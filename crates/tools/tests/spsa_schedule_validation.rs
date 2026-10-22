@@ -4,7 +4,7 @@ use std::process::Command;
 fn invalid_cli_and_derived_schedules_fail_before_engine_start() {
     let dir = tempfile::tempdir().unwrap();
     let params = dir.path().join("input.params");
-    std::fs::write(&params, "X,int,10,0,100,2,0.5\n").unwrap();
+    std::fs::write(&params, "# spsa-format: c-end-r-end-v1\nX,int,10,0,100,2,0.5\n").unwrap();
     let engine = dir.path().join("engine-must-not-be-started");
     std::fs::write(&engine, "fixture: must fail before process spawn").unwrap();
     let marker = dir.path().join("engine-started");

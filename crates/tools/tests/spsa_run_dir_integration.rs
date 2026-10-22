@@ -15,7 +15,11 @@
 //!       --total-pairs 4 --batch-pairs 2 --concurrency "$concurrency" \
 //!       --seed 1 --nodes 1000 --threads 1 --hash-mb 16 --random-startpos "$random" || exit 1
 //!     mkdir -p "$GOLDEN/$mode-$concurrency"
-//!     cp "$run/values.csv" "$run/stats.csv" "$run/state.params" "$GOLDEN/$mode-$concurrency/"
+//!     cp "$run/values.csv" "$run/stats.csv" "$GOLDEN/$mode-$concurrency/"
+//!     {
+//!       printf '%s\n' '# spsa-format: c-end-r-end-v1'
+//!       cat "$run/state.params"
+//!     } > "$GOLDEN/$mode-$concurrency/state.params"
 //!   done
 //! done
 //! cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
@@ -48,6 +52,7 @@ const FAKE_ENGINE_BIN: &str = env!("CARGO_BIN_EXE_spsa_test_engine");
 /// 最小限の canonical params (整数 1 個 + 浮動 1 個) を tempfile に書く。
 fn write_canonical(path: &Path) {
     let body = "\
+# spsa-format: c-end-r-end-v1
 SPSA_TEST_INT,int,5,0,10,1,0.001 //test integer param
 SPSA_TEST_FLOAT,float,1.5,0.0,3.0,0.5,0.001 //test float param
 ";
@@ -259,6 +264,7 @@ fn force_init_resets_run_dir_and_clears_stale_final_params() {
     // canonical を「c_end=0 で値固定」に書き換える (force-init 後の値が
     // canonical 初期値と一致することを期待する境界条件)。
     let new_body = "\
+# spsa-format: c-end-r-end-v1
 SPSA_TEST_INT,int,9,0,10,0,0.001 //changed (c_end=0 で値固定)
 SPSA_TEST_FLOAT,float,2.5,0.0,3.0,0.0,0.001 //changed (c_end=0 で値固定)
 ";
@@ -1055,6 +1061,7 @@ fn regex_excluded_baseline_is_applied_to_both_engines_without_updates() {
     std::fs::write(
         test.path("canonical.params"),
         concat!(
+            "# spsa-format: c-end-r-end-v1\n",
             "FIXED_INT,int,20.4,0,100,1,0.1
 ",
             "FIXED_FLOAT,float,1.7,0,10,1,0.1

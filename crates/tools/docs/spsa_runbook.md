@@ -14,6 +14,8 @@ cargo build --release -p tools --bin generate_spsa_params --bin spsa --bin spsa_
 ## 2. canonical `.params` の準備
 
 `--init-from` に渡す canonical (起点パラメータファイル) を用意する。
+現行形式は `# spsa-format: c-end-r-end-v1` の宣言付きとする。
+旧ファイルの確認・移行と既存runの再開方法は §7 を参照。
 渡せる形式は以下のいずれか:
 
 - **rshogi デフォルト値**: `generate_spsa_params` で生成 (rshogi の `SearchTuneParams::option_specs()` ベース)
@@ -679,52 +681,84 @@ rshogi 式は `+` に統一しているため、YO 式の `-X *` は rshogi 側�
 | TT_MOVE | `SPSA_TT_MOVE_MALUS` | -848 | TT move malus |
 | PRIOR | `SPSA_PRIOR_CAPTURE_CM_BONUS` | 964 | prior capture CM bonus |
 
-## 7. `.params` ファイルの step / delta
+## 7. `.params` ファイルの形式と移行
 
-`generate_spsa_params` が自動算出する値の意味:
+パラメータ行より前に `# spsa-format: c-end-r-end-v1` を1回だけ置く。
+列は `name,type,value,min,max,c_end,r_end`。`generate_spsa_params` と
+`yo_to_rshogi_params` のbase省略時は、次の同じ既定値を使う。
 
 | 列 | 意味 | 算出式 |
 |---|---|---|
-| `step` | 勾配推定時の摂動量（SPSAの c_t に対応） | `max(1, round((max - min) / 200))` |
-| `delta` | パラメータ更新の移動量（SPSAの a_t に対応） | `(max - min) / 20` |
+| 列6 `c_end` | run終端の摂動幅 | `max(1, round((max - min) / 20))` |
+| 列7 `r_end` | run終端の学習率係数 | `0.002` |
 
-- `step` が小さすぎると勾配推定がノイズに埋もれる。大きすぎると近似精度が落ちる。
-- `delta` が大きすぎると発散する。小さすぎると収束が遅い。
-- 実行時に `--scale` で摂動量を一律スケール、`--mobility` で移動量を一律スケールできる。
-- 個別調整が必要な場合は `.params` ファイルを直接編集する。
+- `c_end` は終端でも摂動が意味のある差を作るよう設計する。
+- `r_end` は直接の更新幅ではない。更新量は `R_k × c_k × raw_result × flip × mobility`。
+- 実行時の `--mobility` は更新量を一律に変える。摂動幅は各行の `c_end` で指定する。
+- 旧形式の列6=`max(1,round(range/200))`、列7=`range/20` を現形式として読み替えない。
+  小さいrangeでは列7も小さくなるため、値の閾値では識別できない。
 
-### 7.1 step (c_end) / delta (r_end) 選定チェックリスト
+既存canonicalの扱い:
 
-`step` 列は fishtest 用語の **c_end (最終摂動幅)** に対応する。schedule は
+| ファイル | 確認・移行 |
+|---|---|
+| `generate_spsa_params` / `yo_to_rshogi_params` / `generate_net_spsa_params` の現行出力 | 宣言付きのまま `--init-from` に渡す |
+| `tests/golden/spsa/` のcanonicalと4個のstate fixture | 現形式の宣言付き。数値・values/statsの基準は維持 |
+| 過去のv4 canonical・`state.params` | 列6/7が `c_end/r_end` と確認できたものだけ `--assume-c-end-r-end` で受理 |
+| 旧converterのrshogi出力・YO `tune.py` 由来ファイル | 形式を推定しない。名前体系とscheduleの意味を別々に確認する |
+| `tune/*.params` / `spsa_params/*.params` の私用canonical | リポジトリ追跡外のため内容を保証しない。由来・列定義を確認して上記に分類する |
+
+未宣言・未知・重複・途中の宣言は既定でerror。`--assume-c-end-r-end` は未宣言の
+`--init-from` と既存stateにだけ適用し、未知・旧形式の宣言は上書きしない。
+このフラグは数値を補正せず、既存のschedule・ハッシュ検査も解除しない。
+`yo_to_rshogi_params --base` の未宣言v4入力にも同じ明示確認を指定できる。
+
+既知v4のrunを再開するときは、stateやmetaを手編集せず `--resume --assume-c-end-r-end`
+を指定する。stateへヘッダを手で足すと保存済みSHA-256と不一致になる。
+次のcheckpointで宣言とハッシュが通常どおり保存される。未宣言canonicalを再度
+`--init-from` に渡す間は、この確認フラグも必要。
+
+旧 `step,delta` からは、別パスへ現形式のcanonicalを生成し、同じ名前の値列だけを
+転記する。min/maxを確認し、列6/7は `c_end/r_end` として設計し直す。YO名から
+rshogi名へ移す場合は、`yo_to_rshogi_params` のbase省略で値の転記と現行scheduleの
+生成を行える。旧baseの列6/7を引き継がない。旧runの学習率を意味保存で自動変換する
+規則はないため、scheduleを変えたファイルは新runで開始する。
+
+逆方向の `rshogi_to_yo_params` 出力はYOのbase列を保持するため、現形式を宣言しない。
+`tune.py apply` 用の値転記と、`spsa` への入力準備を区別する。
+
+### 7.1 c_end / r_end 選定チェックリスト
+
+`c_end` は **最終摂動幅**。schedule は
 `c_0 = c_end × N^γ` で初期摂動幅を逆算して減衰するため、`.params` に書く値は
 「run 終盤でもこの幅で摂動する」終端の目標値であって初期 c_k ではない
 (k 軸は total-pairs 到達の手前の batch で終わるため、実走の最終 batch の c_k は
-c_end よりわずかに大きい)。同様に `delta` 列は **r_end (最終学習率係数)** に
-対応し `a_0 = r_end × c_end² × (A+N)^α` で逆算される。
+c_end よりわずかに大きい)。`r_end` は **最終学習率係数** であり、
+`a_0 = r_end × c_end² × (A+N)^α` で逆算される。
 
 run 投入前に確認する:
 
 - **摂動が意味のある差を生む大きさか**: θ+c と θ−c を固定した 2 エンジンの
   短対局 (数百局) では数 nElo 級の差は統計的に検出できない。この確認の目的は
   粗い sanity check — setoption が効いているか、c が明らかに過大 (勝率が壊れる)
-  でないか — に限る。摂動幅は run 終盤でも使われる `step` (c_end) で試す
+  でないか — に限る。摂動幅は run 終盤でも使われる `c_end` で試す
   (c_0 側はこれより大きいので、c_end で信号の見込みがあれば序盤は問題にならない)。
   c の過小は短対局でも run 中の観測でも断定できない (§9.4)。疑いが立ったら
-  次回 run の `step` 設計を見直す材料にする。
-- **整数パラメータの `step`**: 本実装は θ±c_k を stochastic rounding
+  次回 run の `c_end` 設計を見直す材料にする。
+- **整数パラメータの `c_end`**: 本実装は θ±c_k を stochastic rounding
   (`floor(v + U(0,1))`、期待値保存) で整数化するため、fishtest の「整数は c > 1
   必須」則とは異なり **c_end ≈ 1 でも摂動は期待値として保たれる**。10 倍スケール
   表現への変換が要るのは、整数刻みより細かい最適値の分解能が必要な場合に限る。
 - **min/max は clip (安全柵) であって探索範囲の設計変数ではない**:
   `generate_spsa_params` が出力するエンジンの USI option 範囲内で広めに取り、
-  探索を狭めたいときは range を狭めるのではなく `delta` (または `--mobility`) を
+  探索を狭めたいときは range を狭めるのではなく `r_end` (または `--mobility`) を
   下げる。clip で狭めると境界に張り付いた側の勾配感度が死ぬ。USI option の
   min/max を越えて `.params` の range だけを広げてはならない。SPSA 内部の値と
   エンジン側で clamp された実適用値が食い違うため、越える必要がある場合は先に
   エンジン側の option 範囲を変更・再ビルドし、`.params` を再生成する。
 - **θ の境界張り付きを監視する**: `values.csv` で θ が min/max 境界に張り付き
   続けていないかを確認する。張り付きが常態化したら、エンジンの USI option
-  範囲内で range を広げられるか確認するか、まず `delta` / `--mobility` を見直す。
+  範囲内で range を広げられるか確認するか、まず `r_end` / `--mobility` を見直す。
 
 ## 8. よく使う調整項目
 - 開始局面ファイルを固定する: `--startpos-file /path/to/openings.txt`
@@ -811,7 +845,7 @@ avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games
   完全不動 (浮動小数の θ が 1 batch も変化していない = 更新経路が働いていない)、
   等。**「勝率差に信号が無い」は停止理由にならない** — 符号付き `raw_result` は
   ランダムな摂動方向で相殺されるため、無信号は正常な run でも観測され、c 過小
-  との区別が付かない。c 過小の疑いは停止理由ではなく、次回 run の `step` 設計を
+  との区別が付かない。c 過小の疑いは停止理由ではなく、次回 run の `c_end` 設計を
   見直す材料として記録する。感触や中間成績を理由にした打ち切りはしない。
   startup summary は SPSA 内部の active 設定を表示するだけで、setoption の送信・
   適用結果を保証しないため、この確認には使わない。
@@ -839,7 +873,7 @@ cargo build --release -p tools \
 ```bash
 cargo run --release -p tools --bin yo_to_rshogi_params -- \
   --yo-params tune/suisho10.params \
-  --base spsa_params/<rshogi_base>.params \   # min/max/step を引き継ぐベース（省略時はデフォルト range）
+  --base spsa_params/canonical.params \
   --mapping tune/yo_rshogi_mapping.toml \
   --output spsa_params/from_yo_suisho10.params
 ```
@@ -1028,7 +1062,9 @@ YO バイナリは NNUE 評価関数のロード、進行度ファイル、定�
 `.params` の name 列が YO のビルド済み USI option 名と一致していれば、rshogi の `spsa`
 はその name を `setoption` にそのまま流すだけなので、**変換ツール・マッピング表は不要**。
 
-正本 (例: `tune/suisho10.params`) は `--init-from` に指定する。
+YO名のまま列6/7を `c_end/r_end` として確認・設計し、§7の形式宣言を付けた
+正本 (例: `tune/yo_canonical.params`) を `--init-from` に指定する。
+上流由来の未宣言 `.params` へ宣言だけを加えて学習率を読み替えない。
 反復用ファイル (`<run-dir>/state.params`) は spsa が自動生成・上書きするので、
 正本そのものが書き換えられることはない。
 
@@ -1037,7 +1073,7 @@ RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_yo_suisho10"
 
 cargo run --release -p tools --bin spsa -- \
   --run-dir "${RUN_DIR}" \
-  --init-from tune/suisho10.params \
+  --init-from tune/yo_canonical.params \
   --engine-path /path/to/YaneuraOu-tune-patched \
   --total-pairs 6400 --batch-pairs 32 \
   --concurrency 8 --threads 1 --hash-mb 256 --byoyomi 1000 \
@@ -1045,8 +1081,8 @@ cargo run --release -p tools --bin spsa -- \
   --seed 1
 ```
 
-`<run-dir>/state.params` が YO 形式のまま運用に乗る (`tune.py apply` の入力に
-そのまま使える)。`tune/suisho10.params` (正本) は触られない。
+`<run-dir>/state.params` はYO名とc_end/r_end形式宣言を保持する。
+`tune.py apply` には§10.6.3の焼き込み用コピーを使う。正本は触られない。
 CSV 出力 (`stats.csv` / `values.csv`) も同 run-dir に自動生成される (§9 参照)。
 
 ##### case A 用の `--active-only-regex` 例 (YO 命名)
@@ -1134,8 +1170,8 @@ WORK=/path/to/rshogi/runs/spsa/<RUN>/apply
 mkdir -p "$WORK"
 cp /path/to/rshogi/tune/suisho10.tune "$WORK/tuned.tune"
 
-# ケース A の場合: final.params が YO 形式のままなのでそのまま並べる
-cp /path/to/rshogi/runs/spsa/<RUN>/final.params "$WORK/tuned.params"
+# ケース A の場合: YO名の値を保持し、外部reader向けのコピーでは形式宣言を除く
+awk '!/^[[:space:]]*#/' /path/to/rshogi/runs/spsa/<RUN>/final.params > "$WORK/tuned.params"
 
 # ケース B の場合: rshogi 形式 → YO 形式に逆変換して並べる
 cargo run --release -p tools --bin rshogi_to_yo_params -- \
@@ -1172,6 +1208,9 @@ schedule を大きく変えたい等) の **最終値だけを取り出して新
 
 #### 手順
 
+以下は旧ファイルの列6/7が既にc_end/r_endと確認済みの場合に限る。
+旧step/deltaの場合は§7の移行でscheduleを設計し直し、値列だけを引き継ぐ。
+
 ```bash
 # 旧 run の最終 params を新 run の canonical として一旦保管
 OLD_RUN="runs/spsa/20260401_120000_oldrun"
@@ -1183,6 +1222,7 @@ NEW_RUN="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_seeded_from_oldrun"
 cargo run --release -p tools --bin spsa -- \
   --run-dir "${NEW_RUN}" \
   --init-from spsa_params/seed_from_oldrun.params \
+  --assume-c-end-r-end \
   --total-pairs <total game pair 数> \
   --batch-pairs 8 \
   --seed 1 ...
@@ -1527,11 +1567,18 @@ for mode in cyclic random; do
       --total-pairs 4 --batch-pairs 2 --concurrency "$concurrency" \
       --seed 1 --nodes 1000 --threads 1 --hash-mb 16 --random-startpos "$random" || exit 1
     mkdir -p "$GOLDEN/$mode-$concurrency"
-    cp "$run/values.csv" "$run/stats.csv" "$run/state.params" "$GOLDEN/$mode-$concurrency/"
+    cp "$run/values.csv" "$run/stats.csv" "$GOLDEN/$mode-$concurrency/"
+    {
+      printf '%s\n' '# spsa-format: c-end-r-end-v1'
+      cat "$run/state.params"
+    } > "$GOLDEN/$mode-$concurrency/state.params"
   done
 done
 cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
 ```
+
+基準binaryのstate出力には形式宣言がないため、上記手順で宣言だけを付ける。
+数値行とvalues/statsは基準binaryの出力を保持する。
 
 2026-09-09 の生成時には SPSA 本体の改修前にも同じ条件で現行 HEAD を実行し、4条件×3成果物が基準と
 SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6以上なら win、それ以外は resign を返し、
