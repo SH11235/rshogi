@@ -51,7 +51,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `jsonl_to_psv` | 自己対局 JSONL → PSV 変換（破損行は破棄して継続、件数を Summary に計上。[詳細](docs/pack_tools.md#jsonl_to_psv)） |
 | `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](docs/psv_to_hcpe3.md)） |
 | `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へ移行（[詳細](docs/migrate_psv_move16.md)） |
-| `pack_to_psv` | GenSfen .pack → PSV 変換（move16 は実着手ラベルの実 YaneuraOu 形式）。全入力への出力 alias を拒否（[詳細](docs/pack_to_psv.md)） |
+| `pack_to_psv` | GenSfen .pack → PSV を有界バッチで変換。全入力通算の対局数上限、成功時の出力置換、入力 alias 保護（[詳細](docs/pack_to_psv.md)） |
 | `fix_scores` | スコアの補正。前処理済みファイルのインプレース更新に対応し、元ファイルを保護（[詳細](docs/fix_scores.md)） |
 | `psv_dedup` / `psv_dedup_bloom` / `psv_dedup_partition` | PSV 局面の重複除去（3 方式。partition 方式は Phase 1 buffer 自動調整・fused shuffle 対応。使い分けは [pack_tools.md](docs/pack_tools.md#重複除去ツールの選び方)） |
 | `prep_hcpe` | hcpe 教師プールの汚染除去・重複除去・決定的 shuffle・分割（[詳細](docs/prep_hcpe.md)） |

@@ -73,7 +73,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `jsonl_to_psv` | tournament / analyze_selfplay 互換の自己対局 JSONL を PSV に変換。書き手のクラッシュで壊れた行は破棄して継続し、件数を Summary に計上（[詳細](pack_tools.md#jsonl_to_psv)） |
 | `psv_to_hcpe3` | PSV を dlshogi 学習用 hcpe3 / hcpe に変換（通常手は cshogi と byte 一致、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](psv_to_hcpe3.md)） |
 | `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へストリーミング移行（[詳細](migrate_psv_move16.md)） |
-| `pack_to_psv` | GenSfen .pack を PackedSfenValue (PSV) 形式に展開し、実着手の move16 を実 YaneuraOu 形式へ変換。全入力への出力 alias を拒否（[詳細](pack_to_psv.md)） |
+| `pack_to_psv` | GenSfen .pack を40 byteのPSVへ有界バッチで展開。全入力通算の対局数上限、成功時の出力置換、入力 alias 保護（[詳細](pack_to_psv.md)） |
 | `hcpe_to_psv` | hcpe (cshogi HuffmanCodedPosAndEval) を PSV に変換（Linux/macOS・Windows対応、hardlinkを含む入力と出力の同一実体を拒否。外部公開 hcpe プールの `--data`/`--test-data` 用、[詳細](hcpe_to_psv.md)） |
 | `prep_hcpe` | hcpe 教師プールの汚染除去・Bloom 重複除去・決定的 shuffle・件数制限・分割（[詳細](prep_hcpe.md)） |
 
