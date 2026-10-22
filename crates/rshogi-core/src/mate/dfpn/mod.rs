@@ -22,7 +22,7 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher};
 use table::MateTable;
@@ -173,10 +173,15 @@ impl DfpnSolver {
                     },
                     ..*limits
                 };
-                match self.run::<false>(pos, first, start, 0, stop, &mut progress) {
+                let decided = self.run::<false>(pos, first, start, 0, stop, &mut progress);
+                let exhausted = stop.load(Ordering::Relaxed)
+                    || limits.nodes != 0 && self.nodes > limits.nodes
+                    || limits.time_ms != 0 && start.elapsed().as_millis() as u64 >= limits.time_ms;
+                if decided.is_some() || exhausted {
+                    decided
+                } else {
                     // 速さ優先の置換表の値はそのまま使える
-                    None => self.run::<true>(pos, *limits, start, self.nodes, stop, &mut progress),
-                    decided => decided,
+                    self.run::<true>(pos, *limits, start, self.nodes, stop, &mut progress)
                 }
             }
         };

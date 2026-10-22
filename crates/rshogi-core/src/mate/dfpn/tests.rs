@@ -58,19 +58,26 @@ fn pv_usi(pv: &[Move]) -> String {
     pv.iter().map(|m| m.to_usi()).collect::<Vec<_>>().join(" ")
 }
 
-/// 既知の詰みを解き、手順を検証する。`shortest` は最短の詰み手数 (不明なら 1)。
+/// 既知の詰みをすべてのモードで解き、手順を検証する。`shortest` は最短の詰み手数 (不明なら 1)。
+/// 返すのは解く力優先の手順。
 fn assert_mate(sfen: &str, shortest: usize) -> Vec<Move> {
     let mut pos = position(sfen);
     let before = pos.to_sfen();
-    let pv = match solve_limited(&mut pos, 16, 5_000_000) {
-        MateResult::Mate(pv) => pv,
-        other => panic!("{sfen}: {other:?}"),
-    };
-    assert!(is_valid_mate_pv(&mut pos, &pv), "{sfen}: {}", pv_usi(&pv));
-    // 最短は保証しないが、最短手数より短い手順は誤り
-    assert!(pv.len() >= shortest, "{sfen}: {}", pv_usi(&pv));
-    assert_eq!(pos.to_sfen(), before, "局面が元に戻っていない");
-    pv
+    let mut power_pv = Vec::new();
+    for mode in MateMode::ALL {
+        let pv = match solve_in_mode(&mut pos, 16, 5_000_000, mode) {
+            MateResult::Mate(pv) => pv,
+            other => panic!("{sfen} {mode:?}: {other:?}"),
+        };
+        assert!(is_valid_mate_pv(&mut pos, &pv), "{sfen} {mode:?}: {}", pv_usi(&pv));
+        // 最短は保証しないが、最短手数より短い手順は誤り
+        assert!(pv.len() >= shortest, "{sfen} {mode:?}: {}", pv_usi(&pv));
+        assert_eq!(pos.to_sfen(), before, "局面が元に戻っていない");
+        if mode == MateMode::Power {
+            power_pv = pv;
+        }
+    }
+    power_pv
 }
 
 /// 詰み手順の受け方の各局面で、手順に選ばれなかった応手もすべて詰むことを、
@@ -104,7 +111,10 @@ fn assert_all_replies_are_mated(sfen: &str, pv: &[Move]) {
 
 fn assert_no_mate(sfen: &str) {
     let mut pos = position(sfen);
-    assert_eq!(solve_limited(&mut pos, 16, 5_000_000), MateResult::NoMate, "{sfen}");
+    for mode in MateMode::ALL {
+        let result = solve_in_mode(&mut pos, 16, 5_000_000, mode);
+        assert_eq!(result, MateResult::NoMate, "{sfen} {mode:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,15 +345,101 @@ fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
     assert!(matches!(result, MateResult::Mate(_)), "{result:?}");
     assert!(solver.nodes() > AUTO_SWITCH_NODES, "切り替えずに解けた: {}", solver.nodes());
 
-    // ノード数の上限は切り替えの前後の合計に掛かる
-    let limit = AUTO_SWITCH_NODES + 1_000;
+    // ノード数の上限は切り替えの前後の合計に掛かる。切り替える前に使い切ったら切り替えない
+    for limit in [AUTO_SWITCH_NODES + 1_000, 1_000] {
+        let limits = MateLimits {
+            nodes: limit,
+            time_ms: 0,
+        };
+        let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+        assert_eq!(result, MateResult::Unknown);
+        assert_eq!(solver.nodes(), limit + 1);
+    }
+}
+
+#[test]
+fn auto_mode_progress_counts_nodes_across_the_switch() {
+    let mut pos = position(ZUKOU_001);
+    let stop = AtomicBool::new(false);
     let limits = MateLimits {
-        nodes: limit,
-        time_ms: 0,
+        nodes: 0,
+        time_ms: 2_500,
     };
-    let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+    let mut reported = Vec::new();
+    let result = DfpnSolver::with_mode(16, MateMode::Auto)
+        .solve(&mut pos, &limits, &stop, |p| reported.push(p.nodes));
     assert_eq!(result, MateResult::Unknown);
-    assert!(solver.nodes() <= limit + 1, "{}", solver.nodes());
+    assert!(reported.windows(2).all(|w| w[0] < w[1]), "{reported:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 証明駒・反証駒の補正
+// ---------------------------------------------------------------------------
+
+fn hand_of(pieces: &[PieceType]) -> Hand {
+    pieces.iter().fold(Hand::EMPTY, |h, &pt| h.add(pt))
+}
+
+#[test]
+fn proof_hand_counts_interpositions_the_defender_could_make() {
+    // 飛車の遠い王手。受け方が歩を持っていれば合駒できるので、攻め方の歩 2 枚は証明駒に入る
+    let pos = position("4k3R/9/9/9/9/9/9/9/4K4 w 2P 1");
+    let proof = pos.proof_hand_for_evasions(Hand::EMPTY, Color::Black);
+    assert_eq!(proof.count(PieceType::Pawn), 2);
+    // 間の升の筋に受け方の歩があって二歩になるなら、歩は合駒にならない
+    let pos = position("4k3R/9/5ppp1/9/9/9/9/9/4K4 w 2P 1");
+    let proof = pos.proof_hand_for_evasions(Hand::EMPTY, Color::Black);
+    assert_eq!(proof, Hand::EMPTY);
+    // 接触した王手には合駒できない
+    let pos = position("4k4/4G4/9/9/9/9/9/9/4K4 w 2P 1");
+    let proof = pos.proof_hand_for_evasions(Hand::EMPTY, Color::Black);
+    assert_eq!(proof, Hand::EMPTY);
+}
+
+#[test]
+fn disproof_hand_drops_pieces_that_could_give_check() {
+    let full = super::state::FULL_HAND;
+    // 金・歩などを打てば王手になる升が空いているので、持っていない駒種は反証駒から除く
+    let pos = position("4k4/9/9/9/9/9/9/9/4K4 b - 1");
+    let disproof = pos.disproof_hand_for_checks(full, Color::Black);
+    assert_eq!(disproof.count(PieceType::Gold), 0);
+    assert_eq!(disproof.count(PieceType::Pawn), 0);
+    // 玉の筋に攻め方の歩があれば二歩で歩は打てないので、歩は残す
+    let pos = position("4k4/9/9/9/9/9/4P4/9/4K4 b - 1");
+    let disproof = pos.disproof_hand_for_checks(full, Color::Black);
+    assert_eq!(disproof.count(PieceType::Pawn), full.count(PieceType::Pawn));
+    assert_eq!(disproof.count(PieceType::Gold), 0);
+    // 持っている駒種は除かない
+    let pos = position("4k4/9/9/9/9/9/9/9/4K4 b G 1");
+    let disproof = pos.disproof_hand_for_checks(full, Color::Black);
+    assert_eq!(disproof.count(PieceType::Gold), full.count(PieceType::Gold));
+}
+
+#[test]
+fn disproof_hand_for_a_drop_escape_leaves_the_dropped_piece_to_the_defender() {
+    // 両者の金は合わせて 2 枚。受け方が金を打って逃れたなら、攻め方の金は 1 枚まで
+    let pos = position("4k4/9/9/9/9/9/9/9/4K4 w Gg 1");
+    let drop = Move::from_usi("G*5b").unwrap();
+    let disproof = hand_of(&[PieceType::Gold, PieceType::Gold, PieceType::Gold]);
+    let capped = pos.disproof_hand_for_escape(drop, disproof, Color::Black);
+    assert_eq!(capped.count(PieceType::Gold), 1);
+    // 駒を動かす逃れは補正しない
+    let mv = Move::from_usi("5a4a").unwrap();
+    assert_eq!(pos.disproof_hand_for_escape(mv, disproof, Color::Black), disproof);
+}
+
+#[test]
+fn hand_before_undoes_drops_and_captures() {
+    let full = super::state::FULL_HAND;
+    let pos = position("4k4/9/4p4/9/9/9/9/4R4/4K4 b G 1");
+    // 打った駒は戻す。駒数の上限では止める
+    let drop = Move::from_usi("G*5b").unwrap();
+    assert_eq!(pos.hand_before(drop, Hand::EMPTY), hand_of(&[PieceType::Gold]));
+    assert_eq!(pos.hand_before(drop, full), full);
+    // 取った駒は引く
+    let capture = pos.to_move(Move::from_usi("5h5c").unwrap()).unwrap();
+    let after = hand_of(&[PieceType::Pawn, PieceType::Gold]);
+    assert_eq!(pos.hand_before(capture, after), hand_of(&[PieceType::Gold]));
 }
 
 #[test]
