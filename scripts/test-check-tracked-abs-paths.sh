@@ -11,10 +11,9 @@ esac
 trap 'rm -rf -- "$test_root"' EXIT
 
 # 呼び出し元の Git 環境と親リポジトリから fixture を隔離する。
-git_local_env=$(git rev-parse --local-env-vars)
-while IFS= read -r variable; do
-  unset "$variable"
-done <<< "$git_local_env"
+for git_env_name in "${!GIT_@}"; do
+  unset "$git_env_name"
+done
 export GIT_CEILING_DIRECTORIES="$test_root"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
