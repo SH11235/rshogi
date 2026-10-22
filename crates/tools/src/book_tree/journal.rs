@@ -46,6 +46,9 @@ pub(super) struct Settings {
     pub nodes: u64,
     pub multipv: usize,
     pub hash: u32,
+    /// エンジンのソースの版 (`--source-version` の応答)。別マシンの読みを取り込むときの判定にだけ使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
 }
 
 impl Settings {
@@ -109,7 +112,9 @@ impl Settings {
             nodes: args.nodes,
             multipv: args.multipv,
             hash: args.hash,
+            engine_version: None,
         };
+        // 版は指紋に入れない (入れると版を記録する前の台帳と指紋が変わる)。
         let mut normalized = settings.clone();
         for (k, hash) in &settings.content_sha256 {
             if normalized.options.contains_key(k) {
@@ -384,8 +389,7 @@ impl Journal {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と取り込みの条件が違います");
         }
-        // 取り込み全体を検査してから追記し、拒否時には台帳を変更しない。
-        let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
+        let mut incoming = Vec::new();
         for path in paths {
             let provenance = format!("declared-python:{}:sha256={}", path.display(), digest(path)?);
             for (line_no, line) in BufReader::new(File::open(path)?).lines().enumerate() {
@@ -396,23 +400,169 @@ impl Journal {
                 let reading: Reading = serde_json::from_str(&line)
                     .with_context(|| format!("{}:{}", path.display(), line_no + 1))?;
                 reading.validate_declaration(settings)?;
-                let existing = self
-                    .records
-                    .get(&reading.key)
-                    .or_else(|| pending.get(&reading.key).map(|(r, _)| r));
-                if let Some(old) = existing
-                    && !old.same_values(&reading)
-                {
-                    bail!("値の違う重複: {}", reading.key);
-                }
-                pending.insert(reading.key.clone(), (reading, provenance.clone()));
+                incoming.push((reading, provenance.clone()));
             }
         }
-        for (reading, provenance) in pending.into_values() {
-            self.append(reading, settings, provenance)?;
-        }
+        self.append_all(incoming, settings)?;
         Ok(())
     }
+
+    /// 全件を検査してから追記し、拒否時には台帳を変更しない。値の同じ重複は飛ばし、値の違う重複は
+    /// 全体を拒否する。(追記した件数, 飛ばした件数) を返す。
+    pub fn append_all(
+        &mut self,
+        incoming: Vec<(Reading, String)>,
+        settings: &Settings,
+    ) -> Result<(usize, usize)> {
+        if settings.fingerprint != self.fingerprint {
+            bail!("台帳を開いた指紋と取り込みの条件が違います");
+        }
+        let total = incoming.len();
+        let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
+        for (reading, provenance) in incoming {
+            reading.validate(settings)?;
+            let existing = self
+                .records
+                .get(&reading.key)
+                .or_else(|| pending.get(&reading.key).map(|(r, _)| r));
+            if let Some(old) = existing
+                && !old.same_values(&reading)
+            {
+                bail!("値の違う重複: {}", reading.key);
+            }
+            pending.insert(reading.key.clone(), (reading, provenance));
+        }
+        let mut appended = 0;
+        for (reading, provenance) in pending.into_values() {
+            if !self.records.contains_key(&reading.key) {
+                appended += 1;
+            }
+            self.append(reading, settings, provenance)?;
+        }
+        Ok((appended, total - appended))
+    }
+}
+
+/// 取り込み元の台帳から選んだ 1 条件の読み。
+pub(super) struct Source {
+    pub settings: Settings,
+    pub readings: Vec<Reading>,
+    /// 読んだ完全な行 (末尾の未確定行を除く) の SHA-256。
+    pub sha256: String,
+    /// 改行で終わらない末尾の行を無視したか。
+    pub ignored_tail: bool,
+}
+
+/// 取り込み元の台帳を読む。共有 lock を取って書き手 (serve 等の排他 lock) と並ばないようにし、
+/// ファイルは変更しない。条件の一覧を作ってから選んだ条件の読みだけを保持する。
+pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Source> {
+    let file =
+        File::open(path).with_context(|| format!("取り込み元を開けません: {}", path.display()))?;
+    file.try_lock_shared().with_context(|| {
+        format!("取り込み元の台帳を書き込み中のプロセスがあります: {}", path.display())
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut hash = Sha256::new();
+    let mut complete = 0u64;
+    let mut ignored_tail = false;
+    let mut conditions: BTreeMap<String, Settings> = BTreeMap::new();
+    for_each_complete_line(
+        &mut reader,
+        u64::MAX,
+        |bytes| {
+            hash.update(bytes);
+            complete += bytes.len() as u64;
+            let rec = parse_record(bytes)?;
+            match conditions.get_mut(&rec.settings.fingerprint) {
+                Some(known) => merge_engine_version(known, &rec.settings)?,
+                None => {
+                    conditions.insert(rec.settings.fingerprint.clone(), rec.settings);
+                }
+            }
+            Ok(())
+        },
+        &mut ignored_tail,
+    )?;
+    let settings = match fingerprint {
+        Some(fp) => conditions.remove(fp).context("指紋が取り込み元の台帳にありません")?,
+        None => {
+            if conditions.len() != 1 {
+                bail!("取り込み元の条件が一意でありません。--fingerprint を指定してください");
+            }
+            conditions.into_values().next().context("取り込み元の台帳が空です")?
+        }
+    };
+    let mut file = reader.into_inner();
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file);
+    let mut records: BTreeMap<String, Reading> = BTreeMap::new();
+    for_each_complete_line(
+        &mut reader,
+        complete,
+        |bytes| {
+            let rec = parse_record(bytes)?;
+            if rec.settings.fingerprint != settings.fingerprint {
+                return Ok(());
+            }
+            rec.reading.validate(&rec.settings)?;
+            if let Some(old) = records.get(&rec.reading.key)
+                && !old.same_values(&rec.reading)
+            {
+                bail!("取り込み元の重複が矛盾します: {}", rec.reading.key);
+            }
+            records.insert(rec.reading.key.clone(), rec.reading);
+            Ok(())
+        },
+        &mut false,
+    )?;
+    Ok(Source {
+        settings,
+        readings: records.into_values().collect(),
+        sha256: format!("{:x}", hash.finalize()),
+        ignored_tail,
+    })
+}
+
+fn for_each_complete_line(
+    reader: &mut impl BufRead,
+    limit: u64,
+    mut visit: impl FnMut(&[u8]) -> Result<()>,
+    ignored_tail: &mut bool,
+) -> Result<()> {
+    let mut read = 0u64;
+    let mut bytes = Vec::new();
+    while read < limit {
+        bytes.clear();
+        let n = reader.read_until(b'\n', &mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        if !bytes.ends_with(b"\n") {
+            *ignored_tail = true;
+            break;
+        }
+        read += n as u64;
+        visit(&bytes)?;
+    }
+    Ok(())
+}
+
+fn parse_record(bytes: &[u8]) -> Result<Record> {
+    let rec: Record = serde_json::from_slice(bytes).context("tree 台帳の形式が不正です")?;
+    if rec.kind != VERSION || rec.settings.version != VERSION {
+        bail!("台帳の版が違います");
+    }
+    Ok(rec)
+}
+
+/// 版を記録する前の行と後の行が同じ指紋に混ざる。指紋はバイナリの内容を含むので、分かった版を採る。
+fn merge_engine_version(known: &mut Settings, other: &Settings) -> Result<()> {
+    match (&known.engine_version, &other.engine_version) {
+        (Some(a), Some(b)) if a != b => bail!("同じ指紋に違うエンジンの版があります: {a} / {b}"),
+        (None, Some(_)) => known.engine_version = other.engine_version.clone(),
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -434,6 +584,7 @@ mod tests {
             nodes: 100,
             multipv: 1,
             hash: 16,
+            engine_version: None,
         };
         let reading = Reading {
             tag: "fixture".into(),

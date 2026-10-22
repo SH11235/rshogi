@@ -31,6 +31,12 @@ rshogi-usi
 
 The engine will start in USI mode, waiting for commands from stdin.
 
+`rshogi-usi --source-version` は USI を始めずに、ビルドしたソースの版を `source-version <版>` の 1 行で出して終わります。
+版は git の commit で、エンジンの crate に commit されていない変更があれば `-dirty`、探索・評価の結果を変える
+feature (`use-lazy-evaluate`・`search-pass-rules`・`threat-profile-*`) があれば `+` 以降にその名前が付きます。
+git が使えないビルドは `unknown` です。CPU 向けの最適化 (target-cpu・SIMD・build profile) は版に含めません。
+`book_mine tree` が別マシンの読みを同じ条件か確かめるのに使います。
+
 探索中の `isready` には、探索を停止せず `readyok` を返します。TT / EvalHash の
 クリアやモデル・定跡の準備は待機中の `isready` で行います。`setoption` は USI
 仕様に従って探索の停止後に送り、続けて `isready` で設定を反映してください。

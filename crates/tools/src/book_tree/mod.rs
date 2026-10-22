@@ -10,6 +10,7 @@ mod service;
 mod targets;
 #[cfg(test)]
 mod tests;
+mod transfer;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -34,6 +35,8 @@ enum TreeCommand {
     Wait(queue::WaitArgs),
     /// 宣言した条件で node_calib JSONL を取り込む
     Import(ImportArgs),
+    /// 別の台帳の読みを、条件が同じと確かめてから取り込み先の条件で足す
+    ImportJournal(transfer::ImportJournalArgs),
     /// 台帳だけから木を再生成する
     Replay(ReplayArgs),
     /// ready の木の手を定跡の元データの表に登録する
@@ -113,6 +116,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),
         TreeCommand::Register(args) => register::run(args),
+        TreeCommand::ImportJournal(args) => transfer::run(args),
         TreeCommand::Import(args) => {
             let settings = Settings::new(&args.reading)?;
             let mut journal = Journal::open(&args.journal, &settings.fingerprint)?;

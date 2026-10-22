@@ -353,6 +353,36 @@ import では engine とファイル型 USI option の内容 SHA-256、全 optio
 
 replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve・import は宣言した fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。局面ごとには読み (MultiPV 数行) だけを持ちます。条件の同一性は指紋で決まり、内容が同じモデルを別のパスで指定した読みも同じ条件として使い回します。台帳の保持は 1 局面あたり 1 KiB 前後で、10 万局面で約 100 MiB です (これとは別に、各木が自分の局面の読みを持ちます)。定跡の局面を深く読む用途ではこの規模を超えない想定で、ディスク上の索引は持ちません。
 
+### 別の台帳の読みの取り込み
+
+別のマシンの台帳 (複製したもの) の読みを、この台帳の条件の読みとして足します。取り込み先の読み条件は serve と同じ引数で指定します。
+
+```bash
+book_mine tree import-journal --from-journal /path/to/other-machine-journal.jsonl \
+  --journal /path/to/tree-journal.jsonl \
+  --engine /path/to/engine \
+  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
+  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
+  --nodes 1000000000 --multipv 3 --hash 1024
+```
+
+取り込み元に条件が複数あれば `--fingerprint` で選びます (省略時は唯一の条件)。取り込み元は共有 lock で読み、ファイルを変更しません。serve などが書き込み中の台帳は拒否するので、複製してから渡します。改行で終わらない末尾の行は無視します。
+
+次がすべて同じときだけ、取り込み元の読みを取り込み先と同じ条件の読みとみなします。
+
+| 項目 | 比べ方 |
+|---|---|
+| nodes・MultiPV・hash | 値 |
+| ファイル型の USI option (`EvalFile`・`LS_PROGRESS_COEFF` 等) と、明示しない場合のバイナリ隣接 `spsa.params` | 内容の SHA-256 (パスはマシンごとに違ってよい) |
+| それ以外の USI option (`DrawValueBlack` 等) | 名前と値 |
+| エンジン | バイナリが同じか、ソースの版が同じ |
+
+エンジンのバイナリの違い (CPU 向けの最適化・production build など) は条件の違いとみなしません。ソースの版は、serve と import-journal がエンジンを `--source-version` 付きで起動して得る値で、台帳の条件に記録します (条件の指紋には含めないので、記録する前の台帳の指紋は変わりません)。rshogi-usi はビルド時の git commit を答え、エンジンの crate に commit されていない変更があれば `-dirty`、探索・評価の結果を変える feature (`use-lazy-evaluate`・`search-pass-rules`・`threat-profile-*`) があれば `+` 以降にその名前を付けます。git が使えないビルドは `unknown` です。
+
+版が違う、どちらかの版が分からない (記録する前の台帳、`--source-version` に答えないエンジン、`unknown`、`-dirty`) ときは、バイナリが同じでなければ拒否します。探索の結果を変えない変更 (速度の改善だけ等) しか無い版どうしなら、`--force` で取り込めます。`--force` が許すのはエンジンの版の違いだけで、他の項目の違いは拒否します。
+
+取り込みは全件を検査してから、取り込み先の条件で追記します。同じ局面で値の同じ読みは飛ばし、値の違う読みがあれば何も書かずに拒否します。各行の出どころには取り込み元の完全な行の SHA-256・条件の指紋・`--force` の有無・パスを記録します。標準出力に取り込み先と取り込み元の指紋、追記数・飛ばした数を出します。
+
 ### 出力と登録可否
 
 木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、両方の手番の局面の手ごとの伝播後の値 `node_moves.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。

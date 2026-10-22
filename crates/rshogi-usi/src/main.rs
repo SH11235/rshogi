@@ -54,6 +54,8 @@ const ENGINE_NAME: &str = "Shogi Engine";
 const ENGINE_VERSION: &str = "0.1.0";
 /// エンジン作者
 const ENGINE_AUTHOR: &str = "sh11235";
+/// ビルド時に埋め込んだソースの版 (build.rs)。
+const SOURCE_VERSION: &str = env!("RSHOGI_SOURCE_VERSION");
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 /// `go mate` の置換表サイズの既定値 (MB)
@@ -2055,6 +2057,11 @@ fn parse_spsa_net_spec(content: &str) -> Result<Vec<String>> {
 }
 
 fn main() -> Result<()> {
+    // USI の応答 (`id name` 等) は変えず、起動引数で問われたときだけ版を出して終わる。
+    if std::env::args().skip(1).eq(["--source-version".to_owned()]) {
+        println!("source-version {SOURCE_VERSION}");
+        return Ok(());
+    }
     #[cfg(feature = "allocation-stats")]
     allocation_stats::init()?;
 
