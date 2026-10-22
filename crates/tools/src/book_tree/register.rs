@@ -30,7 +30,7 @@ pub(super) struct RegisterArgs {
     /// main からこの値未満の差の手を alt にする
     #[arg(long, default_value_t = 40)]
     alt_gap: i32,
-    /// main を残して木の 1 位と食い違った局面の一覧 (TSV)
+    /// main を残して木の 1 位と食い違った局面の一覧 (TSV)。まだ無いファイルに限る
     #[arg(long)]
     conflicts: PathBuf,
     /// 元データを書き換える。省くと集計と食い違いの一覧だけを出す
@@ -93,7 +93,12 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         ensure!(!text.contains(['\t', '\r', '\n']), "since・note にタブや改行は使えません");
     }
     ensure!(args.alt_gap >= 0, "--alt-gap は 0 以上にしてください");
-    check_conflicts_path(&args.conflicts, &args.master, &args.trees)?;
+    // 木を読む前に止める。書き出しの最後でも create_new で同じことを確かめる。
+    ensure!(
+        std::fs::symlink_metadata(&args.conflicts).is_err(),
+        "{} は既にあります (--conflicts は新しいファイルにしてください)",
+        args.conflicts.display()
+    );
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
     for (tree, dir) in args.trees.iter().enumerate() {
@@ -131,7 +136,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     for c in &conflicts {
         writeln!(table, "{c}\t{}", args.trees[c.tree].display())?;
     }
-    write_atomic(&args.conflicts, &table)?;
+    write_new(&args.conflicts, &table)?;
     for side in ["b", "w"] {
         println!(
             "{side}: main を足した局面 {} / alt を足した手 {}",
@@ -156,41 +161,20 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     Ok(())
 }
 
-/// 食い違いの一覧は確認だけの実行でも書く。書き出しは指定したパスの dir の項目を置き換えるので、その項目
-/// (親 dir の実体 + ファイル名) を元データと木の出力先の実体と比べる。リンクへの書き出しは項目とリンク先が
-/// 食い違うので拒否する。親 dir は既にあるものに限る (まだ無い dir を推測でたどるとリンクを見落とす)。
-pub(super) fn check_conflicts_path(
-    conflicts: &Path,
-    master: &Path,
-    trees: &[PathBuf],
-) -> Result<()> {
-    ensure!(
-        !std::fs::symlink_metadata(conflicts).is_ok_and(|m| m.file_type().is_symlink()),
-        "--conflicts にリンクは指定できません"
-    );
-    let target = entry(conflicts)?;
-    let real_master = std::fs::canonicalize(master)
-        .with_context(|| format!("{} を解決できません", master.display()))?;
-    ensure!(
-        target != real_master && target != entry(master)?,
-        "--conflicts を元データと同じにはできません"
-    );
-    for dir in trees {
-        let real = std::fs::canonicalize(dir)
-            .with_context(|| format!("{} を解決できません", dir.display()))?;
-        ensure!(!target.starts_with(real), "--conflicts を木の出力先の中にはできません");
-    }
+/// 食い違いの一覧は確認だけの実行でも書くので、まだ無いファイルにだけ書く。既にあるファイル (元データ・
+/// 木の出力) は、リンク・`..`・大小文字を区別しない名前などどの書き方で指しても上書きしない。
+fn write_new(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!("{} に書けません (既にあるファイルには書きません)", path.display())
+        })?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
     Ok(())
-}
-
-fn entry(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .with_context(|| format!("{} はファイル名ではありません", path.display()))?;
-    Ok(std::fs::canonicalize(parent)
-        .with_context(|| format!("{} がありません (先に作ってください)", parent.display()))?
-        .join(name))
 }
 
 pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
@@ -603,55 +587,20 @@ mod tests {
     }
 
     #[test]
-    fn conflicts_path_is_compared_by_its_real_location() {
+    fn conflicts_are_written_only_to_a_new_file() {
         let dir = tempfile::tempdir().unwrap();
         let master = dir.path().join("moves.tsv");
         std::fs::write(&master, "x").unwrap();
-        let tree = dir.path().join("tree");
-        std::fs::create_dir(&tree).unwrap();
-        let trees = [tree.clone()];
-        let mut bad = vec![
-            dir.path().join("tree/../moves.tsv"),
-            tree.join("conflicts.tsv"),
-            dir.path().join("tree/./x.tsv"),
-        ];
+        assert!(write_new(&master, "y").is_err());
         #[cfg(unix)]
         {
-            let link = dir.path().join("link.tsv");
-            std::os::unix::fs::symlink(&master, &link).unwrap();
-            bad.push(link);
-        }
-        for bad in bad {
-            assert!(check_conflicts_path(&bad, &master, &trees).is_err(), "{}", bad.display());
-        }
-        check_conflicts_path(&dir.path().join("conflicts.tsv"), &master, &trees).unwrap();
-        for bad in [
-            "new/conflicts.tsv",
-            "new/../reports/conflicts.tsv",
-            "tree/new/conflicts.tsv",
-            "new/../moves.tsv",
-            "new/../tree/x.tsv",
-        ] {
-            assert!(check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(), "{bad}");
-        }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&tree, dir.path().join("tree_link")).unwrap();
-            let outside = dir.path().join("outside.tsv");
-            std::fs::write(&outside, "y").unwrap();
-            std::os::unix::fs::symlink(&outside, tree.join("node_moves.tsv")).unwrap();
-            for bad in [
-                "new/../tree_link/node_moves.tsv",
-                "tree_link/node_moves.tsv",
-                "tree/node_moves.tsv",
-            ] {
-                assert!(
-                    check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(),
-                    "{bad}"
-                );
-            }
+            let link = dir.path().join("dangling.tsv");
+            std::os::unix::fs::symlink(dir.path().join("none"), &link).unwrap();
+            assert!(write_new(&link, "y").is_err());
+            assert!(!dir.path().join("none").exists());
         }
         assert_eq!(std::fs::read_to_string(&master).unwrap(), "x");
+        write_new(&dir.path().join("conflicts.tsv"), "z").unwrap();
     }
 
     #[test]
@@ -688,6 +637,9 @@ mod tests {
                 .unwrap()
                 .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\tbest\t40\t"))
         );
+        assert!(run(args(vec![tree.clone()], true)).is_err());
+        assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
+        std::fs::remove_file(dir.path().join("conflicts.tsv")).unwrap();
         run(args(vec![tree.clone()], true)).unwrap();
         let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
         assert_eq!(find(&rows, W, "w1").unwrap().get("role"), "main");

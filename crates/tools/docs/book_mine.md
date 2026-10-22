@@ -368,7 +368,7 @@ book_mine tree register --master moves.tsv --since 20261022-tag --note "計画�
   --conflicts conflicts.tsv [--alt-gap 40] [--apply] <木の出力先>...
 ```
 
-ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` の親 dir は先に作っておきます。元データ・木の出力先と同じ実体のパスやその中は拒否します。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
+ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
 
 元データの表は `key ply move role source evals nodes lineage tier since note` の 11 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
 
