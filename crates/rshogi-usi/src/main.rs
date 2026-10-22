@@ -17,6 +17,7 @@ use rshogi_core::eval::{
     set_pass_right_value_phased,
 };
 use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, MAX_LAYER_STACK_BUCKETS,
     NET_DELTA_OPTION_PREFIX, NetCoefficientId, NetDelta, NetDeltaReport, clear_nnue,
@@ -1414,6 +1415,15 @@ impl UsiEngine {
                 );
                 anyhow::ensure!(candidate.game_ply() < i32::MAX, "ply overflow");
                 candidate.do_move_with_missing_kings(mv);
+                if mv.is_drop()
+                    && mv.drop_piece_type() == PieceType::Pawn
+                    && candidate.checkers().contains(mv.to())
+                {
+                    // 入力局面では既存の王手もあり得るため、歩以外の王手を残す応手は数えない。
+                    let mut replies = MoveList::new();
+                    generate_legal_all(&candidate, &mut replies);
+                    anyhow::ensure!(!replies.is_empty(), "Illegal pawn-drop mate: {token}");
+                }
             }
         }
         *position = candidate;
@@ -1431,17 +1441,11 @@ impl UsiEngine {
         if !position.pseudo_legal(mv) {
             return false;
         }
-        if mv.is_pass() {
+        if mv.is_pass() || mv.is_drop() {
             return true;
         }
 
         let us = position.side_to_move();
-        if mv.is_drop() {
-            // 打ち歩詰めは相手玉が実在するときだけ検査する。
-            return mv.drop_piece_type() != PieceType::Pawn
-                || position.pieces(!us, PieceType::King).is_empty()
-                || position.is_legal(mv);
-        }
         let captured = position.piece_on(mv.to());
         if captured.is_some() && captured.piece_type() == PieceType::King {
             return false;
@@ -2485,6 +2489,119 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
             assert_eq!(position.to_sfen(), sfen);
             assert_eq!(position.state().continuous_check, [0, 0]);
         }
+    }
+
+    #[test]
+    fn position_commands_reject_pawn_drop_mate_during_existing_check() {
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &["position", "startpos", "moves", "7g7f", "3c3d"],
+            false,
+            2,
+        )
+        .unwrap();
+        let before = position.to_sfen();
+        let key = position.key();
+        for line in [
+            "position sfen 3pk3R/5g3/4G4/9/9/9/9/9/4K4 b P 1 moves P*5b",
+            "position sfen 3pk3R/5g3/4G4/9/9/9/9/9/9 b P 1 moves P*5b",
+            "position sfen 4k4/9/9/9/9/9/4g4/3G5/r3KP3 w p 1 moves P*5h",
+            "position sfen 9/9/9/9/9/9/4g4/3G5/r3KP3 w p 1 moves P*5h",
+        ] {
+            let error = UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                false,
+                2,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("Illegal pawn-drop mate"), "{line}: {error}");
+            assert_eq!(position.to_sfen(), before, "{line}");
+            assert_eq!(position.key(), key, "{line}");
+        }
+        position.undo_move(Move::from_usi_strict("3c3d").unwrap());
+        position.undo_move(Move::from_usi_strict("7g7f").unwrap());
+        assert_eq!(position.to_sfen(), rshogi_core::position::SFEN_HIRATE);
+    }
+
+    #[test]
+    fn position_commands_accept_pawn_checks_with_legal_replies() {
+        for (sfen, moves, checker_count, expected) in [
+            (
+                "3pk3R/5g3/9/9/9/9/9/9/4K4 b P 1",
+                "P*5b 5a5b",
+                2,
+                "3p4R/4kg3/9/9/9/9/9/9/4K4 b p 3",
+            ),
+            (
+                "3pk3R/9/3G5/9/9/9/9/9/4K4 b P 1",
+                "P*5b 5a4b",
+                2,
+                "3p4R/4Pk3/3G5/9/9/9/9/9/4K4 b - 3",
+            ),
+            (
+                "3pk4/5g3/4G4/9/9/9/9/9/4K4 b P 1",
+                "P*5b 4b5b",
+                1,
+                "3pk4/4g4/4G4/9/9/9/9/9/4K4 b p 3",
+            ),
+            ("3pk3R/5g3/9/9/9/9/9/9/9 b P 1", "P*5b 5a5b", 2, "3p4R/4kg3/9/9/9/9/9/9/9 b p 3"),
+        ] {
+            let mut position = Position::new();
+            position.set_sfen(sfen).unwrap();
+            let root_key = position.key();
+            let line = format!("position sfen {sfen} moves {moves}");
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                false,
+                2,
+            )
+            .unwrap_or_else(|error| panic!("{line}: {error}"));
+            assert_eq!(position.to_sfen(), expected, "{line}");
+            assert!(!position.in_check(), "{line}");
+            let mut parsed_moves =
+                moves.split_whitespace().map(|m| Move::from_usi_strict(m).unwrap());
+            let pawn_drop = parsed_moves.next().unwrap();
+            position.undo_move(parsed_moves.next().unwrap());
+            assert_eq!(position.checkers().count(), checker_count, "{line}");
+            assert!(position.checkers().contains(pawn_drop.to()), "{line}");
+            assert_eq!(position.state().continuous_check, [2, 0], "{line}");
+            assert_eq!(position.game_ply(), 2, "{line}");
+            let mut fresh = Position::new();
+            fresh.set_sfen(&position.to_sfen()).unwrap();
+            assert_eq!(position.key(), fresh.key(), "{line}");
+            assert_eq!(position.checkers(), fresh.checkers(), "{line}");
+            position.undo_move(pawn_drop);
+            assert_eq!(position.to_sfen(), sfen, "{line}");
+            assert_eq!(position.key(), root_key, "{line}");
+            assert_eq!(position.state().continuous_check, [0, 0], "{line}");
+        }
+    }
+
+    #[test]
+    fn position_commands_accept_nonchecking_pawn_drop_with_existing_mate() {
+        let sfen = "3pk3R/9/4G4/9/9/9/9/9/4K4 b P 1";
+        let line = format!("position sfen {sfen} moves P*1h");
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            false,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.to_sfen(), "3pk3R/9/4G4/9/9/9/9/8P/4K4 w - 2");
+        let pawn_drop = Move::from_usi_strict("P*1h").unwrap();
+        assert!(position.in_check());
+        assert!(!position.checkers().contains(pawn_drop.to()));
+        let mut replies = MoveList::new();
+        generate_legal_all(&position, &mut replies);
+        assert!(replies.is_empty());
+        assert_eq!(position.state().continuous_check, [2, 0]);
+        position.undo_move(pawn_drop);
+        assert_eq!(position.to_sfen(), sfen);
     }
 
     #[test]

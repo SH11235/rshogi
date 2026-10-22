@@ -54,6 +54,7 @@ fn invalid_position_preserves_previous_position_and_search() {
         "position startpos moves 7g7f 3c3d invalid",
         "position startpos moves 7g7fextra",
         "position startpos moves 7g7fあ",
+        "position sfen 3pk3R/5g3/4G4/9/9/9/9/9/4K4 b P 1 moves P*5b",
     ];
     let expected = "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3";
     let mut input = String::from(
