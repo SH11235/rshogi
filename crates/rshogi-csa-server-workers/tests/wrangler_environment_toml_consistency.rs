@@ -153,7 +153,13 @@ fn assert_bidirectional(
 }
 
 fn assert_r2_bindings_match(env: &EnvironmentBindings) {
-    assert_bidirectional(env, "r2_bindings", ConfigKeys::ALL_R2_BINDINGS, &env.r2_bindings);
+    let required: Vec<_> = env
+        .r2_bindings
+        .iter()
+        .filter(|binding| !ConfigKeys::OPTIONAL_R2_BINDINGS.contains(&binding.as_str()))
+        .cloned()
+        .collect();
+    assert_bidirectional(env, "r2_bindings", ConfigKeys::ALL_R2_BINDINGS, &required);
 }
 
 fn assert_d1_bindings_match(env: &EnvironmentBindings) {

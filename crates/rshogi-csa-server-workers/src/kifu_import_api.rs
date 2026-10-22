@@ -380,7 +380,7 @@ async fn store_and_respond(
     existing: Option<&ExistingGame>,
 ) -> Result<Response> {
     let entry = game.entry();
-    let meta_body = serde_json::to_vec(&entry)?;
+    let meta_body = crate::kifu_backup::meta_with_csa_digest(&entry, &csa_bytes)?;
     let index_key = match games_index_key(game.ended_at_ms, &game.game_id) {
         Ok(key) => key,
         Err(e) => return storage_error("kifu_import_index_key", &game.game_id, &format!("{e:?}")),

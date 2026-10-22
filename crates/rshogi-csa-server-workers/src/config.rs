@@ -105,6 +105,10 @@ impl ConfigKeys {
     pub const CHALLENGE_TTL_SEC: &'static str = "CHALLENGE_TTL_SEC";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
     pub const KIFU_BUCKET_BINDING: &'static str = "KIFU_BUCKET";
+    /// 任意の棋譜バックアップ先。未設定環境ではバックアップは無効。
+    pub const KIFU_BACKUP_BUCKET_BINDING: &'static str = "KIFU_BACKUP_BUCKET";
+    /// バックアップ異常通知先の HTTPS webhook。公開環境では secret として設定する。
+    pub const KIFU_BACKUP_ALERT_URL: &'static str = "KIFU_BACKUP_ALERT_URL";
     /// R2 バケットバインディング名（Floodgate 履歴保存）。1 対局 = 1 オブジェクト
     /// （単一行 JSON）を `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json` キーで
     /// 保存し、`list_recent` は day shard を新しい順に走査して N 件取得する。
@@ -247,12 +251,14 @@ impl ConfigKeys {
     /// 経由で test gate)。
     pub const DEPLOYED_SHA: &'static str = "DEPLOYED_SHA";
 
-    /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
-    /// 網羅列挙。新規 R2 binding 定数を追加したら必ず本配列にも追加する。
+    /// 全環境の `[[r2_buckets]]` に必要な binding。任意の基盤は `OPTIONAL_R2_BINDINGS`。
     pub const ALL_R2_BINDINGS: &'static [&'static str] = &[
         Self::KIFU_BUCKET_BINDING,
         Self::FLOODGATE_HISTORY_BUCKET_BINDING,
     ];
+
+    /// 基盤作成後に個別環境へ追加する任意の R2 binding。
+    pub const OPTIONAL_R2_BINDINGS: &'static [&'static str] = &[Self::KIFU_BACKUP_BUCKET_BINDING];
 
     /// 終局済棋譜の検索用 D1 database binding。
     pub const GAMES_SEARCH_DB_BINDING: &'static str = "GAMES_SEARCH_DB";
@@ -331,6 +337,7 @@ impl ConfigKeys {
         Self::ADMIN_API_TOKEN,
         Self::WORKERS_HANDLE_AUTH,
         Self::PLAYER_ID_SECRET,
+        Self::KIFU_BACKUP_ALERT_URL,
     ];
 
     /// **deploy 時に CI から runtime 注入される** `[vars]` キーの網羅列挙

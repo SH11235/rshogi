@@ -45,6 +45,8 @@ pub mod export_retry;
 pub mod floodgate_history;
 pub mod games_index;
 pub mod games_search_index;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod kifu_backup;
 pub mod kifu_import;
 pub mod player_identity;
 pub mod player_rating_materialization;
@@ -100,6 +102,8 @@ pub(crate) mod observability;
 mod event_meta_api;
 #[cfg(target_arch = "wasm32")]
 mod game_room;
+#[cfg(target_arch = "wasm32")]
+mod kifu_backup_api;
 #[cfg(target_arch = "wasm32")]
 mod kifu_import_api;
 #[cfg(target_arch = "wasm32")]
@@ -170,6 +174,9 @@ fn minute_of_hour(epoch_ms: f64) -> i64 {
 /// 行う。`event.schedule()` は cron の予定時刻 (実起動時刻ではない) の epoch
 /// ミリ秒なので、起動が数秒遅延しても分判定は予定どおり安定する:
 ///
+/// 最初に optional な棋譜バックアップを実行する。コピー開始の枠は起動から 3 秒、
+/// 通知待ちは最大 2 秒で、後続ジョブも同じ起動時刻を基準にする。
+///
 /// - 分が [`BACKFILL_MINUTE`] (0 分) のとき: `run_games_index_backfill` →
 ///   `run_games_search_backfill` → player rating materializer →
 ///   `run_live_orphan_sweep` を順次実行する。全ジョブは cron 発火直後の時刻を
@@ -195,6 +202,9 @@ pub async fn scheduled(
     // 単一 cron のため発火の区別は cron 文字列でなくスケジュール時刻の分で行う。
     let minute = minute_of_hour(event.schedule());
     let run_backfill = minute == BACKFILL_MINUTE;
+
+    // 進行中の R2 操作は打ち切らず、後続ジョブも起動時刻からの残り枠を確認する。
+    kifu_backup_api::scheduled(&env, started_at_ms.saturating_add(3_000)).await;
 
     if run_backfill {
         if let Err(e) = backfill::run_games_index_backfill(&env, started_at_ms).await {

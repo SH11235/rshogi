@@ -33,6 +33,10 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
         return health_response(&env);
     }
 
+    if let Some(response) = crate::kifu_backup_api::try_handle(&req, &env).await? {
+        return Ok(response);
+    }
+
     // viewer 配信 API (`/api/v1/games[/...]`) は GameRoom DO を経由せず
     // R2 直 fetch のみで完結する。本ルートに該当しない場合のみ既存の
     // WebSocket ルーティングへ落ちる。

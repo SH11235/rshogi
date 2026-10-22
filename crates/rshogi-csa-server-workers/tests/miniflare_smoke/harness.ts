@@ -98,6 +98,8 @@ export interface HarnessOptions {
   /// テスト内の handler で受ける。未指定時は miniflare 既定 (実ネットワーク)。
   outboundService?: (request: MfRequest) => MfResponse | Promise<MfResponse>;
   adminApiToken?: string;
+  kifuBackup?: boolean;
+  kifuBackupAlertUrl?: string;
   playerIdSecret?: string;
   /// `WORKERS_HANDLE_AUTH` whitelist (issue #664) のオーバーライド。
   /// 既定は空配列 (`"[]"`) で「whitelist 未宣言」として self-claim 既定挙動を
@@ -166,7 +168,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       // (tag = "v3") と整合する。
       RATE_LIMITER: { className: "RateLimiter", useSQLite: true },
     },
-    r2Buckets: ["KIFU_BUCKET", "FLOODGATE_HISTORY_BUCKET"],
+    r2Buckets: ["KIFU_BUCKET", "FLOODGATE_HISTORY_BUCKET", ...(opts.kifuBackup ? ["KIFU_BACKUP_BUCKET"] : [])],
     d1Databases: ["GAMES_SEARCH_DB"],
     bindings: {
       CLOCK_KIND: opts.clockKind ?? "countdown",
@@ -184,6 +186,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       // `adminApiToken: ""` を明示すること。`%%ADMIN <token>` 成功 E2E の場合は
       // 同 token を `adminApiToken` で揃えて binding する。
       ADMIN_API_TOKEN: opts.adminApiToken ?? "local-dev-admin-token-placeholder",
+      KIFU_BACKUP_ALERT_URL: opts.kifuBackupAlertUrl ?? "",
       PLAYER_ID_SECRET:
         opts.playerIdSecret ?? "local-dev-player-id-secret-placeholder",
       // `WORKERS_HANDLE_AUTH` 既定値は wrangler.toml.example と揃えた空配列で、

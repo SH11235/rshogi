@@ -285,10 +285,7 @@ fn extract_client_kind(req: &Request) -> String {
 /// 一覧 API (`/api/v1/games`) レスポンスの wire 形状。
 #[derive(Debug, Serialize)]
 struct ListResponse {
-    /// `games-index/` のオブジェクト本文をそのまま吐き出すのが契約 (本モジュールでは
-    /// meta の再構築をしない)。MVP では `serde_json::Value` でラウンドトリップ parse
-    /// する素朴実装。要素数 1 ページ最大 100 件のため性能影響は許容。`RawValue` 化は
-    /// レイテンシが顕在化したときの将来拡張で検討する。
+    /// R2 meta の公開フィールド。保存時の内部整合性用 digest は検索 API と同様に除く。
     games: Vec<serde_json::Value>,
     next_cursor: Option<String>,
 }
@@ -1085,7 +1082,12 @@ async fn collect_index_page(
             }
         };
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(v) => Some(v),
+            Ok(mut value) => {
+                if let Some(meta) = value.as_object_mut() {
+                    meta.remove("csa_sha256");
+                }
+                Some(value)
+            }
             Err(e) => {
                 log_viewer_api_failed(
                     &format!("{event_root}_parse"),
@@ -1245,7 +1247,10 @@ async fn find_meta_for(
         return Ok(None);
     };
     let bytes = body.bytes().await.map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if let Some(meta) = value.as_object_mut() {
+        meta.remove("csa_sha256");
+    }
     Ok(Some(value))
 }
 

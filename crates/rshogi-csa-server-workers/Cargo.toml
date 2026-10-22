@@ -27,6 +27,7 @@ rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-csa = { path = "../rshogi-csa" }
 serde.workspace = true
 serde_json.workspace = true
+base64 = "0.22.1"
 # chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、
 # serde 以外の機能は取り込まない。
 chrono = { version = "0.4", default-features = false, features = ["serde"] }

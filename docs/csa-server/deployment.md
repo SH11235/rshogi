@@ -1571,136 +1571,234 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
    `live-games-index/` 手動削除 (§13.4 step 5) の運用負荷が **月 30 分以上**
    になった場合
 
-## 14. R2 backup / lifecycle / 棋譜永久保持 (#624)
+## 14. R2 棋譜バックアップと復元
 
-棋譜は Floodgate 相当 production の **絶対消失防止対象**。`bucket.delete()` の
-誤操作 / `%%DELETEBUOY` の暴走 / Cloudflare account 障害 / lifecycle rule
-誤適用 のいずれでも棋譜が消えないよう、複数層の防御を組む。
+同じ Cloudflare アカウントの別 R2 bucket に、棋譜とメタ情報を版付きで保存する。
+primary の誤削除・上書きから復旧するための仕組みであり、アカウント全体の喪失や
+設定変更権限を持つ管理者による保護解除には対応しない。別アカウントや外部保管は含まない。
 
-### 14.1 R2 prefix taxonomy と削除ポリシー
+`KIFU_BACKUP_BUCKET` が未設定なら機能は無効で、管理 API は `enabled: false` を返す。
+production / staging の Wrangler 設定には binding を追加していない。
+`wrangler.toml.example` のローカル用 binding と、Pulumi の opt-in 宣言を用意している。
+**実 bucket の作成・lock の適用確認・初回全件コピー・復元訓練を済ませるまでは、保護済みとして扱わない。**
 
-production の `KIFU_BUCKET` 配下で書き込まれる prefix と、許可される delete
-経路を以下に固定する。
+初回は [有効化手順](#143-有効化と-lifecycle)、有効化後の状態確認・コピー再開・復元は
+[CLI と復元手順](#144-cli-と復元手順) を参照する。
 
-| prefix | 内容 | 想定 writer | 削除ポリシー |
-|---|---|---|---|
-| `<YYYY>/<MM>/<DD>/<game_id>.csa` | 日付別 棋譜本体 | `game_room::export_kifu_to_r2` (`finalize_if_ended` 経路) | **永久保持** (delete なし、lifecycle rule で保護) |
-| `kifu-by-id/<game_id>.csa` | game_id 逆引き 棋譜本体 | 同上 | **永久保持** (同上) |
-| `kifu-by-id/<game_id>.meta.json` | 棋譜メタ JSON | 同上 + `backfill` (meta repair) | **永久保持** (同上) |
-| `live-games-index/<inv_started_ms:014>-<game_id>.json` | viewer 配信用 進行中 index | `mark_play_started` / cron sweep | 終局/orphan 検出時に DO + sweep が delete 可 |
-| `games-index/<inv_ended_ms:014>-<game_id>.json` | viewer 配信用 終局済 index | 終局時 export (`games_index_key`) | **永久保持** (lifecycle rule で保護) |
-| `buoys/<encoded>.json` | %%SETBUOY 登録 | `store_buoy` | `%%DELETEBUOY` (admin 限定) で delete 可 |
+### 14.1 保存範囲と保護 prefix
 
-`<inv_*_ms:014>` は `INV_BASE - <epoch_ms>` をゼロパディング 14 桁化した値で、
-lex 順 = 時刻降順 を成立させる仕組み (`games_index.rs` / `live_games_index.rs`
-の `INV_BASE = 99_999_999_999_999` を参照)。日付階層 (`<YYYY>/<MM>/<DD>/`)
-は **棋譜本体 prefix のみ**で、`games-index/` / `live-games-index/` には付かない。
+| bucket / prefix | 内容 | 更新・削除の扱い |
+|---|---|---|
+| primary `YYYY/MM/DD/<id>.csa` | native 対局の棋譜本体 | 終局 export と再試行。外部取り込みでは作成しない |
+| primary `kifu-by-id/<id>.csa` / `<id>.meta.json` | 本体とメタ情報 | export、repair、外部取り込みの `force` で更新され得る |
+| primary `games-index/` | 終局 index | meta から生成。外部取り込みの `force` は旧 index を削除する |
+| primary `live-games-index/` | 進行中 index | 終局・orphan sweep で削除する |
+| primary `buoys/` | Buoy | 管理者の `%%DELETEBUOY` で削除可能。棋譜の復元対象外 |
+| backup `snapshots/v1/` | CSA・meta・元 object version をまとめた JSON | 新しい key へ追加。`snapshots/` の indefinite bucket lock で上書き・削除を禁止 |
+| backup `control/` | 進捗・lease・監視状態 | ETag 条件付き更新。lock の対象外 |
 
-**code 側の delete 経路** は本 doc 時点で 3 箇所のみ:
+snapshot key は `snapshots/v1/YYYY/MM/DD/<id>/<meta-uploaded-ms>-<sha256>.json`。
+日付は対局開始時刻の **UTC**、末尾は snapshot の内容に基づく SHA-256 である。
+元の meta の版が変わると別 snapshot を保存し、以前の版も残す。
+復元時の `games-index` は snapshot 内の同じ meta から再生成し、D1 にも upsert する。
+R2 native versioning を前提にしていない。
+v1 の `csa` は UTF-8 なら JSON 文字列、非 UTF-8 なら `{ "base64": "..." }` とする。
+base64 は padding 付きの標準 alphabet に限定し、不正な padding・余分な文字・曖昧なフィールドを拒否する。
+既存の文字列形式も読める。wdoor から取得した非 UTF-8 を含む本体は文字コード変換せず、
+digest の検証・復元とも元の byte 列を使う。本体サイズの上限は base64 展開後にも適用する。
 
-1. `game_room::delete_buoy` — `buoys/` prefix のみ。`x1_paths::BUOY_KEY_PREFIX`
-   で runtime 検証 (#624 隣接懸念)。
-2. `game_room::try_delete_live_games_index` — `live-games-index/` のみ。
-   key は `live_games_index::live_games_index_key()` 経由で生成。
-3. `backfill::sweep_orphan_live_index` — 同 `live-games-index/` のみ。
+新しい export / import は meta に CSA の `csa_sha256` を保存する。コピー時はその照合と
+元 object version の再確認を行い、取り込み途中の旧 meta と新 CSA の組を拒否する。
+CSA は 2 MiB、meta は 64 KiB を上限とし、超過・欠損・不整合はエラーとして進捗を止める。
+meta がまだ存在しない本体はバックアップ対象として数えない。終局 export の再試行を
+復旧させてから再走査する必要がある。
 
-**棋譜本体 (`<YYYY>/...`, `kifu-by-id/...`, `games-index/...`) を delete する
-コードは存在しない**。レビュー時はこの不変条件を維持すること。
+古い native 棋譜は日付別と by-id の本体一致を確かめて保存する。これは native の
+終局後の本体が不変であることを前提とする。古い外部棋譜 (`upload` / `wdoor`) は
+`unverified_legacy` としてそのまま保全するが、自動復元を拒否する。元データと照合し、
+通常の import の `force` で digest 付き meta に移行した後にバックアップし直す。
+旧 snapshot は消さず、外部棋譜を含む復元では確認済みの版を選ぶ。
 
-### 14.2 R2 lifecycle rule 設計 (Pulumi IaC で declarative 化)
+### 14.2 定期コピー・再試行・監視
 
-IaC (Pulumi 等) を使う場合は R2 bucket の lifecycle policy を declarative に追記する。
-wrangler.toml では設定せず、IaC 側を single source of truth とする。
+既存の 15 分間隔 scheduled handler が `kifu-by-id/` を辞書順で走査する。
+1 回最大 128 object、起動から 3 秒を過ぎると新しいコピーを開始しない。
+進行中の R2 操作を 3 秒で打ち切る保証ではない。通知の待ち時間は最大 2 秒。
+既存 backfill / rating / sweep と同じ起動時刻を用い、後続処理も共有の 25 秒枠を確認する。
+処理件数と時間を監視し、継続的に遅れる場合は手動の `run` で追い付かせる。
 
-設計:
+コピー成功後に object ごとに checkpoint を保存する。エラーでは失敗した key の前で止まり、
+次回同じ key を再試行する。snapshot の条件付き作成と内容一致確認により重複実行できる。
+checkpoint の ETag と 60 秒 lease で同時実行を制限し、クラッシュ時は lease の期限後に再開する。
+一周すると先頭から再走査し、古い日付で追加された棋譜や meta の修正も回収する。
 
+元データの欠損・不整合でも自動 skip はしない。その key より後ろのコピーも停止するため、
+`status` の `last_error` と `after_key` を確認し、次の `.meta.json` と対応する本体を調べる。
+
+| 停止原因 | 回復操作 |
+|---|---|
+| native 本体が欠損し meta だけある | R2 権限・障害と GameRoom の export retry を復旧し、本体の書込み完了を確認する。retry が残っていなければ、保全した原本・DO 状態からの管理者による補修が必要 |
+| legacy native の日付別と by-id が欠損・不一致 | 両方を保全して原本と照合し、採用する版を決めて欠損コピーを補修する。一致を確認できなければ停止したまま扱う |
+| external の force import 中断による digest 不一致 | 取得元と対象 ID を確認し、同じ import を `force` 付きで最後まで再実行する。非 UTF-8 本文を UTF-8 に変換して合わせない |
+| meta 不正、サイズ超過、出所を確認できない不整合 | 元 object を保全し、正しい metadata の補修または上限・復旧手順の見直しを管理者が判断する。本体の切詰めや削除で通さない |
+
+補修後に `run --until-complete` を再実行すれば、保持された checkpoint から再試行する。
+解消できない場合は未保護としてインシデントに残し、復旧担当へエスカレーションする。
+`after_key` の書換えや meta の削除で問題の棋譜を飛ばして、走査完了扱いにはしない。
+
+管理 API の `status` は `last_error`、`completed_at_ms`、`after_key`、`verified`、
+`unverified_legacy`、`notification` を返す。件数は現在または直前の走査一周分で、全保存版の総数ではない。
+構造化ログは `kifu_backup_progress` / `kifu_backup_failed` / `kifu_backup_notification_failed`。
+`completed_at_ms` は全走査完了時刻であり、個々の棋譜の RPO を保証する値ではない。
+
+任意の secret `KIFU_BACKUP_ALERT_URL` に HTTPS webhook を設定すると、コピー失敗・
+24 時間超の走査遅延・未検証 legacy を `{ "text": "..." }` 形式で通知する。
+通知先に管理 token や棋譜を送らず、redirect は追わない。checkpoint に種類別の最終試行時刻を保存し、
+失敗・遅延はそれぞれ 1 時間に 1 回、未検証 legacy は 24 時間に 1 回に抑える。
+legacy の通知直後でも新たな失敗・遅延を通知でき、同時に期限が来た種類は 1 回の webhook にまとめる。
+1 実行の通知試行は最大 1 回で、通知後の checkpoint 保存に失敗しても、その実行では再送しない。
+既存 checkpoint に種類別時刻がなければ未通知として読み込む。
+checkpoint 自体を読み書きできない障害では永続的な抑制ができず、scheduled の発火ごとに通知し得る。
+実行後の `notification` は、通知対象がなければ `idle`、通知先未設定なら `unconfigured`、最終送信の成功は
+`delivered`、失敗は `failed`。送信失敗にも同じ間隔を適用し、各 `last_*_alert_ms` は成功時刻ではなく
+試行時刻を表す。Worker/cron 全体の停止は通知できないため、外部監視で最終完了時刻も確認する。
+
+運用目標は **RPO 24 時間、RTO 2 時間**。どちらも未計測の目標である。
+有効化時に全件数・保存量・コピー一周時間・復元所要時間を測り、満たせるか判断する。
+定期実行の件数上限だけでも 1 日 12,288 object、通常の本体と meta の 2 key/局では
+最大 6,144 局/日である。時間枠や再試行により実際の能力はさらに下がる。
+全件数がこの規模を超える場合、定期 cron 単独で全走査を 24 時間以内に完了できない。
+有効化前に手動実行の運用を含めて評価し、必要なら頻度・処理予算や更新通知方式を見直す。
+未検証 legacy、元データ不整合、meta のない未完 export は保護完了に含めない。
+
+### 14.3 有効化と lifecycle
+
+1. `infra/pulumi` の対象 stack で `kifuBackupEnabled: true` を設定し、preview で
+   backup bucket / lock / lifecycle 以外の変更がないことを確認して apply する。
+   bucket 名は production が `rshogi-csa-kifu-backup-prod`、staging が
+   `rshogi-csa-kifu-backup-staging`。既定は false。
+2. `snapshots/` に indefinite lock があり、`control/` は更新可能なことを API / Dashboard で確認する。
+   作業用 sentinel で snapshot の上書き・削除が拒否されることを確かめる。
+   保護された sentinel も保存対象に残るため、棋譜 key と区別できる名前にする。
+   実 R2 binding で条件付き作成 (`etag_does_not_match: "*"`) が既存 key を上書きせず、
+   checkpoint の ETag 条件付き更新が競合を拒否することも隔離した key で確認する。
+3. 対象の `wrangler.<env>.toml` に `KIFU_BACKUP_BUCKET` を追加し、作成した bucket 名を指定する。
+   通知先 secret を設定し、通常の deploy 手順を通す。
+4. 下記 CLI で初回の全件コピーを完了し、エラー、未検証 legacy、元の件数との差異を確認する。
+5. 隔離した復元先で単一棋譜と日付範囲を復元し、本体・meta・index・D1 の一致と所要時間を確認する。
+   実 bucket の lock・通知・cron・復元まで確認して有効化完了とする。
+
+Pulumi は bucket / lock / lifecycle を `protect: true` とし、lifecycle は
+未完 multipart を 7 日後に abort する規則だけを持つ。snapshot の expiry は設けない。
+primary 全体には lock を掛けない。export の再試行や meta repair、外部取り込みの更新を妨げるためである。
+primary の棋譜本体・meta・`games-index` にも期限削除を設定しない。アプリ改修では棋譜本体を削除する経路を追加しない。
+`force` が更新に伴って古い派生 index を整理することと、本体の削除は区別する。
+
+expiry のない lifecycle だけでは API の削除・上書きを防げない。
+[Bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/) は対象 object の
+上書き・削除を防ぐが、権限を持つ管理者は lock 自体を変更できる。
+[IaC の lifecycle](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) と lock の drift を
+運用監視し、変更権限を制限する。
+
+旧版への rollback 前に、その版が現在の checkpoint と snapshot の形式を読めることを確認する。
+未知の checkpoint フィールドや非 UTF-8 snapshot の base64 表現を読めない版へ戻す場合は、
+`KIFU_BACKUP_BUCKET` の binding を外した構成でバックアップを停止し、bucket と `control/` を保全する。
+対応する版で再開し、checkpoint の削除・書換えで旧版の読込みを通さない。
+
+### 14.4 CLI と復元手順
+
+repo root から Node.js 24 で `scripts/kifu-backup.mjs` を使う。
+`ADMIN_API_TOKEN` は環境変数で与え、引数やログに書かない。
+`--url` は対象 Worker の HTTPS origin。loopback のローカル検証のみ HTTP を許可する。
+API は既存管理 token を要求し、Origin ヘッダー付きリクエストを拒否する。
+
+```bash
+node scripts/kifu-backup.mjs --help
+node scripts/kifu-backup.mjs status --url https://<worker-host>
+node scripts/kifu-backup.mjs run --url https://<worker-host> --until-complete --max-runs 100
+node scripts/kifu-backup.mjs list --url https://<worker-host> --from 2026-10-01 --through 2026-10-02
+node scripts/kifu-backup.mjs restore --url https://<worker-host> --snapshot '<snapshot-key>'
+node scripts/kifu-backup.mjs restore --url https://<worker-host> --snapshot '<snapshot-key>' --apply
+node scripts/kifu-backup.mjs restore --url https://<worker-host> --from 2026-10-01 --through 2026-10-02 --latest
 ```
-{KIFU_BUCKET}:
-  rules:
-    - name: abort-incomplete-multipart
-      match: { prefix: "" }
-      abort_incomplete_multipart_upload:
-        days_after_initiation: 7
-    # 棋譜 prefix は明示的に expire しない (永久保持)。
-    # lifecycle rule で `delete` action を一切付与しないことで R2 側の自動削除
-    # 経路を完全に塞ぐ。誤って rule が増えた場合は drift detection で検出。
+
+| オプション | 既定 | 条件 |
+|---|---|---|
+| `--url` | 必須 | 資格情報・path・query のない Worker origin |
+| `--from` / `--through` | through は from と同日 | list / 範囲 restore の UTC 開始日、両端を含む最大 3661 日 |
+| `--game-id` | 絞り込みなし | 英数字・`-`・`_` の 1〜256 文字 |
+| `--snapshot` | 範囲選択 | restore 専用。日付・game-id・latest と排他 |
+| `--latest` | false | 日付・game ID ごとに元 meta の最新 upload 時刻を選ぶ。同時刻は拒否 |
+| `--apply` | false | restore 専用。true のときだけ書き込む |
+| `--until-complete` | false | run を走査一周完了まで繰り返す |
+| `--max-runs` | 100 | run の繰り返し上限。1〜10,000 |
+| `--help` | false | token なしでヘルプを表示 |
+
+`run` は 1 リクエスト最大 128 object / コピー開始枠 20 秒、`--until-complete` は上限回数まで継続する。
+エラー・busy・無効状態では終了コードを失敗にし、checkpoint は保持する。
+`list` と日付範囲復元は 1 ページ 100 key で順次処理し、全件をメモリに載せない。
+`--game-id <id>` で絞り込める。日付範囲は両端を含む UTC の対局開始日で、最大 3661 日。
+`--game-id=` と `--snapshot=` のような明示的な空値は、未指定と区別して通信前に拒否する。
+
+復元は既定で dry run。`--apply` で欠損 object だけを条件付き作成する。
+各棋譜の全 target と D1 の同 ID 行を事前確認し、既存の異なる内容には 409 を返して上書きしない。
+終了時刻が変わった同 ID の `games-index` が残る場合も、dry run・適用とも 409 で拒否する。
+D1 が欠損していても orphan index を見落とさないよう、`games-index/` の列挙を最大 1,000 object
+に制限して全体を確認する。続きがある場合と事前確認が 20 秒を超えた場合は、書込み前に 409 を返す。
+進行中の I/O 自体を 20 秒で中断するものではない。D1 の読取り障害は 502 となり、書き込まない。
+**1,000 object を超える既存索引がある bucket へは、この API では復元できない。** 大規模な既存
+bucket の復旧には、同 ID の残存索引・D1 と復元版を照合する別の復旧手順が必要になる。
+上限を超えた結果を「競合なし」と読み替えない。隔離先への復元でも索引数がこの上限を超えると停止する。
+途中失敗では一部だけ作成され得るが、同じ snapshot の再実行で残りと D1 を補える。
+**日付範囲全体はトランザクションではない**。後の棋譜で失敗しても先の復元は残る。
+先に dry run の全結果を保存・確認し、対象への import / repair を停止してから適用する。
+R2 の複数 object と D1 をまたぐ原子的な復元や、同時の force import との排他は提供しない。
+
+同一日・同一 game ID に複数版があると、明示的な `--latest` または `--snapshot` を要求する。
+`--latest` は元 meta の upload 時刻が最新の版を選び、同時刻の複数版は拒否する。
+開始日が変更された ID は複数の日付に現れ得るため、`list` で確認し `--snapshot` を選ぶ。
+通常の復元 API は異なる版を上書きしない。既存データの採否を決める作業は別途必要になる。
+
+snapshot は CSA/meta/key の整合性を検証してから復元する。native 棋譜は日付別・by-id 本体、
+meta、games-index の 4 object、外部棋譜は日付別を除く 3 object を戻す。
+Buoy、進行中対局、Floodgate history、rating 集計、その他の D1 テーブルは対象外。
+復元後は viewer 検索と棋譜取得を確認する。インシデント記録には対象環境・喪失範囲・日時、
+採用した snapshot key と digest、dry run の結果、実施者、復元後の件数と整合性確認、未解決項目を残す。
+管理 token や棋譜本文は記録に含めない。
+
+backup だけを失った場合は primary を保全し、bucket / binding / lock を復旧した上で
+`run --until-complete` により再同期する。途中の checkpoint が残っていれば、現在の一周を完了した後に
+さらに一周を先頭から完走し、失われた key が checkpoint より前にあっても回収する。
+現在の primary に残る版だけが再作成対象であり、失った旧版を現在の本体から再現することはできない。
+残存する lock 済み snapshot は消さず、再同期後に件数・digest・復元を検証する。
+primary と backup の両方が失われた場合、本機能だけでは復元できない。Cloudflare サポートへ
+状況と保全済み情報を伝えてエスカレーションするが、サポート経由の復旧も保証されない。
+
+### 14.5 費用と検証
+
+保存量は「現在の棋譜数」ではなく **保持する snapshot 全版の JSON バイト数**で増える。
+1 周に N 棋譜、P ページ、K 個の `kifu-by-id/` object がある場合、Class A は概ね
+`P + K + 2 × 実行回数 + 新規 snapshot 数`（list・checkpoint・put）。
+Class B は digest 付き棋譜で概ね `5N + 実行回数`（meta / CSA の get、各 head、snapshot get、checkpoint get）。
+legacy native は日付別 get が加わり、再試行・管理操作・復元・通知も別途必要になる。
+少数棋譜でも毎周走査するため、固定の「1 日数十操作」では見積もれない。
+
+[R2 Standard 料金](https://developers.cloudflare.com/r2/pricing/) は保存 $0.015/GB-month、
+Class A $4.50/百万操作、Class B $0.36/百万操作。アカウントの無料枠は
+10 GB-month / A 100 万 / B 1,000 万操作で、他の利用と共有される。
+実際の請求は料金ページ・丸め・使用量を確認する。転送量が無料でも操作と保存は有料になり得る。
+
+ローカル検証は `kifu_backup` の Rust テストと `kifu_backup.test.ts` の Miniflare で行う。
+Miniflare は隔離した R2 binding の copy / restore / 条件付き更新を試し、非 UTF-8 の wdoor
+取り込みから元 byte 列の復元までを検証する。Cloudflare 側の bucket lock は fixture で上書き拒否を模擬する。
+条件付き作成を含む実 R2 の動作や IaC の適用を証明するものではない。IaC policy テストも設定の意図だけを検査する。
+
+```bash
+cargo test -p rshogi-csa-server-workers
+node --test scripts/kifu-backup.test.mjs
+node --test infra/pulumi/kifu-backup-policy.test.mjs
+cd crates/rshogi-csa-server-workers
+pnpm install --frozen-lockfile
+pnpm run build
+MINIFLARE_SMOKE_SKIP_BUILD=1 pnpm run test:smoke kifu_backup.test.ts
 ```
-
-**注意**:
-- Cloudflare R2 lifecycle rule は現時点で「expire」「abort multipart」をサポート。
-  S3 互換の `noncurrent` 系は未対応 (versioning 自体が R2 native では未提供)。
-- `delete` action のある rule を追加する場合は **必ず** 棋譜 prefix を含まない
-  ことを IaC 側の unit test でガードする。
-
-### 14.3 別 backup bucket への定期 cp cron (Phase 2)
-
-本 PR では設計のみ。実装は #624 Phase 2 別 PR で扱う。
-
-- backup bucket 名 (Phase 2 で確定する仮命名): `rshogi-csa-kifu-backup-prod`
-  (production), `rshogi-csa-kifu-backup-staging` (staging)。primary bucket
-  (`rshogi-csa-kifu-prod` / `rshogi-csa-kifu-staging`) と命名規約を揃える
-- 同 account / 別 bucket。Cloudflare account 障害には弱いが、誤 delete /
-  bucket 誤操作からは防御できる
-- Workers `scheduled` event で 1 日 1 回 (UTC 03:00) 実行
-- 前日の `<YYYY>/<MM>/<DD>/...` prefix を `KIFU_BUCKET.list` で列挙、
-  `BACKUP_BUCKET.put(key, body)` でコピー (上書き protection: HEAD で existence 確認後 skip)
-- `kifu-by-id/` は 1 日分の差分 list 困難のため、終局時の export 経路で
-  primary + backup の 2-bucket 同時 PUT を将来検討
-- ops budget: Class A 20 ops/日 = 600 ops/月 (Free 1M の 0.06%)
-
-### 14.4 restore runbook
-
-#### 14.4.1 単一棋譜の誤削除を疑った場合
-
-実 bucket 名は `wrangler.<env>.toml` の `[[r2_buckets]] binding = "KIFU_BUCKET"`
-配下の `bucket_name` (production: `rshogi-csa-kifu-prod`、staging:
-`rshogi-csa-kifu-staging`) を参照する。`--config` 指定なしで `wrangler r2`
-を叩くと環境を誤認するため、必ず env 別の toml を渡す。
-
-1. **R2 console** で `<YYYY>/<MM>/<DD>/<game_id>.csa` の存在を確認
-2. 不在なら backup bucket (Phase 2 配線後) から download:
-   ```bash
-   vp exec wrangler r2 object get \
-     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
-     "<BACKUP_BUCKET_NAME>/<YYYY>/<MM>/<DD>/<game_id>.csa" \
-     --file=/tmp/restored.csa
-   ```
-3. primary bucket へ put し直す (`<KIFU_BUCKET_NAME>` は production なら
-   `rshogi-csa-kifu-prod`):
-   ```bash
-   vp exec wrangler r2 object put \
-     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
-     "<KIFU_BUCKET_NAME>/<YYYY>/<MM>/<DD>/<game_id>.csa" \
-     --file=/tmp/restored.csa
-   ```
-4. `kifu-by-id/<game_id>.csa` と `<game_id>.meta.json` も同様に確認・復旧
-5. `games-index/<inv_ended_ms:014>-<game_id>.json` がある場合のみ viewer に
-   表示されるため、必要なら `backfill` 経路 (admin endpoint) でインデックス
-   再生成
-
-#### 14.4.2 大規模消失 / Cloudflare account 障害
-
-1. backup bucket の最新 snapshot 時刻を確認:
-   ```bash
-   vp exec wrangler r2 object list \
-     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
-     "<BACKUP_BUCKET_NAME>" --prefix "<YYYY>/<MM>/<DD>/"
-   ```
-2. 喪失範囲を date prefix 単位で特定 (`<YYYY>/<MM>/<DD>` 別)
-3. backup bucket → primary bucket への一括 cp を Workers cron 手動 invoke
-   (`wrangler cron trigger backup-restore` で対応 trigger を起動) で復旧
-4. cp 完了後に `backfill` で `kifu-by-id/` と `games-index/` を再生成
-5. インシデント記録を作成 (`docs/csa-server/incidents/<YYYY-MM-DD>.md` 参照、
-   §13.4 step 6 の DO 喪失 incident と同じ命名規約)
-
-#### 14.4.3 backup bucket 自体が壊れた場合
-
-primary が生きている前提なら、primary → backup の再 sync で復旧。両方喪失の
-場合は Cloudflare サポートへエスカレーション (point-in-time restore は
-Cloudflare 側機能に依存)。
-
-### 14.5 follow-up
-
-- [ ] IaC で R2 lifecycle policy を追加
-- [ ] backup bucket への cp cron 実装 (#624 Phase 2)
-- [ ] viewer 経路で `games-index/` の bucket 整合性 doctor (Phase 2 と同時着手)
