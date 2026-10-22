@@ -152,14 +152,26 @@ pub(super) struct Budget<'a> {
     pub progress: &'a mut dyn FnMut(MateProgress),
 }
 
+/// `Scratch::path_filter` の升の数 (2 の冪)
+const PATH_FILTER_SIZE: usize = 1 << 12;
+
+#[inline]
+fn path_filter_index(key: u64) -> usize {
+    key as usize & (PATH_FILTER_SIZE - 1)
+}
+
 /// 探索の作業領域。ソルバーが solve をまたいで持ち回り、探索中に確保し直さない。
 pub(super) struct Scratch<M> {
     /// ルートから現局面までの局面のキー (添字が深さ)
     path: Vec<u64>,
+    /// `path` のキーを下位ビットで数えたもの。0 の升のキーは経路に無いので、経路を走査せずに済む
+    path_filter: Vec<u16>,
     /// 経路上の各局面の子を、浅い順に 1 本に積んだもの。各フレームの子は末尾にある
     /// (深いフレームは戻るときに自分の子を取り除く)。
     children: Vec<Child<M>>,
     moves: Vec<M>,
+    /// `moves` の各手を指した後のキー
+    child_keys: Vec<u64>,
     /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
     proven: Vec<(M, u16)>,
 }
@@ -168,8 +180,10 @@ impl<M> Scratch<M> {
     pub fn new() -> Self {
         Self {
             path: Vec::with_capacity(MAX_DEPTH),
+            path_filter: vec![0; PATH_FILTER_SIZE],
             children: Vec::with_capacity(CHILDREN_RESERVE),
             moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            child_keys: Vec::with_capacity(crate::movegen::MAX_MOVES),
             proven: Vec::with_capacity(crate::movegen::MAX_MOVES),
         }
     }
@@ -209,6 +223,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
         budget: Budget<'a>,
     ) -> Self {
         scratch.path.clear();
+        scratch.path_filter.fill(0);
         scratch.children.clear();
         Self {
             table,
@@ -227,23 +242,11 @@ impl<'a, S: MateState> Searcher<'a, S> {
         self.nodes
     }
 
-    /// 経路上の局面の数 (= 次に探索する局面の深さ)
-    pub fn path_len(&self) -> usize {
-        self.scratch.path.len()
-    }
-
-    /// 現在の局面を探索経路に積む (PV 復元で、探索を経ずに局面を進めるときに使う)
-    pub fn push_path(&mut self, st: &S) {
-        self.scratch.path.push(st.key());
-    }
-
-    /// `push_path` で積んだ局面を降ろす
-    pub fn pop_path(&mut self) {
-        self.scratch.path.pop();
-    }
-
     /// 局面が探索経路上の局面の反復なら、その祖先の深さ
     fn repetition_depth(&self, key: u64) -> Option<usize> {
+        if self.scratch.path_filter[path_filter_index(key)] == 0 {
+            return None;
+        }
         self.scratch.path.iter().rposition(|&k| k == key)
     }
 
@@ -303,10 +306,12 @@ impl<'a, S: MateState> Searcher<'a, S> {
         }
 
         self.scratch.path.push(key);
+        self.scratch.path_filter[path_filter_index(key)] += 1;
         let frame_start = self.scratch.children.len();
         let result = self.search_node(st, key, args, frame_start, inc_flag);
         self.scratch.children.truncate(frame_start);
         self.scratch.path.pop();
+        self.scratch.path_filter[path_filter_index(key)] -= 1;
         result
     }
 
@@ -330,7 +335,10 @@ impl<'a, S: MateState> Searcher<'a, S> {
         if or_node && len_limit == 0 {
             return Ok(NodeResult::disproven(NO_LOOP, true));
         }
-        if or_node && st.mate_1ply().is_some() {
+        // 1 手詰めは局面だけで決まる。未確定値か不詰が置換表にあるノードは前の訪問で 1 手詰めでないと
+        // 判定済みなので調べない。詰みが置換表にあるノードを読むのは詰み手順の復元だけで、
+        // そこでは 1 手詰めなら子を展開せずに済む。
+        if or_node && self.table.probe(key).is_none_or(|v| v.pn == 0) && st.mate_1ply().is_some() {
             let result = NodeResult::proven(1);
             self.store(key, depth, &result, 1);
             return Ok(result);
@@ -427,6 +435,13 @@ impl<'a, S: MateState> Searcher<'a, S> {
     fn expand(&mut self, st: &S, depth: usize, or_node: bool, child_len_limit: u16) -> bool {
         self.scratch.moves.clear();
         st.generate(or_node, &mut self.scratch.moves);
+        // 子の bucket をまとめて先に読み込ませ、置換表を引くときのキャッシュミスの待ちを重ねる
+        self.scratch.child_keys.clear();
+        for &mv in &self.scratch.moves {
+            let key = st.key_after(mv);
+            self.table.prefetch(key);
+            self.scratch.child_keys.push(key);
+        }
 
         let child_depth = (depth + 1) as u16;
         let mut has_old_child = false;
@@ -441,7 +456,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
                 limited: false,
                 first_visit: true,
             };
-            let child_key = st.key_after(mv);
+            let child_key = self.scratch.child_keys[i];
             if let Some(loop_depth) = self.repetition_depth(child_key) {
                 // 経路上の局面に戻る手は読むまでもなくこの経路では不詰。先に確定させておかないと、
                 // 循環を通って膨らんだ未確定値に隠れて、この手が選ばれないまま閾値の延長が続く。

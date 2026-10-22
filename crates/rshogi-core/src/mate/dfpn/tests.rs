@@ -711,6 +711,35 @@ fn path_dependent_disproof_is_not_reused() {
     }
 }
 
+/// 手順の途中で、前に最短でない詰みで通った攻め方の局面に受け方が戻せる。
+/// 極小の表では短い詰みが追い出されてこの形になりやすい。巻き戻して短い詰みを選び直せること。
+#[test]
+fn pv_is_rebuilt_when_the_defender_returns_to_an_earlier_position() {
+    let edges: Vec<Vec<u32>> = vec![
+        vec![12, 8],
+        vec![7, 8, 9],
+        vec![8, 11, 13],
+        vec![9, 11, 10],
+        vec![13, 7],
+        vec![11],
+        vec![11, 10],
+        vec![],
+        vec![2, 4],
+        vec![5],
+        vec![],
+        vec![4, 6],
+        vec![5],
+        vec![5],
+    ];
+    for buckets in 1..=16 {
+        let mut graph = Graph::new(edges.clone(), 0);
+        let Some(SolveOutcome::Mate(pv)) = solve_graph(&mut graph, buckets) else {
+            panic!("buckets={buckets}: 詰みを返さない");
+        };
+        assert!(is_valid_graph_pv(&graph, 0, &pv), "buckets={buckets}: {pv:?}");
+    }
+}
+
 /// 乱択グラフで最小不動点と一致し、打ち切り (停滞) も起きない
 #[test]
 fn agrees_with_fixed_point_on_random_graphs() {
@@ -735,7 +764,7 @@ fn agrees_with_fixed_point_on_random_graphs() {
         }
         let truth = Graph::new(edges.clone(), 0).mate_set(&is_or)[0];
         mates += usize::from(truth);
-        for buckets in [1, 4, 256] {
+        for buckets in [1, 2, 3, 4, 256] {
             let mut graph = Graph::new(edges.clone(), 0);
             match solve_graph(&mut graph, buckets) {
                 Some(SolveOutcome::Mate(pv)) => {
