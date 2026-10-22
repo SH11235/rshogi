@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const COLUMNS: [&str; 11] = [
     "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
@@ -36,7 +36,7 @@ pub(super) struct RegisterArgs {
     /// 元データを書き換える。省くと集計と食い違いの一覧だけを出す
     #[arg(long)]
     apply: bool,
-    /// ready の木の出力先。同じ局面は根から遠い段まで伸ばした木を使う
+    /// ready の木の出力先。同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う
     #[arg(required = true)]
     trees: Vec<PathBuf>,
 }
@@ -93,11 +93,12 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         ensure!(!text.contains(['\t', '\r', '\n']), "since・note にタブや改行は使えません");
     }
     ensure!(args.alt_gap >= 0, "--alt-gap は 0 以上にしてください");
-    ensure!(args.conflicts != args.master, "--conflicts を元データと同じにはできません");
+    check_conflicts_path(&args.conflicts, &args.master, &args.trees)?;
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
     for (tree, dir) in args.trees.iter().enumerate() {
-        ensure!(!args.conflicts.starts_with(dir), "--conflicts を木の出力先の中にはできません");
+        // 打ち間違えた出力先に lock のために dir を作らない。
+        ensure!(dir.is_dir(), "{}: 木の出力先がありません", dir.display());
         // replay が出力を書き換えている途中の材料を読まない。
         let _lock = LockedFile::open(&dir.join("tree.lock"))?;
         let status = std::fs::read_to_string(dir.join("STATUS"))
@@ -155,6 +156,38 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     Ok(())
 }
 
+/// 食い違いの一覧は確認だけの実行でも書くので、元データや木の出力を指す書き方 (相対・絶対・`..`・リンク) を
+/// 実体のパスで比べて拒否する。
+pub(super) fn check_conflicts_path(
+    conflicts: &Path,
+    master: &Path,
+    trees: &[PathBuf],
+) -> Result<()> {
+    let target = resolved(conflicts)?;
+    ensure!(target != resolved(master)?, "--conflicts を元データと同じにはできません");
+    for dir in trees {
+        ensure!(
+            !target.starts_with(resolved(dir)?),
+            "--conflicts を木の出力先の中にはできません"
+        );
+    }
+    Ok(())
+}
+
+fn resolved(path: &Path) -> Result<PathBuf> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return std::fs::canonicalize(path)
+            .with_context(|| format!("{} を解決できません", path.display()));
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} はファイル名ではありません", path.display()))?;
+    Ok(std::fs::canonicalize(parent)
+        .with_context(|| format!("{} を解決できません", parent.display()))?
+        .join(name))
+}
+
 pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
     let mut lines = text.lines();
     ensure!(
@@ -182,7 +215,7 @@ pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<Strin
     Ok(nodes)
 }
 
-/// 同じ局面は、根から遠い段まで伸ばした (残りの段数が多い) 木を使う。同じなら先に渡した木。
+/// 同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う。同じなら先に渡した木。
 /// 木どうしで 1 位が違った局面の数を返す。
 pub(super) fn merge(into: &mut BTreeMap<String, Node>, from: BTreeMap<String, Node>) -> usize {
     let mut disagreements = 0;
@@ -315,9 +348,7 @@ pub(super) fn register(
         };
         let first_new = rows.len();
         let main = existing.iter().copied().find(|&i| rows[i].get("role") == "main");
-        let curated = existing
-            .iter()
-            .any(|&i| rows[i].get("tier") == "curated" && rows[i].get("role") != "record");
+        let curated = existing.iter().any(|&i| rows[i].get("tier") == "curated");
         match main {
             None => {
                 if let Some(i) = find(&rows, &best.mv) {
@@ -333,19 +364,17 @@ pub(super) fn register(
                     && !curated =>
             {
                 rows[m].set("role", "alt".into());
-                let note = format!(
-                    "{}。{}: 木の伝播後の 1 位でないので main から alt",
+                let note = append(
                     rows[m].get("note"),
-                    options.since
+                    format!("{}: 木の伝播後の 1 位でないので main から alt", options.since),
                 );
                 rows[m].set("note", note);
                 match find(&rows, &best.mv) {
                     Some(i) => {
                         rows[i].set("role", "main".into());
-                        let note = format!(
-                            "{}。{}: 木の伝播後の 1 位なので alt から main",
+                        let note = append(
                             rows[i].get("note"),
-                            options.since
+                            format!("{}: 木の伝播後の 1 位なので alt から main", options.since),
                         );
                         rows[i].set("note", note);
                     }
@@ -406,6 +435,14 @@ pub(super) fn register(
     });
     validate(&rows)?;
     Ok((rows, conflicts, summary))
+}
+
+fn append(note: &str, text: String) -> String {
+    if note.is_empty() {
+        text
+    } else {
+        format!("{note}。{text}")
+    }
 }
 
 /// 局面ごとに main がちょうど 1 つ (丁寧な定跡の行だけでも 1 つ) で、同じ手の行が重ならないこと。
@@ -545,6 +582,97 @@ mod tests {
         );
         assert_eq!(conflicts[0].tree, 1);
         assert_eq!(conflicts[1].main, "careful");
+    }
+
+    #[test]
+    fn curated_record_rows_also_keep_the_main() {
+        let rows = master(&[
+            row(B, "old", "main", "read", "wide", "1"),
+            row(B, "never", "record", "read", "curated", "-30000"),
+        ]);
+        let nodes = BTreeMap::from([(B.into(), node(&[("new", 30), ("old", -20)], 1, 0))]);
+        let (rows, conflicts, summary) = register(rows, &nodes, &options()).unwrap();
+        assert_eq!(find(&rows, B, "old").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, B, "new").unwrap().get("role"), "alt");
+        assert_eq!((conflicts.len(), summary.replaced_main), (1, 0));
+    }
+
+    #[test]
+    fn conflicts_path_is_compared_by_its_real_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("moves.tsv");
+        std::fs::write(&master, "x").unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let trees = [tree.clone()];
+        let mut bad = vec![
+            dir.path().join("tree/../moves.tsv"),
+            tree.join("conflicts.tsv"),
+            dir.path().join("tree/./x.tsv"),
+        ];
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.tsv");
+            std::os::unix::fs::symlink(&master, &link).unwrap();
+            bad.push(link);
+        }
+        for bad in bad {
+            assert!(check_conflicts_path(&bad, &master, &trees).is_err(), "{}", bad.display());
+        }
+        check_conflicts_path(&dir.path().join("conflicts.tsv"), &master, &trees).unwrap();
+        assert_eq!(std::fs::read_to_string(&master).unwrap(), "x");
+    }
+
+    #[test]
+    fn run_checks_trees_and_writes_the_master_only_with_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        let original = format_master(&master(&[row(B, "pinned", "main", "pin", "wide", "")]));
+        std::fs::write(&master_path, &original).unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::write(
+            tree.join(NODE_MOVES),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t3\t0\t2\t1000000000\tbest\t40\t1\t1\n{W}\t4\t1\t1\t1000000000\tw1\t-5\t1\t1\n"),
+        )
+        .unwrap();
+        let args = |trees: Vec<PathBuf>, apply| RegisterArgs {
+            master: master_path.clone(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            conflicts: dir.path().join("conflicts.tsv"),
+            apply,
+            trees,
+        };
+        run(args(vec![tree.clone()], false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
+        let conflicts = std::fs::read_to_string(dir.path().join("conflicts.tsv")).unwrap();
+        assert_eq!(conflicts.lines().count(), 2);
+        assert!(
+            conflicts
+                .lines()
+                .nth(1)
+                .unwrap()
+                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\tbest\t40\t"))
+        );
+        run(args(vec![tree.clone()], true)).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert_eq!(find(&rows, W, "w1").unwrap().get("role"), "main");
+        assert_eq!(
+            find(&rows, B, "best").unwrap().get("note"),
+            "木の伝播後の 1 位 (main と食い違い)"
+        );
+
+        let missing = dir.path().join("typo");
+        assert!(run(args(vec![missing.clone()], false)).is_err());
+        assert!(!missing.exists());
+        std::fs::write(tree.join("STATUS"), "NOT_READY\n").unwrap();
+        assert!(run(args(vec![tree.clone()], false)).is_err());
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::remove_file(tree.join(NODE_MOVES)).unwrap();
+        assert!(run(args(vec![tree], false)).is_err());
     }
 
     #[test]
