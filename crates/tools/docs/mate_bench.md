@@ -69,7 +69,9 @@ cargo build --release -p rshogi-core --example mate_bench_wasm --target wasm32-w
 
 # wasm から見えるのはカレントディレクトリだけなので、局面集のあるディレクトリで相対パスを渡す
 cd $SHOGI_DATA/tsume
-node /path/to/rshogi/scripts/run_wasi.mjs   /path/to/rshogi/target/wasm32-wasip1/release/examples/mate_bench_wasm.wasm   --input yaneuraou-2020/mate11.sfen --stride 1000 --nodes 2000000 --out mate11-wasm.tsv
+node /path/to/rshogi/scripts/run_wasi.mjs \
+  /path/to/rshogi/target/wasm32-wasip1/release/examples/mate_bench_wasm.wasm \
+  --input yaneuraou-2020/mate11.sfen --stride 1000 --nodes 2000000 --out mate11-wasm.tsv
 ```
 
 - 出力は `局面` と `nodes` の 2 行と、`--out` の TSV (`sfen` `result` `pv_len` `nodes` `micros`)。
