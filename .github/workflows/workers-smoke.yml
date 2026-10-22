@@ -14,7 +14,10 @@
 name: Workers Smoke
 
 on:
+  # PR ブランチへの push は pull_request イベント側で検証されるため、push は main だけにする。
   push:
+    branches:
+      - main
     paths:
       - 'crates/rshogi-csa-server-workers/**'
       - 'crates/rshogi-csa-server/**'
@@ -57,10 +60,6 @@ jobs:
         run: |
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # `rust-ci.yml` の `wasm-build` job、`deploy-workers.yml` と
@@ -70,6 +69,7 @@ jobs:
           # 揃える必要がある。どれか 1 つで `RUSTFLAGS` が立つと cache miss / 汚染
           # が発生する。本 job の `RUSTFLAGS: ""` は `env:` で明示済み (44-50 行)。
           shared-key: wasm32
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
       # の対象外なので、`actions/cache` で明示キャッシュする。`deploy-workers.yml`
       # と同じキー規約に揃える。
@@ -112,6 +112,3 @@ jobs:
           # 直前の `pnpm run build` 成果物を再利用してテスト時間を短縮する。
           MINIFLARE_SMOKE_SKIP_BUILD: '1'
         run: pnpm run test:smoke
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true

@@ -86,6 +86,10 @@ struct ServeArgs {
     /// キューの行で opts.draw を省いたときの既定
     #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     draw: i32,
+    /// 読みごとに探索の途中の info 行を `<trace-dir>/<起動の id>.jsonl` に追記する。
+    /// state に固定されず、起動ごとに付け外しできる
+    #[arg(long)]
+    trace_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

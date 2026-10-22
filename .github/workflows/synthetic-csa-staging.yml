@@ -92,12 +92,6 @@ jobs:
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           rustup toolchain install "$CHANNEL" --profile minimal --no-self-update
           rustup default "$CHANNEL"
-      - name: Setup sccache
-        if: steps.check.outputs.can_run == 'true'
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        if: steps.check.outputs.can_run == 'true'
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # native release build 用 cache key。`deploy-workers.yml` 等が使う wasm32
       # group とは別 namespace にして cache key の衝突 (`RUSTFLAGS` 不一致での
       # cache miss / 汚染) を防ぐ。
@@ -111,9 +105,6 @@ jobs:
           cargo build --release \
             -p rshogi-csa-client \
             -p rshogi-usi
-      - name: sccache stats
-        if: always() && steps.check.outputs.can_run == 'true'
-        run: sccache --show-stats || true
       # 1 局完走 synthetic 本体。`&` で 2 client を bg 起動するが、bash run_in_background
       # に頼らず、同期 `wait` で両 PID を回収して exit code を確実に検査する。
       # 期待観測:
