@@ -355,6 +355,29 @@ replay は engine を起動せず、serve と同じ木の処理を台帳の読�
 
 ### 出力と登録可否
 
-木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。
+木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、両方の手番の局面の手ごとの伝播後の値 `node_moves.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。
 
-未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
+未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
+
+`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手は 1 回の読みの値)・`expanded` (伸ばした手なら 1)・`rank` です。勝ち宣言の読みの局面は載せません。
+
+### 定跡の元データへの登録
+
+```bash
+book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
+  --conflicts conflicts.tsv [--alt-gap 40] [--apply] <木の出力先>...
+```
+
+ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
+
+元データの表は `key ply move role source evals nodes lineage tier since note` の 11 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
+
+規則 (局面ごと、先手・後手の手番の区別なし):
+
+- 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
+- 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- `source` が `read` / `deep` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
+- 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
+- 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
+

@@ -5,6 +5,7 @@ mod model;
 mod output;
 mod paths;
 mod queue;
+mod register;
 mod service;
 mod targets;
 #[cfg(test)]
@@ -35,6 +36,8 @@ enum TreeCommand {
     Import(ImportArgs),
     /// 台帳だけから木を再生成する
     Replay(ReplayArgs),
+    /// ready の木の手を定跡の元データの表に登録する
+    Register(register::RegisterArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -109,6 +112,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Serve(args) => service::serve(args),
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),
+        TreeCommand::Register(args) => register::run(args),
         TreeCommand::Import(args) => {
             let settings = Settings::new(&args.reading)?;
             let mut journal = Journal::open(&args.journal, &settings.fingerprint)?;

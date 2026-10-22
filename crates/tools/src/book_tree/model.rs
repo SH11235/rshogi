@@ -466,11 +466,14 @@ impl Tree {
 }
 
 pub(super) fn remove_candidates(out: &Path) -> Result<()> {
-    match std::fs::remove_file(out.join("own_nodes.tsv")) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
+    for name in ["own_nodes.tsv", super::output::NODE_MOVES] {
+        match std::fs::remove_file(out.join(name)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
+    Ok(())
 }
 fn push_unique(moves: &mut Vec<String>, mv: &str) {
     if !moves.iter().any(|m| m == mv) {

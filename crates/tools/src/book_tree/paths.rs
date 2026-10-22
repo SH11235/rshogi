@@ -103,6 +103,7 @@ pub(super) fn artifacts(out: &Path) -> Result<Vec<PathBuf>> {
         "STATUS",
         "tree.lock",
         "own_nodes.tsv",
+        "node_moves.tsv",
         "registration_status.json",
         "tree.db",
         "tree_rule.db",
