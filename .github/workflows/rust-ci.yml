@@ -23,13 +23,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
   # `.cargo/config.toml` の `target-cpu=native` を CI では無効化する。
-  # CI ランナーの CPU 世代（Skylake / Ice Lake / Cascade Lake 等）と sccache の
-  # 組み合わせで、片方の CPU でビルドされたキャッシュエントリが別 CPU の
-  # runner で実行されて SIGILL（`Compile terminated by signal 4`）で落ちる
-  # flaky を起こしていた。CI では CPU 固有命令を出さない `x86-64-v2` 相当の
-  # 保守的な baseline を指定し、sccache エントリを CPU 非依存にする。
+  # CI ランナーの CPU 世代（Skylake / Ice Lake / Cascade Lake 等）は run ごとに変わり、
+  # 片方の CPU でビルドしてキャッシュした成果物を別 CPU の runner で実行すると
+  # SIGILL（`Compile terminated by signal 4`）で落ちる。CI では CPU 固有命令を出さない
+  # `x86-64-v2` 相当の保守的な baseline を指定し、キャッシュする成果物を CPU 非依存にする。
   # ローカル開発の `target-cpu=native` は `.cargo/config.toml` 側で維持され、
   # CI のみがこの env で override される（env の方が `.cargo/config.toml` の
   # rustflags より precedence が高い）。
@@ -101,16 +99,15 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         # rust-cacheの既定RUST prefixでvirtual workspaceのroot profile設定もhashする。
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
+          # PR ごとに保存すると共有の cache 枠 (10GB) を超えて main の cache が追い出されるため、
+          # 保存は main だけにする。PR は main の cache を復元して使う。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       # workspace clippy は default features (dlshogi-onnx 有効) で走るため、tools の
@@ -118,9 +115,6 @@ jobs:
       # 外した構成でも lint し、その分岐の warning を検出する。
       - name: Run Clippy (tools, ONNX 依存無効)
         run: cargo clippy -p tools --no-default-features --features nnue-arch --all-targets -- -D warnings
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   test:
     name: Test
@@ -147,15 +141,12 @@ jobs:
         uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: nextest
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         # profile overrideはcacheにも見せるためjob envで指定する。
         # `[profile.release]` の `lto = "thin"` はテストバイナリ (~90 個) 各々の
@@ -174,9 +165,6 @@ jobs:
         # nextest は doctest を実行しない。テストが失敗した run でも doctest の結果を得る。
         if: ${{ !cancelled() }}
         run: cargo test --release --workspace --doc
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   feature-builds:
     # workspace の clippy / test は既定 feature (edition-universal) しかコンパイルしない。
@@ -201,10 +189,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
@@ -241,9 +225,6 @@ jobs:
         # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
         if: matrix.shard == 3
         run: cargo test -p rshogi-core --lib --features use-lazy-evaluate -- --test-threads=2
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   security:
     name: Security Audit
@@ -319,24 +300,18 @@ jobs:
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # host target キャッシュ (`lint` / `test` job) と完全分離する。
           # `shared-key` 指定で本 job 専用のキャッシュ namespace を確保し、
           # 同 base key 配下に host target sysroot が混入しないようにする。
           shared-key: wasm32
       - name: Build wasm32
         run: cargo build -p rshogi-csa-server-workers --target wasm32-unknown-unknown
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   simd-runtime:
     # NNUE の SIMD propagate 経路 (AVX2 / AVX-512 / AVX-512VNNI) を Intel SDE で
@@ -391,15 +366,12 @@ jobs:
         uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
         with:
           sdeVersion: 10.8.0
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # host baseline (`lint` / `test`) や wasm32 とキャッシュ namespace を分離する。
           # target-cpu を明示するため成果物は CPU 非依存で、別 runner 実行でも SIGILL しない。
           shared-key: simd-${{ matrix.label }}
@@ -411,16 +383,13 @@ jobs:
           # RUSTFLAGS が set だと CARGO_TARGET_<triple>_RUSTFLAGS が無視されるため unset。
           unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$SDE_PATH/sde64 -${{ matrix.chip }} --"
-          # `search::tests` / `search::engine` は module ごと除外する。実探索を回すテストが集まり、
-          # SDE 下では実行時間の大半を占める一方、検証対象は ISA に依存しない探索ロジックで、
-          # 既定の `test` job が実行する。SIMD 経路の数値は nnue / bitboard / position などの
+          # `search::tests` / `search::engine` / `mate::dfpn::` は module ごと除外する。実探索・詰み探索を
+          # 回すテストが集まり、SDE 下では実行時間の大半を占める一方、検証対象は ISA に依存しない
+          # 探索ロジックで、既定の `test` job が実行する。SIMD 経路の数値は nnue / bitboard / position などの
           # 単体テストが各 ISA で検証する。`--skip` は部分一致なので、名前が `search` で終わる
           # module 直下の `tests` も除外される。
           cargo test -p rshogi-core --lib --target x86_64-unknown-linux-gnu -- --test-threads=2 \
-            --skip search::tests:: --skip search::engine::
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
+            --skip search::tests:: --skip search::engine:: --skip mate::dfpn::
 
   nnue-wasm-runtime:
     # rshogi-core の NNUE AffineTransform は重み格納レイアウトを target ごとに
@@ -457,15 +426,12 @@ jobs:
         uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: wasmtime
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         env:
           RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # host / wasm32-unknown キャッシュと混在させないため専用 namespace を確保する。
           shared-key: wasm32-wasip1
       - name: Run NNUE layout tests on wasm (SIMD128 path)
@@ -474,9 +440,6 @@ jobs:
           RUSTFLAGS: "-C target-feature=+simd128"
       - name: Run NNUE layout tests on wasm (scalar fallback)
         run: cargo test -p rshogi-core affine_reference --target wasm32-wasip1
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   abs-paths:
     # tracked file に machine 依存の絶対パスが混入していないか検査する
