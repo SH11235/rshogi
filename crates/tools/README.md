@@ -22,6 +22,7 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と出典 TSV を生成（[詳細](docs/nyugyoku_gensfen.md)） |
 | `book_from_csa` | CSA 棋譜群から YANEURAOU-DB2016 テキスト定跡 `.db` を生成（消費時間による定跡手判定・レート/勝敗フィルタ、[詳細](docs/book_from_csa.md)） |
 | `book_kachi_label` | YANEURAOU-DB2016 テキスト定跡のノード×候補手ごとに CSA corpus から `%KACHI` 決着率を集計し sidecar JSONL を生成（flip 合流対応、[詳細](docs/book_kachi_label.md)） |
+| `book_prepwalk` | 相手の棋譜の即指しの範囲から作った相手の定跡の木を自分の定跡で辿り、自分が考え始める局面・相手の準備の残り手数・出口の評価値と危ない進行を相手ごとに集計（自分の手は main / 全手 / 乱択候補ファイルから選択、[詳細](docs/book_prepwalk.md)） |
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与、実行中は進捗/ETA を stderr 表示（[詳細](docs/book_rescore.md)） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加（[詳細](docs/book_extend.md)） |
 | `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](docs/book_backprop.md)） |
@@ -151,6 +152,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [fix_scores](docs/fix_scores.md) - 元ファイルを保持したスコア訂正とインプレース更新
 - [book_rescore](docs/book_rescore.md) - YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与（実行中は進捗/ETA を stderr 表示）
 - [book_kachi_label](docs/book_kachi_label.md) - YANEURAOU-DB2016 テキスト定跡の候補手に `%KACHI` 決着率を付与する sidecar JSONL を生成
+- [book_prepwalk](docs/book_prepwalk.md) - 相手の定跡の木を自分の定跡で辿り、相手の準備の中で自分が考え始める局面を集計
 - [book_extend](docs/book_extend.md) - YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加
 - [book_backprop](docs/book_backprop.md) - YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から negamax 逆伝播
 - [book_mine](docs/book_mine.md) - `tree` の常駐・対象キュー・待機・取り込み・再生・登録と、YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する
