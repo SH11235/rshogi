@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
+use tools::spsa_param_mapping::{
+    DEFAULT_SPSA_R_END, SPSA_PARAMS_FORMAT_HEADER, default_spsa_c_end,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -20,13 +23,12 @@ struct Cli {
 
 /// Fishtest 互換の c_end（最終摂動幅）。`(max - min) / 20` で最低 1。
 fn c_end(min: i32, max: i32) -> i64 {
-    let range = (max - min) as f64;
-    ((range / 20.0).round() as i64).max(1)
+    default_spsa_c_end(min, max) as i64
 }
 
 /// Fishtest 互換の r_end（最終学習率係数）。固定 0.002。
 fn r_end() -> f64 {
-    0.002
+    DEFAULT_SPSA_R_END
 }
 
 fn format_float(value: f64) -> String {
@@ -45,6 +47,7 @@ fn main() -> Result<()> {
     let file = File::create(&cli.output)
         .with_context(|| format!("failed to create {}", cli.output.display()))?;
     let mut writer = BufWriter::new(file);
+    writeln!(writer, "{SPSA_PARAMS_FORMAT_HEADER}")?;
 
     for spec in SearchTuneParams::option_specs() {
         let c = c_end(spec.min, spec.max);

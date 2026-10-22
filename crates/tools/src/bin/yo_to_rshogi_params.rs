@@ -3,7 +3,7 @@
 //! 動作:
 //! - `--mapping` で指定した TOML（既定 `tune/yo_rshogi_mapping.toml`）を引きつつ
 //!   YO 値を rshogi 名のスロットに転記する（必要なら符号反転）。
-//! - rshogi 側の min/max/step/alpha は `--base` で指定した rshogi `.params` の値を保持する。
+//! - rshogi 側の min/max/c_end/r_end は形式を確認した `--base` の値を保持する。
 //!   `--base` 省略時は `SearchTuneParams::option_specs()` のデフォルト range を使用する。
 //! - YO に対応がない rshogi パラメータは `--base` の値（あるいはデフォルト）のまま。
 
@@ -14,7 +14,8 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
 use tools::spsa_param_mapping::{
-    MappingTable, ParamRow, load_params, write_params, yo_to_rshogi_value,
+    DEFAULT_SPSA_R_END, MappingTable, ParamRow, default_spsa_c_end, load_params, load_spsa_params,
+    write_spsa_params, yo_to_rshogi_value,
 };
 
 #[derive(Parser, Debug)]
@@ -28,9 +29,13 @@ struct Cli {
     #[arg(long, default_value = "tune/yo_rshogi_mapping.toml")]
     mapping: PathBuf,
 
-    /// ベースとなる rshogi .params（min/max/step を流用）。省略時は SearchTuneParams から生成
+    /// ベースとなる rshogi .params（min/max/c_end/r_end を保持）。省略時は既定値から生成
     #[arg(long)]
     base: Option<PathBuf>,
+
+    /// 形式宣言のない --base が c_end/r_end であることを明示確認する（数値は変更しない）
+    #[arg(long, requires = "base")]
+    assume_c_end_r_end: bool,
 
     /// 出力先 rshogi .params
     #[arg(long)]
@@ -44,20 +49,15 @@ struct Cli {
 fn rshogi_default_rows() -> Vec<ParamRow> {
     SearchTuneParams::option_specs()
         .iter()
-        .map(|spec| {
-            let span = (spec.max - spec.min).max(1);
-            let step = ((span as f64) / 200.0).max(1.0).round();
-            let alpha = (span as f64) / 20.0;
-            ParamRow {
-                name: spec.usi_name.to_owned(),
-                kind: "int".to_owned(),
-                value: spec.default,
-                min: spec.min,
-                max: spec.max,
-                step,
-                alpha,
-                not_used: false,
-            }
+        .map(|spec| ParamRow {
+            name: spec.usi_name.to_owned(),
+            kind: "int".to_owned(),
+            value: spec.default,
+            min: spec.min,
+            max: spec.max,
+            step: default_spsa_c_end(spec.min, spec.max),
+            alpha: DEFAULT_SPSA_R_END,
+            not_used: false,
         })
         .collect()
 }
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
         yo_rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
     let mut rshogi_rows = match &cli.base {
-        Some(path) => load_params(path)?,
+        Some(path) => load_spsa_params(path, cli.assume_c_end_r_end)?,
         None => rshogi_default_rows(),
     };
 
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
         }
     }
 
-    write_params(&cli.output, &rshogi_rows)?;
+    write_spsa_params(&cli.output, &rshogi_rows)?;
     eprintln!(
         "applied {applied} mappings, {} out-of-range, {} YO entries unmapped",
         out_of_range.len(),
