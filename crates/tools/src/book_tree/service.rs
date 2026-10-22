@@ -70,7 +70,7 @@ struct Job {
     ply: u32,
 }
 enum Event {
-    Done(usize, String, bool, Result<Reading>),
+    Done(usize, String, bool, Result<Reading>, Option<Box<Trace>>),
     Info(usize, u64, u32),
     Alert(String),
 }
@@ -81,6 +81,85 @@ struct Worker {
     busy: Option<(String, Instant)>,
     nodes: u64,
     depth: u32,
+}
+
+/// 1 回の探索で記録する info 行の上限。bestmove を返さず info を出し続ける engine で
+/// メモリが尽きないようにする (通常の読みは数十 KB)。
+const TRACE_LIMIT_BYTES: usize = 4 << 20;
+
+/// 読み 1 回の探索の途中経過。`--trace-dir` のときだけ集める。
+struct Trace {
+    started: chrono::DateTime<chrono::Utc>,
+    finished: chrono::DateTime<chrono::Utc>,
+    lines: Vec<String>,
+}
+
+/// 1 回の探索の info 行。上限を超えたらその探索の分を捨て、以後は集めない。
+struct TraceBuffer {
+    lines: Vec<String>,
+    bytes: usize,
+    limit: usize,
+    overflowed: bool,
+}
+impl TraceBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            lines: Vec::new(),
+            bytes: 0,
+            limit,
+            overflowed: false,
+        }
+    }
+    /// 上限を超えたその行でだけ真を返す。
+    fn push(&mut self, line: &str) -> bool {
+        if self.overflowed {
+            return false;
+        }
+        self.bytes += line.len();
+        if self.bytes > self.limit {
+            self.overflowed = true;
+            self.lines = Vec::new();
+            return true;
+        }
+        self.lines.push(line.to_owned());
+        false
+    }
+}
+
+/// 起動ごとの探索の記録。1 行 1 読みで追記する。
+struct TraceLog {
+    dir: PathBuf,
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    /// 書きかけで失敗した行がありうる。次の行を改行から始め、壊れた行に繋げない。
+    torn: bool,
+}
+impl TraceLog {
+    fn append(&mut self, record: &serde_json::Value) -> Result<()> {
+        use std::io::Write;
+        let mut text = if self.torn {
+            "\n".to_owned()
+        } else {
+            String::new()
+        };
+        text.push_str(&serde_json::to_string(record)?);
+        text.push('\n');
+        let file = match &mut self.file {
+            Some(file) => file,
+            None => {
+                std::fs::create_dir_all(&self.dir)?;
+                self.file
+                    .insert(std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?)
+            }
+        };
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            self.torn = true;
+            self.file = None;
+            return Err(error.into());
+        }
+        self.torn = false;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -135,6 +214,7 @@ fn spawn_worker(
     let stall = Duration::from_secs(args.stall_secs);
     let restart = Arc::new(Mutex::new(Restart::default()));
     let restart_worker = restart.clone();
+    let tracing = args.trace_dir.is_some();
     let handle = thread::spawn(move || {
         let cfg = EngineConfig {
             path,
@@ -150,6 +230,7 @@ fn spawn_worker(
         };
         let mut engine = None;
         while let Ok(Some(job)) = rx.recv() {
+            let mut trace = None;
             let result = (|| -> Result<Reading> {
                 if engine.is_none() {
                     let process =
@@ -165,6 +246,8 @@ fn spawn_worker(
                 engine.new_game()?;
                 engine.write_line(&format!("position sfen {} {}", job.key, job.ply))?;
                 engine.write_line(&format!("go nodes {}", settings.nodes))?;
+                let started_at = chrono::Utc::now();
+                let mut buffer = tracing.then(|| TraceBuffer::new(TRACE_LIMIT_BYTES));
                 let started = Instant::now();
                 let mut progressed = started;
                 let mut high_nodes = 0;
@@ -206,6 +289,15 @@ fn spawn_worker(
                             bestmove,
                         };
                         reading.validate(&settings).map_err(InvalidReading)?;
+                        if let Some(buffer) = buffer.take()
+                            && !buffer.overflowed
+                        {
+                            trace = Some(Box::new(Trace {
+                                started: started_at,
+                                finished: chrono::Utc::now(),
+                                lines: buffer.lines,
+                            }));
+                        }
                         return Ok(reading);
                     }
                     if line.starts_with("info ") && !line.starts_with("info string ") {
@@ -228,6 +320,16 @@ fn spawn_worker(
                             let _ = events.send(Event::Info(id, high_nodes, high_depth));
                         }
                     }
+                    // Collector と同じ接頭辞で集め、記録から台帳の読みを再現できるようにする。
+                    if line.starts_with("info")
+                        && let Some(buffer) = buffer.as_mut()
+                        && buffer.push(&line)
+                    {
+                        let _ = events.send(Event::Alert(format!(
+                            "探索の記録が {TRACE_LIMIT_BYTES} バイトを超えたのでこの読みの記録を捨てます worker={id} key={}",
+                            job.key
+                        )));
+                    }
                     collector.info(&line).map_err(InvalidReading)?;
                 }
             })();
@@ -238,7 +340,7 @@ fn spawn_worker(
                 let mut control = restart_worker.lock().unwrap_or_else(|error| error.into_inner());
                 control.finish()
             };
-            if events.send(Event::Done(id, job.key, explicit, result)).is_err() {
+            if events.send(Event::Done(id, job.key, explicit, result, trace)).is_err() {
                 break;
             }
         }
@@ -516,11 +618,20 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         draw: args.draw,
     };
     defaults.check()?;
+    let mut trace_log = args.trace_dir.as_ref().map(|dir| TraceLog {
+        dir: dir.clone(),
+        path: dir.join(format!("{run_id}.jsonl")),
+        file: None,
+        torn: false,
+    });
     let settings = Settings::new(&args.reading)?;
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     let (out_root, protected) =
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    if let Some(dir) = &args.trace_dir {
+        super::paths::reject_trace_dir(dir, &journal_path, &args.state, &out_root)?;
+    }
     std::fs::create_dir_all(&out_root)?;
     // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
     let out_lock = out_root.join(OUT_ROOT_LOCK);
@@ -693,14 +804,31 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             worker.depth = depth;
                         }
                     }
-                    Event::Done(id, key, explicit, result) => {
+                    Event::Done(id, key, explicit, result, trace) => {
                         if let Some(worker) = workers.get_mut(&id) {
                             worker.busy = None;
                         }
                         match result {
                             Ok(reading) => {
                                 once.clear("spawn");
+                                let record = trace.map(|t| {
+                                    json!({"key":reading.key,"ply":reading.ply,"fingerprint":settings.fingerprint,"worker":id,"started":t.started.to_rfc3339(),"finished":t.finished.to_rfc3339(),"bestmove":reading.bestmove,"lines":t.lines})
+                                });
                                 journal.append(reading, &settings, "engine".into())?;
+                                // 探索の記録は読みの結果に関わらないので、書けなくても読みは止めない。
+                                if let (Some(log), Some(record)) = (trace_log.as_mut(), record) {
+                                    match log.append(&record) {
+                                        Ok(()) => once.clear("trace"),
+                                        Err(error) => once.report_first(
+                                            &mut alerts,
+                                            "trace",
+                                            format!(
+                                                "探索の記録を書けません {}: {error:#}",
+                                                log.path.display()
+                                            ),
+                                        ),
+                                    }
+                                }
                             }
                             Err(error) => {
                                 if explicit {
@@ -1003,6 +1131,35 @@ fn file_stamp(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_buffer_drops_the_search_once_over_the_limit() {
+        let mut buffer = TraceBuffer::new(10);
+        assert!(!buffer.push("info 12345"));
+        assert_eq!(buffer.lines, ["info 12345"]);
+        assert!(buffer.push("i"));
+        assert!(buffer.overflowed && buffer.lines.is_empty());
+        assert!(!buffer.push("i"));
+        assert!(buffer.lines.is_empty());
+    }
+
+    #[test]
+    fn trace_after_failed_write_starts_on_a_new_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        std::fs::write(&path, "{\"key\":\"tor").unwrap();
+        let mut log = TraceLog {
+            dir: dir.path().to_owned(),
+            path: path.clone(),
+            file: None,
+            torn: true,
+        };
+        log.append(&json!({"key": "a"})).unwrap();
+        log.append(&json!({"key": "b"})).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines, ["{\"key\":\"tor", "{\"key\":\"a\"}", "{\"key\":\"b\"}"]);
+    }
 
     #[test]
     fn completed_job_clears_restart_before_done_is_received() {

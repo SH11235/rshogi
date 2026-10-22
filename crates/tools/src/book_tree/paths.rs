@@ -146,6 +146,27 @@ pub(super) fn reject_out_root(
     Ok((out_root, protected))
 }
 
+/// 探索の記録の dir が台帳・state・出力の根と重ならないことを確かめる。state の制御ファイル
+/// (`stop` や `restart/`) の名前で dir やファイルを作ると、serve がそれを指示として読む。
+pub(super) fn reject_trace_dir(
+    trace_dir: &Path,
+    journal: &Path,
+    state: &Path,
+    out_root: &Path,
+) -> Result<()> {
+    let trace_dir = managed(trace_dir)?;
+    for path in [managed(journal)?, managed(state)?, managed(out_root)?] {
+        if trace_dir.starts_with(&path) {
+            bail!(
+                "trace-dir と保護パスが衝突しています: {} / {}",
+                trace_dir.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 対象の出力先が保護パスと重ならないことを確かめる。
 pub(super) fn reject_protected(out: &Path, protected: &[PathBuf]) -> Result<()> {
     let out = managed(out)?;

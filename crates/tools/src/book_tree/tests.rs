@@ -863,6 +863,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         stop: 300,
         rounds: 3,
         draw: 0,
+        trace_dir: None,
     }
 }
 
@@ -887,6 +888,53 @@ fn serve_startup_rejects_old_checkpoints_and_out_root_collisions_before_changing
     assert!(error.to_string().contains("inbox 受付の state"), "{error:#}");
     assert!(!journal.exists());
     assert!(!state.join("targets.status.json").exists());
+}
+
+#[test]
+fn serve_startup_rejects_trace_dir_on_state_out_root_or_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let def = definition(dir.path(), 0);
+    let out_root = dir.path().join("trees");
+    let journal = dir.path().join("journal.jsonl");
+    for trace in [
+        state.join("stop"),
+        state.join("restart"),
+        state.join("trace"),
+        state.clone(),
+        out_root.join("trace"),
+        journal.clone(),
+    ] {
+        let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+        args.trace_dir = Some(trace.clone());
+        let error = service::serve(args).unwrap_err();
+        assert!(error.to_string().contains("trace-dir と保護パスが衝突"), "{trace:?}: {error:#}");
+        assert!(!state.join("stop").exists());
+        assert!(!state.join("trace").exists());
+        assert!(!out_root.exists());
+        assert!(!journal.exists());
+        assert!(!state.join("targets.status.json").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_startup_rejects_symlinked_trace_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let def = definition(dir.path(), 0);
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let trace = dir.path().join("trace");
+    std::os::unix::fs::symlink(&real, &trace).unwrap();
+    let journal = dir.path().join("journal.jsonl");
+    let mut args = serve_args(&state, &journal, &dir.path().join("trees"), &def.paths);
+    args.trace_dir = Some(trace);
+    let error = service::serve(args).unwrap_err();
+    assert!(error.to_string().contains("シンボリックリンク"), "{error:#}");
+    assert!(std::fs::read_dir(&real).unwrap().next().is_none());
 }
 
 #[cfg(unix)]
