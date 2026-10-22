@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use tools::output_path::{create_safe_output_file, ensure_safe_output_paths};
 
 /// 詰みとみなす絶対 cp 閾値（`yardstick_label` と一致させる）。
 const MATE_ABS: i32 = 30000;
@@ -103,10 +104,9 @@ struct FileReport {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let inputs: Vec<&Path> = cli.labeled.iter().map(PathBuf::as_path).collect();
     if let Some(out) = &cli.out {
-        // 採点を全部終えてから create するため、--out が入力ラベル jsonl と同一だと高価な
-        // ラベルを結果 JSON で上書きしてしまう。同一パス/同一 inode を事前に弾く。
-        validate_out_not_input(out, &cli.labeled)?;
+        ensure_safe_output_paths(&[out], &inputs)?;
     }
     let mut reports = Vec::new();
     for path in &cli.labeled {
@@ -115,43 +115,12 @@ fn main() -> Result<()> {
         reports.push(report);
     }
     if let Some(out) = &cli.out {
-        let f = File::create(out).with_context(|| format!("Failed to create {}", out.display()))?;
+        let f = create_safe_output_file(out, &inputs)?;
         let mut w = BufWriter::new(f);
         serde_json::to_writer_pretty(&mut w, &reports)?;
         w.write_all(b"\n")?;
         w.flush()?;
         eprintln!("wrote results json: {}", out.display());
-    }
-    Ok(())
-}
-
-/// `--out`（結果 JSON）が入力ラベル jsonl のどれかと同一パス/同一 inode なら弾く。
-fn validate_out_not_input(out: &Path, inputs: &[PathBuf]) -> Result<()> {
-    let out_canon = std::fs::canonicalize(out).ok();
-    #[cfg(unix)]
-    let out_devino = {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(out).ok().map(|m| (m.dev(), m.ino()))
-    };
-    for input in inputs {
-        if input == out {
-            bail!("--out must differ from every input ({})", out.display());
-        }
-        if let (Some(oc), Some(ic)) = (&out_canon, std::fs::canonicalize(input).ok())
-            && *oc == ic
-        {
-            bail!("--out resolves to input {}", input.display());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let (Some((od, oi)), Some(im)) = (out_devino, std::fs::metadata(input).ok())
-                && od == im.dev()
-                && oi == im.ino()
-            {
-                bail!("--out is the same file as input {} (same dev/ino)", input.display());
-            }
-        }
     }
     Ok(())
 }

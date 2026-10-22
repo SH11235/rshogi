@@ -51,6 +51,14 @@ FP16 推論は `--onnx-tensorrt` を付けます（初回はエンジンコン�
 | `--onnx-gpu-id <i32>` | 0 | CUDA device id（負値で CPU 推論） |
 | `--onnx-eval-scale <f32>` | 600 | winrate→cp 変換スケール |
 
+## 出力先の保護
+
+入力 jsonl と `--dlshogi-onnx-model` に指定したファイルと同じ実体への出力を拒否します。
+ONNX モデルから参照される外部 tensor data、ORT のランタイムライブラリ、TensorRT cache 内のファイルは検査対象外です。
+同一パス、symlink、hardlink、Windows の大小文字違いを ONNX Runtime のロード前にも検査します。
+衝突しない既存出力は上書きされます。同時アクセスや途中失敗時の制約は
+[共通の出力保護](tools-reference.md#ラベル評価ツールの出力保護)を参照してください。
+
 ## 出力
 
 入力 jsonl の各 object の全フィールドを保持し（行順も入力どおり）、`--out-field`（既定 `eval_dl`）を追記して 1 行ずつ書き出します。
