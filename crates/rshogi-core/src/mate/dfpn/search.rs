@@ -335,9 +335,10 @@ impl<'a, S: MateState> Searcher<'a, S> {
         if or_node && len_limit == 0 {
             return Ok(NodeResult::disproven(NO_LOOP, true));
         }
-        // 1 手詰めは局面だけで決まる。置換表に値があるノードは前の訪問で判定済み (詰みなら確定値が
-        // 書かれていて、ここに来ない) なので、初めて読むノードだけで調べる。
-        if or_node && self.table.probe(key).is_none() && st.mate_1ply().is_some() {
+        // 1 手詰めは局面だけで決まる。未確定値か不詰が置換表にあるノードは前の訪問で 1 手詰めでないと
+        // 判定済みなので調べない。詰みが置換表にあるノードを読むのは詰み手順の復元だけで、
+        // そこでは 1 手詰めなら子を展開せずに済む。
+        if or_node && self.table.probe(key).is_none_or(|v| v.pn == 0) && st.mate_1ply().is_some() {
             let result = NodeResult::proven(1);
             self.store(key, depth, &result, 1);
             return Ok(result);

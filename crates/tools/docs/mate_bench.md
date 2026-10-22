@@ -8,7 +8,7 @@ df-pn 詰み探索 (`rshogi_core::mate::dfpn`、USI の `go mate` と同じ solv
 ```bash
 # 詰将棋の局面集 (最短 11 手で詰む問題) から 1000 行おきに選んで解き、正解と照合する
 cargo run --release -p tools --bin mate_bench -- \
-  --input $SHOGI_DATA/tsume/mate11.sfen \
+  --input $SHOGI_DATA/tsume/yaneuraou-2020/mate11.sfen \
   --stride 1000 --offset 0 --expect-mate-len 11 \
   --nodes 1000000 --jobs 8 --out mate11.tsv
 

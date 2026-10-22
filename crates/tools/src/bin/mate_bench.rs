@@ -21,9 +21,9 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -267,6 +267,9 @@ fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) 
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if cli.limit != 0 && sent >= cli.limit {
+            return Ok(());
+        }
         let selected = line_index % cli.stride == cli.offset;
         line_index += 1;
         if !selected {
@@ -322,6 +325,12 @@ fn solve_worker(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // worker が panic すると、その局面の結果を待つ並べ替えが止まって終わらなくなるので、panic したら即終了する
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        std::process::exit(101);
+    }));
     if cli.stride == 0 || cli.offset >= cli.stride {
         bail!("--offset は --stride 未満にする");
     }
@@ -335,7 +344,7 @@ fn main() -> Result<()> {
     for _ in 0..window {
         tickets_tx.send(()).expect("容量内");
     }
-    let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+    let jobs_rx = Mutex::new(jobs_rx);
 
     let mut writer = match &cli.out {
         Some(path) => {
@@ -352,17 +361,20 @@ fn main() -> Result<()> {
     let start = Instant::now();
     let mut summary = Summary::new();
     let mut reported = 0usize;
+    // TSV の書き込みに失敗しても結果は最後まで受け取る (途中で受け取りをやめると、
+    // 入力スレッドと worker が送り先の空きを待ち続けて終わらない)
+    let mut write_error = None;
     let feed_result = std::thread::scope(|scope| -> Result<()> {
         let feeder = scope.spawn(|| feed(&cli, jobs_tx, tickets_rx));
         for _ in 0..jobs {
-            let jobs_rx = Arc::clone(&jobs_rx);
+            let jobs_rx = &jobs_rx;
             let results_tx = results_tx.clone();
             let cli = &cli;
             std::thread::Builder::new()
                 // 詰み探索の再帰は手数に比例して深くなる
                 .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(scope, move || solve_worker(cli, &jobs_rx, results_tx))
-                .context("スレッドを起動できない")?;
+                .spawn_scoped(scope, move || solve_worker(cli, jobs_rx, results_tx))
+                .expect("スレッドを起動できない");
         }
         drop(results_tx);
 
@@ -371,8 +383,9 @@ fn main() -> Result<()> {
         for (index, outcome) in results_rx {
             pending.insert(index, outcome);
             while let Some(o) = pending.remove(&next) {
-                if let Some(w) = writer.as_mut() {
-                    writeln!(
+                if let Some(w) = writer.as_mut()
+                    && write_error.is_none()
+                    && let Err(e) = writeln!(
                         w,
                         "{}\t{}\t{}\t{}\t{}\t{}",
                         o.sfen,
@@ -381,7 +394,9 @@ fn main() -> Result<()> {
                         o.nodes,
                         o.micros,
                         o.pv_usi()
-                    )?;
+                    )
+                {
+                    write_error = Some(e);
                 }
                 if summary.add(&o, cli.expect_mate_len) && reported < MAX_REPORTED_ERRORS {
                     reported += 1;
@@ -406,6 +421,9 @@ fn main() -> Result<()> {
         feeder.join().expect("入力スレッドが panic した")
     });
     feed_result?;
+    if let Some(e) = write_error {
+        return Err(e).context("TSV に書き込めない");
+    }
     if let Some(mut w) = writer {
         w.flush()?;
     }
