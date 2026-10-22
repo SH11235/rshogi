@@ -353,6 +353,12 @@ pub struct AlignedBox<T> {
     backing: AlignedBoxBacking,
 }
 
+enum AlignedAllocationError {
+    SizeOverflow,
+    InvalidLayout,
+    OutOfMemory(Layout),
+}
+
 impl<T: Copy + Default> AlignedBox<T> {
     /// 指定された長さの配列をゼロ初期化して確保
     ///
@@ -361,9 +367,34 @@ impl<T: Copy + Default> AlignedBox<T> {
     /// - レイアウトが無効な場合
     /// - メモリ確保に失敗した場合
     pub fn new_zeroed(len: usize) -> Self {
+        match Self::allocate_zeroed(len) {
+            Ok(value) => value,
+            Err(AlignedAllocationError::SizeOverflow) => {
+                panic!("AlignedBox::new_zeroed: size overflow")
+            }
+            Err(AlignedAllocationError::InvalidLayout) => panic!("Invalid layout"),
+            Err(AlignedAllocationError::OutOfMemory(layout)) => {
+                std::alloc::handle_alloc_error(layout)
+            }
+        }
+    }
+
+    pub(crate) fn try_new_zeroed(len: usize) -> std::io::Result<Self> {
+        Self::allocate_zeroed(len).map_err(|error| {
+            match error {
+                AlignedAllocationError::SizeOverflow | AlignedAllocationError::InvalidLayout => {
+                    std::io::ErrorKind::InvalidInput
+                }
+                AlignedAllocationError::OutOfMemory(_) => std::io::ErrorKind::OutOfMemory,
+            }
+            .into()
+        })
+    }
+
+    fn allocate_zeroed(len: usize) -> Result<Self, AlignedAllocationError> {
         let size = std::mem::size_of::<T>()
             .checked_mul(len)
-            .expect("AlignedBox::new_zeroed: size overflow");
+            .ok_or(AlignedAllocationError::SizeOverflow)?;
         let align = CACHE_LINE_SIZE.max(std::mem::align_of::<T>());
         // FT 重み級の大きな配列は THP 境界に置き madvise する。THP enabled=madvise の
         // 環境では madvise 無しだと 4KiB ページのままになる。
@@ -376,12 +407,14 @@ impl<T: Copy + Default> AlignedBox<T> {
             align
         };
 
-        // SAFETY: align は 2 のべき乗で、size は align の倍数に切り上げられる
-        let layout = Layout::from_size_align(size, align).expect("Invalid layout").pad_to_align();
+        // 空配列でも allocator の非ゼロ size 契約を守り、整列済みポインタを保持する。
+        let layout = Layout::from_size_align(size.max(1), align)
+            .map_err(|_| AlignedAllocationError::InvalidLayout)?
+            .pad_to_align();
 
         // hugepage 経路では alloc → madvise → 手動ゼロ埋めの順にする。alloc_zeroed は
         // 非既定 align では内部 memset で先に fault するため、ゼロ埋めより前にヒントを置く。
-        // SAFETY: layout は有効で size は非ゼロ (>= HUGEPAGE_SIZE)、alloc / alloc_zeroed は
+        // SAFETY: layout は有効で size は非ゼロ。alloc / alloc_zeroed は
         // 失敗時に null を返す。write_bytes は alloc が返した layout.size() バイトの
         // 確保範囲内への書込で、alloc_zeroed と同じ初期状態にする。
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -400,14 +433,14 @@ impl<T: Copy + Default> AlignedBox<T> {
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let ptr = unsafe { alloc_zeroed(layout) as *mut T };
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            return Err(AlignedAllocationError::OutOfMemory(layout));
         }
 
-        Self {
+        Ok(Self {
             ptr,
             len,
             backing: AlignedBoxBacking::Heap(layout),
-        }
+        })
     }
 }
 
@@ -1155,6 +1188,34 @@ impl AccumulatorCacheGeneric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligned_box_fallible_allocation_preserves_zeroes_and_alignment() {
+        #[derive(Clone, Copy, Default)]
+        #[repr(align(128))]
+        struct Wide(u8);
+
+        for len in [0, 1, 63, 64, 65] {
+            let mut values = AlignedBox::<i16>::try_new_zeroed(len).unwrap();
+            assert_eq!(values.len(), len);
+            assert!(values.iter().all(|&value| value == 0));
+            assert_eq!(values.as_ptr() as usize % CACHE_LINE_SIZE, 0);
+            values.fill(7);
+            assert!(values.iter().all(|&value| value == 7));
+        }
+        let values = AlignedBox::<Wide>::try_new_zeroed(1).unwrap();
+        assert_eq!(values[0].0, 0);
+        assert_eq!(values.as_ptr() as usize % align_of::<Wide>(), 0);
+        assert!(AlignedBox::<i16>::new_zeroed(0).is_empty());
+    }
+
+    #[test]
+    fn aligned_box_fallible_allocation_rejects_invalid_layout_without_allocating() {
+        let overflow = AlignedBox::<i16>::try_new_zeroed(usize::MAX).err().unwrap();
+        assert_eq!(overflow.kind(), std::io::ErrorKind::InvalidInput);
+        let padding_overflow = AlignedBox::<u8>::try_new_zeroed(isize::MAX as usize).err().unwrap();
+        assert_eq!(padding_overflow.kind(), std::io::ErrorKind::InvalidInput);
+    }
 
     fn check_index_list_extend<const N: usize>() {
         use std::panic::{AssertUnwindSafe, catch_unwind};

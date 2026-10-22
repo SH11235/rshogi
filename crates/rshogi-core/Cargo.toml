@@ -40,7 +40,7 @@ getrandom = { workspace = true }
 rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
-# Test dependencies
+tracking-allocator = { version = "=0.4.0", default-features = false }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 web-time = "1"

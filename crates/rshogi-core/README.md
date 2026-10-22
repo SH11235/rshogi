@@ -42,6 +42,15 @@ let result = search.go(&mut pos, limits, None::<fn(&_)>);
 println!("Best move: {}", result.best_move.to_usi());
 ```
 
+## NNUE の読み込み
+
+`NNUENetwork::read` は `Read + Seek`、LayerStacks FT の `read_leb128` は `Read` のみで利用できます。
+LEB128 ブロックは実際に読めたバイト数に応じてバッファを確保し、重みの確保前に要素数を検証します。
+既定の universal edition では、非圧縮の動的な重み配列も必要バイト数と入力の残長を確保前に照合します。
+これらの入力が途中で切れていたり要素数が合わなかったりする場合は `io::Error` を返します。
+これらの重みと圧縮バッファの確保失敗は、取得可能な場合 `ErrorKind::OutOfMemory` で返します。
+圧縮ブロックの上限は 2 GiB です。
+
 ## LayerStacks の progress 係数
 
 `nnue::get_layer_stack_progress_kpabs_weights()` は所有権付きの

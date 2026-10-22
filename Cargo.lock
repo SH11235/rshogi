@@ -2602,6 +2602,7 @@ dependencies = [
  "rayon",
  "serde",
  "sha2",
+ "tracking-allocator",
  "web-time",
  "windows-sys 0.61.2",
 ]
