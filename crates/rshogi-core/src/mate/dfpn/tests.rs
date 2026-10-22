@@ -11,12 +11,12 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 
 use super::search::{Budget, MAX_DEPTH, Scratch, Searcher};
 use super::state::MateState;
-use super::table::MateTable;
+use super::table::{MateTable, TableKey};
 use super::*;
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::Color;
+use crate::types::{Color, Hand};
 
 fn position(sfen: &str) -> Position {
     let mut pos = Position::new();
@@ -24,10 +24,34 @@ fn position(sfen: &str) -> Position {
     pos
 }
 
+/// 速さ優先と解く力優先の両方で解き、詰みと不詰が食い違わないことを確かめて、判定できた方を返す
 fn solve_limited(pos: &mut Position, hash_mb: usize, nodes: u64) -> MateResult {
+    let speed = solve_in_mode(pos, hash_mb, nodes, MateMode::Speed);
+    let power = solve_in_mode(pos, hash_mb, nodes, MateMode::Power);
+    assert!(
+        !is_contradiction(&speed, &power),
+        "{}: 速さ優先 {speed:?} / 解く力優先 {power:?}",
+        pos.to_sfen()
+    );
+    if power == MateResult::Unknown {
+        speed
+    } else {
+        power
+    }
+}
+
+fn solve_in_mode(pos: &mut Position, hash_mb: usize, nodes: u64, mode: MateMode) -> MateResult {
     let stop = AtomicBool::new(false);
     let limits = MateLimits { nodes, time_ms: 0 };
-    DfpnSolver::new(hash_mb).solve(pos, &limits, &stop, |_| {})
+    DfpnSolver::with_mode(hash_mb, mode).solve(pos, &limits, &stop, |_| {})
+}
+
+/// 一方が詰み、他方が不詰
+fn is_contradiction(a: &MateResult, b: &MateResult) -> bool {
+    matches!(
+        (a, b),
+        (MateResult::Mate(_), MateResult::NoMate) | (MateResult::NoMate, MateResult::Mate(_))
+    )
 }
 
 fn pv_usi(pv: &[Move]) -> String {
@@ -298,6 +322,39 @@ fn time_limit_gives_unknown() {
     assert!(start.elapsed().as_millis() < 2_000, "時間制限が効いていない");
 }
 
+/// 速さ優先で 10 万ノードでは決まらない 11 手詰め (やねうら王の詰将棋データセットから)
+const AUTO_SWITCH_MATE: &str =
+    "ln2p+R3/2k1gg3/1pp6/p2p1bp1P/2N1Ps3/PlP3P2/1PK2g3/2G2+n3/LN5+pL b RB3S5p 127";
+
+#[test]
+fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
+    let mut pos = position(AUTO_SWITCH_MATE);
+    let stop = AtomicBool::new(false);
+    let mut solver = DfpnSolver::with_mode(16, MateMode::Auto);
+    let result = solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {});
+    assert!(matches!(result, MateResult::Mate(_)), "{result:?}");
+    assert!(solver.nodes() > AUTO_SWITCH_NODES, "切り替えずに解けた: {}", solver.nodes());
+
+    // ノード数の上限は切り替えの前後の合計に掛かる
+    let limit = AUTO_SWITCH_NODES + 1_000;
+    let limits = MateLimits {
+        nodes: limit,
+        time_ms: 0,
+    };
+    let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+    assert_eq!(result, MateResult::Unknown);
+    assert!(solver.nodes() <= limit + 1, "{}", solver.nodes());
+}
+
+#[test]
+fn mate_mode_names_round_trip() {
+    for mode in MateMode::ALL {
+        assert_eq!(MateMode::from_name(mode.name()), Some(mode));
+        assert_eq!(MateMode::from_name(&mode.name().to_lowercase()), Some(mode));
+    }
+    assert_eq!(MateMode::from_name("fast"), None);
+}
+
 #[test]
 fn mate_pv_validator_rejects_bad_sequences() {
     let mut pos = position("4k4/9/4P4/9/9/9/9/9/4K4 b G 1");
@@ -542,9 +599,30 @@ fn table_size_does_not_contradict_the_answer() {
     }
 }
 
-/// 2 bucket しかない置換表で解く (置き換えが頻発する)
+/// 2 bucket しかない置換表で、証明駒を使う探索と使わない探索の両方で解く (置き換えが頻発する)。
+/// 食い違わないことを確かめて、判定できた方を返す。
 fn solve_tiny_table(pos: &mut Position, nodes: u64) -> MateResult {
-    let mut table = MateTable::with_buckets(2);
+    let exact = solve_in_table::<false>(pos, &mut MateTable::with_buckets(2), nodes);
+    let pieces = solve_with_table(pos, MateTable::with_buckets(2), nodes);
+    assert!(!is_contradiction(&exact, &pieces), "{}: {exact:?} / {pieces:?}", pos.to_sfen());
+    if pieces == MateResult::Unknown {
+        exact
+    } else {
+        pieces
+    }
+}
+
+/// 指定した置換表で、証明駒を使って解く (詰み手順は検証する)
+fn solve_with_table(pos: &mut Position, mut table: MateTable, nodes: u64) -> MateResult {
+    solve_in_table::<true>(pos, &mut table, nodes)
+}
+
+/// 表を空にせずに解く (前の solve の値を流用させる)
+fn solve_in_table<const PIECES: bool>(
+    pos: &mut Position,
+    table: &mut MateTable,
+    nodes: u64,
+) -> MateResult {
     let stop = AtomicBool::new(false);
     let mut progress = |_| {};
     let budget = Budget {
@@ -555,7 +633,8 @@ fn solve_tiny_table(pos: &mut Position, nodes: u64) -> MateResult {
         progress: &mut progress,
     };
     let mut scratch = Scratch::new();
-    let mut searcher = Searcher::new(&mut table, &mut scratch, budget);
+    let attacker = pos.side_to_move();
+    let mut searcher = Searcher::<_, PIECES>::new(table, &mut scratch, attacker, budget);
     match solve_with(&mut searcher, pos) {
         Some(SolveOutcome::Mate(pv)) => {
             assert!(is_valid_mate_pv(pos, &pv), "{}: {}", pos.to_sfen(), pv_usi(&pv));
@@ -563,6 +642,138 @@ fn solve_tiny_table(pos: &mut Position, nodes: u64) -> MateResult {
         }
         Some(SolveOutcome::NoMate) => MateResult::NoMate,
         None => MateResult::Unknown,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 持駒違いの局面への流用 (置換表の優越) の検査
+// ---------------------------------------------------------------------------
+
+/// SFEN の持駒欄を置き換える
+fn with_hands(sfen: &str, hands: &str) -> String {
+    let mut fields: Vec<&str> = sfen.split_whitespace().collect();
+    fields[2] = hands;
+    fields.join(" ")
+}
+
+/// 同じ盤面で持駒 (金・銀・歩) の配り方を変えると、攻め方の持駒が多い側で詰みが消えない
+#[test]
+fn mate_is_monotone_in_attacker_hand() {
+    const PIECES: [(char, char); 3] = [('G', 'g'), ('S', 's'), ('P', 'p')];
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xA0_0A);
+    let mut boards = 0;
+    let mut checked_pairs = 0;
+    while boards < 150 {
+        let Some(pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let base = with_hands(&pos.to_sfen(), "-");
+        // mask の bit が立っている駒を攻め方 (先手) が持ち、残りを受け方が持つ
+        let mut results = Vec::new();
+        for mask in 0..8u32 {
+            let mut hands = String::new();
+            for (i, (black, white)) in PIECES.iter().enumerate() {
+                hands.push(if mask & (1 << i) != 0 { *black } else { *white });
+            }
+            let mut p = Position::new();
+            if p.set_sfen(&with_hands(&base, &hands)).is_err() || has_illegal_pieces(&p) {
+                results.clear();
+                break;
+            }
+            results.push(solve_limited(&mut p, 1, 200_000));
+        }
+        if results.len() != 8 {
+            continue;
+        }
+        boards += 1;
+        for small in 0..8u32 {
+            for large in 0..8u32 {
+                if small & large != small || small == large {
+                    continue;
+                }
+                let (a, b) = (&results[small as usize], &results[large as usize]);
+                if matches!(a, MateResult::Mate(_)) {
+                    checked_pairs += 1;
+                    assert!(
+                        !matches!(b, MateResult::NoMate),
+                        "{base}: 攻め方の持駒 {small:03b} で詰むのに {large:03b} で不詰"
+                    );
+                }
+            }
+        }
+    }
+    assert!(checked_pairs > 50, "比べた組が少なすぎる: {checked_pairs}");
+}
+
+/// 同じ盤面で持駒の配分だけ違う局面を、1 つの表を共有して続けて解く。
+/// 前の配分の証明駒・反証駒を流用した答えが、配分ごとに流用なしで解いた答えと食い違わない。
+#[test]
+fn proof_and_disproof_pieces_are_sound_across_hands() {
+    const PIECES: [(char, char); 4] = [('G', 'g'), ('S', 's'), ('P', 'p'), ('L', 'l')];
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x005E_EDA1);
+    let mut boards = 0;
+    let mut decided = 0;
+    while boards < 120 {
+        let Some(pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let base = with_hands(&pos.to_sfen(), "-");
+        let mut positions = Vec::new();
+        for mask in 0..16u32 {
+            let mut hands = String::new();
+            for (i, (black, white)) in PIECES.iter().enumerate() {
+                hands.push(if mask & (1 << i) != 0 { *black } else { *white });
+            }
+            let mut p = Position::new();
+            if p.set_sfen(&with_hands(&base, &hands)).is_err() || has_illegal_pieces(&p) {
+                positions.clear();
+                break;
+            }
+            positions.push(p);
+        }
+        if positions.len() != 16 {
+            continue;
+        }
+        boards += 1;
+        let mut shared = MateTable::with_buckets(1 << 12);
+        // 持駒の少ない配分と多い配分が交互に来る順で解き、両向きの流用を起こす
+        let order: Vec<usize> = (0..16).map(|i| (i * 7) % 16).collect();
+        for i in order {
+            let mut p = positions[i].clone();
+            let alone =
+                solve_with_table(&mut p, MateTable::new(1, true).without_superiority(), 100_000);
+            let reused = solve_in_table::<true>(&mut p, &mut shared, 100_000);
+            let contradiction = matches!(
+                (&alone, &reused),
+                (MateResult::Mate(_), MateResult::NoMate)
+                    | (MateResult::NoMate, MateResult::Mate(_))
+            );
+            assert!(!contradiction, "{}: 流用なし {alone:?} / 共有表 {reused:?}", p.to_sfen());
+            decided += usize::from(!matches!(reused, MateResult::Unknown));
+        }
+    }
+    assert!(decided > 1000, "判定できた局面が少なすぎる: {decided}");
+}
+
+/// 持駒違いの流用ありと流用なしで、詰みと不詰が食い違わない
+#[test]
+fn superiority_reuse_does_not_change_the_answer() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xD1FF);
+    let mut tested = 0;
+    while tested < 300 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        tested += 1;
+        let sfen = pos.to_sfen();
+        let with = solve_with_table(&mut pos, MateTable::new(4, true), 500_000);
+        let without =
+            solve_with_table(&mut pos, MateTable::new(4, true).without_superiority(), 500_000);
+        let contradiction = matches!(
+            (&with, &without),
+            (MateResult::Mate(_), MateResult::NoMate) | (MateResult::NoMate, MateResult::Mate(_))
+        );
+        assert!(!contradiction, "{sfen}: 流用あり {with:?} / 流用なし {without:?}");
     }
 }
 
@@ -636,8 +847,26 @@ impl MateState for Graph {
         node_key(self.node())
     }
 
+    fn table_key(&self, _attacker: Color) -> TableKey {
+        let key = node_key(self.node());
+        TableKey {
+            key,
+            board: key,
+            hand: Hand::EMPTY,
+        }
+    }
+
     fn key_after(&self, m: u32) -> u64 {
         node_key(m)
+    }
+
+    fn table_key_after(&self, m: u32, _attacker: Color) -> TableKey {
+        let key = node_key(m);
+        TableKey {
+            key,
+            board: key,
+            hand: Hand::EMPTY,
+        }
     }
 
     fn generate(&self, _or_node: bool, out: &mut Vec<u32>) {
@@ -648,7 +877,27 @@ impl MateState for Graph {
         (self.delay_groups != 0).then(|| ((m % self.delay_groups) as u16, m as u8))
     }
 
+    fn hand_before(&self, _m: u32, after: Hand) -> Hand {
+        after
+    }
+
+    fn proof_hand_for_evasions(&self, proof: Hand, _attacker: Color) -> Hand {
+        proof
+    }
+
+    fn disproof_hand_for_checks(&self, disproof: Hand, _attacker: Color) -> Hand {
+        disproof
+    }
+
+    fn disproof_hand_for_escape(&self, _m: u32, disproof: Hand, _attacker: Color) -> Hand {
+        disproof
+    }
+
     fn mate_1ply(&mut self) -> Option<u32> {
+        None
+    }
+
+    fn mate_1ply_with_proof(&mut self) -> Option<(u32, Hand)> {
         None
     }
 
@@ -665,7 +914,25 @@ fn solve_graph(graph: &mut Graph, buckets: usize) -> Option<SolveOutcome<u32>> {
     solve_graph_with_limit(graph, buckets, 2_000_000)
 }
 
+/// 証明駒を使う探索と使わない探索の両方で解き、結果の種類 (詰み・不詰・打ち切り) が同じことを
+/// 確かめて、証明駒を使う方を返す (グラフに持駒は無いので、表の使い方の違いだけを比べる)
 fn solve_graph_with_limit(
+    graph: &mut Graph,
+    buckets: usize,
+    node_limit: u64,
+) -> Option<SolveOutcome<u32>> {
+    let kind = |r: &Option<SolveOutcome<u32>>| match r {
+        Some(SolveOutcome::Mate(_)) => 1,
+        Some(SolveOutcome::NoMate) => 2,
+        None => 0,
+    };
+    let exact = solve_graph_in_mode::<false>(graph, buckets, node_limit);
+    let pieces = solve_graph_in_mode::<true>(graph, buckets, node_limit);
+    assert_eq!(kind(&exact), kind(&pieces), "b={buckets} {:?}", graph.edges);
+    pieces
+}
+
+fn solve_graph_in_mode<const PIECES: bool>(
     graph: &mut Graph,
     buckets: usize,
     node_limit: u64,
@@ -681,7 +948,7 @@ fn solve_graph_with_limit(
         progress: &mut progress,
     };
     let mut scratch = Scratch::new();
-    let mut searcher = Searcher::new(&mut table, &mut scratch, budget);
+    let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
     solve_with(&mut searcher, graph)
 }
 

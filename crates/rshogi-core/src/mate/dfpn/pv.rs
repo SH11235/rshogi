@@ -20,8 +20,8 @@ use super::state::MateState;
 /// ルート局面 (攻め方の手番、`mate_len` 手以内の詰みが証明済み) から詰み手順を復元する。
 ///
 /// 局面は呼び出し前の状態に戻して返る。
-pub(super) fn extract_pv<S: MateState>(
-    searcher: &mut Searcher<'_, S>,
+pub(super) fn extract_pv<S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     mate_len: u16,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
@@ -33,8 +33,8 @@ pub(super) fn extract_pv<S: MateState>(
     Ok(if result? { Some(pv) } else { None })
 }
 
-fn walk<S: MateState>(
-    searcher: &mut Searcher<'_, S>,
+fn walk<S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     len_limit: u16,
     pv: &mut Vec<S::Mv>,
@@ -82,8 +82,8 @@ fn walk<S: MateState>(
 
 /// 攻め方の局面で、`len_limit` 手以内で詰む王手のうち詰み手数が最小のものを選ぶ。
 /// 戻り値は (指し手, その後の詰み手数)。
-fn choose_attack<S: MateState>(
-    searcher: &mut Searcher<'_, S>,
+fn choose_attack<S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     len_limit: u16,
 ) -> Result<Option<(S::Mv, u16)>, Abort> {
@@ -109,8 +109,8 @@ fn choose_attack<S: MateState>(
 
 /// 受け方の局面で、すべての応手が `len_limit - 1` 手以内で詰むことを確かめ、
 /// 詰み手数が最大の応手を選ぶ。戻り値は (指し手, その後の詰み手数)。
-fn choose_defense<S: MateState>(
-    searcher: &mut Searcher<'_, S>,
+fn choose_defense<S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     moves: &[S::Mv],
     len_limit: u16,

@@ -139,6 +139,18 @@ fn setoption_during_go_mate_does_not_block_commands() {
 }
 
 #[test]
+fn each_mate_mode_solves_a_mate() {
+    let mut engine = Engine::start();
+    for mode in ["Speed", "Power", "Auto"] {
+        engine.send(&format!(
+            "setoption name MateMode value {mode}\nposition sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000"
+        ));
+        assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b", "{mode}");
+    }
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
 fn position_without_attacker_king_is_not_implemented() {
     let mut engine = Engine::start();
     engine.send("position sfen 4k4/8g/4P4/9/9/9/9/9/9 b G 1\ngo mate 5000");

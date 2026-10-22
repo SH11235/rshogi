@@ -63,21 +63,74 @@ pub struct MateProgress {
     pub elapsed_ms: u64,
 }
 
+/// 詰み探索の進め方
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MateMode {
+    /// 速さ優先。置換表は局面 (盤面と持駒) が一致するときだけ使う。
+    /// 短い詰みや実戦の詰めろ判定で 1 ノードあたりが軽く、速い。
+    Speed,
+    /// 解く力優先。詰み・不詰を証明駒・反証駒で置換表に書き、持駒だけ違う局面に流用する。
+    /// 長手数・難問でノードが減り、少ない置換表で解ける問題が増えるが、1 ノードあたりは重い。
+    Power,
+    /// 速さ優先で [`AUTO_SWITCH_NODES`] ノードまで読み、決まらなければ同じ置換表のまま解く力優先で
+    /// 読み続ける (ノード数・時間の制限は合計に掛かる)。置換表の大きさは解く力優先と同じ配分。
+    #[default]
+    Auto,
+}
+
+/// [`MateMode::Auto`] で解く力優先に切り替えるノード数
+pub const AUTO_SWITCH_NODES: u64 = 100_000;
+
+impl MateMode {
+    /// すべてのモード ([`MateMode::name`] の一覧に使う)
+    pub const ALL: [MateMode; 3] = [MateMode::Speed, MateMode::Power, MateMode::Auto];
+
+    /// USI オプションなどで使う名前 (`Speed` / `Power` / `Auto`)
+    pub fn name(self) -> &'static str {
+        match self {
+            MateMode::Speed => "Speed",
+            MateMode::Power => "Power",
+            MateMode::Auto => "Auto",
+        }
+    }
+
+    /// [`MateMode::name`] の名前から (大文字・小文字は区別しない)
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(name))
+    }
+
+    fn proof_pieces(self) -> bool {
+        self != MateMode::Speed
+    }
+}
+
 /// 置換表を持ち回る df-pn ソルバー
 pub struct DfpnSolver {
     table: MateTable,
     scratch: Scratch<Move>,
+    mode: MateMode,
     nodes: u64,
 }
 
 impl DfpnSolver {
-    /// 置換表を `hash_mb` MB で確保したソルバーを作る
+    /// 置換表を `hash_mb` MB で確保した、既定のモード ([`MateMode::Auto`]) のソルバーを作る
     pub fn new(hash_mb: usize) -> Self {
+        Self::with_mode(hash_mb, MateMode::default())
+    }
+
+    /// 置換表を `hash_mb` MB で確保した、モード `mode` のソルバーを作る
+    pub fn with_mode(hash_mb: usize, mode: MateMode) -> Self {
         Self {
-            table: MateTable::new(hash_mb),
+            table: MateTable::new(hash_mb, mode.proof_pieces()),
             scratch: Scratch::new(),
+            mode,
             nodes: 0,
         }
+    }
+
+    /// 探索のモード
+    pub fn mode(&self) -> MateMode {
+        self.mode
     }
 
     /// 直前の `solve` で探索したノード数 (詰み手順の復元を含む)
@@ -108,16 +161,25 @@ impl DfpnSolver {
             return MateResult::Unsupported;
         }
         self.table.clear();
-        let budget = Budget {
-            stop,
-            node_limit: limits.nodes,
-            time_limit_ms: limits.time_ms,
-            start: Instant::now(),
-            progress: &mut progress,
+        let start = Instant::now();
+        let result = match self.mode {
+            MateMode::Speed => self.run::<false>(pos, *limits, start, 0, stop, &mut progress),
+            MateMode::Power => self.run::<true>(pos, *limits, start, 0, stop, &mut progress),
+            MateMode::Auto => {
+                let first = MateLimits {
+                    nodes: match limits.nodes {
+                        0 => AUTO_SWITCH_NODES,
+                        n => n.min(AUTO_SWITCH_NODES),
+                    },
+                    ..*limits
+                };
+                match self.run::<false>(pos, first, start, 0, stop, &mut progress) {
+                    // 速さ優先の置換表の値はそのまま使える
+                    None => self.run::<true>(pos, *limits, start, self.nodes, stop, &mut progress),
+                    decided => decided,
+                }
+            }
         };
-        let mut searcher = Searcher::new(&mut self.table, &mut self.scratch, budget);
-        let result = solve_with(&mut searcher, pos);
-        self.nodes = searcher.nodes();
         match result {
             Some(SolveOutcome::Mate(pv)) if is_valid_mate_pv(pos, &pv) => MateResult::Mate(pv),
             Some(SolveOutcome::Mate(_)) => {
@@ -127,6 +189,34 @@ impl DfpnSolver {
             Some(SolveOutcome::NoMate) => MateResult::NoMate,
             None => MateResult::Unknown,
         }
+    }
+}
+
+impl DfpnSolver {
+    /// `nodes` ノード読んだ続きとして解く。制限 (`limits`、`start` からの時間) は合計に掛かる。
+    fn run<const PIECES: bool>(
+        &mut self,
+        pos: &mut Position,
+        limits: MateLimits,
+        start: Instant,
+        nodes: u64,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(MateProgress),
+    ) -> Option<SolveOutcome<Move>> {
+        let budget = Budget {
+            stop,
+            node_limit: limits.nodes,
+            time_limit_ms: limits.time_ms,
+            start,
+            progress,
+        };
+        let attacker = pos.side_to_move();
+        let mut searcher =
+            Searcher::<_, PIECES>::new(&mut self.table, &mut self.scratch, attacker, budget);
+        searcher.continue_from(nodes);
+        let result = solve_with(&mut searcher, pos);
+        self.nodes = searcher.nodes();
+        result
     }
 }
 
@@ -143,8 +233,8 @@ enum SolveOutcome<M> {
 }
 
 /// ルートを解き、詰みなら手順まで復元する。打ち切り・復元失敗は `None`。
-fn solve_with<S: state::MateState>(
-    searcher: &mut Searcher<'_, S>,
+fn solve_with<S: state::MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
 ) -> Option<SolveOutcome<S::Mv>> {
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0).ok()?;

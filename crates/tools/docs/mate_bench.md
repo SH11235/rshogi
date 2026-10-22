@@ -28,6 +28,7 @@ cargo run --release -p tools --bin mate_bench -- \
 | `--nodes` | 1 局面あたりのノード数の上限。0 は無制限 | 0 |
 | `--time-ms` | 1 局面あたりの時間の上限 (ミリ秒)。0 は無制限 | 0 |
 | `--hash-mb` | 置換表のサイズ (MB、スレッドごと) | 64 |
+| `--mode` | 探索の進め方 (`Speed` / `Power` / `Auto`。USI の `MateMode` と同じ) | Auto |
 | `--expect-mate-len` | 正解の最短詰み手数。指定すると、不詰・非対応の結果を誤りとして数え、1 件でもあれば終了コード 1 で終わる。この手数より短い詰み手順は「要確認」として並べる (局面集の「最短」が成り立たない問題もあるため。例えば不成で詰む手を見落とした生成) | なし |
 | `--jobs` | 局面を並列に解くスレッド数。各スレッドが自分の置換表を持つ。時間を比べるときは 1 にする | 1 |
 | `--out` | 局面ごとの結果を書く TSV (入力と同じファイルは拒否する) | なし |
@@ -60,7 +61,7 @@ TSV (`--out`、入力順) の列:
 ブラウザに組み込むとき (wasm) の速さは、rshogi-core の example `mate_bench_wasm` を WASI 向けにビルドして
 Node.js 20 以降 (V8。Chromium と同じエンジン) で動かして測る。`mate_bench` は wasm にビルドできない依存 (tokio) を
 持つため、rshogi-core だけに依存する 1 スレッドの最小版を別に置いている。局面の選び方 (`--stride` `--offset`
-`--limit` `--flip`) と `--nodes` `--hash-mb` は `mate_bench` と同じ。時間の上限・分位点・正解との照合は無い。
+`--limit` `--flip`) と `--nodes` `--hash-mb` `--mode` は `mate_bench` と同じ。時間の上限・分位点・正解との照合は無い。
 
 ```bash
 # rshogi のリポジトリの直下で
@@ -75,7 +76,7 @@ node /path/to/rshogi/scripts/run_wasi.mjs \
 ```
 
 - 出力は `局面` と `nodes` の 2 行と、`--out` の TSV (`sfen` `result` `pv_len` `nodes` `micros`)。
-  同じ `--hash-mb` なら、ノード数と判定は native の `mate_bench` と一致する。
+  同じ `--hash-mb` と `--mode` なら、ノード数と判定は native の `mate_bench` と一致する。
 - `--out` は存在しないファイルにする (wasm ではパスの別名を見分けられないので、入力を上書きしないよう既存のファイルには書かない)。
 - 引数の誤りは終了コード 2、実行中の失敗は 1 (それまでの局面の TSV は残る)。
 

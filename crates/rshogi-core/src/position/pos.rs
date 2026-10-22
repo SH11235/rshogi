@@ -539,6 +539,13 @@ impl Position {
     /// PASS 以外の合法手を指した後のキーを、局面を変更せずに計算する。
     #[inline]
     pub(crate) fn key_after(&self, m: Move) -> u64 {
+        let (board_key, hand_key) = self.keys_after(m);
+        board_key ^ hand_key
+    }
+
+    /// PASS 以外の合法手を指した後の (盤面キー, 手駒キー) を、局面を変更せずに計算する。
+    #[inline]
+    pub(crate) fn keys_after(&self, m: Move) -> (u64, u64) {
         debug_assert!(!m.is_pass());
         let us = self.side_to_move;
         let mut board_key = self.cur_state().board_key ^ zobrist_side();
@@ -569,7 +576,7 @@ impl Position {
             }
         }
 
-        board_key ^ hand_key
+        (board_key, hand_key)
     }
 
     /// 盤面の利き数を取得

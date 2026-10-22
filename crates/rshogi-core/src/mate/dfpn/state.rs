@@ -3,25 +3,43 @@
 //! 探索本体はこの trait 越しに局面を扱う。本番は `Position`、テストでは
 //! 抽象的な AND/OR グラフを同じ探索本体に通して、GHI (経路依存の結果の誤再利用) を検査する。
 
+use super::table::TableKey;
+use crate::bitboard::{FILE_BB, between_bb};
 use crate::movegen::{ExtMoveBuffer, GenType, MoveList, generate_legal_all, generate_with_type};
 use crate::position::Position;
-use crate::types::{Move, PieceType, Rank, Square};
+use crate::types::{Color, Hand, Move, PieceType, Rank, Square};
 
 /// `MateState::delay_key` の組の番号: 成・不成の組は移動元と移動先から (`Square::NUM` の 2 乗未満)、
 /// 合駒は打つ升ごと、受け方の利きの無い升への合駒は全部で 1 組
 const DELAY_GROUP_DROP: u16 = (Square::NUM * Square::NUM) as u16;
 const DELAY_GROUP_UNSUPPORTED_DROP: u16 = DELAY_GROUP_DROP + Square::NUM as u16;
 
+/// 盤上と持駒を合わせた駒数 (持駒の各駒種の上限)
+pub(super) const FULL_HAND: Hand = Hand::EMPTY
+    .set(PieceType::Pawn, 18)
+    .set(PieceType::Lance, 4)
+    .set(PieceType::Knight, 4)
+    .set(PieceType::Silver, 4)
+    .set(PieceType::Gold, 4)
+    .set(PieceType::Bishop, 2)
+    .set(PieceType::Rook, 2);
+
 /// df-pn が局面に求める操作
 pub(super) trait MateState {
     /// 指し手
     type Mv: Copy + Eq;
 
-    /// 局面の同一性キー (盤面・手番・持駒。置換表と経路の反復判定に使う)
+    /// 局面全体のキー (盤面・手番・持駒。経路の反復判定に使う)
     fn key(&self) -> u64;
+
+    /// 置換表での識別子 (攻め方は `attacker`)
+    fn table_key(&self, attacker: Color) -> TableKey;
 
     /// 指し手 `m` を指した後の `key()`。局面は変えない。
     fn key_after(&self, m: Self::Mv) -> u64;
+
+    /// 指し手 `m` を指した後の `table_key()`。局面は変えない。
+    fn table_key_after(&self, m: Self::Mv, attacker: Color) -> TableKey;
 
     /// 手番側の候補手を `out` に追加する。
     ///
@@ -36,8 +54,33 @@ pub(super) trait MateState {
         None
     }
 
-    /// 攻め方の 1 手詰めの手。返す手は合法な王手で、指した後に受け方の合法手が無いことまで確かめ済み。
+    /// 攻め方の手 `m` を指す前の攻め方の持駒。`after` は指した後の持駒。
+    /// 打った駒は足し (駒数の上限で止める)、取った駒は引く (0 で止める)。
+    fn hand_before(&self, m: Self::Mv, after: Hand) -> Hand;
+
+    /// 受け方の局面 (王手されている) の証明駒。`proof` は応手すべての証明駒を合わせたもの。
+    ///
+    /// 攻め方の持駒が今より少ないと、その分の駒は受け方の手にあり、今は打てない合駒を打てる。
+    /// 合駒の余地があれば、受け方が持っていない駒種は攻め方の今の枚数を証明駒に入れる。
+    fn proof_hand_for_evasions(&self, proof: Hand, attacker: Color) -> Hand;
+
+    /// 攻め方の局面の反証駒。`disproof` は王手すべての反証駒の共通部分。
+    ///
+    /// 今は持っていない駒種でも、持っていれば打って王手できる駒種は反証駒から除く
+    /// (その王手は読んでいないので、詰むかもしれない)。
+    fn disproof_hand_for_checks(&self, disproof: Hand, attacker: Color) -> Hand;
+
+    /// 受け方の局面で、応手 `m` で詰まないときの反証駒。`disproof` は `m` の後の局面の反証駒。
+    ///
+    /// `m` が駒打ちなら、受け方の手に打つ駒が 1 枚は残る枚数までに抑える。
+    fn disproof_hand_for_escape(&self, m: Self::Mv, disproof: Hand, attacker: Color) -> Hand;
+
+    /// 攻め方 (手番側) の 1 手詰めの手。返す手は合法な王手で、指した後に受け方の合法手が無いことまで
+    /// 確かめ済み。
     fn mate_1ply(&mut self) -> Option<Self::Mv>;
+
+    /// `mate_1ply` の手と、その詰みの証明駒
+    fn mate_1ply_with_proof(&mut self) -> Option<(Self::Mv, Hand)>;
 
     /// 指し手を進める
     fn do_move(&mut self, m: Self::Mv);
@@ -53,8 +96,37 @@ impl MateState for Position {
         Position::key(self)
     }
 
+    fn table_key(&self, attacker: Color) -> TableKey {
+        TableKey {
+            key: Position::key(self),
+            board: self.state().board_key,
+            hand: self.hand(attacker),
+        }
+    }
+
     fn key_after(&self, m: Move) -> u64 {
         Position::key_after(self, m)
+    }
+
+    fn table_key_after(&self, m: Move, attacker: Color) -> TableKey {
+        let (board, hand_key) = Position::keys_after(self, m);
+        let mut hand = self.hand(attacker);
+        if self.side_to_move() == attacker {
+            if m.is_drop() {
+                hand = hand.sub(m.drop_piece_type());
+            } else {
+                let captured = self.piece_on(m.to());
+                // 玉は持駒にならない (`keys_after` と同じ扱い)
+                if captured.is_some() && captured.piece_type() != PieceType::King {
+                    hand = hand.add(captured.piece_type().unpromote());
+                }
+            }
+        }
+        TableKey {
+            key: board ^ hand_key,
+            board,
+            hand,
+        }
     }
 
     fn generate(&self, or_node: bool, out: &mut Vec<Move>) {
@@ -121,7 +193,106 @@ impl MateState for Position {
         delayable.then_some((group, u8::from(!m.is_promote())))
     }
 
+    fn hand_before(&self, m: Move, after: Hand) -> Hand {
+        if m.is_drop() {
+            let pt = m.drop_piece_type();
+            return if after.count(pt) < FULL_HAND.count(pt) {
+                after.add(pt)
+            } else {
+                after
+            };
+        }
+        let captured = self.piece_on(m.to());
+        if captured.is_some() && captured.piece_type() != PieceType::King {
+            let pt = captured.piece_type().unpromote();
+            if after.has(pt) {
+                return after.sub(pt);
+            }
+        }
+        after
+    }
+
+    fn proof_hand_for_evasions(&self, mut proof: Hand, attacker: Color) -> Hand {
+        let defender = self.side_to_move();
+        let checkers = self.checkers();
+        if checkers.count() != 1 {
+            return proof;
+        }
+        let checker = checkers.lsb().expect("王手している駒は 1 枚");
+        let between = between_bb(self.king_square(defender), checker);
+        if between.is_empty() {
+            return proof;
+        }
+        let attacker_hand = self.hand(attacker);
+        let defender_hand = self.hand(defender);
+        for pt in PieceType::HAND_PIECES {
+            if defender_hand.has(pt) {
+                continue;
+            }
+            if pt == PieceType::Pawn && !pawn_can_interpose(self, defender, between) {
+                continue;
+            }
+            proof = proof.set(pt, attacker_hand.count(pt));
+        }
+        proof
+    }
+
+    fn disproof_hand_for_checks(&self, mut disproof: Hand, attacker: Color) -> Hand {
+        let hand = self.hand(attacker);
+        let king = self.king_square(!attacker);
+        let empty = !self.occupied();
+        for pt in PieceType::HAND_PIECES {
+            if hand.has(pt) || !disproof.has(pt) {
+                continue;
+            }
+            // 玉の筋に歩があれば二歩で打てない
+            if pt == PieceType::Pawn
+                && !(self.pieces(attacker, PieceType::Pawn) & FILE_BB[king.file().index()])
+                    .is_empty()
+            {
+                continue;
+            }
+            if !(self.check_squares(pt) & empty).is_empty() {
+                disproof = disproof.set(pt, 0);
+            }
+        }
+        disproof
+    }
+
+    fn disproof_hand_for_escape(&self, m: Move, disproof: Hand, attacker: Color) -> Hand {
+        if !m.is_drop() {
+            return disproof;
+        }
+        let pt = m.drop_piece_type();
+        let total = self.hand(attacker).count(pt) + self.hand(!attacker).count(pt);
+        if disproof.count(pt) >= total {
+            disproof.set(pt, total - 1)
+        } else {
+            disproof
+        }
+    }
+
     fn mate_1ply(&mut self) -> Option<Move> {
+        self.checked_mate_1ply(false).map(|(mv, _)| mv)
+    }
+
+    fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
+        self.checked_mate_1ply(true)
+    }
+
+    fn do_move(&mut self, m: Move) {
+        let gives_check = self.gives_check(m);
+        Position::do_move(self, m, gives_check);
+    }
+
+    fn undo_move(&mut self, m: Move) {
+        Position::undo_move(self, m);
+    }
+}
+
+impl Position {
+    /// 1 手詰めの手と、`with_proof` ならその証明駒 (そうでなければ空の持駒)
+    fn checked_mate_1ply(&mut self, with_proof: bool) -> Option<(Move, Hand)> {
         if self.in_check() {
             return None;
         }
@@ -134,19 +305,40 @@ impl MateState for Position {
             debug_assert!(false, "mate_1ply が合法な王手でない手を返した: {}", mv.to_usi());
             return None;
         }
+        let attacker = self.side_to_move();
         self.do_move(mv, true);
         let mut replies = MoveList::new();
         generate_legal_all(self, &mut replies);
-        self.undo_move(mv);
-        if replies.is_empty() { Some(mv) } else { None }
+        let proof = replies.is_empty().then(|| {
+            if with_proof {
+                self.proof_hand_for_evasions(Hand::EMPTY, attacker)
+            } else {
+                Hand::EMPTY
+            }
+        });
+        Position::undo_move(self, mv);
+        proof.map(|proof| {
+            (
+                mv,
+                if with_proof {
+                    self.hand_before(mv, proof)
+                } else {
+                    proof
+                },
+            )
+        })
     }
+}
 
-    fn do_move(&mut self, m: Move) {
-        let gives_check = self.gives_check(m);
-        Position::do_move(self, m, gives_check);
+/// 王手の間の升 `between` のどこかに、二歩にならずに歩を打てるか (行き所の無い段は気にしない)
+fn pawn_can_interpose(pos: &Position, defender: Color, between: crate::bitboard::Bitboard) -> bool {
+    let pawns = pos.pieces(defender, PieceType::Pawn);
+    let mut squares = between;
+    while !squares.is_empty() {
+        let sq = squares.pop();
+        if (pawns & FILE_BB[sq.file().index()]).is_empty() {
+            return true;
+        }
     }
-
-    fn undo_move(&mut self, m: Move) {
-        Position::undo_move(self, m);
-    }
+    false
 }
