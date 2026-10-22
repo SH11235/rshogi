@@ -54,7 +54,7 @@ FP16 推論は `--onnx-tensorrt` を付けます（初回はエンジンコン�
 ## 出力先の保護
 
 入力 jsonl と `--dlshogi-onnx-model` に指定したファイルと同じ実体への出力を拒否します。
-ONNX モデルから参照される外部 tensor data のファイルは検査対象外です。
+ONNX モデルから参照される外部 tensor data、ORT のランタイムライブラリ、TensorRT cache 内のファイルは検査対象外です。
 同一パス、symlink、hardlink、Windows の大小文字違いを ONNX Runtime のロード前にも検査します。
 衝突しない既存出力は上書きされます。同時アクセスや途中失敗時の制約は
 [共通の出力保護](tools-reference.md#ラベル評価ツールの出力保護)を参照してください。

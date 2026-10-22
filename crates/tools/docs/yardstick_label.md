@@ -111,7 +111,7 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 
 NNUE モードでは、入力 hcpe と指定した NNUE・進行度係数・SPSA パラメータへの出力を拒否します。
 ONNX モードでは、入力 hcpe と `--onnx-model` に指定したファイルを保護対象とし、無視される NNUE 用オプションのファイルは開きません。
-ONNX モデルから参照される外部 tensor data のファイルは検査対象外です。
+ONNX モデルから参照される外部 tensor data、ORT のランタイムライブラリ、TensorRT cache 内のファイルは検査対象外です。
 同一パス、symlink、hardlink、Windows の大小文字違いによる同一実体への出力を検査します。
 
 `--capture-depths` の全出力は、資源との衝突と出力同士の衝突をまとめて検査してから上書きします。
