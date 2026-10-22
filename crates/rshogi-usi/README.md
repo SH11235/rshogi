@@ -32,10 +32,15 @@ rshogi-usi
 The engine will start in USI mode, waiting for commands from stdin.
 
 `rshogi-usi --source-version` は USI を始めずに、ビルドしたソースの版を `source-version <版>` の 1 行で出して終わります。
-版は git の commit で、エンジンの crate に commit されていない変更があれば `-dirty`、探索・評価の結果を変える
-feature (`use-lazy-evaluate`・`search-pass-rules`・`threat-profile-*`) があれば `+` 以降にその名前が付きます。
-git が使えないビルドは `unknown` です。CPU 向けの最適化 (target-cpu・SIMD・build profile) は版に含めません。
 `book_mine tree` が別マシンの読みを同じ条件か確かめるのに使います。
+
+- 版の本体は、エンジンのソース (`crates/rshogi-core`・`crates/rshogi-book`・`crates/rshogi-usi`・ルートの `Cargo.toml`・`Cargo.lock`) の
+  HEAD の git の tree / blob の id をまとめた id です。tools や docs だけの commit では変わりません
+- そのソースに commit されていない変更 (追跡しているファイル) があれば `-dirty` が付きます
+- 有効な feature のうち、探索・評価の結果を変えないと確かめたもの以外が `+` 以降に名前順で付きます
+  (判定は `crates/rshogi-core/build/result_features.rs` と `crates/rshogi-usi/build/source_version.rs`。新しい feature は付く側)
+- git の作業木の最上位でビルドしていなければ `unknown` です
+- CPU 向けの最適化 (target-cpu・SIMD・build profile) は版に含めません
 
 探索中の `isready` には、探索を停止せず `readyok` を返します。TT / EvalHash の
 クリアやモデル・定跡の準備は待機中の `isready` で行います。`setoption` は USI

@@ -32,6 +32,10 @@ pub(super) struct ImportJournalArgs {
 
 /// `--source-version` に答えるエンジンならソースの版を返す。答えなければ `None`。
 pub(super) fn engine_source_version(engine: &Path) -> Option<String> {
+    query_source_version(engine, VERSION_TIMEOUT)
+}
+
+fn query_source_version(engine: &Path, timeout: Duration) -> Option<String> {
     let mut child = Command::new(engine)
         .arg("--source-version")
         .stdin(Stdio::null())
@@ -39,25 +43,41 @@ pub(super) fn engine_source_version(engine: &Path) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + VERSION_TIMEOUT;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // 起動したプロセスの子が stdout を持ったまま残ると読み終わらないので、読むのも期限付きにする。
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let read = stdout.read_to_string(&mut text).map(|_| text);
+        let _ = tx.send(read);
+    });
+    let deadline = Instant::now() + timeout;
+    let text = rx.recv_timeout(timeout).ok().and_then(Result::ok);
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                // 引数を USI のコマンドとして待ち続けるエンジンもある。
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if text.is_some() && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
             }
+            _ => break None,
         }
     };
-    let mut stdout = String::new();
-    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
-    if !status.success() {
-        return None;
+    if status.is_none() {
+        // 引数を USI のコマンドとして待ち続けるエンジンもある。
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    parse_source_version(&stdout)
+    parse_source_version(&text?).filter(|_| status.is_some_and(|s| s.success()))
+}
+
+/// 版が分からないときに stderr へ 1 行の警告を出す。
+pub(super) fn warn_unknown_version(engine: &Path, version: &Option<String>) {
+    if version.is_none() {
+        eprintln!(
+            "警告: エンジンのソースの版が分かりません (--source-version に答えません): {}。この条件の読みを別のバイナリへ取り込むには --force が要ります",
+            engine.display()
+        );
+    }
 }
 
 fn parse_source_version(stdout: &str) -> Option<String> {
@@ -71,7 +91,7 @@ fn known_version(settings: &Settings) -> Option<&str> {
     settings
         .engine_version
         .as_deref()
-        .filter(|v| *v != "unknown" && !v.contains("-dirty"))
+        .filter(|v| !v.starts_with("unknown") && !v.contains("-dirty"))
 }
 
 /// 取り込み元の読みを取り込み先の条件の読みとみなせるかを確かめる。版だけが違う・分からないときは
@@ -132,12 +152,13 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
+    warn_unknown_version(&args.reading.engine, &dst.engine_version);
+    let source = read_source(&args.from_journal, args.fingerprint.as_deref())?;
     if args.journal.try_exists()?
         && std::fs::canonicalize(&args.journal)? == std::fs::canonicalize(&args.from_journal)?
     {
         bail!("取り込み元と取り込み先が同じ台帳です");
     }
-    let source = read_source(&args.from_journal, args.fingerprint.as_deref())?;
     if source.ignored_tail {
         eprintln!("取り込み元の末尾の改行で終わらない行は無視しました");
     }
@@ -382,6 +403,87 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, BTreeMap::from([(0, true), (1, false), (2, true), (3, false)]));
+    }
+
+    /// serve が書いた台帳の条件 (ファイルのパスだけ置き換えたもの) と、そのとき記録された指紋。
+    const RECORDED_SETTINGS: &str = r#"{"fingerprint":"74695922da474f8e2284c42755db2d93b0fb80815b63a253a1ae071c6ac8942a","version":"book-tree-v1/newgame-ready/node-calib-last-multipv-v1","engine_sha256":"8c32f9585e25eb773b008e05fcd03cd7c6e590660b5eda0a561e3746ce877984","options":{"DrawValueBlack":"-70","DrawValueWhite":"70","EvalFile":"/path/to/model.bin","FV_SCALE":"14","LS_BUCKET_MODE":"progresskpabs","LS_PROGRESS_BUCKETS":"8","LS_PROGRESS_COEFF":"/path/to/progress.bin","MultiPV":"3","Threads":"1","USI_Hash":"1024","UseEvalHash":"false"},"content_sha256":{"EvalFile":"7871f1c0b7af35d84e76a713b20e7b313f8294167d513761f0a69b4e24c4003d","LS_PROGRESS_COEFF":"8d0058b899768c00e71be5508c5c4544d8c8ce24b30c32024c2a0a4452dbdb53","implicit:SPSAParamsFile":"absent"},"nodes":1000000000,"multipv":3,"hash":1024}"#;
+
+    #[test]
+    fn recorded_settings_keep_their_fingerprint() {
+        let mut settings: Settings = serde_json::from_str(RECORDED_SETTINGS).unwrap();
+        assert_eq!(settings.engine_version, None);
+        assert_eq!(settings.computed_fingerprint().unwrap(), settings.fingerprint);
+        settings.engine_version = Some(VERSION_A.into());
+        assert_eq!(settings.computed_fingerprint().unwrap(), settings.fingerprint);
+        let json = serde_json::to_string(&Settings {
+            engine_version: None,
+            ..settings
+        })
+        .unwrap();
+        assert_eq!(json, RECORDED_SETTINGS);
+    }
+
+    fn write_lines(path: &Path, records: &[serde_json::Value]) {
+        let text: String = records.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn record_json(settings: &Settings, reading: &Reading) -> serde_json::Value {
+        serde_json::json!({
+            "kind": settings.version,
+            "settings": settings,
+            "provenance": "fixture",
+            "reading": reading,
+        })
+    }
+
+    #[test]
+    fn every_selected_record_must_match_its_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = machine(dir.path(), "a", "build a", "model");
+        let src = settings(&a, None);
+        let path = dir.path().join("src.jsonl");
+        let good = record_json(&src, &reading(0, &src, "resign"));
+
+        let mut tampered = src.clone();
+        tampered.nodes = 200;
+        let lying = record_json(&tampered, &reading(1, &tampered, "resign"));
+        write_lines(&path, &[good.clone(), lying.clone()]);
+        assert!(read_source(&path, None).is_err());
+        write_lines(&path, &[lying]);
+        assert!(read_source(&path, None).is_err());
+
+        // 選ばない条件の版の食い違いは問わない。
+        let other = Settings::new(&reading_args(&a, 300, &[])).unwrap();
+        let versioned = |v: &str| {
+            let mut s = other.clone();
+            s.engine_version = Some(v.into());
+            record_json(&s, &reading(2, &s, "resign"))
+        };
+        write_lines(&path, &[good.clone(), versioned(VERSION_A), versioned(VERSION_B)]);
+        assert_eq!(read_source(&path, Some(&src.fingerprint)).unwrap().readings.len(), 1);
+        assert!(read_source(&path, Some(&other.fingerprint)).is_err());
+
+        std::fs::write(&path, "").unwrap();
+        let err = read_source(&path, None).err().unwrap().to_string();
+        assert!(err.contains("取り込み元の台帳が空です"), "{err}");
+        let missing = dir.path().join("missing.jsonl");
+        let err = format!("{:#}", read_source(&missing, None).err().unwrap());
+        assert!(err.contains("missing.jsonl"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_query_gives_up_when_a_child_keeps_stdout_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        std::fs::write(&engine, "#!/bin/sh\necho 'source-version abc'\nsleep 30 &\nexit 0\n")
+            .unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = Instant::now();
+        assert_eq!(query_source_version(&engine, Duration::from_secs(1)), None);
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(unix)]

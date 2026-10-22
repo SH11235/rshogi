@@ -114,15 +114,31 @@ impl Settings {
             hash: args.hash,
             engine_version: None,
         };
+        settings.fingerprint = settings.computed_fingerprint()?;
+        Ok(settings)
+    }
+
+    /// 条件の指紋。ファイル型 option はパスでなく内容の SHA-256 で入れる。
+    pub fn computed_fingerprint(&self) -> Result<String> {
+        let mut normalized = self.clone();
+        normalized.fingerprint = String::new();
         // 版は指紋に入れない (入れると版を記録する前の台帳と指紋が変わる)。
-        let mut normalized = settings.clone();
-        for (k, hash) in &settings.content_sha256 {
+        normalized.engine_version = None;
+        for (k, hash) in &self.content_sha256 {
             if normalized.options.contains_key(k) {
                 normalized.options.insert(k.clone(), format!("sha256:{hash}"));
             }
         }
-        settings.fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&normalized)?));
-        Ok(settings)
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&normalized)?)))
+    }
+
+    /// 版を除いて同じ条件か。
+    pub fn same_apart_from_version(&self, other: &Self) -> bool {
+        let strip = |s: &Self| Self {
+            engine_version: None,
+            ..s.clone()
+        };
+        strip(self) == strip(other)
     }
 
     pub fn draw(&self) -> BTreeMap<String, String> {
@@ -473,17 +489,15 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
             hash.update(bytes);
             complete += bytes.len() as u64;
             let rec = parse_record(bytes)?;
-            match conditions.get_mut(&rec.settings.fingerprint) {
-                Some(known) => merge_engine_version(known, &rec.settings)?,
-                None => {
-                    conditions.insert(rec.settings.fingerprint.clone(), rec.settings);
-                }
-            }
+            conditions.entry(rec.settings.fingerprint.clone()).or_insert(rec.settings);
             Ok(())
         },
         &mut ignored_tail,
     )?;
-    let settings = match fingerprint {
+    if conditions.is_empty() {
+        bail!("取り込み元の台帳が空です: {}", path.display());
+    }
+    let mut settings = match fingerprint {
         Some(fp) => conditions.remove(fp).context("指紋が取り込み元の台帳にありません")?,
         None => {
             if conditions.len() != 1 {
@@ -492,6 +506,9 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
             conditions.into_values().next().context("取り込み元の台帳が空です")?
         }
     };
+    if settings.computed_fingerprint()? != settings.fingerprint {
+        bail!("取り込み元の条件が指紋と合いません: {}", settings.fingerprint);
+    }
     let mut file = reader.into_inner();
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
@@ -504,6 +521,11 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
             if rec.settings.fingerprint != settings.fingerprint {
                 return Ok(());
             }
+            // 指紋が同じでも条件の中身が違う行は、指紋の付け間違いか改変なので取り込まない。
+            if !rec.settings.same_apart_from_version(&settings) {
+                bail!("取り込み元に指紋と条件の合わない行があります: {}", rec.reading.key);
+            }
+            merge_engine_version(&mut settings, &rec.settings)?;
             rec.reading.validate(&rec.settings)?;
             if let Some(old) = records.get(&rec.reading.key)
                 && !old.same_values(&rec.reading)
