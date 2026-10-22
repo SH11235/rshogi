@@ -10,7 +10,7 @@ case "$test_root" in
 esac
 trap 'rm -rf -- "$test_root"' EXIT
 
-# 呼び出し元の Git 環境が fixture 外の index を指さないようにする。
+# 呼び出し元の Git 環境と親リポジトリから fixture を隔離する。
 git_local_env=$(git rev-parse --local-env-vars)
 while IFS= read -r variable; do
   unset "$variable"
@@ -45,7 +45,8 @@ expect_status() {
 }
 
 repo="$test_root/repository"
-git init --quiet "$repo"
+mkdir "$test_root/template"
+git init --quiet --template="$test_root/template" "$repo"
 expect_status empty-repository 0 "$repo" "$BASH" "$script_dir/check-tracked-abs-paths.sh"
 
 mkdir -p "$repo/scripts" "$repo/nested" "$test_root/not-repository" "$test_root/empty-bin"
