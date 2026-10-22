@@ -4,6 +4,61 @@ use std::process::Command;
 /// テスト用の共通USI初期化コマンド（Material評価で動作させる）
 const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
+#[test]
+fn invalid_position_preserves_previous_position_and_search() {
+    let invalid_commands = [
+        "position sfen invalid b - 1",
+        "position startpos moves 7g7e",
+        "position startpos moves 5e5d",
+        "position startpos moves 3c3d",
+        "position startpos moves 7g7f+",
+        "position startpos moves 6i6h+",
+        "position startpos moves P*5e",
+        "position startpos moves 7g7f 3c3d 5e5d",
+        "position startpos moves 7g7f 3c3d invalid",
+        "position startpos moves 7g7fextra",
+        "position startpos moves 7g7fあ",
+    ];
+    let expected = "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3";
+    let mut input = String::from(
+        "usi\nsetoption name MaterialLevel value 9\nsetoption name USI_Hash value 1\nsetoption name EvalHash value 0\nisready\nposition startpos moves 7g7f 3c3d\nd\n",
+    );
+    for command in invalid_commands {
+        input.push_str(command);
+        input.push_str("\nd\n");
+    }
+    input.push_str("go depth 1\nstop\nquit\n");
+
+    let output = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+        .timeout(std::time::Duration::from_secs(15))
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    let positions: Vec<_> = stdout.lines().filter_map(|line| line.strip_prefix("SFEN: ")).collect();
+    assert_eq!(positions, vec![expected; invalid_commands.len() + 1], "{stdout}");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.starts_with("info string Error parsing position:"))
+            .count(),
+        invalid_commands.len(),
+        "{stderr}"
+    );
+    let bestmove = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("bestmove "))
+        .expect("bestmove");
+    let mv = rshogi_core::types::Move::from_usi_strict(bestmove.split_whitespace().next().unwrap())
+        .expect("a move, not resign");
+    let mut position = rshogi_core::position::Position::new();
+    position.set_sfen(expected).unwrap();
+    assert!(position.pseudo_legal(mv) && position.is_legal(mv), "{bestmove}");
+}
+
 /// 探索中の isready は infinite / ponder を停止せず readyok を返す。
 #[test]
 fn isready_during_search_keeps_search_running() {

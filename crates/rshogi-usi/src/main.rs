@@ -282,10 +282,10 @@ impl UsiEngine {
             "usinewgame" => {
                 self.cmd_usinewgame()?;
             }
-            "position" => {
-                self.last_position_cmd = Some(line.to_string());
-                self.cmd_position(&tokens);
-            }
+            "position" => match self.cmd_position(&tokens) {
+                Ok(()) => self.last_position_cmd = Some(line.to_string()),
+                Err(error) => eprintln!("info string Error parsing position: {error:#}"),
+            },
             "go" => {
                 self.last_go_cmd = Some(line.to_string());
                 self.cmd_go(&tokens)?;
@@ -1342,13 +1342,13 @@ impl UsiEngine {
     /// positionコマンド: 局面設定
     ///
     /// 拡張形式: `position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> ...]`
-    fn cmd_position(&mut self, tokens: &[&str]) {
+    fn cmd_position(&mut self, tokens: &[&str]) -> Result<()> {
         Self::apply_position_tokens(
             &mut self.position,
             tokens,
             self.pass_rights_enabled,
             self.initial_pass_count,
-        );
+        )
     }
 
     fn apply_position_tokens(
@@ -1356,83 +1356,61 @@ impl UsiEngine {
         tokens: &[&str],
         pass_rights_enabled: bool,
         initial_pass_count: u8,
-    ) {
-        // position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> <move2> ...]
+    ) -> Result<()> {
+        let mut candidate = Position::new();
         let mut idx = 1;
-        if idx >= tokens.len() {
-            return;
-        }
-
-        // 局面の設定
-        if tokens[idx] == "startpos" {
-            position.set_hirate();
-            idx += 1;
-        } else if tokens[idx] == "sfen" {
-            idx += 1;
-            // SFENを収集（movesまたはpassrightsの前まで）
-            let mut sfen_parts = Vec::new();
-            while idx < tokens.len() && tokens[idx] != "moves" && tokens[idx] != "passrights" {
-                sfen_parts.push(tokens[idx]);
+        match tokens.get(idx).copied() {
+            Some("startpos") => {
+                candidate.set_hirate();
                 idx += 1;
             }
-            let sfen = sfen_parts.join(" ");
-            if let Err(e) = position.set_sfen(&sfen) {
-                eprintln!("info string Error parsing SFEN: {e}");
-                return;
+            Some("sfen") => {
+                idx += 1;
+                let start = idx;
+                while idx < tokens.len() && !matches!(tokens[idx], "moves" | "passrights") {
+                    idx += 1;
+                }
+                anyhow::ensure!(
+                    (3..=4).contains(&(idx - start)),
+                    "SFEN must contain a board, side, hand, and optional ply"
+                );
+                candidate.set_sfen(&tokens[start..idx].join(" "))?;
+                anyhow::ensure!(candidate.game_ply() > 0, "SFEN ply must be positive");
             }
+            _ => bail!("Expected startpos or sfen"),
         }
 
-        // パス権の設定（passrights キーワード）
-        // 形式: passrights <black_count> <white_count>
         if idx < tokens.len() && tokens[idx] == "passrights" {
             idx += 1;
+            let black_pass = tokens.get(idx).context("Missing black passrights")?.parse::<u8>()?;
+            let white_pass =
+                tokens.get(idx + 1).context("Missing white passrights")?.parse::<u8>()?;
+            anyhow::ensure!(black_pass <= 15 && white_pass <= 15, "passrights must be 0..15");
+            idx += 2;
             if pass_rights_enabled {
-                // 先手のパス権数
-                let black_pass = if idx < tokens.len() {
-                    tokens[idx].parse::<u8>().unwrap_or(initial_pass_count)
-                } else {
-                    initial_pass_count
-                };
-                idx += 1;
-
-                // 後手のパス権数
-                let white_pass = if idx < tokens.len() {
-                    tokens[idx].parse::<u8>().unwrap_or(initial_pass_count)
-                } else {
-                    initial_pass_count
-                };
-                idx += 1;
-
-                // パス権を設定
-                position.enable_pass_rights(black_pass, white_pass);
-            } else {
-                // パス権が無効な場合は値を読み飛ばす
-                idx += 2;
+                candidate.enable_pass_rights(black_pass, white_pass);
             }
         } else if pass_rights_enabled {
-            // passrights キーワードがないがパス権が有効な場合、デフォルト値を設定
-            position.enable_pass_rights(initial_pass_count, initial_pass_count);
+            candidate.enable_pass_rights(initial_pass_count, initial_pass_count);
         }
 
-        // 指し手の適用
-        if idx < tokens.len() && tokens[idx] == "moves" {
+        if idx < tokens.len() {
+            anyhow::ensure!(tokens[idx] == "moves", "Expected moves, got {}", tokens[idx]);
             idx += 1;
-            while idx < tokens.len() {
-                if let Some(mv) = Move::from_usi(tokens[idx]) {
-                    // PASS の場合は gives_check は false
-                    let gives_check = if mv.is_pass() {
-                        false
-                    } else {
-                        position.gives_check(mv)
-                    };
-                    position.do_move(mv, gives_check);
-                } else {
-                    eprintln!("info string Error parsing move: {token}", token = tokens[idx]);
-                    break;
-                }
-                idx += 1;
+            for token in &tokens[idx..] {
+                let mv = Move::from_usi_strict(token)
+                    .with_context(|| format!("Invalid move token: {token}"))?;
+                anyhow::ensure!(
+                    candidate.pseudo_legal(mv) && candidate.is_legal(mv),
+                    "Illegal move: {token}"
+                );
+                anyhow::ensure!(candidate.game_ply() < i32::MAX, "SFEN ply overflow");
+                let gives_check = !mv.is_pass() && candidate.gives_check(mv);
+                candidate.do_move(mv, gives_check);
             }
         }
+        *position = candidate;
+        Ok(())
     }
 
     fn stochastic_ponder_position(&self) -> Option<Position> {
@@ -1455,7 +1433,8 @@ impl UsiEngine {
             &owned,
             self.pass_rights_enabled,
             self.initial_pass_count,
-        );
+        )
+        .ok()?;
         Some(position)
     }
 
@@ -1836,7 +1815,7 @@ impl UsiEngine {
 
         if let Some(line) = self.last_position_cmd.clone() {
             let tokens: Vec<&str> = line.split_whitespace().collect();
-            self.cmd_position(&tokens);
+            self.cmd_position(&tokens)?;
         }
 
         if let Some(line) = self.last_go_cmd.clone() {
@@ -2349,19 +2328,181 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
     }
 
     #[test]
+    fn position_commands_reject_invalid_input_atomically() {
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &["position", "startpos", "moves", "7g7f", "3c3d"],
+            false,
+            2,
+        )
+        .unwrap();
+        let before = position.to_sfen();
+        let key = position.key();
+        for line in [
+            "position",
+            "position unknown",
+            "position startpos extra",
+            "position sfen invalid b - 1",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 x - 1",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b 19P 1",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - invalid",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 0",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - -1",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1 extra",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 2147483647 moves 5i5h",
+            "position startpos moves 7g7e",
+            "position startpos moves 5e5d",
+            "position startpos moves 3c3d",
+            "position startpos moves 7g7f+",
+            "position startpos moves 6i6h+",
+            "position startpos moves P*5e",
+            "position startpos moves 7g7f 3c3d 5e5d",
+            "position startpos moves 7g7f 3c3d invalid",
+            "position startpos moves 7g7fextra",
+            "position startpos moves 7g7fあ",
+            "position startpos moves none",
+            "position startpos moves win",
+            "position startpos moves pass",
+            "position startpos moves 0000",
+            "position sfen 4r3k/9/9/9/9/9/9/4G4/4K4 b - 1 moves 5h4h",
+            "position sfen 8k/4P4/9/9/9/9/9/9/4K4 b - 1 moves 5b5a",
+            "position sfen 4k4/9/3GN1B2/4R4/9/9/9/9/4K4 b P 1 moves P*5b",
+            "position sfen 4k4/9/9/9/4P4/9/9/9/4K4 b P 1 moves P*5d",
+        ] {
+            let tokens: Vec<_> = line.split_whitespace().collect();
+            assert!(
+                UsiEngine::apply_position_tokens(&mut position, &tokens, false, 2).is_err(),
+                "{line}"
+            );
+            assert_eq!(position.to_sfen(), before, "{line}");
+            assert_eq!(position.key(), key, "{line}");
+        }
+        position.undo_move(Move::from_usi_strict("3c3d").unwrap());
+        position.undo_move(Move::from_usi_strict("7g7f").unwrap());
+        assert_eq!(position.to_sfen(), rshogi_core::position::SFEN_HIRATE);
+    }
+
+    #[test]
+    fn position_commands_preserve_capture_drop_and_repetition_history() {
+        let mut position = Position::new();
+        let line = "position sfen 4k4/9/4p4/4P4/9/9/9/9/4K4 b - 23 moves 5d5c+ 5a4a P*5e";
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            false,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.to_sfen(), "5k3/9/4+P4/9/4P4/9/9/9/4K4 w - 26");
+        for token in ["P*5e", "5a4a", "5d5c+"] {
+            position.undo_move(Move::from_usi_strict(token).unwrap());
+        }
+        assert_eq!(position.to_sfen(), "4k4/9/4p4/4P4/9/9/9/9/4K4 b - 23");
+
+        let cycle = "5i5h 5a5b 5h5i 5b5a ";
+        let line = format!("position sfen 4k4/9/9/9/9/9/9/9/4K4 b P 11 moves {}", cycle.repeat(3));
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            false,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.game_ply(), 23);
+        assert_eq!(position.repetition_state(16), rshogi_core::types::RepetitionState::Draw);
+        let before = position.to_sfen();
+        assert!(
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &["position", "startpos", "moves", "5e5d"],
+                false,
+                2,
+            )
+            .is_err()
+        );
+        assert_eq!(position.to_sfen(), before);
+        assert_eq!(position.repetition_state(16), rshogi_core::types::RepetitionState::Draw);
+    }
+
+    #[test]
+    fn position_commands_validate_pass_rights_and_pass_legality() {
+        use rshogi_core::types::Color;
+        let mut position = Position::new();
+        for (line, enabled, black, white) in [
+            ("position startpos moves pass 0000", true, 1, 1),
+            ("position startpos passrights 1 1 moves pass 0000", true, 0, 0),
+            ("position startpos passrights 15 15", true, 15, 15),
+            ("position startpos passrights 2 3", false, 0, 0),
+        ] {
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                enabled,
+                2,
+            )
+            .unwrap();
+            assert_eq!(position.is_pass_rights_enabled(), enabled);
+            assert_eq!(position.pass_rights(Color::Black), black);
+            assert_eq!(position.pass_rights(Color::White), white);
+        }
+        let before = position.to_sfen();
+        let key = position.key();
+        for enabled in [false, true] {
+            for suffix in ["", "1", "x 1", "1 x", "16 1", "1 256", "1 1 extra"] {
+                let line = format!("position startpos passrights {suffix}");
+                assert!(
+                    UsiEngine::apply_position_tokens(
+                        &mut position,
+                        &line.split_whitespace().collect::<Vec<_>>(),
+                        enabled,
+                        2,
+                    )
+                    .is_err()
+                );
+                assert_eq!(position.to_sfen(), before);
+                assert_eq!(position.key(), key);
+            }
+        }
+        for line in [
+            "position startpos passrights 1 1 moves pass 0000 pass",
+            "position sfen 4r3k/9/9/9/9/9/9/9/4K4 b - 1 passrights 1 1 moves pass",
+        ] {
+            assert!(
+                UsiEngine::apply_position_tokens(
+                    &mut position,
+                    &line.split_whitespace().collect::<Vec<_>>(),
+                    true,
+                    2,
+                )
+                .is_err()
+            );
+            assert_eq!(position.to_sfen(), before);
+            assert_eq!(position.key(), key);
+        }
+    }
+
+    #[test]
     #[serial]
     fn stochastic_ponder_position_rewinds_last_move() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 let mut engine = UsiEngine::new();
-                engine.last_position_cmd = Some("position startpos moves 7g7f 3c3d".to_string());
+                let line = "position startpos moves 7g7f 3c3d";
+                engine.process_command(line).unwrap();
+                let before = engine.position.to_sfen();
+                engine.process_command("position startpos moves 7g7f 5e5d").unwrap();
+                assert_eq!(engine.last_position_cmd.as_deref(), Some(line));
+                assert_eq!(engine.position.to_sfen(), before);
 
                 let pos = engine.stochastic_ponder_position().expect("stochastic ponder position");
                 assert_eq!(
                     pos.to_sfen(),
                     "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2"
                 );
+                engine.last_position_cmd = Some("position startpos moves 5e5d 3c3d".into());
+                assert!(engine.stochastic_ponder_position().is_none());
             })
             .unwrap()
             .join()

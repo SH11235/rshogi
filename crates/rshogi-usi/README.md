@@ -35,6 +35,20 @@ The engine will start in USI mode, waiting for commands from stdin.
 クリアやモデル・定跡の準備は待機中の `isready` で行います。`setoption` は USI
 仕様に従って探索の停止後に送り、続けて `isready` で設定を反映してください。
 
+### 局面の設定 (`position`)
+
+`position startpos [moves ...]` または `position sfen <SFEN> [moves ...]` で局面を設定します。
+SFEN の構造・駒の在庫と、指し手列全体の構文・合法性を検証し、すべて成功した場合だけ局面と対局履歴を更新します。
+不正な SFEN、指し手の構文、移動・成り・駒打ち、自玉を王手にさらす手、打ち歩詰めなどを検出すると、
+標準エラーへ `info string Error parsing position: ...` を出力し、直前の正常な局面・履歴・
+ponder 用の局面コマンドを保持して次のコマンドを受け付けます。
+SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に余分な文字がある場合もエラーです。
+
+有限パス権の拡張は `position startpos [passrights <先手> <後手>] [moves ...]` の形式で、
+`sfen` の後にも指定できます。明示する値はそれぞれ 0〜15 とし、両方が必要です。
+`PassRights` が有効なら省略時は `InitialPassCount` を使い、無効なら検証後の値を適用しません。
+`moves` 内の `pass` / `0000` は、パス権が有効で残数があり、手番側が王手されていない場合だけ受理します。
+
 ### USI Options
 
 | Option | Description | Default |
