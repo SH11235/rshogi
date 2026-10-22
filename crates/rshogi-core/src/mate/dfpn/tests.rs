@@ -369,6 +369,7 @@ fn auto_mode_progress_counts_nodes_across_the_switch() {
     let result = DfpnSolver::with_mode(16, MateMode::Auto)
         .solve(&mut pos, &limits, &stop, |p| reported.push(p.nodes));
     assert_eq!(result, MateResult::Unknown);
+    assert!(reported.len() >= 2, "{reported:?}");
     assert!(reported.windows(2).all(|w| w[0] < w[1]), "{reported:?}");
 }
 
@@ -418,8 +419,10 @@ fn disproof_hand_drops_pieces_that_could_give_check() {
 #[test]
 fn disproof_hand_for_a_drop_escape_leaves_the_dropped_piece_to_the_defender() {
     // 両者の金は合わせて 2 枚。受け方が金を打って逃れたなら、攻め方の金は 1 枚まで
-    let pos = position("4k4/9/9/9/9/9/9/9/4K4 w Gg 1");
-    let drop = Move::from_usi("G*5b").unwrap();
+    // 先手の飛車の王手に金を合駒して逃れた
+    let pos = position("4k4/9/4R4/9/9/9/9/9/4K4 w Gg 1");
+    let drop = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert!(pos.in_check() && pos.is_legal(drop));
     let disproof = hand_of(&[PieceType::Gold, PieceType::Gold, PieceType::Gold]);
     let capped = pos.disproof_hand_for_escape(drop, disproof, Color::Black);
     assert_eq!(capped.count(PieceType::Gold), 1);
