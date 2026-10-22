@@ -18,6 +18,8 @@ done <<< "$git_local_env"
 export GIT_CEILING_DIRECTORIES="$test_root"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1
+export XDG_CONFIG_HOME="$test_root/xdg"
 
 expect_status() {
   local name=$1 expected=$2 directory=$3
