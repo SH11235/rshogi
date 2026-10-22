@@ -402,6 +402,8 @@ pub struct AccumulatorStackLayerStacks<const L1: usize> {
     /// 探索開始時の係数を所有し、評価中のロック取得と Arc clone を避ける。
     #[cfg(feature = "layerstack-arch")]
     progress_q16_weights: Option<std::sync::Arc<[i32]>>,
+    #[cfg(feature = "layerstack-arch")]
+    progress_kpabs_weights: super::network::ProgressKpAbsWeights,
 }
 
 impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
@@ -417,6 +419,8 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
             current: 0,
             #[cfg(feature = "layerstack-arch")]
             progress_q16_weights: super::progress_q16::snapshot_weights(),
+            #[cfg(feature = "layerstack-arch")]
+            progress_kpabs_weights: super::network::get_layer_stack_progress_kpabs_weights(),
         }
     }
 
@@ -513,11 +517,17 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         {
             self.entries[0].progress_q16_valid = 0;
             self.progress_q16_weights = super::progress_q16::snapshot_weights();
+            self.progress_kpabs_weights = super::network::get_layer_stack_progress_kpabs_weights();
         }
         #[cfg(feature = "nnue-progress-diff")]
         {
             self.entries[0].computed_progress = false;
         }
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn progress_kpabs_weights(&self) -> &[f32] {
+        &self.progress_kpabs_weights
     }
 
     /// Q16 の部分和を視点別に遅延更新し、同じ整数閾値で bucket を選ぶ。
@@ -760,6 +770,11 @@ macro_rules! ls_match {
 }
 
 impl LayerStacksAccStack {
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn progress_kpabs_weights(&self) -> &[f32] {
+        ls_match!(self, s => s.progress_kpabs_weights())
+    }
+
     #[cfg(feature = "layerstack-arch")]
     pub(crate) fn ensure_progress_q16_bucket(
         &mut self,
@@ -1030,6 +1045,34 @@ mod tests {
     use crate::nnue::constants::NNUE_PYTORCH_L1;
     use rand::{RngCore, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[cfg(feature = "layerstack-arch")]
+    #[test]
+    fn progress_weights_snapshot_changes_only_on_stack_reset() {
+        use crate::nnue::network::{
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, layer_stack_routing_test_guard,
+            reset_layer_stack_progress_kpabs_weights, set_layer_stack_progress_kpabs_weights,
+        };
+        let _guard = layer_stack_routing_test_guard();
+        set_layer_stack_progress_kpabs_weights(
+            vec![0.25; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let mut stack = AccumulatorStackLayerStacks::<32>::new();
+        set_layer_stack_progress_kpabs_weights(
+            vec![0.5; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        stack.push();
+        assert!(stack.progress_kpabs_weights().iter().all(|&v| v == 0.25));
+        stack.pop();
+        stack.reset();
+        assert!(stack.progress_kpabs_weights().iter().all(|&v| v == 0.5));
+        reset_layer_stack_progress_kpabs_weights();
+        assert!(stack.progress_kpabs_weights().iter().all(|&v| v == 0.5));
+        stack.reset();
+        assert!(stack.progress_kpabs_weights().iter().all(|&v| v == 0.0));
+    }
 
     fn assert_diff_matches_scalar(
         cached: &[BonaPiece; PieceNumber::NB],

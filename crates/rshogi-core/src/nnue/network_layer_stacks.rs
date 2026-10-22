@@ -119,7 +119,7 @@ pub(crate) fn compute_layer_stacks_bucket_index_with_q16(
             compute_layer_stack_progresskpabs_bucket_index(
                 pos,
                 side_to_move,
-                weights,
+                &weights,
                 routing_buckets,
             )
         }

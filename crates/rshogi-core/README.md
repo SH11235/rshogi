@@ -42,6 +42,13 @@ let result = search.go(&mut pos, limits, None::<fn(&_)>);
 println!("Best move: {}", result.best_move.to_usi());
 ```
 
+## LayerStacks の progress 係数
+
+`nnue::get_layer_stack_progress_kpabs_weights()` は所有権付きの
+`ProgressKpAbsWeights` を返す。`&weights` を `&[f32]` として渡せる。
+係数を再設定・resetしても取得済みのsnapshotは有効で、最後の所有者が破棄されるまで保持される。
+探索stackへの反映は生成・reset時に行う。探索中はstackが保持する係数を参照する。
+
 ## License
 
 GPL-3.0-or-later License

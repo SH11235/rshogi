@@ -1,6 +1,6 @@
 # tools
 
-LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md)。
+LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](docs/nnue-routing.md)。
 
 将棋エンジン開発用ツール群
 
