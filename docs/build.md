@@ -59,6 +59,24 @@ cargo test --workspace --doc
 `cargo build` は `target/release/rshogi-usi` を生成する。これは作業領域なので
 別 preset を rebuild すると上書きされる点に注意。
 
+### CI と依存関係の監査
+
+`Rust CI` は pull request と、Rust ソース・Cargo 設定・`rust-toolchain.toml` などを
+変更する `main` への push で検証する。`Security Audit` は `cargo audit --deny warnings`
+で依存関係を検査し、毎日 03:17 UTC にも既定ブランチで単独実行する。定期監査は通常の
+ビルド・テストと別の同時実行枠を使い、変更がない依存関係への新しい勧告も検出する。
+
+tracked file の環境固有パス検査と、その正常系・失敗系のテストは次で実行できる。
+Windows では native Git と同じ環境の Git Bash を使う。
+
+```bash
+bash scripts/check-tracked-abs-paths.sh
+bash scripts/test-check-tracked-abs-paths.sh
+```
+
+検査対象は `check-tracked-abs-paths.sh` に定義したルートで、untracked file は含まない。
+Git が起動できない、リポジトリを特定できない、index を読めない場合も非ゼロで終了する。
+
 ### 複数 architecture binary を残したい場合 (selfplay / SPRT / tournament)
 
 `cargo xtask` を使うと preset ごとに別名で `engines/` 下に配置できる:
