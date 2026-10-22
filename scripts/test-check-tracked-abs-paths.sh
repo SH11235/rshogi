@@ -11,7 +11,11 @@ esac
 trap 'rm -rf -- "$test_root"' EXIT
 
 # 呼び出し元の Git 環境が fixture 外の index を指さないようにする。
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+git_local_env=$(git rev-parse --local-env-vars)
+while IFS= read -r variable; do
+  unset "$variable"
+done <<< "$git_local_env"
+export GIT_CEILING_DIRECTORIES="$test_root"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
