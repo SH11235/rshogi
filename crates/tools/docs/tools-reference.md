@@ -34,6 +34,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](compare_eval_nnue.md)） |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](dump_effect_bucket_golden.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能。alignment 調査用（[詳細](compare_nodes.md)） |
+| [`mate_bench`](mate_bench.md) | df-pn 詰み探索 (`go mate` と同じ solver) を局面集で解き、結果の内訳・ノード予算ごとの判定数・時間の分位点を出す。最短詰み手数の正解との照合、手番反転、並列実行に対応 |
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索（depth / nodes 指定）でラベル付けし `eval_deep` 等を追記（ground truth、局面ごと隔離で `--threads` 非依存に bit 一致） |

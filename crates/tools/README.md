@@ -63,6 +63,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 |--------|------|
 | `benchmark` | エンジン性能ベンチマーク。USI の評価ハッシュ設定と受信期限に対応（[詳細](docs/benchmark.md)） |
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
+| `mate_bench` | df-pn 詰み探索を局面集で解き、結果の内訳・探索量・時間を集計。最短詰み手数の正解と照合（[詳細](docs/mate_bench.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。`--alternate-rounds` で round ごとに A/B を交換し、JSON `blocks` に局面×round の順序と比、`binaries` に両エンジンの SHA-256 を保存。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](docs/compare_eval_nnue.md)） |
@@ -115,6 +116,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [nyugyoku_gensfen](docs/nyugyoku_gensfen.md) - 入玉アンカー局面から gensfen 用開始局面を生成
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [search_only_ab](docs/search_only_ab.md) - search-only A/B ベンチマーク（perf / ETW PMC）の詳細
+- [mate_bench](docs/mate_bench.md) - df-pn 詰み探索の局面集ベンチの詳細
 - [dump_effect_bucket_golden](docs/dump_effect_bucket_golden.md) - 形式一致 golden 用 effect bucket active index dump
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 - [shuffle_psv](docs/shuffle_psv.md) - PSV の再現可能なシャッフルと大規模ファイル向け段階削除
