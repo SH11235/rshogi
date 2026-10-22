@@ -42,6 +42,7 @@ pub fn game_ply_from_record(record: &[u8; PSV_SIZE]) -> u16 {
 
 /// `--input` (カンマ区切りのファイル / ディレクトリ / glob) または
 /// `--input-dir` + `--pattern` からファイル一覧を収集する。
+/// ディレクトリの列挙エラーは、読めた部分だけを入力と誤認しないよう伝播する。
 pub fn collect_input_paths(
     input: Option<&str>,
     input_dir: Option<&PathBuf>,
@@ -101,13 +102,26 @@ fn collect_input_dir(dir: &Path, pattern: &str) -> io::Result<Vec<PathBuf>> {
     let pat = glob::Pattern::new(pattern).map_err(|e| {
         io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
     })?;
-    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| e.path().file_name().and_then(|n| n.to_str()).is_some_and(|n| pat.matches(n)))
-        .map(|e| e.into_path())
-        .collect();
+    collect_matching_files(walkdir::WalkDir::new(dir), &pat)
+}
+
+fn collect_matching_files(
+    entries: impl IntoIterator<Item = Result<walkdir::DirEntry, walkdir::Error>>,
+    pattern: &glob::Pattern,
+) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io::Error::from)?;
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| pattern.matches(n))
+        {
+            paths.push(entry.into_path());
+        }
+    }
     paths.sort();
     Ok(paths)
 }
@@ -417,6 +431,21 @@ mod tests {
         let paths = collect_input_paths(Some(&input), None, "*.bin").unwrap();
 
         assert_eq!(paths, vec![a, b]);
+    }
+
+    #[test]
+    fn collect_input_paths_propagates_walk_error_after_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("valid.pack");
+        fs::write(&input, []).unwrap();
+        let valid = walkdir::WalkDir::new(&input).into_iter().next().unwrap();
+        assert!(valid.is_ok());
+        let invalid = walkdir::WalkDir::new(dir.path().join("missing")).into_iter().next().unwrap();
+        assert!(invalid.is_err());
+        let error =
+            collect_matching_files([valid, invalid], &glob::Pattern::new("*.pack").unwrap())
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
