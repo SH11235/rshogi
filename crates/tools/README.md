@@ -119,10 +119,10 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 - [shuffle_psv](docs/shuffle_psv.md) - PSV の再現可能なシャッフルと大規模ファイル向け段階削除
 - [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
-- [label_bench_positions](docs/label_bench_positions.md) - ベンチ局面の深い探索ラベリング（ground truth）
-- [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
-- [yardstick_label](docs/yardstick_label.md) - held-out hcpe を labeler の固定 depth 探索でラベル付け（物差し stage 1）
-- [yardstick_score](docs/yardstick_score.md) - labeler の WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
+- [label_bench_positions](docs/label_bench_positions.md) - 入力・NNUE・進行度係数を出力先から保護する深い探索ラベリング（ground truth）
+- [label_bench_dl](docs/label_bench_dl.md) - 入力・ONNX モデルを保護して label_bench jsonl に DL水匠 評価値を追記
+- [yardstick_label](docs/yardstick_label.md) - 読み取り専用資源と全 capture 出力の衝突を検査する held-out hcpe のラベリング（物差し stage 1）
+- [yardstick_score](docs/yardstick_score.md) - 全入力ラベルを保護し、WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測

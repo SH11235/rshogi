@@ -107,6 +107,17 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 | `--onnx-gpu-id <i32>` | 0 | ONNX: CUDA device id（負値で CPU） |
 | `--onnx-eval-scale <f32>` | 600 | ONNX: winrate→cp 変換スケール |
 
+## 出力先の保護
+
+NNUE モードでは、入力 hcpe と指定した NNUE・進行度係数・SPSA パラメータへの出力を拒否します。
+ONNX モードでは、入力 hcpe と `--onnx-model` に指定したファイルを保護対象とし、無視される NNUE 用オプションのファイルは開きません。
+ONNX モデルから参照される外部 tensor data のファイルは検査対象外です。
+同一パス、symlink、hardlink、Windows の大小文字違いによる同一実体への出力を検査します。
+
+`--capture-depths` の全出力は、資源との衝突と出力同士の衝突をまとめて検査してから上書きします。
+後続の出力に衝突があっても、先行する既存出力を切り詰めません。衝突しない既存出力は上書きされます。
+同時アクセスや途中失敗時の制約は[共通の出力保護](tools-reference.md#ラベル評価ツールの出力保護)を参照してください。
+
 ## depth sweep を 1 回の探索で（`--capture-depths`）
 
 depth 選定（L0）で複数 depth を比べるとき、`--depth 9` / `12` / `15` を別々に 3 回探索する代わりに
