@@ -252,11 +252,11 @@ async fn copy_game(primary: &Bucket, backup: &Bucket, meta_key: &str) -> Result<
     Ok(verification)
 }
 
-async fn alert(env: &Env, state: &mut Checkpoint) {
+async fn alert(env: &Env, state: &mut Checkpoint) -> bool {
     let now = Date::now().as_millis();
     if state.last_error.is_none() && !state.lagging(now) && state.unverified_legacy == 0 {
         state.notification = "idle".into();
-        return;
+        return false;
     }
     let Some(url) = env
         .var(ConfigKeys::KIFU_BACKUP_ALERT_URL)
@@ -265,11 +265,11 @@ async fn alert(env: &Env, state: &mut Checkpoint) {
         .filter(|v| !v.is_empty())
     else {
         state.notification = "unconfigured".into();
-        return;
+        return false;
     };
     let due = state.due_alerts(now);
     if !due.any() {
-        return;
+        return false;
     }
     let sent = async {
         let parsed = worker::Url::parse(&url).map_err(|_| failure("invalid notification URL"))?;
@@ -307,9 +307,10 @@ async fn alert(env: &Env, state: &mut Checkpoint) {
     if sent.is_err() {
         crate::structured_log!(event: "kifu_backup_notification_failed", component: "kifu_backup");
     }
+    true
 }
 
-async fn run(env: &Env, deadline_ms: u64) -> Result<Outcome> {
+async fn run(env: &Env, deadline_ms: u64, notification_attempted: &mut bool) -> Result<Outcome> {
     let Ok(backup) = env.bucket(ConfigKeys::KIFU_BACKUP_BUCKET_BINDING) else {
         return Ok(Outcome::new(false, Checkpoint::default()));
     };
@@ -373,14 +374,16 @@ async fn run(env: &Env, deadline_ms: u64) -> Result<Outcome> {
     if let Err(error) = work {
         outcome.state.last_error = Some(error.to_string());
     }
-    alert(env, &mut outcome.state).await;
+    // checkpoint 保存が失敗しても、同じ実行で通知を再試行しない。
+    *notification_attempted |= alert(env, &mut outcome.state).await;
     outcome.state.lease_until_ms = 0;
     save_state(&backup, &outcome.state, Some(&etag)).await?;
     Ok(outcome)
 }
 
 pub(crate) async fn scheduled(env: &Env, deadline_ms: u64) {
-    match run(env, deadline_ms).await {
+    let mut notification_attempted = false;
+    match run(env, deadline_ms, &mut notification_attempted).await {
         Ok(outcome) => crate::structured_log!(
             event: "kifu_backup_progress", component: "kifu_backup",
             enabled: outcome.enabled, busy: outcome.busy, processed: outcome.processed,
@@ -389,11 +392,13 @@ pub(crate) async fn scheduled(env: &Env, deadline_ms: u64) {
         ),
         Err(_) => {
             crate::structured_log!(event: "kifu_backup_failed", component: "kifu_backup");
-            let mut state = Checkpoint {
-                last_error: Some("checkpoint/binding unavailable".into()),
-                ..Checkpoint::default()
-            };
-            alert(env, &mut state).await;
+            if !notification_attempted {
+                let mut state = Checkpoint {
+                    last_error: Some("checkpoint/binding unavailable".into()),
+                    ..Checkpoint::default()
+                };
+                alert(env, &mut state).await;
+            }
         }
     }
 }
@@ -427,7 +432,10 @@ pub(crate) async fn try_handle(req: &Request, env: &Env) -> Result<Option<Respon
 
 async fn handle(req: &Request, env: &Env, action: &str) -> Result<Response> {
     if req.method() == Method::Post && action == "run" {
-        let outcome = run(env, Date::now().as_millis().saturating_add(20_000)).await?;
+        let mut notification_attempted = false;
+        let outcome =
+            run(env, Date::now().as_millis().saturating_add(20_000), &mut notification_attempted)
+                .await?;
         return json(&outcome);
     }
     let Ok(backup) = env.bucket(ConfigKeys::KIFU_BACKUP_BUCKET_BINDING) else {

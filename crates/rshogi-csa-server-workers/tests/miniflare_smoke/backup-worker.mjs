@@ -46,6 +46,13 @@ export default class extends worker {
       }),
       ...(backup ? { KIFU_BACKUP_BUCKET: wrap(backup, {
         put: async (key, ...args) => {
+          if (key === 'control/kifu-backup-v1.json' && faults.finalCheckpointPut) {
+            const state = await new Response(args[0]).json();
+            if (state.lease_until_ms === 0) {
+              delete faults.finalCheckpointPut;
+              throw new Error('injected final checkpoint PUT failure');
+            }
+          }
           if (key.startsWith('snapshots/')) {
             if (faults.snapshotDelayMs) {
               await new Promise(resolve => setTimeout(resolve, faults.snapshotDelayMs));

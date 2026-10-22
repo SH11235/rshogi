@@ -208,6 +208,31 @@ describe("Miniflare: versioned kifu backup and restore", () => {
     expect((await run()).state.last_error).toBeNull();
   });
 
+  it.each([200, 500])("does not repeat a notification after final checkpoint failure (webhook %i)", async (status) => {
+    await seed("legacy-checkpoint-failure", "wdoor", START, false);
+    alertStatus = status;
+    await faults({ finalCheckpointPut: true });
+    expect((await mf.dispatchFetch(`${ORIGIN}/__test/cron`)).status).toBe(200);
+    expect(await snapshots()).toHaveLength(1);
+    const state = await (await backup.get(STATE_KEY))!.json<State>();
+    expect(state.lease_until_ms).toBeGreaterThan(0);
+    expect(state.last_alert_ms).toBe(0);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.body).toContain("failed=false");
+    expect(alerts[0]?.body).toContain("unverified_legacy=1");
+  });
+
+  it("notifies a final checkpoint failure when no notification was attempted", async () => {
+    await seed("checkpoint-failure");
+    await faults({ finalCheckpointPut: true });
+    expect((await mf.dispatchFetch(`${ORIGIN}/__test/cron`)).status).toBe(200);
+    expect(await snapshots()).toHaveLength(1);
+    const state = await (await backup.get(STATE_KEY))!.json<State>();
+    expect(state.lease_until_ms).toBeGreaterThan(0);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.body).toContain("failed=true");
+  });
+
   it("limits persistent legacy reminders to one per day", async () => {
     await seed("legacy-reminder", "wdoor", START, false);
     const first = await run();

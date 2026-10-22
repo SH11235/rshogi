@@ -1656,6 +1656,7 @@ checkpoint の ETag と 60 秒 lease で同時実行を制限し、クラッシ�
 通知先に管理 token や棋譜を送らず、redirect は追わない。checkpoint に種類別の最終試行時刻を保存し、
 失敗・遅延はそれぞれ 1 時間に 1 回、未検証 legacy は 24 時間に 1 回に抑える。
 legacy の通知直後でも新たな失敗・遅延を通知でき、同時に期限が来た種類は 1 回の webhook にまとめる。
+1 実行の通知試行は最大 1 回で、通知後の checkpoint 保存に失敗しても、その実行では再送しない。
 既存 checkpoint に種類別時刻がなければ未通知として読み込む。
 checkpoint 自体を読み書きできない障害では永続的な抑制ができず、scheduled の発火ごとに通知し得る。
 実行後の `notification` は、通知対象がなければ `idle`、通知先未設定なら `unconfigured`、最終送信の成功は
@@ -1698,6 +1699,11 @@ expiry のない lifecycle だけでは API の削除・上書きを防げない
 上書き・削除を防ぐが、権限を持つ管理者は lock 自体を変更できる。
 [IaC の lifecycle](https://developers.cloudflare.com/r2/buckets/object-lifecycles/) と lock の drift を
 運用監視し、変更権限を制限する。
+
+旧版への rollback 前に、その版が現在の checkpoint と snapshot の形式を読めることを確認する。
+未知の checkpoint フィールドや非 UTF-8 snapshot の base64 表現を読めない版へ戻す場合は、
+`KIFU_BACKUP_BUCKET` の binding を外した構成でバックアップを停止し、bucket と `control/` を保全する。
+対応する版で再開し、checkpoint の削除・書換えで旧版の読込みを通さない。
 
 ### 14.4 CLI と復元手順
 
