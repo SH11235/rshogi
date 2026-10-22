@@ -120,25 +120,25 @@ impl Settings {
 
     /// 条件の指紋。ファイル型 option はパスでなく内容の SHA-256 で入れる。
     pub fn computed_fingerprint(&self) -> Result<String> {
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&self.normalized())?)))
+    }
+
+    /// 指紋の元になる形。版は入れない (入れると版を記録する前の台帳と指紋が変わる)。
+    fn normalized(&self) -> Self {
         let mut normalized = self.clone();
         normalized.fingerprint = String::new();
-        // 版は指紋に入れない (入れると版を記録する前の台帳と指紋が変わる)。
         normalized.engine_version = None;
         for (k, hash) in &self.content_sha256 {
             if normalized.options.contains_key(k) {
                 normalized.options.insert(k.clone(), format!("sha256:{hash}"));
             }
         }
-        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&normalized)?)))
+        normalized
     }
 
-    /// 版を除いて同じ条件か。
-    pub fn same_apart_from_version(&self, other: &Self) -> bool {
-        let strip = |s: &Self| Self {
-            engine_version: None,
-            ..s.clone()
-        };
-        strip(self) == strip(other)
+    /// 版とファイル型 option のパスを除いて同じ条件か (モデルを移しても serve は同じ指紋で追記する)。
+    pub fn same_condition(&self, other: &Self) -> bool {
+        self.normalized() == other.normalized()
     }
 
     pub fn draw(&self) -> BTreeMap<String, String> {
@@ -261,6 +261,16 @@ impl LockedFile {
     }
 }
 impl Drop for LockedFile {
+    fn drop(&mut self) {
+        if let Err(err) = self.0.unlock() {
+            eprintln!("unlock: {err}");
+        }
+    }
+}
+
+/// 閉じるだけでは、同時に fork された子プロセスが同じファイル記述を持つ間ロックが残るので明示的に外す。
+struct UnlockOnDrop(File);
+impl Drop for UnlockOnDrop {
     fn drop(&mut self) {
         if let Err(err) = self.0.unlock() {
             eprintln!("unlock: {err}");
@@ -477,6 +487,7 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
     file.try_lock_shared().with_context(|| {
         format!("取り込み元の台帳を書き込み中のプロセスがあります: {}", path.display())
     })?;
+    let _unlock = UnlockOnDrop(file.try_clone()?);
     let mut reader = BufReader::new(file);
     let mut hash = Sha256::new();
     let mut complete = 0u64;
@@ -522,7 +533,9 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
                 return Ok(());
             }
             // 指紋が同じでも条件の中身が違う行は、指紋の付け間違いか改変なので取り込まない。
-            if !rec.settings.same_apart_from_version(&settings) {
+            if rec.settings.computed_fingerprint()? != settings.fingerprint
+                || !rec.settings.same_condition(&settings)
+            {
                 bail!("取り込み元に指紋と条件の合わない行があります: {}", rec.reading.key);
             }
             merge_engine_version(&mut settings, &rec.settings)?;

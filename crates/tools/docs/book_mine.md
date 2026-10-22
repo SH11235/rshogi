@@ -366,7 +366,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
   --nodes 1000000000 --multipv 3 --hash 1024
 ```
 
-取り込み元に条件が複数あれば `--fingerprint` で選びます (省略時は唯一の条件)。取り込み元は共有 lock で読み、ファイルを変更しません。serve などが書き込み中の台帳は拒否するので、複製してから渡します。改行で終わらない末尾の行は無視します。選んだ条件の行は、どの行も条件の中身が指紋と合うこと (版を除いて同じ条件であること) を確かめ、合わない行があれば取り込みません。
+取り込み元に条件が複数あれば `--fingerprint` で選びます (省略時は唯一の条件)。取り込み元は共有 lock で読み、ファイルを変更しません。serve などが書き込み中の台帳は拒否するので、複製してから渡します。改行で終わらない末尾の行は無視します。選んだ条件の行は、どの行も条件の中身から計算し直した指紋が選んだ指紋と合い、版とファイル型 option のパスを除いて同じ条件であることを確かめ、合わない行があれば取り込みません (モデルを別のパスへ移した後に serve が追記した行は同じ条件です)。
 
 取り込み先の台帳は排他 lock を取って追記するので、その台帳を使っている serve を止めてから実行します (使用中なら lock の取得に失敗して何も書きません)。
 
@@ -379,12 +379,12 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 | それ以外の USI option (`DrawValueBlack` 等) | 名前と値 |
 | エンジン | バイナリが同じか、ソースの版が同じ |
 
-エンジンのバイナリの違い (CPU 向けの最適化・production build など) は条件の違いとみなしません。ソースの版は、serve と import-journal がエンジンを `--source-version` 付きで起動して得る値で、台帳の条件に記録します (条件の指紋には含めないので、記録する前の台帳の指紋は変わりません)。版が得られないときは stderr に 1 行の警告を出します。rshogi-usi の版は次の形です ([rshogi-usi の README](../../rshogi-usi/README.md))。
+エンジンのバイナリの違い (CPU 向けの最適化・production build など) は条件の違いとみなしません。ソースの版は、serve と import-journal がエンジンを `--source-version` 付きで起動して得る値で、台帳の条件に記録します (条件の指紋には含めないので、記録する前の台帳の指紋は変わりません)。版が得られない・`unknown`・`-dirty` のときは、別のバイナリとの間の取り込みに `--force` が要ることを stderr に 1 行で警告します。rshogi-usi の版は次の形です ([rshogi-usi の README](../../rshogi-usi/README.md))。
 
 - エンジンのソース (`crates/rshogi-core`・`crates/rshogi-book`・`crates/rshogi-usi`・ルートの `Cargo.toml`・`Cargo.lock`) の HEAD の git の id をまとめた id。tools や docs だけの commit では変わりません
 - そのソースに commit されていない変更があれば `-dirty`
-- 有効な feature のうち、探索・評価の結果を変えないと確かめたもの (モデルの形式の選択・計数・診断など) 以外を `+` 以降に名前順で付けます。新しい feature は結果を変える側に入ります
-- git の作業木の最上位でビルドしていなければ `unknown`
+- 有効な feature のうち、探索・評価の結果を変えないと確かめたもの (モデルの形式の選択・計数・診断など) 以外を `+` 以降に名前順で付けます。新しい feature は結果を変える側に入ります。`nnue-progress-diff` も付く側に入るので、同じソースでも universal edition と、それを束ねる specific preset (L0=1536 系など) のビルドは版が違います
+- git が無い・失敗する (`safe.directory` で拒否される等)、または git の作業木の最上位でビルドしていなければ `unknown`
 
 版が違う、どちらかの版が分からない (記録する前の台帳、`--source-version` に答えないエンジン、`unknown`、`-dirty`) ときは、バイナリが同じでなければ拒否します。探索の結果を変えない変更 (速度の改善だけ等) しか無い版どうしなら、`--force` で取り込めます。`--force` が許すのはエンジンの版の違いだけで、他の項目の違いは拒否します。
 

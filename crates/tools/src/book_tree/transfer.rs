@@ -72,11 +72,24 @@ fn query_source_version(engine: &Path, timeout: Duration) -> Option<String> {
 
 /// 版が分からないときに stderr へ 1 行の警告を出す。
 pub(super) fn warn_unknown_version(engine: &Path, version: &Option<String>) {
-    if version.is_none() {
-        eprintln!(
-            "警告: エンジンのソースの版が分かりません (--source-version に答えません): {}。この条件の読みを別のバイナリへ取り込むには --force が要ります",
-            engine.display()
-        );
+    if let Some(warning) = version_warning(version.as_deref()) {
+        eprintln!("警告: {warning}: {}", engine.display());
+    }
+}
+
+/// 別のバイナリとの間で読みを取り込むのに使えない版なら、その理由を返す。
+fn version_warning(version: Option<&str>) -> Option<&'static str> {
+    match version {
+        None => Some(
+            "エンジンが --source-version に答えないので版が分かりません。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+        ),
+        Some(v) if v.starts_with("unknown") => Some(
+            "エンジンの版が unknown です (git の作業木の外でのビルド、または git が使えない)。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+        ),
+        Some(v) if v.contains("-dirty") => Some(
+            "エンジンは commit されていない変更を含むビルド (-dirty) です。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+        ),
+        Some(_) => None,
     }
 }
 
@@ -266,6 +279,18 @@ mod tests {
     }
 
     #[test]
+    fn unusable_versions_are_warned_and_dirty_is_told_apart() {
+        assert!(version_warning(Some(VERSION_A)).is_none());
+        let none = version_warning(None).unwrap();
+        let unknown = version_warning(Some("unknown")).unwrap();
+        let dirty = version_warning(Some(&format!("{VERSION_A}-dirty+deep"))).unwrap();
+        assert!(unknown.contains("unknown"));
+        assert!(dirty.contains("-dirty"));
+        assert_ne!(none, unknown);
+        assert_ne!(unknown, dirty);
+    }
+
+    #[test]
     fn engine_without_the_flag_has_no_version() {
         let dir = tempfile::tempdir().unwrap();
         let m = machine(dir.path(), "a", "not an executable", "model");
@@ -451,6 +476,39 @@ mod tests {
         write_lines(&path, &[good.clone(), lying.clone()]);
         assert!(read_source(&path, None).is_err());
         write_lines(&path, &[lying]);
+        assert!(read_source(&path, None).is_err());
+
+        // モデルを別のパスへ移した後の行は同じ条件として受け入れる。
+        let moved_dir = dir.path().join("moved");
+        std::fs::create_dir_all(&moved_dir).unwrap();
+        std::fs::copy(&a.model, moved_dir.join("model.bin")).unwrap();
+        let moved = Settings::new(&ReadingArgs {
+            engine_options: vec![
+                format!("EvalFile={}", moved_dir.join("model.bin").display()),
+                "DrawValueBlack=-50".into(),
+            ],
+            ..reading_args(&a, 100, &[])
+        })
+        .unwrap();
+        assert_ne!(moved.options, src.options);
+        assert_eq!(moved.fingerprint, src.fingerprint);
+        write_lines(
+            &path,
+            &[
+                good.clone(),
+                record_json(&moved, &reading(3, &moved, "resign")),
+            ],
+        );
+        assert_eq!(read_source(&path, None).unwrap().readings.len(), 2);
+        let mut changed_draw = src.clone();
+        changed_draw.options.insert("DrawValueBlack".into(), "0".into());
+        write_lines(
+            &path,
+            &[
+                good.clone(),
+                record_json(&changed_draw, &reading(3, &src, "resign")),
+            ],
+        );
         assert!(read_source(&path, None).is_err());
 
         // 選ばない条件の版の食い違いは問わない。

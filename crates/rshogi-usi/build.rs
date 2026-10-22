@@ -1,7 +1,8 @@
 //! エンジンのソースの版の材料を埋め込む (`rshogi-usi --source-version` で出す)。
 //!
 //! - `RSHOGI_SOURCE_ID`: HEAD のエンジンのソース (`ENGINE_SOURCES`) の git の id をまとめた id。
-//!   そこに commit されていない変更があれば `-dirty`、git の作業木の最上位でビルドしていなければ `unknown`
+//!   そこに commit されていない変更があれば `-dirty`。git が無い・失敗する、または git の作業木の最上位で
+//!   ビルドしていなければ `unknown`
 //! - `RSHOGI_USI_RESULT_FEATURES`: rshogi-usi 自身の feature のうち結果を変えうるもの
 //!
 //! tools・docs だけの commit では id は変わらない。CPU 向けの最適化 (target-cpu・SIMD・profile) も版に含めない。

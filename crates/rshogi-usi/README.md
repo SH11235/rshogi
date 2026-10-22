@@ -39,7 +39,8 @@ The engine will start in USI mode, waiting for commands from stdin.
 - そのソースに commit されていない変更 (追跡しているファイル) があれば `-dirty` が付きます
 - 有効な feature のうち、探索・評価の結果を変えないと確かめたもの以外が `+` 以降に名前順で付きます
   (判定は `crates/rshogi-core/build/result_features.rs` と `crates/rshogi-usi/build/source_version.rs`。新しい feature は付く側)
-- git の作業木の最上位でビルドしていなければ `unknown` です
+- git が無い・失敗する (`safe.directory` で拒否される等)、または git の作業木の最上位でビルドしていなければ `unknown` です
+- `nnue-progress-diff` も付く側に入るので、同じソースでも universal edition と、それを束ねる specific preset のビルドは版が違います
 - CPU 向けの最適化 (target-cpu・SIMD・build profile) は版に含めません
 
 探索中の `isready` には、探索を停止せず `readyok` を返します。TT / EvalHash の
