@@ -1326,6 +1326,33 @@ fn start_traced(state: &Path, config: &Path, trace: &Path) -> Server {
     command.arg("--trace-dir").arg(trace);
     Server(command.spawn().unwrap())
 }
+/// 記録から MultiPV を組み直す。`limit` が無ければ台帳と同じ読み、あれば nodes がそれ以下の行に限る。
+fn multipv_at(lines: &[&str], limit: Option<u64>) -> Vec<Value> {
+    let mut last = BTreeMap::new();
+    for line in lines {
+        let tokens: Vec<_> = line.split_whitespace().collect();
+        if !line.contains(" pv ")
+            || !line.contains(" score ")
+            || tokens.contains(&"lowerbound")
+            || tokens.contains(&"upperbound")
+        {
+            continue;
+        }
+        let get = |name| tokens.iter().position(|t| *t == name).map(|i| tokens[i + 1]);
+        let nodes = get("nodes").map(|n| n.parse::<u64>().unwrap());
+        if limit.is_some_and(|limit| nodes.is_none_or(|n| n > limit)) {
+            continue;
+        }
+        let index: usize = get("multipv").unwrap_or("1").parse().unwrap();
+        assert_eq!(get("score"), Some("cp"));
+        last.insert(
+            index,
+            json!({"move": get("pv").unwrap(), "cp": get("cp").unwrap().parse::<i32>().unwrap(),
+                "depth": get("depth").unwrap().parse::<u32>().unwrap()}),
+        );
+    }
+    last.into_values().collect()
+}
 fn trace_records(trace: &Path) -> Vec<(PathBuf, Vec<Value>)> {
     let mut files: Vec<_> = std::fs::read_dir(trace).unwrap().map(|e| e.unwrap().path()).collect();
     files.sort();
@@ -1346,6 +1373,9 @@ fn trace_keeps_info_lines_of_completed_searches_only_and_can_change_across_resta
     std::fs::create_dir(state).unwrap();
     let trace = dir.path().join("trace");
     let config = fixture(state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    data["noisy"] = json!(true);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
     add_tree(state, "a");
     let mut server = start_traced(state, &config, &trace);
     wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
@@ -1376,10 +1406,12 @@ fn trace_keeps_info_lines_of_completed_searches_only_and_can_change_across_resta
         assert!(started <= finished);
         let lines: Vec<_> =
             t["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
-        assert!(lines.iter().all(|l| l.starts_with("info ") && !l.starts_with("info string")));
-        assert!(lines.iter().any(|l| l.starts_with("info depth 1 nodes 1 ")));
-        let last = reading["multipv"].as_array().unwrap().len();
-        assert!(lines[lines.len() - 1].contains(&format!(" multipv {last} ")));
+        assert!(lines.iter().all(|l| l.starts_with("info")));
+        assert!(lines.contains(&"info string alive"));
+        assert!(lines.iter().any(|l| l.contains(" lowerbound ")));
+        assert_eq!(reading["multipv"], json!(multipv_at(&lines, None)));
+        // 停滞中の行 (nodes 1) だけが上限 100 以下で、最後の行 (nodes 101) は上限を超える。
+        assert_eq!(multipv_at(&lines, Some(100))[0]["cp"], 0);
     }
     // 台帳の読みだけで済む起動は探索しないので記録を書かず、付け外しで起動を拒否しない。
     std::fs::remove_file(state.join("stop")).unwrap();
@@ -1395,31 +1427,34 @@ fn trace_keeps_info_lines_of_completed_searches_only_and_can_change_across_resta
     assert_eq!(trace_records(&trace).iter().map(|(_, r)| r.len()).sum::<usize>(), journal.len());
 }
 
-#[cfg(unix)]
 #[test]
-fn trace_write_failure_is_alerted_once_and_readings_continue() {
-    use std::os::unix::fs::PermissionsExt;
+fn trace_failures_are_alerted_once_and_readings_continue_until_the_trace_can_be_written() {
     let dir = tempfile::tempdir().unwrap();
     let state = &dir.path().join("state");
     std::fs::create_dir(state).unwrap();
-    let trace = dir.path().join("trace");
-    std::fs::create_dir(&trace).unwrap();
-    std::fs::set_permissions(&trace, std::fs::Permissions::from_mode(0o555)).unwrap();
-    if std::fs::write(trace.join("probe"), "").is_ok() {
-        // 権限を無視できる実行者では書き込みの失敗を作れない。
-        return;
-    }
+    // trace-dir の親が通常のファイルなので、dir を作れない。
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, "").unwrap();
+    let trace = blocker.join("trace");
     let config = fast_fixture(state);
     add_tree(state, "a");
     let mut server = start_traced(state, &config, &trace);
     wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
+    wait_for(|| alerts(state).contains("探索の記録を書けません"));
+    assert_eq!(std::fs::read_to_string(state.join("journal.jsonl")).unwrap().lines().count(), 4);
+    std::fs::remove_file(&blocker).unwrap();
+    let child = child_position_after_move(&format!("{ROOT} 1"), "5i4i").unwrap().to_sfen();
+    add_root(state, "r", strip_ply(&child));
+    // 子は未知の局面なので投了の葉になり、木は NOT_READY で終わる。
+    wait_for(|| status(&out(state, "r", "w")) == "NOT_READY\n");
     stop(state, &mut server);
-    std::fs::set_permissions(&trace, std::fs::Permissions::from_mode(0o755)).unwrap();
     let journal = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
-    assert_eq!(journal.lines().count(), 4);
+    let files = trace_records(&trace);
+    assert_eq!(files.len(), 1);
+    assert!(!files[0].1.is_empty());
+    assert_eq!(files[0].1.len(), journal.lines().count() - 4);
     assert_eq!(
         alerts(state).lines().filter(|l| l.contains("探索の記録を書けません")).count(),
         1
     );
-    assert!(std::fs::read_dir(&trace).unwrap().next().is_none());
 }

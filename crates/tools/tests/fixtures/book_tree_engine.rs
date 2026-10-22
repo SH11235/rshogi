@@ -71,6 +71,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            let noisy = config.get("noisy").is_some_and(|s| s == "true");
+            if noisy && let Some(row) = rows.first() {
+                let mv = row.split_whitespace().next().ok_or("手がありません")?;
+                println!("info depth 2 multipv 1 score cp 3 pv {mv}");
+            }
             for (index, row) in rows.iter().enumerate() {
                 let fields: Vec<_> = row.split_whitespace().collect();
                 println!(
@@ -80,6 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     fields[1],
                     fields[0]
                 );
+            }
+            if noisy && let Some(row) = rows.first() {
+                let mv = row.split_whitespace().next().ok_or("手がありません")?;
+                println!("info depth 99 nodes 150 multipv 1 score cp 12345 lowerbound pv {mv}");
             }
             let bestmove =
                 config.get("bestmove").map(String::as_str).unwrap_or_else(|| {
