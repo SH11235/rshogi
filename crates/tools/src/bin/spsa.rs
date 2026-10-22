@@ -26,8 +26,8 @@ use tools::selfplay::{
     ensure_start_positions_within_max_moves, load_start_positions,
 };
 use tools::spsa_param_mapping::{
-    MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
-    register_unique_parameter,
+    MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, SPSA_PARAMS_FORMAT_HEADER,
+    parse_param_line, register_unique_parameter, validate_spsa_params_format,
 };
 
 /// `meta.json` のフォーマットバージョン。
@@ -281,8 +281,13 @@ struct Cli {
     #[arg(long)]
     init_from: Option<PathBuf>,
 
+    /// 未宣言のparamsがc_end/r_endであることを明示確認する（数値・既存SHAは変更しない）
+    #[arg(long)]
+    assume_c_end_r_end: bool,
+
     /// 既存の `<run-dir>/state.params` を canonical で atomic に上書きして
     /// fresh start する。`--init-from` の指定が必須。
+    /// canonicalの全行とengine mappingの検証を、既存成果物の変更前に行う。
     ///
     /// 既存 `meta.json` / 各 CSV も削除して fresh run として扱う。`--resume`
     /// とは同時指定不可 (意味が矛盾)。
@@ -1477,10 +1482,14 @@ struct InitMatchReport {
     top_diffs: Vec<(String, f64, f64, f64)>, // (name, init_v, existing_v, |Δ|/step)
 }
 
-fn verify_init_matches_existing(init_path: &Path, existing_path: &Path) -> Result<InitMatchReport> {
-    let init_params = read_params(init_path)
+fn verify_init_matches_existing(
+    init_path: &Path,
+    existing_path: &Path,
+    assume_c_end_r_end: bool,
+) -> Result<InitMatchReport> {
+    let init_params = read_params(init_path, assume_c_end_r_end)
         .with_context(|| format!("verify: failed to read init-from {}", init_path.display()))?;
-    let existing_params = read_params(existing_path)
+    let existing_params = read_params(existing_path, assume_c_end_r_end)
         .with_context(|| format!("verify: failed to read existing {}", existing_path.display()))?;
 
     use std::collections::BTreeSet;
@@ -1931,14 +1940,16 @@ fn read_hostname() -> String {
     "unknown".into()
 }
 
-fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
-    read_params_with_translator(path, &EngineNameTranslator::empty())
+fn read_params(path: &Path, assume_c_end_r_end: bool) -> Result<Vec<SpsaParam>> {
+    read_params_with_translator(path, &EngineNameTranslator::empty(), assume_c_end_r_end)
 }
 
 fn read_params_with_translator(
     path: &Path,
     translator: &EngineNameTranslator,
+    assume_c_end_r_end: bool,
 ) -> Result<Vec<SpsaParam>> {
+    validate_spsa_params_format(path, assume_c_end_r_end)?;
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut params = Vec::new();
@@ -1979,6 +1990,7 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
         .with_context(|| format!("failed to create temp file under {}", parent.display()))?;
     {
         let mut w = BufWriter::new(tmp.as_file_mut());
+        writeln!(w, "{SPSA_PARAMS_FORMAT_HEADER}")?;
         for p in params {
             // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
             // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
@@ -3103,14 +3115,6 @@ fn main() -> Result<()> {
     let force_init_cleanup_paths = default_force_init_cleanup_paths(&cli.run_dir);
     let force_init_cleanup_refs: Vec<&Path> =
         force_init_cleanup_paths.iter().map(|p| p.as_path()).collect();
-    let effective_action = apply_init_action(
-        &init_action,
-        cli.init_from.as_deref(),
-        &state_params,
-        meta_path.as_path(),
-        &force_init_cleanup_refs,
-    )?;
-
     let translator = match &cli.engine_param_mapping {
         Some(path) => {
             let t = EngineNameTranslator::from_mapping_file(path)?;
@@ -3119,7 +3123,19 @@ fn main() -> Result<()> {
         }
         None => EngineNameTranslator::empty(),
     };
-    let mut params = read_params_with_translator(&state_params, &translator)?;
+    if let Some(path) = &cli.init_from {
+        read_params_with_translator(path, &translator, cli.assume_c_end_r_end)?;
+    }
+    let effective_action = apply_init_action(
+        &init_action,
+        cli.init_from.as_deref(),
+        &state_params,
+        meta_path.as_path(),
+        &force_init_cleanup_refs,
+    )?;
+
+    let mut params =
+        read_params_with_translator(&state_params, &translator, cli.assume_c_end_r_end)?;
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
     // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
     let schedule = ScheduleConfig {
@@ -3240,7 +3256,11 @@ fn main() -> Result<()> {
                         .init_from
                         .as_ref()
                         .expect("Resume{verify_init:true} requires init_from");
-                    let report = verify_init_matches_existing(init_path, &state_params)?;
+                    let report = verify_init_matches_existing(
+                        init_path,
+                        &state_params,
+                        cli.assume_c_end_r_end,
+                    )?;
                     report.print_summary(init_path, &state_params);
                     if report.has_name_set_mismatch() {
                         eprintln!(
@@ -3914,13 +3934,16 @@ mod tests {
             ("SPSA_X", "SPSA_X"),
             ("SPSA_NET_ft_b_1", "SPSA_NET_ft_b_01"),
         ] {
-            std::fs::write(&path, format!("# header\n{first},int,1,0,10,1,0.002\n\n{second},int,2,0,10,1,0.002 [[NOT USED]]\n")).unwrap();
-            let error = read_params(&path).unwrap_err().to_string();
+            std::fs::write(&path, format!("{SPSA_PARAMS_FORMAT_HEADER}\n{first},int,1,0,10,1,0.002\n\n{second},int,2,0,10,1,0.002 [[NOT USED]]\n")).unwrap();
+            let error = read_params(&path, false).unwrap_err().to_string();
             assert!(error.contains("line 4") && error.contains("line 2"), "{error}");
         }
-        std::fs::write(&path, "# header\nSPSA_A,int,1,0,10,1,0.002\nSPSA_B,int,2,0,10,1,0.002\n")
-            .unwrap();
-        assert_eq!(read_params(&path).unwrap().len(), 2);
+        std::fs::write(
+            &path,
+            "# spsa-format: c-end-r-end-v1\nSPSA_A,int,1,0,10,1,0.002\nSPSA_B,int,2,0,10,1,0.002\n",
+        )
+        .unwrap();
+        assert_eq!(read_params(&path, false).unwrap().len(), 2);
         let translator = EngineNameTranslator {
             table: HashMap::from([
                 ("SPSA_A".into(), ("SPSA_NET_ft_b_1".into(), false)),
@@ -3928,7 +3951,8 @@ mod tests {
             ]),
             enabled: true,
         };
-        let error = format!("{:#}", read_params_with_translator(&path, &translator).unwrap_err());
+        let error =
+            format!("{:#}", read_params_with_translator(&path, &translator, false).unwrap_err());
         assert!(
             error.contains("translated parameter SPSA_B")
                 && error.contains("line 3")
@@ -4264,7 +4288,8 @@ mod tests {
     // ========================================================================
 
     fn write_params_file(path: &Path, lines: &[&str]) {
-        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+        std::fs::write(path, format!("{SPSA_PARAMS_FORMAT_HEADER}\n{}\n", lines.join("\n")))
+            .unwrap();
     }
 
     #[test]
@@ -4293,7 +4318,7 @@ mod tests {
                 "p3,int,160,0,1000,10,0.002",
             ],
         );
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         assert_eq!(report.total, 4);
         assert!(
             (report.median_step_units - 3.0).abs() < 1e-9,
@@ -4310,7 +4335,7 @@ mod tests {
         let line = "foo,int,100,0,1000,50,0.002";
         write_params_file(&init, &[line]);
         write_params_file(&existing, &[line]);
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         assert_eq!(report.total, 1);
         assert_eq!(report.matched_within_half_step, 1);
         assert!((report.median_step_units - 0.0).abs() < 1e-9);
@@ -4327,7 +4352,7 @@ mod tests {
         // step=50 で diff=300 → 6σ (>5σ)
         write_params_file(&init, &["foo,int,100,0,1000,50,0.002"]);
         write_params_file(&existing, &["foo,int,400,0,1000,50,0.002"]);
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         assert_eq!(report.total, 1);
         assert!(report.max_step_units >= 5.0);
         assert!(report.exceeds_strict_threshold());
@@ -4342,7 +4367,7 @@ mod tests {
         let existing = dir.path().join("existing.params");
         write_params_file(&init, &["foo,int,1,0,10,0.1,0.002"]);
         write_params_file(&existing, &["foo,int,2,0,10,0.1,0.002"]);
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         // diff=1, step=0.1 → 10σ
         assert!(
             report.max_step_units > 5.0,
@@ -4360,7 +4385,7 @@ mod tests {
         let existing = dir.path().join("existing.params");
         write_params_file(&init, &["foo,int,5,0,10,0,0.002"]);
         write_params_file(&existing, &["foo,int,5,0,10,0,0.002"]);
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         assert!(!report.max_step_units.is_nan());
         assert_eq!(report.matched_within_half_step, 1);
     }
@@ -4375,7 +4400,7 @@ mod tests {
             &existing,
             &["foo,int,100,0,1000,50,0.002", "qux,int,200,0,1000,50,0.002"],
         );
-        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        let report = verify_init_matches_existing(&init, &existing, false).unwrap();
         assert!(report.has_name_set_mismatch());
         assert_eq!(report.extra_in_init, vec!["bar"]);
         assert_eq!(report.missing_in_init, vec!["qux"]);
@@ -4416,10 +4441,12 @@ mod tests {
         }];
         write_params(&path, &params).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        // B-3 以降: is_int でも `{:.6}` 固定桁で f64 を保存する。
-        assert!(body.starts_with("Foo,int,42.000000,"), "actual: {body}");
+        assert!(
+            body.starts_with(&format!("{SPSA_PARAMS_FORMAT_HEADER}\nFoo,int,42.000000,")),
+            "actual: {body}"
+        );
         // ラウンドトリップ (parse は f64 なので "42" / "42.000000" のどちらでも復元可能)
-        let reloaded = read_params(&path).unwrap();
+        let reloaded = read_params(&path, false).unwrap();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].name, "Foo");
         assert_eq!(reloaded[0].value, 42.0);
@@ -4478,12 +4505,13 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             body,
-            "CommentNotUsed,int,1.000000,0,10,1,0.002 [[NOT USED]] //base=1\n\
+            "# spsa-format: c-end-r-end-v1\n\
+             CommentNotUsed,int,1.000000,0,10,1,0.002 [[NOT USED]] //base=1\n\
              NoCommentNotUsed,int,2.000000,0,10,1,0.002 [[NOT USED]]\n\
              CommentUsed,int,3.000000,0,10,1,0.002 //base=3\n"
         );
 
-        let reloaded = read_params(&path).unwrap();
+        let reloaded = read_params(&path, false).unwrap();
         assert_eq!(reloaded.len(), 3);
         assert_eq!(reloaded[0].name, "CommentNotUsed");
         assert!(reloaded[0].not_used);

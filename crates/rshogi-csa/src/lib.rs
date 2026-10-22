@@ -60,17 +60,19 @@ pub struct Hand {
 }
 
 impl Hand {
-    fn add_demoted(&mut self, pt: PieceType) {
-        match pt {
-            PieceType::Pawn => self.p += 1,
-            PieceType::Lance => self.l += 1,
-            PieceType::Knight => self.n += 1,
-            PieceType::Silver => self.s += 1,
-            PieceType::Gold => self.g += 1,
-            PieceType::Bishop => self.b += 1,
-            PieceType::Rook => self.r += 1,
-            PieceType::King => {}
-        }
+    fn add_demoted(&mut self, pt: PieceType) -> Result<()> {
+        let slot = match pt {
+            PieceType::Pawn => &mut self.p,
+            PieceType::Lance => &mut self.l,
+            PieceType::Knight => &mut self.n,
+            PieceType::Silver => &mut self.s,
+            PieceType::Gold => &mut self.g,
+            PieceType::Bishop => &mut self.b,
+            PieceType::Rook => &mut self.r,
+            PieceType::King => return Ok(()),
+        };
+        *slot = slot.checked_add(1).with_context(|| format!("hand count exceeds 255: {pt:?}"))?;
+        Ok(())
     }
     fn take_one(&mut self, pt: PieceType) -> Result<()> {
         if matches!(pt, PieceType::King) {
@@ -277,6 +279,7 @@ impl Position {
     /// SFEN 文字列（`<盤面> <手番> <持ち駒> [手数]`）から局面を作る。
     ///
     /// 手数は省略可能で、省略時は 1 とする。
+    /// 持ち駒の反復表記も合算し、先後・駒種ごとの合計が255枚を超える場合はエラーを返す。
     pub fn from_sfen(sfen: &str) -> Result<Self> {
         let mut fields = sfen.split_whitespace();
         let board = fields.next().context("SFEN が空です")?;
@@ -340,7 +343,7 @@ impl Position {
                     Color::White => &mut pos.hand_w,
                 };
                 for _ in 0..count.take().unwrap_or(1) {
-                    hand.add_demoted(ty);
+                    hand.add_demoted(ty)?;
                 }
             }
             anyhow::ensure!(count.is_none(), "SFEN の持ち駒が枚数で終わっています: {sfen}");
@@ -456,9 +459,16 @@ impl Position {
         out
     }
 
-    /// Apply a CSA move like "+7776FU" or "-0055KA".
+    /// CSA指し手（`+7776FU`、`-0055KA`など）を局面に適用する。
+    ///
+    /// 先頭7 byteを解釈し、それ以降の消費時間やコメントは無視する。
+    /// 将棋の完全な合法性検査は行わない。
+    ///
+    /// # Errors
+    /// 構文・座標・手番・移動元・持ち駒が不正、持ち駒が255枚を超える、または手数が
+    /// `u32::MAX`を超える場合はエラーを返し、局面を変更しない。
     pub fn apply_csa_move(&mut self, mv: &str) -> Result<()> {
-        anyhow::ensure!(mv.len() >= 7, "invalid CSA move format: {mv}");
+        validate_csa_move(mv)?;
         let bytes = mv.as_bytes();
         let side = match bytes[0] {
             b'+' => Color::Black,
@@ -471,48 +481,45 @@ impl Position {
         let ty = csa_rank_to_y(bytes[4] - b'0')?;
         let code = &mv[5..7];
         let (pty, promoted) = piece_from_csa_code(code)?;
-        // validate turn
         anyhow::ensure!(
             self.side_to_move == side,
             "turn mismatch: mv={mv} side_to_move={:?}",
             self.side_to_move
         );
-
-        // capture if any
+        let next_ply = self.ply.checked_add(1).context("CSA ply exceeds u32::MAX")?;
+        let mut next_hand = match side {
+            Color::Black => self.hand_b,
+            Color::White => self.hand_w,
+        };
         if let Some(dst) = self.board[ty][tx] {
             anyhow::ensure!(dst.color != side, "cannot capture own piece: {mv}");
-            // captured piece moves to hand of mover, demoted
-            let demoted_ty = dst.ty; // dst.promoted doesn't matter; demote
-            match side {
-                Color::Black => self.hand_b.add_demoted(demoted_ty),
-                Color::White => self.hand_w.add_demoted(demoted_ty),
-            }
+            next_hand.add_demoted(dst.ty)?;
         }
 
-        if fx == 0 && fy == 0 {
-            // drop
-            match side {
-                Color::Black => self.hand_b.take_one(pty)?,
-                Color::White => self.hand_w.take_one(pty)?,
-            }
-            self.board[ty][tx] = Some(Piece::new(pty, side, false));
+        let source = if fx == 0 && fy == 0 {
+            next_hand.take_one(pty)?;
+            None
         } else {
-            // normal move
             let fx = csa_file_to_x(fx)?;
             let fy = csa_rank_to_y(fy)?;
             let src = self.board[fy][fx].with_context(|| format!("no piece at source for {mv}"))?;
             anyhow::ensure!(src.color == side, "source piece color mismatch: {mv}");
-            // remove src
-            self.board[fy][fx] = None;
-            // place with promoted flag per destination code
-            self.board[ty][tx] = Some(Piece::new(pty, side, promoted));
-        }
+            Some((fx, fy))
+        };
 
+        if let Some((fx, fy)) = source {
+            self.board[fy][fx] = None;
+        }
+        self.board[ty][tx] = Some(Piece::new(pty, side, source.is_some() && promoted));
+        match side {
+            Color::Black => self.hand_b = next_hand,
+            Color::White => self.hand_w = next_hand,
+        }
         self.side_to_move = match self.side_to_move {
             Color::Black => Color::White,
             Color::White => Color::Black,
         };
-        self.ply += 1;
+        self.ply = next_ply;
         Ok(())
     }
 }
@@ -540,7 +547,7 @@ fn parse_hand_setup(pos: &mut Position, color: Color, payload: &str) -> Result<(
                 Color::Black => &mut pos.hand_b,
                 Color::White => &mut pos.hand_w,
             };
-            hand.add_demoted(pt);
+            hand.add_demoted(pt)?;
         } else {
             // 盤上配置
             let x = csa_file_to_x(file)?;
@@ -721,6 +728,8 @@ impl GameInfo {
 }
 
 /// Parse a CSA text and return initial position, list of move tokens, and game metadata.
+///
+/// 持ち駒の設定は先後・駒種ごとに255枚まで受理し、超過時はエラーを返す。
 pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
     let (pos, moves, info) = parse_csa_full(text)?;
     let simple_moves = moves
@@ -905,6 +914,20 @@ fn is_csa_move_line(s: &str) -> bool {
         && bytes[5..7].iter().all(u8::is_ascii_uppercase)
 }
 
+fn validate_csa_move(mv: &str) -> Result<()> {
+    anyhow::ensure!(is_csa_move_line(mv), "invalid CSA move format: {mv}");
+    let bytes = mv.as_bytes();
+    anyhow::ensure!(
+        &bytes[1..3] == b"00" || bytes[1..3].iter().all(|byte| (b'1'..=b'9').contains(byte)),
+        "invalid CSA move source: {mv}"
+    );
+    anyhow::ensure!(
+        bytes[3..5].iter().all(|byte| (b'1'..=b'9').contains(byte)),
+        "invalid CSA move destination: {mv}"
+    );
+    Ok(())
+}
+
 fn parse_special_move(s: &str) -> Option<SpecialMove> {
     // `%+ILLEGAL_ACTION` / `%-ILLEGAL_ACTION` のような手番付き形式も考慮
     let cmd = s.trim_start_matches('%').trim_start_matches(['+', '-']);
@@ -999,8 +1022,12 @@ fn usi_drop_to_csa_code(c: u8) -> Result<&'static str> {
 /// 例: `+7776FU` → `7g7f`, `+0076FU` → `P*7f`, `+8822UM` → `8h2b+`
 ///
 /// `pos` は変換前の局面（成り判定に使用）。この関数は局面を変更しない。
+/// 先頭7 byteを解釈し、それ以降の消費時間やコメントは無視する。
+///
+/// # Errors
+/// 指し手の符号・座標・駒種が不正な場合はエラーを返す。
 pub fn csa_move_to_usi(mv: &str, pos: &Position) -> Result<String> {
-    anyhow::ensure!(mv.len() >= 7, "invalid CSA move: {mv}");
+    validate_csa_move(mv)?;
     let bytes = mv.as_bytes();
     let fx = bytes[1] - b'0';
     let fy = bytes[2] - b'0';
@@ -1571,6 +1598,152 @@ P-51OU
         // b'0' 未満の byte (空白や `*`) を含んでも減算 underflow で panic しない。
         for text in ["P+ *FU\n", "P-5 OU\n", "PI *HI\n", "PI8 HI\n"] {
             assert!(parse_csa(text).is_err(), "text={text:?}");
+        }
+    }
+
+    #[test]
+    fn csa_move_apis_reject_malformed_tokens_without_mutating_position() {
+        let mut invalid: Vec<String> = [
+            "", "+", "+7776F", "+ 776FU", "+/776FU", "+7\n76FU", "+7776F?", "+7776ZZ", "x7776FU",
+            "+0776FU", "+7076FU", "+7706FU", "+7770FU", "+777AFU", "+0055OU",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        for index in 0..7 {
+            let mut token = "+7776FU".to_owned();
+            token.replace_range(index..index + 1, "あ");
+            invalid.push(token);
+        }
+        let mut pos = initial_position();
+        let before = pos.to_sfen();
+        for token in invalid {
+            assert!(csa_move_to_usi(&token, &pos).is_err(), "token={token:?}");
+            assert!(pos.apply_csa_move(&token).is_err(), "token={token:?}");
+            assert_eq!(pos.to_sfen(), before, "token={token:?}");
+        }
+    }
+
+    #[test]
+    fn apply_csa_move_errors_preserve_position() {
+        let mut pos = initial_position();
+        let before = pos.to_sfen();
+        for token in [
+            "+5553FU", "+3353FU", "+0053HI", "+0055FU", "+7777FU", "-3334FU",
+        ] {
+            assert!(pos.apply_csa_move(token).is_err(), "token={token}");
+            assert_eq!(pos.to_sfen(), before, "token={token}");
+        }
+    }
+
+    #[test]
+    fn csa_and_sfen_hand_setup_check_cumulative_capacity() {
+        for (code, sfen_piece) in [
+            ("FU", 'P'),
+            ("KY", 'L'),
+            ("KE", 'N'),
+            ("GI", 'S'),
+            ("KI", 'G'),
+            ("KA", 'B'),
+            ("HI", 'R'),
+        ] {
+            for side in ['+', '-'] {
+                let piece = if side == '+' {
+                    sfen_piece
+                } else {
+                    sfen_piece.to_ascii_lowercase()
+                };
+                let unit = format!("00{code}");
+                let setup =
+                    format!("P{side}{}\nP{side}{}\n+\n", unit.repeat(128), unit.repeat(127));
+                let (pos, _, _) = parse_csa(&setup).unwrap();
+                assert_eq!(pos.to_sfen(), format!("9/9/9/9/9/9/9/9/9 b 255{piece} 1"));
+                assert!(parse_csa(&format!("{setup}P{side}{unit}\n")).is_err());
+                assert!(parse_csa(&format!("P{side}{}\n+\n", unit.repeat(256))).is_err());
+
+                let sfen = format!("9/9/9/9/9/9/9/9/9 b {} 1", piece.to_string().repeat(255));
+                let pos = Position::from_sfen(&sfen).unwrap();
+                assert_eq!(pos.to_sfen(), format!("9/9/9/9/9/9/9/9/9 b 255{piece} 1"));
+                let overflow = format!("9/9/9/9/9/9/9/9/9 b {} 1", piece.to_string().repeat(256));
+                assert!(Position::from_sfen(&overflow).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn apply_csa_capture_checks_hand_capacity_without_partial_updates() {
+        for (code, sfen_piece) in [
+            ("FU", 'P'),
+            ("KY", 'L'),
+            ("KE", 'N'),
+            ("GI", 'S'),
+            ("KI", 'G'),
+            ("KA", 'B'),
+            ("HI", 'R'),
+        ] {
+            for (side, opponent, target, mv) in
+                [('+', '-', "54", "+5554FU"), ('-', '+', "56", "-5556FU")]
+            {
+                let piece = if side == '+' {
+                    sfen_piece
+                } else {
+                    sfen_piece.to_ascii_lowercase()
+                };
+                for count in [254, 255] {
+                    let setup = format!(
+                        "P{side}55FU\nP{opponent}{target}{code}\nP{side}{}\n{side}\n",
+                        format!("00{code}").repeat(count)
+                    );
+                    let (mut pos, _, _) = parse_csa(&setup).unwrap();
+                    let before = pos.to_sfen();
+                    let result = pos.apply_csa_move(mv);
+                    if count == 254 {
+                        result.unwrap();
+                        assert_eq!(
+                            pos.to_sfen().split_whitespace().nth(2).unwrap(),
+                            format!("255{piece}")
+                        );
+                        assert_eq!(pos.ply, 2);
+                    } else {
+                        assert!(result.is_err());
+                        assert_eq!(pos.to_sfen(), before);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn apply_csa_move_checks_ply_before_mutating_position() {
+        let mut pos = initial_position();
+        pos.ply = u32::MAX - 1;
+        pos.apply_csa_move("+7776FU").unwrap();
+        assert_eq!(pos.ply, u32::MAX);
+        let before = pos.to_sfen();
+        assert!(pos.apply_csa_move("-3334FU").is_err());
+        assert_eq!(pos.to_sfen(), before);
+    }
+
+    #[test]
+    fn csa_move_suffixes_preserve_apply_and_conversion() {
+        let mut white = initial_position();
+        white.side_to_move = Color::White;
+        let drop = Position::from_sfen("4k4/9/9/9/9/9/9/9/4K4 b B 1").unwrap();
+        for (pos, token, usi) in [
+            (initial_position(), "+7776FU", "7g7f"),
+            (initial_position(), "+8822UM", "8h2b+"),
+            (white, "-3334FU", "3c3d"),
+            (drop, "+0055KA", "B*5e"),
+        ] {
+            let mut expected = pos.clone();
+            expected.apply_csa_move(token).unwrap();
+            for suffix in ["", ",T30", ",T30,'日本語コメント", ",日本語", "extra"] {
+                let full_token = format!("{token}{suffix}");
+                assert_eq!(csa_move_to_usi(&full_token, &pos).unwrap(), usi);
+                let mut actual = pos.clone();
+                actual.apply_csa_move(&full_token).unwrap();
+                assert_eq!(actual.to_sfen(), expected.to_sfen());
+            }
         }
     }
 }

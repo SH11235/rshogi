@@ -22,6 +22,8 @@ cargo run --release -p tools --bin generate_net_spsa_params -- \
 元係数ではなく engine が `base + delta` として適用する delta なので、常に `0` で始まる。
 元係数は `// base=<value>` に記録される。先頭の `#` 行には net の basename、SHA-256、
 architecture、bucket 数が入り、後続の焼き込み処理で入力 net の取り違えを検証できる。
+続く `# spsa-format: c-end-r-end-v1` は列6/7が `c_end/r_end` であることを宣言する。
+生成ファイルは追加の形式指定なしで現行 `spsa` に渡せる。
 
 ## kind と既定値
 

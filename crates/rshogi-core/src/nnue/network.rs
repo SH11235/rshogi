@@ -1407,8 +1407,11 @@ pub fn compute_layer_stack_progresskpabs_bucket_index(
 }
 
 /// progresskpabs の重み付き和を全駒スキャンで計算（refresh 用）
+///
+/// # Panics
+/// 係数の長さが `SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS` と一致しない場合はpanicする。
 pub fn compute_progresskpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         weights.len(),
         SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
         "progresskpabs weights length mismatch"
@@ -1416,10 +1419,8 @@ pub fn compute_progresskpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 
     let sq_bk = pos.king_square(Color::Black).index();
     let sq_wk = pos.king_square(Color::White).inverse().index();
-    // SAFETY: sq_bk, sq_wk は king_square().index() で 0..81 の範囲。
-    // weights の長さは 81 * FE_OLD_END であり、(sq + 1) * FE_OLD_END <= weights.len()。
-    let weights_b = unsafe { weights.get_unchecked(sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END) };
-    let weights_w = unsafe { weights.get_unchecked(sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END) };
+    let weights_b = &weights[sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END];
+    let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
 
     let mut sum = 0.0f32;
 
@@ -2652,6 +2653,36 @@ mod tests {
         assert!(set_layer_stack_progress_kpabs_weights(vec![0.0].into_boxed_slice()).is_err());
         assert!(get_layer_stack_progress_kpabs_weights().iter().all(|&v| v == 0.5));
         reset_layer_stack_progress_kpabs_weights();
+    }
+
+    #[test]
+    fn progress_sum_rejects_incorrect_coefficient_lengths() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+        for len in [
+            0,
+            1,
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS - 1,
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS + 1,
+        ] {
+            let weights = vec![0.0; len];
+            let result = std::panic::catch_unwind(|| compute_progresskpabs_sum(&pos, &weights));
+            assert!(result.is_err(), "coefficient length {len} was accepted");
+        }
+    }
+
+    #[test]
+    fn progress_sum_matches_q16_for_integral_coefficients() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+        let integers: Vec<i32> = (0..SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS)
+            .map(|index| (index % 17) as i32 - 8)
+            .collect();
+        let floats: Vec<f32> = integers.iter().map(|&value| value as f32).collect();
+        assert_eq!(
+            compute_progresskpabs_sum(&pos, &floats),
+            super::super::progress_q16::compute_progresskpabs_q16_sum(&pos, &integers) as f32,
+        );
     }
 
     #[cfg(any(

@@ -31,6 +31,59 @@ pub fn register_unique_parameter(
 
 pub const NOT_USED_MARKER: &str = "[[NOT USED]]";
 
+/// 列6を終端摂動幅、列7を終端学習率係数とする `.params` の形式宣言。
+pub const SPSA_PARAMS_FORMAT_HEADER: &str = "# spsa-format: c-end-r-end-v1";
+
+/// 探索パラメータ生成時の終端学習率係数。
+pub const DEFAULT_SPSA_R_END: f64 = 0.002;
+
+/// 探索パラメータの範囲から終端摂動幅を求める。
+pub fn default_spsa_c_end(min: i32, max: i32) -> f64 {
+    ((f64::from(max) - f64::from(min)) / 20.0).round().max(1.0)
+}
+
+/// 形式宣言を検査する。未宣言の入力だけは呼出側の明示確認で受理できる。
+pub fn validate_spsa_params_format(path: &Path, assume_c_end_r_end: bool) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut declared = false;
+    let mut saw_parameter = false;
+    for (idx, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if let Some(format) = trimmed
+            .strip_prefix('#')
+            .map(str::trim)
+            .and_then(|comment| comment.strip_prefix("spsa-format:"))
+        {
+            if declared || saw_parameter {
+                bail!(
+                    "{}: line {}: SPSA format must be declared once, before parameter rows",
+                    path.display(),
+                    idx + 1
+                );
+            }
+            if format.trim() != "c-end-r-end-v1" {
+                bail!(
+                    "{}: line {}: unsupported SPSA format '{}'; convert the schedule columns explicitly",
+                    path.display(),
+                    idx + 1,
+                    format.trim()
+                );
+            }
+            declared = true;
+        } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            saw_parameter = true;
+        }
+    }
+    if !declared && !assume_c_end_r_end {
+        bail!(
+            "{}: missing SPSA format declaration '{SPSA_PARAMS_FORMAT_HEADER}'; legacy step/delta cannot be inferred from numeric values. For verified c_end/r_end files only, use --assume-c-end-r-end; otherwise regenerate the schedule columns before tuning",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// `.params` ファイルの 1 行を文字列のまま保持する低レベル表現。
 ///
 /// 値の型変換 (i32 / f64) は呼び出し側 (`ParamRow::from_raw` /
@@ -44,9 +97,9 @@ pub struct RawParamRow {
     pub value_text: String,
     pub min_text: String,
     pub max_text: String,
-    /// 6 番目の列。YO/rshogi `.params` では `step`、Fishtest 派生では `c_end`。
+    /// 6 番目の列。現行SPSAでは `c_end`。未宣言の外部入力では意味を推定しない。
     pub col5_text: String,
-    /// 7 番目の列。YO/rshogi `.params` では `alpha`、Fishtest 派生では `r_end`。
+    /// 7 番目の列。現行SPSAでは `r_end`。未宣言の外部入力では意味を推定しない。
     pub col6_text: String,
     /// `//` 以降の文字列（先頭の `//` を含まずトリム済み、空なら "")
     pub comment: String,
@@ -177,11 +230,29 @@ pub fn load_params(path: &Path) -> Result<Vec<ParamRow>> {
     Ok(rows)
 }
 
+/// 形式を確認した `c_end/r_end` ファイルを整数値ベースで読み込む。
+pub fn load_spsa_params(path: &Path, assume_c_end_r_end: bool) -> Result<Vec<ParamRow>> {
+    validate_spsa_params_format(path, assume_c_end_r_end)?;
+    load_params(path)
+}
+
 /// `.params` を書き出す（YO/rshogi 共通フォーマット）
 pub fn write_params(path: &Path, rows: &[ParamRow]) -> Result<()> {
+    write_params_with_header(path, rows, None)
+}
+
+/// `c_end/r_end` の形式宣言付きで `.params` を書き出す。
+pub fn write_spsa_params(path: &Path, rows: &[ParamRow]) -> Result<()> {
+    write_params_with_header(path, rows, Some(SPSA_PARAMS_FORMAT_HEADER))
+}
+
+fn write_params_with_header(path: &Path, rows: &[ParamRow], header: Option<&str>) -> Result<()> {
     let file =
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut w = BufWriter::new(file);
+    if let Some(header) = header {
+        writeln!(w, "{header}")?;
+    }
     for r in rows {
         write!(
             w,
@@ -326,6 +397,51 @@ pub fn rshogi_to_yo_value(rshogi_value: i32, sign_flip: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmarked_schedule_requires_confirmation_even_for_small_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.params");
+        let legacy = "small,int,0,0,1,1,0.05\n";
+        std::fs::write(&path, legacy).unwrap();
+        let error = validate_spsa_params_format(&path, false).unwrap_err().to_string();
+        assert!(error.contains("missing SPSA format declaration"), "{error}");
+        validate_spsa_params_format(&path, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+    }
+
+    #[test]
+    fn format_confirmation_does_not_override_declared_or_misplaced_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.params");
+        for text in [
+            "# spsa-format: legacy-step-delta\nsmall,int,0,0,1,1,0.05\n".to_string(),
+            "# spsa-format: c-end-r-end-v2\nsmall,int,0,0,1,1,0.002\n".to_string(),
+            format!("{SPSA_PARAMS_FORMAT_HEADER}\n{SPSA_PARAMS_FORMAT_HEADER}\n"),
+            format!("small,int,0,0,1,1,0.002\n{SPSA_PARAMS_FORMAT_HEADER}\n"),
+        ] {
+            std::fs::write(&path, &text).unwrap();
+            for assume in [false, true] {
+                assert!(validate_spsa_params_format(&path, assume).is_err(), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn declared_schedule_accepts_metadata_and_preserves_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.params");
+        let text =
+            format!("# net metadata\n{SPSA_PARAMS_FORMAT_HEADER}\nsmall,int,0,0,1,0.1,0.003\n");
+        std::fs::write(&path, text).unwrap();
+        let rows = load_spsa_params(&path, false).unwrap();
+        assert_eq!(rows[0].step, 0.1);
+        assert_eq!(rows[0].alpha, 0.003);
+        write_spsa_params(&path, &rows).unwrap();
+        let rows = load_spsa_params(&path, false).unwrap();
+        assert_eq!(rows[0].step, 0.1);
+        assert_eq!(rows[0].alpha, 0.003);
+    }
 
     /// YO ↔ rshogi の値変換は involution（2 回適用で元に戻る）
     #[test]
