@@ -95,17 +95,21 @@ impl ClientTransport for TcpTransport {
         }
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Err(TransportError::Timeout);
-            }
-            let remaining = deadline - now;
-            // fill_buf は cancel-safe。append と consume の間に await を挟まず、
-            // キャンセル時にも部分行と未消費バイトの境界を保つ。
-            let bytes = match tokio::time::timeout(remaining, self.reader.fill_buf()).await {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(e)) => return Err(TransportError::Io(format!("read: {e}"))),
-                Err(_) => return Err(TransportError::Timeout),
+            let bytes = if self.reader.buffer().is_empty() {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    return Err(TransportError::Timeout);
+                }
+                // fill_buf は cancel-safe。append と consume の間に await を挟まず、
+                // キャンセル時にも部分行と未消費バイトの境界を保つ。
+                match tokio::time::timeout(deadline - now, self.reader.fill_buf()).await {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(e)) => return Err(TransportError::Io(format!("read: {e}"))),
+                    Err(_) => return Err(TransportError::Timeout),
+                }
+            } else {
+                // AGREE の期限後 drain は、追加 I/O なしで受信済みの行だけを回収する。
+                self.reader.buffer()
             };
             if bytes.is_empty() {
                 return if self.line_buf.is_empty() {
@@ -250,6 +254,30 @@ mod tests {
         assert_eq!(l1.as_str(), "LINE1");
         let l2 = transport.recv_line(Duration::from_secs(1)).await.unwrap();
         assert_eq!(l2.as_str(), "LINE2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recv_line_drains_prefetched_lines_with_zero_timeout() {
+        let (mut transport, mut client) = loopback_pair().await;
+        client.write_all(b"\n\n\n").await.unwrap();
+        let buffered = transport.reader.fill_buf().await.unwrap().len();
+        assert!(buffered > 0);
+        for _ in 0..buffered {
+            assert!(transport.recv_line(Duration::ZERO).await.unwrap().as_str().is_empty());
+        }
+        assert_eq!(transport.recv_line(Duration::ZERO).await.unwrap_err(), TransportError::Timeout,);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recv_line_zero_timeout_preserves_partial_line_until_buffered_newline() {
+        let (mut transport, mut client) = loopback_pair().await;
+        client.write_all(b"A").await.unwrap();
+        transport.reader.fill_buf().await.unwrap();
+        assert_eq!(transport.recv_line(Duration::ZERO).await.unwrap_err(), TransportError::Timeout,);
+        assert_eq!(transport.line_buf, b"A");
+        client.write_all(b"\n").await.unwrap();
+        transport.reader.fill_buf().await.unwrap();
+        assert_eq!(transport.recv_line(Duration::ZERO).await.unwrap().as_str(), "A");
     }
 
     #[tokio::test(flavor = "current_thread")]
