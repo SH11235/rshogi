@@ -5,6 +5,38 @@ use std::process::Command;
 const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
 #[test]
+fn position_with_existing_enemy_check_rejects_duplicate_kings_atomically() {
+    let mut command = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
+    let output = command
+        .timeout(std::time::Duration::from_secs(15))
+        .write_stdin(
+            "position sfen 4k4/9/9/9/4R4/9/9/9/4K4 b G 1 moves G*1h\nd\n\
+             position sfen 4K4/r8/9/9/9/9/9/9/4K4 b - 1 moves 5a5b\nd\n\
+             position sfen 4k4/R8/9/9/9/9/9/9/4k4 w - 1 moves 5a5b\nd\n\
+             position sfen 4k4/9/9/9/4R4/9/9/9/4K4 b G 1 moves G*1h 5a4a 5e4e\nd\n\
+             quit\n",
+        )
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let positions: Vec<_> = stdout.lines().filter_map(|line| line.strip_prefix("SFEN: ")).collect();
+    let checked = "4k4/9/9/9/4R4/9/9/8G/4K4 w - 2";
+    assert_eq!(
+        positions,
+        [checked, checked, checked, "5k3/9/9/9/5R3/9/9/8G/4K4 w - 4"],
+        "{stdout}"
+    );
+    assert_eq!(
+        stderr.lines().filter(|line| line.contains("at most one king per side")).count(),
+        2,
+        "{stderr}"
+    );
+}
+
+#[test]
 fn invalid_position_preserves_previous_position_and_search() {
     use std::io::{BufRead, BufReader, Read};
     use std::sync::mpsc;

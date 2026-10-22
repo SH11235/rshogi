@@ -32,7 +32,7 @@ use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
     SearchInfo, SearchResult, SearchTuneParams,
 };
-use rshogi_core::types::{EnteringKingRule, Move, PieceType};
+use rshogi_core::types::{Color, EnteringKingRule, Move, PieceType};
 use serde_json::json;
 
 #[cfg(feature = "allocation-stats")]
@@ -1380,6 +1380,12 @@ impl UsiEngine {
             }
             _ => bail!("Expected startpos or sfen"),
         }
+        for color in [Color::Black, Color::White] {
+            anyhow::ensure!(
+                candidate.pieces(color, PieceType::King).count() <= 1,
+                "SFEN must contain at most one king per side"
+            );
+        }
         Self::clear_checkers_without_king(&mut candidate);
 
         if idx < tokens.len() && tokens[idx] == "passrights" {
@@ -2359,6 +2365,165 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
     }
 
     #[test]
+    fn position_commands_preserve_existing_enemy_check() {
+        let cases = [
+            (
+                "4k4/9/9/9/4R4/9/9/9/4K4 b G 1",
+                &[("G*1h", [2, 0]), ("5a4a", [2, 0]), ("5e4e", [4, 0])][..],
+            ),
+            (
+                "4k4/9/9/9/4R4/9/9/9/9 b G 1",
+                &[("G*1h", [2, 0]), ("5a4a", [2, 0]), ("5e4e", [4, 0])],
+            ),
+            (
+                "4k4/9/9/9/4r4/9/9/9/4K4 w g 1",
+                &[("G*1b", [0, 2]), ("5i4i", [0, 2]), ("5e4e", [0, 4])],
+            ),
+            (
+                "4k4/9/9/9/4R4/9/9/9/4K4 b G 1",
+                &[("G*1h", [2, 0]), ("5a4a", [2, 0]), ("5e5d", [0, 0])],
+            ),
+            ("4k4/9/9/9/4R4/9/9/9/4K4 b G 1", &[("G*5c", [0, 0])]),
+            (
+                "4k4/4p4/9/9/4R4/9/9/9/4K4 b - 1",
+                &[("5e5b+", [2, 0]), ("5a5b", [2, 0]), ("P*5e", [0, 0])],
+            ),
+        ];
+        let snapshot = |position: &Position| {
+            (
+                position.to_sfen(),
+                position.key(),
+                position.state().checkers,
+                position.state().continuous_check,
+                position.king_square(Color::Black),
+                position.king_square(Color::White),
+                position.state().last_move,
+            )
+        };
+        for (sfen, steps) in cases {
+            let mut position = Position::new();
+            let mut line = format!("position sfen {sfen} moves");
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                false,
+                2,
+            )
+            .unwrap();
+            let mut history = Vec::new();
+            for &(token, continuous_check) in steps {
+                history.push(snapshot(&position));
+                line.push(' ');
+                line.push_str(token);
+                UsiEngine::apply_position_tokens(
+                    &mut position,
+                    &line.split_whitespace().collect::<Vec<_>>(),
+                    false,
+                    2,
+                )
+                .unwrap_or_else(|err| panic!("{line}: {err}"));
+                let mut fresh = Position::new();
+                fresh.set_sfen(&position.to_sfen()).unwrap();
+                UsiEngine::clear_checkers_without_king(&mut fresh);
+                assert_eq!(position.state().checkers, fresh.state().checkers, "{line}");
+                assert_eq!(position.key(), fresh.key(), "{line}");
+                assert_eq!(position.state().continuous_check, continuous_check, "{line}");
+                assert_eq!(
+                    position.in_check(),
+                    continuous_check[(!position.side_to_move()).index()] != 0,
+                    "{line}"
+                );
+                let before = snapshot(&position);
+                let invalid = format!("{line} 1a1b");
+                assert!(
+                    UsiEngine::apply_position_tokens(
+                        &mut position,
+                        &invalid.split_whitespace().collect::<Vec<_>>(),
+                        false,
+                        2,
+                    )
+                    .is_err(),
+                    "{invalid}"
+                );
+                assert_eq!(snapshot(&position), before, "{invalid}");
+            }
+            for (&(token, _), before) in steps.iter().zip(history).rev() {
+                position.undo_move(Move::from_usi_strict(token).unwrap());
+                assert_eq!(snapshot(&position), before, "{sfen}: undo {token}");
+            }
+        }
+    }
+
+    #[test]
+    fn position_commands_existing_enemy_check_preserves_repetition() {
+        for sfen in [
+            "4k4/9/9/9/4R4/9/9/9/4K4 b G 1",
+            "4k4/9/9/9/4R4/9/9/9/9 b G 1",
+        ] {
+            let cycle = "5a4a 5e4e 4a5a 4e5e ";
+            let moves = format!("G*1h {}", cycle.repeat(3));
+            let line = format!("position sfen {sfen} moves {moves}");
+            let mut position = Position::new();
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                false,
+                2,
+            )
+            .unwrap();
+            assert!(position.in_check());
+            assert_eq!(position.state().continuous_check, [14, 0]);
+            assert_eq!(position.game_ply(), 14);
+            assert_eq!(position.repetition_state(16), rshogi_core::types::RepetitionState::Win);
+            for token in moves.split_whitespace().rev() {
+                position.undo_move(Move::from_usi_strict(token).unwrap());
+                let mut fresh = Position::new();
+                fresh.set_sfen(&position.to_sfen()).unwrap();
+                UsiEngine::clear_checkers_without_king(&mut fresh);
+                assert_eq!(position.state().checkers, fresh.state().checkers);
+            }
+            assert_eq!(position.to_sfen(), sfen);
+            assert_eq!(position.state().continuous_check, [0, 0]);
+        }
+    }
+
+    #[test]
+    fn position_commands_reject_duplicate_kings_atomically() {
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &["position", "startpos", "moves", "7g7f", "3c3d"],
+            false,
+            2,
+        )
+        .unwrap();
+        let before = position.to_sfen();
+        let key = position.key();
+        for line in [
+            "position sfen 4K4/r8/9/9/9/9/9/9/4K4 b - 1 moves 5a5b",
+            "position sfen 4K4/r8/9/9/9/9/9/9/4K4 b - 1",
+            "position sfen 4k4/R8/9/9/9/9/9/9/4k4 w - 1 moves 5a5b",
+            "position sfen 4k4/R8/9/9/9/9/9/9/4k4 w - 1",
+        ] {
+            assert!(
+                UsiEngine::apply_position_tokens(
+                    &mut position,
+                    &line.split_whitespace().collect::<Vec<_>>(),
+                    false,
+                    2,
+                )
+                .is_err(),
+                "{line}"
+            );
+            assert_eq!(position.to_sfen(), before, "{line}");
+            assert_eq!(position.key(), key, "{line}");
+        }
+        position.undo_move(Move::from_usi_strict("3c3d").unwrap());
+        position.undo_move(Move::from_usi_strict("7g7f").unwrap());
+        assert_eq!(position.to_sfen(), rshogi_core::position::SFEN_HIRATE);
+    }
+
+    #[test]
     fn position_commands_accept_moves_without_kings() {
         let mut failures = Vec::new();
         for (sfen, moves, expected) in [
@@ -2469,18 +2634,43 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
         assert_eq!(position.pass_rights(Color::White), 1);
         assert!(!position.in_check());
 
-        let line = "position sfen 4k4/9/9/9/4R4/9/9/9/9 b - 1 passrights 1 1 moves pass";
-        UsiEngine::apply_position_tokens(
-            &mut position,
-            &line.split_whitespace().collect::<Vec<_>>(),
-            true,
-            2,
-        )
-        .unwrap();
-        assert_eq!(position.side_to_move(), Color::White);
-        assert!(position.in_check());
-        assert!(!position.can_pass());
-        assert_eq!(position.state().continuous_check, [2, 0]);
+        for sfen in [
+            "4k4/9/9/9/4R4/9/9/9/9 b - 1",
+            "4k4/9/9/9/4R4/9/9/9/4K4 b - 1",
+        ] {
+            let line = format!("position sfen {sfen} passrights 1 1 moves pass");
+            UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                true,
+                2,
+            )
+            .unwrap();
+            assert_eq!(position.side_to_move(), Color::White);
+            assert!(position.in_check());
+            assert!(!position.can_pass());
+            assert_eq!(position.state().continuous_check, [2, 0]);
+            let before = position.to_sfen();
+            let key = position.key();
+            let invalid = format!("{line} 0000");
+            assert!(
+                UsiEngine::apply_position_tokens(
+                    &mut position,
+                    &invalid.split_whitespace().collect::<Vec<_>>(),
+                    true,
+                    2,
+                )
+                .is_err()
+            );
+            assert_eq!(position.to_sfen(), before);
+            assert_eq!(position.key(), key);
+            assert_eq!(position.state().continuous_check, [2, 0]);
+            position.undo_move(Move::PASS);
+            assert_eq!(position.to_sfen(), sfen);
+            assert_eq!(position.pass_rights(Color::Black), 1);
+            assert_eq!(position.pass_rights(Color::White), 1);
+            assert_eq!(position.state().continuous_check, [0, 0]);
+        }
     }
 
     #[test]

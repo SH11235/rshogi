@@ -1100,16 +1100,16 @@ impl Position {
 
     /// 玉の省略を許す入力局面で、検証済みの指し手を実行する。
     ///
-    /// 移動・成り・手駒・実在する玉の安全などは呼び出し側で検証する。
-    /// 玉のない側への王手は記録しない。通常の探索では `do_move` を使う。
+    /// 各色の玉は0〜1枚とし、駒の在庫、移動・成り・手駒・実在する玉の安全、
+    /// 玉の捕獲禁止、手数の加算範囲、PASSの可否は呼び出し側で検証する。
+    /// 自玉がなければ実行前のstateの `checkers` も消去する。着手後の王手は実在する
+    /// 相手玉への全利きから再計算し、玉のない側への王手は記録しない。
+    /// 通常の探索では `do_move` を使う。
     pub fn do_move_with_missing_kings(&mut self, m: Move) -> DirtyPiece {
         if self.pieces(self.side_to_move, PieceType::King).is_empty() {
             self.cur_state_mut().checkers = Bitboard::EMPTY;
         }
-        let gives_check = !m.is_pass()
-            && !self.pieces(!self.side_to_move, PieceType::King).is_empty()
-            && self.gives_check(m);
-        self.do_move_impl::<true>(m, gives_check)
+        self.do_move_impl::<true>(m, false)
     }
 
     fn do_move_impl<const ALLOW_MISSING_KINGS: bool>(
@@ -1358,9 +1358,14 @@ impl Position {
             };
         }
 
-        // 6. 王手情報の更新（diffベース）
+        // 6. 王手情報の更新
         let mut checkers = Bitboard::EMPTY;
-        if gives_check {
+        if ALLOW_MISSING_KINGS {
+            // 入力局面では相手玉が既に王手されている場合があり、着手による差分だけでは足りない。
+            if !self.pieces(them, PieceType::King).is_empty() {
+                checkers = self.attackers_to_c(self.king_square[them.index()], us);
+            }
+        } else if gives_check {
             let ksq = self.king_square[them.index()];
             // 直接王手: 手を進める前に退避したcheck_squaresを使う。
             // Kingの場合はprev_check_squareがEMPTYなので直接王手はなく、開き王手だけを調べる。
@@ -1382,10 +1387,8 @@ impl Position {
                 }
             }
         }
-        // gives_check=false の場合は checkers=EMPTY のまま
-        // この最適化により、王手にならない手の場合に attackers_to_c() の呼び出しを回避できる
-        // 前提条件: 呼び出し側で gives_check() の判定が正確に行われていること
-        // デバッグビルドでは debug_assert で検証を実施
+        // 通常探索では呼び出し側のgives_checkを前提に差分更新し、
+        // 王手にならない手でattackers_to_c()を呼ばずに済ませる。
         debug_assert!(
             {
                 let expected =
@@ -1394,7 +1397,7 @@ impl Position {
                     } else {
                         self.attackers_to_c(self.king_square[them.index()], us)
                     };
-                let result = if gives_check {
+                let result = if ALLOW_MISSING_KINGS || gives_check {
                     checkers == expected
                 } else {
                     expected.is_empty()
