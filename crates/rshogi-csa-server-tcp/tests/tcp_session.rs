@@ -26,7 +26,7 @@ use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
 use rshogi_csa_server_tcp::server::{
     InMemoryPasswordStore, ServerConfig, build_state, run_server_with_listener,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -394,6 +394,39 @@ fn login_auth_failure_on_bad_password() {
         let resp = read_line_raw(&mut r).await.unwrap();
         assert_eq!(resp, "LOGIN:incorrect");
         let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn oversized_unterminated_line_disconnects_before_and_after_login() {
+    run_local(|| async {
+        for logged_in in [false, true] {
+            let (addr, topdir) = spawn_server("oversized_line").await;
+            let (mut reader, mut writer) = connect(addr).await;
+            if logged_in {
+                send_line(&mut writer, "LOGIN alice+g1+black pw x1").await;
+                assert_eq!(read_line_raw(&mut reader).await.unwrap(), "LOGIN:alice OK");
+            }
+            let oversized = vec![b'x'; 64 * 1024 + 1];
+            writer.write_all(&oversized).await.unwrap();
+            let mut byte = [0u8; 1];
+            let result = tokio::time::timeout(Duration::from_secs(2), reader.read(&mut byte))
+                .await
+                .expect("oversized line did not close the connection");
+            match result {
+                Ok(0) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted,
+                    ) => {}
+                other => panic!("expected connection close, got {other:?}"),
+            }
+            let (mut healthy_reader, mut healthy_writer) = connect(addr).await;
+            send_line(&mut healthy_writer, "LOGIN alice+g1+black pw x1").await;
+            assert_eq!(read_line_raw(&mut healthy_reader).await.unwrap(), "LOGIN:alice OK");
+            let _ = tokio::fs::remove_dir_all(&topdir).await;
+        }
     });
 }
 

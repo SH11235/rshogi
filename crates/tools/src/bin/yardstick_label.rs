@@ -37,6 +37,9 @@ use serde::Serialize;
 use rshogi_core::bitboard::{Bitboard, RANK_BB};
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
+#[cfg(feature = "dlshogi-onnx")]
+use tools::output_path::create_safe_output_file;
+use tools::output_path::{create_safe_output_files, ensure_safe_output_paths};
 use tools::packed_sfen::unpack_hcp;
 use tools::teacher_labeler::{
     self, HCPE_RECORD_SIZE, LabelerEvalConfig, SEARCH_STACK_SIZE, label_position,
@@ -275,13 +278,7 @@ fn run_nnue_mode(cli: &Cli, total: u64, progress: &ProgressBar) -> Result<RunSta
         Some(ds) => *ds.last().expect("non-empty capture depths"),
         None => cli.depth,
     };
-    for out in &outputs {
-        validate_paths(&cli.input, out)?;
-    }
-    // `--spsa-params` は collector が truncate する出力先と衝突すると破壊されるので弾く。
-    if let Some(spsa) = &cli.spsa_params {
-        validate_side_input_not_clobbered(spsa, &outputs)?;
-    }
+    validate_output_paths(cli, &outputs)?;
     if effective_depth <= 0 && cli.nodes == 0 {
         bail!("--depth and --nodes are both unlimited; specify at least one to bound the search");
     }
@@ -348,7 +345,7 @@ fn run_onnx_mode(cli: &Cli, progress: &ProgressBar) -> Result<RunStats> {
     if cli.onnx_tensorrt_cache.is_some() && !cli.onnx_tensorrt {
         eprintln!("warning: --onnx-tensorrt-cache is ignored without --onnx-tensorrt");
     }
-    validate_paths(&cli.input, &cli.output)?;
+    validate_output_paths(cli, std::slice::from_ref(&cli.output))?;
 
     let cfg = OnnxValueConfig {
         model_path: model.clone(),
@@ -371,8 +368,7 @@ fn run_onnx_mode(cli: &Cli, progress: &ProgressBar) -> Result<RunStats> {
     let file = File::open(&cli.input)
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
     let mut reader = BufReader::new(file);
-    let out = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    let out = create_safe_output_file(&cli.output, &readonly_inputs(cli))?;
     let mut writer = BufWriter::new(out);
 
     let source = cli.source.as_deref();
@@ -501,6 +497,12 @@ fn run_pipeline(
         }
         None => Arc::from([]),
     };
+    let output_refs: Vec<&Path> = outputs.iter().map(PathBuf::as_path).collect();
+    let mut writers: Vec<BufWriter<File>> =
+        create_safe_output_files(&output_refs, &readonly_inputs(cli))?
+            .into_iter()
+            .map(BufWriter::new)
+            .collect();
 
     let mut workers = Vec::with_capacity(num_threads);
     for worker_idx in 0..num_threads {
@@ -570,15 +572,7 @@ fn run_pipeline(
         Ok(())
     });
 
-    // collector: seq 順に並べ替えて逐次書き出す。出力は depth ごとに分かれた N 個の writer。
-    let mut writers: Vec<BufWriter<File>> = outputs
-        .iter()
-        .map(|p| {
-            File::create(p)
-                .with_context(|| format!("Failed to create {}", p.display()))
-                .map(BufWriter::new)
-        })
-        .collect::<Result<_>>()?;
+    // collector: seq 順に並べ替えて逐次書き出す。
     let mut next = 0usize;
     let mut buf: std::collections::BTreeMap<usize, Outcome> = std::collections::BTreeMap::new();
     let mut written = 0u64;
@@ -773,66 +767,27 @@ fn eval_band(eval: i32) -> &'static str {
     }
 }
 
-fn validate_paths(input: &Path, output: &Path) -> Result<()> {
-    if input == output {
-        bail!("--in and --out must differ");
+fn readonly_inputs(cli: &Cli) -> Vec<&Path> {
+    let mut inputs = vec![cli.input.as_path()];
+    if let Some(model) = cli.onnx_model.as_deref() {
+        inputs.push(model);
+    } else {
+        inputs.extend(cli.nnue.as_deref());
+        inputs.extend(cli.ls_progress_coeff.as_deref());
+        inputs.extend(cli.spsa_params.as_deref());
     }
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(input), fs::canonicalize(output))
-        && a == b
-    {
-        bail!("--in and --out resolve to the same file");
-    }
-    // canonicalize は hardlink（別 path・同一 inode）を検出できない。collector が出力を
-    // create で truncate するため、dev/ino でも同一性を弾いて入力破壊を防ぐ。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(im), Ok(om)) = (fs::metadata(input), fs::metadata(output))
-            && im.dev() == om.dev()
-            && im.ino() == om.ino()
-        {
-            bail!("--in and --out are the same file (same dev/ino)");
-        }
-    }
-    if let Ok(meta) = fs::symlink_metadata(output)
-        && meta.file_type().is_symlink()
-    {
-        bail!("refusing to write through a symlink: {}", output.display());
-    }
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
-    }
-    Ok(())
+    inputs
 }
 
-/// `--spsa-params` のような read-only な side input が、collector が `create` で truncate する
-/// 出力先と同一ファイルを指していないか検証する（衝突すると side input を破壊してしまう）。
-/// `validate_paths` の入出力チェックと同じく、canonical path と（hardlink 対策の）dev/ino の
-/// 両方で同一性を弾く。
-fn validate_side_input_not_clobbered(side_input: &Path, outputs: &[PathBuf]) -> Result<()> {
-    for out in outputs {
-        let same = side_input == out
-            || matches!(
-                (fs::canonicalize(side_input), fs::canonicalize(out)),
-                (Ok(a), Ok(b)) if a == b
-            );
-        #[cfg(unix)]
-        let same = same || {
-            use std::os::unix::fs::MetadataExt;
-            matches!(
-                (fs::metadata(side_input), fs::metadata(out)),
-                (Ok(sm), Ok(om)) if sm.dev() == om.dev() && sm.ino() == om.ino()
-            )
-        };
-        if same {
-            bail!(
-                "--spsa-params {} and output {} are the same file (output would be truncated)",
-                side_input.display(),
-                out.display()
-            );
+fn validate_output_paths(cli: &Cli, outputs: &[PathBuf]) -> Result<()> {
+    let output_refs: Vec<&Path> = outputs.iter().map(PathBuf::as_path).collect();
+    ensure_safe_output_paths(&output_refs, &readonly_inputs(cli))?;
+    for output in outputs {
+        if let Some(parent) = output.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
         }
     }
     Ok(())
@@ -879,6 +834,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn onnx_mode_does_not_open_ignored_nnue_resources() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input.hcpe");
+        let model = dir.path().join("model.onnx");
+        let output = dir.path().join("output.jsonl");
+        fs::write(&input, [0u8; HCPE_RECORD_SIZE])?;
+        fs::write(&model, b"model")?;
+        let cli = Cli::try_parse_from([
+            "yardstick_label",
+            "--in",
+            input.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+            "--onnx-model",
+            model.to_str().unwrap(),
+            "--nnue",
+            "missing.nnue",
+            "--ls-progress-coeff",
+            "missing.coeff",
+            "--spsa-params",
+            "missing.params",
+        ])?;
+        validate_output_paths(&cli, std::slice::from_ref(&cli.output))?;
+        assert!(!output.exists());
+        assert_eq!(readonly_inputs(&cli), vec![input.as_path(), model.as_path()]);
+        Ok(())
+    }
+
+    #[test]
     fn wdl_stm_maps_absolute_result_to_side_to_move() {
         assert_eq!(wdl_stm(1, Color::Black), Some(1.0));
         assert_eq!(wdl_stm(1, Color::White), Some(0.0));
@@ -901,21 +885,6 @@ mod tests {
         assert_eq!(eval_band(29_999), "1501+");
         assert_eq!(eval_band(30_000), "mate");
         assert_eq!(eval_band(-32_767), "mate");
-    }
-
-    #[test]
-    fn validate_side_input_rejects_output_collision() {
-        let outputs = vec![
-            PathBuf::from("runs/none1536_d9.jsonl"),
-            PathBuf::from("runs/none1536_d15.jsonl"),
-        ];
-        // spsa params が出力先と同一パス → 拒否（出力 truncate で破壊されるため）。
-        assert!(
-            validate_side_input_not_clobbered(Path::new("runs/none1536_d15.jsonl"), &outputs)
-                .is_err()
-        );
-        // 別パスなら OK。
-        assert!(validate_side_input_not_clobbered(Path::new("spsa/v99.params"), &outputs).is_ok());
     }
 
     #[test]

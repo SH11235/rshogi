@@ -982,7 +982,7 @@ impl DynamicLayerStacksNetwork {
                 compute_layer_stack_progresskpabs_bucket_index(
                     pos,
                     pos.side_to_move(),
-                    get_layer_stack_progress_kpabs_weights(),
+                    &stack.progress_kpabs_weights,
                     routing_buckets,
                 )
             }
@@ -1027,6 +1027,7 @@ impl DynamicLayerStacksNetwork {
 
 pub struct DynamicLayerStacksStack {
     progress_q16_weights: Option<std::sync::Arc<[i32]>>,
+    progress_kpabs_weights: super::network::ProgressKpAbsWeights,
     signature: DynamicLayerStacksSignature,
     current: usize,
     accumulations: AlignedBox<i16>,
@@ -1067,6 +1068,7 @@ impl DynamicLayerStacksStack {
     fn new(net: &DynamicLayerStacksNetwork) -> Self {
         Self {
             progress_q16_weights: super::progress_q16::snapshot_weights(),
+            progress_kpabs_weights: get_layer_stack_progress_kpabs_weights(),
             signature: net.stack_signature(),
             current: 0,
             accumulations: AlignedBox::new_zeroed(STACK_CAPACITY * 2 * net.spec.l1),
@@ -1093,6 +1095,7 @@ impl DynamicLayerStacksStack {
     }
     pub(crate) fn reset(&mut self) {
         self.progress_q16_weights = super::progress_q16::snapshot_weights();
+        self.progress_kpabs_weights = get_layer_stack_progress_kpabs_weights();
         self.current = 0;
         self.computed[0] = false;
         self.dirty[0].clear();
@@ -1441,6 +1444,68 @@ mod tests {
     use crate::types::Move;
 
     #[test]
+    fn progress_weights_snapshot_controls_routing_until_stack_reset() {
+        use crate::nnue::network::{
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, configure_layer_stack_routing,
+            layer_stack_routing_test_guard, reset_layer_stack_progress_buckets,
+            reset_layer_stack_progress_kpabs_weights, set_layer_stack_progress_kpabs_weights,
+        };
+        let _guard = layer_stack_routing_test_guard();
+        configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbs, 4, Some(4)).unwrap();
+        set_layer_stack_progress_kpabs_weights(
+            vec![-0.125; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            2,
+            2,
+            1,
+            4,
+        );
+        let mut net = DynamicLayerStacksNetwork::read_with_source(
+            &mut Cursor::new(&model.bytes),
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
+        for (index, bucket) in net.buckets.iter_mut().enumerate() {
+            bucket.l1 = zero_affine(2, 2);
+            bucket.l2 = zero_affine(2, 1);
+            let mut output = vec![0; 4 + padded_input(1)];
+            output[..4].copy_from_slice(&(index as i32 * 8192).to_le_bytes());
+            bucket.output = DynamicAffine::read(&mut Cursor::new(output), 1, 1).unwrap();
+        }
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+        let mut stack = net.new_stack();
+        net.refresh(&pos, &mut stack);
+        let original = net.evaluate(&pos, &mut stack);
+        set_layer_stack_progress_kpabs_weights(
+            vec![0.125; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let mut fresh = net.new_stack();
+        net.refresh(&pos, &mut fresh);
+        let replacement = net.evaluate(&pos, &mut fresh);
+        assert_ne!(original, replacement);
+        assert_eq!(net.evaluate(&pos, &mut stack), original);
+        stack.reset();
+        net.refresh(&pos, &mut stack);
+        assert_eq!(net.evaluate(&pos, &mut stack), replacement);
+        reset_layer_stack_progress_kpabs_weights();
+        assert_eq!(net.evaluate(&pos, &mut stack), replacement);
+        stack.reset();
+        net.refresh(&pos, &mut stack);
+        let zero = net.evaluate(&pos, &mut stack);
+        assert_ne!(zero, original);
+        assert_ne!(zero, replacement);
+        reset_layer_stack_progress_buckets();
+    }
+
+    #[test]
     fn runtime_l2_32_and_64_match_static_and_refresh() {
         fn compare<const WIDTH: usize>() {
             use crate::nnue::accumulator_layer_stacks::AccumulatorLayerStacks;
@@ -1595,7 +1660,7 @@ mod tests {
             let selected_bucket = compute_layer_stack_progresskpabs_bucket_index(
                 &pos,
                 pos.side_to_move(),
-                get_layer_stack_progress_kpabs_weights(),
+                &get_layer_stack_progress_kpabs_weights(),
                 num_buckets,
             );
             assert_eq!(selected_bucket, num_buckets / 2);

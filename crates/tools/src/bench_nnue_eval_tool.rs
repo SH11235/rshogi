@@ -366,7 +366,7 @@ fn compute_layer_stack_bucket_index(
         LayerStackBucketMode::ProgressKPAbs => compute_layer_stack_progresskpabs_bucket_index(
             pos,
             side_to_move,
-            get_layer_stack_progress_kpabs_weights(),
+            &get_layer_stack_progress_kpabs_weights(),
             num_buckets,
         ),
         _ => unreachable!("unsupported LayerStack bucket mode"),

@@ -165,7 +165,7 @@ fn run_for_network<
         let bucket_index = compute_layer_stack_progresskpabs_bucket_index(
             &pos,
             side_to_move,
-            get_layer_stack_progress_kpabs_weights(),
+            &get_layer_stack_progress_kpabs_weights(),
             cli.progress_buckets,
         );
         let bc = &mut bucket_counts[bucket_index];

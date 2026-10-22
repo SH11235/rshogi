@@ -6,15 +6,20 @@
 //! - 攻め方の局面: 上限内で証明できた王手のうち詰み手数が最小のもの。
 //! - 受け方の局面: すべての応手が上限内で詰むことを確かめ、詰み手数が最大のものを選ぶ。
 //!
-//! 詰み手数は手順に沿って厳密に減るので、同じ局面には戻らない。復元できなければ `None` を返し、
-//! 呼び出し側は詰みを主張しない。
+//! 詰み手数の上限は手順に沿って厳密に減る。それでも手順上の局面 X に戻ることはある
+//! (X を通ったときに見つかっていたのが X の最短でない詰みだった場合)。戻った時点の上限は
+//! X を通ったときの上限より小さく、X はその上限内で詰むので、手順を X まで巻き戻して
+//! 小さい上限で選び直す。巻き戻すと X の上限が減り、X より前の局面の上限は変わらない。
+//! 手順に沿った上限の列が辞書式に減り続けるので、復元は必ず終わる。
+//! 各探索は手順を経路に含めずに行う (経路上の局面を不詰とみなすと、置換表の詰みを証明し直せない)。
+//! 復元できなければ `None` を返し、呼び出し側は詰みを主張しない。
 
 use super::search::{Abort, MAX_DEPTH, NodeArgs, Searcher};
 use super::state::MateState;
 
 /// ルート局面 (攻め方の手番、`mate_len` 手以内の詰みが証明済み) から詰み手順を復元する。
 ///
-/// 局面と探索経路は呼び出し前の状態に戻して返る。
+/// 局面は呼び出し前の状態に戻して返る。
 pub(super) fn extract_pv<S: MateState>(
     searcher: &mut Searcher<'_, S>,
     st: &mut S,
@@ -24,7 +29,6 @@ pub(super) fn extract_pv<S: MateState>(
     let result = walk(searcher, st, mate_len, &mut pv);
     for &mv in pv.iter().rev() {
         st.undo_move(mv);
-        searcher.pop_path();
     }
     Ok(if result? { Some(pv) } else { None })
 }
@@ -32,15 +36,19 @@ pub(super) fn extract_pv<S: MateState>(
 fn walk<S: MateState>(
     searcher: &mut Searcher<'_, S>,
     st: &mut S,
-    mut len_limit: u16,
+    len_limit: u16,
     pv: &mut Vec<S::Mv>,
 ) -> Result<bool, Abort> {
     let mut moves = Vec::new();
+    // 手順の i 手目を指す前の局面のキーと詰み手数の上限
+    let mut keys = vec![st.key()];
+    let mut limits = vec![len_limit];
     loop {
         if pv.len() >= MAX_DEPTH {
             return Ok(false);
         }
         let or_node = pv.len() % 2 == 0;
+        let len_limit = limits[pv.len()];
         moves.clear();
         st.generate(or_node, &mut moves);
         if !or_node && moves.is_empty() {
@@ -55,10 +63,20 @@ fn walk<S: MateState>(
         let Some((mv, child_len)) = next else {
             return Ok(false);
         };
-        searcher.push_path(st);
         st.do_move(mv);
         pv.push(mv);
-        len_limit = child_len;
+        let key = st.key();
+        if let Some(i) = keys.iter().position(|&k| k == key) {
+            for mv in pv.drain(i..).rev() {
+                st.undo_move(mv);
+            }
+            keys.truncate(i + 1);
+            limits.truncate(i + 1);
+            limits[i] = child_len;
+        } else {
+            keys.push(key);
+            limits.push(child_len);
+        }
     }
 }
 
@@ -69,9 +87,8 @@ fn choose_attack<S: MateState>(
     st: &mut S,
     len_limit: u16,
 ) -> Result<Option<(S::Mv, u16)>, Abort> {
-    let depth = searcher.path_len();
-    searcher.capture_proven(depth);
-    let result = searcher.search(st, NodeArgs::unbounded(depth, true, len_limit), &mut 0)?;
+    searcher.capture_proven(0);
+    let result = searcher.search(st, NodeArgs::unbounded(0, true, len_limit), &mut 0)?;
     if !result.is_proven() {
         return Ok(None);
     }
@@ -101,28 +118,13 @@ fn choose_defense<S: MateState>(
     let Some(child_limit) = len_limit.checked_sub(1) else {
         return Ok(None);
     };
-    let child_depth = searcher.path_len() + 1;
-    searcher.push_path(st);
-    let result = longest_reply(searcher, st, moves, child_depth, child_limit);
-    searcher.pop_path();
-    result
-}
-
-fn longest_reply<S: MateState>(
-    searcher: &mut Searcher<'_, S>,
-    st: &mut S,
-    moves: &[S::Mv],
-    child_depth: usize,
-    child_limit: u16,
-) -> Result<Option<(S::Mv, u16)>, Abort> {
     let mut best: Option<(S::Mv, u16)> = None;
     for &mv in moves {
         st.do_move(mv);
-        let result =
-            searcher.search(st, NodeArgs::unbounded(child_depth, true, child_limit), &mut 0);
+        let result = searcher.search(st, NodeArgs::unbounded(0, true, child_limit), &mut 0);
         st.undo_move(mv);
         let result = result?;
-        // 上限内で詰まない応手 (経路上の局面に戻る応手を含む) があれば手順は作れない
+        // 上限内で詰まない応手があれば手順は作れない
         if !result.is_proven() {
             return Ok(None);
         }

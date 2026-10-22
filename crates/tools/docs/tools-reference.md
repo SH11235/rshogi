@@ -1,6 +1,6 @@
 # rshogi tools リファレンス
 
-LayerStacks の [native / USI routing 対応と Q16 制限](nnue-routing.md)。
+LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](nnue-routing.md)。
 
 crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
@@ -37,6 +37,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](compare_eval_nnue.md)） |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](dump_effect_bucket_golden.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能。alignment 調査用（[詳細](compare_nodes.md)） |
+| [`mate_bench`](mate_bench.md) | df-pn 詰み探索 (`go mate` と同じ solver) を局面集で解き、結果の内訳・ノード予算ごとの判定数・時間の分位点を出す。最短詰み手数の正解との照合、手番反転、並列実行に対応 |
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索（depth / nodes 指定）でラベル付けし `eval_deep` 等を追記（ground truth、局面ごと隔離で `--threads` 非依存に bit 一致） |
@@ -47,6 +48,21 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加し、parent-journal 再利用、journal/resume、Markdown report を出力（[詳細](book_extend.md)） |
 | `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](book_backprop.md)） |
 | `book_mine` | `tree serve/enqueue/wait/import/replay` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
+
+### ラベル評価ツールの出力保護
+
+`yardstick_label`、`label_bench_positions`、`label_bench_dl`、`yardstick_score` は、
+出力と読み取り専用資源の同一実体への参照（alias）を拒否します。保護対象は各ツールの
+「出力先の保護」に記載しています。出力パス自体が symlink の場合は参照先によらず拒否します。
+hardlink と Windows の大小文字違いも検査します。
+
+すべての出力を切り詰めずに開き、開いたファイルの同一性を確認してから既存出力を空にします。
+複数出力の後続パスが資源や別出力と衝突する場合、先行する既存出力も保持します。
+検査や open に失敗した際、新しく作られた空ファイルが残る場合があります。
+
+この検査はファイルを排他ロックしません。実行中は別プロセスによる資源・出力の変更やパスの差し替えを
+避けてください。衝突しない既存出力は上書きされ、切り詰め開始後の I/O エラーや処理中断では復元しません。
+完了済みの結果を残すには、実行ごとに別の出力先を指定してください。
 
 ## NNUE 学習
 
@@ -94,9 +110,10 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、Linux既定のNUMA-local CPU affinity（`--cpu-affinity off`で解除）、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用する。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
-| `generate_spsa_params` | 実エンジンと共通の既定値から SPSA 用 .params ファイルを生成 |
-| `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
+| `spsa` | [SPSA チューナー](spsa.md)。永続 engine プール、Linux既定のNUMA-local CPU affinity（`--cpu-affinity off`で解除）、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。初期化前にparams全行とmapping、対局開始前にscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用する。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
+| `generate_spsa_params` | 共通の既定値からc_end/r_end形式宣言付きのSPSA `.params` を生成（[詳細](generate_spsa_params.md)） |
+| `yo_to_rshogi_params` | YO値をrshogiへ転記し、宣言付きc_end/r_end形式で保存（[詳細](yo_to_rshogi_params.md)） |
+| `generate_net_spsa_params` | LayerStacks `.bin` を走査し、c_end/r_end形式宣言付きのnet重みdelta用SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
 | `apply_net_spsa_params` | 重複係数を拒否し、SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |
 | `spsa_param_diff` | SPSA .params の最終差分と履歴差分を集計 |
 | `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形。入力 alias を拒否し成功時だけ置換（[詳細](spsa_stats_to_plot_csv.md)） |

@@ -1,6 +1,6 @@
 # gensfen — NNUE 学習用教師局面 (PSV/pack/hcpe3) 生成ツール
 
-LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks の native Q16 対応制限と progress 係数の保持・再読込みは [routing 対応表](nnue-routing.md) を参照してください。
 
 NativeBackend で `--eval-file` 指定の評価関数を使い、エンジン同士の対局を回しながら
 `PackedSfenValue` 形式の教師局面を生成する。棋力評価（Elo 比較・SPRT 等）には

@@ -53,23 +53,28 @@ impl Entry {
 
 const BUCKET_SIZE: usize = 4;
 
+/// キャッシュラインの境界にそろえた bucket (エントリ 32 byte × 4 = キャッシュライン 2 本)
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(64))]
+struct Bucket([Entry; BUCKET_SIZE]);
+
 /// df-pn の置換表
 pub(super) struct MateTable {
-    entries: Vec<Entry>,
-    bucket_count: usize,
+    buckets: Vec<Bucket>,
     /// 現在の世代。`clear` で進める (表全体を書き換えずに空にする)。
     generation: u8,
 }
 
 impl MateTable {
-    /// `size_mb` MB 相当のエントリ数で確保する。最低 1 bucket。
+    /// `size_mb` MB 相当の bucket 数で確保する。最低 1 bucket。
     pub fn new(size_mb: usize) -> Self {
         let bytes = size_mb.saturating_mul(1024 * 1024);
-        let bucket_bytes = std::mem::size_of::<Entry>() * BUCKET_SIZE;
-        let bucket_count = (bytes / bucket_bytes).max(1);
+        Self::with_bucket_count((bytes / std::mem::size_of::<Bucket>()).max(1))
+    }
+
+    fn with_bucket_count(bucket_count: usize) -> Self {
         Self {
-            entries: vec![Entry::default(); bucket_count * BUCKET_SIZE],
-            bucket_count,
+            buckets: vec![Bucket::default(); bucket_count],
             generation: 1,
         }
     }
@@ -77,12 +82,7 @@ impl MateTable {
     /// bucket 数を直接指定する (置き換えが頻発する極小の表をテストで作る)
     #[cfg(test)]
     pub fn with_buckets(bucket_count: usize) -> Self {
-        let bucket_count = bucket_count.max(1);
-        Self {
-            entries: vec![Entry::default(); bucket_count * BUCKET_SIZE],
-            bucket_count,
-            generation: 1,
-        }
+        Self::with_bucket_count(bucket_count.max(1))
     }
 
     /// 全エントリを空にする。
@@ -92,22 +92,42 @@ impl MateTable {
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
-            self.entries.fill(Entry::default());
+            self.buckets.fill(Bucket::default());
             self.generation = 1;
         }
     }
 
-    fn bucket(&self, key: u64) -> std::ops::Range<usize> {
+    /// 局面 `key` の bucket をキャッシュに読み込ませておく。
+    /// 探索時間の多くは置換表を引くときのキャッシュミスの待ちで、子の bucket をまとめて
+    /// 先に読み込ませると待ちが重なる。
+    #[inline]
+    pub fn prefetch(&self, key: u64) {
+        let ptr = &self.buckets[self.bucket_index(key)] as *const Bucket as *const i8;
+
+        #[cfg(target_arch = "x86_64")]
+        for line in 0..std::mem::size_of::<Bucket>() / 64 {
+            // SAFETY: line * 64 < size_of::<Bucket>() なので ptr.add は self.buckets の生存中の
+            // 要素の内側を指す。prefetch はメモリの内容を読み書きしない。
+            unsafe {
+                use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+                _mm_prefetch(ptr.add(line * 64), _MM_HINT_T0);
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = ptr;
+    }
+
+    fn bucket_index(&self, key: u64) -> usize {
         // 上位ビットで bucket を選ぶ (bucket 数が 2 の冪でなくても偏らない)
-        let index = ((u128::from(key) * self.bucket_count as u128) >> 64) as usize;
-        let start = index * BUCKET_SIZE;
-        start..start + BUCKET_SIZE
+        ((u128::from(key) * self.buckets.len() as u128) >> 64) as usize
     }
 
     /// 局面の値を引く
     pub fn probe(&self, key: u64) -> Option<TableValue> {
         let generation = self.generation;
-        self.entries[self.bucket(key)]
+        self.buckets[self.bucket_index(key)]
+            .0
             .iter()
             .find(|e| !e.is_empty(generation) && e.key == key)
             .map(|e| TableValue {
@@ -136,8 +156,8 @@ impl MateTable {
             generation: self.generation,
         };
         let generation = self.generation;
-        let range = self.bucket(key);
-        let bucket = &mut self.entries[range];
+        let index = self.bucket_index(key);
+        let bucket = &mut self.buckets[index].0;
 
         if let Some(e) = bucket.iter_mut().find(|e| !e.is_empty(generation) && e.key == key) {
             if e.is_final() && !new_entry.is_final() {

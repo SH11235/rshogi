@@ -29,7 +29,14 @@ target/release/yardstick_score \
 | フラグ | 既定 | 説明 |
 |---|---|---|
 | `<labeled>...` | （必須） | 採点する jsonl（`yardstick_label` 出力）。複数指定可 |
-| `--out <FILE>` | — | 結果 JSON の出力先（per-file/per-group の数値を機械可読で残す）。入力ラベル jsonl と同一パス/inode は拒否（高価なラベルの上書き防止） |
+| `--out <FILE>` | — | 結果 JSON の出力先（per-file/per-group の数値を機械可読で残す）。すべての入力ラベル jsonl との衝突を検査 |
+
+## 出力先の保護
+
+指定した全入力ラベル jsonl と同じ実体への出力を拒否します。
+同一パス、symlink、hardlink、Windows の大小文字違いを検査し、拒否時は入力を変更しません。
+衝突しない既存出力は上書きされます。同時アクセスや途中失敗時の制約は
+[共通の出力保護](tools-reference.md#ラベル評価ツールの出力保護)を参照してください。
 
 ## 指標
 

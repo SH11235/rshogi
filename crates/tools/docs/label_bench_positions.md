@@ -54,6 +54,13 @@ target/release/label_bench_positions \
 | `--hash-mb <usize>` | 128 | 置換表サイズ（MB）。局面ごとに作り直すため過大にしない |
 | `--threads <usize>` | 0 | worker スレッド数（0=利用可能 CPU 数） |
 
+## 出力先の保護
+
+入力 jsonl、NNUE モデル、指定した進行度係数と同じ実体への出力を拒否します。
+同一パス、symlink、hardlink、Windows の大小文字違いを検査し、拒否時はこれらの資源を変更しません。
+衝突しない既存出力は上書きされます。同時アクセスや途中失敗時の制約は
+[共通の出力保護](tools-reference.md#ラベル評価ツールの出力保護)を参照してください。
+
 ## 評価器の推論設定（重要）
 
 LayerStacks モデルは `init_nnue` のロードだけでは正しく評価できません。USI エンジンと

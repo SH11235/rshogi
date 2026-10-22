@@ -140,10 +140,11 @@ pub use net_delta::{
 pub use network::evaluate_layer_stacks;
 pub(crate) use network::nnue_requires_board_effects;
 pub use network::{
-    LayerStackBucketMode, NNUENetwork, NnueFormatInfo, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-    compute_layer_stack_progresskpabs_bucket_index, compute_progresskpabs_sum,
-    configure_layer_stack_routing, detect_format, ensure_accumulator_computed, evaluate_dispatch,
-    get_fv_scale_override, get_layer_stack_bucket_mode, get_layer_stack_progress_buckets,
+    LayerStackBucketMode, NNUENetwork, NnueFormatInfo, ProgressKpAbsWeights,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progresskpabs_bucket_index,
+    compute_progresskpabs_sum, configure_layer_stack_routing, detect_format,
+    ensure_accumulator_computed, evaluate_dispatch, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_progress_buckets,
     get_layer_stack_progress_kpabs_weights, get_network, init_nnue, init_nnue_from_bytes,
     init_nnue_from_bytes_with_deltas, init_nnue_with_deltas, is_halfka_256_loaded,
     is_halfka_512_loaded, is_halfka_1024_loaded, is_halfka_hm_256_loaded, is_halfka_hm_512_loaded,

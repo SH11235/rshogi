@@ -1,5 +1,7 @@
 # nnue_saturation
 
+progress 係数の保持・再読込みの契約は [routing 対応表](nnue-routing.md) を参照してください。
+
 LayerStacks NNUE の**活性飽和率**を実局面で計測する診断ツールです。ClippedReLU /
 SqrClippedReLU 系の活性は u8 [0,127] に clamp されるため、127 到達率が高いほど
 量子化天井で情報が落ちています（評価値インフレ → 隠れ層飽和、の計器）。

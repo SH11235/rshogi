@@ -12,6 +12,15 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
+## Unreleased
+
+### rshogi-core / ライブラリ利用者の移行
+
+- `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく
+  `ProgressKpAbsWeights` を返す。係数の再設定・reset 後も取得済みの値を保持し、
+  解放済みメモリへの参照を防ぐ。スライスを取る関数には `&weights` を渡す。
+  探索stackは生成・reset時の係数を保持するため、再設定した係数はstackのreset後に反映される。
+
 ## v1.7.0 — 2026-10-11
 
 v1.6.0 以降の、対局・定跡ツールの機能追加と、USI エンジン・CSA クライアントの不具合修正を

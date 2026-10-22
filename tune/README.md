@@ -63,6 +63,10 @@ tune/
 ### rshogi 形式 ⇔ YaneuraOu 形式の `.params` 変換
 
 `yo_rshogi_mapping.toml` を介して双方向変換できる。詳細は同 runbook §10 参照。
+`yo_to_rshogi_params` の出力は `# spsa-format: c-end-r-end-v1` を宣言する。
+YO入力からは値だけを転記し、base省略時のscheduleは `c_end=max(1,round(range/20))`、
+`r_end=0.002`。`--base` には同じ宣言が必要で、未宣言の既知v4ファイルに限り
+`--assume-c-end-r-end` で明示確認できる。旧step/deltaのbaseは使用しない。
 
 ```bash
 # YO 形式 → rshogi 形式
@@ -115,11 +119,16 @@ cargo run --release -p tools --bin check_param_mapping -- \
 あり、SPSA に直接の入力として使う際は **canonical (起点) として `--init-from`
 に渡す** こと。SPSA の live 状態は `--run-dir <dir>` 配下の `state.params` に
 書かれるため、canonical 自体が上書きされることはない。
+YOの名前体系とscheduleの形式は別に確認する。`tune.py` 由来ファイルや
+`rshogi_to_yo_params` の出力は形式を宣言しないため、そのままtunerには渡さない。
+列6/7が既にc_end/r_endと確認済みなら `--assume-c-end-r-end`、旧形式なら値だけを
+新canonicalへ移してscheduleを設計し直す。既存runのstateへヘッダを追記すると
+保存済みhashと不一致になるため、再開時は確認フラグで元のファイルを保つ。
 
 ```bash
 # 正しい運用: canonical を --init-from に、SPSA の作業領域は --run-dir に分離
 spsa --run-dir "runs/spsa/$(date -u +%Y%m%d_%H%M%S)" \
-     --init-from tune/suisho10.params \
+     --init-from spsa_params/from_yo.params \
      --total-pairs 6400 --batch-pairs 32 --seed 1 \
      ...
 ```

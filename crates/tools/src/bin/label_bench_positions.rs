@@ -37,6 +37,7 @@ use rshogi_core::nnue::{
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 use rshogi_core::types::{Color, Value};
+use tools::output_path::{create_safe_output_file, ensure_safe_output_paths};
 
 /// 探索用スタックサイズ（64MB）。深い探索で再帰スタックを使うため main 同等を確保する。
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -125,7 +126,13 @@ fn install_fatal_panic_hook() {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    validate_paths(&cli.input, &cli.output)?;
+    ensure_safe_output_paths(&[&cli.output], &readonly_inputs(cli))?;
+    if let Some(parent) = cli.output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
+    }
 
     // 両方 0 だと時間管理探索（時間 0）に落ちて停止条件が無くなるため弾く。
     if cli.depth <= 0 && cli.nodes == 0 {
@@ -186,6 +193,7 @@ struct RunStats {
 
 /// producer + worker + collector のストリーミングパイプライン本体。
 fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result<RunStats> {
+    let out_file = create_safe_output_file(&cli.output, &readonly_inputs(cli))?;
     // in-flight（acquire 済みで未書き出し）件数の上限。reorder buffer もこの値でバウンドする。
     // 下限を num_threads+1 にするのは、num_threads と等しいと全トークンを worker が握って
     // collector が次の seq を永久に待つデッドロックになり得るため。
@@ -255,9 +263,6 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
         Ok(())
     });
 
-    let output_path = &cli.output;
-    let out_file = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
     let mut next = 0usize;
@@ -463,39 +468,10 @@ fn configure_eval(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn validate_paths(input: &Path, output: &Path) -> Result<()> {
-    if input == output {
-        bail!("--in and --out must differ");
-    }
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(input), fs::canonicalize(output))
-        && a == b
-    {
-        bail!("--in and --out resolve to the same file");
-    }
-    // canonicalize は hardlink（別 path・同一 inode）を検出できない。出力 create が入力を
-    // truncate する事故を防ぐため、dev/ino でも同一性を弾く。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(im), Ok(om)) = (fs::metadata(input), fs::metadata(output))
-            && im.dev() == om.dev()
-            && im.ino() == om.ino()
-        {
-            bail!("--in and --out are the same file (same dev/ino)");
-        }
-    }
-    if let Ok(meta) = fs::symlink_metadata(output)
-        && meta.file_type().is_symlink()
-    {
-        bail!("refusing to write through a symlink: {}", output.display());
-    }
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
-    }
-    Ok(())
+fn readonly_inputs(cli: &Cli) -> Vec<&Path> {
+    let mut inputs = vec![cli.input.as_path(), cli.nnue.as_path()];
+    inputs.extend(cli.ls_progress_coeff.as_deref());
+    inputs
 }
 
 /// 進捗バーの分母用に非空行数を数える（全件を貯めず streaming）。

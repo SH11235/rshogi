@@ -1,6 +1,6 @@
 # tools
 
-LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md)。
+LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](docs/nnue-routing.md)。
 
 将棋エンジン開発用ツール群
 
@@ -66,6 +66,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 |--------|------|
 | `benchmark` | エンジン性能ベンチマーク。USI の評価ハッシュ設定と受信期限に対応（[詳細](docs/benchmark.md)） |
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
+| `mate_bench` | df-pn 詰み探索を局面集で解き、結果の内訳・探索量・時間を集計。最短詰み手数の正解と照合（[詳細](docs/mate_bench.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。`--alternate-rounds` で round ごとに A/B を交換し、JSON `blocks` に局面×round の順序と比、`binaries` に両エンジンの SHA-256 を保存。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](docs/compare_eval_nnue.md)） |
@@ -118,20 +119,22 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [nyugyoku_gensfen](docs/nyugyoku_gensfen.md) - 入玉アンカー局面から gensfen 用開始局面を生成
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [search_only_ab](docs/search_only_ab.md) - search-only A/B ベンチマーク（perf / ETW PMC）の詳細
+- [mate_bench](docs/mate_bench.md) - df-pn 詰み探索の局面集ベンチの詳細
 - [dump_effect_bucket_golden](docs/dump_effect_bucket_golden.md) - 形式一致 golden 用 effect bucket active index dump
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 - [shuffle_psv](docs/shuffle_psv.md) - PSV の再現可能なシャッフルと大規模ファイル向け段階削除
 - [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
-- [label_bench_positions](docs/label_bench_positions.md) - ベンチ局面の深い探索ラベリング（ground truth）
-- [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
-- [yardstick_label](docs/yardstick_label.md) - held-out hcpe を labeler の固定 depth 探索でラベル付け（物差し stage 1）
-- [yardstick_score](docs/yardstick_score.md) - labeler の WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
+- [label_bench_positions](docs/label_bench_positions.md) - 入力・NNUE・進行度係数を出力先から保護する深い探索ラベリング（ground truth）
+- [label_bench_dl](docs/label_bench_dl.md) - 入力・ONNX モデルを保護して label_bench jsonl に DL水匠 評価値を追記
+- [yardstick_label](docs/yardstick_label.md) - 読み取り専用資源と全 capture 出力の衝突を検査する held-out hcpe のラベリング（物差し stage 1）
+- [yardstick_score](docs/yardstick_score.md) - 全入力ラベルを保護し、WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
-- [generate_spsa_params](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の既定値から SPSA 用 `.params` を生成
-- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。Linuxでは既定でworkerごとのengineをnode-localな論理CPU群へ固定（`--cpu-affinity off`で明示解除）。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
-- [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成
+- [generate_spsa_params](docs/generate_spsa_params.md) - 共通の既定値と c_end/r_end 形式宣言付きで SPSA `.params` を生成
+- [spsa](docs/spsa.md) - 永続 engine プールで batch チューニング。Linuxでは既定でworkerごとのengineをnode-localな論理CPU群へ固定（`--cpu-affinity off`で明示解除）。初期化前にparams全行とmapping、対局開始前にscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
+- [yo_to_rshogi_params](docs/yo_to_rshogi_params.md) - YO値をrshogiへ転記し、宣言付きのc_end/r_end形式で保存する
+- [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から c_end/r_end 形式宣言付きの net 重み delta 用 SPSA `.params` を生成
 - [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する。重複行は拒否する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
 - [psv_gate_by_king_zone](docs/psv_gate_by_king_zone.md) - 入玉ドメインの base/override score 合成と行対応 mask bitmap

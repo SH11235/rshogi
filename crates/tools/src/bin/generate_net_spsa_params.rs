@@ -9,6 +9,7 @@ use rshogi_core::nnue::net_bin_layout::LayerStacksBinLayout;
 use rshogi_core::nnue::{NetCoefficientId, NetTensorKind};
 use sha2::{Digest, Sha256};
 use tools::output_path::ensure_safe_output_path;
+use tools::spsa_param_mapping::SPSA_PARAMS_FORMAT_HEADER;
 
 const DEFAULT_MAX_PARAMS: usize = 4096;
 const R_END: &str = "0.002";
@@ -129,7 +130,7 @@ fn generate_params<R: Read + Seek>(
     std::io::copy(reader, &mut hasher).context("failed to hash NNUE")?;
     let sha256 = format!("{:x}", hasher.finalize());
     let mut output = format!(
-        "# net={net_name} sha256={sha256} arch={} buckets={}\n",
+        "# net={net_name} sha256={sha256} arch={} buckets={}\n{SPSA_PARAMS_FORMAT_HEADER}\n",
         layout.architecture, layout.num_buckets
     );
     let mut count = 0usize;
