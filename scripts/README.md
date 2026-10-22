@@ -105,3 +105,9 @@ sudo perf report -i perf_reuse.data
 - 結果はシステム環境（CPU、OS）に依存する
 - 複数スクリプトの並列実行が可能（各スクリプトは別々の `perf_*.data` ファイルを使用）
 - 計測結果の分析ドキュメント: `docs/performance/README.md`
+
+## wasm の計測
+
+`run_wasi.mjs` は、WASI 向けにビルドした wasm を Node.js で動かす (ブラウザと同じ V8 で wasm の速さを測る)。
+`node scripts/run_wasi.mjs <file.wasm> [args...]`。詰み探索の局面集ベンチでの使い方は
+`crates/tools/docs/mate_bench.md` の「wasm で測る」。

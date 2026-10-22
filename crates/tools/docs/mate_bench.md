@@ -54,3 +54,26 @@ TSV (`--out`、入力順) の列:
 | `pv` | 詰み手順 (USI 表記、空白区切り) |
 
 入力は読みながら解くので、メモリは局面数に依存しない (解いている途中と書き出し待ちの局面は `jobs × 64` 件まで)。
+
+## wasm で測る
+
+ブラウザに組み込むとき (wasm) の速さは、rshogi-core の example `mate_bench_wasm` を WASI 向けにビルドして
+Node.js (ブラウザと同じ V8) で動かして測る。`mate_bench` は wasm にビルドできない依存 (tokio) を持つため、
+rshogi-core だけに依存する 1 スレッドの最小版を別に置いている。引数は `--input` `--stride` `--offset`
+`--limit` `--flip` `--nodes` `--hash-mb` `--out` (意味は `mate_bench` と同じ。時間の上限は無い)。
+
+```bash
+rustup target add wasm32-wasip1
+cargo build --release -p rshogi-core --example mate_bench_wasm --target wasm32-wasip1
+# wasm から読み書きするファイルは、カレントディレクトリか引数に書いたパスのディレクトリに置く
+cd $SHOGI_DATA/tsume
+node /path/to/rshogi/scripts/run_wasi.mjs /path/to/rshogi/target/wasm32-wasip1/release/examples/mate_bench_wasm.wasm   --input yaneuraou-2020/mate11.sfen --stride 1000 --nodes 2000000 --out mate11-wasm.tsv
+```
+
+出力は `局面` と `nodes` の 2 行と、`--out` の TSV
+(`sfen` `result` `pv_len` `nodes` `micros`)。ノード数と判定は native の `mate_bench` と一致する。
+
+探索は手数ごとに再帰するので、wasm ではスタックが 2 種類要る: wasm のメモリ上のスタック (Rust の既定 1 MB) と、
+実行エンジンの呼び出しスタック (Node.js・ブラウザの既定はおよそ 1 MB)。探索深さの上限 (2048 手) まで潜ると、
+前者を約 200 KB、後者を約 700 KB 使う。呼び出しスタックが足りないと `RangeError: Maximum call stack size exceeded`
+で探索が止まる (`node --stack-size=<KB>` で上限を変えて確かめられる)。
