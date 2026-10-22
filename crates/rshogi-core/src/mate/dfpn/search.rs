@@ -13,6 +13,10 @@
 //!   条件付きの不詰は置換表に書かない。ルートの不詰が上限に依存していたら判定できなかったとする。
 //! - 子が自分より浅い深さで書かれた未確定値を使っていたら、TCA (Kishimoto 2010) で閾値を延長する。
 //!   循環を通って膨らむ未確定値で、同じ子を選んでは閾値で戻ることを繰り返すのを防ぐ。
+//! - 受け方の合駒 (同じ升への駒違い、守りの無い中合い) と成・不成の組は、組の中で前の手が確定するまで
+//!   後ろの手を現局面の pn/dn に数えない (KomoringHeights の遅延展開)。安い合駒が詰めば高い合駒も
+//!   たいてい詰むので、均等に数えて pn を過大に見積もるのを防ぐ。手を省くのではないので、
+//!   受け方の詰み・攻め方の不詰は、すべての手が数えられてからしか確定しない。
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
@@ -102,6 +106,20 @@ struct Child<M> {
     limited: bool,
     /// 置換表に無く、まだ一度も探索していない子 (TCA の延長を戻す判定に使う)
     first_visit: bool,
+    /// 現局面の pn/dn に数えるか。確定した子は常に数える。後回しの組で、組の中の前に確定していない
+    /// 手がある確定していない手は数えない。
+    active: bool,
+    /// 後回しの組でこの手の次の手 (フレーム内の添字)。`NO_NEXT` なら無い。
+    next: u16,
+}
+
+/// `Child::next` の「次の手が無い」
+const NO_NEXT: u16 = u16::MAX;
+
+impl<M> Child<M> {
+    fn is_final(&self) -> bool {
+        self.pn == 0 || self.dn == 0
+    }
 }
 
 /// 探索するノードと閾値
@@ -172,6 +190,8 @@ pub(super) struct Scratch<M> {
     moves: Vec<M>,
     /// `moves` の各手を指した後のキー
     child_keys: Vec<u64>,
+    /// 後回しにしてよい手の (組, 組の中で読む順, フレーム内の添字)
+    delay_order: Vec<(u16, u8, u16)>,
     /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
     proven: Vec<(M, u16)>,
 }
@@ -184,6 +204,7 @@ impl<M> Scratch<M> {
             children: Vec::with_capacity(CHILDREN_RESERVE),
             moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
             child_keys: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            delay_order: Vec::with_capacity(crate::movegen::MAX_MOVES),
             proven: Vec::with_capacity(crate::movegen::MAX_MOVES),
         }
     }
@@ -406,6 +427,10 @@ impl<'a, S: MateState> Searcher<'a, S> {
             child.mate_len = child_result.mate_len;
             child.loop_depth = child_result.loop_depth;
             child.limited = child_result.limited;
+            if child_result.is_final() && child.next != NO_NEXT {
+                let next = child.next;
+                self.activate_delayed(start, next);
+            }
 
             current = self.aggregate(start, or_node);
             thpn = orig_thpn;
@@ -455,6 +480,8 @@ impl<'a, S: MateState> Searcher<'a, S> {
                 loop_depth: NO_LOOP,
                 limited: false,
                 first_visit: true,
+                active: true,
+                next: NO_NEXT,
             };
             let child_key = self.scratch.child_keys[i];
             if let Some(loop_depth) = self.repetition_depth(child_key) {
@@ -477,7 +504,60 @@ impl<'a, S: MateState> Searcher<'a, S> {
             }
             self.scratch.children.push(child);
         }
+        self.link_delayed(st, or_node);
         has_old_child
+    }
+
+    /// 現在のフレームの子 (`scratch.moves` と同じ順) で後回しの組を作り、組の中で前の手が
+    /// 確定していない手を数えないようにする。
+    fn link_delayed(&mut self, st: &S, or_node: bool) {
+        let n = self.scratch.moves.len();
+        let start = self.scratch.children.len() - n;
+        self.scratch.delay_order.clear();
+        for (i, &mv) in self.scratch.moves.iter().enumerate() {
+            if let Some((group, rank)) = st.delay_key(mv, or_node) {
+                self.scratch.delay_order.push((group, rank, i as u16));
+            }
+        }
+        if self.scratch.delay_order.len() < 2 {
+            return;
+        }
+        // 組ごとに読む順に並べ、隣り合う同じ組の手をつなぐ
+        self.scratch.delay_order.sort_unstable();
+        for k in 1..self.scratch.delay_order.len() {
+            let (group, _, i) = self.scratch.delay_order[k];
+            let (prev_group, _, prev) = self.scratch.delay_order[k - 1];
+            if group == prev_group {
+                self.scratch.children[start + usize::from(prev)].next = i;
+            }
+        }
+
+        // 確定していない手が組の中で先に出たら、それより後ろの確定していない手は数えない
+        let mut current_group = None;
+        let mut blocked = false;
+        for &(group, _, i) in &self.scratch.delay_order {
+            if current_group != Some(group) {
+                current_group = Some(group);
+                blocked = false;
+            }
+            let child = &mut self.scratch.children[start + usize::from(i)];
+            if !child.is_final() {
+                child.active = !blocked;
+                blocked = true;
+            }
+        }
+    }
+
+    /// 後回しの組で、`next` から先の手を確定していない手が 1 つ数えられるまで数える
+    fn activate_delayed(&mut self, start: usize, mut next: u16) {
+        while next != NO_NEXT {
+            let child = &mut self.scratch.children[start + usize::from(next)];
+            child.active = true;
+            if !child.is_final() {
+                break;
+            }
+            next = child.next;
+        }
     }
 
     /// 子の値から現局面の pn/dn を求める (OR: pn=min, dn=和 / AND: pn=和, dn=min)
@@ -486,7 +566,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
         let mut min = PN_INF;
         let mut sum = 0u64;
         let mut has_inf = false;
-        for c in children {
+        for c in children.iter().filter(|c| c.active) {
             let (phi, delta) = if or_node { (c.pn, c.dn) } else { (c.dn, c.pn) };
             min = min.min(phi);
             sum = add_pn(sum, delta);
@@ -519,7 +599,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
         let mut best_phi = PN_INF;
         let mut second_phi = PN_INF;
         let mut sum_delta = 0u64;
-        for (i, c) in children.iter().enumerate() {
+        for (i, c) in children.iter().enumerate().filter(|(_, c)| c.active) {
             let p = phi(c);
             if p < best_phi {
                 second_phi = best_phi;
@@ -555,6 +635,11 @@ impl<'a, S: MateState> Searcher<'a, S> {
         current: NodeResult,
     ) -> NodeResult {
         let children = &self.scratch.children[start..];
+        // 受け方の詰み・攻め方の不詰はすべての子が根拠なので、後回しの組の手もすべて数えられている
+        debug_assert!(
+            !(current.is_proven() && !or_node || current.is_disproven() && or_node)
+                || children.iter().all(|c| c.active)
+        );
         if current.is_proven() {
             let len = if or_node {
                 children.iter().filter(|c| c.pn == 0).map(|c| c.mate_len).min()
