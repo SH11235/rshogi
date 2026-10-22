@@ -101,7 +101,7 @@ cargo run --release -p tools --bin book_prepwalk -- \
 | `max_remaining` | その局面から相手の定跡の終わりまでの手数 (両者の手を合わせた数) の最大 |
 | `eval_out_median` | 通った対局の出口の評価値の中央値 (先手から見た値、偶数個は中央 2 値の平均を 0 方向へ切り捨て) |
 | `eval_out_max` | 通った対局の出口の評価値のうち相手に最も良い値 (`--our-side white` は最大、`black` は最小) |
-| `sente_winrate` | 通った対局での相手の勝率 (小数 2 桁) |
+| `sente_winrate` / `gote_winrate` | 通った対局での相手の勝率 (小数 2 桁)。列名は相手の手番で、`--our-side white` は `sente_winrate`、`black` は `gote_winrate` |
 | `alt_moves` | `--follow all` / `preset` のときだけ。自分が `main` 以外を選んだ手を `手数:手` で並べる |
 
 「相手の定跡が切れた」局面は相手の定跡の範囲に無いので、`games` 以降は 0 か空になります。

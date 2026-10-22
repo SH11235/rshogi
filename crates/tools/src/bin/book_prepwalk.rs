@@ -571,8 +571,14 @@ fn fmt_opt<T: std::fmt::Display>(value: Option<T>) -> String {
 }
 
 fn tsv(reports: &[OpponentReport], cfg: &WalkConfig, with_alts: bool) -> String {
-    let mut out = String::from(
-        "opponent\tweight\tstop\tply\tkey\tpath\tgames\tmax_remaining\teval_out_median\teval_out_max\tsente_winrate",
+    // 最後の列は相手の勝率なので、列名を相手の手番に合わせる。
+    let winrate = if cfg.our_side == Color::White {
+        "sente_winrate"
+    } else {
+        "gote_winrate"
+    };
+    let mut out = format!(
+        "opponent\tweight\tstop\tply\tkey\tpath\tgames\tmax_remaining\teval_out_median\teval_out_max\t{winrate}",
     );
     if with_alts {
         out.push_str("\talt_moves");
@@ -878,6 +884,10 @@ mod tests {
             )
         );
         assert!(tsv(&reports, &cfg, true).lines().next().unwrap().ends_with("\talt_moves"));
+        assert!(lines[0].ends_with("\tsente_winrate"));
+        let mut black = cfg.clone();
+        black.our_side = Color::Black;
+        assert!(tsv(&reports, &black, false).lines().next().unwrap().ends_with("\tgote_winrate"));
     }
 
     #[test]
