@@ -156,30 +156,34 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     Ok(())
 }
 
-/// 食い違いの一覧は確認だけの実行でも書くので、元データや木の出力を指す書き方 (相対・絶対・`..`・リンク) を
-/// 実体のパスで比べて拒否する。
+/// 食い違いの一覧は確認だけの実行でも書く。書き出しは指定したパスの dir の項目を置き換えるので、その項目
+/// (親 dir の実体 + ファイル名) を元データと木の出力先の実体と比べる。リンクへの書き出しは項目とリンク先が
+/// 食い違うので拒否する。親 dir は既にあるものに限る (まだ無い dir を推測でたどるとリンクを見落とす)。
 pub(super) fn check_conflicts_path(
     conflicts: &Path,
     master: &Path,
     trees: &[PathBuf],
 ) -> Result<()> {
-    let target = resolved(conflicts)?;
-    ensure!(target != resolved(master)?, "--conflicts を元データと同じにはできません");
+    ensure!(
+        !std::fs::symlink_metadata(conflicts).is_ok_and(|m| m.file_type().is_symlink()),
+        "--conflicts にリンクは指定できません"
+    );
+    let target = entry(conflicts)?;
+    let real_master = std::fs::canonicalize(master)
+        .with_context(|| format!("{} を解決できません", master.display()))?;
+    ensure!(
+        target != real_master && target != entry(master)?,
+        "--conflicts を元データと同じにはできません"
+    );
     for dir in trees {
-        ensure!(
-            !target.starts_with(resolved(dir)?),
-            "--conflicts を木の出力先の中にはできません"
-        );
+        let real = std::fs::canonicalize(dir)
+            .with_context(|| format!("{} を解決できません", dir.display()))?;
+        ensure!(!target.starts_with(real), "--conflicts を木の出力先の中にはできません");
     }
     Ok(())
 }
 
-/// まだ無い dir を推測でたどると、その先の既存のリンクを見落とす。親 dir は既にあるものに限る。
-fn resolved(path: &Path) -> Result<PathBuf> {
-    if std::fs::symlink_metadata(path).is_ok() {
-        return std::fs::canonicalize(path)
-            .with_context(|| format!("{} を解決できません", path.display()));
-    }
+fn entry(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = path
         .file_name()
@@ -633,9 +637,13 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&tree, dir.path().join("tree_link")).unwrap();
+            let outside = dir.path().join("outside.tsv");
+            std::fs::write(&outside, "y").unwrap();
+            std::os::unix::fs::symlink(&outside, tree.join("node_moves.tsv")).unwrap();
             for bad in [
                 "new/../tree_link/node_moves.tsv",
                 "tree_link/node_moves.tsv",
+                "tree/node_moves.tsv",
             ] {
                 assert!(
                     check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(),
