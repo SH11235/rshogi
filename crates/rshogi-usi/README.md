@@ -49,6 +49,7 @@ The engine will start in USI mode, waiting for commands from stdin.
 | `EvalFile` | NNUE model path | `eval/nn.bin` |
 | `SPSAParamsFile` | Search/net SPSA parameter file | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
+| `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
 
 `PassRights` / `InitialPassCount` / `PassMoveBonus` / `PassRightValueEarly` / `PassRightValueLate`
 configure the optional finite pass-rights rule. The position and move generation support it in
@@ -59,6 +60,31 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
+
+## 詰み探索 (`go mate`)
+
+USI 仕様の `go mate` に df-pn 詰み探索で応答します。通常探索 (`bestmove`) とは別の応答です。
+
+```text
+go mate <ミリ秒>      # 制限時間つき
+go mate infinite      # stop まで (go mate だけ、または 0 ミリ秒も同じ)
+```
+
+| 応答 | 意味 |
+|------|------|
+| `checkmate <手順>` | 手番側が王手を続けて詰ませる手順 (USI 表記、空白区切り)。最短とは限らない |
+| `checkmate nomate` | 詰まない (攻め方の手はすべて王手、受け方は合駒・不成を含む全応手で判定) |
+| `checkmate timeout` | 判定できなかった (制限時間・`stop`、探索深さの上限 2048 手、詰み手順の復元失敗)。不詰の意味ではない |
+| `checkmate notimplemented` | 扱えない局面 (どちらかの玉が無い (攻め方の玉が無い詰将棋など)、手番でない側が王手されている) |
+
+- 問題は「与えられた局面から手番側が詰ませるか」として解きます。`position ... moves ...` の
+  手順 (対局履歴) は見ず、探索中に同じ局面へ戻る手順 (連続王手の千日手を含む) は攻め方の失敗として扱います。
+- 手番側が王手されている局面も、王手を外しつつ王手をかける手 (逆王手) から解きます。
+- 打ち歩詰めの歩打ちは攻め方の手になりません。
+- 局面の同一性は 64bit のハッシュキーで判定します。
+- 約 1 秒ごとに `info time <ms> nodes <n> nps <nps>` を出力します。
+- 「詰めろ」の判定には、手番を相手に渡した局面 (SFEN の手番を反転) を送ります。
+  手番側が王手されている局面は手番を反転できないので、呼ぶ側で除いてください。
 
 ## Allocation diagnostics
 
@@ -172,6 +198,8 @@ GPL-3.0-or-later License
 
 本プロジェクトは将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) およびチェスエンジン [Stockfish](https://github.com/official-stockfish/Stockfish) を参考にしています。
 アルゴリズムや評価のアイデアに影響を受けていますが、実装と構成は独自です。
+詰み探索 (`go mate`) の df-pn は [KomoringHeights](https://github.com/komori-n/KomoringHeights) の設計
+(子の局所展開、TCA、経路依存の不詰の扱い) を参考にしています。
 
 ### TT書き込み診断 (`tt-write-stats`)
 

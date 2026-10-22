@@ -15,6 +15,7 @@ use rshogi_core::eval::{
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
     set_pass_right_value_phased,
 };
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, MAX_LAYER_STACK_BUCKETS,
     NET_DELTA_OPTION_PREFIX, NetCoefficientId, NetDelta, NetDeltaReport, clear_nnue,
@@ -53,6 +54,8 @@ const ENGINE_VERSION: &str = "0.1.0";
 const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
+/// `go mate` の置換表サイズの既定値 (MB)
+const DEFAULT_MATE_HASH_MB: usize = 64;
 
 /// USI へ表示するハッシュ表の page 配置。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +181,15 @@ struct UsiEngine {
     book_loaded_sig: Option<(String, bool)>,
     /// 定跡手抽選用の乱数源
     book_rng: rshogi_book::DefaultBookRng,
+    // --- 詰み探索（go mate）関連 ---
+    /// df-pn の置換表サイズ（MateHashMBで変更）
+    mate_hash_mb: usize,
+    /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
+    mate_solver: Option<DfpnSolver>,
+    /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
+    mate_thread: Option<thread::JoinHandle<Option<DfpnSolver>>>,
+    /// go mate の停止フラグ
+    mate_stop: Arc<AtomicBool>,
 }
 
 impl UsiEngine {
@@ -243,6 +255,10 @@ impl UsiEngine {
             book: None,
             book_loaded_sig: None,
             book_rng: rshogi_book::DefaultBookRng::new(),
+            mate_hash_mb: DEFAULT_MATE_HASH_MB,
+            mate_solver: None,
+            mate_thread: None,
+            mate_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -328,6 +344,7 @@ impl UsiEngine {
             "option name DrawValueWhite type spin default {DEFAULT_DRAW_VALUE_WHITE} min -30000 max 30000"
         );
         println!("option name EvalHash type spin default 256 min 0 max 4096");
+        println!("option name MateHashMB type spin default {DEFAULT_MATE_HASH_MB} min 1 max 4096");
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -745,6 +762,9 @@ impl UsiEngine {
     fn cmd_setoption(&mut self, tokens: &[&str]) {
         // 探索中の設定変更は避ける
         self.wait_for_search();
+        // 未解決の go mate infinite は終わらないので、待つ前に止める (checkmate timeout を出す)
+        self.mate_stop.store(true, Ordering::SeqCst);
+        self.wait_for_mate();
 
         // setoption name <name> value <value>
         let mut name = String::new();
@@ -921,6 +941,15 @@ impl UsiEngine {
                     opts.uci_elo = v;
                     self.skill_options = opts;
                     search.set_skill_options(opts);
+                }
+            }
+            "MateHashMB" => {
+                if let Ok(size) = value.parse::<usize>()
+                    && size >= 1
+                {
+                    self.mate_hash_mb = size;
+                    // 次の go mate で新しいサイズで確保し直す
+                    self.mate_solver = None;
                 }
             }
             "EvalHash" => {
@@ -1436,15 +1465,19 @@ impl UsiEngine {
         // GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
         // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
         self.stop_search_silently();
+        if tokens.get(1) == Some(&"mate") {
+            self.cmd_go_mate(tokens);
+            return Ok(());
+        }
         self.reload_net_deltas_if_dirty()?;
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
 
         // 定跡 probe（探索の外・root で 1 回）。
-        // go infinite / go mate / go ponder では probe しない（Phase 1 の単純化、設計メモ §3）。
+        // go infinite / go ponder では probe しない（Phase 1 の単純化、設計メモ §3）。
         // book hit 時は探索スレッドを起こさず bestmove を直接出力する。
-        if !limits.infinite && limits.mate == 0 && !limits.ponder && self.try_book_probe() {
+        if !limits.infinite && !limits.ponder && self.try_book_probe() {
             return Ok(());
         }
 
@@ -1539,6 +1572,62 @@ impl UsiEngine {
         Ok(())
     }
 
+    /// go mate コマンド: df-pn 詰み探索を別スレッドで走らせ、`checkmate` で応答する。
+    ///
+    /// `go mate <ミリ秒>` / `go mate infinite` / `go mate`（infinite と同じ）。手番側が詰ませる
+    /// 問題として解き、詰みなら `checkmate <手順>`、不詰なら `checkmate nomate`、時間切れ・stop なら
+    /// `checkmate timeout` を返す。局面以前の対局履歴（千日手の履歴）は見ない。
+    fn cmd_go_mate(&mut self, tokens: &[&str]) {
+        let time_ms = parse_go_mate_time(tokens);
+        let mut pos = self.position.clone();
+        let mut solver =
+            self.mate_solver.take().unwrap_or_else(|| DfpnSolver::new(self.mate_hash_mb));
+        self.mate_stop.store(false, Ordering::SeqCst);
+        let stop = Arc::clone(&self.mate_stop);
+        let suppress_flag = Arc::clone(&self.suppress_bestmove);
+        // 詰み探索の再帰は手数に比例して深くなるので、通常探索と同じ大きさのスタックを使う
+        let builder = thread::Builder::new().stack_size(SEARCH_STACK_SIZE);
+        self.mate_thread = Some(
+            builder
+                .spawn(move || {
+                    let limits = MateLimits { nodes: 0, time_ms };
+                    // panic しても GUI は checkmate を待ち続けるので、捕まえて timeout として応答する。
+                    // panic = "abort" のビルド (production プロファイル) ではプロセスごと終了する。
+                    let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let result = solver.solve(&mut pos, &limits, &stop, |progress| {
+                            let nps = progress.nodes * 1000 / progress.elapsed_ms.max(1);
+                            println!(
+                                "info time {} nodes {} nps {nps}",
+                                progress.elapsed_ms, progress.nodes
+                            );
+                            std::io::stdout().flush().ok();
+                        });
+                        (solver, result)
+                    }));
+                    let (solver, result) = match solved {
+                        Ok((solver, result)) => (Some(solver), result),
+                        Err(_) => {
+                            eprintln!("info string mate search panicked");
+                            (None, MateResult::Unknown)
+                        }
+                    };
+                    if !suppress_flag.load(Ordering::SeqCst) {
+                        println!("{}", checkmate_response(&result));
+                        std::io::stdout().flush().ok();
+                    }
+                    solver
+                })
+                .expect("failed to spawn mate search thread"),
+        );
+    }
+
+    /// 詰み探索スレッドの終了を待ち、ソルバーを取り戻す（panic していたら次の go mate で作り直す）
+    fn wait_for_mate(&mut self) {
+        if let Some(handle) = self.mate_thread.take() {
+            self.mate_solver = handle.join().ok().flatten();
+        }
+    }
+
     /// 現在局面を定跡で probe し、hit したら bestmove を直接出力して true を返す。
     ///
     /// USI_OwnBook=false / 定跡未ロード / miss の場合は何も出力せず false を返し、
@@ -1617,18 +1706,6 @@ impl UsiEngine {
                         limits.movetime = tokens[idx].parse().unwrap_or(0);
                     }
                 }
-                "mate" => {
-                    idx += 1;
-                    // `go mate` without a value is treated as infinite (YaneuraOu互換)
-                    limits.mate = if idx < tokens.len() {
-                        match tokens[idx] {
-                            "infinite" => i32::MAX,
-                            v => v.parse().unwrap_or(0),
-                        }
-                    } else {
-                        i32::MAX
-                    };
-                }
                 "btime" => {
                     idx += 1;
                     if idx < tokens.len() {
@@ -1685,7 +1762,6 @@ impl UsiEngine {
                                 | "winc"
                                 | "byoyomi"
                                 | "rtime"
-                                | "mate"
                         ) {
                             idx -= 1; // 巻き戻して次のループで処理
                             break;
@@ -1721,6 +1797,9 @@ impl UsiEngine {
             stop_flag.store(true, Ordering::SeqCst);
         }
         self.wait_for_search();
+        // go mate 中なら打ち切り、探索スレッドが checkmate timeout（または直前に出た結論）を出力する
+        self.mate_stop.store(true, Ordering::SeqCst);
+        self.wait_for_mate();
     }
 
     /// 探索を停止するがbestmoveを出力しない（cmd_go内部で使用）
@@ -1733,6 +1812,8 @@ impl UsiEngine {
             stop_flag.store(true, Ordering::SeqCst);
         }
         self.wait_for_search();
+        self.mate_stop.store(true, Ordering::SeqCst);
+        self.wait_for_mate();
         self.suppress_bestmove.store(false, Ordering::SeqCst);
     }
 
@@ -1843,6 +1924,30 @@ impl UsiEngine {
             println!("info string Static eval: {}", value.raw());
         }
         println!("info string SFEN: {}", self.position.to_sfen());
+    }
+}
+
+/// `go mate` の制限時間（ミリ秒）。`infinite`・省略・0 は無制限（0 を返す）。
+fn parse_go_mate_time(tokens: &[&str]) -> u64 {
+    match tokens.get(2) {
+        None | Some(&"infinite") => 0,
+        Some(value) => value.parse().unwrap_or_else(|_| {
+            eprintln!("info string Warning: invalid go mate time '{value}', treated as infinite");
+            0
+        }),
+    }
+}
+
+/// 詰み探索の結果を USI の `checkmate` 応答にする
+fn checkmate_response(result: &MateResult) -> String {
+    match result {
+        MateResult::Mate(pv) => {
+            let moves: Vec<String> = pv.iter().map(|m| m.to_usi()).collect();
+            format!("checkmate {}", moves.join(" "))
+        }
+        MateResult::NoMate => "checkmate nomate".to_string(),
+        MateResult::Unknown => "checkmate timeout".to_string(),
+        MateResult::Unsupported => "checkmate notimplemented".to_string(),
     }
 }
 
@@ -2227,25 +2332,20 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
             .unwrap();
     }
     #[test]
-    #[serial]
-    fn parse_go_mate_limits() {
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let engine = UsiEngine::new();
-                for (tokens, mate) in [
-                    (&["go", "mate", "5"][..], 5),
-                    (&["go", "mate"][..], i32::MAX),
-                    (&["go", "mate", "infinite"][..], i32::MAX),
-                ] {
-                    let limits = engine.parse_go_options(tokens);
-                    assert_eq!(limits.mate, mate);
-                    assert!(!limits.use_time_management());
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+    fn parse_go_mate_time_accepts_ms_and_infinite() {
+        assert_eq!(parse_go_mate_time(&["go", "mate", "1500"]), 1500);
+        assert_eq!(parse_go_mate_time(&["go", "mate"]), 0);
+        assert_eq!(parse_go_mate_time(&["go", "mate", "infinite"]), 0);
+        assert_eq!(parse_go_mate_time(&["go", "mate", "abc"]), 0);
+    }
+
+    #[test]
+    fn checkmate_response_formats_each_outcome() {
+        let pv = vec![Move::from_usi("G*5b").unwrap()];
+        assert_eq!(checkmate_response(&MateResult::Mate(pv)), "checkmate G*5b");
+        assert_eq!(checkmate_response(&MateResult::NoMate), "checkmate nomate");
+        assert_eq!(checkmate_response(&MateResult::Unknown), "checkmate timeout");
+        assert_eq!(checkmate_response(&MateResult::Unsupported), "checkmate notimplemented");
     }
 
     #[test]
