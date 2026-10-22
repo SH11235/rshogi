@@ -167,8 +167,10 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     dst.engine_version = engine_source_version(&args.reading.engine);
     warn_unknown_version(&args.reading.engine, &dst.engine_version);
     let source = read_source(&args.from_journal, args.fingerprint.as_deref())?;
+    // hard link はパスを正規化しても別に見えるので、ファイルの実体 (device と inode 等) でも比べる。
     if args.journal.try_exists()?
-        && std::fs::canonicalize(&args.journal)? == std::fs::canonicalize(&args.from_journal)?
+        && (std::fs::canonicalize(&args.journal)? == std::fs::canonicalize(&args.from_journal)?
+            || same_file::is_same_file(&args.journal, &args.from_journal)?)
     {
         bail!("取り込み元と取り込み先が同じ台帳です");
     }
@@ -594,5 +596,16 @@ mod tests {
             })
             .is_err()
         );
+        let linked = dir.path().join("linked.jsonl");
+        std::fs::hard_link(&src_path, &linked).unwrap();
+        let before = std::fs::read(&src_path).unwrap();
+        let err = run(ImportJournalArgs {
+            journal: linked,
+            ..args(true)
+        })
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("同じ台帳"), "{err}");
+        assert_eq!(std::fs::read(&src_path).unwrap(), before);
     }
 }
