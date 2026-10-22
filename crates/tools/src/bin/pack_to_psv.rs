@@ -272,10 +272,6 @@ fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result
         builder.permissions(std::fs::Permissions::from_mode(0o666));
     }
     let mut staged = builder.tempfile_in(parent)?;
-    #[cfg(unix)]
-    if let Some(permissions) = existing_permissions {
-        staged.as_file().set_permissions(permissions)?;
-    }
     let mut stats = ConversionStats::default();
     {
         let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, staged.as_file_mut());
@@ -312,6 +308,11 @@ fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result
         }
         write_batch(&batch, paths, &mut writer, &mut stats)?;
         writer.flush()?;
+    }
+    #[cfg(unix)]
+    if let Some(permissions) = existing_permissions {
+        // 書込みで setuid/setgid が落ちるため、flush 後に権限を復元する。
+        staged.as_file().set_permissions(permissions)?;
     }
     staged.as_file().sync_all()?;
     staged.persist(output).map_err(|error| error.error)?;
@@ -586,9 +587,17 @@ mod tests {
         let output = dir.path().join("output.psv");
         convert_paths(std::slice::from_ref(&input), &output, 0).unwrap();
         assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o777, normal_mode);
-        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o640)).unwrap();
-        convert_paths(&[input], &output, 0).unwrap();
-        assert_eq!(std::fs::metadata(output).unwrap().permissions().mode() & 0o777, 0o640);
+        for mode in [0o640, 0o4750, 0o2750, 0o7750] {
+            std::fs::set_permissions(&output, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o7777, mode);
+            convert_paths(std::slice::from_ref(&input), &output, 0).unwrap();
+            assert_eq!(std::fs::metadata(&output).unwrap().len(), 40);
+            assert_eq!(
+                std::fs::metadata(&output).unwrap().permissions().mode() & 0o7777,
+                mode,
+                "output mode {mode:o}"
+            );
+        }
     }
 
     #[test]
