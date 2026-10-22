@@ -142,7 +142,12 @@ fn assert_bidirectional(category: &str, code_side: &[&'static str], template_sid
 /// と双方向に一致することを検証する。
 #[test]
 fn wrangler_template_r2_bindings_match_config_keys() {
-    assert_bidirectional("r2_bindings", ConfigKeys::ALL_R2_BINDINGS, &TEMPLATE.r2_bindings);
+    let bindings: Vec<_> = ConfigKeys::ALL_R2_BINDINGS
+        .iter()
+        .chain(ConfigKeys::OPTIONAL_R2_BINDINGS.iter())
+        .copied()
+        .collect();
+    assert_bidirectional("r2_bindings", &bindings, &TEMPLATE.r2_bindings);
 }
 
 #[test]

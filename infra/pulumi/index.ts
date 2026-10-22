@@ -33,6 +33,7 @@
 
 import * as pulumi from "@pulumi/pulumi";
 import * as cloudflare from "@pulumi/cloudflare";
+import { kifuBackupLifecycleRules, kifuBackupLockRules } from "./kifu-backup-policy";
 
 const config = new pulumi.Config();
 const accountId = config.require("accountId");
@@ -108,6 +109,32 @@ export const buckets = stackSpecs.map(
             { protect: true },
         ),
 );
+
+// binding の有効化前に作成する。既存環境への追加は明示的な opt-in に限定する。
+const kifuBackupEnabled = config.getBoolean("kifuBackupEnabled") ?? false;
+export const kifuBackupBucket = kifuBackupEnabled
+    ? new cloudflare.R2Bucket(`kifuBackup-${stack}`, {
+          accountId,
+          jurisdiction: "default",
+          location: "APAC",
+          name: `rshogi-csa-kifu-backup-${stack === "production" ? "prod" : "staging"}`,
+          storageClass: "Standard",
+      }, { protect: true })
+    : undefined;
+export const kifuBackupLock = kifuBackupBucket
+    ? new cloudflare.R2BucketLock(`kifuBackupLock-${stack}`, {
+          accountId,
+          bucketName: kifuBackupBucket.name,
+          rules: kifuBackupLockRules,
+      }, { protect: true })
+    : undefined;
+export const kifuBackupLifecycle = kifuBackupBucket
+    ? new cloudflare.R2BucketLifecycle(`kifuBackupLifecycle-${stack}`, {
+          accountId,
+          bucketName: kifuBackupBucket.name,
+          rules: kifuBackupLifecycleRules,
+      }, { protect: true })
+    : undefined;
 
 // 対局検索 index 用 D1 (binding `GAMES_SEARCH_DB`)。Worker binding と migrations
 // は wrangler.{staging,production}.toml が所有し、Pulumi は database 本体の

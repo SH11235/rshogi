@@ -73,6 +73,12 @@ binding = "KIFU_BUCKET"
 bucket_name = "local-kifu-dev"
 preview_bucket_name = "local-kifu-dev"
 
+# 本番環境では別 bucket と lock を作成してから、この任意 binding を追加する。
+[[r2_buckets]]
+binding = "KIFU_BACKUP_BUCKET"
+bucket_name = "local-kifu-backup-dev"
+preview_bucket_name = "local-kifu-backup-dev"
+
 # --- R2 (Floodgate 履歴保存) ---
 # Floodgate 運用での 1 対局 = 1 オブジェクト形式の履歴永続化先。
 # `R2FloodgateHistoryStorage` が `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json`
@@ -183,6 +189,7 @@ WORKERS_HANDLE_AUTH = "[]"
 # PLAYER_ID_SECRET` で配置する。local dev 専用 placeholder（実運用値を commit
 # しないこと）。rotation 手順は docs/csa-server/deployment.md §2.5 を参照。
 PLAYER_ID_SECRET = "local-dev-player-id-secret-placeholder"
+KIFU_BACKUP_ALERT_URL = ""
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "0"

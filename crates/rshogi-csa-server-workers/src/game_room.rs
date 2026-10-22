@@ -2718,7 +2718,7 @@ impl GameRoom {
         // 1 度シリアライズして meta primary / games-index secondary の双方に
         // 流用する。serialize 失敗は両 put を skip して終了する (どちらも meta
         // 起点なので片方だけ書く意味がない)。
-        let body = match serde_json::to_vec(&entry) {
+        let body = match crate::kifu_backup::meta_with_csa_digest(&entry, &csa_bytes) {
             Ok(b) => b,
             Err(e) => {
                 crate::structured_log!(

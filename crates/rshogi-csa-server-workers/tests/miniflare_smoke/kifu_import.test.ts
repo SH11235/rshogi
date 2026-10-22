@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { type Miniflare, Response as MfResponse } from "miniflare";
 import { createMiniflare, getKifuBucket, makeTempPersistRoot } from "./harness.ts";
 
@@ -74,6 +75,11 @@ const WDOOR_META = {
   clock: { kind: "fischer", total_sec: 300, increment_sec: 10 },
   source: "wdoor",
   event: "floodgate-300-10F",
+};
+
+const WDOOR_STORED_META = {
+  ...WDOOR_META,
+  csa_sha256: createHash("sha256").update(WDOOR_CSA).digest("hex"),
 };
 
 interface OutboundCall {
@@ -336,7 +342,7 @@ describe("miniflare smoke: external kifu import API", () => {
     const afterKeys = await indexKeys();
     expect(afterKeys).toHaveLength(1);
     expect(afterKeys[0]).not.toBe(beforeKeys[0]);
-    expect(await storedMeta(WDOOR_GAME_ID)).toEqual(WDOOR_META);
+    expect(await storedMeta(WDOOR_GAME_ID)).toEqual(WDOOR_STORED_META);
     const list = await viewerGet("/api/v1/games");
     expect(((await list.json()) as { games: unknown[] }).games).toEqual([WDOOR_META]);
     expect(await searchRows()).toMatchObject([
@@ -544,7 +550,7 @@ describe("miniflare smoke: external kifu import API", () => {
     expect(keys).not.toContain(staleKeys[0]);
     expect(keys.filter((key) => key.endsWith(`-${WDOOR_GAME_ID}.json`))).toHaveLength(1);
     expect(keys.filter((key) => key.endsWith(`-${otherGameId}.json`))).toHaveLength(1);
-    expect(await storedMeta(WDOOR_GAME_ID)).toEqual(WDOOR_META);
+    expect(await storedMeta(WDOOR_GAME_ID)).toEqual(WDOOR_STORED_META);
     const list = await viewerGet("/api/v1/games");
     const games = ((await list.json()) as { games: Array<{ game_id: string }> }).games;
     expect(games.map((game) => game.game_id).sort()).toEqual([otherGameId, WDOOR_GAME_ID].sort());

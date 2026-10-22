@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { Miniflare } from 'miniflare';
 import NodeWebSocket from 'ws';
@@ -415,8 +416,12 @@ describe('終局保存の復旧', () => {
     expect((await control({})).finished?.result_code).toBe('#SENNICHITE');
     const bucket = await getKifuBucket(mf);
     const key = (await bucket.list()).objects.find(o => o.key.endsWith('.csa'))!.key;
-    const moves = (await (await bucket.get(key))!.text()).split('\n').filter(l => /^[+-]\d{4}/.test(l));
+    const csa = await (await bucket.get(key))!.text();
+    const moves = csa.split('\n').filter(l => /^[+-]\d{4}/.test(l));
     expect(moves).toHaveLength(12);
+    const metaKey = (await bucket.list()).objects.find(o => o.key.endsWith('.meta.json'))!.key;
+    const meta = JSON.parse(await (await bucket.get(metaKey))!.text());
+    expect(meta.csa_sha256).toBe(createHash('sha256').update(csa).digest('hex'));
   });
 
   it('棋譜保存の待機中に切断が届いても終局確定を二重に実行しない', async () => {
