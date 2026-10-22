@@ -2610,8 +2610,7 @@ mod tests {
             vec![1.25; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
         )
         .unwrap();
-        let original = get_layer_stack_progress_kpabs_weights();
-        let weak = Arc::downgrade(original.0.as_ref().unwrap());
+        let mut original = get_layer_stack_progress_kpabs_weights();
         set_layer_stack_progress_kpabs_weights(
             vec![-0.75; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
         )
@@ -2622,6 +2621,9 @@ mod tests {
         assert!(original.iter().all(|&v| v == 1.25));
         assert!(replacement.iter().all(|&v| v == -0.75));
         assert!(get_layer_stack_progress_kpabs_weights().iter().all(|&v| v == 0.0));
+        // 他テストのstackが旧係数を保持していても、解放確認は単独所有の値で行う。
+        Arc::make_mut(original.0.as_mut().unwrap());
+        let weak = Arc::downgrade(original.0.as_ref().unwrap());
         assert!(weak.upgrade().is_some());
         drop(original);
         assert!(weak.upgrade().is_none());
