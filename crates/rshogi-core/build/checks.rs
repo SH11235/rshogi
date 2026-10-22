@@ -4,7 +4,7 @@
 /// Cargo feature 組合せの整合性を検証する。
 ///
 /// 不正組合せが見つかれば `Err(message)` を返す。
-/// 詳細は `docs/decisions/2026-05-24-build-edition-flavor-design.md` を参照。
+/// preset edition の命名規則は `docs/build.md` を参照。
 fn validate_feature_combination(
     has_feature: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {

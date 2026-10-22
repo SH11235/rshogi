@@ -2,7 +2,7 @@
 //!
 //! 純粋ロジックは `build/checks.rs` の `validate_feature_combination` に切り出して
 //! あり、`tests/build_rs_checks.rs` から `include!` して単体テストする。
-//! 詳細は `docs/decisions/2026-05-24-build-edition-flavor-design.md` を参照。
+//! preset edition の命名規則は `docs/build.md` を参照。
 
 use std::env;
 

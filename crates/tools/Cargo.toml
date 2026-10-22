@@ -40,7 +40,7 @@ threat-profile-full-symdedup = ["rshogi-core/threat-profile-full-symdedup"]
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 
 # === Edition 軸 atomic feature 群 (本 crate で必要なものだけ forward) ===
-# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
+# 命名規則は docs/build.md を参照。
 # tools は静的 LS network の内部を解析するため、nnue-arch から layerstack-arch と
 # size / FT slot を明示的に forward する。汎用評価用の edition-universal も nnue-arch で
 # 明示指定し、rshogi-core の default や他 crate 経由の feature 統合には頼らない。

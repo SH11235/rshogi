@@ -35,6 +35,13 @@
 各自の共有データ root を `SHOGI_DATA` に export して使う。tracked file には machine
 固有の絶対パスでなく `$SHOGI_DATA` を書く（外部 repo は `/path/to/...` placeholder）。
 
+### 設計判断の記録 (ADR) は repo に置かない
+
+- `docs/decisions/` などに ADR・設計判断・計測結果の記録を置かない。repo に入れる文書は利用者向け
+  (README、`docs/build.md`、ツール doc など) だけにする。
+- コードを読む人に設計の理由が必要なら、該当箇所のコメントか利用者向け doc に要点を書く
+  (repo 外の記録への参照で済ませない)。判断の経緯はコミットメッセージ・PR 本文とメンテナの作業ノートに残す。
+
 ## ツール開発（crates/tools）
 
 ### 大量データを扱うツールはスケーラブルに設計する

@@ -1016,7 +1016,7 @@ impl UsiEngine {
                             });
                             eprintln!("info string {payload}");
                             // LayerStack ネットなら net に格納された bucket 数を出力
-                            // (file/option desync 検知用、ADR `2026-05-26` §2.8)。
+                            // (file/option desync 検知用)。
                             if let Some(net) = get_network().as_deref()
                                 && net.is_layer_stacks()
                             {
