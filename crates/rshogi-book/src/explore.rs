@@ -44,6 +44,11 @@ impl BookExploreList {
         self.entries.is_empty()
     }
 
+    /// 局面の候補手をファイル記載順に返す。手数は無視し、先後反転局面は引かない。
+    pub fn moves_for(&self, sfen: &str) -> Option<&[String]> {
+        self.entries.get(&normalize_key(sfen, true)).map(Vec::as_slice)
+    }
+
     pub(crate) fn moves(&self, sfen: &str, flipped: bool) -> Option<Vec<String>> {
         if let Some(moves) = self.entries.get(&normalize_key(sfen, true)) {
             return Some(moves.clone());
@@ -88,4 +93,23 @@ fn parse_entry(line: &str) -> Result<(String, Vec<String>), String> {
         }
     }
     Ok((normalize_key(&position.to_sfen(), true), moves))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
+
+    #[test]
+    fn moves_for_ignores_ply_and_does_not_flip() {
+        let list = BookExploreList::parse(
+            &format!("sfen {HIRATE} b - 1 7g7f 2g2f\nsfen {HIRATE} b - 5g5f\n"),
+            |_| {},
+        );
+        let expected = ["5g5f".to_string()];
+        assert_eq!(list.moves_for(&format!("{HIRATE} b - 9")), Some(&expected[..]));
+        assert_eq!(list.moves_for(&format!("{HIRATE} b -")), Some(&expected[..]));
+        assert_eq!(list.moves_for(&format!("{HIRATE} w - 2")), None);
+    }
 }

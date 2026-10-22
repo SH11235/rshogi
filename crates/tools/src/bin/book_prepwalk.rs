@@ -1,21 +1,23 @@
 //! 相手の定跡の木 (棋譜で即指しが続いた範囲) を自分の定跡で辿り、相手の準備の中で
 //! 自分が考え始める局面と、そこから先に残る相手の準備の長さを数える。
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, ValueEnum};
+use rshogi_book::BookExploreList;
 use rshogi_core::position::{Position, SFEN_HIRATE};
-use rshogi_core::types::Color;
+use rshogi_core::types::{Color, Move};
 use tools::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
 use tools::common::io::write_atomic;
 
 /// 定跡の元データが記録用の手に付ける値。これ以下の手は自分からは指さない。
 const RECORD_VALUE: i32 = -30000;
-/// 標準出力で止まり方ごとに表示する行数の上限。
+/// 標準出力の「読む」の上位と危ない進行の上位に、それぞれ表示する行数の上限。
 const SUMMARY_TOP: usize = 8;
 
 #[derive(Parser, Debug)]
@@ -61,10 +63,10 @@ struct Cli {
     /// 止まり方「<名前> が読む」に使う自分の名前
     #[arg(long, default_value = "自分")]
     self_name: String,
-    /// 危ない進行とみなす相手の定跡の残り手数の下限
+    /// 危ない進行: 残り手数がこれ以上で出口の評価値も `--danger-eval` 以上の対局がその局面を通っている
     #[arg(long, default_value_t = 40)]
     danger_remaining: usize,
-    /// 危ない進行とみなす出口の評価値 (相手から見た最良値) の下限
+    /// 危ない進行とみなす 1 局の出口の評価値 (相手から見た値) の下限
     #[arg(long, default_value_t = 250)]
     danger_eval: i64,
 }
@@ -92,12 +94,11 @@ enum FollowArg {
 }
 
 /// 自分の手番で辿る手の選び方。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Follow {
     Main,
     All,
-    /// 局面キー → 候補手 (ファイル記載順)。
-    Preset(HashMap<String, Vec<String>>),
+    Preset(BookExploreList),
 }
 
 /// 相手の 1 局。
@@ -182,13 +183,18 @@ impl OurBook {
         Self { entries }
     }
 
-    fn apply_override(&mut self, text: &str) {
+    /// 差し替え TSV を適用し、定跡に無かった局面キーを返す。
+    fn apply_override(&mut self, text: &str) -> Vec<String> {
+        let mut missing = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             let mut cells = line.split('\t');
             let key = cells.next().unwrap_or_default();
+            if !self.entries.contains_key(key) {
+                missing.push(key.to_string());
+            }
             match cells.next().filter(|mv| !mv.is_empty()) {
                 Some(mv) => {
                     let moves = vec![mv.to_string()];
@@ -206,30 +212,28 @@ impl OurBook {
                 }
             }
         }
+        missing
     }
 
-    /// 自分の手番で辿る手。空なら自分が読む局面。
-    fn choices(&self, key: &str, follow: &Follow) -> Vec<String> {
+    /// 自分の手番で辿る、局面で合法な手。空なら自分が読む局面。
+    fn choices(&self, key: &str, follow: &Follow, legal: &dyn Fn(&str) -> bool) -> Vec<String> {
         let Some(entry) = self.entries.get(key) else {
             return Vec::new();
         };
+        let main = || entry.main.iter().filter(|mv| legal(mv)).cloned().collect();
         match follow {
-            Follow::Main => entry.main.iter().cloned().collect(),
-            Follow::All => entry.playable.clone(),
+            Follow::Main => main(),
+            Follow::All => entry.playable.iter().filter(|mv| legal(mv)).cloned().collect(),
             Follow::Preset(preset) => {
-                // エンジンの乱択と同じく、候補と定跡の手の積集合が空なら通常の選択に戻る。
+                // エンジンの乱択と同じく、候補と合法な定跡の手の積集合が空なら通常の選択に戻る。
                 let picked: Vec<String> = preset
-                    .get(key)
-                    .into_iter()
-                    .flatten()
-                    .filter(|mv| entry.listed.contains(mv))
+                    .moves_for(key)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|mv| entry.listed.contains(mv) && legal(mv))
                     .cloned()
                     .collect();
-                if picked.is_empty() {
-                    entry.main.iter().cloned().collect()
-                } else {
-                    picked
-                }
+                if picked.is_empty() { main() } else { picked }
             }
         }
     }
@@ -268,6 +272,15 @@ impl WalkConfig {
         }
     }
 
+    /// 先手から見た評価値を相手から見た値にする。
+    fn for_opponent(&self, eval: i64) -> i64 {
+        if self.our_side == Color::White {
+            eval
+        } else {
+            -eval
+        }
+    }
+
     /// 相手が勝ったときの `winner` 列の値。
     fn opponent_winner(&self) -> &'static str {
         if self.our_side == Color::White {
@@ -294,21 +307,13 @@ struct Row {
     /// 出口の評価値のうち相手に最も良い値 (先手から見た値)。
     eval_best: Option<i64>,
     opponent_winrate: Option<f64>,
+    /// 残り手数と出口の評価値が同じ 1 局で危ない進行の条件を満たす対局数。
+    danger_games: usize,
 }
 
 impl Row {
-    fn is_dangerous(&self, cfg: &WalkConfig) -> bool {
-        let Some(best) = self.eval_best else {
-            return false;
-        };
-        let for_opponent = if cfg.our_side == Color::White {
-            best
-        } else {
-            -best
-        };
-        self.kind == StopKind::WeThink
-            && self.max_remaining >= cfg.danger_remaining
-            && for_opponent >= cfg.danger_eval
+    fn is_dangerous(&self) -> bool {
+        self.kind == StopKind::WeThink && self.danger_games > 0
     }
 }
 
@@ -320,6 +325,7 @@ struct OpponentReport {
     /// 止まり方ごとの重みの合計 (初出順)。
     totals: Vec<(StopKind, f64)>,
     rows: Vec<Row>,
+    illegal: BTreeSet<(String, String)>,
 }
 
 fn position_key(pos: &Position) -> String {
@@ -337,7 +343,7 @@ fn parse_lines(
     our_side: Color,
 ) -> Result<Vec<(String, Vec<LineGame>)>> {
     let names: Vec<String> = opponents.iter().map(|n| n.to_lowercase()).collect();
-    let mut lines = text.split('\n');
+    let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
     let column = |name: &str| {
         header
@@ -416,7 +422,6 @@ fn build_tree(games: &[LineGame], our_side: Color) -> OpponentTree {
                 tree.broken_games += 1;
                 break;
             }
-            // 指した直後に自分の手番なら、いま指したのは相手の手。
             if pos.side_to_move() == our_side {
                 let counts = tree.moves.entry(key).or_default();
                 match counts.iter_mut().find(|(mv, _)| *mv == usi) {
@@ -457,18 +462,34 @@ fn summarize_passes(row: &mut Row, passes: &[Pass], cfg: &WalkConfig) {
         let wins = passes.iter().filter(|p| p.winner == cfg.opponent_winner()).count();
         wins as f64 / passes.len() as f64
     });
+    row.danger_games = passes
+        .iter()
+        .filter(|p| {
+            p.remaining >= cfg.danger_remaining
+                && p.exit_eval.is_some_and(|e| cfg.for_opponent(e) >= cfg.danger_eval)
+        })
+        .count();
+}
+
+fn is_legal_usi(pos: &Position, mv: &str) -> bool {
+    Move::from_usi(mv)
+        .and_then(|m| pos.to_move(m))
+        .is_some_and(|m| m != Move::NONE && pos.pseudo_legal(m) && pos.is_legal(m))
 }
 
 struct Walked {
     /// 止まり方ごとの重みの合計 (初出順)。
     totals: Vec<(StopKind, f64)>,
     rows: Vec<Row>,
+    /// 局面で非合法だったため辿らなかった自分の手 (局面キー, 手)。
+    illegal: BTreeSet<(String, String)>,
 }
 
 /// 平手から相手の木と自分の定跡を交互に辿る。深さ優先で、後に積んだ枝から辿る。
 fn walk(tree: &OpponentTree, our: &OurBook, follow: &Follow, cfg: &WalkConfig) -> Result<Walked> {
     let mut totals = Vec::new();
     let mut rows = Vec::new();
+    let illegal = RefCell::new(BTreeSet::new());
     let mut stack = vec![(hirate(), 1.0f64, Vec::<String>::new(), Vec::<String>::new())];
     while let Some((pos, weight, path, alts)) = stack.pop() {
         let key = position_key(&pos);
@@ -489,8 +510,15 @@ fn walk(tree: &OpponentTree, our: &OurBook, follow: &Follow, cfg: &WalkConfig) -
                 moves.iter().map(|(mv, c)| (mv.clone(), weight * *c as f64 / total as f64));
             (StopKind::OpponentOut, children.collect())
         } else {
-            let moves = our.choices(&key, follow);
-            // 自分の候補が複数なら等確率 (エンジンの乱択と同じ) として重みを等分する。
+            let legal = |mv: &str| {
+                let ok = is_legal_usi(&pos, mv);
+                if !ok {
+                    illegal.borrow_mut().insert((key.clone(), mv.to_string()));
+                }
+                ok
+            };
+            let moves = our.choices(&key, follow, &legal);
+            // エンジンは乱択候補の局面で候補を等確率に選ぶので、複数の手には重みを等分する。
             let share = weight / moves.len() as f64;
             (StopKind::WeThink, moves.into_iter().map(|mv| (mv, share)).collect())
         };
@@ -508,6 +536,7 @@ fn walk(tree: &OpponentTree, our: &OurBook, follow: &Follow, cfg: &WalkConfig) -
                 eval_median: None,
                 eval_best: None,
                 opponent_winrate: None,
+                danger_games: 0,
             });
             continue;
         }
@@ -528,40 +557,23 @@ fn walk(tree: &OpponentTree, our: &OurBook, follow: &Follow, cfg: &WalkConfig) -
         let passes = tree.passes.get(&row.key).map(Vec::as_slice).unwrap_or_default();
         summarize_passes(row, passes, cfg);
     }
-    Ok(Walked { totals, rows })
+    Ok(Walked {
+        totals,
+        rows,
+        illegal: illegal.into_inner(),
+    })
 }
 
-fn parse_preset(text: &str) -> Result<HashMap<String, Vec<String>>> {
-    let mut preset = HashMap::new();
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+/// 乱択候補ファイルをエンジンと同じ規則で読み、読み飛ばした行数を返す。各行の理由は stderr に出す。
+fn parse_preset(text: &str) -> (BookExploreList, usize) {
+    let mut skipped = 0;
+    let list = BookExploreList::parse(text, |message| {
+        if message.ends_with("; ignored") {
+            skipped += 1;
         }
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        ensure!(
-            fields.len() >= 5 && fields[0] == "sfen",
-            "{} 行目: 乱択候補の行が不正です",
-            index + 1
-        );
-        let moves_start = if fields[4].parse::<i32>().is_ok() {
-            5
-        } else {
-            4
-        };
-        ensure!(fields.len() > moves_start, "{} 行目: 手がありません", index + 1);
-        let pos = position_from_sfen(&fields[1..moves_start].join(" "))
-            .with_context(|| format!("{} 行目", index + 1))?;
-        let mut moves: Vec<String> = Vec::new();
-        for mv in &fields[moves_start..] {
-            if !moves.iter().any(|m| m == mv) {
-                moves.push(mv.to_string());
-            }
-        }
-        // 同じ局面の行が重なればエンジンと同じく後の行を使う。
-        preset.insert(position_key(&pos), moves);
-    }
-    Ok(preset)
+        eprintln!("{message}");
+    });
+    (list, skipped)
 }
 
 fn fmt_opt<T: std::fmt::Display>(value: Option<T>) -> String {
@@ -635,7 +647,7 @@ fn summary(reports: &[OpponentReport], cfg: &WalkConfig) -> String {
                 row.opponent_winrate.map(|w| format!("{w:.2}")).unwrap_or_default(),
             );
         }
-        let mut dangerous: Vec<&Row> = report.rows.iter().filter(|r| r.is_dangerous(cfg)).collect();
+        let mut dangerous: Vec<&Row> = report.rows.iter().filter(|r| r.is_dangerous()).collect();
         danger_total += dangerous.len();
         let positions: HashSet<&str> = dangerous.iter().map(|r| r.key.as_str()).collect();
         let _ = writeln!(
@@ -654,26 +666,24 @@ fn summary(reports: &[OpponentReport], cfg: &WalkConfig) -> String {
             };
             let _ = writeln!(
                 out,
-                "     重み {:.4} {} 手目 残り {} 手 出口 {} | {}{alts}",
+                "     重み {:.4} {} 手目 危ない対局 {}/{} | {}{alts}",
                 row.weight,
                 row.ply,
-                row.max_remaining,
-                fmt_opt(row.eval_best),
+                row.danger_games,
+                row.games,
                 row.path.join(" "),
             );
         }
         if report.broken_games > 0 {
             let _ = writeln!(out, "   再生できずに途中で打ち切った対局 {}", report.broken_games);
         }
+        if !report.illegal.is_empty() {
+            let _ = writeln!(out, "   非合法で辿らなかった自分の手 {}", report.illegal.len());
+        }
     }
-    let sign = if cfg.our_side == Color::White {
-        "+"
-    } else {
-        "-"
-    };
     let _ = writeln!(
         out,
-        "危ない進行 (相手の定跡の残り {} 手以上、出口の評価値が相手に {sign}{} 以上) の合計: {danger_total} 本",
+        "危ない進行 (相手の定跡の残り {} 手以上かつ出口の評価値が相手から見て +{} 以上の対局が通る) の合計: {danger_total} 本",
         cfg.danger_remaining, cfg.danger_eval
     );
     out
@@ -689,13 +699,21 @@ fn run_walk(
     let mut reports = Vec::new();
     for (name, games) in parse_lines(lines_text, opponents, cfg.our_side)? {
         let tree = build_tree(&games, cfg.our_side);
-        let Walked { totals, rows } = walk(&tree, our, follow, cfg)?;
+        let Walked {
+            totals,
+            rows,
+            illegal,
+        } = walk(&tree, our, follow, cfg)?;
+        for (key, mv) in &illegal {
+            eprintln!("{name}: 局面 {key} の手 {mv} は非合法なので辿りません");
+        }
         reports.push(OpponentReport {
             name,
             games: games.len(),
             broken_games: tree.broken_games,
             totals,
             rows,
+            illegal,
         });
     }
     Ok(reports)
@@ -705,20 +723,10 @@ fn read_text(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("読めません: {}", path.display()))
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let follow = match (cli.follow, &cli.preset) {
-        (FollowArg::Preset, Some(path)) => Follow::Preset(parse_preset(&read_text(path)?)?),
-        (FollowArg::Preset, None) => bail!("--follow preset には --preset が必要です"),
-        (_, Some(_)) => bail!("--preset は --follow preset のときだけ指定できます"),
-        (FollowArg::Main, None) => Follow::Main,
-        (FollowArg::All, None) => Follow::All,
-    };
-    let mut our = OurBook::from_db(&BookDb::read(&cli.book)?);
-    for path in &cli.overrides {
-        our.apply_override(&read_text(path)?);
-    }
-    let cfg = WalkConfig {
+fn walk_config(cli: &Cli) -> Result<WalkConfig> {
+    ensure!(cli.prune > 0.0, "--prune は正の値にしてください (0 以下だと辿りが終わりません)");
+    ensure!(cli.min_weight >= 0.0, "--min-weight は 0 以上にしてください");
+    Ok(WalkConfig {
         our_side: cli.our_side.color(),
         prune: cli.prune,
         max_ply: cli.max_ply,
@@ -726,7 +734,31 @@ fn main() -> Result<()> {
         danger_remaining: cli.danger_remaining,
         danger_eval: cli.danger_eval,
         self_name: cli.self_name.clone(),
+    })
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let cfg = walk_config(&cli)?;
+    let follow = match (cli.follow, &cli.preset) {
+        (FollowArg::Preset, Some(path)) => {
+            let (preset, skipped) = parse_preset(&read_text(path)?);
+            if skipped > 0 {
+                eprintln!("{}: 不正な {skipped} 行を読み飛ばしました", path.display());
+            }
+            Follow::Preset(preset)
+        }
+        (FollowArg::Preset, None) => bail!("--follow preset には --preset が必要です"),
+        (_, Some(_)) => bail!("--preset は --follow preset のときだけ指定できます"),
+        (FollowArg::Main, None) => Follow::Main,
+        (FollowArg::All, None) => Follow::All,
     };
+    let mut our = OurBook::from_db(&BookDb::read(&cli.book)?);
+    for path in &cli.overrides {
+        for key in our.apply_override(&read_text(path)?) {
+            eprintln!("{}: 局面 {key} は定跡にありません", path.display());
+        }
+    }
     let reports = run_walk(&read_text(&cli.lines)?, &cli.opponents, &our, &follow, &cfg)?;
     write_atomic(&cli.out, &tsv(&reports, &cfg, !matches!(follow, Follow::Main)))?;
     print!("{}", summary(&reports, &cfg));
@@ -764,13 +796,29 @@ mod tests {
             + "\n"
     }
 
-    /// 7g7f の後に main 3c3d・alt 8c8d・記録用 4a3b を持つ定跡。
-    fn our_book() -> OurBook {
-        let text = format!(
-            "{BOOK_HEADER}\nsfen {}\n3c3d none 100 0 2\n8c8d none 100 0 1\n4a3b none -30000 0 0\n",
-            sfen_after(&["7g7f"])
-        );
+    fn book(entries: &[(&[&str], &[&str])]) -> OurBook {
+        let mut text = format!("{BOOK_HEADER}\n");
+        for (moves, lines) in entries {
+            text.push_str(&format!("sfen {}\n", sfen_after(moves)));
+            for line in *lines {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
         OurBook::from_db(&BookDb::from_reader(text.as_bytes()).unwrap())
+    }
+
+    /// 7g7f の後に main 3c3d・alt 8c8d・記録用 4a3b・非合法 9a9c を持つ定跡。
+    fn our_book() -> OurBook {
+        book(&[(
+            &["7g7f"],
+            &[
+                "3c3d none 100 0 2",
+                "8c8d none 100 0 1",
+                "4a3b none -30000 0 0",
+                "9a9c none 100 0 1",
+            ],
+        )])
     }
 
     fn cfg() -> WalkConfig {
@@ -793,6 +841,18 @@ mod tests {
         report.rows.iter().map(|r| r.path.join(" ")).collect()
     }
 
+    fn row<'a>(report: &'a OpponentReport, path: &str) -> &'a Row {
+        report.rows.iter().find(|r| r.path.join(" ") == path).unwrap()
+    }
+
+    fn after_7g7f_legal(mv: &str) -> bool {
+        is_legal_usi(&position_from_sfen(&sfen_after(&["7g7f"])).unwrap(), mv)
+    }
+
+    fn preset(text: &str) -> Follow {
+        Follow::Preset(parse_preset(text).0)
+    }
+
     #[test]
     fn main_walk_splits_opponent_weight_and_reports_remaining_preparation() {
         let reports = walk_with(&Follow::Main, &our_book());
@@ -807,15 +867,15 @@ mod tests {
         assert_eq!((last.games, last.max_remaining), (1, 2));
         assert_eq!((last.eval_median, last.eval_best), (Some(300), Some(300)));
         assert_eq!(last.opponent_winrate, Some(1.0));
-        assert!(last.is_dangerous(&cfg()));
+        assert!(last.is_dangerous());
         // 2g2f の局面は評価値の無い対局だけが通る。
         let first = &report.rows[0];
         assert_eq!((first.games, first.max_remaining, first.eval_best), (1, 3, None));
-        assert!(!first.is_dangerous(&cfg()));
+        assert!(!first.is_dangerous());
     }
 
     #[test]
-    fn main_tsv_keeps_python_columns_and_number_format() {
+    fn tsv_has_eleven_columns_in_main_mode_and_alt_column_otherwise() {
         let cfg = cfg();
         let reports = walk_with(&Follow::Main, &our_book());
         let out = tsv(&reports, &cfg, false);
@@ -832,49 +892,72 @@ mod tests {
     }
 
     #[test]
-    fn all_follows_every_non_record_move_with_equal_weight_and_marks_alts() {
+    fn crlf_lines_give_the_same_walk() {
+        let crlf = lines_text().replace('\n', "\r\n");
+        let names = ["foo".to_string()];
+        let lf = run_walk(&lines_text(), &names, &our_book(), &Follow::Main, &cfg()).unwrap();
+        let cr = run_walk(&crlf, &names, &our_book(), &Follow::Main, &cfg()).unwrap();
+        assert_eq!(tsv(&lf, &cfg(), false), tsv(&cr, &cfg(), false));
+    }
+
+    #[test]
+    fn all_follows_legal_non_record_moves_with_equal_weight_and_marks_alts() {
         let reports = walk_with(&Follow::All, &our_book());
         let report = &reports[0];
-        let alt = report.rows.iter().find(|r| r.path.join(" ") == "7g7f 8c8d").unwrap();
+        let alt = row(report, "7g7f 8c8d");
         assert_eq!(alt.kind, StopKind::OpponentOut);
         assert_eq!(alt.alts, ["2:8c8d"]);
         assert!((alt.weight - 1.0 / 3.0).abs() < 1e-12);
-        let main = report.rows.iter().find(|r| r.path.join(" ") == "7g7f 3c3d 2g2f").unwrap();
+        let main = row(report, "7g7f 3c3d 2g2f");
         assert!(main.alts.is_empty());
         assert!((main.weight - 1.0 / 6.0).abs() < 1e-12);
-        assert!(report.rows.iter().all(|r| !r.path.contains(&"4a3b".to_string())));
+        assert!(report.rows.iter().all(|r| !r.path.iter().any(|m| m == "4a3b" || m == "9a9c")));
+        assert_eq!(
+            report.illegal.iter().cloned().collect::<Vec<_>>(),
+            [(key_after(&["7g7f"]), "9a9c".to_string())]
+        );
         let total: f64 = report.totals.iter().map(|(_, w)| w).sum();
         assert!((total - 1.0).abs() < 1e-12);
     }
 
     #[test]
-    fn preset_intersects_with_book_moves_and_falls_back_to_main() {
+    fn preset_intersects_with_legal_book_moves_and_falls_back_to_main() {
         let key = key_after(&["7g7f"]);
-        let preset = parse_preset(&format!(
-            "# preset\nsfen {} 8c8d 4a3b 9c9d 8c8d\n",
-            sfen_after(&["7g7f"])
-        ))
-        .unwrap();
-        assert_eq!(preset[&key], ["8c8d", "4a3b", "9c9d"]);
-        // 記録用の手も乱択候補に書かれていれば指す (エンジンの乱択と同じ)。
-        assert_eq!(our_book().choices(&key, &Follow::Preset(preset)), ["8c8d", "4a3b"]);
+        let sfen = sfen_after(&["7g7f"]);
+        let our = our_book();
+        // 記録用の手も乱択候補に書かれていれば指す (エンジンの乱択と同じ)。非合法な手は落とす。
+        let listed = preset(&format!("# preset\nsfen {sfen} 8c8d 4a3b 9a9c 9c9d 8c8d\n"));
+        assert_eq!(our.choices(&key, &listed, &after_7g7f_legal), ["8c8d", "4a3b"]);
 
-        let missing = parse_preset(&format!("sfen {key} 9c9d\n")).unwrap();
-        assert_eq!(our_book().choices(&key, &Follow::Preset(missing)), ["3c3d"]);
-        assert!(parse_preset("sfen bad\n").is_err());
+        let missing = preset(&format!("sfen {key} 9c9d\n"));
+        assert_eq!(our.choices(&key, &missing, &after_7g7f_legal), ["3c3d"]);
+
+        let later = preset(&format!("sfen {key} 8c8d\nsfen {key} 4a3b\n"));
+        assert_eq!(our.choices(&key, &later, &after_7g7f_legal), ["4a3b"]);
     }
 
     #[test]
-    fn override_replaces_or_removes_our_move() {
+    fn malformed_preset_line_is_skipped_like_the_engine() {
+        let key = key_after(&["7g7f"]);
+        let (list, skipped) = parse_preset(&format!("sfen {key} 8c8d zz\nsfen bad\n"));
+        assert_eq!(skipped, 2);
+        assert!(list.is_empty());
+        let reports = walk_with(&Follow::Preset(list), &our_book());
+        assert_eq!(paths(&reports[0]), ["2g2f", "7g7f 3c3d 6g6f", "7g7f 3c3d 2g2f"]);
+    }
+
+    #[test]
+    fn override_replaces_or_removes_our_move_and_reports_unknown_keys() {
         let key = key_after(&["7g7f"]);
         let mut our = our_book();
-        our.apply_override(&format!("{key}\t4a3b\n"));
-        assert_eq!(our.choices(&key, &Follow::All), ["4a3b"]);
+        assert!(our.apply_override(&format!("{key}\t4a3b\r\n")).is_empty());
+        assert_eq!(our.choices(&key, &Follow::All, &after_7g7f_legal), ["4a3b"]);
         assert!(our.is_main(&key, "4a3b"));
         our.apply_override(&format!("{key}\t\n"));
-        assert!(our.choices(&key, &Follow::Main).is_empty());
+        assert!(our.choices(&key, &Follow::Main, &after_7g7f_legal).is_empty());
         let reports = walk_with(&Follow::Main, &our);
         assert_eq!(paths(&reports[0]), ["2g2f", "7g7f"]);
+        assert_eq!(our.apply_override("unknown\t7g7f\n"), ["unknown"]);
     }
 
     #[test]
@@ -890,8 +973,47 @@ mod tests {
         summarize_passes(&mut row, &[pass(100), pass(-301)], &black);
         assert_eq!((row.eval_median, row.eval_best), (Some(-100), Some(-301)));
         assert_eq!(row.opponent_winrate, Some(1.0));
-        row.max_remaining = 2;
-        assert!(row.is_dangerous(&black));
+    }
+
+    #[test]
+    fn danger_needs_one_game_with_both_long_preparation_and_good_exit() {
+        // 長いが相手に悪い対局と、短いが相手に良い対局だけが通る局面は危なくない。
+        let text = [
+            HEADER,
+            "a\tfoo\tx\t6\t-500\t+7776FU -3334FU +2726FU -8384FU +2625FU -8485FU\tw",
+            "b\tfoo\tx\t2\t900\t+7776FU -3334FU\tb",
+        ]
+        .join("\n");
+        let mut cfg = cfg();
+        cfg.danger_remaining = 3;
+        let reports =
+            run_walk(&text, &["foo".to_string()], &OurBook::default(), &Follow::Main, &cfg)
+                .unwrap();
+        let stop = row(&reports[0], "7g7f");
+        assert_eq!((stop.max_remaining, stop.eval_best), (5, Some(900)));
+        assert_eq!(stop.danger_games, 0);
+        assert!(!stop.is_dangerous());
+    }
+
+    #[test]
+    fn black_side_walks_our_first_move_and_flips_eval_direction() {
+        let text = [
+            HEADER,
+            "g\tx\tFoo\t4\t-400\t+7776FU -3334FU +2726FU -8384FU\tw",
+            "h\tFoo\ty\t4\t400\t+7776FU -3334FU +2726FU -8384FU\tb",
+        ]
+        .join("\n");
+        let mut cfg = cfg();
+        cfg.our_side = Color::Black;
+        let our = book(&[(&[], &["7g7f none 50 0 1"])]);
+        let reports = run_walk(&text, &["foo".to_string()], &our, &Follow::Main, &cfg).unwrap();
+        assert_eq!(reports[0].games, 1);
+        let stop = &reports[0].rows[0];
+        assert_eq!(stop.path, ["7g7f", "3c3d"]);
+        assert_eq!((stop.kind, stop.ply), (StopKind::WeThink, 3));
+        assert_eq!((stop.max_remaining, stop.eval_best), (2, Some(-400)));
+        assert_eq!(stop.opponent_winrate, Some(1.0));
+        assert!(stop.is_dangerous());
     }
 
     #[test]
@@ -916,5 +1038,28 @@ mod tests {
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].0, "foo");
         assert!(parse_lines(&text, &names, Color::Black).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_must_be_positive_and_min_weight_non_negative() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "book_prepwalk",
+                "--lines",
+                "l",
+                "--book",
+                "b",
+                "--out",
+                "o",
+                "--opponent",
+                "x",
+            ];
+            args.extend_from_slice(extra);
+            walk_config(&Cli::try_parse_from(args).unwrap())
+        };
+        assert!(parse(&[]).is_ok());
+        assert!(parse(&["--prune", "0"]).is_err());
+        assert!(parse(&["--prune=-0.1"]).is_err());
+        assert!(parse(&["--min-weight=-1"]).is_err());
     }
 }
