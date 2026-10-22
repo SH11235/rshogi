@@ -1371,7 +1371,9 @@ fn trace_keeps_info_lines_of_completed_searches_only_and_can_change_across_resta
     let dir = tempfile::tempdir().unwrap();
     let state = &dir.path().join("state");
     std::fs::create_dir(state).unwrap();
-    let trace = dir.path().join("trace");
+    // 出力の根 (state の親) の外に置く。
+    let trace_root = tempfile::tempdir().unwrap();
+    let trace = trace_root.path().join("trace");
     let config = fixture(state);
     let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
     data["noisy"] = json!(true);
@@ -1432,17 +1434,17 @@ fn trace_failures_are_alerted_once_and_readings_continue_until_the_trace_can_be_
     let dir = tempfile::tempdir().unwrap();
     let state = &dir.path().join("state");
     std::fs::create_dir(state).unwrap();
-    // trace-dir の親が通常のファイルなので、dir を作れない。
-    let blocker = dir.path().join("blocker");
-    std::fs::write(&blocker, "").unwrap();
-    let trace = blocker.join("trace");
+    // trace-dir の場所に通常のファイルがあるので、dir を作れない。
+    let trace_root = tempfile::tempdir().unwrap();
+    let trace = trace_root.path().join("trace");
+    std::fs::write(&trace, "").unwrap();
     let config = fast_fixture(state);
     add_tree(state, "a");
     let mut server = start_traced(state, &config, &trace);
     wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
     wait_for(|| alerts(state).contains("探索の記録を書けません"));
     assert_eq!(std::fs::read_to_string(state.join("journal.jsonl")).unwrap().lines().count(), 4);
-    std::fs::remove_file(&blocker).unwrap();
+    std::fs::remove_file(&trace).unwrap();
     let child = child_position_after_move(&format!("{ROOT} 1"), "5i4i").unwrap().to_sfen();
     add_root(state, "r", strip_ply(&child));
     // 子は未知の局面なので投了の葉になり、木は NOT_READY で終わる。

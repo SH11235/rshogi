@@ -629,6 +629,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     let (out_root, protected) =
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    if let Some(dir) = &args.trace_dir {
+        super::paths::reject_trace_dir(dir, &journal_path, &args.state, &out_root)?;
+    }
     std::fs::create_dir_all(&out_root)?;
     // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
     let out_lock = out_root.join(OUT_ROOT_LOCK);
