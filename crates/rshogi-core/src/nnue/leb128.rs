@@ -20,24 +20,26 @@ pub(crate) fn read_layer_stacks_ft_i16<R, W, F>(
 where
     R: Read,
     W: DerefMut<Target = [i16]>,
-    F: FnOnce(usize) -> W,
+    F: FnOnce(usize) -> io::Result<W>,
 {
     let combined_count = biases
         .len()
         .checked_add(weight_count)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "FT element count overflow"))?;
-    let mut first = read_compressed_i16_block(reader)?;
+    let mut first = read_compressed_i16_block(reader, combined_count)?;
     first.decode_into(biases, "FT biases")?;
 
     if first.is_exhausted() {
         drop(first);
-        let mut weights_block = read_compressed_i16_block(reader)?;
-        let mut weights = allocate_weights(weight_count);
+        let mut weights_block = read_compressed_i16_block(reader, weight_count)?;
+        weights_block.validate_remaining_count(weight_count, "FT weights")?;
+        let mut weights = allocate_weights(weight_count)?;
         weights_block.decode_into(&mut weights, "FT weights")?;
         weights_block.require_exhausted("FT weights", weight_count)?;
         Ok(weights)
     } else {
-        let mut weights = allocate_weights(weight_count);
+        first.validate_remaining_count(weight_count, "combined FT weights")?;
+        let mut weights = allocate_weights(weight_count)?;
         first.decode_into(&mut weights, "combined FT weights")?;
         first.require_exhausted("combined FT", combined_count)?;
         Ok(weights)
@@ -50,6 +52,27 @@ struct CompressedI16Block {
 }
 
 impl CompressedI16Block {
+    fn validate_remaining_count(&self, expected: usize, name: &str) -> io::Result<()> {
+        let mut position = self.position;
+        for index in 0..expected {
+            if position == self.payload.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{name} block size mismatch: got {index} values, expected {expected}"),
+                ));
+            }
+            let (_, consumed) = decode_single_leb128(&self.payload[position..])?;
+            position += consumed;
+        }
+        if position != self.payload.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{name} block size mismatch: expected {expected} values"),
+            ));
+        }
+        Ok(())
+    }
+
     fn decode_into(&mut self, destination: &mut [i16], name: &str) -> io::Result<()> {
         let expected = destination.len();
         for (index, value) in destination.iter_mut().enumerate() {
@@ -82,7 +105,10 @@ impl CompressedI16Block {
     }
 }
 
-fn read_compressed_i16_block<R: Read>(reader: &mut R) -> io::Result<CompressedI16Block> {
+fn read_compressed_i16_block<R: Read>(
+    reader: &mut R,
+    max_values: usize,
+) -> io::Result<CompressedI16Block> {
     let mut magic_buf = [0u8; 17];
     reader.read_exact(&mut magic_buf)?;
     if magic_buf != LEB128_MAGIC {
@@ -93,9 +119,33 @@ fn read_compressed_i16_block<R: Read>(reader: &mut R) -> io::Result<CompressedI1
     reader.read_exact(&mut size_buf)?;
     let compressed_size = u32::from_le_bytes(size_buf) as usize;
     validate_compressed_size(compressed_size)?;
+    // 既存 decoder は非最短形も受け付けるため、i64 の最大符号化長を使う。
+    if compressed_size > max_values.saturating_mul(10) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compressed FT block exceeds its maximum encoded element count",
+        ));
+    }
 
-    let mut payload = vec![0u8; compressed_size];
-    reader.read_exact(&mut payload)?;
+    let mut payload = Vec::new();
+    let mut chunk = [0; 8192];
+    while payload.len() < compressed_size {
+        let requested = chunk.len().min(compressed_size - payload.len());
+        let read = match reader.read(&mut chunk[..requested]) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let new_len = payload.len() + read;
+        if new_len > payload.capacity() {
+            let capacity = new_len.max(payload.capacity().saturating_mul(2)).min(compressed_size);
+            payload
+                .try_reserve_exact(capacity - payload.len())
+                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        }
+        payload.extend_from_slice(&chunk[..read]);
+    }
     Ok(CompressedI16Block {
         payload,
         position: 0,
@@ -200,7 +250,7 @@ pub(crate) fn encode_signed_leb128(mut value: i64, output: &mut Vec<u8>) {
 /// ブロック内の要素数で形式（biases のみ / biases+weights 結合）を判別する用途に使う。
 #[cfg(test)]
 pub fn read_compressed_tensor_i16_all<R: Read>(reader: &mut R) -> io::Result<Vec<i16>> {
-    let block = read_compressed_i16_block(reader)?;
+    let block = read_compressed_i16_block(reader, usize::MAX)?;
     decode_leb128_all_i16(&block.payload)
 }
 
@@ -345,7 +395,7 @@ mod tests {
                 &mut Cursor::new(bytes),
                 &mut actual_biases,
                 weights.len(),
-                |len| vec![0; len],
+                |len| Ok(vec![0; len]),
             )
             .expect("streaming FT");
             assert_eq!((actual_biases, actual_weights), expected);
@@ -360,7 +410,7 @@ mod tests {
 
         for bytes in [combined_too_short, split_too_long] {
             let result = read_layer_stacks_ft_i16(&mut Cursor::new(bytes), &mut [0; 2], 2, |len| {
-                vec![0; len]
+                Ok(vec![0; len])
             });
             assert!(result.is_err());
         }
@@ -375,11 +425,90 @@ mod tests {
             2,
             |len| {
                 allocated = true;
-                vec![0; len]
+                Ok(vec![0; len])
             },
         );
         assert!(result.is_err());
         assert!(!allocated);
+    }
+
+    #[test]
+    fn layer_stacks_ft_validates_values_before_weight_allocation() {
+        let combined_too_short = compressed_block(&[1, 2, 3]);
+        let mut split_too_long = compressed_block(&[1, 2]);
+        split_too_long.extend_from_slice(&compressed_block(&[3, 4, 5]));
+        let mut split_too_short = compressed_block(&[1, 2]);
+        split_too_short.extend_from_slice(&compressed_block(&[3]));
+        for bytes in [combined_too_short, split_too_long, split_too_short] {
+            let mut allocated = false;
+            let result = read_layer_stacks_ft_i16(&mut Cursor::new(bytes), &mut [0; 2], 2, |len| {
+                allocated = true;
+                Ok(vec![0; len])
+            });
+            assert!(result.is_err());
+            assert!(!allocated);
+        }
+    }
+
+    #[test]
+    fn layer_stacks_ft_propagates_weight_allocation_failure() {
+        let error = read_layer_stacks_ft_i16(
+            &mut &compressed_block(&[1, 2])[..],
+            &mut [0; 1],
+            1,
+            |_| -> io::Result<Vec<i16>> { Err(io::ErrorKind::OutOfMemory.into()) },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+    }
+
+    #[test]
+    fn compressed_block_reads_fragmented_payload_without_seek() {
+        struct Fragmented<'a> {
+            bytes: &'a [u8],
+            interrupt: bool,
+        }
+        impl Read for Fragmented<'_> {
+            fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                let len = destination.len().min(3);
+                self.bytes.read(&mut destination[..len])
+            }
+        }
+        let values = [i16::MIN as i64, i16::MAX as i64, 32_768, -32_769, 0, -1];
+        let mut encoded = Vec::new();
+        for value in values {
+            encode_signed_leb128(value, &mut encoded);
+        }
+        encoded.extend_from_slice(&[0x80; 9]);
+        encoded.push(0x00);
+        let mut bytes = LEB128_MAGIC.to_vec();
+        bytes.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&encoded);
+        let mut reader = Fragmented {
+            bytes: &bytes,
+            interrupt: false,
+        };
+        let mut biases = [0; 2];
+        let weights =
+            read_layer_stacks_ft_i16(&mut reader, &mut biases, 5, |len| Ok(vec![0; len])).unwrap();
+        assert_eq!(biases, [i16::MIN, i16::MAX]);
+        assert_eq!(weights, [i16::MIN, i16::MAX, 0, -1, 0]);
+        assert!(reader.bytes.is_empty());
+    }
+
+    #[test]
+    fn compressed_block_rejects_short_payload_and_impossible_encoded_count() {
+        let mut bytes = LEB128_MAGIC.to_vec();
+        bytes.extend_from_slice(&(16 * 1024 * 1024u32).to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let error = read_compressed_i16_block(&mut &bytes[..], usize::MAX).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        let error = read_compressed_i16_block(&mut &bytes[..], 3).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

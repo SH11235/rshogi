@@ -116,13 +116,14 @@ pub(crate) struct DynamicAffine {
 }
 
 impl DynamicAffine {
-    pub(crate) fn read<R: Read>(
+    pub(crate) fn read<R: Read + Seek>(
         reader: &mut R,
         input_dim: usize,
         output_dim: usize,
     ) -> io::Result<Self> {
+        require_remaining_bytes(reader, affine_byte_len(input_dim, output_dim)?)?;
         let padded_input = padded_input(input_dim);
-        let mut biases = AlignedBox::new_zeroed(output_dim);
+        let mut biases = AlignedBox::try_new_zeroed(output_dim)?;
         let mut buf4 = [0; 4];
         for bias in biases.iter_mut() {
             reader.read_exact(&mut buf4)?;
@@ -131,7 +132,7 @@ impl DynamicAffine {
         let weight_len = output_dim
             .checked_mul(padded_input)
             .ok_or_else(|| invalid_data("affine weight dimensions overflow"))?;
-        let mut weights = AlignedBox::new_zeroed(weight_len);
+        let mut weights = AlignedBox::try_new_zeroed(weight_len)?;
         let mut byte = [0];
         for weight in weights.iter_mut() {
             reader.read_exact(&mut byte)?;
@@ -167,7 +168,7 @@ impl DynamicAffine {
         output_dim: usize,
         packed: &super::prepacked::PackedModel,
     ) -> io::Result<Self> {
-        let mut biases = AlignedBox::new_zeroed(output_dim);
+        let mut biases = AlignedBox::try_new_zeroed(output_dim)?;
         for bias in biases.iter_mut() {
             let mut bytes = [0; 4];
             reader.read_exact(&mut bytes)?;
@@ -390,16 +391,40 @@ impl DynamicHalfKxNetwork {
             .ok_or_else(|| invalid_data("invalid FT output dimensions"))?;
 
         reader.read_exact(&mut buf4)?; // feature transformer hash
-        let mut ft_biases = AlignedBox::new_zeroed(l1_dim);
+        let ft_weight_len = input_dimensions
+            .checked_mul(l1_dim)
+            .ok_or_else(|| invalid_data("FT weight dimensions overflow"))?;
+        let l1_bytes = affine_byte_len(dense_input, l2_dim)?;
+        let l2_bytes = affine_byte_len(l2_dim, l3_dim)?;
+        let output_bytes = affine_byte_len(l3_dim, 1)?;
+        let dense_bytes = l1_bytes
+            .checked_add(l2_bytes)
+            .and_then(|bytes| bytes.checked_add(output_bytes))
+            .ok_or_else(|| invalid_data("dense network size overflow"))?;
+        let required = ft_weight_len
+            .checked_add(l1_dim)
+            .and_then(|count| count.checked_mul(size_of::<i16>()))
+            .and_then(|bytes| bytes.checked_add(size_of::<u32>()))
+            .and_then(|bytes| bytes.checked_add(dense_bytes))
+            .ok_or_else(|| invalid_data("HalfKX payload size overflow"))?;
+        let remaining = file_size
+            .checked_sub(reader.stream_position()?)
+            .ok_or_else(|| invalid_data("HalfKX payload position exceeds file size"))?;
+        if remaining < required as u64 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        let trailing_len = remaining - required as u64;
+        if trailing_len > 64 {
+            return Err(invalid_data("unexpected trailing HalfKX data"));
+        }
+
+        let mut ft_biases = AlignedBox::try_new_zeroed(l1_dim)?;
         let mut buf2 = [0; 2];
         for bias in ft_biases.iter_mut() {
             reader.read_exact(&mut buf2)?;
             *bias = i16::from_le_bytes(buf2);
         }
-        let ft_weight_len = input_dimensions
-            .checked_mul(l1_dim)
-            .ok_or_else(|| invalid_data("FT weight dimensions overflow"))?;
-        let mut ft_weights = AlignedBox::new_zeroed(ft_weight_len);
+        let mut ft_weights = AlignedBox::try_new_zeroed(ft_weight_len)?;
         for weight in ft_weights.iter_mut() {
             reader.read_exact(&mut buf2)?;
             *weight = i16::from_le_bytes(buf2);
@@ -409,18 +434,15 @@ impl DynamicHalfKxNetwork {
         let l1 = DynamicAffine::read(reader, dense_input, l2_dim)?;
         let l2 = DynamicAffine::read(reader, l2_dim, l3_dim)?;
         let output = DynamicAffine::read(reader, l3_dim, 1)?;
-        let consumed = reader.stream_position()?;
-        if consumed != file_size {
-            let trailing_len = (file_size - consumed) as usize;
-            let mut trailing = vec![0; trailing_len];
-            reader.read_exact(&mut trailing)?;
+        if trailing_len != 0 {
+            let mut trailing = [0; 64];
+            let trailing = &mut trailing[..trailing_len as usize];
+            reader.read_exact(trailing)?;
             let marker = b"bullet";
-            let is_bullet_marker = trailing_len <= 64
-                && trailing.iter().enumerate().all(|(i, &b)| b == marker[i % marker.len()]);
+            let is_bullet_marker =
+                trailing.iter().enumerate().all(|(i, &b)| b == marker[i % marker.len()]);
             if !is_bullet_marker {
-                return Err(invalid_data(format!(
-                    "NNUE payload size mismatch: consumed={consumed}, file_size={file_size}"
-                )));
+                return Err(invalid_data("invalid HalfKX trailing marker"));
             }
         }
 
@@ -700,6 +722,27 @@ pub(crate) fn validate_dimension(name: &str, value: usize) -> io::Result<()> {
     }
 }
 
+pub(super) fn require_remaining_bytes<R: Seek>(reader: &mut R, required: usize) -> io::Result<()> {
+    let position = reader.stream_position()?;
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(position))?;
+    if end.checked_sub(position).is_none_or(|remaining| remaining < required as u64) {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(())
+}
+
+fn affine_byte_len(input_dim: usize, output_dim: usize) -> io::Result<usize> {
+    let padded = input_dim
+        .checked_add(31)
+        .map(|value| value / 32 * 32)
+        .ok_or_else(|| invalid_data("affine input dimensions overflow"))?;
+    padded
+        .checked_add(size_of::<i32>())
+        .and_then(|row| row.checked_mul(output_dim))
+        .ok_or_else(|| invalid_data("affine size overflow"))
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -724,6 +767,101 @@ mod tests {
             biases: AlignedBox::new_zeroed(output_dim),
             weights: AlignedBox::new_zeroed(output_dim * padded_input(input_dim)).into(),
         }
+    }
+
+    fn halfkx_fixture(feature: RuntimeFeatureSet, l1: usize, activation: &str) -> Vec<u8> {
+        let name = match feature {
+            RuntimeFeatureSet::HalfKP => "HalfKP",
+            RuntimeFeatureSet::HalfKaHmMerged => "HalfKaHmMerged",
+            RuntimeFeatureSet::HalfKaSplit => "HalfKaSplit",
+            RuntimeFeatureSet::HalfKaMerged => "HalfKaMerged",
+            RuntimeFeatureSet::HalfKaHmSplit => "HalfKaHmSplit",
+        };
+        let arch =
+            format!("Features={name}[{}->{l1}x2]-{activation},l2=3,l3=5", feature.dimensions());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION_HALFKA.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch.as_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn halfkx_rejects_short_payload_before_reading_large_ft() {
+        let mut bytes = halfkx_fixture(RuntimeFeatureSet::HalfKaHmMerged, 64, "CReLU");
+        let ft_start = bytes.len();
+        bytes.resize(ft_start + 64 * 2, 0);
+        let mut reader = std::io::Cursor::new(bytes);
+        let error = DynamicHalfKxNetwork::read(&mut reader, None).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(reader.position(), ft_start as u64);
+    }
+
+    #[test]
+    fn halfkx_payload_bounds_preserve_features_activations_and_trailing_marker() {
+        for feature in [
+            RuntimeFeatureSet::HalfKP,
+            RuntimeFeatureSet::HalfKaHmMerged,
+            RuntimeFeatureSet::HalfKaSplit,
+            RuntimeFeatureSet::HalfKaMerged,
+            RuntimeFeatureSet::HalfKaHmSplit,
+        ] {
+            for (name, activation) in [
+                ("CReLU", Activation::CReLU),
+                ("SCReLU", Activation::SCReLU),
+                ("PairwiseCReLU", Activation::PairwiseCReLU),
+            ] {
+                let mut bytes = halfkx_fixture(feature, 2, name);
+                let ft_start = bytes.len();
+                bytes.resize(bytes.len() + 2 * (2 + feature.dimensions() * 2), 0);
+                bytes[ft_start..ft_start + 2].copy_from_slice(&13i16.to_le_bytes());
+                let last_weight = bytes.len() - 2;
+                bytes[last_weight..].copy_from_slice(&(-7i16).to_le_bytes());
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+                for (input, output) in [(4 / activation.output_dim_divisor(), 3), (3, 5), (5, 1)] {
+                    bytes.resize(bytes.len() + 4 * output + padded_input(input) * output, 0);
+                }
+                let payload_end = bytes.len();
+                for trailing in [0, 1, 64] {
+                    bytes.truncate(payload_end);
+                    bytes.extend((0..trailing).map(|index| b"bullet"[index % 6]));
+                    let mut reader = std::io::Cursor::new(&bytes);
+                    let network = DynamicHalfKxNetwork::read(&mut reader, None).unwrap();
+                    assert_eq!(network.feature_set, feature);
+                    assert_eq!(network.activation, activation);
+                    assert_eq!(network.ft_biases[0], 13);
+                    assert_eq!(network.ft_weights.last(), Some(&-7));
+                    assert_eq!(reader.position(), bytes.len() as u64);
+                }
+                bytes.truncate(payload_end - 1);
+                assert!(
+                    DynamicHalfKxNetwork::read(&mut std::io::Cursor::new(&bytes), None).is_err()
+                );
+                bytes.resize(payload_end + 1, 0);
+                assert!(
+                    DynamicHalfKxNetwork::read(&mut std::io::Cursor::new(&bytes), None).is_err()
+                );
+                bytes.resize(payload_end + 65, 0);
+                assert!(
+                    DynamicHalfKxNetwork::read(&mut std::io::Cursor::new(&bytes), None).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_affine_rejects_short_payload_and_dimension_overflow() {
+        let mut reader = std::io::Cursor::new([0; 4]);
+        let error = DynamicAffine::read(&mut reader, MAX_RUNTIME_DIMENSION, MAX_RUNTIME_DIMENSION)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(reader.position(), 0);
+        let error = DynamicAffine::read(&mut reader, usize::MAX, 1).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(reader.position(), 0);
     }
 
     #[test]

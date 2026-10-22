@@ -11,7 +11,7 @@ use super::constants::{
     DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
     NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
 };
-use super::dynamic_halfkx::DynamicAffine;
+use super::dynamic_halfkx::{DynamicAffine, require_remaining_bytes};
 use super::effect_bucket_features::append_active_effect_bucket;
 use super::features::{
     FeatureSet as FeatureSetTrait, HalfKPFeatureSet, HalfKaHmMergedFeatureSet,
@@ -277,7 +277,7 @@ impl DynamicLayerStacksNetwork {
         let weight_len = input_dimensions
             .checked_mul(l1)
             .ok_or_else(|| invalid("FT dimensions overflow"))?;
-        let mut ft_biases = AlignedBox::new_zeroed(l1);
+        let mut ft_biases = AlignedBox::try_new_zeroed(l1)?;
         #[cfg(feature = "prepacked-nnue")]
         let ft_weights = if let Some(packed) = packed {
             for bias in ft_biases.iter_mut() {
@@ -287,38 +287,52 @@ impl DynamicLayerStacksNetwork {
             }
             packed.ft(weight_len)?
         } else {
-            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
-                .into()
+            read_layer_stacks_ft_i16(
+                reader,
+                &mut ft_biases,
+                weight_len,
+                AlignedBox::try_new_zeroed,
+            )?
+            .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let ft_weights: WeightBox<i16> =
-            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
-                .into();
+        let ft_weights: WeightBox<i16> = read_layer_stacks_ft_i16(
+            reader,
+            &mut ft_biases,
+            weight_len,
+            AlignedBox::try_new_zeroed,
+        )?
+        .into();
 
         let has_psqt = psqt_override.unwrap_or_else(|| arch.contains("PSQT="));
-        let mut psqt_biases = AlignedBox::new_zeroed(if has_psqt { num_buckets } else { 0 });
+        let mut psqt_biases = AlignedBox::try_new_zeroed(if has_psqt { num_buckets } else { 0 })?;
         let psqt_count = if has_psqt {
-            input_dimensions * num_buckets
+            input_dimensions
+                .checked_mul(num_buckets)
+                .ok_or_else(|| invalid("PSQT dimensions overflow"))?
         } else {
             0
         };
         if has_psqt {
             read_i32s(reader, &mut psqt_biases)?;
         }
+        let mut read_psqt_weights = || -> io::Result<WeightBox<i32>> {
+            let required = psqt_count
+                .checked_mul(size_of::<i32>())
+                .ok_or_else(|| invalid("PSQT size overflow"))?;
+            require_remaining_bytes(reader, required)?;
+            let mut weights = AlignedBox::try_new_zeroed(psqt_count)?;
+            read_i32s(reader, &mut weights)?;
+            Ok(weights.into())
+        };
         #[cfg(feature = "prepacked-nnue")]
         let psqt_weights = if let Some(packed) = packed.filter(|_| has_psqt) {
             packed.psqt(psqt_count)?
         } else {
-            let mut weights = AlignedBox::new_zeroed(psqt_count);
-            read_i32s(reader, &mut weights)?;
-            weights.into()
+            read_psqt_weights()?
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let psqt_weights: WeightBox<i32> = {
-            let mut weights = AlignedBox::new_zeroed(psqt_count);
-            read_i32s(reader, &mut weights)?;
-            weights.into()
-        };
+        let psqt_weights = read_psqt_weights()?;
 
         if arch.contains("ThreatProfile=") {
             reader.read_exact(&mut buf4)?;
@@ -334,7 +348,8 @@ impl DynamicLayerStacksNetwork {
         // packed 経路は mapping 上の span をそのまま借用し、非 packed 経路だけが
         // reader からバイト列を読み込む。
         let mut read_threat_weights = || -> io::Result<WeightBox<i8>> {
-            let mut weights: AlignedBox<i8> = AlignedBox::new_zeroed(threat_count);
+            require_remaining_bytes(reader, threat_count)?;
+            let mut weights: AlignedBox<i8> = AlignedBox::try_new_zeroed(threat_count)?;
             if !weights.is_empty() {
                 // SAFETY: `i8` and `u8` have identical size/alignment, and the slice retains the
                 // exact allocation length while only its byte signedness changes for `Read`.
@@ -353,7 +368,10 @@ impl DynamicLayerStacksNetwork {
         #[cfg(not(feature = "prepacked-nnue"))]
         let threat_weights = read_threat_weights()?;
 
-        let mut buckets = Vec::with_capacity(num_buckets);
+        let mut buckets = Vec::new();
+        buckets
+            .try_reserve_exact(num_buckets)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         for _ in 0..num_buckets {
             reader.read_exact(&mut buf4)?; // per-bucket FC hash
             #[cfg(feature = "prepacked-nnue")]
@@ -1439,6 +1457,115 @@ mod tests {
     use crate::nnue::network_layer_stacks::LayerStacksNetwork;
     use crate::position::SFEN_HIRATE;
     use crate::types::Move;
+
+    #[test]
+    fn layer_stacks_raw_extensions_reject_truncation_before_reading_tensor() {
+        let threat_dimensions = {
+            #[cfg(feature = "nnue-threat")]
+            {
+                super::super::threat_features::THREAT_DIMENSIONS
+            }
+            #[cfg(not(feature = "nnue-threat"))]
+            {
+                0
+            }
+        };
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            73_305,
+            2,
+            3,
+            5,
+            2,
+        );
+        let layout =
+            super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let mut arch =
+            "Features=HalfKaHmMerged[73305->2x2],LayerStacks,l2=3,l3=5,PSQT=2".to_owned();
+        if threat_dimensions != 0 {
+            arch.push_str(&format!(",Threat={threat_dimensions},ThreatProfile=0"));
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch.as_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(
+            &model.bytes[layout.feature_transformer.hash.start..layout.buckets[0].fc_hash.start],
+        );
+        bytes.resize(bytes.len() + 2 * 4, 0);
+        let psqt_start = bytes.len();
+        bytes.resize(bytes.len() + 73_305 * 2 * 4, 0);
+        if threat_dimensions != 0 {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let threat_start = bytes.len();
+        bytes.resize(bytes.len() + threat_dimensions * 2, 0);
+        let dense_start = bytes.len();
+        bytes.extend_from_slice(&model.bytes[layout.buckets[0].fc_hash.start..]);
+        let mut reader = Cursor::new(&bytes);
+        let network = DynamicLayerStacksNetwork::read_with_source(
+            &mut reader,
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
+        assert_eq!(network.psqt_weights.len(), 73_305 * 2);
+        assert_eq!(network.threat_weights.len(), threat_dimensions * 2);
+        assert_eq!(network.buckets.len(), 2);
+        assert_eq!(reader.position(), bytes.len() as u64);
+
+        #[cfg(feature = "prepacked-nnue")]
+        {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = std::env::temp_dir()
+                .join(format!("rshogi-nnue-extensions-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&directory).unwrap();
+            let source = directory.join("source.bin");
+            let output = directory.join("packed.bin");
+            std::fs::write(&source, &bytes).unwrap();
+            super::super::prepacked::pack_layer_stacks(&source, &output).unwrap();
+            let packed = super::super::prepacked::PackedModel::open(&output).unwrap();
+            let loaded = DynamicLayerStacksNetwork::read_with_source(
+                &mut packed.metadata().unwrap(),
+                None,
+                Some(&packed),
+            )
+            .unwrap();
+            packed.finish().unwrap();
+            assert_eq!(&*network.ft_weights, &*loaded.ft_weights);
+            assert_eq!(&*network.psqt_weights, &*loaded.psqt_weights);
+            assert_eq!(&*network.threat_weights, &*loaded.threat_weights);
+            drop(loaded);
+            drop(packed);
+            std::fs::remove_file(source).unwrap();
+            std::fs::remove_file(output).unwrap();
+            std::fs::remove_dir(directory).unwrap();
+        }
+
+        for (end, expected_position) in [
+            (psqt_start, psqt_start),
+            (threat_start, threat_start),
+            (dense_start + 4, dense_start + 4),
+        ] {
+            let mut reader = Cursor::new(&bytes[..end]);
+            let error = DynamicLayerStacksNetwork::read_with_source(
+                &mut reader,
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+            assert_eq!(reader.position(), expected_position as u64);
+        }
+    }
 
     #[test]
     fn runtime_l2_32_and_64_match_static_and_refresh() {

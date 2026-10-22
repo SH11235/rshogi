@@ -370,7 +370,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
     /// LEB128圧縮形式から読み込み（自動検出）
     ///
-    /// 最初のブロックを全デコードし、要素数で形式を判別する:
+    /// 圧縮ブロックは実際に読めたバイト数に応じて確保し、重みの確保前に要素数を検証する。
+    /// 要素数で形式を判別する:
     /// - 要素数 == biases のみ → YO形式（2ブロック）: 続けて weights ブロックを読む
     /// - 要素数 == biases + weights → 旧bullet-shogi形式（1ブロック）
     pub fn read_leb128<R: Read>(reader: &mut R) -> io::Result<Self> {
@@ -396,12 +397,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             }
             packed.ft(weight_size)?
         } else {
-            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::try_new_zeroed)?
                 .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
         let weights: WeightBox<i16> =
-            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::try_new_zeroed)?
                 .into();
         Ok(Self {
             biases: Aligned(biases),
