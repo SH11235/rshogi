@@ -174,36 +174,19 @@ pub(super) fn check_conflicts_path(
     Ok(())
 }
 
-/// 存在する一番長い先頭部分を実体のパスにし、残り (書き出し時に作られる dir) は文字の上でたどる。
+/// まだ無い dir を推測でたどると、その先の既存のリンクを見落とす。親 dir は既にあるものに限る。
 fn resolved(path: &Path) -> Result<PathBuf> {
-    use std::path::Component;
-    let components: Vec<_> = path.components().collect();
-    let mut prefix = PathBuf::new();
-    let mut existing = 0;
-    for component in &components {
-        prefix.push(component);
-        if std::fs::symlink_metadata(&prefix).is_err() {
-            break;
-        }
-        existing += 1;
+    if std::fs::symlink_metadata(path).is_ok() {
+        return std::fs::canonicalize(path)
+            .with_context(|| format!("{} を解決できません", path.display()));
     }
-    let base: PathBuf = if existing == 0 {
-        ".".into()
-    } else {
-        components[..existing].iter().collect()
-    };
-    let mut out = std::fs::canonicalize(&base)
-        .with_context(|| format!("{} を解決できません", base.display()))?;
-    for component in &components[existing..] {
-        match component {
-            Component::Normal(name) => out.push(name),
-            Component::ParentDir => {
-                out.pop();
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} はファイル名ではありません", path.display()))?;
+    Ok(std::fs::canonicalize(parent)
+        .with_context(|| format!("{} がありません (先に作ってください)", parent.display()))?
+        .join(name))
 }
 
 pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
@@ -638,16 +621,27 @@ mod tests {
             assert!(check_conflicts_path(&bad, &master, &trees).is_err(), "{}", bad.display());
         }
         check_conflicts_path(&dir.path().join("conflicts.tsv"), &master, &trees).unwrap();
-        check_conflicts_path(&dir.path().join("new/dir/conflicts.tsv"), &master, &trees).unwrap();
-        assert!(check_conflicts_path(&tree.join("new/conflicts.tsv"), &master, &trees).is_err());
-        check_conflicts_path(&dir.path().join("new/../reports/conflicts.tsv"), &master, &trees)
-            .unwrap();
         for bad in [
+            "new/conflicts.tsv",
+            "new/../reports/conflicts.tsv",
+            "tree/new/conflicts.tsv",
             "new/../moves.tsv",
             "new/../tree/x.tsv",
-            "tree/new/../../moves.tsv",
         ] {
             assert!(check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(), "{bad}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&tree, dir.path().join("tree_link")).unwrap();
+            for bad in [
+                "new/../tree_link/node_moves.tsv",
+                "tree_link/node_moves.tsv",
+            ] {
+                assert!(
+                    check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(),
+                    "{bad}"
+                );
+            }
         }
         assert_eq!(std::fs::read_to_string(&master).unwrap(), "x");
     }
