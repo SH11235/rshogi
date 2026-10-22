@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 pub struct BookExploreList {
     entries: HashMap<String, Vec<String>>,
     warned: HashSet<(String, String)>,
+    skipped_lines: usize,
 }
 
 impl BookExploreList {
@@ -26,6 +27,7 @@ impl BookExploreList {
                     list.entries.insert(key, moves);
                 }
                 Err(reason) => {
+                    list.skipped_lines += 1;
                     info(&format!("BookExploreFile line {}: {reason}; ignored", line_no + 1))
                 }
             }
@@ -44,9 +46,19 @@ impl BookExploreList {
         self.entries.is_empty()
     }
 
+    /// 解析時に不正として読み飛ばした行数を返す。
+    pub fn skipped_lines(&self) -> usize {
+        self.skipped_lines
+    }
+
+    /// 局面の候補手をファイル記載順に返す。手数は無視し、先後反転局面は引かない。
+    pub fn moves_for(&self, sfen: &str) -> Option<&[String]> {
+        self.entries.get(&normalize_key(sfen, true)).map(Vec::as_slice)
+    }
+
     pub(crate) fn moves(&self, sfen: &str, flipped: bool) -> Option<Vec<String>> {
-        if let Some(moves) = self.entries.get(&normalize_key(sfen, true)) {
-            return Some(moves.clone());
+        if let Some(moves) = self.moves_for(sfen) {
+            return Some(moves.to_vec());
         }
         if !flipped {
             return None;
@@ -88,4 +100,33 @@ fn parse_entry(line: &str) -> Result<(String, Vec<String>), String> {
         }
     }
     Ok((normalize_key(&position.to_sfen(), true), moves))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
+
+    #[test]
+    fn moves_for_ignores_ply_and_does_not_flip() {
+        let list = BookExploreList::parse(
+            &format!("sfen {HIRATE} b - 1 7g7f 2g2f\nsfen {HIRATE} b - 5g5f\n"),
+            |_| {},
+        );
+        let expected = ["5g5f".to_string()];
+        assert_eq!(list.moves_for(&format!("{HIRATE} b - 9")), Some(&expected[..]));
+        assert_eq!(list.moves_for(&format!("{HIRATE} b -")), Some(&expected[..]));
+        assert_eq!(list.moves_for(&format!("{HIRATE} w - 2")), None);
+        assert_eq!(list.skipped_lines(), 0);
+    }
+
+    #[test]
+    fn skipped_lines_counts_rejected_lines() {
+        let list = BookExploreList::parse(
+            &format!("# comment\nsfen {HIRATE} b - 7g7f zz\nsfen bad\nsfen {HIRATE} b - 7g7f\n"),
+            |_| {},
+        );
+        assert_eq!((list.len(), list.skipped_lines()), (1, 2));
+    }
 }
