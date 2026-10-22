@@ -31,6 +31,7 @@ use clap::Parser;
 
 use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
 use rshogi_core::position::Position;
+use tools::output_path::ensure_safe_output_path;
 
 #[derive(Parser)]
 #[command(name = "mate_bench", about = "df-pn 詰み探索の局面集ベンチ")]
@@ -346,6 +347,7 @@ fn main() -> Result<()> {
 
     let mut writer = match &cli.out {
         Some(path) => {
+            ensure_safe_output_path(path, &cli.input)?;
             let mut w = BufWriter::new(
                 std::fs::File::create(path)
                     .with_context(|| format!("{} を作れない", path.display()))?,
