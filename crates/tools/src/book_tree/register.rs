@@ -174,18 +174,31 @@ pub(super) fn check_conflicts_path(
     Ok(())
 }
 
+/// 存在する一番近い祖先を実体のパスにし、まだ無い部分をつなげる (書き出し先の dir は後で作られる)。
 fn resolved(path: &Path) -> Result<PathBuf> {
-    if std::fs::symlink_metadata(path).is_ok() {
-        return std::fs::canonicalize(path)
-            .with_context(|| format!("{} を解決できません", path.display()));
+    let mut existing = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    let mut rest = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        rest.push(
+            existing
+                .file_name()
+                .with_context(|| format!("{} を解決できません", path.display()))?,
+        );
+        existing = existing
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
     }
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .with_context(|| format!("{} はファイル名ではありません", path.display()))?;
-    Ok(std::fs::canonicalize(parent)
-        .with_context(|| format!("{} を解決できません", parent.display()))?
-        .join(name))
+    let mut out = std::fs::canonicalize(existing)
+        .with_context(|| format!("{} を解決できません", existing.display()))?;
+    for name in rest.into_iter().rev() {
+        out.push(name);
+    }
+    Ok(out)
 }
 
 pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
@@ -620,6 +633,8 @@ mod tests {
             assert!(check_conflicts_path(&bad, &master, &trees).is_err(), "{}", bad.display());
         }
         check_conflicts_path(&dir.path().join("conflicts.tsv"), &master, &trees).unwrap();
+        check_conflicts_path(&dir.path().join("new/dir/conflicts.tsv"), &master, &trees).unwrap();
+        assert!(check_conflicts_path(&tree.join("new/conflicts.tsv"), &master, &trees).is_err());
         assert_eq!(std::fs::read_to_string(&master).unwrap(), "x");
     }
 
