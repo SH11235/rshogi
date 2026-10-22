@@ -221,7 +221,6 @@ pub(super) struct Searcher<'a, S: MateState> {
     budget: Budget<'a>,
     /// この深さのフレームが終わるとき、証明済みの子を `scratch.proven` に写す (PV 復元用)
     capture_depth: Option<usize>,
-    delay: bool,
 }
 
 #[inline]
@@ -257,7 +256,6 @@ impl<'a, S: MateState> Searcher<'a, S> {
             next_progress_ms: PROGRESS_INTERVAL_MS,
             budget,
             capture_depth: None,
-            delay: std::env::var("DFPN_DELAY").map(|v| v != "0").unwrap_or(true),
         }
     }
 
@@ -507,9 +505,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
             }
             self.scratch.children.push(child);
         }
-        if self.delay {
-            self.link_delayed(st, or_node);
-        }
+        self.link_delayed(st, or_node);
         has_old_child
     }
 
