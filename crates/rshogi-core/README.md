@@ -48,6 +48,12 @@ println!("Best move: {}", result.best_move.to_usi());
 `ProgressKpAbsWeights` を返す。`&weights` を `&[f32]` として渡せる。
 係数を再設定・resetしても取得済みのsnapshotは有効で、最後の所有者が破棄されるまで保持される。
 探索stackへの反映は生成・reset時に行う。探索中はstackが保持する係数を参照する。
+固定editionと実行時寸法版の `NNUEEvaluator` も同じ f32 係数をresetまで保持する。
+`refresh()` はアキュムレータの再計算のみで、係数のsnapshotは更新しない。
+
+stackを受け取らない低level API `NetworkLayerStacks::evaluate()` と
+`evaluate_with_diagnostics()` は、評価ごとにglobal設定のsnapshotを取得する。
+係数の寿命を評価器に固定する場合は `NNUEEvaluator` を使う。
 
 ## License
 
