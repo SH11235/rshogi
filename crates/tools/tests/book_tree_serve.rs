@@ -1320,3 +1320,106 @@ fn replay_started_before_serve_keeps_its_output_until_it_ends() {
     assert_eq!(status(&out(state, "a", "b")), "DONE\n");
     stop(state, &mut server);
 }
+
+fn start_traced(state: &Path, config: &Path, trace: &Path) -> Server {
+    let mut command = serve_command(state, config, 3, 3, state.parent().unwrap());
+    command.arg("--trace-dir").arg(trace);
+    Server(command.spawn().unwrap())
+}
+fn trace_records(trace: &Path) -> Vec<(PathBuf, Vec<Value>)> {
+    let mut files: Vec<_> = std::fs::read_dir(trace).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let records = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+            (path, records)
+        })
+        .collect()
+}
+
+#[test]
+fn trace_keeps_info_lines_of_completed_searches_only_and_can_change_across_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let trace = dir.path().join("trace");
+    let config = fixture(state);
+    add_tree(state, "a");
+    let mut server = start_traced(state, &config, &trace);
+    wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
+    stop(state, &mut server);
+    // crash_once で 1 回の探索が途中で落ち、その局面は読み直される。
+    assert_eq!(searches(state), 5);
+    let journal: Vec<Value> = std::fs::read_to_string(state.join("journal.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let files = trace_records(&trace);
+    assert_eq!(files.len(), 1);
+    let records = &files[0].1;
+    assert_eq!(records.len(), journal.len());
+    for record in &journal {
+        let reading = &record["reading"];
+        let traced: Vec<_> = records.iter().filter(|t| t["key"] == reading["key"]).collect();
+        assert_eq!(traced.len(), 1, "{reading}");
+        let t = traced[0];
+        assert_eq!(t["ply"], reading["ply"]);
+        assert_eq!(t["bestmove"], reading["bestmove"]);
+        assert_eq!(t["fingerprint"], record["settings"]["fingerprint"]);
+        assert!(t["worker"].as_u64().unwrap() < 4);
+        let started = chrono::DateTime::parse_from_rfc3339(t["started"].as_str().unwrap()).unwrap();
+        let finished =
+            chrono::DateTime::parse_from_rfc3339(t["finished"].as_str().unwrap()).unwrap();
+        assert!(started <= finished);
+        let lines: Vec<_> =
+            t["lines"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+        assert!(lines.iter().all(|l| l.starts_with("info ") && !l.starts_with("info string")));
+        assert!(lines.iter().any(|l| l.starts_with("info depth 1 nodes 1 ")));
+        let last = reading["multipv"].as_array().unwrap().len();
+        assert!(lines[lines.len() - 1].contains(&format!(" multipv {last} ")));
+    }
+    // 台帳の読みだけで済む起動は探索しないので記録を書かず、付け外しで起動を拒否しない。
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let mut server = start_traced(state, &config, &trace);
+    add_tree(state, "b");
+    wait_for(|| out(state, "b", "b").join("own_nodes.tsv").exists());
+    stop(state, &mut server);
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let mut server = start(state, &config);
+    wait_for(|| progress(state)["status"] == "IDLE");
+    stop(state, &mut server);
+    assert_eq!(searches(state), 5);
+    assert_eq!(trace_records(&trace).iter().map(|(_, r)| r.len()).sum::<usize>(), journal.len());
+}
+
+#[cfg(unix)]
+#[test]
+fn trace_write_failure_is_alerted_once_and_readings_continue() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let trace = dir.path().join("trace");
+    std::fs::create_dir(&trace).unwrap();
+    std::fs::set_permissions(&trace, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(trace.join("probe"), "").is_ok() {
+        // 権限を無視できる実行者では書き込みの失敗を作れない。
+        return;
+    }
+    let config = fast_fixture(state);
+    add_tree(state, "a");
+    let mut server = start_traced(state, &config, &trace);
+    wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
+    stop(state, &mut server);
+    std::fs::set_permissions(&trace, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let journal = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    assert_eq!(journal.lines().count(), 4);
+    assert_eq!(
+        alerts(state).lines().filter(|l| l.contains("探索の記録を書けません")).count(),
+        1
+    );
+    assert!(std::fs::read_dir(&trace).unwrap().next().is_none());
+}

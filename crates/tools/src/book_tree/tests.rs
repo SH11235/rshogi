@@ -863,6 +863,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         stop: 300,
         rounds: 3,
         draw: 0,
+        trace_dir: None,
     }
 }
 
