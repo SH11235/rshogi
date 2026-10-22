@@ -16,7 +16,7 @@
 //! - 受け方の合駒 (同じ升への駒違い、守りの無い中合い) と成・不成の組は、組の中で前の手が確定するまで
 //!   後ろの手を現局面の pn/dn に数えない (KomoringHeights の遅延展開)。安い合駒が詰めば高い合駒も
 //!   たいてい詰むので、均等に数えて pn を過大に見積もるのを防ぐ。手を省くのではないので、
-//!   詰み・不詰はすべての手が数えられてからしか確定しない。
+//!   受け方の詰み・攻め方の不詰は、すべての手が数えられてからしか確定しない。
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
@@ -106,7 +106,8 @@ struct Child<M> {
     limited: bool,
     /// 置換表に無く、まだ一度も探索していない子 (TCA の延長を戻す判定に使う)
     first_visit: bool,
-    /// 現局面の pn/dn に数えるか。後回しの組で、前の手がまだ確定していない手は数えない。
+    /// 現局面の pn/dn に数えるか。確定した子は常に数える。後回しの組で、組の中の前に確定していない
+    /// 手がある確定していない手は数えない。
     active: bool,
     /// 後回しの組でこの手の次の手 (フレーム内の添字)。`NO_NEXT` なら無い。
     next: u16,
@@ -114,8 +115,6 @@ struct Child<M> {
 
 /// `Child::next` の「次の手が無い」
 const NO_NEXT: u16 = u16::MAX;
-/// 1 局面で作る後回しの組の数の上限 (超えた手は後回しにしない)
-const MAX_DELAY_GROUPS: usize = 10;
 
 impl<M> Child<M> {
     fn is_final(&self) -> bool {
@@ -191,8 +190,8 @@ pub(super) struct Scratch<M> {
     moves: Vec<M>,
     /// `moves` の各手を指した後のキー
     child_keys: Vec<u64>,
-    /// 後回しにしてよい手の (読む順, フレーム内の添字)
-    delay_order: Vec<(u8, u16)>,
+    /// 後回しにしてよい手の (組, 組の中で読む順, フレーム内の添字)
+    delay_order: Vec<(u16, u8, u16)>,
     /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
     proven: Vec<(M, u16)>,
 }
@@ -516,44 +515,35 @@ impl<'a, S: MateState> Searcher<'a, S> {
         let start = self.scratch.children.len() - n;
         self.scratch.delay_order.clear();
         for (i, &mv) in self.scratch.moves.iter().enumerate() {
-            if let Some(rank) = st.delay_rank(mv, or_node) {
-                self.scratch.delay_order.push((rank, i as u16));
+            if let Some((group, rank)) = st.delay_key(mv, or_node) {
+                self.scratch.delay_order.push((group, rank, i as u16));
             }
         }
         if self.scratch.delay_order.len() < 2 {
             return;
         }
-        self.scratch.delay_order.sort_by_key(|&(rank, _)| rank);
-
-        // 組ごとの (先頭, 末尾)
-        let mut groups = [(0u16, 0u16); MAX_DELAY_GROUPS];
-        let mut group_count = 0;
-        for k in 0..self.scratch.delay_order.len() {
-            let i = self.scratch.delay_order[k].1;
-            let mv = self.scratch.moves[usize::from(i)];
-            let found = groups[..group_count]
-                .iter_mut()
-                .find(|(_, tail)| st.same_delay_group(self.scratch.moves[usize::from(*tail)], mv));
-            if let Some((_, tail)) = found {
-                self.scratch.children[start + usize::from(*tail)].next = i;
-                *tail = i;
-            } else if group_count < MAX_DELAY_GROUPS {
-                groups[group_count] = (i, i);
-                group_count += 1;
+        // 組ごとに読む順に並べ、隣り合う同じ組の手をつなぐ
+        self.scratch.delay_order.sort_unstable();
+        for k in 1..self.scratch.delay_order.len() {
+            let (group, _, i) = self.scratch.delay_order[k];
+            let (prev_group, _, prev) = self.scratch.delay_order[k - 1];
+            if group == prev_group {
+                self.scratch.children[start + usize::from(prev)].next = i;
             }
         }
 
         // 確定していない手が組の中で先に出たら、それより後ろの確定していない手は数えない
-        for &(head, _) in &groups[..group_count] {
-            let mut blocked = false;
-            let mut i = head;
-            while i != NO_NEXT {
-                let child = &mut self.scratch.children[start + usize::from(i)];
-                if !child.is_final() {
-                    child.active = !blocked;
-                    blocked = true;
-                }
-                i = child.next;
+        let mut current_group = None;
+        let mut blocked = false;
+        for &(group, _, i) in &self.scratch.delay_order {
+            if current_group != Some(group) {
+                current_group = Some(group);
+                blocked = false;
+            }
+            let child = &mut self.scratch.children[start + usize::from(i)];
+            if !child.is_final() {
+                child.active = !blocked;
+                blocked = true;
             }
         }
     }
@@ -645,6 +635,11 @@ impl<'a, S: MateState> Searcher<'a, S> {
         current: NodeResult,
     ) -> NodeResult {
         let children = &self.scratch.children[start..];
+        // 受け方の詰み・攻め方の不詰はすべての子が根拠なので、後回しの組の手もすべて数えられている
+        debug_assert!(
+            !(current.is_proven() && !or_node || current.is_disproven() && or_node)
+                || children.iter().all(|c| c.active)
+        );
         if current.is_proven() {
             let len = if or_node {
                 children.iter().filter(|c| c.pn == 0).map(|c| c.mate_len).min()

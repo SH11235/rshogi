@@ -575,6 +575,8 @@ fn solve_tiny_table(pos: &mut Position, nodes: u64) -> MateResult {
 struct Graph {
     edges: Vec<Vec<u32>>,
     stack: Vec<u32>,
+    /// 0 でなければ、節点番号を割った余りで後回しの組を作る (番号の小さい手から読む)
+    delay_groups: u32,
 }
 
 impl Graph {
@@ -582,7 +584,13 @@ impl Graph {
         Self {
             edges,
             stack: vec![root],
+            delay_groups: 0,
         }
+    }
+
+    fn with_delay(mut self, groups: u32) -> Self {
+        self.delay_groups = groups;
+        self
     }
 
     fn node(&self) -> u32 {
@@ -634,6 +642,10 @@ impl MateState for Graph {
 
     fn generate(&self, _or_node: bool, out: &mut Vec<u32>) {
         out.extend_from_slice(&self.edges[self.node() as usize]);
+    }
+
+    fn delay_key(&self, m: u32, _or_node: bool) -> Option<(u16, u8)> {
+        (self.delay_groups != 0).then(|| ((m % self.delay_groups) as u16, m as u8))
     }
 
     fn mate_1ply(&mut self) -> Option<u32> {
@@ -764,17 +776,28 @@ fn agrees_with_fixed_point_on_random_graphs() {
         }
         let truth = Graph::new(edges.clone(), 0).mate_set(&is_or)[0];
         mates += usize::from(truth);
-        for buckets in [1, 2, 3, 4, 256] {
-            let mut graph = Graph::new(edges.clone(), 0);
+        for (buckets, delay) in [
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (4, 0),
+            (256, 0),
+            (1, 2),
+            (4, 3),
+            (256, 2),
+        ] {
+            let mut graph = Graph::new(edges.clone(), 0).with_delay(delay);
             match solve_graph(&mut graph, buckets) {
                 Some(SolveOutcome::Mate(pv)) => {
-                    assert!(truth, "case {case} b={buckets}: 偽の詰み {edges:?}");
+                    assert!(truth, "case {case} b={buckets} delay={delay}: 偽の詰み {edges:?}");
                     assert!(is_valid_graph_pv(&graph, 0, &pv), "case {case}: {pv:?} {edges:?}");
                 }
                 Some(SolveOutcome::NoMate) => {
-                    assert!(!truth, "case {case} b={buckets}: 偽の不詰 {edges:?}");
+                    assert!(!truth, "case {case} b={buckets} delay={delay}: 偽の不詰 {edges:?}");
                 }
-                None => panic!("case {case} b={buckets}: 小さなグラフで打ち切り (停滞) {edges:?}"),
+                None => panic!(
+                    "case {case} b={buckets} delay={delay}: 小さなグラフで打ち切り (停滞) {edges:?}"
+                ),
             }
         }
     }

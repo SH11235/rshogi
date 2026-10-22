@@ -5,7 +5,12 @@
 
 use crate::movegen::{ExtMoveBuffer, GenType, MoveList, generate_legal_all, generate_with_type};
 use crate::position::Position;
-use crate::types::{Move, PieceType, Rank};
+use crate::types::{Move, PieceType, Rank, Square};
+
+/// `MateState::delay_key` の組の番号: 成・不成の組は移動元と移動先から (`Square::NUM` の 2 乗未満)、
+/// 合駒は打つ升ごと、受け方の利きの無い升への合駒は全部で 1 組
+const DELAY_GROUP_DROP: u16 = (Square::NUM * Square::NUM) as u16;
+const DELAY_GROUP_UNSUPPORTED_DROP: u16 = DELAY_GROUP_DROP + Square::NUM as u16;
 
 /// df-pn が局面に求める操作
 pub(super) trait MateState {
@@ -23,17 +28,12 @@ pub(super) trait MateState {
     /// `or_node` なら攻め方の手 (合法な王手)、そうでなければ受け方の手 (合法な応手すべて)。
     fn generate(&self, or_node: bool, out: &mut Vec<Self::Mv>);
 
-    /// 後回しにしてよい手なら、同じ組の中で読む順 (小さいほど先)。
+    /// 後回しにしてよい手なら (組, 組の中で読む順 (小さいほど先))。
     ///
-    /// 受け方の合駒と、成れる手の成・不成の組が対象。組の先頭以外は、直前の手が確定するまで
+    /// 受け方の合駒と、成れる手の成・不成の組が対象。組の先頭以外は、組の中で前の手が確定するまで
     /// 子として数えない (読まない手を作るのではなく、読む順を遅らせるだけ)。
-    fn delay_rank(&self, _m: Self::Mv, _or_node: bool) -> Option<u8> {
+    fn delay_key(&self, _m: Self::Mv, _or_node: bool) -> Option<(u16, u8)> {
         None
-    }
-
-    /// 後回しにしてよい 2 手 (`delay_rank` が `Some`) が同じ組か
-    fn same_delay_group(&self, _a: Self::Mv, _b: Self::Mv) -> bool {
-        false
     }
 
     /// 攻め方の 1 手詰めの手。返す手は合法な王手で、指した後に受け方の合法手が無いことまで確かめ済み。
@@ -84,10 +84,13 @@ impl MateState for Position {
         }
     }
 
-    fn delay_rank(&self, m: Move, or_node: bool) -> Option<u8> {
+    fn delay_key(&self, m: Move, or_node: bool) -> Option<(u16, u8)> {
+        let us = self.side_to_move();
         if m.is_drop() {
-            // 合駒は安い駒から読む
-            return (!or_node).then(|| match m.drop_piece_type() {
+            if or_node {
+                return None;
+            }
+            let piece = match m.drop_piece_type() {
                 PieceType::Pawn => 0,
                 PieceType::Lance => 1,
                 PieceType::Knight => 2,
@@ -95,9 +98,16 @@ impl MateState for Position {
                 PieceType::Gold => 4,
                 PieceType::Bishop => 5,
                 _ => 6,
-            });
+            };
+            // 受け方の駒の利きが無い升への合駒は、どこに打っても大差ないので 1 組にまとめる。
+            // 同じ升への合駒は駒によらず同じ組に入れ、安い駒から読む
+            let group = if self.attackers_to_c(m.to(), us).is_empty() {
+                DELAY_GROUP_UNSUPPORTED_DROP
+            } else {
+                DELAY_GROUP_DROP + m.to().index() as u16
+            };
+            return Some((group, piece));
         }
-        let us = self.side_to_move();
         if !crate::mate::can_promote(us, m.from(), m.to()) {
             return None;
         }
@@ -107,24 +117,8 @@ impl MateState for Position {
             PieceType::Lance => m.to().rank().relative(us) == Rank::Rank2,
             _ => false,
         };
-        delayable.then_some(u8::from(!m.is_promote()))
-    }
-
-    fn same_delay_group(&self, a: Move, b: Move) -> bool {
-        match (a.is_drop(), b.is_drop()) {
-            (true, true) => {
-                if a.to() == b.to() {
-                    return true;
-                }
-                // 受け方の駒の利きが無く王手にもならない中合いは、どこに打っても大差ないので 1 組にまとめる
-                let us = self.side_to_move();
-                let unsupported =
-                    |m: Move| self.attackers_to_c(m.to(), us).is_empty() && !self.gives_check(m);
-                unsupported(a) && unsupported(b)
-            }
-            (false, false) => a.from() == b.from() && a.to() == b.to(),
-            _ => false,
-        }
+        let group = (m.from().index() * Square::NUM + m.to().index()) as u16;
+        delayable.then_some((group, u8::from(!m.is_promote())))
     }
 
     fn mate_1ply(&mut self) -> Option<Move> {
