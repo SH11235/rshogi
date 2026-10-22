@@ -267,9 +267,6 @@ fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) 
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if cli.limit != 0 && sent >= cli.limit {
-            return Ok(());
-        }
         let selected = line_index % cli.stride == cli.offset;
         line_index += 1;
         if !selected {
@@ -281,13 +278,14 @@ fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) 
             .map_err(|e| anyhow::anyhow!("SFEN を読めない: {sfen}: {e:?}"))?;
         let flipped = (cli.flip && !pos.in_check()).then(|| flip_side_to_move(&sfen));
         for s in std::iter::once(sfen).chain(flipped) {
-            if cli.limit != 0 && sent >= cli.limit {
-                return Ok(());
-            }
             if tickets.recv().is_err() || jobs_tx.send((sent, s)).is_err() {
                 return Ok(());
             }
             sent += 1;
+            // 上限に達したら次の行を読まない (その先の行が壊れていても上限までの結果を出す)
+            if cli.limit != 0 && sent >= cli.limit {
+                return Ok(());
+            }
         }
     }
     Ok(())
