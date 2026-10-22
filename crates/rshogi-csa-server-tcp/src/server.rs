@@ -65,7 +65,7 @@ use tracing::Instrument;
 use crate::auth::{AuthOutcome, PasswordHasher, authenticate};
 use crate::broadcaster::{InMemoryBroadcaster, Subscriber};
 use crate::rate_limit::IpLoginRateLimiter;
-use crate::transport::TcpTransport;
+use crate::transport::{MAX_CSA_LINE_BYTES, TcpTransport};
 
 /// プレイヤハンドル1 件分の期待形式 (`<handle>+<game_name>+<color>`) を分解する。
 ///
@@ -1774,22 +1774,28 @@ where
                 // 観戦中でない CHAT は NOT_MONITORING で弾く。対局参加前の x1 クライアント
                 // が部屋未指定で CHAT を投げた場合のフォールバック経路。
                 if let Some((active_id, _)) = &monitor_rx {
-                    let line = CsaLine::new(format!("##[CHAT] {handle}: {message}"));
-                    // CHAT broadcast 自体は送信側 (本クライアント) 自身にも echo
-                    // として届く (broadcaster に自身が subscribe している)。これは
-                    // CSA 仕様の通例で、送信確認を兼ねる。
-                    let _ = state
-                        .broadcaster
-                        .broadcast_tag(
-                            &RoomId::new(active_id.as_str()),
-                            BroadcastTag::Spectator,
-                            &line,
-                        )
-                        .await;
-                    Some(vec![
-                        CsaLine::new(format!("##[CHAT] OK {active_id}")),
-                        CsaLine::new("##[CHAT] END"),
-                    ])
+                    if let Some(line) = chat_broadcast_line(&handle, &message) {
+                        // CHAT broadcast 自体は送信側 (本クライアント) 自身にも echo
+                        // として届く (broadcaster に自身が subscribe している)。これは
+                        // CSA 仕様の通例で、送信確認を兼ねる。
+                        let _ = state
+                            .broadcaster
+                            .broadcast_tag(
+                                &RoomId::new(active_id.as_str()),
+                                BroadcastTag::Spectator,
+                                &line,
+                            )
+                            .await;
+                        Some(vec![
+                            CsaLine::new(format!("##[CHAT] OK {active_id}")),
+                            CsaLine::new("##[CHAT] END"),
+                        ])
+                    } else {
+                        Some(vec![
+                            CsaLine::new("##[CHAT] TOO_LONG"),
+                            CsaLine::new("##[CHAT] END"),
+                        ])
+                    }
                 } else {
                     Some(vec![
                         CsaLine::new("##[CHAT] NOT_MONITORING"),
@@ -4123,9 +4129,26 @@ where
     )
 }
 
+fn chat_broadcast_line(handle: &str, message: &str) -> Option<CsaLine> {
+    let text = format!("##[CHAT] {handle}: {message}");
+    // send_line が付ける CR も受信側の上限に含まれる。
+    (text.len() < MAX_CSA_LINE_BYTES).then(|| CsaLine::new(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_broadcast_byte_limit_includes_utf8_handle_and_cr() {
+        let handle = "観戦者".repeat(100);
+        let message_bytes = MAX_CSA_LINE_BYTES - format!("##[CHAT] {handle}: ").len() - 1;
+        let message = "あ".repeat(message_bytes / 3) + &"x".repeat(message_bytes % 3);
+        let line = chat_broadcast_line(&handle, &message).unwrap();
+        assert_eq!(line.as_str().len() + 1, MAX_CSA_LINE_BYTES);
+        assert!(chat_broadcast_line(&handle, &(message + "x")).is_none());
+        assert!(chat_broadcast_line(&"x".repeat(MAX_CSA_LINE_BYTES), "").is_none());
+    }
 
     #[test]
     fn parse_handle_accepts_black_and_white_aliases() {

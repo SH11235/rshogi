@@ -128,6 +128,11 @@ CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で
 | `%%FLOODGATE history [N]` `*` | 直近 N 件の Floodgate 対局履歴。`limit` 省略時は frontend 側で 10 件補う | ✅ | ❌ | `info.rs::floodgate_history_lines` |
 | `%%FLOODGATE rating <handle>` `*` | 1 名分の rate / wins / losses / last_game_id / last_modified | ✅ | ❌ | `info.rs::floodgate_rating_lines` |
 
+TCP の `%%CHAT` は、ハンドル名を付けた配信行と末尾の CR を合わせて 64 KiB まで受理する。
+UTF-8 の byte 数で `message.len() + handle.len() + 12 <= 65536` が条件となる。
+超過時は送信者へ `##[CHAT] TOO_LONG`、`##[CHAT] END` を返し、本文を切り詰めず配信しない。
+送信者と他の観戦者の接続は維持する。この上限は TCP frontend に適用する。
+
 `%%HELP` は `advertise == accept` の原則で実装されており、`%%HELP` の 1 行サマリと
 本表に列挙したコマンドが常に一致する (`info.rs::help_lines` のリストと
 `command.rs::parse_x1` の `match` 分岐が `info.rs::tests::help_lines_cover_currently_wired_commands`

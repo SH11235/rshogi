@@ -1258,6 +1258,68 @@ fn monitor2_removes_subscriber_from_matchmaking_pool() {
 }
 
 #[test]
+fn chat_byte_limit_rejects_without_disconnect_or_broadcast() {
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_admin("chat_byte_limit", vec![]).await;
+        let (mut rb, mut wb, _rw, _ww, game_id) = login_match_agree(addr).await;
+        let (mut sender, mut sender_write) = connect(addr).await;
+        let (mut observer, mut observer_write) = connect(addr).await;
+        for (reader, writer, handle) in [
+            (&mut sender, &mut sender_write, "carol"),
+            (&mut observer, &mut observer_write, "admin"),
+        ] {
+            send_line(writer, &format!("LOGIN {handle}+obs+black pw x1")).await;
+            assert_eq!(read_line_raw(reader).await.unwrap(), format!("LOGIN:{handle} OK"));
+            send_line(writer, &format!("%%MONITOR2ON {game_id}")).await;
+            assert_eq!(
+                read_line_raw(reader).await.unwrap(),
+                format!("##[MONITOR2] BEGIN {game_id}")
+            );
+            assert_eq!(read_line_raw(reader).await.unwrap(), "##[MONITOR2] END");
+        }
+        let limit = 64 * 1024;
+        let message_bytes = limit - "##[CHAT] carol: ".len() - 1;
+        let message = "あ".repeat(message_bytes / 3) + &"x".repeat(message_bytes % 3);
+        send_line(&mut sender_write, &format!("%%CHAT {message}x")).await;
+        assert_eq!(read_line_raw(&mut sender).await.unwrap(), "##[CHAT] TOO_LONG");
+        assert_eq!(read_line_raw(&mut sender).await.unwrap(), "##[CHAT] END");
+
+        send_line(&mut sender_write, &format!("%%CHAT {message}")).await;
+        let expected = format!("##[CHAT] carol: {message}");
+        let mut echo_count = 0;
+        let mut ack_count = 0;
+        let mut end_count = 0;
+        for _ in 0..3 {
+            let line = read_line_raw(&mut sender).await.unwrap();
+            assert!(line.len() < limit, "CHAT response exceeds the wire byte limit");
+            if line == expected {
+                echo_count += 1;
+            } else if line == format!("##[CHAT] OK {game_id}") {
+                ack_count += 1;
+            } else if line == "##[CHAT] END" {
+                end_count += 1;
+            } else {
+                panic!("unexpected CHAT response of {} bytes", line.len());
+            }
+        }
+        assert_eq!((echo_count, ack_count, end_count), (1, 1, 1));
+        let received = read_line_raw(&mut observer).await.unwrap();
+        assert_eq!(received.len() + 1, limit);
+        assert!(received == expected, "observer received a rejected message");
+        for (reader, writer) in [
+            (&mut sender, &mut sender_write),
+            (&mut observer, &mut observer_write),
+        ] {
+            send_line(writer, "%%VERSION").await;
+            assert!(read_line_raw(reader).await.unwrap().starts_with("##[VERSION] "));
+        }
+        send_line(&mut wb, "%TORYO").await;
+        let _ = read_until(&mut rb, "#LOSE").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn chat_without_active_monitor_returns_not_monitoring() {
     // x1 waiter が `%%MONITOR2ON` 前に `%%CHAT` を投げると `NOT_MONITORING` で
     // 弾かれる。購読前の chat 経路を誤って開放していないことの回帰防止。

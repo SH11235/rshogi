@@ -27,7 +27,7 @@ const SEND_BUF_INIT_CAPACITY: usize = 256;
 const SEND_BUF_MAX_RETAIN: usize = 4096;
 
 // client の行上限と合わせ、1 行で手列を送る SETBUOY も許容する。LF は除き、CR は含む。
-const MAX_RECV_LINE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CSA_LINE_BYTES: usize = 64 * 1024;
 
 /// TCP 接続 1 本分の行 I/O アダプタ。
 pub struct TcpTransport {
@@ -120,7 +120,7 @@ impl ClientTransport for TcpTransport {
             }
             let newline = bytes.iter().position(|&byte| byte == b'\n');
             let content_len = newline.unwrap_or(bytes.len());
-            if content_len > MAX_RECV_LINE_BYTES - self.line_buf.len() {
+            if content_len > MAX_CSA_LINE_BYTES - self.line_buf.len() {
                 self.line_buf.clear();
                 self.recv_overflowed = true;
                 return Err(line_too_long());
@@ -284,7 +284,7 @@ mod tests {
     async fn recv_line_accepts_limit_with_lf_crlf_or_eof() {
         for ending in [b"\n".as_slice(), b"\r\n", b"", b"\r"] {
             let (mut transport, mut client) = loopback_pair().await;
-            let content_len = MAX_RECV_LINE_BYTES - usize::from(ending.starts_with(b"\r"));
+            let content_len = MAX_CSA_LINE_BYTES - usize::from(ending.starts_with(b"\r"));
             let mut input = vec![b'x'; content_len];
             input.extend_from_slice(ending);
             let (_, received) = tokio::join!(
@@ -306,7 +306,7 @@ mod tests {
     async fn recv_line_rejects_overflow_before_newline_or_eof() {
         for ending in [b"".as_slice(), b"\n", b"\r\n", b"tail\nNEXT\n"] {
             let (mut transport, mut client) = loopback_pair().await;
-            let mut input = vec![b'x'; MAX_RECV_LINE_BYTES + 1];
+            let mut input = vec![b'x'; MAX_CSA_LINE_BYTES + 1];
             input.extend_from_slice(ending);
             let (sent, received) = tokio::join!(
                 client.write_all(&input),
@@ -330,7 +330,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_counts_cr_toward_limit() {
         let (mut transport, mut client) = loopback_pair().await;
-        let mut input = vec![b'x'; MAX_RECV_LINE_BYTES];
+        let mut input = vec![b'x'; MAX_CSA_LINE_BYTES];
         input.extend_from_slice(b"\r\n");
         let (sent, received) =
             tokio::join!(client.write_all(&input), transport.recv_line(Duration::from_secs(2)),);
@@ -341,7 +341,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_rejects_oversized_unterminated_eof() {
         let (mut transport, mut client) = loopback_pair().await;
-        let input = vec![b'x'; MAX_RECV_LINE_BYTES + 1];
+        let input = vec![b'x'; MAX_CSA_LINE_BYTES + 1];
         let (_, received) = tokio::join!(
             async {
                 client.write_all(&input).await.unwrap();
@@ -355,7 +355,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_applies_limit_to_each_line() {
         let (mut transport, mut client) = loopback_pair().await;
-        let content = "x".repeat(MAX_RECV_LINE_BYTES);
+        let content = "x".repeat(MAX_CSA_LINE_BYTES);
         let input = format!("{content}\n{content}\n\n");
         let (_, ()) = tokio::join!(
             async {
@@ -375,14 +375,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_preserves_limit_across_timeout() {
         let (mut transport, mut client) = loopback_pair().await;
-        let partial = vec![b'x'; MAX_RECV_LINE_BYTES];
+        let partial = vec![b'x'; MAX_CSA_LINE_BYTES];
         let (sent, received) = tokio::join!(
             client.write_all(&partial),
             transport.recv_line(Duration::from_millis(50)),
         );
         sent.unwrap();
         assert_eq!(received.unwrap_err(), TransportError::Timeout);
-        assert_eq!(transport.line_buf.len(), MAX_RECV_LINE_BYTES);
+        assert_eq!(transport.line_buf.len(), MAX_CSA_LINE_BYTES);
         client.write_all(b"x\n").await.unwrap();
         assert!(matches!(
             transport.recv_line(Duration::from_secs(1)).await,
@@ -393,7 +393,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_preserves_split_utf8_across_cancellation() {
         let (mut transport, mut client) = loopback_pair().await;
-        let mut partial = vec![b'x'; MAX_RECV_LINE_BYTES - "あ".len()];
+        let mut partial = vec![b'x'; MAX_CSA_LINE_BYTES - "あ".len()];
         partial.push(0xe3);
         let (_, ()) = tokio::join!(
             async {
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(transport.line_buf, partial);
         client.write_all(b"\x81\x82\nNEXT\n").await.unwrap();
         let line = transport.recv_line(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(line.as_str().len(), MAX_RECV_LINE_BYTES);
+        assert_eq!(line.as_str().len(), MAX_CSA_LINE_BYTES);
         assert!(line.as_str().ends_with('あ'));
         assert_eq!(transport.recv_line(Duration::from_secs(1)).await.unwrap().as_str(), "NEXT");
     }
