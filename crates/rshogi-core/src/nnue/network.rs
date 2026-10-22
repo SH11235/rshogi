@@ -1467,7 +1467,7 @@ pub fn compute_progresskpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 ///
 /// 玉が動いていない場合にのみ使用可能。
 /// DirtyPiece の ExtBonaPiece.fb/fw は progresskpabs と同じ BonaPiece 体系。
-#[cfg(feature = "nnue-progress-diff")]
+#[cfg(all(feature = "nnue-progress-diff", any(feature = "layerstack-arch", test)))]
 #[inline]
 pub fn update_progresskpabs_sum_diff(
     prev_sum: f32,
@@ -1933,7 +1933,7 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ///
 /// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
 /// それ以外は全駒スキャンにフォールバック。
-#[cfg(feature = "nnue-progress-diff")]
+#[cfg(all(feature = "nnue-progress-diff", feature = "layerstack-arch"))]
 #[inline]
 fn ensure_progress_bucket<const L1: usize>(
     pos: &Position,
