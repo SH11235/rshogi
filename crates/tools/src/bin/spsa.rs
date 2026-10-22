@@ -287,6 +287,7 @@ struct Cli {
 
     /// 既存の `<run-dir>/state.params` を canonical で atomic に上書きして
     /// fresh start する。`--init-from` の指定が必須。
+    /// canonicalの全行とengine mappingの検証を、既存成果物の変更前に行う。
     ///
     /// 既存 `meta.json` / 各 CSV も削除して fresh run として扱う。`--resume`
     /// とは同時指定不可 (意味が矛盾)。
@@ -3114,8 +3115,16 @@ fn main() -> Result<()> {
     let force_init_cleanup_paths = default_force_init_cleanup_paths(&cli.run_dir);
     let force_init_cleanup_refs: Vec<&Path> =
         force_init_cleanup_paths.iter().map(|p| p.as_path()).collect();
+    let translator = match &cli.engine_param_mapping {
+        Some(path) => {
+            let t = EngineNameTranslator::from_mapping_file(path)?;
+            eprintln!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
+            t
+        }
+        None => EngineNameTranslator::empty(),
+    };
     if let Some(path) = &cli.init_from {
-        validate_spsa_params_format(path, cli.assume_c_end_r_end)?;
+        read_params_with_translator(path, &translator, cli.assume_c_end_r_end)?;
     }
     let effective_action = apply_init_action(
         &init_action,
@@ -3125,14 +3134,6 @@ fn main() -> Result<()> {
         &force_init_cleanup_refs,
     )?;
 
-    let translator = match &cli.engine_param_mapping {
-        Some(path) => {
-            let t = EngineNameTranslator::from_mapping_file(path)?;
-            eprintln!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
-            t
-        }
-        None => EngineNameTranslator::empty(),
-    };
     let mut params =
         read_params_with_translator(&state_params, &translator, cli.assume_c_end_r_end)?;
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する

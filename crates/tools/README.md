@@ -127,7 +127,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
 - [generate_spsa_params](docs/generate_spsa_params.md) - 共通の既定値と c_end/r_end 形式宣言付きで SPSA `.params` を生成
-- [spsa](docs/spsa.md) - 永続 engine プールで batch チューニング。Linuxでは既定でworkerごとのengineをnode-localな論理CPU群へ固定（`--cpu-affinity off`で明示解除）。開始前にparamsの形式宣言とscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
+- [spsa](docs/spsa.md) - 永続 engine プールで batch チューニング。Linuxでは既定でworkerごとのengineをnode-localな論理CPU群へ固定（`--cpu-affinity off`で明示解除）。初期化前にparams全行とmapping、対局開始前にscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [yo_to_rshogi_params](docs/yo_to_rshogi_params.md) - YO値をrshogiへ転記し、宣言付きのc_end/r_end形式で保存する
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から c_end/r_end 形式宣言付きの net 重み delta 用 SPSA `.params` を生成
 - [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する。重複行は拒否する

@@ -91,7 +91,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | [SPSA チューナー](spsa.md)。永続 engine プール、Linux既定のNUMA-local CPU affinity（`--cpu-affinity off`で解除）、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。開始前にparamsの形式宣言とscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用する。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
+| `spsa` | [SPSA チューナー](spsa.md)。永続 engine プール、Linux既定のNUMA-local CPU affinity（`--cpu-affinity off`で解除）、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。初期化前にparams全行とmapping、対局開始前にscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用する。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
 | `generate_spsa_params` | 共通の既定値からc_end/r_end形式宣言付きのSPSA `.params` を生成（[詳細](generate_spsa_params.md)） |
 | `yo_to_rshogi_params` | YO値をrshogiへ転記し、宣言付きc_end/r_end形式で保存（[詳細](yo_to_rshogi_params.md)） |
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、c_end/r_end形式宣言付きのnet重みdelta用SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |

@@ -318,6 +318,8 @@ spsa --run-dir "${RUN_DIR}" --init-from "${CANONICAL}" --force-init ...
 #### 関連フラグ
 
 - **`--force-init`**: `<run-dir>/state.params` を atomic 上書きして再初期化。
+  上書き元の形式宣言・全行・engine mappingを先に検証する。数値の構文・範囲不正、
+  非有限値、名前や翻訳先の重複、空の入力では既存成果物を変更せず終了する。
   run-dir 直下の `meta.json` / `stats.csv` / `values.csv` / `final.params` も
   削除する。`--resume` と排他。順序保証: meta 削除 (失敗で bail) → 関連
   CSV 削除 → state.params atomic copy。

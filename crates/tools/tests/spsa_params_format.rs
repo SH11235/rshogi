@@ -59,6 +59,97 @@ fn legacy_fixture_is_rejected_before_engine_start_or_force_init() {
     assert_eq!(std::fs::read_to_string(run.join("meta.json")).unwrap(), "preserve metadata");
 }
 
+fn assert_force_init_rejection_preserves_outputs(
+    rows: &str,
+    mapping: Option<&str>,
+    expected_error: &str,
+) {
+    for override_meta in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let params = dir.path().join("invalid.params");
+        let canonical = format!("{SPSA_PARAMS_FORMAT_HEADER}\n{rows}");
+        std::fs::write(&params, &canonical).unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        let files = [
+            "state.params",
+            "meta.json",
+            "values.csv",
+            "stats.csv",
+            "final.params",
+        ];
+        let mut protected: Vec<_> = files
+            .iter()
+            .map(|name| (run.join(name), format!("preserve {name}\r\n").into_bytes()))
+            .collect();
+        let external_meta = dir.path().join("external-meta.json");
+        protected.push((external_meta.clone(), b"preserve external metadata\r\n".to_vec()));
+        for (path, contents) in &protected {
+            std::fs::write(path, contents).unwrap();
+        }
+        let spawn_log = dir.path().join("spawns");
+        let mut command = tuner(&run, &params, 1, 1);
+        command.arg("--force-init").env("SPSA_TEST_ENGINE_SPAWN_LOG", &spawn_log);
+        if override_meta {
+            command.arg("--meta-file").arg(&external_meta);
+        }
+        if let Some(mapping) = mapping {
+            let path = dir.path().join("mapping.toml");
+            std::fs::write(&path, mapping).unwrap();
+            command.arg("--engine-param-mapping").arg(path);
+        }
+        let output = command.output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{rows}: {error}");
+        assert!(error.contains(expected_error), "{rows}: {error}");
+        assert!(!spawn_log.exists(), "{rows}");
+        for (path, contents) in &protected {
+            assert_eq!(std::fs::read(path).unwrap(), *contents, "{rows}: {}", path.display());
+        }
+        assert_eq!(std::fs::read_dir(&run).unwrap().count(), files.len(), "{rows}");
+        assert_eq!(std::fs::read_to_string(&params).unwrap(), canonical);
+    }
+}
+
+#[test]
+fn invalid_declared_rows_preserve_existing_run_before_force_init() {
+    for (rows, expected_error) in [
+        ("X,int,NaN,0,10,1,0.002\n", "non-finite v"),
+        ("X,int,5,-inf,10,1,0.002\n", "non-finite min"),
+        ("X,int,5,0,NaN,1,0.002\n", "non-finite max"),
+        ("X,int,5,0,10,inf,0.002\n", "non-finite c_end"),
+        ("X,int,5,0,10,1,NaN\n", "non-finite r_end"),
+        ("X,int,not-a-number,0,10,1,0.002\n", "invalid v"),
+        ("X,int,5,10,0,1,0.002\n", "> max"),
+        ("X,int,11,0,10,1,0.002\n", "out of [min="),
+        ("X,int,5,0,10,1,0.002\nX,int,6,0,10,1,0.002\n", "duplicate parameter"),
+        ("", "no parameters loaded"),
+    ] {
+        assert_force_init_rejection_preserves_outputs(rows, None, expected_error);
+    }
+}
+
+#[test]
+fn invalid_mapping_preserves_existing_run_before_force_init() {
+    assert_force_init_rejection_preserves_outputs(
+        "X,int,5,0,10,1,0.002\n",
+        Some("[[invalid toml"),
+        "failed to parse mapping table",
+    );
+}
+
+#[test]
+fn translated_aliases_preserve_existing_run_before_force_init() {
+    assert_force_init_rejection_preserves_outputs(
+        "A,int,5,0,10,1,0.002\nB,int,5,0,10,1,0.002\n",
+        Some(
+            "[[mapping]]\nrshogi='A'\nyo='SPSA_NET_ft_b_1'\nsign_flip=false\n\
+             [[mapping]]\nrshogi='B'\nyo='SPSA_NET_ft_b_01'\nsign_flip=false\n",
+        ),
+        "translated parameter",
+    );
+}
+
 #[test]
 fn converter_defaults_match_generator_and_are_accepted_by_tuner() {
     let dir = tempfile::tempdir().unwrap();
