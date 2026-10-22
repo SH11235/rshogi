@@ -567,7 +567,7 @@ mod tests {
         write_input(&dir, "valid.pack", &pack_game(&["7g7f"], 0, 0));
         let inaccessible = dir.path().join("inaccessible");
         std::fs::create_dir(&inaccessible).unwrap();
-        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read_dir(&inaccessible).is_ok() {
             std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700))
                 .unwrap();
