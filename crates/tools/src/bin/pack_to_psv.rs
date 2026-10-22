@@ -311,8 +311,20 @@ fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result
     }
     #[cfg(unix)]
     if let Some(permissions) = existing_permissions {
+        use std::os::unix::fs::PermissionsExt;
         // 書込みで setuid/setgid が落ちるため、flush 後に権限を復元する。
+        // fchmod が成功しても非所属 group の setgid は落ち得るので、実値を確認する。
+        let expected_mode = permissions.mode() & 0o7777;
         staged.as_file().set_permissions(permissions)?;
+        let actual_mode = staged.as_file().metadata()?.permissions().mode() & 0o7777;
+        if actual_mode != expected_mode {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "既存出力の mode bits を保持できません: expected={expected_mode:04o}, actual={actual_mode:04o}"
+                ),
+            ));
+        }
     }
     staged.as_file().sync_all()?;
     staged.persist(output).map_err(|error| error.error)?;
@@ -587,7 +599,13 @@ mod tests {
         let output = dir.path().join("output.psv");
         convert_paths(std::slice::from_ref(&input), &output, 0).unwrap();
         assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o777, normal_mode);
-        for mode in [0o640, 0o4750, 0o2750, 0o7750] {
+        for mode in [
+            0o640,
+            0o4750,
+            0o2750,
+            #[cfg(target_os = "linux")]
+            0o7750,
+        ] {
             std::fs::set_permissions(&output, std::fs::Permissions::from_mode(mode)).unwrap();
             assert_eq!(std::fs::metadata(&output).unwrap().permissions().mode() & 0o7777, mode);
             convert_paths(std::slice::from_ref(&input), &output, 0).unwrap();

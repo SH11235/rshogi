@@ -29,6 +29,8 @@ hardlink、symlink の出力パスは、出力を作成する前に拒否しま�
 出力先と同じディレクトリの一時ファイルへ書き、変換と書込みがすべて成功した後で出力を置換します。
 既存出力がある場合は、既存分と新しい出力分の両方を保持できる空き容量が必要です。
 Unixでは既存ファイルのmode bits（setuid・setgid・stickyを含む）を引き継ぎ、新規出力は通常のファイル作成と同じumaskを適用します。
+OSが権限設定の成功を返してもmode bitsを保持できない場合は、置換前に`PermissionDenied`で失敗し、
+既存出力の内容とmodeを保持します。実行者が所属しないgroupのsetgidディレクトリなどが該当します。
 置換はrename相当の操作です。入力以外のhardlinkの別名は旧内容を保持し、owner・ACL・拡張属性は
 引き継ぎません。Unixでは親ディレクトリへの書込み権限で置換するため、出力ファイル自体が
 読み取り専用でも置換できる場合があります。Windowsでは読み取り専用出力を処理開始前に拒否します。
@@ -37,6 +39,15 @@ Unixでは既存ファイルのmode bits（setuid・setgid・stickyを含む）�
 非zeroで終了します。部分的なPSVを成功結果として公開せず、一時ファイルを破棄し、既存出力を保持します。
 エラーがある対局・ファイルを飛ばすモードはありません。
 強制終了やプロセス中断では、出力先の `.pack_to_psv_*.tmp` が残ることがあります。
+
+Linuxでの非所属groupのsetgid回帰は、開発者向けの
+[`scripts/test-pack-output-mode.sh`](../../../scripts/test-pack-output-mode.sh)で手動確認できます。
+Linux rootで実行し、ビルド済みbinaryと、gid 65534に所属しない既存の非rootユーザーを指定します。
+rootで隔離fixtureの所有者・groupを設定し、変換自体は指定ユーザーで実行します。
+
+```bash
+sudo bash scripts/test-pack-output-mode.sh /path/to/pack_to_psv nonroot-user
+```
 
 ## 入力形式
 
