@@ -624,7 +624,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         file: None,
         torn: false,
     });
-    let settings = Settings::new(&args.reading)?;
+    let mut settings = Settings::new(&args.reading)?;
+    settings.engine_version = super::transfer::engine_source_version(&args.reading.engine);
+    super::transfer::warn_unknown_version(&args.reading.engine, &settings.engine_version);
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     let (out_root, protected) =

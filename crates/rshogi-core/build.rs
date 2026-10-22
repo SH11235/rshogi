@@ -7,6 +7,7 @@
 use std::env;
 
 include!("build/checks.rs");
+include!("build/result_features.rs");
 
 fn has_feature(name: &str) -> bool {
     // Cargo は有効化された feature を `CARGO_FEATURE_<UPPER_SNAKE>` 環境変数で
@@ -22,4 +23,16 @@ fn main() {
     if let Err(msg) = validate_feature_combination(&has_feature) {
         panic!("rshogi-core build.rs: {msg}");
     }
+
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=build/result_features.rs");
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(&env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml"),
+    )
+    .expect("rshogi-core の Cargo.toml を読めません");
+    println!(
+        "cargo:rustc-env=RSHOGI_CORE_RESULT_FEATURES={}",
+        result_features(&manifest, &has_feature).join(",")
+    );
 }

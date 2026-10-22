@@ -141,3 +141,4 @@ path = "src/main.rs"
 assert_cmd = "2.0"
 # `#[serial]` は同期テストにのみ付けるため、default の async (futures-executor 等) は不要。
 serial_test = { version = "3", default-features = false, features = ["logging"] }
+tempfile = "3.20"

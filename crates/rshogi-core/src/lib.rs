@@ -16,6 +16,10 @@
 
 pub mod types;
 
+/// このビルドで有効な feature のうち、探索・評価の結果を変えうるもの (名前順のカンマ区切り)。
+/// 判定は `build/result_features.rs`。結果を変えないと確かめた feature 以外はすべて含む。
+pub const RESULT_FEATURES: &str = env!("RSHOGI_CORE_RESULT_FEATURES");
+
 #[cfg(feature = "allocation-stats")]
 pub mod allocation_stats;
 

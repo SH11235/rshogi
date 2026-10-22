@@ -54,6 +54,8 @@ const ENGINE_NAME: &str = "Shogi Engine";
 const ENGINE_VERSION: &str = "0.1.0";
 /// エンジン作者
 const ENGINE_AUTHOR: &str = "sh11235";
+/// ビルド時に埋め込んだエンジンのソースの id (build.rs)。
+const SOURCE_ID: &str = env!("RSHOGI_SOURCE_ID");
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 /// `go mate` の置換表サイズの既定値 (MB)
@@ -2054,7 +2056,36 @@ fn parse_spsa_net_spec(content: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// ソースの id に、結果を変えうる feature を `+` 以降に名前順で付ける。id が分からなければ `unknown`。
+fn source_version(id: &str, core_features: &str, usi_features: &str) -> String {
+    if id == "unknown" {
+        return id.to_owned();
+    }
+    let mut features: Vec<&str> = core_features
+        .split(',')
+        .chain(usi_features.split(','))
+        .filter(|f| !f.is_empty())
+        .collect();
+    features.sort_unstable();
+    features.dedup();
+    if features.is_empty() {
+        id.to_owned()
+    } else {
+        format!("{id}+{}", features.join(","))
+    }
+}
+
 fn main() -> Result<()> {
+    // USI の応答 (`id name` 等) は変えず、起動引数で問われたときだけ版を出して終わる。
+    if std::env::args().skip(1).eq(["--source-version".to_owned()]) {
+        let version = source_version(
+            SOURCE_ID,
+            rshogi_core::RESULT_FEATURES,
+            env!("RSHOGI_USI_RESULT_FEATURES"),
+        );
+        println!("source-version {version}");
+        return Ok(());
+    }
     #[cfg(feature = "allocation-stats")]
     allocation_stats::init()?;
 
@@ -2095,6 +2126,20 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn source_version_appends_sorted_features_from_both_crates() {
+        assert_eq!(source_version("abc", "", ""), "abc");
+        assert_eq!(
+            source_version("abc-dirty", "use-lazy-evaluate", ""),
+            "abc-dirty+use-lazy-evaluate"
+        );
+        assert_eq!(
+            source_version("abc", "use-lazy-evaluate,deep", "custom,deep"),
+            "abc+custom,deep,use-lazy-evaluate"
+        );
+        assert_eq!(source_version("unknown", "deep", "custom"), "unknown");
+    }
 
     #[test]
     #[serial]
