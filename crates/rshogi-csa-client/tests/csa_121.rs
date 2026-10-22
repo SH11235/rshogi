@@ -355,6 +355,34 @@ fn mixed_units_and_reordered_fields_apply_live_echo_and_opponent_move() {
 }
 
 #[test]
+fn malformed_opponent_move_returns_an_error_without_starting_search() {
+    let (port, handle) = server(|reader, writer| {
+        summary(writer, "-", "1sec", "600", "600", "2", &[]);
+        assert_eq!(read(reader), "AGREE g");
+        send(writer, &["START:g", "+7776あ"]);
+    });
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    let mut config = CsaClientConfig::default();
+    config.game.ponder = false;
+    config.record.enabled = false;
+    let mut engine = Engine::default();
+    let mut sink = CandidateSink::default();
+    let result = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::new(AtomicBool::new(false)),
+        &mut sink,
+    );
+    drop(conn);
+    handle.join().unwrap();
+    let error = anyhow::Error::new(result.expect_err("malformed move must fail the session"));
+    assert!(format!("{error:#}").contains("invalid CSA move"), "{error:#}");
+    assert_eq!(sink.starts, 1);
+    assert!(engine.go.is_empty());
+}
+
+#[test]
 fn negotiation_honors_shutdown_without_resigning() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_server = Arc::clone(&shutdown);

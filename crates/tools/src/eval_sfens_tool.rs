@@ -358,7 +358,7 @@ fn run_eval_for_network<
                 compute_layer_stack_progresskpabs_bucket_index(
                     &pos,
                     side_to_move,
-                    weights,
+                    &weights,
                     cli.progress_buckets,
                 )
             }

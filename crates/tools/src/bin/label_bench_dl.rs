@@ -92,35 +92,8 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if cli.r#in == cli.out {
-        anyhow::bail!("--in and --out must differ (got the same path)");
-    }
-    // 字面が違っても同一ファイル（`./x` と `x`、symlink 等）を指す場合、出力 create が
-    // 入力を truncate して壊すため、解決後パスでも弾く（label_bench_positions と同じ方針）。
-    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(&cli.r#in), std::fs::canonicalize(&cli.out))
-        && a == b
-    {
-        anyhow::bail!("--in and --out resolve to the same file");
-    }
-    // canonicalize は hardlink（別 path・同一 inode）を検出できない。出力 create が入力を
-    // truncate する事故を防ぐため、dev/ino でも同一性を弾く。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(im), Ok(om)) = (std::fs::metadata(&cli.r#in), std::fs::metadata(&cli.out))
-            && im.dev() == om.dev()
-            && im.ino() == om.ino()
-        {
-            anyhow::bail!("--in and --out are the same file (same dev/ino)");
-        }
-    }
-    if cli.out.exists()
-        && std::fs::symlink_metadata(&cli.out)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-    {
-        anyhow::bail!("--out points to a symlink, refusing to write: {}", cli.out.display());
-    }
+    let inputs = [cli.r#in.as_path(), cli.dlshogi_onnx_model.as_path()];
+    tools::output_path::ensure_safe_output_paths(&[&cli.out], &inputs)?;
     if cli.onnx_batch_size == 0 {
         anyhow::bail!("--onnx-batch-size must be > 0");
     }
@@ -147,8 +120,7 @@ fn main() -> anyhow::Result<()> {
     let in_file = std::fs::File::open(&cli.r#in)
         .with_context(|| format!("failed to open {}", cli.r#in.display()))?;
     let reader = BufReader::new(in_file);
-    let out_file = std::fs::File::create(&cli.out)
-        .with_context(|| format!("failed to create {}", cli.out.display()))?;
+    let out_file = tools::output_path::create_safe_output_file(&cli.out, &inputs)?;
     let mut writer = BufWriter::new(out_file);
 
     // バッチ単位の streaming 処理。全件 load せず batch_size 行ずつ溜めて推論する。

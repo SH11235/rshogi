@@ -52,14 +52,17 @@ done
 
 # 既定 edition へ単独で追加できる opt-in feature (rshogi-usi と rshogi-core の両方にあるもの)。
 # 新しい opt-in feature を足したらこの一覧にも追加する。
-# nnue-progress-diff は build.rs が対応 edition に限定しているため単独では検査せず、
-# それを含む edition の check に任せる。threat-profile-* のうち edition に含まれるものも同様で、
+# nnue-progress-diff は preset mode では対応 edition に限定されるため、この一覧には含めない。
+# threat-profile-* のうち edition に含まれるものも同様で、
 # どの edition にも含まれない threat-profile-cross-side だけをここで検査する。
 for feature in prepacked-nnue search-stats nnue-stats diagnostics allocation-stats tt-write-stats tt-trace \
   threat-profile-cross-side search-pass-rules use-lazy-evaluate; do
   run -p rshogi-usi --all-targets --features "${feature}"
   run -p rshogi-core --all-targets --features "${feature}"
 done
+
+# mode sentinel を使わない atomic 構成の cfg 境界。
+run -p rshogi-core --all-targets --no-default-features --features nnue-progress-diff
 
 # 固定 edition と opt-in feature の組み合わせ、および tools 経由の有効化。
 # use-lazy-evaluate の layerstack-arch 経路は既定 edition (edition-universal) では有効にならないため、

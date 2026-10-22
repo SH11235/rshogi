@@ -2260,7 +2260,7 @@ fn worker_main(
                     "white"
                 };
                 if let (Some(weights), Some(num_buckets)) =
-                    (progress_weights, cfg.progress_routing_buckets)
+                    (progress_weights.as_deref(), cfg.progress_routing_buckets)
                 {
                     let bucket = compute_layer_stack_progresskpabs_bucket_index(
                         &pos,

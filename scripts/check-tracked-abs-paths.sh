@@ -10,16 +10,22 @@
 # (`/home/shogi-server/www/x/`) や doc の placeholder まで誤検出するため広げない。
 # 新しいマシンのルートを使い始めたら下の pattern に追加する。
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+repo_root=$(git rev-parse --show-toplevel)
+cd -- "$repo_root"
 
 pattern='/home/sh11235/|/mnt/nvme1/'
-hits=$(git grep -nIE "$pattern" -- . ':(exclude)scripts/check-tracked-abs-paths.sh' || true)
-
-if [ -n "$hits" ]; then
+# Git Bash のパス変換で検索用の正規表現が書き換わるのを防ぐ。
+if hits=$(MSYS2_ARG_CONV_EXCL='*' git grep -nIE "$pattern" -- . ':(exclude)scripts/check-tracked-abs-paths.sh'); then
   echo "ERROR: この環境固有の絶対パスが tracked file にあります:" >&2
   echo "$hits" >&2
   echo >&2
   echo "data/model/progress は \$SHOGI_DATA を、外部 repo は /path/to/... を使ってください。" >&2
   exit 1
+else
+  status=$?
+  if [ "$status" -ne 1 ]; then
+    echo "ERROR: tracked file の検査に失敗しました (git grep exit $status)" >&2
+    exit "$status"
+  fi
 fi
 echo "OK: tracked file に環境固有の絶対パスなし"

@@ -2,6 +2,8 @@
 
 SFEN テキスト（1 行 1 局面）を LayerStacks NNUE で静的評価し、TSV を標準出力へ出す。
 
+progress 係数の保持・再読込みの契約は [routing 対応表](nnue-routing.md) を参照してください。
+
 ```sh
 cargo run --release -p tools --bin eval_sfens -- \
   --nnue "$SHOGI_DATA/nnue/<model>.bin" \

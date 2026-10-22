@@ -387,7 +387,7 @@ fn compare(
     if let Some(progress) = snapshot(evaluator).progress {
         assert_eq!(
             progress,
-            nnue::compute_progresskpabs_sum(pos, nnue::get_layer_stack_progress_kpabs_weights())
+            nnue::compute_progresskpabs_sum(pos, &nnue::get_layer_stack_progress_kpabs_weights())
                 .to_bits()
         );
     }
@@ -651,7 +651,7 @@ fn record_progress(
     buckets: &mut std::collections::BTreeSet<usize>,
     sums: &mut std::collections::BTreeSet<u32>,
 ) {
-    let sum = nnue::compute_progresskpabs_sum(pos, nnue::get_layer_stack_progress_kpabs_weights());
+    let sum = nnue::compute_progresskpabs_sum(pos, &nnue::get_layer_stack_progress_kpabs_weights());
     sums.insert(sum.to_bits());
     buckets.insert(nnue::progress_sum_to_bucket(sum, 4));
 }
