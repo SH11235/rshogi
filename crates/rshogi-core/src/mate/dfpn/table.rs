@@ -458,10 +458,9 @@ impl MateTable {
             *e = new_entry;
             return;
         }
-        let victim = bucket.iter_mut().min_by_key(|e| e.searched).expect("bucket は空でない");
-        if victim.searched <= searched {
-            *victim = new_entry;
-        }
+        // 探索量が少なくても必ず書く。書かずに捨てると、同じ局面の完全一致のエントリは消してあるので
+        // 結果がどこにも残らず、同じ局面を証明し直し続けて探索が止まらないことがある
+        *bucket.iter_mut().min_by_key(|e| e.searched).expect("bucket は空でない") = new_entry;
     }
 }
 
@@ -603,6 +602,23 @@ mod tests {
         assert_eq!(table.probe::<false>(key(5, Hand::EMPTY)), Some(value(2, 2)));
         assert_eq!(table.probe::<false>(key(2, Hand::EMPTY)), None);
         assert_eq!(table.probe::<false>(key(3, Hand::EMPTY)), Some(proven(1, Hand::EMPTY)));
+    }
+
+    #[test]
+    fn full_final_bucket_takes_the_new_final_value() {
+        // 確定値の表 (同じ盤面の bucket) が探索量の多い確定値で埋まっていても、新しい確定値を書く
+        let gold = hand(&[PieceType::Gold]);
+        let silver = hand(&[PieceType::Silver]);
+        let mut table = MateTable::with_buckets(1);
+        for (board, searched) in [(1u64, 3_000), (2, 1_000), (3, 2_000)] {
+            table.store::<true>(key(board, gold), proven(3, gold), searched);
+        }
+        table.store::<true>(key(4, silver), value(2, 2), 1);
+        table.store::<true>(key(4, silver), proven(5, Hand::EMPTY), 1);
+        assert_eq!(table.probe::<true>(key(4, gold)), Some(proven(5, Hand::EMPTY)));
+        // 探索量の最も少ない確定値 (局面 2) が置き換わる
+        assert_eq!(table.probe::<true>(key(2, gold)), None);
+        assert_eq!(table.probe::<true>(key(1, gold)), Some(proven(3, gold)));
     }
 
     #[test]

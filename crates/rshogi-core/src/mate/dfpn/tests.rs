@@ -1083,9 +1083,7 @@ fn solve_graph_in_mode<const PIECES: bool>(
     };
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
-    // 1 bucket (4 エントリ) の表では、初期値が一様でないと値を保てずに同じ子を読み直し続ける例がある
-    // (結論は食い違わない)
-    if PIECES && buckets >= 2 {
+    if PIECES {
         searcher.estimate_initial_values();
     }
     solve_with(&mut searcher, graph)
@@ -1208,6 +1206,30 @@ fn agrees_with_fixed_point_on_random_graphs() {
         }
     }
     assert!(mates > 100);
+}
+
+/// 確定値の表が新しい確定値を書かずに捨てると、同じ局面を証明し直し続けて止まらないグラフ
+/// (1 bucket の表、初期値を見積もる探索)
+#[test]
+fn final_value_rejected_by_the_final_table_is_kept() {
+    let edges: Vec<Vec<u32>> = vec![
+        vec![9],
+        vec![9, 7],
+        vec![11],
+        vec![8, 12, 7],
+        vec![11, 7, 9],
+        vec![13],
+        vec![11, 9, 12],
+        vec![],
+        vec![6],
+        vec![5, 1, 2],
+        vec![4, 5],
+        vec![4, 3],
+        vec![5],
+        vec![4, 2, 6],
+    ];
+    let mut graph = Graph::new(edges, 0);
+    assert!(solve_graph_in_mode::<true>(&mut graph, 1, 2_000_000).is_some());
 }
 
 /// 長さ `len` の一本道 (OR → AND → ...)。`mate_at_end` なら末端は詰みの AND 終端、
