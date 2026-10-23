@@ -337,90 +337,158 @@ enum OnnxMarkerDecision {
     LegacyResume,
 }
 
-/// 2 つのパスが同じファイル実体を指すかを判定する。
-/// パス文字列一致、canonicalize 一致、Unix の `dev + ino` 一致のいずれかで true を返す。
-/// I/O エラーや非 Unix プラットフォームで dev/ino が取れないケースでは false
-/// に倒れる（= 「同一と判定できなかった」。呼び出し側の文脈で追加の安全策が
-/// 必要な場面ではパス一致検証と併用する）。
-#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-fn is_same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
-    if a == b {
-        return true;
-    }
-    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize())
-        && ca == cb
-    {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if a.exists()
-            && b.exists()
-            && let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b))
-            && ma.dev() == mb.dev()
-            && ma.ino() == mb.ino()
-        {
-            return true;
-        }
-    }
-    false
+use tools::output_path::{ensure_safe_output_file, ensure_safe_output_paths, ensure_safe_output_path, ensure_distinct_output_paths};
+
+struct OutputProtection {
+    inputs: Vec<PathBuf>,
+    outputs: Vec<PathBuf>,
 }
 
-/// 既存出力パスが symlink でないこと、未作成・既存どちらでも入力パスと衝突
-/// しないことを検証する。既存ファイルが入力の hardlink である場合も検出する
-/// （Unix のみ、`MetadataExt::dev/ino` で同一 inode を判定）。
-fn ensure_safe_output_path(
-    predicted: &std::path::Path,
-    canonical_input: &std::path::Path,
-) -> Result<()> {
-    // 既存ファイルなら symlink を拒否（truncate/append が symlink を辿ると
-    // 入力破壊につながる）
-    if let Ok(meta) = fs::symlink_metadata(predicted)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!(
-            "Output path is a symlink (refusing to truncate a symlink): {}. \
-             Remove the symlink or choose a different directory.",
-            predicted.display()
-        );
+impl OutputProtection {
+    fn new(inputs: Vec<PathBuf>, outputs: Vec<PathBuf>) -> Result<Self> {
+        let protection = Self { inputs, outputs };
+        protection.check_all()?;
+        Ok(protection)
     }
-    // 出力ファイル未作成でも parent を canonicalize して予定 canonical パスを構築
-    // し、入力パスと一致したらエラー
-    let predicted_canonical = canonicalize_predicted_path(predicted)?;
-    if predicted_canonical == canonical_input {
-        anyhow::bail!(
-            "Output path resolves to input file: {} -> {}",
-            predicted.display(),
-            canonical_input.display()
-        );
+
+    fn check_all(&self) -> Result<()> {
+        let inputs: Vec<_> = self.inputs.iter().map(PathBuf::as_path).collect();
+        let outputs: Vec<_> = self.outputs.iter().map(PathBuf::as_path).collect();
+        ensure_safe_output_paths(&outputs, &inputs)?;
+        for output in &self.outputs { self.check_existing(output)?; }
+        Ok(())
     }
-    // 既存出力ファイルが入力と同じ inode を指す（hardlink）ケースを検出。
-    // `canonicalize` はパス解決のみで hardlink を検出できないため、Unix では
-    // `MetadataExt::{dev, ino}` で同一 inode 判定する。
-    #[cfg(unix)]
-    if predicted.exists() {
-        use std::os::unix::fs::MetadataExt;
-        let pred_meta = fs::metadata(predicted)
-            .with_context(|| format!("Failed to stat predicted output {}", predicted.display()))?;
-        let in_meta = fs::metadata(canonical_input)
-            .with_context(|| format!("Failed to stat input {}", canonical_input.display()))?;
-        if pred_meta.dev() == in_meta.dev() && pred_meta.ino() == in_meta.ino() {
-            anyhow::bail!(
-                "Output path is a hardlink to the input file ({} ↔ {}). \
-                 Refusing to truncate; choose a different directory.",
-                predicted.display(),
-                canonical_input.display()
-            );
+
+    fn check_path(&self, path: &std::path::Path) -> Result<()> {
+        let inputs: Vec<_> = self.inputs.iter().map(PathBuf::as_path).collect();
+        ensure_safe_output_paths(&[path], &inputs)?;
+        for other in &self.outputs {
+            if other.as_path() != path { ensure_distinct_output_paths(path, other)?; }
+        }
+        Ok(())
+    }
+
+    fn forget_deleted_input(&mut self, path: &std::path::Path) {
+        self.inputs.retain(|input| input != path);
+    }
+
+    fn check_file(&self, path: &std::path::Path, file: &File) -> Result<()> {
+        let inputs: Vec<_> = self.inputs.iter().map(PathBuf::as_path).collect();
+        let others: Vec<_> = self.outputs.iter().filter(|other| other.as_path() != path)
+            .map(PathBuf::as_path).collect();
+        ensure_safe_output_file(file, path, &inputs, &others)
+    }
+
+    fn check_existing(&self, path: &std::path::Path) -> Result<()> {
+        match File::open(path) {
+            Ok(file) => self.check_file(path, &file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("Failed to inspect {}", path.display())),
         }
     }
-    Ok(())
+
+    fn open(&self, path: &std::path::Path, append: bool) -> Result<File> {
+        self.check_path(path)?;
+        let file = File::options().write(true).create(true).truncate(false).append(append).open(path)?;
+        self.check_file(path, &file)?;
+        Ok(file)
+    }
+
+    fn truncate(&self, path: &std::path::Path, size: u64) -> Result<()> {
+        self.check_path(path)?;
+        let file = File::options().write(true).open(path)?;
+        self.check_file(path, &file)?;
+        file.set_len(size)?;
+        Ok(())
+    }
+
+    fn remove(&self, path: &std::path::Path) -> Result<()> {
+        self.check_path(path)?;
+        self.check_existing(path)?;
+        fs::remove_file(path)?;
+        Ok(())
+    }
 }
 
-/// ONNX モードの marker チェック + 必要な truncate を行い、判定結果を返す
+fn paths_match(a: &std::path::Path, b: &std::path::Path) -> Result<bool> {
+    if a == b { return Ok(true); }
+    match same_file::is_same_file(a, b) {
+        Ok(same) => Ok(same),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtection> {
+    let mut inputs = input_files.to_vec();
+    for resource in [&cli.nnue, &cli.ls_progress_coeff, &cli.engine, &cli.onnx_model, &cli.dlshogi_onnx_model].into_iter().flatten() {
+        inputs.push(resource.clone());
+    }
+    if let Some(engine) = &cli.engine {
+        let mut explicit_spsa = false;
+        for option in &cli.usi_options {
+            if let Some((name, value)) = option.split_once('=') {
+                let name = name.trim().to_ascii_lowercase();
+                explicit_spsa |= name == "spsaparamsfile";
+                if name == "dnn_model" || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix)) {
+                    let path = PathBuf::from(value.trim());
+                    let path = if path.is_absolute() { path } else {
+                        engine.parent().unwrap_or(std::path::Path::new(".")).join(path)
+                    };
+                    if path.is_dir() {
+                        for entry in walkdir::WalkDir::new(&path).follow_links(true) {
+                            let entry = entry?;
+                            if entry.file_type().is_file() { inputs.push(entry.into_path()); }
+                        }
+                    } else { inputs.push(path); }
+                }
+            }
+        }
+        if !explicit_spsa {
+            let automatic = engine.canonicalize()?.parent().context("Engine has no parent")?.join("spsa.params");
+            if automatic.try_exists()? { inputs.push(automatic); }
+        }
+    }
+    let mut outputs = Vec::new();
+    let mut old_artifacts = Vec::new();
+    for input in input_files {
+        let name = input.file_name().context("Input has no file name")?;
+        let mut output_name = name.to_os_string();
+        if cli.out_scores { output_name.push(".scores.i16"); }
+        let output = cli.output_dir.join(output_name);
+        let expand = cli.expand_output_dir.as_ref().map(|dir| dir.join(name));
+        let replacement = cli.qsearch_leaf_replacement_output.as_ref().map(|dir| dir.join(name));
+        outputs.push(output.clone());
+        outputs.extend(expand.iter().chain(replacement.iter()).cloned());
+        if cli.out_scores || cli.onnx_model.is_some() || cli.dlshogi_onnx_model.is_some() {
+            let done = marker_path_for(&output);
+            for marker in [done.clone(), in_progress_marker_path_for(&output)] {
+                let mut tmp = marker.as_os_str().to_os_string();
+                tmp.push(".tmp");
+                outputs.extend([marker, PathBuf::from(tmp)]);
+            }
+            if done.try_exists()? {
+                let marker = parse_marker(&done)?;
+                for (old, current) in [
+                    (marker.fingerprint.expand_output_path, expand),
+                    (marker.fingerprint.replacement_output_path, replacement),
+                ] {
+                    if let Some(old) = old {
+                        let retained = current.as_ref().map(|current| paths_match(&old, current)).transpose()?.unwrap_or(false);
+                        if !retained { old_artifacts.push(old); }
+                    }
+                }
+            }
+        }
+    }
+    outputs.extend(old_artifacts);
+    OutputProtection::new(inputs, outputs)
+}
+
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 #[allow(clippy::too_many_arguments)]
 fn onnx_marker_decide(
+    protection: &OutputProtection,
     cli: &Cli,
     model_kind: &str,
     onnx_path: &std::path::Path,
@@ -519,7 +587,7 @@ fn onnx_marker_decide(
 
         if marker.fingerprint == current && bodies_match {
             if cli.out_scores {
-                remove_in_progress_marker(rescore_output_path)?;
+                remove_in_progress_marker(protection, rescore_output_path)?;
             }
             return Ok(OnnxMarkerDecision::Skip);
         }
@@ -541,7 +609,7 @@ fn onnx_marker_decide(
         if let Some(old) = &marker.fingerprint.expand_output_path {
             // 段階的パイプライン（前回 expand 出力を次回入力に使う）対策。
             // 旧 artifact が現在 run の入力と同一ファイルなら絶対に削除しない。
-            if is_same_file(old, &canonical_input) {
+            if paths_match(old, &canonical_input)? {
                 anyhow::bail!(
                     "Stale expand artifact {} resolves to the current input file {}. \
                      Refusing to delete to prevent input data loss. \
@@ -551,9 +619,9 @@ fn onnx_marker_decide(
                 );
             }
             // 現在 run の expand 出力と同一なら truncate ステップで処理されるのでスキップ
-            let same_as_current = expand_output_path.is_some_and(|p| is_same_file(p, old));
+            let same_as_current = expand_output_path.map(|p| paths_match(p, old)).transpose()?.unwrap_or(false);
             if !same_as_current && old.exists() {
-                fs::remove_file(old).with_context(|| {
+                protection.remove(old).with_context(|| {
                     format!("Failed to remove stale expand artifact {}", old.display())
                 })?;
             }
@@ -561,7 +629,7 @@ fn onnx_marker_decide(
 
         // 2. 旧 replacement artifact 削除
         if let Some(old) = &marker.fingerprint.replacement_output_path {
-            if is_same_file(old, &canonical_input) {
+            if paths_match(old, &canonical_input)? {
                 anyhow::bail!(
                     "Stale leaf-replacement artifact {} resolves to the current input file {}. \
                      Refusing to delete to prevent input data loss. \
@@ -570,9 +638,9 @@ fn onnx_marker_decide(
                     canonical_input.display()
                 );
             }
-            let same_as_current = replacement_output.is_some_and(|p| is_same_file(p, old));
+            let same_as_current = replacement_output.map(|p| paths_match(p, old)).transpose()?.unwrap_or(false);
             if !same_as_current && old.exists() {
-                fs::remove_file(old).with_context(|| {
+                protection.remove(old).with_context(|| {
                     format!("Failed to remove stale leaf-replacement artifact {}", old.display())
                 })?;
             }
@@ -580,32 +648,32 @@ fn onnx_marker_decide(
 
         // 3. 現 rescore 出力 truncate
         if rescore_output_path.exists() {
-            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
+            protection.truncate(rescore_output_path, 0)?;
         }
         // 4. 現 expand 出力 truncate
         if let Some(p) = expand_output_path
             && p.exists()
         {
-            File::options().write(true).open(p)?.set_len(0)?;
+            protection.truncate(p, 0)?;
         }
         // 5. 現 replacement 出力 truncate
         if let Some(p) = replacement_output
             && p.exists()
         {
-            File::options().write(true).open(p)?.set_len(0)?;
+            protection.truncate(p, 0)?;
         }
         // 6. marker 削除（最後）
-        fs::remove_file(&marker_path)
+        protection.remove(&marker_path)
             .with_context(|| format!("Failed to remove stale marker {}", marker_path.display()))?;
         if cli.out_scores {
-            prepare_in_progress_marker(rescore_output_path, &current, true)?;
+            prepare_in_progress_marker(protection, rescore_output_path, &current, true)?;
         }
         return Ok(OnnxMarkerDecision::TruncateAndProcess);
     }
 
     // marker 不存在
     if cli.out_scores {
-        let decision = prepare_in_progress_marker(rescore_output_path, &current, false)?
+        let decision = prepare_in_progress_marker(protection, rescore_output_path, &current, false)?
             .context("out_scores=true did not create an in-progress marker")?;
         return match decision {
             SidecarStartDecision::Resume => Ok(OnnxMarkerDecision::ResumeSidecar),
@@ -617,17 +685,17 @@ fn onnx_marker_decide(
     if expand_output_path.is_some() || replacement_output.is_some() || cli.qsearch_leaf_label {
         // expand / replacement / leaf-label 有効時は marker 必須。truncate して最初から
         if rescore_output_path.exists() {
-            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
+            protection.truncate(rescore_output_path, 0)?;
         }
         if let Some(p) = expand_output_path
             && p.exists()
         {
-            File::options().write(true).open(p)?.set_len(0)?;
+            protection.truncate(p, 0)?;
         }
         if let Some(p) = replacement_output
             && p.exists()
         {
-            File::options().write(true).open(p)?.set_len(0)?;
+            protection.truncate(p, 0)?;
         }
         Ok(OnnxMarkerDecision::TruncateAndProcess)
     } else {
@@ -885,6 +953,8 @@ fn main() -> Result<()> {
         );
     }
 
+    let mut protection = output_protection(&cli, &input_files)?;
+
     // NNUEモデルのロード（NNUE内部評価モード、または ONNX ラベラー併用の
     // --qsearch-leaf-label で葉探索に NNUE を使う場合）
     let mut nnue_scores_identity: Option<NnueScoresIdentity> = None;
@@ -1131,7 +1201,7 @@ fn main() -> Result<()> {
             } else {
                 ("dlshogi", cli.dlshogi_onnx_model.as_ref().unwrap().as_path())
             };
-            let decision = onnx_marker_decide(
+            let decision = onnx_marker_decide(&protection,
                 &cli,
                 model_kind,
                 onnx_path,
@@ -1180,7 +1250,7 @@ fn main() -> Result<()> {
             let identity = nnue_scores_identity
                 .as_ref()
                 .context("NNUE score sidecar identity must be captured at model load time")?;
-            if nnue_scores_marker_decide(&cli, identity, input_path, &output_path, process_count)? {
+            if nnue_scores_marker_decide(&protection, &cli, identity, input_path, &output_path, process_count)? {
                 eprintln!(
                     "=== [{}/{}] Skipping (marker matches): {} ===",
                     file_idx + 1,
@@ -1254,7 +1324,7 @@ fn main() -> Result<()> {
         let fprog = rprog.start_file(&file_name.to_string_lossy(), file_idx + 1, process_count);
         #[cfg(feature = "aobazero-onnx")]
         if use_onnx {
-            process_file_with_onnx(
+            process_file_with_onnx(&protection,
                 &cli,
                 input_path,
                 &output_path,
@@ -1265,12 +1335,11 @@ fn main() -> Result<()> {
         }
         #[cfg(feature = "dlshogi-onnx")]
         if use_dlshogi_onnx {
-            process_file_with_dlshogi_onnx(
+            process_file_with_dlshogi_onnx(&protection,
                 &cli,
                 input_path,
                 &output_path,
-                expand_output_path.as_deref(),
-                replacement_output_path.as_deref(),
+                (expand_output_path.as_deref(), replacement_output_path.as_deref()),
                 process_count,
                 &fprog,
             )?;
@@ -1280,7 +1349,7 @@ fn main() -> Result<()> {
             // 全エンジン死亡でプールが空になった場合に静的 NNUE モードへ
             // fallback させない（engine モードでは NNUE をロードしていない）
             if cli.engine.is_some() {
-                process_file_with_engine(
+                process_file_with_engine(&protection,
                     &cli,
                     &mut engines,
                     input_path,
@@ -1289,12 +1358,12 @@ fn main() -> Result<()> {
                     &fprog,
                 )?;
             } else if cli.search_depth.is_some() {
-                process_file_with_search(&cli, input_path, &output_path, process_count, &fprog)?;
+                process_file_with_search(&protection, &cli, input_path, &output_path, process_count, &fprog)?;
             } else if nnue_static_scores {
                 let identity = nnue_scores_identity
                     .as_ref()
                     .context("NNUE score sidecar identity must be captured at model load time")?;
-                process_file_nnue_scores(
+                process_file_nnue_scores(&protection,
                     &cli,
                     identity,
                     input_path,
@@ -1303,7 +1372,7 @@ fn main() -> Result<()> {
                     &fprog,
                 )?;
             } else {
-                process_file(&cli, input_path, &output_path, process_count, &fprog)?;
+                process_file(&protection, &cli, input_path, &output_path, process_count, &fprog)?;
             }
         }
 
@@ -1317,6 +1386,7 @@ fn main() -> Result<()> {
                     fs::remove_file(input_path).with_context(|| {
                         format!("Failed to delete input file: {}", input_path.display())
                     })?;
+                    protection.forget_deleted_input(input_path);
                     eprintln!("Deleted input: {}", input_path.display());
                 } else {
                     eprintln!(
@@ -1529,6 +1599,7 @@ fn build_nnue_scores_fingerprint(
 /// sidecar」が残って誤 skip し得る。途中再開の判定は
 /// [`process_file_nnue_scores`] 内の in-progress marker が担う。
 fn nnue_scores_marker_decide(
+    protection: &OutputProtection,
     cli: &Cli,
     identity: &NnueScoresIdentity,
     input_path: &std::path::Path,
@@ -1543,13 +1614,13 @@ fn nnue_scores_marker_decide(
         let body_matches = output_path.exists()
             && fs::metadata(output_path)?.len() == marker.output_sizes.rescore_output_size;
         if marker.fingerprint == current && body_matches {
-            remove_in_progress_marker(output_path)?;
+            remove_in_progress_marker(protection, output_path)?;
             return Ok(true);
         }
         if output_path.exists() {
-            File::options().write(true).open(output_path)?.set_len(0)?;
+            protection.truncate(output_path, 0)?;
         }
-        fs::remove_file(&marker_path)
+        protection.remove(&marker_path)
             .with_context(|| format!("Failed to remove stale marker {}", marker_path.display()))?;
     }
     Ok(false)
@@ -1563,6 +1634,7 @@ fn nnue_scores_marker_decide(
 /// `.done` へ昇格する。Ctrl-C はチャンク境界で停止し、marker を残して次回の
 /// 再開に備える。
 fn process_file_nnue_scores(
+    protection: &OutputProtection,
     cli: &Cli,
     identity: &NnueScoresIdentity,
     input_path: &PathBuf,
@@ -1575,7 +1647,7 @@ fn process_file_nnue_scores(
     let score_clip = cli.score_clip;
     let source_fv_scale = cli.source_fv_scale;
     let target_fv_scale = cli.target_fv_scale;
-    run_nnue_scores_pipeline(
+    run_nnue_scores_pipeline(protection,
         cli,
         identity,
         input_path,
@@ -1612,6 +1684,7 @@ fn process_file_nnue_scores(
 /// この関数が単一の実装である。
 #[allow(clippy::too_many_arguments)]
 fn run_nnue_scores_pipeline(
+    protection: &OutputProtection,
     cli: &Cli,
     identity: &NnueScoresIdentity,
     input_path: &PathBuf,
@@ -1628,9 +1701,9 @@ fn run_nnue_scores_pipeline(
     identity.verify_unchanged()?;
     let start_fingerprint =
         build_nnue_scores_fingerprint(cli, identity, input_path, process_count)?;
-    prepare_in_progress_marker(output_path, &start_fingerprint, false)?
+    prepare_in_progress_marker(protection, output_path, &start_fingerprint, false)?
         .context("out_scores=true did not create an in-progress marker")?;
-    let resume_count = prepare_resume_count(output_path, SCORE_RECORD_SIZE, true)?;
+    let resume_count = prepare_resume_count(protection, output_path, SCORE_RECORD_SIZE, true)?;
     if resume_count > process_count {
         anyhow::bail!(
             "Existing sidecar has {resume_count} records but the input has only {process_count}. \
@@ -1643,10 +1716,7 @@ fn run_nnue_scores_pipeline(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, in_file);
     seek_to_record(&mut reader, resume_count)?;
-    let out_file = File::options()
-        .create(true)
-        .append(true)
-        .open(output_path)
+    let out_file = protection.open(output_path, true)
         .with_context(|| format!("Failed to open {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
@@ -1731,14 +1801,14 @@ fn run_nnue_scores_pipeline(
     identity.verify_unchanged()?;
     let final_fingerprint =
         build_nnue_scores_fingerprint(cli, identity, input_path, process_count)?;
-    reject_changed_sidecar_fingerprint(
+    reject_changed_sidecar_fingerprint(protection,
         output_path,
         &start_fingerprint,
         &final_fingerprint,
         "during the run",
     )?;
     let rescore_output_size = fs::metadata(output_path)?.len();
-    promote_score_sidecar_marker(
+    promote_score_sidecar_marker(protection,
         output_path,
         &DoneMarker {
             fingerprint: final_fingerprint,
@@ -1755,6 +1825,7 @@ fn run_nnue_scores_pipeline(
 }
 
 fn process_file(
+    protection: &OutputProtection,
     cli: &Cli,
     input_path: &PathBuf,
     output_path: &PathBuf,
@@ -1769,7 +1840,7 @@ fn process_file(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, in_file);
 
-    let out_file = File::create(output_path)
+    let out_file = protection.open(output_path, false).and_then(|file| { file.set_len(0)?; Ok(file) })
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
@@ -2019,6 +2090,7 @@ fn process_record(
 /// 連続分割 → 入力順書き出し）でピークメモリを入力件数に非依存にする。探索は重い
 /// ため rayon ではなく、各ワーカーが独自の Search を持って自スライスを逐次処理する。
 fn process_file_with_search(
+    protection: &OutputProtection,
     cli: &Cli,
     input_path: &PathBuf,
     output_path: &PathBuf,
@@ -2033,7 +2105,7 @@ fn process_file_with_search(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, in_file);
 
-    let out_file = File::create(output_path)
+    let out_file = protection.open(output_path, false).and_then(|file| { file.set_len(0)?; Ok(file) })
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
@@ -2446,6 +2518,7 @@ impl UsiEngine {
 /// （読み込み → 生存エンジンへ連続分割 → 入力順書き出し）でピークメモリを入力件数に
 /// 非依存にする。
 fn process_file_with_engine(
+    protection: &OutputProtection,
     cli: &Cli,
     engines: &mut Vec<UsiEngine>,
     input_path: &PathBuf,
@@ -2464,7 +2537,7 @@ fn process_file_with_engine(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, in_file);
 
-    let out_file = File::create(output_path)
+    let out_file = protection.open(output_path, false).and_then(|file| { file.set_len(0)?; Ok(file) })
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
@@ -2736,6 +2809,7 @@ fn write_rescore_batch<W: Write>(
 /// 既存出力のレコード数を返す。通常 PSV の末尾 partial record は従来どおり
 /// 切り捨てて自己修復するが、事後検出不能な score sidecar は fail-closed にする。
 fn prepare_resume_count(
+    protection: &OutputProtection,
     output_path: &std::path::Path,
     output_record_size: u64,
     out_scores: bool,
@@ -2758,7 +2832,7 @@ fn prepare_resume_count(
     }
 
     let aligned_size = out_size - remainder;
-    File::options().write(true).open(output_path)?.set_len(aligned_size)?;
+    protection.truncate(output_path, aligned_size)?;
     eprintln!(
         "Truncated partial output record: {} ({out_size} -> {aligned_size} bytes)",
         output_path.display()
@@ -3247,13 +3321,13 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
 /// マーカーを atomic に書き出す（tmp に書く → sync_all → rename）。
 /// 他の出力パスと同様、tmp / final が symlink の場合は拒否する
 /// （symlink を follow して任意ファイルを上書きするのを防ぐ）。
-fn write_marker_atomic(rescore_output: &std::path::Path, marker: &DoneMarker) -> Result<()> {
+fn write_marker_atomic(protection: &OutputProtection, rescore_output: &std::path::Path, marker: &DoneMarker) -> Result<()> {
     let final_path = marker_path_for(rescore_output);
-    write_marker_atomic_at(&final_path, marker)
+    write_marker_atomic_at(protection, &final_path, marker)
 }
 
 /// 指定したパスへマーカーを atomic に書き出す。
-fn write_marker_atomic_at(final_path: &std::path::Path, marker: &DoneMarker) -> Result<()> {
+fn write_marker_atomic_at(protection: &OutputProtection, final_path: &std::path::Path, marker: &DoneMarker) -> Result<()> {
     let mut tmp_os = final_path.as_os_str().to_owned();
     tmp_os.push(".tmp");
     let tmp_path = PathBuf::from(tmp_os);
@@ -3272,7 +3346,7 @@ fn write_marker_atomic_at(final_path: &std::path::Path, marker: &DoneMarker) -> 
         }
     }
     if tmp_path.exists() {
-        fs::remove_file(&tmp_path)
+        protection.remove(&tmp_path)
             .with_context(|| format!("Failed to remove stale marker tmp {}", tmp_path.display()))?;
     }
 
@@ -3285,9 +3359,13 @@ fn write_marker_atomic_at(final_path: &std::path::Path, marker: &DoneMarker) -> 
             .create_new(true)
             .open(&tmp_path)
             .with_context(|| format!("Failed to create marker tmp {}", tmp_path.display()))?;
+        protection.check_file(&tmp_path, &f)?;
         f.write_all(body.as_bytes())?;
         f.sync_all()?;
     }
+    protection.check_path(&tmp_path)?;
+    protection.check_path(final_path)?;
+    protection.check_existing(final_path)?;
     fs::rename(&tmp_path, final_path).with_context(|| {
         format!("Failed to rename marker {} → {}", tmp_path.display(), final_path.display())
     })?;
@@ -3302,7 +3380,7 @@ enum SidecarStartDecision {
 }
 
 /// in-progress marker が通常ファイルなら削除する。symlink は追跡せず拒否する。
-fn remove_in_progress_marker(rescore_output: &std::path::Path) -> Result<()> {
+fn remove_in_progress_marker(protection: &OutputProtection, rescore_output: &std::path::Path) -> Result<()> {
     let path = in_progress_marker_path_for(rescore_output);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -3318,7 +3396,7 @@ fn remove_in_progress_marker(rescore_output: &std::path::Path) -> Result<()> {
             path.display()
         );
     }
-    fs::remove_file(&path)
+    protection.remove(&path)
         .with_context(|| format!("Failed to remove in-progress marker {}", path.display()))
 }
 
@@ -3327,6 +3405,7 @@ fn remove_in_progress_marker(rescore_output: &std::path::Path) -> Result<()> {
 /// 完了 marker と同じ key=value 形式を再利用し、output size は未完了を表す 0 とする。
 /// fingerprint だけを resume の根拠にし、変化する sidecar 自身の mtime は記録しない。
 fn write_in_progress_marker(
+    protection: &OutputProtection,
     rescore_output: &std::path::Path,
     fingerprint: &RunFingerprint,
 ) -> Result<()> {
@@ -3338,7 +3417,7 @@ fn write_in_progress_marker(
             replacement_output_size: None,
         },
     };
-    write_marker_atomic_at(&in_progress_marker_path_for(rescore_output), &marker)
+    write_marker_atomic_at(protection, &in_progress_marker_path_for(rescore_output), &marker)
 }
 
 /// score sidecar の安全な resume 条件を確認し、run 開始状態を用意する。
@@ -3347,6 +3426,7 @@ fn write_in_progress_marker(
 /// 出力と in-progress marker の両方が存在し fingerprint が一致するときだけ追記を許可する。
 /// それ以外は出力を truncate して現在 fingerprint の marker を書き直す。
 fn prepare_in_progress_marker(
+    protection: &OutputProtection,
     rescore_output: &std::path::Path,
     current: &RunFingerprint,
     force_truncate: bool,
@@ -3390,21 +3470,22 @@ fn prepare_in_progress_marker(
     }
 
     if rescore_output.exists() {
-        File::options().write(true).open(rescore_output)?.set_len(0)?;
+        protection.truncate(rescore_output, 0)?;
     }
-    remove_in_progress_marker(rescore_output)?;
-    write_in_progress_marker(rescore_output, current)?;
+    remove_in_progress_marker(protection, rescore_output)?;
+    write_in_progress_marker(protection, rescore_output, current)?;
     Ok(Some(SidecarStartDecision::Truncate))
 }
 
 /// sidecar の正常完了を `.done` へ昇格し、その後 in-progress marker を削除する。
 /// この順序なら両操作の間で停止しても、次回は `.done` を正として回収できる。
 fn promote_score_sidecar_marker(
+    protection: &OutputProtection,
     rescore_output: &std::path::Path,
     marker: &DoneMarker,
 ) -> Result<()> {
-    write_marker_atomic(rescore_output, marker)?;
-    remove_in_progress_marker(rescore_output)
+    write_marker_atomic(protection, rescore_output, marker)?;
+    remove_in_progress_marker(protection, rescore_output)
 }
 
 /// sidecar run の開始時 fingerprint が現在も有効か確認する。
@@ -3423,6 +3504,7 @@ fn ensure_sidecar_fingerprint_unchanged(
 
 /// run 中の fingerprint 変更を検出した sidecar を、次回 resume 不能な状態へ戻す。
 fn reject_changed_sidecar_fingerprint(
+    protection: &OutputProtection,
     rescore_output: &std::path::Path,
     start: &RunFingerprint,
     current: &RunFingerprint,
@@ -3436,9 +3518,9 @@ fn reject_changed_sidecar_fingerprint(
     // marker だけを残すと入力/model の mtime を元に戻した際に満杯の sidecar が再利用
     // され得る。出力を空にしてから marker を削除し、次回を必ず先頭から始める。
     if rescore_output.exists() {
-        File::options().write(true).open(rescore_output)?.set_len(0)?;
+        protection.truncate(rescore_output, 0)?;
     }
-    remove_in_progress_marker(rescore_output)?;
+    remove_in_progress_marker(protection, rescore_output)?;
     Err(error)
 }
 
@@ -3703,6 +3785,7 @@ impl Drop for PinnedPool {
 /// `build_features` クロージャで特徴量構築の差異を吸収する。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn process_file_with_onnx_pipeline<F>(
+    protection: &OutputProtection,
     config: &OnnxPipelineConfig<'_>,
     build_features: F,
     progress: &FileProgress,
@@ -3975,7 +4058,7 @@ where
     } else {
         PackedSfenValue::SIZE as u64
     };
-    let resume_count = prepare_resume_count(output_path, output_record_size, out_scores)?;
+    let resume_count = prepare_resume_count(protection, output_path, output_record_size, out_scores)?;
     anyhow::ensure!(
         resume_count <= process_count,
         "{} has {resume_count} records, exceeding expected {process_count}: {}",
@@ -3987,10 +4070,7 @@ where
         output_path.display()
     );
 
-    let out_file = File::options()
-        .create(true)
-        .append(true)
-        .open(output_path)
+    let out_file = protection.open(output_path, true)
         .with_context(|| format!("Failed to open {}", output_path.display()))?;
     let writer = BufWriter::new(out_file);
 
@@ -3998,7 +4078,7 @@ where
     // append open で常に先頭から書く。
     let expand_writer: Option<BufWriter<File>> = if let Some(e) = expand {
         let f =
-            File::options().create(true).append(true).open(e.output_path).with_context(|| {
+            protection.open(e.output_path, true).with_context(|| {
                 format!("Failed to open expand output {}", e.output_path.display())
             })?;
         Some(BufWriter::new(f))
@@ -4011,7 +4091,7 @@ where
     // 同一ループで 1:1 lockstep に書くため、レコード数は両者で一致する。
     let replacement_writer: Option<BufWriter<File>> = if let Some(rp) = replacement_output {
         let f =
-            File::options().create(true).append(true).open(rp).with_context(|| {
+            protection.open(rp, true).with_context(|| {
                 format!("Failed to open leaf-replacement output {}", rp.display())
             })?;
         Some(BufWriter::new(f))
@@ -4960,9 +5040,9 @@ where
         }
         let fingerprint = if let Some(start) = sidecar_start_fingerprint {
             let current = build_run_fingerprint(config)?;
-            reject_changed_sidecar_fingerprint(output_path, &start, &current, "during processing")?;
+            reject_changed_sidecar_fingerprint(protection, output_path, &start, &current, "during processing")?;
             let active_marker = parse_marker(&in_progress_marker_path_for(output_path))?;
-            reject_changed_sidecar_fingerprint(
+            reject_changed_sidecar_fingerprint(protection,
                 output_path,
                 &start,
                 &active_marker.fingerprint,
@@ -4990,9 +5070,9 @@ where
             },
         };
         if out_scores {
-            promote_score_sidecar_marker(output_path, &marker)?;
+            promote_score_sidecar_marker(protection, output_path, &marker)?;
         } else {
-            write_marker_atomic(output_path, &marker)?;
+            write_marker_atomic(protection, output_path, &marker)?;
         }
         eprintln!("Marker written: {}", marker_path_for(output_path).display());
     }
@@ -5006,6 +5086,7 @@ where
 
 #[cfg(feature = "aobazero-onnx")]
 fn process_file_with_onnx(
+    protection: &OutputProtection,
     cli: &Cli,
     input_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -5056,7 +5137,7 @@ fn process_file_with_onnx(
         qsearch_ls_progress_coeff_path: None,
         replacement_output: None,
     };
-    process_file_with_onnx_pipeline(
+    process_file_with_onnx_pipeline(protection,
         &config,
         move |pos, f1, f2, psv| {
             make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
@@ -5071,14 +5152,15 @@ fn process_file_with_onnx(
 
 #[cfg(feature = "dlshogi-onnx")]
 fn process_file_with_dlshogi_onnx(
+    protection: &OutputProtection,
     cli: &Cli,
     input_path: &std::path::Path,
     output_path: &std::path::Path,
-    expand_output_path: Option<&std::path::Path>,
-    replacement_output_path: Option<&std::path::Path>,
+    auxiliary_outputs: (Option<&std::path::Path>, Option<&std::path::Path>),
     process_count: u64,
     progress: &FileProgress,
 ) -> Result<()> {
+    let (expand_output_path, replacement_output_path) = auxiliary_outputs;
     use tools::dlshogi_features::{
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
     };
@@ -5122,7 +5204,7 @@ fn process_file_with_dlshogi_onnx(
         qsearch_ls_progress_coeff_path: cli.ls_progress_coeff.as_deref(),
         replacement_output: replacement_output_path,
     };
-    process_file_with_onnx_pipeline(
+    process_file_with_onnx_pipeline(protection,
         &config,
         |pos, f1, f2, _psv| {
             make_input_features(pos, f1, f2);
@@ -5134,7 +5216,247 @@ fn process_file_with_dlshogi_onnx(
 #[cfg(test)]
 mod marker_tests {
     use super::*;
+
+    fn no_protected_paths() -> OutputProtection {
+        OutputProtection { inputs: Vec::new(), outputs: Vec::new() }
+    }
+
     use std::io::{Read, Write};
+
+
+    #[test]
+    fn protection_rejects_late_resource_and_output_aliases_without_mutation() {
+        for resource_alias in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input");
+            let first = dir.path().join("first");
+            let last = dir.path().join("last");
+            std::fs::write(&input, b"resource").unwrap();
+            std::fs::write(&first, b"previous output").unwrap();
+            std::fs::hard_link(if resource_alias { &input } else { &first }, &last).unwrap();
+            assert!(OutputProtection::new(vec![input.clone()], vec![first.clone(), last]).is_err());
+            assert_eq!(std::fs::read(input).unwrap(), b"resource");
+            assert_eq!(std::fs::read(first).unwrap(), b"previous output");
+        }
+    }
+
+    #[test]
+    fn protection_rechecks_actual_handle_and_preserves_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        std::fs::write(&input, b"resource").unwrap();
+        std::fs::write(&output, b"prefix").unwrap();
+        let protection = OutputProtection::new(vec![input.clone()], vec![output.clone()]).unwrap();
+        protection.open(&output, true).unwrap().write_all(b"-suffix").unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"prefix-suffix");
+        std::fs::remove_file(&output).unwrap();
+        std::fs::hard_link(&input, &output).unwrap();
+        let file = File::options().write(true).open(&output).unwrap();
+        assert!(protection.check_file(&output, &file).is_err());
+        assert!(protection.truncate(&output, 0).is_err());
+        assert_eq!(std::fs::read(input).unwrap(), b"resource");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protection_rejects_symlink_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        std::fs::write(&input, b"resource").unwrap();
+        std::os::unix::fs::symlink(&input, &output).unwrap();
+        assert!(OutputProtection::new(vec![input.clone()], vec![output]).is_err());
+        assert_eq!(std::fs::read(input).unwrap(), b"resource");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protection_rejects_case_alias_before_first_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("output");
+        let last = dir.path().join("OUTPUT");
+        let protection = OutputProtection::new(Vec::new(), vec![first.clone(), last]).unwrap();
+        assert!(protection.open(&first, false).is_err());
+        assert_eq!(std::fs::metadata(first).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn startup_protects_all_inputs_resources_and_marker_paths() {
+        for suffix in ["", ".done", ".in-progress", ".done.tmp", ".in-progress.tmp"] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input.psv");
+            let later = dir.path().join("later.psv");
+            let model = dir.path().join("model");
+            let out_dir = dir.path().join("out");
+            std::fs::create_dir(&out_dir).unwrap();
+            for path in [&input, &later, &model] { std::fs::write(path, [7; 40]).unwrap(); }
+            let first_output = out_dir.join("input.psv.scores.i16");
+            std::fs::write(&first_output, b"previous").unwrap();
+            let collision = out_dir.join(format!("later.psv.scores.i16{suffix}"));
+            std::fs::hard_link(&model, collision).unwrap();
+            let cli = Cli::parse_from([
+                "rescore_psv", "--input", input.to_str().unwrap(), later.to_str().unwrap(),
+                "--output-dir", out_dir.to_str().unwrap(), "--nnue", model.to_str().unwrap(),
+                "--out-scores",
+            ]);
+            assert!(output_protection(&cli, &[input.clone(), later.clone()]).is_err());
+            assert_eq!(std::fs::read(first_output).unwrap(), b"previous");
+            for path in [&input, &later, &model] { assert_eq!(std::fs::read(path).unwrap(), [7; 40]); }
+        }
+    }
+
+    #[test]
+    fn startup_rejects_old_marker_cleanup_of_resources_or_outputs() {
+        for (replacement, target) in [(false, "input"), (false, "model"), (false, "output"), (true, "input"), (true, "model"), (true, "output")] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let later = dir.path().join("later.psv");
+        let model = dir.path().join("model");
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+        for path in [&input, &later, &model] { std::fs::write(path, [7; 40]).unwrap(); }
+        let output = out_dir.join("input.psv.scores.i16");
+        std::fs::write(&output, b"previous").unwrap();
+        let mut fingerprint = test_fingerprint(true);
+        let old = match target {
+            "input" => later.clone(), "model" => model.clone(), "output" => output.clone(),
+            _ => unreachable!(),
+        };
+        fingerprint.expand = !replacement;
+        fingerprint.replacement = replacement;
+        fingerprint.expand_output_path = (!replacement).then_some(old.clone());
+        fingerprint.replacement_output_path = replacement.then_some(old);
+        let marker = DoneMarker {
+            fingerprint,
+            output_sizes: OutputSizes {
+                rescore_output_size: 8, expand_output_size: (!replacement).then_some(40), replacement_output_size: replacement.then_some(40),
+            },
+        };
+        write_marker_atomic(&no_protected_paths(), &output, &marker).unwrap();
+        let done = marker_path_for(&output);
+        let before = std::fs::read(&done).unwrap();
+        let cli = Cli::parse_from([
+            "rescore_psv", "--input", input.to_str().unwrap(), later.to_str().unwrap(),
+            "--output-dir", out_dir.to_str().unwrap(), "--nnue", model.to_str().unwrap(),
+            "--out-scores",
+        ]);
+        assert!(output_protection(&cli, &[input, later.clone()]).is_err());
+        assert_eq!(std::fs::read(later).unwrap(), [7; 40]);
+        assert_eq!(std::fs::read(output).unwrap(), b"previous");
+        assert_eq!(std::fs::read(done).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn startup_does_not_create_markers_and_matching_marker_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let model = dir.path().join("model");
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+        for path in [&input, &model] { std::fs::write(path, [7; 40]).unwrap(); }
+        let output = out_dir.join("input.psv.scores.i16");
+        let cli = Cli::parse_from([
+            "rescore_psv", "--input", input.to_str().unwrap(),
+            "--output-dir", out_dir.to_str().unwrap(), "--nnue", model.to_str().unwrap(),
+            "--out-scores",
+        ]);
+        let protection = output_protection(&cli, &[input]).unwrap();
+        assert!(!marker_path_for(&output).exists());
+        assert!(!in_progress_marker_path_for(&output).exists());
+        let fingerprint = test_fingerprint(true);
+        prepare_in_progress_marker(&protection, &output, &fingerprint, false).unwrap();
+        protection.open(&output, true).unwrap().write_all(&[1, 0, 2, 0]).unwrap();
+        assert_eq!(prepare_in_progress_marker(&protection, &output, &fingerprint, false).unwrap(), Some(SidecarStartDecision::Resume));
+        assert_eq!(std::fs::read(output).unwrap(), [1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn deleted_input_does_not_block_later_output_or_unprotect_remaining_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_input = dir.path().join("first.psv");
+        let second_input = dir.path().join("second.psv");
+        let first_output = dir.path().join("first.out");
+        let second_output = dir.path().join("second.out");
+        std::fs::write(&first_input, b"first").unwrap();
+        std::fs::write(&second_input, b"second").unwrap();
+        let mut protection = OutputProtection::new(
+            vec![first_input.clone(), second_input.clone()],
+            vec![first_output.clone(), second_output.clone()],
+        ).unwrap();
+        protection.open(&first_output, false).unwrap().write_all(b"finished").unwrap();
+        std::fs::remove_file(&first_input).unwrap();
+        protection.forget_deleted_input(&first_input);
+        protection.open(&second_output, true).unwrap().write_all(b"resumed").unwrap();
+        std::fs::remove_file(&second_output).unwrap();
+        std::fs::hard_link(&second_input, &second_output).unwrap();
+        assert!(protection.truncate(&second_output, 0).is_err());
+        assert_eq!(std::fs::read(second_input).unwrap(), b"second");
+        assert_eq!(std::fs::read(first_output).unwrap(), b"finished");
+    }
+
+    #[test]
+    fn startup_protects_each_explicit_resource_and_engine_relative_options() {
+        for resource in ["later-input", "nnue", "coeff", "engine", "option", "automatic-spsa"] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("first.psv");
+            let later = dir.path().join("second.psv");
+            let model = dir.path().join("model");
+            let coeff = dir.path().join("coeff");
+            let engine_dir = dir.path().join("engine");
+            let out_dir = dir.path().join("out");
+            std::fs::create_dir(&engine_dir).unwrap();
+            std::fs::create_dir(&out_dir).unwrap();
+            let engine = engine_dir.join("engine.bin");
+            let option = engine_dir.join("model.onnx");
+            let automatic = engine_dir.join("spsa.params");
+            for path in [&input, &later, &model, &coeff, &engine, &option, &automatic] {
+                std::fs::write(path, [9; 40]).unwrap();
+            }
+            let first_output = out_dir.join("first.psv");
+            std::fs::write(&first_output, b"previous").unwrap();
+            let protected = match resource {
+                "later-input" => &later, "nnue" => &model, "coeff" => &coeff,
+                "engine" => &engine, "option" => &option, "automatic-spsa" => &automatic,
+                _ => unreachable!(),
+            };
+            std::fs::hard_link(protected, out_dir.join("second.psv")).unwrap();
+            let mut args = vec![
+                "rescore_psv", "--input", input.to_str().unwrap(), later.to_str().unwrap(),
+                "--output-dir", out_dir.to_str().unwrap(),
+            ];
+            if matches!(resource, "engine" | "option" | "automatic-spsa") {
+                args.extend(["--engine", engine.to_str().unwrap(), "--usi-option", "DNN_Model=model.onnx"]);
+            } else {
+                args.extend(["--nnue", model.to_str().unwrap(), "--ls-progress-coeff", coeff.to_str().unwrap()]);
+            }
+            let cli = Cli::parse_from(args);
+            let error = output_protection(&cli, &[input, later.clone()]).err().unwrap();
+            assert!(error.to_string().contains("Output path resolves to input file"), "{resource}: {error:#}");
+            assert_eq!(std::fs::read(first_output).unwrap(), b"previous");
+            assert_eq!(std::fs::read(protected).unwrap(), [9; 40]);
+        }
+    }
+
+    #[test]
+    fn existing_resource_same_path_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        std::fs::write(&input, b"resource").unwrap();
+        assert!(OutputProtection::new(vec![input.clone()], vec![input.clone()]).is_err());
+        assert_eq!(std::fs::read(input).unwrap(), b"resource");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_resource_case_alias_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("resource");
+        std::fs::write(&input, b"resource").unwrap();
+        assert!(OutputProtection::new(vec![input.clone()], vec![dir.path().join("RESOURCE")]).is_err());
+        assert_eq!(std::fs::read(input).unwrap(), b"resource");
+    }
 
     /// 必須キーを満たす最小 marker テキスト（expand=false）。`extra` に qsearch 系の追加行を差し込む。
     fn base_marker(extra: &str) -> String {
@@ -5298,7 +5620,7 @@ mod marker_tests {
         let output = dir.path().join("scores.i16");
         let fingerprint = test_fingerprint(true);
 
-        write_in_progress_marker(&output, &fingerprint).unwrap();
+        write_in_progress_marker(&no_protected_paths(), &output, &fingerprint).unwrap();
 
         let parsed = parse_marker(&in_progress_marker_path_for(&output)).unwrap();
         assert_eq!(parsed.fingerprint, fingerprint);
@@ -5313,12 +5635,12 @@ mod marker_tests {
         let complete = sidecar_bytes(&[test_psv(-5), test_psv(6), test_psv(300)]);
 
         assert_eq!(
-            prepare_in_progress_marker(&output, &fingerprint, false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &fingerprint, false).unwrap(),
             Some(SidecarStartDecision::Truncate)
         );
         std::fs::write(&output, &complete[..2]).unwrap();
         assert_eq!(
-            prepare_in_progress_marker(&output, &fingerprint, false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &fingerprint, false).unwrap(),
             Some(SidecarStartDecision::Resume)
         );
         assert_eq!(std::fs::read(&output).unwrap(), complete[..2]);
@@ -5339,13 +5661,13 @@ mod marker_tests {
         let fingerprint = test_fingerprint(true);
         let complete = sidecar_bytes(&[test_psv(-5), test_psv(6), test_psv(300)]);
 
-        prepare_in_progress_marker(&output, &fingerprint, false).unwrap();
+        prepare_in_progress_marker(&no_protected_paths(), &output, &fingerprint, false).unwrap();
         std::fs::write(&output, &complete[..2]).unwrap();
 
         let mut changed = fingerprint.clone();
         changed.score_clip = 9999;
         assert_eq!(
-            prepare_in_progress_marker(&output, &changed, false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &changed, false).unwrap(),
             Some(SidecarStartDecision::Truncate)
         );
         assert_eq!(std::fs::metadata(&output).unwrap().len(), 0);
@@ -5366,7 +5688,7 @@ mod marker_tests {
         std::fs::write(&output, sidecar_bytes(&[test_psv(-5)])).unwrap();
 
         assert_eq!(
-            prepare_in_progress_marker(&output, &fingerprint, false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &fingerprint, false).unwrap(),
             Some(SidecarStartDecision::Truncate)
         );
         assert_eq!(std::fs::metadata(&output).unwrap().len(), 0);
@@ -5380,7 +5702,7 @@ mod marker_tests {
         let fingerprint = test_fingerprint(true);
         let complete = sidecar_bytes(&[test_psv(-5), test_psv(6)]);
 
-        prepare_in_progress_marker(&output, &fingerprint, false).unwrap();
+        prepare_in_progress_marker(&no_protected_paths(), &output, &fingerprint, false).unwrap();
         std::fs::write(&output, &complete).unwrap();
         let done = DoneMarker {
             fingerprint: fingerprint.clone(),
@@ -5391,7 +5713,7 @@ mod marker_tests {
             },
         };
 
-        promote_score_sidecar_marker(&output, &done).unwrap();
+        promote_score_sidecar_marker(&no_protected_paths(), &output, &done).unwrap();
 
         assert_eq!(parse_marker(&marker_path_for(&output)).unwrap(), done);
         assert!(!in_progress_marker_path_for(&output).exists());
@@ -5404,7 +5726,7 @@ mod marker_tests {
         std::fs::write(&output, [1, 2, 3]).unwrap();
 
         assert_eq!(
-            prepare_in_progress_marker(&output, &test_fingerprint(false), false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &test_fingerprint(false), false).unwrap(),
             None
         );
         assert_eq!(std::fs::read(&output).unwrap(), [1, 2, 3]);
@@ -5419,20 +5741,20 @@ mod marker_tests {
         let mut changed = start.clone();
         changed.input_mtime_ns += 1;
 
-        prepare_in_progress_marker(&output, &start, false).unwrap();
+        prepare_in_progress_marker(&no_protected_paths(), &output, &start, false).unwrap();
         std::fs::write(&output, [1, 2, 3, 4]).unwrap();
         assert!(
-            reject_changed_sidecar_fingerprint(&output, &start, &start, "during processing")
+            reject_changed_sidecar_fingerprint(&no_protected_paths(), &output, &start, &start, "during processing")
                 .is_ok()
         );
         let error =
-            reject_changed_sidecar_fingerprint(&output, &start, &changed, "during processing")
+            reject_changed_sidecar_fingerprint(&no_protected_paths(), &output, &start, &changed, "during processing")
                 .unwrap_err();
         assert!(error.to_string().contains("changed during processing"));
         assert_eq!(std::fs::metadata(&output).unwrap().len(), 0);
         assert!(!in_progress_marker_path_for(&output).exists());
         assert_eq!(
-            prepare_in_progress_marker(&output, &start, false).unwrap(),
+            prepare_in_progress_marker(&no_protected_paths(), &output, &start, false).unwrap(),
             Some(SidecarStartDecision::Truncate)
         );
     }
@@ -5472,12 +5794,12 @@ mod marker_tests {
         let dir = tempfile::tempdir().unwrap();
         let normal = dir.path().join("normal.psv");
         std::fs::write(&normal, vec![0u8; PackedSfenValue::SIZE + 1]).unwrap();
-        assert_eq!(prepare_resume_count(&normal, PackedSfenValue::SIZE as u64, false).unwrap(), 1);
+        assert_eq!(prepare_resume_count(&no_protected_paths(), &normal, PackedSfenValue::SIZE as u64, false).unwrap(), 1);
         assert_eq!(std::fs::metadata(normal).unwrap().len(), PackedSfenValue::SIZE as u64);
 
         let sidecar = dir.path().join("scores.i16");
         std::fs::write(&sidecar, [0u8; 3]).unwrap();
-        let error = prepare_resume_count(&sidecar, 2, true).unwrap_err();
+        let error = prepare_resume_count(&no_protected_paths(), &sidecar, 2, true).unwrap_err();
         assert!(error.to_string().contains("Delete the .in-progress marker"));
         assert_eq!(std::fs::metadata(sidecar).unwrap().len(), 3);
     }
@@ -5639,7 +5961,7 @@ mod marker_tests {
         // chunk_size 4 / 25 records = 満杯 6 chunk + 端数 1 record。sidecar は入力順の
         // 期待値と bit 一致し、`.done` へ昇格して in-progress marker は消える。
         let input_pathbuf = input.clone();
-        run_nnue_scores_pipeline(
+        run_nnue_scores_pipeline(&no_protected_paths(),
             &cli,
             &identity,
             &input_pathbuf,
@@ -5667,7 +5989,7 @@ mod marker_tests {
             }
             pipeline_double_score(record)
         };
-        let err = run_nnue_scores_pipeline(
+        let err = run_nnue_scores_pipeline(&no_protected_paths(),
             &cli,
             &identity,
             &input_pathbuf,
@@ -5686,7 +6008,7 @@ mod marker_tests {
 
         // 件数 resume: fingerprint 一致の in-progress marker が残っているので record 8
         // から追記され、最終 sidecar は一気通貫実行と bit 一致して `.done` へ昇格する。
-        run_nnue_scores_pipeline(
+        run_nnue_scores_pipeline(&no_protected_paths(),
             &cli,
             &identity,
             &input_pathbuf,

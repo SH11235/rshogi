@@ -115,6 +115,35 @@ pub fn create_safe_output_files(outputs: &[&Path], inputs: &[&Path]) -> Result<V
     Ok(files)
 }
 
+/// 開いた出力の実体を資源と他の出力に照合する。呼出側はこの file を使って書き込む。
+/// 比較相手を一つずつ開くため、同時に保持する handle 数はパス数に依存しない。
+pub fn ensure_safe_output_file(
+    file: &File,
+    output: &Path,
+    inputs: &[&Path],
+    other_outputs: &[&Path],
+) -> Result<()> {
+    ensure_output_not_symlink(output)?;
+    let actual = same_file::Handle::from_file(file.try_clone()?)?;
+    for input in inputs {
+        let protected = same_file::Handle::from_path(input)
+            .with_context(|| format!("Failed to inspect input {}", input.display()))?;
+        anyhow::ensure!(actual != protected, "Output path resolves to input file: {}", output.display());
+    }
+    for other in other_outputs {
+        match same_file::Handle::from_path(other) {
+            Ok(protected) => anyhow::ensure!(
+                actual != protected,
+                "Output paths resolve to the same file: {} and {}",
+                output.display(), other.display()
+            ),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("Failed to inspect output {}", other.display())),
+        }
+    }
+    Ok(())
+}
+
 /// 単一出力を資源の alias でないと確認してから作成または切り詰める。
 pub fn create_safe_output_file(output: &Path, inputs: &[&Path]) -> Result<File> {
     create_safe_output_files(&[output], inputs)?

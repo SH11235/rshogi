@@ -42,7 +42,7 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 | `split_psv` | PSV ファイルを局面数または容量で分割 |
 | `merge_psv` | 複数の PSV ファイルを順序どおり結合 |
 | `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](docs/relabel_psv.md)） |
-| `rescore_psv` | 局面の再評価（NNUE / 外部エンジン / ONNX。`--out-scores` で i16 score sidecar 出力） |
+| `rescore_psv` | 局面の再評価（NNUE / 外部エンジン / ONNX。`--out-scores` で i16 score sidecar 出力。明示資源と PSV/marker 群の alias を検査） |
 | `psv_gate_by_king_zone` | 入玉ドメインの score 合成 / mask bitmap 生成 |
 | `psv_dual_label` | 通常 PSV の score 退避、dual-label PSV の生成・sidecar 抽出・fail-closed 検証（[詳細](docs/psv_dual_label.md)） |
 | `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順に抽出（[詳細](docs/psv_select_by_mask.md)） |

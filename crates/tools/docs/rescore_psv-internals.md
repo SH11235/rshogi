@@ -121,17 +121,16 @@ marker は `key=value\n` テキストのため、round-trip を保証できな�
 （model / input / expand 出力）は起動時エラーで弾く: `=`（セパレータ衝突）、
 `\n` / `\r`（レコードセパレータ衝突）、非 UTF-8 バイト列。
 
-## パス安全チェック（ONNX モード）
+## パス安全チェック
 
-起動時 / ファイルごとに以下を検証し、truncate によるデータ破壊を防ぐ:
+OutputProtection は開始時に PSV / score / expand / replacement / marker 群と旧 cleanup 対象を列挙し、
+共有 output_path で全入力・明示資源および出力同士を照合する。ファイル名が同じ別入力による出力重複も拒否する。
+変更直前には対象パスと全保護パスを再照合し、開いた file の実体を ensure_safe_output_file で検査する。
+全体の相互照合を各変更操作で繰り返さず、比較用 handle も一つずつ開閉する。
 
-- `--output-dir` と `--expand-output-dir` / `--qsearch-leaf-replacement-output` の
-  同一ディレクトリ指定 → エラー
-- 入力ファイル = 予定出力パス（未作成でも parent canonicalize で検出）→ エラー
-- 既存出力が symlink → エラー（symlink 越しの truncate で入力を破壊しない）
-- Unix のみ: 既存出力が入力と同じ inode（hardlink）→ エラー
-- marker 不一致で旧 expand / replacement artifact を削除する前に、旧 artifact が
-  現在の入力と同一実体でないことを検証 → 同一なら削除せずエラー（多段パイプライン対策）
+marker の事前検査は存在する file のみを開く。実際の更新では .tmp を create_new で開いて照合し、
+書込み・sync 後に final path を再検査して rename する。marker の不一致時 truncate と一致時 resume の判定は変更しない。
+保護対象の詳細と、並行置換・ORT 生成物などの制限は [出力パスの保護](rescore_psv.md#出力パスの保護) を参照。
 
 ## leaf-REPLACEMENT arm のレコード仕様
 
