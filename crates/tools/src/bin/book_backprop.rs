@@ -15,12 +15,17 @@ struct Cli {
     book: PathBuf,
     #[arg(long)]
     out: PathBuf,
+    /// 千日手の値 (手番の側から見た値)。先手・後手とも同じ値にする
     #[arg(long, default_value_t = 0)]
     draw_value: i32,
+    /// 先手を自分として解くときの千日手の値。`--draw-value` より優先する
+    #[arg(long)]
+    draw_value_black: Option<i32>,
+    /// 後手を自分として解くときの千日手の値。`--draw-value` より優先する
+    #[arg(long)]
+    draw_value_white: Option<i32>,
     #[arg(long)]
     report: Option<PathBuf>,
-    #[arg(long, default_value_t = 1000)]
-    max_iters: usize,
     #[arg(long, value_enum, default_value_t = MergeMode::Min)]
     merge: MergeMode,
     /// 非合法手と `none` 行を局面の best から除く (行は値を変えずに書き出す)
@@ -46,8 +51,10 @@ fn main() -> Result<()> {
         &cli.book,
         &cli.out,
         report,
-        cli.draw_value,
-        cli.max_iters,
+        DrawValues {
+            black: cli.draw_value_black.unwrap_or(cli.draw_value),
+            white: cli.draw_value_white.unwrap_or(cli.draw_value),
+        },
         cli.merge,
         options,
     )?;
@@ -124,7 +131,7 @@ mod tests {
                         graph.keys.iter().position(|key| key == strip_ply(&parent)).unwrap();
                     assert!(graph.moves[parent_idx][0].edge.is_none());
                     assert!(graph.adjacency[parent_idx].is_empty());
-                    propagate_values(&book, &mut graph, 0, 1000, merge).unwrap();
+                    propagate_values(&book, &mut graph, DrawValues::default(), merge).unwrap();
                     assert_eq!(graph.moves[parent_idx][0].new, 123);
                     let out = dir.path().join("out.db");
                     write_backprop_book(&book, &graph, &out).unwrap();
@@ -159,8 +166,8 @@ mod tests {
         let out1 = dir.path().join("a.db");
         let out2 = dir.path().join("b.db");
 
-        run_backprop(&in_path, &out1, 0, 1000, MergeMode::Min).unwrap();
-        run_backprop(&in_path, &out2, 0, 1000, MergeMode::Min).unwrap();
+        run_backprop(&in_path, &out1, MergeMode::Min).unwrap();
+        run_backprop(&in_path, &out2, MergeMode::Min).unwrap();
 
         assert_eq!(std::fs::read(&out1).unwrap(), std::fs::read(&out2).unwrap());
     }
@@ -267,22 +274,16 @@ mod tests {
         let in_path = write_input(dir.path(), "in.db", &input);
         let out_path = dir.path().join("out.db");
 
-        run_backprop(&in_path, &out_path, 0, 1000, MergeMode::Min).unwrap();
+        run_backprop(&in_path, &out_path, MergeMode::Min).unwrap();
         let book = rshogi_book::Book::from_path(&out_path, true).unwrap();
 
         assert_eq!(book.len(), 2);
     }
 
-    fn run_backprop(
-        input: &Path,
-        output: &Path,
-        draw_value: i32,
-        max_iters: usize,
-        merge: MergeMode,
-    ) -> Result<()> {
+    fn run_backprop(input: &Path, output: &Path, merge: MergeMode) -> Result<()> {
         let book = read_book_db(input)?;
         let mut graph = build_graph(&book)?;
-        propagate_values(&book, &mut graph, draw_value, max_iters, merge)?;
+        propagate_values(&book, &mut graph, DrawValues::default(), merge)?;
         write_backprop_book(&book, &graph, output)
     }
 
@@ -294,7 +295,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let in_path = write_input(dir.path(), "in.db", input);
         let out_path = dir.path().join("out.db");
-        run_backprop(&in_path, &out_path, 0, 1000, merge).unwrap();
+        run_backprop(&in_path, &out_path, merge).unwrap();
         std::fs::read_to_string(out_path).unwrap()
     }
 
