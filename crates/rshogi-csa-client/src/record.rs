@@ -95,9 +95,8 @@ pub struct JsonlMoveExtra {
     pub sfen_before: String,
     /// USI 形式の指し手
     pub move_usi: String,
-    /// この手を指したエンジンのラベル。CSA 上のプレイヤー名 (`sente_name` / `gote_name`)
-    /// と一致させるため、先手手番なら `sente_name`、後手手番なら `gote_name` を入れる。
-    /// analyze_selfplay の per-engine timing 集計でこのラベルがキーになる。
+    /// 公開 API の互換性のため保持する呼出側のラベル。JSONL 出力には使用しない。
+    /// 出力の識別子は `GameRecord` の名前と手番から生成する。
     pub engine_label: String,
     /// この手の探索に費やした実時間 (ms)
     pub elapsed_ms: u64,

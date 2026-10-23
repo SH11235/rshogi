@@ -35,7 +35,7 @@ cargo run -p tools --bin benchmark --release -- \
 | `--eval-hash-mb` | 評価ハッシュ容量（MB）。USI では `EvalHash` | 256 |
 | `--use-eval-hash true/false` | 評価ハッシュ使用。USI では `UseEvalHash` | true |
 | `--tt-mb` | 置換表サイズ（MB） | 1024 |
-| `--limit-type` | 制限タイプ (depth/nodes/movetime) | movetime |
+| `--limit-type` | 制限タイプ (depth/nodes/movetime)。nodes は全スレッドの合計で打ち切る | movetime |
 | `--limit` | 制限値 | 15000 |
 | `--sfens` | カスタム局面ファイル | デフォルト4局面 |
 | `--iterations` | 反復回数 | 1 |

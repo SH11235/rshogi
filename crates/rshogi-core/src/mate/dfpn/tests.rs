@@ -334,7 +334,7 @@ fn time_limit_gives_unknown() {
 
 /// 自動モードの最初の段階 (証明駒を使わない) では 10 万ノードで決まらない 11 手詰め (やねうら王の詰将棋データセットから)
 const AUTO_SWITCH_MATE: &str =
-    "l5s1l/4k4/2n2p1+P1/2pg4p/p4S3/2Pb4P/P1nP1P1K1/9/4G3L b RB2GS2NL7Prsp 121";
+    "2p1kS1nl/1+L1g2+P2/3p1p3/4p2p1/3+blNp2/+Rb4P2/3PP4/3G1G3/3K1L+r2 w g3s2n8p 128";
 
 #[test]
 fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
