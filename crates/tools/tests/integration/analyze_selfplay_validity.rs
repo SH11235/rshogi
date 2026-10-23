@@ -364,7 +364,6 @@ fn csa_single_games_count_without_becoming_sprt_pairs() {
     }
 }
 
-
 fn csa_fixture() -> (Value, Value) {
     (
         json!({
@@ -429,7 +428,10 @@ fn malformed_csa_results_are_rejected_before_counting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.jsonl");
     let (meta, result) = csa_fixture();
-    for rows in [vec![meta.clone()], vec![meta.clone(), result.clone(), result.clone()]] {
+    for rows in [
+        vec![meta.clone()],
+        vec![meta.clone(), result.clone(), result.clone()],
+    ] {
         write_rows(&path, &rows);
         assert!(!ordinary_analysis(&[&path]).status.success());
     }

@@ -895,10 +895,15 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
                     bail!("CSA単局ログの先後ラベルが衝突しています: {path}");
                 }
                 if result.outcome != "draw" {
-                    let expected = if result.outcome == "black_win" { &black } else { &white };
+                    let expected = if result.outcome == "black_win" {
+                        &black
+                    } else {
+                        &white
+                    };
                     if let Some(winner) = &result.winner
                         && winner != expected
-                        && !(legacy_csa && rshogi_csa_client::jsonl::sanitize_for_filename(winner) == *expected)
+                        && !(legacy_csa
+                            && rshogi_csa_client::jsonl::sanitize_for_filename(winner) == *expected)
                     {
                         bail!("CSA単局ログのwinnerとoutcomeが一致しません: {path}");
                     }
