@@ -42,12 +42,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tools::common::io::partial_path;
+use tools::hcpe::{HCPE_RECORD_SIZE, HcpeRecord};
 use tools::output_path::ensure_safe_output_path;
 use tools::packed_sfen::{
     PackedSfenValue, PsvMove16Class, classify_psv_move16, pack_hcp_from_parts, psv_move16_to_hcpe,
     stm_result_to_hcpe, unpack_sfen_to_parts,
 };
-use tools::teacher_labeler::HCPE_RECORD_SIZE;
 
 /// hcpe3 レコード長（hcp[32] + moveNum:u16 + result:u8 + opponent:u8
 /// + selectedMove16:u16 + eval:i16 + candidateNum:u16 + move16:u16 + visitNum:u16）
@@ -153,11 +153,14 @@ fn build_hcpe3(eval: i16, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult
 
 fn build_hcpe(eval: i16, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult {
     let mut data = [0u8; RECORD_BUF];
-    data[0..32].copy_from_slice(hcp);
-    data[32..34].copy_from_slice(&eval.to_le_bytes()); // eval
-    data[34..36].copy_from_slice(&move16.to_le_bytes()); // bestMove16
-    data[36] = result; // gameResult
-    data[37] = 0; // dummy
+    let record = HcpeRecord {
+        hcp: *hcp,
+        eval,
+        best_move16: move16,
+        game_result: result,
+        padding: 0,
+    };
+    data[..HCPE_RECORD_SIZE].copy_from_slice(&record.to_bytes());
     ConvResult::Record {
         data,
         len: HCPE_RECORD_SIZE,

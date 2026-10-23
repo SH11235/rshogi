@@ -1,5 +1,7 @@
 # hcpe_to_psv
 
+入力の [38 byte HCPE形式](hcpe-format.md) は共通です。出力PSVのpaddingは0とし、入力HCPEのdummyは引き継ぎません。
+
 `hcpe_to_psv` は、hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード）を
 PSV（YaneuraOu PackedSfenValue, 40B/レコード）へ変換するツールです。
 

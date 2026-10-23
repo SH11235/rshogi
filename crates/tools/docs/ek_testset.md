@@ -1,5 +1,7 @@
 # ek_testset
 
+`export-hcpe` は共通の [38 byte HCPE形式](hcpe-format.md) を出力します。bestMove16は指し手なしの0、dummyも0です。
+
 `ek_testset` は、held-out CSA 棋譜から入玉局面の評価テストセットを作るツールです。
 native NNUE の静的評価に加え、hcpe へ export して `yardstick_label` → `yardstick_score` で
 探索ラベル品質を採点できます。

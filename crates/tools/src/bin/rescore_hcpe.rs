@@ -31,10 +31,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use rshogi_core::position::Position;
+use tools::hcpe::{HCPE_RECORD_SIZE, HcpeRecord};
 use tools::packed_sfen::unpack_hcp;
-use tools::teacher_labeler::{
-    self, HCPE_RECORD_SIZE, LabelerEvalConfig, SEARCH_STACK_SIZE, label_position,
-};
+use tools::teacher_labeler::{self, LabelerEvalConfig, SEARCH_STACK_SIZE, label_position};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -876,9 +875,8 @@ fn relabel_record(
     score_clip: i32,
     skip_in_check: bool,
 ) -> Outcome {
-    let mut hcp = [0u8; 32];
-    hcp.copy_from_slice(&bytes[0..32]);
-    let sfen = match unpack_hcp(&hcp) {
+    let mut record = HcpeRecord::from_bytes(bytes);
+    let sfen = match unpack_hcp(&record.hcp) {
         Ok(s) => s,
         Err(e) => return Outcome::Error(format!("unpack_hcp failed: {e}")),
     };
@@ -894,9 +892,8 @@ fn relabel_record(
     let (eval, _mate) = labels[0];
     let clipped = eval.clamp(-score_clip, score_clip) as i16;
 
-    let mut out = *bytes;
-    out[32..34].copy_from_slice(&clipped.to_le_bytes());
-    Outcome::Ok(Box::new(out))
+    record.eval = clipped;
+    Outcome::Ok(Box::new(record.to_bytes()))
 }
 
 /// hcpe レコード数（ファイルサイズ / 38）。

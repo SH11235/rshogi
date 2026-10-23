@@ -1,5 +1,7 @@
 # tools
 
+教師データの [HCPE 38 byte共通形式とpaddingの扱い](docs/hcpe-format.md)。
+
 LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](docs/nnue-routing.md)。
 
 将棋エンジン開発用ツール群

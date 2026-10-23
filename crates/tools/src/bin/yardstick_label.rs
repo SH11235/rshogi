@@ -37,16 +37,14 @@ use serde::Serialize;
 use rshogi_core::bitboard::{Bitboard, RANK_BB};
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
+use tools::hcpe::{HCPE_RECORD_SIZE, HcpeRecord};
 #[cfg(feature = "dlshogi-onnx")]
 use tools::output_path::create_safe_output_file;
 use tools::output_path::{create_safe_output_files, ensure_safe_output_paths};
 use tools::packed_sfen::unpack_hcp;
-use tools::teacher_labeler::{
-    self, HCPE_RECORD_SIZE, LabelerEvalConfig, SEARCH_STACK_SIZE, label_position,
-};
+use tools::teacher_labeler::{self, LabelerEvalConfig, SEARCH_STACK_SIZE, label_position};
 
 /// 詰みとみなす絶対 cp 閾値。保存 eval の符号飽和域は較正・logloss から除外する。
-/// `SEARCH_STACK_SIZE` / `HCPE_RECORD_SIZE` は共有コア `teacher_labeler` から import する。
 const MATE_ABS: i32 = 30000;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -644,11 +642,10 @@ enum ParseHcpe {
 
 /// hcpe 1 レコードを Position + 共有フィールドへ展開する（labeler 共通の前段）。
 fn parse_hcpe_record(bytes: &[u8; HCPE_RECORD_SIZE]) -> ParseHcpe {
-    let eval_ref = i16::from_le_bytes([bytes[32], bytes[33]]) as i32;
-    let game_result = bytes[36];
-
-    let mut hcp = [0u8; 32];
-    hcp.copy_from_slice(&bytes[0..32]);
+    let record = HcpeRecord::from_bytes(bytes);
+    let eval_ref = i32::from(record.eval);
+    let game_result = record.game_result;
+    let hcp = record.hcp;
     let sfen = match unpack_hcp(&hcp) {
         Ok(s) => s,
         Err(e) => return ParseHcpe::Error(format!("unpack_hcp failed: {e}")),
