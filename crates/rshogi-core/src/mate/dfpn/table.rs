@@ -131,7 +131,7 @@ impl Entry {
         self.key == key.key && !self.is_empty(generation)
     }
 
-    /// 小さいほど先に追い出す。確定値は未確定値より常に残す。
+    /// 小さいほど先に追い出す。bucket に未確定値があれば、確定値より先に追い出す。
     fn keep_priority(&self) -> u64 {
         let final_bonus = if self.is_final() { 1u64 << 32 } else { 0 };
         final_bonus | u64::from(self.searched)
@@ -362,9 +362,10 @@ impl MateTable {
     ///
     /// `PIECES` なら確定値は `value.hand` (証明駒・反証駒) の持駒で確定値の表に書き、
     /// 同じ局面の完全一致のエントリは消す。それ以外は完全一致のエントリに書く。
-    /// 確定値を未確定値で上書きはしない (確定値は経路に依存しないものだけが書かれるので、後から覆らない)。
-    /// bucket が埋まっていれば、残す優先度の最も低いエントリを置き換える。新しいエントリの探索量の方が
-    /// 少なくても書く: 探索量は読み直すたびに増えるだけなので、比べて書かないでいると、前に読んで今は
+    /// 同じ局面の確定値を未確定値で上書きはしない (確定値は経路に依存しないものだけが書かれるので、後から覆らない)。
+    /// 完全一致の表に新しい局面を書くとき、bucket が埋まっていれば残す優先度の最も低いエントリを置き換える
+    /// (確定値で埋まっていれば確定値も。表はキャッシュなので結論は変わらず、読み直しが増えるだけ)。
+    /// 新しいエントリの探索量の方が少なくても書く: 探索量は読み直すたびに増えるだけなので、比べて書かないでいると、前に読んで今は
     /// 使わない大きなエントリが居座り、今読んでいる局面の値を書けずに同じ局面を読み直し続ける
     /// (表が小さいほど起こる)。
     pub fn store<const PIECES: bool>(&mut self, key: TableKey, value: TableValue, searched: u64) {
@@ -578,12 +579,30 @@ mod tests {
 
     #[test]
     fn full_bucket_takes_the_new_entry_even_if_it_searched_less() {
+        // 探索量の最も少ない未確定値 (局面 2) が置き換わり、ほかは残る
         let mut table = MateTable::with_buckets(1);
-        for board in 1..=4u64 {
-            table.store::<true>(key(board, Hand::EMPTY), value(1, 1), 1_000);
+        for (board, searched) in [(1u64, 300), (2, 100), (3, 400), (4, 200)] {
+            table.store::<true>(key(board, Hand::EMPTY), value(1, 1), searched);
         }
         table.store::<true>(key(5, Hand::EMPTY), value(2, 2), 1);
         assert_eq!(table.probe::<true>(key(5, Hand::EMPTY)), Some(value(2, 2)));
+        assert_eq!(table.probe::<true>(key(2, Hand::EMPTY)), None);
+        for board in [1u64, 3, 4] {
+            assert_eq!(table.probe::<true>(key(board, Hand::EMPTY)), Some(value(1, 1)));
+        }
+    }
+
+    #[test]
+    fn bucket_full_of_final_values_takes_an_unknown_value() {
+        // 完全一致の表が確定値で埋まっていれば、探索量の最も少ない確定値が未確定値に置き換わる
+        let mut table = MateTable::with_bucket_count(1, false);
+        for (board, searched) in [(1u64, 300), (2, 100), (3, 400), (4, 200)] {
+            table.store::<false>(key(board, Hand::EMPTY), proven(1, Hand::EMPTY), searched);
+        }
+        table.store::<false>(key(5, Hand::EMPTY), value(2, 2), 1);
+        assert_eq!(table.probe::<false>(key(5, Hand::EMPTY)), Some(value(2, 2)));
+        assert_eq!(table.probe::<false>(key(2, Hand::EMPTY)), None);
+        assert_eq!(table.probe::<false>(key(3, Hand::EMPTY)), Some(proven(1, Hand::EMPTY)));
     }
 
     #[test]
