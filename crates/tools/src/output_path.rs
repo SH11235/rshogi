@@ -53,14 +53,51 @@ pub fn ensure_safe_output_path(output: &Path, input: &Path) -> Result<()> {
 
 /// 全出力と読み取り専用資源の衝突、および出力同士の衝突を作成前に検査する。
 pub fn ensure_safe_output_paths(outputs: &[&Path], inputs: &[&Path]) -> Result<()> {
-    for (index, output) in outputs.iter().enumerate() {
-        ensure_output_not_symlink(output)?;
-        for input in inputs {
-            ensure_safe_output_path(output, input)?;
+    let canonical_inputs = inputs
+        .iter()
+        .map(|input| {
+            input
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize input {}", input.display()))
+        })
+        .collect::<Result<std::collections::HashSet<_>>>()?;
+    let mut planned = std::collections::HashSet::new();
+    let mut existing = Vec::new();
+    for output in outputs {
+        let present = match fs::symlink_metadata(output) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "Output path is a symlink: {}",
+                    output.display()
+                );
+                true
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect output {}", output.display()));
+            }
+        };
+        let predicted = canonicalize_predicted_path(output)?;
+        anyhow::ensure!(
+            !canonical_inputs.contains(&predicted),
+            "Output path resolves to input file: {}",
+            output.display()
+        );
+        anyhow::ensure!(
+            planned.insert(predicted),
+            "Output paths resolve to the same file: {}",
+            output.display()
+        );
+        if present {
+            existing.push(*output);
         }
-        for other in &outputs[..index] {
-            ensure_distinct_output_paths(output, other)?;
-        }
+    }
+    for (index, output) in existing.iter().enumerate() {
+        let file = File::open(output)
+            .with_context(|| format!("Failed to inspect output {}", output.display()))?;
+        ensure_safe_output_file(&file, output, inputs, &existing[..index])?;
     }
     Ok(())
 }
@@ -113,6 +150,43 @@ pub fn create_safe_output_files(outputs: &[&Path], inputs: &[&Path]) -> Result<V
             .with_context(|| format!("Failed to truncate output {}", path.display()))?;
     }
     Ok(files)
+}
+
+/// 開いた出力の実体を資源と他の出力に照合する。呼出側はこの file を使って書き込む。
+/// 比較相手を一つずつ開くため、同時に保持する handle 数はパス数に依存しない。
+pub fn ensure_safe_output_file(
+    file: &File,
+    output: &Path,
+    inputs: &[&Path],
+    other_outputs: &[&Path],
+) -> Result<()> {
+    ensure_output_not_symlink(output)?;
+    let actual = same_file::Handle::from_file(file.try_clone()?)?;
+    for input in inputs {
+        let protected = same_file::Handle::from_path(input)
+            .with_context(|| format!("Failed to inspect input {}", input.display()))?;
+        anyhow::ensure!(
+            actual != protected,
+            "Output path resolves to input file: {}",
+            output.display()
+        );
+    }
+    for other in other_outputs {
+        match same_file::Handle::from_path(other) {
+            Ok(protected) => anyhow::ensure!(
+                actual != protected,
+                "Output paths resolve to the same file: {} and {}",
+                output.display(),
+                other.display()
+            ),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect output {}", other.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 単一出力を資源の alias でないと確認してから作成または切り詰める。
