@@ -32,6 +32,10 @@ pub(super) trait MateState {
     /// 指し手
     type Mv: Copy + Eq;
 
+    /// 1 回の展開 (同じ局面の子を並べる間) だけ使い回す計算結果。1 回の solve で 1 つ作り、
+    /// 展開を始めるたびに `ExpandCache::begin` で前の展開の結果を捨てる。
+    type ExpandCache: ExpandCache;
+
     /// 局面全体のキー (盤面・手番・持駒。経路の反復判定に使う)
     fn key(&self) -> u64;
 
@@ -53,7 +57,12 @@ pub(super) trait MateState {
     ///
     /// 受け方の合駒と、成れる手の成・不成の組が対象。組の先頭以外は、組の中で前の手が確定するまで
     /// 子として数えない (読まない手を作るのではなく、読む順を遅らせるだけ)。
-    fn delay_key(&self, _m: Self::Mv, _or_node: bool) -> Option<(u16, u8)> {
+    fn delay_key(
+        &self,
+        _m: Self::Mv,
+        _or_node: bool,
+        _cache: &mut Self::ExpandCache,
+    ) -> Option<(u16, u8)> {
         None
     }
 
@@ -87,7 +96,12 @@ pub(super) trait MateState {
 
     /// 置換表に無い子 (指し手 `m` の後の局面) の pn/dn の初期値。確定の判定には使わないので、
     /// 正の有限値なら正しさには影響しない。
-    fn initial_pn_dn(&self, _m: Self::Mv, _or_node: bool) -> (u32, u32) {
+    fn initial_pn_dn(
+        &self,
+        _m: Self::Mv,
+        _or_node: bool,
+        _cache: &mut Self::ExpandCache,
+    ) -> (u32, u32) {
         (1, 1)
     }
 
@@ -101,8 +115,64 @@ pub(super) trait MateState {
     fn undo_move(&mut self, m: Self::Mv);
 }
 
+/// `MateState::ExpandCache` の操作
+pub(super) trait ExpandCache: Default {
+    /// 新しい展開を始める (前の展開で覚えた結果を使わない)
+    fn begin(&mut self);
+}
+
+impl ExpandCache for () {
+    fn begin(&mut self) {}
+}
+
+/// 升ごとの (手番側の駒の利きの数, 相手の駒の利きの数)。同じ升への手 (打つ駒違い・成不成) で
+/// 利きを数え直さないため、1 回の展開の間だけ覚えておく。展開ごとに表を消さず、世代で区別する。
+pub(super) struct AttackCounts {
+    generation: u32,
+    filled: [u32; Square::NUM],
+    counts: [(u8, u8); Square::NUM],
+}
+
+impl Default for AttackCounts {
+    fn default() -> Self {
+        Self {
+            generation: 1,
+            filled: [0; Square::NUM],
+            counts: [(0, 0); Square::NUM],
+        }
+    }
+}
+
+impl ExpandCache for AttackCounts {
+    fn begin(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.filled = [0; Square::NUM];
+            self.generation = 1;
+        }
+    }
+}
+
+impl AttackCounts {
+    fn get(&mut self, pos: &Position, sq: Square) -> (u32, u32) {
+        let i = sq.index();
+        if self.filled[i] != self.generation {
+            let us = pos.side_to_move();
+            let attackers = pos.attackers_to(sq);
+            self.counts[i] = (
+                (attackers & pos.pieces_c(us)).count() as u8,
+                (attackers & pos.pieces_c(!us)).count() as u8,
+            );
+            self.filled[i] = self.generation;
+        }
+        let (ours, theirs) = self.counts[i];
+        (u32::from(ours), u32::from(theirs))
+    }
+}
+
 impl MateState for Position {
     type Mv = Move;
+    type ExpandCache = AttackCounts;
 
     fn key(&self) -> u64 {
         Position::key(self)
@@ -168,7 +238,7 @@ impl MateState for Position {
         }
     }
 
-    fn delay_key(&self, m: Move, or_node: bool) -> Option<(u16, u8)> {
+    fn delay_key(&self, m: Move, or_node: bool, cache: &mut AttackCounts) -> Option<(u16, u8)> {
         let us = self.side_to_move();
         if m.is_drop() {
             if or_node {
@@ -185,7 +255,7 @@ impl MateState for Position {
             };
             // 受け方の駒の利きが無い升への合駒は、どこに打っても大差ないので 1 組にまとめる。
             // 同じ升への合駒は駒によらず同じ組に入れ、安い駒から読む
-            let group = if self.attackers_to_c(m.to(), us).is_empty() {
+            let group = if cache.get(self, m.to()).0 == 0 {
                 DELAY_GROUP_UNSUPPORTED_DROP
             } else {
                 DELAY_GROUP_DROP + m.to().index() as u16
@@ -284,18 +354,16 @@ impl MateState for Position {
         }
     }
 
-    fn initial_pn_dn(&self, m: Move, or_node: bool) -> (u32, u32) {
+    fn initial_pn_dn(&self, m: Move, or_node: bool, cache: &mut AttackCounts) -> (u32, u32) {
         if !or_node {
             return (1, 1);
         }
         // 王手の後の局面の見積もり (GPS 将棋 / KomoringHeights の df-pn+ と同じ考え方)。
         // 王手した升に受け方の利きが多いほど証明しにくく、攻め方の利きが多いほど反証しにくい。
         // 受け方の応手の側は見積もらない (見積もると詰む問題でもノードが増える)。
-        let us = self.side_to_move();
         let to = m.to();
-        let attackers = self.attackers_to(to);
-        let ours = (attackers & self.pieces_c(us)).count() + u32::from(m.is_drop());
-        let theirs = (attackers & self.pieces_c(!us)).count();
+        let (ours, theirs) = cache.get(self, to);
+        let ours = ours + u32::from(m.is_drop());
         let mut pn = PNDN_UNIT;
         let mut dn = PNDN_UNIT;
         if theirs >= 2 {

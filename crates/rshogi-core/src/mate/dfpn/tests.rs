@@ -436,29 +436,29 @@ fn initial_values_prefer_checks_the_defender_cannot_answer_cheaply() {
     // 玉頭への金打ちは攻め方の利き (5c の歩) で支えられ、受け方の利きは玉だけ: 反証しにくい
     let pos = position("4k4/9/4P4/9/9/9/9/9/4K4 b G 1");
     let supported = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(supported, true), (2, 4));
+    assert_eq!(pos.initial_pn_dn(supported, true, &mut Default::default()), (2, 4));
     // 支えの無い王手は証明しにくい
     let pos = position("4k4/9/9/9/9/9/9/9/4K4 b G 1");
     let bare = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(bare, true), (4, 2));
+    assert_eq!(pos.initial_pn_dn(bare, true, &mut Default::default()), (4, 2));
     // 受け方の利きが 2 つある升 (玉と金) への王手は、攻め方の利きが足りなければさらに証明しにくい
     let pos = position("4k4/5g3/4P4/9/9/9/9/9/4K4 b G 1");
     let defended = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(defended, true), (6, 2));
+    assert_eq!(pos.initial_pn_dn(defended, true, &mut Default::default()), (6, 2));
     // 攻め方の利きが足りなくても、金銀 (成銀を含む) を取る王手は反証しにくく、ほかの駒を取る王手は証明しにくい
     let pos = position("3gk4/9/9/9/9/9/9/9/3RK4 b - 1");
     let takes_gold = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(takes_gold, true), (2, 4));
+    assert_eq!(pos.initial_pn_dn(takes_gold, true, &mut Default::default()), (2, 4));
     let pos = position("3+sk4/9/9/9/9/9/9/9/3RK4 b - 1");
     let takes_promoted_silver = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(takes_promoted_silver, true), (2, 4));
+    assert_eq!(pos.initial_pn_dn(takes_promoted_silver, true, &mut Default::default()), (2, 4));
     let pos = position("3nk4/9/9/9/9/9/9/9/3RK4 b - 1");
     let takes_knight = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(takes_knight, true), (4, 2));
+    assert_eq!(pos.initial_pn_dn(takes_knight, true, &mut Default::default()), (4, 2));
     // 受け方の応手は見積もらない
     let pos = position("4k4/4G4/9/9/9/9/9/9/4K4 w - 1");
     let capture = pos.to_move(Move::from_usi("5a5b").unwrap()).unwrap();
-    assert_eq!(pos.initial_pn_dn(capture, false), (1, 1));
+    assert_eq!(pos.initial_pn_dn(capture, false, &mut Default::default()), (1, 1));
 }
 
 #[test]
@@ -971,6 +971,7 @@ fn node_key(v: u32) -> u64 {
 
 impl MateState for Graph {
     type Mv = u32;
+    type ExpandCache = ();
 
     fn key(&self) -> u64 {
         node_key(self.node())
@@ -1002,7 +1003,7 @@ impl MateState for Graph {
         out.extend_from_slice(&self.edges[self.node() as usize]);
     }
 
-    fn delay_key(&self, m: u32, _or_node: bool) -> Option<(u16, u8)> {
+    fn delay_key(&self, m: u32, _or_node: bool, _cache: &mut ()) -> Option<(u16, u8)> {
         (self.delay_groups != 0).then(|| ((m % self.delay_groups) as u16, m as u8))
     }
 
@@ -1030,7 +1031,7 @@ impl MateState for Graph {
         None
     }
 
-    fn initial_pn_dn(&self, m: u32, _or_node: bool) -> (u32, u32) {
+    fn initial_pn_dn(&self, m: u32, _or_node: bool, _cache: &mut ()) -> (u32, u32) {
         // 初期値が一様でなくても結論が変わらないことを確かめるため、節点番号から散らす
         (1 + m % 3, 1 + m / 3 % 3)
     }

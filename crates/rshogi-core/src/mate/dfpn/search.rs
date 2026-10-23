@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::MateProgress;
 use super::state::FULL_HAND;
-use super::state::MateState;
+use super::state::{ExpandCache, MateState};
 use super::table::{MateTable, PN_INF, PN_MAX_FINITE, TableKey, TableValue};
 use crate::time::Instant;
 use crate::types::{Color, Hand, PieceType};
@@ -120,6 +120,8 @@ struct Child<M> {
     hand: Hand,
     /// 置換表に無く、まだ一度も探索していない子 (TCA の延長を戻す判定に使う)
     first_visit: bool,
+    /// 子を探索するとき 1 手詰めを調べるか (`NodeArgs::try_mate_1ply`)
+    try_mate_1ply: bool,
     /// 現局面の pn/dn に数えるか。確定した子は常に数える。後回しの組で、組の中の前に確定していない
     /// 手がある確定していない手は数えない。
     active: bool,
@@ -147,6 +149,9 @@ pub(super) struct NodeArgs {
     pub thdn: u32,
     /// この局面から詰ませる手数の上限。`NO_LEN_LIMIT` は無制限。
     pub len_limit: u16,
+    /// 攻め方の局面で 1 手詰めを調べるか。`None` なら置換表を引いて決める。親が子を展開したときに
+    /// 引いた結果を渡すと、同じ局面を引き直さずに済む。
+    pub try_mate_1ply: Option<bool>,
 }
 
 /// 詰み手数の上限なし
@@ -161,6 +166,7 @@ impl NodeArgs {
             thpn: PN_INF,
             thdn: PN_INF,
             len_limit,
+            try_mate_1ply: None,
         }
     }
 
@@ -241,6 +247,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     capture_depth: Option<usize>,
     /// 置換表に無い子の pn/dn を局面から見積もるか (`MateState::initial_pn_dn`)
     estimate: bool,
+    /// 展開 1 回の間だけ使い回す計算結果
+    expand_cache: S::ExpandCache,
     /// 攻め方の局面の dn を子の和でなく WPNS で数えるときの、子 1 つあたりの加算量 (0 なら和で数える)
     weak_disproof_step: u64,
 }
@@ -292,6 +300,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             budget,
             capture_depth: None,
             estimate: false,
+            expand_cache: S::ExpandCache::default(),
             weak_disproof_step: 0,
         }
     }
@@ -412,6 +421,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             thpn: orig_thpn,
             thdn: orig_thdn,
             len_limit,
+            try_mate_1ply,
         } = args;
         let nodes_before = self.nodes;
 
@@ -422,7 +432,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         // 判定済みなので調べない。詰みが置換表にあるノードを読むのは詰み手順の復元だけで、
         // そこでは 1 手詰めなら子を展開せずに済む。
         if or_node
-            && self.table.probe::<PIECES>(key).is_none_or(|v| v.pn == 0)
+            && try_mate_1ply
+                .unwrap_or_else(|| self.table.probe::<PIECES>(key).is_none_or(|v| v.pn == 0))
             && let Some(proof) = if PIECES {
                 st.mate_1ply_with_proof().map(|(_, proof)| proof)
             } else {
@@ -485,7 +496,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 thpn: child_thpn,
                 thdn: child_thdn,
                 len_limit: args.child_len_limit(),
+                try_mate_1ply: Some(child.try_mate_1ply),
             };
+            // 一度探索した子は 1 手詰めでないと分かっている (1 手詰めなら確定している)
+            child.try_mate_1ply = false;
             st.do_move(mv);
             let child_result = self.search(st, child_args, inc_flag);
             st.undo_move(mv);
@@ -536,6 +550,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     fn expand(&mut self, st: &S, depth: usize, or_node: bool, child_len_limit: u16) -> bool {
         self.scratch.moves.clear();
         st.generate(or_node, &mut self.scratch.moves);
+        self.expand_cache.begin();
         // 置換表を引く前に子の bucket をまとめて読み込ませ、キャッシュミスの待ちを重ねる
         self.scratch.child_keys.clear();
         for &mv in &self.scratch.moves {
@@ -563,6 +578,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 limited: false,
                 hand: child_table_key.hand,
                 first_visit: true,
+                try_mate_1ply: true,
                 active: true,
                 next: NO_NEXT,
             };
@@ -577,6 +593,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 let probed = self.table.probe::<PIECES>(child_table_key);
                 if let Some(v) = probed {
                     child.first_visit = false;
+                    child.try_mate_1ply = v.pn == 0;
                     if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
                         has_old_child = true;
                     }
@@ -589,7 +606,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                         child.hand = v.hand;
                     }
                     // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)
-                    _ if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
+                    _ if self.estimate => {
+                        (child.pn, child.dn) = st.initial_pn_dn(mv, or_node, &mut self.expand_cache)
+                    }
                     _ => {}
                 }
             }
@@ -606,7 +625,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let start = self.scratch.children.len() - n;
         self.scratch.delay_order.clear();
         for (i, &mv) in self.scratch.moves.iter().enumerate() {
-            if let Some((group, rank)) = st.delay_key(mv, or_node) {
+            if let Some((group, rank)) = st.delay_key(mv, or_node, &mut self.expand_cache) {
                 self.scratch.delay_order.push((group, rank, i as u16));
             }
         }
@@ -655,7 +674,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// `count_disproof_weakly` なら OR の dn は WPNS で数える。
     fn aggregate(&self, start: usize, or_node: bool) -> NodeResult {
         let children = &self.scratch.children[start..];
-        let weak = or_node && self.weak_disproof_step != 0;
+        let and_step = and_wpns();
+        let weak = (or_node && self.weak_disproof_step != 0)
+            || (!or_node && and_step != 0 && self.weak_disproof_step != 0);
+        let step = if or_node {
+            self.weak_disproof_step
+        } else {
+            and_step
+        };
         let mut min = PN_INF;
         let mut sum = 0u64;
         let mut has_inf = false;
@@ -670,7 +696,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             nonzero += u64::from(delta != 0);
         }
         let summed = if weak {
-            let others = nonzero.saturating_sub(1) * self.weak_disproof_step;
+            let others = nonzero.saturating_sub(1) * step;
             clamp_sum(u64::from(max) + others, has_inf)
         } else {
             clamp_sum(sum, has_inf)
@@ -723,8 +749,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             // 和で数えるときは thδ − (δ の和 − 最善の子の δ)。ループ条件 (δ の和 < thδ) より正になる。
             // WPNS では thδ − (δ が 0 でない子の数 − 1) × 加算量: 最善の子の δ がこれに届けば
             // 現局面の δ が thδ に届く
+            let and_step = and_wpns();
             let others = if or_node && self.weak_disproof_step != 0 {
                 nonzero.saturating_sub(1) * self.weak_disproof_step
+            } else if !or_node && and_step != 0 && self.weak_disproof_step != 0 {
+                nonzero.saturating_sub(1) * and_step
             } else {
                 sum_delta - u64::from(delta(&children[best]))
             };
@@ -872,4 +901,10 @@ fn hand_min(a: Hand, b: Hand) -> Hand {
     PieceType::HAND_PIECES
         .iter()
         .fold(a, |h, &pt| h.set(pt, a.count(pt).min(b.count(pt))))
+}
+
+fn and_wpns() -> u64 {
+    use std::sync::OnceLock;
+    static M: OnceLock<u64> = OnceLock::new();
+    *M.get_or_init(|| std::env::var("DFPN_ANDW").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
 }
