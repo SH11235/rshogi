@@ -17,10 +17,15 @@ fn rescore_rejects_later_input_alias_before_loading_model_or_writing_outputs() {
     fs::hard_link(&first, output_dir.join("second.psv")).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_rescore_psv"))
-        .arg("--input").arg(&first).arg(&second)
-        .arg("--nnue").arg(&model)
-        .arg("--output-dir").arg(&output_dir)
-        .output().unwrap();
+        .arg("--input")
+        .arg(&first)
+        .arg(&second)
+        .arg("--nnue")
+        .arg(&model)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .output()
+        .unwrap();
     let error = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success());
     assert!(error.contains("Output path resolves to input file"), "{error}");

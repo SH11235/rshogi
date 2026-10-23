@@ -128,17 +128,25 @@ pub fn ensure_safe_output_file(
     for input in inputs {
         let protected = same_file::Handle::from_path(input)
             .with_context(|| format!("Failed to inspect input {}", input.display()))?;
-        anyhow::ensure!(actual != protected, "Output path resolves to input file: {}", output.display());
+        anyhow::ensure!(
+            actual != protected,
+            "Output path resolves to input file: {}",
+            output.display()
+        );
     }
     for other in other_outputs {
         match same_file::Handle::from_path(other) {
             Ok(protected) => anyhow::ensure!(
                 actual != protected,
                 "Output paths resolve to the same file: {} and {}",
-                output.display(), other.display()
+                output.display(),
+                other.display()
             ),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("Failed to inspect output {}", other.display())),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect output {}", other.display()));
+            }
         }
     }
     Ok(())
