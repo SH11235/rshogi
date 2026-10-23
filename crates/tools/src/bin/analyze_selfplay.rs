@@ -376,6 +376,9 @@ impl StartposStats {
 /// 対戦カード（先手, 後手）ごとの集計
 #[derive(Default)]
 struct MatchupStats {
+    side_totals_unknown: bool,
+    a_sente_total: u32,
+    b_sente_total: u32,
     total: u32,
     done: u32,
     black_wins: u32,
@@ -408,6 +411,9 @@ struct EngineStats {
 /// 直接対決の集計（先後合算、正規化済み）
 #[derive(Default)]
 struct HeadToHeadStats {
+    side_totals_unknown: bool,
+    left_sente_total: u32,
+    left_gote_total: u32,
     done: u32,
     left_wins: u32,
     right_wins: u32,
@@ -422,6 +428,9 @@ struct HeadToHeadStats {
 
 #[derive(Default)]
 struct FileExtraStats {
+    side_totals_unknown: bool,
+    a_sente_total: u32,
+    b_sente_total: u32,
     csa_single_game: bool,
     by_startpos: Option<StartposStats>,
     incomplete_pairs: usize,
@@ -456,6 +465,11 @@ fn record_valid_result(
 ) {
     if let Some(by_startpos) = &mut stats.extra.by_startpos {
         by_startpos.record(result);
+    }
+    if slot == 0 {
+        stats.extra.a_sente_total += 1;
+    } else {
+        stats.extra.b_sente_total += 1;
     }
     stats.extra.completed_games += 1;
     stats.extra.total_plies += result.plies as u64;
@@ -745,13 +759,41 @@ fn parse_summary_file(path: &str) -> Result<FileResult> {
             b_sente_games: 0,
             b_sente_wins: 0,
             retry: RetryAnalysisStats::default(),
-            extra: FileExtraStats::default(),
+            extra: FileExtraStats {
+                side_totals_unknown: true,
+                ..FileExtraStats::default()
+            },
         });
     }
     bail!("空のsummaryファイル: {path}");
 }
 
+#[derive(Debug)]
+struct InvalidCsaLog;
+
+impl std::fmt::Display for InvalidCsaLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CSA単局ログが不正です")
+    }
+}
+
+impl std::error::Error for InvalidCsaLog {}
+
 fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
+    let mut csa_single_game = false;
+    let result = parse_normal_file_inner(path, by_startpos, &mut csa_single_game);
+    if csa_single_game {
+        result.context(InvalidCsaLog)
+    } else {
+        result
+    }
+}
+
+fn parse_normal_file_inner(
+    path: &str,
+    by_startpos: bool,
+    csa_single_game: &mut bool,
+) -> Result<FileResult> {
     let file =
         std::fs::File::open(path).with_context(|| format!("ファイルを開けません: {path}"))?;
     let reader = BufReader::new(file);
@@ -802,6 +844,7 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
                         == Some(
                             "csa_client: opponent path is reported as remote name; usi_options are for self-engine only",
                         ));
+            *csa_single_game = stats.extra.csa_single_game;
             if stats.extra.csa_single_game && games != 1 {
                 bail!("CSA単局ログのsettings.gamesは1である必要があります: {path}");
             }
@@ -1587,6 +1630,9 @@ fn main() -> Result<()> {
                 }
                 let key = (result.black.clone(), result.white.clone());
                 let stats = matchups.entry(key).or_default();
+                stats.side_totals_unknown |= result.extra.side_totals_unknown;
+                stats.a_sente_total += result.extra.a_sente_total;
+                stats.b_sente_total += result.extra.b_sente_total;
                 stats.total += result.games;
                 stats.done += result.done;
                 stats.black_wins += result.black_wins;
@@ -1623,8 +1669,9 @@ fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("警告: {path}: {e}");
-                extra.input_issues.push(format!("{path}: {e}"));
+                has_csa_files |= e.is::<InvalidCsaLog>();
+                eprintln!("警告: {path}: {e:#}");
+                extra.input_issues.push(format!("{path}: {e:#}"));
             }
         }
     }
@@ -1685,6 +1732,7 @@ fn main() -> Result<()> {
             (w.clone(), b.clone())
         };
         let h = head_to_head.entry((left, right)).or_default();
+        h.side_totals_unknown |= v.side_totals_unknown;
         h.done += v.done;
         h.draws += v.draws;
         if b <= w {
@@ -1692,6 +1740,8 @@ fn main() -> Result<()> {
             h.left_wins += v.black_wins;
             h.right_wins += v.white_wins;
             // a(=b=left)の先手データ
+            h.left_sente_total += v.a_sente_total;
+            h.left_gote_total += v.b_sente_total;
             h.left_sente_games += v.a_sente_games;
             h.left_sente_wins += v.a_sente_wins;
             // a(=b=left)の後手データ: 相手(w)が先手の局
@@ -1702,6 +1752,8 @@ fn main() -> Result<()> {
             h.right_wins += v.black_wins;
             h.left_wins += v.white_wins;
             // w(=left)の先手データ: b_sente は meta.white が先手の局
+            h.left_sente_total += v.b_sente_total;
+            h.left_gote_total += v.a_sente_total;
             h.left_sente_games += v.b_sente_games;
             h.left_sente_wins += v.b_sente_wins;
             // w(=left)の後手データ: a(=b=right)が先手の局
@@ -1983,8 +2035,6 @@ fn print_text(
             sprt.map(|output| output.base.as_str()),
         );
         let total = v.left_wins + v.right_wins + v.draws;
-        let half = v.done / 2;
-        let half_up = half + v.done % 2;
         let (
             primary,
             secondary,
@@ -2007,8 +2057,8 @@ fn print_text(
                 v.left_gote_games - v.left_gote_wins,
                 v.left_sente_games,
                 v.left_sente_games - v.left_sente_wins,
-                half,
-                half_up,
+                v.left_gote_total,
+                v.left_sente_total,
                 1.0,
             )
         } else {
@@ -2021,8 +2071,8 @@ fn print_text(
                 v.left_sente_wins,
                 v.left_gote_games,
                 v.left_gote_wins,
-                half_up,
-                half,
+                v.left_sente_total,
+                v.left_gote_total,
                 -1.0,
             )
         };
@@ -2069,7 +2119,9 @@ fn print_text(
         );
 
         // 先手/後手別勝率
-        if primary_sente_games > 0 || primary_gote_games > 0 {
+        if v.side_totals_unknown {
+            println!("    先後別集計:不明（先後情報のないsummaryを含む）");
+        } else if primary_sente_total > 0 || primary_gote_total > 0 {
             let primary_sente = format_decisive_rate(
                 "先手",
                 primary_sente_wins,

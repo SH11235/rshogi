@@ -136,7 +136,13 @@ move 行を全件保持せず、処理中の対局には先頭40手を `[u16; 40
 
 CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "csa_client"`、または
 過去ログの CSA client 固有 `engine_cmd.note` で識別する。CSA 入力は pentanomial
-と SPRT の対象外で、`--sprt` は `--allow-partial` 指定時も拒否する。
+と SPRT の対象外で、nElo は tournament の有効な対局ペアだけから計算する。
+`--sprt` は `--allow-partial` 指定時も、CSA の result が欠落・不正な場合も拒否する。
+result がまだない live CSA ログは不完全入力となり、通常は非0で終了する。
+`--allow-partial` では他の有効な入力があればその分だけ集計できる。
+
+通常のテキスト表示の先後別総局数には引分も含め、決着局勝率の分母からは引分を除く。
+先後情報のない summary を含む対戦カードでは先後別集計を不明と表示する。
 
 旧 CSA ログの置換済み meta ラベルと元の名前の `winner` は、勝敗の先後と
 名前の置換結果が一致するときだけ対応付ける。置換済み先後ラベルが同じ場合は
