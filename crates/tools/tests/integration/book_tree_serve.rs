@@ -90,6 +90,16 @@ fn serve_command(
     multipv: usize,
     out_root: &Path,
 ) -> Command {
+    serve_command_with_engine(state, config, max_restarts, multipv, out_root, &engine_path())
+}
+fn serve_command_with_engine(
+    state: &Path,
+    config: &Path,
+    max_restarts: usize,
+    multipv: usize,
+    out_root: &Path,
+    engine: &Path,
+) -> Command {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -100,7 +110,7 @@ fn serve_command(
         .args(["tree", "serve", "--state"])
         .arg(state)
         .arg("--engine")
-        .arg(engine_path())
+        .arg(engine)
         .arg("--engine-option")
         .arg(format!("FixtureFile={}", prepare_config(config).display()))
         .arg("--engine-option")
@@ -1459,4 +1469,125 @@ fn trace_failures_are_alerted_once_and_readings_continue_until_the_trace_can_be_
         alerts(state).lines().filter(|l| l.contains("探索の記録を書けません")).count(),
         1
     );
+}
+
+fn protocol(state: &Path) -> Vec<(u32, String)> {
+    std::fs::read_to_string(state.join("protocol.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn worker_recreation_rejects_changed_or_missing_inputs_without_appending() {
+    for case in [
+        "model",
+        "model-missing",
+        "engine",
+        "engine-missing",
+        "implicit-new",
+        "implicit-missing",
+        "explicit",
+        "explicit-missing",
+        "unchanged",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = &dir.path().join("state");
+        std::fs::create_dir(state).unwrap();
+        std::fs::write(state.join("workers"), "1").unwrap();
+        let config = fast_fixture(state);
+        let engine = dir.path().join(format!("engine{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(engine_path(), &engine).unwrap();
+        let implicit = dir.path().join("spsa.params");
+        let explicit = dir.path().join("coeff.bin");
+        std::fs::write(&explicit, "A").unwrap();
+        if case == "implicit-missing" {
+            std::fs::write(&implicit, "A").unwrap();
+        }
+        let mut command = serve_command_with_engine(state, &config, 3, 3, dir.path(), &engine);
+        command
+            .arg("--engine-option")
+            .arg(format!("LS_PROGRESS_COEFF={}", explicit.display()));
+        add_tree(state, "a");
+        let mut server = Server(command.spawn().unwrap());
+        wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
+        std::fs::write(state.join("workers"), "0").unwrap();
+        wait_for(|| progress(state)["workers"].as_array().is_some_and(Vec::is_empty));
+        let before = std::fs::read(state.join("journal.jsonl")).unwrap();
+        assert!(!before.is_empty());
+        let old_log = protocol(state);
+        let pids: BTreeSet<_> = old_log.iter().map(|(pid, _)| *pid).collect();
+        assert!(!pids.is_empty());
+        for pid in pids {
+            assert!(old_log.contains(&(pid, "quit".into())), "{case}");
+        }
+        match case {
+            "model" => std::fs::write(&config, "B").unwrap(),
+            "model-missing" => std::fs::remove_file(&config).unwrap(),
+            "engine" => std::fs::write(&engine, "B").unwrap(),
+            "engine-missing" => std::fs::remove_file(&engine).unwrap(),
+            "implicit-new" => std::fs::write(&implicit, "B").unwrap(),
+            "implicit-missing" => std::fs::remove_file(&implicit).unwrap(),
+            "explicit" => std::fs::write(&explicit, "B").unwrap(),
+            "explicit-missing" => std::fs::remove_file(&explicit).unwrap(),
+            "unchanged" => std::fs::write(&explicit, "A").unwrap(),
+            _ => unreachable!(),
+        }
+        add_root(state, "b", "4k4/9/9/9/9/9/9/9/2K6 w -");
+        std::fs::write(state.join("workers"), "1").unwrap();
+        if case == "unchanged" {
+            wait_for(|| out(state, "b", "w").join("own_nodes.tsv").exists());
+            let after = std::fs::read(state.join("journal.jsonl")).unwrap();
+            assert!(after.starts_with(&before) && after.len() > before.len());
+            stop(state, &mut server);
+            let log = protocol(state);
+            let pids: BTreeSet<_> = log.iter().map(|(pid, _)| *pid).collect();
+            assert_eq!(pids.len(), 2);
+            for pid in pids {
+                assert!(log.contains(&(pid, "quit".into())));
+            }
+        } else {
+            wait_for(|| server.0.try_wait().unwrap().is_some());
+            assert!(!server.0.wait().unwrap().success(), "{case}");
+            assert!(alerts(state).contains("入力の指紋"), "{case}");
+            assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap(), before, "{case}");
+            assert_eq!(protocol(state), old_log, "{case}");
+        }
+    }
+}
+
+#[test]
+fn persistent_replacement_during_initialization_stops_before_search_and_reaps_engine() {
+    for phase in ["initial", "newgame"] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = &dir.path().join("state");
+        std::fs::create_dir(state).unwrap();
+        std::fs::write(state.join("workers"), "1").unwrap();
+        let config = fast_fixture(state);
+        let marker = state.join("ready-entered");
+        let release = state.join("ready-release");
+        let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        data["ready_phase"] = json!(phase);
+        data["ready_marker"] = json!(marker);
+        data["ready_release"] = json!(release);
+        std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+        add_tree(state, "a");
+        let mut server = start(state, &config);
+        wait_for(|| marker.exists());
+        let before = std::fs::read(state.join("journal.jsonl")).unwrap();
+        std::fs::write(&config, "B").unwrap();
+        std::fs::write(&release, "").unwrap();
+        wait_for(|| server.0.try_wait().unwrap().is_some());
+        assert!(!server.0.wait().unwrap().success());
+        assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap(), before);
+        assert!(alerts(state).contains("入力の指紋"));
+        let log = protocol(state);
+        assert!(!log.iter().any(|(_, line)| line.starts_with("go ")));
+        let pids: BTreeSet<_> = log.iter().map(|(pid, _)| *pid).collect();
+        assert_eq!(pids.len(), 1);
+        for pid in pids {
+            assert!(log.contains(&(pid, "quit".into())));
+        }
+    }
 }

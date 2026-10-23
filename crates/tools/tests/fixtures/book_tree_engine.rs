@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             log.write_all(format!("[{}, {:?}]\n", std::process::id(), line).as_bytes())?;
         }
         if line == "usi" {
-            for name in ["FixtureFile", "EvalFile", "Threads", "USI_Hash", "MultiPV"] {
+            for name in ["FixtureFile", "EvalFile", "LS_PROGRESS_COEFF", "Threads", "USI_Hash", "MultiPV"] {
                 println!("option name {name} type string default empty");
             }
             println!("usiok");
@@ -29,6 +29,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             newgame = true;
             ready = false;
         } else if line == "isready" {
+            let phase = if newgame { "newgame" } else { "initial" };
+            if config.get("ready_phase").is_some_and(|s| s == phase) {
+                fs::write(config.get("ready_marker").ok_or("missing ready_marker")?, "")?;
+                let release = config.get("ready_release").ok_or("missing ready_release")?;
+                let started = Instant::now();
+                while !std::path::Path::new(release).try_exists()? {
+                    if started.elapsed() > Duration::from_secs(30) {
+                        return Err("isready barrier timeout".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             ready = newgame;
             println!("readyok");
         } else if let Some(sfen) = line.strip_prefix("position sfen ") {

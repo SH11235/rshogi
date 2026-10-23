@@ -202,6 +202,26 @@ impl std::fmt::Display for SpawnFailed {
 }
 impl std::error::Error for SpawnFailed {}
 
+#[derive(Debug)]
+struct InputsChanged(anyhow::Error);
+impl std::fmt::Display for InputsChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "入力の指紋を確認できません。serve を停止します: {:#}", self.0)
+    }
+}
+impl std::error::Error for InputsChanged {}
+
+fn verify_inputs(args: &super::ReadingArgs, expected: &Settings) -> Result<()> {
+    let actual = Settings::new(args).map_err(InputsChanged)?;
+    if !expected.same_condition(&actual) {
+        return Err(InputsChanged(anyhow::anyhow!(
+            "engine/model/parameter が開始時の条件と一致しません"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 fn spawn_worker(
     id: usize,
     args: &ServeArgs,
@@ -210,14 +230,14 @@ fn spawn_worker(
 ) -> Worker {
     let (tx, rx) = mpsc::channel::<Option<Job>>();
     let settings = settings.clone();
-    let path = args.reading.engine.clone();
+    let reading_args = args.reading.clone();
     let stall = Duration::from_secs(args.stall_secs);
     let restart = Arc::new(Mutex::new(Restart::default()));
     let restart_worker = restart.clone();
     let tracing = args.trace_dir.is_some();
     let handle = thread::spawn(move || {
         let cfg = EngineConfig {
-            path,
+            path: reading_args.engine.clone(),
             args: Vec::new(),
             threads: 1,
             hash_mb: settings.hash,
@@ -232,9 +252,13 @@ fn spawn_worker(
         while let Ok(Some(job)) = rx.recv() {
             let mut trace = None;
             let result = (|| -> Result<Reading> {
-                if engine.is_none() {
-                    let process =
-                        EngineProcess::spawn(&cfg, format!("tree-{id}")).map_err(SpawnFailed)?;
+                let starting = engine.is_none();
+                if starting {
+                    verify_inputs(&reading_args, &settings)?;
+                    let process = EngineProcess::spawn(&cfg, format!("tree-{id}"));
+                    // 初期化が失敗しても入力変更を局面の再試行に紛れ込ませない。
+                    verify_inputs(&reading_args, &settings)?;
+                    let process = process.map_err(SpawnFailed)?;
                     for name in settings.options.keys() {
                         if !process.advertises_option(name) {
                             bail!("engine が option を広告していません: {name}");
@@ -243,7 +267,11 @@ fn spawn_worker(
                     engine = Some(process);
                 }
                 let engine = engine.as_mut().context("engine がありません")?;
-                engine.new_game()?;
+                let initialized = engine.new_game();
+                if starting {
+                    verify_inputs(&reading_args, &settings)?;
+                }
+                initialized?;
                 engine.write_line(&format!("position sfen {} {}", job.key, job.ply))?;
                 engine.write_line(&format!("go nodes {}", settings.nodes))?;
                 let started_at = chrono::Utc::now();
@@ -833,7 +861,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 }
                             }
                             Err(error) => {
-                                if explicit {
+                                if error.is::<InputsChanged>() {
+                                    alerts.push(&format!("{error:#}"));
+                                    return Err(error);
+                                } else if explicit {
                                     alerts.push(&format!(
                                         "制御ファイルによる RESTART worker={id} key={key}"
                                     ));
@@ -1102,7 +1133,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         for live in &lives {
             let tree = &live.tree;
             if live.prepared && !tree.finished && !tree.failed {
-                remove_candidates(&tree.def.out)?;
+                if let Err(error) = remove_candidates(&tree.def.out) {
+                    alerts.push(&format!("候補の削除失敗: {error:#}"));
+                }
                 monitor(&tree.def.out.join("STATUS"), "FAIL\n");
             }
         }
@@ -1161,6 +1194,45 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines, ["{\"key\":\"tor", "{\"key\":\"a\"}", "{\"key\":\"b\"}"]);
+    }
+
+    #[test]
+    fn input_verification_covers_directory_members_and_explicit_spsa() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model");
+        let params = dir.path().join("explicit.params");
+        std::fs::write(&engine, "engine").unwrap();
+        std::fs::create_dir(&model).unwrap();
+        let weights = model.join("nn.bin");
+        std::fs::write(&weights, "weights").unwrap();
+        std::fs::write(&params, "params").unwrap();
+        let args = super::super::ReadingArgs {
+            engine,
+            engine_options: vec![
+                format!("EvalDir={}", model.display()),
+                format!("SPSAParamsFile={}", params.display()),
+            ],
+            nodes: 100,
+            multipv: 1,
+            hash: 16,
+        };
+        let settings = Settings::new(&args).unwrap();
+        verify_inputs(&args, &settings).unwrap();
+        for path in [&weights, &params] {
+            let original = std::fs::read(path).unwrap();
+            std::fs::write(path, "changed").unwrap();
+            assert!(verify_inputs(&args, &settings).unwrap_err().is::<InputsChanged>());
+            std::fs::remove_file(path).unwrap();
+            assert!(verify_inputs(&args, &settings).unwrap_err().is::<InputsChanged>());
+            std::fs::write(path, original).unwrap();
+            verify_inputs(&args, &settings).unwrap();
+        }
+        std::fs::write(model.join("new.bin"), "new").unwrap();
+        assert!(verify_inputs(&args, &settings).unwrap_err().is::<InputsChanged>());
+        std::fs::remove_file(model.join("new.bin")).unwrap();
+        verify_inputs(&args, &settings).unwrap();
+        assert_eq!(Settings::new(&args).unwrap().fingerprint, settings.fingerprint);
     }
 
     #[test]
