@@ -2058,6 +2058,7 @@ fn graceful_shutdown_prunes_observer_subscribers() {
 async fn spawn_server_with_reconnect_grace(
     tag: &str,
     grace: Duration,
+    clock: Option<ClockSpec>,
 ) -> (
     std::net::SocketAddr,
     PathBuf,
@@ -2095,6 +2096,8 @@ async fn spawn_server_with_reconnect_grace(
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
         reconnect_grace_duration: grace,
+        clock: clock.unwrap_or_default(),
+        time_margin_ms: 0,
         ..ServerConfig::sensible_defaults()
     };
     let state = Rc::new(build_state(
@@ -2126,20 +2129,32 @@ async fn establish_match_and_capture_alice_token(
     rb: &mut BufReader<OwnedReadHalf>,
     wb: &mut OwnedWriteHalf,
 ) -> (String, String) {
+    let (game_id, alice_token, _) = establish_match_and_capture_tokens(ra, wa, rb, wb).await;
+    (game_id, alice_token)
+}
+
+async fn establish_match_and_capture_tokens(
+    ra: &mut BufReader<OwnedReadHalf>,
+    wa: &mut OwnedWriteHalf,
+    rb: &mut BufReader<OwnedReadHalf>,
+    wb: &mut OwnedWriteHalf,
+) -> (String, String, String) {
     send_line(wa, "LOGIN alice+g1+black pw").await;
     send_line(wb, "LOGIN bob+g1+white pw").await;
     assert_eq!(read_line_raw(ra).await.unwrap(), "LOGIN:alice OK");
     assert_eq!(read_line_raw(rb).await.unwrap(), "LOGIN:bob OK");
     let alice_lines = drain_game_summary(ra).await;
-    let _ = drain_game_summary(rb).await;
+    let bob_lines = drain_game_summary(rb).await;
     let game_id = extract_summary_field(&alice_lines, "Game_ID").expect("Game_ID line");
     let alice_token =
         extract_summary_field(&alice_lines, "Reconnect_Token").expect("Reconnect_Token line");
+    let bob_token =
+        extract_summary_field(&bob_lines, "Reconnect_Token").expect("Reconnect_Token line");
     send_line(wa, "AGREE").await;
     send_line(wb, "AGREE").await;
     let _ = read_until(ra, &format!("START:{game_id}")).await;
     let _ = read_until(rb, &format!("START:{game_id}")).await;
-    (game_id, alice_token)
+    (game_id, alice_token, bob_token)
 }
 
 #[test]
@@ -2148,7 +2163,8 @@ fn reconnect_grace_allows_disconnected_player_to_resume_with_valid_token() {
     // (Game_Summary 全文 + Reconnect_State ブロック) を受け取った後に対局を継続できる。
     run_local(|| async {
         let (addr, topdir, _state) =
-            spawn_server_with_reconnect_grace("reconnect_resume", Duration::from_secs(5)).await;
+            spawn_server_with_reconnect_grace("reconnect_resume", Duration::from_secs(5), None)
+                .await;
         let (mut ra, mut wa) = connect(addr).await;
         let (mut rb, mut wb) = connect(addr).await;
         let (game_id, alice_token) =
@@ -2208,7 +2224,8 @@ fn reconnect_grace_rejects_token_mismatch_and_preserves_pending_state() {
     // 再接続すれば対局を再開できる。
     run_local(|| async {
         let (addr, topdir, _state) =
-            spawn_server_with_reconnect_grace("reconnect_mismatch", Duration::from_secs(5)).await;
+            spawn_server_with_reconnect_grace("reconnect_mismatch", Duration::from_secs(5), None)
+                .await;
         let (mut ra, mut wa) = connect(addr).await;
         let (mut rb, mut wb) = connect(addr).await;
         let (game_id, alice_token) =
@@ -2259,9 +2276,12 @@ fn reconnect_grace_falls_back_to_abnormal_when_deadline_expires() {
     // 残留側に `#ABNORMAL` 経由の終局通知が届く。
     run_local(|| async {
         // grace を短く (300ms) してテスト時間を抑える。
-        let (addr, topdir, _state) =
-            spawn_server_with_reconnect_grace("reconnect_expired", Duration::from_millis(300))
-                .await;
+        let (addr, topdir, _state) = spawn_server_with_reconnect_grace(
+            "reconnect_expired",
+            Duration::from_millis(300),
+            None,
+        )
+        .await;
         let (mut ra, mut wa) = connect(addr).await;
         let (mut rb, mut wb) = connect(addr).await;
         let (_game_id, _alice_token) =
@@ -3220,7 +3240,8 @@ fn private_match_pending_session_unregister_avoids_stale_race() {
 fn reconnect_clock_keeps_counting_across_keepalive_and_repeated_reconnect() {
     run_local(|| async {
         let (addr, topdir, _state) =
-            spawn_server_with_reconnect_grace("reconnect_clock", Duration::from_secs(5)).await;
+            spawn_server_with_reconnect_grace("reconnect_clock", Duration::from_secs(5), None)
+                .await;
         let (mut ra, mut wa) = connect(addr).await;
         let (mut rb, mut wb) = connect(addr).await;
         let (game_id, token) =
@@ -3247,6 +3268,267 @@ fn reconnect_clock_keeps_counting_across_keepalive_and_repeated_reconnect() {
         }
         send_line(&mut wa, "%TORYO").await;
         read_until(&mut rb, "#WIN").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn off_turn_disconnect_keeps_moves_live_and_resumes_latest_position() {
+    run_local(|| async {
+        let (addr, topdir, state) = spawn_server_with_reconnect_grace(
+            "reconnect_active_move",
+            Duration::from_secs(5),
+            Some(ClockSpec::Countdown {
+                total_time_sec: 10,
+                byoyomi_sec: 0,
+            }),
+        )
+        .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        send_line(&mut wa, "+7776FU").await;
+        read_until(&mut rb, "+7776FU,T0").await;
+        drop(ra);
+        drop(wa);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(&mut wb, "-3334FU").await;
+        let echoed =
+            tokio::time::timeout(Duration::from_millis(800), read_until(&mut rb, "-3334FU,T0"))
+                .await
+                .expect("connected player's move must be confirmed before reconnect");
+        assert!(echoed.iter().any(|line| line == "-3334FU,T0"));
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let (mut resumed, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut resumed).await.unwrap(), "LOGIN:alice OK");
+        let summary = drain_game_summary(&mut resumed).await;
+        assert!(summary.iter().any(|line| line.starts_with("P4") && line.contains("-FU")));
+        let snapshot = read_until(&mut resumed, "END Reconnect_State").await;
+        assert!(snapshot.iter().any(|line| line == "Last_Move:-3334FU"));
+        assert!(snapshot.iter().any(|line| line == "Current_Turn:+"));
+        let main_ms: u64 = extract_summary_field(&snapshot, "Black_Time_Remaining_Ms")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let remaining_ms: u64 = extract_summary_field(&snapshot, "Current_Turn_Remaining_Ms")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(main_ms, 10_000);
+        assert!(remaining_ms > 0 && remaining_ms <= 9_800, "{remaining_ms}");
+        send_line(&mut writer, "%TORYO").await;
+        read_until(&mut rb, "#WIN").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.active_game_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let list = wait_for_file_text(&topdir.join("00LIST")).await;
+        assert_eq!(list.lines().filter(|line| line.contains(&game_id)).count(), 1);
+        let kifu = wait_for_csa_text(&topdir, &game_id).await;
+        assert_eq!(kifu.lines().filter(|line| *line == "-3334FU,T0").count(), 1);
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn grace_game_end_rejects_reconnect_without_sending_a_snapshot() {
+    run_local(|| async {
+        for reason in ["timeup", "grace", "resign"] {
+            let grace = if reason == "grace" {
+                Duration::from_millis(300)
+            } else {
+                Duration::from_secs(5)
+            };
+            let clock = if reason == "timeup" {
+                Some(ClockSpec::Countdown {
+                    total_time_sec: 1,
+                    byoyomi_sec: 0,
+                })
+            } else {
+                None
+            };
+            let (addr, topdir, state) =
+                spawn_server_with_reconnect_grace(&format!("reconnect_end_{reason}"), grace, clock)
+                    .await;
+            let (mut ra, mut wa) = connect(addr).await;
+            let (mut rb, mut wb) = connect(addr).await;
+            let (game_id, token) =
+                establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+            send_line(&mut wa, "+7776FU").await;
+            read_until(&mut rb, "+7776FU,T0").await;
+            drop(ra);
+            drop(wa);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if reason == "resign" {
+                send_line(&mut wb, "%TORYO").await;
+            }
+            let result = if reason == "grace" { "#WIN" } else { "#LOSE" };
+            let lines = tokio::time::timeout(Duration::from_secs(3), read_until(&mut rb, result))
+                .await
+                .unwrap();
+            let cause = match reason {
+                "timeup" => "#TIME_UP",
+                "grace" => "#ABNORMAL",
+                _ => "#RESIGN",
+            };
+            assert!(lines.iter().any(|line| line == cause), "{lines:?}");
+            let (mut retry, mut writer) = connect(addr).await;
+            send_line(&mut writer, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+                .await;
+            let reply = read_line_raw(&mut retry).await.unwrap();
+            assert!(reply.starts_with("LOGIN:incorrect reconnect_"), "{reply}");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while state.active_game_count() != 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let list = wait_for_file_text(&topdir.join("00LIST")).await;
+            assert_eq!(list.lines().filter(|line| line.contains(&game_id)).count(), 1);
+            assert!(list.contains(cause), "{list}");
+            let kifu = wait_for_csa_text(&topdir, &game_id).await;
+            assert_eq!(kifu.lines().filter(|line| *line == "+7776FU,T0").count(), 1);
+            let _ = tokio::fs::remove_dir_all(&topdir).await;
+        }
+    });
+}
+
+#[test]
+fn both_disconnected_players_still_finish_and_persist_once() {
+    run_local(|| async {
+        let (addr, topdir, state) = spawn_server_with_reconnect_grace(
+            "reconnect_both_closed",
+            Duration::from_secs(3),
+            None,
+        )
+        .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        drop(ra);
+        drop(wa);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        drop(rb);
+        drop(wb);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.active_game_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let list = wait_for_file_text(&topdir.join("00LIST")).await;
+        assert_eq!(list.lines().filter(|line| line.contains(&game_id)).count(), 1);
+        assert!(list.contains("#ABNORMAL"));
+        let (mut retry, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+            .await;
+        assert!(
+            read_line_raw(&mut retry)
+                .await
+                .unwrap()
+                .starts_with("LOGIN:incorrect reconnect_")
+        );
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn oversized_line_during_grace_aborts_without_recording_a_win() {
+    run_local(|| async {
+        let (addr, topdir, state) =
+            spawn_server_with_reconnect_grace("reconnect_oversized", Duration::from_secs(5), None)
+                .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        send_line(&mut wa, "+7776FU").await;
+        read_until(&mut rb, "+7776FU,T0").await;
+        drop(ra);
+        drop(wa);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wb.write_all(&vec![b'x'; 64 * 1024 + 1]).await.unwrap();
+        let mut byte = [0u8; 1];
+        let result = tokio::time::timeout(Duration::from_secs(2), rb.read(&mut byte))
+            .await
+            .expect("protocol violation must abort before the grace deadline");
+        match result {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted,
+                ) => {}
+            other => panic!("expected connection close, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.active_game_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!topdir.join("00LIST").exists());
+        assert!(find_csa_file_recursive(&topdir, &game_id).await.is_none());
+        let (mut retry, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+            .await;
+        assert!(
+            read_line_raw(&mut retry)
+                .await
+                .unwrap()
+                .starts_with("LOGIN:incorrect reconnect_")
+        );
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn white_reconnect_after_first_move_has_consistent_turn_fields() {
+    run_local(|| async {
+        let (addr, topdir, state) =
+            spawn_server_with_reconnect_grace("reconnect_white_turn", Duration::from_secs(5), None)
+                .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, _, bob_token) =
+            establish_match_and_capture_tokens(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        drop(rb);
+        drop(wb);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(&mut wa, "+7776FU").await;
+        tokio::time::timeout(Duration::from_millis(800), read_until(&mut ra, "+7776FU,T0"))
+            .await
+            .expect("first move must be confirmed before white reconnects");
+        let (mut resumed, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN bob+g1+white pw reconnect:{game_id}+{bob_token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut resumed).await.unwrap(), "LOGIN:bob OK");
+        let summary = drain_game_summary(&mut resumed).await;
+        assert_eq!(extract_summary_field(&summary, "To_Move").as_deref(), Some("-"));
+        let position_end = summary.iter().position(|line| line == "END Position").unwrap();
+        assert_eq!(summary[..position_end].last().map(String::as_str), Some("-"));
+        let snapshot = read_until(&mut resumed, "END Reconnect_State").await;
+        assert_eq!(extract_summary_field(&snapshot, "Current_Turn").as_deref(), Some("-"));
+        assert_eq!(extract_summary_field(&snapshot, "Last_Move").as_deref(), Some("+7776FU"));
+        send_line(&mut writer, "%TORYO").await;
+        read_until(&mut ra, "#WIN").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.active_game_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }

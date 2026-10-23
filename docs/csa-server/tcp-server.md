@@ -208,7 +208,15 @@ sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
 | `--admin-handle <HANDLE>` | （空） | `%%SETBUOY` / `%%DELETEBUOY` を許可する handle（複数可）。空だとブイ登録は全拒否 |
 | `--metrics-bind <ADDR>` | （無効） | Prometheus 互換メトリクスを expose する HTTP listener の bind 先 |
 
-## 11. 関連 doc
+## 11. 対局中の再接続猶予
+
+再接続猶予中も時計と接続中の対局者の入力を処理します。着手はその場で通知・記録され、
+再接続した対局者には最新の盤面と残時間が送られます。切断側には猶予中の通知を送らず、
+接続中の対局者と観戦者へ配信します。時間切れ・投了などで終局した対局には再参加できません。
+猶予期限と時計期限が同時なら時間切れを優先します。状態再送の失敗は猶予期限を延長せず、
+双方が切断した場合も元の期限を維持します。
+
+## 12. 関連 doc
 
 - [`../csa-client.md`](../csa-client.md) — `csa_client`（クライアント）の使い方。
 - [`protocol-reference.md`](protocol-reference.md) — 受理する CSA / x1 拡張コマンドの一覧。
