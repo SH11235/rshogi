@@ -498,7 +498,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 len_limit: args.child_len_limit(),
                 try_mate_1ply: Some(child.try_mate_1ply),
             };
-            // 一度探索した子は 1 手詰めでないと分かっている (1 手詰めなら確定している)
+            // 一度探索して確定しなかった攻め方の子は、同じ 1 手詰めの判定をしても見つからない
+            // (確定した子は再び選ばれない)
             child.try_mate_1ply = false;
             st.do_move(mv);
             let child_result = self.search(st, child_args, inc_flag);
@@ -674,14 +675,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// `count_disproof_weakly` なら OR の dn は WPNS で数える。
     fn aggregate(&self, start: usize, or_node: bool) -> NodeResult {
         let children = &self.scratch.children[start..];
-        let and_step = and_wpns();
-        let weak = (or_node && self.weak_disproof_step != 0)
-            || (!or_node && and_step != 0 && self.weak_disproof_step != 0);
-        let step = if or_node {
-            self.weak_disproof_step
-        } else {
-            and_step
-        };
+        let weak = or_node && self.weak_disproof_step != 0;
         let mut min = PN_INF;
         let mut sum = 0u64;
         let mut has_inf = false;
@@ -696,7 +690,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             nonzero += u64::from(delta != 0);
         }
         let summed = if weak {
-            let others = nonzero.saturating_sub(1) * step;
+            let others = nonzero.saturating_sub(1) * self.weak_disproof_step;
             clamp_sum(u64::from(max) + others, has_inf)
         } else {
             clamp_sum(sum, has_inf)
@@ -749,11 +743,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             // 和で数えるときは thδ − (δ の和 − 最善の子の δ)。ループ条件 (δ の和 < thδ) より正になる。
             // WPNS では thδ − (δ が 0 でない子の数 − 1) × 加算量: 最善の子の δ がこれに届けば
             // 現局面の δ が thδ に届く
-            let and_step = and_wpns();
             let others = if or_node && self.weak_disproof_step != 0 {
                 nonzero.saturating_sub(1) * self.weak_disproof_step
-            } else if !or_node && and_step != 0 && self.weak_disproof_step != 0 {
-                nonzero.saturating_sub(1) * and_step
             } else {
                 sum_delta - u64::from(delta(&children[best]))
             };
@@ -901,10 +892,4 @@ fn hand_min(a: Hand, b: Hand) -> Hand {
     PieceType::HAND_PIECES
         .iter()
         .fold(a, |h, &pt| h.set(pt, a.count(pt).min(b.count(pt))))
-}
-
-fn and_wpns() -> u64 {
-    use std::sync::OnceLock;
-    static M: OnceLock<u64> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("DFPN_ANDW").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
 }

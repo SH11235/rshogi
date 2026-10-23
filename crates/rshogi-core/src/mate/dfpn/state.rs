@@ -32,7 +32,7 @@ pub(super) trait MateState {
     /// 指し手
     type Mv: Copy + Eq;
 
-    /// 1 回の展開 (同じ局面の子を並べる間) だけ使い回す計算結果。1 回の solve で 1 つ作り、
+    /// 1 回の展開 (同じ局面の子を並べる間) だけ使い回す計算結果。探索 (`Searcher`) ごとに 1 つ作り、
     /// 展開を始めるたびに `ExpandCache::begin` で前の展開の結果を捨てる。
     type ExpandCache: ExpandCache;
 
