@@ -2764,8 +2764,7 @@ struct ReconnectContext<'a> {
     /// `reconnect_grace_duration > 0` のときに発行された再接続トークン。
     /// grace=0 構成では `None`、その場合 `handle_disconnect_with_grace` 経路には
     /// 入らない (`run_game_loop_and_record` の `grace.is_zero()` ガード)。
-    /// 型として `Option` を持ち、参照経路では fail-closed (panic 不可) で
-    /// `Aborted` に倒す defensive guard を持つ。
+    /// token が欠落している場合は再参加を受理せず、異常終局を確定する。
     black_token: Option<&'a ReconnectToken>,
     white_token: Option<&'a ReconnectToken>,
     summary: &'a GameSummaryBuilder,
@@ -2943,58 +2942,51 @@ where
             let move_started_at = std::time::Instant::now();
             let now = tokio::time::Instant::now();
             let result = if now >= deadline {
-                if turn_deadline <= grace_deadline {
+                let result = if turn_deadline <= grace_deadline {
                     room.force_time_up(room.current_turn())
                 } else {
                     room.force_abnormal(disconnected)
+                };
+                rx.close();
+                if let GraceEvent::Reconnect(Ok(transport)) = event {
+                    reject_aborted_reconnect(transport).await;
                 }
+                result
             } else {
                 match event {
                     GraceEvent::Reconnect(candidate) => {
-                        if let Ok(mut transport) = candidate {
-                            let snapshot = ReconnectSnapshot {
-                                black_remaining_ms: room.clock_remaining_main_ms(Color::Black).max(0) as u64,
-                                white_remaining_ms: room.clock_remaining_main_ms(Color::White).max(0) as u64,
-                                current_turn: room.current_turn(),
-                                last_move: recorded_moves.last().map(|m| m.token.clone()),
-                            };
-                            let mut summary = ctx.summary.clone();
-                            summary.position_section = rshogi_csa_server::protocol::summary::position_section_from_position(room.position());
-                            let resume = build_resume_message(
-                                &summary.build_for(disconnected),
-                                &snapshot,
-                                rshogi_csa_server::protocol::reconnect::ReconnectClock {
-                                    remaining_ms: (ctx.start_instant + Duration::from_millis(room.current_turn_deadline_ms().unwrap_or(0)))
-                                        .saturating_duration_since(tokio::time::Instant::now()).as_millis().min(u64::MAX as u128) as u64,
-                                },
-                            );
-                            let sent = tokio::time::timeout_at(deadline, async {
-                                transport.send_line(&CsaLine::new(format!("LOGIN:{} OK", handle.as_str()))).await?;
-                                send_multiline(&mut transport, &resume).await
-                            }).await;
-                            if matches!(sent, Ok(Ok(()))) && tokio::time::Instant::now() < deadline {
-                                return Ok(DisconnectOutcome::Reconnected(transport));
-                            }
-                            // 部分送信した接続は破棄し、元の猶予期限内だけ再試行を許す。
+                        if let Ok(mut transport) = candidate
+                            && send_current_resume(
+                                &mut transport, room, recorded_moves, ctx,
+                                disconnected, handle, deadline,
+                            ).await
+                        {
+                            return Ok(DisconnectOutcome::Reconnected(transport));
                         }
+                        // 部分送信した接続は破棄し、元の猶予期限内だけ再試行を許す。
                         let (tx, next_rx) = oneshot::channel();
                         *pending.reconnect_tx.lock().await = Some(tx);
                         rx = next_rx;
                         continue;
                     }
                     GraceEvent::Recv(Ok(line)) => {
-                        let at_ms = now.saturating_duration_since(ctx.start_instant).as_millis().min(u64::MAX as u128) as u64;
+                        let at_ms = now.saturating_duration_since(ctx.start_instant)
+                            .as_millis().min(u64::MAX as u128) as u64;
                         room.handle_line(disconnected.opposite(), &line, at_ms)?
                     }
-                    GraceEvent::Recv(Err(error)) => {
+                    GraceEvent::Recv(Err(TransportError::Closed | TransportError::Timeout)) => {
                         // 双方切断でも元の猶予と時計を維持し、EOF を繰り返し poll しない。
-                        tracing::debug!(%error, "remaining player disconnected during grace");
                         connected_open = false;
                         continue;
                     }
+                    GraceEvent::Recv(Err(error)) => return Err(ServerError::Transport(error)),
                     GraceEvent::Expired => continue,
                 }
             };
+            let finished = matches!(room.status(), rshogi_csa_server::GameStatus::Finished(_));
+            if finished {
+                close_reconnect_receiver(&mut rx).await;
+            }
             let is_move = matches!(result.outcome, HandleOutcome::MoveAccepted { .. });
             record_move_broadcasts(&result.broadcasts, room.clock_time_unit_ms(), recorded_moves);
             let active = connected_open.then_some(&mut *connected);
@@ -3002,17 +2994,86 @@ where
                 Color::Black => (None, active),
                 Color::White => (active, None),
             };
-            dispatch_available(&result.broadcasts, black, white, &state.broadcaster, &RoomId::new(game_id.as_str()), true).await?;
+            dispatch_available(
+                &result.broadcasts, black, white, &state.broadcaster,
+                &RoomId::new(game_id.as_str()), true,
+            ).await?;
             if is_move {
-                metrics::histogram!(crate::metrics::MOVE_LATENCY_SECONDS).record(move_started_at.elapsed().as_secs_f64());
+                metrics::histogram!(crate::metrics::MOVE_LATENCY_SECONDS)
+                    .record(move_started_at.elapsed().as_secs_f64());
             }
-            if matches!(room.status(), rshogi_csa_server::GameStatus::Finished(_)) {
+            if finished {
                 return Ok(DisconnectOutcome::Finished);
             }
         }
     }.await;
+    rx.close();
     state.reconnect_pending.lock().await.remove(game_id);
+    close_reconnect_receiver(&mut rx).await;
     outcome
+}
+
+async fn send_current_resume(
+    transport: &mut TcpTransport,
+    room: &GameRoom,
+    recorded_moves: &[KifuMove],
+    ctx: &ReconnectContext<'_>,
+    disconnected: Color,
+    handle: &PlayerName,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if tokio::time::Instant::now() >= deadline {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(250),
+            transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_aborted")),
+        )
+        .await;
+        return false;
+    }
+    let snapshot = ReconnectSnapshot {
+        black_remaining_ms: room.clock_remaining_main_ms(Color::Black).max(0) as u64,
+        white_remaining_ms: room.clock_remaining_main_ms(Color::White).max(0) as u64,
+        current_turn: room.current_turn(),
+        last_move: recorded_moves.last().map(|m| m.token.clone()),
+    };
+    let mut summary = ctx.summary.clone();
+    summary.position_section =
+        rshogi_csa_server::protocol::summary::position_section_from_position(room.position());
+    let turn_deadline =
+        ctx.start_instant + Duration::from_millis(room.current_turn_deadline_ms().unwrap_or(0));
+    let remaining_ms = turn_deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let resume = build_resume_message(
+        &summary.build_for(disconnected),
+        &snapshot,
+        rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
+    );
+    let sent = tokio::time::timeout_at(deadline, async {
+        transport
+            .send_line(&CsaLine::new(format!("LOGIN:{} OK", handle.as_str())))
+            .await?;
+        send_multiline(transport, &resume).await
+    })
+    .await;
+    matches!(sent, Ok(Ok(()))) && tokio::time::Instant::now() < deadline
+}
+
+async fn reject_aborted_reconnect(mut transport: TcpTransport) {
+    let _ = tokio::time::timeout(
+        Duration::from_millis(250),
+        transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_aborted")),
+    )
+    .await;
+}
+
+async fn close_reconnect_receiver(rx: &mut oneshot::Receiver<TcpTransport>) {
+    // close 後も既にキューにある候補は残るため、取り出して明示的に拒否する。
+    rx.close();
+    if let Ok(transport) = rx.try_recv() {
+        reject_aborted_reconnect(transport).await;
+    }
 }
 
 enum GraceEvent {
@@ -3830,15 +3891,15 @@ where
                 "authenticated reconnect transport handed off to game loop"
             );
         }
-        Err(mut transport) => {
-            // game loop 側が既に Aborted で終了 (deadline 超過直後の race)。
+        Err(transport) => {
+            // 対局所有者が期限到達・終局・エラーで受信を閉じている。
             // registry の片付けは game loop の終了処理が済ませている想定。
             // クライアントには曖昧な切断ではなく明示的な拒否行を返してから close する。
             tracing::warn!(
                 game_id = %req.game_id,
                 "reconnect transport handoff failed: game loop already aborted"
             );
-            let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_aborted")).await;
+            reject_aborted_reconnect(transport).await;
         }
     }
     Ok(())
@@ -4192,6 +4253,27 @@ fn chat_broadcast_line(handle: &str, message: &str) -> Option<CsaLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_reconnect_receiver_rejects_an_already_queued_transport() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let transport =
+            TcpTransport::new(server, rshogi_csa_server::types::IpKey::new("127.0.0.1"));
+        let (tx, mut rx) = oneshot::channel();
+        assert!(tx.send(transport).is_ok());
+        close_reconnect_receiver(&mut rx).await;
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.trim(), "LOGIN:incorrect reconnect_aborted");
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn chat_broadcast_byte_limit_includes_utf8_handle_and_cr() {
