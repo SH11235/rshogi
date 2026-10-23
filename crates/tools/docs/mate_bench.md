@@ -76,11 +76,13 @@ node /path/to/rshogi/scripts/run_wasi.mjs \
 ```
 
 - 出力は `局面` と `nodes` の 2 行と、`--out` の TSV (`sfen` `result` `pv_len` `nodes` `micros`)。
-  同じ `--hash-mb` と `--mode` なら、ノード数と判定は native の `mate_bench` と一致する。
+  同じ `--hash-mb` と `--mode` なら、ノード数と判定は native の `mate_bench` と一致する
+  (探索深さの上限が違うので、1024 手より深く潜る局面を除く)。
 - `--out` は存在しないファイルにする (wasm ではパスの別名を見分けられないので、入力を上書きしないよう既存のファイルには書かない)。
 - 引数の誤りは終了コード 2、実行中の失敗は 1 (それまでの局面の TSV は残る)。
 
 探索は手数ごとに再帰するので、wasm ではスタックが 2 種類要る: wasm のメモリ上のスタック (Rust の既定 1 MB) と、
-実行エンジンの呼び出しスタック (Node.js・Chromium の既定はおよそ 1 MB)。探索深さの上限 (2048 手) まで潜ると、
-前者を約 200 KB、後者を約 700 KB 使う。呼び出しスタックが足りないと `RangeError: Maximum call stack size exceeded`
+実行エンジンの呼び出しスタック (Node.js のメインスレッドはおよそ 1 MB、Chromium の Worker はおよそ 770 KB)。
+1 手あたり前者を約 100 byte、後者を約 340 byte 使うので、wasm では探索深さの上限を 1024 手 (native は 2048 手) にして
+後者を約 350 KB に抑えている。呼び出しスタックが足りないと `RangeError: Maximum call stack size exceeded`
 で探索が止まる (`node --stack-size=<KB>` で上限を変えて確かめられる)。

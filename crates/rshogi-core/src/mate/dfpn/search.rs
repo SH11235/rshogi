@@ -35,7 +35,14 @@ use crate::time::Instant;
 use crate::types::{Color, Hand, PieceType};
 
 /// 探索経路の最大長 (手数)。ここに達した局面は上限付きの不詰とする。
-pub(super) const MAX_DEPTH: usize = 2048;
+///
+/// 探索は手数ごとに再帰する。wasm では実行エンジンの呼び出しスタックを 1 手あたり約 340 byte 使い、
+/// ブラウザの Worker の既定 (Chromium で約 770 KB) では 2048 手に足りる余裕が小さいので、半分にする。
+pub(super) const MAX_DEPTH: usize = if cfg!(target_arch = "wasm32") {
+    1024
+} else {
+    2048
+};
 
 /// 停止フラグ・時間を確かめるノード間隔
 const CHECK_INTERVAL: u64 = 1024;
