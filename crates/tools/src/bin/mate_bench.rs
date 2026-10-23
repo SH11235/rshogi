@@ -81,6 +81,10 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     jobs: usize,
 
+    /// 1 局面を解くスレッド数 (置換表を共有する)
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+
     /// 局面ごとの結果を書く TSV
     #[arg(long)]
     out: Option<PathBuf>,
@@ -311,6 +315,7 @@ fn solve_worker(
         time_ms: cli.time_ms,
     };
     let mut solver = DfpnSolver::with_mode(cli.hash_mb, cli.mode);
+    solver.set_threads(cli.threads);
     loop {
         let job = jobs_rx.lock().expect("受け口のロック").recv();
         let Ok((index, sfen)) = job else { break };
