@@ -231,7 +231,7 @@ LobbyDO の LOGIN_LOBBY 受け入れ条件:
 ### 5.3 リソース上限
 
 各 config 値は `[vars]` の追加キーとして wrangler.toml.example に追加し、CI 整合
-チェック (`tests/wrangler_template_consistency.rs`) で固定する:
+チェック (`tests/integration/wrangler_template_consistency.rs`) で固定する:
 
 | Config キー | 既定値 | 実装場所 | 役割 |
 |---|---|---|---|

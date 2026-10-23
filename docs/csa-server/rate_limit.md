@@ -54,7 +54,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 `wrangler.<env>.toml` の `[vars]` テーブルで宣言する 6 個の閾値。すべて
 `SHARED_PUBLIC_VARS_KEYS` に含まれるため、production / staging 両方の toml で
 同名キーを宣言する契約 (CI 整合性 test
-[`tests/wrangler_environment_toml_consistency.rs`](../../crates/rshogi-csa-server-workers/tests/wrangler_environment_toml_consistency.rs)
+[`tests/integration/wrangler_environment_toml_consistency.rs`](../../crates/rshogi-csa-server-workers/tests/integration/wrangler_environment_toml_consistency.rs)
 が gate)。
 
 | 環境変数 | 単位 | production / staging 既定 | 対応する `RateLimitKind` |

@@ -19,7 +19,7 @@ use std::time::Duration;
 use rshogi_csa_client::engine::SpawnOptions;
 use rshogi_csa_client::event::Event;
 
-mod common;
+use crate::common;
 use common::{spawn_engine, write_mock_script};
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);

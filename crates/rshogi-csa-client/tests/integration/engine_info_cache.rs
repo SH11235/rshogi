@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rshogi_csa_client::engine::{SearchOutcome, SpawnOptions, UsiEngine};
 
-mod common;
+use crate::common;
 
 fn write_mock_engine(script: &str, name: &str) -> PathBuf {
     common::write_mock_script(name, script)

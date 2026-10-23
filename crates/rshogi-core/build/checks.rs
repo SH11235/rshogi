@@ -1,4 +1,4 @@
-// build.rs と tests/build_rs_checks.rs から `include!` される純粋ロジック。
+// build.rs と tests/integration/build_rs_checks.rs から `include!` される純粋ロジック。
 // 環境変数や Cargo 連携には依存させず、`has_feature` lookup を引数で受け取る。
 
 /// Cargo feature 組合せの整合性を検証する。

@@ -22,7 +22,7 @@
 //!     } > "$GOLDEN/$mode-$concurrency/state.params"
 //!   done
 //! done
-//! cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
+//! cargo test -p tools --test integration spsa_run_dir_integration::value_driven_matches_fixed_sha_golden
 //! ```
 //! 詳細・互換性範囲は docs/spsa_runbook.md の §14 を参照。
 //!

@@ -137,7 +137,7 @@ pub async fn fetch(
 /// `[event(scheduled)]` ハンドラ (`scheduled`) を起動する単一 cron 文字列。
 ///
 /// 0 / 15 / 30 / 45 分の 4 回発火する。`wrangler.{production,staging,toml.example}.toml`
-/// の `[triggers] crons` 配列と一致させる (`tests/wrangler_environment_toml_consistency.rs`
+/// の `[triggers] crons` 配列と一致させる (`tests/integration/wrangler_environment_toml_consistency.rs`
 /// / `wrangler_template_consistency.rs` で gate)。
 ///
 /// 以前は backfill 用 (`0 * * * *`) と sweep-only 用 (`15,30,45 * * * *`) の 2 cron に

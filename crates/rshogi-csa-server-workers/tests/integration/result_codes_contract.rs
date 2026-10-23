@@ -23,7 +23,7 @@ struct ResultVariantRow {
 #[test]
 fn result_codes_contract_matches_committed_manifest() {
     let generated = build_contract_json();
-    let committed = include_str!("../contracts/result-codes.json");
+    let committed = include_str!("../../contracts/result-codes.json");
 
     assert_eq!(generated, committed);
     for reason in [

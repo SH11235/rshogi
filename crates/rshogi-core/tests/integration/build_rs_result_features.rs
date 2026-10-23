@@ -1,6 +1,6 @@
 //! build.rs の結果を変える feature の判定 (`result_features`) の単体テスト。
 
-include!("../build/result_features.rs");
+include!("../../build/result_features.rs");
 
 fn enabled(features: &'static [&'static str]) -> impl Fn(&str) -> bool {
     move |name: &str| features.contains(&name)

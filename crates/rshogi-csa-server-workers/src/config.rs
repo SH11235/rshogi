@@ -35,8 +35,8 @@ pub const DEFAULT_ENTERING_KING_RULE: rshogi_core::types::EnteringKingRule =
 /// - production / staging では Cloudflare secret 経由、local dev では `[vars]`
 ///   で動かす値: [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]
 ///
-/// `tests/wrangler_template_consistency.rs` (template) と
-/// `tests/wrangler_environment_toml_consistency.rs` (production / staging) が
+/// `tests/integration/wrangler_template_consistency.rs` (template) と
+/// `tests/integration/wrangler_environment_toml_consistency.rs` (production / staging) が
 /// これら配列と該当 toml ファイルの双方向整合を検証する。配列追加を忘れると
 /// template / 各環境 toml 更新忘れも検出できなくなる。
 pub struct ConfigKeys;
@@ -347,8 +347,8 @@ impl ConfigKeys {
     ///
     /// 値は CI workflow の `wrangler deploy --var KEY:VALUE` 引数で 1 回限り注入され、
     /// 各 deploy 毎に最新値で上書きされる (Cloudflare の `--keep-vars` を付けない既定
-    /// 挙動に依存)。`tests/wrangler_template_consistency.rs` /
-    /// `tests/wrangler_environment_toml_consistency.rs` が「本配列のキーが
+    /// 挙動に依存)。`tests/integration/wrangler_template_consistency.rs` /
+    /// `tests/integration/wrangler_environment_toml_consistency.rs` が「本配列のキーが
     /// `[vars]` に含まれていないこと」を gate する。
     ///
     /// 新規定数追加時の振り分け基準（[`Self::SHARED_PUBLIC_VARS_KEYS`] の docstring

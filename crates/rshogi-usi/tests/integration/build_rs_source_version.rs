@@ -1,6 +1,6 @@
 //! build.rs のソースの版の材料 (`engine_source_id`・`usi_result_features`) の単体テスト。
 
-include!("../build/source_version.rs");
+include!("../../build/source_version.rs");
 
 use std::path::Path;
 

@@ -1576,7 +1576,7 @@ for mode in cyclic random; do
     } > "$GOLDEN/$mode-$concurrency/state.params"
   done
 done
-cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
+cargo test -p tools --test integration spsa_run_dir_integration::value_driven_matches_fixed_sha_golden
 ```
 
 基準binaryのstate出力には形式宣言がないため、上記手順で宣言だけを付ける。

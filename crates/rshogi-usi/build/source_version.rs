@@ -1,4 +1,4 @@
-// エンジンのソースの版の材料。build.rs と tests/build_rs_source_version.rs から include! する。
+// エンジンのソースの版の材料。build.rs と tests/integration/build_rs_source_version.rs から include! する。
 
 /// エンジンのバイナリに入るソース (workspace root からの相対パス)。版と `-dirty` はこの範囲だけで決める。
 const ENGINE_SOURCES: &[&str] =
