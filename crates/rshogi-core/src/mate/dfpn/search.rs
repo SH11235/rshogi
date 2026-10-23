@@ -724,7 +724,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             sum_delta = add_pn(sum_delta, delta(c));
         }
 
-        let child_thphi = thphi.min(second_phi.saturating_add(1));
+        // 1+ε (Pawlewicz & Lew 2007): 2 番目の子の φ を 1 超えた時点で戻ると、最善の子が入れ替わるたびに
+        // 子を少し読んでは戻る往復を繰り返す。2 番目の φ の約 1/3 (最低 1) の余裕を持たせる (経験的に 1/3 前後が良く、
+        // 1/2 以上では増える)。
+        let child_thphi = thphi.min(second_phi.saturating_add((second_phi / 3).max(1)));
         let child_thdelta = if thdelta == PN_INF {
             PN_INF
         } else {
