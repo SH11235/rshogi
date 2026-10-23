@@ -817,7 +817,7 @@ mod tests {
         table.store::<false>(exact(5), proven(3, Hand::EMPTY), 1);
         table.store::<false>(exact(6), disproven(Hand::EMPTY), 1);
         assert_eq!(table.probe::<false>(exact(5 | 1 << 63)), None);
-        assert_eq!(table.probe::<false>(exact(6 | 1 << 50)), None);
+        assert_eq!(table.probe::<false>(exact(6 | 1 << 60)), None);
         assert_eq!(table.probe::<false>(exact(5)), Some(proven(3, Hand::EMPTY)));
         assert_eq!(table.probe::<false>(exact(6)), Some(disproven(Hand::EMPTY)));
     }
