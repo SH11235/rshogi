@@ -2,4 +2,5 @@
 
 pub mod command;
 pub mod info;
+pub mod reconnect;
 pub mod summary;

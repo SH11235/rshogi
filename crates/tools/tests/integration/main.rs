@@ -15,6 +15,7 @@ mod pack_to_psv_integration;
 mod psv_scatter_by_mask_integration;
 mod psv_to_hcpe3_integration;
 mod relabel_psv_integration;
+mod rescore_output_safety;
 mod shuffle_psv_determinism;
 mod sprt_negative_nelo_args;
 mod spsa_params_format;

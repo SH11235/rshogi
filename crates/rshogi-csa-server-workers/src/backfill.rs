@@ -574,10 +574,10 @@ mod imp {
                 Some(db.prepare("DELETE FROM games_index_backfill_state WHERE singleton = 1"))
             }
         };
-        if let Some(statement) = state_statement {
-            if let Err(e) = statement.run().await {
-                crate::structured_log!(event: "games_index_backfill_state_write_failed", component: "backfill", err: format!("{e:?}"));
-            }
+        if let Some(statement) = state_statement
+            && let Err(e) = statement.run().await
+        {
+            crate::structured_log!(event: "games_index_backfill_state_write_failed", component: "backfill", err: format!("{e:?}"));
         }
 
         let elapsed_ms = Date::now().as_millis().saturating_sub(started_at_ms);

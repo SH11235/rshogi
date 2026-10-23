@@ -1,5 +1,7 @@
 # rshogi tools リファレンス
 
+教師データの [HCPE 38 byte共通形式とpaddingの扱い](hcpe-format.md)。
+
 LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](nnue-routing.md)。
 
 crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
@@ -47,8 +49,8 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `yardstick_score` | ラベル品質「物差し」ステージ 2。`yardstick_label` 出力を engine ごとに勝率スケール較正し per-class の WDL logloss / 参照天井（符号一致）/ リファレンス一致（win-prob MAE・Spearman）を出す |
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与し、journal/resume と集計 report を出力（実行中は進捗/ETA を stderr 表示） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加し、parent-journal 再利用、journal/resume、Markdown report を出力（[詳細](book_extend.md)） |
-| `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](book_backprop.md)） |
-| `book_mine` | `tree serve/enqueue/wait/import/import-journal/replay/register` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`、両方の手番の木の手を定跡の元データの表に登録する `register`、別マシンの台帳の読みを同じ条件と確かめて取り込む `import-journal`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・探索途中の info 行の記録 (`--trace-dir`)・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
+| `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。書き出す値が循環で破られないかを検査し、破られるなら出力しない。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](book_backprop.md)） |
+| `book_mine` | `tree serve/enqueue/wait/import/import-journal/replay/register` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`、両方の手番の木の手を定跡の元データの表に登録する `register`、別マシンの台帳の読みを同じ条件と確かめて取り込む `import-journal`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。worker 起動前後の入力指紋照合と不一致時の停止・並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・探索途中の info 行の記録 (`--trace-dir`)・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
 
 ### ラベル評価ツールの出力保護
 
@@ -80,7 +82,7 @@ hardlink と Windows の大小文字違いも検査します。
 | `split_psv` | PSV ファイルを局面数または容量で複数ファイルへ分割 |
 | `merge_psv` | 複数の PSV ファイルを順序どおりストリーミング結合 |
 | `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](relabel_psv.md)） |
-| `rescore_psv` | PSV 評価値を NNUE / 外部エンジン / ONNX (dlshogi・AobaZero, GPU/TensorRT) で再計算。qsearch-leaf ラベル・policy 展開・レジューム・score sidecar (`--out-scores`、dlshogi ONNX / NNUE 静的評価) 対応。LayerStacks routing の bucket 数不一致は拒否 (`--allow-routing-buckets-mismatch` で明示許可)（[詳細](rescore_psv.md)） |
+| `rescore_psv` | PSV 評価値を NNUE / 外部エンジン / ONNX (dlshogi・AobaZero, GPU/TensorRT) で再計算。qsearch-leaf ラベル・policy 展開・レジューム・score sidecar (`--out-scores`、dlshogi ONNX / NNUE 静的評価) 対応。明示資源と PSV/score/expand/replacement/marker 群の alias を処理前・書込み直前に検査。LayerStacks routing の bucket 数不一致は拒否 (`--allow-routing-buckets-mismatch` で明示許可)（[詳細](rescore_psv.md)） |
 | `psv_gate_by_king_zone` | 入玉ドメインで base / override score を合成、または行対応 mask bitmap を生成（[詳細](psv_gate_by_king_zone.md)） |
 | `psv_dual_label` | 通常 PSV の score 退避、DL score / entered sidecar と dual-label PSV の相互変換・fail-closed 検証（[詳細](psv_dual_label.md)） |
 | `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順にストリーミング抽出（[詳細](psv_select_by_mask.md)） |

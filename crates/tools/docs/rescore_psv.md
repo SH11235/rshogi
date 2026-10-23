@@ -413,6 +413,43 @@ glibc ヒープを壊し、全処理の正常完了後に `corrupted double-link
 おり欠けない。エラー終了は従来経路のため稀に exit 134 で落ちることがあるが、
 その場合も stderr のエラーメッセージが一次情報。
 
+## 出力パスの保護
+
+処理開始前に、展開済みの全入力と、指定された NNUE・進行度係数・ONNX モデル本体・外部 engine を、
+PSV / score sidecar / expand / replacement 出力および使用する .done・.in-progress・各 .tmp と照合します。
+旧 marker が削除対象として記録した expand / replacement パスも検査します。
+same path、symlink 出力、hardlink（Windows を含む）、同一実体への大小文字 alias を拒否します。
+後続ファイルの出力が先行入力と衝突する場合も、既存出力を変更する前に停止します。
+Windows では正規化した予定パスの Unicode 小文字化→大文字化が一致する出力を、未作成でも起動時に保守的に拒否します。
+case-sensitive directory でもこの命名制限が適用されます。Unicode として表現できない Windows 出力パスは拒否します。
+この文字変換は Windows のファイルシステム固有の case table と完全一致する保証はなく、実在ファイルは handle 同一性も検査します。
+同じ入力を別表記で指定する場合も、出力先が重複すれば拒否します。
+
+外部 engine の DNN_Model と、名前が File / Dir / Path / Coeff で終わる明示 USI option は資源として扱います
+（名前の判定は大文字小文字を区別しません）。相対パスは engine の作業ディレクトリ（指定した engine パスの親）を基準にします。
+USI option の名前・値の前後空白は送信と保護検査の両方で除去します。
+全 USI option の名前・値に独立したトークン name / value が含まれる場合は、大文字小文字を問わず起動前に拒否します。
+これらは engine の setoption 解釈で名前・値の境界を切り替える予約語であり、資源 option に見えない名前も検査対象です。path/value.nnue のようにパスの一部である場合は許可します。
+認識した資源 option（BookDir を含む）の名前・値に連続空白、タブ、改行などが残る場合は、engine による空白正規化で参照先が変わるため起動前に拒否します。
+内部の空白は単一の半角スペースだけを許可し、通常のスペースを含むパスは保護対象です。空値・無効値を除外する前、重複 option を集約する前に検査します。
+空値・`<empty>`・`<auto>`・存在しない USI 資源は列挙しません（NNUE など専用 CLI 引数の存在検査は省略しません）。
+BookFile=no_book は定跡なしとして扱い、有効な BookFile は BookDir（未指定・空なら book）からの相対パスとして解決します。
+BookDir 自体の全走査は行わず、指定された BookFile を保護します。それ以外の directory 資源はファイルを再帰列挙します。
+option 名の大小文字を区別する engine と区別しない engine の双方に対応するため、表記が異なる BookDir 候補は統合せず、
+各候補から解決した BookFile をすべて保護します。完全一致の BookDir が未指定または空なら既定の book も候補に含めます。
+SPSAParamsFile も各表記の明示ファイルを保持し、完全一致の非自動指定がない場合、
+または大小文字違いを含む候補に自動・空指定がある場合は、隣接する spsa.params も保護します。
+複数候補を保守的に保護するため、実際に engine が採用しない候補との衝突も拒否する場合があります。
+SPSAParamsFile が未指定・空・`<auto>`・`<empty>` で engine 実体の隣に spsa.params が存在する場合も保護します。
+これ以外の vendor 固有 option や engine 内部の既定モデルは推測しません。
+
+書込み用 file は切り詰めずに開き、資源・他出力との handle 同一性を再確認してから、従来の truncate / append / resume 判断に従います。
+存在しない marker を事前検査だけで作成しません。比較用 handle は順次開閉し、同時 open 数は入力ファイル数に比例して増えません。
+--delete-input で削除した入力は、その後の検査対象から除きます。他プロセスが保護対象を削除して検査不能になった場合は、安全側に停止します。
+
+この保護は並行置換の排他ロックや処理開始後の rollback を保証しません。拒否時に新規の空出力が残る場合があります。
+ONNX external tensor、ORT が生成する profile JSON、TensorRT cache は列挙・保護対象外です。これらの資源・出力は別の場所に配置してください。
+
 ## トラブルシューティング
 
 | エラーメッセージ | 原因 | 対処 |
@@ -431,8 +468,8 @@ glibc ヒープを壊し、全処理の正常完了後に `corrupted double-link
 | `... must point to different directories` | 出力系ディレクトリの同一指定 | 別ディレクトリを指定 |
 | `--qsearch-leaf-replacement-output requires --qsearch-leaf-label` | replacement のみ指定 | `--qsearch-leaf-label` を併用 |
 | `Output path is a symlink` | 既存出力が symlink（リンク先を問わず truncate を拒否） | symlink を削除するか別ディレクトリを使う |
-| `Output path is a hardlink to the input file` | 既存出力が入力と同じ inode（Unix） | 別ディレクトリを指定 |
-| `Stale expand artifact ... resolves to the current input file` | 旧 expand 出力と現在 input が同一（多段パイプライン） | 入力を移動するか `--expand-output-dir` を変更 |
+| `Output path resolves to input file` | 出力が入力または明示資源の同一実体（hardlink を含む） | 別ディレクトリを指定 |
+| `Output paths resolve to the same file` | 本体・marker・旧 cleanup 対象の出力先が重複 | 衝突する出力先や旧 marker の参照先を確認 |
 | `... path contains '='` / `non-UTF-8 characters` | マーカー非対応のパス文字 | パスをリネーム（`v1.0=alpha` → `v1.0-alpha` 等） |
 | `All engine processes have failed` | 外部エンジンが全プロセス死亡 | エンジンのログ / `--usi-option` / `--engine-timeout` を確認 |
 

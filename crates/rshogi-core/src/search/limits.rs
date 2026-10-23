@@ -4,6 +4,8 @@
 
 use crate::time::Instant;
 use crate::types::Color;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 // =============================================================================
 // TimePoint
@@ -47,7 +49,7 @@ pub struct LimitsType {
     /// 思考時間無制限フラグ
     pub infinite: bool,
 
-    /// 探索ノード数制限（0以外なら有効）
+    /// 探索ノード数制限（0以外なら有効）。helper を含む全スレッドの合計で判定する。
     pub nodes: u64,
 
     /// ponder有効フラグ
@@ -63,6 +65,10 @@ pub struct LimitsType {
 
     /// 探索開始時刻
     pub(crate) start_time: Option<Instant>,
+
+    /// helper を使う `go nodes` で、全 worker の合計ノード数を集める共有カウンタ。
+    /// `Search::go` が設定する。`None` なら各 worker は自分のノード数で判定する。
+    pub(crate) searched_nodes: Option<Arc<AtomicU64>>,
 }
 
 impl Default for LimitsType {
@@ -82,6 +88,7 @@ impl Default for LimitsType {
             multi_pv: 1, // デフォルトは1（通常探索）
             search_moves: Vec::new(),
             start_time: None,
+            searched_nodes: None,
         }
     }
 }

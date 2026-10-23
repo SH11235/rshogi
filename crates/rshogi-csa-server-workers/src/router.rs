@@ -79,6 +79,22 @@ async fn forward_ws_to_lobby(req: Request, env: Env) -> Result<Response> {
         return Response::error("Upgrade required", 426);
     }
 
+    let Some(client_ip) = extract_client_ip(&req) else {
+        return build_missing_ip_response();
+    };
+    let thresholds = resolve_thresholds_from_env(&env);
+    let decision = check_and_consume_via_do(
+        &env,
+        RateLimitKind::WsLobbyUpgradePerIp,
+        &client_ip,
+        thresholds.ws_room_upgrade_per_ip,
+    )
+    .await?;
+    if !decision.allowed {
+        crate::structured_log!(event: "rate_limit_denied", component: "router", kind: "ws_lobby_upgrade_per_ip", retry_after_sec: decision.retry_after_sec);
+        return build_ws_upgrade_rate_limited_response(decision.retry_after_sec);
+    }
+
     let namespace = env.durable_object(ConfigKeys::LOBBY_BINDING)?;
     let stub = namespace.id_from_name("default")?.get_stub()?;
 

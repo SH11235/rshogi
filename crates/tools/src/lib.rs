@@ -52,6 +52,7 @@ pub mod dlshogi_features;
 #[cfg(feature = "csa-replay")]
 pub mod ek_testset;
 pub mod eval_sfens_tool;
+pub mod hcpe;
 pub mod kif;
 pub mod kifu_publish;
 pub mod king_zone;

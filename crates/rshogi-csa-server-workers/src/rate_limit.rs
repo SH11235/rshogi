@@ -55,6 +55,8 @@ pub enum RateLimitKind {
     /// `/ws/<room_id>(/spectate)` upgrade 全般 per source IP。
     /// player / spectator の両 route が共有する WS upgrade 流量上限。
     WsRoomUpgradePerIp,
+    /// Lobby upgrade。対局中の再接続と別 bucket で制限する。
+    WsLobbyUpgradePerIp,
 }
 
 impl RateLimitKind {
@@ -67,6 +69,7 @@ impl RateLimitKind {
             Self::LobbyChallengePerInviter => "lobby_challenge_inviter",
             Self::RoomCreatePerIp => "room_create_ip",
             Self::WsRoomUpgradePerIp => "ws_upgrade_ip",
+            Self::WsLobbyUpgradePerIp => "ws_lobby_upgrade_ip",
         }
     }
 }
@@ -104,7 +107,9 @@ impl RateLimitThresholds {
             RateLimitKind::LobbyChallengePerIp => self.lobby_challenge_per_ip,
             RateLimitKind::LobbyChallengePerInviter => self.lobby_challenge_per_inviter,
             RateLimitKind::RoomCreatePerIp => self.room_create_per_ip,
-            RateLimitKind::WsRoomUpgradePerIp => self.ws_room_upgrade_per_ip,
+            RateLimitKind::WsRoomUpgradePerIp | RateLimitKind::WsLobbyUpgradePerIp => {
+                self.ws_room_upgrade_per_ip
+            }
         }
     }
 }
@@ -459,8 +464,7 @@ impl DurableObject for RateLimiter {
         //                       allow 連発になり rate limit 緩和の脆弱性になる。
         //                       fail-closed の deny を返し、in-memory cache も
         //                       汚さない (次回 fetch で再 `get` を試みる)。
-        let mut cell = self.bucket.borrow_mut();
-        if cell.is_none() {
+        if self.bucket.borrow().is_none() {
             let loaded: Option<TokenBucketState> =
                 match self.state.storage().get::<TokenBucketState>(KEY_BUCKET).await {
                     Ok(v) => v,
@@ -473,16 +477,20 @@ impl DurableObject for RateLimiter {
                         return response_json(&decision);
                     }
                 };
-            *cell = Some(loaded.unwrap_or_else(|| TokenBucketState::full(capacity, now_ms)));
+            self.bucket.borrow_mut().get_or_insert_with(|| {
+                loaded.unwrap_or_else(|| TokenBucketState::full(capacity, now_ms))
+            });
         }
-        let bucket = cell.as_mut().expect("lazy-init above");
-
-        let decision = bucket.try_consume(capacity, now_ms);
+        let (decision, snapshot) = {
+            let mut cell = self.bucket.borrow_mut();
+            let bucket = cell.as_mut().expect("lazy-init above");
+            (bucket.try_consume(capacity, now_ms), *bucket)
+        };
 
         // persist。in-memory state と storage を一致させる (eviction 対策)。
         // `put` 失敗は `?` で上位伝播 → caller (Worker fetch handler) 側で
         // fail-closed (Err = deny) になる (router / lobby ハンドラで `?` 伝播)。
-        self.state.storage().put(KEY_BUCKET, bucket).await?;
+        self.state.storage().put(KEY_BUCKET, snapshot).await?;
 
         response_json(&decision)
     }
@@ -503,7 +511,7 @@ fn response_json<T: Serialize>(value: &T) -> WorkerResult<Response> {
 
 // --- HTTP fail-closed builder for /ws/<room_id> upgrade path -----------------
 
-/// `/ws/<room_id>(/spectate)` upgrade 経路で rate limit 拒否を 503 + Retry-After
+/// Lobby / GameRoom upgrade 経路で rate limit 拒否を 503 + Retry-After
 /// で返す。本 helper は `Response` 自体を組むため wasm32 のみ。
 #[cfg(target_arch = "wasm32")]
 pub fn build_ws_upgrade_rate_limited_response(retry_after_sec: u64) -> WorkerResult<Response> {
@@ -725,7 +733,7 @@ mod tests {
         const _: () = assert!(FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC >= 1);
     }
 
-    /// 6 kind それぞれが異なる `kind_tag` を返すこと (DO ID 名前空間衝突回避)。
+    /// 各 kind が異なる `kind_tag` を返すこと (DO ID 名前空間衝突回避)。
     #[test]
     fn each_kind_has_unique_tag() {
         let kinds = [
@@ -735,6 +743,7 @@ mod tests {
             RateLimitKind::LobbyChallengePerInviter,
             RateLimitKind::RoomCreatePerIp,
             RateLimitKind::WsRoomUpgradePerIp,
+            RateLimitKind::WsLobbyUpgradePerIp,
         ];
         let mut tags: Vec<&'static str> = kinds.iter().map(|k| k.kind_tag()).collect();
         tags.sort_unstable();

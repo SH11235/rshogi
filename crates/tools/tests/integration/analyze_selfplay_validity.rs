@@ -315,8 +315,8 @@ fn csa_single_games_count_without_becoming_sprt_pairs() {
                     }
                     _ => "draws",
                 };
-                for legacy in [false, true] {
-                    if legacy {
+                for without_source in [false, true] {
+                    if without_source {
                         let lines: Vec<String> = fs::read_to_string(&path)
                             .unwrap()
                             .lines()
@@ -361,5 +361,138 @@ fn csa_single_games_count_without_becoming_sprt_pairs() {
                 assert!(!output.status.success());
             }
         }
+    }
+}
+
+
+fn csa_fixture() -> (Value, Value) {
+    (
+        json!({
+            "type":"meta", "source":"csa_client", "settings":{"games":1},
+            "engine_cmd":{
+                "path_black":"base", "path_white":"test",
+                "label_black":"base", "label_white":"test",
+                "note":"csa_client: opponent path is reported as remote name; usi_options are for self-engine only"
+            }
+        }),
+        json!({"type":"result", "game_id":1, "outcome":"black_win", "winner":"base", "plies":0}),
+    )
+}
+
+fn write_rows(path: &Path, rows: &[Value]) {
+    let text = rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    fs::write(path, text + "\n").unwrap();
+}
+
+fn ordinary_analysis(paths: &[&Path]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .args(paths)
+        .arg("--json")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn legacy_csa_sanitized_metadata_matches_raw_winner_without_merging_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.jsonl");
+    let (mut meta, mut result) = csa_fixture();
+    meta.as_object_mut().unwrap().remove("source");
+    meta["engine_cmd"]["label_black"] = json!("alice_test");
+    meta["engine_cmd"]["label_white"] = json!("bob_test");
+    for (outcome, winner, count) in [
+        ("black_win", "alice.test", "black_wins"),
+        ("white_win", "bob@test", "white_wins"),
+    ] {
+        result["outcome"] = json!(outcome);
+        result["winner"] = json!(winner);
+        write_rows(&path, &[meta.clone(), result.clone()]);
+        let output = ordinary_analysis(&[&path]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["matchups"][0][count], 1);
+    }
+    meta["source"] = json!("csa_client");
+    write_rows(&path, &[meta.clone(), result.clone()]);
+    assert!(!ordinary_analysis(&[&path]).status.success());
+    meta.as_object_mut().unwrap().remove("source");
+    meta["engine_cmd"]["label_white"] = json!("alice_test");
+    result["winner"] = json!("alice@test");
+    write_rows(&path, &[meta, result]);
+    let output = ordinary_analysis(&[&path]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("先後ラベルが衝突"));
+}
+
+#[test]
+fn malformed_csa_results_are_rejected_before_counting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.jsonl");
+    let (meta, result) = csa_fixture();
+    for rows in [vec![meta.clone()], vec![meta.clone(), result.clone(), result.clone()]] {
+        write_rows(&path, &rows);
+        assert!(!ordinary_analysis(&[&path]).status.success());
+    }
+    for (field, value) in [
+        ("pair_index", json!(0)),
+        ("pair_slot", json!(0)),
+        ("attempt", json!(1)),
+        ("error", json!(true)),
+        ("outcome", json!("interrupted")),
+        ("winner", json!("test")),
+    ] {
+        let mut invalid = result.clone();
+        invalid[field] = value;
+        write_rows(&path, &[meta.clone(), invalid]);
+        assert!(!ordinary_analysis(&[&path]).status.success(), "{field}");
+    }
+}
+
+#[test]
+fn mixed_csa_and_tournament_counts_games_but_never_runs_sprt() {
+    let dir = tempfile::tempdir().unwrap();
+    let tournament = dir.path().join("tournament.jsonl");
+    let csa = dir.path().join("csa.jsonl");
+    write_log(&tournament, true, &[("black_win", "white_win")]);
+    let (meta, result) = csa_fixture();
+    write_rows(&csa, &[meta, result]);
+    let output = ordinary_analysis(&[&tournament, &csa]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["progress"]["done"], 3);
+    assert_eq!(parsed["matchups"][0]["black_wins"], 3);
+    for partial in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+        command.args([&tournament, &csa]).args(["--json", "--sprt"]);
+        if partial {
+            command.arg("--allow-partial");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("CSA単局ログ"));
+    }
+}
+
+#[test]
+fn explicit_source_overrides_legacy_note_and_plain_single_game_stays_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("complete.jsonl");
+    let single = dir.path().join("single.jsonl");
+    write_log(&good, true, &[("black_win", "white_win")]);
+    for explicit_source in [false, true] {
+        let (mut meta, result) = csa_fixture();
+        if explicit_source {
+            meta["source"] = json!("tournament");
+        } else {
+            meta.as_object_mut().unwrap().remove("source");
+            meta["engine_cmd"].as_object_mut().unwrap().remove("note");
+        }
+        write_rows(&single, &[meta, result]);
+        let (success, parsed) = analyze(&[&good, &single], true);
+        assert!(success);
+        assert_eq!(parsed["progress"]["done"], 2);
+        assert_eq!(parsed["extra"]["invalid"], true);
+        assert_eq!(parsed["sprt"]["decision"], "invalid");
+        assert_eq!(parsed["sprt"]["pairs"], 1);
     }
 }

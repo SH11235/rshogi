@@ -319,7 +319,7 @@ impl DurableObject for GameRoom {
     async fn fetch(&self, req: Request) -> Result<Response> {
         let url = req.url()?;
         let path = url.path();
-        let Some(route) = parse_ws_route(&path) else {
+        let Some(route) = parse_ws_route(path) else {
             return Response::error("Upgrade required", 426);
         };
         let room_id = route.room_id().to_owned();
@@ -928,7 +928,7 @@ impl GameRoom {
                 crate::structured_log!(
                     event: "reconnect_grace_config_error",
                     component: "game_room",
-                    err: format!("{e}"),
+                    err: e.to_string(),
                 );
                 self.abort_pending_match_with_error("##[ERROR] reconnect grace config error")
                     .await?;
@@ -1112,14 +1112,13 @@ impl GameRoom {
         }
 
         let csa = CsaLine::new(line);
-        if let Ok(cmd) = parse_command(&csa) {
-            if let Some(replies) = self.handle_player_control_command(handle, is_admin, cmd).await?
-            {
-                for out in replies {
-                    send_line(ws, &out)?;
-                }
-                return Ok(());
+        if let Ok(cmd) = parse_command(&csa)
+            && let Some(replies) = self.handle_player_control_command(handle, is_admin, cmd).await?
+        {
+            for out in replies {
+                send_line(ws, &out)?;
             }
+            return Ok(());
         }
 
         if self.active_game_id().await?.is_none() && !self.try_start_pending_match().await? {
@@ -2845,7 +2844,7 @@ impl GameRoom {
                 crate::structured_log!(
                     event: "floodgate_history_config_error",
                     component: "game_room",
-                    err: format!("{e}"),
+                    err: e.to_string(),
                 );
                 return Ok(());
             }
@@ -2896,11 +2895,11 @@ impl GameRoom {
     async fn send_to_role(&self, role: Role, line: &str) -> Result<()> {
         for ws in self.state.get_websockets() {
             let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
-            if let Some(WsAttachment::Player { role: r, .. }) = att {
-                if r == role {
-                    send_line(&ws, line)?;
-                    return Ok(());
-                }
+            if let Some(WsAttachment::Player { role: r, .. }) = att
+                && r == role
+            {
+                send_line(&ws, line)?;
+                return Ok(());
             }
         }
         Ok(())
@@ -3686,7 +3685,7 @@ impl GameRoom {
                 crate::structured_log!(
                     event: "grace_alarm_invalid_color",
                     component: "game_room",
-                    err: format!("{e}"),
+                    err: e.to_string(),
                 );
                 self.delete_grace_alarm_state().await?;
                 return Ok(());
@@ -3940,12 +3939,29 @@ impl GameRoom {
         // grace registry / alarm tag を片付ける順で進める。
         let game_name = self.current_game_name_or_empty().await?;
         let login_name = format!("{handle}+{game_name}+{}", color_to_str(role.to_core()));
-        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
         // 状態再送 (Game_Summary + Reconnect_State ブロック) は複数行なので
         // 1 行ずつ `send_line` に分解する。`build_resume_message` の改行終端が
         // 各行末改行と整合するので `lines()` でそのまま reuse できる。
-        let resume =
-            build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
+        let resume = {
+            let core_borrow = self.core.borrow();
+            let core = core_borrow
+                .as_ref()
+                .ok_or_else(|| Error::RustError("reconnect core unavailable".into()))?;
+            let config_borrow = self.config.borrow();
+            let cfg = config_borrow
+                .as_ref()
+                .ok_or_else(|| Error::RustError("reconnect config unavailable".into()))?;
+            let refreshed = self.build_pending_reconnect(core, cfg, role, Duration::ZERO)?;
+            let remaining_ms = core
+                .current_turn_remaining_ms(self.now_ms())
+                .ok_or_else(|| Error::RustError("reconnect clock unavailable".into()))?;
+            build_resume_message(
+                &refreshed.game_summary_for_disconnected,
+                &refreshed.snapshot,
+                rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
+            )
+        };
+        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
         for line in resume.lines() {
             send_line(ws, line)?;
         }
@@ -4046,11 +4062,11 @@ impl GameRoom {
         // 何もしない。タグも `clear_agree_timeout_tag` 経路で消える (race で
         // 残っているなら念のため明示削除)。
         let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
-        if let Some(cfg) = cfg_opt.as_ref() {
-            if cfg.play_started_at_ms.is_some() {
-                let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
-                return Ok(());
-            }
+        if let Some(cfg) = cfg_opt.as_ref()
+            && cfg.play_started_at_ms.is_some()
+        {
+            let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+            return Ok(());
         }
 
         crate::structured_log!(
