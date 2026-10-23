@@ -286,7 +286,7 @@ Workers は `crates/rshogi-csa-server-workers/src/game_room.rs::GameRoom::handle
 
 | 判定 | 応答 |
 |---|---|
-| token 一致 | `LOGIN:<echo> OK` → resume message → transport handoff。TCP は bare handle (§4 と同様)、Workers は `<handle>+<game_name>+<color>` 形式だが**色トークンは `color_to_str` で正規化** (`black` / `white`) されるため、再接続時 LOGIN 行で `b` / `sente` 等の alias を送ってもサーバー応答は `black` で返る。新規 LOGIN 経路 (§4) は raw 入力をそのまま echo するので、ここだけ挙動が異なることに注意 |
+| token 一致 | TCP は transport handoff → 対局所有者が期限確認 → `LOGIN:<echo> OK` → 最新 resume message。Workers は `LOGIN:<echo> OK` → resume message。TCP は bare handle (§4 と同様)、Workers は `<handle>+<game_name>+<color>` 形式だが**色トークンは `color_to_str` で正規化** (`black` / `white`) されるため、再接続時 LOGIN 行で `b` / `sente` 等の alias を送ってもサーバー応答は `black` で返る。新規 LOGIN 経路 (§4) は raw 入力をそのまま echo するので、ここだけ挙動が異なることに注意 |
 | game_id 不在 / handle・color 不一致 / token 不一致 | `LOGIN:incorrect reconnect_rejected` (side-channel 漏洩防止のため理由を統合) |
 | 既に他経路で再接続済み | `LOGIN:incorrect reconnect_already_resumed` |
 | game loop 側が deadline 超過済 | `LOGIN:incorrect reconnect_aborted` |
@@ -298,7 +298,7 @@ Workers は `crates/rshogi-csa-server-workers/src/game_room.rs::GameRoom::handle
 
 ```
 BEGIN Game_Summary
-... (切断時点の position_section、Reconnect_Token: 拡張行を含む)
+... (再接続受理時点の position_section、Reconnect_Token: 拡張行を含む)
 END Game_Summary
 BEGIN Reconnect_State
 Current_Turn:<+|->
@@ -325,6 +325,14 @@ client はこの拡張値を受信後の経過時間と通信マージンを引�
 旧clientは未知の拡張行として無視できるが、時間過大評価の対策にはclient更新が必要。
 旧serverがこの行を送らない場合、新clientは従来の台帳による計算を続ける。
 送信から受信までの遅延は値に含められないため、通信マージンを確保する。
+
+TCP の再接続猶予は時計を停止しない。接続中の相手の着手・投了と時間切れは猶予中も
+処理し、着手の消費時間へ再接続待ち時間を加算しない。再接続の成功応答と状態再送は
+対局を駆動するタスクが行い、猶予中の着手を反映した盤面・最終手・手番を返す。
+時計期限と猶予期限では先に到達した方を確定し、同時なら時間切れを優先する。
+期限到達と再接続が競合した場合は期限を優先し、終局後は再接続を受理しない。
+再送失敗時はその接続を閉じ、元の猶予期限内に限って再試行を受け付ける。
+双方が切断しても元の猶予・時計期限は延長しない。
 
 ### 9.2 Lobby マッチング (`MATCHED <room_id> <color>`) `**`
 
