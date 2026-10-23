@@ -1063,7 +1063,8 @@ impl SearchWorker {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: node limit reached nodes={} limit={}",
-                self.state.nodes, limits.nodes
+                time_manager.budget_nodes(self.state.nodes),
+                limits.nodes
             );
             self.state.abort = true;
             return true;

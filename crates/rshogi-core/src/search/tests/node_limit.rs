@@ -96,7 +96,9 @@ fn multi_thread_go_ponder_nodes_waits_for_ponderhit() {
     search.reset_flags();
     let stop = search.stop_flag();
     let ponderhit = search.ponderhit_handle();
+    const LIMIT: u64 = 2_000;
     let (tx, rx) = std::sync::mpsc::channel();
+    let (spent_tx, spent_rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
@@ -106,22 +108,28 @@ fn multi_thread_go_ponder_nodes_waits_for_ponderhit() {
                 &mut pos,
                 LimitsType {
                     ponder: true,
-                    nodes: 2_000,
+                    nodes: LIMIT,
                     ..Default::default()
                 },
-                None::<fn(&SearchInfo)>,
+                Some(|info: &SearchInfo| {
+                    if info.nodes >= LIMIT {
+                        let _ = spent_tx.send(());
+                    }
+                }),
             );
             tx.send(result.best_move).unwrap();
         })
         .unwrap();
+    let spent = spent_rx.recv_timeout(Duration::from_secs(5));
     // 予算を使い切った後も ponder 中は bestmove を返さない。
-    let early = rx.recv_timeout(Duration::from_millis(300));
+    let early = rx.recv_timeout(Duration::from_millis(100));
     ponderhit.signal();
     let released = rx.recv_timeout(Duration::from_secs(5));
     if released.is_err() {
         stop.store(true, Ordering::SeqCst);
     }
     worker.join().unwrap();
+    assert!(spent.is_ok(), "search must exceed the node budget while pondering");
     assert!(early.is_err(), "ponder must not stop on the node budget");
     assert_ne!(released.expect("ponderhit must stop on the exhausted budget"), Move::NONE);
 }

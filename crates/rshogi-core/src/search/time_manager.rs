@@ -870,14 +870,16 @@ impl TimeManagement {
     /// ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
     #[inline]
     pub(crate) fn node_limit_reached(&self, limits: &LimitsType, own_nodes: u64) -> bool {
-        if limits.nodes == 0 || self.is_pondering {
-            return false;
-        }
-        let nodes = match &self.searched_nodes {
+        limits.nodes > 0 && !self.is_pondering && self.budget_nodes(own_nodes) >= limits.nodes
+    }
+
+    /// nodes 予算と比べるノード数。共有カウンタがあれば全 worker の合計。
+    #[inline]
+    pub(crate) fn budget_nodes(&self, own_nodes: u64) -> u64 {
+        match &self.searched_nodes {
             Some(total) => total.load(Ordering::Relaxed),
             None => own_nodes,
-        };
-        nodes >= limits.nodes
+        }
     }
 
     /// 停止要求が出ているか
