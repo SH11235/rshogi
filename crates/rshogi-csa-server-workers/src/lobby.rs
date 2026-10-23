@@ -65,6 +65,9 @@ use crate::attachment::MAX_WS_LINE_BYTES;
 
 /// LobbyDO 内 in-memory queue 上限の既定値 (`LOBBY_QUEUE_SIZE_LIMIT` 未設定時)。
 const DEFAULT_LOBBY_QUEUE_SIZE_LIMIT: usize = 100;
+const PENDING_LOGIN_TIMEOUT_MS: u64 = 30_000;
+const MAX_PENDING_CONNECTIONS: usize = 100;
+const MAX_PENDING_CONNECTIONS_PER_IP: usize = 4;
 
 /// `ChallengeRegistry` を DO storage に書き出すキー。
 ///
@@ -89,20 +92,12 @@ const CHALLENGE_ALARM_SAFETY_MS: u64 = 200;
 /// WebSocket attachment。LobbyDO は対局 DO と異なり 1 種類の player のみ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum LobbyAttachment {
-    /// LOGIN_LOBBY 到着前の匿名接続。`websocket_message` で初手は LOGIN_LOBBY を期待する。
-    ///
-    /// `client_ip`: 接続元 IP (`CF-Connecting-IP`、`router::forward_ws_to_lobby` が
-    /// 転送する)。LOGIN_LOBBY / CHALLENGE_LOBBY の per-IP rate limit
-    /// (issue [#622](https://github.com/SH11235/rshogi/issues/622) PR3a) で参照
-    /// する。`None` (CF 経由でない / ヘッダ欠落) は anomalous で **fail-closed**
-    /// (= 全コマンドを `rate_limited` で reject) する。
-    /// `#[serde(default)]` を付けて、本フィールド導入前 (= PR3a merge 前) に
-    /// upgrade した既存 hibernated WS が deserialize_attachment で None を読める
-    /// よう backward compat を確保する。新規接続の Pending は必ず `Some(_)` で
-    /// セットされ、`None` 経路は旧 attachment fall-through 時のみ。
+    /// 絶対期限を保存し、hibernation や無効コマンドで認証待ちを延長しない。
     Pending {
         #[serde(default)]
         client_ip: Option<String>,
+        #[serde(default)]
+        expires_at_ms: u64,
     },
     /// queue 登録済みの待機者。
     /// `attachment_id` は LobbyDO 採番の WS 一意 id (`PrivatePending` と同じ値域)。
@@ -176,36 +171,44 @@ impl DurableObject for Lobby {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        let Some(client_ip) = crate::rate_limit::extract_client_ip(&req) else {
+            return crate::rate_limit::build_missing_ip_response();
+        };
+        let now_ms = self.now_ms();
+        self.purge_pending(now_ms);
+        let (total, per_ip) = self.pending_counts(&client_ip, now_ms);
+        if total >= MAX_PENDING_CONNECTIONS || per_ip >= MAX_PENDING_CONNECTIONS_PER_IP {
+            crate::structured_log!(event: "lobby_pending_limit_denied", component: "lobby", total: total, per_ip: per_ip);
+            return crate::rate_limit::build_ws_upgrade_rate_limited_response(30);
+        }
+        // 集計から accept まで await を挟まず、同時 upgrade の上限超過を防ぐ。
         let pair = WebSocketPair::new()?;
         let server = pair.server;
         self.state.accept_web_socket(&server);
-
-        // Rate limit のため、`router::forward_ws_to_lobby` が
-        // 転送した `CF-Connecting-IP` を attachment に保存する。
-        // `accept_web_socket` 後の `websocket_message` ハンドラは Worker fetch
-        // context を持たないため、このフィールド経由でしか per-IP rate limit を
-        // 適用できない。ヘッダ欠落 / 空文字は `None` として扱い、後段の
-        // LOGIN_LOBBY / CHALLENGE_LOBBY ハンドラ側で fail-closed する。
-        let client_ip = crate::rate_limit::extract_client_ip(&req);
-
-        server
-            .serialize_attachment(&LobbyAttachment::Pending {
-                client_ip: client_ip.clone(),
-            })
-            .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
+        server.serialize_attachment(&LobbyAttachment::Pending {
+            client_ip: Some(client_ip),
+            expires_at_ms: now_ms.saturating_add(PENDING_LOGIN_TIMEOUT_MS),
+        })?;
+        if let Err(error) = self.reschedule_alarm().await {
+            let _ = server.close(Some(1011), Some("alarm unavailable"));
+            return Err(error);
+        }
         crate::structured_log!(
             event: "websocket_upgrade_accepted",
             component: "lobby",
             // IP の有無のみ logged (= ヘッダ欠落の異常検知)。値そのものは
             // LOGIN_LOBBY / CHALLENGE_LOBBY 受信時の `rate_limit_denied` ログで
             // 必要時に出すため、upgrade 段階では記録量を抑える。
-            cf_ip_present: client_ip.is_some(),
+            cf_ip_present: true,
         );
 
         Ok(ResponseBuilder::new().with_status(101).with_websocket(pair.client).empty())
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
+        if !self.check_pending_deadline(&ws) {
+            return Ok(());
+        }
         // https://github.com/SH11235/rshogi/issues/627: 受信フレームの byte 数を **String/Binary 共通で** 上限判定する。
         // Lobby protocol は text-only なので Binary は最終的に discard するが、Binary
         // 経路を素通しにすると Cloudflare ランタイム側で 32 MiB の frame を受け取って
@@ -234,10 +237,13 @@ impl DurableObject for Lobby {
         let attachment: LobbyAttachment = ws
             .deserialize_attachment()
             .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?
-            .unwrap_or(LobbyAttachment::Pending { client_ip: None });
+            .unwrap_or(LobbyAttachment::Pending {
+                client_ip: None,
+                expires_at_ms: 0,
+            });
 
         match attachment {
-            LobbyAttachment::Pending { client_ip } => {
+            LobbyAttachment::Pending { client_ip, .. } => {
                 self.dispatch_pending_line(&ws, client_ip.as_deref(), &line).await
             }
             LobbyAttachment::Queued {
@@ -288,7 +294,9 @@ impl DurableObject for Lobby {
             })) => {
                 self.handle_private_pending_close(&token, &handle, &attachment_id).await?;
             }
-            _ => {}
+            _ => {
+                self.reschedule_alarm().await?;
+            }
         }
         Ok(())
     }
@@ -299,13 +307,7 @@ impl DurableObject for Lobby {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        // 単一の Alarm 経路で 2 種類の TTL purge を順に処理する:
-        // 1. challenge_registry の期限切れ token を purge (`purge_expired`)
-        // 2. public queue の stale entry を purge (https://github.com/SH11235/rshogi/issues/631)
-        // 両 purge は独立で副作用が交錯しないため、順序は固定で良い (どちらが
-        // 先でも結果は同じ)。両 purge 後に earliest を再計算して alarm を
-        // **1 回だけ** 再予約する (`reschedule_alarm`) ことで、各 purge が個別に
-        // alarm を上書きする race を避ける。
+        self.purge_pending(self.now_ms());
         self.handle_challenge_purge(self.now_ms()).await?;
         self.handle_queue_purge(self.now_ms()).await?;
         self.reschedule_alarm().await?;
@@ -314,6 +316,63 @@ impl DurableObject for Lobby {
 }
 
 impl Lobby {
+    fn check_pending_deadline(&self, ws: &WebSocket) -> bool {
+        match ws.deserialize_attachment::<LobbyAttachment>() {
+            Ok(Some(LobbyAttachment::Queued { .. } | LobbyAttachment::PrivatePending { .. })) => {
+                true
+            }
+            Ok(Some(LobbyAttachment::Pending {
+                client_ip: Some(_),
+                expires_at_ms,
+            })) if expires_at_ms > self.now_ms() => true,
+            _ => {
+                let _ = ws.close(Some(1008), Some("login timeout"));
+                false
+            }
+        }
+    }
+
+    fn is_active_pending(&self, ws: &WebSocket) -> bool {
+        matches!(
+            ws.deserialize_attachment::<LobbyAttachment>(),
+            Ok(Some(LobbyAttachment::Pending { .. }))
+        ) && self.check_pending_deadline(ws)
+    }
+
+    fn purge_pending(&self, now_ms: u64) {
+        for ws in self.state.get_websockets() {
+            match ws.deserialize_attachment::<LobbyAttachment>() {
+                Ok(Some(LobbyAttachment::Pending {
+                    client_ip: Some(_),
+                    expires_at_ms,
+                })) if expires_at_ms > now_ms => {}
+                Ok(Some(
+                    LobbyAttachment::Queued { .. } | LobbyAttachment::PrivatePending { .. },
+                )) => {}
+                _ => {
+                    let _ = ws.close(Some(1008), Some("login timeout"));
+                }
+            }
+        }
+    }
+
+    fn pending_counts(&self, ip: &str, now_ms: u64) -> (usize, usize) {
+        let mut total = 0;
+        let mut per_ip = 0;
+        for ws in self.state.get_websockets() {
+            if let Ok(Some(LobbyAttachment::Pending {
+                client_ip: Some(client_ip),
+                expires_at_ms,
+            })) = ws.deserialize_attachment::<LobbyAttachment>()
+                && expires_at_ms > now_ms
+            {
+                total += 1;
+                per_ip += usize::from(client_ip == ip);
+            }
+        }
+        (total, per_ip)
+    }
+
     fn queue_size_limit(&self) -> usize {
         self.env
             .var(ConfigKeys::LOBBY_QUEUE_SIZE_LIMIT)
@@ -347,7 +406,7 @@ impl Lobby {
                 crate::structured_log!(
                     event: "invalid_clock_presets",
                     component: "lobby",
-                    err: format!("{e}"),
+                    err: e.to_string(),
                 );
                 HashMap::new()
             }
@@ -408,14 +467,7 @@ impl Lobby {
         Ok(format!("ws-{next}"))
     }
 
-    /// 次回の Alarm を「challenge_registry の earliest_expiry_ms」と「public
-    /// queue の earliest_last_pong_at_ms + ttl_ms」の **両方を併合した earliest**
-    /// に基づいて設定する。両者空なら `delete_alarm` で予約を解除する。
-    ///
-    /// 本 LobbyDO の Alarm は challenge purge と queue purge の 2 用途を共有する
-    /// ため、各 purge / mark / unmark / enqueue / remove / pong update の **全て**
-    /// から本関数を呼ぶ契約。各経路が個別に `set_alarm` / `delete_alarm` を呼ぶと
-    /// race して earliest が壊れるので、必ず本関数経由で 1 本化する。
+    // 認証待ち・challenge・queue が一つの alarm を共有するため最短期限へ集約する。
     async fn reschedule_alarm(&self) -> Result<()> {
         let reg = self.load_challenge_registry().await?;
         self.reschedule_alarm_with(&reg).await
@@ -424,16 +476,29 @@ impl Lobby {
     /// `reschedule_alarm` の inner 版。直前で `load_challenge_registry` 済の caller
     /// (`handle_challenge_lobby` 等) が再 load を避けるために使う。
     async fn reschedule_alarm_with(&self, reg: &ChallengeRegistry) -> Result<()> {
+        let pending_now = self.now_ms();
+        self.purge_pending(pending_now);
         let challenge_earliest = reg.earliest_expiry_ms();
         let ttl_ms = u64::try_from(self.queue_entry_ttl().as_millis()).unwrap_or(u64::MAX);
         let queue_earliest =
             self.queue.borrow().earliest_last_pong_at_ms().map(|t| t.saturating_add(ttl_ms));
-        let earliest = match (challenge_earliest, queue_earliest) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
+        let pending_earliest = self
+            .state
+            .get_websockets()
+            .iter()
+            .filter_map(|ws| match ws.deserialize_attachment::<LobbyAttachment>() {
+                Ok(Some(LobbyAttachment::Pending { expires_at_ms, .. }))
+                    if expires_at_ms > pending_now =>
+                {
+                    Some(expires_at_ms)
+                }
+                _ => None,
+            })
+            .min();
+        let earliest = [challenge_earliest, queue_earliest, pending_earliest]
+            .into_iter()
+            .flatten()
+            .min();
         match earliest {
             Some(epoch_ms) => {
                 let now_ms = self.now_ms();
@@ -527,6 +592,9 @@ impl Lobby {
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
 
         // `WORKERS_HANDLE_AUTH` whitelist: registry に登録された
         // handle に限り SHA256(password) を要求する。rate_limit の後 / queue
@@ -552,6 +620,9 @@ impl Lobby {
         // 同じ id で揃える。private 経路 (`pending_ws_attachment_ids`) と同じ
         // 採番器を共有し、id 値域を一本化する (storage key も共通)。
         let attachment_id = self.next_attachment_id().await?;
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
         let now_ms = self.now_ms();
         let entry = QueueEntry {
             handle: req.handle.clone(),
@@ -593,7 +664,8 @@ impl Lobby {
         );
 
         // ペアリング判定をその場で実行。成立したら両 WS に MATCHED を送って close。
-        if let Some(matched) = self.queue.borrow_mut().try_pair() {
+        let matched = self.queue.borrow_mut().try_pair();
+        if let Some(matched) = matched {
             self.dispatch_match(matched).await?;
         }
         // queue 状態が変わった (enqueue / dispatch) ので earliest_last_pong_at_ms
@@ -916,6 +988,9 @@ impl Lobby {
         {
             return self.send_rate_limited_challenge_lobby(ws, decision).await;
         }
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
 
         // 0. issue 直前に期限切れ entry を掃く。`handle_login_lobby_private` 入口
         //    でも同等の即時 purge を行うため、両入口で対称化することで
@@ -926,6 +1001,10 @@ impl Lobby {
         let now_ms = self.now_ms();
         let ttl = self.challenge_ttl();
         let mut reg = self.load_challenge_registry().await?;
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
+
         let expired = reg.purge_expired(now_ms);
         let purged = !expired.is_empty();
         if purged {
@@ -1041,6 +1120,9 @@ impl Lobby {
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
 
         // `WORKERS_HANDLE_AUTH` whitelist — private 経路でも適用する。
         // `CHALLENGE_LOBBY` の `opponent` が
@@ -1104,6 +1186,9 @@ impl Lobby {
 
         // 通過: attachment id を採番し registry に mark、attachment を更新
         let attachment_id = self.next_attachment_id().await?;
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
         reg.mark_ws_logged_in(
             &token,
             PlayerName::new(handle.as_str()),
@@ -1111,7 +1196,12 @@ impl Lobby {
             now_ms,
         );
         self.save_challenge_registry(&reg).await?;
-        self.reschedule_alarm_with(&reg).await?;
+        if !self.is_active_pending(ws) {
+            reg.unmark_ws_logged_in(&token, &PlayerName::new(handle.as_str()), &attachment_id);
+            self.save_challenge_registry(&reg).await?;
+            self.reschedule_alarm_with(&reg).await?;
+            return Ok(());
+        }
 
         ws.serialize_attachment(&LobbyAttachment::PrivatePending {
             token: token.as_str().to_owned(),
@@ -1120,6 +1210,7 @@ impl Lobby {
         })
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
+        self.reschedule_alarm_with(&reg).await?;
         send_line(ws, &format!("LOGIN_LOBBY:{handle} OK pending_match_dispatch_pending"))?;
         // 私的対局 token は診断用途で平文ログに残す (旧 console_log! と同等の挙動を
         // 保つ移行)。CHALLENGE_LOBBY 発行時の TTL (`CHALLENGE_TTL_SEC`、既定
@@ -1332,15 +1423,14 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
         if let LobbyAttachment::Queued {
             handle: existing, ..
         } = attachment
+            && existing == handle
         {
-            if existing == handle {
-                crate::structured_log!(
-                    event: "evict_duplicate_handle_ws",
-                    component: "lobby",
-                    handle: existing,
-                );
-                let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
-            }
+            crate::structured_log!(
+                event: "evict_duplicate_handle_ws",
+                component: "lobby",
+                handle: existing,
+            );
+            let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
         }
     }
 }

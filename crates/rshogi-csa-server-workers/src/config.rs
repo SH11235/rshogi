@@ -86,6 +86,7 @@ impl ConfigKeys {
     /// 最大回数。player + spectator 両 route が共有する looser cap で、
     /// `ROOM_CREATE_RATE_PER_IP_PER_MIN` (player のみ tighter cap) と二段
     /// チェックに使う。設定不正値は既定 (60) にフォールバック。
+    /// Lobby upgrade も同じ閾値を使用するが、bucket は GameRoom と分離する。
     pub const WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN: &'static str =
         "WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN";
     /// LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を `queue_full`
@@ -657,7 +658,7 @@ pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
             crate::structured_log!(
                 event: "invalid_allow_viewer_api",
                 component: "viewer_api",
-                err: format!("{e}"),
+                err: e.to_string(),
             );
             false
         }
@@ -686,7 +687,7 @@ pub fn is_private_challenge_enabled(env: &worker::Env) -> bool {
             crate::structured_log!(
                 event: "invalid_private_challenge_enabled",
                 component: "lobby",
-                err: format!("{e}"),
+                err: e.to_string(),
             );
             false
         }
