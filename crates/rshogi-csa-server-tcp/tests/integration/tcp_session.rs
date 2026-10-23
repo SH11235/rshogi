@@ -3215,3 +3215,38 @@ fn private_match_pending_session_unregister_avoids_stale_race() {
         );
     });
 }
+
+#[test]
+fn reconnect_clock_keeps_counting_across_keepalive_and_repeated_reconnect() {
+    run_local(|| async {
+        let (addr, topdir, _state) =
+            spawn_server_with_reconnect_grace("reconnect_clock", Duration::from_secs(5)).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        let mut previous = u64::MAX;
+        for _ in 0..3 {
+            send_line(&mut wa, "").await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            drop(ra);
+            drop(wa);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (ra, wa) = connect(addr).await;
+            send_line(&mut wa, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+                .await;
+            assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+            drain_game_summary(&mut ra).await;
+            let lines = read_until(&mut ra, "END Reconnect_State").await;
+            let remaining: u64 = extract_summary_field(&lines, "Current_Turn_Remaining_Ms")
+                .expect("clock field")
+                .parse()
+                .unwrap();
+            assert!(remaining < previous.saturating_sub(100), "{remaining} >= {previous}");
+            previous = remaining;
+        }
+        send_line(&mut wa, "%TORYO").await;
+        read_until(&mut rb, "#WIN").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}

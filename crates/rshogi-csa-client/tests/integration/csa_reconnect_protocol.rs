@@ -166,6 +166,7 @@ fn recv_reconnect_state_parses_known_fields_and_drops_unknown() {
                 // 既知フィールドではない行はサイレントに破棄される (前方互換)。
                 "Last_Move:+7776FU",
                 "Custom_Future_Field:foobar",
+                "Current_Turn_Remaining_Ms:1234",
                 "END Reconnect_State",
             ],
         );
@@ -174,6 +175,7 @@ fn recv_reconnect_state_parses_known_fields_and_drops_unknown() {
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
     conn.login("alice", "pw").expect("login");
     let state = conn.recv_reconnect_state().expect("recv_reconnect_state");
+    assert_eq!(state.turn_clock.unwrap().0.remaining_ms, 1234);
     assert_eq!(state.black_remaining_ms, 599_500);
     assert_eq!(state.white_remaining_ms, 600_000);
     assert_eq!(state.current_turn, Some(rshogi_csa::Color::White));
@@ -200,6 +202,7 @@ fn recv_reconnect_state_handles_minimal_block() {
     conn.login("alice", "pw").expect("login");
     let state = conn.recv_reconnect_state().expect("recv_reconnect_state");
     assert_eq!(state.current_turn, Some(rshogi_csa::Color::Black));
+    assert!(state.turn_clock.is_none());
 }
 
 #[test]
@@ -217,4 +220,27 @@ fn recv_reconnect_state_aborts_when_begin_marker_missing() {
     conn.login("alice", "pw").expect("login");
     let err = conn.recv_reconnect_state().expect_err("expected abort");
     assert!(err.to_string().contains("BEGIN Reconnect_State"));
+}
+
+#[test]
+fn recv_reconnect_state_rejects_invalid_or_ambiguous_clock() {
+    for fields in [
+        vec!["Current_Turn:+", "Current_Turn_Remaining_Ms:-1"],
+        vec![
+            "Current_Turn:+",
+            "Current_Turn_Remaining_Ms:4",
+            "Current_Turn_Remaining_Ms:5",
+        ],
+        vec!["Current_Turn:?", "Current_Turn_Remaining_Ms:4"],
+    ] {
+        let port = spawn_mock_tcp_server(move |reader, writer| {
+            let _ = read_line(reader);
+            write_lines(writer, &["LOGIN:alice OK", "BEGIN Reconnect_State"]);
+            write_lines(writer, &fields);
+            write_lines(writer, &["END Reconnect_State"]);
+        });
+        let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+        conn.login("alice", "pw").unwrap();
+        assert!(conn.recv_reconnect_state().is_err());
+    }
 }

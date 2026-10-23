@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
+import NodeWebSocket from "ws";
+import { request } from "node:http";
 import {
   createMiniflare,
   makeTempPersistRoot,
@@ -307,21 +309,34 @@ describe("/ws/<room_id> upgrade rate limit (per-IP)", () => {
     const ip = "203.0.113.50";
 
     // 1 回目: 101 Upgrade
-    const res1 = await mf.dispatchFetch("https://example.com/ws/room-floodtest-1", {
-      headers: { Upgrade: "websocket", "CF-Connecting-IP": ip },
-    });
-    expect(res1.status).toBe(101);
-    res1.webSocket?.accept();
-    res1.webSocket?.close();
+    const url = new URL('/ws/room-floodtest-1', await mf.ready);
+    url.protocol = 'ws:';
+    const ws = new NodeWebSocket(url, { headers: { 'CF-Connecting-IP': ip }, closeTimeout: 1_000 });
+    try {
+      await new Promise<void>((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+      const closed = new Promise<void>(resolve => ws.once('close', () => resolve()));
+      ws.close();
+      await closed;
+    } finally { if (ws.readyState !== NodeWebSocket.CLOSED) ws.terminate(); }
 
     // 2 回目: 503 + Retry-After
-    const res2 = await mf.dispatchFetch("https://example.com/ws/room-floodtest-2", {
-      headers: { Upgrade: "websocket", "CF-Connecting-IP": ip },
+    const res2 = await new Promise<{ status: number; retry: string; body: string }>((resolve, reject) => {
+      const req = request(new URL('/ws/room-floodtest-2', url.origin.replace('ws:', 'http:')), {
+        headers: { Upgrade: 'websocket', Connection: 'Upgrade', 'CF-Connecting-IP': ip },
+      }, res => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => { body += chunk; });
+        res.once('error', reject);
+        res.once('end', () => resolve({ status: res.statusCode!, retry: String(res.headers['retry-after']), body }));
+      });
+      req.once('error', reject);
+      req.end();
     });
     expect(res2.status).toBe(503);
-    expect(res2.headers.get("Retry-After")).toMatch(/^\d+$/);
-    expect(Number(res2.headers.get("Retry-After"))).toBeGreaterThanOrEqual(1);
-    expect(await res2.text()).toContain("rate_limited");
+    expect(res2.retry).toMatch(/^\d+$/);
+    expect(Number(res2.retry)).toBeGreaterThanOrEqual(1);
+    expect(res2.body).toContain('rate_limited');
   });
 
   test("CF-Connecting-IP が違えば bucket 隔離されて 1 回ずつ allow", async () => {

@@ -208,9 +208,7 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
         match l.kind.as_str() {
             "move" => {
                 if let Some(eng) = l.engine {
-                    // JSONL の move.engine / result.winner は raw の CSA 名、ファイル名と
-                    // meta ラベルは sanitize 済みという混在なので、集計キーは入口で
-                    // sanitize に統一する(`.` 等を含む名前でも突き合わせが揃う)。
+                    // 過去ログの raw 名と置換済みラベルを照合するため、入口で正規化する。
                     let eng = sanitize_for_filename(&eng);
                     if l.ply == Some(1) {
                         sente_ply1 = Some(eng.clone());

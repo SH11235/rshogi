@@ -146,9 +146,15 @@ impl LiveJsonlWriter {
             // flush 済み内容から進んでいなければ何もしない (毎手呼ばれる想定)。
             return Ok(());
         }
+        let (black, white) = engine_labels(record);
         for idx in self.written..upto {
             let ply = (idx as u32) + 1;
-            write_move_line(&mut self.writer, &record.moves[idx], &record.jsonl_moves[idx], ply)?;
+            let m = &record.moves[idx];
+            let label = match m.side_to_move {
+                Color::Black => &black,
+                Color::White => &white,
+            };
+            write_move_line(&mut self.writer, m, &record.jsonl_moves[idx], ply, label)?;
         }
         self.written = upto;
         self.writer.flush().context("live JSONL flush に失敗")
@@ -177,9 +183,8 @@ pub(crate) fn remove_complete_live_jsonl(out_dir: &Path, record: &GameRecord) ->
     }
 }
 
-/// ファイル名・JSONL `engine` ラベルの名前正規化。英数字と `-` `_` 以外を `_` に置換する
-/// (空文字は "unknown")。JSONL のラベルと外部由来の名前 (`server.id` 等) を突き合わせる
-/// consumer は、この関数を通して比較しないと `.` や `@` を含む id が一致しない。
+/// ファイル名向けに英数字と `-` `_` 以外を `_` に置換する。空文字は `unknown`。
+/// 異なる名前が同じ結果になるため、プレイヤー識別子には使わない。
 pub fn sanitize_for_filename(name: &str) -> String {
     if name.is_empty() {
         return "unknown".to_string();
@@ -267,10 +272,7 @@ fn write_meta<W: Write>(
         .map(|(k, v)| format!("{k}={}", toml_value_to_string(v)))
         .collect();
 
-    // analyze_selfplay は `winner` を `label_black` / `label_white` と照合して集計する。
-    // CSA 対局では winner = sente_name または gote_name で送られてくるので、
-    // ラベルを CSA 上のプレイヤー名に揃えておくと analyze 側で素直に集計が動く。
-    // path_* は自エンジン側に実バイナリパス、相手側に `remote:<name>` を入れる。
+    // 集計キーはファイル名用の正規化で失われる文字も保持する。
     let (path_black, path_white, options_black, options_white) = match record.my_color {
         Color::Black => (
             engine_path.clone(),
@@ -285,8 +287,7 @@ fn write_meta<W: Write>(
             usi_options.clone(),
         ),
     };
-    let label_black = engine_label_or_fallback(&record.sente_name);
-    let label_white = engine_label_or_fallback(&record.gote_name);
+    let (label_black, label_white) = engine_labels(record);
 
     let initial_sfen = record.initial_position.to_sfen();
     let start_positions = vec![format!("position sfen {initial_sfen}")];
@@ -335,11 +336,21 @@ fn opponent_descriptor(name: &str) -> String {
     }
 }
 
-fn engine_label_or_fallback(name: &str) -> String {
-    if name.is_empty() {
-        "unknown".to_string()
+fn engine_labels(record: &GameRecord) -> (String, String) {
+    let label = |name: &str| {
+        if name.is_empty() {
+            "unknown".to_owned()
+        } else {
+            name.to_owned()
+        }
+    };
+    let black = label(&record.sente_name);
+    let white = label(&record.gote_name);
+    if black == white {
+        // 同名・空名では名前だけで先後を区別できないため、対局内の識別子を分ける。
+        (format!("{black} (black)"), format!("{white} (white)"))
     } else {
-        sanitize_for_filename(name)
+        (black, white)
     }
 }
 
@@ -399,6 +410,7 @@ fn write_move_line<W: Write>(
     m: &RecordedMove,
     extra: &JsonlMoveExtra,
     ply: u32,
+    engine_label: &str,
 ) -> Result<()> {
     let entry = MoveLog {
         kind: "move",
@@ -407,7 +419,7 @@ fn write_move_line<W: Write>(
         side_to_move: side_label_char(m.side_to_move),
         sfen_before: &extra.sfen_before,
         move_usi: &extra.move_usi,
-        engine: &extra.engine_label,
+        engine: engine_label,
         elapsed_ms: extra.elapsed_ms,
         think_limit_ms: extra.think_limit_ms,
         timed_out: false,
@@ -420,12 +432,17 @@ fn write_move_line<W: Write>(
 
 fn write_moves<W: Write>(writer: &mut W, record: &GameRecord) -> Result<u32> {
     let mut plies: u32 = 0;
+    let (black, white) = engine_labels(record);
     // RecordedMove と JsonlMoveExtra は session.rs で同時に push されるため、
     // 一致しないペアは無視する（CSA から流入した手で extra を持たないものなど）。
     for (idx, (m, extra)) in record.moves.iter().zip(record.jsonl_moves.iter()).enumerate() {
         let ply = (idx as u32) + 1;
         plies = ply;
-        write_move_line(writer, m, extra, ply)?;
+        let label = match m.side_to_move {
+            Color::Black => &black,
+            Color::White => &white,
+        };
+        write_move_line(writer, m, extra, ply, label)?;
     }
     Ok(plies)
 }
@@ -521,11 +538,12 @@ fn outcome_label(result: &GameResult, my_color: Color) -> &'static str {
 }
 
 fn winner_label(record: &GameRecord, result: &GameResult) -> Option<String> {
+    let (black, white) = engine_labels(record);
     match (result, record.my_color) {
-        (GameResult::Win, Color::Black) => Some(record.sente_name.clone()),
-        (GameResult::Win, Color::White) => Some(record.gote_name.clone()),
-        (GameResult::Lose, Color::Black) => Some(record.gote_name.clone()),
-        (GameResult::Lose, Color::White) => Some(record.sente_name.clone()),
+        (GameResult::Win, Color::Black) => Some(black),
+        (GameResult::Win, Color::White) => Some(white),
+        (GameResult::Lose, Color::Black) => Some(white),
+        (GameResult::Lose, Color::White) => Some(black),
         _ => None,
     }
 }
