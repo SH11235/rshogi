@@ -2937,7 +2937,9 @@ where
             let event = tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => GraceEvent::Expired,
                 candidate = &mut rx => GraceEvent::Reconnect(candidate),
-                line = connected.recv_line(NEAR_INFINITE), if connected_open => GraceEvent::Recv(line),
+                line = connected.recv_line(NEAR_INFINITE), if connected_open => {
+                    GraceEvent::Recv(line)
+                },
             };
             let move_started_at = std::time::Instant::now();
             let now = tokio::time::Instant::now();
@@ -2957,9 +2959,15 @@ where
                     GraceEvent::Reconnect(candidate) => {
                         if let Ok(mut transport) = candidate
                             && send_current_resume(
-                                &mut transport, room, recorded_moves, ctx,
-                                disconnected, handle, deadline,
-                            ).await
+                                &mut transport,
+                                room,
+                                recorded_moves,
+                                ctx,
+                                disconnected,
+                                handle,
+                                deadline,
+                            )
+                            .await
                         {
                             return Ok(DisconnectOutcome::Reconnected(transport));
                         }
@@ -2970,8 +2978,10 @@ where
                         continue;
                     }
                     GraceEvent::Recv(Ok(line)) => {
-                        let at_ms = now.saturating_duration_since(ctx.start_instant)
-                            .as_millis().min(u64::MAX as u128) as u64;
+                        let at_ms = now
+                            .saturating_duration_since(ctx.start_instant)
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64;
                         room.handle_line(disconnected.opposite(), &line, at_ms)?
                     }
                     GraceEvent::Recv(Err(TransportError::Closed | TransportError::Timeout)) => {
@@ -2995,9 +3005,14 @@ where
                 Color::White => (active, None),
             };
             dispatch_available(
-                &result.broadcasts, black, white, &state.broadcaster,
-                &RoomId::new(game_id.as_str()), true,
-            ).await?;
+                &result.broadcasts,
+                black,
+                white,
+                &state.broadcaster,
+                &RoomId::new(game_id.as_str()),
+                true,
+            )
+            .await?;
             if is_move {
                 metrics::histogram!(crate::metrics::MOVE_LATENCY_SECONDS)
                     .record(move_started_at.elapsed().as_secs_f64());
@@ -3006,7 +3021,8 @@ where
                 return Ok(DisconnectOutcome::Finished);
             }
         }
-    }.await;
+    }
+    .await;
     rx.close();
     state.reconnect_pending.lock().await.remove(game_id);
     close_reconnect_receiver(&mut rx).await;

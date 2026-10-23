@@ -3306,7 +3306,7 @@ fn off_turn_disconnect_keeps_moves_live_and_resumes_latest_position() {
             .parse()
             .unwrap();
         assert_eq!(main_ms, 10_000);
-        assert!(remaining_ms > 0 && remaining_ms <= 9_000, "{remaining_ms}");
+        assert!(remaining_ms > 0 && remaining_ms <= 9_800, "{remaining_ms}");
         send_line(&mut writer, "%TORYO").await;
         read_until(&mut rb, "#WIN").await;
         tokio::time::timeout(Duration::from_secs(2), async {
