@@ -126,7 +126,10 @@ marker は `key=value\n` テキストのため、round-trip を保証できな�
 OutputProtection は開始時に PSV / score / expand / replacement / marker 群と旧 cleanup 対象を列挙し、
 共有 output_path で全入力・明示資源および出力同士を照合する。ファイル名が同じ別入力による出力重複も拒否する。
 変更直前には対象パスと全保護パスを再照合し、開いた file の実体を ensure_safe_output_file で検査する。
+初期検査の予定パスは各一回正規化して集合で重複を判定し、identity 照合は実在する出力と入力・先行する実在出力に限定する。
 全体の相互照合を各変更操作で繰り返さず、比較用 handle も一つずつ開閉する。
+入力数 N・出力数 M・実在出力数 E に対し、初期の正規化は O(N+M)、実体照合は O(E*N+E²)。
+実在する出力が多い場合の二乗比較は残る。Windows の予定パス命名制限は実体照合と別に適用する。
 
 marker の事前検査は存在する file のみを開く。実際の更新では .tmp を create_new で開いて照合し、
 書込み・sync 後に final path を再検査して rename する。marker の不一致時 truncate と一致時 resume の判定は変更しない。
