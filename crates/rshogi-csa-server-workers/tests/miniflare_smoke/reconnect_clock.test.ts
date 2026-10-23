@@ -75,7 +75,10 @@ describe("miniflare smoke: 秒読み中の再接続時計補償", () => {
     expect(await black1.recvLine()).toBe(`LOGIN:${blackName} OK`);
     await black1.drainGameSummary();
     expect(await black1.recvLine()).toBe("BEGIN Reconnect_State");
-    await black1.recvUntil((line) => line === "END Reconnect_State");
+    const snapshot = await black1.recvUntil((line) => line === "END Reconnect_State");
+    const remaining = Number(snapshot.find((line) => line.startsWith("Current_Turn_Remaining_Ms:"))?.split(":")[1]);
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(1_000);
 
     // さらに 0.9 秒後は raw 経過が 2 秒を超え、旧実装なら着手時に %TIME_UP。
     // 補償後は実効経過が 2 秒未満なので着手を受理し、両側へ同じ T 行を送る。
