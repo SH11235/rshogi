@@ -1048,8 +1048,8 @@ fn solve_graph(graph: &mut Graph, buckets: usize) -> Option<SolveOutcome<u32>> {
     solve_graph_with_limit(graph, buckets, 2_000_000)
 }
 
-/// 証明駒を使う探索と使わない探索の両方で解き、結果の種類 (詰み・不詰・打ち切り) が同じことを
-/// 確かめて、証明駒を使う方を返す (グラフに持駒は無いので、表の使い方の違いだけを比べる)
+/// 証明駒を使わず初期値も見積もらない探索と、証明駒を使い初期値を見積もる探索の両方で解き、結果の種類
+/// (詰み・不詰・打ち切り) が同じことを確かめて、後者を返す (グラフに持駒は無いので、証明駒の流用は起きない)
 fn solve_graph_with_limit(
     graph: &mut Graph,
     buckets: usize,
@@ -1211,7 +1211,7 @@ fn agrees_with_fixed_point_on_random_graphs() {
 /// 確定値の表が新しい確定値を書かずに捨てると、同じ局面を証明し直し続けて止まらないグラフ
 /// (1 bucket の表、初期値を見積もる探索)
 #[test]
-fn final_value_rejected_by_the_final_table_is_kept() {
+fn final_values_are_kept_when_the_final_bucket_is_full() {
     let edges: Vec<Vec<u32>> = vec![
         vec![9],
         vec![9, 7],
@@ -1228,8 +1228,18 @@ fn final_value_rejected_by_the_final_table_is_kept() {
         vec![5],
         vec![4, 2, 6],
     ];
+    // 節点 0..7 が OR、7..14 が AND
+    let is_or: Vec<bool> = (0..edges.len()).map(|v| v < 7).collect();
+    let truth = Graph::new(edges.clone(), 0).mate_set(&is_or)[0];
     let mut graph = Graph::new(edges, 0);
-    assert!(solve_graph_in_mode::<true>(&mut graph, 1, 2_000_000).is_some());
+    match solve_graph_in_mode::<true>(&mut graph, 1, 2_000_000) {
+        Some(SolveOutcome::Mate(pv)) => {
+            assert!(truth);
+            assert!(is_valid_graph_pv(&graph, 0, &pv), "{pv:?}");
+        }
+        Some(SolveOutcome::NoMate) => assert!(!truth),
+        None => panic!("打ち切り (停滞)"),
+    }
 }
 
 /// 長さ `len` の一本道 (OR → AND → ...)。`mate_at_end` なら末端は詰みの AND 終端、
