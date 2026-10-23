@@ -479,6 +479,12 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
     if let Some(engine) = &cli.engine {
         let cwd = engine.parent().unwrap_or(std::path::Path::new("."));
         for (name, value) in cli.usi_options.iter().filter_map(|option| parsed_usi_option(option)) {
+            anyhow::ensure!(
+                !name.split_whitespace().chain(value.split_whitespace()).any(|token| {
+                    token.eq_ignore_ascii_case("name") || token.eq_ignore_ascii_case("value")
+                }),
+                "Reserved USI token in option name or value: {name}"
+            );
             if is_usi_resource_option(name) {
                 anyhow::ensure!(
                     name.split_whitespace().collect::<Vec<_>>().join(" ") == name
@@ -5891,6 +5897,63 @@ mod marker_tests {
             let cli = Cli::parse_from(args);
             assert!(output_protection(&cli, &[input]).is_err());
             assert_eq!(std::fs::read(book).unwrap(), [7; 40]);
+        }
+    }
+
+    #[test]
+    fn reserved_usi_tokens_are_rejected_before_resource_classification() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let input = dir.path().join("input.psv");
+        let resource = dir.path().join("spsa.params");
+        let output_dir = dir.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        for path in [&engine, &input, &resource] {
+            std::fs::write(path, [7; 40]).unwrap();
+        }
+        let output = output_dir.join("input.psv");
+        std::fs::hard_link(&resource, &output).unwrap();
+        for option in [
+            "SPSAParamsFile=value",
+            "SPSAParamsFile=tune value params",
+            "SPSAParamsFile=tune name params",
+            "SPSAParamsFile value=tune params",
+            "SPSAParamsFile name=tune params",
+            "BookDir=books value other",
+            "BookDir=books NAME other",
+            "Unrecognized=VALUE",
+            "Unrecognized name=ignored",
+        ] {
+            let cli = Cli::parse_from([
+                "rescore_psv", "--input", input.to_str().unwrap(),
+                "--engine", engine.to_str().unwrap(),
+                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", option,
+            ]);
+            let error = output_protection(&cli, std::slice::from_ref(&input)).err().unwrap();
+            assert!(error.to_string().contains("Reserved USI token"), "{error}");
+            for path in [&engine, &input, &resource, &output] {
+                assert_eq!(std::fs::read(path).unwrap(), [7; 40]);
+            }
+        }
+        std::fs::remove_file(&output).unwrap();
+        let models = dir.path().join("path");
+        std::fs::create_dir(&models).unwrap();
+        for filename in ["value.nnue", "name.nnue"] {
+            let model = models.join(filename);
+            std::fs::write(&model, b"model bytes").unwrap();
+            let option = format!("EvalFile=path/{filename}");
+            let cli = Cli::parse_from([
+                "rescore_psv", "--input", input.to_str().unwrap(),
+                "--engine", engine.to_str().unwrap(),
+                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", &option,
+            ]);
+            let protection = output_protection(&cli, std::slice::from_ref(&input)).unwrap();
+            assert!(protection.inputs.contains(&model));
+            std::fs::hard_link(&model, &output).unwrap();
+            assert!(output_protection(&cli, std::slice::from_ref(&input)).is_err());
+            assert!(protection.truncate(&output, 0).is_err());
+            assert_eq!(std::fs::read(&model).unwrap(), b"model bytes");
+            std::fs::remove_file(&output).unwrap();
         }
     }
 
