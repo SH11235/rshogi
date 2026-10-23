@@ -208,7 +208,9 @@ jobs:
         run: cargo test -p rshogi-core --lib --features search-pass-rules -- --test-threads=2
       - name: Test USI flow with pass rules
         if: matrix.shard == 3
-        run: cargo test -p rshogi-usi --features search-pass-rules --test integration usi_flow:: -- --test-threads=2
+        run: >-
+          cargo test -p rshogi-usi --features search-pass-rules --test integration usi_flow::
+          -- --test-threads=2
       - name: Test search with lazy evaluate
         # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
         if: matrix.shard == 3
