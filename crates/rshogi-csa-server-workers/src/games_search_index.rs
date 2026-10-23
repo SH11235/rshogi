@@ -599,7 +599,7 @@ pub async fn register_player_aliases(
     reparent_values.extend(targets.iter().map(|id| JsValue::from_str(id)));
     reparent_values.push(JsValue::from_str(canonical_id));
     statements.push(
-        db.prepare(&format!(
+        db.prepare(format!(
             "UPDATE player_id_aliases SET canonical_id = ? WHERE canonical_id IN ({placeholders}) AND alias_id <> ?"
         ))
         .bind(&reparent_values)?,
