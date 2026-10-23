@@ -1,7 +1,7 @@
 //! 型付き評価器と従来 dispatch・全再計算の一致。
 use super::*;
 use crate as core;
-#[path = "../../tests/integration/common/search_models.rs"]
+#[path = "../../tests/common/search_models.rs"]
 mod search_models;
 use crate::nnue::{self, AccumulatorStackVariant};
 use crate::position::SFEN_HIRATE;

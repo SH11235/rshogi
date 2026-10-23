@@ -140,7 +140,7 @@ fn verify_dir(dir: &Path, counts: &mut BTreeMap<String, u32>, failures: &mut Vec
 ///
 /// ```text
 /// KIFU_VERIFY_DIR=<dir> cargo test -p rshogi-csa-server-workers \
-///     --test kifu_archive_import -- --ignored --nocapture
+///     --test integration kifu_archive_import:: -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "KIFU_VERIFY_DIR に kifu_publish --dry-run --out-dir の出力先を指定して実行する"]
