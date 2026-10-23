@@ -794,6 +794,8 @@ pub fn propagate_values_with(
             output
         })
         .collect();
+    drop(evaluator);
+    drop(node_best);
     for (node, moves) in graph.moves.iter_mut().enumerate() {
         let comp = scc.comp_of[node];
         for (mv, vd) in moves.iter_mut().zip(&outputs[node]) {
@@ -805,7 +807,7 @@ pub fn propagate_values_with(
             }
         }
     }
-    certify(graph, params)?;
+    drop(outputs);
 
     for (node_idx, key) in graph.keys.iter().enumerate() {
         let counted = || graph.moves[node_idx].iter().filter(|mv| params.counts(mv));
@@ -830,6 +832,10 @@ pub fn propagate_values_with(
             }
         }
     }
+    // 検査は局面数に比例する作業領域を確保するので、伝播の作業領域を解放してから行う。
+    drop(scc);
+    drop(scc_depth);
+    certify(graph, params)?;
 
     stats.changed_nodes.sort_by(|a, b| {
         (b.new_best - b.old_best)
