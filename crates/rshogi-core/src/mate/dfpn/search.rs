@@ -304,7 +304,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
     /// 攻め方の局面の dn を「子の dn の最大値 + (dn が 0 でない子の数 − 1) × `step`」で数える
     /// (WPNS, Ueda ほか 2008)。王手の後の局面どうしが合流すると同じ反証の手間を何度も足してしまい、
-    /// 和では dn が膨らむ。`step` は子の初期値の単位にそろえる (`MateState::initial_pn_dn`)。
+    /// 和では dn が膨らむ。`step` は子の初期値の単位にそろえる (`MateState::initial_pn_dn`)。0 は 1 として扱う。
     pub fn count_disproof_weakly(&mut self, step: u32) {
         self.weak_disproof_step = u64::from(step.max(1));
     }
