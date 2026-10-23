@@ -431,6 +431,11 @@ USI option の名前・値の前後空白は送信と保護検査の両方で除
 空値・`<empty>`・`<auto>`・存在しない USI 資源は列挙しません（NNUE など専用 CLI 引数の存在検査は省略しません）。
 BookFile=no_book は定跡なしとして扱い、有効な BookFile は BookDir（未指定・空なら book）からの相対パスとして解決します。
 BookDir 自体の全走査は行わず、指定された BookFile を保護します。それ以外の directory 資源はファイルを再帰列挙します。
+option 名の大小文字を区別する engine と区別しない engine の双方に対応するため、表記が異なる BookDir 候補は統合せず、
+各候補から解決した BookFile をすべて保護します。完全一致の BookDir が未指定または空なら既定の book も候補に含めます。
+SPSAParamsFile も各表記の明示ファイルを保持し、完全一致の非自動指定がない場合、
+または大小文字違いを含む候補に自動・空指定がある場合は、隣接する spsa.params も保護します。
+複数候補を保守的に保護するため、実際に engine が採用しない候補との衝突も拒否する場合があります。
 SPSAParamsFile が未指定・空・`<auto>`・`<empty>` で engine 実体の隣に spsa.params が存在する場合も保護します。
 これ以外の vendor 固有 option や engine 内部の既定モデルは推測しません。
 
