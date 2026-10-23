@@ -9,6 +9,7 @@
 ///
 ///   # JSON出力モード
 ///   analyze_selfplay --json file1.jsonl file2.jsonl
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -838,12 +839,8 @@ fn parse_normal_file_inner(
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             games = meta.settings.games;
             legacy_csa = meta.source.is_none();
-            stats.extra.csa_single_game = meta.source.as_deref() == Some("csa_client")
-                || (meta.source.is_none()
-                    && meta.engine_cmd.note.as_deref()
-                        == Some(
-                            "csa_client: opponent path is reported as remote name; usi_options are for self-engine only",
-                        ));
+            stats.extra.csa_single_game =
+                is_csa_jsonl(meta.source.as_deref(), meta.engine_cmd.note.as_deref());
             *csa_single_game = stats.extra.csa_single_game;
             if stats.extra.csa_single_game && games != 1 {
                 bail!("CSA単局ログのsettings.gamesは1である必要があります: {path}");
@@ -925,6 +922,9 @@ fn parse_normal_file_inner(
             };
             *stats.extra.reasons.entry(reason.to_string()).or_default() += 1;
             if stats.extra.csa_single_game {
+                if is_incomplete_result(true, &result.outcome, result.reason.as_deref()) {
+                    bail!("CSA単局ログは未決です: {path}");
+                }
                 if seq != 0
                     || result.pair_index.is_some()
                     || result.pair_slot.is_some()

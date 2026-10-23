@@ -6,6 +6,7 @@
 //! 後段で `rescore_psv` する前提なら `--missing-score zero` で欠損スコアも
 //! 0 として残せる。
 
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -63,6 +64,7 @@ enum MissingScoreMode {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum LogEntry {
+    Meta(serde_json::Value),
     Move(MoveLog),
     Result(ResultLog),
     #[serde(other)]
@@ -88,6 +90,8 @@ struct EvalLog {
 
 #[derive(Debug, Deserialize)]
 struct ResultLog {
+    #[serde(default)]
+    reason: Option<String>,
     game_id: u32,
     outcome: Outcome,
     #[serde(default)]
@@ -100,6 +104,7 @@ enum Outcome {
     BlackWin,
     WhiteWin,
     Draw,
+    #[serde(alias = "interrupted", alias = "censored")]
     InProgress,
 }
 
@@ -222,6 +227,7 @@ fn process_file(
     let file = File::open(path)
         .with_context(|| format!("入力ファイルを開けません: {}", path.display()))?;
     let mut reader = BufReader::new(file);
+    let mut csa = false;
     let mut pending: HashMap<u32, Vec<PendingRecord>> = HashMap::new();
     let mut stats = Stats {
         files: 1,
@@ -296,6 +302,9 @@ fn process_file(
         };
 
         match entry {
+            LogEntry::Meta(meta) => {
+                csa = is_csa_jsonl(meta["source"].as_str(), meta["engine_cmd"]["note"].as_str());
+            }
             LogEntry::Move(mv) => match convert_move(&mv, missing_score) {
                 Ok(Some(record)) => pending.entry(mv.game_id).or_default().push(record),
                 Ok(None) => {
@@ -323,7 +332,10 @@ fn process_file(
                     stats.skipped_error_game += 1;
                     continue;
                 }
-                if result.outcome == Outcome::InProgress {
+                if result.outcome == Outcome::InProgress
+                    || (result.outcome == Outcome::Draw
+                        && is_incomplete_result(csa, "draw", result.reason.as_deref()))
+                {
                     stats.skipped_in_progress_game += 1;
                     continue;
                 }

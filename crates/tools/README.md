@@ -54,7 +54,7 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 | `validate_psv` | PSV ファイルの不正局面検出・除去 |
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップと統計集計。PSV / JSON 出力への入力 alias を拒否（[詳細](docs/filter_teacher_data.md)） |
 | `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用）。入力 alias を拒否（[詳細](docs/psv_to_jsonl.md)） |
-| `jsonl_to_psv` | 自己対局 JSONL → PSV 変換（破損行は破棄して継続、件数を Summary に計上。[詳細](docs/pack_tools.md#jsonl_to_psv)） |
+| `jsonl_to_psv` | 自己対局 JSONL → PSV 変換（破損行は破棄して継続、件数を Summary に計上。[詳細](docs/jsonl_to_psv.md)） |
 | `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](docs/psv_to_hcpe3.md)） |
 | `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へ移行（[詳細](docs/migrate_psv_move16.md)） |
 | `pack_to_psv` | GenSfen .pack → PSV を有界バッチで変換。全入力通算の対局数上限、成功時の出力置換、入力 alias 保護（[詳細](docs/pack_to_psv.md)） |
@@ -181,3 +181,6 @@ Floodgate の HTTPS 取得は reqwest 0.13 の rustls backend を使う。
 CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "csa_client"`、または
 過去ログの CSA client 固有 `engine_cmd.note` で識別する。CSA 入力は pentanomial
 と SPRT の対象外で、`--sprt` は `--allow-partial` 指定時も拒否する。
+
+CSA JSONL の中断・打切りは勝敗集計と教師抽出から除外し、棋譜表示では未決として扱う。
+[解析の未決結果](docs/analyze_selfplay.md)、[KIF変換](docs/jsonl_to_kif.md)を参照。

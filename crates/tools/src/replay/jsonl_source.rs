@@ -4,6 +4,7 @@
 //! フラット化する。`game_id` はペアファイルごとのローカル連番（out-dir 全体での
 //! 一意性は無い）なので、一意キーは `(file_idx, game_id)` にする。
 
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -156,11 +157,15 @@ fn is_pair_jsonl_name(path: &Path) -> bool {
 
 #[derive(Deserialize)]
 struct MetaLine {
+    #[serde(default)]
+    source: Option<String>,
     engine_cmd: MetaEngineCmd,
 }
 
 #[derive(Deserialize)]
 struct MetaEngineCmd {
+    #[serde(default)]
+    note: Option<String>,
     label_black: String,
     label_white: String,
 }
@@ -182,6 +187,8 @@ struct MoveLine {
 
 #[derive(Deserialize)]
 struct ResultLine {
+    #[serde(default)]
+    reason: Option<String>,
     game_id: u32,
     #[serde(default)]
     outcome: String,
@@ -320,7 +327,18 @@ fn index_one_file(
                         start_offset,
                         end_offset,
                     },
-                    outcome: parse_outcome(&result.outcome),
+                    outcome: if is_incomplete_result(
+                        is_csa_jsonl(
+                            meta_line.source.as_deref(),
+                            meta_line.engine_cmd.note.as_deref(),
+                        ),
+                        &result.outcome,
+                        result.reason.as_deref(),
+                    ) {
+                        None
+                    } else {
+                        parse_outcome(&result.outcome)
+                    },
                     error: result.error,
                     ply_count: result.plies,
                     pair_index: result.pair_index,

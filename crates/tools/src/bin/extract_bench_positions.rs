@@ -1,5 +1,6 @@
 //! 棋譜から教師ラベル評価用のベンチ局面を抽出する。
 
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -197,6 +198,7 @@ struct CsaGame {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum JsonlEntry {
+    Meta(serde_json::Value),
     Move(JsonlMove),
     Result(JsonlResult),
     #[serde(other)]
@@ -236,6 +238,7 @@ enum JsonlOutcome {
     BlackWin,
     WhiteWin,
     Draw,
+    #[serde(alias = "interrupted", alias = "censored")]
     InProgress,
 }
 
@@ -507,6 +510,7 @@ fn process_jsonl_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Vec<E
     let file =
         File::open(path).with_context(|| format!("JSONL を開けません: {}", path.display()))?;
     let reader = BufReader::new(file);
+    let mut csa = false;
     let mut pending: HashMap<u32, Vec<JsonlMove>> = HashMap::new();
     let mut results = HashMap::new();
 
@@ -516,6 +520,9 @@ fn process_jsonl_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Vec<E
             continue;
         }
         match serde_json::from_str::<JsonlEntry>(&line) {
+            Ok(JsonlEntry::Meta(meta)) => {
+                csa = is_csa_jsonl(meta["source"].as_str(), meta["engine_cmd"]["note"].as_str());
+            }
             Ok(JsonlEntry::Move(mv)) => pending.entry(mv.game_id).or_default().push(mv),
             Ok(JsonlEntry::Result(result)) => {
                 results.insert(result.game_id, result);
@@ -534,7 +541,11 @@ fn process_jsonl_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Vec<E
             add_count(&mut stats.skipped_by_reason, "jsonl_orphan_game");
             continue;
         };
-        if result.error || result.outcome == JsonlOutcome::InProgress {
+        if result.error
+            || result.outcome == JsonlOutcome::InProgress
+            || (result.outcome == JsonlOutcome::Draw
+                && is_incomplete_result(csa, "draw", result.reason.as_deref()))
+        {
             add_count(&mut stats.skipped_by_reason, "jsonl_error_or_in_progress");
             continue;
         }

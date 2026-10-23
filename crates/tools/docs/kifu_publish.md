@@ -445,3 +445,7 @@ HTTP 部分（ローカルのモックサーバーで成功 / 保存済み / 404
 リダイレクト / 失敗、イベントメタの `PUT`）を検証する。golden の CSA がサーバーの取り込みを通ることは
 `cargo test -p rshogi-csa-server-workers --test integration kifu_archive_import::` で検証する。変換した CSA の勝敗が既存の読み手で一致することは
 `cargo test -p tools --lib csa_source` で検証する。
+
+JSONL の `interrupted` / `censored` は未終局のため公開用 CSA へ変換しない。
+旧 CSA の未決理由 (`interrupted` / `censored`) も拒否する。旧 `draw` + `max_moves`
+は真の引分と区別できないため、従来どおり引分として変換する。

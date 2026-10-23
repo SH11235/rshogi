@@ -92,7 +92,7 @@ hardlink と Windows の大小文字違いも検査します。
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップなどの前処理を適用。PSV / JSON 出力への入力 alias を拒否（[詳細](filter_teacher_data.md)） |
 | `fix_scores` | preprocess で上書きされたスコアを元ファイルから復元。インプレース更新に対応し、元ファイルを保護（[詳細](fix_scores.md)） |
 | `psv_to_jsonl` | PSV 形式を JSONL 形式に変換。入力 alias を拒否（[詳細](psv_to_jsonl.md)） |
-| `jsonl_to_psv` | tournament / analyze_selfplay 互換の自己対局 JSONL を PSV に変換。書き手のクラッシュで壊れた行は破棄して継続し、件数を Summary に計上（[詳細](pack_tools.md#jsonl_to_psv)） |
+| `jsonl_to_psv` | tournament / analyze_selfplay 互換の自己対局 JSONL を PSV に変換。書き手のクラッシュで壊れた行は破棄して継続し、件数を Summary に計上（[詳細](jsonl_to_psv.md)） |
 | `psv_to_hcpe3` | PSV を dlshogi 学習用 hcpe3 / hcpe に変換（通常手は cshogi と byte 一致、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](psv_to_hcpe3.md)） |
 | `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へストリーミング移行（[詳細](migrate_psv_move16.md)） |
 | `pack_to_psv` | GenSfen .pack を40 byteのPSVへ有界バッチで展開。全入力通算の対局数上限、成功時の出力置換、入力 alias 保護（[詳細](pack_to_psv.md)） |
@@ -148,3 +148,7 @@ hardlink と Windows の大小文字違いも検査します。
 CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "csa_client"`、または
 過去ログの CSA client 固有 `engine_cmd.note` で識別する。CSA 入力は pentanomial
 と SPRT の対象外で、`--sprt` は `--allow-partial` 指定時も拒否する。
+
+CSA JSONL の `interrupted` / `censored` は未決結果。勝敗集計・教師抽出から除外し、
+KIF では中断と表示する（[jsonl_to_kif](jsonl_to_kif.md)）。旧 `draw` + `max_moves` は
+真の引分と区別できないため保持する。

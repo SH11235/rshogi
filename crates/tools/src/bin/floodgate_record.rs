@@ -18,6 +18,7 @@
 //! floodgate_record --dir ./jsonl --me RAMU_TF --watch Suisho,dlshogi,nshogi
 //! ```
 
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -153,6 +154,9 @@ struct Line {
     engine: Option<String>,
     eval: Option<Eval>,
     winner: Option<String>,
+    outcome: Option<String>,
+    source: Option<String>,
+    engine_cmd: Option<serde_json::Value>,
     reason: Option<String>,
     plies: Option<u32>,
 }
@@ -165,6 +169,7 @@ struct Eval {
 
 /// 1 局分の集計素材。
 struct Game {
+    explicit_draw: bool,
     /// ファイル名(datetime prefix を含む。表示・整列用)
     stem: String,
     sente: String,
@@ -196,6 +201,10 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
     let mut reason = String::new();
     let mut plies = 0u32;
     let mut has_result = false;
+    let mut csa = false;
+    let mut incomplete = false;
+    let mut explicit_csa = false;
+    let mut explicit_draw = false;
 
     for line in text.lines() {
         let line = line.trim();
@@ -206,6 +215,13 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
             continue;
         };
         match l.kind.as_str() {
+            "meta" => {
+                explicit_csa = l.source.as_deref() == Some("csa_client");
+                csa = is_csa_jsonl(
+                    l.source.as_deref(),
+                    l.engine_cmd.as_ref().and_then(|v| v["note"].as_str()),
+                );
+            }
             "move" => {
                 if let Some(eng) = l.engine {
                     // 過去ログの raw 名と置換済みラベルを照合するため、入口で正規化する。
@@ -226,6 +242,12 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
             }
             "result" => {
                 has_result = true;
+                explicit_draw = explicit_csa && l.outcome.as_deref() == Some("draw");
+                incomplete |= is_incomplete_result(
+                    csa,
+                    l.outcome.as_deref().unwrap_or(""),
+                    l.reason.as_deref(),
+                );
                 winner = l.winner.filter(|w| !w.is_empty()).map(|w| sanitize_for_filename(&w));
                 reason = l.reason.unwrap_or_default();
                 plies = l.plies.unwrap_or(0);
@@ -234,7 +256,7 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
         }
     }
 
-    if !has_result {
+    if !has_result || incomplete {
         return Ok(None); // 進行中 / 未完了の局はスキップ
     }
     let sente = match sente_ply1 {
@@ -249,6 +271,7 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
     };
 
     Ok(Some(Game {
+        explicit_draw,
         stem,
         sente,
         gote,
@@ -261,10 +284,12 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
 
 /// me から見た結果。`None` は集計対象外(中断/検閲/error など未完了局)。
 ///
-/// winner なしの局は reason で判別する: `sennichite` / `max_moves` / `jishogi` は正当な
-/// 引き分け、それ以外(csa_client が中断・検閲を `outcome="draw"` + `reason="interrupted"`
-/// で書く等)は勝率を歪めないよう除外する。
+/// 明示的な未決結果は読込時に除外する。winner のない旧ログでは
+/// `sennichite` / `max_moves` / `jishogi` だけを引分として扱う。
 fn result_for(g: &Game, me: &str) -> Option<Res> {
+    if g.explicit_draw {
+        return Some(Res::Draw);
+    }
     match &g.winner {
         Some(w) if w == me => Some(Res::Win),
         Some(_) => Some(Res::Loss),
@@ -688,6 +713,7 @@ mod tests {
 
     fn game(sente: &str, gote: &str, winner: Option<&str>, reason: &str) -> Game {
         Game {
+            explicit_draw: false,
             stem: "t".to_owned(),
             sente: sente.to_owned(),
             gote: gote.to_owned(),

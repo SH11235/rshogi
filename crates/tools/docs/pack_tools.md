@@ -482,3 +482,7 @@ cargo run -p tools --release --bin shuffle_psv -- \
 - 大規模ファイル（数GB以上）を処理する場合は `--chunk-size` オプションを使用
 - `--delete-input` はディスク容量節約に有効だが、元ファイルが削除されるので注意
 - スコアのスケール（FV_SCALE）は通常24（nn.bin形式）、nnue-pytorch形式は16
+
+`jsonl_to_psv` は JSONL の `interrupted` / `censored` を未決として除外し、
+`Skipped in-progress` に計上する。旧 CSA の `draw` + reason `interrupted` /
+`censored` も除外する。旧 `max_moves` は引分として保持する。
