@@ -470,6 +470,7 @@ where
     let mut clock = Clock::from_summary(&summary);
     if let Some(state) = &resume_state {
         clock.apply_resume_remaining(state.black_remaining_ms, state.white_remaining_ms);
+        clock.resume_turn_clock = state.current_turn.zip(state.turn_clock);
     }
 
     let reconnect_turn = resume_state.as_ref().and_then(|state| state.current_turn);
@@ -1569,6 +1570,8 @@ struct Clock {
     white_increment_ms: i64,
     black_time_unit_ms: i64,
     white_time_unit_ms: i64,
+    resume_turn_clock:
+        Option<(Color, (rshogi_csa_server::protocol::reconnect::ReconnectClock, Instant))>,
 }
 
 impl Clock {
@@ -1586,6 +1589,7 @@ impl Clock {
             white_byoyomi_ms: summary.white_time.byoyomi_ms,
             black_increment_ms: summary.black_time.increment_ms,
             white_increment_ms: summary.white_time.increment_ms,
+            resume_turn_clock: None,
         }
     }
 
@@ -1615,6 +1619,9 @@ impl Clock {
             Color::Black => self.black_time_unit_ms,
             Color::White => self.white_time_unit_ms,
         };
+        if self.resume_turn_clock.is_some_and(|(turn, _)| turn == color) {
+            self.resume_turn_clock = None;
+        }
         let consumed_ms = i64::from(time_units).saturating_mul(unit);
         let inc = self.increment_ms(color);
         match color {
@@ -1630,7 +1637,49 @@ impl Clock {
         ((consumed_ms / 1000).min(i64::from(u32::MAX)) as u32, consumed_ms as u64)
     }
 
+    fn resume_budget_ms(&self, color: Color) -> Option<u64> {
+        self.resume_turn_clock
+            .filter(|(turn, _)| *turn == color)
+            .map(|(_, (clock, received))| {
+                clock.remaining_ms.saturating_sub(
+                    u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX),
+                )
+            })
+    }
+
     fn build_go_args(&self, margin_msec: u64, side_to_move: Color) -> String {
+        if let Some(budget) = self.resume_budget_ms(side_to_move) {
+            let budget = i64::try_from(budget.saturating_sub(margin_msec)).unwrap_or(i64::MAX);
+            let mut btime = self.black_time_ms.max(0);
+            let mut wtime = self.white_time_ms.max(0);
+            let own = match side_to_move {
+                Color::Black => &mut btime,
+                Color::White => &mut wtime,
+            };
+            if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
+                let mut binc = self.black_increment_ms.max(0);
+                let mut winc = self.white_increment_ms.max(0);
+                let inc = match side_to_move {
+                    Color::Black => &mut binc,
+                    Color::White => &mut winc,
+                };
+                *inc = (*inc).min(budget);
+                *own = (*own).min(budget - *inc);
+                return format!("btime {btime} wtime {wtime} binc {binc} winc {winc}");
+            }
+            let byoyomi = match side_to_move {
+                Color::Black => self.black_byoyomi_ms,
+                Color::White => self.white_byoyomi_ms,
+            }
+            .max(0);
+            let byoyomi = byoyomi.min(budget);
+            *own = (*own).min(budget - byoyomi);
+            return if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
+                format!("btime {btime} wtime {wtime} byoyomi {byoyomi}")
+            } else {
+                format!("btime {btime} wtime {wtime}")
+            };
+        }
         let btime = self.black_time_ms.max(0);
         let wtime = self.white_time_ms.max(0);
         if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
@@ -1664,6 +1713,12 @@ impl Clock {
     }
 
     fn think_limit_ms(&self, margin_msec: u64, side_to_move: Color) -> u64 {
+        let limit = self.normal_think_limit_ms(margin_msec, side_to_move);
+        self.resume_budget_ms(side_to_move)
+            .map_or(limit, |budget| limit.min(budget.saturating_sub(margin_msec)))
+    }
+
+    fn normal_think_limit_ms(&self, margin_msec: u64, side_to_move: Color) -> u64 {
         let (total_ms, byoyomi_ms, increment_ms) = match side_to_move {
             Color::Black => (self.black_time_ms, self.black_byoyomi_ms, self.black_increment_ms),
             Color::White => (self.white_time_ms, self.white_byoyomi_ms, self.white_increment_ms),
@@ -2370,6 +2425,7 @@ mod tests {
             current_turn: Some(Color::Black),
             black_remaining_ms: 10_000,
             white_remaining_ms: 5_000,
+            ..Default::default()
         };
         let pub_state = build_reconnect_state(&summary, Some(&proto_state));
         // last_sfen は summary.position.to_sfen() と一致 (履歴 replay は無し)
@@ -2497,6 +2553,7 @@ mod tests {
             current_turn: Some(Color::White),
             black_remaining_ms: 10_000,
             white_remaining_ms: 5_000,
+            ..Default::default()
         };
         let pub_state = build_reconnect_state(&summary, Some(&proto_state));
         // self は白 (5_000ms), opp は黒 (10_000ms)
@@ -2662,5 +2719,65 @@ mod tests {
         clock.apply_resume_remaining(30_000, 25_000);
         assert_eq!(clock.black_time_ms, 30_000);
         assert_eq!(clock.white_time_ms, 25_000);
+    }
+    fn set_resume_budget(clock: &mut Clock, color: Color, remaining_ms: u64, received: Instant) {
+        clock.resume_turn_clock = Some((
+            color,
+            (
+                rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
+                received,
+            ),
+        ));
+    }
+
+    #[test]
+    fn resume_budget_caps_main_byoyomi_and_fischer_without_debiting_ledger() {
+        for summary in [
+            byoyomi_summary(60_000, 0),
+            byoyomi_summary(60_000, 10_000),
+            fischer_summary(60_000, 5_000),
+        ] {
+            let mut clock = Clock::from_summary(&summary);
+            clock.apply_resume_remaining(60_000, 50_000);
+            let before = (clock.black_time_ms, clock.white_time_ms);
+            set_resume_budget(&mut clock, Color::Black, 3_000, Instant::now());
+            assert!(clock.think_limit_ms(500, Color::Black) <= 2_500);
+            let args = clock.build_go_args(500, Color::Black);
+            let fields: Vec<_> = args.split_whitespace().collect();
+            let value = |key| {
+                fields
+                    .windows(2)
+                    .find(|pair| pair[0] == key)
+                    .map(|pair| pair[1].parse::<u64>().unwrap())
+                    .unwrap_or(0)
+            };
+            assert!(value("btime") + value("byoyomi") + value("binc") <= 2_500, "{args}");
+            assert_eq!(value("wtime"), before.1 as u64);
+            assert_eq!((clock.black_time_ms, clock.white_time_ms), before);
+            clock.consume(Color::Black, 2);
+            assert!(clock.resume_turn_clock.is_none());
+            assert_eq!(clock.black_time_ms, (before.0 - 2_000 + clock.black_increment_ms).max(0));
+        }
+    }
+
+    #[test]
+    fn resume_budget_ages_and_is_replaced_on_each_reconnect() {
+        let mut clock = Clock::from_summary(&byoyomi_summary(0, 10_000));
+        set_resume_budget(
+            &mut clock,
+            Color::White,
+            3_000,
+            Instant::now() - Duration::from_millis(2_000),
+        );
+        assert!(clock.think_limit_ms(100, Color::White) <= 900);
+        assert_eq!(clock.think_limit_ms(100, Color::Black), 9_900);
+        clock.consume(Color::Black, 1);
+        assert!(clock.resume_turn_clock.is_some());
+        set_resume_budget(&mut clock, Color::White, 5_000, Instant::now());
+        let remaining = clock.think_limit_ms(100, Color::White);
+        assert!(remaining > 3_000 && remaining <= 4_900);
+        set_resume_budget(&mut clock, Color::White, 0, Instant::now());
+        assert_eq!(clock.think_limit_ms(100, Color::White), 0);
+        assert!(clock.build_go_args(100, Color::White).ends_with("wtime 0 byoyomi 0"));
     }
 }

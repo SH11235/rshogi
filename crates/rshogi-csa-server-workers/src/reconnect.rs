@@ -137,6 +137,7 @@ fn ct_str_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn build_resume_message(
     game_summary_for_disconnected: &str,
     snapshot: &ReconnectSnapshot,
+    clock: rshogi_csa_server::protocol::reconnect::ReconnectClock,
 ) -> String {
     let mut out = game_summary_for_disconnected.to_owned();
     out.push_str("BEGIN Reconnect_State\n");
@@ -154,6 +155,7 @@ pub fn build_resume_message(
     let _ = writeln!(out, "Current_Turn:{turn_char}");
     let _ = writeln!(out, "Black_Time_Remaining_Ms:{}", snapshot.black_remaining_ms);
     let _ = writeln!(out, "White_Time_Remaining_Ms:{}", snapshot.white_remaining_ms);
+    let _ = writeln!(out, "{}", clock.to_line());
     if let Some(last) = &snapshot.last_move {
         let _ = writeln!(out, "Last_Move:{last}");
     }
@@ -360,7 +362,11 @@ mod tests {
     fn build_resume_message_appends_reconnect_state_block() {
         let snap = sample_snapshot();
         let summary = "BEGIN Game_Summary\nGame_ID:g1\nReconnect_Token:abcd\nEND Game_Summary\n";
-        let out = build_resume_message(summary, &snap);
+        let out = build_resume_message(
+            summary,
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         let end_summary = out.find("END Game_Summary\n").expect("END Game_Summary");
         let begin_state = out.find("BEGIN Reconnect_State\n").expect("BEGIN Reconnect_State");
         let end_state = out.find("END Reconnect_State\n").expect("END Reconnect_State");
@@ -369,6 +375,7 @@ mod tests {
         assert!(out.contains("\nCurrent_Turn:-\n"));
         assert!(out.contains("\nBlack_Time_Remaining_Ms:599500\n"));
         assert!(out.contains("\nWhite_Time_Remaining_Ms:600000\n"));
+        assert!(out.contains("\nCurrent_Turn_Remaining_Ms:1234\n"));
         assert!(out.contains("\nLast_Move:+7776FU\n"));
     }
 
@@ -376,7 +383,11 @@ mod tests {
     fn build_resume_message_emits_plus_for_black_turn() {
         let mut snap = sample_snapshot();
         snap.current_turn = "black".to_owned();
-        let out = build_resume_message("BEGIN Game_Summary\nEND Game_Summary\n", &snap);
+        let out = build_resume_message(
+            "BEGIN Game_Summary\nEND Game_Summary\n",
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         assert!(out.contains("\nCurrent_Turn:+\n"));
     }
 
@@ -384,7 +395,11 @@ mod tests {
     fn build_resume_message_omits_last_move_line_when_none() {
         let mut snap = sample_snapshot();
         snap.last_move = None;
-        let out = build_resume_message("BEGIN Game_Summary\nEND Game_Summary\n", &snap);
+        let out = build_resume_message(
+            "BEGIN Game_Summary\nEND Game_Summary\n",
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         assert!(!out.contains("Last_Move:"), "must omit Last_Move when no move played: {out}");
     }
 

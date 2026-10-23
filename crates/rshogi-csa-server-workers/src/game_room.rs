@@ -3944,8 +3944,25 @@ impl GameRoom {
         // 状態再送 (Game_Summary + Reconnect_State ブロック) は複数行なので
         // 1 行ずつ `send_line` に分解する。`build_resume_message` の改行終端が
         // 各行末改行と整合するので `lines()` でそのまま reuse できる。
-        let resume =
-            build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
+        let resume = {
+            let core_borrow = self.core.borrow();
+            let core = core_borrow
+                .as_ref()
+                .ok_or_else(|| Error::RustError("reconnect core unavailable".into()))?;
+            let config_borrow = self.config.borrow();
+            let cfg = config_borrow
+                .as_ref()
+                .ok_or_else(|| Error::RustError("reconnect config unavailable".into()))?;
+            let refreshed = self.build_pending_reconnect(core, cfg, role, Duration::ZERO)?;
+            let remaining_ms = core
+                .current_turn_remaining_ms(self.now_ms())
+                .ok_or_else(|| Error::RustError("reconnect clock unavailable".into()))?;
+            build_resume_message(
+                &refreshed.game_summary_for_disconnected,
+                &refreshed.snapshot,
+                rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
+            )
+        };
         for line in resume.lines() {
             send_line(ws, line)?;
         }

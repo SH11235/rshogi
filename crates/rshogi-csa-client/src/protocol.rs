@@ -119,6 +119,8 @@ pub struct ReconnectState {
     pub current_turn: Option<Color>,
     pub black_remaining_ms: i64,
     pub white_remaining_ms: i64,
+    /// 現手番の残り予算と受信時刻。旧サーバーでは `None`。
+    pub turn_clock: Option<(rshogi_csa_server::protocol::reconnect::ReconnectClock, Instant)>,
 }
 
 /// サーバーから受信した指し手
@@ -259,6 +261,9 @@ impl CsaConnection {
         loop {
             let line = self.recv_line_blocking(Duration::from_secs(30))?;
             if line == "END Reconnect_State" {
+                if state.turn_clock.is_some() && state.current_turn.is_none() {
+                    bail!("再接続時計の手番が不正");
+                }
                 return Ok(state);
             }
             if let Some(val) = line.strip_prefix("Current_Turn:") {
@@ -271,6 +276,14 @@ impl CsaConnection {
                 state.black_remaining_ms = val.trim().parse().unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("White_Time_Remaining_Ms:") {
                 state.white_remaining_ms = val.trim().parse().unwrap_or(0);
+            }
+            if let Some(clock) =
+                rshogi_csa_server::protocol::reconnect::ReconnectClock::parse_line(&line)?
+            {
+                if state.turn_clock.is_some() {
+                    bail!("再接続時計の重複行");
+                }
+                state.turn_clock = Some((clock, Instant::now()));
             }
             // `Last_Move:` を含む他の拡張行は黙って破棄する (前方互換)。
         }

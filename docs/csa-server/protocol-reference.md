@@ -304,12 +304,27 @@ BEGIN Reconnect_State
 Current_Turn:<+|->
 Black_Time_Remaining_Ms:<u64>
 White_Time_Remaining_Ms:<u64>
+Current_Turn_Remaining_Ms:<u64>
 Last_Move:<csa-move>      ← 直前の指し手がある場合のみ
 END Reconnect_State
 ```
 
 `BEGIN Reconnect_State` ... `END Reconnect_State` は本リポ独自で、CSA 標準には
 存在しない。
+
+`Black/White_Time_Remaining_Ms` は確定済み着手後の主時間台帳で、現在手番の経過を
+差し引かない。Fischer ではサーバーの増分加算済み slot を表す。
+`Current_Turn_Remaining_Ms` は送信時点の現在手番の残り予算で、秒読み・増分・
+時計の丸めと再接続補償を含み、経過時間を控除済み。通信マージンは含まない。
+TCP は固定した手番期限から送信直前に計算し、Workers は保存snapshot内の古い時計を
+再利用せず、補償反映後の core から計算する。
+
+client はこの拡張値を受信後の経過時間と通信マージンを引いた一時的な探索上限として
+使う。主時間台帳へ重ねて減算せず、現手番の着手broadcastを受けたら上限を解除する。
+再接続のたびに新しい値で置き換えるため、複数回の再接続でも二重控除しない。
+旧clientは未知の拡張行として無視できるが、時間過大評価の対策にはclient更新が必要。
+旧serverがこの行を送らない場合、新clientは従来の台帳による計算を続ける。
+送信から受信までの遅延は値に含められないため、通信マージンを確保する。
 
 ### 9.2 Lobby マッチング (`MATCHED <room_id> <color>`) `**`
 

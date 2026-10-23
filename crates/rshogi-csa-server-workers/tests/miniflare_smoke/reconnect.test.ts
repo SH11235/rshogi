@@ -58,7 +58,7 @@ describe("miniflare smoke: 再接続プロトコル E2E", () => {
 
     await black0.close();
 
-    const black1 = await CsaClient.connect(mf, roomId);
+    let black1 = await CsaClient.connect(mf, roomId);
     black1.send(`LOGIN ${blackName} pw reconnect:${gameId}+${blackToken}`);
     expect(await black1.recvLine()).toBe(`LOGIN:${blackName} OK`);
 
@@ -76,6 +76,22 @@ describe("miniflare smoke: 再接続プロトコル E2E", () => {
     // `Last_Move` 行は CoreRoom が最終手 token を露出していない現状では省略される。
     // 将来 last_move 経路が実装されたとき本 assertion を更新する signal になる。
     expect(reconnectStateLines.some((l) => l.startsWith("Last_Move:"))).toBe(false);
+
+    let previous = Number(reconnectStateLines.find((line) => line.startsWith("Current_Turn_Remaining_Ms:"))?.split(":")[1]);
+    expect(previous).toBeGreaterThan(0);
+    expect(previous).toBeLessThan(61_999);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await black1.close(100);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      black1 = await CsaClient.connect(mf, roomId);
+      black1.send(`LOGIN ${blackName} pw reconnect:${gameId}+${blackToken}`);
+      expect(await black1.recvLine()).toBe(`LOGIN:${blackName} OK`);
+      await black1.drainGameSummary();
+      const lines = await black1.recvUntil((line) => line === "END Reconnect_State");
+      const remaining = Number(lines.find((line) => line.startsWith("Current_Turn_Remaining_Ms:"))?.split(":")[1]);
+      expect(remaining).toBeLessThan(previous - 100);
+      previous = remaining;
+    }
 
     white.send("-3334FU");
     await white.recvUntil((l) => l.startsWith("-3334FU"));

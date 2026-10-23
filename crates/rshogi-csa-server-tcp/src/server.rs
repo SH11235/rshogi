@@ -723,6 +723,8 @@ pub(crate) struct PendingReconnect {
     pub(crate) reconnect_tx: Mutex<Option<oneshot::Sender<TcpTransport>>>,
     /// 切断時点の対局スナップショット。再送に使う。
     pub(crate) snapshot: ReconnectSnapshot,
+    /// 主時間台帳の時点とは独立した、現手番の期限。
+    pub(crate) turn_deadline: tokio::time::Instant,
     /// 切断側宛の Game_Summary 文字列 (再接続トークン拡張行を含む完全形)。
     pub(crate) game_summary_for_disconnected: String,
 }
@@ -2526,6 +2528,7 @@ where
         black_token: black_reconnect_token.as_ref(),
         white_token: white_reconnect_token.as_ref(),
         summary: &summary,
+        start_instant: game_start_instant,
     };
     let result_moves = run_game_loop_and_record(
         state,
@@ -2772,6 +2775,7 @@ struct ReconnectContext<'a> {
     black_token: Option<&'a ReconnectToken>,
     white_token: Option<&'a ReconnectToken>,
     summary: &'a GameSummaryBuilder,
+    start_instant: tokio::time::Instant,
 }
 
 async fn run_game_loop_and_record<R, K, P, H>(
@@ -2798,7 +2802,7 @@ where
         if let rshogi_csa_server::GameStatus::Finished(result) = status {
             return Ok((result, recorded_moves));
         }
-        let deadline = compute_timeup_deadline(room);
+        let deadline = compute_timeup_deadline(room, start_instant);
         // 受信側は「実質無限」で貼る。持ち時間の終端は `sleep_until(deadline)` 側で駆動する。
         // 1 時間で打ち切っていると長時間持ち時間の対局が誤って切断負けになる。
         let evt = tokio::select! {
@@ -2950,6 +2954,8 @@ where
         expected_token,
         reconnect_tx: Mutex::new(Some(tx)),
         snapshot,
+        turn_deadline: ctx.start_instant
+            + Duration::from_millis(room.current_turn_deadline_ms().unwrap_or(0)),
         game_summary_for_disconnected,
     });
     {
@@ -3780,8 +3786,19 @@ where
     transport
         .send_line(&CsaLine::new(format!("LOGIN:{} OK", handle_player.as_str())))
         .await?;
-    let resume_message =
-        build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
+    let resume_message = build_resume_message(
+        &pending.game_summary_for_disconnected,
+        &pending.snapshot,
+        rshogi_csa_server::protocol::reconnect::ReconnectClock {
+            remaining_ms: u64::try_from(
+                pending
+                    .turn_deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+        },
+    );
     if let Err(e) = send_multiline(&mut transport, &resume_message).await {
         // resume 送信に失敗。game loop は依然 grace 待ちなので、sender を戻して
         // 別の正当な再接続要求が引き続き受理可能な状態に保つ。
@@ -3824,6 +3841,7 @@ where
 fn build_resume_message(
     game_summary_for_disconnected: &str,
     snapshot: &ReconnectSnapshot,
+    clock: rshogi_csa_server::protocol::reconnect::ReconnectClock,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = game_summary_for_disconnected.to_owned();
@@ -3838,6 +3856,7 @@ fn build_resume_message(
     );
     let _ = writeln!(out, "Black_Time_Remaining_Ms:{}", snapshot.black_remaining_ms);
     let _ = writeln!(out, "White_Time_Remaining_Ms:{}", snapshot.white_remaining_ms);
+    let _ = writeln!(out, "{}", clock.to_line());
     if let Some(last) = &snapshot.last_move {
         let _ = writeln!(out, "Last_Move:{}", last.as_str());
     }
@@ -3875,14 +3894,16 @@ async fn dispatch(
     Ok(())
 }
 
-/// 手番側残時間 + マージン + 猶予で時間切れ deadline を算出（run_loop と同等）。
-fn compute_timeup_deadline(room: &GameRoom) -> tokio::time::Instant {
-    // 手番側の予算（本体 + byoyomi）で deadline を計算する。本体残時間だけを使うと
-    // byoyomi 区間に入らず即 time-up してしまうバグになる。
-    let side: Color = room.position().side_to_move().into();
-    let turn_budget = room.clock_turn_budget_ms(side).max(0) as u64;
-    let margin = room.time_margin_ms();
-    tokio::time::Instant::now() + Duration::from_millis(turn_budget + margin + 250)
+/// 現手番の固定期限に通信マージンと配信猶予を加える。
+fn compute_timeup_deadline(
+    room: &GameRoom,
+    start_instant: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let deadline_ms = room.current_turn_deadline_ms().unwrap_or(0);
+    start_instant
+        + Duration::from_millis(
+            deadline_ms.saturating_add(room.time_margin_ms()).saturating_add(250),
+        )
 }
 
 /// Time_Unit 単位の broadcast を CSA V2 棋譜用の秒へ換算する。
@@ -4260,6 +4281,37 @@ mod tests {
         s
     }
 
+    #[test]
+    fn turn_deadline_is_fixed_across_keepalives_and_reconnect_queries() {
+        let cfg = GameRoomConfig {
+            game_id: GameId::new("clock-test"),
+            black: PlayerName::new("alice"),
+            white: PlayerName::new("bob"),
+            max_moves: 256,
+            time_margin_ms: 100,
+            entering_king_rule: rshogi_core::types::EnteringKingRule::Point24,
+            initial_sfen: None,
+        };
+        let mut room = GameRoom::new(
+            cfg,
+            Box::new(rshogi_csa_server::game::clock::SecondsCountdownClock::new(60, 5)),
+        )
+        .unwrap();
+        room.handle_line(Color::Black, &CsaLine::new("AGREE"), 0).unwrap();
+        room.handle_line(Color::White, &CsaLine::new("AGREE"), 0).unwrap();
+        let start = tokio::time::Instant::now();
+        let expected =
+            start + Duration::from_millis(room.current_turn_deadline_ms().unwrap() + 350);
+        for now in [100, 2_000, 10_000] {
+            room.handle_line(Color::Black, &CsaLine::new(""), now).unwrap();
+            assert_eq!(compute_timeup_deadline(&room, start), expected);
+            assert_eq!(
+                room.current_turn_remaining_ms(now).unwrap() + now,
+                room.current_turn_deadline_ms().unwrap()
+            );
+        }
+    }
+
     fn sample_snapshot(last_move: Option<&str>) -> ReconnectSnapshot {
         ReconnectSnapshot {
             black_remaining_ms: 599_500,
@@ -4273,7 +4325,11 @@ mod tests {
     fn build_resume_message_includes_game_summary_then_reconnect_state_block() {
         let summary = sample_summary_text();
         let snap = sample_snapshot(Some("+7776FU"));
-        let out = build_resume_message(&summary, &snap);
+        let out = build_resume_message(
+            &summary,
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         let end_summary = out.find("END Game_Summary\n").expect("END Game_Summary");
         let begin_state = out.find("BEGIN Reconnect_State\n").expect("BEGIN Reconnect_State");
         let end_state = out.find("END Reconnect_State\n").expect("END Reconnect_State");
@@ -4282,6 +4338,7 @@ mod tests {
         assert!(out.contains("\nCurrent_Turn:-\n"));
         assert!(out.contains("\nBlack_Time_Remaining_Ms:599500\n"));
         assert!(out.contains("\nWhite_Time_Remaining_Ms:600000\n"));
+        assert!(out.contains("\nCurrent_Turn_Remaining_Ms:1234\n"));
         assert!(out.contains("\nLast_Move:+7776FU\n"));
     }
 
@@ -4292,7 +4349,11 @@ mod tests {
             current_turn: Color::Black,
             ..sample_snapshot(None)
         };
-        let out = build_resume_message(&summary, &snap);
+        let out = build_resume_message(
+            &summary,
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         assert!(out.contains("\nCurrent_Turn:+\n"));
     }
 
@@ -4300,7 +4361,11 @@ mod tests {
     fn build_resume_message_omits_last_move_line_when_none() {
         let summary = sample_summary_text();
         let snap = sample_snapshot(None);
-        let out = build_resume_message(&summary, &snap);
+        let out = build_resume_message(
+            &summary,
+            &snap,
+            rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms: 1234 },
+        );
         assert!(!out.contains("Last_Move:"), "must omit Last_Move when no move played: {out}");
     }
 
