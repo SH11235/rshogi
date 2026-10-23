@@ -53,26 +53,46 @@ pub fn ensure_safe_output_path(output: &Path, input: &Path) -> Result<()> {
 
 /// 全出力と読み取り専用資源の衝突、および出力同士の衝突を作成前に検査する。
 pub fn ensure_safe_output_paths(outputs: &[&Path], inputs: &[&Path]) -> Result<()> {
-    let canonical_inputs = inputs.iter().map(|input| {
-        input.canonicalize().with_context(|| format!("Failed to canonicalize input {}", input.display()))
-    }).collect::<Result<std::collections::HashSet<_>>>()?;
+    let canonical_inputs = inputs
+        .iter()
+        .map(|input| {
+            input
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize input {}", input.display()))
+        })
+        .collect::<Result<std::collections::HashSet<_>>>()?;
     let mut planned = std::collections::HashSet::new();
     let mut existing = Vec::new();
     for output in outputs {
         let present = match fs::symlink_metadata(output) {
             Ok(metadata) => {
-                anyhow::ensure!(!metadata.file_type().is_symlink(), "Output path is a symlink: {}", output.display());
+                anyhow::ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "Output path is a symlink: {}",
+                    output.display()
+                );
                 true
             }
             Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(error) => return Err(error).with_context(|| format!("Failed to inspect output {}", output.display())),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect output {}", output.display()));
+            }
         };
         let predicted = canonicalize_predicted_path(output)?;
-        anyhow::ensure!(!canonical_inputs.contains(&predicted),
-            "Output path resolves to input file: {}", output.display());
-        anyhow::ensure!(planned.insert(predicted),
-            "Output paths resolve to the same file: {}", output.display());
-        if present { existing.push(*output); }
+        anyhow::ensure!(
+            !canonical_inputs.contains(&predicted),
+            "Output path resolves to input file: {}",
+            output.display()
+        );
+        anyhow::ensure!(
+            planned.insert(predicted),
+            "Output paths resolve to the same file: {}",
+            output.display()
+        );
+        if present {
+            existing.push(*output);
+        }
     }
     for (index, output) in existing.iter().enumerate() {
         let file = File::open(output)

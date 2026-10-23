@@ -42,22 +42,35 @@ fn rescore_case_only_later_outputs_leave_first_existing_output_unchanged() {
     let input_dir_a = dir.path().join("a");
     let input_dir_b = dir.path().join("b");
     let output_dir = dir.path().join("out");
-    for path in [&input_dir_a, &input_dir_b, &output_dir] { fs::create_dir(path).unwrap(); }
+    for path in [&input_dir_a, &input_dir_b, &output_dir] {
+        fs::create_dir(path).unwrap();
+    }
     let first = dir.path().join("first.psv");
     let second = input_dir_a.join("New.psv");
     let third = input_dir_b.join("new.psv");
     let model = dir.path().join("model.nnue");
-    for path in [&first, &second, &third, &model] { fs::write(path, [7; 40]).unwrap(); }
+    for path in [&first, &second, &third, &model] {
+        fs::write(path, [7; 40]).unwrap();
+    }
     let existing = output_dir.join("first.psv");
     fs::write(&existing, b"previous output").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_rescore_psv"))
-        .arg("--input").arg(&first).arg(&second).arg(&third)
-        .arg("--nnue").arg(&model).arg("--output-dir").arg(&output_dir)
-        .output().unwrap();
+        .arg("--input")
+        .arg(&first)
+        .arg(&second)
+        .arg(&third)
+        .arg("--nnue")
+        .arg(&model)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .output()
+        .unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("differ only in case"));
     assert_eq!(fs::read(existing).unwrap(), b"previous output");
-    for path in [&first, &second, &third, &model] { assert_eq!(fs::read(path).unwrap(), [7; 40]); }
+    for path in [&first, &second, &third, &model] {
+        assert_eq!(fs::read(path).unwrap(), [7; 40]);
+    }
     assert!(!output_dir.join("New.psv").exists());
     assert!(!output_dir.join("new.psv").exists());
 }

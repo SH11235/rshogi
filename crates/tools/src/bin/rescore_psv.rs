@@ -55,8 +55,8 @@ use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 use tools::common::dedup::canonicalize_maybe_new;
+use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 // mpsc/Arc/Mutex/Instant は ONNX 直推論パイプライン専用（バッチ供給の Receiver 共有・
 // フェーズ計時）。ONNX 無効ビルドでの unused import を避けるため cfg で囲う。
 use sha2::{Digest, Sha256};
@@ -361,10 +361,14 @@ impl OutputProtection {
             let mut planned = std::collections::BTreeSet::new();
             for output in &self.outputs {
                 let canonical = canonicalize_maybe_new(output)?;
-                let spelling = canonical.to_str().context("Output path cannot be compared as Unicode")?;
+                let spelling =
+                    canonical.to_str().context("Output path cannot be compared as Unicode")?;
                 let folded = spelling.to_lowercase().to_uppercase();
-                anyhow::ensure!(planned.insert(folded),
-                    "Output paths resolve to the same file or differ only in case: {}", output.display());
+                anyhow::ensure!(
+                    planned.insert(folded),
+                    "Output paths resolve to the same file or differ only in case: {}",
+                    output.display()
+                );
             }
         }
         let inputs: Vec<_> = self.inputs.iter().map(PathBuf::as_path).collect();
@@ -468,42 +472,74 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
     }
     if let Some(engine) = &cli.engine {
         let cwd = engine.parent().unwrap_or(std::path::Path::new("."));
-        let options: std::collections::BTreeMap<_, _> = cli.usi_options.iter()
+        let options: std::collections::BTreeMap<_, _> = cli
+            .usi_options
+            .iter()
             .filter_map(|option| parsed_usi_option(option))
             .map(|(name, value)| (name.to_owned(), value))
             .collect();
-        let explicit_spsa = options.get("SPSAParamsFile")
+        let explicit_spsa = options
+            .get("SPSAParamsFile")
             .is_some_and(|value| !matches!(*value, "" | "<auto>" | "<empty>"));
-        let book_dir = options.get("BookDir").filter(|value| !value.is_empty())
-            .copied().unwrap_or("book");
+        let book_dir = options
+            .get("BookDir")
+            .filter(|value| !value.is_empty())
+            .copied()
+            .unwrap_or("book");
         for (raw_name, value) in &options {
             let name = raw_name.to_ascii_lowercase();
-            if value.is_empty() || matches!(*value, "<empty>" | "<auto>")
-                || name == "bookdir" || (name == "bookfile" && *value == "no_book") {
+            if value.is_empty()
+                || matches!(*value, "<empty>" | "<auto>")
+                || name == "bookdir"
+                || (name == "bookfile" && *value == "no_book")
+            {
                 continue;
             }
             if name == "dnn_model"
-                || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix)) {
+                || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix))
+            {
                 let resource = if name == "bookfile" {
                     PathBuf::from(book_dir).join(*value)
-                } else { PathBuf::from(*value) };
-                let path = if resource.is_absolute() { resource } else { cwd.join(resource) };
-                if !path.try_exists()? { continue; }
+                } else {
+                    PathBuf::from(*value)
+                };
+                let path = if resource.is_absolute() {
+                    resource
+                } else {
+                    cwd.join(resource)
+                };
+                if !path.try_exists()? {
+                    continue;
+                }
                 if path.is_dir() {
                     for entry in walkdir::WalkDir::new(&path).follow_links(true) {
                         let entry = entry?;
-                        if entry.file_type().is_file() { inputs.push(entry.into_path()); }
+                        if entry.file_type().is_file() {
+                            inputs.push(entry.into_path());
+                        }
                     }
-                } else { inputs.push(path); }
+                } else {
+                    inputs.push(path);
+                }
             }
         }
         if !explicit_spsa {
-            let automatic = engine.canonicalize()?.parent().context("Engine has no parent")?.join("spsa.params");
-            if automatic.try_exists()? { inputs.push(automatic); }
+            let automatic = engine
+                .canonicalize()?
+                .parent()
+                .context("Engine has no parent")?
+                .join("spsa.params");
+            if automatic.try_exists()? {
+                inputs.push(automatic);
+            }
         }
     }
     let expand_dir = cli.expand_output_dir.as_ref().map(|dir| dir.canonicalize()).transpose()?;
-    let replacement_dir = cli.qsearch_leaf_replacement_output.as_ref().map(|dir| dir.canonicalize()).transpose()?;
+    let replacement_dir = cli
+        .qsearch_leaf_replacement_output
+        .as_ref()
+        .map(|dir| dir.canonicalize())
+        .transpose()?;
     let mut outputs = Vec::new();
     let mut old_artifacts = Vec::new();
     for input in input_files {
@@ -5405,15 +5441,21 @@ mod marker_tests {
     #[test]
     fn protection_rejects_case_alias_before_first_write() {
         for suffix in ["", ".done", ".in-progress", ".done.tmp", ".in-progress.tmp"] {
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("first");
-        let first = dir.path().join(format!("output{suffix}"));
-        let last = dir.path().join(format!("OUTPUT{suffix}"));
-        std::fs::write(&existing, b"previous").unwrap();
-        assert!(OutputProtection::new(Vec::new(), vec![existing.clone(), first.clone(), last.clone()]).is_err());
-        assert_eq!(std::fs::read(existing).unwrap(), b"previous");
-        assert!(!first.exists());
-        assert!(!last.exists());
+            let dir = tempfile::tempdir().unwrap();
+            let existing = dir.path().join("first");
+            let first = dir.path().join(format!("output{suffix}"));
+            let last = dir.path().join(format!("OUTPUT{suffix}"));
+            std::fs::write(&existing, b"previous").unwrap();
+            assert!(
+                OutputProtection::new(
+                    Vec::new(),
+                    vec![existing.clone(), first.clone(), last.clone()]
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(existing).unwrap(), b"previous");
+            assert!(!first.exists());
+            assert!(!last.exists());
         }
     }
 
@@ -5675,13 +5717,25 @@ mod marker_tests {
         let output_dir = dir.path().join("out");
         let expand_dir = dir.path().join("expand");
         let replacement_dir = dir.path().join("replacement");
-        for path in [&output_dir, &expand_dir, &replacement_dir] { std::fs::create_dir(path).unwrap(); }
-        for path in [&input, &model] { std::fs::write(path, [7; 40]).unwrap(); }
+        for path in [&output_dir, &expand_dir, &replacement_dir] {
+            std::fs::create_dir(path).unwrap();
+        }
+        for path in [&input, &model] {
+            std::fs::write(path, [7; 40]).unwrap();
+        }
         let cli = Cli::parse_from([
-            "rescore_psv", "--input", input.to_str().unwrap(), "--nnue", model.to_str().unwrap(),
-            "--output-dir", output_dir.to_str().unwrap(), "--out-scores",
-            "--expand-output-dir", expand_dir.to_str().unwrap(),
-            "--qsearch-leaf-replacement-output", replacement_dir.to_str().unwrap(),
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--nnue",
+            model.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+            "--out-scores",
+            "--expand-output-dir",
+            expand_dir.to_str().unwrap(),
+            "--qsearch-leaf-replacement-output",
+            replacement_dir.to_str().unwrap(),
         ]);
         let expand = expand_dir.canonicalize().unwrap().join("input.psv");
         let replacement = replacement_dir.canonicalize().unwrap().join("input.psv");
@@ -5699,13 +5753,20 @@ mod marker_tests {
         fingerprint.expand_output_path = Some(expand.clone());
         fingerprint.replacement = true;
         fingerprint.replacement_output_path = Some(replacement.clone());
-        let marker = DoneMarker { fingerprint, output_sizes: OutputSizes {
-            rescore_output_size: 0, expand_output_size: Some(0), replacement_output_size: Some(0),
-        }};
+        let marker = DoneMarker {
+            fingerprint,
+            output_sizes: OutputSizes {
+                rescore_output_size: 0,
+                expand_output_size: Some(0),
+                replacement_output_size: Some(0),
+            },
+        };
         let output = output_dir.join("input.psv.scores.i16");
         write_marker_atomic(&no_protected_paths(), &output, &marker).unwrap();
         let protection = output_protection(&cli, &[input]).unwrap();
-        for path in [&expand, &replacement] { protection.open(path, true).unwrap(); }
+        for path in [&expand, &replacement] {
+            protection.open(path, true).unwrap();
+        }
     }
 
     #[test]
@@ -5720,10 +5781,21 @@ mod marker_tests {
         let output = output_dir.join("input.psv");
         std::fs::write(&output, b"previous").unwrap();
         let cli = Cli::parse_from([
-            "rescore_psv", "--input", input.to_str().unwrap(), "--engine", engine.to_str().unwrap(),
-            "--output-dir", output_dir.to_str().unwrap(),
-            "--usi-option", "BookFile=no_book", "--usi-option", "EvalFile=",
-            "--usi-option", "BookExploreFile=<empty>", "--usi-option", "LogFile=missing.log",
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--engine",
+            engine.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+            "--usi-option",
+            "BookFile=no_book",
+            "--usi-option",
+            "EvalFile=",
+            "--usi-option",
+            "BookExploreFile=<empty>",
+            "--usi-option",
+            "LogFile=missing.log",
         ]);
         let protection = output_protection(&cli, &[input]).unwrap();
         assert_eq!(protection.inputs.len(), 2);
@@ -5740,12 +5812,21 @@ mod marker_tests {
             let params = dir.path().join("spsa.params");
             let output_dir = dir.path().join("out");
             std::fs::create_dir(&output_dir).unwrap();
-            for path in [&engine, &input, &params] { std::fs::write(path, [7; 40]).unwrap(); }
+            for path in [&engine, &input, &params] {
+                std::fs::write(path, [7; 40]).unwrap();
+            }
             std::fs::hard_link(&params, output_dir.join("input.psv")).unwrap();
             let option = format!("SPSAParamsFile={value}");
             let cli = Cli::parse_from([
-                "rescore_psv", "--input", input.to_str().unwrap(), "--engine", engine.to_str().unwrap(),
-                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", &option,
+                "rescore_psv",
+                "--input",
+                input.to_str().unwrap(),
+                "--engine",
+                engine.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--usi-option",
+                &option,
             ]);
             assert!(output_protection(&cli, &[input]).is_err());
             assert_eq!(std::fs::read(params).unwrap(), [7; 40]);
@@ -5763,13 +5844,24 @@ mod marker_tests {
             std::fs::create_dir(&output_dir).unwrap();
             std::fs::create_dir(&book_dir).unwrap();
             let book = book_dir.join("opening.db");
-            for path in [&engine, &input, &book] { std::fs::write(path, [7; 40]).unwrap(); }
+            for path in [&engine, &input, &book] {
+                std::fs::write(path, [7; 40]).unwrap();
+            }
             std::fs::hard_link(&book, output_dir.join("input.psv")).unwrap();
             let mut args = vec![
-                "rescore_psv", "--input", input.to_str().unwrap(), "--engine", engine.to_str().unwrap(),
-                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", " BookFile = opening.db ",
+                "rescore_psv",
+                "--input",
+                input.to_str().unwrap(),
+                "--engine",
+                engine.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--usi-option",
+                " BookFile = opening.db ",
             ];
-            if explicit { args.extend(["--usi-option", "BookDir=books"]); }
+            if explicit {
+                args.extend(["--usi-option", "BookDir=books"]);
+            }
             let cli = Cli::parse_from(args);
             assert!(output_protection(&cli, &[input]).is_err());
             assert_eq!(std::fs::read(book).unwrap(), [7; 40]);
