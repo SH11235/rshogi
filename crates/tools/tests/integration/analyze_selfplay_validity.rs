@@ -274,3 +274,390 @@ fn by_startpos_cli_merges_directories_and_reports_legacy_exclusions() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(value.get("by_startpos").is_none());
 }
+
+#[test]
+fn csa_single_games_count_without_becoming_sprt_pairs() {
+    use rshogi_csa::{Color, initial_position};
+    use rshogi_csa_client::config::CsaClientConfig;
+    use rshogi_csa_client::jsonl::write_game_jsonl;
+    use rshogi_csa_client::protocol::{GameResult, GameSummary, TimeConfig};
+    use rshogi_csa_client::record::GameRecord;
+
+    for (black, white) in [
+        ("alice", "bob"),
+        ("alice.test", "alice@test"),
+        ("", "unknown"),
+    ] {
+        for my_color in [Color::Black, Color::White] {
+            for result in [GameResult::Win, GameResult::Lose, GameResult::Draw] {
+                let dir = tempfile::tempdir().unwrap();
+                let record = GameRecord::new(&GameSummary {
+                    game_id: "identity-test".to_owned(),
+                    my_color,
+                    sente_name: black.to_owned(),
+                    gote_name: white.to_owned(),
+                    position: initial_position(),
+                    initial_moves: Vec::new(),
+                    black_time: TimeConfig::default(),
+                    white_time: TimeConfig::default(),
+                    reconnect_token: None,
+                    entering_king_rule: None,
+                });
+                let path =
+                    write_game_jsonl(dir.path(), &record, &CsaClientConfig::default(), &result)
+                        .unwrap();
+                let expected = match (&result, my_color) {
+                    (GameResult::Win, Color::Black) | (GameResult::Lose, Color::White) => {
+                        "black_wins"
+                    }
+                    (GameResult::Lose, Color::Black) | (GameResult::Win, Color::White) => {
+                        "white_wins"
+                    }
+                    _ => "draws",
+                };
+                for without_source in [false, true] {
+                    if without_source {
+                        let lines: Vec<String> = fs::read_to_string(&path)
+                            .unwrap()
+                            .lines()
+                            .map(|line| {
+                                let mut row: Value = serde_json::from_str(line).unwrap();
+                                if row["type"] == "meta" {
+                                    row.as_object_mut().unwrap().remove("source");
+                                }
+                                row.to_string()
+                            })
+                            .collect();
+                        fs::write(&path, lines.join("\n") + "\n").unwrap();
+                    }
+                    let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+                        .arg(&path)
+                        .arg("--json")
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    let mut expected_black =
+                        if black.is_empty() { "unknown" } else { black }.to_owned();
+                    let mut expected_white =
+                        if white.is_empty() { "unknown" } else { white }.to_owned();
+                    if expected_black == expected_white {
+                        expected_black.push_str(" (black)");
+                        expected_white.push_str(" (white)");
+                    }
+                    assert!(
+                        parsed["matchups"][0]["black"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with(&format!("({expected_black})"))
+                    );
+                    assert!(
+                        parsed["matchups"][0]["white"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with(&format!("({expected_white})"))
+                    );
+                    for count in ["black_wins", "white_wins", "draws"] {
+                        assert_eq!(
+                            parsed["matchups"][0][count],
+                            u32::from(count == expected),
+                            "{parsed}"
+                        );
+                    }
+                    assert_eq!(parsed["progress"]["done"], 1);
+                    for partial in [false, true] {
+                        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+                        command.arg(&path).args(["--json", "--sprt"]);
+                        if partial {
+                            command.arg("--allow-partial");
+                        }
+                        let output = command.output().unwrap();
+                        assert!(!output.status.success());
+                        assert!(String::from_utf8_lossy(&output.stderr).contains("CSA単局ログ"));
+                    }
+                }
+                let text = fs::read_to_string(&path).unwrap();
+                let result_line = text.lines().last().unwrap();
+                fs::write(&path, format!("{text}{result_line}\n")).unwrap();
+                let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+                    .arg(&path)
+                    .arg("--json")
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success());
+            }
+        }
+    }
+}
+
+fn csa_fixture() -> (Value, Value) {
+    (
+        json!({
+            "type":"meta", "source":"csa_client", "settings":{"games":1},
+            "engine_cmd":{
+                "path_black":"base", "path_white":"test",
+                "label_black":"base", "label_white":"test",
+                "note":"csa_client: opponent path is reported as remote name; usi_options are for self-engine only"
+            }
+        }),
+        json!({"type":"result", "game_id":1, "outcome":"black_win", "winner":"base", "plies":0}),
+    )
+}
+
+fn write_rows(path: &Path, rows: &[Value]) {
+    let text = rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    fs::write(path, text + "\n").unwrap();
+}
+
+fn ordinary_analysis(paths: &[&Path]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .args(paths)
+        .arg("--json")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn legacy_csa_sanitized_metadata_matches_raw_winner_without_merging_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.jsonl");
+    let (mut meta, mut result) = csa_fixture();
+    meta.as_object_mut().unwrap().remove("source");
+    meta["engine_cmd"]["label_black"] = json!("alice_test");
+    meta["engine_cmd"]["label_white"] = json!("bob_test");
+    for (outcome, winner, count) in [
+        ("black_win", "alice.test", "black_wins"),
+        ("white_win", "bob@test", "white_wins"),
+    ] {
+        result["outcome"] = json!(outcome);
+        result["winner"] = json!(winner);
+        write_rows(&path, &[meta.clone(), result.clone()]);
+        let output = ordinary_analysis(&[&path]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(parsed["matchups"][0][count], 1);
+    }
+    meta["source"] = json!("csa_client");
+    write_rows(&path, &[meta.clone(), result.clone()]);
+    assert!(!ordinary_analysis(&[&path]).status.success());
+    meta.as_object_mut().unwrap().remove("source");
+    meta["engine_cmd"]["label_white"] = json!("alice_test");
+    result["winner"] = json!("alice@test");
+    write_rows(&path, &[meta, result]);
+    let output = ordinary_analysis(&[&path]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("先後ラベルが衝突"));
+}
+
+#[test]
+fn malformed_csa_results_are_rejected_before_counting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.jsonl");
+    let (meta, result) = csa_fixture();
+    for rows in [
+        vec![meta.clone()],
+        vec![meta.clone(), result.clone(), result.clone()],
+    ] {
+        write_rows(&path, &rows);
+        assert!(!ordinary_analysis(&[&path]).status.success());
+    }
+    for (field, value) in [
+        ("pair_index", json!(0)),
+        ("pair_slot", json!(0)),
+        ("attempt", json!(1)),
+        ("error", json!(true)),
+        ("outcome", json!("interrupted")),
+        ("winner", json!("test")),
+    ] {
+        let mut invalid = result.clone();
+        invalid[field] = value;
+        write_rows(&path, &[meta.clone(), invalid]);
+        assert!(!ordinary_analysis(&[&path]).status.success(), "{field}");
+    }
+}
+
+#[test]
+fn mixed_csa_and_tournament_counts_games_but_never_runs_sprt() {
+    let dir = tempfile::tempdir().unwrap();
+    let tournament = dir.path().join("tournament.jsonl");
+    let csa = dir.path().join("csa.jsonl");
+    write_log(&tournament, true, &[("black_win", "white_win")]);
+    let (meta, result) = csa_fixture();
+    write_rows(&csa, &[meta, result]);
+    let output = ordinary_analysis(&[&tournament, &csa]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["progress"]["done"], 3);
+    assert_eq!(parsed["matchups"][0]["black_wins"], 3);
+    for partial in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+        command.args([&tournament, &csa]).args(["--json", "--sprt"]);
+        if partial {
+            command.arg("--allow-partial");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("CSA単局ログ"));
+    }
+}
+
+#[test]
+fn explicit_source_overrides_legacy_note_and_plain_single_game_stays_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("complete.jsonl");
+    let single = dir.path().join("single.jsonl");
+    write_log(&good, true, &[("black_win", "white_win")]);
+    for explicit_source in [false, true] {
+        let (mut meta, result) = csa_fixture();
+        if explicit_source {
+            meta["source"] = json!("tournament");
+        } else {
+            meta.as_object_mut().unwrap().remove("source");
+            meta["engine_cmd"].as_object_mut().unwrap().remove("note");
+        }
+        write_rows(&single, &[meta, result]);
+        let (success, parsed) = analyze(&[&good, &single], true);
+        assert!(success);
+        assert_eq!(parsed["progress"]["done"], 2);
+        assert_eq!(parsed["extra"]["invalid"], true);
+        assert_eq!(parsed["sprt"]["decision"], "invalid");
+        assert_eq!(parsed["sprt"]["pairs"], 1);
+    }
+}
+
+#[test]
+fn malformed_csa_mixed_with_tournament_always_rejects_sprt() {
+    let dir = tempfile::tempdir().unwrap();
+    let tournament = dir.path().join("tournament.jsonl");
+    let csa = dir.path().join("invalid.jsonl");
+    write_log(&tournament, true, &[("black_win", "white_win")]);
+    let (meta, result) = csa_fixture();
+    for legacy in [false, true] {
+        let mut meta = meta.clone();
+        if legacy {
+            meta.as_object_mut().unwrap().remove("source");
+        }
+        for rows in [
+            vec![meta.clone()],
+            vec![meta.clone(), result.clone(), result.clone()],
+        ] {
+            write_rows(&csa, &rows);
+            for partial in [false, true] {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+                command.args([&tournament, &csa]).args(["--json", "--sprt"]);
+                if partial {
+                    command.arg("--allow-partial");
+                }
+                let output = command.output().unwrap();
+                assert!(!output.status.success());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("CSA単局ログは独立した対局ペアではない")
+                );
+            }
+            let (success, parsed) = {
+                let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+                    .args([&tournament, &csa])
+                    .args(["--json", "--allow-partial"])
+                    .output()
+                    .unwrap();
+                (
+                    output.status.success(),
+                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                )
+            };
+            assert!(success);
+            assert_eq!(parsed["progress"]["done"], 2);
+            assert_eq!(parsed["extra"]["invalid"], true);
+        }
+    }
+}
+
+fn text_analysis(paths: &[&Path]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .args(paths)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn csa_text_reports_actual_colors_including_draws_and_reversed_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("game.jsonl");
+    for alice_black in [false, true] {
+        for outcome in ["black_win", "white_win", "draw"] {
+            let (mut meta, mut result) = csa_fixture();
+            let (black, white) = if alice_black {
+                ("alice", "bob")
+            } else {
+                ("bob", "alice")
+            };
+            meta["engine_cmd"]["label_black"] = json!(black);
+            meta["engine_cmd"]["label_white"] = json!(white);
+            result["outcome"] = json!(outcome);
+            result["winner"] = if outcome == "draw" {
+                Value::Null
+            } else {
+                json!(if outcome == "black_win" { black } else { white })
+            };
+            write_rows(&path, &[meta, result]);
+            let text = text_analysis(&[&path]);
+            let line = text.lines().find(|line| line.starts_with("    A(alice) ")).unwrap();
+            let side = if alice_black { "先手" } else { "後手" };
+            let other = if alice_black { "後手" } else { "先手" };
+            assert!(line.contains(&format!("{other}決着局勝率:-（0決着局、全0局）")), "{line}");
+            let expected = if outcome == "draw" {
+                format!("{side}決着局勝率:-（0決着局、全1局）")
+            } else if (outcome == "black_win") == alice_black {
+                format!("{side}決着局勝率:100.0%(1/1決着局、全1局)")
+            } else {
+                format!("{side}決着局勝率:0.0%(0/1決着局、全1局)")
+            };
+            assert!(line.contains(&expected), "{line}");
+        }
+    }
+}
+
+#[test]
+fn mixed_csa_text_preserves_decisive_denominators_and_summary_unknowns() {
+    let dir = tempfile::tempdir().unwrap();
+    let csa = dir.path().join("csa.jsonl");
+    let tournament = dir.path().join("tournament.jsonl");
+    let summary = dir.path().join("old.summary.jsonl");
+    let (mut meta, mut result) = csa_fixture();
+    meta["engine_cmd"]["label_black"] = json!("bob");
+    meta["engine_cmd"]["label_white"] = json!("alice");
+    result["outcome"] = json!("white_win");
+    result["winner"] = json!("alice");
+    write_rows(&csa, &[meta.clone(), result]);
+    meta["source"] = json!("tournament");
+    meta["settings"]["games"] = json!(2);
+    write_rows(
+        &tournament,
+        &[
+            meta,
+            json!({"type":"result","outcome":"black_win","winner":"bob","pair_index":0,"pair_slot":0}),
+            json!({"type":"result","outcome":"draw","pair_index":0,"pair_slot":1}),
+        ],
+    );
+    let text = text_analysis(&[&csa, &tournament]);
+    let line = text.lines().find(|line| line.starts_with("    A(alice) ")).unwrap();
+    assert!(line.contains("先手決着局勝率:-（0決着局、全1局）"), "{line}");
+    assert!(line.contains("後手決着局勝率:50.0%(1/2決着局、全2局)"), "{line}");
+    write_rows(
+        &summary,
+        &[
+            json!({"total_games":2,"black_wins":1,"white_wins":1,"draws":0,
+        "engine_black":{"path":"bob"},"engine_white":{"path":"alice"}}),
+        ],
+    );
+    let summary_text = text_analysis(&[&summary]);
+    assert!(summary_text.contains("先後別集計:不明（先後情報のないsummaryを含む）"));
+    assert!(!summary_text.contains("決着局勝率:"));
+    let mixed_text = text_analysis(&[&csa, &tournament, &summary]);
+    let mixed_line = mixed_text.lines().find(|line| line.starts_with("    A(alice) ")).unwrap();
+    assert_eq!(mixed_line, line);
+    assert!(!mixed_text.contains("先後別集計:不明"));
+}

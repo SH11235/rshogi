@@ -177,3 +177,7 @@ Floodgate の HTTPS 取得は reqwest 0.13 の rustls backend を使う。
 `eval_sfens` / `bench_nnue_eval` / `verify_nnue_accumulator` /
 `nnue_saturation` の静的 LayerStacks 解析は、追加 feature
 `layerstacks-3072x16x64` / `layerstacks-2304x16x64` / `layerstacks-1536x16x64` にも対応する。
+
+CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "csa_client"`、または
+過去ログの CSA client 固有 `engine_cmd.note` で識別する。CSA 入力は pentanomial
+と SPRT の対象外で、`--sprt` は `--allow-partial` 指定時も拒否する。
