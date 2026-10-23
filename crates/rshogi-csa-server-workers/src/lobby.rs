@@ -178,6 +178,7 @@ impl DurableObject for Lobby {
         self.purge_pending(now_ms);
         let (total, per_ip) = self.pending_counts(&client_ip, now_ms);
         if total >= MAX_PENDING_CONNECTIONS || per_ip >= MAX_PENDING_CONNECTIONS_PER_IP {
+            crate::structured_log!(event: "lobby_pending_limit_denied", component: "lobby", total: total, per_ip: per_ip);
             return crate::rate_limit::build_ws_upgrade_rate_limited_response(30);
         }
         // 集計から accept まで await を挟まず、同時 upgrade の上限超過を防ぐ。
@@ -329,6 +330,13 @@ impl Lobby {
                 false
             }
         }
+    }
+
+    fn is_active_pending(&self, ws: &WebSocket) -> bool {
+        matches!(
+            ws.deserialize_attachment::<LobbyAttachment>(),
+            Ok(Some(LobbyAttachment::Pending { .. }))
+        ) && self.check_pending_deadline(ws)
     }
 
     fn purge_pending(&self, now_ms: u64) {
@@ -584,7 +592,7 @@ impl Lobby {
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             return Ok(());
         }
 
@@ -612,7 +620,7 @@ impl Lobby {
         // 同じ id で揃える。private 経路 (`pending_ws_attachment_ids`) と同じ
         // 採番器を共有し、id 値域を一本化する (storage key も共通)。
         let attachment_id = self.next_attachment_id().await?;
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             return Ok(());
         }
         let now_ms = self.now_ms();
@@ -980,7 +988,7 @@ impl Lobby {
         {
             return self.send_rate_limited_challenge_lobby(ws, decision).await;
         }
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             return Ok(());
         }
 
@@ -993,6 +1001,10 @@ impl Lobby {
         let now_ms = self.now_ms();
         let ttl = self.challenge_ttl();
         let mut reg = self.load_challenge_registry().await?;
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
+
         let expired = reg.purge_expired(now_ms);
         let purged = !expired.is_empty();
         if purged {
@@ -1108,7 +1120,7 @@ impl Lobby {
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             return Ok(());
         }
 
@@ -1174,7 +1186,7 @@ impl Lobby {
 
         // 通過: attachment id を採番し registry に mark、attachment を更新
         let attachment_id = self.next_attachment_id().await?;
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             return Ok(());
         }
         reg.mark_ws_logged_in(
@@ -1184,7 +1196,7 @@ impl Lobby {
             now_ms,
         );
         self.save_challenge_registry(&reg).await?;
-        if !self.check_pending_deadline(ws) {
+        if !self.is_active_pending(ws) {
             reg.unmark_ws_logged_in(&token, &PlayerName::new(handle.as_str()), &attachment_id);
             self.save_challenge_registry(&reg).await?;
             self.reschedule_alarm_with(&reg).await?;

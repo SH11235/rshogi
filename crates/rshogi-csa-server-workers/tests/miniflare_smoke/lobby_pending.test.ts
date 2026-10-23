@@ -53,7 +53,8 @@ describe('Lobby 未認証接続の保持制限', () => {
   test('未送信の接続も30秒後に自動切断される', async () => {
     const url = new URL('/ws/lobby', await mf.ready);
     url.protocol = 'ws:';
-    const ws = new NodeWebSocket(url, { headers: { 'CF-Connecting-IP': '192.0.2.1' } });
+    // close frame 未受信ではタイマーは始まらず、無切断の回帰を隠さない。
+    const ws = new NodeWebSocket(url, { headers: { 'CF-Connecting-IP': '192.0.2.1' }, closeTimeout: 1_000 });
     const closed = new Promise<number>(resolve => ws.once('close', code => resolve(code)));
     try {
       await new Promise<void>((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
@@ -100,6 +101,62 @@ describe('Lobby 未認証接続の保持制限', () => {
       expect((await direct(headers)).status).toBe(503);
     }
     expect((await control({})).attachments).toHaveLength(0);
+  });
+
+  async function waitForCloseRequest() {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const state = await control({});
+      if (state.closes.length > 0) return state;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('server did not request close');
+  }
+
+  test('同じWSの並行LOGINは一つだけqueueへ遷移する', async () => {
+    const ws = await connect();
+    const lines = readLineFromWebSocket(ws);
+    ws.send('LOGIN_LOBBY alice+test+black pw\n');
+    ws.send('LOGIN_LOBBY bob+test+black pw\n');
+    expect(await lines.takeLine()).toMatch(/^LOGIN_LOBBY:(alice|bob) OK$/);
+    await expect(lines.takeLine(500)).rejects.toThrow('timeout');
+    expect((await control({})).attachments.filter((att: any) => att.Queued)).toHaveLength(1);
+  });
+
+  test('challenge registry読み込み中の期限切れはtokenを発行しない', async () => {
+    const ws = await connect();
+    await control({ faults: { expireAfterRead: true } });
+    ws.send('CHALLENGE_LOBBY alice bob black byoyomi-600-10\n');
+    const state = await waitForCloseRequest();
+    expect(Object.keys(state.registry?.entries ?? {})).toHaveLength(0);
+    expect(state.faults.expireAfterRead).toBe(false);
+  });
+
+  test('private登録保存中の期限切れはunmarkされ同handleが再登録できる', async () => {
+    const issuer = await connect();
+    const replies = readLineFromWebSocket(issuer);
+    issuer.send('CHALLENGE_LOBBY alice bob black byoyomi-600-10\n');
+    const token = (await replies.takeLine()).split(' ')[1];
+    await control({ faults: { expireAfterMark: true } });
+    issuer.send(`LOGIN_LOBBY alice+private-${token}+free pw\n`);
+    const state = await waitForCloseRequest();
+    expect(state.faults.expireAfterMark).toBe(false);
+    const retry = await connect();
+    const retried = readLineFromWebSocket(retry);
+    retry.send(`LOGIN_LOBBY alice+private-${token}+free pw\n`);
+    expect(await retried.takeLine()).toContain('LOGIN_LOBBY:alice OK');
+  });
+
+  test('RateLimiterは並行消費・再構築の残量・読込失敗時のfail-closedを維持する', async () => {
+    const ns = await mf.getDurableObjectNamespace('RATE_LIMITER') as any;
+    const stub = ns.get(ns.idFromName('pending-rate-regression'));
+    const consume = async () => (await stub.fetch('https://test/check?capacity=2', { method: 'POST' })).json();
+    const setup = async (command: object) => stub.fetch('https://test/__test', { method: 'POST', body: JSON.stringify(command) });
+    await setup({ reset: true, failRead: true });
+    expect((await consume()).allowed).toBe(false);
+    const responses = await Promise.all([consume(), consume(), consume()]);
+    expect(responses.filter(response => response.allowed)).toHaveLength(2);
+    await setup({ reset: true });
+    expect((await consume()).allowed).toBe(false);
   });
 
   test('queuedとprivate認証後の接続は未認証期限のpurge対象にならない', async () => {

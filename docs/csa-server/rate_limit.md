@@ -281,3 +281,8 @@ alarm がない状態から更新した場合、最初のイベントまでは�
 close 完了が遅れても期限切れ接続を認証・枠の集計へ戻さない。物理的な WebSocket の
 解放はランタイムに依存し、アプリ側の保持上限は有効な認証待ち接続を対象とする。
 認証待ち・queue・challenge は同じ alarm に最短期限を予約する。
+
+この上限は資源保持数を制限するもので、複数 IP（IPv6 の別アドレスを含む）による
+全枠占有を防ぐものではない。`lobby_pending_limit_denied` と
+`rate_limit_denied`（`ws_lobby_upgrade_per_ip`）の拒否頻度を確認し、継続的な占有には
+edge 側の制御も併用する。IP prefix の集約や公平な受付枠の割当ては実装していない。

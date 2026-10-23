@@ -91,6 +91,7 @@ async fn forward_ws_to_lobby(req: Request, env: Env) -> Result<Response> {
     )
     .await?;
     if !decision.allowed {
+        crate::structured_log!(event: "rate_limit_denied", component: "router", kind: "ws_lobby_upgrade_per_ip", retry_after_sec: decision.retry_after_sec);
         return build_ws_upgrade_rate_limited_response(decision.retry_after_sec);
     }
 
