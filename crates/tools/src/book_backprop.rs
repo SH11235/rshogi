@@ -18,6 +18,9 @@ use crate::book_retrograde;
 /// YANEURAOU-DB2016 テキスト定跡のヘッダ行。
 pub const BOOK_HEADER: &str = "#YANEURAOU-DB2016 1.00";
 
+/// 千日手の値に指定できる範囲。詰みの値 (32000) より内側に限り、値をずらしても桁あふれしないようにする。
+const DRAW_VALUE_LIMIT: i32 = 30_000;
+
 /// 伝播値と既存ラベル値の合成方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MergeMode {
@@ -181,8 +184,6 @@ pub struct PropagationStats {
     pub check_core_states: usize,
     /// 同値手を選ぶと保証が破れるため、保証手だけを残した局面数。
     pub restricted_ties: usize,
-    /// 反転キーで合流した向きでは値が異なる局面数 (保存されている向きの値を書き出す)。
-    pub flip_conflicts: usize,
 }
 
 /// best 値が変化した局面。
@@ -523,14 +524,18 @@ pub fn propagate_values_with(
         merge,
         skip_unusable_moves: options.skip_unusable_moves,
     };
+    for draw in [draws.black, draws.white] {
+        if !(-DRAW_VALUE_LIMIT..=DRAW_VALUE_LIMIT).contains(&draw) {
+            bail!(
+                "千日手の値は -{DRAW_VALUE_LIMIT}..={DRAW_VALUE_LIMIT} で指定してください: {draw}"
+            );
+        }
+    }
     let n = graph.keys.len();
     let mut results: Vec<Option<NodeResult>> = vec![None; n];
-    let mut mirrored = vec![None; n];
+    let mut mirrored: Vec<Option<NodeResult>> = vec![None; n];
     let mut stats = PropagationStats::default();
     for black in [true, false] {
-        if !(0..n).any(|v| graph.black(v) == black) {
-            continue;
-        }
         let built = build_game(graph, params, black);
         let solution = book_retrograde::solve(&built.game)?;
         stats.check_core_states += solution.core_size[0] + solution.core_size[1];
@@ -541,12 +546,6 @@ pub fn propagate_values_with(
                 continue;
             }
             let state = state as usize;
-            let value = solution.values[state] + draw;
-            if graph.black(v) != black {
-                // 反転キーで合流した向き。行は保存されている向きの 1 組だけなので比べるだけにする。
-                mirrored[v] = Some(value);
-                continue;
-            }
             let row = |j: u32| {
                 let arc = built.game.arcs[built.game.start[state] + j as usize];
                 if arc.to == book_retrograde::NONE {
@@ -556,25 +555,26 @@ pub fn propagate_values_with(
                     (solution.values[to] + draw, solution.distance[to].map(|d| d + arc.length()))
                 }
             };
-            let rows =
-                built.arc_of[v].iter().map(|&j| (j != book_retrograde::NONE).then(|| row(j)));
             let index =
                 |j: u32| built.arc_of[v].iter().position(|&a| a == j && a != book_retrograde::NONE);
-            results[v] = Some(NodeResult {
-                value,
-                rows: rows.collect(),
+            let result = NodeResult {
+                value: solution.values[state] + draw,
+                rows: built.arc_of[v]
+                    .iter()
+                    .map(|&j| (j != book_retrograde::NONE).then(|| row(j)))
+                    .collect(),
                 guaranteed: index(solution.guaranteed[state]),
                 preferred: index(solution.preferred[state]),
-            });
+            };
+            // 反転キーで合流した向きは行を持たないので、保存されている向きの行で指せるかを後で確かめる。
+            if graph.black(v) == black {
+                results[v] = Some(result);
+            } else {
+                mirrored[v] = Some(result);
+            }
         }
     }
-    stats.flip_conflicts = (0..n)
-        .filter(|&v| {
-            mirrored[v].is_some_and(|value| results[v].as_ref().is_some_and(|r| r.value != value))
-        })
-        .count();
-
-    stats.restricted_ties = write_certified(graph, params, &results)?;
+    stats.restricted_ties = write_certified(graph, params, &results, &mirrored)?;
 
     let scc = build_scc_graph(&graph.adjacency);
     stats.nontrivial_sccs = scc.nontrivial.iter().filter(|&&v| v).count();
@@ -628,12 +628,19 @@ fn write_certified(
     graph: &mut Graph,
     params: BestParams,
     results: &[Option<NodeResult>],
+    mirrored: &[Option<NodeResult>],
 ) -> Result<usize> {
     let n = graph.keys.len();
     // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は保証手だけを残す。
     let mut restricted = vec![false; n];
     loop {
         assign_outputs(graph, results, &restricted);
+        let conflicts = flip_conflicts(graph, params, mirrored);
+        if conflicts > 0 {
+            bail!(
+                "反転キーで合流した {conflicts} 局面で、保存されている向きの行が反対の向きの値を保ちません。                 1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください"
+            );
+        }
         let violations = certify(graph, params);
         if violations.nodes.is_empty() {
             break;
@@ -651,6 +658,25 @@ fn write_certified(
         eprintln!("同値手を選ぶと保証が破れる {} 局面で、保証手以外の同値手を -1 しました", count);
     }
     Ok(count)
+}
+
+/// 反転キーで合流した向きで、書き出し値が最大の行のどれを指しても、その向きで解いた値を保つか。
+/// 保たない局面の数を返す。千日手の値が先後で同じなら、両方の向きは同じ問題なので 0 になる。
+fn flip_conflicts(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> usize {
+    (0..graph.keys.len())
+        .filter(|&v| {
+            let Some(mirror) = &mirrored[v] else {
+                return false;
+            };
+            let moves = &graph.moves[v];
+            let best = moves.iter().filter(|mv| params.counts(mv)).map(|mv| mv.new).max();
+            moves.iter().enumerate().any(|(idx, mv)| {
+                params.counts(mv)
+                    && Some(mv.new) == best
+                    && mirror.rows[idx].is_none_or(|(value, _)| value != mirror.value)
+            })
+        })
+        .count()
 }
 
 /// 保存されている向きで、局面の手番の側を自分として解いた結果。値は手番の側から見た値。
@@ -914,6 +940,8 @@ struct CertifyStates<'a> {
     /// 局面 `v` へ入る辺 `(親局面, 親の手番号)` は `reverse[reverse_start[v]..reverse_start[v + 1]]`。
     reverse_start: Vec<usize>,
     reverse: Vec<(u32, u32)>,
+    /// 保存されている向きの局面から指して届く状態。反転キーで合流した向きはここに含まれるものだけが実在する。
+    real: Vec<bool>,
 }
 
 impl<'a> CertifyStates<'a> {
@@ -952,14 +980,29 @@ impl<'a> CertifyStates<'a> {
             reverse[next[to]] = (node as u32, idx as u32);
             next[to] += 1;
         }
-        Self {
+        let mut states = Self {
             graph,
             params,
             me: usize::from(!black),
             values,
             reverse_start,
             reverse,
+            real: vec![false; 2 * n],
+        };
+        let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + usize::from(!graph.black(v))).collect();
+        for &s in &stack {
+            states.real[s] = true;
         }
+        while let Some(s) = stack.pop() {
+            let children: Vec<usize> = states.children(s).map(|(_, t)| t).collect();
+            for t in children {
+                if !states.real[t] {
+                    states.real[t] = true;
+                    stack.push(t);
+                }
+            }
+        }
+        states
     }
 
     fn len(&self) -> usize {
@@ -968,11 +1011,6 @@ impl<'a> CertifyStates<'a> {
 
     fn is_opponent(&self, s: usize) -> bool {
         s % 2 != self.me
-    }
-
-    /// 保存されている局面の手番で指す状態か。
-    fn stored(&self, s: usize) -> bool {
-        s % 2 == usize::from(!self.graph.black(s / 2))
     }
 
     /// 自分から見た状態の値。行の値は実際に手番の側から見た値として使われる。
@@ -1074,13 +1112,13 @@ impl<'a> CertifyStates<'a> {
         seeds
     }
 
-    /// 届く状態のうち、保存されている向きの自分の手番で `promises` を満たす値を約束している局面を返す。
+    /// 届く状態のうち、自分の手番で `promises` を満たす値を約束している局面を返す。
     /// 相手の手番の値は相手の約束で、`min` では相手側の上界なので自分の約束にはならない。
     /// 相手の手番から悪い循環へ届く道は自分の手番の局面を通るので、ここで見落としは出ない。
-    /// 反転キーで合流した向きの値は保存されている向きの値と異なりうるので、ここでは数えない。
+    /// 反転キーで合流した向きも、保存されている向きの行がその向きの値を保つと確かめてから数える。
     fn violations(&self, reached: &[bool], promises: impl Fn(usize) -> bool) -> BTreeSet<usize> {
         (0..self.len())
-            .filter(|&s| !self.is_opponent(s) && self.stored(s) && reached[s] && promises(s))
+            .filter(|&s| !self.is_opponent(s) && self.real[s] && reached[s] && promises(s))
             .map(|s| s / 2)
             .collect()
     }
@@ -1361,11 +1399,6 @@ fn write_scc_report(writer: &mut dyn Write, stats: &PropagationStats) -> Result<
         writer,
         "- tie moves restricted to the guaranteed move: {}",
         stats.restricted_ties
-    )?;
-    writeln!(
-        writer,
-        "- flip-merged positions with a different value: {}",
-        stats.flip_conflicts
     )?;
     writeln!(writer)?;
     Ok(())
@@ -1698,13 +1731,49 @@ mod tests {
             merge: MergeMode::Replace,
             skip_unusable_moves: false,
         };
-        assert_eq!(write_certified(&mut graph, params, &results).unwrap(), 1);
+        assert_eq!(write_certified(&mut graph, params, &results, &[None, None]).unwrap(), 1);
         assert_eq!(values(&graph), [vec![50, 49], vec![-50]]);
         // 保証手だけにしても破られる値はエラーにする。
         let mut broken = results.clone();
         broken[0].as_mut().unwrap().guaranteed = Some(1);
         broken[0].as_mut().unwrap().preferred = Some(1);
-        assert!(write_certified(&mut graph, params, &broken).is_err());
+        assert!(write_certified(&mut graph, params, &broken, &[None, None]).is_err());
+    }
+
+    #[test]
+    fn flipped_orientation_that_needs_another_move_is_rejected() {
+        // B と C 以降は反転キーで合流し、A から進むと C は後手番になる。先手は千日手を -70 とみて C で -50 の葉を選ぶが、
+        // 千日手を 0 とみる後手には循環を続ける方が良いので、保存されている 1 行では両方の向きを表せない。
+        let rows: [&[_]; 6] = [
+            &[(0, Some(1))],
+            &[(0, Some(2))],
+            &[(-50, None), (0, Some(3))],
+            &[(0, Some(4))],
+            &[(0, Some(5))],
+            &[(0, Some(2))],
+        ];
+        let black = [false, false, true, false, true, false];
+        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let error = propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap_err();
+        assert!(error.to_string().contains("反転キーで合流した"), "{error}");
+        // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
+        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
+        propagate_values(&book, &mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
+    }
+
+    #[test]
+    fn draw_values_outside_the_engine_range_are_rejected() {
+        for draw in [i32::MIN, -30_001, 30_001, i32::MAX] {
+            let error =
+                solve_rows_with(&[&[(0, None)]], DrawValues::both(draw), MergeMode::Replace)
+                    .unwrap_err();
+            assert!(error.to_string().contains("千日手の値は"), "{error}");
+        }
+        solve_rows_with(&[&[(0, None)]], DrawValues::both(-30_000), MergeMode::Replace).unwrap();
     }
 
     #[test]

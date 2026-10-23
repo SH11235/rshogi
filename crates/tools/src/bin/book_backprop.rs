@@ -16,13 +16,13 @@ struct Cli {
     #[arg(long)]
     out: PathBuf,
     /// 千日手の値 (手番の側から見た値)。先手・後手とも同じ値にする
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     draw_value: i32,
     /// 先手を自分として解くときの千日手の値。`--draw-value` より優先する
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     draw_value_black: Option<i32>,
     /// 後手を自分として解くときの千日手の値。`--draw-value` より優先する
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     draw_value_white: Option<i32>,
     #[arg(long)]
     report: Option<PathBuf>,
@@ -71,6 +71,36 @@ mod tests {
 
     type FixtureMove<'a> = (&'a str, i32, i32, u64);
     type FixtureEntry<'a> = (&'a str, &'a [FixtureMove<'a>]);
+
+    #[test]
+    fn draw_values_accept_negative_numbers_as_in_the_usage_example() {
+        let args = [
+            "book_backprop",
+            "--book",
+            "in.db",
+            "--out",
+            "out.db",
+            "--draw-value-black",
+            "-70",
+            "--draw-value-white",
+            "0",
+            "--merge",
+            "min",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!((cli.draw_value_black, cli.draw_value_white), (Some(-70), Some(0)));
+        let cli = Cli::try_parse_from([
+            "book_backprop",
+            "--book",
+            "a",
+            "--out",
+            "b",
+            "--draw-value",
+            "-5",
+        ])
+        .unwrap();
+        assert_eq!(cli.draw_value, -5);
+    }
 
     #[test]
     fn skip_unsearched_children_is_opt_in() {
