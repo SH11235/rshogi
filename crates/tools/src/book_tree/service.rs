@@ -477,7 +477,7 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
         .read(true)
         .write(true)
         .open(&lock_path)?;
-    match lock.try_lock_shared() {
+    match super::file_lock::try_lock_shared(&lock) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(Poll::Skipped),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),

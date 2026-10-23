@@ -71,7 +71,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `Threads` | Number of search threads | 1 |
+| `Threads` | Number of search threads (`go nodes N` limits the total across all threads) | 1 |
 | `USI_Hash` | Hash table size in MB | 256 |
 | `EvalHash` | Evaluation hash size (MiB, 0 for an empty table) | 256 |
 | `UseEvalHash` | Use the evaluation hash | true |
@@ -107,7 +107,7 @@ go mate infinite      # stop まで (go mate だけ、または 0 ミリ秒も�
 |------|------|
 | `checkmate <手順>` | 手番側が王手を続けて詰ませる手順 (USI 表記、空白区切り)。最短とは限らない |
 | `checkmate nomate` | 詰まない (攻め方の手はすべて王手、受け方は合駒・不成を含む全応手で判定) |
-| `checkmate timeout` | 判定できなかった (制限時間・`stop`、探索深さの上限 2048 手、詰み手順の復元失敗)。不詰の意味ではない |
+| `checkmate timeout` | 判定できなかった (制限時間・`stop`、探索深さの上限 2048 手 (wasm では 1024 手)、詰み手順の復元失敗)。不詰の意味ではない |
 | `checkmate notimplemented` | 扱えない局面 (どちらかの玉が無い (攻め方の玉が無い詰将棋など)、手番でない側が王手されている) |
 
 - 問題は「与えられた局面から手番側が詰ませるか」として解きます。`position ... moves ...` の

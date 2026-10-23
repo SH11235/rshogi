@@ -314,7 +314,7 @@ book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 - worker の初回起動・再生成では、engine と全ファイル型 USI option (`EvalFile` / `EvalDir`・係数・明示 SPSA ファイルなど)、暗黙の `spsa.params` の有無・内容を開始時の SHA-256 と照合します。起動前、USI 初期化後、初回 `usinewgame` / `isready` 後に検査し、不一致や読取り不能は局面の失敗として再試行せず、ALERT を記録して serve 全体を非0で停止します。その worker の読みは journal に追記しません。原因を解消し、元と同じ内容で再開してください。fingerprint・journal・checkpoint の形式は変わりません。
 - serve 稼働中の engine・モデル・パラメータは不変に保ってください。照合は worker 起動時のみで、大きなモデルにも全内容の読取りコストが発生します。ファイルシステムを排他ロックする仕組みではないため、検査の間だけ書き換えて元へ戻す競合や、検査後・稼働中の書換えとエンジン側の遅延読取りを完全には検出できません。内容を変更する場合は serve を終了し、新条件の state を使ってください。
 - 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV は1行以上かつ指定数以下を受理し、各手の合法性と重複が無いことを検査します。根の不成省略などで指定数より少なくても受理します。0行の場合は合法手の有無によらず `bestmove resign` / `bestmove win` を受理し、展開しない葉として保存します。1位が `win` の1行だけで `bestmove win` が返る場合も、0行の宣言勝ちと同じ葉として扱います。合法手数や根の候補数から行数は推測しません。
-- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力は出力の根の `serve.lock` で別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
+- state の lock と journal 自体の lock を終了まで保持します (Windows でもデータの範囲は lock しないので、serve の実行中に journal を読めます)。別 state でも同じ journal の同時使用はできません。木の出力は出力の根の `serve.lock` で別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
 
 journal、state dir とその管理ファイル (キュー・lock・チェックポイント・状態のファイルなど) がシンボリックリンクなら、リンク先の有無によらず拒否します。親 dir の途中のリンクと未作成部分の `..` は解決して比較します。journal と state の管理パスの衝突も拒否します。replay では、木の出力 dir（配下の生成物全体）と journal・state・paths.tsv・定義ファイルの衝突を拒否します。
 

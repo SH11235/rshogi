@@ -1,5 +1,6 @@
 //! 条件付き台帳を共有する、独立した定跡の木の生成。
 
+mod file_lock;
 mod journal;
 mod model;
 mod output;

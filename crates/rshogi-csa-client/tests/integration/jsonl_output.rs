@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use rshogi_csa::{Color, initial_position};
 use rshogi_csa_client::config::{CsaClientConfig, EngineConfig, RecordConfig, TimeConfig};
-use rshogi_csa_client::jsonl::write_game_jsonl;
+use rshogi_csa_client::jsonl::{LiveJsonlWriter, write_game_jsonl};
 use rshogi_csa_client::protocol::{GameResult, TimeConfig as ProtoTimeConfig};
 use rshogi_csa_client::record::{GameRecord, JsonlMoveExtra};
 use serde_json::Value;
@@ -334,4 +334,73 @@ fn tempdir() -> PathBuf {
     let path = std::env::temp_dir().join(format!("rshogi-csa-jsonl-test-{nanos}"));
     std::fs::create_dir_all(&path).expect("create tempdir");
     path
+}
+
+#[test]
+fn identities_match_across_live_final_meta_moves_and_results() {
+    for (black, white, expected_black, expected_white) in [
+        ("alice", "bob", "alice", "bob"),
+        ("alice.test", "alice@test", "alice.test", "alice@test"),
+        ("alice.test", "alice_test", "alice.test", "alice_test"),
+        ("", "bob", "unknown", "bob"),
+        ("", "unknown", "unknown (black)", "unknown (white)"),
+        ("", "", "unknown (black)", "unknown (white)"),
+        ("same", "same", "same (black)", "same (white)"),
+        ("将棋.A", "将棋@A", "将棋.A", "将棋@A"),
+    ] {
+        for my_color in [Color::Black, Color::White] {
+            let mut record = build_record(my_color);
+            record.sente_name = black.to_owned();
+            record.gote_name = white.to_owned();
+            let dir = tempdir();
+            let config = build_config();
+            let mut live = LiveJsonlWriter::create(&dir, &record, &config).unwrap();
+            for (side, csa, usi) in [
+                (Color::Black, "+7776FU", "7g7f"),
+                (Color::White, "-3334FU", "3c3d"),
+            ] {
+                record.add_move(csa, 1, None, side);
+                record.add_jsonl_move(JsonlMoveExtra {
+                    sfen_before: record.initial_position.to_sfen(),
+                    move_usi: usi.to_owned(),
+                    engine_label: "legacy cached label".to_owned(),
+                    elapsed_ms: 1,
+                    think_limit_ms: 1000,
+                    seldepth: None,
+                    nodes: None,
+                    time_ms: None,
+                    nps: None,
+                });
+                live.append_new_moves(&record).unwrap();
+            }
+            drop(live);
+            let path = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+            let live_text = std::fs::read_to_string(&path).unwrap();
+            let rows: Vec<Value> =
+                live_text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+            assert_eq!(rows[0]["engine_cmd"]["label_black"], expected_black);
+            assert_eq!(rows[0]["engine_cmd"]["label_white"], expected_white);
+            assert_ne!(expected_black, expected_white);
+            assert_eq!(rows[1]["engine"], expected_black);
+            assert_eq!(rows[2]["engine"], expected_white);
+            for result in [GameResult::Win, GameResult::Lose, GameResult::Draw] {
+                let final_path = write_game_jsonl(&dir, &record, &config, &result).unwrap();
+                assert_eq!(final_path, path);
+                let final_text = std::fs::read_to_string(final_path).unwrap();
+                assert!(final_text.starts_with(&live_text));
+                let last: Value = serde_json::from_str(final_text.lines().last().unwrap()).unwrap();
+                let expected = match (&result, my_color) {
+                    (GameResult::Win, Color::Black) | (GameResult::Lose, Color::White) => {
+                        Some(expected_black)
+                    }
+                    (GameResult::Lose, Color::Black) | (GameResult::Win, Color::White) => {
+                        Some(expected_white)
+                    }
+                    _ => None,
+                };
+                assert_eq!(last["winner"].as_str(), expected);
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

@@ -103,39 +103,147 @@ impl PackedHand {
     }
 }
 
-/// 局面全体のキーが一致するときだけ使うエントリ (`PIECES = true` では未確定値だけを書く)
+/// 局面全体のキーが一致するときだけ使うエントリ (`PIECES = true` では未確定値だけを書く)。
+/// キャッシュライン 1 本に 3 つ入るよう 20 byte に詰める。
+///
+/// 確定値は pn か dn の片方が必ず ∞ で、もう片方は 0 なので、2 つの欄にキーの上位 32bit と詰み手数を入れ、
+/// キーは 64bit 全部を照合する (別の局面の詰み・不詰を採用すると結論を誤る)。未確定値はキーの下位 55bit だけを
+/// 照合する。取り違えても探索の効率が落ちるだけで、結論は子の確定値からしか決まらない。
 #[derive(Clone, Copy, Default)]
 struct Entry {
-    /// 局面全体のキー
-    key: u64,
-    pn: u32,
-    dn: u32,
-    /// この局面以下で探索したノード数。置き換えの優先度に使う。0 は空き。
-    searched: u32,
-    mate_len: u16,
-    min_depth: u16,
-    /// 書き込んだ探索の世代。表の世代と違うエントリは空きとみなす。
-    generation: u8,
+    /// 局面全体のキーの下位 32bit
+    key_lo: u32,
+    /// 未確定値では pn、確定値ではキーの上位 32bit
+    pn_or_key_hi: u32,
+    /// 未確定値では dn、確定値では詰み手数 (不詰では 0)
+    dn_or_mate_len: u32,
+    /// 下位から順に、探索量 (`SEARCHED`)、世代 (`GENERATION`)、最小の探索深さ (`MIN_DEPTH`)、
+    /// 確定値か (`FINAL`)、詰みか (`PROVEN`)、キーの 32〜54bit (`TAG`)。
+    /// u64 にすると 8 byte 境界になるので 2 つに分ける。
+    meta: [u32; 2],
+}
+
+/// `Entry::meta` の欄 (最下位ビットの位置, ビット幅)
+type Field = (u32, u32);
+/// この局面以下で探索したノード数。飽和する。置き換えの優先度に使い、0 は空き。
+const SEARCHED: Field = (0, 20);
+/// 書き込んだ探索の世代。表の世代と違うエントリは空きとみなす。
+const GENERATION: Field = (20, 8);
+const MIN_DEPTH: Field = (28, 11);
+const FINAL: Field = (39, 1);
+const PROVEN: Field = (40, 1);
+const TAG: Field = (41, 23);
+/// 書き込む探索深さは探索深さの上限 (`search::MAX_DEPTH`) 未満
+const _: () = assert!(super::search::MAX_DEPTH <= 1 << MIN_DEPTH.1);
+
+const fn field_max(field: Field) -> u64 {
+    (1 << field.1) - 1
 }
 
 impl Entry {
+    fn new(key: u64, value: &TableValue, searched: u32, generation: u8) -> Self {
+        let is_final = value.pn == 0 || value.dn == 0;
+        let mut e = Self {
+            key_lo: key as u32,
+            pn_or_key_hi: if is_final { key_hi(key) } else { value.pn },
+            dn_or_mate_len: if is_final { 0 } else { value.dn },
+            meta: [0; 2],
+        };
+        e.set(TAG, key_tag(key));
+        e.set(FINAL, u64::from(is_final));
+        e.set(PROVEN, u64::from(value.pn == 0));
+        e.set_searched(searched, generation);
+        e.set_lengths(value.mate_len, value.min_depth);
+        e
+    }
+
+    fn meta(&self) -> u64 {
+        u64::from(self.meta[0]) | u64::from(self.meta[1]) << 32
+    }
+
+    fn get(&self, field: Field) -> u64 {
+        self.meta() >> field.0 & field_max(field)
+    }
+
+    /// `value` は欄の最大値で飽和させる
+    fn set(&mut self, field: Field, value: u64) {
+        let mask = field_max(field) << field.0;
+        let meta = (self.meta() & !mask) | value.min(field_max(field)) << field.0;
+        self.meta = [meta as u32, (meta >> 32) as u32];
+    }
+
+    fn pn_dn(&self) -> (u32, u32) {
+        match (self.is_final(), self.is_proven()) {
+            (false, _) => (self.pn_or_key_hi, self.dn_or_mate_len),
+            (true, true) => (0, PN_INF),
+            (true, false) => (PN_INF, 0),
+        }
+    }
+
+    fn searched(&self) -> u32 {
+        self.get(SEARCHED) as u32
+    }
+
+    fn set_searched(&mut self, searched: u32, generation: u8) {
+        self.set(SEARCHED, u64::from(searched));
+        self.set(GENERATION, u64::from(generation));
+    }
+
+    fn mate_len(&self) -> u16 {
+        if self.is_proven() {
+            self.dn_or_mate_len as u16
+        } else {
+            0
+        }
+    }
+
+    fn min_depth(&self) -> u16 {
+        self.get(MIN_DEPTH) as u16
+    }
+
+    /// 詰み手数は詰みのエントリにだけ書く (ほかでは 0 として扱う)
+    fn set_lengths(&mut self, mate_len: u16, min_depth: u16) {
+        if self.is_proven() {
+            self.dn_or_mate_len = u32::from(mate_len);
+        }
+        self.set(MIN_DEPTH, u64::from(min_depth));
+    }
+
     fn is_empty(&self, generation: u8) -> bool {
-        self.searched == 0 || self.generation != generation
+        self.searched() == 0 || self.get(GENERATION) != u64::from(generation)
     }
 
     fn is_final(&self) -> bool {
-        self.pn == 0 || self.dn == 0
+        self.get(FINAL) != 0
+    }
+
+    fn is_proven(&self) -> bool {
+        self.is_final() && self.get(PROVEN) != 0
     }
 
     fn matches(&self, key: TableKey, generation: u8) -> bool {
-        self.key == key.key && !self.is_empty(generation)
+        self.key_lo == key.key as u32
+            && self.get(TAG) == key_tag(key.key)
+            && (!self.is_final() || self.pn_or_key_hi == key_hi(key.key))
+            && !self.is_empty(generation)
     }
 
     /// 小さいほど先に追い出す。bucket に未確定値があれば、確定値より先に追い出す。
     fn keep_priority(&self) -> u64 {
         let final_bonus = if self.is_final() { 1u64 << 32 } else { 0 };
-        final_bonus | u64::from(self.searched)
+        final_bonus | u64::from(self.searched())
     }
+}
+
+#[inline]
+fn key_hi(key: u64) -> u32 {
+    (key >> 32) as u32
+}
+
+/// キーの 32〜54bit (`Entry` で下位 32bit に足して照合する)
+#[inline]
+fn key_tag(key: u64) -> u64 {
+    key >> 32 & field_max(TAG)
 }
 
 /// 証明駒・反証駒で書く確定値のエントリ。キャッシュライン 1 本に 3 つ入るよう 4 byte 境界で詰める。
@@ -179,13 +287,14 @@ impl FinalEntry {
     }
 }
 
-const BUCKET_SIZE: usize = 4;
+const BUCKET_SIZE: usize = 3;
 const FINAL_BUCKET_SIZE: usize = 3;
 
-/// 局面全体のキーの bucket (エントリ 32 byte × 4 = キャッシュライン 2 本)
+/// 局面全体のキーの bucket (エントリ 20 byte × 3 = キャッシュライン 1 本)
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(64))]
 struct Bucket([Entry; BUCKET_SIZE]);
+const _: () = assert!(std::mem::size_of::<Bucket>() == 64);
 
 /// 証明駒・反証駒の確定値の bucket (エントリ 20 byte × 3 = キャッシュライン 1 本)
 #[derive(Clone, Copy, Default)]
@@ -197,7 +306,7 @@ struct FinalBucket([FinalEntry; FINAL_BUCKET_SIZE]);
 /// 完全一致のエントリは局面 (盤面と持駒) で bucket を選ぶ。証明駒・反証駒の確定値は持駒違いの局面からも
 /// 引けるよう、盤面だけで bucket を選ぶ別の表に置く。1 つの表に同じ盤面の持駒違いを束ねると、
 /// 未確定値が 1 つの bucket に集まって追い出し合う。`PIECES = true` で引くと子の局面ごとに
-/// キャッシュライン 3 本 (`false` は 2 本) を読む。
+/// キャッシュライン 2 本 (`false` は 1 本) を読む。
 pub(super) struct MateTable {
     buckets: Vec<Bucket>,
     /// 証明駒・反証駒の確定値。`buckets` と同じ数か、作らないときは空。
@@ -288,12 +397,8 @@ impl MateTable {
     pub fn prefetch<const PIECES: bool>(&self, key: TableKey) {
         use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
         let exact = &self.buckets[self.exact_index(key)] as *const Bucket as *const i8;
-        // SAFETY: exact と exact + 64 は self.buckets の生存中の要素 (128 byte) の内側を指す。
-        // prefetch はメモリの内容を読み書きしない。
-        unsafe {
-            _mm_prefetch(exact, _MM_HINT_T0);
-            _mm_prefetch(exact.add(64), _MM_HINT_T0);
-        }
+        // SAFETY: exact は self.buckets の生存中の要素を指す。prefetch はメモリの内容を読み書きしない。
+        unsafe { _mm_prefetch(exact, _MM_HINT_T0) };
         if PIECES {
             let fin = &self.final_buckets[self.final_index(key)] as *const FinalBucket as *const i8;
             // SAFETY: fin は self.final_buckets の生存中の要素を指す。prefetch は内容を読み書きしない。
@@ -340,10 +445,10 @@ impl MateTable {
             .iter()
             .find(|e| e.matches(key, generation))
             .map(|e| TableValue {
-                pn: e.pn,
-                dn: e.dn,
-                mate_len: e.mate_len,
-                min_depth: e.min_depth,
+                pn: e.pn_dn().0,
+                dn: e.pn_dn().1,
+                mate_len: e.mate_len(),
+                min_depth: e.min_depth(),
                 hand: key.hand,
             })
     }
@@ -380,40 +485,29 @@ impl MateTable {
             // 確定したので同じ局面の完全一致のエントリは要らない (引くときは確定値の表を先に見る)
             let mut searched = searched;
             if let Some(e) = same {
-                searched = searched.saturating_add(e.searched);
-                e.searched = 0;
+                searched = searched.saturating_add(e.searched());
+                e.set_searched(0, generation);
             }
             self.store_final(key, value, searched);
             return;
         }
 
-        let new_entry = Entry {
-            key: key.key,
-            pn: value.pn,
-            dn: value.dn,
-            searched,
-            mate_len: value.mate_len,
-            min_depth: value.min_depth,
-            generation,
-        };
+        let new_entry = Entry::new(key.key, &value, searched, generation);
         if let Some(e) = same {
             if e.is_final() && !is_final {
                 return;
             }
-            let total = searched.saturating_add(e.searched);
-            let min_depth = e.min_depth.min(new_entry.min_depth);
+            let total = searched.saturating_add(e.searched());
+            let min_depth = e.min_depth().min(value.min_depth);
             // 詰み手数は短い証明を残す (詰み手順の復元は手数が減る向きにしか辿らない)
-            let mate_len = if e.pn == 0 && new_entry.pn == 0 {
-                e.mate_len.min(new_entry.mate_len)
+            let mate_len = if e.is_proven() && value.pn == 0 {
+                e.mate_len().min(value.mate_len)
             } else {
-                new_entry.mate_len
+                value.mate_len
             };
-            *e = Entry {
-                searched: total,
-                min_depth,
-                mate_len,
-                ..new_entry
-            };
+            *e = new_entry;
+            e.set_searched(total, generation);
+            e.set_lengths(mate_len, min_depth);
             return;
         }
         if let Some(e) = bucket.iter_mut().find(|e| e.is_empty(generation)) {
@@ -580,13 +674,13 @@ mod tests {
     fn full_bucket_takes_the_new_entry_even_if_it_searched_less() {
         // 探索量の最も少ない未確定値 (局面 2) が置き換わり、ほかは残る
         let mut table = MateTable::with_buckets(1);
-        for (board, searched) in [(1u64, 300), (2, 100), (3, 400), (4, 200)] {
+        for (board, searched) in [(1u64, 300), (2, 100), (3, 400)] {
             table.store::<true>(key(board, Hand::EMPTY), value(1, 1), searched);
         }
         table.store::<true>(key(5, Hand::EMPTY), value(2, 2), 1);
         assert_eq!(table.probe::<true>(key(5, Hand::EMPTY)), Some(value(2, 2)));
         assert_eq!(table.probe::<true>(key(2, Hand::EMPTY)), None);
-        for board in [1u64, 3, 4] {
+        for board in [1u64, 3] {
             assert_eq!(table.probe::<true>(key(board, Hand::EMPTY)), Some(value(1, 1)));
         }
     }
@@ -595,7 +689,7 @@ mod tests {
     fn bucket_full_of_final_values_takes_an_unknown_value() {
         // 完全一致の表が確定値で埋まっていれば、探索量の最も少ない確定値が未確定値に置き換わる
         let mut table = MateTable::with_bucket_count(1, false);
-        for (board, searched) in [(1u64, 300), (2, 100), (3, 400), (4, 200)] {
+        for (board, searched) in [(1u64, 300), (2, 100), (3, 400)] {
             table.store::<false>(key(board, Hand::EMPTY), proven(1, Hand::EMPTY), searched);
         }
         table.store::<false>(key(5, Hand::EMPTY), value(2, 2), 1);
@@ -697,5 +791,70 @@ mod tests {
         table.store::<true>(key(9, gold_silver), proven(5, gold_silver), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)).map(|v| v.mate_len), Some(5));
         assert_eq!(table.probe::<true>(key(9, gold)).map(|v| v.mate_len), Some(9));
+    }
+
+    fn exact(key: u64) -> TableKey {
+        TableKey {
+            key,
+            board: 0,
+            hand: Hand::EMPTY,
+        }
+    }
+
+    #[test]
+    fn unknown_values_are_matched_by_the_lower_55_bits() {
+        let mut table = MateTable::with_bucket_count(1, false);
+        table.store::<false>(exact(5), value(1, 1), 1);
+        for bit in 32..55 {
+            assert_eq!(table.probe::<false>(exact(5 | 1 << bit)), None, "bit {bit}");
+        }
+        assert_eq!(table.probe::<false>(exact(5)), Some(value(1, 1)));
+    }
+
+    #[test]
+    fn final_values_are_matched_by_the_whole_key() {
+        let mut table = MateTable::with_bucket_count(1, false);
+        table.store::<false>(exact(5), proven(3, Hand::EMPTY), 1);
+        table.store::<false>(exact(6), disproven(Hand::EMPTY), 1);
+        assert_eq!(table.probe::<false>(exact(5 | 1 << 63)), None);
+        assert_eq!(table.probe::<false>(exact(6 | 1 << 60)), None);
+        assert_eq!(table.probe::<false>(exact(5)), Some(proven(3, Hand::EMPTY)));
+        assert_eq!(table.probe::<false>(exact(6)), Some(disproven(Hand::EMPTY)));
+    }
+
+    #[test]
+    fn entry_fields_keep_their_limits() {
+        let at_depth = |depth: u16, v: TableValue| TableValue {
+            min_depth: depth,
+            ..v
+        };
+        let mate = at_depth(2047, proven(u16::MAX - 1, Hand::EMPTY));
+        let e = Entry::new(u64::MAX, &mate, (1 << 20) - 1, u8::MAX);
+        assert_eq!(
+            (e.searched(), e.mate_len(), e.min_depth()),
+            ((1 << 20) - 1, u16::MAX - 1, 2047)
+        );
+        assert!(!e.is_empty(u8::MAX) && e.is_proven());
+        let e = Entry::new(u64::MAX, &value(7, 9), 1 << 20, u8::MAX);
+        assert_eq!((e.searched(), e.pn_dn()), ((1 << 20) - 1, (7, 9)));
+        assert!(!e.is_empty(u8::MAX) && !e.is_final());
+    }
+
+    #[test]
+    fn rewriting_an_entry_keeps_the_shallowest_depth_and_shortest_mate() {
+        let mut table = MateTable::with_bucket_count(1, false);
+        table.generation = u8::MAX;
+        let k = exact(0xFFFF_FFFF_FFFF_FFFF);
+        let at_depth = |depth: u16, v: TableValue| TableValue {
+            min_depth: depth,
+            ..v
+        };
+        table.store::<false>(k, at_depth(7, value(3, 3)), u64::MAX);
+        table.store::<false>(k, at_depth(2047, value(4, 4)), u64::MAX);
+        assert_eq!(table.probe::<false>(k), Some(at_depth(7, value(4, 4))));
+        table.store::<false>(k, at_depth(9, proven(9, Hand::EMPTY)), 1);
+        table.store::<false>(k, at_depth(3, proven(5, Hand::EMPTY)), 1);
+        table.store::<false>(k, at_depth(8, proven(7, Hand::EMPTY)), 1);
+        assert_eq!(table.probe::<false>(k), Some(at_depth(3, proven(5, Hand::EMPTY))));
     }
 }
