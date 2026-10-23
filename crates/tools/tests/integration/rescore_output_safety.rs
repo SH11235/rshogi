@@ -90,11 +90,16 @@ fn rescore_rejects_ambiguous_resource_whitespace_before_engine_start_or_output_w
     fs::hard_link(&resource, &output).unwrap();
     for separator in ["  ", "\t", "\n"] {
         let result = Command::new(env!("CARGO_BIN_EXE_rescore_psv"))
-            .arg("--input").arg(&input)
-            .arg("--engine").arg(&engine)
-            .arg("--output-dir").arg(&output_dir)
-            .arg("--usi-option").arg(format!("SPSAParamsFile=tune{separator}params"))
-            .output().unwrap();
+            .arg("--input")
+            .arg(&input)
+            .arg("--engine")
+            .arg(&engine)
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .arg("--usi-option")
+            .arg(format!("SPSAParamsFile=tune{separator}params"))
+            .output()
+            .unwrap();
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(!result.status.success());
         assert!(error.contains("Ambiguous whitespace in USI resource option"), "{error}");

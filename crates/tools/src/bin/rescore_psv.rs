@@ -5919,9 +5919,15 @@ mod marker_tests {
         ] {
             std::fs::write(&output, b"previous output").unwrap();
             let cli = Cli::parse_from([
-                "rescore_psv", "--input", input.to_str().unwrap(),
-                "--engine", engine.to_str().unwrap(),
-                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", option,
+                "rescore_psv",
+                "--input",
+                input.to_str().unwrap(),
+                "--engine",
+                engine.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--usi-option",
+                option,
             ]);
             let error = output_protection(&cli, std::slice::from_ref(&input)).err().unwrap();
             assert!(error.to_string().contains("Ambiguous whitespace"), "{error}");
@@ -5930,10 +5936,15 @@ mod marker_tests {
         }
         std::fs::remove_file(&output).unwrap();
         let cli = Cli::parse_from([
-            "rescore_psv", "--input", input.to_str().unwrap(),
-            "--engine", engine.to_str().unwrap(),
-            "--output-dir", output_dir.to_str().unwrap(),
-            "--usi-option", " SPSAParamsFile = tune params ",
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--engine",
+            engine.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+            "--usi-option",
+            " SPSAParamsFile = tune params ",
         ]);
         let protection = output_protection(&cli, std::slice::from_ref(&input)).unwrap();
         assert!(protection.inputs.contains(&resource));
