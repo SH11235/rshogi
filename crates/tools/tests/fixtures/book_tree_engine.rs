@@ -15,7 +15,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             log.write_all(format!("[{}, {:?}]\n", std::process::id(), line).as_bytes())?;
         }
         if line == "usi" {
-            for name in ["FixtureFile", "EvalFile", "LS_PROGRESS_COEFF", "Threads", "USI_Hash", "MultiPV"] {
+            for name in [
+                "FixtureFile",
+                "EvalFile",
+                "LS_PROGRESS_COEFF",
+                "Threads",
+                "USI_Hash",
+                "MultiPV",
+            ] {
                 println!("option name {name} type string default empty");
             }
             println!("usiok");
@@ -102,10 +109,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mv = row.split_whitespace().next().ok_or("手がありません")?;
                 println!("info depth 99 nodes 150 multipv 1 score cp 12345 lowerbound pv {mv}");
             }
-            let bestmove =
-                config.get("bestmove").map(String::as_str).unwrap_or_else(|| {
-                    rows.first().and_then(|r| r.split_whitespace().next()).unwrap_or("resign")
-                });
+            let bestmove = config.get("bestmove").map(String::as_str).unwrap_or_else(|| {
+                rows.first().and_then(|r| r.split_whitespace().next()).unwrap_or("resign")
+            });
             println!("bestmove {bestmove}");
         } else if line == "quit" {
             break;

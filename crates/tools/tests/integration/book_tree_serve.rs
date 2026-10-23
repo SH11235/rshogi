@@ -1562,11 +1562,12 @@ fn worker_recreation_rejects_changed_or_missing_inputs_without_appending() {
 
 #[test]
 fn persistent_replacement_during_initialization_stops_before_search_and_reaps_engine() {
-    for phase in ["initial", "newgame"] {
+    for (phase, cleanup_failure) in [("initial", false), ("newgame", false), ("initial", true)] {
+        let worker_count = if cleanup_failure { 2 } else { 1 };
         let dir = tempfile::tempdir().unwrap();
         let state = &dir.path().join("state");
         std::fs::create_dir(state).unwrap();
-        std::fs::write(state.join("workers"), "1").unwrap();
+        std::fs::write(state.join("workers"), worker_count.to_string()).unwrap();
         let config = fast_fixture(state);
         let marker = state.join("ready-entered");
         let release = state.join("ready-release");
@@ -1576,8 +1577,23 @@ fn persistent_replacement_during_initialization_stops_before_search_and_reaps_en
         data["ready_release"] = json!(release);
         std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
         add_tree(state, "a");
+        if cleanup_failure {
+            add_root(state, "b", "4k4/9/9/9/9/9/9/9/2K6 w -");
+        }
         let mut server = start(state, &config);
-        wait_for(|| marker.exists());
+        wait_for(|| {
+            marker.exists()
+                && protocol(state)
+                    .iter()
+                    .filter(|(_, line)| line == "isready")
+                    .map(|(pid, _)| *pid)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == worker_count
+        });
+        if cleanup_failure {
+            std::fs::create_dir(out(state, "a", "b").join("own_nodes.tsv")).unwrap();
+        }
         let before = std::fs::metadata(state.join("journal.jsonl")).unwrap().len();
         std::fs::write(&config, "B").unwrap();
         std::fs::write(&release, "").unwrap();
@@ -1585,10 +1601,13 @@ fn persistent_replacement_during_initialization_stops_before_search_and_reaps_en
         assert!(!server.0.wait().unwrap().success());
         assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap().len() as u64, before);
         assert!(alerts(state).contains("入力の指紋"));
+        if cleanup_failure {
+            assert!(alerts(state).contains("候補の削除失敗"));
+        }
         let log = protocol(state);
         assert!(!log.iter().any(|(_, line)| line.starts_with("go ")));
         let pids: BTreeSet<_> = log.iter().map(|(pid, _)| *pid).collect();
-        assert_eq!(pids.len(), 1);
+        assert_eq!(pids.len(), worker_count);
         for pid in pids {
             assert!(log.contains(&(pid, "quit".into())));
         }

@@ -191,7 +191,7 @@ impl std::fmt::Display for InvalidReading {
 }
 impl std::error::Error for InvalidReading {}
 
-/// エンジンを起動できない (開けるファイル数の上限など、局面によらない環境の失敗)。
+/// 入力照合に成功した後のエンジン起動失敗。入力の読取り失敗は再試行せず停止する。
 /// 局面の失敗に数えず、次の周回で起動し直す。
 #[derive(Debug)]
 struct SpawnFailed(anyhow::Error);
