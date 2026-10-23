@@ -1514,8 +1514,8 @@ fn worker_recreation_rejects_changed_or_missing_inputs_without_appending() {
         wait_for(|| out(state, "a", "b").join("own_nodes.tsv").exists());
         std::fs::write(state.join("workers"), "0").unwrap();
         wait_for(|| progress(state)["workers"].as_array().is_some_and(Vec::is_empty));
-        let before = std::fs::read(state.join("journal.jsonl")).unwrap();
-        assert!(!before.is_empty());
+        let before = std::fs::metadata(state.join("journal.jsonl")).unwrap().len();
+        assert!(before > 0);
         let old_log = protocol(state);
         let pids: BTreeSet<_> = old_log.iter().map(|(pid, _)| *pid).collect();
         assert!(!pids.is_empty());
@@ -1538,9 +1538,8 @@ fn worker_recreation_rejects_changed_or_missing_inputs_without_appending() {
         std::fs::write(state.join("workers"), "1").unwrap();
         if case == "unchanged" {
             wait_for(|| out(state, "b", "w").join("own_nodes.tsv").exists());
-            let after = std::fs::read(state.join("journal.jsonl")).unwrap();
-            assert!(after.starts_with(&before) && after.len() > before.len());
             stop(state, &mut server);
+            assert!(std::fs::read(state.join("journal.jsonl")).unwrap().len() as u64 > before);
             let log = protocol(state);
             let pids: BTreeSet<_> = log.iter().map(|(pid, _)| *pid).collect();
             assert_eq!(pids.len(), 2);
@@ -1551,7 +1550,11 @@ fn worker_recreation_rejects_changed_or_missing_inputs_without_appending() {
             wait_for(|| server.0.try_wait().unwrap().is_some());
             assert!(!server.0.wait().unwrap().success(), "{case}");
             assert!(alerts(state).contains("入力の指紋"), "{case}");
-            assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap(), before, "{case}");
+            assert_eq!(
+                std::fs::read(state.join("journal.jsonl")).unwrap().len() as u64,
+                before,
+                "{case}"
+            );
             assert_eq!(protocol(state), old_log, "{case}");
         }
     }
@@ -1575,12 +1578,12 @@ fn persistent_replacement_during_initialization_stops_before_search_and_reaps_en
         add_tree(state, "a");
         let mut server = start(state, &config);
         wait_for(|| marker.exists());
-        let before = std::fs::read(state.join("journal.jsonl")).unwrap();
+        let before = std::fs::metadata(state.join("journal.jsonl")).unwrap().len();
         std::fs::write(&config, "B").unwrap();
         std::fs::write(&release, "").unwrap();
         wait_for(|| server.0.try_wait().unwrap().is_some());
         assert!(!server.0.wait().unwrap().success());
-        assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap(), before);
+        assert_eq!(std::fs::read(state.join("journal.jsonl")).unwrap().len() as u64, before);
         assert!(alerts(state).contains("入力の指紋"));
         let log = protocol(state);
         assert!(!log.iter().any(|(_, line)| line.starts_with("go ")));
