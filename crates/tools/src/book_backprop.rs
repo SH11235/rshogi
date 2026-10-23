@@ -805,6 +805,7 @@ pub fn propagate_values_with(
             }
         }
     }
+    certify(graph, params)?;
 
     for (node_idx, key) in graph.keys.iter().enumerate() {
         let counted = || graph.moves[node_idx].iter().filter(|mv| params.counts(mv));
@@ -869,6 +870,187 @@ fn iterate_nontrivial_scc(
         }
     }
     bail!("SCC 値・距離反復が --max-iters ({max_iters}) に到達しました（未収束）");
+}
+
+/// 書き出す値で定跡を指したとき、循環によって値の約束が破られないかを検査する。
+///
+/// 自分は各局面で書き出し値が最大の手 (同値の -1 補正を受けなかった手) のどれを選んでもよく、
+/// 相手は全手を選べるとして、次のどちらかが残っていればエラーにする。
+/// - 詰まされる値でないのに、相手が自分の連続王手の循環 (反則負け) へ引き込める。
+/// - 千日手より良い値なのに、相手が王手をやめながら循環を続けて千日手へ逃げられる。
+fn certify(graph: &Graph, params: BestParams) -> Result<()> {
+    let states = CertifyStates::new(graph, params);
+    let mate = Value::MATE.raw();
+    // 千日手の値は手番側視点なので、循環上の手番によって ±draw_value のどちらにもなる。
+    // 両方を上回る値だけを「千日手より良い」とみなす。
+    let draw_bound = params.draw_value.abs();
+
+    let (comp, cyclic) = states.components(|s, idx, t| {
+        states.follows(s, idx)
+            && states.own(s) > -mate
+            && states.own(t) > -mate
+            && (states.is_opponent(s) || graph.checked[t / 2])
+    });
+    let perpetual_check: BTreeSet<usize> = (0..states.len())
+        .filter(|&s| !states.is_opponent(s) && cyclic[comp[s]])
+        .map(|s| s / 2)
+        .collect();
+
+    let (comp, _) = states.components(|s, idx, t| {
+        states.follows(s, idx) && states.own(s) > draw_bound && states.own(t) > draw_bound
+    });
+    let mut repetition = BTreeSet::new();
+    for s in (0..states.len()).filter(|&s| states.is_opponent(s) && states.own(s) > draw_bound) {
+        for (_, t) in states.children(s) {
+            if states.own(t) > draw_bound && !graph.checked[t / 2] && comp[s] == comp[t] {
+                repetition.insert(s / 2);
+            }
+        }
+    }
+
+    if perpetual_check.is_empty() && repetition.is_empty() {
+        return Ok(());
+    }
+    let sample = |nodes: &BTreeSet<usize>| {
+        nodes
+            .iter()
+            .take(5)
+            .map(|&v| graph.keys[v].as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    bail!(
+        "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環 {} 局面 [{}]、千日手へ逃げられる循環 {} 局面 [{}]",
+        perpetual_check.len(),
+        sample(&perpetual_check),
+        repetition.len(),
+        sample(&repetition)
+    )
+}
+
+/// [`certify`] が辿る、局面 `v` と手番の持ち主 `p` を組にした状態 `2 * v + p` のグラフ。
+///
+/// 反転 key で合流した辺は実際の先後と局面の手番が一致しないので、局面ではなく
+/// 「検査する側 (`p = 0`) と相手 (`p = 1`) のどちらの手番か」で循環を判定する。
+/// 検査する側を相手に替えた場合は `p` を入れ替えた同型のグラフになるので、`p = 0` 側だけ調べればよい。
+struct CertifyStates<'a> {
+    graph: &'a Graph,
+    params: BestParams,
+    values: Vec<i32>,
+    reverse: Vec<Vec<(usize, usize)>>,
+}
+
+impl<'a> CertifyStates<'a> {
+    fn new(graph: &'a Graph, params: BestParams) -> Self {
+        let values = graph
+            .moves
+            .iter()
+            .map(|moves| {
+                moves
+                    .iter()
+                    .filter(|mv| params.counts(mv))
+                    .map(|mv| mv.new)
+                    .max()
+                    .unwrap_or(params.draw_value)
+            })
+            .collect();
+        let mut reverse = vec![Vec::new(); graph.keys.len()];
+        for (node, moves) in graph.moves.iter().enumerate() {
+            for (idx, mv) in moves.iter().enumerate() {
+                if let Some(edge) = mv.edge.filter(|_| params.counts(mv)) {
+                    reverse[edge.to].push((node, idx));
+                }
+            }
+        }
+        Self {
+            graph,
+            params,
+            values,
+            reverse,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.graph.keys.len() * 2
+    }
+
+    fn is_opponent(&self, s: usize) -> bool {
+        s % 2 == 1
+    }
+
+    /// 検査する側から見た状態の値。
+    fn own(&self, s: usize) -> i32 {
+        let value = self.values[s / 2];
+        if self.is_opponent(s) { -value } else { value }
+    }
+
+    /// 検査する側は書き出し値が最大の手だけを、相手は全手を指しうる。
+    fn follows(&self, s: usize, idx: usize) -> bool {
+        self.is_opponent(s) || self.graph.moves[s / 2][idx].new == self.values[s / 2]
+    }
+
+    fn children(&self, s: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let flip = 1 - s % 2;
+        self.graph.moves[s / 2].iter().enumerate().filter_map(move |(idx, mv)| {
+            mv.edge.filter(|_| self.params.counts(mv)).map(|edge| (idx, edge.to * 2 + flip))
+        })
+    }
+
+    fn parents(&self, t: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let flip = 1 - t % 2;
+        self.reverse[t / 2].iter().map(move |&(node, idx)| (node * 2 + flip, idx))
+    }
+
+    /// `allow(親, 手番号, 子)` を満たす辺だけで強連結成分を求め、成分番号と各成分が循環を持つかを返す。
+    /// 辺は必ず手番を入れ替えるので自己ループはなく、2 状態以上の成分だけが循環を持つ。
+    fn components(&self, allow: impl Fn(usize, usize, usize) -> bool) -> (Vec<usize>, Vec<bool>) {
+        let n = self.len();
+        let mut visited = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        for root in 0..n {
+            if visited[root] {
+                continue;
+            }
+            visited[root] = true;
+            let mut stack = vec![(root, self.children(root))];
+            while let Some((s, children)) = stack.last_mut() {
+                let s = *s;
+                match children.find(|&(idx, t)| !visited[t] && allow(s, idx, t)) {
+                    Some((_, t)) => {
+                        visited[t] = true;
+                        stack.push((t, self.children(t)));
+                    }
+                    None => {
+                        order.push(s);
+                        stack.pop();
+                    }
+                }
+            }
+        }
+        let mut comp = vec![usize::MAX; n];
+        let mut cyclic = Vec::new();
+        let mut stack = Vec::new();
+        for &root in order.iter().rev() {
+            if comp[root] != usize::MAX {
+                continue;
+            }
+            let id = cyclic.len();
+            comp[root] = id;
+            stack.push(root);
+            let mut size = 0;
+            while let Some(t) = stack.pop() {
+                size += 1;
+                for (s, idx) in self.parents(t) {
+                    if comp[s] == usize::MAX && allow(s, idx, t) {
+                        comp[s] = id;
+                        stack.push(s);
+                    }
+                }
+            }
+            cyclic.push(size > 1);
+        }
+        (comp, cyclic)
+    }
 }
 
 fn build_scc_graph(adjacency: &[Vec<usize>]) -> SccGraph {
@@ -1323,6 +1505,74 @@ mod tests {
         };
         propagate_values(&book, &mut graph, 0, max_iters, MergeMode::Replace)?;
         Ok(graph)
+    }
+
+    /// 書き出し値をそのまま与えたグラフに [`certify`] だけを適用する。
+    fn certify_rows(rows: &[&[(i32, Option<usize>)]], checked: &[bool]) -> Result<()> {
+        let graph = Graph {
+            keys: (0..rows.len()).map(|i| i.to_string()).collect(),
+            moves: rows
+                .iter()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|&(value, child)| MoveValue {
+                            old: value,
+                            new: value,
+                            usable: true,
+                            preserve: false,
+                            edge: child.map(|to| Edge {
+                                to,
+                                via_flip: false,
+                            }),
+                        })
+                        .collect()
+                })
+                .collect(),
+            adjacency: rows
+                .iter()
+                .map(|rows| rows.iter().filter_map(|&(_, child)| child).collect())
+                .collect(),
+            flip_edges: 0,
+            illegal_moves: 0,
+            checked: checked.to_vec(),
+            preserved: vec![false; rows.len()],
+            added_moves: vec![vec![]; rows.len()],
+        };
+        certify(
+            &graph,
+            BestParams {
+                draw_value: 0,
+                merge: MergeMode::Replace,
+                skip_unusable_moves: false,
+            },
+        )
+    }
+
+    #[test]
+    fn certify_rejects_positive_value_on_quiet_cycle() {
+        let error = certify_rows(&[&[(50, Some(1))], &[(-50, Some(0))]], &[false; 2]).unwrap_err();
+        assert!(error.to_string().contains("千日手へ逃げられる循環 1 局面"), "{error}");
+        certify_rows(&[&[(0, Some(1))], &[(0, Some(0))]], &[false; 2]).unwrap();
+        // 相手が王手を続けるだけの循環なら、相手の反則負けなので勝ちを約束できる。
+        let mate = Value::MATE.raw();
+        certify_rows(&[&[(mate, Some(1))], &[(-mate, Some(0))]], &[true, false]).unwrap();
+    }
+
+    #[test]
+    fn certify_rejects_own_perpetual_check_unless_already_mated() {
+        let error =
+            certify_rows(&[&[(-80, Some(1))], &[(80, Some(0))]], &[false, true]).unwrap_err();
+        assert!(error.to_string().contains("連続王手で負ける循環 1 局面"), "{error}");
+        let mate = Value::MATE.raw();
+        certify_rows(&[&[(-mate, Some(1))], &[(mate, Some(0))]], &[false, true]).unwrap();
+    }
+
+    #[test]
+    fn certify_rejects_tied_move_into_unsafe_cycle() {
+        // 同値の離脱があっても、補正されずに残った循環手を選べば千日手へ逃げられる。
+        let rows: [&[_]; 2] = [&[(50, None), (50, Some(1))], &[(-50, Some(0))]];
+        assert!(certify_rows(&rows, &[false; 2]).is_err());
+        certify_rows(&[&[(50, None), (49, Some(1))], &[(-50, Some(0))]], &[false; 2]).unwrap();
     }
 
     #[test]
