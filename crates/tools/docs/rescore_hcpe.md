@@ -1,5 +1,7 @@
 # rescore_hcpe — hcpe 教師の eval を NNUE 固定 depth 探索で付け替え
 
+入出力は共通の [38 byte HCPE形式](hcpe-format.md) です。eval以外の36 byte（非0のdummyを含む）を保持します。
+
 LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
 
 hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード）教師プールの各局面を **NNUE 固定 depth

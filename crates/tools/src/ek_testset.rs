@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::common::io::partial_path;
+use crate::hcpe::{HCPE_RECORD_SIZE, HcpeRecord};
 use crate::packed_sfen::{pack_position_hcp, stm_result_to_hcpe};
 use crate::replay::csa_source::CsaSource;
 use crate::replay::model::{GameIndex, GameIndexEntry, GameOutcomeView, GameSource, MoveView};
-use crate::teacher_labeler::HCPE_RECORD_SIZE;
 
 const DEFAULT_MIN_PLY_FROM_ENTRY: i32 = -20;
 const DEFAULT_SAMPLE_STRIDE: u32 = 4;
@@ -720,12 +720,14 @@ fn encode_hcpe_record(record: &TestsetRecord) -> Result<([u8; HCPE_RECORD_SIZE],
         Label::Draw => 0,
     };
 
-    let mut bytes = [0u8; HCPE_RECORD_SIZE];
-    bytes[0..32].copy_from_slice(&pack_position_hcp(&pos));
-    bytes[32..34].copy_from_slice(&stored_eval.to_le_bytes());
-    // bestMove16 は「指し手なし」の 0。padding も初期値の 0 のままにする。
-    bytes[36] = stm_result_to_hcpe(stm_result, stm);
-    Ok((bytes, eval_clamped, eval_missing))
+    let hcpe = HcpeRecord {
+        hcp: pack_position_hcp(&pos),
+        eval: stored_eval,
+        best_move16: 0,
+        game_result: stm_result_to_hcpe(stm_result, stm),
+        padding: 0,
+    };
+    Ok((hcpe.to_bytes(), eval_clamped, eval_missing))
 }
 
 fn run_eval(args: &EvalArgs) -> Result<()> {

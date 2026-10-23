@@ -27,7 +27,7 @@ use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
 /// hcpe（cshogi HuffmanCodedPosAndEval）1 レコードのバイト長。
-pub const HCPE_RECORD_SIZE: usize = 38;
+pub use crate::hcpe::HCPE_RECORD_SIZE;
 
 /// 探索用スタックサイズ（64MB）。深い探索で再帰スタックを使うため main 同等を確保する。
 /// worker スレッドの `stack_size` に使う。

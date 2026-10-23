@@ -39,11 +39,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
+use tools::hcpe::{HCPE_RECORD_SIZE, HcpeRecord};
 use tools::packed_sfen::{
     PackedSfenValue, hcpe_move16_to_psv, hcpe_result_to_stm, pack_sfen_from_parts,
     unpack_hcp_to_parts,
 };
-use tools::teacher_labeler::HCPE_RECORD_SIZE;
 
 const IO_BUF_SIZE: usize = 1 << 20;
 
@@ -116,11 +116,13 @@ enum ConvResult {
 
 /// hcpe 1 レコードを PSV 1 レコードへ変換する。壊れたレコードは種別を返して skip する。
 fn convert_record(bytes: &[u8; HCPE_RECORD_SIZE]) -> ConvResult {
-    let mut hcp = [0u8; 32];
-    hcp.copy_from_slice(&bytes[0..32]);
-    let eval = i16::from_le_bytes([bytes[32], bytes[33]]);
-    let best_move16 = u16::from_le_bytes([bytes[34], bytes[35]]);
-    let game_result = bytes[36];
+    let HcpeRecord {
+        hcp,
+        eval,
+        best_move16,
+        game_result,
+        ..
+    } = HcpeRecord::from_bytes(bytes);
 
     let Ok(parts) = unpack_hcp_to_parts(&hcp) else {
         return ConvResult::DecodeError;

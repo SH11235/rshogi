@@ -1,5 +1,7 @@
 # psv_to_hcpe3
 
+`--format hcpe` の出力は共通の [38 byte HCPE形式](hcpe-format.md) で、dummyは0です。HCPE3のレイアウトとは区別してください。
+
 `psv_to_hcpe3` は、YaneuraOu の PackedSfenValue（PSV, 40 バイト固定長）を
 dlshogi の学習で使う **hcpe3** / **hcpe** 形式へストリーミング変換するツールです。
 
