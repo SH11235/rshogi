@@ -332,9 +332,9 @@ fn time_limit_gives_unknown() {
     assert!(start.elapsed().as_millis() < 2_000, "時間制限が効いていない");
 }
 
-/// 速さ優先で 10 万ノードでは決まらない 11 手詰め (やねうら王の詰将棋データセットから)
+/// 自動モードの最初の段階 (証明駒を使わない) では 10 万ノードで決まらない 11 手詰め (やねうら王の詰将棋データセットから)
 const AUTO_SWITCH_MATE: &str =
-    "ln2p+R3/2k1gg3/1pp6/p2p1bp1P/2N1Ps3/PlP3P2/1PK2g3/2G2+n3/LN5+pL b RB3S5p 127";
+    "l5s1l/4k4/2n2p1+P1/2pg4p/p4S3/2Pb4P/P1nP1P1K1/9/4G3L b RB2GS2NL7Prsp 121";
 
 #[test]
 fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
@@ -429,6 +429,22 @@ fn disproof_hand_for_a_drop_escape_leaves_the_dropped_piece_to_the_defender() {
     // 駒を動かす逃れは補正しない
     let mv = Move::from_usi("5a4a").unwrap();
     assert_eq!(pos.disproof_hand_for_escape(mv, disproof, Color::Black), disproof);
+}
+
+#[test]
+fn initial_values_prefer_checks_the_defender_cannot_answer_cheaply() {
+    // 玉頭への金打ちは攻め方の利き (5c の歩) で支えられ、受け方の利きは玉だけ: 反証しにくい
+    let pos = position("4k4/9/4P4/9/9/9/9/9/4K4 b G 1");
+    let supported = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(supported, true), (2, 4));
+    // 支えの無い王手は証明しにくい
+    let pos = position("4k4/9/9/9/9/9/9/9/4K4 b G 1");
+    let bare = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(bare, true), (4, 2));
+    // 受け方の応手は見積もらない
+    let pos = position("4k4/4G4/9/9/9/9/9/9/4K4 w - 1");
+    let capture = pos.to_move(Move::from_usi("5a5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(capture, false), (1, 1));
 }
 
 #[test]

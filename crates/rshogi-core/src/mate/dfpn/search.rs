@@ -239,6 +239,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     budget: Budget<'a>,
     /// この深さのフレームが終わるとき、証明済みの子を `scratch.proven` に写す (PV 復元用)
     capture_depth: Option<usize>,
+    /// 置換表に無い子の pn/dn を局面から見積もるか (`MateState::initial_pn_dn`)
+    estimate: bool,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -287,7 +289,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             next_progress_ms: PROGRESS_INTERVAL_MS,
             budget,
             capture_depth: None,
+            estimate: false,
         }
+    }
+
+    /// 置換表に無い子の pn/dn を局面から見積もる (df-pn+)。詰む問題ではノードが大きく減るが、
+    /// 不詰の多い詰めろ判定では増える
+    pub fn estimate_initial_values(&mut self) {
+        self.estimate = true;
     }
 
     /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
@@ -535,10 +544,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             let mv = self.scratch.moves[i];
             let child_table_key = self.scratch.child_keys[i];
             let child_key = child_table_key.key;
+            let (pn, dn) = if self.estimate {
+                st.initial_pn_dn(mv, or_node)
+            } else {
+                (1, 1)
+            };
             let mut child = Child {
                 mv,
-                pn: 1,
-                dn: 1,
+                pn,
+                dn,
                 mate_len: 0,
                 loop_depth: NO_LOOP,
                 limited: false,

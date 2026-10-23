@@ -24,6 +24,10 @@ pub(super) const FULL_HAND: Hand = Hand::EMPTY
     .set(PieceType::Bishop, 2)
     .set(PieceType::Rook, 2);
 
+/// `initial_pn_dn` の見積もりの単位。置換表に無い子に差を付けるため 1 より大きくする
+/// (読んだことのある子の値は子の和なので、同じ単位で比べられる)。
+const PNDN_UNIT: u32 = 2;
+
 /// df-pn が局面に求める操作
 pub(super) trait MateState {
     /// 指し手
@@ -81,6 +85,12 @@ pub(super) trait MateState {
     /// 攻め方 (手番側) の 1 手詰めの手。返す手は合法な王手で、指した後に受け方の合法手が無いことまで
     /// 確かめ済み。
     fn mate_1ply(&mut self) -> Option<Self::Mv>;
+
+    /// 置換表に無い子 (指し手 `m` の後の局面) の pn/dn の初期値。確定の判定には使わないので、
+    /// 正の有限値なら正しさには影響しない。
+    fn initial_pn_dn(&self, _m: Self::Mv, _or_node: bool) -> (u32, u32) {
+        (1, 1)
+    }
 
     /// `mate_1ply` の手と、その詰みの証明駒
     fn mate_1ply_with_proof(&mut self) -> Option<(Self::Mv, Hand)>;
@@ -273,6 +283,35 @@ impl MateState for Position {
         } else {
             disproof
         }
+    }
+
+    fn initial_pn_dn(&self, m: Move, or_node: bool) -> (u32, u32) {
+        if !or_node {
+            return (1, 1);
+        }
+        // 王手の後の局面の見積もり (GPS 将棋 / KomoringHeights の df-pn+ と同じ考え方)。
+        // 王手した升に受け方の利きが多いほど証明しにくく、攻め方の利きが多いほど反証しにくい。
+        // 受け方の応手の側は見積もらない (見積もると詰む問題でもノードが増える)。
+        let us = self.side_to_move();
+        let to = m.to();
+        let attackers = self.attackers_to(to);
+        let ours = (attackers & self.pieces_c(us)).count() + u32::from(m.is_drop());
+        let theirs = (attackers & self.pieces_c(!us)).count();
+        let mut pn = PNDN_UNIT;
+        let mut dn = PNDN_UNIT;
+        if theirs >= 2 {
+            pn += PNDN_UNIT;
+        }
+        let captured = self.piece_on(to);
+        if ours > theirs
+            || captured.is_some()
+                && matches!(captured.piece_type().unpromote(), PieceType::Gold | PieceType::Silver)
+        {
+            dn += PNDN_UNIT;
+        } else {
+            pn += PNDN_UNIT;
+        }
+        (pn, dn)
     }
 
     fn mate_1ply(&mut self) -> Option<Move> {
