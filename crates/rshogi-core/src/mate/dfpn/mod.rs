@@ -67,14 +67,16 @@ pub struct MateProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MateMode {
     /// 速さ優先 (不詰の多い詰めろ判定向け)。置換表は局面 (盤面と持駒) が一致するときだけ使い、
-    /// 子の pn/dn の初期値も見積もらない。1 ノードあたりが軽く、不詰の判定が速い。
+    /// 子の pn/dn の初期値も見積もらず、攻め方の局面の dn は子の和で数える。1 ノードあたりが軽く、
+    /// 不詰の判定が速い。
     Speed,
     /// 解く力優先。詰み・不詰を証明駒・反証駒で置換表に書き、持駒だけ違う局面に流用する。
-    /// 子の pn/dn の初期値を局面から見積もる (df-pn+)。詰む問題・長手数・難問でノードが減り、
-    /// 少ない置換表で解ける問題が増えるが、1 ノードあたりは重く、不詰の判定ではノードが増える。
+    /// 子の pn/dn の初期値を局面から見積もり (df-pn+)、攻め方の局面の dn を WPNS で数える。
+    /// 詰む問題・長手数・難問でノードが減り、少ない置換表で解ける問題が増えるが、1 ノードあたりは重く、
+    /// 不詰の判定ではノードが増える。
     Power,
     /// 証明駒を使わない探索で [`AUTO_SWITCH_NODES`] ノードまで読み、決まらなければ同じ置換表のまま
-    /// 解く力優先で読み続ける (ノード数・時間の制限は合計に掛かる)。初期値の見積もりはどちらでも使う。
+    /// 解く力優先で読み続ける (ノード数・時間の制限は合計に掛かる)。初期値の見積もりと WPNS はどちらの段階でも使う。
     /// 置換表の大きさは解く力優先と同じ配分。
     #[default]
     Auto,
@@ -223,6 +225,7 @@ impl DfpnSolver {
         searcher.continue_from(nodes);
         if self.mode != MateMode::Speed {
             searcher.estimate_initial_values();
+            searcher.count_disproof_weakly(state::PNDN_UNIT);
         }
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();

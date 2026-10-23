@@ -241,6 +241,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     capture_depth: Option<usize>,
     /// 置換表に無い子の pn/dn を局面から見積もるか (`MateState::initial_pn_dn`)
     estimate: bool,
+    /// 攻め方の局面の dn を子の和でなく WPNS で数えるときの、子 1 つあたりの加算量 (0 なら和で数える)
+    weak_disproof_step: u64,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -290,6 +292,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             budget,
             capture_depth: None,
             estimate: false,
+            weak_disproof_step: 0,
         }
     }
 
@@ -297,6 +300,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 不詰の多い詰めろ判定では増える
     pub fn estimate_initial_values(&mut self) {
         self.estimate = true;
+    }
+
+    /// 攻め方の局面の dn を「子の dn の最大値 + (dn が 0 でない子の数 − 1) × `step`」で数える
+    /// (WPNS, Ueda ほか 2008)。王手の後の局面どうしが合流すると同じ反証の手間を何度も足してしまい、
+    /// 和では dn が膨らむ。`step` は子の初期値の単位にそろえる (`MateState::initial_pn_dn`)。0 は 1 として扱う。
+    pub fn count_disproof_weakly(&mut self, step: u32) {
+        self.weak_disproof_step = u64::from(step.max(1));
     }
 
     /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
@@ -641,19 +651,30 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         }
     }
 
-    /// 子の値から現局面の pn/dn を求める (OR: pn=min, dn=和 / AND: pn=和, dn=min)
+    /// 子の値から現局面の pn/dn を求める (OR: pn=min, dn=和 / AND: pn=和, dn=min)。
+    /// `count_disproof_weakly` なら OR の dn は WPNS で数える。
     fn aggregate(&self, start: usize, or_node: bool) -> NodeResult {
         let children = &self.scratch.children[start..];
+        let weak = or_node && self.weak_disproof_step != 0;
         let mut min = PN_INF;
         let mut sum = 0u64;
         let mut has_inf = false;
+        let mut max = 0u32;
+        let mut nonzero = 0u64;
         for c in children.iter().filter(|c| c.active) {
             let (phi, delta) = if or_node { (c.pn, c.dn) } else { (c.dn, c.pn) };
             min = min.min(phi);
             sum = add_pn(sum, delta);
             has_inf |= delta == PN_INF;
+            max = max.max(delta);
+            nonzero += u64::from(delta != 0);
         }
-        let summed = clamp_sum(sum, has_inf);
+        let summed = if weak {
+            let others = nonzero.saturating_sub(1) * self.weak_disproof_step;
+            clamp_sum(u64::from(max) + others, has_inf)
+        } else {
+            clamp_sum(sum, has_inf)
+        };
         let (pn, dn) = if or_node {
             (min, summed)
         } else {
@@ -681,7 +702,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let mut best_phi = PN_INF;
         let mut second_phi = PN_INF;
         let mut sum_delta = 0u64;
+        let mut nonzero = 0u64;
         for (i, c) in children.iter().enumerate().filter(|(_, c)| c.active) {
+            nonzero += u64::from(delta(c) != 0);
             let p = phi(c);
             if p < best_phi {
                 second_phi = best_phi;
@@ -697,8 +720,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let child_thdelta = if thdelta == PN_INF {
             PN_INF
         } else {
-            // thδ − (δ の和 − 最善の子の δ)。ループ条件 (δ の和 < thδ) より正になる。
-            let others = sum_delta - u64::from(delta(&children[best]));
+            // 和で数えるときは thδ − (δ の和 − 最善の子の δ)。ループ条件 (δ の和 < thδ) より正になる。
+            // WPNS では thδ − (δ が 0 でない子の数 − 1) × 加算量: 最善の子の δ がこれに届けば
+            // 現局面の δ が thδ に届く
+            let others = if or_node && self.weak_disproof_step != 0 {
+                nonzero.saturating_sub(1) * self.weak_disproof_step
+            } else {
+                sum_delta - u64::from(delta(&children[best]))
+            };
             (u64::from(thdelta).saturating_sub(others)).min(u64::from(PN_INF)) as u32
         };
         if or_node {
