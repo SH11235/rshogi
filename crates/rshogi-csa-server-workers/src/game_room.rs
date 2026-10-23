@@ -3940,7 +3940,6 @@ impl GameRoom {
         // grace registry / alarm tag を片付ける順で進める。
         let game_name = self.current_game_name_or_empty().await?;
         let login_name = format!("{handle}+{game_name}+{}", color_to_str(role.to_core()));
-        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
         // 状態再送 (Game_Summary + Reconnect_State ブロック) は複数行なので
         // 1 行ずつ `send_line` に分解する。`build_resume_message` の改行終端が
         // 各行末改行と整合するので `lines()` でそのまま reuse できる。
@@ -3963,6 +3962,7 @@ impl GameRoom {
                 rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
             )
         };
+        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
         for line in resume.lines() {
             send_line(ws, line)?;
         }

@@ -932,24 +932,19 @@ where
         return action;
     }
 
-    // ponder 開始
-    if s.config.game.ponder
+    // 再接続直後の台帳は切断前の経過を未精算なので、サーバーの消費時間を待つ。
+    let defer_ponder = s.clock.resume_budget_ms(s.my_color).is_some();
+    if !defer_ponder
+        && s.config.game.ponder
         && let Some(ref ponder_mv) = result.ponder_move
     {
         let my_estimated_ms = turn_start.elapsed().as_millis() as i64;
-        let ponder_pos_cmd =
-            build_position_cmd_with_ponder(&s.initial_sfen, &s.usi_moves, ponder_mv);
-        let ponder_go = format!(
-            "go ponder {}",
+        let go_args =
             s.clock
-                .build_ponder_go_args(s.config.time.margin_msec, s.my_color, my_estimated_ms,)
-        );
-        if let Err(err) = s.engine.go_ponder(&ponder_pos_cmd, &ponder_go) {
+                .build_ponder_go_args(s.config.time.margin_msec, s.my_color, my_estimated_ms);
+        if let Err(err) = start_ponder(s, ponder_mv, &go_args) {
             return MoveAction::sink_or_error(err);
         }
-        s.ponder_state = Some(PonderState {
-            expected_usi: ponder_mv.clone(),
-        });
     }
 
     // サーバーエコー待ち
@@ -960,6 +955,15 @@ where
                     let (_, time_sec) = parse_server_move(&line);
                     let (time_sec, _) = s.clock.consume(s.my_color, time_sec);
                     s.record.update_last_time(time_sec);
+                    if defer_ponder
+                        && s.config.game.ponder
+                        && let Some(ref ponder_mv) = result.ponder_move
+                    {
+                        let go_args = s.clock.build_go_args(s.config.time.margin_msec, s.my_color);
+                        if let Err(err) = start_ponder(s, ponder_mv, &go_args) {
+                            return MoveAction::sink_or_error(err);
+                        }
+                    }
                     // MoveConfirmed 発火 (自エンジンの手、time_sec 確定)
                     let confirmed_event = MoveEvent {
                         player: MovePlayer::SelfPlayer,
@@ -1043,6 +1047,23 @@ where
             }
         }
     }
+}
+
+fn start_ponder<E, S>(
+    s: &mut SessionState<'_, E, S>,
+    ponder_mv: &str,
+    go_args: &str,
+) -> anyhow::Result<()>
+where
+    E: UsiEngineDriver + ?Sized,
+    S: SessionEventSink + ?Sized,
+{
+    let position = build_position_cmd_with_ponder(&s.initial_sfen, &s.usi_moves, ponder_mv);
+    s.engine.go_ponder(&position, &format!("go ponder {go_args}"))?;
+    s.ponder_state = Some(PonderState {
+        expected_usi: ponder_mv.to_owned(),
+    });
+    Ok(())
 }
 
 /// 相手手番で受信した指し手 1 行 (`+...` / `-...`) を処理する。

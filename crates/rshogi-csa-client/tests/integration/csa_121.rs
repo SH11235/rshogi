@@ -88,6 +88,9 @@ struct Engine {
     options: Vec<(String, String)>,
     declare: bool,
     first_move: Option<String>,
+    ponder_move: Option<String>,
+    ponder_go: Vec<String>,
+    ponder_hits: usize,
 }
 impl UsiEngineDriver for Engine {
     fn new_game(&mut self) -> Result<()> {
@@ -113,13 +116,14 @@ impl UsiEngineDriver for Engine {
                     .first_move
                     .take()
                     .unwrap_or_else(|| if self.declare { "win" } else { "resign" }.into()),
-                ponder_move: None,
+                ponder_move: self.ponder_move.take(),
             },
             SearchInfo::default(),
         ))
     }
-    fn go_ponder(&mut self, _: &str, _: &str) -> Result<()> {
-        unreachable!()
+    fn go_ponder(&mut self, _: &str, go: &str) -> Result<()> {
+        self.ponder_go.push(go.to_owned());
+        Ok(())
     }
     fn ponderhit_with_info(
         &mut self,
@@ -127,7 +131,14 @@ impl UsiEngineDriver for Engine {
         _: &Receiver<Event>,
         _: &mut InfoCallback<'_>,
     ) -> Result<SearchOutcome> {
-        unreachable!()
+        self.ponder_hits += 1;
+        Ok(SearchOutcome::BestMove(
+            BestMoveResult {
+                bestmove: "resign".into(),
+                ponder_move: None,
+            },
+            SearchInfo::default(),
+        ))
     }
     fn stop_and_wait(&mut self) -> Result<()> {
         Ok(())
@@ -848,4 +859,65 @@ fn stalled_summary_body_can_be_cancelled_without_waiting_for_end() {
     assert!(start.elapsed() < Duration::from_secs(5));
     conn.logout().unwrap();
     handle.join().unwrap();
+}
+
+#[test]
+fn resumed_move_echo_settles_clock_before_ponder_hit() {
+    for increment in [0, 2] {
+        let (port, handle) = server(move |reader, writer| {
+            summary(writer, "+", "1sec", "60", "60", &increment.to_string(), &[]);
+            send(
+                writer,
+                &[
+                    "BEGIN Reconnect_State",
+                    "Current_Turn:+",
+                    "Black_Time_Remaining_Ms:60000",
+                    "White_Time_Remaining_Ms:60000",
+                    "Current_Turn_Remaining_Ms:1000",
+                    "END Reconnect_State",
+                ],
+            );
+            assert_eq!(read(reader), "+7776FU");
+            send(writer, &["+7776FU,T59", "-3334FU,T1"]);
+            assert_eq!(read(reader), "%TORYO");
+            send(writer, &["#RESIGN", "#LOSE"]);
+            assert_eq!(read(reader), "LOGOUT");
+        });
+        let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+        let mut config = CsaClientConfig::default();
+        config.game.ponder = true;
+        config.time.margin_msec = 0;
+        config.record.enabled = false;
+        let mut engine = Engine {
+            first_move: Some("7g7f".into()),
+            ponder_move: Some("3c3d".into()),
+            ..Engine::default()
+        };
+        rshogi_csa_client::session::run_resumed_session_with_events(
+            &config,
+            &mut conn,
+            &mut engine,
+            Arc::new(AtomicBool::new(false)),
+            &mut CandidateSink::default(),
+        )
+        .unwrap();
+        assert_eq!(engine.ponder_hits, 1);
+        let initial: Vec<_> = engine.go[0].split_whitespace().collect();
+        let btime: u64 = initial[2].parse().unwrap();
+        let binc: u64 = if increment > 0 {
+            initial[6].parse().unwrap()
+        } else {
+            0
+        };
+        assert!(btime + binc <= 1000);
+        assert_eq!(
+            engine.ponder_go,
+            [if increment == 0 {
+                "go ponder btime 1000 wtime 60000".to_owned()
+            } else {
+                "go ponder btime 1000 wtime 58000 binc 2000 winc 2000".to_owned()
+            }]
+        );
+        handle.join().unwrap();
+    }
 }
