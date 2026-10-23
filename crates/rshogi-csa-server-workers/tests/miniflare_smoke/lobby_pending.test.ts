@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { resolve } from 'node:path';
+import NodeWebSocket from 'ws';
 import type { Miniflare, WebSocket } from 'miniflare';
 import { createMiniflare, makeTempPersistRoot } from './harness';
 import { readLineFromWebSocket } from './ws_test_helpers';
@@ -50,13 +51,18 @@ describe('Lobby 未認証接続の保持制限', () => {
   });
 
   test('未送信の接続も30秒後に自動切断される', async () => {
-    const ws = await connect();
-    const closed = new Promise<number>(resolve => ws.addEventListener('close', event => resolve(event.code)));
-    const state = await control({});
-    const deadline = state.attachments[0].Pending.expires_at_ms;
-    expect(deadline - Date.now()).toBeGreaterThan(25_000);
-    expect(state.alarm).toBeGreaterThanOrEqual(deadline);
-    expect(await closed).toBe(1008);
+    const url = new URL('/ws/lobby', await mf.ready);
+    url.protocol = 'ws:';
+    const ws = new NodeWebSocket(url, { headers: { 'CF-Connecting-IP': '192.0.2.1' } });
+    const closed = new Promise<number>(resolve => ws.once('close', code => resolve(code)));
+    try {
+      await new Promise<void>((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+      const state = await control({});
+      const deadline = state.attachments[0].Pending.expires_at_ms;
+      expect(deadline - Date.now()).toBeGreaterThan(25_000);
+      expect(state.alarm).toBeGreaterThanOrEqual(deadline);
+      expect(await closed).toBe(1008);
+    } finally { if (ws.readyState !== NodeWebSocket.CLOSED) ws.terminate(); }
   }, 40_000);
 
   test('無効コマンド・binaryは期限を延長せず、復帰後も同じ期限を使う', async () => {
