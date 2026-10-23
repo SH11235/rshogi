@@ -363,7 +363,10 @@ impl MateTable {
     /// `PIECES` なら確定値は `value.hand` (証明駒・反証駒) の持駒で確定値の表に書き、
     /// 同じ局面の完全一致のエントリは消す。それ以外は完全一致のエントリに書く。
     /// 確定値を未確定値で上書きはしない (確定値は経路に依存しないものだけが書かれるので、後から覆らない)。
-    /// bucket が残すべきエントリで埋まっていれば書かない (キャッシュの省略で、結論は変わらない)。
+    /// bucket が埋まっていれば、残す優先度の最も低いエントリを置き換える。新しいエントリの探索量の方が
+    /// 少なくても書く: 探索量は読み直すたびに増えるだけなので、比べて書かないでいると、前に読んで今は
+    /// 使わない大きなエントリが居座り、今読んでいる局面の値を書けずに同じ局面を読み直し続ける
+    /// (表が小さいほど起こる)。
     pub fn store<const PIECES: bool>(&mut self, key: TableKey, value: TableValue, searched: u64) {
         let searched = u32::try_from(searched).unwrap_or(u32::MAX).max(1);
         let generation = self.generation;
@@ -416,11 +419,8 @@ impl MateTable {
             *e = new_entry;
             return;
         }
-        let victim =
-            bucket.iter_mut().min_by_key(|e| e.keep_priority()).expect("bucket は空でない");
-        if victim.keep_priority() <= new_entry.keep_priority() {
-            *victim = new_entry;
-        }
+        *bucket.iter_mut().min_by_key(|e| e.keep_priority()).expect("bucket は空でない") =
+            new_entry;
     }
 
     fn store_final(&mut self, key: TableKey, value: TableValue, searched: u32) {
@@ -574,6 +574,16 @@ mod tests {
             table.store::<true>(key(board, Hand::EMPTY), value(1, 1), 1_000);
         }
         assert_eq!(table.probe::<true>(key(1, Hand::EMPTY)), Some(proven(1, Hand::EMPTY)));
+    }
+
+    #[test]
+    fn full_bucket_takes_the_new_entry_even_if_it_searched_less() {
+        let mut table = MateTable::with_buckets(1);
+        for board in 1..=4u64 {
+            table.store::<true>(key(board, Hand::EMPTY), value(1, 1), 1_000);
+        }
+        table.store::<true>(key(5, Hand::EMPTY), value(2, 2), 1);
+        assert_eq!(table.probe::<true>(key(5, Hand::EMPTY)), Some(value(2, 2)));
     }
 
     #[test]
