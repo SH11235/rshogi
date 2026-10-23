@@ -1059,8 +1059,7 @@ impl SearchWorker {
             return true;
         }
 
-        // ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
-        if limits.nodes > 0 && !time_manager.is_pondering() && self.state.nodes >= limits.nodes {
+        if time_manager.node_limit_reached(limits, self.state.nodes) {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: node limit reached nodes={} limit={}",

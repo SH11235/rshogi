@@ -9,7 +9,7 @@ use crate::types::Color;
 use log::debug;
 use rand::Rng;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // =============================================================================
 // 定数
@@ -116,6 +116,7 @@ pub fn normalize_nodes_effort(effort: f64, nodes_total: u64) -> f64 {
 /// 探索の思考時間を計算し、停止判定を行う。
 pub struct TimeManagement {
     analysis: Option<super::analysis::AnalysisRun>,
+    searched_nodes: Option<Arc<AtomicU64>>,
     published_nodes: u64,
     /// 探索開始時刻
     start_time: Instant,
@@ -188,6 +189,7 @@ impl TimeManagement {
         let now = Instant::now();
         Self {
             analysis: None,
+            searched_nodes: None,
             published_nodes: 0,
             start_time: now,
             optimum_time: 0,
@@ -281,6 +283,7 @@ impl TimeManagement {
     /// * `max_moves_to_draw` - 引き分けまでの最大手数
     pub fn init(&mut self, limits: &LimitsType, us: Color, ply: i32, max_moves_to_draw: i32) {
         self.analysis = limits.analysis.clone();
+        self.searched_nodes = limits.searched_nodes.clone();
         self.published_nodes = 0;
         self.start_time = limits.start_time.unwrap_or_else(Instant::now);
         self.ponderhit_time = self.start_time;
@@ -848,10 +851,33 @@ impl TimeManagement {
 
     // 各 worker のローカル増分だけを共有予算へ加算する。
     pub(crate) fn publish_nodes(&mut self, nodes: u64) {
-        if let Some(run) = &self.analysis {
-            run.publish_nodes(nodes.saturating_sub(self.published_nodes));
-            self.published_nodes = nodes;
+        if self.analysis.is_none() && self.searched_nodes.is_none() {
+            return;
         }
+        let delta = nodes.saturating_sub(self.published_nodes);
+        self.published_nodes = nodes;
+        if let Some(run) = &self.analysis {
+            run.publish_nodes(delta);
+        }
+        if let Some(total) = &self.searched_nodes {
+            total.fetch_add(delta, Ordering::Relaxed);
+        }
+    }
+
+    /// `go nodes` の予算に達したか。共有カウンタがあれば全 worker の合計で判定する。
+    ///
+    /// 合計は各 worker が `publish_nodes` した分だけなので、呼び出し前に自分の分を publish すること。
+    /// ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
+    #[inline]
+    pub(crate) fn node_limit_reached(&self, limits: &LimitsType, own_nodes: u64) -> bool {
+        if limits.nodes == 0 || self.is_pondering {
+            return false;
+        }
+        let nodes = match &self.searched_nodes {
+            Some(total) => total.load(Ordering::Relaxed),
+            None => own_nodes,
+        };
+        nodes >= limits.nodes
     }
 
     /// 停止要求が出ているか

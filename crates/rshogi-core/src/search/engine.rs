@@ -5,12 +5,8 @@
 use crate::eval::EvalHash;
 use crate::time::Instant;
 use std::collections::HashMap;
-// AtomicU64 is only needed for native multi-threaded builds.
-// Wasm Rayon model doesn't use SearchProgress.
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -1027,7 +1023,7 @@ impl Search {
     pub fn go<F>(
         &mut self,
         pos: &mut Position,
-        limits: LimitsType,
+        mut limits: LimitsType,
         mut on_info: Option<F>,
     ) -> SearchResult
     where
@@ -1051,6 +1047,16 @@ impl Search {
         // ヘルパースレッドの結果をクリア
         // スレッド数が1の場合でも呼び出し、前回のマルチスレッド探索の結果が残らないようにする
         self.thread_pool.clear_helper_results();
+
+        // デバッグ用の helper 有効化制御
+        // go depth を含め helper を有効化する。
+        // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
+        let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
+
+        // go nodes は YaneuraOu と同じく全スレッドの合計で打ち切る。
+        // helper が無いときは自分のノード数だけで判定し、共有カウンタの atomic 操作を避ける。
+        limits.searched_nodes =
+            (limits.nodes > 0 && helper_search_enabled).then(|| Arc::new(AtomicU64::new(0)));
 
         // 時間管理
         let mut time_manager =
@@ -1092,11 +1098,6 @@ impl Search {
         // SkillLevel設定を構築（手加減）
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
-
-        // デバッグ用の helper 有効化制御
-        // go depth を含め helper を有効化する。
-        // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
-        let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
         if helper_search_enabled {
             self.thread_pool.start_thinking(
@@ -1668,9 +1669,7 @@ where
                 //   立っていないまま search_root が返ることがある）
                 time_manager.publish_nodes(worker.state.nodes);
                 if worker.state.abort
-                    || (limits.nodes > 0
-                        && !time_manager.is_pondering()
-                        && worker.state.nodes >= limits.nodes)
+                    || time_manager.node_limit_reached(limits, worker.state.nodes)
                     || time_manager.stop_requested()
                 {
                     worker.state.abort = true;

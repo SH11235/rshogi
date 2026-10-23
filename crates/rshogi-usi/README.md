@@ -71,7 +71,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `Threads` | Number of search threads | 1 |
+| `Threads` | Number of search threads (`go nodes N` limits the total across all threads) | 1 |
 | `USI_Hash` | Hash table size in MB | 256 |
 | `EvalHash` | Evaluation hash size (MiB, 0 for an empty table) | 256 |
 | `UseEvalHash` | Use the evaluation hash | true |
