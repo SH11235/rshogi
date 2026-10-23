@@ -64,7 +64,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 | `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN` | CHALLENGE_LOBBY 試行/分 (per IP) | `5` | `LobbyChallengePerIp` |
 | `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN` | CHALLENGE_LOBBY 試行/分 (per inviter) | `3` | `LobbyChallengePerInviter` |
 | `ROOM_CREATE_RATE_PER_IP_PER_MIN` | `/ws/<room_id>` (player) upgrade /分 | `20` | `RoomCreatePerIp` |
-| `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` | `/ws/<room_id>(/spectate)` upgrade /分 | `60` | `WsRoomUpgradePerIp` |
+| `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` | Lobby / GameRoom upgrade /分（各別 bucket） | `60` | `WsRoomUpgradePerIp` / `WsLobbyUpgradePerIp` |
 
 ### 値の解釈
 
@@ -257,3 +257,27 @@ WebSocket library が必要なので、上記は upgrade レイヤのみの確�
   Phase 3
 - client 互換性 (`retry_after` honoring): [#682](https://github.com/SH11235/rshogi/issues/682)
   / [#683](https://github.com/SH11235/rshogi/pull/683)
+
+## Lobby の未認証接続
+
+`/ws/lobby` は accept 前に `CF-Connecting-IP` を必須とし、欠落・空値は
+HTTP 503 と `Retry-After: 10` で拒否する。upgrade の IP 別 token bucket は
+`WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN`（既定 60/分）を使用するが、GameRoom の
+bucket とは独立している。LOGIN / CHALLENGE の bucket とも独立して消費する。
+
+LOGIN 前の接続は Lobby 全体で 100、同一 IP で 4 まで。超過は HTTP 503 と
+`Retry-After: 30` を返す。NAT 配下でも同じ IP の未認証枠を共有するため、
+接続後は速やかに LOGIN し、503 時は Retry-After に従って再接続する。
+
+認証待ちは accept から 30 秒で期限切れとなり、無送信でも close code 1008
+（`login timeout`）で切断する。無効コマンド、binary、rate limit 後の再送、
+CHALLENGE 発行では期限を延長しない。LOGIN 成功後は公開 queue / private challenge
+固有の期限へ移る。この 30 秒は LOGIN 完了までの期限であり、レート制限の待機が
+収まらない場合は新たに接続し直す。
+
+期限は attachment に絶対時刻で保存し、hibernation 復帰後も保持する。期限や IP の
+ない古い attachment は次のイベントまたは alarm で拒否・切断する。既存の無期限接続に
+alarm がない状態から更新した場合、最初のイベントまでは走査されない。
+close 完了が遅れても期限切れ接続を認証・枠の集計へ戻さない。物理的な WebSocket の
+解放はランタイムに依存し、アプリ側の保持上限は有効な認証待ち接続を対象とする。
+認証待ち・queue・challenge は同じ alarm に最短期限を予約する。
