@@ -132,11 +132,16 @@ fn rescore_rejects_reserved_usi_tokens_before_engine_start_or_output_write() {
         "Unrecognized=NAME",
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_rescore_psv"))
-            .arg("--input").arg(&input)
-            .arg("--engine").arg(&engine)
-            .arg("--output-dir").arg(&output_dir)
-            .arg("--usi-option").arg(option)
-            .output().unwrap();
+            .arg("--input")
+            .arg(&input)
+            .arg("--engine")
+            .arg(&engine)
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .arg("--usi-option")
+            .arg(option)
+            .output()
+            .unwrap();
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(!result.status.success());
         assert!(error.contains("Reserved USI token in option name or value"), "{error}");
