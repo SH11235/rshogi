@@ -544,15 +544,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             let mv = self.scratch.moves[i];
             let child_table_key = self.scratch.child_keys[i];
             let child_key = child_table_key.key;
-            let (pn, dn) = if self.estimate {
-                st.initial_pn_dn(mv, or_node)
-            } else {
-                (1, 1)
-            };
             let mut child = Child {
                 mv,
-                pn,
-                dn,
+                pn: 1,
+                dn: 1,
                 mate_len: 0,
                 loop_depth: NO_LOOP,
                 limited: false,
@@ -568,16 +563,24 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 child.dn = 0;
                 child.loop_depth = loop_depth as u16;
                 child.first_visit = false;
-            } else if let Some(v) = self.table.probe::<PIECES>(child_table_key) {
-                child.first_visit = false;
-                if v.pn != 0 || v.mate_len <= child_len_limit {
-                    child.pn = v.pn;
-                    child.dn = v.dn;
-                    child.mate_len = v.mate_len;
-                    child.hand = v.hand;
+            } else {
+                let probed = self.table.probe::<PIECES>(child_table_key);
+                if let Some(v) = probed {
+                    child.first_visit = false;
+                    if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
+                        has_old_child = true;
+                    }
                 }
-                if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
-                    has_old_child = true;
+                match probed {
+                    Some(v) if v.pn != 0 || v.mate_len <= child_len_limit => {
+                        child.pn = v.pn;
+                        child.dn = v.dn;
+                        child.mate_len = v.mate_len;
+                        child.hand = v.hand;
+                    }
+                    // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)
+                    _ if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
+                    _ => {}
                 }
             }
             self.scratch.children.push(child);

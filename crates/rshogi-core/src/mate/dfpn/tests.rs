@@ -441,6 +441,20 @@ fn initial_values_prefer_checks_the_defender_cannot_answer_cheaply() {
     let pos = position("4k4/9/9/9/9/9/9/9/4K4 b G 1");
     let bare = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
     assert_eq!(pos.initial_pn_dn(bare, true), (4, 2));
+    // 受け方の利きが 2 つある升 (玉と金) への王手は、攻め方の利きが足りなければさらに証明しにくい
+    let pos = position("4k4/5g3/4P4/9/9/9/9/9/4K4 b G 1");
+    let defended = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(defended, true), (6, 2));
+    // 攻め方の利きが足りなくても、金銀 (成銀を含む) を取る王手は反証しにくく、ほかの駒を取る王手は証明しにくい
+    let pos = position("3gk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_gold = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_gold, true), (2, 4));
+    let pos = position("3+sk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_promoted_silver = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_promoted_silver, true), (2, 4));
+    let pos = position("3nk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_knight = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_knight, true), (4, 2));
     // 受け方の応手は見積もらない
     let pos = position("4k4/4G4/9/9/9/9/9/9/4K4 w - 1");
     let capture = pos.to_move(Move::from_usi("5a5b").unwrap()).unwrap();
@@ -1016,6 +1030,11 @@ impl MateState for Graph {
         None
     }
 
+    fn initial_pn_dn(&self, m: u32, _or_node: bool) -> (u32, u32) {
+        // 初期値が一様でなくても結論が変わらないことを確かめるため、節点番号から散らす
+        (1 + m % 3, 1 + m / 3 % 3)
+    }
+
     fn do_move(&mut self, m: u32) {
         self.stack.push(m);
     }
@@ -1064,6 +1083,11 @@ fn solve_graph_in_mode<const PIECES: bool>(
     };
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
+    // 1 bucket (4 エントリ) の表では、初期値が一様でないと値を保てずに同じ子を読み直し続ける例がある
+    // (結論は食い違わない)
+    if PIECES && buckets >= 2 {
+        searcher.estimate_initial_values();
+    }
     solve_with(&mut searcher, graph)
 }
 

@@ -182,7 +182,7 @@ impl DfpnSolver {
                 if decided.is_some() || exhausted {
                     decided
                 } else {
-                    // 速さ優先の置換表の値はそのまま使える
+                    // 証明駒を使わない段階の置換表の値はそのまま使える
                     self.run::<true>(pos, *limits, start, self.nodes, stop, &mut progress)
                 }
             }
