@@ -16,7 +16,7 @@ use rshogi_core::eval::{
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
     set_pass_right_value_phased,
 };
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, MAX_LAYER_STACK_BUCKETS,
@@ -188,6 +188,8 @@ struct UsiEngine {
     // --- 詰み探索（go mate）関連 ---
     /// df-pn の置換表サイズ（MateHashMBで変更）
     mate_hash_mb: usize,
+    /// df-pn の進め方（MateModeで変更）
+    mate_mode: MateMode,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
     mate_solver: Option<DfpnSolver>,
     /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
@@ -260,6 +262,7 @@ impl UsiEngine {
             book_loaded_sig: None,
             book_rng: rshogi_book::DefaultBookRng::new(),
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
+            mate_mode: MateMode::default(),
             mate_solver: None,
             mate_thread: None,
             mate_stop: Arc::new(AtomicBool::new(false)),
@@ -349,6 +352,10 @@ impl UsiEngine {
         );
         println!("option name EvalHash type spin default 256 min 0 max 4096");
         println!("option name MateHashMB type spin default {DEFAULT_MATE_HASH_MB} min 1 max 4096");
+        println!(
+            "option name MateMode type combo default {} var Speed var Power var Auto",
+            MateMode::default().name()
+        );
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -953,6 +960,13 @@ impl UsiEngine {
                 {
                     self.mate_hash_mb = size;
                     // 次の go mate で新しいサイズで確保し直す
+                    self.mate_solver = None;
+                }
+            }
+            "MateMode" => {
+                if let Some(mode) = MateMode::from_name(&value) {
+                    self.mate_mode = mode;
+                    // 置換表の配分がモードで違うので、次の go mate で確保し直す
                     self.mate_solver = None;
                 }
             }
@@ -1602,8 +1616,10 @@ impl UsiEngine {
     fn cmd_go_mate(&mut self, tokens: &[&str]) {
         let time_ms = parse_go_mate_time(tokens);
         let mut pos = self.position.clone();
-        let mut solver =
-            self.mate_solver.take().unwrap_or_else(|| DfpnSolver::new(self.mate_hash_mb));
+        let mut solver = self
+            .mate_solver
+            .take()
+            .unwrap_or_else(|| DfpnSolver::with_mode(self.mate_hash_mb, self.mate_mode));
         self.mate_stop.store(false, Ordering::SeqCst);
         let stop = Arc::clone(&self.mate_stop);
         let suppress_flag = Arc::clone(&self.suppress_bestmove);

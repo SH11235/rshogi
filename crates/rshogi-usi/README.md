@@ -82,6 +82,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `SPSAParamsFile` | Search/net SPSA parameter file | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
 | `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
+| `MateMode` | `go mate` の進め方。`Speed` (速さ優先: 置換表は局面の完全一致だけ)、`Power` (解く力優先: 証明駒・反証駒で持駒違いの局面に流用。長手数・難問でノードが減り、少ない置換表で解ける問題が増えるが 1 ノードあたりは重い)、`Auto` (速さ優先で 10 万ノード読み、決まらなければ解く力優先で続ける) | Auto |
 
 `PassRights` / `InitialPassCount` / `PassMoveBonus` / `PassRightValueEarly` / `PassRightValueLate`
 configure the optional finite pass-rights rule. The position and move generation support it in

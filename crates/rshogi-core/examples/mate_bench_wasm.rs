@@ -5,7 +5,7 @@
 //! (ブラウザに組み込むときと同じコード生成) での速さを測るために WASI 向けにビルドして Node.js で動かす。
 //! 手順は `crates/tools/docs/mate_bench.md` の「wasm で測る」。
 //!
-//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--out <tsv>]`
+//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--mode Speed|Power|Auto] [--out <tsv>]`
 //! 終了コード: 引数の誤りは 2、実行中の失敗は 1。
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
 use rshogi_core::position::Position;
 
 struct Args {
@@ -24,6 +24,7 @@ struct Args {
     flip: bool,
     nodes: u64,
     hash_mb: usize,
+    mode: MateMode,
     out: Option<String>,
 }
 
@@ -36,6 +37,7 @@ fn parse_args() -> Result<Args, String> {
         flip: false,
         nodes: 0,
         hash_mb: 64,
+        mode: MateMode::default(),
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -61,6 +63,10 @@ fn parse_args() -> Result<Args, String> {
             "--limit" => args.limit = number(&flag, &value)?,
             "--nodes" => args.nodes = number(&flag, &value)?,
             "--hash-mb" => args.hash_mb = number(&flag, &value)?,
+            "--mode" => {
+                args.mode = MateMode::from_name(&value)
+                    .ok_or_else(|| format!("--mode {value}: Speed / Power / Auto のどれか"))?
+            }
             _ => return Err(format!("知らない引数: {flag}")),
         }
     }
@@ -99,7 +105,7 @@ fn run(args: &Args) -> Result<(), String> {
         None => None,
     };
 
-    let mut solver = DfpnSolver::new(args.hash_mb);
+    let mut solver = DfpnSolver::with_mode(args.hash_mb, args.mode);
     let limits = MateLimits {
         nodes: args.nodes,
         time_ms: 0,

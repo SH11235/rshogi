@@ -29,7 +29,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
 use rshogi_core::position::Position;
 use tools::output_path::ensure_safe_output_path;
 
@@ -67,6 +67,10 @@ struct Cli {
     /// 置換表のサイズ (MB、スレッドごと)
     #[arg(long, default_value_t = 64)]
     hash_mb: usize,
+
+    /// 探索の進め方 (Speed / Power / Auto。USI の MateMode と同じ)
+    #[arg(long, default_value = "Auto", value_parser = parse_mode)]
+    mode: MateMode,
 
     /// 正解の最短詰み手数。指定すると、不詰・非対応の結果を誤りとして数える。
     /// この手数より短い詰み手順は、局面集の正解の側の誤りもありうるので「要確認」として並べる
@@ -248,6 +252,10 @@ impl Summary {
     }
 }
 
+fn parse_mode(name: &str) -> Result<MateMode, String> {
+    MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power / Auto のどれか"))
+}
+
 fn flip_side_to_move(sfen: &str) -> String {
     let mut fields: Vec<&str> = sfen.split_whitespace().collect();
     if fields.len() > 1 {
@@ -302,7 +310,7 @@ fn solve_worker(
         nodes: cli.nodes,
         time_ms: cli.time_ms,
     };
-    let mut solver = DfpnSolver::new(cli.hash_mb);
+    let mut solver = DfpnSolver::with_mode(cli.hash_mb, cli.mode);
     loop {
         let job = jobs_rx.lock().expect("受け口のロック").recv();
         let Ok((index, sfen)) = job else { break };
