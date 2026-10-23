@@ -456,6 +456,12 @@ fn parsed_usi_option(option: &str) -> Option<(&str, &str)> {
     option.split_once('=').map(|(name, value)| (name.trim(), value.trim()))
 }
 
+fn is_usi_resource_option(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "dnn_model"
+        || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix))
+}
+
 fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtection> {
     let mut inputs = input_files.to_vec();
     for resource in [
@@ -472,6 +478,15 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
     }
     if let Some(engine) = &cli.engine {
         let cwd = engine.parent().unwrap_or(std::path::Path::new("."));
+        for (name, value) in cli.usi_options.iter().filter_map(|option| parsed_usi_option(option)) {
+            if is_usi_resource_option(name) {
+                anyhow::ensure!(
+                    name.split_whitespace().collect::<Vec<_>>().join(" ") == name
+                        && value.split_whitespace().collect::<Vec<_>>().join(" ") == value,
+                    "Ambiguous whitespace in USI resource option: {name}"
+                );
+            }
+        }
         let options: std::collections::BTreeMap<_, _> = cli
             .usi_options
             .iter()
@@ -503,9 +518,7 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
             {
                 continue;
             }
-            if name == "dnn_model"
-                || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix))
-            {
+            if is_usi_resource_option(raw_name) {
                 let resources: Vec<_> = if name == "bookfile" {
                     book_dirs
                         .iter()
@@ -5879,6 +5892,55 @@ mod marker_tests {
             assert!(output_protection(&cli, &[input]).is_err());
             assert_eq!(std::fs::read(book).unwrap(), [7; 40]);
         }
+    }
+
+    #[test]
+    fn resource_option_whitespace_is_unambiguous_before_any_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let input = dir.path().join("input.psv");
+        let resource = dir.path().join("tune params");
+        let output_dir = dir.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        for path in [&engine, &input, &resource] {
+            std::fs::write(path, [7; 40]).unwrap();
+        }
+        let output = output_dir.join("input.psv");
+        for option in [
+            "SPSAParamsFile=tune  params",
+            "SPSAParamsFile=tune\tparams",
+            "SPSAParamsFile=tune\nparams",
+            "BookDir=tune  params",
+            "BookDir=tune\tparams",
+            "BookDir=tune\nparams",
+            "Custom  File=",
+            "Custom\tFile=<auto>",
+            "Custom\nFile=<empty>",
+        ] {
+            std::fs::write(&output, b"previous output").unwrap();
+            let cli = Cli::parse_from([
+                "rescore_psv", "--input", input.to_str().unwrap(),
+                "--engine", engine.to_str().unwrap(),
+                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", option,
+            ]);
+            let error = output_protection(&cli, std::slice::from_ref(&input)).err().unwrap();
+            assert!(error.to_string().contains("Ambiguous whitespace"), "{error}");
+            assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+            assert_eq!(std::fs::read(&resource).unwrap(), [7; 40]);
+        }
+        std::fs::remove_file(&output).unwrap();
+        let cli = Cli::parse_from([
+            "rescore_psv", "--input", input.to_str().unwrap(),
+            "--engine", engine.to_str().unwrap(),
+            "--output-dir", output_dir.to_str().unwrap(),
+            "--usi-option", " SPSAParamsFile = tune params ",
+        ]);
+        let protection = output_protection(&cli, std::slice::from_ref(&input)).unwrap();
+        assert!(protection.inputs.contains(&resource));
+        std::fs::hard_link(&resource, &output).unwrap();
+        assert!(output_protection(&cli, std::slice::from_ref(&input)).is_err());
+        assert!(protection.truncate(&output, 0).is_err());
+        assert_eq!(std::fs::read(&resource).unwrap(), [7; 40]);
     }
 
     #[test]

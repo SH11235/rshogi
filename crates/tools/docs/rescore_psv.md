@@ -428,6 +428,8 @@ case-sensitive directory でもこの命名制限が適用されます。Unicode
 外部 engine の DNN_Model と、名前が File / Dir / Path / Coeff で終わる明示 USI option は資源として扱います
 （名前の判定は大文字小文字を区別しません）。相対パスは engine の作業ディレクトリ（指定した engine パスの親）を基準にします。
 USI option の名前・値の前後空白は送信と保護検査の両方で除去します。
+認識した資源 option（BookDir を含む）の名前・値に連続空白、タブ、改行などが残る場合は、engine による空白正規化で参照先が変わるため起動前に拒否します。
+内部の空白は単一の半角スペースだけを許可し、通常のスペースを含むパスは保護対象です。空値・無効値を除外する前、重複 option を集約する前に検査します。
 空値・`<empty>`・`<auto>`・存在しない USI 資源は列挙しません（NNUE など専用 CLI 引数の存在検査は省略しません）。
 BookFile=no_book は定跡なしとして扱い、有効な BookFile は BookDir（未指定・空なら book）からの相対パスとして解決します。
 BookDir 自体の全走査は行わず、指定された BookFile を保護します。それ以外の directory 資源はファイルを再帰列挙します。
