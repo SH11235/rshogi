@@ -274,3 +274,92 @@ fn by_startpos_cli_merges_directories_and_reports_legacy_exclusions() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(value.get("by_startpos").is_none());
 }
+
+#[test]
+fn csa_single_games_count_without_becoming_sprt_pairs() {
+    use rshogi_csa::{Color, initial_position};
+    use rshogi_csa_client::config::CsaClientConfig;
+    use rshogi_csa_client::jsonl::write_game_jsonl;
+    use rshogi_csa_client::protocol::{GameResult, GameSummary, TimeConfig};
+    use rshogi_csa_client::record::GameRecord;
+
+    for (black, white) in [
+        ("alice", "bob"),
+        ("alice.test", "alice@test"),
+        ("", "unknown"),
+    ] {
+        for my_color in [Color::Black, Color::White] {
+            for result in [GameResult::Win, GameResult::Lose, GameResult::Draw] {
+                let dir = tempfile::tempdir().unwrap();
+                let record = GameRecord::new(&GameSummary {
+                    game_id: "identity-test".to_owned(),
+                    my_color,
+                    sente_name: black.to_owned(),
+                    gote_name: white.to_owned(),
+                    position: initial_position(),
+                    initial_moves: Vec::new(),
+                    black_time: TimeConfig::default(),
+                    white_time: TimeConfig::default(),
+                    reconnect_token: None,
+                    entering_king_rule: None,
+                });
+                let path =
+                    write_game_jsonl(dir.path(), &record, &CsaClientConfig::default(), &result)
+                        .unwrap();
+                let expected = match (&result, my_color) {
+                    (GameResult::Win, Color::Black) | (GameResult::Lose, Color::White) => {
+                        "black_wins"
+                    }
+                    (GameResult::Lose, Color::Black) | (GameResult::Win, Color::White) => {
+                        "white_wins"
+                    }
+                    _ => "draws",
+                };
+                for legacy in [false, true] {
+                    if legacy {
+                        let lines: Vec<String> = fs::read_to_string(&path)
+                            .unwrap()
+                            .lines()
+                            .map(|line| {
+                                let mut row: Value = serde_json::from_str(line).unwrap();
+                                if row["type"] == "meta" {
+                                    row.as_object_mut().unwrap().remove("source");
+                                }
+                                row.to_string()
+                            })
+                            .collect();
+                        fs::write(&path, lines.join("\n") + "\n").unwrap();
+                    }
+                    let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+                        .arg(&path)
+                        .arg("--json")
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(parsed["matchups"][0][expected], 1, "{parsed}");
+                    assert_eq!(parsed["progress"]["done"], 1);
+                    for partial in [false, true] {
+                        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+                        command.arg(&path).args(["--json", "--sprt"]);
+                        if partial {
+                            command.arg("--allow-partial");
+                        }
+                        let output = command.output().unwrap();
+                        assert!(!output.status.success());
+                        assert!(String::from_utf8_lossy(&output.stderr).contains("CSA単局ログ"));
+                    }
+                }
+                let text = fs::read_to_string(&path).unwrap();
+                let result_line = text.lines().last().unwrap();
+                fs::write(&path, format!("{text}{result_line}\n")).unwrap();
+                let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+                    .arg(&path)
+                    .arg("--json")
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success());
+            }
+        }
+    }
+}

@@ -208,6 +208,7 @@ pub fn sanitize_for_filename(name: &str) -> String {
 struct MetaLog<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
+    source: &'a str,
     timestamp: String,
     settings: MetaSettings,
     engine_cmd: EngineCommandMeta<'a>,
@@ -294,6 +295,7 @@ fn write_meta<W: Write>(
 
     let meta = MetaLog {
         kind: "meta",
+        source: "csa_client",
         timestamp: record.start_time.to_rfc3339(),
         settings: MetaSettings {
             games: 1,

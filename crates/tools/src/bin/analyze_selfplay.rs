@@ -85,6 +85,8 @@ struct Cli {
 /// 通常JSONLのmeta行
 #[derive(Deserialize)]
 struct MetaLog {
+    #[serde(default)]
+    source: Option<String>,
     settings: MetaSettings,
     engine_cmd: EngineCommandMeta,
     /// tournament.rs が base-vs-N モード（--base-label）時のみ出力。
@@ -103,6 +105,8 @@ struct MetaSettings {
 
 #[derive(Deserialize)]
 struct EngineCommandMeta {
+    #[serde(default)]
+    note: Option<String>,
     path_black: String,
     path_white: String,
     #[serde(default)]
@@ -418,6 +422,7 @@ struct HeadToHeadStats {
 
 #[derive(Default)]
 struct FileExtraStats {
+    csa_single_game: bool,
     by_startpos: Option<StartposStats>,
     incomplete_pairs: usize,
     reasons: BTreeMap<String, u32>,
@@ -755,6 +760,7 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
     let mut black = String::new();
     let mut white = String::new();
     let mut meta_parsed = false;
+    let mut legacy_csa = false;
     let mut stats = ParsedGameStats::default();
     stats.extra.by_startpos = by_startpos.then(StartposStats::default);
     let start_positions: Vec<String> = if by_startpos {
@@ -789,6 +795,16 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
             let meta: MetaLog = serde_json::from_value(value)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             games = meta.settings.games;
+            legacy_csa = meta.source.is_none();
+            stats.extra.csa_single_game = meta.source.as_deref() == Some("csa_client")
+                || (meta.source.is_none()
+                    && meta.engine_cmd.note.as_deref()
+                        == Some(
+                            "csa_client: opponent path is reported as remote name; usi_options are for self-engine only",
+                        ));
+            if stats.extra.csa_single_game && games != 1 {
+                bail!("CSA単局ログのsettings.gamesは1である必要があります: {path}");
+            }
             black = meta
                 .engine_cmd
                 .label_black
@@ -865,6 +881,33 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
                 None => "unknown",
             };
             *stats.extra.reasons.entry(reason.to_string()).or_default() += 1;
+            if stats.extra.csa_single_game {
+                if seq != 0
+                    || result.pair_index.is_some()
+                    || result.pair_slot.is_some()
+                    || result.attempt != 0
+                    || result.error.unwrap_or(false)
+                    || !matches!(result.outcome.as_str(), "black_win" | "white_win" | "draw")
+                {
+                    bail!("CSA単局ログのresultが重複または不正です: {path}");
+                }
+                if black == white {
+                    bail!("CSA単局ログの先後ラベルが衝突しています: {path}");
+                }
+                if result.outcome != "draw" {
+                    let expected = if result.outcome == "black_win" { &black } else { &white };
+                    if let Some(winner) = &result.winner
+                        && winner != expected
+                        && !(legacy_csa && rshogi_csa_client::jsonl::sanitize_for_filename(winner) == *expected)
+                    {
+                        bail!("CSA単局ログのwinnerとoutcomeが一致しません: {path}");
+                    }
+                    result.winner = Some(expected.clone());
+                }
+                seq += 1;
+                record_valid_result(&result, &black, &white, meta_parsed, 0, &mut stats);
+                continue;
+            }
             let pair_index = result.pair_index.unwrap_or(seq / 2);
             let slot = result.pair_slot.unwrap_or(seq % 2).min(1) as usize;
             seq += 1;
@@ -919,6 +962,9 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
         // move行・metrics行等はスキップ
     }
 
+    if stats.extra.csa_single_game && stats.extra.completed_games != 1 {
+        bail!("CSA単局ログに終局resultがありません: {path}");
+    }
     stats.extra.incomplete_pairs = pair_buffer.len();
     if !pair_buffer.is_empty() {
         eprintln!(
@@ -1498,6 +1544,7 @@ fn main() -> Result<()> {
     let mut extra = AggregatedExtraStats::default();
 
     let mut accepted_files = Vec::new();
+    let mut has_csa_files = false;
     let mut checked_run_meta = BTreeSet::new();
     for path in &files {
         let meta_path = std::path::Path::new(path)
@@ -1513,6 +1560,9 @@ fn main() -> Result<()> {
         }
         match parse_file(path, cli.by_startpos) {
             Ok(result) => {
+                if result.extra.csa_single_game {
+                    has_csa_files = true;
+                }
                 if result.extra.incomplete_pairs > 0 {
                     extra
                         .input_issues
@@ -1563,7 +1613,9 @@ fn main() -> Result<()> {
                     );
                 }
                 valid_files += 1;
-                accepted_files.push(*path);
+                if !result.extra.csa_single_game {
+                    accepted_files.push(*path);
+                }
             }
             Err(e) => {
                 eprintln!("警告: {path}: {e}");
@@ -1572,6 +1624,9 @@ fn main() -> Result<()> {
         }
     }
 
+    if cli.sprt && has_csa_files {
+        bail!("CSA単局ログは独立した対局ペアではないためSPRTに使用できません");
+    }
     if matchups.is_empty() {
         bail!("有効な対局データがありません");
     }
