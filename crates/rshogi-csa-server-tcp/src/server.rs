@@ -3053,6 +3053,7 @@ async fn send_current_resume(
         last_move: recorded_moves.last().map(|m| m.token.clone()),
     };
     let mut summary = ctx.summary.clone();
+    summary.to_move = room.current_turn();
     summary.position_section =
         rshogi_csa_server::protocol::summary::position_section_from_position(room.position());
     let turn_deadline =

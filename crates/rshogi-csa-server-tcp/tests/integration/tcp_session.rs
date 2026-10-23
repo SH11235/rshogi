@@ -2129,20 +2129,32 @@ async fn establish_match_and_capture_alice_token(
     rb: &mut BufReader<OwnedReadHalf>,
     wb: &mut OwnedWriteHalf,
 ) -> (String, String) {
+    let (game_id, alice_token, _) = establish_match_and_capture_tokens(ra, wa, rb, wb).await;
+    (game_id, alice_token)
+}
+
+async fn establish_match_and_capture_tokens(
+    ra: &mut BufReader<OwnedReadHalf>,
+    wa: &mut OwnedWriteHalf,
+    rb: &mut BufReader<OwnedReadHalf>,
+    wb: &mut OwnedWriteHalf,
+) -> (String, String, String) {
     send_line(wa, "LOGIN alice+g1+black pw").await;
     send_line(wb, "LOGIN bob+g1+white pw").await;
     assert_eq!(read_line_raw(ra).await.unwrap(), "LOGIN:alice OK");
     assert_eq!(read_line_raw(rb).await.unwrap(), "LOGIN:bob OK");
     let alice_lines = drain_game_summary(ra).await;
-    let _ = drain_game_summary(rb).await;
+    let bob_lines = drain_game_summary(rb).await;
     let game_id = extract_summary_field(&alice_lines, "Game_ID").expect("Game_ID line");
     let alice_token =
         extract_summary_field(&alice_lines, "Reconnect_Token").expect("Reconnect_Token line");
+    let bob_token =
+        extract_summary_field(&bob_lines, "Reconnect_Token").expect("Reconnect_Token line");
     send_line(wa, "AGREE").await;
     send_line(wb, "AGREE").await;
     let _ = read_until(ra, &format!("START:{game_id}")).await;
     let _ = read_until(rb, &format!("START:{game_id}")).await;
-    (game_id, alice_token)
+    (game_id, alice_token, bob_token)
 }
 
 #[test]
@@ -3476,6 +3488,47 @@ fn oversized_line_during_grace_aborts_without_recording_a_win() {
                 .unwrap()
                 .starts_with("LOGIN:incorrect reconnect_")
         );
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn white_reconnect_after_first_move_has_consistent_turn_fields() {
+    run_local(|| async {
+        let (addr, topdir, state) =
+            spawn_server_with_reconnect_grace("reconnect_white_turn", Duration::from_secs(5), None)
+                .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, _, bob_token) =
+            establish_match_and_capture_tokens(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        drop(rb);
+        drop(wb);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(&mut wa, "+7776FU").await;
+        tokio::time::timeout(Duration::from_millis(800), read_until(&mut ra, "+7776FU,T0"))
+            .await
+            .expect("first move must be confirmed before white reconnects");
+        let (mut resumed, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN bob+g1+white pw reconnect:{game_id}+{bob_token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut resumed).await.unwrap(), "LOGIN:bob OK");
+        let summary = drain_game_summary(&mut resumed).await;
+        assert_eq!(extract_summary_field(&summary, "To_Move").as_deref(), Some("-"));
+        let position_end = summary.iter().position(|line| line == "END Position").unwrap();
+        assert_eq!(summary[..position_end].last().map(String::as_str), Some("-"));
+        let snapshot = read_until(&mut resumed, "END Reconnect_State").await;
+        assert_eq!(extract_summary_field(&snapshot, "Current_Turn").as_deref(), Some("-"));
+        assert_eq!(extract_summary_field(&snapshot, "Last_Move").as_deref(), Some("+7776FU"));
+        send_line(&mut writer, "%TORYO").await;
+        read_until(&mut ra, "#WIN").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.active_game_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
