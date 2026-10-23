@@ -1085,7 +1085,7 @@ fn solve_graph_in_mode<const PIECES: bool>(
     let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
     if PIECES {
         searcher.estimate_initial_values();
-        searcher.count_disproof_weakly();
+        searcher.count_disproof_weakly(super::state::PNDN_UNIT);
     }
     solve_with(&mut searcher, graph)
 }

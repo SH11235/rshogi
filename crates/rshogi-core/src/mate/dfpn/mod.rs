@@ -67,7 +67,8 @@ pub struct MateProgress {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MateMode {
     /// 速さ優先 (不詰の多い詰めろ判定向け)。置換表は局面 (盤面と持駒) が一致するときだけ使い、
-    /// 子の pn/dn の初期値も見積もらない。1 ノードあたりが軽く、不詰の判定が速い。
+    /// 子の pn/dn の初期値も見積もらず、攻め方の局面の dn は子の和で数える。1 ノードあたりが軽く、
+    /// 不詰の判定が速い。
     Speed,
     /// 解く力優先。詰み・不詰を証明駒・反証駒で置換表に書き、持駒だけ違う局面に流用する。
     /// 子の pn/dn の初期値を局面から見積もり (df-pn+)、攻め方の局面の dn を WPNS で数える。
@@ -224,7 +225,7 @@ impl DfpnSolver {
         searcher.continue_from(nodes);
         if self.mode != MateMode::Speed {
             searcher.estimate_initial_values();
-            searcher.count_disproof_weakly();
+            searcher.count_disproof_weakly(state::PNDN_UNIT);
         }
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();

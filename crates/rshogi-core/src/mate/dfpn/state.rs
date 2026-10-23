@@ -25,7 +25,7 @@ pub(super) const FULL_HAND: Hand = Hand::EMPTY
     .set(PieceType::Rook, 2);
 
 /// `initial_pn_dn` の見積もりの基準値と加算量。王手の子どうしに差を付けるため 1 より大きくする。
-const PNDN_UNIT: u32 = 2;
+pub(super) const PNDN_UNIT: u32 = 2;
 
 /// df-pn が局面に求める操作
 pub(super) trait MateState {
