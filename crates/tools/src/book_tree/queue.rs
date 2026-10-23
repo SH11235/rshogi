@@ -238,9 +238,9 @@ fn run_alive(state: &Path, run_id: &str) -> Result<bool> {
 
 /// 他のプロセスが排他 lock を持っているか。共有 lock を一瞬だけ試す。
 fn probe(file: &File) -> Result<bool> {
-    match file.try_lock_shared() {
+    match super::file_lock::try_lock_shared(file) {
         Ok(()) => {
-            file.unlock()?;
+            super::file_lock::unlock(file)?;
             Ok(false)
         }
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
