@@ -1,0 +1,70 @@
+# 一時的な計測用 workflow (マージ前に削除する)。Test job の profile / linker 違いを比べる。
+name: Test profile bench
+
+on:
+  push:
+    branches:
+      - ci/test-job-speedup
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C target-cpu=x86-64-v2"
+
+jobs:
+  test:
+    name: Test (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: opt3
+            opt: "3"
+            mold: false
+          - label: opt2
+            opt: "2"
+            mold: false
+          - label: opt1
+            opt: "1"
+            mold: false
+          - label: opt3-mold
+            opt: "3"
+            mold: true
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ matrix.opt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: nextest
+      - name: Setup mold
+        if: matrix.mold
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1 (2026-10-06)
+        with:
+          mold-version: 2.42.1
+          make-default: false
+      - name: Use mold
+        if: matrix.mold
+        run: echo "RUSTFLAGS=-C target-cpu=x86-64-v2 -C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
+        with:
+          cache-on-failure: true
+          shared-key: bench-${{ matrix.label }}
+      - name: Build tests
+        run: cargo nextest run --release --workspace --no-run
+      - name: Run tests
+        run: cargo nextest run --release --workspace --no-fail-fast
+      - name: Check linker
+        if: always()
+        run: |
+          f=$(ls -t target/release/deps/rshogi_core-* | grep -v '\.d$' | head -1)
+          readelf -p .comment "$f" | grep -iE "mold|lld|GCC" || true

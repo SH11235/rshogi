@@ -147,13 +147,13 @@ vp exec wrangler secret list --config wrangler.<env>.toml
 
 ## 7. 整合性 gate
 
-整合性 test (`tests/wrangler_environment_toml_consistency.rs`) が、
+整合性 test (`tests/integration/wrangler_environment_toml_consistency.rs`) が、
 `wrangler.production.toml` / `wrangler.staging.toml` の `[vars]` に
 `ADMIN_API_TOKEN` が混入していたら CI で fail させる契約。本値は必ず secret 経由
 で配置し、env toml の `[vars]` テーブルには書かない。
 
 `wrangler.toml.example` (local dev template) には placeholder として
-`[vars]` に書くのが正しい運用 (`tests/wrangler_template_consistency.rs` で
+`[vars]` に書くのが正しい運用 (`tests/integration/wrangler_template_consistency.rs` で
 gate 済み)。
 
 ## 8. 関連
@@ -237,7 +237,7 @@ vp exec wrangler secret put WORKERS_HANDLE_AUTH --config wrangler.production.tom
 EOF
 ```
 
-整合性 test (`tests/wrangler_environment_toml_consistency.rs`) が
+整合性 test (`tests/integration/wrangler_environment_toml_consistency.rs`) が
 `wrangler.production.toml` / `wrangler.staging.toml` の `[vars]` に
 `WORKERS_HANDLE_AUTH` が混入していたら CI で fail させる契約。
 

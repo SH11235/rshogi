@@ -1,7 +1,7 @@
 //! Cargo feature 組合せ整合性チェック。
 //!
 //! 純粋ロジックは `build/checks.rs` の `validate_feature_combination` に切り出して
-//! あり、`tests/build_rs_checks.rs` から `include!` して単体テストする。
+//! あり、`tests/integration/build_rs_checks.rs` から `include!` して単体テストする。
 //! preset edition の命名規則は `docs/build.md` を参照。
 
 use std::env;

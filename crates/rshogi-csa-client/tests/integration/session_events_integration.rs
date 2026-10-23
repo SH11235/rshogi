@@ -25,7 +25,7 @@ use std::time::Duration;
 use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::SpawnOptions;
 
-mod common;
+use crate::common;
 use rshogi_csa::{Color, Position, initial_position};
 use rshogi_csa_client::events::{
     DisconnectReason, MovePlayer, SearchInfoEmitPolicy, SessionError, SessionEventSink,

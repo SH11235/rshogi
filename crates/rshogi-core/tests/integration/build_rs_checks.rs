@@ -3,7 +3,7 @@
 //! 純粋関数は `crates/rshogi-core/build/checks.rs` に切り出されており、
 //! ここでは `include!` で取り込んで `&dyn Fn(&str) -> bool` lookup を渡して呼ぶ。
 
-include!("../build/checks.rs");
+include!("../../build/checks.rs");
 
 /// 与えられた feature 名集合を `has_feature` lookup に変換するヘルパー。
 fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {

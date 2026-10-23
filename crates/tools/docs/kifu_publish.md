@@ -378,7 +378,7 @@ failed[手数が連続していない]=1
 
 ```bash
 KIFU_VERIFY_DIR=<DIR> cargo test -p rshogi-csa-server-workers \
-    --test kifu_archive_import -- --ignored --nocapture
+    --test integration kifu_archive_import:: -- --ignored --nocapture
 ```
 
 終了コードは、失敗が 0 件なら 0、1 件でもあれば 1。引数・環境変数の不備や入力ファイルが
@@ -443,5 +443,5 @@ cargo test -p tools --lib kifu_publish
 サーバーの読み方での持ち時間の読み戻し、勝敗未確定の局の除外、壊れた読み筋、反則手のコメント化）、
 HTTP 部分（ローカルのモックサーバーで成功 / 保存済み / 404 → アーカイブ / それ以外の 404 /
 リダイレクト / 失敗、イベントメタの `PUT`）を検証する。golden の CSA がサーバーの取り込みを通ることは
-`cargo test -p rshogi-csa-server-workers --test kifu_archive_import` で検証する。変換した CSA の勝敗が既存の読み手で一致することは
+`cargo test -p rshogi-csa-server-workers --test integration kifu_archive_import::` で検証する。変換した CSA の勝敗が既存の読み手で一致することは
 `cargo test -p tools --lib csa_source` で検証する。

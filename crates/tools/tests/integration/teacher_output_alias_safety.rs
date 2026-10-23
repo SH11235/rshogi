@@ -40,7 +40,7 @@ fn link_alias(alias: Alias, input: &Path, output: &Path) {
 }
 
 fn record() -> Vec<u8> {
-    include_bytes!("fixtures/psv_to_hcpe3_yaneuraou_sample.psv")[..40].to_vec()
+    include_bytes!("../fixtures/psv_to_hcpe3_yaneuraou_sample.psv")[..40].to_vec()
 }
 
 fn legacy_record() -> Vec<u8> {

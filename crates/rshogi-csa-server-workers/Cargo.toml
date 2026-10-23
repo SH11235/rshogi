@@ -67,6 +67,6 @@ tokio-transport = []
 tokio = { workspace = true, features = ["rt", "macros"] }
 # `wrangler.toml.example` / `wrangler.staging.toml` / `wrangler.production.toml`
 # を解析して `ConfigKeys` 定数群が正しく宣言されていることを検証する
-# integration test (`tests/wrangler_template_consistency.rs` /
-# `tests/wrangler_environment_toml_consistency.rs`) でのみ使用。
+# integration test (`tests/integration/wrangler_template_consistency.rs` /
+# `tests/integration/wrangler_environment_toml_consistency.rs`) でのみ使用。
 toml = { workspace = true }

@@ -338,7 +338,7 @@ alias として登録し、rating rebuild を要求する。alias 登録前に�
 credential から旧 ID を導出できず、過去結果を統合できないため、対象選手の再接続と
 §3.2.1 の rebuild 完了を確認するまでは旧 key を削除しない。
 
-整合性 test (`tests/wrangler_environment_toml_consistency.rs`) が
+整合性 test (`tests/integration/wrangler_environment_toml_consistency.rs`) が
 `wrangler.<env>.toml` の `[vars]` に `ADMIN_API_TOKEN` 等
 [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`](../../crates/rshogi-csa-server-workers/src/config.rs)
 の値が混入していたら CI で fail させる契約。
@@ -793,7 +793,7 @@ production / staging を web client 化したくなったら、本節の手順�
 1. `wrangler.<env>.toml` の `[vars] WS_ALLOWED_ORIGINS` に追加する Origin を CSV で書く。
    既存値が空文字列なら新値で置換、既存値があれば末尾にカンマ区切りで append する。
    例: `WS_ALLOWED_ORIGINS = "https://rshogi.example.com,https://www.rshogi.example.com"`
-2. PR を作成し CI (rust-ci.yml) を通過させる。`tests/wrangler_environment_toml_consistency.rs`
+2. PR を作成し CI (rust-ci.yml) を通過させる。`tests/integration/wrangler_environment_toml_consistency.rs`
    が `[vars]` キーの整合性を gate しているため、key 名のタイポは PR 段階で落ちる。
 3. main へ merge すると §4.1 のフロー (staging は自動 / production は dispatch) で
    新値が deploy される。
@@ -1197,9 +1197,9 @@ bucket 名 / `WS_ALLOWED_ORIGINS` / 時計設定など **機密でないがイ�
 Worker secret（runtime 用）経由で注入し、本ファイルに直接書かない。
 
 整合性 test:
-- `tests/wrangler_template_consistency.rs`: `wrangler.toml.example` の `[vars]` が
+- `tests/integration/wrangler_template_consistency.rs`: `wrangler.toml.example` の `[vars]` が
   `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS` と双方向に一致することを assert
-- `tests/wrangler_environment_toml_consistency.rs`: `wrangler.staging.toml` /
+- `tests/integration/wrangler_environment_toml_consistency.rs`: `wrangler.staging.toml` /
   `wrangler.production.toml` の `[vars]` が `SHARED_PUBLIC_VARS_KEYS` 単独と一致し、
   かつ `LOCAL_DEV_ONLY_VARS_KEYS` の各キーが含まれていないことを assert
   （secret 経路の前提を gate）。staging / production それぞれに対して 5 件、

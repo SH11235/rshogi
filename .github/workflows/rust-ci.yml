@@ -89,12 +89,6 @@ jobs:
     if: needs.changes.outputs.rust_code == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install mold linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang
-          mold --version || true
-          clang --version || true
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
@@ -128,12 +122,6 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install mold linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang
-          mold --version || true
-          clang --version || true
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
@@ -220,7 +208,7 @@ jobs:
         run: cargo test -p rshogi-core --lib --features search-pass-rules -- --test-threads=2
       - name: Test USI flow with pass rules
         if: matrix.shard == 3
-        run: cargo test -p rshogi-usi --features search-pass-rules --test usi_flow -- --test-threads=2
+        run: cargo test -p rshogi-usi --features search-pass-rules --test integration usi_flow:: -- --test-threads=2
       - name: Test search with lazy evaluate
         # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
         if: matrix.shard == 3
@@ -262,10 +250,6 @@ jobs:
     #   symbol 衝突・`getrandom` の wasm_js feature 不足・lld link error 等）を
     #   検知できない。本 job の目的は「`worker-build --release` で初めて発覚する
     #   退行を PR で止める」なので codegen を通す build を使う。
-    #
-    # mold / clang を入れない:
-    #   wasm32 は lld でリンクするため、host job (`lint` / `test`) が入れている
-    #   mold linker は不要。runner セットアップ時間を浪費しない。
     #
     # clippy を回さない:
     #   clippy は host target の `lint` job で全 crate を網羅済み。本 job の責務は
@@ -357,8 +341,6 @@ jobs:
             chip: icx
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # mold linker は .cargo/config.toml で wired されていないため install しない
-      # (rshogi-core のみのリンクで効果が無く runner setup 時間を浪費するだけ)。
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable

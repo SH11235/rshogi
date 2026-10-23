@@ -23,7 +23,7 @@
 //!   知らせない方針。`wrangler.toml.example` の placeholder
 //!   (`local-dev-admin-token-placeholder`) は **local dev で friction なく
 //!   admin 経路を通電させる** ための既知 dev token であり、production / staging
-//!   へは絶対に持ち込まない (`tests/wrangler_environment_toml_consistency.rs`
+//!   へは絶対に持ち込まない (`tests/integration/wrangler_environment_toml_consistency.rs`
 //!   が混入を gate)。
 //!
 //! # ホスト target テスト方針
