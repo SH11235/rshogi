@@ -106,18 +106,20 @@ impl PackedHand {
 /// 局面全体のキーが一致するときだけ使うエントリ (`PIECES = true` では未確定値だけを書く)。
 /// キャッシュライン 1 本に 3 つ入るよう 20 byte に詰める。
 ///
-/// キーは下位 45bit (下位 32bit と `meta` の 13bit) だけを照合する。bucket が決めるのは上位の数十 bit
-/// なので、同じ bucket の別の局面と取り違える確率は 1 回引くごとに 3 × 2^-45 程度。取り違えた相手が
-/// 確定値なら結論を誤りうる: 誤った詰みは詰み手順の検証で弾かれるが、誤った不詰はそのまま返る。
-/// 確定値をこの表に書くのは証明駒を使わない探索 (Speed と、Auto の前半) だけ。
+/// 確定値は pn か dn の片方が必ず ∞ で、もう片方は 0 なので、2 つの欄にキーの上位 32bit と詰み手数を入れ、
+/// キーは 64bit 全部を照合する (別の局面の詰み・不詰を採用すると結論を誤る)。未確定値はキーの下位 55bit だけを
+/// 照合する。取り違えても探索の効率が落ちるだけで、結論は子の確定値からしか決まらない。
 #[derive(Clone, Copy, Default)]
 struct Entry {
     /// 局面全体のキーの下位 32bit
     key_lo: u32,
-    pn: u32,
-    dn: u32,
-    /// 下位から順に、探索量 (`SEARCHED`)、世代 (`GENERATION`)、詰み手数 (`MATE_LEN`)、
-    /// 最小の探索深さ (`MIN_DEPTH`)、キーの 32〜44bit (`TAG`)。u64 にすると 8 byte 境界になるので 2 つに分ける。
+    /// 未確定値では pn、確定値ではキーの上位 32bit
+    pn_or_key_hi: u32,
+    /// 未確定値では dn、確定値では詰み手数 (不詰では 0)
+    dn_or_mate_len: u32,
+    /// 下位から順に、探索量 (`SEARCHED`)、世代 (`GENERATION`)、最小の探索深さ (`MIN_DEPTH`)、
+    /// 確定値か (`FINAL`)、詰みか (`PROVEN`)、キーの 32〜54bit (`TAG`)。
+    /// u64 にすると 8 byte 境界になるので 2 つに分ける。
     meta: [u32; 2],
 }
 
@@ -127,10 +129,10 @@ type Field = (u32, u32);
 const SEARCHED: Field = (0, 20);
 /// 書き込んだ探索の世代。表の世代と違うエントリは空きとみなす。
 const GENERATION: Field = (20, 8);
-/// 詰み手数の上限。収まらない長さは最大値にし、読むときは `u16::MAX` (上限なし) に戻す。
-const MATE_LEN: Field = (28, 12);
-const MIN_DEPTH: Field = (40, 11);
-const TAG: Field = (51, 13);
+const MIN_DEPTH: Field = (28, 11);
+const FINAL: Field = (39, 1);
+const PROVEN: Field = (40, 1);
+const TAG: Field = (41, 23);
 /// 書き込む探索深さは探索深さの上限 (`search::MAX_DEPTH`) 未満
 const _: () = assert!(super::search::MAX_DEPTH <= 1 << MIN_DEPTH.1);
 
@@ -140,13 +142,16 @@ const fn field_max(field: Field) -> u64 {
 
 impl Entry {
     fn new(key: u64, value: &TableValue, searched: u32, generation: u8) -> Self {
+        let is_final = value.pn == 0 || value.dn == 0;
         let mut e = Self {
             key_lo: key as u32,
-            pn: value.pn,
-            dn: value.dn,
+            pn_or_key_hi: if is_final { key_hi(key) } else { value.pn },
+            dn_or_mate_len: if is_final { 0 } else { value.dn },
             meta: [0; 2],
         };
         e.set(TAG, key_tag(key));
+        e.set(FINAL, u64::from(is_final));
+        e.set(PROVEN, u64::from(value.pn == 0));
         e.set_searched(searched, generation);
         e.set_lengths(value.mate_len, value.min_depth);
         e
@@ -167,6 +172,14 @@ impl Entry {
         self.meta = [meta as u32, (meta >> 32) as u32];
     }
 
+    fn pn_dn(&self) -> (u32, u32) {
+        match (self.is_final(), self.is_proven()) {
+            (false, _) => (self.pn_or_key_hi, self.dn_or_mate_len),
+            (true, true) => (0, PN_INF),
+            (true, false) => (PN_INF, 0),
+        }
+    }
+
     fn searched(&self) -> u32 {
         self.get(SEARCHED) as u32
     }
@@ -177,9 +190,10 @@ impl Entry {
     }
 
     fn mate_len(&self) -> u16 {
-        match self.get(MATE_LEN) {
-            len if len == field_max(MATE_LEN) => u16::MAX,
-            len => len as u16,
+        if self.is_proven() {
+            self.dn_or_mate_len as u16
+        } else {
+            0
         }
     }
 
@@ -187,8 +201,11 @@ impl Entry {
         self.get(MIN_DEPTH) as u16
     }
 
+    /// 詰み手数は詰みのエントリにだけ書く (ほかでは 0 として扱う)
     fn set_lengths(&mut self, mate_len: u16, min_depth: u16) {
-        self.set(MATE_LEN, u64::from(mate_len));
+        if self.is_proven() {
+            self.dn_or_mate_len = u32::from(mate_len);
+        }
         self.set(MIN_DEPTH, u64::from(min_depth));
     }
 
@@ -197,12 +214,17 @@ impl Entry {
     }
 
     fn is_final(&self) -> bool {
-        self.pn == 0 || self.dn == 0
+        self.get(FINAL) != 0
+    }
+
+    fn is_proven(&self) -> bool {
+        self.is_final() && self.get(PROVEN) != 0
     }
 
     fn matches(&self, key: TableKey, generation: u8) -> bool {
         self.key_lo == key.key as u32
             && self.get(TAG) == key_tag(key.key)
+            && (!self.is_final() || self.pn_or_key_hi == key_hi(key.key))
             && !self.is_empty(generation)
     }
 
@@ -213,7 +235,12 @@ impl Entry {
     }
 }
 
-/// キーの 32〜44bit (`Entry` で下位 32bit に足して照合する)
+#[inline]
+fn key_hi(key: u64) -> u32 {
+    (key >> 32) as u32
+}
+
+/// キーの 32〜54bit (`Entry` で下位 32bit に足して照合する)
 #[inline]
 fn key_tag(key: u64) -> u64 {
     key >> 32 & field_max(TAG)
@@ -418,8 +445,8 @@ impl MateTable {
             .iter()
             .find(|e| e.matches(key, generation))
             .map(|e| TableValue {
-                pn: e.pn,
-                dn: e.dn,
+                pn: e.pn_dn().0,
+                dn: e.pn_dn().1,
                 mate_len: e.mate_len(),
                 min_depth: e.min_depth(),
                 hand: key.hand,
@@ -473,7 +500,7 @@ impl MateTable {
             let total = searched.saturating_add(e.searched());
             let min_depth = e.min_depth().min(value.min_depth);
             // 詰み手数は短い証明を残す (詰み手順の復元は手数が減る向きにしか辿らない)
-            let mate_len = if e.pn == 0 && value.pn == 0 {
+            let mate_len = if e.is_proven() && value.pn == 0 {
                 e.mate_len().min(value.mate_len)
             } else {
                 value.mate_len
@@ -775,21 +802,42 @@ mod tests {
     }
 
     #[test]
-    fn keys_differing_only_in_tag_bits_are_different_positions() {
+    fn unknown_values_are_matched_by_the_lower_55_bits() {
         let mut table = MateTable::with_bucket_count(1, false);
-        let a = exact(5 | 1 << 32);
-        table.store::<false>(a, value(1, 1), 1);
-        assert_eq!(table.probe::<false>(exact(5 | 1 << 44)), None);
-        assert_eq!(table.probe::<false>(a), Some(value(1, 1)));
+        table.store::<false>(exact(5), value(1, 1), 1);
+        for bit in 32..55 {
+            assert_eq!(table.probe::<false>(exact(5 | 1 << bit)), None, "bit {bit}");
+        }
+        assert_eq!(table.probe::<false>(exact(5)), Some(value(1, 1)));
     }
 
     #[test]
-    fn mate_too_long_for_the_entry_reads_as_unbounded() {
+    fn final_values_are_matched_by_the_whole_key() {
         let mut table = MateTable::with_bucket_count(1, false);
-        table.store::<false>(exact(1), proven(4094, Hand::EMPTY), 1);
-        table.store::<false>(exact(2), proven(5000, Hand::EMPTY), 1);
-        assert_eq!(table.probe::<false>(exact(1)).map(|v| v.mate_len), Some(4094));
-        assert_eq!(table.probe::<false>(exact(2)).map(|v| v.mate_len), Some(u16::MAX));
+        table.store::<false>(exact(5), proven(3, Hand::EMPTY), 1);
+        table.store::<false>(exact(6), disproven(Hand::EMPTY), 1);
+        assert_eq!(table.probe::<false>(exact(5 | 1 << 63)), None);
+        assert_eq!(table.probe::<false>(exact(6 | 1 << 50)), None);
+        assert_eq!(table.probe::<false>(exact(5)), Some(proven(3, Hand::EMPTY)));
+        assert_eq!(table.probe::<false>(exact(6)), Some(disproven(Hand::EMPTY)));
+    }
+
+    #[test]
+    fn entry_fields_keep_their_limits() {
+        let at_depth = |depth: u16, v: TableValue| TableValue {
+            min_depth: depth,
+            ..v
+        };
+        let mate = at_depth(2047, proven(u16::MAX - 1, Hand::EMPTY));
+        let e = Entry::new(u64::MAX, &mate, (1 << 20) - 1, u8::MAX);
+        assert_eq!(
+            (e.searched(), e.mate_len(), e.min_depth()),
+            ((1 << 20) - 1, u16::MAX - 1, 2047)
+        );
+        assert!(!e.is_empty(u8::MAX) && e.is_proven());
+        let e = Entry::new(u64::MAX, &value(7, 9), 1 << 20, u8::MAX);
+        assert_eq!((e.searched(), e.pn_dn()), ((1 << 20) - 1, (7, 9)));
+        assert!(!e.is_empty(u8::MAX) && !e.is_final());
     }
 
     #[test]
