@@ -1,4 +1,5 @@
 use super::ReadingArgs;
+use super::file_lock;
 use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -256,13 +257,13 @@ impl LockedFile {
             .read(true)
             .write(true)
             .open(path)?;
-        file.try_lock().with_context(|| format!("lock 取得失敗: {}", path.display()))?;
+        file_lock::try_lock(&file).with_context(|| format!("lock 取得失敗: {}", path.display()))?;
         Ok(Self(file))
     }
 }
 impl Drop for LockedFile {
     fn drop(&mut self) {
-        if let Err(err) = self.0.unlock() {
+        if let Err(err) = file_lock::unlock(&self.0) {
             eprintln!("unlock: {err}");
         }
     }
@@ -272,7 +273,7 @@ impl Drop for LockedFile {
 struct UnlockOnDrop(File);
 impl Drop for UnlockOnDrop {
     fn drop(&mut self) {
-        if let Err(err) = self.0.unlock() {
+        if let Err(err) = file_lock::unlock(&self.0) {
             eprintln!("unlock: {err}");
         }
     }
@@ -484,7 +485,7 @@ pub(super) struct Source {
 pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Source> {
     let file =
         File::open(path).with_context(|| format!("取り込み元を開けません: {}", path.display()))?;
-    file.try_lock_shared().with_context(|| {
+    file_lock::try_lock_shared(&file).with_context(|| {
         format!("取り込み元の台帳を書き込み中のプロセスがあります: {}", path.display())
     })?;
     let _unlock = UnlockOnDrop(file.try_clone()?);
