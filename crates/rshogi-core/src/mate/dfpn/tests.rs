@@ -332,9 +332,9 @@ fn time_limit_gives_unknown() {
     assert!(start.elapsed().as_millis() < 2_000, "時間制限が効いていない");
 }
 
-/// 速さ優先で 10 万ノードでは決まらない 11 手詰め (やねうら王の詰将棋データセットから)
+/// 自動モードの最初の段階 (証明駒を使わない) では 10 万ノードで決まらない 11 手詰め (やねうら王の詰将棋データセットから)
 const AUTO_SWITCH_MATE: &str =
-    "ln2p+R3/2k1gg3/1pp6/p2p1bp1P/2N1Ps3/PlP3P2/1PK2g3/2G2+n3/LN5+pL b RB3S5p 127";
+    "l5s1l/4k4/2n2p1+P1/2pg4p/p4S3/2Pb4P/P1nP1P1K1/9/4G3L b RB2GS2NL7Prsp 121";
 
 #[test]
 fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
@@ -429,6 +429,36 @@ fn disproof_hand_for_a_drop_escape_leaves_the_dropped_piece_to_the_defender() {
     // 駒を動かす逃れは補正しない
     let mv = Move::from_usi("5a4a").unwrap();
     assert_eq!(pos.disproof_hand_for_escape(mv, disproof, Color::Black), disproof);
+}
+
+#[test]
+fn initial_values_prefer_checks_the_defender_cannot_answer_cheaply() {
+    // 玉頭への金打ちは攻め方の利き (5c の歩) で支えられ、受け方の利きは玉だけ: 反証しにくい
+    let pos = position("4k4/9/4P4/9/9/9/9/9/4K4 b G 1");
+    let supported = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(supported, true), (2, 4));
+    // 支えの無い王手は証明しにくい
+    let pos = position("4k4/9/9/9/9/9/9/9/4K4 b G 1");
+    let bare = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(bare, true), (4, 2));
+    // 受け方の利きが 2 つある升 (玉と金) への王手は、攻め方の利きが足りなければさらに証明しにくい
+    let pos = position("4k4/5g3/4P4/9/9/9/9/9/4K4 b G 1");
+    let defended = pos.to_move(Move::from_usi("G*5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(defended, true), (6, 2));
+    // 攻め方の利きが足りなくても、金銀 (成銀を含む) を取る王手は反証しにくく、ほかの駒を取る王手は証明しにくい
+    let pos = position("3gk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_gold = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_gold, true), (2, 4));
+    let pos = position("3+sk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_promoted_silver = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_promoted_silver, true), (2, 4));
+    let pos = position("3nk4/9/9/9/9/9/9/9/3RK4 b - 1");
+    let takes_knight = pos.to_move(Move::from_usi("6i6a").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(takes_knight, true), (4, 2));
+    // 受け方の応手は見積もらない
+    let pos = position("4k4/4G4/9/9/9/9/9/9/4K4 w - 1");
+    let capture = pos.to_move(Move::from_usi("5a5b").unwrap()).unwrap();
+    assert_eq!(pos.initial_pn_dn(capture, false), (1, 1));
 }
 
 #[test]
@@ -1000,6 +1030,11 @@ impl MateState for Graph {
         None
     }
 
+    fn initial_pn_dn(&self, m: u32, _or_node: bool) -> (u32, u32) {
+        // 初期値が一様でなくても結論が変わらないことを確かめるため、節点番号から散らす
+        (1 + m % 3, 1 + m / 3 % 3)
+    }
+
     fn do_move(&mut self, m: u32) {
         self.stack.push(m);
     }
@@ -1013,8 +1048,8 @@ fn solve_graph(graph: &mut Graph, buckets: usize) -> Option<SolveOutcome<u32>> {
     solve_graph_with_limit(graph, buckets, 2_000_000)
 }
 
-/// 証明駒を使う探索と使わない探索の両方で解き、結果の種類 (詰み・不詰・打ち切り) が同じことを
-/// 確かめて、証明駒を使う方を返す (グラフに持駒は無いので、表の使い方の違いだけを比べる)
+/// 証明駒を使わず初期値も見積もらない探索と、証明駒を使い初期値を見積もる探索の両方で解き、結果の種類
+/// (詰み・不詰・打ち切り) が同じことを確かめて、後者を返す (グラフに持駒は無いので、証明駒の流用は起きない)
 fn solve_graph_with_limit(
     graph: &mut Graph,
     buckets: usize,
@@ -1048,6 +1083,9 @@ fn solve_graph_in_mode<const PIECES: bool>(
     };
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
+    if PIECES {
+        searcher.estimate_initial_values();
+    }
     solve_with(&mut searcher, graph)
 }
 
@@ -1168,6 +1206,40 @@ fn agrees_with_fixed_point_on_random_graphs() {
         }
     }
     assert!(mates > 100);
+}
+
+/// 確定値の表が新しい確定値を書かずに捨てると、同じ局面を証明し直し続けて止まらないグラフ
+/// (1 bucket の表、初期値を見積もる探索)
+#[test]
+fn final_values_are_kept_when_the_final_bucket_is_full() {
+    let edges: Vec<Vec<u32>> = vec![
+        vec![9],
+        vec![9, 7],
+        vec![11],
+        vec![8, 12, 7],
+        vec![11, 7, 9],
+        vec![13],
+        vec![11, 9, 12],
+        vec![],
+        vec![6],
+        vec![5, 1, 2],
+        vec![4, 5],
+        vec![4, 3],
+        vec![5],
+        vec![4, 2, 6],
+    ];
+    // 節点 0..7 が OR、7..14 が AND
+    let is_or: Vec<bool> = (0..edges.len()).map(|v| v < 7).collect();
+    let truth = Graph::new(edges.clone(), 0).mate_set(&is_or)[0];
+    let mut graph = Graph::new(edges, 0);
+    match solve_graph_in_mode::<true>(&mut graph, 1, 2_000_000) {
+        Some(SolveOutcome::Mate(pv)) => {
+            assert!(truth);
+            assert!(is_valid_graph_pv(&graph, 0, &pv), "{pv:?}");
+        }
+        Some(SolveOutcome::NoMate) => assert!(!truth),
+        None => panic!("打ち切り (停滞)"),
+    }
 }
 
 /// 長さ `len` の一本道 (OR → AND → ...)。`mate_at_end` なら末端は詰みの AND 終端、

@@ -360,8 +360,8 @@ impl MateTable {
     /// 局面 `key` の値を書く。`searched` はこの局面以下の探索ノード数。
     /// `value.min_depth` は今回の探索深さで、既存エントリの最小深さと小さい方を残す。
     ///
-    /// `PIECES` なら確定値は `value.hand` (証明駒・反証駒) の持駒で確定値の表に書き、
-    /// 同じ局面の完全一致のエントリは消す。それ以外は完全一致のエントリに書く。
+    /// `PIECES` なら確定値は `value.hand` (証明駒・反証駒) の持駒で確定値の表に書き (bucket が埋まっていれば
+    /// 探索量の最も少ない確定値を置き換える)、同じ局面の完全一致のエントリは消す。それ以外は完全一致のエントリに書く。
     /// 同じ局面の確定値を未確定値で上書きはしない (確定値は経路に依存しないものだけが書かれるので、後から覆らない)。
     /// 完全一致の表に新しい局面を書くとき、bucket が埋まっていれば残す優先度の最も低いエントリを置き換える
     /// (確定値で埋まっていれば確定値も。表はキャッシュなので結論は変わらず、読み直しが増えるだけ)。
@@ -458,10 +458,9 @@ impl MateTable {
             *e = new_entry;
             return;
         }
-        let victim = bucket.iter_mut().min_by_key(|e| e.searched).expect("bucket は空でない");
-        if victim.searched <= searched {
-            *victim = new_entry;
-        }
+        // 探索量が少なくても必ず書く。書かずに捨てると、同じ局面の完全一致のエントリは消してあるので
+        // 結果がどこにも残らず、同じ局面を証明し直し続けて探索が止まらないことがある
+        *bucket.iter_mut().min_by_key(|e| e.searched).expect("bucket は空でない") = new_entry;
     }
 }
 
@@ -603,6 +602,23 @@ mod tests {
         assert_eq!(table.probe::<false>(key(5, Hand::EMPTY)), Some(value(2, 2)));
         assert_eq!(table.probe::<false>(key(2, Hand::EMPTY)), None);
         assert_eq!(table.probe::<false>(key(3, Hand::EMPTY)), Some(proven(1, Hand::EMPTY)));
+    }
+
+    #[test]
+    fn full_final_bucket_takes_the_new_final_value() {
+        // 確定値の表 (同じ盤面の bucket) が探索量の多い確定値で埋まっていても、新しい確定値を書く
+        let gold = hand(&[PieceType::Gold]);
+        let silver = hand(&[PieceType::Silver]);
+        let mut table = MateTable::with_buckets(1);
+        for (board, searched) in [(1u64, 3_000), (2, 1_000), (3, 2_000)] {
+            table.store::<true>(key(board, gold), proven(3, gold), searched);
+        }
+        table.store::<true>(key(4, silver), value(2, 2), 1);
+        table.store::<true>(key(4, silver), proven(5, Hand::EMPTY), 1);
+        assert_eq!(table.probe::<true>(key(4, gold)), Some(proven(5, Hand::EMPTY)));
+        // 探索量の最も少ない確定値 (局面 2) が置き換わる
+        assert_eq!(table.probe::<true>(key(2, gold)), None);
+        assert_eq!(table.probe::<true>(key(1, gold)), Some(proven(3, gold)));
     }
 
     #[test]

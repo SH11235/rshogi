@@ -239,6 +239,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     budget: Budget<'a>,
     /// この深さのフレームが終わるとき、証明済みの子を `scratch.proven` に写す (PV 復元用)
     capture_depth: Option<usize>,
+    /// 置換表に無い子の pn/dn を局面から見積もるか (`MateState::initial_pn_dn`)
+    estimate: bool,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -287,7 +289,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             next_progress_ms: PROGRESS_INTERVAL_MS,
             budget,
             capture_depth: None,
+            estimate: false,
         }
+    }
+
+    /// 置換表に無い子の pn/dn を局面から見積もる (df-pn+)。詰む問題ではノードが大きく減るが、
+    /// 不詰の多い詰めろ判定では増える
+    pub fn estimate_initial_values(&mut self) {
+        self.estimate = true;
     }
 
     /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
@@ -554,16 +563,24 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 child.dn = 0;
                 child.loop_depth = loop_depth as u16;
                 child.first_visit = false;
-            } else if let Some(v) = self.table.probe::<PIECES>(child_table_key) {
-                child.first_visit = false;
-                if v.pn != 0 || v.mate_len <= child_len_limit {
-                    child.pn = v.pn;
-                    child.dn = v.dn;
-                    child.mate_len = v.mate_len;
-                    child.hand = v.hand;
+            } else {
+                let probed = self.table.probe::<PIECES>(child_table_key);
+                if let Some(v) = probed {
+                    child.first_visit = false;
+                    if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
+                        has_old_child = true;
+                    }
                 }
-                if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
-                    has_old_child = true;
+                match probed {
+                    Some(v) if v.pn != 0 || v.mate_len <= child_len_limit => {
+                        child.pn = v.pn;
+                        child.dn = v.dn;
+                        child.mate_len = v.mate_len;
+                        child.hand = v.hand;
+                    }
+                    // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)
+                    _ if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
+                    _ => {}
                 }
             }
             self.scratch.children.push(child);
