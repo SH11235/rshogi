@@ -481,11 +481,13 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
         let explicit_spsa = options
             .get("SPSAParamsFile")
             .is_some_and(|value| !matches!(*value, "" | "<auto>" | "<empty>"));
-        let implicit_spsa = !explicit_spsa || options.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("SPSAParamsFile")
-                && matches!(*value, "" | "<auto>" | "<empty>")
-        });
-        let mut book_dirs: std::collections::BTreeSet<_> = options.iter()
+        let implicit_spsa = !explicit_spsa
+            || options.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("SPSAParamsFile")
+                    && matches!(*value, "" | "<auto>" | "<empty>")
+            });
+        let mut book_dirs: std::collections::BTreeSet<_> = options
+            .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("BookDir"))
             .map(|(_, value)| if value.is_empty() { "book" } else { *value })
             .collect();
@@ -505,19 +507,32 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
                 || ["file", "dir", "path", "coeff"].iter().any(|suffix| name.ends_with(suffix))
             {
                 let resources: Vec<_> = if name == "bookfile" {
-                    book_dirs.iter().map(|directory| PathBuf::from(*directory).join(*value)).collect()
+                    book_dirs
+                        .iter()
+                        .map(|directory| PathBuf::from(*directory).join(*value))
+                        .collect()
                 } else {
                     vec![PathBuf::from(*value)]
                 };
                 for resource in resources {
-                    let path = if resource.is_absolute() { resource } else { cwd.join(resource) };
-                    if !path.try_exists()? { continue; }
+                    let path = if resource.is_absolute() {
+                        resource
+                    } else {
+                        cwd.join(resource)
+                    };
+                    if !path.try_exists()? {
+                        continue;
+                    }
                     if path.is_dir() {
                         for entry in walkdir::WalkDir::new(&path).follow_links(true) {
                             let entry = entry?;
-                            if entry.file_type().is_file() { inputs.push(entry.into_path()); }
+                            if entry.file_type().is_file() {
+                                inputs.push(entry.into_path());
+                            }
                         }
-                    } else { inputs.push(path); }
+                    } else {
+                        inputs.push(path);
+                    }
                 }
             }
         }
@@ -5866,7 +5881,6 @@ mod marker_tests {
         }
     }
 
-
     #[test]
     fn mixed_case_book_dirs_preserve_all_engine_interpretations() {
         let cases = [
@@ -5881,17 +5895,28 @@ mod marker_tests {
             let input = dir.path().join("input.psv");
             let output_dir = dir.path().join("out");
             std::fs::create_dir(&output_dir).unwrap();
-            for path in [&engine, &input] { std::fs::write(path, [7; 40]).unwrap(); }
+            for path in [&engine, &input] {
+                std::fs::write(path, [7; 40]).unwrap();
+            }
             for name in ["book", "books", "other"] {
                 let directory = dir.path().join(name);
                 std::fs::create_dir(&directory).unwrap();
                 std::fs::write(directory.join("opening.db"), b"book bytes").unwrap();
             }
             let mut args = vec![
-                "rescore_psv", "--input", input.to_str().unwrap(), "--engine", engine.to_str().unwrap(),
-                "--output-dir", output_dir.to_str().unwrap(), "--usi-option", "BookFile=opening.db",
+                "rescore_psv",
+                "--input",
+                input.to_str().unwrap(),
+                "--engine",
+                engine.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--usi-option",
+                "BookFile=opening.db",
             ];
-            for option in options { args.extend(["--usi-option", option]); }
+            for option in options {
+                args.extend(["--usi-option", option]);
+            }
             let cli = Cli::parse_from(args);
             let output = output_dir.join("input.psv");
             for directory in expected {
@@ -5928,10 +5953,17 @@ mod marker_tests {
                 std::fs::write(path, [7; 40]).unwrap();
             }
             let mut args = vec![
-                "rescore_psv", "--input", input.to_str().unwrap(), "--engine", engine.to_str().unwrap(),
-                "--output-dir", output_dir.to_str().unwrap(),
+                "rescore_psv",
+                "--input",
+                input.to_str().unwrap(),
+                "--engine",
+                engine.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
             ];
-            for option in options { args.extend(["--usi-option", option]); }
+            for option in options {
+                args.extend(["--usi-option", option]);
+            }
             let cli = Cli::parse_from(args);
             let output = output_dir.join("input.psv");
             for params in [&automatic, &explicit] {
