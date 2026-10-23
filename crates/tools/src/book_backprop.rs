@@ -1005,18 +1005,9 @@ impl<'a> CertifyStates<'a> {
     }
 
     /// 検査する側は書き出し値が最大の手だけを、相手は全手を指しうる。
-    /// ただし `min` では、相手の探索ラベルが千日手より悪いと示す手を相手は選ばないとみなす。
-    /// そのラベルは book 外の咎める手まで読んだ上界で、その手から循環を続けても千日手にはならない。
+    /// 相手の探索ラベルが悪くても、book どおりに指す側は book 外の咎める手を指さないので相手の選択肢に残す。
     fn follows(&self, s: usize, idx: usize) -> bool {
-        let v = s / 2;
-        let mv = &self.graph.moves[v];
-        if !self.is_opponent(s) {
-            return mv[idx].new == self.values[v];
-        }
-        let labeled = idx < mv.len() - self.graph.added_moves[v].len();
-        self.params.merge != MergeMode::Min
-            || !labeled
-            || mv[idx].old >= -self.params.draw_value.abs()
+        self.is_opponent(s) || self.graph.moves[s / 2][idx].new == self.values[s / 2]
     }
 
     fn children(&self, s: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
@@ -1513,6 +1504,14 @@ mod tests {
     }
 
     fn solve_rows(rows: &[&[(i32, Option<usize>)]], max_iters: usize) -> Result<Graph> {
+        solve_rows_with(rows, max_iters, MergeMode::Replace)
+    }
+
+    fn solve_rows_with(
+        rows: &[&[(i32, Option<usize>)]],
+        max_iters: usize,
+        merge: MergeMode,
+    ) -> Result<Graph> {
         let keys: Vec<_> = (0..rows.len()).map(|i| i.to_string()).collect();
         let book = BookDb {
             entries: keys
@@ -1567,16 +1566,15 @@ mod tests {
             preserved: vec![false; rows.len()],
             added_moves: vec![vec![]; rows.len()],
         };
-        propagate_values(&book, &mut graph, 0, max_iters, MergeMode::Replace)?;
+        propagate_values(&book, &mut graph, 0, max_iters, merge)?;
         Ok(graph)
     }
 
     /// 書き出し値をそのまま与えたグラフに [`certify`] だけを適用する。
-    fn certify_rows_with(
+    fn certify_rows(
         rows: &[&[(i32, Option<usize>)]],
         checked: &[bool],
         draw_value: i32,
-        merge: MergeMode,
     ) -> Result<()> {
         let graph = Graph {
             keys: (0..rows.len()).map(|i| i.to_string()).collect(),
@@ -1611,18 +1609,10 @@ mod tests {
             &graph,
             BestParams {
                 draw_value,
-                merge,
+                merge: MergeMode::Replace,
                 skip_unusable_moves: false,
             },
         )
-    }
-
-    fn certify_rows(
-        rows: &[&[(i32, Option<usize>)]],
-        checked: &[bool],
-        draw_value: i32,
-    ) -> Result<()> {
-        certify_rows_with(rows, checked, draw_value, MergeMode::Replace)
     }
 
     #[test]
@@ -1658,30 +1648,18 @@ mod tests {
     }
 
     #[test]
-    fn certify_follows_min_cycle_through_inconsistent_values() {
-        // 循環上の値 0 の局面で値の整合が切れても、相手の手のラベルが千日手以上なら A の 50 は千日手にしかならない。
-        let rows: [&[_]; 4] = [
-            &[(50, Some(1))],
-            &[(0, Some(2))],
-            &[(0, Some(3))],
-            &[(0, Some(0))],
-        ];
-        let error = certify_rows_with(&rows, &[false; 4], 0, MergeMode::Min).unwrap_err();
-        assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
-    }
-
-    #[test]
-    fn certify_min_trusts_opponent_labels_worse_than_draw() {
-        // 相手の探索ラベル -50 は book 外の咎めを含む上界なので、相手はこの循環で千日手にできない。
+    fn certify_rejects_min_cycle_with_inconsistent_values() {
+        // min は A=50, B=-50, C=0, D=-50 に収束する。C で値の整合が切れても、A の 50 は千日手にしかならない。
         let rows: [&[_]; 4] = [
             &[(50, Some(1))],
             &[(-50, Some(2))],
             &[(0, Some(3))],
             &[(-50, Some(0))],
         ];
-        certify_rows_with(&rows, &[false; 4], 0, MergeMode::Min).unwrap();
-        // replace は book 内の手を全て信じるので、同じ値は千日手へ逃げられる。
-        assert!(certify_rows(&rows, &[false; 4], 0).is_err());
+        let error = solve_rows_with(&rows, 1000, MergeMode::Min).unwrap_err();
+        assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
+        let graph = solve_rows(&rows, 1000).unwrap();
+        assert!(graph.moves.iter().flatten().all(|mv| mv.new == 0));
     }
 
     #[test]
