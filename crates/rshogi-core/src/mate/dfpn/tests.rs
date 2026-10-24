@@ -1156,7 +1156,6 @@ impl Setup {
         Some(pos)
     }
 
-    /// 左右を反転した局面
     fn mirrored(&self) -> Setup {
         let board = self.board.iter().map(|row| row.iter().rev().cloned().collect()).collect();
         Setup {
@@ -1194,7 +1193,7 @@ fn swap_case(s: &str) -> String {
         .collect()
 }
 
-/// 持駒の表記を先手 (大文字) から並べる
+/// SFEN の持駒は先手の駒を先に書く
 fn sorted_hand(hand: &str) -> String {
     let mut pieces: Vec<char> = hand.chars().collect();
     pieces.sort_by_key(|c| c.is_ascii_lowercase());
@@ -1399,15 +1398,48 @@ fn solves_kingless_tsume() {
     }
 }
 
-/// 詰み手順は受け方が最も長く逃れる応手を選んで復元するので、総当たりでもその手数以内に詰む
-/// (手順 1 本の検証では、手順に無い応手で逃れる偽の詰みを見落とす)。`brute3` は 3 手以内の総当たりの結果。
-fn assert_mate_within_pv_len(pos: &mut Position, pv: &[Move], brute3: bool) {
-    let mated = match pv.len() {
-        ..=3 => brute3,
-        5 => brute_mate_by_rules(pos, 5),
-        _ => return,
-    };
-    assert!(mated, "{}: {} 手以内に詰まない: {}", pos.to_sfen(), pv.len(), pv_usi(pv));
+/// 攻め方の玉が無い局面で、詰み手数の上限を `len_limit` 手にした探索が詰みを証明するか
+fn proves_kingless_mate_within(pos: &Position, len_limit: u16, mode: MateMode) -> bool {
+    fn search<const PIECES: bool>(pos: &Position, len_limit: u16, mode: MateMode) -> bool {
+        let stop = AtomicBool::new(false);
+        let mut progress = |_| {};
+        let budget = Budget {
+            stop: &stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: 0,
+            time_limit_ms: 0,
+            start: Instant::now(),
+            progress: &mut progress,
+        };
+        let table = MateTable::new(1, PIECES);
+        let mut scratch = Scratch::new();
+        let mut st = NoAttackerKing::new(pos.clone());
+        let attacker = pos.side_to_move();
+        let mut searcher = Searcher::<_, PIECES>::new(&table, &mut scratch, attacker, budget);
+        configure(&mut searcher, mode);
+        let args = super::search::NodeArgs::unbounded(0, true, len_limit);
+        let result = searcher.search(&mut st, args, &mut 0).expect("制限なしでは打ち切らない");
+        result.is_proven()
+    }
+    match mode {
+        MateMode::Speed => search::<false>(pos, len_limit, mode),
+        MateMode::Power => search::<true>(pos, len_limit, mode),
+    }
+}
+
+/// 詰み手数の上限付きの探索と総当たりが、同じ上限で一致する (詰み・不詰の両方向)。
+/// 詰み手順 1 本の検証では、手順に無い応手で逃れる偽の詰みを見落とすため。`brute3` は 3 手の総当たりの結果。
+fn assert_limited_search_matches_brute_force(pos: &mut Position, brute3: bool, check_5: bool) {
+    for mode in MateMode::ALL {
+        let sfen = pos.to_sfen();
+        assert_eq!(proves_kingless_mate_within(pos, 3, mode), brute3, "{sfen} {mode:?} 3 手");
+        if check_5 {
+            let brute5 = brute_mate_by_rules(pos, 5);
+            assert_eq!(proves_kingless_mate_within(pos, 5, mode), brute5, "{sfen} {mode:?} 5 手");
+        }
+    }
 }
 
 /// 左右の反転と、先後を入れ替えた 180° の回転で答えが変わらない。玉の無い側の既定の升 (1一) と
@@ -1415,14 +1447,15 @@ fn assert_mate_within_pv_len(pos: &mut Position, pv: &[Move], brute3: bool) {
 #[test]
 fn kingless_search_is_symmetric() {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5E77_0000);
-    let (mut tested, mut decided) = (0, 0);
+    let (mut tested, mut compared) = (0, 0);
     while tested < 300 {
         let setup = random_kingless_setup(&mut rng);
         let Some(mut pos) = setup.position() else {
             continue;
         };
         let result = solve_limited(&mut pos, 1, 200_000);
-        for mut other in [setup.mirrored(), setup.rotated()].iter().filter_map(Setup::position) {
+        for other in [setup.mirrored(), setup.rotated()] {
+            let mut other = other.position().expect("反転・回転しても局面として成り立つ");
             let other_result = solve_limited(&mut other, 1, 200_000);
             assert!(
                 !is_contradiction(&result, &other_result),
@@ -1430,11 +1463,12 @@ fn kingless_search_is_symmetric() {
                 pos.to_sfen(),
                 other.to_sfen()
             );
+            compared +=
+                usize::from(result != MateResult::Unknown && other_result != MateResult::Unknown);
         }
         tested += 1;
-        decided += usize::from(result != MateResult::Unknown);
     }
-    assert!(decided * 10 >= tested * 9, "判定できない局面が多すぎる: {decided}/{tested}");
+    assert!(compared * 10 >= tested * 2 * 9, "両方を判定できた組が少なすぎる: {compared}");
 }
 
 #[test]
@@ -1450,7 +1484,6 @@ fn kingless_search_agrees_with_brute_force_on_random_positions() {
         match solve_limited(&mut pos, 1, 2_000_000) {
             MateResult::Mate(pv) => {
                 assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
-                assert_mate_within_pv_len(&mut pos, &pv, brute);
             }
             MateResult::NoMate => assert!(!brute, "{sfen}: 3 手以内に詰むのに NoMate"),
             other => {
@@ -1458,6 +1491,7 @@ fn kingless_search_agrees_with_brute_force_on_random_positions() {
                 unknowns += 1;
             }
         }
+        assert_limited_search_matches_brute_force(&mut pos, brute, tested % 4 == 0);
         tested += 1;
         mates += usize::from(brute);
     }
@@ -1479,7 +1513,6 @@ fn kingless_parallel_search_agrees_with_brute_force() {
             match solve_in_threads(&mut pos, 2_000_000, mode, 4) {
                 MateResult::Mate(pv) => {
                     assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
-                    assert_mate_within_pv_len(&mut pos, &pv, brute);
                 }
                 other => assert!(!brute, "{sfen} {mode:?}: 3 手以内に詰むのに {other:?}"),
             }
