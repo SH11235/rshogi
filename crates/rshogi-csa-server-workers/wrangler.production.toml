@@ -41,17 +41,8 @@ compatibility_date = "2026-04-21"
 # 有効化する (`docs/csa-server/observability.md` §3.2 / §7.3 参照)。
 # logpush = true
 
-# Workers Observability を有効化 (Free plan 対応)。Cloudflare Dashboard の
-# Workers script 詳細画面で過去 7 日分の log を invocation 単位で検索可能になり、
-# Workers Observability ダッシュボードで定義した custom alert rule
-# (例: 5xx errors > 10 in 5min) が発火する基盤になる。
-#
-# 発火した alert は本 PR で declare する `workers_observability_alert`
-# NotificationPolicy (infra/pulumi/index.ts) 経由で Slack webhook に届く。
-#
-# `head_sampling_rate = 1.0` で全 invocation を log (Free plan で 7 日保持)。
-# 詳細は `docs/csa-server/observability.md` §6.1 を参照。
-# [#625 Phase B 続編 / PR (本 PR)]
+# ログ集計の欠落を抑えるため、invocation のサンプリング率を 1.0 にする。
+# 保持期間・プラットフォーム側の制限は docs/csa-server/observability.md を参照。
 [observability]
 enabled = true
 
