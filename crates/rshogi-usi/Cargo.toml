@@ -29,6 +29,7 @@ rshogi-book = { version = "0.1", path = "../rshogi-book", default-features = fal
 [features]
 # default は rshogi-core 側 default (edition-universal) と一致させる。
 default = ["edition-universal"]
+wasm-threads = ["rshogi-core/wasm-threads"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）

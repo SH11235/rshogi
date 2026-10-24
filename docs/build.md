@@ -10,6 +10,7 @@ rshogi-usi バイナリの build 手順と、複数 NNUE architecture binary を
 - [preset edition の選び方](#preset-edition-の選び方)
 - [cargo xtask reference](#cargo-xtask-reference)
 - [build manifest](#build-manifest)
+- [xtask の WebAssembly target](#xtask-の-webassembly-target)
 - [build profile の使い分け](#build-profile-の使い分け)
 - [既存 build scripts との関係](#既存-build-scripts-との関係)
 
@@ -184,11 +185,13 @@ preset edition を build して `engines/` 下に配置する。
 
 ```
 cargo xtask build [--edition <preset>[,<preset>...]] [--all-presets]
-                  [--profile <name>] [--features <name>[,<name>...]]
+                  [--profile <name>] [--features <name>[,<name>...]] [--target <WASM target>]
 ```
 
 - `--edition <name>` : preset edition (`edition-` 接頭辞省略可)。複数指定可
   (カンマ区切り or `--edition` 複数回)。
+- `--target <target>` : `wasm32-wasip1` / `wasm32-unknown-unknown`。省略時は native。
+  flags と配置名は [WASM target の手順](#xtask-の-webassembly-target)を参照。
 - `--all-presets`    : `list-editions` の全 preset を順次 build。`--edition` と排他。
 - `--profile <name>` : cargo profile。デフォルト `production` (LTO=fat、Full LTO、
   単一 codegen unit)。`release` は dev iteration 向け (thin LTO)、`profiling` は
@@ -317,6 +320,9 @@ features = ["mimalloc"]
 `cargo xtask list-binaries` の EDITION 列も、追加 feature があれば binary 名と同じ
 `<edition>+<feature>` 形式で表示する。
 
+`--target` 指定時は `target = "wasm32-wasip1"` 等の field も記録します。
+native build では省略し、旧 manifest は target なしとして読めます。
+
 旧 v1 manifest (`flavor` field を含む) も `cargo xtask list-binaries` で
 parse 失敗せず読める (serde 既定の未知フィールド silently ignore)。
 
@@ -396,6 +402,35 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 活性化と出力層の内積を融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
 それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
 
+## xtask の WebAssembly target
+
+`--target wasm32-wasip1` または `--target wasm32-unknown-unknown` を指定できます。
+省略時は従来の native build です。対象 target を `rustup target add <target>` で事前に追加してください。
+
+```sh
+cargo xtask build --edition universal --target wasm32-wasip1 --profile dev
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --target wasm32-unknown-unknown
+```
+
+成果物は `target/<target>/<profile>/rshogi-usi.wasm`（dev は debug）から
+`engines/rshogi-usi-<edition>[+features]--<target>.wasm` に配置します。
+`CARGO_TARGET_DIR` を指定した場合はその配下です。相対指定は workspace root 基準です。
+manifest の optional `target` と `list-binaries` の EDITION 列でも target を確認できます。
+従来の native 配置名と旧 manifest の読み込みは変わりません。
+
+WASM build では非空の `RUSTFLAGS`、`CARGO_ENCODED_RUSTFLAGS`、`CARGO_BUILD_RUSTFLAGS` を拒否します。
+host の `target-cpu=native` などが混入しないよう、それらを unset し、WASM 用の指定は
+`CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS` または `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS` に移してください。
+空の global flags は build 子プロセスから除き、target 専用 flags は変更せず Cargo に渡します。
+SIMD128 は target 専用 flags の `-C target-feature=+simd128` / `-C target-feature=-simd128` で切り替えます。
+同じ edition・追加 features・target の成果物は SIMD flags が違っても上書きされます。
+manifest は rustflags の完全な記録を持ちません。
+
+`--features wasm-threads` は WASM target でのみ指定できます。これは core の threaded 経路を有効化する
+build オプションであり、WASI 上の並列探索や browser の thread pool 初期化を提供しません。
+`wasm32-unknown-unknown` 成果物も browser へそのまま組み込める保証はなく、実行環境側の組込みが別途必要です。
+WASI での `MaterialLevel=1` の起動確認には `scripts/run_wasi.mjs` を利用できます。
+
 ## fixed edition の WebAssembly ビルド
 
 WASI では `node scripts/check_fixed_wasm.mjs` で、5 FT の fixed
@@ -415,7 +450,6 @@ NNUE loader・forward・探索の正当性、および browser 向けの組込�
 - `cargo xtask verify <binary>`: 既存 binary に USI smoke (usi/isready/readyok) を流す
   自動検証。preset → 推奨 NNUE model のマッピング policy 決定後に着手 (Tier 2)。
 - `cargo xtask clean --stale`: 古い binary を listing / 削除 (destructive、user 確認 prompt 付き)。
-- WASM target 整備 (Issue #740): `cargo xtask build --target wasm32-unknown-unknown` 対応。
 - preset → model 対応表 / SPSA tune 後 binary の運用 doc。
 
 ## 関連 ドキュメント

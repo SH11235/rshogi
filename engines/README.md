@@ -72,3 +72,11 @@ schema とフィールド説明は [`docs/build.md` の build manifest 節](../d
 
 PGO build は `scripts/build_pgo.sh` 経由 (xtask 統合 scope 外、`target/production/` に出力)。
 engines/ に長期保持したい場合は build 後に手動で copy + 命名する。
+
+## WASM 成果物
+
+xtask の `--target wasm32-wasip1` / `wasm32-unknown-unknown` は
+`rshogi-usi-<edition>[+features]--<target>.wasm` と `.wasm.meta.toml` を同階層に配置します。
+manifest の optional `target` で native と区別でき、旧 manifest は引き続き読めます。
+SIMD flags の違いは配置名に含まれず、同じ名前の成果物は上書きされます。
+準備と実行範囲は [WASM target の手順](../docs/build.md#xtask-の-webassembly-target)を参照してください。
