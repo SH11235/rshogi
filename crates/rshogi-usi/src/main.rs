@@ -977,7 +977,7 @@ impl UsiEngine {
                 if let Ok(threads) = value.parse::<usize>()
                     && threads >= 1
                 {
-                    self.mate_threads = threads;
+                    self.mate_threads = threads.min(512);
                 }
             }
             "EvalHash" => {
