@@ -46,7 +46,7 @@ pub(super) const MAX_DEPTH: usize = if cfg!(target_arch = "wasm32") {
 };
 
 /// 停止フラグ・時間を確かめるノード間隔
-const CHECK_INTERVAL: u64 = 1024;
+pub(super) const CHECK_INTERVAL: u64 = 1024;
 /// 子の配列 (全フレーム分を 1 本に積む) にあらかじめ確保しておく要素数。
 /// 経路上の各局面の候補手の合計で、超えたときだけ伸ばす (伸ばした領域はソルバーが持ち回る)。
 const CHILDREN_RESERVE: usize = 1 << 16;

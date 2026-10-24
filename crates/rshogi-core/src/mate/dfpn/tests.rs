@@ -485,7 +485,7 @@ fn node_limit_is_kept_exactly() {
         let result = solver.solve(&mut pos, &limits, &stop, |_| {});
         assert_eq!(result, MateResult::Unknown, "{mode:?}");
         assert!(
-            (limit + 1..=limit + 2 * 1024 + 1).contains(&solver.nodes()),
+            (limit + 1..=limit + 2 * search::CHECK_INTERVAL + 1).contains(&solver.nodes()),
             "{mode:?}: {}",
             solver.nodes()
         );
