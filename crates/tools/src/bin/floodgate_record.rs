@@ -169,7 +169,7 @@ struct Eval {
 
 /// 1 局分の集計素材。
 struct Game {
-    explicit_draw: bool,
+    incomplete: bool,
     /// ファイル名(datetime prefix を含む。表示・整列用)
     stem: String,
     sente: String,
@@ -203,8 +203,6 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
     let mut has_result = false;
     let mut csa = false;
     let mut incomplete = false;
-    let mut explicit_csa = false;
-    let mut explicit_draw = false;
 
     for line in text.lines() {
         let line = line.trim();
@@ -216,7 +214,6 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
         };
         match l.kind.as_str() {
             "meta" => {
-                explicit_csa = l.source.as_deref() == Some("csa_client");
                 csa = is_csa_jsonl(
                     l.source.as_deref(),
                     l.engine_cmd.as_ref().and_then(|v| v["note"].as_str()),
@@ -242,7 +239,6 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
             }
             "result" => {
                 has_result = true;
-                explicit_draw = explicit_csa && l.outcome.as_deref() == Some("draw");
                 incomplete |= is_incomplete_result(
                     csa,
                     l.outcome.as_deref().unwrap_or(""),
@@ -256,7 +252,7 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
         }
     }
 
-    if !has_result || incomplete {
+    if !has_result {
         return Ok(None); // 進行中 / 未完了の局はスキップ
     }
     let sente = match sente_ply1 {
@@ -271,7 +267,7 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
     };
 
     Ok(Some(Game {
-        explicit_draw,
+        incomplete,
         stem,
         sente,
         gote,
@@ -284,11 +280,11 @@ fn parse_game(path: &std::path::Path) -> Result<Option<Game>> {
 
 /// me から見た結果。`None` は集計対象外(中断/検閲/error など未完了局)。
 ///
-/// 明示的な未決結果は読込時に除外する。winner のない旧ログでは
+/// 明示的な未決結果を優先して除外する。winner のないログでは
 /// `sennichite` / `max_moves` / `jishogi` だけを引分として扱う。
 fn result_for(g: &Game, me: &str) -> Option<Res> {
-    if g.explicit_draw {
-        return Some(Res::Draw);
+    if g.incomplete {
+        return None;
     }
     match &g.winner {
         Some(w) if w == me => Some(Res::Win),
@@ -713,7 +709,7 @@ mod tests {
 
     fn game(sente: &str, gote: &str, winner: Option<&str>, reason: &str) -> Game {
         Game {
-            explicit_draw: false,
+            incomplete: false,
             stem: "t".to_owned(),
             sente: sente.to_owned(),
             gote: gote.to_owned(),

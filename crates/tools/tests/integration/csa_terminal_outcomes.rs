@@ -156,8 +156,8 @@ fn writer_terminal_results_reach_readers_without_inventing_draws() {
                 .unwrap();
             let text = String::from_utf8_lossy(&flood.stdout);
             if unfinished {
-                assert!(!flood.status.success());
-                assert!(String::from_utf8_lossy(&flood.stderr).contains("完了局の JSONL"));
+                assert!(flood.status.success(), "{}", String::from_utf8_lossy(&flood.stderr));
+                assert!(String::from_utf8_lossy(&flood.stdout).contains("中断・未完了 1 局"));
                 assert!(!text.contains("(1局)"), "{text}");
                 check_partial_analysis(&path);
             } else {
@@ -165,6 +165,7 @@ fn writer_terminal_results_reach_readers_without_inventing_draws() {
                 let counts = match expected {
                     "black_win" => "1勝 0敗 0分",
                     "white_win" => "0勝 1敗 0分",
+                    _ if reason.is_empty() => "0勝 0敗 0分",
                     _ => "0勝 0敗 1分",
                 };
                 assert!(text.contains(counts), "{text}");
@@ -199,7 +200,14 @@ fn rewrite(path: &Path, source: Option<&str>, reason: &str) {
 #[test]
 fn legacy_reasons_are_csa_only_and_ambiguous_max_moves_stays_draw() {
     for source in [None, Some("csa_client"), Some("tournament")] {
-        for reason in ["interrupted", "censored", "draw", "max_moves"] {
+        for reason in [
+            "interrupted",
+            "censored",
+            "draw",
+            "max_moves",
+            "resign",
+            "win_declaration",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let path = fixture(dir.path(), &GameResult::Draw, reason);
             rewrite(&path, source, reason);
@@ -214,12 +222,15 @@ fn legacy_reasons_are_csa_only_and_ambiguous_max_moves_stays_draw() {
                 .output()
                 .unwrap();
             if unfinished {
-                assert!(!flood.status.success());
-                assert!(String::from_utf8_lossy(&flood.stderr).contains("完了局の JSONL"));
+                assert!(flood.status.success(), "{}", String::from_utf8_lossy(&flood.stderr));
+                assert!(String::from_utf8_lossy(&flood.stdout).contains("中断・未完了 1 局"));
             } else {
                 assert!(flood.status.success(), "{}", String::from_utf8_lossy(&flood.stderr));
-                let counted = source == Some("csa_client") || reason == "max_moves";
+                let counted = reason == "max_moves";
                 let text = String::from_utf8_lossy(&flood.stdout);
+                if !counted {
+                    assert!(text.contains("中断・未完了 1 局"), "{text}");
+                }
                 assert!(
                     text.contains(if counted {
                         "0勝 0敗 1分"

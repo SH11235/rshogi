@@ -87,13 +87,13 @@ save_jsonl = true                   # false だと集計元が無くエラー(--
 - `--watch` 指定時: 注目相手との対戦一覧
 
 明示的な `interrupted` / `censored` と、旧 CSA の `draw` + 未決理由
-(`interrupted` / `censored`) は読込時に除外する。未決以外の `source: "csa_client"` +
-`outcome: "draw"` は理由の有無によらず引分とし、それ以外は `result.winner` を基準に
-勝敗を判定する（`winner==me`→勝ち、他名→負け）。winner のない旧ログは
-`reason` が `sennichite` / `max_moves` / `jishogi` の場合だけ引分に数える。
+(`interrupted` / `censored`) は勝敗集計から除外する。それ以外は `result.winner` を基準に
+勝敗を判定する（`winner==me`→勝ち、他名→負け）。winner がない場合は、
+`reason` が `sennichite` / `max_moves` / `jishogi` のときだけ引分に数える。
+理由不明の `draw` や `resign` / `win_declaration` は、サーバーの結果を受信できなかった
+旧ログと区別できないため除外する。`source: "csa_client"` だけでは新旧を識別できない。
 旧 `max_moves` は引分と打切りを復元できないため引分として保持する。
 理由の値は [csa_client の終局理由](../../../docs/csa-client.md#終局理由の記録)を参照。
 
-対象エンジンが参加していない局と、読込後に結果を判定できなかった局は除外件数を
-ヘッダに表示する。読込対象がすべて未決の場合は「完了局の JSONL が見つからない」と
-非0で終了する。
+対象エンジンが参加していない局と、中断・未完了の局は除外件数をヘッダに表示する。
+全局が未決でも結果行と指し手があれば、除外件数付きの集計0局として終了する。
