@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
+use tools::selfplay::types::ScoreBound;
 use tools::selfplay::{
-    EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
+    EngineConfig, EngineProcess, GameOutcome, ParsedPosition, build_position,
     ensure_start_positions_within_max_moves, load_start_positions,
 };
 use tools::spsa_param_mapping::{
@@ -183,6 +184,10 @@ struct Cli {
     /// パラメータ値履歴CSVの出力を無効化する
     #[arg(long, default_value_t = false)]
     no_param_values_csv: bool,
+
+    /// 棋譜 (<run-dir>/games.jsonl) と batch の摂動記録 (<run-dir>/batches.jsonl) を書かない
+    #[arg(long, default_value_t = false)]
+    no_game_records: bool,
 
     /// 乱数 seed (省略時はランダム)。SPSA の全 RNG stream は seed と batch index から
     /// 決定論的に生成されるため、同じ seed で run を 2 回回すと同じ θ 軌跡になる。
@@ -566,6 +571,10 @@ struct ResumeMetaData {
     /// SPSA schedule 上の累積 k (= 完了 game pair 数)。`completed_iterations × batch_pairs`
     /// と等価だが、明示フィールドとして持つことで future-proof + 検証用途に使う。
     completed_pairs: u32,
+    /// games.jsonl / batches.jsonl を書く run か。途中で切り替えると確定 batch の棋譜が
+    /// 欠けるので resume で一致を求める。記録機能より前の meta には無い (None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_records: Option<bool>,
 }
 
 /// 起動時に決まる SPSA 走行モード。
@@ -627,12 +636,107 @@ struct GameTask {
     game_id: u32,
 }
 
-#[derive(Clone, Copy)]
 struct GameTaskResult {
     game_idx: u32,
     plus_is_black: bool,
     plus_score: f64,
     outcome: GameOutcome,
+    game_id: u32,
+    start_pos_index: usize,
+    /// 開始局面ファイルの手順を適用した後の SFEN。`moves` はこの局面から指す。
+    startpos_sfen: String,
+    reason: String,
+    plies: u32,
+    /// この結果を得るまでに engine の通信障害で指し直した回数。
+    retries: u32,
+    moves: GameMoves,
+}
+
+/// 1 局の手ごとの記録。各配列は手順と同じ長さで、i 番目が i+1 手目に対応する。
+///
+/// 最後の要素は終局を表す `resign` / `win` / `illegal` / `none` になり得る。
+/// `reason` が `timeout` のときは最後の要素が指し手の形でも盤面に適用されていない。
+/// 評価値・深さ・nodes は主 PV の info を項目ごとに上書きした最後の値で、全要素 null の列は省く。
+#[derive(Clone, Debug, Default, Serialize)]
+struct GameMoves {
+    moves: Vec<String>,
+    elapsed_ms: Vec<u64>,
+    #[serde(skip_serializing_if = "all_none")]
+    score_cp: Vec<Option<i32>>,
+    #[serde(skip_serializing_if = "all_none")]
+    score_mate: Vec<Option<i32>>,
+    #[serde(skip_serializing_if = "all_none")]
+    score_bound: Vec<Option<ScoreBound>>,
+    #[serde(skip_serializing_if = "all_none")]
+    depth: Vec<Option<u32>>,
+    #[serde(skip_serializing_if = "all_none")]
+    nodes: Vec<Option<u64>>,
+}
+
+fn all_none<T>(values: &[Option<T>]) -> bool {
+    values.iter().all(Option::is_none)
+}
+
+impl GameMoves {
+    fn push(&mut self, event: &MoveEvent) {
+        let eval = event.eval.as_ref();
+        self.moves.push(event.move_usi.clone());
+        self.elapsed_ms.push(event.elapsed_ms);
+        self.score_cp.push(eval.and_then(|e| e.score_cp));
+        self.score_mate.push(eval.and_then(|e| e.score_mate));
+        self.score_bound.push(eval.and_then(|e| e.score_bound));
+        self.depth.push(eval.and_then(|e| e.depth));
+        self.nodes.push(eval.and_then(|e| e.nodes));
+    }
+}
+
+/// `games.jsonl` / `batches.jsonl` の版。項目の意味や型を変えたら上げる。
+const GAME_RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// `<run-dir>/games.jsonl` の 1 行 (1 局)。読み方は crates/tools/docs/spsa.md の棋譜の節。
+#[derive(Serialize)]
+struct GameRecordLine<'a> {
+    schema: &'static str,
+    version: u32,
+    mode: &'static str,
+    pair_id: u32,
+    pair_slot: u32,
+    /// async のみ。journal の `dispatch` / `received` の attempt。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    /// batch のみ。batch 番号 (1 始まり)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iteration: Option<u32>,
+    /// async のみ。係数を決めた時点の完了 pair 数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatch_k: Option<u32>,
+    game_id: u32,
+    plus_is_black: bool,
+    startpos_idx: usize,
+    startpos_sfen: &'a str,
+    outcome: &'static str,
+    plus_score: i8,
+    reason: &'a str,
+    plies: u32,
+    retries: u32,
+    #[serde(flatten)]
+    moves: &'a GameMoves,
+}
+
+/// `<run-dir>/batches.jsonl` の 1 行 (1 batch)。配列は active param を params 順に並べる。
+#[derive(Serialize)]
+struct BatchRecordLine<'a> {
+    schema: &'static str,
+    version: u32,
+    iteration: u32,
+    batch_pairs: u32,
+    k_pair_start: u32,
+    params: Vec<&'a str>,
+    c_k: Vec<f64>,
+    r_k: Vec<f64>,
+    flip: Vec<i8>,
+    plus: Vec<serde_json::Number>,
+    minus: Vec<serde_json::Number>,
 }
 
 /// 1 batch の game 集計結果。raw_result = Σ plus_score (各 game pair が +1 / 0 / -1)。
@@ -1088,6 +1192,163 @@ fn open_param_values_csv_writer(
     Ok(writer)
 }
 
+fn default_games_jsonl_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("games.jsonl")
+}
+
+fn default_batches_jsonl_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("batches.jsonl")
+}
+
+/// fresh start では空にし、resume では追記する JSONL を開く。
+///
+/// 追記側の回収 (rsync の append 転送) が先頭からの一致を前提にするため、resume で既存の
+/// 行は消さない。書き込み途中で落ちた末尾行は改行だけ補い、次の行と連結させない。
+fn open_jsonl_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
+    ensure_parent_dir(path)?;
+    let existed = path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(!resume)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    if !existed {
+        async_dispatch::sync_dir(
+            path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")),
+        )?;
+    }
+    let len = file
+        .metadata()
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len();
+    let needs_newline = if len == 0 {
+        false
+    } else {
+        file.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        last[0] != b'\n'
+    };
+    file.seek(SeekFrom::End(0))?;
+    let mut writer = BufWriter::new(file);
+    if needs_newline {
+        writer.write_all(b"\n")?;
+    }
+    Ok(writer)
+}
+
+/// 1 行を BufWriter に書く。同期は呼び出し側が `sync_jsonl` でまとめて行う。
+fn write_jsonl_line<T: Serialize>(writer: &mut BufWriter<File>, line: &T) -> Result<()> {
+    serde_json::to_writer(&mut *writer, line)?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn sync_jsonl(writer: &mut BufWriter<File>) -> Result<()> {
+    writer.flush()?;
+    writer.get_ref().sync_data()?;
+    Ok(())
+}
+
+/// batch モードの棋譜 (`games.jsonl`) と摂動 (`batches.jsonl`) の追記先。
+struct BatchRecordWriter {
+    games: BufWriter<File>,
+    batches: BufWriter<File>,
+}
+
+impl BatchRecordWriter {
+    fn open(run_dir: &Path, resume: bool) -> Result<Self> {
+        Ok(Self {
+            games: open_jsonl_writer(&default_games_jsonl_path(run_dir), resume)?,
+            batches: open_jsonl_writer(&default_batches_jsonl_path(run_dir), resume)?,
+        })
+    }
+
+    /// 1 batch 分を追記して fsync する。checkpoint (state.params / meta) より前に呼ぶ。
+    fn append_batch(
+        &mut self,
+        iteration: u32,
+        batch: &BatchRecordLine<'_>,
+        games: &[GameTaskResult],
+    ) -> Result<()> {
+        for game in games {
+            write_jsonl_line(
+                &mut self.games,
+                &GameRecordLine {
+                    schema: "spsa_game",
+                    version: GAME_RECORD_SCHEMA_VERSION,
+                    mode: "batch",
+                    pair_id: (game.game_id - 1) / 2,
+                    pair_slot: game.game_idx % 2,
+                    attempt: None,
+                    iteration: Some(iteration),
+                    dispatch_k: None,
+                    game_id: game.game_id,
+                    plus_is_black: game.plus_is_black,
+                    startpos_idx: game.start_pos_index,
+                    startpos_sfen: &game.startpos_sfen,
+                    outcome: game.outcome.label(),
+                    plus_score: game.plus_score as i8,
+                    reason: &game.reason,
+                    plies: game.plies,
+                    retries: game.retries,
+                    moves: &game.moves,
+                },
+            )?;
+        }
+        write_jsonl_line(&mut self.batches, batch)?;
+        sync_jsonl(&mut self.games)?;
+        sync_jsonl(&mut self.batches)
+    }
+}
+
+/// `batches.jsonl` の 1 行を組み立てる。plus / minus は engine へ送る文字列と同じ丸めで記録する。
+fn batch_record_line<'a>(
+    ctx: &BatchPrepCtx<'a>,
+    iteration: u32,
+    k_pair_start: u32,
+    prep: &BatchPrep,
+) -> Result<BatchRecordLine<'a>> {
+    let sent = |p: &SpsaParam, v: f64| -> Result<serde_json::Number> {
+        option_value_string(p, v)
+            .parse()
+            .with_context(|| format!("non-finite value for {}", p.name))
+    };
+    let mut line = BatchRecordLine {
+        schema: "spsa_batch",
+        version: GAME_RECORD_SCHEMA_VERSION,
+        iteration,
+        batch_pairs: u32::try_from(ctx.batch_pairs).context("batch_pairs overflow")?,
+        k_pair_start,
+        params: Vec::new(),
+        c_k: Vec::new(),
+        r_k: Vec::new(),
+        flip: Vec::new(),
+        plus: Vec::new(),
+        minus: Vec::new(),
+    };
+    for (idx, p) in ctx.params.iter().enumerate() {
+        if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
+            continue;
+        }
+        let (c_k, r_k) = ctx.param_schedules[idx].at_iteration(
+            k_pair_start,
+            ctx.big_a,
+            ctx.schedule.alpha,
+            ctx.schedule.gamma,
+        );
+        line.params.push(&p.name);
+        line.c_k.push(c_k);
+        line.r_k.push(r_k);
+        line.flip.push(prep.flips[idx] as i8);
+        line.plus.push(sent(p, prep.plus_values[idx])?);
+        line.minus.push(sent(p, prep.minus_values[idx])?);
+    }
+    Ok(line)
+}
+
 fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> Result<()> {
     writeln!(
         writer,
@@ -1216,6 +1477,7 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
             total_pairs: 0,
             batch_pairs: 0,
             completed_pairs: 0,
+            game_records: None,
         });
     }
     if version_probe.format_version == async_dispatch::ASYNC_META_FORMAT_VERSION {
@@ -2606,7 +2868,12 @@ impl<'scope> WorkerPool<'scope> {
         })
     }
 
-    fn run_batch(&self, prep: &BatchPrep, iteration: u32) -> Result<BatchGameStats> {
+    /// 1 batch の全局を指し、集計と game_idx 順に並べた各局の結果を返す。
+    fn run_batch(
+        &self,
+        prep: &BatchPrep,
+        iteration: u32,
+    ) -> Result<(BatchGameStats, Vec<GameTaskResult>)> {
         let values = Arc::new(BatchValues {
             plus: prep.plus_values.clone(),
             minus: prep.minus_values.clone(),
@@ -2635,6 +2902,7 @@ impl<'scope> WorkerPool<'scope> {
             minus_wins: 0,
             draws: 0,
         };
+        let mut games = Vec::with_capacity(game_count);
         for _ in 0..game_count {
             let result =
                 self.results.recv().context("failed to receive game result from worker")??;
@@ -2656,8 +2924,10 @@ impl<'scope> WorkerPool<'scope> {
                 result.outcome.label(),
                 result.plus_score
             );
+            games.push(result);
         }
-        Ok(stats)
+        games.sort_by_key(|game| game.game_idx);
+        Ok((stats, games))
     }
 }
 
@@ -2703,14 +2973,20 @@ fn play_pool_task(
     } else {
         (minus, plus)
     };
+    let start_pos = &ctx.start_positions[game.start_pos_index];
+    let pass_rights = ctx.game_cfg.pass_rights;
+    let startpos_sfen =
+        build_position(start_pos, pass_rights.map(|(b, _)| b), pass_rights.map(|(_, w)| w))?
+            .to_sfen();
+    let mut moves = GameMoves::default();
     let result = run_game(
         black,
         white,
-        &ctx.start_positions[game.start_pos_index],
+        start_pos,
         ctx.tc,
         ctx.game_cfg,
         game.game_id,
-        &mut |_: &MoveEvent| {},
+        &mut |event: &MoveEvent| moves.push(event),
         None,
     )?;
     if result.reason == "watchdog" {
@@ -2724,6 +3000,13 @@ fn play_pool_task(
         plus_is_black: game.plus_is_black,
         plus_score: plus_score_from_outcome(result.outcome, game.plus_is_black),
         outcome: result.outcome,
+        game_id: game.game_id,
+        start_pos_index: game.start_pos_index,
+        startpos_sfen,
+        reason: result.reason,
+        plies: result.plies,
+        retries: 0,
+        moves,
     })
 }
 
@@ -2824,7 +3107,8 @@ fn worker_loop(
                     play_pool_task(ctx, &task, plus, minus)
                 })();
                 match result {
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        result.retries = attempt;
                         if results.send(Ok(result)).is_err() {
                             return Ok(());
                         }
@@ -3444,6 +3728,13 @@ fn main() -> Result<()> {
                 let mut meta = load_meta(&meta_path).with_context(|| {
                     format!("--resume was set but metadata load failed: {}", meta_path.display())
                 })?;
+                if let Some(recorded) = meta.game_records
+                    && recorded == cli.no_game_records
+                {
+                    bail!(
+                        "この run は game records = {recorded} で始まっています。                         resume で切り替えると確定 batch の棋譜が欠けるため、                         --no-game-records の有無を開始時と揃えてください"
+                    );
+                }
                 // v3 → v4 silent migrate された meta は `schedule.total_iterations` の意味が
                 // 異なる (v3: iterations, v4: total_pairs)。silent migrate ケースでは
                 // total_iterations だけ比較対象から外す (CLI 値で上書き) ことで運用衝突を避ける。
@@ -3700,6 +3991,27 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let mut game_record_writer = if cli.no_game_records {
+        if !cli.resume {
+            // fresh start で前の run の棋譜を今回の run のものと誤読させない。
+            for path in [
+                default_games_jsonl_path(&cli.run_dir),
+                default_batches_jsonl_path(&cli.run_dir),
+            ] {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e))
+                            .with_context(|| format!("failed to remove {}", path.display()));
+                    }
+                }
+            }
+        }
+        None
+    } else {
+        Some(BatchRecordWriter::open(&cli.run_dir, cli.resume)?)
+    };
 
     // iter 0 スナップショット: 起動時の params を記録する (fresh / force-init / use-existing-fresh)。
     // resume 時は既存 CSV に既に iter 0 行が含まれる前提で append 継続するため、ここではスキップ。
@@ -3777,6 +4089,7 @@ fn main() -> Result<()> {
             total_pairs,
             batch_pairs,
             completed_pairs,
+            game_records: Some(!cli.no_game_records),
         };
         save_meta(&meta_path, &meta)?;
     }
@@ -3833,7 +4146,13 @@ fn main() -> Result<()> {
                 compute_batch_prep(&batch_ctx, batch_idx, completed_pairs, base_seed, total_games)?;
 
             // Phase B: ゲーム実行 (heavy)。
-            let stats = pool.run_batch(&prep, batch_idx + 1)?;
+            let (stats, games) = pool.run_batch(&prep, batch_idx + 1)?;
+            // checkpoint より前に書く。ここで落ちると resume で同じ iteration を指し直して
+            // 再度追記するため、読む側は iteration と pair 番号で後勝ちに重複を除く。
+            if let Some(writer) = game_record_writer.as_mut() {
+                let batch = batch_record_line(&batch_ctx, batch_idx + 1, completed_pairs, &prep)?;
+                writer.append_batch(batch_idx + 1, &batch, &games)?;
+            }
 
             // Phase C: 集計と更新。
             let games_in_batch = (this_batch_pairs * 2) as usize;
@@ -3914,6 +4233,7 @@ fn main() -> Result<()> {
                 total_pairs,
                 batch_pairs,
                 completed_pairs,
+                game_records: Some(!cli.no_game_records),
             };
             save_meta(&meta_path, &meta)?;
             eprintln!(
@@ -5044,6 +5364,7 @@ mod tests {
             total_pairs: 200,
             batch_pairs: 8,
             completed_pairs: 40,
+            game_records: Some(true),
         };
         save_meta(&path, &meta).unwrap();
         let loaded = load_meta(&path).unwrap();

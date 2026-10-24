@@ -257,6 +257,8 @@ resume 時の不変条件チェック (起動時に hard bail):
 | `<run-dir>/meta.json` | resume 用メタデータ | `--meta-file` |
 | `<run-dir>/values.csv` | batch ごとのパラメータ値履歴 | `--param-values-csv` |
 | `<run-dir>/stats.csv` | batch ごとの対局統計 (1 batch = 1 行) | `--stats-csv` |
+| `<run-dir>/games.jsonl` | 確定した局の棋譜 (1 局 1 行、追記のみ) | (なし) |
+| `<run-dir>/batches.jsonl` | batch ごとの摂動 (1 batch 1 行、追記のみ) | (なし) |
 | `<run-dir>/.lock` | 同 run-dir の二重起動を防ぐ排他 lock | (なし) |
 
 通常運用では override は不要。`runs/spsa/<timestamp>_<tag>/` 形式の dir を
@@ -782,6 +784,8 @@ run 投入前に確認する:
 | 再開メタデータ | `<run-dir>/meta.json` | `--meta-file` | — |
 | batch 統計 | `<run-dir>/stats.csv` | `--stats-csv` | `--no-stats-csv` |
 | パラメータ履歴 | `<run-dir>/values.csv` | `--param-values-csv` | `--no-param-values-csv` |
+| 棋譜 | `<run-dir>/games.jsonl` | — | `--no-game-records` |
+| batch の摂動 (batch のみ) | `<run-dir>/batches.jsonl` | — | `--no-game-records` |
 | 可視化CSV (`spsa_stats_to_plot_csv` 出力) | — | `--output-csv` | — |
 
 override フラグを使うと、対象ファイルだけ任意のパスに置ける (他は run-dir 既定のまま)。
@@ -1646,6 +1650,7 @@ engine の異常終了・切断・watchdog・spawn/初期化の失敗は、ま�
 | `snapshots/snapshot-NNNNNN.json` | θ と照合用の状態。`snapshot-000000.json` は開始時の θ と param 定義で、常に残す。ほかは最新 2 世代 |
 | `meta.json` | format v5。seed・L・schedule・param 定義と対局条件の fingerprint・spsa binary の sha256・最新 snapshot・status |
 | `stats.csv` / `values.csv` | journal から作る派生物 (下) |
+| `games.jsonl` | 確定した局の棋譜。§16 |
 | `state.params` | 最新 snapshot の θ (6 桁表示の view)。resume は読まない (無くても壊れていても再開できる) |
 | `final.params` | 完走時の θ |
 
@@ -1680,3 +1685,20 @@ active_params,avg_abs_shift,updated_params,avg_abs_update,max_abs_update
 `result` は 2 局の勝敗和 (−2〜+2)。`g*_outcome` は plus 視点の `plus_win` / `minus_win` / `draw` で、
 result=0 の二引分と一勝一敗を区別できる。`values.csv` は `completed_pairs` 列の後に各 param が並び、0 行目が開始時の θ。
 どちらも resume のたびに journal から作り直す。`spsa_stats_to_plot_csv` は async の stats.csv を 1 行 = 1 pair (2 局) として読む。
+
+## 16. 棋譜の記録と回収
+
+spsa は既定で棋譜を `<run-dir>/games.jsonl` (batch では摂動の `batches.jsonl` も) に追記する。schema・書き込みの順序・
+重複の除き方は [spsa.md の棋譜と摂動の記録](spsa.md#棋譜と摂動の記録) にある。運用上の要点:
+
+- `--no-game-records` で書かない。有無は meta に入り、resume で切り替えると拒否する。fresh start は新しい run-dir で行う
+  (同じ run-dir の fresh は `--force-init` が要り、そのとき games.jsonl も空にする)。回収先も run-dir ごとに分ける。
+- 長時間の run を別の機械から定期回収するときは、**meta (・async は snapshots/ と journal.jsonl) を先に、games.jsonl を後に**取る。
+  棋譜は checkpoint・journal の `received` より先に durable になるので、この順なら回収した meta / journal が確定とする局の行は
+  回収した games.jsonl に必ずある。
+- games.jsonl と batches.jsonl は追記だけなので rsync の追記転送 (`--append-verify`) で差分を取れる。async の journal.jsonl は
+  resume で末尾の断片を切り詰め、stats.csv / values.csv は作り直すので、通常の同期で取る。
+- async で摂動の名前と係数を復元するには gen0 snapshot (`snapshots/snapshot-000000.json`) と meta も回収する。
+  engine mapping を使う run は mapping も残す。
+- games.jsonl の末尾に確定していない局の行があるのは正常 (棋譜を書いた後、checkpoint / `received` の前に落ちた分)。
+  読む側が journal・meta と照合して捨てる。

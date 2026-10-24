@@ -601,7 +601,7 @@ impl PoolTest {
     pub(super) fn path(&self, name: &str) -> std::path::PathBuf {
         self.dir.path().join(name)
     }
-    fn run(
+    pub(super) fn run(
         &self,
         mode: &str,
         total: u32,
