@@ -2,7 +2,7 @@
 //!
 //! `book_backprop` bin と `book_mine run` の双方から呼ぶ。
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
-use rshogi_core::types::{Move, Value};
+use rshogi_core::types::{Color, Move, Piece, Square, Value};
 
 use crate::book_retrograde;
 
@@ -62,11 +62,62 @@ impl PositionEntry {
 /// 定跡の 1 候補手。
 #[derive(Debug, Clone)]
 pub struct BookMove {
-    pub move_usi: Option<String>,
-    pub ponder_usi: Option<String>,
+    pub move_usi: Option<MoveText>,
+    pub ponder_usi: Option<MoveText>,
     pub value: i32,
     pub depth: i32,
     pub count: u64,
+}
+
+/// 定跡の指し手欄の文字列。USI の指し手は最長 5 文字 (`7g7f+`、`P*5e`) なので、
+/// 数千万手を読むときにヒープ確保を避けられるよう 8 バイト以下は内側に持つ。
+/// 長い欄も書き出しで元の文字列を保つため、そのまま持つ。
+#[derive(Clone, PartialEq, Eq)]
+pub enum MoveText {
+    /// 8 バイト以下の欄。未使用の後ろは 0。
+    Inline([u8; 8]),
+    Long(Box<str>),
+}
+
+impl MoveText {
+    /// 欄の文字列から作る。
+    pub fn new(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        if bytes.len() <= 8 && !bytes.contains(&0) {
+            let mut inline = [0u8; 8];
+            inline[..bytes.len()].copy_from_slice(bytes);
+            Self::Inline(inline)
+        } else {
+            Self::Long(text.into())
+        }
+    }
+}
+
+impl std::ops::Deref for MoveText {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Inline(bytes) => {
+                let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                // `new` は str の先頭からのバイト列だけを入れ、0 を含む欄は `Long` にする。
+                std::str::from_utf8(&bytes[..len]).expect("MoveText は UTF-8 の欄から作る")
+            }
+            Self::Long(text) => text,
+        }
+    }
+}
+
+impl std::fmt::Debug for MoveText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl std::fmt::Display for MoveText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
 }
 
 /// book 内子局面への辺。
@@ -287,10 +338,10 @@ fn parse_move_line(line: &str) -> Option<BookMove> {
     })
 }
 
-fn parse_move_field(token: &str) -> Option<String> {
+fn parse_move_field(token: &str) -> Option<MoveText> {
     match token {
         "none" | "None" | "resign" => None,
-        other => Some(other.to_string()),
+        other => Some(MoveText::new(other)),
     }
 }
 
@@ -358,7 +409,7 @@ fn add_transposition_moves(book: &BookDb, graph: &mut Graph, skipped: &[bool]) -
             // 補完手には探索ラベルがない。depth=1 を出自の固定マーカーとして用い、
             // 未探索の 0/0 と区別する（伝播距離や探索した深さを表すものではない）。
             graph.added_moves[node].push(BookMove {
-                move_usi: Some(usi),
+                move_usi: Some(MoveText::new(&usi)),
                 ponder_usi: None,
                 value: 0,
                 depth: 1,
@@ -388,8 +439,20 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
                 && entry.moves.iter().all(|mv| mv.depth == 0)
         })
         .collect();
-    let node_index: BTreeMap<&str, usize> =
-        keys.iter().enumerate().map(|(idx, key)| (key.as_str(), idx)).collect();
+    // 子局面は SFEN 文字列を作らず、盤・手番・持ち駒の並び (SFEN の ply 抜き key と 1 対 1) で引く。
+    // 反転キーも各局面について一度だけ作る。反転は 1 対 1 で 2 回で戻るので、
+    // 「子局面の反転がある局面」と「反転キーが子局面に等しい局面」は同じ。
+    // 引くだけで反復しないので、ハッシュの順序は出力に影響しない。
+    let mut node_index = HashMap::with_capacity(keys.len());
+    let mut flipped_index = HashMap::with_capacity(keys.len());
+    let mut position = Position::new();
+    for (idx, entry) in book.entries.values().enumerate() {
+        position
+            .set_sfen(&entry.sfen)
+            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
+        node_index.insert(PositionKey::of(&position, false), idx);
+        flipped_index.insert(PositionKey::of(&position, true), idx);
+    }
     let preserved: Vec<_> = book
         .entries
         .values()
@@ -401,12 +464,7 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
     let mut flip_edges = 0;
     let mut illegal_moves = 0;
 
-    for (node_idx, key) in keys.iter().enumerate() {
-        let entry = book
-            .entries
-            .get(key)
-            .ok_or_else(|| anyhow!("内部エラー: entry がありません: {key}"))?;
-        let mut position = Position::new();
+    for (node_idx, entry) in book.entries.values().enumerate() {
         position
             .set_sfen(&entry.sfen)
             .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
@@ -415,23 +473,20 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
         for book_move in &entry.moves {
             let mut legal = false;
             let edge = if let Some(move_usi) = &book_move.move_usi {
-                match child_position_after_move(&entry.sfen, move_usi) {
-                    Ok(child) => {
+                match legal_move(&position, &entry.sfen, move_usi) {
+                    Ok(mv) => {
                         legal = true;
-                        let child_sfen = child.to_sfen();
-                        let child_key = strip_ply(&child_sfen);
-                        if let Some(&to) = node_index.get(child_key) {
+                        let gives_check = position.gives_check(mv);
+                        position.do_move(mv, gives_check);
+                        let child_key = PositionKey::of(&position, false);
+                        position.undo_move(mv);
+                        if let Some(&to) = node_index.get(&child_key) {
                             Some(Edge {
                                 to,
                                 via_flip: false,
                             })
                         } else {
-                            let flipped = rshogi_book::flipped_key(&child_sfen);
-                            let flipped_to = flipped
-                                .as_deref()
-                                .map(strip_ply)
-                                .and_then(|key| node_index.get(key).copied());
-                            flipped_to.map(|to| Edge { to, via_flip: true })
+                            flipped_index.get(&child_key).map(|&to| Edge { to, via_flip: true })
                         }
                     }
                     Err(err) => {
@@ -482,11 +537,48 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
     Ok(graph)
 }
 
+/// 盤 81 マスの駒・手番・先手と後手の持ち駒を並べた値。SFEN の ply 抜き key と 1 対 1 に対応する。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PositionKey([u8; 90]);
+
+impl PositionKey {
+    /// `flip` なら盤を 180 度回して先後を入れ替えた局面 (反転キー) の値にする。
+    fn of(pos: &Position, flip: bool) -> Self {
+        let mut key = [0u8; 90];
+        for sq in Square::all() {
+            let pc = pos.piece_on(sq);
+            let (sq, pc) = match (flip, pc.is_some()) {
+                (false, _) => (sq, pc),
+                (true, false) => (sq.inverse(), pc),
+                (true, true) => (sq.inverse(), Piece::new(pc.color().opponent(), pc.piece_type())),
+            };
+            key[sq.index()] = pc.raw();
+        }
+        let (side, black, white) = if flip {
+            (pos.side_to_move().opponent(), Color::White, Color::Black)
+        } else {
+            (pos.side_to_move(), Color::Black, Color::White)
+        };
+        key[81] = side.index() as u8;
+        key[82..86].copy_from_slice(&pos.hand(black).raw().to_le_bytes());
+        key[86..90].copy_from_slice(&pos.hand(white).raw().to_le_bytes());
+        Self(key)
+    }
+}
+
 /// 親局面に USI 指し手を合法性検査付きで適用した子局面を返す。
 pub fn child_position_after_move(parent_sfen: &str, move_usi: &str) -> Result<Position> {
     let mut pos = Position::new();
     pos.set_sfen(parent_sfen)
         .map_err(|e| anyhow!("親局面 SFEN が不正です: {parent_sfen}: {e}"))?;
+    let mv = legal_move(&pos, parent_sfen, move_usi)?;
+    let gives_check = pos.gives_check(mv);
+    pos.do_move(mv, gives_check);
+    Ok(pos)
+}
+
+/// 局面 `pos` (SFEN はエラー表示用) で USI 指し手を合法性検査付きで解釈する。
+fn legal_move(pos: &Position, parent_sfen: &str, move_usi: &str) -> Result<Move> {
     let decoded =
         Move::from_usi(move_usi).ok_or_else(|| anyhow!("USI 指し手が不正です: {move_usi}"))?;
     let mv = pos
@@ -495,9 +587,7 @@ pub fn child_position_after_move(parent_sfen: &str, move_usi: &str) -> Result<Po
     if mv == Move::NONE || !pos.pseudo_legal(mv) || !pos.is_legal(mv) {
         bail!("非合法手です: {move_usi}: {parent_sfen}");
     }
-    let gives_check = pos.gives_check(mv);
-    pos.do_move(mv, gives_check);
-    Ok(pos)
+    Ok(mv)
 }
 
 /// 先手・後手をそれぞれ自分として後退解析し、候補手の値を逆伝播する。
@@ -1841,6 +1931,35 @@ mod tests {
             assert!(error.to_string().contains("千日手の値は"), "{error}");
         }
         solve_rows_with(&[&[(0, None)]], DrawValues::both(-30_000), MergeMode::Replace).unwrap();
+    }
+
+    #[test]
+    fn position_key_matches_sfen_keys_including_the_flipped_one() {
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "4k4/9/4+R4/9/9/9/9/9/K8 w 2Pb3n 7",
+            "ln5nl/6gk1/p3ppgp1/P5p1p/1NPp3P1/1P2SPP1P/2+p1P4/3KG2R1/L6NL b RB2SPbgsp 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut flipped = Position::new();
+            flipped.set_sfen(&rshogi_book::flipped_key(sfen).unwrap()).unwrap();
+            assert!(PositionKey::of(&pos, true) == PositionKey::of(&flipped, false), "{sfen}");
+            assert!(PositionKey::of(&pos, false) != PositionKey::of(&flipped, false), "{sfen}");
+            let mut same = Position::new();
+            same.set_sfen(&format!("{} 99", strip_ply(sfen))).unwrap();
+            assert!(PositionKey::of(&pos, false) == PositionKey::of(&same, false), "{sfen}");
+        }
+    }
+
+    #[test]
+    fn move_text_keeps_short_and_long_fields() {
+        for text in ["7g7f", "7g7f+", "P*5e", "12345678", "longer-than-eight"] {
+            let move_text = MoveText::new(text);
+            assert_eq!(&*move_text, text);
+            assert_eq!(move_text.to_string(), text);
+            assert_eq!(matches!(move_text, MoveText::Inline(_)), text.len() <= 8);
+        }
     }
 
     #[test]
