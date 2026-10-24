@@ -345,16 +345,9 @@ journal、state dir とその管理ファイル (キュー・lock・チェック
 - 台帳の読みの再現: 対象の行のうち、番号ごとに最後の行を番号順に並べます。`nodes` では絞りません。engine は nodes 上限を少し超えてから止まるので、最後の行の `nodes` は上限を超えることがあります。
 - N ノード時点の読み (近似): 上の対象のうち `nodes` が N 以下の行に限って、番号ごとに最後の行を取ります。info 行は反復深化の 1 反復ごと (MultiPV では番号ごと) に出るので、N で止めた探索そのものではなく、N までに終わった最後の反復の結果です。`nodes` の無い行はこの比較に使えないので除きます。
 
-### Python の読みの取り込みと再生
+### 台帳からの再生
 
 ```bash
-book_mine tree import --journal /path/to/tree-journal.jsonl \
-  --engine /path/to/engine \
-  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
-  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
-  --nodes 1000000000 --multipv 3 --hash 1024 \
-  --input /path/to/python-out/d0.jsonl /path/to/python-out/d1.jsonl
-
 book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree.toml
 ```
 
@@ -370,15 +363,15 @@ stop = 300
 own = "w"
 rounds = 3
 extra = ["6b5a"]
-# fingerprint = "..."  # import / serve が表示する読み条件。省略時はプロセスの条件
+# fingerprint = "..."  # serve が表示する読み条件。省略時はプロセスの条件
 # draw = 0            # 手順上の循環に付ける手番側の値。USI DrawValue とは別
 ```
 
 paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key は手数を除く SFEN の3フィールドで、同じ根をまとめ、根の手番をそろえます。GAME は各手順の最初の `depth+1` 手を局面別に合わせます。`own` は `b` / `w`。こちらの根の EXTRA は MultiPV 内だけ、相手の根の EXTRA は合法なら採用します。
 
-import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
+条件の指紋は、engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版から作ります。
 
-replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve・import は宣言した fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。局面ごとには読み (MultiPV 数行) だけを持ちます。条件の同一性は指紋で決まり、内容が同じモデルを別のパスで指定した読みも同じ条件として使い回します。台帳の保持は 1 局面あたり 1 KiB 前後で、10 万局面で約 100 MiB です (これとは別に、各木が自分の局面の読みを持ちます)。定跡の局面を深く読む用途ではこの規模を超えない想定で、ディスク上の索引は持ちません。
+replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve は起動時の条件の fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。局面ごとには読み (MultiPV 数行) だけを持ちます。条件の同一性は指紋で決まり、内容が同じモデルを別のパスで指定した読みも同じ条件として使い回します。台帳の保持は 1 局面あたり 1 KiB 前後で、10 万局面で約 100 MiB です (これとは別に、各木が自分の局面の読みを持ちます)。定跡の局面を深く読む用途ではこの規模を超えない想定で、ディスク上の索引は持ちません。
 
 ### 別の台帳の読みの取り込み
 

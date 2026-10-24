@@ -15,7 +15,7 @@ mod transfer;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use journal::{Journal, Settings};
+use journal::Journal;
 use model::{Definition, Tree};
 use std::path::PathBuf;
 
@@ -34,8 +34,6 @@ enum TreeCommand {
     Enqueue(queue::EnqueueArgs),
     /// 受領の範囲の対象が処理され、終わるまで待つ
     Wait(queue::WaitArgs),
-    /// 宣言した条件で node_calib JSONL を取り込む
-    Import(ImportArgs),
     /// 別の台帳の読みを、条件が同じと確かめてから取り込み先の条件で足す
     ImportJournal(transfer::ImportJournalArgs),
     /// 台帳だけから木を再生成する
@@ -94,22 +92,12 @@ struct ServeArgs {
 }
 
 #[derive(Args, Debug)]
-struct ImportArgs {
-    #[arg(long)]
-    journal: PathBuf,
-    #[command(flatten)]
-    reading: ReadingArgs,
-    #[arg(long, required = true, num_args = 1..)]
-    input: Vec<PathBuf>,
-}
-
-#[derive(Args, Debug)]
 struct ReplayArgs {
     #[arg(long)]
     journal: PathBuf,
     #[arg(long)]
     tree: PathBuf,
-    /// import / serve が表示する読み条件の指紋。省略時は台帳内の唯一の条件
+    /// serve が表示する読み条件の指紋。省略時は台帳内の唯一の条件
     #[arg(long)]
     fingerprint: Option<String>,
 }
@@ -122,13 +110,6 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Wait(args) => queue::wait(args),
         TreeCommand::Register(args) => register::run(args),
         TreeCommand::ImportJournal(args) => transfer::run(args),
-        TreeCommand::Import(args) => {
-            let settings = Settings::new(&args.reading)?;
-            let mut journal = Journal::open(&args.journal, &settings.fingerprint)?;
-            journal.import(&args.input, &settings)?;
-            println!("fingerprint={}", settings.fingerprint);
-            Ok(())
-        }
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
