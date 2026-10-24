@@ -1,7 +1,7 @@
 //! spsa の棋譜 (`games.jsonl`) と batch の摂動 (`batches.jsonl`) の結合テスト。
 //!
 //! 読み方は crates/tools/docs/spsa.md の規則に従う: 読めない行は捨て、async は journal の `received`、
-//! batch は `meta.completed_iterations` で確定した局だけを、番号ごとに後の行で採る。
+//! batch は `meta.completed_pairs` で確定した局だけを、番号ごとに後の行で採る。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -108,20 +108,25 @@ fn confirmed_async_games(test: &PoolTest) -> BTreeMap<(u64, u64), serde_json::Va
     games
 }
 
-/// batch の規則: completed_iterations 以下の行を (iteration, pair_id, slot) ごとに後勝ちで採る。
-fn confirmed_batch_games(test: &PoolTest) -> BTreeMap<(u64, u64, u64), serde_json::Value> {
-    let completed = test.meta()["completed_iterations"].as_u64().unwrap();
-    records(test, "games.jsonl")
+/// batch の規則: (pair_id, slot) ごとに後勝ちで採り、pair_id < completed_pairs のものを残す。
+fn confirmed_batch_games(test: &PoolTest) -> BTreeMap<(u64, u64), serde_json::Value> {
+    let completed = test.meta()["completed_pairs"].as_u64().unwrap();
+    let last: BTreeMap<(u64, u64), serde_json::Value> = records(test, "games.jsonl")
         .into_iter()
-        .filter(|g| g["iteration"].as_u64().unwrap() <= completed)
-        .map(|g| {
-            let key = (
-                g["iteration"].as_u64().unwrap(),
-                g["pair_id"].as_u64().unwrap(),
-                g["pair_slot"].as_u64().unwrap(),
-            );
-            (key, g)
-        })
+        .map(|g| ((g["pair_id"].as_u64().unwrap(), g["pair_slot"].as_u64().unwrap()), g))
+        .collect();
+    last.into_iter().filter(|((pair_id, _), _)| *pair_id < completed).collect()
+}
+
+/// batches.jsonl の規則: k_pair_start ごとに後勝ちで採り、k_pair_start + batch_pairs <= completed_pairs を残す。
+fn confirmed_batches(test: &PoolTest) -> BTreeMap<u64, serde_json::Value> {
+    let completed = test.meta()["completed_pairs"].as_u64().unwrap();
+    let last: BTreeMap<u64, serde_json::Value> = records(test, "batches.jsonl")
+        .into_iter()
+        .map(|b| (b["k_pair_start"].as_u64().unwrap(), b))
+        .collect();
+    last.into_iter()
+        .filter(|(k, b)| k + b["batch_pairs"].as_u64().unwrap() <= completed)
         .collect()
 }
 
@@ -314,8 +319,9 @@ fn batch_crash_after_records_rewrites_the_iteration() {
     let confirmed = confirmed_batch_games(&test);
     assert_eq!(confirmed.len(), 8);
     // 捨てた batch 2 の行より、指し直した batch 2 の行が採られる。
-    assert_eq!(confirmed[&(2, 1, 0)], games[4]);
-    assert_eq!(confirmed[&(2, 1, 1)], games[5]);
+    assert_eq!(confirmed[&(1, 0)], games[4]);
+    assert_eq!(confirmed[&(1, 1)], games[5]);
+    assert_eq!(confirmed_batches(&test).len(), 4);
     let batches = records(&test, "batches.jsonl");
     assert_eq!(batches.len(), 5);
     assert_eq!(batches.iter().filter(|b| b["iteration"] == 2).count(), 2);
@@ -337,6 +343,41 @@ fn make_legacy_meta(test: &PoolTest, v3: bool) {
 
 fn run_bytes(test: &PoolTest, file: &str) -> Option<Vec<u8>> {
     std::fs::read(test.path(&format!("run/{file}"))).ok()
+}
+
+#[test]
+fn batch_resume_with_smaller_batches_reads_by_pair_id() {
+    let test = PoolTest::new();
+    // batch 1 (pair 0・1) の棋譜を書いた後、checkpoint の前に落ちる。
+    let output = test.run(
+        "value_driven",
+        4,
+        2,
+        1,
+        &[],
+        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:1"))],
+    );
+    assert_eq!(output.status.code(), Some(86));
+    assert_eq!(test.meta()["completed_pairs"], 0);
+    // batch の大きさを変えて指し直すと、pair 1 は iteration 2 として書き直される。
+    assert_success(&test.run(
+        "value_driven",
+        4,
+        1,
+        1,
+        &["--resume", "--force-unlock", "--force-schedule"],
+        &[],
+    ));
+    let games = records(&test, "games.jsonl");
+    assert_eq!(games.len(), 12);
+    let confirmed = confirmed_batch_games(&test);
+    assert_eq!(confirmed.len(), 8);
+    for ((pair_id, _), game) in &confirmed {
+        assert_eq!(game["iteration"], pair_id + 1, "{game}");
+    }
+    let batches = confirmed_batches(&test);
+    assert_eq!(batches.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    assert!(batches.values().all(|b| b["batch_pairs"] == 1));
 }
 
 #[test]

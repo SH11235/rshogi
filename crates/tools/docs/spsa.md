@@ -78,8 +78,11 @@ checkpoint の前に落ちると、確定していない行が残る。spsa は�
    採る。同じ組が複数あれば後の行。`plus_is_black`・`plus_score`・`reason`・`plies` は `received` の `games` と一致する。
    θ の更新に使った局だけを見たいときは、さらに `accept` がある pair に絞る。`received` の前に落ちた pair は resume で attempt を
    上げて指し直すので、古い attempt の行は孤立して残る。
-3. batch: `iteration <= meta.completed_iterations` の行を `(iteration, pair_id, pair_slot)` ごとに後の行で採る。batches.jsonl は
-   `iteration` ごとに後の行。捨てた batch を resume で指し直すと同じ番号の行が後に追記される (開始局面や確定値が同じとは限らない)。
+3. batch: `(pair_id, pair_slot)` ごとに後の行を採り、`pair_id < meta.completed_pairs` のものを確定とする。batches.jsonl は
+   `k_pair_start` ごとに後の行を採り、`k_pair_start + batch_pairs <= meta.completed_pairs` のものを確定とする。
+   `pair_id` は batch の大きさによらず累積の局数から決まり、確定した pair は 0 から連続する。捨てた batch を resume で
+   指し直すと同じ `pair_id` の行が後に追記される (`--force-schedule` で batch の大きさを変えた場合も、開始局面や確定値が
+   同じとは限らない場合も、この規則で読める)。`iteration` は表示用で、重複の判定には使わない。
 4. 確定した pair の 2 行が揃わなければ、回収の途中なら未回収、最終の確認では異常として扱う。async の resume は journal の
    `received` ごとに 2 行があるかを確かめ、欠けていれば警告する (run は止めない)。
 
