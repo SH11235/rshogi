@@ -446,12 +446,16 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
     let mut node_index = HashMap::with_capacity(keys.len());
     let mut flipped_index = HashMap::with_capacity(keys.len());
     let mut position = Position::new();
-    for (idx, entry) in book.entries.values().enumerate() {
+    for ((idx, entry), key) in book.entries.values().enumerate().zip(&keys) {
         position
             .set_sfen(&entry.sfen)
             .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
-        node_index.insert(PositionKey::of(&position, false), idx);
-        flipped_index.insert(PositionKey::of(&position, true), idx);
+        // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ局面の行は
+        // 別の局面として残し、索引には入れない。
+        if strip_ply(&position.to_sfen()) == key {
+            node_index.insert(PositionKey::of(&position, false), idx);
+            flipped_index.insert(PositionKey::of(&position, true), idx);
+        }
     }
     let preserved: Vec<_> = book
         .entries
@@ -1950,6 +1954,28 @@ mod tests {
             same.set_sfen(&format!("{} 99", strip_ply(sfen))).unwrap();
             assert!(PositionKey::of(&pos, false) == PositionKey::of(&same, false), "{sfen}");
         }
+    }
+
+    #[test]
+    fn children_join_only_the_canonical_spelling_of_a_position() {
+        let parent = "4k4/9/9/9/9/9/9/9/4K4 b GP 1";
+        let child = child_position_after_move(parent, "5i5h").unwrap().to_sfen();
+        let canonical = strip_ply(&child).to_string();
+        let (board, rest) = canonical.split_once(' ').unwrap();
+        let (side, hand) = rest.split_once(' ').unwrap();
+        let reversed: String = hand.chars().rev().collect();
+        assert_ne!(reversed, hand);
+        let other = format!("{board} {side} {reversed}");
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {parent}\n5i5h none 0 10 1\nsfen {canonical} 2\n5a4a none 30 10 1\nsfen {other} 2\n5a4a none 90 10 1\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.db");
+        std::fs::write(&path, input).unwrap();
+        let book = read_book_db(&path).unwrap();
+        let graph = build_graph(&book).unwrap();
+        let node = |key: &str| graph.keys.iter().position(|k| k == key).unwrap();
+        assert_eq!(graph.moves[node(strip_ply(parent))][0].edge.unwrap().to, node(&canonical));
     }
 
     #[test]
