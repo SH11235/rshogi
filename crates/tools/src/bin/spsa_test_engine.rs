@@ -1,7 +1,8 @@
 //! SPSA 統合テスト用 USI mock。設定は子プロセスの環境変数から読む。
 //!
 //! `SPSA_TEST_ENGINE_MODE` の mode:
-//! - `resign`（既定）: 即投了。`value_driven`: INT >= 6 なら win、それ以外は resign。
+//! - `resign`（既定）: 即投了。`value_driven`: `info depth 3 nodes 100+INT score cp 10×INT` を
+//!   出してから、INT >= 6 なら win、それ以外は resign。
 //! - `hang_on_go`: 探索に無応答。`stop_then_bestmove`: stop 後に resign。
 //! - `info_flood`: go 後に info を出し続ける。`exit_on_go`: go で異常終了。
 //! - `ignore_quit`: 即投了するが quit を無視する。
@@ -168,7 +169,26 @@ fn main() {
                     }
                     None
                 }
-                "value_driven" if value >= 6 => Some("bestmove win"),
+                "value_driven" => {
+                    // games.jsonl の評価値の列を確かめるため、bestmove の前に info を 1 行出す。
+                    let mut stdout = std::io::stdout().lock();
+                    if writeln!(
+                        stdout,
+                        "info depth 3 nodes {} score cp {}",
+                        100 + value,
+                        value * 10
+                    )
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+                    {
+                        break;
+                    }
+                    Some(if value >= 6 {
+                        "bestmove win"
+                    } else {
+                        "bestmove resign"
+                    })
+                }
                 _ => Some("bestmove resign"),
             }
         } else if trimmed == "stop" && mode == "stop_then_bestmove" {

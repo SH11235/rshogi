@@ -499,6 +499,16 @@ impl<'a> AsyncCore<'a> {
         (plus, minus)
     }
 
+    /// 実行中の現 attempt なら、その dispatch を返す。それ以外の結果は duplicate になる。
+    fn current_dispatch(&self, pair_id: u32, attempt: u32) -> Option<&DispatchRecord> {
+        self.pairs
+            .get(&pair_id)
+            .filter(|entry| {
+                entry.status == PairStatus::InFlight && entry.dispatch.attempt == attempt
+            })
+            .map(|entry| &entry.dispatch)
+    }
+
     /// 結果を受け取る。実行中の現 attempt 以外の結果は duplicate として記録だけ残す。
     fn on_done(
         &mut self,
@@ -506,10 +516,7 @@ impl<'a> AsyncCore<'a> {
         attempt: u32,
         games: [GameRecord; 2],
     ) -> Result<Vec<CoreOutput>> {
-        let current = self.pairs.get(&pair_id).is_some_and(|entry| {
-            entry.status == PairStatus::InFlight && entry.dispatch.attempt == attempt
-        });
-        if !current {
+        if self.current_dispatch(pair_id, attempt).is_none() {
             if !self.accepted.contains(&pair_id) && !self.pairs.contains_key(&pair_id) {
                 bail!("result for unknown pair {pair_id}");
             }
@@ -771,12 +778,23 @@ struct PairTask {
     minus: Vec<f64>,
 }
 
+/// journal に載せない 1 局の棋譜。games.jsonl にだけ書く。
+#[derive(Clone, Debug)]
+struct GameDetail {
+    game_id: u32,
+    startpos_sfen: String,
+    moves: GameMoves,
+}
+
 #[derive(Debug)]
 enum WorkerMessage {
     Done {
         pair_id: u32,
         attempt: u32,
         games: [GameRecord; 2],
+        details: Box<[GameDetail; 2]>,
+        /// 同じ attempt の中で engine の通信障害により pair を指し直した回数。
+        retries: u32,
     },
     /// `--engine-retries` を使い切った infra 失敗。coordinator が次の attempt を出す。
     Failed {
@@ -792,14 +810,20 @@ fn play_pair(
     task: &PairTask,
     plus: &mut EngineProcess,
     minus: &mut EngineProcess,
-) -> Result<[GameRecord; 2]> {
+) -> Result<([GameRecord; 2], [GameDetail; 2])> {
     use tools::selfplay::game::EngineFailure;
     apply_parameter_vector(plus, ctx.params, &task.plus, ctx.translator, ctx.application_mask)
         .context(EngineFailure)?;
     apply_parameter_vector(minus, ctx.params, &task.minus, ctx.translator, ctx.application_mask)
         .context(EngineFailure)?;
     let first_game_id = task.pair_id.checked_mul(2).context("game id overflow")?;
+    let start_pos = &ctx.start_positions[task.start_pos_index];
+    let pass_rights = ctx.game_cfg.pass_rights;
+    let startpos_sfen =
+        build_position(start_pos, pass_rights.map(|(b, _)| b), pass_rights.map(|(_, w)| w))?
+            .to_sfen();
     let mut games = Vec::with_capacity(2);
+    let mut details = Vec::with_capacity(2);
     for (offset, plus_is_black) in [(1u32, true), (2, false)] {
         plus.new_game().context(EngineFailure)?;
         minus.new_game().context(EngineFailure)?;
@@ -808,14 +832,16 @@ fn play_pair(
         } else {
             (&mut *minus, &mut *plus)
         };
+        let game_id = first_game_id.checked_add(offset).context("game id overflow")?;
+        let mut moves = GameMoves::default();
         let result = run_game(
             black,
             white,
-            &ctx.start_positions[task.start_pos_index],
+            start_pos,
             ctx.tc,
             ctx.game_cfg,
-            first_game_id.checked_add(offset).context("game id overflow")?,
-            &mut |_: &MoveEvent| {},
+            game_id,
+            &mut |event: &MoveEvent| moves.push(event),
             None,
         )?;
         if result.reason == "watchdog" {
@@ -830,10 +856,17 @@ fn play_pair(
             reason: result.reason,
             plies: result.plies,
         });
+        details.push(GameDetail {
+            game_id,
+            startpos_sfen: startpos_sfen.clone(),
+            moves,
+        });
     }
-    let second = games.pop().context("pair must have two games")?;
-    let first = games.pop().context("pair must have two games")?;
-    Ok([first, second])
+    let games: [GameRecord; 2] =
+        games.try_into().map_err(|_| anyhow::anyhow!("pair must have two games"))?;
+    let details: [GameDetail; 2] =
+        details.try_into().map_err(|_| anyhow::anyhow!("pair must have two games"))?;
+    Ok((games, details))
 }
 
 fn async_worker_loop(
@@ -867,7 +900,7 @@ fn async_worker_loop(
                     play_pair(ctx, &task, plus, minus)
                 })();
                 match played {
-                    Ok(games) => {
+                    Ok((games, details)) => {
                         failure = None;
                         let sends = if faults.duplicates(task.pair_id) {
                             2
@@ -879,6 +912,8 @@ fn async_worker_loop(
                                 pair_id: task.pair_id,
                                 attempt: task.attempt,
                                 games: games.clone(),
+                                details: Box::new(details.clone()),
+                                retries: try_index,
                             };
                             if results.send(Ok(message)).is_err() {
                                 return Ok(());
@@ -1018,13 +1053,13 @@ impl Drop for AsyncPool<'_> {
 
 /// `RSHOGI_SPSA_FAULT=<point>:<n>` で n 回目の通過時に process を終了させ、crash 境界からの
 /// resume を結合テストで再現する。`duplicate_result:<pair_id>` はその pair の結果を 2 度送る。
-struct FaultPlan {
+pub(super) struct FaultPlan {
     point: Option<(String, u32)>,
     hits: std::sync::atomic::AtomicU32,
 }
 
 impl FaultPlan {
-    fn from_env() -> Result<Self> {
+    pub(super) fn from_env() -> Result<Self> {
         let point = match std::env::var("RSHOGI_SPSA_FAULT") {
             Ok(text) => {
                 let (name, n) =
@@ -1039,7 +1074,7 @@ impl FaultPlan {
         })
     }
 
-    fn hit(&self, name: &str) {
+    pub(super) fn hit(&self, name: &str) {
         if let Some((point, n)) = &self.point
             && point == name
             && self.hits.fetch_add(1, Ordering::AcqRel) + 1 == *n
@@ -1173,6 +1208,10 @@ struct AsyncMeta {
     holds: u64,
     max_observed_lag: u32,
     updated_at_utc: String,
+    /// games.jsonl を書く run か。途中で切り替えると received 済みの pair の棋譜が欠けるので、
+    /// resume で一致を求める。
+    #[serde(default)]
+    game_records: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1236,14 +1275,14 @@ fn param_definition_sha256(definitions: &[ParamDefinition]) -> Result<String> {
 /// rename の永続化に親 dir の fsync が要る (Linux)。std では Windows の dir handle を開けないため、
 /// Windows は process crash までを保証範囲にする。
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> Result<()> {
+pub(super) fn sync_dir(dir: &Path) -> Result<()> {
     File::open(dir)
         .and_then(|dir| dir.sync_all())
         .with_context(|| format!("failed to fsync directory {}", dir.display()))
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> Result<()> {
+pub(super) fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1535,6 +1574,8 @@ struct Store<'a> {
     meta: AsyncMeta,
     definitions: Vec<ParamDefinition>,
     journal: Journal,
+    /// `--no-game-records` なら None。
+    games: Option<BufWriter<File>>,
     csv: CsvOutputs,
     generation: u64,
     applied_since_snapshot: u32,
@@ -1648,10 +1689,15 @@ impl Store<'_> {
 }
 
 fn remove_async_artifacts(run_dir: &Path) -> Result<()> {
-    let journal = run_dir.join(JOURNAL_FILE);
-    if journal.exists() {
-        std::fs::remove_file(&journal)
-            .with_context(|| format!("failed to remove {}", journal.display()))?;
+    for path in [
+        run_dir.join(JOURNAL_FILE),
+        default_games_jsonl_path(run_dir),
+        default_batches_jsonl_path(run_dir),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
     }
     let snapshots = run_dir.join(SNAPSHOT_DIR);
     if snapshots.exists() {
@@ -1828,6 +1874,13 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 meta.coordinator_sha256
             );
         }
+        if meta.game_records == cli.no_game_records {
+            bail!(
+                "この run は game records = {} で始まっています。resume で切り替えると received 済みの \
+                 pair の棋譜が欠けるため、--no-game-records の有無を開始時と揃えてください",
+                meta.game_records
+            );
+        }
         meta
     } else {
         let max_lag = match cli.max_lag {
@@ -1873,6 +1926,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             holds: 0,
             max_observed_lag: 0,
             updated_at_utc: Utc::now().to_rfc3339(),
+            game_records: !cli.no_game_records,
         }
     };
     eprintln!("using base seed: {}", meta.base_seed);
@@ -1916,9 +1970,16 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             verified = true;
             Ok(())
         };
+        let mut received = Vec::new();
         let valid_len = read_journal(&journal_path, |offset, record| {
             if offset == latest.journal_offset {
                 verify(&core)?;
+            }
+            if let JournalRecord::Received {
+                pair_id, attempt, ..
+            } = record
+            {
+                received.push((*pair_id, *attempt));
             }
             if let Some(row) = core.replay(record)? {
                 csv.write(&row)?;
@@ -1937,11 +1998,18 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             );
         }
         csv.commit()?;
+        let games = if !cli.no_game_records {
+            report_missing_game_records(&default_games_jsonl_path(run_dir), &received)?;
+            Some(open_jsonl_writer(&default_games_jsonl_path(run_dir), true)?)
+        } else {
+            None
+        };
         let mut store = Store {
             cli,
             meta,
             definitions,
             journal: Journal::open_at(&journal_path, valid_len)?,
+            games,
             csv,
             generation: latest.generation,
             applied_since_snapshot: 0,
@@ -1959,11 +2027,17 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         sync_dir(run_dir)?;
         let mut csv = CsvOutputs::begin(cli, &core.params)?;
         csv.commit()?;
+        let games = if !cli.no_game_records {
+            Some(open_jsonl_writer(&default_games_jsonl_path(run_dir), false)?)
+        } else {
+            None
+        };
         let mut store = Store {
             cli,
             meta,
             definitions,
             journal: Journal::create(&journal_path)?,
+            games,
             csv,
             generation: 0,
             applied_since_snapshot: 0,
@@ -2040,6 +2114,98 @@ fn print_counters(label: &str, core: &AsyncCore<'_>) {
     );
 }
 
+/// pair の 2 局を games.jsonl に書いて fsync する。
+fn write_pair_games(
+    writer: &mut BufWriter<File>,
+    dispatch: &DispatchRecord,
+    games: &[GameRecord; 2],
+    details: &[GameDetail; 2],
+    retries: u32,
+) -> Result<()> {
+    for (slot, (game, detail)) in games.iter().zip(details.iter()).enumerate() {
+        write_jsonl_line(
+            writer,
+            &GameRecordLine {
+                schema: "spsa_game",
+                version: GAME_RECORD_SCHEMA_VERSION,
+                mode: "async",
+                pair_id: dispatch.pair_id,
+                pair_slot: slot as u32,
+                attempt: Some(dispatch.attempt),
+                iteration: None,
+                dispatch_k: Some(dispatch.dispatch_k),
+                game_id: detail.game_id,
+                plus_is_black: game.plus_is_black,
+                startpos_idx: dispatch.start_pos_index,
+                startpos_sfen: &detail.startpos_sfen,
+                outcome: plus_outcome_to_game_outcome(game.plus_score, game.plus_is_black),
+                plus_score: game.plus_score,
+                reason: &game.reason,
+                plies: game.plies,
+                retries,
+                moves: &detail.moves,
+            },
+        )?;
+    }
+    sync_jsonl(writer)
+}
+
+fn plus_outcome_to_game_outcome(plus_score: i8, plus_is_black: bool) -> &'static str {
+    match (plus_score.signum(), plus_is_black) {
+        (0, _) => GameOutcome::Draw.label(),
+        (1, true) | (-1, false) => GameOutcome::BlackWin.label(),
+        _ => GameOutcome::WhiteWin.label(),
+    }
+}
+
+/// resume 時に、journal の received ごとに games.jsonl の 2 行があるかを確かめて警告する。
+///
+/// 欠けていても run は止めない (数十時間の run を棋譜の欠落で失わない)。読めない行は
+/// 書き込み途中で落ちた末尾として数えるだけにする。
+fn report_missing_game_records(path: &Path, received: &[(u32, u32)]) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Key {
+        pair_id: u32,
+        pair_slot: u32,
+        attempt: Option<u32>,
+    }
+    let mut present = HashSet::new();
+    let mut unreadable = 0u64;
+    if path.exists() {
+        let reader = BufReader::new(
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
+        );
+        for line in reader.split(b'\n') {
+            let line = line?;
+            match serde_json::from_slice::<Key>(&line) {
+                Ok(key) => {
+                    present.insert((key.pair_id, key.attempt, key.pair_slot));
+                }
+                Err(_) if line.is_empty() => {}
+                Err(_) => unreadable += 1,
+            }
+        }
+    }
+    let missing: Vec<_> = received
+        .iter()
+        .filter(|&&(pair_id, attempt)| {
+            (0..2).any(|slot| !present.contains(&(pair_id, Some(attempt), slot)))
+        })
+        .collect();
+    if unreadable > 0 {
+        eprintln!("warning: {} の読めない行 {unreadable} 件を無視します", path.display());
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "warning: received 済みの {} pair の棋譜が {} にありません (先頭: {:?})",
+            missing.len(),
+            path.display(),
+            &missing[..missing.len().min(8)]
+        );
+    }
+    Ok(())
+}
+
 /// 空いた worker に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
 fn coordinate(
     core: &mut AsyncCore<'_>,
@@ -2096,8 +2262,19 @@ fn coordinate(
                 pair_id,
                 attempt,
                 games,
+                details,
+                retries,
             } => {
                 in_flight.remove(&(pair_id, attempt));
+                // received より先に durable にする。失敗したら core を進めずに終わり、
+                // snapshot も書かない (journal と core がずれない)。
+                if let (Some(writer), Some(dispatch)) =
+                    (store.games.as_mut(), core.current_dispatch(pair_id, attempt))
+                {
+                    write_pair_games(writer, dispatch, &games, &details, retries)?;
+                    store.faults.fail("games_write")?;
+                    store.faults.hit("after_games");
+                }
                 let outputs = core.on_done(pair_id, attempt, games)?;
                 store.emit(core, outputs)?;
             }
