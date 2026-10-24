@@ -140,8 +140,9 @@ pub struct Graph {
     /// 局面 `v` の `sfen` 行の入力での位置は `blocks[block_start[v]..block_start[v + 1]]` (入力順)。
     block_start: Vec<u32>,
     blocks: Vec<u64>,
-    /// 局面の入力の行のハッシュ値。書き出しで読み直した行と比べる。
-    row_hash: Vec<u64>,
+    /// 局面の `sfen` 行と指し手行のハッシュ値と、入力のバイト数。読み直した入力を 1 回目と比べる。
+    hashes: Vec<u64>,
+    source_len: u64,
     old: Vec<i32>,
     new: Vec<i32>,
     /// 行き先の局面。book 内に子局面が無ければ `NONE`。
@@ -528,13 +529,22 @@ struct LineReader {
 
 impl LineReader {
     fn open(path: &Path) -> Result<Self> {
-        let file =
-            File::open(path).with_context(|| format!("定跡を開けません: {}", path.display()))?;
+        let file = File::open(path)?;
         Ok(Self {
             inner: BufReader::new(file),
             pos: 0,
             line: String::new(),
         })
+    }
+
+    /// 1 回目に読んだときと同じ長さの入力を読み直す。
+    fn reopen(path: &Path, len: u64) -> Result<Self> {
+        let reader =
+            Self::open(path).with_context(|| format!("定跡を開けません: {}", path.display()))?;
+        if reader.inner.get_ref().metadata()?.len() != len {
+            bail!("{CHANGED}: {}", path.display());
+        }
+        Ok(reader)
     }
 
     /// 次の行と、その先頭の位置。
@@ -611,35 +621,65 @@ fn parse_row(line: &str) -> RowFields<'_> {
     }
 }
 
-/// ply 抜き key が `key` の局面の入力の行を、`sfen` 行ごとに入力の順で `f` へ渡し、行のハッシュ値を返す。
-/// 読み直すたびにハッシュ値を比べ、入力が途中で書き換わっていないことを確かめる。
+/// `sfen` 行の SFEN と、次の `sfen` 行までの指し手行のハッシュ値。読み直した内容を 1 回目と比べる。
+struct BlockHash(DefaultHasher);
+
+impl BlockHash {
+    fn new(sfen: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        hasher.write(sfen.as_bytes());
+        hasher.write_u8(b'\n');
+        Self(hasher)
+    }
+
+    fn row(&mut self, row: &str) {
+        self.0.write(row.as_bytes());
+        self.0.write_u8(b'\n');
+    }
+}
+
+/// 局面の `sfen` 行ごとのハッシュ値を入力の順にまとめる。
+fn node_hash(blocks: impl IntoIterator<Item = u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for block in blocks {
+        hasher.write_u64(block);
+    }
+    hasher.finish()
+}
+
+/// 局面の入力の行を、`sfen` 行ごとに入力の順で `f` へ渡す。読んだ内容が 1 回目と同じ (ハッシュ値が `expected`) か確かめる。
 fn for_each_row(
     reader: &mut LineReader,
     blocks: &[u64],
-    key: &str,
+    expected: u64,
     mut f: impl FnMut(&str) -> Result<()>,
-) -> Result<u64> {
-    let mut hasher = DefaultHasher::new();
+) -> Result<()> {
+    let mut hashes = Vec::with_capacity(blocks.len());
     for &offset in blocks {
         reader.seek(offset)?;
-        match reader.next_line()? {
-            Some((_, line)) if matches!(classify(line), Line::Sfen(sfen) if strip_ply(sfen) == key) =>
-                {}
-            _ => bail!(CHANGED),
-        }
+        let mut hash = match reader.next_line()? {
+            Some((_, line)) => match classify(line) {
+                Line::Sfen(sfen) => BlockHash::new(sfen),
+                _ => bail!(CHANGED),
+            },
+            None => bail!(CHANGED),
+        };
         while let Some((_, line)) = reader.next_line()? {
             match classify(line) {
                 Line::Skip => {}
                 Line::Sfen(_) => break,
                 Line::Row(row) => {
-                    hasher.write(row.as_bytes());
-                    hasher.write_u8(b'\n');
+                    hash.row(row);
                     f(row)?;
                 }
             }
         }
+        hashes.push(hash.0.finish());
     }
-    Ok(hasher.finish())
+    if node_hash(hashes) != expected {
+        bail!(CHANGED);
+    }
+    Ok(())
 }
 
 /// 1 回目の読み込みで集める局面の一覧。局面は ply 抜き key の昇順。
@@ -648,6 +688,10 @@ struct Scan {
     rows: Vec<u32>,
     block_start: Vec<u32>,
     blocks: Vec<u64>,
+    /// 局面の `sfen` 行と指し手行のハッシュ値 ([`node_hash`])。
+    hashes: Vec<u64>,
+    /// 入力のバイト数。
+    len: u64,
 }
 
 /// 局面の key・代表 SFEN・行の数と、`sfen` 行の位置を集める。
@@ -657,13 +701,17 @@ fn scan(path: &Path) -> Result<Scan> {
     let mut plies = Vec::new();
     let mut rows: Vec<u32> = Vec::new();
     let mut table = IdTable::default();
-    let mut blocks: Vec<(u32, u64)> = Vec::new();
+    let mut blocks: Vec<(u32, u64, u64)> = Vec::new();
     let mut total_rows = 0u32;
     let mut current = None;
+    let mut hash: Option<BlockHash> = None;
     while let Some((offset, line)) = reader.next_line()? {
         match classify(line) {
             Line::Skip => {}
             Line::Sfen(sfen) => {
+                if let Some(hash) = hash.replace(BlockHash::new(sfen)) {
+                    blocks.last_mut().expect("ハッシュ値は sfen 行ごとに作る").2 = hash.0.finish();
+                }
                 let key = strip_ply(sfen);
                 let hash = hash_bytes(key.as_bytes());
                 let id = match table.find(hash, |id| strip_ply(sfens.get(id as usize)) == key) {
@@ -686,18 +734,23 @@ fn scan(path: &Path) -> Result<Scan> {
                         id
                     }
                 };
-                blocks.push((id, offset));
+                blocks.push((id, offset, 0));
                 current = Some(id);
             }
-            Line::Row(_) => {
-                if let Some(id) = current {
+            Line::Row(row) => {
+                if let (Some(id), Some(hash)) = (current, hash.as_mut()) {
                     total_rows = total_rows.checked_add(1).context("手が多すぎます")?;
                     rows[id as usize] += 1;
+                    hash.row(row);
                 }
             }
         }
     }
-    drop((table, plies));
+    if let Some(hash) = hash {
+        blocks.last_mut().expect("ハッシュ値は sfen 行ごとに作る").2 = hash.0.finish();
+    }
+    let len = reader.pos;
+    drop((reader, table, plies));
     let mut order: Vec<u32> = (0..sfens.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
         strip_ply(sfens.get(a as usize)).cmp(strip_ply(sfens.get(b as usize)))
@@ -717,17 +770,25 @@ fn scan(path: &Path) -> Result<Scan> {
         bail!("sfen 行が多すぎます");
     }
     let mut block_start = vec![0u32; sfens.len() + 1];
-    for &(node, _) in &blocks {
+    for &(node, _, _) in &blocks {
         block_start[node as usize + 1] += 1;
     }
     for node in 0..sfens.len() {
         block_start[node + 1] += block_start[node];
     }
+    let hashes = (0..sfens.len())
+        .map(|node| {
+            let range = block_start[node] as usize..block_start[node + 1] as usize;
+            node_hash(blocks[range].iter().map(|&(_, _, hash)| hash))
+        })
+        .collect();
     Ok(Scan {
         sfens,
         rows,
         block_start,
-        blocks: blocks.into_iter().map(|(_, offset)| offset).collect(),
+        blocks: blocks.into_iter().map(|(_, offset, _)| offset).collect(),
+        hashes,
+        len,
     })
 }
 
@@ -748,8 +809,6 @@ struct InputRows {
     all_depth0: Vec<bool>,
     /// 局面の全行が value=0 かつ depth=0 か (行の無い局面も含む)。
     unexplored: Vec<bool>,
-    /// 局面の行のハッシュ値。書き出しで読み直した行と比べる。
-    row_hash: Vec<u64>,
 }
 
 impl InputRows {
@@ -799,7 +858,7 @@ fn canonical_move(text: &str) -> Option<Move> {
 
 /// 局面の順に入力を読み直し、行の値と指し手を集める。
 fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
-    let mut reader = LineReader::open(path)?;
+    let mut reader = LineReader::reopen(path, scan.len)?;
     let total: usize = scan.rows.iter().map(|&rows| rows as usize).sum();
     let mut input = InputRows {
         value: Vec::with_capacity(total),
@@ -807,15 +866,13 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
         texts: Vec::new(),
         all_depth0: Vec::with_capacity(scan.rows.len()),
         unexplored: Vec::with_capacity(scan.rows.len()),
-        row_hash: Vec::with_capacity(scan.rows.len()),
     };
     for node in 0..scan.rows.len() {
         let blocks =
             &scan.blocks[scan.block_start[node] as usize..scan.block_start[node + 1] as usize];
         let first = input.value.len();
         let (mut depth0, mut unexplored) = (true, true);
-        let key = strip_ply(scan.sfens.get(node));
-        let hash = for_each_row(&mut reader, blocks, key, |line| {
+        for_each_row(&mut reader, blocks, scan.hashes[node], |line| {
             let fields = parse_row(line);
             depth0 &= fields.depth == 0;
             unexplored &= fields.value == 0 && fields.depth == 0;
@@ -843,7 +900,6 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
         }
         input.all_depth0.push(depth0);
         input.unexplored.push(unexplored);
-        input.row_hash.push(hash);
     }
     Ok(input)
 }
@@ -878,13 +934,15 @@ fn build_graph(
     path: &Path,
     options: BackpropOptions,
     scan: Scan,
-    mut input: InputRows,
+    input: InputRows,
 ) -> Result<Graph> {
     let Scan {
         sfens,
         rows,
         block_start,
         blocks,
+        hashes,
+        len,
     } = scan;
     let n = sfens.len();
     let skipped: Vec<bool> = (0..n)
@@ -1013,7 +1071,6 @@ fn build_graph(
         }
         row_start.push(u32::try_from(old.len()).context("手が多すぎます")?);
     }
-    let row_hash = std::mem::take(&mut input.row_hash);
     drop((input, index));
     Ok(Graph {
         source: Some(path.to_path_buf()),
@@ -1021,9 +1078,10 @@ fn build_graph(
         sfens,
         node_flags,
         row_start,
+        source_len: len,
         block_start,
         blocks,
-        row_hash,
+        hashes,
         new: old.clone(),
         old,
         to,
@@ -1078,6 +1136,9 @@ pub fn propagate_values(
         let new_best = counted().map(|row| graph.new[row]).max().unwrap_or(draw);
         if old_best != new_best {
             changed.push(((new_best - old_best).abs(), node as u32, old_best, new_best));
+            if changed.len() >= 2 * TOP_CHANGES {
+                top_changes(graph, &mut changed);
+            }
         }
         *stats.depths.entry(scc.depth[comp] as usize).or_default() += 1;
         for row in graph.rows(node) {
@@ -1095,13 +1156,9 @@ pub fn propagate_values(
             }
         }
     }
-    changed.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| graph.sfen(a.1 as usize).cmp(graph.sfen(b.1 as usize)))
-    });
+    top_changes(graph, &mut changed);
     stats.changed_nodes = changed
         .into_iter()
-        .take(TOP_CHANGES)
         .map(|(_, node, old_best, new_best)| NodeChange {
             sfen: graph.sfen(node as usize).to_string(),
             old_best,
@@ -1109,6 +1166,15 @@ pub fn propagate_values(
         })
         .collect();
     Ok(stats)
+}
+
+/// best 値の変化 `(変化の大きさ, 局面, 変化前, 変化後)` を大きい順 (同じ大きさは SFEN 順) に並べ、上位だけを残す。
+fn top_changes(graph: &Graph, changed: &mut Vec<(i32, u32, i32, i32)>) {
+    changed.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| graph.sfen(a.1 as usize).cmp(graph.sfen(b.1 as usize)))
+    });
+    changed.truncate(TOP_CHANGES);
 }
 
 /// 局面の手番の側を自分として解いた結果。値は手番の側から見た値。
@@ -2069,7 +2135,7 @@ fn create_partial(out: &Path) -> Result<(PathBuf, File)> {
 fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Result<()> {
     writer.write_all(BOOK_HEADER.as_bytes())?;
     writer.write_all(b"\n")?;
-    let mut reader = LineReader::open(source)?;
+    let mut reader = LineReader::reopen(source, graph.source_len)?;
     let mut text = String::new();
     let mut rows = Vec::new();
     let mut order = Vec::new();
@@ -2078,7 +2144,7 @@ fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Resu
         writeln!(writer, "sfen {}", graph.sfen(node))?;
         text.clear();
         rows.clear();
-        let hash = for_each_row(&mut reader, graph.blocks(node), graph.key(node), |line| {
+        for_each_row(&mut reader, graph.blocks(node), graph.hashes[node], |line| {
             let fields = parse_row(line);
             rows.push(OutRow {
                 move_usi: push_field(&mut text, fields.move_usi),
@@ -2088,9 +2154,6 @@ fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Resu
             });
             Ok(())
         })?;
-        if hash != graph.row_hash[node] {
-            bail!("{CHANGED}: {}", source.display());
-        }
         let range = graph.rows(node);
         for row in range.clone().skip(rows.len()) {
             if !graph.added(row) {
@@ -2372,7 +2435,8 @@ mod tests {
             row_start,
             block_start: vec![0; rows.len() + 1],
             blocks: Vec::new(),
-            row_hash: Vec::new(),
+            hashes: Vec::new(),
+            source_len: 0,
             new: old.clone(),
             row_flags: vec![ROW_USABLE; old.len()],
             old,
@@ -2952,26 +3016,14 @@ mod tests {
         let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
         // 7g7fjunk は 7g7f と読めて子局面へ伝播するが、書き出しは入力の欄のまま。
         let input = format!(
-            "{BOOK_HEADER}
-sfen {START}
-7g7fjunk 3c3dX 0 1 9
-P*5e None 5 2 8
-longer-than-eight resign 7 3 7
-None none 1 4
-sfen {child}
-3c3d none 40 5 1
-"
+            "{BOOK_HEADER}\nsfen {START}\n7g7fjunk 3c3dX 0 1 9\nP*5e None 5 2 8\nlonger-than-eight resign 7 3 7\nNone none 1 4\nsfen {child}\n3c3d none 40 5 1\n"
         );
         let output = backprop_text(&input, BackpropOptions::default());
         for row in [
-            "7g7fjunk 3c3dX -40 1 9
-",
-            "P*5e none 5 2 8
-",
-            "longer-than-eight none 7 3 7
-",
-            "none none 1 4 1
-",
+            "7g7fjunk 3c3dX -40 1 9\n",
+            "P*5e none 5 2 8\n",
+            "longer-than-eight none 7 3 7\n",
+            "none none 1 4 1\n",
         ] {
             assert!(output.contains(row), "{output}");
         }
@@ -2981,30 +3033,14 @@ sfen {child}
     fn repeated_keys_are_joined_under_the_minimum_ply_line() {
         let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
         let input = format!(
-            "2g2f none 99 9 9
-{BOOK_HEADER}
-sfen {} 5
-2g2f none 10 3 2
-// comment
-
-sfen {child}
-3c3d none 30 4 1
-sfen {START}
-7g7f none 0 6 2
-",
+            "2g2f none 99 9 9\n{BOOK_HEADER}\nsfen {} 5\n2g2f none 10 3 2\n// comment\n\nsfen {child}\n3c3d none 30 4 1\nsfen {START}\n7g7f none 0 6 2\n",
             strip_ply(START)
         );
         let output = backprop_text(&input, BackpropOptions::default());
         assert_eq!(
             output,
             format!(
-                "{BOOK_HEADER}
-sfen {child}
-3c3d none 30 4 1
-sfen {START}
-2g2f none 10 3 2
-7g7f none -30 6 2
-"
+                "{BOOK_HEADER}\nsfen {child}\n3c3d none 30 4 1\nsfen {START}\n2g2f none 10 3 2\n7g7f none -30 6 2\n"
             )
         );
     }
@@ -3013,12 +3049,7 @@ sfen {START}
     fn output_can_replace_the_input_book() {
         let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
         let input = format!(
-            "{BOOK_HEADER}
-sfen {START}
-7g7f none 0 1 1
-sfen {child}
-3c3d none 30 4 1
-"
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none 30 4 1\n"
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("book.db");
@@ -3094,13 +3125,22 @@ sfen {child}
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("in.db");
         let out = dir.path().join("out.db");
-        std::fs::write(&path, &input).unwrap();
-        let mut graph = read_graph(&path, BackpropOptions::default()).unwrap();
-        propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
-        std::fs::write(&path, input.replace("7g7f none", "2g2f none")).unwrap();
-        let error = write_backprop_book(&graph, &out).unwrap_err();
-        assert!(error.to_string().contains(CHANGED), "{error:#}");
-        assert!(!out.exists());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // 同じ長さの指し手・ply の書き換えと、後ろへの局面の追加。
+        let changed = [
+            input.replace("7g7f none", "2g2f none"),
+            input.replacen(" b - 1\n", " b - 3\n", 1),
+            format!("{input}sfen {START}\n2g2f none 0 1 1\n"),
+        ];
+        for changed in changed {
+            assert_ne!(changed, input);
+            std::fs::write(&path, &input).unwrap();
+            let mut graph = read_graph(&path, BackpropOptions::default()).unwrap();
+            propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
+            std::fs::write(&path, changed).unwrap();
+            let error = write_backprop_book(&graph, &out).unwrap_err();
+            assert!(error.to_string().contains(CHANGED), "{error:#}");
+            assert!(!out.exists());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 }
