@@ -24,6 +24,8 @@
 
 use anyhow::Result;
 use clap::Parser;
+#[cfg(any(test, feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+use std::path::Path;
 use std::path::PathBuf;
 
 /// ポリシーネットワークで PSV を展開
@@ -82,6 +84,17 @@ struct Cli {
     threshold: f32,
 }
 
+#[cfg(any(test, feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn readonly_resources<'a>(
+    cli: &'a Cli,
+    selected_model: &'a Path,
+    ort_library: Option<&'a Path>,
+) -> Vec<&'a Path> {
+    let mut resources = vec![cli.input.as_path(), selected_model];
+    resources.extend(ort_library);
+    resources
+}
+
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn run(cli: &Cli) -> Result<()> {
     use anyhow::Context;
@@ -98,6 +111,7 @@ fn run(cli: &Cli) -> Result<()> {
     use rshogi_core::movegen::{MoveList, generate_legal};
     use rshogi_core::position::Position;
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
+    use tools::output_path::{create_safe_output_file, ensure_safe_output_paths};
     use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
 
     fn ort_err(e: ort::Error) -> anyhow::Error {
@@ -186,23 +200,10 @@ fn run(cli: &Cli) -> Result<()> {
         unreachable!()
     };
 
-    // 入力と出力が同一ファイルでないことを確認
-    {
-        let input_canon = fs::canonicalize(&cli.input)
-            .with_context(|| format!("Cannot resolve {}", cli.input.display()))?;
-        if let Ok(output_canon) = fs::canonicalize(&cli.output)
-            && input_canon == output_canon
-        {
-            anyhow::bail!(
-                "--input and --output point to the same file: {}\n\
-                 Specify a different output path to avoid destroying input data.",
-                input_canon.display()
-            );
-        }
-    }
+    ensure_safe_output_paths(&[&cli.output], &readonly_resources(cli, onnx_path, None))?;
 
     // ORT_DYLIB_PATH 検証
-    match std::env::var("ORT_DYLIB_PATH") {
+    let ort_library = match std::env::var("ORT_DYLIB_PATH") {
         Ok(path) if !path.is_empty() => {
             if !std::path::Path::new(&path).is_file() {
                 anyhow::bail!(
@@ -211,6 +212,7 @@ fn run(cli: &Cli) -> Result<()> {
                 );
             }
             eprintln!("ORT_DYLIB_PATH: {path}");
+            PathBuf::from(path)
         }
         _ => {
             anyhow::bail!(
@@ -219,7 +221,9 @@ fn run(cli: &Cli) -> Result<()> {
                  Example:\n  ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo run ..."
             );
         }
-    }
+    };
+    let resources = readonly_resources(cli, onnx_path, Some(&ort_library));
+    ensure_safe_output_paths(&[&cli.output], &resources)?;
 
     // ONNX セッション初期化
     eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
@@ -337,7 +341,7 @@ fn run(cli: &Cli) -> Result<()> {
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
     let mut reader = std::io::BufReader::new(in_file);
 
-    let out_file = File::create(&cli.output)
+    let out_file = create_safe_output_file(&cli.output, &resources)
         .with_context(|| format!("Failed to create {}", cli.output.display()))?;
     let mut writer = BufWriter::new(out_file);
 
@@ -562,4 +566,90 @@ fn main() -> Result<()> {
 
     #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
     run(&cli)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::{TempDir, tempdir};
+    use tools::output_path::create_safe_output_file;
+
+    fn fixture() -> Result<(TempDir, Cli, PathBuf)> {
+        let dir = tempdir()?;
+        let cli = Cli::parse_from([
+            OsString::from("expand_psv_from_policy"),
+            OsString::from("--input"),
+            dir.path().join("input.psv").into_os_string(),
+            OsString::from("--output"),
+            dir.path().join("expanded.psv").into_os_string(),
+            OsString::from("--dlshogi-onnx-model"),
+            dir.path().join("model.onnx").into_os_string(),
+        ]);
+        let library = dir.path().join("runtime.bin");
+        fs::write(&cli.input, [1u8; 40])?;
+        fs::write(cli.dlshogi_onnx_model.as_ref().unwrap(), b"model fixture")?;
+        fs::write(&library, b"runtime fixture")?;
+        Ok((dir, cli, library))
+    }
+
+    #[test]
+    fn output_creation_rejects_resources_and_their_hardlinks() -> Result<()> {
+        let (dir, cli, library) = fixture()?;
+        let model = cli.dlshogi_onnx_model.as_deref().unwrap();
+        let resources = readonly_resources(&cli, model, Some(&library));
+        for protected in [cli.input.as_path(), model, library.as_path()] {
+            let before = fs::read(protected)?;
+            assert!(create_safe_output_file(protected, &resources).is_err());
+            assert_eq!(fs::read(protected)?, before);
+
+            let alias = dir.path().join("alias.psv");
+            fs::hard_link(protected, &alias)?;
+            assert!(create_safe_output_file(&alias, &resources).is_err());
+            assert_eq!(fs::read(protected)?, before);
+            assert_eq!(fs::read(&alias)?, before);
+            fs::remove_file(alias)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn output_creation_writes_new_files_and_truncates_distinct_existing_files() -> Result<()> {
+        let (_dir, cli, library) = fixture()?;
+        let model = cli.dlshogi_onnx_model.as_deref().unwrap();
+        let resources = readonly_resources(&cli, model, Some(&library));
+        for bytes in [b"first longer output".as_slice(), b"new".as_slice()] {
+            let mut output = create_safe_output_file(&cli.output, &resources)?;
+            output.write_all(bytes)?;
+            output.flush()?;
+            drop(output);
+            assert_eq!(fs::read(&cli.output)?, bytes);
+            assert_eq!(fs::read(&cli.input)?, [1u8; 40]);
+            assert_eq!(fs::read(model)?, b"model fixture");
+            assert_eq!(fs::read(&library)?, b"runtime fixture");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_creation_rejects_unrelated_and_dangling_symlinks() -> Result<()> {
+        let (dir, cli, library) = fixture()?;
+        let model = cli.dlshogi_onnx_model.as_deref().unwrap();
+        let resources = readonly_resources(&cli, model, Some(&library));
+        let existing = dir.path().join("unrelated.bin");
+        let missing = dir.path().join("missing.bin");
+        fs::write(&existing, b"unrelated fixture")?;
+        for target in [&existing, &missing] {
+            std::os::unix::fs::symlink(target, &cli.output)?;
+            assert!(create_safe_output_file(&cli.output, &resources).is_err());
+            assert_eq!(fs::read(&existing)?, b"unrelated fixture");
+            assert!(!missing.exists());
+            assert!(fs::symlink_metadata(&cli.output)?.file_type().is_symlink());
+            fs::remove_file(&cli.output)?;
+        }
+        Ok(())
+    }
 }

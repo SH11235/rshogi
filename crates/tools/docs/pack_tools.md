@@ -287,6 +287,9 @@ cargo run -p tools --release --bin jsonl_to_psv -- \
 
 ### expand_psv_from_policy
 
+出力先には入力 PSV・モデル本体・ORT ライブラリと異なるファイルを指定してください。
+[出力パスの保護と中断時の扱い](expand_psv_from_policy.md#出力パスの保護)も参照してください。
+
 dlshogi 系 ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
 次局面を新しい PSV として書き出す。学習データの局面カバレッジを拡張する用途に使用。
 
