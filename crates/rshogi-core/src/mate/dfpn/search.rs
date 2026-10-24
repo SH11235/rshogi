@@ -46,7 +46,7 @@ pub(super) const MAX_DEPTH: usize = if cfg!(target_arch = "wasm32") {
 };
 
 /// 停止フラグ・時間を確かめるノード間隔
-const CHECK_INTERVAL: u64 = 1024;
+pub(super) const CHECK_INTERVAL: u64 = 1024;
 /// 子の配列 (全フレーム分を 1 本に積む) にあらかじめ確保しておく要素数。
 /// 経路上の各局面の候補手の合計で、超えたときだけ伸ばす (伸ばした領域はソルバーが持ち回る)。
 const CHILDREN_RESERVE: usize = 1 << 16;
@@ -345,12 +345,6 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     pub fn set_tie_seed(&mut self, seed: u32) {
         debug_assert!(seed != 0);
         self.tie_seed = seed;
-    }
-
-    /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
-    pub fn continue_from(&mut self, nodes: u64) {
-        self.nodes = nodes;
-        self.next_check = nodes;
     }
 
     /// これまでに探索したノード数

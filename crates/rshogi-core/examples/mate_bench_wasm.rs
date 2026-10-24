@@ -5,7 +5,7 @@
 //! (ブラウザに組み込むときと同じコード生成) での速さを測るために WASI 向けにビルドして Node.js で動かす。
 //! 手順は `crates/tools/docs/mate_bench.md` の「wasm で測る」。
 //!
-//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--mode Speed|Power|Auto] [--out <tsv>]`
+//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--mode Speed|Power] [--out <tsv>]`
 //! 終了コード: 引数の誤りは 2、実行中の失敗は 1。
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -65,7 +65,7 @@ fn parse_args() -> Result<Args, String> {
             "--hash-mb" => args.hash_mb = number(&flag, &value)?,
             "--mode" => {
                 args.mode = MateMode::from_name(&value)
-                    .ok_or_else(|| format!("--mode {value}: Speed / Power / Auto のどれか"))?
+                    .ok_or_else(|| format!("--mode {value}: Speed / Power のどちらか"))?
             }
             _ => return Err(format!("知らない引数: {flag}")),
         }

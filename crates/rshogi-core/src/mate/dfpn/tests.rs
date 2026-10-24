@@ -454,28 +454,41 @@ fn time_limit_gives_unknown() {
     assert!(start.elapsed().as_millis() < 2_000, "時間制限が効いていない");
 }
 
-/// 自動モードの最初の段階 (証明駒を使わない) では 10 万ノードで決まらない 11 手詰め (やねうら王の詰将棋データセットから)
-const AUTO_SWITCH_MATE: &str =
+/// 解くのに 1 万ノードを超える 11 手詰め (やねうら王の詰将棋データセットから)
+const MATE_OVER_PARALLEL_START: &str =
     "2p1kS1nl/1+L1g2+P2/3p1p3/4p2p1/3+blNp2/+Rb4P2/3PP4/3G1G3/3K1L+r2 w g3s2n8p 128";
 
 #[test]
-fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
-    let mut pos = position(AUTO_SWITCH_MATE);
+fn node_limit_is_kept_exactly() {
+    let mut pos = position(MATE_OVER_PARALLEL_START);
     let stop = AtomicBool::new(false);
-    let mut solver = DfpnSolver::with_mode(16, MateMode::Auto);
-    let result = solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {});
-    assert!(matches!(result, MateResult::Mate(_)), "{result:?}");
-    assert!(solver.nodes() > AUTO_SWITCH_NODES, "切り替えずに解けた: {}", solver.nodes());
-
-    // ノード数の上限は切り替えの前後の合計に掛かる。切り替える前に使い切ったら切り替えない
-    for limit in [AUTO_SWITCH_NODES + 1_000, 1_000] {
+    for mode in MateMode::ALL {
+        let mut solver = DfpnSolver::with_mode(16, mode);
+        let result = solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {});
+        assert!(matches!(result, MateResult::Mate(_)), "{mode:?}: {result:?}");
+        for limit in [1_000, PARALLEL_START_NODES + 1_000] {
+            let limits = MateLimits {
+                nodes: limit,
+                time_ms: 0,
+            };
+            let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+            assert_eq!(result, MateResult::Unknown, "{mode:?} {limit}");
+            assert_eq!(solver.nodes(), limit + 1, "{mode:?} {limit}");
+        }
+        // 並列に切り替わっても上限は全スレッドの合計に掛かる (各スレッドは足し込む間隔の分だけ超えうる)
+        solver.set_threads(2);
+        let limit = PARALLEL_START_NODES + 5_000;
         let limits = MateLimits {
             nodes: limit,
             time_ms: 0,
         };
         let result = solver.solve(&mut pos, &limits, &stop, |_| {});
-        assert_eq!(result, MateResult::Unknown);
-        assert_eq!(solver.nodes(), limit + 1);
+        assert_eq!(result, MateResult::Unknown, "{mode:?}");
+        assert!(
+            (limit + 1..=limit + 2 * search::CHECK_INTERVAL + 1).contains(&solver.nodes()),
+            "{mode:?}: {}",
+            solver.nodes()
+        );
     }
 }
 
@@ -483,7 +496,7 @@ fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
 fn parallel_search_continues_from_the_single_thread_start() {
     // 1 スレッドで解く区間 (既定) を超える局面で、途中から並列に切り替えても詰みを返す
     for mode in MateMode::ALL {
-        let mut pos = position(AUTO_SWITCH_MATE);
+        let mut pos = position(MATE_OVER_PARALLEL_START);
         let stop = AtomicBool::new(false);
         let mut solver = DfpnSolver::with_mode(16, mode);
         solver.set_threads(4);
@@ -497,7 +510,7 @@ fn parallel_search_continues_from_the_single_thread_start() {
 }
 
 #[test]
-fn auto_mode_progress_counts_nodes_across_the_switch() {
+fn parallel_progress_is_monotonic() {
     let mut pos = position(ZUKOU_001);
     let stop = AtomicBool::new(false);
     let limits = MateLimits {
@@ -505,8 +518,9 @@ fn auto_mode_progress_counts_nodes_across_the_switch() {
         time_ms: 2_500,
     };
     let mut reported = Vec::new();
-    let result = DfpnSolver::with_mode(16, MateMode::Auto)
-        .solve(&mut pos, &limits, &stop, |p| reported.push(p.nodes));
+    let mut solver = DfpnSolver::with_mode(16, MateMode::Power);
+    solver.set_threads(2);
+    let result = solver.solve(&mut pos, &limits, &stop, |p| reported.push(p.nodes));
     assert_eq!(result, MateResult::Unknown);
     assert!(reported.len() >= 2, "{reported:?}");
     assert!(reported.windows(2).all(|w| w[0] < w[1]), "{reported:?}");

@@ -68,8 +68,8 @@ struct Cli {
     #[arg(long, default_value_t = 64)]
     hash_mb: usize,
 
-    /// 探索の進め方 (Speed / Power / Auto。USI の MateMode と同じ)
-    #[arg(long, default_value = "Auto", value_parser = parse_mode)]
+    /// 探索の進め方 (Speed / Power。USI の MateMode と同じ)
+    #[arg(long, default_value = "Power", value_parser = parse_mode)]
     mode: MateMode,
 
     /// 正解の最短詰み手数。指定すると、不詰・非対応の結果を誤りとして数える。
@@ -257,7 +257,7 @@ impl Summary {
 }
 
 fn parse_mode(name: &str) -> Result<MateMode, String> {
-    MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power / Auto のどれか"))
+    MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power のどちらか"))
 }
 
 fn flip_side_to_move(sfen: &str) -> String {

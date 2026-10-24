@@ -355,7 +355,7 @@ impl UsiEngine {
         println!("option name EvalHash type spin default 256 min 0 max 4096");
         println!("option name MateHashMB type spin default {DEFAULT_MATE_HASH_MB} min 1 max 4096");
         println!(
-            "option name MateMode type combo default {} var Speed var Power var Auto",
+            "option name MateMode type combo default {} var Speed var Power",
             MateMode::default().name()
         );
         println!("option name MateThreads type spin default 1 min 1 max 512");

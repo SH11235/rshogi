@@ -12,9 +12,6 @@
 //!   受け方の持駒は少ない。攻め方の手は増え、受け方の手は減るので、確定値は次の向きに流用できる:
 //!   攻め方の持駒がより少なくて詰む → 詰み、攻め方の持駒がより多くて詰まない → 不詰。
 //!   確定値の表 ([`MateTable::new`] の `proof_pieces`) が要る。
-//!
-//! 局面全体のキーのエントリはどちらの使い方でも同じ意味なので、`PIECES = false` で使った表を
-//! そのまま `PIECES = true` で使い続けてよい。
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, Ordering, fence};

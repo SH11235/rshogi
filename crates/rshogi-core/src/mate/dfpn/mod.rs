@@ -75,27 +75,19 @@ pub enum MateMode {
     /// 子の pn/dn の初期値を局面から見積もり (df-pn+)、攻め方の局面の dn を WPNS で数える。
     /// 詰む問題・長手数・難問でノードが減り、少ない置換表で解ける問題が増えるが、1 ノードあたりは重く、
     /// 不詰の判定ではノードが増える。
-    Power,
-    /// 証明駒を使わない探索で [`AUTO_SWITCH_NODES`] ノードまで読み、決まらなければ同じ置換表のまま
-    /// 解く力優先で読み続ける (ノード数・時間の制限は合計に掛かる)。初期値の見積もりと WPNS はどちらの段階でも使う。
-    /// 置換表の大きさは解く力優先と同じ配分。
     #[default]
-    Auto,
+    Power,
 }
-
-/// [`MateMode::Auto`] で解く力優先に切り替えるノード数
-pub const AUTO_SWITCH_NODES: u64 = 100_000;
 
 impl MateMode {
     /// すべてのモード ([`MateMode::name`] の一覧に使う)
-    pub const ALL: [MateMode; 3] = [MateMode::Speed, MateMode::Power, MateMode::Auto];
+    pub const ALL: [MateMode; 2] = [MateMode::Speed, MateMode::Power];
 
-    /// USI オプションなどで使う名前 (`Speed` / `Power` / `Auto`)
+    /// USI オプションなどで使う名前 (`Speed` / `Power`)
     pub fn name(self) -> &'static str {
         match self {
             MateMode::Speed => "Speed",
             MateMode::Power => "Power",
-            MateMode::Auto => "Auto",
         }
     }
 
@@ -132,7 +124,7 @@ const PARALLEL_START_NODES: u64 = 10_000;
 const HELPER_SLACKS: [(u64, u64); 7] = [(1, 4), (2, 5), (1, 5), (3, 10), (3, 8), (2, 7), (9, 20)];
 
 impl DfpnSolver {
-    /// 置換表を `hash_mb` MB で確保した、既定のモード ([`MateMode::Auto`]) のソルバーを作る
+    /// 置換表を `hash_mb` MB で確保した、既定のモード ([`MateMode::Power`]) のソルバーを作る
     pub fn new(hash_mb: usize) -> Self {
         Self::with_mode(hash_mb, MateMode::default())
     }
@@ -207,24 +199,8 @@ impl DfpnSolver {
         self.table.clear();
         let start = Instant::now();
         let result = match self.mode {
-            MateMode::Speed => self.run::<false>(pos, *limits, start, 0, stop, &mut progress),
-            MateMode::Power => self.run::<true>(pos, *limits, start, 0, stop, &mut progress),
-            MateMode::Auto => {
-                let first = MateLimits {
-                    nodes: match limits.nodes {
-                        0 => AUTO_SWITCH_NODES,
-                        n => n.min(AUTO_SWITCH_NODES),
-                    },
-                    ..*limits
-                };
-                let decided = self.run::<false>(pos, first, start, 0, stop, &mut progress);
-                if decided.is_some() || exhausted(limits, start, self.nodes, stop) {
-                    decided
-                } else {
-                    // 証明駒を使わない段階の置換表の値はそのまま使える
-                    self.run::<true>(pos, *limits, start, self.nodes, stop, &mut progress)
-                }
-            }
+            MateMode::Speed => self.run::<false>(pos, *limits, start, stop, &mut progress),
+            MateMode::Power => self.run::<true>(pos, *limits, start, stop, &mut progress),
         };
         match result {
             Some(SolveOutcome::Mate(pv)) if is_valid_mate_pv(pos, &pv) => MateResult::Mate(pv),
@@ -239,17 +215,21 @@ impl DfpnSolver {
 }
 
 impl DfpnSolver {
-    /// `nodes` ノード読んだ続きとして解く。制限 (`limits`、`start` からの時間) は合計に掛かる。
+    /// 制限 (`limits`、`start` からの時間) の中で解く
     fn run<const PIECES: bool>(
         &mut self,
         pos: &mut Position,
         limits: MateLimits,
         start: Instant,
-        nodes: u64,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
-        if self.threads > 1 && nodes < self.parallel_start {
+        if self.threads == 1 {
+            return self.run_single::<PIECES>(pos, limits, start, stop, progress);
+        }
+        // 並列の段階は、1 スレッドで読んだノード数の続きから数える
+        let mut nodes = 0;
+        if self.parallel_start > 0 {
             // 易しい局面はスレッドを起こす費用の方が大きいので、先に 1 スレッドで解く
             let first = MateLimits {
                 nodes: match limits.nodes {
@@ -258,17 +238,13 @@ impl DfpnSolver {
                 },
                 ..limits
             };
-            let decided = self.run_single::<PIECES>(pos, first, start, nodes, stop, progress);
+            let decided = self.run_single::<PIECES>(pos, first, start, stop, progress);
             if decided.is_some() || exhausted(&limits, start, self.nodes, stop) {
                 return decided;
             }
-            let nodes = self.nodes;
-            return self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress);
+            nodes = self.nodes;
         }
-        if self.threads > 1 {
-            return self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress);
-        }
-        self.run_single::<PIECES>(pos, limits, start, nodes, stop, progress)
+        self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress)
     }
 
     fn run_single<const PIECES: bool>(
@@ -276,7 +252,6 @@ impl DfpnSolver {
         pos: &mut Position,
         limits: MateLimits,
         start: Instant,
-        nodes: u64,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
@@ -293,7 +268,6 @@ impl DfpnSolver {
         let attacker = pos.side_to_move();
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
-        searcher.continue_from(nodes);
         configure(&mut searcher, self.mode);
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();
