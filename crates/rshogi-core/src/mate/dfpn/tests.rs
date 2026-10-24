@@ -1127,14 +1127,92 @@ fn brute_defense_by_rules(pos: &mut Position, plies: u32) -> bool {
     })
 }
 
-/// 攻め方の玉が無い乱択局面。半分は駒の色と手番を入れ替えて (盤は回さない) 後手を攻め方にし、
-/// 半分は 1一 (玉の無い側の既定の升) に駒を置く。どちらも、既定の升を攻め方の玉とみなす判定が
-/// 結果に混ざる局面を増やすため。
-fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
+/// 乱択局面の盤 (段ごと、9 筋から 1 筋の順。空升は空文字列)・手番・持駒 (SFEN の表記)
+struct Setup {
+    board: Vec<Vec<String>>,
+    side: char,
+    hand: String,
+}
+
+impl Setup {
+    /// 局面にする。手番でない側が王手されている局面・行き所のない駒・二歩は除く
+    fn position(&self) -> Option<Position> {
+        let hand = if self.hand.is_empty() {
+            "-"
+        } else {
+            &self.hand
+        };
+        let sfen = format!("{} {} {hand} 1", board_sfen(&self.board), self.side);
+        let mut pos = Position::new();
+        pos.set_sfen(&sfen).ok()?;
+        let us = pos.side_to_move();
+        if pos.pieces(!us, PieceType::King).is_empty()
+            || !pos.attackers_to_c(pos.king_square(!us), us).is_empty()
+            || has_illegal_pieces(&pos)
+        {
+            return None;
+        }
+        clear_kingless_checkers(&mut pos);
+        Some(pos)
+    }
+
+    /// 左右を反転した局面
+    fn mirrored(&self) -> Setup {
+        let board = self.board.iter().map(|row| row.iter().rev().cloned().collect()).collect();
+        Setup {
+            board,
+            side: self.side,
+            hand: self.hand.clone(),
+        }
+    }
+
+    /// 盤を 180° 回し、駒の色・手番・持駒の持ち主を入れ替えた局面 (先後を入れ替えた同じ問題)
+    fn rotated(&self) -> Setup {
+        let board = self
+            .board
+            .iter()
+            .rev()
+            .map(|row| row.iter().rev().map(|cell| swap_case(cell)).collect())
+            .collect();
+        Setup {
+            board,
+            side: if self.side == 'b' { 'w' } else { 'b' },
+            hand: sorted_hand(&swap_case(&self.hand)),
+        }
+    }
+}
+
+fn swap_case(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect()
+}
+
+/// 持駒の表記を先手 (大文字) から並べる
+fn sorted_hand(hand: &str) -> String {
+    let mut pieces: Vec<char> = hand.chars().collect();
+    pieces.sort_by_key(|c| c.is_ascii_lowercase());
+    pieces.into_iter().collect()
+}
+
+/// 攻め方の玉が無い乱択局面。受け方にも持駒を持たせる。
+/// 1一 (玉の無い側の既定の升) に受け方の玉や駒を置く局面と、駒の色と手番を入れ替えて (盤は回さない)
+/// 後手を攻め方にする局面を混ぜる。どちらも、既定の升を攻め方の玉とみなす判定が結果に混ざる局面を増やすため。
+fn random_kingless_setup(rng: &mut Xoshiro256PlusPlus) -> Setup {
     const AT_11: [&str; 8] = ["G", "S", "+R", "+B", "L", "g", "s", "r"];
+    const DEFENDER_HANDS: [&str; 6] = ["", "", "p", "l", "pp", "sp"];
     let mut board = vec![vec![String::new(); 9]; 9];
-    let kf = rng.random_range(0..9usize);
-    let kr = rng.random_range(0..3usize);
+    let (kf, kr) = if rng.random_range(0..6) == 0 {
+        (8, 0)
+    } else {
+        (rng.random_range(0..9usize), rng.random_range(0..3usize))
+    };
     board[kr][kf] = "k".to_string();
     for _ in 0..rng.random_range(1..=5) {
         let f = (kf as i32 + rng.random_range(-2..=2)).clamp(0, 8) as usize;
@@ -1152,37 +1230,30 @@ fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
     if rng.random_range(0..2) == 0 && board[0][8].is_empty() {
         board[0][8] = AT_11[rng.random_range(0..AT_11.len())].to_string();
     }
-    let mut hand = RANDOM_HANDS[rng.random_range(0..RANDOM_HANDS.len())].to_string();
-    let mut side = "b";
+    let attacker_hand = RANDOM_HANDS[rng.random_range(0..RANDOM_HANDS.len())].replace('-', "");
+    let defender_hand = DEFENDER_HANDS[rng.random_range(0..DEFENDER_HANDS.len())];
+    let setup = Setup {
+        board,
+        side: 'b',
+        hand: format!("{attacker_hand}{defender_hand}"),
+    };
     if rng.random_range(0..2) == 0 {
-        let swap = |s: &str| -> String {
-            s.chars()
-                .map(|c| {
-                    if c.is_ascii_uppercase() {
-                        c.to_ascii_lowercase()
-                    } else {
-                        c.to_ascii_uppercase()
-                    }
-                })
-                .collect()
-        };
-        for cell in board.iter_mut().flatten() {
-            *cell = swap(cell);
+        Setup {
+            board: setup
+                .board
+                .iter()
+                .map(|row| row.iter().map(|c| swap_case(c)).collect())
+                .collect(),
+            side: 'w',
+            hand: sorted_hand(&swap_case(&setup.hand)),
         }
-        if hand != "-" {
-            hand = swap(&hand);
-        }
-        side = "w";
+    } else {
+        setup
     }
-    let sfen = format!("{} {side} {hand} 1", board_sfen(&board));
-    let mut pos = Position::new();
-    pos.set_sfen(&sfen).ok()?;
-    let us = pos.side_to_move();
-    if !pos.attackers_to_c(pos.king_square(!us), us).is_empty() || has_illegal_pieces(&pos) {
-        return None;
-    }
-    clear_kingless_checkers(&mut pos);
-    Some(pos)
+}
+
+fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
+    random_kingless_setup(rng).position()
 }
 
 /// `pos` から先手玉を除いた局面
@@ -1328,6 +1399,44 @@ fn solves_kingless_tsume() {
     }
 }
 
+/// 詰み手順は受け方が最も長く逃れる応手を選んで復元するので、総当たりでもその手数以内に詰む
+/// (手順 1 本の検証では、手順に無い応手で逃れる偽の詰みを見落とす)。`brute3` は 3 手以内の総当たりの結果。
+fn assert_mate_within_pv_len(pos: &mut Position, pv: &[Move], brute3: bool) {
+    let mated = match pv.len() {
+        ..=3 => brute3,
+        5 => brute_mate_by_rules(pos, 5),
+        _ => return,
+    };
+    assert!(mated, "{}: {} 手以内に詰まない: {}", pos.to_sfen(), pv.len(), pv_usi(pv));
+}
+
+/// 左右の反転と、先後を入れ替えた 180° の回転で答えが変わらない。玉の無い側の既定の升 (1一) と
+/// 駒の位置の関係が変わるので、既定の升に依存する判定が混ざると長い手数でも食い違う
+#[test]
+fn kingless_search_is_symmetric() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5E77_0000);
+    let (mut tested, mut decided) = (0, 0);
+    while tested < 300 {
+        let setup = random_kingless_setup(&mut rng);
+        let Some(mut pos) = setup.position() else {
+            continue;
+        };
+        let result = solve_limited(&mut pos, 1, 200_000);
+        for mut other in [setup.mirrored(), setup.rotated()].iter().filter_map(Setup::position) {
+            let other_result = solve_limited(&mut other, 1, 200_000);
+            assert!(
+                !is_contradiction(&result, &other_result),
+                "{} {result:?} / {} {other_result:?}",
+                pos.to_sfen(),
+                other.to_sfen()
+            );
+        }
+        tested += 1;
+        decided += usize::from(result != MateResult::Unknown);
+    }
+    assert!(decided * 10 >= tested * 9, "判定できない局面が多すぎる: {decided}/{tested}");
+}
+
 #[test]
 fn kingless_search_agrees_with_brute_force_on_random_positions() {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0B2A_7E00);
@@ -1341,6 +1450,7 @@ fn kingless_search_agrees_with_brute_force_on_random_positions() {
         match solve_limited(&mut pos, 1, 2_000_000) {
             MateResult::Mate(pv) => {
                 assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
+                assert_mate_within_pv_len(&mut pos, &pv, brute);
             }
             MateResult::NoMate => assert!(!brute, "{sfen}: 3 手以内に詰むのに NoMate"),
             other => {
@@ -1369,6 +1479,7 @@ fn kingless_parallel_search_agrees_with_brute_force() {
             match solve_in_threads(&mut pos, 2_000_000, mode, 4) {
                 MateResult::Mate(pv) => {
                     assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
+                    assert_mate_within_pv_len(&mut pos, &pv, brute);
                 }
                 other => assert!(!brute, "{sfen} {mode:?}: 3 手以内に詰むのに {other:?}"),
             }
