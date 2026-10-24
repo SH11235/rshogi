@@ -154,3 +154,5 @@ KIF では中断と表示する（[jsonl_to_kif](jsonl_to_kif.md)）。旧 `draw
 真の引分と区別できないため保持する。
 
 LayerStacks を使う native 評価ツール共通の [起動時の設定条件](nnue-routing.md#起動時の設定条件)も参照してください。
+
+`preprocess_psv` の再実行時は、[出力パスと既存ファイルの保護](preprocess_psv.md#出力パスと既存ファイルの保護)も参照してください。

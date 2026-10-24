@@ -31,3 +31,5 @@ mod tournament_output_identity;
 mod tournament_shutdown_integration;
 
 mod csa_terminal_outcomes;
+
+mod preprocess_output_safety;
