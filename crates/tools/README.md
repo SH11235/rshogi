@@ -68,7 +68,7 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 
 | ツール | 説明 |
 |--------|------|
-| `benchmark` | エンジン性能ベンチマーク。USI の評価ハッシュ設定と受信期限に対応（[詳細](docs/benchmark.md)） |
+| `benchmark` | エンジン性能ベンチマーク。USI の評価ハッシュ設定と受信期限、`名前 | sfen …` 形式の局面ファイルに対応（[詳細](docs/benchmark.md)） |
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
 | `mate_bench` | df-pn 詰み探索を局面集で解き、結果の内訳・探索量・時間を集計。最短詰み手数の正解と照合（[詳細](docs/mate_bench.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。`--alternate-rounds` で round ごとに A/B を交換し、JSON `blocks` に局面×round の順序と比、`binaries` に両エンジンの SHA-256 を保存。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
