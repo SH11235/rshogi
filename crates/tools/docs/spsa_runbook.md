@@ -1612,8 +1612,8 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params \
   先後を入れ替えて順に指す。pair ごとに全適用 param の絶対値を送り、isready → usinewgame → 第 1 局 → usinewgame → 第 2 局。
 - 更新は `θ += mobility × r_k × c_k × R × flip` の後に clamp。k は **dispatch 時**の `completed_pairs` (dispatch_k)、R は 2 局の勝敗和 (−2〜+2)。
   乱数は batch の `--batch-pairs 1` で batch 番号を pair_id にしたものと同じで、`--concurrency 1` の async は `--batch-pairs 1` の batch と同じ θ になる。
-- `--batch-pairs`・`--games-per-iteration`/`--iterations`・early-stop 系・`--force-schedule`・`--meta-file`・`--stats-csv`・`--param-values-csv` は拒否する。
-  `--total-pairs` は必須。
+- `--batch-pairs`・`--games-per-iteration`/`--iterations`・early-stop 系・`--force-schedule`・`--strict-init-check`・`--meta-file`・
+  `--stats-csv`・`--param-values-csv` は拒否する。`--total-pairs` は必須。
 
 | オプション (async 専用) | 既定値 | 意味 |
 |---|---:|---|
@@ -1646,19 +1646,22 @@ engine の異常終了・切断・watchdog・spawn/初期化の失敗は、ま�
 | `snapshots/snapshot-NNNNNN.json` | θ と照合用の状態。`snapshot-000000.json` は開始時の θ と param 定義で、常に残す。ほかは最新 2 世代 |
 | `meta.json` | format v5。seed・L・schedule・param 定義と対局条件の fingerprint・spsa binary の sha256・最新 snapshot・status |
 | `stats.csv` / `values.csv` | journal から作る派生物 (下) |
-| `state.params` | 最新 snapshot の θ (6 桁表示の view)。resume は値を使わない |
+| `state.params` | 最新 snapshot の θ (6 桁表示の view)。resume は読まない (無くても壊れていても再開できる) |
 | `final.params` | 完走時の θ |
 
 `--resume` (lock が残っていれば `--force-unlock` も) で再開する。meta の seed を使い、`--seed` は省略するか同じ値にする。
+param の定義と開始時の θ は gen0 snapshot から読み、`--init-from` は使わない。
 journal を先頭から再生して θ と CSV を作り直し、最新 snapshot と bit 一致することを確かめてから続ける。
 落ちた時点で実行中だった pair は同じ確定値で指し直す (失敗数は増やさない)。受信済みで適用を待っていた結果は失わない。
 journal の末尾の書きかけの行だけを捨て、途中の行が壊れていれば止まる。
 
 resume で一致を要求するもの (不一致は拒否し、上書きの手段はない。変えたいときは新しい run-dir で始める):
-`--total-pairs` と schedule 系の値、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、
+`--total-pairs` と schedule 系の値 (bit 単位で比べる)、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、
 engine binary の sha256・`--engine-args`・既定値注入後の USI option・値がファイルを指す USI option の内容の sha256、mapping、
-開始局面ファイル、`--random-startpos`、時間・nodes 系の条件、`--nodes-timeout-ms`、`--timeout-margin-ms`、そして spsa 自身の binary。
+開始局面ファイル (`--startpos-file` の内容 / `--sfen`)、`--random-startpos`、`--nodes`・`--byoyomi`・`--btime`・`--binc`、
+`--threads`・`--hash-mb`・`--max-moves`、`--nodes-timeout-ms`、`--timeout-margin-ms`、そして spsa 自身の binary。
 engine が option なしで暗黙に読む評価関数 (rshogi の `eval/nn.bin` など) は識別できないので、`EvalFile` を明示する。
+ファイルを指す option の相対パスは起動したディレクトリ基準で解決するので、resume も同じディレクトリから行う (絶対パスを推奨)。
 
 保証の範囲: process の crash からはどの時点でも再開できる。電源断は Linux のみ (directory の fsync を std で行えるのが Unix だけのため)。
 fresh 開始や `--force-init` の初期化中は旧 run の成果物を先に消すので保証の対象外。

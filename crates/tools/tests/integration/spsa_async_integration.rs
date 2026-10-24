@@ -476,6 +476,7 @@ fn async_and_batch_only_flags_are_rejected_before_touching_run_dir() {
         ("async", vec!["--batch-pairs", "2"], "--batch-pairs"),
         ("async", vec!["--early-stop-patience", "0"], "--early-stop-patience"),
         ("async", vec!["--force-schedule"], "--force-schedule"),
+        ("async", vec!["--strict-init-check"], "--strict-init-check"),
         ("async", vec!["--stats-csv", "x.csv"], "--stats-csv"),
         ("batch", vec!["--max-lag", "4"], "--max-lag"),
         ("batch", vec!["--snapshot-interval", "4"], "--snapshot-interval"),
@@ -502,15 +503,16 @@ fn resume_rejects_other_dispatch_mode_and_changed_conditions() {
     let output = async_run.run_with("value_driven", 6, 1, &["--batch-pairs", "1", "--resume"], &[]);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("--dispatch async"), "{}", stderr(&output));
-    for extra in [
-        vec!["--byoyomi", "10"],
-        vec!["--seed", "2"],
-        vec!["--max-lag", "9"],
+    for (extra, reason) in [
+        (vec!["--byoyomi", "10"], "対局条件が meta と異なります"),
+        (vec!["--max-lag", "9"], "--max-lag 9"),
+        (vec!["--alpha", "0.6020000000000001"], "schedule"),
     ] {
         let mut args = vec!["--resume"];
         args.extend(extra.iter().copied());
         let output = run_async(&async_run, "value_driven", 6, 1, &args, &[]);
         assert!(!output.status.success(), "{extra:?}");
+        assert!(stderr(&output).contains(reason), "{extra:?}: {}", stderr(&output));
     }
     assert_eq!(async_run.meta()["status"], "completed");
 }
@@ -556,7 +558,7 @@ fn downstream_tools_read_async_csv() {
 }
 
 #[test]
-fn resume_rebuilds_missing_or_broken_state_view() {
+fn resume_does_not_read_missing_or_broken_state_view() {
     let reference = reference_run();
     for damage in ["missing", "broken"] {
         let test = PoolTest::new();
@@ -584,8 +586,24 @@ fn resume_rebuilds_missing_or_broken_state_view() {
             &[],
         );
         assert_success(&output);
-        assert!(stderr(&output).contains("state.params を gen0"), "{damage}");
         assert_eq!(final_theta(&test), final_theta(&reference), "{damage}");
         assert_eq!(test.bytes("final.params"), reference.bytes("final.params"), "{damage}");
     }
+}
+
+#[test]
+fn file_valued_usi_option_is_fingerprinted_after_trimming() {
+    let test = PoolTest::new();
+    let eval = test.path("eval file.bin");
+    std::fs::write(&eval, b"first").unwrap();
+    let option = format!("EvalFile= {} ", eval.display());
+    let args = ["--usi-option", option.as_str()];
+    assert_success(&run_async(&test, "value_driven", 2, 1, &args, &[]));
+    let files = test.meta()["fingerprint"]["usi_option_files"].clone();
+    assert_eq!(files.as_array().map(Vec::len), Some(1), "{files}");
+    std::fs::write(&eval, b"second").unwrap();
+    let resume = ["--usi-option", option.as_str(), "--resume"];
+    let output = run_async(&test, "value_driven", 2, 1, &resume, &[]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("対局条件が meta と異なります"), "{}", stderr(&output));
 }

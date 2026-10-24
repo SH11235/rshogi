@@ -509,6 +509,13 @@ impl<'a> AsyncCore<'a> {
         attempt: u32,
         reason: String,
     ) -> (CoreOutput, Option<String>) {
+        let current = self.pairs.get(&pair_id).is_some_and(|entry| {
+            entry.status == PairStatus::InFlight && entry.dispatch.attempt == attempt
+        });
+        if !current {
+            self.counters.duplicates += 1;
+            return (CoreOutput::Journal(JournalRecord::Duplicate { pair_id, attempt }), None);
+        }
         let stop = self
             .record_failure(pair_id, attempt)
             .filter(|failures| *failures >= self.env.max_pair_attempts)
@@ -624,8 +631,15 @@ impl<'a> AsyncCore<'a> {
                     self.counters.dispatched_attempts += 1;
                     return Ok(None);
                 }
-                if pair_id != self.next_pair_id || dispatch.attempt != 1 {
-                    bail!("journal: unexpected new pair {pair_id} attempt {}", dispatch.attempt);
+                if pair_id != self.next_pair_id
+                    || dispatch.attempt != 1
+                    || dispatch.dispatch_k != self.completed
+                {
+                    bail!(
+                        "journal: unexpected new pair {pair_id} attempt {} dispatch_k {}",
+                        dispatch.attempt,
+                        dispatch.dispatch_k
+                    );
                 }
                 if self.completed as usize + self.pairs.len() >= self.env.total_pairs as usize {
                     bail!("journal: dispatch beyond total_pairs");
@@ -648,10 +662,17 @@ impl<'a> AsyncCore<'a> {
             JournalRecord::AttemptFailed {
                 pair_id, attempt, ..
             } => {
-                self.record_failure(*pair_id, *attempt);
+                if self.record_failure(*pair_id, *attempt).is_none() {
+                    bail!(
+                        "journal: attempt_failed for pair {pair_id} attempt {attempt} not in flight"
+                    );
+                }
                 Ok(None)
             }
-            JournalRecord::Duplicate { .. } => {
+            JournalRecord::Duplicate { pair_id, .. } => {
+                if !self.accepted.contains(pair_id) && !self.pairs.contains_key(pair_id) {
+                    bail!("journal: duplicate for unknown pair {pair_id}");
+                }
                 self.counters.duplicates += 1;
                 Ok(None)
             }
@@ -907,8 +928,12 @@ impl<'scope> AsyncPool<'scope> {
             .context("failed to dispatch pair task")
     }
 
-    fn recv(&self) -> Result<WorkerMessage> {
-        self.results.recv().context("failed to receive pair result from worker")?
+    fn recv(&self) -> Result<Result<WorkerMessage>> {
+        self.results.recv().context("failed to receive pair result from worker")
+    }
+
+    fn try_recv(&self) -> Option<Result<WorkerMessage>> {
+        self.results.try_recv().ok()
     }
 }
 
@@ -1015,10 +1040,12 @@ impl RunFingerprint {
     fn new(cli: &Cli, engine: &EngineConfig) -> Result<Self> {
         let mut usi_option_files = Vec::new();
         for option in &engine.usi_options {
+            // engine の初期化と同じく前後の空白を除いた値で判定する。
             if let Some((name, value)) = option.split_once('=')
-                && Path::new(value).is_file()
+                && Path::new(value.trim()).is_file()
             {
-                usi_option_files.push((name.to_owned(), sha256_hex_of_file(Path::new(value))?));
+                let sha = sha256_hex_of_file(Path::new(value.trim()))?;
+                usi_option_files.push((name.trim().to_owned(), sha));
             }
         }
         Ok(Self {
@@ -1076,6 +1103,8 @@ struct AsyncMeta {
     stop_reason: Option<String>,
     dispatched_attempts: u64,
     failed_attempts: u64,
+    duplicates: u64,
+    holds: u64,
     max_observed_lag: u32,
     updated_at_utc: String,
 }
@@ -1395,6 +1424,7 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
         ),
         ("--early-stop-patience", cli.early_stop_patience.is_some()),
         ("--force-schedule", cli.force_schedule),
+        ("--strict-init-check", cli.strict_init_check),
         ("--meta-file", cli.meta_file.is_some()),
         ("--stats-csv", cli.stats_csv.is_some()),
         ("--param-values-csv", cli.param_values_csv.is_some()),
@@ -1511,6 +1541,8 @@ impl Store<'_> {
         self.meta.stop_reason = stop_reason;
         self.meta.dispatched_attempts = core.counters.dispatched_attempts;
         self.meta.failed_attempts = core.counters.failures;
+        self.meta.duplicates = core.counters.duplicates;
+        self.meta.holds = core.counters.holds;
         self.meta.max_observed_lag = core.counters.max_lag;
         self.meta.updated_at_utc = Utc::now().to_rfc3339();
         write_json_durable(&default_meta_path(&self.cli.run_dir), &self.meta, true)?;
@@ -1540,6 +1572,7 @@ impl Store<'_> {
 
     /// 停止前に保留中の結果を含む snapshot を残し、理由を Err で返す。
     fn stop(&mut self, core: &AsyncCore<'_>, error: anyhow::Error) -> Result<()> {
+        print_counters("async stopped", core);
         let reason = format!("{error:#}");
         if let Err(save_error) = self.publish(core, RunStatus::Stopped, Some(reason)) {
             eprintln!("failed to save stop snapshot: {save_error:#}");
@@ -1591,7 +1624,14 @@ fn check_resume_meta(
     if meta.dispatch != "async" || meta.rng_version != RNG_VERSION {
         bail!("unsupported async meta (dispatch={}, rng={})", meta.dispatch, meta.rng_version);
     }
-    if meta.total_pairs != total_pairs || !schedule_matches(meta.schedule, schedule) {
+    // 再生は bit 一致を要求するので、batch の許容誤差付き比較ではなく bit で比べる。
+    let exact = |a: f64, b: f64| a.to_bits() == b.to_bits();
+    let same_schedule = exact(meta.schedule.alpha, schedule.alpha)
+        && exact(meta.schedule.gamma, schedule.gamma)
+        && exact(meta.schedule.a_ratio, schedule.a_ratio)
+        && exact(meta.schedule.mobility, schedule.mobility)
+        && meta.schedule.total_iterations == schedule.total_iterations;
+    if meta.total_pairs != total_pairs || !same_schedule {
         bail!(
             "total_pairs/schedule が meta と異なります (meta total_pairs={} {:?} / cli total_pairs={total_pairs} {schedule:?})。\
              async では変更できないので新しい run-dir で始めてください",
@@ -1626,13 +1666,9 @@ fn check_resume_meta(
     Ok(())
 }
 
-/// async の resume で `state.params` が無い・読めないとき、gen0 の定義と最新 snapshot の θ から作り直す。
-/// `state.params` は view なので、resume の可否をその状態に依存させない。
-pub(super) fn restore_state_view(cli: &Cli) -> Result<()> {
-    let state_params = state_params_path(&cli.run_dir);
-    if read_params(&state_params, cli.assume_c_end_r_end).is_ok() {
-        return Ok(());
-    }
+/// async の resume で使う param を gen0 の定義と最新 snapshot の θ から作る。
+/// `state.params` は 6 桁表示の view で、丸めた値が範囲外に見えることもあるので読まない。
+pub(super) fn load_resume_params(cli: &Cli) -> Result<Vec<SpsaParam>> {
     let meta = load_async_meta(&default_meta_path(&cli.run_dir))?;
     let snapshot_dir = cli.run_dir.join(SNAPSHOT_DIR);
     let initial: Snapshot = read_json(&snapshot_dir.join(snapshot_file_name(0)))?;
@@ -1659,13 +1695,7 @@ pub(super) fn restore_state_view(cli: &Cli) -> Result<()> {
     if params.len() != latest.theta.len() {
         bail!("gen0 の param 定義と snapshot {} の θ の長さが一致しません", latest.generation);
     }
-    write_params(&state_params, &params)?;
-    eprintln!(
-        "state.params を gen0 の定義と snapshot {} から作り直しました: {}",
-        latest.generation,
-        state_params.display()
-    );
-    Ok(())
+    Ok(params)
 }
 
 fn apply_theta(params: &mut [SpsaParam], snapshot: &Snapshot) -> Result<()> {
@@ -1773,6 +1803,8 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             stop_reason: None,
             dispatched_attempts: 0,
             failed_attempts: 0,
+            duplicates: 0,
+            holds: 0,
             max_observed_lag: 0,
             updated_at_utc: Utc::now().to_rfc3339(),
         }
@@ -1800,7 +1832,9 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         let latest: Snapshot = read_json(&snapshot_dir.join(&meta.snapshot))?;
         let initial: Snapshot = read_json(&snapshot_dir.join(snapshot_file_name(0)))?;
         if initial.definitions.as_ref() != Some(&definitions) {
-            bail!("gen0 の param 定義が現在の state.params・CLI から作った定義と一致しません");
+            bail!(
+                "gen0 の param 定義と、CLI (--active-only-regex・mapping) から決まる対象が一致しません"
+            );
         }
         apply_theta(&mut core.params, &initial)?;
         // CSV は gen0 からの全再生で作り直す。
@@ -1920,9 +1954,17 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
 
     store.publish(&core, RunStatus::Completed, None)?;
     faults.hit("completed_snapshot");
+    print_counters("async done", &core);
+    let final_path = run_dir.join("final.params");
+    write_params(&final_path, &core.params)?;
+    eprintln!("final params written: {}", final_path.display());
+    Ok(())
+}
+
+fn print_counters(label: &str, core: &AsyncCore<'_>) {
     let counters = core.counters;
     eprintln!(
-        "async done: completed_pairs={} dispatched_attempts={} failed_attempts={} duplicates={} holds={} max_lag={}",
+        "{label}: completed_pairs={} dispatched_attempts={} failed_attempts={} duplicates={} holds={} max_lag={}",
         core.completed,
         counters.dispatched_attempts,
         counters.failures,
@@ -1930,10 +1972,6 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         counters.holds,
         counters.max_lag
     );
-    let final_path = run_dir.join("final.params");
-    write_params(&final_path, &core.params)?;
-    eprintln!("final params written: {}", final_path.display());
-    Ok(())
 }
 
 /// 空いた worker に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
@@ -1965,16 +2003,25 @@ fn coordinate(
                 minus,
             })?;
         }
-        if in_flight.len() < worker_count
-            && let Some(reason) = core.stall_reason()
-        {
-            return store.stop(core, anyhow::anyhow!(reason));
-        }
-        if in_flight.is_empty() {
-            // 最古の未確定 pair は常に適用か dispatch ができるので、ここへは来ない。
-            return store.stop(core, anyhow::anyhow!("no runnable pair"));
-        }
-        let message = match pool.recv() {
+        let stalled = if in_flight.len() < worker_count {
+            core.stall_reason()
+        } else {
+            None
+        };
+        // 停滞と判定しても、受信済みで未処理の結果があればそれを先に処理する。
+        let message = match (stalled, pool.try_recv()) {
+            (_, Some(message)) => message,
+            (Some(reason), None) => return store.stop(core, anyhow::anyhow!(reason)),
+            (None, None) if in_flight.is_empty() => {
+                // 最古の未確定 pair は常に適用か dispatch ができるので、ここへは来ない。
+                return store.stop(core, anyhow::anyhow!("no runnable pair"));
+            }
+            (None, None) => match pool.recv() {
+                Ok(message) => message,
+                Err(error) => return store.stop(core, error),
+            },
+        };
+        let message = match message {
             Ok(message) => message,
             Err(error) => return store.stop(core, error),
         };
@@ -2617,7 +2664,25 @@ mod tests {
         let dispatch = core.next_dispatch().unwrap().unwrap();
         let mut replayed = fixture.core(4);
         replayed.replay(&JournalRecord::Dispatch(dispatch.clone())).unwrap();
-        assert!(replayed.replay(&JournalRecord::Dispatch(dispatch)).is_err());
+        assert!(replayed.replay(&JournalRecord::Dispatch(dispatch.clone())).is_err());
+        let failed = JournalRecord::AttemptFailed {
+            pair_id: 0,
+            attempt: 2,
+            reason: String::new(),
+        };
+        assert!(replayed.replay(&failed).is_err());
+        assert!(
+            replayed
+                .replay(&JournalRecord::Duplicate {
+                    pair_id: 5,
+                    attempt: 1
+                })
+                .is_err()
+        );
+        let mut skewed = dispatch;
+        skewed.pair_id = 1;
+        skewed.dispatch_k = 3;
+        assert!(replayed.replay(&JournalRecord::Dispatch(skewed)).is_err());
         assert!(
             replayed
                 .replay(&JournalRecord::Received {

@@ -3337,9 +3337,6 @@ fn main() -> Result<()> {
     // あるので即 bail。lock は process 終了時 (Drop) に自動削除されるが、
     // SIGKILL / 電源断で残留した場合は --force-unlock で消せる。
     let _run_dir_lock = RunDirLock::acquire(&cli.run_dir, cli.force_unlock)?;
-    if cli.dispatch == DispatchMode::Async && cli.resume {
-        async_dispatch::restore_state_view(&cli)?;
-    }
 
     let state_params = state_params_path(&cli.run_dir);
 
@@ -3376,6 +3373,37 @@ fn main() -> Result<()> {
     if let Some(path) = &cli.init_from {
         read_params_with_translator(path, &translator, cli.assume_c_end_r_end)?;
     }
+    // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
+    // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
+    let schedule = ScheduleConfig {
+        alpha: cli.alpha,
+        gamma: cli.gamma,
+        a_ratio: cli.a_ratio,
+        mobility: cli.mobility,
+        total_iterations: total_pairs,
+    };
+    // async の resume は gen0 の param 定義を正本にし、view の state.params を読まない。
+    if cli.dispatch == DispatchMode::Async && cli.resume {
+        if cli.force_init || cli.use_existing_state_as_init {
+            bail!("--resume と --force-init / --use-existing-state-as-init は同時に指定できません");
+        }
+        if cli.init_from.is_some() {
+            eprintln!(
+                "info: --dispatch async の resume は --init-from を使いません (起点は gen0 snapshot)"
+            );
+        }
+        return async_dispatch::run(async_dispatch::AsyncSetup {
+            cli: &cli,
+            action: &NonBailAction::Resume { verify_init: false },
+            params: async_dispatch::load_resume_params(&cli)?,
+            translator: &translator,
+            active_only_regex: active_only_regex.as_ref(),
+            schedule,
+            total_pairs,
+            engine_path,
+            fresh_seed: base_seed,
+        });
+    }
     let effective_action = apply_init_action(
         &init_action,
         cli.init_from.as_deref(),
@@ -3386,15 +3414,6 @@ fn main() -> Result<()> {
 
     let mut params =
         read_params_with_translator(&state_params, &translator, cli.assume_c_end_r_end)?;
-    // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
-    // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
-    let schedule = ScheduleConfig {
-        alpha: cli.alpha,
-        gamma: cli.gamma,
-        a_ratio: cli.a_ratio,
-        mobility: cli.mobility,
-        total_iterations: total_pairs,
-    };
     if cli.dispatch == DispatchMode::Async {
         return async_dispatch::run(async_dispatch::AsyncSetup {
             cli: &cli,
