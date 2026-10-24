@@ -38,7 +38,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -246,6 +246,8 @@ fn main() -> Result<()> {
         anyhow::bail!("--rescore requires --nnue option");
     }
 
+    validate_all_output_paths(&cli)?;
+
     // NNUEモデルのロード
     let use_nnue = if let Some(ref nnue_path) = cli.nnue {
         if !nnue_path.exists() {
@@ -404,84 +406,18 @@ fn temporary_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(temporary_name))
 }
 
-fn comparable_path(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return path
-            .canonicalize()
-            .with_context(|| format!("Failed to canonicalize path: {}", path.display()));
-    }
-
-    let file_name = path
-        .file_name()
-        .with_context(|| format!("Path has no file name: {}", path.display()))?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let canonical_parent = parent
-        .canonicalize()
-        .with_context(|| format!("Failed to canonicalize parent path: {}", parent.display()))?;
-    Ok(canonical_parent.join(file_name))
-}
-
-fn paths_resolve_to_same_file(first: &Path, second: &Path) -> Result<bool> {
-    if first.exists() && second.exists() && same_file::is_same_file(first, second)? {
-        return Ok(true);
-    }
-
-    let first = comparable_path(first)?;
-    let second = comparable_path(second)?;
-    #[cfg(windows)]
-    {
-        Ok(first.to_string_lossy().eq_ignore_ascii_case(&second.to_string_lossy()))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(first == second)
-    }
-}
-
 fn validate_output_paths(cli: &Cli) -> Result<()> {
-    if paths_resolve_to_same_file(&cli.input, &cli.output)? {
-        anyhow::bail!("Input and output paths resolve to the same file: {}", cli.input.display());
-    }
+    let mut outputs = vec![cli.output.as_path()];
+    outputs.extend(cli.moved_mask.as_deref());
+    let mut resources = vec![cli.input.as_path()];
+    resources.extend(read_only_resource_paths(cli));
+    tools::output_path::ensure_safe_output_paths(&outputs, &resources)
+}
 
-    if let Some(mask) = &cli.moved_mask {
-        if paths_resolve_to_same_file(&cli.input, mask)? {
-            anyhow::bail!(
-                "Input and moved mask paths resolve to the same file: {}",
-                cli.input.display()
-            );
-        }
-        if paths_resolve_to_same_file(&cli.output, mask)? {
-            anyhow::bail!(
-                "Output and moved mask paths resolve to the same file: {}",
-                cli.output.display()
-            );
-        }
-    }
-
-    // NNUE モデルと progress 係数は読み込み後もディスク上の実体が残る前提の
-    // ファイルなので、出力の rename で置換されないよう書き込み先とは衝突検査する
-    // (入力とは read-read なので共有可)。
-    for resource in read_only_resource_paths(cli) {
-        if paths_resolve_to_same_file(&cli.output, resource)? {
-            anyhow::bail!(
-                "Output path resolves to a read-only resource file: {}",
-                cli.output.display()
-            );
-        }
-        if let Some(mask) = &cli.moved_mask
-            && paths_resolve_to_same_file(mask, resource)?
-        {
-            anyhow::bail!(
-                "Moved mask path resolves to a read-only resource file: {}",
-                mask.display()
-            );
-        }
-    }
-
-    Ok(())
+fn validate_all_output_paths(cli: &Cli) -> Result<()> {
+    let temporary_output = temporary_path(&cli.output)?;
+    let temporary_mask = cli.moved_mask.as_deref().map(temporary_path).transpose()?;
+    validate_temporary_paths(cli, &temporary_output, temporary_mask.as_deref())
 }
 
 /// 処理中に読み込むだけでディスク上に残す前提のファイル (書き込み先と衝突させない)。
@@ -490,37 +426,64 @@ fn read_only_resource_paths(cli: &Cli) -> impl Iterator<Item = &Path> {
 }
 
 fn validate_temporary_paths(cli: &Cli, tmp_output: &Path, tmp_mask: Option<&Path>) -> Result<()> {
-    let mut final_paths = vec![cli.input.as_path(), cli.output.as_path()];
-    if let Some(mask) = cli.moved_mask.as_deref() {
-        final_paths.push(mask);
-    }
-    // `.tmp` の作成 (truncate) や終了時削除が NNUE モデル・progress 係数を
-    // 壊さないよう、一時パスは read-only resource とも衝突検査する。
-    final_paths.extend(read_only_resource_paths(cli));
+    validate_output_paths(cli)?;
+    let mut outputs = vec![cli.output.as_path(), tmp_output];
+    outputs.extend(cli.moved_mask.as_deref());
+    outputs.extend(tmp_mask);
+    let mut resources = vec![cli.input.as_path()];
+    resources.extend(read_only_resource_paths(cli));
+    tools::output_path::ensure_safe_output_paths(&outputs, &resources)
+}
 
-    for final_path in final_paths {
-        if paths_resolve_to_same_file(final_path, tmp_output)? {
-            anyhow::bail!(
-                "Temporary output path conflicts with another path: {}",
-                tmp_output.display()
-            );
+fn open_staging_files(
+    cli: &Cli,
+    paths: &[&Path],
+    cleanup: &mut TemporaryFiles,
+) -> Result<Vec<File>> {
+    let mut resources = vec![cli.input.as_path()];
+    resources.extend(read_only_resource_paths(cli));
+    let mut files = Vec::with_capacity(paths.len());
+    let mut new_files = TemporaryFiles::new();
+    for path in paths {
+        let existed = path.try_exists()?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("Failed to open staging {}", path.display()))?;
+        let others: Vec<&Path> = std::iter::once(cli.output.as_path())
+            .chain(cli.moved_mask.as_deref())
+            .chain(paths.iter().copied().filter(|other| other != path))
+            .collect();
+        tools::output_path::ensure_safe_output_file(&file, path, &resources, &others)?;
+        if !existed {
+            new_files.track(path.to_path_buf());
         }
-        if let Some(mask_tmp) = tmp_mask
-            && paths_resolve_to_same_file(final_path, mask_tmp)?
-        {
-            anyhow::bail!(
-                "Temporary moved mask path conflicts with another path: {}",
-                mask_tmp.display()
-            );
-        }
+        files.push(file);
     }
-    if let Some(mask_tmp) = tmp_mask
-        && paths_resolve_to_same_file(tmp_output, mask_tmp)?
-    {
-        anyhow::bail!("Temporary output and moved mask paths conflict: {}", tmp_output.display());
+    // 後続の open が別の最終出力と同じ実体を作る場合も、truncate 前に拒否する。
+    for (index, file) in files.iter().enumerate() {
+        let others: Vec<&Path> = std::iter::once(cli.output.as_path())
+            .chain(cli.moved_mask.as_deref())
+            .chain(
+                paths
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, path)| *path),
+            )
+            .collect();
+        tools::output_path::ensure_safe_output_file(file, paths[index], &resources, &others)?;
     }
-
-    Ok(())
+    for path in paths {
+        new_files.untrack(path);
+        cleanup.track(path.to_path_buf());
+    }
+    for file in &files {
+        file.set_len(0)?;
+    }
+    Ok(files)
 }
 
 /// ファイルをチャンクストリーミングで処理
@@ -545,38 +508,14 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, in_file);
 
-    // 一時ファイルに書き込み、正常完了時のみ最終出力パスに rename する
-    let out_file = File::create(&tmp_output)
-        .with_context(|| format!("Failed to create {}", tmp_output.display()))?;
-    temporary_files.track(tmp_output.clone());
-    let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
-    let mut mask_writer = if let Some(path) = &tmp_mask {
-        let file =
-            File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
-        temporary_files.track(path.clone());
-        Some(MovedMaskWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file)))
-    } else {
-        None
-    };
-    // 未作成パスの事前比較は case-insensitive filesystem の alias
-    // (`Leaf.psv` と `leaf.psv` 等) を検出できないため、staging を作成した直後に
-    // 実体 (inode) で照合する。
-    {
-        let mut created: Vec<&Path> = vec![&tmp_output];
-        if let Some(mask_tmp) = &tmp_mask {
-            created.push(mask_tmp);
-        }
-        tools::output_path::ensure_created_paths_distinct(&created)?;
-        // 最終出力パスも対象にする: staging の作成が別出力の最終パスを実体化させる
-        // alias (例: output=`MASK.TMP` と mask staging=`mask.tmp`) は staging 同士の
-        // 比較では検出できない。未作成の最終パスは NotFound として不一致扱いになる。
-        let mut targets: Vec<&Path> = vec![cli.input.as_path(), cli.output.as_path()];
-        if let Some(mask) = cli.moved_mask.as_deref() {
-            targets.push(mask);
-        }
-        targets.extend(read_only_resource_paths(cli));
-        tools::output_path::ensure_no_entity_overlap(&created, &targets)?;
-    }
+    let mut staging_paths = vec![tmp_output.as_path()];
+    staging_paths.extend(tmp_mask.as_deref());
+    let mut files = open_staging_files(cli, &staging_paths, &mut temporary_files)?.into_iter();
+    let mut writer =
+        BufWriter::with_capacity(IO_BUF_SIZE, files.next().context("Missing PSV staging file")?);
+    let mut mask_writer = files
+        .next()
+        .map(|file| MovedMaskWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file)));
 
     if use_nnue {
         eprintln!("Using NNUE evaluation (with incremental updates)");
@@ -689,6 +628,8 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         progress.abandon_with_message("Interrupted");
         anyhow::bail!("Interrupted; output files were not updated");
     }
+    validate_temporary_paths(cli, &tmp_output, tmp_mask.as_deref())?;
+
     // 正常完了: 一時ファイルを最終出力パスに移動。
     // 前回 run の完成 mask が残っていると、PSV rename 成功 + mask rename 失敗のとき
     // 「新 PSV + 旧 mask」の組が下流の validate_mask (サイズ検査のみ) を素通りするため、
@@ -976,6 +917,129 @@ mod tests {
     }
 
     #[test]
+    fn moved_mask_byte_boundaries() {
+        for (count, expected) in [
+            (0, vec![]),
+            (1, vec![1]),
+            (7, vec![127]),
+            (8, vec![255]),
+            (9, vec![255, 1]),
+        ] {
+            let mut writer = MovedMaskWriter::new(Vec::new());
+            for _ in 0..count {
+                writer.push(true).unwrap();
+            }
+            assert_eq!(writer.finish().unwrap(), expected, "records={count}");
+        }
+    }
+
+    #[test]
+    fn newly_materialized_case_alias_preserves_existing_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("CaseProbe");
+        std::fs::write(&probe, []).unwrap();
+        if !dir.path().join("caseprobe").exists() {
+            return;
+        }
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("MASK.TMP");
+        let mask = dir.path().join("mask");
+        let first = temporary_path(&output).unwrap();
+        let second = temporary_path(&mask).unwrap();
+        std::fs::write(&input, b"input").unwrap();
+        std::fs::write(&first, b"previous staging").unwrap();
+        let cli = test_cli(input.clone(), output.clone(), Some(mask));
+        validate_all_output_paths(&cli).unwrap();
+        let mut cleanup = TemporaryFiles::new();
+        assert!(open_staging_files(&cli, &[&first, &second], &mut cleanup).is_err());
+        drop(cleanup);
+        assert_eq!(std::fs::read(first).unwrap(), b"previous staging");
+        assert_eq!(std::fs::read(input).unwrap(), b"input");
+        assert!(std::fs::read(output).unwrap().is_empty());
+    }
+
+    #[test]
+    fn newly_materialized_final_case_alias_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CaseProbe"), []).unwrap();
+        if !dir.path().join("caseprobe").exists() {
+            return;
+        }
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("Leaf.psv");
+        let mask = dir.path().join("leaf.psv");
+        std::fs::write(&input, b"input").unwrap();
+        let cli = test_cli(input.clone(), output.clone(), Some(mask.clone()));
+        validate_all_output_paths(&cli).unwrap();
+        let first = temporary_path(&output).unwrap();
+        let second = temporary_path(&mask).unwrap();
+        let mut cleanup = TemporaryFiles::new();
+        assert!(open_staging_files(&cli, &[&first, &second], &mut cleanup).is_err());
+        drop(cleanup);
+        assert_eq!(std::fs::read(input).unwrap(), b"input");
+        assert!(!output.exists());
+        assert!(!mask.exists());
+    }
+
+    #[test]
+    fn staging_handle_rejection_preserves_existing_files() {
+        for protect_final in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input.psv");
+            let output = dir.path().join("output.psv");
+            let mask = dir.path().join("mask.bits");
+            let first = temporary_path(&output).unwrap();
+            let second = temporary_path(&mask).unwrap();
+            std::fs::write(&input, b"input").unwrap();
+            std::fs::write(&output, b"final").unwrap();
+            std::fs::write(&first, b"previous staging").unwrap();
+            let protected = if protect_final { &output } else { &input };
+            std::fs::hard_link(protected, &second).unwrap();
+            let cli = test_cli(input.clone(), output.clone(), Some(mask));
+            let mut cleanup = TemporaryFiles::new();
+            assert!(open_staging_files(&cli, &[&first, &second], &mut cleanup).is_err());
+            drop(cleanup);
+            assert_eq!(std::fs::read(&first).unwrap(), b"previous staging");
+            assert_eq!(std::fs::read(&input).unwrap(), b"input");
+            assert_eq!(std::fs::read(&output).unwrap(), b"final");
+            assert!(second.exists());
+        }
+    }
+
+    #[test]
+    fn staging_handles_reject_each_other_without_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.psv");
+        let first = temporary_path(&output).unwrap();
+        let second = dir.path().join("mask.tmp");
+        std::fs::write(&input, b"input").unwrap();
+        std::fs::write(&first, b"staging").unwrap();
+        std::fs::hard_link(&first, &second).unwrap();
+        let cli = test_cli(input, output, None);
+        let mut cleanup = TemporaryFiles::new();
+        assert!(open_staging_files(&cli, &[&first, &second], &mut cleanup).is_err());
+        drop(cleanup);
+        assert_eq!(std::fs::read(first).unwrap(), b"staging");
+        assert_eq!(std::fs::read(second).unwrap(), b"staging");
+    }
+
+    #[test]
+    fn publish_validation_rechecks_changed_resource_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.psv");
+        let mask = dir.path().join("mask.bits");
+        std::fs::write(&input, b"input").unwrap();
+        let cli = test_cli(input.clone(), output, Some(mask.clone()));
+        validate_all_output_paths(&cli).unwrap();
+        std::fs::hard_link(&input, &mask).unwrap();
+        assert!(validate_all_output_paths(&cli).is_err());
+        assert_eq!(std::fs::read(input).unwrap(), b"input");
+        assert_eq!(std::fs::read(mask).unwrap(), b"input");
+    }
+
+    #[test]
     fn moved_mask_is_lsb_first_and_clears_unused_bits() {
         let mut mask = MovedMaskWriter::new(Vec::new());
         for moved in [
@@ -1172,6 +1236,8 @@ mod tests {
         let output = dir.path().join("output.psv");
         let moved_mask = dir.path().join("moved.bits");
         std::fs::write(&input, []).unwrap();
+        std::fs::write(temporary_path(&output).unwrap(), b"old psv staging").unwrap();
+        std::fs::write(temporary_path(&moved_mask).unwrap(), b"old mask staging").unwrap();
         let cli = test_cli(input, output.clone(), Some(moved_mask.clone()));
         let opts = ProcessOptions {
             max_ply: 16,
@@ -1243,8 +1309,14 @@ mod tests {
         std::fs::write(&output, b"previous psv").unwrap();
         std::fs::remove_file(&moved_mask).unwrap();
         std::fs::create_dir(&moved_mask).unwrap();
-        let err = process_file(&cli, 0, false, opts).unwrap_err();
-        assert!(format!("{err:#}").contains("stale mask"));
+        let error = process_file(&cli, 0, false, opts).unwrap_err();
+        let message = format!("{error:#}");
+        let expected = if cfg!(windows) {
+            "Failed to inspect output"
+        } else {
+            "stale mask"
+        };
+        assert!(message.contains(expected), "{message}");
         assert_eq!(std::fs::read(&output).unwrap(), b"previous psv");
         assert!(!temporary_path(&output).unwrap().exists());
         assert!(!temporary_path(&moved_mask).unwrap().exists());
