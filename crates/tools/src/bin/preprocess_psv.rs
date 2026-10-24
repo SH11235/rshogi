@@ -1309,7 +1309,14 @@ mod tests {
         std::fs::write(&output, b"previous psv").unwrap();
         std::fs::remove_file(&moved_mask).unwrap();
         std::fs::create_dir(&moved_mask).unwrap();
-        assert!(process_file(&cli, 0, false, opts).is_err());
+        let error = process_file(&cli, 0, false, opts).unwrap_err();
+        let message = format!("{error:#}");
+        let expected = if cfg!(windows) {
+            "Failed to inspect output"
+        } else {
+            "stale mask"
+        };
+        assert!(message.contains(expected), "{message}");
         assert_eq!(std::fs::read(&output).unwrap(), b"previous psv");
         assert!(!temporary_path(&output).unwrap().exists());
         assert!(!temporary_path(&moved_mask).unwrap().exists());
