@@ -80,7 +80,7 @@ checkpoint の前に落ちると、確定していない行が残る。spsa は�
    上げて指し直すので、古い attempt の行は孤立して残る。
 3. batch: `(pair_id, pair_slot)` ごとに後の行を採り、`pair_id < meta.completed_pairs` のものを確定とする。batches.jsonl は
    `k_pair_start` ごとに後の行を採り、`k_pair_start + batch_pairs <= meta.completed_pairs` のものを確定とする。
-   `pair_id` は batch の大きさによらず累積の局数から決まり、確定した pair は 0 から連続する。捨てた batch を resume で
+   `pair_id` は batch の大きさによらず、その batch の開始時の完了 pair 数 (`k_pair_start`) から数えるので、確定した pair は 0 から連続する。捨てた batch を resume で
    指し直すと同じ `pair_id` の行が後に追記される (`--force-schedule` で batch の大きさを変えた場合も、開始局面や確定値が
    同じとは限らない場合も、この規則で読める)。`iteration` は表示用で、重複の判定には使わない。
 4. 確定した pair の 2 行が揃わなければ、回収の途中なら未回収、最終の確認では異常として扱う。async の resume は journal の

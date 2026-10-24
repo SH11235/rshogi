@@ -1280,7 +1280,9 @@ impl BatchRecordWriter {
                     schema: "spsa_game",
                     version: GAME_RECORD_SCHEMA_VERSION,
                     mode: "batch",
-                    pair_id: (game.game_id - 1) / 2,
+                    // completed_pairs と同じ軸で数える (v3 から移行した run は total_games と
+                    // completed_pairs がずれ得るので game_id からは求めない)。
+                    pair_id: batch.k_pair_start + game.game_idx / 2,
                     pair_slot: game.game_idx % 2,
                     attempt: None,
                     iteration: Some(iteration),
@@ -4164,7 +4166,7 @@ fn main() -> Result<()> {
             // Phase B: ゲーム実行 (heavy)。
             let (stats, games) = pool.run_batch(&prep, batch_idx + 1)?;
             // checkpoint より前に書く。ここで落ちると resume で同じ iteration を指し直して
-            // 再度追記するため、読む側は iteration と pair 番号で後勝ちに重複を除く。
+            // 再度追記するため、読む側は pair 番号ごとに後の行を採り、completed_pairs で確定を判定する。
             if let Some(writer) = game_record_writer.as_mut() {
                 let batch = batch_record_line(&batch_ctx, batch_idx + 1, completed_pairs, &prep)?;
                 writer.append_batch(batch_idx + 1, &batch, &games)?;
