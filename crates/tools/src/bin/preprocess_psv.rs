@@ -42,15 +42,11 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
+use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 
 use std::cell::RefCell;
 
-use rshogi_core::nnue::{
-    LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs,
-    set_layer_stack_progress_kpabs_weights,
-};
+use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs};
 use rshogi_core::position::Position;
 use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
 use tools::qsearch_pv::{
@@ -258,42 +254,25 @@ fn main() -> Result<()> {
         init_nnue(nnue_path).context("Failed to load NNUE model")?;
         eprintln!("NNUE model loaded: {}", nnue_path.display());
         let network = get_network().context("NNUE was not initialized")?;
-        match network.layer_stack_num_buckets() {
-            Some(stored) => {
-                let mode_str = cli
-                    .ls_bucket_mode
+        let mode = cli
+            .ls_bucket_mode
+            .as_deref()
+            .map(parse_native_layer_stack_bucket_mode)
+            .transpose()?;
+        if let Some(plan) = NativeRouting::prepare(
+            network.layer_stack_num_buckets(),
+            mode,
+            cli.ls_progress_buckets,
+            cli.ls_progress_coeff.is_some(),
+        )
+        .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
+        {
+            plan.apply(|| {
+                cli.ls_progress_coeff
                     .as_deref()
-                    .context("LayerStacks requires --ls-bucket-mode")?;
-                let mode = parse_native_layer_stack_bucket_mode(mode_str)
-                    .context("--ls-bucket-mode must be progresskpabs or kingrank9")?;
-                match (mode, cli.ls_progress_coeff.as_deref()) {
-                    (LayerStackBucketMode::ProgressKPAbs, Some(path)) => {
-                        let weights =
-                            load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
-                        set_layer_stack_progress_kpabs_weights(weights)
-                            .map_err(anyhow::Error::msg)?;
-                    }
-                    (LayerStackBucketMode::ProgressKPAbs, None) => {
-                        if layer_stack_progress_coeff_required(cli.ls_progress_buckets) {
-                            anyhow::bail!("progresskpabs requires --ls-progress-coeff")
-                        }
-                    }
-                    (LayerStackBucketMode::KingRank9, Some(_)) => {
-                        anyhow::bail!("kingrank9 does not use --ls-progress-coeff")
-                    }
-                    (LayerStackBucketMode::KingRank9, None) => {}
-                    _ => unreachable!(),
-                }
-                configure_layer_stack_routing(mode, stored, cli.ls_progress_buckets)
-                    .map_err(anyhow::Error::msg)?;
-            }
-            None if cli.ls_bucket_mode.is_some()
-                || cli.ls_progress_buckets.is_some()
-                || cli.ls_progress_coeff.is_some() =>
-            {
-                anyhow::bail!("LayerStacks routing options require a LayerStacks NNUE")
-            }
-            None => {}
+                    .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+                    .transpose()
+            })?;
         }
         true
     } else {

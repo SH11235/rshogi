@@ -164,3 +164,5 @@ Position-by-position breakdown:
 USI モードは `EvalHash` / `UseEvalHash` をエンジンへ送信します。これらの名前を実装するエンジンが対象です。専用フラグの後に `--usi-option Name=Value` を指定順で送るため、同名の追加設定が最後に適用されます。
 
 探索の受信期限は movetime なら指定時間の 2 倍 + 5 秒、depth / nodes なら 300 秒です。`info` 行を受け取っても延長しません。期限後は `stop` を送り、最大 10 秒応答を回収します。回収した `bestmove` は正常測定として採用せず、タイムアウトで終了します。探索途中の値を成功した測定結果に含めません。
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

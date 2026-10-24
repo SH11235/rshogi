@@ -17,6 +17,8 @@
 //! （`%KACHI` / `%TORYO`）で排他に分かれる。
 //! CSA replay と終局特殊手の取得は `replay::csa_source::CsaSource` に委譲する。
 
+use crate::nnue_routing::NativeRouting;
+use rshogi_core::nnue::{LayerStackRoutingError, validate_layer_stack_routing_with_coefficients};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -31,10 +33,8 @@ use rayon::prelude::*;
 use rshogi_core::eval::{MaterialLevel, set_material_level};
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorStackVariant, LayerStackBucketMode, LayerStacksAccCache,
-    configure_layer_stack_routing, evaluate_dispatch, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs,
-    set_layer_stack_progress_kpabs_weights,
+    AccumulatorStackVariant, LayerStackBucketMode, LayerStacksAccCache, evaluate_dispatch,
+    get_network, init_nnue, load_progress_coeff_kpabs,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
@@ -931,12 +931,12 @@ fn count_game_clusters(path: &Path) -> Result<[usize; SLOTS]> {
 
 /// NNUE アーキテクチャと CLI 指定から、LayerStacks の実効 bucket mode を決める。
 fn resolve_bucket_mode(
-    is_layer_stacks: bool,
+    stored_buckets: Option<usize>,
     bucket_mode: Option<BucketModeArg>,
     has_progress_file: bool,
     progress_buckets: Option<usize>,
 ) -> Result<Option<BucketModeArg>> {
-    if !is_layer_stacks {
+    if stored_buckets.is_none() {
         if bucket_mode.is_some() {
             bail!("--bucket-mode は LayerStacks NNUE でのみ使用できます");
         }
@@ -950,23 +950,25 @@ fn resolve_bucket_mode(
     }
 
     let bucket_mode = bucket_mode.context("LayerStacks では --bucket-mode が必須です")?;
-    match bucket_mode {
-        BucketModeArg::ProgressKpabs
-            if !has_progress_file && layer_stack_progress_coeff_required(progress_buckets) =>
-        {
-            bail!("--bucket-mode progresskpabs では --progress-file が必須です");
+    let mode = match bucket_mode {
+        BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
+        BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9,
+    };
+    validate_layer_stack_routing_with_coefficients(
+        mode,
+        stored_buckets.unwrap(),
+        progress_buckets,
+        has_progress_file,
+    )
+    .map_err(|error| match error {
+        LayerStackRoutingError::Configuration(message) => anyhow!(message),
+        LayerStackRoutingError::MissingCoefficients => {
+            anyhow!("--bucket-mode progresskpabs では --progress-file が必須です")
         }
-        BucketModeArg::ProgressKpabs if progress_buckets.is_none() => {
-            bail!("--bucket-mode progresskpabs では --progress-buckets が必須です");
+        LayerStackRoutingError::UnusedCoefficients => {
+            anyhow!("--bucket-mode kingrank9 では --progress-file は使いません")
         }
-        BucketModeArg::Kingrank9 if has_progress_file => {
-            bail!("--bucket-mode kingrank9 では --progress-file は使いません");
-        }
-        BucketModeArg::Kingrank9 if progress_buckets.is_some() => {
-            bail!("--bucket-mode kingrank9 では --progress-buckets は使いません");
-        }
-        _ => {}
-    }
+    })?;
     Ok(Some(bucket_mode))
 }
 
@@ -984,38 +986,29 @@ fn init_eval(
         .with_context(|| format!("NNUE を読み込めません: {}", eval_file.display()))?;
     let network = get_network().ok_or_else(|| anyhow!("NNUE が初期化されていません"))?;
     let bucket_mode = resolve_bucket_mode(
-        network.is_layer_stacks(),
+        network.layer_stack_num_buckets(),
         bucket_mode,
         progress_file.is_some(),
         progress_buckets,
     )?;
 
-    match bucket_mode {
-        Some(BucketModeArg::ProgressKpabs) => {
-            if let Some(progress_file) = progress_file {
-                let weights = load_progress_coeff_kpabs(progress_file)
-                    .map_err(|e| anyhow!("progress 読み込みに失敗しました: {e}"))?;
-                set_layer_stack_progress_kpabs_weights(weights)
-                    .map_err(|e| anyhow!("progress 設定に失敗しました: {e}"))?;
-            } else if layer_stack_progress_coeff_required(progress_buckets) {
-                bail!("--bucket-mode progresskpabs では --progress-file が必須です");
-            }
-            configure_layer_stack_routing(
-                LayerStackBucketMode::ProgressKPAbs,
-                network.layer_stack_num_buckets().expect("LayerStacks checked"),
-                progress_buckets,
-            )
-            .map_err(anyhow::Error::msg)?;
-        }
-        Some(BucketModeArg::Kingrank9) => {
-            configure_layer_stack_routing(
-                LayerStackBucketMode::KingRank9,
-                network.layer_stack_num_buckets().expect("LayerStacks checked"),
-                None,
-            )
-            .map_err(anyhow::Error::msg)?;
-        }
-        None => {}
+    let mode = bucket_mode.map(|mode| match mode {
+        BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
+        BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9,
+    });
+    if let Some(plan) = NativeRouting::prepare(
+        network.layer_stack_num_buckets(),
+        mode,
+        progress_buckets,
+        progress_file.is_some(),
+    )
+    .context("native routing: --bucket-mode / --progress-buckets / --progress-file")?
+    {
+        plan.apply(|| {
+            progress_file
+                .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+                .transpose()
+        })?;
     }
     Ok((AccumulatorStackVariant::from_network(&network), bucket_mode))
 }
@@ -1877,47 +1870,50 @@ mod tests {
 
     #[test]
     fn layer_stacks_bucket_mode_is_explicit_and_validates_progress_options() {
-        assert!(resolve_bucket_mode(true, None, true, Some(8)).is_err());
+        assert!(resolve_bucket_mode(Some(9), None, true, Some(8)).is_err());
         assert_eq!(
-            resolve_bucket_mode(true, Some(BucketModeArg::ProgressKpabs), true, Some(8))
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::ProgressKpabs), true, Some(8))
                 .expect("明示 progresskpabs"),
             Some(BucketModeArg::ProgressKpabs)
         );
         assert_eq!(
-            resolve_bucket_mode(true, Some(BucketModeArg::Kingrank9), false, None)
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::Kingrank9), false, None)
                 .expect("明示 kingrank9"),
             Some(BucketModeArg::Kingrank9)
         );
 
         let missing_progress =
-            resolve_bucket_mode(true, Some(BucketModeArg::ProgressKpabs), false, Some(8))
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::ProgressKpabs), false, Some(8))
                 .expect_err("progresskpabs には progress-file が必要");
         assert!(missing_progress.to_string().contains("--progress-file が必須"));
         // routing bucket 数 1 は no-op routing のため progress-file なしでも通る。
         assert_eq!(
-            resolve_bucket_mode(true, Some(BucketModeArg::ProgressKpabs), false, Some(1))
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::ProgressKpabs), false, Some(1))
                 .expect("N=1 は係数不要"),
             Some(BucketModeArg::ProgressKpabs)
         );
 
-        let unused_progress = resolve_bucket_mode(true, Some(BucketModeArg::Kingrank9), true, None)
-            .expect_err("kingrank9 では progress-file を拒否");
+        let unused_progress =
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::Kingrank9), true, None)
+                .expect_err("kingrank9 では progress-file を拒否");
         assert!(unused_progress.to_string().contains("--progress-file は使いません"));
-        assert!(resolve_bucket_mode(true, Some(BucketModeArg::ProgressKpabs), true, None).is_err());
+        assert!(
+            resolve_bucket_mode(Some(9), Some(BucketModeArg::ProgressKpabs), true, None).is_err()
+        );
     }
 
     #[test]
     fn non_layer_stacks_rejects_layer_stacks_options() {
-        assert_eq!(resolve_bucket_mode(false, None, false, None).expect("専用 option なし"), None);
+        assert_eq!(resolve_bucket_mode(None, None, false, None).expect("専用 option なし"), None);
 
         let bucket_mode =
-            resolve_bucket_mode(false, Some(BucketModeArg::ProgressKpabs), false, None)
+            resolve_bucket_mode(None, Some(BucketModeArg::ProgressKpabs), false, None)
                 .expect_err("bucket-mode を拒否");
         assert!(bucket_mode.to_string().contains("--bucket-mode は LayerStacks"));
         let progress_file =
-            resolve_bucket_mode(false, None, true, None).expect_err("progress-file を拒否");
+            resolve_bucket_mode(None, None, true, None).expect_err("progress-file を拒否");
         assert!(progress_file.to_string().contains("--progress-file は LayerStacks"));
-        let both = resolve_bucket_mode(false, Some(BucketModeArg::Kingrank9), true, None)
+        let both = resolve_bucket_mode(None, Some(BucketModeArg::Kingrank9), true, None)
             .expect_err("両 option を拒否");
         assert!(both.to_string().contains("--bucket-mode は LayerStacks"));
     }

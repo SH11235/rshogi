@@ -21,7 +21,6 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -29,11 +28,6 @@ use crossbeam_channel::{bounded, unbounded};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Value as JsonValue, json};
 
-use rshogi_core::nnue::{
-    LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, set_fv_scale_override,
-    set_layer_stack_progress_kpabs_weights,
-};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 use rshogi_core::types::{Color, Value};
@@ -395,77 +389,14 @@ fn black_view_label(score: Value, stm: Color) -> (i32, Option<i32>) {
     (eval, mate)
 }
 
-/// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
-///
-/// 設定はすべて評価時に参照されるグローバル状態なので init_nnue 前に適用しておく。
-/// progresskpabs で係数未指定だと bucket 選択が学習時と食い違い、ラベルが静かに
-/// 狂うため、エンジン同様にここで弾く（防御的すり替えはしない＝エラーで停止）。
 fn configure_eval(cli: &Cli) -> Result<()> {
-    if !cli.nnue.exists() {
-        bail!("NNUE model file not found: {}", cli.nnue.display());
-    }
-
-    if cli.fv_scale != 0 {
-        set_fv_scale_override(cli.fv_scale);
-        eprintln!("FV_SCALE: {}", cli.fv_scale);
-    } else {
-        eprintln!("FV_SCALE: auto-detect (header)");
-    }
-
-    let mode =
-        cli.ls_bucket_mode
-            .as_deref()
-            .map(|mode_str| {
-                parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
-            format!("invalid --ls-bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
-            })
-            })
-            .transpose()?;
-
-    let mut coeff_loaded = false;
-    if let Some(path) = &cli.ls_progress_coeff {
-        let weights = load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
-        set_layer_stack_progress_kpabs_weights(weights)
-            .map_err(|e| anyhow::anyhow!("failed to set progress coeff weights: {e}"))?;
-        coeff_loaded = true;
-        eprintln!("LS_PROGRESS_COEFF: {}", path.display());
-    }
-
-    init_nnue(&cli.nnue).context("Failed to load NNUE model")?;
-    eprintln!("NNUE model loaded: {}", cli.nnue.display());
-
-    let stored_buckets =
-        get_network().as_deref().and_then(|network| network.layer_stack_num_buckets());
-    match stored_buckets {
-        Some(stored) => {
-            let mode = mode.context("LayerStacks requires --ls-bucket-mode")?;
-            if mode == LayerStackBucketMode::ProgressKPAbs
-                && !coeff_loaded
-                && layer_stack_progress_coeff_required(cli.ls_progress_buckets)
-            {
-                bail!("--ls-bucket-mode progresskpabs requires --ls-progress-coeff");
-            }
-            if mode == LayerStackBucketMode::KingRank9 && cli.ls_progress_coeff.is_some() {
-                bail!("--ls-bucket-mode kingrank9 does not use --ls-progress-coeff");
-            }
-            configure_layer_stack_routing(mode, stored, cli.ls_progress_buckets)
-                .map_err(anyhow::Error::msg)?;
-            eprintln!(
-                "LayerStacks routing: mode={} stored_buckets={} routing_buckets={}",
-                mode.as_str(),
-                stored,
-                cli.ls_progress_buckets.unwrap_or(9)
-            );
-        }
-        None if mode.is_some()
-            || cli.ls_progress_buckets.is_some()
-            || cli.ls_progress_coeff.is_some() =>
-        {
-            bail!("LayerStacks routing options were provided for a non-LayerStacks network");
-        }
-        None => {}
-    }
-    Ok(())
+    tools::teacher_labeler::configure_eval(&tools::teacher_labeler::LabelerEvalConfig {
+        nnue: &cli.nnue,
+        fv_scale: cli.fv_scale,
+        ls_bucket_mode: cli.ls_bucket_mode.as_deref(),
+        ls_progress_buckets: cli.ls_progress_buckets,
+        ls_progress_coeff: cli.ls_progress_coeff.as_deref(),
+    })
 }
 
 fn readonly_inputs(cli: &Cli) -> Vec<&Path> {

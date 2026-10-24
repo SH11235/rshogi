@@ -182,3 +182,5 @@ in-flight 上限でバウンドします。
 held-out（特に floodgate slice）を labeler の教師にも対局の互角局面にも混ぜないでください。混ぜると
 WDL 指標が train-on-test で汚染され「accuracy は上がるが強くない」状態になります。floodgate を教師に
 含む labeler を採点する場合は、教師に対し dedup した clean held-out を使ってください。
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

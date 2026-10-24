@@ -12,17 +12,13 @@
 //!   使い回すとラベルが処理順に依存してしまう。それを避けるための fresh-per-position。）
 //! - 符号規約は手番側視点（side-to-move view）cp で統一（hcpe 保存 eval・dlshogi value 目標と同じ）。
 
-use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
+use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use rshogi_core::nnue::{
-    LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, set_fv_scale_override,
-    set_layer_stack_progress_kpabs_weights,
-};
+use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs, set_fv_scale_override};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
@@ -48,7 +44,7 @@ pub struct LabelerEvalConfig<'a> {
 }
 
 /// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
-/// `label_bench_positions::configure_eval` と同じく progresskpabs で係数未指定なら弾く
+/// progresskpabs で係数未指定なら弾く
 /// (routing bucket 数 1 の no-op routing は係数を参照しないため除く)。
 ///
 /// # 注意（グローバル状態）
@@ -74,46 +70,33 @@ pub fn configure_eval(cfg: &LabelerEvalConfig) -> Result<()> {
             })
             })
             .transpose()?;
-    let mut coeff_loaded = false;
-    if let Some(path) = cfg.ls_progress_coeff {
-        let weights = load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
-        set_layer_stack_progress_kpabs_weights(weights)
-            .map_err(|e| anyhow::anyhow!("failed to set progress coeff weights: {e}"))?;
-        coeff_loaded = true;
-        eprintln!("LS_PROGRESS_COEFF: {}", path.display());
-    }
     init_nnue(cfg.nnue).context("Failed to load NNUE model")?;
     eprintln!("NNUE model loaded: {}", cfg.nnue.display());
     let stored_buckets =
         get_network().as_deref().and_then(|network| network.layer_stack_num_buckets());
-    match stored_buckets {
-        Some(stored) => {
-            let mode = mode.context("LayerStacks requires --ls-bucket-mode")?;
-            if mode == LayerStackBucketMode::ProgressKPAbs
-                && !coeff_loaded
-                && layer_stack_progress_coeff_required(cfg.ls_progress_buckets)
-            {
-                bail!("--ls-bucket-mode progresskpabs requires --ls-progress-coeff");
-            }
-            if mode == LayerStackBucketMode::KingRank9 && cfg.ls_progress_coeff.is_some() {
-                bail!("--ls-bucket-mode kingrank9 does not use --ls-progress-coeff");
-            }
-            configure_layer_stack_routing(mode, stored, cfg.ls_progress_buckets)
-                .map_err(anyhow::Error::msg)?;
-            eprintln!(
-                "LayerStacks routing: mode={} stored_buckets={} routing_buckets={}",
-                mode.as_str(),
-                stored,
-                cfg.ls_progress_buckets.unwrap_or(9)
-            );
-        }
-        None if mode.is_some()
-            || cfg.ls_progress_buckets.is_some()
-            || cfg.ls_progress_coeff.is_some() =>
-        {
-            bail!("LayerStacks routing options were provided for a non-LayerStacks network");
-        }
-        None => {}
+    if let Some(plan) = NativeRouting::prepare(
+        stored_buckets,
+        mode,
+        cfg.ls_progress_buckets,
+        cfg.ls_progress_coeff.is_some(),
+    )
+    .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
+    {
+        plan.apply(|| {
+            cfg.ls_progress_coeff
+                .map(|path| {
+                    let weights = load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
+                    eprintln!("LS_PROGRESS_COEFF: {}", path.display());
+                    Ok(weights)
+                })
+                .transpose()
+        })?;
+        eprintln!(
+            "LayerStacks routing: mode={} stored_buckets={} routing_buckets={}",
+            plan.mode().as_str(),
+            stored_buckets.unwrap(),
+            cfg.ls_progress_buckets.unwrap_or(9)
+        );
     }
     Ok(())
 }

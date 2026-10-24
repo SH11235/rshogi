@@ -726,3 +726,5 @@ echo '{"target_games":0}' > <out-dir>/control.json         # 安全な drain（�
   `adopted`: 終局理由が教師データ採用対象なら `true`）。`adopted=true` は出力件数を保証せず、
   dedup で蓄積局面が消えた対局、PSV の宣言勝ち終端が `--skip-initial-ply` の対象になった対局、
   pack / hcpe3 で終局前の記録対象局面がない対局でも `true` になり得る。
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

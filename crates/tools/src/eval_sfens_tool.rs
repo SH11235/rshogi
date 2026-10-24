@@ -11,6 +11,7 @@
 //!   --count 10
 //! ```
 
+use crate::nnue_routing::NativeRouting;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::io::{BufRead, BufReader};
@@ -19,9 +20,8 @@ use std::path::PathBuf;
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LsFeatureSpec,
     NNUENetwork, NetworkLayerStacks, compute_layer_stack_progresskpabs_bucket_index,
-    configure_layer_stack_routing, get_layer_stack_progress_kpabs_weights,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, ls_dispatch_ft_size,
-    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
+    get_layer_stack_progress_kpabs_weights, load_progress_coeff_kpabs, ls_dispatch_ft_size,
+    sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
@@ -379,31 +379,26 @@ fn run_eval_for_network<
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.bucket_mode {
-        BucketMode::ProgressKpabs => {
-            if let Some(coeff_path) = cli.progress_coeff.as_ref() {
-                let weights = load_progress_coeff_kpabs(coeff_path)
-                    .map_err(|e| anyhow::anyhow!("failed to load --progress-coeff: {e}"))?;
-                set_layer_stack_progress_kpabs_weights(weights)
-                    .map_err(|e| anyhow::anyhow!("failed to set kpabs weights: {e}"))?;
-            } else if layer_stack_progress_coeff_required(Some(cli.progress_buckets)) {
-                anyhow::bail!("--bucket-mode progresskpabs requires --progress-coeff");
-            }
-        }
-    }
-
     eprintln!("Loading NNUE: {:?}", cli.nnue);
     // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
     // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
     // 静的 net の中間層を dump する本ツールでは使えない。
     let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
-    configure_layer_stack_routing(
-        LayerStackBucketMode::ProgressKPAbs,
-        ls_net.num_buckets(),
+    let plan = NativeRouting::prepare(
+        Some(ls_net.num_buckets()),
+        Some(LayerStackBucketMode::ProgressKPAbs),
         Some(cli.progress_buckets),
+        cli.progress_coeff.as_ref().is_some(),
     )
-    .map_err(anyhow::Error::msg)?;
+    .context("native routing: --progress-buckets / --progress-coeff")?
+    .expect("LayerStacks routing");
+    plan.apply(|| {
+        cli.progress_coeff
+            .as_ref()
+            .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+            .transpose()
+    })?;
 
     ls_dispatch_ft_size!(
         &ls_net,

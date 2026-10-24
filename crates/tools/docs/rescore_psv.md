@@ -480,3 +480,5 @@ ONNX external tensor、ORT が生成する profile JSON、TensorRT cache は列�
 - [rescore_psv-internals.md](rescore_psv-internals.md) — 内部実装（供給パイプライン、
   完了マーカー仕様、パス安全チェック等）
 - [psv-utils](https://github.com/KazApps/psv-utils) — 同等機能の Python ツール
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

@@ -43,11 +43,21 @@ impl Fixture {
     /// ft-halfka_hm_merged × layerstacks-1536x16x32。
     /// num_buckets = 1 なら progresskpabs routing は no-op なので progress 係数が要らない。
     fn new() -> Self {
+        Self::with_buckets(1)
+    }
+
+    fn with_buckets(buckets: usize) -> Self {
         let fixture = Self {
             temp: tempdir().expect("tempdir"),
         };
-        let synthetic =
-            build_synthetic_layer_stacks("HalfKaHmMerged", HALFKA_HM_DIMENSIONS, 1536, 16, 32, 1);
+        let synthetic = build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HALFKA_HM_DIMENSIONS,
+            1536,
+            16,
+            32,
+            buckets,
+        );
         std::fs::write(fixture.net(), &synthetic.bytes).expect("write synthetic net");
         std::fs::write(fixture.sfens(), format!("{SFEN_HIRATE}\n{SFEN_AFTER_7G7F}\n"))
             .expect("write sfens");
@@ -192,4 +202,71 @@ fn bench_nnue_eval_layer_stack_mode_loads_static_layer_stacks() {
         stdout.contains(&format!("Architecture: {EXPECTED_STATIC_ARCH_NAME}")),
         "arch ラベルが静的 spec 名になっていない:\n{stdout}"
     );
+}
+
+#[test]
+fn diagnostic_cli_rejects_missing_coefficients_with_its_own_flags() {
+    let fixture = Fixture::with_buckets(8);
+    for binary in [
+        env!("CARGO_BIN_EXE_eval_sfens"),
+        env!("CARGO_BIN_EXE_nnue_saturation"),
+    ] {
+        let output = run(
+            binary,
+            &[
+                "--nnue",
+                &fixture.net(),
+                "--sfens",
+                &fixture.sfens(),
+                "--progress-buckets",
+                "8",
+                "--count",
+                "1",
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains("requires progress coefficients"), "{stderr}");
+        assert!(stderr.contains("--progress-coeff"), "{stderr}");
+        assert!(!stderr.contains("--ls-progress-coeff"), "{stderr}");
+    }
+}
+
+#[test]
+fn single_bucket_does_not_ignore_invalid_coefficients_or_q16() {
+    let fixture = Fixture::new();
+    let coefficients = fixture.file("invalid-coeff.bin");
+    std::fs::write(&coefficients, [0_u8; 3]).unwrap();
+    let output = run(
+        env!("CARGO_BIN_EXE_eval_sfens"),
+        &[
+            "--nnue",
+            &fixture.net(),
+            "--sfens",
+            &fixture.sfens(),
+            "--progress-buckets",
+            "1",
+            "--progress-coeff",
+            &coefficients,
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("progress coeff size mismatch"), "{stderr}");
+    let output = run(
+        env!("CARGO_BIN_EXE_verify_nnue_accumulator"),
+        &[
+            "--nnue-file",
+            &fixture.net(),
+            "--ls-bucket-mode",
+            "progresskpabsq16",
+            "--ls-progress-buckets",
+            "1",
+            "--ls-progress-coeff",
+            &coefficients,
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("not supported by tools native evaluation"), "{stderr}");
 }

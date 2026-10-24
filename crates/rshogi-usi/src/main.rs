@@ -19,14 +19,13 @@ use rshogi_core::eval::{
 use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorStackVariant, LayerStackBucketMode, MAX_LAYER_STACK_BUCKETS,
+    AccumulatorStackVariant, LayerStackBucketMode, LayerStackRoutingError, MAX_LAYER_STACK_BUCKETS,
     NET_DELTA_OPTION_PREFIX, NetCoefficientId, NetDelta, NetDeltaReport, clear_nnue,
     configure_layer_stack_routing, evaluate_dispatch, get_network, init_nnue_with_deltas,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs_from_bytes,
-    parse_layer_stack_bucket_mode, parse_nnue_architecture, print_nnue_stats,
-    reset_layer_stack_progress_buckets, reset_layer_stack_progress_kpabs_weights,
+    load_progress_coeff_kpabs_from_bytes, parse_layer_stack_bucket_mode, parse_nnue_architecture,
+    print_nnue_stats, reset_layer_stack_progress_buckets, reset_layer_stack_progress_kpabs_weights,
     set_fv_scale_override, set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
-    validate_layer_stack_routing_configuration,
+    validate_layer_stack_routing_with_coefficients,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -1998,38 +1997,22 @@ fn validate_layer_stack_routing(
     progress_buckets: Option<usize>,
     progress_coeff_loaded: bool,
 ) -> std::result::Result<(), String> {
-    match mode {
-        None => Err(
-            "LS_BUCKET_MODE must be explicitly set to progresskpabs, progresskpabsq16 or kingrank9 before isready"
-                .to_string(),
-        ),
-        Some(mode @ (LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16)) => {
-            validate_layer_stack_routing_configuration(
-                mode,
-                stored_bucket_count,
-                progress_buckets,
-            )?;
-            if !progress_coeff_loaded && layer_stack_progress_coeff_required(progress_buckets) {
-                return Err(format!("LS_BUCKET_MODE={} requires LS_PROGRESS_COEFF to be loaded", mode.as_str()));
-            }
-            Ok(())
+    let mode = mode.ok_or_else(|| "LS_BUCKET_MODE must be explicitly set to progresskpabs, progresskpabsq16 or kingrank9 before isready".to_string())?;
+    validate_layer_stack_routing_with_coefficients(
+        mode,
+        stored_bucket_count,
+        progress_buckets,
+        progress_coeff_loaded,
+    )
+    .map_err(|error| match error {
+        LayerStackRoutingError::Configuration(message) => message,
+        LayerStackRoutingError::MissingCoefficients => {
+            format!("LS_BUCKET_MODE={} requires LS_PROGRESS_COEFF to be loaded", mode.as_str())
         }
-        Some(LayerStackBucketMode::KingRank9) => {
-            validate_layer_stack_routing_configuration(
-                LayerStackBucketMode::KingRank9,
-                stored_bucket_count,
-                progress_buckets,
-            )?;
-            if progress_coeff_loaded {
-                return Err(
-                    "LS_BUCKET_MODE=kingrank9 conflicts with LS_PROGRESS_COEFF; leave it unset"
-                        .to_string(),
-                );
-            }
-            Ok(())
+        LayerStackRoutingError::UnusedCoefficients => {
+            "LS_BUCKET_MODE=kingrank9 conflicts with LS_PROGRESS_COEFF; leave it unset".to_string()
         }
-        Some(_) => Err("unsupported LS_BUCKET_MODE".to_string()),
-    }
+    })
 }
 
 fn parse_startup_args(args: impl IntoIterator<Item = String>) -> Result<Option<PathBuf>> {

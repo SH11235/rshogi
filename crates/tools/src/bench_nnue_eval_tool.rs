@@ -12,14 +12,14 @@
 //!   --ls-progress-coeff <progress.bin>
 //! ```
 
-use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
+use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 use std::hint::black_box;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -27,10 +27,8 @@ use rshogi_core::nnue::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
     LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_kingrank9_bucket_index,
-    compute_layer_stack_progresskpabs_bucket_index, configure_layer_stack_routing,
-    get_layer_stack_progress_buckets, get_layer_stack_progress_kpabs_weights,
-    layer_stack_progress_coeff_required, ls_dispatch_ft_size,
-    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
+    compute_layer_stack_progresskpabs_bucket_index, get_layer_stack_progress_buckets,
+    get_layer_stack_progress_kpabs_weights, ls_dispatch_ft_size, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType, Value};
@@ -396,22 +394,15 @@ fn configure_layer_stack_bucket(
         cli.ls_bucket_mode.as_deref().context("LayerStacks requires --ls-bucket-mode")?;
     let mode = parse_native_layer_stack_bucket_mode(mode_str)?;
 
-    if mode == LayerStackBucketMode::ProgressKPAbs {
-        match progress_weights {
-            Some(weights) => {
-                set_layer_stack_progress_kpabs_weights(weights.to_vec().into_boxed_slice())
-                    .map_err(|e| anyhow!("failed to set progresskpabs weights: {e}"))?;
-            }
-            None if layer_stack_progress_coeff_required(cli.ls_progress_buckets) => {
-                bail!("--ls-bucket-mode progresskpabs requires --ls-progress-coeff <progress.bin>")
-            }
-            None => {}
-        }
-    } else if cli.ls_progress_coeff.is_some() {
-        bail!("--ls-bucket-mode kingrank9 does not use --ls-progress-coeff");
-    }
-    configure_layer_stack_routing(mode, stored_buckets, cli.ls_progress_buckets)
-        .map_err(anyhow::Error::msg)?;
+    let plan = NativeRouting::prepare(
+        Some(stored_buckets),
+        Some(mode),
+        cli.ls_progress_buckets,
+        cli.ls_progress_coeff.is_some() || progress_weights.is_some(),
+    )
+    .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
+    .expect("LayerStacks routing");
+    plan.apply(|| Ok(progress_weights.map(|weights| weights.to_vec().into_boxed_slice())))?;
 
     Ok(mode)
 }
@@ -726,6 +717,9 @@ fn run_layer_stack_bench<
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(mode) = cli.ls_bucket_mode.as_deref() {
+        parse_native_layer_stack_bucket_mode(mode)?;
+    }
     let mode = BenchMode::parse(&cli.mode)?;
 
     // テスト局面をパース
