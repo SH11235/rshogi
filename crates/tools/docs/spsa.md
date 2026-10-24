@@ -14,8 +14,9 @@ USIエンジンのパラメータを対局結果から調整する。起点を `
 
 既定で、確定した結果に対応する全局の棋譜を `<run-dir>/games.jsonl` に、batch モードでは batch ごとの摂動を
 `<run-dir>/batches.jsonl` にも追記する。`--no-game-records` で両方を書かない。有無は meta に保存し、
-resume で切り替えると拒否する (切り替えると確定した局の棋譜が欠けるため)。記録機能より前の batch の meta には
-この項目が無く、resume 以降の batch から記録する。
+resume で切り替えると拒否する (切り替えると確定した局の棋譜が欠けるため)。記録機能より前の batch の meta (v3 を含む) には
+この項目が無く、resume 以降の batch から記録する。その場合も run-dir に games.jsonl があれば記録していた run として扱い、
+`--no-game-records` での resume を拒否する。
 
 ### games.jsonl (1 局 1 行、schema `spsa_game` version 1)
 

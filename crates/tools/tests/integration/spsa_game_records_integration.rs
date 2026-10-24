@@ -313,7 +313,7 @@ fn batch_crash_after_records_rewrites_the_iteration() {
     assert_eq!(games.len(), 10);
     let confirmed = confirmed_batch_games(&test);
     assert_eq!(confirmed.len(), 8);
-    // 指し直した batch 2 は後の行 (7・8 行目) が採られる。
+    // 捨てた batch 2 の行より、指し直した batch 2 の行が採られる。
     assert_eq!(confirmed[&(2, 1, 0)], games[4]);
     assert_eq!(confirmed[&(2, 1, 1)], games[5]);
     let batches = records(&test, "batches.jsonl");
@@ -322,41 +322,43 @@ fn batch_crash_after_records_rewrites_the_iteration() {
 }
 
 #[test]
-fn legacy_batch_meta_is_pinned_before_play_resumes() {
-    let test = PoolTest::new();
-    let output = test.run(
-        "value_driven",
-        4,
-        1,
-        1,
-        &[],
-        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:2"))],
-    );
-    assert_eq!(output.status.code(), Some(86));
-    // 記録機能より前の meta を模して項目を消す。
-    let mut meta = test.meta();
-    meta.as_object_mut().unwrap().remove("game_records");
-    std::fs::write(test.path("run/meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
-    let output = test.run(
-        "value_driven",
-        4,
-        1,
-        1,
-        &["--resume", "--force-unlock"],
-        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:1"))],
-    );
-    assert_eq!(output.status.code(), Some(86));
-    assert_eq!(test.meta()["game_records"], true);
-    let output = test.run(
-        "value_driven",
-        4,
-        1,
-        1,
-        &["--resume", "--force-unlock", "--no-game-records"],
-        &[],
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("game records"));
+fn legacy_batch_meta_with_records_rejects_disabling_on_resume() {
+    for v3 in [false, true] {
+        let test = PoolTest::new();
+        let output = test.run(
+            "value_driven",
+            4,
+            1,
+            1,
+            &[],
+            &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:2"))],
+        );
+        assert_eq!(output.status.code(), Some(86));
+        // 記録機能より前の meta を模して項目を消す (v3 は v4 専用の項目も消す)。
+        let mut meta = test.meta();
+        let fields = meta.as_object_mut().unwrap();
+        fields.remove("game_records");
+        if v3 {
+            fields.insert("format_version".into(), serde_json::json!(3));
+            for key in ["total_pairs", "batch_pairs", "completed_pairs"] {
+                fields.remove(key);
+            }
+        }
+        let meta_path = test.path("run/meta.json");
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+        let before = std::fs::read(&meta_path).unwrap();
+        let output = test.run(
+            "value_driven",
+            4,
+            1,
+            1,
+            &["--resume", "--force-unlock", "--no-game-records"],
+            &[],
+        );
+        assert!(!output.status.success(), "v3={v3}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("game records"), "v3={v3}");
+        assert_eq!(std::fs::read(&meta_path).unwrap(), before, "v3={v3}");
+    }
 }
 
 #[test]

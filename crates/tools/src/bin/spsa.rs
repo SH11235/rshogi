@@ -3728,7 +3728,12 @@ fn main() -> Result<()> {
                 let mut meta = load_meta(&meta_path).with_context(|| {
                     format!("--resume was set but metadata load failed: {}", meta_path.display())
                 })?;
-                if let Some(recorded) = meta.game_records
+                // 記録機能より前の meta (v3 を含む) は項目を持たない。その run で棋譜を書いた後
+                // checkpoint の前に落ちていれば games.jsonl があるので、記録していた run として扱う。
+                let recorded = meta
+                    .game_records
+                    .or_else(|| default_games_jsonl_path(&cli.run_dir).exists().then_some(true));
+                if let Some(recorded) = recorded
                     && recorded == cli.no_game_records
                 {
                     bail!(
@@ -3966,15 +3971,6 @@ fn main() -> Result<()> {
         let rotated = rotate_v3_csv_files_for_silent_migrate(&cli.run_dir)?;
         for p in &rotated {
             eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
-        }
-    } else if cli.resume {
-        // 記録機能より前の meta は、最初の checkpoint を待たずに今回の設定で固定する。棋譜を
-        // 書いた後 checkpoint の前に落ちてから設定を切り替えて resume すると、残った行が
-        // 指し直し後の completed_iterations で確定扱いされるため。
-        let mut meta = load_meta(&meta_path)?;
-        if meta.game_records.is_none() {
-            meta.game_records = Some(!cli.no_game_records);
-            save_meta(&meta_path, &meta)?;
         }
     }
 
