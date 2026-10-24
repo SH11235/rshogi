@@ -21,7 +21,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tools::book_backprop::{BackpropOptions, MergeMode, backprop_file_with};
+use tools::book_backprop::{BackpropOptions, DrawValues, MergeMode, backprop_file_with};
 use tools::book_db::{
     BookDb, BookMove, PositionEntry, apply_usi_move, canonical_key, child_position_after_move,
     parse_position_line, position_from_sfen, strip_ply,
@@ -33,9 +33,6 @@ use tools::selfplay::{EngineConfig, EngineProcess};
 
 const MATE_CAP: i32 = 30_000;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-/// `run` の逆伝播は `book_backprop` の既定値で呼ぶ。
-const BACKPROP_DRAW_VALUE: i32 = 0;
-const BACKPROP_MAX_ITERS: usize = 1000;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -2095,8 +2092,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             &expanded_path,
             &book_path,
             Some(&dir.join("backprop.md")),
-            BACKPROP_DRAW_VALUE,
-            BACKPROP_MAX_ITERS,
+            DrawValues::default(),
             args.merge,
             BackpropOptions {
                 skip_unusable_moves: true,

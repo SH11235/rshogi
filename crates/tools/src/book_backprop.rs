@@ -2,7 +2,6 @@
 //!
 //! `book_backprop` bin と `book_mine run` の双方から呼ぶ。
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -14,26 +13,24 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Move, Value};
 
+use crate::book_retrograde;
+
 /// YANEURAOU-DB2016 テキスト定跡のヘッダ行。
 pub const BOOK_HEADER: &str = "#YANEURAOU-DB2016 1.00";
+
+/// 千日手の値に指定できる範囲。詰みの値 (32000) より内側に限り、値をずらしても桁あふれしないようにする。
+const DRAW_VALUE_LIMIT: i32 = 30_000;
 
 /// 伝播値と既存ラベル値の合成方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MergeMode {
     /// 純 negamax。伝播値で置き換える。
     Replace,
-    /// 既存ラベル値と伝播値の小さい方を採る。
+    /// 自分の手は既存ラベル値と伝播値の小さい方を採る。相手の手は伝播値のまま。
     Min,
 }
 
 impl MergeMode {
-    fn apply(self, old: i32, propagated: i32) -> i32 {
-        match self {
-            MergeMode::Replace => propagated,
-            MergeMode::Min => old.min(propagated),
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             MergeMode::Replace => "replace",
@@ -104,10 +101,31 @@ pub struct BackpropOptions {
     pub add_transposition_moves: bool,
 }
 
+/// 千日手の値。それぞれ手番の側から見た値で、先手を自分として解くときは `black`、後手なら `white` を使う。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DrawValues {
+    pub black: i32,
+    pub white: i32,
+}
+
+impl DrawValues {
+    /// 先手・後手とも同じ値。
+    pub fn both(value: i32) -> Self {
+        Self {
+            black: value,
+            white: value,
+        }
+    }
+
+    fn of(self, black: bool) -> i32 {
+        if black { self.black } else { self.white }
+    }
+}
+
 /// 局面の best 計算に共通の設定。
 #[derive(Debug, Clone, Copy)]
 struct BestParams {
-    draw_value: i32,
+    draws: DrawValues,
     merge: MergeMode,
     skip_unusable_moves: bool,
 }
@@ -131,6 +149,18 @@ pub struct Graph {
     added_moves: Vec<Vec<BookMove>>,
 }
 
+impl Graph {
+    /// 局面 key が先手番か。
+    fn black(&self, node: usize) -> bool {
+        self.keys[node].split_whitespace().nth(1) != Some("w")
+    }
+
+    /// 入力の行の数。補完手は後ろに並び、探索ラベルを持たない。
+    fn input_len(&self, node: usize) -> usize {
+        self.moves[node].len() - self.added_moves[node].len()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SccGraph {
     comp_of: Vec<usize>,
@@ -148,9 +178,12 @@ pub struct PropagationStats {
     pub nontrivial_sccs: usize,
     pub max_scc_size: usize,
     pub draw_moves: usize,
-    pub scc_iters: Vec<usize>,
     pub depths: Vec<usize>,
     pub changed_nodes: Vec<NodeChange>,
+    /// 自分・相手が王手をかけ続けられる循環の状態数 (先手・後手として解いた 2 回の合計)。
+    pub check_core_states: usize,
+    /// 同値手を選ぶと保証が破れるため、保証手だけを残した局面数。
+    pub restricted_ties: usize,
 }
 
 /// best 値が変化した局面。
@@ -166,11 +199,10 @@ pub fn backprop_file(
     book: &Path,
     out: &Path,
     report: Option<&Path>,
-    draw_value: i32,
-    max_iters: usize,
+    draws: DrawValues,
     merge: MergeMode,
 ) -> Result<PropagationStats> {
-    backprop_file_with(book, out, report, draw_value, max_iters, merge, BackpropOptions::default())
+    backprop_file_with(book, out, report, draws, merge, BackpropOptions::default())
 }
 
 /// [`backprop_file`] に追加オプションを指定する版。
@@ -178,23 +210,18 @@ pub fn backprop_file_with(
     book: &Path,
     out: &Path,
     report: Option<&Path>,
-    draw_value: i32,
-    max_iters: usize,
+    draws: DrawValues,
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
-    if max_iters == 0 {
-        bail!("--max-iters は 1 以上を指定してください");
-    }
-
     rshogi_book::Book::from_path(book, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", book.display()))?;
     let db = read_book_db(book)?;
     let mut graph = build_graph_with(&db, options)?;
-    let stats = propagate_values_with(&db, &mut graph, draw_value, max_iters, merge, options)?;
+    let stats = propagate_values_with(&db, &mut graph, draws, merge, options)?;
     write_backprop_book(&db, &graph, out)?;
     if let Some(path) = report {
-        write_report(&db, &graph, &stats, path, merge)?;
+        write_report(&db, &graph, &stats, path, merge, draws)?;
     }
     Ok(stats)
 }
@@ -344,216 +371,6 @@ fn add_transposition_moves(book: &BookDb, graph: &mut Graph, skipped: &[bool]) -
     Ok(())
 }
 
-const DISTANCE_MAX: u16 = 9999;
-const PERPETUAL_CHECKED: u16 = 9998;
-const PERPETUAL_CHECK: u16 = 9997;
-
-/// 探索 depth とは独立した、手番側の評価値と葉までの距離。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ValueDistance {
-    value: i32,
-    distance: u16,
-}
-
-impl ValueDistance {
-    fn better(self, other: Self) -> bool {
-        if self.value != other.value {
-            return self.value > other.value;
-        }
-        if self.distance == PERPETUAL_CHECK {
-            return false;
-        }
-        if other.distance == PERPETUAL_CHECK {
-            return true;
-        }
-        if self.value >= 0 {
-            self.distance < other.distance
-        } else {
-            self.distance > other.distance
-        }
-    }
-
-    fn for_parent(self) -> Self {
-        Self {
-            value: -self.value,
-            distance: (self.distance + 1).min(DISTANCE_MAX),
-        }
-    }
-}
-
-/// 王手されている候補から、2 手先に候補がないものを不動点まで除く。
-/// 残った候補同士の間の局面も含め、DFS する部分グラフを得る。
-fn extract_check_loop(graph: &Graph) -> Vec<bool> {
-    let mut candidates = graph.checked.clone();
-    loop {
-        let mut changed = false;
-        for node in 0..candidates.len() {
-            if candidates[node]
-                && !graph.adjacency[node]
-                    .iter()
-                    .any(|&child| graph.adjacency[child].iter().any(|&next| candidates[next]))
-            {
-                candidates[node] = false;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut check_loop = candidates.clone();
-    for (node, &candidate) in candidates.iter().enumerate() {
-        if candidate {
-            for &child in &graph.adjacency[node] {
-                if graph.adjacency[child].iter().any(|&next| candidates[next]) {
-                    check_loop[child] = true;
-                }
-            }
-        }
-    }
-    check_loop
-}
-
-struct SccEvaluator<'a> {
-    graph: &'a Graph,
-    params: BestParams,
-    check_loop: Vec<bool>,
-    input_lengths: Vec<usize>,
-    check_visits: Cell<usize>,
-}
-
-// 全 SCC・反復・始点で共有する、1 回の逆伝播の訪問上限。
-const CHECK_VISIT_LIMIT: usize = 5_000_000;
-
-impl SccEvaluator<'_> {
-    fn merged(&self, node: usize, idx: usize, mut value: ValueDistance) -> ValueDistance {
-        // 補完手には min の上界となる探索ラベルがない。
-        if idx < self.input_lengths[node] {
-            value.value = self.params.merge.apply(self.graph.moves[node][idx].old, value.value);
-        }
-        value
-    }
-
-    fn move_value(&self, node: usize, idx: usize, best: &[ValueDistance]) -> ValueDistance {
-        let mv = &self.graph.moves[node][idx];
-        match mv.edge {
-            Some(edge) => self.merged(node, idx, best[edge.to].for_parent()),
-            None => ValueDistance {
-                value: mv.old,
-                distance: 0,
-            },
-        }
-    }
-
-    fn best(&self, node: usize, values: &[ValueDistance]) -> ValueDistance {
-        self.graph.moves[node]
-            .iter()
-            .enumerate()
-            .filter(|(_, mv)| self.params.counts(mv))
-            .map(|(idx, _)| self.move_value(node, idx, values))
-            .reduce(|a, b| if b.better(a) { b } else { a })
-            .unwrap_or(ValueDistance {
-                value: self.params.draw_value,
-                distance: 0,
-            })
-    }
-
-    // 深い定跡でも Windows のスレッドスタックを消費しない明示 DFS。
-    // ループ以外への離脱は、SCC 反復の前回値と通常の negamax / merge で比較する。
-    // ループ内で min(入力ラベル, 勝ち値) を取ると反則負けまで 0 に消えるため、
-    // 継続辺は純 negamax で規則評価を伝え、既存ラベルとの merge は出力時に行う。
-    fn check_best(&self, root: usize, values: &[ValueDistance]) -> Result<ValueDistance> {
-        struct Frame {
-            node: usize,
-            next: usize,
-            best: Option<ValueDistance>,
-            checking: bool,
-        }
-        self.visit_check_node()?;
-        let mut trajectory = vec![[false; 2]; values.len()];
-        let checking = !self.graph.checked[root];
-        let mut stack = vec![Frame {
-            node: root,
-            next: 0,
-            best: None,
-            checking,
-        }];
-        trajectory[root][usize::from(checking)] = true;
-        while let Some(frame) = stack.last_mut() {
-            let node = frame.node;
-            if frame.next == self.graph.moves[node].len() {
-                let result = frame.best.unwrap_or(ValueDistance {
-                    value: self.params.draw_value,
-                    distance: 0,
-                });
-                trajectory[node][usize::from(frame.checking)] = false;
-                stack.pop();
-                let Some(parent) = stack.last_mut() else {
-                    return Ok(result);
-                };
-                let candidate = result.for_parent();
-                if parent.best.is_none_or(|best| candidate.better(best)) {
-                    parent.best = Some(candidate);
-                }
-                continue;
-            }
-            let idx = frame.next;
-            frame.next += 1;
-            let mv = &self.graph.moves[node][idx];
-            if !self.params.counts(mv) {
-                continue;
-            }
-            // 王手側は王手をかける手のみ継続する。被王手側の応手では役割を交換しない。
-            let candidate = if let Some(edge) = mv
-                .edge
-                .filter(|e| self.check_loop[e.to] && (!frame.checking || self.graph.checked[e.to]))
-            {
-                let child_checking = !frame.checking;
-                if trajectory[edge.to][usize::from(child_checking)] {
-                    if frame.checking {
-                        ValueDistance {
-                            value: -Value::MATE.raw(),
-                            distance: PERPETUAL_CHECK,
-                        }
-                    } else {
-                        ValueDistance {
-                            value: Value::MATE.raw(),
-                            distance: PERPETUAL_CHECKED,
-                        }
-                    }
-                } else {
-                    self.visit_check_node()?;
-                    trajectory[edge.to][usize::from(child_checking)] = true;
-                    stack.push(Frame {
-                        node: edge.to,
-                        next: 0,
-                        best: None,
-                        checking: child_checking,
-                    });
-                    continue;
-                }
-            } else {
-                self.move_value(node, idx, values)
-            };
-            if frame.best.is_none_or(|best| candidate.better(best)) {
-                frame.best = Some(candidate);
-            }
-        }
-        unreachable!("DFS は root の結果を返す")
-    }
-
-    fn visit_check_node(&self) -> Result<()> {
-        let visits = self.check_visits.get();
-        if visits == CHECK_VISIT_LIMIT {
-            bail!(
-                "check-loop structure is too complex: 連続王手 DFS の訪問上限 ({CHECK_VISIT_LIMIT}/backprop run) を超えました。book は出力しません"
-            );
-        }
-        self.check_visits.set(visits + 1);
-        Ok(())
-    }
-}
-
 /// book 内子局面への辺 (反転 key 合流を含む) を張ったグラフを作る。
 pub fn build_graph(book: &BookDb) -> Result<Graph> {
     build_graph_with(book, BackpropOptions::default())
@@ -683,15 +500,14 @@ pub fn child_position_after_move(parent_sfen: &str, move_usi: &str) -> Result<Po
     Ok(pos)
 }
 
-/// SCC 縮約 DAG を葉側から処理して候補手の値を逆伝播する。
+/// 先手・後手をそれぞれ自分として後退解析し、候補手の値を逆伝播する。
 pub fn propagate_values(
     book: &BookDb,
     graph: &mut Graph,
-    draw_value: i32,
-    max_iters: usize,
+    draws: DrawValues,
     merge: MergeMode,
 ) -> Result<PropagationStats> {
-    propagate_values_with(book, graph, draw_value, max_iters, merge, BackpropOptions::default())
+    propagate_values_with(book, graph, draws, merge, BackpropOptions::default())
 }
 
 /// [`propagate_values`] に追加オプションを指定する版。
@@ -699,120 +515,81 @@ pub fn propagate_values(
 pub fn propagate_values_with(
     book: &BookDb,
     graph: &mut Graph,
-    draw_value: i32,
-    max_iters: usize,
+    draws: DrawValues,
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
     let params = BestParams {
-        draw_value,
+        draws,
         merge,
         skip_unusable_moves: options.skip_unusable_moves,
     };
-    let scc = build_scc_graph(&graph.adjacency);
-    let evaluator = SccEvaluator {
-        check_visits: Cell::new(0),
-        graph,
-        params,
-        check_loop: extract_check_loop(graph),
-        input_lengths: graph
-            .keys
-            .iter()
-            .map(|key| {
-                book.entries
-                    .get(key)
-                    .map(|entry| entry.moves.len())
-                    .ok_or_else(|| anyhow!("局面がありません: {key}"))
-            })
-            .collect::<Result<_>>()?,
-    };
-    let mut node_best = vec![
-        ValueDistance {
-            value: draw_value,
-            distance: DISTANCE_MAX
-        };
-        graph.keys.len()
-    ];
-    let mut stats = PropagationStats {
-        nontrivial_sccs: scc.nontrivial.iter().filter(|&&v| v).count(),
-        max_scc_size: scc.comps.iter().map(Vec::len).max().unwrap_or(0),
-        ..PropagationStats::default()
-    };
-    let mut scc_depth = vec![0usize; scc.comps.len()];
-
-    for &comp in scc.topo.iter().rev() {
-        let depth = scc.edges[comp].iter().map(|&child| scc_depth[child] + 1).max().unwrap_or(0);
-        scc_depth[comp] = depth;
-
-        if scc.nontrivial[comp] {
-            let iters =
-                iterate_nontrivial_scc(&evaluator, &scc.comps[comp], &mut node_best, max_iters)?;
-            stats.scc_iters.push(iters);
-        } else {
-            let node = scc.comps[comp][0];
-            node_best[node] = if evaluator.check_loop[node] {
-                evaluator.check_best(node, &node_best)?
-            } else {
-                evaluator.best(node, &node_best)
-            };
+    for draw in [draws.black, draws.white] {
+        if !(-DRAW_VALUE_LIMIT..=DRAW_VALUE_LIMIT).contains(&draw) {
+            bail!(
+                "千日手の値は -{DRAW_VALUE_LIMIT}..={DRAW_VALUE_LIMIT} で指定してください: {draw}"
+            );
         }
     }
-
-    // 補正は最終出力だけ。補正後の -1 をさらに親へ伝播させない。
-    let outputs: Vec<Vec<_>> = graph
-        .moves
-        .iter()
-        .enumerate()
-        .map(|(node, moves)| {
-            let mut output: Vec<_> = moves
-                .iter()
-                .enumerate()
-                .map(|(idx, mv)| {
-                    let mut vd = evaluator.move_value(node, idx, &node_best);
-                    if mv.edge.is_some_and(|e| evaluator.check_loop[e.to] && graph.checked[e.to]) {
-                        vd.distance = PERPETUAL_CHECK;
-                    }
-                    vd
-                })
-                .collect();
-            let best = output
-                .iter()
-                .zip(moves)
-                .filter(|(_, mv)| params.counts(mv))
-                .map(|(&vd, _)| vd)
-                .reduce(|a, b| if b.better(a) { b } else { a });
-            for (vd, mv) in output.iter_mut().zip(moves) {
-                if graph.preserved[node] || mv.preserve || !mv.usable {
-                    vd.value = mv.old;
-                } else if best
-                    .is_some_and(|best| best.value == vd.value && best.distance != vd.distance)
-                {
-                    // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
-                    vd.value = vd.value.saturating_sub(1).max(-Value::MATE.raw());
+    let n = graph.keys.len();
+    let mut results: Vec<Option<NodeResult>> = vec![None; n];
+    let mut mirrored: Vec<Option<NodeResult>> = vec![None; n];
+    let mut stats = PropagationStats::default();
+    for black in [true, false] {
+        let built = build_game(graph, params, black);
+        let solution = book_retrograde::solve(&built.game)?;
+        stats.check_core_states += solution.core_size[0] + solution.core_size[1];
+        let draw = draws.of(black);
+        for v in 0..n {
+            let state = built.state[v][usize::from(!black)];
+            if state == book_retrograde::NONE {
+                continue;
+            }
+            let state = state as usize;
+            let row = |j: u32| {
+                let arc = built.game.arcs[built.game.start[state] + j as usize];
+                if arc.to == book_retrograde::NONE {
+                    (arc.leaf + draw, Some(0))
+                } else {
+                    let to = arc.to as usize;
+                    (solution.values[to] + draw, solution.distance[to].map(|d| d + arc.length()))
                 }
-            }
-            output
-        })
-        .collect();
-    drop(evaluator);
-    drop(node_best);
-    for (node, moves) in graph.moves.iter_mut().enumerate() {
-        let comp = scc.comp_of[node];
-        for (mv, vd) in moves.iter_mut().zip(&outputs[node]) {
-            mv.new = vd.value;
-            if mv.new == draw_value
-                && mv.edge.is_some_and(|e| scc.nontrivial[comp] && scc.comp_of[e.to] == comp)
-            {
-                stats.draw_moves += 1;
+            };
+            let index =
+                |j: u32| built.arc_of[v].iter().position(|&a| a == j && a != book_retrograde::NONE);
+            let result = NodeResult {
+                value: solution.values[state] + draw,
+                rows: built.arc_of[v]
+                    .iter()
+                    .map(|&j| (j != book_retrograde::NONE).then(|| row(j)))
+                    .collect(),
+                guaranteed: index(solution.guaranteed[state]),
+                preferred: index(solution.preferred[state]),
+            };
+            // 反転キーで合流した向きは行を持たないので、保存されている向きの行で指せるかを後で確かめる。
+            if graph.black(v) == black {
+                results[v] = Some(result);
+            } else {
+                mirrored[v] = Some(result);
             }
         }
     }
-    drop(outputs);
+    stats.restricted_ties = write_certified(graph, params, &results, &mirrored)?;
 
+    let scc = build_scc_graph(&graph.adjacency);
+    stats.nontrivial_sccs = scc.nontrivial.iter().filter(|&&v| v).count();
+    stats.max_scc_size = scc.comps.iter().map(Vec::len).max().unwrap_or(0);
+    let mut scc_depth = vec![0usize; scc.comps.len()];
+    for &comp in scc.topo.iter().rev() {
+        scc_depth[comp] =
+            scc.edges[comp].iter().map(|&child| scc_depth[child] + 1).max().unwrap_or(0);
+    }
     for (node_idx, key) in graph.keys.iter().enumerate() {
+        let comp = scc.comp_of[node_idx];
+        let draw = draws.of(graph.black(node_idx));
         let counted = || graph.moves[node_idx].iter().filter(|mv| params.counts(mv));
-        let old_best = counted().map(|mv| mv.old).max().unwrap_or(draw_value);
-        let new_best = counted().map(|mv| mv.new).max().unwrap_or(draw_value);
+        let old_best = counted().map(|mv| mv.old).max().unwrap_or(draw);
+        let new_best = counted().map(|mv| mv.new).max().unwrap_or(draw);
         if old_best != new_best {
             let entry = book
                 .entries
@@ -824,19 +601,19 @@ pub fn propagate_values_with(
                 new_best,
             });
         }
-        stats.depths.push(scc_depth[scc.comp_of[node_idx]]);
+        stats.depths.push(scc_depth[comp]);
         for mv in &graph.moves[node_idx] {
             if mv.old != mv.new {
                 stats.updated_moves += 1;
                 stats.abs_deltas.push((mv.new - mv.old).abs());
             }
+            if mv.new == draw
+                && mv.edge.is_some_and(|e| scc.nontrivial[comp] && scc.comp_of[e.to] == comp)
+            {
+                stats.draw_moves += 1;
+            }
         }
     }
-    // 検査は局面数に比例する作業領域を確保するので、伝播の作業領域を解放してから行う。
-    drop(scc);
-    drop(scc_depth);
-    certify(graph, params)?;
-
     stats.changed_nodes.sort_by(|a, b| {
         (b.new_best - b.old_best)
             .abs()
@@ -846,124 +623,379 @@ pub fn propagate_values_with(
     Ok(stats)
 }
 
-fn iterate_nontrivial_scc(
-    evaluator: &SccEvaluator<'_>,
-    nodes: &[usize],
-    node_best: &mut [ValueDistance],
-    max_iters: usize,
+/// 解いた値を書き出し値にし、保証検査を通るまで危ない同値手を保証手だけに絞る。絞った局面数を返す。
+fn write_certified(
+    graph: &mut Graph,
+    params: BestParams,
+    results: &[Option<NodeResult>],
+    mirrored: &[Option<NodeResult>],
 ) -> Result<usize> {
-    // 通常の循環は draw から始めるが、各辺の値を draw で clamp しない。
-    for &node in nodes {
-        node_best[node] = ValueDistance {
-            value: evaluator.params.draw_value,
-            distance: DISTANCE_MAX,
-        };
-    }
-    for iter in 1..=max_iters {
-        let prev = node_best.to_vec();
-        let mut changed = false;
-        for &node in nodes {
-            let best = if evaluator.check_loop[node] {
-                evaluator.check_best(node, &prev)?
-            } else {
-                evaluator.best(node, &prev)
-            };
-            changed |= best != node_best[node];
-            node_best[node] = best;
+    let n = graph.keys.len();
+    // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は保証手だけを残す。
+    let mut restricted = vec![false; n];
+    loop {
+        assign_outputs(graph, params, results, mirrored, &restricted);
+        let conflicts = flip_conflicts(graph, params, mirrored);
+        if conflicts > 0 {
+            bail!(
+                "反転キーで合流した {conflicts} 局面で、保存されている向きの行が反対の向きの値を保ちません。                 1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください"
+            );
         }
-        if !changed {
-            return Ok(iter);
+        let violations = certify(graph, params, mirrored);
+        if violations.nodes.is_empty() {
+            break;
+        }
+        let fresh: Vec<_> = violations.nodes.iter().copied().filter(|&v| !restricted[v]).collect();
+        if fresh.is_empty() {
+            bail!("{}", violations.message(graph));
+        }
+        for v in fresh {
+            restricted[v] = true;
         }
     }
-    bail!("SCC 値・距離反復が --max-iters ({max_iters}) に到達しました（未収束）");
+    let count = restricted.iter().filter(|&&r| r).count();
+    if count > 0 {
+        eprintln!("同値手を選ぶと保証が破れる {} 局面で、保証手以外の同値手を -1 しました", count);
+    }
+    Ok(count)
 }
 
-/// 書き出す値で定跡を指したとき、循環によって値の約束が破られないかを検査する。
+/// 反転キーで合流した向きで、書き出し値が最大の行のどれを指しても、その向きで解いた値を保つか。
+/// 保たない局面の数を返す。千日手の値が先後で同じなら、両方の向きは同じ問題なので 0 になる。
+fn flip_conflicts(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> usize {
+    (0..graph.keys.len())
+        .filter(|&v| {
+            let Some(mirror) = &mirrored[v] else {
+                return false;
+            };
+            let moves = &graph.moves[v];
+            let best = moves.iter().filter(|mv| params.counts(mv)).map(|mv| mv.new).max();
+            moves.iter().enumerate().any(|(idx, mv)| {
+                params.counts(mv)
+                    && Some(mv.new) == best
+                    && mirror.rows[idx].is_none_or(|(value, _)| value != mirror.value)
+            })
+        })
+        .count()
+}
+
+/// 保存されている向きで、局面の手番の側を自分として解いた結果。値は手番の側から見た値。
+#[derive(Debug, Clone)]
+struct NodeResult {
+    value: i32,
+    /// 行ごとの値と出口までの手数。best の計算に数えない行は `None`。
+    rows: Vec<Option<(i32, Option<u32>)>>,
+    guaranteed: Option<usize>,
+    preferred: Option<usize>,
+}
+
+/// 先手 (`black`) か後手を自分とした後退解析の問題と、局面・行との対応。
+struct BuiltGame {
+    game: book_retrograde::Game,
+    /// `state[v][c]`: 局面 `v` を実際の手番 `c` (0 = 先手、1 = 後手) で指す頂点。届かない向きは `NONE`。
+    state: Vec<[u32; 2]>,
+    /// 局面の行ごとの手番号。best の計算に数えない行は `NONE`。
+    arc_of: Vec<Vec<u32>>,
+}
+
+/// 千日手の値を自分の側の値に固定した 2 人零和の問題を作る。値は自分から見て千日手が 0 になるようにずらす。
+///
+/// 局面と実際の手番の組を頂点にする。反転キーで合流した辺は保存されている局面の手番と実際の手番が逆になるが、
+/// 手を指すごとに実際の手番は必ず入れ替わる。`min` では、相手が book 外で咎められる (自分の手の探索ラベル)
+/// ことを、自分の手と行き先の間に置いた相手の分岐 (ラベルの値の葉か、そのまま進むか) で表す。
+fn build_game(graph: &Graph, params: BestParams, black: bool) -> BuiltGame {
+    use book_retrograde::{Arc, NONE, Step};
+    let n = graph.keys.len();
+    let me = usize::from(!black);
+    let draw = params.draws.of(black);
+    let color = |v: usize| usize::from(!graph.black(v));
+    let arc_of: Vec<Vec<u32>> = graph
+        .moves
+        .iter()
+        .map(|moves| {
+            let mut next = 0;
+            moves
+                .iter()
+                .map(|mv| {
+                    if params.counts(mv) {
+                        next += 1;
+                        next - 1
+                    } else {
+                        NONE
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut reachable = vec![[false; 2]; n];
+    let mut stack: Vec<(usize, usize)> = (0..n).map(|v| (v, color(v))).collect();
+    for &(v, c) in &stack {
+        reachable[v][c] = true;
+    }
+    while let Some((v, c)) = stack.pop() {
+        for mv in graph.moves[v].iter().filter(|mv| params.counts(mv)) {
+            if let Some(edge) = mv.edge
+                && !reachable[edge.to][1 - c]
+            {
+                reachable[edge.to][1 - c] = true;
+                stack.push((edge.to, 1 - c));
+            }
+        }
+    }
+    let mut state = vec![[NONE; 2]; n];
+    let mut order = Vec::new();
+    for v in 0..n {
+        for c in 0..2 {
+            if reachable[v][c] {
+                state[v][c] = order.len() as u32;
+                order.push((v, c));
+            }
+        }
+    }
+    let mut own = Vec::with_capacity(order.len());
+    let mut start = vec![0];
+    let mut arcs = Vec::new();
+    // `min` の分岐: (ラベルの値の葉、行き先の頂点)。
+    let mut branches = Vec::new();
+    for &(v, c) in &order {
+        own.push(c == me);
+        let input_len = graph.input_len(v);
+        for (idx, mv) in graph.moves[v].iter().enumerate().filter(|(_, mv)| params.counts(mv)) {
+            let mine = |x: i32| if c == me { x } else { -x };
+            match mv.edge {
+                None => arcs.push(Arc {
+                    to: NONE,
+                    leaf: mine(mv.old) - draw,
+                    step: Step::Quiet,
+                }),
+                Some(edge) => {
+                    let to = state[edge.to][1 - c];
+                    let step = if graph.checked[edge.to] {
+                        Step::Check
+                    } else {
+                        Step::Quiet
+                    };
+                    if params.merge == MergeMode::Min && c == me && idx < input_len {
+                        let branch = (order.len() + branches.len()) as u32;
+                        branches.push((mv.old - draw, to));
+                        arcs.push(Arc {
+                            to: branch,
+                            leaf: 0,
+                            step,
+                        });
+                    } else {
+                        arcs.push(Arc { to, leaf: 0, step });
+                    }
+                }
+            }
+        }
+        start.push(arcs.len());
+    }
+    for (label, to) in branches {
+        own.push(false);
+        arcs.push(Arc {
+            to: NONE,
+            leaf: label,
+            step: Step::Quiet,
+        });
+        arcs.push(Arc {
+            to,
+            leaf: 0,
+            step: Step::Pass,
+        });
+        start.push(arcs.len());
+    }
+    let mate = Value::MATE.raw();
+    BuiltGame {
+        game: book_retrograde::Game {
+            own,
+            start,
+            arcs,
+            win: [mate - draw, mate + draw],
+        },
+        state,
+        arc_of,
+    }
+}
+
+/// 解いた値を書き出す値にする。値が best と同じ行は、選ぶ手と、それと同じ手数で出口へ向かう手だけを残し、
+/// 他は -1 する (保証手だけを残す局面では選ぶ手以外を全て -1)。補正は書き出しだけで親へ伝えない。
+///
+/// 反転キーで合流した向きにも届く局面では、その向きでも値を保つ手から選ぶ。千日手の値が先後で違うと、
+/// 保存されている向きで短く出口へ向かう手が、反対の向きでは最善でないことがあるため。
+fn assign_outputs(
+    graph: &mut Graph,
+    params: BestParams,
+    results: &[Option<NodeResult>],
+    mirrored: &[Option<NodeResult>],
+    restricted: &[bool],
+) {
+    for node in 0..graph.keys.len() {
+        let preserved = graph.preserved[node];
+        let result = results[node].as_ref();
+        let mirror = mirrored[node].as_ref();
+        let common = |idx: usize| {
+            mirror.is_none_or(|m| m.rows[idx].is_some_and(|(value, _)| value == m.value))
+        };
+        let chosen = result.and_then(|r| {
+            if restricted[node] {
+                return r.guaranteed;
+            }
+            if let Some(c) = [r.preferred, r.guaranteed].into_iter().flatten().find(|&c| common(c))
+            {
+                return Some(c);
+            }
+            // 両方の向きで値を保つ手のうち、勝ちは短く、負けは長く出口へ向かう手。
+            let winning = r.value >= params.draws.of(graph.black(node));
+            let candidates = (0..r.rows.len()).filter(|&idx| {
+                r.rows[idx].is_some_and(|(value, _)| value == r.value) && common(idx)
+            });
+            let key = |idx: usize| {
+                let distance = r.rows[idx].and_then(|(_, d)| d);
+                match (distance, winning) {
+                    (Some(d), true) => (0, i64::from(d)),
+                    (Some(d), false) => (0, -i64::from(d)),
+                    (None, _) => (1, 0),
+                }
+            };
+            candidates.min_by_key(|&idx| key(idx)).or(r.preferred)
+        });
+        let chosen_distance = result.zip(chosen).and_then(|(r, c)| r.rows[c].and_then(|(_, d)| d));
+        for (idx, mv) in graph.moves[node].iter_mut().enumerate() {
+            let row = result.and_then(|r| r.rows[idx]);
+            mv.new = match row {
+                Some((value, distance)) if !preserved && !mv.preserve && mv.usable => {
+                    let best = result.is_some_and(|r| r.value == value);
+                    let keep = chosen == Some(idx)
+                        || (!restricted[node]
+                            && distance.is_some()
+                            && distance == chosen_distance
+                            && common(idx));
+                    if best && !keep {
+                        // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
+                        value.saturating_sub(1).max(-Value::MATE.raw())
+                    } else {
+                        value
+                    }
+                }
+                _ => mv.old,
+            };
+        }
+    }
+}
+
+/// 保証検査で見つかった局面。
+struct Violations {
+    /// 保存されている向きで約束が破られる局面。
+    nodes: BTreeSet<usize>,
+    perpetual_check: BTreeSet<usize>,
+    repetition: BTreeSet<usize>,
+}
+
+impl Violations {
+    fn message(&self, graph: &Graph) -> String {
+        let sample = |nodes: &BTreeSet<usize>| {
+            nodes
+                .iter()
+                .take(5)
+                .map(|&v| graph.keys[v].as_str())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        };
+        format!(
+            "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環へ持ち込まれる {} 局面 [{}]、千日手へ逃げられる {} 局面 [{}]",
+            self.perpetual_check.len(),
+            sample(&self.perpetual_check),
+            self.repetition.len(),
+            sample(&self.repetition)
+        )
+    }
+}
+
+/// 書き出す値で定跡を指したとき、循環によって値の約束が破られないかを、先手・後手をそれぞれ自分として検査する。
 ///
 /// 自分は各局面で書き出し値が最大の手 (同値の -1 補正を受けなかった手) のどれを選んでもよく、
-/// 相手は全手を選べるとして、次のどちらかが残っていればエラーにする。
+/// 相手は全手を選べるとして、次のどちらかの局面を返す。
 /// - 詰まされる値でないのに、相手が自分の連続王手の循環 (反則負け) へ持ち込める。
-/// - 千日手より良い値なのに、相手が王手をやめながら続けられる循環 (千日手) へ持ち込める。
+/// - 自分の千日手の値より良い値なのに、相手が王手をやめながら続けられる循環 (千日手) へ持ち込める。
 ///
-/// `min` では局面ごとの値の整合 (子の値の符号反転が親の値以下) が成り立たないので、
-/// 値で辺を絞らず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
-fn certify(graph: &Graph, params: BestParams) -> Result<()> {
-    let states = CertifyStates::new(graph, params);
-    let mate = Value::MATE.raw();
-    // 千日手の値は手番側視点なので、循環上の手番によって ±draw_value のどちらにもなる。
-    // 両方を上回る値だけを「千日手より良い」とみなす。
-    let draw_bound = params.draw_value.abs();
-    let follows = |s: usize, idx: usize, _t: usize| states.follows(s, idx);
-
-    // 自分の手が全て王手になる循環。強連結成分の状態はどれもその成分内の循環に乗る。
-    let (comp, cyclic) = states.components(|s, idx, t| {
-        states.follows(s, idx) && (states.is_opponent(s) || graph.checked[t / 2])
-    });
-    let seeds: Vec<bool> = comp.iter().map(|&c| cyclic[c as usize]).collect();
-    drop(comp);
-    let perpetual_check =
-        states.violations(&states.reach(seeds, follows), |s| states.own(s) > -mate);
-
-    // 相手が王手をしない手を含む循環。成分内の辺はどれもその成分内の循環に乗るので、
-    // そうした相手の手が成分内にあれば、相手が王手を続けて負ける循環ではない。
-    let (comp, _) = states.components(follows);
-    let mut repeats = vec![false; comp.len()];
-    for s in (0..states.len()).filter(|&s| states.is_opponent(s)) {
-        if states.children(s).any(|(_, t)| !graph.checked[t / 2] && comp[s] == comp[t]) {
-            repeats[comp[s] as usize] = true;
-        }
-    }
-    let seeds: Vec<bool> = comp.iter().map(|&c| repeats[c as usize]).collect();
-    drop(comp);
-    let repetition =
-        states.violations(&states.reach(seeds, follows), |s| states.own(s) > draw_bound);
-
-    if perpetual_check.is_empty() && repetition.is_empty() {
-        return Ok(());
-    }
-    let sample = |nodes: &BTreeSet<usize>| {
-        nodes
-            .iter()
-            .take(5)
-            .map(|&v| graph.keys[v].as_str())
-            .collect::<Vec<_>>()
-            .join(" / ")
+/// 値の整合は前提にせず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
+fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> Violations {
+    let mut violations = Violations {
+        nodes: BTreeSet::new(),
+        perpetual_check: BTreeSet::new(),
+        repetition: BTreeSet::new(),
     };
-    bail!(
-        "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環へ持ち込まれる {} 局面 [{}]、千日手へ逃げられる {} 局面 [{}]",
-        perpetual_check.len(),
-        sample(&perpetual_check),
-        repetition.len(),
-        sample(&repetition)
-    )
+    let mate = Value::MATE.raw();
+    for black in [true, false] {
+        let states = CertifyStates::new(graph, params, mirrored, black);
+        let draw = params.draws.of(black);
+        let follows = |s: usize, idx: usize, _t: usize| states.follows(s, idx);
+
+        // 自分の手が全て王手になる循環。強連結成分の状態はどれもその成分内の循環に乗る。
+        let (comp, cyclic) = states.components(|s, idx, t| {
+            states.follows(s, idx) && (states.is_opponent(s) || graph.checked[t / 2])
+        });
+        let seeds: Vec<bool> = comp.iter().map(|&c| cyclic[c as usize]).collect();
+        drop(comp);
+        let perpetual = states.violations(&states.reach(seeds, follows), |s| states.own(s) > -mate);
+
+        // 相手が王手をしない手を含む循環。成分内の辺はどれもその成分内の循環に乗るので、
+        // そうした相手の手が成分内にあれば、相手が王手を続けて負ける循環ではない。
+        let (comp, _) = states.components(follows);
+        let mut repeats = vec![false; comp.len()];
+        for s in (0..states.len()).filter(|&s| states.is_opponent(s)) {
+            if states.children(s).any(|(_, t)| !graph.checked[t / 2] && comp[s] == comp[t]) {
+                repeats[comp[s] as usize] = true;
+            }
+        }
+        let seeds: Vec<bool> = comp.iter().map(|&c| repeats[c as usize]).collect();
+        drop(comp);
+        let repetition = states.violations(&states.reach(seeds, follows), |s| states.own(s) > draw);
+
+        violations.nodes.extend(perpetual.iter().chain(&repetition));
+        violations.perpetual_check.extend(perpetual);
+        violations.repetition.extend(repetition);
+    }
+    violations
 }
 
-/// [`certify`] が辿る、局面 `v` と手番の持ち主 `p` を組にした状態 `2 * v + p` のグラフ。
+/// [`certify`] が辿る、局面 `v` と実際の手番 `c` (0 = 先手、1 = 後手) を組にした状態 `2 * v + c` のグラフ。
 ///
-/// 反転 key で合流した辺は実際の先後と局面の手番が一致しないので、局面ではなく
-/// 「検査する側 (`p = 0`) と相手 (`p = 1`) のどちらの手番か」で循環を判定する。
-/// 検査する側を相手に替えた場合は `p` を入れ替えた同型のグラフになるので、`p = 0` 側だけ調べればよい。
+/// 反転キーで合流した辺は保存されている局面の手番と実際の手番が逆になるので、実際の手番で自分か相手かを判定する。
 struct CertifyStates<'a> {
     graph: &'a Graph,
     params: BestParams,
+    /// 自分の手番の状態の偶奇。
+    me: usize,
     values: Vec<i32>,
     /// 局面 `v` へ入る辺 `(親局面, 親の手番号)` は `reverse[reverse_start[v]..reverse_start[v + 1]]`。
     reverse_start: Vec<usize>,
     reverse: Vec<(u32, u32)>,
+    /// 保存されている向きの局面から指して届く状態。反転キーで合流した向きはここに含まれるものだけが実在する。
+    real: Vec<bool>,
+    /// 反転キーで合流した向きで解いた値 (手番の側から見た値)。
+    mirrored: Vec<Option<i32>>,
 }
 
 impl<'a> CertifyStates<'a> {
-    fn new(graph: &'a Graph, params: BestParams) -> Self {
+    fn new(
+        graph: &'a Graph,
+        params: BestParams,
+        mirrored: &[Option<NodeResult>],
+        black: bool,
+    ) -> Self {
         let values = graph
             .moves
             .iter()
-            .map(|moves| {
+            .enumerate()
+            .map(|(v, moves)| {
                 moves
                     .iter()
                     .filter(|mv| params.counts(mv))
                     .map(|mv| mv.new)
                     .max()
-                    .unwrap_or(params.draw_value)
+                    .unwrap_or(params.draws.of(graph.black(v)))
             })
             .collect();
         let edges = || {
@@ -987,13 +1019,30 @@ impl<'a> CertifyStates<'a> {
             reverse[next[to]] = (node as u32, idx as u32);
             next[to] += 1;
         }
-        Self {
+        let mut states = Self {
             graph,
             params,
+            me: usize::from(!black),
             values,
             reverse_start,
             reverse,
+            real: vec![false; 2 * n],
+            mirrored: mirrored.iter().map(|m| m.as_ref().map(|m| m.value)).collect(),
+        };
+        let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + usize::from(!graph.black(v))).collect();
+        for &s in &stack {
+            states.real[s] = true;
         }
+        while let Some(s) = stack.pop() {
+            let children: Vec<usize> = states.children(s).map(|(_, t)| t).collect();
+            for t in children {
+                if !states.real[t] {
+                    states.real[t] = true;
+                    stack.push(t);
+                }
+            }
+        }
+        states
     }
 
     fn len(&self) -> usize {
@@ -1001,16 +1050,24 @@ impl<'a> CertifyStates<'a> {
     }
 
     fn is_opponent(&self, s: usize) -> bool {
-        s % 2 == 1
+        s % 2 != self.me
     }
 
-    /// 検査する側から見た状態の値。
+    /// 自分から見た状態の値。行の値は実際に手番の側から見た値として使われる。
+    /// 反転キーで合流した向きの局面では、書き出す値は保存されている向きの値なので、その向きで解いた値を約束とする。
+    /// 書き出す最大値の行がその値を保つことは [`flip_conflicts`] で確かめてある。
     fn own(&self, s: usize) -> i32 {
-        let value = self.values[s / 2];
+        let v = s / 2;
+        let stored = s % 2 == usize::from(!self.graph.black(v));
+        let value = if stored {
+            self.values[v]
+        } else {
+            self.mirrored[v].unwrap_or(self.values[v])
+        };
         if self.is_opponent(s) { -value } else { value }
     }
 
-    /// 検査する側は書き出し値が最大の手だけを、相手は全手を指しうる。
+    /// 自分は書き出し値が最大の手だけを、相手は全手を指しうる。
     /// 相手の探索ラベルが悪くても、book どおりに指す側は book 外の咎める手を指さないので相手の選択肢に残す。
     fn follows(&self, s: usize, idx: usize) -> bool {
         self.is_opponent(s) || self.graph.moves[s / 2][idx].new == self.values[s / 2]
@@ -1103,12 +1160,13 @@ impl<'a> CertifyStates<'a> {
         seeds
     }
 
-    /// 届く状態のうち、検査する側が自分の手番で `promises` を満たす値を約束している局面を返す。
-    /// 相手の手番の値は相手の約束で、`min` では相手側の上界なので検査する側の約束にはならない。
+    /// 届く状態のうち、自分の手番で `promises` を満たす値を約束している局面を返す。
+    /// 相手の手番の値は相手の約束で、`min` では相手側の上界なので自分の約束にはならない。
     /// 相手の手番から悪い循環へ届く道は自分の手番の局面を通るので、ここで見落としは出ない。
+    /// 反転キーで合流した向きも、保存されている向きの行がその向きの値を保つと確かめてから数える。
     fn violations(&self, reached: &[bool], promises: impl Fn(usize) -> bool) -> BTreeSet<usize> {
         (0..self.len())
-            .filter(|&s| !self.is_opponent(s) && reached[s] && promises(s))
+            .filter(|&s| !self.is_opponent(s) && self.real[s] && reached[s] && promises(s))
             .map(|s| s / 2)
             .collect()
     }
@@ -1282,6 +1340,7 @@ pub fn write_report(
     stats: &PropagationStats,
     path: &Path,
     merge: MergeMode,
+    draws: DrawValues,
 ) -> Result<()> {
     let file = File::create(path)
         .with_context(|| format!("report を作成できません: {}", path.display()))?;
@@ -1295,6 +1354,7 @@ pub fn write_report(
     writeln!(writer, "## Summary")?;
     writeln!(writer)?;
     writeln!(writer, "- merge mode: {}", merge.as_str())?;
+    writeln!(writer, "- draw value: black {} / white {}", draws.black, draws.white)?;
     writeln!(writer, "- nodes: {}", book.entries.len())?;
     writeln!(writer, "- moves: {total_moves}")?;
     writeln!(writer, "- updated moves: {}", stats.updated_moves)?;
@@ -1382,22 +1442,14 @@ fn write_scc_report(writer: &mut dyn Write, stats: &PropagationStats) -> Result<
     writeln!(writer, "- nontrivial SCCs: {}", stats.nontrivial_sccs)?;
     writeln!(writer, "- max SCC size: {}", stats.max_scc_size)?;
     writeln!(writer, "- draw-valued internal moves: {}", stats.draw_moves)?;
-    if !stats.scc_iters.is_empty() {
-        let mut iters = stats.scc_iters.clone();
-        iters.sort_unstable();
-        writeln!(writer, "- value iteration max iters: {}", iters.last().copied().unwrap_or(0))?;
-        writeln!(writer, "- value iteration p90 iters: {}", percentile_usize(&iters, 90))?;
-    }
+    writeln!(writer, "- check-loop core states: {}", stats.check_core_states)?;
+    writeln!(
+        writer,
+        "- tie moves restricted to the guaranteed move: {}",
+        stats.restricted_ties
+    )?;
     writeln!(writer)?;
     Ok(())
-}
-
-fn percentile_usize(sorted: &[usize], pct: usize) -> usize {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = ((sorted.len() - 1) * pct).div_ceil(100);
-    sorted[idx]
 }
 
 fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<()> {
@@ -1450,7 +1502,7 @@ mod tests {
         let book = read_book_db(&path).unwrap();
         let mut graph = build_graph(&book).unwrap();
         assert_eq!(graph.illegal_moves, 0);
-        propagate_values(&book, &mut graph, 0, 1000, MergeMode::Replace).unwrap();
+        propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
         for (key, mv) in quiet {
             let node = graph.keys.iter().position(|k| k == &key).unwrap();
             let index = book.entries[&key]
@@ -1463,7 +1515,8 @@ mod tests {
     }
 
     #[test]
-    fn review_check_dfs_branch_merge_budget() {
+    fn branching_check_loop_is_solved_without_a_visit_limit() {
+        // 王手をかける側 (3k の局面) が 2 通りの王手で合流しながら離脱のない循環を回す。
         let mut rows = vec![Vec::new(); 62];
         for level in 0..20 {
             let n = level * 3;
@@ -1474,51 +1527,33 @@ mod tests {
         rows[60] = vec![(0, Some(61))];
         rows[61] = vec![(0, Some(0))];
         let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
-        let mut graph = solve_rows(&refs, 1000).unwrap();
-        graph.checked = (0..62).map(|n| n % 3 != 0).collect();
-        let evaluator = SccEvaluator {
-            check_visits: Cell::new(0),
-            graph: &graph,
-            params: BestParams {
-                draw_value: 0,
-                merge: MergeMode::Replace,
-                skip_unusable_moves: false,
-            },
-            check_loop: extract_check_loop(&graph),
-            input_lengths: rows.iter().map(Vec::len).collect(),
-        };
-        assert!(evaluator.check_loop.iter().all(|&v| v));
-        let values = vec![
-            ValueDistance {
-                value: 0,
-                distance: DISTANCE_MAX
-            };
-            62
-        ];
-        let result = evaluator.check_best(0, &values);
-        assert!(
-            format!("{result:?}").contains("check-loop structure is too complex"),
-            "{result:?}"
-        );
+        let checked: Vec<_> = (0..62).map(|n| n % 3 != 0).collect();
+        let black: Vec<_> = (0..62).map(|n| n % 3 == 0).collect();
+        let (book, mut graph) = rows_graph(&refs, &checked, &black);
+        propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
+        let mate = Value::MATE.raw();
+        for (n, moves) in graph.moves.iter().enumerate() {
+            let expected = if n % 3 == 0 { -mate } else { mate };
+            assert!(moves.iter().all(|mv| mv.new == expected), "{n}");
+        }
     }
 
     #[test]
     fn review_tie_correction_stays_inside_mate_boundary() {
-        let graph = solve_rows(&[&[(-32000, None), (0, Some(1))], &[(32000, None)]], 1000).unwrap();
+        let graph = solve_rows(&[&[(-32000, None), (0, Some(1))], &[(32000, None)]]).unwrap();
         assert_eq!(graph.moves[0][0].new, -32000);
         assert_eq!(graph.moves[0][1].new, -32000);
     }
 
-    fn solve_rows(rows: &[&[(i32, Option<usize>)]], max_iters: usize) -> Result<Graph> {
-        solve_rows_with(rows, max_iters, MergeMode::Replace)
-    }
-
-    fn solve_rows_with(
+    /// 行 `(値, 子)` の局面を並べたグラフ。局面 key は `<番号> <手番>` で、`black[i]` が先手番。
+    fn rows_graph(
         rows: &[&[(i32, Option<usize>)]],
-        max_iters: usize,
-        merge: MergeMode,
-    ) -> Result<Graph> {
-        let keys: Vec<_> = (0..rows.len()).map(|i| i.to_string()).collect();
+        checked: &[bool],
+        black: &[bool],
+    ) -> (BookDb, Graph) {
+        let keys: Vec<_> = (0..rows.len())
+            .map(|i| format!("{i} {}", if black[i] { "b" } else { "w" }))
+            .collect();
         let book = BookDb {
             entries: keys
                 .iter()
@@ -1543,47 +1578,8 @@ mod tests {
                 })
                 .collect(),
         };
-        let mut graph = Graph {
-            keys,
-            moves: rows
-                .iter()
-                .map(|rows| {
-                    rows.iter()
-                        .map(|&(value, child)| MoveValue {
-                            old: value,
-                            new: value,
-                            usable: true,
-                            preserve: false,
-                            edge: child.map(|to| Edge {
-                                to,
-                                via_flip: false,
-                            }),
-                        })
-                        .collect()
-                })
-                .collect(),
-            adjacency: rows
-                .iter()
-                .map(|rows| rows.iter().filter_map(|&(_, child)| child).collect())
-                .collect(),
-            flip_edges: 0,
-            illegal_moves: 0,
-            checked: vec![false; rows.len()],
-            preserved: vec![false; rows.len()],
-            added_moves: vec![vec![]; rows.len()],
-        };
-        propagate_values(&book, &mut graph, 0, max_iters, merge)?;
-        Ok(graph)
-    }
-
-    /// 書き出し値をそのまま与えたグラフに [`certify`] だけを適用する。
-    fn certify_rows(
-        rows: &[&[(i32, Option<usize>)]],
-        checked: &[bool],
-        draw_value: i32,
-    ) -> Result<()> {
         let graph = Graph {
-            keys: (0..rows.len()).map(|i| i.to_string()).collect(),
+            keys,
             moves: rows
                 .iter()
                 .map(|rows| {
@@ -1611,74 +1607,266 @@ mod tests {
             preserved: vec![false; rows.len()],
             added_moves: vec![vec![]; rows.len()],
         };
-        certify(
+        (book, graph)
+    }
+
+    /// 偶数番が先手番、奇数番が後手番の局面を並べて逆伝播する。
+    fn solve_rows_with(
+        rows: &[&[(i32, Option<usize>)]],
+        draws: DrawValues,
+        merge: MergeMode,
+    ) -> Result<Graph> {
+        let black: Vec<_> = (0..rows.len()).map(|i| i % 2 == 0).collect();
+        let (book, mut graph) = rows_graph(rows, &vec![false; rows.len()], &black);
+        propagate_values(&book, &mut graph, draws, merge)?;
+        Ok(graph)
+    }
+
+    fn solve_rows(rows: &[&[(i32, Option<usize>)]]) -> Result<Graph> {
+        solve_rows_with(rows, DrawValues::default(), MergeMode::Replace)
+    }
+
+    fn values(graph: &Graph) -> Vec<Vec<i32>> {
+        graph
+            .moves
+            .iter()
+            .map(|moves| moves.iter().map(|mv| mv.new).collect())
+            .collect()
+    }
+
+    /// 書き出し値をそのまま与えたグラフに [`certify`] だけを適用する。偶数番が先手番。
+    fn certify_rows(
+        rows: &[&[(i32, Option<usize>)]],
+        checked: &[bool],
+        draws: DrawValues,
+    ) -> Result<()> {
+        let black: Vec<_> = (0..rows.len()).map(|i| i % 2 == 0).collect();
+        let (_, graph) = rows_graph(rows, checked, &black);
+        let violations = certify(
             &graph,
             BestParams {
-                draw_value,
+                draws,
                 merge: MergeMode::Replace,
                 skip_unusable_moves: false,
             },
-        )
+            &vec![None; rows.len()],
+        );
+        if violations.nodes.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", violations.message(&graph))
+        }
     }
 
     #[test]
     fn certify_rejects_positive_value_on_quiet_cycle() {
-        let error =
-            certify_rows(&[&[(50, Some(1))], &[(-50, Some(0))]], &[false; 2], 0).unwrap_err();
+        let error = certify_rows(
+            &[&[(50, Some(1))], &[(-50, Some(0))]],
+            &[false; 2],
+            DrawValues::default(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
-        certify_rows(&[&[(0, Some(1))], &[(0, Some(0))]], &[false; 2], 0).unwrap();
+        certify_rows(&[&[(0, Some(1))], &[(0, Some(0))]], &[false; 2], DrawValues::default())
+            .unwrap();
         // 相手が王手を続けるだけの循環なら、相手の反則負けなので勝ちを約束できる。
         let mate = Value::MATE.raw();
-        certify_rows(&[&[(mate, Some(1))], &[(-mate, Some(0))]], &[true, false], 0).unwrap();
+        certify_rows(
+            &[&[(mate, Some(1))], &[(-mate, Some(0))]],
+            &[true, false],
+            DrawValues::default(),
+        )
+        .unwrap();
     }
 
     #[test]
     fn certify_rejects_own_perpetual_check_unless_already_mated() {
-        let error =
-            certify_rows(&[&[(-80, Some(1))], &[(80, Some(0))]], &[false, true], 0).unwrap_err();
+        let error = certify_rows(
+            &[&[(-80, Some(1))], &[(80, Some(0))]],
+            &[false, true],
+            DrawValues::default(),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("連続王手で負ける循環へ持ち込まれる 1 局面"),
             "{error}"
         );
         let mate = Value::MATE.raw();
-        certify_rows(&[&[(-mate, Some(1))], &[(mate, Some(0))]], &[false, true], 0).unwrap();
+        certify_rows(
+            &[&[(-mate, Some(1))], &[(mate, Some(0))]],
+            &[false, true],
+            DrawValues::default(),
+        )
+        .unwrap();
     }
 
     #[test]
     fn certify_rejects_tied_move_into_unsafe_cycle() {
         // 同値の離脱があっても、補正されずに残った循環手を選べば千日手へ逃げられる。
         let rows: [&[_]; 2] = [&[(50, None), (50, Some(1))], &[(-50, Some(0))]];
-        assert!(certify_rows(&rows, &[false; 2], 0).is_err());
+        assert!(certify_rows(&rows, &[false; 2], DrawValues::default()).is_err());
         let rows: [&[_]; 2] = [&[(50, None), (49, Some(1))], &[(-50, Some(0))]];
-        certify_rows(&rows, &[false; 2], 0).unwrap();
+        certify_rows(&rows, &[false; 2], DrawValues::default()).unwrap();
     }
 
     #[test]
-    fn certify_rejects_min_cycle_with_inconsistent_values() {
-        // min は A=50, B=-50, C=0, D=-50 に収束する。C で値の整合が切れても、A の 50 は千日手にしかならない。
+    fn min_caps_only_own_moves_and_a_cycle_is_a_draw() {
+        // 循環上の値 0 の局面で値の整合が切れていても、A の 50 は千日手にしかならない。
+        // 先手 (A, C) の値は先手の手だけをラベルで抑え、後手 (B, D) の値は後手の手だけを抑えて求める。
         let rows: [&[_]; 4] = [
             &[(50, Some(1))],
             &[(-50, Some(2))],
             &[(0, Some(3))],
             &[(-50, Some(0))],
         ];
-        let error = solve_rows_with(&rows, 1000, MergeMode::Min).unwrap_err();
-        assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
-        let graph = solve_rows(&rows, 1000).unwrap();
-        assert!(graph.moves.iter().flatten().all(|mv| mv.new == 0));
+        let graph = solve_rows_with(&rows, DrawValues::default(), MergeMode::Min).unwrap();
+        assert_eq!(values(&graph), [[0], [-50], [0], [-50]]);
+        let graph = solve_rows(&rows).unwrap();
+        assert_eq!(values(&graph), [[0], [0], [0], [0]]);
     }
 
     #[test]
-    fn certify_compares_with_draw_value_from_both_sides() {
+    fn min_does_not_cap_opponent_moves_with_their_labels() {
+        // 後手の 2 手目のラベル 20 は先手が book 外で咎める前提の値。先手は book どおりに指すので、
+        // 先手から見た値では後手の手を抑えず、後手から見た値では後手自身の手を抑える。
+        let rows: [&[_]; 3] = [
+            &[(10, Some(1))],
+            &[(10, None), (20, Some(2))],
+            &[(-100, None)],
+        ];
+        let graph = solve_rows_with(&rows, DrawValues::default(), MergeMode::Min).unwrap();
+        assert_eq!(values(&graph), [vec![-100], vec![10, 20], vec![-100]]);
+    }
+
+    #[test]
+    fn draw_values_are_fixed_per_side() {
+        // 先手が千日手を -70 とみると、後手は +30 で離脱せずに循環へ戻せば、先手に -50 の離脱を強いられる。
+        let rows: [&[_]; 2] = [&[(-50, None), (0, Some(1))], &[(0, Some(0)), (30, None)]];
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let graph = solve_rows_with(&rows, draws, MergeMode::Replace).unwrap();
+        assert_eq!(values(&graph), [[-50, -51], [29, 30]]);
+        // 両側とも 0 なら、後手が循環へ戻すと先手は千日手にできるので、後手は +30 で離脱する。
+        let graph = solve_rows(&rows).unwrap();
+        assert_eq!(values(&graph), [[-50, -30], [29, 30]]);
+    }
+
+    #[test]
+    fn unsafe_tie_is_restricted_to_the_guaranteed_move() {
+        // 同じ手数と見なした同値手が千日手の循環に入るなら、保証手 (葉) だけを残して循環手を -1 する。
+        let (_, mut graph) = rows_graph(
+            &[&[(50, None), (0, Some(1))], &[(0, Some(0))]],
+            &[false; 2],
+            &[true, false],
+        );
+        let results = [
+            Some(NodeResult {
+                value: 50,
+                rows: vec![Some((50, Some(0))), Some((50, Some(0)))],
+                guaranteed: Some(0),
+                preferred: Some(0),
+            }),
+            Some(NodeResult {
+                value: -50,
+                rows: vec![Some((-50, Some(1)))],
+                guaranteed: Some(0),
+                preferred: Some(0),
+            }),
+        ];
+        let params = BestParams {
+            draws: DrawValues::default(),
+            merge: MergeMode::Replace,
+            skip_unusable_moves: false,
+        };
+        assert_eq!(write_certified(&mut graph, params, &results, &[None, None]).unwrap(), 1);
+        assert_eq!(values(&graph), [vec![50, 49], vec![-50]]);
+        // 保証手だけにしても破られる値はエラーにする。
+        let mut broken = results.clone();
+        broken[0].as_mut().unwrap().guaranteed = Some(1);
+        broken[0].as_mut().unwrap().preferred = Some(1);
+        assert!(write_certified(&mut graph, params, &broken, &[None, None]).is_err());
+    }
+
+    #[test]
+    fn flipped_orientation_that_needs_another_move_is_rejected() {
+        // B と C 以降は反転キーで合流し、A から進むと C は後手番になる。先手は千日手を -70 とみて C で -50 の葉を選ぶが、
+        // 千日手を 0 とみる後手には循環を続ける方が良いので、保存されている 1 行では両方の向きを表せない。
+        let rows: [&[_]; 6] = [
+            &[(0, Some(1))],
+            &[(0, Some(2))],
+            &[(-50, None), (0, Some(3))],
+            &[(0, Some(4))],
+            &[(0, Some(5))],
+            &[(0, Some(2))],
+        ];
+        let black = [false, false, true, false, true, false];
+        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let error = propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap_err();
+        assert!(error.to_string().contains("反転キーで合流した"), "{error}");
+        // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
+        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
+        propagate_values(&book, &mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
+    }
+
+    #[test]
+    fn flipped_orientation_prefers_a_move_that_keeps_both_values() {
+        // X は先手番で保存され、A から反転キーで後手番としても届く。先手 (千日手 -70) には -70 の葉と循環が同値で、
+        // 後手 (千日手 0) には循環の 0 が最善。両方の向きで値を保つ循環手を残し、葉を -1 する。
+        let rows: [&[_]; 3] = [
+            &[(0, Some(1))],
+            &[(-70, None), (0, Some(2))],
+            &[(0, Some(1))],
+        ];
+        let (book, mut graph) = rows_graph(&rows, &[false; 3], &[true, true, false]);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap();
+        assert_eq!(values(&graph)[1], [-71, -70]);
+    }
+
+    #[test]
+    fn draw_values_outside_the_engine_range_are_rejected() {
+        for draw in [i32::MIN, -30_001, 30_001, i32::MAX] {
+            let error =
+                solve_rows_with(&[&[(0, None)]], DrawValues::both(draw), MergeMode::Replace)
+                    .unwrap_err();
+            assert!(error.to_string().contains("千日手の値は"), "{error}");
+        }
+        solve_rows_with(&[&[(0, None)]], DrawValues::both(-30_000), MergeMode::Replace).unwrap();
+    }
+
+    #[test]
+    fn mutual_continuous_check_is_rejected() {
+        let black = [true, false];
+        let (book, mut graph) =
+            rows_graph(&[&[(0, Some(1))], &[(0, Some(0))]], &[true, true], &black);
+        let error = propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace)
+            .unwrap_err();
+        assert!(error.to_string().contains("双方が王手をかけ続ける循環"), "{error}");
+    }
+
+    #[test]
+    fn certify_compares_with_each_side_draw_value() {
         let rows: [&[_]; 2] = [&[(20, Some(1))], &[(-20, Some(0))]];
-        certify_rows(&rows, &[false; 2], 30).unwrap();
-        certify_rows(&rows, &[false; 2], -30).unwrap();
-        assert!(certify_rows(&rows, &[false; 2], 10).is_err());
+        let draws = |black, white| DrawValues { black, white };
+        certify_rows(&rows, &[false; 2], draws(30, -10)).unwrap();
+        // 先手は 20 を約束するが、千日手は先手に 10 しか与えない。
+        assert!(certify_rows(&rows, &[false; 2], draws(10, -10)).is_err());
+        // 後手は -20 を約束するが、千日手は後手に -10 を与えるので約束より良い。
+        assert!(certify_rows(&rows, &[false; 2], draws(30, -30)).is_err());
     }
 
     #[test]
     fn losing_side_cannot_claim_draw_when_winner_can_exit() {
-        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]], 1000).unwrap();
+        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]]).unwrap();
         assert_eq!(graph.moves[0][0].new, -100);
         assert_eq!(graph.moves[1][0].new, 99); // 同値の遠回りを避ける。
         assert_eq!(graph.moves[1][1].new, 100);
@@ -1687,8 +1875,7 @@ mod tests {
     #[test]
     fn distances_prefer_short_wins_and_long_losses_only_at_output() {
         for value in [-50, 0, 50] {
-            let graph =
-                solve_rows(&[&[(value, None), (0, Some(1))], &[(-value, None)]], 1000).unwrap();
+            let graph = solve_rows(&[&[(value, None), (0, Some(1))], &[(-value, None)]]).unwrap();
             let expected = if value >= 0 {
                 [value, value - 1]
             } else {
@@ -1696,68 +1883,8 @@ mod tests {
             };
             assert_eq!([graph.moves[0][0].new, graph.moves[0][1].new], expected);
         }
-        let marker = ValueDistance {
-            value: -50,
-            distance: PERPETUAL_CHECK,
-        };
-        assert!(!marker.better(ValueDistance {
-            value: -50,
-            distance: 0
-        }));
-        assert!(
-            ValueDistance {
-                value: -50,
-                distance: 0
-            }
-            .better(marker)
-        );
-        assert_eq!(
-            ValueDistance {
-                value: 1,
-                distance: DISTANCE_MAX
-            }
-            .for_parent()
-            .distance,
-            DISTANCE_MAX
-        );
-        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]], 1).unwrap();
-        assert_eq!(graph.moves[0][0].new, 0);
-    }
-
-    #[test]
-    fn nonconvergence_is_an_error() {
-        let error = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]], 1).unwrap_err();
-        assert!(error.to_string().contains("未収束"));
-        assert!(solve_rows(&[&[(0, Some(0)), (100, None)]], 0).is_err());
-        // 非ゼロの draw 初期値による周期 2 の振動も、成功扱いしない。
-        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]], 1).unwrap();
-        let evaluator = SccEvaluator {
-            check_visits: Cell::new(0),
-            graph: &graph,
-            params: BestParams {
-                draw_value: 1,
-                merge: MergeMode::Replace,
-                skip_unusable_moves: false,
-            },
-            check_loop: vec![false; 2],
-            input_lengths: vec![1; 2],
-        };
-        let mut best = vec![
-            ValueDistance {
-                value: 1,
-                distance: DISTANCE_MAX
-            };
-            2
-        ];
-        let error = iterate_nontrivial_scc(&evaluator, &[0, 1], &mut best, 10).unwrap_err();
-        assert!(error.to_string().contains("未収束"));
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.db");
-        let out = dir.path().join("out.db");
-        std::fs::write(&input, include_str!("../tests/fixtures/book_backprop_check_in.db"))
-            .unwrap();
-        assert!(backprop_file(&input, &out, None, 0, 1, MergeMode::Replace).is_err());
-        assert!(!out.exists());
+        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]]).unwrap();
+        assert_eq!(values(&graph), [[0], [0]]);
     }
 
     #[test]
@@ -1792,7 +1919,7 @@ mod tests {
                 let path = dir.path().join("in.db");
                 let out = dir.path().join("result.db");
                 std::fs::write(&path, &input).unwrap();
-                backprop_file(&path, &out, None, 0, 1000, merge).unwrap();
+                backprop_file(&path, &out, None, DrawValues::default(), merge).unwrap();
                 for entry in read_book_db(&out).unwrap().entries.values() {
                     let mut pos = Position::new();
                     pos.set_sfen(&entry.sfen).unwrap();
@@ -1801,7 +1928,12 @@ mod tests {
                     } else {
                         Value::MATE.raw()
                     };
-                    assert_eq!(entry.moves[0].value, merge.apply(0, rule_value));
+                    let expected = if merge == MergeMode::Min {
+                        rule_value.min(0)
+                    } else {
+                        rule_value
+                    };
+                    assert_eq!(entry.moves[0].value, expected);
                 }
             }
         }
@@ -1869,7 +2001,8 @@ mod tests {
                 ..BackpropOptions::default()
             };
             for merge in [MergeMode::Min, MergeMode::Replace] {
-                backprop_file_with(&path, &out, None, 0, 1000, merge, options).unwrap();
+                backprop_file_with(&path, &out, None, DrawValues::default(), merge, options)
+                    .unwrap();
                 assert!(
                     std::fs::read_to_string(&out)
                         .unwrap()
@@ -1910,13 +2043,25 @@ mod tests {
                 assert_eq!(edge.via_flip, flip);
             }
             for merge in [MergeMode::Replace, MergeMode::Min] {
-                backprop_file_with(&in_path, &out_path, None, 0, 1000, merge, options).unwrap();
+                backprop_file_with(
+                    &in_path,
+                    &out_path,
+                    None,
+                    DrawValues::default(),
+                    merge,
+                    options,
+                )
+                .unwrap();
                 let output = read_book_db(&out_path).unwrap();
                 let value = output.entries[strip_ply(START)].moves[0].value;
                 let expected = if excluded {
                     123
                 } else {
-                    merge.apply(123, -best)
+                    if merge == MergeMode::Min {
+                        (-best).min(123)
+                    } else {
+                        -best
+                    }
                 };
                 assert_eq!(value, expected, "skip={skip}, flip={flip}, merge={merge:?}");
             }
@@ -1953,8 +2098,15 @@ mod tests {
         let in_path = dir.path().join("in.db");
         let out_path = dir.path().join("out.db");
         std::fs::write(&in_path, input).unwrap();
-        backprop_file_with(&in_path, &out_path, None, 0, 1000, MergeMode::Replace, options)
-            .unwrap();
+        backprop_file_with(
+            &in_path,
+            &out_path,
+            None,
+            DrawValues::default(),
+            MergeMode::Replace,
+            options,
+        )
+        .unwrap();
         std::fs::read_to_string(out_path).unwrap()
     }
 

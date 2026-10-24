@@ -1,5 +1,5 @@
 use super::model::{Tree, Values, child, remove_candidates, side};
-use crate::book_backprop::{BackpropOptions, MergeMode, backprop_file_with};
+use crate::book_backprop::{BackpropOptions, DrawValues, MergeMode, backprop_file_with};
 use crate::book_db::{BOOK_HEADER, BookDb};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result};
@@ -87,8 +87,7 @@ impl Tree {
             &self.def.out.join("tree.db"),
             &self.def.out.join("tree_bp_min.db"),
             None,
-            0,
-            200000,
+            DrawValues::default(),
             MergeMode::Min,
             BackpropOptions::default(),
         )

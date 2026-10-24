@@ -10,7 +10,7 @@ fn assert_matches_yaneuraou(name: &str, merges: &[MergeMode]) {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.db");
     for &merge in merges {
-        backprop_file(&input, &output, None, 0, 1000, merge).unwrap();
+        backprop_file(&input, &output, None, DrawValues::default(), merge).unwrap();
         let actual = read_book_db(&output).unwrap();
         assert_eq!(actual.entries.len(), expected.entries.len());
         for (key, entry) in &expected.entries {
