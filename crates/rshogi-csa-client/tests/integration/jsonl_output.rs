@@ -161,7 +161,7 @@ fn writes_white_win_when_self_engine_white_loses() {
 }
 
 #[test]
-fn draws_when_interrupted_regardless_of_side() {
+fn interrupted_has_no_winner() {
     let mut record = build_record(Color::Black);
     record.result = "interrupted".to_string();
 
@@ -173,7 +173,7 @@ fn draws_when_interrupted_regardless_of_side() {
     let lines = std::fs::read_to_string(&path).expect("read jsonl");
     let last = lines.lines().last().unwrap();
     let res: Value = serde_json::from_str(last).unwrap();
-    assert_eq!(res["outcome"], "draw");
+    assert_eq!(res["outcome"], "interrupted");
     assert!(res["winner"].is_null());
 }
 

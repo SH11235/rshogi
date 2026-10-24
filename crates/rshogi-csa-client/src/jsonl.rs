@@ -529,9 +529,8 @@ fn write_result<W: Write>(
 fn outcome_label(result: &GameResult, my_color: Color) -> &'static str {
     match (result, my_color) {
         (GameResult::Draw, _) => "draw",
-        // 中断は analyze_selfplay 側で集計対象外にしたいケースもあるが、
-        // 現状 outcome=draw としておくと「未決」扱いで wins/losses にカウントされない。
-        (GameResult::Interrupted | GameResult::Censored, _) => "draw",
+        (GameResult::Interrupted, _) => "interrupted",
+        (GameResult::Censored, _) => "censored",
         (GameResult::Win, Color::Black) => "black_win",
         (GameResult::Win, Color::White) => "white_win",
         (GameResult::Lose, Color::Black) => "white_win",
@@ -548,6 +547,23 @@ fn winner_label(record: &GameRecord, result: &GameResult) -> Option<String> {
         (GameResult::Lose, Color::White) => Some(black),
         _ => None,
     }
+}
+
+/// 明示的な source を優先し、source のないログだけを旧 CSA 識別文で判定する。
+pub fn is_csa_jsonl(source: Option<&str>, note: Option<&str>) -> bool {
+    source == Some("csa_client")
+        || (source.is_none()
+            && note
+                == Some(
+                    "csa_client: opponent path is reported as remote name; usi_options are for self-engine only",
+                ))
+}
+
+/// 明示的な未決結果と、CSA の旧形式で理由から識別できる未決結果を判定する。
+/// `draw` / `max_moves` だけが残る旧ログは引分と区別できないため補正しない。
+pub fn is_incomplete_result(csa: bool, outcome: &str, reason: Option<&str>) -> bool {
+    matches!(outcome, "interrupted" | "censored")
+        || (csa && outcome == "draw" && matches!(reason, Some("interrupted" | "censored")))
 }
 
 #[cfg(test)]

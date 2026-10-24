@@ -275,3 +275,6 @@ prefix を付けずに**数字のみ**を入力すると、数値フィールド
 - セッションをまたいだ「最後に見ていた対局」の記憶
 - 棋譜ファイルへの書き込み・KIF/CSA へのエクスポート（`jsonl_to_kif` 等の既存ツールで代替）
 - 評価値グラフの Y 軸の自動スケール（現状は固定範囲）
+
+JSONL の `interrupted` / `censored` は勝敗未定として表示する。旧 CSA の `draw` も
+reason が `interrupted` / `censored` なら勝敗未定となる。旧 `max_moves` は引分のまま保持する。

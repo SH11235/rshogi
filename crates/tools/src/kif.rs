@@ -6,6 +6,7 @@
 //!
 //! `gensfen` の出力は move 行を含まないため変換対象にはならない。
 
+use rshogi_csa_client::jsonl::{is_csa_jsonl, is_incomplete_result};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -171,6 +172,8 @@ struct ResultEntry {
 #[derive(Deserialize, Default)]
 struct KifMeta {
     #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
     timestamp: String,
     #[serde(default)]
     settings: KifMetaSettings,
@@ -202,6 +205,8 @@ impl KifMetaSettings {
 
 #[derive(Deserialize, Default)]
 struct KifMetaEngineCmd {
+    #[serde(default)]
+    note: Option<String>,
     #[serde(default)]
     path_black: String,
     #[serde(default)]
@@ -290,10 +295,17 @@ fn export_game_to_kif<W: Write>(
     {
         writeln!(writer, "**終了理由={}", res.reason)?;
     }
-    let summary = match game.result.as_ref().map(|r| r.outcome.as_str()).unwrap_or("draw") {
-        "black_win" => format!("まで{}手で先手の勝ち", final_plies),
-        "white_win" => format!("まで{}手で後手の勝ち", final_plies),
-        _ => format!("まで{}手で引き分け", final_plies),
+    let csa = meta.is_some_and(|m| is_csa_jsonl(m.source.as_deref(), m.engine_cmd.note.as_deref()));
+    let outcome = game
+        .result
+        .as_ref()
+        .filter(|r| !is_incomplete_result(csa, &r.outcome, Some(&r.reason)))
+        .map(|r| r.outcome.as_str());
+    let summary = match outcome {
+        Some("black_win") => format!("まで{}手で先手の勝ち", final_plies),
+        Some("white_win") => format!("まで{}手で後手の勝ち", final_plies),
+        Some("draw") => format!("まで{}手で引き分け", final_plies),
+        _ => format!("まで{}手で中断", final_plies),
     };
     writeln!(writer, "\n{}", summary)?;
     Ok(())

@@ -97,3 +97,7 @@ YO 準拠の合法手生成は歩・大駒などの不成を生成しないた�
 サンプリングは seed 固定の reservoir sampling (Algorithm R) です。入力順 (CSA はパスソート順、JSONL は game_id ソート順) が同じなら、**同一 `--seed` で全出力が bit 一致**します。
 
 全局面を貯めずにストリームで間引くため、**ピークメモリは入力件数に非依存**で、おおむね `セル数 × per_cell + nyugyoku_max + 互角局面数` の上限で頭打ちになります。数千万〜億局面規模の棋譜を流しても数十 MB 級に収まります。
+
+JSONL の `interrupted` / `censored` は `in_progress` と同じ未決として除外し、
+`jsonl_error_or_in_progress` に計上する。旧 CSA の `draw` + reason `interrupted` /
+`censored` も除外する。旧 `max_moves` は引分と打切りを復元できないため保持する。

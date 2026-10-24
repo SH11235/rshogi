@@ -485,3 +485,8 @@ JSONL の `result.reason` と CSA の終局の行に記録する。
 課金結果に一致し、保存する CSA V2 棋譜の消費時間は秒単位を維持する。
 
 サマリー本文の受信中も停止要求を確認するため、未完の本文を送るサーバーに対しても Ctrl-C / sink 停止で待機を抜ける。
+
+JSONL の未決結果は `outcome: "interrupted"`（中断）/ `"censored"`（打切り）となり、
+`winner` は付かない。`reason` は受信した理由を保持し、記録が空なら outcome を使う。
+旧形式の `draw` + `reason: "interrupted"` / `"censored"` は未決と判別できるが、
+`draw` / `max_moves` のみが残るログからは引分と打切りを復元できない。
