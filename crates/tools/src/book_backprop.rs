@@ -140,9 +140,9 @@ pub struct Graph {
     /// 局面 `v` の `sfen` 行の入力での位置は `blocks[block_start[v]..block_start[v + 1]]` (入力順)。
     block_start: Vec<u32>,
     blocks: Vec<u64>,
-    /// 局面の `sfen` 行と指し手行のハッシュ値と、入力のバイト数。読み直した入力を 1 回目と比べる。
+    /// 局面の `sfen` 行ごとの行のハッシュ値と、入力の残りの部分。読み直した入力を 1 回目と比べる。
     hashes: Vec<u64>,
-    source_len: u64,
+    source_check: SourceCheck,
     old: Vec<i32>,
     new: Vec<i32>,
     /// 行き先の局面。book 内に子局面が無ければ `NONE`。
@@ -537,11 +537,21 @@ impl LineReader {
         })
     }
 
-    /// 1 回目に読んだときと同じ長さの入力を読み直す。
-    fn reopen(path: &Path, len: u64) -> Result<Self> {
-        let reader =
+    /// 入力を読み直す。長さと、最初の `sfen` 行より前の行が 1 回目と同じか確かめる。
+    fn reopen(path: &Path, source: &SourceCheck) -> Result<Self> {
+        let mut reader =
             Self::open(path).with_context(|| format!("定跡を開けません: {}", path.display()))?;
-        if reader.inner.get_ref().metadata()?.len() != len {
+        if reader.inner.get_ref().metadata()?.len() != source.len {
+            bail!("{CHANGED}: {}", path.display());
+        }
+        let mut prefix = LineHash::default();
+        while reader.pos < source.prefix_end {
+            let Some((_, line)) = reader.next_line()? else {
+                break;
+            };
+            prefix.line(line);
+        }
+        if reader.pos != source.prefix_end || prefix.finish() != source.prefix_hash {
             bail!("{CHANGED}: {}", path.display());
         }
         Ok(reader)
@@ -621,21 +631,28 @@ fn parse_row(line: &str) -> RowFields<'_> {
     }
 }
 
-/// `sfen` 行の SFEN と、次の `sfen` 行までの指し手行のハッシュ値。読み直した内容を 1 回目と比べる。
-struct BlockHash(DefaultHasher);
+/// 行のハッシュ値。`sfen` 行から次の `sfen` 行の前まで (コメント・空行も含む) の内容を 1 回目と比べる。
+#[derive(Default)]
+struct LineHash(DefaultHasher);
 
-impl BlockHash {
-    fn new(sfen: &str) -> Self {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(sfen.as_bytes());
-        hasher.write_u8(b'\n');
-        Self(hasher)
+impl LineHash {
+    /// 改行を含む、読んだままの行を加える。
+    fn line(&mut self, line: &str) {
+        self.0.write(line.as_bytes());
     }
 
-    fn row(&mut self, row: &str) {
-        self.0.write(row.as_bytes());
-        self.0.write_u8(b'\n');
+    fn finish(&self) -> u64 {
+        self.0.finish()
     }
+}
+
+/// 1 回目の読み込みで確かめた入力の長さと、最初の `sfen` 行より前の行のハッシュ値。
+/// `sfen` 行から次の `sfen` 行の前までは局面ごとのハッシュ値で比べるので、合わせて入力の全ての行を比べる。
+#[derive(Clone, Copy, Default)]
+struct SourceCheck {
+    len: u64,
+    prefix_end: u64,
+    prefix_hash: u64,
 }
 
 /// 局面の `sfen` 行ごとのハッシュ値を入力の順にまとめる。
@@ -657,24 +674,22 @@ fn for_each_row(
     let mut hashes = Vec::with_capacity(blocks.len());
     for &offset in blocks {
         reader.seek(offset)?;
-        let mut hash = match reader.next_line()? {
-            Some((_, line)) => match classify(line) {
-                Line::Sfen(sfen) => BlockHash::new(sfen),
-                _ => bail!(CHANGED),
-            },
-            None => bail!(CHANGED),
-        };
+        let mut hash = LineHash::default();
+        match reader.next_line()? {
+            Some((_, line)) if matches!(classify(line), Line::Sfen(_)) => hash.line(line),
+            _ => bail!(CHANGED),
+        }
         while let Some((_, line)) = reader.next_line()? {
             match classify(line) {
-                Line::Skip => {}
+                Line::Skip => hash.line(line),
                 Line::Sfen(_) => break,
                 Line::Row(row) => {
-                    hash.row(row);
+                    hash.line(line);
                     f(row)?;
                 }
             }
         }
-        hashes.push(hash.0.finish());
+        hashes.push(hash.finish());
     }
     if node_hash(hashes) != expected {
         bail!(CHANGED);
@@ -688,10 +703,9 @@ struct Scan {
     rows: Vec<u32>,
     block_start: Vec<u32>,
     blocks: Vec<u64>,
-    /// 局面の `sfen` 行と指し手行のハッシュ値 ([`node_hash`])。
+    /// 局面の `sfen` 行ごとの行のハッシュ値 ([`node_hash`])。
     hashes: Vec<u64>,
-    /// 入力のバイト数。
-    len: u64,
+    check: SourceCheck,
 }
 
 /// 局面の key・代表 SFEN・行の数と、`sfen` 行の位置を集める。
@@ -704,14 +718,21 @@ fn scan(path: &Path) -> Result<Scan> {
     let mut blocks: Vec<(u32, u64, u64)> = Vec::new();
     let mut total_rows = 0u32;
     let mut current = None;
-    let mut hash: Option<BlockHash> = None;
+    let mut hash = LineHash::default();
+    let mut check = SourceCheck::default();
     while let Some((offset, line)) = reader.next_line()? {
         match classify(line) {
-            Line::Skip => {}
+            Line::Skip => hash.line(line),
             Line::Sfen(sfen) => {
-                if let Some(hash) = hash.replace(BlockHash::new(sfen)) {
-                    blocks.last_mut().expect("ハッシュ値は sfen 行ごとに作る").2 = hash.0.finish();
+                let finished = std::mem::take(&mut hash).finish();
+                match blocks.last_mut() {
+                    Some(block) => block.2 = finished,
+                    None => {
+                        check.prefix_end = offset;
+                        check.prefix_hash = finished;
+                    }
                 }
+                hash.line(line);
                 let key = strip_ply(sfen);
                 let hash = hash_bytes(key.as_bytes());
                 let id = match table.find(hash, |id| strip_ply(sfens.get(id as usize)) == key) {
@@ -737,19 +758,23 @@ fn scan(path: &Path) -> Result<Scan> {
                 blocks.push((id, offset, 0));
                 current = Some(id);
             }
-            Line::Row(row) => {
-                if let (Some(id), Some(hash)) = (current, hash.as_mut()) {
+            Line::Row(_) => {
+                hash.line(line);
+                if let Some(id) = current {
                     total_rows = total_rows.checked_add(1).context("手が多すぎます")?;
                     rows[id as usize] += 1;
-                    hash.row(row);
                 }
             }
         }
     }
-    if let Some(hash) = hash {
-        blocks.last_mut().expect("ハッシュ値は sfen 行ごとに作る").2 = hash.0.finish();
+    match blocks.last_mut() {
+        Some(block) => block.2 = hash.finish(),
+        None => {
+            check.prefix_end = reader.pos;
+            check.prefix_hash = hash.finish();
+        }
     }
-    let len = reader.pos;
+    check.len = reader.pos;
     drop((reader, table, plies));
     let mut order: Vec<u32> = (0..sfens.len() as u32).collect();
     order.sort_unstable_by(|&a, &b| {
@@ -788,7 +813,7 @@ fn scan(path: &Path) -> Result<Scan> {
         block_start,
         blocks: blocks.into_iter().map(|(_, offset, _)| offset).collect(),
         hashes,
-        len,
+        check,
     })
 }
 
@@ -858,7 +883,7 @@ fn canonical_move(text: &str) -> Option<Move> {
 
 /// 局面の順に入力を読み直し、行の値と指し手を集める。
 fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
-    let mut reader = LineReader::reopen(path, scan.len)?;
+    let mut reader = LineReader::reopen(path, &scan.check)?;
     let total: usize = scan.rows.iter().map(|&rows| rows as usize).sum();
     let mut input = InputRows {
         value: Vec::with_capacity(total),
@@ -942,7 +967,7 @@ fn build_graph(
         block_start,
         blocks,
         hashes,
-        len,
+        check,
     } = scan;
     let n = sfens.len();
     let skipped: Vec<bool> = (0..n)
@@ -1078,7 +1103,7 @@ fn build_graph(
         sfens,
         node_flags,
         row_start,
-        source_len: len,
+        source_check: check,
         block_start,
         blocks,
         hashes,
@@ -2135,7 +2160,7 @@ fn create_partial(out: &Path) -> Result<(PathBuf, File)> {
 fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Result<()> {
     writer.write_all(BOOK_HEADER.as_bytes())?;
     writer.write_all(b"\n")?;
-    let mut reader = LineReader::reopen(source, graph.source_len)?;
+    let mut reader = LineReader::reopen(source, &graph.source_check)?;
     let mut text = String::new();
     let mut rows = Vec::new();
     let mut order = Vec::new();
@@ -2436,7 +2461,7 @@ mod tests {
             block_start: vec![0; rows.len() + 1],
             blocks: Vec::new(),
             hashes: Vec::new(),
-            source_len: 0,
+            source_check: SourceCheck::default(),
             new: old.clone(),
             row_flags: vec![ROW_USABLE; old.len()],
             old,
@@ -3120,15 +3145,17 @@ mod tests {
     fn input_changed_before_writing_is_rejected() {
         let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
         let input = format!(
-            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none 30 4 1\n"
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none 30 4 1\n#fen {START}\n"
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("in.db");
         let out = dir.path().join("out.db");
-        // 同じ長さの指し手・ply の書き換えと、後ろへの局面の追加。
+        // 同じ長さの指し手・ply の書き換え、ヘッダ行・コメント行の sfen 行への書き換えと、後ろへの局面の追加。
         let changed = [
             input.replace("7g7f none", "2g2f none"),
             input.replacen(" b - 1\n", " b - 3\n", 1),
+            input.replacen("#YANE", "sfen ", 1),
+            input.replace("#fen", "sfen"),
             format!("{input}sfen {START}\n2g2f none 0 1 1\n"),
         ];
         for changed in changed {
