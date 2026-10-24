@@ -250,7 +250,9 @@ fn single_bucket_does_not_ignore_invalid_coefficients_or_q16() {
             &coefficients,
         ],
     );
-    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("progress coeff size mismatch"), "{stderr}");
     let output = run(
         env!("CARGO_BIN_EXE_verify_nnue_accumulator"),
         &[

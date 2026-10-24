@@ -44,7 +44,7 @@ pub struct LabelerEvalConfig<'a> {
 }
 
 /// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
-/// `label_bench_positions::configure_eval` と同じく progresskpabs で係数未指定なら弾く
+/// progresskpabs で係数未指定なら弾く
 /// (routing bucket 数 1 の no-op routing は係数を参照しないため除く)。
 ///
 /// # 注意（グローバル状態）
