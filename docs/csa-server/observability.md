@@ -16,7 +16,7 @@
 │   ↓ structured_log!() macro (Phase A、JSON 形式)              │
 │ Workers console output (短期、wrangler tail で観察可能)        │
 └─────────────────────────────────────────────────────────────┘
-         (現状は archive 経路なし、wrangler tail で real-time のみ)
+         (archive 経路なし。保存済み Workers Logs の検索は §4.3)
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Notifications (account-level)                    │
@@ -152,7 +152,7 @@ wrangler tail rshogi-csa-server-workers-staging --format json \
 
 > `fromjson?` (`?` は jq のエラー抑制) で plain string message (panic / 通常 console.log) はスキップされ、`structured_log!` 由来の JSON だけが残る。`// empty` で fromjson 失敗時 (null) を行ごと捨てる。
 
-**制約**: `wrangler tail` は **接続中の event のみ受信** する (過去ログは見えない)。障害発生後の遡及調査には使えない。これが必要な場合は §7.1 で Paid plan に移行して Logpush + R2 archive を有効化する。
+**制約**: `wrangler tail` は **接続中の event のみ受信** する (過去ログは見えない)。保存済みログの遡及調査には §4.3 の Query Builder を使う。保持期間を超える archive が必要な場合は §7.1 の Logpush + R2 を検討する。
 
 ### 4.2 Cloudflare Dashboard UI の実態 (2026-05 時点、API fallback 推奨)
 
@@ -188,11 +188,11 @@ curl -sS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/
 
 本リポでは **Pulumi で declare → 確認は API call** で完結する運用なので、Dashboard UI の制約は実害なし。
 
-### 4.3 Workers built-in observability (Cloudflare Dashboard、7 日保持)
+### 4.3 Workers Logs と Query Builder
 
-`wrangler.toml` に `[observability]` block を追加すると Cloudflare Dashboard の Workers script 詳細画面で過去 7 日分の log を検索できる (Free plan でも利用可能、本 PR では未設定)。
+staging / production の wrangler 設定では Workers Logs を有効化している。Cloudflare Dashboard の Query Builder から保存済みログを検索できる。
 
-将来必要になったら以下を追加:
+両環境の設定:
 
 ```toml
 # crates/rshogi-csa-server-workers/wrangler.{production,staging}.toml
@@ -204,7 +204,17 @@ enabled = true
 head_sampling_rate = 1.0
 ```
 
-これは Logpush とは別経路 (Cloudflare 内部の log buffer)。Free plan でも 7 日保持される一方、archive を S3 / R2 に流すには Logpush が必要 (= Paid plan)。
+[Workers Logs の料金表](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#pricing)では、Free は1日200,000 events・3日保持、Paid は7日保持。2026-12-01 に料金体系の変更が予定されているため、運用時に公式表を再確認する。Logpush は別経路であり、ログ検索 API の利用可否と同一視しない。
+
+[Query Builder](https://developers.cloudflare.com/workers/observability/query-builder/) は REST API での検索にも対応する。
+[query API](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/) は `Workers Observability Write` 権限を要求し、`dry: true` なら結果を永続化せずに検証できる。
+`rate_limit_denied` を kind ごとに集計する場合は、対象 Worker と時間範囲を限定する。
+`sampleInterval` が1を超える集計値は推定であり、`statistics.abr_level` によるクエリ側のサンプリングも別に確認する。
+`head_sampling_rate = 1.0` だけでプラットフォーム側の欠落・遅延がないとは保証できない。
+
+本サービスでの API 権限、ログ到着遅延、既知件数との一致は未検証。
+API エラー・不完全な結果を拒否件数0に変換してはいけない。
+検索 API が存在することは、自動通知の設定済み・正常動作を意味しない。
 
 ## 5. Discord 切替方針 (将来)
 
@@ -299,7 +309,7 @@ pulumi up
 | staging | `<POLICY_ID_STAGING>` | `rshogi-staging-workers-observability` | silent (alert rule なし、enabled: true) |
 | production | `<POLICY_ID_PRODUCTION>` | `rshogi-production-workers-observability` | silent (同上) |
 
-**`wrangler.{production,staging}.toml` の `[observability]` block も残置**: Workers Observability の Dashboard 機能 (Logs / Query Builder、Free plan で 7 日保持) は public GA なので有効化したまま運用可能 (Phase A の `structured_log!` JSON を Dashboard 上で検索する用途で実利あり)。
+**`wrangler.{production,staging}.toml` の `[observability]` block も残置**: Workers Observability の Dashboard 機能 (Logs / Query Builder、保持期間と取得上限は §4.3 参照) は public GA なので有効化したまま運用可能 (Phase A の `structured_log!` JSON を Dashboard 上で検索する用途で実利あり)。
 
 **Cloudflare 側 release を確認する trigger:**
 
