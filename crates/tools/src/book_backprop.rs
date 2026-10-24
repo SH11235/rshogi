@@ -140,6 +140,8 @@ pub struct Graph {
     /// 局面 `v` の `sfen` 行の入力での位置は `blocks[block_start[v]..block_start[v + 1]]` (入力順)。
     block_start: Vec<u32>,
     blocks: Vec<u64>,
+    /// 局面の入力の行のハッシュ値。書き出しで読み直した行と比べる。
+    row_hash: Vec<u64>,
     old: Vec<i32>,
     new: Vec<i32>,
     /// 行き先の局面。book 内に子局面が無ければ `NONE`。
@@ -251,6 +253,8 @@ struct Texts {
     text: String,
     start: Vec<usize>,
     len: Vec<u32>,
+    /// 差し替えで使わなくなった領域の長さ。
+    unused: usize,
 }
 
 impl Texts {
@@ -268,17 +272,36 @@ impl Texts {
             .ok()
             .filter(|&index| index != NONE)
             .ok_or_else(|| anyhow!("局面が多すぎます"))?;
-        self.start.push(0);
-        self.len.push(0);
-        self.replace(index as usize, text)?;
+        self.len.push(text_len(text)?);
+        self.start.push(self.text.len());
+        self.text.push_str(text);
         Ok(index)
     }
 
-    /// 文字列を差し替える。元の文字列の領域は使い回さない (差し替えは少ない)。
+    /// 文字列を差し替える。元の領域に収まればそこへ書き、収まらなければ後ろに足す。
+    /// 使わなくなった領域が全体の半分を超えたら詰め直し、差し替えの回数によらず入力の大きさに収める。
     fn replace(&mut self, index: usize, text: &str) -> Result<()> {
-        self.start[index] = self.text.len();
-        self.len[index] = u32::try_from(text.len()).context("SFEN 行が長すぎます")?;
-        self.text.push_str(text);
+        let (start, old) = (self.start[index], self.len[index] as usize);
+        let len = text_len(text)?;
+        if text.len() <= old && self.text.is_char_boundary(start + text.len()) {
+            self.text.replace_range(start..start + text.len(), text);
+            self.unused += old - text.len();
+        } else {
+            self.unused += old;
+            self.start[index] = self.text.len();
+            self.text.push_str(text);
+        }
+        self.len[index] = len;
+        if self.unused > self.text.len() / 2 {
+            let mut text = String::with_capacity(self.text.len() - self.unused);
+            for index in 0..self.len() {
+                let start = text.len();
+                text.push_str(self.get(index));
+                self.start[index] = start;
+            }
+            self.text = text;
+            self.unused = 0;
+        }
         Ok(())
     }
 
@@ -288,8 +311,13 @@ impl Texts {
             start: order.iter().map(|&i| self.start[i as usize]).collect(),
             len: order.iter().map(|&i| self.len[i as usize]).collect(),
             text: self.text,
+            unused: self.unused,
         }
     }
+}
+
+fn text_len(text: &str) -> Result<u32> {
+    u32::try_from(text.len()).context("SFEN 行が長すぎます")
 }
 
 /// 昇順の SFEN の一覧から ply 抜き key を二分探索で引く。
@@ -583,27 +611,35 @@ fn parse_row(line: &str) -> RowFields<'_> {
     }
 }
 
-/// 局面の入力の行を、`sfen` 行ごとに入力の順で `f` へ渡す。
+/// ply 抜き key が `key` の局面の入力の行を、`sfen` 行ごとに入力の順で `f` へ渡し、行のハッシュ値を返す。
+/// 読み直すたびにハッシュ値を比べ、入力が途中で書き換わっていないことを確かめる。
 fn for_each_row(
     reader: &mut LineReader,
     blocks: &[u64],
+    key: &str,
     mut f: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
+) -> Result<u64> {
+    let mut hasher = DefaultHasher::new();
     for &offset in blocks {
         reader.seek(offset)?;
         match reader.next_line()? {
-            Some((_, line)) if matches!(classify(line), Line::Sfen(_)) => {}
+            Some((_, line)) if matches!(classify(line), Line::Sfen(sfen) if strip_ply(sfen) == key) =>
+                {}
             _ => bail!(CHANGED),
         }
         while let Some((_, line)) = reader.next_line()? {
             match classify(line) {
                 Line::Skip => {}
                 Line::Sfen(_) => break,
-                Line::Row(row) => f(row)?,
+                Line::Row(row) => {
+                    hasher.write(row.as_bytes());
+                    hasher.write_u8(b'\n');
+                    f(row)?;
+                }
             }
         }
     }
-    Ok(())
+    Ok(hasher.finish())
 }
 
 /// 1 回目の読み込みで集める局面の一覧。局面は ply 抜き key の昇順。
@@ -677,6 +713,9 @@ fn scan(path: &Path) -> Result<Scan> {
         block.0 = rank[block.0 as usize];
     }
     blocks.sort_unstable();
+    if u32::try_from(blocks.len()).is_err() {
+        bail!("sfen 行が多すぎます");
+    }
     let mut block_start = vec![0u32; sfens.len() + 1];
     for &(node, _) in &blocks {
         block_start[node as usize + 1] += 1;
@@ -709,6 +748,8 @@ struct InputRows {
     all_depth0: Vec<bool>,
     /// 局面の全行が value=0 かつ depth=0 か (行の無い局面も含む)。
     unexplored: Vec<bool>,
+    /// 局面の行のハッシュ値。書き出しで読み直した行と比べる。
+    row_hash: Vec<u64>,
 }
 
 impl InputRows {
@@ -727,7 +768,7 @@ impl InputRows {
 }
 
 /// 正規の USI 表記 (`7g7f` / `7g7f+` / `P*5e`) の指し手を、文字列を作らずに読む。他の表記は `None`。
-/// 返す値は `Move::from_usi` と同じ。
+/// 返す値は `Move::from_usi` と同じ。`1a1a` は `Move::NONE` (`none` と書く値) になるので除く。
 fn canonical_move(text: &str) -> Option<Move> {
     let bytes = text.as_bytes();
     let square = |at: usize| {
@@ -750,7 +791,7 @@ fn canonical_move(text: &str) -> Option<Move> {
             };
             Some(Move::new_drop(piece, square(2)?))
         }
-        4 => Some(Move::new_move(square(0)?, square(2)?, false)),
+        4 => Some(Move::new_move(square(0)?, square(2)?, false)).filter(|&mv| mv != Move::NONE),
         5 if bytes[4] == b'+' => Some(Move::new_move(square(0)?, square(2)?, true)),
         _ => None,
     }
@@ -766,13 +807,15 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
         texts: Vec::new(),
         all_depth0: Vec::with_capacity(scan.rows.len()),
         unexplored: Vec::with_capacity(scan.rows.len()),
+        row_hash: Vec::with_capacity(scan.rows.len()),
     };
     for node in 0..scan.rows.len() {
         let blocks =
             &scan.blocks[scan.block_start[node] as usize..scan.block_start[node + 1] as usize];
         let first = input.value.len();
         let (mut depth0, mut unexplored) = (true, true);
-        for_each_row(&mut reader, blocks, |line| {
+        let key = strip_ply(scan.sfens.get(node));
+        let hash = for_each_row(&mut reader, blocks, key, |line| {
             let fields = parse_row(line);
             depth0 &= fields.depth == 0;
             unexplored &= fields.value == 0 && fields.depth == 0;
@@ -800,6 +843,7 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
         }
         input.all_depth0.push(depth0);
         input.unexplored.push(unexplored);
+        input.row_hash.push(hash);
     }
     Ok(input)
 }
@@ -834,7 +878,7 @@ fn build_graph(
     path: &Path,
     options: BackpropOptions,
     scan: Scan,
-    input: InputRows,
+    mut input: InputRows,
 ) -> Result<Graph> {
     let Scan {
         sfens,
@@ -969,6 +1013,7 @@ fn build_graph(
         }
         row_start.push(u32::try_from(old.len()).context("手が多すぎます")?);
     }
+    let row_hash = std::mem::take(&mut input.row_hash);
     drop((input, index));
     Ok(Graph {
         source: Some(path.to_path_buf()),
@@ -978,6 +1023,7 @@ fn build_graph(
         row_start,
         block_start,
         blocks,
+        row_hash,
         new: old.clone(),
         old,
         to,
@@ -1980,16 +2026,47 @@ struct OutRow {
 }
 
 /// 逆伝播後の値で `.db` を書き出す。局面は key 昇順、手は count 降順 → USI 昇順。
-/// 指し手欄・予想手欄・depth・count は入力を読み直して書く。入力と同じパスにも書けるよう、一時ファイルから置き換える。
+/// 指し手欄・予想手欄・depth・count は入力を読み直して書く。入力と同じパスにも書けるよう、
+/// 同じディレクトリの一時ファイルに書いてから置き換える。
 pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
     let source = graph
         .source
         .as_deref()
         .ok_or_else(|| anyhow!("内部エラー: 入力の定跡がありません"))?;
-    let partial = partial_path(out);
-    let file = File::create(&partial)
-        .with_context(|| format!("出力を作成できません: {}", out.display()))?;
-    let mut writer = BufWriter::new(file);
+    let (partial, file) =
+        create_partial(out).with_context(|| format!("出力を作成できません: {}", out.display()))?;
+    let written = write_rows(graph, source, BufWriter::new(file)).and_then(|()| {
+        std::fs::rename(&partial, out)
+            .with_context(|| format!("出力を置き換えられません: {}", out.display()))
+    });
+    if written.is_err() {
+        // 失敗の報告が本題なので、一時ファイルを消せなかったことは伝えない。
+        std::fs::remove_file(&partial).ok();
+    }
+    written
+}
+
+/// `out` と同じディレクトリに、既存のファイル (入力を含む) と重ならない名前で一時ファイルを作る。
+fn create_partial(out: &Path) -> Result<(PathBuf, File)> {
+    let base = partial_path(out);
+    let mut attempt = 0u32;
+    loop {
+        let mut path = base.clone().into_os_string();
+        if attempt > 0 {
+            path.push(format!(".{attempt}"));
+        }
+        let path = PathBuf::from(path);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt = attempt.checked_add(1).context("一時ファイルの名前が尽きました")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Result<()> {
     writer.write_all(BOOK_HEADER.as_bytes())?;
     writer.write_all(b"\n")?;
     let mut reader = LineReader::open(source)?;
@@ -2001,7 +2078,7 @@ pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
         writeln!(writer, "sfen {}", graph.sfen(node))?;
         text.clear();
         rows.clear();
-        for_each_row(&mut reader, graph.blocks(node), |line| {
+        let hash = for_each_row(&mut reader, graph.blocks(node), graph.key(node), |line| {
             let fields = parse_row(line);
             rows.push(OutRow {
                 move_usi: push_field(&mut text, fields.move_usi),
@@ -2011,6 +2088,9 @@ pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
             });
             Ok(())
         })?;
+        if hash != graph.row_hash[node] {
+            bail!("{CHANGED}: {}", source.display());
+        }
         let range = graph.rows(node);
         for row in range.clone().skip(rows.len()) {
             if !graph.added(row) {
@@ -2050,10 +2130,7 @@ pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
             )?;
         }
     }
-    drop(reader);
-    drop(writer.into_inner().map_err(|e| e.into_error())?);
-    std::fs::rename(&partial, out)
-        .with_context(|| format!("出力を置き換えられません: {}", out.display()))?;
+    writer.into_inner().map_err(|e| e.into_error())?;
     Ok(())
 }
 
@@ -2295,6 +2372,7 @@ mod tests {
             row_start,
             block_start: vec![0; rows.len() + 1],
             blocks: Vec::new(),
+            row_hash: Vec::new(),
             new: old.clone(),
             row_flags: vec![ROW_USABLE; old.len()],
             old,
@@ -2970,9 +3048,59 @@ sfen {child}
             }
         }
         for text in [
-            "7g7f+x", "7g7fjunk", "P*5", "7G7f", "K*5e", "0a1b", "pass", "あa",
+            "7g7f+x", "7g7fjunk", "P*5", "7G7f", "K*5e", "0a1b", "pass", "あa", "1a1a",
         ] {
             assert!(canonical_move(text).is_none(), "{text}");
         }
+    }
+
+    #[test]
+    fn replaced_sfens_do_not_accumulate() {
+        let mut texts = Texts::default();
+        texts.push("k 1000000").unwrap();
+        for ply in (1..1_000_000).rev() {
+            texts.replace(0, &format!("k {ply}")).unwrap();
+        }
+        // 長い表記への差し替えも、使わない領域を詰め直して入力の大きさに収める。
+        for zeros in 1..1000 {
+            texts.replace(0, &format!("k {}1", "0".repeat(zeros))).unwrap();
+        }
+        assert_eq!(texts.get(0), format!("k {}1", "0".repeat(999)));
+        assert!(texts.text.len() <= 2 * texts.get(0).len() + 16, "{}", texts.text.len());
+    }
+
+    #[test]
+    fn temporary_output_does_not_overwrite_the_input() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none 30 4 1\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.db");
+        let book = crate::common::io::partial_path(&out);
+        std::fs::write(&book, &input).unwrap();
+        backprop_file(&book, &out, None, DrawValues::default(), MergeMode::Replace).unwrap();
+        assert_eq!(std::fs::read_to_string(&book).unwrap(), input);
+        assert!(std::fs::read_to_string(&out).unwrap().contains("7g7f none -30 1 1\n"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn input_changed_before_writing_is_rejected() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none 30 4 1\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.db");
+        let out = dir.path().join("out.db");
+        std::fs::write(&path, &input).unwrap();
+        let mut graph = read_graph(&path, BackpropOptions::default()).unwrap();
+        propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
+        std::fs::write(&path, input.replace("7g7f none", "2g2f none")).unwrap();
+        let error = write_backprop_book(&graph, &out).unwrap_err();
+        assert!(error.to_string().contains(CHANGED), "{error:#}");
+        assert!(!out.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }
