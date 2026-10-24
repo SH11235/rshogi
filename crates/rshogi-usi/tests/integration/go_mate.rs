@@ -171,9 +171,17 @@ fn mate_threads_solves_and_stops() {
 }
 
 #[test]
-fn position_without_attacker_king_is_not_implemented() {
+fn position_without_attacker_king_is_solved() {
     let mut engine = Engine::start();
     engine.send("position sfen 4k4/8g/4P4/9/9/9/9/9/9 b G 1\ngo mate 5000");
+    assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b");
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
+fn position_without_defender_king_is_not_implemented() {
+    let mut engine = Engine::start();
+    engine.send("position sfen 9/9/9/9/9/9/9/9/4K4 b R 1\ngo mate 5000");
     assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate notimplemented");
     engine.assert_no_more_checkmate();
 }

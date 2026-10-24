@@ -11,13 +11,15 @@
 //! 探索深さの上限 (2048 手、wasm では 1024 手) に達して読み切れず不詰と言えないとき、詰みを証明したが
 //! 手順を復元できなかったときも Unknown を返す。詰みの手順は最短とは限らない。
 //! 局面の同一性は 64bit のハッシュキーで判定するので、衝突による誤りの可能性は確率的にのみ排除される。
-//! 玉の無い局面 (攻め方の玉が無い詰将棋など) と、手番でない側が王手されている局面は扱わない
+//! 攻め方の玉が無い局面 (詰将棋) も解く。余った駒を受け方の持駒にする詰将棋の約束は、局面の受け方の
+//! 持駒として与える。受け方の玉が無い局面と、手番でない側が王手されている局面は扱わない
 //! ([`MateResult::Unsupported`])。
 
 mod pv;
 mod search;
 mod state;
 mod table;
+mod verify;
 
 #[cfg(test)]
 mod tests;
@@ -26,12 +28,13 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher};
+use state::NoAttackerKing;
 use table::MateTable;
 
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::{Color, Move, PieceType};
+use crate::types::{Move, PieceType};
 
 /// 詰み探索の結果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +45,7 @@ pub enum MateResult {
     NoMate,
     /// 判定できなかった (時間・ノード数・停止による打ち切り、探索深さの上限、手順の復元失敗)
     Unknown,
-    /// 扱えない局面 (どちらかの玉が無い、手番でない側が王手されている)
+    /// 扱えない局面 (受け方の玉が無い、手番でない側が王手されている)
     Unsupported,
 }
 
@@ -186,24 +189,32 @@ impl DfpnSolver {
         mut progress: impl FnMut(MateProgress),
     ) -> MateResult {
         self.nodes = 0;
-        // 玉が無い側の玉の位置は既定値のままで、王手の判定が意味をなさない。
-        // 手番でない側が王手されている局面は将棋として成立せず、受け方の手番の前提が崩れる。
+        // 受け方の玉が無ければ詰みの意味が無い。手番でない側が王手されている局面は将棋として成立せず、
+        // 受け方の手番の前提が崩れる。
         let us = pos.side_to_move();
-        if [Color::Black, Color::White]
-            .iter()
-            .any(|&c| pos.pieces(c, PieceType::King).is_empty())
+        if pos.pieces(!us, PieceType::King).is_empty()
             || !pos.attackers_to_c(pos.king_square(!us), us).is_empty()
         {
             return MateResult::Unsupported;
         }
         self.table.clear();
         let start = Instant::now();
-        let result = match self.mode {
-            MateMode::Speed => self.run::<false>(pos, *limits, start, stop, &mut progress),
-            MateMode::Power => self.run::<true>(pos, *limits, start, stop, &mut progress),
+        let kingless = pos.pieces(us, PieceType::King).is_empty();
+        let result = if kingless {
+            let mut st = NoAttackerKing::new(pos.clone());
+            self.run_mode(&mut st, *limits, start, stop, &mut progress)
+        } else {
+            self.run_mode(pos, *limits, start, stop, &mut progress)
+        };
+        let is_valid = |pos: &mut Position, pv: &[Move]| {
+            if kingless {
+                verify::is_valid_mate_pv_by_rules(pos, pv)
+            } else {
+                is_valid_mate_pv(pos, pv)
+            }
         };
         match result {
-            Some(SolveOutcome::Mate(pv)) if is_valid_mate_pv(pos, &pv) => MateResult::Mate(pv),
+            Some(SolveOutcome::Mate(pv)) if is_valid(pos, &pv) => MateResult::Mate(pv),
             Some(SolveOutcome::Mate(_)) => {
                 debug_assert!(false, "復元した詰み手順が検証を通らない: {}", pos.to_sfen());
                 MateResult::Unknown
@@ -215,17 +226,31 @@ impl DfpnSolver {
 }
 
 impl DfpnSolver {
-    /// 制限 (`limits`、`start` からの時間) の中で解く
-    fn run<const PIECES: bool>(
+    fn run_mode<S: RootState>(
         &mut self,
-        pos: &mut Position,
+        st: &mut S,
+        limits: MateLimits,
+        start: Instant,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(MateProgress),
+    ) -> Option<SolveOutcome<Move>> {
+        match self.mode {
+            MateMode::Speed => self.run::<S, false>(st, limits, start, stop, progress),
+            MateMode::Power => self.run::<S, true>(st, limits, start, stop, progress),
+        }
+    }
+
+    /// 制限 (`limits`、`start` からの時間) の中で解く
+    fn run<S: RootState, const PIECES: bool>(
+        &mut self,
+        pos: &mut S,
         limits: MateLimits,
         start: Instant,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
         if self.threads == 1 {
-            return self.run_single::<PIECES>(pos, limits, start, stop, progress);
+            return self.run_single::<S, PIECES>(pos, limits, start, stop, progress);
         }
         // 並列の段階は、1 スレッドで読んだノード数の続きから数える
         let mut nodes = 0;
@@ -238,18 +263,18 @@ impl DfpnSolver {
                 },
                 ..limits
             };
-            let decided = self.run_single::<PIECES>(pos, first, start, stop, progress);
+            let decided = self.run_single::<S, PIECES>(pos, first, start, stop, progress);
             if decided.is_some() || exhausted(&limits, start, self.nodes, stop) {
                 return decided;
             }
             nodes = self.nodes;
         }
-        self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress)
+        self.run_parallel::<S, PIECES>(pos, limits, start, nodes, stop, progress)
     }
 
-    fn run_single<const PIECES: bool>(
+    fn run_single<S: RootState, const PIECES: bool>(
         &mut self,
-        pos: &mut Position,
+        pos: &mut S,
         limits: MateLimits,
         start: Instant,
         stop: &AtomicBool,
@@ -265,7 +290,7 @@ impl DfpnSolver {
             start,
             progress,
         };
-        let attacker = pos.side_to_move();
+        let attacker = pos.position().side_to_move();
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
@@ -277,9 +302,9 @@ impl DfpnSolver {
     /// 置換表を共有して `threads` 本のスレッドで同じ局面を解く。どれかのスレッドが根の結論を出したら
     /// ほかを止め、呼び出したスレッドの結果を、無ければ補助スレッドの結果を返す (どれも同じ結論になる)。
     /// ノード数の上限は全スレッドの合計に掛ける。
-    fn run_parallel<const PIECES: bool>(
+    fn run_parallel<S: RootState, const PIECES: bool>(
         &mut self,
-        pos: &mut Position,
+        pos: &mut S,
         limits: MateLimits,
         start: Instant,
         nodes: u64,
@@ -292,7 +317,7 @@ impl DfpnSolver {
         let halt = AtomicBool::new(false);
         let cancel = AtomicBool::new(false);
         let shared_nodes = AtomicU64::new(nodes);
-        let attacker = pos.side_to_move();
+        let attacker = pos.position().side_to_move();
         let (table, scratch, helper_scratch, mode) =
             (&self.table, &mut self.scratch, &mut self.helper_scratch, self.mode);
         let slots: Vec<OnceLock<HelperResult>> =
@@ -367,7 +392,7 @@ impl DfpnSolver {
                         | (Some(SolveOutcome::NoMate), Some(SolveOutcome::Mate(_)))
                 ),
                 "スレッドによって詰みと不詰が食い違う: {}",
-                pos.to_sfen()
+                pos.position().to_sfen()
             );
             if result.is_none() {
                 result = r;
@@ -379,6 +404,23 @@ impl DfpnSolver {
 }
 
 type HelperResult = (Option<SolveOutcome<Move>>, u64);
+
+/// 根の局面 (並列に解くときは補助スレッドごとに複製する)
+trait RootState: state::MateState<Mv = Move> + Clone + Send {
+    fn position(&self) -> &Position;
+}
+
+impl RootState for Position {
+    fn position(&self) -> &Position {
+        self
+    }
+}
+
+impl RootState for NoAttackerKing {
+    fn position(&self) -> &Position {
+        NoAttackerKing::position(self)
+    }
+}
 
 /// 補助スレッドのスタック。探索は手数ごとに再帰するので、既定 (2 MB) では探索深さの上限まで潜れない
 /// (debug ビルドは 1 手あたりの使用量が数倍になる)。確保するのは仮想領域で、使った分だけが実メモリになる。
