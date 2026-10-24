@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const VERSION: &str = "book-tree-v1/newgame-ready/node-calib-last-multipv-v1";
 
@@ -224,14 +224,6 @@ impl Reading {
         Ok(())
     }
 
-    pub fn validate_declaration(&self, settings: &Settings) -> Result<()> {
-        self.validate(settings)?;
-        if self.multipv.len() != settings.multipv {
-            bail!("宣言と MultiPV 行数が矛盾します: {}", self.key);
-        }
-        Ok(())
-    }
-
     fn same_values(&self, other: &Self) -> bool {
         self.multipv == other.multipv && self.bestmove == other.bestmove
     }
@@ -409,28 +401,6 @@ impl Journal {
         self.lock.0.write_all(b"\n")?;
         self.lock.0.sync_data()?;
         self.records.insert(key, rec.reading);
-        Ok(())
-    }
-
-    pub fn import(&mut self, paths: &[PathBuf], settings: &Settings) -> Result<()> {
-        if settings.fingerprint != self.fingerprint {
-            bail!("台帳を開いた指紋と取り込みの条件が違います");
-        }
-        let mut incoming = Vec::new();
-        for path in paths {
-            let provenance = format!("declared-python:{}:sha256={}", path.display(), digest(path)?);
-            for (line_no, line) in BufReader::new(File::open(path)?).lines().enumerate() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let reading: Reading = serde_json::from_str(&line)
-                    .with_context(|| format!("{}:{}", path.display(), line_no + 1))?;
-                reading.validate_declaration(settings)?;
-                incoming.push((reading, provenance.clone()));
-            }
-        }
-        self.append_all(incoming, settings)?;
         Ok(())
     }
 
@@ -677,7 +647,6 @@ mod tests {
         let foreign = record("foreign", 2);
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(journal.append(foreign.reading, &foreign.settings, "fixture".into()).is_err());
-        assert!(journal.import(&[], &foreign.settings).is_err());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
         drop(journal);
         assert!(Journal::open(&path, "past-0").is_err());

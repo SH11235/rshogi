@@ -1,4 +1,4 @@
-use super::journal::{Pv, Reading, Readings};
+use super::journal::{Pv, Reading, Settings};
 use super::model::{child, side};
 use super::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -329,42 +329,6 @@ fn parser_preserves_slots_bounds_mates_and_last_line() {
 }
 
 #[test]
-fn import_is_transactional_and_rejects_conflicting_declarations_and_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = settings();
-    let input = dir.path().join("d0.jsonl");
-    let path = dir.path().join("journal");
-    let r = reading(ROOT, &[("5i4i", 10)], &s);
-    let mut j = Journal::open(&path, &s.fingerprint).unwrap();
-    assert!(Journal::open(&path, &s.fingerprint).is_err());
-    for field in ["nodes_limit", "threads", "hash", "draw", "multipv"] {
-        let mut v = serde_json::to_value(&r).unwrap();
-        v[field] = match field {
-            "draw" => serde_json::json!({}),
-            "multipv" => serde_json::json!([]),
-            _ => serde_json::json!(999),
-        };
-        std::fs::write(&input, format!("{}\n{v}\n", serde_json::to_string(&r).unwrap())).unwrap();
-        assert!(j.import(std::slice::from_ref(&input), &s).is_err());
-        assert!(j.get(ROOT).is_none());
-    }
-    std::fs::write(&input, format!("{}\n", serde_json::to_string(&r).unwrap())).unwrap();
-    j.import(std::slice::from_ref(&input), &s).unwrap();
-    let mut other = r.clone();
-    other.multipv[0].cp += 1;
-    std::fs::write(&input, serde_json::to_string(&other).unwrap()).unwrap();
-    assert!(j.import(&[input], &s).is_err());
-    drop(j);
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all(b"{partial").unwrap();
-    }
-    let j = Journal::open(&path, &s.fingerprint).unwrap();
-    assert!(j.get(ROOT).is_some());
-}
-
-#[test]
 fn roots_ignore_stop_extra_rules_and_depth_game_union() {
     let s = settings();
     let cache = corpus(&s);
@@ -639,7 +603,7 @@ fn empty_game_adds_second_candidate_and_status_failure_does_not_block_outputs() 
 }
 
 #[test]
-fn short_multipv_and_terminal_readings_are_leaves_but_import_requires_declaration() {
+fn short_multipv_and_terminal_readings_are_leaves() {
     let s = settings();
     for (key, count) in [
         ("k8/9/R8/9/9/9/9/9/8K w -", 2),
@@ -660,7 +624,6 @@ fn short_multipv_and_terminal_readings_are_leaves_but_import_requires_declaratio
             .collect();
         r.bestmove = moves.first().cloned().unwrap_or("resign".into());
         r.validate(&s).unwrap();
-        assert!(r.validate_declaration(&s).is_err());
         let dir = tempfile::tempdir().unwrap();
         let mut def = definition(dir.path(), 0);
         std::fs::write(&def.paths, format!("{key}\t1\t\tterminal\n")).unwrap();
