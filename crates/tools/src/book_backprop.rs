@@ -1320,7 +1320,8 @@ struct SideGame<'a> {
 
 /// 後退解析の手を 4 バイトに詰めた値。
 ///
-/// - 最上位 bit が 0: 行き先の頂点 (下位 29 bit) と手の種類 (その上の 2 bit)。
+/// - 最上位 bit が 0: 行き先の頂点 (下位 30 bit) と、王手をかける手か (その上の bit)。
+///   局面を進めない分岐の手は、分岐の頂点の 2 番目の手として手の位置で分かる。
 /// - `Target::ROW_LEAF`: 葉。値は行の値から求め直す。
 /// - それ以外: 葉で、値 (解く側から見た値) を `LEAF_BIAS` だけずらして下位 31 bit に持つ。
 ///   数千万本の葉の値を 1 回の読み出しで得るため。収まらない値は `ROW_LEAF` にする。
@@ -1331,16 +1332,11 @@ impl Target {
     const LEAF: u32 = 1 << 31;
     const ROW_LEAF: Self = Self(u32::MAX);
     const LEAF_BIAS: i32 = 1 << 30;
-    const VERTEX: u32 = (1 << 29) - 1;
-    const STEP_SHIFT: u32 = 29;
+    const CHECK: u32 = 1 << 30;
+    const VERTEX: u32 = Self::CHECK - 1;
 
-    fn vertex(to: u32, step: Step) -> Self {
-        let step = match step {
-            Step::Quiet => 0,
-            Step::Check => 1,
-            Step::Pass => 2,
-        };
-        Self(to | (step << Self::STEP_SHIFT))
+    fn vertex(to: u32, check: bool) -> Self {
+        Self(to | if check { Self::CHECK } else { 0 })
     }
 
     fn leaf(value: i32) -> Self {
@@ -1427,11 +1423,6 @@ impl<'a> SideGame<'a> {
                     game.targets.push(Target::leaf(mine - game.draw));
                     continue;
                 };
-                let step = if graph.checked(to) {
-                    Step::Check
-                } else {
-                    Step::Quiet
-                };
                 let target = if min && c == game.me && !graph.added(row) {
                     let branch = target_vertex(base + game.branch_row.len())?;
                     if game.branch_base[v] == NONE {
@@ -1442,7 +1433,7 @@ impl<'a> SideGame<'a> {
                 } else {
                     game.state[to][1 - c]
                 };
-                game.targets.push(Target::vertex(target, step));
+                game.targets.push(Target::vertex(target, graph.checked(to)));
             }
             game.arc_start.push(arc_index(game.targets.len())?);
         }
@@ -1450,7 +1441,7 @@ impl<'a> SideGame<'a> {
             let row = game.branch_row[b] as usize;
             let to = graph.to[row] as usize;
             game.targets.push(Target::leaf(graph.old[row] - game.draw));
-            game.targets.push(Target::vertex(game.state[to][1 - game.me], Step::Pass));
+            game.targets.push(Target::vertex(game.state[to][1 - game.me], false));
             game.arc_start.push(arc_index(game.targets.len())?);
         }
         Ok(game)
@@ -1506,7 +1497,7 @@ impl<'a> SideGame<'a> {
     }
 }
 
-/// 頂点番号にする。[`Target`] に収まるよう 29 bit に限る。
+/// 頂点番号にする。[`Target`] に収まるよう 30 bit に限る。
 fn target_vertex(index: usize) -> Result<u32> {
     u32::try_from(index)
         .ok()
@@ -1534,10 +1525,12 @@ impl book_retrograde::Game for SideGame<'_> {
     fn arc(&self, s: usize, j: usize) -> Arc {
         let Target(target) = self.targets[self.arc_start[s] as usize + j];
         if target & Target::LEAF == 0 {
-            let step = match target >> Target::STEP_SHIFT {
-                0 => Step::Quiet,
-                1 => Step::Check,
-                _ => Step::Pass,
+            let step = if s >= self.vertex.len() {
+                Step::Pass
+            } else if target & Target::CHECK != 0 {
+                Step::Check
+            } else {
+                Step::Quiet
             };
             return Arc {
                 to: target & Target::VERTEX,
