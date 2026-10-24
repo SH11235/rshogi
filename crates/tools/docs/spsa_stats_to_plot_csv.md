@@ -4,7 +4,7 @@
 cargo run --release -p tools --bin spsa_stats_to_plot_csv -- stats.csv --output-csv stats.plot.csv --window 8
 ```
 
-入力は seed 統計 CSV または旧 v3 の aggregate 統計 CSV です。`values.csv` や v4 batch 統計への対応を追加する変更ではありません。認識できない header はエラーになります。
+入力は seed 統計 CSV、旧 v3 の aggregate 統計 CSV、`spsa --dispatch async` の stats.csv です。async は 1 行 = 1 pair (2 局) で、`iteration` 列に `completed_pairs` を出します。更新係数は param ごとに違うので `a_t` / `c_t` / `grad_scale` は空欄です。`values.csv` と v4 batch の統計には対応していません。認識できない header はエラーになります。
 
 `--output-csv` を省略すると入力名に `.plot.csv` を付けます。`--window` は 1 以上で、score_rate の移動平均の幅です（既定 8）。
 

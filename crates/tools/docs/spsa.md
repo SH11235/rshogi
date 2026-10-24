@@ -3,6 +3,13 @@
 USIエンジンのパラメータを対局結果から調整する。起点を `--init-from`、作業領域を
 `--run-dir` に分ける。ビルド、対局条件、再開、停止は [実行runbook](spsa_runbook.md) を参照。
 
+## 更新方式
+
+- `--dispatch batch` (既定): `--batch-pairs` 個の pair を同じ摂動で指し、全局の完了後に 1 回更新する。
+- `--dispatch async`: pair ごとに独立な摂動で指し、結果の到着順に dispatch 時の係数で更新する。
+  lag の上限、失敗した pair の指し直し、journal と snapshot による再開を持つ。
+  [runbook §15](spsa_runbook.md#15-非同期-per-pair-更新---dispatch-async) を参照。
+
 ## 入力形式
 
 パラメータ行より前に、次の形式宣言を1回だけ置く。

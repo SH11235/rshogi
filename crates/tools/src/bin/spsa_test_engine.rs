@@ -19,6 +19,8 @@
 //! - `FAIL_ONCE_MARKER`: create_new に成功した個体だけ go で異常終了。
 //! - `FAIL_AFTER_GO`: 上記失敗を各個体の指定回数の go 後まで遅延（既定0）。
 //!   仕様 F への追加で、batch 2 失敗・resume テスト用。
+//! - `FAIL_ON_NEWGAME`: `FAIL_ONCE_MARKER` の失敗を go ではなく指定回目の usinewgame で起こす
+//!   (初期化時の 1 回を含めて数える)。pair の第 2 局の準備で落とす用。
 //! - `SCRIPT_GATE`: cancel_script 用 marker の基底パス。拡張子 fail は失敗役の選出、
 //!   waiting は他 worker の go 到達、quit は失敗側の破棄開始を表す。
 use std::fs::OpenOptions;
@@ -46,7 +48,11 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
+    let fail_on_newgame = std::env::var("SPSA_TEST_ENGINE_FAIL_ON_NEWGAME")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
     let mut go_count = 0;
+    let mut newgame_count = 0;
     let mut value = 0;
     let protocol_log = std::env::var_os("SPSA_TEST_ENGINE_PROTOCOL_LOG");
     let script_gate =
@@ -84,6 +90,16 @@ fn main() {
             }
         } else if trimmed == "isready" {
             Some("readyok")
+        } else if trimmed == "usinewgame" {
+            newgame_count += 1;
+            if fail_on_newgame == Some(newgame_count)
+                && marker.as_ref().is_some_and(|path| {
+                    OpenOptions::new().write(true).create_new(true).open(path).is_ok()
+                })
+            {
+                std::process::exit(1);
+            }
+            None
         } else if let Some(v) = trimmed.strip_prefix("setoption name SPSA_TEST_INT value ") {
             value = v.parse::<i64>().unwrap_or(0);
             None
@@ -100,7 +116,8 @@ fn main() {
                     .expect("SPAWN_LOG required for WAIT_SPAWNS");
                 wait_spawns(std::path::Path::new(&path), count);
             }
-            if go_count > fail_after
+            if fail_on_newgame.is_none()
+                && go_count > fail_after
                 && marker.as_ref().is_some_and(|path| {
                     OpenOptions::new().write(true).create_new(true).open(path).is_ok()
                 })
