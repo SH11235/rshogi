@@ -396,6 +396,18 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 活性化と出力層の内積を融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
 それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
 
+## fixed edition の WebAssembly ビルド
+
+WASI では `node scripts/check_fixed_wasm.mjs` で、5 FT の fixed
+`1536x16x32-none` edition を SIMD128 on/off の 10 構成で検証できます。
+スクリプトは `cargo build -p rshogi-usi --target wasm32-wasip1 --no-default-features`
+に edition feature を渡して実際にリンクし、各成果物に USI startup smoke を実行します。
+xtask を経由しません。準備・単一 FT の再検証・target directory は
+[scripts の手順](../scripts/README.md#fixed-edition-の-wasi-起動検証)を参照してください。
+
+この smoke は Material 評価での `usi` / `isready` までを対象とします。
+NNUE loader・forward・探索の正当性、および browser 向けの組込み互換性は別の検証が必要です。
+
 ## 今後の追加予定 (本ドキュメントの未対応項目)
 
 別 Issue で追加予定:
