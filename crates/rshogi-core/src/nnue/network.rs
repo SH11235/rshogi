@@ -359,6 +359,40 @@ pub fn validate_layer_stack_routing_configuration(
     }
 }
 
+/// LayerStacks routing の構造・係数検証エラー。
+#[derive(Debug, PartialEq, Eq)]
+pub enum LayerStackRoutingError {
+    /// 格納数・routing 数・mode の組合せが不正。
+    Configuration(String),
+    /// 係数を参照する routing に係数がない。
+    MissingCoefficients,
+    /// 係数を使わない mode に係数が指定された。
+    UnusedCoefficients,
+}
+
+/// routing の構造と係数の有無を、副作用なしで検証する。
+pub fn validate_layer_stack_routing_with_coefficients(
+    mode: LayerStackBucketMode,
+    stored_bucket_count: usize,
+    progress_bucket_count: Option<usize>,
+    coefficients_present: bool,
+) -> Result<(), LayerStackRoutingError> {
+    validate_layer_stack_routing_configuration(mode, stored_bucket_count, progress_bucket_count)
+        .map_err(LayerStackRoutingError::Configuration)?;
+    match mode {
+        LayerStackBucketMode::KingRank9 if coefficients_present => {
+            Err(LayerStackRoutingError::UnusedCoefficients)
+        }
+        LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16
+            if !coefficients_present
+                && layer_stack_progress_coeff_required(progress_bucket_count) =>
+        {
+            Err(LayerStackRoutingError::MissingCoefficients)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// progresskpabs routing が progress 係数を実際に参照するか。
 ///
 /// routing bucket 数 1 は常に bucket 0 を選ぶ no-op routing のため係数を参照しない。

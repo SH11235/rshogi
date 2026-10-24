@@ -16,7 +16,7 @@
 //!   --ls-progress-coeff path/to/nodchip_progress_e1_f1_cuda.bin
 //! ```
 
-use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
+use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::mem::size_of;
@@ -24,10 +24,8 @@ use std::path::PathBuf;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, LayerStackBucketMode, LayerStacksNetwork, LsFeatureSpec, NNUENetwork,
-    NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, configure_layer_stack_routing,
-    layer_stack_progress_coeff_required, ls_dispatch_ft_size,
-    set_layer_stack_progress_kpabs_weights,
+    AccumulatorLayerStacks, LayerStacksNetwork, LsFeatureSpec, NNUENetwork, NetworkLayerStacks,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, ls_dispatch_ft_size,
 };
 use rshogi_core::position::Position;
 
@@ -194,23 +192,6 @@ pub fn run() -> Result<()> {
             cli.ls_bucket_mode
         )
     })?;
-    match (mode, cli.ls_progress_coeff.as_ref()) {
-        (LayerStackBucketMode::ProgressKPAbs, Some(coeff_path)) => {
-            let weights = load_progress_coeff_weights(coeff_path)?;
-            set_layer_stack_progress_kpabs_weights(weights).map_err(anyhow::Error::msg)?;
-        }
-        (LayerStackBucketMode::ProgressKPAbs, None) => {
-            if layer_stack_progress_coeff_required(cli.ls_progress_buckets) {
-                bail!("progresskpabs requires --ls-progress-coeff")
-            }
-        }
-        (LayerStackBucketMode::KingRank9, Some(_)) => {
-            bail!("kingrank9 does not use --ls-progress-coeff")
-        }
-        (LayerStackBucketMode::KingRank9, None) => {}
-        _ => unreachable!(),
-    }
-
     // NNUE モデル読み込み。
     // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
     // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
@@ -218,8 +199,15 @@ pub fn run() -> Result<()> {
     let net = NNUENetwork::load_static_layer_stacks(&cli.nnue_file).with_context(|| {
         format!("静的 LayerStacks NNUE を読み込めません: {}", cli.nnue_file.display())
     })?;
-    configure_layer_stack_routing(mode, net.num_buckets(), cli.ls_progress_buckets)
-        .map_err(anyhow::Error::msg)?;
+    let plan = NativeRouting::prepare(
+        Some(net.num_buckets()),
+        Some(mode),
+        cli.ls_progress_buckets,
+        cli.ls_progress_coeff.is_some(),
+    )
+    .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
+    .expect("LayerStacks routing");
+    plan.apply(|| cli.ls_progress_coeff.as_ref().map(load_progress_coeff_weights).transpose())?;
     println!("Bucket mode: {}", mode.as_str());
 
     println!("Model loaded successfully (L1={}).", net.l1_size());

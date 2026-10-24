@@ -91,3 +91,5 @@ rescore_hcpe \
   本ツールで作る teacher のラベルは yardstick の measure と bit 一致する。
 - `rescore_psv` — PSV 版の再スコアリング（ONNX/GPU・qsearch-leaf 等の機能が豊富）。format が
   hcpe ではなく PSV で、`--search-depth` は fresh-per-position ではない点が異なる。
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

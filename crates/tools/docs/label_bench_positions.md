@@ -111,3 +111,5 @@ LayerStacks モデルは `init_nnue` のロードだけでは正しく評価で�
 トークン制で in-flight 件数を一定上限（`worker 数 × 4` 程度）に抑え、collector が入力順へ
 並べ替えて逐次書き出すため、reorder buffer も in-flight 上限でバウンドします。数千万件規模の
 入力でもピークは worker 数に比例した一定量に収まります（探索コスト自体は件数線形）。
+
+起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

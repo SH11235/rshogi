@@ -152,3 +152,5 @@ CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "c
 CSA JSONL の `interrupted` / `censored` は未決結果。勝敗集計・教師抽出から除外し、
 KIF では中断と表示する（[jsonl_to_kif](jsonl_to_kif.md)）。旧 `draw` + `max_moves` は
 真の引分と区別できないため保持する。
+
+LayerStacks を使う native 評価ツール共通の [起動時の設定条件](nnue-routing.md#起動時の設定条件)も参照してください。

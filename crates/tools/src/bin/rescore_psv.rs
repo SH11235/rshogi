@@ -56,7 +56,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tools::common::dedup::canonicalize_maybe_new;
-use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
+use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 // mpsc/Arc/Mutex/Instant は ONNX 直推論パイプライン専用（バッチ供給の Receiver 共有・
 // フェーズ計時）。ONNX 無効ビルドでの unused import を避けるため cfg で囲う。
 use sha2::{Digest, Sha256};
@@ -69,9 +69,7 @@ use std::thread;
 use std::time::Instant;
 
 use rshogi_core::nnue::{
-    LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs_from_bytes,
-    set_layer_stack_progress_kpabs_weights,
+    LayerStackBucketMode, get_network, init_nnue, load_progress_coeff_kpabs_from_bytes,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
@@ -1102,58 +1100,43 @@ fn main() -> Result<()> {
         eprintln!("NNUE model loaded: {}", nnue.display());
         let network = get_network().context("NNUE was not initialized")?;
         let mut loaded_coeff_sha: Option<String> = None;
-        match network.layer_stack_num_buckets() {
-            Some(stored) => {
-                let mode_str = cli
-                    .ls_bucket_mode
+        let mode = cli
+            .ls_bucket_mode
+            .as_deref()
+            .map(parse_native_layer_stack_bucket_mode)
+            .transpose()?;
+        if let Some(plan) = NativeRouting::prepare(
+            network.layer_stack_num_buckets(),
+            mode,
+            cli.ls_progress_buckets,
+            cli.ls_progress_coeff.is_some(),
+        )
+        .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
+        {
+            if plan.mode() == LayerStackBucketMode::ProgressKPAbs {
+                validate_progress_routing_buckets(
+                    cli.ls_progress_buckets,
+                    network.layer_stack_num_buckets().unwrap(),
+                    cli.allow_routing_buckets_mismatch,
+                )?;
+            }
+            plan.apply(|| {
+                cli.ls_progress_coeff
                     .as_deref()
-                    .context("LayerStacks requires --ls-bucket-mode")?;
-                let mode = parse_native_layer_stack_bucket_mode(mode_str)
-                    .context("--ls-bucket-mode must be progresskpabs or kingrank9")?;
-                match (mode, cli.ls_progress_coeff.as_deref()) {
-                    (LayerStackBucketMode::ProgressKPAbs, Some(path)) => {
-                        // fingerprint に書く sha256 を実際にロードした byte 列そのもの
-                        // から計算するため、ファイルは 1 回だけ読む (読み直すと
-                        // 差し替え時にロード内容と sha が乖離する)。
+                    .map(|path| {
+                        // fingerprint は読み直したファイルでなく、実際にロードする bytes に対応させる。
                         let bytes = fs::read(path).with_context(|| {
                             format!("Failed to read --ls-progress-coeff {}", path.display())
                         })?;
+                        let weights = load_progress_coeff_kpabs_from_bytes(&bytes)
+                            .map_err(anyhow::Error::msg)?;
                         if nnue_static_scores {
                             loaded_coeff_sha = Some(format!("{:x}", Sha256::digest(&bytes)));
                         }
-                        let weights = load_progress_coeff_kpabs_from_bytes(&bytes)
-                            .map_err(anyhow::Error::msg)?;
-                        set_layer_stack_progress_kpabs_weights(weights)
-                            .map_err(anyhow::Error::msg)?;
-                    }
-                    (LayerStackBucketMode::ProgressKPAbs, None) => {
-                        if layer_stack_progress_coeff_required(cli.ls_progress_buckets) {
-                            anyhow::bail!("progresskpabs requires --ls-progress-coeff")
-                        }
-                    }
-                    (LayerStackBucketMode::KingRank9, Some(_)) => {
-                        anyhow::bail!("kingrank9 does not use --ls-progress-coeff")
-                    }
-                    (LayerStackBucketMode::KingRank9, None) => {}
-                    _ => unreachable!(),
-                }
-                if matches!(mode, LayerStackBucketMode::ProgressKPAbs) {
-                    validate_progress_routing_buckets(
-                        cli.ls_progress_buckets,
-                        stored,
-                        cli.allow_routing_buckets_mismatch,
-                    )?;
-                }
-                configure_layer_stack_routing(mode, stored, cli.ls_progress_buckets)
-                    .map_err(anyhow::Error::msg)?;
-            }
-            None if cli.ls_bucket_mode.is_some()
-                || cli.ls_progress_buckets.is_some()
-                || cli.ls_progress_coeff.is_some() =>
-            {
-                anyhow::bail!("LayerStacks routing options require a LayerStacks NNUE")
-            }
-            None => {}
+                        Ok(weights)
+                    })
+                    .transpose()
+            })?;
         }
         // sidecar fingerprint の識別情報はロード直後のこの時点で固定する。
         if nnue_static_scores {

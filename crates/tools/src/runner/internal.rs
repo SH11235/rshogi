@@ -1,6 +1,6 @@
 //! 内部API直接呼び出しモードでのベンチマーク実行
 
-use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
+use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 use std::sync::mpsc;
 use std::thread;
 
@@ -9,11 +9,7 @@ use anyhow::{Context, Result};
 use rshogi_core::eval::{MaterialLevel, set_eval_hash_enabled, set_material_level};
 #[cfg(feature = "diagnostics")]
 use rshogi_core::eval::{eval_hash_stats, reset_eval_hash_stats};
-use rshogi_core::nnue::{
-    LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs,
-    set_layer_stack_progress_kpabs_weights,
-};
+use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
@@ -97,35 +93,19 @@ fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
             .transpose()?;
         let coeff = option_value("LS_PROGRESS_COEFF");
         let network = get_network().context("NNUE was not initialized")?;
-        match network.layer_stack_num_buckets() {
-            Some(stored) => {
-                let mode =
-                    mode.context("internal LayerStacks benchmark requires LS_BUCKET_MODE")?;
-                match (mode, coeff) {
-                    (LayerStackBucketMode::ProgressKPAbs, Some(path)) => {
-                        let weights =
-                            load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
-                        set_layer_stack_progress_kpabs_weights(weights)
-                            .map_err(anyhow::Error::msg)?;
-                    }
-                    (LayerStackBucketMode::ProgressKPAbs, None) => {
-                        if layer_stack_progress_coeff_required(progress_buckets) {
-                            anyhow::bail!("progresskpabs requires LS_PROGRESS_COEFF")
-                        }
-                    }
-                    (LayerStackBucketMode::KingRank9, Some(_)) => {
-                        anyhow::bail!("kingrank9 does not use LS_PROGRESS_COEFF")
-                    }
-                    (LayerStackBucketMode::KingRank9, None) => {}
-                    _ => unreachable!(),
-                }
-                configure_layer_stack_routing(mode, stored, progress_buckets)
-                    .map_err(anyhow::Error::msg)?;
-            }
-            None if mode.is_some() || progress_buckets.is_some() || coeff.is_some() => {
-                anyhow::bail!("LayerStacks USI options require a LayerStacks NNUE")
-            }
-            None => {}
+        if let Some(plan) = NativeRouting::prepare(
+            network.layer_stack_num_buckets(),
+            mode,
+            progress_buckets,
+            coeff.is_some(),
+        )
+        .context("internal routing: LS_BUCKET_MODE / LS_PROGRESS_BUCKETS / LS_PROGRESS_COEFF")?
+        {
+            plan.apply(|| {
+                coeff
+                    .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+                    .transpose()
+            })?;
         }
     }
     Ok(())

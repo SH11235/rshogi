@@ -4,6 +4,7 @@
 //! `Position::declaration_win(EnteringKingRule::Point27)` を使う。core が
 //! `entering_king_point_info` を公開していないため、点数系フィールドは JSONL に出さない。
 
+use crate::nnue_routing::NativeRouting;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::mem::size_of;
@@ -13,9 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, LayerStacksAccCache,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, configure_layer_stack_routing, evaluate_dispatch,
-    get_network, init_nnue, layer_stack_progress_coeff_required,
-    set_layer_stack_progress_kpabs_weights,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, evaluate_dispatch, get_network, init_nnue,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, EnteringKingRule, Move, Rank};
@@ -735,14 +734,6 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
         bail!("--scale は正の有限値を指定してください");
     }
 
-    if let Some(progress_file) = &args.progress_file {
-        let weights = load_progress_coeff_kpabs(progress_file)
-            .map_err(|e| anyhow!("progress 読み込みに失敗しました: {e}"))?;
-        set_layer_stack_progress_kpabs_weights(weights)
-            .map_err(|e| anyhow!("progress 設定に失敗しました: {e}"))?;
-    } else if layer_stack_progress_coeff_required(Some(args.progress_buckets)) {
-        bail!("--progress-buckets が 2 以上のときは --progress-file が必須です");
-    }
     init_nnue(&args.eval_file)
         .with_context(|| format!("NNUE を読み込めません: {}", args.eval_file.display()))?;
 
@@ -753,12 +744,20 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
             network.architecture_name()
         );
     }
-    configure_layer_stack_routing(
-        LayerStackBucketMode::ProgressKPAbs,
-        network.layer_stack_num_buckets().expect("LayerStacks checked above"),
+    let plan = NativeRouting::prepare(
+        network.layer_stack_num_buckets(),
+        Some(LayerStackBucketMode::ProgressKPAbs),
         Some(args.progress_buckets),
+        args.progress_file.as_ref().is_some(),
     )
-    .map_err(anyhow::Error::msg)?;
+    .context("native routing: --progress-buckets / --progress-file")?
+    .expect("LayerStacks routing");
+    plan.apply(|| {
+        args.progress_file
+            .as_ref()
+            .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+            .transpose()
+    })?;
     let mut stack = AccumulatorStackVariant::from_network(&network);
     // acc_cache (Finny Tables) は静的 LayerStacks variant 専用の API で、
     // runtime-dimensions ビルドでは同じ net でも DynamicLayerStacks として load され

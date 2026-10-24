@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
+use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
@@ -18,11 +18,8 @@ use rand::Rng;
 use rand::seq::SliceRandom;
 use rshogi_core::movegen::{MoveList, generate_legal, is_legal_with_pass};
 use rshogi_core::nnue::{
-    LayerStackBucketMode, compute_layer_stack_progresskpabs_bucket_index,
-    configure_layer_stack_routing, get_layer_stack_progress_kpabs_weights, get_network,
-    init_nnue_from_bytes, layer_stack_progress_coeff_required,
-    load_progress_coeff_kpabs_from_bytes, set_fv_scale_override,
-    set_layer_stack_progress_kpabs_weights,
+    compute_layer_stack_progresskpabs_bucket_index, get_layer_stack_progress_kpabs_weights,
+    get_network, init_nnue_from_bytes, load_progress_coeff_kpabs_from_bytes, set_fv_scale_override,
 };
 use rshogi_core::position::{EnteringKingPointInfo, Position};
 use rshogi_core::types::{Color, EnteringKingRule, Move};
@@ -5951,50 +5948,31 @@ fn initialize_native_backend(
     eprintln!("NativeBackend: NNUE loaded from {}", eval_path.display());
     let layer_stack_buckets =
         get_network().as_deref().and_then(|network| network.layer_stack_num_buckets());
-    let progress_routing_buckets = match layer_stack_buckets {
-        Some(stored_buckets) => {
-            let mode_str =
-                bucket_mode.context("--native LayerStacks NNUE requires --bucket-mode")?;
-            let mode = parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
-                format!("invalid --bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
-            })?;
-            match (mode, progress) {
-                (LayerStackBucketMode::ProgressKPAbs, Some((path, bytes))) => {
-                    let weights = load_progress_coeff_kpabs_from_bytes(bytes).map_err(|e| {
-                        anyhow!("failed to load --progress-file {}: {e}", path.display())
-                    })?;
-                    set_layer_stack_progress_kpabs_weights(weights)
-                        .map_err(|e| anyhow!("failed to set --progress-file weights: {e}"))?;
-                    eprintln!("NativeBackend: progress file loaded from {}", path.display());
-                }
-                (LayerStackBucketMode::ProgressKPAbs, None) => {
-                    if layer_stack_progress_coeff_required(progress_buckets) {
-                        bail!("--bucket-mode progresskpabs requires --progress-file")
-                    }
-                }
-                (LayerStackBucketMode::KingRank9, Some(_)) => {
-                    bail!("--bucket-mode kingrank9 does not use --progress-file")
-                }
-                (LayerStackBucketMode::KingRank9, None) => {}
-                _ => unreachable!("known LayerStack bucket mode"),
-            }
-            configure_layer_stack_routing(mode, stored_buckets, progress_buckets)
-                .map_err(anyhow::Error::msg)?;
-            eprintln!(
-                "NativeBackend: LayerStacks mode={} stored_buckets={} routing_buckets={}",
-                mode.as_str(),
-                stored_buckets,
-                progress_buckets.unwrap_or(9)
-            );
-            (mode == LayerStackBucketMode::ProgressKPAbs)
-                .then_some(progress_buckets.expect("validated progress bucket count"))
-        }
-        None if bucket_mode.is_some() || progress_buckets.is_some() || progress.is_some() => {
-            bail!("LayerStacks routing options were provided for a non-LayerStacks network")
-        }
-        None => None,
+    let mode = bucket_mode.map(parse_native_layer_stack_bucket_mode).transpose()?;
+    let Some(plan) =
+        NativeRouting::prepare(layer_stack_buckets, mode, progress_buckets, progress.is_some())
+            .context("native routing: --bucket-mode / --progress-buckets / --progress-file")?
+    else {
+        return Ok(None);
     };
-    Ok(progress_routing_buckets)
+    plan.apply(|| {
+        progress
+            .map(|(path, bytes)| {
+                let weights = load_progress_coeff_kpabs_from_bytes(bytes).map_err(|e| {
+                    anyhow!("failed to load --progress-file {}: {e}", path.display())
+                })?;
+                eprintln!("NativeBackend: progress file loaded from {}", path.display());
+                Ok(weights)
+            })
+            .transpose()
+    })?;
+    eprintln!(
+        "NativeBackend: LayerStacks mode={} stored_buckets={} routing_buckets={}",
+        plan.mode().as_str(),
+        layer_stack_buckets.unwrap(),
+        progress_buckets.unwrap_or(9)
+    );
+    Ok(plan.progress_buckets())
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
@@ -6107,6 +6085,47 @@ mod tests {
     use rand::{SeedableRng, rngs::StdRng};
     use rshogi_core::types::RepetitionState;
     use std::path::PathBuf;
+
+    #[test]
+    fn native_kingrank9_starts_without_progress_buckets() {
+        const CHILD: &str = "RSHOGI_GENSFEN_KINGRANK9_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::native_kingrank9_starts_without_progress_buckets",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let net = rshogi_core::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            rshogi_core::nnue::HALFKA_HM_DIMENSIONS,
+            1536,
+            16,
+            32,
+            9,
+        );
+        assert_eq!(
+            initialize_native_backend(
+                Path::new("synthetic.bin"),
+                &net.bytes,
+                None,
+                Some("kingrank9"),
+                None
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            rshogi_core::nnue::get_layer_stack_bucket_mode(),
+            rshogi_core::nnue::LayerStackBucketMode::KingRank9
+        );
+    }
 
     #[test]
     fn resolve_engine_paths_uses_per_side_when_provided() {
