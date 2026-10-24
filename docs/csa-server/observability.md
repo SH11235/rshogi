@@ -16,7 +16,7 @@
 │   ↓ structured_log!() macro (Phase A、JSON 形式)              │
 │ Workers console output (短期、wrangler tail で観察可能)        │
 └─────────────────────────────────────────────────────────────┘
-         (現状は archive 経路なし、wrangler tail で real-time のみ)
+         (archive 経路なし。保存済み Workers Logs の検索は §4.3)
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Notifications (account-level)                    │
@@ -152,7 +152,7 @@ wrangler tail rshogi-csa-server-workers-staging --format json \
 
 > `fromjson?` (`?` は jq のエラー抑制) で plain string message (panic / 通常 console.log) はスキップされ、`structured_log!` 由来の JSON だけが残る。`// empty` で fromjson 失敗時 (null) を行ごと捨てる。
 
-**制約**: `wrangler tail` は **接続中の event のみ受信** する (過去ログは見えない)。障害発生後の遡及調査には使えない。これが必要な場合は §7.1 で Paid plan に移行して Logpush + R2 archive を有効化する。
+**制約**: `wrangler tail` は **接続中の event のみ受信** する (過去ログは見えない)。保存済みログの遡及調査には §4.3 の Query Builder を使う。保持期間を超える archive が必要な場合は §7.1 の Logpush + R2 を検討する。
 
 ### 4.2 Cloudflare Dashboard UI の実態 (2026-05 時点、API fallback 推奨)
 

@@ -38,10 +38,8 @@ compatibility_date = "2026-04-21"
 # §3.2 / §7.3 参照)。
 # logpush = true
 
-# Workers Observability を有効化 (Free plan 対応)。production toml の同 block と
-# 同設定で揃え、staging で alert rule の動作確認 → production 反映の運用とする。
-# 詳細は `docs/csa-server/observability.md` §6.1 を参照。
-# [#625 Phase B 続編 / PR (本 PR)]
+# ログ集計の欠落を抑えるため、invocation のサンプリング率を 1.0 にする。
+# 保持期間・プラットフォーム側の制限は docs/csa-server/observability.md を参照。
 [observability]
 enabled = true
 
