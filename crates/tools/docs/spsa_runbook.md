@@ -3,6 +3,9 @@
 ## 前提
 - リポジトリルートで実行する。
 - `rshogi-usi` と `tools/spsa` をローカルビルド可能であること。
+- §3〜§9 は既定の `--dispatch batch` を前提に書いている。`--dispatch async` (pair ごとの非同期更新) の
+  オプション・run-dir・resume・CSV の違いは [§15](#15-非同期-per-pair-更新---dispatch-async) にまとめた。
+  棋譜の記録 (`games.jsonl`) は両方式で共通で、[§16](#16-棋譜の記録と回収) にある。
 
 ## 1. 初回ビルド
 
@@ -244,6 +247,12 @@ resume 時の不変条件チェック (起動時に hard bail):
 
 これらが破れる場合は新規 run dir で fresh start する。
 
+`--dispatch async` の resume は `--dispatch async --resume` で行い、`--batch-pairs` は渡さない。
+meta の seed・param 定義・対局条件を使い、journal を再生して再開する
+([§15.3](#153-run-dir-と-resume))。
+
+どちらの方式も、棋譜の記録の有無 (`--no-game-records`) を開始時と揃える。切り替えると resume を拒否する。
+
 ### 4.1 `--run-dir` / `--init-from` / `--resume` / `--force-init` の関係
 
 #### `--run-dir` 配下のファイル構成
@@ -260,6 +269,9 @@ resume 時の不変条件チェック (起動時に hard bail):
 | `<run-dir>/games.jsonl` | 確定した局の棋譜 (1 局 1 行、追記のみ) | (なし) |
 | `<run-dir>/batches.jsonl` | batch ごとの摂動 (1 batch 1 行、追記のみ) | (なし) |
 | `<run-dir>/.lock` | 同 run-dir の二重起動を防ぐ排他 lock | (なし) |
+
+上の表は batch の構成。`--dispatch async` では `journal.jsonl` と `snapshots/` が加わり、
+`batches.jsonl` は作らず、`state.params` は最新 snapshot の表示用になる ([§15.3](#153-run-dir-と-resume))。
 
 通常運用では override は不要。`runs/spsa/<timestamp>_<tag>/` 形式の dir を
 毎回新規に切るのが推奨。
@@ -775,7 +787,8 @@ run 投入前に確認する:
 
 ## 9. 生成物
 
-`--run-dir <dir>` 配下に以下が自動生成される:
+`--run-dir <dir>` 配下に以下が自動生成される (batch の場合。async の生成物と CSV の列は
+[§15.3](#153-run-dir-と-resume)・[§15.4](#154-statscsv--valuescsv-async)):
 
 | 生成物 | 既定パス | override フラグ | opt-out フラグ |
 |---|---|---|---|
@@ -1696,7 +1709,8 @@ spsa は既定で棋譜を `<run-dir>/games.jsonl` (batch では摂動の `batch
 - 長時間の run を別の機械から定期回収するときは、**meta (・async は snapshots/ と journal.jsonl) を先に、games.jsonl を後に**取る。
   棋譜は checkpoint・journal の `received` より先に durable になるので、この順なら回収した meta / journal が確定とする局の行は
   回収した games.jsonl に必ずある。
-- games.jsonl と batches.jsonl は追記だけなので rsync の追記転送 (`--append-verify`) で差分を取れる。async の journal.jsonl は
+- games.jsonl と batches.jsonl は追記だけなので rsync の追記転送で差分を取れる (`--append` は送信側の追加分だけを送る。
+  `--append-verify` は転送のたびに両側でファイル全体の checksum を取るので、数百 MB を短い間隔で回収するなら重くなる)。async の journal.jsonl は
   resume で末尾の断片を切り詰め、stats.csv / values.csv は作り直すので、通常の同期で取る。
 - async で摂動の名前と係数を復元するには gen0 snapshot (`snapshots/snapshot-000000.json`) と meta も回収する。
   engine mapping を使う run は mapping も残す。

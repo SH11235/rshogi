@@ -8,15 +8,15 @@ use std::path::Path;
 
 use super::spsa_run_dir_integration::{PoolTest, assert_success};
 
+/// 改行で終わる行だけを返す。改行の無い末尾は JSON として完結していても書き込み途中の残骸として捨てる。
 fn lines(test: &PoolTest, file: &str) -> Vec<String> {
-    String::from_utf8(test.bytes(file))
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
+    let text = String::from_utf8(test.bytes(file)).unwrap();
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    lines.pop();
+    lines
 }
 
-/// 読めない行 (書き込み途中で落ちた末尾) を捨てて JSON にする。
+/// 読めない行を捨てて JSON にする。
 fn records(test: &PoolTest, file: &str) -> Vec<serde_json::Value> {
     lines(test, file)
         .iter()
@@ -109,12 +109,19 @@ fn confirmed_async_games(test: &PoolTest) -> BTreeMap<(u64, u64), serde_json::Va
 }
 
 /// batch の規則: completed_iterations 以下の行を (iteration, pair_id, slot) ごとに後勝ちで採る。
-fn confirmed_batch_games(test: &PoolTest) -> BTreeMap<(u64, u64), serde_json::Value> {
+fn confirmed_batch_games(test: &PoolTest) -> BTreeMap<(u64, u64, u64), serde_json::Value> {
     let completed = test.meta()["completed_iterations"].as_u64().unwrap();
     records(test, "games.jsonl")
         .into_iter()
         .filter(|g| g["iteration"].as_u64().unwrap() <= completed)
-        .map(|g| ((g["pair_id"].as_u64().unwrap(), g["pair_slot"].as_u64().unwrap()), g))
+        .map(|g| {
+            let key = (
+                g["iteration"].as_u64().unwrap(),
+                g["pair_id"].as_u64().unwrap(),
+                g["pair_slot"].as_u64().unwrap(),
+            );
+            (key, g)
+        })
         .collect()
 }
 
@@ -168,14 +175,17 @@ fn batch_resume_keeps_committed_lines_and_reader_drops_torn_tail() {
     assert!(!output.status.success());
     assert_eq!(lines(&test, "games.jsonl").len(), 2);
     assert_eq!(lines(&test, "batches.jsonl").len(), 1);
-    // 書き込み途中で落ちた末尾を模す。resume は改行を補い、次の行と連結させない。
+    // 書き込み途中で落ちた末尾を模す。JSON として完結していても改行が無ければ読む側は捨て、
+    // resume は改行を補って次の行と連結させない。
     let path = test.path("run/games.jsonl");
     let mut bytes = std::fs::read(&path).unwrap();
-    bytes.extend_from_slice(br#"{"schema":"spsa_game","pair_id":1"#);
+    let last_line = lines(&test, "games.jsonl").pop().unwrap();
+    bytes.extend_from_slice(last_line.as_bytes());
     std::fs::write(&path, bytes).unwrap();
+    assert_eq!(records(&test, "games.jsonl").len(), 2);
     assert_success(&test.run("value_driven", 4, 1, 1, &["--resume"], &[]));
     assert_eq!(lines(&test, "games.jsonl").len(), 9);
-    assert_eq!(records(&test, "games.jsonl").len(), 8);
+    assert_eq!(records(&test, "games.jsonl").len(), 9);
     let confirmed = confirmed_batch_games(&test);
     assert_eq!(confirmed.len(), 8);
     let iterations: BTreeSet<u64> = records(&test, "batches.jsonl")
@@ -280,4 +290,102 @@ fn async_resume_rejects_toggled_game_records() {
     let output = run_async(&test, 4, &["--resume", "--force-unlock", "--no-game-records"], &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("game records"));
+}
+
+#[test]
+fn batch_crash_after_records_rewrites_the_iteration() {
+    let test = PoolTest::new();
+    let output = test.run(
+        "value_driven",
+        4,
+        1,
+        1,
+        &[],
+        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:2"))],
+    );
+    assert_eq!(output.status.code(), Some(86));
+    // batch 2 の棋譜は書いたが checkpoint の前に落ちた。
+    assert_eq!(test.meta()["completed_iterations"], 1);
+    assert_eq!(records(&test, "games.jsonl").len(), 4);
+    assert_eq!(confirmed_batch_games(&test).len(), 2);
+    assert_success(&test.run("value_driven", 4, 1, 1, &["--resume", "--force-unlock"], &[]));
+    let games = records(&test, "games.jsonl");
+    assert_eq!(games.len(), 10);
+    let confirmed = confirmed_batch_games(&test);
+    assert_eq!(confirmed.len(), 8);
+    // 指し直した batch 2 は後の行 (7・8 行目) が採られる。
+    assert_eq!(confirmed[&(2, 1, 0)], games[4]);
+    assert_eq!(confirmed[&(2, 1, 1)], games[5]);
+    let batches = records(&test, "batches.jsonl");
+    assert_eq!(batches.len(), 5);
+    assert_eq!(batches.iter().filter(|b| b["iteration"] == 2).count(), 2);
+}
+
+#[test]
+fn legacy_batch_meta_is_pinned_before_play_resumes() {
+    let test = PoolTest::new();
+    let output = test.run(
+        "value_driven",
+        4,
+        1,
+        1,
+        &[],
+        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:2"))],
+    );
+    assert_eq!(output.status.code(), Some(86));
+    // 記録機能より前の meta を模して項目を消す。
+    let mut meta = test.meta();
+    meta.as_object_mut().unwrap().remove("game_records");
+    std::fs::write(test.path("run/meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+    let output = test.run(
+        "value_driven",
+        4,
+        1,
+        1,
+        &["--resume", "--force-unlock"],
+        &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:1"))],
+    );
+    assert_eq!(output.status.code(), Some(86));
+    assert_eq!(test.meta()["game_records"], true);
+    let output = test.run(
+        "value_driven",
+        4,
+        1,
+        1,
+        &["--resume", "--force-unlock", "--no-game-records"],
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("game records"));
+}
+
+#[test]
+fn async_duplicate_result_is_not_written_twice() {
+    let test = PoolTest::new();
+    assert_success(&run_async(
+        &test,
+        4,
+        &[],
+        &[("RSHOGI_SPSA_FAULT", Path::new("duplicate_result:1"))],
+    ));
+    let games = records(&test, "games.jsonl");
+    assert_eq!(games.iter().filter(|g| g["pair_id"] == 1).count(), 2);
+    assert_eq!(games.len(), 8);
+    assert_eq!(confirmed_async_games(&test).len(), 8);
+}
+
+#[test]
+fn fresh_start_replaces_previous_records() {
+    let test = PoolTest::new();
+    assert_success(&test.run("value_driven", 4, 2, 1, &[], &[]));
+    assert_success(&test.run("value_driven", 2, 1, 1, &["--force-init"], &[]));
+    assert_eq!(records(&test, "games.jsonl").len(), 4);
+    assert_eq!(records(&test, "batches.jsonl").len(), 2);
+    // batch の run-dir を async で作り直すと、async は書かない batches.jsonl も消える。
+    assert_success(&run_async(&test, 2, &["--force-init"], &[]));
+    assert_eq!(records(&test, "games.jsonl").len(), 4);
+    assert!(!test.path("run/batches.jsonl").exists());
+    assert_success(&test.run("value_driven", 2, 1, 1, &["--force-init", "--no-game-records"], &[]));
+    assert!(!test.path("run/games.jsonl").exists());
+    assert!(!test.path("run/batches.jsonl").exists());
 }

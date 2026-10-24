@@ -1053,13 +1053,13 @@ impl Drop for AsyncPool<'_> {
 
 /// `RSHOGI_SPSA_FAULT=<point>:<n>` で n 回目の通過時に process を終了させ、crash 境界からの
 /// resume を結合テストで再現する。`duplicate_result:<pair_id>` はその pair の結果を 2 度送る。
-struct FaultPlan {
+pub(super) struct FaultPlan {
     point: Option<(String, u32)>,
     hits: std::sync::atomic::AtomicU32,
 }
 
 impl FaultPlan {
-    fn from_env() -> Result<Self> {
+    pub(super) fn from_env() -> Result<Self> {
         let point = match std::env::var("RSHOGI_SPSA_FAULT") {
             Ok(text) => {
                 let (name, n) =
@@ -1074,7 +1074,7 @@ impl FaultPlan {
         })
     }
 
-    fn hit(&self, name: &str) {
+    pub(super) fn hit(&self, name: &str) {
         if let Some((point, n)) = &self.point
             && point == name
             && self.hits.fetch_add(1, Ordering::AcqRel) + 1 == *n
@@ -1692,6 +1692,7 @@ fn remove_async_artifacts(run_dir: &Path) -> Result<()> {
     for path in [
         run_dir.join(JOURNAL_FILE),
         default_games_jsonl_path(run_dir),
+        default_batches_jsonl_path(run_dir),
     ] {
         if path.exists() {
             std::fs::remove_file(&path)
@@ -1734,13 +1735,6 @@ fn check_resume_meta(
 ) -> Result<()> {
     if meta.dispatch != "async" || meta.rng_version != RNG_VERSION {
         bail!("unsupported async meta (dispatch={}, rng={})", meta.dispatch, meta.rng_version);
-    }
-    if meta.game_records == cli.no_game_records {
-        bail!(
-            "この run は game records = {} で始まっています。resume で切り替えると received 済みの \
-             pair の棋譜が欠けるため、--no-game-records の有無を開始時と揃えてください",
-            meta.game_records
-        );
     }
     // 再生は bit 一致を要求するので、batch の許容誤差付き比較ではなく bit で比べる。
     let exact = |a: f64, b: f64| a.to_bits() == b.to_bits();
@@ -1880,6 +1874,13 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 meta.coordinator_sha256
             );
         }
+        if meta.game_records == cli.no_game_records {
+            bail!(
+                "この run は game records = {} で始まっています。resume で切り替えると received 済みの \
+                 pair の棋譜が欠けるため、--no-game-records の有無を開始時と揃えてください",
+                meta.game_records
+            );
+        }
         meta
     } else {
         let max_lag = match cli.max_lag {
@@ -1997,7 +1998,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             );
         }
         csv.commit()?;
-        let games = if store_game_records(cli) {
+        let games = if !cli.no_game_records {
             report_missing_game_records(&default_games_jsonl_path(run_dir), &received)?;
             Some(open_jsonl_writer(&default_games_jsonl_path(run_dir), true)?)
         } else {
@@ -2026,7 +2027,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         sync_dir(run_dir)?;
         let mut csv = CsvOutputs::begin(cli, &core.params)?;
         csv.commit()?;
-        let games = if store_game_records(cli) {
+        let games = if !cli.no_game_records {
             Some(open_jsonl_writer(&default_games_jsonl_path(run_dir), false)?)
         } else {
             None
@@ -2111,11 +2112,6 @@ fn print_counters(label: &str, core: &AsyncCore<'_>) {
         counters.holds,
         counters.max_lag
     );
-}
-
-/// 空いた worker に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
-fn store_game_records(cli: &Cli) -> bool {
-    !cli.no_game_records
 }
 
 /// pair の 2 局を games.jsonl に書いて fsync する。
@@ -2210,6 +2206,7 @@ fn report_missing_game_records(path: &Path, received: &[(u32, u32)]) -> Result<(
     Ok(())
 }
 
+/// 空いた worker に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
 fn coordinate(
     core: &mut AsyncCore<'_>,
     store: &mut Store<'_>,

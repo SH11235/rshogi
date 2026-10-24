@@ -3732,7 +3732,9 @@ fn main() -> Result<()> {
                     && recorded == cli.no_game_records
                 {
                     bail!(
-                        "この run は game records = {recorded} で始まっています。                         resume で切り替えると確定 batch の棋譜が欠けるため、                         --no-game-records の有無を開始時と揃えてください"
+                        "この run は game records = {recorded} で始まっています。\
+                         resume で切り替えると確定 batch の棋譜が欠けるため、\
+                         --no-game-records の有無を開始時と揃えてください"
                     );
                 }
                 // v3 → v4 silent migrate された meta は `schedule.total_iterations` の意味が
@@ -3965,6 +3967,15 @@ fn main() -> Result<()> {
         for p in &rotated {
             eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
         }
+    } else if cli.resume {
+        // 記録機能より前の meta は、最初の checkpoint を待たずに今回の設定で固定する。棋譜を
+        // 書いた後 checkpoint の前に落ちてから設定を切り替えて resume すると、残った行が
+        // 指し直し後の completed_iterations で確定扱いされるため。
+        let mut meta = load_meta(&meta_path)?;
+        if meta.game_records.is_none() {
+            meta.game_records = Some(!cli.no_game_records);
+            save_meta(&meta_path, &meta)?;
+        }
     }
 
     let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
@@ -3991,6 +4002,7 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let batch_faults = async_dispatch::FaultPlan::from_env()?;
     let mut game_record_writer = if cli.no_game_records {
         if !cli.resume {
             // fresh start で前の run の棋譜を今回の run のものと誤読させない。
@@ -4152,6 +4164,7 @@ fn main() -> Result<()> {
             if let Some(writer) = game_record_writer.as_mut() {
                 let batch = batch_record_line(&batch_ctx, batch_idx + 1, completed_pairs, &prep)?;
                 writer.append_batch(batch_idx + 1, &batch, &games)?;
+                batch_faults.hit("batch_after_records");
             }
 
             // Phase C: 集計と更新。
