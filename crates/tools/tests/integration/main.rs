@@ -18,6 +18,7 @@ mod relabel_psv_integration;
 mod rescore_output_safety;
 mod shuffle_psv_determinism;
 mod sprt_negative_nelo_args;
+mod spsa_async_integration;
 mod spsa_params_format;
 mod spsa_plot_output;
 mod spsa_run_dir_integration;

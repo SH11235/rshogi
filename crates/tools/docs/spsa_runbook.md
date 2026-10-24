@@ -1522,7 +1522,7 @@ batch の確定済み plus/minus 値でやり直す。乱数は引き直さず�
 再試行は stderr に `retry batch=... game_id=... attempt=... cause=...` と1行記録する。
 `attempt=2` は初回失敗後の2回目の試行を表す。CSV/meta の schema は変えない。
 通常の resign / win / illegal_move / no_bestmove / 時計 timeout / max_moves / sennichite / sennichite_perpetual_check と局面構築エラーは再試行しない。
-これは1局単位の再試行であり、後続 PR2 の PairTask 単位の再試行とは別物。
+これは1局単位の再試行であり、`--dispatch async` の pair 単位の指し直し (§15.2) とは別物。
 
 watchdog は「運用上の探索期限超過。hang と低速を区別せず、勝敗には採用しない」。
 期限で `stop` を送り、`timeout-margin-ms` の猶予で応答を回収する。
@@ -1596,3 +1596,84 @@ SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6�
 `alpha` / `gamma` / `a-ratio` / `mobility` と早期停止の閾値は有限値が必要です。既存の正負範囲に加え、対局開始前に schedule の定数、分母の underflow、摂動と最大勝敗和による更新量の保守的な上界を検査します。巨大な有限値でも安全な上界を確認できない組合せは拒否します。通常の schedule 式・既定値・更新係数は変更しません。`c_end=0` による更新停止は維持します。
 
 早期停止の `|raw_result| / batch_pairs` は 0..2 です。1 pair の両局勝ちも両局負けも 2、両局引分または 1 勝 1 敗なら 0、1 勝 1 引分なら 1 です。分散推定値ではなく勝敗和の絶対値の代理指標です。既存の閾値は同じ単位のまま使え、半分への換算は不要です。逐次的な停止規則の較正や棋力保証を意味しません。
+
+## 15. 非同期 per-pair 更新 (`--dispatch async`)
+
+`--dispatch async` は pair ごとに独立な摂動で対局し、結果が届いた順に θ を更新する (fishtest と同じ形)。
+既定は `--dispatch batch` で、batch の動作・成果物は変わらない。
+
+```bash
+spsa --dispatch async --run-dir "$RUN" --init-from canonical.params \
+  --total-pairs 20000 --concurrency 24 --seed 1 --nodes 1000000 \
+  --usi-option EvalFile=/path/to/nn.bin
+```
+
+- worker は `--concurrency` 個 (= 同時に指す pair 数 W、engine は 2W 本)。各 worker が pair の 2 局を同じ設定値・同じ開始局面で
+  先後を入れ替えて順に指す。pair ごとに全適用 param の絶対値を送り、isready → usinewgame → 第 1 局 → usinewgame → 第 2 局。
+- 更新は `θ += mobility × r_k × c_k × R × flip` の後に clamp。k は **dispatch 時**の `completed_pairs` (dispatch_k)、R は 2 局の勝敗和 (−2〜+2)。
+  乱数は batch の `--batch-pairs 1` で batch 番号を pair_id にしたものと同じで、`--concurrency 1` の async は `--batch-pairs 1` の batch と同じ θ になる。
+- `--batch-pairs`・`--games-per-iteration`/`--iterations`・early-stop 系・`--force-schedule`・`--meta-file`・`--stats-csv`・`--param-values-csv` は拒否する。
+  `--total-pairs` は必須。
+
+| オプション (async 専用) | 既定値 | 意味 |
+|---|---:|---|
+| `--max-lag L` | 4 × `--concurrency` | 適用時の lag (適用時と dispatch 時の completed_pairs の差) の上限。fresh で確定し、resume では変えられない。未較正の初期値 |
+| `--max-pair-attempts N` | 3 | 1 pair の失敗 attempt 数の上限。resume で変えてよい |
+| `--snapshot-interval N` | 64 | snapshot を公開する適用数の間隔。resume で変えてよい |
+
+### 15.1 lag の上限と停止
+
+未確定の pair (実行中・結果待ちの保留・再実行待ち) を dispatch_k の昇順に並べ、すべての i で `completed_pairs + i − k_i ≤ L` を保つ。
+これを破る結果の適用は保留し、破る新規 dispatch は出さない。適用時の lag は常に L 以下で、未確定の pair は最大 L+1 個。
+最古の pair はいつでも適用できるので、最古の結果が届けば保留は順に解ける。
+
+予算が残っているのに lag の条件で新規 dispatch できず、空いた worker と保留があり、最古の pair が現在の attempt を出した後に
+L 件以上の結果に追い越されたら、snapshot を残して停止する (`meta.json` の `status` が `stopped`、`stop_reason` に理由)。
+予算の末尾で worker が空くのは正常で止めない。応答しない engine の時間上限は §14 の watchdog と usi/isready の期限による。
+
+### 15.2 失敗した pair の指し直し
+
+engine の異常終了・切断・watchdog・spawn/初期化の失敗は、まず worker 内で `--engine-retries` 回まで pair 全体 (2 局) を指し直す。
+使い切るとその attempt を失敗として記録し、同じ確定値・開始局面・dispatch_k で次の attempt を出す (新しい摂動には置き換えない)。
+第 1 局を終えた後の失敗でも第 1 局だけを使うことはない。1 pair の失敗数が `--max-pair-attempts` に達したら snapshot を残して停止する。
+失敗数は resume でリセットしないので、同じ上限で resume すると指し直さずに止まる。上限を引き上げれば続きを指す。
+
+### 15.3 run-dir と resume
+
+| 生成物 | 内容 |
+|---|---|
+| `journal.jsonl` | 追記専用の記録。`dispatch` (確定値)・`received` (2 局の結果)・`accept` (適用順)・`attempt_failed`・`duplicate` |
+| `snapshots/snapshot-NNNNNN.json` | θ と照合用の状態。`snapshot-000000.json` は開始時の θ と param 定義で、常に残す。ほかは最新 2 世代 |
+| `meta.json` | format v5。seed・L・schedule・param 定義と対局条件の fingerprint・spsa binary の sha256・最新 snapshot・status |
+| `stats.csv` / `values.csv` | journal から作る派生物 (下) |
+| `state.params` | 最新 snapshot の θ (6 桁表示の view)。resume は値を使わない |
+| `final.params` | 完走時の θ |
+
+`--resume` (lock が残っていれば `--force-unlock` も) で再開する。meta の seed を使い、`--seed` は省略するか同じ値にする。
+journal を先頭から再生して θ と CSV を作り直し、最新 snapshot と bit 一致することを確かめてから続ける。
+落ちた時点で実行中だった pair は同じ確定値で指し直す (失敗数は増やさない)。受信済みで適用を待っていた結果は失わない。
+journal の末尾の書きかけの行だけを捨て、途中の行が壊れていれば止まる。
+
+resume で一致を要求するもの (不一致は拒否し、上書きの手段はない。変えたいときは新しい run-dir で始める):
+`--total-pairs` と schedule 系の値、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、
+engine binary の sha256・`--engine-args`・既定値注入後の USI option・値がファイルを指す USI option の内容の sha256、mapping、
+開始局面ファイル、`--random-startpos`、時間・nodes 系の条件、`--nodes-timeout-ms`、`--timeout-margin-ms`、そして spsa 自身の binary。
+engine が option なしで暗黙に読む評価関数 (rshogi の `eval/nn.bin` など) は識別できないので、`EvalFile` を明示する。
+
+保証の範囲: process の crash からはどの時点でも再開できる。電源断は Linux のみ (directory の fsync を std で行えるのが Unix だけのため)。
+fresh 開始や `--force-init` の初期化中は旧 run の成果物を先に消すので保証の対象外。
+batch (meta v4 以前) の run を `--dispatch async` で、async の run を batch で再開することはできない。
+
+### 15.4 stats.csv / values.csv (async)
+
+`stats.csv` は適用 1 回 = 1 行で、適用順に並ぶ。
+
+```
+completed_pairs,pair_id,attempt,dispatch_k,lag,result,
+g1_plus_is_black,g1_outcome,g1_reason,g1_plies,g2_plus_is_black,g2_outcome,g2_reason,g2_plies,
+active_params,avg_abs_shift,updated_params,avg_abs_update,max_abs_update
+```
+
+`result` は 2 局の勝敗和 (−2〜+2)。`g*_outcome` は plus 視点の `plus_win` / `minus_win` / `draw` で、
+result=0 の二引分と一勝一敗を区別できる。`values.csv` は `completed_pairs` 列の後に各 param が並び、0 行目が開始時の θ。
+どちらも resume のたびに journal から作り直す。`spsa_stats_to_plot_csv` は async の stats.csv を 1 行 = 1 pair (2 局) として読む。

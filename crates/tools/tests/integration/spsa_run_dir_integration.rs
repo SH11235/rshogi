@@ -588,17 +588,17 @@ fn v3_silent_migrate_bails_without_csv_rotate_on_schedule_mismatch() {
 }
 
 /// 子の出力はファイルへ流し、親は独立した期限で監視する。
-struct PoolTest {
+pub(super) struct PoolTest {
     dir: tempfile::TempDir,
 }
 
 impl PoolTest {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             dir: tempfile::tempdir().unwrap(),
         }
     }
-    fn path(&self, name: &str) -> std::path::PathBuf {
+    pub(super) fn path(&self, name: &str) -> std::path::PathBuf {
         self.dir.path().join(name)
     }
     fn run(
@@ -606,6 +606,20 @@ impl PoolTest {
         mode: &str,
         total: u32,
         batch: u32,
+        concurrency: usize,
+        extra: &[&str],
+        env: &[(&str, &Path)],
+    ) -> std::process::Output {
+        let batch = batch.to_string();
+        let mut args = vec!["--batch-pairs", &batch];
+        args.extend_from_slice(extra);
+        self.run_with(mode, total, concurrency, &args, env)
+    }
+    /// `--batch-pairs` を付けずに起動する (`--dispatch async` 用)。
+    pub(super) fn run_with(
+        &self,
+        mode: &str,
+        total: u32,
         concurrency: usize,
         extra: &[&str],
         env: &[(&str, &Path)],
@@ -632,8 +646,6 @@ impl PoolTest {
             .args([
                 "--total-pairs",
                 &total.to_string(),
-                "--batch-pairs",
-                &batch.to_string(),
                 "--concurrency",
                 &concurrency.to_string(),
                 "--seed",
@@ -687,10 +699,10 @@ impl PoolTest {
             stderr: std::fs::read(self.path("stderr")).unwrap(),
         }
     }
-    fn bytes(&self, file: &str) -> Vec<u8> {
+    pub(super) fn bytes(&self, file: &str) -> Vec<u8> {
         std::fs::read(self.path("run").join(file)).unwrap()
     }
-    fn meta(&self) -> serde_json::Value {
+    pub(super) fn meta(&self) -> serde_json::Value {
         serde_json::from_slice(&self.bytes("meta.json")).unwrap()
     }
 }
@@ -763,7 +775,7 @@ impl Drop for TestChild {
     }
 }
 
-fn assert_success(output: &std::process::Output) {
+pub(super) fn assert_success(output: &std::process::Output) {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 

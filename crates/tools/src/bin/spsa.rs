@@ -30,6 +30,9 @@ use tools::spsa_param_mapping::{
     parse_param_line, register_unique_parameter, validate_spsa_params_format,
 };
 
+#[path = "spsa/async_dispatch.rs"]
+mod async_dispatch;
+
 /// `meta.json` のフォーマットバージョン。
 ///
 /// v2 → v3: `params_sha256` / `init_from_sha256` / `engine_path` /
@@ -45,6 +48,14 @@ use tools::spsa_param_mapping::{
 /// 互換性: vN は v(N-1) を読まない (hard bail)。古い run dir で resume したい場合は
 /// 新規 run dir で `--init-from <canonical>` から fresh start する。
 const META_FORMAT_VERSION: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DispatchMode {
+    /// batch_pairs 個の pair を同じ摂動で指し、全局の完了後に 1 回更新する。
+    Batch,
+    /// pair ごとに独立な摂動で指し、結果の到着順に更新する。
+    Async,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CpuAffinityMode {
@@ -86,11 +97,28 @@ struct Cli {
     #[arg(long)]
     total_pairs: Option<u32>,
 
-    /// 1 batch あたりの game pair 数。同じ flip ベクトルで `2 × batch_pairs` 局を
+    /// 1 batch あたりの game pair 数 (batch 専用、既定 8)。同じ flip ベクトルで `2 × batch_pairs` 局を
     /// 消化し、batch 末で θ を 1 回更新する (k は `+= batch_pairs`)。
     /// fishtest worker の `iter += game_pairs` と等価。
-    #[arg(long, default_value_t = 8)]
-    batch_pairs: u32,
+    #[arg(long)]
+    batch_pairs: Option<u32>,
+
+    /// θ の更新方式。batch は batch 末に 1 回、async は pair ごとに到着順で更新する。
+    #[arg(long, value_enum, default_value_t = DispatchMode::Batch)]
+    dispatch: DispatchMode,
+
+    /// async 専用: 適用時の lag (適用時と dispatch 時の completed_pairs の差) の上限。
+    /// 既定は 4 × --concurrency (未較正の初期値)。
+    #[arg(long)]
+    max_lag: Option<u32>,
+
+    /// async 専用: 1 pair の失敗 attempt 数の上限 (既定 3)。達したら snapshot を残して停止する。
+    #[arg(long)]
+    max_pair_attempts: Option<u32>,
+
+    /// async 専用: snapshot を公開する適用数の間隔 (既定 64)。
+    #[arg(long)]
+    snapshot_interval: Option<u32>,
 
     /// **deprecated**: `--total-pairs` + `--batch-pairs` を使用してください。
     /// 後方互換のため残置。指定された場合 `total_pairs = games_per_iteration *
@@ -257,8 +285,8 @@ struct Cli {
     early_stop_result_variance_threshold: Option<f64>,
 
     /// 早期停止: 条件連続成立回数（0で無効）
-    #[arg(long, default_value_t = 0)]
-    early_stop_patience: u32,
+    #[arg(long)]
+    early_stop_patience: Option<u32>,
 
     /// エンジン側パラメータ名マッピング TOML（例: tune/yo_rshogi_mapping.toml）。
     /// 指定時、`.params` の rshogi 名 (`SPSA_*`) を、setoption する直前にエンジン側名前空間
@@ -1190,6 +1218,12 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
             completed_pairs: 0,
         });
     }
+    if version_probe.format_version == async_dispatch::ASYNC_META_FORMAT_VERSION {
+        bail!(
+            "{} は --dispatch async の run です。--dispatch async --resume で再開してください",
+            path.display()
+        );
+    }
     bail!(
         "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
          v{} 形式は v{} とは互換性がありません。\n\
@@ -2043,6 +2077,16 @@ fn clamped_value(param: &SpsaParam, raw: f64) -> f64 {
     raw.clamp(param.min, param.max)
 }
 
+/// 摂動しない項目を engine へ送る値。
+fn fixed_engine_value(param: &SpsaParam) -> f64 {
+    let value = clamped_value(param, param.value);
+    if param.is_int {
+        clamped_value(param, value.round())
+    } else {
+        value
+    }
+}
+
 fn resolve_engine_path(cli: &Cli) -> Result<PathBuf> {
     if let Some(path) = &cli.engine_path {
         return Ok(path.clone());
@@ -2158,7 +2202,7 @@ struct BatchPrepCtx<'a> {
 /// (fishtest 流: 1 batch = 1 update 単位)。
 ///
 /// 引数:
-/// - `batch_idx`: batch 番号 (1-origin)。RNG 生成と stats 表示に使う。
+/// - `batch_idx`: batch 番号 (0-origin)。RNG の seed に使う (async では pair_id)。
 /// - `k_pair_start`: schedule 評価時刻 (= 累積 game pair 数, 0-origin)。
 /// - `total_games_start`: startpos cyclic 進行用 (累積消化 game 数, 0-origin)。
 fn compute_batch_prep(
@@ -2249,12 +2293,7 @@ fn compute_batch_prep(
         } else {
             // 固定項目は両側・全 batch で同じ値。既存の active 項目の乱数列を
             // 変えないため、上の抽選回数は維持し、固定値だけを共通化する。
-            let value = clamped_value(p, p.value);
-            let fixed = if p.is_int {
-                clamped_value(p, value.round())
-            } else {
-                value
-            };
+            let fixed = fixed_engine_value(p);
             plus_values.push(fixed);
             minus_values.push(fixed);
         }
@@ -2311,7 +2350,7 @@ fn compute_batch_prep(
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct UpdateStats {
     updated_params: usize,
     avg_abs_update: f64,
@@ -2842,6 +2881,199 @@ impl Drop for WorkerPool<'_> {
     }
 }
 
+/// `--startpos-file` / `--sfen` から開始局面を読み、max_moves 内に収まることを確かめる。
+fn load_run_start_positions(cli: &Cli) -> Result<Vec<ParsedPosition>> {
+    if cli.startpos_file.is_none() {
+        if cli.require_startpos_file {
+            bail!("--require-startpos-file was set but --startpos-file was not provided");
+        }
+        eprintln!(
+            "warning: --startpos-file is not specified. opening diversity may be insufficient"
+        );
+    }
+
+    let (start_positions, _) =
+        load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
+    ensure_start_positions_within_max_moves(&start_positions, cli.max_moves)?;
+    Ok(start_positions)
+}
+
+struct ParamMasks {
+    active: Vec<bool>,
+    application: Vec<bool>,
+    active_count: usize,
+}
+
+/// 摂動・更新の対象 (active) と engine へ送る対象 (application) を決める。
+fn compute_param_masks(
+    params: &[SpsaParam],
+    active_only_regex: Option<&Regex>,
+    translator: &EngineNameTranslator,
+    cli: &Cli,
+) -> Result<ParamMasks> {
+    // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
+    // /regex マッチ性は不変）ため、適用用と摂動・更新用を分けて 1 度だけ計算する。
+    let active_mask: Vec<bool> = params
+        .iter()
+        .map(|p| is_param_active(p, active_only_regex, translator))
+        .collect();
+    let application_mask: Vec<bool> =
+        params.iter().map(|p| is_param_applicable(p, translator)).collect();
+    let active_param_count = active_mask.iter().filter(|&&b| b).count();
+    if active_param_count == 0 {
+        bail!(
+            "no active parameters (active_only_regex={:?}, not_used filtering may have excluded all)",
+            cli.active_only_regex
+        );
+    }
+    eprintln!("active params: {active_param_count}/{}", params.len());
+
+    // 翻訳器有効時、`active_only_regex` でマッチしたが unmapped で除外されたパラメータを
+    // info 出力する。「期待した parameter が摂動されていない」事象に気づきやすくする。
+    if translator.is_enabled() {
+        let mut unmapped_active: Vec<&str> = params
+            .iter()
+            .filter(|p| {
+                !p.not_used
+                    && active_only_regex.is_none_or(|re| re.is_match(&p.name))
+                    && !translator.is_mapped(&p.name)
+            })
+            .map(|p| p.name.as_str())
+            .collect();
+        if !unmapped_active.is_empty() {
+            unmapped_active.sort();
+            eprintln!(
+                "info: {} param(s) matched --active-only-regex but are unmapped (translator skipped):",
+                unmapped_active.len()
+            );
+            for n in &unmapped_active {
+                eprintln!("  - {n}");
+            }
+        }
+    }
+    Ok(ParamMasks {
+        active: active_mask,
+        application: application_mask,
+        active_count: active_param_count,
+    })
+}
+
+fn build_engine_config(cli: &Cli, engine_path: PathBuf) -> EngineConfig {
+    // 公平な対局条件のため、tournament と同様に NetworkDelay=0 と
+    // MinimumThinkingTime をデフォルトで注入する。ユーザーが明示的に
+    // --usi-option で指定した場合はそちらを優先。
+    // - NetworkDelay: 0 以外だと秒境界切り上げで思考時間が短縮され、
+    //   時間切れ・思考時間の偏りの原因になる。
+    // - MinimumThinkingTime: byoyomi 時は byoyomi と一致させることで秒読み全体を使い切れる。
+    //   フィッシャー/ノード数モードでは 0（エンジンの時間管理に委ねる）。
+    let min_think = if cli.nodes.is_none() && cli.btime.is_none() && cli.byoyomi > 0 {
+        cli.byoyomi.to_string()
+    } else {
+        "0".to_string()
+    };
+    let time_defaults: [(&str, &str); 3] = [
+        ("NetworkDelay", "0"),
+        ("NetworkDelay2", "0"),
+        ("MinimumThinkingTime", min_think.as_str()),
+    ];
+    let mut usi_options = cli.usi_options.clone().unwrap_or_default();
+    for (name, default_value) in &time_defaults {
+        let already_set =
+            usi_options.iter().any(|o| o.split_once('=').is_some_and(|(k, _)| k == *name));
+        if !already_set {
+            usi_options.push(format!("{name}={default_value}"));
+        }
+    }
+
+    EngineConfig {
+        path: engine_path,
+        args: cli.engine_args.clone().unwrap_or_default(),
+        threads: cli.threads,
+        hash_mb: cli.hash_mb,
+        network_delay: None,
+        network_delay2: None,
+        minimum_thinking_time: None,
+        slowmover: None,
+        ponder: false,
+        usi_options,
+    }
+}
+
+/// 全 worker で共有する対局設定。cancel flag は panic hook からも立てる。
+fn build_game_setup(cli: &Cli) -> (GameConfig, TimeControl) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let panic_cancel = cancel.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        // unwind 前に通知し、初期化途中のローカル engine の Drop にも先行する。
+        panic_cancel.store(true, Ordering::Release);
+    }));
+    let game_cfg = GameConfig {
+        limit_only_timeout_ms: cli.nodes.map(|_| cli.nodes_timeout_ms),
+        cancel: Some(cancel),
+        resign_rule: None,
+        win_rule: None,
+        draw_rule: None,
+        max_moves: cli.max_moves,
+        timeout_margin_ms: cli.timeout_margin_ms,
+        pass_rights: None,
+        go_depth: None,
+        go_nodes_black: cli.nodes,
+        go_nodes_white: cli.nodes,
+    };
+    let tc = if cli.nodes.is_some() {
+        // ノード数指定時は時間制御不要だが、タイムアウト検出用に十分大きな値を設定
+        TimeControl::new(0, 0, 0, 0, 0)
+    } else if let Some(btime) = cli.btime {
+        TimeControl::new(btime, btime, cli.binc, cli.binc, 0)
+    } else {
+        TimeControl::new(0, 0, 0, 0, cli.byoyomi)
+    };
+    (game_cfg, tc)
+}
+
+/// Fishtest 方式の per-param スケジュール定数。k 軸の上限は total_pairs。
+fn compute_param_schedules(
+    params: &[SpsaParam],
+    schedule: ScheduleConfig,
+) -> Vec<ParamScheduleConstants> {
+    params
+        .iter()
+        .map(|p| {
+            ParamScheduleConstants::compute(
+                p.c_end,
+                p.r_end,
+                schedule.total_iterations,
+                schedule.a_ratio,
+                schedule.alpha,
+                schedule.gamma,
+            )
+        })
+        .collect()
+}
+
+fn plan_cpu_affinities(cli: &Cli, worker_count: usize) -> Result<Option<Vec<Vec<usize>>>> {
+    Ok(if worker_count == 0 {
+        None
+    } else {
+        match cli.cpu_affinity {
+            CpuAffinityMode::Off => None,
+            CpuAffinityMode::Numa => {
+                let sets = discover_numa_cpu_affinities(cli.threads, worker_count)?;
+                eprintln!(
+                    "CPU affinity: {worker_count} worker(s), {} CPU(s)/worker, NUMA-local",
+                    cli.threads
+                );
+                for (index, cpus) in sets.iter().enumerate() {
+                    eprintln!("  worker{}: {cpus:?}", index + 1);
+                }
+                Some(sets)
+            }
+        }
+    })
+}
+
 /// `print_startup_summary` の入力をまとめた構造体。位置引数の取り違えを防ぎ、
 /// 将来項目を増やしても呼び出し側の修正が小さくなる。
 struct StartupContext<'a> {
@@ -2957,6 +3189,20 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     validate_cli_finite(&cli)?;
+    match cli.dispatch {
+        DispatchMode::Batch => {
+            for (flag, given) in [
+                ("--max-lag", cli.max_lag.is_some()),
+                ("--max-pair-attempts", cli.max_pair_attempts.is_some()),
+                ("--snapshot-interval", cli.snapshot_interval.is_some()),
+            ] {
+                if given {
+                    bail!("{flag} は --dispatch async 専用です");
+                }
+            }
+        }
+        DispatchMode::Async => async_dispatch::validate_cli(&cli)?,
+    }
 
     // v3 multi-seed 機能撤去: --seeds / --parallel-seeds は hard error。
     // 移行ガイドへ案内 (crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ)。
@@ -2976,7 +3222,7 @@ fn main() -> Result<()> {
     // --iterations 併用なら自動換算。
     let (total_pairs, batch_pairs) = match (
         cli.total_pairs,
-        cli.batch_pairs,
+        cli.batch_pairs.unwrap_or(8),
         cli.games_per_iteration,
         cli.iterations,
     ) {
@@ -3052,7 +3298,7 @@ fn main() -> Result<()> {
     let early_stop_config = match (
         cli.early_stop_avg_abs_update_threshold,
         cli.early_stop_result_variance_threshold,
-        cli.early_stop_patience,
+        cli.early_stop_patience.unwrap_or(0),
     ) {
         (None, None, 0) => None,
         (Some(avg), Some(var), patience) if patience > 0 => Some(EarlyStopConfig {
@@ -3077,10 +3323,11 @@ fn main() -> Result<()> {
         .transpose()
         .context("invalid --active-only-regex")?;
     let base_seed = cli.seed.unwrap_or_else(|| rand::rng().random::<u64>());
-    eprintln!("using base seed: {base_seed}");
+    if cli.dispatch == DispatchMode::Batch {
+        eprintln!("using base seed: {base_seed}");
+    }
 
     let engine_path = resolve_engine_path(&cli)?;
-    let engine_args = cli.engine_args.clone().unwrap_or_default();
     // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
     std::fs::create_dir_all(&cli.run_dir)
         .with_context(|| format!("failed to create run-dir {}", cli.run_dir.display()))?;
@@ -3090,6 +3337,9 @@ fn main() -> Result<()> {
     // あるので即 bail。lock は process 終了時 (Drop) に自動削除されるが、
     // SIGKILL / 電源断で残留した場合は --force-unlock で消せる。
     let _run_dir_lock = RunDirLock::acquire(&cli.run_dir, cli.force_unlock)?;
+    if cli.dispatch == DispatchMode::Async && cli.resume {
+        async_dispatch::restore_state_view(&cli)?;
+    }
 
     let state_params = state_params_path(&cli.run_dir);
 
@@ -3145,6 +3395,19 @@ fn main() -> Result<()> {
         mobility: cli.mobility,
         total_iterations: total_pairs,
     };
+    if cli.dispatch == DispatchMode::Async {
+        return async_dispatch::run(async_dispatch::AsyncSetup {
+            cli: &cli,
+            action: &effective_action,
+            params,
+            translator: &translator,
+            active_only_regex: active_only_regex.as_ref(),
+            schedule,
+            total_pairs,
+            engine_path,
+            fresh_seed: base_seed,
+        });
+    }
     // v4 resume の戻り値: (start_batch, completed_pairs, total_games, init_snapshot,
     //                       needs_v3_csv_rotate)。
     // - start_batch: 次に実行する batch 番号 (0-origin)。
@@ -3435,58 +3698,12 @@ fn main() -> Result<()> {
         writer.flush()?;
     }
 
-    if cli.startpos_file.is_none() {
-        if cli.require_startpos_file {
-            bail!("--require-startpos-file was set but --startpos-file was not provided");
-        }
-        eprintln!(
-            "warning: --startpos-file is not specified. opening diversity may be insufficient"
-        );
-    }
-
-    let (start_positions, _) =
-        load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
-    ensure_start_positions_within_max_moves(&start_positions, cli.max_moves)?;
-    // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
-    // /regex マッチ性は不変）ため、適用用と摂動・更新用を分けて 1 度だけ計算する。
-    let active_mask: Vec<bool> = params
-        .iter()
-        .map(|p| is_param_active(p, active_only_regex.as_ref(), &translator))
-        .collect();
-    let application_mask: Vec<bool> =
-        params.iter().map(|p| is_param_applicable(p, &translator)).collect();
-    let active_param_count = active_mask.iter().filter(|&&b| b).count();
-    if active_param_count == 0 {
-        bail!(
-            "no active parameters (active_only_regex={:?}, not_used filtering may have excluded all)",
-            cli.active_only_regex
-        );
-    }
-    eprintln!("active params: {active_param_count}/{}", params.len());
-
-    // 翻訳器有効時、`active_only_regex` でマッチしたが unmapped で除外されたパラメータを
-    // info 出力する。「期待した parameter が摂動されていない」事象に気づきやすくする。
-    if translator.is_enabled() {
-        let mut unmapped_active: Vec<&str> = params
-            .iter()
-            .filter(|p| {
-                !p.not_used
-                    && active_only_regex.as_ref().is_none_or(|re| re.is_match(&p.name))
-                    && !translator.is_mapped(&p.name)
-            })
-            .map(|p| p.name.as_str())
-            .collect();
-        if !unmapped_active.is_empty() {
-            unmapped_active.sort();
-            eprintln!(
-                "info: {} param(s) matched --active-only-regex but are unmapped (translator skipped):",
-                unmapped_active.len()
-            );
-            for n in &unmapped_active {
-                eprintln!("  - {n}");
-            }
-        }
-    }
+    let start_positions = load_run_start_positions(&cli)?;
+    let ParamMasks {
+        active: active_mask,
+        application: application_mask,
+        active_count: active_param_count,
+    } = compute_param_masks(&params, active_only_regex.as_ref(), &translator, &cli)?;
 
     print_startup_summary(&StartupContext {
         snapshot: &init_snapshot,
@@ -3504,92 +3721,15 @@ fn main() -> Result<()> {
         meta_path: &meta_path,
     });
 
-    // 公平な対局条件のため、tournament と同様に NetworkDelay=0 と
-    // MinimumThinkingTime をデフォルトで注入する。ユーザーが明示的に
-    // --usi-option で指定した場合はそちらを優先。
-    // - NetworkDelay: 0 以外だと秒境界切り上げで思考時間が短縮され、
-    //   時間切れ・思考時間の偏りの原因になる。
-    // - MinimumThinkingTime: byoyomi 時は byoyomi と一致させることで秒読み全体を使い切れる。
-    //   フィッシャー/ノード数モードでは 0（エンジンの時間管理に委ねる）。
-    let min_think = if cli.nodes.is_none() && cli.btime.is_none() && cli.byoyomi > 0 {
-        cli.byoyomi.to_string()
-    } else {
-        "0".to_string()
-    };
-    let time_defaults: [(&str, &str); 3] = [
-        ("NetworkDelay", "0"),
-        ("NetworkDelay2", "0"),
-        ("MinimumThinkingTime", min_think.as_str()),
-    ];
-    let mut usi_options = cli.usi_options.clone().unwrap_or_default();
-    for (name, default_value) in &time_defaults {
-        let already_set =
-            usi_options.iter().any(|o| o.split_once('=').is_some_and(|(k, _)| k == *name));
-        if !already_set {
-            usi_options.push(format!("{name}={default_value}"));
-        }
-    }
+    let base_cfg = build_engine_config(&cli, engine_path);
+    let (game_cfg, tc) = build_game_setup(&cli);
 
-    let base_cfg = EngineConfig {
-        path: engine_path,
-        args: engine_args,
-        threads: cli.threads,
-        hash_mb: cli.hash_mb,
-        network_delay: None,
-        network_delay2: None,
-        minimum_thinking_time: None,
-        slowmover: None,
-        ponder: false,
-        usi_options,
-    };
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    let panic_cancel = cancel.clone();
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_hook(info);
-        // unwind 前に通知し、初期化途中のローカル engine の Drop にも先行する。
-        panic_cancel.store(true, Ordering::Release);
-    }));
-    let game_cfg = GameConfig {
-        limit_only_timeout_ms: cli.nodes.map(|_| cli.nodes_timeout_ms),
-        cancel: Some(cancel),
-        resign_rule: None,
-        win_rule: None,
-        draw_rule: None,
-        max_moves: cli.max_moves,
-        timeout_margin_ms: cli.timeout_margin_ms,
-        pass_rights: None,
-        go_depth: None,
-        go_nodes_black: cli.nodes,
-        go_nodes_white: cli.nodes,
-    };
-    let tc = if cli.nodes.is_some() {
-        // ノード数指定時は時間制御不要だが、タイムアウト検出用に十分大きな値を設定
-        TimeControl::new(0, 0, 0, 0, 0)
-    } else if let Some(btime) = cli.btime {
-        TimeControl::new(btime, btime, cli.binc, cli.binc, 0)
-    } else {
-        TimeControl::new(0, 0, 0, 0, cli.byoyomi)
-    };
     let mut early_stop_consecutive = 0u32;
 
     // Fishtest 方式: per-param スケジュール定数を初期化。
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する。
     let big_a = schedule.a_ratio * total_pairs as f64;
-    let param_schedules: Vec<ParamScheduleConstants> = params
-        .iter()
-        .map(|p| {
-            ParamScheduleConstants::compute(
-                p.c_end,
-                p.r_end,
-                total_pairs,
-                schedule.a_ratio,
-                schedule.alpha,
-                schedule.gamma,
-            )
-        })
-        .collect();
+    let param_schedules = compute_param_schedules(&params, schedule);
     validate_schedule_bounds(schedule, &params, &active_mask, &param_schedules, batch_pairs)?;
 
     if is_fresh_start {
@@ -3621,24 +3761,7 @@ fn main() -> Result<()> {
 
     let remaining_pairs = total_pairs - completed_pairs;
     let worker_count = cli.concurrency.min(2 * batch_pairs.min(remaining_pairs) as usize);
-    let cpu_affinities = if worker_count == 0 {
-        None
-    } else {
-        match cli.cpu_affinity {
-            CpuAffinityMode::Off => None,
-            CpuAffinityMode::Numa => {
-                let sets = discover_numa_cpu_affinities(cli.threads, worker_count)?;
-                eprintln!(
-                    "CPU affinity: {worker_count} worker(s), {} CPU(s)/worker, NUMA-local",
-                    cli.threads
-                );
-                for (index, cpus) in sets.iter().enumerate() {
-                    eprintln!("  worker{}: {cpus:?}", index + 1);
-                }
-                Some(sets)
-            }
-        }
-    };
+    let cpu_affinities = plan_cpu_affinities(&cli, worker_count)?;
 
     let worker_params = params.clone();
     std::thread::scope(|scope| -> Result<()> {
