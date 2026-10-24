@@ -20,7 +20,7 @@ pub struct PrivateMatch {
     pub clock: ClockSpec,
     /// 招待時に確定した開始局面。未指定は平手。
     pub initial_sfen: Option<String>,
-    /// 新規参加を受理する最終時刻（UNIX epoch ms）。
+    /// 未成立の招待を受理する最終時刻（UNIX epoch ms）。
     pub expires_at_ms: u64,
 }
 

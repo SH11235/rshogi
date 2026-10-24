@@ -88,6 +88,41 @@ describe('private match dispatch', () => {
     expect(await black.recvUntil(line => line === '#WIN')).toContain('#RESIGN');
   });
 
+  test('GameRoomの両LOGINがD1登録で並行しても両slotを保持し対局を完走する', async () => {
+    await mf.dispose(); await cleanup();
+    const persist = await makeTempPersistRoot(); cleanup = persist.cleanup;
+    mf = await createMiniflare({ persistRoot: persist.path, privateChallengeEnabled: true,
+      playerIdSecret: JSON.stringify({ active_version: 'v2', keys: {
+        v1: '0123456789abcdef0123456789abcdef', v2: 'abcdef0123456789abcdef0123456789',
+      } }),
+      scriptPath: resolve(import.meta.dirname, 'lobby-pending-worker.mjs') });
+    const { issuer, token } = await issue();
+    const opponent = await connectLobby();
+    await loginLobby(issuer, 'alice', token); await loginLobby(opponent, 'bob', token);
+    expect(await issuer.lines.takeLine()).toBe(`MATCHED ${roomId(token)} black`);
+    expect(await opponent.lines.takeLine()).toBe(`MATCHED ${roomId(token)} white`);
+    const black = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
+    const white = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
+    await control('GAME_ROOM', roomId(token), { aliasBatchBarrier: true });
+    black.send(`LOGIN alice+private-${token}+black pw`);
+    white.send(`LOGIN bob+private-${token}+white pw`);
+    const replies = await Promise.all([black.recvLine(), white.recvLine()]);
+    expect(replies).toEqual([`LOGIN:alice+private-${token}+black OK`, `LOGIN:bob+private-${token}+white OK`]);
+    expect((await control('GAME_ROOM', roomId(token), {})).aliasBatchArrivals).toBe(2);
+    const summaries = await Promise.all([black.drainGameSummary(), white.drainGameSummary()]);
+    for (const summary of summaries) {
+      expect(summary).toContain('Name+:alice');
+      expect(summary).toContain('Name-:bob');
+    }
+    black.send('AGREE'); white.send('AGREE');
+    const starts = await Promise.all([black.recvLine(), white.recvLine()]);
+    expect(starts[0]).toMatch(/^START:/);
+    expect(starts[1]).toBe(starts[0]);
+    black.send('%TORYO');
+    expect(await black.recvUntil(line => line === '#LOSE')).toContain('#RESIGN');
+    expect(await white.recvUntil(line => line === '#WIN')).toContain('#RESIGN');
+  });
+
   test('私的対局は招待期限後のcold startでも元のLOGIN名で再接続して継続できる', async () => {
     await mf.dispose(); await cleanup();
     const persist = await makeTempPersistRoot(); cleanup = persist.cleanup;

@@ -515,13 +515,11 @@ impl Lobby {
     /// `is_private_login_handle` で `true` を返した場合は私的経路に分岐し、
     /// CHALLENGE_LOBBY 行は専用パス (`handle_challenge_lobby`) に分岐させる。
     ///
-    /// **私的対局 feature gate (https://github.com/SH11235/rshogi/issues/635)**:
+    /// **私的対局 feature gate**:
     /// `PRIVATE_CHALLENGE_ENABLED` が無効 (production の既定) のとき、私的対局
     /// 2 経路 (`CHALLENGE_LOBBY ` / `LOGIN_LOBBY <handle>+private-...+free`) は
     /// `parse_*` / registry load 等の副作用に入る前に `:incorrect unsupported`
-    /// を返して終了する。両者揃った後の対局起動経路 (consume → GameRoom DO 起動)
-    /// が未実装の状態で client が誤って使うと pending state でハマるため、production
-    /// 到達不能化を最入口で行う。
+    /// を返して終了する。
     async fn dispatch_pending_line(
         &self,
         ws: &WebSocket,

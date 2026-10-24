@@ -9,11 +9,14 @@ import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } f
  * にあるが、router → evaluate → 403 / 101 の繋ぎ込みが回帰しないように
  * Miniflare 経由で 101 / 403 ステータスを直接確認する。
  */
-function closeAcceptedSocket(ws: WebSocket | null | undefined): void {
-  // Miniflare は `accept()` を呼ばずに `close()` すると例外を投げる。Origin
-  // 許可ケースで Upgrade を確認した後の cleanup を 1 行に揃えるためのヘルパ。
-  ws?.accept();
-  ws?.close();
+async function closeAcceptedSocket(ws: WebSocket | null | undefined): Promise<void> {
+  if (!ws) return;
+  ws.accept();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("WebSocket close acknowledgement timed out")), 5000);
+    ws.addEventListener("close", () => { clearTimeout(timer); resolve(); }, { once: true });
+    ws.close();
+  });
 }
 
 describe.each(["https://example.com", ""])("Origin allowlist %j", (allowlist) => {
@@ -36,7 +39,7 @@ describe.each(["https://example.com", ""])("Origin allowlist %j", (allowlist) =>
       const allowed = origin === undefined || origin === allowlist;
       expect(res.status).toBe(allowed ? 101 : 403);
       if (allowed) {
-        expect(res.webSocket).toBeTruthy(); closeAcceptedSocket(res.webSocket);
+        expect(res.webSocket).toBeTruthy(); await closeAcceptedSocket(res.webSocket);
       } else { expect(await res.text()).toContain("Forbidden Origin"); }
     }
   });

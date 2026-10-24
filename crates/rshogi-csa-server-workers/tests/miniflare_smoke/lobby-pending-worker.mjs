@@ -152,12 +152,44 @@ export class RateLimiter {
 }
 
 export class GameRoom {
-  constructor(state, env) { this.state = state; this.env = env; this.inner = new RustGameRoom(state, env); this.failPrepare = false; }
+  constructor(state, env) {
+    this.state = state;
+    this.aliasBatchArrivals = 0;
+    const database = new Proxy(env.GAMES_SEARCH_DB, {
+      get: (target, key) => {
+        if (key === 'batch') return async statements => {
+          const barrier = this.aliasBatchBarrier;
+          if (barrier) {
+            this.aliasBatchArrivals++;
+            if (this.aliasBatchArrivals === 2) { this.aliasBatchBarrier = undefined; barrier.release(); }
+            let timer;
+            try {
+              await Promise.race([barrier.promise, new Promise((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error('alias batch barrier timed out')), 4000);
+              })]);
+            } finally { clearTimeout(timer); }
+          }
+          return target.batch(statements);
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' && key !== 'constructor' ? value.bind(target) : value;
+      },
+    });
+    this.env = { ...env, GAMES_SEARCH_DB: database };
+    this.inner = new RustGameRoom(state, this.env);
+    this.failPrepare = false;
+  }
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/__test') {
       const command = await request.json();
       if (command.reset) this.inner = new RustGameRoom(this.state, this.env);
+      if (command.aliasBatchBarrier) {
+        this.aliasBatchArrivals = 0;
+        let release;
+        const promise = new Promise(resolve => { release = resolve; });
+        this.aliasBatchBarrier = { promise, release };
+      }
       if (command.failPrepare) this.failPrepare = true;
       if (command.failActivate) this.failActivate = true;
       if (command.expirePrivateJoin) await this.state.storage.put('private_join_deadline_ms', Date.now() - 1);
@@ -166,7 +198,7 @@ export class GameRoom {
         plan.expires_at_ms = Date.now() - 1;
         await this.state.storage.put('private_match', plan);
       }
-      return Response.json({ config: await this.state.storage.get('config'), private: await this.state.storage.get('private_match'), cancelled: await this.state.storage.get('private_cancelled') });
+      return Response.json({ aliasBatchArrivals: this.aliasBatchArrivals, config: await this.state.storage.get('config'), private: await this.state.storage.get('private_match'), cancelled: await this.state.storage.get('private_cancelled') });
     }
     if (path === '/private-match/activate' && this.failActivate) { this.failActivate = false; return new Response('injected activate failure', { status: 503 }); }
     if (path === '/private-match' && this.failPrepare) { this.failPrepare = false; return new Response('injected prepare failure', { status: 503 }); }

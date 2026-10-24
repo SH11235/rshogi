@@ -796,17 +796,17 @@ impl GameRoom {
             let _ = ws.close(Some(1003), Some("private match rejected".to_owned()));
             return Ok(());
         }
-        // トークンを棋譜・公開索引へ残さず、参加照合後は非機密の対局名だけを保存する。
-        let game_name = private.as_ref().map_or(game_name, |plan| plan.game_name.clone());
-
         // 再接続要求の経路分岐。LOGIN 行 3 つ目トークンが
         // `reconnect:<game_id>+<token>` の場合は新規対局参加 (slot 確保 + マッチ
         // 成立) ではなく、grace 中の該当対局へ「同一対局者として再参加」する経路へ。
         // 失敗時は LOGIN OK を送らずに `LOGIN:incorrect reconnect_rejected` で
         // 拒否する (拒否は元の対局者による再試行を妨げない)。
         if let Some(req) = reconnect {
-            return self.handle_reconnect_request(ws, &handle, name.as_str(), role, req).await;
+            return self.handle_reconnect_request(ws, &handle, &game_name, role, req).await;
         }
+
+        // トークンを棋譜・公開索引へ残さず、参加照合後は非機密の対局名だけを保存する。
+        let game_name = private.as_ref().map_or(game_name, |plan| plan.game_name.clone());
 
         // 新スロットを**仮に**加えて衝突判定する。`evaluate_match` が Conflict を返す
         // 場合は永続化も attachment 差し替えも行わず、部屋を破壊しないよう拒否する
@@ -860,6 +860,19 @@ impl GameRoom {
                 component: "game_room",
                 err: format!("{error:?}"),
             );
+        }
+
+        // D1 待機中には別の LOGIN が進むため、保存直前に最新の slots で再検証する。
+        let mut next_slots = self.load_slots().await?;
+        next_slots.push(Slot {
+            role,
+            handle: handle.clone(),
+            player_id: identity.player_id.clone(),
+            game_name: game_name.clone(),
+        });
+        if let MatchResult::Conflict { .. } = evaluate_match(&next_slots) {
+            send_line(ws, &LoginReply::Incorrect.to_line())?;
+            return Ok(());
         }
 
         // 検証を通ったので slots を書き戻し、attachment を Player に差し替える。
@@ -3971,7 +3984,7 @@ impl GameRoom {
         &self,
         ws: &WebSocket,
         handle: &str,
-        login_name: &str,
+        login_game_name: &str,
         role: Role,
         req: ReconnectRequest,
     ) -> Result<()> {
@@ -4091,7 +4104,7 @@ impl GameRoom {
         send_line(
             ws,
             &LoginReply::Ok {
-                name: login_name.to_owned(),
+                name: format!("{handle}+{login_game_name}+{}", color_to_str(role.to_core())),
             }
             .to_line(),
         )?;
