@@ -10,13 +10,14 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use super::search::{Budget, MAX_DEPTH, Scratch, Searcher};
-use super::state::MateState;
+use super::state::{MateState, NoAttackerKing};
 use super::table::{MateTable, TableKey};
+use super::verify::{is_valid_mate_pv_by_rules, legal_moves_by_rules};
 use super::*;
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::{Color, Hand};
+use crate::types::{Color, Hand, PieceType};
 
 fn position(sfen: &str) -> Position {
     let mut pos = Position::new();
@@ -408,19 +409,6 @@ fn stop_flag_set_before_solve_gives_unknown_even_for_trivial_positions() {
 }
 
 #[test]
-fn positions_without_a_king_are_unsupported() {
-    // 攻め方の玉が無い詰将棋の局面。玉の位置が既定値のままなので王手の判定が狂う
-    for sfen in [
-        "4k4/8g/4P4/9/9/9/9/9/9 b G 1",
-        "4k4/9/9/9/9/9/9/9/9 b R 1",
-        "9/9/9/9/9/9/9/9/4K4 b R 1",
-    ] {
-        let mut pos = position(sfen);
-        assert_eq!(solve_limited(&mut pos, 1, 1_000), MateResult::Unsupported, "{sfen}");
-    }
-}
-
-#[test]
 fn position_with_side_not_to_move_in_check_is_unsupported() {
     // 手番の先手の飛車が後手玉に利いている (後手が王手を放置した不正な局面)
     for sfen in [
@@ -691,14 +679,18 @@ fn mate_move_generation_matches_legal_moves() {
 // 乱択局面での総当たりとの突き合わせ
 // ---------------------------------------------------------------------------
 
+/// 乱択局面に置く駒と攻め方の持駒
+const RANDOM_PIECES: [&str; 14] = [
+    "P", "L", "N", "S", "G", "B", "R", "+P", "+L", "+N", "+S", "+B", "+R", "G",
+];
+const RANDOM_HANDS: [&str; 12] = [
+    "-", "G", "S", "P", "N", "L", "B", "R", "GS", "PL", "GG", "SN",
+];
+
 /// 玉の周りに数枚の駒を置いた詰将棋風の乱択局面 (攻め方 = 先手)
 fn random_tsume_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
-    const PIECES: [&str; 14] = [
-        "P", "L", "N", "S", "G", "B", "R", "+P", "+L", "+N", "+S", "+B", "+R", "G",
-    ];
-    const HANDS: [&str; 12] = [
-        "-", "G", "S", "P", "N", "L", "B", "R", "GS", "PL", "GG", "SN",
-    ];
+    const PIECES: [&str; 14] = RANDOM_PIECES;
+    const HANDS: [&str; 12] = RANDOM_HANDS;
     let mut board = vec![vec![String::new(); 9]; 9];
     let kf = rng.random_range(0..9usize);
     let kr = rng.random_range(0..3usize);
@@ -718,6 +710,20 @@ fn random_tsume_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
             pc.to_string()
         };
     }
+    let hand = HANDS[rng.random_range(0..HANDS.len())];
+    let sfen = format!("{} b {hand} 1", board_sfen(&board));
+    let mut pos = Position::new();
+    pos.set_sfen(&sfen).ok()?;
+    // 手番でない側 (後手) が王手されている局面・行き所のない駒・二歩は除く
+    let white_king = pos.king_square(Color::White);
+    if !pos.attackers_to_c(white_king, Color::Black).is_empty() || has_illegal_pieces(&pos) {
+        return None;
+    }
+    Some(pos)
+}
+
+/// 盤 (段ごと、9 筋から 1 筋の順。空升は空文字列) を SFEN の盤面の部分にする
+fn board_sfen(board: &[Vec<String>]) -> String {
     let rows: Vec<String> = board
         .iter()
         .map(|row| {
@@ -740,21 +746,11 @@ fn random_tsume_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
             out
         })
         .collect();
-    let hand = HANDS[rng.random_range(0..HANDS.len())];
-    let sfen = format!("{} b {hand} 1", rows.join("/"));
-    let mut pos = Position::new();
-    pos.set_sfen(&sfen).ok()?;
-    // 手番でない側 (後手) が王手されている局面・行き所のない駒・二歩は除く
-    let white_king = pos.king_square(Color::White);
-    if !pos.attackers_to_c(white_king, Color::Black).is_empty() || has_illegal_pieces(&pos) {
-        return None;
-    }
-    Some(pos)
+    rows.join("/")
 }
 
 /// 行き所のない駒・二歩がある (乱択で置いた駒の検査)
 fn has_illegal_pieces(pos: &Position) -> bool {
-    use crate::types::PieceType;
     for color in [Color::Black, Color::White] {
         let mut pawn_files = [false; 9];
         for (pt, dead_ranks) in [
@@ -1059,6 +1055,365 @@ fn superiority_reuse_does_not_change_the_answer() {
             (MateResult::Mate(_), MateResult::NoMate) | (MateResult::NoMate, MateResult::Mate(_))
         );
         assert!(!contradiction, "{sfen}: 流用あり {with:?} / 流用なし {without:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 攻め方の玉が無い局面
+// ---------------------------------------------------------------------------
+
+/// 局面集の問題から攻め方の玉 (受け方の玉から離れていた) を除いた局面と、玉があるときの最短の詰み手数
+const KINGLESS_TSUME: [(&str, usize); 5] = [
+    ("4k4/9/4P4/9/9/9/9/9/9 b G 1", 1),
+    ("l7l/5S2k/p2p1GGp1/1+bp1p3p/1N5S1/PPP5P/3S1G3/1G7/L6NL b RSN3Prbn5p 103", 3),
+    (
+        "8l/4+P4/2p1G2sp/3p3p1/1p2p4/1P1P4P/1+pPSP2+b1/4SK3/1N3L1rL w BGSNr2g2nl5p 134",
+        5,
+    ),
+    ("9/2s6/2nl1s1g1/2plpPpp1/1p7/+r1P1PbP2/1LNS5/4G4/1G1K2+l2 w BS2Prg2n7p 140", 7),
+    ("l6kl/2G1R4/6pg1/p2p1BN2/1l1s4b/P1P2PP2/GP1G4+s/4s4/LN7 b S8Pr2n2p 145", 9),
+];
+
+/// `set_sfen` は玉の無い側の既定の升への利きを王手として記録するので、手番側の玉が無ければ消す
+/// ([`legal_moves_by_rules`] の前提)
+fn clear_kingless_checkers(pos: &mut Position) {
+    if pos.pieces(pos.side_to_move(), PieceType::King).is_empty() {
+        pos.state_mut().checkers = crate::bitboard::Bitboard::EMPTY;
+    }
+}
+
+/// [`legal_moves_by_rules`] のうち王手
+fn checks_by_rules(pos: &mut Position) -> Vec<Move> {
+    legal_moves_by_rules(pos)
+        .into_iter()
+        .filter(|&mv| {
+            pos.do_move_with_missing_kings(mv);
+            let check = pos.in_check();
+            pos.undo_move(mv);
+            check
+        })
+        .collect()
+}
+
+/// `brute_mate` を、指し手生成を使わない合法手 ([`legal_moves_by_rules`]) で行う
+fn brute_mate_by_rules(pos: &mut Position, plies: u32) -> bool {
+    if plies == 0 {
+        return false;
+    }
+    for mv in checks_by_rules(pos) {
+        pos.do_move_with_missing_kings(mv);
+        let mated = brute_defense_by_rules(pos, plies - 1);
+        pos.undo_move(mv);
+        if mated {
+            return true;
+        }
+    }
+    false
+}
+
+fn brute_defense_by_rules(pos: &mut Position, plies: u32) -> bool {
+    let replies = legal_moves_by_rules(pos);
+    if replies.is_empty() {
+        return true;
+    }
+    if plies == 0 {
+        return false;
+    }
+    replies.into_iter().all(|mv| {
+        pos.do_move_with_missing_kings(mv);
+        let mated = brute_mate_by_rules(pos, plies - 1);
+        pos.undo_move(mv);
+        mated
+    })
+}
+
+/// 攻め方の玉が無い乱択局面。半分は駒の色と手番を入れ替えて (盤は回さない) 後手を攻め方にし、
+/// 半分は 1一 (玉の無い側の既定の升) に駒を置く。どちらも、既定の升を攻め方の玉とみなす判定が
+/// 結果に混ざる局面を増やすため。
+fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
+    const AT_11: [&str; 8] = ["G", "S", "+R", "+B", "L", "g", "s", "r"];
+    let mut board = vec![vec![String::new(); 9]; 9];
+    let kf = rng.random_range(0..9usize);
+    let kr = rng.random_range(0..3usize);
+    board[kr][kf] = "k".to_string();
+    for _ in 0..rng.random_range(1..=5) {
+        let f = (kf as i32 + rng.random_range(-2..=2)).clamp(0, 8) as usize;
+        let r = (kr as i32 + rng.random_range(0..=3)).clamp(0, 8) as usize;
+        if !board[r][f].is_empty() {
+            continue;
+        }
+        let pc = RANDOM_PIECES[rng.random_range(0..RANDOM_PIECES.len())];
+        board[r][f] = if rng.random_range(0..4) == 0 {
+            pc.to_lowercase()
+        } else {
+            pc.to_string()
+        };
+    }
+    if rng.random_range(0..2) == 0 && board[0][8].is_empty() {
+        board[0][8] = AT_11[rng.random_range(0..AT_11.len())].to_string();
+    }
+    let mut hand = RANDOM_HANDS[rng.random_range(0..RANDOM_HANDS.len())].to_string();
+    let mut side = "b";
+    if rng.random_range(0..2) == 0 {
+        let swap = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c.to_ascii_uppercase()
+                    }
+                })
+                .collect()
+        };
+        for cell in board.iter_mut().flatten() {
+            *cell = swap(cell);
+        }
+        if hand != "-" {
+            hand = swap(&hand);
+        }
+        side = "w";
+    }
+    let sfen = format!("{} {side} {hand} 1", board_sfen(&board));
+    let mut pos = Position::new();
+    pos.set_sfen(&sfen).ok()?;
+    let us = pos.side_to_move();
+    if !pos.attackers_to_c(pos.king_square(!us), us).is_empty() || has_illegal_pieces(&pos) {
+        return None;
+    }
+    clear_kingless_checkers(&mut pos);
+    Some(pos)
+}
+
+/// `pos` から先手玉を除いた局面
+fn without_black_king(pos: &Position) -> Position {
+    let sfen = pos.to_sfen();
+    let (board, rest) = sfen.split_once(' ').unwrap();
+    let mut rows = Vec::new();
+    for row in board.split('/') {
+        let mut cells = Vec::new();
+        let mut promoted = false;
+        for c in row.chars() {
+            if let Some(n) = c.to_digit(10) {
+                cells.extend(std::iter::repeat_n(String::new(), n as usize));
+            } else if c == '+' {
+                promoted = true;
+            } else {
+                let cell = if c == 'K' {
+                    String::new()
+                } else if promoted {
+                    format!("+{c}")
+                } else {
+                    c.to_string()
+                };
+                cells.push(cell);
+                promoted = false;
+            }
+        }
+        rows.push(cells);
+    }
+    let mut pos = position(&format!("{} {rest}", board_sfen(&rows)));
+    clear_kingless_checkers(&mut pos);
+    pos
+}
+
+#[test]
+fn positions_without_the_defender_king_are_unsupported() {
+    for sfen in [
+        "9/9/9/9/9/9/9/9/4K4 b R 1",
+        "9/9/9/9/9/9/9/9/9 b R 1",
+        "4k4/9/9/9/9/9/9/9/9 w r 1",
+    ] {
+        let mut pos = position(sfen);
+        assert_eq!(solve_limited(&mut pos, 1, 1_000), MateResult::Unsupported, "{sfen}");
+    }
+}
+
+/// 指し手生成を使わない合法手は、両方の玉がある局面で合法手生成と一致する
+#[test]
+fn rules_oracle_matches_legal_moves_with_both_kings() {
+    use crate::position::playout_test_support::RandomPlayout;
+    let sorted = |moves: Vec<Move>| {
+        let mut raw: Vec<u32> = moves.iter().map(|m| m.raw32()).collect();
+        raw.sort_unstable();
+        raw
+    };
+    let mut checked = 0;
+    for index in 0..40 {
+        let mut playout = RandomPlayout::new(0x0AC1E, index);
+        for _ in 0..120 {
+            if playout.step().is_none() {
+                break;
+            }
+            let mut pos = playout.pos.clone();
+            let legal = legal_moves(&pos);
+            assert_eq!(
+                sorted(legal_moves_by_rules(&mut pos)),
+                sorted(legal),
+                "{}",
+                playout.describe()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 2_000);
+}
+
+/// 攻め方の玉が無い局面の手生成が、指し手生成を使わない合法手と集合として一致する
+#[test]
+fn kingless_move_generation_matches_the_rules() {
+    let sorted = |moves: Vec<Move>| {
+        let mut raw: Vec<u32> = moves.iter().map(|m| m.raw32()).collect();
+        raw.sort_unstable();
+        raw
+    };
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0C0_4A1E);
+    let (mut tested, mut replies) = (0, 0);
+    while tested < 1_500 {
+        let Some(mut pos) = random_kingless_position(&mut rng) else {
+            continue;
+        };
+        let mut st = NoAttackerKing::new(pos.clone());
+        let mut attack = Vec::new();
+        st.generate(true, &mut attack);
+        let checks = checks_by_rules(&mut pos);
+        assert_eq!(sorted(attack), sorted(checks.clone()), "王手: {}", pos.to_sfen());
+        for mv in checks {
+            st.do_move(mv);
+            pos.do_move_with_missing_kings(mv);
+            let mut defense = Vec::new();
+            st.generate(false, &mut defense);
+            let legal = legal_moves_by_rules(&mut pos);
+            assert_eq!(sorted(defense), sorted(legal), "応手: {} {}", pos.to_sfen(), mv.to_usi());
+            st.undo_move(mv);
+            pos.undo_move(mv);
+            replies += 1;
+        }
+        tested += 1;
+    }
+    assert!(replies > 1_000, "王手が少なすぎる: {replies}");
+}
+
+/// 受け方の歩合いは、既定の升 (1一) を攻め方の玉とみなすと打ち歩詰めに見えるが、合法
+#[test]
+fn kingless_pawn_interposition_is_not_a_pawn_drop_mate() {
+    // 後手が攻め方 (玉なし)。▽1一香に対する応手は ▲1二歩だけ
+    let sfen = "9/6GP1/7LK/7GL/9/9/9/9/9 w Pl 1";
+    let mut pos = position(sfen);
+    let mut st = NoAttackerKing::new(pos.clone());
+    let lance = pos.to_move(Move::from_usi("L*1a").unwrap()).unwrap();
+    st.do_move(lance);
+    let mut defense = Vec::new();
+    st.generate(false, &mut defense);
+    assert_eq!(pv_usi(&defense), "P*1b");
+    for mode in MateMode::ALL {
+        assert_eq!(solve_in_mode(&mut pos, 1, 100_000, mode), MateResult::NoMate, "{mode:?}");
+    }
+}
+
+#[test]
+fn solves_kingless_tsume() {
+    for (sfen, shortest) in KINGLESS_TSUME {
+        let mut pos = position(sfen);
+        let before = (pos.to_sfen(), pos.checkers());
+        for mode in MateMode::ALL {
+            let pv = match solve_in_mode(&mut pos, 16, 5_000_000, mode) {
+                MateResult::Mate(pv) => pv,
+                other => panic!("{sfen} {mode:?}: {other:?}"),
+            };
+            assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert!(pv.len() >= shortest, "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert_eq!((pos.to_sfen(), pos.checkers()), before, "局面が元に戻っていない");
+        }
+    }
+}
+
+#[test]
+fn kingless_search_agrees_with_brute_force_on_random_positions() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0B2A_7E00);
+    let (mut tested, mut mates, mut unknowns) = (0, 0, 0);
+    while tested < 300 {
+        let Some(mut pos) = random_kingless_position(&mut rng) else {
+            continue;
+        };
+        let sfen = pos.to_sfen();
+        let brute = brute_mate_by_rules(&mut pos, 3);
+        match solve_limited(&mut pos, 1, 2_000_000) {
+            MateResult::Mate(pv) => {
+                assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
+            }
+            MateResult::NoMate => assert!(!brute, "{sfen}: 3 手以内に詰むのに NoMate"),
+            other => {
+                assert!(!brute, "{sfen}: 3 手以内に詰むのに {other:?}");
+                unknowns += 1;
+            }
+        }
+        tested += 1;
+        mates += usize::from(brute);
+    }
+    assert!(mates >= 20, "詰みの局面が少なすぎる: {mates}");
+    assert!(unknowns * 20 <= tested, "判定できない局面が多すぎる: {unknowns}/{tested}");
+}
+
+#[test]
+fn kingless_parallel_search_agrees_with_brute_force() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0B2A_7E01);
+    let mut tested = 0;
+    while tested < 60 {
+        let Some(mut pos) = random_kingless_position(&mut rng) else {
+            continue;
+        };
+        let sfen = pos.to_sfen();
+        let brute = brute_mate_by_rules(&mut pos, 3);
+        for mode in MateMode::ALL {
+            match solve_in_threads(&mut pos, 2_000_000, mode, 4) {
+                MateResult::Mate(pv) => {
+                    assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
+                }
+                other => assert!(!brute, "{sfen} {mode:?}: 3 手以内に詰むのに {other:?}"),
+            }
+        }
+        tested += 1;
+    }
+}
+
+/// 遠くの攻め方の玉を除いても総当たりの結果が変わらない局面では、探索の結果も変わらない
+#[test]
+fn removing_a_distant_attacker_king_keeps_the_answer() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xD1FF_0000);
+    let (mut tested, mut differ) = (0, 0);
+    while tested < 200 {
+        let Some(mut with_king) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let mut without = without_black_king(&with_king);
+        let sfen = with_king.to_sfen();
+        tested += 1;
+        if brute_mate_by_rules(&mut with_king, 3) != brute_mate_by_rules(&mut without, 3) {
+            differ += 1;
+            continue;
+        }
+        let a = solve_limited(&mut with_king, 1, 1_000_000);
+        let b = solve_limited(&mut without, 1, 1_000_000);
+        assert!(!is_contradiction(&a, &b), "{sfen}: 玉あり {a:?} / 玉なし {b:?}");
+    }
+    assert!(differ * 10 <= tested, "玉の有無で結果が変わる局面が多すぎる: {differ}/{tested}");
+}
+
+#[test]
+fn rules_validator_rejects_bad_sequences() {
+    let pos = position("4k4/9/4P4/9/9/9/9/9/9 b G 1");
+    assert!(is_valid_mate_pv_by_rules(&pos, &[Move::from_usi("G*5b").unwrap()]));
+    assert!(!is_valid_mate_pv_by_rules(&pos, &[Move::from_usi("G*1a").unwrap()]));
+    assert!(!is_valid_mate_pv_by_rules(&pos, &[Move::from_usi("G*4b").unwrap()]));
+    assert!(!is_valid_mate_pv_by_rules(&pos, &[]));
+    // 両方の玉がある局面では、指し手生成による検証と同じく通る
+    for (sfen, _) in KNOWN_TSUME {
+        let mut pos = position(sfen);
+        let MateResult::Mate(pv) = solve_in_mode(&mut pos, 16, 5_000_000, MateMode::Power) else {
+            panic!("{sfen}");
+        };
+        assert!(is_valid_mate_pv_by_rules(&pos, &pv), "{sfen}: {}", pv_usi(&pv));
     }
 }
 

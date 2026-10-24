@@ -4,10 +4,10 @@
 //! 抽象的な AND/OR グラフを同じ探索本体に通して、GHI (経路依存の結果の誤再利用) を検査する。
 
 use super::table::TableKey;
-use crate::bitboard::{FILE_BB, between_bb};
+use crate::bitboard::{Bitboard, FILE_BB, between_bb};
 use crate::movegen::{ExtMoveBuffer, GenType, MoveList, generate_legal_all, generate_with_type};
 use crate::position::Position;
-use crate::types::{Color, Hand, Move, PieceType, Rank, Square};
+use crate::types::{Color, Hand, Move, Piece, PieceType, Rank, Square};
 
 /// `MateState::delay_key` の組の番号: 成・不成の組は移動元と移動先から (`Square::NUM` の 2 乗未満)、
 /// 合駒は打つ升ごと、受け方の利きの無い升への合駒は全部で 1 組
@@ -368,6 +368,185 @@ impl Position {
                 },
             )
         })
+    }
+}
+
+/// 攻め方 (手番側) の玉が無い局面。
+///
+/// 玉の無い側の `king_square` は既定の升のまま残り、`Position` はその升を攻め方の玉として
+/// 王手・ピン・合法手 (`is_legal`、受け方の歩合いの打ち歩詰め判定) を計算する。そこで、その升に
+/// 依存する判定だけをここで置き換え、受け方の玉だけを見る操作は `Position` の実装に任せる。
+#[derive(Clone)]
+pub(super) struct NoAttackerKing {
+    pos: Position,
+    attacker: Color,
+}
+
+impl NoAttackerKing {
+    /// 手番側の玉が無い局面 `pos` から作る
+    pub fn new(mut pos: Position) -> Self {
+        let attacker = pos.side_to_move();
+        debug_assert!(pos.pieces(attacker, PieceType::King).is_empty());
+        // 既定の升への受け方の利きが、攻め方への王手として記録されていることがある
+        pos.state_mut().checkers = Bitboard::EMPTY;
+        Self { pos, attacker }
+    }
+
+    pub fn position(&self) -> &Position {
+        &self.pos
+    }
+
+    /// 受け方 (手番側、王手されている) の合法手を、`f` が偽を返すまで順に渡す。偽で止めたら偽を返す。
+    ///
+    /// 歩合いは生成し直す: 生成器は既定の升を攻め方の玉とみなして打ち歩詰めを除くが、
+    /// 攻め方の玉が無いので受け方の歩打ちは打ち歩詰めにならない。
+    fn for_each_evasion(&self, mut f: impl FnMut(Move) -> bool) -> bool {
+        let pos = &self.pos;
+        debug_assert!(pos.in_check(), "AND ノードで王手されていない: {}", pos.to_sfen());
+        let mut buffer = ExtMoveBuffer::new();
+        generate_with_type(pos, GenType::EvasionsAll, &mut buffer, None);
+        for ext in buffer.iter() {
+            let mv = ext.mv;
+            let pawn_drop = mv.is_drop() && mv.drop_piece_type() == PieceType::Pawn;
+            if !pawn_drop && pos.is_legal(mv) && !f(mv) {
+                return false;
+            }
+        }
+        let checkers = pos.checkers();
+        if checkers.count() != 1 {
+            return true;
+        }
+        let defender = pos.side_to_move();
+        let checker = checkers.lsb().expect("王手している駒は 1 枚");
+        let pawn = Piece::make(defender, PieceType::Pawn);
+        for sq in between_bb(pos.king_square(defender), checker).iter() {
+            // 持駒・空升・行き所・二歩は pseudo_legal が確かめる
+            let mv = Move::new_drop_with_piece(PieceType::Pawn, sq, pawn);
+            if pos.pseudo_legal(mv) && !f(mv) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 1 手詰めの手と、`with_proof` ならその証明駒 (`Position::checked_mate_1ply` と同じ)
+    fn checked_mate_1ply(&mut self, with_proof: bool) -> Option<(Move, Hand)> {
+        let found = Position::mate_1ply(&mut self.pos);
+        let mv = self.pos.to_move(found).filter(|m| !m.is_none())?;
+        // 自玉が無いので、駒を動かす手は自玉の安全を見なくてよい (is_legal は既定の升を自玉とみなす)
+        if !(self.pos.pseudo_legal(mv)
+            && (!mv.is_drop() || self.pos.is_legal(mv))
+            && self.pos.gives_check(mv))
+        {
+            debug_assert!(false, "mate_1ply が合法な王手でない手を返した: {}", mv.to_usi());
+            return None;
+        }
+        self.do_move(mv);
+        let mated = self.for_each_evasion(|_| false);
+        let proof = mated.then(|| {
+            if with_proof {
+                self.pos.proof_hand_for_evasions(Hand::EMPTY, self.attacker)
+            } else {
+                Hand::EMPTY
+            }
+        });
+        self.pos.undo_move(mv);
+        proof.map(|proof| {
+            (
+                mv,
+                if with_proof {
+                    self.pos.hand_before(mv, proof)
+                } else {
+                    proof
+                },
+            )
+        })
+    }
+}
+
+impl MateState for NoAttackerKing {
+    type Mv = Move;
+
+    fn key(&self) -> u64 {
+        Position::key(&self.pos)
+    }
+
+    fn table_key(&self, attacker: Color) -> TableKey {
+        self.pos.table_key(attacker)
+    }
+
+    fn key_after(&self, m: Move) -> u64 {
+        Position::key_after(&self.pos, m)
+    }
+
+    fn table_key_after(&self, m: Move, attacker: Color) -> TableKey {
+        self.pos.table_key_after(m, attacker)
+    }
+
+    fn generate(&self, or_node: bool, out: &mut Vec<Move>) {
+        if !or_node {
+            self.for_each_evasion(|mv| {
+                out.push(mv);
+                true
+            });
+            return;
+        }
+        let mut buffer = ExtMoveBuffer::new();
+        generate_with_type(&self.pos, GenType::ChecksAll, &mut buffer, None);
+        for ext in buffer.iter() {
+            // 自玉が無いので、駒を動かす手は自玉の安全を見なくてよい
+            if !ext.mv.is_drop() || self.pos.is_legal(ext.mv) {
+                out.push(ext.mv);
+            }
+        }
+    }
+
+    fn delay_key(&self, m: Move, or_node: bool) -> Option<(u16, u8)> {
+        self.pos.delay_key(m, or_node)
+    }
+
+    fn hand_before(&self, m: Move, after: Hand) -> Hand {
+        self.pos.hand_before(m, after)
+    }
+
+    fn proof_hand_for_evasions(&self, proof: Hand, attacker: Color) -> Hand {
+        self.pos.proof_hand_for_evasions(proof, attacker)
+    }
+
+    fn disproof_hand_for_checks(&self, disproof: Hand, attacker: Color) -> Hand {
+        self.pos.disproof_hand_for_checks(disproof, attacker)
+    }
+
+    fn disproof_hand_for_escape(&self, m: Move, disproof: Hand, attacker: Color) -> Hand {
+        self.pos.disproof_hand_for_escape(m, disproof, attacker)
+    }
+
+    fn mate_1ply(&mut self) -> Option<Move> {
+        self.checked_mate_1ply(false).map(|(mv, _)| mv)
+    }
+
+    fn initial_pn_dn(&self, m: Move, or_node: bool) -> (u32, u32) {
+        self.pos.initial_pn_dn(m, or_node)
+    }
+
+    fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
+        self.checked_mate_1ply(true)
+    }
+
+    fn do_move(&mut self, m: Move) {
+        if self.pos.side_to_move() == self.attacker {
+            // 王手は受け方の玉に対して判定するので正しい
+            let gives_check = self.pos.gives_check(m);
+            Position::do_move(&mut self.pos, m, gives_check);
+        } else {
+            // 受け方の手の王手は既定の升への利きで判定されるので、王手を利きから数え直す
+            // (玉の無い攻め方への王手は記録しない)
+            self.pos.do_move_with_missing_kings(m);
+        }
+    }
+
+    fn undo_move(&mut self, m: Move) {
+        Position::undo_move(&mut self.pos, m);
     }
 }
 
