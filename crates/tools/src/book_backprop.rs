@@ -634,14 +634,14 @@ fn write_certified(
     // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は保証手だけを残す。
     let mut restricted = vec![false; n];
     loop {
-        assign_outputs(graph, results, &restricted);
+        assign_outputs(graph, params, results, mirrored, &restricted);
         let conflicts = flip_conflicts(graph, params, mirrored);
         if conflicts > 0 {
             bail!(
                 "反転キーで合流した {conflicts} 局面で、保存されている向きの行が反対の向きの値を保ちません。                 1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください"
             );
         }
-        let violations = certify(graph, params);
+        let violations = certify(graph, params, mirrored);
         if violations.nodes.is_empty() {
             break;
         }
@@ -820,25 +820,57 @@ fn build_game(graph: &Graph, params: BestParams, black: bool) -> BuiltGame {
 
 /// 解いた値を書き出す値にする。値が best と同じ行は、選ぶ手と、それと同じ手数で出口へ向かう手だけを残し、
 /// 他は -1 する (保証手だけを残す局面では選ぶ手以外を全て -1)。補正は書き出しだけで親へ伝えない。
-fn assign_outputs(graph: &mut Graph, results: &[Option<NodeResult>], restricted: &[bool]) {
-    for (node, moves) in graph.moves.iter_mut().enumerate() {
+///
+/// 反転キーで合流した向きにも届く局面では、その向きでも値を保つ手から選ぶ。千日手の値が先後で違うと、
+/// 保存されている向きで短く出口へ向かう手が、反対の向きでは最善でないことがあるため。
+fn assign_outputs(
+    graph: &mut Graph,
+    params: BestParams,
+    results: &[Option<NodeResult>],
+    mirrored: &[Option<NodeResult>],
+    restricted: &[bool],
+) {
+    for node in 0..graph.keys.len() {
         let preserved = graph.preserved[node];
         let result = results[node].as_ref();
+        let mirror = mirrored[node].as_ref();
+        let common = |idx: usize| {
+            mirror.is_none_or(|m| m.rows[idx].is_some_and(|(value, _)| value == m.value))
+        };
         let chosen = result.and_then(|r| {
             if restricted[node] {
-                r.guaranteed
-            } else {
-                r.preferred
+                return r.guaranteed;
             }
+            if let Some(c) = [r.preferred, r.guaranteed].into_iter().flatten().find(|&c| common(c))
+            {
+                return Some(c);
+            }
+            // 両方の向きで値を保つ手のうち、勝ちは短く、負けは長く出口へ向かう手。
+            let winning = r.value >= params.draws.of(graph.black(node));
+            let candidates = (0..r.rows.len()).filter(|&idx| {
+                r.rows[idx].is_some_and(|(value, _)| value == r.value) && common(idx)
+            });
+            let key = |idx: usize| {
+                let distance = r.rows[idx].and_then(|(_, d)| d);
+                match (distance, winning) {
+                    (Some(d), true) => (0, i64::from(d)),
+                    (Some(d), false) => (0, -i64::from(d)),
+                    (None, _) => (1, 0),
+                }
+            };
+            candidates.min_by_key(|&idx| key(idx)).or(r.preferred)
         });
         let chosen_distance = result.zip(chosen).and_then(|(r, c)| r.rows[c].and_then(|(_, d)| d));
-        for (idx, mv) in moves.iter_mut().enumerate() {
+        for (idx, mv) in graph.moves[node].iter_mut().enumerate() {
             let row = result.and_then(|r| r.rows[idx]);
             mv.new = match row {
                 Some((value, distance)) if !preserved && !mv.preserve && mv.usable => {
                     let best = result.is_some_and(|r| r.value == value);
                     let keep = chosen == Some(idx)
-                        || (!restricted[node] && distance.is_some() && distance == chosen_distance);
+                        || (!restricted[node]
+                            && distance.is_some()
+                            && distance == chosen_distance
+                            && common(idx));
                     if best && !keep {
                         // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
                         value.saturating_sub(1).max(-Value::MATE.raw())
@@ -888,7 +920,7 @@ impl Violations {
 /// - 自分の千日手の値より良い値なのに、相手が王手をやめながら続けられる循環 (千日手) へ持ち込める。
 ///
 /// 値の整合は前提にせず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
-fn certify(graph: &Graph, params: BestParams) -> Violations {
+fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> Violations {
     let mut violations = Violations {
         nodes: BTreeSet::new(),
         perpetual_check: BTreeSet::new(),
@@ -896,7 +928,7 @@ fn certify(graph: &Graph, params: BestParams) -> Violations {
     };
     let mate = Value::MATE.raw();
     for black in [true, false] {
-        let states = CertifyStates::new(graph, params, black);
+        let states = CertifyStates::new(graph, params, mirrored, black);
         let draw = params.draws.of(black);
         let follows = |s: usize, idx: usize, _t: usize| states.follows(s, idx);
 
@@ -942,10 +974,17 @@ struct CertifyStates<'a> {
     reverse: Vec<(u32, u32)>,
     /// 保存されている向きの局面から指して届く状態。反転キーで合流した向きはここに含まれるものだけが実在する。
     real: Vec<bool>,
+    /// 反転キーで合流した向きで解いた値 (手番の側から見た値)。
+    mirrored: Vec<Option<i32>>,
 }
 
 impl<'a> CertifyStates<'a> {
-    fn new(graph: &'a Graph, params: BestParams, black: bool) -> Self {
+    fn new(
+        graph: &'a Graph,
+        params: BestParams,
+        mirrored: &[Option<NodeResult>],
+        black: bool,
+    ) -> Self {
         let values = graph
             .moves
             .iter()
@@ -988,6 +1027,7 @@ impl<'a> CertifyStates<'a> {
             reverse_start,
             reverse,
             real: vec![false; 2 * n],
+            mirrored: mirrored.iter().map(|m| m.as_ref().map(|m| m.value)).collect(),
         };
         let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + usize::from(!graph.black(v))).collect();
         for &s in &stack {
@@ -1014,8 +1054,16 @@ impl<'a> CertifyStates<'a> {
     }
 
     /// 自分から見た状態の値。行の値は実際に手番の側から見た値として使われる。
+    /// 反転キーで合流した向きの局面では、書き出す値は保存されている向きの値なので、その向きで解いた値を約束とする。
+    /// 書き出す最大値の行がその値を保つことは [`flip_conflicts`] で確かめてある。
     fn own(&self, s: usize) -> i32 {
-        let value = self.values[s / 2];
+        let v = s / 2;
+        let stored = s % 2 == usize::from(!self.graph.black(v));
+        let value = if stored {
+            self.values[v]
+        } else {
+            self.mirrored[v].unwrap_or(self.values[v])
+        };
         if self.is_opponent(s) { -value } else { value }
     }
 
@@ -1601,6 +1649,7 @@ mod tests {
                 merge: MergeMode::Replace,
                 skip_unusable_moves: false,
             },
+            &vec![None; rows.len()],
         );
         if violations.nodes.is_empty() {
             Ok(())
@@ -1763,6 +1812,24 @@ mod tests {
         // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
         let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
         propagate_values(&book, &mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
+    }
+
+    #[test]
+    fn flipped_orientation_prefers_a_move_that_keeps_both_values() {
+        // X は先手番で保存され、A から反転キーで後手番としても届く。先手 (千日手 -70) には -70 の葉と循環が同値で、
+        // 後手 (千日手 0) には循環の 0 が最善。両方の向きで値を保つ循環手を残し、葉を -1 する。
+        let rows: [&[_]; 3] = [
+            &[(0, Some(1))],
+            &[(-70, None), (0, Some(2))],
+            &[(0, Some(1))],
+        ];
+        let (book, mut graph) = rows_graph(&rows, &[false; 3], &[true, true, false]);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap();
+        assert_eq!(values(&graph)[1], [-71, -70]);
     }
 
     #[test]
