@@ -153,18 +153,15 @@ mod tests {
                 ]);
                 let dir = tempdir().unwrap();
                 let input_path = write_input(dir.path(), "in.db", &input);
-                let book = read_book_db(&input_path).unwrap();
                 for merge in [MergeMode::Min, MergeMode::Replace] {
-                    let mut graph = build_graph(&book).unwrap();
+                    let mut graph = read_graph(&input_path, BackpropOptions::default()).unwrap();
                     assert_eq!(graph.illegal_moves, 1, "{parent}: {usi}");
-                    let parent_idx =
-                        graph.keys.iter().position(|key| key == strip_ply(&parent)).unwrap();
-                    assert!(graph.moves[parent_idx][0].edge.is_none());
-                    assert!(graph.adjacency[parent_idx].is_empty());
-                    propagate_values(&book, &mut graph, DrawValues::default(), merge).unwrap();
-                    assert_eq!(graph.moves[parent_idx][0].new, 123);
+                    let parent_idx = graph.find(strip_ply(&parent)).unwrap();
+                    assert!(graph.moves(parent_idx).all(|mv| mv.edge.is_none()));
+                    propagate_values(&mut graph, DrawValues::default(), merge).unwrap();
+                    assert_eq!(graph.moves(parent_idx).next().unwrap().new, 123);
                     let out = dir.path().join("out.db");
-                    write_backprop_book(&book, &graph, &out).unwrap();
+                    write_backprop_book(&graph, &out).unwrap();
                     assert!(
                         std::fs::read_to_string(out)
                             .unwrap()
@@ -311,10 +308,9 @@ mod tests {
     }
 
     fn run_backprop(input: &Path, output: &Path, merge: MergeMode) -> Result<()> {
-        let book = read_book_db(input)?;
-        let mut graph = build_graph(&book)?;
-        propagate_values(&book, &mut graph, DrawValues::default(), merge)?;
-        write_backprop_book(&book, &graph, output)
+        let mut graph = read_graph(input, BackpropOptions::default())?;
+        propagate_values(&mut graph, DrawValues::default(), merge)?;
+        write_backprop_book(&graph, output)
     }
 
     fn backprop_text(input: &str) -> String {

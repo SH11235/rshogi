@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 /// 手の無い頂点・葉の手を表す番号。
 pub(crate) const NONE: u32 = u32::MAX;
@@ -34,14 +34,21 @@ pub(crate) struct Arc {
 }
 
 /// 解く問題。値は全て解く側から見た値で、千日手が 0 になるようにずらしてある。
-pub(crate) struct Game {
+/// 数千万本の手を配列に持たずに済むよう、手は呼ぶたびに作ってよい。同じ引数には同じ手を返すこと。
+pub(crate) trait Game {
+    /// 頂点の数。
+    fn vertices(&self) -> usize;
     /// 頂点が解く側の手番か。
-    pub own: Vec<bool>,
-    /// 頂点 `v` の手は `arcs[start[v]..start[v + 1]]`。
-    pub start: Vec<usize>,
-    pub arcs: Vec<Arc>,
+    fn own(&self, v: usize) -> bool;
+    fn degree(&self, v: usize) -> usize;
+    /// 頂点 `v` の `j` 番目の手。
+    fn arc(&self, v: usize, j: usize) -> Arc;
     /// 相手が連続王手を続けて反則負けになったときの値。`[解く側, 相手]` をそれぞれの側から見た値で持つ。
-    pub win: [i32; 2],
+    fn win(&self) -> [i32; 2];
+
+    fn owner(&self, v: usize) -> usize {
+        usize::from(!self.own(v))
+    }
 }
 
 pub(crate) struct Solution {
@@ -51,8 +58,8 @@ pub(crate) struct Solution {
     pub guaranteed: Vec<u32>,
     /// 値を保つ手のうち、勝ちは短く負けは長く出口へ向かう手。距離が決まらない頂点は `guaranteed` と同じ。
     pub preferred: Vec<u32>,
-    /// 値を保つ手だけで出口 (葉・手の無い頂点) まで進む手数。循環から抜けられない頂点は `None`。
-    pub distance: Vec<Option<u32>>,
+    /// 値を保つ手だけで出口 (葉・手の無い頂点) まで進む手数。循環から抜けられない頂点は `NONE`。
+    pub distance: Vec<u32>,
     /// 王手をかけ続けられる循環の頂点数。`[解く側, 相手]`。
     pub core_size: [usize; 2],
 }
@@ -64,72 +71,78 @@ impl Arc {
     }
 }
 
-impl Game {
-    fn degree(&self, v: usize) -> usize {
-        self.start[v + 1] - self.start[v]
-    }
-
-    fn arc(&self, v: usize, j: usize) -> Arc {
-        self.arcs[self.start[v] + j]
-    }
-
-    fn owner(&self, v: usize) -> usize {
-        usize::from(!self.own[v])
-    }
-}
-
 /// 頂点 `p` 側から見た値。
 fn view(p: usize, value: i32) -> i32 {
     if p == 0 { value } else { -value }
 }
 
-struct Solver<'a> {
-    game: &'a Game,
+struct Solver<'a, G: Game> {
+    game: &'a G,
     n: usize,
     /// 頂点 `w` へ入る手 `(親, 親の手番号)` は `reverse[reverse_start[w]..reverse_start[w + 1]]`。
-    reverse_start: Vec<usize>,
+    reverse_start: Vec<u32>,
     reverse: Vec<(u32, u32)>,
+    /// 頂点 `v` の手の通し番号は `arc_start[v]..arc_start[v + 1]`。
+    arc_start: Vec<u32>,
     /// `cores[q]`: `q` が自分の手番で王手をかけ続けられる循環の頂点。
     cores: [Vec<u32>; 2],
     /// 全体の頂点番号から循環内の番号への対応。対象外は `NONE`。使った要素だけを戻して使い回す。
     local: Vec<u32>,
 }
 
-impl<'a> Solver<'a> {
-    fn new(game: &'a Game) -> Self {
-        let n = game.own.len();
-        let mut reverse_start = vec![0; n + 1];
-        for arc in &game.arcs {
-            if arc.to != NONE {
-                reverse_start[arc.to as usize + 1] += 1;
+impl<'a, G: Game> Solver<'a, G> {
+    fn new(game: &'a G) -> Result<Self> {
+        let n = game.vertices();
+        if u32::try_from(n).is_err() {
+            bail!("頂点が多すぎて後退解析できません: {n}");
+        }
+        let mut arc_start = Vec::with_capacity(n + 1);
+        arc_start.push(0u32);
+        for v in 0..n {
+            let end = arc_start[v] as usize + game.degree(v);
+            arc_start
+                .push(u32::try_from(end).map_err(|_| anyhow!("手が多すぎて後退解析できません"))?);
+        }
+        let mut reverse_start = vec![0u32; n + 1];
+        let mut total = 0u32;
+        for v in 0..n {
+            for j in 0..game.degree(v) {
+                let to = game.arc(v, j).to;
+                if to != NONE {
+                    reverse_start[to as usize + 1] += 1;
+                    total = total
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("手が多すぎて後退解析できません"))?;
+                }
             }
         }
         for w in 0..n {
             reverse_start[w + 1] += reverse_start[w];
         }
         let mut next = reverse_start.clone();
-        let mut reverse = vec![(0, 0); reverse_start[n]];
+        let mut reverse = vec![(0, 0); total as usize];
         for v in 0..n {
             for j in 0..game.degree(v) {
                 let to = game.arc(v, j).to;
                 if to != NONE {
-                    reverse[next[to as usize]] = (v as u32, j as u32);
+                    reverse[next[to as usize] as usize] = (v as u32, j as u32);
                     next[to as usize] += 1;
                 }
             }
         }
-        Self {
+        Ok(Self {
             game,
             n,
             reverse_start,
             reverse,
+            arc_start,
             cores: [Vec::new(), Vec::new()],
             local: vec![NONE; n],
-        }
+        })
     }
 
     fn parents(&self, w: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
-        self.reverse[self.reverse_start[w]..self.reverse_start[w + 1]]
+        self.reverse[self.reverse_start[w] as usize..self.reverse_start[w + 1] as usize]
             .iter()
             .map(|&(v, j)| (v as usize, j as usize))
     }
@@ -140,15 +153,15 @@ impl<'a> Solver<'a> {
         let n = self.n;
         let mut seen = vec![false; n];
         let mut order = Vec::with_capacity(n);
-        let mut dfs: Vec<(usize, usize)> = Vec::new();
+        let mut dfs: Vec<(u32, u32)> = Vec::new();
         for root in 0..n {
             if seen[root] {
                 continue;
             }
             seen[root] = true;
-            dfs.push((root, 0));
+            dfs.push((root as u32, 0));
             while let Some(top) = dfs.last_mut() {
-                let (v, k) = *top;
+                let (v, k) = (top.0 as usize, top.1 as usize);
                 if k == game.degree(v) {
                     order.push(v as u32);
                     dfs.pop();
@@ -159,10 +172,11 @@ impl<'a> Solver<'a> {
                 let w = arc.to;
                 if w != NONE && !seen[w as usize] && allow(v, k, arc) {
                     seen[w as usize] = true;
-                    dfs.push((w as usize, 0));
+                    dfs.push((w, 0));
                 }
             }
         }
+        drop(seen);
         let mut comp = vec![NONE; n];
         let mut cyclic = Vec::new();
         let mut stack = Vec::new();
@@ -208,21 +222,23 @@ impl<'a> Solver<'a> {
         for q in 0..2 {
             self.cores[q] = self.cyclic(|v, _, arc| game.owner(v) != q || arc.step != Step::Quiet);
         }
-        let (a_value, a_choice) = self.positive(0);
+        let (mut values, mut guaranteed) = self.positive(0);
         let (b_value, b_choice) = self.positive(1);
-        let mut values = vec![0; self.n];
-        let mut guaranteed = vec![NONE; self.n];
         for v in 0..self.n {
-            if a_value[v] != 0 && b_value[v] != 0 {
+            let a_value = values[v];
+            if a_value != 0 && b_value[v] != 0 {
                 bail!("内部エラー: 双方が正の値を保証しています");
             }
-            values[v] = a_value[v] - b_value[v];
-            if game.owner(v) == 0 && a_value[v] != 0 {
-                guaranteed[v] = a_choice[v];
-            } else if game.owner(v) == 1 && b_value[v] != 0 {
-                guaranteed[v] = b_choice[v];
+            values[v] = a_value - b_value[v];
+            if !(game.owner(v) == 0 && a_value != 0) {
+                guaranteed[v] = if game.owner(v) == 1 && b_value[v] != 0 {
+                    b_choice[v]
+                } else {
+                    NONE
+                };
             }
         }
+        drop((b_value, b_choice));
         for q in 0..2 {
             if !self.avoid_checks(q, &values, &mut guaranteed) {
                 bail!("内部エラー: 値を保ったまま自分の王手を止める手を作れません");
@@ -239,12 +255,13 @@ impl<'a> Solver<'a> {
         let distance = self.distance(&values);
         let preferred = (0..self.n)
             .map(|v| {
-                let Some(d) = distance[v] else {
+                let d = distance[v];
+                if d == NONE {
                     return guaranteed[v];
-                };
+                }
                 let matches = |j: usize| {
                     self.edge_value(&values, v, j) == values[v]
-                        && self.arc_distance(&distance, v, j) == Some(d)
+                        && self.arc_distance(&distance, v, j) == d
                 };
                 if guaranteed[v] != NONE && matches(guaranteed[v] as usize) {
                     guaranteed[v]
@@ -271,12 +288,15 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn arc_distance(&self, distance: &[Option<u32>], v: usize, j: usize) -> Option<u32> {
+    /// 手を指してから出口まで進む手数。決まらなければ `NONE`。
+    fn arc_distance(&self, distance: &[u32], v: usize, j: usize) -> u32 {
         let arc = self.game.arc(v, j);
         if arc.to == NONE {
-            Some(0)
-        } else {
-            distance[arc.to as usize].map(|d| d + arc.length())
+            return 0;
+        }
+        match distance[arc.to as usize] {
+            NONE => NONE,
+            d => d + arc.length(),
         }
     }
 
@@ -309,29 +329,53 @@ impl<'a> Solver<'a> {
             p,
             value: vec![0; self.n],
             choice: vec![NONE; self.n],
-            left: (0..self.n).map(|v| game.degree(v)).collect(),
+            left: (0..self.n).map(|v| game.degree(v) as u32).collect(),
             queue: VecDeque::new(),
         };
-        let mut leaves: BTreeMap<i32, Vec<(usize, usize)>> = BTreeMap::new();
+        // 正の葉を閾値の降順に並べる。同じ閾値の葉は頂点番号・手番号の順 (手の通し番号の順) に当たる。
+        // 葉は数千万本になるので、手の通し番号だけを閾値ごとの区間に数え分けて並べる。
+        let leaf_level = |v: usize, j: usize| {
+            let arc = game.arc(v, j);
+            (arc.to == NONE && view(p, arc.leaf) > 0).then(|| view(p, arc.leaf))
+        };
+        let mut levels = BTreeMap::<i32, u32>::new();
         for v in 0..self.n {
             for j in 0..game.degree(v) {
-                let arc = game.arc(v, j);
-                if arc.to == NONE && view(p, arc.leaf) > 0 {
-                    leaves.entry(view(p, arc.leaf)).or_default().push((v, j));
+                if let Some(level) = leaf_level(v, j) {
+                    *levels.entry(level).or_default() += 1;
                 }
             }
         }
-        let win = game.win[p];
+        let win = game.win()[p];
         if win > 0 {
-            leaves.entry(win).or_default();
+            levels.entry(win).or_default();
         }
-        for (&level, edges) in leaves.iter().rev() {
-            for &(v, j) in edges {
-                front.hit(game, v, j as u32, level);
+        let mut ranges = Vec::with_capacity(levels.len());
+        let mut next = 0u32;
+        for (&level, count) in levels.iter_mut().rev() {
+            ranges.push((level, next..next + *count));
+            (next, *count) = (next + *count, next);
+        }
+        let mut leaves = vec![0u32; next as usize];
+        for v in 0..self.n {
+            for j in 0..game.degree(v) {
+                if let Some(level) = leaf_level(v, j) {
+                    let slot = levels.get_mut(&level).expect("数えた閾値");
+                    leaves[*slot as usize] = self.arc_start[v] + j as u32;
+                    *slot += 1;
+                }
+            }
+        }
+        drop(levels);
+        for (level, range) in ranges {
+            let mut v = 0;
+            for &arc in &leaves[range.start as usize..range.end as usize] {
+                v = self.vertex_of(v, arc);
+                front.hit(game, v, arc - self.arc_start[v], level);
             }
             loop {
                 while let Some(w) = front.queue.pop_front() {
-                    for (v, j) in self.parents(w) {
+                    for (v, j) in self.parents(w as usize) {
                         front.hit(game, v, j as u32, level);
                     }
                 }
@@ -351,6 +395,19 @@ impl<'a> Solver<'a> {
             }
         }
         (front.value, front.choice)
+    }
+
+    /// 手の通し番号 `arc` を持つ頂点。`from` 以前の頂点は持たないこと。同じ閾値の葉は番号の昇順に並ぶので、
+    /// 前の葉の頂点から先へ倍々に探す。
+    fn vertex_of(&self, from: usize, arc: u32) -> usize {
+        let starts = &self.arc_start;
+        let (mut lo, mut step) = (from, 1);
+        while lo + step < self.n && starts[lo + step] <= arc {
+            lo += step;
+            step *= 2;
+        }
+        let hi = (lo + step).min(self.n);
+        lo + starts[lo..hi].partition_point(|&start| start <= arc) - 1
     }
 
     /// 相手の王手循環の中で、`p` が閾値以上を保証できる最大の集合を求める。
@@ -447,7 +504,7 @@ impl<'a> Solver<'a> {
     /// 反則負けの値の頂点は、反則負けより良い値を約束していないので対象外。
     fn avoid_checks(&mut self, q: usize, values: &[i32], guaranteed: &mut [u32]) -> bool {
         let game = self.game;
-        let lose = -game.win[1 - q];
+        let lose = -game.win()[1 - q];
         let active: Vec<usize> = self.cores[q]
             .iter()
             .map(|&v| v as usize)
@@ -518,13 +575,13 @@ impl<'a> Solver<'a> {
     /// 値を保つ手だけで出口までの手数を求める。勝ち (千日手以上) の頂点は最短、負けの頂点は最長。
     /// 勝ちの頂点は最初に確定した子で最短になり、負けの頂点は全ての子の確定を待てば最長になる。
     /// 局面を進めない分岐は手数 0 なので、0-1 BFS の順に確定する。循環から抜けられない頂点は決まらない。
-    fn distance(&self, values: &[i32]) -> Vec<Option<u32>> {
+    fn distance(&self, values: &[i32]) -> Vec<u32> {
         let game = self.game;
         let winning = |v: usize| view(game.owner(v), values[v]) >= 0;
-        let mut distance = vec![None; self.n];
+        let mut distance = vec![NONE; self.n];
+        // 勝ちの頂点は暫定の最短手数、負けの頂点はそれまでに確定した子の最長手数。
         let mut tentative = vec![u32::MAX; self.n];
-        let mut pending = vec![0usize; self.n];
-        let mut longest = vec![0u32; self.n];
+        let mut pending = vec![0u32; self.n];
         let mut queue = VecDeque::new();
         for v in 0..self.n {
             let mut leaf = game.degree(v) == 0;
@@ -540,17 +597,20 @@ impl<'a> Solver<'a> {
             }
             if leaf && (winning(v) || pending[v] == 0) {
                 tentative[v] = 0;
-                queue.push_back(v);
+                queue.push_back(v as u32);
+            } else if !winning(v) {
+                tentative[v] = 0;
             }
         }
         while let Some(w) = queue.pop_front() {
-            if distance[w].is_some() {
+            let w = w as usize;
+            if distance[w] != NONE {
                 continue;
             }
             let d = tentative[w];
-            distance[w] = Some(d);
+            distance[w] = d;
             for (v, j) in self.parents(w) {
-                if distance[v].is_some() || self.edge_value(values, v, j) != values[v] {
+                if distance[v] != NONE || self.edge_value(values, v, j) != values[v] {
                     continue;
                 }
                 let arc = game.arc(v, j);
@@ -559,20 +619,19 @@ impl<'a> Solver<'a> {
                     if candidate < tentative[v] {
                         tentative[v] = candidate;
                         if arc.length() == 0 {
-                            queue.push_front(v);
+                            queue.push_front(v as u32);
                         } else {
-                            queue.push_back(v);
+                            queue.push_back(v as u32);
                         }
                     }
                 } else {
-                    longest[v] = longest[v].max(candidate);
+                    tentative[v] = tentative[v].max(candidate);
                     pending[v] -= 1;
                     if pending[v] == 0 {
-                        tentative[v] = longest[v];
                         if tentative[v] == d {
-                            queue.push_front(v);
+                            queue.push_front(v as u32);
                         } else {
-                            queue.push_back(v);
+                            queue.push_back(v as u32);
                         }
                     }
                 }
@@ -588,8 +647,8 @@ struct Front {
     value: Vec<i32>,
     choice: Vec<u32>,
     /// 相手の手番の頂点で、閾値以上とまだ確かめていない応手の数。
-    left: Vec<usize>,
-    queue: VecDeque<usize>,
+    left: Vec<u32>,
+    queue: VecDeque<u32>,
 }
 
 impl Front {
@@ -599,11 +658,11 @@ impl Front {
         }
         self.value[v] = level;
         self.choice[v] = j;
-        self.queue.push_back(v);
+        self.queue.push_back(v as u32);
     }
 
     /// 頂点 `v` の手 `j` が閾値以上と分かった。自分の手番なら 1 手で、相手の手番なら全応手で確定する。
-    fn hit(&mut self, game: &Game, v: usize, j: u32, level: i32) {
+    fn hit(&mut self, game: &impl Game, v: usize, j: u32, level: i32) {
         if self.value[v] != 0 {
             return;
         }
@@ -619,6 +678,6 @@ impl Front {
 }
 
 /// `game` を解く。
-pub(crate) fn solve(game: &Game) -> Result<Solution> {
-    Solver::new(game).solve()
+pub(crate) fn solve(game: &impl Game) -> Result<Solution> {
+    Solver::new(game)?.solve()
 }
