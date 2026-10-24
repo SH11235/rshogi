@@ -65,6 +65,9 @@ cargo run -p tools --bin benchmark --release -- \
 lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 ```
 
+先頭の `sfen ` は名前付き・名前なしのどちらの行でも省略できます。名前なしの行は
+`position_<行番号>` という名前になります。
+
 ### 出力形式
 
 #### コンソール出力
