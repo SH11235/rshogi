@@ -764,11 +764,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let mut sum_delta = 0u64;
         let mut nonzero = 0u64;
         let seed = self.tie_seed;
+        // 奇数を掛けるので順位は子ごとに異なり、添字が seed の子が最上位になる (スレッドごとに別の子を選ぶ)
         let rank = |i: usize| (i as u32 ^ seed).wrapping_mul(0x9E37_79B1);
         for (i, c) in children.iter().enumerate().filter(|(_, c)| c.active) {
             nonzero += u64::from(delta(c) != 0);
             let p = phi(c);
-            if p < best_phi || seed != 0 && p == best_phi && rank(i) < rank(best) {
+            if p < best_phi || (seed != 0 && p == best_phi && rank(i) < rank(best)) {
                 second_phi = best_phi;
                 best_phi = p;
                 best = i;

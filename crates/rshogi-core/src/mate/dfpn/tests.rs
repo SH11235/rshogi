@@ -276,6 +276,72 @@ fn parallel_search_agrees_with_brute_force_on_random_positions() {
     assert!(mates >= 5, "詰みの局面が少なすぎる: {mates}");
 }
 
+/// 補助スレッドの同点の選び方 (`set_tie_seed`) で 1 スレッドで解いても、総当たりと矛盾しない
+#[test]
+fn tie_seed_search_agrees_with_brute_force_on_random_positions() {
+    fn solve_with_seed<const PIECES: bool>(
+        pos: &mut Position,
+        mode: MateMode,
+        seed: u32,
+    ) -> MateResult {
+        let stop = AtomicBool::new(false);
+        let mut progress = |_| {};
+        let budget = Budget {
+            stop: &stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: 2_000_000,
+            time_limit_ms: 0,
+            start: Instant::now(),
+            progress: &mut progress,
+        };
+        let table = MateTable::new(16, true);
+        let mut scratch = Scratch::new();
+        let attacker = pos.side_to_move();
+        let mut searcher = Searcher::<_, PIECES>::new(&table, &mut scratch, attacker, budget);
+        configure(&mut searcher, mode);
+        searcher.set_tie_seed(seed);
+        match solve_with(&mut searcher, pos) {
+            Some(SolveOutcome::Mate(pv)) => MateResult::Mate(pv),
+            Some(SolveOutcome::NoMate) => MateResult::NoMate,
+            None => MateResult::Unknown,
+        }
+    }
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x071E_5EED);
+    let mut tested = 0;
+    let mut mates = 0;
+    while tested < 100 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let sfen = pos.to_sfen();
+        let brute = brute_mate(&mut pos, 5, true);
+        for seed in [1, 2, 7] {
+            for (mode, result) in [
+                (MateMode::Speed, solve_with_seed::<false>(&mut pos, MateMode::Speed, seed)),
+                (MateMode::Power, solve_with_seed::<true>(&mut pos, MateMode::Power, seed)),
+            ] {
+                match result {
+                    MateResult::Mate(pv) => {
+                        assert!(
+                            is_valid_mate_pv(&mut pos, &pv),
+                            "{sfen} {mode:?} {seed}: {}",
+                            pv_usi(&pv)
+                        );
+                    }
+                    other => {
+                        assert!(!brute, "{sfen} {mode:?} {seed}: 5 手以内に詰むのに {other:?}")
+                    }
+                }
+            }
+        }
+        tested += 1;
+        mates += usize::from(brute);
+    }
+    assert!(mates >= 5, "詰みの局面が少なすぎる: {mates}");
+}
+
 #[test]
 fn pawn_drop_mate_is_not_a_mate() {
     // ▲1二歩は打ち歩詰め (2三金が紐、2一は3二銀が利く)。他に詰みは無い。
