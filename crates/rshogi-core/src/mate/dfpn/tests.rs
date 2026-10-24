@@ -220,6 +220,62 @@ fn solves_known_tsume() {
     }
 }
 
+fn solve_in_threads(pos: &mut Position, nodes: u64, mode: MateMode, threads: usize) -> MateResult {
+    let stop = AtomicBool::new(false);
+    let limits = MateLimits { nodes, time_ms: 0 };
+    let mut solver = DfpnSolver::with_mode(16, mode);
+    solver.set_threads(threads);
+    solver.parallel_from_the_start();
+    solver.solve(pos, &limits, &stop, |_| {})
+}
+
+#[test]
+fn parallel_search_solves_known_tsume() {
+    for (sfen, shortest) in KNOWN_TSUME {
+        for mode in MateMode::ALL {
+            let mut pos = position(sfen);
+            let pv = match solve_in_threads(&mut pos, 5_000_000, mode, 4) {
+                MateResult::Mate(pv) => pv,
+                other => panic!("{sfen} {mode:?}: {other:?}"),
+            };
+            assert!(is_valid_mate_pv(&mut pos, &pv), "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert!(pv.len() >= shortest, "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert_eq!(pos.to_sfen(), position(sfen).to_sfen(), "局面が元に戻っていない");
+        }
+    }
+}
+
+#[test]
+fn parallel_search_agrees_with_brute_force_on_random_positions() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x9A2A_11E1);
+    let mut tested = 0;
+    let mut mates = 0;
+    while tested < 150 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let sfen = pos.to_sfen();
+        let brute = brute_mate(&mut pos, 5, true);
+        let single = solve_in_mode(&mut pos, 16, 2_000_000, MateMode::Power);
+        for mode in MateMode::ALL {
+            let result = solve_in_threads(&mut pos, 2_000_000, mode, 3);
+            assert!(
+                !is_contradiction(&single, &result),
+                "{sfen} {mode:?}: {single:?} / {result:?}"
+            );
+            match result {
+                MateResult::Mate(pv) => {
+                    assert!(is_valid_mate_pv(&mut pos, &pv), "{sfen} {mode:?}: {}", pv_usi(&pv));
+                }
+                _ => assert!(!brute, "{sfen} {mode:?}: 5 手以内に詰むのに {result:?}"),
+            }
+        }
+        tested += 1;
+        mates += usize::from(brute);
+    }
+    assert!(mates >= 5, "詰みの局面が少なすぎる: {mates}");
+}
+
 #[test]
 fn pawn_drop_mate_is_not_a_mate() {
     // ▲1二歩は打ち歩詰め (2三金が紐、2一は3二銀が利く)。他に詰みは無い。
@@ -354,6 +410,23 @@ fn auto_mode_switches_to_proof_pieces_and_keeps_the_node_limit() {
         let result = solver.solve(&mut pos, &limits, &stop, |_| {});
         assert_eq!(result, MateResult::Unknown);
         assert_eq!(solver.nodes(), limit + 1);
+    }
+}
+
+#[test]
+fn parallel_search_continues_from_the_single_thread_start() {
+    // 1 スレッドで解く区間 (既定) を超える局面で、途中から並列に切り替えても詰みを返す
+    for mode in MateMode::ALL {
+        let mut pos = position(AUTO_SWITCH_MATE);
+        let stop = AtomicBool::new(false);
+        let mut solver = DfpnSolver::with_mode(16, mode);
+        solver.set_threads(4);
+        let result = solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {});
+        let MateResult::Mate(pv) = result else {
+            panic!("{mode:?}: {result:?}");
+        };
+        assert!(is_valid_mate_pv(&mut pos, &pv), "{mode:?}: {}", pv_usi(&pv));
+        assert!(solver.nodes() > PARALLEL_START_NODES, "{mode:?}: {}", solver.nodes());
     }
 }
 
@@ -756,6 +829,9 @@ fn solve_in_table<const PIECES: bool>(
     let mut progress = |_| {};
     let budget = Budget {
         stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
         node_limit: nodes,
         time_limit_ms: 0,
         start: Instant::now(),
@@ -1071,18 +1147,21 @@ fn solve_graph_in_mode<const PIECES: bool>(
     buckets: usize,
     node_limit: u64,
 ) -> Option<SolveOutcome<u32>> {
-    let mut table = MateTable::with_buckets(buckets);
+    let table = MateTable::with_buckets(buckets);
     let stop = AtomicBool::new(false);
     let mut progress = |_| {};
     let budget = Budget {
         stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
         node_limit,
         time_limit_ms: 0,
         start: Instant::now(),
         progress: &mut progress,
     };
     let mut scratch = Scratch::new();
-    let mut searcher = Searcher::<_, PIECES>::new(&mut table, &mut scratch, Color::Black, budget);
+    let mut searcher = Searcher::<_, PIECES>::new(&table, &mut scratch, Color::Black, budget);
     if PIECES {
         searcher.estimate_initial_values();
         searcher.count_disproof_weakly(super::state::PNDN_UNIT);

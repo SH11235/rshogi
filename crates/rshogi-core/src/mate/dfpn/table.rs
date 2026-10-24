@@ -16,6 +16,9 @@
 //! 局面全体のキーのエントリはどちらの使い方でも同じ意味なので、`PIECES = false` で使った表を
 //! そのまま `PIECES = true` で使い続けてよい。
 
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, Ordering, fence};
+
 use crate::types::{Hand, PieceType};
 
 /// 証明数・反証数の無限大。確定 (pn == 0 または dn == 0) の相方にだけ使う。
@@ -53,6 +56,7 @@ pub(super) struct TableKey {
 
 /// 持駒を、駒種ごとの枚数の上にガードビットを 1 つずつ置いて詰めたもの。
 /// 駒種ごとの大小比較が 1 回の引き算で済む (`covers`)。
+#[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct PackedHand(u32);
 
@@ -109,6 +113,7 @@ impl PackedHand {
 /// 確定値は pn か dn の片方が必ず ∞ で、もう片方は 0 なので、2 つの欄にキーの上位 32bit と詰み手数を入れ、
 /// キーは 64bit 全部を照合する (別の局面の詰み・不詰を採用すると結論を誤る)。未確定値はキーの下位 55bit だけを
 /// 照合する。取り違えても探索の効率が落ちるだけで、結論は子の確定値からしか決まらない。
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Entry {
     /// 局面全体のキーの下位 32bit
@@ -247,6 +252,7 @@ fn key_tag(key: u64) -> u64 {
 }
 
 /// 証明駒・反証駒で書く確定値のエントリ。キャッシュライン 1 本に 3 つ入るよう 4 byte 境界で詰める。
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct FinalEntry {
     /// 盤面と手番のキーの下位・上位 32bit
@@ -256,15 +262,42 @@ struct FinalEntry {
     hand: PackedHand,
     /// この局面以下で探索したノード数。置き換えの優先度に使う。0 は空き。
     searched: u32,
-    /// 詰みの手数の上限 (不詰では 0)
-    mate_len: u16,
-    proven: bool,
-    generation: u8,
+    /// 下位 16bit: 詰みの手数の上限 (不詰では 0)、次の 8bit: 詰みなら 1、上位 8bit: 書き込んだ探索の世代
+    tail: u32,
 }
 
 impl FinalEntry {
+    fn new(
+        board: u64,
+        hand: PackedHand,
+        searched: u32,
+        mate_len: u16,
+        proven: bool,
+        generation: u8,
+    ) -> Self {
+        Self {
+            board_lo: board as u32,
+            board_hi: (board >> 32) as u32,
+            hand,
+            searched,
+            tail: u32::from(mate_len) | u32::from(proven) << 16 | u32::from(generation) << 24,
+        }
+    }
+
+    fn mate_len(&self) -> u16 {
+        self.tail as u16
+    }
+
+    fn set_mate_len(&mut self, mate_len: u16) {
+        self.tail = (self.tail & !0xffff) | u32::from(mate_len);
+    }
+
+    fn proven(&self) -> bool {
+        self.tail >> 16 & 1 != 0
+    }
+
     fn is_empty(&self, generation: u8) -> bool {
-        self.searched == 0 || self.generation != generation
+        self.searched == 0 || (self.tail >> 24) as u8 != generation
     }
 
     fn has_board(&self, board: u64) -> bool {
@@ -272,7 +305,7 @@ impl FinalEntry {
     }
 
     fn value(&self) -> TableValue {
-        let (pn, dn) = if self.proven {
+        let (pn, dn) = if self.proven() {
             (0, PN_INF)
         } else {
             (PN_INF, 0)
@@ -280,26 +313,141 @@ impl FinalEntry {
         TableValue {
             pn,
             dn,
-            mate_len: self.mate_len,
+            mate_len: self.mate_len(),
             min_depth: 0,
             hand: self.hand.unpack(),
         }
     }
 }
 
+/// bucket に入るエントリの数。どちらの表もエントリは 20 byte (32bit の語 5 つ)。
 const BUCKET_SIZE: usize = 3;
-const FINAL_BUCKET_SIZE: usize = 3;
+const BUCKET_WORDS: usize = 15;
 
-/// 局面全体のキーの bucket (エントリ 20 byte × 3 = キャッシュライン 1 本)
-#[derive(Clone, Copy, Default)]
-#[repr(C, align(64))]
-struct Bucket([Entry; BUCKET_SIZE]);
-const _: () = assert!(std::mem::size_of::<Bucket>() == 64);
+/// bucket に入るエントリ。`#[repr(C)]` で u32 の欄だけからなり、並行に読み書きするときは
+/// bucket を 32bit の語の並びとして atomic に扱う (`Bucket::words`)。
+///
+/// # Safety
+/// 実装する型は u32 (と u32 の `repr(transparent)`) の欄だけからなる `#[repr(C)]` の構造体で、
+/// 詰め物が無く、どのビット列も正しい値であること (`Bucket::from_words` / `to_words` が依存する)。
+unsafe trait Slot: Copy + Default {}
+// SAFETY: Entry は u32 の欄だけの #[repr(C)]
+unsafe impl Slot for Entry {}
+// SAFETY: FinalEntry は u32 と PackedHand (u32 の repr(transparent)) の欄だけの #[repr(C)]
+unsafe impl Slot for FinalEntry {}
+const _: () = assert!(
+    std::mem::size_of::<[Entry; BUCKET_SIZE]>() == 4 * BUCKET_WORDS
+        && std::mem::size_of::<[FinalEntry; BUCKET_SIZE]>() == 4 * BUCKET_WORDS
+        && std::mem::align_of::<Entry>() == 4
+        && std::mem::align_of::<FinalEntry>() == 4
+);
 
-/// 証明駒・反証駒の確定値の bucket (エントリ 20 byte × 3 = キャッシュライン 1 本)
-#[derive(Clone, Copy, Default)]
+/// エントリ 20 byte × 3 と版数 (キャッシュライン 1 本)。
+///
+/// 1 スレッドで使う間は、エントリをそのまま読み書きする (語ごとの atomic や版数の確認は、子を引くたびの
+/// 処理を数 % 重くする)。複数のスレッドが同時に使う間 (`MateTable::concurrent`) は seqlock にする:
+/// 書く側は版数を奇数にしてから書き、偶数に戻す (書く側どうしは奇数にする CAS で排他する)。
+/// 読む側は版数が偶数で、読む前後で変わっていなければ書きかけでない値を読めたとみなす。
+/// 書きかけの値を確定値として読むと結論を誤るので、ロックを取らない読みでも整合を保つ。
 #[repr(C, align(64))]
-struct FinalBucket([FinalEntry; FINAL_BUCKET_SIZE]);
+struct Bucket<E> {
+    entries: UnsafeCell<[E; BUCKET_SIZE]>,
+    version: AtomicU32,
+}
+const _: () = assert!(std::mem::size_of::<Bucket<Entry>>() == 64);
+const _: () = assert!(std::mem::size_of::<Bucket<FinalEntry>>() == 64);
+
+// SAFETY: エントリを複数のスレッドから同時に触るのは `MateTable::concurrent` が真の間だけで、そのときは
+// `words` の AtomicU32 越しにだけ読み書きする (書く側は版数で排他する)。偽の間は 1 スレッドだけが使う
+// (`MateTable` を共有するのは `DfpnSolver::run_parallel` が `set_concurrent(true)` にしてからスレッドを起こし、
+// すべて join してから偽に戻すときだけ)。どちらでも、同じ語への非 atomic な読み書きが並行に起きることはない。
+unsafe impl<E: Send> Sync for Bucket<E> {}
+
+impl<E: Slot> Default for Bucket<E> {
+    fn default() -> Self {
+        Self {
+            entries: UnsafeCell::new([E::default(); BUCKET_SIZE]),
+            version: AtomicU32::new(0),
+        }
+    }
+}
+
+/// 書き終えたら (書き換えの関数が panic しても) 版数を偶数に戻す。奇数のまま残すとほかのスレッドが回り続ける
+struct Unlock<'a>(&'a AtomicU32, u32);
+
+impl Drop for Unlock<'_> {
+    fn drop(&mut self) {
+        self.0.store(self.1.wrapping_add(2), Ordering::Release);
+    }
+}
+
+impl<E: Slot> Bucket<E> {
+    /// エントリを 32bit の語の並びとして atomic に読み書きする
+    fn words(&self) -> &[AtomicU32; BUCKET_WORDS] {
+        // SAFETY: `[E; BUCKET_SIZE]` は u32 の欄だけからなる `#[repr(C)]` の構造体の配列で、大きさは
+        // `[u32; BUCKET_WORDS]` と同じ、境界は 4 (上の const assert)。AtomicU32 は u32 と同じ大きさ・境界を持つ。
+        // 参照は self と同じ間だけ生き、非 atomic な読み書きと並行には使わない (`Sync` の説明)。
+        unsafe { &*(self.entries.get() as *const [AtomicU32; BUCKET_WORDS]) }
+    }
+
+    fn snapshot_words(&self) -> [u32; BUCKET_WORDS] {
+        let words = self.words();
+        std::array::from_fn(|i| words[i].load(Ordering::Relaxed))
+    }
+
+    fn from_words(words: [u32; BUCKET_WORDS]) -> [E; BUCKET_SIZE] {
+        // SAFETY: 大きさが同じで (const assert)、E は u32 の欄だけからなるので、どの語の並びも正しい値になる。
+        // 読み出し先の境界 4 は `[u32; _]` と同じ。
+        unsafe { std::ptr::read(words.as_ptr() as *const [E; BUCKET_SIZE]) }
+    }
+
+    fn to_words(entries: &[E; BUCKET_SIZE]) -> [u32; BUCKET_WORDS] {
+        // SAFETY: from_words と同じ (詰め物の無い u32 だけの並び)
+        unsafe { std::ptr::read(entries.as_ptr() as *const [u32; BUCKET_WORDS]) }
+    }
+
+    /// 読む前後で版数が変わらなかった (書きかけでない) エントリの写し。複数のスレッドが使う間だけ呼ぶ
+    fn consistent(&self) -> [E; BUCKET_SIZE] {
+        loop {
+            let before = self.version.load(Ordering::Acquire);
+            if before & 1 == 0 {
+                let words = self.snapshot_words();
+                fence(Ordering::Acquire);
+                if self.version.load(Ordering::Relaxed) == before {
+                    return Self::from_words(words);
+                }
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// 排他を取ってエントリを `f` で書き換え、変わった語だけを書き戻す。複数のスレッドが使う間だけ呼ぶ
+    fn locked<R>(&self, f: impl FnOnce(&mut [E; BUCKET_SIZE]) -> R) -> R {
+        let before = loop {
+            let v = self.version.load(Ordering::Relaxed);
+            if v & 1 == 0
+                && self
+                    .version
+                    .compare_exchange_weak(v, v + 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+            {
+                break v;
+            }
+            std::hint::spin_loop();
+        };
+        let _unlock = Unlock(&self.version, before);
+        fence(Ordering::Release);
+        let old = self.snapshot_words();
+        let mut entries = Self::from_words(old);
+        let result = f(&mut entries);
+        for ((slot, w), o) in self.words().iter().zip(Self::to_words(&entries)).zip(old) {
+            if w != o {
+                slot.store(w, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+}
 
 /// df-pn の置換表
 ///
@@ -308,13 +456,15 @@ struct FinalBucket([FinalEntry; FINAL_BUCKET_SIZE]);
 /// 未確定値が 1 つの bucket に集まって追い出し合う。`PIECES = true` で引くと子の局面ごとに
 /// キャッシュライン 2 本 (`false` は 1 本) を読む。
 pub(super) struct MateTable {
-    buckets: Vec<Bucket>,
+    buckets: Vec<Bucket<Entry>>,
     /// 証明駒・反証駒の確定値。`buckets` と同じ数か、作らないときは空。
-    final_buckets: Vec<FinalBucket>,
+    final_buckets: Vec<Bucket<FinalEntry>>,
     /// 現在の世代。`clear` で進める (表全体を書き換えずに空にする)。
     generation: u8,
     /// 持駒違いの局面に確定値を流用するか (差分検査のためにテストからだけ切る)
     superiority: bool,
+    /// 複数のスレッドが同時に読み書きしているか (`Bucket` の読み書きの方法を切り替える)
+    concurrent: bool,
 }
 
 impl MateTable {
@@ -322,24 +472,19 @@ impl MateTable {
     /// `proof_pieces` なら確定値の表も (同じ予算の中に) 作り、`PIECES = true` で使えるようにする。
     pub fn new(size_mb: usize, proof_pieces: bool) -> Self {
         let bytes = size_mb.saturating_mul(1024 * 1024);
-        let per_bucket = std::mem::size_of::<Bucket>()
-            + if proof_pieces {
-                std::mem::size_of::<FinalBucket>()
-            } else {
-                0
-            };
+        let per_bucket = std::mem::size_of::<Bucket<Entry>>() * if proof_pieces { 2 } else { 1 };
         Self::with_bucket_count((bytes / per_bucket).clamp(1, u32::MAX as usize), proof_pieces)
     }
 
     fn with_bucket_count(bucket_count: usize, proof_pieces: bool) -> Self {
         Self {
-            buckets: vec![Bucket::default(); bucket_count],
-            final_buckets: vec![
-                FinalBucket::default();
-                if proof_pieces { bucket_count } else { 0 }
-            ],
+            buckets: (0..bucket_count).map(|_| Bucket::default()).collect(),
+            final_buckets: (0..if proof_pieces { bucket_count } else { 0 })
+                .map(|_| Bucket::default())
+                .collect(),
             generation: 1,
             superiority: true,
+            concurrent: false,
         }
     }
 
@@ -356,6 +501,37 @@ impl MateTable {
         self
     }
 
+    /// 複数のスレッドから同時に読み書きする間は `true` にする。`false` の間は 1 スレッドだけが使うこと
+    /// (`Bucket` の `Sync` の前提)。
+    pub fn set_concurrent(&mut self, concurrent: bool) {
+        self.concurrent = concurrent;
+    }
+
+    /// bucket のエントリを読んで `f` に渡す
+    fn read<E: Slot, R>(&self, bucket: &Bucket<E>, f: impl FnOnce(&[E; BUCKET_SIZE]) -> R) -> R {
+        if self.concurrent {
+            f(&bucket.consistent())
+        } else {
+            // SAFETY: concurrent が偽の間はこの表を 1 スレッドだけが使い (`Bucket` の `Sync` の説明)、
+            // f は表に触らないので、この参照と並行・重複する書き込みは無い。
+            f(unsafe { &*bucket.entries.get() })
+        }
+    }
+
+    /// bucket のエントリを `f` で書き換える
+    fn modify<E: Slot, R>(
+        &self,
+        bucket: &Bucket<E>,
+        f: impl FnOnce(&mut [E; BUCKET_SIZE]) -> R,
+    ) -> R {
+        if self.concurrent {
+            bucket.locked(f)
+        } else {
+            // SAFETY: read と同じ。f が終わるまでこの bucket への参照はほかに無い。
+            f(unsafe { &mut *bucket.entries.get() })
+        }
+    }
+
     /// 確定値の表を持つか (`PIECES = true` で使えるか)
     pub fn has_proof_pieces(&self) -> bool {
         !self.final_buckets.is_empty()
@@ -368,8 +544,8 @@ impl MateTable {
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
-            self.buckets.fill(Bucket::default());
-            self.final_buckets.fill(FinalBucket::default());
+            self.buckets.iter_mut().for_each(|b| *b = Bucket::default());
+            self.final_buckets.iter_mut().for_each(|b| *b = Bucket::default());
             self.generation = 1;
         }
     }
@@ -396,11 +572,12 @@ impl MateTable {
     #[inline]
     pub fn prefetch<const PIECES: bool>(&self, key: TableKey) {
         use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-        let exact = &self.buckets[self.exact_index(key)] as *const Bucket as *const i8;
+        let exact = &self.buckets[self.exact_index(key)] as *const Bucket<Entry> as *const i8;
         // SAFETY: exact は self.buckets の生存中の要素を指す。prefetch はメモリの内容を読み書きしない。
         unsafe { _mm_prefetch(exact, _MM_HINT_T0) };
         if PIECES {
-            let fin = &self.final_buckets[self.final_index(key)] as *const FinalBucket as *const i8;
+            let fin = &self.final_buckets[self.final_index(key)] as *const Bucket<FinalEntry>
+                as *const i8;
             // SAFETY: fin は self.final_buckets の生存中の要素を指す。prefetch は内容を読み書きしない。
             unsafe { _mm_prefetch(fin, _MM_HINT_T0) };
         }
@@ -419,47 +596,48 @@ impl MateTable {
         let generation = self.generation;
         if PIECES {
             let hand = PackedHand::new(key.hand);
-            let mut proven: Option<&FinalEntry> = None;
-            let mut disproven = None;
-            for e in &self.final_buckets[self.final_index(key)].0 {
-                if !e.has_board(key.board) || e.is_empty(generation) {
-                    continue;
-                }
-                if !(self.superiority || e.hand == hand) {
-                    continue;
-                }
-                if e.proven {
-                    if hand.covers(e.hand) && proven.is_none_or(|p| e.mate_len < p.mate_len) {
-                        proven = Some(e);
+            let found = self.read(&self.final_buckets[self.final_index(key)], |entries| {
+                let mut proven: Option<&FinalEntry> = None;
+                let mut disproven = None;
+                for e in entries {
+                    if !e.has_board(key.board) || e.is_empty(generation) {
+                        continue;
                     }
-                } else if e.hand.covers(hand) {
-                    disproven = Some(e);
+                    if !(self.superiority || e.hand == hand) {
+                        continue;
+                    }
+                    if e.proven() {
+                        if hand.covers(e.hand) && proven.is_none_or(|p| e.mate_len() < p.mate_len())
+                        {
+                            proven = Some(e);
+                        }
+                    } else if e.hand.covers(hand) {
+                        disproven = Some(e);
+                    }
                 }
-            }
-            if let Some(e) = proven.or(disproven) {
-                return Some(e.value());
+                proven.or(disproven).map(|e| e.value())
+            });
+            if found.is_some() {
+                return found;
             }
         }
-        self.buckets[self.exact_index(key)]
-            .0
-            .iter()
-            .find(|e| e.matches(key, generation))
-            .map(|e| TableValue {
+        self.read(&self.buckets[self.exact_index(key)], |entries| {
+            entries.iter().find(|e| e.matches(key, generation)).map(|e| TableValue {
                 pn: e.pn_dn().0,
                 dn: e.pn_dn().1,
                 mate_len: e.mate_len(),
                 min_depth: e.min_depth(),
                 hand: key.hand,
             })
+        })
     }
 
     /// 同じ局面 (持駒も同じ) の完全一致のエントリがあるか
     #[cfg(test)]
     pub fn contains_exact(&self, key: TableKey) -> bool {
-        self.buckets[self.exact_index(key)]
-            .0
-            .iter()
-            .any(|e| e.matches(key, self.generation))
+        self.read(&self.buckets[self.exact_index(key)], |entries| {
+            entries.iter().any(|e| e.matches(key, self.generation))
+        })
     }
 
     /// 局面 `key` の値を書く。`searched` はこの局面以下の探索ノード数。
@@ -473,27 +651,46 @@ impl MateTable {
     /// 新しいエントリの探索量の方が少なくても書く: 探索量は読み直すたびに増えるだけなので、比べて書かないでいると、前に読んで今は
     /// 使わない大きなエントリが居座り、今読んでいる局面の値を書けずに同じ局面を読み直し続ける
     /// (表が小さいほど起こる)。
-    pub fn store<const PIECES: bool>(&mut self, key: TableKey, value: TableValue, searched: u64) {
+    pub fn store<const PIECES: bool>(&self, key: TableKey, value: TableValue, searched: u64) {
         let searched = u32::try_from(searched).unwrap_or(u32::MAX).max(1);
         let generation = self.generation;
         let is_final = value.pn == 0 || value.dn == 0;
-        let exact_index = self.exact_index(key);
-        let bucket = &mut self.buckets[exact_index].0;
-        let same = bucket.iter_mut().find(|e| e.matches(key, generation));
+        let bucket = &self.buckets[self.exact_index(key)];
 
         if PIECES && is_final {
-            // 確定したので同じ局面の完全一致のエントリは要らない (引くときは確定値の表を先に見る)
-            let mut searched = searched;
-            if let Some(e) = same {
-                searched = searched.saturating_add(e.searched());
-                e.set_searched(0, generation);
+            // 確定したので同じ局面の完全一致のエントリは要らない (引くときは確定値の表を先に見る)。
+            // 確定値を書いてから消す (逆順だと、間で引いたほかのスレッドからどちらも見えない)。
+            // 完全一致のエントリが無ければ書かない (ほとんどの確定値は持たず、排他を取るだけ損)
+            let same = self.read(bucket, |entries| {
+                entries.iter().find(|e| e.matches(key, generation)).map(Entry::searched)
+            });
+            self.store_final(key, value, same.map_or(searched, |s| searched.saturating_add(s)));
+            if same.is_some() {
+                self.modify(bucket, |entries| {
+                    if let Some(e) = entries.iter_mut().find(|e| e.matches(key, generation)) {
+                        e.set_searched(0, generation);
+                    }
+                });
             }
-            self.store_final(key, value, searched);
             return;
         }
 
         let new_entry = Entry::new(key.key, &value, searched, generation);
-        if let Some(e) = same {
+        self.modify(bucket, |bucket| {
+            Self::store_exact(bucket, key, &value, new_entry, searched, generation)
+        });
+    }
+
+    fn store_exact(
+        bucket: &mut [Entry; BUCKET_SIZE],
+        key: TableKey,
+        value: &TableValue,
+        new_entry: Entry,
+        searched: u32,
+        generation: u8,
+    ) {
+        let is_final = value.pn == 0 || value.dn == 0;
+        if let Some(e) = bucket.iter_mut().find(|e| e.matches(key, generation)) {
             if e.is_final() && !is_final {
                 return;
             }
@@ -518,36 +715,37 @@ impl MateTable {
             new_entry;
     }
 
-    fn store_final(&mut self, key: TableKey, value: TableValue, searched: u32) {
+    fn store_final(&self, key: TableKey, value: TableValue, searched: u32) {
         let generation = self.generation;
         let hand = PackedHand::new(if self.superiority {
             value.hand
         } else {
             key.hand
         });
-        let proven = value.pn == 0;
-        let final_index = self.final_index(key);
-        let bucket = &mut self.final_buckets[final_index].0;
+        let new_entry =
+            FinalEntry::new(key.board, hand, searched, value.mate_len, value.pn == 0, generation);
+        self.modify(&self.final_buckets[self.final_index(key)], |bucket| {
+            Self::store_final_entry(bucket, key, new_entry, generation)
+        });
+    }
+
+    fn store_final_entry(
+        bucket: &mut [FinalEntry; BUCKET_SIZE],
+        key: TableKey,
+        new_entry: FinalEntry,
+        generation: u8,
+    ) {
         // 同じ持駒の条件の同じ確定値があればまとめる。詰み手数は短い証明を残す
         if let Some(e) = bucket.iter_mut().find(|e| {
             e.has_board(key.board)
-                && e.hand == hand
-                && e.proven == proven
+                && e.hand == new_entry.hand
+                && e.proven() == new_entry.proven()
                 && !e.is_empty(generation)
         }) {
-            e.searched = e.searched.saturating_add(searched);
-            e.mate_len = e.mate_len.min(value.mate_len);
+            e.searched = e.searched.saturating_add(new_entry.searched);
+            e.set_mate_len(e.mate_len().min(new_entry.mate_len()));
             return;
         }
-        let new_entry = FinalEntry {
-            board_lo: key.board as u32,
-            board_hi: (key.board >> 32) as u32,
-            hand,
-            searched,
-            mate_len: value.mate_len,
-            proven,
-            generation,
-        };
         if let Some(e) = bucket.iter_mut().find(|e| e.is_empty(generation)) {
             *e = new_entry;
             return;
@@ -562,6 +760,7 @@ impl MateTable {
 mod tests {
     use super::*;
     use crate::types::PieceType;
+    use std::sync::atomic::AtomicU64;
 
     fn value(pn: u32, dn: u32) -> TableValue {
         TableValue {
@@ -652,7 +851,7 @@ mod tests {
 
     #[test]
     fn final_value_is_not_overwritten_by_unknown() {
-        let mut table = MateTable::new(1, true);
+        let table = MateTable::new(1, true);
         let k = key(7, Hand::EMPTY);
         table.store::<true>(k, proven(3, Hand::EMPTY), 1);
         table.store::<true>(k, value(2, 2), 100);
@@ -662,7 +861,7 @@ mod tests {
     #[test]
     fn full_bucket_keeps_final_entries() {
         // 1 bucket だけの表で、確定値が未確定値に追い出されないことを確かめる
-        let mut table = MateTable::with_buckets(1);
+        let table = MateTable::with_buckets(1);
         table.store::<true>(key(1, Hand::EMPTY), proven(1, Hand::EMPTY), 1);
         for board in 2..=10u64 {
             table.store::<true>(key(board, Hand::EMPTY), value(1, 1), 1_000);
@@ -673,7 +872,7 @@ mod tests {
     #[test]
     fn full_bucket_takes_the_new_entry_even_if_it_searched_less() {
         // 探索量の最も少ない未確定値 (局面 2) が置き換わり、ほかは残る
-        let mut table = MateTable::with_buckets(1);
+        let table = MateTable::with_buckets(1);
         for (board, searched) in [(1u64, 300), (2, 100), (3, 400)] {
             table.store::<true>(key(board, Hand::EMPTY), value(1, 1), searched);
         }
@@ -688,7 +887,7 @@ mod tests {
     #[test]
     fn bucket_full_of_final_values_takes_an_unknown_value() {
         // 完全一致の表が確定値で埋まっていれば、探索量の最も少ない確定値が未確定値に置き換わる
-        let mut table = MateTable::with_bucket_count(1, false);
+        let table = MateTable::with_bucket_count(1, false);
         for (board, searched) in [(1u64, 300), (2, 100), (3, 400)] {
             table.store::<false>(key(board, Hand::EMPTY), proven(1, Hand::EMPTY), searched);
         }
@@ -703,7 +902,7 @@ mod tests {
         // 確定値の表 (同じ盤面の bucket) が探索量の多い確定値で埋まっていても、新しい確定値を書く
         let gold = hand(&[PieceType::Gold]);
         let silver = hand(&[PieceType::Silver]);
-        let mut table = MateTable::with_buckets(1);
+        let table = MateTable::with_buckets(1);
         for (board, searched) in [(1u64, 3_000), (2, 1_000), (3, 2_000)] {
             table.store::<true>(key(board, gold), proven(3, gold), searched);
         }
@@ -722,7 +921,7 @@ mod tests {
         let silver = hand(&[PieceType::Silver]);
 
         // 金で詰む → 金銀でも詰む。銀だけ・持駒なしでは分からない
-        let mut table = MateTable::new(1, true);
+        let table = MateTable::new(1, true);
         table.store::<true>(key(9, gold), proven(5, gold), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)), Some(proven(5, gold)));
         assert_eq!(table.probe::<true>(key(9, silver)), None);
@@ -731,19 +930,19 @@ mod tests {
         assert_eq!(table.probe::<true>(key(10, gold_silver)), None);
 
         // 金銀で詰まない → 金だけ・持駒なしでも詰まない。金銀を超える持駒では分からない
-        let mut table = MateTable::new(1, true);
+        let table = MateTable::new(1, true);
         table.store::<true>(key(9, gold_silver), disproven(gold_silver), 1);
         assert_eq!(table.probe::<true>(key(9, gold)), Some(disproven(gold_silver)));
         assert_eq!(table.probe::<true>(key(9, Hand::EMPTY)), Some(disproven(gold_silver)));
         assert_eq!(table.probe::<true>(key(9, gold_silver.add(PieceType::Pawn))), None);
 
         // 未確定値は持駒が同じときだけ
-        let mut table = MateTable::new(1, true);
+        let table = MateTable::new(1, true);
         table.store::<true>(key(9, gold), value(3, 3), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)), None);
 
         // 流用を止めた表では持駒が同じときだけ
-        let mut table = MateTable::new(1, true).without_superiority();
+        let table = MateTable::new(1, true).without_superiority();
         table.store::<true>(key(9, gold), proven(5, gold), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)), None);
         assert_eq!(table.probe::<true>(key(9, gold)), Some(proven(5, gold)));
@@ -755,7 +954,7 @@ mod tests {
         // 金だけを持つ局面にも流用できる
         let gold = hand(&[PieceType::Gold]);
         let gold_silver = hand(&[PieceType::Gold, PieceType::Silver]);
-        let mut table = MateTable::with_buckets(1);
+        let table = MateTable::with_buckets(1);
         table.store::<true>(key(9, gold_silver), value(2, 2), 1);
         table.store::<true>(key(9, gold_silver), proven(5, gold), 1);
         assert!(!table.contains_exact(key(9, gold_silver)));
@@ -763,7 +962,7 @@ mod tests {
         assert_eq!(table.probe::<true>(key(9, gold)), Some(proven(5, gold)));
 
         // 反証駒は局面の持駒より多くてよい
-        let mut table = MateTable::with_buckets(1);
+        let table = MateTable::with_buckets(1);
         table.store::<true>(key(9, gold), disproven(gold_silver), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)), Some(disproven(gold_silver)));
     }
@@ -772,7 +971,7 @@ mod tests {
     fn exact_use_reuses_only_the_same_position() {
         let gold = hand(&[PieceType::Gold]);
         let gold_silver = hand(&[PieceType::Gold, PieceType::Silver]);
-        let mut table = MateTable::new(1, false);
+        let table = MateTable::new(1, false);
         assert!(!table.has_proof_pieces());
         table.store::<false>(key(9, gold), proven(5, gold), 1);
         assert_eq!(table.probe::<false>(key(9, gold)), Some(proven(5, gold)));
@@ -786,7 +985,7 @@ mod tests {
     fn shortest_reusable_mate_is_returned() {
         let gold = hand(&[PieceType::Gold]);
         let gold_silver = hand(&[PieceType::Gold, PieceType::Silver]);
-        let mut table = MateTable::new(1, true);
+        let table = MateTable::new(1, true);
         table.store::<true>(key(9, gold), proven(9, gold), 1);
         table.store::<true>(key(9, gold_silver), proven(5, gold_silver), 1);
         assert_eq!(table.probe::<true>(key(9, gold_silver)).map(|v| v.mate_len), Some(5));
@@ -802,8 +1001,53 @@ mod tests {
     }
 
     #[test]
-    fn unknown_values_are_matched_by_the_lower_55_bits() {
+    fn concurrent_stores_and_probes_return_only_written_values() {
+        // 1 bucket に 4 スレッドが読み書きし、引けた値がいつもどれかが書いた値の組 (キーから決まる) であることを確かめる。
+        // 書き込みは短く重なりにくいので、版数による排他を外しても落ちるとは限らない (それは実装を読んで確かめる)
         let mut table = MateTable::with_bucket_count(1, false);
+        table.set_concurrent(true);
+        let key_of = |i: u64| exact(i.wrapping_mul(0x0123_4567_89AB_CDEF) | i);
+        let value_of = |k: u64| {
+            if k & 1 == 1 {
+                proven((k % 1000) as u16, Hand::EMPTY)
+            } else {
+                TableValue {
+                    pn: (k as u32) | 1,
+                    dn: (k >> 32) as u32 | 1,
+                    mate_len: 0,
+                    min_depth: (k % 2000) as u16,
+                    hand: Hand::EMPTY,
+                }
+            }
+        };
+        let hits = [AtomicU64::new(0), AtomicU64::new(0)];
+        std::thread::scope(|s| {
+            for t in 0..4u64 {
+                let (table, hits) = (&table, &hits);
+                s.spawn(move || {
+                    let mut x = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(t + 1);
+                    for _ in 0..100_000 {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        let k = key_of((x >> 8) % 16);
+                        if x & 1 == 0 {
+                            table.store::<false>(k, value_of(k.key), 1);
+                        } else if let Some(v) = table.probe::<false>(k) {
+                            assert_eq!(v, value_of(k.key));
+                            hits[(k.key & 1) as usize].fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        // 未確定値と確定値の両方を引けている
+        assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) > 0));
+    }
+
+    #[test]
+    fn unknown_values_are_matched_by_the_lower_55_bits() {
+        let table = MateTable::with_bucket_count(1, false);
         table.store::<false>(exact(5), value(1, 1), 1);
         for bit in 32..55 {
             assert_eq!(table.probe::<false>(exact(5 | 1 << bit)), None, "bit {bit}");
@@ -813,7 +1057,7 @@ mod tests {
 
     #[test]
     fn final_values_are_matched_by_the_whole_key() {
-        let mut table = MateTable::with_bucket_count(1, false);
+        let table = MateTable::with_bucket_count(1, false);
         table.store::<false>(exact(5), proven(3, Hand::EMPTY), 1);
         table.store::<false>(exact(6), disproven(Hand::EMPTY), 1);
         assert_eq!(table.probe::<false>(exact(5 | 1 << 63)), None);

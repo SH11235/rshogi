@@ -25,7 +25,7 @@
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::MateProgress;
 use super::state::FULL_HAND;
@@ -51,7 +51,7 @@ const CHECK_INTERVAL: u64 = 1024;
 /// 経路上の各局面の候補手の合計で、超えたときだけ伸ばす (伸ばした領域はソルバーが持ち回る)。
 const CHILDREN_RESERVE: usize = 1 << 16;
 /// 進捗を知らせる間隔 (ミリ秒)
-const PROGRESS_INTERVAL_MS: u64 = 1000;
+pub(super) const PROGRESS_INTERVAL_MS: u64 = 1000;
 
 /// 探索の打ち切り。結果は Unknown になる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +184,15 @@ impl NodeArgs {
 /// 停止条件と進捗通知
 pub(super) struct Budget<'a> {
     pub stop: &'a AtomicBool,
-    /// 0 は無制限
+    /// 並列に解くとき、ほかのスレッドが根の結論を出したら立つ
+    pub halt: Option<&'a AtomicBool>,
+    /// 並列に解くとき、どれかのスレッドが panic したら立つ。根の結論を出したスレッドも見続ける
+    /// (`halt` は詰み手順の復元のために外す)。
+    pub cancel: Option<&'a AtomicBool>,
+    /// 並列に解くとき、全スレッドのノード数の合計とその上限 (0 は無制限)。進捗も合計で知らせる
+    /// (`CHECK_INTERVAL` ごとに足し込むので、上限はスレッド数 × `CHECK_INTERVAL` まで超えうる)。
+    pub shared_nodes: Option<(&'a AtomicU64, u64)>,
+    /// このスレッドのノード数の上限。0 は無制限
     pub node_limit: u64,
     /// 0 は無制限
     pub time_limit_ms: u64,
@@ -237,11 +245,13 @@ impl<M> Scratch<M> {
 /// `PIECES` なら確定値を証明駒・反証駒で置換表に書き、持駒違いの局面に流用する
 /// (難しい問題でノードが減るが、置換表を引くたびに読む量が増えて 1 ノードあたりは重い)。
 pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
-    table: &'a mut MateTable,
+    table: &'a MateTable,
     scratch: &'a mut Scratch<S::Mv>,
     /// 攻め方 (ルートの手番)。置換表の持駒はこちらの持駒で表す
     attacker: Color,
     nodes: u64,
+    /// `budget.shared_nodes` に足し込み済みのノード数
+    reported: u64,
     next_check: u64,
     next_progress_ms: u64,
     budget: Budget<'a>,
@@ -251,6 +261,9 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     estimate: bool,
     /// 攻め方の局面の dn を子の和でなく WPNS で数えるときの、子 1 つあたりの加算量 (0 なら和で数える)
     weak_disproof_step: u64,
+    /// 1+ε の余裕として 2 番目の子の φ に掛ける倍率 (2^16 倍の固定小数点)。`None` は既定の 1/3。
+    /// 子を選ぶたびに計算するので、割り算を避ける (既定は定数の割り算で掛け算になる)。
+    slack: Option<u64>,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -280,7 +293,7 @@ fn clamp_sum(sum: u64, has_inf: bool) -> u32 {
 
 impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     pub fn new(
-        table: &'a mut MateTable,
+        table: &'a MateTable,
         scratch: &'a mut Scratch<S::Mv>,
         attacker: Color,
         budget: Budget<'a>,
@@ -294,6 +307,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             scratch,
             attacker,
             nodes: 0,
+            reported: 0,
             // 最初のノードで停止フラグを確かめる (開始前に立っていたら何も返さない)
             next_check: 0,
             next_progress_ms: PROGRESS_INTERVAL_MS,
@@ -301,6 +315,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             capture_depth: None,
             estimate: false,
             weak_disproof_step: 0,
+            slack: None,
         }
     }
 
@@ -315,6 +330,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 和では dn が膨らむ。`step` は子の初期値の単位にそろえる (`MateState::initial_pn_dn`)。0 は 1 として扱う。
     pub fn count_disproof_weakly(&mut self, step: u32) {
         self.weak_disproof_step = u64::from(step.max(1));
+    }
+
+    /// 1+ε の余裕を 2 番目の子の φ の `num / den` にする (並列に解くスレッドごとに探索をずらす)
+    pub fn set_threshold_slack(&mut self, num: u64, den: u64) {
+        self.slack = Some((num << 16) / den.max(1));
     }
 
     /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
@@ -348,6 +368,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         &self.scratch.proven
     }
 
+    /// 根の結論が出たので、ほかのスレッドを止める。このスレッドはこの後 (詰み手順の復元) も止めない。
+    pub fn halt_others(&mut self) {
+        if let Some(halt) = self.budget.halt.take() {
+            halt.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn count_node(&mut self) -> Result<(), Abort> {
         self.nodes += 1;
         if self.budget.node_limit != 0 && self.nodes > self.budget.node_limit {
@@ -355,7 +382,22 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         }
         if self.nodes >= self.next_check {
             self.next_check = self.nodes + CHECK_INTERVAL;
-            if self.budget.stop.load(Ordering::Relaxed) {
+            let total = match self.budget.shared_nodes {
+                Some((shared, limit)) => {
+                    let delta = self.nodes - self.reported;
+                    self.reported = self.nodes;
+                    let total = shared.fetch_add(delta, Ordering::Relaxed) + delta;
+                    if limit != 0 && total > limit {
+                        return Err(Abort);
+                    }
+                    total
+                }
+                None => self.nodes,
+            };
+            if self.budget.stop.load(Ordering::Relaxed)
+                || self.budget.halt.is_some_and(|h| h.load(Ordering::Relaxed))
+                || self.budget.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+            {
                 return Err(Abort);
             }
             let elapsed_ms = self.budget.start.elapsed().as_millis() as u64;
@@ -365,7 +407,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             if elapsed_ms >= self.next_progress_ms {
                 self.next_progress_ms = elapsed_ms + PROGRESS_INTERVAL_MS;
                 (self.budget.progress)(MateProgress {
-                    nodes: self.nodes,
+                    nodes: total,
                     elapsed_ms,
                 });
             }
@@ -727,7 +769,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         // 1+ε (Pawlewicz & Lew 2007): 2 番目の子の φ を 1 超えた時点で戻ると、最善の子が入れ替わるたびに
         // 子を少し読んでは戻る往復を繰り返す。2 番目の φ の約 1/3 (最低 1) の余裕を持たせる (経験的に 1/3 前後が良く、
         // 1/2 以上では増える)。
-        let child_thphi = thphi.min(second_phi.saturating_add((second_phi / 3).max(1)));
+        let widen = match self.slack {
+            None => u64::from(second_phi / 3),
+            Some(q16) => (u64::from(second_phi) * q16) >> 16,
+        }
+        .max(1);
+        let child_thphi = thphi.min((u64::from(second_phi) + widen).min(u64::from(PN_INF)) as u32);
         let child_thdelta = if thdelta == PN_INF {
             PN_INF
         } else {

@@ -22,7 +22,8 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher};
 use table::MateTable;
@@ -114,7 +115,21 @@ pub struct DfpnSolver {
     scratch: Scratch<Move>,
     mode: MateMode,
     nodes: u64,
+    /// 探索するスレッド数 (1 なら呼び出したスレッドだけで解く)
+    threads: usize,
+    /// 2 番目以降のスレッドの作業領域
+    helper_scratch: Vec<Scratch<Move>>,
+    /// 並列に解くとき、最初に 1 スレッドで解くノード数
+    parallel_start: u64,
 }
+
+/// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
+const PARALLEL_START_NODES: u64 = 10_000;
+
+/// 2 番目以降のスレッドの 1+ε の余裕 (2 番目の子の φ に掛ける分数)。1 番目は既定の 1/3。
+/// 局面ごとのノード数は探索の経路で大きく変わるので、少しずらしたスレッドどうしで置換表を共有すると、
+/// 先に解けたスレッドの結論を使える
+const HELPER_SLACKS: [(u64, u64); 7] = [(1, 4), (2, 5), (1, 5), (3, 10), (3, 8), (2, 7), (9, 20)];
 
 impl DfpnSolver {
     /// 置換表を `hash_mb` MB で確保した、既定のモード ([`MateMode::Auto`]) のソルバーを作る
@@ -129,7 +144,32 @@ impl DfpnSolver {
             scratch: Scratch::new(),
             mode,
             nodes: 0,
+            threads: 1,
+            helper_scratch: Vec::new(),
+            parallel_start: PARALLEL_START_NODES,
         }
+    }
+
+    /// 探索するスレッド数を設定する (最低 1)。置換表は全スレッドで共有する。
+    ///
+    /// スレッドの無い wasm (`wasm-threads` なし) では常に 1。`wasm-threads` では補助スレッドを rayon の
+    /// スレッドプールで動かすので、プールを初期化 (`initThreadPool`) した Worker から solve を呼ぶ。
+    /// プールが埋まっていると補助スレッドは空くまで動かない (根の結論が出ていれば動き始めてすぐ止まる)。
+    ///
+    /// 2 スレッド以上では、ノード数の上限を全スレッドの合計に掛けるが、合計は一定間隔でしか数えないので
+    /// 上限をスレッド数 × 1024 ノードまで超えることがある。ノード数は決定的でなくなる。
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = if cfg!(all(target_arch = "wasm32", not(feature = "wasm-threads"))) {
+            1
+        } else {
+            threads.max(1)
+        };
+    }
+
+    /// 並列の経路を小さな局面でも通すため、最初から複数スレッドで解く
+    #[cfg(test)]
+    fn parallel_from_the_start(&mut self) {
+        self.parallel_start = 0;
     }
 
     /// 探索のモード
@@ -178,10 +218,7 @@ impl DfpnSolver {
                     ..*limits
                 };
                 let decided = self.run::<false>(pos, first, start, 0, stop, &mut progress);
-                let exhausted = stop.load(Ordering::Relaxed)
-                    || limits.nodes != 0 && self.nodes > limits.nodes
-                    || limits.time_ms != 0 && start.elapsed().as_millis() as u64 >= limits.time_ms;
-                if decided.is_some() || exhausted {
+                if decided.is_some() || exhausted(limits, start, self.nodes, stop) {
                     decided
                 } else {
                     // 証明駒を使わない段階の置換表の値はそのまま使える
@@ -212,8 +249,42 @@ impl DfpnSolver {
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
+        if self.threads > 1 && nodes < self.parallel_start {
+            // 易しい局面はスレッドを起こす費用の方が大きいので、先に 1 スレッドで解く
+            let first = MateLimits {
+                nodes: match limits.nodes {
+                    0 => self.parallel_start,
+                    n => n.min(self.parallel_start),
+                },
+                ..limits
+            };
+            let decided = self.run_single::<PIECES>(pos, first, start, nodes, stop, progress);
+            if decided.is_some() || exhausted(&limits, start, self.nodes, stop) {
+                return decided;
+            }
+            let nodes = self.nodes;
+            return self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress);
+        }
+        if self.threads > 1 {
+            return self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress);
+        }
+        self.run_single::<PIECES>(pos, limits, start, nodes, stop, progress)
+    }
+
+    fn run_single<const PIECES: bool>(
+        &mut self,
+        pos: &mut Position,
+        limits: MateLimits,
+        start: Instant,
+        nodes: u64,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(MateProgress),
+    ) -> Option<SolveOutcome<Move>> {
         let budget = Budget {
             stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
             node_limit: limits.nodes,
             time_limit_ms: limits.time_ms,
             start,
@@ -221,15 +292,235 @@ impl DfpnSolver {
         };
         let attacker = pos.side_to_move();
         let mut searcher =
-            Searcher::<_, PIECES>::new(&mut self.table, &mut self.scratch, attacker, budget);
+            Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         searcher.continue_from(nodes);
-        if self.mode != MateMode::Speed {
-            searcher.estimate_initial_values();
-            searcher.count_disproof_weakly(state::PNDN_UNIT);
-        }
+        configure(&mut searcher, self.mode);
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();
         result
+    }
+
+    /// 置換表を共有して `threads` 本のスレッドで同じ局面を解く。どれかのスレッドが根の結論を出したら
+    /// ほかを止め、呼び出したスレッドの結果を、無ければ補助スレッドの結果を返す (どれも同じ結論になる)。
+    /// ノード数の上限は全スレッドの合計に掛ける。
+    fn run_parallel<const PIECES: bool>(
+        &mut self,
+        pos: &mut Position,
+        limits: MateLimits,
+        start: Instant,
+        nodes: u64,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(MateProgress),
+    ) -> Option<SolveOutcome<Move>> {
+        let threads = self.threads;
+        self.helper_scratch.resize_with(threads - 1, Scratch::new);
+        self.table.set_concurrent(true);
+        let halt = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        let shared_nodes = AtomicU64::new(nodes);
+        let attacker = pos.side_to_move();
+        let (table, scratch, helper_scratch, mode) =
+            (&self.table, &mut self.scratch, &mut self.helper_scratch, self.mode);
+        let slots: Vec<OnceLock<HelperResult>> =
+            (0..threads - 1).map(|_| OnceLock::new()).collect();
+        let helpers: Vec<Box<dyn FnOnce() + Send + '_>> = helper_scratch
+            .iter_mut()
+            .zip(&slots)
+            .enumerate()
+            .map(|(i, (scratch, slot))| {
+                let mut pos = pos.clone();
+                let (halt, cancel, shared_nodes) = (&halt, &cancel, &shared_nodes);
+                Box::new(move || {
+                    // panic しても結果の欄を埋め、ほかのスレッドを止める (呼び出しスレッドは結果を待つので、
+                    // 埋めないと待ち続けて panic が伝わらない)
+                    struct Done<'a>(&'a OnceLock<HelperResult>, &'a AtomicBool);
+                    impl Drop for Done<'_> {
+                        fn drop(&mut self) {
+                            if self.0.get().is_none() {
+                                self.1.store(true, Ordering::Relaxed);
+                                let _ = self.0.set((None, 0));
+                            }
+                        }
+                    }
+                    let _done = Done(slot, cancel);
+                    let mut quiet = |_| {};
+                    let budget = Budget {
+                        stop,
+                        halt: Some(halt),
+                        cancel: Some(cancel),
+                        shared_nodes: Some((shared_nodes, limits.nodes)),
+                        node_limit: 0,
+                        time_limit_ms: limits.time_ms,
+                        start,
+                        progress: &mut quiet,
+                    };
+                    let mut searcher = Searcher::<_, PIECES>::new(table, scratch, attacker, budget);
+                    configure(&mut searcher, mode);
+                    let (num, den) = HELPER_SLACKS[i % HELPER_SLACKS.len()];
+                    searcher.set_threshold_slack(num, den);
+                    let result = solve_with(&mut searcher, &mut pos);
+                    let _ = slot.set((result, searcher.nodes()));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        let (mut result, mut total) = run_with_helpers(helpers, &cancel, || {
+            let budget = Budget {
+                stop,
+                halt: Some(&halt),
+                cancel: Some(&cancel),
+                shared_nodes: Some((&shared_nodes, limits.nodes)),
+                node_limit: 0,
+                time_limit_ms: limits.time_ms,
+                start,
+                progress: &mut *progress,
+            };
+            let mut searcher = Searcher::<_, PIECES>::new(table, scratch, attacker, budget);
+            configure(&mut searcher, mode);
+            let result = solve_with(&mut searcher, pos);
+            let nodes = searcher.nodes();
+            wait_for_helpers(&slots, &shared_nodes, start, progress);
+            (result, nodes)
+        });
+        self.table.set_concurrent(false);
+        for slot in slots {
+            let (r, n) = slot.into_inner().expect("補助スレッドは結果を書いてから終わる");
+            total += n;
+            debug_assert!(
+                !matches!(
+                    (&result, &r),
+                    (Some(SolveOutcome::Mate(_)), Some(SolveOutcome::NoMate))
+                        | (Some(SolveOutcome::NoMate), Some(SolveOutcome::Mate(_)))
+                ),
+                "スレッドによって詰みと不詰が食い違う: {}",
+                pos.to_sfen()
+            );
+            if result.is_none() {
+                result = r;
+            }
+        }
+        self.nodes = nodes + total;
+        result
+    }
+}
+
+type HelperResult = (Option<SolveOutcome<Move>>, u64);
+
+/// 補助スレッドのスタック。探索は手数ごとに再帰するので、既定 (2 MB) では探索深さの上限まで潜れない
+/// (debug ビルドは 1 手あたりの使用量が数倍になる)。確保するのは仮想領域で、使った分だけが実メモリになる。
+#[cfg(not(target_arch = "wasm32"))]
+const HELPER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// 呼び出したスレッドが panic で抜けるとき (補助の起動の失敗も含む) に、補助スレッドを止める。
+/// 止めないと、scope の終わりで補助の終わりを待ち続けて panic が伝わらない
+struct CancelOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for CancelOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// 補助スレッドが先に根を解いて詰み手順を復元している間も、進捗は呼び出したスレッドから知らせる
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_for_helpers(
+    slots: &[OnceLock<HelperResult>],
+    shared_nodes: &AtomicU64,
+    start: Instant,
+    progress: &mut dyn FnMut(MateProgress),
+) {
+    use search::PROGRESS_INTERVAL_MS;
+    let mut next_progress = start.elapsed().as_millis() as u64 + PROGRESS_INTERVAL_MS;
+    while slots.iter().any(|s| s.get().is_none()) {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if elapsed_ms >= next_progress {
+            next_progress = elapsed_ms + PROGRESS_INTERVAL_MS;
+            progress(MateProgress {
+                nodes: shared_nodes.load(Ordering::Relaxed),
+                elapsed_ms,
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// wasm では待たずに scope の終わりに任せる。呼び出したスレッドが rayon のプールのスレッドだと、補助の仕事が
+/// 自分の deque に積まれていて、ここで待つと誰も実行しない。scope の終わりの待ちは自分で実行する。
+/// その代わり、補助が詰み手順を復元している間は進捗を知らせない。
+#[cfg(target_arch = "wasm32")]
+fn wait_for_helpers(
+    _slots: &[OnceLock<HelperResult>],
+    _shared_nodes: &AtomicU64,
+    _start: Instant,
+    _progress: &mut dyn FnMut(MateProgress),
+) {
+}
+
+/// `helpers` を別のスレッドで動かしながら `main` を呼び出したスレッドで動かし、すべて終わるのを待つ
+#[cfg(not(target_arch = "wasm32"))]
+fn run_with_helpers<'a, R>(
+    helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
+    cancel: &AtomicBool,
+    main: impl FnOnce() -> R,
+) -> R {
+    std::thread::scope(|s| {
+        let _cancel_on_panic = CancelOnPanic(cancel);
+        for h in helpers {
+            std::thread::Builder::new()
+                .stack_size(HELPER_STACK_SIZE)
+                .spawn_scoped(s, h)
+                .expect("詰み探索の補助スレッドを起動できない");
+        }
+        main()
+    })
+}
+
+/// wasm では Web Worker のスレッドプール (rayon) で動かす。`main` は呼び出したスレッドのまま動かす
+/// (進捗の通知は呼び出したスレッドでしか呼べない)。呼び出したスレッドは補助の終わりを待ってブロックするので、
+/// ブラウザのメインスレッドからは呼べない (Worker から呼ぶ)。
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+fn run_with_helpers<'a, R>(
+    helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
+    cancel: &AtomicBool,
+    main: impl FnOnce() -> R,
+) -> R {
+    rayon::in_place_scope(|s| {
+        let _cancel_on_panic = CancelOnPanic(cancel);
+        for h in helpers {
+            s.spawn(move |_| h());
+        }
+        main()
+    })
+}
+
+/// スレッドの無い wasm では補助スレッドを使わない (`set_threads` で 1 に抑えてある)
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+fn run_with_helpers<'a, R>(
+    helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
+    cancel: &AtomicBool,
+    main: impl FnOnce() -> R,
+) -> R {
+    debug_assert!(helpers.is_empty());
+    let _cancel_on_panic = CancelOnPanic(cancel);
+    main()
+}
+
+/// 制限 (停止フラグ、ノード数、時間) を使い切ったか
+fn exhausted(limits: &MateLimits, start: Instant, nodes: u64, stop: &AtomicBool) -> bool {
+    stop.load(Ordering::Relaxed)
+        || limits.nodes != 0 && nodes > limits.nodes
+        || limits.time_ms != 0 && start.elapsed().as_millis() as u64 >= limits.time_ms
+}
+
+/// モードごとの探索の設定
+fn configure<S: state::MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    mode: MateMode,
+) {
+    if mode != MateMode::Speed {
+        searcher.estimate_initial_values();
+        searcher.count_disproof_weakly(state::PNDN_UNIT);
     }
 }
 
@@ -251,6 +542,9 @@ fn solve_with<S: state::MateState, const PIECES: bool>(
     st: &mut S,
 ) -> Option<SolveOutcome<S::Mv>> {
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0).ok()?;
+    // 閾値なしの根の探索は結論が出るか打ち切りでしか戻らない。結論が手順の復元や上限のために
+    // 結果にならなくても、ほかのスレッドが同じ根を読み続ける意味は無い
+    searcher.halt_others();
     if root.is_disproven() {
         // ルートより前の経路は無いので反復には依存しないが、深さの上限で打ち切った手順を
         // 根拠にした不詰は、上限より長い詰みを否定できない
