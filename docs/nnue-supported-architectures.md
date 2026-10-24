@@ -31,25 +31,29 @@ LayerStacks では、下記の振り分け方式も `isready` の前に設定し
 | factorized | 学習用の未統合重みは非対応。coalesced な推論形式へ書き出す | 同左 |
 
 寸法の上限はメモリ使用量の保証ではありません。FT の入力次元と出力幅、Threat、
-EffectBucket などに応じて重みが大きくなり、積の overflow、payload の不足、
-確保失敗は読込エラーになります。固定 edition は必要な FT・サイズ・拡張が揃っていても、
+EffectBucket などに応じて重みが大きくなり、積の overflow や payload の不足など、
+読込時に検出できる不整合はエラーになります。メモリ不足は実行経路によってプロセス終了になるため、十分なメモリを用意してください。固定 edition は必要な FT・サイズ・拡張が揃っていても、
 異なる重み配置や量子化形式を変換するものではありません。
+FT・サイズ・拡張のすべての組合せに名前付き preset があるわけではありません。
+[ビルドガイド](./build.md) で preset を確認し、それ以外は対応する atomic feature を
+組み合わせてください。family edition にも拡張を追加する必要がある場合があります。
 
 ### 形式と量子化
 
 - HalfKX は対応する classic NNUE ヘッダーと整数 payload を使います。
   FT の重み・bias は i16、全結合層の重みは i8、bias は i32 です。
 - LayerStacks は `0x7af32f20`（格納9バケット）または `0x7af32f21`
-  （格納数を明示、1〜16バケット）です。FT は i16（raw / LEB128）、
+  （格納数を明示、1〜16バケット）です。通常の FT は LEB128 圧縮された i16、
   全結合層は i8 重みと i32 bias、PSQT は i32、Threat 重みは i8 です。
 - tatara の LayerStacks 推論用量子化は QA=127、QB=64 です。
-  float checkpoint や別の量子化 scale を、そのまま `EvalFile` には指定できません。
+  float checkpoint は推論用の量子化形式へ書き出してください。別の QA/QB の整数モデルは読み込めても不一致を検出できず、誤った評価値になる可能性があります。
   `FV_SCALE` は最終評価値の換算であり、重みの量子化形式を変換しません。
 
 ### ThreatProfile と利用できないモデル
 
 非ゼロの ThreatProfile を universal で読むと
-`runtime threat profiles other than profile 0 are not yet supported` などの読込エラーになります。
+`Threat dimensions mismatch: model=…, runtime=…`、または次元数が同じ profile 4 では
+`runtime threat profiles other than profile 0 are not yet supported` という読込エラーになります。
 profile を削除して読み込ませず、対応する固定構成を使ってください。
 
 | profile | 固定構成に追加する feature |
@@ -84,7 +88,7 @@ tatara との照合では、参照評価器 `eval_sfen` が扱う FT と拡張�
 HalfKaHmMerged を基準にする評価器で他の FT の一致を証明することはできません。
 PSQT を加算しない参照経路では PSQT 付きモデルを比較対象から外します。
 進行度方式では格納バケット数と実際の routing 数、係数、`FV_SCALE` を揃え、
-評価値の単位も一致させてください。rshogi `eval_sfens` の `score_cp` は歩=100への
+評価値の単位も一致させてください。rshogi [`eval_sfens`](../crates/tools/docs/eval_sfens.md) の `score_cp` は歩=100への
 換算値なので、tatara の出力との比較には `score` を使います。
 
 ## HalfKP / HalfKA 系
