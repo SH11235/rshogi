@@ -27,3 +27,6 @@ E2E 実機対局のシナリオ別手順 (平手 / 連続対局 / 切断再接�
 
 - [`../csa-client.md`](../csa-client.md) — `csa_client` (CSA client 実装) の使い方。**Cloudflare Workers (WebSocket) 版への接続・公開対局場への参加手順**（接続先 URL / LOGIN 形式 / ロビー / 自前 Worker への接続）もここ。
 - 各 crate 直下の Rust doc コメント (`rustdoc`) — 型 / 関数の最終契約はソース側を一次ソースとする。
+
+私的対局の招待・参加・失敗時の再試行は [プロトコル参照](protocol-reference.md#921-workers-の私的対局)、
+環境ごとの有効化と本人確認は [デプロイ運用](deployment.md#私的対局の運用設定) を参照してください。

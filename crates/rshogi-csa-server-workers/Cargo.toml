@@ -51,7 +51,7 @@ hmac = { version = "0.12", default-features = false }
 # 本 crate から直接使うため `futures-util` は明示的な直接依存にしている。
 worker = { version = "0.8", features = ["d1", "http"] }
 worker-macros = { version = "0.8", features = ["http"] }
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 
 [features]
 default = []

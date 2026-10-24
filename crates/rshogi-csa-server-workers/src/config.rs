@@ -665,19 +665,7 @@ pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
     }
 }
 
-/// 私的対局経路 (`CHALLENGE_LOBBY` / `LOGIN_LOBBY <handle>+private-<token>+free`)
-/// が有効化されているかを `[vars]` `PRIVATE_CHALLENGE_ENABLED` から判定する
-/// (https://github.com/SH11235/rshogi/issues/635)。
-///
-/// 値の解釈は [`rshogi_csa_server::config::parse_truthy_bool_env`] に委ねる。
-/// 設定不正値（`true` / `false` / 数字 / yes/no/on/off 以外）は安全側に倒し
-/// （= private challenge 無効化）、[`structured_log!`](crate::structured_log)
-/// で警告ログを出す。
-///
-/// 無効時は LobbyDO の `dispatch_pending_line` 入口で早期 reject し、
-/// `CHALLENGE_LOBBY:incorrect unsupported` / `LOGIN_LOBBY:incorrect unsupported`
-/// を返す。両者揃った後の対局起動経路 (consume → GameRoom DO 起動) が未実装の
-/// ため、production client が誤って使うと pending state でハマるのを防ぐ。
+/// 私的対局の feature gate。未指定または設定不正は無効として扱う。
 #[cfg(target_arch = "wasm32")]
 pub fn is_private_challenge_enabled(env: &worker::Env) -> bool {
     let raw = env.var(ConfigKeys::PRIVATE_CHALLENGE_ENABLED).ok().map(|v| v.to_string());

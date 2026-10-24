@@ -10,6 +10,19 @@ Cloudflare Workers 上で `rshogi-csa-server-workers` を運用するための
 - **production**: 意図的な `workflow_dispatch` でのみ deploy される本番。shogi
   engine 側の改修だけが merge されたときに本番反映が走らないように切り分けている。
 
+### 私的対局の運用設定
+
+私的対局は `PRIVATE_CHALLENGE_ENABLED` で制御し、未指定・不正値は無効になる。
+production の既定設定は無効のまま運用する。有効な環境での接続手順と失敗時の
+再試行は [プロトコル参照](protocol-reference.md#921-workers-の私的対局) を参照。
+`CHALLENGE_TTL_SEC` は秒単位で既定 3600、未消費招待数の上限は
+`LOBBY_QUEUE_SIZE_LIMIT` と共通（既定 100）。招待用の時計名を `CLOCK_PRESETS` に登録する。
+
+本人確認が必要な運用では両者の `WORKERS_HANDLE_AUTH` を設定する。
+未登録 handle の自己申告を招待 token だけで防ぐことはできない。
+私的対局の参加制限と棋譜・観戦の公開制御は別設定である。
+GameRoom の準備・有効化・取消は Lobby からの内部呼出し専用で、外部 HTTP API として公開しない。
+
 ## 0. アーキテクチャ概要
 
 staging / production の 2 環境はそれぞれ同じ shape を持つ Worker / DO / R2

@@ -146,6 +146,22 @@ describe('Lobby 未認証接続の保持制限', () => {
     expect(await retried.takeLine()).toContain('LOGIN_LOBBY:alice OK');
   });
 
+  test('unmark保存失敗とcold start後も期限切れsessionが再LOGINを妨げない', async () => {
+    const issuer = await connect();
+    const replies = readLineFromWebSocket(issuer);
+    issuer.send('CHALLENGE_LOBBY alice bob black byoyomi-600-10\n');
+    const token = (await replies.takeLine()).split(' ')[1];
+    await control({ faults: { expireAfterMark: true, failUnmark: true } });
+    issuer.send(`LOGIN_LOBBY alice+private-${token}+free pw\n`);
+    const state = await waitForCloseRequest();
+    expect(state.faults.expireAfterMark).toBe(false);
+    await control({ reset: true });
+    const retry = await connect();
+    const retried = readLineFromWebSocket(retry);
+    retry.send(`LOGIN_LOBBY alice+private-${token}+free pw\n`);
+    expect(await retried.takeLine()).toContain('LOGIN_LOBBY:alice OK');
+  });
+
   test('RateLimiterは並行消費・再構築の残量・読込失敗時のfail-closedを維持する', async () => {
     const ns = await mf.getDurableObjectNamespace('RATE_LIMITER') as any;
     const stub = ns.get(ns.idFromName('pending-rate-regression'));
