@@ -347,12 +347,6 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.tie_seed = seed;
     }
 
-    /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
-    pub fn continue_from(&mut self, nodes: u64) {
-        self.nodes = nodes;
-        self.next_check = nodes;
-    }
-
     /// これまでに探索したノード数
     pub fn nodes(&self) -> u64 {
         self.nodes

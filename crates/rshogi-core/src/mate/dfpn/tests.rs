@@ -475,6 +475,20 @@ fn node_limit_is_kept_exactly() {
             assert_eq!(result, MateResult::Unknown, "{mode:?} {limit}");
             assert_eq!(solver.nodes(), limit + 1, "{mode:?} {limit}");
         }
+        // 並列に切り替わっても上限は全スレッドの合計に掛かる (各スレッドは足し込む間隔の分だけ超えうる)
+        solver.set_threads(2);
+        let limit = PARALLEL_START_NODES + 5_000;
+        let limits = MateLimits {
+            nodes: limit,
+            time_ms: 0,
+        };
+        let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+        assert_eq!(result, MateResult::Unknown, "{mode:?}");
+        assert!(
+            (limit + 1..=limit + 2 * 1024 + 1).contains(&solver.nodes()),
+            "{mode:?}: {}",
+            solver.nodes()
+        );
     }
 }
 
@@ -496,7 +510,7 @@ fn parallel_search_continues_from_the_single_thread_start() {
 }
 
 #[test]
-fn progress_counts_nodes_across_the_parallel_start() {
+fn parallel_progress_is_monotonic() {
     let mut pos = position(ZUKOU_001);
     let stop = AtomicBool::new(false);
     let limits = MateLimits {

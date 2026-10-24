@@ -225,8 +225,10 @@ impl DfpnSolver {
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
         if self.threads == 1 {
-            return self.run_single::<PIECES>(pos, limits, start, 0, stop, progress);
+            return self.run_single::<PIECES>(pos, limits, start, stop, progress);
         }
+        // 並列の段階は、1 スレッドで読んだノード数の続きから数える
+        let mut nodes = 0;
         if self.parallel_start > 0 {
             // 易しい局面はスレッドを起こす費用の方が大きいので、先に 1 スレッドで解く
             let first = MateLimits {
@@ -236,12 +238,12 @@ impl DfpnSolver {
                 },
                 ..limits
             };
-            let decided = self.run_single::<PIECES>(pos, first, start, 0, stop, progress);
+            let decided = self.run_single::<PIECES>(pos, first, start, stop, progress);
             if decided.is_some() || exhausted(&limits, start, self.nodes, stop) {
                 return decided;
             }
+            nodes = self.nodes;
         }
-        let nodes = self.nodes;
         self.run_parallel::<PIECES>(pos, limits, start, nodes, stop, progress)
     }
 
@@ -250,7 +252,6 @@ impl DfpnSolver {
         pos: &mut Position,
         limits: MateLimits,
         start: Instant,
-        nodes: u64,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
@@ -267,7 +268,6 @@ impl DfpnSolver {
         let attacker = pos.side_to_move();
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
-        searcher.continue_from(nodes);
         configure(&mut searcher, self.mode);
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();
