@@ -1171,8 +1171,10 @@ impl Lobby {
         }
         let entry = reg.lookup(&token, self.now_ms()).cloned();
         let Some(entry) = entry else {
-            reg.purge_expired(self.now_ms());
+            let expired = reg.purge_expired(self.now_ms());
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
             self.save_challenge_registry(&reg).await?;
+            self.reschedule_alarm_with(&reg).await?;
             send_line(ws, &build_login_incorrect_line("challenge_expired"))?;
             let _ = ws.close(Some(1003), Some("challenge_expired"));
             return Ok(());
