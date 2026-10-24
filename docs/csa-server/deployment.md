@@ -10,7 +10,7 @@ Cloudflare Workers 上で `rshogi-csa-server-workers` を運用するための
 - **production**: 意図的な `workflow_dispatch` でのみ deploy される本番。shogi
   engine 側の改修だけが merge されたときに本番反映が走らないように切り分けている。
 
-### 私的対局の運用設定
+## 私的対局の運用設定
 
 私的対局は `PRIVATE_CHALLENGE_ENABLED` で制御し、未指定・不正値は無効になる。
 production の既定設定は無効のまま運用する。有効な環境での接続手順と失敗時の

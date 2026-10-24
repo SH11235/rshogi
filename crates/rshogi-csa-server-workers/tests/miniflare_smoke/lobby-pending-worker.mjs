@@ -160,6 +160,7 @@ export class GameRoom {
       if (command.reset) this.inner = new RustGameRoom(this.state, this.env);
       if (command.failPrepare) this.failPrepare = true;
       if (command.failActivate) this.failActivate = true;
+      if (command.expirePrivateJoin) await this.state.storage.put('private_join_deadline_ms', Date.now() - 1);
       if (command.expirePrivate) {
         const plan = await this.state.storage.get('private_match');
         plan.expires_at_ms = Date.now() - 1;

@@ -1007,7 +1007,7 @@ impl Lobby {
         let expired = reg.purge_expired(now_ms);
         let purged = !expired.is_empty();
         if purged {
-            self.disconnect_pending_websockets(&expired).await;
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         }
 
         // 1. clock_preset の存在確認。`CLOCK_PRESETS` 未宣言 (空 map) の構成では
@@ -1137,7 +1137,7 @@ impl Lobby {
         let _ = &challenge_guard;
         let expired = reg.purge_expired(now_ms);
         if !expired.is_empty() {
-            self.disconnect_pending_websockets(&expired).await;
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         }
 
         // 期限切れ / 未登録 → `challenge_expired`
@@ -1173,7 +1173,10 @@ impl Lobby {
         }
         let entry = reg.lookup(&token, self.now_ms()).cloned();
         let Some(entry) = entry else {
+            reg.purge_expired(self.now_ms());
+            self.save_challenge_registry(&reg).await?;
             send_line(ws, &build_login_incorrect_line("challenge_expired"))?;
+            let _ = ws.close(Some(1003), Some("challenge_expired"));
             return Ok(());
         };
 
@@ -1261,11 +1264,22 @@ impl Lobby {
             return Ok(());
         }
         if reg.consume(token, self.now_ms()).is_none() {
-            self.disconnect_pending_websockets(&[(token.clone(), entry.clone())]).await;
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
             return Ok(());
         }
         if let Err(error) = self.save_challenge_registry(reg).await {
-            self.disconnect_pending_websockets(&[(token.clone(), entry.clone())]).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
             return Err(error);
         }
         let activate =
@@ -1275,8 +1289,30 @@ impl Lobby {
             let cancel =
                 Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
             let _ = stub.fetch_with_request(cancel).await;
-            self.disconnect_pending_websockets(&[(token.clone(), entry.clone())]).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
             return Ok(());
+        }
+        let both_present = [&plan.black_handle, &plan.white_handle].iter().all(|handle| {
+            entry
+                .pending_ws_attachment_ids
+                .get(*handle)
+                .and_then(|id| self.private_socket(token.as_str(), handle, id))
+                .is_some()
+        });
+        if !both_present {
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
+            return self.reschedule_alarm_with(reg).await;
         }
         let mut delivered = true;
         for (handle, color) in [
@@ -1378,7 +1414,7 @@ impl Lobby {
         if expired.is_empty() {
             return Ok(());
         }
-        self.disconnect_pending_websockets(&expired).await;
+        self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         self.save_challenge_registry(&reg).await?;
         crate::structured_log!(
             event: "challenge_purge_expired",
@@ -1432,7 +1468,11 @@ impl Lobby {
     /// 該当する `PrivatePending` attachment を持つ WS にエラー送信 + close。
     /// `state.get_websockets()` を 1 回だけ走査するために攻撃面の attachment id
     /// 集合を pre-compute する (登録 entry の数 × 2 attachment 上限なので O(n))。
-    async fn disconnect_pending_websockets(&self, expired: &[(ChallengeToken, ChallengeEntry)]) {
+    async fn disconnect_pending_websockets(
+        &self,
+        expired: &[(ChallengeToken, ChallengeEntry)],
+        reason: &str,
+    ) {
         if expired.is_empty() {
             return;
         }
@@ -1458,10 +1498,9 @@ impl Lobby {
             } = att
                 && targets.iter().any(|(t, a)| t == &ws_token && a == &ws_id)
             {
-                // 期限切れであることをクライアントに通知してから close。
-                let _ = send_line(&ws, &build_login_incorrect_line("challenge_expired"));
+                let _ = send_line(&ws, &build_login_incorrect_line(reason));
                 let _ = retire_private_socket(&ws);
-                let _ = ws.close(Some(1000), Some("challenge_expired"));
+                let _ = ws.close(Some(1000), Some(reason));
             }
         }
     }

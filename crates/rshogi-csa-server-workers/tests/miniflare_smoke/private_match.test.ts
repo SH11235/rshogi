@@ -120,7 +120,7 @@ describe('private match dispatch', () => {
     await black.recvUntil(line => line.startsWith('+7776FU'));
     await white.recvUntil(line => line.startsWith('+7776FU'));
     await black.close();
-    await control('GAME_ROOM', roomId(token), { expirePrivate: true, reset: true });
+    await control('GAME_ROOM', roomId(token), { expirePrivate: true, expirePrivateJoin: true, reset: true });
     const resumed = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
     resumed.send(`LOGIN ${blackName} pw reconnect:${gameId}+${reconnectToken}`);
     expect(await resumed.recvLine()).toBe(`LOGIN:${blackName} OK`);
@@ -217,8 +217,8 @@ describe('private match dispatch', () => {
     const opponent = await connectLobby();
     await loginLobby(issuer, 'alice', token); await loginLobby(opponent, 'bob', token);
     if (failure === 'activate') {
-      expect(await issuer.lines.takeLine()).toBe('LOGIN_LOBBY:incorrect challenge_expired');
-      expect(await opponent.lines.takeLine()).toBe('LOGIN_LOBBY:incorrect challenge_expired');
+      expect(await issuer.lines.takeLine()).toBe('LOGIN_LOBBY:incorrect match_cancelled');
+      expect(await opponent.lines.takeLine()).toBe('LOGIN_LOBBY:incorrect match_cancelled');
     } else {
       expect(await issuer.lines.takeLine()).toBe(`MATCHED ${roomId(token)} black`);
       await expect(opponent.lines.takeLine()).rejects.toThrow('connection closed');
@@ -235,12 +235,50 @@ describe('private match dispatch', () => {
     }
   });
 
-  test('予約期限切れの部屋は通常対局名でも受け付けない', async () => {
+  test('成立済みなら招待期限後も入室期限内にLOGINして完走できる', async () => {
+    const { issuer, token } = await issue();
+    const opponent = await connectLobby();
+    await loginLobby(issuer, 'alice', token); await loginLobby(opponent, 'bob', token);
+    expect(await issuer.lines.takeLine()).toBe(`MATCHED ${roomId(token)} black`);
+    expect(await opponent.lines.takeLine()).toBe(`MATCHED ${roomId(token)} white`);
+    await control('GAME_ROOM', roomId(token), { expirePrivate: true, reset: true });
+    const black = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
+    black.send(`LOGIN alice+private-${token}+black pw`);
+    expect(await black.recvLine()).toBe(`LOGIN:alice+private-${token}+black OK`);
+    const white = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
+    white.send(`LOGIN bob+private-${token}+white pw`);
+    expect(await white.recvLine()).toBe(`LOGIN:bob+private-${token}+white OK`);
+    await black.drainGameSummary(); await white.drainGameSummary();
+    black.send('AGREE'); white.send('AGREE');
+    const start = await black.recvLine();
+    expect(start).toMatch(/^START:/);
+    expect(await white.recvLine()).toBe(start);
+    black.send('%TORYO');
+    expect(await black.recvUntil(line => line === '#LOSE')).toContain('#RESIGN');
+    expect(await white.recvUntil(line => line === '#WIN')).toContain('#RESIGN');
+  });
+
+  test('招待数上限は期限切れのpurgeで回復する', async () => {
+    await mf.dispose(); await cleanup();
+    const persist = await makeTempPersistRoot(); cleanup = persist.cleanup;
+    mf = await createMiniflare({ persistRoot: persist.path, privateChallengeEnabled: true,
+      lobbyQueueSizeLimit: 1,
+      scriptPath: resolve(import.meta.dirname, 'lobby-pending-worker.mjs') });
+    const first = await issue();
+    const second = await connectLobby();
+    second.ws.send('CHALLENGE_LOBBY carol dave black byoyomi-600-10\n');
+    expect(await second.lines.takeLine()).toBe('CHALLENGE_LOBBY:incorrect queue_full');
+    await control('LOBBY', 'default', { expireChallenges: true });
+    const replacement = await issue();
+    expect(replacement.token).not.toBe(first.token);
+  });
+
+  test('入室期限切れの部屋は通常対局名でも受け付けない', async () => {
     const { issuer, token } = await issue();
     const opponent = await connectLobby();
     await loginLobby(issuer, 'alice', token); await loginLobby(opponent, 'bob', token);
     await issuer.lines.takeLine(); await opponent.lines.takeLine();
-    await control('GAME_ROOM', roomId(token), { expirePrivate: true, reset: true });
+    await control('GAME_ROOM', roomId(token), { expirePrivateJoin: true, reset: true });
     for (const game of [`private-${token}`, 'test']) {
       const client = await CsaClient.connect(mf, roomId(token), 'https://example.com', `198.51.100.${nextIp++}`);
       client.send(`LOGIN alice+${game}+black pw`);

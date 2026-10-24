@@ -160,6 +160,8 @@ const KEY_ROOM_ID: &str = "room_id";
 const KEY_PRIVATE_MATCH: &str = "private_match";
 const KEY_PRIVATE_CANCELLED: &str = "private_cancelled";
 const KEY_PRIVATE_ACTIVE: &str = "private_active";
+const KEY_PRIVATE_JOIN_DEADLINE_MS: &str = "private_join_deadline_ms";
+const PRIVATE_JOIN_WINDOW_MS: u64 = 60_000;
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
@@ -351,6 +353,15 @@ impl DurableObject for GameRoom {
                         .unwrap_or(false)
                 {
                     return Response::error("private match unavailable", 409);
+                }
+                if self.state.storage().get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS).await?.is_none() {
+                    self.state
+                        .storage()
+                        .put(
+                            KEY_PRIVATE_JOIN_DEADLINE_MS,
+                            self.now_ms().saturating_add(PRIVATE_JOIN_WINDOW_MS),
+                        )
+                        .await?;
                 }
                 self.state.storage().put(KEY_PRIVATE_ACTIVE, true).await?;
                 return Response::ok("active");
@@ -772,7 +783,14 @@ impl GameRoom {
                 && (room_id.starts_with("private-") || game_name.starts_with("private-")))
             || self.state.storage().get::<bool>(KEY_PRIVATE_CANCELLED).await?.unwrap_or(false)
             || (reconnect.is_none()
-                && private.as_ref().is_some_and(|plan| plan.expires_at_ms <= self.now_ms()))
+                && private.is_some()
+                && self
+                    .state
+                    .storage()
+                    .get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS)
+                    .await?
+                    .unwrap_or(0)
+                    <= self.now_ms())
         {
             send_line(ws, &LoginReply::Incorrect.to_line())?;
             let _ = ws.close(Some(1003), Some("private match rejected".to_owned()));
@@ -787,7 +805,7 @@ impl GameRoom {
         // 失敗時は LOGIN OK を送らずに `LOGIN:incorrect reconnect_rejected` で
         // 拒否する (拒否は元の対局者による再試行を妨げない)。
         if let Some(req) = reconnect {
-            return self.handle_reconnect_request(ws, &handle, name, role, req).await;
+            return self.handle_reconnect_request(ws, &handle, name.as_str(), role, req).await;
         }
 
         // 新スロットを**仮に**加えて衝突判定する。`evaluate_match` が Conflict を返す
@@ -978,7 +996,14 @@ impl GameRoom {
             .storage()
             .get::<crate::private_match::PrivateMatch>(KEY_PRIVATE_MATCH)
             .await?;
-        if private.as_ref().is_some_and(|plan| plan.expires_at_ms <= self.now_ms())
+        if (private.is_some()
+            && self
+                .state
+                .storage()
+                .get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS)
+                .await?
+                .unwrap_or(0)
+                <= self.now_ms())
             || self.state.storage().get::<bool>(KEY_PRIVATE_CANCELLED).await?.unwrap_or(false)
         {
             self.abort_pending_match_with_error("##[ERROR] private match expired or cancelled")
