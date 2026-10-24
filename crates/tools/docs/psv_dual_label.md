@@ -73,6 +73,8 @@ cargo run -p tools --release --bin psv_dual_label -- extract \
 `--out-base` は move16 と padding を 0 に戻し、base score と他フィールドを保持します。
 `--out-mask` の最終 byte の未使用 bit は常に 0 です。reserved bit (padding bit1-7) が
 立っている入力は行番号付きで拒否します。
+mask は入力順に bit を詰め、チャンク境界に padding を挟みません。末尾の部分 byte と
+flush が正常に完了した後で、既存の fsync・サイズ検算・publish へ進みます。
 
 `embed` に渡した base の move16 と padding が全行 0 なら、続けて `extract` した
 `base.psv`、`dl.i16`、`entered.bits` は元の入力と bit 一致します。

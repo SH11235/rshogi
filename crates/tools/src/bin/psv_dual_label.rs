@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use rshogi_core::position::Position;
 use tools::common::io::{partial_path, sync_directory};
 use tools::king_zone::{ENTERED_TIER, classify};
+use tools::mask_io::BitmapWriter;
 use tools::output_path::{
     ensure_created_paths_distinct, ensure_distinct_output_paths, ensure_no_entity_overlap,
     ensure_safe_output_path,
@@ -453,7 +454,7 @@ fn extract_with_chunk_records(
         let mut reader = BufReader::with_capacity(BUFFER_SIZE, File::open(dual)?);
         let mut base_writer = create_writer(base_staging.as_deref())?;
         let mut score_writer = create_writer(scores_staging.as_deref())?;
-        let mut mask_writer = create_writer(mask_staging.as_deref())?;
+        let mut mask_writer = create_writer(mask_staging.as_deref())?.map(BitmapWriter::new);
         // 予測パス比較は case-insensitive filesystem の alias を見逃すため、
         // 作成済み staging の実体でも同一性を検査する (書き込み前)。staging の
         // 作成が別出力の最終パスを実体化させるケースがあるため、最終出力との
@@ -462,7 +463,6 @@ fn extract_with_chunk_records(
         ensure_no_entity_overlap(&staging_paths, &outputs)?;
         let mut dual_chunk = Vec::with_capacity(chunk_records * RECORD_SIZE);
         let mut score_chunk = Vec::with_capacity(chunk_records * 2);
-        let mut mask_chunk = Vec::with_capacity(chunk_records.div_ceil(8));
         let mut stats = ExtractStats::default();
 
         while stats.records < records {
@@ -487,12 +487,9 @@ fn extract_with_chunk_records(
                 writer.write_all(&score_chunk)?;
             }
             if let Some(writer) = &mut mask_writer {
-                mask_chunk.clear();
-                mask_chunk.resize(current_records.div_ceil(8), 0);
-                for (offset, record) in dual_chunk.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
-                    mask_chunk[offset / 8] |= (record[PADDING_OFFSET] & 1) << (offset % 8);
+                for record in dual_chunk.as_chunks::<RECORD_SIZE>().0 {
+                    writer.push(record[PADDING_OFFSET] & 1 != 0)?;
                 }
-                writer.write_all(&mask_chunk)?;
             }
             // score / mask の gather 後なら dual_chunk を直接 base 化してよい
             // (chunk 全量の複製を避ける)。
@@ -506,8 +503,11 @@ fn extract_with_chunk_records(
             stats.records += current_records as u64;
         }
 
-        for writer in [base_writer, score_writer, mask_writer].into_iter().flatten() {
+        for writer in [base_writer, score_writer].into_iter().flatten() {
             writer.into_inner()?.sync_all()?;
+        }
+        if let Some(writer) = mask_writer {
+            writer.finish()?.into_inner()?.sync_all()?;
         }
 
         if let Some(path) = &base_staging {
@@ -1065,6 +1065,32 @@ mod tests {
             assert_eq!(fs::read(&extracted_base)?, fs::read(&base)?);
             assert_eq!(fs::read(&extracted_scores)?, fs::read(&scores)?);
             assert_eq!(fs::read(&extracted_mask)?, fs::read(&mask)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extract_mask_only_preserves_bits_across_chunk_boundaries() -> Result<()> {
+        let bits = [
+            true, false, true, false, false, true, false, true, true, false, false, true, true,
+            false, false, true, true,
+        ];
+        let mut dual_bytes = base_records(bits.len(), 0)?;
+        for (record, bit) in dual_bytes.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().zip(bits) {
+            record[PADDING_OFFSET] = u8::from(bit);
+        }
+        for chunk_records in [8, 16] {
+            let dir = tempdir()?;
+            let dual = dir.path().join("dual.psv");
+            let mask = dir.path().join("extracted.bits");
+            fs::write(&dual, &dual_bytes)?;
+
+            let stats = extract_with_chunk_records(&dual, None, None, Some(&mask), chunk_records)?;
+
+            assert_eq!(stats.records, 17);
+            assert_eq!(fs::read(&mask)?, [0xa5, 0x99, 0x01]);
+            assert_eq!(fs::read(&dual)?, dual_bytes);
+            assert!(!partial_path(&mask).exists());
         }
         Ok(())
     }

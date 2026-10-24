@@ -45,8 +45,8 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 | `merge_psv` | 複数の PSV ファイルを順序どおり結合 |
 | `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](docs/relabel_psv.md)） |
 | `rescore_psv` | 局面の再評価（NNUE / 外部エンジン / ONNX。`--out-scores` で i16 score sidecar 出力。明示資源と PSV/marker 群の alias を検査） |
-| `psv_gate_by_king_zone` | 入玉ドメインの score 合成 / mask bitmap 生成 |
-| `psv_dual_label` | 通常 PSV の score 退避、dual-label PSV の生成・sidecar 抽出・fail-closed 検証（[詳細](docs/psv_dual_label.md)） |
+| `psv_gate_by_king_zone` | 入玉ドメインの score 合成 / LSB-first mask bitmap 生成 |
+| `psv_dual_label` | 通常 PSV の score 退避、dual-label PSV の生成・LSB-first mask を含む sidecar 抽出・fail-closed 検証（[詳細](docs/psv_dual_label.md)） |
 | `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順に抽出（[詳細](docs/psv_select_by_mask.md)） |
 | `psv_scatter_by_mask` | compact PSV の score を mask 対応で元 shard に書き戻す（[詳細](docs/psv_scatter_by_mask.md)） |
 | `rescore_hcpe` | hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（分散ラベリング・チャンク単位 + 途中 resume 対応） |
@@ -141,7 +141,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する。重複行は拒否する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
 - [psv_gate_by_king_zone](docs/psv_gate_by_king_zone.md) - 入玉ドメインの base/override score 合成と行対応 mask bitmap
-- [psv_dual_label](docs/psv_dual_label.md) - 通常 PSV の score 退避、dual-label PSV の生成・sidecar 抽出・fail-closed 検証
+- [psv_dual_label](docs/psv_dual_label.md) - 通常 PSV の score 退避、dual-label PSV の生成・LSB-first mask を含む sidecar 抽出・fail-closed 検証
 - [psv_select_by_mask](docs/psv_select_by_mask.md) - bitmap mask の bit 1 に対応する PSV 行の順序保持抽出
 - [psv_scatter_by_mask](docs/psv_scatter_by_mask.md) - compact PSV の score を mask 対応で元 shard に書き戻し
 - [relabel_psv](docs/relabel_psv.md) - PSV score の勝敗ラベル置換、宣言勝ち override、diversion 整合性 deblunder

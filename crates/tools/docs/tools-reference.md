@@ -83,8 +83,8 @@ hardlink と Windows の大小文字違いも検査します。
 | `merge_psv` | 複数の PSV ファイルを順序どおりストリーミング結合 |
 | `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](relabel_psv.md)） |
 | `rescore_psv` | PSV 評価値を NNUE / 外部エンジン / ONNX (dlshogi・AobaZero, GPU/TensorRT) で再計算。qsearch-leaf ラベル・policy 展開・レジューム・score sidecar (`--out-scores`、dlshogi ONNX / NNUE 静的評価) 対応。明示資源と PSV/score/expand/replacement/marker 群の alias を処理前・書込み直前に検査。LayerStacks routing の bucket 数不一致は拒否 (`--allow-routing-buckets-mismatch` で明示許可)（[詳細](rescore_psv.md)） |
-| `psv_gate_by_king_zone` | 入玉ドメインで base / override score を合成、または行対応 mask bitmap を生成（[詳細](psv_gate_by_king_zone.md)） |
-| `psv_dual_label` | 通常 PSV の score 退避、DL score / entered sidecar と dual-label PSV の相互変換・fail-closed 検証（[詳細](psv_dual_label.md)） |
+| `psv_gate_by_king_zone` | 入玉ドメインで base / override score を合成、または行対応 LSB-first mask bitmap を生成（[詳細](psv_gate_by_king_zone.md)） |
+| `psv_dual_label` | 通常 PSV の score 退避、DL score / LSB-first entered mask と dual-label PSV の相互変換・fail-closed 検証（[詳細](psv_dual_label.md)） |
 | `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順にストリーミング抽出（[詳細](psv_select_by_mask.md)） |
 | `psv_scatter_by_mask` | compact PSV の score を mask 対応で元 shard にストリーミング書き戻し（[詳細](psv_scatter_by_mask.md)） |
 | `rescore_hcpe` | hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（局面/結果は保持）。共有コア `teacher_labeler` 経由で `yardstick_label` とラベル bit 一致。fresh-per-position で分散ラベリング可、チャンク単位 + 途中（intra-chunk）resume 対応 |
