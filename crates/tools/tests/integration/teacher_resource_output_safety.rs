@@ -222,3 +222,37 @@ fn score_replaces_distinct_output_and_preserves_input() {
     let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
     assert_eq!(report[0]["n_total"], 1);
 }
+
+#[cfg(any(feature = "dlshogi-onnx", feature = "aobazero-onnx"))]
+#[test]
+fn policy_expansion_rejects_resource_aliases_before_loading_runtime() {
+    let flags = [
+        #[cfg(feature = "dlshogi-onnx")]
+        "--dlshogi-onnx-model",
+        #[cfg(feature = "aobazero-onnx")]
+        "--onnx-model",
+    ];
+    for flag in flags {
+        for resource_index in 0..3 {
+            for alias in aliases() {
+                let dir = tempfile::tempdir().unwrap();
+                let paths =
+                    ["input.psv", "policy.onnx", "runtime.bin"].map(|name| dir.path().join(name));
+                for (index, path) in paths.iter().enumerate() {
+                    fs::write(path, vec![index as u8 + 1; 40]).unwrap();
+                }
+                let output = output_alias(dir.path(), &paths[resource_index], alias);
+                let mut command = Command::new(env!("CARGO_BIN_EXE_expand_psv_from_policy"));
+                command
+                    .env("ORT_DYLIB_PATH", &paths[2])
+                    .arg("--input")
+                    .arg(&paths[0])
+                    .arg(flag)
+                    .arg(&paths[1])
+                    .arg("--output")
+                    .arg(output);
+                assert_guard_rejects(&mut command, &[&paths[0], &paths[1], &paths[2]]);
+            }
+        }
+    }
+}
