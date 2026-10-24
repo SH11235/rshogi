@@ -111,3 +111,29 @@ sudo perf report -i perf_reuse.data
 `run_wasi.mjs` は、WASI 向けにビルドした wasm を Node.js 20 以降で動かす (wasm の速さを V8 で測る。wasm から見えるのはカレントディレクトリだけ)。
 `node scripts/run_wasi.mjs <file.wasm> [args...]`。詰み探索の局面集ベンチでの使い方は
 `crates/tools/docs/mate_bench.md` の「wasm で測る」。
+
+## fixed edition の WASI 起動検証
+
+`node scripts/check_fixed_wasm.mjs` は 5 FT の `1536x16x32-none` edition を、
+SIMD128 無効・有効の順に direct `cargo build` し、各 build の直後に Node WASI で起動を検証します。
+全処理は直列で、Cargo は jobs=2 です。Node.js 20 以降と、リポジトリで指定した Rust toolchain の
+`wasm32-wasip1` target が必要です。target は事前に `rustup target add wasm32-wasip1` で追加してください。
+
+```sh
+node scripts/check_fixed_wasm.mjs
+node scripts/check_fixed_wasm.mjs --ft halfka_hm_merged
+```
+
+`--ft` は `halfkp`、`halfka_split`、`halfka_merged`、`halfka_hm_split`、`halfka_hm_merged` の
+いずれか一つを選びます。省略時は全部を検証します。build の上限は各 30 分、起動は各 60 秒です。
+失敗・timeout・`usiok` / `readyok` の不足は非ゼロ終了となります。
+
+全構成で一つの target directory を使います。既定は repo の `target/fixed-edition-wasm`。
+`CARGO_TARGET_DIR` があればそれを使い、相対指定はスクリプトを起動したディレクトリから解決します。
+同じ target directory への別 build と並行実行しないでください。host 用 RUSTFLAGS と encoded flags は
+子プロセスで除去し、`+simd128` / `-simd128` を明示します。
+
+smoke は `MaterialLevel=1` の USI 初期化だけです。NNUE ファイルのロード・forward 数値・探索・browser
+埋込みを検証するものではありません。初期化時には既存の USI 仕様により TT を 256 MiB 確保します。
+
+通常 CI は代表として `halfka_hm_merged` の SIMD128 有無を確認します。全 5 FT の確認は引数なしで実行してください。
