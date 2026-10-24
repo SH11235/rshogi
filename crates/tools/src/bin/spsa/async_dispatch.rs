@@ -745,7 +745,6 @@ impl<'a> AsyncCore<'a> {
     /// 再生の後、実行中だった pair を失敗数を増やさず次の attempt 待ちにし、
     /// 適用できる保留を適用する。
     fn finish_replay(&mut self) -> Result<Vec<CoreOutput>> {
-        self.settle_replay_hold();
         for (&pair_id, entry) in &mut self.pairs {
             if entry.status == PairStatus::InFlight {
                 entry.status = PairStatus::RetryWait;
@@ -754,6 +753,8 @@ impl<'a> AsyncCore<'a> {
         }
         let mut out = Vec::new();
         self.apply_ready(&mut out)?;
+        // `received` の直後に落ちた pair は、ここでの適用を終えてから保留かどうかを決める。
+        self.settle_replay_hold();
         Ok(out)
     }
 }
@@ -2735,6 +2736,32 @@ mod tests {
         let mut replayed = replay_all(&fixture, 3, &result.journal);
         replayed.finish_replay().unwrap();
         assert_eq!(replayed.counters.holds, core.counters.holds);
+    }
+
+    #[test]
+    fn hold_count_is_stable_across_resume_after_received() {
+        let fixture = Fixture::new(vec![param("X", false, 50.0, (0.0, 100.0), 4.0)], None, 3);
+        let mut core = fixture.core(4);
+        let mut journal = vec![JournalRecord::Dispatch(
+            core.next_dispatch().unwrap().unwrap(),
+        )];
+        // `received` を書いた直後、`accept` の前に落ちた。
+        journal.push(JournalRecord::Received {
+            pair_id: 0,
+            attempt: 1,
+            games: games(1, 1),
+        });
+        let mut resumed = replay_all(&fixture, 4, &journal);
+        for output in resumed.finish_replay().unwrap() {
+            if let CoreOutput::Journal(record) = output {
+                journal.push(record);
+            }
+        }
+        assert_eq!(resumed.counters.holds, 0);
+        let mut again = replay_all(&fixture, 4, &journal);
+        again.finish_replay().unwrap();
+        assert_eq!(again.counters.holds, 0);
+        assert_eq!(theta_bits(&again.params), theta_bits(&resumed.params));
     }
 
     #[test]
