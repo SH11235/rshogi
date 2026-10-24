@@ -6,6 +6,7 @@
 //! を書き出し、後から commit / profile / built_at を追跡できるようにする。
 //! `--features <name>[,<name>...]` で Edition 軸と直交する rshogi-usi の opt-in feature
 //! (`mimalloc` 等) を全 edition に追加でき、その場合は binary 名に `+<feature>` が付く。
+//! `--target` 指定時は target を名前に含む `.wasm` を配置する。
 //! 命名規則は `docs/build.md` を参照。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -258,7 +259,7 @@ fn build_command(ctx: &BuildContext<'_>, cargo_features: &str) -> Command {
     ]);
     if let Some(target) = ctx.target {
         command.args(["--target", target.triple()]);
-        // 空の global flags も Cargo の target 専用設定を隠すため、子環境だけから除く。
+        // 空の RUSTFLAGS / encoded flags も target 専用設定を隠すため、子環境から除く。
         for name in GLOBAL_RUSTFLAGS {
             command.env_remove(name);
         }
@@ -648,7 +649,6 @@ fn push_extra_features(target: &mut String, extra_features: &[String]) {
     }
 }
 
-/// `engines/rshogi-usi-<edition slug>[+<feature>...]<EXE_SUFFIX>` を組み立てる。
 /// `extra_features` は `resolve_extra_features` でソート・重複除去済みのものを渡す
 /// (同じ構成が指定順によらず同じ binary 名になる)。
 fn engines_path(

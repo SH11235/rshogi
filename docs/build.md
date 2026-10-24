@@ -234,14 +234,15 @@ TT eval を再利用したノードでは EvalHash hit と同じく NNUE アキ�
 
 #### 命名規則
 
-`engines/rshogi-usi-<edition slug>[+<feature>...][.exe]`
+- native: `engines/rshogi-usi-<edition slug>[+<feature>...][.exe]`
+- WASM: `engines/rshogi-usi-<edition slug>[+<feature>...]--<target>.wasm`
 
 - `<edition slug>` = preset edition から `edition-` 接頭辞を除いたもの
 - `+<feature>` = `--features` で追加した feature。名前順にソートし重複を除いて並べるため、
   指定順によらず同じ構成は同じ名前になる。追加なしなら何も付かない。Edition 名は
   slot 区切りに `-`、slot 内の複合語に `_` を使い、feature 名も `-` を含むため、
   区切りにはどれとも衝突しない `+` を使う
-- Windows host では `.exe` 拡張子付与 (Linux/macOS は空)
+- native build は Windows で `.exe` 拡張子を付与 (Linux/macOS は空)。WASM は host に関係なく `.wasm`
 
 例:
 ```
@@ -422,6 +423,7 @@ WASM build では非空の `RUSTFLAGS`、`CARGO_ENCODED_RUSTFLAGS`、`CARGO_BUIL
 host の `target-cpu=native` などが混入しないよう、それらを unset し、WASM 用の指定は
 `CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS` または `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS` に移してください。
 空の global flags は build 子プロセスから除き、target 専用 flags は変更せず Cargo に渡します。
+この検査は環境変数だけが対象です。ユーザー側の Cargo config にある `build.rustflags` 等は検査しません。
 SIMD128 は target 専用 flags の `-C target-feature=+simd128` / `-C target-feature=-simd128` で切り替えます。
 同じ edition・追加 features・target の成果物は SIMD flags が違っても上書きされます。
 manifest は rustflags の完全な記録を持ちません。
