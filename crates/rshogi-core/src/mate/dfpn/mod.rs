@@ -358,6 +358,7 @@ impl DfpnSolver {
                     configure(&mut searcher, mode);
                     let (num, den) = HELPER_SLACKS[i % HELPER_SLACKS.len()];
                     searcher.set_threshold_slack(num, den);
+                    searcher.set_tie_seed(i as u32 + 1);
                     let result = solve_with(&mut searcher, &mut pos);
                     let _ = slot.set((result, searcher.nodes()));
                 }) as Box<dyn FnOnce() + Send + '_>
