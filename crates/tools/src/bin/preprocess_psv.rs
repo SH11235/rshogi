@@ -42,6 +42,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tools::mask_io::BitmapWriter;
 use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
 
 use std::cell::RefCell;
@@ -155,44 +156,6 @@ struct ResultCounts {
     errors: u64,
     written: u64,
     moved: u64,
-}
-
-/// 出力行に対応する LSB-first bitmap をストリーミングで構築する。
-struct MovedMaskWriter<W> {
-    writer: W,
-    pending: u8,
-    pending_bits: u8,
-}
-
-impl<W: Write> MovedMaskWriter<W> {
-    fn new(writer: W) -> Self {
-        Self {
-            writer,
-            pending: 0,
-            pending_bits: 0,
-        }
-    }
-
-    fn push(&mut self, moved: bool) -> Result<()> {
-        if moved {
-            self.pending |= 1 << self.pending_bits;
-        }
-        self.pending_bits += 1;
-        if self.pending_bits == 8 {
-            self.writer.write_all(&[self.pending])?;
-            self.pending = 0;
-            self.pending_bits = 0;
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> Result<W> {
-        if self.pending_bits > 0 {
-            self.writer.write_all(&[self.pending])?;
-        }
-        self.writer.flush()?;
-        Ok(self.writer)
-    }
 }
 
 struct TemporaryFiles {
@@ -360,7 +323,7 @@ fn collect_results<W: Write, M: Write>(
     original_records: &[[u8; PackedSfenValue::SIZE]],
     results: &[ProcessResult],
     writer: &mut W,
-    mut mask_writer: Option<&mut MovedMaskWriter<M>>,
+    mut mask_writer: Option<&mut BitmapWriter<M>>,
     verbose: bool,
 ) -> Result<ResultCounts> {
     anyhow::ensure!(
@@ -515,7 +478,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         BufWriter::with_capacity(IO_BUF_SIZE, files.next().context("Missing PSV staging file")?);
     let mut mask_writer = files
         .next()
-        .map(|file| MovedMaskWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file)));
+        .map(|file| BitmapWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file)));
 
     if use_nnue {
         eprintln!("Using NNUE evaluation (with incremental updates)");
@@ -925,7 +888,7 @@ mod tests {
             (8, vec![255]),
             (9, vec![255, 1]),
         ] {
-            let mut writer = MovedMaskWriter::new(Vec::new());
+            let mut writer = BitmapWriter::new(Vec::new());
             for _ in 0..count {
                 writer.push(true).unwrap();
             }
@@ -1041,7 +1004,7 @@ mod tests {
 
     #[test]
     fn moved_mask_is_lsb_first_and_clears_unused_bits() {
-        let mut mask = MovedMaskWriter::new(Vec::new());
+        let mut mask = BitmapWriter::new(Vec::new());
         for moved in [
             true, false, false, false, false, false, false, true, true, false,
         ] {
@@ -1070,7 +1033,7 @@ mod tests {
             ProcessResult::Ok(moved),
         ];
         let mut output = Vec::new();
-        let mut mask = MovedMaskWriter::new(Vec::new());
+        let mut mask = BitmapWriter::new(Vec::new());
 
         let counts =
             collect_results(&originals, &results, &mut output, Some(&mut mask), false).unwrap();
@@ -1098,7 +1061,7 @@ mod tests {
         // (psv_select_by_mask / psv_scatter_by_mask) の契約検証をそのまま通ること。
         let dir = tempfile::tempdir().unwrap();
         let mask_path = dir.path().join("moved.bits");
-        let mut mask = MovedMaskWriter::new(Vec::new());
+        let mut mask = BitmapWriter::new(Vec::new());
         for i in 0..10 {
             mask.push(i % 3 == 0).unwrap();
         }
@@ -1123,7 +1086,7 @@ mod tests {
             &originals,
             &results,
             &mut output,
-            None::<&mut MovedMaskWriter<Vec<u8>>>,
+            None::<&mut BitmapWriter<Vec<u8>>>,
             false,
         )
         .unwrap();
@@ -1154,7 +1117,7 @@ mod tests {
             ProcessResult::Ok(unchanged),
         ];
         let mut output = Vec::new();
-        let mut mask = MovedMaskWriter::new(Vec::new());
+        let mut mask = BitmapWriter::new(Vec::new());
 
         let counts =
             collect_results(&originals, &results, &mut output, Some(&mut mask), false).unwrap();

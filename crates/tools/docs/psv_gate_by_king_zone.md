@@ -15,7 +15,8 @@ base PSV の行順と行数が唯一の対応キーであり、sidecar / bitmap 
   `records * 2` byte に厳密一致する。
 - mask bitmap: byte `j` の bit `k`（`k=0` が LSB）は record `j*8+k` に対応する。
   bit 1 はゲート対象。最終 partial byte の余り bit は 0。サイズは
-  `ceil(records / 8)` byte に厳密一致する。
+  `ceil(records / 8)` byte に厳密一致する。空の入力からは空の mask を生成する。
+  チャンク境界を跨いでも bit の並びは連続し、padding はファイル末尾だけに入る。
 
 base はゲート該当行で採用され、学習側では温存される score 側である。override は
 非該当行で採用される score 側で、学習側の `--score-override` に対応する。trainer は

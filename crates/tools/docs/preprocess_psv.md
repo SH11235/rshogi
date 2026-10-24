@@ -9,6 +9,15 @@ Q16 は明示エラーになります。詳細は [routing 対応表](nnue-routi
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
 
+## moved mask の形式
+
+`--moved-mask` の byte `j` の bit `k`（LSB が bit 0）は、出力 PSV の record
+`j * 8 + k` に対応します。packed SFEN が変わった行だけが bit 1 です。
+スキップ・処理エラーで出力されなかった入力行は bit を消費しません。
+サイズは `ceil(出力 records / 8)` byte、末尾の未使用 bit は 0 で、出力0行なら空です。
+チャンク境界でも bit の並びは連続し、mask 全体をメモリに保持しません。
+詳細な処理条件と後段への渡し方は [pack tools](pack_tools.md#preprocess_psv) を参照してください。
+
 ## 出力パスと既存ファイルの保護
 
 入力 PSV、指定した `--nnue` と `--ls-progress-coeff` は読み取り専用資源として保護します。

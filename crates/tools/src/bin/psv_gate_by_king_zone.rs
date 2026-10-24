@@ -9,6 +9,7 @@ use clap::Parser;
 use rayon::prelude::*;
 use rshogi_core::position::Position;
 use tools::king_zone::classify;
+use tools::mask_io::BitmapWriter;
 use tools::output_path::ensure_safe_output_path;
 use tools::packed_sfen::{PackedSfenValue, unpack_sfen_to_parts};
 
@@ -186,35 +187,27 @@ fn write_mask(input: &Path, out: &Path, config: GateConfig) -> Result<Stats> {
     ensure_safe_output_path(out, input)?;
     let records = checked_records(input)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, File::open(input)?);
-    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, File::create(out)?);
+    let mut writer = BitmapWriter::new(BufWriter::with_capacity(BUFFER_SIZE, File::create(out)?));
     let mut chunk = Vec::with_capacity(CHUNK_RECORDS * RECORD_SIZE);
     let mut stats = Stats::default();
-    let mut byte = 0u8;
     let mut first_row = 0u64;
     while first_row < records {
         let chunk_records = (records - first_row).min(CHUNK_RECORDS as u64) as usize;
         read_record_chunk(&mut reader, &mut chunk, chunk_records)?;
         let classifications = classify_chunk(&chunk, first_row);
-        for (offset, classification) in classifications.into_iter().enumerate() {
-            let row = first_row + offset as u64;
+        for classification in classifications {
             let (tier, score) = classification?;
             stats.tiers[tier] += 1;
-            if is_gated(config, tier, score) {
-                byte |= 1 << (row % 8);
+            let gated = is_gated(config, tier, score);
+            writer.push(gated)?;
+            if gated {
                 stats.gated += 1;
-            }
-            if row % 8 == 7 {
-                writer.write_all(&[byte])?;
-                byte = 0;
             }
         }
         first_row += chunk_records as u64;
         stats.records += chunk_records as u64;
     }
-    if records % 8 != 0 {
-        writer.write_all(&[byte])?;
-    }
-    writer.flush()?;
+    drop(writer.finish()?);
     let expected = records.div_ceil(8);
     anyhow::ensure!(fs::metadata(out)?.len() == expected, "Mask size mismatch");
     Ok(stats)
@@ -277,7 +270,7 @@ mod tests {
 
     #[test]
     fn mask_bit_order_and_partial_byte() -> Result<()> {
-        for count in [7, 8, 9, 15, 16, 17] {
+        for count in [0, 1, 7, 8, 9, 15, 16, 17] {
             let dir = tempdir()?;
             let input = dir.path().join("input.psv");
             let output = dir.path().join("mask.bin");
