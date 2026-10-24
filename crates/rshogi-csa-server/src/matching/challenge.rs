@@ -17,11 +17,7 @@
 //! WS attachment id (String) が serialize 可能なため
 //! [`ChallengeEntry::pending_ws_attachment_ids`] に直接持たせる。
 //!
-//! # スコープ
-//!
-//! 本モジュールは https://github.com/SH11235/rshogi/issues/582 の **Core foundation** 部分。`%%CHALLENGE` /
-//! `CHALLENGE_LOBBY` の protocol parser、TCP `drive_private_game` lifecycle、
-//! Workers DO storage 永続化 / Alarm purge は別の follow-up PR で実装される。
+//! protocol の解釈と接続・対局開始は各 frontend が担当する。
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -313,16 +309,12 @@ impl ChallengeRegistry {
         self.entries.values().map(|e| e.expires_at_ms).min()
     }
 
-    /// 登録件数 (テスト専用 accessor)。production 経路で件数を観測する用途が
-    /// 無いため `#[cfg(test)]` で閉じる。Workers の Alarm reset 判定で使うなら
-    /// `earliest_expiry_ms().is_some()` で代替できるため、件数公開は YAGNI。
-    #[cfg(test)]
+    /// 登録されている未消費招待の件数。期限切れの除去は `purge_expired` で行う。
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// 登録 entry が無いかどうか (テスト専用、`len` と対称的に提供)。
-    #[cfg(test)]
+    /// 登録されている招待がないかを返す。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

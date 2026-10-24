@@ -16,16 +16,12 @@
 //!
 //! 認証は self-claim (`<password>` 値検証なし)、本家 Floodgate と同じ扱い。
 //!
-//! # 私的対局 (https://github.com/SH11235/rshogi/issues/582)
-//!
-//! ここでは以下のみ実装する。両者揃った後の対局起動経路 (consume → GameRoom
-//! DO 起動 + clock_spec / initial_sfen バトンパス) は別モジュール (follow-up
-//! integration の後半スコープ) に分割されている。
+//! # 私的対局
 //!
 //! - `CHALLENGE_LOBBY <inviter> <opponent> <color> <clock_preset> [<sfen>]` 受理
 //!   と token 発行 (`CHALLENGE_LOBBY:OK <token> <ttl_sec>` 応答)
 //! - `LOGIN_LOBBY <handle>+private-<token>+free <password>` の認識と attachment
-//!   登録 (`LOGIN_LOBBY:<handle> OK pending_match_dispatch_pending` 応答)
+//!   登録後、双方が揃えば GameRoom に固定条件を渡して MATCHED を通知する。
 //! - [`rshogi_csa_server::matching::challenge::ChallengeRegistry`] の
 //!   DO storage 永続化 (cold start 復元 + `purge_expired` 後再保存)
 //! - DO Alarm による TTL purge と保留中 WS への切断信号送出
@@ -110,11 +106,7 @@ enum LobbyAttachment {
         color: ColorTag,
         attachment_id: String,
     },
-    /// 私的対局 (`LOGIN_LOBBY <handle>+private-<token>+free`) で先行 LOGIN
-    /// 済の待機者。両者揃った時点での GameRoom DO 起動経路は次 PR に分割する
-    /// ため、本 attachment は `pending_ws_attachment_ids` への登録を保持する
-    /// だけの暫定状態にとどまる。WS close 時に attachment id 単位で
-    /// `unmark_ws_logged_in` を呼んで stale handle race を回避する。
+    /// 招待の相手を待つ認証済み接続。保存された session id で切断を照合する。
     PrivatePending {
         /// challenge token の hex 文字列 (24 文字)。`ChallengeToken::from_raw`
         /// でラップして `ChallengeRegistry` 操作に使う。
@@ -159,6 +151,7 @@ pub struct Lobby {
     state: State,
     env: Env,
     queue: RefCell<LobbyQueue>,
+    challenge_lock: futures_util::lock::Mutex<()>,
 }
 
 impl DurableObject for Lobby {
@@ -167,6 +160,7 @@ impl DurableObject for Lobby {
             state,
             env,
             queue: RefCell::new(LobbyQueue::new()),
+            challenge_lock: futures_util::lock::Mutex::new(()),
         }
     }
 
@@ -292,6 +286,7 @@ impl DurableObject for Lobby {
                 handle,
                 attachment_id,
             })) => {
+                retire_private_socket(&ws)?;
                 self.handle_private_pending_close(&token, &handle, &attachment_id).await?;
             }
             _ => {
@@ -460,9 +455,11 @@ impl Lobby {
     /// enter_grace_window` の grace_registry / pending_alarm_kind の 2 連続 put
     /// が同様の前提で動いているのと同じ理由)。
     async fn next_attachment_id(&self) -> Result<String> {
-        let current: Option<u64> =
-            self.state.storage().get(KEY_NEXT_ATTACHMENT_ID).await.ok().flatten();
-        let next = current.unwrap_or(0).saturating_add(1);
+        let current: Option<u64> = self.state.storage().get(KEY_NEXT_ATTACHMENT_ID).await?;
+        let next = current
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| Error::RustError("attachment id exhausted".into()))?;
         self.state.storage().put(KEY_NEXT_ATTACHMENT_ID, &next).await?;
         Ok(format!("ws-{next}"))
     }
@@ -518,13 +515,11 @@ impl Lobby {
     /// `is_private_login_handle` で `true` を返した場合は私的経路に分岐し、
     /// CHALLENGE_LOBBY 行は専用パス (`handle_challenge_lobby`) に分岐させる。
     ///
-    /// **私的対局 feature gate (https://github.com/SH11235/rshogi/issues/635)**:
+    /// **私的対局 feature gate**:
     /// `PRIVATE_CHALLENGE_ENABLED` が無効 (production の既定) のとき、私的対局
     /// 2 経路 (`CHALLENGE_LOBBY ` / `LOGIN_LOBBY <handle>+private-...+free`) は
     /// `parse_*` / registry load 等の副作用に入る前に `:incorrect unsupported`
-    /// を返して終了する。両者揃った後の対局起動経路 (consume → GameRoom DO 起動)
-    /// が未実装の状態で client が誤って使うと pending state でハマるため、production
-    /// 到達不能化を最入口で行う。
+    /// を返して終了する。
     async fn dispatch_pending_line(
         &self,
         ws: &WebSocket,
@@ -1000,7 +995,9 @@ impl Lobby {
         //    による purge 結果の取りこぼしを避ける (Codex review 指摘)。
         let now_ms = self.now_ms();
         let ttl = self.challenge_ttl();
+        let challenge_guard = self.challenge_lock.lock().await;
         let mut reg = self.load_challenge_registry().await?;
+        let _ = &challenge_guard;
         if !self.is_active_pending(ws) {
             return Ok(());
         }
@@ -1008,7 +1005,7 @@ impl Lobby {
         let expired = reg.purge_expired(now_ms);
         let purged = !expired.is_empty();
         if purged {
-            self.disconnect_pending_websockets(&expired).await;
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         }
 
         // 1. clock_preset の存在確認。`CLOCK_PRESETS` 未宣言 (空 map) の構成では
@@ -1036,6 +1033,13 @@ impl Lobby {
                 self.reschedule_alarm_with(&reg).await?;
             }
             send_line(ws, &build_challenge_incorrect_line("bad_sfen"))?;
+            return Ok(());
+        }
+
+        if reg.len() >= self.queue_size_limit() {
+            self.save_challenge_registry(&reg).await?;
+            self.reschedule_alarm_with(&reg).await?;
+            send_line(ws, &build_challenge_incorrect_line("queue_full"))?;
             return Ok(());
         }
 
@@ -1077,24 +1081,6 @@ impl Lobby {
         Ok(())
     }
 
-    /// 私的対局 LOGIN_LOBBY (`<handle>+private-<token>+free`) の処理。
-    ///
-    /// 検証順序 (https://github.com/SH11235/rshogi/issues/582 仕様):
-    /// 1. パース失敗 (`+free` 以外 / hex 不正 / 引数不足) → `LOGIN_LOBBY:incorrect`
-    ///    + 適切な reason
-    /// 2. token 期限切れ / 未登録 → `LOGIN_LOBBY:incorrect challenge_expired`
-    /// 3. handle が `inviter` / `opponent` のどちらにも一致しない →
-    ///    `LOGIN_LOBBY:incorrect not_invited`
-    /// 4. 同 handle が同 token に既登録 → `LOGIN_LOBBY:incorrect already_logged_in`
-    /// 5. 通過 → `mark_ws_logged_in` で attachment id を登録し、
-    ///    `LOGIN_LOBBY:<handle> OK pending_match_dispatch_pending` 暫定応答を返す。
-    ///
-    /// **スコープ補足**: 両者揃った時点で `consume(token)` → GameRoom DO
-    /// 起動 + clock_spec / initial_sfen バトンパスする経路は https://github.com/SH11235/rshogi/issues/582
-    /// follow-up integration の後半スコープに分割されている。ここでは LOGIN_LOBBY
-    /// を受理して attachment を `PrivatePending` で登録するだけで、対局起動
-    /// trigger を発火させない (WS は接続維持され、別モジュールの dispatch 経路で
-    /// 起動する)。
     async fn handle_login_lobby_private(
         &self,
         ws: &WebSocket,
@@ -1140,11 +1126,16 @@ impl Lobby {
 
         // 認証直後に TTL purge を 1 回走らせて、対局相手の到着前に expire した
         // token を即時掃除する (Alarm の最終ガードに加えた即時パス)。
+        let challenge_guard = self.challenge_lock.lock().await;
+        if !self.is_active_pending(ws) {
+            return Ok(());
+        }
         let now_ms = self.now_ms();
         let mut reg = self.load_challenge_registry().await?;
+        let _ = &challenge_guard;
         let expired = reg.purge_expired(now_ms);
         if !expired.is_empty() {
-            self.disconnect_pending_websockets(&expired).await;
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         }
 
         // 期限切れ / 未登録 → `challenge_expired`
@@ -1172,6 +1163,22 @@ impl Lobby {
             let _ = ws.close(Some(1000), Some("not_invited"));
             return Ok(());
         }
+
+        for (pending_handle, pending_id) in &entry.pending_ws_attachment_ids {
+            if self.private_socket(token.as_str(), pending_handle, pending_id).is_none() {
+                reg.unmark_ws_logged_in(&token, &PlayerName::new(pending_handle), pending_id);
+            }
+        }
+        let entry = reg.lookup(&token, self.now_ms()).cloned();
+        let Some(entry) = entry else {
+            let expired = reg.purge_expired(self.now_ms());
+            self.disconnect_pending_websockets(&expired, "challenge_expired").await;
+            self.save_challenge_registry(&reg).await?;
+            self.reschedule_alarm_with(&reg).await?;
+            send_line(ws, &build_login_incorrect_line("challenge_expired"))?;
+            let _ = ws.close(Some(1003), Some("challenge_expired"));
+            return Ok(());
+        };
 
         // 同 handle が既登録なら `already_logged_in`
         if entry.pending_ws_attachment_ids.contains_key(&handle) {
@@ -1211,21 +1218,125 @@ impl Lobby {
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
         self.reschedule_alarm_with(&reg).await?;
-        send_line(ws, &format!("LOGIN_LOBBY:{handle} OK pending_match_dispatch_pending"))?;
-        // 私的対局 token は診断用途で平文ログに残す (旧 console_log! と同等の挙動を
-        // 保つ移行)。CHALLENGE_LOBBY 発行時の TTL (`CHALLENGE_TTL_SEC`、既定
-        // 3600 秒) で自動失効するため、Tail Workers / R2 archive 経由で
-        // 漏えいしてもリプレイ攻撃ウィンドウは限定的。token を無害化したい
-        // 場合はこのフィールドを `token_prefix: token.as_str().chars().take(8).collect::<String>()`
-        // 等に差し替える (現状は保留)。
-        crate::structured_log!(
-            event: "login_lobby_private",
-            component: "lobby",
-            handle: handle,
-            token: token.as_str(),
-            attachment_id: attachment_id,
-        );
+        send_line(ws, &build_login_ok_line(&handle))?;
+        if let Some(entry) = reg.lookup(&token, self.now_ms()).cloned()
+            && entry.pending_ws_attachment_ids.contains_key(&entry.inviter)
+            && entry.pending_ws_attachment_ids.contains_key(&entry.opponent)
+        {
+            self.dispatch_private_match(&mut reg, &token, &entry).await?;
+        }
         Ok(())
+    }
+
+    fn private_socket(&self, token: &str, handle: &str, attachment_id: &str) -> Option<WebSocket> {
+        self.state.get_websockets().into_iter().find(|ws| {
+            matches!(ws.deserialize_attachment::<LobbyAttachment>(),
+                Ok(Some(LobbyAttachment::PrivatePending { token: t, handle: h, attachment_id: id }))
+                if t == token && h == handle && id == attachment_id)
+        })
+    }
+
+    async fn dispatch_private_match(
+        &self,
+        reg: &mut ChallengeRegistry,
+        token: &ChallengeToken,
+        entry: &ChallengeEntry,
+    ) -> Result<()> {
+        let plan = crate::private_match::PrivateMatch::from_challenge(token, entry);
+        let namespace = self.env.durable_object(ConfigKeys::GAME_ROOM_BINDING)?;
+        let stub = namespace.id_from_name(&plan.room_id)?.get_stub()?;
+        let body =
+            serde_json::to_string(&plan).map_err(|error| Error::RustError(error.to_string()))?;
+        let mut init = worker::RequestInit::new();
+        init.with_method(worker::Method::Post).with_body(Some(body.into()));
+        let request = Request::new_with_init("https://do.internal/private-match", &init)?;
+        let prepared = stub.fetch_with_request(request).await;
+        if !matches!(prepared, Ok(ref response) if response.status_code() == 200) {
+            for (handle, id) in &entry.pending_ws_attachment_ids {
+                reg.unmark_ws_logged_in(token, &PlayerName::new(handle), id);
+                if let Some(socket) = self.private_socket(token.as_str(), handle, id) {
+                    let _ = send_line(&socket, &build_login_incorrect_line("match_start_failed"));
+                    let _ = retire_private_socket(&socket);
+                    let _ = socket.close(Some(1011), Some("match_start_failed"));
+                }
+            }
+            self.save_challenge_registry(reg).await?;
+            return Ok(());
+        }
+        if reg.consume(token, self.now_ms()).is_none() {
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
+            return Ok(());
+        }
+        if let Err(error) = self.save_challenge_registry(reg).await {
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
+            return Err(error);
+        }
+        let activate =
+            Request::new("https://do.internal/private-match/activate", worker::Method::Post)?;
+        if !matches!(stub.fetch_with_request(activate).await, Ok(response) if response.status_code() == 200)
+        {
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
+            return Ok(());
+        }
+        let both_present = [&plan.black_handle, &plan.white_handle].iter().all(|handle| {
+            entry
+                .pending_ws_attachment_ids
+                .get(*handle)
+                .and_then(|id| self.private_socket(token.as_str(), handle, id))
+                .is_some()
+        });
+        if !both_present {
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+            self.disconnect_pending_websockets(
+                &[(token.clone(), entry.clone())],
+                "match_cancelled",
+            )
+            .await;
+            return self.reschedule_alarm_with(reg).await;
+        }
+        let mut delivered = true;
+        for (handle, color) in [
+            (&plan.black_handle, Color::Black),
+            (&plan.white_handle, Color::White),
+        ] {
+            let socket = entry
+                .pending_ws_attachment_ids
+                .get(handle)
+                .and_then(|id| self.private_socket(token.as_str(), handle, id));
+            if let Some(socket) = socket {
+                delivered &= send_line(&socket, &build_matched_line(&plan.room_id, color)).is_ok();
+                delivered &= retire_private_socket(&socket).is_ok();
+                let _ = socket.close(Some(1000), Some("matched"));
+            } else {
+                delivered = false;
+            }
+        }
+        if !delivered {
+            let cancel =
+                Request::new("https://do.internal/private-match/cancel", worker::Method::Post)?;
+            let _ = stub.fetch_with_request(cancel).await;
+        }
+        self.reschedule_alarm_with(reg).await
     }
 
     /// 私的対局 attachment の close 経路。stale handle race を避けるため、
@@ -1236,6 +1347,8 @@ impl Lobby {
         handle: &str,
         attachment_id: &str,
     ) -> Result<()> {
+        let challenge_guard = self.challenge_lock.lock().await;
+        let _ = &challenge_guard;
         let mut reg = self.load_challenge_registry().await?;
         let token_obj = ChallengeToken::from_raw(token);
         reg.unmark_ws_logged_in(&token_obj, &PlayerName::new(handle), attachment_id);
@@ -1245,15 +1358,12 @@ impl Lobby {
             event: "private_login_ws_closed",
             component: "lobby",
             handle: handle,
-            token: token,
             attachment_id: attachment_id,
         );
         Ok(())
     }
 
-    /// 私的対局 attachment 状態で受信した line。対局起動経路はこのモジュール
-    /// では発火しないため、`LOGOUT_LOBBY` を受理して切断する以外は ignore する。
-    /// `LOBBY_PONG` は keep-alive として silent に受理する。
+    /// 待機中は切断と keep-alive だけを受理する。
     async fn handle_private_pending_line(
         &self,
         ws: &WebSocket,
@@ -1264,6 +1374,7 @@ impl Lobby {
     ) -> Result<()> {
         match line {
             "LOGOUT_LOBBY" => {
+                retire_private_socket(ws)?;
                 self.handle_private_pending_close(token, handle, attachment_id).await?;
                 let _ = ws.close(Some(1000), Some("logout"));
                 Ok(())
@@ -1274,7 +1385,6 @@ impl Lobby {
                     event: "private_pending_unexpected_line",
                     component: "lobby",
                     handle: handle,
-                    line: line,
                 );
                 Ok(())
             }
@@ -1297,12 +1407,14 @@ impl Lobby {
     /// alarm 再予約は呼び出し側 (`alarm()`) が queue purge とまとめて 1 回だけ
     /// 行う契約 (https://github.com/SH11235/rshogi/issues/631)。
     async fn handle_challenge_purge(&self, now_ms: u64) -> Result<()> {
+        let challenge_guard = self.challenge_lock.lock().await;
+        let _ = &challenge_guard;
         let mut reg = self.load_challenge_registry().await?;
         let expired = reg.purge_expired(now_ms);
         if expired.is_empty() {
             return Ok(());
         }
-        self.disconnect_pending_websockets(&expired).await;
+        self.disconnect_pending_websockets(&expired, "challenge_expired").await;
         self.save_challenge_registry(&reg).await?;
         crate::structured_log!(
             event: "challenge_purge_expired",
@@ -1356,7 +1468,11 @@ impl Lobby {
     /// 該当する `PrivatePending` attachment を持つ WS にエラー送信 + close。
     /// `state.get_websockets()` を 1 回だけ走査するために攻撃面の attachment id
     /// 集合を pre-compute する (登録 entry の数 × 2 attachment 上限なので O(n))。
-    async fn disconnect_pending_websockets(&self, expired: &[(ChallengeToken, ChallengeEntry)]) {
+    async fn disconnect_pending_websockets(
+        &self,
+        expired: &[(ChallengeToken, ChallengeEntry)],
+        reason: &str,
+    ) {
         if expired.is_empty() {
             return;
         }
@@ -1382,19 +1498,22 @@ impl Lobby {
             } = att
                 && targets.iter().any(|(t, a)| t == &ws_token && a == &ws_id)
             {
-                // 期限切れであることをクライアントに通知してから close。
-                let _ = send_line(&ws, &build_login_incorrect_line("challenge_expired"));
-                let _ = ws.close(Some(1000), Some("challenge_expired"));
+                let _ = send_line(&ws, &build_login_incorrect_line(reason));
+                let _ = retire_private_socket(&ws);
+                let _ = ws.close(Some(1000), Some(reason));
             }
         }
     }
 }
 
-/// 私的対局 (`CHALLENGE_LOBBY`) の `<sfen>` 妥当性を検証する。core の
-/// `position_section_from_sfen` と `side_to_move_from_sfen` の双方が `Ok` を
-/// 返すときのみ `true`。Game_Summary 構築経路 (`GameRoom`) と同じ 2 関数で
-/// 揃えることで、CHALLENGE 時点で受理した SFEN が以降の対局駆動でも再利用
-/// 可能であることを保証する (TCP `process_challenge` と同じ流儀)。
+fn retire_private_socket(ws: &WebSocket) -> Result<()> {
+    ws.serialize_attachment(&LobbyAttachment::Pending {
+        client_ip: None,
+        expires_at_ms: 0,
+    })
+    .map_err(|error| Error::RustError(error.to_string()))
+}
+
 fn is_valid_sfen(sfen: &str) -> bool {
     use rshogi_csa_server::protocol::summary::{
         position_section_from_sfen, side_to_move_from_sfen,

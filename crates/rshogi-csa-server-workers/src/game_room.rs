@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS reconnect_clock_credits (
 "#;
 
 const KEY_ROOM_ID: &str = "room_id";
+const KEY_PRIVATE_MATCH: &str = "private_match";
+const KEY_PRIVATE_CANCELLED: &str = "private_cancelled";
+const KEY_PRIVATE_ACTIVE: &str = "private_active";
+const KEY_PRIVATE_JOIN_DEADLINE_MS: &str = "private_join_deadline_ms";
+const PRIVATE_JOIN_WINDOW_MS: u64 = 60_000;
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
@@ -316,9 +321,79 @@ impl DurableObject for GameRoom {
         }
     }
 
-    async fn fetch(&self, req: Request) -> Result<Response> {
+    async fn fetch(&self, mut req: Request) -> Result<Response> {
         let url = req.url()?;
         let path = url.path();
+        if path == "/private-match"
+            || path == "/private-match/cancel"
+            || path == "/private-match/activate"
+        {
+            if req.method() != worker::Method::Post
+                || !crate::config::is_private_challenge_enabled(&self.env)
+            {
+                return Response::error("not found", 404);
+            }
+            if path.ends_with("/cancel") {
+                self.state.storage().put(KEY_PRIVATE_CANCELLED, true).await?;
+                self.abort_pending_match_with_error("##[ERROR] private match cancelled").await?;
+                return Response::ok("cancelled");
+            }
+            if path.ends_with("/activate") {
+                let plan = self
+                    .state
+                    .storage()
+                    .get::<crate::private_match::PrivateMatch>(KEY_PRIVATE_MATCH)
+                    .await?;
+                if plan.is_none_or(|plan| plan.expires_at_ms <= self.now_ms())
+                    || self
+                        .state
+                        .storage()
+                        .get::<bool>(KEY_PRIVATE_CANCELLED)
+                        .await?
+                        .unwrap_or(false)
+                {
+                    return Response::error("private match unavailable", 409);
+                }
+                if self.state.storage().get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS).await?.is_none() {
+                    self.state
+                        .storage()
+                        .put(
+                            KEY_PRIVATE_JOIN_DEADLINE_MS,
+                            self.now_ms().saturating_add(PRIVATE_JOIN_WINDOW_MS),
+                        )
+                        .await?;
+                }
+                self.state.storage().put(KEY_PRIVATE_ACTIVE, true).await?;
+                return Response::ok("active");
+            }
+            let plan: crate::private_match::PrivateMatch = req.json().await?;
+            if plan.expires_at_ms <= self.now_ms()
+                || self.state.storage().get::<bool>(KEY_PRIVATE_CANCELLED).await?.unwrap_or(false)
+                || self.load_finished().await?.is_some()
+            {
+                return Response::error("private match unavailable", 409);
+            }
+            if let Some(existing) = self
+                .state
+                .storage()
+                .get::<crate::private_match::PrivateMatch>(KEY_PRIVATE_MATCH)
+                .await?
+            {
+                return if existing == plan {
+                    Response::ok("prepared")
+                } else {
+                    Response::error("private match conflict", 409)
+                };
+            }
+            if self.state.storage().get::<String>(KEY_ROOM_ID).await?.is_some()
+                || !self.load_slots().await?.is_empty()
+            {
+                return Response::error("room already used", 409);
+            }
+            self.state.storage().put(KEY_PRIVATE_MATCH, &plan).await?;
+            self.state.storage().put(KEY_ROOM_ID, &plan.room_id).await?;
+            return Response::ok("prepared");
+        }
         let Some(route) = parse_ws_route(path) else {
             return Response::error("Upgrade required", 426);
         };
@@ -693,14 +768,45 @@ impl GameRoom {
             return Ok(());
         }
 
+        let private = self
+            .state
+            .storage()
+            .get::<crate::private_match::PrivateMatch>(KEY_PRIVATE_MATCH)
+            .await?;
+        let room_id = self.state.storage().get::<String>(KEY_ROOM_ID).await?.unwrap_or_default();
+        if (private.is_some()
+            && !self.state.storage().get::<bool>(KEY_PRIVATE_ACTIVE).await?.unwrap_or(false))
+            || private
+                .as_ref()
+                .is_some_and(|plan| !plan.accepts(&handle, role == Role::Black, &game_name))
+            || (private.is_none()
+                && (room_id.starts_with("private-") || game_name.starts_with("private-")))
+            || self.state.storage().get::<bool>(KEY_PRIVATE_CANCELLED).await?.unwrap_or(false)
+            || (reconnect.is_none()
+                && private.is_some()
+                && self
+                    .state
+                    .storage()
+                    .get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS)
+                    .await?
+                    .unwrap_or(0)
+                    <= self.now_ms())
+        {
+            send_line(ws, &LoginReply::Incorrect.to_line())?;
+            let _ = ws.close(Some(1003), Some("private match rejected".to_owned()));
+            return Ok(());
+        }
         // 再接続要求の経路分岐。LOGIN 行 3 つ目トークンが
         // `reconnect:<game_id>+<token>` の場合は新規対局参加 (slot 確保 + マッチ
         // 成立) ではなく、grace 中の該当対局へ「同一対局者として再参加」する経路へ。
         // 失敗時は LOGIN OK を送らずに `LOGIN:incorrect reconnect_rejected` で
         // 拒否する (拒否は元の対局者による再試行を妨げない)。
         if let Some(req) = reconnect {
-            return self.handle_reconnect_request(ws, &handle, role, req).await;
+            return self.handle_reconnect_request(ws, &handle, &game_name, role, req).await;
         }
+
+        // トークンを棋譜・公開索引へ残さず、参加照合後は非機密の対局名だけを保存する。
+        let game_name = private.as_ref().map_or(game_name, |plan| plan.game_name.clone());
 
         // 新スロットを**仮に**加えて衝突判定する。`evaluate_match` が Conflict を返す
         // 場合は永続化も attachment 差し替えも行わず、部屋を破壊しないよう拒否する
@@ -754,6 +860,19 @@ impl GameRoom {
                 component: "game_room",
                 err: format!("{error:?}"),
             );
+        }
+
+        // D1 待機中には別の LOGIN が進むため、保存直前に最新の slots で再検証する。
+        let mut next_slots = self.load_slots().await?;
+        next_slots.push(Slot {
+            role,
+            handle: handle.clone(),
+            player_id: identity.player_id.clone(),
+            game_name: game_name.clone(),
+        });
+        if let MatchResult::Conflict { .. } = evaluate_match(&next_slots) {
+            send_line(ws, &LoginReply::Incorrect.to_line())?;
+            return Ok(());
         }
 
         // 検証を通ったので slots を書き戻し、attachment を Player に差し替える。
@@ -885,15 +1004,33 @@ impl GameRoom {
             .await?
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
-        // 双方の LOGIN は既に OK を返しているため、ここで `?` で Err を伝播させると
-        // 両クライアントには Game_Summary も `##[ERROR]` 通知も届かず部屋が永久に
-        // 詰まる。`CLOCK_PRESETS` の不正設定 (`parse_clock_presets` Err) や、env
-        // 設定の不整合で `game_name` 未登録に落ちるケースも、buoy reservation 失敗
-        // と同じ pending match abort 経路に揃えて部屋を解放する (https://github.com/SH11235/rshogi/issues/641 で
-        // Lobby 側の OnceCell キャッシュ廃止後は両 DO ともに env を毎回読み直す
-        // ため deploy race による乖離は解消されたが、`CLOCK_PRESETS` 不正設定時の
-        // fail-fast 経路は残す)。
-        let preset = match resolve_game_preset_for_game(&self.env, game_name) {
+        let private = self
+            .state
+            .storage()
+            .get::<crate::private_match::PrivateMatch>(KEY_PRIVATE_MATCH)
+            .await?;
+        if (private.is_some()
+            && self
+                .state
+                .storage()
+                .get::<u64>(KEY_PRIVATE_JOIN_DEADLINE_MS)
+                .await?
+                .unwrap_or(0)
+                <= self.now_ms())
+            || self.state.storage().get::<bool>(KEY_PRIVATE_CANCELLED).await?.unwrap_or(false)
+        {
+            self.abort_pending_match_with_error("##[ERROR] private match expired or cancelled")
+                .await?;
+            return Ok(false);
+        }
+        let resolved_preset = match &private {
+            Some(plan) => Ok(crate::config::GamePreset {
+                clock: plan.clock.clone(),
+                max_moves: None,
+            }),
+            None => resolve_game_preset_for_game(&self.env, game_name),
+        };
+        let preset = match resolved_preset {
             Ok(preset) => preset,
             Err(e) => {
                 crate::structured_log!(
@@ -939,8 +1076,11 @@ impl GameRoom {
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
         // 再利用可能にする。
-        let reservation = match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await
-        {
+        let reserved = match &private {
+            Some(plan) => Ok(BuoyReservation::Reserved(plan.initial_sfen.clone())),
+            None => self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await,
+        };
+        let reservation = match reserved {
             Ok(r) => r,
             Err(e) => {
                 crate::structured_log!(
@@ -3844,6 +3984,7 @@ impl GameRoom {
         &self,
         ws: &WebSocket,
         handle: &str,
+        login_game_name: &str,
         role: Role,
         req: ReconnectRequest,
     ) -> Result<()> {
@@ -3938,7 +4079,6 @@ impl GameRoom {
         // 成功確定。LOGIN OK → resume 送出 → attachment を Player に差し替え →
         // grace registry / alarm tag を片付ける順で進める。
         let game_name = self.current_game_name_or_empty().await?;
-        let login_name = format!("{handle}+{game_name}+{}", color_to_str(role.to_core()));
         // 状態再送 (Game_Summary + Reconnect_State ブロック) は複数行なので
         // 1 行ずつ `send_line` に分解する。`build_resume_message` の改行終端が
         // 各行末改行と整合するので `lines()` でそのまま reuse できる。
@@ -3961,7 +4101,13 @@ impl GameRoom {
                 rshogi_csa_server::protocol::reconnect::ReconnectClock { remaining_ms },
             )
         };
-        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
+        send_line(
+            ws,
+            &LoginReply::Ok {
+                name: format!("{handle}+{login_game_name}+{}", color_to_str(role.to_core())),
+            }
+            .to_line(),
+        )?;
         for line in resume.lines() {
             send_line(ws, line)?;
         }

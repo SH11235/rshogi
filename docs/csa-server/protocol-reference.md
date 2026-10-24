@@ -353,6 +353,56 @@ GameRoom DO への接続、というフローを取る。
 詳細設計は [`lobby_design.md`](lobby_design.md)、運用 runbook は
 [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) を参照。
 
+### 9.2.1 Workers の私的対局
+
+`PRIVATE_CHALLENGE_ENABLED=true` の環境だけで利用できる。既定は無効。
+招待者は `/ws/lobby` で次を送り、返された token を相手へ共有する。
+`<clock_preset>` は運用側の `CLOCK_PRESETS` に登録済みの名前を指定する。
+
+```text
+CHALLENGE_LOBBY alice bob black <clock_preset>
+CHALLENGE_LOBBY:OK <token> 3600
+```
+
+希望色は `black` / `white` / `free`。末尾に開始局面の SFEN を指定でき、
+省略は平手。時計と開始局面は招待発行時に固定され、Buoy の局面・残回数は使わない。
+応答の最後は有効期間の秒数（`CHALLENGE_TTL_SEC`、既定 3600）。
+
+両者がそれぞれの Lobby 接続で以下を送る。private の Lobby LOGIN は `free` のみ受理する。
+
+```text
+LOGIN_LOBBY alice+private-<token>+free <password>
+LOGIN_LOBBY:alice OK
+```
+
+相手の LOGIN が揃うと、双方に `MATCHED <room_id> <color>` が届いて Lobby 接続が閉じる。
+`<room_id>` は token のハッシュ由来の識別子。両者は `/ws/<room_id>` に接続し、
+通知された色で `LOGIN alice+private-<token>+black <password>` のように通常 LOGIN する。
+相手も LOGIN すると Game_Summary が届き、通常どおり双方の `AGREE` で開始する。
+GameRoom は招待された handle・割当色・token の組合せだけを受理する。
+Game_Summary と棋譜・公開索引の対局名には token を保存しない。
+
+- 自分自身への招待、招待外 handle、期限切れ・消費済み token は拒否する。
+- 待機中に切断した場合は有効期間内に同じ token で再接続できる。接続が生存中の
+  同一 handle の重複 LOGIN は `already_logged_in` で拒否する。
+- `match_start_failed` は GameRoom の準備失敗。両待機接続が閉じるので、
+  同 token を使って両者とも Lobby から再接続する。
+- token は成立時に一度だけ消費する。`match_cancelled` は成立処理の失敗を示す。
+  消費後の起動・通知失敗では部屋の取消を試みるため、
+  新たな招待を発行する。内部通信障害時の取消完了は保証しない。`MATCHED` を受信しても相手が到着しない場合は接続を閉じ、
+  相手と確認して新たな招待でやり直す。通知とネットワーク配送の原子性は保証しない。
+- 成立後は招待の残り時間とは別に 60 秒の参加猶予がある。両者はこの間に GameRoom へ
+  LOGIN する。開始済み対局の継続・設定済みの再接続猶予にはこの期限を適用しない。
+- `private-` で始まる部屋名・対局名は私的対局用に予約され、通常対局としての直接 LOGIN は拒否する。
+- 未消費招待数は `LOBBY_QUEUE_SIZE_LIMIT`（既定 100）まで。上限到達時は
+  `CHALLENGE_LOBBY:incorrect queue_full` を返す。
+
+handle の本人確認は通常 LOGIN と同じ `WORKERS_HANDLE_AUTH` に依存する。
+whitelist 未設定の handle は自己申告であり、私的対局だけで本人確認が強化されることはない。
+token と接続情報を公開しないこと。私的対局は参加者の制限であり、棋譜や観戦の
+非公開化を意味しない。公開範囲は別途 [アクセス制御](viewer_access_control.md) で設定する。
+TCP の `%%CHALLENGE` と Workers の Lobby コマンドは別経路である。
+
 ### 9.3 Floodgate オプトイン gate
 
 opt-in flag (`--allow-floodgate-features` / 環境変数) は **コマンドそのもの**

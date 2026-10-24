@@ -60,6 +60,7 @@ pub mod handle_auth;
 pub mod live_games_index;
 pub mod lobby_protocol;
 pub mod origin;
+pub mod private_match;
 // `rate_limit` は host テスト可能な pure helper (TokenBucketState, threshold
 // resolution, Retry-After 算出) と wasm32-only な `RateLimiter` Durable Object を
 // 同居させる。DO 部分は `#[cfg(target_arch = "wasm32")]` で gate しているので、
