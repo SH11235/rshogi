@@ -1398,7 +1398,8 @@ fn solves_kingless_tsume() {
     }
 }
 
-/// 攻め方の玉が無い局面で、詰み手数の上限を `len_limit` 手にした探索が詰みを証明するか
+/// 攻め方の玉が無い局面で、詰み手数の上限を `len_limit` 手にした探索が詰みを証明するか。
+/// 探索は反復を不詰とみなすが、上限内の最短の証明には反復が無いので、反復を見ない総当たりと一致する
 fn proves_kingless_mate_within(pos: &Position, len_limit: u16, mode: MateMode) -> bool {
     fn search<const PIECES: bool>(pos: &Position, len_limit: u16, mode: MateMode) -> bool {
         let stop = AtomicBool::new(false);
@@ -1432,11 +1433,11 @@ fn proves_kingless_mate_within(pos: &Position, len_limit: u16, mode: MateMode) -
 /// 詰み手数の上限付きの探索と総当たりが、同じ上限で一致する (詰み・不詰の両方向)。
 /// 詰み手順 1 本の検証では、手順に無い応手で逃れる偽の詰みを見落とすため。`brute3` は 3 手の総当たりの結果。
 fn assert_limited_search_matches_brute_force(pos: &mut Position, brute3: bool, check_5: bool) {
+    let sfen = pos.to_sfen();
+    let brute5 = check_5.then(|| brute_mate_by_rules(pos, 5));
     for mode in MateMode::ALL {
-        let sfen = pos.to_sfen();
         assert_eq!(proves_kingless_mate_within(pos, 3, mode), brute3, "{sfen} {mode:?} 3 手");
-        if check_5 {
-            let brute5 = brute_mate_by_rules(pos, 5);
+        if let Some(brute5) = brute5 {
             assert_eq!(proves_kingless_mate_within(pos, 5, mode), brute5, "{sfen} {mode:?} 5 手");
         }
     }
