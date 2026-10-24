@@ -82,6 +82,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `SPSAParamsFile` | Search/net SPSA parameter file | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
 | `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
+| `MateThreads` | `go mate` で 1 局面を解くスレッド数。置換表を全スレッドで共有する。最初の 1 万ノードは 1 スレッドで解き、決まらなければ並列に切り替える (易しい局面は変わらない)。2 以上では難しい問題が速くなる (8 スレッドで 2〜3 倍程度) が、読むノード数は決定的でなくなる | 1 |
 | `MateMode` | `go mate` の進め方。`Speed` (速さ優先、不詰の多い詰めろ判定向け: 置換表は局面の完全一致だけ、子の初期値も見積もらない)、`Power` (解く力優先: 証明駒・反証駒で持駒違いの局面に流用し、子の pn/dn の初期値を局面から見積もり、攻め方の局面の dn を WPNS で数える。詰む問題・長手数・難問でノードが減り、少ない置換表で解ける問題が増えるが、1 ノードあたりは重く不詰の判定ではノードが増える)、`Auto` (証明駒を使わない探索で 10 万ノード読み、決まらなければ解く力優先で続ける。初期値の見積もりと WPNS はどちらの段階でも使う) | Auto |
 
 `PassRights` / `InitialPassCount` / `PassMoveBonus` / `PassRightValueEarly` / `PassRightValueLate`

@@ -151,6 +151,26 @@ fn each_mate_mode_solves_a_mate() {
 }
 
 #[test]
+fn mate_threads_solves_and_stops() {
+    let mut engine = Engine::start();
+    engine.send("setoption name MateThreads value 4");
+    for mode in ["Speed", "Power", "Auto"] {
+        engine.send(&format!(
+            "setoption name MateMode value {mode}\nposition sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000"
+        ));
+        assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b", "{mode}");
+    }
+    // 並列に切り替わる大きな問題でも stop で止まる
+    engine.send(&format!("position sfen {ZUKOU_001}\ngo mate infinite"));
+    std::thread::sleep(Duration::from_millis(500));
+    let start = Instant::now();
+    engine.send("stop");
+    assert_eq!(engine.checkmate(Duration::from_secs(5)), "checkmate timeout");
+    assert!(start.elapsed() < Duration::from_secs(2), "stop への応答が遅い");
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
 fn position_without_attacker_king_is_not_implemented() {
     let mut engine = Engine::start();
     engine.send("position sfen 4k4/8g/4P4/9/9/9/9/9/9 b G 1\ngo mate 5000");

@@ -189,6 +189,8 @@ struct UsiEngine {
     mate_hash_mb: usize,
     /// df-pn の進め方（MateModeで変更）
     mate_mode: MateMode,
+    /// df-pn で 1 局面を解くスレッド数（MateThreadsで変更）
+    mate_threads: usize,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
     mate_solver: Option<DfpnSolver>,
     /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
@@ -262,6 +264,7 @@ impl UsiEngine {
             book_rng: rshogi_book::DefaultBookRng::new(),
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
             mate_mode: MateMode::default(),
+            mate_threads: 1,
             mate_solver: None,
             mate_thread: None,
             mate_stop: Arc::new(AtomicBool::new(false)),
@@ -355,6 +358,7 @@ impl UsiEngine {
             "option name MateMode type combo default {} var Speed var Power var Auto",
             MateMode::default().name()
         );
+        println!("option name MateThreads type spin default 1 min 1 max 512");
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -967,6 +971,13 @@ impl UsiEngine {
                     self.mate_mode = mode;
                     // 置換表の配分がモードで違うので、次の go mate で確保し直す
                     self.mate_solver = None;
+                }
+            }
+            "MateThreads" => {
+                if let Ok(threads) = value.parse::<usize>()
+                    && threads >= 1
+                {
+                    self.mate_threads = threads;
                 }
             }
             "EvalHash" => {
@@ -1619,6 +1630,7 @@ impl UsiEngine {
             .mate_solver
             .take()
             .unwrap_or_else(|| DfpnSolver::with_mode(self.mate_hash_mb, self.mate_mode));
+        solver.set_threads(self.mate_threads);
         self.mate_stop.store(false, Ordering::SeqCst);
         let stop = Arc::clone(&self.mate_stop);
         let suppress_flag = Arc::clone(&self.suppress_bestmove);
