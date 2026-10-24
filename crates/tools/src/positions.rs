@@ -53,22 +53,8 @@ fn load_positions_from_file(path: &Path) -> Result<Vec<(String, String)>> {
     let mut positions = Vec::new();
 
     for (idx, line) in reader.lines().enumerate() {
-        let line = line?;
-        let line = line.trim();
-
-        // コメント行と空行をスキップ
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // "name | sfen" 形式をパース
-        if let Some((name, sfen)) = line.split_once('|') {
-            positions.push((name.trim().to_string(), sfen.trim().to_string()));
-        } else {
-            // 区切り文字がない場合は、インデックスを名前として使用
-            // "sfen " プレフィックスがあれば除去（start_sfens_ply32.txt 等の形式に対応）
-            let sfen = line.strip_prefix("sfen ").unwrap_or(line);
-            positions.push((format!("position_{}", idx + 1), sfen.to_string()));
+        if let Some(position) = parse_position_line(idx, &line?) {
+            positions.push(position);
         }
     }
 
@@ -77,4 +63,61 @@ fn load_positions_from_file(path: &Path) -> Result<Vec<(String, String)>> {
     }
 
     Ok(positions)
+}
+
+/// `name | sfen` 形式または SFEN のみの 1 行を解釈する。
+/// どちらの形式でも `sfen ` プレフィックスは任意（start_sfens_ply32.txt 等の形式に対応）。
+fn parse_position_line(idx: usize, line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let (name, sfen) = match line.split_once('|') {
+        Some((name, sfen)) => (name.trim().to_string(), sfen.trim()),
+        None => (format!("position_{}", idx + 1), line),
+    };
+    let sfen = sfen.strip_prefix("sfen ").unwrap_or(sfen).trim_start();
+    Some((name, sfen.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    #[test]
+    fn named_line_strips_sfen_prefix() {
+        let line = format!("局面名1 | sfen {HIRATE}");
+        assert_eq!(
+            parse_position_line(0, &line),
+            Some(("局面名1".to_string(), HIRATE.to_string()))
+        );
+    }
+
+    #[test]
+    fn named_line_without_prefix_is_kept() {
+        let line = format!("start|{HIRATE}");
+        assert_eq!(parse_position_line(0, &line), Some(("start".to_string(), HIRATE.to_string())));
+    }
+
+    #[test]
+    fn unnamed_line_uses_index_and_strips_prefix() {
+        let line = format!("sfen {HIRATE}");
+        assert_eq!(
+            parse_position_line(2, &line),
+            Some(("position_3".to_string(), HIRATE.to_string()))
+        );
+        assert_eq!(
+            parse_position_line(2, HIRATE),
+            Some(("position_3".to_string(), HIRATE.to_string()))
+        );
+    }
+
+    #[test]
+    fn comment_and_blank_lines_are_skipped() {
+        assert_eq!(parse_position_line(0, "# comment"), None);
+        assert_eq!(parse_position_line(0, "   "), None);
+    }
 }
