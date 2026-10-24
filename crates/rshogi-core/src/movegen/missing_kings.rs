@@ -15,8 +15,10 @@ use super::{MoveList, generate_legal_all_with_pass};
 /// 玉の無い側の手は自玉の安全を問わず、打ち歩詰めは相手玉があるときだけ禁じ、玉を取る手は認めない。
 /// 総当たりで判定するので、両方の玉がある局面の生成より遅い。探索では使わないこと。
 ///
-/// 手番側の玉が無い局面の `checkers` (`set_sfen` は既定の升への利きを王手として記録する) は見ない。
+/// 前提: 玉は各色 0〜1 枚。手番側の玉が無い局面の `checkers` (`set_sfen` は既定の升への利きを
+/// 王手として記録する) は見ない。
 pub fn generate_legal_allowing_missing_kings(pos: &Position, list: &mut MoveList) {
+    debug_assert!(at_most_one_king_each(pos));
     if has_both_kings(pos) {
         generate_legal_all_with_pass(pos, list);
         return;
@@ -29,6 +31,21 @@ pub fn generate_legal_allowing_missing_kings(pos: &Position, list: &mut MoveList
     if pos.can_pass() {
         list.push(Move::PASS);
     }
+}
+
+fn at_most_one_king_each(pos: &Position) -> bool {
+    [Color::Black, Color::White]
+        .into_iter()
+        .all(|color| pos.pieces(color, PieceType::King).count() <= 1)
+}
+
+/// 1 手が合法か (パスを含む)。規則は [`generate_legal_allowing_missing_kings`] と同じで、前提は
+/// [`legal_moves_by_rules`] と同じ。合法なら駒の情報を付けた手を返す。局面は呼び出し前の状態に戻して返る。
+pub(crate) fn to_legal_move_by_rules(pos: &mut Position, mv: Move) -> Option<Move> {
+    if mv.is_pass() {
+        return pos.can_pass().then_some(Move::PASS);
+    }
+    pos.to_move(mv).filter(|&mv| is_legal_by_rules(pos, mv))
 }
 
 fn has_both_kings(pos: &Position) -> bool {
@@ -83,8 +100,12 @@ fn is_legal_by_rules(pos: &mut Position, mv: Move) -> bool {
     pos.do_move_with_missing_kings(mv);
     let king = pos.pieces(us, PieceType::King);
     let mut legal = king.is_empty() || pos.attackers_to_c(pos.king_square(us), !us).is_empty();
-    if legal && mv.is_drop() && mv.drop_piece_type() == PieceType::Pawn && pos.in_check() {
-        // 打ち歩詰め
+    if legal
+        && mv.is_drop()
+        && mv.drop_piece_type() == PieceType::Pawn
+        && pos.checkers().contains(mv.to())
+    {
+        // 打ち歩詰め (打った歩が王手しているときだけ。編集した局面では既に王手が掛かっていることがある)
         legal = !legal_moves_by_rules(pos).is_empty();
     }
     pos.undo_move(mv);
@@ -112,6 +133,33 @@ mod tests {
         assert!(moves.contains(&"G*5e".to_string()));
         assert!(moves.contains(&"G*2b".to_string()));
         assert_eq!(moves.len(), 80);
+    }
+
+    /// 玉の無い側の駒は、既定の升 1一 に向けてピンされているように見えても動ける
+    #[test]
+    fn attacker_piece_in_line_with_default_square_is_not_pinned() {
+        let moves = legal_usi("4k4/8G/9/9/9/9/9/9/8r b - 1");
+        assert!(moves.contains(&"1b2b".to_string()));
+        assert!(moves.contains(&"1b2a".to_string()));
+    }
+
+    /// 手番側に玉があり相手に玉が無い局面の王手の受けは、通常の合法手生成と同じ
+    #[test]
+    fn evasions_with_own_king_match_generator() {
+        let mut pos = Position::new();
+        pos.set_sfen("9/9/9/9/4r4/9/9/9/4K4 w GS 1").unwrap();
+        pos.do_move_with_missing_kings(Move::from_usi("5e5h").unwrap());
+        assert!(pos.in_check());
+        let sorted = |generate: fn(&Position, &mut MoveList)| {
+            let mut list = MoveList::new();
+            generate(&pos, &mut list);
+            let mut moves: Vec<String> = list.iter().map(|m| m.to_usi()).collect();
+            moves.sort();
+            moves
+        };
+        let moves = sorted(generate_legal_allowing_missing_kings);
+        assert!(moves.contains(&"5i5h".to_string()));
+        assert_eq!(moves, sorted(generate_legal_all_with_pass));
     }
 
     /// 攻め方の駒が既定の升 1一 にあっても、玉の移動として扱わない
@@ -148,6 +196,13 @@ mod tests {
         // 受け方の玉を取る手は無い
         let moves = legal_usi("4k4/4G4/9/9/9/9/9/9/9 b - 1");
         assert!(!moves.contains(&"5b5a".to_string()));
+    }
+
+    /// 打った歩が王手していなければ、相手玉が詰んでも打ち歩詰めではない
+    #[test]
+    fn pawn_drop_that_does_not_give_check_is_not_pawn_drop_mate() {
+        let moves = legal_usi("6R1k/6G2/9/9/9/9/9/9/9 b P 1");
+        assert!(moves.contains(&"P*1c".to_string()));
     }
 
     #[test]

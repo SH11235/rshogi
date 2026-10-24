@@ -22,6 +22,6 @@ pub use generator::{
     generate_with_type, is_legal_with_pass,
 };
 pub use missing_kings::generate_legal_allowing_missing_kings;
-pub(crate) use missing_kings::legal_moves_by_rules;
+pub(crate) use missing_kings::{legal_moves_by_rules, to_legal_move_by_rules};
 pub use movelist::MoveList;
 pub use types::{ExtMove, ExtMoveBuffer, GenType, MAX_MOVES};
