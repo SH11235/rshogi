@@ -1,25 +1,47 @@
 //! YANEURAOU-DB2016 テキスト `.db` の評価値を negamax 逆伝播するライブラリ。
 //!
 //! `book_backprop` bin と `book_mine run` の双方から呼ぶ。
+//!
+//! 数千万手の定跡を読めるよう、入力の文字列は局面の代表 SFEN だけを持つ。手は値と行き先の番号の配列で持ち、
+//! 書き出しでは入力を読み直して、指し手欄などは入力の文字列をそのまま使う。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::hash::{DefaultHasher, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, Move, Piece, Square, Value};
+use rshogi_core::types::{Color, Move, Piece, PieceType, Square, Value};
 
-use crate::book_retrograde;
-
-/// YANEURAOU-DB2016 テキスト定跡のヘッダ行。
-pub const BOOK_HEADER: &str = "#YANEURAOU-DB2016 1.00";
+use crate::book_db::ply_of;
+pub use crate::book_db::{BOOK_HEADER, child_position_after_move, strip_ply};
+use crate::book_retrograde::{self, Arc, NONE, Step};
+use crate::common::io::partial_path;
 
 /// 千日手の値に指定できる範囲。詰みの値 (32000) より内側に限り、値をずらしても桁あふれしないようにする。
 const DRAW_VALUE_LIMIT: i32 = 30_000;
+
+/// 2 回目以降の読み込みで、1 回目と違う内容を読んだときのエラー。
+const CHANGED: &str = "定跡が読み込みの途中で変わりました";
+
+/// 合法な指し手を持つ行。非合法手と `none` 行は持たない。
+const ROW_USABLE: u8 = 1;
+/// 反転キーで合流した辺。
+const ROW_FLIP: u8 = 2;
+/// 未探索の子への辺を除いた行。値を書き換えない。
+const ROW_PRESERVE: u8 = 4;
+/// 手順の合流を補完した行。局面の行の最後に並び、探索ラベルを持たない。
+const ROW_ADDED: u8 = 8;
+
+const NODE_BLACK: u8 = 1;
+const NODE_CHECKED: u8 = 2;
+/// 入力時に全行が value=0 / depth=0 で、`skip_unsearched_children` のとき全行を書き換えない局面。
+const NODE_PRESERVED: u8 = 4;
 
 /// 伝播値と既存ラベル値の合成方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -39,87 +61,6 @@ impl MergeMode {
     }
 }
 
-/// ply 抜き key で集約した定跡。
-#[derive(Debug, Clone)]
-pub struct BookDb {
-    pub entries: BTreeMap<String, PositionEntry>,
-}
-
-/// 1 局面分の定跡エントリ。`sfen` は同一 key 中の最小 ply 行。
-#[derive(Debug, Clone)]
-pub struct PositionEntry {
-    pub sfen: String,
-    pub moves: Vec<BookMove>,
-}
-
-impl PositionEntry {
-    /// book_mine と同じく、全候補手が value=0 / depth=0 なら未探索。
-    pub fn is_unexplored(&self) -> bool {
-        self.moves.iter().all(|mv| mv.value == 0 && mv.depth == 0)
-    }
-}
-
-/// 定跡の 1 候補手。
-#[derive(Debug, Clone)]
-pub struct BookMove {
-    pub move_usi: Option<MoveText>,
-    pub ponder_usi: Option<MoveText>,
-    pub value: i32,
-    pub depth: i32,
-    pub count: u64,
-}
-
-/// 定跡の指し手欄の文字列。USI の指し手は最長 5 文字 (`7g7f+`、`P*5e`) なので、
-/// 数千万手を読むときにヒープ確保を避けられるよう 8 バイト以下は内側に持つ。
-/// 長い欄も書き出しで元の文字列を保つため、そのまま持つ。
-#[derive(Clone, PartialEq, Eq)]
-pub enum MoveText {
-    /// 8 バイト以下の欄。未使用の後ろは 0。
-    Inline([u8; 8]),
-    Long(Box<str>),
-}
-
-impl MoveText {
-    /// 欄の文字列から作る。
-    pub fn new(text: &str) -> Self {
-        let bytes = text.as_bytes();
-        if bytes.len() <= 8 && !bytes.contains(&0) {
-            let mut inline = [0u8; 8];
-            inline[..bytes.len()].copy_from_slice(bytes);
-            Self::Inline(inline)
-        } else {
-            Self::Long(text.into())
-        }
-    }
-}
-
-impl std::ops::Deref for MoveText {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        match self {
-            Self::Inline(bytes) => {
-                let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                // `new` は str の先頭からのバイト列だけを入れ、0 を含む欄は `Long` にする。
-                std::str::from_utf8(&bytes[..len]).expect("MoveText は UTF-8 の欄から作る")
-            }
-            Self::Long(text) => text,
-        }
-    }
-}
-
-impl std::fmt::Debug for MoveText {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&**self, f)
-    }
-}
-
-impl std::fmt::Display for MoveText {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self)
-    }
-}
-
 /// book 内子局面への辺。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
@@ -128,14 +69,13 @@ pub struct Edge {
 }
 
 /// 候補手ごとの伝播前後の値。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveValue {
     pub old: i32,
     pub new: i32,
     pub edge: Option<Edge>,
     /// 合法な指し手を持つ行か。非合法手と `none` 行は `false`。
     pub usable: bool,
-    preserve: bool,
 }
 
 /// 逆伝播の追加オプション。既定値は `book_backprop` の従来挙動。
@@ -182,60 +122,337 @@ struct BestParams {
 }
 
 impl BestParams {
-    fn counts(self, mv: &MoveValue) -> bool {
-        !self.skip_unusable_moves || mv.usable
+    fn counts(self, graph: &Graph, row: usize) -> bool {
+        !self.skip_unusable_moves || graph.usable(row)
     }
 }
 
-/// 局面を頂点、book 内子局面への候補手を辺とするグラフ。
-#[derive(Debug, Clone)]
+/// 局面を頂点、候補手を行とするグラフ。局面は ply 抜き key の昇順に並べ、同じ key の `sfen` 行の手は入力順に連結する。
 pub struct Graph {
-    pub keys: Vec<String>,
-    pub moves: Vec<Vec<MoveValue>>,
-    pub adjacency: Vec<Vec<usize>>,
+    /// 書き出しで読み直す入力。
+    source: Option<PathBuf>,
+    options: BackpropOptions,
+    /// 局面の代表 SFEN (同じ key の行のうち最小 ply の行)。
+    sfens: Texts,
+    node_flags: Vec<u8>,
+    /// 局面 `v` の行は `row_start[v]..row_start[v + 1]`。
+    row_start: Vec<u32>,
+    /// 局面 `v` の `sfen` 行の入力での位置は `blocks[block_start[v]..block_start[v + 1]]` (入力順)。
+    block_start: Vec<u32>,
+    blocks: Vec<u64>,
+    old: Vec<i32>,
+    new: Vec<i32>,
+    /// 行き先の局面。book 内に子局面が無ければ `NONE`。
+    to: Vec<u32>,
+    row_flags: Vec<u8>,
+    /// 補完した行の指し手 (`Move` の下位 16 bit)。行の順に並ぶ。
+    added: Vec<u16>,
     pub flip_edges: usize,
     pub illegal_moves: usize,
-    checked: Vec<bool>,
-    preserved: Vec<bool>,
-    added_moves: Vec<Vec<BookMove>>,
+}
+
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graph")
+            .field("nodes", &self.len())
+            .field("moves", &self.total_rows())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Graph {
-    /// 局面 key が先手番か。
-    fn black(&self, node: usize) -> bool {
-        self.keys[node].split_whitespace().nth(1) != Some("w")
+    /// 局面の数。
+    pub fn len(&self) -> usize {
+        self.node_flags.len()
     }
 
-    /// 入力の行の数。補完手は後ろに並び、探索ラベルを持たない。
-    fn input_len(&self, node: usize) -> usize {
-        self.moves[node].len() - self.added_moves[node].len()
+    pub fn is_empty(&self) -> bool {
+        self.node_flags.is_empty()
+    }
+
+    /// 局面の代表 SFEN (ply 付き)。
+    pub fn sfen(&self, node: usize) -> &str {
+        self.sfens.get(node)
+    }
+
+    /// 局面の ply 抜き key。
+    pub fn key(&self, node: usize) -> &str {
+        strip_ply(self.sfen(node))
+    }
+
+    /// ply 抜き key の局面を引く。
+    pub fn find(&self, key: &str) -> Option<usize> {
+        find_key(&self.sfens, key)
+    }
+
+    /// 局面の候補手。入力の行の順で、補完した手は最後に並ぶ。
+    pub fn moves(&self, node: usize) -> impl Iterator<Item = MoveValue> + '_ {
+        self.rows(node).map(|row| MoveValue {
+            old: self.old[row],
+            new: self.new[row],
+            edge: self.edge_to(row).map(|to| Edge {
+                to,
+                via_flip: self.row_flags[row] & ROW_FLIP != 0,
+            }),
+            usable: self.usable(row),
+        })
+    }
+
+    fn rows(&self, node: usize) -> Range<usize> {
+        self.row_start[node] as usize..self.row_start[node + 1] as usize
+    }
+
+    fn blocks(&self, node: usize) -> &[u64] {
+        &self.blocks[self.block_start[node] as usize..self.block_start[node + 1] as usize]
+    }
+
+    /// 局面 key が先手番か。
+    fn black(&self, node: usize) -> bool {
+        self.node_flags[node] & NODE_BLACK != 0
+    }
+
+    /// 局面の手番の色の番号 (0 = 先手、1 = 後手)。
+    fn color(&self, node: usize) -> usize {
+        usize::from(!self.black(node))
+    }
+
+    fn checked(&self, node: usize) -> bool {
+        self.node_flags[node] & NODE_CHECKED != 0
+    }
+
+    fn preserved(&self, node: usize) -> bool {
+        self.node_flags[node] & NODE_PRESERVED != 0
+    }
+
+    fn edge_to(&self, row: usize) -> Option<usize> {
+        (self.to[row] != NONE).then_some(self.to[row] as usize)
+    }
+
+    fn usable(&self, row: usize) -> bool {
+        self.row_flags[row] & ROW_USABLE != 0
+    }
+
+    fn preserve(&self, row: usize) -> bool {
+        self.row_flags[row] & ROW_PRESERVE != 0
+    }
+
+    fn added(&self, row: usize) -> bool {
+        self.row_flags[row] & ROW_ADDED != 0
+    }
+
+    fn total_rows(&self) -> usize {
+        self.old.len()
     }
 }
 
-#[derive(Debug, Clone)]
-struct SccGraph {
-    comp_of: Vec<usize>,
-    comps: Vec<Vec<usize>>,
-    edges: Vec<Vec<usize>>,
-    topo: Vec<usize>,
-    nontrivial: Vec<bool>,
+/// 1 つの文字列に並べた文字列の一覧。
+#[derive(Default)]
+struct Texts {
+    text: String,
+    start: Vec<usize>,
+    len: Vec<u32>,
+}
+
+impl Texts {
+    fn len(&self) -> usize {
+        self.start.len()
+    }
+
+    fn get(&self, index: usize) -> &str {
+        let start = self.start[index];
+        &self.text[start..start + self.len[index] as usize]
+    }
+
+    fn push(&mut self, text: &str) -> Result<u32> {
+        let index = u32::try_from(self.start.len())
+            .ok()
+            .filter(|&index| index != NONE)
+            .ok_or_else(|| anyhow!("局面が多すぎます"))?;
+        self.start.push(0);
+        self.len.push(0);
+        self.replace(index as usize, text)?;
+        Ok(index)
+    }
+
+    /// 文字列を差し替える。元の文字列の領域は使い回さない (差し替えは少ない)。
+    fn replace(&mut self, index: usize, text: &str) -> Result<()> {
+        self.start[index] = self.text.len();
+        self.len[index] = u32::try_from(text.len()).context("SFEN 行が長すぎます")?;
+        self.text.push_str(text);
+        Ok(())
+    }
+
+    /// `order` の順に並べ直す。
+    fn permuted(self, order: &[u32]) -> Self {
+        Self {
+            start: order.iter().map(|&i| self.start[i as usize]).collect(),
+            len: order.iter().map(|&i| self.len[i as usize]).collect(),
+            text: self.text,
+        }
+    }
+}
+
+/// 昇順の SFEN の一覧から ply 抜き key を二分探索で引く。
+fn find_key(sfens: &Texts, key: &str) -> Option<usize> {
+    let (mut lo, mut hi) = (0, sfens.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match strip_ply(sfens.get(mid)).cmp(key) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Some(mid),
+        }
+    }
+    None
+}
+
+/// 番号を値に持つ開番地法のハッシュ表。キーの比較とハッシュ値は呼び出し側が番号から求める。
+#[derive(Default)]
+struct IdTable {
+    slots: Vec<u32>,
+    len: usize,
+}
+
+impl IdTable {
+    fn find(&self, hash: u64, eq: impl Fn(u32) -> bool) -> Option<u32> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        loop {
+            match self.slots[slot] {
+                NONE => return None,
+                id if eq(id) => return Some(id),
+                _ => slot = (slot + 1) & mask,
+            }
+        }
+    }
+
+    /// 番号を加える。表を広げるときは `hash_of` で入っている番号のハッシュ値を求め直す。
+    fn insert(&mut self, hash: u64, id: u32, hash_of: impl Fn(u32) -> u64) {
+        if (self.len + 1) * 2 > self.slots.len() {
+            let old = std::mem::replace(
+                &mut self.slots,
+                vec![NONE; ((self.len + 1) * 2).next_power_of_two().max(16)],
+            );
+            for id in old.into_iter().filter(|&id| id != NONE) {
+                self.place(hash_of(id), id);
+            }
+        }
+        self.place(hash, id);
+        self.len += 1;
+    }
+
+    fn place(&mut self, hash: u64, id: u32) {
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        while self.slots[slot] != NONE {
+            slot = (slot + 1) & mask;
+        }
+        self.slots[slot] = id;
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+/// 盤 81 マスの駒 (5 bit ずつ)・手番・先手と後手の持ち駒を詰めた値。SFEN の ply 抜き key と 1 対 1 に対応する。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PositionKey([u64; 8]);
+
+impl PositionKey {
+    /// 局面の値と、盤を 180 度回して先後を入れ替えた局面 (反転キー) の値。
+    fn pair(pos: &Position) -> [Self; 2] {
+        let mut words = [[0u64; 8]; 2];
+        let mut put = |key: usize, bit: usize, width: usize, value: u64| {
+            words[key][bit / 64] |= value << (bit % 64);
+            if bit % 64 + width > 64 {
+                words[key][bit / 64 + 1] |= value >> (64 - bit % 64);
+            }
+        };
+        for sq in Square::all() {
+            let pc = pos.piece_on(sq);
+            let flipped = if pc.is_some() {
+                Piece::new(pc.color().opponent(), pc.piece_type())
+            } else {
+                pc
+            };
+            // 駒の値は色 (bit 4) と駒種 (0..=14) で 31 以下。
+            put(0, sq.index() * 5, 5, u64::from(pc.raw()));
+            put(1, sq.inverse().index() * 5, 5, u64::from(flipped.raw()));
+        }
+        let side = pos.side_to_move();
+        put(0, 405, 1, side.index() as u64);
+        put(1, 405, 1, side.opponent().index() as u64);
+        for (key, [first, second]) in [
+            (0, [Color::Black, Color::White]),
+            (1, [Color::White, Color::Black]),
+        ] {
+            put(key, 406, 32, u64::from(pos.hand(first).raw()));
+            put(key, 438, 32, u64::from(pos.hand(second).raw()));
+        }
+        words.map(Self)
+    }
+
+    fn hash(&self) -> u64 {
+        let mut hash = 0u64;
+        for word in self.0 {
+            hash = (hash ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        }
+        // 表の番地は下位 bit で決めるので、上位 bit も混ぜる。
+        hash ^ (hash >> 32)
+    }
+}
+
+/// 正規の SFEN の key を持つ局面を [`PositionKey`] で引く索引。
+#[derive(Default)]
+struct PositionIndex {
+    keys: Vec<PositionKey>,
+    nodes: Vec<u32>,
+    table: IdTable,
+}
+
+impl PositionIndex {
+    fn insert(&mut self, key: PositionKey, node: u32) {
+        let id = self.keys.len() as u32;
+        self.keys.push(key);
+        self.nodes.push(node);
+        let keys = &self.keys;
+        self.table.insert(key.hash(), id, |id| keys[id as usize].hash());
+    }
+
+    fn get(&self, key: &PositionKey) -> Option<usize> {
+        self.table
+            .find(key.hash(), |id| self.keys[id as usize] == *key)
+            .map(|id| self.nodes[id as usize] as usize)
+    }
 }
 
 /// 逆伝播の集計。
 #[derive(Debug, Default, Clone)]
 pub struct PropagationStats {
     pub updated_moves: usize,
-    pub abs_deltas: Vec<i32>,
+    /// 値が変わった手の、変化量の絶対値ごとの手数。
+    pub abs_deltas: BTreeMap<i32, usize>,
     pub nontrivial_sccs: usize,
     pub max_scc_size: usize,
     pub draw_moves: usize,
-    pub depths: Vec<usize>,
+    /// 伝播の深さごとの局面数。
+    pub depths: BTreeMap<usize, usize>,
+    /// best 値が変化した局面のうち、変化の大きい 20 局面 (同じ大きさは SFEN 順)。
     pub changed_nodes: Vec<NodeChange>,
     /// 自分・相手が王手をかけ続けられる循環の状態数 (先手・後手として解いた 2 回の合計)。
     pub check_core_states: usize,
     /// 同値手を選ぶと保証が破れるため、保証手だけを残した局面数。
     pub restricted_ties: usize,
 }
+
+/// report に載せる、best 値が変化した局面の数。
+const TOP_CHANGES: usize = 20;
 
 /// best 値が変化した局面。
 #[derive(Debug, Clone)]
@@ -265,358 +482,522 @@ pub fn backprop_file_with(
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
-    rshogi_book::Book::from_path(book, true)
-        .with_context(|| format!("定跡を rshogi-book で読めません: {}", book.display()))?;
-    let db = read_book_db(book)?;
-    let mut graph = build_graph_with(&db, options)?;
-    let stats = propagate_values_with(&db, &mut graph, draws, merge, options)?;
-    write_backprop_book(&db, &graph, out)?;
+    let mut graph = read_graph(book, options)?;
+    let stats = propagate_values(&mut graph, draws, merge)?;
+    write_backprop_book(&graph, out)?;
     if let Some(path) = report {
-        write_report(&db, &graph, &stats, path, merge, draws)?;
+        write_report(&graph, &stats, path, merge, draws)?;
     }
     Ok(stats)
 }
 
-/// `.db` を ply 抜き key で読み込む。同一 key の行は最小 ply の sfen を代表にして手を連結する。
-pub fn read_book_db(path: &Path) -> Result<BookDb> {
-    let file = File::open(path).with_context(|| format!("定跡を開けません: {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut entries = BTreeMap::<String, PositionEntry>::new();
-    let mut current_key: Option<String> = None;
-
-    for line in reader.lines() {
-        let line = line?;
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.trim().is_empty() || line.starts_with('#') || line.starts_with("//") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("sfen ") {
-            let sfen = rest.trim().to_string();
-            let key = strip_ply(&sfen).to_string();
-            entries
-                .entry(key.clone())
-                .and_modify(|entry| {
-                    if ply_of(&sfen) < ply_of(&entry.sfen) {
-                        entry.sfen = sfen.clone();
-                    }
-                })
-                .or_insert(PositionEntry {
-                    sfen,
-                    moves: Vec::new(),
-                });
-            current_key = Some(key);
-            continue;
-        }
-        let Some(key) = current_key.as_ref() else {
-            continue;
-        };
-        if let Some(book_move) = parse_move_line(line) {
-            entries
-                .get_mut(key)
-                .ok_or_else(|| anyhow!("内部エラー: current_key の entry がありません"))?
-                .moves
-                .push(book_move);
-        }
-    }
-
-    Ok(BookDb { entries })
+/// 入力を 1 行ずつ読み、行の先頭の位置を数える。
+struct LineReader {
+    inner: BufReader<File>,
+    pos: u64,
+    line: String,
 }
 
-fn parse_move_line(line: &str) -> Option<BookMove> {
+impl LineReader {
+    fn open(path: &Path) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("定跡を開けません: {}", path.display()))?;
+        Ok(Self {
+            inner: BufReader::new(file),
+            pos: 0,
+            line: String::new(),
+        })
+    }
+
+    /// 次の行と、その先頭の位置。
+    fn next_line(&mut self) -> Result<Option<(u64, &str)>> {
+        self.line.clear();
+        let offset = self.pos;
+        let read = self.inner.read_line(&mut self.line)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        self.pos += read as u64;
+        Ok(Some((offset, &self.line)))
+    }
+
+    fn seek(&mut self, offset: u64) -> Result<()> {
+        if offset != self.pos {
+            let delta = i64::try_from(offset)? - i64::try_from(self.pos)?;
+            self.inner.seek_relative(delta)?;
+            self.pos = offset;
+        }
+        Ok(())
+    }
+}
+
+/// 定跡の 1 行の種類。
+enum Line<'a> {
+    /// 空行・`#` 行・`//` 行。
+    Skip,
+    /// `sfen` 行の SFEN。
+    Sfen(&'a str),
+    /// 指し手行。
+    Row(&'a str),
+}
+
+fn classify(line: &str) -> Line<'_> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line.trim().is_empty() || line.starts_with('#') || line.starts_with("//") {
+        return Line::Skip;
+    }
+    match line.strip_prefix("sfen ") {
+        Some(rest) => Line::Sfen(rest.trim()),
+        None => Line::Row(line),
+    }
+}
+
+/// 指し手行の欄。指し手と予想手の `none` / `None` / `resign` は `None`。
+struct RowFields<'a> {
+    move_usi: Option<&'a str>,
+    ponder_usi: Option<&'a str>,
+    value: i32,
+    depth: i32,
+    count: u64,
+}
+
+fn parse_row(line: &str) -> RowFields<'_> {
+    fn field(token: &str) -> Option<&str> {
+        match token {
+            "none" | "None" | "resign" => None,
+            other => Some(other),
+        }
+    }
     let mut tokens = line.split_whitespace();
-    let move_usi = tokens.next().map(parse_move_field)?;
-    let ponder_usi = tokens.next().map(parse_move_field).unwrap_or(None);
+    let move_usi = tokens.next().and_then(field);
+    let ponder_usi = tokens.next().and_then(field);
     let value = tokens.next().map_or(0, |t| t.parse::<i32>().unwrap_or(0));
     let depth = tokens.next().map_or(0, |t| t.parse::<i32>().unwrap_or(0));
     let count = tokens.next().map_or(1, |t| t.parse::<u64>().unwrap_or(0));
-    Some(BookMove {
+    RowFields {
         move_usi,
         ponder_usi,
         value,
         depth,
         count,
-    })
-}
-
-fn parse_move_field(token: &str) -> Option<MoveText> {
-    match token {
-        "none" | "None" | "resign" => None,
-        other => Some(MoveText::new(other)),
     }
 }
 
-/// SFEN 末尾の ply フィールドを除く。
-pub fn strip_ply(sfen: &str) -> &str {
-    match sfen.rsplit_once(' ') {
-        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
-        _ => sfen,
-    }
-}
-
-fn ply_of(sfen: &str) -> u32 {
-    sfen.rsplit_once(' ')
-        .and_then(|(_, tail)| tail.parse::<u32>().ok())
-        .unwrap_or(u32::MAX)
-}
-
-fn add_transposition_moves(book: &BookDb, graph: &mut Graph, skipped: &[bool]) -> Result<()> {
-    let index: BTreeMap<_, _> =
-        graph.keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
-    for (node, key) in graph.keys.iter().enumerate() {
-        if graph.preserved[node] {
-            continue;
+/// 局面の入力の行を、`sfen` 行ごとに入力の順で `f` へ渡す。
+fn for_each_row(
+    reader: &mut LineReader,
+    blocks: &[u64],
+    mut f: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    for &offset in blocks {
+        reader.seek(offset)?;
+        match reader.next_line()? {
+            Some((_, line)) if matches!(classify(line), Line::Sfen(_)) => {}
+            _ => bail!(CHANGED),
         }
-        let entry = &book.entries[key];
-        let mut pos = Position::new();
-        pos.set_sfen(&entry.sfen)
-            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
-        let mut legal = MoveList::new();
-        generate_legal_all(&pos, &mut legal);
-        let listed: BTreeSet<_> =
-            entry.moves.iter().filter_map(|m| m.move_usi.as_deref()).collect();
-        for &mv in legal.iter() {
-            let usi = mv.to_usi();
-            if listed.contains(usi.as_str()) {
-                continue;
+        while let Some((_, line)) = reader.next_line()? {
+            match classify(line) {
+                Line::Skip => {}
+                Line::Sfen(_) => break,
+                Line::Row(row) => f(row)?,
             }
-            let gives_check = pos.gives_check(mv);
-            pos.do_move(mv, gives_check);
-            let child = pos.to_sfen();
-            pos.undo_move(mv);
-            let edge = index
-                .get(strip_ply(&child))
-                .map(|&to| Edge {
-                    to,
-                    via_flip: false,
-                })
-                .or_else(|| {
-                    rshogi_book::flipped_key(&child).and_then(|flipped| {
-                        index.get(strip_ply(&flipped)).map(|&to| Edge { to, via_flip: true })
-                    })
-                });
-            let Some(edge) = edge.filter(|e| !skipped[e.to]) else {
-                continue;
-            };
-            graph.flip_edges += usize::from(edge.via_flip);
-            graph.adjacency[node].push(edge.to);
-            graph.moves[node].push(MoveValue {
-                old: 0,
-                new: 0,
-                edge: Some(edge),
-                usable: true,
-                preserve: false,
-            });
-            // 補完手には探索ラベルがない。depth=1 を出自の固定マーカーとして用い、
-            // 未探索の 0/0 と区別する（伝播距離や探索した深さを表すものではない）。
-            graph.added_moves[node].push(BookMove {
-                move_usi: Some(MoveText::new(&usi)),
-                ponder_usi: None,
-                value: 0,
-                depth: 1,
-                count: 0,
-            });
         }
-        graph.adjacency[node].sort_unstable();
-        graph.adjacency[node].dedup();
     }
     Ok(())
 }
 
-/// book 内子局面への辺 (反転 key 合流を含む) を張ったグラフを作る。
-pub fn build_graph(book: &BookDb) -> Result<Graph> {
-    build_graph_with(book, BackpropOptions::default())
+/// 1 回目の読み込みで集める局面の一覧。局面は ply 抜き key の昇順。
+struct Scan {
+    sfens: Texts,
+    rows: Vec<u32>,
+    block_start: Vec<u32>,
+    blocks: Vec<u64>,
 }
 
-/// [`build_graph`] に追加オプションを指定する版。未探索の判定は入力時の depth を使う。
-pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph> {
-    let keys: Vec<String> = book.entries.keys().cloned().collect();
-    let skipped_children: Vec<bool> = book
-        .entries
-        .values()
-        .map(|entry| {
-            options.skip_unsearched_children
-                && !entry.moves.is_empty()
-                && entry.moves.iter().all(|mv| mv.depth == 0)
-        })
-        .collect();
-    // 子局面は SFEN 文字列を作らず、盤・手番・持ち駒の並び (SFEN の ply 抜き key と 1 対 1) で引く。
-    // 反転キーも各局面について一度だけ作る。反転は 1 対 1 で 2 回で戻るので、
-    // 「子局面の反転がある局面」と「反転キーが子局面に等しい局面」は同じ。
-    // 引くだけで反復しないので、ハッシュの順序は出力に影響しない。
-    let mut node_index = HashMap::with_capacity(keys.len());
-    let mut flipped_index = HashMap::with_capacity(keys.len());
-    let mut position = Position::new();
-    for ((idx, entry), key) in book.entries.values().enumerate().zip(&keys) {
-        position
-            .set_sfen(&entry.sfen)
-            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
-        // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ局面の行は
-        // 別の局面として残し、索引には入れない。
-        if strip_ply(&position.to_sfen()) == key {
-            node_index.insert(PositionKey::of(&position, false), idx);
-            flipped_index.insert(PositionKey::of(&position, true), idx);
-        }
-    }
-    let preserved: Vec<_> = book
-        .entries
-        .values()
-        .map(|entry| options.skip_unsearched_children && entry.is_unexplored())
-        .collect();
-    let mut checked = Vec::with_capacity(keys.len());
-    let mut moves = Vec::with_capacity(keys.len());
-    let mut adjacency_sets = vec![BTreeSet::new(); keys.len()];
-    let mut flip_edges = 0;
-    let mut illegal_moves = 0;
-
-    for (node_idx, entry) in book.entries.values().enumerate() {
-        position
-            .set_sfen(&entry.sfen)
-            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
-        checked.push(!position.checkers().is_empty());
-        let mut move_values = Vec::with_capacity(entry.moves.len());
-        for book_move in &entry.moves {
-            let mut legal = false;
-            let edge = if let Some(move_usi) = &book_move.move_usi {
-                match legal_move(&position, &entry.sfen, move_usi) {
-                    Ok(mv) => {
-                        legal = true;
-                        let gives_check = position.gives_check(mv);
-                        position.do_move(mv, gives_check);
-                        let child_key = PositionKey::of(&position, false);
-                        position.undo_move(mv);
-                        if let Some(&to) = node_index.get(&child_key) {
-                            Some(Edge {
-                                to,
-                                via_flip: false,
-                            })
-                        } else {
-                            flipped_index.get(&child_key).map(|&to| Edge { to, via_flip: true })
+/// 局面の key・代表 SFEN・行の数と、`sfen` 行の位置を集める。
+fn scan(path: &Path) -> Result<Scan> {
+    let mut reader = LineReader::open(path)?;
+    let mut sfens = Texts::default();
+    let mut plies = Vec::new();
+    let mut rows: Vec<u32> = Vec::new();
+    let mut table = IdTable::default();
+    let mut blocks: Vec<(u32, u64)> = Vec::new();
+    let mut total_rows = 0u32;
+    let mut current = None;
+    while let Some((offset, line)) = reader.next_line()? {
+        match classify(line) {
+            Line::Skip => {}
+            Line::Sfen(sfen) => {
+                let key = strip_ply(sfen);
+                let hash = hash_bytes(key.as_bytes());
+                let id = match table.find(hash, |id| strip_ply(sfens.get(id as usize)) == key) {
+                    Some(id) => {
+                        let ply = ply_of(sfen);
+                        if ply < plies[id as usize] {
+                            sfens.replace(id as usize, sfen)?;
+                            plies[id as usize] = ply;
                         }
+                        id
                     }
-                    Err(err) => {
-                        illegal_moves += 1;
-                        eprintln!(
-                            "警告: 非合法手を逆伝播から除外します: sfen={} move={} error={err:#}",
-                            entry.sfen, move_usi
-                        );
-                        None
+                    None => {
+                        let id = sfens.push(sfen)?;
+                        plies.push(ply_of(sfen));
+                        rows.push(0);
+                        let sfens = &sfens;
+                        table.insert(hash, id, |id| {
+                            hash_bytes(strip_ply(sfens.get(id as usize)).as_bytes())
+                        });
+                        id
                     }
-                }
-            } else {
-                None
-            };
-            let preserve = edge.is_some_and(|edge| skipped_children[edge.to]);
-            let edge = edge.filter(|edge| !skipped_children[edge.to]);
-            if let Some(edge) = edge {
-                if edge.via_flip {
-                    flip_edges += 1;
-                }
-                adjacency_sets[node_idx].insert(edge.to);
+                };
+                blocks.push((id, offset));
+                current = Some(id);
             }
-            move_values.push(MoveValue {
-                old: book_move.value,
-                new: book_move.value,
-                edge,
-                usable: legal,
-                preserve,
-            });
+            Line::Row(_) => {
+                if let Some(id) = current {
+                    total_rows = total_rows.checked_add(1).context("手が多すぎます")?;
+                    rows[id as usize] += 1;
+                }
+            }
         }
-        moves.push(move_values);
     }
+    drop((table, plies));
+    let mut order: Vec<u32> = (0..sfens.len() as u32).collect();
+    order.sort_unstable_by(|&a, &b| {
+        strip_ply(sfens.get(a as usize)).cmp(strip_ply(sfens.get(b as usize)))
+    });
+    let mut rank = vec![0u32; order.len()];
+    for (node, &id) in order.iter().enumerate() {
+        rank[id as usize] = node as u32;
+    }
+    let rows = order.iter().map(|&id| rows[id as usize]).collect();
+    let sfens = sfens.permuted(&order);
+    drop(order);
+    for block in &mut blocks {
+        block.0 = rank[block.0 as usize];
+    }
+    blocks.sort_unstable();
+    let mut block_start = vec![0u32; sfens.len() + 1];
+    for &(node, _) in &blocks {
+        block_start[node as usize + 1] += 1;
+    }
+    for node in 0..sfens.len() {
+        block_start[node + 1] += block_start[node];
+    }
+    Ok(Scan {
+        sfens,
+        rows,
+        block_start,
+        blocks: blocks.into_iter().map(|(_, offset)| offset).collect(),
+    })
+}
 
-    let adjacency = adjacency_sets.into_iter().map(|set| set.into_iter().collect()).collect();
-    let mut graph = Graph {
-        added_moves: vec![Vec::new(); keys.len()],
-        checked,
-        preserved,
-        keys,
-        moves,
-        adjacency,
-        flip_edges,
-        illegal_moves,
+/// 行の指し手欄が `none` などで指し手を持たない。
+const MOVE_NONE: u32 = u32::MAX;
+/// `Move` の表記に戻らない指し手欄。元の文字列は別に持つ。
+const MOVE_TEXT: u32 = 1 << 16;
+/// `Move::from_usi` で読めない指し手欄。
+const MOVE_INVALID: u32 = 1 << 17;
+
+/// 2 回目の読み込みで集める入力の行。指し手は `Move` の下位 16 bit と [`MOVE_TEXT`] などの印で持つ。
+struct InputRows {
+    value: Vec<i32>,
+    moves: Vec<u32>,
+    /// [`MOVE_TEXT`] の行の元の指し手欄 (行番号の昇順)。
+    texts: Vec<(u32, Box<str>)>,
+    /// 局面の全行が depth=0 か。
+    all_depth0: Vec<bool>,
+    /// 局面の全行が value=0 かつ depth=0 か (行の無い局面も含む)。
+    unexplored: Vec<bool>,
+}
+
+impl InputRows {
+    /// 行の指し手欄の文字列。
+    fn text(&self, row: usize) -> String {
+        let mv = self.moves[row];
+        if mv & MOVE_TEXT == 0 {
+            return Move::from_u16(mv as u16).to_usi();
+        }
+        let index = self
+            .texts
+            .binary_search_by_key(&(row as u32), |&(row, _)| row)
+            .expect("MOVE_TEXT の行は元の文字列を持つ");
+        self.texts[index].1.to_string()
+    }
+}
+
+/// 正規の USI 表記 (`7g7f` / `7g7f+` / `P*5e`) の指し手を、文字列を作らずに読む。他の表記は `None`。
+/// 返す値は `Move::from_usi` と同じ。
+fn canonical_move(text: &str) -> Option<Move> {
+    let bytes = text.as_bytes();
+    let square = |at: usize| {
+        let (file, rank) = (bytes[at], bytes[at + 1]);
+        ((b'1'..=b'9').contains(&file) && (b'a'..=b'i').contains(&rank))
+            .then(|| Square::from_usi(&text[at..at + 2]))
+            .flatten()
     };
-    if options.add_transposition_moves {
-        add_transposition_moves(book, &mut graph, &skipped_children)?;
-    }
-    Ok(graph)
-}
-
-/// 盤 81 マスの駒・手番・先手と後手の持ち駒を並べた値。SFEN の ply 抜き key と 1 対 1 に対応する。
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct PositionKey([u8; 90]);
-
-impl PositionKey {
-    /// `flip` なら盤を 180 度回して先後を入れ替えた局面 (反転キー) の値にする。
-    fn of(pos: &Position, flip: bool) -> Self {
-        let mut key = [0u8; 90];
-        for sq in Square::all() {
-            let pc = pos.piece_on(sq);
-            let (sq, pc) = match (flip, pc.is_some()) {
-                (false, _) => (sq, pc),
-                (true, false) => (sq.inverse(), pc),
-                (true, true) => (sq.inverse(), Piece::new(pc.color().opponent(), pc.piece_type())),
+    match bytes.len() {
+        4 if bytes[1] == b'*' => {
+            let piece = match bytes[0] {
+                b'P' => PieceType::Pawn,
+                b'L' => PieceType::Lance,
+                b'N' => PieceType::Knight,
+                b'S' => PieceType::Silver,
+                b'G' => PieceType::Gold,
+                b'B' => PieceType::Bishop,
+                b'R' => PieceType::Rook,
+                _ => return None,
             };
-            key[sq.index()] = pc.raw();
+            Some(Move::new_drop(piece, square(2)?))
         }
-        let (side, black, white) = if flip {
-            (pos.side_to_move().opponent(), Color::White, Color::Black)
-        } else {
-            (pos.side_to_move(), Color::Black, Color::White)
-        };
-        key[81] = side.index() as u8;
-        key[82..86].copy_from_slice(&pos.hand(black).raw().to_le_bytes());
-        key[86..90].copy_from_slice(&pos.hand(white).raw().to_le_bytes());
-        Self(key)
+        4 => Some(Move::new_move(square(0)?, square(2)?, false)),
+        5 if bytes[4] == b'+' => Some(Move::new_move(square(0)?, square(2)?, true)),
+        _ => None,
     }
 }
 
-/// 親局面に USI 指し手を合法性検査付きで適用した子局面を返す。
-pub fn child_position_after_move(parent_sfen: &str, move_usi: &str) -> Result<Position> {
-    let mut pos = Position::new();
-    pos.set_sfen(parent_sfen)
-        .map_err(|e| anyhow!("親局面 SFEN が不正です: {parent_sfen}: {e}"))?;
-    let mv = legal_move(&pos, parent_sfen, move_usi)?;
-    let gives_check = pos.gives_check(mv);
-    pos.do_move(mv, gives_check);
-    Ok(pos)
+/// 局面の順に入力を読み直し、行の値と指し手を集める。
+fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
+    let mut reader = LineReader::open(path)?;
+    let total: usize = scan.rows.iter().map(|&rows| rows as usize).sum();
+    let mut input = InputRows {
+        value: Vec::with_capacity(total),
+        moves: Vec::with_capacity(total),
+        texts: Vec::new(),
+        all_depth0: Vec::with_capacity(scan.rows.len()),
+        unexplored: Vec::with_capacity(scan.rows.len()),
+    };
+    for node in 0..scan.rows.len() {
+        let blocks =
+            &scan.blocks[scan.block_start[node] as usize..scan.block_start[node + 1] as usize];
+        let first = input.value.len();
+        let (mut depth0, mut unexplored) = (true, true);
+        for_each_row(&mut reader, blocks, |line| {
+            let fields = parse_row(line);
+            depth0 &= fields.depth == 0;
+            unexplored &= fields.value == 0 && fields.depth == 0;
+            let row = input.value.len() as u32;
+            input.value.push(fields.value);
+            input.moves.push(match fields.move_usi {
+                None => MOVE_NONE,
+                Some(text) => match canonical_move(text) {
+                    Some(mv) => u32::from(mv.raw()),
+                    None => match Move::from_usi(text) {
+                        Some(mv) if mv.to_usi() == text => u32::from(mv.raw()),
+                        decoded => {
+                            input.texts.push((row, text.into()));
+                            decoded.map_or(MOVE_TEXT | MOVE_INVALID, |mv| {
+                                MOVE_TEXT | u32::from(mv.raw())
+                            })
+                        }
+                    },
+                },
+            });
+            Ok(())
+        })?;
+        if input.value.len() - first != scan.rows[node] as usize {
+            bail!("{CHANGED}: {}", path.display());
+        }
+        input.all_depth0.push(depth0);
+        input.unexplored.push(unexplored);
+    }
+    Ok(input)
 }
 
-/// 局面 `pos` (SFEN はエラー表示用) で USI 指し手を合法性検査付きで解釈する。
-fn legal_move(pos: &Position, parent_sfen: &str, move_usi: &str) -> Result<Move> {
-    let decoded =
-        Move::from_usi(move_usi).ok_or_else(|| anyhow!("USI 指し手が不正です: {move_usi}"))?;
-    let mv = pos
-        .to_move(decoded)
-        .ok_or_else(|| anyhow!("局面に適用できない指し手です: {move_usi}: {parent_sfen}"))?;
+/// 定跡を読み、book 内子局面への辺 (反転 key 合流を含む) を張ったグラフを作る。
+/// 同一 key の行は最小 ply の sfen を代表にして手を連結する。未探索の判定は入力時の depth を使う。
+pub fn read_graph(path: &Path, options: BackpropOptions) -> Result<Graph> {
+    let scan = scan(path)
+        .with_context(|| format!("定跡を rshogi-book で読めません: {}", path.display()))?;
+    let input = read_rows(path, &scan)?;
+    build_graph(path, options, scan, input)
+}
+
+/// 指し手が合法でない理由。
+enum Rejected {
+    Unreadable,
+    NotApplicable,
+    Illegal,
+}
+
+/// 局面 `pos` で USI 指し手 (読めなかった欄は `None`) を合法性検査付きで解釈する。
+fn legal_move(pos: &Position, decoded: Option<Move>) -> Result<Move, Rejected> {
+    let decoded = decoded.ok_or(Rejected::Unreadable)?;
+    let mv = pos.to_move(decoded).ok_or(Rejected::NotApplicable)?;
     if mv == Move::NONE || !pos.pseudo_legal(mv) || !pos.is_legal(mv) {
-        bail!("非合法手です: {move_usi}: {parent_sfen}");
+        return Err(Rejected::Illegal);
     }
     Ok(mv)
 }
 
-/// 先手・後手をそれぞれ自分として後退解析し、候補手の値を逆伝播する。
-pub fn propagate_values(
-    book: &BookDb,
-    graph: &mut Graph,
-    draws: DrawValues,
-    merge: MergeMode,
-) -> Result<PropagationStats> {
-    propagate_values_with(book, graph, draws, merge, BackpropOptions::default())
+fn build_graph(
+    path: &Path,
+    options: BackpropOptions,
+    scan: Scan,
+    input: InputRows,
+) -> Result<Graph> {
+    let Scan {
+        sfens,
+        rows,
+        block_start,
+        blocks,
+    } = scan;
+    let n = sfens.len();
+    let skipped: Vec<bool> = (0..n)
+        .map(|v| options.skip_unsearched_children && rows[v] > 0 && input.all_depth0[v])
+        .collect();
+    // 子局面は SFEN 文字列を作らず、盤・手番・持ち駒の並び (SFEN の ply 抜き key と 1 対 1) で引く。
+    // 反転は 1 対 1 で 2 回で戻るので、「子局面の反転キーが key の局面」と「反転キーが子局面に等しい局面」は同じ。
+    // 引くだけで反復しないので、ハッシュの順序は出力に影響しない。
+    let mut index = PositionIndex::default();
+    let mut node_flags = Vec::with_capacity(n);
+    let mut position = Position::new();
+    for (v, &unexplored) in input.unexplored.iter().enumerate() {
+        let sfen = sfens.get(v);
+        position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+        let key = strip_ply(sfen);
+        // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ局面の行は
+        // 別の局面として残し、索引には入れない。
+        if strip_ply(&position.to_sfen()) == key {
+            index.insert(PositionKey::pair(&position)[0], v as u32);
+        }
+        let mut flags = 0;
+        if key.split_whitespace().nth(1) != Some("w") {
+            flags |= NODE_BLACK;
+        }
+        if !position.checkers().is_empty() {
+            flags |= NODE_CHECKED;
+        }
+        if options.skip_unsearched_children && unexplored {
+            flags |= NODE_PRESERVED;
+        }
+        node_flags.push(flags);
+    }
+
+    let total = input.value.len();
+    let mut row_start = Vec::with_capacity(n + 1);
+    row_start.push(0u32);
+    let mut old = Vec::with_capacity(total);
+    let mut to = Vec::with_capacity(total);
+    let mut row_flags = Vec::with_capacity(total);
+    let mut added = Vec::new();
+    let mut flip_edges = 0;
+    let mut illegal_moves = 0;
+    let mut first = 0usize;
+    for v in 0..n {
+        let sfen = sfens.get(v);
+        position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+        let input_rows = first..first + rows[v] as usize;
+        first = input_rows.end;
+        for row in input_rows.clone() {
+            let mv = input.moves[row];
+            let mut flags = 0;
+            let mut edge = None;
+            if mv != MOVE_NONE {
+                let decoded = (mv & MOVE_INVALID == 0).then(|| Move::from_u16(mv as u16));
+                match legal_move(&position, decoded) {
+                    Ok(mv) => {
+                        flags |= ROW_USABLE;
+                        let gives_check = position.gives_check(mv);
+                        position.do_move(mv, gives_check);
+                        let [direct, flipped] = PositionKey::pair(&position);
+                        edge = index
+                            .get(&direct)
+                            .map(|to| (to, false))
+                            .or_else(|| index.get(&flipped).map(|to| (to, true)));
+                        position.undo_move(mv);
+                    }
+                    Err(reason) => {
+                        illegal_moves += 1;
+                        let text = input.text(row);
+                        let error = match reason {
+                            Rejected::Unreadable => format!("USI 指し手が不正です: {text}"),
+                            Rejected::NotApplicable => {
+                                format!("局面に適用できない指し手です: {text}: {sfen}")
+                            }
+                            Rejected::Illegal => format!("非合法手です: {text}: {sfen}"),
+                        };
+                        eprintln!(
+                            "警告: 非合法手を逆伝播から除外します: sfen={sfen} move={text} error={error}"
+                        );
+                    }
+                }
+            }
+            if edge.is_some_and(|(to, _)| skipped[to]) {
+                flags |= ROW_PRESERVE;
+                edge = None;
+            }
+            if let Some((_, true)) = edge {
+                flags |= ROW_FLIP;
+                flip_edges += 1;
+            }
+            old.push(input.value[row]);
+            to.push(edge.map_or(NONE, |(to, _)| to as u32));
+            row_flags.push(flags);
+        }
+        if options.add_transposition_moves && node_flags[v] & NODE_PRESERVED == 0 {
+            let listed: BTreeSet<String> = input_rows
+                .filter(|&row| input.moves[row] != MOVE_NONE)
+                .map(|row| input.text(row))
+                .collect();
+            let mut legal = MoveList::new();
+            generate_legal_all(&position, &mut legal);
+            for &mv in legal.iter() {
+                let usi = mv.to_usi();
+                if listed.contains(&usi) {
+                    continue;
+                }
+                let gives_check = position.gives_check(mv);
+                position.do_move(mv, gives_check);
+                let child = position.to_sfen();
+                position.undo_move(mv);
+                let edge =
+                    find_key(&sfens, strip_ply(&child)).map(|to| (to, false)).or_else(|| {
+                        rshogi_book::flipped_key(&child)
+                            .and_then(|flipped| find_key(&sfens, strip_ply(&flipped)))
+                            .map(|to| (to, true))
+                    });
+                let Some((child, via_flip)) = edge.filter(|&(to, _)| !skipped[to]) else {
+                    continue;
+                };
+                flip_edges += usize::from(via_flip);
+                old.push(0);
+                to.push(child as u32);
+                row_flags.push(ROW_USABLE | ROW_ADDED | if via_flip { ROW_FLIP } else { 0 });
+                added.push(mv.raw());
+            }
+        }
+        row_start.push(u32::try_from(old.len()).context("手が多すぎます")?);
+    }
+    drop((input, index));
+    Ok(Graph {
+        source: Some(path.to_path_buf()),
+        options,
+        sfens,
+        node_flags,
+        row_start,
+        block_start,
+        blocks,
+        new: old.clone(),
+        old,
+        to,
+        row_flags,
+        added,
+        flip_edges,
+        illegal_moves,
+    })
 }
 
-/// [`propagate_values`] に追加オプションを指定する版。
-/// `skip_unsearched_children` はグラフ構築時に [`build_graph_with`] へ渡すこと。
-pub fn propagate_values_with(
-    book: &BookDb,
+/// 先手・後手をそれぞれ自分として後退解析し、候補手の値を逆伝播する。
+pub fn propagate_values(
     graph: &mut Graph,
     draws: DrawValues,
     merge: MergeMode,
-    options: BackpropOptions,
 ) -> Result<PropagationStats> {
     let params = BestParams {
         draws,
         merge,
-        skip_unusable_moves: options.skip_unusable_moves,
+        skip_unusable_moves: graph.options.skip_unusable_moves,
     };
     for draw in [draws.black, draws.white] {
         if !(-DRAW_VALUE_LIMIT..=DRAW_VALUE_LIMIT).contains(&draw) {
@@ -625,106 +1006,88 @@ pub fn propagate_values_with(
             );
         }
     }
-    let n = graph.keys.len();
-    let mut results: Vec<Option<NodeResult>> = vec![None; n];
-    let mut mirrored: Vec<Option<NodeResult>> = vec![None; n];
     let mut stats = PropagationStats::default();
+    let mut sides = Vec::with_capacity(2);
     for black in [true, false] {
-        let built = build_game(graph, params, black);
-        let solution = book_retrograde::solve(&built.game)?;
+        let game = SideGame::new(graph, params, black)?;
+        let solution = book_retrograde::solve(&game)?;
         stats.check_core_states += solution.core_size[0] + solution.core_size[1];
-        let draw = draws.of(black);
-        for v in 0..n {
-            let state = built.state[v][usize::from(!black)];
-            if state == book_retrograde::NONE {
-                continue;
-            }
-            let state = state as usize;
-            let row = |j: u32| {
-                let arc = built.game.arcs[built.game.start[state] + j as usize];
-                if arc.to == book_retrograde::NONE {
-                    (arc.leaf + draw, Some(0))
-                } else {
-                    let to = arc.to as usize;
-                    (solution.values[to] + draw, solution.distance[to].map(|d| d + arc.length()))
-                }
-            };
-            let index =
-                |j: u32| built.arc_of[v].iter().position(|&a| a == j && a != book_retrograde::NONE);
-            let result = NodeResult {
-                value: solution.values[state] + draw,
-                rows: built.arc_of[v]
-                    .iter()
-                    .map(|&j| (j != book_retrograde::NONE).then(|| row(j)))
-                    .collect(),
-                guaranteed: index(solution.guaranteed[state]),
-                preferred: index(solution.preferred[state]),
-            };
-            // 反転キーで合流した向きは行を持たないので、保存されている向きの行で指せるかを後で確かめる。
-            if graph.black(v) == black {
-                results[v] = Some(result);
-            } else {
-                mirrored[v] = Some(result);
-            }
-        }
+        sides.push(game.into_side(solution));
     }
+    // 局面の手番の側を自分として解いた結果は保存されている向き、反対の側の結果は反転キーで合流した向き。
+    let results = |graph: &Graph, v: usize| sides[graph.color(v)].result(graph, params, v);
+    let mirrored = |graph: &Graph, v: usize| sides[1 - graph.color(v)].result(graph, params, v);
     stats.restricted_ties = write_certified(graph, params, &results, &mirrored)?;
+    drop(sides);
 
-    let scc = build_scc_graph(&graph.adjacency);
+    let scc = Components::of(graph);
     stats.nontrivial_sccs = scc.nontrivial.iter().filter(|&&v| v).count();
-    stats.max_scc_size = scc.comps.iter().map(Vec::len).max().unwrap_or(0);
-    let mut scc_depth = vec![0usize; scc.comps.len()];
-    for &comp in scc.topo.iter().rev() {
-        scc_depth[comp] =
-            scc.edges[comp].iter().map(|&child| scc_depth[child] + 1).max().unwrap_or(0);
-    }
-    for (node_idx, key) in graph.keys.iter().enumerate() {
-        let comp = scc.comp_of[node_idx];
-        let draw = draws.of(graph.black(node_idx));
-        let counted = || graph.moves[node_idx].iter().filter(|mv| params.counts(mv));
-        let old_best = counted().map(|mv| mv.old).max().unwrap_or(draw);
-        let new_best = counted().map(|mv| mv.new).max().unwrap_or(draw);
+    stats.max_scc_size = scc.max_size;
+    let mut changed = Vec::new();
+    for node in 0..graph.len() {
+        let comp = scc.comp_of[node] as usize;
+        let draw = draws.of(graph.black(node));
+        let counted = || graph.rows(node).filter(|&row| params.counts(graph, row));
+        let old_best = counted().map(|row| graph.old[row]).max().unwrap_or(draw);
+        let new_best = counted().map(|row| graph.new[row]).max().unwrap_or(draw);
         if old_best != new_best {
-            let entry = book
-                .entries
-                .get(key)
-                .ok_or_else(|| anyhow!("内部エラー: entry がありません: {key}"))?;
-            stats.changed_nodes.push(NodeChange {
-                sfen: entry.sfen.clone(),
-                old_best,
-                new_best,
-            });
+            changed.push(((new_best - old_best).abs(), node as u32, old_best, new_best));
         }
-        stats.depths.push(scc_depth[comp]);
-        for mv in &graph.moves[node_idx] {
-            if mv.old != mv.new {
+        *stats.depths.entry(scc.depth[comp] as usize).or_default() += 1;
+        for row in graph.rows(node) {
+            let (old, new) = (graph.old[row], graph.new[row]);
+            if old != new {
                 stats.updated_moves += 1;
-                stats.abs_deltas.push((mv.new - mv.old).abs());
+                *stats.abs_deltas.entry((new - old).abs()).or_default() += 1;
             }
-            if mv.new == draw
-                && mv.edge.is_some_and(|e| scc.nontrivial[comp] && scc.comp_of[e.to] == comp)
+            if new == draw
+                && graph
+                    .edge_to(row)
+                    .is_some_and(|to| scc.nontrivial[comp] && scc.comp_of[to] as usize == comp)
             {
                 stats.draw_moves += 1;
             }
         }
     }
-    stats.changed_nodes.sort_by(|a, b| {
-        (b.new_best - b.old_best)
-            .abs()
-            .cmp(&(a.new_best - a.old_best).abs())
-            .then_with(|| a.sfen.cmp(&b.sfen))
+    changed.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| graph.sfen(a.1 as usize).cmp(graph.sfen(b.1 as usize)))
     });
+    stats.changed_nodes = changed
+        .into_iter()
+        .take(TOP_CHANGES)
+        .map(|(_, node, old_best, new_best)| NodeChange {
+            sfen: graph.sfen(node as usize).to_string(),
+            old_best,
+            new_best,
+        })
+        .collect();
     Ok(stats)
 }
+
+/// 局面の手番の側を自分として解いた結果。値は手番の側から見た値。
+#[derive(Debug, Clone)]
+struct NodeResult {
+    value: i32,
+    /// 行ごとの値と出口までの手数。best の計算に数えない行は `None`。
+    rows: Vec<Option<(i32, Option<u32>)>>,
+    guaranteed: Option<usize>,
+    preferred: Option<usize>,
+}
+
+/// 局面ごとの [`NodeResult`] を作る関数。
+type ResultsOf<'a> = dyn Fn(&Graph, usize) -> Option<NodeResult> + 'a;
 
 /// 解いた値を書き出し値にし、保証検査を通るまで危ない同値手を保証手だけに絞る。絞った局面数を返す。
 fn write_certified(
     graph: &mut Graph,
     params: BestParams,
-    results: &[Option<NodeResult>],
-    mirrored: &[Option<NodeResult>],
+    results: &ResultsOf<'_>,
+    mirrored: &ResultsOf<'_>,
 ) -> Result<usize> {
-    let n = graph.keys.len();
+    let n = graph.len();
+    let mirrored_values: Vec<Option<i32>> =
+        (0..n).map(|v| mirrored(graph, v).map(|m| m.value)).collect();
     // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は保証手だけを残す。
     let mut restricted = vec![false; n];
     loop {
@@ -735,7 +1098,7 @@ fn write_certified(
                 "反転キーで合流した {conflicts} 局面で、保存されている向きの行が反対の向きの値を保ちません。                 1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください"
             );
         }
-        let violations = certify(graph, params, mirrored);
+        let violations = certify(graph, params, &mirrored_values);
         if violations.nodes.is_empty() {
             break;
         }
@@ -756,159 +1119,365 @@ fn write_certified(
 
 /// 反転キーで合流した向きで、書き出し値が最大の行のどれを指しても、その向きで解いた値を保つか。
 /// 保たない局面の数を返す。千日手の値が先後で同じなら、両方の向きは同じ問題なので 0 になる。
-fn flip_conflicts(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> usize {
-    (0..graph.keys.len())
+fn flip_conflicts(graph: &Graph, params: BestParams, mirrored: &ResultsOf<'_>) -> usize {
+    (0..graph.len())
         .filter(|&v| {
-            let Some(mirror) = &mirrored[v] else {
+            let Some(mirror) = mirrored(graph, v) else {
                 return false;
             };
-            let moves = &graph.moves[v];
-            let best = moves.iter().filter(|mv| params.counts(mv)).map(|mv| mv.new).max();
-            moves.iter().enumerate().any(|(idx, mv)| {
-                params.counts(mv)
-                    && Some(mv.new) == best
+            let rows = graph.rows(v);
+            let best = rows
+                .clone()
+                .filter(|&row| params.counts(graph, row))
+                .map(|row| graph.new[row])
+                .max();
+            rows.enumerate().any(|(idx, row)| {
+                params.counts(graph, row)
+                    && Some(graph.new[row]) == best
                     && mirror.rows[idx].is_none_or(|(value, _)| value != mirror.value)
             })
         })
         .count()
 }
 
-/// 保存されている向きで、局面の手番の側を自分として解いた結果。値は手番の側から見た値。
-#[derive(Debug, Clone)]
-struct NodeResult {
-    value: i32,
-    /// 行ごとの値と出口までの手数。best の計算に数えない行は `None`。
-    rows: Vec<Option<(i32, Option<u32>)>>,
-    guaranteed: Option<usize>,
-    preferred: Option<usize>,
-}
-
-/// 先手 (`black`) か後手を自分とした後退解析の問題と、局面・行との対応。
-struct BuiltGame {
-    game: book_retrograde::Game,
-    /// `state[v][c]`: 局面 `v` を実際の手番 `c` (0 = 先手、1 = 後手) で指す頂点。届かない向きは `NONE`。
-    state: Vec<[u32; 2]>,
-    /// 局面の行ごとの手番号。best の計算に数えない行は `NONE`。
-    arc_of: Vec<Vec<u32>>,
-}
-
-/// 千日手の値を自分の側の値に固定した 2 人零和の問題を作る。値は自分から見て千日手が 0 になるようにずらす。
+/// 先手 (`black`) か後手を自分とした後退解析の問題。千日手の値を自分の側の値に固定した 2 人零和の問題で、
+/// 値は自分から見て千日手が 0 になるようにずらす。
 ///
 /// 局面と実際の手番の組を頂点にする。反転キーで合流した辺は保存されている局面の手番と実際の手番が逆になるが、
 /// 手を指すごとに実際の手番は必ず入れ替わる。`min` では、相手が book 外で咎められる (自分の手の探索ラベル)
 /// ことを、自分の手と行き先の間に置いた相手の分岐 (ラベルの値の葉か、そのまま進むか) で表す。
-fn build_game(graph: &Graph, params: BestParams, black: bool) -> BuiltGame {
-    use book_retrograde::{Arc, NONE, Step};
-    let n = graph.keys.len();
-    let me = usize::from(!black);
-    let draw = params.draws.of(black);
-    let color = |v: usize| usize::from(!graph.black(v));
-    let arc_of: Vec<Vec<u32>> = graph
-        .moves
-        .iter()
-        .map(|moves| {
-            let mut next = 0;
-            moves
-                .iter()
-                .map(|mv| {
-                    if params.counts(mv) {
-                        next += 1;
-                        next - 1
-                    } else {
-                        NONE
-                    }
-                })
-                .collect()
-        })
-        .collect();
-    let mut reachable = vec![[false; 2]; n];
-    let mut stack: Vec<(usize, usize)> = (0..n).map(|v| (v, color(v))).collect();
-    for &(v, c) in &stack {
-        reachable[v][c] = true;
+/// 手は 4 バイトの [`Target`] で持つ。
+struct SideGame<'a> {
+    graph: &'a Graph,
+    params: BestParams,
+    /// 自分の色の番号 (0 = 先手、1 = 後手)。
+    me: usize,
+    draw: i32,
+    /// `state[v][c]`: 局面 `v` を実際の手番 `c` で指す頂点。届かない向きは `NONE`。
+    state: Vec<[u32; 2]>,
+    /// 局面と手番の頂点の `局面 * 2 + 手番`。分岐の頂点はこの後ろに並ぶ。
+    vertex: Vec<u32>,
+    /// `min` の分岐の頂点が表す行。
+    branch_row: Vec<u32>,
+    /// `min` のとき、局面の自分の手番の頂点で、分岐を挟む最初の行の分岐の頂点。
+    /// 同じ局面の分岐の頂点は行の順に連番になる。
+    branch_base: Vec<u32>,
+    /// 頂点 `s` の手 `j` は `targets[arc_start[s] + j]`。
+    arc_start: Vec<u32>,
+    targets: Vec<Target>,
+    /// `skip_unusable_moves` のとき、局面 `v` の手番号 `j` の行は `counted[counted_start[v] + j]`。
+    counted_start: Vec<u32>,
+    counted: Vec<u32>,
+}
+
+/// 後退解析の手を 4 バイトに詰めた値。
+///
+/// - 最上位 bit が 0: 行き先の頂点 (下位 29 bit) と手の種類 (その上の 2 bit)。
+/// - `Target::ROW_LEAF`: 葉。値は行の値から求め直す。
+/// - それ以外: 葉で、値 (解く側から見た値) を `LEAF_BIAS` だけずらして下位 31 bit に持つ。
+///   数千万本の葉の値を 1 回の読み出しで得るため。収まらない値は `ROW_LEAF` にする。
+#[derive(Clone, Copy)]
+struct Target(u32);
+
+impl Target {
+    const LEAF: u32 = 1 << 31;
+    const ROW_LEAF: Self = Self(u32::MAX);
+    const LEAF_BIAS: i32 = 1 << 30;
+    const VERTEX: u32 = (1 << 29) - 1;
+    const STEP_SHIFT: u32 = 29;
+
+    fn vertex(to: u32, step: Step) -> Self {
+        let step = match step {
+            Step::Quiet => 0,
+            Step::Check => 1,
+            Step::Pass => 2,
+        };
+        Self(to | (step << Self::STEP_SHIFT))
     }
-    while let Some((v, c)) = stack.pop() {
-        for mv in graph.moves[v].iter().filter(|mv| params.counts(mv)) {
-            if let Some(edge) = mv.edge
-                && !reachable[edge.to][1 - c]
-            {
-                reachable[edge.to][1 - c] = true;
-                stack.push((edge.to, 1 - c));
+
+    fn leaf(value: i32) -> Self {
+        match value.checked_add(Self::LEAF_BIAS) {
+            Some(biased) if biased >= 0 && (biased as u32) < Self::LEAF - 1 => {
+                Self(Self::LEAF | biased as u32)
             }
+            _ => Self::ROW_LEAF,
         }
     }
-    let mut state = vec![[NONE; 2]; n];
-    let mut order = Vec::new();
-    for v in 0..n {
-        for c in 0..2 {
-            if reachable[v][c] {
-                state[v][c] = order.len() as u32;
-                order.push((v, c));
+}
+
+impl<'a> SideGame<'a> {
+    fn new(graph: &'a Graph, params: BestParams, black: bool) -> Result<Self> {
+        let n = graph.len();
+        if n > (NONE / 2) as usize {
+            bail!("局面が多すぎて後退解析できません: {n}");
+        }
+        let (mut counted_start, mut counted) = (Vec::new(), Vec::new());
+        if params.skip_unusable_moves {
+            counted_start.push(0);
+            for v in 0..n {
+                counted.extend(
+                    graph.rows(v).filter(|&row| params.counts(graph, row)).map(|row| row as u32),
+                );
+                counted_start.push(counted.len() as u32);
             }
         }
-    }
-    let mut own = Vec::with_capacity(order.len());
-    let mut start = vec![0];
-    let mut arcs = Vec::new();
-    // `min` の分岐: (ラベルの値の葉、行き先の頂点)。
-    let mut branches = Vec::new();
-    for &(v, c) in &order {
-        own.push(c == me);
-        let input_len = graph.input_len(v);
-        for (idx, mv) in graph.moves[v].iter().enumerate().filter(|(_, mv)| params.counts(mv)) {
-            let mine = |x: i32| if c == me { x } else { -x };
-            match mv.edge {
-                None => arcs.push(Arc {
-                    to: NONE,
-                    leaf: mine(mv.old) - draw,
-                    step: Step::Quiet,
-                }),
-                Some(edge) => {
-                    let to = state[edge.to][1 - c];
-                    let step = if graph.checked[edge.to] {
-                        Step::Check
-                    } else {
-                        Step::Quiet
-                    };
-                    if params.merge == MergeMode::Min && c == me && idx < input_len {
-                        let branch = (order.len() + branches.len()) as u32;
-                        branches.push((mv.old - draw, to));
-                        arcs.push(Arc {
-                            to: branch,
-                            leaf: 0,
-                            step,
-                        });
-                    } else {
-                        arcs.push(Arc { to, leaf: 0, step });
-                    }
+        let mut game = Self {
+            graph,
+            params,
+            me: usize::from(!black),
+            draw: params.draws.of(black),
+            state: Vec::new(),
+            vertex: Vec::new(),
+            branch_row: Vec::new(),
+            branch_base: Vec::new(),
+            arc_start: Vec::new(),
+            targets: Vec::new(),
+            counted_start,
+            counted,
+        };
+        let mut reachable = vec![[false; 2]; n];
+        let mut stack: Vec<u32> = (0..n).map(|v| (v * 2 + graph.color(v)) as u32).collect();
+        for &s in &stack {
+            reachable[s as usize / 2][s as usize % 2] = true;
+        }
+        while let Some(s) = stack.pop() {
+            let (v, c) = (s as usize / 2, s as usize % 2);
+            for j in 0..game.moves(v) {
+                if let Some(to) = graph.edge_to(game.row(v, j))
+                    && !reachable[to][1 - c]
+                {
+                    reachable[to][1 - c] = true;
+                    stack.push((to * 2 + 1 - c) as u32);
                 }
             }
         }
-        start.push(arcs.len());
+        drop(stack);
+        game.state = vec![[NONE; 2]; n];
+        for (v, reachable) in reachable.iter().enumerate() {
+            for (c, &reachable) in reachable.iter().enumerate() {
+                if reachable {
+                    game.state[v][c] = target_vertex(game.vertex.len())?;
+                    game.vertex.push((v * 2 + c) as u32);
+                }
+            }
+        }
+        drop(reachable);
+        let min = params.merge == MergeMode::Min;
+        if min {
+            game.branch_base = vec![NONE; n];
+        }
+        // 分岐の頂点は、局面と手番の頂点の順・行の順に番号を振る。
+        let base = game.vertex.len();
+        game.arc_start.push(0);
+        for s in 0..base {
+            let (v, c) = (game.vertex[s] as usize / 2, game.vertex[s] as usize % 2);
+            for j in 0..game.moves(v) {
+                let row = game.row(v, j);
+                let Some(to) = graph.edge_to(row) else {
+                    let old = graph.old[row];
+                    let mine = if c == game.me { old } else { -old };
+                    game.targets.push(Target::leaf(mine - game.draw));
+                    continue;
+                };
+                let step = if graph.checked(to) {
+                    Step::Check
+                } else {
+                    Step::Quiet
+                };
+                let target = if min && c == game.me && !graph.added(row) {
+                    let branch = target_vertex(base + game.branch_row.len())?;
+                    if game.branch_base[v] == NONE {
+                        game.branch_base[v] = branch;
+                    }
+                    game.branch_row.push(row as u32);
+                    branch
+                } else {
+                    game.state[to][1 - c]
+                };
+                game.targets.push(Target::vertex(target, step));
+            }
+            game.arc_start.push(arc_index(game.targets.len())?);
+        }
+        for b in 0..game.branch_row.len() {
+            let row = game.branch_row[b] as usize;
+            let to = graph.to[row] as usize;
+            game.targets.push(Target::leaf(graph.old[row] - game.draw));
+            game.targets.push(Target::vertex(game.state[to][1 - game.me], Step::Pass));
+            game.arc_start.push(arc_index(game.targets.len())?);
+        }
+        Ok(game)
     }
-    for (label, to) in branches {
-        own.push(false);
-        arcs.push(Arc {
+
+    /// 局面 `v` の best の計算に数える行の数。
+    fn moves(&self, v: usize) -> usize {
+        if self.params.skip_unusable_moves {
+            (self.counted_start[v + 1] - self.counted_start[v]) as usize
+        } else {
+            self.graph.rows(v).len()
+        }
+    }
+
+    /// 局面 `v` の `j` 番目の数える行。
+    fn row(&self, v: usize, j: usize) -> usize {
+        if self.params.skip_unusable_moves {
+            self.counted[self.counted_start[v] as usize + j] as usize
+        } else {
+            self.graph.row_start[v] as usize + j
+        }
+    }
+
+    /// 解いた結果のうち、書き出しに使う分だけを残す。
+    fn into_side(self, solution: book_retrograde::Solution) -> Side {
+        let graph = self.graph;
+        let n = graph.len();
+        let mut guaranteed = vec![NONE; n];
+        let mut preferred = vec![NONE; n];
+        for v in 0..n {
+            let s = self.state[v][self.me];
+            if s == NONE {
+                continue;
+            }
+            // 頂点内の手番号を局面内の行番号にする。
+            let index = |j: u32| match j {
+                NONE => NONE,
+                j => (self.row(v, j as usize) - graph.row_start[v] as usize) as u32,
+            };
+            guaranteed[v] = index(solution.guaranteed[s as usize]);
+            preferred[v] = index(solution.preferred[s as usize]);
+        }
+        Side {
+            me: self.me,
+            draw: self.draw,
+            state: self.state,
+            branch_base: self.branch_base,
+            values: solution.values,
+            distance: solution.distance,
+            guaranteed,
+            preferred,
+        }
+    }
+}
+
+/// 頂点番号にする。[`Target`] に収まるよう 29 bit に限る。
+fn target_vertex(index: usize) -> Result<u32> {
+    u32::try_from(index)
+        .ok()
+        .filter(|&id| id <= Target::VERTEX)
+        .ok_or_else(|| anyhow!("頂点が多すぎて後退解析できません"))
+}
+
+fn arc_index(index: usize) -> Result<u32> {
+    u32::try_from(index).map_err(|_| anyhow!("手が多すぎて後退解析できません"))
+}
+
+impl book_retrograde::Game for SideGame<'_> {
+    fn vertices(&self) -> usize {
+        self.vertex.len() + self.branch_row.len()
+    }
+
+    fn own(&self, s: usize) -> bool {
+        s < self.vertex.len() && self.vertex[s] as usize % 2 == self.me
+    }
+
+    fn degree(&self, s: usize) -> usize {
+        (self.arc_start[s + 1] - self.arc_start[s]) as usize
+    }
+
+    fn arc(&self, s: usize, j: usize) -> Arc {
+        let Target(target) = self.targets[self.arc_start[s] as usize + j];
+        if target & Target::LEAF == 0 {
+            let step = match target >> Target::STEP_SHIFT {
+                0 => Step::Quiet,
+                1 => Step::Check,
+                _ => Step::Pass,
+            };
+            return Arc {
+                to: target & Target::VERTEX,
+                leaf: 0,
+                step,
+            };
+        }
+        let leaf = if target != Target::ROW_LEAF.0 {
+            (target & !Target::LEAF) as i32 - Target::LEAF_BIAS
+        } else {
+            match self.vertex.get(s) {
+                Some(&vc) => {
+                    let old = self.graph.old[self.row(vc as usize / 2, j)];
+                    let mine = if vc as usize % 2 == self.me {
+                        old
+                    } else {
+                        -old
+                    };
+                    mine - self.draw
+                }
+                None => self.graph.old[self.branch_row[s - self.vertex.len()] as usize] - self.draw,
+            }
+        };
+        Arc {
             to: NONE,
-            leaf: label,
+            leaf,
             step: Step::Quiet,
-        });
-        arcs.push(Arc {
-            to,
-            leaf: 0,
-            step: Step::Pass,
-        });
-        start.push(arcs.len());
+        }
     }
-    let mate = Value::MATE.raw();
-    BuiltGame {
-        game: book_retrograde::Game {
-            own,
-            start,
-            arcs,
-            win: [mate - draw, mate + draw],
-        },
-        state,
-        arc_of,
+
+    fn win(&self) -> [i32; 2] {
+        let mate = Value::MATE.raw();
+        [mate - self.draw, mate + self.draw]
+    }
+}
+
+/// 先手か後手を自分として解いた結果のうち、書き出しに使う分。
+struct Side {
+    me: usize,
+    draw: i32,
+    state: Vec<[u32; 2]>,
+    /// `min` のとき、局面の自分の手番の頂点で、分岐を挟む最初の行の分岐の頂点。
+    /// 同じ局面の分岐の頂点は行の順に連番になる。
+    branch_base: Vec<u32>,
+    /// 頂点の値と出口までの手数 (`NONE` は決まらない)。
+    values: Vec<i32>,
+    distance: Vec<u32>,
+    /// 局面の自分の手番の頂点で、保証手・選ぶ手の局面内の行番号。
+    guaranteed: Vec<u32>,
+    preferred: Vec<u32>,
+}
+
+impl Side {
+    /// 局面 `v` を実際の手番の側を自分として解いた結果。その向きで届かない局面は `None`。
+    fn result(&self, graph: &Graph, params: BestParams, v: usize) -> Option<NodeResult> {
+        let s = self.state[v][self.me];
+        if s == NONE {
+            return None;
+        }
+        let draw = self.draw;
+        let mut branch = self.branch_base.get(v).copied().unwrap_or(NONE);
+        let rows = graph
+            .rows(v)
+            .map(|row| {
+                if !params.counts(graph, row) {
+                    return None;
+                }
+                let Some(to) = graph.edge_to(row) else {
+                    let leaf = graph.old[row] - draw;
+                    return Some((leaf + draw, Some(0)));
+                };
+                let target = if params.merge == MergeMode::Min && !graph.added(row) {
+                    branch += 1;
+                    branch - 1
+                } else {
+                    self.state[to][1 - self.me]
+                } as usize;
+                let distance = (self.distance[target] != NONE).then(|| self.distance[target] + 1);
+                Some((self.values[target] + draw, distance))
+            })
+            .collect();
+        let row = |j: u32| (j != NONE).then_some(j as usize);
+        Some(NodeResult {
+            value: self.values[s as usize] + draw,
+            rows,
+            guaranteed: row(self.guaranteed[v]),
+            preferred: row(self.preferred[v]),
+        })
     }
 }
 
@@ -920,19 +1489,21 @@ fn build_game(graph: &Graph, params: BestParams, black: bool) -> BuiltGame {
 fn assign_outputs(
     graph: &mut Graph,
     params: BestParams,
-    results: &[Option<NodeResult>],
-    mirrored: &[Option<NodeResult>],
+    results: &ResultsOf<'_>,
+    mirrored: &ResultsOf<'_>,
     restricted: &[bool],
 ) {
-    for node in 0..graph.keys.len() {
-        let preserved = graph.preserved[node];
-        let result = results[node].as_ref();
-        let mirror = mirrored[node].as_ref();
+    for (node, &restricted) in restricted.iter().enumerate() {
+        let preserved = graph.preserved(node);
+        let result = results(graph, node);
+        let mirror = mirrored(graph, node);
         let common = |idx: usize| {
-            mirror.is_none_or(|m| m.rows[idx].is_some_and(|(value, _)| value == m.value))
+            mirror
+                .as_ref()
+                .is_none_or(|m| m.rows[idx].is_some_and(|(value, _)| value == m.value))
         };
-        let chosen = result.and_then(|r| {
-            if restricted[node] {
+        let chosen = result.as_ref().and_then(|r| {
+            if restricted {
                 return r.guaranteed;
             }
             if let Some(c) = [r.preferred, r.guaranteed].into_iter().flatten().find(|&c| common(c))
@@ -954,14 +1525,16 @@ fn assign_outputs(
             };
             candidates.min_by_key(|&idx| key(idx)).or(r.preferred)
         });
-        let chosen_distance = result.zip(chosen).and_then(|(r, c)| r.rows[c].and_then(|(_, d)| d));
-        for (idx, mv) in graph.moves[node].iter_mut().enumerate() {
-            let row = result.and_then(|r| r.rows[idx]);
-            mv.new = match row {
-                Some((value, distance)) if !preserved && !mv.preserve && mv.usable => {
-                    let best = result.is_some_and(|r| r.value == value);
+        let chosen_distance =
+            result.as_ref().zip(chosen).and_then(|(r, c)| r.rows[c].and_then(|(_, d)| d));
+        for (idx, row) in graph.rows(node).enumerate() {
+            let value = match result.as_ref().and_then(|r| r.rows[idx]) {
+                Some((value, distance))
+                    if !preserved && !graph.preserve(row) && graph.usable(row) =>
+                {
+                    let best = result.as_ref().is_some_and(|r| r.value == value);
                     let keep = chosen == Some(idx)
-                        || (!restricted[node]
+                        || (!restricted
                             && distance.is_some()
                             && distance == chosen_distance
                             && common(idx));
@@ -972,8 +1545,9 @@ fn assign_outputs(
                         value
                     }
                 }
-                _ => mv.old,
+                _ => graph.old[row],
             };
+            graph.new[row] = value;
         }
     }
 }
@@ -989,12 +1563,7 @@ struct Violations {
 impl Violations {
     fn message(&self, graph: &Graph) -> String {
         let sample = |nodes: &BTreeSet<usize>| {
-            nodes
-                .iter()
-                .take(5)
-                .map(|&v| graph.keys[v].as_str())
-                .collect::<Vec<_>>()
-                .join(" / ")
+            nodes.iter().take(5).map(|&v| graph.key(v)).collect::<Vec<_>>().join(" / ")
         };
         format!(
             "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環へ持ち込まれる {} 局面 [{}]、千日手へ逃げられる {} 局面 [{}]",
@@ -1014,7 +1583,7 @@ impl Violations {
 /// - 自分の千日手の値より良い値なのに、相手が王手をやめながら続けられる循環 (千日手) へ持ち込める。
 ///
 /// 値の整合は前提にせず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
-fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -> Violations {
+fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<i32>]) -> Violations {
     let mut violations = Violations {
         nodes: BTreeSet::new(),
         perpetual_check: BTreeSet::new(),
@@ -1028,7 +1597,7 @@ fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -
 
         // 自分の手が全て王手になる循環。強連結成分の状態はどれもその成分内の循環に乗る。
         let (comp, cyclic) = states.components(|s, idx, t| {
-            states.follows(s, idx) && (states.is_opponent(s) || graph.checked[t / 2])
+            states.follows(s, idx) && (states.is_opponent(s) || graph.checked(t / 2))
         });
         let seeds: Vec<bool> = comp.iter().map(|&c| cyclic[c as usize]).collect();
         drop(comp);
@@ -1039,7 +1608,7 @@ fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<NodeResult>]) -
         let (comp, _) = states.components(follows);
         let mut repeats = vec![false; comp.len()];
         for s in (0..states.len()).filter(|&s| states.is_opponent(s)) {
-            if states.children(s).any(|(_, t)| !graph.checked[t / 2] && comp[s] == comp[t]) {
+            if states.children(s).any(|(_, t)| !graph.checked(t / 2) && comp[s] == comp[t]) {
                 repeats[comp[s] as usize] = true;
             }
         }
@@ -1063,44 +1632,39 @@ struct CertifyStates<'a> {
     /// 自分の手番の状態の偶奇。
     me: usize,
     values: Vec<i32>,
-    /// 局面 `v` へ入る辺 `(親局面, 親の手番号)` は `reverse[reverse_start[v]..reverse_start[v + 1]]`。
-    reverse_start: Vec<usize>,
+    /// 局面 `v` へ入る辺 `(親局面, 親の局面内の行番号)` は `reverse[reverse_start[v]..reverse_start[v + 1]]`。
+    reverse_start: Vec<u32>,
     reverse: Vec<(u32, u32)>,
     /// 保存されている向きの局面から指して届く状態。反転キーで合流した向きはここに含まれるものだけが実在する。
     real: Vec<bool>,
     /// 反転キーで合流した向きで解いた値 (手番の側から見た値)。
-    mirrored: Vec<Option<i32>>,
+    mirrored: &'a [Option<i32>],
 }
 
 impl<'a> CertifyStates<'a> {
-    fn new(
-        graph: &'a Graph,
-        params: BestParams,
-        mirrored: &[Option<NodeResult>],
-        black: bool,
-    ) -> Self {
-        let values = graph
-            .moves
-            .iter()
-            .enumerate()
-            .map(|(v, moves)| {
-                moves
-                    .iter()
-                    .filter(|mv| params.counts(mv))
-                    .map(|mv| mv.new)
+    fn new(graph: &'a Graph, params: BestParams, mirrored: &'a [Option<i32>], black: bool) -> Self {
+        let n = graph.len();
+        let values = (0..n)
+            .map(|v| {
+                graph
+                    .rows(v)
+                    .filter(|&row| params.counts(graph, row))
+                    .map(|row| graph.new[row])
                     .max()
                     .unwrap_or(params.draws.of(graph.black(v)))
             })
             .collect();
         let edges = || {
-            graph.moves.iter().enumerate().flat_map(move |(node, moves)| {
-                moves.iter().enumerate().filter_map(move |(idx, mv)| {
-                    mv.edge.filter(|_| params.counts(mv)).map(|edge| (node, idx, edge.to))
+            (0..n).flat_map(move |node| {
+                graph.rows(node).enumerate().filter_map(move |(idx, row)| {
+                    graph
+                        .edge_to(row)
+                        .filter(|_| params.counts(graph, row))
+                        .map(|to| (node, idx, to))
                 })
             })
         };
-        let n = graph.keys.len();
-        let mut reverse_start = vec![0; n + 1];
+        let mut reverse_start = vec![0u32; n + 1];
         for (_, _, to) in edges() {
             reverse_start[to + 1] += 1;
         }
@@ -1108,11 +1672,12 @@ impl<'a> CertifyStates<'a> {
             reverse_start[v + 1] += reverse_start[v];
         }
         let mut next = reverse_start.clone();
-        let mut reverse = vec![(0, 0); reverse_start[n]];
+        let mut reverse = vec![(0, 0); reverse_start[n] as usize];
         for (node, idx, to) in edges() {
-            reverse[next[to]] = (node as u32, idx as u32);
+            reverse[next[to] as usize] = (node as u32, idx as u32);
             next[to] += 1;
         }
+        drop(next);
         let mut states = Self {
             graph,
             params,
@@ -1121,9 +1686,9 @@ impl<'a> CertifyStates<'a> {
             reverse_start,
             reverse,
             real: vec![false; 2 * n],
-            mirrored: mirrored.iter().map(|m| m.as_ref().map(|m| m.value)).collect(),
+            mirrored,
         };
-        let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + usize::from(!graph.black(v))).collect();
+        let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + graph.color(v)).collect();
         for &s in &stack {
             states.real[s] = true;
         }
@@ -1140,7 +1705,7 @@ impl<'a> CertifyStates<'a> {
     }
 
     fn len(&self) -> usize {
-        self.graph.keys.len() * 2
+        self.graph.len() * 2
     }
 
     fn is_opponent(&self, s: usize) -> bool {
@@ -1152,7 +1717,7 @@ impl<'a> CertifyStates<'a> {
     /// 書き出す最大値の行がその値を保つことは [`flip_conflicts`] で確かめてある。
     fn own(&self, s: usize) -> i32 {
         let v = s / 2;
-        let stored = s % 2 == usize::from(!self.graph.black(v));
+        let stored = s % 2 == self.graph.color(v);
         let value = if stored {
             self.values[v]
         } else {
@@ -1164,20 +1729,26 @@ impl<'a> CertifyStates<'a> {
     /// 自分は書き出し値が最大の手だけを、相手は全手を指しうる。
     /// 相手の探索ラベルが悪くても、book どおりに指す側は book 外の咎める手を指さないので相手の選択肢に残す。
     fn follows(&self, s: usize, idx: usize) -> bool {
-        self.is_opponent(s) || self.graph.moves[s / 2][idx].new == self.values[s / 2]
+        let v = s / 2;
+        self.is_opponent(s)
+            || self.graph.new[self.graph.row_start[v] as usize + idx] == self.values[v]
     }
 
     fn children(&self, s: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         let flip = 1 - s % 2;
-        self.graph.moves[s / 2].iter().enumerate().filter_map(move |(idx, mv)| {
-            mv.edge.filter(|_| self.params.counts(mv)).map(|edge| (idx, edge.to * 2 + flip))
+        let graph = self.graph;
+        graph.rows(s / 2).enumerate().filter_map(move |(idx, row)| {
+            graph
+                .edge_to(row)
+                .filter(|_| self.params.counts(graph, row))
+                .map(|to| (idx, to * 2 + flip))
         })
     }
 
     fn parents(&self, t: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         let flip = 1 - t % 2;
         let v = t / 2;
-        self.reverse[self.reverse_start[v]..self.reverse_start[v + 1]]
+        self.reverse[self.reverse_start[v] as usize..self.reverse_start[v + 1] as usize]
             .iter()
             .map(move |&(node, idx)| (node as usize * 2 + flip, idx as usize))
     }
@@ -1266,170 +1837,234 @@ impl<'a> CertifyStates<'a> {
     }
 }
 
-fn build_scc_graph(adjacency: &[Vec<usize>]) -> SccGraph {
-    let n = adjacency.len();
-    let mut visited = vec![false; n];
-    let mut order = Vec::with_capacity(n);
-    for start in 0..n {
-        if visited[start] {
-            continue;
+/// book 内の子局面への辺の強連結成分。
+struct Components {
+    comp_of: Vec<u32>,
+    nontrivial: Vec<bool>,
+    /// 成分から縮約したグラフの末端までの最長の辺の数。
+    depth: Vec<u32>,
+    max_size: usize,
+}
+
+impl Components {
+    /// Kosaraju 法で求める。成分は縮約したグラフの位相順に番号が付き、成分をまたぐ辺は番号の大きい成分へ向かう。
+    fn of(graph: &Graph) -> Self {
+        let n = graph.len();
+        let mut start = vec![0u32; n + 1];
+        let mut children = Vec::new();
+        let mut buf = Vec::new();
+        for v in 0..n {
+            buf.clear();
+            buf.extend(graph.rows(v).filter_map(|row| graph.edge_to(row).map(|t| t as u32)));
+            buf.sort_unstable();
+            buf.dedup();
+            children.extend_from_slice(&buf);
+            start[v + 1] = children.len() as u32;
         }
-        let mut stack = vec![(start, 0usize)];
-        visited[start] = true;
-        while let Some((node, next_idx)) = stack.pop() {
-            if next_idx < adjacency[node].len() {
-                stack.push((node, next_idx + 1));
-                let child = adjacency[node][next_idx];
-                if !visited[child] {
-                    visited[child] = true;
-                    stack.push((child, 0));
+        let children_of = |v: usize| &children[start[v] as usize..start[v + 1] as usize];
+
+        let mut visited = vec![false; n];
+        let mut order = Vec::with_capacity(n);
+        let mut stack: Vec<(u32, u32)> = Vec::new();
+        for root in 0..n {
+            if visited[root] {
+                continue;
+            }
+            visited[root] = true;
+            stack.push((root as u32, 0));
+            while let Some(top) = stack.last_mut() {
+                let (v, k) = (top.0 as usize, top.1 as usize);
+                match children_of(v).get(k) {
+                    Some(&child) => {
+                        top.1 += 1;
+                        if !visited[child as usize] {
+                            visited[child as usize] = true;
+                            stack.push((child, 0));
+                        }
+                    }
+                    None => {
+                        order.push(v as u32);
+                        stack.pop();
+                    }
                 }
-            } else {
-                order.push(node);
             }
         }
-    }
+        drop(visited);
 
-    let mut reverse = vec![Vec::new(); n];
-    for (node, children) in adjacency.iter().enumerate() {
-        for &child in children {
-            reverse[child].push(node);
+        let mut reverse_start = vec![0u32; n + 1];
+        for &child in &children {
+            reverse_start[child as usize + 1] += 1;
         }
-    }
-    for children in &mut reverse {
-        children.sort_unstable();
-    }
+        for v in 0..n {
+            reverse_start[v + 1] += reverse_start[v];
+        }
+        let mut next = reverse_start.clone();
+        let mut reverse = vec![0u32; children.len()];
+        for v in 0..n {
+            for &child in children_of(v) {
+                reverse[next[child as usize] as usize] = v as u32;
+                next[child as usize] += 1;
+            }
+        }
+        drop(next);
 
-    let mut comp_of = vec![usize::MAX; n];
-    let mut comps = Vec::<Vec<usize>>::new();
-    for &start in order.iter().rev() {
-        if comp_of[start] != usize::MAX {
-            continue;
+        let mut comp_of = vec![NONE; n];
+        let mut sizes = Vec::new();
+        let mut members = Vec::new();
+        for &root in order.iter().rev() {
+            if comp_of[root as usize] != NONE {
+                continue;
+            }
+            let id = sizes.len() as u32;
+            comp_of[root as usize] = id;
+            members.push(root);
+            let mut size = 0usize;
+            while let Some(w) = members.pop() {
+                size += 1;
+                let w = w as usize;
+                for &parent in &reverse[reverse_start[w] as usize..reverse_start[w + 1] as usize] {
+                    if comp_of[parent as usize] == NONE {
+                        comp_of[parent as usize] = id;
+                        members.push(parent);
+                    }
+                }
+            }
+            sizes.push(size);
         }
-        let comp_idx = comps.len();
-        let mut nodes = Vec::new();
-        let mut stack = vec![start];
-        comp_of[start] = comp_idx;
-        while let Some(node) = stack.pop() {
-            nodes.push(node);
-            for &parent in &reverse[node] {
-                if comp_of[parent] == usize::MAX {
-                    comp_of[parent] = comp_idx;
-                    stack.push(parent);
+        drop((order, reverse, reverse_start));
+
+        let comps = sizes.len();
+        let mut nontrivial: Vec<bool> = sizes.iter().map(|&size| size > 1).collect();
+        let mut by_comp_start = vec![0u32; comps + 1];
+        for &c in &comp_of {
+            by_comp_start[c as usize + 1] += 1;
+        }
+        for c in 0..comps {
+            by_comp_start[c + 1] += by_comp_start[c];
+        }
+        let mut next = by_comp_start.clone();
+        let mut by_comp = vec![0u32; n];
+        for (v, &c) in comp_of.iter().enumerate() {
+            by_comp[next[c as usize] as usize] = v as u32;
+            next[c as usize] += 1;
+        }
+        drop(next);
+        let mut depth = vec![0u32; comps];
+        for c in (0..comps).rev() {
+            for &v in &by_comp[by_comp_start[c] as usize..by_comp_start[c + 1] as usize] {
+                for &child in children_of(v as usize) {
+                    let to = comp_of[child as usize] as usize;
+                    if to == c {
+                        nontrivial[c] = true;
+                    } else {
+                        depth[c] = depth[c].max(depth[to] + 1);
+                    }
                 }
             }
         }
-        nodes.sort_unstable();
-        comps.push(nodes);
-    }
-
-    let mut edge_sets = vec![BTreeSet::new(); comps.len()];
-    let mut self_loop = vec![false; comps.len()];
-    for (node, children) in adjacency.iter().enumerate() {
-        let from = comp_of[node];
-        for &child in children {
-            let to = comp_of[child];
-            if from == to {
-                self_loop[from] = true;
-            } else {
-                edge_sets[from].insert(to);
-            }
+        Self {
+            comp_of,
+            nontrivial,
+            depth,
+            max_size: sizes.iter().copied().max().unwrap_or(0),
         }
-    }
-    let edges: Vec<Vec<usize>> =
-        edge_sets.into_iter().map(|set| set.into_iter().collect()).collect();
-    let nontrivial: Vec<bool> = comps
-        .iter()
-        .enumerate()
-        .map(|(idx, nodes)| nodes.len() > 1 || self_loop[idx])
-        .collect();
-    let topo = topo_order(&edges);
-
-    SccGraph {
-        comp_of,
-        comps,
-        edges,
-        topo,
-        nontrivial,
     }
 }
 
-fn topo_order(edges: &[Vec<usize>]) -> Vec<usize> {
-    let mut indegree = vec![0usize; edges.len()];
-    for children in edges {
-        for &child in children {
-            indegree[child] += 1;
-        }
-    }
-    let mut queue: VecDeque<usize> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &deg)| (deg == 0).then_some(idx))
-        .collect();
-    let mut order = Vec::with_capacity(edges.len());
-    while let Some(node) = queue.pop_front() {
-        order.push(node);
-        for &child in &edges[node] {
-            indegree[child] -= 1;
-            if indegree[child] == 0 {
-                queue.push_back(child);
-            }
-        }
-    }
-    order
+/// 書き出す 1 行。指し手欄と予想手欄は局面ごとの文字列の範囲。
+struct OutRow {
+    move_usi: Range<usize>,
+    ponder_usi: Range<usize>,
+    depth: i32,
+    count: u64,
 }
 
 /// 逆伝播後の値で `.db` を書き出す。局面は key 昇順、手は count 降順 → USI 昇順。
-pub fn write_backprop_book(book: &BookDb, graph: &Graph, out: &Path) -> Result<()> {
-    let file =
-        File::create(out).with_context(|| format!("出力を作成できません: {}", out.display()))?;
+/// 指し手欄・予想手欄・depth・count は入力を読み直して書く。入力と同じパスにも書けるよう、一時ファイルから置き換える。
+pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
+    let source = graph
+        .source
+        .as_deref()
+        .ok_or_else(|| anyhow!("内部エラー: 入力の定跡がありません"))?;
+    let partial = partial_path(out);
+    let file = File::create(&partial)
+        .with_context(|| format!("出力を作成できません: {}", out.display()))?;
     let mut writer = BufWriter::new(file);
     writer.write_all(BOOK_HEADER.as_bytes())?;
     writer.write_all(b"\n")?;
-    let value_by_key: BTreeMap<&str, &Vec<MoveValue>> = graph
-        .keys
-        .iter()
-        .zip(graph.moves.iter())
-        .map(|(key, values)| (key.as_str(), values))
-        .collect();
-    for (key, entry) in &book.entries {
-        writeln!(writer, "sfen {}", entry.sfen)?;
-        let values = value_by_key
-            .get(key.as_str())
-            .ok_or_else(|| anyhow!("内部エラー: move values がありません: {key}"))?;
-        let node = graph.keys.binary_search(key).map_err(|_| anyhow!("局面がありません: {key}"))?;
-        let rows: Vec<_> = entry.moves.iter().chain(&graph.added_moves[node]).collect();
-        let mut order: Vec<usize> = (0..rows.len()).collect();
+    let mut reader = LineReader::open(source)?;
+    let mut text = String::new();
+    let mut rows = Vec::new();
+    let mut order = Vec::new();
+    let mut added = graph.added.iter();
+    for node in 0..graph.len() {
+        writeln!(writer, "sfen {}", graph.sfen(node))?;
+        text.clear();
+        rows.clear();
+        for_each_row(&mut reader, graph.blocks(node), |line| {
+            let fields = parse_row(line);
+            rows.push(OutRow {
+                move_usi: push_field(&mut text, fields.move_usi),
+                ponder_usi: push_field(&mut text, fields.ponder_usi),
+                depth: fields.depth,
+                count: fields.count,
+            });
+            Ok(())
+        })?;
+        let range = graph.rows(node);
+        for row in range.clone().skip(rows.len()) {
+            if !graph.added(row) {
+                bail!("{CHANGED}: {}", source.display());
+            }
+            let mv = added.next().ok_or_else(|| anyhow!("内部エラー: 補完した手がありません"))?;
+            // 補完手には探索ラベルがない。depth=1 を出自の固定マーカーとして用い、
+            // 未探索の 0/0 と区別する（伝播距離や探索した深さを表すものではない）。
+            rows.push(OutRow {
+                move_usi: push_field(&mut text, Some(&Move::from_u16(*mv).to_usi())),
+                ponder_usi: push_field(&mut text, None),
+                depth: 1,
+                count: 0,
+            });
+        }
+        if rows.len() != range.len() {
+            bail!("{CHANGED}: {}", source.display());
+        }
+        order.clear();
+        order.extend(0..rows.len());
         order.sort_by(|&a, &b| {
             rows[b]
                 .count
                 .cmp(&rows[a].count)
-                .then_with(|| move_sort_key(rows[a]).cmp(move_sort_key(rows[b])))
+                .then_with(|| text[rows[a].move_usi.clone()].cmp(&text[rows[b].move_usi.clone()]))
         });
-        for idx in order {
-            let book_move = rows[idx];
+        for &idx in &order {
+            let row = &rows[idx];
             writeln!(
                 writer,
                 "{} {} {} {} {}",
-                book_move.move_usi.as_deref().unwrap_or("none"),
-                book_move.ponder_usi.as_deref().unwrap_or("none"),
-                values[idx].new,
-                book_move.depth,
-                book_move.count
+                &text[row.move_usi.clone()],
+                &text[row.ponder_usi.clone()],
+                graph.new[range.start + idx],
+                row.depth,
+                row.count
             )?;
         }
     }
-    writer.flush()?;
+    drop(reader);
+    drop(writer.into_inner().map_err(|e| e.into_error())?);
+    std::fs::rename(&partial, out)
+        .with_context(|| format!("出力を置き換えられません: {}", out.display()))?;
     Ok(())
 }
 
-fn move_sort_key(book_move: &BookMove) -> &str {
-    book_move.move_usi.as_deref().unwrap_or("none")
+fn push_field(text: &mut String, value: Option<&str>) -> Range<usize> {
+    let start = text.len();
+    text.push_str(value.unwrap_or("none"));
+    start..text.len()
 }
 
 /// Markdown レポートを書き出す。
 pub fn write_report(
-    book: &BookDb,
     graph: &Graph,
     stats: &PropagationStats,
     path: &Path,
@@ -1439,8 +2074,8 @@ pub fn write_report(
     let file = File::create(path)
         .with_context(|| format!("report を作成できません: {}", path.display()))?;
     let mut writer = BufWriter::new(file);
-    let total_moves: usize = graph.moves.iter().map(Vec::len).sum();
-    let total_edges: usize = graph.moves.iter().flatten().filter(|mv| mv.edge.is_some()).count();
+    let total_moves = graph.total_rows();
+    let total_edges = graph.to.iter().filter(|&&to| to != NONE).count();
     let direct_edges = total_edges - graph.flip_edges;
 
     writeln!(writer, "# book_backprop report")?;
@@ -1449,7 +2084,7 @@ pub fn write_report(
     writeln!(writer)?;
     writeln!(writer, "- merge mode: {}", merge.as_str())?;
     writeln!(writer, "- draw value: black {} / white {}", draws.black, draws.white)?;
-    writeln!(writer, "- nodes: {}", book.entries.len())?;
+    writeln!(writer, "- nodes: {}", graph.len())?;
     writeln!(writer, "- moves: {total_moves}")?;
     writeln!(writer, "- updated moves: {}", stats.updated_moves)?;
     writeln!(writer, "- in-book edges: {total_edges}")?;
@@ -1465,39 +2100,43 @@ pub fn write_report(
     Ok(())
 }
 
-fn write_delta_report(writer: &mut dyn Write, deltas: &[i32]) -> Result<()> {
-    let mut sorted = deltas.to_vec();
-    sorted.sort_unstable();
+fn write_delta_report(writer: &mut dyn Write, deltas: &BTreeMap<i32, usize>) -> Result<()> {
+    let total: usize = deltas.values().sum();
     writeln!(writer, "## Value deltas")?;
     writeln!(writer)?;
-    if sorted.is_empty() {
+    if total == 0 {
         writeln!(writer, "- changed moves: 0")?;
         writeln!(writer)?;
         return Ok(());
     }
-    writeln!(writer, "- changed moves: {}", sorted.len())?;
-    writeln!(writer, "- p50: {}", percentile(&sorted, 50))?;
-    writeln!(writer, "- p90: {}", percentile(&sorted, 90))?;
-    writeln!(writer, "- max: {}", sorted.last().copied().unwrap_or(0))?;
+    writeln!(writer, "- changed moves: {total}")?;
+    writeln!(writer, "- p50: {}", percentile(deltas, total, 50))?;
+    writeln!(writer, "- p90: {}", percentile(deltas, total, 90))?;
+    writeln!(writer, "- max: {}", deltas.keys().next_back().copied().unwrap_or(0))?;
     writeln!(writer)?;
     writeln!(writer, "| abs delta bucket | moves |")?;
     writeln!(writer, "|---|---:|")?;
-    for (label, count) in delta_buckets(&sorted) {
+    for (label, count) in delta_buckets(deltas) {
         writeln!(writer, "| {label} | {count} |")?;
     }
     writeln!(writer)?;
     Ok(())
 }
 
-fn percentile(sorted: &[i32], pct: usize) -> i32 {
-    if sorted.is_empty() {
-        return 0;
+/// 昇順に並べた `total` 個の値の `pct` パーセンタイル (並べた位置を切り上げる)。
+fn percentile(counts: &BTreeMap<i32, usize>, total: usize, pct: usize) -> i32 {
+    let idx = ((total - 1) * pct).div_ceil(100);
+    let mut seen = 0;
+    for (&value, &count) in counts {
+        seen += count;
+        if idx < seen {
+            return value;
+        }
     }
-    let idx = ((sorted.len() - 1) * pct).div_ceil(100);
-    sorted[idx]
+    0
 }
 
-fn delta_buckets(sorted: &[i32]) -> Vec<(&'static str, usize)> {
+fn delta_buckets(counts: &BTreeMap<i32, usize>) -> Vec<(&'static str, usize)> {
     let ranges = [
         ("1-49", 1, 49),
         ("50-99", 50, 99),
@@ -1507,23 +2146,16 @@ fn delta_buckets(sorted: &[i32]) -> Vec<(&'static str, usize)> {
     ];
     ranges
         .into_iter()
-        .map(|(label, lo, hi)| {
-            let count = sorted.iter().filter(|&&v| lo <= v && v <= hi).count();
-            (label, count)
-        })
+        .map(|(label, lo, hi)| (label, counts.range(lo..=hi).map(|(_, &count)| count).sum()))
         .collect()
 }
 
-fn write_depth_report(writer: &mut dyn Write, depths: &[usize]) -> Result<()> {
-    let mut counts = BTreeMap::<usize, usize>::new();
-    for &depth in depths {
-        *counts.entry(depth).or_default() += 1;
-    }
+fn write_depth_report(writer: &mut dyn Write, depths: &BTreeMap<usize, usize>) -> Result<()> {
     writeln!(writer, "## Propagation depth")?;
     writeln!(writer)?;
     writeln!(writer, "| depth | nodes |")?;
     writeln!(writer, "|---:|---:|")?;
-    for (depth, count) in counts {
+    for (depth, count) in depths {
         writeln!(writer, "| {depth} | {count} |")?;
     }
     writeln!(writer)?;
@@ -1551,7 +2183,7 @@ fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<(
     writeln!(writer)?;
     writeln!(writer, "| rank | old best | new best | sfen |")?;
     writeln!(writer, "|---:|---:|---:|---|")?;
-    for (idx, change) in changes.iter().take(20).enumerate() {
+    for (idx, change) in changes.iter().take(TOP_CHANGES).enumerate() {
         writeln!(
             writer,
             "| {} | {} | {} | `{}` |",
@@ -1568,6 +2200,7 @@ fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book_db::BookDb;
 
     #[test]
     fn review_quiet_cycle_with_check_branches_stays_draw() {
@@ -1593,18 +2226,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("in.db");
         std::fs::write(&path, input).unwrap();
-        let book = read_book_db(&path).unwrap();
-        let mut graph = build_graph(&book).unwrap();
+        let book = BookDb::read(&path).unwrap();
+        let mut graph = read_graph(&path, BackpropOptions::default()).unwrap();
         assert_eq!(graph.illegal_moves, 0);
-        propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
+        propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
         for (key, mv) in quiet {
-            let node = graph.keys.iter().position(|k| k == &key).unwrap();
+            let node = graph.find(&key).unwrap();
             let index = book.entries[&key]
                 .moves
                 .iter()
                 .position(|m| m.move_usi.as_deref() == Some(mv))
                 .unwrap();
-            assert_eq!(graph.moves[node][index].new, 0, "{mv}: {key}");
+            assert_eq!(values(&graph)[node][index], 0, "{mv}: {key}");
         }
     }
 
@@ -1623,85 +2256,53 @@ mod tests {
         let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
         let checked: Vec<_> = (0..62).map(|n| n % 3 != 0).collect();
         let black: Vec<_> = (0..62).map(|n| n % 3 == 0).collect();
-        let (book, mut graph) = rows_graph(&refs, &checked, &black);
-        propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
+        let mut graph = rows_graph(&refs, &checked, &black);
+        propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap();
         let mate = Value::MATE.raw();
-        for (n, moves) in graph.moves.iter().enumerate() {
+        for (n, values) in values(&graph).into_iter().enumerate() {
             let expected = if n % 3 == 0 { -mate } else { mate };
-            assert!(moves.iter().all(|mv| mv.new == expected), "{n}");
+            assert!(values.iter().all(|&value| value == expected), "{n}");
         }
     }
 
     #[test]
     fn review_tie_correction_stays_inside_mate_boundary() {
         let graph = solve_rows(&[&[(-32000, None), (0, Some(1))], &[(32000, None)]]).unwrap();
-        assert_eq!(graph.moves[0][0].new, -32000);
-        assert_eq!(graph.moves[0][1].new, -32000);
+        assert_eq!(values(&graph)[0], [-32000, -32000]);
     }
 
     /// 行 `(値, 子)` の局面を並べたグラフ。局面 key は `<番号> <手番>` で、`black[i]` が先手番。
-    fn rows_graph(
-        rows: &[&[(i32, Option<usize>)]],
-        checked: &[bool],
-        black: &[bool],
-    ) -> (BookDb, Graph) {
-        let keys: Vec<_> = (0..rows.len())
-            .map(|i| format!("{i} {}", if black[i] { "b" } else { "w" }))
-            .collect();
-        let book = BookDb {
-            entries: keys
-                .iter()
-                .zip(rows)
-                .map(|(key, rows)| {
-                    (
-                        key.clone(),
-                        PositionEntry {
-                            sfen: key.clone(),
-                            moves: rows
-                                .iter()
-                                .map(|&(value, _)| BookMove {
-                                    move_usi: None,
-                                    ponder_usi: None,
-                                    value,
-                                    depth: 10,
-                                    count: 1,
-                                })
-                                .collect(),
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let graph = Graph {
-            keys,
-            moves: rows
-                .iter()
-                .map(|rows| {
-                    rows.iter()
-                        .map(|&(value, child)| MoveValue {
-                            old: value,
-                            new: value,
-                            usable: true,
-                            preserve: false,
-                            edge: child.map(|to| Edge {
-                                to,
-                                via_flip: false,
-                            }),
-                        })
-                        .collect()
-                })
-                .collect(),
-            adjacency: rows
-                .iter()
-                .map(|rows| rows.iter().filter_map(|&(_, child)| child).collect())
-                .collect(),
+    fn rows_graph(rows: &[&[(i32, Option<usize>)]], checked: &[bool], black: &[bool]) -> Graph {
+        let mut sfens = Texts::default();
+        let mut node_flags = Vec::new();
+        let mut row_start = vec![0];
+        let (mut old, mut to) = (Vec::new(), Vec::new());
+        for (i, rows) in rows.iter().enumerate() {
+            sfens.push(&format!("{i} {}", if black[i] { "b" } else { "w" })).unwrap();
+            let side = if black[i] { NODE_BLACK } else { 0 };
+            node_flags.push(side | if checked[i] { NODE_CHECKED } else { 0 });
+            for &(value, child) in rows.iter() {
+                old.push(value);
+                to.push(child.map_or(NONE, |child| child as u32));
+            }
+            row_start.push(old.len() as u32);
+        }
+        Graph {
+            source: None,
+            options: BackpropOptions::default(),
+            sfens,
+            node_flags,
+            row_start,
+            block_start: vec![0; rows.len() + 1],
+            blocks: Vec::new(),
+            new: old.clone(),
+            row_flags: vec![ROW_USABLE; old.len()],
+            old,
+            to,
+            added: Vec::new(),
             flip_edges: 0,
             illegal_moves: 0,
-            checked: checked.to_vec(),
-            preserved: vec![false; rows.len()],
-            added_moves: vec![vec![]; rows.len()],
-        };
-        (book, graph)
+        }
     }
 
     /// 偶数番が先手番、奇数番が後手番の局面を並べて逆伝播する。
@@ -1711,8 +2312,8 @@ mod tests {
         merge: MergeMode,
     ) -> Result<Graph> {
         let black: Vec<_> = (0..rows.len()).map(|i| i % 2 == 0).collect();
-        let (book, mut graph) = rows_graph(rows, &vec![false; rows.len()], &black);
-        propagate_values(&book, &mut graph, draws, merge)?;
+        let mut graph = rows_graph(rows, &vec![false; rows.len()], &black);
+        propagate_values(&mut graph, draws, merge)?;
         Ok(graph)
     }
 
@@ -1721,11 +2322,7 @@ mod tests {
     }
 
     fn values(graph: &Graph) -> Vec<Vec<i32>> {
-        graph
-            .moves
-            .iter()
-            .map(|moves| moves.iter().map(|mv| mv.new).collect())
-            .collect()
+        (0..graph.len()).map(|v| graph.moves(v).map(|mv| mv.new).collect()).collect()
     }
 
     /// 書き出し値をそのまま与えたグラフに [`certify`] だけを適用する。偶数番が先手番。
@@ -1735,7 +2332,7 @@ mod tests {
         draws: DrawValues,
     ) -> Result<()> {
         let black: Vec<_> = (0..rows.len()).map(|i| i % 2 == 0).collect();
-        let (_, graph) = rows_graph(rows, checked, &black);
+        let graph = rows_graph(rows, checked, &black);
         let violations = certify(
             &graph,
             BestParams {
@@ -1850,7 +2447,7 @@ mod tests {
     #[test]
     fn unsafe_tie_is_restricted_to_the_guaranteed_move() {
         // 同じ手数と見なした同値手が千日手の循環に入るなら、保証手 (葉) だけを残して循環手を -1 する。
-        let (_, mut graph) = rows_graph(
+        let mut graph = rows_graph(
             &[&[(50, None), (0, Some(1))], &[(0, Some(0))]],
             &[false; 2],
             &[true, false],
@@ -1874,13 +2471,18 @@ mod tests {
             merge: MergeMode::Replace,
             skip_unusable_moves: false,
         };
-        assert_eq!(write_certified(&mut graph, params, &results, &[None, None]).unwrap(), 1);
+        let results_of = |results: &[Option<NodeResult>; 2]| {
+            let results = results.clone();
+            move |_: &Graph, v: usize| results[v].clone()
+        };
+        let none = |_: &Graph, _: usize| None;
+        assert_eq!(write_certified(&mut graph, params, &results_of(&results), &none).unwrap(), 1);
         assert_eq!(values(&graph), [vec![50, 49], vec![-50]]);
         // 保証手だけにしても破られる値はエラーにする。
         let mut broken = results.clone();
         broken[0].as_mut().unwrap().guaranteed = Some(1);
         broken[0].as_mut().unwrap().preferred = Some(1);
-        assert!(write_certified(&mut graph, params, &broken, &[None, None]).is_err());
+        assert!(write_certified(&mut graph, params, &results_of(&broken), &none).is_err());
     }
 
     #[test]
@@ -1896,16 +2498,16 @@ mod tests {
             &[(0, Some(2))],
         ];
         let black = [false, false, true, false, true, false];
-        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
+        let mut graph = rows_graph(&rows, &[false; 6], &black);
         let draws = DrawValues {
             black: -70,
             white: 0,
         };
-        let error = propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap_err();
+        let error = propagate_values(&mut graph, draws, MergeMode::Replace).unwrap_err();
         assert!(error.to_string().contains("反転キーで合流した"), "{error}");
         // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
-        let (book, mut graph) = rows_graph(&rows, &[false; 6], &black);
-        propagate_values(&book, &mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
+        let mut graph = rows_graph(&rows, &[false; 6], &black);
+        propagate_values(&mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
     }
 
     #[test]
@@ -1917,12 +2519,12 @@ mod tests {
             &[(-70, None), (0, Some(2))],
             &[(0, Some(1))],
         ];
-        let (book, mut graph) = rows_graph(&rows, &[false; 3], &[true, true, false]);
+        let mut graph = rows_graph(&rows, &[false; 3], &[true, true, false]);
         let draws = DrawValues {
             black: -70,
             white: 0,
         };
-        propagate_values(&book, &mut graph, draws, MergeMode::Replace).unwrap();
+        propagate_values(&mut graph, draws, MergeMode::Replace).unwrap();
         assert_eq!(values(&graph)[1], [-71, -70]);
     }
 
@@ -1948,11 +2550,12 @@ mod tests {
             pos.set_sfen(sfen).unwrap();
             let mut flipped = Position::new();
             flipped.set_sfen(&rshogi_book::flipped_key(sfen).unwrap()).unwrap();
-            assert!(PositionKey::of(&pos, true) == PositionKey::of(&flipped, false), "{sfen}");
-            assert!(PositionKey::of(&pos, false) != PositionKey::of(&flipped, false), "{sfen}");
+            let [direct, flip] = PositionKey::pair(&pos);
+            assert!(flip == PositionKey::pair(&flipped)[0], "{sfen}");
+            assert!(direct != PositionKey::pair(&flipped)[0], "{sfen}");
             let mut same = Position::new();
             same.set_sfen(&format!("{} 99", strip_ply(sfen))).unwrap();
-            assert!(PositionKey::of(&pos, false) == PositionKey::of(&same, false), "{sfen}");
+            assert!(direct == PositionKey::pair(&same)[0], "{sfen}");
         }
     }
 
@@ -1972,29 +2575,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("in.db");
         std::fs::write(&path, input).unwrap();
-        let book = read_book_db(&path).unwrap();
-        let graph = build_graph(&book).unwrap();
-        let node = |key: &str| graph.keys.iter().position(|k| k == key).unwrap();
-        assert_eq!(graph.moves[node(strip_ply(parent))][0].edge.unwrap().to, node(&canonical));
-    }
-
-    #[test]
-    fn move_text_keeps_short_and_long_fields() {
-        for text in ["7g7f", "7g7f+", "P*5e", "12345678", "longer-than-eight"] {
-            let move_text = MoveText::new(text);
-            assert_eq!(&*move_text, text);
-            assert_eq!(move_text.to_string(), text);
-            assert_eq!(matches!(move_text, MoveText::Inline(_)), text.len() <= 8);
-        }
+        let graph = read_graph(&path, BackpropOptions::default()).unwrap();
+        let node = |key: &str| graph.find(key).unwrap();
+        let edge = graph.moves(node(strip_ply(parent))).next().unwrap().edge.unwrap();
+        assert_eq!(edge.to, node(&canonical));
     }
 
     #[test]
     fn mutual_continuous_check_is_rejected() {
         let black = [true, false];
-        let (book, mut graph) =
-            rows_graph(&[&[(0, Some(1))], &[(0, Some(0))]], &[true, true], &black);
-        let error = propagate_values(&book, &mut graph, DrawValues::default(), MergeMode::Replace)
-            .unwrap_err();
+        let mut graph = rows_graph(&[&[(0, Some(1))], &[(0, Some(0))]], &[true, true], &black);
+        let error =
+            propagate_values(&mut graph, DrawValues::default(), MergeMode::Replace).unwrap_err();
         assert!(error.to_string().contains("双方が王手をかけ続ける循環"), "{error}");
     }
 
@@ -2012,9 +2604,8 @@ mod tests {
     #[test]
     fn losing_side_cannot_claim_draw_when_winner_can_exit() {
         let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]]).unwrap();
-        assert_eq!(graph.moves[0][0].new, -100);
-        assert_eq!(graph.moves[1][0].new, 99); // 同値の遠回りを避ける。
-        assert_eq!(graph.moves[1][1].new, 100);
+        // 同値の遠回りを避ける。
+        assert_eq!(values(&graph), [vec![-100], vec![99, 100]]);
     }
 
     #[test]
@@ -2026,7 +2617,7 @@ mod tests {
             } else {
                 [value - 1, value]
             };
-            assert_eq!([graph.moves[0][0].new, graph.moves[0][1].new], expected);
+            assert_eq!(values(&graph)[0], expected);
         }
         let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]]).unwrap();
         assert_eq!(values(&graph), [[0], [0]]);
@@ -2065,7 +2656,7 @@ mod tests {
                 let out = dir.path().join("result.db");
                 std::fs::write(&path, &input).unwrap();
                 backprop_file(&path, &out, None, DrawValues::default(), merge).unwrap();
-                for entry in read_book_db(&out).unwrap().entries.values() {
+                for entry in BookDb::read(&out).unwrap().entries.values() {
                     let mut pos = Position::new();
                     pos.set_sfen(&entry.sfen).unwrap();
                     let rule_value = if pos.checkers().is_empty() {
@@ -2172,19 +2763,18 @@ mod tests {
         let in_path = dir.path().join("in.db");
         let out_path = dir.path().join("out.db");
         std::fs::write(&in_path, &input).unwrap();
-        let book = read_book_db(&in_path).unwrap();
         for skip in [false, true] {
             let options = BackpropOptions {
                 skip_unsearched_children: skip,
                 ..BackpropOptions::default()
             };
-            let graph = build_graph_with(&book, options).unwrap();
-            let parent = graph.keys.iter().position(|key| key == strip_ply(START)).unwrap();
+            let graph = read_graph(&in_path, options).unwrap();
+            let parent = graph.find(strip_ply(START)).unwrap();
             let excluded = skip && unsearched;
-            assert_eq!(graph.moves[parent][0].edge.is_none(), excluded);
-            assert_eq!(graph.adjacency[parent].is_empty(), excluded);
+            let first = graph.moves(parent).next().unwrap();
+            assert_eq!(first.edge.is_none(), excluded);
             assert_eq!(graph.flip_edges, usize::from(flip && !excluded));
-            if let Some(edge) = graph.moves[parent][0].edge {
+            if let Some(edge) = first.edge {
                 assert_eq!(edge.via_flip, flip);
             }
             for merge in [MergeMode::Replace, MergeMode::Min] {
@@ -2197,7 +2787,7 @@ mod tests {
                     options,
                 )
                 .unwrap();
-                let output = read_book_db(&out_path).unwrap();
+                let output = BookDb::read(&out_path).unwrap();
                 let value = output.entries[strip_ply(START)].moves[0].value;
                 let expected = if excluded {
                     123
@@ -2277,5 +2867,112 @@ mod tests {
         // 除外した行も値を変えずに書き出す。
         assert!(skipped.contains("5e5d none 0 0 1\n"));
         assert!(skipped.contains("none none 0 0 1\n"));
+    }
+
+    #[test]
+    fn move_fields_are_written_back_as_in_the_input() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        // 7g7fjunk は 7g7f と読めて子局面へ伝播するが、書き出しは入力の欄のまま。
+        let input = format!(
+            "{BOOK_HEADER}
+sfen {START}
+7g7fjunk 3c3dX 0 1 9
+P*5e None 5 2 8
+longer-than-eight resign 7 3 7
+None none 1 4
+sfen {child}
+3c3d none 40 5 1
+"
+        );
+        let output = backprop_text(&input, BackpropOptions::default());
+        for row in [
+            "7g7fjunk 3c3dX -40 1 9
+",
+            "P*5e none 5 2 8
+",
+            "longer-than-eight none 7 3 7
+",
+            "none none 1 4 1
+",
+        ] {
+            assert!(output.contains(row), "{output}");
+        }
+    }
+
+    #[test]
+    fn repeated_keys_are_joined_under_the_minimum_ply_line() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let input = format!(
+            "2g2f none 99 9 9
+{BOOK_HEADER}
+sfen {} 5
+2g2f none 10 3 2
+// comment
+
+sfen {child}
+3c3d none 30 4 1
+sfen {START}
+7g7f none 0 6 2
+",
+            strip_ply(START)
+        );
+        let output = backprop_text(&input, BackpropOptions::default());
+        assert_eq!(
+            output,
+            format!(
+                "{BOOK_HEADER}
+sfen {child}
+3c3d none 30 4 1
+sfen {START}
+2g2f none 10 3 2
+7g7f none -30 6 2
+"
+            )
+        );
+    }
+
+    #[test]
+    fn output_can_replace_the_input_book() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let input = format!(
+            "{BOOK_HEADER}
+sfen {START}
+7g7f none 0 1 1
+sfen {child}
+3c3d none 30 4 1
+"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.db");
+        std::fs::write(&path, &input).unwrap();
+        backprop_file(&path, &path, None, DrawValues::default(), MergeMode::Replace).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            backprop_text(&input, BackpropOptions::default())
+        );
+    }
+
+    #[test]
+    fn canonical_moves_read_like_from_usi() {
+        for sfen in [
+            START,
+            "ln5nl/6gk1/p3ppgp1/P5p1p/1NPp3P1/1P2SPP1P/2+p1P4/3KG2R1/L6NL b RB2SPbgsp 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut legal = MoveList::new();
+            generate_legal_all(&pos, &mut legal);
+            for &mv in legal.iter() {
+                let usi = mv.to_usi();
+                let fast = canonical_move(&usi).unwrap();
+                assert_eq!(fast.raw(), Move::from_usi(&usi).unwrap().raw(), "{usi}");
+                assert_eq!(fast.to_usi(), usi);
+            }
+        }
+        for text in [
+            "7g7f+x", "7g7fjunk", "P*5", "7G7f", "K*5e", "0a1b", "pass", "あa",
+        ] {
+            assert!(canonical_move(text).is_none(), "{text}");
+        }
     }
 }

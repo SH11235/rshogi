@@ -1,17 +1,18 @@
 //! 実 YaneuraOu makebook peta_shock の値を固定した差分テスト。
 //! fixture の生成手順・出典は fixtures/book_backprop_check.md を参照。
 use tools::book_backprop::*;
+use tools::book_db::BookDb;
 
 fn assert_matches_yaneuraou(name: &str, merges: &[MergeMode]) {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let input = fixtures.join(format!("{name}_in.db"));
-    let expected = read_book_db(&fixtures.join(format!("{name}_expected.db"))).unwrap();
-    let original = read_book_db(&input).unwrap();
+    let expected = BookDb::read(&fixtures.join(format!("{name}_expected.db"))).unwrap();
+    let original = BookDb::read(&input).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.db");
     for &merge in merges {
         backprop_file(&input, &output, None, DrawValues::default(), merge).unwrap();
-        let actual = read_book_db(&output).unwrap();
+        let actual = BookDb::read(&output).unwrap();
         assert_eq!(actual.entries.len(), expected.entries.len());
         for (key, entry) in &expected.entries {
             let rows = &actual.entries[key].moves;
