@@ -2,6 +2,7 @@
 
 rshogi-usi バイナリの build 手順と、複数 NNUE architecture binary を運用するための
 `cargo xtask` workflow をまとめる。
+crates.io publish と engine release の公開手順は [RELEASING.md](../RELEASING.md) を参照。
 
 ## 目次
 

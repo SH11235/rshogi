@@ -97,6 +97,7 @@ cargo xtask list-binaries
 ```
 
 詳細は [`docs/build.md`](docs/build.md) を参照。
+保守者向けの crates.io publish・engine tag・GitHub Release の手順は [RELEASING.md](RELEASING.md) を参照。
 
 ## このエンジンを使用したアプリ
 
