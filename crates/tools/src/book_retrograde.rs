@@ -222,7 +222,6 @@ impl<'a, G: Game> Solver<'a, G> {
         for q in 0..2 {
             self.cores[q] = self.cyclic(|v, _, arc| game.owner(v) != q || arc.step != Step::Quiet);
         }
-        // 先手側の結果の配列をそのまま値と保証手の配列にする。
         let (mut values, mut guaranteed) = self.positive(0);
         let (b_value, b_choice) = self.positive(1);
         for v in 0..self.n {

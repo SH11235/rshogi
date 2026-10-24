@@ -169,6 +169,7 @@ impl Graph {
         self.node_flags.len()
     }
 
+    /// 局面が無いか (`sfen` 行の無い入力)。
     pub fn is_empty(&self) -> bool {
         self.node_flags.is_empty()
     }
@@ -557,6 +558,15 @@ impl LineReader {
         Ok(reader)
     }
 
+    /// 読み直しを終えたときにも入力の長さが変わっていないか確かめる。読んでいる間に足された行は
+    /// 局面の区切りの `sfen` 行で止まって読まないことがあるため。
+    fn finish(self, path: &Path, source: &SourceCheck) -> Result<()> {
+        if self.inner.get_ref().metadata()?.len() != source.len {
+            bail!("{CHANGED}: {}", path.display());
+        }
+        Ok(())
+    }
+
     /// 次の行と、その先頭の位置。
     fn next_line(&mut self) -> Result<Option<(u64, &str)>> {
         self.line.clear();
@@ -926,6 +936,7 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
         input.all_depth0.push(depth0);
         input.unexplored.push(unexplored);
     }
+    reader.finish(path, &scan.check)?;
     Ok(input)
 }
 
@@ -2219,6 +2230,7 @@ fn write_rows(graph: &Graph, source: &Path, mut writer: BufWriter<File>) -> Resu
         }
     }
     writer.into_inner().map_err(|e| e.into_error())?;
+    reader.finish(source, &graph.source_check)?;
     Ok(())
 }
 
@@ -3169,5 +3181,18 @@ mod tests {
             assert!(!out.exists());
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn rows_appended_while_reading_are_rejected() {
+        let input = format!("{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.db");
+        std::fs::write(&path, &input).unwrap();
+        let check = scan(&path).unwrap().check;
+        let reader = LineReader::reopen(&path, &check).unwrap();
+        std::fs::write(&path, format!("{input}sfen {START}\n2g2f none 100 1 1\n")).unwrap();
+        let error = reader.finish(&path, &check).unwrap_err();
+        assert!(error.to_string().contains(CHANGED), "{error:#}");
     }
 }
