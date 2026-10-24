@@ -39,7 +39,7 @@ core や workspace 内の各 crate の version を、この番号に一括で揃
 
 [CHANGELOG.md](CHANGELOG.md) に利用者向けの変更と移行手順をまとめます。
 engine release では対象変更を `vX.Y.Z` の節へ整理し、日付を確認します。
-core 単独 publish では core の版・公開対象 commit・移行内容を区別できるようにし、
+core 単独 publish では `Unreleased` 内の core 節に公開予定の版と移行内容を記載し、
 engine 未公開の変更を engine release 済みと扱わないでください。
 
 リポジトリの必須チェックと変更対象の検証を行い、準備 PR をレビュー・CI 通過後に merge します。
@@ -51,6 +51,8 @@ engine 未公開の変更を engine release 済みと扱わないでください
 準備 PR の merge commit の完全な SHA を記録します。core は **version bump PR の merge commit から** publish します。
 engine も release 対象の merge SHA を固定し、以後の main の先端に読み替えません。
 両方を同じ PR で準備した場合は、同じ SHA を使用します。
+remote の最新状態を取得し、その SHA が main に取り込まれていることと、対象 SHA に対する CI の成功を確認します。
+準備 PR の時点では merge SHA は未確定なので、merge 後に公開対象として記録します。
 
 新しい隔離 checkout を作り、その SHA を checkout します。作業中の checkout を reset・clean したり、
 untracked ファイルを移動・削除したりする必要はありません。公開時の操作は以降この隔離 checkout の root で行います。
