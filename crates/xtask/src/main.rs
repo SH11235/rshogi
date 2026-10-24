@@ -6,17 +6,18 @@
 //! を書き出し、後から commit / profile / built_at を追跡できるようにする。
 //! `--features <name>[,<name>...]` で Edition 軸と直交する rshogi-usi の opt-in feature
 //! (`mimalloc` 等) を全 edition に追加でき、その場合は binary 名に `+<feature>` が付く。
+//! `--target` 指定時は target を名前に含む `.wasm` を配置する。
 //! 命名規則は `docs/build.md` を参照。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 /// rshogi-core の Cargo.toml を compile-time に取り込み、preset edition の真値とする。
@@ -52,6 +53,53 @@ struct Cli {
     command: SubCmd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum WasmTarget {
+    #[value(name = "wasm32-wasip1")]
+    Wasi,
+    #[value(name = "wasm32-unknown-unknown")]
+    Unknown,
+}
+
+impl WasmTarget {
+    fn triple(self) -> &'static str {
+        match self {
+            Self::Wasi => "wasm32-wasip1",
+            Self::Unknown => "wasm32-unknown-unknown",
+        }
+    }
+}
+
+const GLOBAL_RUSTFLAGS: [&str; 3] = [
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+];
+
+fn validate_target_settings(
+    target: Option<WasmTarget>,
+    features: &[String],
+    flags: &[Option<OsString>; 3],
+) -> Result<()> {
+    if target.is_none() && features.iter().any(|feature| feature == "wasm-threads") {
+        bail!("--features wasm-threads requires a WASM --target");
+    }
+    if let Some(target) = target {
+        for (name, value) in GLOBAL_RUSTFLAGS.iter().zip(flags) {
+            if value.as_ref().is_some_and(|value| !value.is_empty()) {
+                let key = format!(
+                    "CARGO_TARGET_{}_RUSTFLAGS",
+                    target.triple().replace('-', "_").to_uppercase()
+                );
+                bail!(
+                    "{name} must be unset for WASM builds; move target flags to {key} (host flags must not be applied to WASM)"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum SubCmd {
     /// preset edition を build して `engines/rshogi-usi-<edition>` に配置する。
@@ -68,6 +116,9 @@ enum SubCmd {
         /// cargo profile (`production` / `release` / `dev` / 任意 custom profile)。
         #[arg(long, default_value = DEFAULT_PROFILE)]
         profile: String,
+        /// WASM target。省略時は従来の native build。
+        #[arg(long, value_enum)]
+        target: Option<WasmTarget>,
         /// edition に追加で有効化する rshogi-usi の opt-in feature (`mimalloc` /
         /// `search-stats` 等、Edition 軸と直交するもの)。build 対象の全 edition に付く。
         /// カンマ区切り (`a,b`) または `--features` 複数回いずれも受け付ける。
@@ -91,8 +142,9 @@ fn main() -> Result<()> {
             edition,
             all_presets,
             profile,
+            target,
             features,
-        } => run_build(edition, all_presets, &profile, &features),
+        } => run_build(edition, all_presets, &profile, &features, target),
         SubCmd::ListEditions => run_list_editions(),
         SubCmd::ListBinaries => run_list_binaries(),
     }
@@ -110,9 +162,12 @@ fn run_build(
     all_presets: bool,
     profile: &str,
     feature_args: &[String],
+    target: Option<WasmTarget>,
 ) -> Result<()> {
     let available = preset_editions(CORE_CARGO_TOML)?;
     let extra_features = resolve_extra_features(feature_args, USI_CARGO_TOML, CORE_CARGO_TOML)?;
+    let flags = GLOBAL_RUSTFLAGS.map(std::env::var_os);
+    validate_target_settings(target, &extra_features, &flags)?;
     let editions: Vec<String> = if all_presets {
         if !edition_args.is_empty() {
             bail!("`--edition` and `--all-presets` are mutually exclusive");
@@ -150,6 +205,7 @@ fn run_build(
         workspace_root: &workspace_root,
         target_dir: &target_dir,
         profile,
+        target,
         extra_features: &extra_features,
         commit: commit.as_deref(),
         commit_dirty,
@@ -179,6 +235,7 @@ struct BuildContext<'a> {
     workspace_root: &'a Path,
     target_dir: &'a Path,
     profile: &'a str,
+    target: Option<WasmTarget>,
     /// 検証・ソート・重複除去済みの追加 feature (`resolve_extra_features` の結果)。
     extra_features: &'a [String],
     commit: Option<&'a str>,
@@ -186,31 +243,53 @@ struct BuildContext<'a> {
     rustc_version: Option<&'a str>,
 }
 
+fn build_command(ctx: &BuildContext<'_>, cargo_features: &str) -> Command {
+    let mut command = Command::new(ctx.cargo);
+    command.current_dir(ctx.workspace_root).args([
+        "build",
+        "--package",
+        USI_PACKAGE,
+        "--bin",
+        USI_BINARY,
+        "--profile",
+        ctx.profile,
+        "--no-default-features",
+        "--features",
+        cargo_features,
+    ]);
+    if let Some(target) = ctx.target {
+        command.args(["--target", target.triple()]);
+        // 空の RUSTFLAGS / encoded flags も target 専用設定を隠すため、子環境から除く。
+        for name in GLOBAL_RUSTFLAGS {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
+fn artifact_path(target_dir: &Path, profile: &str, target: Option<WasmTarget>) -> PathBuf {
+    match target {
+        Some(target) => target_dir
+            .join(target.triple())
+            .join(profile_dir(profile))
+            .join("rshogi-usi.wasm"),
+        None => target_dir
+            .join(profile_dir(profile))
+            .join(format!("{USI_BINARY}{}", std::env::consts::EXE_SUFFIX)),
+    }
+}
+
 fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
     let cargo_features = cargo_features_arg(edition_feature, ctx.extra_features);
     println!("==> Building {cargo_features} (profile={})", ctx.profile);
-    let status = Command::new(ctx.cargo)
-        .current_dir(ctx.workspace_root)
-        .args([
-            "build",
-            "--package",
-            USI_PACKAGE,
-            "--bin",
-            USI_BINARY,
-            "--profile",
-            ctx.profile,
-            "--no-default-features",
-            "--features",
-            &cargo_features,
-        ])
+    let status = build_command(ctx, &cargo_features)
         .status()
         .with_context(|| format!("failed to spawn cargo build (cargo={})", ctx.cargo))?;
     if !status.success() {
         bail!("cargo build exited with {status} for features `{cargo_features}`");
     }
 
-    let binary_filename = format!("{USI_BINARY}{}", std::env::consts::EXE_SUFFIX);
-    let src = ctx.target_dir.join(profile_dir(ctx.profile)).join(&binary_filename);
+    let src = artifact_path(ctx.target_dir, ctx.profile, ctx.target);
     if !src.exists() {
         bail!(
             "expected build artifact not found at {} (profile=`{}`, target_dir=`{}`)",
@@ -220,7 +299,7 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
         );
     }
 
-    let dst = engines_path(ctx.workspace_root, edition_feature, ctx.extra_features)?;
+    let dst = engines_path(ctx.workspace_root, edition_feature, ctx.extra_features, ctx.target)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create engines dir: {}", parent.display()))?;
@@ -230,6 +309,7 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
 
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
+        target: ctx.target.map(|target| target.triple().to_string()),
         edition: edition_feature.to_string(),
         features: ctx.extra_features.to_vec(),
         profile: ctx.profile.to_string(),
@@ -367,6 +447,8 @@ fn read_manifest_status(path: &Path) -> ManifestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
     edition: String,
     /// `--features` で追加した feature (ソート・重複除去済み)。追加なしの build では
     /// field ごと省略し、manifest を追加 feature 導入前と同一の内容に保つ。
@@ -385,6 +467,9 @@ struct Manifest {
 fn edition_label(manifest: &Manifest) -> String {
     let mut label = manifest.edition.clone();
     push_extra_features(&mut label, &manifest.features);
+    if let Some(target) = &manifest.target {
+        label.push_str(&format!(" [{target}]"));
+    }
     label
 }
 
@@ -564,20 +649,24 @@ fn push_extra_features(target: &mut String, extra_features: &[String]) {
     }
 }
 
-/// `engines/rshogi-usi-<edition slug>[+<feature>...]<EXE_SUFFIX>` を組み立てる。
 /// `extra_features` は `resolve_extra_features` でソート・重複除去済みのものを渡す
 /// (同じ構成が指定順によらず同じ binary 名になる)。
 fn engines_path(
     workspace_root: &Path,
     edition_feature: &str,
     extra_features: &[String],
+    target: Option<WasmTarget>,
 ) -> Result<PathBuf> {
     let slug = edition_feature
         .strip_prefix(EDITION_PREFIX)
         .with_context(|| format!("edition feature `{edition_feature}` missing prefix"))?;
     let mut name = format!("{USI_BINARY}-{slug}");
     push_extra_features(&mut name, extra_features);
-    name.push_str(std::env::consts::EXE_SUFFIX);
+    if let Some(target) = target {
+        name.push_str(&format!("--{}.wasm", target.triple()));
+    } else {
+        name.push_str(std::env::consts::EXE_SUFFIX);
+    }
     Ok(workspace_root.join("engines").join(name))
 }
 
@@ -758,6 +847,137 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_accepts_only_supported_wasm_targets() {
+        for (name, expected) in [
+            ("wasm32-wasip1", WasmTarget::Wasi),
+            ("wasm32-unknown-unknown", WasmTarget::Unknown),
+        ] {
+            let cli =
+                Cli::try_parse_from(["xtask", "build", "--edition", "universal", "--target", name])
+                    .unwrap();
+            let SubCmd::Build { target, .. } = cli.command else {
+                panic!("expected build")
+            };
+            assert_eq!(target, Some(expected));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "xtask",
+                "build",
+                "--edition",
+                "universal",
+                "--target",
+                "aarch64-unknown-linux-gnu"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn target_flags_are_rejected_without_mutating_the_environment() {
+        let empty = [None, Some(OsString::new()), None];
+        let threaded = vec!["wasm-threads".to_string()];
+        assert!(validate_target_settings(None, &threaded, &empty).is_err());
+        for target in [WasmTarget::Wasi, WasmTarget::Unknown] {
+            assert!(validate_target_settings(Some(target), &threaded, &empty).is_ok());
+            for (index, name) in GLOBAL_RUSTFLAGS.iter().enumerate() {
+                let mut flags = [None, None, None];
+                flags[index] = Some(OsString::from("-C target-cpu=native"));
+                let error =
+                    validate_target_settings(Some(target), &[], &flags).unwrap_err().to_string();
+                assert!(error.contains(name), "{error}");
+                assert!(error.contains("CARGO_TARGET_WASM32_"), "{error}");
+                assert!(validate_target_settings(None, &[], &flags).is_ok());
+            }
+        }
+        assert_eq!(
+            resolve_extra_features(&threaded, USI_CARGO_TOML, CORE_CARGO_TOML).unwrap(),
+            threaded
+        );
+    }
+
+    #[test]
+    fn wasm_command_and_paths_keep_native_builds_separate() {
+        let root = Path::new("workspace with spaces");
+        let target_dir = root.join("custom target");
+        for target in [None, Some(WasmTarget::Wasi), Some(WasmTarget::Unknown)] {
+            let context = BuildContext {
+                cargo: "cargo",
+                workspace_root: root,
+                target_dir: &target_dir,
+                profile: "dev",
+                target,
+                extra_features: &[],
+                commit: None,
+                commit_dirty: false,
+                rustc_version: None,
+            };
+            let command = build_command(&context, "edition-universal");
+            let args: Vec<_> =
+                command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            assert_eq!(command.get_current_dir(), Some(root));
+            assert!(args.windows(2).any(|pair| pair == ["--features", "edition-universal"]));
+            let removals: Vec<_> = command.get_envs().collect();
+            let artifact = artifact_path(&target_dir, "dev", target);
+            let destination = engines_path(root, "edition-universal", &[], target).unwrap();
+            if let Some(target) = target {
+                assert!(args.windows(2).any(|pair| pair == ["--target", target.triple()]));
+                assert_eq!(
+                    artifact,
+                    target_dir.join(target.triple()).join("debug/rshogi-usi.wasm")
+                );
+                assert_eq!(
+                    destination,
+                    root.join("engines")
+                        .join(format!("rshogi-usi-universal--{}.wasm", target.triple()))
+                );
+                assert_eq!(removals.len(), 3);
+                for name in GLOBAL_RUSTFLAGS {
+                    assert!(removals.contains(&(OsStr::new(name), None)));
+                }
+                assert_eq!(
+                    artifact_path(&target_dir, "production", Some(target)),
+                    target_dir.join(target.triple()).join("production/rshogi-usi.wasm")
+                );
+            } else {
+                assert!(!args.iter().any(|arg| arg == "--target"));
+                assert!(removals.is_empty());
+                assert_eq!(
+                    artifact,
+                    target_dir
+                        .join("debug")
+                        .join(format!("rshogi-usi{}", std::env::consts::EXE_SUFFIX))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wasm_manifest_round_trip_and_legacy_default() {
+        let old = toml::to_string(&sample_manifest(Vec::new())).unwrap();
+        let legacy: Manifest = toml::from_str(&old).unwrap();
+        assert_eq!(legacy.target, None);
+        assert!(!old.contains("target ="));
+        for target in [WasmTarget::Wasi, WasmTarget::Unknown] {
+            let mut manifest = sample_manifest(vec!["wasm-threads".into()]);
+            manifest.target = Some(target.triple().into());
+            let path = engines_path(
+                Path::new("workspace"),
+                &manifest.edition,
+                &manifest.features,
+                Some(target),
+            )
+            .unwrap();
+            manifest.binary = path.file_name().unwrap().to_str().unwrap().into();
+            let decoded: Manifest = toml::from_str(&toml::to_string(&manifest).unwrap()).unwrap();
+            assert_eq!(decoded.target, manifest.target);
+            assert!(edition_label(&decoded).contains(target.triple()));
+            assert!(decoded.binary.ends_with(&format!("--{}.wasm", target.triple())));
+            assert!(manifest_path_for(&path).to_str().unwrap().ends_with(".wasm.meta.toml"));
+        }
+    }
+
+    #[test]
     fn l2_64_editions_are_discoverable() {
         let manifest = include_str!("../../rshogi-usi/Cargo.toml");
         for edition in [
@@ -798,8 +1018,9 @@ mod tests {
     #[test]
     fn engines_path_strips_edition_prefix() {
         let root = PathBuf::from("/tmp/rshogi");
-        let p = engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt", &[])
-            .unwrap();
+        let p =
+            engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt", &[], None)
+                .unwrap();
         let expected = format!(
             "/tmp/rshogi/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt{}",
             std::env::consts::EXE_SUFFIX
@@ -811,7 +1032,7 @@ mod tests {
     fn engines_path_appends_extra_features() {
         let root = PathBuf::from("/tmp/rshogi");
         let extras = vec!["mimalloc".to_string(), "search-stats".to_string()];
-        let p = engines_path(&root, "edition-universal", &extras).unwrap();
+        let p = engines_path(&root, "edition-universal", &extras, None).unwrap();
         let expected = format!(
             "/tmp/rshogi/engines/rshogi-usi-universal+mimalloc+search-stats{}",
             std::env::consts::EXE_SUFFIX
@@ -985,6 +1206,7 @@ threat-profile-new = []
     fn sample_manifest(features: Vec<String>) -> Manifest {
         Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
+            target: None,
             edition: "edition-universal".into(),
             features,
             profile: "production".into(),

@@ -450,6 +450,20 @@ jobs:
         run: rustup target add wasm32-wasip1
       - name: Build and start fixed edition with SIMD128 enabled and disabled
         run: node scripts/check_fixed_wasm.mjs --ft halfka_hm_merged
+      - name: Build and start WASI artifacts through xtask
+        env:
+          RUSTFLAGS: ""
+          CARGO_TARGET_DIR: target/fixed-edition-wasm
+          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: "-C target-feature=+simd128"
+        shell: bash
+        run: |
+          cargo xtask build --edition universal,layerstacks-halfka_hm_merged-1536x16x32-none --target wasm32-wasip1 --profile dev
+          for edition in universal layerstacks-halfka_hm_merged-1536x16x32-none; do
+            output=$(printf 'usi\nsetoption name MaterialLevel value 1\nsetoption name USI_Hash value 1\nisready\nquit\n' | node scripts/run_wasi.mjs "engines/rshogi-usi-${edition}--wasm32-wasip1.wasm")
+            printf '%s\n' "$output"
+            grep -qx 'usiok' <<< "$output"
+            grep -qx 'readyok' <<< "$output"
+          done
 
   abs-paths:
     # tracked file に machine 依存の絶対パスが混入していないか検査する
