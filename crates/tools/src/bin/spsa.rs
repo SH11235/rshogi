@@ -3370,7 +3370,10 @@ fn main() -> Result<()> {
         }
         None => EngineNameTranslator::empty(),
     };
-    if let Some(path) = &cli.init_from {
+    let async_resume = cli.dispatch == DispatchMode::Async && cli.resume;
+    if let Some(path) = &cli.init_from
+        && !async_resume
+    {
         read_params_with_translator(path, &translator, cli.assume_c_end_r_end)?;
     }
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
@@ -3383,7 +3386,7 @@ fn main() -> Result<()> {
         total_iterations: total_pairs,
     };
     // async の resume は gen0 の param 定義を正本にし、view の state.params を読まない。
-    if cli.dispatch == DispatchMode::Async && cli.resume {
+    if async_resume {
         if cli.force_init || cli.use_existing_state_as_init {
             bail!("--resume と --force-init / --use-existing-state-as-init は同時に指定できません");
         }

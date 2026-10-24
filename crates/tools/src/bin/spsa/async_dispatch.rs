@@ -39,6 +39,50 @@ mod exact_f64 {
     }
 }
 
+/// meta の schedule を bit 一致で保存する (resume で bit 比較するため)。
+mod exact_schedule {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::ScheduleConfig;
+
+    #[derive(Serialize, Deserialize)]
+    struct Exact {
+        alpha: String,
+        gamma: String,
+        a_ratio: String,
+        mobility: String,
+        total_iterations: u32,
+    }
+
+    pub fn serialize<S: Serializer>(
+        value: &ScheduleConfig,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Exact {
+            alpha: format!("{:?}", value.alpha),
+            gamma: format!("{:?}", value.gamma),
+            a_ratio: format!("{:?}", value.a_ratio),
+            mobility: format!("{:?}", value.mobility),
+            total_iterations: value.total_iterations,
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ScheduleConfig, D::Error> {
+        let exact = Exact::deserialize(deserializer)?;
+        let parse = |text: &str| text.parse::<f64>().map_err(serde::de::Error::custom);
+        Ok(ScheduleConfig {
+            alpha: parse(&exact.alpha)?,
+            gamma: parse(&exact.gamma)?,
+            a_ratio: parse(&exact.a_ratio)?,
+            mobility: parse(&exact.mobility)?,
+            total_iterations: exact.total_iterations,
+        })
+    }
+}
+
 /// 1 局の結果。`plus_score` は plus 視点 (+1 / 0 / -1)。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct GameRecord {
@@ -272,6 +316,8 @@ struct AsyncCore<'a> {
     held: Vec<u32>,
     retry: BTreeSet<u32>,
     counters: CoreCounters,
+    /// 再生中、直前の `received` の pair。続く `accept` の後も保留なら保留回数に数える。
+    replay_hold_check: Option<u32>,
 }
 
 impl<'a> AsyncCore<'a> {
@@ -286,6 +332,16 @@ impl<'a> AsyncCore<'a> {
             held: Vec::new(),
             retry: BTreeSet::new(),
             counters: CoreCounters::default(),
+            replay_hold_check: None,
+        }
+    }
+
+    /// 通常実行の `on_done` と同じく、受信直後の適用を終えても保留のままなら数える。
+    fn settle_replay_hold(&mut self) {
+        if let Some(pair_id) = self.replay_hold_check.take()
+            && self.held.contains(&pair_id)
+        {
+            self.counters.holds += 1;
         }
     }
 
@@ -508,13 +564,16 @@ impl<'a> AsyncCore<'a> {
         pair_id: u32,
         attempt: u32,
         reason: String,
-    ) -> (CoreOutput, Option<String>) {
+    ) -> Result<(CoreOutput, Option<String>)> {
         let current = self.pairs.get(&pair_id).is_some_and(|entry| {
             entry.status == PairStatus::InFlight && entry.dispatch.attempt == attempt
         });
         if !current {
+            if !self.accepted.contains(&pair_id) && !self.pairs.contains_key(&pair_id) {
+                bail!("failure for unknown pair {pair_id}");
+            }
             self.counters.duplicates += 1;
-            return (CoreOutput::Journal(JournalRecord::Duplicate { pair_id, attempt }), None);
+            return Ok((CoreOutput::Journal(JournalRecord::Duplicate { pair_id, attempt }), None));
         }
         let stop = self
             .record_failure(pair_id, attempt)
@@ -530,7 +589,7 @@ impl<'a> AsyncCore<'a> {
             attempt,
             reason,
         };
-        (CoreOutput::Journal(record), stop)
+        Ok((CoreOutput::Journal(record), stop))
     }
 
     /// 実行中の現 attempt の失敗だけを数え、次の attempt 待ちにする。
@@ -610,6 +669,9 @@ impl<'a> AsyncCore<'a> {
 
     /// journal の 1 record を再生する。θ の更新は通常実行と同じ `apply_accept`。
     fn replay(&mut self, record: &JournalRecord) -> Result<Option<AppliedRow>> {
+        if !matches!(record, JournalRecord::Accept { .. }) {
+            self.settle_replay_hold();
+        }
         match record {
             JournalRecord::Dispatch(dispatch) => {
                 let pair_id = dispatch.pair_id;
@@ -647,8 +709,9 @@ impl<'a> AsyncCore<'a> {
                 self.insert_new(dispatch.clone())?;
                 Ok(None)
             }
-            JournalRecord::Received { .. } => {
+            JournalRecord::Received { pair_id, .. } => {
                 self.receive(record)?;
+                self.replay_hold_check = Some(*pair_id);
                 Ok(None)
             }
             JournalRecord::Accept { pair_id } => {
@@ -682,6 +745,7 @@ impl<'a> AsyncCore<'a> {
     /// 再生の後、実行中だった pair を失敗数を増やさず次の attempt 待ちにし、
     /// 適用できる保留を適用する。
     fn finish_replay(&mut self) -> Result<Vec<CoreOutput>> {
+        self.settle_replay_hold();
         for (&pair_id, entry) in &mut self.pairs {
             if entry.status == PairStatus::InFlight {
                 entry.status = PairStatus::RetryWait;
@@ -1083,6 +1147,7 @@ struct AsyncMeta {
     coordinator_sha256: String,
     base_seed: u64,
     total_pairs: u32,
+    #[serde(with = "exact_schedule")]
     schedule: ScheduleConfig,
     max_lag: u32,
     /// 順序付きの param 定義と active・application の印の sha256。
@@ -2041,8 +2106,12 @@ fn coordinate(
                 reason,
             } => {
                 in_flight.remove(&(pair_id, attempt));
-                eprintln!("attempt failed pair={pair_id} attempt={attempt} cause={reason}");
-                let (output, stop) = core.on_failed(pair_id, attempt, reason);
+                let message =
+                    format!("attempt failed pair={pair_id} attempt={attempt} cause={reason}");
+                let (output, stop) = core.on_failed(pair_id, attempt, reason)?;
+                if matches!(output, CoreOutput::Journal(JournalRecord::AttemptFailed { .. })) {
+                    eprintln!("{message}");
+                }
                 store.emit(core, vec![output])?;
                 if let Some(reason) = stop {
                     return store.stop(core, anyhow::anyhow!(reason));
@@ -2489,7 +2558,7 @@ mod tests {
         let mut core = fixture.core(4);
         let first = core.next_dispatch().unwrap().unwrap();
         for attempt in 1..=3 {
-            let (_, stop) = core.on_failed(0, attempt, "engine exited".into());
+            let (_, stop) = core.on_failed(0, attempt, "engine exited".into()).unwrap();
             let retry = core.next_dispatch().unwrap().unwrap();
             assert_eq!(retry.attempt, attempt + 1);
             assert_eq!(
@@ -2500,7 +2569,8 @@ mod tests {
         }
         assert_eq!(core.counters.failures, 3);
         // 古い attempt の失敗通知は数えない。
-        let (_, stop) = core.on_failed(0, 1, "late".into());
+        let (_, stop) = core.on_failed(0, 1, "late".into()).unwrap();
+        assert!(core.on_failed(9, 1, "unknown".into()).is_err());
         assert!(stop.is_none());
         assert_eq!(core.counters.failures, 3);
     }
@@ -2653,6 +2723,44 @@ mod tests {
         assert_eq!(resumed.pairs[&0].status, PairStatus::RetryWait);
         assert_eq!(replayed.checkpoint(), snapshot);
         assert_eq!(theta_bits(&replayed.params), theta_bits(&resumed.params));
+    }
+
+    #[test]
+    fn replay_restores_hold_count() {
+        let fixture = Fixture::new(vec![param("X", false, 50.0, (0.0, 100.0), 4.0)], None, 40);
+        let mut core = fixture.core(3);
+        let result =
+            simulate(&mut core, 3, |_| games(1, 0), |d, _| if d.pair_id % 5 == 0 { 9 } else { 1 });
+        assert!(core.counters.holds > 0);
+        let mut replayed = replay_all(&fixture, 3, &result.journal);
+        replayed.finish_replay().unwrap();
+        assert_eq!(replayed.counters.holds, core.counters.holds);
+    }
+
+    #[test]
+    fn meta_schedule_round_trips_bits() {
+        let schedule = ScheduleConfig {
+            alpha: 0.9999999999999999,
+            gamma: 0.1 + 0.2,
+            a_ratio: 5e-13,
+            mobility: 1.0 / 3.0,
+            total_iterations: 7,
+        };
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            #[serde(with = "exact_schedule")]
+            schedule: ScheduleConfig,
+        }
+        let text = serde_json::to_string(&Wrapper { schedule }).unwrap();
+        let back: Wrapper = serde_json::from_str(&text).unwrap();
+        for (a, b) in [
+            (back.schedule.alpha, schedule.alpha),
+            (back.schedule.gamma, schedule.gamma),
+            (back.schedule.a_ratio, schedule.a_ratio),
+            (back.schedule.mobility, schedule.mobility),
+        ] {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 
     #[test]
