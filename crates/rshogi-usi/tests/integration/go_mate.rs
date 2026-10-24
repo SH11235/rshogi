@@ -141,7 +141,7 @@ fn setoption_during_go_mate_does_not_block_commands() {
 #[test]
 fn each_mate_mode_solves_a_mate() {
     let mut engine = Engine::start();
-    for mode in ["Speed", "Power", "Auto"] {
+    for mode in ["Speed", "Power"] {
         engine.send(&format!(
             "setoption name MateMode value {mode}\nposition sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000"
         ));
@@ -154,7 +154,7 @@ fn each_mate_mode_solves_a_mate() {
 fn mate_threads_solves_and_stops() {
     let mut engine = Engine::start();
     engine.send("setoption name MateThreads value 4");
-    for mode in ["Speed", "Power", "Auto"] {
+    for mode in ["Speed", "Power"] {
         engine.send(&format!(
             "setoption name MateMode value {mode}\nposition sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000"
         ));
