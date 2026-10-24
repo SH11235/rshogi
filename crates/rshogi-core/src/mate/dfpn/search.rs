@@ -264,6 +264,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     /// 1+ε の余裕として 2 番目の子の φ に掛ける倍率 (2^16 倍の固定小数点)。`None` は既定の 1/3。
     /// 子を選ぶたびに計算するので、割り算を避ける (既定は定数の割り算で掛け算になる)。
     slack: Option<u64>,
+    /// 0 でなければ、φ が同じ子のどれを選ぶかをこの値で決める (並列に解くスレッドごとに変える)
+    tie_seed: u32,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -316,6 +318,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             estimate: false,
             weak_disproof_step: 0,
             slack: None,
+            tie_seed: 0,
         }
     }
 
@@ -335,6 +338,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 1+ε の余裕を 2 番目の子の φ の `num / den` にする (並列に解くスレッドごとに探索をずらす)
     pub fn set_threshold_slack(&mut self, num: u64, den: u64) {
         self.slack = Some((num << 16) / den.max(1));
+    }
+
+    /// φ が同じ子のうちどれを選ぶかを `seed` (0 でない) で決める。既定は先に生成した子。
+    /// 未展開の子はどれも同じ初期値になりやすく、全スレッドが同じ子を選ぶと同じ局面を重ねて読む
+    pub fn set_tie_seed(&mut self, seed: u32) {
+        debug_assert!(seed != 0);
+        self.tie_seed = seed;
     }
 
     /// 前の探索で `nodes` ノード読んだ続きとして数える (ノード数の上限と進捗はその合計に掛かる)
@@ -753,10 +763,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let mut second_phi = PN_INF;
         let mut sum_delta = 0u64;
         let mut nonzero = 0u64;
+        let seed = self.tie_seed;
+        let rank = |i: usize| (i as u32 ^ seed).wrapping_mul(0x9E37_79B1);
         for (i, c) in children.iter().enumerate().filter(|(_, c)| c.active) {
             nonzero += u64::from(delta(c) != 0);
             let p = phi(c);
-            if p < best_phi {
+            if p < best_phi || seed != 0 && p == best_phi && rank(i) < rank(best) {
                 second_phi = best_phi;
                 best_phi = p;
                 best = i;
