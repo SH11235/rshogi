@@ -321,9 +321,28 @@ fn batch_crash_after_records_rewrites_the_iteration() {
     assert_eq!(batches.iter().filter(|b| b["iteration"] == 2).count(), 2);
 }
 
+/// 記録機能より前の meta を模して game_records を消す (v3 は v4 専用の項目も消す)。
+fn make_legacy_meta(test: &PoolTest, v3: bool) {
+    let mut meta = test.meta();
+    let fields = meta.as_object_mut().unwrap();
+    fields.remove("game_records");
+    if v3 {
+        fields.insert("format_version".into(), serde_json::json!(3));
+        for key in ["total_pairs", "batch_pairs", "completed_pairs"] {
+            fields.remove(key);
+        }
+    }
+    std::fs::write(test.path("run/meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+}
+
+fn run_bytes(test: &PoolTest, file: &str) -> Option<Vec<u8>> {
+    std::fs::read(test.path(&format!("run/{file}"))).ok()
+}
+
 #[test]
 fn legacy_batch_meta_with_records_rejects_disabling_on_resume() {
-    for v3 in [false, true] {
+    for (v3, keep_games) in [(false, true), (true, true), (false, false), (true, false)] {
+        let label = format!("v3={v3} keep_games={keep_games}");
         let test = PoolTest::new();
         let output = test.run(
             "value_driven",
@@ -334,19 +353,14 @@ fn legacy_batch_meta_with_records_rejects_disabling_on_resume() {
             &[("RSHOGI_SPSA_FAULT", Path::new("batch_after_records:2"))],
         );
         assert_eq!(output.status.code(), Some(86));
-        // 記録機能より前の meta を模して項目を消す (v3 は v4 専用の項目も消す)。
-        let mut meta = test.meta();
-        let fields = meta.as_object_mut().unwrap();
-        fields.remove("game_records");
-        if v3 {
-            fields.insert("format_version".into(), serde_json::json!(3));
-            for key in ["total_pairs", "batch_pairs", "completed_pairs"] {
-                fields.remove(key);
-            }
+        make_legacy_meta(&test, v3);
+        if !keep_games {
+            // games.jsonl だけ失われても batches.jsonl で記録していた run と分かる。
+            std::fs::remove_file(test.path("run/games.jsonl")).unwrap();
         }
-        let meta_path = test.path("run/meta.json");
-        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
-        let before = std::fs::read(&meta_path).unwrap();
+        let before: Vec<_> = ["meta.json", "games.jsonl", "batches.jsonl"]
+            .map(|f| run_bytes(&test, f))
+            .into();
         let output = test.run(
             "value_driven",
             4,
@@ -355,9 +369,61 @@ fn legacy_batch_meta_with_records_rejects_disabling_on_resume() {
             &["--resume", "--force-unlock", "--no-game-records"],
             &[],
         );
+        assert!(!output.status.success(), "{label}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("game records"), "{label}");
+        let after: Vec<_> = ["meta.json", "games.jsonl", "batches.jsonl"]
+            .map(|f| run_bytes(&test, f))
+            .into();
+        assert_eq!(after, before, "{label}");
+    }
+}
+
+#[test]
+fn legacy_batch_meta_without_records_allows_either_setting() {
+    for v3 in [false, true] {
+        let test = PoolTest::new();
+        let output = test.run(
+            "value_driven",
+            4,
+            1,
+            1,
+            &["--no-game-records", "--engine-retries", "0"],
+            &[
+                ("SPSA_TEST_ENGINE_FAIL_ONCE_MARKER", &test.path("failed")),
+                ("SPSA_TEST_ENGINE_FAIL_AFTER_GO", Path::new("1")),
+            ],
+        );
+        assert!(!output.status.success());
+        make_legacy_meta(&test, v3);
+        // 起動条件の検証で止まる resume は記録ファイルを作らない。
+        let output = test.run(
+            "value_driven",
+            4,
+            1,
+            1,
+            &[
+                "--resume",
+                "--force-unlock",
+                "--active-only-regex",
+                "^NO_SUCH_PARAM$",
+            ],
+            &[],
+        );
         assert!(!output.status.success(), "v3={v3}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("game records"), "v3={v3}");
-        assert_eq!(std::fs::read(&meta_path).unwrap(), before, "v3={v3}");
+        assert!(!test.path("run/games.jsonl").exists(), "v3={v3}");
+        assert!(!test.path("run/batches.jsonl").exists(), "v3={v3}");
+        let extra: &[&str] = if v3 {
+            &[
+                "--resume",
+                "--force-unlock",
+                "--no-game-records",
+                "--force-schedule",
+            ]
+        } else {
+            &["--resume", "--force-unlock", "--no-game-records"]
+        };
+        assert_success(&test.run("value_driven", 4, 1, 1, extra, &[]));
+        assert!(!test.path("run/games.jsonl").exists(), "v3={v3}");
     }
 }
 

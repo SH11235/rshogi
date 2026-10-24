@@ -3728,11 +3728,16 @@ fn main() -> Result<()> {
                 let mut meta = load_meta(&meta_path).with_context(|| {
                     format!("--resume was set but metadata load failed: {}", meta_path.display())
                 })?;
-                // 記録機能より前の meta (v3 を含む) は項目を持たない。その run で棋譜を書いた後
-                // checkpoint の前に落ちていれば games.jsonl があるので、記録していた run として扱う。
-                let recorded = meta
-                    .game_records
-                    .or_else(|| default_games_jsonl_path(&cli.run_dir).exists().then_some(true));
+                // 記録機能より前の meta (v3 を含む) は項目を持たない。その run で記録した後
+                // checkpoint の前に落ちていれば中身のある記録ファイルが残るので、記録していた run
+                // として扱う。空のファイルは何も記録していないので判定に使わない。
+                let recorded = meta.game_records.or_else(|| {
+                    let non_empty =
+                        |path: PathBuf| std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+                    let written = non_empty(default_games_jsonl_path(&cli.run_dir))
+                        || non_empty(default_batches_jsonl_path(&cli.run_dir));
+                    written.then_some(true)
+                });
                 if let Some(recorded) = recorded
                     && recorded == cli.no_game_records
                 {
@@ -3998,28 +4003,6 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let batch_faults = async_dispatch::FaultPlan::from_env()?;
-    let mut game_record_writer = if cli.no_game_records {
-        if !cli.resume {
-            // fresh start で前の run の棋譜を今回の run のものと誤読させない。
-            for path in [
-                default_games_jsonl_path(&cli.run_dir),
-                default_batches_jsonl_path(&cli.run_dir),
-            ] {
-                match std::fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(anyhow::Error::new(e))
-                            .with_context(|| format!("failed to remove {}", path.display()));
-                    }
-                }
-            }
-        }
-        None
-    } else {
-        Some(BatchRecordWriter::open(&cli.run_dir, cli.resume)?)
-    };
 
     // iter 0 スナップショット: 起動時の params を記録する (fresh / force-init / use-existing-fresh)。
     // resume 時は既存 CSV に既に iter 0 行が含まれる前提で append 継続するため、ここではスキップ。
@@ -4073,6 +4056,31 @@ fn main() -> Result<()> {
     let big_a = schedule.a_ratio * total_pairs as f64;
     let param_schedules = compute_param_schedules(&params, schedule);
     validate_schedule_bounds(schedule, &params, &active_mask, &param_schedules, batch_pairs)?;
+
+    let batch_faults = async_dispatch::FaultPlan::from_env()?;
+    // 起動条件の検証より後に作る。検証で止まる起動に空の games.jsonl を残すと、旧 meta の run が
+    // 記録していたと判定されるため。
+    let mut game_record_writer = if cli.no_game_records {
+        if !cli.resume {
+            // fresh start で前の run の棋譜を今回の run のものと誤読させない。
+            for path in [
+                default_games_jsonl_path(&cli.run_dir),
+                default_batches_jsonl_path(&cli.run_dir),
+            ] {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e))
+                            .with_context(|| format!("failed to remove {}", path.display()));
+                    }
+                }
+            }
+        }
+        None
+    } else {
+        Some(BatchRecordWriter::open(&cli.run_dir, cli.resume)?)
+    };
 
     if is_fresh_start {
         let meta = ResumeMetaData {
