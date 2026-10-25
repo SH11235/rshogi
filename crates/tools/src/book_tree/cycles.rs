@@ -2,7 +2,7 @@
 //! 外して (指さない手 = record にして) 循環を無くす手の組を、決まった規則で選ぶ。
 
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
-use super::register::{format_master, parse_master};
+use super::register::{format_master, parse_master, validate};
 use super::reply_graph::{
     BookHashes, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
 };
@@ -87,6 +87,14 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     reject_same_file(&args.table, &[("--master", &args.master)])?;
     let parsed = read_master(&args.master)?;
     let positions = &parsed.0;
+    let text = std::fs::read_to_string(&args.master)
+        .with_context(|| format!("{} を読めません", args.master.display()))?;
+    let mut rows = parse_master(&text)?;
+    let curated: HashSet<(String, String)> = rows
+        .iter()
+        .filter(|r| r.get("tier") == "curated")
+        .map(|r| (r.get("key").to_owned(), r.get("move").to_owned()))
+        .collect();
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -101,7 +109,9 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
             .side
             .sides()
             .iter()
-            .map(|&side| scope.spawn(|| solve_side(positions, &hashes, &values, side, start)))
+            .map(|&side| {
+                scope.spawn(|| solve_side(positions, &hashes, &values, &curated, (side, start)))
+            })
             .collect();
         handles
             .into_iter()
@@ -136,11 +146,9 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     }
     write_atomic(&args.table, &table)?;
     if args.apply {
-        let text = std::fs::read_to_string(&args.master)
-            .with_context(|| format!("{} を読めません", args.master.display()))?;
-        let mut rows = parse_master(&text)?;
         let changed =
             rewrite_rows(&mut rows, positions, results.iter().map(|r| &r.plan), &args.note)?;
+        validate(&rows)?;
         write_atomic(&args.master, &format_master(&rows))?;
         println!("書き換えました: 行 {changed}");
     } else {
@@ -168,13 +176,14 @@ fn solve_side(
     positions: &BTreeMap<String, MasterPosition>,
     hashes: &BookHashes,
     values: &HashMap<String, Vec<Option<i32>>>,
-    side: &'static str,
-    start: &str,
+    curated: &HashSet<(String, String)>,
+    (side, start): (&'static str, &str),
 ) -> Result<SideResult> {
     let graph =
         build(positions, hashes, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
     let before = count_on(&graph, |_| 0);
-    let plan = plan_side(&graph, values)?;
+    let mut plan = plan_side(&graph, values)?;
+    plan.new_main = new_mains(&graph, positions, values, &plan.removed, curated)?;
     // 外した手を除き、main を替えた元データで作り直して数える (外す手の選び方とは別の確かめ)。
     let after_graph = build(positions, hashes, side, start, |key, p| {
         let mut moves: Vec<usize> = (0..p.moves.len())
@@ -352,7 +361,7 @@ fn rank_removals(graph: &ReplyGraph, original: &HashMap<usize, usize>) -> Vec<(u
     removed
 }
 
-/// 外す候補から、戻せる手を戻し (3.)、main を替えて (4.)、計画にする。
+/// 外す候補から戻せる手を戻し (3.)、計画にする (main の替わりは [`new_mains`] で決める)。
 fn finish_plan(
     graph: &ReplyGraph,
     original: &HashMap<usize, usize>,
@@ -407,18 +416,6 @@ fn finish_plan(
     for &(v, i) in &removed {
         let book_move = graph.edges[v][i].book_move.context("内部エラー: 相手の手を外しました")?;
         plan.removed.push((graph.keys[v].clone(), book_move));
-        if book_move == 0 {
-            let best = (0..graph.edges[v].len())
-                .filter(|&j| active[v][j])
-                .max_by(|&a, &b| {
-                    value(v, a)
-                        .cmp(&value(v, b))
-                        .then_with(|| graph.edges[v][b].book_move.cmp(&graph.edges[v][a].book_move))
-                })
-                .context("内部エラー: 手の残らない局面です")?;
-            let new_main = graph.edges[v][best].book_move.context("内部エラー: 相手の手です")?;
-            plan.new_main.insert(graph.keys[v].clone(), new_main);
-        }
     }
     plan.removed.sort();
     plan.unbreakable = graph
@@ -427,6 +424,48 @@ fn finish_plan(
         .map(|c| c.into_iter().map(|v| graph.keys[v].clone()).collect())
         .collect();
     Ok(plan)
+}
+
+/// main を外した局面の替わりの main (4.)。残る手 (外さない main・alt) のうち、curated の手が残っていれば
+/// curated の手から選ぶ (curated の行だけの定跡にも main が 1 つ要るため)。その中で合法な手、値の高い手
+/// (値の分からない手は後)、元データの順の先を選ぶ。
+pub(super) fn new_mains(
+    graph: &ReplyGraph,
+    positions: &BTreeMap<String, MasterPosition>,
+    values: &HashMap<String, Vec<Option<i32>>>,
+    removed: &[(String, usize)],
+    curated: &HashSet<(String, String)>,
+) -> Result<BTreeMap<String, usize>> {
+    let node: HashMap<&str, usize> =
+        graph.keys.iter().enumerate().map(|(v, k)| (k.as_str(), v)).collect();
+    let mut result = BTreeMap::new();
+    for (key, _) in removed.iter().filter(|(_, i)| *i == 0) {
+        let position = &positions[key];
+        let gone: HashSet<usize> =
+            removed.iter().filter(|(k, _)| k == key).map(|&(_, i)| i).collect();
+        let legal: HashSet<usize> = node
+            .get(key.as_str())
+            .map(|&v| graph.edges[v].iter().filter_map(|e| e.book_move).collect())
+            .unwrap_or_default();
+        let remaining: Vec<usize> =
+            (0..position.moves.len()).filter(|i| !gone.contains(i)).collect();
+        let is_curated =
+            |i: &usize| curated.contains(&(key.clone(), position.moves[*i].mv.clone()));
+        let pool: Vec<usize> = if remaining.iter().any(is_curated) {
+            remaining.iter().copied().filter(is_curated).collect()
+        } else {
+            remaining
+        };
+        let value = |i: usize| values.get(key).and_then(|v| v[i]);
+        let best = pool
+            .into_iter()
+            .max_by_key(|&i| {
+                (legal.contains(&i), value(i).is_some(), value(i), std::cmp::Reverse(i))
+            })
+            .context("内部エラー: 手の残らない局面です")?;
+        result.insert(key.clone(), best);
+    }
+    Ok(result)
 }
 
 /// 定跡を抜けるまでの段数 (抜けられない局面は `None`)。辺の無い局面が 0。自分の手番の局面は行き先の
@@ -789,7 +828,10 @@ mod tests {
     fn solve_from(p: &BTreeMap<String, MasterPosition>, start: &str) -> SidePlan {
         let work = tempfile::tempdir().unwrap();
         let values = move_values(p, DrawValues::default(), work.path()).unwrap();
-        plan_side(&graph_of(p, start), &values).unwrap()
+        let graph = graph_of(p, start);
+        let mut plan = plan_side(&graph, &values).unwrap();
+        plan.new_main = new_mains(&graph, p, &values, &plan.removed, &HashSet::new()).unwrap();
+        plan
     }
 
     fn solve(rows: &[(&str, &str, &str, &str)]) -> (BTreeMap<String, MasterPosition>, SidePlan) {
@@ -900,6 +942,48 @@ mod tests {
         let plan = solve_from(&p, root);
         assert_eq!(plan.removed, [(root.to_owned(), 0)]);
         assert_eq!(plan.new_main, BTreeMap::from([(root.to_owned(), 1)]));
+    }
+
+    #[test]
+    fn apply_keeps_one_curated_main() {
+        // C の main (curated) を外すとき、値の高い wide の alt ではなく curated の alt を main にする。
+        let c = c();
+        let rows = [
+            (ROOT, "5i4h", "main", "10", "wide"),
+            (c.as_str(), "4h5i", "main", "30", "curated"),
+            (c.as_str(), "4h3h", "alt", "20", "curated"),
+            (c.as_str(), "4h4i", "alt", "90", "wide"),
+        ];
+        let mut text = super::super::register::COLUMNS.join("\t");
+        text.push('\n');
+        for (key, mv, role, evals, tier) in rows {
+            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\t{tier}\tt\tn").unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("moves.tsv");
+        std::fs::write(&master, &text).unwrap();
+        let args = CyclesArgs {
+            master: master.clone(),
+            table: dir.path().join("cycles.tsv"),
+            side: SideArg::B,
+            draw_value_black: 0,
+            draw_value_white: 0,
+            apply: true,
+            note: "塞いだ".into(),
+        };
+        run_from(args, ROOT).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+        let roles: Vec<(&str, &str)> =
+            rows.iter().map(|r| (r.get("move"), r.get("role"))).collect();
+        assert_eq!(
+            roles,
+            [
+                ("5i4h", "main"),
+                ("4h5i", "record"),
+                ("4h3h", "main"),
+                ("4h4i", "alt")
+            ]
+        );
     }
 
     #[test]
