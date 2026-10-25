@@ -847,7 +847,11 @@ impl Search {
         }
         self.thread_pool.clear_histories();
         self.thread_pool.wait_for_search_finished();
-        self.shared_histories.clear(self.search_tune_params.pawn_history_init as i16);
+        // main worker を作る前の共有表は作ったときの既定の初期値のまま残す。main worker の
+        // 履歴を最初の go で既定値から作るのと揃え、1 スレッドの探索を共有前と同じにする。
+        if self.worker.is_some() {
+            self.shared_histories.clear(self.search_tune_params.pawn_history_init as i16);
+        }
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -977,8 +981,8 @@ impl Search {
         let num = 1;
         #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
         let num = num.clamp(1, 512);
-        if num != self.num_threads {
-            // 表の大きさがスレッド数で決まるので作り直す。
+        if SharedHistories::scale_for(num) != self.shared_histories.scale() {
+            // 表の大きさは倍率で決まるので、倍率が変わるときだけ作り直す。
             self.shared_histories = Arc::new(SharedHistories::new(num));
             if let Some(worker) = &mut self.worker {
                 worker.shared_histories = Arc::clone(&self.shared_histories);
@@ -2141,9 +2145,12 @@ mod tests {
                     ..Default::default()
                 };
                 search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-                for count in [3, 2] {
+                let mut previous = Arc::clone(&search.shared_histories);
+                for (count, rebuilt) in [(3, true), (4, false), (2, true)] {
                     search.set_num_threads(count);
                     let shared = Arc::clone(&search.shared_histories);
+                    assert_eq!(!Arc::ptr_eq(&previous, &shared), rebuilt, "Threads={count}");
+                    previous = Arc::clone(&shared);
                     let main = search.worker.as_ref().unwrap();
                     assert!(Arc::ptr_eq(&main.shared_histories, &shared));
                     for thread in search.thread_pool.helper_threads() {
@@ -2152,6 +2159,40 @@ mod tests {
                         });
                     }
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// 最初の go より前の clear は共有表を変えない (main worker を最初の go で作るのと揃える)。
+    #[test]
+    fn clear_before_first_go_keeps_single_thread_search() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let params = SearchTuneParams {
+                    pawn_history_init: -7,
+                    ..SearchTuneParams::default()
+                };
+                let run = |clear_first: bool| {
+                    let mut search = Search::new_with_eval_hash(1, 1);
+                    search.set_search_tune_params(params);
+                    if clear_first {
+                        search.clear_histories();
+                    }
+                    let mut pos = Position::new();
+                    pos.set_hirate();
+                    let limits = LimitsType {
+                        depth: 8,
+                        ..Default::default()
+                    };
+                    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+                    (result.nodes, result.best_move)
+                };
+                assert_eq!(run(true), run(false));
             })
             .unwrap()
             .join()

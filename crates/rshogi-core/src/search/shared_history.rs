@@ -68,12 +68,13 @@ pub struct SharedHistories {
     pawn_history: Box<[SharedPawnHistoryRow]>,
     correction_mask: usize,
     pawn_history_mask: usize,
+    scale: usize,
 }
 
 impl SharedHistories {
     /// `num_threads` 本のスレッドで共有する表を作る (初期値込み)。
     pub fn new(num_threads: usize) -> Self {
-        let scale = num_threads.max(1).next_power_of_two();
+        let scale = Self::scale_for(num_threads);
         let correction_len = CORRECTION_HISTORY_SIZE * scale;
         let pawn_history_len = PAWN_HISTORY_SIZE * scale;
         // SAFETY: CorrectionBundle と SharedPawnHistoryRow は AtomicI16 だけで構成され、
@@ -89,43 +90,50 @@ impl SharedHistories {
             pawn_history,
             correction_mask: correction_len - 1,
             pawn_history_mask: pawn_history_len - 1,
+            scale,
         };
         shared.clear(PAWN_HISTORY_INIT);
         shared
+    }
+
+    /// `num_threads` 本で共有するときの、1 スレッド分の表に対する倍率。
+    ///
+    /// wasm32 はアドレス空間が 4 GB なので、pawn history (1 倍で約 41 MB) が収まるよう抑える。
+    pub fn scale_for(num_threads: usize) -> usize {
+        let scale = num_threads.max(1).next_power_of_two();
+        if cfg!(target_arch = "wasm32") {
+            scale.min(16)
+        } else {
+            scale
+        }
+    }
+
+    /// この表の倍率 (`scale_for` の値)
+    pub fn scale(&self) -> usize {
+        self.scale
     }
 
     /// すべての entry を初期値に戻す。探索中のスレッドが無いときに呼ぶ。
     ///
     /// スレッド数に比例して表が大きくなるので、複数スレッドで分けて埋める。
     pub fn clear(&self, pawn_history_init: i16) {
-        let parts = clear_parallelism(self.pawn_history.len() / PAWN_HISTORY_SIZE);
-        let correction_chunk = self.correction.len().div_ceil(parts);
-        let pawn_chunk = self.pawn_history.len().div_ceil(parts);
-        let fill = |correction: &[CorrectionBundle], pawn_history: &[SharedPawnHistoryRow]| {
-            for bundle in correction {
+        let parts = clear_parallelism(self.scale);
+        let fill = |part: usize| {
+            let range = |len: usize| len * part / parts..len * (part + 1) / parts;
+            for bundle in &self.correction[range(self.correction.len())] {
                 for entry in
                     bundle.pawn.iter().chain(&bundle.minor).chain(bundle.non_pawn.iter().flatten())
                 {
                     entry.set(0);
                 }
             }
-            for entry in pawn_history.iter().flatten().flatten() {
+            for entry in
+                self.pawn_history[range(self.pawn_history.len())].iter().flatten().flatten()
+            {
                 entry.set(pawn_history_init);
             }
         };
-        if parts == 1 {
-            fill(&self.correction, &self.pawn_history);
-            return;
-        }
-        std::thread::scope(|scope| {
-            for (correction, pawn_history) in self
-                .correction
-                .chunks(correction_chunk)
-                .zip(self.pawn_history.chunks(pawn_chunk))
-            {
-                scope.spawn(move || fill(correction, pawn_history));
-            }
-        });
+        run_parts(parts, &fill);
     }
 
     #[inline]
@@ -186,11 +194,11 @@ impl SharedHistories {
     #[inline]
     fn pawn_history_entry(&self, index: usize, pc: Piece, to: Square) -> &SharedStatsEntry<8192> {
         debug_assert!(index < self.pawn_history.len());
-        // SAFETY: index は pawn_history_index() でマスク済み (< len)。
+        // SAFETY: index & mask < len (len は 2 のべき乗)。別の倍率の表で計算した index でも範囲内に収まる。
         //         Piece::index() < Piece::NUM、Square::index() < Square::NUM。
         unsafe {
             self.pawn_history
-                .get_unchecked(index)
+                .get_unchecked(index & self.pawn_history_mask)
                 .get_unchecked(pc.index())
                 .get_unchecked(to.index())
         }
@@ -239,14 +247,35 @@ fn prefetch_ptr<T>(entry: &T) {
 /// 表を埋めるのに使うスレッド数。1 スレッド分の表なら分けない。
 fn clear_parallelism(scale: usize) -> usize {
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let available = std::thread::available_parallelism().map_or(1, |n| n.get());
-        scale.min(available).max(1)
+    let available = std::thread::available_parallelism().map_or(1, |n| n.get());
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    let available = rayon::current_num_threads();
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    let available = 1;
+    scale.min(available).max(1)
+}
+
+/// `fill(0..parts)` を並列に実行する。
+fn run_parts(parts: usize, fill: &(dyn Fn(usize) + Sync)) {
+    if parts == 1 {
+        fill(0);
+        return;
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = scale;
-        1
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::scope(|scope| {
+        for part in 0..parts {
+            scope.spawn(move || fill(part));
+        }
+    });
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    rayon::scope(|scope| {
+        for part in 0..parts {
+            scope.spawn(move |_| fill(part));
+        }
+    });
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    for part in 0..parts {
+        fill(part);
     }
 }
 

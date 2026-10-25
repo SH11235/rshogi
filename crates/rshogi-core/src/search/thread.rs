@@ -756,6 +756,12 @@ mod imp {
             self.num_threads = num_threads;
             self.tt = tt;
             self.eval_hash = eval_hash;
+            // 残っている worker の参照も差し替え、古い表を次の go を待たずに解放する。
+            for slot in &self.workers {
+                if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
+                    worker.shared_histories = Arc::clone(&shared_histories);
+                }
+            }
             self.shared_histories = shared_histories;
             self.max_moves_to_draw = max_moves_to_draw;
             self.search_tune_params = search_tune_params;
