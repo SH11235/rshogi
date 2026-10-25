@@ -10,6 +10,11 @@ pub struct TimeOptions {
     pub slow_mover: i32,
     pub usi_ponder: bool,
     pub stochastic_ponder: bool,
+    /// 1 手の思考時間を秒境界に切り上げる (YaneuraOu 準拠)。
+    ///
+    /// false にすると秒境界への切り上げ、MinimumThinkingTime の 1 秒の下限、
+    /// 残り時間の見積もりから 1 手 1 秒を引く項を外し、消費時間が時計に比例するようにする。
+    pub round_up_to_full_second: bool,
 }
 
 // 深い探索(GPU/ネットワーク待ちが長い環境)用プリセット。
@@ -34,6 +39,7 @@ impl Default for TimeOptions {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         }
     }
 }
@@ -48,6 +54,7 @@ impl TimeOptions {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         }
     }
 }

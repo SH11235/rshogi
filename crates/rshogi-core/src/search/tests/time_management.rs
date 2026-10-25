@@ -353,6 +353,7 @@ fn round_up_boundaries_and_remaining_budget() {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         });
         let mut limits = LimitsType::new();
         limits.time[Color::Black.index()] = remaining;
@@ -364,4 +365,82 @@ fn round_up_boundaries_and_remaining_budget() {
         }
         assert!(actual <= tm.remain_time());
     }
+}
+
+fn unrounded_options(minimum: i64, delay: i64, delay2: i64) -> TimeOptions {
+    TimeOptions {
+        minimum_thinking_time: minimum,
+        network_delay: delay,
+        network_delay2: delay2,
+        round_up_to_full_second: false,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn round_up_disabled_keeps_requested_time_within_remaining() {
+    let mut tm = create_time_manager();
+    tm.set_options(&unrounded_options(0, 0, 0));
+    let mut limits = LimitsType::new();
+    limits.time[Color::Black.index()] = 5000;
+    limits.set_start_time();
+    tm.init(&limits, Color::Black, 1, 512);
+
+    assert_eq!(tm.minimum(), 0);
+    for requested in [1, 300, 1500, 2001] {
+        assert_eq!(tm.round_up(requested), requested);
+    }
+    assert_eq!(tm.round_up(10_000), tm.remain_time());
+}
+
+#[test]
+fn round_up_disabled_minimum_thinking_time_is_not_floored_to_one_second() {
+    let mut tm = create_time_manager();
+    tm.set_options(&unrounded_options(300, 120, 0));
+    let mut limits = LimitsType::new();
+    limits.time[Color::Black.index()] = 60_000;
+    limits.set_start_time();
+    tm.init(&limits, Color::Black, 1, 512);
+
+    assert_eq!(tm.minimum(), 180);
+    tm.set_search_end(50);
+    assert_eq!(tm.search_end(), 180);
+    tm.set_search_end(420);
+    assert_eq!(tm.search_end(), 420);
+}
+
+/// 切り上げと 1 手 1 秒の固定項が無ければ、Fischer の時計を倍にすると optimum もほぼ倍になる
+#[test]
+fn round_up_disabled_budget_scales_with_clock() {
+    let optimum_for = |time: i64, inc: i64| {
+        let mut tm = create_time_manager();
+        tm.set_options(&unrounded_options(0, 0, 0));
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = time;
+        limits.inc[Color::Black.index()] = inc;
+        limits.set_start_time();
+        tm.init(&limits, Color::Black, 40, 512);
+        tm.optimum()
+    };
+    let half = optimum_for(30_000, 500);
+    let full = optimum_for(60_000, 1000);
+    assert!(half > 0 && half < 1000, "half={half}");
+    assert!((full - 2 * half).abs() <= 2, "half={half} full={full}");
+}
+
+#[test]
+fn round_up_disabled_final_push_uses_remaining_byoyomi() {
+    let mut tm = create_time_manager();
+    tm.set_options(&unrounded_options(0, 120, 1120));
+    let mut limits = LimitsType::new();
+    limits.byoyomi[Color::Black.index()] = 5000;
+    limits.set_start_time();
+    tm.init(&limits, Color::Black, 0, 256);
+
+    assert!(tm.is_final_push());
+    assert_eq!(tm.minimum(), 4880);
+    assert_eq!(tm.optimum(), 4880);
+    assert_eq!(tm.maximum(), 4880);
+    tm.set_search_end(10);
+    assert_eq!(tm.search_end(), 4880);
 }
