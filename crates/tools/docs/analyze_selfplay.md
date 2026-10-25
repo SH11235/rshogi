@@ -160,7 +160,8 @@ CSA の `outcome: "interrupted"` / `"censored"` は未決であり、勝敗・�
 `--adjudication-sweep` は、両側の評価の一致による裁定 (tournament / `spsa --dispatch async` の
 `--adjudicate-agreement "movecount=N,score=X"`) を記録済みの対局に当てはめ、X と N の組ごとに集計する。
 通常の勝敗集計は行わない。判定は対局中の裁定と同じ実装で、move 行の `eval` (自己視点の評価値・
-`score_bound`) を合法手の順に与える。
+`score_bound`) を合法手の順に与える。入力は tournament 形式の JSONL で、spsa の `games.jsonl` は読まない。
+読めない行があると止まり、集計できる局が 1 局も無ければエラーにする。
 
 ```bash
 ./target/release/analyze_selfplay --adjudication-sweep \

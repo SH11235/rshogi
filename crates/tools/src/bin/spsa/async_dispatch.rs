@@ -1708,6 +1708,15 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
         if cli.btime.is_none() || cli.nodes.is_some() {
             bail!("--nps-scaling は Fischer (--btime / --binc、--nodes なし) の対局で使います");
         }
+        // bench は --threads で割るので、engine の Threads は --threads だけで決める。
+        if cli.usi_options.iter().flatten().any(|o| {
+            o.split_once('=')
+                .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("Threads"))
+        }) {
+            bail!(
+                "--nps-scaling では Threads を --usi-option ではなく --threads で指定してください"
+            );
+        }
     } else if cli.reference_nps.is_some() || cli.min_nps_ratio.is_some() {
         bail!("--reference-nps / --min-nps-ratio は --nps-scaling と一緒に指定してください");
     }
@@ -2110,20 +2119,22 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     eprintln!("using base seed: {}", meta.base_seed);
 
     let (game_cfg, base_tc) = build_game_setup(cli);
-    // 足切りに掛かる機械では journal・snapshot・meta を書く前に止める。
-    let bench = if cli.nps_scaling && meta.completed_pairs < total_pairs {
-        Some(run_nps_bench(NpsBenchInput {
-            cli,
-            params: &params,
-            resume,
-            application_mask: &masks.application,
-            translator,
-            base_cfg: &base_cfg,
-            start_positions: &start_positions,
-            game_cfg: &game_cfg,
-            tc: base_tc,
-            slots: cli.concurrency.min((total_pairs - meta.completed_pairs) as usize),
-        })?)
+    let bench_input = |slots: usize| NpsBenchInput {
+        cli,
+        params: &params,
+        resume,
+        application_mask: &masks.application,
+        translator,
+        base_cfg: &base_cfg,
+        start_positions: &start_positions,
+        game_cfg: &game_cfg,
+        tc: base_tc,
+        slots,
+    };
+    // fresh は旧 run の成果物を消す前に測り、足切りに掛かる機械では何も書かずに止める。
+    // resume は journal を再生して残りの pair 数 (= 本番の worker 数) を確かめてから測る。
+    let fresh_bench = if cli.nps_scaling && !resume {
+        Some(run_nps_bench(bench_input(cli.concurrency.min(total_pairs as usize)))?)
     } else {
         None
     };
@@ -2254,6 +2265,14 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         store.publish(&core, RunStatus::Running, None)?;
         store
     };
+    let bench = match fresh_bench {
+        Some(bench) => Some(bench),
+        None if cli.nps_scaling && !core.is_complete() => {
+            let remaining = (total_pairs - core.completed) as usize;
+            Some(run_nps_bench(bench_input(cli.concurrency.min(remaining)))?)
+        }
+        None => None,
+    };
     if let Some(bench) = bench {
         let calibration = new_calibration(cli, bench, calibrations.len())?;
         store.journal.append(&JournalRecord::Calibration(calibration.clone()))?;
@@ -2325,6 +2344,10 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         })?;
     }
 
+    // 最後の pair で上限を越えて止めた run は、同じ上限の resume でも完走扱いにしない。
+    if let Some(reason) = core.timeout_stop_reason() {
+        return store.stop(&core, anyhow::anyhow!(reason));
+    }
     store.publish(&core, RunStatus::Completed, None)?;
     faults.hit("completed_snapshot");
     print_counters("async done", &core);
@@ -2426,8 +2449,10 @@ fn pair_time_control(
             TimeControl::new(clock.btime, clock.btime, clock.binc, clock.binc, 0),
             Some(fischer_game_time_limit_ms(clock.btime, clock.binc)),
         ),
-        (None, Some(btime)) => (base, Some(fischer_game_time_limit_ms(btime, cli.binc))),
-        (None, None) => (base, None),
+        (None, Some(btime)) if cli.nodes.is_none() => {
+            (base, Some(fischer_game_time_limit_ms(btime, cli.binc)))
+        }
+        (None, _) => (base, None),
     }
 }
 

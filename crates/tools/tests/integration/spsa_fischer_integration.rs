@@ -252,6 +252,53 @@ fn game_over_the_wall_clock_limit_is_an_infra_error_on_the_same_pair() {
 }
 
 #[test]
+fn a_search_that_ends_past_the_game_limit_is_not_used_as_a_result() {
+    // 上限 600 ms に対して初手の探索が 700 ms かかる。その手の結果は使わずに指し直す。
+    let test = PoolTest::new();
+    let output = run(
+        &test,
+        1,
+        &["--btime", "100"],
+        &["--engine-retries", "0", "--max-pair-attempts", "1"],
+        &[("SPSA_TEST_ENGINE_MOVE_SLEEP_MS", Path::new("700"))],
+    );
+    assert!(!output.status.success());
+    let failed = kinds(&test, "attempt_failed");
+    assert_eq!(failed.len(), 1);
+    let reason = failed[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("game_time_limit") && reason.contains("1 手"), "{reason}");
+    assert!(kinds(&test, "received").is_empty());
+}
+
+#[test]
+fn a_run_over_the_timeout_rate_on_its_last_pair_does_not_complete_on_resume() {
+    let test = PoolTest::new();
+    let limit = ["--btime", "50"];
+    let env = [("SPSA_TEST_ENGINE_MOVE_SLEEP_MS", Path::new("300"))];
+    let common = ["--timeout-margin-ms", "20", "--max-timeout-rate", "0"];
+    assert!(!run(&test, 1, &limit, &common, &env).status.success());
+    assert_eq!(test.meta()["status"], "stopped");
+    let mut resume = common.to_vec();
+    resume.extend(["--resume", "--force-unlock"]);
+    let output = run(&test, 1, &limit, &resume, &env);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("timeout rate"), "{}", stderr(&output));
+    assert_eq!(test.meta()["status"], "stopped");
+    assert!(!test.path("run").join("final.params").exists());
+    // 上限を上げれば完走として閉じられる。
+    let raised = [
+        "--timeout-margin-ms",
+        "20",
+        "--max-timeout-rate",
+        "1",
+        "--resume",
+        "--force-unlock",
+    ];
+    assert_success(&run(&test, 1, &limit, &raised, &env));
+    assert_eq!(test.meta()["status"], "completed");
+}
+
+#[test]
 fn timeouts_are_results_and_too_many_stop_the_run() {
     // 1 手 300 ms に対して持ち時間 50 ms・マージン 20 ms なので、各局の初手が時間切れになる。
     let test = PoolTest::new();
@@ -357,6 +404,17 @@ fn async_fischer_only_flags_are_rejected_elsewhere() {
             vec!["--dispatch", "async", "--max-timeout-rate", "2"],
             vec!["--btime", "1000"],
             "[0, 1]",
+        ),
+        (
+            vec![
+                "--dispatch",
+                "async",
+                "--nps-scaling",
+                "--usi-option",
+                "Threads=8",
+            ],
+            vec!["--btime", "1000"],
+            "--threads",
         ),
     ] {
         let test = PoolTest::new();

@@ -9,6 +9,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Hand, Piece, Square};
 use serde::{Deserialize, Serialize};
 
+use super::types::PrimaryScore;
 use super::{EvalLog, GameOutcome};
 
 /// 裁定による勝敗と終局理由。
@@ -204,6 +205,21 @@ fn beyond(eval: Option<&EvalLog>, score: i32, direction: i64) -> bool {
     })
 }
 
+/// `beyond` に加え、距離不明の詰み (`score mate +` / `score mate -`) も向きで数える。
+/// 距離不明の詰みは cp・mate の欄が空になり、同一行の確定報告 (`last_exact_primary`) にだけ残る。
+fn beyond_or_unknown_mate(eval: Option<&EvalLog>, score: i32, direction: i64) -> bool {
+    beyond(eval, score, direction)
+        || eval.is_some_and(|e| {
+            e.score_cp.is_none()
+                && e.score_mate.is_none()
+                && match e.last_exact_primary.as_ref().map(|p| &p.score) {
+                    Some(PrimaryScore::MateWin) => direction > 0,
+                    Some(PrimaryScore::MateLoss) => direction < 0,
+                    _ => false,
+                }
+        })
+}
+
 fn bump(streak: &mut u32, reached: bool) {
     *streak = if reached { streak.saturating_add(1) } else { 0 };
 }
@@ -263,8 +279,8 @@ impl ScoreAdjudicator {
         }
         if let Some(rule) = self.agreement {
             let side = mover as usize;
-            bump(&mut self.agreement_winning[side], beyond(eval, rule.score, 1));
-            bump(&mut self.agreement_losing[side], beyond(eval, rule.score, -1));
+            bump(&mut self.agreement_winning[side], beyond_or_unknown_mate(eval, rule.score, 1));
+            bump(&mut self.agreement_losing[side], beyond_or_unknown_mate(eval, rule.score, -1));
             let other = (!mover) as usize;
             if self.agreement_winning[side] >= rule.movecount
                 && self.agreement_losing[other] >= rule.movecount
@@ -785,6 +801,22 @@ mod tests {
             let (ply, _) = play_agreement(&mut scores, &evals).unwrap();
             assert_eq!(ply, 8);
         }
+    }
+
+    #[test]
+    fn agreement_counts_mate_without_distance_from_the_usi_line() {
+        let parse = |score: &str| {
+            let mut snap = super::super::InfoSnapshot::default();
+            snap.update_from_line(&format!("info depth 9 score {score} pv 7g7f"));
+            snap.into_eval_log().unwrap()
+        };
+        let (win, lose) = (parse("mate +"), parse("mate -"));
+        assert!(win.score_mate.is_none() && win.score_cp.is_none());
+        let mut scores = agreement(2, 1000);
+        let (ply, verdict) =
+            play_agreement(&mut scores, &[win.clone(), lose.clone(), win, lose]).unwrap();
+        assert_eq!(ply, 4);
+        assert_verdict(Some(verdict), GameOutcome::BlackWin, "adjudication_agreement");
     }
 
     #[test]

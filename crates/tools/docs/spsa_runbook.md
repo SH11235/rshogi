@@ -1738,6 +1738,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 | `--nps-scaling` | off | 開始時に NPS を測り、`--btime` / `--binc` (基準 TC) に倍率を掛ける。async の Fischer 専用 (`--nodes` とは併用できない) |
 | `--reference-nps N` | 350000 | 基準 NPS (1 thread あたり、全 slot を同時に走らせたときの値)。fingerprint に入り、resume で変えられない |
 | `--min-nps-ratio R` | 0.5 | 実測 NPS が `基準 × R` 未満の機械では起動を拒否する |
+| `--threads N` | 1 | engine の Threads。`--nps-scaling` では `--usi-option Threads=...` を拒否する (bench はこの値で割る) |
 | `--timeout-margin-ms MS` | 1000 | 時間切れ判定の猶予。倍率は**掛けない** (通信・回収のための絶対値)。短い TC に対して大きすぎないかを確かめて決める |
 
 ### 17.1 bench の手順 (`spsa-bench-v1`)
@@ -1770,8 +1771,9 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 - resume でも bench を測り直し、**新しい倍率は新しい pair から**使う。落ちた時点で実行中だった pair と再 attempt 待ちの pair は、
   dispatch 時の時計のまま指し直す。機械を移っても同じ pair の条件は変わらない。
 - 基準 TC (`--btime` / `--binc`)・`--reference-nps`・bench の版は fingerprint で一致を求める。変えるときは新しい run-dir で始める。
-- 足切り (`--min-nps-ratio`) に掛かると、journal・snapshot・meta を書く前に止まる。resume の run はそのまま別の機械で再開でき、
-  fresh では旧 run の journal・snapshot も残る (`--force-init` で先に消える meta・CSV を除く)。
+- bench の slot 数は、resume では journal を再生した後の残りの pair 数で決める (本番の worker 数と同じ)。
+- 足切り (`--min-nps-ratio`) に掛かると、較正を書かずに止まる。fresh では旧 run の journal・snapshot も残る
+  (`--force-init` で先に消える meta・CSV を除く)。resume では再生で確定する分だけを書いて止まり、別の機械でそのまま再開できる。
 - 完走済みの run の resume では bench を走らせない。
 
 ### 17.4 時間切れと 1 局の上限
@@ -1783,9 +1785,12 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
   率は byoyomi の run でも数える。原因を調べてから、上限を上げて resume するか新しい run-dir で始める。
 - meta の `received_games` / `timeout_games` に受信した局と時間切れの局の数を残す (journal から作り直す)。
 - 1 局の壁時計の上限は Fischer の pair ごとに `(持ち時間 × 3 + 加算 × 200) × 2` (fishtest の上限を SPSA と同じく 2 倍)。
-  持ち時間と加算は pair の時計 (補正後) の値。各手の開始前に確かめ、超えたら infra error として扱い、
+  持ち時間と加算は pair の時計 (補正後) の値。各手の探索の前後に確かめ、超えたら (その探索の結果は使わずに) infra error として扱い、
   `--engine-retries` → 同じ確定値の次の attempt の順に同じ pair を指し直す (journal の `attempt_failed` の `reason` が
   `game_time_limit: ...`)。時計が 0 になった後も判定の猶予の内で指し続ける engine を止めるためのもので、勝敗には使わない。
+  1 手の中で応答しなくなった engine は、従来どおり 1 手の期限 (残り時間 + 加算 + 猶予) で時間切れの結果になる。
+  その種の故障は時間切れの率による停止で拾う。
+- 時間切れの率が上限を越えたまま resume すると、残りの pair が無くても完走扱いにせず止まる。
 - 終了理由は journal の `received` の `games[].reason` と games.jsonl の `reason` に残る (`timeout`・`sennichite` 系・`max_moves`・
   `resign`・`win`・`adjudication_agreement` など)。infra error は結果ではなく journal の `attempt_failed` に残る。
 - journal の `received` の各局は `elapsed_ms` / `nodes` (先手・後手の順の合計) を持つ。手ごとの値は games.jsonl の
@@ -1795,7 +1800,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 
 `--adjudicate-agreement "movecount=N,score=X"` で、勝ち側の自己視点の評価が +X 以上、負け側の自己視点の評価が −X 以下の状態が、
 両側とも自分の直近 N 手で続いたら勝敗を決める (既定 off、終了理由 `adjudication_agreement`)。N は各側の手数で、対局全体では 2N 手前後。
-詰みの評価は閾値を越えたものとして扱い、`lowerbound` / `upperbound` 付きの評価・評価値の欠落・条件外の値でその側の連続を切る。
+詰みの評価 (距離不明の `score mate +` / `score mate -` を含む) は閾値を越えたものとして扱い、`lowerbound` / `upperbound` 付きの評価・評価値の欠落・条件外の値でその側の連続を切る。
 規則の詳細は [tournament の裁定](tournament.md#ルールによる自動終局) と同じ (同じ実装)。
 
 - async 専用。有無と X・N は fingerprint に入り、resume で一致を求める。採用 SPRT (tournament) も同じ値で指す。

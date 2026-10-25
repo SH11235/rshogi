@@ -1,6 +1,7 @@
 //! `--adjudication-sweep`: 両側の評価の一致による裁定 (`--adjudicate-agreement`) を、記録済みの
 //! 自己対局ログに後から当てはめ、閾値 X と手数 N の組ごとに「裁定が実際の結果と食い違う率」と
 //! 「縮む手数の割合」を出す。判定は対局と同じ `ScoreAdjudicator` を使う。
+//! 入力は tournament 形式の JSONL (`type` が `move` / `result` の行)。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -98,9 +99,12 @@ pub fn sweep(files: &[&str], scores: &[i32], movecounts: &[u32]) -> Result<Vec<S
         let mut pending: HashMap<u32, Vec<PlayedMove>> = HashMap::new();
         for line in BufReader::new(file).lines() {
             let line = line?;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            if line.trim().is_empty() {
                 continue;
-            };
+            }
+            // 壊れた行を飛ばすと評価の連続を誤ってつなぐので、読めない行は入力の誤りとして止める。
+            let value: serde_json::Value = serde_json::from_str(line.trim())
+                .with_context(|| format!("JSONパースエラー: {path}"))?;
             if value["type"] == "move" {
                 let mv: SweepMove = serde_json::from_value(value)
                     .with_context(|| format!("moveパースエラー: {path}"))?;
@@ -257,6 +261,13 @@ mod tests {
         assert_eq!(rows[1].adjudicated, 0);
         assert!((rows[0].mismatch_rate() - 2.0 / 3.0).abs() < 1e-12);
         assert!((rows[0].saved_fraction() - 18.0 / 40.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sweep_rejects_unreadable_lines_instead_of_joining_streaks() {
+        let lines = vec![mv(1, 1, 800), "{broken".to_string(), mv(1, 3, 800)];
+        let (_dir, path) = write_log(&lines);
+        assert!(sweep(&[path.as_str()], &[800], &[2]).is_err());
     }
 
     #[test]

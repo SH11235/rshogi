@@ -149,7 +149,8 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 - `--adjudicate-agreement "movecount=3,score=800"`: 勝ち側の自己視点の評価が +800cp 以上、
   負け側の自己視点の評価が -800cp 以下の状態が、**両側とも自分の直近 3 手**で続いたら勝ち側の勝ち
   （各側の手数で数えるので、対局全体では 6 手前後）。片側だけの評価では裁定しない。
-  詰みの評価は符号の向きで閾値を越えたものとして扱い（勝ち側の正の mate、負け側の負の mate）、
+  詰みの評価は符号の向きで閾値を越えたものとして扱い（勝ち側の正の mate、負け側の負の mate。
+  距離不明の `score mate +` / `score mate -` も数える）、
   条件外の cp・逆向きの mate・評価値欠落でその側の連続をリセットする。`score` は 1 以上。
   採用 SPRT と `spsa --dispatch async` で同じ条件にできるよう、spsa にも同じ option がある。
   閾値は保存済みの対局に `analyze_selfplay --adjudication-sweep` を当てて決める

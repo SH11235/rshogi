@@ -1610,6 +1610,11 @@ fn main() -> Result<()> {
             bail!("--sweep-scores と --sweep-movecounts は 1 以上の値で指定してください");
         }
         let rows = adjudication_sweep::sweep(&files, &cli.sweep_scores, &cli.sweep_movecounts)?;
+        if rows.iter().all(|row| row.games == 0) {
+            bail!(
+                "集計できる局がありません。--adjudication-sweep は tournament 形式の JSONL (move 行に eval を持つもの) を読みます"
+            );
+        }
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&rows)?);
         } else {
