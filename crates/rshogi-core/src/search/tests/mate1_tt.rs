@@ -36,6 +36,7 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,
+        shared: &worker.shared_histories,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,
         max_moves_to_draw: worker.max_moves_to_draw,

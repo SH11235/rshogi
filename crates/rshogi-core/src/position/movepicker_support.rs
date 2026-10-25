@@ -291,17 +291,6 @@ impl Position {
     }
 
     // =========================================================================
-    // 歩の陣形インデックス
-    // =========================================================================
-
-    /// PawnHistory 用のインデックスを計算
-    ///
-    /// 歩の配置に基づくハッシュ値からインデックスを計算する。
-    pub fn pawn_history_index(&self) -> usize {
-        (self.pawn_key() as usize) & (crate::search::PAWN_HISTORY_SIZE - 1)
-    }
-
-    // =========================================================================
     // 指し手生成（MovePicker用）
     // =========================================================================
 
@@ -794,15 +783,6 @@ mod tests {
         let m = Move::new_move(sq55, sq54, false);
         assert!(pos.see_ge(m, Value::new(0)));
         assert!(pos.see_ge(m, Value::new(400))); // 金(540) - 歩(90) = 450 > 400
-    }
-
-    #[test]
-    fn test_pawn_history_index() {
-        let mut pos = Position::new();
-        pos.set_hirate();
-
-        let idx = pos.pawn_history_index();
-        assert!(idx < crate::search::PAWN_HISTORY_SIZE);
     }
 
     /// X-ray攻撃のテスト: to を占有から外さないと誤って得と判定されるケース

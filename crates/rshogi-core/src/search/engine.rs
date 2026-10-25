@@ -16,7 +16,7 @@ use super::time_manager::{
 };
 use super::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, RootMove, SearchTuneParams,
-    SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement,
+    SearchWorker, SharedHistories, Skill, SkillOptions, ThreadPool, TimeManagement,
 };
 use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
@@ -232,6 +232,8 @@ pub struct Search {
     num_threads: usize,
     /// 探索スレッドプール（helper threads）
     thread_pool: ThreadPool,
+    /// main と helper の全スレッドで共有する履歴
+    shared_histories: Arc<SharedHistories>,
 
     /// SearchWorker（長期保持して再利用）
     /// 履歴統計を含み、usinewgameでクリア、goでは保持
@@ -700,10 +702,12 @@ impl Search {
         let increase_depth_shared = Arc::new(AtomicBool::new(true));
         let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
         let search_tune_params = SearchTuneParams::default();
+        let shared_histories = Arc::new(SharedHistories::new(1));
         let thread_pool = ThreadPool::new(
             1,
             Arc::clone(&tt),
             Arc::clone(&eval_hash),
+            Arc::clone(&shared_histories),
             Arc::clone(&stop),
             Arc::clone(&ponderhit_flag),
             Arc::clone(&increase_depth_shared),
@@ -724,6 +728,7 @@ impl Search {
             skill_options: SkillOptions::default(),
             num_threads: 1,
             thread_pool,
+            shared_histories,
             // workerは遅延初期化（最初のgoで作成）
             worker: None,
             best_previous_score: Some(Value::INFINITE),
@@ -841,6 +846,8 @@ impl Search {
             worker.clear();
         }
         self.thread_pool.clear_histories();
+        self.thread_pool.wait_for_search_finished();
+        self.shared_histories.clear(self.search_tune_params.pawn_history_init as i16);
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -970,11 +977,19 @@ impl Search {
         let num = 1;
         #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
         let num = num.clamp(1, 512);
+        if num != self.num_threads {
+            // 表の大きさがスレッド数で決まるので作り直す。
+            self.shared_histories = Arc::new(SharedHistories::new(num));
+            if let Some(worker) = &mut self.worker {
+                worker.shared_histories = Arc::clone(&self.shared_histories);
+            }
+        }
         self.num_threads = num;
         self.thread_pool.set_num_threads(
             num,
             Arc::clone(&self.tt),
             Arc::clone(&self.eval_hash),
+            Arc::clone(&self.shared_histories),
             self.max_moves_to_draw,
             self.search_tune_params,
         );
@@ -1073,8 +1088,16 @@ impl Search {
         let search_tune_params = self.search_tune_params;
         let draw_value_black = self.draw_value_black;
         let draw_value_white = self.draw_value_white;
+        let shared_histories = Arc::clone(&self.shared_histories);
         let worker = self.worker.get_or_insert_with(|| {
-            SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0, search_tune_params)
+            SearchWorker::new_with_shared(
+                tt_clone,
+                eval_hash_clone,
+                shared_histories,
+                max_moves,
+                0,
+                search_tune_params,
+            )
         });
 
         // setoptionで変更された可能性があるため、最新値を反映
@@ -2094,6 +2117,40 @@ mod tests {
                 for count in [2, 3, 1] {
                     search.set_num_threads(count);
                     assert!(!stop.load(Ordering::SeqCst), "Threads={count} requested stop");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// main と helper は同じ共有履歴を持ち、スレッド数を変えると作り直した表に揃う。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn helpers_share_histories_with_main_worker() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new_with_eval_hash(1, 1);
+                let mut pos = Position::new();
+                pos.set_hirate();
+                let limits = LimitsType {
+                    depth: 1,
+                    ..Default::default()
+                };
+                search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+                for count in [3, 2] {
+                    search.set_num_threads(count);
+                    let shared = Arc::clone(&search.shared_histories);
+                    let main = search.worker.as_ref().unwrap();
+                    assert!(Arc::ptr_eq(&main.shared_histories, &shared));
+                    for thread in search.thread_pool.helper_threads() {
+                        thread.with_worker(|worker| {
+                            assert!(Arc::ptr_eq(&worker.shared_histories, &shared));
+                        });
+                    }
                 }
             })
             .unwrap()

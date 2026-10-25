@@ -10,7 +10,7 @@ use crate::types::{Bound, Color, DEPTH_UNSEARCHED, Depth, MAX_PLY, Move, Piece, 
 use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
-use super::history::{CORRECTION_HISTORY_SIZE, CorrectionHistory};
+use super::history::CorrectionHistory;
 use super::search_helpers::nnue_evaluate_cached;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
@@ -36,10 +36,6 @@ pub(super) fn correction_value(
     ply: i32,
 ) -> i32 {
     let us = pos.side_to_move();
-    let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
     // (ss-1)->currentMove を使って continuation correction を参照
     let prev_move = if ply >= 1 {
@@ -53,10 +49,11 @@ pub(super) fn correction_value(
 
     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
     let h = unsafe { ctx.history.as_ref_unchecked() };
-    let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
-    let micv = h.correction_history.minor_value(minor_idx, us) as i32;
-    let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-    let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+    let shared = ctx.shared;
+    let pcv = shared.pawn_correction(pos.pawn_key(), us) as i32;
+    let micv = shared.minor_correction(pos.minor_piece_key(), us) as i32;
+    let wnpcv = shared.non_pawn_correction(pos.non_pawn_key(Color::White), Color::White, us) as i32;
+    let bnpcv = shared.non_pawn_correction(pos.non_pawn_key(Color::Black), Color::Black, us) as i32;
 
     let tp = ctx.tune_params;
     // 前の手が無い (root・null move 直後) ときは continuation 項全体を定数で置き換える。
@@ -102,10 +99,6 @@ pub(super) fn update_correction_history(
     bonus: i32,
 ) {
     let us = pos.side_to_move();
-    let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
     // (ss-1)->currentMove を使って continuation correction を更新
     let prev_move = if ply >= 1 {
@@ -134,23 +127,25 @@ pub(super) fn update_correction_history(
 
     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
     let h = unsafe { ctx.history.as_mut_unchecked() };
-    h.correction_history.update_pawn(pawn_idx, us, bonus);
-    h.correction_history.update_minor(
-        minor_idx,
+    let shared = ctx.shared;
+    shared.update_pawn_correction(pos.pawn_key(), us, bonus);
+    shared.update_minor_correction(
+        pos.minor_piece_key(),
         us,
         bonus * tp.correction_history_minor_piece_mult / 128,
     );
-    h.correction_history.update_non_pawn(
-        non_pawn_idx_w,
+    let non_pawn_bonus = bonus * tp.correction_history_non_pawn_weight / 128;
+    shared.update_non_pawn_correction(
+        pos.non_pawn_key(Color::White),
         Color::White,
         us,
-        bonus * tp.correction_history_non_pawn_weight / 128,
+        non_pawn_bonus,
     );
-    h.correction_history.update_non_pawn(
-        non_pawn_idx_b,
+    shared.update_non_pawn_correction(
+        pos.non_pawn_key(Color::Black),
         Color::Black,
         us,
-        bonus * tp.correction_history_non_pawn_weight / 128,
+        non_pawn_bonus,
     );
 
     // m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）

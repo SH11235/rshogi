@@ -8,7 +8,6 @@
 //! - `CapturePieceToHistory`: [piece][to][captured_pt] -> score
 //! - `PieceToHistory`: [piece][to] -> score
 //! - `ContinuationHistory`: [prev_pc][prev_to][pc][to] -> score
-//! - `PawnHistory`: [pawn_key_idx][piece][to] -> score
 //! - `CounterMoveHistory`: [piece][square] -> Move
 //! - `HistoryCell`: 内部可変性ラッパー（参照リークを型で封じる）
 
@@ -58,9 +57,6 @@ const CAPTURE_HISTORY_INIT: i16 = -689;
 
 /// continuationHistory初期値 (YO: continuationHistory.fill(-529))
 pub const CONTINUATION_HISTORY_INIT: i16 = -529;
-
-/// pawnHistory初期値 (YO: pawnHistory.clear_range(-1238, ...))
-const PAWN_HISTORY_INIT: i16 = -1238;
 
 /// 駒種の数（PieceType::NUM相当）
 const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
@@ -519,94 +515,6 @@ impl Default for ContinuationHistory {
 }
 
 // =============================================================================
-// PawnHistory
-// =============================================================================
-
-/// PawnHistory: [pawn_key_index][piece][to] -> score
-///
-/// 歩の陣形に対する履歴。
-///
-/// HistoryTables内の連続領域に配置するため配列で保持する。
-pub struct PawnHistory {
-    table: [[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE],
-}
-
-impl PawnHistory {
-    /// 新しいPawnHistoryを作成
-    pub fn new() -> Self {
-        let row = [[StatsEntry::default(); Square::NUM]; PIECE_NUM];
-        Self {
-            table: [row; PAWN_HISTORY_SIZE],
-        }
-    }
-
-    /// 新しいPawnHistoryを作成（ヒープ確保）
-    ///
-    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
-    pub fn new_boxed() -> Box<Self> {
-        // SAFETY: StatsEntryはi16のみで構成され、ゼロ初期化は常に有効。
-        unsafe { Box::<Self>::new_zeroed().assume_init() }
-    }
-
-    /// 値を取得
-    #[inline]
-    pub fn get(&self, pawn_key_index: usize, pc: Piece, to: Square) -> i16 {
-        debug_assert!(pawn_key_index < PAWN_HISTORY_SIZE);
-        // SAFETY: pawn_key_index は呼び出し側でマスク済み (< PAWN_HISTORY_SIZE=8192)。
-        //         Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
-        unsafe {
-            self.table
-                .get_unchecked(pawn_key_index)
-                .get_unchecked(pc.index())
-                .get_unchecked(to.index())
-                .get()
-        }
-    }
-
-    /// 値を更新
-    #[inline]
-    pub fn update(&mut self, pawn_key_index: usize, pc: Piece, to: Square, bonus: i32) {
-        debug_assert!(pawn_key_index < PAWN_HISTORY_SIZE);
-        // SAFETY: 同上。
-        unsafe {
-            self.table
-                .get_unchecked_mut(pawn_key_index)
-                .get_unchecked_mut(pc.index())
-                .get_unchecked_mut(to.index())
-                .update(bonus);
-        }
-    }
-
-    /// クリア（初期値-1238）
-    pub fn clear(&mut self) {
-        for pawn_table in self.table.iter_mut() {
-            for pc_table in pawn_table.iter_mut() {
-                for entry in pc_table.iter_mut() {
-                    entry.set(PAWN_HISTORY_INIT);
-                }
-            }
-        }
-    }
-
-    /// 指定初期値でクリア
-    pub fn clear_with_init(&mut self, init_val: i16) {
-        for pawn_table in self.table.iter_mut() {
-            for pc_table in pawn_table.iter_mut() {
-                for entry in pc_table.iter_mut() {
-                    entry.set(init_val);
-                }
-            }
-        }
-    }
-}
-
-impl Default for PawnHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// =============================================================================
 // CounterMoveHistory
 // =============================================================================
 
@@ -661,18 +569,13 @@ impl Default for CounterMoveHistory {
 pub type CorrectionPieceToHistory =
     [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]; Piece::NUM];
 
-/// CorrectionHistory ()
+/// Continuation correction history: [prev_pc][prev_to][pc][to] -> correction
 ///
-/// - Pawn/Minor: [key_index][color] -> correction
-/// - NonPawn: [key_index][side_to_move][piece_color] -> correction
-/// - Continuation: [prev_pc][prev_to][pc][to] -> correction
+/// 局面キーで引く pawn / minor / non-pawn の correction はスレッド間で共有する
+/// (`SharedHistories`)。ここにはスレッドごとの continuation だけを持つ。
 ///
 /// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CorrectionHistory {
-    pawn: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
-    minor: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
-    non_pawn:
-        [[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
     continuation: [[CorrectionPieceToHistory; Square::NUM]; Piece::NUM],
 }
 
@@ -680,9 +583,6 @@ impl CorrectionHistory {
     /// 新しいCorrectionHistoryを作成（初期値込み）
     pub fn new() -> Self {
         let mut history = Self {
-            pawn: [[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE],
-            minor: [[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE],
-            non_pawn: [[[StatsEntry::default(); Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
             continuation: [[[[StatsEntry::default(); Square::NUM]; Piece::NUM]; Square::NUM];
                 Piece::NUM],
         };
@@ -706,88 +606,12 @@ impl CorrectionHistory {
     }
 
     fn fill_initial_values(&mut self) {
-        for entry in self.pawn.iter_mut().flatten() {
-            entry.set(0);
-        }
-        for entry in self.minor.iter_mut().flatten() {
-            entry.set(0);
-        }
-        for entry in self.non_pawn.iter_mut().flatten().flatten() {
-            entry.set(0);
-        }
         for prev_pc in self.continuation.iter_mut() {
             for prev_to in prev_pc.iter_mut() {
                 for entry in prev_to.iter_mut().flatten() {
                     entry.set(8);
                 }
             }
-        }
-    }
-
-    #[inline]
-    pub fn pawn_value(&self, idx: usize, color: Color) -> i16 {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
-        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
-        unsafe { self.pawn.get_unchecked(masked).get_unchecked(color.index()).get() }
-    }
-
-    #[inline]
-    pub fn update_pawn(&mut self, idx: usize, color: Color, bonus: i32) {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: 同上。
-        unsafe {
-            self.pawn
-                .get_unchecked_mut(masked)
-                .get_unchecked_mut(color.index())
-                .update(bonus);
-        }
-    }
-
-    #[inline]
-    pub fn minor_value(&self, idx: usize, color: Color) -> i16 {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
-        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
-        unsafe { self.minor.get_unchecked(masked).get_unchecked(color.index()).get() }
-    }
-
-    #[inline]
-    pub fn update_minor(&mut self, idx: usize, color: Color, bonus: i32) {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: 同上。
-        unsafe {
-            self.minor
-                .get_unchecked_mut(masked)
-                .get_unchecked_mut(color.index())
-                .update(bonus);
-        }
-    }
-
-    #[inline]
-    pub fn non_pawn_value(&self, idx: usize, board_color: Color, stm: Color) -> i16 {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
-        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
-        unsafe {
-            self.non_pawn
-                .get_unchecked(masked)
-                .get_unchecked(board_color.index())
-                .get_unchecked(stm.index())
-                .get()
-        }
-    }
-
-    #[inline]
-    pub fn update_non_pawn(&mut self, idx: usize, board_color: Color, stm: Color, bonus: i32) {
-        let masked = idx % CORRECTION_HISTORY_SIZE;
-        // SAFETY: 同上。
-        unsafe {
-            self.non_pawn
-                .get_unchecked_mut(masked)
-                .get_unchecked_mut(board_color.index())
-                .get_unchecked_mut(stm.index())
-                .update(bonus);
         }
     }
 
@@ -871,7 +695,6 @@ pub struct HistoryTables {
     pub low_ply_history: LowPlyHistory,
     pub capture_history: CapturePieceToHistory,
     pub continuation_history: [[ContinuationHistory; 2]; 2],
-    pub pawn_history: PawnHistory,
     pub correction_history: CorrectionHistory,
     pub tt_move_history: TTMoveHistory,
 }
@@ -898,7 +721,6 @@ impl HistoryTables {
                 ch.clear();
             }
         }
-        self.pawn_history.clear();
         self.correction_history.clear();
         self.tt_move_history.clear();
     }
@@ -913,7 +735,6 @@ impl HistoryTables {
                 ch.clear_with_init(tp.continuation_history_init as i16);
             }
         }
-        self.pawn_history.clear_with_init(tp.pawn_history_init as i16);
         self.correction_history.clear();
         self.tt_move_history.clear();
     }

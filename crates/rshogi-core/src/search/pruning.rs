@@ -130,7 +130,8 @@ pub(super) fn step14_pruning(
             let (main_hist, pawn_hist) = {
                 let h = unsafe { ctx.history.as_ref_unchecked() };
                 let mh = h.main_history.get(step_ctx.mover, step_ctx.mv) as i32;
-                let ph = h.pawn_history.get(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
+                let ph =
+                    ctx.shared.pawn_history(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
                 (mh, ph)
             };
 
@@ -510,7 +511,7 @@ where
         let mv = {
             // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
             let h = unsafe { ctx.history.as_ref_unchecked() };
-            mp.next_move(pos, h)
+            mp.next_move(pos, h, ctx.shared)
         };
         if mv == Move::NONE {
             break;

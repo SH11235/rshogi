@@ -20,6 +20,7 @@ mod movepicker;
 mod pruning;
 mod qsearch;
 mod search_helpers;
+mod shared_history;
 mod skill;
 mod thread;
 mod time_manager;
@@ -41,6 +42,7 @@ pub use engine::*;
 pub use history::*;
 pub use limits::*;
 pub use movepicker::*;
+pub use shared_history::SharedHistories;
 pub use skill::*;
 #[cfg(feature = "search-stats")]
 pub use stats::SearchStats;

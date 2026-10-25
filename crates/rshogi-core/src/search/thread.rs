@@ -13,7 +13,9 @@ mod imp {
     use crate::types::Depth;
 
     use crate::search::engine::{SearchProgress, search_helper};
-    use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
+    use crate::search::{
+        LimitsType, SearchTuneParams, SearchWorker, SharedHistories, TimeManagement, TimeOptions,
+    };
     use crate::types::EnteringKingRule;
 
     const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -38,6 +40,7 @@ mod imp {
             num_threads: usize,
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
+            shared_histories: Arc<SharedHistories>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             increase_depth_shared: Arc<AtomicBool>,
@@ -51,7 +54,14 @@ mod imp {
                 increase_depth_shared,
                 search_tune_params,
             };
-            pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw, search_tune_params);
+            pool.set_num_threads(
+                num_threads,
+                tt,
+                eval_hash,
+                shared_histories,
+                max_moves_to_draw,
+                search_tune_params,
+            );
             pool
         }
 
@@ -60,6 +70,7 @@ mod imp {
             num_threads: usize,
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
+            shared_histories: Arc<SharedHistories>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) {
@@ -78,6 +89,7 @@ mod imp {
                     id,
                     Arc::clone(&tt),
                     Arc::clone(&eval_hash),
+                    Arc::clone(&shared_histories),
                     Arc::clone(&self.stop),
                     Arc::clone(&self.ponderhit),
                     Arc::clone(&self.increase_depth_shared),
@@ -224,14 +236,21 @@ mod imp {
             id: usize,
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
+            shared_histories: Arc<SharedHistories>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             increase_depth_shared: Arc<AtomicBool>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) -> Self {
-            let worker =
-                SearchWorker::new(tt, eval_hash, max_moves_to_draw, id, search_tune_params);
+            let worker = SearchWorker::new_with_shared(
+                tt,
+                eval_hash,
+                shared_histories,
+                max_moves_to_draw,
+                id,
+                search_tune_params,
+            );
             let progress = Arc::new(SearchProgress::new());
             let inner = Arc::new(ThreadInner {
                 worker: Mutex::new(worker),
@@ -409,7 +428,7 @@ mod imp {
     use crate::tt::TranspositionTable;
     use crate::types::Depth;
 
-    use crate::search::{LimitsType, SearchTuneParams, TimeOptions};
+    use crate::search::{LimitsType, SearchTuneParams, SharedHistories, TimeOptions};
 
     /// Stub ThreadPool for single-threaded Wasm builds.
     /// All methods are no-ops since there are no helper threads.
@@ -427,6 +446,7 @@ mod imp {
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
             _eval_hash: Arc<EvalHash>,
+            _shared_histories: Arc<SharedHistories>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             _increase_depth_shared: Arc<AtomicBool>,
@@ -445,6 +465,7 @@ mod imp {
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
             _eval_hash: Arc<EvalHash>,
+            _shared_histories: Arc<SharedHistories>,
             _max_moves_to_draw: i32,
             _search_tune_params: SearchTuneParams,
         ) {
@@ -586,7 +607,9 @@ mod imp {
     use crate::types::{Depth, Move, Value};
 
     use crate::search::engine::search_helper;
-    use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
+    use crate::search::{
+        LimitsType, SearchTuneParams, SearchWorker, SharedHistories, TimeManagement, TimeOptions,
+    };
 
     /// Helper thread の探索結果を格納する構造体。
     /// 各 helper が探索完了時にこの情報を shared vector に push する。
@@ -650,6 +673,7 @@ mod imp {
         num_threads: usize,
         tt: Arc<TranspositionTable>,
         eval_hash: Arc<EvalHash>,
+        shared_histories: Arc<SharedHistories>,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         increase_depth_shared: Arc<AtomicBool>,
@@ -683,6 +707,7 @@ mod imp {
             num_threads: usize,
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
+            shared_histories: Arc<SharedHistories>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             increase_depth_shared: Arc<AtomicBool>,
@@ -698,6 +723,7 @@ mod imp {
                 num_threads,
                 tt,
                 eval_hash,
+                shared_histories,
                 stop,
                 ponderhit,
                 increase_depth_shared,
@@ -714,6 +740,7 @@ mod imp {
             num_threads: usize,
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
+            shared_histories: Arc<SharedHistories>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) {
@@ -729,6 +756,7 @@ mod imp {
             self.num_threads = num_threads;
             self.tt = tt;
             self.eval_hash = eval_hash;
+            self.shared_histories = shared_histories;
             self.max_moves_to_draw = max_moves_to_draw;
             self.search_tune_params = search_tune_params;
         }
@@ -796,6 +824,7 @@ mod imp {
                 let increase_depth = Arc::clone(&self.increase_depth_shared);
                 let tt = Arc::clone(&self.tt);
                 let eval_hash = Arc::clone(&self.eval_hash);
+                let shared_histories = Arc::clone(&self.shared_histories);
                 let pending = Arc::clone(&self.pending_tasks);
                 let helper_results = Arc::clone(&self.helper_results);
                 // thread_id is 1-indexed, so subtract 1 to get the progress index
@@ -807,9 +836,10 @@ mod imp {
                 // ロックは所有権の受け渡し時のみ。探索中はタスクが Box を排他的に所有する。
                 let mut worker =
                     slot.lock().expect("worker slot poisoned").take().unwrap_or_else(|| {
-                        SearchWorker::new(
+                        SearchWorker::new_with_shared(
                             Arc::clone(&tt),
                             Arc::clone(&eval_hash),
+                            Arc::clone(&shared_histories),
                             max_moves_to_draw,
                             thread_id,
                             search_tune_params,
@@ -820,6 +850,7 @@ mod imp {
                     worker.thread_id = thread_id;
                     worker.tt = Arc::clone(&tt);
                     worker.eval_hash = Arc::clone(&eval_hash);
+                    worker.shared_histories = shared_histories;
                     worker.max_moves_to_draw = max_moves_to_draw;
                     worker.draw_value_black = draw_value_black;
                     worker.draw_value_white = draw_value_white;

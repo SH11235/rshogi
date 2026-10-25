@@ -38,7 +38,7 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
-use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE};
+use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE, SharedHistories};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
@@ -137,7 +137,7 @@ impl Stage {
 /// ```ignore
 /// let mut mp = MovePicker::new(pos, tt_move, depth, ply, cont_hist, generate_all);
 /// loop {
-///     let mv = { let h = unsafe { ctx.history.as_ref_unchecked() }; mp.next_move(pos, h) };
+///     let mv = { let h = unsafe { ctx.history.as_ref_unchecked() }; mp.next_move(pos, h, ctx.shared) };
 ///     if mv == Move::NONE { break; }
 ///     // LMPチェック
 ///     if lmp_condition && mp.is_quiet_stage() && !is_capture {
@@ -166,7 +166,7 @@ pub struct MovePicker {
 
     // 初期化時にキャッシュする情報
     side_to_move: Color,
-    pawn_history_index: usize,
+    pawn_key: u64,
 
     // 指し手バッファ（MaybeUninitにより初期化コストゼロ）
     moves: ExtMoveBuffer,
@@ -232,7 +232,7 @@ impl MovePicker {
             skip_quiets: false,
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
-            pawn_history_index: pos.pawn_history_index(),
+            pawn_key: pos.pawn_key(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -270,7 +270,7 @@ impl MovePicker {
             skip_quiets: false,
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
-            pawn_history_index: pos.pawn_history_index(),
+            pawn_key: pos.pawn_key(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -311,7 +311,7 @@ impl MovePicker {
             skip_quiets: false,
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
-            pawn_history_index: pos.pawn_history_index(),
+            pawn_key: pos.pawn_key(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -357,13 +357,19 @@ impl MovePicker {
     /// ## 引数
     /// - `pos`: 現在の局面への参照（各呼び出しで一時的に借用）
     /// - `history`: HistoryTablesへの参照（スコアリング時に使用）
+    /// - `shared`: スレッド間で共有する履歴（スコアリング時に使用）
     ///
     /// ## 使用パターン
     ///
     /// ```ignore
-    /// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+    /// let mv = ctx.history.with_read(|h| mp.next_move(pos, h, ctx.shared));
     /// ```
-    pub fn next_move(&mut self, pos: &Position, history: &HistoryTables) -> Move {
+    pub fn next_move(
+        &mut self,
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+    ) -> Move {
         loop {
             match self.stage {
                 // ==============================
@@ -444,7 +450,7 @@ impl MovePicker {
 
                         self.cur = self.end_captures;
 
-                        self.score_quiets(pos, history);
+                        self.score_quiets(pos, history, shared);
 
                         // YaneuraOu準拠: 深さベースの閾値で部分ソート
                         // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
@@ -592,9 +598,9 @@ impl MovePicker {
     }
 
     /// 静かな手のスコアを計算
-    fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
+    fn score_quiets(&mut self, pos: &Position, history: &HistoryTables, shared: &SharedHistories) {
         let us = self.side_to_move;
-        let pawn_idx = self.pawn_history_index;
+        let pawn_idx = shared.pawn_history_index(self.pawn_key);
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
         let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
@@ -616,7 +622,7 @@ impl MovePicker {
                 let pt = pc.piece_type();
 
                 let mut value = 2 * history.main_history.get(us, m) as i32;
-                value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                value += 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
                 value += ch0.get(pc, to) as i32;
                 value += ch1.get(pc, to) as i32;
                 value += ch2.get(pc, to) as i32;
@@ -641,7 +647,7 @@ impl MovePicker {
                 let pt = pc.piece_type();
 
                 let mut value = 2 * history.main_history.get(us, m) as i32;
-                value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                value += 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
                 value += ch0.get(pc, to) as i32;
                 value += ch1.get(pc, to) as i32;
                 value += ch2.get(pc, to) as i32;
@@ -876,9 +882,15 @@ mod tests {
     use super::*;
     use crate::types::Square;
 
+    /// MovePicker は共有履歴を読むだけなので、テスト間で 1 つを使い回す。
+    fn shared() -> &'static SharedHistories {
+        static SHARED: std::sync::OnceLock<SharedHistories> = std::sync::OnceLock::new();
+        SHARED.get_or_init(|| SharedHistories::new(1))
+    }
+
     fn all_moves(mut picker: MovePicker, pos: &Position, history: &HistoryTables) -> Vec<Move> {
         std::iter::from_fn(|| {
-            let mv = picker.next_move(pos, history);
+            let mv = picker.next_move(pos, history, shared());
             mv.is_some().then_some(mv)
         })
         .collect()
@@ -919,7 +931,7 @@ mod tests {
         keys[0] = key;
         let mut history = HistoryTables::new_boxed();
         let mut picker = MovePicker::new(&pos, tt, 1, 0, keys, false);
-        assert_eq!(picker.next_move(&pos, &history), tt);
+        assert_eq!(picker.next_move(&pos, &history, shared()), tt);
         // TT 手の探索から戻るまで quiet のスコアはまだ確定しない。
         let control = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
         assert_ne!(control[1], target);
@@ -928,7 +940,7 @@ mod tests {
             target.to(),
             10000,
         );
-        assert_eq!(picker.next_move(&pos, &history), target);
+        assert_eq!(picker.next_move(&pos, &history, shared()), target);
         let mut expected = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
         expected.drain(..2);
         assert_eq!(all_moves(picker, &pos, &history), expected);
@@ -946,7 +958,7 @@ mod tests {
         let keys = [key; 6];
         let mut history = HistoryTables::new_boxed();
         let mut picker = MovePicker::new_evasions(&pos, tt, 0, keys, false);
-        assert_eq!(picker.next_move(&pos, &history), tt);
+        assert_eq!(picker.next_move(&pos, &history, shared()), tt);
         history.continuation_history[0][1].get_table_mut(key.piece, key.to).update(
             target.moved_piece_after(),
             target.to(),
@@ -1007,7 +1019,7 @@ mod tests {
     ) {
         let initial_stage = picker.stage;
         loop {
-            let mv = picker.next_move(pos, history);
+            let mv = picker.next_move(pos, history, shared());
             if mv.is_none() {
                 break;
             }
