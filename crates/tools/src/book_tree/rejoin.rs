@@ -450,7 +450,7 @@ mod tests {
             )]
         );
         // 一覧の出力先が入力と同じなら止める。
-        let mut same = args(dir.path(), 40, Some(dir.path().join("moves.tsv")));
+        let mut same = args(dir.path(), 40, None);
         same.table = dir.path().join("moves.tsv");
         assert!(run_from(same, ROOT).is_err());
         let freq = dir.path().join("freq.db");
