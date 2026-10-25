@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を 3 つのサブコマンドで行います。定跡の木 (`tree`) と元データの点検 (`master audit`) は後の節にあります。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`) と定跡の元データの点検 (`master audit`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -446,7 +446,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
   --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db]
 ```
 
-定跡の元データの表 (上の 11 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先が元データと同じファイルなら止まります。
+定跡の元データの表 (上の 11 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|
@@ -461,7 +461,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 - main・alt の手だけを使います。`record` (指さない手) は除きます。
 - 手の値は `evals` の平均 (0.5 は偶数の側へ丸める) です。値は手番の側から見た値です。
-- 値の分かる手は、読みの値のある合法手と、book 内の子局面に値の分かる手がある手です (読みの値の無い手が続く線も、先に読みの値があれば分かる手になります)。分からない手は伝播にも、1 位の候補にも、main との比較にも使いません。
+- 値の分かる手は、読みの値のある合法手と、book 内の子局面 (直接、または先後反転した局面) に値の分かる手がある手です (読みの値の無い手が続く線も、先に読みの値があれば分かる手になります)。分からない手は伝播にも、1 位の候補にも、main との比較にも使いません。
 - 伝播は `book_backprop --merge replace --skip-unusable-moves` と同じです。book 内に子局面のある手は子局面からの値、無い手は読みの値になります。
 
 点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。

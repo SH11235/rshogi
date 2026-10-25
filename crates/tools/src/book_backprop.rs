@@ -2294,7 +2294,6 @@ fn write_delta_report(writer: &mut dyn Write, deltas: &BTreeMap<i32, usize>) -> 
 }
 
 /// 昇順に並べた `total` 個の値の `pct` パーセンタイル (並べた位置を切り上げる)。
-/// 値ごとの数から、`pct` % の位置の値を返す。
 pub(crate) fn percentile(counts: &BTreeMap<i32, usize>, total: usize, pct: usize) -> i32 {
     let idx = ((total - 1) * pct).div_ceil(100);
     let mut seen = 0;

@@ -6,6 +6,7 @@ use crate::book_backprop::{
     BackpropOptions, DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, percentile,
     propagate_values, read_graph, write_backprop_book,
 };
+use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
@@ -125,8 +126,13 @@ pub(super) struct AuditSummary {
 
 pub(super) fn run(args: AuditArgs) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
-    for out in std::iter::once(&args.table).chain(args.out_db.as_ref()) {
-        ensure_not_same_file(&args.master, out)?;
+    let master = resolve(&args.master);
+    let table = resolve(&args.table);
+    ensure!(table != master, "--table が元データと同じです: {}", args.table.display());
+    if let Some(out) = &args.out_db {
+        let out = resolve(out);
+        ensure!(out != master, "--out-db が元データと同じです");
+        ensure!(out != table, "--out-db が --table と同じです");
     }
     let positions = read_master(&args.master)?;
     let draws = DrawValues {
@@ -143,16 +149,19 @@ pub(super) fn run(args: AuditArgs) -> Result<()> {
     Ok(())
 }
 
-/// 出力先が元データと同じファイルなら止める (点検は元データを書き換えない)。
-fn ensure_not_same_file(master: &Path, out: &Path) -> Result<()> {
-    let Ok(out) = out.canonicalize() else {
-        return Ok(());
+/// 同じファイルかを比べるためのパス。まだ無いファイルは親ディレクトリを解決して名前を付ける。
+fn resolve(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
     };
-    let master = master
-        .canonicalize()
-        .with_context(|| format!("{} を開けません", master.display()))?;
-    ensure!(out != master, "出力先が元データと同じです: {}", out.display());
-    Ok(())
+    match (parent.canonicalize(), path.file_name()) {
+        (Ok(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// 元データを読み、局面ごとに main・alt の手 (main が先頭) を集める。record は数だけ返す。
@@ -285,6 +294,13 @@ fn known_moves(
         for (i, m) in moves.iter().enumerate() {
             if let (false, true, Some(edge)) = (row[i], m.usable, m.edge) {
                 waiting.push((edge.to, index, i));
+                // 直接の子局面の値が分からなくても、反転した局面の値が分かれば、値の分かる手だけを
+                // 書く 2 回目のグラフでは辺が反転した局面に張られる。
+                if !edge.via_flip
+                    && let Some(flipped) = flipped_node(graph, edge.to)
+                {
+                    waiting.push((flipped, index, i));
+                }
             }
         }
         node_known[node] = row.iter().any(|&k| k);
@@ -309,6 +325,12 @@ fn known_moves(
     Ok(known)
 }
 
+/// 局面の反転した局面。book に無ければ `None`。
+fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
+    let flipped = rshogi_book::flipped_key(graph.sfen(node))?;
+    graph.find(strip_ply(&flipped)).filter(|&v| v != node)
+}
+
 /// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
 pub(super) fn audit(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
@@ -320,6 +342,14 @@ pub(super) fn audit(
         records: *records,
         ..AuditSummary::default()
     };
+    for key in positions.keys() {
+        let position = position_from_sfen(&format!("{key} 1"))?;
+        // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
+        ensure!(
+            strip_ply(&position.to_sfen()) == key,
+            "key が正規の SFEN (持ち駒の並びなど) ではありません: {key}"
+        );
+    }
     let all_db = work.join("all.db");
     write_value_db(&all_db, positions, None)?;
     let all = read_graph(&all_db, BackpropOptions::default())?;
@@ -523,11 +553,18 @@ mod tests {
     }
 
     fn run_audit(text: &str, line: i32) -> (Vec<Finding>, AuditSummary) {
-        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        run_audit_with(text, line, DrawValues::both(0)).unwrap()
+    }
+
+    fn run_audit_with(
+        text: &str,
+        line: i32,
+        draws: DrawValues,
+    ) -> Result<(Vec<Finding>, AuditSummary)> {
+        let parsed = parse_master_rows(text.as_bytes())?;
         let work = tempfile::tempdir().unwrap();
-        let (findings, summary, _) =
-            audit(&parsed, DrawValues::both(0), line, work.path()).unwrap();
-        (findings, summary)
+        let (findings, summary, _) = audit(&parsed, draws, line, work.path())?;
+        Ok((findings, summary))
     }
 
     #[test]
@@ -624,5 +661,108 @@ mod tests {
         assert!(parse_master_rows(no_main.as_bytes()).is_err());
         let duplicate = master(&[(ROOT, "5i6h", "main", ""), (ROOT, "5i6h", "alt", "10")]);
         assert!(parse_master_rows(duplicate.as_bytes()).is_err());
+    }
+
+    /// A を先後反転した局面 (先手番)。
+    const A_FLIPPED: &str = "9/3k5/9/9/9/9/9/9/4K4 b -";
+
+    #[test]
+    fn values_reach_through_flipped_positions() {
+        // 子局面 A は元データに無く、反転した局面だけがある。
+        let text = master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", "10"),
+            (A_FLIPPED, "5i5h", "main", "30"),
+        ]);
+        let (findings, summary) = run_audit(&text, 1);
+        assert_eq!(summary.known_moves, 3);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].main.value, -30);
+        assert_eq!(findings[0].main.origin, Origin::Propagated);
+
+        // A があっても値の分かる手が無ければ、反転した局面の値で分かる手になる。
+        let text = master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", "10"),
+            (A, "5a5b", "main", ""),
+            (A_FLIPPED, "5i5h", "main", "30"),
+        ]);
+        let (findings, summary) = run_audit(&text, 1);
+        assert_eq!(summary.unknown_main, [0, 1]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].main.value, -30);
+    }
+
+    #[test]
+    fn illegal_main_is_unknown() {
+        let text = master(&[(ROOT, "1a1b", "main", "50"), (ROOT, "5i6h", "alt", "10")]);
+        let (findings, summary) = run_audit(&text, 1);
+        assert!(findings.is_empty());
+        assert_eq!(summary.illegal_moves, 1);
+        assert_eq!(summary.unknown_main, [1, 0]);
+    }
+
+    #[test]
+    fn cycles_use_the_draw_value_of_each_side() {
+        // ROOT → 5i4h → 5a4a → 4h5i → 4a5a で ROOT に戻る。先手は千日手 (-70) を出口 (-100) より好む。
+        let c = "5k3/9/9/9/9/9/9/5K3/9 b -";
+        let d = "5k3/9/9/9/9/9/9/9/4K4 w -";
+        let text = master(&[
+            (ROOT, "5i6h", "main", "-100"),
+            (ROOT, "5i4h", "alt", ""),
+            (A, "5a4a", "main", ""),
+            (c, "4h5i", "main", ""),
+            (d, "4a5a", "main", ""),
+        ]);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let (findings, summary) = run_audit_with(&text, 1, draws).unwrap();
+        assert_eq!(summary.nontrivial_sccs, 1);
+        assert_eq!(summary.unknown_main, [0, 0]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!((findings[0].best.mv.as_str(), findings[0].best.value), ("5i4h", -70));
+        assert_eq!(findings[0].gap(), 30);
+    }
+
+    #[test]
+    fn rejects_non_canonical_keys() {
+        // 正規の表記は持ち駒を飛・角・金・銀・桂・香・歩の順に並べる。
+        let text = master(&[("4k4/9/9/9/9/9/9/9/4K4 b PG", "5i5h", "main", "0")]);
+        let error = run_audit_with(&text, 1, DrawValues::both(0)).unwrap_err();
+        assert!(error.to_string().contains("正規の SFEN"), "{error}");
+    }
+
+    #[test]
+    fn run_writes_outputs_and_rejects_colliding_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        let text = master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", "10"),
+            (A, "5a5b", "main", "30"),
+        ]);
+        std::fs::write(&master_path, &text).unwrap();
+        let args = |table: &str, out_db: Option<&str>| AuditArgs {
+            master: master_path.clone(),
+            table: dir.path().join(table),
+            line: 1,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            out_db: out_db.map(|p| dir.path().join(p)),
+        };
+        assert!(run(args("moves.tsv", None)).is_err());
+        assert!(run(args("audit.tsv", Some("audit.tsv"))).is_err());
+        assert!(run(args("audit.tsv", Some("moves.tsv"))).is_err());
+        assert_eq!(std::fs::read_to_string(&master_path).unwrap(), text);
+
+        run(args("audit.tsv", Some("audited.db"))).unwrap();
+        let table = std::fs::read_to_string(dir.path().join("audit.tsv")).unwrap();
+        assert_eq!(table.lines().count(), 2);
+        let db = std::fs::read_to_string(dir.path().join("audited.db")).unwrap();
+        assert!(db.contains("5i4h none -30 1 2"), "{db}");
+        assert!(db.contains("5i6h none 10 1 1"), "{db}");
     }
 }
