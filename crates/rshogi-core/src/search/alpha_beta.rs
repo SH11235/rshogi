@@ -21,9 +21,9 @@ use crate::types::{
 };
 
 use super::history::{
-    CORRECTION_HISTORY_LIMIT, CorrectionPieceToHistory, HistoryCell, HistoryTables,
-    LOW_PLY_HISTORY_SIZE, continuation_history_bonus_with_offset, continuation_history_weight,
-    low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
+    CORRECTION_HISTORY_LIMIT, ContinuationHistory, CorrectionPieceToHistory, HistoryCell,
+    HistoryTables, LOW_PLY_HISTORY_SIZE, continuation_history_bonus_with_offset,
+    continuation_history_weight, low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -110,7 +110,7 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 /// 王手中は最初の2手前のみ（`if (ss->inCheck && i > 2) break`）。
 #[inline]
 fn update_continuation_histories(
-    h: &mut HistoryTables,
+    continuation_history: &[[ContinuationHistory; 2]; 2],
     stack: &StackArray,
     tune_params: &SearchTuneParams,
     base_ply: i32,
@@ -142,7 +142,7 @@ fn update_continuation_histories(
                 ply_back,
                 tune_params,
             );
-            h.continuation_history[in_check_idx][capture_idx].update(
+            continuation_history[in_check_idx][capture_idx].update(
                 key.piece,
                 key.to,
                 pc,
@@ -186,10 +186,24 @@ fn update_quiet_histories(
 
     // update_continuation_histories に渡す前に 955/1024 を適用
     let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
-    update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
+    update_continuation_histories(
+        shared.continuation_history(),
+        stack,
+        tune_params,
+        ply,
+        in_check,
+        cont_pc,
+        to,
+        cont_bonus,
+    );
 
     let pawn_key_idx = shared.pawn_history_index(pos.pawn_key());
     shared.update_pawn_history(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus, tune_params));
+}
+
+/// continuation history の sentinel (null move や探索根より前が指す表)
+fn cont_history_sentinel_of(shared: &SharedHistories) -> NonNull<PieceToHistory> {
+    NonNull::from(shared.continuation_history()[0][0].get_table(Piece::NONE, Square::SQ_11))
 }
 
 /// LMR用のreduction配列
@@ -807,13 +821,11 @@ impl SearchWorker {
         let history = HistoryCell::new_boxed();
         // HistoryCell経由でsentinelポインタを取得
         // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
-        let (cont_history_sentinel, cont_correction_sentinel) = {
+        let cont_correction_sentinel = {
             let h = unsafe { history.as_ref_unchecked() };
-            (
-                NonNull::from(h.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11)),
-                NonNull::from(h.correction_history.continuation_table(Piece::NONE, Square::SQ_11)),
-            )
+            NonNull::from(h.correction_history.continuation_table(Piece::NONE, Square::SQ_11))
         };
+        let cont_history_sentinel = cont_history_sentinel_of(&shared_histories);
 
         let reductions = build_reductions(search_tune_params.lmr_table_coeff);
         let mut worker = Box::new(Self {
@@ -837,6 +849,13 @@ impl SearchWorker {
         });
         worker.reset_cont_history_ptrs();
         worker
+    }
+
+    /// 共有履歴を差し替える。continuation history の sentinel と探索 stack の参照も付け直す。
+    pub fn set_shared_histories(&mut self, shared_histories: Arc<SharedHistories>) {
+        self.cont_history_sentinel = cont_history_sentinel_of(&shared_histories);
+        self.shared_histories = shared_histories;
+        self.reset_cont_history_ptrs();
     }
 
     /// SearchContext を作成
@@ -971,7 +990,8 @@ impl SearchWorker {
             let h = unsafe { self.history.as_ref_unchecked() };
             (
                 NonNull::from(
-                    h.continuation_history[in_check_idx][capture_idx].get_table(piece, to),
+                    self.shared_histories.continuation_history()[in_check_idx][capture_idx]
+                        .get_table(piece, to),
                 ),
                 NonNull::from(h.correction_history.continuation_table(piece, to)),
             )
@@ -2602,10 +2622,8 @@ impl SearchWorker {
                             let prev_piece = pos.piece_on(prev_sq);
                             let prev_in_check = st.stack[prev_ply].in_check;
                             {
-                                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                                let h = unsafe { ctx.history.as_mut_unchecked() };
                                 update_continuation_histories(
-                                    h,
+                                    ctx.shared.continuation_history(),
                                     &st.stack,
                                     ctx.tune_params,
                                     ply - 1,
@@ -3351,15 +3369,8 @@ impl SearchWorker {
                                             0
                                         };
                                 {
-                                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                                    let h = unsafe { ctx.history.as_mut_unchecked() };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        key.piece,
-                                        key.to,
-                                        moved_piece,
-                                        to_sq,
-                                        bonus,
-                                    );
+                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
+                                        .update(key.piece, key.to, moved_piece, to_sq, bonus);
                                 }
                             }
                         }
@@ -3660,13 +3671,14 @@ impl SearchWorker {
                                     ply_back,
                                     ctx.tune_params,
                                 );
-                                h.continuation_history[in_check_idx][capture_idx].update(
-                                    key.piece,
-                                    key.to,
-                                    best_cont_pc,
-                                    best_to,
-                                    weighted_bonus,
-                                );
+                                ctx.shared.continuation_history()[in_check_idx][capture_idx]
+                                    .update(
+                                        key.piece,
+                                        key.to,
+                                        best_cont_pc,
+                                        best_to,
+                                        weighted_bonus,
+                                    );
                             }
                         }
                     }
@@ -3727,13 +3739,8 @@ impl SearchWorker {
                                         ply_back,
                                         ctx.tune_params,
                                     );
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        key.piece,
-                                        key.to,
-                                        cont_pc,
-                                        to,
-                                        weighted_malus,
-                                    );
+                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
+                                        .update(key.piece, key.to, cont_pc, to, weighted_malus);
                                 }
                             }
                         }
@@ -3809,8 +3816,6 @@ impl SearchWorker {
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         {
-                            // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                            let h = unsafe { ctx.history.as_mut_unchecked() };
                             for ply_back in 1..=6 {
                                 if ply_back > prev_max_ply_back {
                                     continue;
@@ -3835,13 +3840,14 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        target_key.piece,
-                                        target_key.to,
-                                        prev_piece,
-                                        prev_sq,
-                                        weighted_penalty,
-                                    );
+                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
+                                        .update(
+                                            target_key.piece,
+                                            target_key.to,
+                                            prev_piece,
+                                            prev_sq,
+                                            weighted_penalty,
+                                        );
                                 }
                             }
                         }
@@ -3973,13 +3979,14 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        target_key.piece,
-                                        target_key.to,
-                                        prev_piece,
-                                        prev_sq,
-                                        weighted_bonus,
-                                    );
+                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
+                                        .update(
+                                            target_key.piece,
+                                            target_key.to,
+                                            prev_piece,
+                                            prev_sq,
+                                            weighted_bonus,
+                                        );
                                 }
                             }
 

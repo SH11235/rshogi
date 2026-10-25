@@ -541,7 +541,7 @@ impl MovePicker {
                     self.end_cur = count;
                     self.end_generated = count;
 
-                    self.score_evasions(pos, history);
+                    self.score_evasions(pos, history, shared);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = Stage::Evasion;
@@ -605,7 +605,7 @@ impl MovePicker {
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
         let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
         let tables = self.continuation_history.map(|key| {
-            history.continuation_history[key.in_check as usize][key.capture as usize]
+            shared.continuation_history()[key.in_check as usize][key.capture as usize]
                 .get_table(key.piece, key.to)
         });
         let [ch0, ch1, ch2, ch3, _, ch5] = tables;
@@ -664,10 +664,15 @@ impl MovePicker {
     }
 
     /// 回避手のスコアを計算
-    fn score_evasions(&mut self, pos: &Position, history: &HistoryTables) {
+    fn score_evasions(
+        &mut self,
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+    ) {
         let us = self.side_to_move;
         let key = self.continuation_history[0];
-        let ch = history.continuation_history[key.in_check as usize][key.capture as usize]
+        let ch = shared.continuation_history()[key.in_check as usize][key.capture as usize]
             .get_table(key.piece, key.to);
 
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
@@ -888,9 +893,14 @@ mod tests {
         SHARED.get_or_init(|| SharedHistories::new(1))
     }
 
-    fn all_moves(mut picker: MovePicker, pos: &Position, history: &HistoryTables) -> Vec<Move> {
+    fn all_moves(
+        mut picker: MovePicker,
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+    ) -> Vec<Move> {
         std::iter::from_fn(|| {
-            let mv = picker.next_move(pos, history, shared());
+            let mv = picker.next_move(pos, history, shared);
             mv.is_some().then_some(mv)
         })
         .collect()
@@ -908,9 +918,13 @@ mod tests {
             picker
         };
         let history = HistoryTables::new_boxed();
-        let actual = all_moves(picker, &pos, &history);
-        let control =
-            all_moves(MovePicker::new(&pos, Move::NONE, 1, 0, keys, false), &pos, &history);
+        let actual = all_moves(picker, &pos, &history, shared());
+        let control = all_moves(
+            MovePicker::new(&pos, Move::NONE, 1, 0, keys, false),
+            &pos,
+            &history,
+            shared(),
+        );
         assert_eq!(actual, control);
         assert_eq!(actual.len(), 30);
         let mut unique = actual.clone();
@@ -929,21 +943,24 @@ mod tests {
             ContHistKey::new(true, true, Piece::new(Color::White, PieceType::Rook), Square::SQ_55);
         let mut keys = [ContHistKey::null_sentinel(); 6];
         keys[0] = key;
-        let mut history = HistoryTables::new_boxed();
+        let history = HistoryTables::new_boxed();
+        let shared = SharedHistories::new(1);
         let mut picker = MovePicker::new(&pos, tt, 1, 0, keys, false);
-        assert_eq!(picker.next_move(&pos, &history, shared()), tt);
+        assert_eq!(picker.next_move(&pos, &history, &shared), tt);
         // TT 手の探索から戻るまで quiet のスコアはまだ確定しない。
-        let control = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        let control =
+            all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history, &shared);
         assert_ne!(control[1], target);
-        history.continuation_history[1][1].get_table_mut(key.piece, key.to).update(
+        shared.continuation_history()[1][1].get_table(key.piece, key.to).update(
             target.moved_piece_after(),
             target.to(),
             10000,
         );
-        assert_eq!(picker.next_move(&pos, &history, shared()), target);
-        let mut expected = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        assert_eq!(picker.next_move(&pos, &history, &shared), target);
+        let mut expected =
+            all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history, &shared);
         expected.drain(..2);
-        assert_eq!(all_moves(picker, &pos, &history), expected);
+        assert_eq!(all_moves(picker, &pos, &history, &shared), expected);
     }
 
     #[test]
@@ -956,18 +973,20 @@ mod tests {
         let key =
             ContHistKey::new(false, true, Piece::new(Color::Black, PieceType::Gold), Square::SQ_99);
         let keys = [key; 6];
-        let mut history = HistoryTables::new_boxed();
+        let history = HistoryTables::new_boxed();
+        let shared = SharedHistories::new(1);
         let mut picker = MovePicker::new_evasions(&pos, tt, 0, keys, false);
-        assert_eq!(picker.next_move(&pos, &history, shared()), tt);
-        history.continuation_history[0][1].get_table_mut(key.piece, key.to).update(
+        assert_eq!(picker.next_move(&pos, &history, &shared), tt);
+        shared.continuation_history()[0][1].get_table(key.piece, key.to).update(
             target.moved_piece_after(),
             target.to(),
             10000,
         );
-        let rest = all_moves(picker, &pos, &history);
+        let rest = all_moves(picker, &pos, &history, &shared);
         let quiet = rest.iter().find(|mv| !pos.capture_stage(**mv)).copied();
         assert_eq!(quiet, Some(target));
-        let ordinary = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        let ordinary =
+            all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history, &shared);
         assert_eq!(ordinary[1..], rest);
 
         pos.set_sfen("K8/9/9/4r4/4R4/9/9/9/8k b - 1").unwrap();
@@ -975,7 +994,7 @@ mod tests {
         let picker = MovePicker::new_probcut(&pos, capture, Value::ZERO, 0, keys, false);
         drop(history);
         let live = HistoryTables::new_boxed();
-        assert_eq!(all_moves(picker, &pos, &live), vec![capture]);
+        assert_eq!(all_moves(picker, &pos, &live, &shared), vec![capture]);
     }
 
     #[test]

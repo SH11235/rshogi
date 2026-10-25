@@ -94,10 +94,16 @@ fn observe_completed_node(
             h.main_history.get(us, best),
             worker.shared_histories.pawn_history(pawn_idx, pc, to),
             keys.map(|key| {
-                h.continuation_history[key.in_check as usize][key.capture as usize]
+                worker.shared_histories.continuation_history()[key.in_check as usize]
+                    [key.capture as usize]
                     .get(key.piece, key.to, pc, to)
             }),
-            h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to),
+            worker.shared_histories.continuation_history()[0][0].get(
+                Piece::NONE,
+                Square::SQ_11,
+                pc,
+                to,
+            ),
             captured.map(|pt| h.capture_history.get(pc, to, pt)),
             h.main_history.get(us, other),
         )
@@ -109,12 +115,9 @@ fn observe_completed_node(
         (
             worker.shared_histories.pawn_history(pawn_idx, original_pc, to),
             keys.map(|key| {
-                h.continuation_history[key.in_check as usize][key.capture as usize].get(
-                    key.piece,
-                    key.to,
-                    original_pc,
-                    to,
-                )
+                worker.shared_histories.continuation_history()[key.in_check as usize]
+                    [key.capture as usize]
+                    .get(key.piece, key.to, original_pc, to)
             }),
             captured.map(|pt| h.capture_history.get(original_pc, to, pt)),
         )
@@ -149,7 +152,8 @@ fn observe_completed_node(
         assert!(worker.shared_histories.pawn_history(pawn_idx, pc, to) > before.2);
     }
     for (i, key) in keys.iter().enumerate() {
-        let after = h.continuation_history[key.in_check as usize][key.capture as usize]
+        let after = worker.shared_histories.continuation_history()[key.in_check as usize]
+            [key.capture as usize]
             .get(key.piece, key.to, pc, to);
         let updated = crate::search::history::continuation_history_weight(&tune, i + 1) > 0
             && !capture
@@ -170,12 +174,9 @@ fn observe_completed_node(
         );
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(
-                h.continuation_history[key.in_check as usize][key.capture as usize].get(
-                    key.piece,
-                    key.to,
-                    original_pc,
-                    to
-                ),
+                worker.shared_histories.continuation_history()[key.in_check as usize]
+                    [key.capture as usize]
+                    .get(key.piece, key.to, original_pc, to),
                 original_before.1[i]
             );
         }
@@ -183,7 +184,15 @@ fn observe_completed_node(
             assert_eq!(h.capture_history.get(original_pc, to, pt), original_before.2.unwrap());
         }
     }
-    assert_eq!(h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to), before.4);
+    assert_eq!(
+        worker.shared_histories.continuation_history()[0][0].get(
+            Piece::NONE,
+            Square::SQ_11,
+            pc,
+            to
+        ),
+        before.4
+    );
     if !tt_is_best && !pos.capture_stage(other) {
         assert!(h.main_history.get(us, other) < before.6);
     }
@@ -249,7 +258,7 @@ fn completed_search_observes_history_entries() {
 #[test]
 fn continuation_history_basic_update() {
     // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
-    let mut cont_hist = ContinuationHistory::new_boxed();
+    let cont_hist = ContinuationHistory::new_boxed();
     let prev_pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス
     let prev_to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当

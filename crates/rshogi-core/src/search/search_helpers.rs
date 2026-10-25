@@ -298,7 +298,9 @@ pub(super) fn set_cont_history_for_move(
     let (table, correction_table) = {
         let h = unsafe { ctx.history.as_ref_unchecked() };
         (
-            NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to)),
+            NonNull::from(
+                ctx.shared.continuation_history()[in_check_idx][capture_idx].get_table(piece, to),
+            ),
             NonNull::<CorrectionPieceToHistory>::from(
                 h.correction_history.continuation_table(piece, to),
             ),

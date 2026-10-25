@@ -850,7 +850,9 @@ impl Search {
         // main worker を作る前の共有表は作ったときの既定の初期値のまま残す。main worker の
         // 履歴を最初の go で既定値から作るのと揃え、1 スレッドの探索を共有前と同じにする。
         if self.worker.is_some() {
-            self.shared_histories.clear(self.search_tune_params.pawn_history_init as i16);
+            let tp = &self.search_tune_params;
+            self.shared_histories
+                .clear(tp.pawn_history_init as i16, tp.continuation_history_init as i16);
         }
     }
 
@@ -983,9 +985,9 @@ impl Search {
         let num = num.clamp(1, 512);
         if SharedHistories::scale_for(num) != self.shared_histories.scale() {
             // 表の大きさは倍率で決まるので、倍率が変わるときだけ作り直す。
-            self.shared_histories = Arc::new(SharedHistories::new(num));
+            self.shared_histories = Arc::new(self.shared_histories.resized(num));
             if let Some(worker) = &mut self.worker {
-                worker.shared_histories = Arc::clone(&self.shared_histories);
+                worker.set_shared_histories(Arc::clone(&self.shared_histories));
             }
         }
         self.num_threads = num;
@@ -2158,6 +2160,13 @@ mod tests {
                             assert!(Arc::ptr_eq(&worker.shared_histories, &shared));
                         });
                     }
+                    // 作り直した表と、引き継いだ continuation history で探索できる。
+                    let limits = LimitsType {
+                        depth: 4,
+                        ..Default::default()
+                    };
+                    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+                    assert_ne!(result.best_move, Move::NONE);
                 }
             })
             .unwrap()
