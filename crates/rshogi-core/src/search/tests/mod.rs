@@ -2,6 +2,7 @@
 
 mod alpha_beta;
 // search_helper が wasm32 (wasm-threads なし) では configured out されるため合わせて gate する
+mod correction_history;
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 mod cutoff_cnt;
 mod history_update;

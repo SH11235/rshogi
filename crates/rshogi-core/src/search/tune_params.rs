@@ -315,8 +315,12 @@ pub struct SearchTuneParams {
     pub correction_value_micv_weight: i32,
     /// correction_value: non-pawn correction weight
     pub correction_value_nonpawn_weight: i32,
-    /// correction_value: continuation correction weight
+    /// correction_value: continuation correction (ss-2, ss-4) weight
     pub correction_value_cnt_weight: i32,
+    /// correction_value: continuation correction (ss-6) weight
+    pub correction_value_cnt_ss6_weight: i32,
+    /// correction_value: 前の手が無いときに continuation 項全体の代わりに足す定数
+    pub correction_value_cnt_no_move: i32,
     /// correction_history: non-pawn update weight (/128)
     pub correction_history_non_pawn_weight: i32,
     /// correction_history: minor piece update multiplier (/128)
@@ -325,6 +329,8 @@ pub struct SearchTuneParams {
     pub correction_history_cont_ss2_weight: i32,
     /// correction_history: continuation (ss-4) update weight (/128)
     pub correction_history_cont_ss4_weight: i32,
+    /// correction_history: continuation (ss-6) update weight (/128)
+    pub correction_history_cont_ss6_weight: i32,
 
     // =========================================================================
     // Group B: History 初期値
@@ -1230,6 +1236,20 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         max: 32768,
     },
     SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_CNT_SS6_WEIGHT",
+        default: SearchTuneParams::DEFAULT.correction_value_cnt_ss6_weight,
+        min: 0,
+        max: 32768,
+    },
+    // 前の手が無いときの旧式 `8 * SPSA_CORR_CNT_WEIGHT` を CNT_WEIGHT の全範囲で表せるよう、
+    // 上限は CNT_WEIGHT の上限の 8 倍にする。
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_CNT_NO_MOVE",
+        default: SearchTuneParams::DEFAULT.correction_value_cnt_no_move,
+        min: 0,
+        max: 262144,
+    },
+    SearchTuneOptionSpec {
         usi_name: "SPSA_CORR_HIST_NONPAWN",
         default: SearchTuneParams::DEFAULT.correction_history_non_pawn_weight,
         min: 0,
@@ -1250,6 +1270,12 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
     SearchTuneOptionSpec {
         usi_name: "SPSA_CORR_HIST_CONT_SS4",
         default: SearchTuneParams::DEFAULT.correction_history_cont_ss4_weight,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_HIST_CONT_SS6",
+        default: SearchTuneParams::DEFAULT.correction_history_cont_ss6_weight,
         min: 0,
         max: 1024,
     },
@@ -1613,14 +1639,17 @@ impl SearchTuneParams {
         tt_move_history_malus: -865,
         prior_capture_countermove_bonus: 964,
         // Group A
-        correction_value_pcv_weight: 9536,
-        correction_value_micv_weight: 8494,
-        correction_value_nonpawn_weight: 10132,
-        correction_value_cnt_weight: 7156,
-        correction_history_non_pawn_weight: 165,
-        correction_history_minor_piece_mult: 156,
-        correction_history_cont_ss2_weight: 137,
-        correction_history_cont_ss4_weight: 64,
+        correction_value_pcv_weight: 13806,
+        correction_value_micv_weight: 9512,
+        correction_value_nonpawn_weight: 11615,
+        correction_value_cnt_weight: 7885,
+        correction_value_cnt_ss6_weight: 6307,
+        correction_value_cnt_no_move: 80695,
+        correction_history_non_pawn_weight: 186,
+        correction_history_minor_piece_mult: 150,
+        correction_history_cont_ss2_weight: 130,
+        correction_history_cont_ss4_weight: 70,
+        correction_history_cont_ss6_weight: 35,
         // Group B
         main_history_init: 68,
         capture_history_init: -689,
@@ -2009,10 +2038,13 @@ impl SearchTuneParams {
         try_apply!("SPSA_CORR_MICV_WEIGHT", correction_value_micv_weight, 0, 32768);
         try_apply!("SPSA_CORR_NONPAWN_WEIGHT", correction_value_nonpawn_weight, 0, 32768);
         try_apply!("SPSA_CORR_CNT_WEIGHT", correction_value_cnt_weight, 0, 32768);
+        try_apply!("SPSA_CORR_CNT_SS6_WEIGHT", correction_value_cnt_ss6_weight, 0, 32768);
+        try_apply!("SPSA_CORR_CNT_NO_MOVE", correction_value_cnt_no_move, 0, 262144);
         try_apply!("SPSA_CORR_HIST_NONPAWN", correction_history_non_pawn_weight, 0, 1024);
         try_apply!("SPSA_CORR_HIST_MINOR", correction_history_minor_piece_mult, 0, 1024);
         try_apply!("SPSA_CORR_HIST_CONT_SS2", correction_history_cont_ss2_weight, 0, 1024);
         try_apply!("SPSA_CORR_HIST_CONT_SS4", correction_history_cont_ss4_weight, 0, 1024);
+        try_apply!("SPSA_CORR_HIST_CONT_SS6", correction_history_cont_ss6_weight, 0, 1024);
         // Group B
         try_apply!("SPSA_MAIN_HIST_INIT", main_history_init, -2048, 2048);
         try_apply!("SPSA_CAPTURE_HIST_INIT", capture_history_init, -4096, 4096);
