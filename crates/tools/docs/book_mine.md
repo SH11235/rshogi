@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`) と定跡の元データの点検 (`master audit`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master audit`)、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -269,8 +269,9 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 |---|---|
 | `id` | `[A-Za-z0-9_-]{1,64}`。出力先の dir 名。大小文字だけが違う id は拒否 |
 | `root` | `sfen <盤> <手番> <持駒> <手数>` か `startpos moves <USI の手順>`。合法でなければ拒否 |
+| `roots` | 追加の根の配列 (形は `root` と同じ、`root` と同じ手番に限る)。CLI の引数は無く `--from` の行で渡す。`borrow cut` が段 0 の行で使う |
 | `own` | `b` / `w` / `bw`。`bw` は先手と後手の 2 本の木 (読みは台帳で共有)。2 本は一緒に受け付けるか一緒に拒否する |
-| `depth` | 1〜20 |
+| `depth` | 0〜20。0 は根 (と `roots`) を読むだけで伸ばさない |
 | `priority` | 0〜1000000、小さいほど先。目安: 0 = 急ぎ、100 = 既定、1000 = 空きを埋めるだけ |
 | `hold` | 真なら読まない (読みかけは読み終えて台帳に入れる)。解除で再開 |
 | `game` | 根からの実戦の手順 (USI の配列の配列)。各手順の最初の `depth+1` 手を局面別に合わせる |
@@ -433,8 +434,8 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
-- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
-- `source` が `read` / `deep` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep` / `peta`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- `source` が `read` / `deep` / `peta` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
@@ -473,3 +474,106 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 - 点検の表は読み直しの候補です。木で伝播した値と 1 回の読みの値を比べるので、深さの違う値が混ざります。main を自動では替えません。
 - 相手の手も定跡の手だけで見るので、定跡の外の相手の手で同じ局面に戻る循環 (先手の千日手) は、この伝播では見つかりません (YaneuraOu の peta_shock も同じ)。書き出した定跡の千日手の検査は別に要ります。
 - 元データは全件を読み、局面数と手の数に比例するメモリを使います。
+
+## `borrow`: 大きい定跡の木を借りる
+
+大きい定跡 (YaneuraOu のペタショック定跡など) から、どの手を伸ばすかだけを借ります。値は自分のエンジンの読みで付け、大きい定跡の値は手を選ぶ当たりにだけ使います (登録する値には混ぜません)。読むべき出口が最初から全部分かるので、`tree serve` の並列を使い切って同時に読めます。
+
+1. `borrow cut`: 根ごとに部分木を切り出し、読む局面 (出口と確認点) とキューの行を書く。
+2. `tree enqueue --from <cut>/targets.jsonl` → `tree serve` で読む (同じ台帳を他の木と使い回せる)。
+3. `borrow value`: 台帳の読みを部分木で根まで伝播し、元データに登録する行を作る。
+
+### 切り出し
+
+```bash
+book_mine borrow cut --book peta.db --roots roots.jsonl --out cut1 \
+  [--own-diff 30] [--opp-diff 100] [--opp-top 2] [--max-plies 20] [--max-positions 20000] \
+  [--check-every 2] [--master moves.tsv [--master-exit use|read]] [--extra marks.tsv] [--tag peta] [--priority 100]
+```
+
+| オプション | 既定 | 説明 |
+|---|---:|---|
+| `--book` | 必須 | 大きい定跡 `.db`。丸読みせず、ファイル上で二分探索して引く (`rshogi-book` の BookOnTheFly)。`sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要があり、並んでいなければ開くときに止まる (並べ替えた写しを渡す)。ファイルは読むだけ |
+| `--roots` | 必須 | 根の一覧 (JSON Lines)。1 行に `id` (`[A-Za-z0-9_-]`)・`root` (`sfen ...` か `startpos moves ...`)・`own` (`b` / `w`、根の手番と同じ)。他の項目は読まないので、`tree` のキューの行もそのまま渡せる |
+| `--out` | 必須 | 出力先。まだ無い dir |
+| `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす (YaneuraOu の BookEvalDiff に当たる) |
+| `--opp-diff` / `--opp-top` | 100 / 2 | 相手の手番: 値の上位 `--opp-top` 手と、最善からの差が `--opp-diff` 以内の手の和を伸ばす |
+| `--max-plies` | 20 | 根からの手数の上限。この手数の局面は出口 |
+| `--max-positions` | 20000 | 根ごとの局面数の上限。伸ばすとこれを超える局面は出口 |
+| `--check-every` | 2 | 確認点の間隔。自分の手番の途中の局面を、自分の手のこの数おき (根を含む) に読む。0 で読まない |
+| `--master` | なし | 定跡の元データの表。ここにある局面 (根を除く) を出口にする |
+| `--master-exit` | `use` | `use`: 元データの値を使い、読まない (自分の手番は main、相手の手番は値の分かる手の 1 位。値は `master audit` と同じ伝播の値)。値が分からない局面は読む。`read`: 止めて読む |
+| `--extra` | なし | 足す手 (TSV、見出しに `id`・`key`・`move`)。`borrow value` の `marks.tsv` をそのまま渡せる。部分木の途中の自分の手番の局面でだけ足す |
+| `--tag` / `--priority` | `peta` / 100 | キューの行の id (`<根の id>_<tag>_<b\|w>`) と priority |
+
+切り出し方:
+
+- 根から幅優先で伸ばし、同じ局面 (手数を除く key) は 1 つにまとめます (合流。先後反転の局面は別の局面)。局面の手数は最初に着いた (根から最短の) 手数です。
+- 大きい定跡に合法な手が無い局面、手数の上限の局面、局面数の上限で伸ばせない局面、元データにある局面が出口です。非合法手は伸ばしません。
+- 確認点は、伸ばした自分の手番の局面のうち、根からの自分の手の数が `--check-every` の倍数の局面です。
+- メモリは根 1 本の部分木の局面数と、読む局面の一覧に比例します。
+
+出力 (`--out`):
+
+| ファイル | 内容 |
+|---|---|
+| `summary.tsv` | 根ごとの局面数・途中の局面・出口の種類ごとの数・確認点・読む局面の数。読む前の見積もりに使う (標準出力にも出す) |
+| `nodes.tsv` | `id key ply level side turn kind read`。`turn` は `own` / `opp`、`kind` は `inner` / `exit_nobook` / `exit_depth` / `exit_cap` / `exit_master`、`read` は読む局面なら 1 |
+| `edges.tsv` | `id key move child book_value origin`。`book_value` は大きい定跡の値 (手番の側から)、`origin` は `book` / `extra` |
+| `reads.tsv` | 読む局面 (根をまたいで重複を除く) の `key ply` |
+| `targets.jsonl` | `tree enqueue --from` に渡すキューの行。根ごと・手番ごとに 1 行で、段 0 (`depth: 0`) と `roots` に読む局面すべてを持つ |
+| `cut.json` | 大きい定跡の名前・大きさ・SHA-256、条件、根の一覧 (`borrow value` が読む) |
+
+同じ入力なら同じ出力になります。読む局面の組を変えて (条件や `--extra` を変えて) 切り直したときは `--tag` を変えてください。キューは id ごとに `root` を固定するので、同じ id で組が変わると拒否されることがあります。
+
+### 読み
+
+`tree serve` は段 0 の行の根 (`root` と `roots`) を読むだけで伸ばしません。読みの条件 (指紋) が同じなら、他の木や別の切り出しの読みも同じ台帳で使い回します。定跡の値をそろえるため、条件は BookMiner の木と同じにします (`--nodes 1000000000 --multipv 3 --hash 1024`、`DrawValueBlack=-70` / `DrawValueWhite=70`、Threads は 1 に固定)。
+
+```bash
+receipt=$(book_mine tree enqueue --state "$STATE" --from cut1/targets.jsonl)
+book_mine tree wait --state "$STATE" --receipt "$receipt"
+```
+
+serve の 1 周ごとの処理は、まだ読んでいない局面の数に比例します。
+
+### 値付けと登録
+
+```bash
+book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.tsv \
+  --out value1 --since 20261101-peta [--note "..."] [--alt-gap 40] [--line 40] \
+  [--draw-value-black -70] [--draw-value-white 70] [--fingerprint <指紋>] [--apply]
+```
+
+台帳は共有 lock で読むので、serve が書いている台帳は複製して渡します。読む局面のどれかの読みが台帳に無ければ、何も書かずに止まります (足りない数と例を出す)。
+
+伝播:
+
+- 部分木を `.db` にして `book_backprop --merge replace` と同じ後退解析で解きます。先手を自分として解く回は `--draw-value-black`、後手は `--draw-value-white` を千日手の値にします (部分木の中の循環)。
+- 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
+- 途中の局面の手は部分木の手だけです。確認点の読みは値に混ぜません。
+- 同じ値の手は、`book_backprop` の同値手の補正 (勝ちは出口へ短く届く手を残し、遠回りの手を 1 下げる) を受けます。
+
+確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます (BookMiner の「伸ばしていない手が上回る」に当たる)。印の付いた局面は登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
+
+登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
+
+- 登録するのは自分の手番の局面だけです。伸ばした局面は伝播後の値、出口は読みの値で並べます。元データで止めた出口と印の付いた局面は登録しません。
+- 足す行は `source=peta`、`lineage=peta:<大きい定跡のファイル名>`、`nodes` は台帳の読みのノード数です。`peta` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
+- 同じ局面が複数の根にあるときは、その局面から先の手数の余り (`--max-plies` − 段) の大きい根を使います。
+
+`--apply` の前に、登録後の元データを `master audit` と同じ伝播に通し (通らなければ止まる)、点検の数 (main が 1 位から `--line` 以上負ける局面) の前後を出します。`--apply` を省くと元データは変えません。
+
+出力 (`--out`、まだ無い dir):
+
+| ファイル | 内容 |
+|---|---|
+| `roots.tsv` | 根ごとの伝播後の 1 位・2 位とその値、先手から見た 1 位の値、印の数。BookMiner の木の 1 位と比べるときに使う |
+| `values.tsv` | 全局面の手の伝播後の値。`id key ply level side turn kind move value value_black expanded book_value` (`value` は手番の側、`value_black` は先手から見た値、`expanded` は部分木の手なら 1) |
+| `marks.tsv` | 印。`id key ply side move cp best best_value gap` |
+| `conflicts.tsv` | 食い違いの一覧 (`tree register` と同じ列で、最後の列は根の id) |
+
+注意:
+
+- 相手の手も部分木の手だけで見るので、部分木の外の相手の手で戻る循環 (先手の千日手) は、この伝播では見つかりません (`master audit` と同じ)。
+- 元データの局面で止めた出口の値は、`value` を実行したときの元データから求めます。切り出しの後に元データが変わり、値が分からなくなった局面があれば止まります。

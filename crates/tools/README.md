@@ -28,7 +28,7 @@ LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の�
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与、実行中は進捗/ETA を stderr 表示（[詳細](docs/book_rescore.md)） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加（[詳細](docs/book_extend.md)） |
 | `book_backprop` | 定跡の値を千日手を考慮した後退解析で逆伝播 (YaneuraOu の peta_shock と同じ方式、入力によらず終わる)。先手・後手をそれぞれ自分として解き、千日手の値を先後別に指定できる。`min` は自分の手だけを探索ラベルで抑える。連続王手の千日手は王手側の負け、合法値下限を守る同値補正、書き出す値が循環で破られないかの検査 (危ない同値手は保証手に戻す)。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完。225 万局面を 1 スレッド約 95 秒・ピークメモリ約 0.9 GiB で処理（[詳細](docs/book_backprop.md)） |
-| `book_mine` | `master audit` は定跡の元データの表の読みの値を逆伝播し、main が伝播後の 1 位から線以上負ける局面を点検の表 (先手から見た値の列つき) と要約に出す。`tree serve/enqueue/wait/import-journal/replay/register` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`、両方の手番の木の手を定跡の元データの表に登録する `register`、別マシンの台帳の読みを同じ条件と確かめて取り込む `import-journal`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。worker 起動前後の入力指紋照合と不一致時の停止・並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・探索途中の info 行の記録 (`--trace-dir`)・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
+| `book_mine` | `borrow cut/value` は大きい定跡 (ペタショック定跡など) をファイル上で引いて根ごとの部分木 (自分の手番は最善から差 D 以内、相手の手番は上位 N 手と差 D' 以内) を切り出し、出口と確認点を `tree serve` の段 0 のキューの行で読ませ、台帳の読みを後退解析で根まで伝播して元データに `source=peta` で登録する (確認点で候補の外の手が上回れば印を付けて登録を保留)。`master audit` は定跡の元データの表の読みの値を逆伝播し、main が伝播後の 1 位から線以上負ける局面を点検の表 (先手から見た値の列つき) と要約に出す。`tree serve/enqueue/wait/import-journal/replay/register` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`、両方の手番の木の手を定跡の元データの表に登録する `register`、別マシンの台帳の読みを同じ条件と確かめて取り込む `import-journal`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。worker 起動前後の入力指紋照合と不一致時の停止・並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・探索途中の info 行の記録 (`--trace-dir`)・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
 
 ### 棋譜閲覧
 
@@ -158,7 +158,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [book_prepwalk](docs/book_prepwalk.md) - 相手の定跡の木を自分の定跡で辿り、相手の準備の中で自分が考え始める局面を集計
 - [book_extend](docs/book_extend.md) - YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加
 - [book_backprop](docs/book_backprop.md) - YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から後退解析で逆伝播
-- [book_mine](docs/book_mine.md) - 定跡の元データの点検 (`master audit`)、`tree` の常駐・対象キュー・待機・取り込み・再生・登録と、YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する
+- [book_mine](docs/book_mine.md) - 大きい定跡の木を借りた登録 (`borrow cut/value`)、定跡の元データの点検 (`master audit`)、`tree` の常駐・対象キュー・待機・取り込み・再生・登録と、YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する
 
 各ツールのオプション一覧は `--help` で確認できます。
 

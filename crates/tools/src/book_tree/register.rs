@@ -13,8 +13,9 @@ pub(super) const COLUMNS: [&str; 11] = [
     "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
 ];
 pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
-/// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。
-const READ_SOURCES: [&str; 2] = ["read", "deep"];
+/// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。`peta` は大きい定跡の
+/// 木を借りて自分の読みで値を付けた行 (`book_mine borrow value`)。
+const READ_SOURCES: [&str; 3] = ["read", "deep", "peta"];
 
 #[derive(Args, Debug)]
 pub(super) struct RegisterArgs {
@@ -85,6 +86,10 @@ pub(super) struct Options<'a> {
     pub since: &'a str,
     pub note: &'a str,
     pub alt_gap: i32,
+    /// 足す行の source 列。
+    pub source: &'a str,
+    /// 足す行の lineage 列。
+    pub lineage: &'a str,
 }
 
 pub(super) fn run(args: RegisterArgs) -> Result<()> {
@@ -128,6 +133,8 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         since: &args.since,
         note: &args.note,
         alt_gap: args.alt_gap,
+        source: "read",
+        lineage: "",
     };
     let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
@@ -326,10 +333,10 @@ pub(super) fn register(
                 node.ply.clone(),
                 mv.mv.clone(),
                 role.into(),
-                "read".into(),
+                options.source.into(),
                 mv.value.to_string(),
                 nodes_text.clone(),
-                String::new(),
+                options.lineage.into(),
                 "wide".into(),
                 options.since.into(),
                 format!("{why}{suffix}"),
@@ -511,6 +518,8 @@ mod tests {
             since: "tag",
             note: "plan",
             alt_gap: 40,
+            source: "read",
+            lineage: "",
         }
     }
     fn find<'a>(rows: &'a [Row], key: &str, mv: &str) -> Option<&'a Row> {

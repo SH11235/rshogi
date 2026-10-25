@@ -78,6 +78,7 @@ fn line_from_args(args: &EnqueueArgs) -> Result<Line> {
     Ok(Line {
         id: args.id.clone().context("--id が必要です")?,
         root: args.root.clone().with_context(|| need("root"))?,
+        roots: Vec::new(),
         own: args.own.clone().with_context(|| need("own"))?,
         depth: args.depth.with_context(|| need("depth"))?,
         priority: args.priority.unwrap_or(DEFAULT_PRIORITY),

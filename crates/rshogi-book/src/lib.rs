@@ -22,6 +22,6 @@ mod reader;
 
 pub use explore::BookExploreList;
 pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe, probe_with_explore};
-pub use reader::Book;
+pub use reader::{Book, BookEntryMove};
 
 pub use flip::{flip_usi_move, flipped_key};

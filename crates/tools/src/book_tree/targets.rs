@@ -1,6 +1,6 @@
 //! 読む対象のキュー (`<state>/targets.jsonl`) の行と、serve のチェックポイント・状態の形。
 
-use super::model::{GameLine, Tree, TreeParams, child};
+use super::model::{GameLine, Tree, TreeParams, child, side};
 use crate::book_db::{parse_position_line, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,9 @@ fn default_priority() -> u32 {
 pub(super) struct Line {
     pub id: String,
     pub root: String,
+    /// `root` と同じ手番の追加の根 (形は `root` と同じ)。段 0 で多くの局面を読むときに使う。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
     pub own: String,
     pub depth: usize,
     #[serde(default = "default_priority")]
@@ -72,7 +75,7 @@ pub(super) struct Root {
     pub ply: u32,
 }
 
-fn parse_root(root: &str) -> Result<Root> {
+pub(super) fn parse_root(root: &str) -> Result<Root> {
     let tokens: Vec<_> = root.split_whitespace().collect();
     let valid = match tokens.as_slice() {
         ["sfen", _, _, _, _] => true,
@@ -132,9 +135,15 @@ impl Line {
         if !matches!(self.own.as_str(), "b" | "w" | "bw") {
             bail!("own は b / w / bw が必要です: {}", self.own);
         }
-        check_range("depth", self.depth, 1, MAX_DEPTH)?;
+        check_range("depth", self.depth, 0, MAX_DEPTH)?;
         check_range("priority", self.priority, 0, MAX_PRIORITY)?;
         let root = parse_root(&self.root)?;
+        for more in &self.roots {
+            let more = parse_root(more)?;
+            if side(&more.key) != side(&root.key) {
+                bail!("roots は root と同じ手番が必要です: {}", more.key);
+            }
+        }
         for moves in &self.game {
             let mut key = root.key.clone();
             for mv in moves {
@@ -169,10 +178,15 @@ impl Line {
         self.own.chars().map(String::from).collect()
     }
 
-    pub fn resolve(&self, root: &Root, defaults: &Defaults) -> Resolved {
-        Resolved {
+    pub fn resolve(&self, root: &Root, defaults: &Defaults) -> Result<Resolved> {
+        Ok(Resolved {
             key: root.key.clone(),
             ply: root.ply,
+            roots: self
+                .roots
+                .iter()
+                .map(|r| parse_root(r).map(|r| (r.key, r.ply)))
+                .collect::<Result<_>>()?,
             depth: self.depth,
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
@@ -180,7 +194,7 @@ impl Line {
             draw: self.opts.draw.unwrap_or(defaults.draw),
             extra: self.opts.extra.clone().unwrap_or_default(),
             game: self.game.clone(),
-        }
+        })
     }
 }
 
@@ -190,6 +204,9 @@ impl Line {
 pub(super) struct Resolved {
     pub key: String,
     pub ply: u32,
+    /// 追加の根 (局面 key と手数)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<(String, u32)>,
     pub depth: usize,
     pub opp_n: usize,
     pub stop: i32,
@@ -213,13 +230,16 @@ impl Resolved {
     }
 
     pub fn lines(&self) -> Vec<GameLine> {
-        if self.game.is_empty() {
-            return vec![(self.key.clone(), self.ply, Vec::new())];
-        }
-        self.game
-            .iter()
-            .map(|moves| (self.key.clone(), self.ply, moves.clone()))
-            .collect()
+        let mut lines: Vec<GameLine> = if self.game.is_empty() {
+            vec![(self.key.clone(), self.ply, Vec::new())]
+        } else {
+            self.game
+                .iter()
+                .map(|moves| (self.key.clone(), self.ply, moves.clone()))
+                .collect()
+        };
+        lines.extend(self.roots.iter().map(|(key, ply)| (key.clone(), *ply, Vec::new())));
+        lines
     }
 
     /// 記録用の paths.tsv 形式 (`tree replay` の paths にも使える)。
@@ -365,7 +385,7 @@ impl Checkpoint {
     ) -> Result<Vec<(usize, Tree)>> {
         let line: Line = serde_json::from_slice(bytes).context("行の形式が不正です")?;
         let root = line.check()?;
-        let resolved = line.resolve(&root, defaults);
+        let resolved = line.resolve(&root, defaults)?;
         let sides = line.sides();
         // Windows では大小文字だけ違う id が同じ出力先になる。
         if self
