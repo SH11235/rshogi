@@ -120,6 +120,15 @@ impl OnnxValueEvaluator {
                     .with_device_id(cfg.gpu_id)
                     .with_fp16(true)
                     .with_engine_cache(cfg.tensorrt_cache.is_some());
+                // 形状の範囲を 1..=batch_size に固定する。未指定だと TensorRT EP は見たことのない
+                // batch 数が来るたびに engine を作り直し、batch 数が毎回変わる呼び出し側で数秒ずつ止まる。
+                let shapes = |n: usize| {
+                    format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
+                };
+                let trt_ep = trt_ep
+                    .with_profile_min_shapes(shapes(1))
+                    .with_profile_opt_shapes(shapes(cfg.batch_size))
+                    .with_profile_max_shapes(shapes(cfg.batch_size));
                 let trt_ep = if let Some(cache_path) = cfg.tensorrt_cache.as_deref() {
                     let cache_str = cache_path.to_str().ok_or_else(|| {
                         anyhow::anyhow!(
