@@ -18,7 +18,6 @@ use std::rc::Rc;
 
 use crate::types::{Color, Move, Piece, PieceType, Square};
 
-use super::shared_history::SharedStatsEntry;
 use super::tt_history::TTMoveHistory;
 use super::tune_params::SearchTuneParams;
 
@@ -369,42 +368,50 @@ impl Default for CapturePieceToHistory {
 
 /// PieceToHistory: [piece][to] -> score
 ///
-/// 駒と移動先でインデックスする履歴。continuation history の 1 context 分で、
-/// スレッド間で共有するので entry は atomic。
+/// 駒と移動先でインデックスする履歴。
+#[derive(Clone)]
 pub struct PieceToHistory {
-    table: [[SharedStatsEntry<30000>; Square::NUM]; PIECE_NUM],
+    table: [[StatsEntry<30000>; Square::NUM]; PIECE_NUM],
 }
 
 impl PieceToHistory {
     /// 新しいPieceToHistoryを作成
     pub fn new() -> Self {
         Self {
-            table: std::array::from_fn(|_| std::array::from_fn(|_| SharedStatsEntry::default())),
+            table: [[StatsEntry::default(); Square::NUM]; PIECE_NUM],
         }
     }
 
     /// 値を取得
     #[inline]
     pub fn get(&self, pc: Piece, to: Square) -> i16 {
-        self.entry(pc, to).get()
+        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
+        unsafe { self.table.get_unchecked(pc.index()).get_unchecked(to.index()).get() }
     }
 
     /// 値を更新
     #[inline]
-    pub fn update(&self, pc: Piece, to: Square, bonus: i32) {
-        self.entry(pc, to).update(bonus);
+    pub fn update(&mut self, pc: Piece, to: Square, bonus: i32) {
+        // SAFETY: 同上。
+        unsafe {
+            self.table
+                .get_unchecked_mut(pc.index())
+                .get_unchecked_mut(to.index())
+                .update(bonus);
+        }
     }
 
-    #[inline]
-    fn entry(&self, pc: Piece, to: Square) -> &SharedStatsEntry<30000> {
-        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
-        unsafe { self.table.get_unchecked(pc.index()).get_unchecked(to.index()) }
+    /// クリア（初期値-529）
+    pub fn clear(&mut self) {
+        self.fill(CONTINUATION_HISTORY_INIT);
     }
 
     /// 指定した値で全エントリを埋める
-    pub fn fill(&self, value: i16) {
-        for entry in self.table.iter().flatten() {
-            entry.set(value);
+    pub fn fill(&mut self, value: i16) {
+        for pc_table in &mut self.table {
+            for entry in pc_table.iter_mut() {
+                entry.set(value);
+            }
         }
     }
 }
@@ -424,16 +431,50 @@ impl Default for PieceToHistory {
 /// 連続する2手の組み合わせ履歴。
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 ///
-/// [in_check][capture]の組ごとに4つあり、スレッド間で共有する (`SharedHistories`)。
+/// HistoryTablesでは[in_check][capture]の組ごとに4つ保持する。
+/// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct ContinuationHistory {
     table: [[PieceToHistory; Square::NUM]; PIECE_NUM],
 }
 
 impl ContinuationHistory {
+    /// 新しいContinuationHistoryを作成
+    pub fn new() -> Self {
+        let table = std::array::from_fn(|_| std::array::from_fn(|_| PieceToHistory::new()));
+        Self { table }
+    }
+
     #[inline]
     pub fn get_table(&self, prev_pc: Piece, prev_to: Square) -> &PieceToHistory {
         // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
         unsafe { self.table.get_unchecked(prev_pc.index()).get_unchecked(prev_to.index()) }
+    }
+
+    /// 内部テーブルへの可変参照を取得
+    #[inline]
+    pub fn get_table_mut(&mut self, prev_pc: Piece, prev_to: Square) -> &mut PieceToHistory {
+        // SAFETY: 同上。
+        unsafe { self.table.get_unchecked_mut(prev_pc.index()).get_unchecked_mut(prev_to.index()) }
+    }
+
+    /// 新しいContinuationHistoryを作成（ヒープ確保）
+    ///
+    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: PieceToHistoryはStatsEntry(i16)のみで構成され、ゼロ初期化は有効。
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
+    }
+
+    /// 1手前・2手前などの継続手を更新
+    pub fn update_from_prev(
+        &mut self,
+        prev_pc: Piece,
+        prev_to: Square,
+        pc: Piece,
+        to: Square,
+        bonus: i32,
+    ) {
+        self.get_table_mut(prev_pc, prev_to).update(pc, to, bonus);
     }
 
     /// 値を取得
@@ -444,13 +485,32 @@ impl ContinuationHistory {
 
     /// 値を更新
     #[inline]
-    pub fn update(&self, prev_pc: Piece, prev_to: Square, pc: Piece, to: Square, bonus: i32) {
-        self.get_table(prev_pc, prev_to).update(pc, to, bonus);
+    pub fn update(&mut self, prev_pc: Piece, prev_to: Square, pc: Piece, to: Square, bonus: i32) {
+        self.get_table_mut(prev_pc, prev_to).update(pc, to, bonus);
     }
 
-    /// 1 context 分の表を前から並べたもの
-    pub(super) fn tables(&self) -> &[PieceToHistory] {
-        self.table.as_flattened()
+    /// クリア
+    pub fn clear(&mut self) {
+        for row in self.table.iter_mut() {
+            for entry in row.iter_mut() {
+                entry.clear();
+            }
+        }
+    }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for row in self.table.iter_mut() {
+            for entry in row.iter_mut() {
+                entry.fill(init_val);
+            }
+        }
+    }
+}
+
+impl Default for ContinuationHistory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -634,6 +694,7 @@ pub struct HistoryTables {
     pub main_history: ButterflyHistory,
     pub low_ply_history: LowPlyHistory,
     pub capture_history: CapturePieceToHistory,
+    pub continuation_history: [[ContinuationHistory; 2]; 2],
     pub correction_history: CorrectionHistory,
     pub tt_move_history: TTMoveHistory,
 }
@@ -655,6 +716,11 @@ impl HistoryTables {
         self.main_history.clear();
         self.low_ply_history.clear();
         self.capture_history.clear();
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear();
+            }
+        }
         self.correction_history.clear();
         self.tt_move_history.clear();
     }
@@ -664,6 +730,11 @@ impl HistoryTables {
         self.main_history.clear_with_init(tp.main_history_init as i16);
         self.low_ply_history.clear_with_init(tp.low_ply_history_init as i16);
         self.capture_history.clear_with_init(tp.capture_history_init as i16);
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear_with_init(tp.continuation_history_init as i16);
+            }
+        }
         self.correction_history.clear();
         self.tt_move_history.clear();
     }

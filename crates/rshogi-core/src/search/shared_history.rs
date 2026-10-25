@@ -1,30 +1,23 @@
-//! スレッド間で共有する履歴 (pawn history、局面キーで引く correction history、continuation history)。
+//! スレッド間で共有する履歴 (pawn history と、局面キーで引く correction history)。
 //!
-//! Lazy SMP の各スレッドが同じ表を読み書きし、ほかのスレッドが調べた歩の形・駒配置・手順の
-//! 補正値や履歴を使えるようにする。局面キーで引く表の大きさは 1 スレッド分 × スレッド数
-//! (2 のべき乗に切り上げ)、continuation history は大きさが固定なので、1 スレッドでは
-//! 1 スレッド専用の表と同じ大きさ・同じ引き方になる。
+//! Lazy SMP の各スレッドが同じ表を読み書きし、ほかのスレッドが調べた歩の形や駒配置の
+//! 補正値・履歴を使えるようにする。表の大きさは 1 スレッド分 × スレッド数 (2 のべき乗に
+//! 切り上げ) なので、1 スレッドでは 1 スレッド専用の表と同じ大きさ・同じ引き方になる。
 //!
 //! 読み書きは relaxed の load / store で、同じ entry を同時に更新すると片方の更新が
 //! 失われうる。履歴は近似値なのでそれを許し、値が i16 として壊れないことだけを保証する。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::position::Position;
 use crate::types::{Color, Piece, Square};
 
-use super::history::{
-    CONTINUATION_HISTORY_INIT, CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE,
-    ContinuationHistory, PAWN_HISTORY_SIZE,
-};
+use super::history::{CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE, PAWN_HISTORY_SIZE};
 
 /// pawnHistory初期値 (YO: pawnHistory.clear_range(-1238, ...))
 pub(super) const PAWN_HISTORY_INIT: i16 = -1238;
 
 /// 複数スレッドから読み書きする履歴の 1 entry。更新式は `StatsEntry` と同じ。
 #[repr(transparent)]
-#[derive(Default)]
 pub struct SharedStatsEntry<const D: i32>(AtomicI16);
 
 impl<const D: i32> SharedStatsEntry<D> {
@@ -68,23 +61,6 @@ pub struct CorrectionBundle {
 /// pawn history の 1 index 分: [piece][to] -> score
 pub type SharedPawnHistoryRow = [[SharedStatsEntry<8192>; Square::NUM]; Piece::NUM];
 
-/// continuation history の [in_check][capture] の 4 つ。
-pub struct ContinuationHistories {
-    tables: [[ContinuationHistory; 2]; 2],
-}
-
-impl ContinuationHistories {
-    fn new_arc() -> Arc<Self> {
-        // SAFETY: ContinuationHistory は AtomicI16 だけで構成され、ゼロのビット列は有効な値 (0)。
-        unsafe { Arc::<Self>::new_zeroed().assume_init() }
-    }
-
-    /// 1 context 分の表を [in_check][capture] の順に並べたもの
-    fn tables(&self) -> impl Iterator<Item = &[super::history::PieceToHistory]> {
-        self.tables.iter().flatten().map(ContinuationHistory::tables)
-    }
-}
-
 /// スレッド間で共有する履歴の表。
 pub struct SharedHistories {
     correction: Box<[CorrectionBundle]>,
@@ -92,29 +68,11 @@ pub struct SharedHistories {
     correction_mask: usize,
     pawn_history_mask: usize,
     scale: usize,
-    /// 大きさがスレッド数に依らないので、`resized` で作り直しても同じ表を使い続ける。
-    /// worker と探索 stack はこの中を直接指すので、表を作り直すと指す先が無くなる。
-    continuation: Arc<ContinuationHistories>,
 }
 
 impl SharedHistories {
     /// `num_threads` 本のスレッドで共有する表を作る (初期値込み)。
     pub fn new(num_threads: usize) -> Self {
-        let continuation = ContinuationHistories::new_arc();
-        for tables in continuation.tables() {
-            for table in tables {
-                table.fill(CONTINUATION_HISTORY_INIT);
-            }
-        }
-        Self::with_continuation(num_threads, continuation)
-    }
-
-    /// `num_threads` 本用の大きさで作り直す。continuation history はこの表のものを引き継ぐ。
-    pub fn resized(&self, num_threads: usize) -> Self {
-        Self::with_continuation(num_threads, Arc::clone(&self.continuation))
-    }
-
-    fn with_continuation(num_threads: usize, continuation: Arc<ContinuationHistories>) -> Self {
         let scale = Self::scale_for(num_threads);
         let correction_len = CORRECTION_HISTORY_SIZE * scale;
         let pawn_history_len = PAWN_HISTORY_SIZE * scale;
@@ -132,9 +90,8 @@ impl SharedHistories {
             correction_mask: correction_len - 1,
             pawn_history_mask: pawn_history_len - 1,
             scale,
-            continuation,
         };
-        shared.clear_key_indexed(PAWN_HISTORY_INIT);
+        shared.clear(PAWN_HISTORY_INIT);
         shared
     }
 
@@ -156,23 +113,12 @@ impl SharedHistories {
     }
 
     /// すべての entry を初期値に戻す。探索中のスレッドが無いときに呼ぶ。
-    pub fn clear(&self, pawn_history_init: i16, continuation_history_init: i16) {
-        self.clear_key_indexed(pawn_history_init);
-        let parts = clear_parallelism(self.scale);
-        run_parts(parts, &|part| {
-            for tables in self.continuation.tables() {
-                for table in &tables[part_range(tables.len(), part, parts)] {
-                    table.fill(continuation_history_init);
-                }
-            }
-        });
-    }
-
-    /// 局面キーで引く表を初期値に戻す。スレッド数に比例して大きいので、複数スレッドで分けて埋める。
-    fn clear_key_indexed(&self, pawn_history_init: i16) {
+    ///
+    /// スレッド数に比例して表が大きくなるので、複数スレッドで分けて埋める。
+    pub fn clear(&self, pawn_history_init: i16) {
         let parts = clear_parallelism(self.scale);
         let fill = |part: usize| {
-            let range = |len: usize| part_range(len, part, parts);
+            let range = |len: usize| len * part / parts..len * (part + 1) / parts;
             for bundle in &self.correction[range(self.correction.len())] {
                 for entry in
                     bundle.pawn.iter().chain(&bundle.minor).chain(bundle.non_pawn.iter().flatten())
@@ -268,39 +214,6 @@ impl SharedHistories {
     pub fn update_pawn_history(&self, index: usize, pc: Piece, to: Square, bonus: i32) {
         self.pawn_history_entry(index, pc, to).update(bonus);
     }
-
-    /// continuation history: [in_check][capture]
-    #[inline]
-    pub fn continuation_history(&self) -> &[[ContinuationHistory; 2]; 2] {
-        &self.continuation.tables
-    }
-}
-
-impl SharedHistories {
-    /// 指し手を実行した直後の局面で引く entry をキャッシュへ先読みする。
-    ///
-    /// 子局面の静的評価 (NNUE) の間にメモリ待ちを隠す。`pc` / `to` は実行した手の
-    /// 動かした後の駒と移動先で、pawn history はその組を読む。
-    #[inline]
-    pub fn prefetch(&self, pos: &Position, pc: Piece, to: Square) {
-        prefetch_ptr(self.correction_bundle(pos.pawn_key()));
-        prefetch_ptr(self.correction_bundle(pos.minor_piece_key()));
-        prefetch_ptr(self.correction_bundle(pos.non_pawn_key(Color::White)));
-        prefetch_ptr(self.correction_bundle(pos.non_pawn_key(Color::Black)));
-        prefetch_ptr(self.pawn_history_entry(self.pawn_history_index(pos.pawn_key()), pc, to));
-    }
-}
-
-#[inline]
-fn prefetch_ptr<T>(entry: &T) {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: entry は生存中の値を指し、prefetch は内容を変更しない。
-    unsafe {
-        use std::arch::x86_64::_mm_prefetch;
-        _mm_prefetch(entry as *const T as *const i8, 3);
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = entry;
 }
 
 /// 表を埋めるのに使うスレッド数。1 スレッド分の表なら分けない。
@@ -317,11 +230,6 @@ fn clear_parallelism(scale: usize) -> usize {
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     let available = 1;
     scale.min(available).max(1)
-}
-
-/// `len` 個を `parts` 個に分けたときの `part` 番目の範囲
-fn part_range(len: usize, part: usize, parts: usize) -> std::ops::Range<usize> {
-    len * part / parts..len * (part + 1) / parts
 }
 
 /// `fill(0..parts)` を並列に実行する。
@@ -390,10 +298,7 @@ mod tests {
         let last_index = shared.pawn_history.len() - 1;
         shared.update_pawn_history(last_index, Piece::B_PAWN, Square::SQ_55, 4000);
 
-        let continuation = &shared.continuation_history()[1][0];
-        continuation.update(Piece::B_ROOK, Square::SQ_11, Piece::B_PAWN, Square::SQ_55, 3000);
-
-        shared.clear(-7, -9);
+        shared.clear(-7);
 
         assert!(shared.correction.iter().all(|bundle| {
             bundle
@@ -404,10 +309,5 @@ mod tests {
                 .all(|entry| entry.get() == 0)
         }));
         assert!(shared.pawn_history.iter().flatten().flatten().all(|entry| entry.get() == -7));
-        assert!(shared.continuation.tables().flatten().all(|table| {
-            [Piece::NONE, Piece::B_PAWN, Piece::W_ROOK]
-                .iter()
-                .all(|&pc| Square::all().all(|sq| table.get(pc, sq) == -9))
-        }));
     }
 }

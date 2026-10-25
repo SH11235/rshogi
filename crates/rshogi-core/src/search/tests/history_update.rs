@@ -3,7 +3,7 @@ use crate::eval::EvalHash;
 use crate::position::Position;
 use crate::search::{
     ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, SharedHistories,
-    TimeManagement,
+    TimeManagement, history::ContinuationHistory,
 };
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, DEPTH_QS, Move, Piece, Square, Value};
@@ -94,16 +94,10 @@ fn observe_completed_node(
             h.main_history.get(us, best),
             worker.shared_histories.pawn_history(pawn_idx, pc, to),
             keys.map(|key| {
-                worker.shared_histories.continuation_history()[key.in_check as usize]
-                    [key.capture as usize]
+                h.continuation_history[key.in_check as usize][key.capture as usize]
                     .get(key.piece, key.to, pc, to)
             }),
-            worker.shared_histories.continuation_history()[0][0].get(
-                Piece::NONE,
-                Square::SQ_11,
-                pc,
-                to,
-            ),
+            h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to),
             captured.map(|pt| h.capture_history.get(pc, to, pt)),
             h.main_history.get(us, other),
         )
@@ -115,9 +109,12 @@ fn observe_completed_node(
         (
             worker.shared_histories.pawn_history(pawn_idx, original_pc, to),
             keys.map(|key| {
-                worker.shared_histories.continuation_history()[key.in_check as usize]
-                    [key.capture as usize]
-                    .get(key.piece, key.to, original_pc, to)
+                h.continuation_history[key.in_check as usize][key.capture as usize].get(
+                    key.piece,
+                    key.to,
+                    original_pc,
+                    to,
+                )
             }),
             captured.map(|pt| h.capture_history.get(original_pc, to, pt)),
         )
@@ -152,8 +149,7 @@ fn observe_completed_node(
         assert!(worker.shared_histories.pawn_history(pawn_idx, pc, to) > before.2);
     }
     for (i, key) in keys.iter().enumerate() {
-        let after = worker.shared_histories.continuation_history()[key.in_check as usize]
-            [key.capture as usize]
+        let after = h.continuation_history[key.in_check as usize][key.capture as usize]
             .get(key.piece, key.to, pc, to);
         let updated = crate::search::history::continuation_history_weight(&tune, i + 1) > 0
             && !capture
@@ -174,9 +170,12 @@ fn observe_completed_node(
         );
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(
-                worker.shared_histories.continuation_history()[key.in_check as usize]
-                    [key.capture as usize]
-                    .get(key.piece, key.to, original_pc, to),
+                h.continuation_history[key.in_check as usize][key.capture as usize].get(
+                    key.piece,
+                    key.to,
+                    original_pc,
+                    to
+                ),
                 original_before.1[i]
             );
         }
@@ -184,15 +183,7 @@ fn observe_completed_node(
             assert_eq!(h.capture_history.get(original_pc, to, pt), original_before.2.unwrap());
         }
     }
-    assert_eq!(
-        worker.shared_histories.continuation_history()[0][0].get(
-            Piece::NONE,
-            Square::SQ_11,
-            pc,
-            to
-        ),
-        before.4
-    );
+    assert_eq!(h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to), before.4);
     if !tt_is_best && !pos.capture_stage(other) {
         assert!(h.main_history.get(us, other) < before.6);
     }
@@ -257,8 +248,8 @@ fn completed_search_observes_history_entries() {
 /// ContinuationHistory: 基本的な更新が機能することを確認
 #[test]
 fn continuation_history_basic_update() {
-    let shared = SharedHistories::new(1);
-    let cont_hist = &shared.continuation_history()[0][0];
+    // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
+    let mut cont_hist = ContinuationHistory::new_boxed();
     let prev_pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス
     let prev_to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当
@@ -266,11 +257,15 @@ fn continuation_history_basic_update() {
     // SAFETY: 51は有効なSquareインデックス
     let to = unsafe { Square::from_u8_unchecked(51) }; // 7五相当
 
-    let initial = cont_hist.get(prev_pc, prev_to, pc, to);
+    // 初期値は0
+    assert_eq!(cont_hist.get(prev_pc, prev_to, pc, to), 0);
+
+    // 更新
     cont_hist.update(prev_pc, prev_to, pc, to, 100);
 
+    // 値が増加
     let value = cont_hist.get(prev_pc, prev_to, pc, to);
-    assert!(value > initial, "ContinuationHistory should increase after update");
+    assert!(value > 0, "ContinuationHistory should increase after update");
 }
 
 // =============================================================================

@@ -555,31 +555,6 @@ fn test_sentinel_initialization() {
     assert_eq!(std::mem::size_of::<crate::search::Stack>(), 56);
 }
 
-/// 別の共有表へ差し替えると、sentinel と探索 stack の参照が新しい表へ付け直される。
-#[test]
-fn set_shared_histories_repoints_continuation_pointers() {
-    let tt = Arc::new(TranspositionTable::new(16));
-    let eval_hash = Arc::new(EvalHash::new(1));
-    let mut worker = SearchWorker::new(tt, eval_hash, 0, 0, SearchTuneParams::default());
-    worker.set_cont_history_for_move(
-        3,
-        false,
-        false,
-        crate::types::Piece::B_SILVER,
-        crate::types::Square::SQ_55,
-    );
-
-    let replacement = Arc::new(crate::search::SharedHistories::new(2));
-    let expected = std::ptr::NonNull::from(
-        replacement.continuation_history()[0][0]
-            .get_table(crate::types::Piece::NONE, crate::types::Square::SQ_11),
-    );
-    worker.set_shared_histories(Arc::clone(&replacement));
-
-    assert_eq!(worker.cont_history_sentinel, expected);
-    assert!(worker.state.stack.iter().all(|stack| stack.cont_history_ptr == expected));
-}
-
 #[test]
 fn test_cont_correction_pointer_tracks_move_and_null() {
     let tt = Arc::new(TranspositionTable::new(16));

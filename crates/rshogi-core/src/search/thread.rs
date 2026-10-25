@@ -759,7 +759,7 @@ mod imp {
             // 残っている worker の参照も差し替え、古い表を次の go を待たずに解放する。
             for slot in &self.workers {
                 if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
-                    worker.set_shared_histories(Arc::clone(&shared_histories));
+                    worker.shared_histories = Arc::clone(&shared_histories);
                 }
             }
             self.shared_histories = shared_histories;
@@ -856,7 +856,7 @@ mod imp {
                     worker.thread_id = thread_id;
                     worker.tt = Arc::clone(&tt);
                     worker.eval_hash = Arc::clone(&eval_hash);
-                    worker.set_shared_histories(shared_histories);
+                    worker.shared_histories = shared_histories;
                     worker.max_moves_to_draw = max_moves_to_draw;
                     worker.draw_value_black = draw_value_black;
                     worker.draw_value_white = draw_value_white;

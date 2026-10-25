@@ -21,9 +21,9 @@ use crate::types::{
 };
 
 use super::history::{
-    CORRECTION_HISTORY_LIMIT, ContinuationHistory, CorrectionPieceToHistory, HistoryCell,
-    HistoryTables, LOW_PLY_HISTORY_SIZE, continuation_history_bonus_with_offset,
-    continuation_history_weight, low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
+    CORRECTION_HISTORY_LIMIT, CorrectionPieceToHistory, HistoryCell, HistoryTables,
+    LOW_PLY_HISTORY_SIZE, continuation_history_bonus_with_offset, continuation_history_weight,
+    low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -110,7 +110,7 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 /// 王手中は最初の2手前のみ（`if (ss->inCheck && i > 2) break`）。
 #[inline]
 fn update_continuation_histories(
-    continuation_history: &[[ContinuationHistory; 2]; 2],
+    h: &mut HistoryTables,
     stack: &StackArray,
     tune_params: &SearchTuneParams,
     base_ply: i32,
@@ -142,7 +142,7 @@ fn update_continuation_histories(
                 ply_back,
                 tune_params,
             );
-            continuation_history[in_check_idx][capture_idx].update(
+            h.continuation_history[in_check_idx][capture_idx].update(
                 key.piece,
                 key.to,
                 pc,
@@ -186,24 +186,10 @@ fn update_quiet_histories(
 
     // update_continuation_histories に渡す前に 955/1024 を適用
     let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
-    update_continuation_histories(
-        shared.continuation_history(),
-        stack,
-        tune_params,
-        ply,
-        in_check,
-        cont_pc,
-        to,
-        cont_bonus,
-    );
+    update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
 
     let pawn_key_idx = shared.pawn_history_index(pos.pawn_key());
     shared.update_pawn_history(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus, tune_params));
-}
-
-/// continuation history の sentinel (null move や探索根より前が指す表)
-fn cont_history_sentinel_of(shared: &SharedHistories) -> NonNull<PieceToHistory> {
-    NonNull::from(shared.continuation_history()[0][0].get_table(Piece::NONE, Square::SQ_11))
 }
 
 /// LMR用のreduction配列
@@ -717,12 +703,11 @@ pub struct SearchWorker {
     /// 履歴/統計テーブル群（HistoryCell 経由でアクセス）
     pub history: Box<HistoryCell>,
 
-    /// スレッド間で共有する履歴。sentinel と探索 stack がこの中の continuation history を
-    /// 指すので、差し替えは `set_shared_histories` だけで行う。
+    /// スレッド間で共有する履歴
     pub(super) shared_histories: Arc<SharedHistories>,
 
-    /// ContinuationHistoryのsentinel (`shared_histories` の中を指す)
-    pub(super) cont_history_sentinel: NonNull<PieceToHistory>,
+    /// ContinuationHistoryのsentinel
+    pub cont_history_sentinel: NonNull<PieceToHistory>,
 
     /// ContinuationCorrectionHistoryのsentinel
     pub cont_correction_sentinel: NonNull<CorrectionPieceToHistory>,
@@ -780,9 +765,9 @@ impl SearchWorker {
         let main_hist =
             unsafe { self.history.as_ref_unchecked() }.main_history.get(mover, mv) as i32;
         // SAFETY:
-        // - `cont_history_sentinel` は `self.shared_histories` の continuation history を指し、
-        //   `set_shared_histories` で表と一緒に付け直す。表は Arc で生存し、再配置されない。
-        // - entry は atomic なので、ほかのスレッドが同時に書いても読み取りは競合しない。
+        // - `cont_history_sentinel` は `SearchWorker::new()` で HistoryCell 内部テーブルを指して初期化される。
+        // - HistoryCell の実体は SearchWorker のライフタイム中に再配置されない。
+        // - ここでは読み取り専用で参照し、可変参照とは同時に保持しない。
         let cont_hist =
             unsafe { self.cont_history_sentinel.as_ref() }.get(moved_piece, to_sq) as i32;
         2 * main_hist + cont_hist + cont_hist
@@ -822,11 +807,13 @@ impl SearchWorker {
         let history = HistoryCell::new_boxed();
         // HistoryCell経由でsentinelポインタを取得
         // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
-        let cont_correction_sentinel = {
+        let (cont_history_sentinel, cont_correction_sentinel) = {
             let h = unsafe { history.as_ref_unchecked() };
-            NonNull::from(h.correction_history.continuation_table(Piece::NONE, Square::SQ_11))
+            (
+                NonNull::from(h.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11)),
+                NonNull::from(h.correction_history.continuation_table(Piece::NONE, Square::SQ_11)),
+            )
         };
-        let cont_history_sentinel = cont_history_sentinel_of(&shared_histories);
 
         let reductions = build_reductions(search_tune_params.lmr_table_coeff);
         let mut worker = Box::new(Self {
@@ -850,13 +837,6 @@ impl SearchWorker {
         });
         worker.reset_cont_history_ptrs();
         worker
-    }
-
-    /// 共有履歴を差し替える。continuation history の sentinel と探索 stack の参照も付け直す。
-    pub fn set_shared_histories(&mut self, shared_histories: Arc<SharedHistories>) {
-        self.cont_history_sentinel = cont_history_sentinel_of(&shared_histories);
-        self.shared_histories = shared_histories;
-        self.reset_cont_history_ptrs();
     }
 
     /// SearchContext を作成
@@ -991,8 +971,7 @@ impl SearchWorker {
             let h = unsafe { self.history.as_ref_unchecked() };
             (
                 NonNull::from(
-                    self.shared_histories.continuation_history()[in_check_idx][capture_idx]
-                        .get_table(piece, to),
+                    h.continuation_history[in_check_idx][capture_idx].get_table(piece, to),
                 ),
                 NonNull::from(h.correction_history.continuation_table(piece, to)),
             )
@@ -1381,7 +1360,6 @@ impl SearchWorker {
                 gives_check,
                 self.tt.as_ref(),
                 self.eval_hash.as_ref(),
-                &self.shared_histories,
             );
             // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
@@ -2046,7 +2024,6 @@ impl SearchWorker {
                 gives_check,
                 self.tt.as_ref(),
                 self.eval_hash.as_ref(),
-                &self.shared_histories,
             );
             // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
@@ -2623,8 +2600,10 @@ impl SearchWorker {
                             let prev_piece = pos.piece_on(prev_sq);
                             let prev_in_check = st.stack[prev_ply].in_check;
                             {
+                                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                                let h = unsafe { ctx.history.as_mut_unchecked() };
                                 update_continuation_histories(
-                                    ctx.shared.continuation_history(),
+                                    h,
                                     &st.stack,
                                     ctx.tune_params,
                                     ply - 1,
@@ -3113,7 +3092,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash, ctx.shared);
+            do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
@@ -3370,8 +3349,15 @@ impl SearchWorker {
                                             0
                                         };
                                 {
-                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
-                                        .update(key.piece, key.to, moved_piece, to_sq, bonus);
+                                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                                    let h = unsafe { ctx.history.as_mut_unchecked() };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        key.piece,
+                                        key.to,
+                                        moved_piece,
+                                        to_sq,
+                                        bonus,
+                                    );
                                 }
                             }
                         }
@@ -3672,14 +3658,13 @@ impl SearchWorker {
                                     ply_back,
                                     ctx.tune_params,
                                 );
-                                ctx.shared.continuation_history()[in_check_idx][capture_idx]
-                                    .update(
-                                        key.piece,
-                                        key.to,
-                                        best_cont_pc,
-                                        best_to,
-                                        weighted_bonus,
-                                    );
+                                h.continuation_history[in_check_idx][capture_idx].update(
+                                    key.piece,
+                                    key.to,
+                                    best_cont_pc,
+                                    best_to,
+                                    weighted_bonus,
+                                );
                             }
                         }
                     }
@@ -3740,8 +3725,13 @@ impl SearchWorker {
                                         ply_back,
                                         ctx.tune_params,
                                     );
-                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
-                                        .update(key.piece, key.to, cont_pc, to, weighted_malus);
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        key.piece,
+                                        key.to,
+                                        cont_pc,
+                                        to,
+                                        weighted_malus,
+                                    );
                                 }
                             }
                         }
@@ -3817,6 +3807,8 @@ impl SearchWorker {
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         {
+                            // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                            let h = unsafe { ctx.history.as_mut_unchecked() };
                             for ply_back in 1..=6 {
                                 if ply_back > prev_max_ply_back {
                                     continue;
@@ -3841,14 +3833,13 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
-                                        .update(
-                                            target_key.piece,
-                                            target_key.to,
-                                            prev_piece,
-                                            prev_sq,
-                                            weighted_penalty,
-                                        );
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_penalty,
+                                    );
                                 }
                             }
                         }
@@ -3980,14 +3971,13 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                    ctx.shared.continuation_history()[in_check_idx][capture_idx]
-                                        .update(
-                                            target_key.piece,
-                                            target_key.to,
-                                            prev_piece,
-                                            prev_sq,
-                                            weighted_bonus,
-                                        );
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_bonus,
+                                    );
                                 }
                             }
 
@@ -4119,14 +4109,10 @@ impl SearchWorker {
 
 // SAFETY: SearchWorkerは単一スレッドで使用される前提。
 //
-// 1. `cont_correction_ptr`（StackArray内の各Stack）:
-//    `self.history`が所有するcontinuation correction history内のテーブルへの参照である。
+// 1. `cont_history_ptr` / `cont_correction_ptr`（StackArray内の各Stack）:
+//    `self.history`が所有するcontinuation history / correction history内のテーブルへの参照である。
 //    HistoryCell本体はBox allocation内にあり、SearchWorkerがスレッド間でmoveされても再配置されない。
 //    ワーカーは移動先の単一スレッドだけで使用するため、データ競合も発生しない。
-// 2. `cont_history_ptr` / `cont_history_sentinel`:
-//    `self.shared_histories` (Arc) の continuation history 内のテーブルを指す。worker が Arc を
-//    持つ間は解放・再配置されず、表を差し替えるときは `set_shared_histories` で付け直す。
-//    ほかのスレッドも同じ表を読み書きするが、entry はすべて atomic なのでデータ競合にならない。
 //
 unsafe impl Send for SearchWorker {}
 

@@ -8,7 +8,7 @@ use crate::eval::{EvalHash, eval_hash_enabled};
 use crate::nnue::DirtyPiece;
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
-use crate::search::{PieceToHistory, SharedHistories};
+use crate::search::PieceToHistory;
 use crate::types::{Color, Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
@@ -189,14 +189,10 @@ pub(super) fn do_move_and_push_prefetched(
     mv: Move,
     gives_check: bool,
     eval_hash: &EvalHash,
-    shared: &SharedHistories,
 ) {
     let dirty_piece = pos.do_move(mv, gives_check);
     if mv.is_pass() && eval_hash_enabled() {
         eval_hash.prefetch(pos.key());
-    }
-    if !mv.is_pass() {
-        shared.prefetch(pos, mv.moved_piece_after(), mv.to());
     }
     st.nodes += 1;
     st.evaluator.push(dirty_piece);
@@ -214,7 +210,6 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     gives_check: bool,
     prefetcher: &P,
     eval_hash: &EvalHash,
-    shared: &SharedHistories,
 ) {
     let search_prefetch = SearchPrefetch {
         tt: prefetcher,
@@ -224,9 +219,6 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     // PASS は do_move_with_prefetch 内のプリフェッチを経由しない。
     if mv.is_pass() && eval_hash_enabled() {
         eval_hash.prefetch(pos.key());
-    }
-    if !mv.is_pass() {
-        shared.prefetch(pos, mv.moved_piece_after(), mv.to());
     }
     st.nodes += 1;
     st.evaluator.push(dirty_piece);
@@ -298,9 +290,7 @@ pub(super) fn set_cont_history_for_move(
     let (table, correction_table) = {
         let h = unsafe { ctx.history.as_ref_unchecked() };
         (
-            NonNull::from(
-                ctx.shared.continuation_history()[in_check_idx][capture_idx].get_table(piece, to),
-            ),
+            NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to)),
             NonNull::<CorrectionPieceToHistory>::from(
                 h.correction_history.continuation_table(piece, to),
             ),
