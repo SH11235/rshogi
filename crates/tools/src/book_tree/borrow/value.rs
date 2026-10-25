@@ -212,7 +212,12 @@ pub(super) fn value_root(
     }
     out.flush()?;
     drop(out);
-    let mut graph = read_graph(&db, BackpropOptions::default())?;
+    // 切り出しは先後反転した局面を合流させないので、伝播でも反転した局面へ辺を張らない。
+    let options = BackpropOptions {
+        skip_flipped_children: true,
+        ..BackpropOptions::default()
+    };
+    let mut graph = read_graph(&db, options)?;
     ensure!(graph.illegal_moves == 0, "{}: 内部エラー: 非合法手があります", root.id);
     propagate_values(&mut graph, draws, MergeMode::Replace)?;
 
@@ -272,16 +277,17 @@ pub(super) fn value_root(
     Ok(result)
 }
 
-/// 登録する局面: 自分の手番で、元データで止めた出口と印の付いた局面を除く。
-fn register_nodes(
+/// 登録する局面: 自分の手番で、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
+/// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
+pub(super) fn register_nodes(
     index: usize,
     root: &RootInfo,
     tree: &Subtree,
     values: &RootValues,
+    marked: &BTreeSet<&str>,
     max_plies: usize,
     nodes_limit: u64,
 ) -> BTreeMap<String, register::Node> {
-    let marked: BTreeSet<&str> = values.marks.iter().map(|m| m.key.as_str()).collect();
     let mut nodes = BTreeMap::new();
     for (key, node) in &tree.nodes {
         // 元データの局面は元データの値と手を残す (読み直した出口でも替えない)。
@@ -333,13 +339,9 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .iter()
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
-    let source = read_source(&args.journal, args.fingerprint.as_deref())?;
-    let readings: ReadingsOf = source
-        .readings
-        .into_iter()
-        .filter(|r| wanted.contains(r.key.as_str()))
-        .map(|r| (r.key.clone(), r))
-        .collect();
+    let source =
+        read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;
+    let readings: ReadingsOf = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
     let missing: Vec<&str> =
         wanted.iter().copied().filter(|k| !readings.contains_key(*k)).collect();
     if !missing.is_empty() {
@@ -367,23 +369,31 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let master = master_values(&master_rows, draws, work.path())?;
     let (_, before, _) = audit(&master_rows, draws, args.line, work.path())?;
 
-    let mut all = Vec::new();
+    let all = meta
+        .roots
+        .iter()
+        .zip(&trees)
+        .map(|(root, tree)| {
+            value_root(root, tree, &readings, &master, draws, args.line, work.path())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let marked: BTreeSet<&str> =
+        all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
-    for (index, (root, tree)) in meta.roots.iter().zip(&trees).enumerate() {
-        let values = value_root(root, tree, &readings, &master, draws, args.line, work.path())?;
+    for (index, ((root, tree), values)) in meta.roots.iter().zip(&trees).zip(&all).enumerate() {
         disagreements += merge(
             &mut nodes,
             register_nodes(
                 index,
                 root,
                 tree,
-                &values,
+                values,
+                &marked,
                 meta.params.max_plies,
                 source.settings.nodes,
             ),
         );
-        all.push(values);
     }
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;

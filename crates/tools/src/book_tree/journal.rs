@@ -451,8 +451,13 @@ pub(super) struct Source {
 }
 
 /// 取り込み元の台帳を読む。共有 lock を取って書き手 (serve 等の排他 lock) と並ばないようにし、
-/// ファイルは変更しない。条件の一覧を作ってから選んだ条件の読みだけを保持する。
-pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Source> {
+/// ファイルは変更しない。条件の一覧を作ってから選んだ条件の読みのうち、`keep` が真の局面だけを保持する
+/// (全行の検査はする)。
+pub(super) fn read_source(
+    path: &Path,
+    fingerprint: Option<&str>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Source> {
     let file =
         File::open(path).with_context(|| format!("取り込み元を開けません: {}", path.display()))?;
     file_lock::try_lock_shared(&file).with_context(|| {
@@ -511,6 +516,9 @@ pub(super) fn read_source(path: &Path, fingerprint: Option<&str>) -> Result<Sour
             }
             merge_engine_version(&mut settings, &rec.settings)?;
             rec.reading.validate(&rec.settings)?;
+            if !keep(&rec.reading.key) {
+                return Ok(());
+            }
             if let Some(old) = records.get(&rec.reading.key)
                 && !old.same_values(&rec.reading)
             {

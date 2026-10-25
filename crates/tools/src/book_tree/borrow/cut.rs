@@ -54,7 +54,7 @@ pub(super) struct CutArgs {
     /// 元データの局面の出口で、元データの値を使う (use) か、自分のエンジンで読む (read)
     #[arg(long, value_enum, default_value_t = MasterExit::Use, requires = "master")]
     master_exit: MasterExit,
-    /// 足す手 (TSV、見出しに id・key・move。`borrow value` の marks.tsv をそのまま渡せる)
+    /// 足す手 (TSV、見出しに key・move。`borrow value` の marks.tsv をそのまま渡せる)。どの根でも同じ局面に足す
     #[arg(long)]
     extra: Option<PathBuf>,
     /// キューの行の id `<根の id>_<tag>_<b|w>` に入れる名前。読む局面の組を変えたら変える
@@ -195,26 +195,21 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     );
     let mut reads: BTreeMap<String, u32> = BTreeMap::new();
     let mut queue = String::new();
-    let mut unused_extras = 0;
+    let mut extras_used: BTreeSet<(String, String)> = BTreeSet::new();
     let mut lookup = |sfen: &str| book.entry_moves(sfen).map_err(anyhow::Error::from);
     for root in &roots {
-        let root_extras = extras.get(&root.id).cloned().unwrap_or_default();
         let stop = master.as_ref().map(|values| MasterStop {
             values,
             mode: args.master_exit,
         });
-        let tree = cut_root(root, &params, &mut lookup, stop.as_ref(), &root_extras)?;
+        let tree = cut_root(root, &params, &mut lookup, stop.as_ref(), &extras)?;
         let used: BTreeSet<(&str, &str)> = tree
             .edges
             .iter()
             .filter(|e| e.extra)
             .map(|e| (e.key.as_str(), e.mv.as_str()))
             .collect();
-        unused_extras += root_extras
-            .iter()
-            .flat_map(|(k, moves)| moves.iter().map(move |m| (k.as_str(), m.as_str())))
-            .filter(|km| !used.contains(km))
-            .count();
+        extras_used.extend(used.iter().map(|&(k, m)| (k.to_owned(), m.to_owned())));
         for (key, node) in &tree.nodes {
             writeln!(
                 nodes_out,
@@ -285,9 +280,14 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     write_atomic(&args.out.join(META), &serde_json::to_string_pretty(&meta)?)?;
     print!("{summary}");
     println!("読む局面 (根をまたいで重複を除く) {}", reads.len());
+    let unused_extras = extras
+        .iter()
+        .flat_map(|(k, moves)| moves.iter().map(move |m| (k.clone(), m.clone())))
+        .filter(|km| !extras_used.contains(km))
+        .count();
     if unused_extras > 0 {
         println!(
-            "足せなかった --extra の手 {unused_extras} (部分木の途中の自分の手番の局面に無い、または非合法)"
+            "足せなかった --extra の手 {unused_extras} (どの根でも部分木の途中の自分の手番の局面に無い、または非合法)"
         );
     }
     Ok(())
@@ -336,15 +336,15 @@ fn read_roots(path: &Path) -> Result<Vec<RootInfo>> {
     Ok(roots)
 }
 
-/// 根の id → 局面 key → 足す手。
-type Extras = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+/// 局面 key → 足す手。
+type Extras = BTreeMap<String, Vec<String>>;
 
 fn read_extras(path: &Path) -> Result<Extras> {
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
     let mut lines = BufReader::new(file).lines();
     let header = lines.next().transpose()?.context("--extra が空です")?;
-    let col = columns(&header, &["id", "key", "move"])?;
+    let col = columns(&header, &["key", "move"])?;
     let mut extras: Extras = BTreeMap::new();
     for line in lines {
         let line = line?;
@@ -357,12 +357,8 @@ fn read_extras(path: &Path) -> Result<Extras> {
                 .copied()
                 .with_context(|| format!("--extra の列が足りません: {line}"))
         };
-        let moves = extras
-            .entry(get(0)?.to_owned())
-            .or_default()
-            .entry(get(1)?.to_owned())
-            .or_default();
-        let mv = get(2)?.to_owned();
+        let moves = extras.entry(get(0)?.to_owned()).or_default();
+        let mv = get(1)?.to_owned();
         if !moves.contains(&mv) {
             moves.push(mv);
         }

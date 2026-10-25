@@ -1,5 +1,5 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
-use super::value::{ValueArgs, value_root};
+use super::value::{ValueArgs, register_nodes, value_root};
 use super::*;
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, BookMove, PositionEntry};
@@ -512,4 +512,29 @@ fn cut_rejects_bad_roots() {
         std::fs::write(d.join("roots.jsonl"), line).unwrap();
         assert!(super::cut::run(cut_args(d, &format!("o{i}"), None)).is_err(), "{line}");
     }
+}
+
+#[test]
+fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
+    let s = settings();
+    let empty = BTreeMap::new();
+    let tree = cut_root(&root(), &params(4, 100), &mut lookup, None, &empty).unwrap();
+    let cache = readings(&s, &[("5i5h", 10)]);
+    let work = tempfile::tempdir().unwrap();
+    let draws = DrawValues {
+        black: -70,
+        white: 70,
+    };
+    let values =
+        value_root(&root(), &tree, &cache, &BTreeMap::new(), draws, 40, work.path()).unwrap();
+    assert!(values.marks.is_empty());
+    let ab = key(&["5i5h", "5a5b"]);
+    let all = register_nodes(0, &root(), &tree, &values, &BTreeSet::new(), 4, 100);
+    assert!(all.contains_key(ROOT) && all.contains_key(&ab));
+    // 相手の手番の局面は登録しない。
+    assert!(!all.contains_key(&key(&["5i5h"])));
+    let marked = BTreeSet::from([ab.as_str()]);
+    let without = register_nodes(0, &root(), &tree, &values, &marked, 4, 100);
+    assert!(without.contains_key(ROOT) && !without.contains_key(&ab));
+    assert_eq!(without[ROOT].remaining, 4);
 }

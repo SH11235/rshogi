@@ -46,6 +46,7 @@ fn main() -> Result<()> {
         skip_unusable_moves: cli.skip_unusable_moves,
         skip_unsearched_children: cli.skip_unsearched_children,
         add_transposition_moves: cli.add_transposition_moves,
+        ..BackpropOptions::default()
     };
     backprop_file_with(
         &cli.book,

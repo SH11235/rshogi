@@ -1020,9 +1020,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 "RUNNING"
             };
             monitor_changed(&args.state.join("STATUS"), &format!("{status} {run_id}\n"));
-            let busy = |key: &String| {
-                workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
-            };
+            // 段 0 の木は数十万局面を持つので、局面ごとに worker を走査しない。
+            let busy_keys: BTreeSet<&String> =
+                workers.values().filter_map(|w| w.busy.as_ref().map(|(k, _)| k)).collect();
+            let busy = |key: &String| busy_keys.contains(key);
             // 終わった木は列にも読みにも関わらないので、局面を数え直さない。
             let counts =
                 |live: &Live| live.ended.unwrap_or((live.tree.nodes.len(), live.tree.level.len()));
@@ -1038,7 +1039,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let (queued, running) = if active_tree(live) {
                         (
                             t.level.keys().filter(|k| journal.get(k).is_none() && !busy(k)).count(),
-                            t.level.keys().filter(|k| busy(k)).count(),
+                            busy_keys.iter().filter(|k| t.level.contains_key(**k)).count(),
                         )
                     } else {
                         (0, 0)
@@ -1056,7 +1057,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             for (target, live) in checkpoint.targets.iter().zip(lives.iter_mut()) {
                 let (read, required) = counts(live);
                 let tree = &live.tree;
-                let reading = active_tree(live) && tree.level.keys().any(busy);
+                let reading =
+                    active_tree(live) && busy_keys.iter().any(|k| tree.level.contains_key(*k));
                 let tree_status = if tree.failed {
                     "FAIL"
                 } else if tree.finished {

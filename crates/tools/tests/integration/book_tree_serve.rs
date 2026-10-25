@@ -472,7 +472,7 @@ fn queue_rejections_partial_lines_and_invalid_workers_are_reported_once() {
     std::fs::create_dir(state).unwrap();
     let config = fast_fixture(state);
     std::fs::write(state.join("workers"), "invalid").unwrap();
-    let bad = "invalid\n{\"id\":\"x\",\"root\":\"startpos\",\"own\":\"b\",\"depth\":0}\n";
+    let bad = "invalid\n{\"id\":\"x\",\"root\":\"startpos\",\"own\":\"b\",\"depth\":21}\n";
     std::fs::write(state.join("targets.jsonl"), format!("{bad}{{\"id\":\"partial\"")).unwrap();
     let mut server = start(state, &config);
     wait_for(|| {
@@ -1612,4 +1612,34 @@ fn persistent_replacement_during_initialization_stops_before_search_and_reaps_en
             assert!(log.contains(&(pid, "quit".into())));
         }
     }
+}
+
+#[test]
+fn depth_zero_line_reads_every_root_without_expanding() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let config = fast_fixture(state);
+    let after = |moves: &[&str]| {
+        let mut sfen = format!("{ROOT} 1");
+        for mv in moves {
+            sfen = child_position_after_move(&sfen, mv).unwrap().to_sfen();
+        }
+        format!("sfen {sfen}")
+    };
+    let mismatched = json!({"id":"mixed","root":format!("sfen {ROOT} 1"),"own":"b","depth":0,
+        "roots":[after(&["5i4i"])]});
+    assert!(!try_enqueue(state, &[mismatched]).status.success());
+    enqueue(
+        state,
+        json!({"id":"flat","root":format!("sfen {ROOT} 1"),"own":"b","depth":0,
+            "roots":[after(&["5i4i", "5a4a"]), after(&["5i5h", "5a5b"])]}),
+    );
+    let mut server = start(state, &config);
+    wait_for(|| status(&out(state, "flat", "b")) == "DONE\n");
+    let read = std::fs::read_to_string(out(state, "flat", "b").join("d0.jsonl")).unwrap();
+    assert_eq!(read.lines().count(), 3);
+    assert!(!out(state, "flat", "b").join("d1.jsonl").exists());
+    assert_eq!(searches(state), 3);
+    stop(state, &mut server);
 }

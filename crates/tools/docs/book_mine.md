@@ -503,7 +503,7 @@ book_mine borrow cut --book peta.db --roots roots.jsonl --out cut1 \
 | `--check-every` | 2 | 確認点の間隔。自分の手番の途中の局面を、自分の手のこの数おき (根を含む) に読む。0 で読まない |
 | `--master` | なし | 定跡の元データの表。ここにある局面 (根を除く) を出口にする |
 | `--master-exit` | `use` | `use`: 元データの値を使い、読まない (自分の手番は main、相手の手番は値の分かる手の 1 位。値は `master audit` と同じ伝播の値)。値が分からない局面は読む。`read`: 止めて読む |
-| `--extra` | なし | 足す手 (TSV、見出しに `id`・`key`・`move`)。`borrow value` の `marks.tsv` をそのまま渡せる。部分木の途中の自分の手番の局面でだけ足す |
+| `--extra` | なし | 足す手 (TSV、見出しに `key`・`move`。他の列は読まない)。`borrow value` の `marks.tsv` をそのまま渡せる。どの根でも、部分木の途中の自分の手番の局面に着いたら足す |
 | `--tag` / `--priority` | `peta` / 100 | キューの行の id (`<根の id>_<tag>_<b\|w>`) と priority |
 
 切り出し方:
@@ -535,7 +535,7 @@ receipt=$(book_mine tree enqueue --state "$STATE" --from cut1/targets.jsonl)
 book_mine tree wait --state "$STATE" --receipt "$receipt"
 ```
 
-serve の 1 周ごとの処理は、まだ読んでいない局面の数に比例します。
+serve の 1 周ごとの処理 (0.1 秒ごと) は、前の周から読みが来ていない木ではまだ読んでいない局面の数に比例します。`progress.json` の集計 (1 秒に 1 回まで) は、終わっていない木の局面数に比例します (2 万局面で数 ms)。
 
 ### 値付けと登録
 
@@ -549,12 +549,12 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 
 伝播:
 
-- 部分木を `.db` にして `book_backprop --merge replace` と同じ後退解析で解きます。先手を自分として解く回は `--draw-value-black`、後手は `--draw-value-white` を千日手の値にします (部分木の中の循環)。
-- 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
+- 部分木を `.db` にして `book_backprop --merge replace` と同じ後退解析で解きます。切り出しと同じく、先後反転した局面へは辺を張りません。先手を自分として解く回は `--draw-value-black`、後手は `--draw-value-white` を千日手の値にします (部分木の中の循環)。
+- 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です (BookMiner の木の伝播は resign の葉を 0 にするので、詰みの絡む根では 1 位が食い違うことがあります)。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
 - 途中の局面の手は部分木の手だけです。確認点の読みは値に混ぜません。
 - 同じ値の手は、`book_backprop` の同値手の補正 (勝ちは出口へ短く届く手を残し、遠回りの手を 1 下げる) を受けます。
 
-確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます (BookMiner の「伸ばしていない手が上回る」に当たる)。印の付いた局面は登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
+確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます (BookMiner の「伸ばしていない手が上回る」に当たる)。印の付いた局面は、どの根から着いても登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
 
 登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 
