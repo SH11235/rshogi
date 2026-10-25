@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::ValueEnum;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -307,6 +307,36 @@ impl Texts {
             self.text = text;
             self.unused = 0;
         }
+        Ok(())
+    }
+
+    /// 文字列が格納順に並ぶ一覧を、残す局面だけに詰める。
+    fn retain_ordered(&mut self, keep: &[bool]) -> Result<()> {
+        ensure!(keep.len() == self.len(), "内部エラー: 局面数が合いません");
+        ensure!(
+            self.start.windows(2).all(|w| w[0] <= w[1]),
+            "内部エラー: 文字列が格納順ではありません"
+        );
+        let mut bytes = std::mem::take(&mut self.text).into_bytes();
+        let (mut end, mut count) = (0, 0);
+        for (v, &keep) in keep.iter().enumerate() {
+            if keep {
+                let len = self.len[v] as usize;
+                bytes.copy_within(self.start[v]..self.start[v] + len, end);
+                self.start[count] = end;
+                self.len[count] = len as u32;
+                end += len;
+                count += 1;
+            }
+        }
+        bytes.truncate(end);
+        bytes.shrink_to_fit();
+        self.text = String::from_utf8(bytes).context("内部エラー: SFEN が UTF-8 ではありません")?;
+        self.start.truncate(count);
+        self.len.truncate(count);
+        self.start.shrink_to_fit();
+        self.len.shrink_to_fit();
+        self.unused = 0;
         Ok(())
     }
 
@@ -614,15 +644,15 @@ fn classify(line: &str) -> Line<'_> {
 }
 
 /// 指し手行の欄。指し手と予想手の `none` / `None` / `resign` は `None`。
-struct RowFields<'a> {
-    move_usi: Option<&'a str>,
-    ponder_usi: Option<&'a str>,
+pub(crate) struct RowFields<'a> {
+    pub(crate) move_usi: Option<&'a str>,
+    pub(crate) ponder_usi: Option<&'a str>,
     value: i32,
-    depth: i32,
-    count: u64,
+    pub(crate) depth: i32,
+    pub(crate) count: u64,
 }
 
-fn parse_row(line: &str) -> RowFields<'_> {
+pub(crate) fn parse_row(line: &str) -> RowFields<'_> {
     fn field(token: &str) -> Option<&str> {
         match token {
             "none" | "None" | "resign" => None,
@@ -850,6 +880,25 @@ struct InputRows {
 }
 
 impl InputRows {
+    fn push(&mut self, fields: &RowFields<'_>) {
+        let row = self.value.len() as u32;
+        self.value.push(fields.value);
+        self.moves.push(match fields.move_usi {
+            None => MOVE_NONE,
+            Some(text) => match canonical_move(text) {
+                Some(mv) => u32::from(mv.raw()),
+                None => match Move::from_usi(text) {
+                    Some(mv) if mv.to_usi() == text => u32::from(mv.raw()),
+                    decoded => {
+                        self.texts.push((row, text.into()));
+                        decoded
+                            .map_or(MOVE_TEXT | MOVE_INVALID, |mv| MOVE_TEXT | u32::from(mv.raw()))
+                    }
+                },
+            },
+        });
+    }
+
     /// 行の指し手欄の文字列。
     fn text(&self, row: usize) -> String {
         let mv = self.moves[row];
@@ -914,23 +963,7 @@ fn read_rows(path: &Path, scan: &Scan) -> Result<InputRows> {
             let fields = parse_row(line);
             depth0 &= fields.depth == 0;
             unexplored &= fields.value == 0 && fields.depth == 0;
-            let row = input.value.len() as u32;
-            input.value.push(fields.value);
-            input.moves.push(match fields.move_usi {
-                None => MOVE_NONE,
-                Some(text) => match canonical_move(text) {
-                    Some(mv) => u32::from(mv.raw()),
-                    None => match Move::from_usi(text) {
-                        Some(mv) if mv.to_usi() == text => u32::from(mv.raw()),
-                        decoded => {
-                            input.texts.push((row, text.into()));
-                            decoded.map_or(MOVE_TEXT | MOVE_INVALID, |mv| {
-                                MOVE_TEXT | u32::from(mv.raw())
-                            })
-                        }
-                    },
-                },
-            });
+            input.push(&fields);
             Ok(())
         })?;
         if input.value.len() - first != scan.rows[node] as usize {
@@ -949,7 +982,159 @@ pub fn read_graph(path: &Path, options: BackpropOptions) -> Result<Graph> {
     let scan = scan(path)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", path.display()))?;
     let input = read_rows(path, &scan)?;
-    build_graph(path, options, scan, input)
+    build_graph(Some(path), options, scan, input)
+}
+
+/// key 順の元データから、一時ファイルを経ずに伝播用グラフを作る。
+pub(crate) fn graph_from_entries<'a, M>(
+    entries: impl IntoIterator<Item = (&'a str, &'a str, M)>,
+) -> Result<Graph>
+where
+    M: IntoIterator<Item = (&'a str, Option<i32>)>,
+{
+    use std::fmt::Write as _;
+    let mut scan = Scan {
+        sfens: Texts::default(),
+        rows: Vec::new(),
+        block_start: vec![0],
+        blocks: Vec::new(),
+        hashes: Vec::new(),
+        check: SourceCheck::default(),
+    };
+    let mut input = InputRows {
+        value: Vec::new(),
+        moves: Vec::new(),
+        texts: Vec::new(),
+        all_depth0: Vec::new(),
+        unexplored: Vec::new(),
+    };
+    let mut line = String::new();
+    for (key, ply, moves) in entries {
+        ensure!(
+            scan.sfens.len() == 0 || strip_ply(scan.sfens.get(scan.sfens.len() - 1)) < key,
+            "内部エラー: 元データが key 順ではありません"
+        );
+        let first = input.value.len();
+        let (mut depth0, mut unexplored) = (true, true);
+        for (i, (mv, value)) in moves.into_iter().enumerate() {
+            line.clear();
+            // 不正な手の欄も、テキスト定跡を経た場合と同じ欄として解釈する。
+            write!(
+                line,
+                "{mv} none {} {} {}",
+                value.unwrap_or(0),
+                i32::from(value.is_some()),
+                if i == 0 { 2 } else { 1 }
+            )?;
+            let fields = parse_row(&line);
+            depth0 &= fields.depth == 0;
+            unexplored &= fields.value == 0 && fields.depth == 0;
+            u32::try_from(input.value.len()).context("手が多すぎます")?;
+            input.push(&fields);
+        }
+        if input.value.len() == first {
+            continue;
+        }
+        scan.sfens.push(format!("{key} {ply}").trim())?;
+        scan.rows
+            .push(u32::try_from(input.value.len() - first).context("手が多すぎます")?);
+        scan.block_start.push(0);
+        scan.hashes.push(0);
+        input.all_depth0.push(depth0);
+        input.unexplored.push(unexplored);
+    }
+    build_graph(None, BackpropOptions::default(), scan, input)
+}
+
+/// 値の分かる手だけを残し、消えた直接の子局面は残る反転局面への辺に張り替える。
+pub(crate) fn retain_known(graph: &mut Graph, known: &[Vec<bool>]) -> Result<()> {
+    ensure!(
+        graph.source.is_none() && graph.added.is_empty(),
+        "内部エラー: 元データ専用のグラフではありません"
+    );
+    ensure!(known.len() == graph.len(), "内部エラー: 局面数が合いません");
+    let keep: Vec<bool> = known.iter().map(|m| m.iter().any(|&k| k)).collect();
+    let mut count = 0u32;
+    let remap: Vec<u32> = keep
+        .iter()
+        .map(|&keep| {
+            if keep {
+                let v = count;
+                count += 1;
+                v
+            } else {
+                NONE
+            }
+        })
+        .collect();
+    let flipped: Vec<u32> = (0..graph.len())
+        .map(|v| {
+            if keep[v] {
+                return NONE;
+            }
+            rshogi_book::flipped_key(graph.sfen(v))
+                .and_then(|key| graph.find(strip_ply(&key)))
+                .map_or(NONE, |to| remap[to])
+        })
+        .collect();
+    let (mut node, mut row) = (0, 0);
+    let mut flip_edges = 0;
+    for (v, moves) in known.iter().enumerate() {
+        let range = graph.rows(v);
+        ensure!(range.len() == moves.len(), "内部エラー: 手の数が合いません");
+        if !keep[v] {
+            continue;
+        }
+        graph.row_start[node] = row as u32;
+        graph.node_flags[node] = graph.node_flags[v];
+        for (r, &known) in range.zip(moves) {
+            if !known {
+                continue;
+            }
+            ensure!(graph.usable(r), "内部エラー: 非合法手の値が分かっています");
+            let mut flags = ROW_USABLE;
+            let to = graph.edge_to(r).map_or(NONE, |to| {
+                if remap[to] != NONE {
+                    flags |= graph.row_flags[r] & ROW_FLIP;
+                    remap[to]
+                } else if graph.row_flags[r] & ROW_FLIP == 0 && flipped[to] != NONE {
+                    flags |= ROW_FLIP;
+                    flipped[to]
+                } else {
+                    NONE
+                }
+            });
+            graph.old[row] = graph.old[r];
+            graph.new[row] = graph.old[r];
+            graph.to[row] = to;
+            graph.row_flags[row] = flags;
+            flip_edges += usize::from(flags & ROW_FLIP != 0);
+            row += 1;
+        }
+        node += 1;
+    }
+    graph.row_start[node] = row as u32;
+    graph.row_start.truncate(node + 1);
+    graph.node_flags.truncate(node);
+    graph.old.truncate(row);
+    graph.new.truncate(row);
+    graph.to.truncate(row);
+    graph.row_flags.truncate(row);
+    graph.sfens.retain_ordered(&keep)?;
+    graph.row_start.shrink_to_fit();
+    graph.node_flags.shrink_to_fit();
+    graph.old.shrink_to_fit();
+    graph.new.shrink_to_fit();
+    graph.to.shrink_to_fit();
+    graph.row_flags.shrink_to_fit();
+    graph.block_start.truncate(node + 1);
+    graph.hashes.truncate(node);
+    graph.block_start.shrink_to_fit();
+    graph.hashes.shrink_to_fit();
+    graph.flip_edges = flip_edges;
+    graph.illegal_moves = 0;
+    graph.options.skip_unusable_moves = true;
+    Ok(())
 }
 
 /// 指し手が合法でない理由。
@@ -991,7 +1176,7 @@ struct RowPart {
 }
 
 fn build_graph(
-    path: &Path,
+    source: Option<&Path>,
     options: BackpropOptions,
     scan: Scan,
     input: InputRows,
@@ -1193,7 +1378,7 @@ fn build_graph(
     }
     drop((input, index));
     Ok(Graph {
-        source: Some(path.to_path_buf()),
+        source: source.map(Path::to_path_buf),
         options,
         sfens,
         node_flags,
@@ -2212,9 +2397,17 @@ pub fn write_backprop_book(graph: &Graph, out: &Path) -> Result<()> {
         .source
         .as_deref()
         .ok_or_else(|| anyhow!("内部エラー: 入力の定跡がありません"))?;
+    write_book_atomic(out, |writer| write_rows(graph, source, writer))
+}
+
+/// 定跡の内容を一時ファイルへ書き、成功したときだけ出力を置き換える。
+pub(crate) fn write_book_atomic(
+    out: &Path,
+    write: impl FnOnce(BufWriter<File>) -> Result<()>,
+) -> Result<()> {
     let (partial, file) =
         create_partial(out).with_context(|| format!("出力を作成できません: {}", out.display()))?;
-    let written = write_rows(graph, source, BufWriter::new(file)).and_then(|()| {
+    let written = write(BufWriter::new(file)).and_then(|()| {
         std::fs::rename(&partial, out)
             .with_context(|| format!("出力を置き換えられません: {}", out.display()))
     });

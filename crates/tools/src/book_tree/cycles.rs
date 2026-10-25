@@ -99,8 +99,7 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
-    let values = evaluate(positions, draws, work.path())?;
+    let values = evaluate(positions, draws)?;
     let index = BookIndex::new(positions)?;
 
     // 先手と後手のグラフは互いの手に左右されない (相手の手番では合法手を全部見る) ので並べて解く。
@@ -885,8 +884,7 @@ mod tests {
     }
 
     fn solve_from(p: &BTreeMap<String, MasterPosition>, start: &str) -> SidePlan {
-        let work = tempfile::tempdir().unwrap();
-        let values = evaluate(p, DrawValues::default(), work.path()).unwrap();
+        let values = evaluate(p, DrawValues::default()).unwrap();
         let index = BookIndex::new(p).unwrap();
         let graph = graph_of(&index, start);
         let mut plan = plan_side(&graph, &values).unwrap();
