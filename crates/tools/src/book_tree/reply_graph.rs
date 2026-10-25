@@ -213,6 +213,7 @@ pub(super) struct ReplyGraph<'a> {
     edges: Vec<ReplyEdge>,
     /// 自分の手のうち、非合法で辺にしなかった手の数。
     pub illegal_moves: usize,
+    pub pruned_positions: usize,
 }
 
 impl<'a> ReplyGraph<'a> {
@@ -318,7 +319,7 @@ pub(super) fn thread_pool(threads: usize) -> Result<rayon::ThreadPool> {
 
 /// 1 局面から出る辺 (手、行き先のハッシュ値と詰めた形と元データの番号、自分の手なら元データの手の番号) と、
 /// 非合法で辺にしなかった自分の手の数。
-type Expansion = (Vec<(Move, u64, Packed, u32, u32)>, usize);
+type Expansion = (Vec<(Move, u64, Packed, u32, u32)>, usize, bool);
 
 /// `side` を自分として `start` から辿ったグラフを作る。自分の手番の局面では `select(元データの番号, 局面)` の
 /// 手を指し、相手の手番の局面では、合法手のうち元データの局面に戻る手を辺にする。相手の合法手は不成も含める
@@ -336,6 +337,17 @@ pub(super) fn build<'a>(
     start: &str,
     select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
 ) -> Result<ReplyGraph<'a>> {
+    build_filtered(index, side, start, select, |_, _| true)
+}
+
+/// `expand` が偽の局面では、合法手の生成と子局面の展開を止める。
+pub(super) fn build_filtered<'a>(
+    index: &'a BookIndex<'a>,
+    side: &str,
+    start: &str,
+    select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
+    expand: impl Fn(Option<usize>, &Position) -> bool + Sync,
+) -> Result<ReplyGraph<'a>> {
     let black = side == "b";
     let mut graph = ReplyGraph {
         index,
@@ -345,6 +357,7 @@ pub(super) fn build<'a>(
         edge_start: vec![0],
         edges: Vec::new(),
         illegal_moves: 0,
+        pruned_positions: 0,
     };
     // 頂点のハッシュ値 → 番号。同じハッシュ値の別の局面は詰めた形で見分ける。
     let mut nodes = HashIndex::default();
@@ -365,13 +378,16 @@ pub(super) fn build<'a>(
     let root_master = index.find_packed(root.key(), &root_packed).unwrap_or(NONE);
     let root_own = (root.side_to_move() == Color::Black) == black;
     intern(&mut graph, root.key(), root_packed, root_master, root_own);
-    let expand = |packed: &Packed, master: u32, own: bool| -> Result<Expansion> {
+    let expand_node = |packed: &Packed, master: u32, own: bool| -> Result<Expansion> {
         let mut pos = unpack(packed)?;
+        if !expand((master != NONE).then_some(master as usize), &pos) {
+            return Ok((Vec::new(), 0, true));
+        }
         let mut edges = Vec::new();
         let mut illegal = 0;
         if own {
             if master == NONE {
-                return Ok((edges, illegal));
+                return Ok((edges, illegal, false));
             }
             let position = index.position(master as usize);
             for i in select(master as usize, position) {
@@ -400,19 +416,20 @@ pub(super) fn build<'a>(
                 }
             }
         }
-        Ok((edges, illegal))
+        Ok((edges, illegal, false))
     };
     let mut level = 0..1usize;
     while !level.is_empty() {
         let expansions: Vec<Result<Expansion>> = level
             .clone()
             .into_par_iter()
-            .map(|v| expand(&graph.packed[v], graph.master[v], graph.own[v]))
+            .map(|v| expand_node(&graph.packed[v], graph.master[v], graph.own[v]))
             .collect();
         let next_start = graph.len();
         for (v, expansion) in level.clone().zip(expansions) {
-            let (edges, illegal) = expansion?;
+            let (edges, illegal, pruned) = expansion?;
             graph.illegal_moves += illegal;
+            graph.pruned_positions += usize::from(pruned);
             // 1 手で手番が替わる。
             let child_own = !graph.own[v];
             for (mv, hash, packed, master, book_move) in edges {
