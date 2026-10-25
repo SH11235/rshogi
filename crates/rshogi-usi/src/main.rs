@@ -192,6 +192,8 @@ struct UsiEngine {
     mate_mode: MateMode,
     /// df-pn で 1 局面を解くスレッド数（MateThreadsで変更）
     mate_threads: usize,
+    /// 最短手順モード（MateShortestで変更）
+    mate_shortest: bool,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
     mate_solver: Option<DfpnSolver>,
     /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
@@ -267,6 +269,7 @@ impl UsiEngine {
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
             mate_mode: MateMode::default(),
             mate_threads: 1,
+            mate_shortest: false,
             mate_solver: None,
             mate_thread: None,
             mate_stop: Arc::new(AtomicBool::new(false)),
@@ -363,6 +366,7 @@ impl UsiEngine {
             MateMode::default().name()
         );
         println!("option name MateThreads type spin default 1 min 1 max 512");
+        println!("option name MateShortest type check default false");
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -1017,6 +1021,11 @@ impl UsiEngine {
                     self.mate_threads = threads.min(512);
                 }
             }
+            "MateShortest" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    self.mate_shortest = v;
+                }
+            }
             "EvalHash" => {
                 if let Ok(size) = value.parse::<usize>()
                     && let Some(search) = self.search.as_mut()
@@ -1664,6 +1673,7 @@ impl UsiEngine {
             .take()
             .unwrap_or_else(|| DfpnSolver::with_mode(self.mate_hash_mb, self.mate_mode));
         solver.set_threads(self.mate_threads);
+        solver.set_shortest(self.mate_shortest);
         self.mate_stop.store(false, Ordering::SeqCst);
         let stop = Arc::clone(&self.mate_stop);
         let suppress_flag = Arc::clone(&self.suppress_bestmove);

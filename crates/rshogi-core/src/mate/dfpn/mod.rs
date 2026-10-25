@@ -10,6 +10,8 @@
 //! 打ち切り (時間・ノード数・停止) は必ず [`MateResult::Unknown`] になり、不詰と混ざらない。
 //! 探索深さの上限 (2048 手、wasm では 1024 手) に達して読み切れず不詰と言えないとき、詰みを証明したが
 //! 手順を復元できなかったときも Unknown を返す。詰みの手順は最短とは限らない。
+//! 最短手順モード ([`DfpnSolver::set_shortest`]) では、詰みを証明した後に詰将棋のルールでの
+//! 正解手順 (最短手数、受け方は最長の応手、無駄合いは数えない) を求める。
 //! 局面の同一性は 64bit のハッシュキーで判定するので、衝突による誤りの可能性は確率的にのみ排除される。
 //! 攻め方の玉が無い局面 (詰将棋) も解く。余った駒を受け方の持駒にする詰将棋の約束は、局面の受け方の
 //! 持駒として与える。受け方の玉が無い局面と、手番でない側が王手されている局面は扱わない
@@ -17,10 +19,13 @@
 
 mod pv;
 mod search;
+mod shortest;
 mod state;
 mod table;
 mod verify;
 
+#[cfg(test)]
+mod shortest_tests;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +45,7 @@ use crate::types::{Move, PieceType};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MateResult {
     /// 詰み。攻め方の手から始まる詰み手順 (最後の手で受け方が詰む)。
+    /// 最短手順モードでは正解手順で、最後の局面に受け方の無駄合いだけが残ることがある。
     Mate(Vec<Move>),
     /// 不詰 (攻め方が王手を続けて詰ませる手順は無い)
     NoMate,
@@ -116,6 +122,8 @@ pub struct DfpnSolver {
     helper_scratch: Vec<Scratch<Move>>,
     /// 並列に解くとき、最初に 1 スレッドで解くノード数
     parallel_start: u64,
+    /// 最短手順モード
+    shortest: bool,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -142,7 +150,20 @@ impl DfpnSolver {
             threads: 1,
             helper_scratch: Vec::new(),
             parallel_start: PARALLEL_START_NODES,
+            shortest: false,
         }
+    }
+
+    /// 最短手順モードにするか (既定は切る)。
+    ///
+    /// 最短手順モードでは、詰みを証明した後に、詰将棋のルールでの正解手順を求めて返す: 攻め方は最短の
+    /// 手数で詰まし、受け方は最も長く逃れる応手を選び、無駄合いは手数に数えず、受け方の応手で手数が
+    /// 同じなら詰上りで攻め方に持駒が余らない方を選ぶ。無駄合いは、王手している駒が合駒を取り、取った駒を
+    /// 使わずに詰む駒打ちの合駒 (移動合いは無駄合いとしない)。判定 (詰み・不詰) は切ったときと同じで、
+    /// 手順を求める分だけ時間とノードが増える。手順を求め終わる前に制限に達したら [`MateResult::Unknown`]。
+    /// 手順を求める段階は 1 スレッドで解く。
+    pub fn set_shortest(&mut self, shortest: bool) {
+        self.shortest = shortest;
     }
 
     /// 探索するスレッド数を設定する (最低 1)。置換表は全スレッドで共有する。
@@ -206,11 +227,12 @@ impl DfpnSolver {
         } else {
             self.run_mode(pos, *limits, start, stop, &mut progress)
         };
+        let futile_end = self.shortest;
         let is_valid = |pos: &mut Position, pv: &[Move]| {
             if kingless {
-                verify::is_valid_mate_pv_by_rules(pos, pv)
+                verify::check_mate_pv_by_rules(pos, pv, futile_end)
             } else {
-                is_valid_mate_pv(pos, pv)
+                check_mate_pv(pos, pv, futile_end)
             }
         };
         match result {
@@ -235,9 +257,45 @@ impl DfpnSolver {
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
         match self.mode {
-            MateMode::Speed => self.run::<S, false>(st, limits, start, stop, progress),
-            MateMode::Power => self.run::<S, true>(st, limits, start, stop, progress),
+            MateMode::Speed => self.run_with_pv::<S, false>(st, limits, start, stop, progress),
+            MateMode::Power => self.run_with_pv::<S, true>(st, limits, start, stop, progress),
         }
+    }
+
+    /// 解き、最短手順モードなら詰みの証明に続けて正解手順を求める
+    fn run_with_pv<S: RootState, const PIECES: bool>(
+        &mut self,
+        st: &mut S,
+        limits: MateLimits,
+        start: Instant,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(MateProgress),
+    ) -> Option<SolveOutcome<Move>> {
+        let outcome = self.run::<S, PIECES>(st, limits, start, stop, progress);
+        if !self.shortest || !matches!(outcome, Some(SolveOutcome::Mate(_))) {
+            return outcome;
+        }
+        let judged_nodes = self.nodes;
+        let budget = Budget {
+            stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: match limits.nodes {
+                0 => 0,
+                n => n.saturating_sub(judged_nodes).max(1),
+            },
+            time_limit_ms: limits.time_ms,
+            start,
+            progress,
+        };
+        let attacker = st.position().side_to_move();
+        let mut searcher =
+            Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
+        configure(&mut searcher, self.mode);
+        let pv = shortest::shortest_pv(&mut searcher, st);
+        self.nodes = judged_nodes + searcher.nodes();
+        pv.ok().flatten().map(SolveOutcome::Mate)
     }
 
     /// 制限 (`limits`、`start` からの時間) の中で解く
@@ -294,7 +352,7 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
-        let result = solve_with(&mut searcher, pos);
+        let result = solve_with(&mut searcher, pos, !self.shortest);
         self.nodes = searcher.nodes();
         result
     }
@@ -320,6 +378,7 @@ impl DfpnSolver {
         let attacker = pos.position().side_to_move();
         let (table, scratch, helper_scratch, mode) =
             (&self.table, &mut self.scratch, &mut self.helper_scratch, self.mode);
+        let extract_pv = !self.shortest;
         let slots: Vec<OnceLock<HelperResult>> =
             (0..threads - 1).map(|_| OnceLock::new()).collect();
         let helpers: Vec<Box<dyn FnOnce() + Send + '_>> = helper_scratch
@@ -358,7 +417,7 @@ impl DfpnSolver {
                     let (num, den) = HELPER_SLACKS[i % HELPER_SLACKS.len()];
                     searcher.set_threshold_slack(num, den);
                     searcher.set_tie_seed(i as u32 + 1);
-                    let result = solve_with(&mut searcher, &mut pos);
+                    let result = solve_with(&mut searcher, &mut pos, extract_pv);
                     let _ = slot.set((result, searcher.nodes()));
                 }) as Box<dyn FnOnce() + Send + '_>
             })
@@ -376,7 +435,7 @@ impl DfpnSolver {
             };
             let mut searcher = Searcher::<_, PIECES>::new(table, scratch, attacker, budget);
             configure(&mut searcher, mode);
-            let result = solve_with(&mut searcher, pos);
+            let result = solve_with(&mut searcher, pos, extract_pv);
             let nodes = searcher.nodes();
             wait_for_helpers(&slots, &shared_nodes, start, progress);
             (result, nodes)
@@ -549,14 +608,17 @@ pub fn solve(pos: &mut Position, limits: &MateLimits, stop: &AtomicBool) -> Mate
 }
 
 enum SolveOutcome<M> {
+    /// 詰み手順。手順を復元しないときは空
     Mate(Vec<M>),
     NoMate,
 }
 
-/// ルートを解き、詰みなら手順まで復元する。打ち切り・復元失敗は `None`。
+/// ルートを解き、詰みなら `extract_pv` のとき手順まで復元する (しないときは空の手順を返す)。
+/// 打ち切り・復元失敗は `None`。
 fn solve_with<S: state::MateState, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
+    extract_pv: bool,
 ) -> Option<SolveOutcome<S::Mv>> {
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0).ok()?;
     // 閾値なしの根の探索は結論が出るか打ち切りでしか戻らない。結論が手順の復元や上限のために
@@ -570,6 +632,9 @@ fn solve_with<S: state::MateState, const PIECES: bool>(
     if !root.is_proven() {
         return None;
     }
+    if !extract_pv {
+        return Some(SolveOutcome::Mate(Vec::new()));
+    }
     pv::extract_pv(searcher, st, root.mate_len)
         .ok()
         .flatten()
@@ -578,7 +643,14 @@ fn solve_with<S: state::MateState, const PIECES: bool>(
 
 /// 詰み手順を探索とは独立に検証する: 全手が合法 (不成を含む合法手生成に含まれる)、
 /// 攻め方の手はすべて王手、同じ局面に戻らない、最後の局面は王手されていて合法手が無い。
+#[cfg(test)]
 fn is_valid_mate_pv(pos: &mut Position, pv: &[Move]) -> bool {
+    check_mate_pv(pos, pv, false)
+}
+
+/// [`is_valid_mate_pv`] の検証。`futile_end` なら、最後の局面の合法手が王手している駒に取られる合駒
+/// (無駄合いの候補) だけでもよい (取った後に詰むことは確かめない)。
+fn check_mate_pv(pos: &mut Position, pv: &[Move], futile_end: bool) -> bool {
     if pv.is_empty() || pv.len().is_multiple_of(2) {
         return false;
     }
@@ -609,7 +681,10 @@ fn is_valid_mate_pv(pos: &mut Position, pv: &[Move]) -> bool {
     if ok {
         let mut legal = MoveList::new();
         generate_legal_all(pos, &mut legal);
-        ok = pos.in_check() && legal.is_empty();
+        ok = pos.in_check()
+            && (legal.is_empty()
+                || futile_end
+                    && legal.iter().all(|&mv| verify::is_capturable_interposition(pos, mv, true)));
     }
     for &mv in pv[..played].iter().rev() {
         pos.undo_move(mv);

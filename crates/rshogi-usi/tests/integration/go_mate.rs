@@ -139,6 +139,20 @@ fn setoption_during_go_mate_does_not_block_commands() {
 }
 
 #[test]
+fn mate_shortest_returns_the_solution_without_futile_interpositions() {
+    // ▲9一飛まで。受け方の歩の合駒は、飛車が取ると同じ形で詰む無駄合い
+    let mut engine = Engine::start();
+    for mode in ["Speed", "Power"] {
+        engine.send(&format!(
+            "setoption name MateMode value {mode}\nsetoption name MateShortest value true\nposition sfen 8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1\ngo mate 10000"
+        ));
+        let line = engine.checkmate(Duration::from_secs(20));
+        assert!(matches!(line.as_str(), "checkmate 9i9a" | "checkmate 9i9a+"), "{mode}: {line}");
+    }
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
 fn each_mate_mode_solves_a_mate() {
     let mut engine = Engine::start();
     for mode in ["Speed", "Power"] {

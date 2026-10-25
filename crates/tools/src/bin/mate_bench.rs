@@ -13,10 +13,14 @@
 //! # 実戦局面を手番そのままと手番反転 (詰めろ判定の使い方) の両方で解く
 //! cargo run --release -p tools --bin mate_bench -- \
 //!   --input positions.sfen --flip --time-ms 1000 --out real.tsv
+//!
+//! # 作品集 (各行 `<SFEN><TAB><作意手数>`) を最短手順モードで解き、作意手数と照合する
+//! cargo run --release -p tools --bin mate_bench -- \
+//!   --input works.tsv --shortest --out works-result.tsv
 //! ```
 //!
 //! 入力は読みながら解くので、メモリは局面数に依存しない (分位点は対数ヒストグラムで近似する)。
-//! 出力の TSV は入力順で、1 行 1 局面の `sfen` `result` `pv_len` `nodes` `micros` `pv`。
+//! 出力の TSV は入力順で、1 行 1 局面の `sfen` `result` `pv_len` `nodes` `micros` `pv` `expect_len`。
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -72,8 +76,13 @@ struct Cli {
     #[arg(long, default_value = "Power", value_parser = parse_mode)]
     mode: MateMode,
 
-    /// 正解の最短詰み手数。指定すると、不詰・非対応の結果を誤りとして数える。
-    /// この手数より短い詰み手順は、局面集の正解の側の誤りもありうるので「要確認」として並べる
+    /// 最短手順モード (USI の MateShortest と同じ): 詰将棋のルールでの正解手順を求める
+    #[arg(long)]
+    shortest: bool,
+
+    /// 正解の詰み手数 (入力の行に `<TAB><手数>` があればその行はそちらを使う)。正解の分かっている局面で、
+    /// 不詰・非対応の結果を誤りとして数える。この手数より短い詰み手順は、局面集の正解の側の誤りも
+    /// ありうるので「要確認」として並べる。`--shortest` では、この手数より長い手順も「要確認」にする
     #[arg(long)]
     expect_mate_len: Option<usize>,
 
@@ -95,6 +104,8 @@ struct Outcome {
     result: MateResult,
     nodes: u64,
     micros: u64,
+    /// 正解の詰み手数 (入力の行か `--expect-mate-len`)
+    expect: Option<usize>,
 }
 
 impl Outcome {
@@ -189,8 +200,12 @@ struct Summary {
     max_micros: u64,
     /// ノード予算ごとの判定数
     within_budget: [usize; 5],
+    /// 正解の詰み手数が分かっている局面数
+    expect_known: usize,
     expect_wrong: usize,
     expect_too_short: usize,
+    /// `--shortest` で正解より長い手順
+    expect_too_long: usize,
     expect_shortest: usize,
 }
 
@@ -211,14 +226,16 @@ impl Summary {
             max_nodes: 0,
             max_micros: 0,
             within_budget: [0; 5],
+            expect_known: 0,
             expect_wrong: 0,
             expect_too_short: 0,
+            expect_too_long: 0,
             expect_shortest: 0,
         }
     }
 
-    /// 1 局面を足す。正解と食い違うか要確認なら true。
-    fn add(&mut self, o: &Outcome, expect: Option<usize>) -> bool {
+    /// 1 局面を足す。正解と食い違うか要確認なら true。`shortest` は最短手順モードで解いたか。
+    fn add(&mut self, o: &Outcome, shortest: bool) -> bool {
         self.total_nodes += o.nodes;
         match o.result {
             MateResult::Mate(_) => self.mate += 1,
@@ -235,9 +252,10 @@ impl Summary {
                 *count += usize::from(o.nodes <= budget);
             }
         }
-        let Some(expect) = expect else {
+        let Some(expect) = o.expect else {
             return false;
         };
+        self.expect_known += 1;
         match o.result {
             MateResult::NoMate | MateResult::Unsupported => {
                 self.expect_wrong += 1;
@@ -245,6 +263,10 @@ impl Summary {
             }
             MateResult::Mate(_) if o.pv_len() < expect => {
                 self.expect_too_short += 1;
+                true
+            }
+            MateResult::Mate(_) if shortest && o.pv_len() > expect => {
+                self.expect_too_long += 1;
                 true
             }
             MateResult::Mate(_) => {
@@ -268,8 +290,26 @@ fn flip_side_to_move(sfen: &str) -> String {
     fields.join(" ")
 }
 
+/// 解く局面の (通し番号, SFEN, 正解の詰み手数)
+type Job = (usize, String, Option<usize>);
+
+/// 入力の 1 行を SFEN と正解の詰み手数 (`<TAB><手数>` があれば) に分ける
+fn parse_line(line: &str) -> Result<(String, Option<usize>)> {
+    let (sfen, expect) = match line.split_once('\t') {
+        Some((sfen, expect)) => {
+            let expect = expect
+                .trim()
+                .parse()
+                .with_context(|| format!("正解の詰み手数を読めない: {line}"))?;
+            (sfen.trim(), Some(expect))
+        }
+        None => (line, None),
+    };
+    Ok((sfen.strip_prefix("sfen ").unwrap_or(sfen).to_string(), expect))
+}
+
 /// 入力を読み、使う局面に通し番号を付けて送る。`tickets` で未処理の件数に上限をかける。
-fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) -> Result<()> {
+fn feed(cli: &Cli, jobs_tx: SyncSender<Job>, tickets: Receiver<()>) -> Result<()> {
     let file = std::fs::File::open(&cli.input)
         .with_context(|| format!("{} を開けない", cli.input.display()))?;
     let mut line_index = 0usize;
@@ -285,13 +325,16 @@ fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) 
         if !selected {
             continue;
         }
-        let sfen = line.strip_prefix("sfen ").unwrap_or(line).to_string();
+        let (sfen, expect) = parse_line(line)?;
+        let expect = expect.or(cli.expect_mate_len);
         let mut pos = Position::new();
         pos.set_sfen(&sfen)
             .map_err(|e| anyhow::anyhow!("SFEN を読めない: {sfen}: {e:?}"))?;
         let flipped = (cli.flip && !pos.in_check()).then(|| flip_side_to_move(&sfen));
-        for s in std::iter::once(sfen).chain(flipped) {
-            if tickets.recv().is_err() || jobs_tx.send((sent, s)).is_err() {
+        // 反転局面は別の問題なので、正解の手数は付けない
+        let jobs = std::iter::once((sfen, expect)).chain(flipped.map(|s| (s, None)));
+        for (s, expect) in jobs {
+            if tickets.recv().is_err() || jobs_tx.send((sent, s, expect)).is_err() {
                 return Ok(());
             }
             sent += 1;
@@ -306,7 +349,7 @@ fn feed(cli: &Cli, jobs_tx: SyncSender<(usize, String)>, tickets: Receiver<()>) 
 
 fn solve_worker(
     cli: &Cli,
-    jobs_rx: &Mutex<Receiver<(usize, String)>>,
+    jobs_rx: &Mutex<Receiver<Job>>,
     results_tx: SyncSender<(usize, Outcome)>,
 ) {
     let stop = AtomicBool::new(false);
@@ -316,9 +359,12 @@ fn solve_worker(
     };
     let mut solver = DfpnSolver::with_mode(cli.hash_mb, cli.mode);
     solver.set_threads(cli.threads);
+    solver.set_shortest(cli.shortest);
     loop {
         let job = jobs_rx.lock().expect("受け口のロック").recv();
-        let Ok((index, sfen)) = job else { break };
+        let Ok((index, sfen, expect)) = job else {
+            break;
+        };
         let mut pos = Position::new();
         pos.set_sfen(&sfen).expect("読み込み時に検査済み");
         let start = Instant::now();
@@ -328,6 +374,7 @@ fn solve_worker(
             result,
             nodes: solver.nodes(),
             micros: start.elapsed().as_micros() as u64,
+            expect,
         };
         if results_tx.send((index, outcome)).is_err() {
             break;
@@ -350,7 +397,7 @@ fn main() -> Result<()> {
     // 解いている途中と書き出し待ちの局面数の上限 (遅い局面があっても並べ替え待ちが膨らまない)
     let window = jobs * 64;
 
-    let (jobs_tx, jobs_rx) = sync_channel::<(usize, String)>(jobs * 2);
+    let (jobs_tx, jobs_rx) = sync_channel::<Job>(jobs * 2);
     let (results_tx, results_rx) = sync_channel::<(usize, Outcome)>(jobs * 2);
     let (tickets_tx, tickets_rx) = sync_channel::<()>(window);
     for _ in 0..window {
@@ -365,7 +412,7 @@ fn main() -> Result<()> {
                 std::fs::File::create(path)
                     .with_context(|| format!("{} を作れない", path.display()))?,
             );
-            writeln!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv")?;
+            writeln!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv\texpect_len")?;
             Some(w)
         }
         None => None,
@@ -400,26 +447,28 @@ fn main() -> Result<()> {
                     && write_error.is_none()
                     && let Err(e) = writeln!(
                         w,
-                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         o.sfen,
                         o.tag(),
                         o.pv_len(),
                         o.nodes,
                         o.micros,
-                        o.pv_usi()
+                        o.pv_usi(),
+                        o.expect.map_or(String::new(), |n| n.to_string())
                     )
                 {
                     write_error = Some(e);
                 }
-                if summary.add(&o, cli.expect_mate_len) && reported < MAX_REPORTED_ERRORS {
+                if summary.add(&o, cli.shortest) && reported < MAX_REPORTED_ERRORS {
                     reported += 1;
-                    let label = if o.tag() == "mate" {
-                        "要確認 (最短未満)"
-                    } else {
-                        "誤り"
+                    let expect = o.expect.unwrap_or(0);
+                    let label = match o.tag() {
+                        "mate" if o.pv_len() < expect => "要確認 (正解より短い)",
+                        "mate" => "要確認 (正解より長い)",
+                        _ => "誤り",
                     };
                     println!(
-                        "{label}: {} (手順 {} 手) {} {}",
+                        "{label}: {} (手順 {} 手、正解 {expect} 手) {} {}",
                         o.tag(),
                         o.pv_len(),
                         o.sfen,
@@ -467,10 +516,15 @@ fn main() -> Result<()> {
     let curve: Vec<String> =
         BUDGETS.iter().zip(&s.within_budget).map(|(b, c)| format!("{b}:{c}")).collect();
     println!("ノード予算ごとの判定数: {}", curve.join(" "));
-    if let Some(expect) = cli.expect_mate_len {
+    if s.expect_known > 0 {
+        let too_long = if cli.shortest {
+            format!(" / 正解より長い (要確認) {}", s.expect_too_long)
+        } else {
+            String::new()
+        };
         println!(
-            "正解 (最短 {expect} 手の詰み) との照合: 誤り (不詰・非対応) {} / 手順が最短未満 (要確認) {} / 最短手順 {} / 詰み {}",
-            s.expect_wrong, s.expect_too_short, s.expect_shortest, s.mate
+            "正解の詰み手数との照合 ({} 局面): 誤り (不詰・非対応) {} / 正解より短い (要確認) {}{too_long} / 正解と同じ手数 {}",
+            s.expect_known, s.expect_wrong, s.expect_too_short, s.expect_shortest
         );
         if s.expect_wrong > 0 {
             bail!("詰みの正解に対して不詰・非対応を返した局面がある");
@@ -494,6 +548,14 @@ mod tests {
         assert!((500..=546).contains(&p50), "{p50}");
         assert!(h.percentile(100) >= 1000);
         assert_eq!(LogHistogram::new().percentile(50), 0);
+    }
+
+    #[test]
+    fn input_line_may_carry_the_expected_mate_length() {
+        let sfen = "4k4/9/4P4/9/9/9/9/9/4K4 b G 1";
+        assert_eq!(parse_line(sfen).unwrap(), (sfen.to_string(), None));
+        assert_eq!(parse_line(&format!("sfen {sfen}\t1")).unwrap(), (sfen.to_string(), Some(1)));
+        assert!(parse_line(&format!("{sfen}\tx")).is_err());
     }
 
     #[test]

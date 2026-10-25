@@ -94,6 +94,29 @@ pub(super) trait MateState {
     /// `mate_1ply` の手と、その詰みの証明駒
     fn mate_1ply_with_proof(&mut self) -> Option<(Self::Mv, Hand)>;
 
+    /// 駒打ちか (受け方の手なら合駒。無駄合いの判定の対象)
+    fn is_drop(&self, _m: Self::Mv) -> bool {
+        false
+    }
+
+    /// 指し手を区別する値 (無駄合いの判定の結果を覚えるときの鍵)
+    fn move_key(&self, _m: Self::Mv) -> u64 {
+        0
+    }
+
+    /// 受け方の合駒 `drop` を指した後の局面 (攻め方の手番) で、王手していた駒が合駒を取る合法な王手
+    /// (成・不成) を `out` に追加する。
+    fn interposition_captures(&self, _drop: Self::Mv, _out: &mut Vec<Self::Mv>) {}
+
+    /// 合駒を取った後の局面 (受け方の手番) から、取った駒を攻め方の持駒から受け方の持駒に移した局面。
+    /// `attacker` は攻め方。
+    fn with_captured_piece_returned(&self, _attacker: Color) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// 指し手を進める
     fn do_move(&mut self, m: Self::Mv);
 
@@ -321,6 +344,22 @@ impl MateState for Position {
         self.checked_mate_1ply(true)
     }
 
+    fn is_drop(&self, m: Move) -> bool {
+        m.is_drop()
+    }
+
+    fn move_key(&self, m: Move) -> u64 {
+        u64::from(m.raw())
+    }
+
+    fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
+        interposition_captures(self, drop, out, |mv| self.is_legal(mv));
+    }
+
+    fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
+        captured_piece_returned(self, attacker)
+    }
+
     fn do_move(&mut self, m: Move) {
         let gives_check = self.gives_check(m);
         Position::do_move(self, m, gives_check);
@@ -329,6 +368,62 @@ impl MateState for Position {
     fn undo_move(&mut self, m: Move) {
         Position::undo_move(self, m);
     }
+}
+
+/// 合駒 `drop` を指した後の局面 `pos` (攻め方の手番) で、王手していた駒が合駒を取る王手を `out` に追加する。
+/// `is_legal` は駒を動かす手の合法性 (攻め方の玉の安全) の判定。
+fn interposition_captures(
+    pos: &Position,
+    drop: Move,
+    out: &mut Vec<Move>,
+    is_legal: impl Fn(Move) -> bool,
+) {
+    let attacker = pos.side_to_move();
+    let king = pos.king_square(!attacker);
+    let to = drop.to();
+    // 合駒は王手していた駒と玉の間にあり、王手していた駒はその升に利いている (より遠くの同じ筋の駒は利かない)
+    let Some(from) = (pos.attackers_to_c(to, attacker))
+        .iter()
+        .find(|&sq| between_bb(king, sq).contains(to))
+    else {
+        return;
+    };
+    let pt = pos.piece_on(from).piece_type();
+    let can_promote = pt.can_promote() && crate::mate::can_promote(attacker, from, to);
+    for promote in [true, false] {
+        if promote && !can_promote {
+            continue;
+        }
+        let Some(mv) = pos.to_move(Move::new_move(from, to, promote)) else {
+            continue;
+        };
+        // 不成で行き所の無くなる手は pseudo_legal が拒否する
+        if pos.pseudo_legal(mv) && is_legal(mv) && pos.gives_check(mv) {
+            out.push(mv);
+        }
+    }
+}
+
+/// 局面 `pos` (直前の手で攻め方が駒を取った、受け方の手番) から、取った駒を受け方の持駒に移した局面
+fn captured_piece_returned(pos: &Position, attacker: Color) -> Option<Position> {
+    let captured = pos.captured_piece();
+    if captured.is_none() || pos.side_to_move() == attacker {
+        return None;
+    }
+    let pt = captured.piece_type().unpromote();
+    let mut hands = [pos.hand(Color::Black), pos.hand(Color::White)];
+    if !hands[attacker.index()].has(pt) {
+        return None;
+    }
+    hands[attacker.index()] = hands[attacker.index()].sub(pt);
+    hands[(!attacker).index()] = hands[(!attacker).index()].add(pt);
+    let mut board = [Piece::NONE; Square::NUM];
+    for (i, cell) in board.iter_mut().enumerate() {
+        *cell = pos.piece_on(Square::from_u8(i as u8).expect("升の番号は 81 未満"));
+    }
+    let mut returned = Position::new();
+    returned.set_from_parts(&board, &hands, pos.side_to_move()).ok()?;
+    Some(returned)
 }
 
 impl Position {
@@ -531,6 +626,25 @@ impl MateState for NoAttackerKing {
 
     fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
         self.checked_mate_1ply(true)
+    }
+
+    fn is_drop(&self, m: Move) -> bool {
+        m.is_drop()
+    }
+
+    fn move_key(&self, m: Move) -> u64 {
+        u64::from(m.raw())
+    }
+
+    fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
+        // 自玉が無いので、駒を動かす手は自玉の安全を見なくてよい
+        interposition_captures(&self.pos, drop, out, |_| true);
+    }
+
+    fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
+        debug_assert_eq!(attacker, self.attacker);
+        let pos = captured_piece_returned(&self.pos, attacker)?;
+        Some(Self { pos, attacker })
     }
 
     fn do_move(&mut self, m: Move) {
