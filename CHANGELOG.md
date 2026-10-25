@@ -16,6 +16,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_mine master rejoin` / `cycles` のグラフを詰めた局面と連続した辺の配列で保持し、
+  `cycles` の書き換え用の行は `--apply` 時だけ読み込んでメモリを削減。
+
 - `book_backprop` (と、同じ処理を使う `book_mine master audit` / `rejoin` / `cycles` / `borrow value`) の定跡のグラフ作りを、
   局面の塊ごとに並べて処理するようにした。出力は変わらない。既定は全コアを使う (従来は 1 スレッド) ので、
   ほかの計算と同じ機械で使うときは `--threads` で数を指定する (`borrow value` には無いので `RAYON_NUM_THREADS`)。

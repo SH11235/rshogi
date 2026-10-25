@@ -10,7 +10,7 @@ use clap::ValueEnum;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, Move};
+use rshogi_core::types::{Color, Move, Piece, PieceType};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
@@ -69,8 +69,26 @@ impl ReplyEdge {
     }
 }
 
-/// 32 バイトに詰めた局面 (教師データの PackedSfen と同じ形)。盤・手番・持ち駒が同じなら同じ値になる。
-type Packed = [u8; 32];
+/// 両玉のある局面は PackedSfen、玉の欠けた局面は手数を揃えた SFEN で持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Packed {
+    Standard([u8; 32]),
+    Sfen(Box<str>),
+}
+
+impl Packed {
+    fn of(pos: &Position) -> Self {
+        if [Color::Black, Color::White]
+            .iter()
+            .all(|&c| pos.piece_on(pos.king_square(c)) == Piece::new(c, PieceType::King))
+        {
+            Self::Standard(pack_position(pos))
+        } else {
+            // PackedSfen の復号は両玉を必ず置くため、片玉・玉なし局面には使えない。
+            Self::Sfen(format!("{} 1", strip_ply(&pos.to_sfen())).into_boxed_str())
+        }
+    }
+}
 
 /// 局面のハッシュ値 → 番号の索引。同じハッシュ値の別の局面があれば、その値の番号を全部 `collided` に入れ、
 /// 呼び出し側が詰めた局面で見分ける。
@@ -124,7 +142,7 @@ impl<'a> BookIndex<'a> {
                 .par_iter()
                 .map(|(key, _)| {
                     let pos = position_from_sfen(&format!("{key} 1"))?;
-                    let p = pack_position(&pos);
+                    let p = Packed::of(&pos);
                     ensure!(
                         strip_ply(&unpack(&p)?.to_sfen()) == *key,
                         "局面を詰めた形で表せません: {key}"
@@ -169,8 +187,12 @@ impl<'a> BookIndex<'a> {
     }
 }
 
-/// 詰めた形から局面を作る (SFEN 文字列を経ない)。
+/// 保存した形から局面を作る (両玉があれば SFEN 文字列を経ない)。
 fn unpack(packed: &Packed) -> Result<Position> {
+    let packed = match packed {
+        Packed::Standard(packed) => packed,
+        Packed::Sfen(sfen) => return position_from_sfen(sfen),
+    };
     let parts = unpack_sfen_to_parts(packed).map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))?;
     let mut pos = Position::new();
     pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
@@ -306,7 +328,7 @@ type Expansion = (Vec<(Move, u64, Packed, u32, u32)>, usize);
 /// 順に振るので、結果はスレッド数によらない。
 ///
 /// 計算量: 相手の手番の局面ごとに全合法手 (平均 80 前後) について、局面を進めずに行き先のハッシュ値を求め、
-/// 元データの局面と一致した手だけ局面を進めて詰めた形で確かめる。メモリは頂点ごとに約 60 バイト (詰めた局面と
+/// 元データの局面と一致した手だけ局面を進めて詰めた形で確かめる。メモリは頂点ごとに約 70 バイト (詰めた局面と
 /// 索引)、辺ごとに 12 バイト。
 pub(super) fn build<'a>(
     index: &'a BookIndex<'a>,
@@ -339,7 +361,7 @@ pub(super) fn build<'a>(
             v
         };
     let root = position_from_sfen(&format!("{start} 1"))?;
-    let root_packed = pack_position(&root);
+    let root_packed = Packed::of(&root);
     let root_master = index.find_packed(root.key(), &root_packed).unwrap_or(NONE);
     let root_own = (root.side_to_move() == Color::Black) == black;
     intern(&mut graph, root.key(), root_packed, root_master, root_own);
@@ -358,7 +380,7 @@ pub(super) fn build<'a>(
                     illegal += 1;
                     continue;
                 };
-                let packed = pack_position(&child);
+                let packed = Packed::of(&child);
                 let to_master = index.find_packed(child.key(), &packed).unwrap_or(NONE);
                 edges.push((mv, child.key(), packed, to_master, i as u32));
             }
@@ -371,7 +393,7 @@ pub(super) fn build<'a>(
                     continue;
                 }
                 pos.do_move(mv, pos.gives_check(mv));
-                let packed = pack_position(&pos);
+                let packed = Packed::of(&pos);
                 pos.undo_move(mv);
                 if let Some(to_master) = index.find_packed(hash, &packed) {
                     edges.push((mv, hash, packed, to_master, NONE));
@@ -521,6 +543,31 @@ pub(super) mod fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_positions_preserve_missing_kings_and_child_identity() {
+        use fixture::{after, positions};
+        for root in [
+            "7k1/9/9/9/9/9/9/9/9 w -",
+            "9/9/9/9/9/9/9/9/7K1 b -",
+            "9/9/9/9/9/9/9/9/9 b P",
+        ] {
+            let pos = position_from_sfen(&format!("{root} 1")).unwrap();
+            let packed = Packed::of(&pos);
+            assert_eq!(strip_ply(&unpack(&packed).unwrap().to_sfen()), root);
+            assert!(matches!(packed, Packed::Sfen(_)));
+        }
+        let root = "7k1/9/9/9/9/9/9/9/9 w -";
+        let child = after(root, &["2a3a"]);
+        let rows = positions(&[(root, "2a3a", "main", "10"), (&child, "none", "main", "0")]);
+        let index = BookIndex::new(&rows).unwrap();
+        let graph =
+            build(&index, "w", root, |_, p| selected_moves(p, Preset::Random, None)).unwrap();
+        assert_eq!(graph.key(0).unwrap(), root);
+        let edge = graph.edges(0)[0];
+        assert_eq!(graph.key(edge.to()).unwrap(), child);
+        assert_eq!(graph.master(edge.to()), index.find(&child));
+    }
 
     #[test]
     fn hash_index_tells_apart_ids_with_the_same_hash() {
