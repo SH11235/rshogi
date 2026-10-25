@@ -717,11 +717,12 @@ pub struct SearchWorker {
     /// 履歴/統計テーブル群（HistoryCell 経由でアクセス）
     pub history: Box<HistoryCell>,
 
-    /// スレッド間で共有する履歴
-    pub shared_histories: Arc<SharedHistories>,
+    /// スレッド間で共有する履歴。sentinel と探索 stack がこの中の continuation history を
+    /// 指すので、差し替えは `set_shared_histories` だけで行う。
+    pub(super) shared_histories: Arc<SharedHistories>,
 
-    /// ContinuationHistoryのsentinel
-    pub cont_history_sentinel: NonNull<PieceToHistory>,
+    /// ContinuationHistoryのsentinel (`shared_histories` の中を指す)
+    pub(super) cont_history_sentinel: NonNull<PieceToHistory>,
 
     /// ContinuationCorrectionHistoryのsentinel
     pub cont_correction_sentinel: NonNull<CorrectionPieceToHistory>,
@@ -779,9 +780,9 @@ impl SearchWorker {
         let main_hist =
             unsafe { self.history.as_ref_unchecked() }.main_history.get(mover, mv) as i32;
         // SAFETY:
-        // - `cont_history_sentinel` は `SearchWorker::new()` で HistoryCell 内部テーブルを指して初期化される。
-        // - HistoryCell の実体は SearchWorker のライフタイム中に再配置されない。
-        // - ここでは読み取り専用で参照し、可変参照とは同時に保持しない。
+        // - `cont_history_sentinel` は `self.shared_histories` の continuation history を指し、
+        //   `set_shared_histories` で表と一緒に付け直す。表は Arc で生存し、再配置されない。
+        // - entry は atomic なので、ほかのスレッドが同時に書いても読み取りは競合しない。
         let cont_hist =
             unsafe { self.cont_history_sentinel.as_ref() }.get(moved_piece, to_sq) as i32;
         2 * main_hist + cont_hist + cont_hist
@@ -4118,10 +4119,14 @@ impl SearchWorker {
 
 // SAFETY: SearchWorkerは単一スレッドで使用される前提。
 //
-// 1. `cont_history_ptr` / `cont_correction_ptr`（StackArray内の各Stack）:
-//    `self.history`が所有するcontinuation history / correction history内のテーブルへの参照である。
+// 1. `cont_correction_ptr`（StackArray内の各Stack）:
+//    `self.history`が所有するcontinuation correction history内のテーブルへの参照である。
 //    HistoryCell本体はBox allocation内にあり、SearchWorkerがスレッド間でmoveされても再配置されない。
 //    ワーカーは移動先の単一スレッドだけで使用するため、データ競合も発生しない。
+// 2. `cont_history_ptr` / `cont_history_sentinel`:
+//    `self.shared_histories` (Arc) の continuation history 内のテーブルを指す。worker が Arc を
+//    持つ間は解放・再配置されず、表を差し替えるときは `set_shared_histories` で付け直す。
+//    ほかのスレッドも同じ表を読み書きするが、entry はすべて atomic なのでデータ競合にならない。
 //
 unsafe impl Send for SearchWorker {}
 

@@ -847,8 +847,8 @@ impl Search {
         }
         self.thread_pool.clear_histories();
         self.thread_pool.wait_for_search_finished();
-        // main worker を作る前の共有表は作ったときの既定の初期値のまま残す。main worker の
-        // 履歴を最初の go で既定値から作るのと揃え、1 スレッドの探索を共有前と同じにする。
+        // main worker を作る前の共有表は、作ったときの既定の初期値のまま残す。main worker の
+        // スレッドごとの履歴も最初の go で既定値から作るので、最初の対局の初期値が揃う。
         if self.worker.is_some() {
             let tp = &self.search_tune_params;
             self.shared_histories
@@ -2148,6 +2148,7 @@ mod tests {
                 };
                 search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
                 let mut previous = Arc::clone(&search.shared_histories);
+                let sentinel = search.worker.as_ref().unwrap().cont_history_sentinel;
                 for (count, rebuilt) in [(3, true), (4, false), (2, true)] {
                     search.set_num_threads(count);
                     let shared = Arc::clone(&search.shared_histories);
@@ -2155,6 +2156,8 @@ mod tests {
                     previous = Arc::clone(&shared);
                     let main = search.worker.as_ref().unwrap();
                     assert!(Arc::ptr_eq(&main.shared_histories, &shared));
+                    // continuation history は作り直しても同じ表を使い続ける。
+                    assert_eq!(main.cont_history_sentinel, sentinel);
                     for thread in search.thread_pool.helper_threads() {
                         thread.with_worker(|worker| {
                             assert!(Arc::ptr_eq(&worker.shared_histories, &shared));
@@ -2184,6 +2187,7 @@ mod tests {
             .spawn(|| {
                 let params = SearchTuneParams {
                     pawn_history_init: -7,
+                    continuation_history_init: -9,
                     ..SearchTuneParams::default()
                 };
                 let run = |clear_first: bool| {

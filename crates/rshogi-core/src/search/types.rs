@@ -185,7 +185,8 @@ pub struct Stack {
     /// - 常に有効な `PieceToHistory` テーブルを指す（`dangling()` は初期値のみ）
     /// - `SearchWorker::reset_cont_history_ptrs()` でsentinelに初期化される
     /// - `SearchWorker::set_cont_history_for_move()` で `continuation_history` 内のテーブルを指すよう更新される
-    /// - 参照先は `SearchWorker::history` フィールドが所有しており、`SearchWorker` の生存期間中は有効
+    /// - 参照先は `SearchWorker::shared_histories` (Arc) が所有し、worker がその Arc を持つ間は有効。
+    ///   表を差し替えるときは `SearchWorker::set_shared_histories()` が付け直す
     pub cont_history_ptr: NonNull<PieceToHistory>,
 
     /// ContinuationHistoryキー（YaneuraOu方式）

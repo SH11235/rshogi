@@ -436,14 +436,6 @@ impl ContinuationHistory {
         unsafe { self.table.get_unchecked(prev_pc.index()).get_unchecked(prev_to.index()) }
     }
 
-    /// 新しいContinuationHistoryを作成（ヒープ確保、全 entry 0）
-    ///
-    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
-    pub fn new_boxed() -> Box<Self> {
-        // SAFETY: PieceToHistoryはAtomicI16のみで構成され、ゼロのビット列は有効な値 (0)。
-        unsafe { Box::<Self>::new_zeroed().assume_init() }
-    }
-
     /// 値を取得
     #[inline]
     pub fn get(&self, prev_pc: Piece, prev_to: Square, pc: Piece, to: Square) -> i16 {

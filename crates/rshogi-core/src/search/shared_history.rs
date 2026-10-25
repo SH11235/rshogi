@@ -305,6 +305,11 @@ fn prefetch_ptr<T>(entry: &T) {
 
 /// 表を埋めるのに使うスレッド数。1 スレッド分の表なら分けない。
 fn clear_parallelism(scale: usize) -> usize {
+    // wasm-threads では rayon のスレッド数を尋ねるとグローバルプールが既定の設定で確定し、
+    // 埋め込み側の initThreadPool が失敗する。分ける必要が無いときは尋ねない。
+    if scale == 1 {
+        return 1;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let available = std::thread::available_parallelism().map_or(1, |n| n.get());
     #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -320,6 +325,9 @@ fn part_range(len: usize, part: usize, parts: usize) -> std::ops::Range<usize> {
 }
 
 /// `fill(0..parts)` を並列に実行する。
+///
+/// wasm-threads では呼び出し元が rayon の終了を待つので、ブラウザのメインスレッド
+/// (Atomics.wait が使えない) からは 2 スレッド以上の表で呼ばない。
 fn run_parts(parts: usize, fill: &(dyn Fn(usize) + Sync)) {
     if parts == 1 {
         fill(0);

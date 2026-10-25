@@ -189,7 +189,7 @@ impl MovePicker {
     /// 旧 API の `[&PieceToHistory; 6]` は `[ContHistKey; 6]` に置き換える。
     /// 履歴のない手前の ply には `ContHistKey::null_sentinel()` を指定する。
     /// 単独の `PieceToHistory` を渡す代わりに、選択したキーに対応する
-    /// `HistoryTables::continuation_history` 内のテーブルへ値を設定する。
+    /// `SharedHistories::continuation_history()` 内のテーブルへ値を設定する。
     ///
     pub fn new(
         pos: &Position,

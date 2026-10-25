@@ -3,7 +3,7 @@ use crate::eval::EvalHash;
 use crate::position::Position;
 use crate::search::{
     ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, SharedHistories,
-    TimeManagement, history::ContinuationHistory,
+    TimeManagement,
 };
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, DEPTH_QS, Move, Piece, Square, Value};
@@ -257,8 +257,8 @@ fn completed_search_observes_history_entries() {
 /// ContinuationHistory: 基本的な更新が機能することを確認
 #[test]
 fn continuation_history_basic_update() {
-    // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
-    let cont_hist = ContinuationHistory::new_boxed();
+    let shared = SharedHistories::new(1);
+    let cont_hist = &shared.continuation_history()[0][0];
     let prev_pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス
     let prev_to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当
@@ -266,15 +266,11 @@ fn continuation_history_basic_update() {
     // SAFETY: 51は有効なSquareインデックス
     let to = unsafe { Square::from_u8_unchecked(51) }; // 7五相当
 
-    // 初期値は0
-    assert_eq!(cont_hist.get(prev_pc, prev_to, pc, to), 0);
-
-    // 更新
+    let initial = cont_hist.get(prev_pc, prev_to, pc, to);
     cont_hist.update(prev_pc, prev_to, pc, to, 100);
 
-    // 値が増加
     let value = cont_hist.get(prev_pc, prev_to, pc, to);
-    assert!(value > 0, "ContinuationHistory should increase after update");
+    assert!(value > initial, "ContinuationHistory should increase after update");
 }
 
 // =============================================================================
