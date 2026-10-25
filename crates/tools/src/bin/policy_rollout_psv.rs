@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u16).range(1..))]
     max_game_ply: u16,
 
+    /// 種から N 手先までの局面を出力して打ち切る (未指定なら終局または通し手数上限まで)
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    max_rollout_ply: Option<u16>,
+
     /// 出力の game_result に入れる値
     #[arg(long, value_enum, default_value_t = GameResultMode::Zero)]
     game_result: GameResultMode,
@@ -133,10 +137,30 @@ fn validate(cli: &Cli) -> Result<RolloutConfig> {
         min_prob: cli.min_prob,
         top_k: cli.top_k,
         max_game_ply: cli.max_game_ply,
+        max_rollout_ply: cli.max_rollout_ply,
         game_result: cli.game_result,
         seed: cli.seed,
         avoid_seed_move: !cli.allow_seed_move,
     })
+}
+
+#[cfg(any(feature = "dlshogi-onnx", test))]
+fn prepare_output_directories(
+    streams: &[(PathBuf, PathBuf, u64)],
+    readonly: &[&std::path::Path],
+) -> Result<()> {
+    use tools::output_path::{ensure_created_paths_distinct, ensure_safe_output_paths};
+    use tools::policy_rollout::chunk_file_name;
+
+    for (_, dir, _) in streams {
+        std::fs::create_dir_all(dir)?;
+    }
+    let directories: Vec<_> = streams.iter().map(|(_, dir, _)| dir.as_path()).collect();
+    ensure_created_paths_distinct(&directories)?;
+    for (_, dir, _) in streams {
+        ensure_safe_output_paths(&[&dir.join(chunk_file_name(0))], readonly)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "dlshogi-onnx"))]
@@ -156,8 +180,7 @@ fn main() -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tools::onnx_value::{OnnxValueConfig, OnnxValueEvaluator};
-    use tools::output_path::ensure_safe_output_paths;
-    use tools::policy_rollout::{chunk_file_name, run_all};
+    use tools::policy_rollout::run_all;
 
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -171,11 +194,7 @@ fn main() -> Result<()> {
     if let Some(lib) = ort_library.as_deref().filter(|p| p.is_file()) {
         readonly.push(lib);
     }
-    // 出力ディレクトリ自体が資源と衝突しないことを、推論器の初期化前に確かめる。
-    for (_, dir, _) in &streams {
-        std::fs::create_dir_all(dir)?;
-        ensure_safe_output_paths(&[&dir.join(chunk_file_name(0))], &readonly)?;
-    }
+    prepare_output_directories(&streams, &readonly)?;
 
     let mut model = OnnxValueEvaluator::new(&OnnxValueConfig {
         model_path: cli.dlshogi_onnx_model.clone(),
@@ -197,4 +216,64 @@ fn main() -> Result<()> {
         run_all(&mut model, input, *stream, dir, cli.chunk_seeds, &cfg, &readonly, &INTERRUPTED)?;
     }
     tools::ort_teardown::exit_skipping_ort_teardown(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollout_limit_is_optional_and_requires_positive_plies() {
+        let args = [
+            "policy_rollout_psv",
+            "--input",
+            "seeds.psv",
+            "--output-dir",
+            "out",
+            "--dlshogi-onnx-model",
+            "model.onnx",
+        ];
+        assert_eq!(validate(&Cli::try_parse_from(args).unwrap()).unwrap().max_rollout_ply, None);
+        let limited = args.into_iter().chain(["--max-rollout-ply", "3"]);
+        assert_eq!(
+            validate(&Cli::try_parse_from(limited).unwrap()).unwrap().max_rollout_ply,
+            Some(3)
+        );
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--max-rollout-ply", "0"])).is_err());
+    }
+
+    fn assert_output_alias_rejected(first: PathBuf, second: PathBuf) {
+        let streams = vec![
+            (PathBuf::from("first.psv"), first.clone(), 0),
+            (PathBuf::from("second.psv"), second, 1),
+        ];
+        let error = prepare_output_directories(&streams, &[]).unwrap_err();
+        assert!(error.to_string().contains("same file"), "{error:#}");
+        assert_eq!(std::fs::read_dir(first).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn shared_output_directory_is_rejected_before_writing_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("out");
+        assert_output_alias_rejected(output.clone(), output);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_alias_outputs_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_output_alias_rejected(temp.path().join("Seeds"), temp.path().join("seeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_outputs_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("out");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&output).unwrap();
+        std::os::unix::fs::symlink(&output, &alias).unwrap();
+        assert_output_alias_rejected(output, alias);
+    }
 }

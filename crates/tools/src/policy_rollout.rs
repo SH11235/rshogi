@@ -51,6 +51,8 @@ pub struct RolloutConfig {
     pub top_k: usize,
     /// 通し手数がこの値に達したら打ち切る
     pub max_game_ply: u16,
+    /// 種からこの手数先までの局面を出力して打ち切る。None なら制限しない
+    pub max_rollout_ply: Option<u16>,
     /// 出力の game_result に入れる値
     pub game_result: GameResultMode,
     /// 乱数の seed
@@ -59,12 +61,12 @@ pub struct RolloutConfig {
     pub avoid_seed_move: bool,
 }
 
-/// 局面の batch から value (手番視点 cp) と policy logit を返す推論器
+/// 局面の順序付き並列イテレータから value (手番視点 cp) と policy logit を返す推論器
 pub trait PolicyValueModel {
     /// `values` に局面ごとの cp、`policy` に局面ごとの `MAX_MOVE_LABEL_NUM` 個の logit を追記する。
-    fn infer(
+    fn infer<'a>(
         &mut self,
-        positions: &[&Position],
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
         values: &mut Vec<i32>,
         policy: &mut Vec<f32>,
     ) -> Result<()>;
@@ -72,9 +74,9 @@ pub trait PolicyValueModel {
 
 #[cfg(feature = "dlshogi-onnx")]
 impl PolicyValueModel for crate::onnx_value::OnnxValueEvaluator {
-    fn infer(
+    fn infer<'a>(
         &mut self,
-        positions: &[&Position],
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
         values: &mut Vec<i32>,
         policy: &mut Vec<f32>,
     ) -> Result<()> {
@@ -89,6 +91,7 @@ enum EndReason {
     Repetition,
     PerpetualCheck,
     MaxPly,
+    MaxRolloutPly,
 }
 
 /// 結末。勝者 (無ければ引き分け扱い) と終わり方。
@@ -260,6 +263,8 @@ pub struct ChunkStats {
     pub perpetual_check: u64,
     /// 手数の上限で終わった数
     pub max_ply: u64,
+    /// 種からの手数上限で終わった数
+    pub max_rollout_ply: u64,
 }
 
 impl ChunkStats {
@@ -273,16 +278,17 @@ impl ChunkStats {
         self.repetition += o.repetition;
         self.perpetual_check += o.perpetual_check;
         self.max_ply += o.max_ply;
+        self.max_rollout_ply += o.max_rollout_ply;
     }
 }
 
 /// 終わった指し進めの局面を書き出す。
 fn flush_game<W: Write>(
-    game: Game,
+    mut game: Game,
     mode: GameResultMode,
     writer: &mut W,
     stats: &mut ChunkStats,
-) -> Result<()> {
+) -> Result<Vec<(PackedSfenValue, Color)>> {
     let ending = game.ending.expect("flush_game is called only for finished games");
     match ending.reason {
         EndReason::Mated => stats.mated += 1,
@@ -290,9 +296,10 @@ fn flush_game<W: Write>(
         EndReason::Repetition => stats.repetition += 1,
         EndReason::PerpetualCheck => stats.perpetual_check += 1,
         EndReason::MaxPly => stats.max_ply += 1,
+        EndReason::MaxRolloutPly => stats.max_rollout_ply += 1,
     }
     stats.rollouts += 1;
-    for (mut psv, stm) in game.records {
+    for (mut psv, stm) in game.records.drain(..) {
         psv.game_result = match (mode, ending.winner) {
             (GameResultMode::Rollout, Some(w)) if w == stm => 1,
             (GameResultMode::Rollout, Some(_)) => -1,
@@ -301,7 +308,7 @@ fn flush_game<W: Write>(
         writer.write_all(&psv.to_bytes())?;
         stats.positions += 1;
     }
-    Ok(())
+    Ok(game.records)
 }
 
 /// 種 `seeds` (入力ファイルの識別子 `stream` の中で、先頭の通し番号が `first_seed_index`) から
@@ -324,6 +331,8 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
         .enumerate()
         .flat_map(|(i, s)| (0..cfg.rollouts_per_seed).map(move |r| (i, s, r)));
     let mut slots: Vec<Option<Game>> = (0..cfg.parallel).map(|_| None).collect();
+    let mut record_buffers: Vec<Vec<(PackedSfenValue, Color)>> =
+        (0..cfg.parallel).map(|_| Vec::new()).collect();
     let mut tasks_done = false;
     let mut active: Vec<usize> = Vec::with_capacity(cfg.parallel);
     let mut row_of_slot = vec![usize::MAX; cfg.parallel];
@@ -336,7 +345,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
         }
 
         // 空いた枠に新しい指し進めを入れる。種の時点で終わっている場合はすぐ書き出す。
-        for slot in slots.iter_mut() {
+        for (slot_idx, slot) in slots.iter_mut().enumerate() {
             while slot.is_none() && !tasks_done {
                 let Some((i, seed_psv, r)) = tasks.next() else {
                     tasks_done = true;
@@ -366,12 +375,18 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                     avoid_first,
                     legal: MoveList::new(),
                     ending: None,
-                    records: Vec::new(),
+                    records: std::mem::take(&mut record_buffers[slot_idx]),
                 };
                 game.update_status(cfg.max_game_ply);
                 if game.ending.is_some() {
-                    flush_game(game, cfg.game_result, writer, &mut stats)?;
+                    record_buffers[slot_idx] =
+                        flush_game(game, cfg.game_result, writer, &mut stats)?;
                 } else {
+                    let remaining = usize::from(cfg.max_game_ply.saturating_sub(game.game_ply));
+                    let capacity = cfg
+                        .max_rollout_ply
+                        .map_or(remaining, |n| remaining.min(usize::from(n) + 1));
+                    game.records.reserve_exact(capacity);
                     *slot = Some(game);
                 }
             }
@@ -386,9 +401,8 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
         values.clear();
         policy.clear();
         {
-            let positions: Vec<&Position> =
-                active.iter().map(|&i| &slots[i].as_ref().unwrap().pos).collect();
-            model.infer(&positions, &mut values, &mut policy)?;
+            let positions = active.par_iter().map(|&i| &slots[i].as_ref().unwrap().pos);
+            model.infer(positions, &mut values, &mut policy)?;
         }
         if values.len() != active.len() || policy.len() != active.len() * MAX_MOVE_LABEL_NUM {
             anyhow::bail!(
@@ -428,6 +442,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
 
                 if game.moves_from_seed > 0 || game.emit_seed {
                     let score = values[row].clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX));
+                    debug_assert!(game.records.len() < game.records.capacity());
                     game.records.push((
                         PackedSfenValue {
                             sfen: pack_position(&game.pos),
@@ -441,6 +456,14 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                     ));
                 }
 
+                if cfg.max_rollout_ply.is_some_and(|n| game.moves_from_seed >= u32::from(n)) {
+                    game.ending = Some(Ending {
+                        winner: None,
+                        reason: EndReason::MaxRolloutPly,
+                    });
+                    return;
+                }
+
                 let gives_check = game.pos.gives_check(mv);
                 game.pos.do_move(mv, gives_check);
                 game.moves_from_seed += 1;
@@ -449,10 +472,10 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
             },
         );
 
-        for slot in slots.iter_mut() {
+        for (slot_idx, slot) in slots.iter_mut().enumerate() {
             if slot.as_ref().is_some_and(|g| g.ending.is_some()) {
                 let game = slot.take().unwrap();
-                flush_game(game, cfg.game_result, writer, &mut stats)?;
+                record_buffers[slot_idx] = flush_game(game, cfg.game_result, writer, &mut stats)?;
             }
         }
     }
@@ -536,7 +559,7 @@ pub fn run_all<M: PolicyValueModel>(
         eprintln!(
             "chunk {chunk}: {} positions from {} rollouts in {secs:.1}s ({:.0} pos/s, {} inferences, \
              avg batch {:.0}); ends: mated {} / declaration {} / repetition {} / perpetual {} / \
-             max-ply {}; invalid seeds {}",
+             max-ply {} / rollout-ply {}; invalid seeds {}",
             stats.positions,
             stats.rollouts,
             stats.positions as f64 / secs.max(1e-9),
@@ -547,6 +570,7 @@ pub fn run_all<M: PolicyValueModel>(
             stats.repetition,
             stats.perpetual_check,
             stats.max_ply,
+            stats.max_rollout_ply,
             stats.invalid_seeds,
         );
         total.add(&stats);
@@ -569,20 +593,28 @@ mod tests {
     struct HashModel;
 
     impl PolicyValueModel for HashModel {
-        fn infer(
+        fn infer<'a>(
             &mut self,
-            positions: &[&Position],
+            positions: impl IndexedParallelIterator<Item = &'a Position>,
             values: &mut Vec<i32>,
             policy: &mut Vec<f32>,
         ) -> Result<()> {
-            for pos in positions {
-                let key = pos.key();
-                values.push((key % 2001) as i32 - 1000);
-                policy.extend((0..MAX_MOVE_LABEL_NUM).map(|l| {
-                    let h = key ^ (l as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                    ((h >> 40) % 1000) as f32 / 200.0
-                }));
-            }
+            let n = positions.len();
+            let value_start = values.len();
+            let policy_start = policy.len();
+            values.resize(value_start + n, 0);
+            policy.resize(policy_start + n * MAX_MOVE_LABEL_NUM, 0.0);
+            positions
+                .zip(values[value_start..].par_iter_mut())
+                .zip(policy[policy_start..].par_chunks_mut(MAX_MOVE_LABEL_NUM))
+                .for_each(|((pos, value), row)| {
+                    let key = pos.key();
+                    *value = (key % 2001) as i32 - 1000;
+                    for (l, logit) in row.iter_mut().enumerate() {
+                        let h = key ^ (l as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        *logit = ((h >> 40) % 1000) as f32 / 200.0;
+                    }
+                });
             Ok(())
         }
     }
@@ -595,6 +627,7 @@ mod tests {
             min_prob: 0.01,
             top_k: 0,
             max_game_ply: 60,
+            max_rollout_ply: None,
             game_result: GameResultMode::Rollout,
             seed: 7,
             avoid_seed_move: true,
@@ -701,6 +734,61 @@ mod tests {
                 .count();
             assert_eq!(n, 1);
         }
+    }
+
+    #[test]
+    fn rollout_limit_emits_the_nth_position_and_is_reproducible() {
+        let input = seeds();
+        for n in [1, 3] {
+            let cfg = RolloutConfig {
+                max_game_ply: 512,
+                max_rollout_ply: Some(n),
+                ..config()
+            };
+            let (bytes, stats) = run_seeds(&cfg, &input);
+            assert_eq!((bytes.clone(), stats.clone()), run_seeds(&cfg, &input));
+            assert_eq!(stats.max_rollout_ply, 9);
+            assert_eq!(stats.max_ply, 0);
+            let recs = records(&bytes);
+            assert!(recs.iter().all(|r| r.game_result == 0 && u16::from(r.padding) <= n));
+            for seed in &input {
+                for depth in 0..=n {
+                    let count = recs
+                        .iter()
+                        .filter(|r| {
+                            r.game_ply == seed.game_ply + depth && u16::from(r.padding) == depth
+                        })
+                        .count();
+                    let expected = if depth == 0 {
+                        1
+                    } else {
+                        cfg.rollouts_per_seed as usize
+                    };
+                    assert_eq!(count, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_ply_limit_and_mate_take_precedence_over_rollout_limit() {
+        let cfg = RolloutConfig {
+            rollouts_per_seed: 1,
+            parallel: 1,
+            max_game_ply: 2,
+            max_rollout_ply: Some(1),
+            ..config()
+        };
+        let (bytes, stats) = run_seeds(&cfg, &seeds()[..1]);
+        assert_eq!(records(&bytes).iter().map(|r| r.padding).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(stats.max_ply, 1);
+        assert_eq!(stats.max_rollout_ply, 0);
+
+        let mated = seed_psv("4k4/4G4/4P4/9/9/9/9/9/4K4 w - 1", 1);
+        let (bytes, stats) = run_seeds(&cfg, &[mated]);
+        assert!(bytes.is_empty());
+        assert_eq!(stats.mated, 1);
+        assert_eq!(stats.max_rollout_ply, 0);
     }
 
     #[test]

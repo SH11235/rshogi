@@ -7,7 +7,6 @@
 //! `rescore_psv` の ONNX パイプラインから value 推論部分のみを切り出した再利用モジュール
 //! （`rescore_psv` 側は独自実装のままで、推論ロジックが重複している）。
 
-use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -227,7 +226,7 @@ impl OnnxValueEvaluator {
     pub fn evaluate(&mut self, positions: &[Position]) -> Result<Vec<i32>> {
         let mut out = Vec::with_capacity(positions.len());
         for chunk in positions.chunks(self.batch_size) {
-            self.run_chunk(chunk, &mut out, None)?;
+            self.run_chunk(chunk.par_iter(), &mut out, None)?;
         }
         Ok(out)
     }
@@ -236,9 +235,9 @@ impl OnnxValueEvaluator {
     ///
     /// `values` には手番視点 cp を、`policy` には局面ごとに `MAX_MOVE_LABEL_NUM` 個の
     /// policy logit（softmax 前）を局面順に追記する。
-    pub fn evaluate_with_policy(
+    pub fn evaluate_with_policy<'a>(
         &mut self,
-        positions: &[&Position],
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
         values: &mut Vec<i32>,
         policy: &mut Vec<f32>,
     ) -> Result<()> {
@@ -252,13 +251,13 @@ impl OnnxValueEvaluator {
         self.run_chunk(positions, values, Some(policy))
     }
 
-    fn run_chunk<P: Borrow<Position> + Sync>(
+    fn run_chunk<'a>(
         &mut self,
-        chunk: &[P],
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
         out: &mut Vec<i32>,
         policy_out: Option<&mut Vec<f32>>,
     ) -> Result<()> {
-        let n = chunk.len();
+        let n = positions.len();
         debug_assert!(n <= self.batch_size);
         if n == 0 {
             return Ok(());
@@ -267,16 +266,11 @@ impl OnnxValueEvaluator {
         self.f1_buf[..n * FEATURES1_SIZE].fill(0.0);
         self.f2_buf[..n * FEATURES2_SIZE].fill(0.0);
 
-        let f1_slices: Vec<&mut [f32]> =
-            self.f1_buf[..n * FEATURES1_SIZE].chunks_mut(FEATURES1_SIZE).collect();
-        let f2_slices: Vec<&mut [f32]> =
-            self.f2_buf[..n * FEATURES2_SIZE].chunks_mut(FEATURES2_SIZE).collect();
-
-        f1_slices.into_par_iter().zip(f2_slices).zip(chunk.par_iter()).for_each(
-            |((f1, f2), pos)| {
-                make_input_features(pos.borrow(), f1, f2);
-            },
-        );
+        self.f1_buf[..n * FEATURES1_SIZE]
+            .par_chunks_mut(FEATURES1_SIZE)
+            .zip(self.f2_buf[..n * FEATURES2_SIZE].par_chunks_mut(FEATURES2_SIZE))
+            .zip(positions)
+            .for_each(|((f1, f2), pos)| make_input_features(pos, f1, f2));
 
         let shape1: [usize; 4] = [n, INPUT1_CHANNELS, 9, 9];
         let input1 =
