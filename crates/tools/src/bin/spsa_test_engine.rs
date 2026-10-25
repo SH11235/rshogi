@@ -12,6 +12,9 @@
 //! - `initialize_cancel_script`: 最初の usi 受信個体が相方 worker の go を待って
 //!   不正 UTF-8 を返し初期化を失敗させる。quit marker で相方の応答を解放する。
 //! - `initialize_fail_once`: 最初の usi だけ不正 UTF-8 を返す。再試行時は即投了。
+//! - `fischer_script`: 平手からの固定の合法手順を position の moves 数に応じて返し、尽きたら投了する。
+//!   各手で `info depth 1 nodes 1000 score cp S` を出す (S は先手番なら `SCORE`、後手番なら `-SCORE`)。
+//!   `go depth D` には `info depth D nodes BENCH_NODES` を出して bestmove を返す (NPS bench 用)。
 //!
 //! 環境変数（すべて `SPSA_TEST_ENGINE_` 接頭辞）:
 //! - `SPAWN_LOG`: PID を起動ごとに追記。
@@ -24,6 +27,8 @@
 //!   (初期化時の 1 回を含めて数える)。pair の第 2 局の準備で落とす用。
 //! - `SCRIPT_GATE`: cancel_script 用 marker の基底パス。拡張子 fail は失敗役の選出、
 //!   waiting は他 worker の go 到達、quit は失敗側の破棄開始を表す。
+//! - `SCORE` / `MOVE_SLEEP_MS`: fischer_script の評価値 (既定 0) と、1 手ごとに眠る時間 (既定 0)。
+//! - `BENCH_NODES` / `BENCH_SLEEP_MS`: fischer_script の `go depth` の nodes (既定 3500) と時間 (既定 10)。
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::sync::{
@@ -126,6 +131,7 @@ fn main() {
                 std::process::exit(1);
             }
             match mode.as_str() {
+                "fischer_script" => fischer_script_response(trimmed, moves_count),
                 "cancel_script" | "initialize_cancel_script" => {
                     let gate = script_gate.as_ref().expect("SCRIPT_GATE required");
                     let script_failure = mode == "cancel_script"
@@ -214,6 +220,54 @@ fn main() {
     if let Some(handle) = flood_thread {
         let _ = handle.join();
     }
+}
+
+/// 平手から指せる固定の手順。開始局面ファイルの 2 局面目 (7g7f の後) からも続きを指せる。
+const SCRIPT_BESTMOVES: [&str; 16] = [
+    "bestmove 7g7f",
+    "bestmove 3c3d",
+    "bestmove 2g2f",
+    "bestmove 8c8d",
+    "bestmove 2f2e",
+    "bestmove 8d8e",
+    "bestmove 6i7h",
+    "bestmove 4a3b",
+    "bestmove 3i3h",
+    "bestmove 7a7b",
+    "bestmove 9g9f",
+    "bestmove 9c9d",
+    "bestmove 1g1f",
+    "bestmove 1c1d",
+    "bestmove 4g4f",
+    "bestmove 6c6d",
+];
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+fn fischer_script_response(go: &str, moves_count: usize) -> Option<&'static str> {
+    let mut stdout = std::io::stdout().lock();
+    if let Some(depth) = go.strip_prefix("go depth ") {
+        std::thread::sleep(Duration::from_millis(env_u64("SPSA_TEST_ENGINE_BENCH_SLEEP_MS", 10)));
+        let nodes = env_u64("SPSA_TEST_ENGINE_BENCH_NODES", 3500);
+        writeln!(stdout, "info depth {depth} nodes {nodes} score cp 0").ok()?;
+        stdout.flush().ok()?;
+        return Some("bestmove 7g7f");
+    }
+    std::thread::sleep(Duration::from_millis(env_u64("SPSA_TEST_ENGINE_MOVE_SLEEP_MS", 0)));
+    let score = std::env::var("SPSA_TEST_ENGINE_SCORE")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let score = if moves_count.is_multiple_of(2) {
+        score
+    } else {
+        -score
+    };
+    writeln!(stdout, "info depth 1 nodes 1000 score cp {score}").ok()?;
+    stdout.flush().ok()?;
+    Some(SCRIPT_BESTMOVES.get(moves_count).copied().unwrap_or("bestmove resign"))
 }
 
 fn wait_spawns(path: &std::path::Path, count: usize) {

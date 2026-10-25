@@ -90,6 +90,44 @@ struct GameRecord {
     plus_score: i8,
     reason: String,
     plies: u32,
+    /// 先手・後手それぞれの消費時間の合計 (spsa 側の計測、ms)。
+    #[serde(default)]
+    elapsed_ms: [u64; 2],
+    /// 先手・後手それぞれの探索 nodes の合計 (各手の最後の info の値)。
+    #[serde(default)]
+    nodes: [u64; 2],
+}
+
+/// `--nps-scaling` の pair の時計。基準 TC に、その pair を dispatch した時点の倍率を掛けた値。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PairClock {
+    btime: u64,
+    binc: u64,
+    /// `meta.tc_calibrations` / journal の `calibration` の index。
+    calibration: u32,
+}
+
+/// 1 回の NPS の較正 (fresh と resume のたびに 1 件)。journal と meta の両方に残す。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct TcCalibration {
+    index: u32,
+    bench_version: String,
+    reference_nps: u64,
+    measured_nps: f64,
+    slot_nps: Vec<f64>,
+    /// 基準 ÷ 実測。持ち時間と加算の両方に掛ける。
+    scale: f64,
+    reference_btime: u64,
+    reference_binc: u64,
+    btime: u64,
+    binc: u64,
+    bench_depth: u32,
+    warmup_depth: u32,
+    bench_positions: usize,
+    threads: usize,
+    slots: usize,
+    host: String,
+    measured_at_utc: String,
 }
 
 /// pair の確定値。再 attempt と resume 後の指し直しは同じ値を使う。
@@ -106,12 +144,17 @@ struct DispatchRecord {
     plus: Vec<f64>,
     #[serde(with = "exact_f64")]
     minus: Vec<f64>,
+    /// `--nps-scaling` の run だけが持つ確定した時計。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clock: Option<PairClock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalRecord {
     Dispatch(DispatchRecord),
+    /// NPS の較正。以後の新しい pair の時計がこの倍率で決まる。
+    Calibration(TcCalibration),
     /// 結果の受信。適用 (`Accept`) とは別に記録し、保留中の結果も crash で失わない。
     Received {
         pair_id: u32,
@@ -165,6 +208,11 @@ struct CoreEnv<'a> {
     total_pairs: u32,
     max_lag: u32,
     max_pair_attempts: u32,
+    /// 新しい pair に付ける時計 (`--nps-scaling` のときだけ)。
+    clock: Option<PairClock>,
+    /// 時間切れの率の上限と、率の分母の下限。
+    max_timeout_rate: f64,
+    timeout_rate_min_games: u32,
 }
 
 /// dispatch 時の係数で現在の θ を更新する。通常実行と resume の再生で共有する純粋関数。
@@ -268,6 +316,9 @@ struct CoreCounters {
     received: u64,
     holds: u64,
     max_lag: u32,
+    /// 受信した局の数と、そのうち時計の時間切れで終わった局の数。
+    games: u64,
+    timeouts: u64,
 }
 
 /// coordinator が順に永続化・反映する出力。
@@ -459,6 +510,7 @@ impl<'a> AsyncCore<'a> {
             flips,
             plus,
             minus,
+            clock: self.env.clock,
         };
         self.insert_new(dispatch.clone())?;
         Ok(Some(dispatch))
@@ -562,7 +614,25 @@ impl<'a> AsyncCore<'a> {
         entry.games = Some(games.clone());
         self.held.push(*pair_id);
         self.counters.received += 1;
+        self.counters.games += games.len() as u64;
+        self.counters.timeouts += games.iter().filter(|g| g.reason == "timeout").count() as u64;
         Ok(())
+    }
+
+    /// 時間切れの局が `max_timeout_rate × max(局数, timeout_rate_min_games)` を超えたら停止理由を返す。
+    /// 時間切れは対局結果として θ に入れたうえで、多すぎるときは止めて原因を調べる。
+    fn timeout_stop_reason(&self) -> Option<String> {
+        let denominator = self.counters.games.max(u64::from(self.env.timeout_rate_min_games));
+        let allowed = self.env.max_timeout_rate * denominator as f64;
+        (self.counters.timeouts as f64 > allowed).then(|| {
+            format!(
+                "timeout rate: {} of {} game(s) timed out (limit {} × max(games, {}))",
+                self.counters.timeouts,
+                self.counters.games,
+                self.env.max_timeout_rate,
+                self.env.timeout_rate_min_games
+            )
+        })
     }
 
     /// 失敗した attempt を記録する。失敗数が上限に達したら停止理由を返す。
@@ -746,6 +816,8 @@ impl<'a> AsyncCore<'a> {
                 self.counters.duplicates += 1;
                 Ok(None)
             }
+            // 時計は dispatch が持つので、再生では状態を変えない。
+            JournalRecord::Calibration(_) => Ok(None),
         }
     }
 
@@ -776,6 +848,31 @@ struct PairTask {
     start_pos_index: usize,
     plus: Vec<f64>,
     minus: Vec<f64>,
+    /// pair の 2 局の時計の初期値。再 attempt と resume 後の指し直しも同じ値。
+    tc: TimeControl,
+    /// 1 局の壁時計の上限。超えたら infra error として同じ pair を指し直す。
+    game_time_limit_ms: Option<u64>,
+}
+
+/// fishtest の対局の上限 `持ち時間 × 3 + 加算 × 200` を SPSA と同じく 2 倍したもの (ms)。
+fn fischer_game_time_limit_ms(btime: u64, binc: u64) -> u64 {
+    btime
+        .saturating_mul(3)
+        .saturating_add(binc.saturating_mul(200))
+        .saturating_mul(2)
+}
+
+/// 先手・後手の手ごとの消費時間と nodes を合計する。
+fn sum_by_side(moves: &GameMoves) -> ([u64; 2], [u64; 2]) {
+    let mut elapsed = [0u64; 2];
+    let mut nodes = [0u64; 2];
+    for (ply, ms) in moves.elapsed_ms.iter().enumerate() {
+        elapsed[ply % 2] = elapsed[ply % 2].saturating_add(*ms);
+        if let Some(Some(n)) = moves.nodes.get(ply) {
+            nodes[ply % 2] = nodes[ply % 2].saturating_add(*n);
+        }
+    }
+    (elapsed, nodes)
 }
 
 /// journal に載せない 1 局の棋譜。games.jsonl にだけ書く。
@@ -822,6 +919,11 @@ fn play_pair(
     let startpos_sfen =
         build_position(start_pos, pass_rights.map(|(b, _)| b), pass_rights.map(|(_, w)| w))?
             .to_sfen();
+    let game_cfg = GameConfig {
+        cancel: ctx.game_cfg.cancel.clone(),
+        game_time_limit_ms: task.game_time_limit_ms,
+        ..*ctx.game_cfg
+    };
     let mut games = Vec::with_capacity(2);
     let mut details = Vec::with_capacity(2);
     for (offset, plus_is_black) in [(1u32, true), (2, false)] {
@@ -838,8 +940,8 @@ fn play_pair(
             black,
             white,
             start_pos,
-            ctx.tc,
-            ctx.game_cfg,
+            task.tc,
+            &game_cfg,
             game_id,
             &mut |event: &MoveEvent| moves.push(event),
             None,
@@ -847,14 +949,32 @@ fn play_pair(
         if result.reason == "watchdog" {
             return Err(anyhow::anyhow!("watchdog: 運用上の探索期限超過").context(EngineFailure));
         }
+        if result.reason == "game_time_limit" {
+            return Err(anyhow::anyhow!(
+                "game_time_limit: 1 局の上限 {} ms を超えました (game_id={game_id}, {} 手)",
+                task.game_time_limit_ms.unwrap_or_default(),
+                result.plies
+            )
+            .context(EngineFailure));
+        }
         if result.reason == "cancelled" {
             return Err(WorkerCancelled.into());
         }
+        // 開始局面の手番が後手なら 1 手目は後手の手。
+        let (elapsed, nodes) = sum_by_side(&moves);
+        let first_is_black = startpos_sfen.split_whitespace().nth(1) != Some("w");
+        let (elapsed_ms, nodes) = if first_is_black {
+            (elapsed, nodes)
+        } else {
+            ([elapsed[1], elapsed[0]], [nodes[1], nodes[0]])
+        };
         games.push(GameRecord {
             plus_is_black,
             plus_score: plus_score_from_outcome(result.outcome, plus_is_black) as i8,
             reason: result.reason,
             plies: result.plies,
+            elapsed_ms,
+            nodes,
         });
         details.push(GameDetail {
             game_id,
@@ -1134,6 +1254,17 @@ struct RunFingerprint {
     max_moves: u32,
     nodes_timeout_ms: u64,
     timeout_margin_ms: u64,
+    #[serde(default)]
+    adjudicate_agreement: Option<ResignRule>,
+    /// `--nps-scaling` の基準。`btime` / `binc` は基準 TC の値のまま比べる。
+    #[serde(default)]
+    nps_scaling: Option<NpsScalingSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct NpsScalingSpec {
+    reference_nps: u64,
+    bench_version: String,
 }
 
 impl RunFingerprint {
@@ -1170,6 +1301,11 @@ impl RunFingerprint {
             max_moves: cli.max_moves,
             nodes_timeout_ms: cli.nodes_timeout_ms,
             timeout_margin_ms: cli.timeout_margin_ms,
+            adjudicate_agreement: cli.adjudicate_agreement,
+            nps_scaling: cli.nps_scaling.then(|| NpsScalingSpec {
+                reference_nps: reference_nps(cli),
+                bench_version: nps_bench::BENCH_VERSION.into(),
+            }),
         })
     }
 }
@@ -1212,6 +1348,23 @@ struct AsyncMeta {
     /// resume で一致を求める。
     #[serde(default)]
     game_records: bool,
+    /// NPS の較正の履歴 (journal の `calibration` と同じ内容)。最後の 1 件が新しい pair に使われる。
+    #[serde(default)]
+    tc_calibrations: Vec<TcCalibration>,
+    /// 受信した局の数と、そのうち時計の時間切れの局の数。
+    #[serde(default)]
+    received_games: u64,
+    #[serde(default)]
+    timeout_games: u64,
+}
+
+const DEFAULT_REFERENCE_NPS: u64 = 350_000;
+const DEFAULT_MIN_NPS_RATIO: f64 = 0.5;
+const DEFAULT_MAX_TIMEOUT_RATE: f64 = 0.005;
+const DEFAULT_TIMEOUT_RATE_MIN_GAMES: u32 = 1000;
+
+fn reference_nps(cli: &Cli) -> u64 {
+    cli.reference_nps.unwrap_or(DEFAULT_REFERENCE_NPS)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1551,6 +1704,24 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
             bail!("{flag} must be >= 1");
         }
     }
+    if cli.nps_scaling {
+        if cli.btime.is_none() || cli.nodes.is_some() {
+            bail!("--nps-scaling は Fischer (--btime / --binc、--nodes なし) の対局で使います");
+        }
+    } else if cli.reference_nps.is_some() || cli.min_nps_ratio.is_some() {
+        bail!("--reference-nps / --min-nps-ratio は --nps-scaling と一緒に指定してください");
+    }
+    if cli.reference_nps == Some(0) {
+        bail!("--reference-nps must be >= 1");
+    }
+    for (flag, value) in [
+        ("--min-nps-ratio", cli.min_nps_ratio),
+        ("--max-timeout-rate", cli.max_timeout_rate),
+    ] {
+        if value.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+            bail!("{flag} must be in [0, 1]");
+        }
+    }
     Ok(())
 }
 
@@ -1601,7 +1772,9 @@ impl Store<'_> {
                         JournalRecord::AttemptFailed { .. } => {
                             self.faults.hit("after_attempt_failed")
                         }
-                        JournalRecord::Dispatch(_) | JournalRecord::Duplicate { .. } => {}
+                        JournalRecord::Dispatch(_)
+                        | JournalRecord::Duplicate { .. }
+                        | JournalRecord::Calibration(_) => {}
                     }
                 }
                 CoreOutput::Applied(row) => {
@@ -1651,6 +1824,8 @@ impl Store<'_> {
         self.meta.duplicates = core.counters.duplicates;
         self.meta.holds = core.counters.holds;
         self.meta.max_observed_lag = core.counters.max_lag;
+        self.meta.received_games = core.counters.games;
+        self.meta.timeout_games = core.counters.timeouts;
         self.meta.updated_at_utc = Utc::now().to_rfc3339();
         write_json_durable(&default_meta_path(&self.cli.run_dir), &self.meta, true)?;
         self.faults.hit("meta_written");
@@ -1927,9 +2102,31 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             max_observed_lag: 0,
             updated_at_utc: Utc::now().to_rfc3339(),
             game_records: !cli.no_game_records,
+            tc_calibrations: Vec::new(),
+            received_games: 0,
+            timeout_games: 0,
         }
     };
     eprintln!("using base seed: {}", meta.base_seed);
+
+    let (game_cfg, base_tc) = build_game_setup(cli);
+    // 足切りに掛かる機械では journal・snapshot・meta を書く前に止める。
+    let bench = if cli.nps_scaling && meta.completed_pairs < total_pairs {
+        Some(run_nps_bench(NpsBenchInput {
+            cli,
+            params: &params,
+            resume,
+            application_mask: &masks.application,
+            translator,
+            base_cfg: &base_cfg,
+            start_positions: &start_positions,
+            game_cfg: &game_cfg,
+            tc: base_tc,
+            slots: cli.concurrency.min((total_pairs - meta.completed_pairs) as usize),
+        })?)
+    } else {
+        None
+    };
 
     let env = CoreEnv {
         schedule,
@@ -1944,10 +2141,17 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         total_pairs,
         max_lag: meta.max_lag,
         max_pair_attempts: cli.max_pair_attempts.unwrap_or(3),
+        clock: None,
+        max_timeout_rate: cli.max_timeout_rate.unwrap_or(DEFAULT_MAX_TIMEOUT_RATE),
+        timeout_rate_min_games: cli
+            .timeout_rate_min_games
+            .unwrap_or(DEFAULT_TIMEOUT_RATE_MIN_GAMES),
     };
     let mut core = AsyncCore::new(env, params.clone());
     let snapshot_interval = cli.snapshot_interval.unwrap_or(64);
 
+    // journal の calibration の並び。meta の履歴はこれから作り直す (journal が正本)。
+    let mut calibrations: Vec<TcCalibration> = Vec::new();
     let mut store = if resume {
         let latest: Snapshot = read_json(&snapshot_dir.join(&meta.snapshot))?;
         let initial: Snapshot = read_json(&snapshot_dir.join(snapshot_file_name(0)))?;
@@ -1980,6 +2184,9 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             } = record
             {
                 received.push((*pair_id, *attempt));
+            }
+            if let JournalRecord::Calibration(calibration) = record {
+                calibrations.push(calibration.clone());
             }
             if let Some(row) = core.replay(record)? {
                 csv.write(&row)?;
@@ -2047,6 +2254,20 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         store.publish(&core, RunStatus::Running, None)?;
         store
     };
+    if let Some(bench) = bench {
+        let calibration = new_calibration(cli, bench, calibrations.len())?;
+        store.journal.append(&JournalRecord::Calibration(calibration.clone()))?;
+        core.env.clock = Some(PairClock {
+            btime: calibration.btime,
+            binc: calibration.binc,
+            calibration: calibration.index,
+        });
+        calibrations.push(calibration);
+        store.meta.tc_calibrations = calibrations;
+        store.publish(&core, RunStatus::Running, None)?;
+    } else {
+        store.meta.tc_calibrations = calibrations;
+    }
 
     let remaining = total_pairs - core.completed;
     let worker_count = cli.concurrency.min(remaining as usize);
@@ -2066,11 +2287,23 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         core.env.max_lag, core.env.max_pair_attempts, cli.engine_retries
     );
     eprintln!("active params:  {}/{}", masks.active_count, params.len());
+    if let Some(clock) = core.env.clock {
+        let calibration = &store.meta.tc_calibrations[clock.calibration as usize];
+        eprintln!(
+            "clock:          btime={} binc={} (reference {}+{} x scale {:.4}; measured {:.0} nps/thread, reference {})",
+            clock.btime,
+            clock.binc,
+            calibration.reference_btime,
+            calibration.reference_binc,
+            calibration.scale,
+            calibration.measured_nps,
+            calibration.reference_nps
+        );
+    }
     eprintln!("=== End Summary ===");
 
     if !core.is_complete() {
         let cpu_affinities = plan_cpu_affinities(cli, worker_count)?;
-        let (game_cfg, tc) = build_game_setup(cli);
         std::thread::scope(|scope| -> Result<()> {
             let pool = AsyncPool::new(
                 scope,
@@ -2080,7 +2313,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                     params: &params,
                     start_positions: &start_positions,
                     game_cfg: &game_cfg,
-                    tc,
+                    tc: base_tc,
                     translator,
                     application_mask: &masks.application,
                     cpu_affinities: cpu_affinities.as_deref(),
@@ -2088,7 +2321,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 cli.engine_retries,
                 &faults,
             )?;
-            coordinate(&mut core, &mut store, &pool, worker_count)
+            coordinate(&mut core, &mut store, &pool, worker_count, base_tc)
         })?;
     }
 
@@ -2101,16 +2334,115 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     Ok(())
 }
 
+struct NpsBenchInput<'a> {
+    cli: &'a Cli,
+    params: &'a [SpsaParam],
+    resume: bool,
+    application_mask: &'a [bool],
+    translator: &'a EngineNameTranslator,
+    base_cfg: &'a EngineConfig,
+    start_positions: &'a [ParsedPosition],
+    game_cfg: &'a GameConfig,
+    tc: TimeControl,
+    slots: usize,
+}
+
+/// run 開始時の θ₀ (resume では gen0 snapshot の θ) で bench を走らせ、足切りを確かめる。
+fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
+    let cli = input.cli;
+    let mut theta0_params = input.params.to_vec();
+    if input.resume {
+        let initial: Snapshot =
+            read_json(&cli.run_dir.join(SNAPSHOT_DIR).join(snapshot_file_name(0)))?;
+        apply_theta(&mut theta0_params, &initial)?;
+    }
+    let theta0: Vec<f64> = theta0_params.iter().map(fixed_engine_value).collect();
+    let cpu_affinities = plan_cpu_affinities(cli, input.slots)?;
+    let ctx = WorkerContext {
+        base_cfg: input.base_cfg,
+        params: &theta0_params,
+        start_positions: input.start_positions,
+        game_cfg: input.game_cfg,
+        tc: input.tc,
+        translator: input.translator,
+        application_mask: input.application_mask,
+        cpu_affinities: cpu_affinities.as_deref(),
+    };
+    eprintln!("nps bench: {} slot(s) x {} thread(s) ...", input.slots, cli.threads);
+    let result = nps_bench::measure(ctx, input.slots, &theta0, cli.threads)?;
+    let reference = reference_nps(cli) as f64;
+    let ratio = cli.min_nps_ratio.unwrap_or(DEFAULT_MIN_NPS_RATIO);
+    eprintln!(
+        "nps bench: {:.0} nps/thread (slots: {})",
+        result.nps,
+        result.slot_nps.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(", ")
+    );
+    if result.nps < reference * ratio {
+        bail!(
+            "この機械の NPS {:.0} (1 thread あたり) が基準 {reference:.0} の {ratio} 倍を下回るので起動しません",
+            result.nps
+        );
+    }
+    Ok(result)
+}
+
+fn new_calibration(
+    cli: &Cli,
+    bench: nps_bench::BenchResult,
+    index: usize,
+) -> Result<TcCalibration> {
+    let reference_btime = cli.btime.context("--nps-scaling requires --btime")?;
+    let reference_nps = reference_nps(cli);
+    let scale = reference_nps as f64 / bench.nps;
+    Ok(TcCalibration {
+        index: u32::try_from(index).context("calibration index overflow")?,
+        bench_version: nps_bench::BENCH_VERSION.into(),
+        reference_nps,
+        measured_nps: bench.nps,
+        slots: bench.slot_nps.len(),
+        slot_nps: bench.slot_nps,
+        scale,
+        reference_btime,
+        reference_binc: cli.binc,
+        btime: nps_bench::scale_clock(reference_btime, scale),
+        binc: nps_bench::scale_clock(cli.binc, scale),
+        bench_depth: bench.depth,
+        warmup_depth: bench.warmup_depth,
+        bench_positions: bench.positions,
+        threads: cli.threads,
+        host: read_hostname(),
+        measured_at_utc: Utc::now().to_rfc3339(),
+    })
+}
+
+/// pair の時計と 1 局の上限。`--nps-scaling` の pair は dispatch が持つ確定値を使う。
+fn pair_time_control(
+    cli: &Cli,
+    base: TimeControl,
+    dispatch: &DispatchRecord,
+) -> (TimeControl, Option<u64>) {
+    match (dispatch.clock, cli.btime) {
+        (Some(clock), _) => (
+            TimeControl::new(clock.btime, clock.btime, clock.binc, clock.binc, 0),
+            Some(fischer_game_time_limit_ms(clock.btime, clock.binc)),
+        ),
+        (None, Some(btime)) => (base, Some(fischer_game_time_limit_ms(btime, cli.binc))),
+        (None, None) => (base, None),
+    }
+}
+
 fn print_counters(label: &str, core: &AsyncCore<'_>) {
     let counters = core.counters;
     eprintln!(
-        "{label}: completed_pairs={} dispatched_attempts={} failed_attempts={} duplicates={} holds={} max_lag={}",
+        "{label}: completed_pairs={} dispatched_attempts={} failed_attempts={} duplicates={} holds={} max_lag={} games={} timeouts={}",
         core.completed,
         counters.dispatched_attempts,
         counters.failures,
         counters.duplicates,
         counters.holds,
-        counters.max_lag
+        counters.max_lag,
+        counters.games,
+        counters.timeouts
     );
 }
 
@@ -2212,11 +2544,12 @@ fn coordinate(
     store: &mut Store<'_>,
     pool: &AsyncPool<'_>,
     worker_count: usize,
+    base_tc: TimeControl,
 ) -> Result<()> {
     let mut in_flight = HashSet::new();
     while !core.is_complete() {
         // 順序: 保留の適用 (on_done・finish_replay 内) → 再 attempt を含む dispatch → 停滞の判定。
-        if let Some(reason) = core.exhausted_retry() {
+        if let Some(reason) = core.exhausted_retry().or_else(|| core.timeout_stop_reason()) {
             return store.stop(core, anyhow::anyhow!(reason));
         }
         while in_flight.len() < worker_count {
@@ -2226,6 +2559,7 @@ fn coordinate(
             store.journal.append(&JournalRecord::Dispatch(dispatch.clone()))?;
             store.faults.hit("after_dispatch");
             let (plus, minus) = core.engine_values(&dispatch);
+            let (tc, game_time_limit_ms) = pair_time_control(store.cli, base_tc, &dispatch);
             in_flight.insert((dispatch.pair_id, dispatch.attempt));
             pool.send(PairTask {
                 pair_id: dispatch.pair_id,
@@ -2233,6 +2567,8 @@ fn coordinate(
                 start_pos_index: dispatch.start_pos_index,
                 plus,
                 minus,
+                tc,
+                game_time_limit_ms,
             })?;
         }
         let stalled = if in_flight.len() < worker_count {
@@ -2277,6 +2613,9 @@ fn coordinate(
                 }
                 let outputs = core.on_done(pair_id, attempt, games)?;
                 store.emit(core, outputs)?;
+                if let Some(reason) = core.timeout_stop_reason() {
+                    return store.stop(core, anyhow::anyhow!(reason));
+                }
             }
             WorkerMessage::Failed {
                 pair_id,
@@ -2369,6 +2708,9 @@ mod tests {
                 total_pairs: self.schedule.total_iterations,
                 max_lag,
                 max_pair_attempts: 3,
+                clock: None,
+                max_timeout_rate: 1.0,
+                timeout_rate_min_games: 0,
             }
         }
 
@@ -2383,6 +2725,8 @@ mod tests {
             plus_score,
             reason: "resign".into(),
             plies: 10,
+            elapsed_ms: [0; 2],
+            nodes: [0; 2],
         }
     }
 
@@ -2639,6 +2983,7 @@ mod tests {
             flips: "++".into(),
             plus: vec![1.0, 2.0],
             minus: vec![3.0, 4.0],
+            clock: None,
         });
         assert_eq!(dispatch, (vec![1.0, 2.0, 7.0], vec![3.0, 4.0, 7.0]));
     }
@@ -3041,6 +3386,7 @@ mod tests {
             flips: "+".into(),
             plus: values.clone(),
             minus: values.clone(),
+            clock: None,
         };
         let text = serde_json::to_string(&JournalRecord::Dispatch(dispatch)).unwrap();
         let JournalRecord::Dispatch(parsed) = serde_json::from_str(&text).unwrap() else {
@@ -3097,5 +3443,123 @@ mod tests {
             }
         }
         assert!(improved >= 7, "improved in {improved}/8 seeds");
+    }
+
+    #[test]
+    fn timeout_rate_uses_min_games_as_the_denominator_floor() {
+        let fixture = Fixture::new(vec![param("A", true, 5.0, (0.0, 10.0), 1.0)], None, 8);
+        let mut env = fixture.env(4);
+        env.max_timeout_rate = 0.25;
+        env.timeout_rate_min_games = 8;
+        let mut core = AsyncCore::new(env, fixture.params.clone());
+        let timeout = |plus_is_black| GameRecord {
+            reason: "timeout".into(),
+            ..game(plus_is_black, -1)
+        };
+        // 1 pair 目: 2 局中 2 局が時間切れでも、分母は 8 局なので上限は 2 局。
+        core.next_dispatch().unwrap().unwrap();
+        core.on_done(0, 1, [timeout(true), timeout(false)]).unwrap();
+        assert_eq!((core.counters.games, core.counters.timeouts), (2, 2));
+        assert!(core.timeout_stop_reason().is_none());
+        core.next_dispatch().unwrap().unwrap();
+        core.on_done(1, 1, [timeout(true), game(false, 1)]).unwrap();
+        let reason = core.timeout_stop_reason().unwrap();
+        assert!(reason.contains("3 of 4"), "{reason}");
+    }
+
+    #[test]
+    fn redispatch_keeps_the_clock_and_replay_ignores_calibration() {
+        let fixture = Fixture::new(vec![param("A", true, 5.0, (0.0, 10.0), 1.0)], None, 4);
+        let clock = PairClock {
+            btime: 60_000,
+            binc: 1_000,
+            calibration: 0,
+        };
+        let mut core = fixture.core(4);
+        core.env.clock = Some(clock);
+        let first = core.next_dispatch().unwrap().unwrap();
+        assert_eq!(first.clock, Some(clock));
+        core.on_failed(0, 1, "game_time_limit".into()).unwrap();
+        // 測り直した倍率は新しい pair からだけ使う。
+        core.env.clock = Some(PairClock {
+            btime: 30_000,
+            binc: 500,
+            calibration: 1,
+        });
+        let retry = core.next_dispatch().unwrap().unwrap();
+        assert_eq!((retry.pair_id, retry.attempt, retry.clock), (0, 2, Some(clock)));
+        let fresh = core.next_dispatch().unwrap().unwrap();
+        assert_eq!(fresh.clock.map(|c| c.calibration), Some(1));
+
+        let mut replayed = fixture.core(4);
+        let calibration = JournalRecord::Calibration(TcCalibration {
+            index: 0,
+            bench_version: "v".into(),
+            reference_nps: 1,
+            measured_nps: 1.0,
+            slot_nps: vec![1.0],
+            scale: 1.0,
+            reference_btime: 1,
+            reference_binc: 0,
+            btime: 1,
+            binc: 0,
+            bench_depth: 1,
+            warmup_depth: 1,
+            bench_positions: 1,
+            threads: 1,
+            slots: 1,
+            host: "h".into(),
+            measured_at_utc: "t".into(),
+        });
+        let text = serde_json::to_string(&calibration).unwrap();
+        assert!(text.contains(r#""kind":"calibration""#), "{text}");
+        assert_eq!(serde_json::from_str::<JournalRecord>(&text).unwrap(), calibration);
+        let before = replayed.checkpoint();
+        assert!(replayed.replay(&calibration).unwrap().is_none());
+        assert_eq!(replayed.checkpoint(), before);
+        assert!(replayed.replay(&JournalRecord::Dispatch(first)).unwrap().is_none());
+        assert_eq!(replayed.pairs[&0].dispatch.clock, Some(clock));
+    }
+
+    #[test]
+    fn fischer_pairs_get_the_fishtest_game_limit() {
+        assert_eq!(fischer_game_time_limit_ms(120_000, 2_000), (360_000 + 400_000) * 2);
+        assert_eq!(fischer_game_time_limit_ms(u64::MAX, 1), u64::MAX);
+        let cli = Cli::try_parse_from([
+            "spsa",
+            "--run-dir",
+            "r",
+            "--btime",
+            "20000",
+            "--binc",
+            "200",
+        ])
+        .unwrap();
+        let mut dispatch = DispatchRecord {
+            pair_id: 0,
+            attempt: 1,
+            dispatch_k: 0,
+            start_pos_index: 0,
+            flips: "+".into(),
+            plus: vec![1.0],
+            minus: vec![1.0],
+            clock: None,
+        };
+        let base = TimeControl::new(20_000, 20_000, 200, 200, 0);
+        let (tc, limit) = pair_time_control(&cli, base, &dispatch);
+        assert_eq!((tc.black_time, tc.black_inc, limit), (20_000, 200, Some(200_000)));
+        dispatch.clock = Some(PairClock {
+            btime: 10_000,
+            binc: 100,
+            calibration: 0,
+        });
+        let (tc, limit) = pair_time_control(&cli, base, &dispatch);
+        assert_eq!(
+            (tc.black_time, tc.white_time, tc.white_inc, tc.byoyomi, limit),
+            (10_000, 10_000, 100, 0, Some(100_000))
+        );
+        let nodes = Cli::try_parse_from(["spsa", "--run-dir", "r", "--nodes", "1000"]).unwrap();
+        dispatch.clock = None;
+        assert_eq!(pair_time_control(&nodes, base, &dispatch).1, None);
     }
 }

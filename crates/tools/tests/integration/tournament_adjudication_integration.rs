@@ -12,6 +12,15 @@ fn driver_adjudicates_repetition_and_only_exact_scores() {
         // 後手の6回目の優勢評価と千日手が同時に成立すると、千日手が優先される。
         ("white-winning", "--adjudicate-win", "movecount=6,score=600", "sennichite", 12),
         ("cp 600", "--adjudicate-win", "movecount=2,score=600", "adjudication_win", 3),
+        // 先手 -600・後手 +600 が両側 2 手ずつ揃う 4 手目で後手勝ち。
+        (
+            "agree",
+            "--adjudicate-agreement",
+            "movecount=2,score=600",
+            "adjudication_agreement",
+            4,
+        ),
+        ("agree", "--adjudicate-agreement", "movecount=2,score=601", "sennichite", 12),
         ("mate 1", "--adjudicate-win", "movecount=2,score=600", "adjudication_win", 3),
         (
             "cp 600 lowerbound",
@@ -98,6 +107,9 @@ while IFS= read -r line; do
       if [ "$score" = white-winning ]; then
         if [ $((ply % 2)) = 0 ]; then score='cp 600'; else score='cp 0'; fi
       fi
+      if [ "$score" = agree ]; then
+        if [ $((ply % 2)) = 0 ]; then score='cp 600'; else score='cp -600'; fi
+      fi
       printf 'info score %s pv %s\nbestmove %s\n' "$score" "$move" "$move"
       ;;
     quit) break ;;
@@ -142,7 +154,7 @@ done
             assert_eq!(result["plies"], plies);
             assert_eq!(
                 result["outcome"],
-                if reason == "adjudication_resign" {
+                if reason == "adjudication_resign" || reason == "adjudication_agreement" {
                     "white_win"
                 } else if reason == "adjudication_win" {
                     "black_win"

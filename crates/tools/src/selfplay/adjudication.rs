@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Hand, Piece, Square};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{EvalLog, GameOutcome};
 
@@ -104,8 +104,8 @@ impl RuleAdjudicator {
     }
 }
 
-/// 同一側の評価が連続した場合の投了・勝ち裁定の共通設定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// 同一側の評価が連続した場合の投了・勝ち裁定と、両側の評価の一致による裁定の共通設定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResignRule {
     /// 必要な同一側の連続着手数（1 以上）。
     pub movecount: u32,
@@ -173,14 +173,39 @@ impl FromStr for DrawRule {
     }
 }
 
-/// オプトインの評価値裁定。投了、勝ち、引分の順に判定する。
+/// `--adjudicate-agreement` の値。`score=0` は両側が同時に「勝ち」と「負け」を満たすので拒否する。
+pub fn parse_agreement_rule(input: &str) -> Result<ResignRule, String> {
+    let rule = input.parse::<ResignRule>()?;
+    if rule.score == 0 {
+        return Err(format!("score は 1 以上が必要です: {input}"));
+    }
+    Ok(rule)
+}
+
+/// オプトインの評価値裁定。投了、勝ち、両側の一致、引分の順に判定する。
 pub struct ScoreAdjudicator {
     resign: Option<ResignRule>,
     draw: Option<DrawRule>,
     win: Option<ResignRule>,
+    agreement: Option<ResignRule>,
     win_streak: [u32; 2],
     resign_streak: [u32; 2],
+    /// 両側の一致の裁定で使う、各側の自己視点の「+score 以上」「-score 以下」の連続着手数。
+    agreement_winning: [u32; 2],
+    agreement_losing: [u32; 2],
     draw_streak: u32,
+}
+
+/// 確定評価が自己視点で `direction × score` を越えているか。詰みは符号だけで判定する。
+fn beyond(eval: Option<&EvalLog>, score: i32, direction: i64) -> bool {
+    eval.is_some_and(|e| match e.score_mate {
+        Some(mate) => i64::from(mate) * direction > 0,
+        None => e.score_cp.is_some_and(|cp| i64::from(cp) * direction >= i64::from(score)),
+    })
+}
+
+fn bump(streak: &mut u32, reached: bool) {
+    *streak = if reached { streak.saturating_add(1) } else { 0 };
 }
 
 impl ScoreAdjudicator {
@@ -194,10 +219,23 @@ impl ScoreAdjudicator {
             resign,
             draw,
             win,
+            agreement: None,
             win_streak: [0; 2],
             resign_streak: [0; 2],
+            agreement_winning: [0; 2],
+            agreement_losing: [0; 2],
             draw_streak: 0,
         }
+    }
+
+    /// 両側の一致による勝敗の裁定を設定する。None で無効。
+    ///
+    /// 勝ち側の自己視点の評価が `+score` 以上、負け側の自己視点の評価が `-score` 以下の状態が、
+    /// 両側とも自分の直近 `movecount` 手で続いたら勝敗を決める (1 側あたりの手数で数え、
+    /// 対局全体では 2 × movecount 手前後になる)。詰みの評価は符号の向きで閾値を越えたものとして扱う。
+    pub fn with_agreement(mut self, agreement: Option<ResignRule>) -> Self {
+        self.agreement = agreement;
+        self
     }
 
     /// 合法手の自己視点評価を記録する。ply は開始局面からの将棋の手数。
@@ -217,16 +255,26 @@ impl ScoreAdjudicator {
                 continue;
             };
             let direction = if winning { 1_i64 } else { -1 };
-            let reached = eval.is_some_and(|e| match e.score_mate {
-                Some(mate) => i64::from(mate) * direction > 0,
-                None => {
-                    e.score_cp.is_some_and(|cp| i64::from(cp) * direction >= i64::from(rule.score))
-                }
-            });
             let streak = &mut streaks[mover as usize];
-            *streak = if reached { streak.saturating_add(1) } else { 0 };
+            bump(streak, beyond(eval, rule.score, direction));
             if *streak >= rule.movecount {
                 return Some(loss(if winning { !mover } else { mover }, reason));
+            }
+        }
+        if let Some(rule) = self.agreement {
+            let side = mover as usize;
+            bump(&mut self.agreement_winning[side], beyond(eval, rule.score, 1));
+            bump(&mut self.agreement_losing[side], beyond(eval, rule.score, -1));
+            let other = (!mover) as usize;
+            if self.agreement_winning[side] >= rule.movecount
+                && self.agreement_losing[other] >= rule.movecount
+            {
+                return Some(loss(!mover, "adjudication_agreement"));
+            }
+            if self.agreement_losing[side] >= rule.movecount
+                && self.agreement_winning[other] >= rule.movecount
+            {
+                return Some(loss(mover, "adjudication_agreement"));
             }
         }
         if let Some(rule) = self.draw {
@@ -253,6 +301,7 @@ impl ScoreAdjudicator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selfplay::types::ScoreBound;
     use rshogi_core::movegen::is_legal_with_pass;
     use rshogi_core::types::Move;
 
@@ -661,5 +710,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn agreement(movecount: u32, score: i32) -> ScoreAdjudicator {
+        ScoreAdjudicator::new(None, None, None)
+            .with_agreement(Some(ResignRule { movecount, score }))
+    }
+
+    /// 先手・後手の順に評価を交互に与え、裁定が出た手数と結果を返す。
+    fn play_agreement(scores: &mut ScoreAdjudicator, evals: &[EvalLog]) -> Option<(u32, Verdict)> {
+        evals.iter().enumerate().find_map(|(i, eval)| {
+            let mover = if i % 2 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let ply = i as u32 + 1;
+            scores.after_move(mover, Some(eval), ply).map(|verdict| (ply, verdict))
+        })
+    }
+
+    #[test]
+    fn agreement_requires_both_sides_for_movecount_own_moves() {
+        // 先手 +600・後手 -600 が両側 2 手ずつ揃った 4 手目で先手勝ち。
+        let mut scores = agreement(2, 600);
+        let (ply, verdict) =
+            play_agreement(&mut scores, &[cp(600), cp(-600), cp(700), cp(-650)]).unwrap();
+        assert_eq!(ply, 4);
+        assert_verdict(Some(verdict), GameOutcome::BlackWin, "adjudication_agreement");
+        // 片側だけが閾値を越えても裁定しない (負け側が -599 で踏みとどまる)。
+        let mut scores = agreement(2, 600);
+        assert!(
+            play_agreement(&mut scores, &[cp(900), cp(-599), cp(900), cp(-599), cp(900)]).is_none()
+        );
+        // 後手が勝ち側でも同じ (手番側が負け側の手で揃う)。
+        let mut scores = agreement(2, 600);
+        let (ply, verdict) =
+            play_agreement(&mut scores, &[cp(-600), cp(600), cp(-600), cp(600)]).unwrap();
+        assert_eq!(ply, 4);
+        assert_verdict(Some(verdict), GameOutcome::WhiteWin, "adjudication_agreement");
+        let mut scores = agreement(2, 600);
+        let (ply, verdict) =
+            play_agreement(&mut scores, &[cp(0), cp(600), cp(-600), cp(600), cp(-600)]).unwrap();
+        assert_eq!(ply, 5);
+        assert_verdict(Some(verdict), GameOutcome::WhiteWin, "adjudication_agreement");
+    }
+
+    #[test]
+    fn agreement_treats_mate_as_beyond_threshold_and_resets_on_breaks() {
+        let mut scores = agreement(2, 1000);
+        let (ply, verdict) =
+            play_agreement(&mut scores, &[mate(5), mate(-4), mate(3), cp(-1000)]).unwrap();
+        assert_eq!(ply, 4);
+        assert_verdict(Some(verdict), GameOutcome::BlackWin, "adjudication_agreement");
+        // 途中で評価が戻る・評価が欠ける・上下界だけの評価は連続を切る。
+        let bound = EvalLog {
+            score_cp: Some(-2000),
+            score_bound: Some(ScoreBound::Upperbound),
+            ..EvalLog::default()
+        };
+        for reset in [cp(-999), EvalLog::default(), bound, mate(1)] {
+            let mut scores = agreement(2, 1000);
+            // 4 手目 (後手) で切れると、後手の連続は 6・8 手目で数え直して 8 手目に揃う。
+            let evals = [
+                cp(1000),
+                cp(-1000),
+                cp(1000),
+                reset.clone(),
+                cp(1000),
+                cp(-1000),
+                cp(1000),
+                cp(-1000),
+            ];
+            let (ply, _) = play_agreement(&mut scores, &evals).unwrap();
+            assert_eq!(ply, 8);
+        }
+    }
+
+    #[test]
+    fn agreement_is_off_by_default_and_rejects_zero_score() {
+        let mut scores = ScoreAdjudicator::new(None, None, None);
+        assert!(play_agreement(&mut scores, &[mate(1), mate(-1), mate(1), mate(-1)]).is_none());
+        assert!(parse_agreement_rule("movecount=3,score=0").is_err());
+        assert_eq!(
+            parse_agreement_rule("movecount=3,score=800"),
+            Ok(ResignRule {
+                movecount: 3,
+                score: 800
+            })
+        );
     }
 }

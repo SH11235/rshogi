@@ -27,11 +27,16 @@ pub struct GameConfig {
     pub win_rule: Option<ResignRule>,
     /// 評価値による引分裁定。既定は無効。
     pub draw_rule: Option<DrawRule>,
+    /// 両側の自己視点の評価の一致による勝敗の裁定 (`ScoreAdjudicator::with_agreement`)。None で無効。
+    pub agreement_rule: Option<ResignRule>,
     /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) を含めて数える。
     pub max_moves: u32,
     pub timeout_margin_ms: u64,
     /// 時間制御なしの nodes/depth 探索の期限（1 手、正のミリ秒）。
     pub limit_only_timeout_ms: Option<u64>,
+    /// 1 局の壁時計の上限 (ms)。各手の開始前に確かめ、超えていれば reason `game_time_limit` で打ち切る。
+    /// 時計の時間切れとは別の、hang を検知するための運用上の上限。
+    pub game_time_limit_ms: Option<u64>,
     /// 各手の開始前に確認する停止要求。探索中の割り込みは行わない。
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// パス権利の初期値 (先手, 後手)。None の場合はパス権なし。
@@ -100,7 +105,9 @@ pub fn run_game(
         .map(|_| (pos.pass_rights(Color::Black), pos.pass_rights(Color::White)));
     let mut moves = String::new();
     let mut rules = RuleAdjudicator::new(&pos);
-    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.win_rule, config.draw_rule);
+    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.win_rule, config.draw_rule)
+        .with_agreement(config.agreement_rule);
+    let game_start = std::time::Instant::now();
     let mut tc = tc;
     let mut outcome = GameOutcome::InProgress;
     let mut outcome_reason = "max_moves".to_string();
@@ -116,6 +123,16 @@ pub fn run_game(
             return Ok(GameResult {
                 outcome: GameOutcome::InProgress,
                 reason: "cancelled".into(),
+                plies: plies_played,
+            });
+        }
+        if config
+            .game_time_limit_ms
+            .is_some_and(|limit| game_start.elapsed() >= std::time::Duration::from_millis(limit))
+        {
+            return Ok(GameResult {
+                outcome: GameOutcome::InProgress,
+                reason: "game_time_limit".into(),
                 plies: plies_played,
             });
         }

@@ -98,6 +98,7 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 | `--adjudicate-resign "movecount=3,score=600"` | off | 同一側の劣勢評価の連続による投了裁定 |
 | `--adjudicate-win "movecount=3,score=600"` | off | 同一側の優勢評価の連続による勝ち裁定 |
 | `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は開始局面からの対局内 ply（`--max-moves` と異なり開始局面までの手数は含まない） |
+| `--adjudicate-agreement "movecount=3,score=800"` | off | 両側の自己視点の評価が勝ち側 +score 以上・負け側 -score 以下で一致した状態の連続による勝敗の裁定 |
 | `--concurrency N` | 1 | 並列対局数。1 対局は手番制で約 1 CPU スレッド消費 |
 | `--report-interval N` | 10 | N 局ごとに進捗を表示 |
 
@@ -145,18 +146,28 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
   16 ply 相当）。連続回数は 34 手未満でも数え、mate score・条件外の cp・
   評価値欠落でリセットする。
 
-`lowerbound` / `upperbound` 付きの score は確定評価ではないため、投了・勝ち・引分裁定の
+- `--adjudicate-agreement "movecount=3,score=800"`: 勝ち側の自己視点の評価が +800cp 以上、
+  負け側の自己視点の評価が -800cp 以下の状態が、**両側とも自分の直近 3 手**で続いたら勝ち側の勝ち
+  （各側の手数で数えるので、対局全体では 6 手前後）。片側だけの評価では裁定しない。
+  詰みの評価は符号の向きで閾値を越えたものとして扱い（勝ち側の正の mate、負け側の負の mate）、
+  条件外の cp・逆向きの mate・評価値欠落でその側の連続をリセットする。`score` は 1 以上。
+  採用 SPRT と `spsa --dispatch async` で同じ条件にできるよう、spsa にも同じ option がある。
+  閾値は保存済みの対局に `analyze_selfplay --adjudication-sweep` を当てて決める
+  （[analyze_selfplay](analyze_selfplay.md#評価値の一致による裁定の後付け集計)）。
+
+`lowerbound` / `upperbound` 付きの score は確定評価ではないため、投了・勝ち・一致・引分裁定の
 すべてで評価値欠落と同様に連続回数をリセットする。move 行の `eval.score_bound` に
 `lowerbound` / `upperbound` を記録する（確定評価と旧ログでは省略）。
 
 各フラグの key はすべて必須で、`,` または空白区切りに対応する（値全体を引用符で囲む）。
 未知・重複 key はエラー。`movecount` は 1 以上、`score` は非負の i32、`movenumber` は
 非負の u32 とする。有効な設定は meta の `settings.adjudicate_resign` /
-`settings.adjudicate_win` / `settings.adjudicate_draw` に記録し、無効な設定は省略する。
+`settings.adjudicate_win` / `settings.adjudicate_draw` / `settings.adjudicate_agreement` に記録し、
+無効な設定は省略する。
 
-合法手の適用後に千日手 → 投了裁定 → 勝ち裁定 → 引分裁定の順に判定し、終局手も move 行に記録する。
+合法手の適用後に千日手 → 投了裁定 → 勝ち裁定 → 一致の裁定 → 引分裁定の順に判定し、終局手も move 行に記録する。
 千日手・引分裁定・最大手数による引分は通常の引分として WLD / pentanomial に算入する。
-連続王手の千日手と投了・勝ち裁定には勝者を記録する。
+連続王手の千日手と投了・勝ち・一致の裁定には勝者を記録する。
 
 結果 JSONL の `reason` は次のとおり。
 
@@ -169,6 +180,7 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 | `adjudication_resign` | 評価値による投了裁定 |
 | `adjudication_win` | 評価値による勝ち裁定 |
 | `adjudication_draw` | 評価値による引分裁定 |
+| `adjudication_agreement` | 両側の評価の一致による勝敗の裁定 |
 | `max_moves` | 最大手数到達による引分 |
 | `timeout` | 時間切れ負け |
 | `illegal_move` | 不正な指し手による負け |

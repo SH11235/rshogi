@@ -624,6 +624,18 @@ impl PoolTest {
         extra: &[&str],
         env: &[(&str, &Path)],
     ) -> std::process::Output {
+        self.run_with_limit(mode, total, concurrency, &["--nodes", "1000"], extra, env)
+    }
+    /// 探索の制限 (`--nodes` や `--btime`) を指定して起動する。
+    pub(super) fn run_with_limit(
+        &self,
+        mode: &str,
+        total: u32,
+        concurrency: usize,
+        limit: &[&str],
+        extra: &[&str],
+        env: &[(&str, &Path)],
+    ) -> std::process::Output {
         use std::process::Stdio;
         use std::time::{Duration, Instant};
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/spsa");
@@ -650,13 +662,12 @@ impl PoolTest {
                 &concurrency.to_string(),
                 "--seed",
                 "1",
-                "--nodes",
-                "1000",
                 "--threads",
                 "1",
                 "--hash-mb",
                 "16",
             ])
+            .args(limit)
             .args(extra)
             .env("SPSA_TEST_ENGINE_MODE", mode)
             .env("SPSA_TEST_ENGINE_SPAWN_LOG", self.path("spawns"))
