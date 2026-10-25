@@ -90,6 +90,10 @@ impl CutArgs {
             priority: DEFAULT_PRIORITY,
         }
     }
+
+    pub(super) fn set_check_every(&mut self, every: usize) {
+        self.check_every = every;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

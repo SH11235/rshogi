@@ -339,9 +339,23 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .iter()
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
-    let source =
-        read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;
-    let readings: ReadingsOf = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
+    // 読む局面が無い部分木 (循環だけで閉じた木) は千日手の値だけで解けるので、台帳を読まない。
+    let mut nodes_limit = 0;
+    let mut readings = ReadingsOf::new();
+    if !wanted.is_empty() {
+        let source =
+            read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;
+        println!(
+            "台帳の条件 {} (nodes {} / MultiPV {} / 千日手 {:?}) の読み {} 局面",
+            source.settings.fingerprint,
+            source.settings.nodes,
+            source.settings.multipv,
+            source.settings.draw(),
+            source.readings.len()
+        );
+        nodes_limit = source.settings.nodes;
+        readings = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
+    }
     let missing: Vec<&str> =
         wanted.iter().copied().filter(|k| !readings.contains_key(*k)).collect();
     if !missing.is_empty() {
@@ -352,14 +366,6 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
             missing.iter().take(3).copied().collect::<Vec<_>>().join(" | ")
         );
     }
-    println!(
-        "台帳の条件 {} (nodes {} / MultiPV {} / 千日手 {:?}) の読み {} 局面",
-        source.settings.fingerprint,
-        source.settings.nodes,
-        source.settings.multipv,
-        source.settings.draw(),
-        readings.len()
-    );
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -384,15 +390,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     for (index, ((root, tree), values)) in meta.roots.iter().zip(&trees).zip(&all).enumerate() {
         disagreements += merge(
             &mut nodes,
-            register_nodes(
-                index,
-                root,
-                tree,
-                values,
-                &marked,
-                meta.params.max_plies,
-                source.settings.nodes,
-            ),
+            register_nodes(index, root, tree, values, &marked, meta.params.max_plies, nodes_limit),
         );
     }
     let text = std::fs::read_to_string(&args.master)

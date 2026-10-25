@@ -538,3 +538,54 @@ fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
     assert!(without.contains_key(ROOT) && !without.contains_key(&ab));
     assert_eq!(without[ROOT].remaining, 4);
 }
+
+#[test]
+fn a_subtree_without_readings_is_valued_without_a_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut db = BookDb::default();
+    for (moves, mv) in [
+        (&[][..], "5i5h"),
+        (&["5i5h"][..], "5a5b"),
+        (&["5i5h", "5a5b"][..], "5h5i"),
+        (&["5i5h", "5a5b", "5h5i"][..], "5b5a"),
+    ] {
+        let k = key(moves);
+        db.entries.insert(
+            k.clone(),
+            PositionEntry {
+                sfen: format!("{k} 1"),
+                moves: vec![BookMove {
+                    move_usi: Some(mv.into()),
+                    ponder_usi: None,
+                    value: 0,
+                    depth: 1,
+                    count: 1,
+                }],
+            },
+        );
+    }
+    db.write(&d.join("big.db")).unwrap();
+    std::fs::write(
+        d.join("roots.jsonl"),
+        format!("{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\"}}\n"),
+    )
+    .unwrap();
+    let mut args = cut_args(d, "cut", None);
+    args.set_check_every(0);
+    super::cut::run(args).unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("cut/targets.jsonl")).unwrap(), "");
+    let master = d.join("moves.tsv");
+    std::fs::write(&master, format!("{}\n", COLUMNS.join("\t"))).unwrap();
+    let args = ValueArgs::for_test(
+        d.join("cut"),
+        d.join("absent.jsonl"),
+        master.clone(),
+        d.join("v"),
+        true,
+    );
+    super::value::run(args).unwrap();
+    let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+    let root_row = rows.iter().find(|r| r.0[0] == ROOT).unwrap();
+    assert_eq!((root_row.0[2].as_str(), root_row.0[5].as_str()), ("5i5h", "-70"));
+}

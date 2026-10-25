@@ -545,7 +545,7 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
   [--draw-value-black -70] [--draw-value-white 70] [--fingerprint <指紋>] [--apply]
 ```
 
-台帳は共有 lock で読むので、serve が書いている台帳は複製して渡します。読む局面のどれかの読みが台帳に無ければ、何も書かずに止まります (足りない数と例を出す)。
+台帳は共有 lock で読むので、serve が書いている台帳は複製して渡します。台帳からは読む局面の読みだけを残します (他の局面も行の検査と重複の矛盾の検査はする)。読む局面のどれかの読みが台帳に無ければ、何も書かずに止まります (足りない数と例を出す)。読む局面が 1 つも無ければ台帳は読みません。
 
 伝播:
 
