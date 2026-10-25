@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use rshogi_core::position::{Position, SFEN_HIRATE};
+use rshogi_core::position::{Position, SFEN_HIRATE, StaticPosition};
 use rshogi_core::types::Move;
 
 use crate::common::io::write_atomic;
@@ -241,6 +241,11 @@ pub fn position_from_sfen(sfen: &str) -> Result<Position> {
     let mut pos = Position::new();
     pos.set_sfen(sfen).map_err(|e| anyhow!("SFEN が不正です: {sfen}: {e}"))?;
     Ok(pos)
+}
+
+/// SFEN から読み取り専用の局面を作る。
+pub(crate) fn static_position_from_sfen(sfen: &str) -> Result<StaticPosition> {
+    StaticPosition::from_sfen(sfen).map_err(|e| anyhow!("SFEN が不正です: {sfen}: {e}"))
 }
 
 /// 親局面に USI 指し手を合法性検査付きで適用した子局面を返す。

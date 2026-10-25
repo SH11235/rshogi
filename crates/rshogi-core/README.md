@@ -42,6 +42,26 @@ let result = search.go(&mut pos, limits, None::<fn(&_)>);
 println!("Best move: {}", result.best_move.to_usi());
 ```
 
+## 読み取り専用の局面
+
+`position::StaticPosition` は SFEN または盤面・手駒・手番から、駒在庫を検査した読み取り専用の局面を作る。
+key・正規の SFEN・盤上の駒・手駒・手番・玉の位置・王手の有無を参照できる。
+利きの全升集計、NNUE の駒表、駒割を初期化しないため、大量の定跡の索引や表記の検査に使える。
+
+```rust
+use rshogi_core::position::{StaticPosition, SFEN_HIRATE};
+
+let diagram = StaticPosition::from_sfen(SFEN_HIRATE)?;
+let key = diagram.key();
+let position = diagram.into_position()?;
+assert_eq!(position.key(), key);
+# Ok::<(), rshogi_core::position::SfenError>(())
+```
+
+`StaticPosition` には指し手の実行・評価の API や `Position` への参照を公開しない。
+`into_position()` は利き・NNUE の駒表・駒割などを完全に初期化してから通常の `Position` を返す。
+`Position::set_sfen` / `set_from_parts` は従来どおり完全な局面を構築する。
+
 ## NNUE の読み込み
 
 `NNUENetwork::read` は `Read + Seek`、LayerStacks FT の `read_leb128` は `Read` のみで利用できます。

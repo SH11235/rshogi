@@ -6,7 +6,7 @@ use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
     percentile, propagate_values, retain_known, write_book_atomic,
 };
-use crate::book_db::{position_from_sfen, strip_ply};
+use crate::book_db::{static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
@@ -388,7 +388,7 @@ fn propagate(
     let checks: Vec<Result<()>> = keys
         .par_iter()
         .map(|key| -> Result<()> {
-            let position = position_from_sfen(&format!("{key} 1"))
+            let position = static_position_from_sfen(&format!("{key} 1"))
                 .with_context(|| format!("key を局面として読めません: {key}"))?;
             // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
             ensure!(

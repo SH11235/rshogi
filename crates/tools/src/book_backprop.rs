@@ -16,8 +16,8 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::ValueEnum;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use rshogi_core::position::Position;
-use rshogi_core::types::{Color, Move, Piece, PieceType, Square, Value};
+use rshogi_core::position::{Position, StaticPosition};
+use rshogi_core::types::{Color, Hand, Move, Piece, PieceType, Square, Value};
 
 use crate::book_db::ply_of;
 pub use crate::book_db::{BOOK_HEADER, child_position_after_move, strip_ply};
@@ -430,6 +430,18 @@ struct PositionKey([u64; 8]);
 impl PositionKey {
     /// 局面の値と、盤を 180 度回して先後を入れ替えた局面 (反転キー) の値。
     fn pair(pos: &Position) -> [Self; 2] {
+        Self::pair_from(pos.side_to_move(), |sq| pos.piece_on(sq), |c| pos.hand(c))
+    }
+
+    fn pair_static(pos: &StaticPosition) -> [Self; 2] {
+        Self::pair_from(pos.side_to_move(), |sq| pos.piece_on(sq), |c| pos.hand(c))
+    }
+
+    fn pair_from(
+        side: Color,
+        piece_on: impl Fn(Square) -> Piece,
+        hand: impl Fn(Color) -> Hand,
+    ) -> [Self; 2] {
         let mut words = [[0u64; 8]; 2];
         let mut put = |key: usize, bit: usize, width: usize, value: u64| {
             words[key][bit / 64] |= value << (bit % 64);
@@ -438,7 +450,7 @@ impl PositionKey {
             }
         };
         for sq in Square::all() {
-            let pc = pos.piece_on(sq);
+            let pc = piece_on(sq);
             let flipped = if pc.is_some() {
                 Piece::new(pc.color().opponent(), pc.piece_type())
             } else {
@@ -448,15 +460,14 @@ impl PositionKey {
             put(0, sq.index() * 5, 5, u64::from(pc.raw()));
             put(1, sq.inverse().index() * 5, 5, u64::from(flipped.raw()));
         }
-        let side = pos.side_to_move();
         put(0, 405, 1, side.index() as u64);
         put(1, 405, 1, side.opponent().index() as u64);
         for (key, [first, second]) in [
             (0, [Color::Black, Color::White]),
             (1, [Color::White, Color::Black]),
         ] {
-            put(key, 406, 32, u64::from(pos.hand(first).raw()));
-            put(key, 438, 32, u64::from(pos.hand(second).raw()));
+            put(key, 406, 32, u64::from(hand(first).raw()));
+            put(key, 438, 32, u64::from(hand(second).raw()));
         }
         words.map(Self)
     }
@@ -1201,22 +1212,22 @@ fn build_graph(
     let chunks: Vec<Range<usize>> =
         (0..n).step_by(CHUNK).map(|start| start..(start + CHUNK).min(n)).collect();
     let node_part = |range: &Range<usize>| -> Result<NodePart> {
-        let mut position = Position::new();
         range
             .clone()
             .map(|v| {
                 let sfen = sfens.get(v);
-                position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+                let position = StaticPosition::from_sfen(sfen)
+                    .map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
                 let key = strip_ply(sfen);
                 // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ
                 // 局面の行は別の局面として残し、索引には入れない。
                 let indexed = (strip_ply(&position.to_sfen()) == key)
-                    .then(|| PositionKey::pair(&position)[0]);
+                    .then(|| PositionKey::pair_static(&position)[0]);
                 let mut flags = 0;
                 if key.split_whitespace().nth(1) != Some("w") {
                     flags |= NODE_BLACK;
                 }
-                if !position.checkers().is_empty() {
+                if position.in_check() {
                     flags |= NODE_CHECKED;
                 }
                 if options.skip_unsearched_children && input.unexplored[v] {
