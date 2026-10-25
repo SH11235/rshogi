@@ -210,9 +210,15 @@ fn unpack_static(packed: &Packed) -> Result<StaticPosition> {
 }
 
 fn unpack(packed: &Packed) -> Result<Position> {
-    unpack_static(packed)?
-        .into_position()
-        .map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))
+    let packed = match packed {
+        Packed::Standard(packed) => packed,
+        Packed::Sfen(sfen) => return position_from_sfen(sfen),
+    };
+    let parts = unpack_sfen_to_parts(packed).map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))?;
+    let mut pos = Position::new();
+    pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
+        .map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))?;
+    Ok(pos)
 }
 
 /// 頂点 0 が根。頂点はすべて根から辿れる。局面は詰めた形で持ち、key の文字列は出力のときだけ作る。
