@@ -9,6 +9,7 @@
 
 use std::sync::atomic::{AtomicI16, Ordering};
 
+use crate::position::Position;
 use crate::types::{Color, Piece, Square};
 
 use super::history::{CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE, PAWN_HISTORY_SIZE};
@@ -206,6 +207,33 @@ impl SharedHistories {
     pub fn update_pawn_history(&self, index: usize, pc: Piece, to: Square, bonus: i32) {
         self.pawn_history_entry(index, pc, to).update(bonus);
     }
+}
+
+impl SharedHistories {
+    /// 指し手を実行した直後の局面で引く entry をキャッシュへ先読みする。
+    ///
+    /// 子局面の静的評価 (NNUE) の間にメモリ待ちを隠す。`pc` / `to` は実行した手の
+    /// 動かした後の駒と移動先で、pawn history はその組を読む。
+    #[inline]
+    pub fn prefetch(&self, pos: &Position, pc: Piece, to: Square) {
+        prefetch_ptr(self.correction_bundle(pos.pawn_key()));
+        prefetch_ptr(self.correction_bundle(pos.minor_piece_key()));
+        prefetch_ptr(self.correction_bundle(pos.non_pawn_key(Color::White)));
+        prefetch_ptr(self.correction_bundle(pos.non_pawn_key(Color::Black)));
+        prefetch_ptr(self.pawn_history_entry(self.pawn_history_index(pos.pawn_key()), pc, to));
+    }
+}
+
+#[inline]
+fn prefetch_ptr<T>(entry: &T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: entry は生存中の値を指し、prefetch は内容を変更しない。
+    unsafe {
+        use std::arch::x86_64::_mm_prefetch;
+        _mm_prefetch(entry as *const T as *const i8, 3);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = entry;
 }
 
 /// 表を埋めるのに使うスレッド数。1 スレッド分の表なら分けない。
