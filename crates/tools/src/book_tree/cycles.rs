@@ -162,23 +162,17 @@ fn solve_side(
     (side, start): (&'static str, &str),
 ) -> Result<SideResult> {
     let graph = build(index, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
-    let before = count_on(&graph, |_| 0);
+    let before = count_on(&graph, |_| 0, |_, _| false);
     let mut plan = plan_side(&graph, values)?;
     plan.new_main = new_mains(&graph, index, values, &plan.removed, curated)?;
-    // 外した手を除き、main を替えた元データで作り直して数える (外す手の選び方とは別の確かめ)。
-    let removed_at = |key: &str, i: usize| {
+    // 同じグラフで、外した手を除き main を替えて数え直す。自分の手番の辺を減らすだけで相手の手番の辺は
+    // 変わらないので、外した後の元データでグラフを作り直して数えるのと同じになる。
+    let removed_at = |m: usize, i: usize| {
+        let key = index.key(m);
         plan.removed.binary_search_by(|(k, j)| (k.as_str(), *j).cmp(&(key, i))).is_ok()
     };
-    let after_graph = build(index, side, start, |m, p| {
-        let key = index.key(m);
-        let mut moves: Vec<usize> = (0..p.moves.len()).filter(|&i| !removed_at(key, i)).collect();
-        if let Some(&j) = plan.new_main.get(key) {
-            moves.retain(|&i| i != j);
-            moves.insert(0, j);
-        }
-        moves
-    })?;
-    let after = count_on(&after_graph, |m| plan.new_main.get(index.key(m)).copied().unwrap_or(0));
+    let after =
+        count_on(&graph, |m| plan.new_main.get(index.key(m)).copied().unwrap_or(0), removed_at);
     Ok(SideResult {
         side,
         before,
@@ -188,15 +182,21 @@ fn solve_side(
 }
 
 /// random のグラフで、default (自分の手は main だけ) と random の循環を数える。`main` は元データの局面の番号
-/// から main の手の番号を返す (書き出しと同じく、main が非合法ならその局面に default の辺は無い)。
-fn count_on(graph: &ReplyGraph, main: impl Fn(usize) -> usize) -> [CycleCount; 2] {
-    let default = |v: usize, i: usize| {
-        !graph.own[v]
-            || graph.master(v).is_some_and(|m| graph.edges(v)[i].book_move() == Some(main(m)))
-    };
+/// から main の手の番号を返し (書き出しと同じく、main が非合法ならその局面に default の辺は無い)、
+/// `removed(局面の番号, 手の番号)` が真の自分の手は使わない。
+fn count_on(
+    graph: &ReplyGraph,
+    main: impl Fn(usize) -> usize,
+    removed: impl Fn(usize, usize) -> bool,
+) -> [CycleCount; 2] {
+    let book = |v: usize, i: usize| graph.master(v).zip(graph.edges(v)[i].book_move());
+    let random =
+        |v: usize, i: usize| !graph.own[v] || book(v, i).is_some_and(|(m, j)| !removed(m, j));
+    let default =
+        |v: usize, i: usize| !graph.own[v] || book(v, i).is_some_and(|(m, j)| j == main(m));
     [
         CycleCount::of(&graph.cycles(default)),
-        CycleCount::of(&graph.cycles(|_, _| true)),
+        CycleCount::of(&graph.cycles(random)),
     ]
 }
 
@@ -881,7 +881,7 @@ mod tests {
     /// default と random の循環の数。
     fn cycles_of(p: &BTreeMap<String, MasterPosition>, start: &str) -> [CycleCount; 2] {
         let index = BookIndex::new(p).unwrap();
-        count_on(&graph_of(&index, start), |_| 0)
+        count_on(&graph_of(&index, start), |_| 0, |_, _| false)
     }
 
     fn solve_from(p: &BTreeMap<String, MasterPosition>, start: &str) -> SidePlan {
