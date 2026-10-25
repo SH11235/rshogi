@@ -465,6 +465,28 @@ mod tests {
     }
 
     #[test]
+    fn filtered_out_positions_still_reject_conflicting_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = machine(dir.path(), "a", "build a", "model");
+        let src = settings(&a, None);
+        let path = dir.path().join("src.jsonl");
+        let kept = reading(1, &src, "resign");
+        let keep = |key: &str| key == kept.key;
+        let lines = |second: &str| {
+            [
+                record_json(&src, &reading(0, &src, "resign")),
+                record_json(&src, &reading(0, &src, second)),
+                record_json(&src, &kept),
+            ]
+        };
+        write_lines(&path, &lines("resign"));
+        let source = read_source(&path, None, keep).unwrap();
+        assert_eq!(source.readings, std::slice::from_ref(&kept));
+        write_lines(&path, &lines("win"));
+        assert!(read_source(&path, None, keep).is_err());
+    }
+
+    #[test]
     fn every_selected_record_must_match_its_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
