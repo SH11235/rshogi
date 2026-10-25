@@ -345,7 +345,9 @@ impl UsiEngine {
         println!("option name MultiPV type spin default 1 min 1 max 500");
         println!("option name NetworkDelay type spin default 120 min 0 max 10000");
         println!("option name NetworkDelay2 type spin default 1120 min 0 max 10000");
-        println!("option name MinimumThinkingTime type spin default 2000 min 1000 max 100000");
+        // RoundUpToFullSecond=true のときはエンジン側で 1000 未満を 1000 に上げる
+        println!("option name MinimumThinkingTime type spin default 2000 min 0 max 100000");
+        println!("option name RoundUpToFullSecond type check default true");
         println!("option name SlowMover type spin default 100 min 1 max 1000");
         println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
         println!(
@@ -922,6 +924,15 @@ impl UsiEngine {
                 {
                     let mut opts = search.time_options();
                     opts.minimum_thinking_time = v;
+                    search.set_time_options(opts);
+                }
+            }
+            "RoundUpToFullSecond" => {
+                if let Ok(v) = value.parse::<bool>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.round_up_to_full_second = v;
                     search.set_time_options(opts);
                 }
             }

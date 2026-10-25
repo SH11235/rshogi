@@ -27,7 +27,7 @@ const DEFAULT_NETWORK_DELAY2: TimePoint = 1120;
 /// デフォルトのSlowMover（百分率）
 const DEFAULT_SLOW_MOVER: i32 = 100;
 
-/// MinimumThinkingTime の下限（ミリ秒）
+/// 秒境界に切り上げるときの MinimumThinkingTime と最小思考時間の下限（ミリ秒）
 const MIN_MINIMUM_THINKING_TIME: TimePoint = 1000;
 
 /// 引き分けまでの最大手数のデフォルト値
@@ -170,6 +170,9 @@ pub struct TimeManagement {
     usi_ponder: bool,
     stochastic_ponder: bool,
 
+    /// 思考時間を秒境界に切り上げるか (`TimeOptions::round_up_to_full_second`)
+    round_up_to_full_second: bool,
+
     /// Ponder中に時間を使い切ったフラグ（stopOnPonderhit相当）
     stop_on_ponderhit: bool,
 
@@ -209,6 +212,7 @@ impl TimeManagement {
             previous_time_reduction: 0.85,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
             stop_on_ponderhit: false,
             is_pondering: false,
             last_stop_threshold: None,
@@ -219,7 +223,9 @@ impl TimeManagement {
     pub fn set_options(&mut self, opts: &TimeOptions) {
         self.network_delay = opts.network_delay.max(0);
         self.network_delay2 = opts.network_delay2.max(0);
-        self.minimum_thinking_time = opts.minimum_thinking_time.max(MIN_MINIMUM_THINKING_TIME);
+        self.round_up_to_full_second = opts.round_up_to_full_second;
+        self.minimum_thinking_time =
+            opts.minimum_thinking_time.max(self.second_floor(MIN_MINIMUM_THINKING_TIME));
         self.slow_mover = opts.slow_mover.clamp(1, 1000);
         self.usi_ponder = opts.usi_ponder;
         self.stochastic_ponder = opts.stochastic_ponder;
@@ -251,11 +257,25 @@ impl TimeManagement {
         self.remain_time
     }
 
+    /// 秒境界に切り上げるときだけ `floor` を返し、切り上げないときは 0 を返す
+    fn second_floor(&self, floor: TimePoint) -> TimePoint {
+        if self.round_up_to_full_second {
+            floor
+        } else {
+            0
+        }
+    }
+
     /// round_up処理（YaneuraOu準拠）
     ///
     /// 1秒単位で繰り上げてdelayを引く。
     /// ただし、remain_timeよりは小さくなるように制限する。
+    /// `round_up_to_full_second` が false なら切り上げず、remain_time による制限だけを掛ける。
     pub fn round_up(&self, t0: TimePoint) -> TimePoint {
+        if !self.round_up_to_full_second {
+            return t0.min(self.remain_time).max(0);
+        }
+
         // 1000で繰り上げる。minimum_thinking_timeが最低値。
         let mut t = ((t0 + 999) / 1000 * 1000).max(self.minimum_thinking_time);
 
@@ -384,18 +404,20 @@ impl TimeManagement {
         }
 
         // 最小思考時間 (network_delay を差し引く)
-        self.minimum_time = (self.minimum_thinking_time - self.network_delay).max(1000);
+        self.minimum_time = (self.minimum_thinking_time - self.network_delay)
+            .max(self.second_floor(MIN_MINIMUM_THINKING_TIME));
 
         // 初期値は残り時間
         self.optimum_time = self.remain_time;
         self.maximum_time = self.remain_time;
 
         // remain_estimate = time + inc*mtg + byoyomi*mtg - (mtg+1)*1000
+        // 1 手 1000ms は秒境界への切り上げで失う時間の見込みなので、切り上げないときは引かない
         let mtg_i64 = mtg as TimePoint;
         let mut remain_estimate = time_left
             .saturating_add(increment.saturating_mul(mtg_i64))
             .saturating_add(byoyomi.saturating_mul(mtg_i64));
-        remain_estimate = remain_estimate.saturating_sub((mtg_i64 + 1) * 1000);
+        remain_estimate = remain_estimate.saturating_sub((mtg_i64 + 1) * self.second_floor(1000));
         if remain_estimate < 0 {
             remain_estimate = 0;
         }
@@ -1115,6 +1137,35 @@ mod tests {
         assert!(!should_stop || tm.elapsed() >= tm.search_end());
     }
 
+    /// 秒境界に切り上げないとき、ponder 中に時間を使い切っていれば hit 直後に止まる
+    #[test]
+    fn test_ponderhit_without_round_up_stops_right_after_hit() {
+        let mut tm = create_time_manager();
+        tm.set_options(&TimeOptions {
+            network_delay: 0,
+            network_delay2: 0,
+            minimum_thinking_time: 300,
+            round_up_to_full_second: false,
+            ..TimeOptions::default()
+        });
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60_000;
+        limits.ponder = true;
+        limits.start_time = Some(Instant::now() - Duration::from_millis(5_000));
+        tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+        assert_eq!(tm.minimum(), 300);
+
+        tm.stop_on_ponderhit = true;
+        tm.on_ponderhit();
+
+        let offset = tm.ponderhit_offset();
+        assert!(offset >= 5_000);
+        assert!(tm.search_end() >= offset);
+        assert!(tm.search_end() <= tm.elapsed(), "search_end={}", tm.search_end());
+        assert!(tm.should_stop_immediately());
+    }
+
     #[test]
     fn test_last_stop_threshold_is_used() {
         let mut tm = create_time_manager();
@@ -1280,6 +1331,7 @@ mod tests {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         });
 
         let mut limits = LimitsType::new();
@@ -1304,6 +1356,7 @@ mod tests {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         });
 
         let mut tm_delay = create_time_manager();
@@ -1314,6 +1367,7 @@ mod tests {
             slow_mover: 100,
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         });
 
         let mut limits = LimitsType::new();
@@ -1349,6 +1403,7 @@ mod tests {
             slow_mover: 200, // 2倍
             usi_ponder: false,
             stochastic_ponder: false,
+            round_up_to_full_second: true,
         });
         tm_slow.init(&limits, Color::Black, 0, 256);
 
