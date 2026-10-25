@@ -9,7 +9,6 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Hand, Piece, Square};
 use serde::{Deserialize, Serialize};
 
-use super::types::PrimaryScore;
 use super::{EvalLog, GameOutcome};
 
 /// 裁定による勝敗と終局理由。
@@ -206,18 +205,10 @@ fn beyond(eval: Option<&EvalLog>, score: i32, direction: i64) -> bool {
 }
 
 /// `beyond` に加え、距離不明の詰み (`score mate +` / `score mate -`) も向きで数える。
-/// 距離不明の詰みは cp・mate の欄が空になり、同一行の確定報告 (`last_exact_primary`) にだけ残る。
 fn beyond_or_unknown_mate(eval: Option<&EvalLog>, score: i32, direction: i64) -> bool {
     beyond(eval, score, direction)
-        || eval.is_some_and(|e| {
-            e.score_cp.is_none()
-                && e.score_mate.is_none()
-                && match e.last_exact_primary.as_ref().map(|p| &p.score) {
-                    Some(PrimaryScore::MateWin) => direction > 0,
-                    Some(PrimaryScore::MateLoss) => direction < 0,
-                    _ => false,
-                }
-        })
+        || eval
+            .is_some_and(|e| e.score_mate_sign.is_some_and(|sign| i64::from(sign) * direction > 0))
 }
 
 fn bump(streak: &mut u32, reached: bool) {
@@ -817,6 +808,16 @@ mod tests {
             play_agreement(&mut scores, &[win.clone(), lose.clone(), win, lose]).unwrap();
         assert_eq!(ply, 4);
         assert_verdict(Some(verdict), GameOutcome::BlackWin, "adjudication_agreement");
+        // 最後の score 行の符号で数える。前の確定行の `mate +` は使わない。pv の無い行でも数える。
+        let mut snap = super::super::InfoSnapshot::default();
+        snap.update_from_line("info depth 9 score mate + pv 7g7f");
+        snap.update_from_line("info score mate -");
+        let flipped = snap.into_eval_log().unwrap();
+        assert_eq!(flipped.score_mate_sign, Some(-1));
+        // 両側とも負けを報告しているので、勝ち側が無く裁定しない。
+        let mut scores = agreement(2, 1000);
+        let evals = [parse("mate -"), flipped.clone(), parse("mate -"), flipped];
+        assert!(play_agreement(&mut scores, &evals).is_none());
     }
 
     #[test]

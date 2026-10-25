@@ -2269,7 +2269,11 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         Some(bench) => Some(bench),
         None if cli.nps_scaling && !core.is_complete() => {
             let remaining = (total_pairs - core.completed) as usize;
-            Some(run_nps_bench(bench_input(cli.concurrency.min(remaining)))?)
+            // 足切りの理由を meta の stop_reason に残す (別の機械からそのまま resume できる)。
+            match run_nps_bench(bench_input(cli.concurrency.min(remaining))) {
+                Ok(bench) => Some(bench),
+                Err(error) => return store.stop(&core, error),
+            }
         }
         None => None,
     };

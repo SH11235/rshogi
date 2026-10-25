@@ -212,6 +212,7 @@ impl SearchBackend for NativeBackend {
             } else {
                 None
             },
+            score_mate_sign: None,
             depth: Some(result.depth as u32),
             seldepth: None,
             nodes: Some(result.nodes),
