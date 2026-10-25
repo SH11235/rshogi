@@ -177,6 +177,33 @@ fn ends_clean(pos: &Position, pv: &[Move]) -> bool {
     pos.hand(attacker) == Hand::EMPTY
 }
 
+/// 手順の各手が定義どおりか: 攻め方の手の後は残りの手数で詰み、受け方の手は無駄合いでなく残りの手数より
+/// 短く詰まない (最長)。最後の局面の応手はすべて無駄合い
+fn assert_pv_follows_definition(sfen: &str, pv: &[Move]) {
+    let mut pos = position(sfen);
+    pos.clear_checkers_without_king();
+    let len = pv.len() as u32;
+    for (i, &mv) in pv.iter().enumerate() {
+        let rest = len - i as u32;
+        if i % 2 == 1 {
+            assert!(!ref_is_futile(&mut pos, mv), "{sfen}: {} 手目は無駄合い", i + 1);
+        }
+        pos.do_move_with_missing_kings(mv);
+        if i % 2 == 0 {
+            assert!(ref_defense(&mut pos, rest - 1), "{sfen}: {} 手目の後に詰まない", i + 1);
+        } else if rest >= 4 {
+            assert!(!ref_mate(&mut pos, rest - 3), "{sfen}: {} 手目より長い応手がある", i + 1);
+        }
+    }
+    for reply in legal_moves_by_rules(&mut pos) {
+        assert!(
+            ref_is_futile(&mut pos, reply),
+            "{sfen}: 詰上りに無駄合いでない応手 {}",
+            reply.to_usi()
+        );
+    }
+}
+
 /// 最短手順モードの手順が正解役と同じ手数で、駒余りの有無も一致することを、両方のモードで確かめる
 fn assert_matches_reference(sfen: &str, expected_len: u32) {
     let mut pos = position(sfen);
@@ -192,6 +219,7 @@ fn assert_matches_reference(sfen: &str, expected_len: u32) {
         assert!(check_mate_pv_by_rules(&pos, &pv, true), "{sfen} {mode:?}: {}", pv_usi(&pv));
         assert_eq!(pv.len() as u32, expected_len, "{sfen} {mode:?}: {}", pv_usi(&pv));
         assert_eq!(ends_clean(&pos, &pv), clean, "{sfen} {mode:?}: 駒余り {}", pv_usi(&pv));
+        assert_pv_follows_definition(sfen, &pv);
     }
 }
 
@@ -299,6 +327,7 @@ fn shortest_mode_matches_reference_on_random_positions() {
                         "{sfen} {mode:?}: 駒余り {}",
                         pv_usi(&pv)
                     );
+                    assert_pv_follows_definition(&sfen, &pv);
                 }
                 (MateResult::Mate(pv), None) => {
                     assert!(
@@ -314,6 +343,48 @@ fn shortest_mode_matches_reference_on_random_positions() {
         mates += usize::from(reference.is_some());
     }
     assert!(mates >= 30, "詰みの局面が少なすぎる: {mates}");
+}
+
+/// 並列に解いても (手順を求める段階は 1 スレッド)、1 スレッドと同じ手数になる
+#[test]
+fn shortest_mode_with_threads_matches_single_thread() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5807_0002);
+    let mut mates = 0;
+    while mates < 20 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let MateResult::Mate(single) = solve_shortest(&mut pos, MateMode::Power, 2_000_000) else {
+            continue;
+        };
+        mates += 1;
+        for mode in MateMode::ALL {
+            let stop = AtomicBool::new(false);
+            let mut solver = DfpnSolver::with_mode(16, mode);
+            solver.set_shortest(true);
+            solver.set_threads(4);
+            solver.parallel_from_the_start();
+            let limits = MateLimits {
+                nodes: 2_000_000,
+                time_ms: 0,
+            };
+            let MateResult::Mate(pv) = solver.solve(&mut pos, &limits, &stop, |_| {}) else {
+                panic!("{} {mode:?}", pos.to_sfen());
+            };
+            assert_eq!(pv.len(), single.len(), "{} {mode:?}: {}", pos.to_sfen(), pv_usi(&pv));
+        }
+    }
+}
+
+/// 手順を求める段階でノード数の上限に達したら Unknown で、局面は元に戻る
+#[test]
+fn shortest_mode_stops_at_the_node_limit() {
+    // 判定は数千ノードで終わるが、無駄合いの判定で最短手順を求めるのに 100 万ノードほどかかる
+    let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
+    let mut pos = position(sfen);
+    let before = pos.to_sfen();
+    assert_eq!(solve_shortest(&mut pos, MateMode::Power, 20_000), MateResult::Unknown);
+    assert_eq!(pos.to_sfen(), before);
 }
 
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)

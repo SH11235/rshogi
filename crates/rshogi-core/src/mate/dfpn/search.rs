@@ -367,10 +367,13 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     tie_seed: u32,
     /// 最短手順モード: 受け方の無駄合いを詰み手数に数えず、詰み手数の上限だけに依存する不詰を覚えておく
     shortest: bool,
+    /// 最短手順モードで無駄合いを詰み手数に数えない
+    futility: bool,
 }
 
-/// 無駄合いの判定で、合駒を取った後の局面を解くノード数の上限
-const FUTILITY_NODES: u64 = 100_000;
+/// 無駄合いの判定で、合駒を取った後の局面を解くノード数の上限。詰まない局面はこの上限まで読むことが多く、
+/// 最短手順を求める時間の大半になる
+const FUTILITY_NODES: u64 = 20_000;
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
 #[inline]
@@ -424,13 +427,16 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             slack: None,
             tie_seed: 0,
             shortest: false,
+            futility: false,
         }
     }
 
-    /// 最短手順モードにする ([`super::shortest`])。詰み手数の上限付きの探索で、受け方の無駄合いを
-    /// 詰み手数に数えず、上限だけに依存する不詰を覚えておく。
-    pub fn enable_shortest(&mut self) {
+    /// 最短手順モードにする ([`super::shortest`])。詰み手数の上限付きの探索で、上限だけに依存する不詰を
+    /// 覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。覚えた不詰は無駄合いの数え方で
+    /// 変わるので、呼ぶたびに捨てる。
+    pub fn enable_shortest(&mut self, futility: bool) {
         self.shortest = true;
+        self.futility = futility;
         self.scratch.reset_shortest_tables();
     }
 
@@ -829,8 +835,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         for i in 0..n {
             let mv = self.scratch.moves[i];
             let child = &self.scratch.children[start + i];
-            let bounded = child.dn == 0 && child.limited;
-            let unsettled = child.pn != 0 && !(child.dn == 0 && !child.limited);
+            // 上限や経路 (合駒の後に経路上の局面へ戻る) のために詰まないと分かっている子
+            let bounded = child.dn == 0 && (child.limited || child.loop_depth != NO_LOOP);
+            let unsettled = child.pn != 0 && !(child.dn == 0 && !bounded);
             if !st.is_drop(mv) || !(bounded || len_limit == 0 && unsettled) {
                 continue;
             }
@@ -848,6 +855,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 戻した局面は手順から外れた局面なので、経路を持たずに解く (`FUTILITY_NODES` で打ち切ったら無駄合いと
     /// しない)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
     pub(super) fn futile_drop(&mut self, st: &mut S, drop: S::Mv) -> Result<Option<Hand>, Abort> {
+        if !self.futility {
+            return Ok(None);
+        }
         let before = st.table_key(self.attacker);
         // 同じ判定を探索中に何度も繰り返すので覚えておく (打ち切った判定も無駄合いでないとして覚える)
         let memo_key =

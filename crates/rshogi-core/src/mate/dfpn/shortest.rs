@@ -33,20 +33,17 @@ pub(super) fn shortest_pv<S: MateState, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
-    searcher.enable_shortest();
+    // 無駄合いを数えない手数は、すべての応手を数える手数以下。先に無駄合いの判定の要らない数え方で
+    // 縮めておくと、無駄合いの判定 (別の局面を解く) をする上限付きの探索が減る
+    searcher.enable_shortest(false);
     // 証明は置換表に残っているので、読み直すと証明した手数が分かる
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;
     if !root.is_proven() {
         return Ok(None);
     }
-    let mut len = root.mate_len;
-    while len >= 3 {
-        let r = searcher.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0)?;
-        if !r.is_proven() {
-            break;
-        }
-        len = r.mate_len;
-    }
+    let mut len = descend(searcher, st, root.mate_len)?;
+    searcher.enable_shortest(true);
+    len = descend(searcher, st, len)?;
 
     let mut walker = Walker {
         memo: HashMap::new(),
@@ -70,6 +67,22 @@ pub(super) fn shortest_pv<S: MateState, const PIECES: bool>(
         st.undo_move(mv);
     }
     Ok(complete.then_some(pv))
+}
+
+/// `len` 手以内に詰む根から、上限を 2 手ずつ減らして証明できる最短の手数を求める
+fn descend<S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    st: &mut S,
+    mut len: u16,
+) -> Result<u16, Abort> {
+    while len >= 3 {
+        let r = searcher.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0)?;
+        if !r.is_proven() {
+            break;
+        }
+        len = r.mate_len;
+    }
+    Ok(len)
 }
 
 /// 局面で選んだ手 (受け方の詰上りは `None`) と、そこから持駒が余らない手順があるか
