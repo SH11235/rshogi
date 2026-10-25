@@ -457,6 +457,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
+| `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
 伝播の仕方:
 

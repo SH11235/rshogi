@@ -134,11 +134,12 @@ pub(super) struct BookHashes(HashSet<u64>);
 impl BookHashes {
     pub fn new(positions: &BTreeMap<String, MasterPosition>) -> Result<Self> {
         let keys: Vec<&String> = positions.keys().collect();
-        let hashes: Vec<u64> = keys
+        // エラーは key の順で最初のものを返す。
+        let hashes: Vec<Result<u64>> = keys
             .par_iter()
             .map(|key| Ok(position_from_sfen(&format!("{key} 1"))?.key()))
-            .collect::<Result<_>>()?;
-        Ok(Self(hashes.into_iter().collect()))
+            .collect();
+        hashes.into_iter().collect::<Result<_>>().map(Self)
     }
 }
 
