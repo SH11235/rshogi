@@ -19,6 +19,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 - 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
   (既定 `false` で従来どおり丸読み)。`sfen` 行が SFEN の文字列順に並んだ `.db` が必要で、
   `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。
+- `rshogi-book` の `Book::len` / `Book::is_empty` は `Book::position_count`
+  (丸読みの局面数。on the fly では `None`) に置き換えた。`Book` は `Clone` でなくなった。
 
 ### rshogi-core / ライブラリ利用者の移行
 

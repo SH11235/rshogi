@@ -152,19 +152,20 @@ fn find_candidates(
     let sfen = position.to_sfen();
 
     // 3. find(ply 込み) → miss なら flip 再検索。
+    // 読み出しエラーは miss と区別し、反転局面の再検索に進まない(丸読みなら直接当たる局面で
+    // 反転側の手を選ばないため)。
     let mut find = |key: &str| {
         book.find_raw(key)
             .map_err(|e| info("", &format!("Error reading book file: {e}")))
             .ok()
-            .flatten()
     };
-    let (entry, flipped) = if let Some(entry) = find(&sfen) {
-        (entry, false)
-    } else if flipped_book {
-        let flipped_sfen = flip::flipped_key(&sfen)?;
-        (find(&flipped_sfen)?, true)
-    } else {
-        return None;
+    let (entry, flipped) = match find(&sfen)? {
+        Some(entry) => (entry, false),
+        None if flipped_book => {
+            let flipped_sfen = flip::flipped_key(&sfen)?;
+            (find(&flipped_sfen)??, true)
+        }
+        None => return None,
     };
 
     // 4. 合法性検証。

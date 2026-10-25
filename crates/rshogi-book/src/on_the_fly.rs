@@ -272,6 +272,30 @@ mod tests {
     }
 
     #[test]
+    fn matches_memory_book_on_irregular_layouts() {
+        let queries = [
+            "4k4/9/9/9/9/9/9/9/4K4 b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b - 3",
+            "4k4/9/9/9/9/9/9/9/4K4 w - 2",
+        ];
+        // 最初の sfen 行より前の指し手行、同じ手数込み sfen の 2 ブロック、末尾改行なし。
+        assert_same(
+            "5i5h\n\
+             sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1\n5i4h\n\
+             sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1\n5i6h\n\
+             sfen 4k4/9/9/9/9/9/9/9/4K4 w - 2\n5a5b",
+            &queries,
+        );
+        // 手数を除いたキーで並べ、同じ局面の中は手数の逆順。末尾が sfen 行で終わる。
+        assert_same(
+            "sfen 4k4/9/9/9/9/9/9/9/4K4 b - 3\n5i4h\n\
+             sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1\n5i5h\n\
+             sfen 4k4/9/9/9/9/9/9/9/4K4 w - 2",
+            &queries,
+        );
+    }
+
+    #[test]
     fn rejects_unsorted_file() {
         let text = "#YANEURAOU-DB2016 1.00\n\
             sfen 4k4/9/9/9/9/9/9/9/4K4 w - 2\n5a5b\n\
