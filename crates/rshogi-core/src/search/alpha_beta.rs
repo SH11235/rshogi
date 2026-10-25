@@ -42,7 +42,7 @@ use super::qsearch::qsearch;
 use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_keys, cont_history_ptr,
     do_move_and_push, do_move_and_push_prefetched, nnue_evaluate, nnue_pop, prefetch_child,
-    prefetch_cont_correction, set_cont_history_for_move, take_prior_reduction,
+    set_cont_history_for_move, take_prior_reduction,
 };
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_trace_tt_write};
@@ -1324,7 +1324,6 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            prefetch_cont_correction(&self.state, &self.history, 0, mv);
             do_move_and_push(
                 &mut self.state,
                 pos,
@@ -1978,7 +1977,6 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            prefetch_cont_correction(&self.state, &self.history, 0, mv);
             do_move_and_push(
                 &mut self.state,
                 pos,
@@ -3052,7 +3050,6 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            prefetch_cont_correction(st, ctx.history, ply, mv);
             do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
