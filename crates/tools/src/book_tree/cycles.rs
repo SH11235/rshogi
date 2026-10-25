@@ -173,7 +173,7 @@ fn solve_side(
 ) -> Result<SideResult> {
     let graph =
         build(positions, hashes, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
-    let before = count_on(&graph);
+    let before = count_on(&graph, |_| 0);
     let plan = plan_side(&graph, values)?;
     // 外した手を除き、main を替えた元データで作り直して数える (外す手の選び方とは別の確かめ)。
     let after_graph = build(positions, hashes, side, start, |key, p| {
@@ -186,7 +186,7 @@ fn solve_side(
         }
         moves
     })?;
-    let after = count_on(&after_graph);
+    let after = count_on(&after_graph, |key| plan.new_main.get(key).copied().unwrap_or(0));
     Ok(SideResult {
         side,
         before,
@@ -195,14 +195,14 @@ fn solve_side(
     })
 }
 
-/// random のグラフで、default (自分の手は先頭の手だけ) と random の循環を数える。
-fn count_on(graph: &ReplyGraph) -> [CycleCount; 2] {
-    let first = |v: usize, i: usize| {
-        !graph.own[v]
-            || graph.edges[v][i].book_move == graph.edges[v].first().and_then(|e| e.book_move)
+/// random のグラフで、default (自分の手は main だけ) と random の循環を数える。`main` は局面の key から
+/// main の手の番号を返す (書き出しと同じく、main が非合法ならその局面に default の辺は無い)。
+fn count_on(graph: &ReplyGraph, main: impl Fn(&str) -> usize) -> [CycleCount; 2] {
+    let default = |v: usize, i: usize| {
+        !graph.own[v] || graph.edges[v][i].book_move == Some(main(&graph.keys[v]))
     };
     [
-        CycleCount::of(&graph.cycles(first)),
+        CycleCount::of(&graph.cycles(default)),
         CycleCount::of(&graph.cycles(|_, _| true)),
     ]
 }
@@ -820,13 +820,13 @@ mod tests {
         let after_positions = apply_plans(&p, [&plan].into_iter());
         assert_eq!(after_positions[&c].moves[0].mv, "4h4i");
         assert_eq!(
-            count_on(&graph_of(&p, ROOT)),
+            count_on(&graph_of(&p, ROOT), |_| 0),
             [CycleCount {
                 components: 1,
                 positions: 4
             }; 2]
         );
-        assert_eq!(count_on(&graph_of(&after_positions, ROOT)), [CycleCount::default(); 2]);
+        assert_eq!(count_on(&graph_of(&after_positions, ROOT), |_| 0), [CycleCount::default(); 2]);
     }
 
     #[test]
@@ -867,7 +867,7 @@ mod tests {
             (z.as_str(), "5i4h", "main", "0"),
         ];
         let (p, plan) = solve(&rows);
-        assert_eq!(count_on(&graph_of(&p, ROOT))[1].components, 1);
+        assert_eq!(count_on(&graph_of(&p, ROOT), |_| 0)[1].components, 1);
         assert_eq!(plan.removed, [(e.clone(), 0)]);
         assert_eq!(plan.new_main, BTreeMap::from([(e.clone(), 1)]));
         assert!(plan.unbreakable.is_empty());
@@ -896,7 +896,7 @@ mod tests {
             (root, "9i8i", "alt", "0"),
             (b.as_str(), "9h9i", "main", "0"),
         ]);
-        assert_eq!(count_on(&graph_of(&p, root))[1].components, 1);
+        assert_eq!(count_on(&graph_of(&p, root), |_| 0)[1].components, 1);
         let plan = solve_from(&p, root);
         assert_eq!(plan.removed, [(root.to_owned(), 0)]);
         assert_eq!(plan.new_main, BTreeMap::from([(root.to_owned(), 1)]));
@@ -1026,7 +1026,7 @@ mod tests {
             let plan = solve_from(&p, &root);
             let after_positions = apply_plans(&p, [&plan].into_iter());
             assert!(after_positions.values().all(|m| !m.moves.is_empty()), "seed {seed}");
-            let after = count_on(&graph_of(&after_positions, &root));
+            let after = count_on(&graph_of(&after_positions, &root), |_| 0);
             assert_eq!(after[1].components, plan.unbreakable.len(), "seed {seed}");
             let graph = graph_of(&p, &root);
             let multi: Vec<usize> = (0..graph.len())

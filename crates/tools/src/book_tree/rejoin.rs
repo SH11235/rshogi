@@ -398,11 +398,14 @@ mod tests {
     }
 
     fn freq() -> BookDb {
+        BookDb::from_reader(freq_text().as_bytes()).unwrap()
+    }
+
+    fn freq_text() -> String {
         let a = after(ROOT, &["5i4h"]);
-        let text = format!(
+        format!(
             "#YANEURAOU-DB2016 1.00\nsfen {a} 2\n5a5b none 0 0 6\n5a4b none 0 0 3\n5a6b none 0 0 1\n"
-        );
-        BookDb::from_reader(text.as_bytes()).unwrap()
+        )
     }
 
     fn write_master(dir: &std::path::Path) -> PathBuf {
@@ -446,6 +449,16 @@ mod tests {
                 "b\t{ROOT}\t1\t5i4h\tmain\t100\t{a}\t5a4b\t{q}\t4h3h\t20\t80\t100\t20\t\t\t"
             )]
         );
+        // 一覧の出力先が入力と同じなら止める。
+        let mut same = args(dir.path(), 40, Some(dir.path().join("moves.tsv")));
+        same.table = dir.path().join("moves.tsv");
+        assert!(run_from(same, ROOT).is_err());
+        let freq = dir.path().join("freq.db");
+        std::fs::write(&freq, freq_text()).unwrap();
+        let mut same = args(dir.path(), 40, Some(freq.clone()));
+        same.table = freq.clone();
+        assert!(run_from(same, ROOT).is_err());
+        assert_eq!(std::fs::read_to_string(&freq).unwrap(), freq_text());
         // 下がり幅が線に届かなければ出ない。
         run_from(args(dir.path(), 81, None), ROOT).unwrap();
         let table = std::fs::read_to_string(dir.path().join("rejoin.tsv")).unwrap();
