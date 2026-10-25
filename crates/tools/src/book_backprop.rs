@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
+use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, Piece, PieceType, Square, Value};
@@ -968,6 +969,27 @@ fn legal_move(pos: &Position, decoded: Option<Move>) -> Result<Move, Rejected> {
     Ok(mv)
 }
 
+/// `build_graph` で並べて処理する局面の塊の大きさ。
+const CHUNK: usize = 4096;
+/// `build_graph` で一度に並べる塊の数 (束)。束ごとに結果を連結して捨てる。
+const WINDOW: usize = 64;
+
+/// `build_graph` の塊ごとの局面の (索引に入れる key, 局面の印)。
+type NodePart = Vec<(Option<PositionKey>, u8)>;
+
+/// `build_graph` の塊ごとの手の行。`row_ends` は局面ごとの、塊の中での行の終わり。
+#[derive(Default)]
+struct RowPart {
+    old: Vec<i32>,
+    to: Vec<u32>,
+    row_flags: Vec<u8>,
+    added: Vec<u16>,
+    row_ends: Vec<usize>,
+    flip_edges: usize,
+    illegal_moves: usize,
+    warnings: Vec<String>,
+}
+
 fn build_graph(
     path: &Path,
     options: BackpropOptions,
@@ -990,29 +1012,156 @@ fn build_graph(
     // 反転は 1 対 1 で 2 回で戻るので、「子局面の反転キーが key の局面」と「反転キーが子局面に等しい局面」は同じ。
     // 引くだけで反復しないので、ハッシュの順序は出力に影響しない。
     let mut index = PositionIndex::default();
+    // 局面ごとの計算は独立なので塊に分けて並べ、結果を元の順に連結する (出力と警告の順は 1 本で処理したときと同じ)。
+    let chunks: Vec<Range<usize>> =
+        (0..n).step_by(CHUNK).map(|start| start..(start + CHUNK).min(n)).collect();
+    let node_part = |range: &Range<usize>| -> Result<NodePart> {
+        let mut position = Position::new();
+        range
+            .clone()
+            .map(|v| {
+                let sfen = sfens.get(v);
+                position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+                let key = strip_ply(sfen);
+                // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ
+                // 局面の行は別の局面として残し、索引には入れない。
+                let indexed = (strip_ply(&position.to_sfen()) == key)
+                    .then(|| PositionKey::pair(&position)[0]);
+                let mut flags = 0;
+                if key.split_whitespace().nth(1) != Some("w") {
+                    flags |= NODE_BLACK;
+                }
+                if !position.checkers().is_empty() {
+                    flags |= NODE_CHECKED;
+                }
+                if options.skip_unsearched_children && input.unexplored[v] {
+                    flags |= NODE_PRESERVED;
+                }
+                Ok((indexed, flags))
+            })
+            .collect()
+    };
     let mut node_flags = Vec::with_capacity(n);
-    let mut position = Position::new();
-    for (v, &unexplored) in input.unexplored.iter().enumerate() {
-        let sfen = sfens.get(v);
-        position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
-        let key = strip_ply(sfen);
-        // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ局面の行は
-        // 別の局面として残し、索引には入れない。
-        if strip_ply(&position.to_sfen()) == key {
-            index.insert(PositionKey::pair(&position)[0], v as u32);
+    let mut v = 0u32;
+    // 塊の結果を束ごとに連結して捨て、並べる分の一時的なメモリを束の大きさまでに抑える。
+    for window in chunks.chunks(WINDOW) {
+        let parts: Vec<Result<NodePart>> = window.par_iter().map(node_part).collect();
+        for part in parts {
+            for (indexed, flags) in part? {
+                if let Some(key) = indexed {
+                    index.insert(key, v);
+                }
+                node_flags.push(flags);
+                v += 1;
+            }
         }
-        let mut flags = 0;
-        if key.split_whitespace().nth(1) != Some("w") {
-            flags |= NODE_BLACK;
-        }
-        if !position.checkers().is_empty() {
-            flags |= NODE_CHECKED;
-        }
-        if options.skip_unsearched_children && unexplored {
-            flags |= NODE_PRESERVED;
-        }
-        node_flags.push(flags);
     }
+
+    // 塊ごとの最初の入力の行 (局面ごとには持たない)。
+    let chunk_rows: Vec<(Range<usize>, usize)> = chunks
+        .iter()
+        .scan(0usize, |first, range| {
+            let start = *first;
+            *first += rows[range.clone()].iter().map(|&count| count as usize).sum::<usize>();
+            Some((range.clone(), start))
+        })
+        .collect();
+    let row_part = |(range, first): &(Range<usize>, usize)| -> Result<RowPart> {
+        let mut part = RowPart::default();
+        let mut position = Position::new();
+        let mut next_row = *first;
+        for v in range.clone() {
+            let sfen = sfens.get(v);
+            position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+            let input_rows = next_row..next_row + rows[v] as usize;
+            next_row = input_rows.end;
+            for row in input_rows.clone() {
+                let mv = input.moves[row];
+                let mut flags = 0;
+                let mut edge = None;
+                if mv != MOVE_NONE {
+                    let decoded = (mv & MOVE_INVALID == 0).then(|| Move::from_u16(mv as u16));
+                    match legal_move(&position, decoded) {
+                        Ok(mv) => {
+                            flags |= ROW_USABLE;
+                            let gives_check = position.gives_check(mv);
+                            position.do_move(mv, gives_check);
+                            let [direct, flipped] = PositionKey::pair(&position);
+                            edge = index.get(&direct).map(|to| (to, false)).or_else(|| {
+                                (!options.skip_flipped_children)
+                                    .then(|| index.get(&flipped).map(|to| (to, true)))
+                                    .flatten()
+                            });
+                            position.undo_move(mv);
+                        }
+                        Err(reason) => {
+                            part.illegal_moves += 1;
+                            let text = input.text(row);
+                            let error = match reason {
+                                Rejected::Unreadable => format!("USI 指し手が不正です: {text}"),
+                                Rejected::NotApplicable => {
+                                    format!("局面に適用できない指し手です: {text}: {sfen}")
+                                }
+                                Rejected::Illegal => format!("非合法手です: {text}: {sfen}"),
+                            };
+                            part.warnings.push(format!(
+                                    "警告: 非合法手を逆伝播から除外します: sfen={sfen} move={text} error={error}"
+                                ));
+                        }
+                    }
+                }
+                if edge.is_some_and(|(to, _)| skipped[to]) {
+                    flags |= ROW_PRESERVE;
+                    edge = None;
+                }
+                if let Some((_, true)) = edge {
+                    flags |= ROW_FLIP;
+                    part.flip_edges += 1;
+                }
+                part.old.push(input.value[row]);
+                part.to.push(edge.map_or(NONE, |(to, _)| to as u32));
+                part.row_flags.push(flags);
+            }
+            if options.add_transposition_moves && node_flags[v] & NODE_PRESERVED == 0 {
+                let listed: BTreeSet<String> = input_rows
+                    .filter(|&row| input.moves[row] != MOVE_NONE)
+                    .map(|row| input.text(row))
+                    .collect();
+                let mut legal = MoveList::new();
+                generate_legal_all(&position, &mut legal);
+                for &mv in legal.iter() {
+                    let usi = mv.to_usi();
+                    if listed.contains(&usi) {
+                        continue;
+                    }
+                    let gives_check = position.gives_check(mv);
+                    position.do_move(mv, gives_check);
+                    let child = position.to_sfen();
+                    position.undo_move(mv);
+                    let edge =
+                        find_key(&sfens, strip_ply(&child)).map(|to| (to, false)).or_else(|| {
+                            if options.skip_flipped_children {
+                                return None;
+                            }
+                            rshogi_book::flipped_key(&child)
+                                .and_then(|flipped| find_key(&sfens, strip_ply(&flipped)))
+                                .map(|to| (to, true))
+                        });
+                    let Some((child, via_flip)) = edge.filter(|&(to, _)| !skipped[to]) else {
+                        continue;
+                    };
+                    part.flip_edges += usize::from(via_flip);
+                    part.old.push(0);
+                    part.to.push(child as u32);
+                    part.row_flags
+                        .push(ROW_USABLE | ROW_ADDED | if via_flip { ROW_FLIP } else { 0 });
+                    part.added.push(mv.raw());
+                }
+            }
+            part.row_ends.push(part.old.len());
+        }
+        Ok(part)
+    };
 
     let total = input.value.len();
     let mut row_start = Vec::with_capacity(n + 1);
@@ -1023,95 +1172,24 @@ fn build_graph(
     let mut added = Vec::new();
     let mut flip_edges = 0;
     let mut illegal_moves = 0;
-    let mut first = 0usize;
-    for v in 0..n {
-        let sfen = sfens.get(v);
-        position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
-        let input_rows = first..first + rows[v] as usize;
-        first = input_rows.end;
-        for row in input_rows.clone() {
-            let mv = input.moves[row];
-            let mut flags = 0;
-            let mut edge = None;
-            if mv != MOVE_NONE {
-                let decoded = (mv & MOVE_INVALID == 0).then(|| Move::from_u16(mv as u16));
-                match legal_move(&position, decoded) {
-                    Ok(mv) => {
-                        flags |= ROW_USABLE;
-                        let gives_check = position.gives_check(mv);
-                        position.do_move(mv, gives_check);
-                        let [direct, flipped] = PositionKey::pair(&position);
-                        edge = index.get(&direct).map(|to| (to, false)).or_else(|| {
-                            (!options.skip_flipped_children)
-                                .then(|| index.get(&flipped).map(|to| (to, true)))
-                                .flatten()
-                        });
-                        position.undo_move(mv);
-                    }
-                    Err(reason) => {
-                        illegal_moves += 1;
-                        let text = input.text(row);
-                        let error = match reason {
-                            Rejected::Unreadable => format!("USI 指し手が不正です: {text}"),
-                            Rejected::NotApplicable => {
-                                format!("局面に適用できない指し手です: {text}: {sfen}")
-                            }
-                            Rejected::Illegal => format!("非合法手です: {text}: {sfen}"),
-                        };
-                        eprintln!(
-                            "警告: 非合法手を逆伝播から除外します: sfen={sfen} move={text} error={error}"
-                        );
-                    }
-                }
+    for window in chunk_rows.chunks(WINDOW) {
+        let parts: Vec<Result<RowPart>> = window.par_iter().map(row_part).collect();
+        for part in parts {
+            let part = part?;
+            for warning in &part.warnings {
+                eprintln!("{warning}");
             }
-            if edge.is_some_and(|(to, _)| skipped[to]) {
-                flags |= ROW_PRESERVE;
-                edge = None;
+            let base = old.len();
+            for end in part.row_ends {
+                row_start.push(u32::try_from(base + end).context("手が多すぎます")?);
             }
-            if let Some((_, true)) = edge {
-                flags |= ROW_FLIP;
-                flip_edges += 1;
-            }
-            old.push(input.value[row]);
-            to.push(edge.map_or(NONE, |(to, _)| to as u32));
-            row_flags.push(flags);
+            old.extend(part.old);
+            to.extend(part.to);
+            row_flags.extend(part.row_flags);
+            added.extend(part.added);
+            flip_edges += part.flip_edges;
+            illegal_moves += part.illegal_moves;
         }
-        if options.add_transposition_moves && node_flags[v] & NODE_PRESERVED == 0 {
-            let listed: BTreeSet<String> = input_rows
-                .filter(|&row| input.moves[row] != MOVE_NONE)
-                .map(|row| input.text(row))
-                .collect();
-            let mut legal = MoveList::new();
-            generate_legal_all(&position, &mut legal);
-            for &mv in legal.iter() {
-                let usi = mv.to_usi();
-                if listed.contains(&usi) {
-                    continue;
-                }
-                let gives_check = position.gives_check(mv);
-                position.do_move(mv, gives_check);
-                let child = position.to_sfen();
-                position.undo_move(mv);
-                let edge =
-                    find_key(&sfens, strip_ply(&child)).map(|to| (to, false)).or_else(|| {
-                        if options.skip_flipped_children {
-                            return None;
-                        }
-                        rshogi_book::flipped_key(&child)
-                            .and_then(|flipped| find_key(&sfens, strip_ply(&flipped)))
-                            .map(|to| (to, true))
-                    });
-                let Some((child, via_flip)) = edge.filter(|&(to, _)| !skipped[to]) else {
-                    continue;
-                };
-                flip_edges += usize::from(via_flip);
-                old.push(0);
-                to.push(child as u32);
-                row_flags.push(ROW_USABLE | ROW_ADDED | if via_flip { ROW_FLIP } else { 0 });
-                added.push(mv.raw());
-            }
-        }
-        row_start.push(u32::try_from(old.len()).context("手が多すぎます")?);
     }
     drop((input, index));
     Ok(Graph {

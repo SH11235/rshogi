@@ -5,14 +5,17 @@ use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
 use super::register::{format_master, parse_master, validate};
 use super::reply_graph::{
     BookHashes, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
+    thread_pool,
 };
 use crate::book_backprop::DrawValues;
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Args, Debug)]
 pub(super) struct CyclesArgs {
@@ -38,6 +41,9 @@ pub(super) struct CyclesArgs {
     /// 書き換えるとき、外す手と替わりの main の行の note の末尾に付ける文
     #[arg(long, default_value = "千日手の循環を塞ぐため指さない手にした")]
     note: String,
+    /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
 }
 
 /// 1 つの側で外す手と、main を替える局面。
@@ -79,7 +85,7 @@ struct SideResult {
 }
 
 pub(super) fn run(args: CyclesArgs) -> Result<()> {
-    run_from(args, HIRATE_KEY)
+    thread_pool(args.threads)?.install(|| run_from(args, HIRATE_KEY))
 }
 
 fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
@@ -104,20 +110,12 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     let hashes = BookHashes::new(positions)?;
 
     // 先手と後手のグラフは互いの手に左右されない (相手の手番では合法手を全部見る) ので並べて解く。
-    let results: Vec<SideResult> = std::thread::scope(|scope| {
-        let handles: Vec<_> = args
-            .side
-            .sides()
-            .iter()
-            .map(|&side| {
-                scope.spawn(|| solve_side(positions, &hashes, &values, &curated, (side, start)))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect::<Result<_>>()
-    })?;
+    let results: Vec<SideResult> = args
+        .side
+        .sides()
+        .par_iter()
+        .map(|&side| solve_side(positions, &hashes, &values, &curated, (side, start)))
+        .collect::<Result<_>>()?;
 
     let mut table =
         String::from("side\tkey\tply\tmove\trole\tvalue\teval\tnew_main\tnew_main_value\n");
@@ -275,7 +273,7 @@ pub(super) fn plan_side(
         |removed: Vec<(usize, usize)>| finish_plan(graph, &original, removed, &value, &is_main);
     let by_cycle = SidePlan {
         method: "A (循環ごと)",
-        ..finish(cycle_removals(graph, &original, &removal_order))?
+        ..finish(cycle_removals(graph, &removal_order))?
     };
     let by_rank = SidePlan {
         method: "B (抜けるまでの段数)",
@@ -295,46 +293,80 @@ pub(super) fn plan_side(
     })
 }
 
-/// A: 循環ごとに外す手。
+/// 辺を使うかどうか (局面ごとに辺の順)。循環ごとに並べて解くとき、各循環は自分の局面の辺だけを読み書きする
+/// (循環どうしは局面を共有しない) ので、読み書きの順は結果に影響しない。
+type SharedActive = [Vec<AtomicBool>];
+
+/// A: 循環ごとに外す手。循環どうしは互いに影響しないので並べて解く。
 fn cycle_removals<K: Ord>(
     graph: &ReplyGraph,
-    original: &HashMap<usize, usize>,
+    removal_order: &(impl Fn((usize, usize)) -> K + Sync),
+) -> Vec<(usize, usize)> {
+    let active: Vec<Vec<AtomicBool>> = graph
+        .edges
+        .iter()
+        .map(|e| e.iter().map(|_| AtomicBool::new(true)).collect())
+        .collect();
+    let parts: Vec<Vec<(usize, usize)>> = graph
+        .cycles(|_, _| true)
+        .par_iter()
+        .map(|component| component_removals(graph, &active, component, removal_order))
+        .collect();
+    parts.into_iter().flatten().collect()
+}
+
+/// 1 つの (元の) 循環の中で外す手。外した後に中に残る循環について繰り返す。
+fn component_removals<K: Ord>(
+    graph: &ReplyGraph,
+    active: &SharedActive,
+    component: &[usize],
     removal_order: &impl Fn((usize, usize)) -> K,
 ) -> Vec<(usize, usize)> {
-    let mut active: Vec<Vec<bool>> = graph.edges.iter().map(|e| vec![true; e.len()]).collect();
     let mut removed: Vec<(usize, usize)> = Vec::new();
-    let mut spent: HashMap<usize, usize> = HashMap::new();
-    let mut queue: Vec<Vec<usize>> = graph.cycles(|_, _| true);
+    let mut spent = 0usize;
+    let mut queue: Vec<Vec<usize>> = vec![component.to_vec()];
     while let Some(component) = queue.pop() {
-        let candidates = removable(graph, &active, &component);
+        let candidates = removable(graph, active, &component);
         if candidates.is_empty() {
             continue;
         }
         let inner_edges: usize = component.iter().map(|&v| graph.edges[v].len()).sum();
         let cost = candidates.len().saturating_mul(inner_edges);
-        let budget = spent.entry(original[&component[0]]).or_default();
-        let mut chosen = if budget.saturating_add(cost) <= EXACT_SCORING_LIMIT {
-            *budget += cost;
+        let mut chosen = if spent.saturating_add(cost) <= EXACT_SCORING_LIMIT {
+            spent += cost;
             vec![choose_removal(
                 graph,
-                &active,
+                active,
                 &component,
                 &candidates,
                 removal_order,
             )]
         } else {
-            dfs_removals(graph, &mut active, &component, removal_order)
+            dfs_removals(graph, active, &component, removal_order)
         };
         if chosen.is_empty() {
             chosen.push(*candidates.iter().min_by_key(|&&e| removal_order(e)).expect("候補"));
         }
         for (v, i) in chosen {
-            active[v][i] = false;
+            set(active, v, i, false);
             removed.push((v, i));
         }
-        queue.extend(sub_cycles(graph, &active, &component));
+        queue.extend(sub_cycles(graph, active, &component));
     }
     removed
+}
+
+fn is_active(active: &SharedActive, v: usize, i: usize) -> bool {
+    active[v][i].load(Ordering::Relaxed)
+}
+
+fn set(active: &SharedActive, v: usize, i: usize, value: bool) {
+    active[v][i].store(value, Ordering::Relaxed);
+}
+
+/// 局面に残っている (使う) 自分の手の数。
+fn active_count(active: &SharedActive, v: usize) -> usize {
+    active[v].iter().filter(|a| a.load(Ordering::Relaxed)).count()
 }
 
 /// B: 定跡を抜けるまでの段数で外す手。
@@ -501,14 +533,14 @@ fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
 }
 
 /// `component` の中の局面だけでできる循環 (今の辺で)。
-fn sub_cycles(graph: &ReplyGraph, active: &[Vec<bool>], component: &[usize]) -> Vec<Vec<usize>> {
+fn sub_cycles(graph: &ReplyGraph, active: &SharedActive, component: &[usize]) -> Vec<Vec<usize>> {
     let local: HashMap<usize, u32> =
         component.iter().enumerate().map(|(i, &v)| (v, i as u32)).collect();
     let adjacency: Vec<Vec<u32>> = component
         .iter()
         .map(|&v| {
             (0..graph.edges[v].len())
-                .filter(|&i| active[v][i])
+                .filter(|&i| is_active(active, v, i))
                 .filter_map(|i| local.get(&graph.edges[v][i].to).copied())
                 .collect()
         })
@@ -520,27 +552,32 @@ fn sub_cycles(graph: &ReplyGraph, active: &[Vec<bool>], component: &[usize]) -> 
 }
 
 /// 循環の中で外せる自分の手 (循環の中の局面へ行き、その局面に 2 手以上残る手)。
-fn removable(graph: &ReplyGraph, active: &[Vec<bool>], component: &[usize]) -> Vec<(usize, usize)> {
+fn removable(
+    graph: &ReplyGraph,
+    active: &SharedActive,
+    component: &[usize],
+) -> Vec<(usize, usize)> {
     let inside: HashSet<usize> = component.iter().copied().collect();
     component
         .iter()
-        .filter(|&&v| graph.own[v] && active[v].iter().filter(|&&a| a).count() >= 2)
+        .filter(|&&v| graph.own[v] && active_count(active, v) >= 2)
         .flat_map(|&v| (0..graph.edges[v].len()).map(move |i| (v, i)))
-        .filter(|&(v, i)| active[v][i] && inside.contains(&graph.edges[v][i].to))
+        .filter(|&(v, i)| is_active(active, v, i) && inside.contains(&graph.edges[v][i].to))
         .collect()
 }
 
 /// 外した後に循環に残る局面の数の一番少ない手 (同じなら外したい順の先)。
 fn choose_removal<K: Ord>(
     graph: &ReplyGraph,
-    active: &[Vec<bool>],
+    active: &SharedActive,
     component: &[usize],
     candidates: &[(usize, usize)],
     removal_order: &impl Fn((usize, usize)) -> K,
 ) -> (usize, usize) {
     let local: HashMap<usize, u32> =
         component.iter().enumerate().map(|(i, &v)| (v, i as u32)).collect();
-    let inner = |v: usize, i: usize| active[v][i] && local.contains_key(&graph.edges[v][i].to);
+    let inner =
+        |v: usize, i: usize| is_active(active, v, i) && local.contains_key(&graph.edges[v][i].to);
     *candidates
         .iter()
         .min_by_key(|&&(v, i)| {
@@ -563,7 +600,7 @@ fn choose_removal<K: Ord>(
 /// 外したい順の先の手を外す。外した手を返す (`active` も更新する)。
 fn dfs_removals<K: Ord>(
     graph: &ReplyGraph,
-    active: &mut [Vec<bool>],
+    active: &SharedActive,
     component: &[usize],
     removal_order: &impl Fn((usize, usize)) -> K,
 ) -> Vec<(usize, usize)> {
@@ -578,9 +615,9 @@ fn dfs_removals<K: Ord>(
             continue;
         }
         let mut stack: Vec<Frame> = Vec::new();
-        let order = |v: usize, active: &[Vec<bool>]| -> Vec<usize> {
+        let order = |v: usize, active: &SharedActive| -> Vec<usize> {
             let mut edges: Vec<usize> = (0..graph.edges[v].len())
-                .filter(|&i| active[v][i] && local.contains_key(&graph.edges[v][i].to))
+                .filter(|&i| is_active(active, v, i) && local.contains_key(&graph.edges[v][i].to))
                 .collect();
             edges.sort_by_key(|&i| std::cmp::Reverse(removal_order((v, i))));
             edges
@@ -595,7 +632,7 @@ fn dfs_removals<K: Ord>(
                 continue;
             };
             frame.2 += 1;
-            if !active[v][i] {
+            if !is_active(active, v, i) {
                 continue;
             }
             let w = graph.edges[v][i].to;
@@ -610,13 +647,11 @@ fn dfs_removals<K: Ord>(
                     let cycle = stack[depth + 1..].iter().filter_map(|f| f.3).chain([(v, i)]);
                     let target = cycle
                         .filter(|&(u, j)| {
-                            graph.own[u]
-                                && active[u][j]
-                                && active[u].iter().filter(|&&a| a).count() >= 2
+                            graph.own[u] && is_active(active, u, j) && active_count(active, u) >= 2
                         })
                         .min_by_key(|&e| removal_order(e));
                     if let Some((u, j)) = target {
-                        active[u][j] = false;
+                        set(active, u, j, false);
                         removed.push((u, j));
                     }
                 }
@@ -625,7 +660,7 @@ fn dfs_removals<K: Ord>(
     }
     // 呼び出し側で外したことにするので、ここでは元に戻して返す。
     for &(u, j) in &removed {
-        active[u][j] = true;
+        set(active, u, j, true);
     }
     removed
 }
@@ -970,6 +1005,7 @@ mod tests {
             draw_value_white: 0,
             apply: true,
             note: "塞いだ".into(),
+            threads: 0,
         };
         run_from(args, ROOT).unwrap();
         let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
@@ -1005,6 +1041,7 @@ mod tests {
             draw_value_white: 0,
             apply: true,
             note: "塞いだ".into(),
+            threads: 0,
         };
         // 一覧の出力先が元データと同じなら書かずに止める。
         assert!(run_from(args(master.clone()), ROOT).is_err());

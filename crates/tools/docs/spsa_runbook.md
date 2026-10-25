@@ -1812,3 +1812,11 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 - async 専用。有無と X・N は fingerprint に入り、resume で一致を求める。採用 SPRT (tournament) も同じ値で指す。
 - X と N は、保存済みの自己対局に `analyze_selfplay --adjudication-sweep` を当てて、裁定が実際の結果と食い違う率と
   縮む手数の割合から決める ([analyze_selfplay](analyze_selfplay.md#評価値の一致による裁定の後付け集計))。
+
+### 17.6 rshogi の秒単位の時間管理 (`RoundUpToFullSecond`)
+
+rshogi の時間管理 (YaneuraOu 準拠) は既定で 1 手の思考時間を秒境界に切り上げ、最低思考時間に 1 秒の下限を掛け、
+残り時間の見積もりから 1 手 1 秒を引く。短い時計では 1 手の消費時間が秒単位に張り付き、倍率を掛けても探索量が比例して縮まない。
+`--nps-scaling` で短い TC を使うときは `--usi-option RoundUpToFullSecond=false` を渡してこの 3 つを外す
+(spsa が既定で入れる `MinimumThinkingTime=0` もそのまま 0 ms として効く)。NetworkDelay と残り時間を超えない制約は残る。
+大会・floodgate など秒単位で時間を数える対局では既定 (true) のまま使う。

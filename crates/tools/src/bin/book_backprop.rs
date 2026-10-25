@@ -37,6 +37,9 @@ struct Cli {
     /// 異なる手順で同一局面に合流するときに候補手を共有できるよう、既知局面への合法手を補完する
     #[arg(long, default_value_t = false)]
     add_transposition_moves: bool,
+    /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
 }
 
 fn main() -> Result<()> {
@@ -48,17 +51,20 @@ fn main() -> Result<()> {
         add_transposition_moves: cli.add_transposition_moves,
         ..BackpropOptions::default()
     };
-    backprop_file_with(
-        &cli.book,
-        &cli.out,
-        report,
-        DrawValues {
-            black: cli.draw_value_black.unwrap_or(cli.draw_value),
-            white: cli.draw_value_white.unwrap_or(cli.draw_value),
-        },
-        cli.merge,
-        options,
-    )?;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(cli.threads).build()?;
+    pool.install(|| {
+        backprop_file_with(
+            &cli.book,
+            &cli.out,
+            report,
+            DrawValues {
+                black: cli.draw_value_black.unwrap_or(cli.draw_value),
+                white: cli.draw_value_white.unwrap_or(cli.draw_value),
+            },
+            cli.merge,
+            options,
+        )
+    })?;
     Ok(())
 }
 

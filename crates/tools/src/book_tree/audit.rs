@@ -10,6 +10,7 @@ use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
@@ -35,6 +36,9 @@ pub(super) struct AuditArgs {
     /// 値の分かる手だけを載せた、伝播後の値つき .db の出力先
     #[arg(long)]
     out_db: Option<PathBuf>,
+    /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
 }
 
 /// 局面の main・alt の手。record は指さないので持たない。
@@ -125,6 +129,10 @@ pub(super) struct AuditSummary {
 }
 
 pub(super) fn run(args: AuditArgs) -> Result<()> {
+    super::reply_graph::thread_pool(args.threads)?.install(|| run_in_pool(args))
+}
+
+fn run_in_pool(args: AuditArgs) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     let master = resolve(&args.master);
     let table = resolve_output(&args.table)?;
@@ -356,15 +364,22 @@ fn propagate(
     draws: DrawValues,
     work: &Path,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
-    for key in positions.keys() {
-        let position = position_from_sfen(&format!("{key} 1"))
-            .with_context(|| format!("key を局面として読めません: {key}"))?;
-        // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
-        ensure!(
-            strip_ply(&position.to_sfen()) == key,
-            "key が正規の SFEN (持ち駒の並びなど) ではありません: {key}"
-        );
-    }
+    let keys: Vec<&String> = positions.keys().collect();
+    // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
+    let checks: Vec<Result<()>> = keys
+        .par_iter()
+        .map(|key| -> Result<()> {
+            let position = position_from_sfen(&format!("{key} 1"))
+                .with_context(|| format!("key を局面として読めません: {key}"))?;
+            // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
+            ensure!(
+                strip_ply(&position.to_sfen()) == key.as_str(),
+                "key が正規の SFEN (持ち駒の並びなど) ではありません: {key}"
+            );
+            Ok(())
+        })
+        .collect();
+    checks.into_iter().collect::<Result<()>>()?;
     let all_db = work.join("all.db");
     write_value_db(&all_db, positions, None)?;
     let all = read_graph(&all_db, BackpropOptions::default())?;
@@ -847,6 +862,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             out_db: out_db.map(|p| dir.path().join(p)),
+            threads: 1,
         };
         assert!(run(args("moves.tsv", None)).is_err());
         assert!(run(args("audit.tsv", Some("audit.tsv"))).is_err());
