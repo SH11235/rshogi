@@ -340,17 +340,22 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
     graph.find(strip_ply(&flipped)).filter(|&v| v != node)
 }
 
-/// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
-pub(super) fn audit(
-    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+/// 伝播後の手の値。`moves[i][j]` は元データの i 番目 (key 順) の局面の j 番目の手 (main が先頭) で、
+/// 値の分からない手は `None`。
+pub(super) struct Evaluated {
+    pub moves: Vec<Vec<Option<AuditedMove>>>,
+    pub graph: Graph,
+    pub illegal_moves: usize,
+    pub nontrivial_sccs: usize,
+    pub max_scc_size: usize,
+}
+
+/// 元データの読みの値を伝播し、手ごとの伝播後の値を求める。
+pub(super) fn evaluate(
+    positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-    line: i32,
     work: &Path,
-) -> Result<(Vec<Finding>, AuditSummary, Graph)> {
-    let mut summary = AuditSummary {
-        records: *records,
-        ..AuditSummary::default()
-    };
+) -> Result<Evaluated> {
     for key in positions.keys() {
         let position = position_from_sfen(&format!("{key} 1"))
             .with_context(|| format!("key を局面として読めません: {key}"))?;
@@ -363,7 +368,7 @@ pub(super) fn audit(
     let all_db = work.join("all.db");
     write_value_db(&all_db, positions, None)?;
     let all = read_graph(&all_db, BackpropOptions::default())?;
-    summary.illegal_moves = all.illegal_moves;
+    let illegal_moves = all.illegal_moves;
     let known = known_moves(positions, &all)?;
     drop(all);
 
@@ -375,17 +380,9 @@ pub(super) fn audit(
     };
     let mut graph = read_graph(&known_db, options)?;
     let stats: PropagationStats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
-    summary.nontrivial_sccs = stats.nontrivial_sccs;
-    summary.max_scc_size = stats.max_scc_size;
 
-    let mut findings = Vec::new();
+    let mut moves = Vec::with_capacity(positions.len());
     for ((key, position), known) in positions.iter().zip(&known) {
-        let side = usize::from(key.split(' ').nth(1) == Some("w"));
-        summary.positions[side] += 1;
-        summary.moves += position.moves.len();
-        if position.moves.len() >= 2 {
-            summary.multi_move_positions[side] += 1;
-        }
         let audited: Vec<Option<AuditedMove>> = match graph.find(key) {
             Some(node) => {
                 let mut values = graph.moves(node);
@@ -415,6 +412,41 @@ pub(super) fn audit(
             }
             None => vec![None; position.moves.len()],
         };
+        moves.push(audited);
+    }
+    Ok(Evaluated {
+        moves,
+        graph,
+        illegal_moves,
+        nontrivial_sccs: stats.nontrivial_sccs,
+        max_scc_size: stats.max_scc_size,
+    })
+}
+
+/// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
+pub(super) fn audit(
+    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    work: &Path,
+) -> Result<(Vec<Finding>, AuditSummary, Graph)> {
+    let evaluated = evaluate(positions, draws, work)?;
+    let mut summary = AuditSummary {
+        records: *records,
+        illegal_moves: evaluated.illegal_moves,
+        nontrivial_sccs: evaluated.nontrivial_sccs,
+        max_scc_size: evaluated.max_scc_size,
+        ..AuditSummary::default()
+    };
+
+    let mut findings = Vec::new();
+    for ((key, position), audited) in positions.iter().zip(&evaluated.moves) {
+        let side = usize::from(key.split(' ').nth(1) == Some("w"));
+        summary.positions[side] += 1;
+        summary.moves += position.moves.len();
+        if position.moves.len() >= 2 {
+            summary.multi_move_positions[side] += 1;
+        }
         for m in audited.iter().flatten() {
             summary.known_moves += 1;
             match m.eval {
@@ -456,7 +488,7 @@ pub(super) fn audit(
         }
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
-    Ok((findings, summary, graph))
+    Ok((findings, summary, evaluated.graph))
 }
 
 pub(super) fn format_table(findings: &[Finding]) -> String {

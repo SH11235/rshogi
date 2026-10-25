@@ -60,10 +60,10 @@ pub(super) struct Node {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Row(pub Vec<String>);
 impl Row {
-    fn get(&self, column: &str) -> &str {
+    pub(super) fn get(&self, column: &str) -> &str {
         &self.0[index(column)]
     }
-    fn set(&mut self, column: &str, value: String) {
+    pub(super) fn set(&mut self, column: &str, value: String) {
         self.0[index(column)] = value;
     }
 }
