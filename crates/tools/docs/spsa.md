@@ -9,6 +9,9 @@ USIエンジンのパラメータを対局結果から調整する。起点を `
 - `--dispatch async`: pair ごとに独立な摂動で指し、結果の到着順に dispatch 時の係数で更新する。
   lag の上限、失敗した pair の指し直し、journal と snapshot による再開を持つ。
   [runbook §15](spsa_runbook.md#15-非同期-per-pair-更新---dispatch-async) を参照。
+  Fischer の対局では、開始時に測った NPS で持ち時間を補正する `--nps-scaling`、1 局の上限、時間切れの率での停止、
+  両側の評価の一致による裁定 `--adjudicate-agreement` を使える
+  ([runbook §17](spsa_runbook.md#17-fischer-と-nps-による時計の補正---nps-scaling))。
 
 ## 棋譜と摂動の記録
 
@@ -35,7 +38,7 @@ resume で切り替えると拒否する (切り替えると確定した局の�
 | `startpos_sfen` | 開始局面ファイルの手順を適用した後の SFEN。`moves` はこの局面から指す |
 | `outcome` | `black_win` / `white_win` / `draw` |
 | `plus_score` | plus 視点の 1 / 0 / -1 |
-| `reason` | 終局理由 (`resign` / `win` / `timeout` / `illegal_move` / `no_bestmove` / `max_moves` / 千日手系) |
+| `reason` | 終局理由 (`resign` / `win` / `timeout` / `illegal_move` / `no_bestmove` / `max_moves` / 千日手系 / `adjudication_agreement`) |
 | `plies` | 下の配列の長さ |
 | `retries` | この結果を得るまでに engine の通信障害で指し直した回数 |
 | `moves` | 指し手 (USI) |
@@ -56,6 +59,10 @@ resume で切り替えると拒否する (切り替えると確定した局の�
 `iteration`・`batch_pairs`・`k_pair_start` (係数を決めた時点の完了 pair 数) と、active param を params の順に並べた
 `params` (名前)・`c_k`・`r_k`・`flip` (±1)・`plus`・`minus` を持つ。`plus` / `minus` は丸め・clamp 後の確定値で、
 engine へ送る文字列と同じ桁に揃えている (mapping の名前・符号の変換前の値)。
+
+async の journal の `received` の `games[]` は、`plus_is_black`・`plus_score`・`reason`・`plies` に加えて、
+先手・後手の順の消費時間の合計 `elapsed_ms` と nodes の合計 `nodes` を持つ。`--nps-scaling` の run では
+`dispatch` が確定した時計 `clock`、`calibration` 行が NPS の較正を持つ ([runbook §17.2](spsa_runbook.md#172-時計の決め方と記録))。
 
 async では摂動を別ファイルに書かない。journal の `dispatch` 行の `flips`・`plus`・`minus` が active param の確定値で、
 名前は gen0 snapshot (`snapshots/snapshot-000000.json`) の `definitions` を保存順のまま `active` のものだけ抜いた並びに対応する。

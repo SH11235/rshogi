@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 use tools::selfplay::CONTROL_HISTORY_FILE_NAME;
 use tools::sprt::{Penta, SprtMetaLog, SprtParameters, collect_sprt_penta, judge};
 
+#[path = "analyze_selfplay/adjudication_sweep.rs"]
+mod adjudication_sweep;
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -77,6 +80,23 @@ struct Cli {
     /// 第二種過誤率 β。未指定時は meta → ハードコード fallback (0.05) の順で解決。
     #[arg(long)]
     sprt_beta: Option<f64>,
+
+    /// 両側の評価の一致による裁定 (tournament / spsa の `--adjudicate-agreement`) を記録済みの対局に
+    /// 当てはめ、閾値と手数の組ごとに食い違いの率と縮む手数の割合を出す。通常の集計は行わない。
+    #[arg(long)]
+    adjudication_sweep: bool,
+
+    /// `--adjudication-sweep` の閾値 X (cp、カンマ区切り)。
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "500,600,700,800,900,1000"
+    )]
+    sweep_scores: Vec<i32>,
+
+    /// `--adjudication-sweep` の各側の連続手数 N (カンマ区切り)。
+    #[arg(long, value_delimiter = ',', default_value = "2,3,4,6,8")]
+    sweep_movecounts: Vec<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1584,6 +1604,24 @@ fn main() -> Result<()> {
         })
         .map(|s| s.as_str())
         .collect();
+
+    if cli.adjudication_sweep {
+        if cli.sweep_scores.iter().any(|&x| x <= 0) || cli.sweep_movecounts.contains(&0) {
+            bail!("--sweep-scores と --sweep-movecounts は 1 以上の値で指定してください");
+        }
+        let rows = adjudication_sweep::sweep(&files, &cli.sweep_scores, &cli.sweep_movecounts)?;
+        if rows.iter().all(|row| row.games == 0) {
+            bail!(
+                "集計できる局がありません。--adjudication-sweep は tournament 形式の JSONL (move 行に eval を持つもの) を読みます"
+            );
+        }
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        } else {
+            adjudication_sweep::print_text(&rows);
+        }
+        return Ok(());
+    }
 
     // 全ファイルをパースして集計
     let mut matchups: BTreeMap<(String, String), MatchupStats> = BTreeMap::new();

@@ -40,7 +40,8 @@ cargo run --release -p tools --bin generate_spsa_params -- \
 
 対局 driver は開始局面を含む 4 回同一局面で千日手を自動終局する。
 通常は引分、連続王手の千日手は王手側の反則負けとして評価に算入する。
-SPSA では評価値による投了・引分裁定は無効。
+SPSA では評価値による投了・勝ち・引分裁定は使えない。`--dispatch async` では両側の評価の一致による裁定
+(`--adjudicate-agreement`、既定 off) だけを使える ([§17.5](#175-両側の評価の一致による裁定---adjudicate-agreement))。
 各探索には対局開始局面と、その局の全指し手を `position sfen ... moves ...` で渡す。
 開始局面ファイルの手順適用後を履歴の基点とし、毎局・再試行時に履歴をリセットする。
 TT 等のキャッシュ保持とは別の処理であり、エンジンが対局中の反復を探索で利用できる。
@@ -128,7 +129,8 @@ SPSA は paired antithetic スケジュールで対局を組む。**1 pair (2 �
 ### 3.2 時間制御の選択
 
 - `--byoyomi <ms>` (既定 1000ms): 1 手あたりの秒読み時間制御。最も単純で SPSA 向き
-- `--btime <ms> --binc <ms>`: Fischer モード（持ち時間 + 加算）。長い対局の挙動を測りたい時のみ
+- `--btime <ms> --binc <ms>`: Fischer モード（持ち時間 + 加算）。時間管理ごと調整したいときに使う。
+  async では機械の速さで持ち時間を補正できる ([§17](#17-fischer-と-nps-による時計の補正---nps-scaling))
 - `--nodes <N>`: ノード数固定。CPU 性能差に依存しない厳密比較が必要な場合のみ。`--threads` が 2 以上でも N は全スレッドの合計
   - 1手の探索期限は `--nodes-timeout-ms` で指定する（[§14](#14-engine-プール再試行停止) 参照）。
   （SPSA はノイズ低減のため通常は時間ベースで十分）
@@ -1636,6 +1638,8 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params \
 |---|---:|---|
 | `--max-lag L` | 4 × `--concurrency` | 適用時の lag (適用時と dispatch 時の completed_pairs の差) の上限。fresh で確定し、resume では変えられない。未較正の初期値 |
 | `--max-pair-attempts N` | 3 | 1 pair の失敗 attempt 数の上限。resume で変えてよい |
+| `--max-timeout-rate R` | 0.005 | 時間切れの局の率の上限 ([§17.4](#174-時間切れと-1-局の上限))。resume で変えてよい |
+| `--timeout-rate-min-games N` | 1000 | 時間切れの率の分母の下限 (局数)。resume で変えてよい |
 | `--snapshot-interval N` | 64 | snapshot を公開する適用数の間隔。resume で変えてよい |
 
 ### 15.1 lag の上限と停止
@@ -1677,7 +1681,9 @@ resume で一致を要求するもの (不一致は拒否し、上書きの手�
 `--total-pairs` と schedule 系の値 (bit 単位で比べる)、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、
 engine binary の sha256・`--engine-args`・既定値注入後の USI option・値がファイルを指す USI option の内容の sha256、mapping、
 開始局面ファイル (`--startpos-file` の内容 / `--sfen`)、`--random-startpos`、`--nodes`・`--byoyomi`・`--btime`・`--binc`、
-`--threads`・`--hash-mb`・`--max-moves`、`--nodes-timeout-ms`、`--timeout-margin-ms`、そして spsa 自身の binary。
+`--threads`・`--hash-mb`・`--max-moves`、`--nodes-timeout-ms`、`--timeout-margin-ms`、`--adjudicate-agreement`、
+`--nps-scaling` の有無と `--reference-nps`・bench の版、そして spsa 自身の binary。
+`--btime` / `--binc` は `--nps-scaling` でも倍率を掛ける前の基準 TC の値で比べる (倍率は resume のたびに測り直す。§17.3)。
 engine が option なしで暗黙に読む評価関数 (rshogi の `eval/nn.bin` など) は識別できないので、`EvalFile` を明示する。
 ファイルを指す option の相対パスは起動したディレクトリ基準で解決するので、resume も同じディレクトリから行う (絶対パスを推奨)。
 
@@ -1716,3 +1722,87 @@ spsa は既定で棋譜を `<run-dir>/games.jsonl` (batch では摂動の `batch
   engine mapping を使う run は mapping も残す。
 - games.jsonl の末尾に確定していない局の行があるのは正常 (棋譜を書いた後、checkpoint / `received` の前に落ちた分)。
   読む側が journal・meta と照合して捨てる。
+
+## 17. Fischer と NPS による時計の補正 (`--nps-scaling`)
+
+`--dispatch async` の Fischer (`--btime` / `--binc`) 対局で、持ち時間を「基準 NPS で何 ms か」と定義し、
+機械ごとに `倍率 = 基準 NPS ÷ その機械の NPS` を掛けて指す (fishtest の方式)。速い機械では持ち時間が短く、
+遅い機械では長くなり、1 手あたりの探索量が機械によらず揃う。
+
+```bash
+spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pairs 20000 --concurrency 23 --threads 8 --hash-mb 256 --cpu-affinity numa   --btime 120000 --binc 2000 --nps-scaling   --mobility 0.2 --startpos-file start_sfens_ply24.txt --max-moves 320   --usi-option EvalFile=/path/to/nn.bin
+```
+
+| オプション | 既定値 | 意味 |
+|---|---:|---|
+| `--nps-scaling` | off | 開始時に NPS を測り、`--btime` / `--binc` (基準 TC) に倍率を掛ける。async の Fischer 専用 (`--nodes` とは併用できない) |
+| `--reference-nps N` | 350000 | 基準 NPS (1 thread あたり、全 slot を同時に走らせたときの値)。fingerprint に入り、resume で変えられない |
+| `--min-nps-ratio R` | 0.5 | 実測 NPS が `基準 × R` 未満の機械では起動を拒否する |
+| `--threads N` | 1 | engine の Threads。`--nps-scaling` では `--usi-option Threads=...` を拒否する (bench はこの値で割る) |
+| `--timeout-margin-ms MS` | 1000 | 時間切れ判定の猶予。倍率は**掛けない** (通信・回収のための絶対値)。短い TC に対して大きすぎないかを確かめて決める |
+
+### 17.1 bench の手順 (`spsa-bench-v1`)
+
+- slot 数 = `min(--concurrency, 残りの pair 数)`。全 slot の bench を**同時に**走らせる (本番と同じ負荷)。
+- 各 slot は本番の worker と同じ設定で engine を 2 本 (plus / minus) 起動する: `--threads`・`--hash-mb`・
+  USI option (`EvalFile` など)・`--engine-args`・`--cpu-affinity` の割り当て。NNUE 重みのプロセス間共有の有無も、
+  engine が同じ環境変数で起動されるので本番と同じになる。探索するのは plus 側だけ (対局中も探索するのは手番側だけ)。
+- engine に送る探索定数は **run 開始時の θ₀** (resume でも gen0 snapshot の θ)。摂動や更新で NPS が変わっても倍率は動かない。
+- 局面は benchmark ツールの既定 4 局面 (YaneuraOu の bench と同じ局面)。各局面の前に `usinewgame` を送る。
+  warmup として 4 局面を `go depth 12` で 1 周した後、`go depth 16` で 1 周を計測する。
+- slot の NPS = `engine が報告した nodes の合計 ÷ go から bestmove までの時間の合計 ÷ Threads`。倍率に使う NPS は slot 間の平均。
+- 1 局面の探索が 600 s を超える、または engine が nodes を報告しないと bench は失敗する。
+- bench の版 (局面・深さ・集計方法) を変えたら `bench_version` を上げる。版は fingerprint に入る。
+
+### 17.2 時計の決め方と記録
+
+- `btime = round(基準 btime × 倍率)`、`binc = round(基準 binc × 倍率)` (0 でない値は 1 ms 以上)。先後同じ値。
+- 倍率は run (起動) 中は固定する。対局中の NPS からは出し直さない。
+- 較正 1 回ごとに journal に `calibration` を 1 行書き、meta の `tc_calibrations` に同じ内容を積む
+  (`index`・`bench_version`・`reference_nps`・`measured_nps`・`slot_nps`・`scale`・`reference_btime`・`reference_binc`・
+  `btime`・`binc`・`bench_depth`・`warmup_depth`・`bench_positions`・`threads`・`slots`・`host`・`measured_at_utc`)。
+  meta の履歴は resume のたびに journal から作り直す。
+- 新しい pair の journal の `dispatch` は確定した時計 `clock: {btime, binc, calibration}` を持つ。
+  同じ pair の 2 局、infra error の後の再 attempt、resume 後の指し直しは、すべてこの値で指す。
+- 起動時の要約に `clock: btime=... binc=... (reference ... x scale ...)` を出す。
+
+### 17.3 resume (別の機械を含む)
+
+- resume でも bench を測り直し、**新しい倍率は新しい pair から**使う。落ちた時点で実行中だった pair と再 attempt 待ちの pair は、
+  dispatch 時の時計のまま指し直す。機械を移っても同じ pair の条件は変わらない。
+- 基準 TC (`--btime` / `--binc`)・`--reference-nps`・bench の版は fingerprint で一致を求める。変えるときは新しい run-dir で始める。
+- bench の slot 数は、resume では journal を再生した後の残りの pair 数で決める (本番の worker 数と同じ)。
+- 足切り (`--min-nps-ratio`) に掛かると、較正を書かずに止まる。fresh では旧 run の journal・snapshot も残る
+  (`--force-init` で先に消える meta・CSV を除く)。resume では再生で確定する分だけを書いて止まり、別の機械でそのまま再開できる。
+- 完走済みの run の resume では bench を走らせない。
+
+### 17.4 時間切れと 1 局の上限
+
+- 時計の時間切れ (`reason: timeout`) は普通の対局結果として θ の更新に入る (時間管理の失敗も強さの一部)。
+  ただし、受信した局のうち時間切れの局が `--max-timeout-rate × max(局数, --timeout-rate-min-games)` を超えたら、
+  snapshot を残して止める (`meta.json` の `status: stopped`、`stop_reason` が `timeout rate: ...`)。
+  分母の下限は、序盤の 1 局の時間切れで止まらないようにするため (既定では最初の 1000 局の間は 5 局まで)。
+  率は byoyomi の run でも数える。原因を調べてから、上限を上げて resume するか新しい run-dir で始める。
+- meta の `received_games` / `timeout_games` に受信した局と時間切れの局の数を残す (journal から作り直す)。
+- 1 局の壁時計の上限は Fischer の pair ごとに `(持ち時間 × 3 + 加算 × 200) × 2` (fishtest の上限を SPSA と同じく 2 倍)。
+  持ち時間と加算は pair の時計 (補正後) の値。各手の探索の前後に確かめ、超えたら (その探索の結果は使わずに) infra error として扱い、
+  `--engine-retries` → 同じ確定値の次の attempt の順に同じ pair を指し直す (journal の `attempt_failed` の `reason` が
+  `game_time_limit: ...`)。時計が 0 になった後も判定の猶予の内で指し続ける engine を止めるためのもので、勝敗には使わない。
+  1 手の中で応答しなくなった engine は、従来どおり 1 手の期限 (残り時間 + 加算 + 猶予) で時間切れの結果になる。
+  その種の故障は時間切れの率による停止で拾う。
+- 時間切れの率が上限を越えたまま resume すると、残りの pair が無くても完走扱いにせず止まる。
+- 終了理由は journal の `received` の `games[].reason` と games.jsonl の `reason` に残る (`timeout`・`sennichite` 系・`max_moves`・
+  `resign`・`win`・`adjudication_agreement` など)。infra error は結果ではなく journal の `attempt_failed` に残る。
+- journal の `received` の各局は `elapsed_ms` / `nodes` (先手・後手の順の合計) を持つ。手ごとの値は games.jsonl の
+  `elapsed_ms` / `nodes` の列。
+
+### 17.5 両側の評価の一致による裁定 (`--adjudicate-agreement`)
+
+`--adjudicate-agreement "movecount=N,score=X"` で、勝ち側の自己視点の評価が +X 以上、負け側の自己視点の評価が −X 以下の状態が、
+両側とも自分の直近 N 手で続いたら勝敗を決める (既定 off、終了理由 `adjudication_agreement`)。N は各側の手数で、対局全体では 2N 手前後。
+詰みの評価 (距離不明の `score mate +` / `score mate -` を含む) は閾値を越えたものとして扱い、`lowerbound` / `upperbound` 付きの評価・評価値の欠落・条件外の値でその側の連続を切る。
+規則の詳細は [tournament の裁定](tournament.md#ルールによる自動終局) と同じ (同じ実装)。
+
+- async 専用。有無と X・N は fingerprint に入り、resume で一致を求める。採用 SPRT (tournament) も同じ値で指す。
+- X と N は、保存済みの自己対局に `analyze_selfplay --adjudication-sweep` を当てて、裁定が実際の結果と食い違う率と
+  縮む手数の割合から決める ([analyze_selfplay](analyze_selfplay.md#評価値の一致による裁定の後付け集計))。

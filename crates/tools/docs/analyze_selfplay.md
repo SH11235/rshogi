@@ -154,3 +154,32 @@ CSA の `outcome: "interrupted"` / `"censored"` は未決であり、勝敗・�
 旧 CSA の `draw` でも reason が `interrupted` / `censored` なら同じ扱いにする。
 旧ログの `draw` / `max_moves` だけでは真の引分と打切りを復元できず、引分として保持する。
 明示的な非 CSA source の旧理由補正は行わず、tournament の最大手数引分も変えない。
+
+## 評価値の一致による裁定の後付け集計
+
+`--adjudication-sweep` は、両側の評価の一致による裁定 (tournament / `spsa --dispatch async` の
+`--adjudicate-agreement "movecount=N,score=X"`) を記録済みの対局に当てはめ、X と N の組ごとに集計する。
+通常の勝敗集計は行わない。判定は対局中の裁定と同じ実装で、move 行の `eval` (自己視点の評価値・
+`score_bound`) を合法手の順に与える。入力は tournament 形式の JSONL で、spsa の `games.jsonl` は読まない。
+読めない行があると止まり、集計できる局が 1 局も無ければエラーにする。
+
+```bash
+./target/release/analyze_selfplay --adjudication-sweep \
+  --sweep-scores 500,600,700,800,900,1000 --sweep-movecounts 2,3,4,6,8 \
+  runs/selfplay/{DIR}/*.jsonl
+```
+
+| 列 | 意味 |
+|---|---|
+| `games` | 集計した局 (error の局と未決の局を除く) |
+| `adjudged` | 裁定が出た局の割合 |
+| `mismatch` | 裁定した局のうち、実際の結果と食い違う局 (`reversed` + `drawn`) の割合 |
+| `reversed` | 裁定の勝者が実際には負けた局の割合 (逆転) |
+| `drawn` | 裁定したが実際は引分だった局の数 |
+| `saved` | 裁定で縮む手数 (実際の手数 − 裁定した手数) の合計 ÷ 全局の手数の合計 |
+
+- 既定は `--sweep-scores 500,600,700,800,900,1000`、`--sweep-movecounts 2,3,4,6,8`。N は各側の手数。
+- move 行と result 行は `game_id` で対応付け、同じ `game_id` の指し直しは手数が戻った時点で前の試行の手を捨てる。
+  読みながら局ごとに捨てるので、保持するのは結果待ちの局の手だけ。
+- 実際の対局がすでに別の裁定 (投了・勝ち裁定など) で終わっている局は、その結果を「実際の結果」として比べる。
+- `--json` で行ごとの生の件数 (`adjudicated`・`reversed`・`drawn`・`plies`・`plies_saved`) を出す。

@@ -52,6 +52,10 @@ pub struct EvalLog {
     pub score_cp: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_mate: Option<i32>,
+    /// 最後の主 PV の評価値が距離不明の詰み (`score mate +` / `score mate -`) のときの符号 (+1 / -1)。
+    /// このとき `score_cp` / `score_mate` は空。旧ログには存在しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_mate_sign: Option<i8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depth: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +91,7 @@ pub struct InfoSnapshot {
     pub score_bound: Option<ScoreBound>,
     pub score_cp: Option<i32>,
     pub score_mate: Option<i32>,
+    pub score_mate_sign: Option<i8>,
     pub depth: Option<u32>,
     pub seldepth: Option<u32>,
     pub nodes: Option<u64>,
@@ -129,6 +134,7 @@ impl InfoSnapshot {
         let mut score_bound = None;
         let mut score_cp: Option<i32> = None;
         let mut score_mate: Option<i32> = None;
+        let mut score_mate_sign: Option<i8> = None;
         let mut depth: Option<u32> = None;
         let mut seldepth: Option<u32> = None;
         let mut nodes: Option<u64> = None;
@@ -167,6 +173,7 @@ impl InfoSnapshot {
                         score_cp = tokens[i + 2].parse::<i32>().ok();
                         primary_score = score_cp.map(PrimaryScore::Cp);
                         score_mate = None;
+                        score_mate_sign = None;
                         i += 2;
                     }
                     "mate" => {
@@ -176,6 +183,11 @@ impl InfoSnapshot {
                             "+" => Some(PrimaryScore::MateWin),
                             "-" => Some(PrimaryScore::MateLoss),
                             _ => score_mate.map(PrimaryScore::Mate),
+                        };
+                        score_mate_sign = match tokens[i + 2] {
+                            "+" => Some(1),
+                            "-" => Some(-1),
+                            _ => None,
                         };
                         score_cp = None;
                         i += 2;
@@ -257,6 +269,7 @@ impl InfoSnapshot {
                 self.score_bound = score_bound;
                 self.score_cp = score_cp;
                 self.score_mate = score_mate;
+                self.score_mate_sign = score_mate_sign;
             }
             if !pv.is_empty() {
                 self.pv = pv.clone();
@@ -284,6 +297,7 @@ impl InfoSnapshot {
     pub fn into_eval_log(self) -> Option<EvalLog> {
         if self.score_cp.is_none()
             && self.score_mate.is_none()
+            && self.score_mate_sign.is_none()
             && self.depth.is_none()
             && self.seldepth.is_none()
             && self.nodes.is_none()
@@ -298,6 +312,7 @@ impl InfoSnapshot {
             score_bound: self.score_bound,
             score_cp: self.score_cp,
             score_mate: self.score_mate,
+            score_mate_sign: self.score_mate_sign,
             depth: self.depth,
             seldepth: self.seldepth,
             nodes: self.nodes,

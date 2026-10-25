@@ -63,6 +63,7 @@ use crossbeam_channel as chan;
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
+use tools::selfplay::adjudication::parse_agreement_rule;
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::{EvalLog, side_label};
@@ -156,6 +157,10 @@ struct Cli {
     /// 評価値による引分裁定 (movenumber=34,movecount=8,score=20)。手数は開始局面からの対局内 ply。
     #[arg(long, value_parser = clap::value_parser!(DrawRule))]
     adjudicate_draw: Option<DrawRule>,
+    /// 両側の評価の一致による勝敗の裁定 (movecount=3,score=800)。勝ち側の自己視点が +score 以上、
+    /// 負け側の自己視点が -score 以下の状態が両側とも自分の直近 movecount 手で続いたら裁定する。既定 off。
+    #[arg(long, value_parser = parse_agreement_rule)]
+    adjudicate_agreement: Option<ResignRule>,
 
     /// 出力ディレクトリ。既存の対局出力がある場合は拒否する。
     #[arg(long)]
@@ -350,6 +355,8 @@ struct MetaSettings {
     adjudicate_win: Option<ResignRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     adjudicate_draw: Option<DrawRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adjudicate_agreement: Option<ResignRule>,
     byoyomi: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
     btime: u64,
@@ -376,6 +383,7 @@ impl MetaSettings {
             adjudicate_resign: cli.adjudicate_resign,
             adjudicate_win: cli.adjudicate_win,
             adjudicate_draw: cli.adjudicate_draw,
+            adjudicate_agreement: cli.adjudicate_agreement,
             byoyomi: cli.byoyomi,
             btime: cli.btime,
             binc: cli.binc,
@@ -740,6 +748,7 @@ struct WorkerConfig {
     adjudicate_resign: Option<ResignRule>,
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
+    adjudicate_agreement: Option<ResignRule>,
     timeout_margin_ms: u64,
     time_control: TimeControl,
     go_depth: Option<u32>,
@@ -765,6 +774,7 @@ fn worker_main(
         adjudicate_resign,
         adjudicate_win,
         adjudicate_draw,
+        adjudicate_agreement,
         timeout_margin_ms,
         time_control,
         go_depth,
@@ -840,6 +850,8 @@ fn worker_main(
             resign_rule: adjudicate_resign,
             win_rule: adjudicate_win,
             draw_rule: adjudicate_draw,
+            agreement_rule: adjudicate_agreement,
+            game_time_limit_ms: None,
             timeout_margin_ms,
             pass_rights: None,
             go_depth,
@@ -929,6 +941,7 @@ struct SpawnCtx<'a> {
     adjudicate_resign: Option<ResignRule>,
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
+    adjudicate_agreement: Option<ResignRule>,
     timeout_margin_ms: u64,
     time_control: TimeControl,
     go_depth: Option<u32>,
@@ -956,6 +969,7 @@ fn spawn_worker(
         adjudicate_resign: ctx.adjudicate_resign,
         adjudicate_win: ctx.adjudicate_win,
         adjudicate_draw: ctx.adjudicate_draw,
+        adjudicate_agreement: ctx.adjudicate_agreement,
         timeout_margin_ms: ctx.timeout_margin_ms,
         time_control: ctx.time_control,
         go_depth: ctx.go_depth,
@@ -1396,6 +1410,7 @@ fn main() -> Result<()> {
         adjudicate_resign: cli.adjudicate_resign,
         adjudicate_win: cli.adjudicate_win,
         adjudicate_draw: cli.adjudicate_draw,
+        adjudicate_agreement: cli.adjudicate_agreement,
         timeout_margin_ms: cli.timeout_margin_ms,
         time_control,
         go_depth: cli.depth,
@@ -2615,6 +2630,7 @@ mod tests {
         assert_eq!(cli.adjudicate_win, None);
         assert_eq!(cli.startpos_order, super::StartposOrder::Random);
         assert_eq!(cli.adjudicate_draw, None);
+        assert_eq!(cli.adjudicate_agreement, None);
         for separator in [",", " "] {
             let resign = ["movecount=3", "score=600"].join(separator);
             let draw = ["movenumber=34", "movecount=8", "score=20"].join(separator);
@@ -2625,8 +2641,11 @@ mod tests {
                 resign.as_str(),
                 "--adjudicate-draw",
                 draw.as_str(),
+                "--adjudicate-agreement",
+                resign.as_str(),
             ]))
             .unwrap();
+            assert_eq!(cli.adjudicate_agreement, cli.adjudicate_resign);
             assert_eq!(
                 cli.adjudicate_resign,
                 Some(super::ResignRule {
@@ -2673,6 +2692,9 @@ mod tests {
             ("--adjudicate-draw", "movenumber=34,movecount=8"),
             ("--adjudicate-draw", "movenumber=34,movecount=8,score=20,movenumber=40"),
             ("--adjudicate-draw", "movenumber=34,movecount=0,score=20"),
+            ("--adjudicate-agreement", "movecount=3,score=0"),
+            ("--adjudicate-agreement", "movecount=0,score=600"),
+            ("--adjudicate-agreement", "score=600"),
         ] {
             assert!(
                 super::Cli::try_parse_from([
@@ -2702,6 +2724,7 @@ mod tests {
             adjudicate_resign: None,
             adjudicate_win: None,
             adjudicate_draw: None,
+            adjudicate_agreement: None,
             byoyomi: 100,
             btime: 0,
             binc: 0,
@@ -2716,6 +2739,7 @@ mod tests {
         let json = serde_json::to_value(&settings).unwrap();
         assert!(json.get("adjudicate_resign").is_none());
         assert!(json.get("adjudicate_win").is_none());
+        assert!(json.get("adjudicate_agreement").is_none());
         assert_eq!(json["startpos_order"], "random");
         // 明示したゼロを「先手と同じ」と誤解しないよう、後手の値は常に記録する。
         assert_eq!(json["wtime"], 0);
@@ -2725,7 +2749,9 @@ mod tests {
         assert!(json.get("adjudicate_draw").is_none());
         settings.adjudicate_resign = Some("movecount=3,score=600".parse().unwrap());
         settings.adjudicate_draw = Some("movenumber=34,movecount=8,score=20".parse().unwrap());
+        settings.adjudicate_agreement = Some("movecount=4,score=800".parse().unwrap());
         let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["adjudicate_agreement"], serde_json::json!({"movecount":4,"score":800}));
         assert_eq!(json["startpos_order"], "sequential");
         assert_eq!(json["adjudicate_win"], serde_json::json!({"movecount":1,"score":300}));
         assert_eq!(json["adjudicate_resign"], serde_json::json!({"movecount":3,"score":600}));
@@ -2848,6 +2874,7 @@ mod tests {
             adjudicate_resign: None,
             adjudicate_win: None,
             adjudicate_draw: None,
+            adjudicate_agreement: None,
             timeout_margin_ms: 1,
             time_control: super::TimeControl::new(0, 0, 0, 0, 0),
             go_depth: None,

@@ -95,6 +95,8 @@ done
         resign_rule: None,
         win_rule: None,
         draw_rule: None,
+        agreement_rule: None,
+        game_time_limit_ms: None,
         max_moves: plies_before_start(&initial) + game_moves,
         timeout_margin_ms: 1000,
         limit_only_timeout_ms: None,
