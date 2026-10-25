@@ -16,9 +16,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
-- `book_backprop` (と、同じ処理を使う `book_mine master audit` / `rejoin` / `cycles`) の定跡のグラフ作りを、
+- `book_backprop` (と、同じ処理を使う `book_mine master audit` / `rejoin` / `cycles` / `borrow value`) の定跡のグラフ作りを、
   局面の塊ごとに並べて処理するようにした。出力は変わらない。既定は全コアを使う (従来は 1 スレッド) ので、
-  ほかの計算と同じ機械で使うときは `--threads` で数を指定する。
+  ほかの計算と同じ機械で使うときは `--threads` で数を指定する (`borrow value` には無いので `RAYON_NUM_THREADS`)。
 - `book_backprop` と `book_mine master audit` / `rejoin` / `cycles` に `--threads` (0 = 全コア) を足した。
   rejoin / cycles はグラフ作り・先手と後手・循環ごとの外し方も並べて解く。出力はスレッド数によらない。
 
