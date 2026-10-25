@@ -340,17 +340,13 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
     graph.find(strip_ply(&flipped)).filter(|&v| v != node)
 }
 
-/// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
-pub(super) fn audit(
-    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+/// 元データの値の分かる手だけを伝播する。(伝播後のグラフ, 局面ごと・手ごとの値の分かる手, 非合法手の数,
+/// 伝播の集計) を返す。key が正規の SFEN でなければ止まる。
+fn propagate(
+    positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-    line: i32,
     work: &Path,
-) -> Result<(Vec<Finding>, AuditSummary, Graph)> {
-    let mut summary = AuditSummary {
-        records: *records,
-        ..AuditSummary::default()
-    };
+) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     for key in positions.keys() {
         let position = position_from_sfen(&format!("{key} 1"))
             .with_context(|| format!("key を局面として読めません: {key}"))?;
@@ -363,7 +359,7 @@ pub(super) fn audit(
     let all_db = work.join("all.db");
     write_value_db(&all_db, positions, None)?;
     let all = read_graph(&all_db, BackpropOptions::default())?;
-    summary.illegal_moves = all.illegal_moves;
+    let illegal_moves = all.illegal_moves;
     let known = known_moves(positions, &all)?;
     drop(all);
 
@@ -374,10 +370,66 @@ pub(super) fn audit(
         ..BackpropOptions::default()
     };
     let mut graph = read_graph(&known_db, options)?;
-    let stats: PropagationStats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
+    let stats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
+    Ok((graph, known, illegal_moves, stats))
+}
+
+/// 元データの局面の伝播後の値 (手番の側から)。値の分からない手は入れない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MasterValue {
+    /// main の値。
+    pub main: Option<i32>,
+    /// 値の分かる手のうち最大の値。
+    pub best: Option<i32>,
+}
+
+/// 元データを `audit` と同じ規則で伝播し、局面ごとの main と 1 位の値を返す。
+pub(super) fn master_values(
+    (positions, _): &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    work: &Path,
+) -> Result<BTreeMap<String, MasterValue>> {
+    let (graph, known, _, _) = propagate(positions, draws, work)?;
+    let mut values = BTreeMap::new();
+    for ((key, _), known) in positions.iter().zip(&known) {
+        let Some(node) = graph.find(key) else {
+            values.insert(
+                key.clone(),
+                MasterValue {
+                    main: None,
+                    best: None,
+                },
+            );
+            continue;
+        };
+        // グラフには値の分かる手だけが元データの順 (main が先頭) で入っている。
+        let moves: Vec<i32> = graph.moves(node).map(|m| m.new).collect();
+        values.insert(
+            key.clone(),
+            MasterValue {
+                main: known[0].then(|| moves[0]),
+                best: moves.iter().copied().max(),
+            },
+        );
+    }
+    Ok(values)
+}
+
+/// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
+pub(super) fn audit(
+    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    work: &Path,
+) -> Result<(Vec<Finding>, AuditSummary, Graph)> {
+    let mut summary = AuditSummary {
+        records: *records,
+        ..AuditSummary::default()
+    };
+    let (graph, known, illegal_moves, stats) = propagate(positions, draws, work)?;
+    summary.illegal_moves = illegal_moves;
     summary.nontrivial_sccs = stats.nontrivial_sccs;
     summary.max_scc_size = stats.max_scc_size;
-
     let mut findings = Vec::new();
     for ((key, position), known) in positions.iter().zip(&known) {
         let side = usize::from(key.split(' ').nth(1) == Some("w"));

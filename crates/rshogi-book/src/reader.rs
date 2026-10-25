@@ -32,6 +32,17 @@ pub(crate) struct RawBookMove {
     pub(crate) move_count: u64,
 }
 
+/// 定跡に書かれた 1 手 ([`Book::entry_moves`] の結果)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookEntryMove {
+    /// 指し手 (USI 文字列。合法性は検証していない)。
+    pub move_usi: String,
+    /// 手番の側から見た評価値。
+    pub value: i32,
+    /// 探索深さ。
+    pub depth: i32,
+}
+
 /// 1 局面ぶんの定跡エントリ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PositionEntry {
@@ -182,6 +193,25 @@ impl Book {
         self.ignore_ply
     }
 
+    /// 局面の定跡手を `.db` に書かれた順に返す。`none` などの指し手なしの行は除く。
+    /// 局面が無ければ空。on the fly の読み出しに失敗したときだけ `Err` になる。
+    pub fn entry_moves(&self, sfen: &str) -> io::Result<Vec<BookEntryMove>> {
+        let Some(entry) = self.find_raw(sfen)? else {
+            return Ok(Vec::new());
+        };
+        Ok(entry
+            .moves
+            .iter()
+            .filter_map(|m| {
+                Some(BookEntryMove {
+                    move_usi: m.move_usi.clone()?,
+                    value: m.value,
+                    depth: m.depth,
+                })
+            })
+            .collect())
+    }
+
     /// SFEN 文字列で局面エントリを検索する(内部の `ignore_ply` に従いキー正規化)。
     /// on the fly の読み出しに失敗したときだけ `Err` になる。
     pub(crate) fn find_raw(&self, sfen: &str) -> io::Result<Option<Cow<'_, PositionEntry>>> {
@@ -289,6 +319,24 @@ mod tests {
         assert_eq!(entry.moves.len(), 2);
         assert_eq!(entry.moves[0].move_usi.as_deref(), Some("7g7f"));
         assert_eq!(entry.moves[1].move_usi.as_deref(), Some("2g2f"));
+    }
+
+    #[test]
+    fn entry_moves_keep_file_order_and_drop_no_move_rows() {
+        let data = format!(
+            "{HEADER}\n\
+             sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n\
+             2g2f 8c8d 25 16 40\n\
+             none none 99 0 1\n\
+             7g7f none 30\n"
+        );
+        let book = Book::from_reader(data.as_bytes(), true).unwrap();
+        let moves = book
+            .entry_moves("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 9")
+            .unwrap();
+        let got: Vec<_> = moves.iter().map(|m| (m.move_usi.as_str(), m.value, m.depth)).collect();
+        assert_eq!(got, [("2g2f", 25, 16), ("7g7f", 30, 0)]);
+        assert!(book.entry_moves("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap().is_empty());
     }
 
     #[test]

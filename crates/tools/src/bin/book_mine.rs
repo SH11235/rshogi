@@ -56,6 +56,8 @@ enum Command {
     Tree(tools::book_tree::TreeArgs),
     /// 定跡の元データの表を点検する
     Master(tools::book_tree::MasterArgs),
+    /// 大きい定跡の木の形を借り、出口を自分の読みで値付けして元データに登録する
+    Borrow(tools::book_tree::BorrowArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -183,6 +185,7 @@ fn main() -> Result<()> {
         Command::Run(args) => cmd_run(&args),
         Command::Tree(args) => tools::book_tree::run(args),
         Command::Master(args) => tools::book_tree::run_master(args),
+        Command::Borrow(args) => tools::book_tree::run_borrow(args),
     }
 }
 

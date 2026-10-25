@@ -101,6 +101,8 @@ pub(super) struct Tree {
     pub ready: bool,
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
+    /// 前回の `advance` が返した不足 (読みの無い局面)。
+    waiting: Vec<(String, usize)>,
 }
 impl Tree {
     /// TOML の定義と paths.tsv から木を作る。出力先には触れない。
@@ -180,6 +182,7 @@ impl Tree {
             ready: false,
             failed: false,
             expanded: BTreeMap::new(),
+            waiting: Vec::new(),
         })
     }
 
@@ -255,6 +258,12 @@ impl Tree {
         if self.finished || self.failed {
             return Ok(Vec::new());
         }
+        // 不足の局面のどれにも読みが来ていなければ、全局面を辿り直しても同じ不足になる
+        // (状態が変わるのは不足の局面の読みを取り込んだときだけ)。毎周の処理を不足の数に比例させる。
+        if !self.waiting.is_empty() && self.waiting.iter().all(|(k, _)| cache.get(k).is_none()) {
+            return Ok(self.waiting.clone());
+        }
+        self.waiting.clear();
         loop {
             let mut work: VecDeque<_> = self.level.keys().cloned().collect();
             while let Some(key) = work.pop_front() {
@@ -305,6 +314,7 @@ impl Tree {
                 .map(|(k, d)| (k.clone(), *d))
                 .collect();
             if !missing.is_empty() {
+                self.waiting.clone_from(&missing);
                 return Ok(missing);
             }
             if self.round < self.def.rounds {
@@ -347,6 +357,7 @@ impl Tree {
         self.candidates.clear();
         self.compare.clear();
         self.expanded.clear();
+        self.waiting.clear();
     }
 
     pub fn reach(&self, edges: &Edges) -> BTreeSet<String> {

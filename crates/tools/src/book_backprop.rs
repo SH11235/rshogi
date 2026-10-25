@@ -90,6 +90,8 @@ pub struct BackpropOptions {
     pub skip_unsearched_children: bool,
     /// 異なる手順で同一局面へ合流する合法手を補完し、手順間で候補手を共有する。
     pub add_transposition_moves: bool,
+    /// 直接の子局面が無いとき、先後反転した局面へ辺を張らない (book 外の手として既存 `value` を使う)。
+    pub skip_flipped_children: bool,
 }
 
 /// 千日手の値。それぞれ手番の側から見た値で、先手を自分として解くときは `black`、後手なら `white` を使う。
@@ -1039,10 +1041,11 @@ fn build_graph(
                         let gives_check = position.gives_check(mv);
                         position.do_move(mv, gives_check);
                         let [direct, flipped] = PositionKey::pair(&position);
-                        edge = index
-                            .get(&direct)
-                            .map(|to| (to, false))
-                            .or_else(|| index.get(&flipped).map(|to| (to, true)));
+                        edge = index.get(&direct).map(|to| (to, false)).or_else(|| {
+                            (!options.skip_flipped_children)
+                                .then(|| index.get(&flipped).map(|to| (to, true)))
+                                .flatten()
+                        });
                         position.undo_move(mv);
                     }
                     Err(reason) => {
@@ -1091,6 +1094,9 @@ fn build_graph(
                 position.undo_move(mv);
                 let edge =
                     find_key(&sfens, strip_ply(&child)).map(|to| (to, false)).or_else(|| {
+                        if options.skip_flipped_children {
+                            return None;
+                        }
                         rshogi_book::flipped_key(&child)
                             .and_then(|flipped| find_key(&sfens, strip_ply(&flipped)))
                             .map(|to| (to, true))
@@ -2729,6 +2735,30 @@ mod tests {
             let mut same = Position::new();
             same.set_sfen(&format!("{} 99", strip_ply(sfen))).unwrap();
             assert!(direct == PositionKey::pair(&same)[0], "{sfen}");
+        }
+    }
+
+    #[test]
+    fn skip_flipped_children_keeps_the_leaf_value_instead_of_the_flipped_child() {
+        let parent = "4k4/9/9/9/9/9/9/9/4K4 b G 1";
+        let child = child_position_after_move(parent, "5i5h").unwrap().to_sfen();
+        let flipped = rshogi_book::flipped_key(&child).unwrap();
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {parent}\n5i5h none 7 10 1\nsfen {flipped}\n5i4i none 300 10 1\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.db");
+        std::fs::write(&path, input).unwrap();
+        for (skip, expected) in [(false, -300), (true, 7)] {
+            let options = BackpropOptions {
+                skip_flipped_children: skip,
+                ..BackpropOptions::default()
+            };
+            let mut graph = read_graph(&path, options).unwrap();
+            propagate_values(&mut graph, DrawValues::both(0), MergeMode::Replace).unwrap();
+            let node = graph.find(strip_ply(parent)).unwrap();
+            let row = graph.moves(node).next().unwrap();
+            assert_eq!((row.edge.is_some(), row.new), (!skip, expected), "skip={skip}");
         }
     }
 
