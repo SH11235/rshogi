@@ -2,7 +2,7 @@
 //! 外して (指さない手 = record にして) 循環を無くす手の組を、決まった規則で選ぶ。
 
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
-use super::register::{format_master, parse_master, validate};
+use super::register::{COLUMNS, format_master, parse_master, validate};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
     thread_pool,
@@ -14,6 +14,7 @@ use clap::Args;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::io::BufRead as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -93,14 +94,7 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     reject_same_file(&args.table, &[("--master", &args.master)])?;
     let parsed = read_master(&args.master)?;
     let positions = &parsed.0;
-    let text = std::fs::read_to_string(&args.master)
-        .with_context(|| format!("{} を読めません", args.master.display()))?;
-    let mut rows = parse_master(&text)?;
-    let curated: HashSet<(String, String)> = rows
-        .iter()
-        .filter(|r| r.get("tier") == "curated")
-        .map(|r| (r.get("key").to_owned(), r.get("move").to_owned()))
-        .collect();
+    let curated = curated_moves(&args.master)?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -145,6 +139,10 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     }
     write_atomic(&args.table, &table)?;
     if args.apply {
+        // 行は書き換えるときだけ読む (元データを丸ごと 2 つ持たないため)。
+        let text = std::fs::read_to_string(&args.master)
+            .with_context(|| format!("{} を読めません", args.master.display()))?;
+        let mut rows = parse_master(&text)?;
         let changed =
             rewrite_rows(&mut rows, positions, results.iter().map(|r| &r.plan), &args.note)?;
         validate(&rows)?;
@@ -241,7 +239,7 @@ pub(super) fn plan_side(graph: &ReplyGraph, values: &[Vec<Option<i32>>]) -> Resu
     let is_main = |v: usize, i: usize| graph.edges(v)[i].book_move() == Some(0);
     // 外したい順 (小さいほど先に外す)。局面は元データの番号 (key の順と同じ)、手は元データの手の文字列で比べる。
     let removal_order = |(v, i): (usize, usize)| {
-        (is_main(v, i), value(v, i), graph.master(v), graph.own_move_text(v, i))
+        (is_main(v, i), value(v, i), graph.master(v), graph.move_text(v, i))
     };
     let original: HashMap<usize, usize> = graph
         .cycles(|_, _| true)
@@ -389,7 +387,7 @@ fn finish_plan(
                 value(v, i).is_none(),
                 std::cmp::Reverse(value(v, i)),
                 graph.master(v),
-                graph.own_move_text(v, i),
+                graph.move_text(v, i),
             )
         };
         order(av, ai).cmp(&order(bv, bi))
@@ -749,6 +747,23 @@ fn reaches(
         }
     }
     false
+}
+
+/// 元データの curated の行の (key, 手)。行を 1 行ずつ読み、curated の行だけを持つ。
+fn curated_moves(path: &std::path::Path) -> Result<HashSet<(String, String)>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
+    let column = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
+    let (key, mv, tier) = (column("key"), column("move"), column("tier"));
+    let mut curated = HashSet::new();
+    for line in std::io::BufReader::new(file).lines().skip(1) {
+        let line = line?;
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.get(tier) == Some(&"curated") {
+            curated.insert((cells[key].to_owned(), cells[mv].to_owned()));
+        }
+    }
+    Ok(curated)
 }
 
 /// 元データの行を書き換え、書き換えた行の数を返す。

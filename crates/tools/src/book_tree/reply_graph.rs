@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 /// 初期局面の key。
@@ -71,13 +72,43 @@ impl ReplyEdge {
 /// 32 バイトに詰めた局面 (教師データの PackedSfen と同じ形)。盤・手番・持ち駒が同じなら同じ値になる。
 type Packed = [u8; 32];
 
+/// 局面のハッシュ値 → 番号の索引。同じハッシュ値の別の局面があれば、その値の番号を全部 `collided` に入れ、
+/// 呼び出し側が詰めた局面で見分ける。
+#[derive(Default)]
+struct HashIndex {
+    first: HashMap<u64, u32>,
+    collided: HashMap<u64, Vec<u32>>,
+}
+
+impl HashIndex {
+    fn contains(&self, hash: u64) -> bool {
+        self.first.contains_key(&hash)
+    }
+
+    /// ハッシュ値が `hash` で `same(番号)` が真の番号。
+    fn find(&self, hash: u64, same: impl Fn(u32) -> bool) -> Option<u32> {
+        match self.collided.get(&hash) {
+            Some(ids) => ids.iter().copied().find(|&id| same(id)),
+            None => self.first.get(&hash).copied().filter(|&id| same(id)),
+        }
+    }
+
+    /// 番号を足す (同じ局面がまだ無いことは呼び出し側が確かめる)。
+    fn insert(&mut self, hash: u64, id: u32) {
+        match self.first.get(&hash) {
+            Some(&first) => self.collided.entry(hash).or_insert_with(|| vec![first]).push(id),
+            None => {
+                self.first.insert(hash, id);
+            }
+        }
+    }
+}
+
 /// 元データの局面の索引。局面は key の順に番号を振る (番号の順は key の文字列の順と同じ)。
 pub(super) struct BookIndex<'a> {
     list: Vec<(&'a str, &'a MasterPosition)>,
     packed: Vec<Packed>,
-    /// 局面のハッシュ値 → 番号。同じハッシュ値の局面が 2 つ以上あれば `collided` に全部を入れる。
-    by_hash: HashMap<u64, u32>,
-    collided: HashMap<u64, Vec<u32>>,
+    hashes: HashIndex,
 }
 
 impl<'a> BookIndex<'a> {
@@ -85,36 +116,32 @@ impl<'a> BookIndex<'a> {
     pub fn new(positions: &'a BTreeMap<String, MasterPosition>) -> Result<Self> {
         let list: Vec<(&str, &MasterPosition)> =
             positions.iter().map(|(k, p)| (k.as_str(), p)).collect();
-        // エラーは key の順で最初のものを返す。
-        let entries: Vec<Result<(u64, Packed)>> = list
-            .par_iter()
-            .map(|(key, _)| {
-                let pos = position_from_sfen(&format!("{key} 1"))?;
-                let packed = pack_position(&pos);
-                ensure!(
-                    strip_ply(&unpack(&packed)?.to_sfen()) == *key,
-                    "局面を詰めた形で表せません: {key}"
-                );
-                Ok((pos.key(), packed))
-            })
-            .collect();
         let mut packed = Vec::with_capacity(list.len());
-        let mut by_hash: HashMap<u64, u32> = HashMap::with_capacity(list.len());
-        let mut collided: HashMap<u64, Vec<u32>> = HashMap::new();
-        for (i, entry) in entries.into_iter().enumerate() {
-            let (hash, p) = entry?;
-            packed.push(p);
-            if let Some(&first) = by_hash.get(&hash) {
-                collided.entry(hash).or_insert_with(|| vec![first]).push(i as u32);
-            } else {
-                by_hash.insert(hash, i as u32);
+        let mut hashes = HashIndex::default();
+        // 束ごとに並べて求め、元の順に足す (中間の配列は束の大きさまで。エラーは key の順で最初のもの)。
+        for window in list.chunks(1 << 16) {
+            let entries: Vec<Result<(u64, Packed)>> = window
+                .par_iter()
+                .map(|(key, _)| {
+                    let pos = position_from_sfen(&format!("{key} 1"))?;
+                    let p = pack_position(&pos);
+                    ensure!(
+                        strip_ply(&unpack(&p)?.to_sfen()) == *key,
+                        "局面を詰めた形で表せません: {key}"
+                    );
+                    Ok((pos.key(), p))
+                })
+                .collect();
+            for entry in entries {
+                let (hash, p) = entry?;
+                hashes.insert(hash, packed.len() as u32);
+                packed.push(p);
             }
         }
         Ok(Self {
             list,
             packed,
-            by_hash,
-            collided,
+            hashes,
         })
     }
 
@@ -133,17 +160,12 @@ impl<'a> BookIndex<'a> {
 
     /// ハッシュ値が一致する局面があるか (当たりを付けるだけ)。
     fn has_hash(&self, hash: u64) -> bool {
-        self.by_hash.contains_key(&hash)
+        self.hashes.contains(hash)
     }
 
     /// ハッシュ値と詰めた形が一致する局面の番号。
     fn find_packed(&self, hash: u64, packed: &Packed) -> Option<u32> {
-        match self.collided.get(&hash) {
-            Some(ids) => ids.iter().copied().find(|&i| self.packed[i as usize] == *packed),
-            None => {
-                self.by_hash.get(&hash).copied().filter(|&i| self.packed[i as usize] == *packed)
-            }
-        }
+        self.hashes.find(hash, |i| self.packed[i as usize] == *packed)
     }
 }
 
@@ -202,10 +224,13 @@ impl<'a> ReplyGraph<'a> {
         }
     }
 
-    /// 自分の手番の局面 `v` の `i` 番目の手の、元データの行の手の文字列 (相手の手なら `None`)。
-    pub fn own_move_text(&self, v: usize, i: usize) -> Option<&'a str> {
-        let book_move = self.edges(v)[i].book_move()?;
-        Some(self.index.position(self.master(v)?).moves[book_move].mv.as_str())
+    /// 局面 `v` の `i` 番目の手の文字列。自分の手は元データの行の通り、相手の手は USI。
+    pub fn move_text(&self, v: usize, i: usize) -> Cow<'a, str> {
+        let edge = self.edges(v)[i];
+        match (edge.book_move(), self.master(v)) {
+            (Some(j), Some(m)) => Cow::Borrowed(self.index.position(m).moves[j].mv.as_str()),
+            _ => Cow::Owned(edge.mv.to_usi()),
+        }
     }
 
     /// 根から辿れる自明でない強連結成分 (循環)。`active(頂点, 辺の番号)` が偽の辺は使わない。
@@ -299,28 +324,18 @@ pub(super) fn build<'a>(
         edges: Vec::new(),
         illegal_moves: 0,
     };
-    // 頂点のハッシュ値 → 番号。同じハッシュ値の別の局面は `collided` に入れ、詰めた形で見分ける。
-    let mut by_hash: HashMap<u64, u32> = HashMap::new();
-    let mut collided: HashMap<u64, Vec<u32>> = HashMap::new();
+    // 頂点のハッシュ値 → 番号。同じハッシュ値の別の局面は詰めた形で見分ける。
+    let mut nodes = HashIndex::default();
     let mut intern =
         |graph: &mut ReplyGraph, hash: u64, packed: Packed, master: u32, own: bool| -> u32 {
-            let found = match collided.get(&hash) {
-                Some(ids) => ids.iter().copied().find(|&v| graph.packed[v as usize] == packed),
-                None => by_hash.get(&hash).copied().filter(|&v| graph.packed[v as usize] == packed),
-            };
-            if let Some(v) = found {
+            if let Some(v) = nodes.find(hash, |v| graph.packed[v as usize] == packed) {
                 return v;
             }
             let v = graph.packed.len() as u32;
             graph.own.push(own);
             graph.packed.push(packed);
             graph.master.push(master);
-            match by_hash.get(&hash) {
-                Some(&first) => collided.entry(hash).or_insert_with(|| vec![first]).push(v),
-                None => {
-                    by_hash.insert(hash, v);
-                }
-            }
+            nodes.insert(hash, v);
             v
         };
     let root = position_from_sfen(&format!("{start} 1"))?;
@@ -506,6 +521,23 @@ pub(super) mod fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_index_tells_apart_ids_with_the_same_hash() {
+        let mut index = HashIndex::default();
+        let values = [10, 20, 30, 40];
+        // 0, 1, 2 は同じハッシュ値、3 は別のハッシュ値。
+        for (id, hash) in [(0u32, 7u64), (1, 7), (2, 7), (3, 8)] {
+            assert_eq!(index.find(hash, |i| values[i as usize] == values[id as usize]), None);
+            index.insert(hash, id);
+        }
+        for (id, hash) in [(0u32, 7u64), (1, 7), (2, 7), (3, 8)] {
+            assert_eq!(index.find(hash, |i| values[i as usize] == values[id as usize]), Some(id));
+        }
+        assert_eq!(index.find(7, |i| values[i as usize] == 40), None);
+        assert_eq!(index.find(9, |_| true), None);
+        assert!(index.contains(7) && index.contains(8) && !index.contains(9));
+    }
 
     #[test]
     fn nontrivial_sccs_finds_cycles_only() {
