@@ -52,8 +52,9 @@
   載っていないときは記憶装置のランダム読み出しの速さで決まります。ponder の補完や
   `FlippedBook` の再検索で 1 回の probe に数回の検索をします。
 - **読み出しエラー**: probe 中の読み出しエラーや UTF-8 でない行は、その局面を定跡なしとして
-  `info string Error reading book file: ...` を出します。丸読みはこの場合 `isready` で読み込み
-  自体が失敗します。
+  `info string Error reading book file: ...` を出します。ponder を補うために子局面を引いて
+  いるときのエラーは何も出さず、予想手なしで bestmove を返します。丸読みはこの場合 `isready`
+  で読み込み自体が失敗します。
 - **`.ybb` (YaneuraOu のバイナリ定跡)** には対応していません。テキスト `.db` だけです。
 
 ### 定跡ファイルの差し替え
