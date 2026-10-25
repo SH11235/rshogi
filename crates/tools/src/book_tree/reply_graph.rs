@@ -4,10 +4,11 @@
 
 use super::audit::MasterPosition;
 use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::ValueEnum;
+use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 初期局面の key。
 pub(super) const HIRATE_KEY: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -";
@@ -119,32 +120,47 @@ pub(super) fn selected_moves(
         .collect()
 }
 
+/// `threads` 本 (0 = 全コア) の rayon のスレッドプール。
+pub(super) fn thread_pool(threads: usize) -> Result<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .context("スレッドプールを作れません")
+}
+
 /// 元データの局面のハッシュ値。相手の合法手の行き先が元データにあるかを、SFEN を作らずに当たりを付ける。
 pub(super) struct BookHashes(HashSet<u64>);
 
 impl BookHashes {
     pub fn new(positions: &BTreeMap<String, MasterPosition>) -> Result<Self> {
-        positions
-            .keys()
+        let keys: Vec<&String> = positions.keys().collect();
+        // エラーは key の順で最初のものを返す。
+        let hashes: Vec<Result<u64>> = keys
+            .par_iter()
             .map(|key| Ok(position_from_sfen(&format!("{key} 1"))?.key()))
-            .collect::<Result<_>>()
-            .map(Self)
+            .collect();
+        hashes.into_iter().collect::<Result<_>>().map(Self)
     }
 }
 
+/// 1 局面から出る辺 (手、行き先の key、自分の手なら元データの手の番号)。
+type Expansion = (Vec<(String, String, Option<usize>)>, usize);
+
 /// `side` を自分として `start` から辿ったグラフを作る。自分の手番の局面では `select` の手を指し、
 /// 相手の手番の局面では、合法手のうち元データの局面に戻る手を辺にする。`hashes` は `positions` の key から作る。
-///
 /// 相手の合法手は不成も含める (探索用の手の生成は一部の不成を省くので使わない)。
 ///
-/// 計算量: 相手の手番の局面ごとに全合法手 (平均 80 前後) を 1 手ずつ進め、ハッシュ値が元データの局面と
-/// 一致した手だけ SFEN を作って確かめる。
+/// 根からの段ごとに、その段の局面を並べて展開する (rayon のスレッドで)。局面の番号は 1 本の幅優先探索と同じ
+/// 順に振るので、結果はスレッド数によらない。
+///
+/// 計算量: 相手の手番の局面ごとに全合法手 (平均 80 前後) について、局面を進めずに行き先のハッシュ値を求め、
+/// 元データの局面と一致した手だけ局面を進めて SFEN で確かめる。
 pub(super) fn build(
     positions: &BTreeMap<String, MasterPosition>,
     hashes: &BookHashes,
     side: &str,
     start: &str,
-    mut select: impl FnMut(&str, &MasterPosition) -> Vec<usize>,
+    select: impl Fn(&str, &MasterPosition) -> Vec<usize> + Sync,
 ) -> Result<ReplyGraph> {
     let mut graph = ReplyGraph {
         keys: Vec::new(),
@@ -153,7 +169,7 @@ pub(super) fn build(
         illegal_moves: 0,
     };
     let mut index: HashMap<String, usize> = HashMap::new();
-    let mut intern = |graph: &mut ReplyGraph, queue: &mut VecDeque<usize>, key: String| {
+    let mut intern = |graph: &mut ReplyGraph, next: &mut Vec<usize>, key: String| {
         if let Some(&v) = index.get(&key) {
             return v;
         }
@@ -162,52 +178,62 @@ pub(super) fn build(
         graph.keys.push(key.clone());
         graph.edges.push(Vec::new());
         index.insert(key, v);
-        queue.push_back(v);
+        next.push(v);
         v
     };
-    let mut queue = VecDeque::new();
-    intern(&mut graph, &mut queue, start.to_owned());
-    while let Some(v) = queue.pop_front() {
-        let key = graph.keys[v].clone();
+    let mut frontier = Vec::new();
+    intern(&mut graph, &mut frontier, start.to_owned());
+    let expand = |key: &str, own: bool| -> Result<Expansion> {
         let mut pos = position_from_sfen(&format!("{key} 1"))?;
         let mut edges = Vec::new();
-        if graph.own[v] {
-            let Some(position) = positions.get(&key) else {
-                continue;
+        let mut illegal = 0;
+        if own {
+            let Some(position) = positions.get(key) else {
+                return Ok((edges, illegal));
             };
-            for i in select(&key, position) {
+            for i in select(key, position) {
                 let mv = &position.moves[i].mv;
                 let mut child = pos.clone();
                 if apply_usi_move(&mut child, mv).is_err() {
-                    graph.illegal_moves += 1;
+                    illegal += 1;
                     continue;
                 }
-                let to = intern(&mut graph, &mut queue, strip_ply(&child.to_sfen()).to_owned());
-                edges.push(ReplyEdge {
-                    mv: mv.clone(),
-                    to,
-                    book_move: Some(i),
-                });
+                edges.push((mv.clone(), strip_ply(&child.to_sfen()).to_owned(), Some(i)));
             }
         } else {
             let mut list = MoveList::new();
             generate_legal_all(&pos, &mut list);
             for &mv in list.iter() {
+                if !hashes.0.contains(&pos.key_after(mv)) {
+                    continue;
+                }
                 pos.do_move(mv, pos.gives_check(mv));
-                let child =
-                    hashes.0.contains(&pos.key()).then(|| strip_ply(&pos.to_sfen()).to_owned());
+                let child = strip_ply(&pos.to_sfen()).to_owned();
                 pos.undo_move(mv);
-                if let Some(child) = child.filter(|c| positions.contains_key(c)) {
-                    let to = intern(&mut graph, &mut queue, child);
-                    edges.push(ReplyEdge {
-                        mv: mv.to_usi(),
-                        to,
-                        book_move: None,
-                    });
+                if positions.contains_key(&child) {
+                    edges.push((mv.to_usi(), child, None));
                 }
             }
         }
-        graph.edges[v] = edges;
+        Ok((edges, illegal))
+    };
+    while !frontier.is_empty() {
+        let expansions: Vec<Result<Expansion>> =
+            frontier.par_iter().map(|&v| expand(&graph.keys[v], graph.own[v])).collect();
+        let mut next = Vec::new();
+        for (&v, expansion) in frontier.iter().zip(expansions) {
+            let (edges, illegal) = expansion?;
+            graph.illegal_moves += illegal;
+            graph.edges[v] = edges
+                .into_iter()
+                .map(|(mv, child, book_move)| ReplyEdge {
+                    mv,
+                    to: intern(&mut graph, &mut next, child),
+                    book_move,
+                })
+                .collect();
+        }
+        frontier = next;
     }
     Ok(graph)
 }

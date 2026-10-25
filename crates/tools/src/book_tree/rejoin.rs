@@ -5,12 +5,15 @@
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
-use super::reply_graph::{BookHashes, HIRATE_KEY, Preset, SideArg, build, selected_moves};
+use super::reply_graph::{
+    BookHashes, HIRATE_KEY, Preset, SideArg, build, selected_moves, thread_pool,
+};
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -53,6 +56,9 @@ pub(super) struct RejoinArgs {
     /// 一覧に出す重みの下限 (`--opp-freq` を渡したときだけ使う)
     #[arg(long, default_value_t = 0.0)]
     min_weight: f64,
+    /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
 }
 
 /// 一覧の 1 行。値はすべて自分の側から見た値。
@@ -111,7 +117,7 @@ pub(super) struct WeightOptions {
 }
 
 pub(super) fn run(args: RejoinArgs) -> Result<()> {
-    run_from(args, HIRATE_KEY)
+    thread_pool(args.threads)?.install(|| run_from(args, HIRATE_KEY))
 }
 
 fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
@@ -149,25 +155,35 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
     let mut table = String::from(
         "side\tkey\tply\tmove\trole\texpected\tdig\trejoin_move\trejoin\trejoin_main\trejoin_value\tdrop\texpected_black\trejoin_value_black\tweight\tdig_games\trejoin_games\n",
     );
-    for &side in args.side.sides() {
-        let weights = freq
-            .as_ref()
-            .map(|f| reach_weights(&positions, f, side, start, weight_options))
-            .transpose()?;
-        let query = Query {
-            side,
-            start,
-            preset: args.preset,
-            line: args.line,
-        };
-        let (mut rejoins, mut summary) =
-            find_rejoins(&positions, &hashes, &values, query, weights.as_ref(), freq.as_ref())?;
-        if weights.is_some() {
-            let before = rejoins.len();
-            rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.min_weight);
-            summary.below_min_weight = before - rejoins.len();
-        }
-        for r in &rejoins {
+    // 先手と後手は互いの結果を使わないので並べて解く。
+    let results: Vec<(&'static str, Vec<Rejoin>, RejoinSummary)> = args
+        .side
+        .sides()
+        .par_iter()
+        .map(|&side| -> Result<_> {
+            let weights = freq
+                .as_ref()
+                .map(|f| reach_weights(&positions, f, side, start, weight_options))
+                .transpose()?;
+            let query = Query {
+                side,
+                start,
+                preset: args.preset,
+                line: args.line,
+            };
+            let (mut rejoins, mut summary) =
+                find_rejoins(&positions, &hashes, &values, query, weights.as_ref(), freq.as_ref())?;
+            if weights.is_some() {
+                let before = rejoins.len();
+                rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.min_weight);
+                summary.below_min_weight = before - rejoins.len();
+            }
+            Ok((side, rejoins, summary))
+        })
+        .collect::<Result<_>>()?;
+    for (side, rejoins, summary) in &results {
+        let side = *side;
+        for r in rejoins {
             let black = |v: i32| if side == "b" { v } else { -v };
             let opt = |v: Option<u64>| v.map_or_else(String::new, |v| v.to_string());
             writeln!(
@@ -192,7 +208,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
                 opt(r.rejoin_games),
             )?;
         }
-        print!("{}", format_summary(side, &summary, args.line, &rejoins));
+        print!("{}", format_summary(side, summary, args.line, rejoins));
     }
     write_atomic(&args.table, &table)?;
     Ok(())
@@ -431,6 +447,7 @@ mod tests {
             max_ply: 80,
             weight_floor: 1e-5,
             min_weight: 0.0,
+            threads: 0,
         }
     }
 
