@@ -6,7 +6,7 @@
 
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
 use super::reply_graph::{
-    BookHashes, HIRATE_KEY, Preset, SideArg, build, selected_moves, thread_pool,
+    BookIndex, HIRATE_KEY, Preset, SideArg, build, selected_moves, thread_pool,
 };
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
@@ -137,15 +137,9 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         white: args.draw_value_white,
     };
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
-    let evaluated = evaluate(&positions, draws, work.path())?;
-    let values: HashMap<&str, Vec<Option<i32>>> = positions
-        .keys()
-        .zip(&evaluated)
-        .map(|(k, m)| (k.as_str(), m.iter().map(|m| m.as_ref().map(|m| m.value)).collect()))
-        .collect();
-    drop(evaluated);
+    let values = evaluate(&positions, draws, work.path())?;
     let freq = args.opp_freq.as_deref().map(BookDb::read).transpose()?;
-    let hashes = BookHashes::new(&positions)?;
+    let index = BookIndex::new(&positions)?;
     let weight_options = WeightOptions {
         min_games: args.min_games,
         max_ply: args.max_ply,
@@ -172,7 +166,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
                 line: args.line,
             };
             let (mut rejoins, mut summary) =
-                find_rejoins(&positions, &hashes, &values, query, weights.as_ref(), freq.as_ref())?;
+                find_rejoins(&index, &values, query, weights.as_ref(), freq.as_ref())?;
             if weights.is_some() {
                 let before = rejoins.len();
                 rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.min_weight);
@@ -225,9 +219,8 @@ pub(super) struct Query<'a> {
 
 /// 値の下がる再合流を探す。重みがあれば重みの大きい順、無ければ下がり幅の大きい順に並べる。
 pub(super) fn find_rejoins(
-    positions: &BTreeMap<String, MasterPosition>,
-    hashes: &BookHashes,
-    values: &HashMap<&str, Vec<Option<i32>>>,
+    index: &BookIndex,
+    values: &[Vec<Option<i32>>],
     query: Query<'_>,
     weights: Option<&HashMap<String, f64>>,
     freq: Option<&BookDb>,
@@ -238,42 +231,52 @@ pub(super) fn find_rejoins(
         preset,
         line,
     } = query;
-    let graph = build(positions, hashes, side, start, |_, p| selected_moves(p, preset, None))?;
+    let graph = build(index, side, start, |_, p| selected_moves(p, preset, None))?;
     let mut summary = RejoinSummary::default();
     let mut rejoins = Vec::new();
     let mut digs = HashSet::new();
     for u in (0..graph.len()).filter(|&u| graph.own[u]) {
-        let key = &graph.keys[u];
-        let Some(position) = positions.get(key) else {
+        let Some(m) = graph.master(u) else {
             continue;
         };
+        let key = index.key(m);
+        let position = index.position(m);
         summary.own_positions += 1;
-        for edge in &graph.edges[u] {
-            let book_move = edge.book_move.context("内部エラー: 自分の手番に相手の手があります")?;
-            let Some(expected) = values[key.as_str()][book_move] else {
+        for edge in graph.edges(u) {
+            let book_move =
+                edge.book_move().context("内部エラー: 自分の手番に相手の手があります")?;
+            let Some(expected) = values[m][book_move] else {
                 summary.unknown_expected += 1;
                 continue;
             };
-            let p = edge.to;
-            let dig = &graph.keys[p];
+            let p = edge.to();
+            if graph.edges(p).is_empty() {
+                continue;
+            }
+            let dig = graph.key(p)?;
             // 掘る局面で、伝播に入っている相手の手 (値の分かる main・alt)。
-            let in_book: HashSet<&str> = positions.get(dig).map_or_else(HashSet::new, |d| {
-                d.moves
+            let in_book: HashSet<&str> = graph.master(p).map_or_else(HashSet::new, |d| {
+                index
+                    .position(d)
+                    .moves
                     .iter()
-                    .zip(&values[dig.as_str()])
+                    .zip(&values[d])
                     .filter(|(_, v)| v.is_some())
                     .map(|(m, _)| m.mv.as_str())
                     .collect()
             });
-            let counts = freq.and_then(|f| f.entries.get(dig));
-            for reply in &graph.edges[p] {
-                if in_book.contains(reply.mv.as_str()) {
+            let counts = freq.and_then(|f| f.entries.get(&dig));
+            for reply in graph.edges(p) {
+                let rejoin_move = reply.mv.to_usi();
+                if in_book.contains(rejoin_move.as_str()) {
                     continue;
                 }
                 summary.rejoin_moves += 1;
                 digs.insert(p);
-                let rejoin = &graph.keys[reply.to];
-                let Some(rejoin_value) = values[rejoin.as_str()][0] else {
+                let q = graph
+                    .master(reply.to())
+                    .context("内部エラー: 元データに無い局面へ戻る辺です")?;
+                let Some(rejoin_value) = values[q][0] else {
                     summary.unknown_rejoin += 1;
                     continue;
                 };
@@ -282,28 +285,28 @@ pub(super) fn find_rejoins(
                 }
                 rejoins.push(Rejoin {
                     side,
-                    key: key.clone(),
+                    key: key.to_owned(),
                     ply: position.ply.clone(),
-                    mv: edge.mv.clone(),
+                    mv: position.moves[book_move].mv.clone(),
                     role: if book_move == 0 { "main" } else { "alt" },
                     expected,
                     dig: dig.clone(),
-                    rejoin_move: reply.mv.clone(),
-                    rejoin: rejoin.clone(),
-                    rejoin_main: positions[rejoin].moves[0].mv.clone(),
-                    rejoin_value,
-                    weight: weights.map(|w| w.get(key).copied().unwrap_or(0.0)),
-                    dig_games: freq
-                        .map(|_| counts.map_or(0, |e| e.moves.iter().map(|m| m.count).sum())),
                     rejoin_games: freq.map(|_| {
                         counts.map_or(0, |e| {
                             e.moves
                                 .iter()
-                                .filter(|m| m.move_usi.as_deref() == Some(reply.mv.as_str()))
+                                .filter(|m| m.move_usi.as_deref() == Some(rejoin_move.as_str()))
                                 .map(|m| m.count)
                                 .sum()
                         })
                     }),
+                    rejoin_move,
+                    rejoin: index.key(q).to_owned(),
+                    rejoin_main: index.position(q).moves[0].mv.clone(),
+                    rejoin_value,
+                    weight: weights.map(|w| w.get(key).copied().unwrap_or(0.0)),
+                    dig_games: freq
+                        .map(|_| counts.map_or(0, |e| e.moves.iter().map(|m| m.count).sum())),
                 });
             }
         }
@@ -518,18 +521,16 @@ mod tests {
             (&after(&a, &["5a4b"]), "4h3h", "main", ""),
             (&after(ROOT, &["5i6h", "5a4b"]), "6h7h", "main", ""),
         ]);
-        let values: HashMap<&str, Vec<Option<i32>>> = p
-            .iter()
-            .map(|(k, m)| (k.as_str(), m.moves.iter().map(|m| m.eval).collect()))
-            .collect();
-        let hashes = BookHashes::new(&p).unwrap();
+        let values: Vec<Vec<Option<i32>>> =
+            p.values().map(|m| m.moves.iter().map(|m| m.eval).collect()).collect();
+        let index = BookIndex::new(&p).unwrap();
         let query = Query {
             side: "b",
             start: ROOT,
             preset: Preset::Random,
             line: 1,
         };
-        let (found, summary) = find_rejoins(&p, &hashes, &values, query, None, None).unwrap();
+        let (found, summary) = find_rejoins(&index, &values, query, None, None).unwrap();
         assert!(found.is_empty());
         // 値の無い自分の手は根の 5i4h と、戻った先の 2 局面の main。5i4h の先は値が無いので相手の手を見ず、
         // 5i6h の後の相手の 5a4b で戻る局面は main の値が無い。
@@ -547,23 +548,19 @@ mod tests {
             (ROOT, "5i6h", "alt", "100"),
             (&after(&a, &["5a4b"]), "6h7h", "main", "0"),
         ]);
-        let values: HashMap<&str, Vec<Option<i32>>> = p
-            .iter()
-            .map(|(k, m)| (k.as_str(), m.moves.iter().map(|m| m.eval).collect()))
-            .collect();
-        let hashes = BookHashes::new(&p).unwrap();
+        let values: Vec<Vec<Option<i32>>> =
+            p.values().map(|m| m.moves.iter().map(|m| m.eval).collect()).collect();
+        let index = BookIndex::new(&p).unwrap();
         let query = |preset| Query {
             side: "b",
             start: ROOT,
             preset,
             line: 40,
         };
-        let (found, _) =
-            find_rejoins(&p, &hashes, &values, query(Preset::Random), None, None).unwrap();
+        let (found, _) = find_rejoins(&index, &values, query(Preset::Random), None, None).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].mv.as_str(), found[0].role, found[0].drop()), ("5i6h", "alt", 100));
-        let (found, _) =
-            find_rejoins(&p, &hashes, &values, query(Preset::Default), None, None).unwrap();
+        let (found, _) = find_rejoins(&index, &values, query(Preset::Default), None, None).unwrap();
         assert!(found.is_empty());
     }
 }
