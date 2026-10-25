@@ -4,7 +4,7 @@
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
 use super::register::{format_master, parse_master, validate};
 use super::reply_graph::{
-    BookHashes, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
+    BookIndex, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
     thread_pool,
 };
 use crate::book_backprop::DrawValues;
@@ -106,15 +106,15 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
         white: args.draw_value_white,
     };
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
-    let values = move_values(positions, draws, work.path())?;
-    let hashes = BookHashes::new(positions)?;
+    let values = evaluate(positions, draws, work.path())?;
+    let index = BookIndex::new(positions)?;
 
     // 先手と後手のグラフは互いの手に左右されない (相手の手番では合法手を全部見る) ので並べて解く。
     let results: Vec<SideResult> = args
         .side
         .sides()
         .par_iter()
-        .map(|&side| solve_side(positions, &hashes, &values, &curated, (side, start)))
+        .map(|&side| solve_side(&index, &values, &curated, (side, start)))
         .collect::<Result<_>>()?;
 
     let mut table =
@@ -123,9 +123,10 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
         let plan = &r.plan;
         for (key, i) in &plan.removed {
             let position = &positions[key];
+            let master = index.find(key).context("内部エラー: 元データに無い局面です")?;
             let m = &position.moves[*i];
             let role = if *i == 0 { "main" } else { "alt" };
-            let value = |i: usize| values[key][i].map_or_else(String::new, |v| v.to_string());
+            let value = |i: usize| values[master][i].map_or_else(String::new, |v| v.to_string());
             let (new_main, new_main_value) = match plan.new_main.get(key) {
                 Some(&j) if *i == 0 => (position.moves[j].mv.clone(), value(j)),
                 _ => (String::new(), String::new()),
@@ -155,45 +156,31 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     Ok(())
 }
 
-/// 手ごとの伝播後の値 (手番の側から)。値の分からない手は `None`。
-fn move_values(
-    positions: &BTreeMap<String, MasterPosition>,
-    draws: DrawValues,
-    work: &std::path::Path,
-) -> Result<HashMap<String, Vec<Option<i32>>>> {
-    let evaluated = evaluate(positions, draws, work)?;
-    Ok(positions
-        .keys()
-        .zip(evaluated)
-        .map(|(key, moves)| (key.clone(), moves.into_iter().map(|m| m.map(|m| m.value)).collect()))
-        .collect())
-}
-
 /// 1 つの側を解く。グラフは外す前の 1 回と、外した後の確かめの 1 回だけ作る。
 fn solve_side(
-    positions: &BTreeMap<String, MasterPosition>,
-    hashes: &BookHashes,
-    values: &HashMap<String, Vec<Option<i32>>>,
+    index: &BookIndex,
+    values: &[Vec<Option<i32>>],
     curated: &HashSet<(String, String)>,
     (side, start): (&'static str, &str),
 ) -> Result<SideResult> {
-    let graph =
-        build(positions, hashes, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
+    let graph = build(index, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
     let before = count_on(&graph, |_| 0);
     let mut plan = plan_side(&graph, values)?;
-    plan.new_main = new_mains(&graph, positions, values, &plan.removed, curated)?;
+    plan.new_main = new_mains(&graph, index, values, &plan.removed, curated)?;
     // 外した手を除き、main を替えた元データで作り直して数える (外す手の選び方とは別の確かめ)。
-    let after_graph = build(positions, hashes, side, start, |key, p| {
-        let mut moves: Vec<usize> = (0..p.moves.len())
-            .filter(|&i| plan.removed.binary_search(&(key.to_owned(), i)).is_err())
-            .collect();
+    let removed_at = |key: &str, i: usize| {
+        plan.removed.binary_search_by(|(k, j)| (k.as_str(), *j).cmp(&(key, i))).is_ok()
+    };
+    let after_graph = build(index, side, start, |m, p| {
+        let key = index.key(m);
+        let mut moves: Vec<usize> = (0..p.moves.len()).filter(|&i| !removed_at(key, i)).collect();
         if let Some(&j) = plan.new_main.get(key) {
             moves.retain(|&i| i != j);
             moves.insert(0, j);
         }
         moves
     })?;
-    let after = count_on(&after_graph, |key| plan.new_main.get(key).copied().unwrap_or(0));
+    let after = count_on(&after_graph, |m| plan.new_main.get(index.key(m)).copied().unwrap_or(0));
     Ok(SideResult {
         side,
         before,
@@ -202,11 +189,12 @@ fn solve_side(
     })
 }
 
-/// random のグラフで、default (自分の手は main だけ) と random の循環を数える。`main` は局面の key から
-/// main の手の番号を返す (書き出しと同じく、main が非合法ならその局面に default の辺は無い)。
-fn count_on(graph: &ReplyGraph, main: impl Fn(&str) -> usize) -> [CycleCount; 2] {
+/// random のグラフで、default (自分の手は main だけ) と random の循環を数える。`main` は元データの局面の番号
+/// から main の手の番号を返す (書き出しと同じく、main が非合法ならその局面に default の辺は無い)。
+fn count_on(graph: &ReplyGraph, main: impl Fn(usize) -> usize) -> [CycleCount; 2] {
     let default = |v: usize, i: usize| {
-        !graph.own[v] || graph.edges[v][i].book_move == Some(main(&graph.keys[v]))
+        !graph.own[v]
+            || graph.master(v).is_some_and(|m| graph.edges(v)[i].book_move() == Some(main(m)))
     };
     [
         CycleCount::of(&graph.cycles(default)),
@@ -245,23 +233,15 @@ const EXACT_SCORING_LIMIT: usize = 20_000_000;
 /// 中だけを分解し直す。厳密な採点は元の循環ごとに累計で上限を設ける。深さ優先探索は、循環を閉じる辺ごとに
 /// 探索の経路をなぞるので、長い経路に循環を閉じる辺が多いと循環の大きさの 2 乗程度になり得る。3. は 1 手ごとに
 /// その手の循環の中と、新しく根から届く局面を辿る (戻せた手で届いた局面は以後辿り直さない)。
-pub(super) fn plan_side(
-    graph: &ReplyGraph,
-    values: &HashMap<String, Vec<Option<i32>>>,
-) -> Result<SidePlan> {
+pub(super) fn plan_side(graph: &ReplyGraph, values: &[Vec<Option<i32>>]) -> Result<SidePlan> {
     let value = |v: usize, i: usize| -> Option<i32> {
-        let book_move = graph.edges[v][i].book_move?;
-        values.get(&graph.keys[v]).and_then(|m| m[book_move])
+        let book_move = graph.edges(v)[i].book_move()?;
+        values[graph.master(v)?][book_move]
     };
-    let is_main = |v: usize, i: usize| graph.edges[v][i].book_move == Some(0);
-    // 外したい順 (小さいほど先に外す)。
+    let is_main = |v: usize, i: usize| graph.edges(v)[i].book_move() == Some(0);
+    // 外したい順 (小さいほど先に外す)。局面は元データの番号 (key の順と同じ)、手は元データの手の文字列で比べる。
     let removal_order = |(v, i): (usize, usize)| {
-        (
-            is_main(v, i),
-            value(v, i),
-            graph.keys[v].as_str(),
-            graph.edges[v][i].mv.as_str(),
-        )
+        (is_main(v, i), value(v, i), graph.master(v), graph.own_move_text(v, i))
     };
     let original: HashMap<usize, usize> = graph
         .cycles(|_, _| true)
@@ -295,18 +275,14 @@ pub(super) fn plan_side(
 
 /// 辺を使うかどうか (局面ごとに辺の順)。循環ごとに並べて解くとき、各循環は自分の局面の辺だけを読み書きする
 /// (循環どうしは局面を共有しない) ので、読み書きの順は結果に影響しない。
-type SharedActive = [Vec<AtomicBool>];
+type SharedActive = [AtomicBool];
 
 /// A: 循環ごとに外す手。循環どうしは互いに影響しないので並べて解く。
 fn cycle_removals<K: Ord>(
     graph: &ReplyGraph,
     removal_order: &(impl Fn((usize, usize)) -> K + Sync),
 ) -> Vec<(usize, usize)> {
-    let active: Vec<Vec<AtomicBool>> = graph
-        .edges
-        .iter()
-        .map(|e| e.iter().map(|_| AtomicBool::new(true)).collect())
-        .collect();
+    let active: Vec<AtomicBool> = (0..graph.edge_count()).map(|_| AtomicBool::new(true)).collect();
     let parts: Vec<Vec<(usize, usize)>> = graph
         .cycles(|_, _| true)
         .par_iter()
@@ -330,7 +306,7 @@ fn component_removals<K: Ord>(
         if candidates.is_empty() {
             continue;
         }
-        let inner_edges: usize = component.iter().map(|&v| graph.edges[v].len()).sum();
+        let inner_edges: usize = component.iter().map(|&v| graph.edges(v).len()).sum();
         let cost = candidates.len().saturating_mul(inner_edges);
         let mut chosen = if spent.saturating_add(cost) <= EXACT_SCORING_LIMIT {
             spent += cost;
@@ -348,7 +324,7 @@ fn component_removals<K: Ord>(
             chosen.push(*candidates.iter().min_by_key(|&&e| removal_order(e)).expect("候補"));
         }
         for (v, i) in chosen {
-            set(active, v, i, false);
+            set(graph, active, v, i, false);
             removed.push((v, i));
         }
         queue.extend(sub_cycles(graph, active, &component));
@@ -356,17 +332,17 @@ fn component_removals<K: Ord>(
     removed
 }
 
-fn is_active(active: &SharedActive, v: usize, i: usize) -> bool {
-    active[v][i].load(Ordering::Relaxed)
+fn is_active(graph: &ReplyGraph, active: &SharedActive, v: usize, i: usize) -> bool {
+    active[graph.edge_id(v, i)].load(Ordering::Relaxed)
 }
 
-fn set(active: &SharedActive, v: usize, i: usize, value: bool) {
-    active[v][i].store(value, Ordering::Relaxed);
+fn set(graph: &ReplyGraph, active: &SharedActive, v: usize, i: usize, value: bool) {
+    active[graph.edge_id(v, i)].store(value, Ordering::Relaxed);
 }
 
 /// 局面に残っている (使う) 自分の手の数。
-fn active_count(active: &SharedActive, v: usize) -> usize {
-    active[v].iter().filter(|a| a.load(Ordering::Relaxed)).count()
+fn active_count(graph: &ReplyGraph, active: &SharedActive, v: usize) -> usize {
+    (0..graph.edges(v).len()).filter(|&i| is_active(graph, active, v, i)).count()
 }
 
 /// B: 定跡を抜けるまでの段数で外す手。
@@ -377,12 +353,12 @@ fn rank_removals(graph: &ReplyGraph, original: &HashMap<usize, usize>) -> Vec<(u
         let Some(own_rank) = rank[v] else {
             continue;
         };
-        for (i, e) in graph.edges[v].iter().enumerate() {
-            let cycle_risk = match rank[e.to] {
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            let cycle_risk = match rank[e.to()] {
                 None => true,
                 Some(r) => {
                     r >= own_rank
-                        && original.get(&v).is_some_and(|c| original.get(&e.to) == Some(c))
+                        && original.get(&v).is_some_and(|c| original.get(&e.to()) == Some(c))
                 }
             };
             if cycle_risk {
@@ -401,9 +377,9 @@ fn finish_plan(
     value: &impl Fn(usize, usize) -> Option<i32>,
     is_main: &impl Fn(usize, usize) -> bool,
 ) -> Result<SidePlan> {
-    let mut active: Vec<Vec<bool>> = graph.edges.iter().map(|e| vec![true; e.len()]).collect();
+    let mut active = vec![true; graph.edge_count()];
     for &(v, i) in &removed {
-        active[v][i] = false;
+        active[graph.edge_id(v, i)] = false;
     }
     // 戻したい順 (main、値の高い手、値の分からない手は後、key 順、手の順)。
     removed.sort_by(|&(av, ai), &(bv, bi)| {
@@ -412,16 +388,16 @@ fn finish_plan(
                 !is_main(v, i),
                 value(v, i).is_none(),
                 std::cmp::Reverse(value(v, i)),
-                graph.keys[v].as_str(),
-                graph.edges[v][i].mv.as_str(),
+                graph.master(v),
+                graph.own_move_text(v, i),
             )
         };
         order(av, ai).cmp(&order(bv, bi))
     });
     let mut reached = reachable(graph, &active);
     removed.retain(|&(v, i)| {
-        active[v][i] = true;
-        let to = graph.edges[v][i].to;
+        active[graph.edge_id(v, i)] = true;
+        let to = graph.edges(v)[i].to();
         // 根から届かない局面の手は、戻しても届く範囲の循環を作らない (後で届くようになる手の側で調べる)。
         let added = if !reached[v] {
             Some(Vec::new())
@@ -438,7 +414,7 @@ fn finish_plan(
                 false
             }
             None => {
-                active[v][i] = false;
+                active[graph.edge_id(v, i)] = false;
                 true
             }
         }
@@ -446,15 +422,16 @@ fn finish_plan(
 
     let mut plan = SidePlan::default();
     for &(v, i) in &removed {
-        let book_move = graph.edges[v][i].book_move.context("内部エラー: 相手の手を外しました")?;
-        plan.removed.push((graph.keys[v].clone(), book_move));
+        let book_move =
+            graph.edges(v)[i].book_move().context("内部エラー: 相手の手を外しました")?;
+        plan.removed.push((graph.key(v)?, book_move));
     }
     plan.removed.sort();
     plan.unbreakable = graph
-        .cycles(|v, i| active[v][i])
+        .cycles(|v, i| active[graph.edge_id(v, i)])
         .into_iter()
-        .map(|c| c.into_iter().map(|v| graph.keys[v].clone()).collect())
-        .collect();
+        .map(|c| c.into_iter().map(|v| graph.key(v)).collect::<Result<_>>())
+        .collect::<Result<_>>()?;
     Ok(plan)
 }
 
@@ -463,21 +440,25 @@ fn finish_plan(
 /// (値の分からない手は後)、元データの順の先を選ぶ。
 pub(super) fn new_mains(
     graph: &ReplyGraph,
-    positions: &BTreeMap<String, MasterPosition>,
-    values: &HashMap<String, Vec<Option<i32>>>,
+    index: &BookIndex,
+    values: &[Vec<Option<i32>>],
     removed: &[(String, usize)],
     curated: &HashSet<(String, String)>,
 ) -> Result<BTreeMap<String, usize>> {
-    let node: HashMap<&str, usize> =
-        graph.keys.iter().enumerate().map(|(v, k)| (k.as_str(), v)).collect();
+    // 元データの番号 → グラフの頂点 (自分の手番の局面)。
+    let node: HashMap<usize, usize> = (0..graph.len())
+        .filter(|&v| graph.own[v])
+        .filter_map(|v| Some((graph.master(v)?, v)))
+        .collect();
     let mut result = BTreeMap::new();
     for (key, _) in removed.iter().filter(|(_, i)| *i == 0) {
-        let position = &positions[key];
+        let master = index.find(key).context("内部エラー: 元データに無い局面です")?;
+        let position = index.position(master);
         let gone: HashSet<usize> =
             removed.iter().filter(|(k, _)| k == key).map(|&(_, i)| i).collect();
         let legal: HashSet<usize> = node
-            .get(key.as_str())
-            .map(|&v| graph.edges[v].iter().filter_map(|e| e.book_move).collect())
+            .get(&master)
+            .map(|&v| graph.edges(v).iter().filter_map(|e| e.book_move()).collect())
             .unwrap_or_default();
         let remaining: Vec<usize> =
             (0..position.moves.len()).filter(|i| !gone.contains(i)).collect();
@@ -488,7 +469,7 @@ pub(super) fn new_mains(
         } else {
             remaining
         };
-        let value = |i: usize| values.get(key).and_then(|v| v[i]);
+        let value = |i: usize| values[master][i];
         let best = pool
             .into_iter()
             .max_by_key(|&i| {
@@ -503,13 +484,25 @@ pub(super) fn new_mains(
 /// 定跡を抜けるまでの段数 (抜けられない局面は `None`)。辺の無い局面が 0。自分の手番の局面は行き先の
 /// 段数の最小 + 1、相手の手番の局面は全部の行き先が抜けられるとき最大 + 1。
 fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
-    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); graph.len()];
-    for (v, edges) in graph.edges.iter().enumerate() {
-        for e in edges {
-            predecessors[e.to].push(v);
+    // 逆向きの辺を 1 本の配列に詰める (頂点 `w` の前の局面は `predecessors[start[w]..start[w + 1]]`)。
+    let mut start = vec![0usize; graph.len() + 1];
+    for v in 0..graph.len() {
+        for e in graph.edges(v) {
+            start[e.to() + 1] += 1;
         }
     }
-    let mut remaining: Vec<usize> = graph.edges.iter().map(Vec::len).collect();
+    for w in 0..graph.len() {
+        start[w + 1] += start[w];
+    }
+    let mut fill = start.clone();
+    let mut predecessors = vec![0u32; graph.edge_count()];
+    for v in 0..graph.len() {
+        for e in graph.edges(v) {
+            predecessors[fill[e.to()]] = v as u32;
+            fill[e.to()] += 1;
+        }
+    }
+    let mut remaining: Vec<usize> = (0..graph.len()).map(|v| graph.edges(v).len()).collect();
     let mut rank: Vec<Option<u32>> = vec![None; graph.len()];
     let mut queue: VecDeque<usize> = (0..graph.len()).filter(|&v| remaining[v] == 0).collect();
     for &v in &queue {
@@ -518,7 +511,8 @@ fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
     // 段数の小さい順に取り出すので、自分の手番は最初の行き先で最小、相手の手番は最後の行き先で最大になる。
     while let Some(v) = queue.pop_front() {
         let next = rank[v].expect("取り出す局面は段数がある") + 1;
-        for &p in &predecessors[v] {
+        for &p in &predecessors[start[v]..start[v + 1]] {
+            let p = p as usize;
             if rank[p].is_some() {
                 continue;
             }
@@ -539,9 +533,9 @@ fn sub_cycles(graph: &ReplyGraph, active: &SharedActive, component: &[usize]) ->
     let adjacency: Vec<Vec<u32>> = component
         .iter()
         .map(|&v| {
-            (0..graph.edges[v].len())
-                .filter(|&i| is_active(active, v, i))
-                .filter_map(|i| local.get(&graph.edges[v][i].to).copied())
+            (0..graph.edges(v).len())
+                .filter(|&i| is_active(graph, active, v, i))
+                .filter_map(|i| local.get(&graph.edges(v)[i].to()).copied())
                 .collect()
         })
         .collect();
@@ -560,9 +554,11 @@ fn removable(
     let inside: HashSet<usize> = component.iter().copied().collect();
     component
         .iter()
-        .filter(|&&v| graph.own[v] && active_count(active, v) >= 2)
-        .flat_map(|&v| (0..graph.edges[v].len()).map(move |i| (v, i)))
-        .filter(|&(v, i)| is_active(active, v, i) && inside.contains(&graph.edges[v][i].to))
+        .filter(|&&v| graph.own[v] && active_count(graph, active, v) >= 2)
+        .flat_map(|&v| (0..graph.edges(v).len()).map(move |i| (v, i)))
+        .filter(|&(v, i)| {
+            is_active(graph, active, v, i) && inside.contains(&graph.edges(v)[i].to())
+        })
         .collect()
 }
 
@@ -576,17 +572,18 @@ fn choose_removal<K: Ord>(
 ) -> (usize, usize) {
     let local: HashMap<usize, u32> =
         component.iter().enumerate().map(|(i, &v)| (v, i as u32)).collect();
-    let inner =
-        |v: usize, i: usize| is_active(active, v, i) && local.contains_key(&graph.edges[v][i].to);
+    let inner = |v: usize, i: usize| {
+        is_active(graph, active, v, i) && local.contains_key(&graph.edges(v)[i].to())
+    };
     *candidates
         .iter()
         .min_by_key(|&&(v, i)| {
             let adjacency: Vec<Vec<u32>> = component
                 .iter()
                 .map(|&u| {
-                    (0..graph.edges[u].len())
+                    (0..graph.edges(u).len())
                         .filter(|&j| inner(u, j) && (u, j) != (v, i))
-                        .map(|j| local[&graph.edges[u][j].to])
+                        .map(|j| local[&graph.edges(u)[j].to()])
                         .collect()
                 })
                 .collect();
@@ -616,8 +613,10 @@ fn dfs_removals<K: Ord>(
         }
         let mut stack: Vec<Frame> = Vec::new();
         let order = |v: usize, active: &SharedActive| -> Vec<usize> {
-            let mut edges: Vec<usize> = (0..graph.edges[v].len())
-                .filter(|&i| is_active(active, v, i) && local.contains_key(&graph.edges[v][i].to))
+            let mut edges: Vec<usize> = (0..graph.edges(v).len())
+                .filter(|&i| {
+                    is_active(graph, active, v, i) && local.contains_key(&graph.edges(v)[i].to())
+                })
                 .collect();
             edges.sort_by_key(|&i| std::cmp::Reverse(removal_order((v, i))));
             edges
@@ -632,10 +631,10 @@ fn dfs_removals<K: Ord>(
                 continue;
             };
             frame.2 += 1;
-            if !is_active(active, v, i) {
+            if !is_active(graph, active, v, i) {
                 continue;
             }
-            let w = graph.edges[v][i].to;
+            let w = graph.edges(v)[i].to();
             match state[local[&w]] {
                 UNSEEN => {
                     state[local[&w]] = stack.len();
@@ -647,11 +646,13 @@ fn dfs_removals<K: Ord>(
                     let cycle = stack[depth + 1..].iter().filter_map(|f| f.3).chain([(v, i)]);
                     let target = cycle
                         .filter(|&(u, j)| {
-                            graph.own[u] && is_active(active, u, j) && active_count(active, u) >= 2
+                            graph.own[u]
+                                && is_active(graph, active, u, j)
+                                && active_count(graph, active, u) >= 2
                         })
                         .min_by_key(|&e| removal_order(e));
                     if let Some((u, j)) = target {
-                        set(active, u, j, false);
+                        set(graph, active, u, j, false);
                         removed.push((u, j));
                     }
                 }
@@ -660,7 +661,7 @@ fn dfs_removals<K: Ord>(
     }
     // 呼び出し側で外したことにするので、ここでは元に戻して返す。
     for &(u, j) in &removed {
-        set(active, u, j, true);
+        set(graph, active, u, j, true);
     }
     removed
 }
@@ -669,15 +670,15 @@ fn dfs_removals<K: Ord>(
 type Frame = (usize, Vec<usize>, usize, Option<(usize, usize)>);
 
 /// 根から今の辺で届く局面。
-fn reachable(graph: &ReplyGraph, active: &[Vec<bool>]) -> Vec<bool> {
+fn reachable(graph: &ReplyGraph, active: &[bool]) -> Vec<bool> {
     let mut reached = vec![false; graph.len()];
     reached[0] = true;
     let mut stack = vec![0];
     while let Some(v) = stack.pop() {
-        for (i, e) in graph.edges[v].iter().enumerate() {
-            if active[v][i] && !reached[e.to] {
-                reached[e.to] = true;
-                stack.push(e.to);
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            if active[graph.edge_id(v, i)] && !reached[e.to()] {
+                reached[e.to()] = true;
+                stack.push(e.to());
             }
         }
     }
@@ -687,7 +688,7 @@ fn reachable(graph: &ReplyGraph, active: &[Vec<bool>]) -> Vec<bool> {
 /// `from` を通って新しく根から届く局面。その中に循環があれば `None`。
 fn newly_reached(
     graph: &ReplyGraph,
-    active: &[Vec<bool>],
+    active: &[bool],
     reached: &[bool],
     from: usize,
 ) -> Option<Vec<usize>> {
@@ -699,19 +700,19 @@ fn newly_reached(
     let mut next = 0;
     while let Some(&v) = nodes.get(next) {
         next += 1;
-        for (i, e) in graph.edges[v].iter().enumerate() {
-            if active[v][i] && !reached[e.to] && !local.contains_key(&e.to) {
-                local.insert(e.to, nodes.len() as u32);
-                nodes.push(e.to);
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            if active[graph.edge_id(v, i)] && !reached[e.to()] && !local.contains_key(&e.to()) {
+                local.insert(e.to(), nodes.len() as u32);
+                nodes.push(e.to());
             }
         }
     }
     let adjacency: Vec<Vec<u32>> = nodes
         .iter()
         .map(|&v| {
-            (0..graph.edges[v].len())
-                .filter(|&i| active[v][i])
-                .filter_map(|i| local.get(&graph.edges[v][i].to).copied())
+            (0..graph.edges(v).len())
+                .filter(|&i| active[graph.edge_id(v, i)])
+                .filter_map(|i| local.get(&graph.edges(v)[i].to()).copied())
                 .collect()
         })
         .collect();
@@ -721,7 +722,7 @@ fn newly_reached(
 /// `from` から `to` に、今の辺で行けるか。どちらも元のグラフの同じ循環の中の局面だけを通る。
 fn reaches(
     graph: &ReplyGraph,
-    active: &[Vec<bool>],
+    active: &[bool],
     original: &HashMap<usize, usize>,
     from: usize,
     to: usize,
@@ -738,9 +739,12 @@ fn reaches(
         if v == to {
             return true;
         }
-        for (i, e) in graph.edges[v].iter().enumerate() {
-            if active[v][i] && original.get(&e.to) == Some(&component) && seen.insert(e.to) {
-                stack.push(e.to);
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            if active[graph.edge_id(v, i)]
+                && original.get(&e.to()) == Some(&component)
+                && seen.insert(e.to())
+            {
+                stack.push(e.to());
             }
         }
     }
@@ -855,17 +859,23 @@ mod tests {
         after
     }
 
-    fn graph_of(p: &BTreeMap<String, MasterPosition>, start: &str) -> ReplyGraph {
-        let hashes = BookHashes::new(p).unwrap();
-        build(p, &hashes, "b", start, |_, m| selected_moves(m, Preset::Random, None)).unwrap()
+    fn graph_of<'a>(index: &'a BookIndex<'a>, start: &str) -> ReplyGraph<'a> {
+        build(index, "b", start, |_, m| selected_moves(m, Preset::Random, None)).unwrap()
+    }
+
+    /// default と random の循環の数。
+    fn cycles_of(p: &BTreeMap<String, MasterPosition>, start: &str) -> [CycleCount; 2] {
+        let index = BookIndex::new(p).unwrap();
+        count_on(&graph_of(&index, start), |_| 0)
     }
 
     fn solve_from(p: &BTreeMap<String, MasterPosition>, start: &str) -> SidePlan {
         let work = tempfile::tempdir().unwrap();
-        let values = move_values(p, DrawValues::default(), work.path()).unwrap();
-        let graph = graph_of(p, start);
+        let values = evaluate(p, DrawValues::default(), work.path()).unwrap();
+        let index = BookIndex::new(p).unwrap();
+        let graph = graph_of(&index, start);
         let mut plan = plan_side(&graph, &values).unwrap();
-        plan.new_main = new_mains(&graph, p, &values, &plan.removed, &HashSet::new()).unwrap();
+        plan.new_main = new_mains(&graph, &index, &values, &plan.removed, &HashSet::new()).unwrap();
         plan
     }
 
@@ -897,13 +907,13 @@ mod tests {
         let after_positions = apply_plans(&p, [&plan].into_iter());
         assert_eq!(after_positions[&c].moves[0].mv, "4h4i");
         assert_eq!(
-            count_on(&graph_of(&p, ROOT), |_| 0),
+            cycles_of(&p, ROOT),
             [CycleCount {
                 components: 1,
                 positions: 4
             }; 2]
         );
-        assert_eq!(count_on(&graph_of(&after_positions, ROOT), |_| 0), [CycleCount::default(); 2]);
+        assert_eq!(cycles_of(&after_positions, ROOT), [CycleCount::default(); 2]);
     }
 
     #[test]
@@ -944,7 +954,7 @@ mod tests {
             (z.as_str(), "5i4h", "main", "0"),
         ];
         let (p, plan) = solve(&rows);
-        assert_eq!(count_on(&graph_of(&p, ROOT), |_| 0)[1].components, 1);
+        assert_eq!(cycles_of(&p, ROOT)[1].components, 1);
         assert_eq!(plan.removed, [(e.clone(), 0)]);
         assert_eq!(plan.new_main, BTreeMap::from([(e.clone(), 1)]));
         assert!(plan.unbreakable.is_empty());
@@ -973,7 +983,7 @@ mod tests {
             (root, "9i8i", "alt", "0"),
             (b.as_str(), "9h9i", "main", "0"),
         ]);
-        assert_eq!(count_on(&graph_of(&p, root), |_| 0)[1].components, 1);
+        assert_eq!(cycles_of(&p, root)[1].components, 1);
         let plan = solve_from(&p, root);
         assert_eq!(plan.removed, [(root.to_owned(), 0)]);
         assert_eq!(plan.new_main, BTreeMap::from([(root.to_owned(), 1)]));
@@ -1147,19 +1157,20 @@ mod tests {
             let plan = solve_from(&p, &root);
             let after_positions = apply_plans(&p, [&plan].into_iter());
             assert!(after_positions.values().all(|m| !m.moves.is_empty()), "seed {seed}");
-            let after = count_on(&graph_of(&after_positions, &root), |_| 0);
+            let after = cycles_of(&after_positions, &root);
             assert_eq!(after[1].components, plan.unbreakable.len(), "seed {seed}");
-            let graph = graph_of(&p, &root);
+            let index = BookIndex::new(&p).unwrap();
+            let graph = graph_of(&index, &root);
             let multi: Vec<usize> = (0..graph.len())
-                .filter(|&v| graph.own[v] && graph.edges[v].len() >= 2)
+                .filter(|&v| graph.own[v] && graph.edges(v).len() >= 2)
                 .collect();
             // 2 手以上ある局面で残す 1 手の組を全部試す (各局面の手の番号を桁にした数え上げ)。
-            let combinations: usize = multi.iter().map(|&v| graph.edges[v].len()).product();
+            let combinations: usize = multi.iter().map(|&v| graph.edges(v).len()).product();
             let solvable = (0..combinations).any(|mut n| {
                 let keep: HashMap<usize, usize> = multi
                     .iter()
                     .map(|&v| {
-                        let k = graph.edges[v].len();
+                        let k = graph.edges(v).len();
                         let choice = n % k;
                         n /= k;
                         (v, choice)

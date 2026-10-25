@@ -476,18 +476,34 @@ fn audited_moves(
         .collect()
 }
 
-/// 元データを `audit` と同じ規則で伝播し、手ごとの伝播後の値を返す。`[i][j]` は元データの i 番目 (key 順) の
-/// 局面の j 番目の手 (main が先頭)。
+/// 元データを `audit` と同じ規則で伝播し、手ごとの伝播後の値 (手番の側から) を返す。`[i][j]` は元データの
+/// i 番目 (key 順) の局面の j 番目の手 (main が先頭) で、値の分からない手は `None`。
 pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
     work: &Path,
-) -> Result<Vec<Vec<Option<AuditedMove>>>> {
+) -> Result<Vec<Vec<Option<i32>>>> {
     let (graph, known, _, _) = propagate(positions, draws, work)?;
     positions
         .iter()
         .zip(&known)
-        .map(|((key, position), known)| audited_moves(&graph, key, position, known))
+        .map(|((key, position), known)| {
+            let Some(node) = graph.find(key) else {
+                return Ok(vec![None; position.moves.len()]);
+            };
+            // グラフには値の分かる手だけが元データの順で入っている。
+            let mut values = graph.moves(node);
+            known
+                .iter()
+                .map(|&k| {
+                    if !k {
+                        return Ok(None);
+                    }
+                    let value = values.next().context("内部エラー: 手の数が合いません")?;
+                    Ok(Some(value.new))
+                })
+                .collect()
+        })
         .collect()
 }
 
