@@ -1,5 +1,6 @@
 //! 条件付き台帳を共有する、独立した定跡の木の生成。
 
+mod audit;
 mod file_lock;
 mod journal;
 mod model;
@@ -100,6 +101,26 @@ struct ReplayArgs {
     /// serve が表示する読み条件の指紋。省略時は台帳内の唯一の条件
     #[arg(long)]
     fingerprint: Option<String>,
+}
+
+/// 定跡の元データの表を扱う入口。
+#[derive(Args, Debug)]
+pub struct MasterArgs {
+    #[command(subcommand)]
+    command: MasterCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum MasterCommand {
+    /// 読みの値を book_backprop で伝播し、main が伝播後の 1 位から負ける局面を点検する
+    Audit(audit::AuditArgs),
+}
+
+/// CLI の指定に従い元データを処理する。
+pub fn run_master(args: MasterArgs) -> Result<()> {
+    match args.command {
+        MasterCommand::Audit(args) => audit::run(args),
+    }
 }
 
 /// CLI の指定に従い木を処理する。
