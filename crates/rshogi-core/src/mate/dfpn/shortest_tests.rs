@@ -383,6 +383,13 @@ fn shortest_mode_stops_at_the_node_limit() {
     let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
     let mut pos = position(sfen);
     let before = pos.to_sfen();
+    let stop = AtomicBool::new(false);
+    let limits = MateLimits {
+        nodes: 20_000,
+        time_ms: 0,
+    };
+    let judged = DfpnSolver::with_mode(16, MateMode::Power).solve(&mut pos, &limits, &stop, |_| {});
+    assert!(matches!(judged, MateResult::Mate(_)), "判定は上限内に終わる: {judged:?}");
     assert_eq!(solve_shortest(&mut pos, MateMode::Power, 20_000), MateResult::Unknown);
     assert_eq!(pos.to_sfen(), before);
 }
