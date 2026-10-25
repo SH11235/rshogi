@@ -16,6 +16,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_backprop` と `book_mine` の局面索引・key 検査に、評価用の初期化を省く読み取り専用局面を使う。
+  手を指す経路は完全な `Position` を維持し、出力は変わらない。
+
 - `book_mine master audit` / `rejoin` / `cycles` / `borrow` の元データの伝播では、一時定跡を経ず
   メモリ内でグラフを1回作り、値の分からない手を配列内で除去して伝播する。出力は変わらない。
 
@@ -42,6 +45,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   (丸読みの局面数。on the fly では `None`) に置き換えた。`Book` は `Clone` でなくなった。
 
 ### rshogi-core / ライブラリ利用者の移行
+
+- `StaticPosition` を追加。SFEN / 盤面と手駒から、利きの全升集計・NNUE の駒表・駒割を作らず
+  読み取り専用の局面を構築できる。指し手の実行や評価には `into_position()` で完全な局面へ変換する。
 
 - `Position::key_after` を公開した。合法手を指した後の `Position::key` を、局面を進めずに求める。
 - `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく

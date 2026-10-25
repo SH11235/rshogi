@@ -129,3 +129,5 @@ cargo run -p tools --release --bin book_backprop -- \
 | Top changed nodes | 旧 best と新 best の差が大きい上位 20 局面 |
 
 元データの点検を行う `book_mine master audit` と、同じ元データの伝播を使う `rejoin` / `cycles` / `borrow` は、この後退解析をメモリ内のグラフで呼び出します。一時 `.db` への変換と再読み込みを省き、値の分からない手を除く際にもグラフを作り直しません。`book_backprop` コマンドの入力形式と出力は変わりません。
+
+グラフの局面索引は `rshogi-core` の読み取り専用局面で作り、利きの全升集計・NNUE の駒表・駒割の初期化を省きます。手の合法性を調べて子局面へ進める経路は、従来どおり完全な `Position` を使います。

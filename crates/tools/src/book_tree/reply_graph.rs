@@ -3,13 +3,13 @@
 //! (対局の設定 `FlippedBook=false` と同じ)。
 
 use super::audit::MasterPosition;
-use crate::book_db::{position_from_sfen, strip_ply};
-use crate::packed_sfen::{pack_position, unpack_sfen_to_parts};
+use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
+use crate::packed_sfen::{pack_position, pack_static_position, unpack_sfen_to_parts};
 use anyhow::{Context, Result, anyhow, ensure};
 use clap::ValueEnum;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use rshogi_core::position::Position;
+use rshogi_core::position::{Position, StaticPosition};
 use rshogi_core::types::{Color, Move, Piece, PieceType};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -77,6 +77,17 @@ enum Packed {
 }
 
 impl Packed {
+    fn from_static(pos: &StaticPosition) -> Self {
+        if [Color::Black, Color::White]
+            .iter()
+            .all(|&c| pos.piece_on(pos.king_square(c)) == Piece::new(c, PieceType::King))
+        {
+            Self::Standard(pack_static_position(pos))
+        } else {
+            Self::Sfen(format!("{} 1", strip_ply(&pos.to_sfen())).into_boxed_str())
+        }
+    }
+
     fn of(pos: &Position) -> Self {
         if [Color::Black, Color::White]
             .iter()
@@ -141,10 +152,10 @@ impl<'a> BookIndex<'a> {
             let entries: Vec<Result<(u64, Packed)>> = window
                 .par_iter()
                 .map(|(key, _)| {
-                    let pos = position_from_sfen(&format!("{key} 1"))?;
-                    let p = Packed::of(&pos);
+                    let pos = static_position_from_sfen(&format!("{key} 1"))?;
+                    let p = Packed::from_static(&pos);
                     ensure!(
-                        strip_ply(&unpack(&p)?.to_sfen()) == *key,
+                        strip_ply(&unpack_static(&p)?.to_sfen()) == *key,
                         "局面を詰めた形で表せません: {key}"
                     );
                     Ok((pos.key(), p))
@@ -187,17 +198,21 @@ impl<'a> BookIndex<'a> {
     }
 }
 
-/// 保存した形から局面を作る (両玉があれば SFEN 文字列を経ない)。
-fn unpack(packed: &Packed) -> Result<Position> {
+/// 保存した形から読み取り専用局面を作る (両玉があれば SFEN 文字列を経ない)。
+fn unpack_static(packed: &Packed) -> Result<StaticPosition> {
     let packed = match packed {
         Packed::Standard(packed) => packed,
-        Packed::Sfen(sfen) => return position_from_sfen(sfen),
+        Packed::Sfen(sfen) => return static_position_from_sfen(sfen),
     };
     let parts = unpack_sfen_to_parts(packed).map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))?;
-    let mut pos = Position::new();
-    pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
-        .map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))?;
-    Ok(pos)
+    StaticPosition::from_parts(&parts.board, &parts.hands, parts.side_to_move)
+        .map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))
+}
+
+fn unpack(packed: &Packed) -> Result<Position> {
+    unpack_static(packed)?
+        .into_position()
+        .map_err(|e| anyhow!("詰めた局面を戻せません: {e}"))
 }
 
 /// 頂点 0 が根。頂点はすべて根から辿れる。局面は詰めた形で持ち、key の文字列は出力のときだけ作る。
@@ -243,7 +258,7 @@ impl<'a> ReplyGraph<'a> {
     pub fn key(&self, v: usize) -> Result<String> {
         match self.master(v) {
             Some(m) => Ok(self.index.key(m).to_owned()),
-            None => Ok(strip_ply(&unpack(&self.packed[v])?.to_sfen()).to_owned()),
+            None => Ok(strip_ply(&unpack_static(&self.packed[v])?.to_sfen()).to_owned()),
         }
     }
 

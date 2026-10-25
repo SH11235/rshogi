@@ -37,6 +37,88 @@ impl std::fmt::Display for SfenError {
 
 impl std::error::Error for SfenError {}
 
+/// 盤面・手駒・手番・手数とハッシュだけを初期化した、読み取り専用の局面。
+/// 利きの全升集計・NNUE の駒表・駒割は作らない。指し手の実行や評価には
+/// [`Self::into_position`] で完全な [`Position`] に変換してから使う。
+///
+/// ```compile_fail
+/// use rshogi_core::position::{StaticPosition, SFEN_HIRATE};
+/// use rshogi_core::types::Move;
+/// let mut position = StaticPosition::from_sfen(SFEN_HIRATE).unwrap();
+/// position.do_move(Move::NONE, false);
+/// ```
+pub struct StaticPosition {
+    position: Position,
+}
+
+impl StaticPosition {
+    /// SFEN を解析し、通常の局面と同じ駒在庫の検査を行う。
+    pub fn from_sfen(sfen: &str) -> Result<Self, SfenError> {
+        let mut position = Position::new();
+        position.populate_sfen(sfen)?;
+        Self::from_populated(position)
+    }
+
+    /// 盤面・手駒・手番から作る。手数は 1 とし、駒在庫を検査する。
+    pub fn from_parts(
+        board: &[Piece; Square::NUM],
+        hand: &[Hand; Color::NUM],
+        side_to_move: Color,
+    ) -> Result<Self, SfenError> {
+        let mut position = Position::new();
+        position.populate_parts(board, hand, side_to_move);
+        Self::from_populated(position)
+    }
+
+    fn from_populated(mut position: Position) -> Result<Self, SfenError> {
+        position.validate_piece_inventory()?;
+        position.compute_hash();
+        Ok(Self { position })
+    }
+
+    /// 指定した升の駒。
+    pub fn piece_on(&self, square: Square) -> Piece {
+        self.position.piece_on(square)
+    }
+
+    /// 指定した側の手駒。
+    pub fn hand(&self, color: Color) -> Hand {
+        self.position.hand(color)
+    }
+
+    /// 手番。
+    pub fn side_to_move(&self) -> Color {
+        self.position.side_to_move()
+    }
+
+    /// 玉の位置。玉の無い側では通常の局面と同じ既定の升を返す。
+    pub fn king_square(&self, color: Color) -> Square {
+        self.position.king_square(color)
+    }
+
+    /// 盤面・手駒・手番のハッシュ値。
+    pub fn key(&self) -> u64 {
+        self.position.key()
+    }
+
+    /// 手番の側が王手を受けているか。
+    pub fn in_check(&self) -> bool {
+        let side = self.side_to_move();
+        !self.position.attackers_to_c(self.king_square(side), !side).is_empty()
+    }
+
+    /// 手数を含む正規の SFEN。
+    pub fn to_sfen(&self) -> String {
+        self.position.to_sfen()
+    }
+
+    /// 利き・NNUE の駒表・駒割などを初期化し、指し手の実行や評価に使える局面へ変換する。
+    pub fn into_position(mut self) -> Result<Position, SfenError> {
+        self.position.finalize_after_population()?;
+        Ok(self.position)
+    }
+}
+
 impl Position {
     /// 平手初期局面を設定
     pub fn set_hirate(&mut self) {
@@ -45,6 +127,11 @@ impl Position {
 
     /// SFEN文字列から局面を設定
     pub fn set_sfen(&mut self, sfen: &str) -> Result<(), SfenError> {
+        self.populate_sfen(sfen)?;
+        self.finalize_after_population()
+    }
+
+    fn populate_sfen(&mut self, sfen: &str) -> Result<(), SfenError> {
         // 局面をクリア
         *self = Position::new();
 
@@ -78,7 +165,7 @@ impl Position {
             self.game_ply = 1;
         }
 
-        self.finalize_after_population()
+        Ok(())
     }
 
     /// SFEN 文字列を経ずに、盤面・手駒・手番から局面を構築する。
@@ -95,6 +182,16 @@ impl Position {
         hand: &[Hand; Color::NUM],
         side_to_move: Color,
     ) -> Result<(), SfenError> {
+        self.populate_parts(board, hand, side_to_move);
+        self.finalize_after_population()
+    }
+
+    fn populate_parts(
+        &mut self,
+        board: &[Piece; Square::NUM],
+        hand: &[Hand; Color::NUM],
+        side_to_move: Color,
+    ) {
         *self = Position::new();
 
         for (sq_idx, &pc) in board.iter().enumerate() {
@@ -115,8 +212,6 @@ impl Position {
         self.hand = *hand;
         self.side_to_move = side_to_move;
         self.game_ply = 1;
-
-        self.finalize_after_population()
     }
 
     /// 盤面・手駒・手番を投入済みの状態から、PieceList・ハッシュ・利き・pin・王手・material・
@@ -784,6 +879,107 @@ mod tests {
         assert_eq!(piece_to_sfen(Piece::W_PAWN), "p");
         assert_eq!(piece_to_sfen(Piece::B_PRO_PAWN), "+P");
         assert_eq!(piece_to_sfen(Piece::W_HORSE), "+b");
+    }
+
+    fn assert_materialized_matches(actual: &Position, expected: &Position, effects: bool) {
+        assert_eq!(actual.to_sfen(), expected.to_sfen());
+        assert_eq!(actual.key(), expected.key());
+        assert_eq!(actual.state().material_value, expected.state().material_value);
+        assert_eq!(actual.state().checkers, expected.state().checkers);
+        assert_eq!(actual.state().blockers_for_king, expected.state().blockers_for_king);
+        assert_eq!(actual.state().pinners, expected.state().pinners);
+        assert_eq!(actual.state().check_squares, expected.state().check_squares);
+        assert_eq!(actual.piece_list().piece_list_fb(), expected.piece_list().piece_list_fb());
+        assert_eq!(actual.piece_list().piece_list_fw(), expected.piece_list().piece_list_fw());
+        if effects {
+            for sq in Square::all() {
+                for c in [Color::Black, Color::White] {
+                    assert_eq!(actual.board_effect(c, sq), expected.board_effect(c, sq));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn static_position_matches_full_position_and_materializes_for_moves() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        let mut played = Position::new();
+        played.set_hirate();
+        for ply in 0..64 {
+            let sfen = played.to_sfen();
+            let light = StaticPosition::from_sfen(&sfen).unwrap();
+            let mut expected = Position::new();
+            expected.set_sfen(&sfen).unwrap();
+            assert_eq!(light.to_sfen(), expected.to_sfen());
+            assert_eq!(light.key(), expected.key());
+            assert_eq!(light.in_check(), expected.in_check());
+            assert_eq!(light.side_to_move(), expected.side_to_move());
+            let board = std::array::from_fn(|i| {
+                let sq = Square::from_u8(i as u8).unwrap();
+                assert_eq!(light.piece_on(sq), expected.piece_on(sq));
+                light.piece_on(sq)
+            });
+            let hands = [light.hand(Color::Black), light.hand(Color::White)];
+            let parts = StaticPosition::from_parts(&board, &hands, light.side_to_move()).unwrap();
+            assert_eq!(parts.key(), light.key());
+            assert_eq!(parts.in_check(), light.in_check());
+            let mut full_parts = Position::new();
+            full_parts.set_from_parts(&board, &hands, light.side_to_move()).unwrap();
+            assert_materialized_matches(&parts.into_position().unwrap(), &full_parts, true);
+            let mut actual = light.into_position().unwrap();
+            assert_materialized_matches(&actual, &expected, true);
+            let mut moves = MoveList::new();
+            generate_legal_all(&expected, &mut moves);
+            if moves.is_empty() {
+                break;
+            }
+            let mv = moves.as_slice()[(ply * 37 + 11) % moves.len()];
+            actual.do_move(mv, actual.gives_check(mv));
+            expected.do_move(mv, expected.gives_check(mv));
+            assert_materialized_matches(&actual, &expected, false);
+            actual.undo_move(mv);
+            expected.undo_move(mv);
+            assert_materialized_matches(&actual, &expected, false);
+            played.do_move(mv, played.gives_check(mv));
+        }
+    }
+
+    #[test]
+    fn static_position_preserves_missing_kings_checks_and_input_errors() {
+        for sfen in [
+            "7k1/9/9/9/9/9/9/9/9 w - 3",
+            "9/9/9/9/9/9/9/9/7K1 b - 1",
+            "9/9/9/9/9/9/9/9/9 b P 1",
+            "4k4/9/9/9/4+R4/9/9/9/4K4 w P 7",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18P 37",
+        ] {
+            let light = StaticPosition::from_sfen(sfen).unwrap();
+            let mut full = Position::new();
+            full.set_sfen(sfen).unwrap();
+            assert_eq!(light.to_sfen(), full.to_sfen());
+            assert_eq!(light.key(), full.key());
+            assert_eq!(light.in_check(), full.in_check());
+            assert_materialized_matches(&light.into_position().unwrap(), &full, true);
+        }
+        for sfen in [
+            "invalid",
+            "9/9/9/9/9/9/9/9/9 x - 1",
+            "9/9/9/9/9/9/9/9/9 b X 1",
+            "9/9/9/9/9/9/9/9/9 b - x",
+            "4k4/9/9/9/9/9/9/9/4K4 b 3R 1",
+        ] {
+            let mut full = Position::new();
+            assert_eq!(StaticPosition::from_sfen(sfen).err(), full.set_sfen(sfen).err());
+        }
+        let mut full = Position::new();
+        full.set_hirate();
+        let mut board = std::array::from_fn(|i| full.piece_on(Square::from_u8(i as u8).unwrap()));
+        board[Square::SQ_55.index()] = Piece::B_PAWN;
+        let hands = [Hand::EMPTY; Color::NUM];
+        assert_eq!(
+            StaticPosition::from_parts(&board, &hands, Color::Black).err(),
+            full.set_from_parts(&board, &hands, Color::Black).err()
+        );
     }
 
     #[test]

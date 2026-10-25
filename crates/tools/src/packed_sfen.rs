@@ -47,7 +47,7 @@
 //! 4. 盤上の駒 (ハフマン符号化): 81マス分（玉のマスはスキップ）
 //! 5. 手駒 (ハフマン符号化): 残りビットで表現
 
-use rshogi_core::position::Position;
+use rshogi_core::position::{Position, StaticPosition};
 use rshogi_core::types::{Color, Hand, Move, Piece, PieceType, Square};
 
 /// PackedSfenValue (40バイト)
@@ -1405,23 +1405,47 @@ fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
 /// パディングされます。駒箱の駒はunpack時に無視されるため、
 /// 余った0ビットが歩として誤読される問題を防止しています。
 pub fn pack_position(pos: &Position) -> [u8; 32] {
+    pack_board(
+        pos.side_to_move(),
+        [pos.king_square(Color::Black), pos.king_square(Color::White)],
+        |sq| pos.piece_on(sq),
+        |c| pos.hand(c),
+    )
+}
+
+/// 読み取り専用局面を通常の PackedSfen と同じ形式で詰める。
+pub(crate) fn pack_static_position(pos: &StaticPosition) -> [u8; 32] {
+    pack_board(
+        pos.side_to_move(),
+        [pos.king_square(Color::Black), pos.king_square(Color::White)],
+        |sq| pos.piece_on(sq),
+        |c| pos.hand(c),
+    )
+}
+
+fn pack_board(
+    side: Color,
+    kings: [Square; 2],
+    piece_on: impl Fn(Square) -> Piece,
+    hand: impl Fn(Color) -> Hand,
+) -> [u8; 32] {
     let mut stream = BitStreamWriter::new();
 
     // 1. 手番 (1bit): 0=先手, 1=後手
-    stream.write_one_bit(pos.side_to_move() == Color::White);
+    stream.write_one_bit(side == Color::White);
 
     // 2. 先手玉位置 (7bit)
-    let black_king_sq = pos.king_square(Color::Black);
+    let black_king_sq = kings[0];
     stream.write_n_bit(black_king_sq.index() as u32, 7);
 
     // 3. 後手玉位置 (7bit)
-    let white_king_sq = pos.king_square(Color::White);
+    let white_king_sq = kings[1];
     stream.write_n_bit(white_king_sq.index() as u32, 7);
 
     // 4. 盤上の駒 (81マス、玉はスキップ)
     for sq_idx in 0..81u8 {
         let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
-        let piece = pos.piece_on(sq);
+        let piece = piece_on(sq);
 
         // 玉はスキップ
         if piece.is_some() && piece.piece_type() == PieceType::King {
@@ -1444,7 +1468,7 @@ pub fn pack_position(pos: &Position) -> [u8; 32] {
     ];
 
     for &color in &[Color::Black, Color::White] {
-        let hand = pos.hand(color);
+        let hand = hand(color);
         for &pt in &piece_order {
             let count = hand.count(pt);
             for _ in 0..count {
@@ -1883,6 +1907,20 @@ pub fn pack_hcp_from_parts(parts: &UnpackedSfen) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_positions_use_the_same_packed_format() {
+        for sfen in [
+            rshogi_core::position::SFEN_HIRATE,
+            "4k4/9/9/9/4+R4/9/9/9/4K4 w P 7",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18P 37",
+        ] {
+            let light = StaticPosition::from_sfen(sfen).unwrap();
+            let mut full = Position::new();
+            full.set_sfen(sfen).unwrap();
+            assert_eq!(pack_static_position(&light), pack_position(&full));
+        }
+    }
 
     #[test]
     fn test_bitstream() {
