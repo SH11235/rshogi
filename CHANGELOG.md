@@ -16,6 +16,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_mine master rejoin` / `cycles` の頂点の展開では完全な局面を直接構築し、在庫検査とハッシュ計算の重複を省く。
+
 - `book_backprop` と `book_mine` の局面索引・key 検査に、評価用の初期化を省く読み取り専用局面を使う。
   手を指す経路は完全な `Position` を維持し、出力は変わらない。
 
