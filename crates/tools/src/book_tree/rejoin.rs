@@ -6,7 +6,7 @@
 
 use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
 use super::reply_graph::{
-    BookIndex, HIRATE_KEY, Preset, SideArg, build, selected_moves, thread_pool,
+    BookIndex, HIRATE_KEY, Preset, SideArg, build_filtered, selected_moves, thread_pool,
 };
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
@@ -53,7 +53,7 @@ pub(super) struct RejoinArgs {
     /// 重み: これ未満の重みの局面では辿るのを止める
     #[arg(long, default_value_t = 1e-5)]
     weight_floor: f64,
-    /// 一覧に出す重みの下限 (`--opp-freq` を渡したときだけ使う)
+    /// 一覧と局面の展開に使う重みの下限 (`--opp-freq` を渡したときだけ使う)
     #[arg(long, default_value_t = 0.0)]
     min_weight: f64,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -106,6 +106,8 @@ pub(super) struct RejoinSummary {
     pub findings: usize,
     /// 重みの下限で落とした数。
     pub below_min_weight: usize,
+    /// 重みの下限で展開を止めた局面の数。
+    pub pruned_positions: usize,
 }
 
 /// 重みの付け方。
@@ -164,6 +166,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
                 start,
                 preset: args.preset,
                 line: args.line,
+                min_weight: args.min_weight,
             };
             let (mut rejoins, mut summary) =
                 find_rejoins(&index, &values, query, weights.as_ref(), freq.as_ref())?;
@@ -215,6 +218,7 @@ pub(super) struct Query<'a> {
     pub start: &'a str,
     pub preset: Preset,
     pub line: i32,
+    pub min_weight: f64,
 }
 
 /// 値の下がる再合流を探す。重みがあれば重みの大きい順、無ければ下がり幅の大きい順に並べる。
@@ -230,9 +234,34 @@ pub(super) fn find_rejoins(
         start,
         preset,
         line,
+        min_weight,
     } = query;
-    let graph = build(index, side, start, |_, p| selected_moves(p, preset, None))?;
-    let mut summary = RejoinSummary::default();
+    let graph = build_filtered(
+        index,
+        side,
+        start,
+        |_, p| selected_moves(p, preset, None),
+        |master, pos| {
+            weights.is_none_or(|weights| {
+                if min_weight == 0.0 {
+                    return true;
+                }
+                let sfen;
+                let key = match master {
+                    Some(m) => index.key(m),
+                    None => {
+                        sfen = pos.to_sfen();
+                        strip_ply(&sfen)
+                    }
+                };
+                weights.get(key).copied().unwrap_or(0.0) >= min_weight
+            })
+        },
+    )?;
+    let mut summary = RejoinSummary {
+        pruned_positions: graph.pruned_positions,
+        ..RejoinSummary::default()
+    };
     let mut rejoins = Vec::new();
     let mut digs = HashSet::new();
     for u in (0..graph.len()).filter(|&u| graph.own[u]) {
@@ -397,6 +426,9 @@ fn format_summary(side: &str, summary: &RejoinSummary, line: i32, rejoins: &[Rej
         rejoins.len(),
         summary.below_min_weight
     ));
+    if summary.pruned_positions > 0 {
+        out(format!("{side}: 重みの下限で展開を止めた局面 {}", summary.pruned_positions));
+    }
     text
 }
 
@@ -513,6 +545,47 @@ mod tests {
     }
 
     #[test]
+    fn weight_pruning_stops_low_weight_gateways_and_includes_the_boundary() {
+        let p = super::super::reply_graph::fixture::positions(&[
+            (ROOT, "5i4h", "main", "100"),
+            (&after(ROOT, &["5i4h", "5a4b"]), "4h3h", "main", "20"),
+        ]);
+        let values: Vec<Vec<Option<i32>>> =
+            p.values().map(|p| p.moves.iter().map(|m| m.eval).collect()).collect();
+        let index = BookIndex::new(&p).unwrap();
+        let a = after(ROOT, &["5i4h"]);
+        let q = after(&a, &["5a4b"]);
+        let mut weights =
+            HashMap::from([(ROOT.to_owned(), 1.0), (a.clone(), 1.0), (q.clone(), 1.0)]);
+        let query = |min_weight| Query {
+            side: "b",
+            start: ROOT,
+            preset: Preset::Random,
+            line: 40,
+            min_weight,
+        };
+        let (boundary, _) =
+            find_rejoins(&index, &values, query(1.0), Some(&weights), None).unwrap();
+        assert_eq!(boundary.len(), 1);
+        weights.insert(a.clone(), 0.1);
+        let (pruned, summary) =
+            find_rejoins(&index, &values, query(0.5), Some(&weights), None).unwrap();
+        assert!(pruned.is_empty());
+        assert_eq!(summary.pruned_positions, 1);
+        assert_eq!(summary.own_positions, 1);
+        let (unpruned, _) =
+            find_rejoins(&index, &values, query(0.0), Some(&weights), None).unwrap();
+        assert_eq!(unpruned.len(), 1);
+        assert_eq!(unpruned[0].rejoin, q);
+        let no_freq = find_rejoins(&index, &values, query(2.0), None, None).unwrap();
+        assert_eq!(no_freq, find_rejoins(&index, &values, query(0.0), None, None).unwrap());
+        let (pruned_root, summary) =
+            find_rejoins(&index, &values, query(2.0), Some(&weights), None).unwrap();
+        assert!(pruned_root.is_empty());
+        assert_eq!(summary.pruned_positions, 1);
+    }
+
+    #[test]
     fn counts_moves_and_rejoins_without_values() {
         let a = after(ROOT, &["5i4h"]);
         let p = super::super::reply_graph::fixture::positions(&[
@@ -529,6 +602,7 @@ mod tests {
             start: ROOT,
             preset: Preset::Random,
             line: 1,
+            min_weight: 0.0,
         };
         let (found, summary) = find_rejoins(&index, &values, query, None, None).unwrap();
         assert!(found.is_empty());
@@ -556,6 +630,7 @@ mod tests {
             start: ROOT,
             preset,
             line: 40,
+            min_weight: 0.0,
         };
         let (found, _) = find_rejoins(&index, &values, query(Preset::Random), None, None).unwrap();
         assert_eq!(found.len(), 1);

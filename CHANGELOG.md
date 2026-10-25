@@ -16,6 +16,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_mine master rejoin` は `--opp-freq` と正の `--min-weight` の併用時に下限未満の局面の展開を止める。
+  一覧の事後フィルタだけだった挙動から変わり、下限未満の局面を経由する先は調査対象から外れる。既定の下限 0 の出力は維持。
+
 - `book_mine master cycles` は外した後の循環を同じグラフの辺を絞って数え直し、グラフの再構築を省く。出力は変わらない。
 
 - `book_mine master rejoin` / `cycles` のグラフを詰めた局面と連続した辺の配列で保持し、
