@@ -22,7 +22,10 @@ use rshogi_core::types::{Color, EnteringKingRule, Move, RepetitionState};
 
 use crate::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
 use crate::output_path::create_safe_output_file;
-use crate::packed_sfen::{PackedSfenValue, move_to_psv_move16, pack_position, unpack_sfen};
+use crate::packed_sfen::{
+    PackedSfenValue, is_legal_psv_move, move_to_psv_move16, pack_position, psv_move16_to_move,
+    same_psv_move, unpack_sfen,
+};
 
 /// 出力 PSV の game_result の決め方
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -52,6 +55,8 @@ pub struct RolloutConfig {
     pub game_result: GameResultMode,
     /// 乱数の seed
     pub seed: u64,
+    /// 種からの最初の 1 手で、種のレコードの move16 (元の対局で指された手) を選ばない
+    pub avoid_seed_move: bool,
 }
 
 /// 局面の batch から value (手番視点 cp) と policy logit を返す推論器
@@ -100,22 +105,26 @@ struct Game {
     moves_from_seed: u32,
     /// 種の局面も書き出す (同じ種の指し進めのうち 1 本だけが持つ)
     emit_seed: bool,
+    /// 種からの最初の 1 手で選ばない手
+    avoid_first: Option<Move>,
     legal: MoveList,
     ending: Option<Ending>,
     records: Vec<(PackedSfenValue, Color)>,
 }
 
-/// 種の通し番号と指し進めの番号から、その指し進め専用の乱数列を作る。
+/// 入力ファイルの識別子・種の通し番号・指し進めの番号から、その指し進め専用の乱数列を作る。
 ///
-/// batch の組み方や chunk の区切りに依らず、各指し進めの手順が同じになる。
-fn rollout_rng(seed: u64, seed_index: u64, rollout_index: u32) -> ChaCha8Rng {
+/// batch の組み方や chunk の区切り、入力ファイルを渡す順に依らず、各指し進めの手順が同じになる。
+fn rollout_rng(seed: u64, stream: u64, seed_index: u64, rollout_index: u32) -> ChaCha8Rng {
     fn splitmix64(mut x: u64) -> u64 {
         x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
         x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         x ^ (x >> 31)
     }
-    let h = splitmix64(splitmix64(seed ^ splitmix64(seed_index)) ^ u64::from(rollout_index));
+    let h = splitmix64(
+        splitmix64(splitmix64(seed ^ splitmix64(stream)) ^ seed_index) ^ u64::from(rollout_index),
+    );
     ChaCha8Rng::seed_from_u64(h)
 }
 
@@ -173,18 +182,21 @@ impl Game {
 
 /// 合法手の logit から 1 手を抽選し、`logits` 内の添字を返す。
 ///
-/// 確率は合法手だけで softmax した値。`min_prob` 未満を除き (最善手は残す)、上位 `top_k` に
+/// `excluded` の手は合法手から除いて扱う (残りの手が 1 つ以上あること)。
+/// 確率は残りの合法手だけで softmax した値。`min_prob` 未満を除き (最善手は残す)、上位 `top_k` に
 /// 絞ってから p^(1/T) で抽選する。`scratch` は呼び出し間で再利用する作業領域。
 fn choose_move(
     logits: &[f32],
+    excluded: Option<usize>,
     cfg: &RolloutConfig,
     rng: &mut ChaCha8Rng,
     scratch: &mut Vec<(usize, f32)>,
 ) -> usize {
-    debug_assert!(!logits.is_empty());
-    let mut best = 0;
-    for (i, &l) in logits.iter().enumerate() {
-        if l > logits[best] {
+    debug_assert!(logits.len() > usize::from(excluded.is_some()));
+    let allowed = |i: &usize| Some(*i) != excluded;
+    let mut best = (0..logits.len()).find(allowed).unwrap_or(0);
+    for i in (0..logits.len()).filter(allowed) {
+        if logits[i] > logits[best] {
             best = i;
         }
     }
@@ -192,10 +204,13 @@ fn choose_move(
         return best;
     }
     let max = logits[best];
-    let denom: f64 = logits.iter().map(|&l| f64::from(l - max).exp()).sum();
+    let denom: f64 = (0..logits.len())
+        .filter(allowed)
+        .map(|i| f64::from(logits[i] - max).exp())
+        .sum();
 
     scratch.clear();
-    for (i, &l) in logits.iter().enumerate() {
+    for (i, &l) in logits.iter().enumerate().filter(|(i, _)| allowed(i)) {
         let p = f64::from(l - max).exp() / denom;
         if i == best || p >= f64::from(cfg.min_prob) {
             scratch.push((i, l));
@@ -284,13 +299,15 @@ fn flush_game<W: Write>(
     Ok(())
 }
 
-/// 種 `seeds` (先頭の通し番号が `first_seed_index`) から指し進め、局面を `writer` に書く。
+/// 種 `seeds` (入力ファイルの識別子 `stream` の中で、先頭の通し番号が `first_seed_index`) から
+/// 指し進め、局面を `writer` に書く。
 ///
 /// 出力は指し進めが終わった順。各指し進めの手順は自身の乱数列だけで決まり、終わる順も
 /// 入力と option だけで決まるので、同じ条件の再実行は bit 一致する。
 pub fn run_chunk<M: PolicyValueModel, W: Write>(
     model: &mut M,
     seeds: &[PackedSfenValue],
+    stream: u64,
     first_seed_index: u64,
     cfg: &RolloutConfig,
     writer: &mut W,
@@ -330,12 +347,18 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                     }
                     continue;
                 }
+                let seed_move = psv_move16_to_move(seed_psv.move16);
+                let avoid_first = (cfg.avoid_seed_move
+                    && seed_psv.move16 != 0
+                    && is_legal_psv_move(&pos, seed_move))
+                .then_some(seed_move);
                 let mut game = Game {
                     pos,
-                    rng: rollout_rng(cfg.seed, first_seed_index + i as u64, r),
+                    rng: rollout_rng(cfg.seed, stream, first_seed_index + i as u64, r),
                     game_ply: seed_psv.game_ply,
                     moves_from_seed: 0,
                     emit_seed: r == 0,
+                    avoid_first,
                     legal: MoveList::new(),
                     ending: None,
                     records: Vec::new(),
@@ -387,7 +410,14 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                 let row_logits = &policy[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM];
                 logits.clear();
                 logits.extend(game.legal.iter().map(|&mv| row_logits[make_move_label(mv, stm)]));
-                let mv = game.legal.as_slice()[choose_move(logits, cfg, &mut game.rng, scratch)];
+                let excluded = match game.avoid_first {
+                    Some(avoid) if game.moves_from_seed == 0 && game.legal.len() > 1 => {
+                        game.legal.iter().position(|&m| same_psv_move(m, avoid))
+                    }
+                    _ => None,
+                };
+                let mv = game.legal.as_slice()
+                    [choose_move(logits, excluded, cfg, &mut game.rng, scratch)];
 
                 if game.moves_from_seed > 0 || game.emit_seed {
                     let score = values[row].clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX));
@@ -398,7 +428,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                             move16: move_to_psv_move16(mv),
                             game_ply: game.game_ply,
                             game_result: 0,
-                            padding: 0,
+                            padding: game.moves_from_seed.min(u32::from(u8::MAX)) as u8,
                         },
                         stm,
                     ));
@@ -428,12 +458,14 @@ pub fn chunk_file_name(chunk: u64) -> String {
 }
 
 /// 入力の全 chunk (`chunk_seeds` 件ずつ) を順に処理する。完成済みの chunk ファイルがあれば飛ばす。
+/// `stream` は入力ファイルの識別子で、乱数列をファイルごとに分ける。
 ///
 /// chunk は `<name>.tmp` に書いてから rename するので、中断した chunk は再実行で作り直される。
 /// `readonly` は出力で上書きしてはならない資源 (入力・モデル等)。
 pub fn run_all<M: PolicyValueModel>(
     model: &mut M,
     input: &Path,
+    stream: u64,
     output_dir: &Path,
     chunk_seeds: u64,
     cfg: &RolloutConfig,
@@ -485,7 +517,7 @@ pub fn run_all<M: PolicyValueModel>(
         let tmp_path = output_dir.join(format!("{}.tmp", chunk_file_name(chunk)));
         let mut writer = BufWriter::new(create_safe_output_file(&tmp_path, readonly)?);
         let chunk_started = Instant::now();
-        let stats = run_chunk(model, &seeds, first, cfg, &mut writer, interrupted)?;
+        let stats = run_chunk(model, &seeds, stream, first, cfg, &mut writer, interrupted)?;
         let file = writer.into_inner().map_err(|e| e.into_error())?;
         file.sync_all()?;
         drop(file);
@@ -558,6 +590,7 @@ mod tests {
             max_game_ply: 60,
             game_result: GameResultMode::Rollout,
             seed: 7,
+            avoid_seed_move: true,
         }
     }
 
@@ -585,11 +618,15 @@ mod tests {
         ]
     }
 
-    fn run_bytes(cfg: &RolloutConfig) -> (Vec<u8>, ChunkStats) {
+    fn run_seeds(cfg: &RolloutConfig, seeds: &[PackedSfenValue]) -> (Vec<u8>, ChunkStats) {
         let mut out = Vec::new();
         let stop = AtomicBool::new(false);
-        let stats = run_chunk(&mut HashModel, &seeds(), 0, cfg, &mut out, &stop).unwrap();
+        let stats = run_chunk(&mut HashModel, seeds, 0, 0, cfg, &mut out, &stop).unwrap();
         (out, stats)
+    }
+
+    fn run_bytes(cfg: &RolloutConfig) -> (Vec<u8>, ChunkStats) {
+        run_seeds(cfg, &seeds())
     }
 
     fn records(bytes: &[u8]) -> Vec<PackedSfenValue> {
@@ -646,6 +683,8 @@ mod tests {
             pos.set_sfen(&unpack_sfen(&r.sfen).unwrap()).unwrap();
             let mv = crate::packed_sfen::psv_move16_to_move(r.move16);
             assert!(crate::packed_sfen::is_legal_psv_move(&pos, mv));
+            // padding は種から何手目か。種の game_ply (1 / 3 / 20) まで戻れる。
+            assert!([1, 3, 20].contains(&(r.game_ply - u16::from(r.padding))));
         }
         // 種の局面は rollouts_per_seed 本に対して 1 回だけ出力する
         for seed in seeds() {
@@ -658,6 +697,43 @@ mod tests {
     }
 
     #[test]
+    fn first_move_avoids_the_recorded_seed_move() {
+        // 温度 0 で、種の move16 を最善手そのものにしておく
+        let greedy = RolloutConfig {
+            rollouts_per_seed: 1,
+            temperature: 0.0,
+            avoid_seed_move: false,
+            ..config()
+        };
+        let seed_record = |bytes: &[u8], seed: &PackedSfenValue| {
+            records(bytes)
+                .into_iter()
+                .find(|r| r.sfen == seed.sfen && r.padding == 0)
+                .unwrap()
+        };
+        let plain = seeds();
+        let (bytes, _) = run_seeds(&greedy, &plain);
+        let with_move: Vec<PackedSfenValue> = plain
+            .iter()
+            .map(|s| PackedSfenValue {
+                move16: seed_record(&bytes, s).move16,
+                ..*s
+            })
+            .collect();
+
+        let (kept, _) = run_seeds(&greedy, &with_move);
+        let avoid = RolloutConfig {
+            avoid_seed_move: true,
+            ..greedy
+        };
+        let (avoided, _) = run_seeds(&avoid, &with_move);
+        for s in &with_move {
+            assert_eq!(seed_record(&kept, s).move16, s.move16);
+            assert_ne!(seed_record(&avoided, s).move16, s.move16);
+        }
+    }
+
+    #[test]
     fn mated_position_ends_with_win_for_mating_side() {
         // 後手玉 5一、先手の金 5二 を歩 5三 が支える。後手番で詰み。
         let sfen = "4k4/4G4/4P4/9/9/9/9/9/4K4 w - 10";
@@ -665,10 +741,11 @@ mod tests {
         pos.set_sfen(sfen).unwrap();
         let mut game = Game {
             pos,
-            rng: rollout_rng(0, 0, 0),
+            rng: rollout_rng(0, 0, 0, 0),
             game_ply: 10,
             moves_from_seed: 1,
             emit_seed: false,
+            avoid_first: None,
             legal: MoveList::new(),
             ending: None,
             records: vec![
@@ -691,7 +768,7 @@ mod tests {
 
     #[test]
     fn choose_move_respects_min_prob_top_k_and_zero_temperature() {
-        let mut rng = rollout_rng(1, 2, 3);
+        let mut rng = rollout_rng(1, 0, 2, 3);
         let mut scratch = Vec::new();
         // softmax 後の確率はおよそ [0.665, 0.245, 0.090, 0.0003]
         let logits = [3.0f32, 2.0, 1.0, -5.0];
@@ -701,7 +778,7 @@ mod tests {
             temperature: 0.0,
             ..base.clone()
         };
-        assert_eq!(choose_move(&logits, &greedy, &mut rng, &mut scratch), 0);
+        assert_eq!(choose_move(&logits, None, &greedy, &mut rng, &mut scratch), 0);
 
         let top1 = RolloutConfig {
             top_k: 1,
@@ -713,11 +790,17 @@ mod tests {
         };
         let mut seen = [0u32; 4];
         for _ in 0..2000 {
-            assert_eq!(choose_move(&logits, &top1, &mut rng, &mut scratch), 0);
-            seen[choose_move(&logits, &floor, &mut rng, &mut scratch)] += 1;
+            assert_eq!(choose_move(&logits, None, &top1, &mut rng, &mut scratch), 0);
+            seen[choose_move(&logits, None, &floor, &mut rng, &mut scratch)] += 1;
         }
         assert!(seen[0] > 0 && seen[1] > 0);
         assert_eq!(seen[2] + seen[3], 0);
+
+        // 除いた手は最善手でも選ばない
+        assert_eq!(choose_move(&logits, Some(0), &greedy, &mut rng, &mut scratch), 1);
+        for _ in 0..200 {
+            assert_ne!(choose_move(&logits, Some(0), &base, &mut rng, &mut scratch), 0);
+        }
     }
 
     #[test]
@@ -731,13 +814,13 @@ mod tests {
         let stop = AtomicBool::new(false);
         let readonly = [input.as_path()];
 
-        run_all(&mut HashModel, &input, &out, 2, &cfg, &readonly, &stop).unwrap();
+        run_all(&mut HashModel, &input, 0, &out, 2, &cfg, &readonly, &stop).unwrap();
         let first0 = fs::read(out.join(chunk_file_name(0))).unwrap();
         let first1 = fs::read(out.join(chunk_file_name(1))).unwrap();
 
         fs::remove_file(out.join(chunk_file_name(1))).unwrap();
         fs::write(out.join(chunk_file_name(0)), b"kept").unwrap();
-        let stats = run_all(&mut HashModel, &input, &out, 2, &cfg, &readonly, &stop).unwrap();
+        let stats = run_all(&mut HashModel, &input, 0, &out, 2, &cfg, &readonly, &stop).unwrap();
         assert_eq!(stats.rollouts, 3);
         assert_eq!(fs::read(out.join(chunk_file_name(0))).unwrap(), b"kept");
         assert_eq!(fs::read(out.join(chunk_file_name(1))).unwrap(), first1);

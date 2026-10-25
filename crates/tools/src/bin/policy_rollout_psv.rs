@@ -4,8 +4,8 @@
 //! 多数の指し進めを同時に走らせ、全局面を 1 回の batch 推論にまとめる。同じ推論の
 //! value head を各局面の score (手番視点 cp) にする。
 //!
-//! 入力の種を `--chunk-seeds` 件ずつの chunk に分け、chunk ごとに 1 ファイルを書く。
-//! 完成した chunk は再実行時に飛ばすので、中断しても続きから再開できる。
+//! 入力ファイルごとに出力ディレクトリを分け、種を `--chunk-seeds` 件ずつの chunk に分けて
+//! chunk ごとに 1 ファイルを書く。完成した chunk は再実行時に飛ばすので、中断しても続きから再開できる。
 
 use std::path::PathBuf;
 
@@ -21,11 +21,11 @@ use tools::policy_rollout::{GameResultMode, RolloutConfig};
              score は同じ推論の value head (手番視点 cp)。探索はしない。"
 )]
 struct Cli {
-    /// 種の局面の PSV
-    #[arg(short, long)]
-    input: PathBuf,
+    /// 種の局面の PSV。複数指定すると指定順に 1 ファイルずつ全量を処理する
+    #[arg(short, long, required = true, num_args = 1..)]
+    input: Vec<PathBuf>,
 
-    /// 出力ディレクトリ (chunk ごとに `rollout-NNNNNN.psv` を書く)
+    /// 出力ディレクトリ (入力ファイル名から拡張子を除いた名前の下に、chunk ごとの `rollout-NNNNNN.psv` を書く)
     #[arg(short, long)]
     output_dir: PathBuf,
 
@@ -69,6 +69,11 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     seed: u64,
 
+    /// 種からの最初の 1 手で、種のレコードの move16 (元の対局で指された手) も抽選の対象にする。
+    /// 未指定ならその手を除く (move16 が 0 か非合法なら何もしない)
+    #[arg(long)]
+    allow_seed_move: bool,
+
     /// CUDA device id (負値で CPU 推論)
     #[arg(long, default_value_t = 0)]
     onnx_gpu_id: i32,
@@ -84,6 +89,28 @@ struct Cli {
     /// winrate→cp 変換スケール
     #[arg(long, default_value_t = 600.0)]
     onnx_eval_scale: f32,
+}
+
+/// 入力ファイルごとの出力ディレクトリと、乱数列を分ける識別子 (ファイル名の FNV-1a)。
+///
+/// 識別子をファイル名から作るので、入力を渡す順を変えても各ファイルの出力は変わらない。
+fn input_streams(cli: &Cli) -> Result<Vec<(PathBuf, PathBuf, u64)>> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(cli.input.len());
+    for input in &cli.input {
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("input has no UTF-8 file name: {}", input.display()))?;
+        if !seen.insert(stem.to_owned()) {
+            anyhow::bail!("two inputs share the file name '{stem}'; rename one of them");
+        }
+        let stream = stem.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+        out.push((input.clone(), cli.output_dir.join(stem), stream));
+    }
+    Ok(out)
 }
 
 fn validate(cli: &Cli) -> Result<RolloutConfig> {
@@ -108,6 +135,7 @@ fn validate(cli: &Cli) -> Result<RolloutConfig> {
         max_game_ply: cli.max_game_ply,
         game_result: cli.game_result,
         seed: cli.seed,
+        avoid_seed_move: !cli.allow_seed_move,
     })
 }
 
@@ -115,6 +143,7 @@ fn validate(cli: &Cli) -> Result<RolloutConfig> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     validate(&cli)?;
+    input_streams(&cli)?;
     anyhow::bail!(
         "policy_rollout_psv requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
          Rebuild with default features: cargo build --release -p tools --bin policy_rollout_psv"
@@ -134,16 +163,19 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = validate(&cli)?;
+    let streams = input_streams(&cli)?;
 
     let ort_library = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
-    let mut readonly: Vec<&Path> = vec![cli.input.as_path(), cli.dlshogi_onnx_model.as_path()];
+    let mut readonly: Vec<&Path> = cli.input.iter().map(PathBuf::as_path).collect();
+    readonly.push(cli.dlshogi_onnx_model.as_path());
     if let Some(lib) = ort_library.as_deref().filter(|p| p.is_file()) {
         readonly.push(lib);
     }
     // 出力ディレクトリ自体が資源と衝突しないことを、推論器の初期化前に確かめる。
-    std::fs::create_dir_all(&cli.output_dir)?;
-    let probe = cli.output_dir.join(chunk_file_name(0));
-    ensure_safe_output_paths(&[&probe], &readonly)?;
+    for (_, dir, _) in &streams {
+        std::fs::create_dir_all(dir)?;
+        ensure_safe_output_paths(&[&dir.join(chunk_file_name(0))], &readonly)?;
+    }
 
     let mut model = OnnxValueEvaluator::new(&OnnxValueConfig {
         model_path: cli.dlshogi_onnx_model.clone(),
@@ -161,14 +193,8 @@ fn main() -> Result<()> {
         eprintln!("WARNING: failed to set Ctrl+C handler: {e}");
     }
 
-    run_all(
-        &mut model,
-        &cli.input,
-        &cli.output_dir,
-        cli.chunk_seeds,
-        &cfg,
-        &readonly,
-        &INTERRUPTED,
-    )?;
+    for (input, dir, stream) in &streams {
+        run_all(&mut model, input, *stream, dir, cli.chunk_seeds, &cfg, &readonly, &INTERRUPTED)?;
+    }
     tools::ort_teardown::exit_skipping_ort_teardown(0)
 }
