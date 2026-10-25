@@ -6,7 +6,7 @@ use super::audit::MasterPosition;
 use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use anyhow::Result;
 use clap::ValueEnum;
-use rshogi_core::movegen::{MoveList, generate_legal};
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// 初期局面の key。
@@ -135,6 +135,8 @@ impl BookHashes {
 /// `side` を自分として `start` から辿ったグラフを作る。自分の手番の局面では `select` の手を指し、
 /// 相手の手番の局面では、合法手のうち元データの局面に戻る手を辺にする。`hashes` は `positions` の key から作る。
 ///
+/// 相手の合法手は不成も含める (探索用の手の生成は一部の不成を省くので使わない)。
+///
 /// 計算量: 相手の手番の局面ごとに全合法手 (平均 80 前後) を 1 手ずつ進め、ハッシュ値が元データの局面と
 /// 一致した手だけ SFEN を作って確かめる。
 pub(super) fn build(
@@ -189,7 +191,7 @@ pub(super) fn build(
             }
         } else {
             let mut list = MoveList::new();
-            generate_legal(&pos, &mut list);
+            generate_legal_all(&pos, &mut list);
             for &mv in list.iter() {
                 pos.do_move(mv, pos.gives_check(mv));
                 let child =

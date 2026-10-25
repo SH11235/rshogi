@@ -4,7 +4,7 @@
 //! 定跡の値は相手の手も定跡の手だけで伝播しているので、相手が定跡に無い手で別の定跡の局面へ合流すると、
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
-use super::audit::{MasterPosition, evaluate, read_master};
+use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
 use super::reply_graph::{BookHashes, HIRATE_KEY, Preset, SideArg, build, selected_moves};
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
@@ -120,6 +120,11 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         args.weight_floor >= 0.0 && args.min_weight >= 0.0,
         "重みの下限は 0 以上にしてください"
     );
+    let mut inputs = vec![("--master", args.master.as_path())];
+    if let Some(freq) = &args.opp_freq {
+        inputs.push(("--opp-freq", freq.as_path()));
+    }
+    reject_same_file(&args.table, &inputs)?;
     let (positions, _) = read_master(&args.master)?;
     let draws = DrawValues {
         black: args.draw_value_black,
@@ -472,6 +477,36 @@ mod tests {
         let table = std::fs::read_to_string(dir.path().join("rejoin.tsv")).unwrap();
         let cells: Vec<&str> = table.lines().nth(1).unwrap().split('\t').collect();
         assert_eq!(cells[14..], ["1.000000", "10", "3"]);
+    }
+
+    #[test]
+    fn counts_moves_and_rejoins_without_values() {
+        let a = after(ROOT, &["5i4h"]);
+        let p = super::super::reply_graph::fixture::positions(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", "10"),
+            (&after(&a, &["5a4b"]), "4h3h", "main", ""),
+            (&after(ROOT, &["5i6h", "5a4b"]), "6h7h", "main", ""),
+        ]);
+        let values: HashMap<&str, Vec<Option<i32>>> = p
+            .iter()
+            .map(|(k, m)| (k.as_str(), m.moves.iter().map(|m| m.eval).collect()))
+            .collect();
+        let hashes = BookHashes::new(&p).unwrap();
+        let query = Query {
+            side: "b",
+            start: ROOT,
+            preset: Preset::Random,
+            line: 1,
+        };
+        let (found, summary) = find_rejoins(&p, &hashes, &values, query, None, None).unwrap();
+        assert!(found.is_empty());
+        // 値の無い自分の手は根の 5i4h と、戻った先の 2 局面の main。5i4h の先は値が無いので相手の手を見ず、
+        // 5i6h の後の相手の 5a4b で戻る局面は main の値が無い。
+        assert_eq!(
+            (summary.unknown_expected, summary.unknown_rejoin, summary.rejoin_moves),
+            (3, 1, 1)
+        );
     }
 
     #[test]

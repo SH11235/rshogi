@@ -149,6 +149,15 @@ pub(super) fn run(args: AuditArgs) -> Result<()> {
     Ok(())
 }
 
+/// 出力先が入力のどれかと同じファイルなら止める (出力の書き出しで入力を壊さないため)。
+pub(super) fn reject_same_file(output: &Path, inputs: &[(&str, &Path)]) -> Result<()> {
+    let resolved = resolve_output(output)?;
+    for (name, input) in inputs {
+        ensure!(resolved != resolve(input), "出力先 {} が {name} と同じです", output.display());
+    }
+    Ok(())
+}
+
 /// 出力先の親ディレクトリを作ってから [`resolve`] する。親が無いと同じファイルを指す別の書き方を見分けられない。
 fn resolve_output(path: &Path) -> Result<PathBuf> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
