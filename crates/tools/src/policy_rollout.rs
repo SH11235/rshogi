@@ -16,7 +16,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
-use rshogi_core::movegen::{MoveList, generate_legal};
+use rshogi_core::movegen::{MAX_MOVES, MoveList, generate_legal};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, EnteringKingRule, Move, RepetitionState};
 
@@ -190,8 +190,9 @@ fn choose_move(
     excluded: Option<usize>,
     cfg: &RolloutConfig,
     rng: &mut ChaCha8Rng,
-    scratch: &mut Vec<(usize, f32)>,
+    scratch: &mut [(usize, f32); MAX_MOVES],
 ) -> usize {
+    debug_assert!(logits.len() <= MAX_MOVES);
     debug_assert!(logits.len() > usize::from(excluded.is_some()));
     let allowed = |i: &usize| Some(*i) != excluded;
     let mut best = (0..logits.len()).find(allowed).unwrap_or(0);
@@ -209,18 +210,22 @@ fn choose_move(
         .map(|i| f64::from(logits[i] - max).exp())
         .sum();
 
-    scratch.clear();
+    let mut count = 0;
     for (i, &l) in logits.iter().enumerate().filter(|(i, _)| allowed(i)) {
         let p = f64::from(l - max).exp() / denom;
         if i == best || p >= f64::from(cfg.min_prob) {
-            scratch.push((i, l));
+            scratch[count] = (i, l);
+            count += 1;
         }
     }
-    if cfg.top_k > 0 && scratch.len() > cfg.top_k {
+    let scratch = &mut scratch[..count];
+    let scratch = if cfg.top_k > 0 && scratch.len() > cfg.top_k {
         // 同じ logit は添字の小さい手を優先し、出力を決定的にする。
-        scratch.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        scratch.truncate(cfg.top_k);
-    }
+        scratch.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        &scratch[..cfg.top_k]
+    } else {
+        scratch
+    };
 
     let inv_t = 1.0 / f64::from(cfg.temperature);
     let total: f64 = scratch.iter().map(|&(_, l)| (f64::from(l - max) * inv_t).exp()).sum();
@@ -400,7 +405,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
         }
 
         slots.par_iter_mut().enumerate().for_each_init(
-            || (Vec::with_capacity(600), Vec::with_capacity(600)),
+            || ([0.0; MAX_MOVES], [(0, 0.0); MAX_MOVES]),
             |(logits, scratch), (slot_idx, slot)| {
                 let Some(game) = slot.as_mut() else {
                     return;
@@ -408,8 +413,10 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                 let row = row_of_slot[slot_idx];
                 let stm = game.pos.side_to_move();
                 let row_logits = &policy[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM];
-                logits.clear();
-                logits.extend(game.legal.iter().map(|&mv| row_logits[make_move_label(mv, stm)]));
+                let logits = &mut logits[..game.legal.len()];
+                for (logit, &mv) in logits.iter_mut().zip(game.legal.iter()) {
+                    *logit = row_logits[make_move_label(mv, stm)];
+                }
                 let excluded = match game.avoid_first {
                     Some(avoid) if game.moves_from_seed == 0 && game.legal.len() > 1 => {
                         game.legal.iter().position(|&m| same_psv_move(m, avoid))
@@ -769,7 +776,7 @@ mod tests {
     #[test]
     fn choose_move_respects_min_prob_top_k_and_zero_temperature() {
         let mut rng = rollout_rng(1, 0, 2, 3);
-        let mut scratch = Vec::new();
+        let mut scratch = [(0, 0.0); MAX_MOVES];
         // softmax 後の確率はおよそ [0.665, 0.245, 0.090, 0.0003]
         let logits = [3.0f32, 2.0, 1.0, -5.0];
         let base = config();
@@ -801,6 +808,41 @@ mod tests {
         for _ in 0..200 {
             assert_ne!(choose_move(&logits, Some(0), &base, &mut rng, &mut scratch), 0);
         }
+    }
+
+    #[test]
+    fn choose_move_preserves_sampling_with_varying_candidate_counts() {
+        use sha2::{Digest, Sha256};
+
+        let mut rng = rollout_rng(1, 0, 2, 3);
+        let mut scratch = [(0, 0.0); MAX_MOVES];
+        let logits = [0.0; MAX_MOVES];
+        let mut digest = Sha256::new();
+        for (len, top_k, min_prob, excluded) in [
+            (logits.len(), 0, 0.0, None),
+            (logits.len(), 300, 0.0, Some(0)),
+            (logits.len(), 0, 1.0, Some(0)),
+            (logits.len(), 1, 0.0, None),
+            (2, 0, 0.0, Some(0)),
+            (1, 0, 0.0, None),
+            (logits.len(), 0, 0.0, None),
+        ] {
+            let cfg = RolloutConfig {
+                top_k,
+                min_prob,
+                ..config()
+            };
+            for _ in 0..64 {
+                let chosen = choose_move(&logits[..len], excluded, &cfg, &mut rng, &mut scratch);
+                assert!(chosen < len);
+                assert_ne!(Some(chosen), excluded);
+                digest.update((chosen as u32).to_le_bytes());
+            }
+        }
+        assert_eq!(
+            format!("{:x}", digest.finalize()),
+            "bb35a27c720c61c47f26d99e40c831fd740d6447070ec250fe47dae42cfccf37"
+        );
     }
 
     #[test]

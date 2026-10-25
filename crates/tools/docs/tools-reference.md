@@ -84,7 +84,7 @@ hardlink と Windows の大小文字違いも検査します。
 | `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](relabel_psv.md)） |
 | `rescore_psv` | PSV 評価値を NNUE / 外部エンジン / ONNX (dlshogi・AobaZero, GPU/TensorRT) で再計算。qsearch-leaf ラベル・policy 展開・レジューム・score sidecar (`--out-scores`、dlshogi ONNX / NNUE 静的評価) 対応。明示資源と PSV/score/expand/replacement/marker 群の alias を処理前・書込み直前に検査。LayerStacks routing の bucket 数不一致は拒否 (`--allow-routing-buckets-mismatch` で明示許可)（[詳細](rescore_psv.md)） |
 | `expand_psv_from_policy` | ONNX ポリシーによる PSV 展開。入力・モデル本体・ORT ライブラリへの出力 alias を拒否（[詳細](expand_psv_from_policy.md)） |
-| `policy_rollout_psv` | dlshogi 系 ONNX の policy で種の局面から指し進め、途中の局面を value 静的評価付き PSV に書き出す。seed で bit 一致、chunk 単位で再開（[詳細](policy_rollout_psv.md)） |
+| `policy_rollout_psv` | dlshogi 系 ONNX の policy で種の局面から指し進め、途中の局面を value 静的評価付き PSV に書き出す。温度・下限確率・上位手数を指定可。seed で bit 一致、chunk 単位で再開（[詳細](policy_rollout_psv.md)） |
 | `psv_gate_by_king_zone` | 入玉ドメインで base / override score を合成、または行対応 LSB-first mask bitmap を生成（[詳細](psv_gate_by_king_zone.md)） |
 | `psv_dual_label` | 通常 PSV の score 退避、DL score / LSB-first entered mask と dual-label PSV の相互変換・fail-closed 検証（[詳細](psv_dual_label.md)） |
 | `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順にストリーミング抽出（[詳細](psv_select_by_mask.md)） |
