@@ -149,6 +149,15 @@ pub(super) fn run(args: AuditArgs) -> Result<()> {
     Ok(())
 }
 
+/// 出力先が入力のどれかと同じファイルなら止める (出力の書き出しで入力を壊さないため)。
+pub(super) fn reject_same_file(output: &Path, inputs: &[(&str, &Path)]) -> Result<()> {
+    let resolved = resolve_output(output)?;
+    for (name, input) in inputs {
+        ensure!(resolved != resolve(input), "出力先 {} が {name} と同じです", output.display());
+    }
+    Ok(())
+}
+
 /// 出力先の親ディレクトリを作ってから [`resolve`] する。親が無いと同じファイルを指す別の書き方を見分けられない。
 fn resolve_output(path: &Path) -> Result<PathBuf> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -415,6 +424,58 @@ pub(super) fn master_values(
     Ok(values)
 }
 
+/// 伝播後のグラフから、局面の手ごとの伝播後の値を元データの手の順 (main が先頭) で取り出す。値の分からない
+/// 手は `None`。
+fn audited_moves(
+    graph: &Graph,
+    key: &str,
+    position: &MasterPosition,
+    known: &[bool],
+) -> Result<Vec<Option<AuditedMove>>> {
+    let Some(node) = graph.find(key) else {
+        return Ok(vec![None; position.moves.len()]);
+    };
+    let mut values = graph.moves(node);
+    position
+        .moves
+        .iter()
+        .zip(known)
+        .map(|(m, &k)| -> Result<_> {
+            if !k {
+                return Ok(None);
+            }
+            let value = values.next().context("内部エラー: 手の数が合いません")?;
+            let origin = if value.edge.is_some() {
+                Origin::Propagated
+            } else {
+                ensure!(m.eval.is_some(), "内部エラー: 値の無い手です: {key} {}", m.mv);
+                Origin::Eval
+            };
+            Ok(Some(AuditedMove {
+                mv: m.mv.clone(),
+                value: value.new,
+                origin,
+                eval: m.eval,
+            }))
+        })
+        .collect()
+}
+
+/// 元データを `audit` と同じ規則で伝播し、手ごとの伝播後の値を返す。`[i][j]` は元データの i 番目 (key 順) の
+/// 局面の j 番目の手 (main が先頭)。
+pub(super) fn evaluate(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    work: &Path,
+) -> Result<Vec<Vec<Option<AuditedMove>>>> {
+    let (graph, known, _, _) = propagate(positions, draws, work)?;
+    positions
+        .iter()
+        .zip(&known)
+        .map(|((key, position), known)| audited_moves(&graph, key, position, known))
+        .collect()
+}
+
 /// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
 pub(super) fn audit(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
@@ -438,35 +499,7 @@ pub(super) fn audit(
         if position.moves.len() >= 2 {
             summary.multi_move_positions[side] += 1;
         }
-        let audited: Vec<Option<AuditedMove>> = match graph.find(key) {
-            Some(node) => {
-                let mut values = graph.moves(node);
-                position
-                    .moves
-                    .iter()
-                    .zip(known)
-                    .map(|(m, &k)| -> Result<_> {
-                        if !k {
-                            return Ok(None);
-                        }
-                        let value = values.next().context("内部エラー: 手の数が合いません")?;
-                        let origin = if value.edge.is_some() {
-                            Origin::Propagated
-                        } else {
-                            ensure!(m.eval.is_some(), "内部エラー: 値の無い手です: {key} {}", m.mv);
-                            Origin::Eval
-                        };
-                        Ok(Some(AuditedMove {
-                            mv: m.mv.clone(),
-                            value: value.new,
-                            origin,
-                            eval: m.eval,
-                        }))
-                    })
-                    .collect::<Result<_>>()?
-            }
-            None => vec![None; position.moves.len()],
-        };
+        let audited = audited_moves(&graph, key, position, known)?;
         for m in audited.iter().flatten() {
             summary.known_moves += 1;
             match m.eval {

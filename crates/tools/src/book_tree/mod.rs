@@ -2,6 +2,7 @@
 
 mod audit;
 mod borrow;
+mod cycles;
 mod file_lock;
 mod journal;
 mod model;
@@ -9,6 +10,8 @@ mod output;
 mod paths;
 mod queue;
 mod register;
+mod rejoin;
+mod reply_graph;
 mod service;
 mod targets;
 #[cfg(test)]
@@ -117,12 +120,18 @@ pub struct MasterArgs {
 enum MasterCommand {
     /// 読みの値を book_backprop で伝播し、main が伝播後の 1 位から負ける局面を点検する
     Audit(audit::AuditArgs),
+    /// 相手の定跡に無い手で定跡に戻ると、戻った先の値が手前で期待した値より下がる所を一覧にする
+    Rejoin(rejoin::RejoinArgs),
+    /// 相手の合法手で定跡に戻る千日手の循環を、自分の手番の手を外して塞ぐ手の組を出す
+    Cycles(cycles::CyclesArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
 pub fn run_master(args: MasterArgs) -> Result<()> {
     match args.command {
         MasterCommand::Audit(args) => audit::run(args),
+        MasterCommand::Rejoin(args) => rejoin::run(args),
+        MasterCommand::Cycles(args) => cycles::run(args),
     }
 }
 

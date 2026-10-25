@@ -61,10 +61,10 @@ pub(super) struct Node {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Row(pub Vec<String>);
 impl Row {
-    fn get(&self, column: &str) -> &str {
+    pub(super) fn get(&self, column: &str) -> &str {
         &self.0[index(column)]
     }
-    fn set(&mut self, column: &str, value: String) {
+    pub(super) fn set(&mut self, column: &str, value: String) {
         self.0[index(column)] = value;
     }
 }
@@ -442,7 +442,7 @@ fn append(note: &str, text: String) -> String {
 }
 
 /// 局面ごとに main がちょうど 1 つ (丁寧な定跡の行だけでも 1 つ) で、同じ手の行が重ならないこと。
-fn validate(rows: &[Row]) -> Result<()> {
+pub(super) fn validate(rows: &[Row]) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut groups: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
     for row in rows {
