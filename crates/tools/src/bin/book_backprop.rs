@@ -304,7 +304,7 @@ mod tests {
         run_backprop(&in_path, &out_path, MergeMode::Min).unwrap();
         let book = rshogi_book::Book::from_path(&out_path, true).unwrap();
 
-        assert_eq!(book.len(), 2);
+        assert_eq!(book.position_count(), Some(2));
     }
 
     fn run_backprop(input: &Path, output: &Path, merge: MergeMode) -> Result<()> {

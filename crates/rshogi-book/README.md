@@ -20,12 +20,66 @@
 | `NarrowBook` | `false` | count 情報がある場合、出現率 10% 未満の手を除外する。 |
 | `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。同値は count 大、さらに同値なら USI 昇順。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
 | `ConsiderBookMoveCount` | `false` | `true` なら count 比例抽選する。全 count が 0 の場合は等確率。 |
-| `IgnoreBookPly` | `false` | ロード時に SFEN の手数を無視してキーを正規化する。 |
+| `IgnoreBookPly` | `false` | SFEN の手数を無視して局面を引く。 |
 | `FlippedBook` | `true` | miss 時に先後反転局面で再検索する。 |
+| `BookOnTheFly` | `false` | `true` なら定跡を丸読みせず、probe のたびにファイルから引く。大きい定跡向け。[下記](#大きい定跡を丸読みせずに使う-bookonthefly)参照。 |
 
 選択順序は、合法性検証、`BookDepthLimit`、`BookEvalDiff` / value 下限フィルタの後に
 `BookSelectValue` を評価します。`BookSelectValue=false` の場合は従来どおり
 `NarrowBook` を適用し、その後 `ConsiderBookMoveCount` または等確率抽選で選びます。
+
+## 大きい定跡を丸読みせずに使う (BookOnTheFly)
+
+既定 (`BookOnTheFly=false`) では `isready` で定跡ファイル全体をメモリに読み込みます。メモリと
+`isready` の時間が定跡の大きさに比例して増えるので、数百万局面を超える定跡では
+`setoption name BookOnTheFly value true` を使います。probe の結果 (候補手・value・depth・
+採択数と、各フィルタ・`IgnoreBookPly`・`FlippedBook`・`BookExploreFile` を通した後の選択) は
+丸読みと同じです。
+
+- **ファイルの並び**: `sfen` 行が SFEN の文字列 (バイト) 順に並んでいる必要があります。
+  rshogi の定跡ツールの出力と YaneuraOu の定跡書き出し (`.db`) はこの順です。手数の違う同じ
+  局面が隣り合っていれば、手数込みで並べても手数を除いて並べてもかまいません。`isready` で
+  ファイルの 1,024 か所を抜き取って並びを確かめ、逆順を見つけたら
+  `info string Error opening book file ...: book file is not sorted by SFEN ...` を出して
+  定跡なしで続けます。抜き取りなので局所的な乱れは見逃し得ます (その局面は引けません)。
+- **持つもの**: 開いたファイルハンドルだけで、索引は作りません。エンジンのメモリは定跡の
+  大きさによらず増えません。
+- **`isready`**: ファイルを開いて並びを抜き取りで確かめるだけで、定跡の大きさによらず短く
+  終わります。
+- **probe**: ファイル上の二分探索で局面を引きます。1 回の検索で読むのは、ファイルの大きさの
+  対数に比例する回数の小さな読み出し (1 回 8 KiB 程度) と、手数を除いて同じ局面の行
+  (手数違いの重複があればその全部) です。OS のファイルキャッシュに載っていればミリ秒未満で、
+  載っていないときは記憶装置のランダム読み出しの速さで決まります。ponder の補完や
+  `FlippedBook` の再検索で 1 回の probe に数回の検索をします。
+- **読み出しエラー**: probe 中の読み出しエラーや UTF-8 でない行は、その局面を定跡なしとして
+  `info string Error reading book file: ...` を出します。ponder を補うために子局面を引いて
+  いるときのエラーは何も出さず、予想手なしで bestmove を返します。丸読みはこの場合 `isready`
+  で読み込み自体が失敗します。
+- **`.ybb` (YaneuraOu のバイナリ定跡)** には対応していません。テキスト `.db` だけです。
+
+### 定跡ファイルの差し替え
+
+`BookOnTheFly=true` では `isready` のたびにファイルを開き直します。対局の合間に新しい定跡を
+置いて `isready` を送れば、次の対局から新しいファイルを引きます。
+
+- 差し替えは別名で書き出してから `mv` で置き換える (rename) か、別のファイル名にして
+  `BookFile` を変えます。開いているファイルをその場で上書きすると、次の `isready` までの
+  probe が書きかけの内容を読むことがあります。
+- Windows では開いているファイルの置き換えが失敗することがあります。その場合は別のファイル名に
+  して `BookFile` を変えてください。
+
+丸読み (`BookOnTheFly=false`) は、`BookFile` (解決後のパス) と `IgnoreBookPly` が前回と同じなら
+`isready` で読み直しません。同じパスのファイルを差し替えたときは、エンジンを起動し直すか
+`BookFile` を変えてください。
+
+### 丸読みとの一致の確かめ方
+
+実際の定跡ファイルで、全局面 (手数違いと先後反転を含む) の引いた結果と probe の選択が丸読みと
+一致することを次のテストで確かめられます。
+
+```bash
+RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- --ignored
+```
 
 ## 局面を指定した定跡手の乱択
 

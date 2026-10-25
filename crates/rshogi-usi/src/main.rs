@@ -177,9 +177,11 @@ struct UsiEngine {
     book_dir: String,
     /// IgnoreBookPly（末尾手数を無視して検索するか。定跡ロード時のキー正規化に使う）
     ignore_book_ply: bool,
+    /// BookOnTheFly（定跡を丸読みせず、probe のたびにファイルから引くか）
+    book_on_the_fly: bool,
     /// ロード済み定跡（isready 時にロード。BookFile=no_book なら None）
     book: Option<rshogi_book::Book>,
-    /// ロード済み定跡の識別子 `(解決済みパス, ignore_book_ply)`。再ロード要否の判定に使う
+    /// ロード済み定跡の識別子 `(解決済みパス, ignore_book_ply)`。丸読みの再ロード要否の判定に使う
     book_loaded_sig: Option<(String, bool)>,
     /// 定跡手抽選用の乱数源
     book_rng: rshogi_book::DefaultBookRng,
@@ -258,6 +260,7 @@ impl UsiEngine {
             book_explore: None,
             book_dir: "book".to_string(),
             ignore_book_ply: false,
+            book_on_the_fly: false,
             book: None,
             book_loaded_sig: None,
             book_rng: rshogi_book::DefaultBookRng::new(),
@@ -410,6 +413,7 @@ impl UsiEngine {
         println!("option name ConsiderBookMoveCount type check default false");
         println!("option name IgnoreBookPly type check default false");
         println!("option name FlippedBook type check default true");
+        println!("option name BookOnTheFly type check default false");
         for spec in SearchTuneParams::option_specs() {
             println!(
                 "option name {} type spin default {} min {} max {}",
@@ -543,7 +547,8 @@ impl UsiEngine {
     /// 定跡ファイルのロード（isready 時に実施）。
     ///
     /// BookFile=no_book なら何もしない。ロード失敗は info string でエラー出力し、
-    /// 定跡なし（bookless）で継続する。同一パス・同一 IgnoreBookPly なら再ロードしない。
+    /// 定跡なし（bookless）で継続する。丸読みは同一パス・同一 IgnoreBookPly なら再ロードしない。
+    /// BookOnTheFly は開き直しが軽いので isready のたびに開き直し、差し替えたファイルを拾う。
     fn maybe_load_book(&mut self) {
         if self.book_file == "no_book" || self.book_file.is_empty() {
             self.book = None;
@@ -556,6 +561,25 @@ impl UsiEngine {
         let resolved_str = resolved.to_string_lossy().into_owned();
         let sig = (resolved_str.clone(), self.ignore_book_ply);
 
+        if self.book_on_the_fly {
+            // 開いていたハンドルを先に閉じる（Windows で差し替え先を開けるように）。
+            self.book = None;
+            self.book_loaded_sig = None;
+            match rshogi_book::Book::open_on_the_fly(&resolved, self.ignore_book_ply) {
+                Ok(book) => {
+                    println!(
+                        "info string book opened on the fly: {resolved_str} ({} bytes)",
+                        book.on_the_fly_file_len().unwrap_or(0)
+                    );
+                    self.book = Some(book);
+                }
+                Err(e) => {
+                    println!("info string Error opening book file {resolved_str}: {e}");
+                }
+            }
+            return;
+        }
+
         // 既ロード & 設定不変なら再ロード不要。
         if self.book.is_some() && self.book_loaded_sig.as_ref() == Some(&sig) {
             return;
@@ -563,7 +587,10 @@ impl UsiEngine {
 
         match rshogi_book::Book::from_path(&resolved, self.ignore_book_ply) {
             Ok(book) => {
-                println!("info string book loaded: {resolved_str} ({} positions)", book.len());
+                println!(
+                    "info string book loaded: {resolved_str} ({} positions)",
+                    book.position_count().unwrap_or(0)
+                );
                 self.book = Some(book);
                 self.book_loaded_sig = Some(sig);
             }
@@ -1344,6 +1371,9 @@ impl UsiEngine {
             }
             "FlippedBook" => {
                 self.book_options.flipped_book = value == "true" || value == "1";
+            }
+            "BookOnTheFly" => {
+                self.book_on_the_fly = value == "true" || value == "1";
             }
             _ => {
                 // 未知のオプションは無視
@@ -2142,6 +2172,60 @@ mod tests {
             "abc+custom,deep,use-lazy-evaluate"
         );
         assert_eq!(source_version("unknown", "deep", "custom"), "unknown");
+    }
+
+    #[test]
+    #[serial]
+    fn book_on_the_fly_reopens_on_isready_but_memory_book_does_not() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/book-on-the-fly-option-test.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let write_book = |mv: &str| {
+            let tmp = path.with_extension("db.tmp");
+            std::fs::write(
+                &tmp,
+                format!(
+                    "#YANEURAOU-DB2016 1.00\n\
+                     sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n\
+                     {mv} none 0 0 1\n"
+                ),
+            )
+            .unwrap();
+            std::fs::rename(&tmp, &path).unwrap();
+        };
+        let book_move = |engine: &UsiEngine| {
+            let mut position = Position::new();
+            position.set_hirate();
+            rshogi_book::probe(
+                engine.book.as_ref().unwrap(),
+                &position,
+                &engine.book_options,
+                &mut rshogi_book::DefaultBookRng::from_seed(0),
+                |_| {},
+            )
+            .unwrap()
+            .best_move
+            .to_usi()
+        };
+
+        for (on_the_fly, after_replace) in [("true", "2g2f"), ("false", "7g7f")] {
+            write_book("7g7f");
+            let mut engine = UsiEngine::new();
+            engine.cmd_setoption(&[
+                "setoption",
+                "name",
+                "BookFile",
+                "value",
+                path.to_str().unwrap(),
+            ]);
+            engine.cmd_setoption(&["setoption", "name", "BookOnTheFly", "value", on_the_fly]);
+            engine.maybe_load_book();
+            assert_eq!(book_move(&engine), "7g7f");
+            write_book("2g2f");
+            engine.maybe_load_book();
+            assert_eq!(book_move(&engine), after_replace, "BookOnTheFly={on_the_fly}");
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

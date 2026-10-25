@@ -145,6 +145,38 @@ fn book_hit_returns_bestmove_from_db() {
 }
 
 #[test]
+fn book_on_the_fly_hit_and_unsorted_rejection() {
+    let db = "#YANEURAOU-DB2016 1.00\n\
+              sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n\
+              7g7f 3c3d 30 16 100\n\
+              sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1\n\
+              3c3d 7g7f 0 16 1\n";
+    let unsorted = db.replace(" b - 1\n", " x - 1\n");
+    for (tag, contents, expected) in [("otf", db, true), ("otf_unsorted", &unsorted, false)] {
+        let path = write_temp_db(tag, contents);
+        let path_str = path.to_string_lossy();
+        let input = format!(
+            "{MATERIAL_INIT}\
+             setoption name BookFile value {path_str}\n\
+             setoption name BookOnTheFly value true\n\
+             isready\n\
+             position startpos\n\
+             go depth 6\n"
+        );
+        let stdout = run_engine(&input);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(stdout.contains("info string book opened on the fly"), expected, "{stdout}");
+        if expected {
+            assert_eq!(first_bestmove(&stdout), Some("bestmove 7g7f ponder 3c3d"), "{stdout}");
+        } else {
+            assert!(stdout.contains("not sorted by SFEN"), "{stdout}");
+            assert!(stdout.lines().any(|line| line.starts_with("info depth 6 ")), "{stdout}");
+        }
+    }
+}
+
+#[test]
 fn flipped_book_hit_on_one_sided_db() {
     // 片側正規化定跡: 後手番局面のみを flip した先手番の正準局面を登録。
     // 後手番局面 (2 手目、白番) を probe すると flip でヒットする。
