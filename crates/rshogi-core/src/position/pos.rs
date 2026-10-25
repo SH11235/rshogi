@@ -536,9 +536,12 @@ impl Position {
         self.cur_state().key()
     }
 
-    /// PASS 以外の合法手を指した後のキーを、局面を変更せずに計算する。
+    /// PASS 以外の合法手を指した後の [`Position::key`] を、局面を変更せずに計算する。
+    ///
+    /// `do_move` で局面を進める (利きや評価関数の差分も更新する) より軽いので、多くの手の行き先を
+    /// ハッシュで引くときに使う。PASS と非合法手を渡したときの値は意味を持たない。
     #[inline]
-    pub(crate) fn key_after(&self, m: Move) -> u64 {
+    pub fn key_after(&self, m: Move) -> u64 {
         let (board_key, hand_key) = self.keys_after(m);
         board_key ^ hand_key
     }

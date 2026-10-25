@@ -14,6 +14,14 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### ツール
+
+- `book_backprop` (と、同じ処理を使う `book_mine master audit` / `rejoin` / `cycles`) の定跡のグラフ作りを、
+  局面の塊ごとに並べて処理するようにした。出力は変わらない。rayon の全スレッドを使うので、
+  `RAYON_NUM_THREADS` で数を変えられる。
+- `book_mine master rejoin` / `cycles` に `--threads` (0 = 全コア) を足し、グラフ作り・先手と後手・
+  循環ごとの外し方を並べて解くようにした。出力はスレッド数によらない。
+
 ### USI エンジン
 
 - 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
@@ -24,6 +32,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### rshogi-core / ライブラリ利用者の移行
 
+- `Position::key_after` を公開した。合法手を指した後の `Position::key` を、局面を進めずに求める。
 - `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく
   `ProgressKpAbsWeights` を返す。係数の再設定・reset 後も取得済みの値を保持し、
   解放済みメモリへの参照を防ぐ。スライスを取る関数には `&weights` を渡す。

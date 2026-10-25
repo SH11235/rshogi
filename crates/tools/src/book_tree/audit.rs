@@ -10,6 +10,7 @@ use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
@@ -356,15 +357,17 @@ fn propagate(
     draws: DrawValues,
     work: &Path,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
-    for key in positions.keys() {
+    let keys: Vec<&String> = positions.keys().collect();
+    keys.par_iter().try_for_each(|key| -> Result<()> {
         let position = position_from_sfen(&format!("{key} 1"))
             .with_context(|| format!("key を局面として読めません: {key}"))?;
         // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
         ensure!(
-            strip_ply(&position.to_sfen()) == key,
+            strip_ply(&position.to_sfen()) == key.as_str(),
             "key が正規の SFEN (持ち駒の並びなど) ではありません: {key}"
         );
-    }
+        Ok(())
+    })?;
     let all_db = work.join("all.db");
     write_value_db(&all_db, positions, None)?;
     let all = read_graph(&all_db, BackpropOptions::default())?;
