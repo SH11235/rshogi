@@ -158,7 +158,7 @@ fn move_values(
     let evaluated = evaluate(positions, draws, work)?;
     Ok(positions
         .keys()
-        .zip(evaluated.moves)
+        .zip(evaluated)
         .map(|(key, moves)| (key.clone(), moves.into_iter().map(|m| m.map(|m| m.value)).collect()))
         .collect())
 }

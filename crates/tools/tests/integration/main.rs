@@ -19,6 +19,7 @@ mod rescore_output_safety;
 mod shuffle_psv_determinism;
 mod sprt_negative_nelo_args;
 mod spsa_async_integration;
+mod spsa_fischer_integration;
 mod spsa_game_records_integration;
 mod spsa_params_format;
 mod spsa_plot_output;

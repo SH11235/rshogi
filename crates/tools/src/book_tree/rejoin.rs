@@ -134,7 +134,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
     let evaluated = evaluate(&positions, draws, work.path())?;
     let values: HashMap<&str, Vec<Option<i32>>> = positions
         .keys()
-        .zip(&evaluated.moves)
+        .zip(&evaluated)
         .map(|(k, m)| (k.as_str(), m.iter().map(|m| m.as_ref().map(|m| m.value)).collect()))
         .collect();
     drop(evaluated);

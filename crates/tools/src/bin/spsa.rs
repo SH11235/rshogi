@@ -19,6 +19,7 @@ use rand_chacha::ChaCha8Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tools::selfplay::adjudication::{ResignRule, parse_agreement_rule};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::ScoreBound;
@@ -30,6 +31,9 @@ use tools::spsa_param_mapping::{
     MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, SPSA_PARAMS_FORMAT_HEADER,
     parse_param_line, register_unique_parameter, validate_spsa_params_format,
 };
+
+#[path = "spsa/nps_bench.rs"]
+mod nps_bench;
 
 #[path = "spsa/async_dispatch.rs"]
 mod async_dispatch;
@@ -253,9 +257,36 @@ struct Cli {
     #[arg(long, default_value_t = 320)]
     max_moves: u32,
 
-    /// タイムアウト判定マージン(ms)
+    /// タイムアウト判定マージン(ms)。`--nps-scaling` の倍率は掛けない (通信・回収のための絶対値)。
     #[arg(long, default_value_t = 1000)]
     timeout_margin_ms: u64,
+
+    /// async 専用: 両側の評価の一致による勝敗の裁定 (movecount=N,score=X)。勝ち側の自己視点が +X 以上、
+    /// 負け側の自己視点が -X 以下の状態が両側とも自分の直近 N 手で続いたら裁定する。既定 off。
+    #[arg(long, value_parser = parse_agreement_rule)]
+    adjudicate_agreement: Option<ResignRule>,
+
+    /// async + Fischer 専用: `--btime` / `--binc` を基準 NPS での時計とみなし、開始時に測った
+    /// この機械の NPS との比 (基準 ÷ 実測) を掛けて指す。
+    #[arg(long, default_value_t = false)]
+    nps_scaling: bool,
+
+    /// `--nps-scaling` の基準 NPS (1 thread あたり、全 slot 同時)。既定 350000。
+    #[arg(long)]
+    reference_nps: Option<u64>,
+
+    /// `--nps-scaling` の足切り。実測 NPS が基準のこの割合未満なら起動を拒否する。既定 0.5。
+    #[arg(long)]
+    min_nps_ratio: Option<f64>,
+
+    /// async 専用: 時計の時間切れ (reason `timeout`) で終わった局の率の上限 (既定 0.005)。
+    /// 超えたら snapshot を残して止める。
+    #[arg(long)]
+    max_timeout_rate: Option<f64>,
+
+    /// async 専用: 時間切れの率を出す分母の下限 (局数、既定 1000)。これより少ない間は、この局数で割る。
+    #[arg(long)]
+    timeout_rate_min_games: Option<u32>,
 
     /// 開始局面ファイル
     #[arg(long)]
@@ -400,6 +431,8 @@ fn validate_cli_finite(cli: &Cli) -> Result<()> {
         ("mobility", Some(cli.mobility)),
         ("early-stop-avg-abs-update-threshold", cli.early_stop_avg_abs_update_threshold),
         ("early-stop-result-variance-threshold", cli.early_stop_result_variance_threshold),
+        ("min-nps-ratio", cli.min_nps_ratio),
+        ("max-timeout-rate", cli.max_timeout_rate),
     ] {
         if let Some(value) = value
             && !value.is_finite()
@@ -3301,6 +3334,9 @@ fn build_game_setup(cli: &Cli) -> (GameConfig, TimeControl) {
         resign_rule: None,
         win_rule: None,
         draw_rule: None,
+        agreement_rule: cli.adjudicate_agreement,
+        // Fischer の async では pair ごとの時計から決めて上書きする。
+        game_time_limit_ms: None,
         max_moves: cli.max_moves,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
@@ -3481,6 +3517,12 @@ fn main() -> Result<()> {
                 ("--max-lag", cli.max_lag.is_some()),
                 ("--max-pair-attempts", cli.max_pair_attempts.is_some()),
                 ("--snapshot-interval", cli.snapshot_interval.is_some()),
+                ("--adjudicate-agreement", cli.adjudicate_agreement.is_some()),
+                ("--nps-scaling", cli.nps_scaling),
+                ("--reference-nps", cli.reference_nps.is_some()),
+                ("--min-nps-ratio", cli.min_nps_ratio.is_some()),
+                ("--max-timeout-rate", cli.max_timeout_rate.is_some()),
+                ("--timeout-rate-min-games", cli.timeout_rate_min_games.is_some()),
             ] {
                 if given {
                     bail!("{flag} は --dispatch async 専用です");

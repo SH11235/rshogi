@@ -166,7 +166,7 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
     warn_unknown_version(&args.reading.engine, &dst.engine_version);
-    let source = read_source(&args.from_journal, args.fingerprint.as_deref())?;
+    let source = read_source(&args.from_journal, args.fingerprint.as_deref(), |_| true)?;
     // hard link はパスを正規化しても別に見えるので、ファイルの実体 (device と inode 等) でも比べる。
     if args.journal.try_exists()?
         && (std::fs::canonicalize(&args.journal)? == std::fs::canonicalize(&args.from_journal)?
@@ -391,15 +391,15 @@ mod tests {
         bytes.extend_from_slice(b"{partial");
         std::fs::write(&src_path, &bytes).unwrap();
 
-        assert!(read_source(&src_path, None).is_err());
-        let source = read_source(&src_path, Some(&src.fingerprint)).unwrap();
+        assert!(read_source(&src_path, None, |_| true).is_err());
+        let source = read_source(&src_path, Some(&src.fingerprint), |_| true).unwrap();
         assert!(source.ignored_tail);
         assert_eq!(source.readings.len(), 2);
         assert_eq!(source.settings.engine_version.as_deref(), Some(VERSION_A));
         assert_eq!(std::fs::read(&src_path).unwrap(), bytes);
         {
             let _writer = LockedFile::open(&src_path).unwrap();
-            assert!(read_source(&src_path, Some(&src.fingerprint)).is_err());
+            assert!(read_source(&src_path, Some(&src.fingerprint), |_| true).is_err());
         }
 
         let dst = settings(&b, Some(VERSION_A));
@@ -465,6 +465,28 @@ mod tests {
     }
 
     #[test]
+    fn filtered_out_positions_still_reject_conflicting_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = machine(dir.path(), "a", "build a", "model");
+        let src = settings(&a, None);
+        let path = dir.path().join("src.jsonl");
+        let kept = reading(1, &src, "resign");
+        let keep = |key: &str| key == kept.key;
+        let lines = |second: &str| {
+            [
+                record_json(&src, &reading(0, &src, "resign")),
+                record_json(&src, &reading(0, &src, second)),
+                record_json(&src, &kept),
+            ]
+        };
+        write_lines(&path, &lines("resign"));
+        let source = read_source(&path, None, keep).unwrap();
+        assert_eq!(source.readings, std::slice::from_ref(&kept));
+        write_lines(&path, &lines("win"));
+        assert!(read_source(&path, None, keep).is_err());
+    }
+
+    #[test]
     fn every_selected_record_must_match_its_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
@@ -476,9 +498,9 @@ mod tests {
         tampered.nodes = 200;
         let lying = record_json(&tampered, &reading(1, &tampered, "resign"));
         write_lines(&path, &[good.clone(), lying.clone()]);
-        assert!(read_source(&path, None).is_err());
+        assert!(read_source(&path, None, |_| true).is_err());
         write_lines(&path, &[lying]);
-        assert!(read_source(&path, None).is_err());
+        assert!(read_source(&path, None, |_| true).is_err());
 
         // モデルを別のパスへ移した後の行は同じ条件として受け入れる。
         let moved_dir = dir.path().join("moved");
@@ -501,7 +523,7 @@ mod tests {
                 record_json(&moved, &reading(3, &moved, "resign")),
             ],
         );
-        assert_eq!(read_source(&path, None).unwrap().readings.len(), 2);
+        assert_eq!(read_source(&path, None, |_| true).unwrap().readings.len(), 2);
         let mut changed_draw = src.clone();
         changed_draw.options.insert("DrawValueBlack".into(), "0".into());
         write_lines(
@@ -511,7 +533,7 @@ mod tests {
                 record_json(&changed_draw, &reading(3, &src, "resign")),
             ],
         );
-        assert!(read_source(&path, None).is_err());
+        assert!(read_source(&path, None, |_| true).is_err());
 
         // 選ばない条件の版の食い違いは問わない。
         let other = Settings::new(&reading_args(&a, 300, &[])).unwrap();
@@ -521,14 +543,14 @@ mod tests {
             record_json(&s, &reading(2, &s, "resign"))
         };
         write_lines(&path, &[good.clone(), versioned(VERSION_A), versioned(VERSION_B)]);
-        assert_eq!(read_source(&path, Some(&src.fingerprint)).unwrap().readings.len(), 1);
-        assert!(read_source(&path, Some(&other.fingerprint)).is_err());
+        assert_eq!(read_source(&path, Some(&src.fingerprint), |_| true).unwrap().readings.len(), 1);
+        assert!(read_source(&path, Some(&other.fingerprint), |_| true).is_err());
 
         std::fs::write(&path, "").unwrap();
-        let err = read_source(&path, None).err().unwrap().to_string();
+        let err = read_source(&path, None, |_| true).err().unwrap().to_string();
         assert!(err.contains("取り込み元の台帳が空です"), "{err}");
         let missing = dir.path().join("missing.jsonl");
-        let err = format!("{:#}", read_source(&missing, None).err().unwrap());
+        let err = format!("{:#}", read_source(&missing, None, |_| true).err().unwrap());
         assert!(err.contains("missing.jsonl"), "{err}");
     }
 

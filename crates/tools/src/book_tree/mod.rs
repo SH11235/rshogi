@@ -1,6 +1,7 @@
 //! 条件付き台帳を共有する、独立した定跡の木の生成。
 
 mod audit;
+mod borrow;
 mod cycles;
 mod file_lock;
 mod journal;
@@ -16,6 +17,8 @@ mod targets;
 #[cfg(test)]
 mod tests;
 mod transfer;
+
+pub use borrow::{BorrowArgs, run as run_borrow};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
