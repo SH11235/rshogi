@@ -16,7 +16,7 @@ use super::alpha_beta::{
 use super::qsearch::qsearch;
 use super::search_helpers::{
     clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_pop, nnue_push,
-    set_cont_history_for_move,
+    prefetch_cont_correction, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
@@ -528,6 +528,7 @@ where
         let cont_hist_to = mv.to();
 
         st.stack[ply as usize].current_move = mv;
+        prefetch_cont_correction(st, ply, mv);
         do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
         set_cont_history_for_move(
             st,

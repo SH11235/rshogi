@@ -832,6 +832,40 @@ impl CorrectionHistory {
         unsafe { table.as_ref().get_unchecked(pc.index()).get_unchecked(to.index()).get() }
     }
 
+    /// 事前に選択済みのcontinuation correction tableの`[pc][to]`をキャッシュへ先読みする。
+    ///
+    /// # Safety
+    ///
+    /// `table`は生存中の`CorrectionHistory::continuation_table()`を指していなければならない。
+    #[inline]
+    pub unsafe fn prefetch_continuation_from_table(
+        table: NonNull<CorrectionPieceToHistory>,
+        pc: Piece,
+        to: Square,
+    ) {
+        // SAFETY: 呼出側がtableの生存期間を保証し、Piece/Square indexは各NUM未満。
+        let entry_ptr =
+            unsafe { table.as_ref().get_unchecked(pc.index()).get_unchecked(to.index()) }
+                as *const StatsEntry<CORRECTION_HISTORY_LIMIT>;
+
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: entry_ptr は生存中のエントリを指し、prefetch は内容を変更しない。
+        unsafe {
+            use std::arch::x86_64::_mm_prefetch;
+            _mm_prefetch(entry_ptr as *const i8, 3);
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: entry_ptr は生存中のエントリを指し、prefetch は内容を変更しない。
+        unsafe {
+            use std::arch::aarch64::_prefetch;
+            _prefetch(entry_ptr as *const i8, 0, 3);
+        }
+
+        #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
+        let _ = entry_ptr;
+    }
+
     #[inline]
     pub fn update_continuation(
         &mut self,
