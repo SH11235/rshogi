@@ -39,7 +39,7 @@ cargo run --release -p tools --bin policy_rollout_psv -- \
 
 | フィールド | 値 |
 |---|---|
-| sfen | 指し進めの途中の局面。種の局面そのものは書きません (同じ種から複数本を始めると重複するため) |
+| sfen | 種の局面と指し進めの途中の局面。種の局面は同じ種から複数本を始めても 1 回だけ書きます |
 | score | value head の勝率を手番視点 cp に変換した値 (`cp = scale * ln(p / (1 - p))`、scale は `--onnx-eval-scale`) |
 | move16 | その局面で抽選した手 |
 | game_ply | 種の game_ply に、種から指した手数を足した値 |

@@ -98,6 +98,8 @@ struct Game {
     rng: ChaCha8Rng,
     game_ply: u16,
     moves_from_seed: u32,
+    /// 種の局面も書き出す (同じ種の指し進めのうち 1 本だけが持つ)
+    emit_seed: bool,
     legal: MoveList,
     ending: Option<Ending>,
     records: Vec<(PackedSfenValue, Color)>,
@@ -333,6 +335,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                     rng: rollout_rng(cfg.seed, first_seed_index + i as u64, r),
                     game_ply: seed_psv.game_ply,
                     moves_from_seed: 0,
+                    emit_seed: r == 0,
                     legal: MoveList::new(),
                     ending: None,
                     records: Vec::new(),
@@ -386,8 +389,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                 logits.extend(game.legal.iter().map(|&mv| row_logits[make_move_label(mv, stm)]));
                 let mv = game.legal.as_slice()[choose_move(logits, cfg, &mut game.rng, scratch)];
 
-                // 種の局面は書き出さない (同じ種から複数本を始めると重複するため)。
-                if game.moves_from_seed > 0 {
+                if game.moves_from_seed > 0 || game.emit_seed {
                     let score = values[row].clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX));
                     game.records.push((
                         PackedSfenValue {
@@ -645,8 +647,14 @@ mod tests {
             let mv = crate::packed_sfen::psv_move16_to_move(r.move16);
             assert!(crate::packed_sfen::is_legal_psv_move(&pos, mv));
         }
-        // 種の局面 (ply 1 / 3 / 20) 自体は出力しない
-        assert!(recs.iter().all(|r| r.game_ply > 1));
+        // 種の局面は rollouts_per_seed 本に対して 1 回だけ出力する
+        for seed in seeds() {
+            let n = recs
+                .iter()
+                .filter(|r| r.sfen == seed.sfen && r.game_ply == seed.game_ply)
+                .count();
+            assert_eq!(n, 1);
+        }
     }
 
     #[test]
@@ -660,6 +668,7 @@ mod tests {
             rng: rollout_rng(0, 0, 0),
             game_ply: 10,
             moves_from_seed: 1,
+            emit_seed: false,
             legal: MoveList::new(),
             ending: None,
             records: vec![
