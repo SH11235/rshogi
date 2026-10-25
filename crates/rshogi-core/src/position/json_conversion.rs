@@ -1,4 +1,4 @@
-use crate::movegen::{MoveList, generate_legal_all_with_pass};
+use crate::movegen::{MoveList, generate_legal_all_with_pass, to_legal_move_by_rules};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
 };
@@ -40,7 +40,7 @@ impl Position {
         }
     }
 
-    /// JSON形式から局面を復元する。
+    /// JSON形式から局面を復元する。玉は各色 0〜1 枚 (玉の無い側がある局面も受け付ける)。
     pub fn from_board_state_json(json: &BoardStateJson) -> Result<Self, String> {
         if json.cells.len() != 9 {
             return Err(format!("cells must have 9 rows, but got {}", json.cells.len()));
@@ -68,9 +68,15 @@ impl Position {
                         return Err(format!("duplicated piece on square {}", cell.square));
                     }
                     if piece.piece_type() == PieceType::King {
-                        match piece.color() {
-                            Color::Black => black_king = Some(square),
-                            Color::White => white_king = Some(square),
+                        let king = match piece.color() {
+                            Color::Black => &mut black_king,
+                            Color::White => &mut white_king,
+                        };
+                        if king.replace(square).is_some() {
+                            return Err(format!(
+                                "{} has more than one king in board state",
+                                color_to_owner(piece.color())
+                            ));
                         }
                     }
                     position.put_piece(piece, square);
@@ -78,15 +84,19 @@ impl Position {
             }
         }
 
-        position.king_square[Color::Black.index()] =
-            black_king.ok_or_else(|| "sente king is missing in board state".to_string())?;
-        position.king_square[Color::White.index()] =
-            white_king.ok_or_else(|| "gote king is missing in board state".to_string())?;
+        // 玉の無い側の king_square は既定の升のまま (`set_sfen` と同じ)
+        if let Some(square) = black_king {
+            position.king_square[Color::Black.index()] = square;
+        }
+        if let Some(square) = white_king {
+            position.king_square[Color::White.index()] = square;
+        }
 
         position.hand[Color::Black.index()] = hand_from_json(&json.hands.sente)?;
         position.hand[Color::White.index()] = hand_from_json(&json.hands.gote)?;
 
         position.finalize_after_population().map_err(|e| e.to_string())?;
+        position.clear_checkers_without_king();
 
         Ok(position)
     }
@@ -103,6 +113,9 @@ impl Position {
     }
 
     /// 棋譜を厳密に適用し、不正手で停止する。合法な不成も省略せず受理する。
+    ///
+    /// 玉の無い側がある局面も受け付ける (合法手は
+    /// [`crate::movegen::generate_legal_allowing_missing_kings`] と同じ)。
     ///
     /// # Arguments
     /// * `sfen` - 開始局面のSFEN
@@ -124,6 +137,15 @@ impl Position {
         if let Some((black, white)) = pass_rights {
             position.enable_pass_rights(black, white);
         }
+        let mut missing_king = false;
+        for color in [Color::Black, Color::White] {
+            match position.pieces(color, PieceType::King).count() {
+                0 => missing_king = true,
+                1 => {}
+                _ => return Err(format!("{} has more than one king", color_to_owner(color))),
+            }
+        }
+        position.clear_checkers_without_king();
 
         let mut applied: Vec<String> = Vec::with_capacity(moves.len());
         let mut error: Option<String> = None;
@@ -133,16 +155,20 @@ impl Position {
                 Move::from_usi_strict(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
             let parsed_raw = parsed.raw();
 
-            let mut list = MoveList::new();
-            generate_legal_all_with_pass(&position, &mut list);
-            let is_legal = list.iter().any(|candidate| candidate.raw() == parsed_raw);
+            let is_legal = if missing_king {
+                // 1 手ずつ総当たりの規則で確かめる (全合法手を作るより軽い)
+                to_legal_move_by_rules(&mut position, parsed).is_some()
+            } else {
+                let mut list = MoveList::new();
+                generate_legal_all_with_pass(&position, &mut list);
+                list.iter().any(|candidate| candidate.raw() == parsed_raw)
+            };
             if !is_legal {
                 error = Some(format!("illegal move: {mv}"));
                 break;
             }
 
-            let gives_check = position.gives_check(parsed);
-            position.do_move(parsed, gives_check);
+            position.do_move_allowing_missing_kings(parsed);
             applied.push(parsed.to_usi());
         }
 
@@ -615,5 +641,59 @@ mod tests {
         );
         assert!(result.error.is_some());
         assert!(result.error.unwrap().contains("illegal move"));
+    }
+
+    #[test]
+    fn test_replay_moves_strict_without_attacker_king() {
+        // 受け方の玉 2一 の利きが、玉の無い攻め方の既定の升 1一 に届く局面
+        let sfen = "7k1/9/9/9/9/9/9/9/9 b G 1";
+        let moves = ["G*2b".to_string()];
+        let result = Position::replay_moves_strict(sfen, &moves, None).unwrap();
+        assert_eq!(result.error, None);
+        assert_eq!(result.applied, moves);
+        // 受け方の玉は、利きの無い金を取れて、利きのある升へは逃げられない
+        let moves = ["G*3b".to_string(), "2a3b".to_string()];
+        let result = Position::replay_moves_strict(sfen, &moves, None).unwrap();
+        assert_eq!(result.error, None);
+        let moves = ["G*2b".to_string(), "2a1b".to_string(), "2b2a".to_string()];
+        let result = Position::replay_moves_strict(sfen, &moves, None).unwrap();
+        assert_eq!(result.error, Some("illegal move: 2a1b".to_string()));
+        assert_eq!(result.applied, ["G*2b"]);
+    }
+
+    #[test]
+    fn test_replay_moves_strict_with_pass_without_attacker_king() {
+        let sfen = "7k1/9/9/9/9/9/9/9/9 b G 1";
+        let moves = ["pass".to_string(), "2a3a".to_string(), "G*3b".to_string()];
+        let result = Position::replay_moves_strict(sfen, &moves, Some((1, 1))).unwrap();
+        assert_eq!(result.error, None);
+        assert_eq!(result.applied, moves);
+        let result = Position::replay_moves_strict(sfen, &moves, None).unwrap();
+        assert_eq!(result.error, Some("illegal move: pass".to_string()));
+    }
+
+    #[test]
+    fn test_replay_moves_strict_rejects_two_kings_of_one_side() {
+        let result = Position::replay_moves_strict("9/9/9/9/9/9/9/9/K7K b - 1", &[], None);
+        assert_eq!(result.unwrap_err(), "sente has more than one king");
+    }
+
+    #[test]
+    fn test_json_accepts_missing_king_and_rejects_two_kings() {
+        let mut expected = Position::new();
+        // 受け方の玉 2一 の利きが、玉の無い先手の既定の升 1一 に届く
+        expected.set_sfen("7k1/9/9/9/9/9/9/9/9 b G 1").unwrap();
+        let json = expected.to_board_state_json();
+        let restored = Position::from_board_state_json(&json).unwrap();
+        assert_eq!(restored.to_sfen(), expected.to_sfen());
+        assert!(!restored.in_check());
+
+        let mut two_kings = json.clone();
+        let gote_king = json.cells[0].iter().find_map(|cell| cell.piece.clone());
+        two_kings.cells[8][0].piece = gote_king;
+        assert_eq!(
+            Position::from_board_state_json(&two_kings).err().as_deref(),
+            Some("gote has more than one king in board state")
+        );
     }
 }

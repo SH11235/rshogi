@@ -1105,6 +1105,16 @@ impl Position {
         self.do_move_impl::<false>(m, gives_check)
     }
 
+    /// 手番側の玉が無ければ、`checkers` を消す。
+    ///
+    /// `set_sfen` などの局面の読み込みは、玉の無い側の既定の升 (`king_square`) への利きを
+    /// 王手として記録する。玉の省略を許す入力局面では、読み込んだ直後に呼ぶ。
+    pub fn clear_checkers_without_king(&mut self) {
+        if self.pieces(self.side_to_move, PieceType::King).is_empty() {
+            self.cur_state_mut().checkers = Bitboard::EMPTY;
+        }
+    }
+
     /// 玉の省略を許す入力局面で、検証済みの指し手を実行する。
     ///
     /// 各色の玉は0〜1枚とし、駒の在庫、移動・成り・手駒・実在する玉の安全、
@@ -1113,10 +1123,21 @@ impl Position {
     /// 相手玉への全利きから再計算し、玉のない側への王手は記録しない。
     /// 通常の探索では `do_move` を使う。
     pub fn do_move_with_missing_kings(&mut self, m: Move) -> DirtyPiece {
-        if self.pieces(self.side_to_move, PieceType::King).is_empty() {
-            self.cur_state_mut().checkers = Bitboard::EMPTY;
-        }
+        self.clear_checkers_without_king();
         self.do_move_impl::<true>(m, false)
+    }
+
+    /// 合法と確かめた指し手を実行する。玉の無い側があれば [`Self::do_move_with_missing_kings`]、
+    /// 両方の玉があれば [`Self::do_move`] で指す。棋譜の再生や UI 向けで、探索では使わない。
+    pub fn do_move_allowing_missing_kings(&mut self, m: Move) -> DirtyPiece {
+        if self.pieces(Color::Black, PieceType::King).is_empty()
+            || self.pieces(Color::White, PieceType::King).is_empty()
+        {
+            self.do_move_with_missing_kings(m)
+        } else {
+            let gives_check = self.gives_check(m);
+            self.do_move(m, gives_check)
+        }
     }
 
     fn do_move_impl<const ALLOW_MISSING_KINGS: bool>(

@@ -388,7 +388,7 @@ impl NoAttackerKing {
         let attacker = pos.side_to_move();
         debug_assert!(pos.pieces(attacker, PieceType::King).is_empty());
         // 既定の升への受け方の利きが、攻め方への王手として記録されていることがある
-        pos.state_mut().checkers = Bitboard::EMPTY;
+        pos.clear_checkers_without_king();
         Self { pos, attacker }
     }
 
@@ -551,7 +551,7 @@ impl MateState for NoAttackerKing {
 }
 
 /// 王手の間の升 `between` のどこかに、二歩にならずに歩を打てるか (行き所の無い段は気にしない)
-fn pawn_can_interpose(pos: &Position, defender: Color, between: crate::bitboard::Bitboard) -> bool {
+fn pawn_can_interpose(pos: &Position, defender: Color, between: Bitboard) -> bool {
     let pawns = pos.pieces(defender, PieceType::Pawn);
     let mut squares = between;
     while !squares.is_empty() {

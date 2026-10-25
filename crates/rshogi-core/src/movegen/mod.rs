@@ -6,11 +6,13 @@
 //! - `MoveList`: 固定長バッファを使った指し手リスト
 //! - `generate_non_evasions` / `generate_evasions` / `generate_all`: 王手の有無に応じた pseudo-legal 手生成
 //! - `generate_legal`: `Position::is_legal` でフィルタした完全合法手生成
+//! - `generate_legal_allowing_missing_kings`: 玉の無い側がある局面も扱う合法手 (棋譜の検証・UI 向け)
 //!
 //! `generate_non_evasions` は「王手がかかっていない局面」でのみ、
 //! `generate_evasions` は「王手がかかっている局面」でのみ呼び出すことを前提とする。
 
 mod generator;
+mod missing_kings;
 mod movelist;
 mod types;
 
@@ -19,5 +21,7 @@ pub use generator::{
     generate_legal_all_with_pass, generate_legal_with_pass, generate_non_evasions,
     generate_with_type, is_legal_with_pass,
 };
+pub use missing_kings::generate_legal_allowing_missing_kings;
+pub(crate) use missing_kings::{legal_moves_by_rules, to_legal_move_by_rules};
 pub use movelist::MoveList;
 pub use types::{ExtMove, ExtMoveBuffer, GenType, MAX_MOVES};

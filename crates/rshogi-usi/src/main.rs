@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
-use rshogi_core::bitboard::Bitboard;
 use rshogi_core::eval::{
     DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel, disable_material,
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
@@ -1413,7 +1412,7 @@ impl UsiEngine {
                 "SFEN must contain at most one king per side"
             );
         }
-        Self::clear_checkers_without_king(&mut candidate);
+        candidate.clear_checkers_without_king();
 
         if idx < tokens.len() && tokens[idx] == "passrights" {
             idx += 1;
@@ -1454,13 +1453,6 @@ impl UsiEngine {
         }
         *position = candidate;
         Ok(())
-    }
-
-    fn clear_checkers_without_king(position: &mut Position) {
-        // 玉のない側の king_square は仮の升なので、入力検証の王手情報には使わない。
-        if position.pieces(position.side_to_move(), PieceType::King).is_empty() {
-            position.state_mut().checkers = Bitboard::EMPTY;
-        }
     }
 
     fn is_legal_position_move(position: &Position, mv: Move) -> bool {
@@ -2484,7 +2476,7 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 .unwrap_or_else(|err| panic!("{line}: {err}"));
                 let mut fresh = Position::new();
                 fresh.set_sfen(&position.to_sfen()).unwrap();
-                UsiEngine::clear_checkers_without_king(&mut fresh);
+                fresh.clear_checkers_without_king();
                 assert_eq!(position.state().checkers, fresh.state().checkers, "{line}");
                 assert_eq!(position.key(), fresh.key(), "{line}");
                 assert_eq!(position.state().continuous_check, continuous_check, "{line}");
@@ -2539,7 +2531,7 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 position.undo_move(Move::from_usi_strict(token).unwrap());
                 let mut fresh = Position::new();
                 fresh.set_sfen(&position.to_sfen()).unwrap();
-                UsiEngine::clear_checkers_without_king(&mut fresh);
+                fresh.clear_checkers_without_king();
                 assert_eq!(position.state().checkers, fresh.state().checkers);
             }
             assert_eq!(position.to_sfen(), sfen);
