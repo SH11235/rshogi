@@ -118,6 +118,7 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,
+        shared: &worker.shared_histories,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,
         max_moves_to_draw: worker.max_moves_to_draw,

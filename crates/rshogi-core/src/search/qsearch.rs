@@ -384,7 +384,7 @@ pub(super) fn qsearch<const NT: u8>(
         // next_move の呼び出しを囲むブロックの終わりで破棄され、下の再帰呼び出しの間は生存しない。
         let mv = {
             let h = unsafe { ctx.history.as_ref_unchecked() };
-            mp.next_move(pos, h)
+            mp.next_move(pos, h, ctx.shared)
         };
         if mv == Move::NONE {
             break;

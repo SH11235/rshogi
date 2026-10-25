@@ -2,8 +2,8 @@
 use crate::eval::EvalHash;
 use crate::position::Position;
 use crate::search::{
-    ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, TimeManagement,
-    history::{ContinuationHistory, PawnHistory},
+    ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, SharedHistories,
+    TimeManagement, history::ContinuationHistory,
 };
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, DEPTH_QS, Move, Piece, Square, Value};
@@ -83,7 +83,7 @@ fn observe_completed_node(
     let pc = best.moved_piece_after();
     let to = best.to();
     let us = pos.side_to_move();
-    let pawn_idx = pos.pawn_history_index();
+    let pawn_idx = worker.shared_histories.pawn_history_index(pos.pawn_key());
     let capture = pos.capture_stage(best);
     let captured = capture.then(|| pos.piece_on(to).piece_type());
     // SAFETY: 探索していない間だけ owner の読み取り参照を保持する。
@@ -92,7 +92,7 @@ fn observe_completed_node(
         (
             h.tt_move_history.get(),
             h.main_history.get(us, best),
-            h.pawn_history.get(pawn_idx, pc, to),
+            worker.shared_histories.pawn_history(pawn_idx, pc, to),
             keys.map(|key| {
                 h.continuation_history[key.in_check as usize][key.capture as usize]
                     .get(key.piece, key.to, pc, to)
@@ -107,7 +107,7 @@ fn observe_completed_node(
     let original_before = {
         let h = unsafe { worker.history.as_ref_unchecked() };
         (
-            h.pawn_history.get(pawn_idx, original_pc, to),
+            worker.shared_histories.pawn_history(pawn_idx, original_pc, to),
             keys.map(|key| {
                 h.continuation_history[key.in_check as usize][key.capture as usize].get(
                     key.piece,
@@ -143,10 +143,10 @@ fn observe_completed_node(
     if let Some(pt) = captured {
         assert!(h.capture_history.get(pc, to, pt) > before.5.unwrap());
         assert_eq!(h.main_history.get(us, best), before.1);
-        assert_eq!(h.pawn_history.get(pawn_idx, pc, to), before.2);
+        assert_eq!(worker.shared_histories.pawn_history(pawn_idx, pc, to), before.2);
     } else {
         assert!(h.main_history.get(us, best) > before.1);
-        assert!(h.pawn_history.get(pawn_idx, pc, to) > before.2);
+        assert!(worker.shared_histories.pawn_history(pawn_idx, pc, to) > before.2);
     }
     for (i, key) in keys.iter().enumerate() {
         let after = h.continuation_history[key.in_check as usize][key.capture as usize]
@@ -164,7 +164,10 @@ fn observe_completed_node(
     if best.is_promotion() {
         let original_pc = pos.moved_piece(best);
         assert_ne!(original_pc, pc);
-        assert_eq!(h.pawn_history.get(pawn_idx, original_pc, to), original_before.0);
+        assert_eq!(
+            worker.shared_histories.pawn_history(pawn_idx, original_pc, to),
+            original_before.0
+        );
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(
                 h.continuation_history[key.in_check as usize][key.capture as usize].get(
@@ -272,19 +275,15 @@ fn continuation_history_basic_update() {
 /// PawnHistory: 基本的な更新が機能することを確認
 #[test]
 fn pawn_history_basic_update() {
-    let mut history = PawnHistory::new_boxed();
-    let pawn_idx = 42; // 任意のインデックス
+    let shared = SharedHistories::new(1);
+    let pawn_idx = shared.pawn_history_index(42);
     let pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス
     let to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当
 
-    // 初期値は0
-    assert_eq!(history.get(pawn_idx, pc, to), 0);
+    let initial = shared.pawn_history(pawn_idx, pc, to);
+    shared.update_pawn_history(pawn_idx, pc, to, 200);
 
-    // 更新
-    history.update(pawn_idx, pc, to, 200);
-
-    // 値が増加
-    let value = history.get(pawn_idx, pc, to);
-    assert!(value > 0, "PawnHistory should increase after update");
+    let value = shared.pawn_history(pawn_idx, pc, to);
+    assert!(value > initial, "PawnHistory should increase after update");
 }

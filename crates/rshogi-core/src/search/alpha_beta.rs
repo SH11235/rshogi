@@ -30,7 +30,7 @@ use super::types::{
     ContHistKey, NodeType, PvTable, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE,
     SearchedMoveList, StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
 };
-use super::{LimitsType, MovePicker, SearchTuneParams, TimeManagement};
+use super::{LimitsType, MovePicker, SearchTuneParams, SharedHistories, TimeManagement};
 
 use super::eval_helpers::{
     compute_eval_context, correction_value, probe_transposition, update_correction_history,
@@ -159,6 +159,7 @@ fn update_continuation_histories(
 #[inline]
 fn update_quiet_histories(
     h: &mut HistoryTables,
+    shared: &SharedHistories,
     stack: &StackArray,
     tune_params: &SearchTuneParams,
     pos: &Position,
@@ -187,9 +188,8 @@ fn update_quiet_histories(
     let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
     update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
 
-    let pawn_key_idx = pos.pawn_history_index();
-    h.pawn_history
-        .update(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus, tune_params));
+    let pawn_key_idx = shared.pawn_history_index(pos.pawn_key());
+    shared.update_pawn_history(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus, tune_params));
 }
 
 /// LMR用のreduction配列
@@ -385,6 +385,8 @@ pub struct SearchContext<'a> {
     pub eval_hash: &'a EvalHash,
     /// 履歴テーブルへの参照（HistoryCell 経由でアクセス）
     pub history: &'a HistoryCell,
+    /// スレッド間で共有する履歴
+    pub shared: &'a SharedHistories,
     /// ContinuationHistoryのsentinel
     pub cont_history_sentinel: NonNull<PieceToHistory>,
     /// 全合法手生成フラグ
@@ -701,6 +703,9 @@ pub struct SearchWorker {
     /// 履歴/統計テーブル群（HistoryCell 経由でアクセス）
     pub history: Box<HistoryCell>,
 
+    /// スレッド間で共有する履歴
+    pub(super) shared_histories: Arc<SharedHistories>,
+
     /// ContinuationHistoryのsentinel
     pub cont_history_sentinel: NonNull<PieceToHistory>,
 
@@ -770,10 +775,31 @@ impl SearchWorker {
 
     /// 新しいSearchWorkerを作成（isreadyまたは最初のgo時）
     ///
-    /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
+    /// 共有履歴はこの worker 専用 (1 スレッド分) のものを作る。
     pub fn new(
         tt: Arc<TranspositionTable>,
         eval_hash: Arc<EvalHash>,
+        max_moves_to_draw: i32,
+        thread_id: usize,
+        search_tune_params: SearchTuneParams,
+    ) -> Box<Self> {
+        Self::new_with_shared(
+            tt,
+            eval_hash,
+            Arc::new(SharedHistories::new(1)),
+            max_moves_to_draw,
+            thread_id,
+            search_tune_params,
+        )
+    }
+
+    /// 共有履歴を指定して SearchWorker を作成する
+    ///
+    /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
+    pub fn new_with_shared(
+        tt: Arc<TranspositionTable>,
+        eval_hash: Arc<EvalHash>,
+        shared_histories: Arc<SharedHistories>,
         max_moves_to_draw: i32,
         thread_id: usize,
         search_tune_params: SearchTuneParams,
@@ -794,6 +820,7 @@ impl SearchWorker {
             tt,
             eval_hash,
             history,
+            shared_histories,
             cont_history_sentinel,
             cont_correction_sentinel,
             generate_all_legal_moves: false,
@@ -821,6 +848,7 @@ impl SearchWorker {
             tt: &self.tt,
             eval_hash: &self.eval_hash,
             history: &self.history,
+            shared: &self.shared_histories,
             cont_history_sentinel: self.cont_history_sentinel,
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
@@ -1222,6 +1250,7 @@ impl SearchWorker {
                 tt: &self.tt,
                 eval_hash: &self.eval_hash,
                 history: &self.history,
+                shared: &self.shared_histories,
                 cont_history_sentinel: self.cont_history_sentinel,
                 generate_all_legal_moves: self.generate_all_legal_moves,
                 max_moves_to_draw: self.max_moves_to_draw,
@@ -1293,7 +1322,7 @@ impl SearchWorker {
         loop {
             let mv = {
                 let h = unsafe { self.history.as_ref_unchecked() };
-                mp.next_move(pos, h)
+                mp.next_move(pos, h, &self.shared_histories)
             };
             if mv == Move::NONE {
                 break;
@@ -1721,7 +1750,7 @@ impl SearchWorker {
                 let bonus = stat_bonus(depth, is_tt_move, &tune);
                 let malus = stat_malus(depth, root_move_count, &tune);
                 let us = pos.side_to_move();
-                let pawn_key_idx = pos.pawn_history_index();
+                let pawn_key_idx = self.shared_histories.pawn_history_index(pos.pawn_key());
 
                 let best_moved_pc = pos.moved_piece(best_move_for_stats);
                 let best_cont_pc = if best_move_for_stats.is_promotion() {
@@ -1750,7 +1779,12 @@ impl SearchWorker {
 
                         // PawnHistory
                         let pawn_bonus = pawn_history_bonus(scaled_bonus, &tune);
-                        h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
+                        self.shared_histories.update_pawn_history(
+                            pawn_key_idx,
+                            best_cont_pc,
+                            best_to,
+                            pawn_bonus,
+                        );
 
                         // quiets_triedはbestMove追加段階で除外済みのため
                         // ペナルティループでの重複チェックは不要
@@ -1775,7 +1809,12 @@ impl SearchWorker {
                             let to = m.to();
 
                             let pawn_malus = pawn_history_bonus(-actual_malus, &tune);
-                            h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
+                            self.shared_histories.update_pawn_history(
+                                pawn_key_idx,
+                                cont_pc,
+                                to,
+                                pawn_malus,
+                            );
                         }
                     }
                 } else {
@@ -1865,6 +1904,7 @@ impl SearchWorker {
                     tt: &self.tt,
                     eval_hash: &self.eval_hash,
                     history: &self.history,
+                    shared: &self.shared_histories,
                     cont_history_sentinel: self.cont_history_sentinel,
                     generate_all_legal_moves: self.generate_all_legal_moves,
                     max_moves_to_draw: self.max_moves_to_draw,
@@ -2341,6 +2381,7 @@ impl SearchWorker {
             tt: &self.tt,
             eval_hash: &self.eval_hash,
             history: &self.history,
+            shared: &self.shared_histories,
             cont_history_sentinel: self.cont_history_sentinel,
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
@@ -2536,6 +2577,7 @@ impl SearchWorker {
                             let h = unsafe { ctx.history.as_mut_unchecked() };
                             update_quiet_histories(
                                 h,
+                                ctx.shared,
                                 &st.stack,
                                 ctx.tune_params,
                                 pos,
@@ -2632,8 +2674,8 @@ impl SearchWorker {
                     if !tt_hit {
                         let prev_piece = pos.piece_on(prev_sq);
                         if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
-                            let pawn_idx = pos.pawn_history_index();
-                            h.pawn_history.update(
+                            let pawn_idx = ctx.shared.pawn_history_index(pos.pawn_key());
+                            ctx.shared.update_pawn_history(
                                 pawn_idx,
                                 prev_piece,
                                 prev_sq,
@@ -2795,7 +2837,7 @@ impl SearchWorker {
         let mut quiets_tried = SearchedMoveList::new();
         let mut captures_tried = SearchedMoveList::new();
         let mover = pos.side_to_move();
-        let pawn_history_index = pos.pawn_history_index();
+        let pawn_history_index = ctx.shared.pawn_history_index(pos.pawn_key());
 
         // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
         let tt_move = if depth <= DEPTH_QS
@@ -2827,7 +2869,7 @@ impl SearchWorker {
             // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
             let mv = {
                 let h = unsafe { ctx.history.as_ref_unchecked() };
-                mp.next_move(pos, h)
+                mp.next_move(pos, h, ctx.shared)
             };
             if mv == Move::NONE {
                 break;
@@ -3551,7 +3593,7 @@ impl SearchWorker {
             // malus = min(825*depth-196, 2159) - 16*moveCount
             let malus = stat_malus(depth, move_count, ctx.tune_params);
             let us = pos.side_to_move();
-            let pawn_key_idx = pos.pawn_history_index();
+            let pawn_key_idx = ctx.shared.pawn_history_index(pos.pawn_key());
 
             // best_moveの駒情報を取得
             let best_moved_pc = pos.moved_piece(best_move);
@@ -3629,7 +3671,7 @@ impl SearchWorker {
 
                     // PawnHistory: bonus * (pos ? 850 : 550) / 1024
                     let pawn_bonus = pawn_history_bonus(scaled_bonus, ctx.tune_params);
-                    h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
+                    ctx.shared.update_pawn_history(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
                     // quiets_triedはbestMove追加段階で除外済みのため
                     // ペナルティループでの重複チェックは不要
@@ -3696,7 +3738,7 @@ impl SearchWorker {
 
                         // PawnHistoryへのペナルティ
                         let pawn_malus = pawn_history_bonus(-actual_malus, ctx.tune_params);
-                        h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
+                        ctx.shared.update_pawn_history(pawn_key_idx, cont_pc, to, pawn_malus);
                     }
                 }
             } else {
@@ -3895,7 +3937,7 @@ impl SearchWorker {
 
                         // pawn history更新（歩以外かつ成りでない場合）
                         // if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
-                        let pawn_key_idx = pos.pawn_history_index();
+                        let pawn_key_idx = ctx.shared.pawn_history_index(pos.pawn_key());
                         let pawn_bonus = (scaled_bonus
                             * ctx.tune_params.prior_quiet_countermove_pawn_scale_num as i64
                             / 32768) as i32;
@@ -3942,7 +3984,7 @@ impl SearchWorker {
                             h.main_history.update(opponent, prev_move, main_bonus);
 
                             if update_pawn {
-                                h.pawn_history.update(
+                                ctx.shared.update_pawn_history(
                                     pawn_key_idx,
                                     prev_piece,
                                     prev_sq,
