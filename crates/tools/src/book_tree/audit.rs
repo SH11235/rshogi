@@ -127,10 +127,10 @@ pub(super) struct AuditSummary {
 pub(super) fn run(args: AuditArgs) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     let master = resolve(&args.master);
-    let table = resolve(&args.table);
+    let table = resolve_output(&args.table)?;
     ensure!(table != master, "--table が元データと同じです: {}", args.table.display());
     if let Some(out) = &args.out_db {
-        let out = resolve(out);
+        let out = resolve_output(out)?;
         ensure!(out != master, "--out-db が元データと同じです");
         ensure!(out != table, "--out-db が --table と同じです");
     }
@@ -147,6 +147,15 @@ pub(super) fn run(args: AuditArgs) -> Result<()> {
     }
     print!("{}", format_summary(&summary, args.line, draws));
     Ok(())
+}
+
+/// 出力先の親ディレクトリを作ってから [`resolve`] する。親が無いと同じファイルを指す別の書き方を見分けられない。
+fn resolve_output(path: &Path) -> Result<PathBuf> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("{} を作れません", parent.display()))?;
+    }
+    Ok(resolve(path))
 }
 
 /// 同じファイルかを比べるためのパス。まだ無いファイルは親ディレクトリを解決して名前を付ける。
@@ -343,7 +352,8 @@ pub(super) fn audit(
         ..AuditSummary::default()
     };
     for key in positions.keys() {
-        let position = position_from_sfen(&format!("{key} 1"))?;
+        let position = position_from_sfen(&format!("{key} 1"))
+            .with_context(|| format!("key を局面として読めません: {key}"))?;
         // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
         ensure!(
             strip_ply(&position.to_sfen()) == key,
@@ -756,6 +766,7 @@ mod tests {
         assert!(run(args("moves.tsv", None)).is_err());
         assert!(run(args("audit.tsv", Some("audit.tsv"))).is_err());
         assert!(run(args("audit.tsv", Some("moves.tsv"))).is_err());
+        assert!(run(args("fresh/audit.tsv", Some("fresh/../fresh/audit.tsv"))).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), text);
 
         run(args("audit.tsv", Some("audited.db"))).unwrap();
