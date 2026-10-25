@@ -253,6 +253,8 @@ pub struct ChunkStats {
     pub invalid_seeds: u64,
     /// 推論 (batch) の回数
     pub inferences: u64,
+    /// 全 batch で推論した局面数
+    pub inferred_positions: u64,
     /// 詰みで終わった数
     pub mated: u64,
     /// 入玉宣言で終わった数
@@ -273,6 +275,7 @@ impl ChunkStats {
         self.positions += o.positions;
         self.invalid_seeds += o.invalid_seeds;
         self.inferences += o.inferences;
+        self.inferred_positions += o.inferred_positions;
         self.mated += o.mated;
         self.declaration += o.declaration;
         self.repetition += o.repetition;
@@ -387,6 +390,11 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                         .max_rollout_ply
                         .map_or(remaining, |n| remaining.min(usize::from(n) + 1));
                     game.records.reserve_exact(capacity);
+                    let moves =
+                        cfg.max_rollout_ply.map_or(remaining, |n| remaining.min(usize::from(n)));
+                    game.pos
+                        .try_reserve_move_history(moves)
+                        .context("cannot reserve rollout history")?;
                     *slot = Some(game);
                 }
             }
@@ -413,6 +421,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
             );
         }
         stats.inferences += 1;
+        stats.inferred_positions += active.len() as u64;
 
         for (row, &slot) in active.iter().enumerate() {
             row_of_slot[slot] = row;
@@ -564,7 +573,7 @@ pub fn run_all<M: PolicyValueModel>(
             stats.rollouts,
             stats.positions as f64 / secs.max(1e-9),
             stats.inferences,
-            (stats.positions + stats.rollouts) as f64 / stats.inferences.max(1) as f64,
+            stats.inferred_positions as f64 / stats.inferences.max(1) as f64,
             stats.mated,
             stats.declaration,
             stats.repetition,
@@ -748,6 +757,7 @@ mod tests {
             let (bytes, stats) = run_seeds(&cfg, &input);
             assert_eq!((bytes.clone(), stats.clone()), run_seeds(&cfg, &input));
             assert_eq!(stats.max_rollout_ply, 9);
+            assert_eq!(stats.inferred_positions, 9 * (u64::from(n) + 1));
             assert_eq!(stats.max_ply, 0);
             let recs = records(&bytes);
             assert!(recs.iter().all(|r| r.game_result == 0 && u16::from(r.padding) <= n));
