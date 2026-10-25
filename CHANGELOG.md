@@ -14,6 +14,12 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### USI エンジン
+
+- 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
+  (既定 `false` で従来どおり丸読み)。`sfen` 行が SFEN の文字列順に並んだ `.db` が必要で、
+  `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。
+
 ### rshogi-core / ライブラリ利用者の移行
 
 - `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく

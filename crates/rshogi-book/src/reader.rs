@@ -10,12 +10,15 @@
 //!   (`move_count` は「省略=1」だが「不正=0」)
 //! - `move`/`ponder` が `none` / `None` / `resign` のいずれかなら「指し手なし」
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::path::Path;
 
+use crate::on_the_fly::OnTheFlyFile;
+
 /// 定跡 1 手ぶんの生データ(USI 文字列のまま保持し、合法性検証は probe 時に行う)。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RawBookMove {
     /// 指し手(USI 文字列)。`none`/`resign` 等の「指し手なし」は `None`。
     pub(crate) move_usi: Option<String>,
@@ -30,19 +33,51 @@ pub(crate) struct RawBookMove {
 }
 
 /// 1 局面ぶんの定跡エントリ。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PositionEntry {
     pub(crate) moves: Vec<RawBookMove>,
 }
 
-/// メモリ上に丸読みした定跡本体。
+/// 定跡本体。メモリに丸読みしたもの([`Book::from_path`] など)と、ファイルを開いたまま
+/// probe のたびに引くもの([`Book::open_on_the_fly`])の 2 通りがあり、引いた結果は同じになる。
 ///
 /// キーは SFEN 文字列。`ignore_ply` が `true` のときは末尾の手数(ply)を落とした
 /// SFEN をキーとして格納・検索する(盤面が同じなら手数違いでもヒットする)。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Book {
-    entries: HashMap<String, PositionEntry>,
+    store: Store,
     ignore_ply: bool,
+}
+
+#[derive(Debug)]
+enum Store {
+    Memory(HashMap<String, PositionEntry>),
+    OnTheFly(OnTheFlyFile),
+}
+
+/// `.db` の 1 行の種類。丸読みと on the fly で同じ解釈をするために共通化している。
+pub(crate) enum Line<'a> {
+    /// 空行・`#` 行・`//` コメント行。
+    Skip,
+    /// `sfen ` 行。中身は前後の空白を除いた SFEN。
+    Sfen(&'a str),
+    /// 指し手行。
+    Move(RawBookMove),
+}
+
+/// 1 行を解釈する。行末の改行(`\r` / `\n`)は除いて渡しても付けたままでもよい。
+pub(crate) fn classify_line(line: &str) -> Line<'_> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line.trim().is_empty() || line.starts_with('#') || line.starts_with("//") {
+        return Line::Skip;
+    }
+    if let Some(rest) = line.strip_prefix("sfen ") {
+        return Line::Sfen(rest.trim());
+    }
+    match parse_move_line(line) {
+        Some(bm) => Line::Move(bm),
+        None => Line::Skip,
+    }
 }
 
 /// `move`/`ponder` フィールドを USI 文字列の `Option` に変換する。
@@ -72,7 +107,7 @@ pub(crate) fn normalize_key(sfen: &str, ignore_ply: bool) -> String {
 }
 
 impl Book {
-    /// ファイルパスから定跡を読み込む(NNUE ローダの `init_nnue` 相当の path 版 API)。
+    /// ファイルパスから定跡を丸読みする(NNUE ローダの `init_nnue` 相当の path 版 API)。
     ///
     /// バッファリングは `from_reader` 側で行う。
     pub fn from_path<P: AsRef<Path>>(path: P, ignore_ply: bool) -> io::Result<Self> {
@@ -93,52 +128,53 @@ impl Book {
 
         for line in buf.lines() {
             let line = line?;
-            let line = line.trim_end_matches(['\r', '\n']);
-
-            // 空行はスキップ。
-            if line.trim().is_empty() {
-                continue;
-            }
-            // `#` 始まり(ヘッダ・バージョン識別・NOE 行)はスキップ。
-            if line.starts_with('#') {
-                continue;
-            }
-            // `//` 始まりのコメント行はスキップ。
-            if line.starts_with("//") {
-                continue;
-            }
-
-            if let Some(rest) = line.strip_prefix("sfen ") {
-                // 局面区切り行。ignore_ply に応じてキーを正規化して以降の指し手を紐付ける。
-                let sfen = rest.trim();
-                current_key = Some(normalize_key(sfen, ignore_ply));
-                continue;
-            }
-
-            // 指し手行。直前に sfen 行が無ければ(不正な並び)スキップ。
-            let Some(key) = current_key.as_ref() else {
-                continue;
-            };
-
-            if let Some(bm) = parse_move_line(line) {
-                entries.entry(key.clone()).or_default().moves.push(bm);
+            match classify_line(&line) {
+                Line::Skip => {}
+                Line::Sfen(sfen) => {
+                    // 局面区切り行。ignore_ply に応じてキーを正規化して以降の指し手を紐付ける。
+                    current_key = Some(normalize_key(sfen, ignore_ply));
+                }
+                Line::Move(bm) => {
+                    // 直前に sfen 行が無い指し手行(不正な並び)はスキップ。
+                    if let Some(key) = current_key.as_ref() {
+                        entries.entry(key.clone()).or_default().moves.push(bm);
+                    }
+                }
             }
         }
 
         Ok(Self {
-            entries,
+            store: Store::Memory(entries),
             ignore_ply,
         })
     }
 
-    /// 登録局面数。
-    pub fn len(&self) -> usize {
-        self.entries.len()
+    /// 定跡ファイルを開くだけで丸読みせず、probe のたびにファイルから引く(BookOnTheFly)。
+    ///
+    /// ファイルは `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要がある
+    /// (YaneuraOu の定跡書き出しの順)。開くときに等間隔の抜き取りで並びを確かめ、
+    /// 逆順の箇所を見つけたら `InvalidData` を返す。ファイルは開いたまま保持する。
+    pub fn open_on_the_fly<P: AsRef<Path>>(path: P, ignore_ply: bool) -> io::Result<Self> {
+        Ok(Self {
+            store: Store::OnTheFly(OnTheFlyFile::open(path.as_ref())?),
+            ignore_ply,
+        })
     }
 
-    /// 空(登録局面ゼロ)か。
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    /// 丸読みした定跡の登録局面数。on the fly では局面数を数えないので `None`。
+    pub fn position_count(&self) -> Option<usize> {
+        match &self.store {
+            Store::Memory(entries) => Some(entries.len()),
+            Store::OnTheFly(_) => None,
+        }
+    }
+
+    /// on the fly で引く定跡なら、開いているファイルのバイト数。
+    pub fn on_the_fly_file_len(&self) -> Option<u64> {
+        match &self.store {
+            Store::Memory(_) => None,
+            Store::OnTheFly(file) => Some(file.len()),
+        }
     }
 
     /// この定跡が手数無視(IgnoreBookPly)で構築されたか。
@@ -147,8 +183,14 @@ impl Book {
     }
 
     /// SFEN 文字列で局面エントリを検索する(内部の `ignore_ply` に従いキー正規化)。
-    pub(crate) fn find_raw(&self, sfen: &str) -> Option<&PositionEntry> {
-        self.entries.get(&normalize_key(sfen, self.ignore_ply))
+    /// on the fly の読み出しに失敗したときだけ `Err` になる。
+    pub(crate) fn find_raw(&self, sfen: &str) -> io::Result<Option<Cow<'_, PositionEntry>>> {
+        match &self.store {
+            Store::Memory(entries) => {
+                Ok(entries.get(&normalize_key(sfen, self.ignore_ply)).map(Cow::Borrowed))
+            }
+            Store::OnTheFly(file) => Ok(file.find(sfen, self.ignore_ply)?.map(Cow::Owned)),
+        }
     }
 }
 
@@ -239,9 +281,10 @@ mod tests {
              3c3d none 20 16 10\n"
         );
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
-        assert_eq!(book.len(), 2);
+        assert_eq!(book.position_count(), Some(2));
         let entry = book
             .find_raw("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap()
             .expect("hirate entry present");
         assert_eq!(entry.moves.len(), 2);
         assert_eq!(entry.moves[0].move_usi.as_deref(), Some("7g7f"));
@@ -252,7 +295,7 @@ mod tests {
     fn read_book_ignores_move_line_before_any_sfen() {
         let data = format!("{HEADER}\n7g7f 3c3d 0 0 1\n");
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
-        assert!(book.is_empty());
+        assert_eq!(book.position_count(), Some(0));
     }
 
     #[test]
@@ -266,9 +309,10 @@ mod tests {
              2g2f 8c8d 25 16 40\n"
         );
         let book = Book::from_bytes(data.as_bytes(), true).unwrap();
-        assert_eq!(book.len(), 1);
+        assert_eq!(book.position_count(), Some(1));
         let entry = book
             .find_raw("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 5")
+            .unwrap()
             .unwrap();
         assert_eq!(entry.moves.len(), 2);
     }

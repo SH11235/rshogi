@@ -6,8 +6,9 @@
 //!
 //! # 概要
 //!
-//! - [`Book`]: `.db` を丸読みした定跡本体。path 版([`Book::from_path`])と
-//!   bytes 版([`Book::from_bytes`])の二本立て API(NNUE ローダ準拠、wasm 互換)。
+//! - [`Book`]: `.db` の定跡本体。丸読みの path 版([`Book::from_path`])と
+//!   bytes 版([`Book::from_bytes`])の二本立て API(NNUE ローダ準拠、wasm 互換)に加え、
+//!   丸読みせず probe のたびにファイルを二分探索する [`Book::open_on_the_fly`] がある。
 //! - [`probe`]: root 局面に対して定跡手を選ぶ。miss 時は [`BookOptions::flipped_book`]
 //!   により先後反転局面で再検索する(FlippedBook)。
 //! - [`BookOptions`]: USI オプションのミラー。
@@ -15,6 +16,7 @@
 
 mod explore;
 mod flip;
+mod on_the_fly;
 mod probe;
 mod reader;
 

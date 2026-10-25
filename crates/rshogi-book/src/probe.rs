@@ -152,11 +152,17 @@ fn find_candidates(
     let sfen = position.to_sfen();
 
     // 3. find(ply 込み) → miss なら flip 再検索。
-    let (entry, flipped) = if let Some(entry) = book.find_raw(&sfen) {
+    let mut find = |key: &str| {
+        book.find_raw(key)
+            .map_err(|e| info("", &format!("Error reading book file: {e}")))
+            .ok()
+            .flatten()
+    };
+    let (entry, flipped) = if let Some(entry) = find(&sfen) {
         (entry, false)
     } else if flipped_book {
         let flipped_sfen = flip::flipped_key(&sfen)?;
-        (book.find_raw(&flipped_sfen)?, true)
+        (find(&flipped_sfen)?, true)
     } else {
         return None;
     };
