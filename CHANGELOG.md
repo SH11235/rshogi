@@ -16,6 +16,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_mine master cycles` は外した後の循環を同じグラフの辺を絞って数え直し、グラフの再構築を省く。出力は変わらない。
+
 - `book_mine master rejoin` / `cycles` のグラフを詰めた局面と連続した辺の配列で保持し、
   `cycles` の書き換え用の行は `--apply` 時だけ読み込んでメモリを削減。
 

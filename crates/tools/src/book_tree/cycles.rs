@@ -154,7 +154,7 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     Ok(())
 }
 
-/// 1 つの側を解く。グラフは外す前の 1 回と、外した後の確かめの 1 回だけ作る。
+/// 1 つの側を解く。外した後も同じグラフの辺を絞って数える。
 fn solve_side(
     index: &BookIndex,
     values: &[Vec<Option<i32>>],
@@ -1176,6 +1176,16 @@ mod tests {
             assert_eq!(after[1].components, plan.unbreakable.len(), "seed {seed}");
             let index = BookIndex::new(&p).unwrap();
             let graph = graph_of(&index, &root);
+            let filtered = count_on(
+                &graph,
+                |m| plan.new_main.get(index.key(m)).copied().unwrap_or(0),
+                |m, i| {
+                    plan.removed
+                        .binary_search_by(|(k, j)| (k.as_str(), *j).cmp(&(index.key(m), i)))
+                        .is_ok()
+                },
+            );
+            assert_eq!(filtered, after, "seed {seed}");
             let multi: Vec<usize> = (0..graph.len())
                 .filter(|&v| graph.own[v] && graph.edges(v).len() >= 2)
                 .collect();
