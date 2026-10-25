@@ -524,6 +524,16 @@ impl Position {
         self.state_idx
     }
 
+    /// 現局面から指定手数先までの履歴領域を予約する。容量を確保できなければエラーを返す。
+    pub fn try_reserve_move_history(
+        &mut self,
+        additional_plies: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        let required = self.state_idx.saturating_add(1).saturating_add(additional_plies);
+        self.state_stack
+            .try_reserve_exact(required.saturating_sub(self.state_stack.len()))
+    }
+
     /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
     #[inline]
     pub fn state_mut(&mut self) -> &mut StateInfo {
@@ -2341,6 +2351,37 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn reserve_move_history_keeps_state_and_storage_while_playing() {
+        use crate::movegen::{MoveList, generate_legal};
+
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        let before = (pos.to_sfen(), pos.key(), pos.state_index());
+        pos.try_reserve_move_history(4).unwrap();
+        assert_eq!((pos.to_sfen(), pos.key(), pos.state_index()), before);
+        let storage = pos.state_stack.as_ptr();
+        let mut played = Vec::new();
+        for usi in ["7g7f", "3c3d", "2g2f", "8c8d"] {
+            let mut legal = MoveList::new();
+            generate_legal(&pos, &mut legal);
+            let mv = *legal.iter().find(|m| m.to_usi() == usi).unwrap();
+            let check = pos.gives_check(mv);
+            pos.do_move(mv, check);
+            played.push(mv);
+            assert_eq!(pos.state_stack.as_ptr(), storage);
+        }
+        for mv in played.into_iter().rev() {
+            pos.undo_move(mv);
+        }
+        assert_eq!((pos.to_sfen(), pos.key(), pos.state_index()), before);
+        pos.try_reserve_move_history(2).unwrap();
+        assert_eq!(pos.state_stack.as_ptr(), storage);
+        assert!(pos.try_reserve_move_history(usize::MAX).is_err());
+        assert_eq!((pos.to_sfen(), pos.key(), pos.state_index()), before);
     }
 
     #[test]

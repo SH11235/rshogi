@@ -1,7 +1,8 @@
 //! 標準 dlshogi ONNX モデルによる value head 静的評価
 //!
 //! `make_input_features` で構築した dlshogi 入力を ONNX Runtime (CUDA / TensorRT EP)
-//! へ流し、value head の勝率を手番 (STM) 視点 cp へ変換して返す。
+//! へ流し、value head の勝率を手番 (STM) 視点 cp へ変換して返す。同じ推論の policy logit も
+//! 取り出せる (`evaluate_with_policy`)。
 //!
 //! `rescore_psv` の ONNX パイプラインから value 推論部分のみを切り出した再利用モジュール
 //! （`rescore_psv` 側は独自実装のままで、推論ロジックが重複している）。
@@ -17,8 +18,8 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 use crate::dlshogi_features::{
-    FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
-    winrate_to_cp,
+    FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
+    make_input_features, winrate_to_cp,
 };
 
 /// ONNX value evaluator の設定
@@ -118,6 +119,15 @@ impl OnnxValueEvaluator {
                     .with_device_id(cfg.gpu_id)
                     .with_fp16(true)
                     .with_engine_cache(cfg.tensorrt_cache.is_some());
+                // 形状の範囲を 1..=batch_size に固定する。未指定だと TensorRT EP は見たことのない
+                // batch 数が来るたびに engine を作り直し、batch 数が毎回変わる呼び出し側で数秒ずつ止まる。
+                let shapes = |n: usize| {
+                    format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
+                };
+                let trt_ep = trt_ep
+                    .with_profile_min_shapes(shapes(1))
+                    .with_profile_opt_shapes(shapes(cfg.batch_size))
+                    .with_profile_max_shapes(shapes(cfg.batch_size));
                 let trt_ep = if let Some(cache_path) = cfg.tensorrt_cache.as_deref() {
                     let cache_str = cache_path.to_str().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -216,28 +226,51 @@ impl OnnxValueEvaluator {
     pub fn evaluate(&mut self, positions: &[Position]) -> Result<Vec<i32>> {
         let mut out = Vec::with_capacity(positions.len());
         for chunk in positions.chunks(self.batch_size) {
-            self.evaluate_chunk(chunk, &mut out)?;
+            self.run_chunk(chunk.par_iter(), &mut out, None)?;
         }
         Ok(out)
     }
 
-    fn evaluate_chunk(&mut self, chunk: &[Position], out: &mut Vec<i32>) -> Result<()> {
-        let n = chunk.len();
+    /// 1 回の推論で value と policy を同時に得る。`positions.len()` は `batch_size` 以下。
+    ///
+    /// `values` には手番視点 cp を、`policy` には局面ごとに `MAX_MOVE_LABEL_NUM` 個の
+    /// policy logit（softmax 前）を局面順に追記する。
+    pub fn evaluate_with_policy<'a>(
+        &mut self,
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
+        values: &mut Vec<i32>,
+        policy: &mut Vec<f32>,
+    ) -> Result<()> {
+        if positions.len() > self.batch_size {
+            anyhow::bail!(
+                "evaluate_with_policy: {} positions exceed batch_size {}",
+                positions.len(),
+                self.batch_size
+            );
+        }
+        self.run_chunk(positions, values, Some(policy))
+    }
+
+    fn run_chunk<'a>(
+        &mut self,
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
+        out: &mut Vec<i32>,
+        policy_out: Option<&mut Vec<f32>>,
+    ) -> Result<()> {
+        let n = positions.len();
         debug_assert!(n <= self.batch_size);
+        if n == 0 {
+            return Ok(());
+        }
 
         self.f1_buf[..n * FEATURES1_SIZE].fill(0.0);
         self.f2_buf[..n * FEATURES2_SIZE].fill(0.0);
 
-        let f1_slices: Vec<&mut [f32]> =
-            self.f1_buf[..n * FEATURES1_SIZE].chunks_mut(FEATURES1_SIZE).collect();
-        let f2_slices: Vec<&mut [f32]> =
-            self.f2_buf[..n * FEATURES2_SIZE].chunks_mut(FEATURES2_SIZE).collect();
-
-        f1_slices.into_par_iter().zip(f2_slices).zip(chunk.par_iter()).for_each(
-            |((f1, f2), pos)| {
-                make_input_features(pos, f1, f2);
-            },
-        );
+        self.f1_buf[..n * FEATURES1_SIZE]
+            .par_chunks_mut(FEATURES1_SIZE)
+            .zip(self.f2_buf[..n * FEATURES2_SIZE].par_chunks_mut(FEATURES2_SIZE))
+            .zip(positions)
+            .for_each(|((f1, f2), pos)| make_input_features(pos, f1, f2));
 
         let shape1: [usize; 4] = [n, INPUT1_CHANNELS, 9, 9];
         let input1 =
@@ -251,8 +284,8 @@ impl OnnxValueEvaluator {
         let mut binding = self.session.create_binding().map_err(ort_err)?;
         binding.bind_input("input1", &input1).map_err(ort_err)?;
         binding.bind_input("input2", &input2).map_err(ort_err)?;
-        // value 推論には output_policy を使わないが、未バインド出力は ORT 内部処理の
-        // オーバーヘッドを増やすため全出力をバインドする。
+        // value のみの推論でも、未バインド出力は ORT 内部処理のオーバーヘッドを増やすため
+        // 全出力をバインドする。
         binding
             .bind_output_to_device("output_policy", &self.output_mem)
             .map_err(ort_err)?;
@@ -265,6 +298,17 @@ impl OnnxValueEvaluator {
 
         for &winrate in values.iter().take(n) {
             out.push(winrate_to_cp(winrate, self.eval_scale));
+        }
+
+        if let Some(policy_out) = policy_out {
+            let (shape, logits) =
+                outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
+            if logits.len() != n * MAX_MOVE_LABEL_NUM {
+                anyhow::bail!(
+                    "policy output shape mismatch: expected [{n}, {MAX_MOVE_LABEL_NUM}], got {shape:?}"
+                );
+            }
+            policy_out.extend_from_slice(logits);
         }
         Ok(())
     }
