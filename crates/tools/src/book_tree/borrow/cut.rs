@@ -153,11 +153,7 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     };
     let master = match &args.master {
         // 止めるかどうかは値が分かるかだけで決まり、千日手の値には依らない。
-        Some(path) => Some(master_values(
-            &read_master(path)?,
-            DrawValues::default(),
-            tempfile::tempdir().context("一時ディレクトリを作れません")?.path(),
-        )?),
+        Some(path) => Some(master_values(&read_master(path)?, DrawValues::default())?),
         None => None,
     };
     let book = Book::open_on_the_fly(&args.book, true).with_context(|| {

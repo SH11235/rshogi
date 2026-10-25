@@ -372,8 +372,8 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     };
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
     let master_rows = read_master(&args.master)?;
-    let master = master_values(&master_rows, draws, work.path())?;
-    let (_, before, _) = audit(&master_rows, draws, args.line, work.path())?;
+    let master = master_values(&master_rows, draws)?;
+    let (_, before, _) = audit(&master_rows, draws, args.line)?;
 
     let all = meta
         .roots
@@ -408,8 +408,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
-    let (_, after, _) =
-        audit(&parse_master_rows(registered.as_bytes())?, draws, args.line, work.path())?;
+    let (_, after, _) = audit(&parse_master_rows(registered.as_bytes())?, draws, args.line)?;
 
     std::fs::create_dir_all(&args.out)?;
     write_outputs(&args.out, &meta, &trees, &all, &conflicts)?;

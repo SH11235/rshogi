@@ -3,8 +3,8 @@
 
 use super::register::{COLUMNS, ROLES};
 use crate::book_backprop::{
-    BackpropOptions, DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, percentile,
-    propagate_values, read_graph, write_backprop_book,
+    DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
+    percentile, propagate_values, retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
@@ -13,7 +13,7 @@ use clap::Args;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, BufWriter, Write as _};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -147,11 +147,10 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
-    let (findings, summary, graph) = audit(&positions, draws, args.line, work.path())?;
+    let (findings, summary, book) = audit(&positions, draws, args.line)?;
     write_atomic(&args.table, &format_table(&findings))?;
     if let Some(out) = &args.out_db {
-        write_backprop_book(&graph, out)?;
+        write_audited_db(out, &positions.0, &book)?;
     }
     print!("{}", format_summary(&summary, args.line, draws));
     Ok(())
@@ -263,36 +262,57 @@ fn mean_eval(text: &str) -> Result<Option<i32>> {
     Ok(Some(i32::try_from(mean.round_ties_even() as i64)?))
 }
 
-/// 局面の手を `.db` に書く。`known` が `Some` なら値の分かる手だけを書き、手の無い局面は書かない。
-fn write_value_db(
+/// 点検後のグラフと、元データの手との対応。
+pub(super) struct AuditedBook {
+    graph: Graph,
+    known: Vec<Vec<bool>>,
+}
+
+fn write_audited_db(
     path: &Path,
     positions: &BTreeMap<String, MasterPosition>,
-    known: Option<&[Vec<bool>]>,
+    book: &AuditedBook,
 ) -> Result<()> {
-    let file =
-        std::fs::File::create(path).with_context(|| format!("{} を作れません", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    writeln!(writer, "{}", crate::book_backprop::BOOK_HEADER)?;
-    for (index, (key, position)) in positions.iter().enumerate() {
-        let selected: Vec<(usize, &BookMove)> = position
-            .moves
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| known.is_none_or(|known| known[index][i]))
-            .collect();
-        if selected.is_empty() {
-            continue;
+    write_book_atomic(path, |mut writer| {
+        writeln!(writer, "{}", crate::book_backprop::BOOK_HEADER)?;
+        for ((key, position), known) in positions.iter().zip(&book.known) {
+            let Some(node) = book.graph.find(key) else {
+                continue;
+            };
+            writeln!(writer, "sfen {}", book.graph.sfen(node))?;
+            let mut values = book.graph.moves(node);
+            let mut rows = Vec::new();
+            for (i, m) in position.moves.iter().enumerate().filter(|(i, _)| known[*i]) {
+                let value = values.next().context("内部エラー: 手の数が合いません")?.new;
+                let source = format!(
+                    "{} none {} 1 {}",
+                    m.mv,
+                    m.eval.unwrap_or(0),
+                    if i == 0 { 2 } else { 1 }
+                );
+                rows.push((source, value));
+            }
+            rows.sort_by(|a, b| {
+                let (a, b) = (parse_row(&a.0), parse_row(&b.0));
+                b.count
+                    .cmp(&a.count)
+                    .then_with(|| a.move_usi.unwrap_or("none").cmp(b.move_usi.unwrap_or("none")))
+            });
+            for (source, value) in rows {
+                let fields = parse_row(&source);
+                writeln!(
+                    writer,
+                    "{} {} {value} {} {}",
+                    fields.move_usi.unwrap_or("none"),
+                    fields.ponder_usi.unwrap_or("none"),
+                    fields.depth,
+                    fields.count
+                )?;
+            }
         }
-        writeln!(writer, "sfen {key} {}", position.ply)?;
-        for (i, m) in selected {
-            // 値の分かる手だけを書く 2 回目は、読みの値の無い手も子局面からの伝播で値が付くので depth=1 にする。
-            let depth = i32::from(m.eval.is_some() || known.is_some());
-            let count = if i == 0 { 2 } else { 1 };
-            writeln!(writer, "{} none {} {depth} {count}", m.mv, m.eval.unwrap_or(0))?;
-        }
-    }
-    writer.flush()?;
-    Ok(())
+        writer.into_inner().map_err(|e| e.into_error())?;
+        Ok(())
+    })
 }
 
 /// 値の分かる手を求める。読みの値のある合法手と、book 内の子局面に値の分かる手がある手。
@@ -362,7 +382,6 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
 fn propagate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-    work: &Path,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
@@ -380,20 +399,12 @@ fn propagate(
         })
         .collect();
     checks.into_iter().collect::<Result<()>>()?;
-    let all_db = work.join("all.db");
-    write_value_db(&all_db, positions, None)?;
-    let all = read_graph(&all_db, BackpropOptions::default())?;
-    let illegal_moves = all.illegal_moves;
-    let known = known_moves(positions, &all)?;
-    drop(all);
-
-    let known_db = work.join("known.db");
-    write_value_db(&known_db, positions, Some(&known))?;
-    let options = BackpropOptions {
-        skip_unusable_moves: true,
-        ..BackpropOptions::default()
-    };
-    let mut graph = read_graph(&known_db, options)?;
+    let mut graph = graph_from_entries(positions.iter().map(|(key, p)| {
+        (key.as_str(), p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
+    }))?;
+    let illegal_moves = graph.illegal_moves;
+    let known = known_moves(positions, &graph)?;
+    retain_known(&mut graph, &known)?;
     let stats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
     Ok((graph, known, illegal_moves, stats))
 }
@@ -411,9 +422,8 @@ pub(super) struct MasterValue {
 pub(super) fn master_values(
     (positions, _): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
-    work: &Path,
 ) -> Result<BTreeMap<String, MasterValue>> {
-    let (graph, known, _, _) = propagate(positions, draws, work)?;
+    let (graph, known, _, _) = propagate(positions, draws)?;
     let mut values = BTreeMap::new();
     for ((key, _), known) in positions.iter().zip(&known) {
         let Some(node) = graph.find(key) else {
@@ -481,9 +491,8 @@ fn audited_moves(
 pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-    work: &Path,
 ) -> Result<Vec<Vec<Option<i32>>>> {
-    let (graph, known, _, _) = propagate(positions, draws, work)?;
+    let (graph, known, _, _) = propagate(positions, draws)?;
     positions
         .iter()
         .zip(&known)
@@ -512,13 +521,12 @@ pub(super) fn audit(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
-    work: &Path,
-) -> Result<(Vec<Finding>, AuditSummary, Graph)> {
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
         ..AuditSummary::default()
     };
-    let (graph, known, illegal_moves, stats) = propagate(positions, draws, work)?;
+    let (graph, known, illegal_moves, stats) = propagate(positions, draws)?;
     summary.illegal_moves = illegal_moves;
     summary.nontrivial_sccs = stats.nontrivial_sccs;
     summary.max_scc_size = stats.max_scc_size;
@@ -572,7 +580,7 @@ pub(super) fn audit(
         }
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
-    Ok((findings, summary, graph))
+    Ok((findings, summary, AuditedBook { graph, known }))
 }
 
 pub(super) fn format_table(findings: &[Finding]) -> String {
@@ -688,8 +696,7 @@ mod tests {
         draws: DrawValues,
     ) -> Result<(Vec<Finding>, AuditSummary)> {
         let parsed = parse_master_rows(text.as_bytes())?;
-        let work = tempfile::tempdir().unwrap();
-        let (findings, summary, _) = audit(&parsed, draws, line, work.path())?;
+        let (findings, summary, _) = audit(&parsed, draws, line)?;
         Ok((findings, summary))
     }
 
@@ -851,6 +858,124 @@ mod tests {
         assert_eq!(findings[0].key, ROOT);
         assert_eq!((findings[0].best.mv.as_str(), findings[0].best.value), ("5i4h", -70));
         assert_eq!(findings[0].gap(), 30);
+    }
+
+    #[test]
+    fn in_memory_filter_matches_rebuilt_graph_for_known_move_combinations() {
+        use crate::book_backprop::{BackpropOptions, read_graph, write_backprop_book};
+        let dir = tempfile::tempdir().unwrap();
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let c = "5k3/9/9/9/9/9/9/5K3/9 b -";
+        let d = "5k3/9/9/9/9/9/9/9/4K4 w -";
+        for mask in 0..256u32 {
+            let candidates = [
+                (ROOT, "5i4h", "main"),
+                (ROOT, "5i6h", "alt"),
+                (A, "5a5b", "main"),
+                (A, "5a4a", "alt"),
+                (B, "4h5i", "main"),
+                (A_FLIPPED, "5i5h", "main"),
+                (c, "4h5i", "main"),
+                (d, "4a5a", "main"),
+            ];
+            let values: Vec<String> = (0..8)
+                .map(|i| {
+                    if mask & (1 << i) == 0 {
+                        String::new()
+                    } else {
+                        (i * 10 - 30).to_string()
+                    }
+                })
+                .collect();
+            let mut rows: Vec<_> = candidates
+                .iter()
+                .zip(&values)
+                .map(|(&(k, m, r), e)| (k, m, r, e.as_str()))
+                .collect();
+            rows.push((ROOT, "bad", "alt", "99"));
+            rows.push((ROOT, "5i5h 5a5b", "alt", "99"));
+            rows.push((ROOT, " 5i4i ", "alt", "12"));
+            let (mut positions, _) = parse_master_rows(master(&rows).as_bytes()).unwrap();
+            if mask % 2 == 0 {
+                positions.get_mut(ROOT).unwrap().ply = "1 ".into();
+            }
+            let text_db = |known: Option<&[Vec<bool>]>| {
+                let mut text = format!("{}\n", crate::book_backprop::BOOK_HEADER);
+                for (v, (key, p)) in positions.iter().enumerate() {
+                    let moves: Vec<_> = p
+                        .moves
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| known.is_none_or(|k| k[v][*i]))
+                        .collect();
+                    if moves.is_empty() {
+                        continue;
+                    }
+                    writeln!(text, "sfen {key} {}", p.ply).unwrap();
+                    for (i, m) in moves {
+                        writeln!(
+                            text,
+                            "{} none {} {} {}",
+                            m.mv,
+                            m.eval.unwrap_or(0),
+                            i32::from(m.eval.is_some() || known.is_some()),
+                            if i == 0 { 2 } else { 1 }
+                        )
+                        .unwrap();
+                    }
+                }
+                text
+            };
+            let all_path = dir.path().join("all.db");
+            std::fs::write(&all_path, text_db(None)).unwrap();
+            let all = read_graph(&all_path, BackpropOptions::default()).unwrap();
+            let known = known_moves(&positions, &all).unwrap();
+            let known_path = dir.path().join("known.db");
+            std::fs::write(&known_path, text_db(Some(&known))).unwrap();
+            let mut rebuilt = read_graph(
+                &known_path,
+                BackpropOptions {
+                    skip_unusable_moves: true,
+                    ..BackpropOptions::default()
+                },
+            )
+            .unwrap();
+            propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
+            let (memory, actual_known, illegal, _) = propagate(&positions, draws).unwrap();
+            assert_eq!(known, actual_known, "mask {mask}");
+            assert_eq!(all.illegal_moves, illegal, "mask {mask}");
+            assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
+            assert_eq!(rebuilt.flip_edges, memory.flip_edges, "mask {mask}");
+            for v in 0..rebuilt.len() {
+                assert_eq!(rebuilt.sfen(v), memory.sfen(v), "mask {mask}");
+                let values = |g: &Graph| {
+                    g.moves(v)
+                        .map(|m| (m.old, m.new, m.usable, m.edge.map(|e| (e.to, e.via_flip))))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(values(&rebuilt), values(&memory), "mask {mask}");
+            }
+            let old_out = dir.path().join("old.db");
+            let new_out = dir.path().join("new.db");
+            write_backprop_book(&rebuilt, &old_out).unwrap();
+            write_audited_db(
+                &new_out,
+                &positions,
+                &AuditedBook {
+                    graph: memory,
+                    known,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&old_out).unwrap(),
+                std::fs::read(&new_out).unwrap(),
+                "mask {mask}"
+            );
+        }
     }
 
     #[test]

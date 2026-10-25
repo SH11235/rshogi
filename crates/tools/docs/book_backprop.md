@@ -127,3 +127,5 @@ cargo run -p tools --release --bin book_backprop -- \
 | Propagation depth | 局面グラフの強連結成分を縮約した DAG で、葉から何段伝播したかの分布 |
 | SCC | 非自明 SCC 数、最大サイズ、千日手の値になった SCC 内手数、王手をかけ続けられる循環の状態数、保証手だけを残した局面数 |
 | Top changed nodes | 旧 best と新 best の差が大きい上位 20 局面 |
+
+元データの点検を行う `book_mine master audit` と、同じ元データの伝播を使う `rejoin` / `cycles` / `borrow` は、この後退解析をメモリ内のグラフで呼び出します。一時 `.db` への変換と再読み込みを省き、値の分からない手を除く際にもグラフを作り直しません。`book_backprop` コマンドの入力形式と出力は変わりません。

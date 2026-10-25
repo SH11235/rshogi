@@ -138,8 +138,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
-    let values = evaluate(&positions, draws, work.path())?;
+    let values = evaluate(&positions, draws)?;
     let freq = args.opp_freq.as_deref().map(BookDb::read).transpose()?;
     let index = BookIndex::new(&positions)?;
     let weight_options = WeightOptions {
