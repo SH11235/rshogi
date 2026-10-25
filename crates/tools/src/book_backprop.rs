@@ -2294,7 +2294,8 @@ fn write_delta_report(writer: &mut dyn Write, deltas: &BTreeMap<i32, usize>) -> 
 }
 
 /// 昇順に並べた `total` 個の値の `pct` パーセンタイル (並べた位置を切り上げる)。
-fn percentile(counts: &BTreeMap<i32, usize>, total: usize, pct: usize) -> i32 {
+/// 値ごとの数から、`pct` % の位置の値を返す。
+pub(crate) fn percentile(counts: &BTreeMap<i32, usize>, total: usize, pct: usize) -> i32 {
     let idx = ((total - 1) * pct).div_ceil(100);
     let mut seen = 0;
     for (&value, &count) in counts {
@@ -2306,7 +2307,8 @@ fn percentile(counts: &BTreeMap<i32, usize>, total: usize, pct: usize) -> i32 {
     0
 }
 
-fn delta_buckets(counts: &BTreeMap<i32, usize>) -> Vec<(&'static str, usize)> {
+/// 差の絶対値ごとの数を、report の帯ごとにまとめる。
+pub(crate) fn delta_buckets(counts: &BTreeMap<i32, usize>) -> Vec<(&'static str, usize)> {
     let ranges = [
         ("1-49", 1, 49),
         ("50-99", 50, 99),

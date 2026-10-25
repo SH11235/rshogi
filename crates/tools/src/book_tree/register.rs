@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-const COLUMNS: [&str; 11] = [
+pub(super) const COLUMNS: [&str; 11] = [
     "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
 ];
-const ROLES: [&str; 3] = ["main", "alt", "record"];
+pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
 /// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。
 const READ_SOURCES: [&str; 2] = ["read", "deep"];
 

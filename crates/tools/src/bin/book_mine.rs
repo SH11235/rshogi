@@ -3,6 +3,7 @@
 //! - `frontier`: book と開始局面から、次に掘る末端局面を列挙する
 //! - `expand`: 末端局面を MultiPV 探索し、局面と候補手を book に追加する
 //! - `run`: `frontier` → `expand` → 逆伝播 (`tools::book_backprop`) を周回する
+//! - `master audit`: 定跡の元データの読みの値を逆伝播し、main を点検する
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
@@ -53,6 +54,8 @@ enum Command {
     Run(RunArgs),
     /// 独立した木を共有キューで読み、Python 互換の登録材料を作る
     Tree(tools::book_tree::TreeArgs),
+    /// 定跡の元データの表を点検する
+    Master(tools::book_tree::MasterArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -179,6 +182,7 @@ fn main() -> Result<()> {
         Command::Expand(args) => cmd_expand(&args),
         Command::Run(args) => cmd_run(&args),
         Command::Tree(args) => tools::book_tree::run(args),
+        Command::Master(args) => tools::book_tree::run_master(args),
     }
 }
 
