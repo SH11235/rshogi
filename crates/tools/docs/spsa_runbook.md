@@ -542,14 +542,20 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]] //base=2809
 
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
-| CORR | `SPSA_CORR_PCV_WEIGHT` | 9536 | pawn correction weight |
-| CORR | `SPSA_CORR_MICV_WEIGHT` | 8494 | minor piece correction weight |
-| CORR | `SPSA_CORR_NONPAWN_WEIGHT` | 10132 | non-pawn correction weight |
-| CORR | `SPSA_CORR_CNT_WEIGHT` | 7156 | continuation correction weight |
-| CORR | `SPSA_CORR_HIST_NONPAWN` | 165 | correction history non-pawn 更新係数 |
-| CORR | `SPSA_CORR_HIST_MINOR` | 156 | correction history minor piece 更新係数 |
-| CORR | `SPSA_CORR_HIST_CONT_SS2` | 137 | correction history cont (ss-2) 更新係数 |
-| CORR | `SPSA_CORR_HIST_CONT_SS4` | 64 | correction history cont (ss-4) 更新係数 |
+| CORR | `SPSA_CORR_PCV_WEIGHT` | 13806 | pawn correction weight |
+| CORR | `SPSA_CORR_MICV_WEIGHT` | 9512 | minor piece correction weight |
+| CORR | `SPSA_CORR_NONPAWN_WEIGHT` | 11615 | non-pawn correction weight |
+| CORR | `SPSA_CORR_CNT_WEIGHT` | 7885 | continuation correction (ss-2, ss-4) weight |
+| CORR | `SPSA_CORR_CNT_SS6_WEIGHT` | 6307 | continuation correction (ss-6) weight |
+| CORR | `SPSA_CORR_CNT_NO_MOVE` | 80695 | 前の手が無いとき continuation 項全体の代わりに足す定数 |
+| CORR | `SPSA_CORR_HIST_NONPAWN` | 186 | correction history non-pawn 更新係数 |
+| CORR | `SPSA_CORR_HIST_MINOR` | 150 | correction history minor piece 更新係数 |
+| CORR | `SPSA_CORR_HIST_CONT_SS2` | 130 | correction history cont (ss-2) 更新係数 |
+| CORR | `SPSA_CORR_HIST_CONT_SS4` | 70 | correction history cont (ss-4) 更新係数 |
+| CORR | `SPSA_CORR_HIST_CONT_SS6` | 35 | correction history cont (ss-6) 更新係数 |
+
+`SPSA_CORR_CNT_SS6_WEIGHT=0`・`SPSA_CORR_HIST_CONT_SS6=0`・`SPSA_CORR_CNT_NO_MOVE=8×SPSA_CORR_CNT_WEIGHT` にすると、
+(ss-6) を使わず、前の手が無いときは `8 × cnt` を足す式 (YaneuraOu と同じ形) になる。
 
 History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)_HIST_INIT'`
 

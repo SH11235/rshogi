@@ -94,6 +94,8 @@ fn aspiration_abort_returns_completed_result() {
             pos.do_move(mv, check);
         }
         let mut search = Search::new(1);
+        // nodes の上限と期待値は、この補正の設定で aspiration の再探索中に止まるよう選んである。
+        search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
         let mut infos = Vec::new();
         let result = search.go(
             &mut pos,

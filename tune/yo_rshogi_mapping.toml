@@ -12,6 +12,8 @@
 
 # === Correction value ===
 # return 9536@ * pcv + 8494@ * micv + 10132@ * (wnpcv + bnpcv) + 7156@ * cntcv;
+# YO の cntcv は前の手が無いとき 8 なので、YO と同じ式にするには rshogi 側で
+# SPSA_CORR_CNT_NO_MOVE = 8 * SPSA_CORR_CNT_WEIGHT、(ss-6) の 2 param を 0 にする。
 [[mapping]]
 yo = "correction_value_1"
 rshogi = "SPSA_CORR_PCV_WEIGHT"
@@ -670,6 +672,9 @@ yo = [
 # YO 側に対応マーカー (`@`) がない、または rshogi 独自に追加されたパラメータ。
 # YO → rshogi 変換時にデフォルトのまま据え置かれる。
 rshogi = [
+  "SPSA_CORR_CNT_SS6_WEIGHT",
+  "SPSA_CORR_CNT_NO_MOVE",
+  "SPSA_CORR_HIST_CONT_SS6",
   "SPSA_FUTILITY_IMPROVING_SCALE",
   "SPSA_FUTILITY_OPP_WORSENING_SCALE",
   "SPSA_NMP_MARGIN_IMPROVING_BONUS",

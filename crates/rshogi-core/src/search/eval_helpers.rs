@@ -58,44 +58,38 @@ pub(super) fn correction_value(
     let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
     let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-    // move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
+    let tp = ctx.tune_params;
+    // 前の手が無い (root・null move 直後) ときは continuation 項全体を定数で置き換える。
     let cntcv = if move_ok {
         let sentinel = std::ptr::NonNull::from(
             h.correction_history.continuation_table(Piece::NONE, Square::SQ_11),
         );
-        let table_2 = if ply >= 2 {
-            debug_assert!(((ply - 2) as usize) < st.stack.len());
-            // SAFETY: ply >= 2 かつ ply <= MAX_PLY なので (ply-2) はStackArrayの範囲内。
-            unsafe { st.stack.get_unchecked((ply - 2) as usize) }.cont_correction_ptr
-        } else {
-            sentinel
-        };
-        let table_4 = if ply >= 4 {
-            debug_assert!(((ply - 4) as usize) < st.stack.len());
-            // SAFETY: ply >= 4 かつ ply <= MAX_PLY なので (ply-4) はStackArrayの範囲内。
-            unsafe { st.stack.get_unchecked((ply - 4) as usize) }.cont_correction_ptr
-        } else {
-            sentinel
+        let table = |back: i32| {
+            if ply >= back {
+                debug_assert!(((ply - back) as usize) < st.stack.len());
+                // SAFETY: ply >= back かつ ply <= MAX_PLY なので (ply-back) はStackArrayの範囲内。
+                unsafe { st.stack.get_unchecked((ply - back) as usize) }.cont_correction_ptr
+            } else {
+                sentinel
+            }
         };
         let pc = pos.piece_on(prev_move.to());
-        // SAFETY: Stack上のpointerはHistoryCell内のtableまたはsentinelを指し、探索中は有効。
-        let cv2 = unsafe {
-            CorrectionHistory::continuation_value_from_table(table_2, pc, prev_move.to())
-        } as i32;
-        // SAFETY: 同上。
-        let cv4 = unsafe {
-            CorrectionHistory::continuation_value_from_table(table_4, pc, prev_move.to())
-        } as i32;
-        cv2 + cv4
+        let value = |back: i32| {
+            // SAFETY: Stack上のpointerはHistoryCell内のtableまたはsentinelを指し、探索中は有効。
+            i32::from(unsafe {
+                CorrectionHistory::continuation_value_from_table(table(back), pc, prev_move.to())
+            })
+        };
+        tp.correction_value_cnt_weight * (value(2) + value(4))
+            + tp.correction_value_cnt_ss6_weight * value(6)
     } else {
-        8
+        tp.correction_value_cnt_no_move
     };
 
-    let tp = ctx.tune_params;
     tp.correction_value_pcv_weight * pcv
         + tp.correction_value_micv_weight * micv
         + tp.correction_value_nonpawn_weight * (wnpcv + bnpcv)
-        + tp.correction_value_cnt_weight * cntcv
+        + cntcv
 }
 
 /// 補正履歴の更新
@@ -123,27 +117,17 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2)/(ss-4) context — cont_hist_key が未設定(None)でも sentinel へフォールバック
-    let sentinel_key = ContHistKey::null_sentinel();
-    let cont_key_2 = if ply >= 2 {
-        debug_assert!(((ply - 2) as usize) < st.stack.len());
-        // SAFETY: ply >= 2 かつ ply <= MAX_PLY なので (ply-2) は StackArray の範囲内。
-        match unsafe { st.stack.get_unchecked((ply - 2) as usize) }.cont_hist_key {
-            Some(key) => key,
-            None => sentinel_key,
+    // (ss-2)/(ss-4)/(ss-6) context — cont_hist_key が未設定(None)でも sentinel へフォールバック
+    let cont_key = |back: i32| {
+        if ply >= back {
+            debug_assert!(((ply - back) as usize) < st.stack.len());
+            // SAFETY: ply >= back かつ ply <= MAX_PLY なので (ply-back) は StackArray の範囲内。
+            unsafe { st.stack.get_unchecked((ply - back) as usize) }
+                .cont_hist_key
+                .unwrap_or_else(ContHistKey::null_sentinel)
+        } else {
+            ContHistKey::null_sentinel()
         }
-    } else {
-        sentinel_key
-    };
-    let cont_key_4 = if ply >= 4 {
-        debug_assert!(((ply - 4) as usize) < st.stack.len());
-        // SAFETY: ply >= 4 かつ ply <= MAX_PLY なので (ply-4) は StackArray の範囲内。
-        match unsafe { st.stack.get_unchecked((ply - 4) as usize) }.cont_hist_key {
-            Some(key) => key,
-            None => sentinel_key,
-        }
-    } else {
-        sentinel_key
     };
 
     let tp = ctx.tune_params;
@@ -169,25 +153,24 @@ pub(super) fn update_correction_history(
         bonus * tp.correction_history_non_pawn_weight / 128,
     );
 
-    // continuation(ss-2)/(ss-4) の重みをパラメータから取得
     // m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
     if move_ok {
         let pc = pos.piece_on(prev_move.to());
         let prev_to = prev_move.to();
-        h.correction_history.update_continuation(
-            cont_key_2.piece,
-            cont_key_2.to,
-            pc,
-            prev_to,
-            bonus * tp.correction_history_cont_ss2_weight / 128,
-        );
-        h.correction_history.update_continuation(
-            cont_key_4.piece,
-            cont_key_4.to,
-            pc,
-            prev_to,
-            bonus * tp.correction_history_cont_ss4_weight / 128,
-        );
+        for (back, weight) in [
+            (2, tp.correction_history_cont_ss2_weight),
+            (4, tp.correction_history_cont_ss4_weight),
+            (6, tp.correction_history_cont_ss6_weight),
+        ] {
+            let key = cont_key(back);
+            h.correction_history.update_continuation(
+                key.piece,
+                key.to,
+                pc,
+                prev_to,
+                bonus * weight / 128,
+            );
+        }
     }
 }
 

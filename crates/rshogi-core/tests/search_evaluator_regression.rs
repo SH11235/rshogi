@@ -82,9 +82,9 @@ fn node_budget() {
     let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
     assert_eq!(result.nodes, 1000);
     assert_eq!(result.depth, 6);
-    assert_eq!(result.score.raw(), 2);
+    assert_eq!(result.score.raw(), 1);
     assert_eq!(result.best_move.to_usi(), "1g1f");
     let pv = result.pv.iter().map(|mv| mv.to_usi()).collect::<Vec<_>>().join(" ");
-    assert_eq!(pv, "1g1f 2c2d 3g3f");
+    assert_eq!(pv, "1g1f 2c2d 4g4f 1c1d 6g6f 5c5d");
     material::disable_material();
 }
