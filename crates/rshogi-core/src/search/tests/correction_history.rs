@@ -1,4 +1,4 @@
-//! correction value / correction history の tune param で、(ss-6) を使わない旧式の補正を再現できること。
+//! correction value / correction history の tune param で、(ss-6) を使わない式を再現できること。
 use crate::position::Position;
 use crate::search::{LimitsType, Search, SearchInfo, SearchTuneParams};
 
@@ -11,8 +11,8 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
         .unwrap();
 }
 
-/// (ss-2)/(ss-4) だけを参照し、前の手が無いときは `8 * cnt` を使う旧式の値。
-fn legacy_params() -> SearchTuneParams {
+/// (ss-2)/(ss-4) だけを参照し、前の手が無いときは `8 * cnt` を足す式 (YaneuraOu と同じ形) の値。
+pub(super) fn correction_params_ss2_ss4_only() -> SearchTuneParams {
     SearchTuneParams {
         correction_value_pcv_weight: 9536,
         correction_value_micv_weight: 8494,
@@ -37,31 +37,26 @@ const SFENS: [&str; 3] = [
 
 const DEPTH: i32 = 16;
 
-/// 深さ固定・1 スレッドで探索し、局面ごとの (nodes, bestmove) を返す。
-fn search_all(params: SearchTuneParams) -> Vec<(u64, String)> {
-    SFENS
-        .iter()
-        .map(|sfen| {
-            let mut pos = Position::new();
-            pos.set_sfen(sfen).unwrap();
-            let mut search = Search::new(16);
-            search.set_search_tune_params(params);
-            let result = search.go(
-                &mut pos,
-                LimitsType {
-                    depth: DEPTH,
-                    ..Default::default()
-                },
-                None::<fn(&SearchInfo)>,
-            );
-            (result.nodes, result.best_move.to_usi())
-        })
-        .collect()
+/// 深さ固定・1 スレッドで探索し、(nodes, bestmove) を返す。
+fn search(sfen: &str, params: SearchTuneParams) -> (u64, String) {
+    let mut pos = Position::new();
+    pos.set_sfen(sfen).unwrap();
+    let mut search = Search::new(16);
+    search.set_search_tune_params(params);
+    let result = search.go(
+        &mut pos,
+        LimitsType {
+            depth: DEPTH,
+            ..Default::default()
+        },
+        None::<fn(&SearchInfo)>,
+    );
+    (result.nodes, result.best_move.to_usi())
 }
 
-/// (ss-6) の項を入れる前の探索 (material 評価 Lv1) で得た値。
+/// material 評価 Lv1 で、(ss-2)/(ss-4) だけの式を `correction_value` に直書きしていた探索が返す値。
 /// use-lazy-evaluate は TT の eval を再利用するため 2 局面目の nodes が変わる。
-fn expected_legacy() -> Vec<(u64, String)> {
+fn expected_ss2_ss4_only() -> Vec<(u64, String)> {
     let second = if cfg!(feature = "use-lazy-evaluate") {
         645_120
     } else {
@@ -75,13 +70,31 @@ fn expected_legacy() -> Vec<(u64, String)> {
 }
 
 #[test]
-fn legacy_correction_params_reproduce_previous_search() {
+fn ss2_ss4_only_params_reproduce_hardcoded_formula() {
     let _guard = crate::eval::material::test_support::lock_material();
     crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
     on_large_stack(|| {
-        let legacy = search_all(legacy_params());
-        assert_eq!(legacy, expected_legacy());
-        // 既定値では (ss-6) の項が効いて探索が変わる。
-        assert_ne!(search_all(SearchTuneParams::default()), legacy);
+        let base = correction_params_ss2_ss4_only();
+        let got: Vec<_> = SFENS.iter().map(|sfen| search(sfen, base)).collect();
+        assert_eq!(got, expected_ss2_ss4_only());
+
+        // 新しい 3 param がそれぞれ単独で探索に効く (参照・更新・定数項の経路が生きている)。
+        let toggles = [
+            SearchTuneParams {
+                correction_value_cnt_ss6_weight: 6307,
+                ..base
+            },
+            SearchTuneParams {
+                correction_history_cont_ss6_weight: 35,
+                ..base
+            },
+            SearchTuneParams {
+                correction_value_cnt_no_move: 80695,
+                ..base
+            },
+        ];
+        for params in toggles {
+            assert_ne!(search(SFENS[0], params), got[0]);
+        }
     });
 }

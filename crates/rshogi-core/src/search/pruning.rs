@@ -528,7 +528,7 @@ where
         let cont_hist_to = mv.to();
 
         st.stack[ply as usize].current_move = mv;
-        prefetch_cont_correction(st, ply, mv);
+        prefetch_cont_correction(st, ctx.history, ply, mv);
         do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
         set_cont_history_for_move(
             st,

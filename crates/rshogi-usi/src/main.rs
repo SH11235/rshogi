@@ -2353,7 +2353,7 @@ mod tests {
             .spawn(|| {
                 let mut engine = UsiEngine::new();
                 let defaults = engine.search.as_ref().unwrap().search_tune_params();
-                assert_eq!(SearchTuneParams::option_specs().len(), 170);
+                assert_eq!(SearchTuneParams::option_specs().len(), 173);
                 for spec in SearchTuneParams::option_specs() {
                     let value = spec.default.to_string();
                     engine.cmd_setoption(&["setoption", "name", spec.usi_name, "value", &value]);

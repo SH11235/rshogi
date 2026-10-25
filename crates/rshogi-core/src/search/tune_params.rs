@@ -1241,8 +1241,8 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         min: 0,
         max: 32768,
     },
-    // 前の手が無いときの旧式 `8 * SPSA_CORR_CNT_WEIGHT` を CNT_WEIGHT の全範囲で表せるよう、
-    // 上限は CNT_WEIGHT の上限の 8 倍にする。
+    // (ss-6) を使わない式の、前の手が無いときの `8 * SPSA_CORR_CNT_WEIGHT` を CNT_WEIGHT の
+    // 全範囲で表せるよう、上限は CNT_WEIGHT の上限の 8 倍にする。
     SearchTuneOptionSpec {
         usi_name: "SPSA_CORR_CNT_NO_MOVE",
         default: SearchTuneParams::DEFAULT.correction_value_cnt_no_move,

@@ -555,7 +555,7 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]] //base=2809
 | CORR | `SPSA_CORR_HIST_CONT_SS6` | 35 | correction history cont (ss-6) 更新係数 |
 
 `SPSA_CORR_CNT_SS6_WEIGHT=0`・`SPSA_CORR_HIST_CONT_SS6=0`・`SPSA_CORR_CNT_NO_MOVE=8×SPSA_CORR_CNT_WEIGHT` にすると、
-(ss-6) を使わない旧式の補正になる。
+(ss-6) を使わず、前の手が無いときは `8 × cnt` を足す式 (YaneuraOu と同じ形) になる。
 
 History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)_HIST_INIT'`
 

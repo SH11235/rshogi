@@ -1324,6 +1324,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
+            prefetch_cont_correction(&self.state, &self.history, 0, mv);
             do_move_and_push(
                 &mut self.state,
                 pos,
@@ -1977,6 +1978,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
+            prefetch_cont_correction(&self.state, &self.history, 0, mv);
             do_move_and_push(
                 &mut self.state,
                 pos,
@@ -3050,7 +3052,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            prefetch_cont_correction(st, ply, mv);
+            prefetch_cont_correction(st, ctx.history, ply, mv);
             do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）

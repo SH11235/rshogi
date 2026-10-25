@@ -15,6 +15,11 @@ cargo run --release -p tools --bin yo_to_rshogi_params -- \
 `c_end = max(1, round((max-min)/20))`、`r_end = 0.002`。
 マッピング対象外のrshogi値は既定値のまま残る。
 
+correction value の (ss-6) の2項 (`SPSA_CORR_CNT_SS6_WEIGHT` / `SPSA_CORR_HIST_CONT_SS6`) と
+`SPSA_CORR_CNT_NO_MOVE` は YO に無いのでマッピング対象外になり、既定値 (Stockfish の値) が残る。
+YO と同じ式にするには、出力で前2つを 0、`SPSA_CORR_CNT_NO_MOVE` を `8 × SPSA_CORR_CNT_WEIGHT` にする。
+逆向きの `rshogi_to_yo_params` では、この3項の値は YO 側へ移らない。
+
 `--base <path>` を指定すると、そのファイルの範囲・`c_end/r_end` と
 マッピング対象外の値を保持する。baseには同じ形式宣言が必要。
 列6/7が現形式と確認済みの未宣言baseに限り `--assume-c-end-r-end` を指定できる。

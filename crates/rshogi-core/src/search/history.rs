@@ -855,14 +855,7 @@ impl CorrectionHistory {
             _mm_prefetch(entry_ptr as *const i8, 3);
         }
 
-        #[cfg(target_arch = "aarch64")]
-        // SAFETY: entry_ptr は生存中のエントリを指し、prefetch は内容を変更しない。
-        unsafe {
-            use std::arch::aarch64::_prefetch;
-            _prefetch(entry_ptr as *const i8, 0, 3);
-        }
-
-        #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
+        #[cfg(not(target_arch = "x86_64"))]
         let _ = entry_ptr;
     }
 

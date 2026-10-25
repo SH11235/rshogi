@@ -12,7 +12,7 @@ use crate::search::PieceToHistory;
 use crate::types::{Color, Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
-use super::history::{CorrectionHistory, CorrectionPieceToHistory};
+use super::history::{CorrectionHistory, CorrectionPieceToHistory, HistoryCell};
 use super::types::{ContHistKey, STACK_SIZE};
 use super::{LimitsType, TimeManagement};
 
@@ -199,22 +199,35 @@ pub(super) fn do_move_and_push_prefetched(
 }
 
 /// 子局面の correction_value が読む (ss-2)/(ss-4)/(ss-6) の continuation correction を、
-/// 親から見た (ss-1)/(ss-3)/(ss-5) の表で先読みする。探索根より前は sentinel なので対象外。
+/// 親から見た (ss-1)/(ss-3)/(ss-5) の表で先読みする。探索根より前は sentinel を読む。
 #[inline]
-pub(super) fn prefetch_cont_correction(st: &SearchState, ply: i32, mv: Move) {
+pub(super) fn prefetch_cont_correction(
+    st: &SearchState,
+    history: &HistoryCell,
+    ply: i32,
+    mv: Move,
+) {
     if mv.is_pass() {
         return;
     }
+    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない。
+    let sentinel = NonNull::from(
+        unsafe { history.as_ref_unchecked() }
+            .correction_history
+            .continuation_table(Piece::NONE, Square::SQ_11),
+    );
     let pc = mv.moved_piece_after();
     let to = mv.to();
     for back in [1, 3, 5] {
-        if ply >= back {
+        let table = if ply >= back {
+            debug_assert!(((ply - back) as usize) < st.stack.len());
             // SAFETY: back <= ply < STACK_SIZE。
-            let table =
-                unsafe { st.stack.get_unchecked((ply - back) as usize) }.cont_correction_ptr;
-            // SAFETY: Stack上のpointerはHistoryCell内のtableまたはsentinelを指し、探索中は有効。
-            unsafe { CorrectionHistory::prefetch_continuation_from_table(table, pc, to) };
-        }
+            unsafe { st.stack.get_unchecked((ply - back) as usize) }.cont_correction_ptr
+        } else {
+            sentinel
+        };
+        // SAFETY: Stack上のpointerはHistoryCell内のtableまたはsentinelを指し、探索中は有効。
+        unsafe { CorrectionHistory::prefetch_continuation_from_table(table, pc, to) };
     }
 }
 
