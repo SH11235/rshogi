@@ -44,3 +44,5 @@ mod compare_nodes_failures;
 mod params_boundaries;
 
 mod book_fingerprint_compat;
+
+mod prep_hcpe_memory;

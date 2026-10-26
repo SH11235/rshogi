@@ -14,12 +14,30 @@ cargo run -p tools --release --bin prep_hcpe -- \
   --exclude "$SHOGI_DATA/teachers/heldout.hcpe" \
   --out-dir "$SHOGI_DATA/teachers/prepared" \
   --prefix train \
-  --target 100000000 \
+  --shuffle-memory-mib 256 \
   --seed 42
 ```
 
 `--in` と `--exclude` はそれぞれパスをソートし、重複したパスを除去してから処理するため、
-引数の指定順は出力に影響しません。同じファイル内容と seed からは同じ byte 列を出力します。
+引数の指定順は出力に影響しません。同じファイル内容・seed・shuffle 予算からは同じ byte 列を出力します。
+
+開始時に stderr へ、レコード保持・Bloom filter の最大見積もり、利用可能メモリ、
+別枠となるメモリの注意を表示します。予算内ならメモリ内 shuffle を使い、通過件数が上限を
+超えたときだけディスクへ切り替えます。既定予算は 256 MiB です。
+
+```bash
+# メモリを節約する場合（新しい出力先を指定）
+prep_hcpe --in "$SHOGI_DATA/teachers/a.hcpe" \
+  --out-dir "$SHOGI_DATA/teachers/prepared-small-memory" --shuffle-memory-mib 16
+
+# 予算を増やし、メモリ内で処理できる範囲を広げる場合
+prep_hcpe --in "$SHOGI_DATA/teachers/a.hcpe" \
+  --out-dir "$SHOGI_DATA/teachers/prepared-large-memory" --shuffle-memory-mib 1024
+```
+
+件数を制限する場合は `--target 100000000` のように指定します。この場合は従来の
+reservoir sampling で保持し、`--shuffle-memory-mib` とは併用できません。開始時に
+最大保持件数と必要なレコード容量を表示します。
 
 ## オプション
 
@@ -31,6 +49,7 @@ cargo run -p tools --release --bin prep_hcpe -- \
 | `--prefix <STR>` | 出力ファイル名の接頭辞 | `chunk` |
 | `--chunk-records <N>` | 1ファイルあたりのレコード数 | `250000` |
 | `--target <N>` | shuffle 後に残す件数。0 は全件 | `0` |
+| `--shuffle-memory-mib <MiB>` | 全件 shuffle のレコードバッファ予算。1 以上、`--target 0` 専用 | `256` |
 | `--seed <U64>` | shuffle seed | `42` |
 | `--expected-records <N>` | Bloom filter の想定投入件数 | `100000000` |
 | `--false-positive-rate <F>` | Bloom filter の偽陽性率 | `1e-6` |
@@ -48,11 +67,22 @@ cargo run -p tools --release --bin prep_hcpe -- \
 高めに出る場合があります。入力が `--expected-records` を超える場合は警告します。
 既定設定の Bloom 本体は約 343 MiB で、想定投入件数に比例します。
 
-`--target N`（N > 0）は reservoir sampling で最大 N 件をメモリに保持します。
-レコード本体の上限は `38 × N` byte（100M 件なら約 3.54 GiB）です。
-`--target 0` は 250000 件までメモリに保持し、それを超えると 128 bit 乱数キーで外部ソートして
-全通過レコードを並べ替えます。ソートのバッファは 250000 件、マージは最大 32 ファイルずつです。
-同じ入力・seed なら出力 byte 列は一致しますが、大規模な全件出力の順番は旧版とは異なります。
+`--target 0`（全件）は `--shuffle-memory-mib` の予算内でレコードを保持し、メモリ内で
+シャッフルします。通過件数が保持上限を超えると、128 bit 乱数キーの外部ソートに切り替えます。
+保持中のレコードと外部ソートバッファが同時に生存する分も予算に含めます。既定 256 MiB では
+保持上限は 6656196 件です。ソートバッファは最大 250000 件（約 14.78 MiB）、小さい予算では
+予算の約半分以下に抑えます。マージは最大 32 ファイルずつです。
+
+予算はレコードバッファ用で、**プロセス全体のメモリ上限ではありません**。Bloom filter、
+除外集合、I/O バッファ、メモリ管理領域は別枠です。表示する利用可能メモリを見て予算を調整し、
+並行ジョブの使用分も考慮してください。OS の空きメモリは表示にだけ使い、方式の決定には使いません。
+
+同じ入力・seed・予算なら出力 byte 列は一致します。予算を変えてメモリ内と外部ソートの
+方式が変わると、同じ seed でも出力順は変わります。どちらも通過した全レコードを保持します。
+
+`--target N`（N > 0）は reservoir sampling で最大 `min(N, 総入力件数)` 件をメモリに保持し、
+全件用の shuffle 予算を適用しません。レコード本体は保持件数 × 38 byte
+（100M 件なら約 3.54 GiB）です。Bloom や除外集合はさらに必要です。
 
 除外局面は完全一致で判定します。250000 種類未満はメモリの集合、それ以上はディスク上の
 ソート済み 32 byte キーを二分探索するため、除外件数に応じてメモリが増え続けません。
