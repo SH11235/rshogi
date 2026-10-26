@@ -63,8 +63,7 @@ name = "GAME_ROOM"
 class_name = "GameRoom"
 
 # Lobby: マッチング待機キューとペアリング判定を担当する 1 instance 固定 DO。
-# `id_from_name("default")` で routing する。in-memory queue のみ保持し、
-# Hibernation 復帰時は client が再 LOGIN_LOBBY する想定で永続化はしない。
+# `id_from_name("default")` で routing し、Hibernation 復帰時は attachment から待機者を復元する。
 [[durable_objects.bindings]]
 name = "LOBBY"
 class_name = "Lobby"
@@ -86,8 +85,7 @@ class_name = "RateLimiter"
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
 
-# Lobby を SQLite-backed として追加 (storage 利用予定はないが将来の queue TTL 永続化
-# 等を見据えて SQLite クラスとして登録しておく)。
+# 招待 registry と接続 ID の採番を永続化する Lobby クラス。
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Lobby"]
@@ -232,19 +230,15 @@ ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。staging では小規模通電向けに 100 で運用。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
 # 公開マッチング queue の entry TTL (秒)。staging は smoke / E2E をテンポよく回す
-# ため短めの 60 秒に設定する (Issue #631)。本値を超えても `LOBBY_PONG` 受信で
-# 延長されるため、heartbeat 実装後はそのまま使える。production 昇格時は 300 秒
+# ため短めの 60 秒に設定する。`LOBBY_PONG` 受信で延長される。production 昇格時は 300 秒
 # に揃える。`0` / 未設定 / 非数値は 300 秒既定にフォールバック。
 LOBBY_QUEUE_ENTRY_TTL_SEC = "60"
 # 私的対局 (CHALLENGE_LOBBY) で発行される token の TTL (秒)。staging は通電
 # 確認をテンポよく回すため短めの 600 秒 (10 分) で運用する。production 昇格
 # 時は 3600 秒に揃える。
 CHALLENGE_TTL_SEC = "600"
-# 私的対局 (CHALLENGE_LOBBY / LOGIN_LOBBY+private-<token>+free) 経路の opt-in
-# 有効化フラグ (https://github.com/SH11235/rshogi/issues/635)。両者揃った後の
-# 対局起動経路 (consume → GameRoom DO 起動) が未実装の現状、staging では起動
-# 経路実装の動作確認 (E2E 通電) を回す前提で `"true"` を既定とする。production
-# は fail-closed で `"false"` 既定 (production toml 側参照)。
+# staging では私的対局の招待から対局開始まで検証するため有効化する。
+# production は明示的に有効化するまで招待を受け付けない。
 PRIVATE_CHALLENGE_ENABLED = "true"
 
 # --- Rate limit / abuse protection (issue #622 PR3a) ---

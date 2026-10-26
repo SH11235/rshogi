@@ -1,288 +1,160 @@
-# rshogi-csa-server-workers Rate limit 運用 Runbook
+# Workers のレート制限
 
-[Issue #622](https://github.com/SH11235/rshogi/issues/622) PR3a で導入した
-LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対する
-**Worker code-only** rate limit の運用手順をまとめる。設計判断の根拠は
-[`docs/csa-server/rate_limit_design.md`](./rate_limit_design.md) を参照。
+CSA 接続・ロビー操作の頻度と、ログイン前の接続保持数を制限する。
+制限に当たったクライアントは `Retry-After` / `retry_after` の秒数を待って再試行する。
+仕組みの詳細は [rate limit の実装](rate_limit_design.md) を参照。
 
-> 本 runbook は **層 2 (atomic token bucket)** + **層 3 (room create cap)** を
-> 扱う。**層 1 (Cloudflare WAF Rate Limiting Rules)** は IaC
-> [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3 と統合する PR3b
-> 以降のスコープで、本 runbook の対象外。
+## ローカルで動作を確認する
 
-## 1. アーキテクチャ概要
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ Cloudflare edge — staging / production の各 worker namespace        │
-│                                                                    │
-│  Client                                                            │
-│   │ /ws/<room_id> + CF-Connecting-IP                               │
-│   ▼                                                                │
-│  ┌─────────────────────┐                                           │
-│  │ Worker (router.rs)  │                                           │
-│  │  - Origin / Upgrade │                                           │
-│  │  - extract_client_ip│                                           │
-│  │  - rate_limit RPC ──┼────►┌────────────────────────┐           │
-│  │  - id_from_name     │     │ RateLimiter DO          │           │
-│  │  - stub.fetch       │     │ id = "{kind}:{ident}"   │           │
-│  └─────────────────────┘     │ - refill (token bucket)│           │
-│                              │ - try_consume          │           │
-│                              │ - persist (storage)    │           │
-│                              └────────────────────────┘           │
-│                                                                    │
-│  /ws/lobby 経路は CF-Connecting-IP を LobbyDO の Pending attachment │
-│  に保存し、LOGIN_LOBBY / CHALLENGE_LOBBY 受信時に同 RateLimiter DO に │
-│  per-IP / per-handle / per-inviter の各 bucket で 2 段チェックする。 │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-- **DO sharding 戦略**: `id_from_name(format!("{kind}:{identifier}"))` で
-  per-(kind, identifier) に DO を分散。同 IP / handle のリクエストは決定論的
-  に同 instance に到達する。Cloudflare 側で idle DO は自動 GC。
-- **token bucket**: capacity = `<env>` per minute、refill rate = capacity / 60
-  token/sec。満タンからの burst を許容しつつ、長期平均は X/min を超えない。
-- **fail-closed**: `CF-Connecting-IP` 欠落 / DO RPC エラーは **deny** に倒す
-  (ヘッダ偽装や transient 障害で全 allow に振れない security-first 既定)。
-- **wire format**: 拒否時は `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`
-  / `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>` /
-  `/ws/<room_id>` upgrade では HTTP 503 + `Retry-After: <sec>` ヘッダ
-  ([設計 §3 Q4](rate_limit_design.md#q4-拒否応答))。WS は close せず client が retry 可能な状態を保つ。
-
-## 2. 環境変数 reference
-
-`wrangler.<env>.toml` の `[vars]` テーブルで宣言する 6 個の閾値。すべて
-`SHARED_PUBLIC_VARS_KEYS` に含まれるため、production / staging 両方の toml で
-同名キーを宣言する契約 (CI 整合性 test
-[`tests/integration/wrangler_environment_toml_consistency.rs`](../../crates/rshogi-csa-server-workers/tests/integration/wrangler_environment_toml_consistency.rs)
-が gate)。
-
-| 環境変数 | 単位 | production / staging 既定 | 対応する `RateLimitKind` |
-|---|---|---|---|
-| `LOBBY_LOGIN_RATE_PER_IP_PER_MIN` | LOGIN_LOBBY 試行/分 (per IP) | `10` | `LobbyLoginPerIp` |
-| `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN` | LOGIN_LOBBY 試行/分 (per handle) | `5` | `LobbyLoginPerHandle` |
-| `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN` | CHALLENGE_LOBBY 試行/分 (per IP) | `5` | `LobbyChallengePerIp` |
-| `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN` | CHALLENGE_LOBBY 試行/分 (per inviter) | `3` | `LobbyChallengePerInviter` |
-| `ROOM_CREATE_RATE_PER_IP_PER_MIN` | `/ws/<room_id>` (player) upgrade /分 | `20` | `RoomCreatePerIp` |
-| `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` | Lobby / GameRoom upgrade /分（各別 bucket） | `60` | `WsRoomUpgradePerIp` / `WsLobbyUpgradePerIp` |
-
-### 値の解釈
-
-- 各値は **u32 の正値**。`0` / 空 / 非数値 / `u32` 範囲外は安全側既定
-  (`crate::rate_limit::RateLimitThresholds::DEFAULTS`) にフォールバック。
-  「env で `0` を入れて運用を無効化」という経路は **意図的に提供していない**
-  (運用で外したい場合は十分に大きい値 (例: `1000000`) を入れて事実上無効化)。
-- 値は **deploy なしで反映** される (Worker fetch ハンドラが env を都度読む
-  → DO に capacity を query string で引き渡す設計)。閾値変更は
-  `wrangler.<env>.toml` の `[vars]` を編集 → PR で merge → CI deploy で完了。
-  Cloudflare secret (`wrangler secret put`) 経由ではない。
-
-## 3. 閾値調整手順
-
-### 3.1 緩和 (cap を上げる)
-
-**典型ケース**: legitimate な高頻度 LOGIN / 大規模イベント運用で false positive 拒否
-が発生したとき。
-
-1. Cloudflare Logs / `wrangler tail` で `rate_limit_denied` ログを観測し、
-   どの kind / IP / handle が当たっているか特定する (§4 参照)
-2. `wrangler.<env>.toml` の該当 env を 1.5〜2x 程度に増やす (e.g. `10` → `15`)
-3. 通常の PR レビュー経路で merge
-4. CI deploy 完了後、`wrangler tail` で `rate_limit_denied` 件数の減少を観測
-
-### 3.2 厳格化 (cap を下げる)
-
-**典型ケース**: 攻撃 / 異常 traffic を検知して短期に絞りたいとき。
-
-1. **緊急時 hotfix path**: 直接 production wrangler.toml を編集 → PR merge
-   → CI deploy (rollout は約 1〜2 分)
-2. 逆に過剰拒否で legitimate user が締め出される場合は §3.1 で緩和
-
-> **注意**: 閾値を下げ過ぎると正規ユーザの再接続失敗が増えて support 負荷
-> が上がる。staging で実 traffic ベースライン (`rate_limit_denied` の
-> baseline 件数) を計測してから production に反映するのが安全。
-
-### 3.3 staging で先行検証
-
-新しい閾値の挙動を確認する場合:
-
-1. `wrangler.staging.toml` のみ先に変更 → PR merge → staging 自動 deploy
-   (main への push trigger)
-2. `csa-e2e-staging` skill (`docs/csa-client/staging.md` 参照) で 7 シナリオ
-   通電
-3. 問題なければ production 側 toml も同値に揃える PR を別途 merge
-
-## 4. 観測 / debug
-
-### 4.1 構造化ログイベント
-
-すべて [`structured_log!`](../../crates/rshogi-csa-server-workers/src/observability.rs)
-macro 経由で 1 行 JSON で出力 ([Issue #625](https://github.com/SH11235/rshogi/issues/625)
-Phase A の流儀に揃える)。`event` フィールドが alert / aggregation の primary 軸。
-
-| event | component | 出力タイミング | 主要 field |
-|---|---|---|---|
-| `rate_limit_missing_cf_ip` | `router` / `lobby` | CF-Connecting-IP 欠落で fail-closed | `path` / `kind` / `handle` / `inviter` |
-| `rate_limit_denied` | `router` / `lobby` | bucket 超過で reject | `kind`, `ip`, `handle`/`inviter`, `retry_after_sec`, `path` |
-| `websocket_upgrade_accepted` | `lobby` | LobbyDO upgrade 成功 (rate limit pass 後の通常経路) | `cf_ip_present` (rate limit 観測補助) |
-
-### 4.2 grep 例 (Cloudflare Tail Workers / R2 archive)
+本番へ負荷をかけず、Miniflare で LOGIN・CHALLENGE・upgrade の拒否応答を確認できる。
+Node は crate の `.node-version`、pnpm は `package.json` の `packageManager` に合わせる。
+repo root から次を実行する。
 
 ```bash
-# 直近 1 時間の rate_limit denial を kind 別に集計
-wrangler tail --config wrangler.production.toml --format json \
-  | jq 'select(.event == "rate_limit_denied") | .kind' \
-  | sort | uniq -c
-
-# 特定 IP に対する denial を全 kind 横断で抽出
-wrangler tail --config wrangler.production.toml --format json \
-  | jq 'select(.event == "rate_limit_denied" and .ip == "203.0.113.50")'
-
-# CF-Connecting-IP 欠落 (本来ありえない anomaly) の検知
-wrangler tail --config wrangler.production.toml --format json \
-  | jq 'select(.event == "rate_limit_missing_cf_ip")'
+rustup target add wasm32-unknown-unknown
+cargo install worker-build@=0.8.1 --locked
+cd crates/rshogi-csa-server-workers
+pnpm install --frozen-lockfile
+pnpm exec vitest run --config tests/miniflare_smoke/vitest.config.ts \
+  rate_limit.test.ts lobby_pending.test.ts
 ```
 
-R2 archive 経路 ([Issue #625](https://github.com/SH11235/rshogi/issues/625)
-Phase B 統合後) では `floodgate-history/YYYY/MM/DD/...` と同様のキー体系で
-保存される logs に対して同 jq query を回せる。
+テストの global setup が Worker をビルドし、一時ストレージ上でサーバーを起動する。
+`rate_limit.test.ts` は IP / handle / inviter 別の拒否と HTTP 503 + `Retry-After`、
+`lobby_pending.test.ts` は未認証接続の上限・期限、休眠復帰、DO へ直接渡した IP 欠落を検査する。
+Vitest の成功件数を確認し、Ctrl+C で中断した場合は同じコマンドでやり直す。
 
-### 4.3 `wrangler tail` 一時起動 (Tail Workers 不在時)
+token の時間経過による補充・飽和・待ち時間の計算は、repo root で次を実行する。
 
-[`docs/csa-server/deployment.md`](./deployment.md) の §5 参照。
+```bash
+cargo test -p rshogi-csa-server-workers rate_limit::tests
+```
+
+HTTP upgrade だけでは LOGIN の頻度制限を検証できない。実機で調べる場合も
+WebSocket 上で対象のコマンドを送信し、閾値・送信間隔・応答を合わせて確認する。
+Cloudflare edge を通る接続では `CF-Connecting-IP` は edge 側の値になる。
+
+## 環境変数
+
+`wrangler.staging.toml` / `wrangler.production.toml` の `[vars]` で設定する。
+両環境の同梱値と、未設定・不正値のフォールバック値は次のとおり。
+
+| 環境変数 | 対象 | 既定値 / 分 |
+|---|---|---:|
+| `LOBBY_LOGIN_RATE_PER_IP_PER_MIN` | LOGIN_LOBBY / IP | 10 |
+| `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN` | LOGIN_LOBBY / handle | 5 |
+| `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN` | CHALLENGE_LOBBY / IP | 5 |
+| `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN` | CHALLENGE_LOBBY / inviter | 3 |
+| `ROOM_CREATE_RATE_PER_IP_PER_MIN` | player の room upgrade / IP | 20 |
+| `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` | Lobby / GameRoom upgrade / IP（別 bucket） | 60 |
+
+値は `u32` の正数。`0`、空、非数値、範囲外は既定値へ戻る。
+0 による無効化はできない。実質的に緩和する場合は、必要な上限値を明示する。
+型と既定値は `rate_limit.rs::RateLimitThresholds`、設定のキー整合は
+`tests/integration/wrangler_environment_toml_consistency.rs` で検査している。
+
+各 bucket は満タンから既定値分の burst を許し、1 分でその容量を補充する。
+固定窓のリセット方式ではないため、送信中も少しずつ回復する。
+IP と handle / inviter のチェックは順に実施し、後段で拒否されても
+前段で消費した token は戻さない。
+
+GameRoom の upgrade bucket は player / spectator で共有する。
+player だけはさらに room 作成の bucket を消費する。これは新規 DO 数そのものではなく、
+既存 room への再接続も含む player upgrade 回数を制限する。
+Lobby upgrade は GameRoom upgrade・LOGIN・CHALLENGE の bucket と独立する。
+
+## 閾値調整手順
+
+1. `rate_limit_denied` の `kind`、IP、handle / inviter を確認し、制限の種類を特定する。
+2. 対象環境の toml を変更し、PR を通して [デプロイ](deployment.md) する。
+3. デプロイ完了後、拒否頻度と対局開始・再接続の挙動を確認する。
+
+`[vars]` の編集だけでは配備中の値は変わらない。Worker が読んだ閾値を各 RPC で
+RateLimiter DO に渡すため、デプロイ後に bucket ごとの移行操作は不要。
+secret の更新で閾値を設定する構成ではない。
+緩和は小幅ずつ行い、厳格化は staging で正規クライアントを拒否しないことを確認する。
+staging からの実機確認は [ロビー対局手順](lobby_e2e_runbook.md) を参照。
+
+## 拒否応答と障害時の挙動
+
+| 経路 | 応答 |
+|---|---|
+| WebSocket upgrade | HTTP 503 + `Retry-After: <sec>` |
+| LOGIN_LOBBY | `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` |
+| CHALLENGE_LOBBY | `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>` |
+
+Lobby の頻度超過では WebSocket を維持するが、後述の認証待ち期限は延長しない。
+期限内に再試行できなければ、新たに接続し直す。
+
+IP の取得元は `CF-Connecting-IP` のみで、`X-Forwarded-For` は使わない。
+IP が欠落・空の upgrade は HTTP 503 + `Retry-After: 10` で拒否する。
+DO RPC、JSON 応答解析、ストレージの失敗も許可に変換せずエラーとする
+（この場合、通常の頻度超過と同じ応答になるとは限らない）。
+
+## ログとトラブルシューティング
+
+repo root から対象環境のログを表示する。`wrangler tail` は接続後のイベントを受信する。
+過去ログの検索は [observability](observability.md) を参照。
 
 ```bash
 cd crates/rshogi-csa-server-workers
-vp run tail:prod          # production
-vp run tail:staging       # staging
+pnpm exec wrangler tail --config wrangler.production.toml --format json \
+  | jq -c '.logs[]?.message[]? | fromjson? // empty | select(.event == "rate_limit_denied")'
 ```
 
-## 5. トラブルシュート
+staging では `--config wrangler.staging.toml` に置き換える。
+特定 IP だけに絞るときは jq の条件へ `and .ip == "203.0.113.50"` を加える。
+top-level の `.event` は invocation のメタ情報なので、先に `logs[].message[]` を展開する。
 
-### 5.1 すべての client が `rate_limited` で reject される
-
-- **原因 1**: env 値の typo / `0` / 範囲外で fallback (= 既定値) に倒れた
-  + 既存 traffic が常に default cap を超えている
-  - 対処: `wrangler.<env>.toml` の値を確認し、適正値に戻す
-- **原因 2**: `CF-Connecting-IP` が Cloudflare edge 経由で来ていない
-  (proxy 設定不正 / Origin direct hit)
-  - 対処: `rate_limit_missing_cf_ip` イベントの頻度を確認、
-    Cloudflare ダッシュボードで proxy 状態を確認
-- **原因 3**: 同 NAT 配下の多 client が同 IP として観測されて per-IP cap を
-  共有してしまう (= NAT 同居問題)
-  - 対処: per-handle cap を相対的に緩める or 当該 IP の per-IP cap を運用
-    例外的に上げる (本 PR では IP 単位例外設定機構は提供しない、必要時
-    follow-up issue で扱う)
-
-### 5.2 RateLimiter DO storage の成長モデル
-
-**重要 — DO storage は永続的**: Cloudflare Durable Object は「**isolate (in-memory
-state) は idle で evict** される」が、「**`state.storage()` の永続データは明示
-削除しない限り残る**」(公式仕様)。本 PR3a では `state.storage().put` を毎 check 後
-に呼ぶ設計のため、過去に touch された全 (kind, identifier) ペアの bucket state が
-storage に残る。
-
-**実測上の storage 消費**:
-
-| シナリオ | unique (kind, identifier) 数 | storage 消費 |
+| event | 意味 | 確認するフィールド |
 |---|---|---|
-| 単一 IP × 6 bucket kinds | 6 | ~96 byte |
-| 1,000 unique IP × 6 kinds | 6,000 | ~96 KB |
-| 1M unique IP × 6 kinds (botnet 級) | 6M | ~96 MB |
+| `rate_limit_denied` | bucket 超過 | `kind`, `ip`, `handle` / `inviter`, `retry_after_sec`, `path`（経路ごとに異なる） |
+| `rate_limit_missing_cf_ip` | IP が取得できない経路での拒否 | `component`, `path` / `kind` |
+| `websocket_upgrade_accepted` | Lobby の upgrade 成功 | `cf_ip_present` |
+| `lobby_pending_limit_denied` | 未認証接続数の上限超過 | `total`, `per_ip` |
 
-5 GB Free 枠に対して、1M unique IP までは余裕がある (Floodgate 想定 traffic では
-ここまで来ない)。**懸念**: CF-Connecting-IP を変えながら攻撃する分散ボットネットが
-来た場合、storage が数 GB 規模まで成長する可能性がある (理論上限)。
+すべての利用者が拒否される場合は次を確認する。
 
-**現状の運用**: 本 PR3a では TTL ベースの自動 storage 削除を実装しない
-(scope minimization)。以下の状況になったら follow-up issue で alarm-based cleanup
-を追加する:
+- 設定値の typo / 0 / 範囲外で、意図せず既定値へ戻っていないか。
+- 同じ NAT 配下のクライアントが IP 別 bucket を共有していないか。IP 別の制限に
+  当たっている場合、handle 別だけを緩めても解消しない。IP ごとの例外設定はない。
+- `CF-Connecting-IP` が取得できる Cloudflare の接続経路か。
+- DO / ストレージの障害か。通常の超過ログと、RPC 等のエラーを区別する。
 
-- DO 「Storage Used」が 1 GB を超える
-- 月次の DO storage コストが想定外に増える
+## ストレージの保持
 
-**follow-up 候補設計**: `RateLimiter::fetch` で persist 後に DO Alarm を
-`last_refill_ms + 60_000` で予約。Alarm 発火時に bucket が満タン
-(= しばらく未使用) なら `state.storage().delete_all()` で破棄する。次回 fetch で
-fresh start。これは別 PR スコープ。
-
-**確認手順**: Cloudflare ダッシュボードの「Workers & Pages」→ 該当 worker →
-「Settings」→「Durable Objects」で class 別 instance 数 / storage 使用量を確認する。
-急増があれば本 §5.2 follow-up を起動する判断材料にする。
-
-### 5.3 Miniflare 上で `CF-Connecting-IP` 欠落の挙動を再現したい
-
-**できない**: Miniflare は edge proxy をシミュレートするために
-`CF-Connecting-IP` を **常に** request 元の IP で自動注入する。本シナリオ
-(production で Cloudflare を bypass されるケース) は host pure unit test
-(`crates/rshogi-csa-server-workers/src/rate_limit.rs::tests`) と
-[`tests/miniflare_smoke/rate_limit.test.ts`](../../crates/rshogi-csa-server-workers/tests/miniflare_smoke/rate_limit.test.ts)
-内コメントで担保している (= 直接 smoke にできない理由を doc 化)。
-
-実 production では Cloudflare edge を経由しない経路は存在しないため、
-本シナリオは **理論上のみ** の fail-closed safety net。
-
-### 5.4 closed loop testing: rate limit が効いているか手動確認したい
-
-```bash
-# CF-Connecting-IP を固定して 11 回連続 LOGIN_LOBBY (= 既定 10/分 を 1 超過)
-for i in $(seq 1 11); do
-  curl -sS \
-    -H "Upgrade: websocket" \
-    -H "CF-Connecting-IP: 203.0.113.99" \
-    -H "Sec-WebSocket-Version: 13" \
-    -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" \
-    "https://rshogi-csa-server-workers.example/ws/lobby"
-  echo " ... attempt $i"
-done
-```
-
-11 回目以降の試行で `503 Service Unavailable` + `Retry-After: <sec>` ヘッダが
-返れば rate limit が機能している (実 LOGIN_LOBBY message を流すには
-WebSocket library が必要なので、上記は upgrade レイヤのみの確認)。
-
-> **注意**: 本確認を production に流すと自分自身が rate limit に当たる。
-> staging で行うか、安全な別 IP / VPN 経由で行う。
-
-## 6. 関連
-
-- 設計 doc: [`docs/csa-server/rate_limit_design.md`](./rate_limit_design.md)
-- 親 issue: [#622](https://github.com/SH11235/rshogi/issues/622)
-- 実装: [`crates/rshogi-csa-server-workers/src/rate_limit.rs`](../../crates/rshogi-csa-server-workers/src/rate_limit.rs)
-- 配線: [`router.rs::forward_ws_to_room`](../../crates/rshogi-csa-server-workers/src/router.rs) /
-  [`lobby.rs::handle_login_lobby`](../../crates/rshogi-csa-server-workers/src/lobby.rs)
-- DO migration 契約: [`docs/csa-server/deployment.md`](./deployment.md) §3.4
-- 観測連携 (alerting / R2 archive): [Issue #625](https://github.com/SH11235/rshogi/issues/625)
-- WAF / IaC 統合 (= PR3b): [Issue #675](https://github.com/SH11235/rshogi/issues/675)
-  Phase 3
-- client 互換性 (`retry_after` honoring): [#682](https://github.com/SH11235/rshogi/issues/682)
-  / [#683](https://github.com/SH11235/rshogi/pull/683)
+RateLimiter は `(kind, identifier)` ごとに DO を分け、bucket の残量を保存する。
+isolate が休眠・再構築されても残量は復元される。永続データを時間で自動削除する
+仕組みはなく、異なる IP / handle が増えるほど保存対象も増える。
+JSON のフィールドサイズだけから DO の総ストレージ使用量を見積もらず、
+配備先の instance 数・storage 使用量・費用を確認する。
+頻度制限とは別に、必要に応じて edge 側の制御も併用する。
 
 ## Lobby の未認証接続
 
-`/ws/lobby` は accept 前に `CF-Connecting-IP` を必須とし、欠落・空値は
-HTTP 503 と `Retry-After: 10` で拒否する。upgrade の IP 別 token bucket は
-`WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN`（既定 60/分）を使用するが、GameRoom の
-bucket とは独立している。LOGIN / CHALLENGE の bucket とも独立して消費する。
-
-LOGIN 前の接続は Lobby 全体で 100、同一 IP で 4 まで。超過は HTTP 503 と
-`Retry-After: 30` を返す。NAT 配下でも同じ IP の未認証枠を共有するため、
-接続後は速やかに LOGIN し、503 時は Retry-After に従って再接続する。
+LOGIN 前の接続は Lobby 全体で 100、同一 IP で 4 まで。超過は HTTP 503 +
+`Retry-After: 30` で拒否する。NAT 配下でも未認証枠を共有するため、
+接続後は速やかに LOGIN する。
 
 認証待ちは accept から 30 秒で期限切れとなり、無送信でも close code 1008
 （`login timeout`）で切断する。無効コマンド、binary、rate limit 後の再送、
 CHALLENGE 発行では期限を延長しない。LOGIN 成功後は公開 queue / private challenge
-固有の期限へ移る。この 30 秒は LOGIN 完了までの期限であり、レート制限の待機が
-収まらない場合は新たに接続し直す。
+固有の期限へ移る。
 
-期限は attachment に絶対時刻で保存し、hibernation 復帰後も保持する。期限や IP の
-ない古い attachment は次のイベントまたは alarm で拒否・切断する。既存の無期限接続に
-alarm がない状態から更新した場合、最初のイベントまでは走査されない。
-close 完了が遅れても期限切れ接続を認証・枠の集計へ戻さない。物理的な WebSocket の
-解放はランタイムに依存し、アプリ側の保持上限は有効な認証待ち接続を対象とする。
-認証待ち・queue・challenge は同じ alarm に最短期限を予約する。
+認証待ちの期限と IP は attachment に保存する。これらがない古い attachment は
+次のイベントまたは alarm で拒否・切断する。古い無期限接続に alarm がない場合は、
+更新後の最初のイベントまで走査されない。
+認証待ち・公開 queue・challenge は、一つの alarm に最短期限を予約する。
+公開 queue の heartbeat 時刻も attachment に保存し、休眠復帰後も保持する。
 
-この上限は資源保持数を制限するもので、複数 IP（IPv6 の別アドレスを含む）による
-全枠占有を防ぐものではない。`lobby_pending_limit_denied` と
-`rate_limit_denied`（`ws_lobby_upgrade_per_ip`）の拒否頻度を確認し、継続的な占有には
-edge 側の制御も併用する。IP prefix の集約や公平な受付枠の割当ては実装していない。
+close 完了が遅れても期限切れ接続を認証・枠の集計へ戻さない。
+保持上限は有効な認証待ち接続を対象とし、物理的な WebSocket の解放はランタイムに依存する。
+複数 IP（IPv6 の別アドレスを含む）による全枠占有、IP prefix の集約、公平な受付枠の
+割当てはこの制限で扱わない。拒否が継続する場合は edge 側の制御も検討する。
+
+## 関連
+
+- [実装の詳細](rate_limit_design.md)
+- [クライアントの接続・再試行](../csa-client.md)
+- [デプロイ・反映手順](deployment.md)
+- [ログの検索](observability.md)

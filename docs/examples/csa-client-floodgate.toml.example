@@ -12,7 +12,7 @@ floodgate = true                 # 評価値/PV コメントを送信
 
 [server.keepalive]
 tcp = true                       # 中間 NAT の無通信切断対策
-ping_interval_sec = 60
+ping_interval_sec = 30
 
 [engine]
 path = "/path/to/your-usi-engine"

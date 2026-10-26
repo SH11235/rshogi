@@ -25,7 +25,7 @@ pub struct CsaClientConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// 接続先。`host:port` 直書き、`tcp://host`、`ws://host[:port]/ws/<room>`、
+    /// 接続先。ホスト名、`tcp://host`、`ws://host[:port]/ws/<room>`、
     /// `wss://host[:port]/ws/<room>` のいずれか。`ws://` / `wss://` の場合は
     /// `port` 設定は無視される（URL に含めること）。
     pub host: String,
@@ -34,9 +34,8 @@ pub struct ServerConfig {
     pub password: String,
     pub floodgate: bool,
     pub keepalive: KeepaliveConfig,
-    /// WebSocket Upgrade 時に送る `Origin` ヘッダ値。`None` のとき
-    /// `tungstenite` の既定値（URL から導出）に任せる。Cloudflare Workers の
-    /// `WS_ALLOWED_ORIGINS` allowlist 通過のため、運用時は明示する。
+    /// WebSocket Upgrade 時に送る `Origin` ヘッダ値。`None` なら送信しない。
+    /// 指定する場合は接続先の `WS_ALLOWED_ORIGINS` に含まれる値を使う。
     #[serde(default)]
     pub ws_origin: Option<String>,
 }
@@ -60,7 +59,7 @@ impl Default for ServerConfig {
 pub struct KeepaliveConfig {
     /// TCP SO_KEEPALIVE を有効化
     pub tcp: bool,
-    /// CSAレベル空行ping間隔（秒）。0で無効
+    /// CSA 空行 / ロビーの `LOBBY_PONG` 間隔（秒）。0 で周期送信なし。
     pub ping_interval_sec: u64,
 }
 
@@ -68,7 +67,7 @@ impl Default for KeepaliveConfig {
     fn default() -> Self {
         Self {
             tcp: true,
-            ping_interval_sec: 60,
+            ping_interval_sec: 30,
         }
     }
 }

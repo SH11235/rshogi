@@ -80,9 +80,8 @@ impl TransportTarget {
 pub struct ConnectOpts {
     /// TCP SO_KEEPALIVE を有効化する（TCP 経路でのみ参照）。
     pub tcp_keepalive: bool,
-    /// WebSocket Upgrade 時の Origin ヘッダ値。`None` なら tungstenite の既定値
-    /// （`url::Url::origin()`）に任せる。Cloudflare Workers の `WS_ALLOWED_ORIGINS`
-    /// allowlist 通過のため、運用時は明示指定する想定。
+    /// WebSocket Upgrade 時の Origin ヘッダ値。`None` なら送信しない。
+    /// 指定する場合は接続先の `WS_ALLOWED_ORIGINS` に含まれる値を使う。
     pub ws_origin: Option<String>,
 }
 

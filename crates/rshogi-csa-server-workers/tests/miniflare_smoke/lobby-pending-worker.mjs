@@ -87,6 +87,12 @@ export class Lobby {
     }
     for (const ws of this.state.getWebSockets()) {
       const att = ws.deserializeAttachment();
+      if (att?.Queued) {
+        if (command.legacyQueued) delete att.Queued.last_pong_at_ms;
+        if (command.expireQueued) att.Queued.last_pong_at_ms = 0;
+        if (command.queuedTimestamp !== undefined) att.Queued.last_pong_at_ms = command.queuedTimestamp;
+        ws.serializeAttachment(att);
+      }
       if (!att?.Pending) continue;
       if (command.legacy) delete att.Pending.expires_at_ms;
       if (command.expire) att.Pending.expires_at_ms = Date.now() - 1;

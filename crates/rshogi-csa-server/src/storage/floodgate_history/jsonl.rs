@@ -1,25 +1,13 @@
 //! JSONL 形式の Floodgate 履歴ストレージ実装（tokio ランタイム前提）。
 //!
-//! # 設計判断
-//!
-//! - **YAML ではなく JSONL**: 大量のエントリを高速に追記するなら 1 entry =
-//!   1 line + `\n` の append-only が一番衝突しにくい。Ruby Floodgate の
-//!   `floodgate.history.dump` 等の特定フォーマットを引き継ぐ要件は無く、本
-//!   サーバ独自フォーマットで `serde_json::to_string` で安定生成する
-//! - **append 単位の atomic 性**: ファイル末尾への append は POSIX 上 1 write
-//!   == 1 syscall でブロック分の atomic 性が保証される（512B 程度）。1 entry が
-//!   PIPE_BUF (= 4096B) を超えない範囲でオープン append-mode 書き込みが atomic
-//!   なので、追加の lock は不要（同一プロセス内での同時 append は内部 Mutex で
-//!   直列化）
-//! - **クロスプロセス並行 append は非対応**: 単一プロセス前提。複数プロセスが
-//!   同ファイルを書く運用は想定しない（YAGNI）
-//! - **ローテーションは外部任せ**: ファイルサイズ管理は logrotate 等の外部
-//!   ツールに任せ、append のみ責任を持つ
+//! 追記は同一インスタンスの Mutex で直列化する。他プロセスからの同時追記には
+//! 対応しない。ローテーションは外部ツールへ任せ、照会は必要な末尾行だけを読む。
 
+use std::io::SeekFrom;
 use std::path::PathBuf;
 
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::StorageError;
@@ -30,11 +18,9 @@ use super::types::FloodgateHistoryEntry;
 /// JSONL 形式（1 entry = 1 line）でファイルに append-only 記録する `FloodgateHistoryStorage`
 /// 実装。
 ///
-/// `append` は内部 `AsyncMutex` で直列化し、`OpenOptions::append(true)` で
-/// 開いて 1 entry を書く。POSIX 上の `O_APPEND` 書き込みは「現在のファイル末尾
-/// にカーソルを移動 → write」を 1 syscall で行うため、同一プロセス内の追記は
-/// 上述 Mutex で直列化、他プロセスからの追記は OS 任せ（PIPE_BUF 以下なら atomic、
-/// 超える場合は interleave 可能だが単一プロセス前提）。
+/// `append` は内部 `AsyncMutex` で直列化する。同一ファイルへの別インスタンスや
+/// 他プロセスからの同時追記には対応しない。
+/// `list_recent` は末尾から必要な行だけを読み、履歴全体をメモリへ読み込まない。
 #[derive(Debug)]
 pub struct JsonlFloodgateHistoryStorage {
     path: PathBuf,
@@ -108,35 +94,63 @@ impl FloodgateHistoryStorage for JsonlFloodgateHistoryStorage {
             if limit == 0 {
                 return Ok(Vec::new());
             }
-            let raw = match tokio::fs::read_to_string(&path).await {
-                Ok(s) => s,
+            let mut file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(StorageError::Io(format!("read {}: {}", path.display(), e))),
             };
-            // 後ろから limit 行までを集めて、新しい順（最後に書かれた順）で返す。
-            //
-            // malformed 行は strict に `Err` で返す（`tracing::warn!` で skip しない）。
-            // 理由は履歴 JSONL が運用ダッシュボード / x1 拡張コマンド経由の参照に
-            // 加えて勝敗集計（mk_rate 等の外部バッチ）の入力にも使われ得るため、
-            // 不整合行を黙って無視するとプレイヤごとの win/lose が静かに乖離して
-            // 後追い切り分けが極めて困難になる。append-lock + write_all で書き込み
-            // 中の crash 痕跡が残った場合は、運用が手作業で末尾の半行を切る or
-            // logrotate の rotate 境界で物理削除するなど明示的に対処する方針。
-            let mut entries: Vec<FloodgateHistoryEntry> = Vec::new();
-            for line in raw.lines().rev() {
-                if line.trim().is_empty() {
-                    continue;
+            // 必要な末尾行だけ読む。行を組み立ててから UTF-8 検証し、ブロック境界の分断を許容する。
+            let mut offset = file.metadata().await.map_err(history_io_error)?.len();
+            let mut buffer = [0_u8; 8192];
+            let mut reversed_line = Vec::new();
+            let mut entries = Vec::new();
+            while offset > 0 {
+                let count = offset.min(buffer.len() as u64) as usize;
+                offset -= count as u64;
+                file.seek(SeekFrom::Start(offset)).await.map_err(history_io_error)?;
+                file.read_exact(&mut buffer[..count]).await.map_err(history_io_error)?;
+                for &byte in buffer[..count].iter().rev() {
+                    if byte == b'\n' {
+                        if let Some(entry) = parse_reversed_history_line(&mut reversed_line)? {
+                            entries.push(entry);
+                            if entries.len() == limit {
+                                return Ok(entries);
+                            }
+                        }
+                    } else {
+                        reversed_line.push(byte);
+                    }
                 }
-                let entry: FloodgateHistoryEntry = serde_json::from_str(line)
-                    .map_err(|e| StorageError::Malformed(format!("history line: {e}")))?;
+            }
+            if let Some(entry) = parse_reversed_history_line(&mut reversed_line)? {
                 entries.push(entry);
-                if entries.len() >= limit {
-                    break;
-                }
             }
             Ok(entries)
         }
     }
+}
+
+fn history_io_error(error: std::io::Error) -> StorageError {
+    StorageError::Io(format!("read history: {error}"))
+}
+
+fn parse_reversed_history_line(
+    bytes: &mut Vec<u8>,
+) -> Result<Option<FloodgateHistoryEntry>, StorageError> {
+    bytes.reverse();
+    let line = std::str::from_utf8(bytes)
+        .map_err(|error| StorageError::Io(format!("read history UTF-8: {error}")))?;
+    // 不整合行を黙って読み飛ばすと、履歴を使う対戦集計が欠落する。
+    let entry = if line.trim().is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_str(line)
+                .map_err(|error| StorageError::Malformed(format!("history line: {error}")))?,
+        )
+    };
+    bytes.clear();
+    Ok(entry)
 }
 
 #[cfg(test)]
@@ -268,6 +282,78 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].game_id, "g2");
         assert_eq!(recent[1].game_id, "g1");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_recent_matches_reverse_lines_across_blocks_and_utf8_boundaries() {
+        let dir = tempdir();
+        let path = dir.path().join("history.jsonl");
+        let mut raw = String::new();
+        for n in 0..32 {
+            let mut record = entry(&format!("g{n}"), None);
+            if n % 4 == 0 {
+                record.black = "日本語".repeat(2000);
+            }
+            raw.push_str(&serde_json::to_string(&record).unwrap());
+            raw.push_str(if n % 2 == 0 {
+                "\r\n\u{3000}\r\n"
+            } else {
+                "\n\n"
+            });
+        }
+        raw.push_str(&serde_json::to_string(&entry("last", None)).unwrap());
+        tokio::fs::write(&path, &raw).await.unwrap();
+        let storage = JsonlFloodgateHistoryStorage::new(path);
+        for limit in [0, 1, 2, 7, 33, 100] {
+            let expected: Vec<FloodgateHistoryEntry> = raw
+                .lines()
+                .rev()
+                .filter(|line| !line.trim().is_empty())
+                .take(limit)
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(storage.list_recent(limit).await.unwrap(), expected, "limit {limit}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_recent_reassembles_multibyte_character_split_at_block_boundary() {
+        let dir = tempdir();
+        let path = dir.path().join("history.jsonl");
+        let mut record = entry("utf8", None);
+        record.black = "あ".repeat(4000);
+        let mut raw = serde_json::to_string(&record).unwrap();
+        while raw.is_char_boundary(raw.len() - 8192) {
+            record.white.push('x');
+            raw = serde_json::to_string(&record).unwrap();
+        }
+        tokio::fs::write(&path, raw).await.unwrap();
+        let storage = JsonlFloodgateHistoryStorage::new(path);
+        assert_eq!(storage.list_recent(1).await.unwrap(), vec![record]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_recent_rejects_only_malformed_lines_inside_requested_tail() {
+        let dir = tempdir();
+        let path = dir.path().join("history.jsonl");
+        let record = entry("last", None);
+        let raw = format!("{{not json}}\r\n{}", serde_json::to_string(&record).unwrap());
+        tokio::fs::write(&path, raw).await.unwrap();
+        let storage = JsonlFloodgateHistoryStorage::new(path);
+        assert_eq!(storage.list_recent(1).await.unwrap(), vec![record]);
+        assert!(matches!(storage.list_recent(2).await, Err(StorageError::Malformed(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_recent_rejects_unterminated_malformed_or_invalid_utf8_tail() {
+        let dir = tempdir();
+        let path = dir.path().join("history.jsonl");
+        let storage = JsonlFloodgateHistoryStorage::new(path.clone());
+        tokio::fs::write(&path, b"{not json}").await.unwrap();
+        assert!(matches!(storage.list_recent(1).await, Err(StorageError::Malformed(_))));
+        tokio::fs::write(&path, [0xff, b'\n']).await.unwrap();
+        assert!(matches!(storage.list_recent(1).await, Err(StorageError::Io(_))));
+        assert!(storage.list_recent(0).await.unwrap().is_empty());
     }
 
     /// テスト専用 RAII tempdir（`tempfile` クレート依存を避ける）。

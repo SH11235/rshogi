@@ -420,7 +420,7 @@ pub fn save_record_with_status(
     let mut filename_base = config
         .filename_template
         .replace("{datetime}", &datetime)
-        .replace("{game_id}", &record.game_id)
+        .replace("{game_id}", &sanitize_filename(&record.game_id))
         .replace("{sente}", &sanitize_filename(&record.sente_name))
         .replace("{gote}", &sanitize_filename(&record.gote_name));
     filename_base.push_str(status.filename_suffix());
@@ -479,6 +479,36 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_id_cannot_escape_record_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "csa-record-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = RecordConfig {
+            dir: root.join("records"),
+            filename_template: "{game_id}".to_owned(),
+            ..RecordConfig::default()
+        };
+        let mut record = GameRecord::new(&summary(rshogi_csa::initial_position()));
+        record.add_move("+7776FU", 1, None, Color::Black);
+        let absolute_id = root.join("outside").to_string_lossy().into_owned();
+        for game_id in ["../outside", "..\\outside", absolute_id.as_str()] {
+            record.game_id = game_id.to_owned();
+            save_record(&record, &config).unwrap();
+            let filename = sanitize_filename(game_id);
+            assert!(config.dir.join(format!("{filename}.csa")).is_file());
+            assert!(config.dir.join(format!("{filename}.sfen")).is_file());
+        }
+        assert!(!root.join("outside.csa").exists());
+        assert!(!root.join("outside.sfen").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn summary(position: Position) -> GameSummary {
         GameSummary {
