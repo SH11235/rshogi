@@ -45,9 +45,13 @@ pub(super) fn read_record<const N: usize>(reader: &mut impl Read) -> Result<Opti
 impl<const N: usize> ExternalSort<N> {
     pub(super) fn new(capacity: usize) -> Result<Self> {
         anyhow::ensure!(capacity > 0, "sort buffer must be nonzero");
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(capacity)
+            .context("外部ソート用メモリを確保できません")?;
         Ok(Self {
             directory: tempfile::tempdir()?,
-            buffer: Vec::with_capacity(capacity),
+            buffer,
             capacity,
             runs: 0,
             count: 0,

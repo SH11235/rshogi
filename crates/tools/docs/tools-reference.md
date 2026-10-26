@@ -14,7 +14,7 @@
 | [`shuffle_psv`](shuffle_psv.md) | seed とチャンクサイズを指定して PSV をシャッフル |
 | [`split_psv`](split_psv.md) | PSV を件数・容量で分割し、入力を出力 alias から保護 |
 | [`merge_psv`](merge_psv.md) | 複数 PSV を指定順にストリーミング結合 |
-| [`prep_hcpe`](prep_hcpe.md) | hcpe の汚染・重複除去、決定的 shuffle、件数制限・分割 |
+| [`prep_hcpe`](prep_hcpe.md) | hcpe の汚染・重複除去、予算内のメモリ内 shuffle / ディスク切替、メモリ見積もり、件数制限・分割 |
 | [`preprocess_psv`](preprocess_psv.md) | qsearch leaf への置換と、変更行の bitmap mask 出力 |
 | [`filter_teacher_data`](filter_teacher_data.md) | 王手・評価値による抽出、クリップ、統計出力 |
 | [`validate_psv`](validate_psv.md) | PSV の不正局面を検出・除去し、入力 alias を拒否 |

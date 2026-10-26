@@ -17,6 +17,8 @@ mod external_sort;
 use external_sort::{ExternalSort, SortedRecords, read_record};
 
 const MEMORY_RECORDS: usize = 250_000;
+const DEFAULT_SHUFFLE_MEMORY_MIB: u64 = 256;
+const MIB: u64 = 1024 * 1024;
 const SHUFFLE_RECORD_SIZE: usize = 24 + RECORD_SIZE;
 
 const RECORD_SIZE: usize = 38;
@@ -57,6 +59,10 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     target: usize,
 
+    /// 全件 shuffle のレコードバッファ予算 (MiB、未指定時 256)。--target 0 専用。
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    shuffle_memory_mib: Option<u64>,
+
     /// 決定的 shuffle の seed。
     #[arg(long, default_value_t = 42)]
     seed: u64,
@@ -80,6 +86,20 @@ struct BloomFilter {
 impl BloomFilter {
     /// 想定要素数と偽陽性率からフィルタを確保する。
     fn new(num_elements: u64, false_positive_rate: f64) -> Result<Self> {
+        let (total_u64s, num_blocks, num_hashes) = Self::layout(num_elements, false_positive_rate)?;
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(total_u64s)
+            .context("Bloom filter のメモリを確保できません")?;
+        blocks.resize(total_u64s, 0);
+        Ok(Self {
+            blocks,
+            num_blocks,
+            num_hashes,
+        })
+    }
+
+    fn layout(num_elements: u64, false_positive_rate: f64) -> Result<(usize, u64, u32)> {
         if num_elements == 0 {
             bail!("--expected-records は 1 以上で指定してください");
         }
@@ -98,11 +118,11 @@ impl BloomFilter {
             .and_then(|blocks| blocks.checked_mul(BLOCK_U64S))
             .context("Bloom filter のサイズがアドレス可能範囲を超えています")?;
 
-        Ok(Self {
-            blocks: vec![0; total_u64s],
-            num_blocks,
-            num_hashes,
-        })
+        anyhow::ensure!(
+            total_u64s <= isize::MAX as usize / size_of::<u64>(),
+            "Bloom filter がアドレス可能範囲を超えています"
+        );
+        Ok((total_u64s, num_blocks, num_hashes))
     }
 
     /// key を登録し、登録前から存在した可能性がある場合は `true` を返す。
@@ -156,9 +176,131 @@ struct Config {
     prefix: String,
     chunk_records: usize,
     target: usize,
+    shuffle_memory_mib: Option<u64>,
     seed: u64,
     expected_records: u64,
     false_positive_rate: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ShuffleBuffers {
+    budget_bytes: usize,
+    memory_records: usize,
+    sort_records: usize,
+}
+
+impl ShuffleBuffers {
+    fn new(memory_mib: u64) -> Result<Self> {
+        anyhow::ensure!(memory_mib > 0, "--shuffle-memory-mib は 1 以上で指定してください");
+        let budget_bytes = memory_mib
+            .checked_mul(MIB)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .context("--shuffle-memory-mib がアドレス可能範囲を超えています")?;
+        let sort_records = MEMORY_RECORDS.min(budget_bytes / (2 * SHUFFLE_RECORD_SIZE));
+        // spill 中は drain 元の Vec とソートバッファが同時に生存する。
+        let memory_records = (budget_bytes - sort_records * SHUFFLE_RECORD_SIZE) / RECORD_SIZE;
+        Ok(Self {
+            budget_bytes,
+            memory_records,
+            sort_records,
+        })
+    }
+
+    fn retained_records(self, target: usize, input_records: u64) -> usize {
+        let limit = if target == 0 {
+            self.memory_records
+        } else {
+            target
+        };
+        limit.min(usize::try_from(input_records).unwrap_or(usize::MAX))
+    }
+}
+
+fn print_memory_plan(
+    writer: &mut impl Write,
+    config: &Config,
+    buffers: ShuffleBuffers,
+    input_records: u64,
+    exclude_records: u64,
+    available_memory: Option<u64>,
+) -> Result<()> {
+    let (bloom_words, _, _) =
+        BloomFilter::layout(config.expected_records, config.false_positive_rate)?;
+    let bloom_bytes = bloom_words * size_of::<u64>();
+    let retained = buffers.retained_records(config.target, input_records);
+    let record_bytes = retained
+        .checked_mul(RECORD_SIZE)
+        .context("保持レコードのサイズが大きすぎます")?;
+    if config.target == 0 {
+        writeln!(
+            writer,
+            "メモリ計画: shuffle バッファ予算 {:.2} MiB、レコード保持上限 {} 件",
+            buffers.budget_bytes as f64 / MIB as f64,
+            buffers.memory_records
+        )?;
+        writeln!(
+            writer,
+            "  初期保持バッファ: 最大 {:.2} MiB ({} 件)",
+            record_bytes as f64 / MIB as f64,
+            retained
+        )?;
+        if input_records <= buffers.memory_records as u64 {
+            writeln!(writer, "  予定方式: メモリ内 shuffle (入力の上限件数が予算内)")?;
+        } else {
+            writeln!(writer, "  予定方式: 通過件数が上限を超えるとディスクへ切替")?;
+        }
+        writeln!(
+            writer,
+            "  ディスク切替時のソートバッファ: {:.2} MiB (予算内に予約済み)",
+            (buffers.sort_records * SHUFFLE_RECORD_SIZE) as f64 / MIB as f64
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "メモリ計画: reservoir + メモリ内 shuffle、最大 {} 件 / {:.2} MiB",
+            retained,
+            record_bytes as f64 / MIB as f64
+        )?;
+    }
+    writeln!(
+        writer,
+        "  Bloom filter: {:.2} MiB (shuffle 予算とは別枠)",
+        bloom_bytes as f64 / MIB as f64
+    )?;
+    writeln!(
+        writer,
+        "  除外集合: {} レコード、別枠 ({} キーでディスクへ退避)",
+        exclude_records, MEMORY_RECORDS
+    )?;
+    let shuffle_bytes = if config.target == 0 && input_records > buffers.memory_records as u64 {
+        buffers.budget_bytes
+    } else {
+        record_bytes
+    };
+    let planned_bytes = (shuffle_bytes as u64).saturating_add(bloom_bytes as u64);
+    writeln!(
+        writer,
+        "  shuffle + Bloom の最大見積もり: {:.2} MiB (除外集合などは別)",
+        planned_bytes as f64 / MIB as f64
+    )?;
+    if let Some(available) = available_memory {
+        writeln!(writer, "  OS の利用可能メモリ: {:.2} MiB", available as f64 / MIB as f64)?;
+        if planned_bytes > available {
+            writeln!(
+                writer,
+                "警告: shuffle と Bloom の見積もりが利用可能メモリを超えます。予算・target・expected-records を見直してください。"
+            )?;
+        }
+    } else {
+        writeln!(writer, "  OS の利用可能メモリ: 取得できません")?;
+    }
+    writeln!(
+        writer,
+        "注意: 予算は shuffle のレコードバッファ用です。Bloom・除外集合・I/O・メモリ管理領域は別枠で、プロセス全体の上限ではありません。"
+    )?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn sorted_unique_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -283,11 +425,13 @@ fn collect_records(
     bloom: &mut BloomFilter,
     target: usize,
     input_records: u64,
+    buffers: ShuffleBuffers,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Records, Summary)> {
-    let capacity = if target == 0 { MEMORY_RECORDS } else { target };
-    let mut kept =
-        Vec::with_capacity(capacity.min(usize::try_from(input_records).unwrap_or(usize::MAX)));
+    let capacity = buffers.retained_records(target, input_records);
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(capacity)
+        .context("レコード保持用メモリを確保できません")?;
     let mut sorter = None;
     let mut summary = Summary::default();
     for path in paths {
@@ -300,8 +444,12 @@ fn collect_records(
                 summary.deduped += 1;
             } else {
                 if target == 0 {
-                    if kept.len() == MEMORY_RECORDS && sorter.is_none() {
-                        let mut disk = ExternalSort::new(MEMORY_RECORDS)?;
+                    if kept.len() == buffers.memory_records && sorter.is_none() {
+                        eprintln!(
+                            "shuffle: ディスクへ切替 (通過件数が保持上限 {} 件を超過)",
+                            buffers.memory_records
+                        );
+                        let mut disk = ExternalSort::new(buffers.sort_records)?;
                         for (ordinal, record) in kept.drain(..).enumerate() {
                             disk.push(keyed_record(record, ordinal as u64, rng))?;
                         }
@@ -413,14 +561,22 @@ fn run(config: Config) -> Result<Summary> {
         bail!("--prefix は空にできません");
     }
 
-    let inputs = sorted_unique_paths(config.inputs);
-    let excludes = sorted_unique_paths(config.excludes);
+    anyhow::ensure!(
+        config.target == 0 || config.shuffle_memory_mib.is_none(),
+        "--shuffle-memory-mib は --target 0 専用です。--target N の保持容量は N で指定します"
+    );
+    let buffers =
+        ShuffleBuffers::new(config.shuffle_memory_mib.unwrap_or(DEFAULT_SHUFFLE_MEMORY_MIB))?;
+    let inputs = sorted_unique_paths(config.inputs.clone());
+    let excludes = sorted_unique_paths(config.excludes.clone());
 
     // 総入力レコード数（ファイルサイズから安価に算出）が --expected-records を超えると、bloom の
     // 実効偽陽性率が悪化し dedup が新規局面を余計に落とす（安全側だが学習データ損失）。事前に警告。
     let mut total_input_records: u64 = 0;
     for path in &inputs {
-        total_input_records += validate_file(path)?;
+        total_input_records = total_input_records
+            .checked_add(validate_file(path)?)
+            .context("総入力件数が u64 範囲を超えています")?;
     }
     if total_input_records > config.expected_records {
         eprintln!(
@@ -430,6 +586,20 @@ fn run(config: Config) -> Result<Summary> {
         );
     }
 
+    let mut total_exclude_records = 0_u64;
+    for path in &excludes {
+        total_exclude_records = total_exclude_records
+            .checked_add(validate_file(path)?)
+            .context("除外件数が u64 範囲を超えています")?;
+    }
+    print_memory_plan(
+        &mut std::io::stderr().lock(),
+        &config,
+        buffers,
+        total_input_records,
+        total_exclude_records,
+        tools::common::memory::available_memory_bytes(),
+    )?;
     validate_output_directory(&config.out_dir, &config.prefix)?;
     let mut exclude_keys = load_exclude_keys(&excludes)?;
     let mut bloom = BloomFilter::new(config.expected_records, config.false_positive_rate)?;
@@ -441,9 +611,17 @@ fn run(config: Config) -> Result<Summary> {
         &mut bloom,
         config.target,
         total_input_records,
+        buffers,
         &mut rng,
     )?;
 
+    eprintln!(
+        "shuffle: {}",
+        match &records {
+            Records::Memory(_) => "メモリ内 shuffle",
+            Records::Disk(_) => "外部ソート",
+        }
+    );
     let protected: Vec<&Path> = inputs.iter().chain(&excludes).map(PathBuf::as_path).collect();
     (summary.written, summary.chunks) = write_chunks(
         records,
@@ -465,6 +643,7 @@ fn main() -> Result<()> {
         prefix: args.prefix,
         chunk_records: args.chunk_records,
         target: args.target,
+        shuffle_memory_mib: args.shuffle_memory_mib,
         seed: args.seed,
         expected_records: args.expected_records,
         false_positive_rate: args.false_positive_rate,
@@ -539,8 +718,15 @@ mod tests {
         let mut bloom = BloomFilter::new(100, 1e-9)?;
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
-        let (records, summary) =
-            collect_records(&[input], &mut exclude_keys, &mut bloom, 0, 3, &mut rng)?;
+        let (records, summary) = collect_records(
+            &[input],
+            &mut exclude_keys,
+            &mut bloom,
+            0,
+            3,
+            ShuffleBuffers::new(DEFAULT_SHUFFLE_MEMORY_MIB)?,
+            &mut rng,
+        )?;
 
         let Records::Memory(records) = records else {
             panic!("small collection")
@@ -564,6 +750,7 @@ mod tests {
             &mut bloom,
             0,
             3,
+            ShuffleBuffers::new(DEFAULT_SHUFFLE_MEMORY_MIB)?,
             &mut rng,
         )?;
 
@@ -592,6 +779,7 @@ mod tests {
             &mut bloom,
             4,
             recs.len() as u64,
+            ShuffleBuffers::new(DEFAULT_SHUFFLE_MEMORY_MIB)?,
             &mut rng,
         )?;
 
@@ -615,6 +803,7 @@ mod tests {
             &mut bloom2,
             4,
             recs.len() as u64,
+            ShuffleBuffers::new(DEFAULT_SHUFFLE_MEMORY_MIB)?,
             &mut rng2,
         )?;
         let Records::Memory(records2) = records2 else {
@@ -640,6 +829,7 @@ mod tests {
             prefix: "part".to_owned(),
             chunk_records: 2,
             target: 0,
+            shuffle_memory_mib: None,
             seed: 7,
             expected_records: 100,
             false_positive_rate: 1e-9,
@@ -689,6 +879,7 @@ mod tests {
                 prefix: "part".into(),
                 chunk_records: count,
                 target: 0,
+                shuffle_memory_mib: Some(1),
                 seed: 42,
                 expected_records: count as u64 * 16,
                 false_positive_rate: 1e-9,
@@ -746,5 +937,101 @@ mod tests {
         assert!(validate_output_directory(&out, "chunk").is_err());
         assert_eq!(fs::read(source)?, indexed_record(0));
         Ok(())
+    }
+    fn small_config(out_dir: PathBuf) -> Config {
+        Config {
+            inputs: vec![],
+            excludes: vec![],
+            out_dir,
+            prefix: "part".into(),
+            chunk_records: 100,
+            target: 0,
+            shuffle_memory_mib: None,
+            seed: 42,
+            expected_records: 100,
+            false_positive_rate: 1e-6,
+        }
+    }
+
+    #[test]
+    fn shuffle_buffers_bound_simultaneous_record_allocations() -> Result<()> {
+        for mib in [1, 2, 16, 256, 1024] {
+            let buffers = ShuffleBuffers::new(mib)?;
+            assert!(buffers.memory_records > 0 && buffers.sort_records > 0);
+            assert!(
+                buffers.memory_records * RECORD_SIZE + buffers.sort_records * SHUFFLE_RECORD_SIZE
+                    <= buffers.budget_bytes
+            );
+            assert!(buffers.sort_records <= MEMORY_RECORDS);
+        }
+        assert!(ShuffleBuffers::new(0).is_err());
+        assert!(ShuffleBuffers::new(u64::MAX).is_err());
+        assert!(ShuffleBuffers::new(isize::MAX as u64 / MIB + 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn memory_budget_boundary_spills_only_after_the_limit() -> Result<()> {
+        let buffers = ShuffleBuffers::new(1)?;
+        let dir = tempdir()?;
+        let input = dir.path().join("input.hcpe");
+        let count = buffers.memory_records;
+        let records: Vec<_> = (0..count).map(|index| indexed_record(index as u64)).collect();
+        write_records(&input, &records)?;
+        let collect = |input_count: usize| -> Result<Records> {
+            let mut bloom = BloomFilter::new((input_count as u64) * 32, 1e-9)?;
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
+            let (records, summary) = collect_records(
+                std::slice::from_ref(&input),
+                &mut Exclusions::Memory(HashSet::new()),
+                &mut bloom,
+                0,
+                input_count as u64,
+                buffers,
+                &mut rng,
+            )?;
+            assert_eq!(summary.kept, input_count as u64);
+            Ok(records)
+        };
+        assert!(matches!(collect(count)?, Records::Memory(_)));
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&input)?;
+        writer.write_all(&indexed_record(count as u64))?;
+        drop(writer);
+        assert!(matches!(collect(count + 1)?, Records::Disk(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn memory_plan_reports_estimate_scope_and_low_memory_warning() -> Result<()> {
+        let dir = tempdir()?;
+        let mut config = small_config(dir.path().join("out"));
+        let mut output = Vec::new();
+        print_memory_plan(&mut output, &config, ShuffleBuffers::new(256)?, 2_000_000, 10, Some(1))?;
+        let report = String::from_utf8(output)?;
+        assert!(report.contains("256.00 MiB"));
+        assert!(report.contains("72.48 MiB"));
+        assert!(report.contains("予定方式: メモリ内"));
+        assert!(report.contains("shuffle + Bloom"));
+        assert!(report.contains("プロセス全体の上限ではありません"));
+        assert!(report.contains("警告:"));
+        config.target = 100_000_000;
+        let mut output = Vec::new();
+        print_memory_plan(&mut output, &config, ShuffleBuffers::new(256)?, 100_000_000, 0, None)?;
+        let report = String::from_utf8(output)?;
+        assert!(report.contains("reservoir"));
+        assert!(report.contains("3623.96 MiB"));
+        assert!(report.contains("取得できません"));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_shuffle_budget_is_rejected_for_reservoir_before_output_creation() {
+        let dir = tempdir().unwrap();
+        let mut config = small_config(dir.path().join("out"));
+        config.target = 10;
+        config.shuffle_memory_mib = Some(1);
+        let output = config.out_dir.clone();
+        assert!(run(config).unwrap_err().to_string().contains("--target 0 専用"));
+        assert!(!output.exists());
     }
 }
