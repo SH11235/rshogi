@@ -34,7 +34,12 @@
 
 `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit` で、
 `BookEvalDiff` / `BookDepthLimit` を先手番と後手番で別の値にできます。名前と、`0` 以上の値の意味は
-YaneuraOu の `BOOK_OPTIONS V2` の同名オプションと同じです。
+YaneuraOu の `BOOK_OPTIONS V2` の同名オプションと同じです。ただし評価値差の基準は、rshogi が候補中の
+最大 value、YaneuraOu が count 順 (同 count なら value 順) の筆頭手の value なので、count の付いた定跡で
+count 最大の手が最大 value でないときは残る手が変わります。たとえば後手番で (value 100, count 10) と
+(value 120, count 5) の 2 手、`BookEvalWhiteDiff=0` なら、rshogi は value 120 の手だけを、YaneuraOu は
+両方を残します。count を持たない定跡 (`.ybb` やペタショック定跡) では一致します。この差は共通の
+`BookEvalDiff` にもあります。
 
 - probe のたびに root 局面の手番側の値を見て、`0` 以上ならそれを、`-1` なら共通の値 (`BookEvalDiff` /
   `BookDepthLimit`) をその時点の値で使います。評価値差と depth 下限は別々に決まります。

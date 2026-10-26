@@ -32,6 +32,15 @@ fn write_temp_db(tag: &str, contents: &str) -> PathBuf {
     path
 }
 
+/// 一時ファイルを Drop で消す。テストが panic しても残さない。
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// bestmove を受信してから quit し、探索の自然終了までの stdout を返す。
 fn run_engine(input: &str) -> String {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
@@ -378,8 +387,8 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
               sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2\n\
               3c3d 2g2f 100 3 10\n\
               8c8d 2g2f 80 3 5\n";
-    let path = write_temp_db("per_side", db);
-    let path_str = path.to_string_lossy();
+    let path = RemoveOnDrop(write_temp_db("per_side", db));
+    let path_str = path.0.to_string_lossy();
     // 個別値を共通値より先に送っても、後手番では個別値 (0) で 1 手に絞る。
     let input = format!(
         "{MATERIAL_INIT}\
@@ -393,7 +402,6 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
          go depth 6\n"
     );
     let stdout = run_engine(&input);
-    let _ = std::fs::remove_file(&path);
 
     let first = stdout.lines().position(|l| l.starts_with("option name USI_OwnBook ")).unwrap();
     let book_options: Vec<&str> = stdout.lines().skip(first).take(19).collect();
