@@ -27,17 +27,15 @@ id = "alice+floodgate-600-10+black"
 password = "anything"
 floodgate = true
 
-# WebSocket Upgrade 時の Origin ヘッダ値。Worker 側 `WS_ALLOWED_ORIGINS` の
-# allowlist と一致させる必要がある。allowlist 未設定 / 空の Worker（=production
-# 既定）はネイティブ経路として Origin 欠落で接続するため、本フィールドは省略する。
+# WebSocket Upgrade 時の Origin ヘッダ値。通常のネイティブ接続では省略する。
+# 指定する場合は Worker 側 `WS_ALLOWED_ORIGINS` の値と一致させる。
 # ws_origin = "https://your-frontend.example"
 
 [server.keepalive]
-# wss は通常 TLS が中間 NAT のタイムアウトを Pong で吸収するため、CSA 空行
-# keep-alive は最低限（60 秒）でよい。TCP 経路 (`tcp://...`) では SO_KEEPALIVE を
-# 有効化して中間 NAT 切断検出に頼る。
+# tcp は TCP 経路の SO_KEEPALIVE。ping_interval_sec は CSA 空行を送る間隔で、
+# ロビー待機中は LOBBY_PONG を送って登録の有効期限を延長する。0 は周期送信なし。
 tcp = false
-ping_interval_sec = 60
+ping_interval_sec = 30
 
 [engine]
 # ローカル USI エンジンへの絶対パス。release ビルド推奨。
@@ -56,8 +54,8 @@ Threads = 4
 # BookFile = "no_book"
 
 [time]
-# 秒読み(byoyomi)から差し引く安全マージン(ms)。bestmove がサーバ deadline 前に
-# 届くよう csa_client 層で byoyomi を削ってエンジンに渡す(btime/wtime は満額)。
+# エンジンへ渡す自分の思考予算から差し引く安全マージン(ms)。秒読み時計では
+# byoyomi、加算・切れ負け時計では手番側の btime/wtime を減らす。
 # rshogi-usi 等エンジン側に NetworkDelay/NetworkDelay2 がある場合は予約が二重に
 # 効き実効思考時間がさらに縮むので、片方を小さくして二重計上を避ける。自前の
 # 遅延予約を持たないエンジンでは margin_msec が唯一の安全弁になるため 0 にしない。

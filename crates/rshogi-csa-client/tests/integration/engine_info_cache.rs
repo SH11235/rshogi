@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -75,6 +75,39 @@ done
         SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
     }
     assert_eq!(callback_count, 0);
+}
+
+#[test]
+fn shutdown_is_observed_between_info_and_bestmove() {
+    let path = write_mock_engine(
+        r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo "usiok" ;;
+        isready) echo "readyok" ;;
+        go*)
+            printf 'info depth 1 score cp 10 pv 7g7f\nbestmove 7g7f\n'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#,
+        "mock_shutdown_after_info",
+    );
+    let mut engine = spawn_engine(&path);
+    let shutdown = AtomicBool::new(false);
+    let (_tx, rx) = mpsc::channel();
+    let mut callback = |_info: &rshogi_csa_client::engine::SearchInfo, _raw: &str| {
+        shutdown.store(true, Ordering::SeqCst);
+    };
+    let outcome = engine
+        .go_with_info("position startpos", "go depth 1", &shutdown, &rx, &mut callback)
+        .expect("go");
+    engine.quit();
+    match outcome {
+        SearchOutcome::BestMove(result, _) => assert_eq!(result.bestmove, "resign"),
+        SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
+    }
 }
 
 #[test]

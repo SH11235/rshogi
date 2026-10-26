@@ -200,6 +200,178 @@ describe('Lobby 未認証接続の保持制限', () => {
     await expect(q.takeLine(200)).rejects.toThrow('timeout');
     pending.close();
   });
+
+  test('休眠復帰後も待機中の接続と新しい参加者がマッチする', async () => {
+    const black = await connect();
+    const b = readLineFromWebSocket(black);
+    black.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await b.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    await control({ reset: true });
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    const blackMatched = await b.takeLine();
+    const whiteMatched = await w.takeLine();
+    expect(blackMatched).toMatch(/^MATCHED lobby-test-[0-9a-f]{32} black$/);
+    expect(whiteMatched).toBe(blackMatched.replace(/ black$/, ' white'));
+  });
+
+  test('heartbeat時刻は休眠をまたいで保持し、期限切れ接続はpurgeする', async () => {
+    const ws = await connect();
+    const lines = readLineFromWebSocket(ws);
+    ws.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await lines.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const oldTimestamp = Date.now() - 1_000;
+    await control({ queuedTimestamp: oldTimestamp, reset: true });
+    ws.send('LOBBY_PONG\n');
+    let timestamp = oldTimestamp;
+    for (let attempt = 0; attempt < 100 && timestamp === oldTimestamp; attempt++) {
+      const before = await control({});
+      timestamp = before.attachments.find((att: any) => att.Queued).Queued.last_pong_at_ms;
+      if (timestamp === oldTimestamp) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(timestamp).toBeGreaterThan(oldTimestamp);
+    const restored = await control({ reset: true });
+    expect(restored.attachments.find((att: any) => att.Queued).Queued.last_pong_at_ms).toBe(timestamp);
+    await control({ holdClose: true, expireQueued: true, reset: true, alarm: true });
+    expect(await lines.takeLine()).toBe('LOGIN_LOBBY:incorrect queue_expired');
+    const afterExpiry = await control({ reset: true });
+    expect(afterExpiry.attachments.some((att: any) => att.Queued)).toBe(false);
+    ws.close();
+  });
+
+  test('heartbeat時刻のない旧attachmentは一度だけ補完し、復帰で期限を延長しない', async () => {
+    const ws = await connect();
+    const lines = readLineFromWebSocket(ws);
+    ws.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await lines.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const migrated = await control({ legacyQueued: true, reset: true });
+    const timestamp = migrated.attachments.find((att: any) => att.Queued).Queued.last_pong_at_ms;
+    expect(timestamp).toBeGreaterThan(0);
+    const again = await control({ reset: true });
+    expect(again.attachments.find((att: any) => att.Queued).Queued.last_pong_at_ms).toBe(timestamp);
+    ws.close();
+  });
+
+  test('LOGOUT後のclose遅延を休眠でまたいでもqueueへ復活しない', async () => {
+    const old = await connect();
+    const o = readLineFromWebSocket(old);
+    old.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await o.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    await control({ holdClose: true });
+    old.send('LOGOUT_LOBBY\n');
+    await waitForCloseRequest();
+    await control({ reset: true });
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    await expect(w.takeLine(300)).rejects.toThrow('timeout');
+    old.close();
+    white.close();
+  });
+
+  test('MATCHED後のclose遅延を休眠でまたいでも再通知しない', async () => {
+    await control({ holdClose: true });
+    const black = await connect();
+    const b = readLineFromWebSocket(black);
+    black.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await b.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    expect(await b.takeLine()).toContain('MATCHED ');
+    expect(await w.takeLine()).toContain('MATCHED ');
+    const restored = await control({ reset: true });
+    expect(restored.attachments.some((att: any) => att.Queued)).toBe(false);
+    const next = await connect();
+    const n = readLineFromWebSocket(next);
+    next.send('LOGIN_LOBBY carol+test+black pw\n');
+    expect(await n.takeLine()).toBe('LOGIN_LOBBY:carol OK');
+    await expect(n.takeLine(300)).rejects.toThrow('timeout');
+    black.close();
+    white.close();
+    next.close();
+  });
+
+  test('同名置換した旧接続はclose遅延と休眠をまたいでも復活しない', async () => {
+    const old = await connect();
+    const o = readLineFromWebSocket(old);
+    old.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await o.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    await control({ holdClose: true });
+    const replacement = await connect();
+    const r = readLineFromWebSocket(replacement);
+    replacement.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await r.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const restored = await control({ reset: true });
+    expect(restored.attachments.filter((att: any) => att.Queued)).toHaveLength(1);
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    expect(await r.takeLine()).toMatch(/^MATCHED .+ black$/);
+    expect(await w.takeLine()).toMatch(/^MATCHED .+ white$/);
+    await expect(o.takeLine(300)).rejects.toThrow('timeout');
+    old.close();
+    replacement.close();
+    white.close();
+  });
+
+  test.each([1, 2])('公開MATCHEDの%i回目の送信失敗でも未通知接続を残さず再LOGINできる', async failNumber => {
+    await control({ holdClose: true, failMatchedSendNumber: failNumber });
+    const black = await connect();
+    const b = readLineFromWebSocket(black);
+    black.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await b.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    const results = await Promise.all([b.takeLine(), w.takeLine()]);
+    expect(results.filter(line => line.startsWith('MATCHED '))).toHaveLength(failNumber - 1);
+    expect(results.filter(line => line === 'LOGIN_LOBBY:incorrect match_cancelled')).toHaveLength(3 - failNumber);
+    const failed = await control({});
+    expect(failed.attachments.some((att: any) => att.Queued)).toBe(false);
+    expect(failed.matchedSendCount).toBe(failNumber);
+    expect(failed.closes.length).toBeGreaterThanOrEqual(2);
+    expect(failed.closes.filter((close: any) => close.code === 1011)).toHaveLength(3 - failNumber);
+
+    const retryBlack = await connect();
+    const rb = readLineFromWebSocket(retryBlack);
+    retryBlack.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await rb.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const retryWhite = await connect();
+    const rw = readLineFromWebSocket(retryWhite);
+    retryWhite.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await rw.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    const blackMatched = await rb.takeLine();
+    expect(blackMatched).toMatch(/^MATCHED lobby-test-[0-9a-f]{32} black$/);
+    expect(await rw.takeLine()).toBe(blackMatched.replace(/ black$/, ' white'));
+    for (const ws of [black, white, retryBlack, retryWhite]) ws.close();
+  });
+
+  test('公開ペアの片側attachment退役に失敗しても他方の退役とエラーcloseを完了する', async () => {
+    await control({ holdClose: true, failRetireHandle: 'alice' });
+    const black = await connect();
+    const b = readLineFromWebSocket(black);
+    black.send('LOGIN_LOBBY alice+test+black pw\n');
+    expect(await b.takeLine()).toBe('LOGIN_LOBBY:alice OK');
+    const white = await connect();
+    const w = readLineFromWebSocket(white);
+    white.send('LOGIN_LOBBY bob+test+white pw\n');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:bob OK');
+    expect(await b.takeLine()).toBe('LOGIN_LOBBY:incorrect match_cancelled');
+    expect(await w.takeLine()).toBe('LOGIN_LOBBY:incorrect match_cancelled');
+    const failed = await control({});
+    expect(failed.matchedSendCount).toBe(0);
+    expect(failed.attachments.filter((att: any) => att.Queued?.handle === 'bob')).toHaveLength(0);
+    expect(failed.closes.filter((close: any) => close.code === 1011)).toHaveLength(2);
+    black.close();
+    white.close();
+  });
 });
 
 

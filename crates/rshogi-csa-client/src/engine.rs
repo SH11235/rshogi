@@ -683,6 +683,12 @@ impl UsiEngine {
         let mut server_lines: Vec<String> = Vec::new();
 
         loop {
+            if !stop_sent && shutdown.load(Ordering::SeqCst) {
+                log::info!("[USI] shutdown 要求により stop 送信");
+                self.send("stop")?;
+                stop_sent = true;
+                stop_sent_at = Some(Instant::now());
+            }
             // 全体タイムアウト
             let elapsed = start.elapsed();
             if let Some(st) = stop_sent_at {
@@ -752,14 +758,7 @@ impl UsiEngine {
                         ));
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    if !stop_sent && shutdown.load(Ordering::SeqCst) {
-                        log::info!("[USI] shutdown 要求により stop 送信");
-                        self.send("stop")?;
-                        stop_sent = true;
-                        stop_sent_at = Some(Instant::now());
-                    }
-                }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(self.engine_exited_error());
                 }

@@ -88,8 +88,15 @@ where
         };
 
         // 4. broadcasts を物理経路に落とし込む。
-        dispatch_broadcasts(&handle_result.broadcasts, sente_io, gote_io, broadcaster, room_id)
-            .await?;
+        dispatch_broadcasts(
+            &handle_result.broadcasts,
+            sente_io,
+            gote_io,
+            broadcaster,
+            room_id,
+            matches!(handle_result.outcome, HandleOutcome::GameEnded(_)),
+        )
+        .await?;
 
         // 5. 終局を検出したら結果を返す。
         if let HandleOutcome::GameEnded(result) = handle_result.outcome {
@@ -123,6 +130,7 @@ async fn dispatch_broadcasts<TBlack, TWhite, B>(
     gote_io: &mut TWhite,
     broadcaster: &B,
     room_id: &RoomId,
+    game_ended: bool,
 ) -> Result<(), ServerError>
 where
     TBlack: ClientTransport,
@@ -130,25 +138,25 @@ where
     B: Broadcaster,
 {
     for entry in entries {
-        match entry.target {
-            BroadcastTarget::Black => {
-                sente_io.send_line(&entry.line).await?;
-            }
-            BroadcastTarget::White => {
-                gote_io.send_line(&entry.line).await?;
-            }
-            BroadcastTarget::Players => {
-                sente_io.send_line(&entry.line).await?;
-                gote_io.send_line(&entry.line).await?;
-            }
-            BroadcastTarget::Spectators => {
-                broadcaster.broadcast_tag(room_id, BroadcastTag::Spectator, &entry.line).await?;
-            }
-            BroadcastTarget::All => {
-                sente_io.send_line(&entry.line).await?;
-                gote_io.send_line(&entry.line).await?;
-                broadcaster.broadcast_tag(room_id, BroadcastTag::Spectator, &entry.line).await?;
-            }
+        // 終局確定後は切断側への送信失敗で、相手への通知と結果の返却を止めない。
+        if matches!(
+            entry.target,
+            BroadcastTarget::Black | BroadcastTarget::Players | BroadcastTarget::All
+        ) && let Err(error) = sente_io.send_line(&entry.line).await
+            && !game_ended
+        {
+            return Err(ServerError::Transport(error));
+        }
+        if matches!(
+            entry.target,
+            BroadcastTarget::White | BroadcastTarget::Players | BroadcastTarget::All
+        ) && let Err(error) = gote_io.send_line(&entry.line).await
+            && !game_ended
+        {
+            return Err(ServerError::Transport(error));
+        }
+        if matches!(entry.target, BroadcastTarget::Spectators | BroadcastTarget::All) {
+            broadcaster.broadcast_tag(room_id, BroadcastTag::Spectator, &entry.line).await?;
         }
     }
     Ok(())
@@ -177,6 +185,7 @@ mod tests {
         rx: UnboundedReceiver<Result<CsaLine, TransportError>>,
         outbox: Outbox,
         peer: IpKey,
+        closed: bool,
     }
 
     struct MockHandles {
@@ -193,6 +202,7 @@ mod tests {
                 rx,
                 outbox: outbox.clone(),
                 peer: IpKey::new(label),
+                closed: false,
             };
             MockHandles {
                 transport,
@@ -204,13 +214,20 @@ mod tests {
 
     impl ClientTransport for MockTransport {
         async fn recv_line(&mut self, _timeout: Duration) -> Result<CsaLine, TransportError> {
-            match self.rx.recv().await {
+            let result = match self.rx.recv().await {
                 Some(item) => item,
                 None => Err(TransportError::Closed),
+            };
+            if matches!(result, Err(TransportError::Closed)) {
+                self.closed = true;
             }
+            result
         }
 
         async fn send_line(&mut self, line: &CsaLine) -> Result<(), TransportError> {
+            if self.closed {
+                return Err(TransportError::Closed);
+            }
             self.outbox.borrow_mut().push(line.clone());
             Ok(())
         }
@@ -432,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn run_returns_abnormal_when_player_disconnects() {
+    async fn run_returns_abnormal_when_disconnected_transport_rejects_writes() {
         let mut room = make_room();
         let MockHandles {
             transport: mut sente,
@@ -442,7 +459,7 @@ mod tests {
         let MockHandles {
             transport: mut gote,
             tx: gote_tx,
-            outbox: _gote_out,
+            outbox: gote_out,
         } = MockHandles::build("gote");
         let bcast = MockBroadcaster {
             sent: Rc::new(RefCell::new(Vec::new())),
@@ -472,6 +489,8 @@ mod tests {
                 winner: Some(Color::White),
             }
         ));
+        assert!(gote_out.borrow().iter().any(|line| line.as_str() == "#WIN"));
+        assert!(bcast.sent.borrow().iter().any(|(_, line)| line.as_str() == "#ABNORMAL"));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
