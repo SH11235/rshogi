@@ -9,8 +9,8 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use super::tests::{
-    MATE_OVER_PARALLEL_START, ZUKOU_001, brute_mate_by_rules, checks_by_rules, position, pv_usi,
-    random_kingless_position, random_tsume_position,
+    ZUKOU_001, brute_mate_by_rules, checks_by_rules, position, pv_usi, random_kingless_position,
+    random_tsume_position,
 };
 use super::verify::{check_mate_pv_by_rules, legal_moves_by_rules};
 use super::*;
@@ -570,7 +570,10 @@ fn recapturable_interpositions_are_effective() {
 /// 最短手順を求める段階 (無駄合いの判定で別の局面を解いている間も) も進捗を知らせ、ノード数は増え続ける
 #[test]
 fn shortest_mode_reports_monotonic_progress() {
-    let mut pos = position(MATE_OVER_PARALLEL_START);
+    // 最短手順を求め終わるまで時間制限より十分長くかかる局面 (85 手詰) を、時間制限で打ち切る
+    let mut pos = position(
+        "1lnpGpBs1/lg1g3p1/p2+N4l/1S1P2k2/2Sn5/Pp2pn1K1/GPp+pR1pP1/+p2+ps3p/1B1LP1R2 b P 5",
+    );
     let stop = AtomicBool::new(false);
     let limits = MateLimits {
         nodes: 0,
@@ -589,7 +592,7 @@ fn shortest_mode_reports_monotonic_progress() {
 /// 無駄合いの判定で別の局面を解いている間も、進捗をこの探索のノード数に足して知らせる
 #[test]
 fn futility_checks_forward_progress() {
-    use super::search::{Budget, Scratch, Searcher, ShortestTables};
+    use super::search::{Budget, NodeArgs, Scratch, Searcher, ShortestTables};
     use super::state::MateState;
     use super::table::MateTable;
     use crate::time::Instant;
@@ -621,6 +624,12 @@ fn futility_checks_forward_progress() {
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     configure(&mut searcher, MateMode::Power);
     searcher.enable_shortest(true, &tables);
+    // この探索で先にノードを数えておき、進捗がそれに部分探索の分を足した値になることを確かめる
+    searcher.search(&mut pos, NodeArgs::unbounded(0, false, 0), &mut 0).unwrap();
+    let before = searcher.nodes();
+    assert!(before > 0);
+    // 部分探索の最初に数えるノードで知らせる
+    searcher.set_next_progress(0);
     let mut drops = Vec::new();
     MateState::generate(&pos, false, &mut drops);
     drops.retain(|m| m.is_drop());
@@ -628,8 +637,13 @@ fn futility_checks_forward_progress() {
         searcher.futile_drop(&mut pos, mv, 20).unwrap();
     }
     let nodes = searcher.nodes();
-    assert!(!reported.is_empty());
-    assert!(reported.iter().all(|&n| n <= nodes), "{reported:?} / {nodes}");
+    // 最初の通知はこの探索自身から、それより後は部分探索から (この探索で数えた分より多い)
+    assert!(reported.len() >= 2, "{reported:?}");
+    assert_eq!(reported[0], before);
+    assert!(
+        reported[1..].iter().all(|&n| before < n && n <= nodes),
+        "{reported:?} / {before}..{nodes}"
+    );
 }
 
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)
