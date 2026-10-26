@@ -18,21 +18,21 @@
 //! `nps` / `pv`）。
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rshogi_csa::Color;
 use serde::Serialize;
 
 use crate::config::CsaClientConfig;
 use crate::protocol::GameResult;
-use crate::record::{GameRecord, JsonlMoveExtra, RecordStatus, RecordedMove};
+use crate::record::{GameRecord, JsonlMoveExtra, RecordStatus, RecordedMove, record_filename_base};
 
 /// CSA 経由対局で 1 局分の JSONL を書き出す。
 ///
 /// 既存の `GameRecord` から meta / move / result を組み立てて、`out_dir` 直下に
-/// `<datetime>_<sente>_vs_<gote>.jsonl` を作成する。`out_dir` が無ければ作成する。
+/// 設定したテンプレートと対局識別子を含む名前で保存する。ディレクトリは自動作成する。
 pub fn write_game_jsonl(
     out_dir: &Path,
     record: &GameRecord,
@@ -43,6 +43,7 @@ pub fn write_game_jsonl(
 }
 
 /// 棋譜種別を明示して CSA 経由対局の JSONL を書き出す。
+/// 同局の未完 live JSONL だけを置き換え、完成済み・別内容のファイルは上書きしない。
 pub fn write_game_jsonl_with_status(
     out_dir: &Path,
     record: &GameRecord,
@@ -54,22 +55,117 @@ pub fn write_game_jsonl_with_status(
         format!("JSONL 出力ディレクトリを作成できません: {}", out_dir.display())
     })?;
 
-    let path = out_dir.join(jsonl_filename(record, status));
-    // live 追記 (`LiveJsonlWriter`) 有効時は同じパスを読者 (kifu_player --live 等) が
-    // 開いていることがあるため、truncate 書き込みでなく tmp→rename で置き換え、
-    // 読者が常に完全な内容だけを見るようにする。
-    let tmp = path.with_extension("jsonl.tmp");
-    let file = File::create(&tmp)
-        .with_context(|| format!("JSONL ファイルを作成できません: {}", tmp.display()))?;
-    let mut writer = BufWriter::new(file);
-
-    write_meta(&mut writer, record, config, &path)?;
-    let plies = write_moves(&mut writer, record)?;
-    write_result(&mut writer, record, result, plies)?;
-
-    writer.flush().context("JSONL flush に失敗")?;
-    rename_with_retry(&tmp, &path)?;
+    let path = out_dir.join(jsonl_filename(record, config, status));
+    write_jsonl_snapshot(&path, record, config, Some(result))?;
     Ok(path)
+}
+
+struct JsonlTemporary {
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+impl JsonlTemporary {
+    fn reserve(destination: &Path) -> Result<(Self, File)> {
+        let path = destination.with_extension("jsonl.tmp");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("JSONL の更新を予約できません: {}", path.display()))?;
+        Ok((
+            Self {
+                path,
+                remove_on_drop: true,
+            },
+            file,
+        ))
+    }
+}
+
+impl Drop for JsonlTemporary {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn write_jsonl_snapshot(
+    path: &Path,
+    record: &GameRecord,
+    config: &CsaClientConfig,
+    result: Option<&GameResult>,
+) -> Result<usize> {
+    // 同名 tmp の create_new が、live 再開と最終保存の更新権を排他する。
+    let (mut temporary, file) = JsonlTemporary::reserve(path)?;
+    let mut writer = BufWriter::new(file);
+    write_meta(&mut writer, record, config, path)?;
+    let plies = write_moves(&mut writer, record)?;
+    if let Some(result) = result {
+        write_result(&mut writer, record, result, plies)?;
+    }
+    writer.flush().context("JSONL flush に失敗")?;
+    drop(writer);
+
+    if let Some(mut existing) = open_owned_live_jsonl(path, record)? {
+        let mut expected = File::open(&temporary.path)?;
+        existing.rewind()?;
+        let mut actual_bytes = [0_u8; 4096];
+        let mut expected_bytes = [0_u8; 4096];
+        loop {
+            let count = existing.read(&mut actual_bytes)?;
+            if count == 0 {
+                break;
+            }
+            expected
+                .read_exact(&mut expected_bytes[..count])
+                .context("既存 live JSONL の方が保存対象より長いため置き換えません")?;
+            if actual_bytes[..count] != expected_bytes[..count] {
+                bail!("既存 live JSONL の内容が保存対象と一致しません: {}", path.display());
+            }
+        }
+    }
+    // rename 後に別 writer が同名 tmp を取得しても、その予約を削除しない。
+    temporary.remove_on_drop = false;
+    rename_with_retry(&temporary.path, path)?;
+    Ok(plies as usize)
+}
+
+fn open_owned_live_jsonl(path: &Path, record: &GameRecord) -> Result<Option<File>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let meta: serde_json::Value = serde_json::from_str(&line)
+        .with_context(|| format!("既存 JSONL の metadata が不正です: {}", path.display()))?;
+    if meta["type"].as_str() != Some("meta")
+        || meta["source"].as_str() != Some("csa_client")
+        || meta["game_id"].as_str() != Some(&record.game_id)
+        || meta["timestamp"].as_str() != Some(record.start_time.to_rfc3339().as_str())
+    {
+        bail!("既存 JSONL は同じ対局の記録ではありません: {}", path.display());
+    }
+    if !line.ends_with('\n') {
+        bail!("既存 JSONL は行の途中で終わっています: {}", path.display());
+    }
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(Some(reader.into_inner()));
+        }
+        if !line.ends_with('\n') {
+            bail!("既存 JSONL は行の途中で終わっています: {}", path.display());
+        }
+        let row: serde_json::Value = serde_json::from_str(&line)?;
+        if row["type"].as_str() == Some("result") {
+            bail!("完成済み JSONL は上書きしません: {}", path.display());
+        }
+    }
 }
 
 /// tmp から最終パスへの rename。Windows では宛先を `FILE_SHARE_DELETE` なしで開く
@@ -126,17 +222,16 @@ impl LiveJsonlWriter {
         fs::create_dir_all(out_dir).with_context(|| {
             format!("JSONL 出力ディレクトリを作成できません: {}", out_dir.display())
         })?;
-        let path = out_dir.join(jsonl_filename(record, status));
-        let file = File::create(&path)
-            .with_context(|| format!("live JSONL を作成できません: {}", path.display()))?;
-        let mut writer = BufWriter::new(file);
-        write_meta(&mut writer, record, config, &path)?;
-        let mut live = Self { writer, written: 0 };
-        live.append_new_moves(record)?;
-        // 手が 0 の作成直後でも meta 行を読者から見えるようにする
-        // (append_new_moves は書くものが無いと flush しない)。
-        live.writer.flush().context("live JSONL flush に失敗")?;
-        Ok(live)
+        let path = out_dir.join(jsonl_filename(record, config, status));
+        let written = write_jsonl_snapshot(&path, record, config, None)?;
+        let file = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("live JSONL を開けません: {}", path.display()))?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+            written,
+        })
     }
 
     /// record に追加された未書き出しの move 行を追記して flush する。
@@ -161,26 +256,37 @@ impl LiveJsonlWriter {
     }
 }
 
-/// `<datetime>_<sente>_vs_<gote>.jsonl` 形式のファイル名を生成する。
-fn jsonl_filename(record: &GameRecord, status: &RecordStatus) -> String {
-    let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
-    let sente = sanitize_for_filename(&record.sente_name);
-    let gote = sanitize_for_filename(&record.gote_name);
-    format!("{datetime}_{sente}_vs_{gote}{}.jsonl", status.filename_suffix())
+fn jsonl_filename(record: &GameRecord, config: &CsaClientConfig, status: &RecordStatus) -> String {
+    format!("{}.jsonl", record_filename_base(record, &config.record, status))
 }
 
 /// 切断前に作った通常名 live JSONL を削除する。
 ///
 /// 局面不一致 fallback では以後 `_reconnect_fragment.jsonl` へ記録するため、通常名の
 /// 未完ファイルを残すと集計側が別対局として拾ってしまう。存在しない場合は成功扱い。
-pub(crate) fn remove_complete_live_jsonl(out_dir: &Path, record: &GameRecord) -> Result<()> {
-    let path = out_dir.join(jsonl_filename(record, &RecordStatus::Complete));
-    match fs::remove_file(&path) {
+pub(crate) fn remove_complete_live_jsonl(
+    out_dir: &Path,
+    record: &GameRecord,
+    config: &CsaClientConfig,
+) -> Result<()> {
+    let path = out_dir.join(jsonl_filename(record, config, &RecordStatus::Complete));
+    match fs::metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let (temporary, file) = JsonlTemporary::reserve(&path)?;
+    drop(file);
+    let existing = open_owned_live_jsonl(&path, record)?;
+    drop(existing);
+    let result = match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err)
             .with_context(|| format!("切断前 live JSONL を削除できません: {}", path.display())),
-    }
+    };
+    drop(temporary);
+    result
 }
 
 /// ファイル名向けに英数字と `-` `_` 以外を `_` に置換する。空文字は `unknown`。
@@ -209,6 +315,7 @@ struct MetaLog<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     source: &'a str,
+    game_id: &'a str,
     timestamp: String,
     settings: MetaSettings,
     engine_cmd: EngineCommandMeta<'a>,
@@ -266,12 +373,13 @@ fn write_meta<W: Write>(
     output_path: &Path,
 ) -> Result<()> {
     let engine_path = config.engine.path.display().to_string();
-    let usi_options: Vec<String> = config
+    let mut usi_options: Vec<String> = config
         .engine
         .options
         .iter()
         .map(|(k, v)| format!("{k}={}", toml_value_to_string(v)))
         .collect();
+    usi_options.sort_unstable();
 
     // 集計キーはファイル名用の正規化で失われる文字も保持する。
     let (path_black, path_white, options_black, options_white) = match record.my_color {
@@ -296,6 +404,7 @@ fn write_meta<W: Write>(
     let meta = MetaLog {
         kind: "meta",
         source: "csa_client",
+        game_id: &record.game_id,
         timestamp: record.start_time.to_rfc3339(),
         settings: MetaSettings {
             games: 1,
@@ -611,7 +720,7 @@ mod tests {
         let mut record = GameRecord::new(&summary());
 
         let mut live = LiveJsonlWriter::create(&dir, &record, &config).unwrap();
-        let path = dir.join(jsonl_filename(&record, &RecordStatus::Complete));
+        let path = dir.join(jsonl_filename(&record, &config, &RecordStatus::Complete));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 1, "作成直後は meta 行のみ");
         assert!(text.contains("\"type\":\"meta\""));
@@ -678,7 +787,7 @@ mod tests {
         push_move(&mut record, Color::White, "sfen2", "3c3d");
 
         let _live = LiveJsonlWriter::create(&dir, &record, &config).unwrap();
-        let path = dir.join(jsonl_filename(&record, &RecordStatus::Complete));
+        let path = dir.join(jsonl_filename(&record, &config, &RecordStatus::Complete));
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -686,13 +795,14 @@ mod tests {
     #[test]
     fn reconnect_fragment_filename_is_explicit() {
         let record = GameRecord::new(&summary());
+        let config = CsaClientConfig::default();
         let status = RecordStatus::ReconnectFragment {
             reason: "test mismatch".to_owned(),
         };
         assert!(
-            jsonl_filename(&record, &status).ends_with("_reconnect_fragment.jsonl"),
+            jsonl_filename(&record, &config, &status).ends_with("_reconnect_fragment.jsonl"),
             "filename={}",
-            jsonl_filename(&record, &status)
+            jsonl_filename(&record, &config, &status)
         );
     }
 
@@ -702,11 +812,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let config = CsaClientConfig::default();
         let record = GameRecord::new(&summary());
-        let complete = dir.join(jsonl_filename(&record, &RecordStatus::Complete));
+        let complete = dir.join(jsonl_filename(&record, &config, &RecordStatus::Complete));
         let fragment_status = RecordStatus::ReconnectFragment {
             reason: "mismatch".to_owned(),
         };
-        let fragment = dir.join(jsonl_filename(&record, &fragment_status));
+        let fragment = dir.join(jsonl_filename(&record, &config, &fragment_status));
 
         let _complete_live = LiveJsonlWriter::create(&dir, &record, &config).unwrap();
         let _fragment_live =
@@ -714,11 +824,170 @@ mod tests {
         assert!(complete.exists());
         assert!(fragment.exists());
 
-        remove_complete_live_jsonl(&dir, &record).unwrap();
+        remove_complete_live_jsonl(&dir, &record, &config).unwrap();
         assert!(!complete.exists());
         assert!(fragment.exists());
         // 2 回目も NotFound を成功扱いにする。
-        remove_complete_live_jsonl(&dir, &record).unwrap();
+        remove_complete_live_jsonl(&dir, &record, &config).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn collision_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "csa-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn scored_record(game_id: &str) -> GameRecord {
+        let mut record = GameRecord::new(&summary());
+        record.game_id = game_id.to_owned();
+        let sfen = record.initial_position.to_sfen();
+        push_move(&mut record, Color::Black, &sfen, "7g7f");
+        record.moves[0].eval_cp = Some(50);
+        record
+    }
+
+    #[test]
+    fn same_second_games_share_distinct_names_across_all_formats() {
+        let dir = collision_test_dir("same-second");
+        let mut config = CsaClientConfig::default();
+        config.record.dir = dir.clone();
+        config.record.filename_template = "constant".to_owned();
+        let first = scored_record("first-game");
+        let mut second = scored_record("second-game");
+        second.start_time = first.start_time;
+        second.moves[0].eval_cp = Some(-100);
+        let first_json = write_game_jsonl(&dir, &first, &config, &GameResult::Win).unwrap();
+        crate::record::save_record(&first, &config.record).unwrap();
+        let second_json = write_game_jsonl(&dir, &second, &config, &GameResult::Lose).unwrap();
+        crate::record::save_record(&second, &config.record).unwrap();
+        assert_ne!(first_json, second_json);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 6);
+        for (path, record, score) in [(&first_json, &first, "50"), (&second_json, &second, "-100")]
+        {
+            assert!(fs::read_to_string(path).unwrap().contains(&record.game_id));
+            assert!(
+                fs::read_to_string(path.with_extension("csa"))
+                    .unwrap()
+                    .contains(&record.game_id)
+            );
+            assert!(fs::read_to_string(path.with_extension("sfen")).unwrap().contains(score));
+        }
+        let first_csa = fs::read(first_json.with_extension("csa")).unwrap();
+        let first_sfen = fs::read(first_json.with_extension("sfen")).unwrap();
+        assert!(crate::record::save_record(&first, &config.record).is_err());
+        config.record.save_csa = false;
+        assert!(crate::record::save_record(&first, &config.record).is_err());
+        assert_eq!(fs::read(first_json.with_extension("csa")).unwrap(), first_csa);
+        assert_eq!(fs::read(first_json.with_extension("sfen")).unwrap(), first_sfen);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_resume_and_finalization_leave_other_same_second_game_untouched() {
+        let dir = collision_test_dir("live-ownership");
+        let config = CsaClientConfig::default();
+        let first = scored_record("first-game");
+        let mut second = scored_record("second-game");
+        second.start_time = first.start_time;
+        let first_live = LiveJsonlWriter::create(&dir, &first, &config).unwrap();
+        let second_live = LiveJsonlWriter::create(&dir, &second, &config).unwrap();
+        let first_path = dir.join(jsonl_filename(&first, &config, &RecordStatus::Complete));
+        let second_path = dir.join(jsonl_filename(&second, &config, &RecordStatus::Complete));
+        let other_before = fs::read(&second_path).unwrap();
+        drop(first_live);
+        let resumed_live = LiveJsonlWriter::create(&dir, &first, &config).unwrap();
+        drop(resumed_live);
+        assert_eq!(write_game_jsonl(&dir, &first, &config, &GameResult::Win).unwrap(), first_path);
+        let completed = fs::read(&first_path).unwrap();
+        assert!(write_game_jsonl(&dir, &first, &config, &GameResult::Lose).is_err());
+        assert!(LiveJsonlWriter::create(&dir, &first, &config).is_err());
+        assert!(remove_complete_live_jsonl(&dir, &first, &config).is_err());
+        assert_eq!(fs::read(&first_path).unwrap(), completed);
+        assert_eq!(fs::read(&second_path).unwrap(), other_before);
+        drop(second_live);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_initialization_does_not_remove_foreign_file_or_temporary() {
+        let dir = collision_test_dir("foreign-file");
+        let config = CsaClientConfig::default();
+        let record = scored_record("game");
+        let path = dir.join(jsonl_filename(&record, &config, &RecordStatus::Complete));
+        fs::write(&path, b"foreign file").unwrap();
+        assert!(LiveJsonlWriter::create(&dir, &record, &config).is_err());
+        assert!(write_game_jsonl(&dir, &record, &config, &GameResult::Win).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"foreign file");
+        let temporary = path.with_extension("jsonl.tmp");
+        fs::write(&temporary, b"reserved by another writer").unwrap();
+        assert!(write_game_jsonl(&dir, &record, &config, &GameResult::Win).is_err());
+        assert_eq!(fs::read(&temporary).unwrap(), b"reserved by another writer");
+        assert_eq!(fs::read(&path).unwrap(), b"foreign file");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mismatched_live_game_id_and_start_time_are_preserved() {
+        let dir = collision_test_dir("mismatched-identity");
+        let config = CsaClientConfig::default();
+        let record = scored_record("game");
+        let live = LiveJsonlWriter::create(&dir, &record, &config).unwrap();
+        drop(live);
+        let path = dir.join(jsonl_filename(&record, &config, &RecordStatus::Complete));
+        let original = fs::read_to_string(&path).unwrap();
+        for (old, new) in [
+            ("\"game_id\":\"game\"".to_owned(), "\"game_id\":\"another-game\"".to_owned()),
+            (record.start_time.to_rfc3339(), "different-time".to_owned()),
+        ] {
+            let foreign = original.replace(&old, &new);
+            fs::write(&path, &foreign).unwrap();
+            assert!(write_game_jsonl(&dir, &record, &config, &GameResult::Win).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), foreign);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn process_writer_fixture() {
+        let Some(dir) = std::env::var_os("RSHOGI_RECORD_PROCESS_TEST_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let mut config = CsaClientConfig::default();
+        config.record.dir = dir.clone();
+        config.record.filename_template = "constant".to_owned();
+        let mut record = scored_record("same-game-id");
+        record.start_time = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        crate::record::save_record(&record, &config.record).unwrap();
+        write_game_jsonl(&dir, &record, &config, &GameResult::Win).unwrap();
+    }
+
+    #[test]
+    fn parallel_processes_preserve_both_records_with_identical_metadata() {
+        let dir = collision_test_dir("parallel-processes");
+        let executable = std::env::current_exe().unwrap();
+        let spawn = || {
+            std::process::Command::new(&executable)
+                .args(["--exact", "jsonl::tests::process_writer_fixture"])
+                .env("RSHOGI_RECORD_PROCESS_TEST_DIR", &dir)
+                .spawn()
+                .unwrap()
+        };
+        let mut first = spawn();
+        let mut second = spawn();
+        assert!(first.wait().unwrap().success());
+        assert!(second.wait().unwrap().success());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 6);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

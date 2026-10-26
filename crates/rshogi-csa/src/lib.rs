@@ -770,8 +770,7 @@ pub fn parse_csa_full_with_evals_style(
     for line in text.lines() {
         let comment_follows_inline_timed_move = follows_inline_timed_move;
         follows_inline_timed_move = false;
-        let raw = line.trim_end_matches('\r');
-        let s = raw.trim();
+        let s = line.trim();
         if s.is_empty() || s.starts_with('V') {
             continue;
         }
@@ -866,7 +865,7 @@ pub fn parse_csa_full_with_evals_style(
                 explicit_board = true;
                 pos.insert(Position::default())
             };
-            parse_csa_rank_line(pos_ref, raw)?;
+            parse_csa_rank_line(pos_ref, s)?;
             continue;
         }
         if s == "+" || s == "-" {
@@ -1073,7 +1072,11 @@ pub fn csa_move_to_usi(mv: &str, pos: &Position) -> Result<String> {
 /// `pos` は変換前の局面（駒種解決・手番判定に使用）。この関数は局面を変更しない。
 pub fn usi_move_to_csa(mv: &str, pos: &Position) -> Result<String> {
     let bytes = mv.as_bytes();
-    anyhow::ensure!(bytes.len() >= 4, "invalid USI move: {mv}");
+    let is_drop = bytes.get(1) == Some(&b'*');
+    anyhow::ensure!(
+        bytes.len() == 4 || (!is_drop && bytes.len() == 5 && bytes[4] == b'+'),
+        "invalid USI move: {mv}"
+    );
 
     let side_char = match pos.side_to_move {
         Color::Black => '+',
@@ -1083,7 +1086,7 @@ pub fn usi_move_to_csa(mv: &str, pos: &Position) -> Result<String> {
     let mut out = String::with_capacity(7);
     out.push(side_char);
 
-    if bytes.len() >= 4 && bytes[1] == b'*' {
+    if is_drop {
         // 駒打ち: P*7f → +0076FU
         let csa_code = usi_drop_to_csa_code(bytes[0])?;
         let to_file = usi_file_to_num(bytes[2])?;
@@ -1095,7 +1098,7 @@ pub fn usi_move_to_csa(mv: &str, pos: &Position) -> Result<String> {
         let from_rank = usi_rank_to_num(bytes[1])?;
         let to_file = usi_file_to_num(bytes[2])?;
         let to_rank = usi_rank_to_num(bytes[3])?;
-        let promote = bytes.len() >= 5 && bytes[4] == b'+';
+        let promote = bytes.len() == 5;
 
         // 移動元の駒種を盤面から取得
         let src_x = csa_file_to_x(from_file)?;
@@ -1482,6 +1485,33 @@ P-00KA
             assert!(usi_move_to_csa(mv, &pos).is_err(), "should reject: {mv:?}");
         }
         assert_eq!(usi_move_to_csa("7g7f", &pos).unwrap(), "+7776FU");
+    }
+
+    #[test]
+    fn csa_rank_lines_accept_leading_whitespace() {
+        let text = initial_position().to_csa_board();
+        for prefix in [" ", "  ", "\t", "\u{3000}"] {
+            let indented = text.lines().map(|line| format!("{prefix}{line}\n")).collect::<String>();
+            let (pos, _, _) = parse_csa_full(&indented).unwrap();
+            assert_eq!(pos.to_sfen(), initial_position().to_sfen());
+        }
+    }
+
+    #[test]
+    fn usi_move_conversion_rejects_trailing_garbage() {
+        let pos = initial_position();
+        for mv in [
+            "7g7fx",
+            "7g7f++",
+            "7g7f+tail",
+            "P*7f+",
+            "P*7ftail",
+            "7g7f歩",
+        ] {
+            assert!(usi_move_to_csa(mv, &pos).is_err(), "should reject: {mv:?}");
+        }
+        assert_eq!(usi_move_to_csa("7g7f+", &pos).unwrap(), "+7776TO");
+        assert_eq!(usi_move_to_csa("P*7f", &pos).unwrap(), "+0076FU");
     }
 
     #[test]

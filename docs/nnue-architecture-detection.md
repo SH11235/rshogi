@@ -35,7 +35,7 @@ network_payload = FT_bias + FT_weight
 各サイズはバイト単位です。ヘッダーは `12 + arch_len` バイト、FT とネットワークの hash は計8バイトです。
 既知サイズの照合では、hash を含まない payload、hash を加えた payload + 8、
 さらに bullet 形式のパディング1〜63バイトを加えたサイズを一致と扱います。
-サイズ一致だけで任意の末尾データを受理するわけではありません。
+universal は末尾が `bullet` マーカーの繰り返しか検査します。固定 HalfKP の reader は末尾を検査しません。
 
 universal の未知サイズはヘッダー寸法から必要バイト数を求め、payload の不足や不正な末尾を拒否します。
 固定・family edition では既知サイズに一致しない場合、`Unknown architecture` と候補との差を返します。

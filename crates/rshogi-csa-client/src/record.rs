@@ -1,6 +1,8 @@
 //! 棋譜記録・保存
 
 use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write as _;
 
 use anyhow::Result;
 use chrono::Local;
@@ -404,7 +406,7 @@ pub fn save_record(record: &GameRecord, config: &RecordConfig) -> Result<()> {
     save_record_with_status(record, config, &RecordStatus::Complete)
 }
 
-/// 棋譜種別を明示してファイルへ保存する。
+/// 棋譜種別を明示してファイルへ保存する。既存のファイルは上書きせずエラーを返す。
 pub fn save_record_with_status(
     record: &GameRecord,
     config: &RecordConfig,
@@ -416,18 +418,15 @@ pub fn save_record_with_status(
 
     std::fs::create_dir_all(&config.dir)?;
 
-    let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
-    let mut filename_base = config
-        .filename_template
-        .replace("{datetime}", &datetime)
-        .replace("{game_id}", &record.game_id)
-        .replace("{sente}", &sanitize_filename(&record.sente_name))
-        .replace("{gote}", &sanitize_filename(&record.gote_name));
-    filename_base.push_str(status.filename_suffix());
+    let filename_base = record_filename_base(record, config, status);
 
     if config.save_csa {
         let path = config.dir.join(format!("{filename_base}.csa"));
-        std::fs::write(&path, record.to_csa_with_status(status))?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?
+            .write_all(record.to_csa_with_status(status).as_bytes())?;
         log::info!("[REC] 棋譜保存: {}", path.display());
     }
 
@@ -435,7 +434,11 @@ pub fn save_record_with_status(
         let sfen = record.to_sfen_lines()?;
         if !sfen.is_empty() {
             let path = config.dir.join(format!("{filename_base}.sfen"));
-            std::fs::write(&path, sfen)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?
+                .write_all(sfen.as_bytes())?;
             log::info!("[REC] SFEN保存: {}", path.display());
         }
     }
@@ -443,6 +446,49 @@ pub fn save_record_with_status(
     Ok(())
 }
 
+pub(crate) fn record_filename_base(
+    record: &GameRecord,
+    config: &RecordConfig,
+    status: &RecordStatus,
+) -> String {
+    let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
+    let base = config
+        .filename_template
+        .replace("{datetime}", &datetime)
+        .replace("{game_id}", &sanitize_filename(&record.game_id))
+        .replace("{sente}", &sanitize_filename(&record.sente_name))
+        .replace("{gote}", &sanitize_filename(&record.gote_name));
+    let sente = crate::jsonl::sanitize_for_filename(&record.sente_name);
+    let gote = crate::jsonl::sanitize_for_filename(&record.gote_name);
+    let players = format!("{sente}_vs_{gote}");
+    let dash_players = format!("{sente}-vs-{gote}");
+    let prefix = base
+        .strip_suffix(&players)
+        .or_else(|| base.strip_suffix(&dash_players))
+        .unwrap_or(&base)
+        .trim_end_matches('_');
+    let mut game_hash = DefaultHasher::new();
+    record.game_id.hash(&mut game_hash);
+    match record.my_color {
+        Color::Black => 0_u8,
+        Color::White => 1_u8,
+    }
+    .hash(&mut game_hash);
+    let identity = format!(
+        "{}-{:09}-{}-{:016x}",
+        record.start_time.timestamp(),
+        record.start_time.timestamp_subsec_nanos(),
+        std::process::id(),
+        game_hash.finish(),
+    );
+    // 後手未着手の読者は末尾の `_vs_<後手名>` から対局者を補う。
+    let name = if prefix.is_empty() {
+        format!("{identity}_{players}")
+    } else {
+        format!("{prefix}_{identity}_{players}")
+    };
+    format!("{name}{}", status.filename_suffix())
+}
 impl RecordStatus {
     /// 断片棋譜なら、全形式のファイル名に付ける suffix を返す。
     pub fn filename_suffix(&self) -> &'static str {
@@ -480,6 +526,73 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn game_id_cannot_escape_record_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "csa-record-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = RecordConfig {
+            dir: root.join("records"),
+            filename_template: "{game_id}".to_owned(),
+            ..RecordConfig::default()
+        };
+        let mut record = GameRecord::new(&summary(rshogi_csa::initial_position()));
+        record.add_move(
+            "+7776FU",
+            1,
+            Some(&SearchInfo {
+                score_cp: Some(0),
+                ..SearchInfo::default()
+            }),
+            Color::Black,
+        );
+        let absolute_id = root.join("outside").to_string_lossy().into_owned();
+        for game_id in ["../outside", "..\\outside", absolute_id.as_str()] {
+            record.game_id = game_id.to_owned();
+            save_record(&record, &config).unwrap();
+            let filename = record_filename_base(&record, &config, &RecordStatus::Complete);
+            assert!(config.dir.join(format!("{filename}.csa")).is_file());
+            assert!(config.dir.join(format!("{filename}.sfen")).is_file());
+        }
+        assert!(!root.join("outside.csa").exists());
+        assert!(!root.join("outside.sfen").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn filename_keeps_actual_players_at_end_for_legacy_readers() {
+        let record = GameRecord::new(&summary(rshogi_csa::initial_position()));
+        for template in [
+            "{datetime}_{sente}_vs_{gote}",
+            "constant",
+            "custom_vs_wrong",
+            "custom_{sente}_vs_{gote}_notes",
+            "{sente}-vs-{gote}",
+            "{sente}_vs_{gote}",
+        ] {
+            let config = RecordConfig {
+                filename_template: template.to_owned(),
+                ..RecordConfig::default()
+            };
+            let name = record_filename_base(&record, &config, &RecordStatus::Complete);
+            assert_eq!(name.rsplit_once("_vs_").unwrap().1, "bob", "{template}: {name}");
+            assert!(name.ends_with("_alice_vs_bob"), "{template}: {name}");
+            if template.starts_with("{datetime}") {
+                assert!(name.starts_with(&record.start_time.format("%Y%m%d_%H%M%S").to_string()));
+                assert_eq!(name.matches("alice_vs_bob").count(), 1);
+            }
+            let status = RecordStatus::ReconnectFragment {
+                reason: "mismatch".to_owned(),
+            };
+            let fragment = record_filename_base(&record, &config, &status);
+            assert_eq!(fragment, format!("{name}_reconnect_fragment"));
+        }
+    }
     fn summary(position: Position) -> GameSummary {
         GameSummary {
             game_id: "resume-game".to_owned(),

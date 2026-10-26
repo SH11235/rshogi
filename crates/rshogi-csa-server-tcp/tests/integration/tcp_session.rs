@@ -1682,6 +1682,37 @@ fn fork_gracefully_errors_and_keeps_connection_alive() {
 }
 
 #[test]
+fn fork_rejects_path_ids_and_accepts_unicode_lookup_without_disconnect() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("fork_invalid_id", vec!["admin".to_owned()]).await;
+        let (mut reader, mut writer) = connect(addr).await;
+        send_line(&mut writer, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut reader).await.unwrap(), "LOGIN:admin OK");
+
+        for id in [
+            "../../outside",
+            "20260417/../../../../outside",
+            "..\\outside",
+            "game:stream",
+        ] {
+            send_line(&mut writer, &format!("%%FORK {id} safe 0")).await;
+            let error = read_line_raw(&mut reader).await.unwrap();
+            assert!(error.starts_with("##[FORK] ERROR safe"), "{id:?}: {error}");
+            assert_eq!(read_line_raw(&mut reader).await.unwrap(), "##[FORK] END");
+        }
+
+        send_line(&mut writer, "%%FORK 日本語の対局 safe 0").await;
+        assert_eq!(read_line_raw(&mut reader).await.unwrap(), "##[FORK] NOT_FOUND 日本語の対局");
+        assert_eq!(read_line_raw(&mut reader).await.unwrap(), "##[FORK] END");
+        send_line(&mut writer, "%%GETBUOYCOUNT safe").await;
+        assert_eq!(read_line_raw(&mut reader).await.unwrap(), "##[GETBUOYCOUNT] NOT_FOUND safe");
+        assert_eq!(read_line_raw(&mut reader).await.unwrap(), "##[GETBUOYCOUNT] END");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
     // 打ち歩詰の典型局面を TCP E2E で流し、`#ILLEGAL_MOVE` → `#LOSE/#WIN` が
     // wire されることを固定する（追加終局判定の受入回帰）。
@@ -3438,6 +3469,58 @@ fn both_disconnected_players_still_finish_and_persist_once() {
                 .starts_with("LOGIN:incorrect reconnect_")
         );
         let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn zero_grace_disconnect_notifies_survivor_and_persists_once() {
+    run_local(|| async {
+        for disconnect_black in [true, false] {
+            let (addr, topdir, state) =
+                spawn_server_with_reconnect_grace("zero_grace_disconnect", Duration::ZERO, None)
+                    .await;
+            let (mut black_reader, mut black_writer) = connect(addr).await;
+            let (mut white_reader, mut white_writer) = connect(addr).await;
+            send_line(&mut black_writer, "LOGIN alice+g1+black pw").await;
+            send_line(&mut white_writer, "LOGIN bob+g1+white pw").await;
+            assert_eq!(read_line_raw(&mut black_reader).await.unwrap(), "LOGIN:alice OK");
+            assert_eq!(read_line_raw(&mut white_reader).await.unwrap(), "LOGIN:bob OK");
+            let summary = drain_game_summary(&mut black_reader).await;
+            drain_game_summary(&mut white_reader).await;
+            let game_id = extract_summary_field(&summary, "Game_ID").unwrap();
+            send_line(&mut black_writer, "AGREE").await;
+            send_line(&mut white_writer, "AGREE").await;
+            read_until(&mut black_reader, &format!("START:{game_id}")).await;
+            read_until(&mut white_reader, &format!("START:{game_id}")).await;
+            send_line(&mut black_writer, "+7776FU").await;
+            read_until(&mut black_reader, "+7776FU,T0").await;
+            read_until(&mut white_reader, "+7776FU,T0").await;
+
+            let mut survivor = if disconnect_black {
+                drop(black_reader);
+                drop(black_writer);
+                white_reader
+            } else {
+                drop(white_reader);
+                drop(white_writer);
+                black_reader
+            };
+            let terminal = read_until(&mut survivor, "#WIN").await;
+            assert!(terminal.iter().any(|line| line == "#ABNORMAL"));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while state.active_game_count() != 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let list = wait_for_file_text(&topdir.join("00LIST")).await;
+            assert_eq!(list.lines().filter(|line| line.contains(&game_id)).count(), 1);
+            assert!(list.contains("#ABNORMAL"));
+            let kifu = wait_for_csa_text(&topdir, &game_id).await;
+            assert_eq!(kifu.lines().filter(|line| *line == "+7776FU,T0").count(), 1);
+            let _ = tokio::fs::remove_dir_all(&topdir).await;
+        }
     });
 }
 

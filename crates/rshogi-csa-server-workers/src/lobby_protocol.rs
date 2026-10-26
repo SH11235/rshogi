@@ -167,7 +167,7 @@ pub struct QueueEntry {
 
 /// LobbyDO の in-memory queue。
 ///
-/// queue は volatile (Hibernation 復帰で空になる)。client は再 LOGIN_LOBBY する想定。
+/// Hibernation 復帰時は LobbyDO が WebSocket attachment から再構築する。
 #[derive(Debug, Default)]
 pub struct LobbyQueue {
     entries: Vec<QueueEntry>,
