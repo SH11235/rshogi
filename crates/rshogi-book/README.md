@@ -92,16 +92,23 @@ RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- -
   index を二分探索します。`IgnoreBookPly=false` では手数も一致したときだけ当たります (`.ybb` は
   同じ盤面を 1 つしか持てないので、手数違いの重複はありません)。`FlippedBook` は先後反転した
   局面で引き直し、手を反転します。玉が欠けた局面など PackedSfen にできない局面は引けません。
-- **持たない情報**: ponder と採択回数 (count) を持たず、手ごとの depth は持つ版と持たない版
-  (0 として扱う) があります。ponder は子局面を引いた筆頭手で補い、`ConsiderBookMoveCount` は
-  等確率、`NarrowBook` は何もしません。同じ局面集合の `.db` (ponder なし・count が揃ったもの) から
-  変換した `.ybb` は、probe の結果が `.db` と一致します。
+- **持たない情報**: ponder と採択回数 (count) を持たず、手ごとの depth は持つ版 (flags の bit0)
+  と持たない版 (0 として扱う) があります。ponder は子局面を引いた筆頭手で補い、
+  `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしません。
+- **`.db` と probe の結果が一致する条件**: 同じ局面集合の `.db` から変換した `.ybb` で、`.db` が
+  ponder を持たず、count が局面内で揃っていて、`.ybb` が depth を持つ (flags の bit0) か
+  `BookDepthLimit=0` であること。
+- **手の無い局面**: 当たった局面の手が 0 個なら定跡なしとし、`FlippedBook` でも反転局面を
+  引き直しません (YaneuraOu と同じ)。手数が違って当たらなかったときは引き直します。
 - **丸読み (`BookOnTheFly=false`)**: ファイル全体をそのまま読み込みます。メモリはファイルの大きさと
-  同じです。`isready` の時間はファイルを読む時間です。
+  同じで、`BookFile` などを変えて読み直すときは新旧が揃うまで一時的に 2 倍になります。大きい
+  `.ybb` では `BookOnTheFly=true` を勧めます。`isready` の時間はファイルを読む時間です。
 - **`BookOnTheFly=true`**: header (32 byte) だけを読み、index も手もファイル上で引きます。並びの
   抜き取り検査はしません (YaneuraOu の書き出しは PackedSfen 順)。1 回の検索で読むのは index の
   44 byte を局面数の対数回と、その局面の手だけです。
-- **壊れたファイル**: magic・未知の flags・局面数に対して短すぎるファイルは開くときに拒否します。
+- **壊れたファイル**: 未知の flags・局面数に対して短すぎるファイル、拡張子が `.ybb` で magic が
+  違うファイルは開くときに拒否します (header を確かめてから本体を読みます)。拡張子が `.ybb` でなく
+  magic も違うファイルはテキスト `.db` として読みます。
   手の領域が途中で切れている局面は probe の読み出しエラーとして扱います。
 
 実際の `.ybb` と、同じ局面集合の `.db` (手数を除いた SFEN 順に並んだもの) で引いた結果と probe の

@@ -127,8 +127,14 @@ impl Book {
     ///
     /// バッファリングは `from_reader` 側で行う。
     pub fn from_path<P: AsRef<Path>>(path: P, ignore_ply: bool) -> io::Result<Self> {
-        let file = std::fs::File::open(path)?;
-        Self::from_reader(file, ignore_ply)
+        let path = path.as_ref();
+        if is_ybb_file(path)? {
+            return Ok(Self {
+                store: Store::Ybb(YbbBook::read_file(path)?),
+                ignore_ply,
+            });
+        }
+        Self::from_text_reader(std::fs::File::open(path)?, ignore_ply)
     }
 
     /// バイト列から定跡を読み込む(NNUE ローダの `init_nnue_from_bytes` 相当。wasm 互換)。
@@ -141,9 +147,8 @@ impl Book {
         let mut head = Vec::with_capacity(ybb::MAGIC.len());
         (&mut reader).take(ybb::MAGIC.len() as u64).read_to_end(&mut head)?;
         if head == ybb::MAGIC {
-            reader.read_to_end(&mut head)?;
             return Ok(Self {
-                store: Store::Ybb(YbbBook::from_bytes(head)?),
+                store: Store::Ybb(YbbBook::from_reader(head, reader)?),
                 ignore_ply,
             });
         }
@@ -262,13 +267,23 @@ pub fn resolve_book_path(path: &Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-/// ファイル先頭が `.ybb` の magic か。
+/// ファイル先頭が `.ybb` の magic か。拡張子が `.ybb` なのに magic が違うファイルは、
+/// テキストとして読むと 0 局面の定跡として開けてしまうので `InvalidData` にする。
 fn is_ybb_file(path: &Path) -> io::Result<bool> {
     let mut head = Vec::with_capacity(ybb::MAGIC.len());
     std::fs::File::open(path)?
         .take(ybb::MAGIC.len() as u64)
         .read_to_end(&mut head)?;
-    Ok(head == ybb::MAGIC)
+    if head == ybb::MAGIC {
+        return Ok(true);
+    }
+    if path.extension().is_some_and(|ext| ext == "ybb") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a ybb file (magic mismatch)", path.display()),
+        ));
+    }
+    Ok(false)
 }
 
 /// 指し手行 1 行を `RawBookMove` にパースする。`move` フィールドが空なら `None`。

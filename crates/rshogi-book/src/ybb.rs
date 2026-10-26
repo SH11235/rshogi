@@ -42,28 +42,16 @@ pub(crate) struct YbbBook {
     move_record_size: u64,
 }
 
-impl YbbBook {
-    /// ファイル全体を読み込む。
-    pub(crate) fn from_bytes(bytes: Vec<u8>) -> io::Result<Self> {
-        let len = bytes.len() as u64;
-        let header: [u8; HEADER_SIZE as usize] = bytes
-            .get(..HEADER_SIZE as usize)
-            .and_then(|h| h.try_into().ok())
-            .ok_or_else(|| invalid("ybb file is shorter than its header"))?;
-        Self::new(Source::Memory(bytes), len, &header)
-    }
+/// 検証済みの header。
+struct Header {
+    record_count: u64,
+    move_record_size: u64,
+    /// index の終わり (= moves 領域の先頭) のバイト位置。
+    index_end: u64,
+}
 
-    /// ファイルを開くだけで、index も moves も読み込まない。
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
-        let mut file = File::open(path)?;
-        let len = file.metadata()?.len();
-        let mut header = [0u8; HEADER_SIZE as usize];
-        file.read_exact(&mut header)
-            .map_err(|_| invalid("ybb file is shorter than its header"))?;
-        Self::new(Source::File(Mutex::new(file)), len, &header)
-    }
-
-    fn new(source: Source, len: u64, header: &[u8; HEADER_SIZE as usize]) -> io::Result<Self> {
+impl Header {
+    fn parse(header: &[u8; HEADER_SIZE as usize]) -> io::Result<Self> {
         if &header[..16] != MAGIC {
             return Err(invalid("not a ybb file (magic mismatch)"));
         }
@@ -72,21 +60,82 @@ impl YbbBook {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(invalid(format!("ybb file has unknown flags {flags:#x}")));
         }
-        record_count
+        let index_end = record_count
             .checked_mul(INDEX_RECORD_SIZE)
             .and_then(|n| n.checked_add(HEADER_SIZE))
-            .filter(|&end| end <= len)
-            .ok_or_else(|| {
-                invalid(format!(
-                    "ybb index of {record_count} positions does not fit in {len} bytes"
-                ))
-            })?;
+            .ok_or_else(|| invalid(format!("ybb index of {record_count} positions overflows")))?;
         Ok(Self {
-            source,
-            len,
             record_count,
             move_record_size: if flags & FLAG_MOVE_DEPTH != 0 { 6 } else { 4 },
+            index_end,
         })
+    }
+
+    /// `path` のファイルの header を読んで検証し、index がファイルに収まることも確かめる。
+    fn read_file(path: &Path) -> io::Result<(Self, File, u64)> {
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
+        let mut bytes = [0u8; HEADER_SIZE as usize];
+        file.read_exact(&mut bytes)
+            .map_err(|_| invalid("ybb file is shorter than its header"))?;
+        let header = Self::parse(&bytes)?;
+        header.check_len(len)?;
+        Ok((header, file, len))
+    }
+
+    fn check_len(&self, len: u64) -> io::Result<()> {
+        if self.index_end > len {
+            return Err(invalid(format!(
+                "ybb index of {} positions does not fit in {len} bytes",
+                self.record_count
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl YbbBook {
+    fn new(source: Source, len: u64, header: Header) -> Self {
+        Self {
+            source,
+            len,
+            record_count: header.record_count,
+            move_record_size: header.move_record_size,
+        }
+    }
+
+    /// magic を読んだ後の `reader` から残りを読み込む。header を検証してから本体を読む。
+    pub(crate) fn from_reader<R: Read>(magic: Vec<u8>, mut reader: R) -> io::Result<Self> {
+        let mut bytes = magic;
+        (&mut reader).take(HEADER_SIZE - bytes.len() as u64).read_to_end(&mut bytes)?;
+        let header_bytes: [u8; HEADER_SIZE as usize] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid("ybb file is shorter than its header"))?;
+        let header = Header::parse(&header_bytes)?;
+        reader.read_to_end(&mut bytes)?;
+        let len = bytes.len() as u64;
+        header.check_len(len)?;
+        Ok(Self::new(Source::Memory(bytes), len, header))
+    }
+
+    /// ファイル全体を読み込む。header とファイル長を確かめてから読む。
+    pub(crate) fn read_file(path: &Path) -> io::Result<Self> {
+        let (header, mut file, len) = Header::read_file(path)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(len).map_err(|_| {
+            io::Error::new(io::ErrorKind::OutOfMemory, "ybb file does not fit in memory")
+        })?);
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut bytes)?;
+        let len = bytes.len() as u64;
+        header.check_len(len)?;
+        Ok(Self::new(Source::Memory(bytes), len, header))
+    }
+
+    /// ファイルを開くだけで、index も moves も読み込まない。
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let (header, file, len) = Header::read_file(path)?;
+        Ok(Self::new(Source::File(Mutex::new(file)), len, header))
     }
 
     pub(crate) fn record_count(&self) -> u64 {
@@ -119,7 +168,8 @@ impl YbbBook {
     }
 
     /// 局面を引く。`ignore_ply` が `false` なら手数も一致したときだけ返す。PackedSfen に
-    /// できない SFEN は引けない局面として扱う。
+    /// できない SFEN は引けない局面として扱う。手の数が 0 の局面も空のエントリとして返す
+    /// (YaneuraOu は当たった局面の手が空でも FlippedBook の反転局面を引き直さない)。
     pub(crate) fn find(&self, sfen: &str, ignore_ply: bool) -> io::Result<Option<PositionEntry>> {
         let Some((target, ply)) = pack_sfen(sfen) else {
             return Ok(None);
@@ -140,7 +190,7 @@ impl YbbBook {
                     let offset = u64::from_le_bytes(record[32..40].try_into().unwrap_or_default());
                     let count = u16::from_le_bytes([record[42], record[43]]);
                     let moves = self.read_moves(offset, count)?;
-                    return Ok((!moves.is_empty()).then_some(PositionEntry { moves }));
+                    return Ok(Some(PositionEntry { moves }));
                 }
             }
         }
@@ -307,7 +357,8 @@ pub(crate) fn pack_sfen(sfen: &str) -> Option<([u8; 32], u64)> {
             if !(PAWN..KING).contains(&piece_type) {
                 return None;
             }
-            hands[usize::from(piece >> 4)][usize::from(piece_type)] += count.take().unwrap_or(1);
+            let slot = &mut hands[usize::from(piece >> 4)][usize::from(piece_type)];
+            *slot = slot.checked_add(count.take().unwrap_or(1))?;
         }
         if count.is_some() {
             return None;
@@ -545,6 +596,8 @@ mod tests {
     /// 実際の `.ybb` を on the fly で開いて平手を引き、変換元 (か変換先) の `.db` があれば、
     /// `.db` から等間隔に抜いた局面 (手数違い・先後反転を含む) で引いた結果と probe の選択が一致する
     /// ことを確かめる。`.db` は sfen 行が手数を除いた SFEN 順に並んでいること (on the fly で引く)。
+    /// `.ybb` が持たないものは比べない: ponder (probe は指し手だけ比べる)、depth なしの `.ybb` の depth。
+    /// probe の一致は `.db` の count が局面内で揃っていることが前提。
     /// `RSHOGI_YBB_PATH=<.ybb> [RSHOGI_YBB_DB_PATH=<.db>] cargo test --release -p rshogi-book -- --ignored real_ybb`
     #[test]
     #[ignore = "RSHOGI_YBB_PATH の定跡ファイルが要る"]
@@ -554,6 +607,9 @@ mod tests {
         let ybb_path = std::env::var("RSHOGI_YBB_PATH").expect("RSHOGI_YBB_PATH");
         let samples: u64 = std::env::var("RSHOGI_YBB_SAMPLES").map_or(4000, |s| s.parse().unwrap());
         let ybb = Book::open_on_the_fly(&ybb_path, true).unwrap();
+        let mut header = [0u8; HEADER_SIZE as usize];
+        File::open(&ybb_path).unwrap().read_exact(&mut header).unwrap();
+        let with_depth = Header::parse(&header).unwrap().move_record_size == 6;
         let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let moves = ybb.entry_moves(hirate).unwrap();
         eprintln!("{} positions, hirate: {moves:?}", ybb.position_count().unwrap());
@@ -601,7 +657,10 @@ mod tests {
                     continue;
                 };
                 for query in [&canonical, &other_ply, &flipped] {
-                    let expected = db.entry_moves(query).unwrap();
+                    let mut expected = db.entry_moves(query).unwrap();
+                    if !with_depth {
+                        expected.iter_mut().for_each(|m| m.depth = 0);
+                    }
                     assert_eq!(ybb.entry_moves(query).unwrap(), expected, "{query}");
                     queries += 1;
                     hits += usize::from(!expected.is_empty());
@@ -610,6 +669,7 @@ mod tests {
                     position.set_sfen(query).unwrap();
                     let run = |book: &Book| {
                         probe(book, &position, &options, &mut DefaultBookRng::from_seed(1), |_| {})
+                            .map(|r| r.best_move)
                     };
                     assert_eq!(run(&ybb), run(&db), "{query}");
                 }
@@ -619,6 +679,103 @@ mod tests {
                 sfens.len()
             );
         }
+    }
+
+    /// depth なしの `.ybb` を組み立てる。手は (Move16, 評価値)。
+    fn build_ybb(records: &[(&str, &[(u16, i16)])]) -> Vec<u8> {
+        let mut packed: Vec<_> = records
+            .iter()
+            .map(|(sfen, moves)| {
+                let (key, ply) = pack_sfen(sfen).unwrap();
+                (key, ply as u16, *moves)
+            })
+            .collect();
+        packed.sort_by_key(|r| r.0);
+        let mut out = MAGIC.to_vec();
+        out.extend((packed.len() as u64).to_le_bytes());
+        out.extend(0u64.to_le_bytes());
+        let mut moves_area = Vec::new();
+        for (key, ply, moves) in &packed {
+            out.extend(key);
+            out.extend((moves_area.len() as u64).to_le_bytes());
+            out.extend(ply.to_le_bytes());
+            out.extend((moves.len() as u16).to_le_bytes());
+            for (m, v) in *moves {
+                moves_area.extend(m.to_le_bytes());
+                moves_area.extend(v.to_le_bytes());
+            }
+        }
+        out.extend(moves_area);
+        out
+    }
+
+    #[test]
+    fn position_without_moves_does_not_fall_back_to_flipped() {
+        let hirate_b = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let hirate_w = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1";
+        // 3c3d: 3c = 2*9+2, 3d = 2*9+3。
+        let bytes = build_ybb(&[(hirate_b, &[]), (hirate_w, &[((20 << 7) | 21, 10)])]);
+        let book = Book::from_bytes(&bytes, true).unwrap();
+        assert_eq!(book.find_raw(hirate_b).unwrap().map(|e| e.moves.len()), Some(0));
+        assert!(book.entry_moves(hirate_b).unwrap().is_empty());
+        let options = BookOptions {
+            flipped_book: true,
+            ..Default::default()
+        };
+        let run = |sfen: &str| {
+            let mut position = Position::new();
+            position.set_sfen(sfen).unwrap();
+            probe(&book, &position, &options, &mut DefaultBookRng::from_seed(0), |_| {})
+                .map(|r| r.best_move.to_usi())
+        };
+        assert_eq!(run(hirate_b), None);
+        assert_eq!(run(hirate_w), Some("3c3d".to_string()));
+    }
+
+    #[test]
+    fn header_is_checked_before_reading_the_body() {
+        struct Fail;
+        impl Read for Fail {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("body must not be read"))
+            }
+        }
+        let mut unknown_flag = SMALL_YBB[..32].to_vec();
+        unknown_flag[24] = 2;
+        let mut overflow = SMALL_YBB[..32].to_vec();
+        overflow[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        for header in [unknown_flag, overflow] {
+            let err = Book::from_reader(header.as_slice().chain(Fail), true).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        }
+    }
+
+    #[test]
+    fn ybb_extension_with_wrong_magic_is_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("rshogi_book_ybb_magic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = b"XANE-BINBOOK-V1\0".to_vec();
+        bytes.extend([0u8; 16]);
+        let short = dir.join("short.ybb");
+        std::fs::write(&short, b"YANE").unwrap();
+        let broken = dir.join("broken.ybb");
+        std::fs::write(&broken, &bytes).unwrap();
+        for path in [&broken, &short] {
+            for on_the_fly in [false, true] {
+                let result = if on_the_fly {
+                    Book::open_on_the_fly(path, true)
+                } else {
+                    Book::from_path(path, true)
+                };
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
+        // 拡張子が .ybb でなければテキストの定跡として読む。
+        let text = dir.join("broken.db");
+        std::fs::write(&text, &bytes).unwrap();
+        assert_eq!(Book::from_path(&text, true).unwrap().position_count(), Some(0));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -646,6 +803,10 @@ mod tests {
         assert_eq!(pack_sfen("4k4/9/9/9/9/9/9/9/9 b 2G 1"), None);
         assert_eq!(pack_sfen("4k4/9/9/9/9/9/9/9/4K4 b 19P 1"), None);
         assert!(pack_sfen("4k4/9/9/9/9/9/9/9/4K4 b 18P 1").is_some());
+        // 手駒の枚数の和が i32 を超えても panic しない。
+        assert_eq!(pack_sfen("4k4/9/9/9/9/9/9/9/4K4 b 2147483647P1P 1"), None);
+        let book = Book::from_bytes(SMALL_YBB, true).unwrap();
+        assert!(book.entry_moves("4k4/9/9/9/9/9/9/9/4K4 b 2147483647P1P 1").unwrap().is_empty());
     }
 
     #[test]
