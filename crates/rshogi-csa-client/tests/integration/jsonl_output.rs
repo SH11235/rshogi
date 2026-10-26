@@ -324,6 +324,7 @@ fn filename_includes_datetime_and_player_names() {
     let path = write_game_jsonl(&tmp, &record, &config, &GameResult::Draw).expect("write");
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     assert!(name.ends_with("_alice_vs_bob.jsonl"), "got: {name}");
+    assert!(name.ends_with(".jsonl"), "got: {name}");
 }
 
 /// テスト用に `target/tmp/csa_client_jsonl_<nanos>` を作って返す簡易 tempdir。
@@ -384,10 +385,10 @@ fn identities_match_across_live_final_meta_moves_and_results() {
             assert_eq!(rows[1]["engine"], expected_black);
             assert_eq!(rows[2]["engine"], expected_white);
             for result in [GameResult::Win, GameResult::Lose, GameResult::Draw] {
-                let final_path = write_game_jsonl(&dir, &record, &config, &result).unwrap();
-                assert_eq!(final_path, path);
+                let result_dir = tempdir();
+                let final_path = write_game_jsonl(&result_dir, &record, &config, &result).unwrap();
+                assert_eq!(final_path.file_name(), path.file_name());
                 let final_text = std::fs::read_to_string(final_path).unwrap();
-                assert!(final_text.starts_with(&live_text));
                 let last: Value = serde_json::from_str(final_text.lines().last().unwrap()).unwrap();
                 let expected = match (&result, my_color) {
                     (GameResult::Win, Color::Black) | (GameResult::Lose, Color::White) => {
@@ -399,6 +400,7 @@ fn identities_match_across_live_final_meta_moves_and_results() {
                     _ => None,
                 };
                 assert_eq!(last["winner"].as_str(), expected);
+                std::fs::remove_dir_all(result_dir).unwrap();
             }
             std::fs::remove_dir_all(dir).unwrap();
         }

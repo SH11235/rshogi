@@ -1,7 +1,9 @@
 pub mod adjudication;
 pub mod backend;
+pub mod cpu_affinity;
 pub mod engine;
 pub mod game;
+pub mod nps_bench;
 pub mod position;
 pub mod time_control;
 pub mod types;

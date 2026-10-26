@@ -1,7 +1,7 @@
 //! `KifuStorage` のローカルファイル実装。
 //!
 //! - `<topdir>/YYYY/MM/DD/<game_id>.csa` に CSA V2 棋譜を書き込む。
-//!   日付は `game_id` 末尾の 8 桁が `YYYYMMDD` 形式である前提だが、形式が
+//!   日付は `game_id` 先頭の 8 桁が `YYYYMMDD` 形式である前提だが、形式が
 //!   合わなければ `start_time` から推定する代わりにフォールバックの `unknown/`
 //!   ディレクトリへ落とす（現状は緩く扱う方針）。
 //! - 00LIST は `<topdir>/00LIST` にスペース区切り 1 行として追記する。
@@ -26,6 +26,7 @@ use crate::types::{GameId, StorageKey};
 /// `append_summary` は同一インスタンス内で `Mutex` で直列化される。
 /// 同一 `topdir` を別インスタンスから複数プロセスで叩くケースは想定外
 /// （TCP サーバーは 1 プロセス・1 ストレージインスタンス）。
+/// 空の対局 ID やパス区切り・コロン・制御文字を含む ID は形式エラーとして拒否する。
 #[derive(Debug, Clone)]
 pub struct FileKifuStorage {
     topdir: PathBuf,
@@ -48,18 +49,22 @@ impl FileKifuStorage {
     ///
     /// 先頭 8 文字を `chrono::NaiveDate` で厳密に YYYYMMDD として検証し、
     /// 不正日付（例 `20261340...`）や数字以外を含むものは `unknown/` に落とす。
-    fn relative_kifu_path(&self, game_id: &GameId) -> PathBuf {
+    fn relative_kifu_path(&self, game_id: &GameId) -> Result<PathBuf, StorageError> {
         let id = game_id.as_str();
-        if id.len() >= 8 {
-            let head = &id[0..8];
-            if chrono::NaiveDate::parse_from_str(head, "%Y%m%d").is_ok() {
-                let yyyy = &head[0..4];
-                let mm = &head[4..6];
-                let dd = &head[6..8];
-                return PathBuf::from(yyyy).join(mm).join(dd).join(format!("{id}.csa"));
-            }
+        // FORK の対局 ID はクライアント入力なので、OS にかかわらず単一のファイル名に限定する。
+        if id.is_empty() || id.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control()) {
+            return Err(StorageError::Malformed("invalid kifu game_id".to_owned()));
         }
-        PathBuf::from("unknown").join(format!("{id}.csa"))
+        if let Some(head) = id.get(..8)
+            && head.bytes().all(|b| b.is_ascii_digit())
+            && chrono::NaiveDate::parse_from_str(head, "%Y%m%d").is_ok()
+        {
+            let yyyy = &head[0..4];
+            let mm = &head[4..6];
+            let dd = &head[6..8];
+            return Ok(PathBuf::from(yyyy).join(mm).join(dd).join(format!("{id}.csa")));
+        }
+        Ok(PathBuf::from("unknown").join(format!("{id}.csa")))
     }
 
     fn zerozero_list_path(&self) -> PathBuf {
@@ -69,7 +74,7 @@ impl FileKifuStorage {
 
 impl KifuStorage for FileKifuStorage {
     async fn save(&self, game_id: &GameId, csa_v2_text: &str) -> Result<StorageKey, StorageError> {
-        let rel = self.relative_kifu_path(game_id);
+        let rel = self.relative_kifu_path(game_id)?;
         let abs = self.topdir.join(&rel);
         let parent =
             abs.parent().ok_or_else(|| StorageError::Io(format!("no parent for {abs:?}")))?;
@@ -82,7 +87,7 @@ impl KifuStorage for FileKifuStorage {
     }
 
     async fn load(&self, game_id: &GameId) -> Result<Option<String>, StorageError> {
-        let rel = self.relative_kifu_path(game_id);
+        let rel = self.relative_kifu_path(game_id)?;
         let abs = self.topdir.join(&rel);
         match fs::read_to_string(&abs).await {
             Ok(body) => Ok(Some(body)),
@@ -236,6 +241,47 @@ mod tests {
         let key = store.save(&game_id, "V2.2\n").await.unwrap();
         assert_eq!(PathBuf::from(key.as_str()), PathBuf::from("unknown").join("20261340abcd.csa"));
         let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn save_and_load_preserve_unicode_game_ids() {
+        let dir = unique_topdir("unicode_id");
+        let store = FileKifuStorage::new(&dir);
+        for id in ["日本語の対局", "20260417-日本語"] {
+            let game_id = GameId::new(id);
+            let key = store.save(&game_id, "V2.2\n").await.unwrap();
+            assert_eq!(Path::new(key.as_str()).file_name().unwrap(), format!("{id}.csa").as_str());
+            assert_eq!(store.load(&game_id).await.unwrap().as_deref(), Some("V2.2\n"));
+        }
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn save_and_load_reject_path_components_before_io() {
+        let dir = unique_topdir("invalid_id");
+        let store = FileKifuStorage::new(&dir);
+        for id in [
+            "",
+            "../outside",
+            "20260417/../../../../outside",
+            "..\\outside",
+            "/outside",
+            "C:outside",
+            "game:stream",
+            "game\0id",
+            "game\nid",
+        ] {
+            let game_id = GameId::new(id);
+            assert!(
+                matches!(store.load(&game_id).await, Err(StorageError::Malformed(_))),
+                "{id:?}"
+            );
+            assert!(
+                matches!(store.save(&game_id, "V2.2\n").await, Err(StorageError::Malformed(_))),
+                "{id:?}"
+            );
+        }
+        assert!(!dir.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

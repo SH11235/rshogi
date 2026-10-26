@@ -4,6 +4,7 @@
 //! CSA プロトコルを乗せる。送信側は `serialize_client_command` 経由で
 //! `ClientCommand` バリアントから 1 行を組み立てる。
 
+use std::borrow::Cow;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -148,8 +149,6 @@ pub struct CsaConnection {
     /// 下層 transport（TCP / WebSocket）。
     transport: CsaTransport,
     last_activity_time: Instant,
-    /// パスワードマスク用
-    password: String,
     /// 直前に受信した終局理由行（#TIME_UP 等）
     pub pending_end_reason: Option<String>,
 }
@@ -174,14 +173,12 @@ impl CsaConnection {
         Ok(Self {
             transport,
             last_activity_time: Instant::now(),
-            password: String::new(),
             pending_end_reason: None,
         })
     }
 
     /// ログイン
     pub fn login(&mut self, id: &str, password: &str) -> Result<()> {
-        self.password = password.to_string();
         let cmd = serialize_client_command(&ClientCommand::Login {
             name: PlayerName::new(id),
             password: Secret::new(password),
@@ -214,7 +211,6 @@ impl CsaConnection {
         token: &str,
     ) -> Result<()> {
         use rshogi_csa_server::protocol::command::ReconnectRequest;
-        self.password = password.to_string();
         let cmd = serialize_client_command(&ClientCommand::Login {
             name: PlayerName::new(id),
             password: Secret::new(password),
@@ -622,6 +618,36 @@ impl CsaConnection {
         self.recv_line_blocking(timeout)
     }
 
+    /// `LOBBY_PONG` と停止確認を続けながら、ロビーの次の応答行を待つ。
+    /// `keepalive_interval_sec` が 0 なら自発送信は無効。`LOBBY_PING` には常に応答する。
+    /// 待機時間に上限は設けず、停止時は `Ok(None)`。受信スレッド開始後は使用できない。
+    pub fn recv_lobby_line_while(
+        &mut self,
+        keepalive_interval_sec: u64,
+        mut should_continue: impl FnMut() -> bool,
+    ) -> Result<Option<String>> {
+        let mut last_pong_time = Instant::now();
+        loop {
+            if !should_continue() {
+                return Ok(None);
+            }
+            if keepalive_interval_sec > 0
+                && last_pong_time.elapsed() >= Duration::from_secs(keepalive_interval_sec)
+            {
+                self.send_raw_line("LOBBY_PONG")?;
+                last_pong_time = Instant::now();
+            }
+            if let Some(line) = self.recv_line_nonblocking()? {
+                if line == "LOBBY_PING" {
+                    self.send_raw_line("LOBBY_PONG")?;
+                    last_pong_time = Instant::now();
+                    continue;
+                }
+                return Ok(Some(line));
+            }
+        }
+    }
+
     /// keep-alive 空行を送信（必要な場合）
     pub fn maybe_send_keepalive(&mut self, interval_sec: u64) -> Result<()> {
         if interval_sec == 0 {
@@ -635,12 +661,7 @@ impl CsaConnection {
     }
 
     fn send_line(&mut self, line: &str) -> Result<()> {
-        if !self.password.is_empty() && line.contains(&self.password) {
-            let masked = line.replace(&self.password, "*****");
-            log::debug!("[CSA] > {masked}");
-        } else {
-            log::debug!("[CSA] > {line}");
-        }
+        log::debug!("[CSA] > {}", redact_login(line));
         self.transport.write_line(line)?;
         self.last_activity_time = Instant::now();
         Ok(())
@@ -664,6 +685,17 @@ impl CsaConnection {
             self.last_activity_time = Instant::now();
         }
         Ok(opt)
+    }
+}
+
+fn redact_login(line: &str) -> Cow<'_, str> {
+    let mut parts = line.split_whitespace();
+    match parts.next() {
+        Some(command @ ("LOGIN" | "LOGIN_LOBBY")) => {
+            let id = parts.next().unwrap_or_default();
+            Cow::Owned(format!("{command} {id} *****"))
+        }
+        _ => Cow::Borrowed(line),
     }
 }
 
@@ -784,6 +816,92 @@ pub fn compute_effective_retry_delay(err_msg: &str, retry_delay: Duration) -> Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_logging_hides_password_and_reconnect_token() {
+        for line in [
+            "LOGIN alice secret",
+            "LOGIN alice secret reconnect:game+token",
+            "LOGIN\talice\tsecret x1",
+            "LOGIN_LOBBY alice+casual+black secret",
+        ] {
+            let redacted = redact_login(line);
+            assert!(!redacted.contains("secret"));
+            assert!(!redacted.contains("token"));
+            assert!(redacted.ends_with(" *****"));
+        }
+        assert_eq!(redact_login("+7776FU"), "+7776FU");
+        assert_eq!(redact_login("LOGOUT_LOBBY"), "LOGOUT_LOBBY");
+    }
+
+    #[test]
+    fn lobby_wait_observes_stop_while_server_is_silent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut conn =
+            CsaConnection::connect("127.0.0.1", listener.local_addr().unwrap().port(), false)
+                .unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let mut checks = 0;
+        let started = Instant::now();
+        let line = conn
+            .recv_lobby_line_while(0, || {
+                checks += 1;
+                checks < 2
+            })
+            .unwrap();
+        assert!(line.is_none());
+        assert_eq!(checks, 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn lobby_wait_keeps_queue_alive_until_match() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut conn =
+            CsaConnection::connect("127.0.0.1", listener.local_addr().unwrap().port(), false)
+                .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let mut keepalive = String::new();
+            reader.read_line(&mut keepalive).unwrap();
+            assert_eq!(keepalive, "LOBBY_PONG\n");
+            reader.get_mut().write_all(b"MATCHED room black\n").unwrap();
+        });
+        assert_eq!(
+            conn.recv_lobby_line_while(1, || true).unwrap().as_deref(),
+            Some("MATCHED room black")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn lobby_wait_answers_ping_when_periodic_keepalive_is_disabled() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut conn =
+            CsaConnection::connect("127.0.0.1", listener.local_addr().unwrap().port(), false)
+                .unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        server.write_all(b"LOBBY_PING\n").unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let mut pong = String::new();
+            reader.read_line(&mut pong).unwrap();
+            assert_eq!(pong, "LOBBY_PONG\n");
+            reader.get_mut().write_all(b"MATCHED room black\n").unwrap();
+        });
+        assert_eq!(
+            conn.recv_lobby_line_while(0, || true).unwrap().as_deref(),
+            Some("MATCHED room black")
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn time_unit_requires_positive_supported_unit_and_preserves_multiplier() {

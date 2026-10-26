@@ -1,176 +1,56 @@
-# `rshogi-csa-client` 実行例
+# `csa_client` の実行例
 
-USI エンジンを CSA プロトコル対局サーバーに接続するブリッジ。TCP 経路と
-WebSocket 経路の両方をサポートする。
+USI エンジンを TCP / WebSocket の CSA 対局サーバーへ接続する。
+詳細は[接続と設定](../../../docs/csa-client.md)、[棋譜と JSONL](../../../docs/csa-client-records.md)、
+[コメント付き TOML](csa_client.toml.example)を参照。
 
-詳細な設定リファレンスは [`docs/csa-client.md`](../../../docs/csa-client.md)、
-generic な TOML 設定例は [`csa_client.toml.example`](csa_client.toml.example)、
-Workers (`rshogi-csa-server-workers`) deploy 環境への実機 E2E 手順は
-`.claude/skills/csa-e2e-staging/SKILL.md` を参照。
-
-## クイックスタート (`--target` プリセット)
-
-本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の staging / production
-Worker には TOML を書かずに 1 コマンドで接続できる。エンジンには NNUE モデル付きの
-本番想定構成を使う (例: `v82-400-layerstack.bin` 等の LayerStack NNUE モデルを `EvalFile` に渡す)。
-
-`--game-name` には worker `CLOCK_PRESETS` 登録の preset 名 (本リポ既定では
-`byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10`) を入れて clock を
-選ぶ。staging / production の両 Worker は `CLOCK_PRESETS` strict mode のため
-`--target` 利用時は `--game-name` を**必須**としており、省略すると client 側で
-`anyhow!` Err となって LOGIN 前に止まる (未登録名は server でも
-`LOGIN_LOBBY:incorrect unknown_game_name` 等で拒否される)。
+## Workers で自動マッチングする
 
 ```bash
-# 黒番 (staging)
 cargo run -p rshogi-csa-client --release -- \
-  --target staging \
-  --room-id e2e-quickstart-1 \
-  --handle alice \
-  --color black \
-  --game-name floodgate-600-10 \
-  --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
-
-# 別ターミナルで白番 (room_id / game-name を黒と一致させる)
-cargo run -p rshogi-csa-client --release -- \
-  --target staging \
-  --room-id e2e-quickstart-1 \
-  --handle bob \
-  --color white \
-  --game-name floodgate-600-10 \
-  --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
-```
-
-production に繋ぎたい場合は `--target production` に差し替えるだけでよい
-（production は `WS_ALLOWED_ORIGINS = ""` 運用前提でネイティブ経路 / Origin 欠落で
-接続する）。本リポ以外の Cloudflare アカウントに deploy した Worker に繋ぎたい場合は
-`--target` を使わず TOML / `--host` で URL を直接指定する。
-
-エンジンビルドの feature 選定は [ビルドガイド](../../../docs/build.md) と
-[対応 NNUE アーキテクチャ](../../../docs/nnue-supported-architectures.md) を参照。
-使用するモデルのアーキテクチャと必要な USI options は、モデルの配布元の仕様を確認する。
-
-## マッチングモード (`--lobby`)
-
-`--lobby` を付けると LobbyDO (`/ws/lobby`) に接続して `<game_name>` 単位の待機
-キューに入り、相補的な手番のペアが揃ったら自動で room_id を発番してその対局へ
-接続するループに入る。`--max-games` まで対局を繰り返し、shutdown (Ctrl+C) で離脱
-する。
-
-```bash
-# 黒番 (staging) で 5 局連続マッチング対局
-cargo run -p rshogi-csa-client --release -- \
-  --target staging \
-  --lobby \
-  --game-name floodgate-600-10 \
-  --handle alice \
-  --color black \
-  --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
-  --max-games 5
-
-# 別ターミナルで白番 (game_name を一致させる)
-cargo run -p rshogi-csa-client --release -- \
-  --target staging \
-  --lobby \
-  --game-name floodgate-600-10 \
-  --handle bob \
-  --color white \
-  --engine /path/to/your/rshogi-usi \
+  --target staging --lobby \
+  --handle alice --color black --game-name floodgate-600-10 \
+  --engine /path/to/your/usi-engine \
   --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
   --max-games 5
 ```
 
-`<game_name>` は `[A-Za-z0-9_-]` / 1〜32 文字の制約あり。同 `game_name` 同士で
-しかペアリングしない。`--lobby` は `--target` 経由でのみ動作する (LobbyDO の URL を
-`wss://<subdomain>/ws/lobby` で組み立てる前提)。本リポ以外の Cloudflare アカウントの
-Worker で動かしたい場合は TOML 直書きの host を `wss://<your-subdomain>/ws/lobby` に
-向ける必要があり、現状の `--lobby` モードは未対応 (`--target staging|production` 必須)。
+別ターミナルで `--handle bob --color white` に変え、同じコマンドを実行する。
+同じ `game_name` と逆の手番の相手が揃うと `MATCHED` が通知され、割り当てられた対局へ接続する。
+各局終了後はロビーへ戻り、`--max-games` まで繰り返す。Ctrl-C で待機・対局を中止する。
+`--room-id` は不要。
 
-## JSONL 出力 — `tools::analyze_selfplay` で集計
+`--game-name` は必須で、ASCII 英数字・`-`・`_` の 1〜32 文字。
+同梱環境では `CLOCK_PRESETS` に登録された `floodgate-600-10`（10 分 + 10 秒読み）、
+`byoyomi-120-5`（2 分 + 5 秒読み）、`byoyomi-msec-10-100`（10 秒 + 100ms 秒読み）から選ぶ。
+未登録名は拒否される。モデルの配布元で必要な USI オプションを確認すること。
+エンジンのビルドは[ビルドガイド](../../../docs/build.md)と
+[対応 NNUE アーキテクチャ](../../../docs/nnue-supported-architectures.md)を参照。
 
-対局完了ごとに analyze_selfplay 互換の JSONL を
-`<DIR>/<datetime>_<sente>_vs_<gote>.jsonl` として書き出す。サーバーへ送信するわけでは
-なく、完全にローカル CLI 解析専用。既定 ON で `record.dir/jsonl/`
-(デフォルト `./records/jsonl/`) に保存され、`--jsonl-out <DIR>` または TOML の
-`record.jsonl_out` で出力先を上書きできる。止めたい場合は TOML で
-`record.save_jsonl = false`（または記録ごと止める `record.enabled = false`）。
+`--target production` に変えると公開の本番環境に接続する。
+通常のネイティブ接続では Origin を送る必要はない。`--target staging` は同梱環境の
+許可済み Origin を設定する。自前の Worker へは TOML または `--host` で URL を指定する。
+自前ロビーの場合も `--lobby --handle ... --color ... --game-name ...` を付け、
+`host` を `wss://<ホスト>/ws/lobby` にする。
+プリセットを使わない場合は、TOML の `server.id` または `--id` にも通常の LOGIN ID を設定する。
 
-JSONL には CSA 棋譜 (`T<sec>` = 秒単位) から復元できない ms 単位の消費時間や
-`nodes` / `nps` / `seldepth` が含まれるため、既定 ON で取り損ねを防いでいる。
+## 相手を指定した直接ルームで対局する
 
-スキーマは selfplay (`tools/src/bin/tournament.rs`) の出力と同じ `meta` / `move` /
-`result` の 3 種類で、`move.eval` は `score_cp` / `score_mate` / `depth` / `seldepth` /
-`nodes` / `time_ms` / `nps` / `pv` を含む。`engine` フィールドは CSA 上の player 名
-(`sente_name` / `gote_name`) と一致するため、selfplay の per-engine 集計と同じツールを
-そのまま流用できる。
+上記コマンドの `--lobby` を `--room-id myroom-001` に置き換え、`--max-games 1` にする。
+相手も同じ room ID・game name と逆の手番で接続する。
+終了済みのルームは再利用せず、次の対局では新しい ID を指定する。
+連続対局では `host` とログイン ID 内の `{game_seq}` が 0 始まりの対局番号へ置換されるため、
+TOML の URL を `wss://<ホスト>/ws/myroom-{game_seq}` とし、両者で番号を揃える方法もある。
+
+実機でのログと棋譜確認は[ロビー E2E 手順](../../../docs/csa-server/lobby_e2e_runbook.md)を参照。
+
+## JSONL を集計する
+
+JSONL は既定で `./records/jsonl/` に 1 局 1 ファイルを保存する。
+`--jsonl-out DIR` で保存先を変えるか、TOML の `record.save_jsonl = false` で停止する。
 
 ```bash
-# 1. CSA 経由対局を実行（--target staging の例。JSONL は既定 ON）
-cargo run -p rshogi-csa-client --release -- \
-  --target staging \
-  --room-id e2e-jsonl-1 \
-  --handle alice \
-  --color black \
-  --game-name byoyomi-msec-10-100 \
-  --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
-  --max-games 5
-
-# 2. selfplay と同じツールで集計（既定の出力先は ./records/jsonl/）
 cargo run -p tools --release --bin analyze_selfplay -- records/jsonl/*.jsonl
-
-# JSON で受け取りたい場合
-cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.jsonl
 ```
 
-出力先・ON/OFF は TOML 設定の `[record]` セクションでも指定可能:
-
-```toml
-[record]
-enabled = true
-dir = "./records"
-save_jsonl = true                  # false で JSONL のみ停止
-jsonl_out = "./runs/csa-jsonl"     # 省略時は dir/jsonl/
-```
-
-注意点:
-
-- 1 対局 = 1 JSONL ファイル。複数局を回した場合は glob 展開でまとめて
-  analyze_selfplay に渡す。
-- 相手エンジンのバイナリパス・USI options は CSA プロトコル上で得られないため
-  `path_white` / `path_black` の片側は `remote:<player_name>` 形式の placeholder が入る。
-  per-engine 集計に必要な `label_*` は `sente_name` / `gote_name` を使うので
-  `winner` 判定はそのまま動く。
-- 相手手番の `move` 行は `eval` を持たない（USI info を観測できないため）。
-  集計対象は自エンジンの `engine_timing` のみ意味を持つ。
-
-## Workers (`rshogi-csa-server-workers`) deploy 環境への実機 E2E
-
-平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy / 異常終局 / 時計違いの
-シナリオ手順と toml の最小構成例は
-[`.claude/skills/csa-e2e-staging/SKILL.md`](../../../.claude/skills/csa-e2e-staging/SKILL.md)
-にまとまっている。
-
-最小起動例 (CLI プリセット経路):
-
-```bash
-ROOM=e2e-$(date +%Y%m%d%H%M%S)
-PRESET=floodgate-600-10  # CLOCK_PRESETS 登録済 preset 名
-target/release/csa_client \
-  --target staging --room-id "$ROOM" \
-  --handle alice --color black --game-name "$PRESET" \
-  --engine /path/to/your/usi-engine \
-  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
-target/release/csa_client \
-  --target staging --room-id "$ROOM" \
-  --handle bob --color white --game-name "$PRESET" \
-  --engine /path/to/your/usi-engine \
-  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
-wait
-```
-
-TOML で詳細制御したい場合は [`csa_client.toml.example`](csa_client.toml.example)
-をコピーして編集する。
+スキーマ、JSON 出力、相手側データの制約は[JSONL の集計](../../../docs/csa-client-records.md#jsonl-の集計)を参照。

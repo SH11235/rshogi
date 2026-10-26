@@ -22,7 +22,7 @@ const PV_SIZE: usize = MAX_PLY as usize + 1;
 
 /// PV 三角配列（Reckless 由来）
 ///
-/// 各 ply の PV を固定長配列で保持し、Vec<Move> のヒープ割り当てを回避する。
+/// 各 ply の PV を固定長配列で保持し、`Vec<Move>` のヒープ割り当てを回避する。
 /// `table[ply][0..len[ply]]` が ply の PV ライン。
 /// `update(ply, mv)` で `table[ply] = [mv] + table[ply+1]` にコピー。
 pub struct PvTable {
@@ -368,7 +368,7 @@ pub struct RootMove {
     /// この手の探索にかかったeffort（ノード数の割合）
     pub effort: f64,
     /// PV（Principal Variation）
-    /// pv[0]が指し手自体
+    /// `pv[0]`が指し手自体
     pub pv: Vec<Move>,
 }
 
@@ -743,7 +743,7 @@ pub fn value_from_tt(v: Value, ply: i32) -> Value {
 /// 千日手/優劣局面を評価値に変換
 ///
 /// draw_value_table は SearchContext.draw_value_table を渡す。
-/// REPETITION_DRAW の場合、drawValueTable[stm] を返す。
+/// REPETITION_DRAW の場合、`drawValueTable[stm]` を返す。
 #[inline]
 pub fn draw_value(
     state: RepetitionState,

@@ -3,38 +3,30 @@
 USIエンジンをCSAプロトコル対局サーバー（floodgate等）にCLIから接続するツール。
 将棋所などのGUIを介さず、バックグラウンドで連続対局を実行できる。
 
-## CSA 1.2.1 と大会前の確認
-
-- `REJECT:<game_id>` は対局不成立として扱い、投了やログアウトを送らず同じ接続で次の `Game_Summary` を待つ。不成立の対局は対局数に含めない。
-- `AGREE` 後の `START` 待ちは時間制限を設けず、設定した keep-alive と停止要求の確認を続ける。対局 ID が通知と一致しなければプロトコルエラーで終了する。停止済みなら AGREE を送らず終了し、Game_ID 省略時は START の確定 ID を棋譜と再接続用 summary に保存する。
-- Ctrl-C は待機・対局を中止する要求であり、対局完了まで待つ要求ではない。AGREE 後の停止はサーバー側の対局成立を取り消さない。
-- 進捗 API の `GameSummary` は対局候補ごとに発火する。REJECT 後は次候補で置き換え、`GameStarted` で成立を確定する。サーバーが START で ID を確定した場合は、`GameStarted` の直前に確定 ID を含む `GameSummary` を再通知する。
-- 共通および先後別の `Time_Unit`（`sec` / `min` / `msec`、正の整数倍）を、開始手順・自手のエコー・相手手の時計更新に適用する。USI へはミリ秒で渡す。
-- CSA 棋譜と進捗通知の既存 `time_sec` は秒へ換算し、秒未満を切り捨てる。時計の計算と開始手順・相手手の JSONL `elapsed_ms` はミリ秒精度を保持する。
-- 入玉はサーバーの `Declaration:Jishogi 1.1` から `CSARule27` を設定する。ただし明示したエンジンオプションが優先されるため、大会用設定で別のルールを指定しないこと。
-
-電竜戦向けの回帰テストは、冒頭4手の時間調整後に先手180秒・後手600秒となる設定と毎手2秒加算、両色の最初の探索、`%KACHI` の送信、512手目のエコー後の `#MAX_MOVES` → `#DRAW` の終局通知、残時間1秒と2秒加算、エンジンを再利用した次の対局を模擬サーバーで確認する。実大会サーバーへの接続試験は別途行うこと。これは CSA 1.2.1 の全オプションへの完全対応を保証するものではない。
-
-仕様: [CSA サーバ プロトコル ver.1.2.1](https://www.computer-shogi.org/protocol/tcp_ip_server_121.html)
-
 ## クイックスタート
 
 ```bash
 # 1. 設定ファイルを用意（example をコピーして編集）
-cp crates/rshogi-csa-client/examples/csa_client.toml.example my_config.toml
+cp crates/rshogi-csa-client/examples/csa_client.toml.example ~/csa-client.toml
 # → server.host, server.id, server.password, engine.path を書き換える
 
 # 2. 実行
-cargo run -p rshogi-csa-client --release -- my_config.toml
+cargo run -p rshogi-csa-client --release -- ~/csa-client.toml --max-games 1
 ```
+
+設定ファイルには認証情報が入るため、リポジトリ外へ保存する。
+`[CSA] 対局待機中...` → `対局情報受信` → `対局開始` → `対局 #1 結果` の順で進む。
+既定では `./records/` に CSA / SFEN、`./records/jsonl/` に JSONL を保存する。
+Ctrl-C で待機・対局を中止する。通常運用で連続対局する場合は `--max-games 0` にする。
 
 ## 設定
 
-TOML設定ファイルで管理する。`crates/rshogi-csa-client/examples/csa_client.toml.example` に全設定項目のコメント付き例がある（TCP / WebSocket 両経路対応）。
+TOML 設定ファイルで管理する。[コメント付き設定例](../crates/rshogi-csa-client/examples/csa_client.toml.example)は TCP / WebSocket の両経路に対応する。
 
 ### 設定の優先順位
 
-CLIオプション > 環境変数 > TOML設定ファイル > デフォルト値
+CLI オプション > 環境変数 > `--target` プリセット > TOML 設定ファイル > デフォルト値。
+`--target` は接続先・ログイン ID・Origin・floodgate モードを設定する。
 
 ### CLIオプション
 
@@ -49,24 +41,39 @@ cargo run -p rshogi-csa-client --release -- config.toml \
   --options "Threads=8,EvalFile=/path/to/nn.bin"
 ```
 
-主なオプション:
+すべての CLI オプションを以下に示す。`—` は CLI で値を上書きせず、上記の優先順位に従う意味。
+設定ファイルのパスは省略できるが、ログイン ID とエンジンパスは必要になる。
 
-| オプション | 説明 |
-|-----------|------|
-| `--host` | CSAサーバーホスト名 |
-| `--port` | ポート番号 |
-| `--id` | ログインID |
-| `--password` | パスワード |
-| `--engine` | USIエンジンのパス |
-| `--hash` | USI_Hash (MB) |
-| `--ponder` | ponder 有効/無効 |
-| `--floodgate` | floodgateモード（評価値コメント送信） |
-| `--keep-alive` | keep-alive間隔（秒） |
-| `--margin-msec` | 秒読みマージン（ms） |
-| `--max-games` | 最大対局数（0=無制限） |
-| `--log-level` | ログレベル (error/warn/info/debug/trace) |
-| `--record-dir` | 棋譜保存ディレクトリ |
-| `--options` | USIオプション (K=V,K=V,...) |
+| オプション | 省略時の値 | 説明 |
+|---|---|---|
+| `--target staging\|production` | — | 同梱 Workers 環境の接続プリセット |
+| `--room-id ID` | — | 直接ルーム接続時の ID。`--target` 使用時は必須（ロビーでは不要） |
+| `--handle NAME` | — | `--target` / `--lobby` のハンドル |
+| `--color black\|white` | — | `--target` / `--lobby` の手番 |
+| `--lobby` | `false` | `/ws/lobby` で自動マッチングを待つ |
+| `--game-name NAME` | — | 時計プリセット名。`--target` / `--lobby` 使用時は必須 |
+| `--host HOST` | `wdoor.c.u-tokyo.ac.jp` | TCP ホスト名、または WebSocket URL |
+| `--port PORT` | `4081` | TCP ポート。WebSocket では URL のポートを使う |
+| `--id ID` | — | CSA ログイン ID |
+| `--password PASSWORD` | — | パスワード。`--target` では空なら `anything` を補う |
+| `--engine PATH` | — | USI エンジンのパス |
+| `--hash MB` | — | エンジンの `USI_Hash` を上書き |
+| `--ponder [true\|false]` | `true` | 先読み。値を省略したフラグ指定も `true` |
+| `--floodgate [true\|false]` | `true` | 評価値・PV コメントを送信。値省略時も `true` |
+| `--ws-origin ORIGIN` | — | WebSocket の Origin。通常のネイティブ接続では省略 |
+| `--keep-alive SEC` | `30` | CSA 空行 / ロビーの `LOBBY_PONG` 間隔。0 で周期送信なし、正値は 30 以上 |
+| `--margin-msec MS` | `1500` | 自分の思考予算から差し引く通信マージン |
+| `--max-games N` | `0` | 最大対局数。0 は無制限 |
+| `--log-level LEVEL` | `info` | `error` / `warn` / `info` / `debug` / `trace` |
+| `--record-dir DIR` | `./records` | CSA / SFEN 保存先と既定の JSONL 保存先の親 |
+| `--jsonl-out DIR` | — | JSONL 保存先だけを上書き（既定は `record.dir/jsonl/`） |
+| `--options K=V,K=V,...` | — | USI オプション。同名キーは `--hash` よりこちらを優先 |
+| `--engine-stderr-passthrough` | `false` | エンジン stderr を info ログにも出す |
+| `--no-engine-stderr-passthrough` | — | 上記設定を無効化。両フラグ指定時は最後の指定を採用 |
+| `-h`, `--help` | — | ヘルプを表示 |
+
+表の既定値は TOML・環境変数・プリセットがない場合の値。
+`--engine-stderr-passthrough=false` は受け付けない。
 
 ### 環境変数
 
@@ -86,7 +93,7 @@ password = "floodgate-300-10F,your_trip"  # floodgate は <game_name>,<trip> 形
 floodgate = true  # 評価値・PVコメントを送信
 ```
 
-`host` の scheme で transport が決まる: `host:port` / `tcp://...` は TCP、
+`host` の scheme で transport が決まる: ホスト名 / `tcp://ホスト名` と別設定の `port` は TCP、
 `ws://...` / `wss://...` は WebSocket（Cloudflare Workers 版、`port` は無視）。
 Workers 版への接続は
 [Cloudflare Workers (WebSocket) で対局する](#cloudflare-workers-websocket-で対局する)
@@ -113,9 +120,9 @@ Threads = 4
 margin_msec = 1500  # 通信遅延を考慮した安全マージン
 ```
 
-秒読みからこの値を差し引いてエンジンに渡す（`btime`/`wtime` は満額）。bestmove が
-サーバ側 deadline 前に届くようにするための csa_client 層のバッファで、ネットワーク
-越しの対局では大きめに設定する。
+秒読み時計では `byoyomi` から、加算・切れ負け時計では手番側の `btime` / `wtime` から
+差し引いてエンジンに渡す。相手の残時間は減らさない。bestmove がサーバーの期限前に
+届くようにする通信マージンで、ネットワーク越しの対局では遅延に合わせて設定する。
 
 > **エンジン側の遅延予約との二重計上に注意。** rshogi-usi など USI エンジンが
 > `NetworkDelay` / `NetworkDelay2` を持つ場合、エンジンも内部で同種の予約を行うため
@@ -133,61 +140,12 @@ ponder = true       # 相手手番中の先読み
 restart_engine_every_game = false  # メモリリーク対策
 ```
 
-### `[record]` — 棋譜保存
+接続失敗時は `[retry] initial_delay_sec = 10` から指数的に待ち時間を増やし、
+`max_delay_sec = 900` で頭打ちにする。サーバーの `retry_after` が長ければそちらを待つ。
+`[log]` の既定値は `level = "info"`、`dir = "./logs"`、`stdout = true`。
+ログレベルは TOML または `--log-level` で設定する。
 
-```toml
-[record]
-enabled = true
-dir = "./records"
-filename_template = "{datetime}_{sente}_vs_{gote}"
-save_csa = true   # CSA形式
-save_sfen = true  # SFEN局面列（学習データ生成用）
-save_jsonl = true # analyze_selfplay / kifu_player 互換 JSONL（dir/jsonl/ に 1 局 1 ファイル）
-live_jsonl = false # 対局中に JSONL を手単位で live 追記（下記）
-```
-
-テンプレート変数: `{datetime}`, `{game_id}`, `{sente}`, `{gote}`
-
-JSONL の `engine_cmd.label_black` / `label_white`、`move.engine`、`result.winner` は、
-CSA のプレイヤー名を同じ規則で使用する。`.` や `@` なども保持し、ファイル名だけを
-安全な文字へ置き換える。空名は `unknown`、両者のラベルが同じ場合はそれぞれ
-` (black)` / ` (white)` を付け、対局内で区別する。同名対局のラベルは先後を含むため、
-複数対局を集計する際は実際の meta ラベルを確認する。
-
-通常の英数字・`-`・`_` の異なる名前はそのまま保持する。meta の `source: "csa_client"` は
-単局ログを対局ペアのログと区別する。
-過去の JSONL は書き換えない。過去ログでは meta が `_` 置換済み、winner が元の名前に
-なっている場合があるため、新旧の特殊文字入りラベルを集計するときは元の CSA 名と
-勝敗の先後を照合する。置換後に衝突したラベルから元の名前を一意に復元することはできない。
-
-`analyze_selfplay` は CSA の1局ファイルを1局単位で集計する。`source` のない過去ログは
-既存の `engine_cmd.note` にある CSA client の識別文で判別する。明示的な `source` が
-あればそちらを優先する。旧ログの置換済み先後ラベルが衝突する場合は集計を拒否する。
-CSA は先後交換の
-独立したペアではないため、`--sprt` は `--allow-partial` の有無によらず拒否する。
-`floodgate_record` は過去ログとの照合で名前を正規化するため、特殊文字の異なる名前が
-同じ集計キーになる場合がある。JSONL 内の元のラベルで区別する場合は注意する。
-
-`live_jsonl = true` にすると、対局中に JSONL ファイル（`save_jsonl` と同じパス）へ
-確定した手を 1 手ずつ追記する。`kifu_player --tournament-dir <dir>/jsonl --live` で
-開いておくと、**自エンジンの進行中対局を評価値付き・手単位でリアルタイム観戦**できる
-（wdoor を経由しないので低遅延）。追記中のファイルには result 行が無く、読者は
-進行中対局（勝敗不明）として扱う。終局時は従来どおりの完全な内容（result 行込み）へ
-置き換わる。追記の失敗は警告のみで対局は続行する。`save_jsonl = false` なら効果なし。
-
-#### 再接続時の棋譜継続
-
-対局中の切断から `Reconnect_Token` で復帰した場合、`csa_client` は切断前にメモリへ
-蓄積した指し手を対局開始局面から replay し、再送された `Game_Summary` の現在局面
-（盤面・持ち駒・手番）および `Reconnect_State` の `Current_Turn` と照合する。
-一致すれば開始時刻と既存の指し手・探索情報を
-引き継ぎ、再接続を挟んでも `.csa` / `.sfen` / `.jsonl` を 1 局 1 ファイルの通し記録
-として保存する。ファイル名の `{datetime}` も最初の対局開始時刻のまま変わらない。
-
-局面または game ID・対局者・自手番が一致しない場合は `[REC] resume 局面不一致` の
-警告を出し、resume 局面以降だけを断片として保存する。この場合は全形式のファイル名に
-`_reconnect_fragment` が付き、CSA には `RECONNECT_FRAGMENT` コメントと不一致理由も
-記録される。
+棋譜・JSONL の保存設定と再接続時の記録は[記録リファレンス](csa-client-records.md)を参照。
 
 ## 使い方の例
 
@@ -217,7 +175,7 @@ ponder = true
 nohup cargo run -p rshogi-csa-client --release -- config.toml > csa.log 2>&1 &
 ```
 
-Ctrl+C (SIGINT) で現在の対局完了後にgracefulに終了する。
+Ctrl-C (SIGINT) で待機・対局を中止して終了する。
 
 > **floodgate の参加プールは `password` で選ぶ。** floodgate は参加したい対局条件
 > （game_name = 持ち時間プリセット）を `password` 欄に **`<game_name>,<trip>`** 形式で
@@ -380,6 +338,14 @@ cargo run -p rshogi-csa-client --release -- \
   --options "Threads=4,EvalFile=/path/to/nn.bin"
 ```
 
+ロビーでは `--handle`・`--color`・`--game-name` が必要で、`--room-id` は不要。
+`game_name` は ASCII 英数字・`-`・`_` の 1〜32 文字で、同梱環境では登録済み時計プリセットを指定する。
+相手待ちに 60 秒の上限は設けない。`--keep-alive` の間隔で `LOBBY_PONG` を送って登録を維持し、
+`LOBBY_PING` にも応答する。0 にすると周期送信は止まるため、サーバーの TTL 超過で登録が失効し得る。
+`LOGIN_LOBBY:expired` や接続失敗後はバックオフして登録し直す。
+私的対局のサーバープロトコルには `free` があるが、この CLI の `--color` は `black` / `white` のみ。
+私的対局の招待・参加は[プロトコル参照](csa-server/protocol-reference.md#921-workers-の私的対局)を参照。
+
 > `csa_client` はネイティブ経路（`Origin` ヘッダなし）で接続するため `ws_origin` は
 > **指定しないこと**。公開インスタンスの `WS_ALLOWED_ORIGINS` はブラウザ製クライアント
 > 向けの allowlist で、`ws_origin` を allowlist 外の値で指定すると `403` で弾かれる。
@@ -406,87 +372,22 @@ floodgate = true
 グローバル既定時計が全 game_name に適用される。観戦・ライブ対局 API は
 [`csa-server/viewer_access_control.md`](csa-server/viewer_access_control.md) を参照。
 
-## 出力
+## CSA 1.2.1 と大会前の確認
 
-### ログ
+- `REJECT:<game_id>` は対局不成立として扱い、投了やログアウトを送らず同じ接続で次の `Game_Summary` を待つ。不成立の対局は対局数に含めない。
+- `AGREE` 後の `START` 待ちは時間制限を設けず、設定した keep-alive と停止要求の確認を続ける。対局 ID が通知と一致しなければプロトコルエラーで終了する。停止済みなら AGREE を送らず終了し、Game_ID 省略時は START の確定 ID を棋譜と再接続用 summary に保存する。
+- Ctrl-C は待機・対局を中止する要求であり、対局完了まで待つ要求ではない。AGREE 後の停止はサーバー側の対局成立を取り消さない。
+- 進捗 API の `GameSummary` は対局候補ごとに発火する。REJECT 後は次候補で置き換え、`GameStarted` で成立を確定する。サーバーが START で ID を確定した場合は、`GameStarted` の直前に確定 ID を含む `GameSummary` を再通知する。
+- 共通および先後別の `Time_Unit`（`sec` / `min` / `msec`、正の整数倍）を、開始手順・自手のエコー・相手手の時計更新に適用する。USI へはミリ秒で渡す。
+- CSA 棋譜と進捗通知の既存 `time_sec` は秒へ換算し、秒未満を切り捨てる。時計の計算と開始手順・相手手の JSONL `elapsed_ms` はミリ秒精度を保持する。
+- 入玉はサーバーの `Declaration:Jishogi 1.1` から `CSARule27` を設定する。ただし明示したエンジンオプションが優先されるため、大会用設定で別のルールを指定しないこと。
 
-```
-[2026-03-28T12:00:00.123Z INFO] CSA対局クライアント起動
-[2026-03-28T12:00:00.456Z INFO] [CSA] ログイン成功: rshogi_v1
-[2026-03-28T12:00:30.789Z INFO] [CSA] 対局開始: START:game123
-[2026-03-28T12:10:15.012Z INFO] 対局 #1 結果: Win | 通算: 1勝 0敗 0分
-```
+仕様: [CSA サーバ プロトコル ver.1.2.1](https://www.computer-shogi.org/protocol/tcp_ip_server_121.html)
 
-`--log-level debug` で CSA/USI 通信の全行が表示される。
+## 棋譜・JSONL・出力
 
-### 棋譜ファイル
+保存設定、ライブ観戦、再接続後の棋譜継続、出力形式は[記録リファレンス](csa-client-records.md)を参照。
 
-`records/` ディレクトリに対局ごとに保存:
+### 終局理由の記録
 
-- `20260328_120030_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
-- `20260328_120030_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
-
-CSA の書式は wdoor (Floodgate) の公開棋譜と同じ並びにしてある。指し手行 → `T<秒>` 行 →
-`'** <先手視点評価値> <読み筋>` 行（コメントは直前の指し手のもの）の順で、末尾に終局の行
-（終局コマンド、`'summary:<理由>:<先手名> <win|lose|draw>:<後手名> <win|lose|draw>`、
-`'$END_TIME:YYYY/MM/DD HH:MM:SS`）を書く。評価値と読み筋が入るのは自エンジンの手だけで、
-相手の手には `'**` 行がない（相手の評価値は対局中に届かない）。両対局者の評価値が入った棋譜を
-公開するには [kifu_publish](../crates/tools/docs/kifu_publish.md) の `wdoor` で wdoor 版を取り込む。
-
-- `$START_TIME` / `'$END_TIME:` は、実行マシンのタイムゾーンによらず JST で書く（CSA の時刻には
-  タイムゾーン表記がなく、棋譜サーバーは JST として読む）。ファイル名の `{datetime}` と JSONL の
-  `timestamp` はローカル時刻のまま。
-- 持ち時間は `$TIME_LIMIT:HH:MM+SS`（持ち時間の時:分 + 秒読みの秒）で書き、フィッシャーの加算は
-  wdoor と同じ `'Increment:<秒>` コメントに書く。持ち時間の 1 分未満の端数は切り捨てる。
-- 読み筋の先頭は実際の指し手そのもの（Floodgate へ送るコメントと同じ）。
-- 勝敗は `'summary:` 行が持つ。勝敗が決まった局には必ず書く。
-
-旧版の `csa_client` は評価値を `'* <評価値> <読み筋>` として指し手の**前**に書き、
-`'summary:` / `'$END_TIME:` は書かなかった。`kifu_player` などの読み取り側は両方の形式に対応している。
-
-#### 終局理由の記録
-
-サーバーが最終結果（`#WIN` / `#LOSE` / `#DRAW` / `#CENSORED` / `#CHUDAN`）の前に送る理由行を、
-JSONL の `result.reason` と CSA の終局の行に記録する。
-
-| サーバーの理由行 | JSONL `reason` | CSA の終局コマンド | `'summary:` の理由 |
-|---|---|---|---|
-| `#RESIGN` | `resign` | `%TORYO` | `toryo` |
-| `#TIME_UP` | `time_up` | `%TIME_UP` | `time up` |
-| `#ILLEGAL_MOVE` | `illegal_move` | なし | `illegal move` |
-| `#JISHOGI` + `#WIN` / `#LOSE`（入玉宣言の成立） | `win_declaration` | `%KACHI` | `kachi` |
-| `#JISHOGI` + `#DRAW` | `jishogi` | `%JISHOGI` | `jishogi` |
-| `#OUTE_SENNICHITE` | `oute_sennichite` | なし | `oute_sennichite` |
-| `#SENNICHITE` | `sennichite` | `%SENNICHITE` | `sennichite` |
-| `#MAX_MOVES` | `max_moves` | `%MAX_MOVES` | `max_moves` |
-| `#ABNORMAL`（相手の切断など） | `abnormal` | `%CHUDAN` | `abnormal` |
-| 知らない理由行 + `#WIN` / `#LOSE` | `abnormal` | `%CHUDAN` | `abnormal` |
-| `#CHUDAN` | `interrupted` | `%CHUDAN` | （書かない） |
-| 理由行なしの `#WIN` / `#LOSE` | `win` / `lose` | `%TORYO` | `toryo` |
-| 理由行なしの `#DRAW` | `sennichite` | `%SENNICHITE` | `sennichite` |
-
-- 反則負けと連続王手の千日手は、wdoor の実物と同じく `%` コマンドを書かずに `'summary:` で終える。
-- 自分の手のエコーが返る前に終局した場合（自分の反則手、時間切れ後に届いた手）、その手は
-  サーバーに受理されていないので、CSA / SFEN / JSONL の指し手には入れない。反則負けのときは
-  CSA に `'ILLEGAL_MOVE(<手>)` コメントとして残す。
-- 自分が `%TORYO` / `%KACHI` を送った後にサーバーの結果が届かず切断された場合、JSONL には送った
-  コマンド（`resign` / `win_declaration`）を記録するが、勝敗が確定していないので CSA は `%CHUDAN`
-  だけで終える（`%TORYO` / `%KACHI` も `'summary:` も書かない）。勝敗が決まっていない局は理由に
-  よらず同じ扱い。
-- 対局中にサーバーとの接続が切れた局は終局理由を記録せず、CSA は指し手までで終わる。
-- `'summary:` の理由は、wdoor の実棋譜（2026 年 6〜7 月の約 2.4 万局）に現れる 9 種（`toryo` /
-  `time up` / `sennichite` / `kachi` / `abnormal` / `illegal move` / `oute_sennichite` /
-  `max_moves` / `oute_kaihimore`）の表記に合わせている。`oute_kaihimore`（王手放置）は
-  プロトコル上 `#ILLEGAL_MOVE` として届き区別できないので `illegal move` と書く。`jishogi` は
-  wdoor にない独自のラベル。
-
-内蔵 CSA サーバーについても、ミリ秒・分時計の着手通知と `Time_Unit` の一致を
-実 `GameRoom` と TCP 接続による統合テストで検証する。対局者の残時間はサーバーの
-課金結果に一致し、保存する CSA V2 棋譜の消費時間は秒単位を維持する。
-
-サマリー本文の受信中も停止要求を確認するため、未完の本文を送るサーバーに対しても Ctrl-C / sink 停止で待機を抜ける。
-
-JSONL の未決結果は `outcome: "interrupted"`（中断）/ `"censored"`（打切り）となり、
-`winner` は付かない。`reason` は受信した理由を保持し、記録が空なら outcome を使う。
-旧形式の `draw` + `reason: "interrupted"` / `"censored"` は未決と判別できるが、
-`draw` / `max_moves` のみが残るログからは引分と打切りを復元できない。
+[終局理由と CSA / JSONL の対応表](csa-client-records.md#終局理由の記録)へ移動した。

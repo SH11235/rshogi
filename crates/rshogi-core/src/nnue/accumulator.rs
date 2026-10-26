@@ -693,7 +693,7 @@ impl<T: Copy + Default> WeightBox<T> {
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct Accumulator {
-    /// 累積値 [perspective][trigger][dimension]
+    /// 累積値 `[perspective][trigger][dimension]`
     /// - perspective: BLACK=0, WHITE=1
     /// - trigger: 0..NUM_REFRESH_TRIGGERS
     pub accumulation: [[Aligned<[i16; TRANSFORMED_FEATURE_DIMENSIONS]>; NUM_REFRESH_TRIGGERS]; 2],

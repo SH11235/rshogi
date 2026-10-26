@@ -264,6 +264,7 @@ fn main() -> Result<()> {
     // 明示的に登録されていないと panic する。aws-lc-rs より導入が軽い `ring` を選択し、
     // 起動時に 1 度だけ install する。`set_default` は同 process で既に install されて
     // いれば `Err` を返すので無視する。
+    #[cfg(feature = "websocket")]
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
@@ -647,12 +648,15 @@ fn acquire_lobby_match(
     // LOGIN_LOBBY:OK → MATCHED <room_id> <color> の順で受信。途中 shutdown が立ったら
     // logout して None を返す。
     loop {
-        if shutdown.load(Ordering::SeqCst) {
-            let _ = conn.send_raw_line("LOGOUT_LOBBY");
-            return Ok(None);
-        }
-        let line = match conn.recv_line_blocking_pub(Duration::from_secs(60)) {
-            Ok(l) => l,
+        let line = match conn
+            .recv_lobby_line_while(config.server.keepalive.ping_interval_sec, || {
+                !shutdown.load(Ordering::SeqCst)
+            }) {
+            Ok(Some(line)) => line,
+            Ok(None) => {
+                let _ = conn.send_raw_line("LOGOUT_LOBBY");
+                return Ok(None);
+            }
             Err(e) => {
                 bail!("[Lobby] 受信エラー: {e}");
             }

@@ -345,7 +345,7 @@ GameRoom DO への接続、というフローを取る。
 |---|---|---|
 | `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | queue 追加 | [`crates/rshogi-csa-server-workers/src/lobby_protocol.rs`](../../crates/rshogi-csa-server-workers/src/lobby_protocol.rs) の `parse_login_lobby` |
 | `LOGOUT_LOBBY` | queue 離脱 | [`crates/rshogi-csa-server-workers/src/lobby.rs`](../../crates/rshogi-csa-server-workers/src/lobby.rs) の `LobbyDO::handle_queued_line` (`LOGOUT_LOBBY` arm) |
-| `LOBBY_PONG` | client → server。受信のみ実装 (queue 滞在中の no-op)。サーバーからの `LOBBY_PING` 送出と PONG 応答処理は未実装 | `lobby.rs::LobbyDO::handle_queued_line` (`LOBBY_PONG` arm) |
+| `LOBBY_PONG` | client → server。公開 queue の生存時刻を更新し、休眠復帰後も TTL を維持する。client が定期送信する（サーバーからの `LOBBY_PING` は送らない） | `lobby.rs::Lobby::handle_queued_line` (`LOBBY_PONG` arm) |
 | `LOGIN_LOBBY:<handle> OK` | queue 登録成功 | `lobby_protocol.rs::build_login_ok_line` |
 | `LOGIN_LOBBY:incorrect <reason>` | 登録失敗 (`reason` は `lobby_protocol.rs::LoginLobbyError::reason` 参照) | `lobby_protocol.rs::build_login_incorrect_line` |
 | `MATCHED <room_id> <color>` | ペアリング成立。`<room_id>` は `lobby-<game_name>-<32hex>` (`lobby_protocol.rs::build_room_id`) | `lobby_protocol.rs::build_matched_line` |

@@ -31,7 +31,7 @@ use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::FloodgateHistoryStorage;
 use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_feature_gate};
-use rshogi_csa_server::error::{ProtocolError, ServerError};
+use rshogi_csa_server::error::{ProtocolError, ServerError, StorageError};
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig, HandleOutcome};
 use rshogi_csa_server::matching::challenge::{
@@ -2206,10 +2206,13 @@ where
     P: PasswordStore + 'static,
     H: FloodgateHistoryStorage + 'static,
 {
-    let Some(csa_v2_text) =
-        state.kifu_storage.load(source_game).await.map_err(ServerError::Storage)?
-    else {
-        return Ok(ForkOutcome::NotFound);
+    let csa_v2_text = match state.kifu_storage.load(source_game).await {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(ForkOutcome::NotFound),
+        Err(StorageError::Malformed(message)) => {
+            return Ok(ForkOutcome::Malformed(format!("%%FORK {source_game}: {message}")));
+        }
+        Err(error) => return Err(ServerError::Storage(error)),
     };
     match fork_initial_sfen_from_kifu(&csa_v2_text, nth_move) {
         Ok((initial_sfen, applied_moves)) => Ok(ForkOutcome::Derived(ForkDerivation {
@@ -2852,8 +2855,15 @@ where
         };
         let is_move_accepted = matches!(r.outcome, HandleOutcome::MoveAccepted { .. });
         record_move_broadcasts(&r.broadcasts, room.clock_time_unit_ms(), &mut recorded_moves);
-        dispatch(&r.broadcasts, black, white, &state.broadcaster, &RoomId::new(game_id.as_str()))
-            .await?;
+        dispatch_available(
+            &r.broadcasts,
+            Some(black),
+            Some(white),
+            &state.broadcaster,
+            &RoomId::new(game_id.as_str()),
+            matches!(r.outcome, HandleOutcome::GameEnded(_)),
+        )
+        .await?;
         if is_move_accepted {
             // `dispatch` 完了後に record。`metrics.rs` の HELP 説明
             // 「move arrival to broadcast dispatch completion」と整合する。
@@ -3985,7 +3995,7 @@ async fn dispatch_available(
             if !tolerate_player_disconnect {
                 return Err(ServerError::Transport(error));
             }
-            tracing::debug!(%error, "player disconnected during grace broadcast");
+            tracing::debug!(%error, "player disconnected during best-effort broadcast");
         }
         if matches!(
             entry.target,
@@ -3996,7 +4006,7 @@ async fn dispatch_available(
             if !tolerate_player_disconnect {
                 return Err(ServerError::Transport(error));
             }
-            tracing::debug!(%error, "player disconnected during grace broadcast");
+            tracing::debug!(%error, "player disconnected during best-effort broadcast");
         }
         if matches!(entry.target, BroadcastTarget::Spectators | BroadcastTarget::All) {
             broadcaster.broadcast_tag(room_id, BroadcastTag::Spectator, &entry.line).await?;

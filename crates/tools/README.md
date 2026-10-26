@@ -71,6 +71,8 @@ cargo run --release -p tools --bin analyze_selfplay -- "$RUN"
 
 `--games 10` は各方向 10 局なので、この例は先後を交換して計 20 局です。
 開始局面集を使う比較では `--startpos-file` を追加します。
+Fischer 時計の NPS による補正（`--nps-scaling`）と Linux の NUMA 固定（`--cpu-affinity numa`）は
+[tournament の時計補正と CPU 割り当て](docs/tournament.md#機械の速さによる時計の補正---nps-scaling)を参照してください。
 中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
 不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。
 

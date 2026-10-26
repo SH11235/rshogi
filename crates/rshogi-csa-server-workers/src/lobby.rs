@@ -11,8 +11,7 @@
 //!    各 WS を close する。client は新規 `/ws/<room_id>` に LOGIN し直す。
 //! 4. **LOGOUT_LOBBY / WS close**: queue から該当 handle を削除する。
 //!
-//! queue は **DO 永続 storage を使わず in-memory** で保持する (Hibernation 復帰で
-//! 消える)。client は再 LOGIN_LOBBY する想定。
+//! queue はメモリに保持し、Hibernation 復帰時は接続の attachment から復元する。
 //!
 //! 認証は self-claim (`<password>` 値検証なし)、本家 Floodgate と同じ扱い。
 //!
@@ -67,9 +66,7 @@ const MAX_PENDING_CONNECTIONS_PER_IP: usize = 4;
 
 /// `ChallengeRegistry` を DO storage に書き出すキー。
 ///
-/// 同 LobbyDO 内で他に永続化対象がない (queue は volatile) ため、key は単一で
-/// 衝突の心配はない。Cold start 時に必ず `state.storage().get` でこのキーを
-/// 引き、既存値を `purge_expired` してから保持する契約。
+/// public queue は WebSocket attachment、招待は本キーへ個別に保存する。
 const KEY_CHALLENGE_REGISTRY: &str = "challenge_registry";
 
 /// 私的対局 attachment ごとに割り振る一意 id を採番するためのキー。
@@ -105,6 +102,8 @@ enum LobbyAttachment {
         game_name: String,
         color: ColorTag,
         attachment_id: String,
+        #[serde(default)]
+        last_pong_at_ms: Option<u64>,
     },
     /// 招待の相手を待つ認証済み接続。保存された session id で切断を照合する。
     PrivatePending {
@@ -156,12 +155,14 @@ pub struct Lobby {
 
 impl DurableObject for Lobby {
     fn new(state: State, env: Env) -> Self {
-        Self {
+        let lobby = Self {
             state,
             env,
             queue: RefCell::new(LobbyQueue::new()),
             challenge_lock: futures_util::lock::Mutex::new(()),
-        }
+        };
+        lobby.restore_queue();
+        lobby
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -245,6 +246,7 @@ impl DurableObject for Lobby {
                 ref game_name,
                 color,
                 ref attachment_id,
+                ..
             } => {
                 self.handle_queued_line(&ws, handle, game_name, color, attachment_id, &line)
                     .await
@@ -270,6 +272,7 @@ impl DurableObject for Lobby {
                 attachment_id,
                 ..
             })) => {
+                retire_lobby_socket(&ws)?;
                 self.queue.borrow_mut().remove(&handle, &attachment_id);
                 crate::structured_log!(
                     event: "queued_client_closed",
@@ -286,7 +289,7 @@ impl DurableObject for Lobby {
                 handle,
                 attachment_id,
             })) => {
-                retire_private_socket(&ws)?;
+                retire_lobby_socket(&ws)?;
                 self.handle_private_pending_close(&token, &handle, &attachment_id).await?;
             }
             _ => {
@@ -311,6 +314,54 @@ impl DurableObject for Lobby {
 }
 
 impl Lobby {
+    fn restore_queue(&self) {
+        let now_ms = self.now_ms();
+        let mut entries = Vec::new();
+        for ws in self.state.get_websockets() {
+            let Ok(Some(LobbyAttachment::Queued {
+                handle,
+                game_name,
+                color,
+                attachment_id,
+                last_pong_at_ms,
+            })) = ws.deserialize_attachment::<LobbyAttachment>()
+            else {
+                continue;
+            };
+            let last_pong = last_pong_at_ms.unwrap_or(now_ms);
+            // 旧 attachment の時刻も保存し、復帰のたびに TTL が延長されるのを防ぐ。
+            if last_pong_at_ms.is_none()
+                && ws
+                    .serialize_attachment(&LobbyAttachment::Queued {
+                        handle: handle.clone(),
+                        game_name: game_name.clone(),
+                        color,
+                        attachment_id: attachment_id.clone(),
+                        last_pong_at_ms: Some(last_pong),
+                    })
+                    .is_err()
+            {
+                let _ = ws.close(Some(1011), Some("queue restore failed"));
+                continue;
+            }
+            entries.push(QueueEntry {
+                handle,
+                game_name,
+                color: color.to_core(),
+                attachment_id,
+                last_pong_at_ms: last_pong,
+            });
+        }
+        // get_websockets の列挙順に依存せず、LOGIN の採番順と同名置換を再現する。
+        entries.sort_by_key(|entry| {
+            entry.attachment_id.strip_prefix("ws-").and_then(|id| id.parse::<u64>().ok())
+        });
+        let mut queue = self.queue.borrow_mut();
+        for entry in entries {
+            queue.enqueue(entry, usize::MAX);
+        }
+    }
+
     fn check_pending_deadline(&self, ws: &WebSocket) -> bool {
         match ws.deserialize_attachment::<LobbyAttachment>() {
             Ok(Some(LobbyAttachment::Queued { .. } | LobbyAttachment::PrivatePending { .. })) => {
@@ -636,7 +687,7 @@ impl Lobby {
         // 抜いてあるが、attachment が `Queued` のまま残ると `dispatch_match` の
         // `state.get_websockets()` 走査で旧 WS にも MATCHED が誤送される。close を
         // 先に行うことで websocket_close 経路に乗せ、attachment を消す。
-        evict_old_websockets_with_handle(&self.state, ws, &req.handle);
+        evict_old_websockets_with_handle(&self.state, &req.handle)?;
 
         // attachment を Queued に差し替えて待機状態に遷移。
         ws.serialize_attachment(&LobbyAttachment::Queued {
@@ -644,6 +695,7 @@ impl Lobby {
             game_name: req.game_name.clone(),
             color: ColorTag::from_core(req.color),
             attachment_id: attachment_id.clone(),
+            last_pong_at_ms: Some(now_ms),
         })
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
@@ -674,13 +726,14 @@ impl Lobby {
         &self,
         ws: &WebSocket,
         handle: &str,
-        _game_name: &str,
-        _color: ColorTag,
+        game_name: &str,
+        color: ColorTag,
         attachment_id: &str,
         line: &str,
     ) -> Result<()> {
         match line {
             "LOGOUT_LOBBY" => {
+                retire_lobby_socket(ws)?;
                 self.queue.borrow_mut().remove(handle, attachment_id);
                 crate::structured_log!(
                     event: "logout_lobby",
@@ -698,6 +751,13 @@ impl Lobby {
                 // `last_pong_at_ms` を更新し、stale 判定を延長する
                 // (https://github.com/SH11235/rshogi/issues/631)。
                 let now_ms = self.now_ms();
+                ws.serialize_attachment(&LobbyAttachment::Queued {
+                    handle: handle.to_owned(),
+                    game_name: game_name.to_owned(),
+                    color,
+                    attachment_id: attachment_id.to_owned(),
+                    last_pong_at_ms: Some(now_ms),
+                })?;
                 self.queue.borrow_mut().touch_pong(handle, attachment_id, now_ms);
                 Ok(())
             }
@@ -717,6 +777,7 @@ impl Lobby {
         let room_id = build_room_id(&matched.game_name, &random_128bit_hex());
         let mut sent_black = false;
         let mut sent_white = false;
+        let mut targets = Vec::new();
         for ws in self.state.get_websockets() {
             let att = match ws.deserialize_attachment::<LobbyAttachment>() {
                 Ok(Some(a)) => a,
@@ -749,13 +810,46 @@ impl Lobby {
             if target_color != color.to_core() {
                 continue;
             }
-            send_line(&ws, &build_matched_line(&room_id, target_color))?;
-            // close 後に websocket_close ハンドラが queue から remove するが、
-            // 既に try_pair で removed なので no-op で安全。
-            let _ = ws.close(Some(1000), Some("matched"));
-            match target_color {
-                Color::Black => sent_black = true,
-                Color::White => sent_white = true,
+            targets.push((ws, target_color));
+        }
+        let mut failed = targets.len() != 2;
+        // queue から除去済みの両接続を先に退役させ、片側の送信失敗でも残留させない。
+        for (ws, color) in &targets {
+            if let Err(error) = retire_lobby_socket(ws) {
+                failed = true;
+                crate::structured_log!(
+                    event: "matched_dispatch_retire_failed",
+                    component: "lobby",
+                    room_id: room_id,
+                    color: format!("{color:?}"),
+                    err: format!("{error:?}"),
+                );
+            }
+        }
+        for (ws, color) in &targets {
+            if !failed {
+                match send_line(ws, &build_matched_line(&room_id, *color)) {
+                    Ok(()) => match color {
+                        Color::Black => sent_black = true,
+                        Color::White => sent_white = true,
+                    },
+                    Err(error) => {
+                        failed = true;
+                        crate::structured_log!(
+                            event: "matched_dispatch_send_failed",
+                            component: "lobby",
+                            room_id: room_id,
+                            color: format!("{color:?}"),
+                            err: format!("{error:?}"),
+                        );
+                    }
+                }
+            }
+            if failed {
+                let _ = send_line(ws, &build_login_incorrect_line("match_cancelled"));
+                let _ = ws.close(Some(1011), Some("match cancelled"));
+            } else {
+                let _ = ws.close(Some(1000), Some("matched"));
             }
         }
         crate::structured_log!(
@@ -768,12 +862,6 @@ impl Lobby {
             sent_white: sent_white,
         );
         if !sent_black || !sent_white {
-            // 片方の WS が close 済みなどで MATCHED が届かなかった場合、queue から
-            // 既に該当 entry を抜いてあるため client は orphan になる。client 側は
-            // recv timeout (60 秒) で接続エラー検出 → retry_delay 経由で再 LOGIN_LOBBY
-            // するため最終的に復帰できるが、サーバ側でも警告ログを残して
-            // observability を確保する。GameRoom DO 側の login deadline (将来 PR で
-            // 実装予定) でも片側不在は救済される。
             crate::structured_log!(
                 event: "matched_dispatch_incomplete",
                 component: "lobby",
@@ -1256,7 +1344,7 @@ impl Lobby {
                 reg.unmark_ws_logged_in(token, &PlayerName::new(handle), id);
                 if let Some(socket) = self.private_socket(token.as_str(), handle, id) {
                     let _ = send_line(&socket, &build_login_incorrect_line("match_start_failed"));
-                    let _ = retire_private_socket(&socket);
+                    let _ = retire_lobby_socket(&socket);
                     let _ = socket.close(Some(1011), Some("match_start_failed"));
                 }
             }
@@ -1325,7 +1413,7 @@ impl Lobby {
                 .and_then(|id| self.private_socket(token.as_str(), handle, id));
             if let Some(socket) = socket {
                 delivered &= send_line(&socket, &build_matched_line(&plan.room_id, color)).is_ok();
-                delivered &= retire_private_socket(&socket).is_ok();
+                delivered &= retire_lobby_socket(&socket).is_ok();
                 let _ = socket.close(Some(1000), Some("matched"));
             } else {
                 delivered = false;
@@ -1374,7 +1462,7 @@ impl Lobby {
     ) -> Result<()> {
         match line {
             "LOGOUT_LOBBY" => {
-                retire_private_socket(ws)?;
+                retire_lobby_socket(ws)?;
                 self.handle_private_pending_close(token, handle, attachment_id).await?;
                 let _ = ws.close(Some(1000), Some("logout"));
                 Ok(())
@@ -1452,6 +1540,7 @@ impl Lobby {
                 continue;
             };
             if targets.iter().any(|(h, a)| h == &ws_handle && a == &ws_id) {
+                retire_lobby_socket(&ws)?;
                 let _ = send_line(&ws, &build_login_incorrect_line("queue_expired"));
                 let _ = ws.close(Some(1000), Some("queue_expired"));
             }
@@ -1499,14 +1588,14 @@ impl Lobby {
                 && targets.iter().any(|(t, a)| t == &ws_token && a == &ws_id)
             {
                 let _ = send_line(&ws, &build_login_incorrect_line(reason));
-                let _ = retire_private_socket(&ws);
+                let _ = retire_lobby_socket(&ws);
                 let _ = ws.close(Some(1000), Some(reason));
             }
         }
     }
 }
 
-fn retire_private_socket(ws: &WebSocket) -> Result<()> {
+fn retire_lobby_socket(ws: &WebSocket) -> Result<()> {
     ws.serialize_attachment(&LobbyAttachment::Pending {
         client_ip: None,
         expires_at_ms: 0,
@@ -1523,18 +1612,9 @@ fn is_valid_sfen(sfen: &str) -> bool {
 
 /// 同 handle で `Queued` attachment を持つ旧 WS を close して、新 WS のみが
 /// マッチング対象になるよう揃える。`evict_old` 挙動 (本家 Floodgate 互換) を
-/// attachment レイヤでも反映する。`current_ws` は除外する (新しい接続そのものを
-/// close しないため)。
-fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handle: &str) {
+/// attachment レイヤでも反映する。新しい接続は Pending の間に呼ぶ。
+fn evict_old_websockets_with_handle(state: &State, handle: &str) -> Result<()> {
     for ws in state.get_websockets() {
-        // `WebSocket` には eq 比較がないので serialize_attachment 側の同一性で
-        // 判定する代替が無く、ws を都度 attachment 経由で見て handle 一致を見る。
-        // current_ws と他 WS の弁別: current_ws は LOGIN_LOBBY 直後で attachment を
-        // まだ `Queued` に切り替えていない (`handle_login_lobby` 内で本関数の後に
-        // serialize_attachment するため、`current_ws` の attachment は Pending か
-        // 古い handle のままで、新 handle と一致しない経路が支配的)。同 handle で
-        // 別 WS のみが loop 対象になる安全側設計。
-        let _ = current_ws; // 比較には使わないが、契約を明示するために引数に残す。
         let attachment = match ws.deserialize_attachment::<LobbyAttachment>() {
             Ok(Some(a)) => a,
             _ => continue,
@@ -1544,6 +1624,7 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
         } = attachment
             && existing == handle
         {
+            retire_lobby_socket(&ws)?;
             crate::structured_log!(
                 event: "evict_duplicate_handle_ws",
                 component: "lobby",
@@ -1552,6 +1633,7 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
             let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
         }
     }
+    Ok(())
 }
 
 /// LOGIN handle 自称防止の lobby 経路版。

@@ -112,7 +112,7 @@ use super::layers::m128_add_dpbusd_epi32;
 /// - キャッシュ効率の向上
 #[repr(C, align(64))]
 pub struct AccumulatorHalfKP<const L1: usize> {
-    /// アキュムレータバッファ [perspective][L1]（64バイトアライン、インライン）
+    /// アキュムレータバッファ `[perspective][L1]`（64バイトアライン、インライン）
     pub accumulation: [AlignedI16<L1>; 2],
     /// 計算済みフラグ
     pub computed_accumulation: bool,

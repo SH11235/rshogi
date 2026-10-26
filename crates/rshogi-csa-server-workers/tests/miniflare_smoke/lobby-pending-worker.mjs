@@ -12,6 +12,7 @@ export class Lobby {
     this.holdClose = false;
     this.faults = {};
     this.closes = [];
+    this.matchedSendCount = 0;
     const wrap = (object, overrides) => new Proxy(object, {
       get(target, key) {
         if (Object.hasOwn(overrides, key)) return overrides[key];
@@ -23,12 +24,24 @@ export class Lobby {
     this.socket = ws => {
       if (!this.sockets.has(ws)) this.sockets.set(ws, wrap(ws, {
         send: data => {
-          if (typeof data === 'string' && data.startsWith('MATCHED ') &&
-              ws.deserializeAttachment()?.PrivatePending?.handle === this.failMatchedHandle) {
-            this.failMatchedHandle = undefined;
-            throw new Error('injected MATCHED failure');
+          if (typeof data === 'string' && data.startsWith('MATCHED ')) {
+            this.matchedSendCount++;
+            if ((this.failMatchedHandle !== undefined && ws.deserializeAttachment()?.PrivatePending?.handle === this.failMatchedHandle) ||
+                this.matchedSendCount === this.failMatchedSendNumber) {
+              this.failMatchedHandle = undefined;
+              this.failMatchedSendNumber = undefined;
+              throw new Error('injected MATCHED failure');
+            }
           }
           return ws.send(data);
+        },
+        serializeAttachment: attachment => {
+          if (attachment?.Pending && this.failRetireHandle !== undefined &&
+              ws.deserializeAttachment()?.Queued?.handle === this.failRetireHandle) {
+            this.failRetireHandle = undefined;
+            throw new Error('injected attachment retirement failure');
+          }
+          return ws.serializeAttachment(attachment);
         },
         close: (code, reason) => {
           this.closes.push({ code, reason });
@@ -78,6 +91,11 @@ export class Lobby {
     if (command.faults) this.faults = command.faults;
     if (command.holdClose !== undefined) this.holdClose = command.holdClose;
     if (command.failMatchedHandle) this.failMatchedHandle = command.failMatchedHandle;
+    if (command.failRetireHandle) this.failRetireHandle = command.failRetireHandle;
+    if (command.failMatchedSendNumber) {
+      this.failMatchedSendNumber = command.failMatchedSendNumber;
+      this.matchedSendCount = 0;
+    }
     if (command.stalePrivateMarks) {
       const registry = await this.state.storage.get('challenge_registry');
       for (const entry of registry?.entries?.values() ?? []) {
@@ -87,6 +105,12 @@ export class Lobby {
     }
     for (const ws of this.state.getWebSockets()) {
       const att = ws.deserializeAttachment();
+      if (att?.Queued) {
+        if (command.legacyQueued) delete att.Queued.last_pong_at_ms;
+        if (command.expireQueued) att.Queued.last_pong_at_ms = 0;
+        if (command.queuedTimestamp !== undefined) att.Queued.last_pong_at_ms = command.queuedTimestamp;
+        ws.serializeAttachment(att);
+      }
       if (!att?.Pending) continue;
       if (command.legacy) delete att.Pending.expires_at_ms;
       if (command.expire) att.Pending.expires_at_ms = Date.now() - 1;
@@ -104,7 +128,7 @@ export class Lobby {
       await this.inner.alarm();
     }
     return Response.json({
-      alarm: await this.state.storage.getAlarm(), closes: this.closes,
+      alarm: await this.state.storage.getAlarm(), closes: this.closes, matchedSendCount: this.matchedSendCount,
       attachments: this.state.getWebSockets().map(ws => ws.deserializeAttachment()),
       registry: { entries: Object.fromEntries((await this.state.storage.get("challenge_registry"))?.entries ?? []) },
       faults: this.faults,
