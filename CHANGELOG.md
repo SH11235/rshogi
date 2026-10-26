@@ -24,8 +24,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 - `book_mine master audit` / `rejoin` / `cycles` / `borrow` の元データの伝播では、一時定跡を経ず
   メモリ内でグラフを1回作り、値の分からない手を配列内で除去して伝播する。出力は変わらない。
 
-- `book_mine master rejoin` は `--opp-freq` と正の `--min-weight` の併用時に下限未満の局面の展開を止める。
+- `book_mine master rejoin` は `--opp-freq` と正の `--min-weight` の併用時に下限未満の自分の手番の局面の展開を止める。
   一覧の事後フィルタだけだった挙動から変わり、下限未満の局面を経由する先は調査対象から外れる。既定の下限 0 の出力は維持。
+  止めるのは自分の手番の局面だけで、相手の手番の局面は重みによらず展開する (alt の手の先で重み 0 になる相手の局面で止めると、
+  重みの大きい局面の alt の行が一覧から消えるため)。
 
 - `book_mine master cycles` は外した後の循環を同じグラフの辺を絞って数え直し、グラフの再構築を省く。出力は変わらない。
 
