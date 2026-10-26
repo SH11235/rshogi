@@ -1216,7 +1216,8 @@ impl<const DIM: usize> ClippedReLU<DIM> {
         {
             let num_chunks = (DIM - processed) / 8;
             if num_chunks > 0 {
-                // SAFETY: 同上
+                // SAFETY: cfgがSIMD128を保証し、各chunkの入力8要素・出力8バイトはDIM内。
+                // v128_loadとwrite_unalignedは入出力にSIMD境界の整列を要求しない。
                 unsafe {
                     use std::arch::wasm32::*;
 
@@ -1235,7 +1236,7 @@ impl<const DIM: usize> ClippedReLU<DIM> {
                         let bytes = i8x16_narrow_i16x8(words, words);
                         let result = i8x16_max(bytes, zero);
 
-                        *out_ptr.add(i) = i64x2_extract_lane::<0>(result);
+                        out_ptr.add(i).write_unaligned(i64x2_extract_lane::<0>(result));
                     }
                 }
                 processed += num_chunks * 8;
@@ -1476,8 +1477,6 @@ mod tests {
             weights: weights.into(),
         };
 
-        // 入力はPADDED_INPUT（32バイト）にパディングする必要がある
-        // SIMD実装は32バイト単位で処理するため、64バイトアライン必須
         let mut input = Aligned([0u8; 32]);
         input.0[0] = 1;
         input.0[1] = 2;
@@ -1507,6 +1506,29 @@ mod tests {
     }
 
     #[test]
+    fn clipped_relu_accepts_unaligned_output_with_simd_tails() {
+        fn check<const DIM: usize>() {
+            let input = std::array::from_fn(|i| {
+                [i32::MIN, -8192, -64, -1, 0, 63, 64, 8191, 8192, i32::MAX][i % 10]
+            });
+            let mut storage = Aligned([0xa5u8; 130]);
+            let output: &mut [u8; DIM] = (&mut storage.0[1..DIM + 1]).try_into().unwrap();
+            assert_eq!(output.as_ptr() as usize % 8, 1);
+            ClippedReLU::propagate(&input, output);
+            for (&value, &actual) in input.iter().zip(output.iter()) {
+                assert_eq!(actual, (value >> WEIGHT_SCALE_BITS).clamp(0, 127) as u8);
+            }
+            assert_eq!(storage.0[0], 0xa5);
+            assert_eq!(storage.0[DIM + 1], 0xa5);
+        }
+        check::<8>();
+        check::<13>();
+        check::<32>();
+        check::<67>();
+        check::<128>();
+    }
+
+    #[test]
     fn test_affine_transform_real_size() {
         // 実際の使用サイズ（512入力→32出力）に近いテスト
         // PADDED_INPUT = padded_input(512) = 512
@@ -1529,7 +1551,6 @@ mod tests {
             weights: weights.into(),
         };
 
-        // 入力は64バイトアライン必須
         let mut input = Aligned([0u8; 512]);
         for (i, val) in input.0.iter_mut().take(32).enumerate() {
             *val = (i + 1) as u8; // 1, 2, 3, ..., 32
