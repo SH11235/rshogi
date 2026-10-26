@@ -17,11 +17,39 @@ use super::*;
 use crate::types::{Color, Hand, PieceType};
 
 fn solve_shortest(pos: &mut Position, mode: MateMode, nodes: u64) -> MateResult {
+    solve_counting(pos, mode, ShortestMode::Tsume, nodes)
+}
+
+fn solve_counting(
+    pos: &mut Position,
+    mode: MateMode,
+    shortest: ShortestMode,
+    nodes: u64,
+) -> MateResult {
     let stop = AtomicBool::new(false);
     let limits = MateLimits { nodes, time_ms: 0 };
     let mut solver = DfpnSolver::with_mode(16, mode);
-    solver.set_shortest(true);
+    solver.set_shortest(Some(shortest));
     solver.solve(pos, &limits, &stop, |_| {})
+}
+
+fn shortest_len(sfen: &str, shortest: ShortestMode, nodes: u64) -> usize {
+    let mut lens = Vec::new();
+    for mode in MateMode::ALL {
+        let mut pos = position(sfen);
+        let MateResult::Mate(pv) = solve_counting(&mut pos, mode, shortest, nodes) else {
+            panic!("{sfen} {mode:?} {shortest:?}: 詰みを返さない");
+        };
+        let futile_end = shortest == ShortestMode::Tsume;
+        assert!(
+            check_mate_pv_by_rules(&pos, &pv, futile_end),
+            "{sfen} {mode:?} {shortest:?}: {}",
+            pv_usi(&pv)
+        );
+        lens.push(pv.len());
+    }
+    assert_eq!(lens[0], lens[1], "{sfen} {shortest:?}: Speed と Power で手数が違う");
+    lens[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +437,7 @@ fn shortest_mode_with_threads_matches_single_thread() {
         for mode in MateMode::ALL {
             let stop = AtomicBool::new(false);
             let mut solver = DfpnSolver::with_mode(16, mode);
-            solver.set_shortest(true);
+            solver.set_shortest(Some(ShortestMode::Tsume));
             solver.set_threads(4);
             solver.parallel_from_the_start();
             let limits = MateLimits {
@@ -454,7 +482,7 @@ fn shortest_mode_returns_the_solution_or_unknown_under_limits() {
         for mode in MateMode::ALL {
             let stop = AtomicBool::new(false);
             let mut solver = DfpnSolver::with_mode(16, mode);
-            solver.set_shortest(true);
+            solver.set_shortest(Some(ShortestMode::Tsume));
             let mut pos = position(sfen);
             let MateResult::Mate(full) =
                 solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {})
@@ -580,7 +608,7 @@ fn shortest_mode_reports_monotonic_progress() {
         time_ms: 3_500,
     };
     let mut solver = DfpnSolver::with_mode(16, MateMode::Power);
-    solver.set_shortest(true);
+    solver.set_shortest(Some(ShortestMode::Tsume));
     let mut reported = Vec::new();
     solver.solve(&mut pos, &limits, &stop, |p| reported.push((p.elapsed_ms, p.nodes)));
     assert!(reported.len() >= 2, "{reported:?}");
@@ -644,6 +672,128 @@ fn futility_checks_forward_progress() {
         reported[1..].iter().all(|&n| before < n && n <= nodes),
         "{reported:?} / {before}..{nodes}"
     );
+}
+
+/// 全応手を数える最短手順は合駒も受け方の手として数えるので、詰将棋のルールより長くなりうる
+#[test]
+fn all_mode_counts_every_interposition() {
+    for (sfen, tsume, all) in [
+        // ▲1七飛の 1 筋の合駒はどれも同飛と取って詰む無駄合いだが、全応手では合駒を続けて逃れる
+        (
+            "l7k/r4+B1P1/p1ns1P1G1/5sp2/2Ppp4/1pp6/PP1PP1gpb/2GS+s3R/LNK6 b 3Pg2n2lp 117",
+            1,
+            11,
+        ),
+        ("8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1", 1, 5),
+        ("g7k/RP7/6G2/8P/9/9/9/9/4K4 b p 1", 3, 3),
+        ("ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1", 7, 7),
+    ] {
+        assert_eq!(shortest_len(sfen, ShortestMode::Tsume, 5_000_000), tsume, "{sfen}");
+        assert_eq!(shortest_len(sfen, ShortestMode::All, 5_000_000), all, "{sfen}");
+    }
+}
+
+/// 全応手を数える数え方では、無駄合いの判定 (別の局面を解く) をしない
+#[test]
+fn all_mode_does_not_search_futility() {
+    use super::search::{Budget, Scratch, Searcher, ShortestTables};
+    use super::state::MateState;
+    use super::table::MateTable;
+    use crate::time::Instant;
+    use std::cell::RefCell;
+
+    // ▲9一飛の後の歩の合駒は、詰将棋のルールでは無駄合い
+    let mut pos = position("8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1");
+    let attacker = pos.side_to_move();
+    MateState::do_move(&mut pos, Move::from_usi("9i9a").unwrap());
+    let drop = Move::from_usi("P*5a").unwrap();
+    let drop = legal_moves_by_rules(&mut pos)
+        .into_iter()
+        .find(|m| m.raw() == drop.raw())
+        .unwrap();
+    let stop = AtomicBool::new(false);
+    let mut progress = |_| {};
+    let budget = Budget {
+        stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
+        node_limit: 0,
+        time_limit_ms: 0,
+        start: Instant::now(),
+        progress: &mut progress,
+    };
+    let table = MateTable::new(1, true);
+    let tables = RefCell::new(ShortestTables::new());
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
+    searcher.enable_shortest(false, &tables);
+    assert_eq!(searcher.futile_drop(&mut pos, drop, 4).unwrap(), None);
+    assert_eq!(searcher.nodes(), 0);
+    searcher.enable_shortest(true, &tables);
+    assert!(searcher.futile_drop(&mut pos, drop, 4).unwrap().is_some());
+    assert!(searcher.nodes() > 0);
+}
+
+/// 乱択局面で、全応手を数える最短手順の手数が総当たり (すべての応手を数える) の最短手数と一致する
+#[test]
+fn all_mode_matches_brute_force_on_random_positions() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5807_0003);
+    let (mut tested, mut mates) = (0, 0);
+    while tested < 200 {
+        let pos = if tested % 2 == 0 {
+            random_tsume_position(&mut rng)
+        } else {
+            random_kingless_position(&mut rng)
+        };
+        let Some(mut pos) = pos else { continue };
+        tested += 1;
+        pos.clear_checkers_without_king();
+        let sfen = pos.to_sfen();
+        let brute = (1..=5).step_by(2).find(|&n| brute_mate_by_rules(&mut pos, n));
+        for mode in MateMode::ALL {
+            let mut pos = position(&sfen);
+            match (solve_counting(&mut pos, mode, ShortestMode::All, 2_000_000), brute) {
+                (MateResult::Mate(pv), Some(len)) => {
+                    assert!(
+                        check_mate_pv_by_rules(&pos, &pv, false),
+                        "{sfen} {mode:?}: {}",
+                        pv_usi(&pv)
+                    );
+                    assert_eq!(pv.len() as u32, len, "{sfen} {mode:?}: {}", pv_usi(&pv));
+                }
+                (MateResult::Mate(pv), None) => {
+                    assert!(
+                        pv.len() > 5,
+                        "{sfen} {mode:?}: 総当たりは 5 手以内に詰まない {}",
+                        pv_usi(&pv)
+                    );
+                }
+                (other, Some(len)) => panic!("{sfen} {mode:?}: {len} 手で詰むのに {other:?}"),
+                (_, None) => {}
+            }
+        }
+        mates += usize::from(brute.is_some());
+    }
+    assert!(mates >= 20, "詰みの局面が少なすぎる: {mates}");
+}
+
+/// 全応手を数える手数は、詰将棋のルールの手数以上 (既知の長手数の局面。release で手動実行)
+#[test]
+#[ignore]
+fn all_mode_is_not_shorter_than_tsume_on_long_mates() {
+    let kingless = ZUKOU_001.replace("2N5K", "2N6");
+    for sfen in [
+        "2p1kS1nl/1+L1g2+P2/3p1p3/4p2p1/3+blNp2/+Rb4P2/3PP4/3G1G3/3K1L+r2 w g3s2n8p 128",
+        "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1",
+        "1lnpGpBs1/lg1g3p1/p2+N4l/1S1P2k2/2Sn5/Pp2pn1K1/GPp+pR1pP1/+p2+ps3p/1B1LP1R2 b P 5",
+        ZUKOU_001,
+        kingless.as_str(),
+    ] {
+        let tsume = shortest_len(sfen, ShortestMode::Tsume, 0);
+        let all = shortest_len(sfen, ShortestMode::All, 0);
+        assert!(all >= tsume, "{sfen}: 全応手 {all} / 詰将棋 {tsume}");
+    }
 }
 
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)

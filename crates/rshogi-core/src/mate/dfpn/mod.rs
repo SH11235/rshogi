@@ -10,8 +10,8 @@
 //! 打ち切り (時間・ノード数・停止) は必ず [`MateResult::Unknown`] になり、不詰と混ざらない。
 //! 探索深さの上限 (2048 手、wasm では 1024 手) に達して読み切れず不詰と言えないとき、詰みを証明したが
 //! 手順を復元できなかったときも Unknown を返す。詰みの手順は最短とは限らない。
-//! 最短手順モード ([`DfpnSolver::set_shortest`]) では、詰みを証明した後に詰将棋のルールでの
-//! 正解手順 (最短手数、受け方は最長の応手、無駄合いは数えない) を求める。
+//! 最短手順モード ([`DfpnSolver::set_shortest`]) では、詰みを証明した後に最短の手順 (攻め方は最短手数、
+//! 受け方は最長の応手) を求める。合駒の数え方は [`ShortestMode`] で選ぶ。
 //! 局面の同一性は 64bit のハッシュキーで判定するので、衝突による誤りの可能性は確率的にのみ排除される。
 //! 攻め方の玉が無い局面 (詰将棋) も解く。余った駒を受け方の持駒にする詰将棋の約束は、局面の受け方の
 //! 持駒として与える。受け方の玉が無い局面と、手番でない側が王手されている局面は扱わない
@@ -111,6 +111,34 @@ impl MateMode {
     }
 }
 
+/// 最短手順モードでの受け方の応手の数え方
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortestMode {
+    /// 詰将棋のルール: 無駄合いは受け方の手として数えず、受け方の応手で手数が同じなら詰上りで攻め方に
+    /// 持駒が余らない方を選ぶ
+    Tsume,
+    /// 合駒を含むすべての応手を受け方の手として数える (駒余りは比べない)
+    All,
+}
+
+impl ShortestMode {
+    /// すべての数え方 ([`ShortestMode::name`] の一覧に使う)
+    pub const ALL: [ShortestMode; 2] = [ShortestMode::Tsume, ShortestMode::All];
+
+    /// USI オプションなどで使う名前 (`Tsume` / `All`)
+    pub fn name(self) -> &'static str {
+        match self {
+            ShortestMode::Tsume => "Tsume",
+            ShortestMode::All => "All",
+        }
+    }
+
+    /// [`ShortestMode::name`] の名前から (大文字・小文字は区別しない)
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(name))
+    }
+}
+
 /// 置換表を持ち回る df-pn ソルバー
 pub struct DfpnSolver {
     table: MateTable,
@@ -123,8 +151,8 @@ pub struct DfpnSolver {
     helper_scratch: Vec<Scratch<Move>>,
     /// 並列に解くとき、最初に 1 スレッドで解くノード数
     parallel_start: u64,
-    /// 最短手順モード
-    shortest: bool,
+    /// 最短手順モード (`None` は通常の詰み判定)
+    shortest: Option<ShortestMode>,
     /// 最短手順モードの表 (最初に使うときに確保する)
     shortest_tables: RefCell<ShortestTables>,
 }
@@ -153,21 +181,24 @@ impl DfpnSolver {
             threads: 1,
             helper_scratch: Vec::new(),
             parallel_start: PARALLEL_START_NODES,
-            shortest: false,
+            shortest: None,
             shortest_tables: RefCell::new(ShortestTables::new()),
         }
     }
 
-    /// 最短手順モードにするか (既定は切る)。
+    /// 最短手順モードにするか (`None` は通常の詰み判定。既定)。
     ///
-    /// 最短手順モードでは、詰みを証明した後に、詰将棋のルールでの正解手順を求めて返す: 攻め方は最短の
-    /// 手数で詰まし、受け方は最も長く逃れる応手を選び、無駄合いは手数に数えず、受け方の応手で手数が
-    /// 同じなら詰上りで攻め方に持駒が余らない方を選ぶ。無駄合いは、駒打ちの合駒を王手している駒が取り、
-    /// 受け方がその駒を取り返せず、取った駒を受け方の持駒に戻した局面の詰み手数が、駒打ち以外の応手で
-    /// 逃れたときの詰み手数以下の合駒 (移動合いは無駄合いとしない)。判定 (詰み・不詰) は切ったときと同じで、
-    /// 手順を求める分だけ時間とノードが増える。手順を求め終わる前に制限に達したら [`MateResult::Unknown`]。
-    /// 手順を求める段階は 1 スレッドで解く。
-    pub fn set_shortest(&mut self, shortest: bool) {
+    /// 最短手順モードでは、詰みを証明した後に最短の手順を求めて返す: 攻め方は最短の手数で詰まし、
+    /// 受け方は最も長く逃れる応手を選ぶ。
+    /// - [`ShortestMode::Tsume`] (詰将棋のルール): 無駄合いは手数に数えず、受け方の応手で手数が同じなら
+    ///   詰上りで攻め方に持駒が余らない方を選ぶ。無駄合いは、駒打ちの合駒を王手している駒が取り、受け方が
+    ///   その駒を取り返せず、取った駒を受け方の持駒に戻した局面の詰み手数が、駒打ち以外の応手で逃れたときの
+    ///   詰み手数以下の合駒 (移動合いは無駄合いとしない)。手順の最後の局面に無駄合いだけが残ることがある。
+    /// - [`ShortestMode::All`]: 合駒を含むすべての応手を数える (無駄合いの判定をしない)。
+    ///
+    /// 判定 (詰み・不詰) は通常と同じで、手順を求める分だけ時間とノードが増える。手順を求め終わる前に
+    /// 制限に達したら [`MateResult::Unknown`]。手順を求める段階は 1 スレッドで解く。
+    pub fn set_shortest(&mut self, shortest: Option<ShortestMode>) {
         self.shortest = shortest;
     }
 
@@ -232,7 +263,7 @@ impl DfpnSolver {
         } else {
             self.run_mode(pos, *limits, start, stop, &mut progress)
         };
-        let futile_end = self.shortest;
+        let futile_end = self.shortest == Some(ShortestMode::Tsume);
         let is_valid = |pos: &mut Position, pv: &[Move]| {
             if kingless {
                 verify::check_mate_pv_by_rules(pos, pv, futile_end)
@@ -276,9 +307,9 @@ impl DfpnSolver {
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
-        if !self.shortest {
+        let Some(shortest_mode) = self.shortest else {
             return self.run::<S, PIECES>(st, limits, start, stop, progress);
-        }
+        };
         // 正解手順を求める段階でも、進捗の間隔を判定の最後の通知から数える
         let mut last_report_ms = None;
         let mut tracked = |p: MateProgress| {
@@ -317,7 +348,7 @@ impl DfpnSolver {
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
         }
-        let pv = shortest::shortest_pv(&mut searcher, st, &self.shortest_tables);
+        let pv = shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode);
         self.nodes = judged_nodes + searcher.nodes();
         pv.ok().flatten().map(SolveOutcome::Mate)
     }
@@ -376,7 +407,7 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
-        let result = solve_with(&mut searcher, pos, !self.shortest);
+        let result = solve_with(&mut searcher, pos, self.shortest.is_none());
         self.nodes = searcher.nodes();
         result
     }
@@ -402,7 +433,7 @@ impl DfpnSolver {
         let attacker = pos.position().side_to_move();
         let (table, scratch, helper_scratch, mode) =
             (&self.table, &mut self.scratch, &mut self.helper_scratch, self.mode);
-        let extract_pv = !self.shortest;
+        let extract_pv = self.shortest.is_none();
         let slots: Vec<OnceLock<HelperResult>> =
             (0..threads - 1).map(|_| OnceLock::new()).collect();
         let helpers: Vec<Box<dyn FnOnce() + Send + '_>> = helper_scratch

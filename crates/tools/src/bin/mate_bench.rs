@@ -16,7 +16,7 @@
 //!
 //! # 作品集 (各行 `<SFEN><TAB><作意手数>`) を最短手順モードで解き、作意手数と照合する
 //! cargo run --release -p tools --bin mate_bench -- \
-//!   --input works.tsv --shortest --out works-result.tsv
+//!   --input works.tsv --shortest tsume --out works-result.tsv
 //! ```
 //!
 //! 入力は読みながら解くので、メモリは局面数に依存しない (分位点は対数ヒストグラムで近似する)。
@@ -33,7 +33,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult, ShortestMode};
 use rshogi_core::position::Position;
 use tools::output_path::ensure_safe_output_path;
 
@@ -76,9 +76,10 @@ struct Cli {
     #[arg(long, default_value = "Power", value_parser = parse_mode)]
     mode: MateMode,
 
-    /// 最短手順モード (USI の MateShortest と同じ): 詰将棋のルールでの正解手順を求める
-    #[arg(long)]
-    shortest: bool,
+    /// 最短手順を求める (USI の MateShortest と同じ)。`tsume` は詰将棋のルール (無駄合いを数えない、
+    /// 同手数なら駒余りを避ける)、`all` は合駒を含むすべての応手を数える。省略すると通常の詰み判定
+    #[arg(long, value_parser = parse_shortest)]
+    shortest: Option<ShortestMode>,
 
     /// 正解の詰み手数 (入力の行に `<TAB><手数>` があればその行はそちらを使う)。正解の分かっている局面で、
     /// 不詰・非対応の結果を誤りとして数える。この手数より短い詰み手順は、局面集の正解の側の誤りも
@@ -278,6 +279,10 @@ impl Summary {
     }
 }
 
+fn parse_shortest(name: &str) -> Result<ShortestMode, String> {
+    ShortestMode::from_name(name).ok_or_else(|| format!("{name}: tsume / all のどちらか"))
+}
+
 fn parse_mode(name: &str) -> Result<MateMode, String> {
     MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power のどちらか"))
 }
@@ -459,7 +464,7 @@ fn main() -> Result<()> {
                 {
                     write_error = Some(e);
                 }
-                if summary.add(&o, cli.shortest) && reported < MAX_REPORTED_ERRORS {
+                if summary.add(&o, cli.shortest.is_some()) && reported < MAX_REPORTED_ERRORS {
                     reported += 1;
                     let expect = o.expect.unwrap_or(0);
                     let label = match o.tag() {
@@ -517,7 +522,7 @@ fn main() -> Result<()> {
         BUDGETS.iter().zip(&s.within_budget).map(|(b, c)| format!("{b}:{c}")).collect();
     println!("ノード予算ごとの判定数: {}", curve.join(" "));
     if s.expect_known > 0 {
-        let too_long = if cli.shortest {
+        let too_long = if cli.shortest.is_some() {
             format!(" / 正解より長い (要確認) {}", s.expect_too_long)
         } else {
             String::new()

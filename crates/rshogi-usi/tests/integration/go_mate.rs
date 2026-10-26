@@ -144,11 +144,27 @@ fn mate_shortest_returns_the_solution_without_futile_interpositions() {
     let mut engine = Engine::start();
     for mode in ["Speed", "Power"] {
         engine.send(&format!(
-            "setoption name MateMode value {mode}\nsetoption name MateShortest value true\nposition sfen 8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1\ngo mate 10000"
+            "setoption name MateMode value {mode}\nsetoption name MateShortest value Tsume\nposition sfen 8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1\ngo mate 10000"
         ));
         let line = engine.checkmate(Duration::from_secs(20));
         assert!(matches!(line.as_str(), "checkmate 9i9a" | "checkmate 9i9a+"), "{mode}: {line}");
     }
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
+fn mate_shortest_all_counts_interpositions() {
+    // 全応手を数えると、受け方は歩の合駒を 2 回して 5 手で詰む
+    let mut engine = Engine::start();
+    engine.send(
+        "setoption name MateShortest value All\nposition sfen 8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1\ngo mate 10000",
+    );
+    let line = engine.checkmate(Duration::from_secs(20));
+    assert_eq!(line.split_whitespace().count(), 1 + 5, "{line}");
+    engine.send(
+        "setoption name MateShortest value Off\nposition sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000",
+    );
+    assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b");
     engine.assert_no_more_checkmate();
 }
 

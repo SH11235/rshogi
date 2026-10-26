@@ -1,4 +1,5 @@
-//! 最短手順モード: 詰将棋のルールでの正解手順
+//! 最短手順モード: 詰将棋のルールでの正解手順 ([`ShortestMode::Tsume`]) と、すべての応手を数える最短手順
+//! ([`ShortestMode::All`]。下の 1・2 だけを使い、無駄合いの判定をせず駒余りも比べない)
 //!
 //! 正解手順の定義:
 //! 1. 攻め方は王手を続け、最短の手数で詰ます。
@@ -9,7 +10,7 @@
 //!    無駄合いでない応手から選べる。
 //! 4. 受け方の応手で手数が同じなら、詰上りで攻め方に持駒が余らない方を選ぶ。
 //!
-//! 局面の最短の詰み手数 (無駄合いを数えない) を「詰み手数」と呼ぶ。
+//! 局面の最短の詰み手数 (Tsume では無駄合いを数えない) を「詰み手数」と呼ぶ。
 //! - 根の詰み手数: 判定で証明した手数 L から、上限を L − 2 にして証明し直すことを、証明できなくなるまで
 //!   繰り返す。上限付きの探索は無駄合いを手数に数えず、上限だけに依存する不詰を覚えておく
 //!   (`Searcher::enable_shortest`)。置換表の詰みの手数は証明の長さ (詰み手数の上限) なので、
@@ -24,6 +25,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use super::ShortestMode;
 use super::search::{Abort, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
 use super::state::MateState;
 use crate::types::{Color, Hand, PieceType};
@@ -34,6 +36,7 @@ pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
     searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
     tables: &'a RefCell<ShortestTables>,
+    mode: ShortestMode,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     // 無駄合いを数えない手数は、すべての応手を数える手数以下。先に無駄合いの判定の要らない数え方で
     // 縮めておくと、無駄合いの判定 (別の局面を解く) をする上限付きの探索が減る
@@ -44,12 +47,16 @@ pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
         return Ok(None);
     }
     let mut len = descend(searcher, st, root.mate_len)?;
-    searcher.enable_shortest(true, tables);
-    len = descend(searcher, st, len)?;
+    let tsume = mode == ShortestMode::Tsume;
+    if tsume {
+        searcher.enable_shortest(true, tables);
+        len = descend(searcher, st, len)?;
+    }
 
     let mut walker = Walker {
         memo: HashMap::new(),
         buffers: Vec::new(),
+        tie_break: tsume,
     };
     if walker.choose(searcher, st, len, true)?.is_none() {
         return Ok(None);
@@ -100,6 +107,8 @@ struct Walker<M> {
     memo: HashMap<(u64, u16), Choice<M>>,
     /// 指し手の作業領域。手順の深さごとに 2 本使い、局面ごとに確保し直さない
     buffers: Vec<Vec<M>>,
+    /// 持駒が余らない手順を探す (詰将棋のルール)。探さなければ最初の候補を選ぶ
+    tie_break: bool,
 }
 
 impl<M: Copy + Eq> Walker<M> {
@@ -154,7 +163,7 @@ impl<M: Copy + Eq> Walker<M> {
         or_node: bool,
     ) -> bool {
         let attacker_moves = if or_node { d.div_ceil(2) } else { d / 2 };
-        hand_count(st.table_key(attacker).hand) <= u32::from(attacker_moves)
+        self.tie_break && hand_count(st.table_key(attacker).hand) <= u32::from(attacker_moves)
     }
 
     /// `tried` と `checks` は空の作業領域

@@ -15,7 +15,7 @@ use rshogi_core::eval::{
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
     set_pass_right_value_phased,
 };
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult, ShortestMode};
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, LayerStackRoutingError, MAX_LAYER_STACK_BUCKETS,
@@ -192,8 +192,8 @@ struct UsiEngine {
     mate_mode: MateMode,
     /// df-pn で 1 局面を解くスレッド数（MateThreadsで変更）
     mate_threads: usize,
-    /// 最短手順モード（MateShortestで変更）
-    mate_shortest: bool,
+    /// 最短手順モード（MateShortestで変更。None は通常の詰み判定）
+    mate_shortest: Option<ShortestMode>,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
     mate_solver: Option<DfpnSolver>,
     /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
@@ -269,7 +269,7 @@ impl UsiEngine {
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
             mate_mode: MateMode::default(),
             mate_threads: 1,
-            mate_shortest: false,
+            mate_shortest: None,
             mate_solver: None,
             mate_thread: None,
             mate_stop: Arc::new(AtomicBool::new(false)),
@@ -366,7 +366,7 @@ impl UsiEngine {
             MateMode::default().name()
         );
         println!("option name MateThreads type spin default 1 min 1 max 512");
-        println!("option name MateShortest type check default false");
+        println!("option name MateShortest type combo default Off var Off var Tsume var All");
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -1022,8 +1022,10 @@ impl UsiEngine {
                 }
             }
             "MateShortest" => {
-                if let Ok(v) = value.parse::<bool>() {
-                    self.mate_shortest = v;
+                if value.eq_ignore_ascii_case("Off") {
+                    self.mate_shortest = None;
+                } else if let Some(mode) = ShortestMode::from_name(&value) {
+                    self.mate_shortest = Some(mode);
                 }
             }
             "EvalHash" => {
