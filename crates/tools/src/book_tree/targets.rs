@@ -16,8 +16,8 @@ pub(super) const RUN_DIR: &str = "run";
 pub(super) const OUT_ROOT_LOCK: &str = "serve.lock";
 const CHECKPOINT_VERSION: &str = "book-tree-queue-v1";
 pub(super) const DEFAULT_PRIORITY: u32 = 100;
-const MAX_PRIORITY: u32 = 1_000_000;
-const MAX_DEPTH: usize = 20;
+pub(super) const MAX_PRIORITY: u32 = 1_000_000;
+pub(super) const MAX_DEPTH: usize = 20;
 const MAX_EXTRA: usize = 8;
 
 /// 伸ばし方の値。書かない項目は serve の既定で解決する。

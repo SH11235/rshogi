@@ -4,6 +4,7 @@
 use super::refutation::{self, RefutationOutputs};
 use super::register::{COLUMNS, ROLES};
 use super::rejoin::WeightArgs;
+use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
 use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
     percentile, propagate_values, retain_known, write_book_atomic,
@@ -49,11 +50,22 @@ pub(super) struct AuditArgs {
     #[arg(long)]
     enqueue_out: Option<PathBuf>,
     /// キューの行の depth
-    #[arg(long, default_value_t = 2)]
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=MAX_DEPTH as u64)
+    )]
     refutation_depth: usize,
     /// キューの行の数の上限 (表の順で先から)
     #[arg(long)]
     refutation_max: Option<usize>,
+    /// キューの行の priority の基準。表の順位 (0 始まり、99 で頭打ち) を足す
+    #[arg(
+        long,
+        default_value_t = DEFAULT_PRIORITY,
+        value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_PRIORITY - 99))
+    )]
+    priority: u32,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -101,6 +113,8 @@ pub(super) struct AuditedMove {
     pub value: i32,
     pub origin: Origin,
     pub eval: Option<i32>,
+    /// 1 位と同値で選ばれず、`value` を -1 した手か (補正前の値は `value + 1`)。
+    pub tie_lowered: bool,
 }
 
 /// 点検の表の 1 行。
@@ -197,6 +211,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
             margin: args.refutation_margin,
             depth: args.refutation_depth,
             max: args.refutation_max,
+            priority: args.priority,
             weight: &args.weight,
         };
         print!("{}", refutation::write_outputs(&args.master, &positions.0, &book, &outputs)?);
@@ -529,6 +544,7 @@ pub(super) fn audited_moves(
                 value: value.new,
                 origin,
                 eval: m.eval,
+                tie_lowered: value.tie_lowered,
             }))
         })
         .collect()
@@ -1056,6 +1072,7 @@ mod tests {
             enqueue_out: None,
             refutation_depth: 2,
             refutation_max: None,
+            priority: 100,
             weight: WeightArgs {
                 opp_freq: None,
                 min_games: 3,

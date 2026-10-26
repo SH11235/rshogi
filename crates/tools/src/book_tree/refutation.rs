@@ -19,20 +19,21 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-/// 反駁の表の 1 行。値は手番の側から見た伝播後の値。
+/// 反駁の表の 1 行。値は手番の側から見た伝播後の値で、同値の -1 補正の前の値。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Refutation {
     pub key: String,
     pub ply: String,
     pub source: String,
-    /// main。値が分からなければ `None`。
+    pub main_move: String,
+    /// main の伝播後の手。値が分からなければ `None`。
     pub main: Option<AuditedMove>,
     /// 伸ばしていない手 (`Origin::Eval`) の最善。
     pub best: AuditedMove,
     pub best_source: String,
     /// 伸ばした手 (`Origin::Propagated`) の最善。
     pub expanded_best: AuditedMove,
-    /// 伝播前の読みの値の 1 位が `best` でない。
+    /// 伝播前の読みの値で `best` より大きい手がある。
     pub swapped: bool,
     pub main_is_best: bool,
     pub weight: Option<f64>,
@@ -94,13 +95,17 @@ pub(super) fn find(
     margin: i32,
     weights: Option<&SideWeights>,
     min_weight: f64,
-    sources: &HashMap<(String, String), String>,
 ) -> Result<(Vec<Refutation>, RefutationSummary)> {
     let mut summary = RefutationSummary::default();
     let mut rows = Vec::new();
     for ((key, position), known) in positions.iter().zip(&book.known) {
         let side = usize::from(key.split(' ').nth(1) == Some("w"));
-        let audited = audited_moves(&book.graph, key, position, known)?;
+        let mut audited = audited_moves(&book.graph, key, position, known)?;
+        // 伝播の書き出しは 1 位と同値で選ばなかった手を -1 する。そのまま比べると、伸ばした手と伸ばして
+        // いない手が同値でも margin 1 で当たる。
+        for m in audited.iter_mut().flatten() {
+            m.value += i32::from(std::mem::take(&mut m.tie_lowered));
+        }
         if audited.iter().flatten().count() >= 2 {
             summary.comparable[side] += 1;
         }
@@ -123,26 +128,19 @@ pub(super) fn find(
             continue;
         }
         // 伝播前の順位は読みの値で比べる。深さの違う読みが混ざるので条件には使わない。
-        let pre_top = audited
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| Some((i, m.as_ref()?.eval?)))
-            .reduce(|top, m| if m.1 > top.1 { m } else { top })
-            .map(|(i, _)| i);
+        // 同値なら入れ替わっていないとみなす。
+        let pre_top = audited.iter().flatten().filter_map(|m| m.eval).max();
         let row = Refutation {
             key: key.clone(),
             ply: position.ply.clone(),
             source: position.source.clone(),
+            main_move: position.moves[0].mv.clone(),
             main: audited[0].clone(),
-            best_source: sources
-                .get(&(key.clone(), best.mv.clone()))
-                .with_context(|| {
-                    format!("内部エラー: 手の source がありません: {key} {}", best.mv)
-                })?
-                .clone(),
+            // 当たった局面だけ後で元データから引く。
+            best_source: String::new(),
             best: best.clone(),
             expanded_best: expanded.clone(),
-            swapped: pre_top != Some(best_index),
+            swapped: pre_top > best.eval,
             main_is_best: best_index == 0,
             weight: weights.map(|w| w[side].get(key).copied().unwrap_or(0.0)),
         };
@@ -167,15 +165,19 @@ pub(super) fn find(
     Ok((rows, summary))
 }
 
-/// 元データの main・alt の行の source を (key, 手) ごとに読む。`read_master` は手の source を持たないので
-/// 反駁の表を書くときだけ読み直す。
-pub(super) fn read_move_sources(path: &Path) -> Result<HashMap<(String, String), String>> {
+/// 反駁の行の `best_source` を元データの `best` の行の source で埋める。`read_master` は手ごとの source を
+/// 持たないので、当たった局面の分だけ読み直して引く。
+pub(super) fn fill_best_sources(path: &Path, rows: &mut [Refutation]) -> Result<()> {
+    let mut wanted: HashMap<(&str, &str), usize> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        wanted.insert((r.key.as_str(), r.best.mv.as_str()), i);
+    }
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
     let col = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
     let (key_col, move_col, role_col, source_col) =
         (col("key"), col("move"), col("role"), col("source"));
-    let mut sources = HashMap::new();
+    let mut found = vec![None; rows.len()];
     // 見出しと列の数は `read_master` で検査済み。
     for line in BufReader::new(file).lines().skip(1) {
         let line = line?;
@@ -183,12 +185,16 @@ pub(super) fn read_move_sources(path: &Path) -> Result<HashMap<(String, String),
         if cells[role_col] == "record" {
             continue;
         }
-        sources.insert(
-            (cells[key_col].to_owned(), cells[move_col].to_owned()),
-            cells[source_col].to_owned(),
-        );
+        if let Some(&i) = wanted.get(&(cells[key_col], cells[move_col])) {
+            found[i] = Some(cells[source_col].to_owned());
+        }
     }
-    Ok(sources)
+    for (row, source) in rows.iter_mut().zip(found) {
+        row.best_source = source.with_context(|| {
+            format!("元データが読み込みの途中で変わりました: {} {}", row.key, row.best.mv)
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn format_table(rows: &[Refutation]) -> String {
@@ -207,7 +213,7 @@ pub(super) fn format_table(rows: &[Refutation]) -> String {
             r.key,
             r.ply,
             if black { "b" } else { "w" },
-            r.main.as_ref().map_or("", |m| m.mv.as_str()),
+            r.main_move,
             r.best.mv,
             r.best.value,
             eval(&r.best),
@@ -228,22 +234,11 @@ pub(super) fn format_table(rows: &[Refutation]) -> String {
     text
 }
 
-/// キューの行の優先度 (小さいほど先)。重みの桁 (1 以上 = 0、0.1 以上 = 1、…、重み 0 = 9) を百の位に、
-/// margin を 100 で頭打ちにして 100 から引いた値を下 2 桁に置く。重みが無ければ百の位は 0。
-pub(super) fn priority(margin: i32, weight: Option<f64>) -> u32 {
-    let decades = weight.map_or(0, |w| {
-        if w > 0.0 {
-            (-w.log10()).floor().clamp(0.0, 9.0) as u32
-        } else {
-            9
-        }
-    });
-    100 * decades + (100 - margin.clamp(1, 100)) as u32
-}
-
-/// 反駁の表の行から `book_mine tree enqueue --from` の行を作る。根は `best` を指した後の局面、自分はその局面の
-/// 手番。同じ局面なら同じ id になる。
-pub(super) fn queue_line(row: &Refutation, depth: usize) -> Result<Line> {
+/// 反駁の表の行から `book_mine tree enqueue --from` の行を作る。根は `best` を指した後の (相手の手番の)
+/// 局面で、`own` は `best` を指す側 (定跡の自分の側)。相手番の根では木が相手の応手を `opp_n` 手まで広げる
+/// ので、`best` が相手の応手に耐えるかを読める。priority は `base + min(rank, 99)` (`rank` は表の順位、
+/// 0 始まり)。id は局面と `best` で決まり、同じ局面に同じ手を足し直すと同じ id になる。
+pub(super) fn queue_line(row: &Refutation, rank: usize, depth: usize, base: u32) -> Result<Line> {
     let ply: u32 = row
         .ply
         .trim()
@@ -251,14 +246,14 @@ pub(super) fn queue_line(row: &Refutation, depth: usize) -> Result<Line> {
         .with_context(|| format!("元データの手数を読めません: {} {}", row.key, row.ply))?;
     let root = child(&row.key, &row.best.mv)?;
     let side = if row.black() { "b" } else { "w" };
-    let digest = format!("{:x}", Sha256::digest(row.key.as_bytes()));
+    let digest = format!("{:x}", Sha256::digest(format!("{} {}", row.key, row.best.mv)));
     let line = Line {
         id: format!("{}_refut_{side}", &digest[..16]),
         root: format!("sfen {root} {}", ply + 1),
         roots: Vec::new(),
         own: side.to_owned(),
         depth,
-        priority: priority(row.margin(), row.weight),
+        priority: base + rank.min(99) as u32,
         hold: false,
         game: Vec::new(),
         opts: Opts::default(),
@@ -336,6 +331,7 @@ pub(super) struct RefutationOutputs<'a> {
     pub margin: i32,
     pub depth: usize,
     pub max: Option<usize>,
+    pub priority: u32,
     pub weight: &'a WeightArgs,
 }
 
@@ -347,15 +343,9 @@ pub(super) fn write_outputs(
     outputs: &RefutationOutputs<'_>,
 ) -> Result<String> {
     let weights = side_weights(positions, outputs.weight)?;
-    let sources = read_move_sources(master)?;
-    let (rows, summary) = find(
-        positions,
-        book,
-        outputs.margin,
-        weights.as_ref(),
-        outputs.weight.min_weight,
-        &sources,
-    )?;
+    let (mut rows, summary) =
+        find(positions, book, outputs.margin, weights.as_ref(), outputs.weight.min_weight)?;
+    fill_best_sources(master, &mut rows)?;
     if let Some(path) = outputs.table {
         crate::common::io::write_atomic(path, &format_table(&rows))?;
     }
@@ -364,7 +354,8 @@ pub(super) fn write_outputs(
             let lines = rows
                 .iter()
                 .take(outputs.max.unwrap_or(usize::MAX))
-                .map(|r| queue_line(r, outputs.depth))
+                .enumerate()
+                .map(|(rank, r)| queue_line(r, rank, outputs.depth, outputs.priority))
                 .collect::<Result<Vec<_>>>()?;
             crate::common::io::write_atomic(path, &format_queue(&lines)?)?;
             Some(lines.len())
@@ -410,11 +401,12 @@ mod tests {
     ) -> (Vec<Refutation>, RefutationSummary) {
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
         let (_, _, book) = audit(&parsed, DrawValues::both(0), 1).unwrap();
+        let (mut rows, summary) = find(&parsed.0, &book, margin, weights, min_weight).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
         std::fs::write(&path, text).unwrap();
-        let sources = read_move_sources(&path).unwrap();
-        find(&parsed.0, &book, margin, weights, min_weight, &sources).unwrap()
+        fill_best_sources(&path, &mut rows).unwrap();
+        (rows, summary)
     }
 
     #[test]
@@ -472,6 +464,47 @@ mod tests {
     }
 
     #[test]
+    fn equal_eval_before_propagation_is_not_swapped() {
+        let (rows, summary) = run_find(&root_master("10"), 1, None, 0.0);
+        assert!(!rows[0].swapped);
+        assert_eq!(summary.swapped, 0);
+    }
+
+    #[test]
+    fn tie_lowered_moves_are_compared_before_the_correction() {
+        // 5i4h は A の -10 で 10、5i6h は読みの値 10 で同値。書き出しはどちらかを 9 にする。
+        let text = master(&[
+            (ROOT, "5i4h", "main", "read", ""),
+            (ROOT, "5i6h", "alt", "team", "10"),
+            (A, "5a5b", "main", "read", "-10"),
+        ]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&parsed, DrawValues::both(0), 1).unwrap();
+        let root = &parsed.0[ROOT];
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let audited = audited_moves(&book.graph, ROOT, root, &book.known[index]).unwrap();
+        assert!(audited.iter().flatten().any(|m| m.tie_lowered && m.value == 9));
+        let (rows, summary) = run_find(&text, 1, None, 0.0);
+        assert!(rows.is_empty());
+        assert_eq!(summary.mixed, [1, 0]);
+    }
+
+    #[test]
+    fn main_move_is_listed_without_its_value() {
+        let text = master(&[
+            (ROOT, "5i5h", "main", "read", ""),
+            (ROOT, "5i6h", "alt", "team", "10"),
+            (ROOT, "5i4h", "alt", "read", ""),
+            (A, "5a5b", "main", "read", "30"),
+        ]);
+        let (rows, _) = run_find(&text, 1, None, 0.0);
+        assert!(rows[0].main.is_none());
+        let table = format_table(&rows);
+        let cells: Vec<_> = table.lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(cells[3..7], ["5i5h", "", "", "5i6h"]);
+    }
+
+    #[test]
     fn main_is_best_when_main_is_the_unexpanded_move() {
         let text = master(&[
             (ROOT, "5i6h", "main", "team", "10"),
@@ -497,25 +530,20 @@ mod tests {
     #[test]
     fn queue_line_roots_after_the_unexpanded_move() {
         let (rows, _) = run_find(&root_master(""), 1, None, 0.0);
-        let line = queue_line(&rows[0], 2).unwrap();
+        let line = queue_line(&rows[0], 0, 2, 100).unwrap();
+        // own は best を指す側のまま、根は best を指した後の相手の手番の局面。
         assert_eq!(line.root, "sfen 4k4/9/9/9/9/9/9/3K5/9 w - 2");
         assert_eq!(line.own, "b");
         assert_eq!(line.depth, 2);
-        assert_eq!(line.priority, 60);
+        assert_eq!(line.priority, 100);
+        assert_eq!(queue_line(&rows[0], 150, 2, 100).unwrap().priority, 199);
         assert!(line.id.ends_with("_refut_b"));
-        assert_eq!(queue_line(&rows[0], 2).unwrap().id, line.id);
+        assert_eq!(queue_line(&rows[0], 3, 2, 100).unwrap().id, line.id);
+        let mut other_best = rows[0].clone();
+        other_best.best.mv = "5i5h".into();
+        assert_ne!(queue_line(&other_best, 0, 2, 100).unwrap().id, line.id);
         let text = format_queue(std::slice::from_ref(&line)).unwrap();
         let parsed: Line = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(parsed, line);
-    }
-
-    #[test]
-    fn priority_puts_weight_decades_before_margin() {
-        assert_eq!(priority(40, None), 60);
-        assert_eq!(priority(150, None), 0);
-        assert_eq!(priority(40, Some(2.0)), 60);
-        assert_eq!(priority(40, Some(0.05)), 160);
-        assert_eq!(priority(40, Some(0.0)), 960);
-        assert_eq!(priority(1, Some(1e-12)), 999);
     }
 }

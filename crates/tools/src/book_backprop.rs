@@ -38,6 +38,8 @@ const ROW_FLIP: u8 = 2;
 const ROW_PRESERVE: u8 = 4;
 /// 手順の合流を補完した行。局面の行の最後に並び、探索ラベルを持たない。
 const ROW_ADDED: u8 = 8;
+/// 1 位と同値で選ばれず、伝播後の値を -1 した行。
+const ROW_TIE_LOWERED: u8 = 16;
 
 const NODE_BLACK: u8 = 1;
 const NODE_CHECKED: u8 = 2;
@@ -77,6 +79,8 @@ pub struct MoveValue {
     pub edge: Option<Edge>,
     /// 合法な指し手を持つ行か。非合法手と `none` 行は `false`。
     pub usable: bool,
+    /// 1 位と同値で選ばれず、`new` を -1 した行か (補正前の値は `new + 1`)。
+    pub tie_lowered: bool,
 }
 
 /// 逆伝播の追加オプション。既定値は `book_backprop` の従来挙動。
@@ -202,6 +206,7 @@ impl Graph {
                 via_flip: self.row_flags[row] & ROW_FLIP != 0,
             }),
             usable: self.usable(row),
+            tie_lowered: self.row_flags[row] & ROW_TIE_LOWERED != 0,
         })
     }
 
@@ -1949,6 +1954,7 @@ fn assign_outputs(
         let chosen_distance =
             result.as_ref().zip(chosen).and_then(|(r, c)| r.rows[c].and_then(|(_, d)| d));
         for (idx, row) in graph.rows(node).enumerate() {
+            let mut lowered = false;
             let value = match result.as_ref().and_then(|r| r.rows[idx]) {
                 Some((value, distance))
                     if !preserved && !graph.preserve(row) && graph.usable(row) =>
@@ -1961,7 +1967,9 @@ fn assign_outputs(
                             && common(idx));
                     if best && !keep {
                         // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
-                        value.saturating_sub(1).max(-Value::MATE.raw())
+                        let lowered_value = value.saturating_sub(1).max(-Value::MATE.raw());
+                        lowered = lowered_value != value;
+                        lowered_value
                     } else {
                         value
                     }
@@ -1969,6 +1977,9 @@ fn assign_outputs(
                 _ => graph.old[row],
             };
             graph.new[row] = value;
+            // 保証検査で絞り直すと同じ行を書き直すので、毎回付け直す。
+            graph.row_flags[row] = (graph.row_flags[row] & !ROW_TIE_LOWERED)
+                | if lowered { ROW_TIE_LOWERED } else { 0 };
         }
     }
 }
