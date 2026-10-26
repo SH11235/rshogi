@@ -16,6 +16,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `psv_profile` を追加。PSV 教師データの手数の帯ごとの入玉 (先手玉・後手玉・相入玉)・宣言できる局面・勝敗と、シャッフル前の
+  棋譜順の PSV では対局ごとの終局 (宣言勝ちか、開始・終局の手数) を集計し、`--json` で保存する。
+
 - `book_mine master audit` に反駁の点検 (YaneuraOu の `peta refutation` に当たる) を追加。`--refutation-table` で、伝播後の
   1 位が先を伸ばしていない手で、伸ばした手の最善を `--refutation-margin` (既定 1) 以上上回る局面を書き、`--enqueue-out` で
   その手の後の局面を根にした `tree enqueue --from` の行を書く (priority は `--priority` + 表の順位)。重みは `master rejoin`

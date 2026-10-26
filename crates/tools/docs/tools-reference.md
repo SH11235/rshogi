@@ -17,6 +17,7 @@
 | [`prep_hcpe`](prep_hcpe.md) | hcpe の汚染・重複除去、予算内のメモリ内 shuffle / ディスク切替、メモリ見積もり、件数制限・分割 |
 | [`preprocess_psv`](preprocess_psv.md) | qsearch leaf への置換と、変更行の bitmap mask 出力 |
 | [`filter_teacher_data`](filter_teacher_data.md) | 王手・評価値による抽出、クリップ、統計出力 |
+| [`psv_profile`](psv_profile.md) | 手数・入玉・宣言・勝敗の分布と、棋譜順 PSV の対局ごとの終局を集計 |
 | [`validate_psv`](validate_psv.md) | PSV の不正局面を検出・除去し、入力 alias を拒否 |
 | [`validate_sfens`](../src/bin/validate_sfens.rs) | SFEN テキストの不正局面を検出・除去 |
 | [`relabel_psv`](relabel_psv.md) | 勝敗による score 置換、宣言勝ち・diversion の検査 |
