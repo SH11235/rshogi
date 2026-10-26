@@ -17,10 +17,10 @@ use std::io::{self, Read};
 /// FeatureTransformerのパラメータ
 #[repr(C, align(64))]
 pub struct FeatureTransformer {
-    /// バイアス [half_dimensions]
+    /// バイアス `[half_dimensions]`
     pub biases: Aligned<[i16; TRANSFORMED_FEATURE_DIMENSIONS]>,
 
-    /// 重み [input_dimensions][half_dimensions]
+    /// 重み `[input_dimensions][half_dimensions]`
     /// 64バイトアラインメントで確保（aligned load/store用）
     pub weights: AlignedBox<i16>,
 }

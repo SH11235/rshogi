@@ -29,7 +29,7 @@ fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut 
 
 /// 活性段ごとの 127 飽和カウント（診断用）。
 ///
-/// ClippedReLU / SqrClippedReLU 系の活性は u8 [0,127] に clamp されるため、
+/// ClippedReLU / SqrClippedReLU 系の活性は u8 `[0,127]` に clamp されるため、
 /// 127 到達率が高いほど量子化天井で情報が落ちている。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LsSaturationCounts {

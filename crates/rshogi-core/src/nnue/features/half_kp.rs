@@ -1,7 +1,7 @@
 //! HalfKP 特徴量
 //!
 //! 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
-//! YaneuraOu の HalfKP<Friend> に相当する。
+//! YaneuraOu の `HalfKP<Friend>` に相当する。
 
 use super::Feature;
 use super::TriggerEvent;
@@ -11,7 +11,7 @@ use crate::nnue::piece_list::PieceNumber;
 use crate::position::Position;
 use crate::types::{Color, Square};
 
-/// HalfKP<Friend> 特徴量
+/// `HalfKP<Friend>` 特徴量
 ///
 /// 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
 /// 自玉が動いた場合にアキュムレータの全計算が必要になる。

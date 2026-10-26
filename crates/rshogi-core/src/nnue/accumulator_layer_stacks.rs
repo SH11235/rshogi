@@ -19,16 +19,16 @@ use super::finny::{apply_weight_changes_to_two, collect_piece_list_diff};
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct AccumulatorLayerStacks<const L1: usize> {
-    /// 各視点の累積値 [perspective][dimension]
+    /// 各視点の累積値 `[perspective][dimension]`
     /// perspective: 0 = Black, 1 = White
     pub accumulation: [[i16; L1]; 2],
 
-    /// Threat アキュムレータ [perspective][dimension]
+    /// Threat アキュムレータ `[perspective][dimension]`
     /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
     #[cfg(feature = "nnue-threat")]
     pub threat_accumulation: [[i16; L1]; 2],
 
-    /// PSQT アキュムレータ [perspective][bucket]
+    /// PSQT アキュムレータ `[perspective][bucket]`
     /// 各駒の PSQT 重みを視点ごとに累積する。
     #[cfg(feature = "nnue-psqt")]
     pub psqt_accumulation: [[i32; MAX_LAYER_STACK_BUCKETS]; 2],
