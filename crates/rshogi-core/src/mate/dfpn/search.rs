@@ -1083,7 +1083,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     fn has_reply_lasting(&mut self, st: &mut S, len: u16) -> Result<bool, Abort> {
         let mut replies = std::mem::take(&mut self.scratch.reply_moves);
         replies.clear();
-        st.generate(false, &mut replies);
+        generate_replies(st, &mut replies);
         let mut result = Ok(false);
         for &mv in &replies {
             if st.is_drop(mv) {
@@ -1454,6 +1454,16 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             searched,
         );
     }
+}
+
+/// 受け方の応手を生成する。
+///
+/// 呼び出し側 (`Searcher::futile_drop`) のフレームは無駄合いの判定の入れ子 (`Searcher::solve_detached`)
+/// のあいだスタックに残るので、生成の作業領域 (指し手の最大数ぶんの配列) をそこへ inline させない。
+/// inline されると、入れ子 1 段ごとにその作業領域がスタックに積み重なる。
+#[inline(never)]
+fn generate_replies<S: MateState>(st: &S, out: &mut Vec<S::Mv>) {
+    st.generate(false, out);
 }
 
 /// TCA: 現局面の値を少しだけ超えるまで閾値を延ばす

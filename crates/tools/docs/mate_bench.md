@@ -68,7 +68,8 @@ TSV (`--out`、入力順) の列:
 ブラウザに組み込むとき (wasm) の速さは、rshogi-core の example `mate_bench_wasm` を WASI 向けにビルドして
 Node.js 20 以降 (V8。Chromium と同じエンジン) で動かして測る。`mate_bench` は wasm にビルドできない依存 (tokio) を
 持つため、rshogi-core だけに依存する 1 スレッドの最小版を別に置いている。局面の選び方 (`--stride` `--offset`
-`--limit` `--flip`) と `--nodes` `--hash-mb` `--mode` は `mate_bench` と同じ。時間の上限・分位点・正解との照合は無い。
+`--limit` `--flip`、行末の `<TAB><作意手数>` は読めることだけ確かめて使わない) と `--nodes` `--hash-mb` `--mode` `--shortest` は `mate_bench` と同じ。
+時間の上限・分位点・正解との照合は無い。
 
 ```bash
 # rshogi のリポジトリの直下で
@@ -82,14 +83,17 @@ node /path/to/rshogi/scripts/run_wasi.mjs \
   --input yaneuraou-2020/mate11.sfen --stride 1000 --nodes 2000000 --out mate11-wasm.tsv
 ```
 
-- 出力は `局面` と `nodes` の 2 行と、`--out` の TSV (`sfen` `result` `pv_len` `nodes` `micros`)。
-  同じ `--hash-mb` と `--mode` なら、ノード数と判定は native の `mate_bench` と一致する
+- 出力は `局面` と `nodes` の 2 行と、`--out` の TSV (`sfen` `result` `pv_len` `nodes` `micros` `pv`)。
+  同じ `--hash-mb` `--mode` `--shortest` なら、ノード数・判定・手順は native の `mate_bench` と一致する
   (探索深さの上限が違うので、深さ 1024 に達する局面を除く。その局面では判定も変わりうる)。
 - `--out` は存在しないファイルにする (wasm ではパスの別名を見分けられないので、入力を上書きしないよう既存のファイルには書かない)。
 - 引数の誤りは終了コード 2、実行中の失敗は 1 (それまでの局面の TSV は残る)。
 
 探索は手数ごとに再帰するので、wasm ではスタックが 2 種類要る: wasm のメモリ上のスタック (Rust の既定 1 MB) と、
 実行エンジンの呼び出しスタック (Node.js のメインスレッドはおよそ 1 MB、Chromium の Worker はおよそ 770 KB)。
-1 手あたり前者を約 100 byte、後者を約 340〜400 byte (ビルドで変わる) 使うので、wasm では探索深さの上限を
+1 手あたり前者を約 160 byte、後者を約 340〜400 byte (ビルドで変わる) 使うので、wasm では探索深さの上限を
 1024 手 (native は 2048 手) にして後者を約 400 KB 以下に抑えている。呼び出しスタックが足りないと `RangeError: Maximum call stack size exceeded`
-で探索が止まる (`node --stack-size=<KB>` で上限を変えて確かめられる)。
+で探索が止まる (`node --stack-size=<KB>` で上限を変えて確かめられる)。wasm のメモリ上のスタックが足りないと
+`RuntimeError: memory access out of bounds` で止まる (リンカの `-zstack-size=<byte>` で大きさを変えて確かめられる)。
+最短手順モード (`--shortest`) では、手順を選ぶ再帰と、`tsume` の無駄合いの判定で別の局面を入れ子に解く分だけ、
+どちらのスタックも多く使う。

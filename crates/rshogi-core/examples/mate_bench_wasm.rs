@@ -5,7 +5,7 @@
 //! (ブラウザに組み込むときと同じコード生成) での速さを測るために WASI 向けにビルドして Node.js で動かす。
 //! 手順は `crates/tools/docs/mate_bench.md` の「wasm で測る」。
 //!
-//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--mode Speed|Power] [--out <tsv>]`
+//! 引数: `--input <file> [--stride N] [--offset N] [--limit N] [--flip] [--nodes N] [--hash-mb N] [--mode Speed|Power] [--shortest tsume|all] [--out <tsv>]`
 //! 終了コード: 引数の誤りは 2、実行中の失敗は 1。
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult};
+use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult, ShortestMode};
 use rshogi_core::position::Position;
 
 struct Args {
@@ -25,6 +25,7 @@ struct Args {
     nodes: u64,
     hash_mb: usize,
     mode: MateMode,
+    shortest: Option<ShortestMode>,
     out: Option<String>,
 }
 
@@ -38,6 +39,7 @@ fn parse_args() -> Result<Args, String> {
         nodes: 0,
         hash_mb: 64,
         mode: MateMode::default(),
+        shortest: None,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -66,6 +68,12 @@ fn parse_args() -> Result<Args, String> {
             "--mode" => {
                 args.mode = MateMode::from_name(&value)
                     .ok_or_else(|| format!("--mode {value}: Speed / Power のどちらか"))?
+            }
+            "--shortest" => {
+                args.shortest = Some(
+                    ShortestMode::from_name(&value)
+                        .ok_or_else(|| format!("--shortest {value}: tsume / all のどちらか"))?,
+                )
             }
             _ => return Err(format!("知らない引数: {flag}")),
         }
@@ -99,13 +107,14 @@ fn run(args: &Args) -> Result<(), String> {
                     |e| format!("{path} を新しく作れない (既にあるファイルには書かない): {e}"),
                 )?;
             let mut w = BufWriter::new(file);
-            writeln!(w, "sfen\tresult\tpv_len\tnodes\tmicros").map_err(|e| e.to_string())?;
+            writeln!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv").map_err(|e| e.to_string())?;
             Some(w)
         }
         None => None,
     };
 
     let mut solver = DfpnSolver::with_mode(args.hash_mb, args.mode);
+    solver.set_shortest(args.shortest);
     let limits = MateLimits {
         nodes: args.nodes,
         time_ms: 0,
@@ -128,7 +137,18 @@ fn run(args: &Args) -> Result<(), String> {
         if !selected {
             continue;
         }
-        let sfen = line.strip_prefix("sfen ").unwrap_or(line).to_string();
+        // 作品集の `<SFEN><TAB><作意手数>` の行は、mate_bench と同じく手数が読めることだけ確かめて SFEN を使う
+        let sfen = match line.split_once('\t') {
+            Some((sfen, expect)) => {
+                expect
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("正解の詰み手数を読めない: {line}"))?;
+                sfen.trim()
+            }
+            None => line,
+        };
+        let sfen = sfen.strip_prefix("sfen ").unwrap_or(sfen).to_string();
         let mut pos = Position::new();
         pos.set_sfen(&sfen).map_err(|e| format!("SFEN を読めない: {sfen}: {e:?}"))?;
         let flipped = (args.flip && !pos.in_check()).then(|| flip_side_to_move(&sfen));
@@ -158,8 +178,15 @@ fn run(args: &Args) -> Result<(), String> {
             };
             total_nodes += solver.nodes();
             if let Some(w) = out.as_mut() {
-                writeln!(w, "{s}\t{tag}\t{pv_len}\t{}\t{micros}", solver.nodes())
+                write!(w, "{s}\t{tag}\t{pv_len}\t{}\t{micros}\t", solver.nodes())
                     .map_err(|e| e.to_string())?;
+                if let MateResult::Mate(pv) = &result {
+                    for (i, mv) in pv.iter().enumerate() {
+                        let sep = if i == 0 { "" } else { " " };
+                        write!(w, "{sep}{}", mv.to_usi()).map_err(|e| e.to_string())?;
+                    }
+                }
+                writeln!(w).map_err(|e| e.to_string())?;
             }
             solved += 1;
             if args.limit != 0 && solved >= args.limit {
