@@ -69,16 +69,16 @@ impl CsaSource {
         let md = fs::metadata(&self.input)
             .with_context(|| format!("failed to stat {}", self.input.display()))?;
         if md.is_dir() {
-            let mut paths: Vec<PathBuf> = WalkDir::new(&self.input)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().and_then(|x| x.to_str()) == Some("csa")
-                })
-                .map(|e| e.into_path())
-                .collect();
+            let mut paths = Vec::new();
+            for entry in WalkDir::new(&self.input).follow_links(false) {
+                let entry = entry?;
+                if entry.file_type().is_file()
+                    && entry.path().extension().and_then(|extension| extension.to_str())
+                        == Some("csa")
+                {
+                    paths.push(entry.into_path());
+                }
+            }
             paths.sort();
             Ok(paths)
         } else {

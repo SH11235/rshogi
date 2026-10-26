@@ -16,8 +16,12 @@ YaneuraOu の `bench` コマンド相当の標準ベンチマーク機能を提�
 #### 内部APIモード（自作エンジン）
 
 ```bash
-cargo run -p tools --bin benchmark --release -- --internal
+cargo run -p tools --bin benchmark --release -- \
+  --internal --usi-option MaterialLevel=1 \
+  --limit-type nodes --limit 10000 --tt-mb 16 --eval-hash-mb 16
 ```
+
+評価関数なしの短い動作確認例です。NNUE の性能を測るときは `--nnue-file` と必要な routing を指定します。
 
 #### USIモード（外部エンジン）
 
@@ -90,7 +94,7 @@ Threads    Total Nodes     Total Time      Avg NPS         Efficiency
 #### JSON出力
 
 結果は `benchmark_results/` に自動保存されます：
-- ファイル名形式: `YYYYMMDDhhmmss_enginename_threads.json`
+- ファイル名形式: `YYYYMMDDhhmmss_enginename_threads.json`。エンジン名はファイル名に使える文字へ置換し、UTF-8 の文字境界を保って最大 100 byte に短縮します。
 - システム情報、エンジン情報、全測定結果を含む
 
 ### ライブラリとしての使用

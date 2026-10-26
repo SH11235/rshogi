@@ -23,6 +23,7 @@ use std::{
 use clap::Parser;
 use tools::common::dedup::{
     PSV_SIZE, SFEN_SIZE, check_output_not_in_inputs, collect_input_paths, hash_packed_sfen,
+    validate_psv_file_sizes,
 };
 
 #[derive(Parser, Debug)]
@@ -57,6 +58,8 @@ fn main() -> io::Result<()> {
         eprintln!("入力ファイルが見つかりません");
         return Ok(());
     }
+
+    validate_psv_file_sizes(&paths)?;
 
     // 入力と出力の重複チェック（出力ファイルが未作成でも検出可能）
     check_output_not_in_inputs(&args.output, &paths)?;

@@ -22,6 +22,7 @@ use std::{
 use clap::Parser;
 use tools::common::dedup::{
     PSV_SIZE, SFEN_SIZE, collect_input_paths, game_ply_from_record, hash_packed_sfen,
+    validate_psv_file_sizes,
 };
 
 #[derive(Parser, Debug)]
@@ -119,6 +120,8 @@ fn main() -> io::Result<()> {
         eprintln!("No valid data files found");
         return Ok(());
     }
+
+    validate_psv_file_sizes(&paths)?;
 
     eprintln!("{} files found", paths.len());
 

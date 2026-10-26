@@ -30,7 +30,9 @@ use std::{
 };
 
 use clap::Parser;
-use tools::common::dedup::{PSV_SIZE, SFEN_SIZE, check_output_not_in_inputs, collect_input_paths};
+use tools::common::dedup::{
+    PSV_SIZE, SFEN_SIZE, check_output_not_in_inputs, collect_input_paths, validate_psv_file_sizes,
+};
 use tools::common::memory::available_memory_bytes;
 
 #[derive(Parser, Debug)]
@@ -206,15 +208,7 @@ fn count_records(label: &str, paths: &[PathBuf]) -> io::Result<u64> {
     eprintln!("[{label}]");
     for p in paths {
         let sz = std::fs::metadata(p)?.len();
-        let n = sz / PSV_SIZE as u64;
-        if sz % PSV_SIZE as u64 != 0 {
-            eprintln!(
-                "Warning: {} のサイズが {} の倍数ではありません (残余 {} bytes)",
-                p.display(),
-                PSV_SIZE,
-                sz % PSV_SIZE as u64,
-            );
-        }
+        let n = validate_psv_file_sizes(std::slice::from_ref(p))?;
         total += n;
         eprintln!("  {}: {n} records ({:.2} GB)", p.display(), sz as f64 / 1e9);
     }
@@ -224,7 +218,7 @@ fn count_records(label: &str, paths: &[PathBuf]) -> io::Result<u64> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    if args.fpr <= 0.0 || args.fpr >= 1.0 {
+    if !(args.fpr > 0.0 && args.fpr < 1.0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--fpr は 0.0〜1.0 の間で指定してください",

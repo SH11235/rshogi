@@ -142,17 +142,8 @@ fn main() -> Result<()> {
         bail!("入力ファイルが見つかりません");
     }
 
-    let output_canonical = args.output.canonicalize().ok();
-    for path in &paths {
-        if let Ok(input_canonical) = path.canonicalize()
-            && Some(&input_canonical) == output_canonical.as_ref()
-        {
-            bail!("出力ファイルが入力ファイルと同一です: {}", path.display());
-        }
-    }
-
-    let out_file = File::create(&args.output)
-        .with_context(|| format!("出力ファイルを作成できません: {}", args.output.display()))?;
+    let inputs: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+    let out_file = tools::output_path::create_safe_output_file(&args.output, &inputs)?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
     let mut total = Stats::default();

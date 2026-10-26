@@ -576,6 +576,38 @@ fn parse_reference_paths(reference: &str) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn check_partition_outputs(
+    input_subdir: &Path,
+    ref_subdir: &Path,
+    partitions: usize,
+    inputs: &[PathBuf],
+    references: &[PathBuf],
+    output: Option<&Path>,
+) -> io::Result<()> {
+    if references.is_empty() && output.is_some() {
+        let reference_directory = tools::common::dedup::canonicalize_maybe_new(ref_subdir)?;
+        for input in inputs {
+            if input.canonicalize()?.starts_with(&reference_directory) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "input is inside the temporary reference directory: {}",
+                        input.display()
+                    ),
+                ));
+            }
+        }
+    }
+    let mut outputs: Vec<_> = [input_subdir, ref_subdir]
+        .into_iter()
+        .flat_map(|dir| (0..partitions).map(move |index| dir.join(partition_filename(index))))
+        .collect();
+    outputs.extend(output.map(Path::to_path_buf));
+    let outputs: Vec<_> = outputs.iter().map(PathBuf::as_path).collect();
+    let resources: Vec<_> = inputs.iter().chain(references).map(PathBuf::as_path).collect();
+    tools::output_path::ensure_safe_output_paths(&outputs, &resources).map_err(io::Error::other)
+}
+
 /// 入力ファイル群を 1 つのサブディレクトリ下のパーティションに振り分ける。
 ///
 /// `max_positions > 0` の場合は `total_records` がその値に達した時点で
@@ -594,6 +626,10 @@ fn partition_files_into(
     delete_inputs_on_success: bool,
 ) -> io::Result<u64> {
     std::fs::create_dir_all(subdir)?;
+
+    for index in 0..num_partitions {
+        check_output_not_in_inputs(&subdir.join(partition_filename(index)), inputs)?;
+    }
 
     let mut writers: Vec<BufWriter<File>> = (0..num_partitions)
         .map(|i| {
@@ -844,6 +880,11 @@ fn deduplicate_partitions(
         std::fs::create_dir_all(parent)?;
     }
 
+    let partition_paths: Vec<_> = std::iter::once(input_subdir)
+        .chain(ref_subdir)
+        .flat_map(|dir| (0..num_partitions).map(move |index| dir.join(partition_filename(index))))
+        .collect();
+    check_output_not_in_inputs(output_path, &partition_paths)?;
     let out_file = File::create(output_path)?;
     let mut writer = BufWriter::with_capacity(16 << 20, out_file);
 
@@ -1198,8 +1239,14 @@ fn main() -> io::Result<()> {
             eprintln!("入力ファイルが見つかりません");
             return Ok(());
         }
-        check_output_not_in_inputs(output_path, &inputs)?;
-        check_output_not_in_inputs(output_path, &ref_paths)?;
+        check_partition_outputs(
+            &input_subdir,
+            &ref_subdir,
+            partitions,
+            &inputs,
+            &ref_paths,
+            Some(output_path),
+        )?;
 
         let ref_size = sum_file_sizes(&ref_paths)?;
         let input_size = sum_file_sizes(&inputs)?;
@@ -1371,6 +1418,8 @@ fn run_partition_only(
             "入力ファイルが見つかりません (--partition-only には --input または --input-dir が必須)",
         ));
     }
+
+    check_partition_outputs(input_subdir, ref_subdir, args.partitions, &inputs, &ref_paths, None)?;
 
     // 既存 partition があれば数を揃える。不一致なら即エラー (ハッシュ空間が変わると
     // 過去ファイルとの整合が取れなくなりデータが壊れる)。

@@ -87,11 +87,15 @@ ONNX 静的評価モードの正常終了は、出力 `.db` / report / journal �
 
 探索 cache のキーは ply を除いた SFEN です。同じ親局面や同じ子局面に合流する候補手は 1 回だけ探索され、結果は journal に追記されます。
 
-journal は JSON Lines 形式です。各行には `kind`, `sfen`, `go`, `engine_fingerprint` と、子局面なら `value`/`depth`、親局面なら `bestmove` を記録します。USI 探索モードの `engine_fingerprint` は `--engine` パスの basename と、`--engine-option` を key 昇順に正規化した文字列から作ります。
+journal は JSON Lines 形式です。各行には `kind`, `sfen`, `go`, `engine_fingerprint` と、子局面なら `value`/`depth`、親局面なら `bestmove` を記録します。
 
-ONNX 静的評価モードでは journal の `go` は常に `static` です。`engine_fingerprint` は ONNX モデルファイルの basename と `--eval-scale` から作ります。モデルファイル名または eval-scale を変えた場合、同じ journal ファイル内の古い行は stale として無視されます。
+USI モードの指紋にはエンジン本体と、明示した `EvalFile` / `EvalDir` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookExploreFile` の内容を含めます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、`no_book` または空文字なら無効です。`BookExploreFile` の空文字・`<empty>` は無効値です。`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の `spsa.params` を識別します。重複した option 名は拒否します。
 
-`--resume` は `go` と `engine_fingerprint` の両方が現在の実行設定と一致する journal 行だけを再利用します。`--engine` や `--engine-option`（例: `EvalFile`）を変えた場合、同じ journal ファイル内の古い行は stale として無視され、再探索されます。
+絶対パスでモデルと資源を特定できる設定では、内容が同じときだけ再利用します。相対モデルパスや任意のファイル型 option など、エンジン固有の解決を保証できない設定は受理して実行し、警告して過去 journal の再利用だけを無効化します。再利用が必要なら対応する資源の絶対パスを明示してください。
+
+ONNX モードでは `go` は `static` で、モデルの内容と `--eval-scale` を識別します。モデルを同名で差し替えた場合も古い結果を再利用しません。
+
+`--resume` は `go` と指紋が両方一致する行だけを再利用します。内容ハッシュのない旧 journal は再探索します。実行中はモデル・エンジン・option 資源を変更しないでください。
 
 ONNX 静的評価モードでは、journal への追記を `--onnx-batch-size` 単位で行います（1 batch 推論するごとにその結果を追記）。完了済みの batch は journal に残るため、静的評価中に中断しても `--resume` で未処理の batch から再開できます。中断した batch 内の途中結果は all-or-nothing で保存されません。
 
@@ -111,3 +115,15 @@ ONNX 静的評価モードでは親局面 bestmove 探索を行わないため�
 
 探索中の `info` 行は受信期限を延長しません。期限に達すると `stop` を送り、最大 10 秒応答を回収します。期限後に `bestmove` が届いてもタイムアウトとして扱い、途中の評価を正常な journal 結果として保存しません。
 探索失敗後はその worker のエンジンを再利用しません。保存済み journal は保持され、未完了タスクは `--resume` で再開できます。
+
+## 出力先の保護
+
+`--out` / `--journal` / `--report` 同士の衝突と、入力定跡・エンジン・解決できた明示モデル・定跡・進行度係数・params 資源への出力を起動時と定跡書き出し前に拒否します。hardlink、シンボリックリンク、Windows の大小文字違いも検査します。任意のファイル型 option でも、値が直接指す既存ファイル・ディレクトリは保護候補に含めます。候補が存在しないことを起動エラーにはしません。既存の衝突しない出力は上書きされます。実行中のパス差し替えは避けてください。
+
+### エンジン名と PATH
+
+`--engine rshogi-usi` のような名前指定は PATH から解決できます。明示したパスは PATH で探しません。
+Windows では `.exe` の補完と標準のシステムフォルダー探索も行います。
+通常は選択した絶対パスを実起動・内容指紋・自動 params の識別に共通で使います。
+Windows で `.exe` 以外の名前を絶対化すると別の `.exe` が優先される場合は、元の起動名を保持し、指紋・保護には解決した実体を使います。
+実行中の PATH・エンジン・参照資源の差し替えは避けてください。

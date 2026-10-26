@@ -13,7 +13,6 @@ use clap::Parser;
 use rshogi_core::position::Position;
 use rshogi_core::types::Move;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tools::common::io::write_atomic;
 use tools::progress::MultiFileProgress;
 use tools::selfplay::{EngineConfig, EngineProcess};
@@ -177,14 +176,19 @@ enum ParentSource {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     validate_cli(&cli)?;
+    cli.engine = tools::book_fingerprint::resolve_engine_path(&cli.engine)?;
 
     rshogi_book::Book::from_path(&cli.book, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", cli.book.display()))?;
     let book = read_book_db(&cli.book)?;
     let engine_fingerprint = engine_fingerprint(&cli.engine, &cli.engine_options)?;
-    let mut journal = if cli.resume {
+    let reusable = tools::book_fingerprint::has_explicit_model(&cli.engine_options)?;
+    if cli.resume && !reusable {
+        eprintln!("警告: EvalFile / EvalDir が未指定のため journal を再利用しません");
+    }
+    let mut journal = if cli.resume && reusable {
         load_journal(&cli.journal, &cli.go, &engine_fingerprint)?
     } else {
         LoadedJournal::default()
@@ -344,22 +348,7 @@ fn strip_ply(sfen: &str) -> &str {
 }
 
 fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<String> {
-    let engine_name =
-        engine_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    let engine_bytes = std::fs::read(engine_path)
-        .with_context(|| format!("engine binary を読めません: {}", engine_path.display()))?;
-    let engine_sha256 = Sha256::digest(&engine_bytes);
-    let mut normalized_options: Vec<&str> = engine_options.iter().map(String::as_str).collect();
-    normalized_options
-        .sort_by(|a, b| engine_option_key(a).cmp(engine_option_key(b)).then_with(|| a.cmp(b)));
-    Ok(format!(
-        "{engine_name}\tsha256={engine_sha256:x}\t{}",
-        normalized_options.join("\n")
-    ))
-}
-
-fn engine_option_key(option: &str) -> &str {
-    option.split_once('=').map_or(option, |(key, _)| key)
+    tools::book_fingerprint::engine_fingerprint(engine_path, engine_options)
 }
 
 fn child_position_after_move(parent_sfen: &str, move_usi: &str) -> Result<Position> {
@@ -1214,8 +1203,8 @@ done
         let fp_b = engine_fingerprint(&engine_b, &["Hash=256".to_string()]).unwrap();
 
         assert_ne!(fp_a, fp_b);
-        assert!(fp_a.contains("sha256="));
-        assert!(fp_b.contains("sha256="));
+        assert!(fp_a.starts_with("content-v2:"));
+        assert!(fp_b.starts_with("content-v2:"));
     }
 
     #[test]

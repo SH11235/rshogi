@@ -184,6 +184,7 @@ crossterm = { version = "0.29", optional = true }
 # search_only_ab の Windows 実装 (ETW NT Kernel Logger の PMC counting) と、
 # book_mine tree の台帳のファイル lock (book_tree::file_lock) 用。
 [target.'cfg(windows)'.dependencies]
+known-folders = "1.4.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

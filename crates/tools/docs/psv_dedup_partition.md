@@ -342,3 +342,7 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 - 入力と出力が同一ファイルの場合はエラー
 - キーは PackedSfen のみ。同一局面に対する複数の教師手がある場合は `psv_dedup` と同様、最初の出現だけ残す
 - seed 未指定でもパーティション番号順に連結するため、入力全体の順序は保存されない。`--partitions` を変えると行順も変わるため、bit 再現には同じ値を使う。`--shuffle-seed` 指定時はパーティション内の順序も shuffle される
+
+出力・一時 partition が入力や参照ファイルと同じ実体を指す場合、書き込み前に拒否します。hardlink と symlink も検査し、最終出力と一時 partition の衝突も拒否します。
+
+参照を指定しない通常処理では一時 `ref/` を整理するため、入力をその配下に置く指定は拒否します。

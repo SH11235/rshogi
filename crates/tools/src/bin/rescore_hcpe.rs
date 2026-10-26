@@ -185,6 +185,8 @@ fn run(cli: &Cli) -> Result<()> {
     fs::create_dir_all(&cli.out_dir)
         .with_context(|| format!("Failed to create out-dir {}", cli.out_dir.display()))?;
 
+    validate_output_paths(cli, &inputs)?;
+
     // 評価器を yardstick と同一手順で構成（fv-scale/progress/bucket）。
     teacher_labeler::configure_eval(&LabelerEvalConfig {
         nnue: &cli.nnue,
@@ -231,12 +233,13 @@ fn run(cli: &Cli) -> Result<()> {
             break;
         }
         let out_path = output_path_for(&cli.out_dir, input)?;
-        if !cli.overwrite && output_is_complete(&out_path, input, &config_fp)? {
+        let input_fp = input_fingerprint(input, &config_fp)?;
+        if !cli.overwrite && output_is_complete(&out_path, input, &input_fp)? {
             skipped_files += 1;
             continue; // resume: 同一 config・件数一致の完了済みチャンクのみ skip
         }
         // 1 ファイルの失敗（破損レコード・IO）はそのファイルだけ未完了として続行し、最後に非ゼロ終了。
-        match process_file(cli, input, &out_path, &tune_params, num_threads, &config_fp) {
+        match process_file(cli, input, &out_path, &tune_params, num_threads, &input_fp) {
             Ok(stats) => {
                 total.written += stats.written;
                 total.skipped += stats.skipped;
@@ -271,6 +274,38 @@ fn run(cli: &Cli) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn planned_outputs(out_path: &Path) -> Vec<PathBuf> {
+    [
+        "",
+        ".tmp",
+        ".meta",
+        ".meta.tmp",
+        ".tmp.meta",
+        ".tmp.meta.tmp",
+    ]
+    .into_iter()
+    .map(|suffix| {
+        let mut path = out_path.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    })
+    .collect()
+}
+
+fn validate_output_paths(cli: &Cli, inputs: &[PathBuf]) -> Result<()> {
+    let mut resources: Vec<_> = inputs.iter().map(PathBuf::as_path).collect();
+    resources.push(&cli.nnue);
+    resources.extend(cli.ls_progress_coeff.as_deref());
+    resources.extend(cli.spsa_params.as_deref());
+    let outputs = inputs
+        .iter()
+        .map(|input| output_path_for(&cli.out_dir, input))
+        .collect::<Result<Vec<_>>>()?;
+    let outputs: Vec<_> = outputs.iter().flat_map(|path| planned_outputs(path)).collect();
+    let output_refs: Vec<_> = outputs.iter().map(PathBuf::as_path).collect();
+    tools::output_path::ensure_safe_output_paths(&output_refs, &resources)
 }
 
 /// 出力チャンクの完了メタ（`<out>.meta`）のパス。
@@ -344,6 +379,13 @@ fn config_fingerprint(cli: &Cli, tune_params: &[(String, i32)]) -> Result<String
         h.update(value.to_le_bytes());
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn input_fingerprint(input: &Path, config_fp: &str) -> Result<String> {
+    let mut hasher = Sha256::new();
+    update_tagged(&mut hasher, b"config", config_fp.as_bytes());
+    hash_file_tagged(&mut hasher, b"input", input)?;
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// `タグ + u64長 + バイト列` を hasher に投入する（セクション境界の曖昧さを排除）。
@@ -564,6 +606,7 @@ fn run_streaming(
         .truncate(false) // 全消去ではなく set_len で N*38 へ切り詰める（resume プレフィックスを残す）。
         .open(&tmp_path)
         .with_context(|| format!("Failed to open {}", tmp_path.display()))?;
+    tools::output_path::ensure_safe_output_file(&file, &tmp_path, &[input], &[])?;
     file.set_len(start_written * HCPE_RECORD_SIZE as u64)
         .with_context(|| format!("Failed to truncate {}", tmp_path.display()))?;
     file.seek(SeekFrom::End(0))
@@ -915,6 +958,37 @@ fn count_records(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_same_size_input_invalidates_completed_and_partial_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.hcpe");
+        let output = dir.path().join("out.hcpe");
+        fs::write(&input, [1; HCPE_RECORD_SIZE]).unwrap();
+        fs::write(&output, [2; HCPE_RECORD_SIZE]).unwrap();
+        let original = input_fingerprint(&input, "settings").unwrap();
+        write_meta(&output, HCPE_RECORD_SIZE as u64, 1, &original).unwrap();
+        assert!(output_is_complete(&output, &input, &original).unwrap());
+        let checkpoint = TmpMeta {
+            input_bytes: HCPE_RECORD_SIZE as u64,
+            config_fp: original,
+            input_seq: 1,
+            output_records: 1,
+        };
+        fs::write(&input, [3; HCPE_RECORD_SIZE]).unwrap();
+        let changed = input_fingerprint(&input, "settings").unwrap();
+        assert!(!output_is_complete(&output, &input, &changed).unwrap());
+        assert!(matches!(
+            decide_resume(
+                Some(checkpoint),
+                HCPE_RECORD_SIZE as u64,
+                &changed,
+                HCPE_RECORD_SIZE as u64,
+                1
+            ),
+            ResumeDecision::Fresh
+        ));
+    }
 
     #[test]
     fn output_path_uses_input_filename() {

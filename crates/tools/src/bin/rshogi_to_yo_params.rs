@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
 use tools::spsa_param_mapping::{
-    MappingTable, ParamRow, load_params, rshogi_to_yo_value, write_params,
+    MappingTable, ParamRow, default_spsa_c_end, load_params, rshogi_to_yo_value, write_params,
 };
 
 #[derive(Parser, Debug)]
@@ -125,13 +125,13 @@ fn detect_rshogi_default_match(rshogi_rows: &[ParamRow]) -> DefaultMatchReport {
 /// SPSA は両側に摂動するため、min/max は `value` を中心に対称な range にする。
 /// 片側だけ (例 `(0, span)`) にすると正方向の摂動が clamp されて勾配推定が壊れる。
 fn synthesize_yo_row(yo_name: &str, value: i32) -> ParamRow {
-    let abs_value = value.unsigned_abs() as i32;
-    let span = (abs_value * 2).max(8);
-    let min = value.saturating_sub(span);
-    let max = value.saturating_add(span);
+    let wide_value = i64::from(value);
+    let span = (wide_value.abs() * 2).max(8);
+    let min = (wide_value - span).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let max = (wide_value + span).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     // YO 側 .params の step は整数前提で扱われるため round する
     // (yo_to_rshogi_params の rshogi_default_rows と整合)
-    let step = (((max - min) as f64) / 20.0).max(1.0).round();
+    let step = default_spsa_c_end(min, max);
     ParamRow {
         name: yo_name.to_owned(),
         kind: "int".to_owned(),
@@ -223,7 +223,8 @@ fn main() -> Result<()> {
             }
             continue;
         };
-        let new_value = rshogi_to_yo_value(r_row.value, mapping.sign_flip);
+        let new_value = rshogi_to_yo_value(r_row.value, mapping.sign_flip)
+            .with_context(|| format!("{} -> {}", mapping.rshogi, mapping.yo))?;
         let mut yo_row = base_by_name
             .get(yo_name)
             .map(|r| (*r).clone())
@@ -294,6 +295,31 @@ mod tests {
             alpha: 0.002,
             not_used: false,
         }
+    }
+
+    #[test]
+    fn synthesized_ranges_cover_extreme_and_normal_values() {
+        for value in [
+            i32::MIN,
+            i32::MAX,
+            -1_073_741_824,
+            1_073_741_824,
+            -100,
+            -1,
+            0,
+            1,
+            100,
+        ] {
+            let row = synthesize_yo_row("parameter", value);
+            assert_eq!(row.value, value);
+            assert!(row.min <= value && value <= row.max);
+            assert!(row.min < row.max);
+            assert!(row.step.is_finite() && row.step >= 1.0);
+        }
+        let ordinary = synthesize_yo_row("parameter", 100);
+        assert_eq!((ordinary.min, ordinary.max, ordinary.step), (-100, 300, 20.0));
+        let minimum = synthesize_yo_row("parameter", i32::MIN);
+        assert_eq!((minimum.min, minimum.max), (i32::MIN, i32::MAX));
     }
 
     #[test]

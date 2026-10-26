@@ -99,7 +99,7 @@ fn main() -> Result<()> {
             if sfen_match { "一致" } else { "変更" },
             orig_score,
             prep_score,
-            prep_score - orig_score
+            i32::from(prep_score) - i32::from(orig_score)
         );
     }
     eprintln!();

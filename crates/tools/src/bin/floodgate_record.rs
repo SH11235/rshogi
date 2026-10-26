@@ -355,8 +355,8 @@ fn history_recorded_today(history: Option<&Path>, me: &str) -> bool {
 
 /// 履歴ファイルに `date<TAB>name<TAB>rate` を 1 行追記する。同一 (date, name) の行が
 /// 既にあれば何もしない(レートページは日次生成のため、同日の再実行で重複させない)。
-/// 全体を tmp に書いて rename で置き換えるので、並行実行の追記競合や過去の尻切れ行に
-/// 新行が連結される破損が起きない。追記したら `Ok(true)`。
+/// 全体を tmp に書いて rename で置き換え、尻切れ行に新行を連結しない。
+/// 読み取りと置換は不可分ではないため、同じ履歴への書き込みは直列化する。
 fn append_ratings_history(path: &Path, date: &str, name: &str, rate: f64) -> Result<bool> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,

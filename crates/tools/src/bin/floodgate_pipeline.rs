@@ -33,6 +33,7 @@ use tools::common::dedup::DedupSet;
 use tools::common::floodgate as fg;
 use tools::common::io::{open_writer, write_atomic};
 use tools::common::sfen_ops::{canonicalize_4t_with_mirror, mirror_horizontal};
+use tools::output_path::ensure_safe_output_paths;
 
 #[derive(Parser)]
 #[command(
@@ -1052,7 +1053,9 @@ fn run_download(
 
 fn visit_csa_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(root) {
+        let entry =
+            entry.with_context(|| format!("Failed to read CSA directory {}", root.display()))?;
         if entry.file_type().is_file() {
             let p = entry.path();
             if let Some(ext) = p.extension().and_then(|e| e.to_str())
@@ -1194,10 +1197,10 @@ fn run_extract(root: &str, out: &str, opts: &ExtractOptions) -> Result<()> {
     let num_files = files.len();
     eprintln!("Found {num_files} CSA files in {root:?}");
 
-    // rayon で並列パース → 各ゲームの SFEN リストを収集
-    let results: Vec<GameResult> =
-        files.par_iter().map(|p| extract_sfens_from_game(p, opts)).collect();
-
+    if out != "-" {
+        let inputs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+        ensure_safe_output_paths(&[Path::new(out)], &inputs)?;
+    }
     // 逐次で dedup + 書き出し（per_game_cap は dedup 後の書き出し数でカウント）
     let mut out_w = open_writer(out)?;
     let mut dedup = DedupSet::new(opts.mirror_dedup);
@@ -1207,36 +1210,40 @@ fn run_extract(root: &str, out: &str, opts: &ExtractOptions) -> Result<()> {
     let mut no_rating = 0usize;
     let mut games_used = 0usize;
 
-    for gr in &results {
-        if gr.error {
-            errors += 1;
-            continue;
-        }
-        if gr.no_rating {
-            no_rating += 1;
-            continue;
-        }
-        if gr.rating_skipped {
-            rating_skipped += 1;
-            continue;
-        }
-        if gr.sfens.is_empty() {
-            continue;
-        }
-        games_used += 1;
-        let mut written_this_game = 0usize;
-        for sfen in &gr.sfens {
-            if !opts.mirror_dedup || dedup.insert(sfen) {
-                writeln!(out_w, "{sfen}")?;
-                wrote += 1;
-                written_this_game += 1;
-                if opts.per_game_cap > 0 && written_this_game >= opts.per_game_cap {
-                    break;
+    const EXTRACTION_BATCH_GAMES: usize = 128;
+    for batch in files.chunks(EXTRACTION_BATCH_GAMES) {
+        let results: Vec<GameResult> =
+            batch.par_iter().map(|path| extract_sfens_from_game(path, opts)).collect();
+        for gr in &results {
+            if gr.error {
+                errors += 1;
+                continue;
+            }
+            if gr.no_rating {
+                no_rating += 1;
+                continue;
+            }
+            if gr.rating_skipped {
+                rating_skipped += 1;
+                continue;
+            }
+            if gr.sfens.is_empty() {
+                continue;
+            }
+            games_used += 1;
+            let mut written_this_game = 0usize;
+            for sfen in &gr.sfens {
+                if !opts.mirror_dedup || dedup.insert(sfen) {
+                    writeln!(out_w, "{sfen}")?;
+                    wrote += 1;
+                    written_this_game += 1;
+                    if opts.per_game_cap > 0 && written_this_game >= opts.per_game_cap {
+                        break;
+                    }
                 }
             }
         }
     }
-
     out_w.close()?;
     eprintln!("Wrote {wrote} SFENs from {games_used} games to {out}");
     if errors > 0 {
@@ -1411,5 +1418,68 @@ mod tests {
         }
         assert!(!st.push_subscribed);
         assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn extraction_batches_preserve_sorted_output_and_are_repeatable() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("csa");
+        fs::create_dir(&root)?;
+        for index in 0..257 {
+            let text = if index % 2 == 0 {
+                "V2.2\nPI\n+\n+7776FU\n%TORYO\n"
+            } else {
+                "V2.2\nPI\n+\n+2726FU\n%TORYO\n"
+            };
+            fs::write(root.join(format!("{index:03}.csa")), text)?;
+        }
+        let opts = ExtractOptions {
+            mode: Mode::All,
+            nth: &[],
+            mirror_dedup: false,
+            emit_mirror: false,
+            min_ply: 1,
+            max_ply: 0,
+            per_game_cap: 0,
+            min_rating: 0,
+        };
+        let expected: Vec<String> = visit_csa_files(&root)?
+            .iter()
+            .flat_map(|path| extract_sfens_from_game(path, &opts).sfens)
+            .collect();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        run_extract(root.to_str().unwrap(), first.to_str().unwrap(), &opts)?;
+        run_extract(root.to_str().unwrap(), second.to_str().unwrap(), &opts)?;
+        assert_eq!(fs::read(&first)?, fs::read(&second)?);
+        let text = fs::read_to_string(first)?;
+        assert_eq!(text.lines().collect::<Vec<_>>(), expected);
+        assert_eq!(text.lines().count(), 514);
+        Ok(())
+    }
+
+    #[test]
+    fn extraction_rejects_output_alias_and_missing_root() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("csa");
+        fs::create_dir(&root)?;
+        let input = root.join("game.csa");
+        let original = b"V2.2\nPI\n+\n+7776FU\n%TORYO\n";
+        fs::write(&input, original)?;
+        let output = dir.path().join("output.txt");
+        fs::hard_link(&input, &output)?;
+        let opts = ExtractOptions {
+            mode: Mode::All,
+            nth: &[],
+            mirror_dedup: false,
+            emit_mirror: false,
+            min_ply: 1,
+            max_ply: 0,
+            per_game_cap: 0,
+            min_rating: 0,
+        };
+        assert!(run_extract(root.to_str().unwrap(), output.to_str().unwrap(), &opts).is_err());
+        assert_eq!(fs::read(input)?, original);
+        assert!(visit_csa_files(&dir.path().join("missing")).is_err());
+        Ok(())
     }
 }
