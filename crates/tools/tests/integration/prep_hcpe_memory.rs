@@ -44,9 +44,20 @@ fn shuffle_budget_selects_both_methods_with_reproducible_complete_output() {
         assert!(result.status.success(), "{report}");
         assert!(report.contains("Bloom filter:"));
         assert!(report.contains("プロセス全体の上限ではありません"));
-        assert!(String::from_utf8_lossy(&result.stdout).contains("written=20000"));
+        let summary = String::from_utf8(result.stdout).unwrap();
+        let summary_count = |name: &str| -> usize {
+            summary
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix(name))
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let kept = summary_count("kept=");
+        assert_eq!(kept, summary_count("written="));
+        assert!(kept <= count as usize);
         let bytes = fs::read(output.join("chunk_00000.hcpe")).unwrap();
-        assert_eq!(bytes.len(), count as usize * 38);
+        assert_eq!(bytes.len(), kept * 38);
         if budget.is_none() {
             assert!(report.contains("初期保持バッファ:"));
             assert!(report.contains("shuffle: メモリ内 shuffle"));
@@ -69,7 +80,11 @@ fn shuffle_budget_selects_both_methods_with_reproducible_complete_output() {
         records.sort_unstable();
         records
     };
-    assert_eq!(sorted(memory.unwrap()), sorted(disk.unwrap()));
+    let memory = sorted(memory.unwrap());
+    assert_eq!(memory, sorted(disk.unwrap()));
+    assert!(memory.windows(2).all(|records| records[0] != records[1]));
+    let input = sorted(fs::read(&input).unwrap());
+    assert!(memory.iter().all(|record| input.binary_search(record).is_ok()));
 }
 
 #[test]
