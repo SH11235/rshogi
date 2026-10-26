@@ -281,6 +281,13 @@ impl DfpnSolver {
             return outcome;
         }
         let judged_nodes = self.nodes;
+        // 新しい Searcher のノード数は 0 から数えるので、進捗には判定で読んだ分を足して渡す
+        let mut continued = |p: MateProgress| {
+            progress(MateProgress {
+                nodes: judged_nodes + p.nodes,
+                ..p
+            })
+        };
         let budget = Budget {
             stop,
             halt: None,
@@ -292,7 +299,7 @@ impl DfpnSolver {
             },
             time_limit_ms: limits.time_ms,
             start,
-            progress,
+            progress: &mut continued,
         };
         let attacker = st.position().side_to_move();
         let mut searcher =
