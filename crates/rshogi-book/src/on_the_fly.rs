@@ -364,14 +364,14 @@ mod tests {
                     for (i, options) in option_sets.iter().enumerate() {
                         let seed = queries as u64 ^ i as u64;
                         let expected = probe(
-                            &memory,
+                            std::slice::from_ref(&memory),
                             &position,
                             options,
                             &mut DefaultBookRng::from_seed(seed),
                             |_| {},
                         );
                         let actual = probe(
-                            &otf,
+                            std::slice::from_ref(&otf),
                             &position,
                             options,
                             &mut DefaultBookRng::from_seed(seed),

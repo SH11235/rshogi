@@ -4,7 +4,9 @@
 //!
 //! 1. `USI_OwnBook=false` なら不使用
 //! 2. `game_ply > BookMoves` なら不使用
-//! 3. find(ply 込みキー / IgnoreBookPly)。miss かつ FlippedBook なら反転局面で再検索し指し手反転
+//! 3. find(ply 込みキー / IgnoreBookPly)。miss かつ FlippedBook なら反転局面で再検索し指し手反転。
+//!    定跡が複数ある(優先定跡)ときは先頭から順にファイルごとにこれを行い、指し手が 1 つ以上ある
+//!    最初の局面を使う
 //! 4. `to_move` + pseudo-legal + legal で合法性検証、非合法は info string 警告して除去
 //!    explore 登録局面はここで合法な定跡手との積集合から等確率で選び、ponder 解決へ進む。
 //! 5. `BookDepthLimit`(0 で無効): 筆頭手 depth 不足なら局面ごと不採用
@@ -18,7 +20,9 @@
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move};
 
-use crate::reader::Book;
+use std::borrow::Cow;
+
+use crate::reader::{Book, PositionEntry};
 use crate::{BookExploreList, flip};
 
 /// 定跡選択に用いる乱数源。テストで固定できるよう抽象化する。
@@ -140,33 +144,48 @@ struct Candidate {
     move_count: u64,
 }
 
+/// 定跡を先頭から順に find(ply 込み) し、miss なら同じファイルで flip 再検索する (選択パイプラインの 3)。
+/// 指し手が 0 個の局面は載っていないものとして次のファイルへ進む (YaneuraOu の優先定跡と同じ)。
+/// 戻り値の `bool` は反転局面で当たったか。
+///
+/// 読み出しエラーは miss と区別し、反転局面の再検索にも後ろのファイルにも進まない
+/// (丸読みなら当たる局面で、反転側や優先度の低いファイルの手を選ばないため)。
+fn find_in_books<'a>(
+    books: &'a [Book],
+    sfen: &str,
+    flipped_book: bool,
+    info: &mut dyn FnMut(&str, &str),
+) -> Option<(Cow<'a, PositionEntry>, bool)> {
+    for book in books {
+        let mut find = |key: &str| {
+            book.find_raw(key)
+                .map_err(|e| info("", &format!("Error reading book file: {e}")))
+                .ok()
+        };
+        let found = match find(sfen)? {
+            Some(entry) => Some((entry, false)),
+            None if flipped_book => find(&flip::flipped_key(sfen)?)?.map(|entry| (entry, true)),
+            None => None,
+        };
+        if let Some(found) = found.filter(|(entry, _)| !entry.moves.is_empty()) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// find + flip + 合法性検証 + 並び替えまでを行い、筆頭手が先頭に来た候補列を返す。
 ///
 /// 並びは move_count 降順 → value 降順(安定ソート)。
 fn find_candidates(
-    book: &Book,
+    books: &[Book],
     position: &Position,
     flipped_book: bool,
     info: &mut dyn FnMut(&str, &str),
 ) -> Option<Vec<Candidate>> {
     let sfen = position.to_sfen();
 
-    // 3. find(ply 込み) → miss なら flip 再検索。
-    // 読み出しエラーは miss と区別し、反転局面の再検索に進まない(丸読みなら直接当たる局面で
-    // 反転側の手を選ばないため)。
-    let mut find = |key: &str| {
-        book.find_raw(key)
-            .map_err(|e| info("", &format!("Error reading book file: {e}")))
-            .ok()
-    };
-    let (entry, flipped) = match find(&sfen)? {
-        Some(entry) => (entry, false),
-        None if flipped_book => {
-            let flipped_sfen = flip::flipped_key(&sfen)?;
-            (find(&flipped_sfen)??, true)
-        }
-        None => return None,
-    };
+    let (entry, flipped) = find_in_books(books, &sfen, flipped_book, info)?;
 
     // 4. 合法性検証。
     let mut candidates: Vec<Candidate> = Vec::with_capacity(entry.moves.len());
@@ -275,7 +294,7 @@ fn select_value_index(candidates: &[Candidate]) -> usize {
 
 /// ponder を解決する。book に ponder があれば検証して採用、無ければ 1 手進めて筆頭手を拾う。
 fn resolve_ponder(
-    book: &Book,
+    books: &[Book],
     position: &Position,
     options: &BookOptions,
     best_move: Move,
@@ -297,27 +316,30 @@ fn resolve_ponder(
     }
 
     // ponder 補完: 子局面を再 find し筆頭候補を ponder に。
-    let child_candidates = find_candidates(book, &child, options.flipped_book, &mut |_, _| {})?;
+    let child_candidates = find_candidates(books, &child, options.flipped_book, &mut |_, _| {})?;
     child_candidates.first().map(|c| c.mv)
 }
 
 /// root 局面に対して定跡を probe する。ヒットしなければ `None`。
 ///
+/// `books` は優先順 (先頭ほど優先。[`priority_book_paths`](crate::priority_book_paths) の順)。
+/// 局面が載っている最初の定跡だけを使い、その定跡で候補が全て除外されても後ろの定跡には進まない。
+///
 /// `info` には除外理由等の info string 本文(`"info string "` プレフィックスなし)が渡される。
 pub fn probe(
-    book: &Book,
+    books: &[Book],
     position: &Position,
     options: &BookOptions,
     rng: &mut dyn BookRng,
     info: impl FnMut(&str),
 ) -> Option<BookProbeResult> {
-    probe_with_explore(book, position, options, rng, None, info)
+    probe_with_explore(books, position, options, rng, None, info)
 }
 
 /// 局面指定の乱択候補を優先して定跡を probe する。
 /// `info` は `probe` と同じく info string 本文を受け取る。
 pub fn probe_with_explore(
-    book: &Book,
+    books: &[Book],
     position: &Position,
     options: &BookOptions,
     rng: &mut dyn BookRng,
@@ -337,7 +359,7 @@ pub fn probe_with_explore(
     let sfen = position.to_sfen();
     let explore_moves = explore.as_ref().and_then(|list| list.moves(&sfen, options.flipped_book));
     let mut candidates =
-        find_candidates(book, position, options.flipped_book, &mut |mv, message| {
+        find_candidates(books, position, options.flipped_book, &mut |mv, message| {
             // リスト指定手の警告は、下の warn_skipped に集約して重複を防ぐ。
             if !explore_moves.as_ref().is_some_and(|moves| moves.iter().any(|m| m == mv)) {
                 info(message);
@@ -360,7 +382,13 @@ pub fn probe_with_explore(
             info(&format!("book explore: {} from [{}]", chosen.move_usi, names.join(", ")));
             return Some(BookProbeResult {
                 best_move: chosen.mv,
-                ponder_move: resolve_ponder(book, position, options, chosen.mv, &chosen.ponder_usi),
+                ponder_move: resolve_ponder(
+                    books,
+                    position,
+                    options,
+                    chosen.mv,
+                    &chosen.ponder_usi,
+                ),
             });
         }
     }
@@ -404,7 +432,7 @@ pub fn probe_with_explore(
         let chosen = &candidates[idx];
         let best_move = chosen.mv;
         let book_ponder = chosen.ponder_usi.clone();
-        let ponder_move = resolve_ponder(book, position, options, best_move, &book_ponder);
+        let ponder_move = resolve_ponder(books, position, options, best_move, &book_ponder);
 
         return Some(BookProbeResult {
             best_move,
@@ -436,7 +464,7 @@ pub fn probe_with_explore(
     let book_ponder = chosen.ponder_usi.clone();
 
     // 10. ponder 解決。
-    let ponder_move = resolve_ponder(book, position, options, best_move, &book_ponder);
+    let ponder_move = resolve_ponder(books, position, options, best_move, &book_ponder);
 
     Some(BookProbeResult {
         best_move,
@@ -492,14 +520,20 @@ mod tests {
             eval_diff: 300,
             ..Default::default()
         };
-        let normal =
-            probe(&book, &pos(HIRATE), &options, &mut SeqRng::new(vec![1]), no_info).unwrap();
+        let normal = probe(
+            std::slice::from_ref(&book),
+            &pos(HIRATE),
+            &options,
+            &mut SeqRng::new(vec![1]),
+            no_info,
+        )
+        .unwrap();
         assert_eq!(normal.best_move.to_usi(), "7g7f");
         let mut explore = BookExploreList::parse(&format!("sfen {HIRATE} 7g7f 2g2f 7g7f"), no_info);
         for (index, expected, ponder) in [(0, "7g7f", "3c3d"), (1, "2g2f", "8c8d")] {
             let mut messages = Vec::new();
             let result = probe_with_explore(
-                &book,
+                std::slice::from_ref(&book),
                 &pos(HIRATE),
                 &options,
                 &mut SeqRng::new(vec![index]),
@@ -522,10 +556,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            probe(&book, &pos(HIRATE), &options, &mut SeqRng::new(vec![1]), no_info)
-                .unwrap()
-                .best_move
-                .to_usi(),
+            probe(
+                std::slice::from_ref(&book),
+                &pos(HIRATE),
+                &options,
+                &mut SeqRng::new(vec![1]),
+                no_info
+            )
+            .unwrap()
+            .best_move
+            .to_usi(),
             "7g7f"
         );
         for options in [
@@ -540,7 +580,7 @@ mod tests {
             },
         ] {
             let result = probe_with_explore(
-                &book,
+                std::slice::from_ref(&book),
                 &pos(HIRATE),
                 &options,
                 &mut SeqRng::new(vec![1]),
@@ -560,7 +600,7 @@ mod tests {
             let mut warnings = Vec::new();
             for _ in 0..2 {
                 let result = probe_with_explore(
-                    &book,
+                    std::slice::from_ref(&book),
                     &pos(HIRATE),
                     &BookOptions::default(),
                     &mut SeqRng::new(vec![0]),
@@ -601,7 +641,7 @@ mod tests {
         assert_eq!(explore.moves(canonical, false).unwrap(), ["P*5e"]);
         let mut messages = Vec::new();
         let result = probe_with_explore(
-            &book,
+            std::slice::from_ref(&book),
             &pos(canonical),
             &BookOptions::default(),
             &mut SeqRng::new(vec![0]),
@@ -621,7 +661,7 @@ mod tests {
             let mut warnings = Vec::new();
             for _ in 0..2 {
                 probe_with_explore(
-                    &book,
+                    std::slice::from_ref(&book),
                     &pos(HIRATE),
                     &BookOptions::default(),
                     &mut SeqRng::new(vec![0]),
@@ -648,7 +688,7 @@ mod tests {
                 ..Default::default()
             };
             let result = probe_with_explore(
-                &book,
+                std::slice::from_ref(&book),
                 &pos(HIRATE),
                 &options,
                 &mut SeqRng::new(vec![0]),
@@ -661,7 +701,7 @@ mod tests {
         let mut explore =
             BookExploreList::parse(&format!("sfen {flipped} 8c8d\nsfen {HIRATE} 7g7f"), no_info);
         let result = probe_with_explore(
-            &book,
+            std::slice::from_ref(&book),
             &pos(HIRATE),
             &BookOptions::default(),
             &mut SeqRng::new(vec![0]),
@@ -672,7 +712,7 @@ mod tests {
         assert_eq!(result.best_move.to_usi(), "7g7f");
         // 定跡自体も反転検索した場合、ponder も元局面の座標に戻る。
         let result = probe_with_explore(
-            &book,
+            std::slice::from_ref(&book),
             &pos(&flipped),
             &BookOptions::default(),
             &mut SeqRng::new(vec![0]),
@@ -700,7 +740,7 @@ mod tests {
         ] {
             assert!(
                 probe_with_explore(
-                    &book,
+                    std::slice::from_ref(&book),
                     &pos(HIRATE),
                     &options,
                     &mut SeqRng::new(vec![0]),
@@ -713,7 +753,7 @@ mod tests {
         let empty_book = Book::from_reader(format!("{HEADER}\n").as_bytes(), false).unwrap();
         assert!(
             probe_with_explore(
-                &empty_book,
+                std::slice::from_ref(&empty_book),
                 &pos(HIRATE),
                 &BookOptions::default(),
                 &mut SeqRng::new(vec![0]),
@@ -725,7 +765,7 @@ mod tests {
         let mut empty = BookExploreList::default();
         assert_eq!(
             probe_with_explore(
-                &book,
+                std::slice::from_ref(&book),
                 &pos(HIRATE),
                 &BookOptions::default(),
                 &mut SeqRng::new(vec![1]),
@@ -763,8 +803,14 @@ mod tests {
         let data = format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 30 16 100\n");
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
         let mut rng = SeqRng::new(vec![0]);
-        let result =
-            probe(&book, &pos(HIRATE), &BookOptions::default(), &mut rng, no_info).unwrap();
+        let result = probe(
+            std::slice::from_ref(&book),
+            &pos(HIRATE),
+            &BookOptions::default(),
+            &mut rng,
+            no_info,
+        )
+        .unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
         assert_eq!(result.ponder_move.map(|m| m.to_usi()).as_deref(), Some("3c3d"));
     }
@@ -776,7 +822,16 @@ mod tests {
         // 定跡に無い局面(2 手目 3c3d 後)。flip でもヒットしない。
         let other = "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3";
         let mut rng = SeqRng::new(vec![0]);
-        assert!(probe(&book, &pos(other), &BookOptions::default(), &mut rng, no_info).is_none());
+        assert!(
+            probe(
+                std::slice::from_ref(&book),
+                &pos(other),
+                &BookOptions::default(),
+                &mut rng,
+                no_info
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -790,8 +845,14 @@ mod tests {
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
 
         let mut rng = SeqRng::new(vec![0]);
-        let result =
-            probe(&book, &pos(after_76), &BookOptions::default(), &mut rng, no_info).unwrap();
+        let result = probe(
+            std::slice::from_ref(&book),
+            &pos(after_76),
+            &BookOptions::default(),
+            &mut rng,
+            no_info,
+        )
+        .unwrap();
         // flip で戻された指し手が after_76(白番)局面の合法手であること。
         assert_eq!(result.best_move.to_usi(), "3c3d");
         assert!(pos(after_76).is_legal(result.best_move));
@@ -809,7 +870,9 @@ mod tests {
             ..Default::default()
         };
         let mut rng = SeqRng::new(vec![0]);
-        assert!(probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).is_none());
+        assert!(
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).is_none()
+        );
     }
 
     #[test]
@@ -821,7 +884,9 @@ mod tests {
             ..Default::default()
         };
         let mut rng = SeqRng::new(vec![0]);
-        assert!(probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).is_some());
+        assert!(
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).is_some()
+        );
     }
 
     #[test]
@@ -838,7 +903,8 @@ mod tests {
         };
         // 候補が 1 手に絞られるので抽選結果は常に 7g7f。
         let mut rng = SeqRng::new(vec![0, 0, 0]);
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
     }
 
@@ -863,8 +929,10 @@ mod tests {
 
         let mut warnings = Vec::new();
         let mut rng = SeqRng::new(vec![2]);
-        let result =
-            probe(&book, &pos(HIRATE), &opts, &mut rng, |m| warnings.push(m.to_string())).unwrap();
+        let result = probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, |m| {
+            warnings.push(m.to_string())
+        })
+        .unwrap();
 
         assert_ne!(result.best_move.to_usi(), "6g6f");
         assert!(warnings.iter().any(|w| w == "BookEvalDiff = 30 : 3 moves to 2 moves."));
@@ -885,8 +953,10 @@ mod tests {
 
         let mut warnings = Vec::new();
         let mut rng = SeqRng::new(vec![2]);
-        let result =
-            probe(&book, &pos(HIRATE), &opts, &mut rng, |m| warnings.push(m.to_string())).unwrap();
+        let result = probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, |m| {
+            warnings.push(m.to_string())
+        })
+        .unwrap();
 
         assert_eq!(result.best_move.to_usi(), "6g6f");
         assert!(!warnings.iter().any(|w| w.starts_with("BookEvalDiff = ")));
@@ -902,7 +972,9 @@ mod tests {
             ..Default::default()
         };
         let mut rng = SeqRng::new(vec![0]);
-        assert!(probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).is_none());
+        assert!(
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).is_none()
+        );
     }
 
     #[test]
@@ -919,7 +991,8 @@ mod tests {
             ..Default::default()
         };
         let mut rng = SeqRng::new(vec![0]);
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
     }
 
@@ -941,7 +1014,8 @@ mod tests {
         };
         let mut rng = SeqRng::new(vec![0, 0, 0]);
 
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
 
         assert_eq!(result.best_move.to_usi(), "2g2f");
     }
@@ -961,7 +1035,8 @@ mod tests {
         };
         let mut rng = SeqRng::new(vec![2, 2, 2]);
 
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
 
         assert_eq!(result.best_move.to_usi(), "1g1f");
     }
@@ -986,7 +1061,8 @@ mod tests {
         // i=0: 0<100 で idx=0、i=1: 149<50? false なので 7g7f のまま。
         let mut rng = SeqRng::new(vec![0, 149]);
 
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
 
         assert_eq!(result.best_move.to_usi(), "7g7f");
     }
@@ -1009,7 +1085,8 @@ mod tests {
         // select: 各手で rand_below(cumulative)。cumulative: 70, 90, 100。
         // 系列 → i=0 で採用(0<70)、i=1 で 89<20?false、i=2 で 99<10?false → 7g7f。
         let mut rng = SeqRng::new(vec![0, 89, 99]);
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
     }
 
@@ -1029,7 +1106,8 @@ mod tests {
         // i=0: rand_below(1)=0<1 → idx=0; i=1: rand_below(2)=0<1 → idx=1;
         // i=2: rand_below(3)=2<1?false → idx=1。
         let mut rng = SeqRng::new(vec![0, 0, 2]);
-        let result = probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
         assert_eq!(result.best_move.to_usi(), "2g2f");
     }
 
@@ -1040,9 +1118,13 @@ mod tests {
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
         let mut warnings = Vec::new();
         let mut rng = SeqRng::new(vec![0]);
-        let result = probe(&book, &pos(HIRATE), &BookOptions::default(), &mut rng, |m| {
-            warnings.push(m.to_string())
-        })
+        let result = probe(
+            std::slice::from_ref(&book),
+            &pos(HIRATE),
+            &BookOptions::default(),
+            &mut rng,
+            |m| warnings.push(m.to_string()),
+        )
         .unwrap();
         assert_eq!(result.best_move.to_usi(), "2g2f");
         assert!(warnings.iter().any(|w| w.contains("Illegal Move In Book DB")));
@@ -1057,9 +1139,93 @@ mod tests {
         );
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
         let mut rng = SeqRng::new(vec![0]);
-        let result =
-            probe(&book, &pos(HIRATE), &BookOptions::default(), &mut rng, no_info).unwrap();
+        let result = probe(
+            std::slice::from_ref(&book),
+            &pos(HIRATE),
+            &BookOptions::default(),
+            &mut rng,
+            no_info,
+        )
+        .unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
         assert_eq!(result.ponder_move.map(|m| m.to_usi()).as_deref(), Some("3c3d"));
+    }
+
+    fn db_book(body: &str) -> Book {
+        Book::from_reader(format!("{HEADER}\n{body}").as_bytes(), false).unwrap()
+    }
+
+    fn best_and_ponder(
+        books: &[Book],
+        sfen: &str,
+        options: &BookOptions,
+    ) -> Option<(String, String)> {
+        probe(books, &pos(sfen), options, &mut SeqRng::new(vec![0]), no_info)
+            .map(|r| (r.best_move.to_usi(), r.ponder_move.map(|m| m.to_usi()).unwrap_or_default()))
+    }
+
+    #[test]
+    fn priority_books_use_first_book_with_the_position() {
+        let other = "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3";
+        let books = [
+            db_book(&format!("sfen {other}\n2g2f none 0 0 1\n")),
+            db_book(&format!("sfen {HIRATE}\n2g2f 8c8d 0 0 1\n")),
+            db_book(&format!("sfen {HIRATE}\n7g7f 3c3d 0 0 1\n")),
+        ];
+        let options = BookOptions::default();
+        assert_eq!(best_and_ponder(&books, HIRATE, &options), Some(("2g2f".into(), "8c8d".into())));
+        assert_eq!(
+            best_and_ponder(&books[2..], HIRATE, &options),
+            Some(("7g7f".into(), "3c3d".into()))
+        );
+        assert_eq!(best_and_ponder(&books[..1], HIRATE, &options), None);
+    }
+
+    #[test]
+    fn priority_books_try_flipped_position_before_next_book() {
+        let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let flipped = flip::flipped_key(after_76).unwrap();
+        let books = [
+            db_book(&format!("sfen {flipped}\n7g7f none 0 0 1\n")),
+            db_book(&format!("sfen {after_76}\n8c8d none 0 0 1\n")),
+        ];
+        let run = |flipped_book| {
+            let options = BookOptions {
+                flipped_book,
+                ..Default::default()
+            };
+            best_and_ponder(&books, after_76, &options).map(|(best, _)| best)
+        };
+        assert_eq!(run(true).as_deref(), Some("3c3d"));
+        assert_eq!(run(false).as_deref(), Some("8c8d"));
+    }
+
+    #[test]
+    fn priority_books_do_not_fall_through_when_candidates_are_filtered_out() {
+        // 手が全て下限未満でも、指し手なし (none) の行だけでも、局面は載っているので次へ進まない。
+        let fallback = || db_book(&format!("sfen {HIRATE}\n7g7f none 50 0 1\n"));
+        let options = BookOptions::default();
+        assert!(best_and_ponder(&[fallback()], HIRATE, &options).is_some());
+        for first in ["2g2f none -500 0 1", "none none 0 0 1"] {
+            let books = [db_book(&format!("sfen {HIRATE}\n{first}\n")), fallback()];
+            assert_eq!(best_and_ponder(&books, HIRATE, &options), None, "{first}");
+        }
+    }
+
+    #[test]
+    fn priority_books_complete_ponder_in_priority_order() {
+        let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let options = BookOptions::default();
+        let first = format!("sfen {HIRATE}\n7g7f none 0 0 1\n");
+        let books = [
+            db_book(&first),
+            db_book(&format!("sfen {after_76}\n3c3d none 0 0 1\n")),
+        ];
+        assert_eq!(best_and_ponder(&books, HIRATE, &options), Some(("7g7f".into(), "3c3d".into())));
+        let books = [
+            db_book(&format!("{first}sfen {after_76}\n8c8d none 0 0 1\n")),
+            db_book(&format!("sfen {after_76}\n3c3d none 0 0 1\n")),
+        ];
+        assert_eq!(best_and_ponder(&books, HIRATE, &options), Some(("7g7f".into(), "8c8d".into())));
     }
 }

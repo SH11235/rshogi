@@ -3,6 +3,7 @@
 //! - YANEURAOU-DB2016 形式の実 `.db` フィクスチャを与えて position→go で bestmove が返ること
 //! - BookFile=no_book（既定）では定跡関連の出力が一切無く従来挙動が不変であること
 //! - 片側正規化定跡に FlippedBook でヒットすること
+//! - 優先定跡 (`<BookFile の名前>-000.db` 等) を BookFile より先に引くこと
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -254,4 +255,67 @@ fn own_book_false_falls_back_to_search() {
     assert!(stdout.contains("book loaded"), "book should still load:\n{stdout}");
     assert!(stdout.lines().any(|line| line.starts_with("info depth 6 ")), "{stdout}");
     assert!(first_bestmove(&stdout).is_some(), "bestmove present:\n{stdout}");
+}
+
+#[test]
+fn priority_book_files_are_loaded_in_order_and_hit_first() {
+    let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    let dir = std::env::temp_dir().join(format!(
+        "rshogi_book_test_priority_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let header = "#YANEURAOU-DB2016 1.00";
+    std::fs::write(dir.join("user-000.db"), format!("{header}\nsfen {hirate}\n2g2f 8c8d 0 0 1\n"))
+        .unwrap();
+    std::fs::write(
+        dir.join("user-000.ybb"),
+        include_bytes!("../../../rshogi-book/testdata/small.ybb"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("user-001.ybb"), "not a ybb file").unwrap();
+    std::fs::write(dir.join("user.db"), format!("{header}\nsfen {hirate}\n7g7f 3c3d 0 0 1\n"))
+        .unwrap();
+    let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+
+    for (on_the_fly, loaded) in [("false", "book loaded"), ("true", "book opened on the fly")] {
+        let input = format!(
+            "{MATERIAL_INIT}\
+             setoption name BookFile value {}\n\
+             setoption name BookOnTheFly value {on_the_fly}\n\
+             isready\n\
+             position startpos\n\
+             go depth 6\n",
+            path("user.db")
+        );
+        let stdout = run_engine(&input);
+        let book_lines: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.contains("book") && !line.starts_with("option "))
+            .collect();
+        let error = if on_the_fly == "true" {
+            "opening"
+        } else {
+            "loading"
+        };
+        assert_eq!(book_lines.len(), 4, "{stdout}");
+        assert_eq!(
+            book_lines[0],
+            format!("info string priority book file exists twice. use: {}", path("user-000.db"))
+        );
+        assert!(
+            book_lines[1].starts_with(&format!("info string {loaded}: {} ", path("user-000.db")))
+        );
+        assert!(book_lines[2].starts_with(&format!(
+            "info string Error {error} book file {}: ",
+            path("user-001.ybb")
+        )));
+        assert!(book_lines[3].starts_with(&format!("info string {loaded}: {} ", path("user.db"))));
+        assert_eq!(first_bestmove(&stdout), Some("bestmove 2g2f ponder 8c8d"), "{stdout}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

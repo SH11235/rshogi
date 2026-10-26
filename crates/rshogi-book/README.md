@@ -9,7 +9,7 @@
 | USI オプション | 既定 | 説明 |
 | --- | --- | --- |
 | `USI_OwnBook` | `true` | 定跡使用の総合スイッチ。`false` なら probe しない。 |
-| `BookFile` | `no_book` | 定跡ファイル名 (`.db` か `.ybb`)。`no_book` または空なら定跡をロードしない。`.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む。[下記](#yaneuraou-のバイナリ定跡-ybb)参照。 |
+| `BookFile` | `no_book` | 定跡ファイル名 (`.db` か `.ybb`)。`no_book` または空なら定跡をロードしない。`.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む。[下記](#yaneuraou-のバイナリ定跡-ybb)参照。同じディレクトリに `<名前>-000.db` などの優先定跡があれば先に引く。[下記](#優先定跡)参照。 |
 | `BookExploreFile` | `<empty>`（空文字列・無効） | 指定局面の定跡手を等確率で選ぶ UTF-8 ファイル。 |
 | `BookDir` | `book` | 相対 `BookFile` を解決するディレクトリ。 |
 | `BookMoves` | `16` | この手数まで定跡を使う。 |
@@ -68,8 +68,8 @@
 - Windows では開いているファイルの置き換えが失敗することがあります。その場合は別のファイル名に
   して `BookFile` を変えてください。
 
-丸読み (`BookOnTheFly=false`) は、`BookFile` (解決後のパス) と `IgnoreBookPly` が前回と同じなら
-`isready` で読み直しません。同じパスのファイルを差し替えたときは、エンジンを起動し直すか
+丸読み (`BookOnTheFly=false`) は、読むファイルのパス (優先定跡を含む解決後のもの) と
+`IgnoreBookPly` が前回と同じなら `isready` で読み直しません。同じパスのファイルを差し替えたときは、エンジンを起動し直すか
 `BookFile` を変えてください。
 
 ### 丸読みとの一致の確かめ方
@@ -120,6 +120,35 @@ RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- -
 RSHOGI_YBB_PATH=/path/to/book.ybb RSHOGI_YBB_DB_PATH=/path/to/book.db \
   cargo test --release -p rshogi-book -- --ignored real_ybb
 ```
+
+## 優先定跡
+
+YaneuraOu の優先定跡と同じ規則で、`BookFile` の前に別の定跡ファイルを引きます。
+`BookFile=user_book1.db` なら、同じディレクトリの次のファイルをこの順に引きます。
+
+```text
+user_book1-000.db
+user_book1-001.ybb
+user_book1-002.db
+...
+user_book1.db
+```
+
+- **番号**: `000` から 1 ずつ探し、最初に欠けた番号で探すのをやめます (`000` が無ければ優先定跡は
+  使いません)。3 桁に満たない番号は 0 で埋め、`1000` 以降はそのままの桁数です。
+- **拡張子**: 番号ごとに `.db` と `.ybb` のどちらでもかまいません。両方あれば `BookFile` と同じ
+  拡張子の方を使い、`info string priority book file exists twice. use: <パス>` を出します。
+  `BookFile` が `.db` / `.ybb` で終わらなければ優先定跡は探しません。
+- **引き方**: 先頭のファイルから順に局面を引き、局面が載っていない (手が 0 個の局面を含む) ときだけ
+  次のファイルへ進みます。`FlippedBook=true` なら、ファイルごとに反転局面まで引いてから次のファイルへ
+  進みます。当たったファイルで `BookEvalDiff` などのフィルタで候補が残らなくても、後ろのファイルは
+  引きません。ponder の補完で子局面を引くときも同じ順です。読み出しエラーが起きたらその局面は
+  定跡なしとし、後ろのファイルは引きません。
+- **オプション**: `BookOnTheFly`、`IgnoreBookPly`、`FlippedBook`、`BookEvalDiff` などは全ファイルに
+  共通です。
+- **`isready`**: ファイルごとに `info string book loaded: ...` (丸読み) か
+  `info string book opened on the fly: ...` を引く順に出します。読めなかったファイルはエラーを出して
+  飛ばし、残りのファイルで続けます。優先定跡を足したり消したりすると、次の `isready` で読み直します。
 
 ## 局面を指定した定跡手の乱択
 

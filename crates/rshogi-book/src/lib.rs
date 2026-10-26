@@ -11,7 +11,8 @@
 //!   丸読みせず probe のたびにファイルを二分探索する [`Book::open_on_the_fly`] がある。
 //!   `.ybb` はファイル先頭の magic で見分け、同じ API で引ける。
 //! - [`resolve_book_path`]: `.db` が無く同名の `.ybb` があればそちらを返す(YaneuraOu と同じ)。
-//! - [`probe`]: root 局面に対して定跡手を選ぶ。miss 時は [`BookOptions::flipped_book`]
+//! - [`priority_book_paths`]: `user_book1-000.db` のような優先定跡を含め、引く順にパスを並べる。
+//! - [`probe`]: root 局面に対して定跡手を選ぶ。定跡は複数を優先順に渡せる。miss 時は [`BookOptions::flipped_book`]
 //!   により先後反転局面で再検索する(FlippedBook)。
 //! - [`BookOptions`]: USI オプションのミラー。
 //! - [`BookRng`] / [`DefaultBookRng`]: 抽選用乱数源(テストで固定注入可能)。
@@ -25,6 +26,6 @@ mod ybb;
 
 pub use explore::BookExploreList;
 pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe, probe_with_explore};
-pub use reader::{Book, BookEntryMove, resolve_book_path};
+pub use reader::{Book, BookEntryMove, priority_book_paths, resolve_book_path};
 
 pub use flip::{flip_usi_move, flipped_key};

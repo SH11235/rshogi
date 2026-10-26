@@ -59,6 +59,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   magic で見分ける。`BookFile` に `.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む
   (YaneuraOu と同じ)。`.ybb` は ponder と採択回数を持たないので、ponder は子局面を引いて補い、
   `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしない。
+- YaneuraOu の優先定跡に対応した。`BookFile=user_book1.db` のとき、同じディレクトリの
+  `user_book1-000.db`、`user_book1-001.ybb`、… を番号順に先に引き、局面が載っていなければ次へ、
+  最後に `user_book1.db` を引く (各番号は `.db` / `.ybb` のどちらでもよい)。優先定跡のファイルが
+  無ければ従来どおり。`rshogi-book` の `probe` / `probe_with_explore` は定跡を `&[Book]` で受け取る
+  ようにし、引く順のパスを返す `priority_book_paths` を足した。
 
 ### rshogi-core / ライブラリ利用者の移行
 

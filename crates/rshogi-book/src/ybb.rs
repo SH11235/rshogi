@@ -539,7 +539,7 @@ mod tests {
                     for seed in 0..8 {
                         let run = |book: &Book| {
                             probe(
-                                book,
+                                std::slice::from_ref(book),
                                 &position,
                                 &opt,
                                 &mut DefaultBookRng::from_seed(seed),
@@ -675,8 +675,14 @@ mod tests {
                 for query in [&canonical, &flipped] {
                     position.set_sfen(query).unwrap();
                     let run = |book: &Book| {
-                        probe(book, &position, &options, &mut DefaultBookRng::from_seed(1), |_| {})
-                            .map(|r| r.best_move)
+                        probe(
+                            std::slice::from_ref(book),
+                            &position,
+                            &options,
+                            &mut DefaultBookRng::from_seed(1),
+                            |_| {},
+                        )
+                        .map(|r| r.best_move)
                     };
                     assert_eq!(run(&ybb), run(&db), "{query}");
                 }
@@ -732,11 +738,38 @@ mod tests {
         let run = |sfen: &str| {
             let mut position = Position::new();
             position.set_sfen(sfen).unwrap();
-            probe(&book, &position, &options, &mut DefaultBookRng::from_seed(0), |_| {})
-                .map(|r| r.best_move.to_usi())
+            probe(
+                std::slice::from_ref(&book),
+                &position,
+                &options,
+                &mut DefaultBookRng::from_seed(0),
+                |_| {},
+            )
+            .map(|r| r.best_move.to_usi())
         };
         assert_eq!(run(hirate_b), None);
         assert_eq!(run(hirate_w), Some("3c3d".to_string()));
+    }
+
+    #[test]
+    fn position_without_moves_falls_through_to_next_priority_book() {
+        let hirate_b = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        // 2g2f: 2g = 1*9+6, 2f = 1*9+5。
+        let books = [
+            Book::from_bytes(&build_ybb(&[(hirate_b, &[])]), false).unwrap(),
+            Book::from_bytes(&build_ybb(&[(hirate_b, &[((15 << 7) | 14, 10)])]), false).unwrap(),
+        ];
+        let mut position = Position::new();
+        position.set_sfen(hirate_b).unwrap();
+        let best = probe(
+            &books,
+            &position,
+            &BookOptions::default(),
+            &mut DefaultBookRng::from_seed(0),
+            |_| {},
+        )
+        .map(|r| r.best_move.to_usi());
+        assert_eq!(best.as_deref(), Some("2g2f"));
     }
 
     #[test]
