@@ -2253,7 +2253,8 @@ mod tests {
     fn book_file_db_falls_back_to_ybb_of_the_same_name() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
         std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("book-ybb-fallback-test.db");
+        // 別プロセスで並行に流れても衝突しないよう、プロセスごとに名前を変える。
+        let db = dir.join(format!("book-ybb-fallback-test-{}.db", std::process::id()));
         let ybb = db.with_extension("ybb");
         std::fs::remove_file(&db).ok();
         std::fs::write(&ybb, include_bytes!("../../rshogi-book/testdata/small.ybb")).unwrap();

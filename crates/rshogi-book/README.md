@@ -97,7 +97,9 @@ RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- -
   `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしません。
 - **`.db` と probe の結果が一致する条件**: 同じ局面集合の `.db` から変換した `.ybb` で、`.db` が
   ponder を持たず、count が局面内で揃っていて、`.ybb` が depth を持つ (flags の bit0) か
-  `BookDepthLimit=0` であること。
+  `BookDepthLimit=0` であり、count を使うオプションを使わない (`NarrowBook=false` かつ
+  `ConsiderBookMoveCount=false`) こと。count を使うと、`.db` は count で手を絞り重み付きで抽選する
+  のに対し、`.ybb` は絞らず等確率なので選ぶ手が変わり得ます。
 - **手の無い局面**: 当たった局面の手が 0 個なら定跡なしとし、`FlippedBook` でも反転局面を
   引き直しません (YaneuraOu と同じ)。手数が違って当たらなかったときは引き直します。
 - **丸読み (`BookOnTheFly=false`)**: ファイル全体をそのまま読み込みます。メモリはファイルの大きさと

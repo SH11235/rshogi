@@ -122,9 +122,14 @@ impl YbbBook {
     /// ファイル全体を読み込む。header とファイル長を確かめてから読む。
     pub(crate) fn read_file(path: &Path) -> io::Result<Self> {
         let (header, mut file, len) = Header::read_file(path)?;
-        let mut bytes = Vec::with_capacity(usize::try_from(len).map_err(|_| {
-            io::Error::new(io::ErrorKind::OutOfMemory, "ybb file does not fit in memory")
-        })?);
+        // 確保に失敗しても abort せず、read_to_end と同じく Err で返す。
+        let mut bytes = Vec::new();
+        usize::try_from(len)
+            .ok()
+            .and_then(|n| bytes.try_reserve_exact(n).ok())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::OutOfMemory, "ybb file does not fit in memory")
+            })?;
         file.seek(SeekFrom::Start(0))?;
         file.read_to_end(&mut bytes)?;
         let len = bytes.len() as u64;
@@ -504,9 +509,9 @@ mod tests {
             },
             BookOptions {
                 book_moves: 10000,
-                consider_move_count: true,
-                narrow_book: true,
                 eval_diff: 100,
+                eval_black_limit: -100,
+                eval_white_limit: -100,
                 ..Default::default()
             },
         ];
@@ -597,7 +602,9 @@ mod tests {
     /// `.db` から等間隔に抜いた局面 (手数違い・先後反転を含む) で引いた結果と probe の選択が一致する
     /// ことを確かめる。`.db` は sfen 行が手数を除いた SFEN 順に並んでいること (on the fly で引く)。
     /// `.ybb` が持たないものは比べない: ponder (probe は指し手だけ比べる)、depth なしの `.ybb` の depth。
-    /// probe の一致は `.db` の count が局面内で揃っていることが前提。
+    /// probe は `book_moves=10000`・`eval_diff=10000`・`FlippedBook=true` で、count を使う
+    /// `NarrowBook` / `ConsiderBookMoveCount` は使わない。一致は `.db` の count が局面内で揃っている
+    /// ことが前提。
     /// `RSHOGI_YBB_PATH=<.ybb> [RSHOGI_YBB_DB_PATH=<.db>] cargo test --release -p rshogi-book -- --ignored real_ybb`
     #[test]
     #[ignore = "RSHOGI_YBB_PATH の定跡ファイルが要る"]
