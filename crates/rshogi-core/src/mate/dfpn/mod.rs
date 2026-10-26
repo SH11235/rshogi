@@ -29,10 +29,11 @@ mod shortest_tests;
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher};
+use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher, ShortestTables};
 use state::NoAttackerKing;
 use table::MateTable;
 
@@ -124,6 +125,8 @@ pub struct DfpnSolver {
     parallel_start: u64,
     /// 最短手順モード
     shortest: bool,
+    /// 最短手順モードの表 (最初に使うときに確保する)
+    shortest_tables: RefCell<ShortestTables>,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -151,6 +154,7 @@ impl DfpnSolver {
             helper_scratch: Vec::new(),
             parallel_start: PARALLEL_START_NODES,
             shortest: false,
+            shortest_tables: RefCell::new(ShortestTables::new()),
         }
     }
 
@@ -294,7 +298,7 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
-        let pv = shortest::shortest_pv(&mut searcher, st);
+        let pv = shortest::shortest_pv(&mut searcher, st, &self.shortest_tables);
         self.nodes = judged_nodes + searcher.nodes();
         pv.ok().flatten().map(SolveOutcome::Mate)
     }

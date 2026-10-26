@@ -437,6 +437,87 @@ fn shortest_mode_stops_at_the_node_limit() {
     assert_eq!(pos.to_sfen(), before);
 }
 
+/// 制限を変えて解いても、正解手順 (手数と駒余りの有無) か Unknown のどちらかを返す。
+/// 無駄合いの判定や駒余りの比較の途中で制限に達しても、確かめ切れていない手順を返さない
+#[test]
+fn shortest_mode_returns_the_solution_or_unknown_under_limits() {
+    for (sfen, len) in [
+        ("ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1", 7),
+        ("9/9/5k3/3+R5/6G+R1/9/9/9/8K b B 1", 5),
+        ("8k/7pp/9/6P2/5B3/9/9/9/9 b RGNg 1", 9),
+    ] {
+        for mode in MateMode::ALL {
+            let stop = AtomicBool::new(false);
+            let mut solver = DfpnSolver::with_mode(16, mode);
+            solver.set_shortest(true);
+            let mut pos = position(sfen);
+            let MateResult::Mate(full) =
+                solver.solve(&mut pos, &MateLimits::default(), &stop, |_| {})
+            else {
+                panic!("{sfen} {mode:?}");
+            };
+            assert_eq!(full.len(), len, "{sfen} {mode:?}: {}", pv_usi(&full));
+            let clean = ends_clean(&pos, &full);
+            let total = solver.nodes();
+            for i in 1..16 {
+                let limits = MateLimits {
+                    nodes: total * i / 16,
+                    time_ms: 0,
+                };
+                match solver.solve(&mut pos, &limits, &stop, |_| {}) {
+                    MateResult::Mate(pv) => {
+                        assert_eq!(pv.len(), len, "{sfen} {mode:?} {limits:?}: {}", pv_usi(&pv));
+                        assert_eq!(ends_clean(&pos, &pv), clean, "{sfen} {mode:?} {limits:?}");
+                    }
+                    MateResult::Unknown => {}
+                    other => panic!("{sfen} {mode:?} {limits:?}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// 無駄合いを数えない詰みは、持駒違いの局面に流用される置換表に書かず、最短手順モードの表に局面の完全一致で
+/// だけ書く (攻め方の持駒が多い局面では他の応手が短くなり、無駄合いだった合駒が有効になって長くなりうる)
+#[test]
+fn futility_counted_mates_are_not_shared_across_hands() {
+    use super::search::{Budget, NodeArgs, Scratch, Searcher, ShortestTables};
+    use super::state::MateState;
+    use super::table::MateTable;
+    use crate::time::Instant;
+    use std::cell::RefCell;
+
+    // ▲9一飛の後: 受け方の応手は無駄合いの歩打ちだけなので、無駄合いを数えなければ 0 手で詰み
+    let mut pos = position("8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1");
+    let attacker = pos.side_to_move();
+    MateState::do_move(&mut pos, Move::from_usi("9i9a").unwrap());
+    let stop = AtomicBool::new(false);
+    let mut progress = |_| {};
+    let budget = Budget {
+        stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
+        node_limit: 0,
+        time_limit_ms: 0,
+        start: Instant::now(),
+        progress: &mut progress,
+    };
+    let table = MateTable::new(1, true);
+    let tables = RefCell::new(ShortestTables::new());
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
+    searcher.enable_shortest(true, &tables);
+    let result = searcher.search(&mut pos, NodeArgs::unbounded(0, false, 0), &mut 0).unwrap();
+    assert!(result.is_proven());
+    let key = pos.table_key(attacker);
+    assert_eq!(tables.borrow().mate_len(key.key), Some(0));
+    for hand in [key.hand, key.hand.add(PieceType::Gold)] {
+        let probed = table.probe::<true>(super::table::TableKey { hand, ..key });
+        assert!(probed.is_none_or(|v| v.pn != 0), "{hand:?}: {probed:?}");
+    }
+}
+
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)
 #[test]
 #[ignore]

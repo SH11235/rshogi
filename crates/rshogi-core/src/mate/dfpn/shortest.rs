@@ -17,34 +17,33 @@
 //!   無駄合い (上限 d で判定) でない応手のうち d − 3 手以内に詰まないもの (ちょうど d − 1) から選ぶ。
 //!
 //! 4 の「持駒が余らない」は、攻め方も受け方も上の候補から選ぶ手順のうち、詰上りで攻め方の持駒が
-//! 空になるものがあるかで決める (攻め方も余らない手順を選ぶ)。候補の 2 番目以降を調べるのは
-//! `TIE_BREAK_POSITIONS` 局面までで、それを超えたら最初の候補を選ぶ。
+//! 空になるものがあるかで決める (攻め方も余らない手順を選ぶ)。この探索の制限の中で、余らない手順が
+//! 無いと分かるまで候補を調べる (攻め方の持駒が残りの攻め方の手数より多ければ必ず余るので調べない)。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
-use super::search::{Abort, NO_LEN_LIMIT, NodeArgs, Searcher};
+use super::search::{Abort, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
 use super::state::MateState;
 use crate::types::{Color, Hand, PieceType};
 
-/// 持駒が余らない手順を探すとき、候補の 2 番目以降を調べてよい局面数 (調べた局面の合計) の上限
-const TIE_BREAK_POSITIONS: usize = 20_000;
-
 /// 根 (攻め方の手番、詰みを証明して置換表に残っている) の正解手順を求める。
 /// 探索の結果が食い違って手順を作れなければ `None`。局面は呼び出し前の状態に戻して返る。
-pub(super) fn shortest_pv<S: MateState, const PIECES: bool>(
-    searcher: &mut Searcher<'_, S, PIECES>,
+pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
+    searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
+    tables: &'a RefCell<ShortestTables>,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     // 無駄合いを数えない手数は、すべての応手を数える手数以下。先に無駄合いの判定の要らない数え方で
     // 縮めておくと、無駄合いの判定 (別の局面を解く) をする上限付きの探索が減る
-    searcher.enable_shortest(false);
+    searcher.enable_shortest(false, tables);
     // 証明は置換表に残っているので、読み直すと証明した手数が分かる
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;
     if !root.is_proven() {
         return Ok(None);
     }
     let mut len = descend(searcher, st, root.mate_len)?;
-    searcher.enable_shortest(true);
+    searcher.enable_shortest(true, tables);
     len = descend(searcher, st, len)?;
 
     let mut walker = Walker {
@@ -126,7 +125,7 @@ impl<M: Copy + Eq> Walker<M> {
     }
 
     /// 持駒が余らない手順を、最初の候補以外も調べて探すか。
-    /// 攻め方は 1 手で持駒を高々 1 枚しか減らせないので、残りの攻め方の手数より多く持っていれば余る
+    /// 攻め方は 1 手で持駒を高々 1 枚しか減らせないので、残りの攻め方の手数より多く持っていれば必ず余る
     fn may_search_alternatives<S: MateState>(
         &self,
         st: &S,
@@ -135,8 +134,7 @@ impl<M: Copy + Eq> Walker<M> {
         or_node: bool,
     ) -> bool {
         let attacker_moves = if or_node { d.div_ceil(2) } else { d / 2 };
-        self.memo.len() < TIE_BREAK_POSITIONS
-            && hand_count(st.table_key(attacker).hand) <= u32::from(attacker_moves)
+        hand_count(st.table_key(attacker).hand) <= u32::from(attacker_moves)
     }
 
     fn choose_attack<S: MateState<Mv = M>, const PIECES: bool>(

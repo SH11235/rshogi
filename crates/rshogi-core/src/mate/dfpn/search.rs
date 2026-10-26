@@ -28,6 +28,7 @@
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::MateProgress;
@@ -261,21 +262,89 @@ pub(super) struct Scratch<M> {
     delay_order: Vec<(u16, u8, u16)>,
     /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
     proven: Vec<(M, u16)>,
-    /// 詰み手数の上限だけに依存する不詰 (最短手順モードだけで使う。それ以外は空)
-    len_bounds: Vec<LenBound>,
     /// 無駄合いの判定で別の局面を解くときの作業領域 (最初に使うときに作る)
     sub: Option<Box<Scratch<M>>>,
     /// 無駄合いの判定で生成する攻め方の手
     capture_moves: Vec<M>,
     /// 無駄合いの判定で生成する受け方の手
     reply_moves: Vec<M>,
-    /// 無駄合いの判定の結果 (最短手順モードだけで使う。それ以外は空)
+}
+
+/// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) とも共有する。
+///
+/// 置換表と分けるのは、ここに書く値が無駄合いの数え方に依存するため。上限付きの不詰は上限と組でしか
+/// 成り立たず、無駄合いを数えない詰み手数は他の応手の手数で決まる無駄合いに依存するので、持駒違いの局面に
+/// 流用できない (攻め方の持駒が多いと他の応手が短くなり、無駄合いだった合駒が有効になって長くなりうる)。
+/// どちらも局面の完全一致でだけ使う。
+pub(super) struct ShortestTables {
+    /// 局面からこの手数以内には詰まない
+    len_bounds: Vec<LenBound>,
+    /// 無駄合いを数えない数え方で、局面がこの手数以内に詰む
+    mates: Vec<LenBound>,
+    /// 無駄合いの判定の結果
     futility: Vec<Futility>,
-    /// `len_bounds` と `futility` の鍵に混ぜる値。solve ごとに変えて、表を書き換えずに前の solve の値を無効にする
+    /// 鍵に混ぜる値。数え方を変えるたびに変えて、表を書き換えずに前の値を無効にする
     salt: u64,
 }
 
-/// `Scratch::futility` の 1 件: 局面・合駒・上限の組 `key` が無駄合いなら証明駒 `proof`
+impl ShortestTables {
+    pub fn new() -> Self {
+        Self {
+            len_bounds: Vec::new(),
+            mates: Vec::new(),
+            futility: Vec::new(),
+            salt: 0,
+        }
+    }
+
+    /// (初めてなら確保して) 空にする
+    fn reset(&mut self) {
+        if self.len_bounds.is_empty() {
+            self.len_bounds.resize(LEN_BOUNDS_SIZE, LenBound::default());
+            self.mates.resize(LEN_BOUNDS_SIZE, LenBound::default());
+            self.futility.resize(FUTILITY_SIZE, Futility::default());
+        }
+        self.salt = self.salt.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn get(table: &[LenBound], salt: u64, key: u64) -> Option<u16> {
+        let e = table.get(key as usize & (LEN_BOUNDS_SIZE - 1))?;
+        (e.key == key ^ salt).then_some(e.bound)
+    }
+
+    /// 同じ局面の値があれば `keep` で残す方を選ぶ
+    fn put(table: &mut [LenBound], salt: u64, key: u64, bound: u16, keep: fn(u16, u16) -> u16) {
+        let salted = key ^ salt;
+        let Some(e) = table.get_mut(key as usize & (LEN_BOUNDS_SIZE - 1)) else {
+            return;
+        };
+        if e.key == salted {
+            e.bound = keep(e.bound, bound);
+        } else {
+            *e = LenBound { key: salted, bound };
+        }
+    }
+
+    /// 局面 `key` が何手以内に詰まないと分かっているか
+    fn len_bound(&self, key: u64) -> Option<u16> {
+        Self::get(&self.len_bounds, self.salt, key)
+    }
+
+    fn store_len_bound(&mut self, key: u64, bound: u16) {
+        Self::put(&mut self.len_bounds, self.salt, key, bound, u16::max);
+    }
+
+    /// 局面 `key` が何手以内に詰むと分かっているか
+    pub(super) fn mate_len(&self, key: u64) -> Option<u16> {
+        Self::get(&self.mates, self.salt, key)
+    }
+
+    fn store_mate_len(&mut self, key: u64, len: u16) {
+        Self::put(&mut self.mates, self.salt, key, len, u16::min);
+    }
+}
+
+/// `ShortestTables::futility` の 1 件: 局面・合駒・上限の組 `key` が無駄合いなら証明駒 `proof`
 #[derive(Clone, Copy, Default)]
 struct Futility {
     key: u64,
@@ -285,17 +354,17 @@ struct Futility {
     len: u16,
 }
 
-/// `Scratch::futility` の要素数 (2 の冪)
+/// `ShortestTables::futility` の要素数 (2 の冪)
 const FUTILITY_SIZE: usize = 1 << 16;
 
-/// `Scratch::len_bounds` の 1 局面分: 局面 `key` から `bound` 手以内には詰まない
+/// `ShortestTables` の手数の表の 1 局面分
 #[derive(Clone, Copy, Default)]
 struct LenBound {
     key: u64,
     bound: u16,
 }
 
-/// `Scratch::len_bounds` の要素数 (2 の冪)。置換表と違い、最短手順モードの間だけ使う
+/// `ShortestTables` の手数の表の要素数 (2 の冪)
 const LEN_BOUNDS_SIZE: usize = 1 << 20;
 
 impl<M> Scratch<M> {
@@ -308,39 +377,9 @@ impl<M> Scratch<M> {
             child_keys: Vec::with_capacity(crate::movegen::MAX_MOVES),
             delay_order: Vec::with_capacity(crate::movegen::MAX_MOVES),
             proven: Vec::with_capacity(crate::movegen::MAX_MOVES),
-            len_bounds: Vec::new(),
             sub: None,
             capture_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
             reply_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
-            futility: Vec::new(),
-            salt: 0,
-        }
-    }
-
-    /// 最短手順モードの表を (初めてなら確保して) 空にする
-    fn reset_shortest_tables(&mut self) {
-        if self.len_bounds.is_empty() {
-            self.len_bounds.resize(LEN_BOUNDS_SIZE, LenBound::default());
-            self.futility.resize(FUTILITY_SIZE, Futility::default());
-        }
-        self.salt = self.salt.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    }
-
-    /// 局面 `key` が何手以内に詰まないと分かっているか
-    fn len_bound(&self, key: u64) -> Option<u16> {
-        let e = self.len_bounds.get(key as usize & (LEN_BOUNDS_SIZE - 1))?;
-        (e.key == key ^ self.salt).then_some(e.bound)
-    }
-
-    fn store_len_bound(&mut self, key: u64, bound: u16) {
-        let salted = key ^ self.salt;
-        let Some(e) = self.len_bounds.get_mut(key as usize & (LEN_BOUNDS_SIZE - 1)) else {
-            return;
-        };
-        if e.key == salted {
-            e.bound = e.bound.max(bound);
-        } else {
-            *e = LenBound { key: salted, bound };
         }
     }
 }
@@ -375,6 +414,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     shortest: bool,
     /// 最短手順モードで無駄合いを詰み手数に数えない
     futility: bool,
+    /// 最短手順モードの表
+    tables: Option<&'a RefCell<ShortestTables>>,
 }
 
 /// `Searcher::solve_detached` の結果
@@ -383,13 +424,7 @@ enum Detached {
     Mated(Hand, u16),
     /// 上限内に詰まない
     Escaped,
-    /// `FUTILITY_NODES` で打ち切った
-    CutOff,
 }
-
-/// 無駄合いの判定で、合駒を取った後の局面を解くノード数の上限。詰まない局面はこの上限まで読むことが多く、
-/// 最短手順を求める時間の大半になる
-const FUTILITY_NODES: u64 = 20_000;
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
 #[inline]
@@ -444,16 +479,23 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             tie_seed: 0,
             shortest: false,
             futility: false,
+            tables: None,
         }
     }
 
     /// 最短手順モードにする ([`super::shortest`])。詰み手数の上限付きの探索で、上限だけに依存する不詰を
-    /// 覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。覚えた不詰は無駄合いの数え方で
-    /// 変わるので、呼ぶたびに捨てる。
-    pub fn enable_shortest(&mut self, futility: bool) {
+    /// `tables` に覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。
+    /// `futility` では、詰みは置換表に書かず `tables` に局面の完全一致で書く (`ShortestTables`)。
+    /// 覚えた値は無駄合いの数え方で変わるので、呼ぶたびに捨てる。
+    pub fn enable_shortest(&mut self, futility: bool, tables: &'a RefCell<ShortestTables>) {
         self.shortest = true;
         self.futility = futility;
-        self.scratch.reset_shortest_tables();
+        tables.borrow_mut().reset();
+        self.tables = Some(tables);
+    }
+
+    fn len_bound(&self, key: u64) -> Option<u16> {
+        self.tables.and_then(|t| t.borrow().len_bound(key))
     }
 
     /// 置換表に無い子の pn/dn を局面から見積もる (df-pn+)。詰む問題ではノードが大きく減るが、
@@ -727,8 +769,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
         let result = self.node_result(st, key.hand, start, depth, or_node, current);
         self.store(key, depth, &result, self.nodes - nodes_before);
-        if self.shortest && result.is_len_bounded() {
-            self.scratch.store_len_bound(key.key, len_limit);
+        if self.shortest
+            && result.is_len_bounded()
+            && let Some(tables) = self.tables
+        {
+            tables.borrow_mut().store_len_bound(key.key, len_limit);
         }
         if self.capture_depth == Some(depth) {
             self.capture_depth = None;
@@ -803,11 +848,26 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                         has_old_child = true;
                     }
                 }
-                let usable = probed.filter(|v| v.pn != 0 || v.mate_len <= child_len_limit);
+                // 置換表の詰みは無駄合いを数える証明だけで、その手数は無駄合いを数えない手数の上限にもなる
+                // (持駒違いの局面に流用しても、全応手を数える手数は攻め方の持駒が多いほど短い)
+                let mut usable = probed.filter(|v| v.pn != 0 || v.mate_len <= child_len_limit);
+                if self.futility
+                    && usable.is_none_or(|v| v.pn != 0)
+                    && let Some(len) = self.tables.and_then(|t| t.borrow().mate_len(child_key))
+                    && len <= child_len_limit
+                {
+                    usable = Some(TableValue {
+                        pn: 0,
+                        dn: PN_INF,
+                        mate_len: len,
+                        min_depth: 0,
+                        hand: child_table_key.hand,
+                    });
+                }
                 let bounded = self.shortest
                     && child_len_limit != NO_LEN_LIMIT
                     && usable.is_none_or(|v| v.pn != 0 && v.dn != 0)
-                    && self.scratch.len_bound(child_key).is_some_and(|b| b >= child_len_limit);
+                    && self.len_bound(child_key).is_some_and(|b| b >= child_len_limit);
                 match usable {
                     _ if bounded => {
                         child.pn = PN_INF;
@@ -872,9 +932,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 合駒を取る 2 手が挟まるだけで、合駒が無かったときより詰みが長くならない合駒だけが無駄合いになり、
     /// 受け方の局面の詰み手数を決めることはない。取り返されて詰みが長くなる合駒は有効な合駒として数える。
     /// M が `len_limit` の中で詰まなければ、無駄合いでもこの局面は上限内に詰まないので、無駄合いとしない。
-    /// M と応手の後の局面は手順から外れた局面なので、経路を持たずに解く。`FUTILITY_NODES` で打ち切ったら、
-    /// M は詰まない・応手の後は詰むとみなす (どちらも無駄合いとしない向きで、手数を短く数えない)。
-    /// 盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
+    /// M と応手の後の局面は手順から外れた局面なので、経路を持たずに、この探索全体の制限の中で読み切る
+    /// (読み切れなければ `Abort`)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
     pub(super) fn futile_drop(
         &mut self,
         st: &mut S,
@@ -886,11 +945,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         }
         let before = st.table_key(self.attacker);
         // 同じ判定を探索中に何度も繰り返すので覚えておく (打ち切った判定も無駄合いでないとして覚える)
+        let Some(tables) = self.tables else {
+            return Ok(None);
+        };
         let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
             .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
-            ^ self.scratch.salt;
+            ^ tables.borrow().salt;
         let slot = memo_key as usize & (FUTILITY_SIZE - 1);
-        if let Some(e) = self.scratch.futility.get(slot)
+        if let Some(e) = tables.borrow().futility.get(slot)
             && e.key == memo_key
         {
             return Ok(e.futile.then_some((e.proof, e.len)));
@@ -905,7 +967,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         {
             found = None;
         }
-        if let Some(e) = self.scratch.futility.get_mut(slot) {
+        if let Some(e) = tables.borrow_mut().futility.get_mut(slot) {
             let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
             *e = Futility {
                 key: memo_key,
@@ -943,7 +1005,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             };
             match self.table.probe::<PIECES>(probe_key) {
                 Some(v) if v.dn == 0 => continue,
-                _ if self.scratch.len_bound(returned.key).is_some_and(|b| b >= len_limit) => {
+                _ if self.len_bound(returned.key).is_some_and(|b| b >= len_limit) => {
                     continue;
                 }
                 _ => {}
@@ -979,7 +1041,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     }
 
     /// 受け方の手番の局面 `st` の、`len_limit` 手以内の最短の詰み手数とその証明駒 (上限を 2 手ずつ縮めて
-    /// 証明し直す。打ち切ったらそこまでの手数)
+    /// 証明し直す)
     fn shortest_detached(
         &mut self,
         st: &mut S,
@@ -992,7 +1054,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         while best.1 >= 2 {
             match self.solve_detached(st, false, best.1 - 2)? {
                 Detached::Mated(proof, len) => best = (proof, len),
-                Detached::Escaped | Detached::CutOff => break,
+                Detached::Escaped => break,
             }
         }
         Ok(Some(best))
@@ -1020,7 +1082,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                     result = Ok(true);
                     break;
                 }
-                Ok(Detached::Mated(..) | Detached::CutOff) => {}
+                Ok(Detached::Mated(..)) => {}
                 Err(abort) => {
                     result = Err(abort);
                     break;
@@ -1031,8 +1093,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         result
     }
 
-    /// 局面 `st` (`or_node` なら攻め方の手番) を経路と無関係に `len_limit` 手の上限で解く。無駄合いの数え方は
-    /// この探索と同じ。`FUTILITY_NODES` で打ち切ったら `CutOff` (この探索全体の制限に達していたら `Abort`)。
+    /// 局面 `st` (`or_node` なら攻め方の手番) を経路と無関係に `len_limit` 手の上限で解く。無駄合いの数え方と
+    /// 最短手順モードの表はこの探索と同じ。この探索全体の制限 (残りのノード数・時間・停止) の中で読み切り、
+    /// 制限に達したら `Abort`。
     fn solve_detached(
         &mut self,
         st: &mut S,
@@ -1041,8 +1104,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     ) -> Result<Detached, Abort> {
         let mut scratch = self.scratch.sub.take().unwrap_or_else(|| Box::new(Scratch::new()));
         let remaining = match self.budget.node_limit {
-            0 => FUTILITY_NODES,
-            limit => limit.saturating_sub(self.nodes).min(FUTILITY_NODES),
+            0 => 0,
+            limit => limit.saturating_sub(self.nodes).max(1),
         };
         let mut quiet = |_| {};
         let budget = Budget {
@@ -1050,7 +1113,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             halt: None,
             cancel: self.budget.cancel,
             shared_nodes: None,
-            node_limit: remaining.max(1),
+            node_limit: remaining,
             time_limit_ms: self.budget.time_limit_ms,
             start: self.budget.start,
             progress: &mut quiet,
@@ -1060,29 +1123,18 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 Searcher::<S, PIECES>::new(self.table, &mut scratch, self.attacker, budget);
             sub.estimate = self.estimate;
             sub.weak_disproof_step = self.weak_disproof_step;
-            // 作業領域の表は確保しないので、上限付きの不詰と無駄合いの判定は覚えない
             sub.shortest = true;
             sub.futility = true;
+            sub.tables = self.tables;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
             (result, sub.nodes)
         };
         self.scratch.sub = Some(scratch);
         self.nodes += nodes;
-        match result {
-            Ok(r) if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
-            Ok(_) => Ok(Detached::Escaped),
-            Err(Abort) if self.exhausted() => Err(Abort),
-            Err(Abort) => Ok(Detached::CutOff),
+        match result? {
+            r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
+            _ => Ok(Detached::Escaped),
         }
-    }
-
-    /// この探索全体の制限 (停止・ノード数・時間) に達したか
-    fn exhausted(&self) -> bool {
-        self.budget.stop.load(Ordering::Relaxed)
-            || self.budget.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
-            || self.budget.node_limit != 0 && self.nodes >= self.budget.node_limit
-            || self.budget.time_limit_ms != 0
-                && self.budget.start.elapsed().as_millis() as u64 >= self.budget.time_limit_ms
     }
 
     /// 現在のフレームの子 (`scratch.moves` と同じ順) で後回しの組を作り、組の中で前の手が
@@ -1349,6 +1401,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
     fn store(&mut self, key: TableKey, depth: usize, result: &NodeResult, searched: u64) {
         if result.is_conditional() {
+            return;
+        }
+        if self.futility && result.is_proven() {
+            if let Some(tables) = self.tables {
+                tables.borrow_mut().store_mate_len(key.key, result.mate_len);
+            }
             return;
         }
         self.table.store::<PIECES>(
