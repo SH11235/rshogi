@@ -5,7 +5,7 @@
 //! - bit 4: `Color`（0 = Black, 1 = White）。
 //!
 //! `Piece::NONE` 以外の値は常に有効な `PieceType` / `Color` の組み合わせであることを前提とする。
-//! `piece_type()` を呼び出す前に `is_none()` を避けるのが契約。
+//! `Piece::NONE` の駒種の取得・成り・生駒への変換は panic する。
 
 use std::ops::{Index, IndexMut};
 
@@ -68,10 +68,13 @@ impl Piece {
     }
 
     /// 駒種を取得
+    ///
+    /// # Panics
+    /// `Piece::NONE` に対して呼ぶと panic する。
     #[inline]
     pub const fn piece_type(self) -> PieceType {
-        // SAFETY: self.0 & 0x0F は 0..=14 なので有効なPieceType値
-        // ただし0の場合はNONEなので呼び出し側で判定が必要
+        assert!(!self.is_none(), "piece_type() called on Piece::NONE");
+        // SAFETY: Piece は {0, 1..=14, 17..=30} で、NONE を除く下位4bitは 1..=14。
         unsafe { std::mem::transmute(self.0 & 0x0F) }
     }
 
@@ -95,6 +98,9 @@ impl Piece {
     }
 
     /// 成り駒を返す
+    ///
+    /// # Panics
+    /// `Piece::NONE` に対して呼ぶと panic する。
     #[inline]
     pub const fn promote(self) -> Option<Piece> {
         match self.piece_type().promote() {
@@ -104,6 +110,9 @@ impl Piece {
     }
 
     /// 生駒を返す
+    ///
+    /// # Panics
+    /// `Piece::NONE` に対して呼ぶと panic する。
     #[inline]
     pub const fn unpromote(self) -> Piece {
         Piece::new(self.color(), self.piece_type().unpromote())
@@ -146,26 +155,48 @@ impl<T> Index<Piece> for [T] {
 
     #[inline]
     fn index(&self, pc: Piece) -> &T {
-        debug_assert!(pc.index() < self.len());
-        // SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
-        // Piece の構築時に値域が保証されている。
-        unsafe { self.get_unchecked(pc.index()) }
+        &self[pc.index()]
     }
 }
 
 impl<T> IndexMut<Piece> for [T] {
     #[inline]
     fn index_mut(&mut self, pc: Piece) -> &mut T {
-        debug_assert!(pc.index() < self.len());
-        // SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
-        // Piece の構築時に値域が保証されている。
-        unsafe { self.get_unchecked_mut(pc.index()) }
+        &mut self[pc.index()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn none_piece_type_and_promotions_panic() {
+        use std::panic::catch_unwind;
+
+        assert!(catch_unwind(|| Piece::NONE.piece_type()).is_err());
+        assert!(catch_unwind(|| Piece::NONE.promote()).is_err());
+        assert!(catch_unwind(|| Piece::NONE.unpromote()).is_err());
+    }
+
+    #[test]
+    fn slice_index_checks_length() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for len in [0, 1, Piece::NUM - 1, Piece::NUM] {
+            let mut storage = vec![0; len];
+            let values = storage.as_mut_slice();
+            for piece in [Piece::NONE, Piece::B_PAWN, Piece::W_DRAGON] {
+                if piece.index() < len {
+                    values[piece] = 7;
+                    assert_eq!(values[piece], 7);
+                } else {
+                    assert!(catch_unwind(|| values[piece]).is_err());
+                    assert!(catch_unwind(AssertUnwindSafe(|| values[piece] = 1)).is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_piece_new() {

@@ -178,49 +178,44 @@ impl Square {
     }
 }
 
-// =============================================================================
-// Index trait による境界チェック除去（Reckless 由来）
-//
-// Square(0..=80) は [T; Square::NUM] の有効なインデックスであることが
-// Square の構築時に保証される（new, from_index 等）。
-// この不変条件に依拠して全インデックスアクセスから境界チェックを除去する。
-// =============================================================================
-
 impl<T> Index<Square> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, sq: Square) -> &T {
-        debug_assert!(
-            sq.index() < self.len(),
-            "Square index {} out of bounds for slice of length {}",
-            sq.index(),
-            self.len()
-        );
-        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
-        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
-        unsafe { self.get_unchecked(sq.index()) }
+        &self[sq.index()]
     }
 }
 
 impl<T> IndexMut<Square> for [T] {
     #[inline]
     fn index_mut(&mut self, sq: Square) -> &mut T {
-        debug_assert!(
-            sq.index() < self.len(),
-            "Square index {} out of bounds for slice of length {}",
-            sq.index(),
-            self.len()
-        );
-        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
-        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
-        unsafe { self.get_unchecked_mut(sq.index()) }
+        &mut self[sq.index()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_index_checks_length() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for len in [0, 1, Square::NUM - 1, Square::NUM] {
+            let mut storage = vec![0; len];
+            let values = storage.as_mut_slice();
+            for square in [Square::SQ_11, Square::SQ_55, Square::SQ_99] {
+                if square.index() < len {
+                    values[square] = 7;
+                    assert_eq!(values[square], 7);
+                } else {
+                    assert!(catch_unwind(|| values[square]).is_err());
+                    assert!(catch_unwind(AssertUnwindSafe(|| values[square] = 1)).is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_strict_usi_square_token_boundaries() {

@@ -318,11 +318,17 @@ impl Position {
 
             for c in rank_str.chars() {
                 if c == '+' {
+                    if promoted {
+                        return Err(SfenError::Board("Repeated promotion marker".to_string()));
+                    }
                     promoted = true;
                     continue;
                 }
 
                 if let Some(digit) = c.to_digit(10) {
+                    if promoted || digit == 0 {
+                        return Err(SfenError::Board(format!("Invalid empty-square count: {c}")));
+                    }
                     file_idx -= digit as i32;
                     if file_idx < -1 {
                         return Err(SfenError::Board(format!(
@@ -352,6 +358,9 @@ impl Position {
                 }
             }
 
+            if promoted {
+                return Err(SfenError::Board("Promotion marker without a piece".to_string()));
+            }
             if file_idx != -1 {
                 return Err(SfenError::Board(format!(
                     "Rank {rank_idx} has wrong number of squares"
@@ -371,6 +380,9 @@ impl Position {
         let mut count = 0u32;
         for c in hand_str.chars() {
             if let Some(digit) = c.to_digit(10) {
+                if count == 0 && digit == 0 {
+                    return Err(SfenError::Hand("Hand count must be positive".to_string()));
+                }
                 count =
                     count.checked_mul(10).and_then(|v| v.checked_add(digit)).ok_or_else(|| {
                         SfenError::Hand("Hand count overflow while parsing digits".to_string())
@@ -845,6 +857,29 @@ mod tests {
         let mut pos = Position::new();
         let result = pos.set_sfen(sfen);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sfen_rejects_misplaced_promotion_markers() {
+        for rank in ["9+", "++P8", "+1P7", "+9", "0P8"] {
+            let sfen = format!("{rank}/9/9/9/9/9/9/9/9 b - 1");
+            assert!(matches!(Position::new().set_sfen(&sfen), Err(SfenError::Board(_))));
+            assert!(matches!(StaticPosition::from_sfen(&sfen), Err(SfenError::Board(_))));
+        }
+    }
+
+    #[test]
+    fn test_sfen_rejects_zero_hand_counts() {
+        for hand in ["0", "0P", "00P", "01P", "P0", "P0p"] {
+            let sfen = format!("9/9/9/9/9/9/9/9/9 b {hand} 1");
+            assert!(matches!(Position::new().set_sfen(&sfen), Err(SfenError::Hand(_))));
+            assert!(matches!(StaticPosition::from_sfen(&sfen), Err(SfenError::Hand(_))));
+        }
+        let sfen = "9/9/9/9/9/9/9/9/9 b 10P 1";
+        let mut position = Position::new();
+        position.set_sfen(sfen).unwrap();
+        assert_eq!(position.to_sfen(), sfen);
+        assert_eq!(StaticPosition::from_sfen(sfen).unwrap().to_sfen(), sfen);
     }
 
     #[test]

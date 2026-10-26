@@ -740,10 +740,10 @@ impl NNUENetwork {
         )
     }
 
-    /// リーダーから読み込み（ファイルサイズ優先の自動判別）
+    /// リーダーから読み込み、形式とビルドに合う評価経路を選ぶ。
     ///
-    /// ファイルサイズからアーキテクチャを一意に検出し、適切なバリアントに委譲する。
-    /// ヘッダーの description 文字列は活性化関数の検出にのみ使用する。
+    /// HalfKX は既知のファイルサイズを優先し、universal edition では未一致時に
+    /// ヘッダーの寸法を使う。LayerStacks の寸法、特徴集合や活性化もヘッダーから読む。
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
         Self::read_with_architecture_override(reader, get_nnue_architecture_override())
     }

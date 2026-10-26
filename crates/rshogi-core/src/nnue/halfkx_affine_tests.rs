@@ -115,6 +115,9 @@ pub(crate) fn check<const INPUT: usize, const OUTPUT: usize>(
                 expected,
                 "INPUT={INPUT}, OUTPUT={OUTPUT}, case={case}, seven_bit={seven_bit}"
             );
+            let mut unaligned = AlignedBox::<u8>::new_zeroed(padded + 1);
+            unaligned[1..].copy_from_slice(&input);
+            assert_eq!(propagate(&bytes, &unaligned[1..], seven_bit), expected);
         }
     }
 }
@@ -138,8 +141,8 @@ macro_rules! halfkx_affine_tests {
                         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
                         {
                             let mut avx2 = [0; OUTPUT];
-                            // SAFETY: cfgがAVX2を保証する。入力は64バイトアラインかつ
-                            // PADDED_INPUT要素を持ち、readが対応する重み配置を構築する。
+                            // SAFETY: cfgがAVX2を保証する。入力はPADDED_INPUT要素を持ち、
+                            // readが対応する重み配置を構築する。入力の整列は不要。
                             unsafe {
                                 layer.propagate_avx2_loop_inverted::<true>(input, &mut avx2);
                                 assert_eq!(output, avx2, "AVX2 / dispatch");
@@ -180,6 +183,21 @@ macro_rules! halfkx_affine_tests {
             check::<1025, 8>();
             check::<2049, 8>();
             check::<32, 4>();
+        }
+
+        #[test]
+        fn affine_rejects_short_input_and_weights() {
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+            let bytes = crate::nnue::layers::halfkx_affine_tests::dense_fixture(32, 8);
+            let mut layer = $affine::<32, 8>::read(&mut &bytes[..]).unwrap();
+            let mut output = [0; 8];
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| layer.propagate(&[0; 31], &mut output))).is_err()
+            );
+            layer.weights = crate::nnue::accumulator::AlignedBox::new_zeroed(1);
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| layer.propagate(&[0; 32], &mut output))).is_err()
+            );
         }
     };
 }

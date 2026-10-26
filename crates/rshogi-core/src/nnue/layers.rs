@@ -628,40 +628,12 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// AVX2/SSE2/WASMのSIMD最適化版。
     /// 密な行列積方式（YaneuraOuスタイル）で実装。
     ///
-    /// # アライメント要件
+    /// 入力は `INPUT_DIM` を32の倍数に切り上げた長さ以上とし、末尾をゼロ埋めする。
+    /// 入力のアライメントは問わない。
     ///
-    /// **重要**: 入力スライスは64バイトアライメントが必要です。
-    ///
-    /// | ターゲット | 必要アライメント | 使用命令 |
-    /// |-----------|-----------------|----------|
-    /// | AVX2 (`x86_64`) | 32バイト以上 | `_mm256_load_si256` |
-    /// | SSE2 (`x86_64`) | 16バイト以上 | `_mm_load_si128` |
-    /// | WASM SIMD128 | 不要 | `v128_load`（任意アドレス対応） |
-    /// | スカラー | 不要 | - |
-    ///
-    /// アライメントを保証するには、[`Aligned`](super::accumulator::Aligned) ラッパーを使用してください:
-    ///
-    /// ```ignore
-    /// use crate::nnue::accumulator::Aligned;
-    ///
-    /// let mut input = Aligned([0u8; 512]);  // 64バイトアライン
-    /// transform.propagate(&input.0, &mut output);
-    /// ```
-    ///
-    /// **警告**: アライメントされていない入力を渡すと、AVX2/SSE2環境で
-    /// 未定義動作（SIGSEGV等）が発生します。
-    ///
-    /// # 入力サイズの契約
-    ///
-    /// 入力スライスは `PADDED_INPUT` バイト以上である必要がある。
-    /// SIMD実装は32バイト（AVX2）または16バイト（SSE2）単位で処理するため、
-    /// `INPUT_DIM` より小さい入力を渡すと境界外アクセスが発生する。
-    ///
-    /// # 入力密度
-    ///
-    /// 実測結果（2025-12-18）: 約40%（39-42%）
-    /// → スパース最適化には高すぎるため、密な行列積方式が正しい選択。
-    /// 詳細は `network.rs` の diagnostics 計測コードを参照。
+    /// # Panics
+    /// 入力または公開フィールドの重み配列が必要な長さに満たない場合。
+    /// SIMD のスクランブル配置を使う場合、出力次元は1024以下でなければならない。
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
         self.propagate_impl::<true>(input, output);
     }
@@ -679,12 +651,14 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     }
 
     fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
-        debug_assert!(
+        assert!(
             input.len() >= Self::PADDED_INPUT,
             "input length {} is less than PADDED_INPUT {}",
             input.len(),
             Self::PADDED_INPUT
         );
+        assert!(self.weights.len() >= OUTPUT_DIM * Self::PADDED_INPUT);
+        assert!(!Self::should_use_scrambled_weights() || OUTPUT_DIM <= 1024);
 
         #[cfg(all(
             target_arch = "x86_64",
@@ -714,10 +688,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
-            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - input は Aligned<[u8; N]> で64バイトアライン
-            // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
+            // - 入力・重みの長さは propagate_impl の先頭で検証済み
+            // - 入力は unaligned load、重みは64バイト整列済み
             // - PADDED_INPUT は32の倍数なのでオフセットは常に32バイト境界
             // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
@@ -748,7 +720,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     // 外側: 入力チャンク（入力4バイト = 1 i32）
                     for i in 0..Self::NUM_INPUT_CHUNKS {
                         // 入力4バイトを全レーンにブロードキャスト
-                        let in_val = _mm256_set1_epi32(*input32.add(i));
+                        let in_val = _mm256_set1_epi32(input32.add(i).read_unaligned());
 
                         // この入力チャンクに対応する重みの開始位置
                         // スクランブル形式: weights[input_chunk][output][4]
@@ -784,7 +756,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                     for k in 0..num_chunks {
                         let offset = k * 32;
-                        let in_vec = _mm256_load_si256(input_ptr.add(offset) as *const __m256i);
+                        let in_vec = _mm256_loadu_si256(input_ptr.add(offset) as *const __m256i);
                         let w_vec = _mm256_load_si256(
                             weights_ptr.add(weight_row_offset + offset) as *const __m256i
                         );
@@ -805,10 +777,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         ))]
         {
             // SAFETY:
-            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
-            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - input は Aligned<[u8; N]> で64バイトアライン（16バイト境界も満たす）
-            // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
+            // - 入力・重みの長さは propagate_impl の先頭で検証済み
+            // - 入力は unaligned load、重みは64バイト整列済み
             // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
             // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
@@ -836,7 +806,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     // 外側: 入力チャンク（入力4バイト = 1 i32）
                     for i in 0..Self::NUM_INPUT_CHUNKS {
                         // 入力4バイトを全レーンにブロードキャスト
-                        let in_val = _mm_set1_epi32(*input32.add(i));
+                        let in_val = _mm_set1_epi32(input32.add(i).read_unaligned());
 
                         // この入力チャンクに対応する重みの開始位置
                         // スクランブル形式: weights[input_chunk][output][4]
@@ -872,7 +842,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                     for k in 0..num_chunks {
                         let offset = k * 16;
-                        let in_vec = _mm_load_si128(input_ptr.add(offset) as *const __m128i);
+                        let in_vec = _mm_loadu_si128(input_ptr.add(offset) as *const __m128i);
                         let w_vec = _mm_load_si128(
                             weights_ptr.add(weight_row_offset + offset) as *const __m128i
                         );
@@ -895,10 +865,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // 本経路は重みを行優先で読む。スクランブル格納と共存しないことを単一判定で保証する。
             const { assert!(!Self::should_use_scrambled_weights()) };
             // SAFETY:
-            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
-            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - input は Aligned<[u8; N]> で64バイトアライン（16バイト境界も満たす）
-            // - weights は AlignedBox<i8> で64バイトアライン
+            // - 入力・重みの長さは propagate_impl の先頭で検証済み
+            // - 入力は unaligned load、重みは64バイト整列済み
             // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
             unsafe {
                 use std::arch::x86_64::*;
@@ -920,7 +888,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     // 入力を16バイトずつ処理
                     for k in 0..num_chunks {
                         let offset = k * 16;
-                        let in_vec = _mm_load_si128(input_ptr.add(offset) as *const __m128i);
+                        let in_vec = _mm_loadu_si128(input_ptr.add(offset) as *const __m128i);
                         let w_vec = _mm_load_si128(
                             weights_ptr.add(weight_row_offset + offset) as *const __m128i
                         );
@@ -959,8 +927,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // 本経路は重みを行優先で読む。スクランブル格納と共存しないことを単一判定で保証する。
             const { assert!(!Self::should_use_scrambled_weights()) };
             // SAFETY:
-            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
-            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
+            // - 入力・重みの長さは propagate_impl の先頭で検証済み
             // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意のアドレスで動作）
             // - biases/output は4出力ずつ（j += 4）でアクセスし、i32配列なので
             //   オフセットは 4 * sizeof(i32) = 16バイトの倍数となり16バイト境界
@@ -1338,6 +1305,38 @@ pub(crate) fn check_qa255_affine<const INPUT: usize, const OUTPUT: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn affine_accepts_unaligned_input_and_rejects_short_buffers() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        fn check<const OUTPUT: usize>() {
+            let bytes = super::halfkx_affine_tests::dense_fixture(32, OUTPUT);
+            let mut layer = AffineTransform::<32, OUTPUT>::read(&mut &bytes[..]).unwrap();
+            let mut input = AlignedBox::<u8>::new_zeroed(33);
+            input.fill(127);
+            let mut output = [0; OUTPUT];
+            layer.propagate(&input[1..], &mut output);
+            assert_eq!(
+                output.as_slice(),
+                super::halfkx_affine_tests::dense_reference(&input[1..], OUTPUT)
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| layer.propagate(&input[..31], &mut output)))
+                    .is_err()
+            );
+            layer.weights = AlignedBox::new_zeroed(1).into();
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| layer.propagate(&input[1..], &mut output)))
+                    .is_err()
+            );
+        }
+
+        check::<1>();
+        check::<4>();
+        check::<8>();
+        check::<16>();
+    }
 
     #[test]
     fn qa255_affine_reference_matches_integer() {

@@ -44,28 +44,39 @@ impl<T> Index<Color> for [T] {
 
     #[inline]
     fn index(&self, c: Color) -> &T {
-        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
-        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
-        // このクレート内では Color でインデックスする配列は全て
-        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
-        unsafe { self.get_unchecked(c as usize) }
+        &self[c.index()]
     }
 }
 
 impl<T> IndexMut<Color> for [T] {
     #[inline]
     fn index_mut(&mut self, c: Color) -> &mut T {
-        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
-        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
-        // このクレート内では Color でインデックスする配列は全て
-        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
-        unsafe { self.get_unchecked_mut(c as usize) }
+        &mut self[c.index()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_index_checks_length() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for len in 0..=Color::NUM {
+            let mut storage = vec![0; len];
+            let values = storage.as_mut_slice();
+            for color in [Color::Black, Color::White] {
+                if color.index() < len {
+                    values[color] = 7;
+                    assert_eq!(values[color], 7);
+                } else {
+                    assert!(catch_unwind(|| values[color]).is_err());
+                    assert!(catch_unwind(AssertUnwindSafe(|| values[color] = 1)).is_err());
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_color_opponent() {

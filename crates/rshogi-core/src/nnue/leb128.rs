@@ -165,6 +165,13 @@ pub fn read_signed_leb128<R: Read>(reader: &mut R) -> io::Result<i64> {
         reader.read_exact(&mut byte)?;
         let b = byte[0];
 
+        if shift == 63 && b != 0x00 && b != 0x7f {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LEB128 overflow: value too large",
+            ));
+        }
+
         // 下位7ビットを結果に追加
         result |= ((b & 0x7f) as i64) << shift;
         shift += 7;
@@ -178,7 +185,7 @@ pub fn read_signed_leb128<R: Read>(reader: &mut R) -> io::Result<i64> {
             break;
         }
 
-        // 最大9バイト（64bit）を超えるとエラー
+        // i64 の符号付き表現は最大10バイト。
         if shift >= 64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -208,6 +215,13 @@ pub(crate) fn decode_single_leb128(data: &[u8]) -> io::Result<(i64, usize)> {
 
         let b = data[pos];
         pos += 1;
+
+        if shift == 63 && b != 0x00 && b != 0x7f {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LEB128 overflow: value too large",
+            ));
+        }
 
         result |= ((b & 0x7f) as i64) << shift;
         shift += 7;
@@ -285,6 +299,34 @@ fn decode_leb128_all_i16(data: &[u8]) -> io::Result<Vec<i16>> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn signed_leb128_rejects_overflow_in_tenth_byte() {
+        for terminal in 0..=u8::MAX {
+            let mut bytes = [0x80; 10];
+            bytes[9] = terminal;
+            if terminal == 0 || terminal == 0x7f {
+                let expected = if terminal == 0 { 0 } else { i64::MIN };
+                assert_eq!(decode_single_leb128(&bytes).unwrap(), (expected, 10));
+                assert_eq!(read_signed_leb128(&mut &bytes[..]).unwrap(), expected);
+            } else {
+                assert_eq!(
+                    decode_single_leb128(&bytes).unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    read_signed_leb128(&mut &bytes[..]).unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
+        for value in [i64::MIN, i64::MAX] {
+            let mut bytes = Vec::new();
+            encode_signed_leb128(value, &mut bytes);
+            assert_eq!(decode_single_leb128(&bytes).unwrap(), (value, bytes.len()));
+            assert_eq!(read_signed_leb128(&mut &bytes[..]).unwrap(), value);
+        }
+    }
 
     fn compressed_block(values: &[i16]) -> Vec<u8> {
         assert!(values.iter().all(|value| (-64..=63).contains(value)));
