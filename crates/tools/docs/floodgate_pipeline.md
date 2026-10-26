@@ -52,6 +52,9 @@ cargo run -p tools --bin floodgate_pipeline -- download \
 - `--player-file <PATH>`: いずれかの対局者が含まれる対局のみ取得（`fetch-ratings` の出力を渡す）。
 - `--concurrency <N>`: 並列数（既定 8、`0` で CPU コア数）。
 
+各 CSA は一時ファイルへ最後まで受信してから公開する。受信途中で失敗したファイルは残さず、
+再実行時に取得し直す。既存ファイルは上書きしない。
+
 ### `live-mirror`
 
 当日 (JST) の対局 CSA をローカル dir へミラーし続ける。`kifu_player --csa <dir> --live`
@@ -135,3 +138,13 @@ cargo run -p tools --bin floodgate_pipeline -- download --date-from 2026-03-10 -
 # 4. SFEN 抽出
 cargo run -p tools --bin floodgate_pipeline -- extract --min-rating 3900 --max-ply 32
 ```
+
+抽出はパスをソートし、128 棋譜ごとに並列解析して入力順に書き出す。全棋譜の SFEN を
+一度に保持しないため、通常の抽出で保持する局面数は入力全体の局面数に比例しない。
+パス一覧は棋譜数に比例する。ディレクトリ列挙に失敗すると、読めた部分だけで続行せずエラーで終了する。
+
+`--mirror-dedup` は正規化した SFEN の集合をメモリに保持し、メモリ使用量は重複除去後の局面数に比例する。
+数千万〜億局面の抽出ではこのフラグを付けず、必要なら抽出後の SFEN を外部ソートで重複除去する。
+PSV に変換済みの教師データなら [psv_dedup_partition](psv_dedup_partition.md) でディスク方式の exact 重複除去を行える。
+
+`extract --out` が入力 CSA と同じ実体（同一パス・hardlink）を指す場合や、出力自体が symlink の場合は拒否する。

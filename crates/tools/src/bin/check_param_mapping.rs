@@ -229,7 +229,8 @@ fn main() -> Result<()> {
                 ));
                 continue;
             };
-            let expected = yo_to_rshogi_value(yo.value, m.sign_flip);
+            let expected = yo_to_rshogi_value(yo.value, m.sign_flip)
+                .with_context(|| format!("{} -> {}", m.yo, m.rshogi))?;
             if expected != r.value {
                 value_mismatches.push(format!(
                     "{} ↔ {} (sign_flip={}): YO={} → 期待 rshogi={} だが実際は {}",

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT_ENCODING, HeaderValue};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -54,14 +54,25 @@ pub fn http_get_to_file_noclobber(client: &Client, url: &str, out_path: &Path) -
         .with_context(|| format!("GET {url}"))?;
     let status = res.status();
     anyhow::ensure!(status.is_success(), "HTTP {status} for {url}");
-    let mut f = File::create(out_path).with_context(|| format!("open {}", out_path.display()))?;
+    let parent = out_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary download in {}", parent.display()))?;
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = res.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        f.write_all(&buf[..n])?;
+        staged.write_all(&buf[..n])?;
+    }
+    staged.flush()?;
+    match staged.persist_noclobber(out_path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("save {}", out_path.display())),
     }
     Ok(out_path.to_path_buf())
 }
@@ -376,5 +387,43 @@ mod tests {
         let (a2, b2) = players_from_path(p2).unwrap();
         assert_eq!(a2, "gps_normal");
         assert_eq!(b2, "gps500");
+    }
+    #[test]
+    fn interrupted_download_is_not_published_and_can_be_retried() -> Result<()> {
+        use std::net::TcpListener;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            for truncated in [true, false] {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut request = BufReader::new(stream.try_clone()?);
+                loop {
+                    let mut line = String::new();
+                    if request.read_line(&mut line)? == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n",
+                )?;
+                stream.write_all(if truncated { b"part" } else { b"complete" })?;
+            }
+            Ok(())
+        });
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("download.csa");
+        let client = http_client_builder().no_proxy().timeout(Duration::from_secs(5)).build()?;
+        let url = format!("http://{address}/game.csa");
+        assert!(http_get_to_file_noclobber(&client, &url, &output).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(dir.path())?.count(), 0);
+        http_get_to_file_noclobber(&client, &url, &output)?;
+        assert_eq!(fs::read(&output)?, b"complete");
+        http_get_to_file_noclobber(&client, "invalid url", &output)?;
+        assert_eq!(fs::read(&output)?, b"complete");
+        server.join().expect("HTTP fixture thread")?;
+        Ok(())
     }
 }

@@ -19,7 +19,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::prelude::*;
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use std::fs::File;
@@ -302,12 +302,7 @@ fn run(cli: Cli) -> Result<()> {
 
     // 2. ランダムサンプリング
     println!("サンプルを選択中...");
-    let mut rng = ChaCha8Rng::seed_from_u64(cli.seed);
-    let sample_indices: Vec<usize> = {
-        let mut indices: Vec<usize> = (0..total_records).collect();
-        indices.shuffle(&mut rng);
-        indices.into_iter().take(cli.samples).collect()
-    };
+    let sample_indices = sample_record_indices(total_records, cli.samples, cli.seed);
 
     let mut sorted_indices = sample_indices.clone();
     sorted_indices.sort();
@@ -444,6 +439,11 @@ fn run(cli: Cli) -> Result<()> {
     analyze_results(&all_results, &cli)?;
 
     Ok(())
+}
+
+fn sample_record_indices(total_records: usize, samples: usize, seed: u64) -> Vec<usize> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    rand::seq::index::sample(&mut rng, total_records, samples.min(total_records)).into_vec()
 }
 
 fn analyze_results(results: &[(Sample, EvalResult)], cli: &Cli) -> Result<()> {
@@ -610,6 +610,30 @@ fn save_results(results: &[(Sample, EvalResult)], cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::sample_record_indices;
+
+    #[test]
+    fn fixed_seed_selects_identical_unique_indices_from_large_input() {
+        let first = sample_record_indices(1_000_000_000, 10_000, 42);
+        let second = sample_record_indices(1_000_000_000, 10_000, 42);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 10_000);
+        assert!(first.iter().all(|&index| index < 1_000_000_000));
+        let unique: std::collections::HashSet<_> = first.into_iter().collect();
+        assert_eq!(unique.len(), 10_000);
+    }
+
+    #[test]
+    fn sample_count_is_limited_by_available_records() {
+        let mut indices = sample_record_indices(3, 10, 42);
+        indices.sort_unstable();
+        assert_eq!(indices, [0, 1, 2]);
+        assert!(sample_record_indices(0, 10, 42).is_empty());
+    }
 }
 
 #[cfg(all(test, unix))]

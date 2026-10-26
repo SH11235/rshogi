@@ -212,9 +212,10 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
         let output_path = build_part_path(output_prefix, part_index, config.digits, &config.suffix);
         ensure_parent_dir(&output_path)?;
 
-        let out_file = File::create(&output_path).with_context(|| {
-            format!("出力ファイルを作成できませんでした: {}", output_path.display())
-        })?;
+        let out_file = tools::output_path::create_safe_output_file(&output_path, &[input_path])
+            .with_context(|| {
+                format!("出力ファイルを作成できませんでした: {}", output_path.display())
+            })?;
         let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
 
         let mut written_in_part = 0u64;

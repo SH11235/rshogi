@@ -36,3 +36,11 @@ mod tournament_shutdown_integration;
 mod csa_terminal_outcomes;
 
 mod preprocess_output_safety;
+
+mod data_output_safety;
+
+mod compare_nodes_failures;
+
+mod params_boundaries;
+
+mod book_fingerprint_compat;

@@ -37,12 +37,15 @@ impl JsonlSource {
     }
 
     fn collect_paths(&self) -> Result<Vec<PathBuf>> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.out_dir)
-            .with_context(|| format!("failed to read directory {}", self.out_dir.display()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| is_pair_jsonl_name(p))
-            .collect();
+        let entries = std::fs::read_dir(&self.out_dir)
+            .with_context(|| format!("failed to read directory {}", self.out_dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if is_pair_jsonl_name(&path) {
+                paths.push(path);
+            }
+        }
         // file_idx を実行のたびに安定させるため、列挙順をファイル名でソートする。
         paths.sort();
         Ok(paths)

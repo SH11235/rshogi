@@ -176,15 +176,26 @@ impl ReportStats {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let mode = validate_cli(&cli)?;
+    if let Some(engine) = &cli.engine {
+        cli.engine = Some(tools::book_fingerprint::resolve_engine_path(engine)?);
+    }
+    validate_output_paths(&cli)?;
 
     rshogi_book::Book::from_path(&cli.book, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", cli.book.display()))?;
     let book = read_book_db(&cli.book)?;
     let engine_fingerprint = run_fingerprint(&cli, mode)?;
     let go_field = mode.go_field(&cli);
-    let mut journal = if cli.resume {
+    let reusable = match cli.engine.as_deref() {
+        Some(_) => tools::book_fingerprint::has_explicit_model(&cli.engine_options)?,
+        None => true,
+    };
+    if cli.resume && !reusable {
+        eprintln!("警告: EvalFile / EvalDir が未指定のため journal を再利用しません");
+    }
+    let mut journal = if cli.resume && reusable {
         load_journal(&cli.journal, go_field, &engine_fingerprint)?
     } else {
         LoadedJournal::default()
@@ -203,6 +214,7 @@ fn main() -> Result<()> {
         }
     }
 
+    validate_output_paths(&cli)?;
     write_rescored_book(&book, &journal.child, &cli.out)?;
     if let Some(path) = &cli.report {
         write_report(&book, &journal.child, &journal.parent, path, mode == RunMode::UsiSearch)?;
@@ -249,6 +261,35 @@ fn validate_cli(cli: &Cli) -> Result<RunMode> {
     }
 }
 
+fn validate_output_paths(cli: &Cli) -> Result<()> {
+    let mut resources = vec![cli.book.clone()];
+    if let Some(engine) = &cli.engine {
+        resources.extend(tools::book_fingerprint::readonly_resources(engine, &cli.engine_options)?);
+    }
+    if let Some(model) = &cli.dlshogi_onnx_model {
+        resources.push(model.clone());
+    }
+    let mut inputs = Vec::new();
+    for resource in resources {
+        if resource.is_dir() {
+            for entry in walkdir::WalkDir::new(&resource).follow_links(true) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    inputs.push(entry.into_path());
+                }
+            }
+        } else {
+            inputs.push(resource);
+        }
+    }
+    let mut outputs = vec![cli.out.as_path(), cli.journal.as_path()];
+    if let Some(report) = &cli.report {
+        outputs.push(report);
+    }
+    let inputs: Vec<_> = inputs.iter().map(PathBuf::as_path).collect();
+    tools::output_path::ensure_safe_output_paths(&outputs, &inputs)
+}
+
 fn run_fingerprint(cli: &Cli, mode: RunMode) -> Result<String> {
     match mode {
         RunMode::UsiSearch => {
@@ -256,7 +297,7 @@ fn run_fingerprint(cli: &Cli, mode: RunMode) -> Result<String> {
                 .engine
                 .as_deref()
                 .ok_or_else(|| anyhow!("内部エラー: --engine がありません"))?;
-            Ok(engine_fingerprint(engine, &cli.engine_options))
+            engine_fingerprint(engine, &cli.engine_options)
         }
         #[cfg(feature = "dlshogi-onnx")]
         RunMode::StaticOnnx => {
@@ -264,7 +305,7 @@ fn run_fingerprint(cli: &Cli, mode: RunMode) -> Result<String> {
                 .dlshogi_onnx_model
                 .as_deref()
                 .ok_or_else(|| anyhow!("内部エラー: --dlshogi-onnx-model がありません"))?;
-            Ok(onnx_fingerprint(model, cli.eval_scale))
+            onnx_fingerprint(model, cli.eval_scale)
         }
     }
 }
@@ -338,23 +379,16 @@ fn strip_ply(sfen: &str) -> &str {
     }
 }
 
-fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> String {
-    let engine_name =
-        engine_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    let mut normalized_options: Vec<&str> = engine_options.iter().map(String::as_str).collect();
-    normalized_options
-        .sort_by(|a, b| engine_option_key(a).cmp(engine_option_key(b)).then_with(|| a.cmp(b)));
-    format!("{engine_name}\t{}", normalized_options.join("\n"))
+fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<String> {
+    tools::book_fingerprint::engine_fingerprint(engine_path, engine_options)
 }
 
 #[cfg(feature = "dlshogi-onnx")]
-fn onnx_fingerprint(model_path: &Path, eval_scale: f32) -> String {
-    let model_name = model_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    format!("dlshogi-onnx\tmodel={model_name}\teval_scale={eval_scale:.9}")
-}
-
-fn engine_option_key(option: &str) -> &str {
-    option.split_once('=').map_or(option, |(key, _)| key)
+fn onnx_fingerprint(model_path: &Path, eval_scale: f32) -> Result<String> {
+    Ok(format!(
+        "onnx-content-v1:{}:scale={eval_scale:.9}",
+        tools::book_fingerprint::content_digest(model_path)?
+    ))
 }
 
 fn side_to_move(sfen: &str) -> Result<Color> {
@@ -1042,21 +1076,21 @@ done
 
     #[test]
     #[cfg(feature = "dlshogi-onnx")]
-    fn onnx_fingerprint_changes_by_model_basename_or_eval_scale() {
-        let a = onnx_fingerprint(Path::new("/tmp/model-a.onnx"), 600.0);
-        let same = onnx_fingerprint(Path::new("/other/model-a.onnx"), 600.0);
-        let different_model = onnx_fingerprint(Path::new("/tmp/model-b.onnx"), 600.0);
-        let different_scale = onnx_fingerprint(Path::new("/tmp/model-a.onnx"), 650.0);
-
-        assert_eq!(a, same);
-        assert_ne!(a, different_model);
-        assert_ne!(a, different_scale);
+    fn onnx_fingerprint_changes_with_content_or_eval_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        std::fs::write(&model, b"model-a").unwrap();
+        let original = onnx_fingerprint(&model, 600.0).unwrap();
+        assert_eq!(original, onnx_fingerprint(&model, 600.0).unwrap());
+        assert_ne!(original, onnx_fingerprint(&model, 650.0).unwrap());
+        std::fs::write(&model, b"model-b").unwrap();
+        assert_ne!(original, onnx_fingerprint(&model, 600.0).unwrap());
     }
 
     #[test]
     #[cfg(feature = "dlshogi-onnx")]
     fn journal_match_requires_go_and_fingerprint() {
-        let fingerprint = onnx_fingerprint(Path::new("/tmp/static.onnx"), 600.0);
+        let fingerprint = "onnx-content-v1:current-model".to_owned();
         let record = JournalRecord {
             kind: JournalKind::Child,
             sfen: strip_ply(START).to_string(),
@@ -1069,11 +1103,7 @@ done
 
         assert!(journal_record_matches(&record, "static", &fingerprint));
         assert!(!journal_record_matches(&record, "nodes 1", &fingerprint));
-        assert!(!journal_record_matches(
-            &record,
-            "static",
-            &onnx_fingerprint(Path::new("/tmp/other.onnx"), 600.0)
-        ));
+        assert!(!journal_record_matches(&record, "static", "onnx-content-v1:other-model"));
     }
 
     #[test]
@@ -1165,8 +1195,7 @@ done
         }];
         let mut journal = LoadedJournal::default();
 
-        let fingerprint = engine_fingerprint(cli.engine.as_deref().unwrap(), &cli.engine_options);
-        let err = run_search_tasks(&cli, tasks, &fingerprint, &mut journal).unwrap_err();
+        let err = run_search_tasks(&cli, tasks, "fixture", &mut journal).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("探索タスクが未完了です: 0/1 件完了"));
         assert!(message.contains("--resume で再開できます"));
@@ -1221,21 +1250,58 @@ done
     }
 
     #[test]
+    fn output_collisions_preserve_book_model_and_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("input.db");
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.nnue");
+        let journal = dir.path().join("journal.jsonl");
+        for path in [&book, &engine, &model, &journal] {
+            std::fs::write(path, b"preserve").unwrap();
+        }
+        let mut cli = Cli::parse_from([
+            "book_rescore",
+            "--book",
+            book.to_str().unwrap(),
+            "--out",
+            dir.path().join("out.db").to_str().unwrap(),
+            "--engine",
+            engine.to_str().unwrap(),
+            "--journal",
+            journal.to_str().unwrap(),
+            "--engine-option",
+            &format!("EvalFile={}", model.display()),
+        ]);
+        assert!(validate_output_paths(&cli).is_ok());
+        for protected in [&book, &engine, &model, &journal] {
+            cli.report = Some(protected.clone());
+            assert!(validate_output_paths(&cli).is_err(), "{}", protected.display());
+            assert_eq!(std::fs::read(protected).unwrap(), b"preserve");
+        }
+        cli.report = None;
+        let hardlink = dir.path().join("alias.db");
+        std::fs::hard_link(&book, &hardlink).unwrap();
+        cli.out = hardlink;
+        assert!(validate_output_paths(&cli).is_err());
+        assert_eq!(std::fs::read(&book).unwrap(), b"preserve");
+    }
+
+    #[test]
     fn resume_ignores_journal_record_with_mismatched_engine_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let go = "nodes 1";
         let current_engine = dir.path().join("new-engine");
-        let current_options = vec!["EvalFile=current.nnue".to_string()];
-        let current_fingerprint = engine_fingerprint(&current_engine, &current_options);
+        let model = dir.path().join("model.nnue");
+        std::fs::write(&current_engine, b"engine").unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        let current_options = vec![format!("EvalFile={}", model.display())];
+        let current_fingerprint = engine_fingerprint(&current_engine, &current_options).unwrap();
         let stale_record = JournalRecord {
             kind: JournalKind::Child,
             sfen: strip_ply(START).to_string(),
             go: go.to_string(),
-            engine_fingerprint: engine_fingerprint(
-                Path::new("/path/to/old-engine"),
-                &["EvalFile=old.nnue".to_string()],
-            ),
+            engine_fingerprint: "legacy-fingerprint".to_owned(),
             value: Some(42),
             depth: Some(3),
             bestmove: None,

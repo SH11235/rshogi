@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
 use tools::spsa_param_mapping::{
@@ -87,7 +87,8 @@ fn main() -> Result<()> {
             // YO 入力に該当パラメータがない（古い tune.params など）→ base 値維持
             continue;
         };
-        let new_value = yo_to_rshogi_value(yo_row.value, mapping.sign_flip);
+        let new_value = yo_to_rshogi_value(yo_row.value, mapping.sign_flip)
+            .with_context(|| format!("{} -> {}", mapping.yo, mapping.rshogi))?;
         if new_value < r.min || new_value > r.max {
             out_of_range.push((r.name.clone(), new_value, r.min, r.max));
         }

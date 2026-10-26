@@ -19,6 +19,7 @@ use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::output_path::ensure_safe_output_path;
 use crate::selfplay::EvalLog;
 
 /// 変換対象を絞り込むフィルタ。
@@ -115,14 +116,14 @@ pub fn convert_jsonl_to_kif(
         output.is_dir() || (output.extension().is_none() && !output.as_os_str().is_empty());
 
     let single = selected.len() == 1 && !output_is_dir;
-    let mut written = Vec::new();
+    let mut paths = Vec::new();
 
     if output_is_dir {
         std::fs::create_dir_all(output)
             .with_context(|| format!("failed to create dir {}", output.display()))?;
     }
 
-    for (game_id, game) in selected {
+    for (game_id, _) in &selected {
         let path = if output_is_dir {
             output.join(format!("g{game_id:03}.kif"))
         } else if single {
@@ -133,14 +134,25 @@ pub fn convert_jsonl_to_kif(
             let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("kif");
             parent.join(format!("{stem}_g{game_id:03}.{ext}"))
         };
-        let mut writer = BufWriter::new(
-            File::create(&path).with_context(|| format!("failed to create {}", path.display()))?,
-        );
-        export_game_to_kif(&mut writer, meta.as_ref(), game_id, &game)?;
-        writer.flush()?;
-        written.push(path);
+        paths.push(path);
     }
-    Ok(written)
+    for path in &paths {
+        ensure_safe_output_path(path, input)?;
+    }
+    for ((game_id, game), path) in selected.iter().zip(&paths) {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        {
+            let mut writer = BufWriter::new(staged.as_file_mut());
+            export_game_to_kif(&mut writer, meta.as_ref(), *game_id, game)?;
+            writer.flush()?;
+        }
+        ensure_safe_output_path(path, input)?;
+        staged
+            .persist(path)
+            .with_context(|| format!("failed to replace {}", path.display()))?;
+    }
+    Ok(paths)
 }
 
 #[derive(Default)]
@@ -156,6 +168,10 @@ struct MoveEntry {
     sfen_before: String,
     move_usi: String,
     #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(default)]
     elapsed_ms: Option<u64>,
     #[serde(default)]
     eval: Option<EvalLog>,
@@ -166,6 +182,8 @@ struct ResultEntry {
     outcome: String,
     reason: String,
     plies: u32,
+    #[serde(default)]
+    pair_slot: Option<u32>,
 }
 
 /// KIF 生成に必要な meta フィールドのみのサブセット。
@@ -210,7 +228,11 @@ struct KifMetaEngineCmd {
     #[serde(default)]
     path_black: String,
     #[serde(default)]
+    label_black: Option<String>,
+    #[serde(default)]
     path_white: String,
+    #[serde(default)]
+    label_white: Option<String>,
     #[serde(default)]
     usi_options_black: Vec<String>,
     #[serde(default)]
@@ -226,7 +248,56 @@ fn export_game_to_kif<W: Write>(
     let (mut pos, start_sfen) = start_position_for_game(game_id, &game.moves)?;
 
     let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
-    let (black_name, white_name) = engine_names_for(meta);
+    let (mut black_name, mut white_name) = engine_names_for(meta);
+    let meta_names = (black_name.clone(), white_name.clone());
+    if game.result.as_ref().and_then(|result| result.pair_slot) == Some(1) {
+        std::mem::swap(&mut black_name, &mut white_name);
+    }
+    let display_engine = |engine: &str| {
+        let Some(meta) = meta else {
+            return engine.to_owned();
+        };
+        if meta.engine_cmd.label_black.as_deref() == Some(engine) {
+            return meta_names.0.clone();
+        }
+        if meta.engine_cmd.label_white.as_deref() == Some(engine) {
+            return meta_names.1.clone();
+        }
+        let black_matches = Path::new(&meta.engine_cmd.path_black)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(engine);
+        let white_matches = Path::new(&meta.engine_cmd.path_white)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(engine);
+        match (black_matches, white_matches) {
+            (true, false) => meta_names.0.clone(),
+            (false, true) => meta_names.1.clone(),
+            _ => engine.to_owned(),
+        }
+    };
+    let mut found_black = false;
+    let mut found_white = false;
+    for entry in &game.moves {
+        let Some(engine) = entry.engine.as_ref() else {
+            continue;
+        };
+        let mut before = Position::new();
+        before
+            .set_sfen(&entry.sfen_before)
+            .map_err(|error| anyhow!("invalid sfen_before: {error}"))?;
+        if before.side_to_move() == Color::Black && !found_black {
+            black_name = display_engine(engine);
+            found_black = true;
+        } else if before.side_to_move() == Color::White && !found_white {
+            white_name = display_engine(engine);
+            found_white = true;
+        }
+        if found_black && found_white {
+            break;
+        }
+    }
     let (btime, wtime) =
         meta.map(|m| (m.settings.btime, m.settings.white_time())).unwrap_or((0, 0));
     writeln!(writer, "開始日時：{}", timestamp)?;
@@ -253,7 +324,9 @@ fn export_game_to_kif<W: Write>(
     let mut total_white = 0u64;
 
     for entry in moves {
-        if entry.move_usi == "resign" || entry.move_usi == "win" || entry.move_usi == "timeout" {
+        if entry.timed_out
+            || matches!(entry.move_usi.as_str(), "resign" | "win" | "timeout" | "illegal" | "none")
+        {
             break;
         }
         let side = pos.side_to_move();
@@ -511,6 +584,8 @@ mod tests {
                     sfen_before: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
                         .into(),
                     move_usi: "resign".into(),
+                    engine: None,
+                    timed_out: false,
                     elapsed_ms: None,
                     eval: None,
                 }],
@@ -606,5 +681,167 @@ mod tests {
         let err = convert_jsonl_to_kif(&input, &output, &filter)
             .expect_err("should bail on empty filter result");
         assert!(format!("{err}").contains("no games matched filter"), "err: {err}");
+    }
+    fn write_terminal_game(path: &Path, terminal: &str) -> Result<()> {
+        let row = serde_json::json!({
+            "type": "move", "game_id": 1, "ply": 1,
+            "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "move_usi": terminal,
+        });
+        std::fs::write(path, format!("{row}\n"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_pseudo_moves_are_exported_without_parsing_as_board_moves() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("games.jsonl");
+        let output = dir.path().join("game.kif");
+        for terminal in ["resign", "win", "timeout", "illegal", "none"] {
+            write_terminal_game(&input, terminal)?;
+            convert_jsonl_to_kif(&input, &output, &GameFilter::default())?;
+            assert!(std::fs::read_to_string(&output)?.contains("まで1手で中断"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn conversion_rejects_input_aliases_without_changing_input() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("games.jsonl");
+        write_terminal_game(&input, "resign")?;
+        let original = std::fs::read(&input)?;
+        assert!(convert_jsonl_to_kif(&input, &input, &GameFilter::default()).is_err());
+        let alias = dir.path().join("alias.kif");
+        std::fs::hard_link(&input, &alias)?;
+        assert!(convert_jsonl_to_kif(&input, &alias, &GameFilter::default()).is_err());
+        assert_eq!(std::fs::read(&input)?, original);
+        assert_eq!(std::fs::read(&alias)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn conversion_error_preserves_existing_kif() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("games.jsonl");
+        let output = dir.path().join("game.kif");
+        write_terminal_game(&input, "bad_move")?;
+        std::fs::write(&output, b"previous complete game")?;
+        assert!(convert_jsonl_to_kif(&input, &output, &GameFilter::default()).is_err());
+        assert_eq!(std::fs::read(&output)?, b"previous complete game");
+        Ok(())
+    }
+
+    #[test]
+    fn exchanged_colors_use_move_engines_and_keep_matching_options() -> Result<()> {
+        let meta: KifMeta = serde_json::from_value(serde_json::json!({
+            "engine_cmd": {
+                "path_black": "engine_a", "path_white": "engine_b",
+                "label_black": "a", "label_white": "b",
+                "usi_options_black": ["Style=A"], "usi_options_white": ["Style=B"],
+            }
+        }))?;
+        let first: MoveEntry = serde_json::from_value(serde_json::json!({
+            "game_id": 2, "ply": 1,
+            "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "move_usi": "7g7f", "engine": "b",
+        }))?;
+        let second: MoveEntry = serde_json::from_value(serde_json::json!({
+            "game_id": 2, "ply": 2,
+            "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            "move_usi": "resign", "engine": "a",
+        }))?;
+        let game = GameLog {
+            moves: vec![first, second],
+            result: None,
+        };
+        let mut output = Vec::new();
+        export_game_to_kif(&mut output, Some(&meta), 2, &game)?;
+        let text = String::from_utf8(output)?;
+        assert!(text.contains("先手：engine_b [Style=B]"));
+        assert!(text.contains("後手：engine_a [Style=A]"));
+        Ok(())
+    }
+    #[test]
+    fn a_legal_bestmove_received_after_timeout_is_not_exported_as_a_move() -> Result<()> {
+        let game = GameLog {
+            moves: vec![serde_json::from_value(serde_json::json!({
+                "game_id": 1, "ply": 1,
+                "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                "move_usi": "7g7f", "timed_out": true,
+            }))?],
+            result: Some(serde_json::from_value(serde_json::json!({
+                "outcome": "white_win", "reason": "timeout", "plies": 1,
+            }))?),
+        };
+        let mut output = Vec::new();
+        export_game_to_kif(&mut output, None, 1, &game)?;
+        let text = String::from_utf8(output)?;
+        assert!(!text.contains("▲"));
+        assert!(text.contains("まで1手で後手の勝ち"));
+        Ok(())
+    }
+    #[test]
+    fn explicit_labels_take_priority_over_shared_binary_name_in_both_colors() -> Result<()> {
+        let meta: KifMeta = serde_json::from_value(serde_json::json!({
+            "engine_cmd": {
+                "path_black": "engine", "path_white": "engine",
+                "label_black": "candidate", "label_white": "engine",
+                "usi_options_black": ["EvalFile=candidate.bin"],
+                "usi_options_white": ["EvalFile=base.bin"],
+            }
+        }))?;
+        for exchanged in [false, true] {
+            let (black_label, white_label, black_eval, white_eval) = if exchanged {
+                ("engine", "candidate", "base.bin", "candidate.bin")
+            } else {
+                ("candidate", "engine", "candidate.bin", "base.bin")
+            };
+            let game = GameLog {
+                moves: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "game_id": 1, "ply": 1,
+                        "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                        "move_usi": "7g7f", "engine": black_label,
+                    }))?,
+                    serde_json::from_value(serde_json::json!({
+                        "game_id": 1, "ply": 2,
+                        "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+                        "move_usi": "resign", "engine": white_label,
+                    }))?,
+                ],
+                result: None,
+            };
+            let mut output = Vec::new();
+            export_game_to_kif(&mut output, Some(&meta), 1, &game)?;
+            let text = String::from_utf8(output)?;
+            assert!(text.contains(&format!("先手：engine [EvalFile={black_eval}]")));
+            assert!(text.contains(&format!("後手：engine [EvalFile={white_eval}]")));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_binary_names_do_not_select_either_option_set() -> Result<()> {
+        let meta: KifMeta = serde_json::from_value(serde_json::json!({
+            "engine_cmd": {
+                "path_black": "engine", "path_white": "engine",
+                "usi_options_black": ["EvalFile=candidate.bin"],
+                "usi_options_white": ["EvalFile=base.bin"],
+            }
+        }))?;
+        let game = GameLog {
+            moves: vec![serde_json::from_value(serde_json::json!({
+                "game_id": 1, "ply": 1,
+                "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                "move_usi": "resign", "engine": "engine",
+            }))?],
+            result: None,
+        };
+        let mut output = Vec::new();
+        export_game_to_kif(&mut output, Some(&meta), 1, &game)?;
+        let text = String::from_utf8(output)?;
+        assert!(text.lines().any(|line| line == "先手：engine"));
+        Ok(())
     }
 }

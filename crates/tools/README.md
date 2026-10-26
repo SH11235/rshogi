@@ -1,188 +1,100 @@
-# tools
+# rshogi tools
 
-教師データの [HCPE 38 byte共通形式とpaddingの扱い](docs/hcpe-format.md)。
+将棋エンジンの対局評価、教師データの生成・加工、性能計測、定跡整備のツール群です。
 
-LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](docs/nnue-routing.md)。
+| やりたいこと | 入口 |
+|---|---|
+| 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
+| エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
+| 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
+| その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
-将棋エンジン開発用ツール群
+## ビルドと実行
 
-共通の入力ファイル収集を使うツールは、ディレクトリ列挙に失敗するとエラーで終了します。
-読めないサブディレクトリを黙って除外した部分的な入力一覧は返しません。
+リポジトリのルートで実行します。必要な Rust 環境は [ビルド手順](../../docs/build.md) を参照してください。
+以下は Bash / Git Bash で実行する例です。Windows native のエンジンの実行ファイルには `.exe` を付けます。
 
-## ツール一覧
+```bash
+cargo build --release -p tools --bin shuffle_psv
+cargo run --release -p tools --bin shuffle_psv -- --help
+```
 
-### 対局・データ生成
-
-| ツール | 説明 |
-|--------|------|
-| `tournament` | `--adjudicate-win` と `--startpos-order sequential` で定跡候補手を比較。`--adjudicate-agreement` で両側の評価の一致による勝敗の裁定 (既定 off)。既存対局出力を保護し、カード index と表示ラベルを含むファイル名で保存。中断時も回収結果を保存し run 状態を明示。複数エンジンの round-robin 並列トーナメント、動的目標変更時の先後交換ペア維持、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](docs/tournament.md)）。SPRT の `--sprt-nelo0` / `--sprt-nelo1` は負値をスペース区切りで指定可能（例: `--sprt-nelo0 -10 --sprt-nelo1 0`、`nelo0 < nelo1` 必須）。USIの同一行exact主PVを `eval.last_exact_primary` に保存 |
-| `analyze_selfplay` | `--by-startpos` で開始局面別の先後成績・時間・手順数を合算。不完全入力を invalid とし、部分集計と採否を区別。tournament 出力の世代別ペア集計・Elo/nElo 算出・SPRT post-hoc 判定、`--adjudication-sweep` による一致の裁定の閾値の後付け集計（[詳細](docs/analyze_selfplay.md)、[LLR 計算・再計算時の注意](docs/tournament.md#llr-の計算と保存ログの再計算)）。SPRT の `--sprt-nelo0` / `--sprt-nelo1` は負値をスペース区切りで指定可能（例: `--sprt-nelo0 -10 --sprt-nelo1 0`、`nelo0 < nelo1` 必須） |
-| `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](docs/floodgate_record.md)） |
-| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
-| `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換・`live-mirror --push` MONITOR2 着手通知付きリアルタイムミラー（[詳細](docs/floodgate_pipeline.md)） |
-| `kifu_publish` | 棋譜を rshogi の棋譜サーバーへ公開（`wdoor`: csa_client の records から Floodgate 対局を ID で取り込み、wdoor に無い局はアーカイブからアップロード / `jsonl`: tournament・csa_client の JSONL を wdoor 形式の CSA に変換してアップロード / `csa`: CSA（Shift_JIS 可、ディレクトリ可）をサーバーが読める形に正規化してアップロード / `kif`: 電竜戦の KIF を CSA に変換してアップロード / `event`: イベントの正式名称・公式リンクを登録。[詳細](docs/kifu_publish.md)） |
-| `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と出典 TSV を生成（[詳細](docs/nyugyoku_gensfen.md)） |
-| `book_from_csa` | CSA 棋譜群から YANEURAOU-DB2016 テキスト定跡 `.db` を生成（消費時間による定跡手判定・レート/勝敗フィルタ、[詳細](docs/book_from_csa.md)） |
-| `book_kachi_label` | YANEURAOU-DB2016 テキスト定跡のノード×候補手ごとに CSA corpus から `%KACHI` 決着率を集計し sidecar JSONL を生成（flip 合流対応、[詳細](docs/book_kachi_label.md)） |
-| `book_prepwalk` | 相手の棋譜の即指しの範囲から作った相手の定跡の木を自分の定跡で辿り、自分が考え始める局面・相手の準備の残り手数・出口の評価値と危ない進行を相手ごとに集計（自分の手は main / 全手 / 乱択候補ファイルから選択、[詳細](docs/book_prepwalk.md)） |
-| `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与、実行中は進捗/ETA を stderr 表示（[詳細](docs/book_rescore.md)） |
-| `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加（[詳細](docs/book_extend.md)） |
-| `book_backprop` | 定跡の値を千日手を考慮した後退解析で逆伝播 (YaneuraOu の peta_shock と同じ方式、入力によらず終わる)。先手・後手をそれぞれ自分として解き、千日手の値を先後別に指定できる。`min` は自分の手だけを探索ラベルで抑える。連続王手の千日手は王手側の負け、合法値下限を守る同値補正、書き出す値が循環で破られないかの検査 (危ない同値手は保証手に戻す)。探索 depth を保持し、未探索 0/0 を保護可能。局面索引は読み取り専用の軽い局面で作り、手を指す処理は完全な局面を使う。`--add-transposition-moves` で手順間の合流手を補完。225 万局面を 1 スレッド約 95 秒・ピークメモリ約 0.9 GiB で処理（[詳細](docs/book_backprop.md)） |
-| `book_mine` | `borrow cut/value` は大きい定跡 (ペタショック定跡など) をファイル上で引いて根ごとの部分木 (自分の手番は最善から差 D 以内、相手の手番は上位 N 手と差 D' 以内) を切り出し、出口と確認点を `tree serve` の段 0 のキューの行で読ませ、台帳の読みを後退解析で根まで伝播して元データに `source=peta` で登録する (確認点で候補の外の手が上回れば印を付けて登録を保留)。`master audit` は定跡の元データの表の読みの値を逆伝播し、main が伝播後の 1 位から線以上負ける局面を点検の表 (先手から見た値の列つき) と要約に出す。元データの伝播グラフは一時定跡を経ずメモリ内で1回作り、未知の手と手の無くなる局面を同じ配列内で除く。局面の索引・key の検査には評価用の初期化を省いた読み取り専用局面を使う。頂点の展開は詰めた局面から完全な局面を直接作り、在庫検査とハッシュ計算を重複させない。`master rejoin` は相手の定跡に無い合法手で定跡の局面に戻ると値が線以上下がる所を、強い対局の手の頻度による重み付きで一覧にする。`--opp-freq` と正の `--min-weight` を渡すと下限未満の自分の手番の局面の展開を止めるため、その局面を経由する先も調査対象から外れる (相手の手番の局面は止めない)。`master cycles` は相手の合法手で定跡に戻る千日手の循環を、自分の手番の手を外して (record にして) 塞ぐ手の組を決まった規則で出す (`--apply` で元データを書き換え)。`rejoin` / `cycles` の辿るグラフは局面を 32 バイトに詰めて持ち (玉の欠けた局面は SFEN で保持し)、辺を 1 本の配列にまとめる。`cycles` の書き換え用の元データの行は `--apply` のときだけ読む。外した後の循環は同じグラフの辺を絞って数え直すため、グラフは手番ごとに 1 回だけ作る。`tree serve/enqueue/wait/import-journal/replay/register` は優先度付きの対象キュー (JSON Lines、段数・優先度・保留を足し直しで変更、世代ごとの出力、受領の範囲まで待つ `wait`、両方の手番の木の手を定跡の元データの表に登録する `register`、別マシンの台帳の読みを同じ条件と確かめて取り込む `import-journal`) の木で版付き台帳と優先列を共有し、対象 fingerprint の読みだけを保持。worker 起動前後の入力指紋照合と不一致時の停止・並列数の動的変更・drain・局面単位の障害分離・監視書き込みの再試行・探索途中の info 行の記録 (`--trace-dir`)・終了済み STATUS の差分更新・出力先の排他とパス衝突の拒否・短い MultiPV と宣言勝ちの受理・Python 互換出力に対応。反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後と再開時の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、内部成果物への出力や内部ファイル・ディレクトリのリンクを拒否。ファイル型オプションはリンク先モデルの内容も識別する。再開をまたぐ journal・終端・収束キャッシュの再利用には `EvalFile` / `EvalDir` の明示指定が必要。指定がなければ既定モデルの場所を推測せず、警告して再利用を無効化する。内容ハッシュ導入前の journal は再利用せず再探索する。journal は排他ロック中に追記・不完全末尾を復旧し、終了時に明示的にロックを解放する。YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
-
-### 棋譜閲覧
-
-| ツール | 説明 |
-|--------|------|
-| `kifu_player` | tournament の index 形式・旧形式に対応。PSV / tournament JSONL / CSA を同じ TUI で再生・閲覧（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き。[詳細](docs/kifu_player.md)） |
-
-### 学習データ処理
-
-| ツール | 説明 |
-|--------|------|
-| `shuffle_psv` | PSV ファイルのシャッフル。seed 指定による再現と、大規模向けチャンク方式・opt-in の段階削除に対応（[詳細](docs/shuffle_psv.md)） |
-| `split_psv` | PSV ファイルを局面数または容量で分割 |
-| `merge_psv` | 複数の PSV ファイルを順序どおり結合 |
-| `relabel_psv` | PSV の score を game_result 由来値へ置換し、宣言勝ち override / diversion 整合性 deblunder / dry-run / verdict sidecar に対応（[詳細](docs/relabel_psv.md)） |
-| `rescore_psv` | 局面の再評価（NNUE / 外部エンジン / ONNX。`--out-scores` で i16 score sidecar 出力。明示資源と PSV/marker 群の alias を検査） |
-| `expand_psv_from_policy` | ONNX ポリシーによる PSV 展開。入力・モデル本体・ORT ライブラリへの出力 alias を拒否（[詳細](docs/expand_psv_from_policy.md)） |
-| `policy_rollout_psv` | dlshogi 系 ONNX の policy で種の局面から指し進め、途中の局面を value 静的評価付き PSV に書き出す。種から N 手先までに制限可。温度・下限確率・上位手数を指定可。seed で bit 一致、chunk 単位で再開（[詳細](docs/policy_rollout_psv.md)） |
-| `psv_gate_by_king_zone` | 入玉ドメインの score 合成 / LSB-first mask bitmap 生成 |
-| `psv_dual_label` | 通常 PSV の score 退避、dual-label PSV の生成・LSB-first mask を含む sidecar 抽出・fail-closed 検証（[詳細](docs/psv_dual_label.md)） |
-| `psv_select_by_mask` | LSB-first bitmap mask の bit 1 に対応する PSV 行を入力順に抽出（[詳細](docs/psv_select_by_mask.md)） |
-| `psv_scatter_by_mask` | compact PSV の score を mask 対応で元 shard に書き戻す（[詳細](docs/psv_scatter_by_mask.md)） |
-| `rescore_hcpe` | hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（分散ラベリング・チャンク単位 + 途中 resume 対応） |
-| `preprocess_psv` | PSV の qsearch leaf 置換と、任意の局面変更行 bitmap mask 生成（[詳細](docs/pack_tools.md#preprocess_psv)） |
-| `validate_psv` | PSV ファイルの不正局面検出・除去 |
-| `filter_teacher_data` | 王手除外・スコアフィルタ・クリップと統計集計。PSV / JSON 出力への入力 alias を拒否（[詳細](docs/filter_teacher_data.md)） |
-| `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用）。入力 alias を拒否（[詳細](docs/psv_to_jsonl.md)） |
-| `jsonl_to_psv` | 自己対局 JSONL → PSV 変換（破損行は破棄して継続、件数を Summary に計上。[詳細](docs/jsonl_to_psv.md)） |
-| `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](docs/psv_to_hcpe3.md)） |
-| `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へ移行（[詳細](docs/migrate_psv_move16.md)） |
-| `pack_to_psv` | GenSfen .pack → PSV を有界バッチで変換。全入力通算の対局数上限、成功時の出力置換、入力 alias 保護（[詳細](docs/pack_to_psv.md)） |
-| `fix_scores` | スコアの補正。前処理済みファイルのインプレース更新に対応し、元ファイルを保護（[詳細](docs/fix_scores.md)） |
-| `psv_dedup` / `psv_dedup_bloom` / `psv_dedup_partition` | PSV 局面の重複除去（3 方式。partition 方式は Phase 1 buffer 自動調整・fused shuffle 対応。使い分けは [pack_tools.md](docs/pack_tools.md#重複除去ツールの選び方)） |
-| `prep_hcpe` | hcpe 教師プールの汚染除去・重複除去・決定的 shuffle・分割（[詳細](docs/prep_hcpe.md)） |
-| `hcpe_to_psv` | hcpe → PSV 変換（Linux/macOS・Windows対応、hardlinkを含む入力と出力の同一実体を拒否。外部公開 hcpe プールの学習/検証投入用、[詳細](docs/hcpe_to_psv.md)） |
-
-### ベンチマーク・分析
-
-| ツール | 説明 |
-|--------|------|
-| `benchmark` | エンジン性能ベンチマーク。USI の評価ハッシュ設定と受信期限、`名前 | sfen …` 形式の局面ファイルに対応（[詳細](docs/benchmark.md)） |
-| `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
-| `mate_bench` | df-pn 詰み探索を局面集で解き、結果の内訳・探索量・時間を集計。最短詰み手数の正解と照合（[詳細](docs/mate_bench.md)） |
-| `search_only_ab` | search-only A/B ベンチマーク。`--alternate-rounds` で round ごとに A/B を交換し、JSON `blocks` に局面×round の順序と比、`binaries` に両エンジンの SHA-256 を保存。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
-| `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
-| `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](docs/compare_eval_nnue.md)） |
-| `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](docs/dump_effect_bucket_golden.md)） |
-| `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
-| `label_bench_positions` | ベンチ局面 jsonl を深い探索でラベル付けし `eval_deep` を追記（ground truth） |
-| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) で静的評価し `eval_dl` を追記（`dlshogi-onnx` feature、default 有効） |
-| `yardstick_label` / `yardstick_score` | ラベル品質「物差し」。held-out hcpe を labeler でラベル付け（stage 1）→ engine ごとに勝率較正して per-class WDL logloss / 参照天井 / リファレンス一致を採点（stage 2） |
-| `ek_testset` | held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点（[詳細](docs/ek_testset.md)） |
-| `nyugyoku_metrics` | 終局 CSA から宣言ルール距離ペア（`%KACHI`）と探索読み切り詰み距離（`%TORYO` + oracle 探索）を抽出し、native NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点（[詳細](docs/nyugyoku_metrics.md)） |
-| `nnue_saturation` | LayerStacks NNUE の活性飽和率（ClippedReLU 127 張り付き）を実局面で計測（[詳細](docs/nnue_saturation.md)） |
-| `prepack_nnue` | LayerStacks の FT を事前展開し、共有読み込み用コンテナを作成（[詳細](docs/prepack_nnue.md)） |
-
-### NNUE 学習
-
-NNUE モデルの学習には [bullet-shogi](https://github.com/SH11235/bullet-shogi/tree/shogi-support) を使用しています。
-教師データは上記の PSV ツール群で生成・前処理し、bullet-shogi で学習を行います。
+通常は必要なバイナリだけを `--bin` で選びます。`kifu_player` と `dlshogi-onnx` は
+既定で有効です。TUI・ONNX 依存を外す場合は
+`--no-default-features --features nnue-arch` をビルド引数に追加します。
+`prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
 
 ## クイックスタート
 
-### 教師局面の生成（gensfen）
+教師データ・NNUE モデル・進行度係数は repo 外の共有 root に置き、
+環境変数 `SHOGI_DATA` に設定してください。以下の入力ファイルはあらかじめ用意します。
+出力は実行ごとに別名にすると前回の結果を保持できます。
+
+### 教師データの生成とシャッフル
 
 ```bash
-cargo run -p tools --release --bin gensfen -- \
-  --games 100 --byoyomi 1000
-# → runs/gensfen/<timestamp>/gensfen.psv
+# model.bin は使用する評価関数に置き換える。
+RUN="$SHOGI_DATA/teachers/generated-$(date +%Y%m%d_%H%M%S)"
+cargo run --release -p tools --bin gensfen -- \
+  --eval-file "$SHOGI_DATA/nnue/model.bin" \
+  --games 100 --nodes 80000 --threads 1 --hash-mb 256 \
+  --out-dir "$RUN"
+
+cargo run --release -p tools --bin shuffle_psv -- \
+  --input "$RUN/gensfen.psv" --output "$RUN/shuffled.psv" \
+  --seed 42 --chunk-size 1000000
 ```
 
-### 学習データのシャッフル
+`gensfen` は終了時に局面数を表示し、指定先へ PSV と結果 JSONL を保存します。
+LayerStacks の routing・進行度係数が必要なモデルは
+[起動時の設定条件](docs/nnue-routing.md#起動時の設定条件)に従って指定してください。
+`shuffle_psv` のチャンク指定は全件のメモリ保持を避けるためです。メモリ・一時ディスク容量と
+中断時の扱いは [shuffle_psv](docs/shuffle_psv.md)、生成の drain・再開は
+[gensfen](docs/gensfen.md) を参照してください。学習自体は外部トレーナーで行います。
+[bullet-shogi](https://github.com/SH11235/bullet-shogi/tree/shogi-support) を使う場合の学習手順は、そちらの文書を参照してください。
+
+### 2 エンジンの対局と集計
+
+評価関数などの初期設定が済んだ USI エンジンを用意します。
+同じバイナリでモデルを比較する例は [tournament](docs/tournament.md) を参照してください。
 
 ```bash
-cargo run -p tools --release --bin shuffle_psv -- \
-  --input data.psv --output shuffled.psv
+RUN="runs/selfplay/$(date +%Y%m%d_%H%M%S)-compare"
+cargo run --release -p tools --bin tournament -- \
+  --engine /path/to/candidate --engine-label candidate \
+  --engine /path/to/base --engine-label base \
+  --games 10 --byoyomi 1000 --threads 1 --hash-mb 256 \
+  --concurrency 2 --seed 42 --out-dir "$RUN"
+
+cargo run --release -p tools --bin analyze_selfplay -- "$RUN"
 ```
 
-### ベンチマーク実行
+`--games 10` は各方向 10 局なので、この例は先後を交換して計 20 局です。
+開始局面集を使う比較では `--startpos-file` を追加します。
+中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
+不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。
+
+### 探索の動作確認
 
 ```bash
-cargo run -p tools --release --bin benchmark -- --internal
+cargo run --release -p tools --bin benchmark -- \
+  --internal --usi-option MaterialLevel=1 \
+  --limit-type nodes --limit 10000 --tt-mb 16 --eval-hash-mb 16
 ```
 
-## ドキュメント
+駒得評価で短く探索し、コンソールに NPS、`benchmark_results/` に JSON を保存します。
+NNUE を使った性能比較では `--nnue-file` と必要な routing を明示し、
+[benchmark](docs/benchmark.md) または [search_only_ab](docs/search_only_ab.md) の条件を揃えて計測します。
 
-各ツールの詳細は `docs/` を参照：
+## 共通の注意と関連資料
 
-- [tournament](docs/tournament.md) - seed 指定で開始局面を再現できる並列トーナメント・SPRT 検定。`--wtime` / `--winc` による先後別フィッシャー時計に対応
-- [kifu_player](docs/kifu_player.md) - PSV / tournament JSONL / CSA 共通の棋譜プレイヤー TUI（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き）
-- [kifu_publish](docs/kifu_publish.md) - 棋譜（Floodgate 対局 / tournament・csa_client の JSONL / CSA / 電竜戦の KIF）とイベントのメタデータを rshogi の棋譜サーバーへ公開
-- [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
-- [nyugyoku_gensfen](docs/nyugyoku_gensfen.md) - 入玉アンカー局面から gensfen 用開始局面を生成
-- [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
-- [search_only_ab](docs/search_only_ab.md) - search-only A/B ベンチマーク（perf / ETW PMC）の詳細
-- [mate_bench](docs/mate_bench.md) - df-pn 詰み探索の局面集ベンチの詳細
-- [dump_effect_bucket_golden](docs/dump_effect_bucket_golden.md) - 形式一致 golden 用 effect bucket active index dump
-- [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
-- [shuffle_psv](docs/shuffle_psv.md) - PSV の再現可能なシャッフルと大規模ファイル向け段階削除
-- [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
-- [label_bench_positions](docs/label_bench_positions.md) - 入力・NNUE・進行度係数を出力先から保護する深い探索ラベリング（ground truth）
-- [label_bench_dl](docs/label_bench_dl.md) - 入力・ONNX モデルを保護して label_bench jsonl に DL水匠 評価値を追記
-- [yardstick_label](docs/yardstick_label.md) - 読み取り専用資源と全 capture 出力の衝突を検査する held-out hcpe のラベリング（物差し stage 1）
-- [yardstick_score](docs/yardstick_score.md) - 全入力ラベルを保護し、WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
-- [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
-- [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
-- [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
-- [generate_spsa_params](docs/generate_spsa_params.md) - 共通の既定値と c_end/r_end 形式宣言付きで SPSA `.params` を生成
-- [spsa](docs/spsa.md) - 永続 engine プールで batch チューニング (`--dispatch async` で pair ごとの非同期更新、journal と snapshot による再開)。既定で確定した局の棋譜を `games.jsonl` に追記 (`--no-game-records` で無効)。async の Fischer では `--nps-scaling` (NPS による持ち時間の補正)・1 局の上限・時間切れの率での停止・`--adjudicate-agreement`。Linuxでは既定でworkerごとのengineをnode-localな論理CPU群へ固定（`--cpu-affinity off`で明示解除）。初期化前にparams全行とmapping、対局開始前にscheduleの有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
-- [yo_to_rshogi_params](docs/yo_to_rshogi_params.md) - YO値をrshogiへ転記し、宣言付きのc_end/r_end形式で保存する
-- [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から c_end/r_end 形式宣言付きの net 重み delta 用 SPSA `.params` を生成
-- [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する。重複行は拒否する
-- [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
-- [psv_gate_by_king_zone](docs/psv_gate_by_king_zone.md) - 入玉ドメインの base/override score 合成と行対応 mask bitmap
-- [psv_dual_label](docs/psv_dual_label.md) - 通常 PSV の score 退避、dual-label PSV の生成・LSB-first mask を含む sidecar 抽出・fail-closed 検証
-- [psv_select_by_mask](docs/psv_select_by_mask.md) - bitmap mask の bit 1 に対応する PSV 行の順序保持抽出
-- [psv_scatter_by_mask](docs/psv_scatter_by_mask.md) - compact PSV の score を mask 対応で元 shard に書き戻し
-- [relabel_psv](docs/relabel_psv.md) - PSV score の勝敗ラベル置換、宣言勝ち override、diversion 整合性 deblunder
-- [rescore_hcpe](docs/rescore_hcpe.md) - hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（共有コアで yardstick とラベル bit 一致、分散ラベリング・チャンク単位 + 途中 resume 対応）
-- [psv_to_hcpe3](docs/psv_to_hcpe3.md) - PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` の有効な着手なしレコードを件数付きスキップ、`--evalfix-a` 対応）
-- [migrate_psv_move16](docs/migrate_psv_move16.md) - 旧 PSV move16 の実 YaneuraOu 形式への移行
-- [psv_to_jsonl](docs/psv_to_jsonl.md) - PSV の JSONL 変換と入力ファイルの保護
-- [pack_to_psv](docs/pack_to_psv.md) - GenSfen 棋譜から PSV への展開
-- [filter_teacher_data](docs/filter_teacher_data.md) - 教師データのフィルタと PSV / JSON 出力先の保護
-- [fix_scores](docs/fix_scores.md) - 元ファイルを保持したスコア訂正とインプレース更新
-- [book_rescore](docs/book_rescore.md) - YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与（実行中は進捗/ETA を stderr 表示）
-- [book_kachi_label](docs/book_kachi_label.md) - YANEURAOU-DB2016 テキスト定跡の候補手に `%KACHI` 決着率を付与する sidecar JSONL を生成
-- [book_prepwalk](docs/book_prepwalk.md) - 相手の定跡の木を自分の定跡で辿り、相手の準備の中で自分が考え始める局面を集計
-- [book_extend](docs/book_extend.md) - YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加
-- [book_backprop](docs/book_backprop.md) - YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から後退解析で逆伝播
-- [book_mine](docs/book_mine.md) - 大きい定跡の木を借りた登録 (`borrow cut/value`)、定跡の元データの点検 (`master audit` / `rejoin` / `cycles`)、`tree` の常駐・対象キュー・待機・取り込み・再生・登録と、YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する
-
-各ツールのオプション一覧は `--help` で確認できます。
-
-## HTTPS 接続とビルド環境
-
-Floodgate の HTTPS 取得は reqwest 0.13 の rustls backend を使う。
-信頼する root 証明書は OS の証明書ストアから取得するため、最小 Linux
-コンテナには `ca-certificates` を用意する。暗号 provider は `ring` で、
-ビルドに必要なのは C コンパイラのみ (CMake / NASM は不要)。
-
-## 使用例
-
-より多くのコマンド例は [examples/README.md](examples/README.md) を参照。
-
-- [spsa_stats_to_plot_csv](docs/spsa_stats_to_plot_csv.md) - async の stats.csv にも対応。入力 alias を拒否し、変換成功時だけ plot CSV を置換
-
-`eval_sfens` / `bench_nnue_eval` / `verify_nnue_accumulator` /
-`nnue_saturation` の静的 LayerStacks 解析は、追加 feature
-`layerstacks-3072x16x64` / `layerstacks-2304x16x64` / `layerstacks-1536x16x64` にも対応する。
-
-CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "csa_client"`、または
-過去ログの CSA client 固有 `engine_cmd.note` で識別する。CSA 入力は pentanomial
-と SPRT の対象外で、`--sprt` は `--allow-partial` 指定時も拒否する。
-
-CSA JSONL の中断・打切りは勝敗集計と教師抽出から除外し、棋譜表示では未決として扱う。
-[解析の未決結果](docs/analyze_selfplay.md)、[KIF変換](docs/jsonl_to_kif.md)を参照。
+- 各 CLI の全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
+- 共通の入力ファイル収集は、読めないディレクトリを黙って除外せずエラーを返します。
+- 入出力の保護・上書き・再開の契約はツールごとに異なります。各 doc の出力に関する説明を確認してください。
+- [HCPE の 38 byte 形式と padding](docs/hcpe-format.md)、[LayerStacks routing と Q16 の制限](docs/nnue-routing.md)。
+- CSA client のログは単局集計です。未決の対局は勝敗集計・教師抽出から除外し、SPRT の対象にしません。
+  詳細は [解析](docs/analyze_selfplay.md) と [KIF 変換](docs/jsonl_to_kif.md) を参照してください。
+- Floodgate の HTTPS 取得は OS の証明書ストアを使います。最小 Linux コンテナには `ca-certificates` を用意してください。
+  暗号 provider は `ring` で、ビルドには C コンパイラが必要です（CMake / NASM は不要）。
+- [コマンド例集](examples/README.md)、[教師データの追加パイプライン](docs/training_data_pipeline.md)。
+- CSA 接続クライアントは別 crate です。[csa_client の手順](../rshogi-csa-client/examples/README.md)を参照してください。

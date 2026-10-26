@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use regex::Regex;
 use rshogi_core::search::SearchTuneParams;
+use tools::spsa_param_mapping::parse_value_i32 as parse_param_value_i32;
 
 const NOT_USED_MARKER: &str = "[[NOT USED]]";
 
@@ -34,15 +35,7 @@ struct Cli {
 struct DiffEntry {
     default: i32,
     current: i32,
-    delta: i32,
-}
-
-fn parse_param_value_i32(text: &str) -> Result<i32> {
-    if let Ok(v) = text.parse::<i32>() {
-        return Ok(v);
-    }
-    let v = text.parse::<f64>().with_context(|| format!("invalid numeric value: {text}"))?;
-    Ok(v.round() as i32)
+    delta: i64,
 }
 
 fn parse_params_line(line: &str, line_no: usize) -> Result<Option<(String, i32)>> {
@@ -128,7 +121,10 @@ fn load_param_values_touched(
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    run(Cli::parse())
+}
+
+fn run(cli: Cli) -> Result<()> {
     let name_re = cli.regex.as_deref().map(Regex::new).transpose().context("invalid --regex")?;
 
     let defaults = if let Some(base_path) = &cli.base {
@@ -151,7 +147,7 @@ fn main() -> Result<()> {
             DiffEntry {
                 default: *default,
                 current: current_value,
-                delta: current_value - default,
+                delta: i64::from(current_value) - i64::from(*default),
             },
         ));
     }
@@ -212,6 +208,22 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_i32_values_can_be_subtracted_and_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.params");
+        let current = dir.path().join("current.params");
+        std::fs::write(&base, "low,int,-2147483648\nhigh,int,2147483647\n").unwrap();
+        std::fs::write(&current, "low,int,2147483647\nhigh,int,-2147483648\n").unwrap();
+        run(Cli {
+            current,
+            base: Some(base),
+            regex: None,
+            param_values_csv: None,
+        })
+        .unwrap();
+    }
 
     #[test]
     fn parse_params_line_handles_comment_and_marker() {

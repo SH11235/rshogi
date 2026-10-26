@@ -190,10 +190,19 @@ pub fn ensure_safe_output_file(
 }
 
 /// 単一出力を資源の alias でないと確認してから作成または切り詰める。
+/// 入力の実体は一つずつ比較し、同時に開く handle 数を一定に保つ。
 pub fn create_safe_output_file(output: &Path, inputs: &[&Path]) -> Result<File> {
-    create_safe_output_files(&[output], inputs)?
-        .pop()
-        .context("Output file was not opened")
+    ensure_safe_output_paths(&[output], inputs)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(output)
+        .with_context(|| format!("Failed to open output {}", output.display()))?;
+    ensure_safe_output_file(&file, output, inputs, &[])?;
+    file.set_len(0)
+        .with_context(|| format!("Failed to truncate output {}", output.display()))?;
+    Ok(file)
 }
 
 /// 二つの出力パスが同じ実体または同じ生成予定パスなら拒否する。

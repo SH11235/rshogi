@@ -207,18 +207,26 @@ fn append_components(mut base: PathBuf, components: &[std::path::Component<'_>])
 /// 出力パスが入力パスのいずれかと一致していないか検査する。
 /// 一致していればエラーを返す。出力ファイルがまだ存在しない場合でも正しく検出する。
 pub fn check_output_not_in_inputs(output: &Path, inputs: &[PathBuf]) -> io::Result<()> {
-    let out_canonical = canonicalize_maybe_new(output)?;
-    for p in inputs {
-        if let Ok(ic) = p.canonicalize()
-            && ic == out_canonical
-        {
+    let inputs: Vec<_> = inputs.iter().map(PathBuf::as_path).collect();
+    crate::output_path::ensure_safe_output_paths(&[output], &inputs).map_err(io::Error::other)
+}
+
+/// 入力全体の PSV レコード境界を検証し、総レコード数を返す。
+pub fn validate_psv_file_sizes(paths: &[PathBuf]) -> io::Result<u64> {
+    let mut records = 0_u64;
+    for path in paths {
+        let size = std::fs::metadata(path)?.len();
+        if !size.is_multiple_of(PSV_SIZE as u64) {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("出力ファイルが入力ファイルと同一です: {}", p.display()),
+                io::ErrorKind::InvalidData,
+                format!("{} size {size} is not a multiple of {PSV_SIZE} bytes", path.display()),
             ));
         }
+        records = records.checked_add(size / PSV_SIZE as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "PSV record count overflow")
+        })?;
     }
-    Ok(())
+    Ok(records)
 }
 
 /// 入力ファイル群のサイズ合計（バイト）を返す。
@@ -474,6 +482,17 @@ mod tests {
         let normalized = normalize_mount_compare_path(original);
 
         assert_eq!(normalized, PathBuf::from(r"C:\work\tmp\dedup"));
+    }
+
+    #[test]
+    fn output_check_rejects_hardlinked_input_without_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.psv");
+        fs::write(&input, [7; PSV_SIZE]).unwrap();
+        fs::hard_link(&input, &output).unwrap();
+        assert!(check_output_not_in_inputs(&output, std::slice::from_ref(&input)).is_err());
+        assert_eq!(fs::read(input).unwrap(), [7; PSV_SIZE]);
     }
 
     #[test]

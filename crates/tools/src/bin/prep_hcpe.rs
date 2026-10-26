@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -11,6 +11,13 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
+
+#[path = "prep_hcpe/external_sort.rs"]
+mod external_sort;
+use external_sort::{ExternalSort, SortedRecords, read_record};
+
+const MEMORY_RECORDS: usize = 250_000;
+const SHUFFLE_RECORD_SIZE: usize = 24 + RECORD_SIZE;
 
 const RECORD_SIZE: usize = 38;
 const KEY_SIZE: usize = 32;
@@ -193,97 +200,209 @@ fn position_key(record: &Record) -> PositionKey {
     record[..KEY_SIZE].try_into().unwrap()
 }
 
-fn load_exclude_keys(paths: &[PathBuf]) -> Result<HashSet<PositionKey>> {
-    let mut keys = HashSet::new();
-    for path in paths {
-        for_each_record(path, |record| {
-            keys.insert(position_key(&record));
-            Ok(())
-        })?;
-    }
-    Ok(keys)
+enum Exclusions {
+    Memory(HashSet<PositionKey>),
+    Disk {
+        file: File,
+        records: SortedRecords<KEY_SIZE>,
+    },
 }
 
-/// 入力を streaming で走査し、exclude（汚染/クロス重複）と bloom 自己重複を落としつつ、
-/// 生き残りレコードを集める。`target > 0` のときは **reservoir sampling**（Algorithm R）で
-/// target 件の無偏標本だけを保持するため、ピークメモリは入力件数でなく `target` で有界になる。
-/// `target == 0` のときは全生き残りを保持する（その場合のみメモリは生き残り件数に比例）。
-/// reservoir に同じ `rng` を使うため、seed + 入力順固定で結果は決定的。
-fn collect_records(
-    paths: &[PathBuf],
-    exclude_keys: &HashSet<PositionKey>,
-    bloom: &mut BloomFilter,
-    target: usize,
-    input_records: u64,
-    rng: &mut ChaCha8Rng,
-) -> Result<(Vec<Record>, Summary)> {
-    // target>0 のとき reservoir は最大 min(target, 生き残り件数) 件しか保持しない。逐次 push の
-    // 幾何成長だと最終容量が必要量を大きく超え、再確保中は旧/新領域が同時に必要になって OOM
-    // しやすい（doc 例の target=100M で約 3.54 GiB）ため事前確保する。容量は生き残り件数の上限
-    // である総入力件数 input_records で頭打ちにする。これにより (a) target≫入力 のときの過剰確保と
-    // (b) 巨大 target（usize::MAX 近傍）での capacity overflow panic の両方を避ける。
-    let mut kept: Vec<Record> = if target > 0 {
-        Vec::with_capacity(target.min(input_records as usize))
-    } else {
-        Vec::new()
-    };
-    let mut summary = Summary::default();
-    // これまでに「生き残った」レコード数（reservoir のインデックス）。
-    let mut kept_seen: u64 = 0;
-
-    for path in paths {
-        for_each_record(path, |record| {
-            summary.read += 1;
-            let key = position_key(&record);
-            if exclude_keys.contains(&key) {
-                summary.excluded += 1;
-            } else if bloom.insert_or_check(&key) {
-                summary.deduped += 1;
-            } else {
-                if target == 0 || kept.len() < target {
-                    kept.push(record);
-                } else {
-                    // Algorithm R: kept_seen 番目（0-index）の生き残りを確率 target/(kept_seen+1) で採用。
-                    // u64 のまま比較し（先に usize へ cast すると 32-bit で切り詰めうる）、採用時のみ
-                    // index 化する（このとき j < target ≤ usize::MAX なので安全）。
-                    let j = rng.random_range(0..=kept_seen);
-                    if j < target as u64 {
-                        kept[j as usize] = record;
+impl Exclusions {
+    fn contains(&mut self, key: &PositionKey) -> Result<bool> {
+        match self {
+            Self::Memory(keys) => Ok(keys.contains(key)),
+            Self::Disk { records, file } => {
+                let (mut left, mut right) = (0, records.count);
+                while left < right {
+                    let middle = left + (right - left) / 2;
+                    file.seek(SeekFrom::Start(middle * KEY_SIZE as u64))?;
+                    let mut candidate = [0; KEY_SIZE];
+                    file.read_exact(&mut candidate)?;
+                    match candidate.cmp(key) {
+                        std::cmp::Ordering::Less => left = middle + 1,
+                        std::cmp::Ordering::Equal => return Ok(true),
+                        std::cmp::Ordering::Greater => right = middle,
                     }
                 }
-                kept_seen += 1;
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn load_exclude_keys(paths: &[PathBuf]) -> Result<Exclusions> {
+    let mut keys = HashSet::new();
+    let mut sorter = None;
+    for path in paths {
+        for_each_record(path, |record| {
+            let key = position_key(&record);
+            if let Some(sorter) = &mut sorter {
+                ExternalSort::push(sorter, key)?;
+            } else {
+                keys.insert(key);
+                if keys.len() == MEMORY_RECORDS {
+                    let mut disk = ExternalSort::new(MEMORY_RECORDS)?;
+                    // HashSet の反復順を外部ソートで正規化する。
+                    for key in keys.drain() {
+                        disk.push(key)?;
+                    }
+                    keys.shrink_to_fit();
+                    sorter = Some(disk);
+                }
             }
             Ok(())
         })?;
     }
-    summary.kept = kept_seen; // 生き残り総数（標本化前）
-    Ok((kept, summary))
+    if let Some(sorter) = sorter {
+        let records = sorter.finish()?;
+        let file = records.open()?;
+        Ok(Exclusions::Disk { records, file })
+    } else {
+        Ok(Exclusions::Memory(keys))
+    }
+}
+
+fn keyed_record(record: Record, ordinal: u64, rng: &mut ChaCha8Rng) -> [u8; SHUFFLE_RECORD_SIZE] {
+    let mut keyed = [0; SHUFFLE_RECORD_SIZE];
+    keyed[..16].copy_from_slice(&rng.random::<u128>().to_be_bytes());
+    // 同じ乱数 key のレコードも入力順で一意に並ぶ。
+    keyed[16..24].copy_from_slice(&ordinal.to_be_bytes());
+    keyed[24..].copy_from_slice(&record);
+    keyed
+}
+
+enum Records {
+    Memory(Vec<Record>),
+    Disk(SortedRecords<SHUFFLE_RECORD_SIZE>),
+}
+
+fn collect_records(
+    paths: &[PathBuf],
+    exclude_keys: &mut Exclusions,
+    bloom: &mut BloomFilter,
+    target: usize,
+    input_records: u64,
+    rng: &mut ChaCha8Rng,
+) -> Result<(Records, Summary)> {
+    let capacity = if target == 0 { MEMORY_RECORDS } else { target };
+    let mut kept =
+        Vec::with_capacity(capacity.min(usize::try_from(input_records).unwrap_or(usize::MAX)));
+    let mut sorter = None;
+    let mut summary = Summary::default();
+    for path in paths {
+        for_each_record(path, |record| {
+            summary.read += 1;
+            let key = position_key(&record);
+            if exclude_keys.contains(&key)? {
+                summary.excluded += 1;
+            } else if bloom.insert_or_check(&key) {
+                summary.deduped += 1;
+            } else {
+                if target == 0 {
+                    if kept.len() == MEMORY_RECORDS && sorter.is_none() {
+                        let mut disk = ExternalSort::new(MEMORY_RECORDS)?;
+                        for (ordinal, record) in kept.drain(..).enumerate() {
+                            disk.push(keyed_record(record, ordinal as u64, rng))?;
+                        }
+                        kept.shrink_to_fit();
+                        sorter = Some(disk);
+                    }
+                    if let Some(sorter) = &mut sorter {
+                        sorter.push(keyed_record(record, summary.kept, rng))?;
+                    } else {
+                        kept.push(record);
+                    }
+                } else if kept.len() < target {
+                    kept.push(record);
+                } else {
+                    let index = rng.random_range(0..=summary.kept);
+                    if index < target as u64 {
+                        kept[index as usize] = record;
+                    }
+                }
+                summary.kept += 1;
+            }
+            Ok(())
+        })?;
+    }
+    let records = if let Some(sorter) = sorter {
+        Records::Disk(sorter.finish()?)
+    } else {
+        Records::Memory(kept)
+    };
+    Ok((records, summary))
 }
 
 fn write_chunks(
-    records: &[Record],
+    records: Records,
     out_dir: &Path,
     prefix: &str,
     chunk_records: usize,
-) -> Result<usize> {
-    fs::create_dir_all(out_dir)
-        .with_context(|| format!("出力ディレクトリを作成できません: {}", out_dir.display()))?;
-
-    for (chunk_index, chunk) in records.chunks(chunk_records).enumerate() {
-        let path = out_dir.join(format!("{prefix}_{chunk_index:05}.hcpe"));
-        let file = File::create(&path)
-            .with_context(|| format!("出力ファイルを作成できません: {}", path.display()))?;
-        let mut writer = BufWriter::new(file);
-        for record in chunk {
-            writer
-                .write_all(record)
-                .with_context(|| format!("レコードを書き込めません: {}", path.display()))?;
+    protected: &[&Path],
+    rng: &mut ChaCha8Rng,
+) -> Result<(u64, usize)> {
+    let mut written = 0_u64;
+    let mut chunks = 0;
+    let mut writer = None;
+    let mut write_record = |record: Record| -> Result<()> {
+        if written.is_multiple_of(chunk_records as u64) {
+            if let Some(mut previous) = writer.take() {
+                BufWriter::flush(&mut previous)?;
+            }
+            let path = out_dir.join(format!("{prefix}_{chunks:05}.hcpe"));
+            tools::output_path::ensure_safe_output_paths(&[&path], protected)?;
+            let file = File::create_new(&path)
+                .with_context(|| format!("出力ファイルを新規作成できません: {}", path.display()))?;
+            writer = Some(BufWriter::new(file));
+            chunks += 1;
         }
-        writer
-            .flush()
-            .with_context(|| format!("出力を flush できません: {}", path.display()))?;
+        writer.as_mut().context("出力が開いていません")?.write_all(&record)?;
+        written += 1;
+        Ok(())
+    };
+    match records {
+        Records::Memory(mut records) => {
+            records.shuffle(rng);
+            for record in records {
+                write_record(record)?;
+            }
+        }
+        Records::Disk(records) => {
+            let mut reader = BufReader::new(records.open()?);
+            while let Some(keyed) = read_record::<SHUFFLE_RECORD_SIZE>(&mut reader)? {
+                write_record(keyed[24..].try_into()?)?;
+            }
+        }
     }
-    Ok(records.len().div_ceil(chunk_records))
+    if let Some(mut writer) = writer {
+        writer.flush()?;
+    }
+    Ok((written, chunks))
+}
+
+fn validate_output_directory(out_dir: &Path, prefix: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prefix.is_empty() && prefix != "." && prefix != ".." && !prefix.contains(['/', '\\', ':']),
+        "--prefix はパス区切りを含まないファイル名にしてください"
+    );
+    fs::create_dir_all(out_dir)?;
+    for entry in fs::read_dir(out_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name
+            .to_ascii_lowercase()
+            .starts_with(&format!("{prefix}_").to_ascii_lowercase())
+            && name.to_ascii_lowercase().ends_with(".hcpe")
+        {
+            bail!(
+                "同じ prefix の既存出力があります。空の出力先か別の prefix を指定してください: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run(config: Config) -> Result<Summary> {
@@ -311,24 +430,29 @@ fn run(config: Config) -> Result<Summary> {
         );
     }
 
-    let exclude_keys = load_exclude_keys(&excludes)?;
+    validate_output_directory(&config.out_dir, &config.prefix)?;
+    let mut exclude_keys = load_exclude_keys(&excludes)?;
     let mut bloom = BloomFilter::new(config.expected_records, config.false_positive_rate)?;
     let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
     // streaming で集める（target>0 は reservoir でメモリ有界）。reservoir と shuffle は同一 rng。
-    let (mut records, mut summary) = collect_records(
+    let (records, mut summary) = collect_records(
         &inputs,
-        &exclude_keys,
+        &mut exclude_keys,
         &mut bloom,
         config.target,
         total_input_records,
         &mut rng,
     )?;
 
-    // reservoir の保持順は一様でないので、最終出力順を seed 固定で無作為化する。
-    records.shuffle(&mut rng);
-
-    summary.written = records.len() as u64;
-    summary.chunks = write_chunks(&records, &config.out_dir, &config.prefix, config.chunk_records)?;
+    let protected: Vec<&Path> = inputs.iter().chain(&excludes).map(PathBuf::as_path).collect();
+    (summary.written, summary.chunks) = write_chunks(
+        records,
+        &config.out_dir,
+        &config.prefix,
+        config.chunk_records,
+        &protected,
+        &mut rng,
+    )?;
     Ok(summary)
 }
 
@@ -411,13 +535,16 @@ mod tests {
         let input = dir.path().join("input.hcpe");
         let excluded = record(2, 20);
         write_records(&input, &[record(1, 10), excluded, record(3, 30)])?;
-        let exclude_keys = HashSet::from([position_key(&excluded)]);
+        let mut exclude_keys = Exclusions::Memory(HashSet::from([position_key(&excluded)]));
         let mut bloom = BloomFilter::new(100, 1e-9)?;
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
         let (records, summary) =
-            collect_records(&[input], &exclude_keys, &mut bloom, 0, 3, &mut rng)?;
+            collect_records(&[input], &mut exclude_keys, &mut bloom, 0, 3, &mut rng)?;
 
+        let Records::Memory(records) = records else {
+            panic!("small collection")
+        };
         assert_eq!(records, vec![record(1, 10), record(3, 30)]);
         assert_eq!(summary.excluded, 1);
         Ok(())
@@ -431,9 +558,18 @@ mod tests {
         let mut bloom = BloomFilter::new(100, 1e-9)?;
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
-        let (records, summary) =
-            collect_records(&[input], &HashSet::new(), &mut bloom, 0, 3, &mut rng)?;
+        let (records, summary) = collect_records(
+            &[input],
+            &mut Exclusions::Memory(HashSet::new()),
+            &mut bloom,
+            0,
+            3,
+            &mut rng,
+        )?;
 
+        let Records::Memory(records) = records else {
+            panic!("small collection")
+        };
         assert_eq!(records, vec![record(1, 10), record(2, 20)]);
         assert_eq!(summary.deduped, 1);
         Ok(())
@@ -450,9 +586,18 @@ mod tests {
         let mut bloom = BloomFilter::new(100, 1e-9)?;
         let mut rng = ChaCha8Rng::seed_from_u64(123);
 
-        let (records, summary) =
-            collect_records(&inputs, &HashSet::new(), &mut bloom, 4, recs.len() as u64, &mut rng)?;
+        let (records, summary) = collect_records(
+            &inputs,
+            &mut Exclusions::Memory(HashSet::new()),
+            &mut bloom,
+            4,
+            recs.len() as u64,
+            &mut rng,
+        )?;
 
+        let Records::Memory(records) = records else {
+            panic!("reservoir")
+        };
         assert_eq!(records.len(), 4); // target で有界
         assert_eq!(summary.kept, 10); // 生き残り総数
         // 採用された 4 件はすべて入力に存在し重複しない。
@@ -466,12 +611,15 @@ mod tests {
         let mut rng2 = ChaCha8Rng::seed_from_u64(123);
         let (records2, _) = collect_records(
             &inputs,
-            &HashSet::new(),
+            &mut Exclusions::Memory(HashSet::new()),
             &mut bloom2,
             4,
             recs.len() as u64,
             &mut rng2,
         )?;
+        let Records::Memory(records2) = records2 else {
+            panic!("reservoir")
+        };
         assert_eq!(records, records2);
         Ok(())
     }
@@ -512,6 +660,91 @@ mod tests {
                 chunks: 2,
             }
         );
+        Ok(())
+    }
+    fn indexed_record(index: u64) -> Record {
+        use sha2::{Digest, Sha256};
+        let mut bytes = [0; RECORD_SIZE];
+        bytes[..KEY_SIZE].copy_from_slice(&Sha256::digest(index.to_le_bytes()));
+        bytes[KEY_SIZE..].copy_from_slice(&index.to_le_bytes()[..RECORD_SIZE - KEY_SIZE]);
+        bytes
+    }
+
+    #[test]
+    fn disk_shuffle_preserves_all_records_and_repeats_seeded_bytes() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("input.hcpe");
+        let count = MEMORY_RECORDS + 1;
+        let mut writer = BufWriter::new(File::create(&input)?);
+        for index in 0..count {
+            writer.write_all(&indexed_record(index as u64))?;
+        }
+        writer.flush()?;
+        let outputs = [dir.path().join("first"), dir.path().join("second")];
+        for output in &outputs {
+            let summary = run(Config {
+                inputs: vec![input.clone()],
+                excludes: vec![],
+                out_dir: output.clone(),
+                prefix: "part".into(),
+                chunk_records: count,
+                target: 0,
+                seed: 42,
+                expected_records: count as u64 * 16,
+                false_positive_rate: 1e-9,
+            })?;
+            assert_eq!(summary.written, count as u64);
+            assert_eq!(summary.deduped, 0);
+        }
+        let first = fs::read(outputs[0].join("part_00000.hcpe"))?;
+        assert_eq!(first, fs::read(outputs[1].join("part_00000.hcpe"))?);
+        let mut actual: Vec<Record> = first.as_chunks::<RECORD_SIZE>().0.to_vec();
+        actual.sort_unstable();
+        let mut expected: Vec<Record> =
+            (0..count).map(|index| indexed_record(index as u64)).collect();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn disk_exclusion_matches_first_middle_last_and_rejects_absent_keys() -> Result<()> {
+        let dir = tempdir()?;
+        let input = dir.path().join("exclude.hcpe");
+        let mut writer = BufWriter::new(File::create(&input)?);
+        for index in 0..MEMORY_RECORDS + 1 {
+            writer.write_all(&indexed_record(index as u64))?;
+        }
+        writer.flush()?;
+        let mut keys = load_exclude_keys(&[input])?;
+        assert!(matches!(keys, Exclusions::Disk { .. }));
+        for index in [0, MEMORY_RECORDS / 2, MEMORY_RECORDS] {
+            assert!(keys.contains(&position_key(&indexed_record(index as u64)))?);
+        }
+        assert!(!keys.contains(&position_key(&indexed_record(u64::MAX)))?);
+        Ok(())
+    }
+
+    #[test]
+    fn output_validation_rejects_paths_and_existing_hardlinked_chunks() -> Result<()> {
+        let dir = tempdir()?;
+        for prefix in [
+            "../escape",
+            "nested/file",
+            "nested\\file",
+            "..",
+            ".",
+            "C:escape",
+        ] {
+            assert!(validate_output_directory(&dir.path().join("out"), prefix).is_err());
+        }
+        let source = dir.path().join("source.hcpe");
+        fs::write(&source, indexed_record(0))?;
+        let out = dir.path().join("out");
+        fs::create_dir(&out)?;
+        fs::hard_link(&source, out.join("chunk_00000.hcpe"))?;
+        assert!(validate_output_directory(&out, "chunk").is_err());
+        assert_eq!(fs::read(source)?, indexed_record(0));
         Ok(())
     }
 }

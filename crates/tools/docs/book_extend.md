@@ -59,7 +59,9 @@ cargo run -p tools --release --bin book_extend -- \
 
 ## journal と決定性
 
-`--journal` は JSON Lines 形式です。親探索は `kind:"parent"`、子局面探索は `kind:"child"` として追記します。各行には `go` と `engine_fingerprint` を記録します。`engine_fingerprint` は `--engine` パスの basename、エンジンバイナリ内容の SHA-256、`--engine-option` を key 昇順に正規化した文字列から作ります。同名パスでもバイナリ内容が変わると fingerprint が変わるため、エンジン差し替え後に古い journal 行を誤って再利用することはありません。
+`--journal` は JSON Lines 形式です。親探索は `kind:"parent"`、子局面探索は `kind:"child"` として追記し、`go` と `engine_fingerprint` を記録します。指紋はエンジン本体と、明示したモデル・進行度係数・params・定跡の内容を含みます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、空文字・`no_book` なら無効です。`BookExploreFile` の空文字・`<empty>` は無効、`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の自動読み込みです。
+
+相対モデルパスや任意のファイル型 option など、資源の解決を保証できない設定は受理して実行し、警告して過去 journal の再利用だけを無効化します。再利用が必要なら対応する資源の絶対パスを明示してください。モデルが未指定の場合も再利用しません。重複した option 名は拒否します。実行中は参照資源を変更しないでください。
 
 `--resume` は `go` と `engine_fingerprint` が現在の実行設定に一致する `--journal` の行だけを再利用します。`--parent-journal` は別予算の親探索結果を検出シグナルとして使うため、`kind:"parent"` と SFEN 3 フィールドだけを見ます。
 
@@ -85,3 +87,11 @@ cargo run -p tools --release --bin book_extend -- \
 
 探索中の `info` 行は受信期限を延長しません。期限に達すると `stop` を送り、最大 10 秒応答を回収します。期限後に `bestmove` が届いてもタイムアウトとして扱い、途中の評価を正常な journal 結果として保存しません。
 探索失敗後はその worker のエンジンを再利用しません。保存済み journal は保持され、未完了タスクは `--resume` で再開できます。
+
+### エンジン名と PATH
+
+`--engine rshogi-usi` のような名前指定は PATH から解決できます。明示したパスは PATH で探しません。
+Windows では `.exe` の補完と標準のシステムフォルダー探索も行います。
+通常は選択した絶対パスを実起動・内容指紋・自動 params の識別に共通で使います。
+Windows で `.exe` 以外の名前を絶対化すると別の `.exe` が優先される場合は、元の起動名を保持し、指紋・保護には解決した実体を使います。
+実行中の PATH・エンジン・参照資源の差し替えは避けてください。

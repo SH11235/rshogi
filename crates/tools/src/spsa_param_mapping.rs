@@ -188,8 +188,12 @@ pub fn parse_value_i32(text: &str) -> Result<i32> {
     if let Ok(v) = text.parse::<i32>() {
         return Ok(v);
     }
-    let v = text.parse::<f64>().with_context(|| format!("invalid numeric value: {text}"))?;
-    Ok(v.round() as i32)
+    let value = text.parse::<f64>().with_context(|| format!("invalid numeric value: {text}"))?;
+    let rounded = value.round();
+    if !rounded.is_finite() || rounded < i32::MIN as f64 || rounded > i32::MAX as f64 {
+        bail!("numeric value is not a finite i32: {text}");
+    }
+    Ok(rounded as i32)
 }
 
 fn parse_f64(text: &str) -> Result<f64> {
@@ -375,28 +379,42 @@ impl<'a> MappingIndex<'a> {
     }
 }
 
-/// 値変換: YO → rshogi
+/// 値変換: YO → rshogi。符号反転した値を i32 で表せない場合はエラー。
 ///
 /// 内部実装は `rshogi_to_yo_value` と同一（involution）だが、両関数を別名で公開する
 /// ことで呼び出し元の方向性（どちらの名前空間にいるのか）を明示する目的で残している。
-pub fn yo_to_rshogi_value(yo_value: i32, sign_flip: bool) -> i32 {
-    if sign_flip { -yo_value } else { yo_value }
+pub fn yo_to_rshogi_value(yo_value: i32, sign_flip: bool) -> Result<i32> {
+    rshogi_to_yo_value(yo_value, sign_flip)
 }
 
-/// 値変換: rshogi → YO（YO 側は元の符号慣用に戻る）
-///
-/// `yo_to_rshogi_value` と実装は同じ。意図表現（どちら方向の変換か）を保つために両方公開。
-pub fn rshogi_to_yo_value(rshogi_value: i32, sign_flip: bool) -> i32 {
+/// 値変換: rshogi → YO。符号反転した値を i32 で表せない場合はエラー。
+pub fn rshogi_to_yo_value(rshogi_value: i32, sign_flip: bool) -> Result<i32> {
     if sign_flip {
-        -rshogi_value
+        rshogi_value.checked_neg().context("sign-flipped value does not fit i32")
     } else {
-        rshogi_value
+        Ok(rshogi_value)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_values_must_be_finite_and_fit_i32_after_rounding() {
+        for text in [
+            "NaN",
+            "inf",
+            "-inf",
+            "2147483647.5",
+            "-2147483648.5",
+            "1e100",
+        ] {
+            assert!(parse_value_i32(text).is_err(), "{text}");
+        }
+        assert_eq!(parse_value_i32("2147483647.4").unwrap(), i32::MAX);
+        assert_eq!(parse_value_i32("-2147483648.4").unwrap(), i32::MIN);
+    }
 
     #[test]
     fn unmarked_schedule_requires_confirmation_even_for_small_ranges() {
@@ -448,9 +466,19 @@ mod tests {
     fn value_translation_is_involution() {
         for &v in &[-10000_i32, -1, 0, 1, 100, 12345] {
             for &flip in &[false, true] {
-                let r = yo_to_rshogi_value(v, flip);
-                assert_eq!(rshogi_to_yo_value(r, flip), v, "v={v} flip={flip}");
+                let r = yo_to_rshogi_value(v, flip).unwrap();
+                assert_eq!(rshogi_to_yo_value(r, flip).unwrap(), v, "v={v} flip={flip}");
             }
+        }
+    }
+
+    #[test]
+    fn sign_translation_checks_i32_minimum() {
+        for translate in [yo_to_rshogi_value, rshogi_to_yo_value] {
+            assert_eq!(translate(i32::MIN, false).unwrap(), i32::MIN);
+            assert!(translate(i32::MIN, true).is_err());
+            assert_eq!(translate(i32::MAX, true).unwrap(), -i32::MAX);
+            assert_eq!(translate(-i32::MAX, true).unwrap(), i32::MAX);
         }
     }
 
@@ -587,13 +615,13 @@ mod tests {
             else {
                 continue;
             };
-            let to_r = yo_to_rshogi_value(yo_row.value, m.sign_flip);
+            let to_r = yo_to_rshogi_value(yo_row.value, m.sign_flip).unwrap();
             assert_eq!(
                 to_r, r_row.value,
                 "{} -> {}: YO={} sign_flip={} 期待 rshogi={} 実際={}",
                 m.yo, m.rshogi, yo_row.value, m.sign_flip, to_r, r_row.value
             );
-            let back_to_yo = rshogi_to_yo_value(r_row.value, m.sign_flip);
+            let back_to_yo = rshogi_to_yo_value(r_row.value, m.sign_flip).unwrap();
             assert_eq!(
                 back_to_yo, yo_row.value,
                 "{} -> {}: rshogi={} sign_flip={} 期待 YO={} 実際={}",

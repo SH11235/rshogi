@@ -147,7 +147,7 @@ fn generate_output_filename(engine_name: &str, threads: &[usize]) -> String {
     let safe_engine_name = if safe_engine_name.is_empty() {
         "unknown".to_string()
     } else if safe_engine_name.len() > 100 {
-        safe_engine_name[..100].to_string()
+        safe_engine_name[..safe_engine_name.floor_char_boundary(100)].to_string()
     } else {
         safe_engine_name
     };
@@ -205,4 +205,17 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_engine_name_is_truncated_at_character_boundary() {
+        let filename = generate_output_filename(&"将".repeat(40), &[1, 4]);
+        let name = filename.split('_').nth(1).unwrap();
+        assert_eq!(name, "将".repeat(33));
+        assert!(filename.ends_with("_1-4.json"));
+    }
 }

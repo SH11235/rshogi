@@ -1516,6 +1516,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "known-folders"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a1886916523694cd6ea3d175f03a1e5010699a2a4cc13696d83d7bea1d80638"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3518,6 +3527,7 @@ dependencies = [
  "flate2",
  "glob",
  "indicatif",
+ "known-folders",
  "libc",
  "log",
  "ort",

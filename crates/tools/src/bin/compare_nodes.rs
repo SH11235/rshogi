@@ -338,34 +338,29 @@ impl ProgressWriter {
     }
 
     /// 1局面の結果を追記し、必要に応じてサマリを更新する
-    fn push(&mut self, result: PositionResult, rc: &ResolvedConfig) {
-        // jsonl に即時追記
-        let write_ok = serde_json::to_writer(&mut self.jsonl_writer, &result)
-            .map_err(|e| e.into())
-            .and_then(|()| self.jsonl_writer.write_all(b"\n"))
-            .and_then(|()| self.jsonl_writer.flush());
-        if let Err(e) = write_ok {
-            eprintln!("jsonl 書き込みエラー: {e}");
-        }
-
+    fn push(&mut self, result: PositionResult, rc: &ResolvedConfig) -> Result<()> {
+        serde_json::to_writer(&mut self.jsonl_writer, &result).context("jsonl を書き込めません")?;
+        self.jsonl_writer.write_all(b"\n")?;
+        self.jsonl_writer.flush().context("jsonl を flush できません")?;
         self.results.push(result);
 
-        // N局面ごと、または最終局面でサマリを更新
         let done = self.results.len();
         if done == self.total_positions || done.is_multiple_of(self.summary_interval) {
-            self.update_summary(rc);
+            self.update_summary(rc)?;
         }
+        Ok(())
     }
 
-    fn update_summary(&self, rc: &ResolvedConfig) {
+    fn update_summary(&self, rc: &ResolvedConfig) -> Result<()> {
         let done = self.results.len();
         let total = self.total_positions;
-        if let Ok(file) = File::create(&self.summary_path) {
-            let mut w = BufWriter::new(file);
-            let _ = writeln!(w, "[途中経過: {done}/{total} 局面完了]");
-            let _ = writeln!(w);
-            let _ = write_summary(&mut w, &self.results, rc, None, self.workers);
-        }
+        let file = File::create(&self.summary_path).context("途中サマリを作成できません")?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "[途中経過: {done}/{total} 局面完了]")?;
+        writeln!(writer)?;
+        write_summary(&mut writer, &self.results, rc, None, self.workers)?;
+        writer.flush().context("途中サマリを flush できません")?;
+        Ok(())
     }
 }
 
@@ -477,7 +472,7 @@ impl UsiEngine {
         let mut line = String::new();
         loop {
             line.clear();
-            self.stdout.read_line(&mut line)?;
+            read_engine_line(&mut self.stdout, &mut line)?;
             if line.trim().starts_with(expected) {
                 break;
             }
@@ -511,7 +506,7 @@ impl UsiEngine {
 
         let bestmove = loop {
             line.clear();
-            self.stdout.read_line(&mut line).context("エンジン出力の読み取りに失敗")?;
+            read_engine_line(&mut self.stdout, &mut line)?;
             let trimmed = line.trim();
 
             if trimmed.starts_with("info") {
@@ -532,6 +527,14 @@ impl UsiEngine {
             bestmove,
         })
     }
+}
+
+fn read_engine_line(reader: &mut impl BufRead, line: &mut String) -> Result<()> {
+    anyhow::ensure!(
+        reader.read_line(line).context("エンジン出力の読み取りに失敗")? != 0,
+        "応答を待っている途中でエンジンの出力が終了しました (EOF)"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,24 +1259,25 @@ fn main() -> Result<()> {
         let results = process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb);
         let mut pw = progress_writer.lock().unwrap();
         for result in results {
-            pw.push(result, &rc);
+            pw.push(result, &rc)?;
         }
     } else {
         // 通常モード: 局面ごとに新規プロセスを起動して並列処理。
         rayon::ThreadPoolBuilder::new().num_threads(workers).build_global().ok();
         let rc_clone = Arc::clone(&rc);
-        sfens.par_iter().for_each(|(index, sfen)| {
+        sfens.par_iter().try_for_each(|(index, sfen)| -> Result<()> {
             match process_position(&params_a, &params_b, *index, sfen, depth) {
                 Ok(result) => {
                     pb.inc(1);
-                    progress_writer.lock().unwrap().push(result, &rc_clone);
+                    progress_writer.lock().unwrap().push(result, &rc_clone)?;
                 }
                 Err(e) => {
                     eprintln!("position {index} エラー: {e}");
                     pb.inc(1);
                 }
             }
-        });
+            Ok(())
+        })?;
     }
 
     pb.finish_with_message("完了");
@@ -1286,6 +1290,7 @@ fn main() -> Result<()> {
         let summary_file = File::create(output_dir.join("summary.txt"))?;
         let mut file_writer = BufWriter::new(summary_file);
         write_summary(&mut file_writer, &pw.results, &rc, Some(wall_clock_secs), workers)?;
+        file_writer.flush()?;
     }
     write_summary(&mut std::io::stdout().lock(), &pw.results, &rc, Some(wall_clock_secs), workers)?;
 
@@ -1298,6 +1303,7 @@ fn main() -> Result<()> {
         for r in &divergent {
             writeln!(w, "{}", r.sfen)?;
         }
+        w.flush()?;
         println!();
         println!("乖離局面: {}/{} → {}", divergent.len(), pw.results.len(), div_path.display());
     }
@@ -1305,12 +1311,33 @@ fn main() -> Result<()> {
     println!();
     println!("結果保存先: {}", output_dir.display());
 
+    anyhow::ensure!(
+        pw.results.len() == total,
+        "局面の比較が未完了です: {}/{} 件成功。保存済み結果は部分結果です",
+        pw.results.len(),
+        total
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_output_eof_after_info_is_an_error() {
+        let mut reader = std::io::Cursor::new(b"info depth 1 nodes 10\n".as_slice());
+        let mut line = String::new();
+        read_engine_line(&mut reader, &mut line).unwrap();
+        assert_eq!(line, "info depth 1 nodes 10\n");
+        line.clear();
+        assert!(
+            read_engine_line(&mut reader, &mut line)
+                .unwrap_err()
+                .to_string()
+                .contains("EOF")
+        );
+    }
 
     fn depth_info(depth: u32, nodes: u64) -> DepthInfo {
         DepthInfo {
@@ -1371,6 +1398,26 @@ mod tests {
             output_base: PathBuf::from("results"),
             reuse_engine: false,
         }
+    }
+
+    #[test]
+    fn jsonl_write_errors_are_returned_without_counting_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.jsonl");
+        let mut writer =
+            ProgressWriter::new(&path, dir.path().join("summary.txt"), 1, 1, 1).unwrap();
+        writer.jsonl_writer = BufWriter::new(File::open(&path).unwrap());
+        assert!(writer.push(position_result(1, &[10], &[10]), &resolved_config(1)).is_err());
+        assert!(writer.results.is_empty());
+    }
+
+    #[test]
+    fn summary_creation_errors_are_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            ProgressWriter::new(&dir.path().join("results.jsonl"), dir.path().to_owned(), 1, 1, 1)
+                .unwrap();
+        assert!(writer.push(position_result(1, &[10], &[10]), &resolved_config(1)).is_err());
     }
 
     #[test]

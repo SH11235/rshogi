@@ -57,7 +57,7 @@ floodgate_record --dir ~/floodgate/records/jsonl --fetch-ratings --ratings-cache
 | `--fetch-ratings` | wdoor floodgate の現在レート表を取得し、自分/相手に ` (R<rate>)` を併記(要ネットワーク)。wdoor は per-game レートを出さないので**現在値**(対局時点ではない)。取得・解析は `tools::common::floodgate` を再利用。取得失敗時はレート併記だけ諦め、集計は続行 |
 | `--ratings-cache <FILE>` | `--fetch-ratings` 併用。fetch 成功時は `name<TAB>rate` を FILE へ書き出し、失敗時は FILE を読み戻してフォールバック併記する(一時障害でも直近値を維持)。config 指定時の既定は `<record.dir>/ratings_cache.tsv` |
 | `--ratings-max-age <SEC>` | `--fetch-ratings` 併用。キャッシュの mtime が SEC 秒以内なら**ネットワーク取得をスキップ**してキャッシュを直接使う。既定 0(常に取得)。レートページは日次生成なので数時間(例: `21600` = 6h)で十分。履歴併用時、履歴に当日(JST)分が無ければ鮮度内でも取得する(スキップで履歴の日付が抜けないように) |
-| `--ratings-history <FILE>` | `--fetch-ratings` 併用。fetch 成功時に自分(`--me`)の現在レートを `ページ日付<TAB>名前<TAB>レート` で FILE へ追記する(R 推移のローカル記録)。同一(日付, 名前)は再追記せず**その日最初の観測値**を保持。書き込みは tmp→rename の全置換(並行実行でも行が壊れない)。config 指定時の既定は `<record.dir>/ratings_history.tsv` |
+| `--ratings-history <FILE>` | `--fetch-ratings` 併用。fetch 成功時に自分(`--me`)の現在レートを `ページ日付<TAB>名前<TAB>レート` で FILE へ追記する(R 推移のローカル記録)。同一(日付, 名前)は再追記せず**その日最初の観測値**を保持。書き込みは tmp→rename の全置換。同じ履歴への同時書き込みは後の置換で先の追記を失うため、直列に実行する。config 指定時の既定は `<record.dir>/ratings_history.tsv` |
 
 `--config` に渡す TOML は csa_client の設定そのもので、本ツールが読むのは次の部分
 (完全な floodgate 用 config の例は
