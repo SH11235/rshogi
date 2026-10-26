@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::on_the_fly::OnTheFlyFile;
 use crate::ybb::{self, YbbBook};
@@ -257,7 +257,7 @@ impl Book {
 
 /// 定跡ファイルのパスを解決する。`path` が無く、`.db` で終わり、拡張子を `.ybb` にした
 /// ファイルがあればそちらを返す。それ以外は `path` のまま (YaneuraOu の `BookFile` と同じ)。
-pub fn resolve_book_path(path: &Path) -> std::path::PathBuf {
+pub fn resolve_book_path(path: &Path) -> PathBuf {
     if !path.exists() && path.extension().is_some_and(|ext| ext == "db") {
         let ybb = path.with_extension("ybb");
         if ybb.exists() {
@@ -265,6 +265,40 @@ pub fn resolve_book_path(path: &Path) -> std::path::PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+/// 優先定跡を含めて、引く順に定跡ファイルのパスを返す。末尾は `path` を
+/// [`resolve_book_path`] で解決したもの。
+///
+/// `path` が `user_book1.db` なら、同じディレクトリの `user_book1-000.db`、`user_book1-001.db`、…
+/// を番号順に並べ、最初に欠けた番号で止める (番号は 3 桁未満なら 0 で埋める。1000 以降は 4 桁)。
+/// 各番号は `path` と同じ拡張子を先に探し、無ければもう一方 (`.db` と `.ybb`) を探す。両方あれば
+/// `path` と同じ拡張子の方を使い、`info` で知らせる。`path` が `.db` / `.ybb` で終わらなければ
+/// 優先定跡は探さない。YaneuraOu の優先定跡と同じ規則。
+pub fn priority_book_paths(path: &Path, mut info: impl FnMut(&str)) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let extensions = (file_name.strip_suffix(".ybb").map(|stem| (stem, "ybb", "db")))
+        .or_else(|| file_name.strip_suffix(".db").map(|stem| (stem, "db", "ybb")))
+        .filter(|(stem, _, _)| !stem.is_empty());
+    if let Some((stem, primary, secondary)) = extensions {
+        for index in 0.. {
+            let numbered = |ext: &str| path.with_file_name(format!("{stem}-{index:03}.{ext}"));
+            let (primary, secondary) = (numbered(primary), numbered(secondary));
+            if primary.exists() {
+                if secondary.exists() {
+                    info(&format!("priority book file exists twice. use : {}", primary.display()));
+                }
+                paths.push(primary);
+            } else if secondary.exists() {
+                paths.push(secondary);
+            } else {
+                break;
+            }
+        }
+    }
+    paths.push(resolve_book_path(path));
+    paths
 }
 
 /// ファイル先頭が `.ybb` の magic か。拡張子が `.ybb` なのに magic が違うファイルは、
@@ -431,5 +465,135 @@ mod tests {
     fn strip_ply_only_when_numeric_tail() {
         assert_eq!(strip_ply("a b c 42"), "a b c");
         assert_eq!(strip_ply("a b -"), "a b -");
+    }
+
+    /// 並行に流れるテストやプロセスと衝突しない空のディレクトリを作る。
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("rshogi_book_priority_{tag}_{}_{n}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn priority_book_paths_follow_numbers_until_a_gap() {
+        let dir = unique_temp_dir("paths");
+        for name in [
+            "user.db",
+            "user-000.db",
+            "user-001.ybb",
+            "user-002.db",
+            "user-002.ybb",
+            "user-004.db",
+        ] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        let mut infos = Vec::new();
+        let paths = priority_book_paths(&dir.join("user.db"), |m| infos.push(m.to_string()));
+        assert_eq!(file_names(&paths), ["user-000.db", "user-001.ybb", "user-002.db", "user.db"]);
+        assert_eq!(
+            infos,
+            [format!(
+                "priority book file exists twice. use : {}",
+                dir.join("user-002.db").display()
+            )]
+        );
+        // BookFile が .ybb なら同じ番号の .ybb を優先する。BookFile 自体は存在しなくてよい。
+        let paths = priority_book_paths(&dir.join("user.ybb"), |_| {});
+        assert_eq!(file_names(&paths), ["user-000.db", "user-001.ybb", "user-002.ybb", "user.ybb"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn priority_book_paths_without_priority_books() {
+        let dir = unique_temp_dir("none");
+        for name in ["book.ybb", "book.bin", "book.bin-000.db", "other-000.db"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        // 優先定跡が無ければ BookFile の解決 (.db → .ybb) だけ。
+        assert_eq!(file_names(&priority_book_paths(&dir.join("book.db"), |_| {})), ["book.ybb"]);
+        // .db / .ybb 以外の BookFile では優先定跡を探さない。
+        assert_eq!(file_names(&priority_book_paths(&dir.join("book.bin"), |_| {})), ["book.bin"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn priority_book_paths_use_four_digits_from_1000() {
+        let dir = unique_temp_dir("digits");
+        for index in 0..=1000 {
+            std::fs::write(dir.join(format!("b-{index:03}.db")), "").unwrap();
+        }
+        let paths = priority_book_paths(&dir.join("b.db"), |_| {});
+        assert_eq!(paths.len(), 1002);
+        assert_eq!(file_names(&paths[999..]), ["b-999.db", "b-1000.db", "b.db"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 優先定跡のファイル群を、丸読みと on the fly の両方、`.db` / `.ybb` 混在で引く。
+    #[test]
+    fn priority_books_from_files_in_memory_and_on_the_fly() {
+        use crate::{BookOptions, DefaultBookRng, probe};
+        use rshogi_core::position::Position;
+
+        let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let after_26 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL w - 2";
+        let after_26_ply10 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL w - 10";
+        let dir = unique_temp_dir("files");
+        std::fs::write(dir.join("user-000.ybb"), include_bytes!("../testdata/small.ybb")).unwrap();
+        std::fs::write(
+            dir.join("user-001.db"),
+            format!("{HEADER}\nsfen {after_26}\n8c8d none 0 0 1\n"),
+        )
+        .unwrap();
+        // on the fly の .db は手数を除いた SFEN 順に並べる。
+        std::fs::write(
+            dir.join("user.db"),
+            format!(
+                "{HEADER}\nsfen {after_26_ply10}\n1c1d none 0 0 1\nsfen {hirate}\n1g1f none 0 0 1\n"
+            ),
+        )
+        .unwrap();
+        let paths = priority_book_paths(&dir.join("user.db"), |_| {});
+        assert_eq!(file_names(&paths), ["user-000.ybb", "user-001.db", "user.db"]);
+
+        for on_the_fly in [false, true] {
+            for ignore_ply in [false, true] {
+                let books: Vec<Book> = paths
+                    .iter()
+                    .map(|path| {
+                        if on_the_fly {
+                            Book::open_on_the_fly(path, ignore_ply)
+                        } else {
+                            Book::from_path(path, ignore_ply)
+                        }
+                        .unwrap()
+                    })
+                    .collect();
+                let best = |sfen: &str| {
+                    let mut position = Position::new();
+                    position.set_sfen(sfen).unwrap();
+                    let options = BookOptions::default();
+                    probe(&books, &position, &options, &mut DefaultBookRng::from_seed(0), |_| {})
+                        .map(|r| r.best_move.to_usi())
+                        .unwrap()
+                };
+                let case = format!("on_the_fly={on_the_fly} ignore_ply={ignore_ply}");
+                assert!(["7g7f", "2g2f"].contains(&best(hirate).as_str()), "{case}");
+                assert_eq!(best(after_26), "8c8d", "{case}");
+                let expected = if ignore_ply { "8c8d" } else { "1c1d" };
+                assert_eq!(best(after_26_ply10), expected, "{case}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

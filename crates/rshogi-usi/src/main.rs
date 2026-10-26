@@ -179,10 +179,10 @@ struct UsiEngine {
     ignore_book_ply: bool,
     /// BookOnTheFly（定跡を丸読みせず、probe のたびにファイルから引くか）
     book_on_the_fly: bool,
-    /// ロード済み定跡（isready 時にロード。BookFile=no_book なら None）
-    book: Option<rshogi_book::Book>,
-    /// ロード済み定跡の識別子 `(解決済みパス, ignore_book_ply)`。丸読みの再ロード要否の判定に使う
-    book_loaded_sig: Option<(String, bool)>,
+    /// ロード済み定跡（isready 時にロード。優先定跡があれば先頭ほど優先。BookFile=no_book なら空）
+    books: Vec<rshogi_book::Book>,
+    /// ロード済み定跡の識別子 `(解決済みパスの列, ignore_book_ply)`。丸読みの再ロード要否の判定に使う
+    book_loaded_sig: Option<(Vec<String>, bool)>,
     /// 定跡手抽選用の乱数源
     book_rng: rshogi_book::DefaultBookRng,
     // --- 詰み探索（go mate）関連 ---
@@ -263,7 +263,7 @@ impl UsiEngine {
             book_dir: "book".to_string(),
             ignore_book_ply: false,
             book_on_the_fly: false,
-            book: None,
+            books: Vec::new(),
             book_loaded_sig: None,
             book_rng: rshogi_book::DefaultBookRng::new(),
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
@@ -552,12 +552,13 @@ impl UsiEngine {
 
     /// 定跡ファイルのロード（isready 時に実施）。
     ///
-    /// BookFile=no_book なら何もしない。ロード失敗は info string でエラー出力し、
-    /// 定跡なし（bookless）で継続する。丸読みは同一パス・同一 IgnoreBookPly なら再ロードしない。
+    /// BookFile=no_book なら何もしない。`user_book1-000.db` のような優先定跡があれば BookFile より
+    /// 先に引く順で並べて読む。ロードに失敗したファイルは info string でエラー出力して飛ばし、
+    /// 残りの定跡で継続する。丸読みは同一パス列・同一 IgnoreBookPly なら再ロードしない。
     /// BookOnTheFly は開き直しが軽いので isready のたびに開き直し、差し替えたファイルを拾う。
     fn maybe_load_book(&mut self) {
         if self.book_file == "no_book" || self.book_file.is_empty() {
-            self.book = None;
+            self.books.clear();
             self.book_loaded_sig = None;
             return;
         }
@@ -565,55 +566,67 @@ impl UsiEngine {
         // BookDir 配下に解決（BookFile が絶対パス/明示パスならそちらが優先される）。
         // `.db` が無く同名の `.ybb` があればそちらを読む。
         let requested = std::path::Path::new(&self.book_dir).join(&self.book_file);
-        let resolved = rshogi_book::resolve_book_path(&requested);
-        if resolved != requested {
+        let paths = rshogi_book::priority_book_paths(&requested, |msg| {
+            println!("info string {msg}");
+        });
+        if let Some(resolved) = paths.last().filter(|resolved| **resolved != requested) {
             println!(
                 "info string book file fallback: {} -> {}",
                 requested.display(),
                 resolved.display()
             );
         }
-        let resolved_str = resolved.to_string_lossy().into_owned();
-        let sig = (resolved_str.clone(), self.ignore_book_ply);
+        let path_strs: Vec<String> =
+            paths.iter().map(|path| path.to_string_lossy().into_owned()).collect();
 
         if self.book_on_the_fly {
             // 開いていたハンドルを先に閉じる（Windows で差し替え先を開けるように）。
-            self.book = None;
+            self.books.clear();
             self.book_loaded_sig = None;
-            match rshogi_book::Book::open_on_the_fly(&resolved, self.ignore_book_ply) {
-                Ok(book) => {
-                    println!(
-                        "info string book opened on the fly: {resolved_str} ({} bytes)",
-                        book.on_the_fly_file_len().unwrap_or(0)
-                    );
-                    self.book = Some(book);
-                }
-                Err(e) => {
-                    println!("info string Error opening book file {resolved_str}: {e}");
+            for (path, path_str) in paths.iter().zip(&path_strs) {
+                match rshogi_book::Book::open_on_the_fly(path, self.ignore_book_ply) {
+                    Ok(book) => {
+                        println!(
+                            "info string book opened on the fly: {path_str} ({} bytes)",
+                            book.on_the_fly_file_len().unwrap_or(0)
+                        );
+                        self.books.push(book);
+                    }
+                    Err(e) => {
+                        println!("info string Error opening book file {path_str}: {e}");
+                    }
                 }
             }
             return;
         }
 
         // 既ロード & 設定不変なら再ロード不要。
-        if self.book.is_some() && self.book_loaded_sig.as_ref() == Some(&sig) {
+        let sig = (path_strs, self.ignore_book_ply);
+        if !self.books.is_empty() && self.book_loaded_sig.as_ref() == Some(&sig) {
             return;
         }
 
-        match rshogi_book::Book::from_path(&resolved, self.ignore_book_ply) {
-            Ok(book) => {
-                println!(
-                    "info string book loaded: {resolved_str} ({} positions)",
-                    book.position_count().unwrap_or(0)
-                );
-                self.book = Some(book);
-                self.book_loaded_sig = Some(sig);
+        self.books.clear();
+        self.book_loaded_sig = None;
+        let mut all_loaded = true;
+        for (path, path_str) in paths.iter().zip(&sig.0) {
+            match rshogi_book::Book::from_path(path, self.ignore_book_ply) {
+                Ok(book) => {
+                    println!(
+                        "info string book loaded: {path_str} ({} positions)",
+                        book.position_count().unwrap_or(0)
+                    );
+                    self.books.push(book);
+                }
+                Err(e) => {
+                    println!("info string Error loading book file {path_str}: {e}");
+                    all_loaded = false;
+                }
             }
-            Err(e) => {
-                println!("info string Error loading book file {resolved_str}: {e}");
-                self.book = None;
-                self.book_loaded_sig = None;
-            }
+        }
+        // 読めなかったファイルがあれば、次の isready で全部読み直す。
+        if all_loaded {
+            self.book_loaded_sig = Some(sig);
         }
     }
 
@@ -1739,14 +1752,14 @@ impl UsiEngine {
         if !self.book_options.own_book {
             return false;
         }
-        let Some(book) = self.book.as_ref() else {
+        if self.books.is_empty() {
             return false;
-        };
+        }
 
         // probe 中の info string 本文を集めてから出力する（borrow 競合回避）。
         let mut infos: Vec<String> = Vec::new();
         let result = rshogi_book::probe_with_explore(
-            book,
+            &self.books,
             &self.position,
             &self.book_options,
             &mut self.book_rng,
@@ -2229,7 +2242,7 @@ mod tests {
             let mut position = Position::new();
             position.set_hirate();
             rshogi_book::probe(
-                engine.book.as_ref().unwrap(),
+                &engine.books,
                 &position,
                 &engine.book_options,
                 &mut rshogi_book::DefaultBookRng::from_seed(0),
@@ -2286,12 +2299,12 @@ mod tests {
             ]);
             engine.cmd_setoption(&["setoption", "name", "BookOnTheFly", "value", on_the_fly]);
             engine.maybe_load_book();
-            let book = engine.book.as_ref().expect("ybb book loaded");
-            assert_eq!(book.position_count(), Some(8));
+            assert_eq!(engine.books.len(), 1);
+            assert_eq!(engine.books[0].position_count(), Some(8));
             let mut position = Position::new();
             position.set_hirate();
             let best = rshogi_book::probe(
-                book,
+                &engine.books,
                 &position,
                 &engine.book_options,
                 &mut rshogi_book::DefaultBookRng::from_seed(0),

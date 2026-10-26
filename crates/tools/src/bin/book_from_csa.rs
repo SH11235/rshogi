@@ -892,7 +892,9 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(HIRATE_SFEN).unwrap();
         let mut rng = DefaultBookRng::from_seed(1);
-        let result = probe(&book, &pos, &BookOptions::default(), &mut rng, |_| {}).unwrap();
+        let result =
+            probe(std::slice::from_ref(&book), &pos, &BookOptions::default(), &mut rng, |_| {})
+                .unwrap();
         assert_eq!(result.best_move.to_usi(), "7g7f");
         // ponder はこの棋譜集合では 3c3d。
         assert_eq!(result.ponder_move.map(|m| m.to_usi()).as_deref(), Some("3c3d"));
