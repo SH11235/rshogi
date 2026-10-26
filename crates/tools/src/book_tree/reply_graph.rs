@@ -358,16 +358,17 @@ pub(super) fn build<'a>(
     start: &str,
     select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
 ) -> Result<ReplyGraph<'a>> {
-    build_filtered(index, side, start, select, |_, _| true)
+    build_filtered(index, side, start, select, |_| true)
 }
 
-/// `expand` が偽の局面では、合法手の生成と子局面の展開を止める。
+/// 元データにある自分の手番の局面のうち `expand(元データの番号)` が偽の局面では、手の生成と子局面の展開を
+/// 止める。相手の手番の局面は常に展開する。
 pub(super) fn build_filtered<'a>(
     index: &'a BookIndex<'a>,
     side: &str,
     start: &str,
     select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
-    expand: impl Fn(Option<usize>, &Position) -> bool + Sync,
+    expand: impl Fn(usize) -> bool + Sync,
 ) -> Result<ReplyGraph<'a>> {
     let black = side == "b";
     let mut graph = ReplyGraph {
@@ -400,10 +401,10 @@ pub(super) fn build_filtered<'a>(
     let root_own = (root.side_to_move() == Color::Black) == black;
     intern(&mut graph, root.key(), root_packed, root_master, root_own);
     let expand_node = |packed: &Packed, master: u32, own: bool| -> Result<Expansion> {
-        let mut pos = unpack(packed)?;
-        if !expand((master != NONE).then_some(master as usize), &pos) {
+        if own && master != NONE && !expand(master as usize) {
             return Ok((Vec::new(), 0, true));
         }
+        let mut pos = unpack(packed)?;
         let mut edges = Vec::new();
         let mut illegal = 0;
         if own {

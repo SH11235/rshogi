@@ -53,7 +53,7 @@ pub(super) struct RejoinArgs {
     /// 重み: これ未満の重みの局面では辿るのを止める
     #[arg(long, default_value_t = 1e-5)]
     weight_floor: f64,
-    /// 一覧と局面の展開に使う重みの下限 (`--opp-freq` を渡したときだけ使う)
+    /// 一覧と自分の手番の局面の展開に使う重みの下限 (`--opp-freq` を渡したときだけ使う)
     #[arg(long, default_value_t = 0.0)]
     min_weight: f64,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -240,20 +240,11 @@ pub(super) fn find_rejoins(
         side,
         start,
         |_, p| selected_moves(p, preset, None),
-        |master, pos| {
+        // 一覧は `key` (自分の手番) の重みで絞るので、相手の手番では止めない。alt の手の先の相手の局面は
+        // main だけで辿る重みが 0 になり、そこで止めると重みの大きい `key` の alt の行が消える。
+        |m| {
             weights.is_none_or(|weights| {
-                if min_weight == 0.0 {
-                    return true;
-                }
-                let sfen;
-                let key = match master {
-                    Some(m) => index.key(m),
-                    None => {
-                        sfen = pos.to_sfen();
-                        strip_ply(&sfen)
-                    }
-                };
-                weights.get(key).copied().unwrap_or(0.0) >= min_weight
+                min_weight == 0.0 || weights.get(index.key(m)).copied().unwrap_or(0.0) >= min_weight
             })
         },
     )?;
@@ -544,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn weight_pruning_stops_low_weight_gateways_and_includes_the_boundary() {
+    fn weight_pruning_stops_only_low_weight_own_positions() {
         let p = super::super::reply_graph::fixture::positions(&[
             (ROOT, "5i4h", "main", "100"),
             (&after(ROOT, &["5i4h", "5a4b"]), "4h3h", "main", "20"),
@@ -563,25 +554,28 @@ mod tests {
             line: 40,
             min_weight,
         };
-        let (boundary, _) =
+        let (boundary, summary) =
             find_rejoins(&index, &values, query(1.0), Some(&weights), None).unwrap();
         assert_eq!(boundary.len(), 1);
-        weights.insert(a.clone(), 0.1);
-        let (pruned, summary) =
+        assert_eq!(summary.pruned_positions, 0);
+        weights.insert(a.clone(), 0.0);
+        let (opponent_low, summary) =
             find_rejoins(&index, &values, query(0.5), Some(&weights), None).unwrap();
-        assert!(pruned.is_empty());
+        assert_eq!(opponent_low.len(), 1);
+        assert_eq!(opponent_low[0].rejoin, q);
+        assert_eq!(summary.pruned_positions, 0);
+        weights.insert(q.clone(), 0.1);
+        let (rejoin_low, summary) =
+            find_rejoins(&index, &values, query(0.5), Some(&weights), None).unwrap();
+        assert_eq!(rejoin_low, opponent_low);
         assert_eq!(summary.pruned_positions, 1);
-        assert_eq!(summary.own_positions, 1);
-        let (unpruned, _) =
-            find_rejoins(&index, &values, query(0.0), Some(&weights), None).unwrap();
-        assert_eq!(unpruned.len(), 1);
-        assert_eq!(unpruned[0].rejoin, q);
         let no_freq = find_rejoins(&index, &values, query(2.0), None, None).unwrap();
         assert_eq!(no_freq, find_rejoins(&index, &values, query(0.0), None, None).unwrap());
         let (pruned_root, summary) =
             find_rejoins(&index, &values, query(2.0), Some(&weights), None).unwrap();
         assert!(pruned_root.is_empty());
         assert_eq!(summary.pruned_positions, 1);
+        assert_eq!(summary.own_positions, 1);
     }
 
     #[test]
