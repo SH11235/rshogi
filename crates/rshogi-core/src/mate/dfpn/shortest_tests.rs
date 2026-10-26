@@ -29,8 +29,9 @@ fn solve_shortest(pos: &mut Position, mode: MateMode, nodes: u64) -> MateResult 
 // ---------------------------------------------------------------------------
 
 /// `plies` 手以内に詰ませたい受け方の局面 `pos` (王手されている) の応手 `mv` が無駄合いか: 駒打ちの合駒を
-/// 王手している駒が取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面 M の詰み手数が、
-/// 駒打ち以外の応手の詰み手数 + 1 の最大 (無ければ 0) 以下。M が `plies` 手以内に詰まなければ無駄合いとしない
+/// 王手している駒が取り (成・不成のどちらか)、受け方がその駒を取り返せず、取った駒を受け方の持駒に戻した
+/// 局面 M の詰み手数が、駒打ち以外の応手の詰み手数 + 1 の最大 (無ければ 0) 以下。M が `plies` 手以内に
+/// 詰まなければ無駄合いとしない
 fn ref_is_futile(pos: &mut Position, mv: Move, plies: u32) -> bool {
     let checkers = pos.checkers();
     if !mv.is_drop() || checkers.count() != 1 {
@@ -46,8 +47,12 @@ fn ref_is_futile(pos: &mut Position, mv: Move, plies: u32) -> bool {
     let mut returned_len: Option<u32> = None;
     for cap in captures {
         pos.do_move_with_missing_kings(cap);
+        let recapture = legal_moves_by_rules(pos).iter().any(|r| !r.is_drop() && r.to() == mv.to());
         let mut returned = with_piece_returned(pos, mv.drop_piece_type(), defender);
         pos.undo_move(cap);
+        if recapture {
+            continue;
+        }
         let len = (0..=plies).step_by(2).find(|&n| ref_defense(&mut returned, n));
         returned_len = match (returned_len, len) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -516,6 +521,48 @@ fn futility_counted_mates_are_not_shared_across_hands() {
         let probed = table.probe::<true>(super::table::TableKey { hand, ..key });
         assert!(probed.is_none_or(|v| v.pn != 0), "{hand:?}: {probed:?}");
     }
+}
+
+/// 合駒を取った駒を受け方が取り返せるなら、詰み手数が同じでも有効な合駒。▲9一竜への△2一歩は、▲同竜を
+/// △同玉と取り返せる (取って歩を戻した局面は 2 手で詰み、合駒以外の△1二玉も 2 手で詰むが、無駄合いにしない)
+#[test]
+fn recapturable_interpositions_are_effective() {
+    use super::search::{Budget, Scratch, Searcher, ShortestTables};
+    use super::state::MateState;
+    use super::table::MateTable;
+    use crate::time::Instant;
+    use std::cell::RefCell;
+
+    let sfen = "g7k/RP7/6G2/8P/9/9/9/9/4K4 b p 1";
+    assert_matches_reference(sfen, 3);
+    let mut pos = position(sfen);
+    let attacker = pos.side_to_move();
+    MateState::do_move(&mut pos, Move::from_usi("9b9a+").unwrap());
+    let drop = Move::from_usi("P*2a").unwrap();
+    let drop = legal_moves_by_rules(&mut pos)
+        .into_iter()
+        .find(|m| m.raw() == drop.raw())
+        .unwrap();
+    assert!(!ref_is_futile(&mut pos, drop, 2));
+
+    let stop = AtomicBool::new(false);
+    let mut progress = |_| {};
+    let budget = Budget {
+        stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
+        node_limit: 0,
+        time_limit_ms: 0,
+        start: Instant::now(),
+        progress: &mut progress,
+    };
+    let table = MateTable::new(1, true);
+    let tables = RefCell::new(ShortestTables::new());
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
+    searcher.enable_shortest(true, &tables);
+    assert_eq!(searcher.futile_drop(&mut pos, drop, 2).unwrap(), None);
 }
 
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)

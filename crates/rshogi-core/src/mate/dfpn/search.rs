@@ -928,8 +928,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 詰み手数の上限が `len_limit` の受け方の局面 `st` (王手されている) で、合駒 `drop` が無駄合いなら、
     /// 合駒の後の局面の証明駒と、合駒を取って取った駒を戻した局面の詰み手数を返す。
     ///
-    /// 無駄合い: 王手している駒が合駒を取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面 M の
-    /// 詰み手数が、駒打ち以外の応手で逃れたときの詰み手数 (応手の詰み手数 + 1 の最大、無ければ 0) 以下。
+    /// 無駄合い: 王手している駒が合駒を取り (成・不成のどちらか)、受け方がその駒を取り返せず、取った駒を
+    /// 受け方の持駒に戻した局面 M の詰み手数が、駒打ち以外の応手で逃れたときの詰み手数 (応手の詰み手数 + 1 の
+    /// 最大、無ければ 0) 以下。
     /// 合駒を取る 2 手が挟まるだけで、合駒が無かったときより詰みが長くならない合駒だけが無駄合いになり、
     /// 受け方の局面の詰み手数を決めることはない。取り返されて詰みが長くなる合駒は有効な合駒として数える。
     /// M が `len_limit` の中で詰まなければ、無駄合いでもこの局面は上限内に詰まないので、無駄合いとしない。
@@ -1012,7 +1013,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 _ => {}
             }
             st.do_move(capture);
-            let returned_state = st.with_captured_piece_returned(self.attacker);
+            // 合駒を取った駒を受け方が取り返せるなら、取った後の局面は合駒が無かったときと別物なので有効な合駒
+            let returned_state = if st.can_recapture(drop) {
+                None
+            } else {
+                st.with_captured_piece_returned(self.attacker)
+            };
             st.undo_move(capture);
             let Some(mut returned_state) = returned_state else {
                 continue;

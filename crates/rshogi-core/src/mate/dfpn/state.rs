@@ -108,6 +108,11 @@ pub(super) trait MateState {
     /// (成・不成) を `out` に追加する。
     fn interposition_captures(&self, _drop: Self::Mv, _out: &mut Vec<Self::Mv>) {}
 
+    /// 合駒 `drop` を取った後の局面 (受け方の手番) で、受け方が合駒の升の駒 (取った駒) を取る合法手があるか
+    fn can_recapture(&self, _drop: Self::Mv) -> bool {
+        false
+    }
+
     /// 合駒を取った後の局面 (受け方の手番) から、取った駒を攻め方の持駒から受け方の持駒に移した局面。
     /// `attacker` は攻め方。
     fn with_captured_piece_returned(&self, _attacker: Color) -> Option<Self>
@@ -354,6 +359,12 @@ impl MateState for Position {
 
     fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
         interposition_captures(self, drop, out, |mv| self.is_legal(mv));
+    }
+
+    fn can_recapture(&self, drop: Move) -> bool {
+        let mut replies = MoveList::new();
+        generate_legal_all(self, &mut replies);
+        replies.iter().any(|m| !m.is_drop() && m.to() == drop.to())
     }
 
     fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
@@ -639,6 +650,10 @@ impl MateState for NoAttackerKing {
     fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
         // 自玉が無いので、駒を動かす手は自玉の安全を見なくてよい
         interposition_captures(&self.pos, drop, out, |_| true);
+    }
+
+    fn can_recapture(&self, drop: Move) -> bool {
+        !self.for_each_evasion(|m| m.is_drop() || m.to() != drop.to())
     }
 
     fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
