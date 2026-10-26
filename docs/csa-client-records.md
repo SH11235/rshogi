@@ -19,8 +19,12 @@ live_jsonl = false # 対局中に JSONL を手単位で live 追記（下記）
 テンプレート変数: `{datetime}`, `{game_id}`, `{sente}`, `{gote}`
 
 ファイル名に使う対局 ID・対局者名は、Unicode の文字・数字・`-`・`_` を保持し、それ以外を `_` に置き換える。
-元の名前と ID は棋譜内に保持する。`{datetime}` は対局開始時刻の秒までなので、
-同じ保存先・同じテンプレートで同秒に始まる対局はファイル名が重なる場合がある。
+元の名前と ID は棋譜内に保持する。`filename_template` は CSA / SFEN / JSONL に共通で、
+展開した名前に対局開始時刻の全精度・プロセス ID・対局 ID に基づく識別子を必ず付ける。
+対局者組（`_vs_` / `-vs-`）を含まないテンプレートには `_<先手名>_vs_<後手名>` も補い、ライブ観戦で列挙できる名前にする。
+同秒・同名対局や、日時を含まないテンプレートでも対局を区別する。再接続では開始時刻を保持し、
+live JSONL と最終保存も同じ名前を使う。既存の完成済みファイルは上書きせず、保存エラーとして報告する。
+SFEN は評価値付きの指し手がある局だけファイルを作る。
 
 JSONL の `engine_cmd.label_black` / `label_white`、`move.engine`、`result.winner` は、
 CSA のプレイヤー名を同じ規則で使用する。`.` や `@` なども保持し、ファイル名だけを
@@ -62,7 +66,7 @@ cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.js
 ```
 
 1 対局を 1 JSONL ファイルに書き、複数局は上記の glob でまとめて集計する。
-スキーマは selfplay と同じ `meta` / `move` / `result` の 3 種類。
+スキーマは selfplay と同じ `meta` / `move` / `result` の 3 種類。`meta.game_id` は対局 ID を保持する。
 `move.eval` は `score_cp` / `score_mate` / `depth` / `seldepth` / `nodes` / `time_ms` / `nps` / `pv` を含む。
 相手手番の `eval` は取得できず、時間情報の `engine_timing` は自エンジン側の値を対象にする。
 相手のバイナリパス・USI オプションは CSA から取得できないため、`path_black` / `path_white` の
@@ -99,8 +103,8 @@ cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.js
 
 `records/` ディレクトリに対局ごとに保存:
 
-- `20260328_120030_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
-- `20260328_120030_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
+- `20260328_120030_rshogi_v1_vs_opponent_<識別子>.csa` — CSA形式（評価値コメント付き）
+- `20260328_120030_rshogi_v1_vs_opponent_<識別子>.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
 
 CSA の書式は wdoor (Floodgate) の公開棋譜と同じ並びにしてある。指し手行 → `T<秒>` 行 →
 `'** <先手視点評価値> <読み筋>` 行（コメントは直前の指し手のもの）の順で、末尾に終局の行
@@ -166,3 +170,10 @@ JSONL の未決結果は `outcome: "interrupted"`（中断）/ `"censored"`（�
 `winner` は付かない。`reason` は受信した理由を保持し、記録が空なら outcome を使う。
 旧形式の `draw` + `reason: "interrupted"` / `"censored"` は未決と判別できるが、
 `draw` / `max_moves` のみが残るログからは引分と打切りを復元できない。
+
+### 保存に失敗した場合
+
+既存ファイルが別の内容を持つ場合や、同局の JSONL が完成済みの場合は変更しない。
+live JSONL の再開・確定では、対局 ID と開始時刻、未完であること、既存内容との一致を確認する。
+同名の `.jsonl.tmp` がある場合も上書きしない。別の保存処理が動いていないことを確認してから
+残った一時ファイルを退避し、保存済みの棋譜を確認する。

@@ -499,7 +499,7 @@ where
                 );
                 if config.record.live_jsonl
                     && let Some(dir) = config.record.jsonl_dir()
-                    && let Err(err) = remove_complete_live_jsonl(&dir, &retained_record)
+                    && let Err(err) = remove_complete_live_jsonl(&dir, &retained_record, config)
                 {
                     log::warn!("[REC] 切断前 live JSONL の削除に失敗しました: {err:#}");
                 }

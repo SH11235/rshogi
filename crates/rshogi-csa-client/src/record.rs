@@ -1,6 +1,8 @@
 //! 棋譜記録・保存
 
 use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write as _;
 
 use anyhow::Result;
 use chrono::Local;
@@ -404,7 +406,7 @@ pub fn save_record(record: &GameRecord, config: &RecordConfig) -> Result<()> {
     save_record_with_status(record, config, &RecordStatus::Complete)
 }
 
-/// 棋譜種別を明示してファイルへ保存する。
+/// 棋譜種別を明示してファイルへ保存する。既存のファイルは上書きせずエラーを返す。
 pub fn save_record_with_status(
     record: &GameRecord,
     config: &RecordConfig,
@@ -416,18 +418,15 @@ pub fn save_record_with_status(
 
     std::fs::create_dir_all(&config.dir)?;
 
-    let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
-    let mut filename_base = config
-        .filename_template
-        .replace("{datetime}", &datetime)
-        .replace("{game_id}", &sanitize_filename(&record.game_id))
-        .replace("{sente}", &sanitize_filename(&record.sente_name))
-        .replace("{gote}", &sanitize_filename(&record.gote_name));
-    filename_base.push_str(status.filename_suffix());
+    let filename_base = record_filename_base(record, config, status);
 
     if config.save_csa {
         let path = config.dir.join(format!("{filename_base}.csa"));
-        std::fs::write(&path, record.to_csa_with_status(status))?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?
+            .write_all(record.to_csa_with_status(status).as_bytes())?;
         log::info!("[REC] 棋譜保存: {}", path.display());
     }
 
@@ -435,12 +434,55 @@ pub fn save_record_with_status(
         let sfen = record.to_sfen_lines()?;
         if !sfen.is_empty() {
             let path = config.dir.join(format!("{filename_base}.sfen"));
-            std::fs::write(&path, sfen)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?
+                .write_all(sfen.as_bytes())?;
             log::info!("[REC] SFEN保存: {}", path.display());
         }
     }
 
     Ok(())
+}
+
+pub(crate) fn record_filename_base(
+    record: &GameRecord,
+    config: &RecordConfig,
+    status: &RecordStatus,
+) -> String {
+    let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
+    let mut base = config
+        .filename_template
+        .replace("{datetime}", &datetime)
+        .replace("{game_id}", &sanitize_filename(&record.game_id))
+        .replace("{sente}", &sanitize_filename(&record.sente_name))
+        .replace("{gote}", &sanitize_filename(&record.gote_name));
+    if !base.contains("_vs_") && !base.contains("-vs-") {
+        // JSONL の読者は対局者組を含む名前を対局ファイルとして列挙する。
+        write!(
+            base,
+            "_{}_vs_{}",
+            sanitize_filename(&record.sente_name),
+            sanitize_filename(&record.gote_name)
+        )
+        .expect("String への書き込みは失敗しない");
+    }
+    let mut game_hash = DefaultHasher::new();
+    record.game_id.hash(&mut game_hash);
+    match record.my_color {
+        Color::Black => 0_u8,
+        Color::White => 1_u8,
+    }
+    .hash(&mut game_hash);
+    format!(
+        "{base}_{}-{:09}-{}-{:016x}{}",
+        record.start_time.timestamp(),
+        record.start_time.timestamp_subsec_nanos(),
+        std::process::id(),
+        game_hash.finish(),
+        status.filename_suffix(),
+    )
 }
 
 impl RecordStatus {
@@ -496,12 +538,20 @@ mod tests {
             ..RecordConfig::default()
         };
         let mut record = GameRecord::new(&summary(rshogi_csa::initial_position()));
-        record.add_move("+7776FU", 1, None, Color::Black);
+        record.add_move(
+            "+7776FU",
+            1,
+            Some(&SearchInfo {
+                score_cp: Some(0),
+                ..SearchInfo::default()
+            }),
+            Color::Black,
+        );
         let absolute_id = root.join("outside").to_string_lossy().into_owned();
         for game_id in ["../outside", "..\\outside", absolute_id.as_str()] {
             record.game_id = game_id.to_owned();
             save_record(&record, &config).unwrap();
-            let filename = sanitize_filename(game_id);
+            let filename = record_filename_base(&record, &config, &RecordStatus::Complete);
             assert!(config.dir.join(format!("{filename}.csa")).is_file());
             assert!(config.dir.join(format!("{filename}.sfen")).is_file());
         }

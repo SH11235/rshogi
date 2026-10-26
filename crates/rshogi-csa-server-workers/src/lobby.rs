@@ -777,6 +777,7 @@ impl Lobby {
         let room_id = build_room_id(&matched.game_name, &random_128bit_hex());
         let mut sent_black = false;
         let mut sent_white = false;
+        let mut targets = Vec::new();
         for ws in self.state.get_websockets() {
             let att = match ws.deserialize_attachment::<LobbyAttachment>() {
                 Ok(Some(a)) => a,
@@ -809,12 +810,46 @@ impl Lobby {
             if target_color != color.to_core() {
                 continue;
             }
-            retire_lobby_socket(&ws)?;
-            send_line(&ws, &build_matched_line(&room_id, target_color))?;
-            let _ = ws.close(Some(1000), Some("matched"));
-            match target_color {
-                Color::Black => sent_black = true,
-                Color::White => sent_white = true,
+            targets.push((ws, target_color));
+        }
+        let mut failed = targets.len() != 2;
+        // queue から除去済みの両接続を先に退役させ、片側の送信失敗でも残留させない。
+        for (ws, color) in &targets {
+            if let Err(error) = retire_lobby_socket(ws) {
+                failed = true;
+                crate::structured_log!(
+                    event: "matched_dispatch_retire_failed",
+                    component: "lobby",
+                    room_id: room_id,
+                    color: format!("{color:?}"),
+                    err: format!("{error:?}"),
+                );
+            }
+        }
+        for (ws, color) in &targets {
+            if !failed {
+                match send_line(ws, &build_matched_line(&room_id, *color)) {
+                    Ok(()) => match color {
+                        Color::Black => sent_black = true,
+                        Color::White => sent_white = true,
+                    },
+                    Err(error) => {
+                        failed = true;
+                        crate::structured_log!(
+                            event: "matched_dispatch_send_failed",
+                            component: "lobby",
+                            room_id: room_id,
+                            color: format!("{color:?}"),
+                            err: format!("{error:?}"),
+                        );
+                    }
+                }
+            }
+            if failed {
+                let _ = send_line(ws, &build_login_incorrect_line("match_cancelled"));
+                let _ = ws.close(Some(1011), Some("match cancelled"));
+            } else {
+                let _ = ws.close(Some(1000), Some("matched"));
             }
         }
         crate::structured_log!(
@@ -827,12 +862,6 @@ impl Lobby {
             sent_white: sent_white,
         );
         if !sent_black || !sent_white {
-            // 片方の WS が close 済みなどで MATCHED が届かなかった場合、queue から
-            // 既に該当 entry を抜いてあるため client は orphan になる。client 側は
-            // recv timeout (60 秒) で接続エラー検出 → retry_delay 経由で再 LOGIN_LOBBY
-            // するため最終的に復帰できるが、サーバ側でも警告ログを残して
-            // observability を確保する。GameRoom DO 側の login deadline (将来 PR で
-            // 実装予定) でも片側不在は救済される。
             crate::structured_log!(
                 event: "matched_dispatch_incomplete",
                 component: "lobby",

@@ -27,7 +27,7 @@ WebSocket のテキストメッセージで 1 行ずつ送受信する。
 
 | 方向 | 行 | 意味 |
 |---|---|---|
-| client → server | `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | 公開対局の待機登録。手番は `black` / `white`（別名 `sente` / `gote` も受理） |
+| client → server | `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | 公開対局の待機登録。手番は `black` / `white` |
 | client → server | `LOGOUT_LOBBY` | 待機から離脱 |
 | client → server | `LOBBY_PONG` | 生存確認時刻を更新 |
 | server → client | `LOGIN_LOBBY:<handle> OK` | 待機登録成功 |
@@ -43,6 +43,10 @@ WebSocket のテキストメッセージで 1 行ずつ送受信する。
 `unknown_game_name` / `queue_full` / `queue_expired` / `handle_auth_failed` /
 `rate_limited retry_after=<秒>`。レート制限時はサーバー指定の待ち時間を尊重する。
 接続前の HTTP 429 / 503 も `Retry-After` に従って再試行する。
+
+成立通知の送信に失敗した場合は、未通知の接続へ `LOGIN_LOBBY:incorrect match_cancelled`
+を返して閉じ、再ログインできる状態へ戻す。すでに `MATCHED` を受信して対局ルームへ
+移った相手の通知は取り消せない。片側だけでルーム待機になった場合は、後述の手順で中止・再接続する。
 
 ## 認証・接続制限
 
