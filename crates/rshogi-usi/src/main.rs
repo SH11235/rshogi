@@ -559,7 +559,16 @@ impl UsiEngine {
         }
 
         // BookDir 配下に解決（BookFile が絶対パス/明示パスならそちらが優先される）。
-        let resolved = std::path::Path::new(&self.book_dir).join(&self.book_file);
+        // `.db` が無く同名の `.ybb` があればそちらを読む。
+        let requested = std::path::Path::new(&self.book_dir).join(&self.book_file);
+        let resolved = rshogi_book::resolve_book_path(&requested);
+        if resolved != requested {
+            println!(
+                "info string book file fallback: {} -> {}",
+                requested.display(),
+                resolved.display()
+            );
+        }
         let resolved_str = resolved.to_string_lossy().into_owned();
         let sig = (resolved_str.clone(), self.ignore_book_ply);
 
@@ -2237,6 +2246,51 @@ mod tests {
             assert_eq!(book_move(&engine), after_replace, "BookOnTheFly={on_the_fly}");
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn book_file_db_falls_back_to_ybb_of_the_same_name() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 別プロセスで並行に流れても衝突しないよう、プロセスごとに名前を変える。
+        let db = dir.join(format!("book-ybb-fallback-test-{}.db", std::process::id()));
+        let ybb = db.with_extension("ybb");
+        std::fs::remove_file(&db).ok();
+        std::fs::write(&ybb, include_bytes!("../../rshogi-book/testdata/small.ybb")).unwrap();
+        for (book_file, on_the_fly) in [
+            (&db, "true"),
+            (&db, "false"),
+            (&ybb, "true"),
+            (&ybb, "false"),
+        ] {
+            let mut engine = UsiEngine::new();
+            engine.cmd_setoption(&[
+                "setoption",
+                "name",
+                "BookFile",
+                "value",
+                book_file.to_str().unwrap(),
+            ]);
+            engine.cmd_setoption(&["setoption", "name", "BookOnTheFly", "value", on_the_fly]);
+            engine.maybe_load_book();
+            let book = engine.book.as_ref().expect("ybb book loaded");
+            assert_eq!(book.position_count(), Some(8));
+            let mut position = Position::new();
+            position.set_hirate();
+            let best = rshogi_book::probe(
+                book,
+                &position,
+                &engine.book_options,
+                &mut rshogi_book::DefaultBookRng::from_seed(0),
+                |_| {},
+            )
+            .unwrap()
+            .best_move
+            .to_usi();
+            assert!(["7g7f", "2g2f"].contains(&best.as_str()), "{best}");
+        }
+        std::fs::remove_file(ybb).unwrap();
     }
 
     #[test]

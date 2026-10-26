@@ -589,3 +589,34 @@ fn a_subtree_without_readings_is_valued_without_a_journal() {
     let root_row = rows.iter().find(|r| r.0[0] == ROOT).unwrap();
     assert_eq!((root_row.0[2].as_str(), root_row.0[5].as_str()), ("5i5h", "-70"));
 }
+
+#[test]
+fn cut_reads_ybb_like_the_sorted_db_it_was_converted_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rshogi-book/testdata");
+    // 変換元の .db は並んでいないので、on the fly で引ける順に書き直す。
+    BookDb::read(&testdata.join("small.db"))
+        .unwrap()
+        .write(&d.join("big.db"))
+        .unwrap();
+    std::fs::copy(testdata.join("small_depth.ybb"), d.join("big.ybb")).unwrap();
+    std::fs::write(
+        d.join("roots.jsonl"),
+        "{\"id\":\"r1\",\"root\":\"sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\",\"own\":\"b\"}\n",
+    )
+    .unwrap();
+    super::cut::run(cut_args(d, "from_db", None)).unwrap();
+    let ybb_args =
+        CutArgs::for_test(d.join("big.ybb"), d.join("roots.jsonl"), d.join("from_ybb"), None);
+    super::cut::run(ybb_args).unwrap();
+    for name in [NODES, EDGES, "reads.tsv", "summary.tsv"] {
+        let from_db = std::fs::read_to_string(d.join("from_db").join(name)).unwrap();
+        assert_eq!(
+            from_db,
+            std::fs::read_to_string(d.join("from_ybb").join(name)).unwrap(),
+            "{name}"
+        );
+        assert!(from_db.lines().count() > 1, "{name}");
+    }
+}

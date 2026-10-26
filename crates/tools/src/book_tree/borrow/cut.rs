@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub(super) struct CutArgs {
-    /// 大きい定跡 (.db)。sfen 行が手数を除いた SFEN のバイト順に並んでいること (ファイル上で二分探索する)
+    /// 大きい定跡 (.db か YaneuraOu の .ybb)。.db は sfen 行が手数を除いた SFEN のバイト順に並んでいること (ファイル上で二分探索する)
     #[arg(long)]
     book: PathBuf,
     /// 根の一覧 (JSON Lines、1 行に id・root・own。他の項目は読まない)
@@ -158,7 +158,7 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     };
     let book = Book::open_on_the_fly(&args.book, true).with_context(|| {
         format!(
-            "{} を開けません (sfen 行が手数を除いた SFEN のバイト順に並んでいる必要があります。並んでいなければ並べ替えた写しを渡す)",
+            "{} を開けません (.db は sfen 行が手数を除いた SFEN のバイト順に並んでいる必要があります。並んでいなければ並べ替えた写しを渡す)",
             args.book.display()
         )
     })?;
