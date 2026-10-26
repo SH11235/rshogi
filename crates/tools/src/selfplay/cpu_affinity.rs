@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
+/// `--cpu-affinity` の値。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum CpuAffinityMode {
     /// CPU affinity を設定しない。
@@ -83,6 +84,9 @@ fn plan_numa_cpu_affinities(
     Ok(result)
 }
 
+/// worker `worker_count` 個ぶんの CPU 群を返す。各群は一つの NUMA node 内の `threads` 個の論理 CPU で、
+/// 許可された CPU (cpuset) だけから取り、node ごとに 1 群ずつ round-robin で割り当てる。
+/// 完全な群が足りない、NUMA topology が見えない、または Linux 以外ではエラーを返す。
 #[cfg(target_os = "linux")]
 pub fn discover_numa_cpu_affinities(
     threads: usize,
@@ -143,6 +147,9 @@ fn read_numa_node_cpus(node_root: &Path, allowed_text: &str) -> Result<Vec<Vec<u
     Ok(node_cpus)
 }
 
+/// worker `worker_count` 個ぶんの CPU 群を返す。各群は一つの NUMA node 内の `threads` 個の論理 CPU で、
+/// 許可された CPU (cpuset) だけから取り、node ごとに 1 群ずつ round-robin で割り当てる。
+/// 完全な群が足りない、NUMA topology が見えない、または Linux 以外ではエラーを返す。
 #[cfg(not(target_os = "linux"))]
 pub fn discover_numa_cpu_affinities(
     _threads: usize,

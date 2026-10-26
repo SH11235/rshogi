@@ -12,7 +12,9 @@ use super::types::{SearchRequest, TimeArgs};
 
 /// 局面集合・深さ・集計方法の版。これらを変えたら上げる。spsa の run fingerprint にも入る。
 pub const BENCH_VERSION: &str = "spsa-bench-v1";
+/// `--reference-nps` の既定値 (1 thread あたり、全 slot 同時)。
 pub const DEFAULT_REFERENCE_NPS: u64 = 350_000;
+/// `--min-nps-ratio` の既定値。
 pub const DEFAULT_MIN_NPS_RATIO: f64 = 0.5;
 /// 測る局面は benchmark ツールの既定局面 (YaneuraOu の bench と同じ 4 局面)。
 const BENCH_DEPTH: u32 = 16;
@@ -39,12 +41,16 @@ pub struct BenchResult {
     pub slot_nps: Vec<f64>,
     /// slot 間の平均。
     pub nps: f64,
+    /// 計測した探索の深さ。
     pub depth: u32,
+    /// warmup の探索の深さ。
     pub warmup_depth: u32,
+    /// 局面集合の局面数。
     pub positions: usize,
 }
 
 impl BenchResult {
+    /// 起動ログの 1 行 (`nps bench: <平均> nps/thread (slots: ...)`)。
     pub fn summary(&self) -> String {
         format!(
             "nps bench: {:.0} nps/thread (slots: {})",
