@@ -731,4 +731,19 @@ mod tests {
         assert_eq!(value["profile"]["records"], 1);
         assert_eq!(value["entering_king_rule"], "CSARule27");
     }
+
+    #[test]
+    fn error_record_number_counts_across_chunks() {
+        let double_pawn = "4k4/9/9/9/9/9/P8/P8/4K4 b - 1";
+        // 2 件目は chunk の最後なので次の chunk に繰り越され、6 件目は 3 つ目の chunk にある
+        for bad in [1usize, 2, 5] {
+            let bytes: Vec<u8> = (0..7)
+                .map(|i| record(if i == bad { double_pawn } else { NORMAL }, 1, 0, 0))
+                .collect::<Vec<_>>()
+                .concat();
+            let error = try_run_files(&[&bytes], config(false), 3).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(&format!("at record {bad}:")), "{message}");
+        }
+    }
 }

@@ -22,10 +22,10 @@ cargo run --release -p tools --bin psv_profile -- \
 
 chunk (26 万局面) ずつ読むので、ピークメモリは入力の件数によりません。
 
-次の入力では、ファイル名とファイル内の record 番号 (0 始まり) を表示して停止します。不正な局面を含む PSV は、
-先に [`validate_psv`](validate_psv.md) で除いてから集計してください。
+サイズが 40 byte の倍数でない入力は、ファイル名とサイズを表示して停止します。次の record では、ファイル名と
+ファイル内の record 番号 (0 始まり) を表示して停止します。不正な局面を含む PSV は、先に
+[`validate_psv`](validate_psv.md) で除いてから集計してください。
 
-- サイズが 40 byte の倍数でない
 - 局面を展開できない、または将棋のルール上ありえない局面 (`validate_psv` と同じ検査: 玉の有無・駒数・行き所のない駒・二歩・手番でない側への王手)
 - `game_result` が -1・0・1 以外
 
@@ -68,6 +68,6 @@ YaneuraOu 系の生成ツールは宣言できる局面を書かずに対局を�
 
 ## JSON
 
-`--json` の出力は `inputs`・`entering_king_rule`・`ply_bin` と、`profile` (`records`・`continued_records`・`totals`・
+`--json` の出力は `inputs` (UTF-8 でないパスは置換文字 U+FFFD で書く)・`entering_king_rule`・`ply_bin` と、`profile` (`records`・`continued_records`・`totals`・
 `by_ply`・`games`) を持ちます。`by_ply[i]` と `games.by_end_ply[i]`・`games.by_start_ply[i]` は手数
 `i * ply_bin` から `(i + 1) * ply_bin - 1` の帯で、値はすべて百分率ではなく件数です。`--games` を付けないと `games` は `null` です。
