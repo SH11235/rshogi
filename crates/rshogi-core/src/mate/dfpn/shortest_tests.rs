@@ -9,15 +9,12 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use super::tests::{
-    ZUKOU_001, brute_defense_by_rules, brute_mate_by_rules, checks_by_rules, position, pv_usi,
-    random_kingless_position, random_tsume_position,
+    ZUKOU_001, brute_mate_by_rules, checks_by_rules, position, pv_usi, random_kingless_position,
+    random_tsume_position,
 };
 use super::verify::{check_mate_pv_by_rules, legal_moves_by_rules};
 use super::*;
 use crate::types::{Color, Hand, PieceType};
-
-/// 無駄合いの判定で、合駒を取った後の局面が詰むかを総当たりで調べる手数
-const FUTILE_PLIES: u32 = 6;
 
 fn solve_shortest(pos: &mut Position, mode: MateMode, nodes: u64) -> MateResult {
     let stop = AtomicBool::new(false);
@@ -31,9 +28,9 @@ fn solve_shortest(pos: &mut Position, mode: MateMode, nodes: u64) -> MateResult 
 // 正解役 (総当たり)
 // ---------------------------------------------------------------------------
 
-/// 王手されている局面 `pos` の応手 `mv` が無駄合いか: 駒打ちの合駒を王手している駒が取り
-/// (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面が `FUTILE_PLIES` 手以内に詰む
-fn ref_is_futile(pos: &mut Position, mv: Move) -> bool {
+/// `plies` 手以内に詰ませたい受け方の局面 `pos` (王手されている) の応手 `mv` が無駄合いか: 駒打ちの合駒を
+/// 王手している駒が取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面が同じ `plies` 手以内に詰む
+fn ref_is_futile(pos: &mut Position, mv: Move, plies: u32) -> bool {
     let checkers = pos.checkers();
     if !mv.is_drop() || checkers.count() != 1 {
         return false;
@@ -50,7 +47,7 @@ fn ref_is_futile(pos: &mut Position, mv: Move) -> bool {
         pos.do_move_with_missing_kings(cap);
         let mut returned = with_piece_returned(pos, mv.drop_piece_type(), defender);
         pos.undo_move(cap);
-        if brute_defense_by_rules(&mut returned, FUTILE_PLIES) {
+        if ref_defense(&mut returned, plies) {
             futile = true;
             break;
         }
@@ -114,7 +111,7 @@ fn ref_mate(pos: &mut Position, plies: u32) -> bool {
 /// 受け方の手番の `pos` が `plies` 手以内に詰むか (無駄合いは詰みとして数えない)
 fn ref_defense(pos: &mut Position, plies: u32) -> bool {
     for mv in legal_moves_by_rules(pos) {
-        if ref_is_futile(pos, mv) {
+        if ref_is_futile(pos, mv, plies) {
             continue;
         }
         if plies == 0 {
@@ -152,7 +149,7 @@ fn ref_clean(pos: &mut Position, d: u32, or_node: bool, attacker: Color) -> bool
         return pos.hand(attacker) == Hand::EMPTY;
     }
     for mv in legal_moves_by_rules(pos) {
-        if ref_is_futile(pos, mv) {
+        if ref_is_futile(pos, mv, d) {
             continue;
         }
         pos.do_move_with_missing_kings(mv);
@@ -186,7 +183,7 @@ fn assert_pv_follows_definition(sfen: &str, pv: &[Move]) {
     for (i, &mv) in pv.iter().enumerate() {
         let rest = len - i as u32;
         if i % 2 == 1 {
-            assert!(!ref_is_futile(&mut pos, mv), "{sfen}: {} 手目は無駄合い", i + 1);
+            assert!(!ref_is_futile(&mut pos, mv, rest), "{sfen}: {} 手目は無駄合い", i + 1);
         }
         pos.do_move_with_missing_kings(mv);
         if i % 2 == 0 {
@@ -197,7 +194,7 @@ fn assert_pv_follows_definition(sfen: &str, pv: &[Move]) {
     }
     for reply in legal_moves_by_rules(&mut pos) {
         assert!(
-            ref_is_futile(&mut pos, reply),
+            ref_is_futile(&mut pos, reply, 0),
             "{sfen}: 詰上りに無駄合いでない応手 {}",
             reply.to_usi()
         );
@@ -259,8 +256,12 @@ fn positions_without_interpositions_match_the_reference() {
 
 #[test]
 fn effective_interpositions_are_counted() {
-    // 最短の王手の後に、無駄合いでない合駒 (取ると取った駒を使わなければ詰まない) が最長の応手としてある
-    for sfen in ["9/8k/9/6+R+L1/9/9/9/9/9 b LPsp 1"] {
+    // 最短の王手の後に、無駄合いでない合駒が最長の応手としてある。2 局面目は、後手の竜の王手 △9一竜 への ▲9二香を
+    // 竜で取ると玉に竜を取り返され、取った後の詰みが長くなるので有効な合駒
+    for sfen in [
+        "9/8k/9/6+R+L1/9/9/9/9/9 b LPsp 1",
+        "8+r/9/K8/2+r6/9/9/9/9/9 w L2g 1",
+    ] {
         assert_matches_reference(sfen, 3);
         let mut pos = position(sfen);
         pos.clear_checkers_without_king();
@@ -270,11 +271,26 @@ fn effective_interpositions_are_counted() {
             if ref_defense(&mut pos, 2) {
                 effective |= legal_moves_by_rules(&mut pos)
                     .into_iter()
-                    .any(|r| r.is_drop() && !ref_is_futile(&mut pos, r));
+                    .any(|r| r.is_drop() && !ref_is_futile(&mut pos, r, 2));
             }
             pos.undo_move(mv);
         }
         assert!(effective, "{sfen}");
+    }
+}
+
+/// 7 手詰。▲6四竜への△4四歩などの合駒は、▲同竜 △同玉と竜を取り返されて詰みが長くなるので有効な合駒。
+/// 合駒を無駄合いとして数えないと ▲6四竜からの 5 手になる
+#[test]
+fn recaptured_interpositions_are_counted() {
+    let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
+    for mode in MateMode::ALL {
+        let mut pos = position(sfen);
+        let MateResult::Mate(pv) = solve_shortest(&mut pos, mode, 5_000_000) else {
+            panic!("{mode:?}");
+        };
+        assert!(check_mate_pv_by_rules(&pos, &pv, true), "{mode:?}: {}", pv_usi(&pv));
+        assert_eq!(pv.len(), 7, "{mode:?}: {}", pv_usi(&pv));
     }
 }
 
@@ -379,7 +395,7 @@ fn shortest_mode_with_threads_matches_single_thread() {
 /// 手順を求める段階でノード数の上限に達したら Unknown で、局面は元に戻る
 #[test]
 fn shortest_mode_stops_at_the_node_limit() {
-    // 判定は数千ノードで終わるが、無駄合いの判定で最短手順を求めるのに 100 万ノードほどかかる
+    // 判定は数千ノードで終わるが、最短手順を求めるのに 3 万ノードほどかかる
     let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
     let mut pos = position(sfen);
     let before = pos.to_sfen();

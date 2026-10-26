@@ -1112,7 +1112,7 @@ pub(super) fn brute_mate_by_rules(pos: &mut Position, plies: u32) -> bool {
     false
 }
 
-pub(super) fn brute_defense_by_rules(pos: &mut Position, plies: u32) -> bool {
+fn brute_defense_by_rules(pos: &mut Position, plies: u32) -> bool {
     let replies = legal_moves_by_rules(pos);
     if replies.is_empty() {
         return true;
