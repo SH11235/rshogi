@@ -20,8 +20,9 @@ live_jsonl = false # 対局中に JSONL を手単位で live 追記（下記）
 
 ファイル名に使う対局 ID・対局者名は、Unicode の文字・数字・`-`・`_` を保持し、それ以外を `_` に置き換える。
 元の名前と ID は棋譜内に保持する。`filename_template` は CSA / SFEN / JSONL に共通で、
-展開した名前に対局開始時刻の全精度・プロセス ID・対局 ID に基づく識別子を必ず付ける。
-対局者組（`_vs_` / `-vs-`）を含まないテンプレートには `_<先手名>_vs_<後手名>` も補い、ライブ観戦で列挙できる名前にする。
+対局開始時刻の全精度・プロセス ID・対局 ID に基づく識別子を、末尾の対局者組より前に挿入する。
+既定は `<datetime>_<識別子>_<先手名>_vs_<後手名>`。任意テンプレートでも実際の対局者組を末尾へ補い、
+後手が未着手の記録を集計できる名前にする。`_vs_` を含むだけで実際の後手名で終わらない名前にも対局者組を補う。
 同秒・同名対局や、日時を含まないテンプレートでも対局を区別する。再接続では開始時刻を保持し、
 live JSONL と最終保存も同じ名前を使う。既存の完成済みファイルは上書きせず、保存エラーとして報告する。
 SFEN は評価値付きの指し手がある局だけファイルを作る。
@@ -83,8 +84,9 @@ cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.js
 
 局面または game ID・対局者・自手番が一致しない場合は `[REC] resume 局面不一致` の
 警告を出し、resume 局面以降だけを断片として保存する。この場合は全形式のファイル名に
-`_reconnect_fragment` が付き、CSA には `RECONNECT_FRAGMENT` コメントと不一致理由も
-記録される。
+`_reconnect_fragment` が末尾に付き、CSA には `RECONNECT_FRAGMENT` コメントと不一致理由も
+記録される。`kifu_publish` はこの末尾マーカーで断片を除外する。`floodgate_record` は断片を
+自動除外しないため、対局全体の戦績を集計するときは通し記録だけを別の入力ディレクトリへ集める。
 
 ## 出力
 
@@ -103,8 +105,8 @@ cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.js
 
 `records/` ディレクトリに対局ごとに保存:
 
-- `20260328_120030_rshogi_v1_vs_opponent_<識別子>.csa` — CSA形式（評価値コメント付き）
-- `20260328_120030_rshogi_v1_vs_opponent_<識別子>.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
+- `20260328_120030_<識別子>_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
+- `20260328_120030_<識別子>_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
 
 CSA の書式は wdoor (Floodgate) の公開棋譜と同じ並びにしてある。指し手行 → `T<秒>` 行 →
 `'** <先手視点評価値> <読み筋>` 行（コメントは直前の指し手のもの）の順で、末尾に終局の行

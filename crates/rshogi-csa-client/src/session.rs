@@ -910,8 +910,6 @@ where
         time_ms: observed_info.and_then(|i| i.time_ms),
         nps: observed_info.and_then(|i| i.nps),
     });
-    live_append(&mut s.live_jsonl, &s.record);
-
     // MoveSent 発火 (送信直後、サーバ echo の time_sec はまだ未確定)
     let move_sent_event = MoveEvent {
         player: MovePlayer::SelfPlayer,
@@ -955,6 +953,8 @@ where
                     let (_, time_sec) = parse_server_move(&line);
                     let (time_sec, _) = s.clock.consume(s.my_color, time_sec);
                     s.record.update_last_time(time_sec);
+                    // エコー前に終局すると自手を取り消すため、live には確定後だけ追記する。
+                    live_append(&mut s.live_jsonl, &s.record);
                     if defer_ponder
                         && s.config.game.ponder
                         && let Some(ref ponder_mv) = result.ponder_move

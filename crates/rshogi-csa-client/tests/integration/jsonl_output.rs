@@ -323,7 +323,7 @@ fn filename_includes_datetime_and_player_names() {
     let config = build_config();
     let path = write_game_jsonl(&tmp, &record, &config, &GameResult::Draw).expect("write");
     let name = path.file_name().unwrap().to_string_lossy().to_string();
-    assert!(name.contains("_alice_vs_bob_"), "got: {name}");
+    assert!(name.ends_with("_alice_vs_bob.jsonl"), "got: {name}");
     assert!(name.ends_with(".jsonl"), "got: {name}");
 }
 

@@ -32,7 +32,7 @@ use crate::record::{GameRecord, JsonlMoveExtra, RecordStatus, RecordedMove, reco
 /// CSA 経由対局で 1 局分の JSONL を書き出す。
 ///
 /// 既存の `GameRecord` から meta / move / result を組み立てて、`out_dir` 直下に
-/// 設定したファイル名に対局識別用 suffix を付けて保存する。ディレクトリは自動作成する。
+/// 設定したテンプレートと対局識別子を含む名前で保存する。ディレクトリは自動作成する。
 pub fn write_game_jsonl(
     out_dir: &Path,
     record: &GameRecord,

@@ -452,22 +452,21 @@ pub(crate) fn record_filename_base(
     status: &RecordStatus,
 ) -> String {
     let datetime = record.start_time.format("%Y%m%d_%H%M%S").to_string();
-    let mut base = config
+    let base = config
         .filename_template
         .replace("{datetime}", &datetime)
         .replace("{game_id}", &sanitize_filename(&record.game_id))
         .replace("{sente}", &sanitize_filename(&record.sente_name))
         .replace("{gote}", &sanitize_filename(&record.gote_name));
-    if !base.contains("_vs_") && !base.contains("-vs-") {
-        // JSONL の読者は対局者組を含む名前を対局ファイルとして列挙する。
-        write!(
-            base,
-            "_{}_vs_{}",
-            sanitize_filename(&record.sente_name),
-            sanitize_filename(&record.gote_name)
-        )
-        .expect("String への書き込みは失敗しない");
-    }
+    let sente = crate::jsonl::sanitize_for_filename(&record.sente_name);
+    let gote = crate::jsonl::sanitize_for_filename(&record.gote_name);
+    let players = format!("{sente}_vs_{gote}");
+    let dash_players = format!("{sente}-vs-{gote}");
+    let prefix = base
+        .strip_suffix(&players)
+        .or_else(|| base.strip_suffix(&dash_players))
+        .unwrap_or(&base)
+        .trim_end_matches('_');
     let mut game_hash = DefaultHasher::new();
     record.game_id.hash(&mut game_hash);
     match record.my_color {
@@ -475,16 +474,21 @@ pub(crate) fn record_filename_base(
         Color::White => 1_u8,
     }
     .hash(&mut game_hash);
-    format!(
-        "{base}_{}-{:09}-{}-{:016x}{}",
+    let identity = format!(
+        "{}-{:09}-{}-{:016x}",
         record.start_time.timestamp(),
         record.start_time.timestamp_subsec_nanos(),
         std::process::id(),
         game_hash.finish(),
-        status.filename_suffix(),
-    )
+    );
+    // 後手未着手の読者は末尾の `_vs_<後手名>` から対局者を補う。
+    let name = if prefix.is_empty() {
+        format!("{identity}_{players}")
+    } else {
+        format!("{prefix}_{identity}_{players}")
+    };
+    format!("{name}{}", status.filename_suffix())
 }
-
 impl RecordStatus {
     /// 断片棋譜なら、全形式のファイル名に付ける suffix を返す。
     pub fn filename_suffix(&self) -> &'static str {
@@ -560,6 +564,35 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn filename_keeps_actual_players_at_end_for_legacy_readers() {
+        let record = GameRecord::new(&summary(rshogi_csa::initial_position()));
+        for template in [
+            "{datetime}_{sente}_vs_{gote}",
+            "constant",
+            "custom_vs_wrong",
+            "custom_{sente}_vs_{gote}_notes",
+            "{sente}-vs-{gote}",
+            "{sente}_vs_{gote}",
+        ] {
+            let config = RecordConfig {
+                filename_template: template.to_owned(),
+                ..RecordConfig::default()
+            };
+            let name = record_filename_base(&record, &config, &RecordStatus::Complete);
+            assert_eq!(name.rsplit_once("_vs_").unwrap().1, "bob", "{template}: {name}");
+            assert!(name.ends_with("_alice_vs_bob"), "{template}: {name}");
+            if template.starts_with("{datetime}") {
+                assert!(name.starts_with(&record.start_time.format("%Y%m%d_%H%M%S").to_string()));
+                assert_eq!(name.matches("alice_vs_bob").count(), 1);
+            }
+            let status = RecordStatus::ReconnectFragment {
+                reason: "mismatch".to_owned(),
+            };
+            let fragment = record_filename_base(&record, &config, &status);
+            assert_eq!(fragment, format!("{name}_reconnect_fragment"));
+        }
+    }
     fn summary(position: Position) -> GameSummary {
         GameSummary {
             game_id: "resume-game".to_owned(),
