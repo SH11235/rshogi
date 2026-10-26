@@ -137,8 +137,17 @@ fn run(args: &Args) -> Result<(), String> {
         if !selected {
             continue;
         }
-        // 作品集の `<SFEN><TAB><作意手数>` の行も、mate_bench と同じく SFEN だけを使う
-        let sfen = line.split_once('\t').map_or(line, |(sfen, _)| sfen).trim();
+        // 作品集の `<SFEN><TAB><作意手数>` の行は、mate_bench と同じく手数が読めることだけ確かめて SFEN を使う
+        let sfen = match line.split_once('\t') {
+            Some((sfen, expect)) => {
+                expect
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("正解の詰み手数を読めない: {line}"))?;
+                sfen.trim()
+            }
+            None => line,
+        };
         let sfen = sfen.strip_prefix("sfen ").unwrap_or(sfen).to_string();
         let mut pos = Position::new();
         pos.set_sfen(&sfen).map_err(|e| format!("SFEN を読めない: {sfen}: {e:?}"))?;

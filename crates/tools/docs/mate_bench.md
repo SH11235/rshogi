@@ -68,7 +68,7 @@ TSV (`--out`、入力順) の列:
 ブラウザに組み込むとき (wasm) の速さは、rshogi-core の example `mate_bench_wasm` を WASI 向けにビルドして
 Node.js 20 以降 (V8。Chromium と同じエンジン) で動かして測る。`mate_bench` は wasm にビルドできない依存 (tokio) を
 持つため、rshogi-core だけに依存する 1 スレッドの最小版を別に置いている。局面の選び方 (`--stride` `--offset`
-`--limit` `--flip`、行末の `<TAB><作意手数>` は読み飛ばす) と `--nodes` `--hash-mb` `--mode` `--shortest` は `mate_bench` と同じ。
+`--limit` `--flip`、行末の `<TAB><作意手数>` は読めることだけ確かめて使わない) と `--nodes` `--hash-mb` `--mode` `--shortest` は `mate_bench` と同じ。
 時間の上限・分位点・正解との照合は無い。
 
 ```bash
