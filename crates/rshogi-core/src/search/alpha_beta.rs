@@ -547,7 +547,7 @@ pub struct SearchState {
     pub nmp_min_ply: i32,
     /// ルート手
     pub root_moves: RootMoves,
-    /// PV 三角配列（Reckless 由来、Vec<Move> のヒープ割り当て回避）
+    /// PV 三角配列（Reckless 由来、`Vec<Move>` のヒープ割り当て回避）
     pub pv_table: PvTable,
     /// 前回 iteration の PV ライン
     pub previous_pv: Vec<Move>,

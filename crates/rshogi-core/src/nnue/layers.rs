@@ -639,14 +639,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// | WASM SIMD128 | 不要 | `v128_load`（任意アドレス対応） |
     /// | スカラー | 不要 | - |
     ///
-    /// アライメントを保証するには、[`Aligned`](super::accumulator::Aligned) ラッパーを使用してください:
-    ///
-    /// ```ignore
-    /// use crate::nnue::accumulator::Aligned;
-    ///
-    /// let mut input = Aligned([0u8; 512]);  // 64バイトアライン
-    /// transform.propagate(&input.0, &mut output);
-    /// ```
+    /// 呼び出し側で、使用するSIMD命令に必要な入力のアライメントを保証してください。
     ///
     /// **警告**: アライメントされていない入力を渡すと、AVX2/SSE2環境で
     /// 未定義動作（SIGSEGV等）が発生します。

@@ -823,11 +823,11 @@ impl Position {
         self.pinned_pieces_excluding(them, avoid)
     }
 
-    /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    /// fromを取り除いた占有でのpin駒（やねうら王の`pinned_pieces<Them>(from)`相当）
     ///
     /// avoid升の駒をoccupiedとpinner候補の両方から除外する。
     /// set_check_infoでのpin情報の更新とは異なり、
-    /// sniper同士の除外は行わない（YOのpinned_pieces<C>(avoid)に準拠）。
+    /// sniper同士の除外は行わない（YOの`pinned_pieces<C>(avoid)`に準拠）。
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
         let avoid_bb = Bitboard::from_square(avoid);
         let avoid_not = !avoid_bb;

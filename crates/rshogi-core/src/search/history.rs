@@ -122,7 +122,7 @@ impl<const D: i32> StatsEntry<D> {
 // ButterflyHistory
 // =============================================================================
 
-/// ButterflyHistory: [Color][from_to] -> score
+/// ButterflyHistory: `[Color][from_to]` -> score
 ///
 /// 静かな手（quiet moves）の成功/失敗を記録。
 /// 手の移動元と移動先でインデックス。
@@ -191,7 +191,7 @@ impl Default for ButterflyHistory {
 // LowPlyHistory
 // =============================================================================
 
-/// LowPlyHistory: [ply][from_to] -> score
+/// LowPlyHistory: `[ply][from_to]` -> score
 ///
 /// ルート付近での手の順序を改善するための履歴。
 pub struct LowPlyHistory {
@@ -255,7 +255,7 @@ impl Default for LowPlyHistory {
 // CapturePieceToHistory
 // =============================================================================
 
-/// CapturePieceToHistory: [piece][to][captured_piece_type] -> score
+/// CapturePieceToHistory: `[piece][to][captured_piece_type]` -> score
 ///
 /// 捕獲する手の履歴。
 ///
@@ -366,7 +366,7 @@ impl Default for CapturePieceToHistory {
 // PieceToHistory
 // =============================================================================
 
-/// PieceToHistory: [piece][to] -> score
+/// PieceToHistory: `[piece][to]` -> score
 ///
 /// 駒と移動先でインデックスする履歴。
 #[derive(Clone)]
@@ -426,12 +426,12 @@ impl Default for PieceToHistory {
 // ContinuationHistory
 // =============================================================================
 
-/// ContinuationHistory: [prev_piece][prev_to][piece][to] -> score
+/// ContinuationHistory: `[prev_piece][prev_to][piece][to]` -> score
 ///
 /// 連続する2手の組み合わせ履歴。
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 ///
-/// HistoryTablesでは[in_check][capture]の組ごとに4つ保持する。
+/// HistoryTablesでは`[in_check][capture]`の組ごとに4つ保持する。
 /// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct ContinuationHistory {
     table: [[PieceToHistory; Square::NUM]; PIECE_NUM],
@@ -518,7 +518,7 @@ impl Default for ContinuationHistory {
 // CounterMoveHistory
 // =============================================================================
 
-/// CounterMoveHistory: [piece][square] -> Move
+/// CounterMoveHistory: `[piece][square]` -> Move
 ///
 /// 直前の相手の手に対するカウンター手。
 pub struct CounterMoveHistory {
@@ -565,11 +565,11 @@ impl Default for CounterMoveHistory {
 // CorrectionHistory
 // =============================================================================
 
-/// Continuation correction historyの1 context分: [piece][to] -> correction。
+/// Continuation correction historyの1 context分: `[piece][to]` -> correction。
 pub type CorrectionPieceToHistory =
     [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]; Piece::NUM];
 
-/// Continuation correction history: [prev_pc][prev_to][pc][to] -> correction
+/// Continuation correction history: `[prev_pc][prev_to][pc][to]` -> correction
 ///
 /// 局面キーで引く pawn / minor / non-pawn の correction はスレッド間で共有する
 /// (`SharedHistories`)。ここにはスレッドごとの continuation だけを持つ。
@@ -634,7 +634,7 @@ impl CorrectionHistory {
         }
     }
 
-    /// 指定した直前手contextの[piece][to]テーブルを返す。
+    /// 指定した直前手contextの`[piece][to]`テーブルを返す。
     #[inline]
     pub fn continuation_table(&self, prev_pc: Piece, prev_to: Square) -> &CorrectionPieceToHistory {
         // SAFETY: Piece::index() < Piece::NUM=31、Square::index() < Square::NUM=81。
