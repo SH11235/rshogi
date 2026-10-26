@@ -1358,13 +1358,11 @@ struct AsyncMeta {
     timeout_games: u64,
 }
 
-const DEFAULT_REFERENCE_NPS: u64 = 350_000;
-const DEFAULT_MIN_NPS_RATIO: f64 = 0.5;
 const DEFAULT_MAX_TIMEOUT_RATE: f64 = 0.005;
 const DEFAULT_TIMEOUT_RATE_MIN_GAMES: u32 = 1000;
 
 fn reference_nps(cli: &Cli) -> u64 {
-    cli.reference_nps.unwrap_or(DEFAULT_REFERENCE_NPS)
+    cli.reference_nps.unwrap_or(tools::selfplay::nps_bench::DEFAULT_REFERENCE_NPS)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1709,10 +1707,7 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
             bail!("--nps-scaling は Fischer (--btime / --binc、--nodes なし) の対局で使います");
         }
         // bench は --threads で割るので、engine の Threads は --threads だけで決める。
-        if cli.usi_options.iter().flatten().any(|o| {
-            o.split_once('=')
-                .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("Threads"))
-        }) {
+        if tools::selfplay::nps_bench::sets_threads_option(cli.usi_options.iter().flatten()) {
             bail!(
                 "--nps-scaling では Threads を --usi-option ではなく --threads で指定してください"
             );
@@ -2397,19 +2392,11 @@ fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
     };
     eprintln!("nps bench: {} slot(s) x {} thread(s) ...", input.slots, cli.threads);
     let result = nps_bench::measure(ctx, input.slots, &theta0, cli.threads)?;
-    let reference = reference_nps(cli) as f64;
-    let ratio = cli.min_nps_ratio.unwrap_or(DEFAULT_MIN_NPS_RATIO);
-    eprintln!(
-        "nps bench: {:.0} nps/thread (slots: {})",
-        result.nps,
-        result.slot_nps.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(", ")
-    );
-    if result.nps < reference * ratio {
-        bail!(
-            "この機械の NPS {:.0} (1 thread あたり) が基準 {reference:.0} の {ratio} 倍を下回るので起動しません",
-            result.nps
-        );
-    }
+    eprintln!("{}", result.summary());
+    result.ensure_above_floor(
+        reference_nps(cli),
+        cli.min_nps_ratio.unwrap_or(tools::selfplay::nps_bench::DEFAULT_MIN_NPS_RATIO),
+    )?;
     Ok(result)
 }
 

@@ -209,6 +209,10 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 | `--engine-usi-option "IDX:Name=Value"` | — | エンジン個別の USI オプション（0 始まりインデックス）。共通 `--usi-option` にマージされ、同じキーは engine 個別指定が上書きする |
 | `--strict-engine-usi-option` | false | `--engine-usi-option` を指定したエンジンでは共通 `--usi-option` を完全に置換する（旧挙動） |
 | `--engine-params-file "IDX:FILE"` | — | SPSA `.params` ファイルから USI オプションを読み込む。`--engine-usi-option` と併用可（マージ） |
+| `--nps-scaling` | off | Fischer の時計を機械の NPS で補正する（[下記](#機械の速さによる時計の補正---nps-scaling)） |
+| `--reference-nps N` | 350000 | `--nps-scaling` の基準 NPS（1 thread あたり、全 slot 同時） |
+| `--min-nps-ratio R` | 0.5 | `--nps-scaling` の足切り。実測 NPS が `基準 × R` 未満なら起動しない |
+| `--cpu-affinity off\|numa` | off | numa は worker ごとに `--threads` 個の論理 CPU を一つの NUMA node 内から割り当て、その worker の全エンジンを固定する（Linux 専用） |
 
 `--wtime` / `--winc` はそれぞれ独立に省略でき、省略した値だけ先手と同じになる。
 明示した `0` はそのまま使う。後手オプションだけの指定は不可で、`--btime` / `--binc` の
@@ -234,6 +238,41 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 と同値（先手のフィールドもなければゼロ）を意味する。既存 run の再開は引き続き未対応。
 `jsonl_to_kif` もこの補完を行い、明示されたゼロは保持する。
 先後いずれかに加算時間があれば、KIF にも先後それぞれの加算時間を記載する。
+
+### 機械の速さによる時計の補正 (`--nps-scaling`)
+
+`--btime` / `--binc`（と `--wtime` / `--winc`）を「基準 NPS の機械での時計」とみなし、開始時に測ったこの機械の
+NPS から `倍率 = 基準 NPS ÷ 実測 NPS` を求めて、持ち時間と加算の両方に掛けて指す。spsa の `--nps-scaling`
+（[runbook §17](spsa_runbook.md#17-fischer-と-nps-による時計の補正---nps-scaling)）と同じ bench・同じ既定値なので、
+SPSA と同じ条件で SPRT を回せる。
+
+```bash
+tournament   --engine /path/to/rshogi-usi --engine-label base   --engine /path/to/rshogi-usi --engine-label tuned   --engine-params-file 1:tuned.params   --usi-option EvalFile=/path/to/nn.bin --usi-option RoundUpToFullSecond=false   --threads 8 --concurrency 23 --cpu-affinity numa   --btime 20000 --binc 2500 --nps-scaling   --sprt --sprt-base-label base --sprt-test-label tuned   --games 2500 --startpos-file start_sfens.txt --out-dir runs/sprt-tuned
+```
+
+- bench は spsa と共通の `spsa-bench-v1`（既定 4 局面を depth 12 で warmup した後 depth 16 で 1 周）。
+  slot 数は `--concurrency` で、全 slot を同時に走らせる。各 slot には対局の worker と同じく全エンジンを
+  `--threads`・`--hash-mb`・USI オプション・`--cpu-affinity` の割り当てで起動し、探索は bench エンジンだけが行う。
+  NPS は `nodes ÷ 時間 ÷ Threads` の slot 間平均。
+- bench エンジンは SPRT の base（`--sprt-base-label`、省略時 `--base-label`）。SPRT でなければ `--base-label` が必須。
+  採用の判定で候補自身の NPS の低下を持ち時間の増加で相殺しないよう、倍率は base 側で決める。
+  そのエンジンの USI オプションで Threads を指定すると拒否する（bench は `--threads` で割る）。
+- 倍率は起動時に 1 回測り、run 中は固定する（`control.json` で concurrency を変えても測り直さない）。
+  補正後の値は `round(基準 × 倍率)`（0 でない値は 1 ms 以上）。時間切れ判定の `--timeout-margin-ms` には掛けない。
+- Fischer 専用。`--byoyomi`・`--depth`・`--nodes`・`--engine-nodes` との併用は拒否する。
+  `--reference-nps` / `--min-nps-ratio` は `--nps-scaling` なしでは指定できない。
+- 標準出力に `nps bench: ... nps/thread (slots: ...)` と
+  `clock: btime=... binc=... (reference ...+... x scale ...; measured ... nps/thread, reference ...)` を出す。
+- `meta.json` と各 JSONL の `meta` 行の `settings.btime` / `binc` / `wtime` / `winc` は補正後の実際の時計。
+  `nps_scaling` に `bench_version`・`bench_engine_label`・`reference_nps`・`min_nps_ratio`・`measured_nps`・
+  `slot_nps`・`scale`・`reference_btime` / `reference_binc` / `reference_wtime` / `reference_winc`・
+  `btime` / `binc` / `wtime` / `winc`・`bench_depth`・`warmup_depth`・`bench_positions`・`threads`・`slots`・
+  `measured_at` を記録する。
+- 短い時計では rshogi の秒単位の時間管理で倍率が効かないため、`RoundUpToFullSecond=false` を渡す
+  （[runbook §17.6](spsa_runbook.md#176-rshogi-の秒単位の時間管理-rounduptofullsecond)）。
+
+`--cpu-affinity numa` の CPU 群は起動時の `--concurrency` 分だけ確保する。`control.json` でそれを越える
+concurrency を指定しても無視する（減らすのは可）。退役した worker の CPU 群は、そのエンジンが終了してから後任に渡す。
 
 ### 開始局面
 
