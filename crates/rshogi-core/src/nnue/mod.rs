@@ -1,26 +1,13 @@
 //! NNUE評価関数モジュール
 //!
-//! Efficiently Updatable Neural Network による局面評価。
-//! YaneuraOu の HalfKP 256x2-32-32 アーキテクチャを Rust で実装する。
+//! HalfKP / HalfKA 系と LayerStacks による局面評価。
+//! 既定の universal edition は実行時寸法のネットワークを使い、固定・family edition は
+//! ビルドに含めた const generics の構成を使う。
 //!
-//! サポートするアーキテクチャ:
-//! - **HalfKP**: 従来のclassic NNUE（水匠/tanuki互換）
-//! - **HalfKaSplit**: nnue-pytorch互換（Non-mirror）
-//! - **HalfKaHmMerged^**: nnue-pytorch互換（Half-Mirror + Factorization）
-//!
-//! # const generics 版統一実装
-//!
-//! `NetworkHalfKaHmMerged<L1, L2, L3, A>` で複数のアーキテクチャに対応:
-//! - L1: FT出力次元（256, 512, 1024）
-//! - L2: 隠れ層1出力次元（8, 32）
-//! - L3: 隠れ層2出力次元（32, 96）
-//! - A: 活性化関数（CReLU, SCReLU, PairwiseCReLU）
-//!
-//! - ネットワーク構造の読み込み（`Network::load` / `init_nnue`）
-//! - 入力特徴量（HalfKP: 自玉×駒配置）の計算と変換（`BonaPiece` / `FeatureTransformer`）
-//! - Accumulator による差分更新可能な中間表現の保持（`diff::get_changed_features` を用いた増分更新 + フォールバック全計算）
-//! - AffineTransform + ClippedReLU による 512→32→32→1 の多層パーセプトロン
-//! - NNUE 未初期化時のフォールバック駒得評価
+//! [`init_nnue`] で共有モデルを読み込み、探索時は差分更新可能なアキュムレータを保持する。
+//! 個別に評価器を持つ場合は [`NNUEEvaluator`] を使う。
+//! NNUE を使わず Material 評価を行う場合も、[`crate::eval::material::set_material_level`]
+//! による明示的な設定が必要。
 
 mod accumulator;
 mod accumulator_layer_stacks;

@@ -5,8 +5,8 @@ use crate::types::Square;
 /// Bitboard（128bit、16バイトアラインメント）
 ///
 /// 縦型配置:
-/// - p[0]: 1-7筋 (bit 0-62使用、bit 63未使用)
-/// - p[1]: 8-9筋 (bit 0-17使用)
+/// - `p[0]`: 1-7筋 (bit 0-62使用、bit 63未使用)
+/// - `p[1]`: 8-9筋 (bit 0-17使用)
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
 #[repr(C, align(16))]
 pub struct Bitboard {
@@ -18,8 +18,8 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard { p: [0, 0] };
 
     /// 全マスが立っているBitboard
-    /// - p[0]: Files 1-7 (63bit使用、bit63未使用)
-    /// - p[1]: Files 8-9 (18bit使用、bit18-63未使用)
+    /// - `p[0]`: Files 1-7 (63bit使用、bit63未使用)
+    /// - `p[1]`: Files 8-9 (18bit使用、bit18-63未使用)
     pub const ALL: Bitboard = Bitboard {
         p: [
             0x7FFF_FFFF_FFFF_FFFF, // Files 1-7: 63bit set
@@ -184,13 +184,13 @@ impl Bitboard {
         }
     }
 
-    /// p[0]を取得
+    /// `p[0]`を取得
     #[inline]
     pub const fn p0(self) -> u64 {
         self.p[0]
     }
 
-    /// p[1]を取得
+    /// `p[1]`を取得
     #[inline]
     pub const fn p1(self) -> u64 {
         self.p[1]
@@ -215,20 +215,20 @@ impl Bitboard {
 
     // ==== Qugiyアルゴリズム用メソッド ====
 
-    /// Squareがp[0]とp[1]のどちらに属するかを返す
+    /// Squareが`p[0]`と`p[1]`のどちらに属するかを返す
     ///
     /// # Returns
-    /// - `0`: p[0]に属する（1-7筋、index < 63）
-    /// - `1`: p[1]に属する（8-9筋、index >= 63）
+    /// - `0`: `p[0]`に属する（1-7筋、index < 63）
+    /// - `1`: `p[1]`に属する（8-9筋、index >= 63）
     #[inline]
     pub const fn part(sq: Square) -> usize {
         if sq.index() < 63 { 0 } else { 1 }
     }
 
-    /// p[N]を取得（N = 0 or 1）
+    /// `p[N]`を取得（N = 0 or 1）
     ///
     /// # Type Parameters
-    /// * `N` - 0 (p[0]) または 1 (p[1])
+    /// * `N` - 0 (`p[0]`) または 1 (`p[1]`)
     #[inline]
     pub const fn extract64<const N: usize>(self) -> u64 {
         self.p[N]
@@ -237,8 +237,8 @@ impl Bitboard {
     /// 128bit全体で1減算（Qugiyアルゴリズム用）
     ///
     /// # Algorithm
-    /// - p[0] - 1を計算
-    /// - p[0]がゼロの場合のみp[1]から桁借り
+    /// - `p[0]` - 1を計算
+    /// - `p[0]`がゼロの場合のみ`p[1]`から桁借り
     ///
     /// # Performance
     /// - SSE4.1: `_mm_cmpeq_epi64` + `_mm_alignr_epi8` + `_mm_add_epi64`
@@ -293,7 +293,7 @@ impl Bitboard {
     ///
     /// # Performance
     /// - SSSE3: `_mm_shuffle_epi8`
-    /// - Scalar: `swap_bytes` + p[0]/p[1]交換
+    /// - Scalar: `swap_bytes` + `p[0]`/`p[1]`交換
     #[inline]
     pub fn byte_reverse(self) -> Bitboard {
         #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]

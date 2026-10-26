@@ -61,16 +61,16 @@ impl PieceTypeCheck {
 }
 
 /// 王手になる候補の駒の位置を示すBitboard
-/// [玉の位置][PieceTypeCheck][攻撃側の色]
+/// `[玉の位置][PieceTypeCheck][攻撃側の色]`
 pub static CHECK_CAND_BB: [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] = build_check_cand_bb();
 
 /// 玉周辺の利きを求めるときに使う、玉周辺に利きをつける候補の駒を表すBB
-/// [玉の位置][駒の種類(PAWN-KING)][攻撃側の色]
+/// `[玉の位置][駒の種類(PAWN-KING)][攻撃側の色]`
 pub static CHECK_AROUND_BB: LazyLock<[[[Bitboard; 2]; PieceType::NUM + 1]; 81]> =
     LazyLock::new(init_check_around_bb);
 
 /// sq1に対してsq2の延長上にある次の升
-/// [sq1][sq2] -> 次の升（同一升・非直線・盤外ならNone）
+/// `[sq1][sq2]` -> 次の升（同一升・非直線・盤外ならNone）
 pub static NEXT_SQUARE: LazyLock<[[Option<Square>; 81]; 81]> = LazyLock::new(init_next_square);
 
 /// テーブルのラッパー（Color/enum指定で取りやすくする）

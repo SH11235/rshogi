@@ -18,24 +18,24 @@ crates.io publish と engine release の公開手順は [RELEASING.md](../RELEAS
 ## 前提環境
 
 - Rust toolchain (stable、`rust-toolchain.toml` の指定に従う)
-- Linux / macOS / Windows (x86_64 + AVX2 を想定、`.cargo/config.toml` で
-  `target-cpu=native` を永続採用)
-- 並列探索を活かす場合は AVX2 以上の CPU
+- Linux / macOS / Windows。x86_64 の Windows / Linux では `.cargo/config.toml` の
+  `target-cpu=native` により、ビルドした CPU に合う命令を使う。別のマシンへ配布する場合は
+  実行先の CPU に合う設定でビルドする。並列探索に AVX2 は必須ではない。
 - NNUE モデルは別途用意 (起動時 `setoption name EvalFile value <path>` で指定)
 - **LayerStack (LS) 系 preset** (`edition-layerstacks*` および `edition-universal`) を動かす
-  場合、bucket routing を明示する。`progresskpabs` モデルでは次の 3 項目が必須:
+  場合、モデルに合う bucket routing を明示する。`progresskpabs` モデルでは次を指定する:
   `setoption name LS_BUCKET_MODE value progresskpabs`、
   `setoption name LS_PROGRESS_BUCKETS value <学習時の bucket 数>`、
-  `setoption name LS_PROGRESS_COEFF value <progress.bin path>`。
+  `setoption name LS_PROGRESS_COEFF value <progress.bin path>`（bucket 数1では不要）。
   両玉の相対段で 9 bucket を選ぶモデルでは
   `setoption name LS_BUCKET_MODE value kingrank9` のみを指定し、
   `LS_PROGRESS_BUCKETS=0`、`LS_PROGRESS_COEFF` 未指定にする。
-  `nnue-progress-diff` feature の有無に関わらず、`progresskpabs` を使う LS 系経路では
-  bucket 数と progress.bin の指定が必須。HalfKX 単一 preset
+  `nnue-progress-diff` feature の有無によって routing 設定の要否は変わらない。HalfKX 単一 preset
   (`edition-halfkp-*` /
   `edition-halfka_hm_merged-*` 等) は LS 経路を通らないので不要。
-  現状 progress.bin は `eval/` 配下に同梱されていないため、学習側
-  (bullet-shogi 等) で生成したものを参照する運用。
+  モデルは `$SHOGI_DATA/nnue/`、進行度係数は `$SHOGI_DATA/progress/` に用意する。
+  `progresskpabsq16` を含む方式の違いと設定条件は
+  [NNUE 対応表](./nnue-supported-architectures.md#振り分け方式の設定)を参照。
 
 ## 典型ワークフロー
 
@@ -58,7 +58,7 @@ cargo nextest run --workspace
 cargo test --workspace --doc
 ```
 
-`cargo build` は `target/release/rshogi-usi` を生成する。これは作業領域なので
+`cargo build --release` は `target/release/rshogi-usi`（Windows は `.exe`）を生成する。これは作業領域なので
 別 preset を rebuild すると上書きされる点に注意。
 
 ### CI と依存関係の監査
@@ -94,7 +94,7 @@ cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
 cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt,layerstacks-halfka_hm_merged-1536x16x32-threat
 cargo xtask build --edition X --edition Y
 
-# 全 preset を build (現状 24 件)
+# list-editions に表示される全 preset を build
 cargo xtask build --all-presets
 
 # Edition 軸と直交する opt-in feature を追加 (engines/rshogi-usi-<preset>+mimalloc に配置)
@@ -117,25 +117,27 @@ build target で、5 カテゴリ × 複数 concrete preset の構造を持つ�
 | **universal** | アプリ / 開発、header 駆動の動的推論 | `edition-universal` | HalfKX / LS、全 5 FT、任意次元 |
 | **HalfKX family** | 旧 NNUE 系統 (HalfKP / HalfKa\*) を dispatch | `edition-halfkx`, `edition-halfkx-any` | HalfKX 全 variant |
 | **HalfKX specific** | HalfKX 単一 architecture 専用 | `edition-halfkp-crelu`, `edition-halfka_hm_merged-screlu` | 1 architecture 固定 |
-| **LayerStack family** | LS 全 FT / size / ext を dispatch | `edition-layerstacks`, `edition-layerstacks-any-any-any` | LS 全構成 |
+| **LayerStack family** | LS 全 FT / size / ext を dispatch | `edition-layerstacks`, `edition-layerstacks-any-any-any` | ビルドに含む LS 構成 |
 | **LayerStack specific** | LS 単一構成専用、tournament 用 | `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt` 等 | 1 構成固定 |
 
 ### どれを選ぶか (典型ケース)
 
 | 状況 | 選ぶ preset | 理由 |
 |---|---|---|
-| `cargo build` で困っていない | `edition-universal` (= default) | runtime dispatch で何でも読める |
-| 同じ NNUE モデルで SPRT / selfplay を回したい | specific preset (例 `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt`) | dispatch 除去で最大 perf、再現性高い |
+| `cargo build` で困っていない | `edition-universal` (= default) | 対応するモデルを実行時に構成 |
+| 同じ NNUE モデルで SPRT / selfplay を回したい | specific preset (例 `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt`) | モデル構成に絞った専用ビルド |
 | HalfKX 系モデル数本を切替えながら触りたい | `edition-halfkx-any` | activation 含む全 HalfKX を 1 binary でカバー |
 | LS 系を size 違いで切替えたい | `edition-layerstacks-any-any-any` | size / ext を runtime dispatch |
 | 全 arch / 任意 size をまとめて動作確認したい | `edition-universal` | header 駆動で対応 family を 1 binary に集約できる |
 
-`edition-universal` は NNUE header にある L1/L2/L3 を実行時に読み、HalfKX と
-LayerStacks のバッファおよび dense layer を動的に構成する。従って、新しい次元を
+`edition-universal` は HalfKX と LayerStacks の寸法に合わせてバッファおよび dense layer を
+動的に構成する。HalfKX は既知の payload サイズを優先し、未一致時は header の寸法を使う。
+LayerStacks は header の寸法を使う。従って、新しい次元を
 追加するたびに Cargo feature とバイナリを増やす必要はない。HalfKP / HalfKaSplit /
 HalfKaMerged / HalfKaHmSplit / HalfKaHmMerged、HalfKX の CReLU / SCReLU /
 PairwiseCReLU、LayerStacks の PSQT / Threat profile 0 / EffectBucket、および
-KingRank9 / ProgressKPAbs bucket mode を扱う。
+KingRank9 / ProgressKPAbs / ProgressKPAbsQ16 bucket mode を扱う。
+寸法の範囲や形式の制約は [NNUE 対応表](./nnue-supported-architectures.md)を参照。
 
 一方、family / specific preset は従来どおり const-generic 実装を使う。大会、selfplay、
 SPRT など同じモデルを長時間使う用途では、SIMD 最適化と dispatch 除去を得られる
@@ -149,7 +151,7 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 - HalfKP: `edition-halfkp-{activation}`
 - HalfKa\* (4 variant): `edition-{arch}-{activation}`
 - LayerStack: `edition-layerstacks-{ft}-{size}-{ext}`
-- HalfKX family alias: `edition-halfkx[-{activation}]`
+- HalfKX family alias: `edition-halfkx` / `edition-halfkx-any`
 - LS family alias: `edition-layerstacks[-any-any-any]`
 - universal: `edition-universal`
 
@@ -165,7 +167,7 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 |---|---|:---:|:---:|
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
-| size (LS) | `1536x16x32` / `1536x32x32` / `768x16x32` / `512x16x32` | ✗ | ✓ |
+| size (LS) | [対応する10構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
 | ext (LS) | `psqt` / `threat` / `psqt_threat` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
@@ -173,8 +175,7 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
-  `edition-layerstacks-any-any-any` の短縮形。`edition-halfkx-{activation}` は
-  HalfKX の全 architecture を runtime dispatch しつつ activation だけ固定する。
+  `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
 - slot 区切りは `-`、slot 内の複合語は `_` (tatara の `halfka-hm-merged` と同じ architecture を
   `halfka_hm_merged` と書く)。
 
@@ -269,7 +270,7 @@ edition-layerstacks
 edition-layerstacks-any-any-any
 edition-layerstacks-halfka_hm_merged-1536x16x32-none
 edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
-... (現状 24 件)
+...
 edition-universal
 ```
 
@@ -371,8 +372,7 @@ xtaskが `engines/` へコピーするのは実行ファイルとmanifestのみ�
 debug情報によってコード配置が変わる可能性があるため、productionとバイナリや速度が
 完全に同じとは限らない。速度のA/B比較では両側のprofileを揃え、解析用buildと混在させない。
 
-xtask の `--profile` デフォルトは `production`。SPRT 等の棋力比較は profile を揃える
-必要があるため固定 (memory `feedback_build_profile_consistency`)。
+xtask の `--profile` デフォルトは `production`。SPRT 等の棋力比較では profile を揃える。
 
 PGO build は `scripts/build_pgo.sh` 参照 (NPS +6-7% を狙う、本番計測前の追い込み用)。
 

@@ -1,18 +1,4 @@
-//! # engine-core
-//!
-//! ## モジュール構成
-//!
-//! - `types`: 基本型（Color, Square, Piece, Move, Value, etc.）
-//! - `bitboard`: ビットボード演算
-//! - `position`: 局面表現とdo_move/undo_move
-//! - `movegen`: 合法手生成
-//! - `nnue`: NNUE評価関数
-//! - `tt`: 置換表（Transposition Table）
-//! - `search`: 探索アルゴリズム
-//! - `movepick`: 手の順序付け
-//! - `time`: 時間管理
-//! - `mate`: 1手詰め探索
-//!
+#![doc = include_str!("../README.md")]
 
 pub mod types;
 
