@@ -9,8 +9,8 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use super::tests::{
-    ZUKOU_001, brute_mate_by_rules, checks_by_rules, position, pv_usi, random_kingless_position,
-    random_tsume_position,
+    MATE_OVER_PARALLEL_START, ZUKOU_001, brute_mate_by_rules, checks_by_rules, position, pv_usi,
+    random_kingless_position, random_tsume_position,
 };
 use super::verify::{check_mate_pv_by_rules, legal_moves_by_rules};
 use super::*;
@@ -565,6 +565,71 @@ fn recapturable_interpositions_are_effective() {
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     searcher.enable_shortest(true, &tables);
     assert_eq!(searcher.futile_drop(&mut pos, drop, 2).unwrap(), None);
+}
+
+/// 最短手順を求める段階 (無駄合いの判定で別の局面を解いている間も) も進捗を知らせ、ノード数は増え続ける
+#[test]
+fn shortest_mode_reports_monotonic_progress() {
+    let mut pos = position(MATE_OVER_PARALLEL_START);
+    let stop = AtomicBool::new(false);
+    let limits = MateLimits {
+        nodes: 0,
+        time_ms: 3_500,
+    };
+    let mut solver = DfpnSolver::with_mode(16, MateMode::Power);
+    solver.set_shortest(true);
+    let mut reported = Vec::new();
+    solver.solve(&mut pos, &limits, &stop, |p| reported.push((p.elapsed_ms, p.nodes)));
+    assert!(reported.len() >= 2, "{reported:?}");
+    assert!(reported.windows(2).all(|w| w[0].1 < w[1].1), "{reported:?}");
+    // 部分探索に入れ子で入っても、通知の間隔は探索全体で約 1 秒
+    assert!(reported.windows(2).all(|w| w[1].0 >= w[0].0 + 900), "{reported:?}");
+}
+
+/// 無駄合いの判定で別の局面を解いている間も、進捗をこの探索のノード数に足して知らせる
+#[test]
+fn futility_checks_forward_progress() {
+    use super::search::{Budget, Scratch, Searcher, ShortestTables};
+    use super::state::MateState;
+    use super::table::MateTable;
+    use crate::time::Instant;
+    use std::cell::RefCell;
+
+    // 85 手詰の途中の受け方の局面。上限 20 手での合駒の判定で、合駒を取って戻した局面などを別に解く
+    let mut pos = position(
+        "1l1p1p3/l1k2+R3/p1gNS+P2+P/1S7/2Sn5/Pp2pn1K1/GPp+p3P1/+p2+ps3p/1B1LP4 w Lrb2gn2p 70",
+    );
+    let attacker = !pos.side_to_move();
+    let stop = AtomicBool::new(false);
+    let mut reported = Vec::new();
+    let mut progress = |p: MateProgress| reported.push(p.nodes);
+    // 開始を過去にして、最初に数えるノードで進捗を知らせる時刻を過ぎているようにする
+    let start = Instant::now().checked_sub(std::time::Duration::from_secs(5)).unwrap();
+    let budget = Budget {
+        stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
+        node_limit: 0,
+        time_limit_ms: 0,
+        start,
+        progress: &mut progress,
+    };
+    let table = MateTable::new(16, true);
+    let tables = RefCell::new(ShortestTables::new());
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
+    configure(&mut searcher, MateMode::Power);
+    searcher.enable_shortest(true, &tables);
+    let mut drops = Vec::new();
+    MateState::generate(&pos, false, &mut drops);
+    drops.retain(|m| m.is_drop());
+    for mv in drops {
+        searcher.futile_drop(&mut pos, mv, 20).unwrap();
+    }
+    let nodes = searcher.nodes();
+    assert!(!reported.is_empty());
+    assert!(reported.iter().all(|&n| n <= nodes), "{reported:?} / {nodes}");
 }
 
 /// 将棋図巧 第 1 番 (作意 69 手)。攻め方の玉がある既存の局面と、玉を除いた原図の両方 (release で手動実行)

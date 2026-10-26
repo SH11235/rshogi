@@ -444,7 +444,7 @@ fn time_limit_gives_unknown() {
 }
 
 /// 解くのに 1 万ノードを超える 11 手詰め (やねうら王の詰将棋データセットから)
-const MATE_OVER_PARALLEL_START: &str =
+pub(super) const MATE_OVER_PARALLEL_START: &str =
     "2p1kS1nl/1+L1g2+P2/3p1p3/4p2p1/3+blNp2/+Rb4P2/3PP4/3G1G3/3K1L+r2 w g3s2n8p 128";
 
 #[test]

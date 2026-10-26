@@ -524,6 +524,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.tie_seed = seed;
     }
 
+    /// 次に進捗を知らせる経過時間 (ミリ秒)。前の探索から続けて知らせるときに使う
+    pub fn set_next_progress(&mut self, ms: u64) {
+        self.next_progress_ms = ms;
+    }
+
     /// 攻め方
     pub fn attacker(&self) -> Color {
         self.attacker
@@ -1114,28 +1119,42 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             0 => 0,
             limit => limit.saturating_sub(self.nodes).max(1),
         };
-        let mut quiet = |_| {};
+        let (table, attacker, tables) = (self.table, self.attacker, self.tables);
+        let (estimate, weak_disproof_step) = (self.estimate, self.weak_disproof_step);
+        let (stop, cancel, start) = (self.budget.stop, self.budget.cancel, self.budget.start);
+        let time_limit_ms = self.budget.time_limit_ms;
+        // 部分探索のノード数は 0 から数えるので、進捗にはこの探索で読んだ分を足して渡す。通知の間隔は
+        // 部分探索に引き継いで戻すので、入れ子になっても探索全体で約 1 秒ごとになる
+        let base = self.nodes;
+        let parent_progress = &mut *self.budget.progress;
+        let mut forward = |p: MateProgress| {
+            parent_progress(MateProgress {
+                nodes: base + p.nodes,
+                ..p
+            })
+        };
         let budget = Budget {
-            stop: self.budget.stop,
+            stop,
             halt: None,
-            cancel: self.budget.cancel,
+            cancel,
             shared_nodes: None,
             node_limit: remaining,
-            time_limit_ms: self.budget.time_limit_ms,
-            start: self.budget.start,
-            progress: &mut quiet,
+            time_limit_ms,
+            start,
+            progress: &mut forward,
         };
-        let (result, nodes) = {
-            let mut sub =
-                Searcher::<S, PIECES>::new(self.table, &mut scratch, self.attacker, budget);
-            sub.estimate = self.estimate;
-            sub.weak_disproof_step = self.weak_disproof_step;
+        let (result, nodes, next_progress_ms) = {
+            let mut sub = Searcher::<S, PIECES>::new(table, &mut scratch, attacker, budget);
+            sub.estimate = estimate;
+            sub.weak_disproof_step = weak_disproof_step;
             sub.shortest = true;
             sub.futility = true;
-            sub.tables = self.tables;
+            sub.tables = tables;
+            sub.next_progress_ms = self.next_progress_ms;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
-            (result, sub.nodes)
+            (result, sub.nodes, sub.next_progress_ms)
         };
+        self.next_progress_ms = next_progress_ms;
         self.scratch.sub = Some(scratch);
         self.nodes += nodes;
         match result? {

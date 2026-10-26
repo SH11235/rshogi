@@ -49,6 +49,7 @@ pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
 
     let mut walker = Walker {
         memo: HashMap::new(),
+        buffers: Vec::new(),
     };
     if walker.choose(searcher, st, len, true)?.is_none() {
         return Ok(None);
@@ -97,9 +98,22 @@ struct Choice<M> {
 struct Walker<M> {
     /// (局面のキー, 詰み手数) ごとの選んだ手
     memo: HashMap<(u64, u16), Choice<M>>,
+    /// 指し手の作業領域。手順の深さごとに 2 本使い、局面ごとに確保し直さない
+    buffers: Vec<Vec<M>>,
 }
 
 impl<M: Copy + Eq> Walker<M> {
+    fn take_buffer(&mut self) -> Vec<M> {
+        self.buffers
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(crate::movegen::MAX_MOVES))
+    }
+
+    fn return_buffer(&mut self, mut buffer: Vec<M>) {
+        buffer.clear();
+        self.buffers.push(buffer);
+    }
+
     /// 詰み手数 `d` の局面 `st` の手を選んで覚え、持駒が余らない手順があるかを返す。
     /// 探索の結果が食い違ったら `None`。
     fn choose<S: MateState<Mv = M>, const PIECES: bool>(
@@ -113,11 +127,16 @@ impl<M: Copy + Eq> Walker<M> {
         if let Some(c) = self.memo.get(&key) {
             return Ok(Some(c.clean));
         }
+        let mut first = self.take_buffer();
+        let mut second = self.take_buffer();
         let choice = if or_node {
-            self.choose_attack(searcher, st, d)?
+            self.choose_attack(searcher, st, d, &mut first, &mut second)
         } else {
-            self.choose_defense(searcher, st, d)?
+            self.choose_defense(searcher, st, d, &mut first, &mut second)
         };
+        self.return_buffer(first);
+        self.return_buffer(second);
+        let choice = choice?;
         let Some(choice) = choice else {
             return Ok(None);
         };
@@ -138,11 +157,14 @@ impl<M: Copy + Eq> Walker<M> {
         hand_count(st.table_key(attacker).hand) <= u32::from(attacker_moves)
     }
 
+    /// `tried` と `checks` は空の作業領域
     fn choose_attack<S: MateState<Mv = M>, const PIECES: bool>(
         &mut self,
         searcher: &mut Searcher<'_, S, PIECES>,
         st: &mut S,
         d: u16,
+        tried: &mut Vec<M>,
+        checks: &mut Vec<M>,
     ) -> Result<Option<Choice<M>>, Abort> {
         // 詰み手数 d − 1 で詰む王手を 1 つ (置換表に残っていればいくつか) 探索で見つける
         searcher.capture_proven(0);
@@ -150,12 +172,13 @@ impl<M: Copy + Eq> Walker<M> {
         if !r.is_proven() || r.mate_len != d {
             return Ok(None);
         }
-        let mut tried: Vec<M> = searcher
-            .proven_children()
-            .iter()
-            .filter(|&&(_, len)| len < d)
-            .map(|&(mv, _)| mv)
-            .collect();
+        tried.extend(
+            searcher
+                .proven_children()
+                .iter()
+                .filter(|&&(_, len)| len < d)
+                .map(|&(mv, _)| mv),
+        );
         if tried.is_empty() {
             // 1 手詰めの近道で証明された局面は子を展開していない
             match st.mate_1ply() {
@@ -164,7 +187,7 @@ impl<M: Copy + Eq> Walker<M> {
             }
         }
         let first = tried[0];
-        for &mv in &tried {
+        for &mv in tried.iter() {
             st.do_move(mv);
             let clean = self.choose(searcher, st, d - 1, false);
             st.undo_move(mv);
@@ -187,9 +210,8 @@ impl<M: Copy + Eq> Walker<M> {
             }
         }
         // 探索で見つけていない王手も、詰み手数 d − 1 で詰むものを調べる
-        let mut checks = Vec::new();
-        st.generate(true, &mut checks);
-        for mv in checks {
+        st.generate(true, checks);
+        for &mv in checks.iter() {
             if tried.contains(&mv)
                 || !self.may_search_alternatives(st, searcher.attacker(), d, true)
             {
@@ -215,11 +237,14 @@ impl<M: Copy + Eq> Walker<M> {
         }))
     }
 
+    /// `replies` と `candidates` は空の作業領域
     fn choose_defense<S: MateState<Mv = M>, const PIECES: bool>(
         &mut self,
         searcher: &mut Searcher<'_, S, PIECES>,
         st: &mut S,
         d: u16,
+        replies: &mut Vec<M>,
+        candidates: &mut Vec<M>,
     ) -> Result<Option<Choice<M>>, Abort> {
         if d == 0 {
             return Ok(Some(Choice {
@@ -227,11 +252,9 @@ impl<M: Copy + Eq> Walker<M> {
                 clean: st.table_key(searcher.attacker()).hand == Hand::EMPTY,
             }));
         }
-        let mut replies = Vec::new();
-        st.generate(false, &mut replies);
+        st.generate(false, replies);
         // 詰み手数がちょうど d − 1 の応手 (無駄合いを除く)
-        let mut candidates = Vec::new();
-        for mv in replies {
+        for &mv in replies.iter() {
             if st.is_drop(mv) && searcher.futile_drop(st, mv, d)?.is_some() {
                 continue;
             }
@@ -248,7 +271,7 @@ impl<M: Copy + Eq> Walker<M> {
         let Some(&first) = candidates.first() else {
             return Ok(None);
         };
-        for &mv in &candidates {
+        for &mv in candidates.iter() {
             if mv != first && !self.may_search_alternatives(st, searcher.attacker(), d, false) {
                 break;
             }

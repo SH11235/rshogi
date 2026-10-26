@@ -276,8 +276,17 @@ impl DfpnSolver {
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
-        let outcome = self.run::<S, PIECES>(st, limits, start, stop, progress);
-        if !self.shortest || !matches!(outcome, Some(SolveOutcome::Mate(_))) {
+        if !self.shortest {
+            return self.run::<S, PIECES>(st, limits, start, stop, progress);
+        }
+        // 正解手順を求める段階でも、進捗の間隔を判定の最後の通知から数える
+        let mut last_report_ms = None;
+        let mut tracked = |p: MateProgress| {
+            last_report_ms = Some(p.elapsed_ms);
+            progress(p)
+        };
+        let outcome = self.run::<S, PIECES>(st, limits, start, stop, &mut tracked);
+        if !matches!(outcome, Some(SolveOutcome::Mate(_))) {
             return outcome;
         }
         let judged_nodes = self.nodes;
@@ -305,6 +314,9 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
+        if let Some(ms) = last_report_ms {
+            searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
+        }
         let pv = shortest::shortest_pv(&mut searcher, st, &self.shortest_tables);
         self.nodes = judged_nodes + searcher.nodes();
         pv.ok().flatten().map(SolveOutcome::Mate)
