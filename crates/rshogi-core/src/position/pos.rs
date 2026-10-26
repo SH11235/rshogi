@@ -246,6 +246,12 @@ impl Position {
 
     /// 空の局面を生成
     pub fn new() -> Self {
+        Self::with_state_stack(vec![StateInfo::new()])
+    }
+
+    /// 空の局面を、状態スタックの領域 `state_stack` (要素は 1 つの初期状態) を使って作る
+    pub(super) fn with_state_stack(state_stack: Vec<StateInfo>) -> Self {
+        debug_assert_eq!(state_stack.len(), 1);
         Position {
             board: [Piece::NONE; Square::NUM],
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
@@ -258,7 +264,7 @@ impl Position {
             rook_dragon_bb: Bitboard::EMPTY,
             hdk_bb: Bitboard::EMPTY,
             hand: [Hand::EMPTY; Color::NUM],
-            state_stack: vec![StateInfo::new()],
+            state_stack,
             state_idx: 0,
             game_ply: 0,
             side_to_move: Color::Black,

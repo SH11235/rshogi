@@ -58,7 +58,7 @@
 | [`benchmark`](benchmark.md) | 内部 API または外部 USI の探索量・時間・NPS を計測 |
 | [`bench_nnue_eval`](bench_nnue_eval.md) | 固定・巡回局面の NNUE eval / refresh を分けて計測 |
 | [`search_only_ab`](search_only_ab.md) | 探索だけの A/B 比較と Linux perf / Windows ETW の計測 |
-| [`mate_bench`](mate_bench.md) | df-pn 詰み探索の正解・探索量・時間を集計 |
+| [`mate_bench`](mate_bench.md) | df-pn 詰み探索の正解・探索量・時間を集計。最短手順 (詰将棋ルール / 全応手) と作意手数との照合 |
 | [`compare_nodes`](compare_nodes.md) | 2 エンジンの深度別ノード数を比較し、通信終了をエラーとして検出 |
 | [`compare_eval_nnue`](compare_eval_nnue.md) | PSV をサンプリングして NNUE の静的評価・探索スコアを比較 |
 | [`eval_sfens`](eval_sfens.md) | SFEN 局面集を NNUE で静的評価 |

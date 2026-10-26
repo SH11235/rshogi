@@ -6,6 +6,7 @@ use crate::nnue::{ExtBonaPiece, PieceNumber};
 use crate::types::{Color, File, Hand, Piece, PieceType, Rank, Square};
 
 use super::pos::{Position, is_minor_piece};
+use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};
 
 /// 平手初期局面のSFEN
@@ -192,7 +193,11 @@ impl Position {
         hand: &[Hand; Color::NUM],
         side_to_move: Color,
     ) {
-        *self = Position::new();
+        // 局面を大量に組み直す用途で、状態スタックの領域を確保し直さない
+        let mut state_stack = std::mem::take(&mut self.state_stack);
+        state_stack.clear();
+        state_stack.push(StateInfo::new());
+        *self = Position::with_state_stack(state_stack);
 
         for (sq_idx, &pc) in board.iter().enumerate() {
             if pc.is_none() {

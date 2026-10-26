@@ -28,7 +28,7 @@ pub(super) const FULL_HAND: Hand = Hand::EMPTY
 pub(super) const PNDN_UNIT: u32 = 2;
 
 /// df-pn が局面に求める操作
-pub(super) trait MateState {
+pub(super) trait MateState: Send + Sized + 'static {
     /// 指し手
     type Mv: Copy + Eq;
 
@@ -93,6 +93,32 @@ pub(super) trait MateState {
 
     /// `mate_1ply` の手と、その詰みの証明駒
     fn mate_1ply_with_proof(&mut self) -> Option<(Self::Mv, Hand)>;
+
+    /// 駒打ちか (受け方の手なら合駒。無駄合いの判定の対象)
+    fn is_drop(&self, _m: Self::Mv) -> bool {
+        false
+    }
+
+    /// 指し手を区別する値 (無駄合いの判定の結果を覚えるときの鍵)
+    fn move_key(&self, _m: Self::Mv) -> u64 {
+        0
+    }
+
+    /// 受け方の合駒 `drop` を指した後の局面 (攻め方の手番) で、王手していた駒が合駒を取る合法な王手
+    /// (成・不成) を `out` に追加する。
+    fn interposition_captures(&self, _drop: Self::Mv, _out: &mut Vec<Self::Mv>) {}
+
+    /// 合駒 `drop` を取った後の局面 (受け方の手番) で、受け方が合駒の升の駒 (取った駒) を取る合法手があるか
+    fn can_recapture(&self, _drop: Self::Mv) -> bool {
+        false
+    }
+
+    /// 合駒を取った後の局面 (受け方の手番) から、取った駒を攻め方の持駒から受け方の持駒に移した局面を
+    /// `out` に組み立てる (`out` に局面があればその領域を使い回す)。組み立てられなければ偽。
+    /// `attacker` は攻め方。
+    fn captured_piece_returned_into(&self, _attacker: Color, _out: &mut Option<Self>) -> bool {
+        false
+    }
 
     /// 指し手を進める
     fn do_move(&mut self, m: Self::Mv);
@@ -321,6 +347,28 @@ impl MateState for Position {
         self.checked_mate_1ply(true)
     }
 
+    fn is_drop(&self, m: Move) -> bool {
+        m.is_drop()
+    }
+
+    fn move_key(&self, m: Move) -> u64 {
+        u64::from(m.raw())
+    }
+
+    fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
+        interposition_captures(self, drop, out, |mv| self.is_legal(mv));
+    }
+
+    fn can_recapture(&self, drop: Move) -> bool {
+        let mut replies = MoveList::new();
+        generate_legal_all(self, &mut replies);
+        replies.iter().any(|m| !m.is_drop() && m.to() == drop.to())
+    }
+
+    fn captured_piece_returned_into(&self, attacker: Color, out: &mut Option<Self>) -> bool {
+        captured_piece_returned_into(self, attacker, out.get_or_insert_with(Position::new))
+    }
+
     fn do_move(&mut self, m: Move) {
         let gives_check = self.gives_check(m);
         Position::do_move(self, m, gives_check);
@@ -329,6 +377,61 @@ impl MateState for Position {
     fn undo_move(&mut self, m: Move) {
         Position::undo_move(self, m);
     }
+}
+
+/// 合駒 `drop` を指した後の局面 `pos` (攻め方の手番) で、王手していた駒が合駒を取る王手を `out` に追加する。
+/// `is_legal` は駒を動かす手の合法性 (攻め方の玉の安全) の判定。
+fn interposition_captures(
+    pos: &Position,
+    drop: Move,
+    out: &mut Vec<Move>,
+    is_legal: impl Fn(Move) -> bool,
+) {
+    let attacker = pos.side_to_move();
+    let king = pos.king_square(!attacker);
+    let to = drop.to();
+    // 合駒は王手していた駒と玉の間にあり、王手していた駒はその升に利いている (より遠くの同じ筋の駒は利かない)
+    let Some(from) = (pos.attackers_to_c(to, attacker))
+        .iter()
+        .find(|&sq| between_bb(king, sq).contains(to))
+    else {
+        return;
+    };
+    let pt = pos.piece_on(from).piece_type();
+    let can_promote = pt.can_promote() && crate::mate::can_promote(attacker, from, to);
+    for promote in [true, false] {
+        if promote && !can_promote {
+            continue;
+        }
+        let Some(mv) = pos.to_move(Move::new_move(from, to, promote)) else {
+            continue;
+        };
+        // 不成で行き所の無くなる手は pseudo_legal が拒否する
+        if pos.pseudo_legal(mv) && is_legal(mv) && pos.gives_check(mv) {
+            out.push(mv);
+        }
+    }
+}
+
+/// 局面 `pos` (直前の手で攻め方が駒を取った、受け方の手番) から、取った駒を受け方の持駒に移した局面を
+/// `out` に組み立てる。組み立てられなければ偽
+fn captured_piece_returned_into(pos: &Position, attacker: Color, out: &mut Position) -> bool {
+    let captured = pos.captured_piece();
+    if captured.is_none() || pos.side_to_move() == attacker {
+        return false;
+    }
+    let pt = captured.piece_type().unpromote();
+    let mut hands = [pos.hand(Color::Black), pos.hand(Color::White)];
+    if !hands[attacker.index()].has(pt) {
+        return false;
+    }
+    hands[attacker.index()] = hands[attacker.index()].sub(pt);
+    hands[(!attacker).index()] = hands[(!attacker).index()].add(pt);
+    let mut board = [Piece::NONE; Square::NUM];
+    for (i, cell) in board.iter_mut().enumerate() {
+        *cell = pos.piece_on(Square::from_u8(i as u8).expect("升の番号は 81 未満"));
+    }
+    out.set_from_parts(&board, &hands, pos.side_to_move()).is_ok()
 }
 
 impl Position {
@@ -531,6 +634,33 @@ impl MateState for NoAttackerKing {
 
     fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
         self.checked_mate_1ply(true)
+    }
+
+    fn is_drop(&self, m: Move) -> bool {
+        m.is_drop()
+    }
+
+    fn move_key(&self, m: Move) -> u64 {
+        u64::from(m.raw())
+    }
+
+    fn interposition_captures(&self, drop: Move, out: &mut Vec<Move>) {
+        // 自玉が無いので、駒を動かす手は自玉の安全を見なくてよい
+        interposition_captures(&self.pos, drop, out, |_| true);
+    }
+
+    fn can_recapture(&self, drop: Move) -> bool {
+        !self.for_each_evasion(|m| m.is_drop() || m.to() != drop.to())
+    }
+
+    fn captured_piece_returned_into(&self, attacker: Color, out: &mut Option<Self>) -> bool {
+        debug_assert_eq!(attacker, self.attacker);
+        let out = out.get_or_insert_with(|| Self {
+            pos: Position::new(),
+            attacker,
+        });
+        out.attacker = attacker;
+        captured_piece_returned_into(&self.pos, attacker, &mut out.pos)
     }
 
     fn do_move(&mut self, m: Move) {

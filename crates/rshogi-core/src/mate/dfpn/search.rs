@@ -22,9 +22,15 @@
 //!   証明駒の駒種ごとの最大に、受け方が合駒に使えたはずの駒 (攻め方が持っていないと受け方の手にある)
 //!   を足す。反証駒は子の反証駒の最小から、持っていれば打って王手できる駒種を除く。
 //!   経路や上限に依存する不詰には反証駒を付けない (局面の持駒のまま、置換表にも書かない)。
+//! - 最短手順モード (`enable_shortest`) では、詰み手数の上限だけに依存する不詰を上限と組で覚えて、上限が
+//!   それ以下の探索に使う。無駄合いを数えない数え方では、詰みも置換表に書かない。どちらも
+//!   `ShortestTables` に局面の完全一致でだけ書き、置換表 (持駒違いに流用する) には上限なしの不詰と、
+//!   全応手を数える詰みしか書かない。
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::MateProgress;
@@ -68,6 +74,8 @@ pub(super) struct NodeResult {
     pub loop_depth: u16,
     /// 不詰が詰み手数の上限か探索深さの上限に依存している
     pub limited: bool,
+    /// `limited` のうち、探索深さの上限に依存している
+    pub depth_limited: bool,
     /// 攻め方の持駒の条件。詰みは証明駒、経路や上限に依存しない不詰は反証駒、
     /// それ以外 (未確定と条件付きの不詰) は局面の持駒。
     pub hand: Hand,
@@ -84,6 +92,7 @@ impl NodeResult {
             mate_len,
             loop_depth: NO_LOOP,
             limited: false,
+            depth_limited: false,
             hand,
         }
     }
@@ -95,8 +104,22 @@ impl NodeResult {
             mate_len: 0,
             loop_depth,
             limited,
+            depth_limited: false,
             hand,
         }
+    }
+
+    /// 探索深さの上限で打ち切った不詰
+    fn depth_disproven(hand: Hand) -> Self {
+        Self {
+            depth_limited: true,
+            ..Self::disproven(NO_LOOP, true, hand)
+        }
+    }
+
+    /// 詰み手数の上限だけに依存する不詰 (この局面から上限の手数以内には詰まない)
+    fn is_len_bounded(&self) -> bool {
+        self.is_disproven() && self.limited && !self.depth_limited && self.loop_depth == NO_LOOP
     }
 
     /// 局面そのものでなく、経路か上限に依存した結果か
@@ -124,6 +147,9 @@ struct Child<M> {
     mate_len: u16,
     loop_depth: u16,
     limited: bool,
+    depth_limited: bool,
+    /// 無駄合い (最短手順モードの受け方の局面だけ)。詰みとして数え、合駒と取る 2 手は詰み手数に数えない
+    futile: bool,
     /// 子の局面での `NodeResult::hand`
     hand: Hand,
     /// 置換表に無く、まだ一度も探索していない子 (TCA の延長を戻す判定に使う)
@@ -141,6 +167,20 @@ const NO_NEXT: u16 = u16::MAX;
 impl<M> Child<M> {
     fn is_final(&self) -> bool {
         self.pn == 0 || self.dn == 0
+    }
+
+    /// 無駄合いの詰みにする。`proof` は合駒の後の局面の証明駒、`len` は合駒を取って取った駒を戻した局面の
+    /// 詰み手数 (受け方の局面の詰み手数にそのまま数える)
+    fn set_futile(&mut self, proof: Hand, len: u16) {
+        self.pn = 0;
+        self.dn = PN_INF;
+        self.mate_len = len;
+        self.loop_depth = NO_LOOP;
+        self.limited = false;
+        self.depth_limited = false;
+        self.futile = true;
+        self.hand = proof;
+        self.first_visit = false;
     }
 }
 
@@ -224,7 +264,112 @@ pub(super) struct Scratch<M> {
     delay_order: Vec<(u16, u8, u16)>,
     /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
     proven: Vec<(M, u16)>,
+    /// 無駄合いの判定で別の局面を解くときの作業領域 (最初に使うときに作る)
+    sub: Option<Box<Scratch<M>>>,
+    /// 無駄合いの判定で生成する攻め方の手
+    capture_moves: Vec<M>,
+    /// 無駄合いの判定で生成する受け方の手
+    reply_moves: Vec<M>,
+    /// 無駄合いの判定で取った駒を戻した局面 (`Option<S>`。局面の型は solve ごとに変わりうる)
+    returned: Option<Box<dyn Any + Send>>,
 }
+
+/// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) とも共有する。
+///
+/// 置換表と分けるのは、ここに書く値が無駄合いの数え方に依存するため。上限付きの不詰は上限と組でしか
+/// 成り立たず、無駄合いを数えない詰み手数は他の応手の手数で決まる無駄合いに依存するので、持駒違いの局面に
+/// 流用できない (攻め方の持駒が多いと他の応手が短くなり、無駄合いだった合駒が有効になって長くなりうる)。
+/// どちらも局面の完全一致でだけ使う。
+pub(super) struct ShortestTables {
+    /// 局面からこの手数以内には詰まない
+    len_bounds: Vec<LenBound>,
+    /// 無駄合いを数えない数え方で、局面がこの手数以内に詰む
+    mates: Vec<LenBound>,
+    /// 無駄合いの判定の結果
+    futility: Vec<Futility>,
+    /// 鍵に混ぜる値。数え方を変えるたびに変えて、表を書き換えずに前の値を無効にする
+    salt: u64,
+}
+
+impl ShortestTables {
+    pub fn new() -> Self {
+        Self {
+            len_bounds: Vec::new(),
+            mates: Vec::new(),
+            futility: Vec::new(),
+            salt: 0,
+        }
+    }
+
+    /// (初めてなら確保して) 空にする
+    fn reset(&mut self) {
+        if self.len_bounds.is_empty() {
+            self.len_bounds.resize(LEN_BOUNDS_SIZE, LenBound::default());
+            self.mates.resize(LEN_BOUNDS_SIZE, LenBound::default());
+            self.futility.resize(FUTILITY_SIZE, Futility::default());
+        }
+        self.salt = self.salt.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn get(table: &[LenBound], salt: u64, key: u64) -> Option<u16> {
+        let e = table.get(key as usize & (LEN_BOUNDS_SIZE - 1))?;
+        (e.key == key ^ salt).then_some(e.bound)
+    }
+
+    /// 同じ局面の値があれば `keep` で残す方を選ぶ
+    fn put(table: &mut [LenBound], salt: u64, key: u64, bound: u16, keep: fn(u16, u16) -> u16) {
+        let salted = key ^ salt;
+        let Some(e) = table.get_mut(key as usize & (LEN_BOUNDS_SIZE - 1)) else {
+            return;
+        };
+        if e.key == salted {
+            e.bound = keep(e.bound, bound);
+        } else {
+            *e = LenBound { key: salted, bound };
+        }
+    }
+
+    /// 局面 `key` が何手以内に詰まないと分かっているか
+    fn len_bound(&self, key: u64) -> Option<u16> {
+        Self::get(&self.len_bounds, self.salt, key)
+    }
+
+    fn store_len_bound(&mut self, key: u64, bound: u16) {
+        Self::put(&mut self.len_bounds, self.salt, key, bound, u16::max);
+    }
+
+    /// 局面 `key` が何手以内に詰むと分かっているか
+    pub(super) fn mate_len(&self, key: u64) -> Option<u16> {
+        Self::get(&self.mates, self.salt, key)
+    }
+
+    fn store_mate_len(&mut self, key: u64, len: u16) {
+        Self::put(&mut self.mates, self.salt, key, len, u16::min);
+    }
+}
+
+/// `ShortestTables::futility` の 1 件: 局面・合駒・上限の組 `key` が無駄合いなら証明駒 `proof`
+#[derive(Clone, Copy, Default)]
+struct Futility {
+    key: u64,
+    futile: bool,
+    proof: Hand,
+    /// 合駒を取って戻した局面の詰み手数
+    len: u16,
+}
+
+/// `ShortestTables::futility` の要素数 (2 の冪)
+const FUTILITY_SIZE: usize = 1 << 16;
+
+/// `ShortestTables` の手数の表の 1 局面分
+#[derive(Clone, Copy, Default)]
+struct LenBound {
+    key: u64,
+    bound: u16,
+}
+
+/// `ShortestTables` の手数の表の要素数 (2 の冪)
+const LEN_BOUNDS_SIZE: usize = 1 << 20;
 
 impl<M> Scratch<M> {
     pub fn new() -> Self {
@@ -236,6 +381,10 @@ impl<M> Scratch<M> {
             child_keys: Vec::with_capacity(crate::movegen::MAX_MOVES),
             delay_order: Vec::with_capacity(crate::movegen::MAX_MOVES),
             proven: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            sub: None,
+            capture_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            reply_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            returned: None,
         }
     }
 }
@@ -266,6 +415,20 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     slack: Option<u64>,
     /// 0 でなければ、φ が同じ子のどれを選ぶかをこの値で決める (並列に解くスレッドごとに変える)
     tie_seed: u32,
+    /// 最短手順モード: 受け方の無駄合いを詰み手数に数えず、詰み手数の上限だけに依存する不詰を覚えておく
+    shortest: bool,
+    /// 最短手順モードで無駄合いを詰み手数に数えない
+    futility: bool,
+    /// 最短手順モードの表
+    tables: Option<&'a RefCell<ShortestTables>>,
+}
+
+/// `Searcher::solve_detached` の結果
+enum Detached {
+    /// 上限内に詰む (証明駒, 詰み手数)
+    Mated(Hand, u16),
+    /// 上限内に詰まない
+    Escaped,
 }
 
 /// 証明駒を使わないときの置換表のキー。盤面のキーと攻め方の持駒は使わないので求めない。
@@ -319,7 +482,25 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             weak_disproof_step: 0,
             slack: None,
             tie_seed: 0,
+            shortest: false,
+            futility: false,
+            tables: None,
         }
+    }
+
+    /// 最短手順モードにする ([`super::shortest`])。詰み手数の上限付きの探索で、上限だけに依存する不詰を
+    /// `tables` に覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。
+    /// `futility` では、詰みは置換表に書かず `tables` に局面の完全一致で書く (`ShortestTables`)。
+    /// 覚えた値は無駄合いの数え方で変わるので、呼ぶたびに捨てる。
+    pub fn enable_shortest(&mut self, futility: bool, tables: &'a RefCell<ShortestTables>) {
+        self.shortest = true;
+        self.futility = futility;
+        tables.borrow_mut().reset();
+        self.tables = Some(tables);
+    }
+
+    fn len_bound(&self, key: u64) -> Option<u16> {
+        self.tables.and_then(|t| t.borrow().len_bound(key))
     }
 
     /// 置換表に無い子の pn/dn を局面から見積もる (df-pn+)。詰む問題ではノードが大きく減るが、
@@ -345,6 +526,16 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     pub fn set_tie_seed(&mut self, seed: u32) {
         debug_assert!(seed != 0);
         self.tie_seed = seed;
+    }
+
+    /// 次に進捗を知らせる経過時間 (ミリ秒)。前の探索から続けて知らせるときに使う
+    pub fn set_next_progress(&mut self, ms: u64) {
+        self.next_progress_ms = ms;
+    }
+
+    /// 攻め方
+    pub fn attacker(&self) -> Color {
+        self.attacker
     }
 
     /// これまでに探索したノード数
@@ -436,7 +627,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         let key = table_key.key;
         if args.depth >= MAX_DEPTH {
-            return Ok(NodeResult::disproven(NO_LOOP, true, table_key.hand));
+            return Ok(NodeResult::depth_disproven(table_key.hand));
         }
         if let Some(loop_depth) = self.repetition_depth(key) {
             return Ok(NodeResult::disproven(loop_depth as u16, false, table_key.hand));
@@ -488,7 +679,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             return Ok(result);
         }
 
-        let has_old_child = self.expand(st, depth, or_node, args.child_len_limit());
+        let has_old_child = self.expand(st, depth, or_node, len_limit)?;
         if self.scratch.children.len() == start {
             // 攻め方に王手が無ければ不詰、受け方に応手が無ければ詰み
             let result = match (or_node, PIECES) {
@@ -505,8 +696,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             self.store(key, depth, &result, 1);
             return Ok(result);
         }
-        if len_limit == 0 {
-            // 受け方に応手があり、手数の上限で攻め方はもう指せない
+        // 受け方に応手があり、手数の上限で攻め方はもう指せない (最短手順モードで応手がすべて無駄合いなら詰み)
+        if len_limit == 0 && !(self.shortest && self.aggregate(start, or_node).is_proven()) {
             return Ok(NodeResult::disproven(NO_LOOP, true, key.hand));
         }
 
@@ -556,8 +747,20 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             child.mate_len = child_result.mate_len;
             child.loop_depth = child_result.loop_depth;
             child.limited = child_result.limited;
+            child.depth_limited = child_result.depth_limited;
             child.hand = child_result.hand;
-            if child_result.is_final() && child.next != NO_NEXT {
+            // 合駒が上限や経路のために詰まなかったら、無駄合いかを調べる
+            if self.shortest
+                && !or_node
+                && child_result.is_disproven()
+                && child_result.is_conditional()
+                && st.is_drop(mv)
+                && let Some((proof, len)) = self.futile_drop(st, mv, len_limit)?
+            {
+                self.scratch.children[best].set_futile(proof, len);
+            }
+            let child = &self.scratch.children[best];
+            if child.is_final() && child.next != NO_NEXT {
                 let next = child.next;
                 self.activate_delayed(start, next);
             }
@@ -576,6 +779,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
         let result = self.node_result(st, key.hand, start, depth, or_node, current);
         self.store(key, depth, &result, self.nodes - nodes_before);
+        if self.shortest
+            && result.is_len_bounded()
+            && let Some(tables) = self.tables
+        {
+            tables.borrow_mut().store_len_bound(key.key, len_limit);
+        }
         if self.capture_depth == Some(depth) {
             self.capture_depth = None;
             let proven = self.scratch.children[start..].iter().filter(|c| c.pn == 0);
@@ -586,8 +795,20 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
     /// 子を生成し、置換表の値で初期化する。戻り値は「浅い深さで書かれた未確定値を使ったか」。
     ///
-    /// 置換表の詰みのうち、詰み手数が `child_len_limit` を超えるものは使わない (未確定として読み直す)。
-    fn expand(&mut self, st: &S, depth: usize, or_node: bool, child_len_limit: u16) -> bool {
+    /// 置換表の詰みのうち、詰み手数が子の上限 (`len_limit` − 1) を超えるものは使わない (未確定として読み直す)。
+    /// 最短手順モードでは、上限内に詰まないと分かっている子を不詰にし、受け方の無駄合いを詰みにする。
+    fn expand(
+        &mut self,
+        st: &mut S,
+        depth: usize,
+        or_node: bool,
+        len_limit: u16,
+    ) -> Result<bool, Abort> {
+        let child_len_limit = if len_limit == NO_LEN_LIMIT {
+            NO_LEN_LIMIT
+        } else {
+            len_limit.saturating_sub(1)
+        };
         self.scratch.moves.clear();
         st.generate(or_node, &mut self.scratch.moves);
         // 置換表を引く前に子の bucket をまとめて読み込ませ、キャッシュミスの待ちを重ねる
@@ -615,6 +836,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 mate_len: 0,
                 loop_depth: NO_LOOP,
                 limited: false,
+                depth_limited: false,
+                futile: false,
                 hand: child_table_key.hand,
                 first_visit: true,
                 active: true,
@@ -635,22 +858,316 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                         has_old_child = true;
                     }
                 }
-                match probed {
-                    Some(v) if v.pn != 0 || v.mate_len <= child_len_limit => {
+                // 置換表の詰みは無駄合いを数える証明だけで、その手数は無駄合いを数えない手数の上限にもなる
+                // (持駒違いの局面に流用しても、全応手を数える手数は攻め方の持駒が多いほど短い)
+                let mut usable = probed.filter(|v| v.pn != 0 || v.mate_len <= child_len_limit);
+                if self.futility
+                    && usable.is_none_or(|v| v.pn != 0)
+                    && let Some(len) = self.tables.and_then(|t| t.borrow().mate_len(child_key))
+                    && len <= child_len_limit
+                {
+                    usable = Some(TableValue {
+                        pn: 0,
+                        dn: PN_INF,
+                        mate_len: len,
+                        min_depth: 0,
+                        hand: child_table_key.hand,
+                    });
+                }
+                let bounded = self.shortest
+                    && child_len_limit != NO_LEN_LIMIT
+                    && usable.is_none_or(|v| v.pn != 0 && v.dn != 0)
+                    && self.len_bound(child_key).is_some_and(|b| b >= child_len_limit);
+                match usable {
+                    _ if bounded => {
+                        child.pn = PN_INF;
+                        child.dn = 0;
+                        child.limited = true;
+                        child.first_visit = false;
+                    }
+                    Some(v) => {
                         child.pn = v.pn;
                         child.dn = v.dn;
                         child.mate_len = v.mate_len;
                         child.hand = v.hand;
                     }
                     // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)
-                    _ if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
-                    _ => {}
+                    None if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
+                    None => {}
                 }
             }
             self.scratch.children.push(child);
         }
+        if self.shortest && !or_node {
+            self.mark_futile_drops(st, len_limit)?;
+        }
         self.link_delayed(st, or_node);
-        has_old_child
+        Ok(has_old_child)
+    }
+
+    /// 受け方の局面の子 (現在のフレームの末尾、`scratch.moves` と同じ順) のうち、展開した時点で上限内に
+    /// 詰まないと分かっている合駒が無駄合いなら詰みにする。それ以外の合駒は、読んで上限内に詰まなかったときに
+    /// 調べる (`search_node`)。
+    ///
+    /// 上限が 0 なら子は読まないので、応手がすべて合駒のときだけ、すべて調べる (駒打ち以外の応手があれば
+    /// この局面は上限内に詰まない)。
+    fn mark_futile_drops(&mut self, st: &mut S, len_limit: u16) -> Result<(), Abort> {
+        let n = self.scratch.moves.len();
+        let start = self.scratch.children.len() - n;
+        let all_drops = self.scratch.moves.iter().all(|&mv| st.is_drop(mv));
+        if len_limit == 0 && !all_drops {
+            return Ok(());
+        }
+        for i in 0..n {
+            let mv = self.scratch.moves[i];
+            let child = &self.scratch.children[start + i];
+            // 上限や経路 (合駒の後に経路上の局面へ戻る) のために詰まないと分かっている子
+            let bounded = child.dn == 0 && (child.limited || child.loop_depth != NO_LOOP);
+            let unsettled = child.pn != 0 && !(child.dn == 0 && !bounded);
+            if !st.is_drop(mv) || !(bounded || len_limit == 0 && unsettled) {
+                continue;
+            }
+            if let Some((proof, len)) = self.futile_drop(st, mv, len_limit)? {
+                self.scratch.children[start + i].set_futile(proof, len);
+            }
+        }
+        Ok(())
+    }
+
+    /// 詰み手数の上限が `len_limit` の受け方の局面 `st` (王手されている) で、合駒 `drop` が無駄合いなら、
+    /// 合駒の後の局面の証明駒と、合駒を取って取った駒を戻した局面の詰み手数を返す。
+    ///
+    /// 無駄合い: 王手している駒が合駒を取り (成・不成のどちらか)、受け方がその駒を取り返せず、取った駒を
+    /// 受け方の持駒に戻した局面 M の詰み手数が、駒打ち以外の応手で逃れたときの詰み手数 (応手の詰み手数 + 1 の
+    /// 最大、無ければ 0) 以下。
+    /// 合駒を取る 2 手が挟まるだけで、合駒が無かったときより詰みが長くならない合駒だけが無駄合いになり、
+    /// 受け方の局面の詰み手数を決めることはない。取り返せる合駒と、取った後の詰みが長くなる合駒は有効な合駒として数える。
+    /// M が `len_limit` の中で詰まなければ、無駄合いでもこの局面は上限内に詰まないので、無駄合いとしない。
+    /// M と応手の後の局面は手順から外れた局面なので、経路を持たずに、この探索全体の制限の中で読み切る
+    /// (読み切れなければ `Abort`)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
+    pub(super) fn futile_drop(
+        &mut self,
+        st: &mut S,
+        drop: S::Mv,
+        len_limit: u16,
+    ) -> Result<Option<(Hand, u16)>, Abort> {
+        if !self.futility {
+            return Ok(None);
+        }
+        let before = st.table_key(self.attacker);
+        let Some(tables) = self.tables else {
+            return Ok(None);
+        };
+        // 同じ判定を探索中に何度も繰り返すので覚えておく
+        let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+            ^ tables.borrow().salt;
+        let slot = memo_key as usize & (FUTILITY_SIZE - 1);
+        if let Some(e) = tables.borrow().futility.get(slot)
+            && e.key == memo_key
+        {
+            return Ok(e.futile.then_some((e.proof, e.len)));
+        }
+        st.do_move(drop);
+        let result = self.futile_after_drop(st, drop, before, len_limit);
+        st.undo_move(drop);
+        let mut found = result?;
+        if let Some((_, len)) = found
+            && len > 0
+            && !self.has_reply_lasting(st, len)?
+        {
+            found = None;
+        }
+        if let Some(e) = tables.borrow_mut().futility.get_mut(slot) {
+            let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
+            *e = Futility {
+                key: memo_key,
+                futile: found.is_some(),
+                proof,
+                len,
+            };
+        }
+        Ok(found)
+    }
+
+    fn futile_after_drop(
+        &mut self,
+        st: &mut S,
+        drop: S::Mv,
+        before: TableKey,
+        len_limit: u16,
+    ) -> Result<Option<(Hand, u16)>, Abort> {
+        let mut captures = std::mem::take(&mut self.scratch.capture_moves);
+        captures.clear();
+        st.interposition_captures(drop, &mut captures);
+        // 取った駒を戻した局面の領域。判定のたびに局面を確保し直さない
+        let mut slot = match self.scratch.returned.take().map(|b| b.downcast::<Option<S>>()) {
+            Some(Ok(slot)) => slot,
+            _ => Box::new(None),
+        };
+        let mut result = Ok(None);
+        for &capture in &captures {
+            // 取った後の局面の盤面に、合駒の前の持駒 (取った駒は受け方の手) を組み合わせた局面
+            let after = st.table_key_after(capture, self.attacker);
+            let returned = TableKey {
+                key: after.board ^ before.key ^ before.board,
+                board: after.board,
+                hand: before.hand,
+            };
+            let probe_key = if PIECES {
+                returned
+            } else {
+                exact_key(returned.key)
+            };
+            match self.table.probe::<PIECES>(probe_key) {
+                Some(v) if v.dn == 0 => continue,
+                _ if self.len_bound(returned.key).is_some_and(|b| b >= len_limit) => {
+                    continue;
+                }
+                _ => {}
+            }
+            st.do_move(capture);
+            // 合駒を取った駒を受け方が取り返せるなら、取った後の局面は合駒が無かったときと別物なので有効な合駒
+            let built = !st.can_recapture(drop)
+                && st.captured_piece_returned_into(self.attacker, &mut slot);
+            st.undo_move(capture);
+            let Some(returned_state) = Option::as_mut(&mut *slot).filter(|_| built) else {
+                continue;
+            };
+            debug_assert_eq!(returned_state.key(), returned.key);
+            match self.shortest_detached(returned_state, len_limit) {
+                Ok(Some((proof, len))) => {
+                    let proof = if PIECES { proof } else { before.hand };
+                    // 取る手が複数 (成・不成) なら、詰み手数の短い方
+                    let shorter = match result {
+                        Ok(Some((_, best))) => len < best,
+                        _ => true,
+                    };
+                    if shorter {
+                        result = Ok(Some((proof, len)));
+                    }
+                }
+                Ok(None) => {}
+                Err(abort) => {
+                    result = Err(abort);
+                    break;
+                }
+            }
+        }
+        self.scratch.capture_moves = captures;
+        self.scratch.returned = Some(slot);
+        result
+    }
+
+    /// 受け方の手番の局面 `st` の、`len_limit` 手以内の最短の詰み手数とその証明駒 (上限を 2 手ずつ縮めて
+    /// 証明し直す)
+    fn shortest_detached(
+        &mut self,
+        st: &mut S,
+        len_limit: u16,
+    ) -> Result<Option<(Hand, u16)>, Abort> {
+        let Detached::Mated(proof, len) = self.solve_detached(st, false, len_limit)? else {
+            return Ok(None);
+        };
+        let mut best = (proof, len);
+        while best.1 >= 2 {
+            match self.solve_detached(st, false, best.1 - 2)? {
+                Detached::Mated(proof, len) => best = (proof, len),
+                Detached::Escaped => break,
+            }
+        }
+        Ok(Some(best))
+    }
+
+    /// 受け方の局面 `st` に、`len` 手より短く詰まない (詰み手数 + 1 が `len` 以上の) 駒打ち以外の応手があるか
+    fn has_reply_lasting(&mut self, st: &mut S, len: u16) -> Result<bool, Abort> {
+        let mut replies = std::mem::take(&mut self.scratch.reply_moves);
+        replies.clear();
+        st.generate(false, &mut replies);
+        let mut result = Ok(false);
+        for &mv in &replies {
+            if st.is_drop(mv) {
+                continue;
+            }
+            if len < 4 {
+                result = Ok(true);
+                break;
+            }
+            st.do_move(mv);
+            let solved = self.solve_detached(st, true, len - 3);
+            st.undo_move(mv);
+            match solved {
+                Ok(Detached::Escaped) => {
+                    result = Ok(true);
+                    break;
+                }
+                Ok(Detached::Mated(..)) => {}
+                Err(abort) => {
+                    result = Err(abort);
+                    break;
+                }
+            }
+        }
+        self.scratch.reply_moves = replies;
+        result
+    }
+
+    /// 局面 `st` (`or_node` なら攻め方の手番) を経路と無関係に `len_limit` 手の上限で解く。無駄合いの数え方と
+    /// 最短手順モードの表はこの探索と同じ。この探索全体の制限 (残りのノード数・時間・停止) の中で読み切り、
+    /// 制限に達したら `Abort`。
+    fn solve_detached(
+        &mut self,
+        st: &mut S,
+        or_node: bool,
+        len_limit: u16,
+    ) -> Result<Detached, Abort> {
+        let mut scratch = self.scratch.sub.take().unwrap_or_else(|| Box::new(Scratch::new()));
+        let remaining = match self.budget.node_limit {
+            0 => 0,
+            limit => limit.saturating_sub(self.nodes).max(1),
+        };
+        let (table, attacker, tables) = (self.table, self.attacker, self.tables);
+        let (estimate, weak_disproof_step) = (self.estimate, self.weak_disproof_step);
+        let (stop, cancel, start) = (self.budget.stop, self.budget.cancel, self.budget.start);
+        let time_limit_ms = self.budget.time_limit_ms;
+        // 部分探索のノード数は 0 から数えるので、進捗にはこの探索で読んだ分を足して渡す。通知の間隔は
+        // 部分探索に引き継いで戻すので、入れ子になっても探索全体で約 1 秒ごとになる
+        let base = self.nodes;
+        let parent_progress = &mut *self.budget.progress;
+        let mut forward = |p: MateProgress| {
+            parent_progress(MateProgress {
+                nodes: base + p.nodes,
+                ..p
+            })
+        };
+        let budget = Budget {
+            stop,
+            halt: None,
+            cancel,
+            shared_nodes: None,
+            node_limit: remaining,
+            time_limit_ms,
+            start,
+            progress: &mut forward,
+        };
+        let (result, nodes, next_progress_ms) = {
+            let mut sub = Searcher::<S, PIECES>::new(table, &mut scratch, attacker, budget);
+            sub.estimate = estimate;
+            sub.weak_disproof_step = weak_disproof_step;
+            sub.shortest = true;
+            sub.futility = true;
+            sub.tables = tables;
+            sub.next_progress_ms = self.next_progress_ms;
+            let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
+            (result, sub.nodes, sub.next_progress_ms)
+        };
+        self.next_progress_ms = next_progress_ms;
+        self.scratch.sub = Some(scratch);
+        self.nodes += nodes;
+        match result? {
+            r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
+            _ => Ok(Detached::Escaped),
+        }
     }
 
     /// 現在のフレームの子 (`scratch.moves` と同じ順) で後回しの組を作り、組の中で前の手が
@@ -740,6 +1257,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             mate_len: 0,
             loop_depth: NO_LOOP,
             limited: false,
+            depth_limited: false,
             hand: Hand::EMPTY,
         }
     }
@@ -819,13 +1337,35 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             !(current.is_proven() && !or_node || current.is_disproven() && or_node)
                 || children.iter().all(|c| c.active)
         );
+        // 受け方の局面の詰み手数は応手の詰み手数 + 1 の最大 (応手が無ければ 0)。無駄合いは合駒を取って戻した
+        // 局面の詰み手数で数える (合駒と取る 2 手は数えない)。その手数は駒打ち以外の応手の手数以下なので、
+        // 無駄合いが受け方の局面の手数を決めることはない
+        let defense_len = || {
+            children
+                .iter()
+                .map(|c| {
+                    if c.futile {
+                        c.mate_len
+                    } else {
+                        c.mate_len.saturating_add(1)
+                    }
+                })
+                .max()
+                .unwrap_or(0)
+        };
         if current.is_proven() && !PIECES {
             let len = if or_node {
-                children.iter().filter(|c| c.pn == 0).map(|c| c.mate_len).min()
+                children
+                    .iter()
+                    .filter(|c| c.pn == 0)
+                    .map(|c| c.mate_len)
+                    .min()
+                    .unwrap_or(0)
+                    .saturating_add(1)
             } else {
-                children.iter().map(|c| c.mate_len).max()
+                defense_len()
             };
-            return NodeResult::proven(len.unwrap_or(0).saturating_add(1), hand);
+            return NodeResult::proven(len, hand);
         }
         if current.is_proven() {
             if or_node {
@@ -838,49 +1378,40 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 let proof = st.hand_before(best.mv, best.hand);
                 return NodeResult::proven(best.mate_len.saturating_add(1), proof);
             }
-            let len = children.iter().map(|c| c.mate_len).max().unwrap_or(0);
             let proof = children.iter().fold(Hand::EMPTY, |h, c| hand_max(h, c.hand));
             let proof = st.proof_hand_for_evasions(proof, self.attacker);
-            return NodeResult::proven(len.saturating_add(1), proof);
+            return NodeResult::proven(defense_len(), proof);
         }
         if current.is_disproven() {
             // OR の不詰はすべての子が根拠 (条件はすべて引き継ぐ)。AND の不詰は逃れの子の
             // どれか 1 つが根拠になるので、条件の最も弱い子を選ぶ。
-            let (loop_depth, limited, disproof) = if !PIECES {
-                let (loop_depth, limited) = if or_node {
-                    (
-                        children.iter().map(|c| c.loop_depth).min().unwrap_or(NO_LOOP),
-                        children.iter().any(|c| c.limited),
-                    )
-                } else {
-                    children
-                        .iter()
-                        .filter(|c| c.dn == 0)
-                        .map(|c| (c.loop_depth, c.limited))
-                        .max_by_key(|&(loop_depth, limited)| (!limited, loop_depth))
-                        .expect("不詰の AND ノードには逃れの子がある")
-                };
-                (loop_depth, limited, hand)
+            let escape = || {
+                children
+                    .iter()
+                    .filter(|c| c.dn == 0)
+                    .max_by_key(|c| (!c.limited, c.loop_depth))
+                    .expect("不詰の AND ノードには逃れの子がある")
+            };
+            let (loop_depth, limited, depth_limited) = if or_node {
+                (
+                    children.iter().map(|c| c.loop_depth).min().unwrap_or(NO_LOOP),
+                    children.iter().any(|c| c.limited),
+                    children.iter().any(|c| c.depth_limited),
+                )
+            } else {
+                let e = escape();
+                (e.loop_depth, e.limited, e.depth_limited)
+            };
+            let disproof = if !PIECES {
+                hand
             } else if or_node {
                 let disproof = children
                     .iter()
                     .fold(FULL_HAND, |h, c| hand_min(h, st.hand_before(c.mv, c.hand)));
-                (
-                    children.iter().map(|c| c.loop_depth).min().unwrap_or(NO_LOOP),
-                    children.iter().any(|c| c.limited),
-                    st.disproof_hand_for_checks(disproof, self.attacker),
-                )
+                st.disproof_hand_for_checks(disproof, self.attacker)
             } else {
-                let escape = children
-                    .iter()
-                    .filter(|c| c.dn == 0)
-                    .max_by_key(|c| (!c.limited, c.loop_depth))
-                    .expect("不詰の AND ノードには逃れの子がある");
-                (
-                    escape.loop_depth,
-                    escape.limited,
-                    st.disproof_hand_for_escape(escape.mv, escape.hand, self.attacker),
-                )
+                let e = escape();
+                st.disproof_hand_for_escape(e.mv, e.hand, self.attacker)
             };
             // ループの始点がこのノードかそれより深ければ、このノードから読み直しても同じ循環になる
             let loop_depth = if usize::from(loop_depth) >= depth {
@@ -888,7 +1419,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             } else {
                 loop_depth
             };
-            let result = NodeResult::disproven(loop_depth, limited, disproof);
+            let result = NodeResult {
+                depth_limited,
+                ..NodeResult::disproven(loop_depth, limited, disproof)
+            };
             return if result.is_conditional() {
                 NodeResult { hand, ..result }
             } else {
@@ -900,6 +1434,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
 
     fn store(&mut self, key: TableKey, depth: usize, result: &NodeResult, searched: u64) {
         if result.is_conditional() {
+            return;
+        }
+        if self.futility && result.is_proven() {
+            if let Some(tables) = self.tables {
+                tables.borrow_mut().store_mate_len(key.key, result.mate_len);
+            }
             return;
         }
         self.table.store::<PIECES>(

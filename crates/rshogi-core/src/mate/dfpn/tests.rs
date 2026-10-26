@@ -19,7 +19,7 @@ use crate::position::Position;
 use crate::time::Instant;
 use crate::types::{Color, Hand, PieceType};
 
-fn position(sfen: &str) -> Position {
+pub(super) fn position(sfen: &str) -> Position {
     let mut pos = Position::new();
     pos.set_sfen(sfen).unwrap_or_else(|e| panic!("{sfen}: {e:?}"));
     pos
@@ -55,7 +55,7 @@ fn is_contradiction(a: &MateResult, b: &MateResult) -> bool {
     )
 }
 
-fn pv_usi(pv: &[Move]) -> String {
+pub(super) fn pv_usi(pv: &[Move]) -> String {
     pv.iter().map(|m| m.to_usi()).collect::<Vec<_>>().join(" ")
 }
 
@@ -205,7 +205,8 @@ const KNOWN_TSUME: [(&str, usize); 6] = [
 ];
 
 /// 将棋図巧 第 1 番 (69 手詰め)
-const ZUKOU_001: &str = "1pG1B4/Gs+P6/pP7/n1ls5/3k5/nL4+r1b/1+p1p+R4/1S7/2N5K b SP2gn2l11p 1";
+pub(super) const ZUKOU_001: &str =
+    "1pG1B4/Gs+P6/pP7/n1ls5/3k5/nL4+r1b/1+p1p+R4/1S7/2N5K b SP2gn2l11p 1";
 
 #[test]
 fn solves_one_ply_mate() {
@@ -303,7 +304,7 @@ fn tie_seed_search_agrees_with_brute_force_on_random_positions() {
         let mut searcher = Searcher::<_, PIECES>::new(&table, &mut scratch, attacker, budget);
         configure(&mut searcher, mode);
         searcher.set_tie_seed(seed);
-        match solve_with(&mut searcher, pos) {
+        match solve_with(&mut searcher, pos, true) {
             Some(SolveOutcome::Mate(pv)) => MateResult::Mate(pv),
             Some(SolveOutcome::NoMate) => MateResult::NoMate,
             None => MateResult::Unknown,
@@ -688,7 +689,7 @@ const RANDOM_HANDS: [&str; 12] = [
 ];
 
 /// 玉の周りに数枚の駒を置いた詰将棋風の乱択局面 (攻め方 = 先手)
-fn random_tsume_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
+pub(super) fn random_tsume_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
     const PIECES: [&str; 14] = RANDOM_PIECES;
     const HANDS: [&str; 12] = RANDOM_HANDS;
     let mut board = vec![vec![String::new(); 9]; 9];
@@ -916,7 +917,7 @@ fn solve_in_table<const PIECES: bool>(
     let mut scratch = Scratch::new();
     let attacker = pos.side_to_move();
     let mut searcher = Searcher::<_, PIECES>::new(table, &mut scratch, attacker, budget);
-    match solve_with(&mut searcher, pos) {
+    match solve_with(&mut searcher, pos, true) {
         Some(SolveOutcome::Mate(pv)) => {
             assert!(is_valid_mate_pv(pos, &pv), "{}: {}", pos.to_sfen(), pv_usi(&pv));
             MateResult::Mate(pv)
@@ -1083,7 +1084,7 @@ fn clear_kingless_checkers(pos: &mut Position) {
 }
 
 /// [`legal_moves_by_rules`] のうち王手
-fn checks_by_rules(pos: &mut Position) -> Vec<Move> {
+pub(super) fn checks_by_rules(pos: &mut Position) -> Vec<Move> {
     legal_moves_by_rules(pos)
         .into_iter()
         .filter(|&mv| {
@@ -1096,7 +1097,7 @@ fn checks_by_rules(pos: &mut Position) -> Vec<Move> {
 }
 
 /// `brute_mate` を、指し手生成を使わない合法手 ([`legal_moves_by_rules`]) で行う
-fn brute_mate_by_rules(pos: &mut Position, plies: u32) -> bool {
+pub(super) fn brute_mate_by_rules(pos: &mut Position, plies: u32) -> bool {
     if plies == 0 {
         return false;
     }
@@ -1251,7 +1252,7 @@ fn random_kingless_setup(rng: &mut Xoshiro256PlusPlus) -> Setup {
     }
 }
 
-fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
+pub(super) fn random_kingless_position(rng: &mut Xoshiro256PlusPlus) -> Option<Position> {
     random_kingless_setup(rng).position()
 }
 
@@ -1746,7 +1747,7 @@ fn solve_graph_in_mode<const PIECES: bool>(
         searcher.estimate_initial_values();
         searcher.count_disproof_weakly(super::state::PNDN_UNIT);
     }
-    solve_with(&mut searcher, graph)
+    solve_with(&mut searcher, graph, true)
 }
 
 /// グラフ上の詰み手順を検証する: 辺に沿い、同じ節点に戻らず、子の無い AND で終わる
