@@ -282,7 +282,7 @@ fn positions_without_interpositions_match_the_reference() {
 #[test]
 fn effective_interpositions_are_counted() {
     // 最短の王手の後に、無駄合いでない合駒が最長の応手としてある。2 局面目は、後手の竜の王手 △9一竜 への ▲9二香を
-    // 竜で取ると玉に竜を取り返され、取った後の詰みが長くなるので有効な合駒
+    // 竜で取ると玉に竜を取り返されるので有効な合駒
     for sfen in [
         "9/8k/9/6+R+L1/9/9/9/9/9 b LPsp 1",
         "8+r/9/K8/2+r6/9/9/9/9/9 w L2g 1",
@@ -535,6 +535,8 @@ fn recapturable_interpositions_are_effective() {
 
     let sfen = "g7k/RP7/6G2/8P/9/9/9/9/4K4 b p 1";
     assert_matches_reference(sfen, 3);
+    // 攻め方の玉が無くても同じ
+    assert_matches_reference("g7k/RP7/6G2/8P/9/9/9/9/9 b p 1", 3);
     let mut pos = position(sfen);
     let attacker = pos.side_to_move();
     MateState::do_move(&mut pos, Move::from_usi("9b9a+").unwrap());
