@@ -41,21 +41,8 @@ pub(super) struct RejoinArgs {
     /// 後手を自分として解くときの千日手の値 (対局の DrawValueWhite に揃える)
     #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     draw_value_white: i32,
-    /// 相手の手の頻度の定跡 (`book_from_csa` の .db、手の count を局数として使う)。渡すと重みを付ける
-    #[arg(long)]
-    opp_freq: Option<PathBuf>,
-    /// 重み: 相手の局数がこれ未満の局面と手では辿るのを止める
-    #[arg(long, default_value_t = 3)]
-    min_games: u64,
-    /// 重み: 初期局面からこの手数まで辿る
-    #[arg(long, default_value_t = 80)]
-    max_ply: usize,
-    /// 重み: これ未満の重みの局面では辿るのを止める
-    #[arg(long, default_value_t = 1e-5)]
-    weight_floor: f64,
-    /// 一覧と自分の手番の局面の展開に使う重みの下限 (`--opp-freq` を渡したときだけ使う)
-    #[arg(long, default_value_t = 0.0)]
-    min_weight: f64,
+    #[command(flatten)]
+    weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -110,6 +97,44 @@ pub(super) struct RejoinSummary {
     pub pruned_positions: usize,
 }
 
+/// 相手の手の頻度による重みの引数。`master rejoin` と `master audit` で同じ意味。
+#[derive(Args, Debug, Clone)]
+pub(super) struct WeightArgs {
+    /// 相手の手の頻度の定跡 (`book_from_csa` の .db、手の count を局数として使う)。渡すと重みを付ける
+    #[arg(long)]
+    pub opp_freq: Option<PathBuf>,
+    /// 重み: 相手の局数がこれ未満の局面と手では辿るのを止める
+    #[arg(long, default_value_t = 3)]
+    pub min_games: u64,
+    /// 重み: 初期局面からこの手数まで辿る
+    #[arg(long, default_value_t = 80)]
+    pub max_ply: usize,
+    /// 重み: これ未満の重みの局面では辿るのを止める
+    #[arg(long, default_value_t = 1e-5)]
+    pub weight_floor: f64,
+    /// 一覧に出す重みの下限 (`--opp-freq` を渡したときだけ使う)。rejoin は自分の手番の局面の展開にも使う
+    #[arg(long, default_value_t = 0.0)]
+    pub min_weight: f64,
+}
+
+impl WeightArgs {
+    pub fn check(&self) -> Result<()> {
+        ensure!(
+            self.weight_floor >= 0.0 && self.min_weight >= 0.0,
+            "重みの下限は 0 以上にしてください"
+        );
+        Ok(())
+    }
+
+    pub fn options(&self) -> WeightOptions {
+        WeightOptions {
+            min_games: self.min_games,
+            max_ply: self.max_ply,
+            floor: self.weight_floor,
+        }
+    }
+}
+
 /// 重みの付け方。
 #[derive(Debug, Clone, Copy)]
 pub(super) struct WeightOptions {
@@ -124,12 +149,9 @@ pub(super) fn run(args: RejoinArgs) -> Result<()> {
 
 fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
-    ensure!(
-        args.weight_floor >= 0.0 && args.min_weight >= 0.0,
-        "重みの下限は 0 以上にしてください"
-    );
+    args.weight.check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
-    if let Some(freq) = &args.opp_freq {
+    if let Some(freq) = &args.weight.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
     reject_same_file(&args.table, &inputs)?;
@@ -139,13 +161,9 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         white: args.draw_value_white,
     };
     let values = evaluate(&positions, draws)?;
-    let freq = args.opp_freq.as_deref().map(BookDb::read).transpose()?;
+    let freq = args.weight.opp_freq.as_deref().map(BookDb::read).transpose()?;
     let index = BookIndex::new(&positions)?;
-    let weight_options = WeightOptions {
-        min_games: args.min_games,
-        max_ply: args.max_ply,
-        floor: args.weight_floor,
-    };
+    let weight_options = args.weight.options();
 
     let mut table = String::from(
         "side\tkey\tply\tmove\trole\texpected\tdig\trejoin_move\trejoin\trejoin_main\trejoin_value\tdrop\texpected_black\trejoin_value_black\tweight\tdig_games\trejoin_games\n",
@@ -165,13 +183,13 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
                 start,
                 preset: args.preset,
                 line: args.line,
-                min_weight: args.min_weight,
+                min_weight: args.weight.min_weight,
             };
             let (mut rejoins, mut summary) =
                 find_rejoins(&index, &values, query, weights.as_ref(), freq.as_ref())?;
             if weights.is_some() {
                 let before = rejoins.len();
-                rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.min_weight);
+                rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.weight.min_weight);
                 summary.below_min_weight = before - rejoins.len();
             }
             Ok((side, rejoins, summary))
@@ -467,11 +485,13 @@ mod tests {
             preset: Preset::Random,
             draw_value_black: 0,
             draw_value_white: 0,
-            opp_freq,
-            min_games: 3,
-            max_ply: 80,
-            weight_floor: 1e-5,
-            min_weight: 0.0,
+            weight: WeightArgs {
+                opp_freq,
+                min_games: 3,
+                max_ply: 80,
+                weight_floor: 1e-5,
+                min_weight: 0.0,
+            },
             threads: 0,
         }
     }

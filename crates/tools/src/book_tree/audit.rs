@@ -1,7 +1,10 @@
 //! 定跡の元データの読みの値を `book_backprop` の後退解析で伝播し、main が伝播後の 1 位から
 //! どれだけ負けるかを点検する。元データは書き換えない。
 
+use super::refutation::{self, RefutationOutputs};
 use super::register::{COLUMNS, ROLES};
+use super::rejoin::WeightArgs;
+use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
 use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
     percentile, propagate_values, retain_known, write_book_atomic,
@@ -36,6 +39,35 @@ pub(super) struct AuditArgs {
     /// 値の分かる手だけを載せた、伝播後の値つき .db の出力先
     #[arg(long)]
     out_db: Option<PathBuf>,
+    /// 反駁の表 (TSV) の出力先。伝播後の 1 位が伸ばしていない手で、伸ばした手の最善を
+    /// --refutation-margin 以上上回る局面を書く
+    #[arg(long)]
+    refutation_table: Option<PathBuf>,
+    /// 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す
+    #[arg(long, default_value_t = 1)]
+    refutation_margin: i32,
+    /// 反駁の局面ごとに、伸ばしていない手を指した後の局面を根にした `tree enqueue --from` の行 (JSON Lines) の出力先
+    #[arg(long)]
+    enqueue_out: Option<PathBuf>,
+    /// キューの行の depth
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=MAX_DEPTH as u64)
+    )]
+    refutation_depth: usize,
+    /// キューの行の数の上限 (表の順で先から)
+    #[arg(long)]
+    refutation_max: Option<usize>,
+    /// キューの行の priority の基準。表の順位 (0 始まり、99 で頭打ち) を足す
+    #[arg(
+        long,
+        default_value_t = DEFAULT_PRIORITY,
+        value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_PRIORITY - 99))
+    )]
+    priority: u32,
+    #[command(flatten)]
+    weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -66,7 +98,7 @@ pub(super) enum Origin {
 }
 
 impl Origin {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Origin::Eval => "eval",
             Origin::Propagated => "propagated",
@@ -81,6 +113,8 @@ pub(super) struct AuditedMove {
     pub value: i32,
     pub origin: Origin,
     pub eval: Option<i32>,
+    /// 1 位と同値で選ばれず、`value` を -1 した手か (補正前の値は `value + 1`)。
+    pub tie_lowered: bool,
 }
 
 /// 点検の表の 1 行。
@@ -134,13 +168,30 @@ pub(super) fn run(args: AuditArgs) -> Result<()> {
 
 fn run_in_pool(args: AuditArgs) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
-    let master = resolve(&args.master);
-    let table = resolve_output(&args.table)?;
-    ensure!(table != master, "--table が元データと同じです: {}", args.table.display());
-    if let Some(out) = &args.out_db {
-        let out = resolve_output(out)?;
-        ensure!(out != master, "--out-db が元データと同じです");
-        ensure!(out != table, "--out-db が --table と同じです");
+    ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
+    let refutation = args.refutation_table.is_some() || args.enqueue_out.is_some();
+    ensure!(
+        refutation || args.weight.opp_freq.is_none(),
+        "--opp-freq は --refutation-table か --enqueue-out と一緒に使います"
+    );
+    args.weight.check()?;
+    let mut inputs = vec![("--master", args.master.as_path())];
+    if let Some(freq) = &args.weight.opp_freq {
+        inputs.push(("--opp-freq", freq.as_path()));
+    }
+    let outputs: Vec<(&str, &Path)> = [
+        ("--table", Some(args.table.as_path())),
+        ("--out-db", args.out_db.as_deref()),
+        ("--refutation-table", args.refutation_table.as_deref()),
+        ("--enqueue-out", args.enqueue_out.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, path)| Some((name, path?)))
+    .collect();
+    for (i, (name, path)) in outputs.iter().enumerate() {
+        let mut others = inputs.clone();
+        others.extend(outputs[..i].iter().copied());
+        reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
     let positions = read_master(&args.master)?;
     let draws = DrawValues {
@@ -153,6 +204,18 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         write_audited_db(out, &positions.0, &book)?;
     }
     print!("{}", format_summary(&summary, args.line, draws));
+    if refutation {
+        let outputs = RefutationOutputs {
+            table: args.refutation_table.as_deref(),
+            enqueue_out: args.enqueue_out.as_deref(),
+            margin: args.refutation_margin,
+            depth: args.refutation_depth,
+            max: args.refutation_max,
+            priority: args.priority,
+            weight: &args.weight,
+        };
+        print!("{}", refutation::write_outputs(&args.master, &positions.0, &book, &outputs)?);
+    }
     Ok(())
 }
 
@@ -264,8 +327,8 @@ fn mean_eval(text: &str) -> Result<Option<i32>> {
 
 /// 点検後のグラフと、元データの手との対応。
 pub(super) struct AuditedBook {
-    graph: Graph,
-    known: Vec<Vec<bool>>,
+    pub graph: Graph,
+    pub known: Vec<Vec<bool>>,
 }
 
 fn write_audited_db(
@@ -451,7 +514,7 @@ pub(super) fn master_values(
 
 /// 伝播後のグラフから、局面の手ごとの伝播後の値を元データの手の順 (main が先頭) で取り出す。値の分からない
 /// 手は `None`。
-fn audited_moves(
+pub(super) fn audited_moves(
     graph: &Graph,
     key: &str,
     position: &MasterPosition,
@@ -481,6 +544,7 @@ fn audited_moves(
                 value: value.new,
                 origin,
                 eval: m.eval,
+                tie_lowered: value.tie_lowered,
             }))
         })
         .collect()
@@ -1003,6 +1067,19 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             out_db: out_db.map(|p| dir.path().join(p)),
+            refutation_table: None,
+            refutation_margin: 1,
+            enqueue_out: None,
+            refutation_depth: 2,
+            refutation_max: None,
+            priority: 100,
+            weight: WeightArgs {
+                opp_freq: None,
+                min_games: 3,
+                max_ply: 80,
+                weight_floor: 1e-5,
+                min_weight: 0.0,
+            },
             threads: 1,
         };
         assert!(run(args("moves.tsv", None)).is_err());
@@ -1017,5 +1094,22 @@ mod tests {
         let db = std::fs::read_to_string(dir.path().join("audited.db")).unwrap();
         assert!(db.contains("5i4h none -30 1 2"), "{db}");
         assert!(db.contains("5i6h none 10 1 1"), "{db}");
+
+        let mut with_refutation = args("audit2.tsv", None);
+        with_refutation.refutation_table = Some(dir.path().join("refutation.tsv"));
+        with_refutation.enqueue_out = Some(dir.path().join("audit2.tsv"));
+        assert!(run(with_refutation).is_err());
+        let mut opp_freq_only = args("audit2.tsv", None);
+        opp_freq_only.weight.opp_freq = Some(dir.path().join("freq.db"));
+        assert!(run(opp_freq_only).is_err());
+        let mut with_refutation = args("audit2.tsv", None);
+        with_refutation.refutation_table = Some(dir.path().join("refutation.tsv"));
+        with_refutation.enqueue_out = Some(dir.path().join("queue.jsonl"));
+        run(with_refutation).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("audit2.tsv")).unwrap(), table);
+        let refutation = std::fs::read_to_string(dir.path().join("refutation.tsv")).unwrap();
+        assert_eq!(refutation.lines().count(), 2);
+        let queue = std::fs::read_to_string(dir.path().join("queue.jsonl")).unwrap();
+        assert_eq!(queue.lines().count(), 1);
     }
 }

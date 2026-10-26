@@ -16,6 +16,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `book_mine master audit` に反駁の点検 (YaneuraOu の `peta refutation` に当たる) を追加。`--refutation-table` で、伝播後の
+  1 位が先を伸ばしていない手で、伸ばした手の最善を `--refutation-margin` (既定 1) 以上上回る局面を書き、`--enqueue-out` で
+  その手の後の局面を根にした `tree enqueue --from` の行を書く (priority は `--priority` + 表の順位)。重みは `master rejoin`
+  と同じ `--opp-freq` などで付ける。値は同値の -1 補正の前の値で比べる。オプションを付けなければ既存の出力は変わらない。
+
 - `book_mine master rejoin` / `cycles` の頂点の展開では完全な局面を直接構築し、在庫検査とハッシュ計算の重複を省く。
 
 - `book_backprop` と `book_mine` の局面索引・key 検査に、評価用の初期化を省く読み取り専用局面を使う。

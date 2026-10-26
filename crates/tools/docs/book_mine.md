@@ -444,7 +444,9 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db]
+  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] \
+  [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
+  [--opp-freq strong_games.db --min-weight 0.001]
 ```
 
 定跡の元データの表 (上の 11 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
@@ -457,6 +459,13 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
+| `--refutation-table <PATH>` | なし | 反駁の表 (TSV) の出力先 (下の「反駁の点検」) |
+| `--refutation-margin <CP>` | `1` | 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す (1 以上) |
+| `--enqueue-out <PATH>` | なし | 反駁の局面を読み足す、`book_mine tree enqueue --from` に渡す行 (JSON Lines) の出力先 |
+| `--refutation-depth <N>` | `2` | キューの行の `depth` (0〜20) |
+| `--refutation-max <N>` | なし | キューの行の数の上限 (表の順で先から) |
+| `--priority <N>` | `100` | キューの行の priority の基準 (`borrow cut` の `--priority` と同じ意味)。表の順位を足す |
+| `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁の表の重み。`master rejoin` と同じ意味 (`--min-weight` は表から落とす下限)。`--opp-freq` は反駁の出力と一緒に使う |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
 伝播の仕方:
@@ -469,6 +478,25 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
 
 標準出力に要約を出します: 局面数 (手番ごと)、手の数・値の分かる手の数・非合法手・除いた record、読みの値から伝播で変わった手の数と差の分布、読みの値が無く伝播で値が付いた手の数、main・alt が 2 手以上の局面数、main が 1 位から線未満・線以上負ける局面数、main の値が分からない局面数、循環 (自明でない強連結成分) の数。
+
+### 反駁の点検
+
+YaneuraOu の `peta refutation` に当たります。読みの MultiPV の 2 位以下の値は 1 位より甘く出やすく、伝播で 1 位の手の先が掘られて値が下がると、先を伸ばしていない甘い手が伝播後の 1 位に繰り上がります。`--refutation-table` か `--enqueue-out` を渡すと、次の局面を出します。どちらも渡さなければ、上の表・要約・`--out-db` の出力は変わりません。
+
+- 伸ばした手 (`*_from` が `propagated`、book 内の子局面から値が来る手) と伸ばしていない手 (`eval`、1 回の読みの値) の両方に値の分かる手がある局面で、伸ばしていない手の最善 `best` が伸ばした手の最善 `expanded_best` を `--refutation-margin` 以上上回る局面 (同じ値なら元データの順で先の手を最善とします)。
+- 値は同値の -1 補正の前の値で比べます。伝播の書き出し (`--out-db` と `book_backprop`) は 1 位と同値で選ばなかった手を -1 するので、補正後の値で比べると同値の手が margin 1 で当たるためです。そのため反駁の表の値は、点検の表や `--out-db` の値と 1 違うことがあります。
+- 伝播前の順位は深さの違う読みが混ざるので条件にしません。伝播前の読みの値に `best` の読みの値より大きい手があれば `swapped` を 1 にします (同値なら入れ替わっていないとみなします)。`main_is_best` は main が `best` なら 1 です。
+
+反駁の表の列は `key ply side main main_value main_from best best_value best_eval expanded_best expanded_best_value expanded_best_eval margin swapped main_is_best weight best_value_black expanded_best_value_black source best_source` です。`margin = best_value - expanded_best_value`、値は手番の側から、`*_black` は先手から見た値 (プラス = 先手良し)、`source` は main の行の source、`best_source` は `best` の行の source です。main の値が分からなければ `main_value`・`main_from` だけ空にします (`main` には手を書きます)。重み `weight` は `--opp-freq` を渡したときだけ埋まり、局面の手番の側を自分として `master rejoin` と同じ規則で初期局面から辿った重みです (main だけで辿るので、alt からしか届かない局面は 0)。重みがあれば重みの大きい順、無ければ `margin` の大きい順 (同じなら key 順) に並べ、`--min-weight` 未満の局面を除きます。
+
+`--enqueue-out` は表の順で 1 局面 1 行、`book_mine tree enqueue --from` にそのまま渡せる行を書きます (書く前に enqueue と同じ検査を通します。キューには触りません)。
+
+- `root` は `best` を指した後の局面 (相手の手番、手数は元データの `ply` + 1)、`own` は `best` を指す側 (`key` の手番、定跡の自分の側)、`depth` は `--refutation-depth` です。相手の手番の根では木が相手の応手を `opp_n` 手まで伸ばすので、`best` が相手の応手に耐えるかを読めます。
+- `id` は `<key と best の SHA-256 の先頭 16 桁>_refut_<b|w>` です。同じ局面・同じ `best` を足し直すと同じ id (キューは同じ id の最後の行が有効)、`best` が変われば別の id になります。
+- `priority` は `--priority + min(表の順位, 99)` です (表の順位は 0 始まりで、重みがあれば重みの順、無ければ `margin` の順)。小さいほど先です。
+- `memo` は `refutation margin=<margin> best=<best> expanded_best=<expanded_best>` です。
+
+標準出力の要約の後に、値の分かる手が 2 手以上の局面数、伸ばした手と伸ばしていない手の両方がある局面数、当たる局面数 (`swapped`・`main_is_best` の数)、`margin` の分布を出します。重みがあれば表の行数と重みの下限で除いた数、`--enqueue-out` があればキューの行数も出します。出力先が元データ・`--opp-freq`・他の出力先と同じファイルなら止まります。
 
 注意:
 

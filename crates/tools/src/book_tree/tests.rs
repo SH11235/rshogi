@@ -701,6 +701,29 @@ fn min_failure_is_reported_and_done_follows_all_artifacts() {
 }
 
 #[test]
+fn opponent_root_expands_opp_n_replies() {
+    // 相手の手番の根では MultiPV の上位 opp_n 手を伸ばし、自分の手番の根では 1 位と手順の手だけを伸ばす。
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 1;
+    def.opp_n = 3;
+    def.extra = Vec::new();
+    def.own = "w".into();
+    let mut tree = Tree::load(def, &s).unwrap();
+    tree.advance(&corpus(&s)).unwrap();
+    assert!(tree.candidates[ROOT].contains(&"5i6i".to_owned()));
+    let mut def = definition(dir.path(), 0);
+    def.depth = 1;
+    def.opp_n = 3;
+    def.extra = Vec::new();
+    def.out = dir.path().join("out-own");
+    let mut tree = Tree::load(def, &s).unwrap();
+    tree.advance(&corpus(&s)).unwrap();
+    assert!(!tree.candidates[ROOT].contains(&"5i6i".to_owned()));
+}
+
+#[test]
 fn report_includes_opponent_candidates_and_unexpanded_warning() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
