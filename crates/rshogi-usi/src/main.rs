@@ -1418,8 +1418,8 @@ impl UsiEngine {
                     };
                     *field = v;
                 }
-                None => println!(
-                    "info string {name}: invalid value '{value}' (expected -1..=99999); unchanged"
+                None => eprintln!(
+                    "info string Warning: {name}: invalid value '{value}' (expected -1..=99999); unchanged"
                 ),
             },
             "NarrowBook" => {

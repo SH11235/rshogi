@@ -423,14 +423,36 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
         "{stdout}"
     );
     assert!(
-        stdout.contains(
-            "info string BookDepthWhiteLimit: invalid value '100000' (expected -1..=99999); unchanged"
-        ),
-        "{stdout}"
-    );
-    assert!(
         stdout.contains("info string BookEvalWhiteDiff = 0 : 2 moves to 1 moves."),
         "{stdout}"
     );
     assert_eq!(first_bestmove(&stdout), Some("bestmove 3c3d ponder 2g2f"), "{stdout}");
+}
+
+#[test]
+fn per_side_book_option_invalid_value_warns_on_stderr() {
+    let mut cmd = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
+    let output = cmd
+        .write_stdin(
+            "usi\n\
+             setoption name BookDepthWhiteLimit value 100000\n\
+             setoption name BookEvalBlackDiff value abc\n\
+             quit\n",
+        )
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    for (name, value) in [
+        ("BookDepthWhiteLimit", "100000"),
+        ("BookEvalBlackDiff", "abc"),
+    ] {
+        let warning = format!(
+            "info string Warning: {name}: invalid value '{value}' (expected -1..=99999); unchanged"
+        );
+        assert!(stderr.lines().any(|line| line == warning), "{stderr}");
+        assert!(!stdout.contains("invalid value"), "{stdout}");
+    }
 }

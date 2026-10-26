@@ -40,7 +40,7 @@ YaneuraOu の `BOOK_OPTIONS V2` の同名オプションと同じです。
   `BookDepthLimit`) をその時点の値で使います。評価値差と depth 下限は別々に決まります。
 - `FlippedBook` で先後反転した局面に当たったときも、使うのは元の root 局面の手番の値です。
 - `setoption` の順序によらず結果は同じです。共通の値を後から変えても個別の値は残り、個別の値に
-  `-1` を送ると共通の値を使う状態に戻ります。範囲外や数でない値は無視し、info string で知らせます。
+  `-1` を送ると共通の値を使う状態に戻ります。範囲外や数でない値は無視し、標準エラー出力に警告 (`info string Warning: ...`) を出します。
 - 定跡手を絞ったときの info string には、使った値のオプション名 (共通なら `BookEvalDiff`、個別なら
   `BookEvalBlackDiff` 等) を出します。
 
