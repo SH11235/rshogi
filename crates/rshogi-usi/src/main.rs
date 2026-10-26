@@ -414,6 +414,10 @@ impl UsiEngine {
         println!("option name BookEvalBlackLimit type spin default 0 min -30000 max 30000");
         println!("option name BookEvalWhiteLimit type spin default -140 min -30000 max 30000");
         println!("option name BookDepthLimit type spin default 0 min 0 max 256");
+        // 先後別の値。-1 なら BookEvalDiff / BookDepthLimit を使う。
+        for name in BOOK_PER_SIDE_OPTIONS {
+            println!("option name {name} type spin default -1 min -1 max 99999");
+        }
         println!("option name NarrowBook type check default false");
         println!("option name BookSelectValue type check default false");
         println!("option name ConsiderBookMoveCount type check default false");
@@ -1401,6 +1405,23 @@ impl UsiEngine {
                     self.book_options.depth_limit = v;
                 }
             }
+            "BookEvalBlackDiff"
+            | "BookEvalWhiteDiff"
+            | "BookDepthBlackLimit"
+            | "BookDepthWhiteLimit" => match parse_book_per_side_value(&value) {
+                Some(v) => {
+                    let field = match name.as_str() {
+                        "BookEvalBlackDiff" => &mut self.book_options.eval_black_diff,
+                        "BookEvalWhiteDiff" => &mut self.book_options.eval_white_diff,
+                        "BookDepthBlackLimit" => &mut self.book_options.depth_black_limit,
+                        _ => &mut self.book_options.depth_white_limit,
+                    };
+                    *field = v;
+                }
+                None => println!(
+                    "info string {name}: invalid value '{value}' (expected -1..=99999); unchanged"
+                ),
+            },
             "NarrowBook" => {
                 self.book_options.narrow_book = value == "true" || value == "1";
             }
@@ -2094,6 +2115,23 @@ fn validate_layer_stack_routing(
     })
 }
 
+/// 先後別の定跡オプション。`usi` ではこの順に出す。
+const BOOK_PER_SIDE_OPTIONS: [&str; 4] = [
+    "BookEvalBlackDiff",
+    "BookEvalWhiteDiff",
+    "BookDepthBlackLimit",
+    "BookDepthWhiteLimit",
+];
+
+/// 先後別の定跡オプションの値を読む。-1 は共通値の継承 (`Some(None)`)、範囲外や数でなければ `None`。
+fn parse_book_per_side_value(value: &str) -> Option<Option<i32>> {
+    match value.parse::<i32>().ok()? {
+        -1 => Some(None),
+        v @ 0..=99999 => Some(Some(v)),
+        _ => None,
+    }
+}
+
 fn parse_startup_args(args: impl IntoIterator<Item = String>) -> Result<Option<PathBuf>> {
     let mut spec_path = None;
     let mut args = args.into_iter();
@@ -2217,6 +2255,65 @@ mod tests {
             "abc+custom,deep,use-lazy-evaluate"
         );
         assert_eq!(source_version("unknown", "deep", "custom"), "unknown");
+    }
+
+    #[test]
+    fn parse_book_per_side_value_accepts_minus_one_to_99999() {
+        assert_eq!(parse_book_per_side_value("-1"), Some(None));
+        assert_eq!(parse_book_per_side_value("0"), Some(Some(0)));
+        assert_eq!(parse_book_per_side_value("99999"), Some(Some(99999)));
+        for invalid in ["-2", "100000", "abc", "", "1.5"] {
+            assert_eq!(parse_book_per_side_value(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn setoption_book_per_side_options_keep_values_across_shared_changes() {
+        let set = |engine: &mut UsiEngine, name: &str, value: &str| {
+            engine.cmd_setoption(&["setoption", "name", name, "value", value]);
+        };
+        let per_side = |engine: &UsiEngine| {
+            let o = &engine.book_options;
+            (o.eval_black_diff, o.eval_white_diff, o.depth_black_limit, o.depth_white_limit)
+        };
+
+        let mut engine = UsiEngine::new();
+        assert_eq!(per_side(&engine), (None, None, None, None));
+
+        // 共通値の前後どちらで送っても同じ。共通値を変えても個別値は残る。
+        let mut before = UsiEngine::new();
+        set(&mut before, "BookEvalBlackDiff", "10");
+        set(&mut before, "BookEvalDiff", "50");
+        set(&mut engine, "BookEvalDiff", "50");
+        set(&mut engine, "BookEvalBlackDiff", "10");
+        assert_eq!(per_side(&before), per_side(&engine));
+        assert_eq!(engine.book_options.eval_diff, 50);
+        assert_eq!(per_side(&engine), (Some(10), None, None, None));
+
+        set(&mut engine, "BookDepthWhiteLimit", "5");
+        set(&mut engine, "BookDepthLimit", "16");
+        assert_eq!(per_side(&engine), (Some(10), None, None, Some(5)));
+        assert_eq!(engine.book_options.depth_limit, 16);
+
+        // 不正値・範囲外は値を変えない。
+        for invalid in ["-2", "100000", "abc"] {
+            set(&mut engine, "BookEvalBlackDiff", invalid);
+            set(&mut engine, "BookDepthWhiteLimit", invalid);
+        }
+        assert_eq!(per_side(&engine), (Some(10), None, None, Some(5)));
+
+        set(&mut engine, "BookEvalWhiteDiff", "0");
+        set(&mut engine, "BookDepthBlackLimit", "99999");
+        assert_eq!(per_side(&engine), (Some(10), Some(0), Some(99999), Some(5)));
+
+        // -1 で共通値の継承に戻る。
+        for name in BOOK_PER_SIDE_OPTIONS {
+            set(&mut engine, name, "-1");
+        }
+        assert_eq!(per_side(&engine), (None, None, None, None));
+        assert_eq!(engine.book_options.eval_diff, 50);
+        assert_eq!(engine.book_options.depth_limit, 16);
     }
 
     #[test]

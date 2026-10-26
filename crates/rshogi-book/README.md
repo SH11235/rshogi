@@ -17,6 +17,8 @@
 | `BookEvalBlackLimit` | `0` | 先手番で採用する value 下限。 |
 | `BookEvalWhiteLimit` | `-140` | 後手番で採用する value 下限。 |
 | `BookDepthLimit` | `0` | 筆頭手の depth 下限。`0` は無効。 |
+| `BookEvalBlackDiff` / `BookEvalWhiteDiff` | `-1` | root 局面が先手番 / 後手番のときの `BookEvalDiff`。`-1` なら `BookEvalDiff` を使う。範囲は `-1`〜`99999`。[下記](#先後別の評価値差と-depth-下限)参照。 |
+| `BookDepthBlackLimit` / `BookDepthWhiteLimit` | `-1` | root 局面が先手番 / 後手番のときの `BookDepthLimit`。`-1` なら `BookDepthLimit` を使う。`0` は無効。範囲は `-1`〜`99999`。 |
 | `NarrowBook` | `false` | count 情報がある場合、出現率 10% 未満の手を除外する。 |
 | `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。同値は count 大、さらに同値なら USI 昇順。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
 | `ConsiderBookMoveCount` | `false` | `true` なら count 比例抽選する。全 count が 0 の場合は等確率。 |
@@ -27,6 +29,39 @@
 選択順序は、合法性検証、`BookDepthLimit`、`BookEvalDiff` / value 下限フィルタの後に
 `BookSelectValue` を評価します。`BookSelectValue=false` の場合は従来どおり
 `NarrowBook` を適用し、その後 `ConsiderBookMoveCount` または等確率抽選で選びます。
+
+## 先後別の評価値差と depth 下限
+
+`BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit` で、
+`BookEvalDiff` / `BookDepthLimit` を先手番と後手番で別の値にできます。名前と、`0` 以上の値の意味は
+YaneuraOu の `BOOK_OPTIONS V2` の同名オプションと同じです。
+
+- probe のたびに root 局面の手番側の値を見て、`0` 以上ならそれを、`-1` なら共通の値 (`BookEvalDiff` /
+  `BookDepthLimit`) をその時点の値で使います。評価値差と depth 下限は別々に決まります。
+- `FlippedBook` で先後反転した局面に当たったときも、使うのは元の root 局面の手番の値です。
+- `setoption` の順序によらず結果は同じです。共通の値を後から変えても個別の値は残り、個別の値に
+  `-1` を送ると共通の値を使う状態に戻ります。範囲外や数でない値は無視し、info string で知らせます。
+- 定跡手を絞ったときの info string には、使った値のオプション名 (共通なら `BookEvalDiff`、個別なら
+  `BookEvalBlackDiff` 等) を出します。
+
+例: `BookEvalDiff=30`、`BookEvalBlackDiff=10`、`BookEvalWhiteDiff=-1` なら、評価値差は先手番 10・後手番 30。
+ここで `BookEvalDiff=50` にすると 10 / 50、さらに `BookEvalBlackDiff=-1` にすると 50 / 50 です。
+
+YaneuraOu の `BOOK_OPTIONS V2` の既定値に相当する設定にするには、次を明示的に送ります
+(`BookFile` は使う定跡に合わせる)。
+
+```text
+setoption name BookFile value user_book1.db
+setoption name BookMoves value 200
+setoption name BookEvalBlackDiff value 0
+setoption name BookEvalWhiteDiff value 0
+setoption name BookDepthBlackLimit value 0
+setoption name BookDepthWhiteLimit value 5
+setoption name NarrowBook value false
+setoption name ConsiderBookMoveCount value false
+setoption name IgnoreBookPly value true
+setoption name BookOnTheFly value true
+```
 
 ## 大きい定跡を丸読みせずに使う (BookOnTheFly)
 

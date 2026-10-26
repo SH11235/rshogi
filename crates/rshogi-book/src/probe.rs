@@ -11,6 +11,8 @@
 //!    explore 登録局面はここで合法な定跡手との積集合から等確率で選び、ponder 解決へ進む。
 //! 5. `BookDepthLimit`(0 で無効): 筆頭手 depth 不足なら局面ごと不採用
 //! 6. `BookEvalDiff` / `BookEvalBlackLimit` / `BookEvalWhiteLimit`: 下限未満を除去
+//!    (5・6 の depth 下限と評価値差は、root 局面の手番側の `BookDepthBlackLimit` / `BookEvalBlackDiff`
+//!    等があればそちらを使う)
 //! 7. `BookSelectValue`: true なら value 最大手を決定的に選ぶ(同値は count 降順 → USI 昇順)
 //! 8. `NarrowBook`: count 情報がある場合のみ出現率 10% 未満を除去
 //! 9. 選択: `ConsiderBookMoveCount` なら count 比例抽選(全 0 は等確率)、false は等確率
@@ -103,6 +105,52 @@ pub struct BookOptions {
     pub consider_move_count: bool,
     /// `FlippedBook`: miss 時に先後反転局面で再検索するか。
     pub flipped_book: bool,
+    /// `BookEvalBlackDiff`: 先手番の `eval_diff`。`None` なら `eval_diff` を使う。
+    pub eval_black_diff: Option<i32>,
+    /// `BookEvalWhiteDiff`: 後手番の `eval_diff`。`None` なら `eval_diff` を使う。
+    pub eval_white_diff: Option<i32>,
+    /// `BookDepthBlackLimit`: 先手番の `depth_limit`。`None` なら `depth_limit` を使う。
+    pub depth_black_limit: Option<i32>,
+    /// `BookDepthWhiteLimit`: 後手番の `depth_limit`。`None` なら `depth_limit` を使う。
+    pub depth_white_limit: Option<i32>,
+}
+
+/// root 局面の手番で決まる評価値差・depth 下限と、info string に出すオプション名。
+struct SideLimits {
+    eval_diff_name: &'static str,
+    eval_diff: i32,
+    depth_limit_name: &'static str,
+    depth_limit: i32,
+}
+
+impl BookOptions {
+    /// 手番側の個別値があればそれを、無ければ共通値を使う。評価値差と depth は独立に決める。
+    fn side_limits(&self, side: Color) -> SideLimits {
+        let (eval_side, depth_side) = match side {
+            Color::Black => (
+                (self.eval_black_diff, "BookEvalBlackDiff"),
+                (self.depth_black_limit, "BookDepthBlackLimit"),
+            ),
+            Color::White => (
+                (self.eval_white_diff, "BookEvalWhiteDiff"),
+                (self.depth_white_limit, "BookDepthWhiteLimit"),
+            ),
+        };
+        let (eval_diff, eval_diff_name) = match eval_side {
+            (Some(v), name) => (v, name),
+            (None, _) => (self.eval_diff, "BookEvalDiff"),
+        };
+        let (depth_limit, depth_limit_name) = match depth_side {
+            (Some(v), name) => (v, name),
+            (None, _) => (self.depth_limit, "BookDepthLimit"),
+        };
+        SideLimits {
+            eval_diff_name,
+            eval_diff,
+            depth_limit_name,
+            depth_limit,
+        }
+    }
 }
 
 impl Default for BookOptions {
@@ -118,6 +166,10 @@ impl Default for BookOptions {
             select_value: false,
             consider_move_count: false,
             flipped_book: true,
+            eval_black_diff: None,
+            eval_white_diff: None,
+            depth_black_limit: None,
+            depth_white_limit: None,
         }
     }
 }
@@ -396,9 +448,15 @@ pub fn probe_with_explore(
         return None;
     }
 
+    // FlippedBook で反転局面を引いても、使う側は元の root 局面の手番で決める。
+    let limits = options.side_limits(position.side_to_move());
+
     // 5. BookDepthLimit(0 で無効): 筆頭手の depth 不足なら局面ごと不採用。
-    if options.depth_limit != 0 && candidates[0].depth < options.depth_limit {
-        info("Top move depth is below BookDepthLimit.");
+    if limits.depth_limit != 0 && candidates[0].depth < limits.depth_limit {
+        info(&format!(
+            "Top move depth is below {} = {}.",
+            limits.depth_limit_name, limits.depth_limit
+        ));
         return None;
     }
 
@@ -410,13 +468,14 @@ pub fn probe_with_explore(
         } else {
             options.eval_white_limit
         };
-        let value_limit = (top_value - options.eval_diff).max(side_limit);
+        let value_limit = (top_value - limits.eval_diff).max(side_limit);
         let before = candidates.len();
         candidates.retain(|c| c.value >= value_limit);
         if candidates.len() != before {
             info(&format!(
-                "BookEvalDiff = {} : {} moves to {} moves.",
-                options.eval_diff,
+                "{} = {} : {} moves to {} moves.",
+                limits.eval_diff_name,
+                limits.eval_diff,
                 before,
                 candidates.len()
             ));
@@ -887,6 +946,170 @@ mod tests {
         assert!(
             probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).is_some()
         );
+    }
+
+    const AFTER_7G7F: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+
+    /// 先手番・後手番の局面を 1 つずつ持つ定跡。どちらも筆頭手 value=100、2 番手 value=80、
+    /// depth は先手番 10・後手番 3。
+    fn both_sides_book() -> Book {
+        let data = format!(
+            "{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 100 10 10\n2g2f 8c8d 80 10 5\n\
+             sfen {AFTER_7G7F}\n3c3d 2g2f 100 3 10\n8c8d 2g2f 80 3 5\n"
+        );
+        Book::from_reader(data.as_bytes(), false).unwrap()
+    }
+
+    /// probe して `(指し手, info 文字列)` を返す。抽選は常に先頭。
+    fn probe_info(book: &Book, sfen: &str, opts: &BookOptions) -> (Option<String>, Vec<String>) {
+        let mut messages = Vec::new();
+        let mut rng = SeqRng::new(vec![0]);
+        let result = probe(std::slice::from_ref(book), &pos(sfen), opts, &mut rng, |m| {
+            messages.push(m.to_string())
+        });
+        (result.map(|r| r.best_move.to_usi()), messages)
+    }
+
+    fn has(messages: &[String], expected: &str) -> bool {
+        messages.iter().any(|m| m == expected)
+    }
+
+    fn filtered(messages: &[String]) -> bool {
+        messages.iter().any(|m| m.contains("moves to"))
+    }
+
+    #[test]
+    fn unset_per_side_options_use_shared_values_on_both_sides() {
+        let book = both_sides_book();
+        let opts = BookOptions {
+            eval_diff: 0,
+            ..Default::default()
+        };
+        for sfen in [HIRATE, AFTER_7G7F] {
+            let (_, messages) = probe_info(&book, sfen, &opts);
+            assert!(has(&messages, "BookEvalDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
+        }
+        let opts = BookOptions {
+            depth_limit: 4,
+            ..Default::default()
+        };
+        assert!(probe_info(&book, HIRATE, &opts).0.is_some());
+        let (best, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert_eq!(best, None);
+        assert!(has(&messages, "Top move depth is below BookDepthLimit = 4."), "{messages:?}");
+    }
+
+    #[test]
+    fn per_side_eval_diff_applies_only_to_its_side() {
+        let book = both_sides_book();
+        let opts = BookOptions {
+            eval_diff: 0,
+            eval_black_diff: Some(30),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, HIRATE, &opts);
+        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert!(!filtered(&messages), "{messages:?}");
+        let (_, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert!(has(&messages, "BookEvalDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
+
+        let opts = BookOptions {
+            eval_diff: 30,
+            eval_white_diff: Some(0),
+            ..Default::default()
+        };
+        let (_, messages) = probe_info(&book, HIRATE, &opts);
+        assert!(!filtered(&messages), "{messages:?}");
+        let (best, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert_eq!(best.as_deref(), Some("3c3d"));
+        assert!(has(&messages, "BookEvalWhiteDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
+    }
+
+    #[test]
+    fn per_side_depth_limit_applies_only_to_its_side_and_independently_of_eval_diff() {
+        let book = both_sides_book();
+        // 後手番の depth だけ個別。評価値差は共通の 0 のまま。
+        let opts = BookOptions {
+            eval_diff: 0,
+            depth_limit: 0,
+            depth_white_limit: Some(4),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert_eq!(best, None);
+        assert!(
+            has(&messages, "Top move depth is below BookDepthWhiteLimit = 4."),
+            "{messages:?}"
+        );
+        let (best, messages) = probe_info(&book, HIRATE, &opts);
+        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert!(has(&messages, "BookEvalDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
+
+        let opts = BookOptions {
+            depth_limit: 0,
+            depth_black_limit: Some(11),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, HIRATE, &opts);
+        assert_eq!(best, None);
+        assert!(
+            has(&messages, "Top move depth is below BookDepthBlackLimit = 11."),
+            "{messages:?}"
+        );
+        assert!(probe_info(&book, AFTER_7G7F, &opts).0.is_some());
+    }
+
+    #[test]
+    fn per_side_zero_and_max_values_override_shared_values() {
+        let book = both_sides_book();
+        // 個別の 0 は「継承」ではなく 0 (評価値差 0、depth 下限なし)。
+        let opts = BookOptions {
+            eval_diff: 30000,
+            depth_limit: 999,
+            eval_black_diff: Some(0),
+            depth_black_limit: Some(0),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, HIRATE, &opts);
+        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert!(has(&messages, "BookEvalBlackDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
+
+        let opts = BookOptions {
+            eval_diff: 0,
+            eval_white_diff: Some(99999),
+            depth_white_limit: Some(99999),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert_eq!(best, None);
+        assert!(
+            has(&messages, "Top move depth is below BookDepthWhiteLimit = 99999."),
+            "{messages:?}"
+        );
+        let opts = BookOptions {
+            depth_white_limit: None,
+            ..opts
+        };
+        let (_, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert!(!filtered(&messages), "{messages:?}");
+    }
+
+    #[test]
+    fn per_side_options_use_root_side_even_when_hit_by_flipped_book() {
+        // 後手番の root (7g7f の後) を、先後反転した先手番の局面だけで登録した定跡。
+        let flipped_sfen = "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 2";
+        let data = format!("{HEADER}\nsfen {flipped_sfen}\n7g7f 8c8d 100 3 10\n2g2f 8c8d 80 3 5\n");
+        let book = Book::from_reader(data.as_bytes(), false).unwrap();
+        let opts = BookOptions {
+            eval_black_diff: Some(30000),
+            eval_white_diff: Some(0),
+            depth_black_limit: Some(999),
+            depth_white_limit: Some(3),
+            ..Default::default()
+        };
+        let (best, messages) = probe_info(&book, AFTER_7G7F, &opts);
+        assert_eq!(best.as_deref(), Some("3c3d"));
+        assert!(has(&messages, "BookEvalWhiteDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
     }
 
     #[test]

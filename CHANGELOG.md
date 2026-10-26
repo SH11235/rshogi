@@ -50,6 +50,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン
 
+- 先後別の定跡オプション `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit`
+  (YaneuraOu の `BOOK_OPTIONS V2` と同じ名前) を追加した。既定 `-1` は共通の `BookEvalDiff` / `BookDepthLimit`
+  を使い、従来どおり。`0` 以上を送ると root 局面がその手番のときだけその値を使う。既存のオプションと既定値は変わらない。
+  depth 下限で定跡を使わなかったときの info string に、使った下限の値を添えた。`rshogi-book` の `BookOptions` に
+  `eval_black_diff` 等の 4 項目 (`Option<i32>`) を足した。詳細は `crates/rshogi-book/README.md`。
 - 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
   (既定 `false` で従来どおり丸読み)。`sfen` 行が SFEN の文字列順に並んだ `.db` が必要で、
   `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。

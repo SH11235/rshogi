@@ -4,6 +4,7 @@
 //! - BookFile=no_book（既定）では定跡関連の出力が一切無く従来挙動が不変であること
 //! - 片側正規化定跡に FlippedBook でヒットすること
 //! - 優先定跡 (`<BookFile の名前>-000.db` 等) を BookFile より先に引くこと
+//! - 先後別の定跡オプション (`BookEvalWhiteDiff` 等) を宣言し、root 局面の手番側で使うこと
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -369,4 +370,67 @@ fn memory_book_reloads_on_next_isready_only_when_a_file_failed() {
         assert_eq!(first_bestmove(&stdout), Some("bestmove 2g2f ponder 8c8d"), "{case}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn per_side_book_options_are_declared_and_used_for_side_to_move() {
+    let db = "#YANEURAOU-DB2016 1.00\n\
+              sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2\n\
+              3c3d 2g2f 100 3 10\n\
+              8c8d 2g2f 80 3 5\n";
+    let path = write_temp_db("per_side", db);
+    let path_str = path.to_string_lossy();
+    // 個別値を共通値より先に送っても、後手番では個別値 (0) で 1 手に絞る。
+    let input = format!(
+        "{MATERIAL_INIT}\
+         setoption name BookFile value {path_str}\n\
+         setoption name BookEvalWhiteDiff value 0\n\
+         setoption name BookEvalDiff value 30000\n\
+         setoption name BookDepthBlackLimit value 999\n\
+         setoption name BookDepthWhiteLimit value 100000\n\
+         isready\n\
+         position startpos moves 7g7f\n\
+         go depth 6\n"
+    );
+    let stdout = run_engine(&input);
+    let _ = std::fs::remove_file(&path);
+
+    let first = stdout.lines().position(|l| l.starts_with("option name USI_OwnBook ")).unwrap();
+    let book_options: Vec<&str> = stdout.lines().skip(first).take(19).collect();
+    assert_eq!(
+        book_options,
+        [
+            "option name USI_OwnBook type check default true",
+            "option name BookFile type string default no_book",
+            "option name BookExploreFile type string default <empty>",
+            "option name BookDir type string default book",
+            "option name BookMoves type spin default 16 min 0 max 10000",
+            "option name BookEvalDiff type spin default 30 min 0 max 30000",
+            "option name BookEvalBlackLimit type spin default 0 min -30000 max 30000",
+            "option name BookEvalWhiteLimit type spin default -140 min -30000 max 30000",
+            "option name BookDepthLimit type spin default 0 min 0 max 256",
+            "option name BookEvalBlackDiff type spin default -1 min -1 max 99999",
+            "option name BookEvalWhiteDiff type spin default -1 min -1 max 99999",
+            "option name BookDepthBlackLimit type spin default -1 min -1 max 99999",
+            "option name BookDepthWhiteLimit type spin default -1 min -1 max 99999",
+            "option name NarrowBook type check default false",
+            "option name BookSelectValue type check default false",
+            "option name ConsiderBookMoveCount type check default false",
+            "option name IgnoreBookPly type check default false",
+            "option name FlippedBook type check default true",
+            "option name BookOnTheFly type check default false",
+        ],
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "info string BookDepthWhiteLimit: invalid value '100000' (expected -1..=99999); unchanged"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("info string BookEvalWhiteDiff = 0 : 2 moves to 1 moves."),
+        "{stdout}"
+    );
+    assert_eq!(first_bestmove(&stdout), Some("bestmove 3c3d ponder 2g2f"), "{stdout}");
 }
