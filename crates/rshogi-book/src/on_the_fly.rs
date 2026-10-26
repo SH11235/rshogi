@@ -229,6 +229,79 @@ mod tests {
             .map(|e| e.into_owned())
     }
 
+    #[test]
+    fn find_distinguishes_missing_empty_and_with_moves() {
+        let path = write_temp("find_kinds", SORTED);
+        let book = Book::open_on_the_fly(&path, false).unwrap();
+        let moves = |sfen: &str| {
+            book.find_raw(sfen).unwrap().map(|e| {
+                e.moves
+                    .iter()
+                    .map(|m| m.move_usi.clone().unwrap_or_default())
+                    .collect::<Vec<_>>()
+            })
+        };
+        // 未登録: 手数違い、盤面は同じで持駒違い、先頭より前、末尾より後。
+        for missing in [
+            "4k4/9/9/9/9/9/9/9/4K4 b - 99",
+            "4k4/9/9/9/9/9/9/9/4K4 w - 3",
+            "4k4/9/9/9/9/9/9/9/4K4 b P 1",
+            "0",
+            "~",
+        ] {
+            assert_eq!(moves(missing), None, "{missing}");
+        }
+        // 手の行が無い sfen 行は空のエントリ。
+        assert_eq!(moves("4k4/9/9/9/9/9/9/9/4K4 w - 2"), Some(vec![]));
+        assert_eq!(moves("4k4/9/9/9/9/9/9/9/4K4 b - 10"), Some(vec!["5i4h".to_string()]));
+        assert_eq!(moves("4k4/9/9/9/9/9/9/9/4K4 w - 4"), Some(vec!["5a5b".to_string()]));
+        // 手数を無視すると手数違いの行がまとまり、手の無い行も手のある行と同じ局面になる。
+        let book = Book::open_on_the_fly(&path, true).unwrap();
+        let w = book.find_raw("4k4/9/9/9/9/9/9/9/4K4 w - 2").unwrap().unwrap();
+        assert_eq!(w.moves.len(), 1);
+        assert_eq!(book.find_raw("4k4/9/9/9/9/9/9/9/4K4 b P 1").unwrap().unwrap().moves.len(), 1);
+        assert_eq!(book.find_raw("~").unwrap(), None);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn ponder_child_without_moves_does_not_fall_back_to_flipped() {
+        use crate::{BookOptions, DefaultBookRng, flipped_key, probe};
+        use rshogi_core::position::Position;
+
+        let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let mut blocks = [
+            (hirate.to_string(), "7g7f none 0 0 1\n"),
+            (after_76.to_string(), ""),
+            (flipped_key(after_76).unwrap(), "7g7f none 0 0 1\n"),
+        ];
+        blocks.sort_by(|a, b| strip_ply(&a.0).cmp(strip_ply(&b.0)));
+        let text: String = std::iter::once("#YANEURAOU-DB2016 1.00\n".to_string())
+            .chain(blocks.iter().map(|(sfen, moves)| format!("sfen {sfen}\n{moves}")))
+            .collect();
+        let path = write_temp("ponder_no_moves", &text);
+        let mut position = Position::new();
+        position.set_sfen(hirate).unwrap();
+        let run = |book: Book| {
+            let result = probe(
+                &[book],
+                &position,
+                &BookOptions::default(),
+                &mut DefaultBookRng::from_seed(0),
+                |_| {},
+            )
+            .unwrap();
+            (result.best_move.to_usi(), result.ponder_move.map(|m| m.to_usi()))
+        };
+        assert_eq!(run(Book::open_on_the_fly(&path, false).unwrap()), ("7g7f".to_string(), None));
+        assert_eq!(
+            run(Book::from_path(&path, false).unwrap()),
+            ("7g7f".to_string(), Some("3c3d".to_string()))
+        );
+        std::fs::remove_file(path).ok();
+    }
+
     fn assert_same(text: &str, queries: &[&str]) {
         let path = write_temp("same", text);
         for ignore_ply in [false, true] {
@@ -428,7 +501,24 @@ mod tests {
                             &mut DefaultBookRng::from_seed(seed),
                             |_| {},
                         );
-                        assert_eq!(actual, expected, "{query} options #{i}");
+                        assert_eq!(
+                            actual.map(|r| r.best_move),
+                            expected.map(|r| r.best_move),
+                            "{query} options #{i}"
+                        );
+                        // ponder を補う子局面が手の無い sfen 行なら、on the fly だけが反転局面を
+                        // 引き直さないので比べない。
+                        if let (Some(actual), Some(expected)) = (actual, expected) {
+                            let mut child = position.clone();
+                            child.do_move(actual.best_move, position.gives_check(actual.best_move));
+                            let child_entry = otf.find_raw(&child.to_sfen()).unwrap();
+                            if !child_entry.is_some_and(|e| e.moves.is_empty()) {
+                                assert_eq!(
+                                    actual.ponder_move, expected.ponder_move,
+                                    "{query} options #{i}"
+                                );
+                            }
+                        }
                     }
                 }
             }
