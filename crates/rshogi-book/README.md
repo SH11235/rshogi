@@ -34,7 +34,7 @@
 `isready` の時間が定跡の大きさに比例して増えるので、数百万局面を超える定跡では
 `setoption name BookOnTheFly value true` を使います。probe の結果 (候補手・value・depth・
 採択数と、各フィルタ・`IgnoreBookPly`・`FlippedBook`・`BookExploreFile` を通した後の選択) は
-丸読みと同じです。
+手の無い局面 (下記) を除いて丸読みと同じです。
 
 - **ファイルの並び**: `sfen` 行が SFEN の文字列 (バイト) 順に並んでいる必要があります。
   rshogi の定跡ツールの出力と YaneuraOu の定跡書き出し (`.db`) はこの順です。手数の違う同じ
@@ -55,6 +55,9 @@
   `info string Error reading book file: ...` を出します。ponder を補うために子局面を引いて
   いるときのエラーは何も出さず、予想手なしで bestmove を返します。丸読みはこの場合 `isready`
   で読み込み自体が失敗します。
+- **手の無い局面**: 手の行が無い `sfen` 行に当たったら定跡なしとし、`FlippedBook` でも反転局面を
+  引き直しません (YaneuraOu の on the fly と同じ)。丸読みはこの局面を登録しないので反転局面を
+  引き直し、選ぶ手が丸読みと違い得る唯一の場合です。
 - 上の並び・抜き取り・読み出し量の説明はテキスト `.db` のものです。`.ybb` は[下記](#yaneuraou-のバイナリ定跡-ybb)。
 
 ### 定跡ファイルの差し替え
@@ -75,7 +78,7 @@
 ### 丸読みとの一致の確かめ方
 
 実際の定跡ファイルで、全局面 (手数違いと先後反転を含む) の引いた結果と probe の選択が丸読みと
-一致することを次のテストで確かめられます。
+一致することを次のテストで確かめられます (手の無い局面は除きます)。
 
 ```bash
 RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- --ignored
@@ -123,7 +126,8 @@ RSHOGI_YBB_PATH=/path/to/book.ybb RSHOGI_YBB_DB_PATH=/path/to/book.db \
 
 ## 優先定跡
 
-YaneuraOu の優先定跡と同じ規則で、`BookFile` の前に別の定跡ファイルを引きます。
+YaneuraOu の優先定跡と同じ規則で、`BookFile` の前に別の定跡ファイルを引きます (probe 中の
+読み出しエラーの扱いだけは意図して違います。下記)。
 `BookFile=user_book1.db` なら、同じディレクトリの次のファイルをこの順に引きます。
 
 ```text
@@ -137,13 +141,19 @@ user_book1.db
 - **番号**: `000` から 1 ずつ探し、最初に欠けた番号で探すのをやめます (`000` が無ければ優先定跡は
   使いません)。3 桁に満たない番号は 0 で埋め、`1000` 以降はそのままの桁数です。
 - **拡張子**: 番号ごとに `.db` と `.ybb` のどちらでもかまいません。両方あれば `BookFile` と同じ
-  拡張子の方を使い、`info string priority book file exists twice. use: <パス>` を出します。
+  拡張子の方を使い、`info string priority book file exists twice. use : <パス>` を出します。
   `BookFile` が `.db` / `.ybb` で終わらなければ優先定跡は探しません。
 - **引き方**: 先頭のファイルから順に局面を引き、局面が載っていない (手が 0 個の局面を含む) ときだけ
   次のファイルへ進みます。`FlippedBook=true` なら、ファイルごとに反転局面まで引いてから次のファイルへ
   進みます。当たったファイルで `BookEvalDiff` などのフィルタで候補が残らなくても、後ろのファイルは
-  引きません。ponder の補完で子局面を引くときも同じ順です。読み出しエラーが起きたらその局面は
-  定跡なしとし、後ろのファイルは引きません。
+  引きません。ponder の補完で子局面を引くときも同じ順です。手の行が無い `sfen` 行は、
+  `BookOnTheFly=true` のテキスト `.db` と `.ybb` では「手が 0 個の局面」として次のファイルへ進み、
+  丸読みのテキスト `.db` では局面として登録しないので反転局面を引きます (YaneuraOu と同じ)。
+- **読み出しエラー (YaneuraOu と違う点)**: probe 中にファイルの読み出しエラーが起きたら、その局面は
+  定跡なしとし、後ろのファイルは引きません。YaneuraOu は載っていないものとして次のファイルへ
+  進みます。読めなかったファイルにその局面が載っていたか分からないので、優先度の低いファイルの手を
+  選ぶと、前のファイルで手を上書きした意図に反し得るためです。読み込み時 (`isready`) の失敗は
+  エラーの行で分かるので、そのファイルを飛ばして残りで続けます。
 - **オプション**: `BookOnTheFly`、`IgnoreBookPly`、`FlippedBook`、`BookEvalDiff` などは全ファイルに
   共通です。
 - **`isready`**: ファイルごとに `info string book loaded: ...` (丸読み) か

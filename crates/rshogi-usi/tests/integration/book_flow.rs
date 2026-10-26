@@ -305,7 +305,7 @@ fn priority_book_files_are_loaded_in_order_and_hit_first() {
         assert_eq!(book_lines.len(), 4, "{stdout}");
         assert_eq!(
             book_lines[0],
-            format!("info string priority book file exists twice. use: {}", path("user-000.db"))
+            format!("info string priority book file exists twice. use : {}", path("user-000.db"))
         );
         assert!(
             book_lines[1].starts_with(&format!("info string {loaded}: {} ", path("user-000.db")))
@@ -316,6 +316,57 @@ fn priority_book_files_are_loaded_in_order_and_hit_first() {
         )));
         assert!(book_lines[3].starts_with(&format!("info string {loaded}: {} ", path("user.db"))));
         assert_eq!(first_bestmove(&stdout), Some("bestmove 2g2f ponder 8c8d"), "{stdout}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn memory_book_reloads_on_next_isready_only_when_a_file_failed() {
+    let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    let dir = std::env::temp_dir().join(format!(
+        "rshogi_book_test_priority_reload_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let header = "#YANEURAOU-DB2016 1.00";
+    std::fs::write(dir.join("user-000.db"), format!("{header}\nsfen {hirate}\n2g2f 8c8d 0 0 1\n"))
+        .unwrap();
+    std::fs::write(dir.join("user.db"), format!("{header}\nsfen {hirate}\n7g7f 3c3d 0 0 1\n"))
+        .unwrap();
+    let priority = dir.join("user-000.db").to_string_lossy().into_owned();
+    let broken = dir.join("user-001.ybb");
+
+    for (with_broken, expected_loads) in [(false, 1), (true, 2)] {
+        if with_broken {
+            std::fs::write(&broken, "not a ybb file").unwrap();
+        }
+        let input = format!(
+            "{MATERIAL_INIT}\
+             setoption name BookFile value {}\n\
+             isready\n\
+             isready\n\
+             position startpos\n\
+             go depth 6\n",
+            dir.join("user.db").display()
+        );
+        let stdout = run_engine(&input);
+        let count = |prefix: &str| stdout.lines().filter(|line| line.starts_with(prefix)).count();
+        let case = format!("with_broken={with_broken}\n{stdout}");
+        assert_eq!(
+            count(&format!("info string book loaded: {priority} ")),
+            expected_loads,
+            "{case}"
+        );
+        assert_eq!(
+            count("info string Error loading book file "),
+            if with_broken { 2 } else { 0 },
+            "{case}"
+        );
+        assert_eq!(first_bestmove(&stdout), Some("bestmove 2g2f ponder 8c8d"), "{case}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

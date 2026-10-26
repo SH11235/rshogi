@@ -287,7 +287,7 @@ pub fn priority_book_paths(path: &Path, mut info: impl FnMut(&str)) -> Vec<PathB
             let (primary, secondary) = (numbered(primary), numbered(secondary));
             if primary.exists() {
                 if secondary.exists() {
-                    info(&format!("priority book file exists twice. use: {}", primary.display()));
+                    info(&format!("priority book file exists twice. use : {}", primary.display()));
                 }
                 paths.push(primary);
             } else if secondary.exists() {
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(
             infos,
             [format!(
-                "priority book file exists twice. use: {}",
+                "priority book file exists twice. use : {}",
                 dir.join("user-002.db").display()
             )]
         );

@@ -64,6 +64,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   最後に `user_book1.db` を引く (各番号は `.db` / `.ybb` のどちらでもよい)。優先定跡のファイルが
   無ければ従来どおり。`rshogi-book` の `probe` / `probe_with_explore` は定跡を `&[Book]` で受け取る
   ようにし、引く順のパスを返す `priority_book_paths` を足した。
+- `BookOnTheFly=true` のテキスト `.db` で、手の行が無い `sfen` 行に当たったら反転局面を引き直さず
+  定跡なしとする (YaneuraOu と同じ。従来は `FlippedBook` で反転局面を引いていた)。丸読みは変わらない。
 
 ### rshogi-core / ライブラリ利用者の移行
 

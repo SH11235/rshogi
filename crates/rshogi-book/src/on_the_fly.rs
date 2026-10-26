@@ -145,7 +145,9 @@ impl OnTheFlyFile {
         self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// 局面を引く。丸読みの `Book::find_raw` と同じく、指し手が 1 つも無ければ `None`。
+    /// 局面を引く。`sfen` 行があれば指し手の行が無くても空のエントリを返す (YaneuraOu の
+    /// on the fly と同じ。反転局面を引き直さず、優先定跡なら次のファイルへ進む)。丸読みは
+    /// 指し手の無い局面を登録しないので、その局面では `None` になる。
     pub(crate) fn find(&self, sfen: &str, ignore_ply: bool) -> io::Result<Option<PositionEntry>> {
         let target = strip_ply(sfen);
         let full_key = normalize_key(sfen, ignore_ply);
@@ -166,6 +168,7 @@ impl OnTheFlyFile {
         reader.seek_line_start(lo)?;
         let mut entry = PositionEntry::default();
         let mut in_block = false;
+        let mut found = false;
         while reader.next_line()?.is_some() {
             match classify_line(reader.line_str()?) {
                 Line::Skip => {}
@@ -174,6 +177,7 @@ impl OnTheFlyFile {
                         break;
                     }
                     in_block = normalize_key(line_sfen, ignore_ply) == full_key;
+                    found |= in_block;
                 }
                 Line::Move(bm) => {
                     if in_block {
@@ -182,7 +186,7 @@ impl OnTheFlyFile {
                 }
             }
         }
-        Ok((!entry.moves.is_empty()).then_some(entry))
+        Ok(found.then_some(entry))
     }
 }
 
@@ -217,6 +221,14 @@ mod tests {
         sfen 4k4/9/9/9/9/9/9/9/4K4 w - 4\n\
         5a5b\n";
 
+    /// 指し手のある局面だけを比べる (on the fly は指し手の無い `sfen` 行にも空のエントリを返す)。
+    fn find_with_moves(book: &Book, sfen: &str) -> Option<PositionEntry> {
+        book.find_raw(sfen)
+            .unwrap()
+            .filter(|e| !e.moves.is_empty())
+            .map(|e| e.into_owned())
+    }
+
     fn assert_same(text: &str, queries: &[&str]) {
         let path = write_temp("same", text);
         for ignore_ply in [false, true] {
@@ -224,8 +236,8 @@ mod tests {
             let otf = Book::open_on_the_fly(&path, ignore_ply).unwrap();
             for q in queries {
                 assert_eq!(
-                    otf.find_raw(q).unwrap(),
-                    memory.find_raw(q).unwrap(),
+                    find_with_moves(&otf, q),
+                    find_with_moves(&memory, q),
                     "query {q} ignore_ply={ignore_ply}"
                 );
             }
@@ -296,6 +308,41 @@ mod tests {
     }
 
     #[test]
+    fn position_without_moves_does_not_fall_back_to_flipped() {
+        use crate::{BookOptions, DefaultBookRng, flipped_key, probe};
+        use rshogi_core::position::Position;
+
+        let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let flipped = flipped_key(after_76).unwrap();
+        let mut blocks = [(after_76.to_string(), ""), (flipped, "7g7f none 0 0 1\n")];
+        blocks.sort_by(|a, b| strip_ply(&a.0).cmp(strip_ply(&b.0)));
+        let text: String = std::iter::once("#YANEURAOU-DB2016 1.00\n".to_string())
+            .chain(blocks.iter().map(|(sfen, moves)| format!("sfen {sfen}\n{moves}")))
+            .collect();
+        let first = write_temp("no_moves", &text);
+        let second = write_temp("no_moves_next", &format!("sfen {after_76}\n8c8d none 0 0 1\n"));
+        let mut position = Position::new();
+        position.set_sfen(after_76).unwrap();
+        let best = |books: &[Book]| {
+            probe(
+                books,
+                &position,
+                &BookOptions::default(),
+                &mut DefaultBookRng::from_seed(0),
+                |_| {},
+            )
+            .map(|r| r.best_move.to_usi())
+        };
+        let otf = |path| Book::open_on_the_fly(path, false).unwrap();
+        assert_eq!(best(&[otf(&first)]), None);
+        assert_eq!(best(&[otf(&first), otf(&second)]).as_deref(), Some("8c8d"));
+        // 丸読みは指し手の無い局面を登録しないので、反転局面に当たる (YaneuraOu と同じ)。
+        assert_eq!(best(&[Book::from_path(&first, false).unwrap()]).as_deref(), Some("3c3d"));
+        std::fs::remove_file(first).ok();
+        std::fs::remove_file(second).ok();
+    }
+
+    #[test]
     fn rejects_unsorted_file() {
         let text = "#YANEURAOU-DB2016 1.00\n\
             sfen 4k4/9/9/9/9/9/9/9/4K4 w - 2\n5a5b\n\
@@ -307,7 +354,7 @@ mod tests {
     }
 
     /// 実際の定跡ファイルで、全局面(手数違い・先後反転を含む)の引いた結果と probe の選択が
-    /// 丸読みと一致することを確かめる。
+    /// 丸読みと一致することを確かめる (手の無い sfen 行の局面は除く)。
     /// `RSHOGI_BOOK_EQUIV_PATH=<.db> cargo test --release -p rshogi-book -- --ignored`
     #[test]
     #[ignore = "RSHOGI_BOOK_EQUIV_PATH の定跡ファイルが要る"]
@@ -353,12 +400,16 @@ mod tests {
                     continue;
                 };
                 for query in [&canonical, &other_ply, &flipped] {
-                    let expected = memory.find_raw(query).unwrap();
-                    assert_eq!(otf.find_raw(query).unwrap(), expected, "{query}");
+                    let expected = find_with_moves(&memory, query);
+                    assert_eq!(find_with_moves(&otf, query), expected, "{query}");
                     queries += 1;
                     hits += usize::from(expected.is_some());
                 }
                 for query in [&canonical, &flipped] {
+                    // 手の無い sfen 行は on the fly だけが反転局面を引き直さないので比べない。
+                    if otf.find_raw(query).unwrap().is_some_and(|e| e.moves.is_empty()) {
+                        continue;
+                    }
                     let mut position = Position::new();
                     position.set_sfen(query).unwrap();
                     for (i, options) in option_sets.iter().enumerate() {
