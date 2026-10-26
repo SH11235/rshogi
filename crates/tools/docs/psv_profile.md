@@ -20,8 +20,14 @@ cargo run --release -p tools --bin psv_profile -- \
 | `--json PATH` | なし | 集計結果を JSON で保存する。入力と同じ実体 (同一パス・hardlink・symlink) は拒否する |
 | `--threads N` | 0 (全コア) | 局面の展開と判定の並列数 |
 
-入力のサイズが 40 byte の倍数でない場合は停止します。chunk (26 万局面) ずつ読むので、
-ピークメモリは入力の件数によりません。
+chunk (26 万局面) ずつ読むので、ピークメモリは入力の件数によりません。
+
+次の入力では、ファイル名とファイル内の record 番号 (0 始まり) を表示して停止します。不正な局面を含む PSV は、
+先に [`validate_psv`](validate_psv.md) で除いてから集計してください。
+
+- サイズが 40 byte の倍数でない
+- 局面を展開できない、または将棋のルール上ありえない局面 (`validate_psv` と同じ検査: 玉の有無・駒数・行き所のない駒・二歩・手番でない側への王手)
+- `game_result` が -1・0・1 以外
 
 ## 局面の集計
 
@@ -32,7 +38,7 @@ cargo run --release -p tools --bin psv_profile -- \
 | `entered%` | 入玉の局面。先手玉が 1〜3 段目、または後手玉が 7〜9 段目 |
 | `black%` / `white%` / `both%` | 入玉の内訳 (先手玉だけ・後手玉だけ・両方) |
 | `advancing%` | 入玉ではなく、どちらかの玉が 4〜6 段目 ([`psv_gate_by_king_zone`](psv_gate_by_king_zone.md) の `advancing` と同じ) |
-| `declarable` | 手番側がその局面で宣言できる (`--entering-king-rule` の条件をすべて満たす) 局面の数 |
+| `declarable` | 手番側がその局面で宣言できる (`--entering-king-rule` の条件をすべて満たす) 局面の数。`TryRule` では「トライの手がある」局面の数 |
 | `win%` / `draw%` / `loss%` | `game_result` (手番側から見た勝敗) |
 
 `continued` は、直前の record と手数が 1 違いで勝敗が反転している record の割合です。棋譜順のまま並んでいる
@@ -41,7 +47,8 @@ PSV では 100% に近く、シャッフル済みの PSV では 0% に近くな�
 ## 対局の集計 (`--games`)
 
 直前の record と手数が 1 違いで勝敗が反転していれば同じ対局、そうでなければ新しい対局とみなします。
-シャッフル済みの PSV に付けると、意味のない集計になります。
+シャッフル済みの PSV に付けると、意味のない集計になります。盤面は照合しないので、新しい対局がたまたま
+この条件を満たす位置から始まると、前の対局とつながって 1 局に数えられます。
 
 対局の最後の局面 (手番側から見た勝敗を `r` とする) から、終局を次のように分けます。
 
@@ -63,4 +70,4 @@ YaneuraOu 系の生成ツールは宣言できる局面を書かずに対局を�
 
 `--json` の出力は `inputs`・`entering_king_rule`・`ply_bin` と、`profile` (`records`・`continued_records`・`totals`・
 `by_ply`・`games`) を持ちます。`by_ply[i]` と `games.by_end_ply[i]`・`games.by_start_ply[i]` は手数
-`i * ply_bin` から `(i + 1) * ply_bin - 1` の帯で、件数はすべて実数です。`--games` を付けないと `games` は `null` です。
+`i * ply_bin` から `(i + 1) * ply_bin - 1` の帯で、値はすべて百分率ではなく件数です。`--games` を付けないと `games` は `null` です。

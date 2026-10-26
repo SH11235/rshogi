@@ -70,6 +70,7 @@ pub mod ort_teardown;
 pub mod output_path;
 pub mod packed_sfen;
 pub mod policy_rollout;
+pub mod position_rules;
 pub mod positions;
 pub mod progress;
 pub mod qsearch_pv;

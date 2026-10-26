@@ -12,6 +12,7 @@ use rshogi_core::types::{Color, EnteringKingRule, Move};
 use serde::Serialize;
 use tools::output_path::ensure_safe_output_paths;
 use tools::packed_sfen::{PackedSfenValue, psv_move16_to_move, unpack_sfen_to_parts};
+use tools::position_rules::validate_position;
 
 const RECORD_SIZE: usize = PackedSfenValue::SIZE;
 const BUFFER_SIZE: usize = 32 << 20;
@@ -124,6 +125,26 @@ struct GameProfile {
     by_start_ply: Vec<u64>,
 }
 
+#[derive(Serialize)]
+struct Report<'a> {
+    /// UTF-8 でないパスは置換文字で表す
+    inputs: Vec<String>,
+    entering_king_rule: &'static str,
+    ply_bin: u16,
+    profile: &'a Profile,
+}
+
+impl<'a> Report<'a> {
+    fn new(inputs: &[PathBuf], rule: EnteringKingRule, ply_bin: u16, profile: &'a Profile) -> Self {
+        Self {
+            inputs: inputs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            entering_king_rule: rule.to_usi(),
+            ply_bin,
+            profile,
+        }
+    }
+}
+
 #[derive(Default)]
 struct GameState {
     start_ply: u16,
@@ -156,13 +177,8 @@ fn main() -> Result<()> {
     }
     print_profile(&profile, config);
     if let Some(json) = &cli.json {
-        let value = serde_json::json!({
-            "inputs": cli.inputs,
-            "entering_king_rule": rule.to_usi(),
-            "ply_bin": cli.ply_bin,
-            "profile": profile,
-        });
-        std::fs::write(json, serde_json::to_vec_pretty(&value)?)
+        let report = Report::new(&cli.inputs, rule, cli.ply_bin, &profile);
+        std::fs::write(json, serde_json::to_vec_pretty(&report)?)
             .with_context(|| format!("Failed to write {}", json.display()))?;
     }
     Ok(())
@@ -210,6 +226,7 @@ fn profile_file(
     let mut prev_tail: Option<[u8; RECORD_SIZE]> = None;
     let mut game = GameState::default();
     let mut read = 0u64;
+    let mut processed = 0u64;
     while read < records {
         let take = (records - read).min(chunk_records as u64) as usize;
         let carried = buffer.len();
@@ -225,21 +242,24 @@ fn profile_file(
         process_chunk(
             &buffer[..usable],
             &buffer[usable..],
+            processed,
             config,
             &mut prev_tail,
             &mut game,
             profile,
-        )
-        .with_context(|| format!("at record {}", read - take as u64))?;
+        )?;
+        processed += (usable / RECORD_SIZE) as u64;
         buffer.drain(..usable);
     }
     Ok(())
 }
 
-/// `chunk` の record を集計する。`next` は `chunk` の直後の record (ファイル末尾なら空)。
+/// `chunk` の record を集計する。`next` は `chunk` の直後の record (ファイル末尾なら空)、
+/// `first_row` は `chunk` の先頭のファイル内の record 番号。
 fn process_chunk(
     chunk: &[u8],
     next: &[u8],
+    first_row: u64,
     config: Config,
     prev_tail: &mut Option<[u8; RECORD_SIZE]>,
     game: &mut GameState,
@@ -260,8 +280,11 @@ fn process_chunk(
             classify(pos, record, config, config.games && end)
         })
         .collect();
-    for ((record, end), classified) in records.iter().zip(is_end).zip(classified) {
-        let classified = classified?;
+    for (offset, ((record, end), classified)) in
+        records.iter().zip(is_end).zip(classified).enumerate()
+    {
+        let classified =
+            classified.with_context(|| format!("at record {}", first_row + offset as u64))?;
         let ply = field_ply(record);
         let result = field_result(record);
         let starts_game = prev_tail.as_ref().is_none_or(|prev| !continues(prev, record));
@@ -309,10 +332,18 @@ fn process_chunk(
 fn classify(pos: &mut Position, record: &[u8], config: Config, end: bool) -> Result<Classified> {
     let psv =
         PackedSfenValue::from_bytes(record).ok_or_else(|| anyhow::anyhow!("PSV parse failed"))?;
+    anyhow::ensure!(
+        (-1..=1).contains(&psv.game_result),
+        "game_result is out of range: {}",
+        psv.game_result
+    );
     let parts =
         unpack_sfen_to_parts(&psv.sfen).map_err(|e| anyhow::anyhow!("unpack failed: {e}"))?;
     pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
         .context("invalid position")?;
+    if let Some((category, reason)) = validate_position(pos) {
+        anyhow::bail!("invalid position ({category}): {reason}");
+    }
     let zone = zone_of(pos);
     let declarable = pos.declaration_win(config.rule) != Move::NONE;
     let ending = end.then(|| ending_of(pos, &psv, declarable, config.rule));
@@ -554,16 +585,22 @@ mod tests {
         .concat()
     }
 
-    fn run(bytes: &[u8], config: Config, chunk_records: usize) -> Profile {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("in.psv");
-        std::fs::write(&path, bytes).unwrap();
+    fn try_run_files(files: &[&[u8]], config: Config, chunk_records: usize) -> Result<Profile> {
+        let dir = tempdir()?;
         let mut profile = Profile {
             games: config.games.then(GameProfile::default),
             ..Profile::default()
         };
-        profile_file(&path, config, chunk_records, &mut profile).unwrap();
-        profile
+        for (i, bytes) in files.iter().enumerate() {
+            let path = dir.path().join(format!("in{i}.psv"));
+            std::fs::write(&path, bytes)?;
+            profile_file(&path, config, chunk_records, &mut profile)?;
+        }
+        Ok(profile)
+    }
+
+    fn run(bytes: &[u8], config: Config, chunk_records: usize) -> Profile {
+        try_run_files(&[bytes], config, chunk_records).unwrap()
     }
 
     #[test]
@@ -633,5 +670,65 @@ mod tests {
         let mut profile = Profile::default();
         let error = profile_file(&path, config(false), 16, &mut profile).unwrap_err();
         assert!(error.to_string().contains("not a multiple"));
+    }
+
+    #[test]
+    fn games_do_not_continue_across_files() {
+        let first = record(NORMAL, 10, 1, 0);
+        let second = record(NORMAL, 11, -1, 0);
+        let profile = try_run_files(&[&first, &second], config(true), 1024).unwrap();
+        assert_eq!(profile.continued_records, 0);
+        assert_eq!(profile.games.unwrap().totals.games, 2);
+        // 1 つのファイルに並べると同じ対局になる
+        let joined = run(&[first, second].concat(), config(true), 1024);
+        assert_eq!(joined.games.unwrap().totals.games, 1);
+    }
+
+    #[test]
+    fn plain_loss_is_other_decisive_white_win() {
+        let profile = run(&record(NORMAL, 40, -1, 0), config(true), 1024);
+        let totals = profile.games.unwrap().totals;
+        assert_eq!((totals.other_decisive, totals.white_win, totals.black_win), (1, 1, 0));
+    }
+
+    #[test]
+    fn illegal_or_special_bestmove_is_not_declaration_next() {
+        // 玉が 2 マス動く手は非合法
+        let illegal = Move::from_usi("1e3e").map(move_to_psv_move16).unwrap();
+        let yo_move16_resign = (2 << 7) | 2;
+        for move16 in [illegal, yo_move16_resign, 0] {
+            let profile = run(&record(BEFORE_BLACK_DECLARES, 51, -1, move16), config(true), 1024);
+            let totals = profile.games.unwrap().totals;
+            assert_eq!((totals.declaration_next, totals.other_decisive), (0, 1), "move16={move16}");
+        }
+    }
+
+    #[test]
+    fn rejects_illegal_position_with_record_number() {
+        let double_pawn = "4k4/9/9/9/9/9/P8/P8/4K4 b - 1";
+        let bytes = [record(NORMAL, 1, 0, 0), record(double_pawn, 2, 0, 0)].concat();
+        let error = try_run_files(&[&bytes], config(false), 1024).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("at record 1"), "{message}");
+        assert!(message.contains("double_pawn"), "{message}");
+    }
+
+    #[test]
+    fn rejects_out_of_range_game_result() {
+        let error = try_run_files(&[&record(NORMAL, 1, 2, 0)], config(false), 1024).unwrap_err();
+        assert!(format!("{error:#}").contains("game_result is out of range"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_serializes_non_utf8_input_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let profile = run(&record(NORMAL, 1, 0, 0), config(false), 1024);
+        let input = PathBuf::from(std::ffi::OsStr::from_bytes(b"bad\xff.bin"));
+        let report = Report::new(&[input], EnteringKingRule::Point27, 10, &profile);
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["inputs"][0], "bad\u{fffd}.bin");
+        assert_eq!(value["profile"]["records"], 1);
+        assert_eq!(value["entering_king_rule"], "CSARule27");
     }
 }
