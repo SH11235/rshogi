@@ -29,6 +29,7 @@
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -269,6 +270,8 @@ pub(super) struct Scratch<M> {
     capture_moves: Vec<M>,
     /// 無駄合いの判定で生成する受け方の手
     reply_moves: Vec<M>,
+    /// 無駄合いの判定で取った駒を戻した局面 (`Option<S>`。局面の型は solve ごとに変わりうる)
+    returned: Option<Box<dyn Any + Send>>,
 }
 
 /// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) とも共有する。
@@ -381,6 +384,7 @@ impl<M> Scratch<M> {
             sub: None,
             capture_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
             reply_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            returned: None,
         }
     }
 }
@@ -996,6 +1000,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let mut captures = std::mem::take(&mut self.scratch.capture_moves);
         captures.clear();
         st.interposition_captures(drop, &mut captures);
+        // 取った駒を戻した局面の領域。判定のたびに局面を確保し直さない
+        let mut slot = match self.scratch.returned.take().map(|b| b.downcast::<Option<S>>()) {
+            Some(Ok(slot)) => slot,
+            _ => Box::new(None),
+        };
         let mut result = Ok(None);
         for &capture in &captures {
             // 取った後の局面の盤面に、合駒の前の持駒 (取った駒は受け方の手) を組み合わせた局面
@@ -1019,17 +1028,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             }
             st.do_move(capture);
             // 合駒を取った駒を受け方が取り返せるなら、取った後の局面は合駒が無かったときと別物なので有効な合駒
-            let returned_state = if st.can_recapture(drop) {
-                None
-            } else {
-                st.with_captured_piece_returned(self.attacker)
-            };
+            let built = !st.can_recapture(drop)
+                && st.captured_piece_returned_into(self.attacker, &mut slot);
             st.undo_move(capture);
-            let Some(mut returned_state) = returned_state else {
+            let Some(returned_state) = Option::as_mut(&mut *slot).filter(|_| built) else {
                 continue;
             };
             debug_assert_eq!(returned_state.key(), returned.key);
-            match self.shortest_detached(&mut returned_state, len_limit) {
+            match self.shortest_detached(returned_state, len_limit) {
                 Ok(Some((proof, len))) => {
                     let proof = if PIECES { proof } else { before.hand };
                     // 取る手が複数 (成・不成) なら、詰み手数の短い方
@@ -1049,6 +1055,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             }
         }
         self.scratch.capture_moves = captures;
+        self.scratch.returned = Some(slot);
         result
     }
 

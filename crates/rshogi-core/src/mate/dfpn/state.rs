@@ -28,7 +28,7 @@ pub(super) const FULL_HAND: Hand = Hand::EMPTY
 pub(super) const PNDN_UNIT: u32 = 2;
 
 /// df-pn が局面に求める操作
-pub(super) trait MateState {
+pub(super) trait MateState: Send + Sized + 'static {
     /// 指し手
     type Mv: Copy + Eq;
 
@@ -113,13 +113,11 @@ pub(super) trait MateState {
         false
     }
 
-    /// 合駒を取った後の局面 (受け方の手番) から、取った駒を攻め方の持駒から受け方の持駒に移した局面。
+    /// 合駒を取った後の局面 (受け方の手番) から、取った駒を攻め方の持駒から受け方の持駒に移した局面を
+    /// `out` に組み立てる (`out` に局面があればその領域を使い回す)。組み立てられなければ偽。
     /// `attacker` は攻め方。
-    fn with_captured_piece_returned(&self, _attacker: Color) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        None
+    fn captured_piece_returned_into(&self, _attacker: Color, _out: &mut Option<Self>) -> bool {
+        false
     }
 
     /// 指し手を進める
@@ -367,8 +365,8 @@ impl MateState for Position {
         replies.iter().any(|m| !m.is_drop() && m.to() == drop.to())
     }
 
-    fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
-        captured_piece_returned(self, attacker)
+    fn captured_piece_returned_into(&self, attacker: Color, out: &mut Option<Self>) -> bool {
+        captured_piece_returned_into(self, attacker, out.get_or_insert_with(Position::new))
     }
 
     fn do_move(&mut self, m: Move) {
@@ -415,16 +413,17 @@ fn interposition_captures(
     }
 }
 
-/// 局面 `pos` (直前の手で攻め方が駒を取った、受け方の手番) から、取った駒を受け方の持駒に移した局面
-fn captured_piece_returned(pos: &Position, attacker: Color) -> Option<Position> {
+/// 局面 `pos` (直前の手で攻め方が駒を取った、受け方の手番) から、取った駒を受け方の持駒に移した局面を
+/// `out` に組み立てる。組み立てられなければ偽
+fn captured_piece_returned_into(pos: &Position, attacker: Color, out: &mut Position) -> bool {
     let captured = pos.captured_piece();
     if captured.is_none() || pos.side_to_move() == attacker {
-        return None;
+        return false;
     }
     let pt = captured.piece_type().unpromote();
     let mut hands = [pos.hand(Color::Black), pos.hand(Color::White)];
     if !hands[attacker.index()].has(pt) {
-        return None;
+        return false;
     }
     hands[attacker.index()] = hands[attacker.index()].sub(pt);
     hands[(!attacker).index()] = hands[(!attacker).index()].add(pt);
@@ -432,9 +431,7 @@ fn captured_piece_returned(pos: &Position, attacker: Color) -> Option<Position> 
     for (i, cell) in board.iter_mut().enumerate() {
         *cell = pos.piece_on(Square::from_u8(i as u8).expect("升の番号は 81 未満"));
     }
-    let mut returned = Position::new();
-    returned.set_from_parts(&board, &hands, pos.side_to_move()).ok()?;
-    Some(returned)
+    out.set_from_parts(&board, &hands, pos.side_to_move()).is_ok()
 }
 
 impl Position {
@@ -656,10 +653,14 @@ impl MateState for NoAttackerKing {
         !self.for_each_evasion(|m| m.is_drop() || m.to() != drop.to())
     }
 
-    fn with_captured_piece_returned(&self, attacker: Color) -> Option<Self> {
+    fn captured_piece_returned_into(&self, attacker: Color, out: &mut Option<Self>) -> bool {
         debug_assert_eq!(attacker, self.attacker);
-        let pos = captured_piece_returned(&self.pos, attacker)?;
-        Some(Self { pos, attacker })
+        let out = out.get_or_insert_with(|| Self {
+            pos: Position::new(),
+            attacker,
+        });
+        out.attacker = attacker;
+        captured_piece_returned_into(&self.pos, attacker, &mut out.pos)
     }
 
     fn do_move(&mut self, m: Move) {

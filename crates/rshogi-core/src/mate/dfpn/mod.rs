@@ -46,7 +46,8 @@ use crate::types::{Move, PieceType};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MateResult {
     /// 詰み。攻め方の手から始まる詰み手順 (最後の手で受け方が詰む)。
-    /// 最短手順モードでは正解手順で、最後の局面に受け方の無駄合いだけが残ることがある。
+    /// 最短手順モードでは最短手順。[`ShortestMode::Tsume`] では最後の局面に受け方の無駄合いだけが残ることがある
+    /// ([`ShortestMode::All`] と通常の判定では、最後の局面の受け方に合法手が無い)。
     Mate(Vec<Move>),
     /// 不詰 (攻め方が王手を続けて詰ませる手順は無い)
     NoMate,
