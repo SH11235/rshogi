@@ -51,8 +51,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -64,7 +64,9 @@ use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
 use tools::selfplay::adjudication::parse_agreement_rule;
+use tools::selfplay::cpu_affinity::{CpuAffinityMode, discover_numa_cpu_affinities};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
+use tools::selfplay::nps_bench;
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{CONTROL_HISTORY_FILE_NAME, DrawRule, ResignRule};
@@ -117,6 +119,25 @@ struct Cli {
     /// 後手の加算時間（ミリ秒、省略時 --binc）。Fischer 専用、単独指定不可、先後それぞれ持ち時間か加算の正値が必須
     #[arg(long)]
     winc: Option<u64>,
+
+    /// Fischer 専用: `--btime` / `--binc` (と `--wtime` / `--winc`) を基準 NPS での時計とみなし、
+    /// 開始時に測ったこの機械の NPS との比 (基準 ÷ 実測) を掛けて指す。bench は SPRT の base
+    /// (`--sprt-base-label`、省略時 `--base-label`) の engine で測る。
+    #[arg(long, default_value_t = false)]
+    nps_scaling: bool,
+
+    /// `--nps-scaling` の基準 NPS (1 thread あたり、全 slot 同時)。既定 350000。
+    #[arg(long)]
+    reference_nps: Option<u64>,
+
+    /// `--nps-scaling` の足切り。実測 NPS が基準のこの割合未満なら起動を拒否する。既定 0.5。
+    #[arg(long)]
+    min_nps_ratio: Option<f64>,
+
+    /// engine の CPU affinity。numa は worker ごとに Threads 個の論理 CPU を同一 NUMA node 内から
+    /// 割り当て、その worker の全 engine を固定する (Linux 専用)。
+    #[arg(long, value_enum, default_value_t = CpuAffinityMode::Off)]
+    cpu_affinity: CpuAffinityMode,
 
     /// Threads per engine
     #[arg(long, default_value_t = 1)]
@@ -334,6 +355,42 @@ struct MetaLogEntry {
     /// analyze_selfplay 側でラベル自動推定に利用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     sprt: Option<SprtMetaLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nps_scaling: Option<NpsScalingMeta>,
+}
+
+/// `--nps-scaling` の較正。run 開始時に 1 回測り、run 中は固定する。
+#[derive(Clone, Serialize)]
+struct NpsScalingMeta {
+    bench_version: &'static str,
+    /// bench を走らせた engine (SPRT の base)。
+    bench_engine_label: String,
+    reference_nps: u64,
+    min_nps_ratio: f64,
+    measured_nps: f64,
+    slot_nps: Vec<f64>,
+    /// 基準 ÷ 実測。持ち時間と加算の両方に掛ける。時間切れ判定のマージンには掛けない。
+    scale: f64,
+    reference_btime: u64,
+    reference_binc: u64,
+    reference_wtime: u64,
+    reference_winc: u64,
+    btime: u64,
+    binc: u64,
+    wtime: u64,
+    winc: u64,
+    bench_depth: u32,
+    warmup_depth: u32,
+    bench_positions: usize,
+    threads: usize,
+    slots: usize,
+    measured_at: String,
+}
+
+impl NpsScalingMeta {
+    fn time_control(&self) -> TimeControl {
+        TimeControl::new(self.btime, self.wtime, self.binc, self.winc, 0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
@@ -385,8 +442,8 @@ impl MetaSettings {
             adjudicate_draw: cli.adjudicate_draw,
             adjudicate_agreement: cli.adjudicate_agreement,
             byoyomi: cli.byoyomi,
-            btime: cli.btime,
-            binc: cli.binc,
+            btime: time_control.black_time,
+            binc: time_control.black_inc,
             wtime: time_control.white_time,
             winc: time_control.white_inc,
             timeout_margin_ms: cli.timeout_margin_ms,
@@ -432,6 +489,8 @@ struct TournamentMeta {
     incomplete_pairs: u32,
     /// 送信済みだが worker から結果を回収できなかったチケット数。
     unreturned_games: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nps_scaling: Option<NpsScalingMeta>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -755,6 +814,98 @@ struct WorkerConfig {
     /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
     go_nodes: Vec<Option<u64>>,
     start_positions: Vec<ParsedPosition>,
+    cpu_slots: Option<Arc<CpuSlots>>,
+}
+
+fn engine_config(
+    path: &Path,
+    usi_options: &[String],
+    threads: usize,
+    hash_mb: u32,
+) -> EngineConfig {
+    EngineConfig {
+        path: path.to_path_buf(),
+        args: Vec::new(),
+        threads,
+        hash_mb,
+        network_delay: None,
+        network_delay2: None,
+        minimum_thinking_time: None,
+        slowmover: None,
+        ponder: false,
+        usi_options: usi_options.to_vec(),
+    }
+}
+
+fn spawn_engine(
+    cfg: &EngineConfig,
+    label: String,
+    cpus: Option<&[usize]>,
+) -> Result<EngineProcess> {
+    let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(cfg, label, cpus)?;
+    engine.initialize(cfg)?;
+    Ok(engine)
+}
+
+/// `--cpu-affinity numa` の CPU 群。worker は起動時に空いている群を 1 つ取り、終了時に返す。
+/// 退役した worker の engine が終わる前に後任が同じ CPU 群で起動しないよう、返すまで待たせる。
+struct CpuSlots {
+    sets: Vec<Vec<usize>>,
+    /// 小さい index から取るよう降順に積む (bench の slot と同じ群を先に使う)。
+    free: Mutex<Vec<usize>>,
+    returned: Condvar,
+}
+
+impl CpuSlots {
+    fn new(sets: Vec<Vec<usize>>) -> Self {
+        let free = (0..sets.len()).rev().collect();
+        Self {
+            sets,
+            free: Mutex::new(free),
+            returned: Condvar::new(),
+        }
+    }
+
+    /// 空きが出るまで待つ。shutdown なら None。
+    fn acquire(self: &Arc<Self>, shutdown: &AtomicBool) -> Option<CpuSlotGuard> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(index) = free.pop() {
+                return Some(CpuSlotGuard {
+                    slots: self.clone(),
+                    index,
+                });
+            }
+            free = self
+                .returned
+                .wait_timeout(free, Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+struct CpuSlotGuard {
+    slots: Arc<CpuSlots>,
+    index: usize,
+}
+
+impl CpuSlotGuard {
+    fn cpus(&self) -> &[usize] {
+        &self.slots.sets[self.index]
+    }
+}
+
+impl Drop for CpuSlotGuard {
+    fn drop(&mut self) {
+        let mut free = self.slots.free.lock().unwrap_or_else(|e| e.into_inner());
+        free.push(self.index);
+        free.sort_unstable_by(|a, b| b.cmp(a));
+        self.slots.returned.notify_one();
+    }
 }
 
 fn worker_main(
@@ -780,24 +931,23 @@ fn worker_main(
         go_depth,
         go_nodes,
         start_positions,
+        cpu_slots,
     } = cfg;
+    // engine より先に宣言し、engine の終了後に CPU 群を返す。
+    let cpu_slot = match &cpu_slots {
+        Some(slots) => match slots.acquire(&shutdown) {
+            Some(guard) => Some(guard),
+            None => return,
+        },
+        None => None,
+    };
+    let cpu_affinity = cpu_slot.as_ref().map(CpuSlotGuard::cpus);
     // ワーカー内で全エンジンを起動
     let mut engines: Vec<EngineProcess> = Vec::new();
     for (i, path) in engine_paths.iter().enumerate() {
         let label = engine_labels[i].clone();
-        let cfg = EngineConfig {
-            path: path.clone(),
-            args: Vec::new(),
-            threads,
-            hash_mb,
-            network_delay: None,
-            network_delay2: None,
-            minimum_thinking_time: None,
-            slowmover: None,
-            ponder: false,
-            usi_options: engine_usi_options[i].clone(),
-        };
-        match EngineProcess::spawn(&cfg, label) {
+        let cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
+        match spawn_engine(&cfg, label, cpu_affinity) {
             Ok(ep) => {
                 engines.push(ep);
             }
@@ -948,6 +1098,7 @@ struct SpawnCtx<'a> {
     /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
     go_nodes: &'a [Option<u64>],
     start_defs: &'a [ParsedPosition],
+    cpu_slots: Option<&'a Arc<CpuSlots>>,
 }
 
 /// ワーカースレッドを 1 つ起動して `handles` に追加する。初期起動と動的増員で共用する。
@@ -984,6 +1135,7 @@ fn spawn_worker(
                 source_line: p.source_line,
             })
             .collect(),
+        cpu_slots: ctx.cpu_slots.cloned(),
     };
     let rx = ticket_rx.clone();
     let tx = result_tx.clone();
@@ -1105,6 +1257,7 @@ fn main() -> Result<()> {
     let engine_nodes = resolve_engine_nodes(n, cli.nodes, cli.engine_nodes.as_deref())?;
 
     let time_control = resolve_time_control(&cli, &engine_nodes)?;
+    validate_nps_scaling(&cli, &engine_nodes)?;
 
     // 開始局面のロード
     let (start_defs, start_commands) =
@@ -1208,8 +1361,45 @@ fn main() -> Result<()> {
             opts
         })
         .collect();
+    let bench_idx = if cli.nps_scaling {
+        let idx = nps_bench_engine_index(&cli, &engine_labels)?;
+        if nps_bench::sets_threads_option(&engine_usi_options[idx]) {
+            bail!("--nps-scaling では Threads を USI option ではなく --threads で指定してください");
+        }
+        Some(idx)
+    } else {
+        None
+    };
+    let cpu_slots = match cli.cpu_affinity {
+        CpuAffinityMode::Off => None,
+        CpuAffinityMode::Numa => {
+            let sets = discover_numa_cpu_affinities(cli.threads, cli.concurrency)?;
+            eprintln!(
+                "CPU affinity: {} worker(s), {} CPU(s)/worker, NUMA-local",
+                cli.concurrency, cli.threads
+            );
+            for (index, cpus) in sets.iter().enumerate() {
+                eprintln!("  worker{}: {cpus:?}", index + 1);
+            }
+            Some(Arc::new(CpuSlots::new(sets)))
+        }
+    };
+
     // run 全体の出力先を排他的に確保する。既存成果物や同時起動 run を上書きしない。
     let output_guard = reserve_output_directory(&cli.out_dir)?;
+
+    let nps_scaling = match bench_idx {
+        Some(idx) => Some(calibrate_nps_scaling(
+            &cli,
+            idx,
+            &engine_labels,
+            &engine_usi_options,
+            time_control,
+            cpu_slots.as_deref(),
+        )?),
+        None => None,
+    };
+    let time_control = nps_scaling.as_ref().map_or(time_control, NpsScalingMeta::time_control);
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_failed = Arc::new(AtomicBool::new(false));
@@ -1242,6 +1432,7 @@ fn main() -> Result<()> {
         run_status: RunStatus::Running,
         incomplete_pairs: 0,
         unreturned_games: 0,
+        nps_scaling: nps_scaling.clone(),
     };
     // meta.json 書き出し
     {
@@ -1384,6 +1575,7 @@ fn main() -> Result<()> {
                 output: path.display().to_string(),
                 base_label: cli.base_label.clone(),
                 sprt: sprt_meta,
+                nps_scaling: nps_scaling.clone(),
             };
             pw.write_json(&meta)?;
             pw.flush()?;
@@ -1416,6 +1608,7 @@ fn main() -> Result<()> {
         go_depth: cli.depth,
         go_nodes: &engine_nodes,
         start_defs: &start_defs,
+        cpu_slots: cpu_slots.as_ref(),
     };
 
     // ワーカースレッドの起動
@@ -1460,6 +1653,8 @@ fn main() -> Result<()> {
         control_path.display(),
     );
 
+    // CPU 群は起動時の --concurrency 分だけ確保するので、それを越える増員は受け付けない。
+    let max_workers = cpu_slots.as_ref().map(|slots| slots.sets.len());
     let mut tickets_sent: u32 = 0;
     let mut live_workers = cli.concurrency;
     let mut desired_workers = cli.concurrency;
@@ -1484,6 +1679,7 @@ fn main() -> Result<()> {
                 &target_per_dir,
                 &mut desired_workers,
                 agg.completed,
+                max_workers,
             );
         }
 
@@ -1561,6 +1757,7 @@ fn main() -> Result<()> {
                         &target_per_dir,
                         &mut desired_workers,
                         agg.completed,
+                        max_workers,
                     );
                     if source.has_next() && (!agg.stop_feeding || !source.retry_queue.is_empty())
                         || live_workers > desired_workers
@@ -1758,6 +1955,7 @@ fn apply_control(
     target_per_dir: &AtomicU32,
     desired_workers: &mut usize,
     completed: u32,
+    max_workers: Option<usize>,
 ) {
     let Ok(text) = fs::read_to_string(control_path) else {
         return;
@@ -1783,6 +1981,10 @@ fn apply_control(
     if let Some(c) = parsed.concurrency {
         if c == 0 {
             eprintln!("[control] concurrency=0 は不正のため無視します");
+        } else if let Some(max) = max_workers.filter(|&max| c > max) {
+            eprintln!(
+                "[control] concurrency={c} は --cpu-affinity numa で確保した CPU 群 ({max}) を越えるため無視します"
+            );
         } else if c != applied.concurrency {
             applied.concurrency = c;
             *desired_workers = c;
@@ -2451,6 +2653,131 @@ fn ensure_node_coverage(
     Ok(())
 }
 
+/// `--nps-scaling` は Fischer の時計だけに掛ける。byoyomi・depth・nodes の対局では倍率の意味が無い。
+fn validate_nps_scaling(cli: &Cli, engine_nodes: &[Option<u64>]) -> Result<()> {
+    if !cli.nps_scaling {
+        if cli.reference_nps.is_some() || cli.min_nps_ratio.is_some() {
+            bail!("--reference-nps / --min-nps-ratio は --nps-scaling と一緒に指定してください");
+        }
+        return Ok(());
+    }
+    if cli.byoyomi > 0
+        || cli.depth.is_some()
+        || engine_nodes.iter().any(Option::is_some)
+        || (cli.btime == 0 && cli.binc == 0)
+    {
+        bail!(
+            "--nps-scaling は Fischer (--btime / --binc、--byoyomi・--depth・--nodes・--engine-nodes なし) の対局で使います"
+        );
+    }
+    if cli.reference_nps == Some(0) {
+        bail!("--reference-nps must be >= 1");
+    }
+    if cli.min_nps_ratio.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+        bail!("--min-nps-ratio must be in [0, 1]");
+    }
+    Ok(())
+}
+
+/// bench を走らせる engine。採用 SPRT の倍率を base で決め、候補自身の NPS の低下を持ち時間の
+/// 増加で相殺しないようにする。
+fn nps_bench_engine_index(cli: &Cli, engine_labels: &[String]) -> Result<usize> {
+    let label = cli
+        .sprt_base_label
+        .as_deref()
+        .filter(|_| cli.sprt)
+        .or(cli.base_label.as_deref())
+        .context("--nps-scaling は bench を測る engine を --base-label (SPRT では --sprt-base-label も可) で指定してください")?;
+    engine_labels.iter().position(|l| l == label).with_context(|| {
+        format!("--nps-scaling の bench engine '{label}' が engines に存在しません")
+    })
+}
+
+/// 全 slot (`--concurrency` 本) で同時に bench を走らせ、基準の時計に掛ける倍率を決める。
+/// slot には対局の worker と同じく全 engine を常駐させ、探索は bench engine だけが行う。
+fn calibrate_nps_scaling(
+    cli: &Cli,
+    bench_idx: usize,
+    engine_labels: &[String],
+    engine_usi_options: &[Vec<String>],
+    reference: TimeControl,
+    cpu_slots: Option<&CpuSlots>,
+) -> Result<NpsScalingMeta> {
+    let configs: Vec<EngineConfig> = cli
+        .engines
+        .iter()
+        .zip(engine_usi_options)
+        .map(|(path, options)| engine_config(path, options, cli.threads, cli.hash_mb))
+        .collect();
+    let slots = cli.concurrency;
+    let bench_label = &engine_labels[bench_idx];
+    println!(
+        "nps bench: {slots} slot(s) x {} thread(s), engine {bench_label} ...",
+        cli.threads
+    );
+    let bench = nps_bench::measure(slots, cli.threads, cli.timeout_margin_ms, |idx, cancel| {
+        let cpus = cpu_slots.map(|slots| slots.sets[idx].as_slice());
+        let mut searcher = None;
+        let mut resident = Vec::new();
+        for (i, cfg) in configs.iter().enumerate() {
+            if cancel.load(Ordering::Acquire) {
+                return Err(nps_bench::BenchCancelled.into());
+            }
+            let engine = spawn_engine(cfg, format!("bench{}_{}", idx + 1, engine_labels[i]), cpus)?;
+            if i == bench_idx {
+                searcher = Some(engine);
+            } else {
+                resident.push(engine);
+            }
+        }
+        Ok((searcher.context("bench engine was not spawned")?, resident))
+    })?;
+    println!("{}", bench.summary());
+    let reference_nps = cli.reference_nps.unwrap_or(nps_bench::DEFAULT_REFERENCE_NPS);
+    let min_nps_ratio = cli.min_nps_ratio.unwrap_or(nps_bench::DEFAULT_MIN_NPS_RATIO);
+    bench.ensure_above_floor(reference_nps, min_nps_ratio)?;
+    let scale = reference_nps as f64 / bench.nps;
+    let meta = NpsScalingMeta {
+        bench_version: nps_bench::BENCH_VERSION,
+        bench_engine_label: bench_label.clone(),
+        reference_nps,
+        min_nps_ratio,
+        measured_nps: bench.nps,
+        slots: bench.slot_nps.len(),
+        slot_nps: bench.slot_nps,
+        scale,
+        reference_btime: reference.black_time,
+        reference_binc: reference.black_inc,
+        reference_wtime: reference.white_time,
+        reference_winc: reference.white_inc,
+        btime: nps_bench::scale_clock(reference.black_time, scale),
+        binc: nps_bench::scale_clock(reference.black_inc, scale),
+        wtime: nps_bench::scale_clock(reference.white_time, scale),
+        winc: nps_bench::scale_clock(reference.white_inc, scale),
+        bench_depth: bench.depth,
+        warmup_depth: bench.warmup_depth,
+        bench_positions: bench.positions,
+        threads: cli.threads,
+        measured_at: Local::now().to_rfc3339(),
+    };
+    let white = if (meta.wtime, meta.winc) == (meta.btime, meta.binc) {
+        String::new()
+    } else {
+        format!(" wtime={} winc={}", meta.wtime, meta.winc)
+    };
+    println!(
+        "clock: btime={} binc={}{white} (reference {}+{} x scale {:.4}; measured {:.0} nps/thread, reference {})",
+        meta.btime,
+        meta.binc,
+        meta.reference_btime,
+        meta.reference_binc,
+        meta.scale,
+        meta.measured_nps,
+        meta.reference_nps
+    );
+    Ok(meta)
+}
+
 /// 省略された後手の時計を補完し、探索制限との組み合わせを検証する。
 fn resolve_time_control(cli: &Cli, engine_nodes: &[Option<u64>]) -> Result<TimeControl> {
     let use_byoyomi = cli.byoyomi > 0;
@@ -2880,6 +3207,7 @@ mod tests {
             go_depth: None,
             go_nodes: &[],
             start_defs: &[],
+            cpu_slots: None,
         };
         let (ticket_tx, ticket_rx) = super::chan::bounded(1);
         let (result_tx, _result_rx) = super::chan::bounded(1);
@@ -3230,12 +3558,12 @@ mod tests {
         };
 
         // ファイル不在 → 何もしない（履歴も作られない）。
-        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 0);
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 0, None);
         assert!(!history_path.exists());
 
         // target と concurrency を変更。
         std::fs::write(&control_path, r#"{"target_games": 150, "concurrency": 8}"#).unwrap();
-        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 10);
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 10, None);
         assert_eq!(target.load(Ordering::Relaxed), 150);
         assert_eq!(desired, 8);
         assert_eq!(applied.target_games, 150);
@@ -3244,20 +3572,98 @@ mod tests {
         assert_eq!(history.lines().count(), 1, "変更 1 件で履歴 1 行");
 
         // 同じ内容の再ポーリングは no-op（履歴が増えない）。
-        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 20);
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 20, None);
         let history = std::fs::read_to_string(&history_path).unwrap();
         assert_eq!(history.lines().count(), 1, "差分なしでは履歴が増えない");
 
         // concurrency=0 は無視され、target だけ反映される。
         std::fs::write(&control_path, r#"{"target_games": 200, "concurrency": 0}"#).unwrap();
-        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 30);
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 30, None);
         assert_eq!(target.load(Ordering::Relaxed), 200);
         assert_eq!(desired, 8, "concurrency=0 は無視");
 
         // 壊れた JSON は無視され、実行継続（既存値も維持）。
         std::fs::write(&control_path, "{ not json").unwrap();
-        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 40);
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 40, None);
         assert_eq!(target.load(Ordering::Relaxed), 200);
+
+        // NUMA の CPU 群の数を越える増員は無視する。
+        std::fs::write(&control_path, r#"{"concurrency": 9}"#).unwrap();
+        apply_control(
+            &control_path,
+            &history_path,
+            &mut applied,
+            &target,
+            &mut desired,
+            50,
+            Some(8),
+        );
+        assert_eq!(desired, 8);
+    }
+
+    #[test]
+    fn nps_scaling_requires_fischer_clock_and_flags_need_it() {
+        let ok = clock_cli(&["--btime", "20000", "--binc", "2500", "--nps-scaling"]);
+        assert!(super::validate_nps_scaling(&ok, &[None, None]).is_ok());
+        for args in [
+            &["--byoyomi", "1000", "--nps-scaling"][..],
+            &["--btime", "20000", "--depth", "10", "--nps-scaling"],
+            &["--btime", "20000", "--nps-scaling", "--reference-nps", "0"],
+            &[
+                "--btime",
+                "20000",
+                "--nps-scaling",
+                "--min-nps-ratio",
+                "1.5",
+            ],
+            &["--btime", "20000", "--reference-nps", "350000"],
+            &["--btime", "20000", "--min-nps-ratio", "0.5"],
+        ] {
+            let cli = clock_cli(args);
+            assert!(super::validate_nps_scaling(&cli, &[None, None]).is_err(), "{args:?}");
+        }
+        assert!(super::validate_nps_scaling(&ok, &[Some(1000), None]).is_err());
+    }
+
+    #[test]
+    fn nps_bench_engine_is_the_sprt_base() {
+        let labels = ["base".to_owned(), "test".to_owned()];
+        let cli = clock_cli(&["--btime", "20000", "--nps-scaling", "--base-label", "test"]);
+        assert_eq!(super::nps_bench_engine_index(&cli, &labels).unwrap(), 1);
+        let cli = clock_cli(&[
+            "--btime",
+            "20000",
+            "--nps-scaling",
+            "--base-label",
+            "test",
+            "--sprt",
+            "--sprt-base-label",
+            "base",
+        ]);
+        assert_eq!(super::nps_bench_engine_index(&cli, &labels).unwrap(), 0);
+        let cli = clock_cli(&["--btime", "20000", "--nps-scaling"]);
+        assert!(super::nps_bench_engine_index(&cli, &labels).is_err());
+        let cli = clock_cli(&[
+            "--btime",
+            "20000",
+            "--nps-scaling",
+            "--base-label",
+            "missing",
+        ]);
+        assert!(super::nps_bench_engine_index(&cli, &labels).is_err());
+    }
+
+    #[test]
+    fn cpu_slots_hand_out_lowest_free_group_and_take_it_back() {
+        let slots = Arc::new(super::CpuSlots::new(vec![vec![0, 1], vec![2, 3]]));
+        let shutdown = super::AtomicBool::new(false);
+        let first = slots.acquire(&shutdown).unwrap();
+        let second = slots.acquire(&shutdown).unwrap();
+        assert_eq!((first.cpus(), second.cpus()), (&[0, 1][..], &[2, 3][..]));
+        drop(first);
+        assert_eq!(slots.acquire(&shutdown).unwrap().cpus(), &[0, 1]);
+        shutdown.store(true, Ordering::Relaxed);
+        assert!(slots.acquire(&shutdown).is_none());
     }
 
     #[test]

@@ -1759,6 +1759,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 - slot の NPS = `engine が報告した nodes の合計 ÷ go から bestmove までの時間の合計 ÷ Threads`。倍率に使う NPS は slot 間の平均。
 - 1 局面の探索が 600 s を超える、または engine が nodes を報告しないと bench は失敗する。
 - bench の版 (局面・深さ・集計方法) を変えたら `bench_version` を上げる。版は fingerprint に入る。
+- tournament の `--nps-scaling` も同じ bench を使う ([tournament](tournament.md#機械の速さによる時計の補正---nps-scaling))。
 
 ### 17.2 時計の決め方と記録
 
