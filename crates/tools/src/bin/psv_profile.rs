@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn error_record_number_counts_across_chunks() {
         let double_pawn = "4k4/9/9/9/9/9/P8/P8/4K4 b - 1";
-        // 2 件目は chunk の最後なので次の chunk に繰り越され、6 件目は 3 つ目の chunk にある
+        // chunk 3 件では番号 2 と 5 が次の chunk へ繰り越され、番号 1 は chunk の途中にある
         for bad in [1usize, 2, 5] {
             let bytes: Vec<u8> = (0..7)
                 .map(|i| record(if i == bad { double_pawn } else { NORMAL }, 1, 0, 0))
