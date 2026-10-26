@@ -40,6 +40,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 - `book_backprop` と `book_mine master audit` / `rejoin` / `cycles` に `--threads` (0 = 全コア) を足した。
   rejoin / cycles はグラフ作り・先手と後手・循環ごとの外し方も並べて解く。出力はスレッド数によらない。
 
+- `book_mine borrow cut` の `--book` に YaneuraOu の `.ybb` を渡せるようにした。
+  `.ybb` は並べ替え不要で、切り出しの結果は変換元の `.db` と同じ。
+
 ### USI エンジン
 
 - 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
@@ -47,6 +50,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。
 - `rshogi-book` の `Book::len` / `Book::is_empty` は `Book::position_count`
   (丸読みの局面数。on the fly では `None`) に置き換えた。`Book` は `Clone` でなくなった。
+- YaneuraOu のバイナリ定跡 `.ybb` を読めるようにした (丸読みと `BookOnTheFly` の両方)。ファイル先頭の
+  magic で見分ける。`BookFile` に `.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む
+  (YaneuraOu と同じ)。`.ybb` は ponder と採択回数を持たないので、ponder は子局面を引いて補い、
+  `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしない。
 
 ### rshogi-core / ライブラリ利用者の移行
 

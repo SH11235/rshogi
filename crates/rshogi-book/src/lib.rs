@@ -1,14 +1,16 @@
 //! rshogi 定跡(opening book)機構 Phase 1。
 //!
-//! YANEURAOU-DB2016 テキスト `.db` 形式(外部で広く流通する定跡 DB フォーマット)の
-//! リーダと、root 局面 1 回の probe(指し手選択)を提供する。ファイルフォーマットのみ
-//! 外部互換とし、probe 機構・実装は rshogi 内で完結する。
+//! YANEURAOU-DB2016 テキスト `.db` 形式(外部で広く流通する定跡 DB フォーマット)と
+//! YaneuraOu のバイナリ定跡 `.ybb` のリーダと、root 局面 1 回の probe(指し手選択)を
+//! 提供する。ファイルフォーマットのみ外部互換とし、probe 機構・実装は rshogi 内で完結する。
 //!
 //! # 概要
 //!
-//! - [`Book`]: `.db` の定跡本体。丸読みの path 版([`Book::from_path`])と
+//! - [`Book`]: 定跡本体。丸読みの path 版([`Book::from_path`])と
 //!   bytes 版([`Book::from_bytes`])の二本立て API(NNUE ローダ準拠、wasm 互換)に加え、
 //!   丸読みせず probe のたびにファイルを二分探索する [`Book::open_on_the_fly`] がある。
+//!   `.ybb` はファイル先頭の magic で見分け、同じ API で引ける。
+//! - [`resolve_book_path`]: `.db` が無く同名の `.ybb` があればそちらを返す(YaneuraOu と同じ)。
 //! - [`probe`]: root 局面に対して定跡手を選ぶ。miss 時は [`BookOptions::flipped_book`]
 //!   により先後反転局面で再検索する(FlippedBook)。
 //! - [`BookOptions`]: USI オプションのミラー。
@@ -19,9 +21,10 @@ mod flip;
 mod on_the_fly;
 mod probe;
 mod reader;
+mod ybb;
 
 pub use explore::BookExploreList;
 pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe, probe_with_explore};
-pub use reader::{Book, BookEntryMove};
+pub use reader::{Book, BookEntryMove, resolve_book_path};
 
 pub use flip::{flip_usi_move, flipped_key};

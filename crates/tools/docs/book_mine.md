@@ -576,7 +576,7 @@ book_mine borrow cut --book peta.db --roots roots.jsonl --out cut1 \
 
 | オプション | 既定 | 説明 |
 |---|---:|---|
-| `--book` | 必須 | 大きい定跡 `.db`。丸読みせず、ファイル上で二分探索して引く (`rshogi-book` の BookOnTheFly)。`sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要があり、並んでいなければ開くときに止まる (並べ替えた写しを渡す)。ファイルは読むだけ |
+| `--book` | 必須 | 大きい定跡。テキスト `.db` か YaneuraOu のバイナリ定跡 `.ybb` (ファイル先頭で見分ける)。丸読みせず、ファイル上で二分探索して引く (`rshogi-book` の BookOnTheFly)。`.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要があり、並んでいなければ開くときに止まる (並べ替えた写しを渡す)。`.ybb` は並べ替え不要で、手の depth と count を持たないが切り出しは値しか使わないので結果は `.db` と同じ。ファイルは読むだけ |
 | `--roots` | 必須 | 根の一覧 (JSON Lines)。1 行に `id` (`[A-Za-z0-9_-]`)・`root` (`sfen ...` か `startpos moves ...`)・`own` (`b` / `w`、根の手番と同じ)。他の項目は読まないので、`tree` のキューの行もそのまま渡せる |
 | `--out` | 必須 | 出力先。まだ無い dir |
 | `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす (YaneuraOu の BookEvalDiff に当たる) |

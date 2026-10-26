@@ -9,13 +9,16 @@
 //!   `value=0, depth=0, move_count=1`。数値化できないフィールドは 0 とみなす
 //!   (`move_count` は「省略=1」だが「不正=0」)
 //! - `move`/`ponder` が `none` / `None` / `resign` のいずれかなら「指し手なし」
+//!
+//! 先頭が `.ybb` の magic なら YaneuraOu のバイナリ定跡として読む ([`crate::ybb`])。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::on_the_fly::OnTheFlyFile;
+use crate::ybb::{self, YbbBook};
 
 /// 定跡 1 手ぶんの生データ(USI 文字列のまま保持し、合法性検証は probe 時に行う)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub(crate) struct PositionEntry {
 
 /// 定跡本体。メモリに丸読みしたもの([`Book::from_path`] など)と、ファイルを開いたまま
 /// probe のたびに引くもの([`Book::open_on_the_fly`])の 2 通りがあり、引いた結果は同じになる。
+/// テキスト `.db` と YaneuraOu のバイナリ定跡 `.ybb` を読める (ファイル先頭の magic で見分ける)。
 ///
 /// キーは SFEN 文字列。`ignore_ply` が `true` のときは末尾の手数(ply)を落とした
 /// SFEN をキーとして格納・検索する(盤面が同じなら手数違いでもヒットする)。
@@ -64,6 +68,7 @@ pub struct Book {
 enum Store {
     Memory(HashMap<String, PositionEntry>),
     OnTheFly(OnTheFlyFile),
+    Ybb(YbbBook),
 }
 
 /// `.db` の 1 行の種類。丸読みと on the fly で同じ解釈をするために共通化している。
@@ -93,7 +98,7 @@ pub(crate) fn classify_line(line: &str) -> Line<'_> {
 
 /// `move`/`ponder` フィールドを USI 文字列の `Option` に変換する。
 /// `none` / `None` / `resign` は「指し手なし」= `None`。
-fn parse_move_field(token: &str) -> Option<String> {
+pub(crate) fn parse_move_field(token: &str) -> Option<String> {
     match token {
         "none" | "None" | "resign" => None,
         other => Some(other.to_string()),
@@ -128,11 +133,24 @@ impl Book {
 
     /// バイト列から定跡を読み込む(NNUE ローダの `init_nnue_from_bytes` 相当。wasm 互換)。
     pub fn from_bytes(bytes: &[u8], ignore_ply: bool) -> io::Result<Self> {
-        Self::from_reader(Cursor::new(bytes), ignore_ply)
+        Self::from_reader(bytes, ignore_ply)
     }
 
-    /// 任意の `Read` から定跡を読み込む。
-    pub fn from_reader<R: Read>(reader: R, ignore_ply: bool) -> io::Result<Self> {
+    /// 任意の `Read` から定跡を読み込む。`.ybb` はファイル全体をそのまま保持する。
+    pub fn from_reader<R: Read>(mut reader: R, ignore_ply: bool) -> io::Result<Self> {
+        let mut head = Vec::with_capacity(ybb::MAGIC.len());
+        (&mut reader).take(ybb::MAGIC.len() as u64).read_to_end(&mut head)?;
+        if head == ybb::MAGIC {
+            reader.read_to_end(&mut head)?;
+            return Ok(Self {
+                store: Store::Ybb(YbbBook::from_bytes(head)?),
+                ignore_ply,
+            });
+        }
+        Self::from_text_reader(head.as_slice().chain(reader), ignore_ply)
+    }
+
+    fn from_text_reader<R: Read>(reader: R, ignore_ply: bool) -> io::Result<Self> {
         let mut entries: HashMap<String, PositionEntry> = HashMap::new();
         let mut current_key: Option<String> = None;
         let buf = BufReader::new(reader);
@@ -162,21 +180,27 @@ impl Book {
 
     /// 定跡ファイルを開くだけで丸読みせず、probe のたびにファイルから引く(BookOnTheFly)。
     ///
-    /// ファイルは `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要がある
+    /// テキスト `.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要がある
     /// (YaneuraOu の定跡書き出しの順)。開くときに等間隔の抜き取りで並びを確かめ、
-    /// 逆順の箇所を見つけたら `InvalidData` を返す。ファイルは開いたまま保持する。
+    /// 逆順の箇所を見つけたら `InvalidData` を返す。`.ybb` は header だけを確かめ、
+    /// index をファイル上で二分探索する。ファイルは開いたまま保持する。
     pub fn open_on_the_fly<P: AsRef<Path>>(path: P, ignore_ply: bool) -> io::Result<Self> {
-        Ok(Self {
-            store: Store::OnTheFly(OnTheFlyFile::open(path.as_ref())?),
-            ignore_ply,
-        })
+        let path = path.as_ref();
+        let store = if is_ybb_file(path)? {
+            Store::Ybb(YbbBook::open(path)?)
+        } else {
+            Store::OnTheFly(OnTheFlyFile::open(path)?)
+        };
+        Ok(Self { store, ignore_ply })
     }
 
-    /// 丸読みした定跡の登録局面数。on the fly では局面数を数えないので `None`。
+    /// 定跡の局面数。テキスト `.db` の丸読みは `IgnoreBookPly` で手数違いをまとめた後の数、
+    /// `.ybb` は header の局面数。テキスト `.db` の on the fly では数えないので `None`。
     pub fn position_count(&self) -> Option<usize> {
         match &self.store {
             Store::Memory(entries) => Some(entries.len()),
             Store::OnTheFly(_) => None,
+            Store::Ybb(book) => usize::try_from(book.record_count()).ok(),
         }
     }
 
@@ -185,6 +209,7 @@ impl Book {
         match &self.store {
             Store::Memory(_) => None,
             Store::OnTheFly(file) => Some(file.len()),
+            Store::Ybb(book) => book.file_len(),
         }
     }
 
@@ -193,7 +218,7 @@ impl Book {
         self.ignore_ply
     }
 
-    /// 局面の定跡手を `.db` に書かれた順に返す。`none` などの指し手なしの行は除く。
+    /// 局面の定跡手を定跡ファイルに書かれた順に返す。`none` などの指し手なしの行は除く。
     /// 局面が無ければ空。on the fly の読み出しに失敗したときだけ `Err` になる。
     pub fn entry_moves(&self, sfen: &str) -> io::Result<Vec<BookEntryMove>> {
         let Some(entry) = self.find_raw(sfen)? else {
@@ -220,8 +245,30 @@ impl Book {
                 Ok(entries.get(&normalize_key(sfen, self.ignore_ply)).map(Cow::Borrowed))
             }
             Store::OnTheFly(file) => Ok(file.find(sfen, self.ignore_ply)?.map(Cow::Owned)),
+            Store::Ybb(book) => Ok(book.find(sfen, self.ignore_ply)?.map(Cow::Owned)),
         }
     }
+}
+
+/// 定跡ファイルのパスを解決する。`path` が無く、`.db` で終わり、拡張子を `.ybb` にした
+/// ファイルがあればそちらを返す。それ以外は `path` のまま (YaneuraOu の `BookFile` と同じ)。
+pub fn resolve_book_path(path: &Path) -> std::path::PathBuf {
+    if !path.exists() && path.extension().is_some_and(|ext| ext == "db") {
+        let ybb = path.with_extension("ybb");
+        if ybb.exists() {
+            return ybb;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// ファイル先頭が `.ybb` の magic か。
+fn is_ybb_file(path: &Path) -> io::Result<bool> {
+    let mut head = Vec::with_capacity(ybb::MAGIC.len());
+    std::fs::File::open(path)?
+        .take(ybb::MAGIC.len() as u64)
+        .read_to_end(&mut head)?;
+    Ok(head == ybb::MAGIC)
 }
 
 /// 指し手行 1 行を `RawBookMove` にパースする。`move` フィールドが空なら `None`。

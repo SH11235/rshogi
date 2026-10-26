@@ -84,7 +84,7 @@
 | [`book_rescore`](book_rescore.md) | 候補手を USI / ONNX で評価し、内容指紋で再開を検査 |
 | [`book_extend`](book_extend.md) | USI bestmove を count=0 で候補集合へ追加 |
 | [`book_backprop`](book_backprop.md) | 千日手・連続王手を考慮した後退解析で評価値を逆伝播 |
-| [`book_mine`](book_mine.md) | 定跡の展開・借用・監査と、キュー・台帳を使う並列探索 |
+| [`book_mine`](book_mine.md) | 定跡の展開・借用 (借りる定跡は `.db` / `.ybb`)・監査と、キュー・台帳を使う並列探索 |
 
 ## SPSA・パラメータ
 

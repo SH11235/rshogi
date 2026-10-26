@@ -1,0 +1,30 @@
+#YANEURAOU-DB2016 1.00
+sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
+7g7f none 50 20
+2g2f none 50 18
+5g5f none -120 65535
+resign none 0 0
+sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2
+3c3d none -40 16
+8c8d none -45 16
+none none 0 0
+sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3
+8h2b+ none 30 12
+8h2b none -200 3
+2g2f none 25 12
+sfen lnsgkgsnl/1r5+B1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/7R1/LNSGKGSNL w B 4
+3a2b none -30 10
+sfen lnsgkg1nl/1r5s1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/7R1/LNSGKGSNL b Bb 5
+B*4e none 10 9
+B*5e none -32768 9
+7i7h none 32767 1
+sfen lnsgkg1nl/1r5s1/pppppp1pp/6p2/5B3/2P6/PP1PPPPPP/7R1/LNSGKGSNL w b 6
+2b3c none -5 8
+B*6e none -20 8
+sfen lnsgkgs1l/7b1/p1pppp+R1p/9/9/1r7/P1PPPPP1P/1B7/LNSGKGSNL w N2P3p 14
+3a2b none -900 7
+P*3b none -950 7
+sfen lnsgkg2l/6sb1/p1pppp+R1p/9/9/1r7/P1PPPPP1P/1B7/LNSGKGSNL b N2P3p 15
+P*8g none 800 6
+3c2b none 790 6
+N*2d none 500 6

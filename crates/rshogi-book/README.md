@@ -1,7 +1,7 @@
 # rshogi-book
 
-`rshogi-book` は YANEURAOU-DB2016 テキスト `.db` 形式の定跡を読み込み、root 局面で
-定跡手を 1 手 probe する crate です。USI 統合では `rshogi-usi` の Book 系オプションが
+`rshogi-book` は YANEURAOU-DB2016 テキスト `.db` 形式と YaneuraOu のバイナリ定跡 `.ybb` の
+定跡を読み込み、root 局面で定跡手を 1 手 probe する crate です。USI 統合では `rshogi-usi` の Book 系オプションが
 `BookOptions` に反映されます。
 
 ## 定跡 probe オプション
@@ -9,7 +9,7 @@
 | USI オプション | 既定 | 説明 |
 | --- | --- | --- |
 | `USI_OwnBook` | `true` | 定跡使用の総合スイッチ。`false` なら probe しない。 |
-| `BookFile` | `no_book` | 定跡ファイル名。`no_book` または空なら定跡をロードしない。 |
+| `BookFile` | `no_book` | 定跡ファイル名 (`.db` か `.ybb`)。`no_book` または空なら定跡をロードしない。`.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む。[下記](#yaneuraou-のバイナリ定跡-ybb)参照。 |
 | `BookExploreFile` | `<empty>`（空文字列・無効） | 指定局面の定跡手を等確率で選ぶ UTF-8 ファイル。 |
 | `BookDir` | `book` | 相対 `BookFile` を解決するディレクトリ。 |
 | `BookMoves` | `16` | この手数まで定跡を使う。 |
@@ -55,7 +55,7 @@
   `info string Error reading book file: ...` を出します。ponder を補うために子局面を引いて
   いるときのエラーは何も出さず、予想手なしで bestmove を返します。丸読みはこの場合 `isready`
   で読み込み自体が失敗します。
-- **`.ybb` (YaneuraOu のバイナリ定跡)** には対応していません。テキスト `.db` だけです。
+- 上の並び・抜き取り・読み出し量の説明はテキスト `.db` のものです。`.ybb` は[下記](#yaneuraou-のバイナリ定跡-ybb)。
 
 ### 定跡ファイルの差し替え
 
@@ -79,6 +79,37 @@
 
 ```bash
 RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- --ignored
+```
+
+## YaneuraOu のバイナリ定跡 (.ybb)
+
+`BookFile` に YaneuraOu の `.ybb` (`YANE-BINBOOK-V1`) を指定すると、テキスト `.db` と同じ
+オプションで使えます。形式はファイル先頭の magic で見分けます。`BookFile` に `.db` を指定して
+そのファイルが無く、拡張子を `.ybb` にしたファイルがあればそちらを読み、
+`info string book file fallback: <.db> -> <.ybb>` を出します (YaneuraOu と同じ)。
+
+- **引き方**: 局面から YaneuraOu と同じビット列の PackedSfen を作り、PackedSfen の順に並んだ
+  index を二分探索します。`IgnoreBookPly=false` では手数も一致したときだけ当たります (`.ybb` は
+  同じ盤面を 1 つしか持てないので、手数違いの重複はありません)。`FlippedBook` は先後反転した
+  局面で引き直し、手を反転します。玉が欠けた局面など PackedSfen にできない局面は引けません。
+- **持たない情報**: ponder と採択回数 (count) を持たず、手ごとの depth は持つ版と持たない版
+  (0 として扱う) があります。ponder は子局面を引いた筆頭手で補い、`ConsiderBookMoveCount` は
+  等確率、`NarrowBook` は何もしません。同じ局面集合の `.db` (ponder なし・count が揃ったもの) から
+  変換した `.ybb` は、probe の結果が `.db` と一致します。
+- **丸読み (`BookOnTheFly=false`)**: ファイル全体をそのまま読み込みます。メモリはファイルの大きさと
+  同じです。`isready` の時間はファイルを読む時間です。
+- **`BookOnTheFly=true`**: header (32 byte) だけを読み、index も手もファイル上で引きます。並びの
+  抜き取り検査はしません (YaneuraOu の書き出しは PackedSfen 順)。1 回の検索で読むのは index の
+  44 byte を局面数の対数回と、その局面の手だけです。
+- **壊れたファイル**: magic・未知の flags・局面数に対して短すぎるファイルは開くときに拒否します。
+  手の領域が途中で切れている局面は probe の読み出しエラーとして扱います。
+
+実際の `.ybb` と、同じ局面集合の `.db` (手数を除いた SFEN 順に並んだもの) で引いた結果と probe の
+選択が一致することを、`.db` から等間隔に抜いた局面で確かめられます (`.db` を省くと平手を引くだけ)。
+
+```bash
+RSHOGI_YBB_PATH=/path/to/book.ybb RSHOGI_YBB_DB_PATH=/path/to/book.db \
+  cargo test --release -p rshogi-book -- --ignored real_ybb
 ```
 
 ## 局面を指定した定跡手の乱択
