@@ -29,7 +29,8 @@ fn solve_shortest(pos: &mut Position, mode: MateMode, nodes: u64) -> MateResult 
 // ---------------------------------------------------------------------------
 
 /// `plies` 手以内に詰ませたい受け方の局面 `pos` (王手されている) の応手 `mv` が無駄合いか: 駒打ちの合駒を
-/// 王手している駒が取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面が同じ `plies` 手以内に詰む
+/// 王手している駒が取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面 M の詰み手数が、
+/// 駒打ち以外の応手の詰み手数 + 1 の最大 (無ければ 0) 以下。M が `plies` 手以内に詰まなければ無駄合いとしない
 fn ref_is_futile(pos: &mut Position, mv: Move, plies: u32) -> bool {
     let checkers = pos.checkers();
     if !mv.is_drop() || checkers.count() != 1 {
@@ -42,18 +43,37 @@ fn ref_is_futile(pos: &mut Position, mv: Move, plies: u32) -> bool {
         .into_iter()
         .filter(|m| !m.is_drop() && m.from() == checker && m.to() == mv.to())
         .collect();
-    let mut futile = false;
+    let mut returned_len: Option<u32> = None;
     for cap in captures {
         pos.do_move_with_missing_kings(cap);
         let mut returned = with_piece_returned(pos, mv.drop_piece_type(), defender);
         pos.undo_move(cap);
-        if ref_defense(&mut returned, plies) {
-            futile = true;
-            break;
-        }
+        let len = (0..=plies).step_by(2).find(|&n| ref_defense(&mut returned, n));
+        returned_len = match (returned_len, len) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
     }
     pos.undo_move(mv);
-    futile
+    let Some(len) = returned_len else {
+        return false;
+    };
+    if len == 0 {
+        return true;
+    }
+    // 駒打ち以外の応手で、詰み手数が len − 1 以上 (len − 3 手以内に詰まない) のものがあるか
+    legal_moves_by_rules(pos).into_iter().any(|r| {
+        if r.is_drop() {
+            return false;
+        }
+        if len < 4 {
+            return true;
+        }
+        pos.do_move_with_missing_kings(r);
+        let mated = ref_mate(pos, len - 3);
+        pos.undo_move(r);
+        !mated
+    })
 }
 
 /// `pos` から攻め方の持駒の `pt` を 1 枚、受け方 `defender` の持駒に移した局面 (SFEN で作り直す)
@@ -279,18 +299,25 @@ fn effective_interpositions_are_counted() {
     }
 }
 
-/// 7 手詰。▲6四竜への△4四歩などの合駒は、▲同竜 △同玉と竜を取り返されて詰みが長くなるので有効な合駒。
-/// 合駒を無駄合いとして数えないと ▲6四竜からの 5 手になる
+/// 取ると取り返される合駒は有効な合駒として数える。
+/// - 7 手詰: ▲6四竜への△4四歩などは ▲同竜 △同玉と竜を取り返されて詰みが長くなる (無駄合いとすると 5 手)
+/// - 9 手詰 (2 局面): ▲3一飛 (▲7一飛) への唯一の応手△2一金 (△2一香) は ▲同飛成 △同玉と取り返される。
+///   取り返された後の詰みの手数で受け方の局面の手数が決まるので、無駄合いにすると手順が作れない
 #[test]
 fn recaptured_interpositions_are_counted() {
-    let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
-    for mode in MateMode::ALL {
-        let mut pos = position(sfen);
-        let MateResult::Mate(pv) = solve_shortest(&mut pos, mode, 5_000_000) else {
-            panic!("{mode:?}");
-        };
-        assert!(check_mate_pv_by_rules(&pos, &pv, true), "{mode:?}: {}", pv_usi(&pv));
-        assert_eq!(pv.len(), 7, "{mode:?}: {}", pv_usi(&pv));
+    for (sfen, len) in [
+        ("ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1", 7),
+        ("8k/7pp/9/6P2/5B3/9/9/9/9 b RGNg 1", 9),
+        ("8k/7pp/9/9/5B3/9/9/9/9 b RGNl 1", 9),
+    ] {
+        for mode in MateMode::ALL {
+            let mut pos = position(sfen);
+            let MateResult::Mate(pv) = solve_shortest(&mut pos, mode, 5_000_000) else {
+                panic!("{sfen} {mode:?}");
+            };
+            assert!(check_mate_pv_by_rules(&pos, &pv, true), "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert_eq!(pv.len(), len, "{sfen} {mode:?}: {}", pv_usi(&pv));
+        }
     }
 }
 
@@ -395,7 +422,7 @@ fn shortest_mode_with_threads_matches_single_thread() {
 /// 手順を求める段階でノード数の上限に達したら Unknown で、局面は元に戻る
 #[test]
 fn shortest_mode_stops_at_the_node_limit() {
-    // 判定は数千ノードで終わるが、最短手順を求めるのに 3 万ノードほどかかる
+    // 判定は上限内に終わるが、最短手順を求める段階は上限を超える
     let sfen = "ll1S1gBs1/2sR3p1/8l/1p4k1p/P2N2p2/2P4K1/1P1P+n4/6G2/1r6L b BGSPg2n9p 1";
     let mut pos = position(sfen);
     let before = pos.to_sfen();

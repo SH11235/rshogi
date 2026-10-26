@@ -854,12 +854,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 詰み手数の上限が `len_limit` の受け方の局面 `st` (王手されている) で、合駒 `drop` が無駄合いなら、
     /// 合駒の後の局面の証明駒と、合駒を取って取った駒を戻した局面の詰み手数を返す。
     ///
-    /// 無駄合い: 王手している駒が合駒を取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面が、
-    /// この局面と同じ上限 `len_limit` の中で詰む。合駒を取る 2 手が挟まるだけで、残りの手数は合駒が無かった
-    /// ときと変わらない合駒だけが無駄合いになる。取った駒を取り返される・取った後の詰みが長くなる合駒は
-    /// 上限に収まらないので有効な合駒として数える。
-    /// 戻した局面は手順から外れた局面なので、経路を持たずに解く (`FUTILITY_NODES` で打ち切ったら無駄合いと
-    /// しない)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
+    /// 無駄合い: 王手している駒が合駒を取り (成・不成のどちらか)、取った駒を受け方の持駒に戻した局面 M の
+    /// 詰み手数が、駒打ち以外の応手で逃れたときの詰み手数 (応手の詰み手数 + 1 の最大、無ければ 0) 以下。
+    /// 合駒を取る 2 手が挟まるだけで、合駒が無かったときより詰みが長くならない合駒だけが無駄合いになり、
+    /// 受け方の局面の詰み手数を決めることはない。取った駒を取り返される・取った後の詰みが長くなる合駒は
+    /// 有効な合駒として数える。M が `len_limit` の中で詰まなければ、無駄合いでもこの局面は上限内に詰まない
+    /// ので、無駄合いとしない。
+    /// M と応手の後の局面は手順から外れた局面なので、経路を持たずに解く (`FUTILITY_NODES` で打ち切ったら
+    /// M は詰まない・応手の後は詰むとみなす)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
     pub(super) fn futile_drop(
         &mut self,
         st: &mut S,
@@ -883,7 +885,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         st.do_move(drop);
         let result = self.futile_after_drop(st, drop, before, len_limit);
         st.undo_move(drop);
-        let found = result?;
+        let mut found = result?;
+        if let Some((_, len)) = found
+            && len > 0
+            && !self.has_reply_lasting(st, len)?
+        {
+            found = None;
+        }
         if let Some(e) = self.scratch.futility.get_mut(slot) {
             let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
             *e = Futility {
@@ -921,10 +929,6 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 exact_key(returned.key)
             };
             match self.table.probe::<PIECES>(probe_key) {
-                Some(v) if v.pn == 0 && v.mate_len <= len_limit => {
-                    result = Ok(Some((if PIECES { v.hand } else { before.hand }, v.mate_len)));
-                    break;
-                }
                 Some(v) if v.dn == 0 => continue,
                 _ if self.scratch.len_bound(returned.key).is_some_and(|b| b >= len_limit) => {
                     continue;
@@ -938,10 +942,17 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 continue;
             };
             debug_assert_eq!(returned_state.key(), returned.key);
-            match self.solve_detached(&mut returned_state, len_limit) {
+            match self.shortest_detached(&mut returned_state, len_limit) {
                 Ok(Some((proof, len))) => {
-                    result = Ok(Some((if PIECES { proof } else { before.hand }, len)));
-                    break;
+                    let proof = if PIECES { proof } else { before.hand };
+                    // 取る手が複数 (成・不成) なら、詰み手数の短い方
+                    let shorter = match result {
+                        Ok(Some((_, best))) => len < best,
+                        _ => true,
+                    };
+                    if shorter {
+                        result = Ok(Some((proof, len)));
+                    }
                 }
                 Ok(None) => {}
                 Err(abort) => {
@@ -954,10 +965,55 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         result
     }
 
-    /// 受け方の手番の局面 `st` を経路と無関係に `len_limit` 手の上限で解き、詰みなら証明駒と詰み手数を返す。
-    /// 無駄合いの数え方はこの探索と同じ。`FUTILITY_NODES` で打ち切ったら `None` (この探索全体の制限に
-    /// 達していたら `Abort`)。
-    fn solve_detached(&mut self, st: &mut S, len_limit: u16) -> Result<Option<(Hand, u16)>, Abort> {
+    /// 受け方の手番の局面 `st` の、`len_limit` 手以内の最短の詰み手数とその証明駒 (上限を 2 手ずつ縮めて
+    /// 証明し直す。打ち切ったらそこまでの手数)
+    fn shortest_detached(
+        &mut self,
+        st: &mut S,
+        len_limit: u16,
+    ) -> Result<Option<(Hand, u16)>, Abort> {
+        let Some(mut best) = self.solve_detached(st, false, len_limit)? else {
+            return Ok(None);
+        };
+        while best.1 >= 2 {
+            match self.solve_detached(st, false, best.1 - 2)? {
+                Some(shorter) => best = shorter,
+                None => break,
+            }
+        }
+        Ok(Some(best))
+    }
+
+    /// 受け方の局面 `st` に、`len` 手より短く詰まない (詰み手数 + 1 が `len` 以上の) 駒打ち以外の応手があるか
+    fn has_reply_lasting(&mut self, st: &mut S, len: u16) -> Result<bool, Abort> {
+        let mut replies = Vec::new();
+        st.generate(false, &mut replies);
+        for mv in replies {
+            if st.is_drop(mv) {
+                continue;
+            }
+            if len < 4 {
+                return Ok(true);
+            }
+            st.do_move(mv);
+            let mated = self.solve_detached(st, true, len - 3);
+            st.undo_move(mv);
+            if mated?.is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// 局面 `st` (`or_node` なら攻め方の手番) を経路と無関係に `len_limit` 手の上限で解き、詰みなら証明駒と
+    /// 詰み手数を返す。無駄合いの数え方はこの探索と同じ。`FUTILITY_NODES` で打ち切ったら `None`
+    /// (この探索全体の制限に達していたら `Abort`)。
+    fn solve_detached(
+        &mut self,
+        st: &mut S,
+        or_node: bool,
+        len_limit: u16,
+    ) -> Result<Option<(Hand, u16)>, Abort> {
         let mut scratch = self.scratch.sub.take().unwrap_or_else(|| Box::new(Scratch::new()));
         let remaining = match self.budget.node_limit {
             0 => FUTILITY_NODES,
@@ -982,7 +1038,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             // 作業領域の表は確保しないので、上限付きの不詰と無駄合いの判定は覚えない
             sub.shortest = true;
             sub.futility = true;
-            let result = sub.search(st, NodeArgs::unbounded(0, false, len_limit), &mut 0);
+            let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
             (result, sub.nodes)
         };
         self.scratch.sub = Some(scratch);
@@ -1172,8 +1228,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 || children.iter().all(|c| c.active)
         );
         // 受け方の局面の詰み手数は応手の詰み手数 + 1 の最大 (応手が無ければ 0)。無駄合いは合駒を取って戻した
-        // 局面の詰み手数をそのまま数える (合駒と取る 2 手は数えない)。この手数を上限にしても同じ合駒が
-        // 無駄合いになるので、置換表の詰み手数として上限付きの探索に使える
+        // 局面の詰み手数で数える (合駒と取る 2 手は数えない)。その手数は駒打ち以外の応手の手数以下なので、
+        // 無駄合いが受け方の局面の手数を決めることはない
         let defense_len = || {
             children
                 .iter()
