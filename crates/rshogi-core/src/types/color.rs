@@ -39,27 +39,25 @@ impl std::ops::Not for Color {
     }
 }
 
+// Color で添字にする配列は [T; Color::NUM] (2 要素) 以上という前提で、境界検査を省く。
+// 探索の最内ループで通るため release では検査しない (理由は `Index<Square> for [T]` と同じ)。
 impl<T> Index<Color> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, c: Color) -> &T {
-        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
-        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
-        // このクレート内では Color でインデックスする配列は全て
-        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
-        unsafe { self.get_unchecked(c as usize) }
+        debug_assert!(c.index() < self.len());
+        // SAFETY: Color は #[repr(u8)] で値域 0..=1。Color で添字にする配列は [T; Color::NUM] (2 要素) 以上。
+        unsafe { self.get_unchecked(c.index()) }
     }
 }
 
 impl<T> IndexMut<Color> for [T] {
     #[inline]
     fn index_mut(&mut self, c: Color) -> &mut T {
-        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
-        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
-        // このクレート内では Color でインデックスする配列は全て
-        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
-        unsafe { self.get_unchecked_mut(c as usize) }
+        debug_assert!(c.index() < self.len());
+        // SAFETY: Color は #[repr(u8)] で値域 0..=1。Color で添字にする配列は [T; Color::NUM] (2 要素) 以上。
+        unsafe { self.get_unchecked_mut(c.index()) }
     }
 }
 

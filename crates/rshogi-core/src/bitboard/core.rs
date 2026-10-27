@@ -92,6 +92,10 @@ impl Bitboard {
     }
 
     /// 最下位ビットのSquareを取得して消す
+    ///
+    /// 空の場合はデバッグビルドで panic し、release では `Square::SQ_11` を返す。
+    /// 盤外のビット (`p[1]` の bit 18 以上) が立っていないことが前提。
+    // 手生成で 1 手ごとに通るため、取り出した升の範囲は release では検査しない。
     #[inline]
     pub fn pop(&mut self) -> Square {
         if self.is_empty() {
@@ -102,35 +106,34 @@ impl Bitboard {
         if self.p[0] != 0 {
             let idx = self.p[0].trailing_zeros();
             self.p[0] &= self.p[0] - 1;
-            // SAFETY: idx < 63 で有効なSquare範囲内
+            // SAFETY: p[0] の有効ビットは 0..=62 なので idx は 0..=62。
             unsafe { Square::from_u8_unchecked(idx as u8) }
         } else {
             let idx = self.p[1].trailing_zeros();
             self.p[1] &= self.p[1] - 1;
-            // SAFETY: 63 + idx < 81 で有効なSquare範囲内
+            // SAFETY: p[1] の有効ビットは 0..=17 なので 63 + idx は 63..=80。
             unsafe { Square::from_u8_unchecked(63 + idx as u8) }
         }
     }
 
     /// 最下位ビットのSquareを取得（消さない）
     ///
-    /// 空の場合は不正な値を返す可能性があるため、
-    /// 空でないことが保証されている場合のみ使用すること。
+    /// 空でないこと、盤外のビットが立っていないことが前提。`pop()` と同じ理由で release では検査しない。
     #[inline]
     pub const fn lsb_unchecked(self) -> Square {
         debug_assert!(self.is_not_empty(), "lsb_unchecked() called on empty Bitboard");
         if self.p[0] != 0 {
-            // SAFETY: trailing_zeros() < 64、かつp[0]の有効ビットは0-62
+            // SAFETY: p[0] の有効ビットは 0..=62。
             unsafe { Square::from_u8_unchecked(self.p[0].trailing_zeros() as u8) }
         } else {
-            // SAFETY: 63 + trailing_zeros() < 81
+            // SAFETY: 空でなく p[1] の有効ビットは 0..=17 なので 63..=80。
             unsafe { Square::from_u8_unchecked(63 + self.p[1].trailing_zeros() as u8) }
         }
     }
 
     /// 最下位ビットのSquareを取得（消さない）
     ///
-    /// 空の場合はNoneを返す。
+    /// 空の場合はNoneを返す。盤外のビットが立っていないことが前提。
     #[inline]
     pub fn lsb(self) -> Option<Square> {
         if self.is_empty() {
@@ -532,6 +535,18 @@ impl ExactSizeIterator for BitboardIter {}
 mod tests {
     use super::*;
     use crate::types::{File, Rank};
+
+    #[test]
+    fn lsb_and_pop_return_every_board_square() {
+        for index in 0..Square::NUM as u8 {
+            let square = Square::from_u8(index).unwrap();
+            let mut bb = Bitboard::from_square(square);
+            assert_eq!(bb.lsb(), Some(square));
+            assert_eq!(bb.pop(), square);
+            assert!(bb.is_empty());
+        }
+        assert_eq!(Bitboard::EMPTY.lsb(), None);
+    }
 
     #[test]
     fn test_bitboard_from_square() {

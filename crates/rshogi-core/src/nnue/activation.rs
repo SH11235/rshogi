@@ -47,6 +47,10 @@ pub trait FtActivation: Clone + Copy + Default + Send + Sync + 'static {
     /// - `input`: FeatureTransformer出力（i16）
     /// - `output`: 活性化後の出力（u8）
     /// - `qa`: クリッピング閾値（通常127または255）
+    ///
+    /// # Panics
+    /// 組込み実装は出力長が `input.len() / OUTPUT_DIM_DIVISOR` と異なる場合に panic する。
+    /// PairwiseCReLU の入力長は、両視点を均等に分割できる4の倍数でなければならない。
     fn activate_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16);
 
     /// i32入力からu8出力への活性化関数適用（中間層用）
@@ -56,6 +60,9 @@ pub trait FtActivation: Clone + Copy + Default + Send + Sync + 'static {
     /// # 引数
     /// - `input`: AffineTransform出力（i32）
     /// - `output`: 活性化後の出力（u8）
+    ///
+    /// # Panics
+    /// 組込み実装は入力と出力の長さが異なる場合に panic する。
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]);
 
     /// アーキテクチャ文字列のサフィックス
@@ -86,13 +93,13 @@ impl FtActivation for CReLU {
 
     #[inline]
     fn activate_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
-        debug_assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), output.len());
         crelu_i16_to_u8(input, output, qa);
     }
 
     #[inline]
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
-        debug_assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), output.len());
         crelu_i32_to_u8(input, output);
     }
 
@@ -397,7 +404,8 @@ impl FtActivation for PairwiseCReLU {
 
     #[inline]
     fn activate_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
-        debug_assert_eq!(input.len(), output.len() * 2);
+        assert!(input.len().is_multiple_of(4));
+        assert_eq!(input.len() / 2, output.len());
         pairwise_crelu_i16_to_u8(input, output, qa);
     }
 
@@ -405,7 +413,7 @@ impl FtActivation for PairwiseCReLU {
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
         // 中間層では通常のCReLUを使用（bullet-shogiと同じ）
         // Pairwiseは最初のFT層のみに適用
-        debug_assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), output.len());
         crelu_i32_to_u8(input, output);
     }
 
@@ -1115,13 +1123,13 @@ impl FtActivation for SCReLU {
 
     #[inline]
     fn activate_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
-        debug_assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), output.len());
         screlu_i16_to_u8(input, output, qa);
     }
 
     #[inline]
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
-        debug_assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), output.len());
         screlu_i32_to_u8(input, output);
     }
 
@@ -1283,7 +1291,17 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
                     };
 
                     // クランプ
+                    #[cfg(target_feature = "sse4.1")]
                     let clamped = _mm_min_epi32(_mm_max_epi32(v, zero), max_clamp);
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let clamped = {
+                        let positive = _mm_and_si128(v, _mm_cmpgt_epi32(v, zero));
+                        let over = _mm_cmpgt_epi32(positive, max_clamp);
+                        _mm_or_si128(
+                            _mm_and_si128(over, max_clamp),
+                            _mm_andnot_si128(over, positive),
+                        )
+                    };
 
                     // 二乗
                     #[cfg(target_feature = "sse4.1")]
@@ -1305,7 +1323,13 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
 
                     // シフトしてクランプ
                     let shifted = _mm_srai_epi32(squared, SHIFT);
+                    #[cfg(target_feature = "sse4.1")]
                     let result = _mm_min_epi32(shifted, max_out);
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let result = {
+                        let over = _mm_cmpgt_epi32(shifted, max_out);
+                        _mm_or_si128(_mm_and_si128(over, max_out), _mm_andnot_si128(over, shifted))
+                    };
 
                     // i32 → i16 → u8 にパック
                     let packed16 = _mm_packs_epi32(result, result);
@@ -1466,6 +1490,55 @@ pub fn default_qa_for_arch(arch_str: &str) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activations_reject_short_output_before_writing() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        fn check<A: FtActivation>() {
+            let mut output = [0xa5; 1];
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| A::activate_i16_to_u8(
+                    &[1; 32],
+                    &mut output,
+                    127
+                )))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5]);
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| A::activate_i32_to_u8(&[1; 32], &mut output)))
+                    .is_err()
+            );
+            assert_eq!(output, [0xa5]);
+        }
+
+        check::<CReLU>();
+        check::<SCReLU>();
+        check::<PairwiseCReLU>();
+    }
+
+    #[test]
+    #[should_panic]
+    fn pairwise_rejects_unequal_perspective_halves() {
+        PairwiseCReLU::activate_i16_to_u8(&[1; 6], &mut [0; 3], 127);
+    }
+
+    #[test]
+    fn screlu_i16_matches_scalar_at_simd_boundaries() {
+        let input: [i16; 67] = std::array::from_fn(|i| {
+            [-128, -1, 0, 1, 63, 126, 127, 128, 254, 255, i16::MAX][i % 11]
+        });
+        for qa in [127, 255] {
+            let mut output = [0; 67];
+            SCReLU::activate_i16_to_u8(&input, &mut output, qa);
+            for (&value, actual) in input.iter().zip(output) {
+                let clamped = i32::from(value).clamp(0, i32::from(qa));
+                let shift = if qa == 255 { 9 } else { 7 };
+                assert_eq!(actual, ((clamped * clamped) >> shift).min(127) as u8);
+            }
+        }
+    }
 
     #[test]
     fn test_detect_activation_from_arch() {

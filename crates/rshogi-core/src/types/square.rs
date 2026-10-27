@@ -178,27 +178,16 @@ impl Square {
     }
 }
 
-// =============================================================================
-// Index trait による境界チェック除去（Reckless 由来）
-//
-// Square(0..=80) は [T; Square::NUM] の有効なインデックスであることが
-// Square の構築時に保証される（new, from_index 等）。
-// この不変条件に依拠して全インデックスアクセスから境界チェックを除去する。
-// =============================================================================
-
+// Square で添字にする配列は [T; Square::NUM] (81 要素) 以上という前提で、境界検査を省く。
+// 探索の最内ループで通るため release では検査しない。Square・Color・Piece の添字と、Move・Bitboard・
+// ExtMoveBuffer のアクセサの範囲検査を release でも入れると、探索の命令数が約 4% 増え、速度が 2〜3% 落ちる。
 impl<T> Index<Square> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, sq: Square) -> &T {
-        debug_assert!(
-            sq.index() < self.len(),
-            "Square index {} out of bounds for slice of length {}",
-            sq.index(),
-            self.len()
-        );
-        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
-        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
+        debug_assert!(sq.index() < self.len());
+        // SAFETY: Square の値域は 0..=80。Square で添字にする配列は [T; Square::NUM] (81 要素) 以上。
         unsafe { self.get_unchecked(sq.index()) }
     }
 }
@@ -206,14 +195,8 @@ impl<T> Index<Square> for [T] {
 impl<T> IndexMut<Square> for [T] {
     #[inline]
     fn index_mut(&mut self, sq: Square) -> &mut T {
-        debug_assert!(
-            sq.index() < self.len(),
-            "Square index {} out of bounds for slice of length {}",
-            sq.index(),
-            self.len()
-        );
-        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
-        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
+        debug_assert!(sq.index() < self.len());
+        // SAFETY: Square の値域は 0..=80。Square で添字にする配列は [T; Square::NUM] (81 要素) 以上。
         unsafe { self.get_unchecked_mut(sq.index()) }
     }
 }

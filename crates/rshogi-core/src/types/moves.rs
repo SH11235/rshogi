@@ -91,41 +91,47 @@ impl Move {
         Move(m)
     }
 
+    // to / from / drop_piece_type は探索の最内ループで通るため、release では符号化を検査しない
+    // (理由は `Index<Square> for [T]` と同じ)。呼ぶのは手生成が作った手か、`from_u16_checked` /
+    // `Position::to_move` で検証した手だけ。置換表から読んだ生の move16 は `Position::to_move` を通してから使う。
+
     /// 移動先を取得
     ///
-    /// # 注意
-    /// - PASSに対して呼ぶと不正な値が返る
-    /// - NULLはNMPで使用されるため従来通り許可
-    ///
-    /// # Safety
-    /// - release ビルドでは PASS チェックが無効化される（`debug_assert!`）
-    /// - 呼び出し側で PASS でないことを保証する必要がある
+    /// `NONE` / `NULL` の符号化に含まれる升も取得できる。
+    /// `PASS` / `WIN` や、移動先が盤外の符号化 (検証していない `from_u16` の値) に対して呼ばないこと。
     #[inline]
     pub const fn to(self) -> Square {
         debug_assert!(!self.is_pass() && !self.is_win(), "to() called on PASS/WIN move");
-        // SAFETY: to は 0-80 の範囲（7bit）
+        // SAFETY: 検証済みの手の to は 0..=80。
         unsafe { Square::from_u8_unchecked((self.0 & Self::TO_MASK) as u8) }
     }
 
-    /// 移動元を取得（駒打ちの場合は無効）
+    /// 移動元を取得
     ///
-    /// 【注意】PASSや駒打ちに対して呼ぶと不正な値が返る
+    /// `PASS` / `WIN` / 駒打ちや、移動元が盤外の符号化に対して呼ばないこと。
     #[inline]
     pub const fn from(self) -> Square {
         debug_assert!(
             !self.is_pass() && !self.is_win() && !self.is_drop(),
             "from() called on invalid move (PASS/WIN or drop)"
         );
-        // SAFETY: from は 0-80 の範囲（7bit）
+        // SAFETY: 検証済みの駒移動の from は 0..=80。
         unsafe { Square::from_u8_unchecked(((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8) }
     }
 
-    /// 打つ駒種を取得（駒打ちでない場合は無効）
+    /// 打つ駒種を取得
+    ///
+    /// 駒打ちでない手や、打つ駒種が手駒の7種類でない符号化に対して呼ばないこと。
     #[inline]
     pub const fn drop_piece_type(self) -> PieceType {
-        debug_assert!(self.is_drop());
-        // SAFETY: PieceType は 1-7 の範囲（手駒のみ）
-        unsafe { std::mem::transmute(((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8) }
+        debug_assert!(self.is_drop(), "drop_piece_type() called on a non-drop move");
+        let piece = ((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8;
+        debug_assert!(
+            piece >= 1 && piece <= PieceType::Gold as u8,
+            "drop piece must be a hand piece"
+        );
+        // SAFETY: 検証済みの駒打ちの駒種は 1..=7 (Pawn..=Gold)。
+        unsafe { std::mem::transmute(piece) }
     }
 
     /// 移動後の駒を取得（YaneuraOu互換）
@@ -235,6 +241,9 @@ impl Move {
     }
 
     /// u16からMoveを生成（駒情報なし）
+    ///
+    /// 符号化は検証しない。外部入力の検証には `from_u16_checked()` を使う。
+    /// 盤外の升や不正な駒種を含む値に `to()` / `from()` / `drop_piece_type()` を呼んではならない。
     #[inline]
     pub const fn from_u16(value: u16) -> Move {
         Move(value as u32)
@@ -394,6 +403,26 @@ impl Default for Move {
 mod tests {
     use super::*;
     use crate::types::{File, Rank};
+
+    #[test]
+    fn raw_move_accessors_preserve_valid_fields() {
+        for index in 0..Square::NUM as u8 {
+            let square = Square::from_u8(index).unwrap();
+            let mv = Move::new_move(square, square, false);
+            let restored = Move::from_u16(mv.to_u16());
+            assert_eq!(restored.from(), square);
+            assert_eq!(restored.to(), square);
+            for piece in PieceType::HAND_PIECES {
+                let mv = Move::new_drop(piece, square);
+                let restored = Move::from_u16(mv.to_u16());
+                assert_eq!(restored.to(), square);
+                assert_eq!(restored.drop_piece_type(), piece);
+            }
+        }
+        for mv in [Move::NONE, Move::NULL] {
+            assert_eq!(mv.from(), mv.to());
+        }
+    }
 
     #[test]
     fn test_move_new_move() {

@@ -1120,6 +1120,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
 
     #[inline]
     fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+        assert!(input.len() >= Self::PADDED_INPUT);
+        assert!(self.weights.len() >= OUTPUT * Self::PADDED_INPUT);
+        assert!(!Self::should_use_scrambled_weights() || OUTPUT <= 1024);
+
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
@@ -1323,7 +1327,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
                 // 外側ループ: 入力チャンク
                 for i in 0..Self::NUM_INPUT_CHUNKS {
                     // 入力4バイトを全レーンにブロードキャスト
-                    let in_val = _mm256_set1_epi32(*input32.add(i));
+                    let in_val = _mm256_set1_epi32(input32.add(i).read_unaligned());
 
                     // この入力チャンクに対応する重みの開始位置
                     // スクランブル形式: weights[input_chunk][output][4]
@@ -1408,7 +1412,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
 
                 // 外側ループ: 入力チャンク
                 for i in 0..Self::NUM_INPUT_CHUNKS {
-                    let in_val = _mm_set1_epi32(*input32.add(i));
+                    let in_val = _mm_set1_epi32(input32.add(i).read_unaligned());
                     let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m128i;
 
                     for k in 0..num_regs {

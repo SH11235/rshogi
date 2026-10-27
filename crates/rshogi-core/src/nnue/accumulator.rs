@@ -319,7 +319,7 @@ enum AlignedBoxBacking {
 /// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
 ///
 /// backing の種別:
-/// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Copy + Default`）。
+/// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Zeroable`）。
 /// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
 /// - `Mapped`: fileの読み取り専用mappingを共有所有（read-only、`DerefMut` 不可）。
 ///
@@ -336,8 +336,8 @@ enum AlignedBoxBacking {
 ///
 /// # 安全性契約
 ///
-/// - `new_zeroed` は `T: Copy + Default` を要求し、`Copy` は `Drop` と排他的なので
-///   `T` は `Drop` を実装できない。よって `drop` は `dealloc` のみで安全（`drop_in_place` 不要）。
+/// - `new_zeroed` は閉じた `Zeroable` 型だけを受け付け、ゼロビット列が有効値になる。
+///   `Copy` により要素の `Drop` は不要で、領域の解放だけでよい。
 /// - `Shared` backing は複数プロセスから参照される read-only 領域。`DerefMut` は panic し、
 ///   可変参照を一切発行しないことで Rust の排他参照不変条件を守る。
 ///
@@ -359,7 +359,24 @@ enum AlignedAllocationError {
     OutOfMemory(Layout),
 }
 
-impl<T: Copy + Default> AlignedBox<T> {
+mod zeroable {
+    pub trait Sealed {}
+
+    impl Sealed for i8 {}
+    impl Sealed for i16 {}
+    impl Sealed for i32 {}
+    impl Sealed for u8 {}
+}
+
+/// ゼロビット列が有効値になる、重み・作業領域用の閉じた型集合。
+pub trait Zeroable: zeroable::Sealed + Copy + Default {}
+
+impl Zeroable for i8 {}
+impl Zeroable for i16 {}
+impl Zeroable for i32 {}
+impl Zeroable for u8 {}
+
+impl<T: Zeroable> AlignedBox<T> {
     /// 指定された長さの配列をゼロ初期化して確保
     ///
     /// # Panics
@@ -571,7 +588,7 @@ impl<T> Drop for AlignedBox<T> {
             AlignedBoxBacking::Heap(layout) => {
                 // SAFETY:
                 // - ptr は new_zeroed が確保したポインタ、layout は確保時と同じもの
-                // - AlignedBox::new_zeroed は T: Copy + Default を要求する
+                // - AlignedBox::new_zeroed は T: Zeroable (Copy) を要求する
                 // - Copy トレイトは Drop と排他的なので、T は Drop を実装できない
                 // - したがって drop_in_place は不要で、dealloc のみで安全
                 unsafe {
@@ -592,7 +609,7 @@ impl<T> Drop for AlignedBox<T> {
     }
 }
 
-impl<T: Copy + Default> Clone for AlignedBox<T> {
+impl<T: Zeroable> Clone for AlignedBox<T> {
     fn clone(&self) -> Self {
         let mut new_box = Self::new_zeroed(self.len);
         new_box.copy_from_slice(self);
@@ -654,7 +671,7 @@ impl<T> Deref for WeightBox<T> {
     }
 }
 
-impl<T: Copy + Default> WeightBox<T> {
+impl<T: Zeroable> WeightBox<T> {
     /// 書き換え用の可変スライスを返す。
     ///
     /// backing が read-only（共有メモリ / file mapping）のときは、先に私有ヒープへ
@@ -1194,6 +1211,9 @@ mod tests {
         #[derive(Clone, Copy, Default)]
         #[repr(align(128))]
         struct Wide(u8);
+
+        impl zeroable::Sealed for Wide {}
+        impl Zeroable for Wide {}
 
         for len in [0, 1, 63, 64, 65] {
             let mut values = AlignedBox::<i16>::try_new_zeroed(len).unwrap();

@@ -21,7 +21,7 @@ LayerStacks では、下記の振り分け方式も `isready` の前に設定し
 |----|---------------------|-------------------------------|
 | HalfKX の FT | HalfKP、HalfKaSplit、HalfKaMerged、HalfKaHmSplit、HalfKaHmMerged | ビルドに含めた FT のみ |
 | LayerStacks の FT | 上記5種、HalfKaHmMerged の EffectBucket | FT と EffectBucket 設定をビルドに含める |
-| HalfKX の形状 | 各幅1〜16384。ヘッダー・payload の整合が必要 | 下記の静的構成とビルドの組合せ |
+| HalfKX の形状 | 各幅1〜16384。PairwiseCReLU の L1 は偶数。ヘッダー・payload の整合が必要 | 下記の静的構成とビルドの組合せ |
 | LayerStacks の形状 | L1 は正の偶数、L2 は2以上、L3 は1以上。各幅16384以下 | 下記の10構成からビルド時に選択 |
 | HalfKX の活性化 | CReLU / SCReLU / PairwiseCReLU | ビルドに含めた活性化のみ |
 | LayerStacks の活性化 | Product Pooling、SCReLU と CReLU の混在、skip を持つ専用構造 | 同じ専用構造。任意の活性化グラフは非対応 |

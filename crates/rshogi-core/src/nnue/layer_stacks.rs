@@ -606,6 +606,7 @@ fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
     affine: &AffineTransform<LS_L2_OUT, 1>,
 ) -> i32 {
     const { assert!(LS_L2_OUT == 32 || LS_L2_OUT == 64) };
+    assert!(affine.weights.len() >= LS_L2_OUT);
     if LS_L2_OUT == 64 {
         let input = input.as_slice().try_into().unwrap();
         let weights = (&affine.weights[..]).try_into().unwrap();
@@ -728,11 +729,27 @@ fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bia
 }
 /// 入力: 両視点のアキュムレータ (各L1次元, i16)
 /// 出力: SqrClippedReLU後のL1次元 (u8)
+///
+/// # Panics
+/// 両視点を均等に分割できない奇数の `L1` を指定した場合。
 pub fn sqr_clipped_relu_transform<const L1: usize>(
     us_acc: &[i16; L1],
     them_acc: &[i16; L1],
     output: &mut [u8; L1],
 ) {
+    assert!(L1.is_multiple_of(2));
+    if !L1.is_multiple_of(64) {
+        let half = L1 / 2;
+        let (us_out, them_out) = output.split_at_mut(half);
+        for (acc, out) in [(us_acc, us_out), (them_acc, them_out)] {
+            for (i, value) in out.iter_mut().enumerate() {
+                let a = i32::from(acc[i]).clamp(0, 127);
+                let b = i32::from(acc[half + i]).clamp(0, 127);
+                *value = ((a * b) >> 7) as u8;
+            }
+        }
+        return;
+    }
     // SAFETY: output は L1 バイトの書き込み可能な領域で、入力とは重ならない。
     unsafe { sqr_clipped_relu_write(us_acc, them_acc, output.as_mut_ptr()) };
 }
@@ -1026,6 +1043,46 @@ pub fn compute_king_ranks(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn fused_output_rejects_short_weights() {
+        let mut bucket = super::LayerStackBucket::<64, 16, 30, 32>::new();
+        bucket.output.weights = super::AffineTransform::<1, 0>::new().weights;
+        assert!(std::panic::catch_unwind(|| bucket.propagate(&[0; 64])).is_err());
+    }
+
+    #[test]
+    fn public_sqr_transform_writes_every_even_dimension() {
+        fn check<const N: usize>() {
+            let us = std::array::from_fn(|i| (i * 31 % 256) as i16 - 32);
+            let them = std::array::from_fn(|i| (i * 17 % 256) as i16 - 32);
+            let mut output = [0xa5; N];
+            super::sqr_clipped_relu_transform(&us, &them, &mut output);
+            let half = N / 2;
+            for (offset, acc) in [(0, us), (half, them)] {
+                for i in 0..half {
+                    let a = i32::from(acc[i]).clamp(0, 127);
+                    let b = i32::from(acc[half + i]).clamp(0, 127);
+                    assert_eq!(output[offset + i], ((a * b) >> 7) as u8);
+                }
+            }
+        }
+        check::<0>();
+        check::<2>();
+        check::<30>();
+        check::<32>();
+        check::<62>();
+        check::<64>();
+        check::<66>();
+        check::<128>();
+    }
+
+    #[test]
+    #[should_panic]
+    fn public_sqr_transform_rejects_odd_dimension() {
+        super::sqr_clipped_relu_transform(&[0; 3], &[0; 3], &mut [0; 3]);
+    }
+
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
     fn test_fused_output64_boundaries_and_lanes() {

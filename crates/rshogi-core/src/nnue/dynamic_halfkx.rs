@@ -385,6 +385,9 @@ impl DynamicHalfKxNetwork {
         } else {
             Activation::CReLU
         };
+        if activation == Activation::PairwiseCReLU && !l1_dim.is_multiple_of(2) {
+            return Err(invalid_data("PairwiseCReLU requires an even FT output dimension"));
+        }
         let dense_input = l1_dim
             .checked_mul(2)
             .and_then(|v| v.checked_div(activation.output_dim_divisor()))
@@ -786,6 +789,32 @@ mod tests {
         bytes.extend_from_slice(arch.as_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn halfkx_rejects_odd_pairwise_width_before_loading_weights() {
+        for feature in [
+            RuntimeFeatureSet::HalfKP,
+            RuntimeFeatureSet::HalfKaHmMerged,
+            RuntimeFeatureSet::HalfKaSplit,
+            RuntimeFeatureSet::HalfKaMerged,
+            RuntimeFeatureSet::HalfKaHmSplit,
+        ] {
+            for l1 in [1, 3] {
+                let mut bytes = halfkx_fixture(feature, l1, "PairwiseCReLU");
+                let header_end = bytes.len() - 4;
+                bytes.resize(bytes.len() + 2 * (l1 + feature.dimensions() * l1), 0);
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+                for (input, output) in [(l1, 3), (3, 5), (5, 1)] {
+                    bytes.resize(bytes.len() + 4 * output + padded_input(input) * output, 0);
+                }
+                let mut reader = std::io::Cursor::new(bytes);
+                let error = DynamicHalfKxNetwork::read(&mut reader, None).err().unwrap();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("even FT output dimension"));
+                assert_eq!(reader.position(), header_end as u64);
+            }
+        }
     }
 
     #[test]
