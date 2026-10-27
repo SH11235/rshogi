@@ -72,7 +72,7 @@ NPS 比較を含む評価では **全 engine 同一 profile** で揃える:
 
 | profile | LTO | codegen-units | overflow-checks | 用途 |
 |---|---|---|---|---|
-| `release` (default) | thin | 4 | true | 開発・短時間検証 |
+| `release` (cargo の既定。xtask `--profile` の既定は `production`) | thin | 4 | true | 開発・短時間検証 |
 | `production` | fat | 1 | false | **配布・SPRT・性能計測** (推奨) |
 
 production は release より約 1.5% 低い instructions/node を達成する。異 profile を混在
@@ -137,52 +137,56 @@ build` で再構築。
 
 通常は preset で十分なので xtask 推奨。preset で対応できない実験的組合せのみ手動 build。
 
-feature は 4 カテゴリの組み合わせ:
+feature は 5 カテゴリの組み合わせ:
 
 1. **feature-set** (どれか 1 つ): `ft-halfkp` / `ft-halfka_split` / `ft-halfka_merged`
    / `ft-halfka_hm_split` / `ft-halfka_hm_merged`
 2. **architecture 経路** (LayerStack は必須): `layerstack-arch` (LayerStack network
    経路を含める。単一 arch の mode-specific build では HalfKP/HalfKA dispatch が外れ
    `evaluate_dispatch` を直接呼ぶ)
-3. **L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` (default) / `layerstacks-1536x32x32`
+3. **L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
    / `layerstacks-768x16x32` / `layerstacks-768x8x32` / `layerstacks-512x16x32`
    / `layerstacks-1024x16x32`。複数同時指定は cycles +5.5% 退行
-4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (L0=1536 限定、
-   L0=768/512 では cache pressure 増加で cycles +2-6% 退行するため指定しない)
+4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (build.rs が
+   `mode-specific` + L0=1536 系 / 3072 系 / 2304x16x64 以外を拒否する。L0=768/512 では
+   cache pressure 増加で cycles +2-6% 退行するため指定しない)
 5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
-   `threat-profile-same-class-major-pawn` (id2) / `threat-profile-cross-side` (id10)。
+   `threat-profile-same-class-major-pawn` (id2) / `threat-profile-step-attacker` (id3) /
+   `threat-profile-full-symdedup` (id4、dims は full と同一) / `threat-profile-cross-side` (id10)。
    除外 pair で次元を削減した変種で、未指定は full (id0)。edition grammar に profile 軸は
    無いが、需要のある profile は ext 値に複合語として畳んだ concrete preset を整備する
    (例: `layerstacks-halfka_hm_merged-1024x16x32-threat_same_class` /
-   `…-threat_same_class_major_pawn`)。preset が無い profile は `nnue-threat` に
+   `…-threat_same_class_major_pawn` / `…-threat_step_attacker` /
+   `layerstacks-halfka_hm_merged-1536x16x32-threat_symdedup`)。preset が無い profile は `nnue-threat` に
    `threat-profile-*` を手動で 1 つ足す。engine と学習 net の profile は
    一致必須 (不一致は EvalFile load 時に dims mismatch で reject)。
 
-最新 feature 名は実コード確認:
+最新 feature 名は実コード確認 (preset だけなら `cargo xtask list-editions`):
 
 ```bash
-grep -E '^[a-z][a-z0-9-]+ =' crates/rshogi-core/Cargo.toml
+sed -n '/^\[features\]/,/^\[lib\]/p' crates/rshogi-core/Cargo.toml | grep -E '^[a-z][a-z0-9_-]* *='
 ```
 
 ### モデル → feature 対応表
 
 preset 名から逆引きできる。preset と等価な features は下表、または rshogi-core
 Cargo.toml の `edition-*` feature 定義で確認する (meta.toml の `features` は `--features` の追加分だけで、
-edition を構成する feature は載らない)。
+edition を構成する feature は載らない)。手動 build 列は `--no-default-features --features` に渡す値で、
+preset がある構成は edition feature をそのまま使う (rshogi-usi の default は `edition-universal`)。
 
-| アーキ | preset 名 (`xtask build --edition`) | 手動 build features |
+| アーキ | preset 名 (`xtask build --edition`) | 手動 build features (`--no-default-features --features …`) |
 |---|---|---|
-| LayerStack 1536x16x32 | `layerstacks-halfka_hm_merged-1536x16x32-none` | `layerstack-arch,nnue-progress-diff` (default に `layerstacks-1536x16x32` 含む) |
-| 同上 + PSQT | `layerstacks-halfka_hm_merged-1536x16x32-psqt` | `layerstack-arch,nnue-psqt,nnue-progress-diff` |
-| 同上 + Threat | `layerstacks-halfka_hm_merged-1536x16x32-threat` | `layerstack-arch,nnue-threat,nnue-progress-diff` |
-| 同上 + PSQT + Threat | `layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-arch,nnue-psqt,nnue-threat,nnue-progress-diff` |
-| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-arch,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
-| LayerStack 1536x32x32 (旧 L1=32) | `layerstacks-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features layerstack-arch,ft-halfka_hm_merged,layerstacks-1536x32x32,nnue-progress-diff` |
-| LayerStack 768x16x32 | `layerstacks-halfka_hm_merged-768x16x32-none` | `--no-default-features --features layerstack-arch,ft-halfka_hm_merged,layerstacks-768x16x32` |
-| LayerStack 768x8x32 | `layerstacks-halfka_hm_merged-768x8x32-none` | `--no-default-features --features layerstack-arch,ft-halfka_hm_merged,layerstacks-768x8x32` |
-| LayerStack 512x16x32 | `layerstacks-halfka_hm_merged-512x16x32-none` | `--no-default-features --features layerstack-arch,ft-halfka_hm_merged,layerstacks-512x16x32` |
-| LayerStack 1024x16x32 | `layerstacks-halfka_hm_merged-1024x16x32-none` | `--no-default-features --features layerstack-arch,ft-halfka_hm_merged,layerstacks-1024x16x32` |
-| LayerStack 1536x16x32 + HalfKP | `layerstacks-halfkp-1536x16x32-none` | `layerstack-arch,ft-halfkp,nnue-progress-diff` |
+| LayerStack 1536x16x32 | `layerstacks-halfka_hm_merged-1536x16x32-none` | `edition-layerstacks-halfka_hm_merged-1536x16x32-none` |
+| 同上 + PSQT | `layerstacks-halfka_hm_merged-1536x16x32-psqt` | `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt` |
+| 同上 + Threat | `layerstacks-halfka_hm_merged-1536x16x32-threat` | `edition-layerstacks-halfka_hm_merged-1536x16x32-threat` |
+| 同上 + PSQT + Threat | `layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` |
+| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `edition-layerstacks-halfka_hm_merged-1536x16x32-threat,threat-profile-cross-side` |
+| LayerStack 1536x32x32 (旧 L1=32) | `layerstacks-halfka_hm_merged-1536x32x32-none` | `edition-layerstacks-halfka_hm_merged-1536x32x32-none` |
+| LayerStack 768x16x32 | `layerstacks-halfka_hm_merged-768x16x32-none` | `edition-layerstacks-halfka_hm_merged-768x16x32-none` |
+| LayerStack 768x8x32 | `layerstacks-halfka_hm_merged-768x8x32-none` | `edition-layerstacks-halfka_hm_merged-768x8x32-none` |
+| LayerStack 512x16x32 | `layerstacks-halfka_hm_merged-512x16x32-none` | `edition-layerstacks-halfka_hm_merged-512x16x32-none` |
+| LayerStack 1024x16x32 | `layerstacks-halfka_hm_merged-1024x16x32-none` | `edition-layerstacks-halfka_hm_merged-1024x16x32-none` |
+| LayerStack 1536x16x32 + HalfKP | `layerstacks-halfkp-1536x16x32-none` | `edition-layerstacks-halfkp-1536x16x32-none` |
 | 非 LayerStack 旧 (CReLU/SCReLU) | `halfkp-crelu` / `halfka_hm_merged-screlu` 等 | preset 推奨 |
 
 ### 手動 cargo build (preset 外実験)
@@ -190,15 +194,17 @@ edition を構成する feature は載らない)。
 ```bash
 cargo build --profile production -p rshogi-usi \
   --no-default-features \
-  --features layerstack-arch,ft-halfka_hm_merged,layerstacks-768x16x32
+  --features mode-specific,layerstack-arch,ft-halfka_hm_merged,layerstacks-768x16x32
 # binary を engines/ にコピーして退避
 cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 ```
 
 注意:
 
-- `layerstacks-1536x16x32` がデフォルト feature。他 dim 使うには `--no-default-features`
-  で外す
+- rshogi-usi / rshogi-core の default feature は `edition-universal` (header 駆動の runtime
+  次元)。固定構成を build するときは必ず `--no-default-features` で外し、edition feature か
+  atomic feature (`mode-specific` + arch + ft + dim + 拡張) を明示する。`nnue-progress-diff` は
+  `mode-specific` が無いと build.rs の検査で失敗する
 - 探索経路の有限パス権 (pass_rights の評価 / PASS NMP) は既定で無効。使う build だけ
   `search-pass-rules` を明示する。旧 `search-no-pass-rules` は何もしない互換用で、指定は不要
 - 過去の `layerstacks-1536` (L1/L2 区別なし) feature は廃止済

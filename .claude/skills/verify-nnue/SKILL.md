@@ -54,16 +54,12 @@ kingrank9 の net は `--ls-bucket-mode kingrank9` で `--ls-progress-*` を外�
 
 tatara checkout は環境変数 `$TATARA_DIR` があればそれを使い、無ければユーザーに場所を聞く。
 
+**kingrank9 の net は Step 2 の対象外**。rshogi `eval_sfens` の `--bucket-mode` は
+`progresskpabs` しか受け付けないため、kingrank9 の net は Step 1 で検証する。
+
 ```bash
 # SFEN だけを 1 行 1 局面で用意する
 sed -n 's/^[^#|][^|]*| //p' crates/tools/docs/fixtures/search_only_sentinel_4pos.txt > sfens.txt
-
-# 参照値 (tatara): stdout に cp、--debug で stderr に bucket / raw / cp を出す
-cargo build --release --manifest-path "$TATARA_DIR/Cargo.toml" -p eval-sfen
-args=(); while IFS= read -r s; do args+=(--sfen "$s"); done < sfens.txt
-"$TATARA_DIR/target/release/eval_sfen" --nnue-file <net.bin> \
-  --bucket-mode progresskpabs --progress-coeff <progress.bin> \
-  --fv-scale <eval_sfens が表示する fv_scale> --debug "${args[@]}"
 
 # rshogi: TSV (sfen / bucket / raw / score / score_cp) を stdout、fv_scale を stderr に出す。
 # 既定 features で読めない arch (768x16x32 + Threat 等) は
@@ -72,6 +68,13 @@ cargo run --release -p tools --bin eval_sfens -- \
   --nnue <net.bin> --sfens sfens.txt \
   --bucket-mode progresskpabs --progress-coeff <progress.bin> \
   --progress-buckets <routing bucket 数> --count <局面数>
+
+# 参照値 (tatara): stdout に cp、--debug で stderr に bucket / raw / cp を出す
+cargo build --release --manifest-path "$TATARA_DIR/Cargo.toml" -p eval-sfen
+args=(); while IFS= read -r s; do args+=(--sfen "$s"); done < sfens.txt
+"$TATARA_DIR/target/release/eval_sfen" --nnue-file <net.bin> \
+  --bucket-mode progresskpabs --progress-coeff <progress.bin> \
+  --fv-scale <eval_sfens が表示する fv_scale> --debug "${args[@]}"
 ```
 
 **判定**: 全局面で次の 2 列が完全一致すれば OK。
@@ -98,7 +101,7 @@ cargo run --release -p tools --bin eval_sfens -- \
 
 ---
 
-## Legacy: bullet-shogi とのクロス検証
+## Legacy: bullet-shogi とのクロス検証 (Golden Forward)
 
 bullet-shogi で学習した旧 net の再検証にだけ使う。新しい net は Step 2 の tatara 経路を使う。
 
@@ -127,7 +130,9 @@ cargo run --release --example shogi_layerstack_eval -- \
 ### rshogi 側で同一局面を評価
 
 ```bash
-cargo build --release -p rshogi-usi --features diagnostics
+# default (edition-universal) は layerstack-arch を含まず `eval diag` がエラーになるので edition を明示する
+cargo build --release -p rshogi-usi --no-default-features \
+  --features edition-layerstacks-any-any-any,diagnostics
 
 printf 'setoption name EvalFile value <net.bin>
 setoption name LS_BUCKET_MODE value progresskpabs
