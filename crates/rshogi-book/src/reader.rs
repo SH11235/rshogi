@@ -44,6 +44,8 @@ pub struct BookEntryMove {
     pub value: i32,
     /// 探索深さ。
     pub depth: i32,
+    /// 採択回数 (テキスト `.db` の 5 列目、省略時 1)。`.ybb` は持たないので 0。
+    pub move_count: u64,
 }
 
 /// 1 局面ぶんの定跡エントリ。
@@ -237,6 +239,7 @@ impl Book {
                     move_usi: m.move_usi.clone()?,
                     value: m.value,
                     depth: m.depth,
+                    move_count: m.move_count,
                 })
             })
             .collect())
@@ -430,8 +433,11 @@ mod tests {
         let moves = book
             .entry_moves("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 9")
             .unwrap();
-        let got: Vec<_> = moves.iter().map(|m| (m.move_usi.as_str(), m.value, m.depth)).collect();
-        assert_eq!(got, [("2g2f", 25, 16), ("7g7f", 30, 0)]);
+        let got: Vec<_> = moves
+            .iter()
+            .map(|m| (m.move_usi.as_str(), m.value, m.depth, m.move_count))
+            .collect();
+        assert_eq!(got, [("2g2f", 25, 16, 40), ("7g7f", 30, 0, 1)]);
         assert!(book.entry_moves("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap().is_empty());
     }
 

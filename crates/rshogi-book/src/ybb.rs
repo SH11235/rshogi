@@ -494,7 +494,7 @@ mod tests {
             .collect()
     }
 
-    /// 本の局面・手数違い・先後反転を問い合わせ、`.db` と同じ結果になることを確かめる。
+    /// 本の局面・手数違い・先後反転を問い合わせ、`.db` と同じ結果になることを確かめる。採択回数は `.ybb` が持たないので比べない。
     fn assert_matches_db(ybb: &Book, db: &Book, with_depth: bool) {
         let options = [
             BookOptions {
@@ -521,8 +521,11 @@ mod tests {
             let flipped = flipped_key(&sfen).unwrap();
             for query in [&sfen, &other_ply, &flipped] {
                 let mut expected = db.entry_moves(query).unwrap();
-                if !with_depth {
-                    expected.iter_mut().for_each(|m| m.depth = 0);
+                for m in &mut expected {
+                    m.move_count = 0;
+                    if !with_depth {
+                        m.depth = 0;
+                    }
                 }
                 let actual = ybb.entry_moves(query).unwrap();
                 assert_eq!(actual, expected, "{query}");
@@ -593,7 +596,8 @@ mod tests {
             BookEntryMove {
                 move_usi: "5g5f".to_string(),
                 value: -120,
-                depth: 65535
+                depth: 65535,
+                move_count: 0,
             }
         );
     }
@@ -665,8 +669,11 @@ mod tests {
                 };
                 for query in [&canonical, &other_ply, &flipped] {
                     let mut expected = db.entry_moves(query).unwrap();
-                    if !with_depth {
-                        expected.iter_mut().for_each(|m| m.depth = 0);
+                    for m in &mut expected {
+                        m.move_count = 0;
+                        if !with_depth {
+                            m.depth = 0;
+                        }
                     }
                     assert_eq!(ybb.entry_moves(query).unwrap(), expected, "{query}");
                     queries += 1;

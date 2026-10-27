@@ -18,6 +18,7 @@ mod targets;
 #[cfg(test)]
 mod tests;
 mod transfer;
+mod walk;
 
 pub use borrow::{BorrowArgs, run as run_borrow};
 
@@ -125,6 +126,8 @@ enum MasterCommand {
     Rejoin(rejoin::RejoinArgs),
     /// 相手の合法手で定跡に戻る千日手の循環を、自分の手番の手を外して塞ぐ手の組を出す
     Cycles(cycles::CyclesArgs),
+    /// 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す
+    Walk(walk::WalkArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -133,6 +136,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Audit(args) => audit::run(args),
         MasterCommand::Rejoin(args) => rejoin::run(args),
         MasterCommand::Cycles(args) => cycles::run(args),
+        MasterCommand::Walk(args) => walk::run(args),
     }
 }
 
