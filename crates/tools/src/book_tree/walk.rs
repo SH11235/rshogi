@@ -122,7 +122,7 @@ struct Row {
     /// 大きい定跡の最善を両者が指し続けた手順 (`Own` だけ)。
     cont: Vec<String>,
     /// その手順で最後に定跡を引けた局面の最善の値 (先手から見た値)。
-    cont_end_black: Option<i32>,
+    cont_end_black: Option<i64>,
 }
 
 /// ply 付き SFEN で定跡の手を引く関数。
@@ -260,7 +260,7 @@ fn book_moves(moves: &[BookEntryMove], opp: OppOptions) -> Vec<(String, f64)> {
 
 /// `key` から大きい定跡の最善を両者が指し続けた手順と、最後に引けた局面の最善の値 (先手から見た値)。
 /// 局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`max` 手で止める。
-fn continuation(key: &str, book: &mut Probe, max: usize) -> Result<(Vec<String>, Option<i32>)> {
+fn continuation(key: &str, book: &mut Probe, max: usize) -> Result<(Vec<String>, Option<i64>)> {
     let mut key = key.to_owned();
     let mut seen = HashSet::new();
     let mut moves = Vec::new();
@@ -269,6 +269,8 @@ fn continuation(key: &str, book: &mut Probe, max: usize) -> Result<(Vec<String>,
         let Some((mv, value)) = book.best(&key)? else {
             break;
         };
+        // i32::MIN の符号を反転できるよう広げる。
+        let value = i64::from(value);
         end = Some(if black_to_move(&key) { value } else { -value });
         // 大きい定跡の手は合法性を確かめていない。
         let Ok(next) = advance(&key, &mv) else {

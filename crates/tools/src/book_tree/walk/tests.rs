@@ -240,6 +240,14 @@ fn continuation_stops_at_cycle_limit_and_illegal_move() {
     assert_eq!(continuation(&b, &mut probe(illegal), 100).unwrap(), (Vec::new(), Some(7)));
 }
 
+#[test]
+fn continuation_negates_the_lowest_value_of_the_second_player() {
+    let w = after(ROOT, &["5i4h"]);
+    let table = BTreeMap::from([(w.clone(), vec![("5a5b", i32::MIN, 1)])]);
+    let (_, end) = continuation(&w, &mut probe(table), 100).unwrap();
+    assert_eq!(end, Some(-i64::from(i32::MIN)));
+}
+
 fn own_row(key: &str, ply: usize, weight: f64) -> Row {
     Row {
         side: "b",
