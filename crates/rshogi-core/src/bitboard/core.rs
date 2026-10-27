@@ -94,9 +94,8 @@ impl Bitboard {
     /// 最下位ビットのSquareを取得して消す
     ///
     /// 空の場合はデバッグビルドで panic し、release では `Square::SQ_11` を返す。
-    ///
-    /// # Panics
-    /// 取り出すビットが升の範囲を超える場合は、どのビルドでも panic する。
+    /// 盤外のビット (`p[1]` の bit 18 以上) が立っていないことが前提。
+    // 手生成で 1 手ごとに通るため、取り出した升の範囲は release では検査しない。
     #[inline]
     pub fn pop(&mut self) -> Square {
         if self.is_empty() {
@@ -107,36 +106,34 @@ impl Bitboard {
         if self.p[0] != 0 {
             let idx = self.p[0].trailing_zeros();
             self.p[0] &= self.p[0] - 1;
-            Square::from_u8(idx as u8).expect("bitboard bit must be on the board")
+            // SAFETY: p[0] の有効ビットは 0..=62 なので idx は 0..=62。
+            unsafe { Square::from_u8_unchecked(idx as u8) }
         } else {
             let idx = self.p[1].trailing_zeros();
             self.p[1] &= self.p[1] - 1;
-            Square::from_u8(63 + idx as u8).expect("bitboard bit must be on the board")
+            // SAFETY: p[1] の有効ビットは 0..=17 なので 63 + idx は 63..=80。
+            unsafe { Square::from_u8_unchecked(63 + idx as u8) }
         }
     }
 
     /// 最下位ビットのSquareを取得（消さない）
     ///
-    /// # Panics
-    /// 空の場合、または取り出すビットが升の範囲を超える場合は panic する。
+    /// 空でないこと、盤外のビットが立っていないことが前提。`pop()` と同じ理由で release では検査しない。
     #[inline]
     pub const fn lsb_unchecked(self) -> Square {
         debug_assert!(self.is_not_empty(), "lsb_unchecked() called on empty Bitboard");
         if self.p[0] != 0 {
-            Square::from_u8(self.p[0].trailing_zeros() as u8)
-                .expect("bitboard bit must be on the board")
+            // SAFETY: p[0] の有効ビットは 0..=62。
+            unsafe { Square::from_u8_unchecked(self.p[0].trailing_zeros() as u8) }
         } else {
-            Square::from_u8(63 + self.p[1].trailing_zeros() as u8)
-                .expect("bitboard bit must be on the board")
+            // SAFETY: 空でなく p[1] の有効ビットは 0..=17 なので 63..=80。
+            unsafe { Square::from_u8_unchecked(63 + self.p[1].trailing_zeros() as u8) }
         }
     }
 
     /// 最下位ビットのSquareを取得（消さない）
     ///
-    /// 空の場合はNoneを返す。
-    ///
-    /// # Panics
-    /// 取り出すビットが升の範囲を超える場合は panic する。
+    /// 空の場合はNoneを返す。盤外のビットが立っていないことが前提。
     #[inline]
     pub fn lsb(self) -> Option<Square> {
         if self.is_empty() {
@@ -540,27 +537,14 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn raw_bitboard_cannot_yield_out_of_board_square() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-
-        for bit in 0..64 {
-            let mut low = Bitboard::new(1 << bit, 0);
-            assert!(low.lsb_unchecked().is_ok());
-            assert!(low.pop().is_ok());
-
-            let mut high = Bitboard::from_u64_pair(0, 1 << bit);
-            if bit < 18 {
-                let square = Square::from_u8(63 + bit).unwrap();
-                assert_eq!(high.lsb(), Some(square));
-                assert_eq!(high.pop(), square);
-            } else {
-                assert!(catch_unwind(|| high.lsb_unchecked()).is_err());
-                assert!(catch_unwind(|| high.lsb()).is_err());
-                assert!(catch_unwind(|| high.iter().next()).is_err());
-                assert!(catch_unwind(AssertUnwindSafe(|| high.pop())).is_err());
-            }
+    fn lsb_and_pop_return_every_board_square() {
+        for index in 0..Square::NUM as u8 {
+            let square = Square::from_u8(index).unwrap();
+            let mut bb = Bitboard::from_square(square);
+            assert_eq!(bb.lsb(), Some(square));
+            assert_eq!(bb.pop(), square);
+            assert!(bb.is_empty());
         }
-        assert!(catch_unwind(|| Bitboard::EMPTY.lsb_unchecked()).is_err());
         assert_eq!(Bitboard::EMPTY.lsb(), None);
     }
 

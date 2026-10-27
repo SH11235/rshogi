@@ -194,11 +194,11 @@ impl ExtMoveBuffer {
 
     /// 初期化済みの要素数を指定した長さまで短縮する。
     ///
-    /// # Panics
-    /// 現在の長さを超える場合は panic する。要素の追加には `push()` / `set()` を使う。
+    /// 現在の長さ以下を渡すこと。要素の追加には `push()` / `set()` を使う。
+    // get / swap / set_len は MovePicker で手ごとに通るため、release では範囲を検査しない。
     #[inline]
     pub fn set_len(&mut self, len: usize) {
-        assert!(len <= self.len, "cannot extend buffer length without initializing elements");
+        debug_assert!(len <= self.len, "cannot extend buffer length without initializing elements");
         self.len = len;
     }
 
@@ -218,11 +218,12 @@ impl ExtMoveBuffer {
 
     /// 指定インデックスの要素を取得
     ///
-    /// # Panics
-    /// `idx >= len()` の場合は panic する。
+    /// `idx < len()` を渡すこと。
     #[inline]
     pub fn get(&self, idx: usize) -> ExtMove {
-        self.as_slice()[idx]
+        debug_assert!(idx < self.len, "index out of bounds: {idx} >= {}", self.len);
+        // SAFETY: idx < len であれば初期化済みで、buf の長さは MAX_MOVES >= len。
+        unsafe { self.buf.get_unchecked(idx).assume_init() }
     }
 
     /// 指定インデックスを上書きする。`idx == len()` なら末尾に追加する。
@@ -249,11 +250,15 @@ impl ExtMoveBuffer {
 
     /// 2つの要素を入れ替え
     ///
-    /// # Panics
-    /// いずれかのインデックスが `len()` 以上の場合は panic する。
+    /// どちらのインデックスも `len()` 未満を渡すこと。
     #[inline]
     pub fn swap(&mut self, i: usize, j: usize) {
-        self.as_mut_slice().swap(i, j);
+        debug_assert!(i < self.len && j < self.len, "index out of bounds");
+        // SAFETY: i, j < len であれば初期化済み。ptr::swap は i == j でも正しい。
+        unsafe {
+            let base = self.buf.as_mut_ptr();
+            std::ptr::swap(base.add(i), base.add(j));
+        }
     }
 
     /// イテレータを返す
@@ -335,25 +340,18 @@ mod tests {
     }
 
     #[test]
-    fn buffer_rejects_uninitialized_and_out_of_bounds_access() {
+    fn buffer_set_rejects_uninitialized_and_out_of_bounds_index() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let mut buffer = ExtMoveBuffer::new();
-        assert!(catch_unwind(AssertUnwindSafe(|| buffer.set_len(1))).is_err());
-        assert!(catch_unwind(|| buffer.get(0)).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| buffer.set_value(0, 7))).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| buffer.swap(0, 0))).is_err());
         assert!(buffer.is_empty());
 
         buffer.push(ExtMove::new(Move::NULL, 10));
         for index in [1, MAX_MOVES, usize::MAX] {
-            assert!(catch_unwind(|| buffer.get(index)).is_err());
             assert!(catch_unwind(AssertUnwindSafe(|| buffer.set_value(index, 7))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| buffer.swap(0, index))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| buffer.swap(index, 0))).is_err());
         }
         for index in [2, MAX_MOVES, usize::MAX] {
-            assert!(catch_unwind(AssertUnwindSafe(|| buffer.set_len(index))).is_err());
             assert!(
                 catch_unwind(AssertUnwindSafe(|| buffer.set(index, ExtMove::new(Move::WIN, 20))))
                     .is_err()

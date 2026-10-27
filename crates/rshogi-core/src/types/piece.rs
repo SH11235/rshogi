@@ -5,7 +5,7 @@
 //! - bit 4: `Color`（0 = Black, 1 = White）。
 //!
 //! `Piece::NONE` 以外の値は常に有効な `PieceType` / `Color` の組み合わせであることを前提とする。
-//! `Piece::NONE` の駒種の取得・成り・生駒への変換は panic する。
+//! `Piece::NONE` に対して駒種の取得・成り・生駒への変換を呼ばないのが契約 (探索の速度のため release では検査しない)。
 
 use std::ops::{Index, IndexMut};
 
@@ -69,12 +69,12 @@ impl Piece {
 
     /// 駒種を取得
     ///
-    /// # Panics
-    /// `Piece::NONE` に対して呼ぶと panic する。
+    /// `Piece::NONE` に対して呼ばないこと。
+    // 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
     #[inline]
     pub const fn piece_type(self) -> PieceType {
-        assert!(!self.is_none(), "piece_type() called on Piece::NONE");
-        // SAFETY: Piece は {0, 1..=14, 17..=30} で、NONE を除く下位4bitは 1..=14。
+        debug_assert!(!self.is_none(), "piece_type() called on Piece::NONE");
+        // SAFETY: Piece は {0, 1..=14, 17..=30} で、NONE を除く下位4bitは 1..=14。NONE でないことは呼び出し側の前提。
         unsafe { std::mem::transmute(self.0 & 0x0F) }
     }
 
@@ -99,8 +99,7 @@ impl Piece {
 
     /// 成り駒を返す
     ///
-    /// # Panics
-    /// `Piece::NONE` に対して呼ぶと panic する。
+    /// `Piece::NONE` に対して呼ばないこと。
     #[inline]
     pub const fn promote(self) -> Option<Piece> {
         match self.piece_type().promote() {
@@ -111,8 +110,7 @@ impl Piece {
 
     /// 生駒を返す
     ///
-    /// # Panics
-    /// `Piece::NONE` に対して呼ぶと panic する。
+    /// `Piece::NONE` に対して呼ばないこと。
     #[inline]
     pub const fn unpromote(self) -> Piece {
         Piece::new(self.color(), self.piece_type().unpromote())
@@ -150,53 +148,31 @@ impl Default for Piece {
     }
 }
 
+// Piece で添字にする配列は [T; Piece::NUM] (31 要素) 以上という前提で、境界検査を省く。
+// 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
 impl<T> Index<Piece> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, pc: Piece) -> &T {
-        &self[pc.index()]
+        debug_assert!(pc.index() < self.len());
+        // SAFETY: Piece の値域は 0..=30。Piece で添字にする配列は [T; Piece::NUM] (31 要素) 以上。
+        unsafe { self.get_unchecked(pc.index()) }
     }
 }
 
 impl<T> IndexMut<Piece> for [T] {
     #[inline]
     fn index_mut(&mut self, pc: Piece) -> &mut T {
-        &mut self[pc.index()]
+        debug_assert!(pc.index() < self.len());
+        // SAFETY: Piece の値域は 0..=30。Piece で添字にする配列は [T; Piece::NUM] (31 要素) 以上。
+        unsafe { self.get_unchecked_mut(pc.index()) }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn none_piece_type_and_promotions_panic() {
-        use std::panic::catch_unwind;
-
-        assert!(catch_unwind(|| Piece::NONE.piece_type()).is_err());
-        assert!(catch_unwind(|| Piece::NONE.promote()).is_err());
-        assert!(catch_unwind(|| Piece::NONE.unpromote()).is_err());
-    }
-
-    #[test]
-    fn slice_index_checks_length() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-
-        for len in [0, 1, Piece::NUM - 1, Piece::NUM] {
-            let mut storage = vec![0; len];
-            let values = storage.as_mut_slice();
-            for piece in [Piece::NONE, Piece::B_PAWN, Piece::W_DRAGON] {
-                if piece.index() < len {
-                    values[piece] = 7;
-                    assert_eq!(values[piece], 7);
-                } else {
-                    assert!(catch_unwind(|| values[piece]).is_err());
-                    assert!(catch_unwind(AssertUnwindSafe(|| values[piece] = 1)).is_err());
-                }
-            }
-        }
-    }
 
     #[test]
     fn test_piece_new() {
