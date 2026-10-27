@@ -41,6 +41,7 @@ fn lookup(sfen: &str) -> Result<Vec<BookEntryMove>> {
             move_usi: (*m).into(),
             value: *v,
             depth: 10,
+            move_count: 1,
         })
         .collect())
 }
@@ -340,6 +341,7 @@ fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
                 move_usi: m.into(),
                 value: v,
                 depth: 1,
+                move_count: 1,
             })
             .collect())
     };

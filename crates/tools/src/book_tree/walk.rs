@@ -4,10 +4,9 @@
 
 use super::audit::{MasterPosition, read_master, reject_same_file};
 use super::refutation::format_queue;
-use super::rejoin::WeightArgs;
 use super::reply_graph::{HIRATE_KEY, SideArg};
 use super::targets::{Line, MAX_DEPTH, Opts};
-use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
+use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -15,7 +14,10 @@ use rshogi_book::{Book, BookEntryMove};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// `--tag` の長さの上限。id `<tag>_<手数>_<hash 16 桁>_<b|w>` が 64 文字に収まる長さ。
+const MAX_TAG_LEN: usize = 40;
 
 #[derive(Args, Debug)]
 pub(super) struct WalkArgs {
@@ -28,8 +30,22 @@ pub(super) struct WalkArgs {
     /// 自分の側
     #[arg(long, value_enum, default_value_t = SideArg::Both)]
     side: SideArg,
-    #[command(flatten)]
-    weight: WeightArgs,
+    /// 相手の手の頻度の定跡 (`book_from_csa` のテキスト .db。手の count を局数として使う)。
+    /// sfen 行が手数を除いた SFEN の順に並んでいること (ファイルから引き、丸読みしない)
+    #[arg(long)]
+    opp_freq: Option<PathBuf>,
+    /// `--opp-freq` で、局数がこれ未満の局面は頻度で指さず、局数がこれ未満の手は頻度で指さない
+    #[arg(long, default_value_t = 3)]
+    min_games: u64,
+    /// 初期局面からこの手数で辿るのを止める (max)
+    #[arg(long, default_value_t = 80)]
+    max_ply: usize,
+    /// 重みがこれ未満の局面で辿るのを止める (tiny)
+    #[arg(long, default_value_t = 1e-5)]
+    weight_floor: f64,
+    /// 要約で数える局面と、キューの行に書く局面の重みの下限 (同じ局面に別の手数で来た重みは足す)
+    #[arg(long, default_value_t = 0.0)]
+    min_weight: f64,
     /// 相手の手の大きい定跡 (.db か YaneuraOu の .ybb)。`--opp-freq` の局数が足りない局面ではこの定跡の手で指す
     #[arg(long)]
     opp_book: Option<PathBuf>,
@@ -51,7 +67,7 @@ pub(super) struct WalkArgs {
     /// キューの行の priority の始まり (重みの順位を足す)
     #[arg(long, default_value_t = 300)]
     priority: u32,
-    /// キューの行の id `<tag>_<局面の hash>_<b|w>` に入れる名前
+    /// キューの行の id `<tag>_<根の手数>_<局面の hash>_<b|w>` に入れる名前 ([A-Za-z0-9_-] の 1〜40 文字)
     #[arg(long, default_value = "walk")]
     tag: String,
     /// キューの行の `game` に、大きい定跡の最善を両者が指し続けた手順を入れる (木がその手を必ず読む)
@@ -60,13 +76,13 @@ pub(super) struct WalkArgs {
 }
 
 /// 止まり方。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum Stop {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
     /// 自分の手番で元データに行が無い (自分が読み始める)。
     Own,
     /// 相手の手番で、局数が足りず大きい定跡にも無い (相手の手が分からない)。
     Out,
-    /// 相手の手番で、局数が `--min-games` 未満の手に行った分。
+    /// 相手の手番で、局数が `--min-games` 未満の手か指せない手に行った分。
     Rare,
     /// 重みが `--weight-floor` 未満。
     Tiny,
@@ -90,81 +106,89 @@ impl Stop {
 
 /// 一覧の 1 行。
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Row {
-    pub side: &'static str,
-    pub stop: Stop,
+struct Row {
+    side: &'static str,
+    stop: Stop,
     /// 初期局面からの手数。
-    pub ply: usize,
-    pub weight: f64,
-    pub key: String,
+    ply: usize,
+    weight: f64,
+    key: String,
     /// 初期局面からの手順 (同じ手数で同じ局面に来た手順のうち最初に辿ったもの)。
-    pub moves: Vec<String>,
+    moves: Vec<String>,
     /// `--opp-freq` のこの局面の局数。
-    pub games: Option<u64>,
+    games: Option<u64>,
     /// 大きい定跡のこの局面の手の数。
-    pub book_moves: Option<usize>,
+    book_moves: Option<usize>,
     /// 大きい定跡の最善を両者が指し続けた手順 (`Own` だけ)。
-    pub cont: Vec<String>,
-    /// その手順の最後の局面の最善の値 (先手から見た値)。
-    pub cont_end_black: Option<i32>,
+    cont: Vec<String>,
+    /// その手順で最後に定跡を引けた局面の最善の値 (先手から見た値)。
+    cont_end_black: Option<i32>,
 }
 
-/// ply 付き SFEN で大きい定跡の手を引く関数。
+/// ply 付き SFEN で定跡の手を引く関数。
 type Lookup<'a> = Box<dyn FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a>;
 
-/// 大きい定跡の引き方。同じ局面は 1 回だけ引く。
-pub(super) struct BookProbe<'a> {
+/// 定跡の引き方。同じ局面は 1 回だけ引き、引いた局面だけを持つ。
+struct Probe<'a> {
     lookup: Lookup<'a>,
-    cache: HashMap<String, Vec<(String, i32)>>,
+    cache: HashMap<String, Vec<BookEntryMove>>,
 }
 
-impl<'a> BookProbe<'a> {
-    pub fn new(lookup: impl FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a) -> Self {
+impl<'a> Probe<'a> {
+    fn new(lookup: impl FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a) -> Self {
         Self {
             lookup: Box::new(lookup),
             cache: HashMap::new(),
         }
     }
 
-    /// 手と手番の側から見た値を定跡ファイルの順で返す。無ければ空。
-    fn moves(&mut self, key: &str) -> Result<&[(String, i32)]> {
+    /// 定跡ファイルの順の手。無ければ空。
+    fn moves(&mut self, key: &str) -> Result<&[BookEntryMove]> {
         if !self.cache.contains_key(key) {
-            let moves = (self.lookup)(&format!("{key} 1"))?
-                .into_iter()
-                .map(|m| (m.move_usi, m.value))
-                .collect();
+            let moves = (self.lookup)(&format!("{key} 1"))?;
             self.cache.insert(key.to_owned(), moves);
         }
         Ok(&self.cache[key])
     }
 
-    /// 最善の手 (同じ値なら定跡ファイルで先の手)。
+    /// 最善の手と手番の側から見た値 (同じ値なら定跡ファイルで先の手)。
     fn best(&mut self, key: &str) -> Result<Option<(String, i32)>> {
         let moves = self.moves(key)?;
         Ok(moves
             .iter()
-            .fold(None::<&(String, i32)>, |b, m| match b {
-                Some(b) if b.1 >= m.1 => Some(b),
+            .fold(None::<&BookEntryMove>, |b, m| match b {
+                Some(b) if b.value >= m.value => Some(b),
                 _ => Some(m),
             })
-            .cloned())
+            .map(|m| (m.move_usi.clone(), m.value)))
     }
+
+    fn games(&mut self, key: &str) -> Result<u64> {
+        Ok(self.moves(key)?.iter().map(|m| m.move_count).sum())
+    }
+}
+
+/// 相手の手の出どころ。
+#[derive(Default)]
+struct Sources<'a> {
+    freq: Option<Probe<'a>>,
+    book: Option<Probe<'a>>,
 }
 
 /// 相手の手の決め方。
 #[derive(Debug, Clone, Copy)]
-pub(super) struct OppOptions {
-    pub min_games: u64,
-    pub book_diff: i32,
-    pub book_best: f64,
+struct OppOptions {
+    min_games: u64,
+    book_diff: i32,
+    book_best: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct WalkOptions {
-    pub max_ply: usize,
-    pub floor: f64,
-    pub cont_max: usize,
-    pub opp: OppOptions,
+struct WalkOptions {
+    max_ply: usize,
+    floor: f64,
+    cont_max: usize,
+    opp: OppOptions,
 }
 
 fn black_to_move(key: &str) -> bool {
@@ -177,56 +201,53 @@ fn advance(key: &str, mv: &str) -> Result<String> {
     Ok(strip_ply(&pos.to_sfen()).to_owned())
 }
 
-/// 相手の手番の局面で、相手が指す手と重み (足して 1 未満なら残りは `Rare`)。手が分からなければ `None`。
+/// 相手の手番の局面で、相手が指す手と重み (重みは正、足して 1 未満なら残りは `Rare`)。手が分からなければ `None`。
 /// 局数が `min_games` 以上の局面では、局数が `min_games` 以上の手を頻度で指す。局数の少ない手に行った分と、
 /// 局数の足りない局面は、大きい定跡があればその手で指す (同じ手は重みを足す)。
 fn opponent_moves(
     key: &str,
-    freq: Option<&BookDb>,
-    book: Option<&mut BookProbe>,
+    src: &mut Sources,
     opp: OppOptions,
 ) -> Result<Option<Vec<(String, f64)>>> {
     let mut out: Vec<(String, f64)> = Vec::new();
     let mut rest = 1.0;
-    if let Some(entry) = freq.and_then(|f| f.entries.get(key)) {
-        let total: u64 = entry.moves.iter().map(|m| m.count).sum();
+    if let Some(freq) = src.freq.as_mut() {
+        let moves = freq.moves(key)?;
+        let total: u64 = moves.iter().map(|m| m.move_count).sum();
         if total >= opp.min_games && total > 0 {
-            for m in entry.moves.iter().filter(|m| m.count >= opp.min_games) {
-                if let Some(mv) = &m.move_usi {
-                    let share = m.count as f64 / total as f64;
-                    out.push((mv.clone(), share));
-                    rest -= share;
-                }
+            for m in moves.iter().filter(|m| m.move_count >= opp.min_games) {
+                let share = m.move_count as f64 / total as f64;
+                out.push((m.move_usi.clone(), share));
+                rest -= share;
             }
         }
     }
-    let from_book = match book {
+    let from_book = match src.book.as_mut() {
         Some(book) if rest > 1e-12 => book_moves(book.moves(key)?, opp),
         _ => Vec::new(),
     };
-    if out.is_empty() && from_book.is_empty() {
-        return Ok(None);
-    }
     for (mv, share) in from_book {
         match out.iter_mut().find(|(m, _)| *m == mv) {
             Some(e) => e.1 += rest * share,
             None => out.push((mv, rest * share)),
         }
     }
-    Ok(Some(out))
+    // `--opp-book-best` が 0 か 1 だと重み 0 の手ができる。辿ると到達しない局面を読み始める局面として出してしまう。
+    out.retain(|(_, share)| *share > 0.0);
+    Ok((!out.is_empty()).then_some(out))
 }
 
 /// 大きい定跡で指す手と重み (足して 1)。最善 (同じ値の手は等分) に `book_best`、最善から `book_diff` 以内の
 /// 残りの手に `1 - book_best` を等分する。差以内の手が最善だけなら最善に 1。
-fn book_moves(moves: &[(String, i32)], opp: OppOptions) -> Vec<(String, f64)> {
-    let Some(best) = moves.iter().map(|m| m.1).max() else {
+fn book_moves(moves: &[BookEntryMove], opp: OppOptions) -> Vec<(String, f64)> {
+    let Some(best) = moves.iter().map(|m| m.value).max() else {
         return Vec::new();
     };
-    let top: Vec<&String> = moves.iter().filter(|m| m.1 == best).map(|m| &m.0).collect();
+    let top: Vec<&String> = moves.iter().filter(|m| m.value == best).map(|m| &m.move_usi).collect();
     let rest: Vec<&String> = moves
         .iter()
-        .filter(|m| m.1 < best && m.1 >= best - opp.book_diff)
-        .map(|m| &m.0)
+        .filter(|m| m.value < best && m.value >= best - opp.book_diff)
+        .map(|m| &m.move_usi)
         .collect();
     let top_share = if rest.is_empty() { 1.0 } else { opp.book_best };
     let mut out: Vec<(String, f64)> =
@@ -236,8 +257,8 @@ fn book_moves(moves: &[(String, i32)], opp: OppOptions) -> Vec<(String, f64)> {
 }
 
 /// `key` から大きい定跡の最善を両者が指し続けた手順と、最後に引けた局面の最善の値 (先手から見た値)。
-/// 局面が繰り返すか定跡に無くなるか `max` 手で止める。
-fn continuation(key: &str, book: &mut BookProbe, max: usize) -> Result<(Vec<String>, Option<i32>)> {
+/// 局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`max` 手で止める。
+fn continuation(key: &str, book: &mut Probe, max: usize) -> Result<(Vec<String>, Option<i32>)> {
     let mut key = key.to_owned();
     let mut seen = HashSet::new();
     let mut moves = Vec::new();
@@ -247,24 +268,50 @@ fn continuation(key: &str, book: &mut BookProbe, max: usize) -> Result<(Vec<Stri
             break;
         };
         end = Some(if black_to_move(&key) { value } else { -value });
-        key = advance(&key, &mv)?;
+        // 大きい定跡の手は合法性を確かめていない。
+        let Ok(next) = advance(&key, &mv) else {
+            break;
+        };
+        key = next;
         moves.push(mv);
     }
     Ok((moves, end))
 }
 
+/// 止まった局面の行。
+fn stop_row(
+    src: &mut Sources,
+    side: &'static str,
+    stop: Stop,
+    ply: usize,
+    weight: f64,
+    key: &str,
+    path: &[String],
+) -> Result<Row> {
+    let games = src.freq.as_mut().map(|f| f.games(key)).transpose()?;
+    let book_moves = src.book.as_mut().map(|b| b.moves(key).map(<[_]>::len)).transpose()?;
+    Ok(Row {
+        side,
+        stop,
+        ply,
+        weight,
+        key: key.to_owned(),
+        moves: path.to_vec(),
+        games,
+        book_moves,
+        cont: Vec::new(),
+        cont_end_black: None,
+    })
+}
+
 /// `side` を自分として初期局面 `start` から辿り、止まった局面を返す。同じ手数で同じ局面に来た重みは足し合わせる。
-pub(super) fn walk_side(
+fn walk_side(
     positions: &BTreeMap<String, MasterPosition>,
-    freq: Option<&BookDb>,
-    mut book: Option<&mut BookProbe>,
+    src: &mut Sources,
     side: &'static str,
     start: &str,
     options: WalkOptions,
 ) -> Result<Vec<Row>> {
-    let games = |key: &str| {
-        freq.map(|f| f.entries.get(key).map_or(0, |e| e.moves.iter().map(|m| m.count).sum()))
-    };
     let mut rows = Vec::new();
     let mut layer: BTreeMap<String, (f64, Vec<String>)> =
         BTreeMap::from([(start.to_owned(), (1.0, Vec::new()))]);
@@ -279,31 +326,12 @@ pub(super) fn walk_side(
             entry.0 += weight;
         };
         for (key, (weight, path)) in layer {
-            let mut stop = |stop: Stop, weight: f64, book: Option<&mut BookProbe>| -> Result<()> {
-                let book_moves = match book {
-                    Some(b) => Some(b.moves(&key)?.len()),
-                    None => None,
-                };
-                rows.push(Row {
-                    side,
-                    stop,
-                    ply,
-                    weight,
-                    key: key.clone(),
-                    moves: path.clone(),
-                    games: games(&key),
-                    book_moves,
-                    cont: Vec::new(),
-                    cont_end_black: None,
-                });
-                Ok(())
-            };
             if ply == options.max_ply {
-                stop(Stop::Max, weight, book.as_deref_mut())?;
+                rows.push(stop_row(src, side, Stop::Max, ply, weight, &key, &path)?);
                 continue;
             }
             if weight < options.floor {
-                stop(Stop::Tiny, weight, book.as_deref_mut())?;
+                rows.push(stop_row(src, side, Stop::Tiny, ply, weight, &key, &path)?);
                 continue;
             }
             let own = black_to_move(&key) == (side == "b");
@@ -314,19 +342,18 @@ pub(super) fn walk_side(
                         put(advance(&key, mv)?, weight, &path, mv);
                     }
                     None => {
-                        stop(Stop::Own, weight, book.as_deref_mut())?;
-                        if let Some(b) = book.as_deref_mut() {
-                            let (cont, end) = continuation(&key, b, options.cont_max)?;
-                            let row = rows.last_mut().expect("直前に足した行");
-                            row.cont = cont;
-                            row.cont_end_black = end;
+                        let mut row = stop_row(src, side, Stop::Own, ply, weight, &key, &path)?;
+                        if let Some(book) = src.book.as_mut() {
+                            (row.cont, row.cont_end_black) =
+                                continuation(&key, book, options.cont_max)?;
                         }
+                        rows.push(row);
                     }
                 }
                 continue;
             }
-            let Some(moves) = opponent_moves(&key, freq, book.as_deref_mut(), options.opp)? else {
-                stop(Stop::Out, weight, book.as_deref_mut())?;
+            let Some(moves) = opponent_moves(&key, src, options.opp)? else {
+                rows.push(stop_row(src, side, Stop::Out, ply, weight, &key, &path)?);
                 continue;
             };
             let mut used = 0.0;
@@ -338,7 +365,8 @@ pub(super) fn walk_side(
                 }
             }
             if used < 1.0 - 1e-9 {
-                stop(Stop::Rare, weight * (1.0 - used), book.as_deref_mut())?;
+                let rare = weight * (1.0 - used);
+                rows.push(stop_row(src, side, Stop::Rare, ply, rare, &key, &path)?);
             }
         }
         layer = next;
@@ -353,16 +381,26 @@ pub(super) fn run(args: WalkArgs) -> Result<()> {
     run_from(args, HIRATE_KEY)
 }
 
-fn run_from(args: WalkArgs, start: &str) -> Result<()> {
-    args.weight.check()?;
+fn check_args(args: &WalkArgs) -> Result<()> {
+    ensure!(
+        args.weight_floor >= 0.0 && args.min_weight >= 0.0,
+        "--weight-floor と --min-weight は 0 以上にしてください"
+    );
     ensure!(
         (0.0..=1.0).contains(&args.opp_book_best),
         "--opp-book-best は 0〜1 にしてください"
     );
     ensure!(args.opp_book_diff >= 0, "--opp-book-diff は 0 以上にしてください");
     ensure!(args.depth <= MAX_DEPTH, "--depth は {MAX_DEPTH} 以下にしてください");
+    ensure!(
+        !args.tag.is_empty()
+            && args.tag.len() <= MAX_TAG_LEN
+            && args.tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        "--tag は [A-Za-z0-9_-] の 1〜{MAX_TAG_LEN} 文字にしてください: {}",
+        args.tag
+    );
     let mut inputs = vec![("--master", args.master.as_path())];
-    if let Some(freq) = &args.weight.opp_freq {
+    if let Some(freq) = &args.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
     if let Some(book) = &args.opp_book {
@@ -370,35 +408,50 @@ fn run_from(args: WalkArgs, start: &str) -> Result<()> {
     }
     reject_same_file(&args.table, &inputs)?;
     if let Some(out) = &args.enqueue_out {
+        inputs.push(("--table", args.table.as_path()));
         reject_same_file(out, &inputs)?;
-        ensure!(out != &args.table, "--enqueue-out と --table が同じです");
     }
+    Ok(())
+}
+
+fn open_book(path: &Path) -> Result<Book> {
+    Book::open_on_the_fly(path, true).with_context(|| format!("{} を開けません", path.display()))
+}
+
+fn book_probe(book: &Book) -> Probe<'_> {
+    Probe::new(move |sfen: &str| Ok(book.entry_moves(sfen)?))
+}
+
+fn run_from(args: WalkArgs, start: &str) -> Result<()> {
+    check_args(&args)?;
     let (positions, _) = read_master(&args.master)?;
-    let freq = args.weight.opp_freq.as_deref().map(BookDb::read).transpose()?;
-    let book = args
-        .opp_book
-        .as_deref()
-        .map(|path| {
-            Book::open_on_the_fly(path, true)
-                .with_context(|| format!("{} を開けません", path.display()))
-        })
-        .transpose()?;
-    let mut probe = book.as_ref().map(|b| {
-        BookProbe::new(move |sfen: &str| b.entry_moves(sfen).map_err(anyhow::Error::from))
-    });
+    let freq = args.opp_freq.as_deref().map(open_book).transpose()?;
+    if let (Some(book), Some(path)) = (&freq, &args.opp_freq) {
+        // on the fly で局面数を返すのは .ybb だけ。.ybb は採択回数を持たないので局数にならない。
+        ensure!(
+            book.position_count().is_none(),
+            "--opp-freq は採択回数を持つテキストの .db にしてください: {}",
+            path.display()
+        );
+    }
+    let book = args.opp_book.as_deref().map(open_book).transpose()?;
+    let mut src = Sources {
+        freq: freq.as_ref().map(book_probe),
+        book: book.as_ref().map(book_probe),
+    };
     let options = WalkOptions {
-        max_ply: args.weight.max_ply,
-        floor: args.weight.weight_floor,
+        max_ply: args.max_ply,
+        floor: args.weight_floor,
         cont_max: args.cont_max,
         opp: OppOptions {
-            min_games: args.weight.min_games,
+            min_games: args.min_games,
             book_diff: args.opp_book_diff,
             book_best: args.opp_book_best,
         },
     };
     let mut rows = Vec::new();
     for &side in args.side.sides() {
-        rows.extend(walk_side(&positions, freq.as_ref(), probe.as_mut(), side, start, options)?);
+        rows.extend(walk_side(&positions, &mut src, side, start, options)?);
     }
     rows.sort_by(|a, b| {
         a.side
@@ -416,11 +469,11 @@ fn run_from(args: WalkArgs, start: &str) -> Result<()> {
         }
         None => None,
     };
-    print!("{}", format_summary(&rows, args.weight.min_weight, queued));
+    print!("{}", format_summary(&rows, args.min_weight, queued));
     Ok(())
 }
 
-pub(super) fn format_table(rows: &[Row]) -> String {
+fn format_table(rows: &[Row]) -> String {
     let mut text = String::from(
         "side\tstop\tply\tweight\tgames\tbook_moves\tcont_plies\tcont_end_black\tkey\tmoves\tcont\n",
     );
@@ -450,34 +503,40 @@ pub(super) fn format_table(rows: &[Row]) -> String {
     text
 }
 
-/// 重みが `--min-weight` 以上の `Own` の行を、重みの順にキューの行にする。同じ局面に別の手数で来た行は
-/// 重みを足して 1 行にする (根の手数は最も重い行のもの)。id は局面で決まり、`--tag` が同じなら同じ局面は
-/// 同じ id になる。
-fn queue_lines(rows: &[Row], args: &WalkArgs) -> Result<Vec<Line>> {
-    let mut merged: BTreeMap<(&str, &str), (f64, &Row)> = BTreeMap::new();
+/// `Own` の行を (側, 局面) ごとにまとめた重みと代表の行。代表は手数の最も小さい行 (同じ手数なら `rows` で先の行)。
+fn merged_own(rows: &[Row]) -> BTreeMap<(&'static str, &str), (f64, &Row)> {
+    let mut merged: BTreeMap<(&'static str, &str), (f64, &Row)> = BTreeMap::new();
     for r in rows.iter().filter(|r| r.stop == Stop::Own) {
         let e = merged.entry((r.side, r.key.as_str())).or_insert((0.0, r));
         e.0 += r.weight;
-        if r.weight > e.1.weight {
+        if r.ply < e.1.ply {
             e.1 = r;
         }
     }
+    merged
+}
+
+/// 重みが `--min-weight` 以上の読み始める局面を、重みの順にキューの行にする。同じ局面に別の手数で来た行は
+/// 重みを足して 1 行にし、根の手数は最も小さい手数にする。キューは同じ id の根の手数が変わる行を受け付けないので、
+/// id に根の手数を入れ、重みが入れ替わっても同じ局面・同じ手数は同じ id になるようにする。
+fn queue_lines(rows: &[Row], args: &WalkArgs) -> Result<Vec<Line>> {
     let mut picked: Vec<(f64, &Row)> =
-        merged.into_values().filter(|(w, _)| *w >= args.weight.min_weight).collect();
+        merged_own(rows).into_values().filter(|(w, _)| *w >= args.min_weight).collect();
     picked.sort_by(|a, b| {
         b.0.total_cmp(&a.0).then(a.1.side.cmp(b.1.side)).then(a.1.key.cmp(&b.1.key))
     });
     let mut lines = Vec::new();
     for (rank, (weight, r)) in picked.iter().enumerate() {
         let digest = format!("{:x}", Sha256::digest(&r.key));
+        let root_ply = r.ply + 1;
         let game = if args.game_from_book && !r.cont.is_empty() {
             vec![r.cont.iter().take(args.depth + 1).cloned().collect()]
         } else {
             Vec::new()
         };
         let line = Line {
-            id: format!("{}_{}_{}", args.tag, &digest[..16], r.side),
-            root: format!("sfen {} {}", r.key, r.ply + 1),
+            id: format!("{}_{root_ply}_{}_{}", args.tag, &digest[..16], r.side),
+            root: format!("sfen {} {root_ply}", r.key),
             roots: Vec::new(),
             own: r.side.to_owned(),
             depth: args.depth,
@@ -495,6 +554,7 @@ fn queue_lines(rows: &[Row], args: &WalkArgs) -> Result<Vec<Line>> {
 
 fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> String {
     let mut text = String::new();
+    let merged = merged_own(rows);
     for side in ["b", "w"] {
         let rows: Vec<&Row> = rows.iter().filter(|r| r.side == side).collect();
         if rows.is_empty() {
@@ -516,13 +576,11 @@ fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> Strin
             bands.iter().map(|(b, w)| format!("{b}-{}: {w:.4}", b + 9)).collect();
         writeln!(text, "{side}: 読み始める重み (手数の帯) {}", bands.join(" / "))
             .expect("String への書き込み");
-        let heavy = rows.iter().filter(|r| r.stop == Stop::Own && r.weight >= min_weight).count();
-        writeln!(
-            text,
-            "{side}: 読み始める局面 {} (重み {min_weight} 以上 {heavy})",
-            rows.iter().filter(|r| r.stop == Stop::Own).count()
-        )
-        .expect("String への書き込み");
+        let own: Vec<f64> =
+            merged.iter().filter(|((s, _), _)| *s == side).map(|(_, (w, _))| *w).collect();
+        let heavy = own.iter().filter(|&&w| w >= min_weight).count();
+        writeln!(text, "{side}: 読み始める局面 {} (重み {min_weight} 以上 {heavy})", own.len())
+            .expect("String への書き込み");
     }
     if let Some(n) = queued {
         writeln!(text, "キューの行 {n}").expect("String への書き込み");
