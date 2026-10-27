@@ -70,7 +70,7 @@ impl Piece {
     /// 駒種を取得
     ///
     /// `Piece::NONE` に対して呼ばないこと。
-    // 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
+    // 探索の最内ループで通るため release では検査しない (理由は `Index<Square> for [T]` と同じ)。
     #[inline]
     pub const fn piece_type(self) -> PieceType {
         debug_assert!(!self.is_none(), "piece_type() called on Piece::NONE");
@@ -149,7 +149,7 @@ impl Default for Piece {
 }
 
 // Piece で添字にする配列は [T; Piece::NUM] (31 要素) 以上という前提で、境界検査を省く。
-// 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
+// 探索の最内ループで通るため release では検査しない (理由は `Index<Square> for [T]` と同じ)。
 impl<T> Index<Piece> for [T] {
     type Output = T;
 

@@ -195,7 +195,7 @@ impl ExtMoveBuffer {
     /// 初期化済みの要素数を指定した長さまで短縮する。
     ///
     /// 現在の長さ以下を渡すこと。要素の追加には `push()` / `set()` を使う。
-    // get / swap / set_len は MovePicker で手ごとに通るため、release では範囲を検査しない。
+    // MovePicker で手ごとに通るため、release では範囲を検査しない。
     #[inline]
     pub fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len, "cannot extend buffer length without initializing elements");
@@ -219,6 +219,7 @@ impl ExtMoveBuffer {
     /// 指定インデックスの要素を取得
     ///
     /// `idx < len()` を渡すこと。
+    // MovePicker で手ごとに通るため、release では範囲を検査しない。
     #[inline]
     pub fn get(&self, idx: usize) -> ExtMove {
         debug_assert!(idx < self.len, "index out of bounds: {idx} >= {}", self.len);
@@ -251,6 +252,7 @@ impl ExtMoveBuffer {
     /// 2つの要素を入れ替え
     ///
     /// どちらのインデックスも `len()` 未満を渡すこと。
+    // MovePicker で手ごとに通るため、release では範囲を検査しない。
     #[inline]
     pub fn swap(&mut self, i: usize, j: usize) {
         debug_assert!(i < self.len && j < self.len, "index out of bounds");

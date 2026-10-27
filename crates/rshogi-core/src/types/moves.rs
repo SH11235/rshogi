@@ -92,7 +92,7 @@ impl Move {
     }
 
     // to / from / drop_piece_type は探索の最内ループで通るため、release では符号化を検査しない
-    // (検査を入れると探索が 2〜3% 遅くなる)。呼ぶのは手生成が作った手か、`from_u16_checked` /
+    // (理由は `Index<Square> for [T]` と同じ)。呼ぶのは手生成が作った手か、`from_u16_checked` /
     // `Position::to_move` で検証した手だけ。置換表から読んだ生の move16 は `Position::to_move` を通してから使う。
 
     /// 移動先を取得

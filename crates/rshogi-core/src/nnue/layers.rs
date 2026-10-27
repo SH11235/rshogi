@@ -628,7 +628,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// AVX2/SSE2/WASMのSIMD最適化版。
     /// 密な行列積方式（YaneuraOuスタイル）で実装。
     ///
-    /// 入力は `INPUT_DIM` を32の倍数に切り上げた長さ以上とし、末尾をゼロ埋めする。
+    /// 入力は `INPUT_DIM` を32の倍数に切り上げた長さ以上とし、`INPUT_DIM` より後ろは呼び出し側がゼロで埋めておく。
     /// 入力のアライメントは問わない。
     ///
     /// # Panics
@@ -690,7 +690,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - 入力・重みの長さは propagate_impl の先頭で検証済み
             // - 入力は unaligned load、重みは64バイト整列済み
-            // - PADDED_INPUT は32の倍数なのでオフセットは常に32バイト境界
+            // - PADDED_INPUT は32の倍数なので、重みの各オフセットは32バイト境界 (重みの aligned load の前提)
             // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
                 use std::arch::x86_64::*;
@@ -779,7 +779,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - 入力・重みの長さは propagate_impl の先頭で検証済み
             // - 入力は unaligned load、重みは64バイト整列済み
-            // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
+            // - PADDED_INPUT は32の倍数なので、重みの各オフセットは16バイト境界 (重みの aligned load の前提)
             // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
                 use std::arch::x86_64::*;
@@ -867,7 +867,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - 入力・重みの長さは propagate_impl の先頭で検証済み
             // - 入力は unaligned load、重みは64バイト整列済み
-            // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
+            // - PADDED_INPUT は32の倍数なので、重みの各オフセットは16バイト境界 (重みの aligned load の前提)
             unsafe {
                 use std::arch::x86_64::*;
 

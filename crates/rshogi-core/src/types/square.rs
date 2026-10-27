@@ -179,7 +179,8 @@ impl Square {
 }
 
 // Square で添字にする配列は [T; Square::NUM] (81 要素) 以上という前提で、境界検査を省く。
-// 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
+// 探索の最内ループで通るため release では検査しない。Square・Color・Piece の添字と、Move・Bitboard・
+// ExtMoveBuffer のアクセサの範囲検査を release でも入れると、探索の命令数が約 4% 増え、速度が 2〜3% 落ちる。
 impl<T> Index<Square> for [T] {
     type Output = T;
 

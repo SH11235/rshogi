@@ -40,7 +40,7 @@ impl std::ops::Not for Color {
 }
 
 // Color で添字にする配列は [T; Color::NUM] (2 要素) 以上という前提で、境界検査を省く。
-// 探索の最内ループで通るため release では検査しない (検査を入れると探索が 2〜3% 遅くなる)。
+// 探索の最内ループで通るため release では検査しない (理由は `Index<Square> for [T]` と同じ)。
 impl<T> Index<Color> for [T] {
     type Output = T;
 
