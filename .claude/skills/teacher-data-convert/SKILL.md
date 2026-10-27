@@ -26,8 +26,13 @@ user-invocable: true
    - `psv_to_hcpe3`: 処理中は `<output>.partial` に書き、正常完了時のみ最終名へ `rename`。
      **進捗は `<output>.partial` のサイズ増加で確認**。中断時は `.partial` を削除（壊れた最終出力を残さない）。
    - `rescore_psv`: `--output-dir` 配下の出力ファイルに**直接書き込み**（`.partial` は無い）。
-     完了時に `<filename>.done` サイドカーを書く。**進捗は出力ファイル本体のサイズ増加で確認**。
-     中断時は出力が中途残存し、再実行時に `.done` マーカー／既存出力レコード数で skip/resume を判定する。
+     **進捗は出力ファイル本体のサイズ増加で確認**。中断・再実行時の扱いはモードで異なる（下表）。
+
+     | モード | 完了マーカー | 再実行時 |
+     |---|---|---|
+     | NNUE 静的評価 / qsearch / 探索 / 外部エンジン | 書かない | 出力レコード数 ≥ 入力なら skip。途中までのファイルは最初からやり直す |
+     | ONNX | `<出力名>.done` | fingerprint・サイズ一致なら skip、不一致なら truncate して再生成 |
+     | `--out-scores`（ONNX / NNUE 静的評価） | `.in-progress` → 完了時 `.done` | fingerprint 一致なら既存 prefix へ追記して再開 |
 3. **非 TTY（background / リダイレクト）では progress bar は出ない**が、`psv_to_hcpe3` は数秒ごとに
    テキスト進捗（件数 / rec/s / ETA）を出す。ログが「冒頭 1 行だけで止まって見える」のは正常。
 
@@ -65,6 +70,9 @@ cargo build --release -p tools --bin psv_to_hcpe3
   未指定なら生 score をそのまま書く。`<a>` の値は教師セット側のスケールに合わせる。
 - ストリーミング処理でピークメモリは入力件数に非依存（`--chunk` 件分のみ）。
 - 出力はスレッド数・チャンク境界に依らず bit 一致する。
+- 入力先頭（最大 10 万件）の move16 が旧形式だと、`migrate_psv_move16` での移行を促してエラー終了する。
+- `<output>.partial` は `create_new` で作るため、異常終了（panic / kill 等）で残った `.partial` があると
+  再実行が拒否される。中身と使用中でないことを確かめてから削除して再実行する。
 
 ## rescore_psv（PSV 再評価）
 
@@ -72,9 +80,15 @@ cargo build --release -p tools --bin psv_to_hcpe3
 cargo build --release -p tools --bin rescore_psv
 
 # 内部 NNUE 静的評価。既定は全コア。他ジョブと並走するなら --threads で上限を下げる。
+# LayerStacks net は --ls-bucket-mode 必須（無いと起動時エラー）。progresskpabs は
+# --ls-progress-buckets（格納 bucket 数と一致）と --ls-progress-coeff も必須。
 ./target/release/rescore_psv --input "$SHOGI_DATA/teachers/<pool>.bin" \
   --output-dir "$SHOGI_DATA/teachers/<out_dir>" \
-  --nnue "$SHOGI_DATA/nnue/<model>.bin" --threads <物理コア数以下>
+  --nnue "$SHOGI_DATA/nnue/<model>.bin" \
+  --ls-bucket-mode progresskpabs --ls-progress-buckets <bucket 数> \
+  --ls-progress-coeff "$SHOGI_DATA/progress/<coeff>.bin" \
+  --threads <物理コア数以下>
+# kingrank9 の net は --ls-bucket-mode kingrank9 にして --ls-progress-* を外す
 
 # qsearch 評価 / 葉ラベル等は --use-qsearch / --qsearch-leaf-label（docs 参照）
 ```
@@ -95,7 +109,7 @@ cargo build --release -p tools --bin rescore_psv
 - 物理 read が 0（`/proc/<pid>/io` の `read_bytes=0`）でも、入力先頭が page cache に載っているだけのことが多い。
   `rchar` と出力サイズが**同調して増えていれば正常な前進**。ループ疑いは「出力が増えず rchar だけ増える」ケース。
 - 中断（Ctrl-C / SIGINT）時: `psv_to_hcpe3` は `.partial` を削除（壊れた最終出力を残さない）。
-  `rescore_psv` は出力ファイルが中途残存し、再実行時に `.done` マーカー／既存出力レコード数で skip/resume される。
+  `rescore_psv` は出力ファイルが中途残存し、再実行時の skip / やり直し / 再開はモードで異なる（冒頭の表）。
 
 ## 出力検証（必須）
 

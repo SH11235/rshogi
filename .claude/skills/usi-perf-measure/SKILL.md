@@ -72,6 +72,8 @@ wrapper 自体は計測対象 feature に依存しないので release build 1 �
     監視**する（沈黙 ≠ 実行中）。ランナーが過去の result を掃除しない設計なら、
     **トリガー前に前回の残骸を削除**する（残骸を今回の失敗と誤判定しない）
 - 既存の NT Kernel Logger セッション（xperf / wpr のカーネルトレース等）と並走させない。
+- `--pmc-sources` の既定は `TotalCycles,InstructionRetired`（cycles/node・instructions/node に必須）。
+  cache 系などを足すときは `wpr -pmcsources` で列挙される名前を追加する。
 - `--cpus`（shard 並列）は Windows では使えない。`--cpu N` で 1 論理 CPU に pin する。
 - 計測中（`go` 以降）に lazy spawn されるスレッドは最初の数スライスが帰属から漏れうる。
   `isready` までに全スレッドを起動するエンジンなら影響しない。
@@ -91,9 +93,10 @@ perf stat -e cycles,instructions,cache-misses,L1-dcache-load-misses -- true
 
 `<not supported>` が出たイベントは使えない。CPU によっては `LLC-loads` /
 `LLC-load-misses` が露出しないので、`cache-misses` と `L1-dcache-load-misses` で代用する。
-AMD では `ls_any_fills_from_sys.ext_cache_local`, `ls_any_fills_from_sys.mem_io_local` が
-CCX 外フィル / DRAM フィルの代替指標として使える (`perf list` で存在を確認してから
-`--perf-events` に追加する)。
+`search_only_ab` が集計するのは既定の 7 イベント（`cycles`, `instructions`, `branches`,
+`branch-misses`, `cache-references`, `cache-misses`, `L1-dcache-load-misses`）だけで、
+`--perf-events` にそれ以外（例: AMD の `ls_any_fills_from_sys.*`）を足しても出力には出ない。
+そうした指標は `perf stat` を別途直接実行して見る。
 
 ### 2. 並行プロセスの確認
 
@@ -233,7 +236,8 @@ L0 や feature が違うバイナリに同じ eval file を渡すと panic す�
 
 ### 3. LLC イベントが露出しない CPU がある
 
-`--perf-events` で `<not supported>` のイベントを指定すると落ちる。前提確認 1 で使えるイベントを確かめてから指定する。
+`<not supported>` / `<not counted>` のイベントは値なし扱いで結果から欠けるだけで、エラーになるのは
+`cycles` と `instructions` が取れなかったときだけ。欠けた指標で判定しないよう、前提確認 1 で使えるイベントを確かめておく。
 
 ### 4. 1 コア pin でも L3 は共有
 
