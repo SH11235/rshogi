@@ -201,9 +201,9 @@ fn advance(key: &str, mv: &str) -> Result<String> {
     Ok(strip_ply(&pos.to_sfen()).to_owned())
 }
 
-/// 相手の手番の局面で、相手が指す手と重み (重みは正、足して 1 未満なら残りは `Rare`)。手が分からなければ `None`。
-/// 局数が `min_games` 以上の局面では、局数が `min_games` 以上の手を頻度で指す。局数の少ない手に行った分と、
-/// 局数の足りない局面は、大きい定跡があればその手で指す (同じ手は重みを足す)。
+/// 相手の手番の局面で、相手が指す手と重み (重みは正、足して 1 未満なら残りは `Rare`)。局数が足りず大きい定跡にも
+/// 無く、手が分からなければ `None`。局数が `min_games` 以上の局面では、局数が `min_games` 以上の手を頻度で指す。
+/// 局数の少ない手に行った分と、局数の足りない局面は、大きい定跡があればその手で指す (同じ手は重みを足す)。
 fn opponent_moves(
     key: &str,
     src: &mut Sources,
@@ -211,10 +211,12 @@ fn opponent_moves(
 ) -> Result<Option<Vec<(String, f64)>>> {
     let mut out: Vec<(String, f64)> = Vec::new();
     let mut rest = 1.0;
+    let mut enough_games = false;
     if let Some(freq) = src.freq.as_mut() {
         let moves = freq.moves(key)?;
         let total: u64 = moves.iter().map(|m| m.move_count).sum();
-        if total >= opp.min_games && total > 0 {
+        enough_games = total >= opp.min_games && total > 0;
+        if enough_games {
             for m in moves.iter().filter(|m| m.move_count >= opp.min_games) {
                 let share = m.move_count as f64 / total as f64;
                 out.push((m.move_usi.clone(), share));
@@ -234,7 +236,7 @@ fn opponent_moves(
     }
     // `--opp-book-best` が 0 か 1 だと重み 0 の手ができる。辿ると到達しない局面を読み始める局面として出してしまう。
     out.retain(|(_, share)| *share > 0.0);
-    Ok((!out.is_empty()).then_some(out))
+    Ok((enough_games || !out.is_empty()).then_some(out))
 }
 
 /// 大きい定跡で指す手と重み (足して 1)。最善 (同じ値の手は等分) に `book_best`、最善から `book_diff` 以内の
@@ -246,7 +248,7 @@ fn book_moves(moves: &[BookEntryMove], opp: OppOptions) -> Vec<(String, f64)> {
     let top: Vec<&String> = moves.iter().filter(|m| m.value == best).map(|m| &m.move_usi).collect();
     let rest: Vec<&String> = moves
         .iter()
-        .filter(|m| m.value < best && m.value >= best - opp.book_diff)
+        .filter(|m| m.value < best && m.value >= best.saturating_sub(opp.book_diff))
         .map(|m| &m.move_usi)
         .collect();
     let top_share = if rest.is_empty() { 1.0 } else { opp.book_best };

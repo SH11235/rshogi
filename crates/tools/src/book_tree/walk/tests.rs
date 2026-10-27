@@ -97,6 +97,34 @@ fn illegal_frequency_move_goes_to_rare() {
 }
 
 #[test]
+fn position_with_enough_games_but_only_rare_moves_stops_as_rare() {
+    let a = after(ROOT, &["5i4h"]);
+    let freq = BTreeMap::from([(a.clone(), vec![("5a5b", 0, 2), ("5a4b", 0, 2)])]);
+    let rows = walk(&mut sources(Some(freq), None), "b", options());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].stop, Stop::Rare);
+    assert!(close(rows[0].weight, 1.0));
+}
+
+#[test]
+fn large_book_diff_keeps_every_move_without_overflow() {
+    let moves: Vec<BookEntryMove> = [("a", -100), ("b", -200)]
+        .iter()
+        .map(|(m, v)| BookEntryMove {
+            move_usi: (*m).into(),
+            value: *v,
+            depth: 0,
+            move_count: 1,
+        })
+        .collect();
+    let opp = OppOptions {
+        book_diff: i32::MAX,
+        ..options().opp
+    };
+    assert_eq!(book_moves(&moves, opp).len(), 2);
+}
+
+#[test]
 fn book_fills_positions_without_games_and_reports_continuation() {
     let a = after(ROOT, &["5i4h"]);
     let rows = walk(&mut sources(None, Some(book())), "b", options());
@@ -355,4 +383,13 @@ fn bad_tag_is_rejected() {
     let mut ok = args(dir.path(), master, Some(freq), big, 1);
     ok.tag = "t".repeat(MAX_TAG_LEN);
     assert!(check_args(&ok).is_ok());
+}
+
+#[test]
+fn ybb_frequency_book_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (master, _, big) = write_inputs(dir.path());
+    let ybb = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rshogi-book/testdata/small.ybb");
+    let err = run_from(args(dir.path(), master, Some(ybb), big, 1), ROOT).unwrap_err();
+    assert!(err.to_string().contains("--opp-freq"), "{err}");
 }

@@ -669,8 +669,11 @@ mod tests {
                 };
                 for query in [&canonical, &other_ply, &flipped] {
                     let mut expected = db.entry_moves(query).unwrap();
-                    if !with_depth {
-                        expected.iter_mut().for_each(|m| m.depth = 0);
+                    for m in &mut expected {
+                        m.move_count = 0;
+                        if !with_depth {
+                            m.depth = 0;
+                        }
                     }
                     assert_eq!(ybb.entry_moves(query).unwrap(), expected, "{query}");
                     queries += 1;
