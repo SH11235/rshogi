@@ -876,6 +876,8 @@ impl Search {
     pub fn reset_to_fresh_state(&mut self) {
         self.tt.clear_on_current_thread();
         self.clear_for_new_game();
+        // helper を使った go は終了時に stop を立てたまま戻る。
+        self.reset_flags();
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -2269,6 +2271,18 @@ mod tests {
                 reused.reset_to_fresh_state();
                 let stack = &reused.worker.as_ref().unwrap().state.stack;
                 assert!(stack.iter().all(|e| !e.tt_pv));
+
+                // helper を使った探索の後も、次の go は深さ上限まで進む。
+                reused.set_num_threads(2);
+                run(&mut reused, sfens[0]);
+                reused.reset_to_fresh_state();
+                let mut pos = Position::new();
+                pos.set_sfen(sfens[0]).unwrap();
+                let limits = LimitsType {
+                    depth: 5,
+                    ..Default::default()
+                };
+                assert_eq!(reused.go(&mut pos, limits, None::<fn(&SearchInfo)>).depth, 5);
             })
             .unwrap()
             .join()

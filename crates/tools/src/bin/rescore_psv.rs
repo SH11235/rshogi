@@ -2404,16 +2404,18 @@ struct SearchDispatch<'r, R> {
     read_error: Option<std::io::Error>,
 }
 
-/// panic で抜けるワーカーが配布を止め、待っている他のワーカーを起こす。
-/// これがないと、書き込み側が panic したワーカーの塊を待ち続け、scope が終わらない。
-struct StopDispatchOnPanic<'a, 'r, R> {
+/// drop 時に配布を止め、待っているワーカーを起こす。ワーカーの panic や書き込み側の
+/// 早期 return（スレッド生成・書き込みの失敗）で、待ちが残って scope が終わらないのを防ぐ。
+struct StopDispatchOnDrop<'a, 'r, R> {
     dispatch: &'a Mutex<SearchDispatch<'r, R>>,
     ready: &'a std::sync::Condvar,
+    /// true なら panic で抜けるときだけ止める（ワーカーの正常終了では止めない）
+    only_on_panic: bool,
 }
 
-impl<R> Drop for StopDispatchOnPanic<'_, '_, R> {
+impl<R> Drop for StopDispatchOnDrop<'_, '_, R> {
     fn drop(&mut self) {
-        if thread::panicking() {
+        if !self.only_on_panic || thread::panicking() {
             let mut d = self.dispatch.lock().unwrap_or_else(|e| e.into_inner());
             d.done = true;
             self.ready.notify_all();
@@ -2422,8 +2424,8 @@ impl<R> Drop for StopDispatchOnPanic<'_, '_, R> {
 }
 
 /// `reader` の先頭 `process_count` 件を `block_records` 件ずつの塊にして空いたワーカーへ配り、
-/// 結果を入力順に `writer` へ書く。配布済みで書いていない塊を `window_records` 件分までに抑え、
-/// ピークメモリを入力件数に依存させない。中断でワーカーが塊の途中で止まったら、そこで
+/// 結果を入力順に `writer` へ書く。配布済みで書いていない塊を `window_records` 件分（最低 1 塊）
+/// までに抑え、ピークメモリを入力件数に依存させない。中断でワーカーが塊の途中で止まったら、そこで
 /// 書き出しを打ち切り、出力を入力の連続した先頭部分に保つ。
 fn run_search_pipeline<S, R: Read + Send, W: Write>(
     reader: &mut R,
@@ -2433,8 +2435,8 @@ fn run_search_pipeline<S, R: Read + Send, W: Write>(
     type Block = (u64, Vec<ProcessResult>, bool);
     let process_count = config.process_count;
     let block_records = config.block_records.max(1);
-    let window_blocks =
-        (config.window_records / block_records).max(config.num_threads).max(1) as u64;
+    // window が塊より小さいときも、1 塊は配れるようにする
+    let window_blocks = (config.window_records / block_records).max(1) as u64;
     let dispatch = Mutex::new(SearchDispatch {
         reader,
         read: 0,
@@ -2447,9 +2449,10 @@ fn run_search_pipeline<S, R: Read + Send, W: Write>(
     let (tx, rx) = mpsc::channel::<Block>();
 
     let worker = |tx: mpsc::Sender<Block>| {
-        let _guard = StopDispatchOnPanic {
+        let _guard = StopDispatchOnDrop {
             dispatch: &dispatch,
             ready: &ready,
+            only_on_panic: true,
         };
         let mut state = (config.make_state)();
         loop {
@@ -2508,6 +2511,11 @@ fn run_search_pipeline<S, R: Read + Send, W: Write>(
 
     let mut counts = SearchCounts::default();
     let write_result = thread::scope(|s| -> Result<()> {
+        let _stop = StopDispatchOnDrop {
+            dispatch: &dispatch,
+            ready: &ready,
+            only_on_panic: false,
+        };
         for _ in 0..config.num_threads {
             let tx = tx.clone();
             let worker = &worker;
@@ -2558,14 +2566,7 @@ fn run_search_pipeline<S, R: Read + Send, W: Write>(
             }
             Ok(())
         };
-        let result = write_in_order();
-        // 書き込みエラーや打ち切りで抜けたときも、待っているワーカーを終わらせる
-        let mut d = dispatch.lock().unwrap_or_else(|e| e.into_inner());
-        d.done = true;
-        ready.notify_all();
-        drop(d);
-        drop(rx);
-        result
+        write_in_order()
     });
     let dispatch = dispatch.into_inner().unwrap_or_else(|e| e.into_inner());
     counts.read = dispatch.read;
@@ -6965,6 +6966,38 @@ mod search_pipeline_tests {
             assert_eq!(counts.read, limit);
             assert_eq!(counts.written + counts.skipped, limit);
         }
+    }
+
+    /// 先頭の塊が書き出されるまで、window を超える位置の局面は配られない（スレッド数が多くても）。
+    #[test]
+    fn does_not_dispatch_beyond_window_before_first_block_is_written() {
+        let input: Vec<u8> = (0..60u16).flat_map(indexed_record).collect();
+        let first_done = AtomicBool::new(false);
+        let process = |_: &mut (), record: &[u8; PackedSfenValue::SIZE]| {
+            let i = PackedSfenValue::from_bytes(record).unwrap().move16;
+            if i == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                first_done.store(true, Ordering::SeqCst);
+            } else if i >= 10 {
+                assert!(first_done.load(Ordering::SeqCst), "record {i} dispatched past window");
+            }
+            ProcessResult::Ok(*record, false)
+        };
+        let (output, counts) = run(
+            &input,
+            &SearchPipeline {
+                process_count: 60,
+                num_threads: 8,
+                block_records: 5,
+                window_records: 10,
+                make_state: &|| (),
+                start_block: &|_| {},
+                process: &process,
+                on_record: &|| {},
+            },
+        );
+        assert_eq!(output, input);
+        assert_eq!(counts.written, 60);
     }
 
     /// 塊の先頭で探索状態を初期化するので、同じ入力と塊の大きさなら、実行ごと・スレッド数に
