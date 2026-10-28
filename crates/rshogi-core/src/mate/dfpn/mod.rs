@@ -17,6 +17,7 @@
 //! 持駒として与える。受け方の玉が無い局面と、手番でない側が王手されている局面は扱わない
 //! ([`MateResult::Unsupported`])。
 
+mod estimate;
 mod pv;
 mod search;
 mod shortest;
@@ -46,7 +47,8 @@ use crate::types::{Move, PieceType};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MateResult {
     /// 詰み。攻め方の手から始まる詰み手順 (最後の手で受け方が詰む)。
-    /// 最短手順モードでは最短手順。[`ShortestMode::Tsume`] では最後の局面に受け方の無駄合いだけが残ることがある
+    /// 最短手順モードでは最短手順 ([`ShortestMode::Estimate`] では推定した正解手順)。
+    /// [`ShortestMode::Tsume`] と [`ShortestMode::Estimate`] では最後の局面に受け方の無駄合いだけが残ることがある
     /// ([`ShortestMode::All`] と通常の判定では、最後の局面の受け方に合法手が無い)。
     Mate(Vec<Move>),
     /// 不詰 (攻め方が王手を続けて詰ませる手順は無い)
@@ -120,17 +122,26 @@ pub enum ShortestMode {
     Tsume,
     /// 合駒を含むすべての応手を受け方の手として数える (駒余りは比べない)
     All,
+    /// 詰将棋のルール ([`ShortestMode::Tsume`] と同じ無駄合いの数え方) の正解手順を、最短であることを
+    /// 証明せずに推定する。詰みを縮める試みを手ごとのノード数の予算で打ち切るので、Tsume より桁違いに速いが、
+    /// 手順が最短とは限らない
+    Estimate,
 }
 
 impl ShortestMode {
     /// すべての数え方 ([`ShortestMode::name`] の一覧に使う)
-    pub const ALL: [ShortestMode; 2] = [ShortestMode::Tsume, ShortestMode::All];
+    pub const ALL: [ShortestMode; 3] = [
+        ShortestMode::Tsume,
+        ShortestMode::All,
+        ShortestMode::Estimate,
+    ];
 
-    /// USI オプションなどで使う名前 (`Tsume` / `All`)
+    /// USI オプションなどで使う名前 (`Tsume` / `All` / `Estimate`)
     pub fn name(self) -> &'static str {
         match self {
             ShortestMode::Tsume => "Tsume",
             ShortestMode::All => "All",
+            ShortestMode::Estimate => "Estimate",
         }
     }
 
@@ -196,6 +207,8 @@ impl DfpnSolver {
     ///   その駒を取り返せず、取った駒を受け方の持駒に戻した局面の詰み手数が、駒打ち以外の応手で逃れたときの
     ///   詰み手数以下の合駒 (移動合いは無駄合いとしない)。手順の最後の局面に無駄合いだけが残ることがある。
     /// - [`ShortestMode::All`]: 合駒を含むすべての応手を数える (無駄合いの判定をしない)。
+    /// - [`ShortestMode::Estimate`]: Tsume と同じ数え方の正解手順を、最短であることを証明せずに推定する
+    ///   (手順を縮める探索を手ごとのノード数の予算で打ち切る。駒余りは比べない)。
     ///
     /// 判定 (詰み・不詰) は通常と同じで、手順を求める分だけ時間とノードが増える。手順を求め終わる前に
     /// 制限に達したら [`MateResult::Unknown`]。手順を求める段階は 1 スレッドで解く。
@@ -264,7 +277,8 @@ impl DfpnSolver {
         } else {
             self.run_mode(pos, *limits, start, stop, &mut progress)
         };
-        let futile_end = self.shortest == Some(ShortestMode::Tsume);
+        let futile_end =
+            matches!(self.shortest, Some(ShortestMode::Tsume | ShortestMode::Estimate));
         let is_valid = |pos: &mut Position, pv: &[Move]| {
             if kingless {
                 verify::check_mate_pv_by_rules(pos, pv, futile_end)
@@ -349,7 +363,11 @@ impl DfpnSolver {
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
         }
-        let pv = shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode);
+        let pv = if shortest_mode == ShortestMode::Estimate {
+            estimate::estimate_pv(&mut searcher, st, &self.shortest_tables)
+        } else {
+            shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode)
+        };
         self.nodes = judged_nodes + searcher.nodes();
         pv.ok().flatten().map(SolveOutcome::Mate)
     }

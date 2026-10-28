@@ -543,6 +543,40 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.nodes
     }
 
+    /// `f` (この探索器での探索) をあと `nodes` ノードまでで打ち切る。打ち切ったら `None`。
+    /// 探索全体の制限 (ノード数・時間・停止) に達したときは `Abort` のまま返す。
+    pub fn within<T>(
+        &mut self,
+        nodes: u64,
+        f: impl FnOnce(&mut Self) -> Result<T, Abort>,
+    ) -> Result<Option<T>, Abort> {
+        let global = self.budget.node_limit;
+        let local = self.nodes.saturating_add(nodes);
+        let tighter = global == 0 || local < global;
+        if tighter {
+            self.budget.node_limit = local;
+        }
+        let result = f(self);
+        self.budget.node_limit = global;
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(abort) => {
+                let stopped = self.budget.stop.load(Ordering::Relaxed)
+                    || self.budget.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+                    || self.budget.time_limit_ms != 0
+                        && self.budget.start.elapsed().as_millis() as u64
+                            >= self.budget.time_limit_ms;
+                if tighter && !stopped {
+                    // 打ち切った探索の深さ 0 で証明済みの子を集める指定が残ると、次の探索が集めてしまう
+                    self.capture_depth = None;
+                    Ok(None)
+                } else {
+                    Err(abort)
+                }
+            }
+        }
+    }
+
     /// 局面が探索経路上の局面の反復なら、その祖先の深さ
     fn repetition_depth(&self, key: u64) -> Option<usize> {
         if self.scratch.path_filter[path_filter_index(key)] == 0 {
