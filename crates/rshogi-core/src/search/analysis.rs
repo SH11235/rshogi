@@ -89,6 +89,23 @@ pub(crate) struct AnalysisRun {
     pub nodes: Arc<AtomicU64>,
     pub start: Instant,
 }
+#[cfg(test)]
+impl AnalysisRun {
+    /// 解析の再開として扱う、停止条件のない実行。
+    pub(crate) fn resumed_for_test() -> Self {
+        Self {
+            handle: AnalysisRunHandle {
+                control: Arc::new(AtomicU32::new(0)),
+                generation: 0,
+            },
+            resume: true,
+            budget: AnalysisBudget::Unlimited,
+            nodes: Arc::new(AtomicU64::new(0)),
+            start: Instant::now(),
+        }
+    }
+}
+
 impl AnalysisRun {
     pub fn stopped(&self) -> bool {
         self.handle.stopped()

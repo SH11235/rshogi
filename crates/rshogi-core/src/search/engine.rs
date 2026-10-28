@@ -2268,9 +2268,26 @@ mod tests {
                 // 浅い探索では漏れが結果に出にくいので、探索スタックが go ごとに新品に戻ることも
                 // 直接見る（解析の再開だけは持ち越す）。
                 let worker = reused.worker.as_mut().unwrap();
-                worker.state.stack.iter_mut().for_each(|e| e.tt_pv = true);
+                worker.state.stack.iter_mut().for_each(|e| {
+                    e.tt_pv = true;
+                    e.ply = -1;
+                    e.cont_history_ptr = std::ptr::NonNull::dangling();
+                });
+                let resume = LimitsType {
+                    analysis: Some(crate::search::analysis::AnalysisRun::resumed_for_test()),
+                    ..Default::default()
+                };
+                worker.prepare_search(&resume);
+                assert!(worker.state.stack.iter().all(|e| e.tt_pv && e.ply == -1));
                 worker.prepare_search(&LimitsType::default());
-                assert!(worker.state.stack.iter().all(|e| !e.tt_pv));
+                let (sentinel, correction_sentinel) =
+                    (worker.cont_history_sentinel, worker.cont_correction_sentinel);
+                assert!(worker.state.stack.iter().enumerate().all(|(i, e)| {
+                    !e.tt_pv
+                        && e.ply == i as i32
+                        && e.cont_history_ptr == sentinel
+                        && e.cont_correction_ptr == correction_sentinel
+                }));
 
                 // helper を使った探索の後も、次の go は深さ上限まで進む。
                 reused.set_num_threads(2);
