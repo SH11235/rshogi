@@ -171,6 +171,23 @@ impl TranspositionTable {
         });
     }
 
+    /// 呼び出しスレッドだけで全 entry を未書込状態に戻す（再確保しない）。
+    ///
+    /// `clear` は利用可能な全コアにスレッドを展開する。多数の `Search` を並べて探索の合間に
+    /// 消す呼び出し側でそれが重なると、コア数の二乗のスレッドが生まれるため分けている。
+    /// 同じ表で探索中のスレッドがないときに呼ぶこと。
+    pub fn clear_on_current_thread(&self) {
+        self.generation8.store(0, Ordering::Relaxed);
+        for cluster in self.table.iter() {
+            for data in &cluster.data {
+                data.store(0, Ordering::Relaxed);
+            }
+            for key in &cluster.keys {
+                key.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// 新しい探索を開始（世代を進める）
     pub fn new_search(&self) {
         self.generation8.fetch_add(GENERATION_DELTA, Ordering::Relaxed);

@@ -854,6 +854,35 @@ impl Search {
         }
     }
 
+    /// 次の `go` を、同じ設定で新しく作った `Search` と同じ探索にする。
+    ///
+    /// 置換表・履歴・探索スタックと、手番反転の検出や時間配分のために前回の探索から持ち越す状態を
+    /// 初期化する。
+    /// 互いに独立な局面を順に探索し、どの局面をどの `Search` が受け持っても結果を変えない用途向け。
+    /// EvalHash は局面の静的評価だけを 64 bit key 全体の照合で返すため探索結果を変えず、消さない。
+    /// 置換表は呼び出しスレッドだけで消す（[`TranspositionTable::clear_on_current_thread`]）。
+    pub fn reset_to_fresh_state(&mut self) {
+        self.tt.clear_on_current_thread();
+        // qsearch の 1 手詰めの保存は、そのノードで書いていない stack[ply].tt_pv を読む
+        // (YaneuraOu と同じ) ため、前の探索の値が置換表の PV フラグに漏れる。
+        if let Some(worker) = &mut self.worker {
+            worker.state.stack = super::types::init_stack_array();
+        }
+        self.clear_histories();
+        self.best_previous_score = Some(Value::INFINITE);
+        self.best_previous_average_score = Some(Value::INFINITE);
+        self.iter_value = [Value::ZERO; 4];
+        self.iter_idx = 0;
+        self.last_best_move_depth = 0;
+        self.last_best_move = Move::NONE;
+        self.tot_best_move_changes = 0.0;
+        self.previous_time_reduction = 0.85;
+        self.last_game_ply = None;
+        self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
+        self.search_again_counter = 0;
+    }
+
     /// 停止フラグを取得（探索スレッドに渡す用）
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
@@ -2193,6 +2222,48 @@ mod tests {
                     (result.nodes, result.best_move)
                 };
                 assert_eq!(run(true), run(false));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// reset_to_fresh_state の後の go は、前に何を探索していても新しい Search と同じ木になる。
+    #[test]
+    fn reset_to_fresh_state_matches_new_search() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let sfens = [
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+                    "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+                    "lnsgkg1nl/1r5s1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/7R1/LNSGKGSNL b Bb 5",
+                ];
+                let run = |search: &mut Search, sfen: &str| {
+                    let mut pos = Position::new();
+                    pos.set_sfen(sfen).unwrap();
+                    let limits = LimitsType {
+                        depth: 7,
+                        ..Default::default()
+                    };
+                    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+                    (result.nodes, result.best_move, result.score)
+                };
+                let mut reused = Search::new_with_eval_hash(1, 1);
+                for &i in &[3, 0, 2, 1, 3, 2] {
+                    reused.reset_to_fresh_state();
+                    let fresh = run(&mut Search::new_with_eval_hash(1, 1), sfens[i]);
+                    assert_eq!(run(&mut reused, sfens[i]), fresh, "{}", sfens[i]);
+                }
+                // 浅い探索では漏れが結果に出にくいので、探索スタックが新品に戻ることも直接見る。
+                let worker = reused.worker.as_mut().unwrap();
+                worker.state.stack.iter_mut().for_each(|e| e.tt_pv = true);
+                reused.reset_to_fresh_state();
+                let stack = &reused.worker.as_ref().unwrap().state.stack;
+                assert!(stack.iter().all(|e| !e.tt_pv));
             })
             .unwrap()
             .join()
