@@ -182,12 +182,12 @@ impl<'a> BookIndex<'a> {
         self.list[i].1
     }
 
-    /// key の局面の番号。
     /// 元データの局面の数。
     pub fn len(&self) -> usize {
         self.list.len()
     }
 
+    /// key の局面の番号。
     pub fn find(&self, key: &str) -> Option<usize> {
         self.list.binary_search_by(|(k, _)| (*k).cmp(key)).ok()
     }
