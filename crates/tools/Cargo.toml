@@ -180,6 +180,7 @@ ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, fea
 # kifu_player で使わないため外し、残りの default (crossterm / layout-cache / underline-color) は維持する。
 ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 crossterm = { version = "0.29", optional = true }
+microlp = "0.6.0"
 
 # search_only_ab の Windows 実装 (ETW NT Kernel Logger の PMC counting) と、
 # book_mine tree の台帳のファイル lock (book_tree::file_lock) 用。
