@@ -989,11 +989,14 @@ impl SearchWorker {
         self.state.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
     }
 
-    /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
+    /// usinewgameで呼び出し：全履歴と探索スタックをクリア（YaneuraOu Worker::clear()相当）
     pub fn clear(&mut self) {
         // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
         unsafe { self.history.as_mut_unchecked() }.clear_with_params(&self.search_tune_params);
         self.reductions = build_reductions(self.search_tune_params.lmr_table_coeff);
+        // qsearch の 1 手詰めの保存は、そのノードで書いていない stack[ply].tt_pv を読む
+        // (YaneuraOu と同じ) ため、前の対局の値が置換表の PV フラグに漏れる。
+        self.state.stack = init_stack_array();
     }
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）

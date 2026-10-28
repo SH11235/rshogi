@@ -1456,7 +1456,7 @@ impl UsiEngine {
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
             search.clear_eval_hash();
-            search.clear_histories(); // YaneuraOu準拠：履歴統計もクリア
+            search.clear_for_new_game();
         }
         self.maybe_report_page_status();
         self.position = Position::new();

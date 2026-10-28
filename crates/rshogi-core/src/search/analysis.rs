@@ -164,7 +164,7 @@ impl AnalysisSession {
         }
         search.clear_tt();
         search.clear_eval_hash();
-        search.clear_histories();
+        search.clear_for_new_game();
         search.set_skill_options(super::SkillOptions::default());
         Ok(Self {
             search,
