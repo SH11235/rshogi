@@ -366,7 +366,9 @@ impl UsiEngine {
             MateMode::default().name()
         );
         println!("option name MateThreads type spin default 1 min 1 max 512");
-        println!("option name MateShortest type combo default Off var Off var Tsume var All");
+        println!(
+            "option name MateShortest type combo default Off var Off var Tsume var All var Estimate"
+        );
         println!("option name UseEvalHash type check default true");
         println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");

@@ -421,6 +421,49 @@ fn shortest_mode_matches_reference_on_random_positions() {
     assert!(mates >= 30, "詰みの局面が少なすぎる: {mates}");
 }
 
+/// 作意推定モードは小さい局面では予算内に縮めきれるので、正解役と同じ手数の正しい手順を返す
+#[test]
+fn estimate_mode_matches_reference_on_random_positions() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5807_0003);
+    let (mut tested, mut mates) = (0, 0);
+    while tested < 300 {
+        let pos = if tested % 2 == 0 {
+            random_tsume_position(&mut rng)
+        } else {
+            random_kingless_position(&mut rng)
+        };
+        let Some(mut pos) = pos else { continue };
+        tested += 1;
+        pos.clear_checkers_without_king();
+        let sfen = pos.to_sfen();
+        let reference = ref_len(&mut pos, 5);
+        for mode in MateMode::ALL {
+            let mut pos = position(&sfen);
+            match (solve_counting(&mut pos, mode, ShortestMode::Estimate, 2_000_000), reference) {
+                (MateResult::Mate(pv), Some(len)) => {
+                    assert!(
+                        check_mate_pv_by_rules(&pos, &pv, true),
+                        "{sfen} {mode:?}: {}",
+                        pv_usi(&pv)
+                    );
+                    assert_eq!(pv.len() as u32, len, "{sfen} {mode:?}: {}", pv_usi(&pv));
+                }
+                (MateResult::Mate(pv), None) => {
+                    assert!(
+                        pv.len() > 5,
+                        "{sfen} {mode:?}: 正解役は 5 手以内に詰まない {}",
+                        pv_usi(&pv)
+                    );
+                }
+                (other, Some(len)) => panic!("{sfen} {mode:?}: {len} 手で詰むのに {other:?}"),
+                (_, None) => {}
+            }
+        }
+        mates += usize::from(reference.is_some());
+    }
+    assert!(mates >= 30, "詰みの局面が少なすぎる: {mates}");
+}
+
 /// 並列に解いても (手順を求める段階は 1 スレッド)、1 スレッドと同じ手数になる
 #[test]
 fn shortest_mode_with_threads_matches_single_thread() {
@@ -805,6 +848,35 @@ fn solves_zukou_001_in_its_intended_length() {
         for mode in MateMode::ALL {
             let mut pos = position(sfen);
             let MateResult::Mate(pv) = solve_shortest(&mut pos, mode, 0) else {
+                panic!("{sfen} {mode:?}");
+            };
+            assert!(check_mate_pv_by_rules(&pos, &pv, true), "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert_eq!(pv.len(), 69, "{sfen} {mode:?}: {}", pv_usi(&pv));
+        }
+    }
+}
+
+/// 作意推定も将棋図巧 第 1 番で作意の手順を返す。推定は置換表に残った証明の手数を頼りに選ぶので、表が小さいと
+/// 外れやすい (16 MB では受け方が短く詰む応手を選んだ 49 手になる) (release で手動実行)
+#[test]
+#[ignore]
+fn estimate_mode_finds_zukou_001_intended_length() {
+    let kingless = ZUKOU_001.replace("2N5K", "2N6");
+    for sfen in [ZUKOU_001, kingless.as_str()] {
+        for mode in MateMode::ALL {
+            let mut pos = position(sfen);
+            let stop = AtomicBool::new(false);
+            let mut solver = DfpnSolver::with_mode(64, mode);
+            solver.set_shortest(Some(ShortestMode::Estimate));
+            let MateResult::Mate(pv) = solver.solve(
+                &mut pos,
+                &MateLimits {
+                    nodes: 0,
+                    time_ms: 0,
+                },
+                &stop,
+                |_| {},
+            ) else {
                 panic!("{sfen} {mode:?}");
             };
             assert!(check_mate_pv_by_rules(&pos, &pv, true), "{sfen} {mode:?}: {}", pv_usi(&pv));

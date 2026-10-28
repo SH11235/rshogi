@@ -77,7 +77,8 @@ struct Cli {
     mode: MateMode,
 
     /// 最短手順を求める (USI の MateShortest と同じ)。`tsume` は詰将棋のルール (無駄合いを数えない、
-    /// 同手数なら駒余りを避ける)、`all` は合駒を含むすべての応手を数える。省略すると通常の詰み判定
+    /// 同手数なら駒余りを避ける)、`all` は合駒を含むすべての応手を数える、`estimate` は `tsume` と同じ数え方の
+    /// 正解手順を最短と証明せずに推定する。省略すると通常の詰み判定
     #[arg(long, value_parser = parse_shortest)]
     shortest: Option<ShortestMode>,
 
@@ -280,7 +281,7 @@ impl Summary {
 }
 
 fn parse_shortest(name: &str) -> Result<ShortestMode, String> {
-    ShortestMode::from_name(name).ok_or_else(|| format!("{name}: tsume / all のどちらか"))
+    ShortestMode::from_name(name).ok_or_else(|| format!("{name}: tsume / all / estimate のどれか"))
 }
 
 fn parse_mode(name: &str) -> Result<MateMode, String> {
