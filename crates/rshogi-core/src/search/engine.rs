@@ -840,8 +840,8 @@ impl Search {
 
     /// 新しい対局の前に、置換表と EvalHash 以外の探索状態を初期化する（usinewgame 時に呼ぶ）。
     ///
-    /// 全 worker の履歴と探索スタック（`SearchWorker::clear`）、共有履歴、前の対局から持ち越す
-    /// 時間配分と手番反転検出の状態を戻す。Stockfish の `ThreadPool::clear()` 相当。
+    /// 全 worker の履歴（`SearchWorker::clear`）、共有履歴、前の対局から持ち越す時間配分と
+    /// 手番反転検出の状態を戻す。Stockfish の `ThreadPool::clear()` 相当。
     /// 置換表と EvalHash は `clear_tt` / `clear_eval_hash` で別に消す。
     pub fn clear_for_new_game(&mut self) {
         if let Some(worker) = &mut self.worker {
@@ -2265,12 +2265,12 @@ mod tests {
                 new_game.clear_for_new_game();
                 assert_eq!(new_game.best_previous_score, Some(Value::INFINITE));
                 assert_eq!(new_game.previous_time_reduction, 0.85);
-                // 浅い探索では漏れが結果に出にくいので、探索スタックが新品に戻ることも直接見る。
+                // 浅い探索では漏れが結果に出にくいので、探索スタックが go ごとに新品に戻ることも
+                // 直接見る（解析の再開だけは持ち越す）。
                 let worker = reused.worker.as_mut().unwrap();
                 worker.state.stack.iter_mut().for_each(|e| e.tt_pv = true);
-                reused.reset_to_fresh_state();
-                let stack = &reused.worker.as_ref().unwrap().state.stack;
-                assert!(stack.iter().all(|e| !e.tt_pv));
+                worker.prepare_search(&LimitsType::default());
+                assert!(worker.state.stack.iter().all(|e| !e.tt_pv));
 
                 // helper を使った探索の後も、次の go は深さ上限まで進む。
                 reused.set_num_threads(2);

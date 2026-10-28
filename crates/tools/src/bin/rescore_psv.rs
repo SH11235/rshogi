@@ -6973,11 +6973,22 @@ mod search_pipeline_tests {
     fn does_not_dispatch_beyond_window_before_first_block_is_written() {
         let input: Vec<u8> = (0..60u16).flat_map(indexed_record).collect();
         let first_done = AtomicBool::new(false);
+        let started_in_window = AtomicU64::new(0);
         let process = |_: &mut (), record: &[u8; PackedSfenValue::SIZE]| {
             let i = PackedSfenValue::from_bytes(record).unwrap().move16;
             if i == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // window 内のもう 1 塊（5〜9）が全部処理を始め、空いたワーカーが次を取りに
+                // 行くまで先頭の塊を終わらせない。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while started_in_window.load(Ordering::SeqCst) < 5
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
                 first_done.store(true, Ordering::SeqCst);
+            } else if (5..10).contains(&i) {
+                started_in_window.fetch_add(1, Ordering::SeqCst);
             } else if i >= 10 {
                 assert!(first_done.load(Ordering::SeqCst), "record {i} dispatched past window");
             }
