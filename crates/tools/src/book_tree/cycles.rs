@@ -101,13 +101,13 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     reject_same_file(&args.table, &[("--master", &args.master)])?;
     let parsed = read_master(&args.master)?;
     let positions = &parsed.0;
-    let tags = move_tags(&args.master, &args.removable_since)?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
     let values = evaluate(positions, draws)?;
     let index = BookIndex::new(positions)?;
+    let tags = move_tags(&args.master, &args.removable_since, &index)?;
 
     // 先手と後手のグラフは互いの手に左右されない (相手の手番では合法手を全部見る) ので並べて解く。
     let results: Vec<SideResult> = args
@@ -169,7 +169,7 @@ fn solve_side(
 ) -> Result<SideResult> {
     let graph = build(index, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
     let before = count_on(&graph, |_| 0, |_, _| false);
-    let allowed = allowed_edges(&graph, index, tags.removable.as_ref());
+    let allowed = allowed_edges(&graph, tags.removable.as_ref());
     let mut plan = plan_side(&graph, values, &allowed)?;
     plan.new_main = new_mains(&graph, index, values, &plan.removed, &tags.curated)?;
     // 同じグラフで、外した手を除き main を替えて数え直す。自分の手番の辺を減らすだけで相手の手番の辺は
@@ -266,8 +266,7 @@ pub(super) fn plan_side(
         |removed: Vec<(usize, usize)>| finish_plan(graph, &original, removed, &value, &is_main);
     let by_component = cycle_removals(graph, &components, allowed, &removal_order);
     let exact = exact::exact_removals(graph, allowed, &components, &by_component);
-    let mut by_rank = rank_removals(graph, &original);
-    by_rank.retain(|&(v, i)| allowed[graph.edge_id(v, i)]);
+    let by_rank = rank_removals(graph, &original, allowed);
     let plans = [
         SidePlan {
             method: "A (循環ごと)",
@@ -369,15 +368,22 @@ fn active_count(graph: &ReplyGraph, active: &SharedActive, v: usize) -> usize {
     (0..graph.edges(v).len()).filter(|&i| is_active(graph, active, v, i)).count()
 }
 
-/// B: 定跡を抜けるまでの段数で外す手。
-fn rank_removals(graph: &ReplyGraph, original: &HashMap<usize, usize>) -> Vec<(usize, usize)> {
-    let rank = attractor(graph);
+/// B: 定跡を抜けるまでの段数で外す手 (外してよい手だけ)。
+fn rank_removals(
+    graph: &ReplyGraph,
+    original: &HashMap<usize, usize>,
+    allowed: &[bool],
+) -> Vec<(usize, usize)> {
+    let rank = attractor(graph, allowed);
     let mut removed = Vec::new();
     for v in (0..graph.len()).filter(|&v| graph.own[v]) {
         let Some(own_rank) = rank[v] else {
             continue;
         };
         for (i, e) in graph.edges(v).iter().enumerate() {
+            if !allowed[graph.edge_id(v, i)] {
+                continue;
+            }
             let cycle_risk = match rank[e.to()] {
                 None => true,
                 Some(r) => {
@@ -506,8 +512,12 @@ pub(super) fn new_mains(
 }
 
 /// 定跡を抜けるまでの段数 (抜けられない局面は `None`)。辺の無い局面が 0。自分の手番の局面は行き先の
-/// 段数の最小 + 1、相手の手番の局面は全部の行き先が抜けられるとき最大 + 1。
-fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
+/// 段数の最小 + 1、相手の手番の局面は全部の行き先が抜けられるとき最大 + 1。外せない自分の手
+/// (`allowed` が偽) のある局面は、その手が必ず残るので、相手の手番と同じく外せない手の行き先が全部
+/// 抜けられるとき最大 + 1 (外せない手の行き先は段数が小さいので、残しても循環にならない)。
+fn attractor(graph: &ReplyGraph, allowed: &[bool]) -> Vec<Option<u32>> {
+    // 前の局面の番号の最上位ビットに、その辺が外せない自分の手かを入れる。
+    const FORCED: u32 = 1 << 31;
     // 逆向きの辺を 1 本の配列に詰める (頂点 `w` の前の局面は `predecessors[start[w]..start[w + 1]]`)。
     let mut start = vec![0usize; graph.len() + 1];
     for v in 0..graph.len() {
@@ -520,13 +530,25 @@ fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
     }
     let mut fill = start.clone();
     let mut predecessors = vec![0u32; graph.edge_count()];
+    // 外せない自分の手の数 (自分の手番の局面だけ。0 なら行き先の 1 つが抜けられれば抜けられる)。
+    let mut forced = vec![0usize; graph.len()];
     for v in 0..graph.len() {
-        for e in graph.edges(v) {
-            predecessors[fill[e.to()]] = v as u32;
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            let is_forced = graph.own[v] && !allowed[graph.edge_id(v, i)];
+            forced[v] += usize::from(is_forced);
+            predecessors[fill[e.to()]] = v as u32 | if is_forced { FORCED } else { 0 };
             fill[e.to()] += 1;
         }
     }
-    let mut remaining: Vec<usize> = (0..graph.len()).map(|v| graph.edges(v).len()).collect();
+    let mut remaining: Vec<usize> = (0..graph.len())
+        .map(|v| {
+            if forced[v] > 0 {
+                forced[v]
+            } else {
+                graph.edges(v).len()
+            }
+        })
+        .collect();
     let mut rank: Vec<Option<u32>> = vec![None; graph.len()];
     let mut queue: VecDeque<usize> = (0..graph.len()).filter(|&v| remaining[v] == 0).collect();
     for &v in &queue {
@@ -535,13 +557,13 @@ fn attractor(graph: &ReplyGraph) -> Vec<Option<u32>> {
     // 段数の小さい順に取り出すので、自分の手番は最初の行き先で最小、相手の手番は最後の行き先で最大になる。
     while let Some(v) = queue.pop_front() {
         let next = rank[v].expect("取り出す局面は段数がある") + 1;
-        for &p in &predecessors[start[v]..start[v + 1]] {
-            let p = p as usize;
-            if rank[p].is_some() {
+        for &entry in &predecessors[start[v]..start[v + 1]] {
+            let p = (entry & !FORCED) as usize;
+            if rank[p].is_some() || (forced[p] > 0 && entry & FORCED == 0) {
                 continue;
             }
             remaining[p] -= 1;
-            if graph.own[p] || remaining[p] == 0 {
+            if (graph.own[p] && forced[p] == 0) || remaining[p] == 0 {
                 rank[p] = Some(next);
                 queue.push_back(p);
             }
@@ -784,12 +806,49 @@ fn reaches(
 struct MoveTags {
     /// curated の行の (key, 手)。
     curated: HashSet<(String, String)>,
-    /// 外してよい手 (key → 手)。`--removable-since` を省くと `None` (全部の手)。
-    removable: Option<HashMap<String, HashSet<String>>>,
+    /// 外してよい手。`--removable-since` を省くと `None` (全部の手)。
+    removable: Option<MoveBits>,
 }
 
-/// 元データの行を 1 行ずつ読み、curated の行と、since が `since` のどれかの行の手だけを持つ。
-fn move_tags(path: &std::path::Path, since: &[String]) -> Result<MoveTags> {
+/// 元データの手ごとの印 (局面の番号と手の番号で引く)。文字列を持たないので、印の付く行が多くても局面数と
+/// 手数に比例する小さい量で済む。
+struct MoveBits {
+    /// 局面 `m` の手は `offsets[m]..offsets[m + 1]` 番目。
+    offsets: Vec<u32>,
+    bits: Vec<u64>,
+}
+
+impl MoveBits {
+    fn new(index: &BookIndex) -> Result<Self> {
+        let mut offsets = Vec::with_capacity(index.len() + 1);
+        let mut total = 0u32;
+        offsets.push(0);
+        for m in 0..index.len() {
+            total = u32::try_from(index.position(m).moves.len())
+                .ok()
+                .and_then(|n| total.checked_add(n))
+                .context("元データの手が多すぎます")?;
+            offsets.push(total);
+        }
+        Ok(Self {
+            offsets,
+            bits: vec![0; (total as usize).div_ceil(64)],
+        })
+    }
+
+    fn set(&mut self, m: usize, j: usize) {
+        let k = self.offsets[m] as usize + j;
+        self.bits[k / 64] |= 1 << (k % 64);
+    }
+
+    fn get(&self, m: usize, j: usize) -> bool {
+        let k = self.offsets[m] as usize + j;
+        self.bits[k / 64] & (1 << (k % 64)) != 0
+    }
+}
+
+/// 元データの行を 1 行ずつ読み、curated の行と、since が `since` のどれかの行の手に印を付ける。
+fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Result<MoveTags> {
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
     let column = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
@@ -797,7 +856,11 @@ fn move_tags(path: &std::path::Path, since: &[String]) -> Result<MoveTags> {
         (column("key"), column("move"), column("tier"), column("since"));
     let mut tags = MoveTags {
         curated: HashSet::new(),
-        removable: (!since.is_empty()).then(HashMap::new),
+        removable: if since.is_empty() {
+            None
+        } else {
+            Some(MoveBits::new(index)?)
+        },
     };
     for line in std::io::BufReader::new(file).lines().skip(1) {
         let line = line?;
@@ -805,35 +868,29 @@ fn move_tags(path: &std::path::Path, since: &[String]) -> Result<MoveTags> {
         if cells.get(tier) == Some(&"curated") {
             tags.curated.insert((cells[key].to_owned(), cells[mv].to_owned()));
         }
-        if let Some(removable) = tags.removable.as_mut()
+        if let Some(bits) = tags.removable.as_mut()
             && cells.get(since_column).is_some_and(|s| since.iter().any(|t| t == s))
+            // record の行は局面の手に無い (辺にもならない) ので印を付けない。
+            && let Some(m) = index.find(cells[key])
+            && let Some(j) = index.position(m).moves.iter().position(|x| x.mv == cells[mv])
         {
-            removable.entry(cells[key].to_owned()).or_default().insert(cells[mv].to_owned());
+            bits.set(m, j);
         }
     }
     Ok(tags)
 }
 
 /// 辺の番号ごとに、外してよい自分の手か。相手の手番の辺は偽。
-fn allowed_edges(
-    graph: &ReplyGraph,
-    index: &BookIndex,
-    removable: Option<&HashMap<String, HashSet<String>>>,
-) -> Vec<bool> {
+fn allowed_edges(graph: &ReplyGraph, removable: Option<&MoveBits>) -> Vec<bool> {
     let mut allowed = vec![false; graph.edge_count()];
     for v in (0..graph.len()).filter(|&v| graph.own[v]) {
         let Some(master) = graph.master(v) else {
             continue;
         };
-        let moves = removable.map(|r| r.get(index.key(master)));
         for (i, e) in graph.edges(v).iter().enumerate() {
-            let Some(j) = e.book_move() else {
-                continue;
-            };
-            allowed[graph.edge_id(v, i)] = match moves {
-                None => true,
-                Some(set) => set.is_some_and(|s| s.contains(&index.position(master).moves[j].mv)),
-            };
+            if let Some(j) = e.book_move() {
+                allowed[graph.edge_id(v, i)] = removable.is_none_or(|bits| bits.get(master, j));
+            }
         }
     }
     allowed
@@ -1218,6 +1275,40 @@ mod tests {
         // どちらでもない tag なら外せる手が無く、塞げない循環として残す。
         run_from(args(vec!["none".into()], "none.tsv"), ROOT).unwrap();
         assert!(removed("none.tsv").is_empty());
+    }
+
+    #[test]
+    fn removable_since_cuts_entry_when_cycle_moves_are_kept() {
+        // E2 → X → Y → Z → E2 の循環の手 (X・Z、old) は外せない。X には別の手もあるが old なので外せない。
+        // 手前の局面 E の 5h4h (new) を外せば根から届かなくなる。
+        let e = after(ROOT, &["5i5h", "5a4a"]);
+        let e2 = after(&e, &["5h4h"]);
+        let x = after(&e2, &["4a5a"]);
+        let z = after(&x, &["4h5i", "5a4a"]);
+        let rows = [
+            (ROOT, "5i5h", "main", "0", "old"),
+            (e.as_str(), "5h4h", "main", "30", "new"),
+            (e.as_str(), "5h6h", "alt", "0", "new"),
+            (x.as_str(), "4h5i", "main", "0", "old"),
+            (x.as_str(), "4h3h", "alt", "0", "old"),
+            (z.as_str(), "5i4h", "main", "0", "old"),
+        ];
+        let mut text = super::super::register::COLUMNS.join("\t");
+        text.push('\n');
+        for (key, mv, role, evals, since) in rows {
+            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\t{since}\tn").unwrap();
+        }
+        let p = parse_master_rows(text.as_bytes()).unwrap().0;
+        let values = evaluate(&p, DrawValues::default()).unwrap();
+        let index = BookIndex::new(&p).unwrap();
+        let graph = graph_of(&index, ROOT);
+        let allowed: Vec<bool> = (0..graph.len())
+            .flat_map(|v| std::iter::repeat_n(v, graph.edges(v).len()))
+            .map(|v| graph.own[v] && graph.master(v).is_some_and(|m| index.key(m) == e))
+            .collect();
+        let plan = plan_side(&graph, &values, &allowed).unwrap();
+        assert_eq!(plan.removed, [(e.clone(), 0)]);
+        assert!(plan.unbreakable.is_empty());
     }
 
     /// 乱数の元データで、C (循環ごとの整数計画) の外す手の数が、循環を全部無くし各局面に手を残す組の総当たりの

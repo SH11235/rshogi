@@ -11,8 +11,18 @@ use microlp::{
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// 1 回の整数計画で探す分枝の数の上限。時間でなく分枝の数で打ち切るので、結果は機械の速さによらない。
-const NODE_LIMIT: u64 = 200_000;
+/// 循環 1 つで、解き直しの全部を通して探す分枝の数の上限。時間でなく分枝の数で打ち切るので、結果は機械の
+/// 速さによらない。microlp は未探索の分枝ごとに変数と制約の数に比例する基底を持つので、下の変数・制約の
+/// 上限と合わせて 1 つの循環のメモリを抑える (未探索の分枝 × (変数 + 制約) が数千万要素まで)。
+const NODE_BUDGET: u64 = 10_000;
+/// 循環 1 つで、解き直しの全部を通して使う単体法のピボットの数の上限。解き直すたびに制約が増えて 1 回の
+/// 整数計画が重くなるので、分枝の数とは別に時間を抑える (乱数で作った密な循環 (変数 188〜811) で、分枝かピボットの
+/// 上限に当たるまで 6〜13 秒)。1 回の解く途中では止められないので、解き直しの前に確かめる。
+const PIVOT_BUDGET: u64 = 300_000;
+/// 変数 (循環の中の外せる手) の数の上限。超える循環は解かずに A の組を使う。
+const MAX_VARS: usize = 1_000;
+/// 足す循環の制約の数の上限。
+const MAX_CUTS: usize = 2_000;
 /// 解き直す回数の上限。
 const MAX_ROUNDS: usize = 200;
 /// 1 回に、残る循環 1 つあたり足す制約の数の上限 (始点を変えた最短の循環)。
@@ -114,6 +124,9 @@ pub(super) fn solve_component(
     if vars.is_empty() {
         return Outcome::Infeasible;
     }
+    if vars.len() > MAX_VARS {
+        return Outcome::Limit;
+    }
     // 手の数を先に、同じなら main を外す数を少なく (1 手の重さを main の数の合計より大きくする)。
     let weight = (vars.len() + 1) as f64;
     let cost: Vec<f64> = vars
@@ -132,8 +145,15 @@ pub(super) fn solve_component(
     }
     let mut cuts: Vec<Vec<usize>> = Vec::new();
     let mut seen_cuts: HashSet<Vec<usize>> = HashSet::new();
+    let mut budget = Budget {
+        nodes: NODE_BUDGET,
+        pivots: PIVOT_BUDGET,
+    };
     for _ in 0..MAX_ROUNDS {
-        let chosen = match solve(&cost, &keep, &cuts) {
+        if cuts.len() > MAX_CUTS || budget.pivots == 0 {
+            return Outcome::Limit;
+        }
+        let chosen = match solve(&cost, &keep, &cuts, &mut budget) {
             Ok(chosen) => chosen,
             Err(outcome) => return outcome,
         };
@@ -219,8 +239,19 @@ fn shortest_cycle(adjacency: &[Vec<u32>], members: &HashSet<u32>, start: u32) ->
     None
 }
 
-/// 0-1 整数計画を解き、1 の変数の番号を返す。
-fn solve(cost: &[f64], keep: &[Vec<usize>], cuts: &[Vec<usize>]) -> Result<Vec<usize>, Outcome> {
+/// 循環 1 つで残っている計算量。
+struct Budget {
+    nodes: u64,
+    pivots: u64,
+}
+
+/// 0-1 整数計画を解き、1 の変数の番号を返す。`budget` から探した分枝とピボットの数を引く。
+fn solve(
+    cost: &[f64],
+    keep: &[Vec<usize>],
+    cuts: &[Vec<usize>],
+    budget: &mut Budget,
+) -> Result<Vec<usize>, Outcome> {
     let mut problem = Problem::new(OptimizationDirection::Minimize);
     let vars: Vec<_> = cost.iter().map(|&c| problem.add_binary_var(c)).collect();
     for group in keep {
@@ -232,9 +263,12 @@ fn solve(cost: &[f64], keep: &[Vec<usize>], cuts: &[Vec<usize>]) -> Result<Vec<u
         problem.add_constraint(expr.as_slice(), ComparisonOp::Ge, 1.0);
     }
     let mut options = SolveOptions::default();
-    options.node_limit = Some(NODE_LIMIT);
+    options.node_limit = Some(budget.nodes);
     match problem.solve_with(options) {
         Ok(SolveOutcome::Solution(solution)) if solution.status() == SolutionStatus::Optimal => {
+            let stats = solution.stats();
+            budget.nodes = budget.nodes.saturating_sub(stats.nodes_solved);
+            budget.pivots = budget.pivots.saturating_sub(stats.lp_iterations);
             Ok((0..cost.len()).filter(|&x| solution.var_value(vars[x]) > 0.5).collect())
         }
         Err(microlp::Error::Infeasible) => Err(Outcome::Infeasible),
