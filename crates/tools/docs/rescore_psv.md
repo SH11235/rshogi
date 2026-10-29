@@ -140,20 +140,10 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
 1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
-出力は汎用の build と同じになる。
+下の feature で build すれば、出力は汎用の build と byte 単位で同じになる。
 
-`--no-default-features` を付けて、rshogi-core の preset edition (`cargo xtask list-editions`
-で一覧、命名は [ビルドガイド](../../../docs/build.md#命名規則)) を `rshogi-core/` 付きで指定する。
+`--no-default-features` を付けて、その構成の feature だけを指定する。各軸の slot は 1 つずつ選ぶ。
 `--target-dir` を分けると、汎用の build と並べて置ける。
-
-```bash
-# HalfKP 256x2-32-32 CReLU（水匠5 など）
-cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-halfkp   --no-default-features --features rshogi-core/edition-halfkp-crelu
-# LayerStacks HalfKA_hm 1536x16x32、拡張なし
-cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1536   --no-default-features --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x32-none
-```
-
-preset に無い構成は atomic feature を直接並べる。各軸の slot は 1 つずつ選ぶ。
 
 | 構成 | feature |
 |---|---|
@@ -164,6 +154,23 @@ preset に無い構成は atomic feature を直接並べる。各軸の slot は
 `<寸法>` は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)の L1 構成
 (`1536x16x32` など)。LayerStacks の `layerstack-arch` は寸法と FT の slot が無いと build エラーになる。
 build に含まれない構成の NNUE は読み込み時にエラーになる。
+
+```bash
+# HalfKP 256x2-32-32 CReLU（水匠5 など）
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-halfkp \
+  --no-default-features \
+  --features rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-crelu,ft-halfkp
+# LayerStacks HalfKA_hm 1536x16x32、拡張なし
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1536 \
+  --no-default-features \
+  --features rshogi-core/layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
+```
+
+HalfKX は rshogi-core の preset edition (`rshogi-core/edition-halfkp-crelu` など、
+`cargo xtask list-editions` で一覧) を指定しても同じ build になる。LayerStacks の preset は
+L0=1536 / 3072 系などで `nnue-progress-diff` を含む。progresskpabs の bucket を f32 の差分更新で
+求めるため、全駒から計算する汎用の build と丸めが違い、bucket の境界付近の局面で評価値が変わる。
+汎用の build と同じ値が要る教師のリスコアでは preset を使わない。
 
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` 等) も同じ構成で build するときは、
 tools の `layerstack-arch` と、rshogi-core に渡したのと同じ寸法・FT の slot を tools の feature
