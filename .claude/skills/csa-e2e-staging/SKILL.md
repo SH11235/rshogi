@@ -404,12 +404,19 @@ grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
    (`docs/csa-server/deployment.md` の §12.6。main への push でも自動 deploy され、そのときも
    main の toml に戻る)
 3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通ることに加え、
-   `vp exec wrangler tail --config "$WRANGLER" --format json` を流した状態で、外した preset 名を
-   `--game-name` にして 1-A の黒・白を起動する。tail に `"event":"clock_spec_resolution_failed"` が
-   その `game_name` で出れば、未登録として対局が不成立になっている (preset を 1 件以上登録した Worker は
-   未登録の `game_name` の対局を成立させない。`crates/rshogi-csa-server-workers/src/game_room.rs` の
-   `resolve_game_preset_for_game`)。client 側は Game_Summary 以外の行を info ログに残さず、不成立の後も
-   再接続を繰り返して `--max-games 1` でも終わらないので、確認できたら記録した PID で黒・白を止める
+   次の tail を流した状態で、外した preset 名を `--game-name` にして 1-A の黒・白を起動する
+   (この確認では 1-A の例の末尾の `wait` を省き、黒・白の PID を記録して戻る):
+   ```bash
+   vp exec wrangler tail --config "$WRANGLER" --format json \
+     | jq -c '.logs[]?.message[]? | fromjson? // empty
+              | select(.event == "clock_spec_resolution_failed" and .game_name == "<外した preset 名>")'
+   ```
+   1 行でも出れば、未登録として対局が不成立になっている (preset を 1 件以上登録した Worker は未登録の
+   `game_name` の対局を成立させない。`crates/rshogi-csa-server-workers/src/game_room.rs` の
+   `resolve_game_preset_for_game`)。structured_log は `logs[].message[]` に JSON 文字列として入るので、
+   jq の `fromjson` で展開してから見る (`docs/csa-server/observability.md` の tail の節)。
+   client 側は Game_Summary 以外の行を info ログに残さず、不成立の後も再接続を繰り返して
+   `--max-games 1` でも終わらないので、確認できたら記録した PID で黒・白を止める
 
 ## 9. 後始末
 
