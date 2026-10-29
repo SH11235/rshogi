@@ -127,6 +127,21 @@ cmp -n <N> <out> <reference>
   （一致しなければロジックが壊れている）。
 - 破損レコード（不正な PSV）や末尾の半端バイトはスキップしてカウントされ、正常レコードの出力には影響しない。
 
+reference の無い本番実行は、終了時の stderr と出力サイズで成功を判定する
+（中断でも終了コードは 0 になり得るので、終了コードだけで判定しない）:
+
+- **`psv_to_hcpe3`**: `<output>.partial` が残らず最終名がある。stderr の
+  `書き出し: N レコード` の N に対し、出力サイズ = N × 46（hcpe3）/ N × 38（hcpe）。
+  `--limit` なしなら N + `有効な着手を持たないレコードをスキップ: M` の M +
+  `注意: E レコードを変換できずスキップ` の E が入力レコード数（入力サイズ / 40、末尾の半端バイトは E に 1 件加算）と一致する。
+  `完了前に中断されました` が出ていれば未完了。
+- **`rescore_psv`**（PSV 出力。expand / leaf replacement 以外）: stderr 末尾が
+  `All <n> file(s) processed successfully`（`Note: Processing was interrupted` なら未完了）。
+  各出力のサイズが 40 の倍数で、`--limit` なしなら レコード数 = 入力レコード数 − `Note: E positions had errors`
+  （ONNX は `Note: E 件のレコードでエラー`）の E − `Skipped (in check): S` の S。
+  `--out-scores` は `<出力名>.done` があり、sidecar サイズ = 入力レコード数 × 2。
+- E > 0 は入力側の破損を示す。件数を記録し、想定外に多ければ入力を調べてから学習に使う。
+
 ---
 
 ## データ配置

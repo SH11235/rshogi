@@ -1,6 +1,7 @@
 ---
 name: usi-perf-measure
 description: "USI エンジンの探索区間を search_only_ab で A/B 計測する。Linux perf と Windows ETW の条件、結果の読み方、ノイズの確認、性能改善の採否判定に使う。"
+user-invocable: true
 ---
 
 # USI エンジンの search-only perf 計測
@@ -34,7 +35,10 @@ A/B 比較する手順と、その結果で性能改善を採否判定する基�
    再現性が足りない場合は A/A でばらつきを測る。別機の固定閾値を流用しない。
 3. 探索木を変えない最適化なら、単一 thread・固定 depth で nodes / bestmove / score の
    一致を確認する。不一致を性能改善だけで正当化せず、原因を調べて棋力評価
-   ([selfplay](../selfplay/SKILL.md)) の要否を判断する。
+   ([selfplay](../selfplay/SKILL.md)) の要否を判断する。確認には `compare_nodes`
+   (`crates/tools/docs/compare_nodes.md`) を `--depth N` で使い、`--options-a` / `--options-b` の両方に
+   `Threads=1` と同じ `EvalFile=` 等を渡す (`--eval-b` は `EvalDir` として渡るので rshogi 同士では使わない)。
+   `summary.txt` の depth 別ノード一致・最善手一致率と、`results.jsonl` の評価値を見る。
 4. クリーンな binary で A/B を行い、局面別の差と run 間ばらつきを確認する。
    NPS と cycles/node を採否に使い、instructions/node は機序の補助にする。
    CPU 占有率の低下や命令数減少だけで高速化を断定しない。コード配置差の裏取り
@@ -70,7 +74,7 @@ wrapper 自体は計測対象 feature に依存しないので release build 1 �
     エスケープ破損で JSON が静かに壊れる）
   - 結果は log / exit code / error を別ファイルに分け、待機側は **error ファイルも
     監視**する（沈黙 ≠ 実行中）。ランナーが過去の result を掃除しない設計なら、
-    **トリガー前に前回の残骸を削除**する（残骸を今回の失敗と誤判定しない）
+    **トリガー前に前回の残骸を削除**する（残骸を新しい run の失敗と誤判定しない）
 - 既存の NT Kernel Logger セッション（xperf / wpr のカーネルトレース等）と並走させない。
 - `--pmc-sources` の既定は `TotalCycles,InstructionRetired`（cycles/node・instructions/node に必須）。
   cache 系などを足すときは `wpr -pmcsources` で列挙される名前を追加する。
