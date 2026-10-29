@@ -48,23 +48,23 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use glob::glob;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use tools::common::dedup::canonicalize_maybe_new;
 use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
-// mpsc/Arc/Mutex/Instant は ONNX 直推論パイプライン専用（バッチ供給の Receiver 共有・
-// フェーズ計時）。ONNX 無効ビルドでの unused import を避けるため cfg で囲う。
-use sha2::{Digest, Sha256};
-#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-use std::sync::mpsc;
-#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-use std::sync::{Arc, Mutex};
-use std::thread;
+// Arc/Instant は ONNX 直推論パイプライン専用（フェーズ計時など）。ONNX 無効ビルドでの
+// unused import を避けるため cfg で囲う。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 use std::time::Instant;
 
@@ -2233,9 +2233,19 @@ fn process_record(
     ProcessResult::Ok(new_psv.to_bytes(), clipped)
 }
 
-/// 深さ指定探索でファイルを処理。チャンクストリーミング（読み込み → ワーカーへ
-/// 連続分割 → 入力順書き出し）でピークメモリを入力件数に非依存にする。探索は重い
-/// ため rayon ではなく、各ワーカーが独自の Search を持って自スライスを逐次処理する。
+/// 探索モードで、空いたワーカーに一度に渡す局面数。塊の先頭で探索状態を初期化するので、
+/// 出力はこの値で決まる（スレッド数には依存しない）。初期化は履歴の表だけで約 100 MB を
+/// 消すため、局面ごとではなく塊ごとに行う。
+const SEARCH_BLOCK_RECORDS: usize = 256;
+/// 探索モードで、配布済みで書き出していない局面数の上限。ピークメモリをこの件数で抑える。
+/// 1 局面だけ極端に重いときも、他のワーカーがこの件数まで先へ進めるようにする。
+const SEARCH_WINDOW_RECORDS: usize = 1_000_000;
+/// `--verbose` で表示するために持っておくエラーの件数。
+const SEARCH_ERROR_SAMPLES: usize = 16;
+
+/// 深さ指定探索でファイルを処理。入力を塊に切って空いたワーカーへ順に配り、結果は入力順に
+/// 並べ直して書く。各ワーカーは独自の Search を持ち、塊の先頭で探索状態を初期化するので、
+/// どの塊をどのワーカーが受け持っても出力は変わらない。
 fn process_file_with_search(
     protection: &OutputProtection,
     cli: &Cli,
@@ -2245,8 +2255,6 @@ fn process_file_with_search(
     progress: &FileProgress,
 ) -> Result<()> {
     let search_depth = cli.search_depth.expect("search_depth should be Some");
-
-    const CHUNK_SIZE: usize = 1_000_000;
 
     let in_file = File::open(input_path)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
@@ -2282,146 +2290,291 @@ fn process_file_with_search(
         );
     }
 
-    let max_nodes = cli.max_nodes;
-    let max_time = cli.max_time;
-    let score_clip = cli.score_clip;
-    let skip_in_check = cli.skip_in_check;
-    let source_fv_scale = cli.source_fv_scale;
-    let target_fv_scale = cli.target_fv_scale;
-    let verbose = cli.verbose;
-
-    // 各ワーカー専用の Search をチャンクをまたいで持ち越す
-    // （Search::go は TT/履歴をクリアしないため、作り直すと探索結果が変わる）
-    let mut searches: Vec<Search> = (0..num_threads)
-        .map(|_| {
-            let mut search = Search::new(cli.hash_mb);
-            search.set_num_threads(1);
-            search
-        })
-        .collect();
-
-    let mut error_count = 0u64;
-    let mut clipped_count = 0u64;
-    let mut skipped_count = 0u64;
-    let mut total_read = 0u64;
-    let mut total_written = 0u64;
-
     progress.set_message("Processing...");
 
-    loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            progress.abandon_with_message("Interrupted");
-            break;
-        }
-
-        // チャンク読み込み
-        let want = (CHUNK_SIZE as u64).min(process_count.saturating_sub(total_read)) as usize;
-        let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(want);
-        let mut buffer = [0u8; PackedSfenValue::SIZE];
-        for _ in 0..want {
-            match reader.read_exact(&mut buffer) {
-                Ok(()) => chunk.push(buffer),
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-        }
-        if chunk.is_empty() {
-            break;
-        }
-        total_read += chunk.len() as u64;
-
-        // チャンク内を連続分割し、ワーカー i がスライス i を先頭から逐次処理する。
-        // 割り当てが（チャンク長, スレッド数）だけで決まるため、同一設定での出力は決定的
-        let slice_size = chunk.len().div_ceil(num_threads).max(1);
-        let results: Vec<Vec<ProcessResult>> = thread::scope(|s| {
-            let handles: Vec<_> = searches
-                .iter_mut()
-                .zip(chunk.chunks(slice_size))
-                .map(|(search, slice)| {
-                    let progress = progress.clone();
-                    thread::Builder::new()
-                        .stack_size(SEARCH_STACK_SIZE)
-                        .spawn_scoped(s, move || {
-                            let mut results = Vec::with_capacity(slice.len());
-                            for record in slice {
-                                if INTERRUPTED.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                                results.push(process_record_with_search(
-                                    record,
-                                    search,
-                                    search_depth,
-                                    max_nodes,
-                                    max_time,
-                                    score_clip,
-                                    skip_in_check,
-                                    source_fv_scale,
-                                    target_fv_scale,
-                                    cli.emit_bestmove,
-                                ));
-                                progress.inc(1);
-                            }
-                            results
-                        })
-                        .expect("Failed to spawn worker thread")
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().expect("Worker thread panicked")).collect()
-        });
-
-        // 連続分割なのでワーカー順の連結がそのまま入力順になる。
-        // 中断でワーカーがスライス途中で止まった場合は、そこで書き出しを打ち切り
-        // 出力を入力の連続 prefix に保つ（歯抜けの部分出力を作らない）
-        for (worker_results, slice) in results.into_iter().zip(chunk.chunks(slice_size)) {
-            let truncated = worker_results.len() < slice.len();
-            for result in worker_results {
-                match result {
-                    ProcessResult::Ok(record, clipped) => {
-                        if clipped {
-                            clipped_count += 1;
-                        }
-                        writer.write_all(&record)?;
-                        total_written += 1;
-                    }
-                    ProcessResult::Skip => skipped_count += 1,
-                    ProcessResult::Error(e) => {
-                        error_count += 1;
-                        if verbose {
-                            eprintln!("Error processing record: {e}");
-                        }
-                    }
-                }
-            }
-            if truncated {
-                break;
-            }
-        }
-    }
+    let hash_mb = cli.hash_mb;
+    let counts = run_search_pipeline(
+        &mut reader,
+        &mut writer,
+        &SearchPipeline {
+            process_count,
+            num_threads,
+            block_records: SEARCH_BLOCK_RECORDS,
+            window_records: SEARCH_WINDOW_RECORDS,
+            make_state: &|| {
+                let mut search = Search::new(hash_mb);
+                search.set_num_threads(1);
+                search
+            },
+            start_block: &|search: &mut Search| search.reset_to_fresh_state(),
+            process: &|search: &mut Search, record: &[u8; PackedSfenValue::SIZE]| {
+                process_record_with_search(
+                    record,
+                    search,
+                    search_depth,
+                    cli.max_nodes,
+                    cli.max_time,
+                    cli.score_clip,
+                    cli.skip_in_check,
+                    cli.source_fv_scale,
+                    cli.target_fv_scale,
+                    cli.emit_bestmove,
+                )
+            },
+            on_record: &|| progress.inc(1),
+        },
+    )?;
 
     writer.flush()?;
-    progress.finish_with_message("Done");
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        progress.abandon_with_message("Interrupted");
+    } else {
+        progress.finish_with_message("Done");
+    }
 
+    let total_read = counts.read;
     if total_read == 0 {
         eprintln!("Warning: No records to process, output file is empty");
     }
-    if error_count > 0 {
-        eprintln!("Note: {error_count} positions had errors");
+    if counts.errors > 0 {
+        eprintln!("Note: {} positions had errors", counts.errors);
+        if cli.verbose {
+            for e in &counts.error_samples {
+                eprintln!("Error processing record: {e}");
+            }
+        }
     }
-    if skipped_count > 0 && total_read > 0 {
+    if counts.skipped > 0 && total_read > 0 {
         eprintln!(
-            "Skipped (in check): {skipped_count} ({:.2}%)",
-            skipped_count as f64 / total_read as f64 * 100.0
+            "Skipped (in check): {} ({:.2}%)",
+            counts.skipped,
+            counts.skipped as f64 / total_read as f64 * 100.0
         );
     }
     if total_read > 0 {
         eprintln!(
-            "Clipped scores: {clipped_count} ({:.2}%)",
-            clipped_count as f64 / total_read as f64 * 100.0
+            "Clipped scores: {} ({:.2}%)",
+            counts.clipped,
+            counts.clipped as f64 / total_read as f64 * 100.0
         );
     }
-    eprintln!("Wrote {total_written} records");
+    eprintln!("Wrote {} records", counts.written);
 
     Ok(())
+}
+
+/// `run_search_pipeline` の設定。`S` はワーカーごとに持つ状態（探索では `Search`）。
+struct SearchPipeline<'a, S> {
+    /// 入力の先頭から処理する件数
+    process_count: u64,
+    num_threads: usize,
+    /// 空いたワーカーに一度に渡す件数
+    block_records: usize,
+    /// 配布済みで書き出していない件数の上限
+    window_records: usize,
+    make_state: &'a (dyn Fn() -> S + Sync),
+    /// 塊を処理し始める前に呼ぶ
+    start_block: &'a (dyn Fn(&mut S) + Sync),
+    process: &'a (dyn Fn(&mut S, &[u8; PackedSfenValue::SIZE]) -> ProcessResult + Sync),
+    /// 1 件処理するたびに呼ぶ（進捗表示用）
+    on_record: &'a (dyn Fn() + Sync),
+}
+
+/// `run_search_pipeline` の集計。
+#[derive(Default)]
+struct SearchCounts {
+    read: u64,
+    written: u64,
+    skipped: u64,
+    errors: u64,
+    clipped: u64,
+    /// 先頭の `SEARCH_ERROR_SAMPLES` 件のエラー
+    error_samples: Vec<String>,
+}
+
+/// ワーカーが共有する読み込み側の状態。
+struct SearchDispatch<'r, R> {
+    reader: &'r mut R,
+    read: u64,
+    next_block: u64,
+    /// 入力順に書き終えた塊の数
+    flushed_blocks: u64,
+    /// これ以上配らない（入力の終わり・読み込みエラー・中断・書き込み側の停止）
+    done: bool,
+    read_error: Option<std::io::Error>,
+}
+
+/// drop 時に配布を止め、待っているワーカーを起こす。ワーカーの panic や書き込み側の
+/// 早期 return（スレッド生成・書き込みの失敗）で、待ちが残って scope が終わらないのを防ぐ。
+struct StopDispatchOnDrop<'a, 'r, R> {
+    dispatch: &'a Mutex<SearchDispatch<'r, R>>,
+    ready: &'a std::sync::Condvar,
+    /// true なら panic で抜けるときだけ止める（ワーカーの正常終了では止めない）
+    only_on_panic: bool,
+}
+
+impl<R> Drop for StopDispatchOnDrop<'_, '_, R> {
+    fn drop(&mut self) {
+        if !self.only_on_panic || thread::panicking() {
+            let mut d = self.dispatch.lock().unwrap_or_else(|e| e.into_inner());
+            d.done = true;
+            self.ready.notify_all();
+        }
+    }
+}
+
+/// `reader` の先頭 `process_count` 件を `block_records` 件ずつの塊にして空いたワーカーへ配り、
+/// 結果を入力順に `writer` へ書く。配布済みで書いていない塊を `window_records` 件分（最低 1 塊）
+/// までに抑え、ピークメモリを入力件数に依存させない。中断でワーカーが塊の途中で止まったら、そこで
+/// 書き出しを打ち切り、出力を入力の連続した先頭部分に保つ。
+fn run_search_pipeline<S, R: Read + Send, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    config: &SearchPipeline<'_, S>,
+) -> Result<SearchCounts> {
+    type Block = (u64, Vec<ProcessResult>, bool);
+    let process_count = config.process_count;
+    let block_records = config.block_records.max(1);
+    // window が塊より小さいときも、1 塊は配れるようにする
+    let window_blocks = (config.window_records / block_records).max(1) as u64;
+    let dispatch = Mutex::new(SearchDispatch {
+        reader,
+        read: 0,
+        next_block: 0,
+        flushed_blocks: 0,
+        done: process_count == 0,
+        read_error: None,
+    });
+    let ready = std::sync::Condvar::new();
+    let (tx, rx) = mpsc::channel::<Block>();
+
+    let worker = |tx: mpsc::Sender<Block>| {
+        let _guard = StopDispatchOnDrop {
+            dispatch: &dispatch,
+            ready: &ready,
+            only_on_panic: true,
+        };
+        let mut state = (config.make_state)();
+        loop {
+            let (seq, block) = {
+                let mut d = dispatch.lock().expect("search dispatch poisoned");
+                while !d.done && d.next_block >= d.flushed_blocks + window_blocks {
+                    d = ready.wait(d).expect("search dispatch poisoned");
+                }
+                if d.done || INTERRUPTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                let want = (block_records as u64).min(process_count - d.read) as usize;
+                let mut block = Vec::with_capacity(want);
+                let mut buffer = [0u8; PackedSfenValue::SIZE];
+                for _ in 0..want {
+                    match d.reader.read_exact(&mut buffer) {
+                        Ok(()) => block.push(buffer),
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                                d.read_error = Some(e);
+                            }
+                            d.done = true;
+                            break;
+                        }
+                    }
+                }
+                d.read += block.len() as u64;
+                if d.read >= process_count {
+                    d.done = true;
+                }
+                if d.done {
+                    ready.notify_all();
+                }
+                if block.is_empty() {
+                    return;
+                }
+                let seq = d.next_block;
+                d.next_block += 1;
+                (seq, block)
+            };
+            let mut results = Vec::with_capacity(block.len());
+            (config.start_block)(&mut state);
+            for record in &block {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    break;
+                }
+                results.push((config.process)(&mut state, record));
+                (config.on_record)();
+            }
+            let complete = results.len() == block.len();
+            if tx.send((seq, results, complete)).is_err() {
+                return;
+            }
+        }
+    };
+
+    let mut counts = SearchCounts::default();
+    let write_result = thread::scope(|s| -> Result<()> {
+        let _stop = StopDispatchOnDrop {
+            dispatch: &dispatch,
+            ready: &ready,
+            only_on_panic: false,
+        };
+        for _ in 0..config.num_threads {
+            let tx = tx.clone();
+            let worker = &worker;
+            thread::Builder::new()
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn_scoped(s, move || worker(tx))
+                .context("Failed to spawn worker thread")?;
+        }
+        drop(tx);
+
+        let mut pending: std::collections::BTreeMap<u64, (Vec<ProcessResult>, bool)> =
+            std::collections::BTreeMap::new();
+        let mut next_block = 0u64;
+        let mut write_in_order = || -> Result<()> {
+            for (seq, results, complete) in &rx {
+                pending.insert(seq, (results, complete));
+                let mut stop = false;
+                while let Some((results, complete)) = pending.remove(&next_block) {
+                    for result in results {
+                        match result {
+                            ProcessResult::Ok(record, clipped) => {
+                                counts.clipped += u64::from(clipped);
+                                writer.write_all(&record)?;
+                                counts.written += 1;
+                            }
+                            ProcessResult::Skip => counts.skipped += 1,
+                            ProcessResult::Error(e) => {
+                                counts.errors += 1;
+                                if counts.error_samples.len() < SEARCH_ERROR_SAMPLES {
+                                    counts.error_samples.push(e.to_string());
+                                }
+                            }
+                        }
+                    }
+                    next_block += 1;
+                    if !complete {
+                        stop = true;
+                        break;
+                    }
+                }
+                let mut d = dispatch.lock().expect("search dispatch poisoned");
+                d.flushed_blocks = next_block;
+                d.done |= stop;
+                ready.notify_all();
+                if stop {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        write_in_order()
+    });
+    let dispatch = dispatch.into_inner().unwrap_or_else(|e| e.into_inner());
+    counts.read = dispatch.read;
+    write_result?;
+    if let Some(e) = dispatch.read_error {
+        return Err(e.into());
+    }
+    Ok(counts)
 }
 
 /// 深さ指定探索で1レコードを処理
@@ -6719,5 +6872,187 @@ mod marker_tests {
         cursor.read_exact(&mut record).unwrap();
         assert_eq!(PackedSfenValue::from_bytes(&record).unwrap().score, 300);
         assert!(seek_to_record(&mut cursor, u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod search_pipeline_tests {
+    use super::*;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+    use rshogi_core::movegen::{MoveList, generate_legal};
+
+    fn indexed_record(i: u16) -> [u8; PackedSfenValue::SIZE] {
+        PackedSfenValue {
+            sfen: [0; 32],
+            score: i as i16,
+            move16: i,
+            game_ply: 1,
+            game_result: 0,
+            padding: 0,
+        }
+        .to_bytes()
+    }
+
+    /// 平手から乱数で指し進めた局面の PSV 列。
+    fn random_positions(seed: u64, count: usize) -> Vec<u8> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut input = Vec::new();
+        while input.len() < count * PackedSfenValue::SIZE {
+            let mut pos = Position::new();
+            pos.set_hirate();
+            for _ in 0..rng.random_range(0..60) {
+                let mut moves = MoveList::new();
+                generate_legal(&pos, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                let m = moves.as_slice()[rng.random_range(0..moves.len())];
+                let gives_check = pos.gives_check(m);
+                pos.do_move(m, gives_check);
+            }
+            let psv = PackedSfenValue {
+                sfen: pack_position(&pos),
+                score: 0,
+                move16: 0,
+                game_ply: 1,
+                game_result: 0,
+                padding: 0,
+            };
+            input.extend_from_slice(&psv.to_bytes());
+        }
+        input
+    }
+
+    fn run<S>(input: &[u8], config: &SearchPipeline<'_, S>) -> (Vec<u8>, SearchCounts) {
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        let counts = run_search_pipeline(&mut reader, &mut output, config).unwrap();
+        (output, counts)
+    }
+
+    /// 重さがばらつき、塊・窓が小さくても、出力は入力順で Skip だけが抜ける。
+    #[test]
+    fn writes_in_input_order_with_uneven_work() {
+        let n = 200u16;
+        let input: Vec<u8> = (0..n).flat_map(indexed_record).collect();
+        let expected: Vec<u8> =
+            (0..n).filter(|i| !i.is_multiple_of(11)).flat_map(indexed_record).collect();
+        let process = |_: &mut (), record: &[u8; PackedSfenValue::SIZE]| {
+            let i = PackedSfenValue::from_bytes(record).unwrap().move16;
+            std::thread::sleep(std::time::Duration::from_micros(u64::from(i % 7) * 300));
+            if i.is_multiple_of(11) {
+                ProcessResult::Skip
+            } else {
+                ProcessResult::Ok(*record, false)
+            }
+        };
+        for (threads, block, window, limit) in [(1, 1, 1, 200), (3, 2, 4, 200), (8, 5, 10, 137)] {
+            let (output, counts) = run(
+                &input,
+                &SearchPipeline {
+                    process_count: limit,
+                    num_threads: threads,
+                    block_records: block,
+                    window_records: window,
+                    make_state: &|| (),
+                    start_block: &|_| {},
+                    process: &process,
+                    on_record: &|| {},
+                },
+            );
+            let kept = (0..limit as u16).filter(|i| !i.is_multiple_of(11)).count();
+            assert_eq!(output, expected[..kept * PackedSfenValue::SIZE], "threads={threads}");
+            assert_eq!(counts.read, limit);
+            assert_eq!(counts.written + counts.skipped, limit);
+        }
+    }
+
+    /// 先頭の塊が書き出されるまで、window を超える位置の局面は配られない（スレッド数が多くても）。
+    #[test]
+    fn does_not_dispatch_beyond_window_before_first_block_is_written() {
+        let input: Vec<u8> = (0..60u16).flat_map(indexed_record).collect();
+        let first_done = AtomicBool::new(false);
+        let started_in_window = AtomicU64::new(0);
+        let process = |_: &mut (), record: &[u8; PackedSfenValue::SIZE]| {
+            let i = PackedSfenValue::from_bytes(record).unwrap().move16;
+            if i == 0 {
+                // window 内のもう 1 塊（5〜9）が全部処理を始め、空いたワーカーが次を取りに
+                // 行くまで先頭の塊を終わらせない。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while started_in_window.load(Ordering::SeqCst) < 5
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                first_done.store(true, Ordering::SeqCst);
+            } else if (5..10).contains(&i) {
+                started_in_window.fetch_add(1, Ordering::SeqCst);
+            } else if i >= 10 {
+                assert!(first_done.load(Ordering::SeqCst), "record {i} dispatched past window");
+            }
+            ProcessResult::Ok(*record, false)
+        };
+        let (output, counts) = run(
+            &input,
+            &SearchPipeline {
+                process_count: 60,
+                num_threads: 8,
+                block_records: 5,
+                window_records: 10,
+                make_state: &|| (),
+                start_block: &|_| {},
+                process: &process,
+                on_record: &|| {},
+            },
+        );
+        assert_eq!(output, input);
+        assert_eq!(counts.written, 60);
+    }
+
+    /// 塊の先頭で探索状態を初期化するので、同じ入力と塊の大きさなら、実行ごと・スレッド数に
+    /// よらず出力が bit 一致する。
+    #[test]
+    fn search_output_is_identical_across_runs_and_thread_counts() {
+        rshogi_core::eval::material::set_material_level(
+            rshogi_core::eval::material::MaterialLevel::Lv1,
+        );
+        let input = random_positions(2026, 40);
+        let search_output = |threads: usize| {
+            run(
+                &input,
+                &SearchPipeline {
+                    process_count: u64::MAX,
+                    num_threads: threads,
+                    block_records: 3,
+                    window_records: 8,
+                    make_state: &|| {
+                        let mut search = Search::new(1);
+                        search.set_num_threads(1);
+                        search
+                    },
+                    start_block: &|search: &mut Search| search.reset_to_fresh_state(),
+                    process: &|search: &mut Search, record: &[u8; PackedSfenValue::SIZE]| {
+                        process_record_with_search(
+                            record, search, 6, 0, 0, 10000, false, 1, 1, true,
+                        )
+                    },
+                    on_record: &|| {},
+                },
+            )
+        };
+        let (base, counts) = search_output(1);
+        assert_eq!(counts.written, 40);
+        let scores: std::collections::BTreeSet<i16> = base
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
+            .map(|r| PackedSfenValue::from_bytes(r).unwrap().score)
+            .collect();
+        assert!(scores.len() > 1, "search must produce varied labels");
+        for threads in [1, 4, 4, 7] {
+            assert_eq!(search_output(threads).0, base, "threads={threads}");
+        }
     }
 }

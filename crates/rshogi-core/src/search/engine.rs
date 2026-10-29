@@ -838,10 +838,12 @@ impl Search {
         self.eval_hash_size_mb
     }
 
-    /// 履歴統計をクリア（usinewgame時に呼び出し）
+    /// 新しい対局の前に、置換表と EvalHash 以外の探索状態を初期化する（usinewgame 時に呼ぶ）。
     ///
-    /// Worker::clear()相当
-    pub fn clear_histories(&mut self) {
+    /// 全 worker の履歴（`SearchWorker::clear`）、共有履歴、前の対局から持ち越す時間配分と
+    /// 手番反転検出の状態を戻す。Stockfish の `ThreadPool::clear()` 相当。
+    /// 置換表と EvalHash は `clear_tt` / `clear_eval_hash` で別に消す。
+    pub fn clear_for_new_game(&mut self) {
         if let Some(worker) = &mut self.worker {
             worker.clear();
         }
@@ -852,6 +854,30 @@ impl Search {
         if self.worker.is_some() {
             self.shared_histories.clear(self.search_tune_params.pawn_history_init as i16);
         }
+        self.best_previous_score = Some(Value::INFINITE);
+        self.best_previous_average_score = Some(Value::INFINITE);
+        self.iter_value = [Value::ZERO; 4];
+        self.iter_idx = 0;
+        self.last_best_move_depth = 0;
+        self.last_best_move = Move::NONE;
+        self.tot_best_move_changes = 0.0;
+        self.previous_time_reduction = 0.85;
+        self.last_game_ply = None;
+        self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
+        self.search_again_counter = 0;
+    }
+
+    /// 次の `go` を、同じ設定で新しく作った `Search` と同じ探索にする。
+    ///
+    /// 互いに独立な局面を順に探索し、どの局面をどの `Search` が受け持っても結果を変えない用途向け。
+    /// 置換表は呼び出しスレッドだけで消す（[`TranspositionTable::clear_on_current_thread`]）。
+    /// EvalHash は局面の静的評価だけを 64 bit key 全体の照合で返すため探索結果を変えず、消さない。
+    pub fn reset_to_fresh_state(&mut self) {
+        self.tt.clear_on_current_thread();
+        self.clear_for_new_game();
+        // helper を使った go は終了時に stop を立てたまま戻る。
+        self.reset_flags();
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -2181,7 +2207,7 @@ mod tests {
                     let mut search = Search::new_with_eval_hash(1, 1);
                     search.set_search_tune_params(params);
                     if clear_first {
-                        search.clear_histories();
+                        search.clear_for_new_game();
                     }
                     let mut pos = Position::new();
                     pos.set_hirate();
@@ -2193,6 +2219,87 @@ mod tests {
                     (result.nodes, result.best_move)
                 };
                 assert_eq!(run(true), run(false));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// reset_to_fresh_state の後と、usinewgame と同じ初期化の後の go は、前に何を探索していても
+    /// 新しい Search と同じ木になる。
+    #[test]
+    fn reset_to_fresh_state_matches_new_search() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let sfens = [
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+                    "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+                    "lnsgkg1nl/1r5s1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/7R1/LNSGKGSNL b Bb 5",
+                ];
+                let run = |search: &mut Search, sfen: &str| {
+                    let mut pos = Position::new();
+                    pos.set_sfen(sfen).unwrap();
+                    let limits = LimitsType {
+                        depth: 7,
+                        ..Default::default()
+                    };
+                    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+                    (result.nodes, result.best_move, result.score)
+                };
+                let mut reused = Search::new_with_eval_hash(1, 1);
+                let mut new_game = Search::new_with_eval_hash(1, 1);
+                for &i in &[3, 0, 2, 1, 3, 2] {
+                    reused.reset_to_fresh_state();
+                    new_game.clear_tt();
+                    new_game.clear_eval_hash();
+                    new_game.clear_for_new_game();
+                    let fresh = run(&mut Search::new_with_eval_hash(1, 1), sfens[i]);
+                    assert_eq!(run(&mut reused, sfens[i]), fresh, "{}", sfens[i]);
+                    assert_eq!(run(&mut new_game, sfens[i]), fresh, "{}", sfens[i]);
+                }
+                assert_ne!(new_game.best_previous_score, Some(Value::INFINITE));
+                new_game.clear_for_new_game();
+                assert_eq!(new_game.best_previous_score, Some(Value::INFINITE));
+                assert_eq!(new_game.previous_time_reduction, 0.85);
+                // 浅い探索では漏れが結果に出にくいので、探索スタックが go ごとに新品に戻ることも
+                // 直接見る（解析の再開だけは持ち越す）。
+                let worker = reused.worker.as_mut().unwrap();
+                worker.state.stack.iter_mut().for_each(|e| {
+                    e.tt_pv = true;
+                    e.ply = -1;
+                    e.cont_history_ptr = std::ptr::NonNull::dangling();
+                });
+                let resume = LimitsType {
+                    analysis: Some(crate::search::analysis::AnalysisRun::resumed_for_test()),
+                    ..Default::default()
+                };
+                worker.prepare_search(&resume);
+                assert!(worker.state.stack.iter().all(|e| e.tt_pv && e.ply == -1));
+                worker.prepare_search(&LimitsType::default());
+                let (sentinel, correction_sentinel) =
+                    (worker.cont_history_sentinel, worker.cont_correction_sentinel);
+                assert!(worker.state.stack.iter().enumerate().all(|(i, e)| {
+                    !e.tt_pv
+                        && e.ply == i as i32
+                        && e.cont_history_ptr == sentinel
+                        && e.cont_correction_ptr == correction_sentinel
+                }));
+
+                // helper を使った探索の後も、次の go は深さ上限まで進む。
+                reused.set_num_threads(2);
+                run(&mut reused, sfens[0]);
+                reused.reset_to_fresh_state();
+                let mut pos = Position::new();
+                pos.set_sfen(sfens[0]).unwrap();
+                let limits = LimitsType {
+                    depth: 5,
+                    ..Default::default()
+                };
+                assert_eq!(reused.go(&mut pos, limits, None::<fn(&SearchInfo)>).depth, 5);
             })
             .unwrap()
             .join()

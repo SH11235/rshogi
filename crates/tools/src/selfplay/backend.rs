@@ -118,10 +118,10 @@ impl SearchBackend for NativeBackend {
         if keep_tt {
             // TT・EvalHash・履歴を保持（USI backend の保持動作は接続先に依存）
         } else {
-            // TT・EvalHash・履歴をクリア（rshogi USI の usinewgame と同等）
+            // TT・EvalHash・探索状態をクリア（rshogi USI の usinewgame と同等）
             self.engine.clear_tt();
             self.engine.clear_eval_hash();
-            self.engine.clear_histories();
+            self.engine.clear_for_new_game();
         }
         Ok(())
     }

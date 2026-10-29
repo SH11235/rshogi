@@ -89,6 +89,23 @@ pub(crate) struct AnalysisRun {
     pub nodes: Arc<AtomicU64>,
     pub start: Instant,
 }
+#[cfg(test)]
+impl AnalysisRun {
+    /// 解析の再開として扱う、停止条件のない実行。
+    pub(crate) fn resumed_for_test() -> Self {
+        Self {
+            handle: AnalysisRunHandle {
+                control: Arc::new(AtomicU32::new(0)),
+                generation: 0,
+            },
+            resume: true,
+            budget: AnalysisBudget::Unlimited,
+            nodes: Arc::new(AtomicU64::new(0)),
+            start: Instant::now(),
+        }
+    }
+}
+
 impl AnalysisRun {
     pub fn stopped(&self) -> bool {
         self.handle.stopped()
@@ -164,7 +181,7 @@ impl AnalysisSession {
         }
         search.clear_tt();
         search.clear_eval_hash();
-        search.clear_histories();
+        search.clear_for_new_game();
         search.set_skill_options(super::SkillOptions::default());
         Ok(Self {
             search,
