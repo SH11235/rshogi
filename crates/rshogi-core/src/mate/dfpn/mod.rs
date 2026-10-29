@@ -364,7 +364,7 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
-        searcher.set_helpers(&mut self.helper_scratch);
+        searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
         }

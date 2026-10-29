@@ -479,6 +479,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     tables: Option<&'a ShortestTables>,
     /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
     helpers: &'a mut [Scratch<S::Mv>],
+    /// `search_shared` で、補助スレッドを起こす前に 1 スレッドで読むノード数
+    serial_nodes: u64,
 }
 
 /// `Searcher::solve_detached` の結果
@@ -544,6 +546,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             futility: false,
             tables: None,
             helpers: &mut [],
+            serial_nodes: 0,
         }
     }
 
@@ -558,9 +561,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.tables = Some(tables);
     }
 
-    /// `search_shared` で使う補助スレッドの作業領域を渡す (スレッド数 − 1 個)
-    pub fn set_helpers(&mut self, helpers: &'a mut [Scratch<S::Mv>]) {
+    /// `search_shared` で使う補助スレッドの作業領域 (スレッド数 − 1 個) と、補助スレッドを起こす前に
+    /// 1 スレッドで読むノード数を渡す
+    pub fn set_helpers(&mut self, helpers: &'a mut [Scratch<S::Mv>], serial_nodes: u64) {
         self.helpers = helpers;
+        self.serial_nodes = serial_nodes;
     }
 
     fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
@@ -1301,6 +1306,17 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         if self.helpers.is_empty() {
             return self.search(st, args, &mut 0);
         }
+        if self.serial_nodes > 0 {
+            // 易しい局面 (置換表で数ノードのうちに決まる読みが多い) はスレッドを起こす費用の方が大きいので、
+            // 先に 1 スレッドで読む。打ち切ると `within` が証明済みの子を集める指定を消すので戻す
+            let capture = self.capture_depth;
+            if let Some(result) = self.within(self.serial_nodes, |s| s.search(st, args, &mut 0))? {
+                return Ok(result);
+            }
+            if let Some(depth) = capture {
+                self.capture_proven(depth);
+            }
+        }
         let halt = AtomicBool::new(false);
         let cancel = AtomicBool::new(false);
         // この探索器の上限の残りを全スレッドの合計に掛ける
@@ -1394,7 +1410,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             self.nodes += n;
             if result.is_err() && r.is_ok() {
                 result = r;
-                // 結論を出したスレッドが集めた証明済みの子を、この探索器で集めたものとして返す
+                // 返す結果と証明済みの子を同じスレッドのものにそろえる (手数の違う別の証明の子が混ざらないように)
                 if capture.is_some() {
                     self.scratch.proven.clone_from(&self.helpers[i].proven);
                 }
