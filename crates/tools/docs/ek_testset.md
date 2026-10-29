@@ -92,7 +92,8 @@ cargo run -p tools --release --bin ek_testset -- eval \
 
 NNUE は `init_nnue` がロードできる全アーキテクチャ（LayerStacks、HalfKP 系など）に対応します。
 LayerStacks では `--bucket-mode`（`progresskpabs` / `progresskpabsq16` / `kingrank9`）で bucket の
-選択方式を指定し、省略すると `progresskpabs` です。進行度方式では `--progress-buckets` に学習時の
+選択方式を指定します。`--bucket-mode` を省いて進行度の option だけを指定した場合は
+`progresskpabs` として扱います。進行度方式では `--progress-buckets` に学習時の
 routing bucket 数を指定します。`--progress-buckets 1` は常に bucket 0 を選ぶ no-op routing のため、
 その場合のみ `--progress-file` は省略できます。`kingrank9` は進行度の option を使いません。
 LayerStacks 以外の NNUE では `--bucket-mode`・`--progress-buckets`・`--progress-file` を指定しません

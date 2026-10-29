@@ -41,4 +41,4 @@ mode・bucket 数・係数の要否を検証し、係数の読み込みに成功
 `rescore_psv` の係数 SHA は、評価に使う係数と同じ読み込み済み bytes から計算します。
 
 CLI 名は各ツールのドキュメントを参照してください。`ek_testset` と `nyugyoku_metrics` は
-`--bucket-mode` で指定します（`ek_testset` は省略すると `progresskpabs`）。
+`--bucket-mode` で指定します（`ek_testset` は進行度の option だけを指定して省くと `progresskpabs`）。

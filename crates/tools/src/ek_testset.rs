@@ -79,7 +79,7 @@ struct EvalArgs {
     /// NNUE ファイル。
     #[arg(long)]
     eval_file: PathBuf,
-    /// LayerStacks の bucket 選択モード。LayerStacks で省略すると `progresskpabs`。
+    /// LayerStacks の bucket 選択モード。省いて進行度の option だけを指定すると `progresskpabs`。
     /// LayerStacks 以外の NNUE では指定しない。
     #[arg(long, value_enum)]
     bucket_mode: Option<BucketModeArg>,

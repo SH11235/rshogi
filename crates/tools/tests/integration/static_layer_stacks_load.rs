@@ -272,6 +272,28 @@ fn single_bucket_does_not_ignore_invalid_coefficients() {
 }
 
 #[test]
+fn q16_single_bucket_runs_without_coefficients() {
+    let fixture = Fixture::new();
+    let (net, sfens) = (fixture.net(), fixture.sfens());
+    let args = [
+        "--nnue",
+        &net,
+        "--sfens",
+        &sfens,
+        "--bucket-mode",
+        "progresskpabsq16",
+        "--progress-buckets",
+        "1",
+    ];
+    for binary in [
+        env!("CARGO_BIN_EXE_eval_sfens"),
+        env!("CARGO_BIN_EXE_nnue_saturation"),
+    ] {
+        assert_static_layer_stacks_success(binary, &run(binary, &args));
+    }
+}
+
+#[test]
 fn q16_routing_runs_on_diagnostic_tools() {
     use rshogi_core::nnue::{
         SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_progresskpabs_q16_sum,

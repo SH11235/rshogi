@@ -162,9 +162,19 @@ impl NativeRouting {
 ///
 /// 係数は生成時に一度だけ取得し、評価ループ中は global を読まない。
 pub enum LayerStackBucketer {
-    KingRank9 { stored: usize },
-    ProgressKpAbs { weights: Arc<[f32]>, buckets: usize },
-    ProgressKpAbsQ16 { weights: Arc<[i32]>, buckets: usize },
+    /// 進行度方式の routing bucket 数 1。係数を参照せず常に bucket 0。
+    Single,
+    KingRank9 {
+        stored: usize,
+    },
+    ProgressKpAbs {
+        weights: Arc<[f32]>,
+        buckets: usize,
+    },
+    ProgressKpAbsQ16 {
+        weights: Arc<[i32]>,
+        buckets: usize,
+    },
 }
 
 impl LayerStackBucketer {
@@ -172,6 +182,12 @@ impl LayerStackBucketer {
     pub fn from_configured(stored: usize, routing_buckets: usize) -> Result<Self> {
         Ok(match get_layer_stack_bucket_mode() {
             LayerStackBucketMode::KingRank9 => Self::KingRank9 { stored },
+            // routing 数 1 では係数ファイルを省略できるので、未設定の係数を要求しない。
+            LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16
+                if routing_buckets == 1 =>
+            {
+                Self::Single
+            }
             LayerStackBucketMode::ProgressKPAbs => Self::ProgressKpAbs {
                 weights: Arc::from(&*get_layer_stack_progress_kpabs_weights()),
                 buckets: routing_buckets,
@@ -188,6 +204,7 @@ impl LayerStackBucketer {
     /// 局面の bucket index。
     pub fn bucket(&self, pos: &Position) -> usize {
         match self {
+            Self::Single => 0,
             Self::KingRank9 { stored } => {
                 compute_layer_stack_kingrank9_bucket_index(pos, pos.side_to_move(), *stored)
             }
