@@ -97,8 +97,9 @@ test (`pnpm test:smoke` の miniflare smoke 等) 側で済んでいる前提で�
 
 ## 1. 共通セットアップ
 
-別ターミナルで Worker tail を流すと R2 export ログ
-(`[GameRoom] kifu exported to R2 key=...`) や error がリアルタイムで見える:
+別ターミナルで Worker tail を流すと GameRoom の structured log (1 行 1 JSON、
+`event` field で識別。R2 export 完了は `"event":"export_complete"` +
+`game_id` / `key`) や error がリアルタイムで見える:
 
 ```bash
 vp exec wrangler tail --config "$WRANGLER" --format pretty
@@ -189,7 +190,8 @@ curl -sf "https://$CSA_HOST/api/v1/games/<game_id>" \
   | python3 -c "import json,sys; d=json.load(sys.stdin)['meta']; print(f'end_reason={d[\"end_reason\"]} result={d[\"result_kind\"]} moves={d[\"moves_count\"]}')"
 ```
 
-`end_reason` が `RESIGN` / `TIME_UP` / `ILLEGAL_MOVE` / `ABNORMAL` のいずれか、
+`end_reason` が `RESIGN` / `TIME_UP` / `ILLEGAL` / `ABNORMAL` 等 (値域は
+`crates/rshogi-csa-server-workers/src/games_index.rs` の `classify_result`) のいずれか、
 `source: "floodgate"`、CSA file の `BEGIN Time` block が想定 preset と一致する
 ことを確認。
 
@@ -216,17 +218,19 @@ preset は中時間 (120 秒 + 5 秒等) を選び、grace の中で reconnect �
 
 手順:
 
-1. シナリオ A 構成で起動して対局を進める
+1. シナリオ A 構成で起動して対局を進める。黒 client は受信行を残すため
+   `--log-level debug` を付けて起動する (TOML 経路なら `[log] level = "debug"`)
 2. 黒 client ログから `Reconnect_Token:<token>` と `Game_ID:<game_id>` を抜き取る
    (debug ログレベル `[CSA] < ` プレフィクスで出る)
 3. 記録した PID で黒 client を停止する: `kill -KILL "$(cat "$RUN/black.pid")"`
-4. `wrangler tail` で `[GameRoom] entered grace window: role=Black grace_secs=<N>`
-   を確認
+4. `wrangler tail` で `"event":"entered_grace_window"` (`role` / `grace_secs`
+   field 付き) を確認
 5. **次のいずれかの経路で grace + reconnect 動作を観測する** (用途で使い分け):
 
    **(a) Server 側 grace + force_abnormal の実機検証** (推奨、最も確実):
-   - `wrangler tail` で `[GameRoom] entered grace window` → grace 経過後に
-     `force_abnormal` ログを確認
+   - `wrangler tail` で `"event":"entered_grace_window"` を確認。grace 満了時の
+     `force_abnormal` 自体には専用 event が無いので、続く `"event":"export_complete"`
+     (同 `game_id`) と白 client の受信で確定を見る
    - 白 client が `#ABNORMAL` + `#WIN` を受信して終局
    - R2 export には `end_reason: "ABNORMAL"`、viewer API
      (`GET /api/v1/games/<game_id>`) で同値を確認
@@ -256,18 +260,27 @@ preset は中時間 (120 秒 + 5 秒等) を選び、grace の中で reconnect �
 ## 5. シナリオ D: 観戦 (`%%MONITOR2ON`)
 
 `csa_client` は観戦モード未実装のため `wscat` 等の汎用 WS client で擬似する。
+観戦は対局者経路 (`/ws/<room_id>` + LOGIN) ではなく専用経路
+`GET /ws/<room_id>/spectate` (`<game_id>` も可) を使い、LOGIN は送らない。
+
+> **前提**: `ALLOW_VIEWER_API` 有効 (無効なら 404) かつ `WS_ALLOWED_ORIGINS` が
+> 非空 (空なら 403)。Origin を付ける場合は allowlist と完全一致させる (不一致は
+> 403)。仕様は `docs/csa-server/viewer_access_control.md`。
 
 ```bash
-wscat -c "wss://$CSA_HOST/ws/<room_id>"
-> LOGIN spectator+<preset_name>+spectator anything
-< LOGIN:spectator+<preset_name>+spectator OK
+wscat -o "https://<WS_ALLOWED_ORIGINS の 1 つ>" -c "wss://$CSA_HOST/ws/<room_id>/spectate"
 > %%MONITOR2ON <game_id>
-< [対局者の指し手が broadcast される]
+< ##[MONITOR2] BEGIN <game_id>
+< [Game_Summary + 既存指し手の snapshot]
+< ##[MONITOR2] END
+< [以降、対局者の指し手が broadcast される]
 ```
 
 シナリオ A と並行起動し、対局者の指し手が spectator 側にも届くことを確認する。
-`<preset_name>` は対局と同じ preset 名を使う (strict mode 下では preset 登録
-されていない game_name は LOGIN_LOBBY:incorrect で reject される)。
+終局済み room に接続すると `%%MONITOR2ON` を待たずに snapshot と結果行を push して
+code 1000 (`spectate finished`) で close される。server 側の期待挙動は
+`tests/miniflare_smoke/spectator_finished.test.ts` /
+`tests/miniflare_smoke/finalization.test.ts` (workers crate 配下) が押さえている。
 
 ## 6. シナリオ E: Buoy 対局 (`%%SETBUOY` / `%%DELETEBUOY`)
 
@@ -275,13 +288,22 @@ ADMIN 権限で運用権限コマンドを送り、中盤局面からの対局�
 `csa_client` は管理コマンドを直接送る経路を持たないので ADMIN 部分は `wscat`
 で代替し、対局者は通常の `csa_client` を使う。
 
+admin 権限は handle ではなく、同一 session 内で `%%ADMIN <token>` を通すことで
+得る (`<token>` は wrangler secret `ADMIN_API_TOKEN` の値。運用は
+`docs/csa-server/admin_auth.md`)。
+
 ```bash
-# `<ADMIN_HANDLE>` は staging/production の wrangler secret に設定された値。
 wscat -c "wss://$CSA_HOST/ws/<room_id>"
-> LOGIN <ADMIN_HANDLE>+<preset_name>+black anything
+> LOGIN <handle>+<preset_name>+black anything
 < LOGIN:... OK
+> %%ADMIN <ADMIN_API_TOKEN>
+< ##[ADMIN] OK
+< ##[ADMIN] END
 > %%SETBUOY <preset_name> +7776FU -3334FU 1
 ```
+
+`%%ADMIN` を通さずに `%%SETBUOY` を送ると `PERMISSION_DENIED` で拒否される
+(token 不一致も `##[ADMIN] PERMISSION_DENIED`)。
 
 `count = 1` なので 1 回だけ buoy 対局が成立する。続いて通常 client 2 本で対局
 すると、Game_Summary の `Position` ブロックに `+7776FU` `-3334FU` の 2 手が
@@ -360,7 +382,7 @@ CLOCK_PRESETS = '''[
 
 1. R2 検証用 object を削除したい場合 (残しても害はない):
    ```bash
-   vp exec wrangler r2 object delete <bucket>/<key> --config "$WRANGLER"
+   vp exec wrangler r2 object delete <bucket>/<key> --remote --config "$WRANGLER"
    ```
    bucket 名は wrangler toml の `r2_buckets` を参照する。
 2. `$RUN` 配下の toml / log / pid と `./records/` を必要に応じて破棄

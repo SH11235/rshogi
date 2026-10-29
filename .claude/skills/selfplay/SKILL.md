@@ -185,7 +185,7 @@ build / preset edition / feature 構成の詳細は
 [`edition-build` SKILL](../edition-build/SKILL.md) を参照。selfplay 観点での最低要件:
 
 - **モデル比較なら preset 経由で build**: `cargo run --release -p xtask -- build
-  --edition <name> --profile production`。preset 一覧は `xtask list-editions`
+  --edition <name> --profile production`。preset 一覧は `cargo xtask list-editions`
 - **既存 binary を流用するなら meta.toml で edition / profile / commit 確認**
   (features は記録されないので edition 名から逆引き)、ckpt format との整合が
   取れない (`Unknown NNUE version: 0x...`) なら rebuild
@@ -261,7 +261,8 @@ cargo run -p tools --release --bin tournament -- \
   --concurrency {CONCURRENCY} \
   --seed {SEED} \
   --startpos-file data/startpos/start_sfens_ply32.txt \
-  --usi-option {NNUE} \
+  --engine-usi-option "0:EvalFile={NNUE_A}" \
+  --engine-usi-option "1:EvalFile={NNUE_B}" \
   --out-dir "$OUT"
 ```
 
@@ -421,9 +422,17 @@ simplification / non-regression の検定は `--sprt-nelo0 -10 --sprt-nelo1 0` �
 無損失で復元できる。**SPRT モードで起動していない通常 run のログでも使える**。
 
 ```
+# SPRT モードで回した run: meta に記録された bounds で再現する (4 パラメータを渡さない)
+cargo run -p tools --release --bin analyze_selfplay -- "$OUT"/*.jsonl --sprt
+
+# meta に SPRT 情報が無い通常 run: 事前登録した bounds を 4 つとも明示する (例は gainer)
 cargo run -p tools --release --bin analyze_selfplay -- \
-  "$OUT"/*.jsonl --sprt
+  "$OUT"/*.jsonl --sprt \
+  --sprt-nelo0 0 --sprt-nelo1 10 --sprt-alpha 0.05 --sprt-beta 0.05
 ```
+
+数値パラメータは CLI → meta → 既定値の順で解決されるので、CLI で渡した値は meta の記録を
+上書きする。SPRT run の再現で 4 パラメータを渡すときは、実行時と同じ値にする。
 
 base/test のラベルは CLI 明示 → meta の SPRT 情報 → meta の `base_label` → ラベル名の順で
 自動推定され、根拠が stderr に出る (詳細は `crates/tools/docs/tournament.md` の「SPRT post-hoc 判定」)。
