@@ -356,8 +356,8 @@ const _: () = assert!(std::mem::size_of::<Bucket<FinalEntry>>() == 64);
 
 // SAFETY: エントリを複数のスレッドから同時に触るのは `MateTable::concurrent` が真の間だけで、そのときは
 // `words` の AtomicU32 越しにだけ読み書きする (書く側は版数で排他する)。偽の間は 1 スレッドだけが使う
-// (`MateTable` を共有するのは `DfpnSolver::run_parallel` が `set_concurrent(true)` にしてからスレッドを起こし、
-// すべて join してから偽に戻すときだけ)。どちらでも、同じ語への非 atomic な読み書きが並行に起きることはない。
+// (`MateTable` を共有するのは `DfpnSolver::run_parallel` と最短手順を求める段階 (`DfpnSolver::run_with_pv`) が
+// `set_concurrent(true)` にしてからスレッドを起こし、すべて join してから偽に戻すときだけ)。どちらでも、同じ語への非 atomic な読み書きが並行に起きることはない。
 unsafe impl<E: Send> Sync for Bucket<E> {}
 
 impl<E: Slot> Default for Bucket<E> {
