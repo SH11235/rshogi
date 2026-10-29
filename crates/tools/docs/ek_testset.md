@@ -90,8 +90,15 @@ cargo run -p tools --release --bin ek_testset -- eval \
   --out runs/ek_testset/band/metrics.json
 ```
 
-`--progress-buckets` は学習時の routing bucket 数を指定します。`--progress-buckets 1` は
-常に bucket 0 を選ぶ no-op routing のため、その場合のみ `--progress-file` は省略できます。
+NNUE は `init_nnue` がロードできる全アーキテクチャ（LayerStacks、HalfKP 系など）に対応します。
+LayerStacks では `--bucket-mode`（`progresskpabs` / `progresskpabsq16` / `kingrank9`）で bucket の
+選択方式を指定します。`--bucket-mode` を省いて進行度の option だけを指定した場合は
+`progresskpabs` として扱います。進行度方式では `--progress-buckets` に学習時の
+routing bucket 数を指定します。`--progress-buckets 1` は常に bucket 0 を選ぶ no-op routing のため、
+その場合のみ `--progress-file` は省略できます。`kingrank9` は進行度の option を使いません。
+LayerStacks 以外の NNUE では `--bucket-mode`・`--progress-buckets`・`--progress-file` を指定しません
+（指定するとエラーになります）。JSON の `bucket_mode` は LayerStacks で実際に使った方式、
+LayerStacks 以外では `null` です。
 
 標準出力と `--out` に同じ JSON を出します。評価値は手番側視点 cp として扱い、DT は宣言可能局面の
 符号一致率と +600cp 超過率、OC は実対局結果との符号一致率（勝敗のみ）、cross entropy、Brier、

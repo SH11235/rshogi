@@ -62,15 +62,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use tools::common::dedup::canonicalize_maybe_new;
-use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use tools::nnue_routing::{
+    NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 // Arc/Instant は ONNX 直推論パイプライン専用（フェーズ計時など）。ONNX 無効ビルドでの
 // unused import を避けるため cfg で囲う。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 use std::time::Instant;
 
-use rshogi_core::nnue::{
-    LayerStackBucketMode, get_network, init_nnue, load_progress_coeff_kpabs_from_bytes,
-};
+use rshogi_core::nnue::{LayerStackBucketMode, get_network, init_nnue};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
 use tools::packed_sfen::{
@@ -115,11 +115,11 @@ struct Cli {
     #[arg(long)]
     ls_bucket_mode: Option<String>,
 
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
-    /// progresskpabs 用の進行度係数ファイル。
+    /// 進行度方式 (progresskpabs / progresskpabsq16) 用の進行度係数ファイル。
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
@@ -1113,7 +1113,10 @@ fn main() -> Result<()> {
         )
         .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
         {
-            if plan.mode() == LayerStackBucketMode::ProgressKPAbs {
+            if matches!(
+                plan.mode(),
+                LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16
+            ) {
                 validate_progress_routing_buckets(
                     cli.ls_progress_buckets,
                     network.layer_stack_num_buckets().unwrap(),
@@ -1128,8 +1131,7 @@ fn main() -> Result<()> {
                         let bytes = fs::read(path).with_context(|| {
                             format!("Failed to read --ls-progress-coeff {}", path.display())
                         })?;
-                        let weights = load_progress_coeff_kpabs_from_bytes(&bytes)
-                            .map_err(anyhow::Error::msg)?;
+                        let weights = ProgressCoefficients::from_f64_bytes(&bytes)?;
                         if nnue_static_scores {
                             loaded_coeff_sha = Some(format!("{:x}", Sha256::digest(&bytes)));
                         }
@@ -1556,7 +1558,7 @@ fn main() -> Result<()> {
 }
 
 /// ファイルを処理
-/// progresskpabs の routing bucket 数指定と NNUE 格納 bucket 数の整合を検証する。
+/// 進行度方式の routing bucket 数指定と NNUE 格納 bucket 数の整合を検証する。
 ///
 /// 現行世代の net は格納数 = 学習時 routing 数なので、不一致は bucket 数の指定ミス
 /// (誤った routing は全行を無警告で誤評価にする) として拒否する。格納 bucket 数より

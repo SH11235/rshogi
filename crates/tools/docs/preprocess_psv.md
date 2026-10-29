@@ -3,9 +3,9 @@
 PSV の局面を qsearch の PV 末端へ置換します。`--input` と `--output` は必須です。
 `--nnue` で評価モデルを指定し、省略時は駒得評価を使います。`--rescore` には `--nnue` が必要です。
 
-LayerStacks は `--ls-bucket-mode progresskpabs|kingrank9` を指定します。
-progresskpabs は `--ls-progress-buckets` と（bucket 数 1 以外で）`--ls-progress-coeff` が必要です。
-Q16 は明示エラーになります。詳細は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks は `--ls-bucket-mode progresskpabs|progresskpabsq16|kingrank9` を指定します。
+進行度方式は `--ls-progress-buckets` と（bucket 数 1 以外で）`--ls-progress-coeff` が必要です。
+詳細は [routing 対応表](nnue-routing.md) を参照してください。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
 

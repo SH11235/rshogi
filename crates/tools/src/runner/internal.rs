@@ -1,6 +1,8 @@
 //! 内部API直接呼び出しモードでのベンチマーク実行
 
-use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use crate::nnue_routing::{
+    NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 use std::sync::mpsc;
 use std::thread;
 
@@ -9,7 +11,7 @@ use anyhow::{Context, Result};
 use rshogi_core::eval::{MaterialLevel, set_eval_hash_enabled, set_material_level};
 #[cfg(feature = "diagnostics")]
 use rshogi_core::eval::{eval_hash_stats, reset_eval_hash_stats};
-use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs};
+use rshogi_core::nnue::{get_network, init_nnue};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
@@ -101,11 +103,7 @@ fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
         )
         .context("internal routing: LS_BUCKET_MODE / LS_PROGRESS_BUCKETS / LS_PROGRESS_COEFF")?
         {
-            plan.apply(|| {
-                coeff
-                    .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
-                    .transpose()
-            })?;
+            plan.apply(|| coeff.map(|path| ProgressCoefficients::load(path.as_ref())).transpose())?;
         }
     }
     Ok(())

@@ -42,6 +42,7 @@ feature を選んでビルドしてください。PSQT 併用モデルには `nn
 経由で universal edition の `nnue-runtime-dimensions` が feature 統合されていても、
 LayerStacks net を静的構造のまま読み込めます（CLI は変わりません）。
 
+`--bucket-mode` は `progresskpabs`（既定）または `progresskpabsq16` です。
 `--progress-buckets` は学習時の routing bucket 数を指定します。`--progress-buckets 1` は
 常に bucket 0 を選ぶ no-op routing のため、その場合のみ `--progress-coeff` は省略できます。
 

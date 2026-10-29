@@ -143,5 +143,5 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 
 SFNN の振り分け方式への対応と、ファイル形式の互換性は別です。
 YaneuraOu SFNN 形式のファイルは、rshogi で読み込める形式への変換が必要です。
-tools の native 評価経路には Q16 未対応のものがあります。
+tools の native 評価経路も 3 方式に対応します。
 対象と利用方法は [tools の LayerStacks routing 対応](../crates/tools/docs/nnue-routing.md) を参照してください。

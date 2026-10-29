@@ -16,6 +16,16 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- tools の native 評価経路で `progresskpabsq16` (YaneuraOu / BulletOu SFNN の整数進行度) を選べるようにする。
+  これまで明示エラーにしていた `rescore_psv` / `preprocess_psv` / `gensfen` / `rescore_hcpe` / `yardstick_label` /
+  `label_bench_positions` / `bench_nnue_eval` / `verify_nnue_accumulator` / `nyugyoku_metrics` などが、USI の
+  `LS_PROGRESS_COEFF` と同じ f64 の progress.bin から Q16 係数を作って使う。`eval_sfens` と `nnue_saturation` は
+  `--bucket-mode progresskpabsq16` を、`ek_testset eval` は `--bucket-mode` を追加する。
+- `ek_testset eval` を LayerStacks 以外の NNUE (HalfKP 系など) にも対応させる。`--progress-buckets` は省略可能になり、
+  `--bucket-mode` を省いて進行度の option だけを指定した従来の呼び出しは `progresskpabs` として動く。
+  出力 JSON に `bucket_mode` を追加し、LayerStacks 以外では `bucket_mode` / `progress_buckets` が `null` になる。
+- `bench_nnue_eval` の進行度 bucket のマイクロベンチは、指定した方式 (f32 / Q16) で計測し、JSON に `mode` を出す。
+
 - `psv_profile` を追加。PSV 教師データの手数の帯ごとの入玉 (先手玉・後手玉・相入玉)・宣言できる局面・勝敗と、シャッフル前の
   棋譜順の PSV では対局ごとの終局 (宣言勝ちか、開始・終局の手数) を集計し、`--json` で保存する。
 
@@ -76,6 +86,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   定跡なしとする (YaneuraOu と同じ。従来は `FlippedBook` で反転局面を引いていた)。丸読みは変わらない。
 
 ### rshogi-core / ライブラリ利用者の移行
+
+- `get_layer_stack_progress_kpabs_q16_weights()` を追加。設定済みの Q16 進行度係数を bucket mode によらず取得する。
 
 - `StaticPosition` を追加。SFEN / 盤面と手駒から、利きの全升集計・NNUE の駒表・駒割を作らず
   読み取り専用の局面を構築できる。指し手の実行や評価には `into_position()` で完全な局面へ変換する。

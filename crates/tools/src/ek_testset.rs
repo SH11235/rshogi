@@ -4,18 +4,14 @@
 //! `Position::declaration_win(EnteringKingRule::Point27)` を使う。core が
 //! `entering_king_point_info` を公開していないため、点数系フィールドは JSONL に出さない。
 
-use crate::nnue_routing::NativeRouting;
+use crate::nyugyoku_metrics::{BucketModeArg, init_eval};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use rshogi_core::nnue::{
-    AccumulatorStackVariant, LayerStackBucketMode, LayerStacksAccCache,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, evaluate_dispatch, get_network, init_nnue,
-};
+use rshogi_core::nnue::{LayerStacksAccCache, evaluate_dispatch};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, EnteringKingRule, Move, Rank};
 use serde::{Deserialize, Serialize};
@@ -83,13 +79,17 @@ struct EvalArgs {
     /// NNUE ファイル。
     #[arg(long)]
     eval_file: PathBuf,
-    /// LayerStacks progresskpabs 用 progress.bin。
+    /// LayerStacks の bucket 選択モード。省いて進行度の option だけを指定すると `progresskpabs`。
+    /// LayerStacks 以外の NNUE では指定しない。
+    #[arg(long, value_enum)]
+    bucket_mode: Option<BucketModeArg>,
+    /// LayerStacks の進行度方式用 progress.bin。
     /// `--progress-buckets 1` (no-op routing) 以外では必須。
     #[arg(long)]
     progress_file: Option<PathBuf>,
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
-    progress_buckets: usize,
+    progress_buckets: Option<usize>,
     /// sigmoid(eval / scale) の scale。
     #[arg(long, default_value_t = DEFAULT_SCALE)]
     scale: f64,
@@ -157,8 +157,9 @@ struct BuildMeta {
 struct EvalMetrics {
     testset: String,
     eval_file: String,
+    bucket_mode: Option<String>,
     progress_file: Option<String>,
-    progress_buckets: usize,
+    progress_buckets: Option<usize>,
     scale: f64,
     records: usize,
     dt: DtMetrics,
@@ -734,31 +735,12 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
         bail!("--scale は正の有限値を指定してください");
     }
 
-    init_nnue(&args.eval_file)
-        .with_context(|| format!("NNUE を読み込めません: {}", args.eval_file.display()))?;
-
-    let network = get_network().ok_or_else(|| anyhow!("NNUE が初期化されていません"))?;
-    if !network.is_layer_stacks() {
-        bail!(
-            "ek_testset eval は LayerStacks NNUE のみ対応しています: {}",
-            network.architecture_name()
-        );
-    }
-    let plan = NativeRouting::prepare(
-        network.layer_stack_num_buckets(),
-        Some(LayerStackBucketMode::ProgressKPAbs),
-        Some(args.progress_buckets),
-        args.progress_file.as_ref().is_some(),
-    )
-    .context("native routing: --progress-buckets / --progress-file")?
-    .expect("LayerStacks routing");
-    plan.apply(|| {
-        args.progress_file
-            .as_ref()
-            .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
-            .transpose()
-    })?;
-    let mut stack = AccumulatorStackVariant::from_network(&network);
+    let (mut stack, bucket_mode) = init_eval(
+        effective_bucket_mode(args),
+        args.progress_file.as_deref(),
+        args.progress_buckets,
+        &args.eval_file,
+    )?;
     // acc_cache (Finny Tables) は静的 LayerStacks variant 専用の API で、
     // runtime-dimensions ビルドでは同じ net でも DynamicLayerStacks として load され
     // `as_layer_stacks()` が panic する (`is_layer_stacks()` は Dynamic でも true)。
@@ -791,6 +773,7 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
     let out = EvalMetrics {
         testset: args.testset.display().to_string(),
         eval_file: args.eval_file.display().to_string(),
+        bucket_mode: bucket_mode.map(|mode| mode.mode().as_str().to_string()),
         progress_file: args.progress_file.as_ref().map(|p| p.display().to_string()),
         progress_buckets: args.progress_buckets,
         scale: args.scale,
@@ -810,23 +793,12 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_progress_coeff_kpabs(path: &Path) -> Result<Box<[f32]>, String> {
-    let bytes = fs::read(path).map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
-    let expected = SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f64>();
-    if bytes.len() != expected {
-        return Err(format!(
-            "progress.bin size mismatch: got {} bytes, expected {}",
-            bytes.len(),
-            expected
-        ));
-    }
-    let weights: Vec<f32> = bytes
-        .as_chunks::<{ size_of::<f64>() }>()
-        .0
-        .iter()
-        .map(|chunk| f64::from_le_bytes(*chunk) as f32)
-        .collect();
-    Ok(weights.into_boxed_slice())
+/// `--bucket-mode` を省いて進行度の指定だけがある従来の指定は progresskpabs として扱う。
+fn effective_bucket_mode(args: &EvalArgs) -> Option<BucketModeArg> {
+    args.bucket_mode.or_else(|| {
+        (args.progress_file.is_some() || args.progress_buckets.is_some())
+            .then_some(BucketModeArg::ProgressKpabs)
+    })
 }
 
 fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -1516,6 +1488,37 @@ mod tests {
         assert_eq!(dt.decisive_acc, Some(0.25));
         assert_eq!(dt.eval_median, Some(0));
         assert_eq!(dt.eval_p10, Some(-32_000));
+    }
+
+    #[test]
+    fn eval_bucket_mode_defaults_to_progresskpabs_only_with_progress_options() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "ek_testset",
+                "eval",
+                "--testset",
+                "t.jsonl",
+                "--eval-file",
+                "n",
+            ];
+            argv.extend_from_slice(extra);
+            let Command::Eval(args) = Cli::try_parse_from(argv).unwrap().command else {
+                unreachable!()
+            };
+            effective_bucket_mode(&args)
+        };
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["--progress-buckets", "8"]), Some(BucketModeArg::ProgressKpabs));
+        assert_eq!(
+            parse(&[
+                "--bucket-mode",
+                "progresskpabsq16",
+                "--progress-buckets",
+                "8"
+            ]),
+            Some(BucketModeArg::ProgressKpabsQ16)
+        );
+        assert_eq!(parse(&["--bucket-mode", "kingrank9"]), Some(BucketModeArg::Kingrank9));
     }
 
     #[test]

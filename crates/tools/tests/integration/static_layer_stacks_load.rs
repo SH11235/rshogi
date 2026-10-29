@@ -233,7 +233,7 @@ fn diagnostic_cli_rejects_missing_coefficients_with_its_own_flags() {
 }
 
 #[test]
-fn single_bucket_does_not_ignore_invalid_coefficients_or_q16() {
+fn single_bucket_does_not_ignore_invalid_coefficients() {
     let fixture = Fixture::new();
     let coefficients = fixture.file("invalid-coeff.bin");
     std::fs::write(&coefficients, [0_u8; 3]).unwrap();
@@ -268,5 +268,109 @@ fn single_bucket_does_not_ignore_invalid_coefficients_or_q16() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
-    assert!(stderr.contains("not supported by tools native evaluation"), "{stderr}");
+    assert!(stderr.contains("Invalid progress coeff size"), "{stderr}");
+}
+
+#[test]
+fn q16_single_bucket_runs_without_coefficients() {
+    let fixture = Fixture::new();
+    let (net, sfens) = (fixture.net(), fixture.sfens());
+    let args = [
+        "--nnue",
+        &net,
+        "--sfens",
+        &sfens,
+        "--bucket-mode",
+        "progresskpabsq16",
+        "--progress-buckets",
+        "1",
+    ];
+    for binary in [
+        env!("CARGO_BIN_EXE_eval_sfens"),
+        env!("CARGO_BIN_EXE_nnue_saturation"),
+    ] {
+        assert_static_layer_stacks_success(binary, &run(binary, &args));
+    }
+}
+
+#[test]
+fn q16_routing_runs_on_diagnostic_tools() {
+    use rshogi_core::nnue::{
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_progresskpabs_q16_sum,
+        load_progress_coeff_kpabs_q16_from_bytes, progress_q16_sum_to_bucket,
+    };
+    use rshogi_core::position::Position;
+
+    let fixture = Fixture::with_buckets(8);
+    // 合成 net では評価値に差が出にくいので、bucket が局面ごとに変わる大きめの係数にする。
+    let bytes: Vec<u8> = (0..SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS)
+        .flat_map(|i| (((i * 7919) % 2001) as f64 / 1000.0 - 1.0).to_le_bytes())
+        .collect();
+    let coefficients = fixture.file("progress.bin");
+    std::fs::write(&coefficients, &bytes).unwrap();
+    let q16 = load_progress_coeff_kpabs_q16_from_bytes(&bytes).unwrap();
+
+    let output = run(
+        env!("CARGO_BIN_EXE_eval_sfens"),
+        &[
+            "--nnue",
+            &fixture.net(),
+            "--sfens",
+            &fixture.sfens(),
+            "--bucket-mode",
+            "progresskpabsq16",
+            "--progress-buckets",
+            "8",
+            "--progress-coeff",
+            &coefficients,
+        ],
+    );
+    let stdout = assert_static_layer_stacks_success("eval_sfens q16", &output);
+    let mut rows = 0;
+    for line in stdout.lines().skip(1) {
+        let mut columns = line.split('\t');
+        let sfen = columns.next().unwrap();
+        let bucket: usize = columns.next().unwrap().parse().unwrap();
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        assert_eq!(
+            bucket,
+            progress_q16_sum_to_bucket(compute_progresskpabs_q16_sum(&pos, &q16), 8)
+        );
+        rows += 1;
+    }
+    assert_eq!(rows, 2, "{stdout}");
+
+    let output = run(
+        env!("CARGO_BIN_EXE_nnue_saturation"),
+        &[
+            "--nnue",
+            &fixture.net(),
+            "--sfens",
+            &fixture.sfens(),
+            "--bucket-mode",
+            "progresskpabsq16",
+            "--progress-buckets",
+            "8",
+            "--progress-coeff",
+            &coefficients,
+        ],
+    );
+    let stdout = assert_static_layer_stacks_success("nnue_saturation q16", &output);
+    assert!(stdout.contains("\"bucket_mode\": \"progresskpabsq16\""), "{stdout}");
+
+    let output = run(
+        env!("CARGO_BIN_EXE_verify_nnue_accumulator"),
+        &[
+            "--nnue-file",
+            &fixture.net(),
+            "--ls-bucket-mode",
+            "progresskpabsq16",
+            "--ls-progress-buckets",
+            "8",
+            "--ls-progress-coeff",
+            &coefficients,
+        ],
+    );
+    assert_static_layer_stacks_success("verify_nnue_accumulator q16", &output);
 }

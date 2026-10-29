@@ -1,6 +1,6 @@
 ## 将棋エンジンベンチマークツール
 
-LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
 
 YaneuraOu の `bench` コマンド相当の標準ベンチマーク機能を提供します。
 

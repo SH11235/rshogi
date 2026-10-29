@@ -1,6 +1,6 @@
 # label_bench_positions
 
-LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
 
 `label_bench_positions` は、`extract_bench_positions` が出力する `label_bench*.jsonl`
 の各局面を rshogi の探索で深く評価し、ground truth ラベル `eval_deep` 等を追記する

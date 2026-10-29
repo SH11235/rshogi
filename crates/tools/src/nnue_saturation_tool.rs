@@ -10,18 +10,17 @@
 //! 重み側の i8/i16 飽和は rshogi-nnue (tatara) の
 //! `crates/nnue-format/examples/clamp_stats.rs` が担当する（export 時量子化の話のため）。
 
-use crate::nnue_routing::NativeRouting;
+use crate::nnue_routing::{LayerStackBucketer, NativeRouting, ProgressCoefficients};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, LayerStackBucketMode, LsFeatureSpec, LsSaturationCounts, NNUENetwork,
-    NetworkLayerStacks, compute_layer_stack_progresskpabs_bucket_index,
-    get_layer_stack_progress_kpabs_weights, load_progress_coeff_kpabs, ls_dispatch_ft_size,
+    NetworkLayerStacks, ls_dispatch_ft_size,
 };
 use rshogi_core::position::Position;
 
@@ -39,12 +38,16 @@ struct Cli {
     #[arg(long)]
     sfens: PathBuf,
 
-    /// progress.bin (progresskpabs 進行度重み) のパス。
+    /// bucket 選択の進行度方式。
+    #[arg(long, value_enum, default_value = "progresskpabs")]
+    bucket_mode: BucketMode,
+
+    /// progress.bin (進行度重み) のパス。
     /// `--progress-buckets 1` (no-op routing) 以外では必須。
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
 
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     progress_buckets: usize,
 
@@ -57,10 +60,28 @@ struct Cli {
     out: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BucketMode {
+    #[value(name = "progresskpabs")]
+    ProgressKpabs,
+    #[value(name = "progresskpabsq16")]
+    ProgressKpabsQ16,
+}
+
+impl BucketMode {
+    fn mode(self) -> LayerStackBucketMode {
+        match self {
+            Self::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
+            Self::ProgressKpabsQ16 => LayerStackBucketMode::ProgressKPAbsQ16,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SaturationReport {
     nnue: String,
     sfens: String,
+    bucket_mode: String,
     progress_coeff: Option<String>,
     progress_buckets: usize,
     positions: u64,
@@ -148,6 +169,7 @@ fn run_for_network<
     let mut pos = Position::new();
     let mut acc = AccumulatorLayerStacks::<L1>::new();
     let mut bucket_counts = vec![BucketCounts::default(); network.num_buckets];
+    let bucketer = LayerStackBucketer::from_configured(network.num_buckets, cli.progress_buckets)?;
     let mut bucket_positions = vec![0u64; network.num_buckets];
     let limit = cli.count.unwrap_or(usize::MAX);
 
@@ -161,12 +183,7 @@ fn run_for_network<
         network.refresh_accumulator(&pos, &mut acc);
 
         let side_to_move = pos.side_to_move();
-        let bucket_index = compute_layer_stack_progresskpabs_bucket_index(
-            &pos,
-            side_to_move,
-            &get_layer_stack_progress_kpabs_weights(),
-            cli.progress_buckets,
-        );
+        let bucket_index = bucketer.bucket(&pos);
         let bc = &mut bucket_counts[bucket_index];
         bc.ft_sat +=
             network.accumulate_saturation_counts(&acc, side_to_move, bucket_index, &mut bc.act);
@@ -181,6 +198,7 @@ fn run_for_network<
     let report = SaturationReport {
         nnue: cli.nnue.display().to_string(),
         sfens: cli.sfens.display().to_string(),
+        bucket_mode: cli.bucket_mode.mode().as_str().to_string(),
         progress_coeff: cli.progress_coeff.as_ref().map(|p| p.display().to_string()),
         progress_buckets: cli.progress_buckets,
         positions: bucket_positions.iter().sum(),
@@ -225,7 +243,7 @@ pub fn run() -> Result<()> {
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     let plan = NativeRouting::prepare(
         Some(ls_net.num_buckets()),
-        Some(LayerStackBucketMode::ProgressKPAbs),
+        Some(cli.bucket_mode.mode()),
         Some(cli.progress_buckets),
         cli.progress_coeff.as_ref().is_some(),
     )
@@ -234,7 +252,7 @@ pub fn run() -> Result<()> {
     plan.apply(|| {
         cli.progress_coeff
             .as_ref()
-            .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+            .map(|path| ProgressCoefficients::load(path.as_ref()))
             .transpose()
     })?;
 

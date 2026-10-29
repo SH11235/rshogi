@@ -98,7 +98,7 @@ NNUE を使った性能比較では `--nnue-file` と必要な routing を明示
 - 共通の入力ファイル収集は、読めないディレクトリを黙って除外せずエラーを返します。
 - 入出力の保護・上書き・再開の契約はツールごとに異なります。各 doc の出力に関する説明を確認してください。
 - [prep_hcpe](docs/prep_hcpe.md) はメモリ予算に応じて shuffle 方式を切り替え、開始時に使用量の見積もりを表示します。
-- [HCPE の 38 byte 形式と padding](docs/hcpe-format.md)、[LayerStacks routing と Q16 の制限](docs/nnue-routing.md)。
+- [HCPE の 38 byte 形式と padding](docs/hcpe-format.md)、[LayerStacks routing と進行度係数](docs/nnue-routing.md)。
 - CSA client のログは単局集計です。未決の対局は勝敗集計・教師抽出から除外し、SPRT の対象にしません。
   詳細は [解析](docs/analyze_selfplay.md) と [KIF 変換](docs/jsonl_to_kif.md) を参照してください。
 - Floodgate の HTTPS 取得は OS の証明書ストアを使います。最小 Linux コンテナには `ca-certificates` を用意してください。

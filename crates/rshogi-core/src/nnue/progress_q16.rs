@@ -80,6 +80,11 @@ pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32
         .collect::<Result<Vec<_>, _>>()
         .map(Vec::into_boxed_slice)
 }
+/// 設定済みの Q16 係数を bucket mode によらず取得する。stack を持たないツールが
+/// 評価ループの外で一度だけ取得し、同じ配列で bucket を数えるために使う。
+pub fn get_layer_stack_progress_kpabs_q16_weights() -> Option<Arc<[i32]>> {
+    WEIGHTS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
 /// Q16 係数を設定する。探索前に routing と合わせて設定すること。
 /// 既存の探索用 stack への反映には再生成または reset が必要。
 pub fn set_layer_stack_progress_kpabs_q16_weights(weights: Box<[i32]>) -> Result<(), String> {

@@ -43,11 +43,13 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tools::mask_io::BitmapWriter;
-use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use tools::nnue_routing::{
+    NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 
 use std::cell::RefCell;
 
-use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs};
+use rshogi_core::nnue::{get_network, init_nnue};
 use rshogi_core::position::Position;
 use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
 use tools::qsearch_pv::{
@@ -90,11 +92,11 @@ struct Cli {
     #[arg(long)]
     ls_bucket_mode: Option<String>,
 
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
-    /// progresskpabs 用の進行度係数ファイル。
+    /// 進行度方式 (progresskpabs / progresskpabsq16) 用の進行度係数ファイル。
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
@@ -233,10 +235,7 @@ fn main() -> Result<()> {
         .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
         {
             plan.apply(|| {
-                cli.ls_progress_coeff
-                    .as_deref()
-                    .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
-                    .transpose()
+                cli.ls_progress_coeff.as_deref().map(ProgressCoefficients::load).transpose()
             })?;
         }
         true

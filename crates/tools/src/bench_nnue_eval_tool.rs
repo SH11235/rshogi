@@ -12,9 +12,10 @@
 //!   --ls-progress-coeff <progress.bin>
 //! ```
 
-use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use crate::nnue_routing::{
+    LayerStackBucketer, NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 use std::hint::black_box;
-use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,9 +27,7 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
     LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_kingrank9_bucket_index,
-    compute_layer_stack_progresskpabs_bucket_index, get_layer_stack_progress_buckets,
-    get_layer_stack_progress_kpabs_weights, ls_dispatch_ft_size, sqr_clipped_relu_transform,
+    get_layer_stack_progress_buckets, ls_dispatch_ft_size, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType, Value};
@@ -57,12 +56,12 @@ struct Cli {
     #[arg(long, default_value = "10000")]
     warmup: u64,
 
-    /// progresskpabs 重みファイル（progress.bin）
+    /// 進行度重みファイル（progress.bin、f64 LE）
     /// 指定時は bucket index 計算のマイクロベンチも実行
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
-    /// progresskpabs が推論に使う bucket 数。LayerStacks + progresskpabs では必須。
+    /// 進行度方式が推論に使う bucket 数。LayerStacks + 進行度方式では必須。
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
@@ -274,101 +273,43 @@ fn bench_evaluator(
     })
 }
 
-/// progress.bin を読み込み f64 → f32 に変換
-fn load_progress_kpabs_weights(path: &PathBuf) -> Result<Box<[f32]>> {
-    let bytes = std::fs::read(path)?;
-    let expected = SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f64>();
-    anyhow::ensure!(
-        bytes.len() == expected,
-        "progress.bin size mismatch: got {} bytes, expected {}",
-        bytes.len(),
-        expected
-    );
-    let weights: Vec<f32> = bytes
-        .as_chunks::<{ size_of::<f64>() }>()
-        .0
-        .iter()
-        .map(|chunk| f64::from_le_bytes(*chunk) as f32)
-        .collect();
-    Ok(weights.into_boxed_slice())
-}
-
-/// progresskpabs bucket 計算のマイクロベンチマーク
+/// progress bucket 計算のマイクロベンチマーク
 ///
-/// `num_buckets` は学習時と一致する、CLI で明示された routing bucket 数。
+/// 適用済みの routing の方式 (f32 / Q16) と係数で計測する。
 fn bench_progress_bucket(
     positions: &[Position],
-    weights: &[f32],
+    bucketer: &LayerStackBucketer,
+    mode: LayerStackBucketMode,
     num_buckets: usize,
     warmup: u64,
     iterations: u64,
 ) {
-    // ウォームアップ
     for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(compute_layer_stack_progresskpabs_bucket_index(
-            pos,
-            pos.side_to_move(),
-            weights,
-            num_buckets,
-        ));
+        black_box(bucketer.bucket(&positions[i as usize % positions.len()]));
     }
 
-    // 計測
     let start = Instant::now();
     for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(compute_layer_stack_progresskpabs_bucket_index(
-            pos,
-            pos.side_to_move(),
-            weights,
-            num_buckets,
-        ));
+        black_box(bucketer.bucket(&positions[i as usize % positions.len()]));
     }
     let duration = start.elapsed();
 
     let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
     let ops_per_sec = 1_000_000_000.0 / ns_per_op;
 
-    // 各局面の bucket 値を表示
-    println!("=== progresskpabs bucket (N={num_buckets}) ===");
+    let mode = mode.as_str();
+    println!("=== {mode} bucket (N={num_buckets}) ===");
     for (i, pos) in positions.iter().enumerate() {
-        let bucket = compute_layer_stack_progresskpabs_bucket_index(
-            pos,
-            pos.side_to_move(),
-            weights,
-            num_buckets,
-        );
-        println!("  position[{i}]: bucket={bucket}");
+        println!("  position[{i}]: bucket={}", bucketer.bucket(pos));
     }
     println!("  {:.1} ns/op ({:.0} ops/sec)", ns_per_op, ops_per_sec);
     println!();
-    println!("--- progresskpabs JSON ---");
+    println!("--- {mode} JSON ---");
     println!(
-        r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0},"num_buckets":{}}}"#,
+        r#"{{"mode":"{mode}","bucket_ns":{:.1},"bucket_ops_per_sec":{:.0},"num_buckets":{}}}"#,
         ns_per_op, ops_per_sec, num_buckets
     );
     println!();
-}
-
-fn compute_layer_stack_bucket_index(
-    pos: &Position,
-    mode: LayerStackBucketMode,
-    num_buckets: usize,
-) -> usize {
-    let side_to_move = pos.side_to_move();
-    match mode {
-        LayerStackBucketMode::KingRank9 => {
-            compute_layer_stack_kingrank9_bucket_index(pos, side_to_move, num_buckets)
-        }
-        LayerStackBucketMode::ProgressKPAbs => compute_layer_stack_progresskpabs_bucket_index(
-            pos,
-            side_to_move,
-            &get_layer_stack_progress_kpabs_weights(),
-            num_buckets,
-        ),
-        _ => unreachable!("unsupported LayerStack bucket mode"),
-    }
 }
 
 fn format_bucket_counts(bucket_counts: &[usize]) -> String {
@@ -387,7 +328,7 @@ fn format_bucket_counts(bucket_counts: &[usize]) -> String {
 
 fn configure_layer_stack_bucket(
     cli: &Cli,
-    progress_weights: Option<&[f32]>,
+    progress_coefficients: Option<ProgressCoefficients>,
     stored_buckets: usize,
 ) -> Result<LayerStackBucketMode> {
     let mode_str =
@@ -398,11 +339,11 @@ fn configure_layer_stack_bucket(
         Some(stored_buckets),
         Some(mode),
         cli.ls_progress_buckets,
-        cli.ls_progress_coeff.is_some() || progress_weights.is_some(),
+        cli.ls_progress_coeff.is_some() || progress_coefficients.is_some(),
     )
     .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
     .expect("LayerStacks routing");
-    plan.apply(|| Ok(progress_weights.map(|weights| weights.to_vec().into_boxed_slice())))?;
+    plan.apply(|| Ok(progress_coefficients))?;
 
     Ok(mode)
 }
@@ -421,11 +362,11 @@ fn prepare_layer_stack_cases<
 ) -> Result<LayerStackCases<L1>> {
     let num_buckets = net.num_buckets;
     let routing_buckets = match bucket_mode {
-        LayerStackBucketMode::ProgressKPAbs => get_layer_stack_progress_buckets()
-            .expect("progress routing configured before preparing cases"),
         LayerStackBucketMode::KingRank9 => num_buckets,
-        _ => unreachable!("unsupported LayerStack bucket mode"),
+        _ => get_layer_stack_progress_buckets()
+            .expect("progress routing configured before preparing cases"),
     };
+    let bucketer = LayerStackBucketer::from_configured(num_buckets, routing_buckets)?;
     let mut propagate_cases = Vec::with_capacity(positions.len());
     let mut eval_cases = Vec::with_capacity(positions.len());
     let mut update_cache_cases = Vec::with_capacity(positions.len());
@@ -436,7 +377,7 @@ fn prepare_layer_stack_cases<
         let mut accumulator = AccumulatorLayerStacks::<L1>::new();
         net.refresh_accumulator(pos, &mut accumulator);
 
-        let bucket_index = compute_layer_stack_bucket_index(pos, bucket_mode, routing_buckets);
+        let bucket_index = bucketer.bucket(pos);
         bucket_counts[bucket_index] += 1;
 
         let (us_acc, them_acc) = if pos.side_to_move() == Color::Black {
@@ -461,8 +402,7 @@ fn prepare_layer_stack_cases<
         if let Some(mv) = select_non_king_legal_move(pos) {
             let mut next_pos = pos.clone();
             let dirty_piece = next_pos.do_move(mv, pos.gives_check(mv));
-            let next_bucket_index =
-                compute_layer_stack_bucket_index(&next_pos, bucket_mode, routing_buckets);
+            let next_bucket_index = bucketer.bucket(&next_pos);
             update_bucket_counts[next_bucket_index] += 1;
 
             update_cache_cases.push(LayerStackUpdateCacheCase {
@@ -741,15 +681,15 @@ pub fn run() -> Result<()> {
     println!("Test positions: {}", positions.len());
     println!();
 
-    let progress_weights = if let Some(ref coeff_path) = cli.ls_progress_coeff {
-        println!("Loading progresskpabs weights: {}", coeff_path.display());
-        let weights = load_progress_kpabs_weights(coeff_path)?;
-        println!("  weights: {} elements", weights.len());
+    let progress_coefficients = if let Some(ref coeff_path) = cli.ls_progress_coeff {
+        println!("Loading progress coefficients: {}", coeff_path.display());
+        let coefficients = ProgressCoefficients::load(coeff_path)?;
         println!();
-        Some(weights)
+        Some(coefficients)
     } else {
         None
     };
+    let has_progress_coefficients = progress_coefficients.is_some();
 
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = Arc::new(NNUENetwork::load(&cli.nnue_file)?);
@@ -757,9 +697,7 @@ pub fn run() -> Result<()> {
 
     let stored_buckets = network.layer_stack_num_buckets();
     let bucket_mode = match stored_buckets {
-        Some(stored) => {
-            Some(configure_layer_stack_bucket(&cli, progress_weights.as_deref(), stored)?)
-        }
+        Some(stored) => Some(configure_layer_stack_bucket(&cli, progress_coefficients, stored)?),
         None if cli.ls_bucket_mode.is_some()
             || cli.ls_progress_buckets.is_some()
             || cli.ls_progress_coeff.is_some() =>
@@ -769,11 +707,21 @@ pub fn run() -> Result<()> {
         None => None,
     };
 
-    if let Some(weights) = progress_weights.as_deref() {
+    if let (true, Some(bucket_mode), Some(stored)) =
+        (has_progress_coefficients, bucket_mode, stored_buckets)
+    {
         let num_buckets = cli
             .ls_progress_buckets
-            .context("progresskpabs requires --ls-progress-buckets")?;
-        bench_progress_bucket(&positions, weights, num_buckets, cli.warmup, cli.iterations);
+            .context("progress routing requires --ls-progress-buckets")?;
+        let bucketer = LayerStackBucketer::from_configured(stored, num_buckets)?;
+        bench_progress_bucket(
+            &positions,
+            &bucketer,
+            bucket_mode,
+            num_buckets,
+            cli.warmup,
+            cli.iterations,
+        );
     }
 
     match mode {
@@ -847,26 +795,6 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_q16_is_rejected_before_weights_or_routing_are_applied() {
-        for count in [1, 8] {
-            let cli = Cli::try_parse_from([
-                "bench_nnue_eval",
-                "--nnue-file",
-                "unused.nnue",
-                "--ls-bucket-mode",
-                "progresskpabsq16",
-                "--ls-progress-buckets",
-                &count.to_string(),
-            ])
-            .unwrap();
-            for weights in [None, Some([0.0_f32].as_slice())] {
-                let error = configure_layer_stack_bucket(&cli, weights, count).unwrap_err();
-                assert!(format!("{error:#}").contains("not supported by tools native evaluation"));
-            }
-        }
-    }
 
     /// 外部モデルを明示して実行する数値回帰。固定局面以外の状態を先に作る。
     #[test]

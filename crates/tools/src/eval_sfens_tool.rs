@@ -11,7 +11,7 @@
 //!   --count 10
 //! ```
 
-use crate::nnue_routing::NativeRouting;
+use crate::nnue_routing::{LayerStackBucketer, NativeRouting, ProgressCoefficients};
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::io::{BufRead, BufReader};
@@ -19,9 +19,7 @@ use std::path::PathBuf;
 
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LsFeatureSpec,
-    NNUENetwork, NetworkLayerStacks, compute_layer_stack_progresskpabs_bucket_index,
-    get_layer_stack_progress_kpabs_weights, load_progress_coeff_kpabs, ls_dispatch_ft_size,
-    sqr_clipped_relu_transform,
+    NNUENetwork, NetworkLayerStacks, ls_dispatch_ft_size, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
@@ -41,7 +39,7 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     count: usize,
 
-    /// Output bucket mode (progresskpabs)
+    /// Output bucket mode (progresskpabs / progresskpabsq16)
     #[arg(long, value_enum, default_value = "progresskpabs")]
     bucket_mode: BucketMode,
 
@@ -49,7 +47,7 @@ struct Cli {
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
 
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     progress_buckets: usize,
 
@@ -62,6 +60,17 @@ struct Cli {
 enum BucketMode {
     #[value(name = "progresskpabs")]
     ProgressKpabs,
+    #[value(name = "progresskpabsq16")]
+    ProgressKpabsQ16,
+}
+
+impl BucketMode {
+    fn mode(self) -> LayerStackBucketMode {
+        match self {
+            Self::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
+            Self::ProgressKpabsQ16 => LayerStackBucketMode::ProgressKPAbsQ16,
+        }
+    }
 }
 
 fn padded_input(input_dim: usize) -> usize {
@@ -310,12 +319,8 @@ fn run_eval_for_network<
     network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
 ) -> Result<()> {
     eprintln!("fv_scale: {}", network.fv_scale);
-    eprintln!(
-        "bucket_mode: {}",
-        match cli.bucket_mode {
-            BucketMode::ProgressKpabs => "progresskpabs",
-        }
-    );
+    eprintln!("bucket_mode: {}", cli.bucket_mode.mode().as_str());
+    let bucketer = LayerStackBucketer::from_configured(network.num_buckets, cli.progress_buckets)?;
 
     let file = std::fs::File::open(&cli.sfens)
         .with_context(|| format!("Failed to open: {:?}", cli.sfens))?;
@@ -352,17 +357,7 @@ fn run_eval_for_network<
         let mut transformed = [0u8; L1];
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
 
-        let bucket_index = match cli.bucket_mode {
-            BucketMode::ProgressKpabs => {
-                let weights = get_layer_stack_progress_kpabs_weights();
-                compute_layer_stack_progresskpabs_bucket_index(
-                    &pos,
-                    side_to_move,
-                    &weights,
-                    cli.progress_buckets,
-                )
-            }
-        };
+        let bucket_index = bucketer.bucket(&pos);
         let raw = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
 
         if cli.dump_debug_first && !dumped_debug {
@@ -387,7 +382,7 @@ pub fn run() -> Result<()> {
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     let plan = NativeRouting::prepare(
         Some(ls_net.num_buckets()),
-        Some(LayerStackBucketMode::ProgressKPAbs),
+        Some(cli.bucket_mode.mode()),
         Some(cli.progress_buckets),
         cli.progress_coeff.as_ref().is_some(),
     )
@@ -396,7 +391,7 @@ pub fn run() -> Result<()> {
     plan.apply(|| {
         cli.progress_coeff
             .as_ref()
-            .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
+            .map(|path| ProgressCoefficients::load(path.as_ref()))
             .transpose()
     })?;
 
