@@ -85,6 +85,18 @@ fn validate_feature_combination(
         }
     }
 
+    // 静的 LayerStacks 実装は FT × L1 の slot ごとに生成されるため、slot が 0 個だと
+    // rustc の網羅性エラーになる。atomic 直指定でも同じなので mode によらず先に弾く。
+    if layerstack_arch && layerstacks_count == 0 && !runtime_dimensions {
+        return Err(
+            "layerstack-arch を有効化するには layerstacks-* を 1 個以上必要です。".to_string(),
+        );
+    }
+
+    if layerstack_arch && ft_count == 0 && !runtime_dimensions {
+        return Err("layerstack-arch を有効化するには ft-* を 1 個以上必要です。".to_string());
+    }
+
     // mode sentinel 未指定の build は旧 atomic feature 直指定の従来運用と見なし、
     // 以降の mode 依存 check を緩和する (組合せ妥当性は user 責任)。
     if mode_count == 0 {
@@ -103,16 +115,6 @@ fn validate_feature_combination(
             "mode-* features must be exactly 1; got {mode_count} \
              (universal={mode_universal}, family={mode_family}, specific={mode_specific})."
         ));
-    }
-
-    if layerstack_arch && layerstacks_count == 0 && !runtime_dimensions {
-        return Err(
-            "layerstack-arch を有効化するには layerstacks-* を 1 個以上必要です。".to_string(),
-        );
-    }
-
-    if layerstack_arch && ft_count == 0 && !runtime_dimensions {
-        return Err("layerstack-arch を有効化するには ft-* を 1 個以上必要です。".to_string());
     }
 
     if mode_specific {

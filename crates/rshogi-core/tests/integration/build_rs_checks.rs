@@ -35,6 +35,7 @@ fn atomic_features_without_mode_pass() {
     let has = lookup(&[
         "layerstack-arch",
         "layerstacks-1536x16x32",
+        "ft-halfka_hm_merged",
         "nnue-psqt",
         "nnue-progress-diff",
     ]);
@@ -92,6 +93,31 @@ fn ls_arch_without_size_rejected() {
     let has = lookup(&["mode-family", "layerstack-arch"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("layerstacks-* を 1 個以上"));
+}
+
+#[test]
+fn atomic_ls_arch_without_size_rejected() {
+    let has = lookup(&[
+        "layerstack-arch",
+        "halfkx-arch",
+        "ft-halfkp",
+        "halfkx-activation-crelu",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("layerstacks-* を 1 個以上"));
+}
+
+#[test]
+fn atomic_ls_arch_without_ft_rejected() {
+    let has = lookup(&["layerstack-arch", "layerstacks-1536x16x32"]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-* を 1 個以上"));
+}
+
+#[test]
+fn atomic_halfkx_without_ls_arch_ok() {
+    let has = lookup(&["halfkx-arch", "ft-halfkp", "halfkx-activation-crelu"]);
+    assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]

@@ -136,6 +136,36 @@ cargo build --release -p tools --features aobazero-onnx --bin rescore_psv  # Aob
 
 ort は load-dynamic のためビルド時に libonnxruntime は不要（実行時に dlopen する）。
 
+### 単一構成の build（内部 NNUE / 探索モードの高速化）
+
+既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
+1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
+出力は汎用の build と同じになる。
+
+`--no-default-features` を付けて、rshogi-core の preset edition (`cargo xtask list-editions`
+で一覧、命名は [ビルドガイド](../../../docs/build.md#命名規則)) を `rshogi-core/` 付きで指定する。
+`--target-dir` を分けると、汎用の build と並べて置ける。
+
+```bash
+# HalfKP 256x2-32-32 CReLU（水匠5 など）
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-halfkp   --no-default-features --features rshogi-core/edition-halfkp-crelu
+# LayerStacks HalfKA_hm 1536x16x32、拡張なし
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1536   --no-default-features --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x32-none
+```
+
+preset に無い構成は atomic feature を直接並べる。各軸の slot は 1 つずつ選ぶ。
+
+| 構成 | feature |
+|---|---|
+| HalfKX (HalfKP / HalfKA 系) | `rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-<crelu\|screlu\|pairwise>,ft-<FT>` |
+| LayerStacks | `rshogi-core/layerstack-arch,layerstacks-<寸法>,ft-<FT>`、拡張があれば `nnue-psqt` / `nnue-threat` を足す |
+
+`<FT>` は `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged`、
+`<寸法>` は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)の L1 構成
+(`1536x16x32` など)。LayerStacks の `layerstack-arch` は寸法と FT の slot が無いと build エラーになる。
+build に含まれない構成の NNUE は読み込み時にエラーになる。
+
+
 ## オプションリファレンス
 
 ### 共通

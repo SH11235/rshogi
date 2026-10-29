@@ -386,6 +386,10 @@ PGO build は `scripts/build_pgo.sh` 参照 (NPS +6-7% を狙う、本番計測�
 `cargo build --features <atomic feature>` の直接指定もサポートするが、
 新規 user は preset edition (`cargo xtask build --edition <name>`) 経由を推奨。
 
+tools (`rescore_psv` 等) も `--no-default-features --features rshogi-core/edition-<preset>` で
+1 構成だけの build にできる。手順は
+[rescore_psv の単一構成の build](../crates/tools/docs/rescore_psv.md#単一構成の-build内部-nnue--探索モードの高速化) を参照。
+
 ## L2=64 の LayerStacks
 
 `layerstacks-halfka_hm_merged-3072x16x64-none`、

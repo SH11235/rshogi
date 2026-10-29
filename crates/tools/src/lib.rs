@@ -41,6 +41,8 @@
 //! ```
 
 pub mod aobazero_features;
+// 静的 LayerStacks NNUE (`NNUENetwork::load_static_layer_stacks`) を直接読む診断ツール。
+#[cfg(feature = "layerstack-arch")]
 pub mod bench_nnue_eval_tool;
 pub mod book_backprop;
 pub mod book_db;
@@ -53,6 +55,7 @@ pub mod dlshogi_features;
 // ek_testset は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
 pub mod ek_testset;
+#[cfg(feature = "layerstack-arch")]
 pub mod eval_sfens_tool;
 pub mod hcpe;
 pub mod kif;
@@ -60,6 +63,7 @@ pub mod kifu_publish;
 pub mod king_zone;
 pub mod mask_io;
 pub mod nnue_routing;
+#[cfg(feature = "layerstack-arch")]
 pub mod nnue_saturation_tool;
 // nyugyoku_metrics は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
@@ -84,6 +88,7 @@ pub mod spsa_param_mapping;
 pub mod system;
 pub mod teacher_labeler;
 mod utils;
+#[cfg(feature = "layerstack-arch")]
 pub mod verify_nnue_accumulator_tool;
 
 // 公開API
