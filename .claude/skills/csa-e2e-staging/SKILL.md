@@ -12,7 +12,8 @@ user-invocable: true
 が宣言する Custom Domain のみ。fork は自分の route の host に読み替える。
 
 既定の対象は staging。production に対しては、user が production での実行を明示的に
-承認した場合だけ流す (deploy・`CLOCK_PRESETS` 編集・ADMIN 操作を伴うシナリオも同様)。
+承認した場合だけ流す (deploy・ADMIN 操作を伴うシナリオも同様)。`CLOCK_PRESETS` を編集する
+シナリオ G は production では行わない。
 
 ## 0a. シナリオ選定 (どの change にどの scenario を流すか)
 
@@ -384,8 +385,8 @@ CLOCK_PRESETS = '''[
 ]'''
 ```
 
-preset の追加は共有 staging の再 deploy を伴うので、production では行わない。staging では
-編集する前に元の preset 一覧を保存しておく:
+preset の追加は対象の Worker の再 deploy を伴う。production では行わない (冒頭の「production で
+流す条件」の例外)。staging では編集する前に元の preset 一覧を保存しておく:
 
 ```bash
 grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
@@ -402,11 +403,13 @@ grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
 2. 追加時と同じ deploy コマンドで再 deploy する。staging は drain の対象外
    (`docs/csa-server/deployment.md` の §12.6。main への push でも自動 deploy され、そのときも
    main の toml に戻る)
-3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通り、
-   追加して外した preset 名で 1-A の黒・白を起動すると、対局開始に至らず
-   `##[ERROR] clock spec for '<game_name>' could not be resolved` を受け取る
-   (preset を 1 件以上登録した Worker は未登録の `game_name` の対局を成立させない。
-   `crates/rshogi-csa-server-workers/src/game_room.rs` の `resolve_game_preset_for_game`)
+3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通ることに加え、
+   `vp exec wrangler tail --config "$WRANGLER" --format json` を流した状態で、外した preset 名を
+   `--game-name` にして 1-A の黒・白を起動する。tail に `"event":"clock_spec_resolution_failed"` が
+   その `game_name` で出れば、未登録として対局が不成立になっている (preset を 1 件以上登録した Worker は
+   未登録の `game_name` の対局を成立させない。`crates/rshogi-csa-server-workers/src/game_room.rs` の
+   `resolve_game_preset_for_game`)。client 側は Game_Summary 以外の行を info ログに残さず、不成立の後も
+   再接続を繰り返して `--max-games 1` でも終わらないので、確認できたら記録した PID で黒・白を止める
 
 ## 9. 後始末
 

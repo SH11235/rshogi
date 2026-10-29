@@ -122,10 +122,10 @@ BUG と INTENTIONAL の判別は、次の証拠源で意図の有無を確かめ
 ### 差分一覧
 
 #### {差分1のタイトル}
-- **カテゴリ**: BUG / NAMING / INTENTIONAL / YO_SPECIFIC / MISSING
+- **カテゴリ**: BUG / NAMING / INTENTIONAL / YO_SPECIFIC / MISSING / UNVERIFIED
 - **rshogi**: `{コード}` ({ファイル}:L{行})
 - **YO**: `{コード}` ({ファイル}:L{行})
-- **証拠**: {コメント / commit / tune_params の由来。見つからなければ「根拠未確認」}
+- **証拠**: {コメント / commit / tune_params の由来。見つからなければ調べた証拠源 (UNVERIFIED)}
 - **影響**: {動作への影響の説明}
 - **推奨対応**: {対応方針}
 
