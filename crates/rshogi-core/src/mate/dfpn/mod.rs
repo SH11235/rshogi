@@ -568,7 +568,7 @@ const HELPER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// 呼び出したスレッドが panic で抜けるとき (補助の起動の失敗も含む) に、補助スレッドを止める。
 /// 止めないと、scope の終わりで補助の終わりを待ち続けて panic が伝わらない
-struct CancelOnPanic<'a>(&'a AtomicBool);
+pub(super) struct CancelOnPanic<'a>(pub(super) &'a AtomicBool);
 
 impl Drop for CancelOnPanic<'_> {
     fn drop(&mut self) {

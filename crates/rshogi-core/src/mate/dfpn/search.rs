@@ -296,7 +296,9 @@ struct Slots {
 }
 
 /// 表の 1 件。スレッド間で鍵の照合と値の読み書きを分けずに済むよう、鍵を値と XOR して書く。
-/// 書き込みの途中を読んでも鍵が一致しないので、別の局面の値を使うことはない。
+/// 値をそのまま XOR すると、2 つの書き込みの `check` と `data` を組み合わせて読んだときに値の差が
+/// そのまま鍵の差になり、同じ枠を使う登録していない鍵と一致しうる (無駄合いの表は値の bit が添字の
+/// bit の外にある)。値を `splitmix64_finalize` で混ぜてから XOR し、組み合わせた読み取りの鍵をでたらめな値にする。
 #[derive(Default)]
 struct Slot {
     check: AtomicU64,
@@ -306,13 +308,19 @@ struct Slot {
 impl Slot {
     fn get(&self, salted: u64) -> Option<u64> {
         let data = self.data.load(Ordering::Relaxed);
-        (self.check.load(Ordering::Relaxed) ^ data == salted).then_some(data)
+        (self.check.load(Ordering::Relaxed) ^ splitmix64_finalize(data) == salted).then_some(data)
     }
 
     fn set(&self, salted: u64, data: u64) {
         self.data.store(data, Ordering::Relaxed);
-        self.check.store(salted ^ data, Ordering::Relaxed);
+        self.check.store(salted ^ splitmix64_finalize(data), Ordering::Relaxed);
     }
+}
+
+fn splitmix64_finalize(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 fn new_slots(size: usize) -> Box<[Slot]> {
@@ -555,7 +563,6 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.helpers = helpers;
     }
 
-    /// 探索の設定 (`search_shared` の各スレッドにそろえる)
     fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
         (
             self.estimate,
@@ -1235,11 +1242,17 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         let (table, attacker, tables) = (self.table, self.attacker, self.tables);
         let (estimate, weak_disproof_step) = (self.estimate, self.weak_disproof_step);
-        let (stop, cancel, start) = (self.budget.stop, self.budget.cancel, self.budget.start);
-        let time_limit_ms = self.budget.time_limit_ms;
-        // 部分探索のノード数は 0 から数えるので、進捗にはこの探索で読んだ分を足して渡す。通知の間隔は
-        // 部分探索に引き継いで戻すので、入れ子になっても探索全体で約 1 秒ごとになる
-        let base = self.nodes;
+        let (stop, halt, cancel, start) =
+            (self.budget.stop, self.budget.halt, self.budget.cancel, self.budget.start);
+        let (shared_nodes, time_limit_ms) = (self.budget.shared_nodes, self.budget.time_limit_ms);
+        // 部分探索のノード数は 0 から数えるので、進捗にはこの探索で読んだ分を足して渡す (並列に解くときは
+        // 部分探索も全スレッドの合計で知らせる)。通知の間隔は部分探索に引き継いで戻すので、入れ子になっても
+        // 探索全体で約 1 秒ごとになる
+        let base = if shared_nodes.is_some() {
+            0
+        } else {
+            self.nodes
+        };
         let parent_progress = &mut *self.budget.progress;
         let mut forward = |p: MateProgress| {
             parent_progress(MateProgress {
@@ -1249,15 +1262,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         let budget = Budget {
             stop,
-            halt: None,
+            halt,
             cancel,
-            shared_nodes: None,
+            shared_nodes,
             node_limit: remaining,
             time_limit_ms,
             start,
             progress: &mut forward,
         };
-        let (result, nodes, next_progress_ms) = {
+        let (result, nodes, reported, next_progress_ms) = {
             let mut sub = Searcher::<S, PIECES>::new(table, &mut scratch, attacker, budget);
             sub.estimate = estimate;
             sub.weak_disproof_step = weak_disproof_step;
@@ -1266,11 +1279,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             sub.tables = tables;
             sub.next_progress_ms = self.next_progress_ms;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
-            (result, sub.nodes, sub.next_progress_ms)
+            (result, sub.nodes, sub.reported, sub.next_progress_ms)
         };
         self.next_progress_ms = next_progress_ms;
         self.scratch.sub = Some(scratch);
         self.nodes += nodes;
+        // 部分探索が全スレッドの合計に足し込んだ分は、この探索から足し込み直さない
+        self.reported += reported;
         match result? {
             r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
             _ => Ok(Detached::Escaped),
@@ -1308,6 +1323,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 let mut st = st.clone();
                 let (halt, cancel, shared_nodes) = (&halt, &cancel, &shared_nodes);
                 Box::new(move || {
+                    // panic したら呼び出したスレッドも止める (止めないと scope の終わりで待ち続ける)
+                    let _cancel_on_panic = super::CancelOnPanic(cancel);
                     let mut quiet = |_| {};
                     let budget = Budget {
                         stop,
