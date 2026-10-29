@@ -25,6 +25,13 @@ mod spsa_params_format;
 mod spsa_plot_output;
 mod spsa_run_dir_integration;
 mod spsa_schedule_validation;
+// 診断 bin は required-features で外れても `CARGO_BIN_EXE_*` は定義されるため、実行時に
+// bin が無くて落ちる。合成 net も HalfKaHmMerged × 1536x16x32 固定なので、その構成に限る。
+#[cfg(all(
+    feature = "layerstack-arch",
+    feature = "layerstacks-1536x16x32",
+    feature = "ft-halfka_hm_merged"
+))]
 mod static_layer_stacks_load;
 mod teacher_output_alias_safety;
 mod teacher_resource_output_safety;

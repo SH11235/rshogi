@@ -40,7 +40,41 @@
 //! report.print_summary();
 //! ```
 
+// rshogi-core の `ls_dispatch_ft_size!` は macro なので、その `cfg(feature = ...)` は呼び出し側の
+// tools の feature で評価される。tools の slot が無いと診断ツールの dispatch が空になる。
+#[cfg(all(
+    feature = "layerstack-arch",
+    not(any(
+        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x32x32",
+        feature = "layerstacks-768x16x32",
+        feature = "layerstacks-768x8x32",
+        feature = "layerstacks-512x16x32",
+        feature = "layerstacks-1024x16x32",
+        feature = "layerstacks-3072x16x32",
+        feature = "layerstacks-2304x16x64",
+        feature = "layerstacks-3072x16x64",
+        feature = "layerstacks-1536x16x64"
+    ))
+))]
+compile_error!(
+    "tools の layerstack-arch には tools の layerstacks-* feature を 1 個以上指定してください。"
+);
+#[cfg(all(
+    feature = "layerstack-arch",
+    not(any(
+        feature = "ft-halfkp",
+        feature = "ft-halfka_split",
+        feature = "ft-halfka_merged",
+        feature = "ft-halfka_hm_split",
+        feature = "ft-halfka_hm_merged"
+    ))
+))]
+compile_error!("tools の layerstack-arch には tools の ft-* feature を 1 個以上指定してください。");
+
 pub mod aobazero_features;
+// 静的 LayerStacks NNUE (`NNUENetwork::load_static_layer_stacks`) を直接読む診断ツール。
+#[cfg(feature = "layerstack-arch")]
 pub mod bench_nnue_eval_tool;
 pub mod book_backprop;
 pub mod book_db;
@@ -53,6 +87,7 @@ pub mod dlshogi_features;
 // ek_testset は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
 pub mod ek_testset;
+#[cfg(feature = "layerstack-arch")]
 pub mod eval_sfens_tool;
 pub mod hcpe;
 pub mod kif;
@@ -60,6 +95,7 @@ pub mod kifu_publish;
 pub mod king_zone;
 pub mod mask_io;
 pub mod nnue_routing;
+#[cfg(feature = "layerstack-arch")]
 pub mod nnue_saturation_tool;
 // nyugyoku_metrics は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
@@ -84,6 +120,7 @@ pub mod spsa_param_mapping;
 pub mod system;
 pub mod teacher_labeler;
 mod utils;
+#[cfg(feature = "layerstack-arch")]
 pub mod verify_nnue_accumulator_tool;
 
 // 公開API

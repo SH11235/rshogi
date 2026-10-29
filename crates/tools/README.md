@@ -23,6 +23,10 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 既定で有効です。TUI・ONNX 依存を外す場合は
 `--no-default-features --features nnue-arch` をビルド引数に追加します。
 `prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
+1 つの NNUE 構成だけを入れた速い build (`rescore_psv` 等) は
+[rescore_psv の単一構成の build](docs/rescore_psv.md#単一構成の-build) を参照してください。
+静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /
+`verify_nnue_accumulator`) には、tools の `layerstack-arch` feature (`nnue-arch` に含まれる) が必要です。
 
 ## クイックスタート
 

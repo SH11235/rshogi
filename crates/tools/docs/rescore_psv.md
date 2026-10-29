@@ -136,6 +136,49 @@ cargo build --release -p tools --features aobazero-onnx --bin rescore_psv  # Aob
 
 ort は load-dynamic のためビルド時に libonnxruntime は不要（実行時に dlopen する）。
 
+### 単一構成の build
+
+既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
+1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
+
+`--no-default-features` を付けて、その構成の feature だけを指定する。各軸の slot は 1 つずつ選ぶ。
+`--target-dir` を分けると、汎用の build と並べて置ける。
+
+| 構成 | feature |
+|---|---|
+| HalfKX (HalfKP / HalfKA 系) | `rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-<crelu\|screlu\|pairwise>,ft-<FT>` |
+| LayerStacks | `rshogi-core/layerstack-arch,layerstacks-<寸法>,ft-<FT>`、拡張があれば `nnue-psqt` / `nnue-threat` を足す |
+
+`<FT>` は `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged`、
+`<寸法>` は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)の L1 構成
+(`1536x16x32` など)。LayerStacks の `layerstack-arch` は寸法と FT の slot が無いと build エラーになる。
+build に含まれない構成の NNUE は読み込み時にエラーになる。
+
+```bash
+# HalfKP 256x2-32-32 CReLU（水匠5 など）
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-halfkp \
+  --no-default-features \
+  --features rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-crelu,ft-halfkp
+# LayerStacks HalfKA_hm 1536x16x32、拡張なし
+cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1536 \
+  --no-default-features \
+  --features rshogi-core/layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
+```
+
+上の 2 つの build では、水匠5 と progresskpabs の LayerStacks の net を深さ 9 の探索でリスコアした出力が、
+汎用の build と byte 単位で一致した。ほかの構成で同じ値になることは試験していないので、
+教師を作る前に少数の局面で汎用の build と出力を比べる。
+
+HalfKX は rshogi-core の preset edition (`rshogi-core/edition-halfkp-crelu` など、
+`cargo xtask list-editions` で一覧) を指定しても同じ build になる。LayerStacks の preset のうち
+寸法が 1536 / 2304 / 3072 系のものは `nnue-progress-diff` を含み、progresskpabs の bucket を
+f32 の差分更新で求める。全駒から計算する汎用の build とは丸めが違うので、progresskpabs の net では
+bucket の境界付近の局面で評価値が変わる。汎用の build と同じ値が要る教師のリスコアでは、これらの preset を使わない。
+
+静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` 等) も同じ構成で build するときは、
+LayerStacks の行の `rshogi-core/layerstack-arch` を tools の `layerstack-arch` に替える。
+preset に足すときは、tools の `layerstack-arch` と、preset と同じ寸法・FT の slot を tools の feature
+(`layerstacks-<寸法>` / `ft-<FT>`、`rshogi-core/` を付けない) で指定する。
 ## オプションリファレンス
 
 ### 共通

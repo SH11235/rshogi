@@ -73,6 +73,10 @@ run -p rshogi-usi --all-targets --no-default-features \
   --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,use-lazy-evaluate
 run -p tools --all-targets --features prepacked-nnue
 run -p tools --all-targets --features diagnostics
+# tools の単一構成 build。HalfKX だけの構成では静的 LayerStacks の診断ツールを外して build する。
+run -p tools --all-targets --no-default-features --features rshogi-core/edition-halfkp-crelu
+run -p tools --all-targets --no-default-features \
+  --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x32-none,layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
 
 # rshogi-usi にだけある opt-in feature。
 run -p rshogi-usi --all-targets --features mimalloc
