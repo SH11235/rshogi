@@ -1310,6 +1310,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         let shared_nodes = AtomicU64::new(0);
         let (table, attacker, settings) = (self.table, self.attacker, self.settings());
+        let capture = self.capture_depth.take();
         let (stop, start, time_limit_ms) =
             (self.budget.stop, self.budget.start, self.budget.time_limit_ms);
         let slots: Vec<OnceLock<(Result<NodeResult, Abort>, u64)>> =
@@ -1338,6 +1339,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                     };
                     let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
                     sub.apply_settings(settings);
+                    if let Some(depth) = capture {
+                        sub.capture_proven(depth);
+                    }
                     let (num, den) = super::HELPER_SLACKS[i % super::HELPER_SLACKS.len()];
                     sub.set_threshold_slack(num, den);
                     sub.set_tie_seed(i as u32 + 1);
@@ -1373,6 +1377,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 };
                 let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
                 sub.apply_settings(settings);
+                if let Some(depth) = capture {
+                    sub.capture_proven(depth);
+                }
                 sub.next_progress_ms = next_progress_ms;
                 let result = sub.search(st, args, &mut 0);
                 // 先に結論を出した補助スレッドも、打ち切られた補助スレッドも、ここで止める
@@ -1382,11 +1389,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.next_progress_ms = next_progress_ms;
         let mut result = main_result;
         self.nodes += main_nodes;
-        for slot in slots {
+        for (i, slot) in slots.into_iter().enumerate() {
             let (r, n) = slot.into_inner().unwrap_or((Err(Abort), 0));
             self.nodes += n;
             if result.is_err() && r.is_ok() {
                 result = r;
+                // 結論を出したスレッドが集めた証明済みの子を、この探索器で集めたものとして返す
+                if capture.is_some() {
+                    self.scratch.proven.clone_from(&self.helpers[i].proven);
+                }
             }
         }
         result
