@@ -479,6 +479,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     tables: Option<&'a ShortestTables>,
     /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
     helpers: &'a mut [Scratch<S::Mv>],
+    /// `search_shared` で、補助スレッドを起こす前に 1 スレッドで読むノード数
+    serial_nodes: u64,
 }
 
 /// `Searcher::solve_detached` の結果
@@ -544,6 +546,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             futility: false,
             tables: None,
             helpers: &mut [],
+            serial_nodes: 0,
         }
     }
 
@@ -558,9 +561,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.tables = Some(tables);
     }
 
-    /// `search_shared` で使う補助スレッドの作業領域を渡す (スレッド数 − 1 個)
-    pub fn set_helpers(&mut self, helpers: &'a mut [Scratch<S::Mv>]) {
+    /// `search_shared` で使う補助スレッドの作業領域 (スレッド数 − 1 個) と、補助スレッドを起こす前に
+    /// 1 スレッドで読むノード数を渡す
+    pub fn set_helpers(&mut self, helpers: &'a mut [Scratch<S::Mv>], serial_nodes: u64) {
         self.helpers = helpers;
+        self.serial_nodes = serial_nodes;
     }
 
     fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
@@ -1301,6 +1306,17 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         if self.helpers.is_empty() {
             return self.search(st, args, &mut 0);
         }
+        if self.serial_nodes > 0 {
+            // 易しい局面 (置換表で数ノードのうちに決まる読みが多い) はスレッドを起こす費用の方が大きいので、
+            // 先に 1 スレッドで読む。打ち切ると `within` が証明済みの子を集める指定を消すので戻す
+            let capture = self.capture_depth;
+            if let Some(result) = self.within(self.serial_nodes, |s| s.search(st, args, &mut 0))? {
+                return Ok(result);
+            }
+            if let Some(depth) = capture {
+                self.capture_proven(depth);
+            }
+        }
         let halt = AtomicBool::new(false);
         let cancel = AtomicBool::new(false);
         // この探索器の上限の残りを全スレッドの合計に掛ける
@@ -1310,6 +1326,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         let shared_nodes = AtomicU64::new(0);
         let (table, attacker, settings) = (self.table, self.attacker, self.settings());
+        let capture = self.capture_depth.take();
         let (stop, start, time_limit_ms) =
             (self.budget.stop, self.budget.start, self.budget.time_limit_ms);
         let slots: Vec<OnceLock<(Result<NodeResult, Abort>, u64)>> =
@@ -1338,6 +1355,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                     };
                     let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
                     sub.apply_settings(settings);
+                    if let Some(depth) = capture {
+                        sub.capture_proven(depth);
+                    }
                     let (num, den) = super::HELPER_SLACKS[i % super::HELPER_SLACKS.len()];
                     sub.set_threshold_slack(num, den);
                     sub.set_tie_seed(i as u32 + 1);
@@ -1373,6 +1393,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 };
                 let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
                 sub.apply_settings(settings);
+                if let Some(depth) = capture {
+                    sub.capture_proven(depth);
+                }
                 sub.next_progress_ms = next_progress_ms;
                 let result = sub.search(st, args, &mut 0);
                 // 先に結論を出した補助スレッドも、打ち切られた補助スレッドも、ここで止める
@@ -1382,11 +1405,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.next_progress_ms = next_progress_ms;
         let mut result = main_result;
         self.nodes += main_nodes;
-        for slot in slots {
+        for (i, slot) in slots.into_iter().enumerate() {
             let (r, n) = slot.into_inner().unwrap_or((Err(Abort), 0));
             self.nodes += n;
             if result.is_err() && r.is_ok() {
                 result = r;
+                // 返す結果と証明済みの子を同じスレッドのものにそろえる (手数の違う別の証明の子が混ざらないように)
+                if capture.is_some() {
+                    self.scratch.proven.clone_from(&self.helpers[i].proven);
+                }
             }
         }
         result

@@ -43,7 +43,7 @@ struct Effort {
 }
 
 /// 根 (攻め方の手番、詰みを証明して置換表に残っている) の推定手順を求める。局面は呼び出し前の状態に戻して返る。
-pub(super) fn estimate_pv<'a, S: MateState, const PIECES: bool>(
+pub(super) fn estimate_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
     tables: &'a ShortestTables,
@@ -97,7 +97,7 @@ pub(super) fn estimate_pv<'a, S: MateState, const PIECES: bool>(
 
 /// `len_limit` 手以内に詰む根から手順を選んで `pv` に積む (局面は手順の後のまま)。
 /// 手順を作れなければ `false`。
-fn walk<S: MateState, const PIECES: bool>(
+fn walk<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     len_limit: u16,
@@ -153,7 +153,7 @@ fn walk<S: MateState, const PIECES: bool>(
 
 /// 攻め方の局面で、`len_limit` 手以内に詰む王手のうち、予算内で縮められる限り短いものを選ぶ。
 /// 戻り値は (指し手, その後の詰み手数)。`proven` は作業領域。
-fn choose_attack<S: MateState, const PIECES: bool>(
+fn choose_attack<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     len_limit: u16,
@@ -177,7 +177,7 @@ fn choose_attack<S: MateState, const PIECES: bool>(
 ///
 /// 縮め方は 2 つ: 王手ごとに小さい予算で読み、置換表の別の証明に合流して短く詰む王手を探す (攻め方の回り道を
 /// 除く。回り道の先の局面は根からの探索で証明済みのことが多い)。そのうえで上限を 2 手ずつ縮めて証明し直す。
-fn attack_len<S: MateState, const PIECES: bool>(
+fn attack_len<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     len_limit: u16,
@@ -209,7 +209,7 @@ fn attack_len<S: MateState, const PIECES: bool>(
                 Ok(None)
             } else {
                 searcher
-                    .within(PROBE, |s| s.search(st, NodeArgs::unbounded(0, false, len - 2), &mut 0))
+                    .within(PROBE, |s| s.search_shared(st, NodeArgs::unbounded(0, false, len - 2)))
             };
             st.undo_move(mv);
             match r? {
@@ -228,7 +228,7 @@ fn attack_len<S: MateState, const PIECES: bool>(
 
 /// `len` 手以内に詰む攻め方の局面 `st` の詰みを、上限を 2 手ずつ縮めて予算内で証明できる限り短くし、
 /// その手数を返す。`proven` があれば、最後に証明できた探索の証明済みの子 (指し手, 詰み手数) に置き換える。
-fn shorten<S: MateState, const PIECES: bool>(
+fn shorten<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     mut len: u16,
@@ -238,7 +238,7 @@ fn shorten<S: MateState, const PIECES: bool>(
     while len >= 3 && !effort.gave_up.contains(&(st.key(), len)) {
         searcher.capture_proven(0);
         let shorter = searcher
-            .within(EFFORT, |s| s.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0))?;
+            .within(EFFORT, |s| s.search_shared(st, NodeArgs::unbounded(0, true, len - 2)))?;
         match shorter {
             Some(r) if r.is_proven() => {
                 len = r.mate_len;
@@ -267,7 +267,7 @@ enum Defense<M> {
 
 /// 受け方の局面で、無駄合いを除く応手のうち詰み手数が最も長いものを選ぶ。
 /// 最も長く見える応手の詰みを縮めてから比べ直すことを、縮めても最も長いものが決まるまで繰り返す。
-fn choose_defense<S: MateState, const PIECES: bool>(
+fn choose_defense<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     moves: &[S::Mv],

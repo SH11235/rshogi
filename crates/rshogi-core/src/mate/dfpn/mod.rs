@@ -212,7 +212,7 @@ impl DfpnSolver {
     ///
     /// 判定 (詰み・不詰) は通常と同じで、手順を求める分だけ時間とノードが増える。手順を求め終わる前に
     /// 制限に達したら [`MateResult::Unknown`]。手順を求める段階のうち、上限付きで根や手順上の局面を読み切る
-    /// 探索は判定と同じスレッド数で解き、手順を選ぶ探索は 1 スレッドで解く。
+    /// 探索と、推定で詰みを縮める探索は判定と同じスレッド数で解き、手順を選ぶ探索は 1 スレッドで解く。
     pub fn set_shortest(&mut self, shortest: Option<ShortestMode>) {
         self.shortest = shortest;
     }
@@ -364,7 +364,7 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
-        searcher.set_helpers(&mut self.helper_scratch);
+        searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
         }

@@ -495,6 +495,40 @@ fn shortest_mode_with_threads_matches_single_thread() {
     }
 }
 
+/// 作意推定を複数スレッドで解いても、小さい局面では正解役と同じ手数の正しい手順を返す
+#[test]
+fn estimate_mode_with_threads_matches_reference() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5807_0004);
+    let mut mates = 0;
+    while mates < 20 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else {
+            continue;
+        };
+        let sfen = pos.to_sfen();
+        let Some(len) = ref_len(&mut pos, 5) else {
+            continue;
+        };
+        mates += 1;
+        for mode in MateMode::ALL {
+            let mut pos = position(&sfen);
+            let stop = AtomicBool::new(false);
+            let mut solver = DfpnSolver::with_mode(16, mode);
+            solver.set_shortest(Some(ShortestMode::Estimate));
+            solver.set_threads(4);
+            solver.parallel_from_the_start();
+            let limits = MateLimits {
+                nodes: 2_000_000,
+                time_ms: 0,
+            };
+            let MateResult::Mate(pv) = solver.solve(&mut pos, &limits, &stop, |_| {}) else {
+                panic!("{sfen} {mode:?}");
+            };
+            assert!(check_mate_pv_by_rules(&pos, &pv, true), "{sfen} {mode:?}: {}", pv_usi(&pv));
+            assert_eq!(pv.len() as u32, len, "{sfen} {mode:?}: {}", pv_usi(&pv));
+        }
+    }
+}
+
 /// 手順を求める段階でノード数の上限に達したら Unknown で、局面は元に戻る
 #[test]
 fn shortest_mode_stops_at_the_node_limit() {
