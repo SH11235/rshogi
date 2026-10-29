@@ -98,7 +98,7 @@ NNUE は `init_nnue` がロードできる全アーキテクチャ（LayerStacks
 対応します。
 
 - **bucket-mode（LayerStacks 専用）**: LayerStacks では `--bucket-mode` が必須です。
-  `progresskpabs` では `--progress-buckets` と `--progress-file` が必須です
+  進行度方式（`progresskpabs` / `progresskpabsq16`）では `--progress-buckets` と `--progress-file` が必須です
   (`--progress-buckets 1` は常に bucket 0 を選ぶ no-op routing のため `--progress-file` 不要)。`--bucket-mode kingrank9` は
   progress 係数を使わないため `--progress-file` 不要です（指定するとエラーにします）。
   LayerStacks 以外の NNUE でこれらの routing option を指定すると

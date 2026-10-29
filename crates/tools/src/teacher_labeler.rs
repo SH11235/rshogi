@@ -12,13 +12,15 @@
 //!   使い回すとラベルが処理順に依存してしまう。それを避けるための fresh-per-position。）
 //! - 符号規約は手番側視点（side-to-move view）cp で統一（hcpe 保存 eval・dlshogi value 目標と同じ）。
 
-use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use crate::nnue_routing::{
+    NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use rshogi_core::nnue::{get_network, init_nnue, load_progress_coeff_kpabs, set_fv_scale_override};
+use rshogi_core::nnue::{get_network, init_nnue, set_fv_scale_override};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
@@ -37,14 +39,14 @@ pub struct LabelerEvalConfig<'a> {
     pub fv_scale: i32,
     /// LayerStacks の bucket mode（例 `progresskpabs`）。LayerStacks では必須。
     pub ls_bucket_mode: Option<&'a str>,
-    /// progresskpabs が推論に使う bucket 数。LayerStacks + progresskpabs では必須。
+    /// 進行度方式が推論に使う bucket 数。LayerStacks + 進行度方式では必須。
     pub ls_progress_buckets: Option<usize>,
-    /// progresskpabs 用の進行度係数ファイル（USI `LS_PROGRESS_COEFF` と同じ）。
+    /// 進行度方式 (progresskpabs / progresskpabsq16) 用の進行度係数ファイル（USI `LS_PROGRESS_COEFF` と同じ）。
     pub ls_progress_coeff: Option<&'a Path>,
 }
 
 /// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
-/// progresskpabs で係数未指定なら弾く
+/// 進行度方式で係数未指定なら弾く
 /// (routing bucket 数 1 の no-op routing は係数を参照しないため除く)。
 ///
 /// # 注意（グローバル状態）
@@ -66,7 +68,7 @@ pub fn configure_eval(cfg: &LabelerEvalConfig) -> Result<()> {
         cfg.ls_bucket_mode
             .map(|mode_str| {
                 parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
-            format!("invalid --ls-bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
+            format!("invalid --ls-bucket-mode '{mode_str}' (expected progresskpabs, progresskpabsq16 or kingrank9)")
             })
             })
             .transpose()?;
@@ -85,7 +87,7 @@ pub fn configure_eval(cfg: &LabelerEvalConfig) -> Result<()> {
         plan.apply(|| {
             cfg.ls_progress_coeff
                 .map(|path| {
-                    let weights = load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg)?;
+                    let weights = ProgressCoefficients::load(path)?;
                     eprintln!("LS_PROGRESS_COEFF: {}", path.display());
                     Ok(weights)
                 })
@@ -260,24 +262,6 @@ pub fn label_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn labeler_rejects_native_q16_before_loading_coefficients_or_model() {
-        let existing_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        for count in [1, 8] {
-            for coeff in [None, Some(Path::new("missing-progress.bin"))] {
-                let cfg = LabelerEvalConfig {
-                    nnue: &existing_file,
-                    fv_scale: 0,
-                    ls_bucket_mode: Some("progresskpabsq16"),
-                    ls_progress_buckets: Some(count),
-                    ls_progress_coeff: coeff,
-                };
-                let error = configure_eval(&cfg).unwrap_err();
-                assert!(format!("{error:#}").contains("not supported by tools native evaluation"));
-            }
-        }
-    }
 
     #[test]
     fn parse_spsa_params_content_parses_rounds_and_skips() {

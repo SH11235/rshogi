@@ -73,16 +73,16 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     fv_scale: i32,
 
-    /// LayerStacks の bucket mode（`progresskpabs` または `kingrank9`）。LayerStacks では必須。
+    /// LayerStacks の bucket mode（`progresskpabs`、`progresskpabsq16` または `kingrank9`）。LayerStacks では必須。
     #[arg(long)]
     ls_bucket_mode: Option<String>,
 
-    /// progresskpabs が推論に使う bucket 数。LayerStacks + progresskpabs では必須。
+    /// 進行度方式が推論に使う bucket 数。LayerStacks + 進行度方式では必須。
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
-    /// progresskpabs 用の進行度係数ファイル（USI `LS_PROGRESS_COEFF` と同じ）。
-    /// LayerStacks モデルで bucket mode が progresskpabs のとき必須。
+    /// 進行度方式 (progresskpabs / progresskpabsq16) 用の進行度係数ファイル（USI `LS_PROGRESS_COEFF` と同じ）。
+    /// LayerStacks モデルで bucket mode が進行度方式のとき必須。
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 

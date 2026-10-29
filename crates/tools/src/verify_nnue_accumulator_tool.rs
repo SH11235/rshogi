@@ -16,7 +16,9 @@
 //!   --ls-progress-coeff path/to/nodchip_progress_e1_f1_cuda.bin
 //! ```
 
-use crate::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use crate::nnue_routing::{
+    NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::mem::size_of;
@@ -38,14 +40,14 @@ struct Cli {
     #[arg(long)]
     nnue_file: PathBuf,
 
-    /// LayerStacks bucket mode (`progresskpabs` または `kingrank9`)。
+    /// LayerStacks bucket mode (`progresskpabs`、`progresskpabsq16` または `kingrank9`)。
     #[arg(long)]
     ls_bucket_mode: String,
 
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
@@ -136,7 +138,7 @@ fn verify_with_network<
     Ok((total_tests, fail))
 }
 
-fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<Box<[f32]>> {
+fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<ProgressCoefficients> {
     let data = std::fs::read(coeff_path)
         .with_context(|| format!("Failed to read progress coeff: {}", coeff_path.display()))?;
 
@@ -150,17 +152,11 @@ fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<Box<[f32]>> {
             .iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect();
-        return Ok(weights.into_boxed_slice());
+        return Ok(ProgressCoefficients::from_kpabs(weights.into_boxed_slice()));
     }
 
     if data.len() == expected_f64_bytes {
-        let weights: Vec<f32> = data
-            .as_chunks::<{ size_of::<f64>() }>()
-            .0
-            .iter()
-            .map(|c| f64::from_le_bytes(*c) as f32)
-            .collect();
-        return Ok(weights.into_boxed_slice());
+        return ProgressCoefficients::from_f64_bytes(&data);
     }
 
     bail!(
@@ -188,7 +184,7 @@ pub fn run() -> Result<()> {
 
     let mode = parse_native_layer_stack_bucket_mode(&cli.ls_bucket_mode).with_context(|| {
         format!(
-            "invalid --ls-bucket-mode '{}' (expected progresskpabs or kingrank9)",
+            "invalid --ls-bucket-mode '{}' (expected progresskpabs, progresskpabsq16 or kingrank9)",
             cli.ls_bucket_mode
         )
     })?;

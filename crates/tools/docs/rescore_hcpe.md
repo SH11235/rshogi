@@ -2,7 +2,7 @@
 
 入出力は共通の [38 byte HCPE形式](hcpe-format.md) です。eval以外の36 byte（非0のdummyを含む）を保持します。
 
-LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
 
 hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード）教師プールの各局面を **NNUE 固定 depth
 探索**で再評価し、**eval だけを差し替えた hcpe** を出力する教師生成ツール（局面・bestMove16・

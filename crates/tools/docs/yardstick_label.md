@@ -2,7 +2,7 @@
 
 入力は共通の [38 byte HCPE形式](hcpe-format.md) です。gameResultの手番側視点への変換と無効値のスキップは、ラベリング処理で行います。
 
-LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
 
 `yardstick_label` は、ラベル品質「物差し」のステージ 1 です。固定 held-out（棋譜由来の
 hcpe。各局面に保存 eval＝教師ラベルと gameResult＝実対局結果を持つ）の各局面を、与えた

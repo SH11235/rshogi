@@ -106,7 +106,7 @@
 ## 形式・運用の共通資料
 
 - [PSV 処理の選び方](pack_tools.md)、[教師データの追加パイプライン](training_data_pipeline.md)。
-- [HCPE の形式](hcpe-format.md)、[LayerStacks routing・Q16・進行度係数](nnue-routing.md)。
+- [HCPE の形式](hcpe-format.md)、[LayerStacks routing・進行度係数](nnue-routing.md)。
 - [SPSA の運用手順](spsa_runbook.md)、[コマンド例集](../examples/README.md)。
 - CSA 接続は別 crate の [csa_client](../../rshogi-csa-client/examples/README.md) を使います。
 - CSA の未決結果・SPRT 対象の制約は [analyze_selfplay](analyze_selfplay.md)、

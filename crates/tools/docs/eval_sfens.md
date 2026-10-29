@@ -13,7 +13,7 @@ cargo run --release -p tools --bin eval_sfens -- \
   --count 10
 ```
 
-`--bucket-mode` は `progresskpabs`（既定）。`--progress-buckets` は必須で、
+`--bucket-mode` は `progresskpabs`（既定）または `progresskpabsq16`。`--progress-buckets` は必須で、
 モデルの bucket 数と routing 設定に合わせる。`--count` の既定値は 10 で、
 入力の先頭から読む行数を制限する（空行も数えるが評価はしない）。
 出力列は `sfen`、`bucket`、`raw`、`score`（歩=90 の内部スケール）、

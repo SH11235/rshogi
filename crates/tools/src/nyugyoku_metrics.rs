@@ -17,7 +17,7 @@
 //! （`%KACHI` / `%TORYO`）で排他に分かれる。
 //! CSA replay と終局特殊手の取得は `replay::csa_source::CsaSource` に委譲する。
 
-use crate::nnue_routing::NativeRouting;
+use crate::nnue_routing::{NativeRouting, ProgressCoefficients};
 use rshogi_core::nnue::{LayerStackRoutingError, validate_layer_stack_routing_with_coefficients};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -34,7 +34,7 @@ use rshogi_core::eval::{MaterialLevel, set_material_level};
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, LayerStacksAccCache, evaluate_dispatch,
-    get_network, init_nnue, load_progress_coeff_kpabs,
+    get_network, init_nnue,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
@@ -96,13 +96,13 @@ struct EvalArgs {
     /// NNUE ファイル。
     #[arg(long)]
     eval_file: PathBuf,
-    /// LayerStacks progresskpabs 用 progress.bin（--bucket-mode progresskpabs で必須）。
+    /// LayerStacks の進行度方式用 progress.bin（--bucket-mode progresskpabs / progresskpabsq16 で必須）。
     #[arg(long)]
     progress_file: Option<PathBuf>,
     /// LayerStacks の bucket 選択モード。LayerStacks では必須。
     #[arg(long, value_enum)]
     bucket_mode: Option<BucketModeArg>,
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     progress_buckets: Option<usize>,
     /// metrics.json の出力先。
@@ -159,13 +159,13 @@ struct EvalMatesArgs {
     /// NNUE ファイル。
     #[arg(long)]
     eval_file: PathBuf,
-    /// LayerStacks progresskpabs 用 progress.bin（--bucket-mode progresskpabs で必須）。
+    /// LayerStacks の進行度方式用 progress.bin（--bucket-mode progresskpabs / progresskpabsq16 で必須）。
     #[arg(long)]
     progress_file: Option<PathBuf>,
     /// LayerStacks の bucket 選択モード。LayerStacks では必須。
     #[arg(long, value_enum)]
     bucket_mode: Option<BucketModeArg>,
-    /// progresskpabs が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
     progress_buckets: Option<usize>,
     /// metrics.json の出力先。
@@ -184,12 +184,25 @@ struct EvalMatesArgs {
 
 /// LayerStacks bucket mode の CLI 表現。
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum BucketModeArg {
+pub(crate) enum BucketModeArg {
     /// 進行度方式（progress.bin 必須）。ek_testset eval と同じ既定。
     #[value(name = "progresskpabs")]
     ProgressKpabs,
+    /// YaneuraOu / BulletOu SFNN 互換の整数進行度方式（f64 の progress.bin 必須）。
+    #[value(name = "progresskpabsq16")]
+    ProgressKpabsQ16,
     /// 両玉相対段方式（progress.bin 不要）。
     Kingrank9,
+}
+
+impl BucketModeArg {
+    pub(crate) fn mode(self) -> LayerStackBucketMode {
+        match self {
+            Self::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
+            Self::ProgressKpabsQ16 => LayerStackBucketMode::ProgressKPAbsQ16,
+            Self::Kingrank9 => LayerStackBucketMode::KingRank9,
+        }
+    }
 }
 
 /// pair の遷移条件（本指標の 4 条件、固定順）。
@@ -950,12 +963,8 @@ fn resolve_bucket_mode(
     }
 
     let bucket_mode = bucket_mode.context("LayerStacks では --bucket-mode が必須です")?;
-    let mode = match bucket_mode {
-        BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
-        BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9,
-    };
     validate_layer_stack_routing_with_coefficients(
-        mode,
+        bucket_mode.mode(),
         stored_buckets.unwrap(),
         progress_buckets,
         has_progress_file,
@@ -963,7 +972,7 @@ fn resolve_bucket_mode(
     .map_err(|error| match error {
         LayerStackRoutingError::Configuration(message) => anyhow!(message),
         LayerStackRoutingError::MissingCoefficients => {
-            anyhow!("--bucket-mode progresskpabs では --progress-file が必須です")
+            anyhow!("--bucket-mode {} では --progress-file が必須です", bucket_mode.mode().as_str())
         }
         LayerStackRoutingError::UnusedCoefficients => {
             anyhow!("--bucket-mode kingrank9 では --progress-file は使いません")
@@ -976,7 +985,7 @@ fn resolve_bucket_mode(
 ///
 /// `init_nnue` が対応する全アーキテクチャを読み込み、LayerStacks の場合だけ bucket mode
 /// と progress 係数を設定して評価用 accumulator stack を返す。
-fn init_eval(
+pub(crate) fn init_eval(
     bucket_mode: Option<BucketModeArg>,
     progress_file: Option<&Path>,
     progress_buckets: Option<usize>,
@@ -992,10 +1001,7 @@ fn init_eval(
         progress_buckets,
     )?;
 
-    let mode = bucket_mode.map(|mode| match mode {
-        BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
-        BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9,
-    });
+    let mode = bucket_mode.map(BucketModeArg::mode);
     if let Some(plan) = NativeRouting::prepare(
         network.layer_stack_num_buckets(),
         mode,
@@ -1004,11 +1010,7 @@ fn init_eval(
     )
     .context("native routing: --bucket-mode / --progress-buckets / --progress-file")?
     {
-        plan.apply(|| {
-            progress_file
-                .map(|path| load_progress_coeff_kpabs(path).map_err(anyhow::Error::msg))
-                .transpose()
-        })?;
+        plan.apply(|| progress_file.map(ProgressCoefficients::load).transpose())?;
     }
     Ok((AccumulatorStackVariant::from_network(&network), bucket_mode))
 }
@@ -1103,12 +1105,7 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
         pairs: args.pairs.display().to_string(),
         eval_file: args.eval_file.display().to_string(),
         progress_file: args.progress_file.as_ref().map(|p| p.display().to_string()),
-        bucket_mode: bucket_mode
-            .map(|mode| match mode {
-                BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs.as_str(),
-                BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9.as_str(),
-            })
-            .map(str::to_string),
+        bucket_mode: bucket_mode.map(|mode| mode.mode().as_str().to_string()),
         progress_buckets: args.progress_buckets,
         bootstrap: args.bootstrap,
         seed: args.seed,
@@ -1820,12 +1817,7 @@ fn run_eval_mates(args: &EvalMatesArgs) -> Result<()> {
         mates: args.mates.display().to_string(),
         eval_file: args.eval_file.display().to_string(),
         progress_file: args.progress_file.as_ref().map(|p| p.display().to_string()),
-        bucket_mode: bucket_mode
-            .map(|mode| match mode {
-                BucketModeArg::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs.as_str(),
-                BucketModeArg::Kingrank9 => LayerStackBucketMode::KingRank9.as_str(),
-            })
-            .map(str::to_string),
+        bucket_mode: bucket_mode.map(|mode| mode.mode().as_str().to_string()),
         progress_buckets: args.progress_buckets,
         bootstrap: args.bootstrap,
         seed: args.seed,

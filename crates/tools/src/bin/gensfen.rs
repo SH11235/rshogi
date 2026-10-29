@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tools::nnue_routing::{NativeRouting, parse_native_layer_stack_bucket_mode};
+use tools::nnue_routing::{
+    LayerStackBucketer, NativeRouting, ProgressCoefficients, parse_native_layer_stack_bucket_mode,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
@@ -17,10 +19,7 @@ use crossbeam_channel as chan;
 use rand::Rng;
 use rand::seq::SliceRandom;
 use rshogi_core::movegen::{MoveList, generate_legal, is_legal_with_pass};
-use rshogi_core::nnue::{
-    compute_layer_stack_progresskpabs_bucket_index, get_layer_stack_progress_kpabs_weights,
-    get_network, init_nnue_from_bytes, load_progress_coeff_kpabs_from_bytes, set_fv_scale_override,
-};
+use rshogi_core::nnue::{get_network, init_nnue_from_bytes, set_fv_scale_override};
 use rshogi_core::position::{EnteringKingPointInfo, Position};
 use rshogi_core::types::{Color, EnteringKingRule, Move};
 use serde::{Deserialize, Serialize, Serializer};
@@ -305,7 +304,7 @@ struct Cli {
     #[arg(long)]
     eval_file: Option<PathBuf>,
 
-    /// progresskpabs 用の進行度係数ファイル（NativeBackend の LayerStacks ネットで使用）
+    /// 進行度方式用の進行度係数ファイル（NativeBackend の LayerStacks ネットで使用）
     #[arg(long)]
     progress_file: Option<PathBuf>,
 
@@ -313,7 +312,7 @@ struct Cli {
     #[arg(long)]
     bucket_mode: Option<String>,
 
-    /// NativeBackend の progresskpabs が推論に使う bucket 数。
+    /// NativeBackend の進行度方式が推論に使う bucket 数。
     #[arg(long)]
     progress_buckets: Option<usize>,
 
@@ -438,7 +437,7 @@ struct MetaSettings {
     /// 開始局面シャッフルの乱数シード（--startpos-no-repeat 用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shuffle_seed: Option<u64>,
-    /// NativeBackend の progresskpabs 進行度係数ファイル
+    /// NativeBackend の進行度方式の進行度係数ファイル
     #[serde(default, skip_serializing_if = "Option::is_none")]
     progress_file: Option<String>,
     /// progress_file 内容の SHA-256（resume 時に同一パスへの係数差し替えを検出する）
@@ -447,7 +446,7 @@ struct MetaSettings {
     /// NativeBackend の LayerStacks bucket mode。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bucket_mode: Option<String>,
-    /// NativeBackend の progresskpabs routing bucket 数。
+    /// NativeBackend の進行度方式の routing bucket 数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     progress_buckets: Option<usize>,
     /// FV_SCALE オーバーライド（未指定 = arch 文字列から自動判定）
@@ -2192,8 +2191,10 @@ fn worker_main(
         let mut interval_dedup_hits = 0u64;
         let mut interval_positions_checked = 0u64;
         let mut committed_games = 0u32;
-        let progress_weights =
-            cfg.progress_routing_buckets.map(|_| get_layer_stack_progress_kpabs_weights());
+        let progress_bucketer = cfg
+            .progress_routing_buckets
+            .map(|buckets| LayerStackBucketer::from_configured(buckets, buckets))
+            .transpose()?;
         let mut progress_bucket_counts = cfg
             .progress_routing_buckets
             .map(|num_buckets| vec![0u64; num_buckets])
@@ -2256,16 +2257,8 @@ fn worker_main(
                 } else {
                     "white"
                 };
-                if let (Some(weights), Some(num_buckets)) =
-                    (progress_weights.as_deref(), cfg.progress_routing_buckets)
-                {
-                    let bucket = compute_layer_stack_progresskpabs_bucket_index(
-                        &pos,
-                        side,
-                        weights,
-                        num_buckets,
-                    );
-                    progress_bucket_counts[bucket] += 1;
+                if let Some(bucketer) = &progress_bucketer {
+                    progress_bucket_counts[bucketer.bucket(&pos)] += 1;
                 }
                 let sfen_before = pos.to_sfen();
 
@@ -5958,8 +5951,8 @@ fn initialize_native_backend(
     plan.apply(|| {
         progress
             .map(|(path, bytes)| {
-                let weights = load_progress_coeff_kpabs_from_bytes(bytes).map_err(|e| {
-                    anyhow!("failed to load --progress-file {}: {e}", path.display())
+                let weights = ProgressCoefficients::from_f64_bytes(bytes).with_context(|| {
+                    format!("failed to load --progress-file {}", path.display())
                 })?;
                 eprintln!("NativeBackend: progress file loaded from {}", path.display());
                 Ok(weights)
