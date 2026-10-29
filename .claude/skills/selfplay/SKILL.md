@@ -163,6 +163,7 @@ hash、SPRT bounds と上限局数。加えて実行機・backend・raw log の�
   commit ごとの worktree で `xtask build` し、各 worktree の `engines/` (xtask は自分の
   workspace root 下に置く) の binary をそのまま `--engine` に渡す。起動前に各
   `<binary>.meta.toml` の `commit` が比較対象の commit と一致し、`commit_dirty = false` であることを照合する。
+  下の stderr wrapper の例の `$PWD/engines/...` も、各 worktree の絶対パスに置き換える。
 - 起動 script では build repo と log root を同じ変数に畳み込まない。log root は上記 canonical
   root からのみ組み立てる。
 
@@ -302,9 +303,15 @@ cargo run -p tools --release --bin tournament -- \
   役割の意味は無い（ファイル名・meta の label_black/white は指定順のまま）。
 - `--base-label` は対局ペアを「基準を含むペアだけ」に絞る (`tournament.rs` の `base_idx`)。
   3 エンジン以上で基準を含む総当たりをしたいときは `--base-label` を付けず、基準のラベルは
-  事前登録に書く。post-hoc では `analyze_selfplay "$OUT"/*.jsonl --sprt --sprt-base-label {BASE}
-  --sprt-test-label {TEST}` と 4 パラメータを明示して、比較したいペアごとに役割を指定する
-  (meta の `base_label` が無いため、ラベル未指定だと名前の推定に落ちる)。
+  事前登録に書く。post-hoc では比較したいペアごとに、2 つのラベルと SPRT の 4 パラメータ
+  (`--sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta`) をすべて明示する。meta に
+  `base_label` も SPRT 情報も無いので、ラベルを省くと名前の推定に、パラメータを省くと
+  既定値 (nelo0=0, nelo1=5) の別の検定に落ちる:
+  ```
+  cargo run -p tools --release --bin analyze_selfplay -- "$OUT"/*.jsonl --sprt \
+    --sprt-base-label {BASE} --sprt-test-label {TEST} \
+    --sprt-nelo0 0 --sprt-nelo1 10 --sprt-alpha 0.05 --sprt-beta 0.05   # 例は gainer の標準 bounds
+  ```
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
   - `pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`（--engine 指定順の 0 始まり index + 整形した表示ラベル）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）。例: `pair-0-1__baseline-vs-pass-root-bonus.jsonl`
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。

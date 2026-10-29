@@ -64,7 +64,8 @@ YO のベースパス: YaneuraOu checkout の `source/`。環境変数 `$YO_DIR`
 3. Read で該当コードを読み取り
 
 **YO ソースの注意点:**
-- `#if defined(STOCKFISH)` 等の分岐は、比較対象の edition の define で有効な経路を判断して読む
+- `#if STOCKFISH` / `#else` の分岐は、将棋の build では `#else` 側 (将棋固有パス) が有効。edition 固有の define
+  が絡む分岐は、比較対象の YO の build で有効な define から経路を判断して読む
 - `moved_piece(m)` は `moved_piece_after(m)` のエイリアス（成り後の駒、Stockfish とは異なる）
 - `Depth = int` であり `ONE_PLY` は存在しない
 - `ss->inCheck` 時に `goto moves_loop` でeval計算〜pruningが全スキップされる設計
@@ -89,6 +90,7 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 | **INTENTIONAL** | rshogi 側で意図的に変更した部分 | 理由を記載 |
 | **YO_SPECIFIC** | YO 固有の機能で rshogi に不要 | 対応不要 |
 | **MISSING** | rshogi に未実装の YO 機能 | 要検討 |
+| **UNVERIFIED** | 動作差があるが、意図した変更かの根拠が見つからない | BUG か INTENTIONAL かを user に確認 |
 
 BUG と INTENTIONAL の判別は、次の証拠源で意図の有無を確かめてから行い、レポートに証拠を書く:
 
@@ -96,7 +98,7 @@ BUG と INTENTIONAL の判別は、次の証拠源で意図の有無を確かめ
 - `git log -L <開始>,<終了>:<ファイル>` / `git log -S '<コード片>'` で導入 commit を引き、commit message を読む
 - `search/tune_params.rs` の値は、`SPSA_*` option としてチューニング対象か、導入 commit が SPSA 等の調整結果か YO からの転記かを `git log -S '<値>'` で確かめる
 
-証拠が見つからない動作差は INTENTIONAL にせず BUG に分類し、「根拠未確認」と付記する。
+証拠が見つからない動作差は INTENTIONAL にも BUG にもせず UNVERIFIED に分類し、調べた証拠源を書く。
 
 ## 出力フォーマット
 
@@ -132,13 +134,14 @@ BUG と INTENTIONAL の判別は、次の証拠源で意図の有無を確かめ
 - 一致項目数: {N} / {total}
 - BUG: {件数}
 - MISSING: {件数}
+- UNVERIFIED: {件数}
 - 総合: {PASS / REVIEW_NEEDED / FIX_REQUIRED}
 ```
 
 総合判定の基準:
 
 - **FIX_REQUIRED**: BUG が 1 件以上
-- **REVIEW_NEEDED**: BUG が 0 件で、MISSING が 1 件以上
+- **REVIEW_NEEDED**: BUG が 0 件で、MISSING か UNVERIFIED が 1 件以上
 - **PASS**: 上記のいずれにも当たらない (差分が NAMING / 証拠付き INTENTIONAL / YO_SPECIFIC だけ)
 
 ## YaneuraOu USI の落とし穴

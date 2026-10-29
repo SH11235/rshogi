@@ -130,10 +130,13 @@ cmp -n <N> <out> <reference>
 reference の無い本番実行は、終了時の stderr と出力サイズで成功を判定する
 （中断でも終了コードは 0 になり得るので、終了コードだけで判定しない）:
 
-- **`psv_to_hcpe3`**: `<output>.partial` が残らず最終名がある。stderr の
+- **`psv_to_hcpe3`**: `<output>.partial` が残らず、最終名のファイルの mtime がこの run の開始より後
+  (同じパスに前回 run の出力が残っている場合と区別する)。stderr の
   `書き出し: N レコード` の N に対し、出力サイズ = N × 46（hcpe3）/ N × 38（hcpe）。
-  `--limit` なしなら N + `有効な着手を持たないレコードをスキップ: M` の M +
-  `注意: E レコードを変換できずスキップ` の E が入力レコード数（入力サイズ / 40、末尾の半端バイトは E に 1 件加算）と一致する。
+  `--limit` なしなら、入力サイズを S として
+  N + M + E = floor(S / 40) + (S mod 40 が 0 でなければ 1)
+  が成り立つ (M = `有効な着手を持たないレコードをスキップ: M`、E = `注意: E レコードを変換できずスキップ`。
+  末尾の半端バイトは E に 1 件として数えられる)。
   `完了前に中断されました` が出ていれば未完了。
 - **`rescore_psv`**（PSV 出力。expand / leaf replacement 以外）: stderr 末尾が
   `All <n> file(s) processed successfully`（`Note: Processing was interrupted` なら未完了）。

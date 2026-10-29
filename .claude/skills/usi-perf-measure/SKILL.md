@@ -38,6 +38,8 @@ A/B 比較する手順と、その結果で性能改善を採否判定する基�
    ([selfplay](../selfplay/SKILL.md)) の要否を判断する。確認には `compare_nodes`
    (`crates/tools/docs/compare_nodes.md`) を `--depth N` で使い、`--options-a` / `--options-b` の両方に
    `Threads=1` と同じ `EvalFile=` 等を渡す (`--eval-b` は `EvalDir` として渡るので rshogi 同士では使わない)。
+   LayerStacks の net なら `LS_BUCKET_MODE` などモデルが要る `LS_*` option も両側に渡す。`--options-*` は
+   カンマ区切りなので、カンマを含むパスは渡せない (パスを置き換える)。
    `summary.txt` の depth 別ノード一致・最善手一致率と、`results.jsonl` の評価値を見る。
 4. クリーンな binary で A/B を行い、局面別の差と run 間ばらつきを確認する。
    NPS と cycles/node を採否に使い、instructions/node は機序の補助にする。

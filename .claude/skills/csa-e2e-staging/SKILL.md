@@ -125,7 +125,9 @@ quit する。`--target` は `staging` / `production` の 2 値で、接続先 h
 csa_client に固定されている (`crates/rshogi-csa-client/src/main.rs` の `TargetPreset`)。
 `WRANGLER` を変えても接続先は変わらないので、production を対象にするときは下記の
 `--target staging` を `--target production` に変える。fork など `CSA_HOST` がこの repo の
-hostname と異なる Worker では 1-A は使えず、1-B (TOML の `server.host`) で接続する。`<room_id>` は黒/白で完全一致、`<preset>` も完全一致 (黒/白 LOGIN
+hostname と異なる Worker では 1-A は使えず、1-B (TOML の `server.host`) で接続する。
+
+`<room_id>` は黒/白で完全一致、`<preset>` も完全一致 (黒/白 LOGIN
 のマッチング条件)。
 
 ```bash
@@ -382,19 +384,29 @@ CLOCK_PRESETS = '''[
 ]'''
 ```
 
+preset の追加は共有 staging の再 deploy を伴うので、production では行わない。staging では
+編集する前に元の preset 一覧を保存しておく:
+
+```bash
+grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
+```
+
 各 preset で 1 局ずつ走らせ、Game_Summary `BEGIN Time` セクションの `Time_Unit` /
 `Total_Time` / `Byoyomi`/`Increment` が想定値であることを確認する。
 
-preset を追加して再 deploy した場合は、検証後に共有 staging を元の preset 構成へ戻す:
+検証後は共有 staging を元の preset 構成へ戻す:
 
-1. 編集前に元の一覧を保存しておく:
-   `grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"`
-2. 検証後、`git diff -- "$WRANGLER"` で差分が追加した preset だけであることを確かめ、
-   `git restore -- "$WRANGLER"` で toml を戻す
-3. `docs/csa-server/deployment.md` の「deploy 前確認手順」(進行中の対局が無いこと) を
-   満たしてから、追加時と同じ deploy コマンドで再 deploy する
-4. `grep -o '"game_name":"[^"]*"' "$WRANGLER" | diff - "$RUN/presets.before"` が差分なし、
-   かつ `curl -sf "https://$CSA_HOST/health"` が通ることを確認する
+1. `git diff -- "$WRANGLER"` で差分が追加した preset だけであることを確かめ、
+   `git restore -- "$WRANGLER"` で toml を戻す。
+   `grep -o '"game_name":"[^"]*"' "$WRANGLER" | diff - "$RUN/presets.before"` が差分なしになる
+2. 追加時と同じ deploy コマンドで再 deploy する。staging は drain の対象外
+   (`docs/csa-server/deployment.md` の §12.6。main への push でも自動 deploy され、そのときも
+   main の toml に戻る)
+3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通り、
+   追加して外した preset 名で 1-A の黒・白を起動すると、対局開始に至らず
+   `##[ERROR] clock spec for '<game_name>' could not be resolved` を受け取る
+   (preset を 1 件以上登録した Worker は未登録の `game_name` の対局を成立させない。
+   `crates/rshogi-csa-server-workers/src/game_room.rs` の `resolve_game_preset_for_game`)
 
 ## 9. 後始末
 
