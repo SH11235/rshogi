@@ -133,7 +133,8 @@ quit' | timeout 30 engines/<binary> 2>&1 | grep -E 'readyok|Error|Unknown NNUE v
 
 | net | 追加する setoption |
 |---|---|
-| LayerStacks + progresskpabs (`progresskpabsq16` も同じ組) | `LS_BUCKET_MODE value progresskpabs` / `LS_PROGRESS_BUCKETS value <学習時の routing bucket 数>` / `LS_PROGRESS_COEFF value <progress.bin>` |
+| LayerStacks + progresskpabs (tatara の f32 係数) | `LS_BUCKET_MODE value progresskpabs` / `LS_PROGRESS_BUCKETS value <学習時の routing bucket 数>` / `LS_PROGRESS_COEFF value <progress.bin>` |
+| LayerStacks + progresskpabsq16 (YaneuraOu / BulletOu SFNN の整数 Q16 係数) | `LS_BUCKET_MODE value progresskpabsq16` / `LS_PROGRESS_BUCKETS` / `LS_PROGRESS_COEFF` をモデルの設定に合わせて。`progresskpabs` で代用しない (同じ係数ファイルを読めて `isready` も通るが、量子化境界で別の bucket を選ぶ。`crates/tools/docs/nnue-routing.md`) |
 | LayerStacks + kingrank9 (格納 bucket 数 9 の net) | `LS_BUCKET_MODE value kingrank9` のみ。`LS_PROGRESS_BUCKETS` / `LS_PROGRESS_COEFF` は付けると `isready` で拒否される |
 | 非 LayerStacks (`halfkp-crelu` 等の HalfKP / HalfKA) | なし (`EvalFile` と `FV_SCALE` だけ) |
 
