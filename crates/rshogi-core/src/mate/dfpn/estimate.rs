@@ -13,7 +13,6 @@
 //! 根から選び直す (`MAX_PASSES` 回まで。推定全体で `RECHOOSE_BUDGET` ノードを超えたら前の手順を使う)。根の上限は証明した手数のまま
 //! (手順の長さは、受け方が最善を選べていなければ根の詰み手数の上限にならない)。
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use super::search::{Abort, MAX_DEPTH, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
@@ -47,7 +46,7 @@ struct Effort {
 pub(super) fn estimate_pv<'a, S: MateState, const PIECES: bool>(
     searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
-    tables: &'a RefCell<ShortestTables>,
+    tables: &'a ShortestTables,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     searcher.enable_shortest(true, tables);
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;

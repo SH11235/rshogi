@@ -30,7 +30,7 @@
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::MateProgress;
@@ -274,99 +274,147 @@ pub(super) struct Scratch<M> {
     returned: Option<Box<dyn Any + Send>>,
 }
 
-/// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) とも共有する。
+/// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) や、並列に解くスレッドとも共有する。
 ///
 /// 置換表と分けるのは、ここに書く値が無駄合いの数え方に依存するため。上限付きの不詰は上限と組でしか
 /// 成り立たず、無駄合いを数えない詰み手数は他の応手の手数で決まる無駄合いに依存するので、持駒違いの局面に
 /// 流用できない (攻め方の持駒が多いと他の応手が短くなり、無駄合いだった合駒が有効になって長くなりうる)。
 /// どちらも局面の完全一致でだけ使う。
 pub(super) struct ShortestTables {
-    /// 局面からこの手数以内には詰まない
-    len_bounds: Vec<LenBound>,
-    /// 無駄合いを数えない数え方で、局面がこの手数以内に詰む
-    mates: Vec<LenBound>,
-    /// 無駄合いの判定の結果
-    futility: Vec<Futility>,
+    slots: OnceLock<Slots>,
     /// 鍵に混ぜる値。数え方を変えるたびに変えて、表を書き換えずに前の値を無効にする
-    salt: u64,
+    salt: AtomicU64,
+}
+
+struct Slots {
+    /// 局面からこの手数以内には詰まない
+    len_bounds: Box<[Slot]>,
+    /// 無駄合いを数えない数え方で、局面がこの手数以内に詰む
+    mates: Box<[Slot]>,
+    /// 無駄合いの判定の結果 (`Futility::pack`)
+    futility: Box<[Slot]>,
+}
+
+/// 表の 1 件。スレッド間で鍵の照合と値の読み書きを分けずに済むよう、鍵を値と XOR して書く。
+/// 書き込みの途中を読んでも鍵が一致しないので、別の局面の値を使うことはない。
+#[derive(Default)]
+struct Slot {
+    check: AtomicU64,
+    data: AtomicU64,
+}
+
+impl Slot {
+    fn get(&self, salted: u64) -> Option<u64> {
+        let data = self.data.load(Ordering::Relaxed);
+        (self.check.load(Ordering::Relaxed) ^ data == salted).then_some(data)
+    }
+
+    fn set(&self, salted: u64, data: u64) {
+        self.data.store(data, Ordering::Relaxed);
+        self.check.store(salted ^ data, Ordering::Relaxed);
+    }
+}
+
+fn new_slots(size: usize) -> Box<[Slot]> {
+    (0..size).map(|_| Slot::default()).collect()
 }
 
 impl ShortestTables {
     pub fn new() -> Self {
         Self {
-            len_bounds: Vec::new(),
-            mates: Vec::new(),
-            futility: Vec::new(),
-            salt: 0,
+            slots: OnceLock::new(),
+            salt: AtomicU64::new(0),
         }
     }
 
-    /// (初めてなら確保して) 空にする
-    fn reset(&mut self) {
-        if self.len_bounds.is_empty() {
-            self.len_bounds.resize(LEN_BOUNDS_SIZE, LenBound::default());
-            self.mates.resize(LEN_BOUNDS_SIZE, LenBound::default());
-            self.futility.resize(FUTILITY_SIZE, Futility::default());
-        }
-        self.salt = self.salt.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    /// (初めてなら確保して) 空にする。探索中に呼ばない
+    fn reset(&self) {
+        self.slots.get_or_init(|| Slots {
+            len_bounds: new_slots(LEN_BOUNDS_SIZE),
+            mates: new_slots(LEN_BOUNDS_SIZE),
+            futility: new_slots(FUTILITY_SIZE),
+        });
+        self.salt.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
     }
 
-    fn get(table: &[LenBound], salt: u64, key: u64) -> Option<u16> {
-        let e = table.get(key as usize & (LEN_BOUNDS_SIZE - 1))?;
-        (e.key == key ^ salt).then_some(e.bound)
+    fn salted(&self, key: u64) -> u64 {
+        key ^ self.salt.load(Ordering::Relaxed)
+    }
+
+    fn get(&self, table: fn(&Slots) -> &[Slot], key: u64) -> Option<u64> {
+        let table = table(self.slots.get()?);
+        table[key as usize & (table.len() - 1)].get(self.salted(key))
     }
 
     /// 同じ局面の値があれば `keep` で残す方を選ぶ
-    fn put(table: &mut [LenBound], salt: u64, key: u64, bound: u16, keep: fn(u16, u16) -> u16) {
-        let salted = key ^ salt;
-        let Some(e) = table.get_mut(key as usize & (LEN_BOUNDS_SIZE - 1)) else {
+    fn put(&self, table: fn(&Slots) -> &[Slot], key: u64, bound: u16, keep: fn(u16, u16) -> u16) {
+        let Some(slots) = self.slots.get() else {
             return;
         };
-        if e.key == salted {
-            e.bound = keep(e.bound, bound);
-        } else {
-            *e = LenBound { key: salted, bound };
-        }
+        let table = table(slots);
+        let salted = self.salted(key);
+        let slot = &table[key as usize & (table.len() - 1)];
+        let bound = match slot.get(salted) {
+            Some(old) => keep(old as u16, bound),
+            None => bound,
+        };
+        slot.set(salted, u64::from(bound));
     }
 
     /// 局面 `key` が何手以内に詰まないと分かっているか
     fn len_bound(&self, key: u64) -> Option<u16> {
-        Self::get(&self.len_bounds, self.salt, key)
+        self.get(|s| &s.len_bounds, key).map(|v| v as u16)
     }
 
-    fn store_len_bound(&mut self, key: u64, bound: u16) {
-        Self::put(&mut self.len_bounds, self.salt, key, bound, u16::max);
+    fn store_len_bound(&self, key: u64, bound: u16) {
+        self.put(|s| &s.len_bounds, key, bound, u16::max);
     }
 
     /// 局面 `key` が何手以内に詰むと分かっているか
     pub(super) fn mate_len(&self, key: u64) -> Option<u16> {
-        Self::get(&self.mates, self.salt, key)
+        self.get(|s| &s.mates, key).map(|v| v as u16)
     }
 
-    fn store_mate_len(&mut self, key: u64, len: u16) {
-        Self::put(&mut self.mates, self.salt, key, len, u16::min);
+    fn store_mate_len(&self, key: u64, len: u16) {
+        self.put(|s| &s.mates, key, len, u16::min);
+    }
+
+    fn futility(&self, key: u64) -> Option<Futility> {
+        self.get(|s| &s.futility, key).map(Futility::unpack)
+    }
+
+    fn store_futility(&self, key: u64, futility: Futility) {
+        if let Some(slots) = self.slots.get() {
+            let table = &slots.futility;
+            table[key as usize & (table.len() - 1)].set(self.salted(key), futility.pack());
+        }
     }
 }
 
-/// `ShortestTables::futility` の 1 件: 局面・合駒・上限の組 `key` が無駄合いなら証明駒 `proof`
-#[derive(Clone, Copy, Default)]
+/// 無駄合いの判定の結果: 無駄合いなら証明駒 `proof` と、合駒を取って戻した局面の詰み手数 `len`
+#[derive(Clone, Copy)]
 struct Futility {
-    key: u64,
     futile: bool,
     proof: Hand,
-    /// 合駒を取って戻した局面の詰み手数
     len: u16,
 }
 
-/// `ShortestTables::futility` の要素数 (2 の冪)
-const FUTILITY_SIZE: usize = 1 << 16;
+impl Futility {
+    fn pack(self) -> u64 {
+        u64::from(self.futile) | u64::from(self.len) << 16 | u64::from(self.proof.raw()) << 32
+    }
 
-/// `ShortestTables` の手数の表の 1 局面分
-#[derive(Clone, Copy, Default)]
-struct LenBound {
-    key: u64,
-    bound: u16,
+    fn unpack(v: u64) -> Self {
+        Self {
+            futile: v & 1 != 0,
+            len: (v >> 16) as u16,
+            proof: Hand::from_raw((v >> 32) as u32),
+        }
+    }
 }
+
+/// `ShortestTables` の無駄合いの表の要素数 (2 の冪)
+const FUTILITY_SIZE: usize = 1 << 16;
 
 /// `ShortestTables` の手数の表の要素数 (2 の冪)
 const LEN_BOUNDS_SIZE: usize = 1 << 20;
@@ -420,7 +468,9 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     /// 最短手順モードで無駄合いを詰み手数に数えない
     futility: bool,
     /// 最短手順モードの表
-    tables: Option<&'a RefCell<ShortestTables>>,
+    tables: Option<&'a ShortestTables>,
+    /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
+    helpers: &'a mut [Scratch<S::Mv>],
 }
 
 /// `Searcher::solve_detached` の結果
@@ -485,6 +535,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             shortest: false,
             futility: false,
             tables: None,
+            helpers: &mut [],
         }
     }
 
@@ -492,15 +543,41 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// `tables` に覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。
     /// `futility` では、詰みは置換表に書かず `tables` に局面の完全一致で書く (`ShortestTables`)。
     /// 覚えた値は無駄合いの数え方で変わるので、呼ぶたびに捨てる。
-    pub fn enable_shortest(&mut self, futility: bool, tables: &'a RefCell<ShortestTables>) {
+    pub fn enable_shortest(&mut self, futility: bool, tables: &'a ShortestTables) {
         self.shortest = true;
         self.futility = futility;
-        tables.borrow_mut().reset();
+        tables.reset();
         self.tables = Some(tables);
     }
 
+    /// `search_shared` で使う補助スレッドの作業領域を渡す (スレッド数 − 1 個)
+    pub fn set_helpers(&mut self, helpers: &'a mut [Scratch<S::Mv>]) {
+        self.helpers = helpers;
+    }
+
+    /// 探索の設定 (`search_shared` の各スレッドにそろえる)
+    fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
+        (
+            self.estimate,
+            self.weak_disproof_step,
+            self.shortest,
+            self.futility,
+            self.tables,
+        )
+    }
+
+    fn apply_settings(&mut self, settings: (bool, u64, bool, bool, Option<&'a ShortestTables>)) {
+        (
+            self.estimate,
+            self.weak_disproof_step,
+            self.shortest,
+            self.futility,
+            self.tables,
+        ) = settings;
+    }
+
     fn len_bound(&self, key: u64) -> Option<u16> {
-        self.tables.and_then(|t| t.borrow().len_bound(key))
+        self.tables.and_then(|t| t.len_bound(key))
     }
 
     /// 置換表に無い子の pn/dn を局面から見積もる (df-pn+)。詰む問題ではノードが大きく減るが、
@@ -817,7 +894,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             && result.is_len_bounded()
             && let Some(tables) = self.tables
         {
-            tables.borrow_mut().store_len_bound(key.key, len_limit);
+            tables.store_len_bound(key.key, len_limit);
         }
         if self.capture_depth == Some(depth) {
             self.capture_depth = None;
@@ -897,7 +974,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 let mut usable = probed.filter(|v| v.pn != 0 || v.mate_len <= child_len_limit);
                 if self.futility
                     && usable.is_none_or(|v| v.pn != 0)
-                    && let Some(len) = self.tables.and_then(|t| t.borrow().mate_len(child_key))
+                    && let Some(len) = self.tables.and_then(|t| t.mate_len(child_key))
                     && len <= child_len_limit
                 {
                     usable = Some(TableValue {
@@ -994,12 +1071,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         // 同じ判定を探索中に何度も繰り返すので覚えておく
         let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-            .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
-            ^ tables.borrow().salt;
-        let slot = memo_key as usize & (FUTILITY_SIZE - 1);
-        if let Some(e) = tables.borrow().futility.get(slot)
-            && e.key == memo_key
-        {
+            .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+        if let Some(e) = tables.futility(memo_key) {
             return Ok(e.futile.then_some((e.proof, e.len)));
         }
         st.do_move(drop);
@@ -1012,15 +1085,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         {
             found = None;
         }
-        if let Some(e) = tables.borrow_mut().futility.get_mut(slot) {
-            let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
-            *e = Futility {
-                key: memo_key,
+        let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
+        tables.store_futility(
+            memo_key,
+            Futility {
                 futile: found.is_some(),
                 proof,
                 len,
-            };
-        }
+            },
+        );
         Ok(found)
     }
 
@@ -1202,6 +1275,104 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
             _ => Ok(Detached::Escaped),
         }
+    }
+
+    /// 局面 `st` を閾値なしで、補助スレッドと置換表・最短手順モードの表を共有して読む (補助が無ければ
+    /// `search` と同じ)。どれかのスレッドが結論を出したらほかを止める。探索の途中 (フレームの中) からは呼べない。
+    pub fn search_shared(&mut self, st: &mut S, args: NodeArgs) -> Result<NodeResult, Abort>
+    where
+        S: Clone + Send,
+    {
+        if self.helpers.is_empty() {
+            return self.search(st, args, &mut 0);
+        }
+        let halt = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        // この探索器の上限の残りを全スレッドの合計に掛ける
+        let limit = match self.budget.node_limit {
+            0 => 0,
+            limit => limit.saturating_sub(self.nodes).max(1),
+        };
+        let shared_nodes = AtomicU64::new(0);
+        let (table, attacker, settings) = (self.table, self.attacker, self.settings());
+        let (stop, start, time_limit_ms) =
+            (self.budget.stop, self.budget.start, self.budget.time_limit_ms);
+        let slots: Vec<OnceLock<(Result<NodeResult, Abort>, u64)>> =
+            (0..self.helpers.len()).map(|_| OnceLock::new()).collect();
+        let helpers: Vec<Box<dyn FnOnce() + Send + '_>> = self
+            .helpers
+            .iter_mut()
+            .zip(&slots)
+            .enumerate()
+            .map(|(i, (scratch, slot))| {
+                let mut st = st.clone();
+                let (halt, cancel, shared_nodes) = (&halt, &cancel, &shared_nodes);
+                Box::new(move || {
+                    let mut quiet = |_| {};
+                    let budget = Budget {
+                        stop,
+                        halt: Some(halt),
+                        cancel: Some(cancel),
+                        shared_nodes: Some((shared_nodes, limit)),
+                        node_limit: 0,
+                        time_limit_ms,
+                        start,
+                        progress: &mut quiet,
+                    };
+                    let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
+                    sub.apply_settings(settings);
+                    let (num, den) = super::HELPER_SLACKS[i % super::HELPER_SLACKS.len()];
+                    sub.set_threshold_slack(num, den);
+                    sub.set_tie_seed(i as u32 + 1);
+                    let result = sub.search(&mut st, args, &mut 0);
+                    if result.is_ok() {
+                        halt.store(true, Ordering::Relaxed);
+                    }
+                    let _ = slot.set((result, sub.nodes));
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        let base = self.nodes;
+        let next_progress_ms = self.next_progress_ms;
+        let parent_progress = &mut *self.budget.progress;
+        let scratch = &mut *self.scratch;
+        let (main_result, main_nodes, next_progress_ms) =
+            super::run_with_helpers(helpers, &cancel, || {
+                let mut forward = |p: MateProgress| {
+                    parent_progress(MateProgress {
+                        nodes: base + p.nodes,
+                        ..p
+                    })
+                };
+                let budget = Budget {
+                    stop,
+                    halt: Some(&halt),
+                    cancel: Some(&cancel),
+                    shared_nodes: Some((&shared_nodes, limit)),
+                    node_limit: 0,
+                    time_limit_ms,
+                    start,
+                    progress: &mut forward,
+                };
+                let mut sub = Searcher::<S, PIECES>::new(table, scratch, attacker, budget);
+                sub.apply_settings(settings);
+                sub.next_progress_ms = next_progress_ms;
+                let result = sub.search(st, args, &mut 0);
+                // 先に結論を出した補助スレッドも、打ち切られた補助スレッドも、ここで止める
+                halt.store(true, Ordering::Relaxed);
+                (result, sub.nodes, sub.next_progress_ms)
+            });
+        self.next_progress_ms = next_progress_ms;
+        let mut result = main_result;
+        self.nodes += main_nodes;
+        for slot in slots {
+            let (r, n) = slot.into_inner().unwrap_or((Err(Abort), 0));
+            self.nodes += n;
+            if result.is_err() && r.is_ok() {
+                result = r;
+            }
+        }
+        result
     }
 
     /// 現在のフレームの子 (`scratch.moves` と同じ順) で後回しの組を作り、組の中で前の手が
@@ -1472,7 +1643,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         }
         if self.futility && result.is_proven() {
             if let Some(tables) = self.tables {
-                tables.borrow_mut().store_mate_len(key.key, result.mate_len);
+                tables.store_mate_len(key.key, result.mate_len);
             }
             return;
         }

@@ -30,7 +30,6 @@ mod shortest_tests;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -166,7 +165,7 @@ pub struct DfpnSolver {
     /// 最短手順モード (`None` は通常の詰み判定)
     shortest: Option<ShortestMode>,
     /// 最短手順モードの表 (最初に使うときに確保する)
-    shortest_tables: RefCell<ShortestTables>,
+    shortest_tables: ShortestTables,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -175,7 +174,8 @@ const PARALLEL_START_NODES: u64 = 10_000;
 /// 2 番目以降のスレッドの 1+ε の余裕 (2 番目の子の φ に掛ける分数)。1 番目は既定の 1/3。
 /// 局面ごとのノード数は探索の経路で大きく変わるので、少しずらしたスレッドどうしで置換表を共有すると、
 /// 先に解けたスレッドの結論を使える
-const HELPER_SLACKS: [(u64, u64); 7] = [(1, 4), (2, 5), (1, 5), (3, 10), (3, 8), (2, 7), (9, 20)];
+pub(super) const HELPER_SLACKS: [(u64, u64); 7] =
+    [(1, 4), (2, 5), (1, 5), (3, 10), (3, 8), (2, 7), (9, 20)];
 
 impl DfpnSolver {
     /// 置換表を `hash_mb` MB で確保した、既定のモード ([`MateMode::Power`]) のソルバーを作る
@@ -194,7 +194,7 @@ impl DfpnSolver {
             helper_scratch: Vec::new(),
             parallel_start: PARALLEL_START_NODES,
             shortest: None,
-            shortest_tables: RefCell::new(ShortestTables::new()),
+            shortest_tables: ShortestTables::new(),
         }
     }
 
@@ -211,7 +211,8 @@ impl DfpnSolver {
     ///   (手順を縮める探索を手ごとのノード数の予算で打ち切る。駒余りは比べない)。
     ///
     /// 判定 (詰み・不詰) は通常と同じで、手順を求める分だけ時間とノードが増える。手順を求め終わる前に
-    /// 制限に達したら [`MateResult::Unknown`]。手順を求める段階は 1 スレッドで解く。
+    /// 制限に達したら [`MateResult::Unknown`]。手順を求める段階のうち、上限付きで根や手順上の局面を読み切る
+    /// 探索は判定と同じスレッド数で解き、手順を選ぶ探索は 1 スレッドで解く。
     pub fn set_shortest(&mut self, shortest: Option<ShortestMode>) {
         self.shortest = shortest;
     }
@@ -357,9 +358,13 @@ impl DfpnSolver {
             progress: &mut continued,
         };
         let attacker = st.position().side_to_move();
+        // 正解手順を求める段階の重い探索 (`Searcher::search_shared`) も、判定と同じスレッド数で読む
+        self.helper_scratch.resize_with(self.threads - 1, Scratch::new);
+        self.table.set_concurrent(self.threads > 1);
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
+        searcher.set_helpers(&mut self.helper_scratch);
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
         }
@@ -369,6 +374,7 @@ impl DfpnSolver {
             shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode)
         };
         self.nodes = judged_nodes + searcher.nodes();
+        self.table.set_concurrent(false);
         pv.ok().flatten().map(SolveOutcome::Mate)
     }
 
@@ -609,7 +615,7 @@ fn wait_for_helpers(
 
 /// `helpers` を別のスレッドで動かしながら `main` を呼び出したスレッドで動かし、すべて終わるのを待つ
 #[cfg(not(target_arch = "wasm32"))]
-fn run_with_helpers<'a, R>(
+pub(super) fn run_with_helpers<'a, R>(
     helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
     cancel: &AtomicBool,
     main: impl FnOnce() -> R,
@@ -630,7 +636,7 @@ fn run_with_helpers<'a, R>(
 /// (進捗の通知は呼び出したスレッドでしか呼べない)。呼び出したスレッドは補助の終わりを待ってブロックするので、
 /// ブラウザのメインスレッドからは呼べない (Worker から呼ぶ)。
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-fn run_with_helpers<'a, R>(
+pub(super) fn run_with_helpers<'a, R>(
     helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
     cancel: &AtomicBool,
     main: impl FnOnce() -> R,
@@ -646,7 +652,7 @@ fn run_with_helpers<'a, R>(
 
 /// スレッドの無い wasm では補助スレッドを使わない (`set_threads` で 1 に抑えてある)
 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-fn run_with_helpers<'a, R>(
+pub(super) fn run_with_helpers<'a, R>(
     helpers: Vec<Box<dyn FnOnce() + Send + 'a>>,
     cancel: &AtomicBool,
     main: impl FnOnce() -> R,

@@ -561,7 +561,6 @@ fn futility_counted_mates_are_not_shared_across_hands() {
     use super::state::MateState;
     use super::table::MateTable;
     use crate::time::Instant;
-    use std::cell::RefCell;
 
     // ▲9一飛の後: 受け方の応手は無駄合いの歩打ちだけなので、無駄合いを数えなければ 0 手で詰み
     let mut pos = position("8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1");
@@ -580,14 +579,14 @@ fn futility_counted_mates_are_not_shared_across_hands() {
         progress: &mut progress,
     };
     let table = MateTable::new(1, true);
-    let tables = RefCell::new(ShortestTables::new());
+    let tables = ShortestTables::new();
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     searcher.enable_shortest(true, &tables);
     let result = searcher.search(&mut pos, NodeArgs::unbounded(0, false, 0), &mut 0).unwrap();
     assert!(result.is_proven());
     let key = pos.table_key(attacker);
-    assert_eq!(tables.borrow().mate_len(key.key), Some(0));
+    assert_eq!(tables.mate_len(key.key), Some(0));
     for hand in [key.hand, key.hand.add(PieceType::Gold)] {
         let probed = table.probe::<true>(super::table::TableKey { hand, ..key });
         assert!(probed.is_none_or(|v| v.pn != 0), "{hand:?}: {probed:?}");
@@ -602,7 +601,6 @@ fn recapturable_interpositions_are_effective() {
     use super::state::MateState;
     use super::table::MateTable;
     use crate::time::Instant;
-    use std::cell::RefCell;
 
     let sfen = "g7k/RP7/6G2/8P/9/9/9/9/4K4 b p 1";
     assert_matches_reference(sfen, 3);
@@ -631,7 +629,7 @@ fn recapturable_interpositions_are_effective() {
         progress: &mut progress,
     };
     let table = MateTable::new(1, true);
-    let tables = RefCell::new(ShortestTables::new());
+    let tables = ShortestTables::new();
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     searcher.enable_shortest(true, &tables);
@@ -667,7 +665,6 @@ fn futility_checks_forward_progress() {
     use super::state::MateState;
     use super::table::MateTable;
     use crate::time::Instant;
-    use std::cell::RefCell;
 
     // 85 手詰の途中の受け方の局面。上限 20 手での合駒の判定で、合駒を取って戻した局面などを別に解く
     let mut pos = position(
@@ -690,7 +687,7 @@ fn futility_checks_forward_progress() {
         progress: &mut progress,
     };
     let table = MateTable::new(16, true);
-    let tables = RefCell::new(ShortestTables::new());
+    let tables = ShortestTables::new();
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     configure(&mut searcher, MateMode::Power);
@@ -743,7 +740,6 @@ fn all_mode_does_not_search_futility() {
     use super::state::MateState;
     use super::table::MateTable;
     use crate::time::Instant;
-    use std::cell::RefCell;
 
     // ▲9一飛の後の歩の合駒は、詰将棋のルールでは無駄合い
     let mut pos = position("8k/6S2/7G1/9/9/9/9/9/R3K4 b 2p 1");
@@ -767,7 +763,7 @@ fn all_mode_does_not_search_futility() {
         progress: &mut progress,
     };
     let table = MateTable::new(1, true);
-    let tables = RefCell::new(ShortestTables::new());
+    let tables = ShortestTables::new();
     let mut scratch = Scratch::new();
     let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
     searcher.enable_shortest(false, &tables);

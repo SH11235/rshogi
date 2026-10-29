@@ -30,7 +30,7 @@ pub(super) const PNDN_UNIT: u32 = 2;
 /// df-pn が局面に求める操作
 pub(super) trait MateState: Send + Sized + 'static {
     /// 指し手
-    type Mv: Copy + Eq;
+    type Mv: Copy + Eq + Send;
 
     /// 局面全体のキー (盤面・手番・持駒。経路の反復判定に使う)
     fn key(&self) -> u64;

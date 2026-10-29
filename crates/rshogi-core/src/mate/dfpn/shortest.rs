@@ -23,7 +23,6 @@
 //! 空になるものがあるかで決める (攻め方も余らない手順を選ぶ)。この探索の制限の中で、余らない手順が
 //! 無いと分かるまで候補を調べる (攻め方の持駒が残りの攻め方の手数より多ければ必ず余るので調べない)。
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::search::{Abort, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
@@ -44,10 +43,10 @@ const ROOT_DISPROOF_BUDGET: u64 = if cfg!(test) { 30 } else { 20_000_000 };
 
 /// 根 (攻め方の手番、詰みを証明して置換表に残っている) の正解手順を求める。
 /// 探索の結果が食い違って手順を作れなければ `None`。局面は呼び出し前の状態に戻して返る。
-pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
+pub(super) fn shortest_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
-    tables: &'a RefCell<ShortestTables>,
+    tables: &'a ShortestTables,
     mode: ShortestMode,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     // 無駄合いを数えない手数は、すべての応手を数える手数以下。先に無駄合いの判定の要らない数え方で
@@ -100,10 +99,10 @@ pub(super) fn shortest_pv<'a, S: MateState, const PIECES: bool>(
 ///   攻め方の局面で手順以外の王手を先に読みに行き、長編では桁違いに重くなることがある。
 /// - 詰まないことの証明: 根で予算内に読み切れなければ、手順上の攻め方の局面を末端から根へ、残りの手数 − 2 を
 ///   上限にして読み切ってから根を読む (上限付きの不詰は局面ごとに覚えているので、根の探索が手順の先で使う)。
-fn tsume_len<'a, S: MateState, const PIECES: bool>(
+fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'a, S, PIECES>,
     st: &mut S,
-    tables: &'a RefCell<ShortestTables>,
+    tables: &'a ShortestTables,
     len: u16,
 ) -> Result<u16, Abort> {
     // すべての応手を数える手数は詰将棋のルールの手数以上なので、縮めた手数も上限に使える。最後の縮められない
@@ -111,7 +110,7 @@ fn tsume_len<'a, S: MateState, const PIECES: bool>(
     let mut len = len;
     while len >= 3 {
         let r = searcher.within(ALL_STEP_BUDGET, |s| {
-            s.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0)
+            s.search_shared(st, NodeArgs::unbounded(0, true, len - 2))
         })?;
         match r {
             Some(r) if r.is_proven() => len = r.mate_len,
@@ -128,7 +127,7 @@ fn tsume_len<'a, S: MateState, const PIECES: bool>(
         len = pv.len() as u16;
         if len >= 3 {
             let r = searcher.within(ROOT_DISPROOF_BUDGET, |s| {
-                s.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0)
+                s.search_shared(st, NodeArgs::unbounded(0, true, len - 2))
             })?;
             if r.is_none() {
                 disprove_backward(searcher, st, &pv)?;
@@ -168,7 +167,7 @@ fn prove_backward<S: MateState, const PIECES: bool>(
 }
 
 /// 手順上の攻め方の局面を末端から根へ、残りの手数 − 2 を上限にして読む
-fn disprove_backward<S: MateState, const PIECES: bool>(
+fn disprove_backward<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     pv: &[S::Mv],
@@ -182,7 +181,7 @@ fn disprove_backward<S: MateState, const PIECES: bool>(
         if i % 2 == 1 || remaining < 3 {
             continue;
         }
-        let r = searcher.search(st, NodeArgs::unbounded(0, true, (remaining - 2) as u16), &mut 0);
+        let r = searcher.search_shared(st, NodeArgs::unbounded(0, true, (remaining - 2) as u16));
         if let Err(abort) = r {
             for &mv in pv[..i].iter().rev() {
                 st.undo_move(mv);
@@ -194,13 +193,13 @@ fn disprove_backward<S: MateState, const PIECES: bool>(
 }
 
 /// `len` 手以内に詰む根から、上限を 2 手ずつ減らして証明できる最短の手数を求める
-fn descend<S: MateState, const PIECES: bool>(
+fn descend<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     mut len: u16,
 ) -> Result<u16, Abort> {
     while len >= 3 {
-        let r = searcher.search(st, NodeArgs::unbounded(0, true, len - 2), &mut 0)?;
+        let r = searcher.search_shared(st, NodeArgs::unbounded(0, true, len - 2))?;
         if !r.is_proven() {
             break;
         }
