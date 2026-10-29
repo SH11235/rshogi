@@ -176,7 +176,6 @@ L0=1536 / 3072 系などで `nnue-progress-diff` を含む。progresskpabs の b
 tools の `layerstack-arch` と、rshogi-core に渡したのと同じ寸法・FT の slot を tools の feature
 (`layerstacks-<寸法>` / `ft-<FT>`、`rshogi-core/` を付けない) で足す。
 
-
 ## オプションリファレンス
 
 ### 共通

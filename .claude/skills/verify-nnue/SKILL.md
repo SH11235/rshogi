@@ -144,9 +144,9 @@ Threat profile 付き net では rshogi も同じ profile feature で build す�
 
 ```bash
 cargo build --release -p tools --no-default-features \
-  --features layerstacks-768x16x32,nnue-threat,threat-profile-same-class
+  --features layerstack-arch,layerstacks-768x16x32,ft-halfka_hm_merged,nnue-threat,threat-profile-same-class
 cargo build --release -p rshogi-usi --no-default-features \
-  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
+  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/ft-halfka_hm_merged,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
 ```
 
 `threat-profile-same-class` は対象 profile の feature に全て置き換える。
