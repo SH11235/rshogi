@@ -165,6 +165,10 @@ preset に無い構成は atomic feature を直接並べる。各軸の slot は
 (`1536x16x32` など)。LayerStacks の `layerstack-arch` は寸法と FT の slot が無いと build エラーになる。
 build に含まれない構成の NNUE は読み込み時にエラーになる。
 
+静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` 等) も同じ構成で build するときは、
+tools の `layerstack-arch` と、rshogi-core に渡したのと同じ寸法・FT の slot を tools の feature
+(`layerstacks-<寸法>` / `ft-<FT>`、`rshogi-core/` を付けない) で足す。
+
 
 ## オプションリファレンス
 
