@@ -11,6 +11,10 @@ user-invocable: true
 直 URL を公開しないため、到達経路は `wrangler.{staging,production}.toml` の `routes`
 が宣言する Custom Domain のみ。fork は自分の route の host に読み替える。
 
+既定の対象は staging。production に対しては、user が production での実行を明示的に
+承認した場合だけ流す (deploy・ADMIN 操作を伴うシナリオも同様)。`CLOCK_PRESETS` を編集する
+シナリオ G は production では行わない。
+
 ## 0a. シナリオ選定 (どの change にどの scenario を流すか)
 
 7 シナリオすべてを毎回流す必要はない。**変更した経路に対応する subset** を
@@ -118,7 +122,13 @@ mkdir -p "$RUN"
 ### 1-A. CLI プリセット (`--target`) で TOML なし起動
 
 最短経路。本リポ同梱 Worker 限定。`--max-games 1` で 1 局終了で client が自動
-quit する。`<room_id>` は黒/白で完全一致、`<preset>` も完全一致 (黒/白 LOGIN
+quit する。`--target` は `staging` / `production` の 2 値で、接続先 hostname は
+csa_client に固定されている (`crates/rshogi-csa-client/src/main.rs` の `TargetPreset`)。
+`WRANGLER` を変えても接続先は変わらないので、production を対象にするときは下記の
+`--target staging` を `--target production` に変える。fork など `CSA_HOST` がこの repo の
+hostname と異なる Worker では 1-A は使えず、1-B (TOML の `server.host`) で接続する。
+
+`<room_id>` は黒/白で完全一致、`<preset>` も完全一致 (黒/白 LOGIN
 のマッチング条件)。
 
 ```bash
@@ -375,8 +385,38 @@ CLOCK_PRESETS = '''[
 ]'''
 ```
 
+preset の追加は対象の Worker の再 deploy を伴う。production では行わない (冒頭の「production で
+流す条件」の例外)。staging では編集する前に元の preset 一覧を保存しておく:
+
+```bash
+grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
+```
+
 各 preset で 1 局ずつ走らせ、Game_Summary `BEGIN Time` セクションの `Time_Unit` /
 `Total_Time` / `Byoyomi`/`Increment` が想定値であることを確認する。
+
+検証後は共有 staging を元の preset 構成へ戻す:
+
+1. `git diff -- "$WRANGLER"` で差分が追加した preset だけであることを確かめ、
+   `git restore -- "$WRANGLER"` で toml を戻す。
+   `grep -o '"game_name":"[^"]*"' "$WRANGLER" | diff - "$RUN/presets.before"` が差分なしになる
+2. 追加時と同じ deploy コマンドで再 deploy する。staging は drain の対象外
+   (`docs/csa-server/deployment.md` の §12.6。main への push でも自動 deploy され、そのときも
+   main の toml に戻る)
+3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通ることに加え、
+   次の tail を流した状態で、外した preset 名を `--game-name` にして 1-A の黒・白を起動する
+   (この確認では 1-A の例の末尾の `wait` を省き、黒・白の PID を記録して戻る):
+   ```bash
+   vp exec wrangler tail --config "$WRANGLER" --format json \
+     | jq -c '.logs[]?.message[]? | fromjson? // empty
+              | select(.event == "clock_spec_resolution_failed" and .game_name == "<外した preset 名>")'
+   ```
+   1 行でも出れば、未登録として対局が不成立になっている (preset を 1 件以上登録した Worker は未登録の
+   `game_name` の対局を成立させない。`crates/rshogi-csa-server-workers/src/game_room.rs` の
+   `resolve_game_preset_for_game`)。structured_log は `logs[].message[]` に JSON 文字列として入るので、
+   jq の `fromjson` で展開してから見る (`docs/csa-server/observability.md` の tail の節)。
+   client 側は Game_Summary 以外の行を info ログに残さず、不成立の後も再接続を繰り返して
+   `--max-games 1` でも終わらないので、確認できたら記録した PID で黒・白を止める
 
 ## 9. 後始末
 

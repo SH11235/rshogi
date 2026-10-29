@@ -9,6 +9,7 @@ user-invocable: true
 以下の指示に従い、指定されたエンジン間の対局を実行し結果を集計する。
 統計規範 (SPRT bounds・試行規律・採否判定) は本 SKILL の各節に記す。
 規範から逸脱する場合は実験 doc に理由を事前登録する。
+対応 OS は Linux / WSL2 (全手順) と Windows native (下記の各節で「Windows native」と明記した範囲)。
 モードは主に 3 つ:
 
 1. **総当たり (round-robin)** — 固定局数で全ペアを対局させて Elo 差・勝率を測る。デフォルト。
@@ -25,7 +26,7 @@ user-invocable: true
 - **確認ポイント**: 特に注目する比較（例: "E vs D: TT 16bit の棋力効果"）
 
 ### デフォルト値（指定がなければ以下を使用）
-- **開始局面**: `--startpos-file data/startpos/start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること。他の候補: `data/startpos/start_sfens_ply24.txt`, `data/startpos/taya36.sfen`。これらは local 専用 (gitignored `data/` 配下) で、他の contributor の環境には存在しないので skill 側で必要なら個別に配置する）
+- **開始局面**: `--startpos-file data/startpos/start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること。他の候補: `data/startpos/start_sfens_ply24.txt`, `data/startpos/taya36.sfen`。これらは local 専用 (gitignored `data/` 配下) で、他の contributor の環境には存在しないので skill 側で必要なら個別に配置する）。指定の startpos ファイルが存在しない (`test -s` が偽) 場合は、`--startpos-file` を外して平手で起動せず、ファイルの所在か代替の開始局面集を user に確認する
 - time control: 下記 (b) の 3 択から比較軸で選ぶ
 - スレッド: 1
 - ハッシュ: 256MB
@@ -45,9 +46,11 @@ user-invocable: true
 かかる。確認時は「現在の CPU 負荷状況 (同時稼働中の学習/ベンチの有無とスレッド数)」を
 添えて尋ねる。
 
-Linux / WSL2 で複数プロセスを並走させる場合は、開始前に `df -h /dev/shm` で空き容量も
+Linux / WSL2 で rshogi engine を 1 本以上 `--engine` に渡す場合は、開始前に `df -h /dev/shm` で空き容量も
 確認する。NNUE 共有重みの確保失敗は local heap へ無言でフォールバックし、片側だけの
-fallback が A/B の偽差を生み得るため、満杯・僅少なら解消するまで起動しない。正常時の
+fallback が A/B の偽差を生み得るため、満杯・僅少なら解消するまで起動しない。NNUE 共有重みは
+Linux 専用の機構 (`crates/rshogi-core/src/nnue/shared_weights.rs`。他 OS では no-op) なので、
+Windows native では `/dev/shm` 確認・wrapper・marker 検査はいずれも対象外。正常時の
 engine stderr は `tournament` が内部 buffer に取り込むだけで永続化しないため、下記の
 side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確認は
 「完了待ち・結果集計」の必須チェックに含める。
@@ -72,7 +75,7 @@ side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確
 
 search / FS / arch / 速度が変わる対局を固定ノードでやると、本来実戦強度に効く NPS 差を
 切り捨ててしまい、デプロイ実態と乖離する。
-**「前回固定ノードだったから今回も」と暗黙踏襲しない**。比較軸ごとに毎回選び直す。
+**「前回固定ノードだったから次も」と暗黙踏襲しない**。比較軸ごとに毎回選び直す。
 
 #### (c) SPRT 仮説と上限局数
 
@@ -114,6 +117,24 @@ search / FS / arch / 速度が変わる対局を固定ノードでやると、�
 FV_SCALE)、USI options、startpos ファイルと hash、seed、TC (nodes / byoyomi / btime+binc)、threads、
 hash、SPRT bounds と上限局数。加えて実行機・backend・raw log の所在も記録する。
 
+記録先は user の実験ノート (この repo には置かない)。user が置き場を指定していない場合は、
+起動前の会話内の報告に同じ項目を書いて代える。最低限の書式:
+
+```markdown
+## 事前登録: {PURPOSE} ({run 名 YYYYMMDD-HHMMSS-PURPOSE})
+- 目的 / 仮説: {確認ポイント。gainer / simplification の別}
+- engines: {label}: {binary path} @ {SHA} ({edition}, {profile}) — 各 engine 1 行
+- NNUE: {label}: {EvalFile} (FV_SCALE={値}) — 各 engine 1 行
+- USI options: {共通 --usi-option と engine 個別 --engine-usi-option}
+- startpos: {ファイル} (sha256={hash})
+- seed: {SEED}
+- TC: {--nodes N | --byoyomi MS | --btime MS --binc MS}、threads={N}、hash={MB}
+- SPRT: nelo0={} nelo1={} alpha={} beta={}、上限 --games {N} (各方向) / 固定局数なら局数
+- 実行機 / backend: {hostname 等} / {CPU backend 等}
+- raw log: {$OUT の絶対パス}
+- 規範からの逸脱と理由: {無ければ「なし」}
+```
+
 #### (f) startpos / engine USI option
 
 これらはモデル / 評価目的に依存。startpos は `data/startpos/start_sfens_ply32.txt`
@@ -138,6 +159,11 @@ hash、SPRT bounds と上限局数。加えて実行機・backend・raw log の�
 - Windows の junction / symlink、Linux の symlink を永続 root に使わない。
 - engine の build は worktree でよいが、`xtask` が作る標準
   `engines/rshogi-usi-<edition>` を使う。`sprt-runtime-*` 等の独自 runtime directory を作らない。
+- 同じ edition の 2 commit を比較する場合、`engines/rshogi-usi-<edition>` は同名で上書きされる。
+  commit ごとの worktree で `xtask build` し、各 worktree の `engines/` (xtask は自分の
+  workspace root 下に置く) の binary をそのまま `--engine` に渡す。起動前に各
+  `<binary>.meta.toml` の `commit` が比較対象の commit と一致し、`commit_dirty = false` であることを照合する。
+  下の stderr wrapper の例の `$PWD/engines/...` も、各 worktree の絶対パスに置き換える。
 - 起動 script では build repo と log root を同じ変数に畳み込まない。log root は上記 canonical
   root からのみ組み立てる。
 
@@ -214,7 +240,7 @@ mkdir -p "$OUT"
 
 #### Linux / WSL2: rshogi engine stderr の永続化
 
-複数の rshogi process を起動する run では、各 side の実 binary を `exec` する wrapper を
+Linux / WSL2 で rshogi engine を 1 本以上 `--engine` に渡す run では常に、各 rshogi side の実 binary を `exec` する wrapper を
 起動前に生成し、`tournament --engine` には実 binary でなく wrapper を渡す。wrapper は
 process ごとに `$OUT/engine-stderr/<side>-<unique>.log` を作るので、正常終了した process の
 共有重み marker も失われない。既存 process log が 1 件でもある `$OUT` では生成を拒否する。
@@ -228,8 +254,8 @@ TEST_ENGINE=$("$WRAP" "$OUT" test "$PWD/engines/rshogi-usi-{TEST_EDITION}") || e
 
 side 名は `base` / `test` に限らず engine label と対応する一意な名前にする。YaneuraOu など
 `nnue shared weights` marker を実装しない外部 engine は wrapper / marker 検査の対象外で、
-そのまま実 binary を `--engine` に渡す。Linux / WSL2 以外で wrapper が不要な場合は、
-`BASE_ENGINE=engines/rshogi-usi-{BASE_EDITION}` のように xtask 成果物を直接指定する。
+そのまま実 binary を `--engine` に渡す。Windows native では wrapper を使わず、
+`BASE_ENGINE=engines/rshogi-usi-{BASE_EDITION}.exe` のように xtask 成果物を直接指定する。
 
 ### 3. tournament バイナリで総当たり自己対局を実行
 
@@ -249,7 +275,7 @@ tournament の meta には指定したコマンドパス・ラベル・USI 設�
 
 `tournament` バイナリ1コマンドで、全ペアの総当たり対局を並列実行する。
 `--engine` を複数指定すると自動で C(N,2) ペアの対局を生成する。
-Linux / WSL2 で複数の rshogi process を使う場合、`{ENGINE_A}` 等には上で生成した
+Linux / WSL2 では、rshogi engine の `{ENGINE_A}` 等には上で生成した
 side 別 wrapper のパスを指定する。
 
 ```
@@ -275,11 +301,23 @@ cargo run -p tools --release --bin tournament -- \
   なるだけでなく、meta 行に `base_label` が記録され、後から `analyze_selfplay --sprt` を
   ラベル指定なしで実行しても base/test の役割が自動推定される。`--engine` の指定順に
   役割の意味は無い（ファイル名・meta の label_black/white は指定順のまま）。
+- `--base-label` は対局ペアを「基準を含むペアだけ」に絞る (`tournament.rs` の `base_idx`)。
+  3 エンジン以上で基準を含む総当たりをしたいときは `--base-label` を付けず、基準のラベルは
+  事前登録に書く。post-hoc では比較したいペアごとに、2 つのラベルと SPRT の 4 パラメータ
+  (`--sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta`) をすべて明示する。meta に
+  `base_label` も SPRT 情報も無いので、ラベルを省くと名前の推定に、パラメータを省くと
+  既定値 (nelo0=0, nelo1=5) の別の検定に落ちる:
+  ```
+  cargo run -p tools --release --bin analyze_selfplay -- "$OUT"/*.jsonl --sprt \
+    --sprt-base-label {BASE} --sprt-test-label {TEST} \
+    --sprt-nelo0 0 --sprt-nelo1 10 --sprt-alpha 0.05 --sprt-beta 0.05   # 例は gainer の標準 bounds
+  ```
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
   - `pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`（--engine 指定順の 0 始まり index + 整形した表示ラベル）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）。例: `pair-0-1__baseline-vs-pass-root-bonus.jsonl`
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
-数局で終わる確認 run 以外 (SPRT・数百局以上の評価) はセッションから切り離して起動し、PID を残す:
+数局で終わる確認 run 以外 (SPRT・数百局以上の評価) はセッションから切り離して起動し、PID を残す
+(Linux / WSL2。Windows native での切り離し起動・PID 監視の手順は未整備):
 
 ```bash
 nohup setsid -w bash -c 'echo $$ > "$1/PID"; shift; exec "$@"' _ "$OUT" \
@@ -348,7 +386,7 @@ nElo はペア単位 (同一開始局面・先後入替) で集計し、開始�
 - **`max_moves` 到達率**: `analyze_selfplay` 出力の `max_moves 到達率` 行を見る。
   到達率 0.1% 未満は現状維持、0.1% 以上は長手数局を
   調査し、1% 以上は bounds の解釈より先に上限または千日手等のルール処理を見直す。
-- **NNUE 共有重み** (Linux / WSL2 の複数 rshogi process run): wrapper を使った各 rshogi
+- **NNUE 共有重み** (Linux / WSL2 で rshogi engine を使う run): wrapper を使った各 rshogi
   side について、全 process log に `nnue shared weights [...]` の `shared` marker があり、
   `local` marker が無いことを確認する。missing / `local` が 1 件でもあれば結果を suspect
   扱いにし、原因を解消して再走する。marker 非対応の外部 engine は対象に含めない。

@@ -1,13 +1,13 @@
 ---
 name: edition-build
-description: "rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32 / 1024x16x32、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。"
+description: "rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 3072x16x64 等の L0xL1xL2 dim (網羅は `cargo xtask list-editions`)、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。"
 user-invocable: true
 ---
 
 # rshogi engine build / edition 管理スキル
 
 rshogi は HalfKP / HalfKA / HalfKA_HM (split / merged) などの feature-set、LayerStack
-1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32 / 1024x16x32 などの dim、PSQT / Threat 等の拡張、を
+1536x16x32 / 3072x16x64 などの dim (§5 の 3)、PSQT / Threat 等の拡張、を
 組み合わせた多数の architecture variant をサポートする。これらは Cargo feature の組合せで
 build し、preset として `xtask` から呼び出せる。
 
@@ -113,9 +113,12 @@ version 定数の正典は `crates/rshogi-core/src/nnue/constants.rs`。
 ls -la engines/<binary>
 cat engines/<binary>.meta.toml
 # edition / profile / commit / built_at が記録されている (features は edition 名から逆引き)
+git show <meta.toml の commit>:crates/rshogi-core/src/nnue/constants.rs | grep -i '<(a) の version>'
 ```
 
-ckpt 作成時点の rshogi commit より engine build commit が古ければ rebuild 必要。
+ckpt は rshogi 外の trainer で作られるため、ckpt 側から rshogi commit は観測できない。
+build commit の `constants.rs` に (a) の version 定数が無ければ rebuild 必要。有っても
+feature-set / dim / 拡張の対応は (c) の load test で判定する。
 
 ### (c) 試金石: usi-isready で load test
 
@@ -123,12 +126,21 @@ ckpt 作成時点の rshogi commit より engine build commit が古ければ re
 echo -e 'usi
 setoption name EvalFile value <ckpt.bin>
 setoption name FV_SCALE value <net の FV_SCALE>
-setoption name LS_BUCKET_MODE value progresskpabs
-setoption name LS_PROGRESS_BUCKETS value <routing bucket 数>
-setoption name LS_PROGRESS_COEFF value <progress.bin>
+<bucket mode ごとの setoption (下表)>
 isready
 quit' | timeout 30 engines/<binary> 2>&1 | grep -E 'readyok|Error|Unknown NNUE version|panic'
 ```
+
+| net | 追加する setoption |
+|---|---|
+| LayerStacks + progresskpabs (tatara の f32 係数) | `LS_BUCKET_MODE value progresskpabs` / `LS_PROGRESS_BUCKETS value <学習時の routing bucket 数>` / `LS_PROGRESS_COEFF value <progress.bin>` |
+| LayerStacks + progresskpabsq16 (YaneuraOu / BulletOu SFNN の整数 Q16 係数) | `LS_BUCKET_MODE value progresskpabsq16` / `LS_PROGRESS_BUCKETS` / `LS_PROGRESS_COEFF` をモデルの設定に合わせて。`progresskpabs` で代用しない (同じ係数ファイルを読めて `isready` も通るが、量子化境界で別の bucket を選ぶ。`crates/tools/docs/nnue-routing.md`) |
+| LayerStacks + kingrank9 (格納 bucket 数 9 の net) | `LS_BUCKET_MODE value kingrank9` のみ。`LS_PROGRESS_BUCKETS` / `LS_PROGRESS_COEFF` は付けると `isready` で拒否される |
+| 非 LayerStacks (`halfkp-crelu` 等の HalfKP / HalfKA) | なし (`EvalFile` と `FV_SCALE` だけ) |
+
+LayerStacks で `LS_BUCKET_MODE` を省くと既定が無いので `isready` で失敗する。
+`FV_SCALE` は (a) の arch 文字列に `fv_scale=N` があればその N で、`FV_SCALE` を 0 (既定) の
+ままにすると自動でその値を使う。arch 文字列に無い net は、モデル作成時に記録した値を明示する。
 
 `readyok` 確認できれば OK。`Unknown NNUE version: 0x...` 等の error が出たら `xtask
 build` で再構築。
@@ -144,9 +156,11 @@ feature は 5 カテゴリの組み合わせ:
 2. **architecture 経路** (LayerStack は必須): `layerstack-arch` (LayerStack network
    経路を含める。単一 arch の mode-specific build では HalfKP/HalfKA dispatch が外れ
    `evaluate_dispatch` を直接呼ぶ)
-3. **L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
+3. **L0×L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
    / `layerstacks-768x16x32` / `layerstacks-768x8x32` / `layerstacks-512x16x32`
-   / `layerstacks-1024x16x32`。複数同時指定は cycles +5.5% 退行
+   / `layerstacks-1024x16x32` / `layerstacks-3072x16x32` / `layerstacks-2304x16x64`
+   / `layerstacks-3072x16x64` / `layerstacks-1536x16x64` (rshogi-core `Cargo.toml` の
+   「LayerStack network L1 サイズ slot」が正典)。複数同時指定は cycles +5.5% 退行
 4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (build.rs が
    `mode-specific` + L0=1536 系 / 3072 系 / 2304x16x64 以外を拒否する。L0=768/512 では
    cache pressure 増加で cycles +2-6% 退行するため指定しない)
@@ -171,7 +185,7 @@ sed -n '/^\[features\]/,/^\[lib\]/p' crates/rshogi-core/Cargo.toml | grep -E '^[
 
 preset 名から逆引きできる。preset と等価な features は下表、または rshogi-core
 Cargo.toml の `edition-*` feature 定義で確認する (meta.toml の `features` は `--features` の追加分だけで、
-edition を構成する feature は載らない)。手動 build 列は `--no-default-features --features` に渡す値で、
+edition を構成する feature は載らない)。下表は代表例で、全 preset は `cargo xtask list-editions` で見る。手動 build 列は `--no-default-features --features` に渡す値で、
 preset がある構成は edition feature をそのまま使う (rshogi-usi の default は `edition-universal`)。
 
 | アーキ | preset 名 (`xtask build --edition`) | 手動 build features (`--no-default-features --features …`) |

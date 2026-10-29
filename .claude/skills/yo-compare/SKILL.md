@@ -1,6 +1,6 @@
 ---
 name: yo-compare
-description: "rshogi の指定モジュールを YaneuraOu の対応実装と比較し、差分をレビューする"
+description: "rshogi の指定モジュールを YaneuraOu の対応実装と比較し、差分をレビューする。「YO と比較して」「YO 準拠か確認して」「YaneuraOu との差分を見て」「YO と同じ挙動か」等のリクエストで使う。"
 user-invocable: true
 ---
 
@@ -27,7 +27,9 @@ rshogi の指定領域を YaneuraOu (YO) の対応実装と行単位で対照比
 rshogi のルートパス: `crates/rshogi-core/src/`
 YO のベースパス: YaneuraOu checkout の `source/`。環境変数 `$YO_DIR` が設定されていれば
 `$YO_DIR/source/` を使い、無ければユーザーに checkout の場所を聞く。推測したパスや
-別バージョンの YO を読まない。
+別バージョンの YO を読まない。比較の基準にする YO の commit / branch はユーザーの指定に従い、
+指定が無ければ checkout の現在の HEAD を基準にする。どちらの場合も
+`git -C "$YO_DIR" rev-parse HEAD` と `git -C "$YO_DIR" branch --show-current` の結果をレポートに記録する。
 
 | rshogi | YO | 領域 |
 |---|---|---|
@@ -43,8 +45,9 @@ YO のベースパス: YaneuraOu checkout の `source/`。環境変数 `$YO_DIR`
 | `mate/` (`drop_mate.rs`, `move_mate.rs`, `helpers.rs`, `tables.rs`) | `mate/mate1ply_without_effect.cpp` | 1手詰め |
 | `types/` (`piece.rs`, `piece_type.rs`, `moves.rs`, `square.rs` 等) | `types.h`, `position.h` | 基本型定義 |
 | `bitboard/` (`core.rs`, `tables.rs`, `check_candidate.rs`, `sliders.rs`) | `bitboard.cpp`, `bitboard.h` | Bitboard |
-| `position/` (`mod.rs`, `state.rs`, `sfen.rs`) | `position.cpp`, `position.h` | 局面管理 |
-| `eval/` | `eval/evaluate_bona_piece.cpp` | 評価関数 |
+| `position/` (`pos.rs`, `state.rs`, `sfen.rs`, `zobrist.rs` 等) | `position.cpp`, `position.h` | 局面管理 |
+| `eval/` (`material.rs`: 駒得・パス権評価, `eval_hash.rs`: 評価値キャッシュ) | `eval/evaluate_bona_piece.cpp` (対応は未確認。YO 側で Grep して確かめる) | 評価関数 (非 NNUE 部分) |
+| `nnue/` (`feature_transformer*.rs`, `layer_stacks.rs`, `network_*.rs`, `bona_piece*.rs` 等) | 未確認 (YO の `eval/` 配下で Grep して特定する) | NNUE 評価 |
 
 ## 比較手順
 
@@ -61,7 +64,8 @@ YO のベースパス: YaneuraOu checkout の `source/`。環境変数 `$YO_DIR`
 3. Read で該当コードを読み取り
 
 **YO ソースの注意点:**
-- `#if STOCKFISH` / `#else` 分岐がある場合、`#else` 側（将棋固有パス）を参照すること
+- `#if STOCKFISH` / `#else` の分岐は、将棋の build では `#else` 側 (将棋固有パス) が有効。edition 固有の define
+  が絡む分岐は、比較対象の YO の build で有効な define から経路を判断して読む
 - `moved_piece(m)` は `moved_piece_after(m)` のエイリアス（成り後の駒、Stockfish とは異なる）
 - `Depth = int` であり `ONE_PLY` は存在しない
 - `ss->inCheck` 時に `goto moves_loop` でeval計算〜pruningが全スキップされる設計
@@ -86,6 +90,15 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 | **INTENTIONAL** | rshogi 側で意図的に変更した部分 | 理由を記載 |
 | **YO_SPECIFIC** | YO 固有の機能で rshogi に不要 | 対応不要 |
 | **MISSING** | rshogi に未実装の YO 機能 | 要検討 |
+| **UNVERIFIED** | 動作差があるが、意図した変更かの根拠が見つからない | BUG か INTENTIONAL かを user に確認 |
+
+BUG と INTENTIONAL の判別は、次の証拠源で意図の有無を確かめてから行い、レポートに証拠を書く:
+
+- 該当箇所と周辺のコメント (YO との差を説明しているか)
+- `git log -L <開始>,<終了>:<ファイル>` / `git log -S '<コード片>'` で導入 commit を引き、commit message を読む
+- `search/tune_params.rs` の値は、`SPSA_*` option としてチューニング対象か、導入 commit が SPSA 等の調整結果か YO からの転記かを `git log -S '<値>'` で確かめる
+
+証拠が見つからない動作差は INTENTIONAL にも BUG にもせず UNVERIFIED に分類し、調べた証拠源を書く。
 
 ## 出力フォーマット
 
@@ -96,8 +109,8 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 
 ### 比較範囲
 
-- **rshogi**: `{ファイルパス}` L{開始}-L{終了}
-- **YO**: `{ファイルパス}` L{開始}-L{終了}
+- **rshogi**: `{ファイルパス}` L{開始}-L{終了} (commit `{rshogi の HEAD}`)
+- **YO**: `{ファイルパス}` L{開始}-L{終了} (commit `{YO の HEAD}`, branch `{branch}`)
 
 ### 対照表
 
@@ -109,9 +122,10 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 ### 差分一覧
 
 #### {差分1のタイトル}
-- **カテゴリ**: BUG / NAMING / INTENTIONAL / YO_SPECIFIC / MISSING
+- **カテゴリ**: BUG / NAMING / INTENTIONAL / YO_SPECIFIC / MISSING / UNVERIFIED
 - **rshogi**: `{コード}` ({ファイル}:L{行})
 - **YO**: `{コード}` ({ファイル}:L{行})
+- **証拠**: {コメント / commit / tune_params の由来。見つからなければ調べた証拠源 (UNVERIFIED)}
 - **影響**: {動作への影響の説明}
 - **推奨対応**: {対応方針}
 
@@ -120,8 +134,15 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 - 一致項目数: {N} / {total}
 - BUG: {件数}
 - MISSING: {件数}
+- UNVERIFIED: {件数}
 - 総合: {PASS / REVIEW_NEEDED / FIX_REQUIRED}
 ```
+
+総合判定の基準:
+
+- **FIX_REQUIRED**: BUG が 1 件以上
+- **REVIEW_NEEDED**: BUG が 0 件で、MISSING か UNVERIFIED が 1 件以上
+- **PASS**: 上記のいずれにも当たらない (差分が NAMING / 証拠付き INTENTIONAL / YO_SPECIFIC だけ)
 
 ## YaneuraOu USI の落とし穴
 
@@ -131,9 +152,8 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 - pipe で `go` の直後に `quit` を送ると探索が即中断する。`bestmove` を待ってから `quit` を送る。
 - 生の静的評価は `e` コマンド (`eval` ではない)。
 - `d` の盤面出力は unicode を含むので grep には `-a` を付ける。
-- 探索コードは `#if STOCKFISH` / `#else` で分岐している。将棋の動作は `#else` 側。
 
 ## 大規模な比較の場合
 
-対象領域が広い場合（alpha_beta 全体、mate 全体など）は、Task ツールで Explore エージェントを活用し、
-rshogi 側と YO 側の読み取りを並列化して効率的に比較すること。
+対象領域が広い場合（alpha_beta 全体、mate 全体など）は、並列のサブエージェントを使えるなら
+rshogi 側と YO 側の読み取りを分担させて並列化する。
