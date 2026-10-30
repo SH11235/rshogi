@@ -2118,6 +2118,10 @@ fn solve_returns_position_with_board_effects_rebuilt() {
         solve_in_mode(&mut pos, 1, 10_000, MateMode::Speed),
         MateResult::Mate(_)
     ));
+    // 利きを維持しない feature 構成では比べるものが無い
+    if !Position::should_update_board_effects() {
+        return;
+    }
     let fresh = position(&pos.to_sfen());
     for sq in crate::types::Square::all() {
         for c in [Color::Black, Color::White] {

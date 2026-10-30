@@ -96,7 +96,6 @@ pub struct Position {
     long_effects: LongEffects,
     /// board_effectsが最新かどうか（手動配置時の整合性維持用）
     board_effects_dirty: bool,
-    /// do_move / undo_move で利きを更新しない (`pause_board_effects`)
     board_effects_paused: bool,
 
     // === 合成Bitboard（attackers_to_occ最適化用）===
@@ -625,7 +624,7 @@ impl Position {
     }
 
     #[inline]
-    pub(super) fn should_update_board_effects() -> bool {
+    pub(crate) fn should_update_board_effects() -> bool {
         // Runtime editions can receive an EffectBucket network through a local NNUEEvaluator or
         // after the Position has already advanced, without touching the global NNUE state.
         // Maintaining effects unconditionally makes both paths safe and keeps model reload atomic.
