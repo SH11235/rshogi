@@ -2110,3 +2110,22 @@ fn bench_positions() {
         solved_ms.last().copied().unwrap_or(0)
     );
 }
+
+#[test]
+fn solve_returns_position_with_board_effects_rebuilt() {
+    let mut pos = position("4k4/9/4P4/9/9/9/9/9/4K4 b G 1");
+    assert!(matches!(
+        solve_in_mode(&mut pos, 1, 10_000, MateMode::Speed),
+        MateResult::Mate(_)
+    ));
+    // 利きを維持しない feature 構成では比べるものが無い
+    if !Position::should_update_board_effects() {
+        return;
+    }
+    let fresh = position(&pos.to_sfen());
+    for sq in crate::types::Square::all() {
+        for c in [Color::Black, Color::White] {
+            assert_eq!(pos.board_effect(c, sq), fresh.board_effect(c, sq));
+        }
+    }
+}
