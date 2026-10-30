@@ -18,8 +18,10 @@ use std::collections::{HashMap, HashSet};
 use super::search::{Abort, MAX_DEPTH, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
 use super::state::MateState;
 
-/// 詰みを縮める試み 1 回あたりのノード数の予算
-const EFFORT: u64 = 100_000;
+/// 詰みを縮める試み 1 回あたりのノード数の予算。縮められる試みはほとんどがこの予算に収まり、
+/// 推定のノードの大半は縮められずに予算を使い切る試みが占める。合駒が無駄合いかの判定の予算にも使う
+/// (打ち切ったら無駄合いでないとみなす)
+const EFFORT: u64 = 30_000;
 
 /// 攻め方の局面で、王手 1 つを読む予算
 const PROBE: u64 = 10_000;
