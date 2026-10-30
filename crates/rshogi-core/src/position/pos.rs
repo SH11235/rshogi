@@ -96,6 +96,8 @@ pub struct Position {
     long_effects: LongEffects,
     /// board_effectsが最新かどうか（手動配置時の整合性維持用）
     board_effects_dirty: bool,
+    /// do_move / undo_move で利きを更新しない (`pause_board_effects`)
+    board_effects_paused: bool,
 
     // === 合成Bitboard（attackers_to_occ最適化用）===
     /// 金相当の駒（Gold | ProPawn | ProLance | ProKnight | ProSilver）
@@ -259,6 +261,7 @@ impl Position {
             board_effects: BoardEffects::new(),
             long_effects: LongEffects::new(),
             board_effects_dirty: false,
+            board_effects_paused: false,
             golds_bb: Bitboard::EMPTY,
             bishop_horse_bb: Bitboard::EMPTY,
             rook_dragon_bb: Bitboard::EMPTY,
@@ -610,6 +613,15 @@ impl Position {
     pub(crate) fn board_effects(&self) -> &BoardEffects {
         debug_assert!(!self.board_effects_dirty, "board_effects is dirty");
         &self.board_effects
+    }
+
+    /// 利きを読まない探索 (詰みの df-pn など) の間、do_move / undo_move での利きの更新を止める。
+    /// 差分更新は指し手ごとの手間の 1 割前後を占める。再開すると、利きを使う設定なら作り直す
+    pub fn pause_board_effects(&mut self, paused: bool) {
+        self.board_effects_paused = paused;
+        if !paused && Self::should_update_board_effects() {
+            self.ensure_board_effects();
+        }
     }
 
     #[inline]
@@ -1172,7 +1184,8 @@ impl Position {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
-        let update_board_effects = Self::should_update_board_effects();
+        let update_board_effects =
+            !self.board_effects_paused && Self::should_update_board_effects();
 
         let prev_check_square = if gives_check {
             let moved_pt = if m.is_drop() {
@@ -1511,7 +1524,8 @@ impl Position {
         let captured = self.cur_state().captured_piece;
         let prev_idx = self.cur_state().previous;
         assert_ne!(prev_idx, StateInfo::NO_PREVIOUS, "No previous state for undo");
-        let update_board_effects = Self::should_update_board_effects();
+        let update_board_effects =
+            !self.board_effects_paused && Self::should_update_board_effects();
         if update_board_effects {
             self.ensure_board_effects();
         } else {
@@ -2109,6 +2123,37 @@ mod tests {
     use crate::bitboard::{dragon_effect, horse_effect, lance_effect};
     use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
+
+    #[test]
+    fn paused_board_effects_are_rebuilt_on_resume() {
+        use crate::movegen::{MoveList, generate_legal_all};
+
+        fn play(pos: &mut Position, usi: &str) -> Move {
+            let mut legal = MoveList::new();
+            generate_legal_all(pos, &mut legal);
+            let mv = *legal.iter().find(|m| m.to_usi() == usi).expect("合法手");
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+            mv
+        }
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        pos.pause_board_effects(true);
+        play(&mut pos, "7g7f");
+        play(&mut pos, "3c3d");
+        let capture = play(&mut pos, "8h2b+");
+        pos.undo_move(capture);
+        pos.pause_board_effects(false);
+        play(&mut pos, "8h2b+");
+        let mut fresh = Position::new();
+        fresh.set_sfen(&pos.to_sfen()).unwrap();
+        // 利きを維持しない feature 構成では比べるものが無い
+        if !pos.board_effects_dirty {
+            assert!(
+                pos.board_effects == fresh.board_effects && pos.long_effects == fresh.long_effects
+            );
+        }
+    }
 
     fn assert_key_after_move(pos: &mut Position, mv: Move, counts: &mut [[usize; 6]; 2]) {
         use std::cell::Cell;

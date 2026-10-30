@@ -272,12 +272,14 @@ impl DfpnSolver {
         self.table.clear();
         let start = Instant::now();
         let kingless = pos.pieces(us, PieceType::King).is_empty();
+        pos.pause_board_effects(true);
         let result = if kingless {
             let mut st = NoAttackerKing::new(pos.clone());
             self.run_mode(&mut st, *limits, start, stop, &mut progress)
         } else {
             self.run_mode(pos, *limits, start, stop, &mut progress)
         };
+        pos.pause_board_effects(false);
         let futile_end =
             matches!(self.shortest, Some(ShortestMode::Tsume | ShortestMode::Estimate));
         let is_valid = |pos: &mut Position, pv: &[Move]| {
