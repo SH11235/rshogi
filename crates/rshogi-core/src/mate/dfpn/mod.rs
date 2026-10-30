@@ -272,14 +272,15 @@ impl DfpnSolver {
         self.table.clear();
         let start = Instant::now();
         let kingless = pos.pieces(us, PieceType::King).is_empty();
-        pos.pause_board_effects(true);
-        let result = if kingless {
-            let mut st = NoAttackerKing::new(pos.clone());
-            self.run_mode(&mut st, *limits, start, stop, &mut progress)
-        } else {
-            self.run_mode(pos, *limits, start, stop, &mut progress)
+        let result = {
+            let paused = EffectsPaused::new(pos);
+            if kingless {
+                let mut st = NoAttackerKing::new(paused.0.clone());
+                self.run_mode(&mut st, *limits, start, stop, &mut progress)
+            } else {
+                self.run_mode(paused.0, *limits, start, stop, &mut progress)
+            }
         };
-        pos.pause_board_effects(false);
         let futile_end =
             matches!(self.shortest, Some(ShortestMode::Tsume | ShortestMode::Estimate));
         let is_valid = |pos: &mut Position, pv: &[Move]| {
@@ -298,6 +299,23 @@ impl DfpnSolver {
             Some(SolveOutcome::NoMate) => MateResult::NoMate,
             None => MateResult::Unknown,
         }
+    }
+}
+
+/// 探索の間だけ利きの差分更新を止める (詰みの探索は利きを読まない)。panic で抜けても呼び出し側の局面を
+/// 戻すよう、再開は drop で行う
+struct EffectsPaused<'a>(&'a mut Position);
+
+impl<'a> EffectsPaused<'a> {
+    fn new(pos: &'a mut Position) -> Self {
+        pos.pause_board_effects(true);
+        Self(pos)
+    }
+}
+
+impl Drop for EffectsPaused<'_> {
+    fn drop(&mut self) {
+        self.0.pause_board_effects(false);
     }
 }
 

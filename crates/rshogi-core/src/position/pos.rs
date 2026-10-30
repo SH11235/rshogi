@@ -615,8 +615,8 @@ impl Position {
         &self.board_effects
     }
 
-    /// 利きを読まない探索 (詰みの df-pn など) の間、do_move / undo_move での利きの更新を止める。
-    /// 差分更新は指し手ごとの手間の 1 割前後を占める。再開すると、利きを使う設定なら作り直す
+    /// 利きを読まない探索 (詰みの df-pn など) の間、do_move / undo_move での利きの差分更新を止める。
+    /// 再開すると、利きを使う設定なら作り直す
     pub fn pause_board_effects(&mut self, paused: bool) {
         self.board_effects_paused = paused;
         if !paused && Self::should_update_board_effects() {
@@ -2144,11 +2144,11 @@ mod tests {
         let capture = play(&mut pos, "8h2b+");
         pos.undo_move(capture);
         pos.pause_board_effects(false);
-        play(&mut pos, "8h2b+");
-        let mut fresh = Position::new();
-        fresh.set_sfen(&pos.to_sfen()).unwrap();
         // 利きを維持しない feature 構成では比べるものが無い
-        if !pos.board_effects_dirty {
+        if Position::should_update_board_effects() {
+            let mut fresh = Position::new();
+            fresh.set_sfen(&pos.to_sfen()).unwrap();
+            assert!(!pos.board_effects_dirty);
             assert!(
                 pos.board_effects == fresh.board_effects && pos.long_effects == fresh.long_effects
             );
