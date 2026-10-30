@@ -4,7 +4,7 @@
 production / staging 環境のアクセス制御方針と、rollout / kill-switch 手順を
 まとめる。基本的な deploy 手順は [`deployment.md`](deployment.md)、Workers
 deploy 環境への実機通電は repo 同梱 Skill
-`.claude/skills/csa-e2e-staging/SKILL.md` を参照。
+`.claude/skills/csa-e2e/SKILL.md` を参照。
 
 ## 1. access control が及ぶ endpoint
 
@@ -116,7 +116,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" \
 ### 5-5. spectate WS（参考）
 
 WebSocket Upgrade を curl で完結させるのは難しいため、Origin 付き接続テストは
-repo 同梱 Skill `.claude/skills/csa-e2e-staging/SKILL.md` §5 の `wscat` 手順に
+repo 同梱 Skill `.claude/skills/csa-e2e/SKILL.md` §5 の `wscat` 手順に
 従う。viewer API 無効時は
 `/ws/<id>/spectate` も 404 で揃うことだけ smoke チェックで担保する:
 

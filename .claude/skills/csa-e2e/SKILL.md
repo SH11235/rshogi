@@ -1,6 +1,6 @@
 ---
-name: csa-e2e-staging
-description: "Workers (`rshogi-csa-server-workers`) deploy 環境に対する `csa_client` 実機 E2E 手順。平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy 対局 / 異常終局 / 時計違いペアの 7 シナリオを通電させる。「staging で smoke 流して」「reconnect 検証して」「観戦テスト」「buoy 動かして」「異常終局再現」「時計 kind 切替確認」等のリクエストで起動する。"
+name: csa-e2e
+description: "Workers (`rshogi-csa-server-workers`) の staging / production に対する `csa_client` 実機 E2E 手順。平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy 対局 / 異常終局 / 時計違いペアの 7 シナリオを通電させる。「staging で smoke 流して」「production で smoke 流して」「reconnect 検証して」「観戦テスト」「buoy 動かして」「異常終局再現」「時計 kind 切替確認」等のリクエストで起動する。"
 user-invocable: true
 ---
 
@@ -11,14 +11,16 @@ user-invocable: true
 直 URL を公開しないため、到達経路は `wrangler.{staging,production}.toml` の `routes`
 が宣言する Custom Domain のみ。fork は自分の route の host に読み替える。
 
-既定の対象は staging。production に対しては、user が production での実行を明示的に
-承認した場合だけ流す (deploy・ADMIN 操作を伴うシナリオも同様)。`CLOCK_PRESETS` を編集する
-シナリオ G は production では行わない。
+対象は staging / production のどちらでもよい (user が指定した方。指定が無ければ staging)。
+既定で流すのは軽いシナリオ A (平手 1 局) と D (観戦) だけ。重いシナリオ B (連続対局)・C (切断)・
+E (Buoy・ADMIN)・F (異常切断)・G (preset 変更と再 deploy) は、user がシナリオを指定したときだけ流す。
+production の再 deploy (G) は進行中の対局を drain してから行う (`docs/csa-server/deployment.md` の §12)。
 
 ## 0a. シナリオ選定 (どの change にどの scenario を流すか)
 
 7 シナリオすべてを毎回流す必要はない。**変更した経路に対応する subset** を
-選んで走らせるのが原則。A は smoke 通電基本として常に走らせる。
+選んで走らせるのが原則。A は smoke 通電基本として常に走らせる。下の表で B / C / E / F / G が要る変更でも、
+重いシナリオは user が指定したときだけ流す (指定が無ければ、要るシナリオを挙げて確認する)。
 
 | 変更内容 | 必要 scenario | メモ |
 |---|---|---|
@@ -385,8 +387,9 @@ CLOCK_PRESETS = '''[
 ]'''
 ```
 
-preset の追加は対象の Worker の再 deploy を伴う。production では行わない (冒頭の「production で
-流す条件」の例外)。staging では編集する前に元の preset 一覧を保存しておく:
+preset の追加は対象の Worker の再 deploy を伴う (user が G を指定したときだけ行う)。production では
+追加と復元の両方の deploy を `docs/csa-server/deployment.md` §12 の drain 経路で行う。編集する前に
+元の preset 一覧を保存しておく:
 
 ```bash
 grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
@@ -400,7 +403,7 @@ grep -o '"game_name":"[^"]*"' "$WRANGLER" > "$RUN/presets.before"
 1. `git diff -- "$WRANGLER"` で差分が追加した preset だけであることを確かめ、
    `git restore -- "$WRANGLER"` で toml を戻す。
    `grep -o '"game_name":"[^"]*"' "$WRANGLER" | diff - "$RUN/presets.before"` が差分なしになる
-2. 追加時と同じ deploy コマンドで再 deploy する。staging は drain の対象外
+2. 追加時と同じ deploy コマンドで再 deploy する (production は §12 の drain 経路)。staging は drain の対象外
    (`docs/csa-server/deployment.md` の §12.6。main への push でも自動 deploy され、そのときも
    main の toml に戻る)
 3. deploy 済みの Worker が戻ったことを確かめる: `curl -sf "https://$CSA_HOST/health"` が通ることに加え、
