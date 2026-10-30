@@ -453,7 +453,7 @@ production は本家 Floodgate 互換の `countdown` (`Time_Unit:1sec`) を既�
 - [`deployment.md`](deployment.md) - Cloudflare Workers の構築 / 運用 runbook
 - [`lobby_design.md`](lobby_design.md) - LobbyDO の詳細設計
 - [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) - Lobby マッチングの実機 E2E 運用
-- `.claude/skills/csa-e2e-staging/SKILL.md` - Workers deploy 環境での実機対局シナリオ集
+- `.claude/skills/csa-e2e/SKILL.md` - Workers deploy 環境での実機対局シナリオ集
 - [`viewer_access_control.md`](viewer_access_control.md) - viewer / spectate API の access control 運用
 - [`../csa-client.md`](../csa-client.md) - CSA client (`csa_client`) の利用方法
 
