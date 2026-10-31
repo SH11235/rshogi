@@ -2,8 +2,6 @@
 //! どれだけ負けるかを点検する。元データは書き換えない。
 
 use super::master_table::{BookMove, MasterPosition, read_master};
-#[cfg(test)]
-use super::master_table::{COLUMNS, mean_eval, parse_master_rows};
 use super::refutation::{self, RefutationOutputs};
 use super::rejoin::WeightArgs;
 use super::reply_graph::apply_usi;
@@ -846,6 +844,7 @@ pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValue
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_table::{COLUMNS, mean_eval, parse_master_rows};
     use super::*;
 
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";

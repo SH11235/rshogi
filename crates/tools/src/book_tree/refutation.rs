@@ -5,8 +5,6 @@
 //! 根にした木のキューの行とともに出す。
 
 use super::audit::{AuditedBook, AuditedMove, Origin, audited_moves};
-#[cfg(test)]
-use super::master_table::COLUMNS;
 use super::master_table::MasterPosition;
 use super::model::child;
 use super::rejoin::{WeightArgs, reach_weights};
@@ -177,7 +175,7 @@ pub(super) fn fill_best_sources(path: &Path, rows: &mut [Refutation]) -> Result<
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
     let mut found = vec![None; rows.len()];
-    // 見出しと role は read_master で検査済み。
+    // 見出し・列の数・role は read_master で検査済み。
     for line in BufReader::new(file).lines().skip(1) {
         let row = super::master_table::Row::split_line(&line?);
         if row.get("role") == "record" {
@@ -368,7 +366,7 @@ mod tests {
     use super::*;
     use crate::book_backprop::DrawValues;
     use crate::book_tree::audit::audit;
-    use crate::book_tree::master_table::parse_master_rows;
+    use crate::book_tree::master_table::{COLUMNS, parse_master_rows};
 
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
     /// ROOT から 5i4h。

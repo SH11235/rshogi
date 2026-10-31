@@ -1,8 +1,6 @@
 //! 木の出力 (node_moves.tsv) から定跡の元データの表に手を登録する。
 
 use super::journal::LockedFile;
-#[cfg(test)]
-use super::master_table::COLUMNS;
 use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
 use super::output::NODE_MOVES;
 use crate::common::io::write_atomic;
@@ -400,6 +398,7 @@ fn append(note: &str, text: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_table::COLUMNS;
     use super::*;
 
     const B: &str = "pos1 b -";

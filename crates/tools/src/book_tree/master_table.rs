@@ -89,6 +89,7 @@ pub(super) fn format_master(rows: &[Row]) -> String {
     text
 }
 
+/// 局面ごとに main・alt の手を main を先頭に集め、record は数だけ返す。
 pub(super) fn read_master(path: &Path) -> Result<(BTreeMap<String, MasterPosition>, usize)> {
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
@@ -150,7 +151,10 @@ pub(super) fn mean_eval(text: &str) -> Result<Option<i32>> {
         return Ok(None);
     }
     let values: Vec<i64> = text.split(',').map(str::parse).collect::<Result<_, _>>()?;
-    let mean = values.iter().sum::<i64>() as f64 / values.len() as f64;
+    let sum = values.iter().try_fold(0_i64, |sum, value| {
+        sum.checked_add(*value).context("evals の合計が i64 の範囲を超えています")
+    })?;
+    let mean = sum as f64 / values.len() as f64;
     Ok(Some(i32::try_from(mean.round_ties_even() as i64)?))
 }
 
@@ -204,6 +208,13 @@ pub(super) fn run_validate(args: ValidateArgs) -> Result<()> {
     let file = std::fs::File::open(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let report = validate_table(BufReader::new(file))?;
+    write_validation_report(&report, std::io::stdout().lock())
+}
+
+fn write_validation_report(
+    report: &ValidationReport,
+    mut stdout: impl std::io::Write,
+) -> Result<()> {
     for error in &report.errors {
         eprintln!("{error}");
     }
@@ -212,7 +223,7 @@ pub(super) fn run_validate(args: ValidateArgs) -> Result<()> {
         "元データに {} 件の誤りがあります",
         report.errors.len()
     );
-    print!("{}", report.summary);
+    write!(stdout, "{}", report.summary)?;
     Ok(())
 }
 
@@ -243,10 +254,15 @@ fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
     use std::fmt::Write as _;
 
     let mut report = ValidationReport::default();
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if without_line_ending(&line) != COLUMNS.join("\t") {
-        report.errors.push("元データの 1 行目の見出しが違います".into());
+    let mut errors = Vec::new();
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    match std::str::from_utf8(&line) {
+        Err(_) => errors.push((1, "元データの 1 行目: UTF-8 ではありません".into())),
+        Ok(line) if without_line_ending(line) != COLUMNS.join("\t") => {
+            errors.push((1, "元データの 1 行目の見出しが違います".into()));
+        }
+        Ok(_) => {}
     }
     let mut groups: BTreeMap<String, PositionRows> = BTreeMap::new();
     let mut tiers: BTreeMap<String, (BTreeSet<String>, usize)> = ["curated", "wide"]
@@ -260,22 +276,29 @@ fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
     let mut at = 1;
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
         at += 1;
-        let row = match Row::parse_line(without_line_ending(&line), at) {
+        let text = match std::str::from_utf8(&line) {
+            Ok(text) => text,
+            Err(_) => {
+                errors.push((at, format!("元データの {at} 行目: UTF-8 ではありません")));
+                continue;
+            }
+        };
+        let row = match Row::parse_line(without_line_ending(text), at) {
             Ok(row) => row,
             Err(error) => {
-                report.errors.push(error.to_string());
+                errors.push((at, error.to_string()));
                 continue;
             }
         };
         count += 1;
         let mut error =
-            |message: &str| report.errors.push(format!("元データの {at} 行目: {message}"));
-        if row.0.iter().any(|cell| cell.contains(['\t', '\r', '\n'])) {
-            error("セルにタブ・CR・LF は使えません");
+            |message: &str| errors.push((at, format!("元データの {at} 行目: {message}")));
+        if row.0.iter().any(|cell| cell.contains('\r')) {
+            error("セルに CR は使えません");
         }
         if row.get("since").trim().is_empty() {
             error("since が空です");
@@ -292,8 +315,8 @@ fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
             error("ply は空か 10 進の数字だけにしてください");
         }
         let evals = row.get("evals");
-        if !evals.is_empty() && evals.split(',').any(|v| v.parse::<i64>().is_err()) {
-            error("evals は空かカンマ区切りの整数にしてください (i64)");
+        if let Err(reason) = mean_eval(evals) {
+            error(&format!("evals が不正です: {reason}"));
         }
         let key = row.get("key");
         let group = groups.entry(key.to_owned()).or_insert_with(|| PositionRows {
@@ -319,20 +342,23 @@ fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
         *roles.entry(role.to_owned()).or_default() += 1;
         *sources.entry(row.get("source").to_owned()).or_default() += 1;
     }
-    if count == 0 {
-        report.errors.push("元データの 1 行目: 手の行がありません".into());
+    if at == 1 {
+        errors.push((1, "元データの 1 行目: 手の行がありません".into()));
     }
     for (key, group) in &groups {
         for (scope, name) in ["all", "curated"].iter().enumerate() {
             if group.playable[scope] > 0 && group.mains[scope] != 1 {
-                report.errors.push(format!(
-                    "元データの {} 行目: {key}: {name}: main がちょうど 1 つではありません",
-                    group.first
+                errors.push((
+                    group.first,
+                    format!(
+                        "元データの {} 行目: {key}: {name}: main がちょうど 1 つではありません",
+                        group.first
+                    ),
                 ));
             }
         }
         let mut error = |message: &str| {
-            report.errors.push(format!("元データの {} 行目: {key}: {message}", group.first))
+            errors.push((group.first, format!("元データの {} 行目: {key}: {message}", group.first)))
         };
         let parts: Vec<_> = key.split_whitespace().collect();
         if parts.len() != 3
@@ -358,13 +384,16 @@ fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
         for (mv, lines) in &group.moves {
             if !legal.contains(mv) {
                 for at in lines {
-                    report
-                        .errors
-                        .push(format!("元データの {at} 行目: 合法手ではありません: {mv} ({key})"));
+                    errors.push((
+                        *at,
+                        format!("元データの {at} 行目: 合法手ではありません: {mv} ({key})"),
+                    ));
                 }
             }
         }
     }
+    errors.sort_by_key(|(at, _)| *at);
+    report.errors = errors.into_iter().map(|(_, message)| message).collect();
     if report.errors.is_empty() {
         writeln!(report.summary, "positions={}, moves={count}", groups.len())?;
         for (tier, (positions, moves)) in tiers {
@@ -421,6 +450,103 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         }
         assert!(Cli::try_parse_from(["book_mine", "validate"]).is_err());
+    }
+
+    #[test]
+    fn eval_range_and_sum_overflow_are_errors_for_validation_and_audit_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        for evals in [
+            "2147483648",
+            "-2147483649",
+            "9223372036854775807,1",
+            "-9223372036854775808,-1",
+            "9223372036854775807,9223372036854775807",
+        ] {
+            let mut r = row("7g7f", "main", "wide");
+            r.set("evals", evals.into());
+            let text = format_master(&[r]);
+            let report = validate_table(text.as_bytes()).unwrap();
+            assert_eq!(report.errors.len(), 1, "{evals}: {report:?}");
+            assert!(report.errors[0].contains("2 行目: evals"));
+            std::fs::write(&path, text).unwrap();
+            assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
+        }
+        assert_eq!(mean_eval("2147483648,-2147483648").unwrap(), Some(0));
+        assert_eq!(mean_eval("2147483647").unwrap(), Some(i32::MAX));
+        assert_eq!(mean_eval("-2147483648").unwrap(), Some(i32::MIN));
+    }
+
+    #[test]
+    fn invalid_utf8_is_reported_and_later_rows_are_checked() {
+        let text = format_master(&[row("7g7f", "main", "wide")]);
+        let (header, body) = text.split_once('\n').unwrap();
+        for (bytes, at) in [
+            ([header.as_bytes(), b"\n\xff\n", body.as_bytes(), b"bad\n"].concat(), 2),
+            ([b"\xff\n".as_slice(), body.as_bytes(), b"bad\n"].concat(), 1),
+        ] {
+            let report = validate_table(bytes.as_slice()).unwrap();
+            assert_eq!(report.errors.len(), 2, "{report:?}");
+            assert_eq!(report.errors[0], format!("元データの {at} 行目: UTF-8 ではありません"));
+            assert!(report.errors[1].contains("列の数"));
+            assert!(
+                read_rows(bytes.as_slice())
+                    .and_then(|rows| rows.collect::<Result<Vec<_>>>())
+                    .is_err()
+            );
+        }
+        let bytes = [header.as_bytes(), b"\n\xff"].concat();
+        assert_eq!(
+            validate_table(bytes.as_slice()).unwrap().errors,
+            ["元データの 2 行目: UTF-8 ではありません"]
+        );
+    }
+
+    #[test]
+    fn diagnostics_follow_line_order_and_preserve_order_within_a_line() {
+        let mut first = row("7g7e", "alt", "curated");
+        first.set("since", String::new());
+        first.set("ply", "bad".into());
+        let mut second = row("5i5h", "alt", "wide");
+        second.set("key", "4k4/9/9/9/9/9/9/9/4K4 b -".into());
+        second.set("evals", "bad".into());
+        let found = errors(&[first, second]);
+        assert_eq!(found.len(), 7, "{found:?}");
+        for (message, expected) in found.iter().zip([
+            "2 行目: since",
+            "2 行目: ply",
+            "all: main",
+            "curated: main",
+            "2 行目: 合法手",
+            "3 行目: evals",
+            "3 行目:",
+        ]) {
+            assert!(message.contains(expected), "{found:?}");
+        }
+        assert!(found[6].contains("all: main"));
+    }
+
+    #[test]
+    fn malformed_rows_do_not_count_as_an_empty_table() {
+        let text = format!("{}\nx\n", COLUMNS.join("\t"));
+        let report = validate_table(text.as_bytes()).unwrap();
+        assert_eq!(report.errors, ["元データの 2 行目の列の数が違います"]);
+        assert!(report.summary.is_empty());
+    }
+
+    #[test]
+    fn validation_errors_do_not_write_a_summary_to_stdout() {
+        let mut stdout = Vec::new();
+        let report = ValidationReport {
+            errors: vec!["元データの 2 行目: evals が不正です".into()],
+            summary: "positions=1, moves=1\n".into(),
+        };
+        assert!(write_validation_report(&report, &mut stdout).is_err());
+        assert!(stdout.is_empty());
+        let report =
+            validate_table(format_master(&[row("7g7f", "main", "wide")]).as_bytes()).unwrap();
+        write_validation_report(&report, &mut stdout).unwrap();
+        assert_eq!(stdout, report.summary.as_bytes());
     }
 
     #[test]
