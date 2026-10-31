@@ -210,7 +210,7 @@ fn eval_mean_rounds_exact_integer_quotient() {
 }
 
 #[test]
-fn reads_outside_tier_are_counted_but_do_not_change_outputs() {
+fn reads_outside_tier_are_discarded_without_changing_outputs() {
     use super::super::reply_graph::{HIRATE_KEY, fixture::after};
     let dir = tempfile::tempdir().unwrap();
     let child = after(HIRATE_KEY, &["7g7f", "3c3d"]);
@@ -255,8 +255,8 @@ fn reads_outside_tier_are_counted_but_do_not_change_outputs() {
     let keys = BTreeSet::from([HIRATE_KEY]);
     let (selected, counts) = reads::load(std::slice::from_ref(&logs), 0, 0, Some(&keys)).unwrap();
     let (_, all_counts) = reads::load(std::slice::from_ref(&logs), 0, 0, None).unwrap();
-    assert_eq!(counts, all_counts);
-    assert_eq!((counts.used, counts.duplicates, counts.draw_unset_used), (3, 3, 2));
+    assert_eq!((counts.used, counts.duplicates, counts.draw_unset_used), (1, 0, 1));
+    assert_eq!((all_counts.used, all_counts.duplicates, all_counts.draw_unset_used), (3, 3, 2));
     assert_eq!(selected.keys().map(String::as_str).collect::<Vec<_>>(), [HIRATE_KEY]);
     let mut a = args(dir.path());
     a.tier = "curated".into();

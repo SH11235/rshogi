@@ -5,9 +5,7 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 use num_traits::Signed;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use serde::Deserialize;
 use serde_json::value::RawValue;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader},
@@ -15,14 +13,14 @@ use std::{
 };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Reading {
+pub(in crate::book_tree) struct Reading {
     pub nodes: BigRational,
     pub ply: BigInt,
     pub scores: Vec<(String, BigRational)>,
 }
-pub(super) type Groups = BTreeMap<String, Vec<Reading>>;
+pub(in crate::book_tree) type Groups = BTreeMap<String, Vec<Reading>>;
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(super) struct Counts {
+pub(in crate::book_tree) struct Counts {
     pub lines: usize,
     pub malformed: usize,
     pub below_min: usize,
@@ -34,7 +32,7 @@ pub(super) struct Counts {
     pub used: usize,
     pub draw_unset_used: usize,
 }
-pub(super) fn expand(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+pub(in crate::book_tree) fn expand(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = BTreeSet::new();
     for path in paths {
         ensure!(path.exists(), "log input does not exist: {}", path.display());
@@ -71,10 +69,7 @@ fn canonical_key(key: &str) -> Result<String> {
 type RawObject = BTreeMap<String, Box<RawValue>>;
 
 // 先に型付きフィールドへ読むと、重複キーの最後の値を選ぶ前に型エラーになる。
-#[derive(Deserialize)]
-#[serde(try_from = "RawObject")]
 struct ReadEvent {
-    key: String,
     nodes: Box<RawValue>,
     ply: Box<RawValue>,
     multipv: Vec<RawObject>,
@@ -94,7 +89,6 @@ impl TryFrom<RawObject> for ReadEvent {
 
     fn try_from(mut fields: RawObject) -> Result<Self> {
         Ok(Self {
-            key: take_field(&mut fields, "key")?,
             nodes: take_raw(&mut fields, "nodes")?,
             ply: take_raw(&mut fields, "ply")?,
             multipv: take_field(&mut fields, "multipv")?,
@@ -107,10 +101,17 @@ impl TryFrom<RawObject> for ReadEvent {
     }
 }
 
-fn parse(line: &str) -> Result<(String, Reading, bool)> {
-    let event: ReadEvent = serde_json::from_str(line)?;
+fn parse_selected(
+    line: &str,
+    retain_keys: Option<&BTreeSet<&str>>,
+) -> Result<Option<(String, Reading, bool)>> {
+    let mut fields: RawObject = serde_json::from_str(line)?;
+    let key = canonical_key(&take_field::<String>(&mut fields, "key")?)?;
+    if retain_keys.is_some_and(|keys| !keys.contains(key.as_str())) {
+        return Ok(None);
+    }
+    let event = ReadEvent::try_from(fields)?;
     let draw = event.draw.is_some_and(|o| !o.is_empty());
-    let key = canonical_key(&event.key)?;
     let nodes = numbers::number(&event.nodes)?;
     let ply = event.ply.get();
     ensure!(!ply.contains(['.', 'e', 'E']), "invalid ply");
@@ -124,42 +125,9 @@ fn parse(line: &str) -> Result<(String, Reading, bool)> {
         ensure!(seen.insert(mv.clone()), "duplicate move");
         scores.push((mv, numbers::number(&take_raw(&mut entry, "cp")?)?));
     }
-    Ok((key, Reading { nodes, ply, scores }, draw))
+    Ok(Some((key, Reading { nodes, ply, scores }, draw)))
 }
-type Fingerprint = [u8; 16];
-
-fn key_fingerprint(key: &str) -> Fingerprint {
-    let digest = Sha256::digest(key.as_bytes());
-    let mut result = [0; 16];
-    result.copy_from_slice(&digest[..16]);
-    result
-}
-
-fn reading_fingerprint(key: &str, reading: &Reading) -> Fingerprint {
-    fn field(hash: &mut Sha256, bytes: &[u8]) {
-        // 可変長の値の連結で、フィールド境界が異なる読みを同一視しないため。
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(bytes);
-    }
-    fn rational(hash: &mut Sha256, value: &BigRational) {
-        field(hash, &value.numer().to_signed_bytes_le());
-        field(hash, &value.denom().to_signed_bytes_le());
-    }
-    let mut hash = Sha256::new();
-    field(&mut hash, key.as_bytes());
-    rational(&mut hash, &reading.nodes);
-    field(&mut hash, &reading.ply.to_signed_bytes_le());
-    for (mv, cp) in &reading.scores {
-        field(&mut hash, mv.as_bytes());
-        rational(&mut hash, cp);
-    }
-    let digest = hash.finalize();
-    let mut result = [0; 16];
-    result.copy_from_slice(&digest[..16]);
-    result
-}
-
-fn remember<K: Ord>(seen: &mut BTreeMap<K, bool>, key: K, draw: bool, counts: &mut Counts) {
+fn remember(seen: &mut BTreeMap<Reading, bool>, key: Reading, draw: bool, counts: &mut Counts) {
     match seen.entry(key) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
             counts.duplicates += 1;
@@ -178,8 +146,9 @@ fn remember<K: Ord>(seen: &mut BTreeMap<K, bool>, key: K, draw: bool, counts: &m
     }
 }
 
-/// 読みを集計し、`retain_keys` が `None` なら全局面、`Some` なら指定局面の読みを返す。
-pub(super) fn load(
+/// `None` なら全局面の読みと件数を、`Some` なら指定局面の読みを返す。
+/// 件数の全項目が有効なのは `None` の場合だけ。
+pub(in crate::book_tree) fn load(
     paths: &[PathBuf],
     min_nodes: impl Into<BigInt>,
     draw_pin: impl Into<BigInt>,
@@ -189,19 +158,24 @@ pub(super) fn load(
     let pin = BigRational::from_integer(draw_pin.into());
     ensure!(!minimum.is_negative() && !pin.is_negative(), "thresholds must be nonnegative");
     let mut seen: BTreeMap<String, BTreeMap<Reading, bool>> = BTreeMap::new();
-    let mut summaries = BTreeMap::new();
     let mut below = BTreeSet::new();
     let mut counts = Counts::default();
     for path in paths {
         load_file(path, &mut |line| {
             counts.lines += 1;
-            let Ok((key, reading, draw)) = parse(line) else {
-                counts.malformed += 1;
-                return Ok(());
+            let (key, reading, draw) = match parse_selected(line, retain_keys) {
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => return Ok(()),
+                Err(_) => {
+                    counts.malformed += 1;
+                    return Ok(());
+                }
             };
             if reading.nodes < minimum {
                 counts.below_min += 1;
-                below.insert(key_fingerprint(&key));
+                if retain_keys.is_none() {
+                    below.insert(key);
+                }
                 return Ok(());
             }
             if reading.scores.windows(2).any(|s| s[0].1 < s[1].1) {
@@ -219,11 +193,7 @@ pub(super) fn load(
                 counts.draw_pinned += 1;
                 return Ok(());
             }
-            if retain_keys.is_none_or(|keys| keys.contains(key.as_str())) {
-                remember(seen.entry(key).or_default(), reading, draw, &mut counts);
-            } else {
-                remember(&mut summaries, reading_fingerprint(&key, &reading), draw, &mut counts);
-            }
+            remember(seen.entry(key).or_default(), reading, draw, &mut counts);
             Ok(())
         })?;
     }
@@ -253,7 +223,7 @@ fn load_file(path: &Path, process: &mut impl FnMut(&str) -> Result<()>) -> Resul
     }
     Ok(())
 }
-pub(super) fn deep(reads: &[Reading]) -> Vec<&Reading> {
+pub(in crate::book_tree) fn deep(reads: &[Reading]) -> Vec<&Reading> {
     let Some(max) = reads.iter().map(|r| &r.nodes).max() else {
         return vec![];
     };
@@ -266,6 +236,9 @@ pub(super) fn deep(reads: &[Reading]) -> Vec<&Reading> {
 mod tests {
     use super::super::super::reply_graph::HIRATE_KEY;
     use super::*;
+    fn parse(line: &str) -> Result<(String, Reading, bool)> {
+        Ok(parse_selected(line, None)?.unwrap())
+    }
     fn event(nodes: &str, ply: &str, cp: &str, mv: &str, draw: &str) -> String {
         format!(
             r#"{{"key":"{HIRATE_KEY}","nodes":{nodes},"ply":{ply},"multipv":[{{"move":"{mv}","cp":{cp}}}],"draw":{draw}}}"#
@@ -296,9 +269,8 @@ mod tests {
         std::fs::write(&path, format!("\u{feff}{}\n\n", lines.join("\n"))).unwrap();
         let (groups, c) = load(std::slice::from_ref(&path), 900_000_000, 3, None).unwrap();
         for keys in [BTreeSet::new(), BTreeSet::from([HIRATE_KEY])] {
-            let (selected, counts) =
+            let (selected, _) =
                 load(std::slice::from_ref(&path), 900_000_000, 3, Some(&keys)).unwrap();
-            assert_eq!(counts, c);
             if keys.is_empty() {
                 assert!(selected.is_empty());
             } else {
@@ -426,28 +398,15 @@ mod tests {
     }
 
     #[test]
-    fn fingerprints_preserve_normalized_identity_and_score_order() {
-        let (key, reading, _) = parse(&event("100", "1", "12", "7g7f", "null")).unwrap();
-        let expected = reading_fingerprint(&key, &reading);
-        let (_, equivalent, _) = parse(&event("1e2", "1", "12.0", "7g7f", r#"{"b":0}"#)).unwrap();
-        assert_eq!(reading_fingerprint(&key, &equivalent), expected);
-        for line in [
-            event("101", "1", "12", "7g7f", "null"),
-            event("100", "2", "12", "7g7f", "null"),
-            event("100", "1", "-12", "7g7f", "null"),
-            event("100", "1", "12.5", "7g7f", "null"),
-            event("100", "1", "12", "2g2f", "null"),
-        ] {
-            let (_, changed, _) = parse(&line).unwrap();
-            assert_ne!(reading_fingerprint(&key, &changed), expected);
-        }
-        assert_ne!(reading_fingerprint("other key", &reading), expected);
-        let mut ordered = reading;
-        ordered.scores.push(("2g2f".into(), BigRational::from_integer(12.into())));
-        let forward = reading_fingerprint(&key, &ordered);
-        assert_ne!(forward, expected);
-        ordered.scores.reverse();
-        assert_ne!(reading_fingerprint(&key, &ordered), forward);
+    fn excluded_keys_skip_reading_validation_after_normalization() {
+        let keys = BTreeSet::from([HIRATE_KEY]);
+        let excluded = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let invalid = format!(r#"{{"key":"  {excluded}  ","multipv":false}}"#);
+        assert!(parse_selected(&invalid, Some(&keys)).unwrap().is_none());
+        assert!(parse_selected(&invalid, None).is_err());
+        let normalized = event("100", "1", "12", "7g7f", "null")
+            .replace(HIRATE_KEY, &format!("  {HIRATE_KEY}  "));
+        assert_eq!(parse_selected(&normalized, Some(&keys)).unwrap().unwrap().0, HIRATE_KEY);
     }
 
     #[test]

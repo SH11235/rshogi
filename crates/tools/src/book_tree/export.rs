@@ -1,9 +1,9 @@
 //! 元データから定跡・プリセット・注釈を書き出す。
-mod files;
+pub(super) mod files;
 mod graph;
 mod json;
-mod numbers;
-mod reads;
+pub(super) mod numbers;
+pub(super) mod reads;
 #[cfg(test)]
 mod tests;
 
@@ -17,7 +17,7 @@ use json::Json;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{BufRead, BufReader, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -57,7 +57,7 @@ pub(super) struct ExportArgs {
     #[arg(long)]
     force: bool,
 }
-fn nonnegative_integer(text: &str) -> std::result::Result<num_bigint::BigInt, String> {
+pub(super) fn nonnegative_integer(text: &str) -> std::result::Result<num_bigint::BigInt, String> {
     let value: num_bigint::BigInt = text.parse().map_err(|e| format!("{e}"))?;
     if value < num_bigint::BigInt::from(0) {
         return Err("expected nonnegative integer".into());
@@ -66,11 +66,12 @@ fn nonnegative_integer(text: &str) -> std::result::Result<num_bigint::BigInt, St
 }
 
 #[derive(Default)]
-struct Schema {
+pub(super) struct Schema {
     sources: Vec<(String, String)>,
+    check_sources: bool,
 }
 impl Schema {
-    fn load(dir: Option<&Path>) -> Result<Self> {
+    pub(super) fn load(dir: Option<&Path>) -> Result<Self> {
         let Some(dir) = dir else {
             return Ok(Self::default());
         };
@@ -95,7 +96,42 @@ impl Schema {
             ensure!(seen.insert(fields[0]), "sources.tsv:{}: duplicate source", i + 2);
             sources.push((fields[0].into(), fields[1].into()));
         }
-        Ok(Self { sources })
+        Ok(Self {
+            sources,
+            check_sources: true,
+        })
+    }
+    pub(super) fn validate(&self, text: impl AsRef<[u8]>) -> Result<Vec<String>> {
+        let bytes = text.as_ref();
+        let mut errors = master_table::validate_table(bytes)?.errors;
+        if self.check_sources {
+            let known: BTreeSet<_> = self.sources.iter().map(|(s, _)| s.as_str()).collect();
+            for (i, line) in bytes.split(|b| *b == b'\n').enumerate().skip(1) {
+                if let Ok(line) = std::str::from_utf8(line)
+                    && let Ok(row) = Row::parse_line(line.trim_end_matches('\r'), i + 1)
+                    && !known.contains(row.get("source"))
+                {
+                    errors.push(format!(
+                        "元データの {} 行目: unknown source: {}",
+                        i + 1,
+                        row.get("source")
+                    ));
+                }
+            }
+        }
+        Ok(errors)
+    }
+
+    pub(super) fn addition_counts() -> Self {
+        Self {
+            sources: [
+                "pin", "top", "deep", "selfplay", "team", "read", "plug", "fgbook",
+            ]
+            .into_iter()
+            .map(|s| (s.into(), String::new()))
+            .collect(),
+            check_sources: false,
+        }
     }
 }
 pub(super) fn run(args: ExportArgs) -> Result<()> {
@@ -119,40 +155,12 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     }
     let outputs = files::outputs(&args.out);
     files::guard(&outputs, &inputs, args.force)?;
-    let report = master_table::validate_table(BufReader::new(
-        std::fs::File::open(&args.master)
-            .with_context(|| format!("開けません: {}", args.master.display()))?,
-    ))
-    .with_context(|| format!("読めません: {}", args.master.display()))?;
-    let mut errors = report.errors;
-    if args.schema.is_some() {
-        let known: BTreeSet<_> = schema.sources.iter().map(|(s, _)| s.as_str()).collect();
-        for (i, line) in BufReader::new(
-            std::fs::File::open(&args.master)
-                .with_context(|| format!("開けません: {}", args.master.display()))?,
-        )
-        .split(b'\n')
-        .enumerate()
-        .skip(1)
-        {
-            let line = line.with_context(|| format!("読めません: {}", args.master.display()))?;
-            if let Ok(line) = std::str::from_utf8(&line)
-                && let Ok(row) = Row::parse_line(line.trim_end_matches('\r'), i + 1)
-                && !known.contains(row.get("source"))
-            {
-                errors.push(format!(
-                    "元データの {} 行目: unknown source: {}",
-                    i + 1,
-                    row.get("source")
-                ));
-            }
-        }
-    }
+    let text = std::fs::read(&args.master)
+        .with_context(|| format!("読めません: {}", args.master.display()))?;
+    let errors = schema.validate(&text)?;
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
-    let mut rows = master_table::parse_master(
-        &std::fs::read_to_string(&args.master)
-            .with_context(|| format!("読めません: {}", args.master.display()))?,
-    )?;
+    let mut rows = master_table::parse_master(std::str::from_utf8(&text)?)?;
+    drop(text);
     rows.retain(|r| args.tier == "wide" || r.get("tier") == "curated");
     rows.sort_by(|a, b| {
         (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
@@ -402,7 +410,7 @@ fn evals(row: &Row) -> Result<Vec<f64>> {
         .map(|s| s.trim().parse())
         .collect::<std::result::Result<_, _>>()?)
 }
-fn print_counts(rows: &[Row], schema: &Schema, out: &mut impl Write) -> Result<()> {
+pub(super) fn print_counts(rows: &[Row], schema: &Schema, out: &mut impl Write) -> Result<()> {
     writeln!(
         out,
         "positions: {}; moves: {}",

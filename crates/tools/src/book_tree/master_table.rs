@@ -315,8 +315,10 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
             error("ply は空か 10 進の数字だけにしてください");
         }
         let evals = row.get("evals");
-        if let Err(reason) = mean_eval(evals) {
-            error(&format!("evals が不正です: {reason}"));
+        if !evals.is_empty()
+            && !evals.split(',').all(|v| v.trim().parse::<f64>().is_ok_and(f64::is_finite))
+        {
+            error("evals は有限の数値をカンマで区切ってください");
         }
         let key = row.get("key");
         let group = groups.entry(key.to_owned()).or_insert_with(|| PositionRows {
@@ -453,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_range_and_sum_overflow_are_errors_for_validation_and_audit_reader() {
+    fn finite_evals_validate_but_audit_reader_checks_integer_range() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
         for evals in [
@@ -467,8 +469,7 @@ mod tests {
             r.set("evals", evals.into());
             let text = format_master(&[r]);
             let report = validate_table(text.as_bytes()).unwrap();
-            assert_eq!(report.errors.len(), 1, "{evals}: {report:?}");
-            assert!(report.errors[0].contains("2 行目: evals"));
+            assert!(report.errors.is_empty(), "{evals}: {report:?}");
             std::fs::write(&path, text).unwrap();
             assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
         }
@@ -623,12 +624,10 @@ mod tests {
             ("ply", "+1", "ply"),
             ("ply", "１", "ply"),
             ("ply", " 1", "ply"),
-            ("evals", "1.5", "evals"),
             ("evals", "NaN", "evals"),
             ("evals", "inf", "evals"),
             ("evals", "1,", "evals"),
             ("evals", "1,,2", "evals"),
-            ("evals", "999999999999999999999999", "evals"),
             ("move", "resign", "合法手"),
             ("move", "7g7e", "合法手"),
             ("move", "P*5e", "合法手"),

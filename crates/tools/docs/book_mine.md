@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -455,14 +455,81 @@ key ply move role source evals nodes lineage tier since note
 - 見出しの完全一致、各行の列数、1 行以上の手があること。区切りはタブ、行末は LF または CRLF です。セル内のタブ・CR・LF は使えません。
 - `since` が空白だけでないこと、同じ `key` と `move` の重複がないこと。
 - `role` は `main` / `alt` / `record`、`tier` は `curated` / `wide`。
-- `ply` は空か ASCII の 10 進数字だけ。`evals` は空かカンマ区切りの符号付き整数 (各値と加算途中の合計が i64 に収まり、偶数丸めした平均が i32 に収まること)。小数・空の要素・空白つきの値は使えません。`record` の行も検査します (読み込み側は `record` の `evals` を読まないので、`validate` の方が厳しくなります)。
+- `ply` は空か ASCII の 10 進数字だけ。`evals` は空かカンマ区切りの有限数です。小数・指数表記・値の前後の空白も受け付けますが、空の要素・NaN・無限大は使えません。`record` の行も検査します。
 - 局面に `main` / `alt` がある場合、`main` がちょうど 1 行あること。全行と `curated` の行だけでそれぞれ検査します。`record` だけの局面も受け付けます。
 - `key` は両玉を 1 枚ずつ含む SFEN の盤面・手番・持ち駒の 3 フィールドで、読み込んだ局面を書き出した正規形と一致すること。
 - `move` はその局面の合法手を表す USI 文字列であること (`record` も検査します)。
 
 `source` の語彙は検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
 
-誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。`master audit` などの読み込み側も、`evals` の合計が i64 を超える場合はエラーになります。
+誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。`master audit` など整数の評価値を使う読み込み側は、各値と加算途中の合計が i64 に収まり、偶数丸めした平均が i32 に収まる整数列だけを受け付けます。小数・指数表記を含む表は、そちらの入力には使えません。
+
+## `master add`: 元データへの行の追加と置換
+
+```bash
+book_mine master add --master moves.tsv --add add.tsv
+book_mine master add --master moves.tsv --add add.tsv --apply --schema schema
+book_mine master add --master moves.tsv --add replacements.tsv --replace --apply
+```
+
+`--master` と `--add` は同じ 11 列の TSV です。同じ `(key, move)` が既にあれば追加を省き、
+role・tier・source に差があれば `skipped conflict: ...` に列ごとの差を出します。
+追加表の中の `(key, move)` の重複は、既存行と一致する場合もエラーです。
+元データと追加後の全体を `master validate` と同じ規則で検査し、検出した誤りをすべて報告します。
+`--schema <dir>` があれば、export と同じ `sources.tsv` で source の語彙も検査します。
+
+`--replace` は、既存の `(key, move)` に一致する行を全列置き換えます。
+新しい main の行と、元の main を alt にした行を同じ追加表に書くと、まとめて入れ替えられます。
+一致した行の数を `replaced existing rows`、実際に値が変わった列の行数を `changed <列>: <数>` に出します。
+値が同じ行も置換数に含め、変化のない列は出しません。追加数には新しい行だけを数えます。
+
+stdout には既存行の省略数、新しい局面と手の数、tier・role・source・since ごとの件数、
+`added <tier>/<role>` を出します。source の集計順は pin・top・deep・selfplay・team・read・plug・fgbook です。
+行は key、role (main・alt・record)、move の順で並べます。
+既定は dry run で `OK (dry run): rows A -> B; no files written` と終わります。
+`--apply` の場合だけ一時ファイルへ全行を書き、元データを置き換えて `applied: rows A -> B` と報告します。
+検査に失敗したら書き換えません。元データと追加表が同じファイルなら、dry run でも拒否します。
+
+## `master add-reads`: 読みから追加候補を作る
+
+```bash
+book_mine master add-reads --master moves.tsv --out out/add.tsv --since candidate \
+  --min-nodes 900000000 --draw-pin 3 reads.jsonl more-reads
+```
+
+`--master`、`--out`、`--since` と 1 つ以上のログパスが必須です。
+`--since` は空白だけの文字列やタブ・CR・LF を含む文字列を拒否します。
+ノード数の下限は既定 9 億、draw-pin は既定 3 で、どちらも非負整数です。
+ログの読み方・除外規則は [共通の読みのログ形式](#読みのログ形式-export--add-reads-共通) に従います。
+元データを検査してから読みを比較し、候補を追加した全体にも同じ検査を行います。
+
+局面ごとに深い読みだけを残し、最小の MultiPV 本数を n として各回の先頭 n 手を比べます。
+各回の先頭値からの差を求め、全回で比べる範囲にあり、差の平均が 20 未満で、
+どの回の差も 40 未満の合法手を選びます (`consensus`)。
+深い読みが 1 回だけなら先頭手だけ (`single`)、条件を満たす手がなければ
+nodes・ply・順序付きの (move, cp) が最大の読みの先頭手 (`fallback`) を選びます。
+選んだ手は差の平均の昇順、1 位の回数の降順、USI の順に並べ、
+新しい局面では先頭を main、残りを alt にします。
+既存局面では新しい手を record にし、既存の手は変更しません。
+複数回の読みで選択から外れた手も、出現した回での差の平均が 40 未満なら record に残します。
+非合法手は行にせず、報告だけに残します。
+
+候補の ply は浅い読みも含めた最小値です。evals は深い読みの順の値、nodes は深い読みの最大値です。
+比較は有理数で行い、evals・差の平均は f64 に変換して有効 12 桁で表示します。
+nodes は有効 2 桁の指数表記、note の億ノード数は有効 2 桁に丸めてから表示します。
+note には読みの回数・1 位の回数・差の平均と、record にした理由を書きます。
+
+出力は `--out` の 11 列 TSV と、その名前に `.report.tsv` を付けた報告です。
+報告の列は key・reads・shallow_dropped・move・role・mean_gap・firsts・status・reason・
+existing_moves・compared_reads・multipv_lengths・compare_n・gaps・reread です。
+status は add / existing / illegal / not_selected、reason は single / consensus / fallback、
+gaps の未出現の回は `NA` です。1 回だけの読みで先頭 2 手の差が 10 未満なら reread は `True`、
+それ以外は `False` です。報告は key・move 順、候補は add と同じ行順になります。
+
+出力がどちらか 1 つでも既にあれば拒否し、入力と同じファイルにも書けません。
+親ディレクトリは必要なら作り、両方を一時ファイルに書き終えてから確定します。
+stdout には読みの取込・除外数、浅い読みの除外数、対象局面数・追加数・非合法手数、
+先後別の手数帯 (1–20、21–40、41–60、61 以上) ごとの追加局面数・手数を出します。
 
 ## `master export`: 定跡・プリセット・注釈の書き出し
 
@@ -536,13 +603,34 @@ USI 順に並べたものです。`depth_after` は main・alt の辺だけか�
 同じ成分の別局面ならその成分の最長路、別成分なら 2 と相手成分の最長路の和を候補にし、
 手ごとの最大値を使います。record は常に 0 です。実際に指せる手数や評価値を保証する値ではありません。
 
+
+到達検査は初期局面から先手・後手を別々に辿り、自分は main・alt、
+相手は全合法手のうち定跡の局面へ着く手を使います。自分の手番の値は
+`read.main`、main の evals の平均、`read.top` の順に選びます。
+stdout には curated main と wide alt が混在する局面の警告、悪い到達局面と経路、
+値が無い局面数、base との差、tier・role・source・since の件数、
+プリセット局面数・返信リンク数・最大 depth_after、DB の SHA-256 をこの順に出します。
+
+### 読みのログ形式 (export / add-reads 共通)
+
+UTF-8 の JSON Lines (1 行 1 オブジェクト) を使います。先頭の BOM と空行は許容します。
+ファイルを複数指定でき、ディレクトリは再帰的に `*.jsonl` を探します。
+
+```json
+{"key":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -","ply":1,"nodes":900000000,"multipv":[{"move":"7g7f","cp":25}],"draw":{"b":0,"w":0}}
+```
+
+`key` は手数を除いた SFEN、`ply` は局面の手数、`nodes` は探索ノード数です。
+`multipv[].move` は USI の手、`multipv[].cp` は**手番の側から見たセンチポーン**です。
+`draw` は読みで指定した引き分け設定のオブジェクトです。値そのものは比較に使わず、
+空でないオブジェクトかどうかで draw 未指定を判定します。
+
 reads はパスを正規化して重複を除き、パス順・行順で取り込みます。
-`--tier` で絞った後の定跡にある局面の読みは、MultiPV と数値を丸ごとメモリに保持します。
-それ以外は、重複集計のために読みの SHA-256 の先頭 16 バイトと draw のフラグだけを保持し、
-異なる読み 1 件あたりのメモリは管理領域を含めて固定の数十バイトです。
-ノード数不足の局面数も key の要約で数えます。メモリは対象局面の読みの総サイズと、
-対象外の異なる読み・ノード数不足の異なる局面の件数に比例します。
-対象外の読みは注釈に含めません。
+`master export` では、`--tier` で絞った後の定跡にある局面の読みは、MultiPV と数値を丸ごとメモリに保持します。
+それ以外の局面の行は key の正規化直後に除外し、合法手の検査や読みの保持をしません。
+メモリは対象局面の読みの総サイズに比例し、対象外の読みは注釈に含めません。
+`master add-reads` は全局面が対象で、読みと件数を集計します。
+取り込む行については、以下を検査します。
 key は両玉を持つ SFEN の 3 フィールドを正規化し、ply は 1 以上の整数、
 multipv は重複のない文字列 move と有限な数値 cp の配列であることを検査します。
 nodes・cp は整数または小数です。整数はそのまま、小数の字面は f64 に読み、
@@ -553,13 +641,6 @@ draw が未指定・null・空オブジェクトで先頭値が draw-pin の範�
 draw は null またはオブジェクトだけを受け付けます。
 key・nodes・ply・順序付きの (move, cp) が一致する読みは 1 回にまとめます。
 局面ごとの最大ノード数を N とし、`nodes × 3 > N` の読みだけを集計に使います。
-
-到達検査は初期局面から先手・後手を別々に辿り、自分は main・alt、
-相手は全合法手のうち定跡の局面へ着く手を使います。自分の手番の値は
-`read.main`、main の evals の平均、`read.top` の順に選びます。
-stdout には curated main と wide alt が混在する局面の警告、悪い到達局面と経路、
-値が無い局面数、base との差、tier・role・source・since の件数、
-プリセット局面数・返信リンク数・最大 depth_after、DB の SHA-256 をこの順に出します。
 
 ## `master diff`: 2 つの定跡の差分
 

@@ -24,7 +24,7 @@ pub(super) fn repr(value: f64) -> String {
     }
 }
 
-pub(super) fn decimal(text: &str) -> Result<BigRational> {
+pub(in crate::book_tree) fn decimal(text: &str) -> Result<BigRational> {
     let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
     let exponent: i32 = exponent.parse()?;
     let decimals = mantissa.split_once('.').map_or(0, |(_, f)| f.len() as i32);
@@ -61,7 +61,7 @@ pub(super) fn mean(values: &[BigRational]) -> Result<f64> {
     // 二進浮動小数を十進小数 1 桁に丸める。先に 10 倍すると境界が変わる。
     Ok(format!("{value:.1}").parse()?)
 }
-pub(super) fn rounded_nodes(nodes: &BigRational) -> Result<String> {
+pub(in crate::book_tree) fn rounded_nodes(nodes: &BigRational) -> Result<String> {
     let value = nodes.to_f64().context("nodes overflow")?;
     ensure!(value.is_finite(), "nodes overflow");
     Ok(format!("{value:.1e}"))
@@ -72,6 +72,32 @@ pub(super) fn eval_number(value: f64) -> String {
     } else {
         repr(value)
     }
+}
+
+fn general(value: f64, precision: usize) -> Result<String> {
+    ensure!(value.is_finite() && precision > 0, "invalid general-format value");
+    let scientific = format!("{:.*e}", precision - 1, value);
+    let (mantissa, exponent) = scientific.split_once('e').context("missing exponent")?;
+    let exponent: i32 = exponent.parse()?;
+    if exponent < -4 || exponent >= precision as i32 {
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        Ok(format!("{mantissa}e{exponent:+03}"))
+    } else {
+        let decimals = (precision as i32 - 1 - exponent).max(0) as usize;
+        let text = format!("{value:.decimals$}");
+        Ok(if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').into()
+        } else {
+            text
+        })
+    }
+}
+pub(in crate::book_tree) fn display(value: &BigRational) -> Result<String> {
+    general(value.to_f64().context("value overflow")?, 12)
+}
+pub(in crate::book_tree) fn node_note(nodes: &BigRational) -> Result<String> {
+    let value = (nodes / BigInt::from(100_000_000)).to_f64().context("nodes overflow")?;
+    general(general(value, 2)?.parse()?, 6)
 }
 
 #[cfg(test)]
