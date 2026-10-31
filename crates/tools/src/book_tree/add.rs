@@ -16,7 +16,7 @@ pub(super) struct AddArgs {
     /// 元データの表
     #[arg(long)]
     master: PathBuf,
-    /// 追加・置換する行の表 (同じ 11 列)
+    /// 追加・置換する行の表 (同じ 13 列)
     #[arg(long)]
     add: PathBuf,
     /// 検査後に元データを書き換える
@@ -25,7 +25,7 @@ pub(super) struct AddArgs {
     /// 同じ局面と手の既存行を全列置き換える
     #[arg(long)]
     replace: bool,
-    /// sources.tsv を置いたディレクトリ
+    /// source・読み条件・lineage の種類の表を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
 }
@@ -42,8 +42,8 @@ pub(super) fn read_table(path: &Path) -> Result<(Vec<Row>, Vec<String>)> {
         std::fs::read_to_string(path).with_context(|| format!("読めません: {}", path.display()))?;
     let mut lines = text.lines();
     let mut errors = Vec::new();
-    if lines.next() != Some(COLUMNS.join("\t").as_str()) {
-        errors.push(format!("{}: 元データの見出しが違います", path.display()));
+    if let Err(error) = master_table::check_header(lines.next().unwrap_or("")) {
+        errors.push(format!("{}: {error}", path.display()));
     }
     let mut rows = Vec::new();
     for (i, line) in lines.enumerate() {
@@ -61,7 +61,7 @@ pub(super) fn run(args: AddArgs) -> Result<()> {
 fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
     let mut protected = vec![args.add.clone()];
     if let Some(dir) = &args.schema {
-        protected.push(dir.join("sources.tsv"));
+        protected.extend(super::schema::paths(dir));
     }
     files::guard(std::slice::from_ref(&args.master), &protected, true)?;
     let schema = Schema::load(args.schema.as_deref())?;
@@ -79,9 +79,12 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut fresh = Vec::new();
     let mut replaced = 0;
-    let mut changed = [0usize; 11];
+    let mut changed = [0usize; COLUMNS.len()];
     let mut replacements = Vec::new();
     for row in &added {
+        if let Err(error) = schema.validate_row(row) {
+            errors.push(error.to_string());
+        }
         let pair = (row.get("key").to_owned(), row.get("move").to_owned());
         if !seen.insert(pair.clone()) {
             errors.push(format!("追加する表で同じ局面と手が重なっています: {} {}", pair.0, pair.1));
@@ -99,12 +102,14 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
                         .filter(|f| old.get(f) != row.get(f))
                         .map(|f| format!("{f}: {} -> {}", old.get(f), row.get(f)))
                         .collect();
-                    replacements.push(format!(
-                        "replaced: {} | {}: {}",
-                        pair.0,
-                        pair.1,
-                        differences.join(", ")
-                    ));
+                    if !differences.is_empty() {
+                        replacements.push(format!(
+                            "replaced: {} | {}: {}",
+                            pair.0,
+                            pair.1,
+                            differences.join(", ")
+                        ));
+                    }
                 }
                 rows[index] = row.clone();
             } else {

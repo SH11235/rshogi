@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const VERSION: &str = "book-tree-v1/newgame-ready/node-calib-last-multipv-v1";
 
@@ -273,6 +273,9 @@ impl Drop for UnlockOnDrop {
 
 pub(super) trait Readings {
     fn get(&self, key: &str) -> Option<&Reading>;
+    fn fingerprint(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl Readings for BTreeMap<String, Reading> {
@@ -290,6 +293,9 @@ pub(super) struct Journal {
 }
 
 impl Readings for Journal {
+    fn fingerprint(&self) -> Option<&str> {
+        Some(&self.fingerprint)
+    }
     fn get(&self, key: &str) -> Option<&Reading> {
         self.records.get(key)
     }
@@ -589,6 +595,88 @@ fn merge_engine_version(known: &mut Settings, other: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// 木に残る全ての読みを台帳と照合する。複数条件に一致する読みも確定扱いにしない。
+pub(super) fn match_fingerprints(
+    paths: &[PathBuf],
+    trees: &[Vec<Reading>],
+) -> Result<Vec<Option<String>>> {
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct Signature {
+        key: String,
+        nodes_limit: u64,
+        nodes: Option<u64>,
+        threads: usize,
+        hash: u32,
+        draw: BTreeMap<String, String>,
+        multipv: Vec<(String, i32, u32)>,
+        bestmove: String,
+    }
+    fn signature(r: &Reading) -> Signature {
+        Signature {
+            key: r.key.clone(),
+            nodes_limit: r.nodes_limit,
+            nodes: r.nodes,
+            threads: r.threads,
+            hash: r.hash,
+            draw: r.draw.clone(),
+            multipv: r.multipv.iter().map(|p| (p.mv.clone(), p.cp, p.depth)).collect(),
+            bestmove: r.bestmove.clone(),
+        }
+    }
+    let signatures: Vec<Vec<_>> =
+        trees.iter().map(|rs| rs.iter().map(signature).collect()).collect();
+    let mut wanted: BTreeMap<Signature, BTreeSet<String>> =
+        signatures.iter().flatten().cloned().map(|s| (s, BTreeSet::new())).collect();
+    if wanted.is_empty() {
+        return Ok(vec![None; trees.len()]);
+    }
+    for path in paths.iter().collect::<BTreeSet<_>>() {
+        let file =
+            File::open(path).with_context(|| format!("台帳を読めません: {}", path.display()))?;
+        // serve の追記を妨げず、読み始めの範囲だけで完結させる。
+        let limit = file.metadata()?.len();
+        for_each_complete_line(
+            &mut BufReader::new(file.take(limit)),
+            limit,
+            |bytes| {
+                let rec = parse_record(bytes)?;
+                if let Some(matches) = wanted.get_mut(&signature(&rec.reading)) {
+                    if rec.settings.computed_fingerprint()? != rec.settings.fingerprint {
+                        bail!("台帳の指紋と条件が合いません");
+                    }
+                    rec.reading.validate(&rec.settings)?;
+                    matches.insert(rec.settings.fingerprint);
+                }
+                Ok(())
+            },
+            &mut false,
+        )?;
+    }
+    Ok(signatures
+        .iter()
+        .map(|readings| {
+            let mut fingerprint = None;
+            for sig in readings {
+                let matches = &wanted[sig];
+                if matches.len() != 1 {
+                    return None;
+                }
+                let found = matches.first().expect("1 件の指紋");
+                if fingerprint.as_ref().is_some_and(|old| old != found) {
+                    return None;
+                }
+                fingerprint = Some(found.clone());
+            }
+            fingerprint
+        })
+        .collect())
+}
+
+#[cfg(test)]
+fn match_fingerprint(path: &Path, readings: &[Reading]) -> Result<Option<String>> {
+    Ok(match_fingerprints(&[path.to_owned()], &[readings.to_vec()])?.remove(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +722,150 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn matching_tree_readings_requires_one_condition_for_every_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut a = record("", 0);
+        a.reading.multipv = vec![Pv {
+            mv: "9i8i".into(),
+            cp: 10,
+            depth: 2,
+        }];
+        a.reading.bestmove = "9i8i".into();
+        a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+        let mut b = record("", 8);
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        let write = |records: &[Record]| {
+            let mut file = File::create(&path).unwrap();
+            for rec in records {
+                write_record(&mut file, rec);
+            }
+        };
+        let readings = vec![a.reading.clone(), b.reading.clone()];
+        write(&[a.clone(), b.clone()]);
+        assert_eq!(
+            match_fingerprint(&path, &readings).unwrap(),
+            Some(a.settings.fingerprint.clone())
+        );
+        let mut changed = readings.clone();
+        changed[0].multipv[0].depth += 1;
+        assert!(match_fingerprint(&path, &changed).unwrap().is_none());
+        for change in 0..8 {
+            let mut changed = readings.clone();
+            match change {
+                0 => changed[0].nodes_limit += 1,
+                1 => changed[0].multipv[0].cp += 1,
+                2 => changed[0].multipv[0].mv = "9i8h".into(),
+                3 => changed[0].hash += 1,
+                4 => {
+                    changed[0].draw.insert("DrawValueBlack".into(), "70".into());
+                }
+                5 => changed[0].threads = 2,
+                6 => changed[0].nodes = Some(101),
+                _ => changed[0].bestmove = "resign".into(),
+            }
+            assert!(match_fingerprint(&path, &changed).unwrap().is_none());
+        }
+        write(std::slice::from_ref(&a));
+        assert!(match_fingerprint(&path, &readings).unwrap().is_none());
+        b.settings.engine_sha256 = "different".into();
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        write(&[a.clone(), b.clone()]);
+        assert!(match_fingerprint(&path, &readings).unwrap().is_none());
+        let mut ambiguous = a.clone();
+        ambiguous.settings = b.settings.clone();
+        write(&[a.clone(), ambiguous]);
+        assert!(match_fingerprint(&path, &[a.reading]).unwrap().is_none());
+        let before = std::fs::read(&path).unwrap();
+        assert!(match_fingerprint(&path, &[]).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn matching_ignores_unfinished_tail_without_changing_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        write_record(&mut file, &rec);
+        file.write_all(b"{\"reading\":").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            match_fingerprint(&path, &[rec.reading]).unwrap(),
+            Some(rec.settings.fingerprint)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn matching_reads_exclusively_locked_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut journal = Journal::open(&path, &rec.settings.fingerprint).unwrap();
+        journal.append(rec.reading.clone(), &rec.settings, "fixture".into()).unwrap();
+        let probe = File::open(&path).unwrap();
+        assert!(matches!(
+            file_lock::try_lock_shared(&probe),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            match_fingerprint(&path, &[rec.reading]).unwrap(),
+            Some(rec.settings.fingerprint)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(journal);
+    }
+
+    #[test]
+    fn matching_rejects_invalid_complete_line_after_matching_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        write_record(&mut file, &rec);
+        file.write_all(b"{invalid}\n{unfinished").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(match_fingerprint(&path, &[rec.reading]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn matching_combines_all_journals_for_all_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [dir.path().join("one"), dir.path().join("two")];
+        let mut a = record("", 0);
+        a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+        let mut b = record("", 8);
+        b.settings.engine_sha256 = "different".into();
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        let mut ambiguous = a.clone();
+        ambiguous.settings = b.settings.clone();
+        write_record(&mut File::create(&paths[0]).unwrap(), &a);
+        let mut file = File::create(&paths[1]).unwrap();
+        write_record(&mut file, &b);
+        write_record(&mut file, &ambiguous);
+        let trees = [
+            vec![a.reading.clone()],
+            vec![b.reading.clone()],
+            vec![a.reading.clone(), b.reading.clone()],
+            vec![],
+        ];
+        assert_eq!(
+            match_fingerprints(&paths[..1], &trees).unwrap(),
+            [Some(a.settings.fingerprint), None, None, None]
+        );
+        assert_eq!(
+            match_fingerprints(&paths, &trees).unwrap(),
+            [None, Some(b.settings.fingerprint), None, None]
+        );
     }
 
     #[test]

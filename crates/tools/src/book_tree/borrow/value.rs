@@ -4,7 +4,7 @@
 use super::cut::master_value;
 use super::{Kind, Meta, RootInfo, Subtree, read_cut, side, turn};
 use crate::book_backprop::{
-    BOOK_HEADER, BackpropOptions, DrawValues, MergeMode, propagate_values, read_graph,
+    BOOK_HEADER, BackpropOptions, DrawValues, Graph, MergeMode, propagate_values, read_graph,
 };
 use crate::book_tree::audit::{MasterValue, audit, master_values};
 use crate::book_tree::journal::{Reading, read_source};
@@ -13,7 +13,7 @@ use crate::book_tree::register::{self, Conflict, NodeMove, Options, merge};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,9 @@ pub(super) struct ValueArgs {
     /// 定跡の元データの表 (TSV)
     #[arg(long)]
     master: PathBuf,
+    /// 語彙と読み条件の表を置いたディレクトリ
+    #[arg(long)]
+    schema: Option<PathBuf>,
     /// 結果の出力先 (まだ無い dir)
     #[arg(long)]
     out: PathBuf,
@@ -74,6 +77,7 @@ impl ValueArgs {
             cut,
             journal,
             fingerprint: None,
+            schema: None,
             master,
             out,
             since: "tag".into(),
@@ -95,6 +99,8 @@ pub(super) struct MoveValue {
     /// 部分木の手 (大きい定跡の手か --extra の手)。偽なら出口の読みの手。
     pub expanded: bool,
     pub book_value: Option<i32>,
+    pub propagated: bool,
+    pub cond: String,
 }
 
 /// 確認点の印: 候補の外の手が候補の最善を線以上上回る。
@@ -118,6 +124,82 @@ pub(super) struct RootValues {
 /// 部分木の読みの局面の読み。
 pub(super) type ReadingsOf = BTreeMap<String, Reading>;
 
+pub(super) struct ValueInput<'a> {
+    pub readings: &'a ReadingsOf,
+    pub master: &'a BTreeMap<String, MasterValue>,
+    pub master_known: &'a BTreeSet<String>,
+    pub cond: &'a str,
+}
+
+// 最善手の選択や同値補正も他の候補に依存するので、子の全候補の由来を確かめる。
+// 循環を含む依存関係は台帳の読みだけで値を証明できないため、未確定のまま残す。
+fn verified_nodes(graph: &Graph, leaves: &[Vec<bool>]) -> Vec<bool> {
+    let mut pending = vec![0; graph.len()];
+    let mut blocked = vec![false; graph.len()];
+    let mut parents = vec![Vec::new(); graph.len()];
+    let mut queue = VecDeque::new();
+    for node in 0..graph.len() {
+        let mut count = 0;
+        for (m, known) in graph.moves(node).zip(&leaves[node]) {
+            count += 1;
+            if let Some(edge) = m.edge {
+                pending[node] += 1;
+                parents[edge.to].push(node);
+            } else if !known {
+                blocked[node] = true;
+            }
+        }
+        if count > 0 && pending[node] == 0 && !blocked[node] {
+            queue.push_back(node);
+        }
+    }
+    let mut verified = vec![false; graph.len()];
+    while let Some(node) = queue.pop_front() {
+        verified[node] = true;
+        for &parent in &parents[node] {
+            pending[parent] -= 1;
+            if pending[parent] == 0 && !blocked[parent] {
+                queue.push_back(parent);
+            }
+        }
+    }
+    verified
+}
+
+fn master_conditions(
+    rows: &[crate::book_tree::master_table::Row],
+    positions: &BTreeMap<String, crate::book_tree::master_table::MasterPosition>,
+    audited: &crate::book_tree::audit::AuditedBook,
+    cond: &str,
+) -> BTreeSet<String> {
+    if cond == "unknown" {
+        return BTreeSet::new();
+    }
+    let conditions: BTreeMap<_, _> =
+        rows.iter().map(|r| ((r.get("key"), r.get("move")), r.get("cond"))).collect();
+    let mut leaves = vec![Vec::new(); audited.graph.len()];
+    let mut same_condition = BTreeSet::new();
+    for ((key, position), known) in positions.iter().zip(&audited.known) {
+        let Some(node) = audited.graph.find(key) else {
+            continue;
+        };
+        let matches: Vec<_> = position
+            .moves
+            .iter()
+            .zip(known)
+            .filter(|(_, k)| **k)
+            .map(|(m, _)| conditions.get(&(key.as_str(), m.mv.as_str())) == Some(&cond))
+            .collect();
+        if !matches.is_empty() && matches.iter().all(|&k| k) {
+            same_condition.insert(key.clone());
+        }
+        leaves[node] = matches;
+    }
+    let verified = verified_nodes(&audited.graph, &leaves);
+    same_condition.retain(|key| audited.graph.find(key).is_some_and(|node| verified[node]));
+    same_condition
+}
+
 /// `.db` に書いた 1 行。
 struct Written<'a> {
     /// 指し手。`None` は指し手の無い値だけの行。
@@ -139,12 +221,14 @@ fn leaf_value(reading: &Reading) -> i32 {
 pub(super) fn value_root(
     root: &RootInfo,
     tree: &Subtree,
-    readings: &ReadingsOf,
-    master: &BTreeMap<String, MasterValue>,
+    input: &ValueInput,
     draws: DrawValues,
     line: i32,
     work: &Path,
 ) -> Result<RootValues> {
+    let ValueInput {
+        readings, master, ..
+    } = input;
     let mut edges: BTreeMap<&str, Vec<&super::Edge>> = BTreeMap::new();
     for e in &tree.edges {
         edges.entry(e.key.as_str()).or_default().push(e);
@@ -220,20 +304,42 @@ pub(super) fn value_root(
     ensure!(graph.illegal_moves == 0, "{}: 内部エラー: 非合法手があります", root.id);
     propagate_values(&mut graph, draws, MergeMode::Replace)?;
 
+    let leaves: Vec<Vec<bool>> = (0..graph.len())
+        .map(|node| {
+            let key = graph.key(node);
+            let n = &tree.nodes[key];
+            let known = if n.kind == Kind::Master && !n.read {
+                input.master_known.contains(key)
+            } else {
+                n.kind != Kind::Inner && input.cond != "unknown"
+            };
+            graph.moves(node).map(|_| known).collect()
+        })
+        .collect();
+    let verified = verified_nodes(&graph, &leaves);
     let mut result = RootValues::default();
     for (key, rows) in written {
         let node = graph
             .find(key)
             .with_context(|| format!("内部エラー: 局面がありません: {key}"))?;
-        let values: Vec<i32> = graph.moves(node).map(|m| m.new).collect();
+        let values: Vec<_> = graph.moves(node).collect();
         ensure!(values.len() == rows.len(), "内部エラー: 手の数が合いません: {key}");
         let mut moves: Vec<MoveValue> = rows
             .iter()
             .zip(values)
-            .filter_map(|(row, value)| {
+            .enumerate()
+            .filter_map(|(i, (row, value))| {
                 Some(MoveValue {
+                    cond: if value.edge.map_or(leaves[node][i], |edge| verified[edge.to])
+                        && (!value.tie_lowered || verified[node])
+                    {
+                        input.cond.to_owned()
+                    } else {
+                        "unknown".into()
+                    },
                     mv: row.mv?.to_owned(),
-                    value,
+                    value: value.new,
+                    propagated: value.edge.is_some(),
                     expanded: row.expanded,
                     book_value: row.book_value,
                 })
@@ -306,8 +412,14 @@ pub(super) fn register_nodes(
                 moves: moves
                     .iter()
                     .map(|m| NodeMove {
+                        cond: m.cond.clone(),
                         mv: m.mv.clone(),
                         value: m.value,
+                        value_kind: if m.propagated {
+                            format!("tree:{}", max_plies.saturating_sub(node.level).max(1))
+                        } else {
+                            "single".into()
+                        },
                     })
                     .collect(),
                 tree: index,
@@ -338,9 +450,11 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .iter()
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
-    // 読む局面が無い部分木 (循環だけで閉じた木) は千日手の値だけで解けるので、台帳を読まない。
+    let schema = crate::book_tree::schema::Schema::load(args.schema.as_deref())?;
+    let mut cond = "unknown".to_owned();
     let mut nodes_limit = 0;
     let mut readings = ReadingsOf::new();
+    // 読みが不要な木に、無関係な台帳の条件を割り当てない。
     if !wanted.is_empty() {
         let source =
             read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;
@@ -352,6 +466,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
             source.settings.draw(),
             source.readings.len()
         );
+        cond = schema.condition(&source.settings.fingerprint)?;
         nodes_limit = source.settings.nodes;
         readings = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
     }
@@ -372,15 +487,27 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
     let master_rows = read_master(&args.master)?;
     let master = master_values(&master_rows, draws)?;
-    let (_, before, _) = audit(&master_rows, draws, args.line, false)?;
+    let (_, before, audited) = audit(&master_rows, draws, args.line, false)?;
+    let text = std::fs::read_to_string(&args.master)
+        .with_context(|| format!("{} を読めません", args.master.display()))?;
+    let rows = parse_master(&text)?;
+    for row in &rows {
+        schema.validate_row(row)?;
+    }
+    let master_known = master_conditions(&rows, &master_rows.0, &audited, &cond);
+    drop(audited);
+    let input = ValueInput {
+        readings: &readings,
+        master: &master,
+        master_known: &master_known,
+        cond: &cond,
+    };
 
     let all = meta
         .roots
         .iter()
         .zip(&trees)
-        .map(|(root, tree)| {
-            value_root(root, tree, &readings, &master, draws, args.line, work.path())
-        })
+        .map(|(root, tree)| value_root(root, tree, &input, draws, args.line, work.path()))
         .collect::<Result<Vec<_>>>()?;
     let marked: BTreeSet<&str> =
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
@@ -392,9 +519,6 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
             register_nodes(index, root, tree, values, &marked, meta.params.max_plies, nodes_limit),
         );
     }
-    let text = std::fs::read_to_string(&args.master)
-        .with_context(|| format!("{} を読めません", args.master.display()))?;
-    let rows = parse_master(&text)?;
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
     let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);
@@ -404,6 +528,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         alt_gap: args.alt_gap,
         source: "ext",
         lineage: &lineage,
+        schema: &schema,
     };
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
@@ -528,4 +653,46 @@ fn write_outputs(
     }
     write_atomic(&out.join("conflicts.tsv"), &table)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::book_tree::master_table::{positions_from_rows, test_row};
+
+    #[test]
+    fn master_conditions_check_exit_names_and_propagated_sources() {
+        let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let child = crate::book_tree::model::child(root, "5i4i").unwrap();
+        let row = |key: &str, mv: &str, cond: &str| {
+            test_row(&[
+                ("key", key.into()),
+                ("move", mv.into()),
+                ("role", "main".into()),
+                ("evals", "10".into()),
+                ("cond", cond.into()),
+                ("source", "read".into()),
+            ])
+        };
+        for (parent_cond, child_cond, expected) in [
+            ("ledger", "unknown", vec![]),
+            ("ledger", "other", vec![]),
+            ("ledger", "ledger", vec![root.to_owned(), child.clone()]),
+            ("unknown", "ledger", vec![child.clone()]),
+        ] {
+            let rows = vec![
+                row(root, "5i4i", parent_cond),
+                row(&child, "5a4a", child_cond),
+            ];
+            let master =
+                positions_from_rows(rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))
+                    .unwrap();
+            let (_, _, book) = audit(&master, DrawValues::default(), 40, false).unwrap();
+            assert_eq!(
+                master_conditions(&rows, &master.0, &book, "ledger"),
+                expected.into_iter().collect()
+            );
+            assert!(master_conditions(&rows, &master.0, &book, "unknown").is_empty());
+        }
+    }
 }

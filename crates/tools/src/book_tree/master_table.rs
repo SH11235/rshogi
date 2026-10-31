@@ -5,8 +5,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-pub(super) const COLUMNS: [&str; 11] = [
-    "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
+pub(super) const COLUMNS: [&str; 13] = [
+    "key",
+    "ply",
+    "move",
+    "role",
+    "source",
+    "evals",
+    "nodes",
+    "cond",
+    "value_kind",
+    "lineage",
+    "tier",
+    "since",
+    "note",
 ];
 pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +54,81 @@ fn index(column: &str) -> usize {
     COLUMNS.iter().position(|c| *c == column).expect("既知の列")
 }
 
+pub(super) fn check_header(header: &str) -> Result<()> {
+    const OLD: &str = "key\tply\tmove\trole\tsource\tevals\tnodes\tlineage\ttier\tsince\tnote";
+    ensure!(header != OLD, "元データは古い書式 (11 列) です。13 列への移行が必要です");
+    ensure!(header == COLUMNS.join("\t"), "元データの見出しが違います");
+    Ok(())
+}
+
+pub(super) fn condition_name(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+pub(super) fn lineage_kind(s: &str) -> bool {
+    s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+}
+
+pub(super) fn validate_metadata(row: &Row) -> Result<()> {
+    let evals = row.get("evals");
+    let cond = row.get("cond");
+    let kind = row.get("value_kind");
+    if evals.is_empty() {
+        ensure!(
+            cond.is_empty() && kind.is_empty(),
+            "evals が空なら cond・value_kind も空にしてください"
+        );
+    } else {
+        ensure!(condition_name(cond), "cond は空でない条件名・unknown・mixed にしてください");
+        let n = evals.split(',').count();
+        let valid = match kind {
+            "unknown" => true,
+            "single" => n == 1,
+            _ => kind.split_once(':').is_some_and(|(prefix, count)| {
+                !count.is_empty()
+                    && count.bytes().all(|b| b.is_ascii_digit())
+                    && match prefix {
+                        "mean" => n >= 2 && count.trim_start_matches('0') == n.to_string(),
+                        "tree" => count.bytes().any(|b| b != b'0') && n == 1,
+                        _ => false,
+                    }
+            }),
+        };
+        ensure!(valid, "value_kind が不正、または evals の個数と合いません");
+    }
+    if !row.get("lineage").is_empty() {
+        for entry in row.get("lineage").split(',') {
+            ensure!(
+                entry.split_once(':').is_some_and(|(kind, name)| {
+                    lineage_kind(kind) && !name.is_empty() && !name.chars().any(char::is_whitespace)
+                }),
+                "lineage は <種類>:<名前> のカンマ区切りにしてください"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn test_row(fields: &[(&str, String)]) -> Row {
+    let mut row = Row::from_fields(fields);
+    if !row.get("evals").is_empty() {
+        for name in ["cond", "value_kind"] {
+            if !fields.iter().any(|(f, _)| *f == name) {
+                row.set(name, "unknown".into());
+            }
+        }
+    }
+    row
+}
+
+#[cfg(test)]
+pub(super) fn test_line(fields: &[(&str, String)]) -> String {
+    test_row(fields).0.join("\t")
+}
+
 /// 局面の main・alt の手。record は指さないので持たない。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BookMove {
@@ -67,14 +154,12 @@ pub(super) fn read_rows(
 ) -> Result<impl Iterator<Item = Result<(usize, Row)>>> {
     let mut lines = reader.lines();
     let header = lines.next().transpose()?;
-    ensure!(
-        header.as_deref() == Some(COLUMNS.join("\t").as_str()),
-        "元データの見出しが違います"
-    );
+    check_header(header.as_deref().unwrap_or(""))?;
     Ok(lines.enumerate().map(|(i, line)| {
         let at = i + 2;
         let row = Row::parse_line(&line?, at)?;
         ensure!(ROLES.contains(&row.get("role")), "元データの {at} 行目の role が不正です");
+        validate_metadata(&row).with_context(|| format!("元データの {at} 行目"))?;
         Ok((at, row))
     }))
 }
@@ -107,6 +192,7 @@ pub(super) fn positions_from_rows(
 ) -> Result<(BTreeMap<String, MasterPosition>, usize)> {
     let mut positions: BTreeMap<String, MasterPosition> = BTreeMap::new();
     let mut records = 0;
+    let mut mains = BTreeSet::new();
     for row in rows {
         let (at, row) = row?;
         let role = row.get("role");
@@ -131,7 +217,10 @@ pub(super) fn positions_from_rows(
             eval,
         };
         if role == "main" {
-            ensure!(position.ply.is_empty(), "元データの {at} 行目: 局面に main が 2 つあります");
+            ensure!(
+                mains.insert(row.get("key").to_owned()),
+                "元データの {at} 行目: 局面に main が 2 つあります"
+            );
             position.ply = row.get("ply").to_owned();
             position.source = row.get("source").to_owned();
             position.moves.insert(0, book_move);
@@ -139,7 +228,7 @@ pub(super) fn positions_from_rows(
             position.moves.push(book_move);
         }
     }
-    if let Some((key, _)) = positions.iter().find(|(_, p)| p.ply.is_empty()) {
+    if let Some((key, _)) = positions.iter().find(|(key, _)| !mains.contains(*key)) {
         bail!("main の無い局面があります: {key}");
     }
     Ok((positions, records))
@@ -163,6 +252,7 @@ pub(super) fn validate(rows: &[Row]) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut groups: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
     for row in rows {
+        validate_metadata(row)?;
         ensure!(
             seen.insert((row.get("key"), row.get("move"))),
             "同じ手の行が重なっています: {} {}",
@@ -202,12 +292,20 @@ pub(super) struct ValidateArgs {
     /// 定跡の元データの表 (TSV)
     #[arg(long)]
     master: std::path::PathBuf,
+    /// 語彙と読み条件の表を置いたディレクトリ
+    #[arg(long)]
+    schema: Option<std::path::PathBuf>,
 }
 
 pub(super) fn run_validate(args: ValidateArgs) -> Result<()> {
     let file = std::fs::File::open(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
-    let report = validate_table(BufReader::new(file))?;
+    let schema = super::schema::Schema::load(args.schema.as_deref())?;
+    let mut report = validate_table(BufReader::new(file))?;
+    if args.schema.is_some() {
+        report.errors.extend(schema.vocabulary_errors(std::fs::read(&args.master)?)?);
+        report.errors.sort_by_key(|(at, _)| *at);
+    }
     write_validation_report(&report, std::io::stdout().lock())
 }
 
@@ -215,7 +313,7 @@ fn write_validation_report(
     report: &ValidationReport,
     mut stdout: impl std::io::Write,
 ) -> Result<()> {
-    for error in &report.errors {
+    for (_, error) in &report.errors {
         eprintln!("{error}");
     }
     ensure!(
@@ -229,7 +327,7 @@ fn write_validation_report(
 
 #[derive(Default, Debug)]
 pub(super) struct ValidationReport {
-    pub(super) errors: Vec<String>,
+    pub(super) errors: Vec<(usize, String)>,
     summary: String,
 }
 
@@ -260,7 +358,13 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
     match std::str::from_utf8(&line) {
         Err(_) => errors.push((1, "元データの 1 行目: UTF-8 ではありません".into())),
         Ok(line) if without_line_ending(line) != COLUMNS.join("\t") => {
-            errors.push((1, "元データの 1 行目の見出しが違います".into()));
+            errors.push((
+                1,
+                format!(
+                    "元データの 1 行目: {}",
+                    check_header(without_line_ending(line)).unwrap_err()
+                ),
+            ));
         }
         Ok(_) => {}
     }
@@ -317,6 +421,9 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
         let evals = row.get("evals");
         if mean_eval(evals).is_err() {
             error("evals は整数をカンマで区切り、合計は i64、平均は i32 の範囲にしてください");
+        }
+        if let Err(reason) = validate_metadata(&row) {
+            error(&reason.to_string());
         }
         let key = row.get("key");
         let group = groups.entry(key.to_owned()).or_insert_with(|| PositionRows {
@@ -393,7 +500,7 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
         }
     }
     errors.sort_by_key(|(at, _)| *at);
-    report.errors = errors.into_iter().map(|(_, message)| message).collect();
+    report.errors = errors;
     if report.errors.is_empty() {
         writeln!(report.summary, "positions={}, moves={count}", groups.len())?;
         for (tier, (positions, moves)) in tiers {
@@ -414,7 +521,7 @@ mod tests {
     use super::*;
 
     fn row(mv: &str, role: &str, tier: &str) -> Row {
-        Row::from_fields(&[
+        crate::book_tree::master_table::test_row(&[
             ("key", HIRATE_KEY.into()),
             ("ply", "1".into()),
             ("move", mv.into()),
@@ -427,7 +534,12 @@ mod tests {
     }
 
     fn errors(rows: &[Row]) -> Vec<String> {
-        validate_table(format_master(rows).as_bytes()).unwrap().errors
+        validate_table(format_master(rows).as_bytes())
+            .unwrap()
+            .errors
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect()
     }
 
     #[test]
@@ -472,7 +584,7 @@ mod tests {
             r.set("evals", evals.into());
             let text = format_master(&[r]);
             let report = validate_table(text.as_bytes()).unwrap();
-            assert!(report.errors.iter().any(|e| e.contains("evals")), "{evals}: {report:?}");
+            assert!(report.errors.iter().any(|(_, e)| e.contains("evals")), "{evals}: {report:?}");
             std::fs::write(&path, text).unwrap();
             assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
         }
@@ -491,8 +603,8 @@ mod tests {
         ] {
             let report = validate_table(bytes.as_slice()).unwrap();
             assert_eq!(report.errors.len(), 2, "{report:?}");
-            assert_eq!(report.errors[0], format!("元データの {at} 行目: UTF-8 ではありません"));
-            assert!(report.errors[1].contains("列の数"));
+            assert_eq!(report.errors[0].1, format!("元データの {at} 行目: UTF-8 ではありません"));
+            assert!(report.errors[1].1.contains("列の数"));
             assert!(
                 read_rows(bytes.as_slice())
                     .and_then(|rows| rows.collect::<Result<Vec<_>>>())
@@ -501,7 +613,12 @@ mod tests {
         }
         let bytes = [header.as_bytes(), b"\n\xff"].concat();
         assert_eq!(
-            validate_table(bytes.as_slice()).unwrap().errors,
+            validate_table(bytes.as_slice())
+                .unwrap()
+                .errors
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>(),
             ["元データの 2 行目: UTF-8 ではありません"]
         );
     }
@@ -534,7 +651,7 @@ mod tests {
     fn malformed_rows_do_not_count_as_an_empty_table() {
         let text = format!("{}\nx\n", COLUMNS.join("\t"));
         let report = validate_table(text.as_bytes()).unwrap();
-        assert_eq!(report.errors, ["元データの 2 行目の列の数が違います"]);
+        assert_eq!(report.errors, [(2, "元データの 2 行目の列の数が違います".into())]);
         assert!(report.summary.is_empty());
     }
 
@@ -542,7 +659,7 @@ mod tests {
     fn validation_errors_do_not_write_a_summary_to_stdout() {
         let mut stdout = Vec::new();
         let report = ValidationReport {
-            errors: vec!["元データの 2 行目: evals が不正です".into()],
+            errors: vec![(2, "元データの 2 行目: evals が不正です".into())],
             summary: "positions=1, moves=1\n".into(),
         };
         assert!(write_validation_report(&report, &mut stdout).is_err());
@@ -581,7 +698,7 @@ mod tests {
                 .unwrap()
                 .errors
                 .iter()
-                .any(|e| e.contains("見出し"))
+                .any(|(_, e)| e.contains("見出し"))
         );
     }
 
@@ -605,6 +722,8 @@ mod tests {
         ];
         rows[0].set("ply", String::new());
         rows[1].set("evals", String::new());
+        rows[1].set("cond", String::new());
+        rows[1].set("value_kind", String::new());
         let report = validate_table(format_master(&rows).as_bytes()).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(
@@ -661,7 +780,7 @@ mod tests {
         );
         let report = validate_table(text.as_bytes()).unwrap();
         assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].contains("1 行目"));
+        assert!(report.errors[0].1.contains("1 行目"));
     }
 
     #[test]
@@ -713,10 +832,7 @@ mod tests {
         main.set("ply", "".into());
         let text = format_master(&[main]);
         assert!(parse_master(&text).is_ok());
-        assert_eq!(
-            parse_master_rows(text.as_bytes()).unwrap_err().to_string(),
-            format!("main の無い局面があります: {HIRATE_KEY}")
-        );
+        assert_eq!(parse_master_rows(text.as_bytes()).unwrap().0[HIRATE_KEY].ply, "");
         let text = format_master(&[row("7g7f", "main", "wide"), row("2g2f", "main", "wide")]);
         assert_eq!(
             parse_master_rows(text.as_bytes()).unwrap_err().to_string(),
@@ -735,6 +851,76 @@ mod tests {
         assert_eq!(
             parse_master(&text).unwrap_err().to_string(),
             "元データの 2 行目の role が不正です"
+        );
+    }
+    #[test]
+    fn metadata_structure_is_checked_by_every_reader() {
+        for (evals, cond, kind, lineage, valid) in [
+            ("", "", "", "", true),
+            ("+5", "engine-1.a_b", "single", "book:x@abc,plan:手順", true),
+            ("1,2", "mixed", "mean:2", "", true),
+            ("1", "unknown", "tree:1", "", true),
+            ("1,2,3", "unknown", "unknown", "", true),
+            ("", "unknown", "", "", false),
+            ("", "", "single", "", false),
+            ("1", "", "single", "", false),
+            ("1", "a b", "single", "", false),
+            ("1", "条件", "single", "", false),
+            ("1", "ok", "", "", false),
+            ("1,2", "ok", "single", "", false),
+            ("1", "ok", "mean:1", "", false),
+            ("1,2", "ok", "mean:3", "", false),
+            ("1,2", "ok", "mean:+2", "", false),
+            ("1", "ok", "tree:0", "", false),
+            ("1,2", "ok", "tree:2", "", false),
+            ("1", "ok", "tree:-1", "", false),
+            ("1", "ok", "tree:999999999999999999999999", "", true),
+            ("1", "ok", "other", "", false),
+            ("1", "ok", "single", "old", false),
+            ("1", "ok", "single", "Book:x", false),
+            ("1", "ok", "single", "0book:x", false),
+            ("1", "ok", "single", "book:", false),
+            ("1", "ok", "single", "book:a b", false),
+            ("1", "ok", "single", "book:a　b", false),
+            ("1", "ok", "single", "book:a,", false),
+        ] {
+            let mut r = row("7g7f", "main", "wide");
+            for (field, value) in [
+                ("evals", evals),
+                ("cond", cond),
+                ("value_kind", kind),
+                ("lineage", lineage),
+            ] {
+                r.set(field, value.into());
+            }
+            let text = format_master(std::slice::from_ref(&r));
+            assert_eq!(errors(std::slice::from_ref(&r)).is_empty(), valid, "{text}");
+            assert_eq!(parse_master(&text).is_ok(), valid, "{text}");
+            assert_eq!(parse_master_rows(text.as_bytes()).is_ok(), valid, "{text}");
+            assert_eq!(validate(&[r]).is_ok(), valid, "{text}");
+        }
+    }
+
+    #[test]
+    fn old_header_requires_migration_and_empty_main_ply_is_not_missing() {
+        let old = COLUMNS
+            .iter()
+            .filter(|c| !["cond", "value_kind"].contains(c))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\t");
+        assert!(parse_master(&old).unwrap_err().to_string().contains("移行"));
+        assert!(validate_table(old.as_bytes()).unwrap().errors[0].1.contains("移行"));
+        let mut first = row("7g7f", "main", "wide");
+        first.set("ply", "".into());
+        let text = format_master(std::slice::from_ref(&first));
+        assert!(parse_master_rows(text.as_bytes()).is_ok());
+        let text = format_master(&[first, row("2g2f", "main", "wide")]);
+        assert!(
+            parse_master_rows(text.as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("main が 2 つ")
         );
     }
 }

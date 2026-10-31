@@ -26,11 +26,16 @@ impl Tree {
         let replace = self.negamax(&all)?;
         let rule = self.negamax(&rule_set)?;
         let pending = self.unresolved(&replace);
+        let mut status = json!({"ready": pending.is_empty(), "unresolved": pending});
+        if self.reading_conditions.len() == 1
+            && let Some(Some(fingerprint)) = self.reading_conditions.first()
+            && super::schema::valid_fingerprint(fingerprint)
+        {
+            status["fingerprint"] = json!(fingerprint);
+        }
         write_atomic(
             &self.def.out.join("registration_status.json"),
-            &serde_json::to_string_pretty(
-                &json!({"ready": pending.is_empty(), "unresolved": pending}),
-            )?,
+            &serde_json::to_string_pretty(&status)?,
         )?;
         // 後段は d*.jsonl を全て読むため、以前の定義の読みを残さない。
         for entry in std::fs::read_dir(&self.def.out)? {
@@ -249,7 +254,7 @@ impl Tree {
         Ok(true)
     }
 
-    /// 両方の手番の局面の手ごとの伝播後の値。伸ばしていない手は 1 回の読みの値のまま並べる。
+    /// 両方の手番の局面の手ごとの伝播後の値。行き先が木の局面でない手は 1 回の読みの値のまま並べる。
     fn node_moves(&self, replace: &Values) -> Result<String> {
         let mut text =
             "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n".to_owned();

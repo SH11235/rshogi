@@ -1065,19 +1065,90 @@ fn node_moves_lists_both_sides_with_propagated_values() {
     while !tree.finished {
         assert!(tree.advance(&cache).unwrap().is_empty() || tree.finished);
     }
+    let parent = ["5i5h", "5a5b", "5h4i"]
+        .iter()
+        .fold(ROOT.to_owned(), |key, mv| child(&key, mv).unwrap());
+    let destination = child(&parent, "5b4a").unwrap();
+    assert!(tree.edge.get_mut(&parent).unwrap().remove("5b4a"));
+    assert!(tree.reach(&tree.edge).contains(&destination));
     assert!(tree.write_outputs().unwrap());
     let text = std::fs::read_to_string(tree.def.out.join("node_moves.tsv")).unwrap();
-    let nodes = super::register::parse_node_moves(&text, 0).unwrap();
+    let nodes =
+        super::register::parse_node_moves(&text, 0, Some(&tree.nodes.keys().cloned().collect()))
+            .unwrap();
     let values = reference_values(&tree);
     assert!(nodes.keys().any(|k| side(k) == "w"));
     assert!(nodes.keys().any(|k| side(k) == "b"));
+    let mut joined = 0;
+    let mut single = 0;
     for (key, node) in &nodes {
         let expected: Vec<_> = tree.rank(key, &values[key], values[key].keys().cloned());
         let got: Vec<_> = node.moves.iter().map(|m| m.mv.clone()).collect();
         assert_eq!(got, expected, "{key}");
         for m in &node.moves {
             assert_eq!(m.value, values[key][&m.mv], "{key} {}", m.mv);
+            let destination = child(key, &m.mv).unwrap();
+            if let Some(child_node) = nodes.get(&destination) {
+                assert_eq!(m.value_kind, format!("tree:{}", child_node.remaining + 1));
+                if !tree.edge.get(key).is_some_and(|edges| edges.contains(&m.mv)) {
+                    joined += 1;
+                }
+            } else if tree.nodes.contains_key(&destination) {
+                assert_eq!(m.value_kind, "unknown");
+            } else {
+                assert_eq!(m.value_kind, "single");
+                single += 1;
+            }
         }
         assert_eq!(node.remaining, tree.def.depth - tree.level[key]);
+    }
+    assert!(joined > 0);
+    assert!(single > 0);
+}
+
+#[test]
+fn registration_fingerprint_requires_uniform_reading_provenance() {
+    struct Cache<'a> {
+        rows: &'a BTreeMap<String, Reading>,
+        fingerprint: Option<&'a str>,
+    }
+    impl journal::Readings for Cache<'_> {
+        fn get(&self, key: &str) -> Option<&Reading> {
+            self.rows.get(key)
+        }
+        fn fingerprint(&self) -> Option<&str> {
+            self.fingerprint
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let rows = corpus(&settings);
+    for mixed in [false, true] {
+        let mut tree = Tree::load(definition(dir.path(), 2), &settings).unwrap();
+        let partial = BTreeMap::from([(ROOT.to_owned(), rows[ROOT].clone())]);
+        tree.advance(&Cache {
+            rows: &partial,
+            fingerprint: Some(&settings.fingerprint),
+        })
+        .unwrap();
+        let other = "b".repeat(64);
+        let cache = Cache {
+            rows: &rows,
+            fingerprint: Some(if mixed { &other } else { &settings.fingerprint }),
+        };
+        while !tree.finished {
+            assert!(tree.advance(&cache).unwrap().is_empty());
+        }
+        tree.write_outputs().unwrap();
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(tree.def.out.join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        if mixed {
+            assert!(status.get("fingerprint").is_none());
+        } else {
+            assert_eq!(status["fingerprint"], settings.fingerprint);
+        }
+        assert!(status.get("ready").is_some() && status.get("unresolved").is_some());
     }
 }

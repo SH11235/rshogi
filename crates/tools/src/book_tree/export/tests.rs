@@ -1,18 +1,20 @@
 use super::*;
+use std::path::Path;
 #[test]
 fn schema_is_explicit_and_ordered() {
     let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
     assert!(Schema::load(Some(d.path())).is_err());
     let p = d.path().join("sources.tsv");
     for text in [
         "wrong\n",
-        "source\tdescription\nx\tone\nx\ttwo\n",
-        "source\tdescription\nx\n",
+        "source\tdescription\treplaceable\nx\tone\t0\nx\ttwo\t0\n",
+        "source\tdescription\treplaceable\nx\n",
     ] {
         std::fs::write(&p, text).unwrap();
         assert!(Schema::load(Some(d.path())).is_err());
     }
-    std::fs::write(p, "source\tdescription\nz\t日本語\na\t説明\n").unwrap();
+    std::fs::write(p, "source\tdescription\treplaceable\nz\t日本語\t0\na\t説明\t0\n").unwrap();
     assert_eq!(
         Schema::load(Some(d.path())).unwrap().sources,
         [("z".into(), "日本語".into()), ("a".into(), "説明".into())]
@@ -20,7 +22,7 @@ fn schema_is_explicit_and_ordered() {
     assert!(Schema::load(None).unwrap().sources.is_empty());
 }
 fn row(key: &str, mv: &str, role: &str, tier: &str, eval: &str) -> Row {
-    Row::from_fields(&[
+    crate::book_tree::master_table::test_row(&[
         ("key", key.into()),
         ("move", mv.into()),
         ("role", role.into()),
@@ -51,6 +53,7 @@ fn args(dir: &Path) -> ExportArgs {
 fn outputs_reads_schema_and_strict_bad_eval() {
     use super::super::reply_graph::{HIRATE_KEY, fixture::after};
     let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
     let root = HIRATE_KEY;
     let child = after(root, &["7g7f", "3c3d"]);
     let rows = [
@@ -73,6 +76,9 @@ fn outputs_reads_schema_and_strict_bad_eval() {
     let annotation: serde_json::Value =
         serde_json::from_slice(&std::fs::read(d.path().join("book.annot.json")).unwrap()).unwrap();
     assert_eq!(annotation["sources"], serde_json::json!({}));
+    assert_eq!(annotation["version"], 2);
+    assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["cond"], "unknown");
+    assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["value_kind"], "unknown");
     assert_eq!(
         annotation["positions"][root]["moves"]["7g7f"]["replies"],
         serde_json::json!(["3c3d"])
@@ -98,7 +104,11 @@ fn outputs_reads_schema_and_strict_bad_eval() {
     let text = std::fs::read_to_string(d.path().join("book.annot.json")).unwrap();
     assert!(text.contains("\"top\": 12.0"));
     assert!(text.contains("\"main\": 10.0"));
-    std::fs::write(d.path().join("sources.tsv"), "source\tdescription\nunknown\t説明\n").unwrap();
+    std::fs::write(
+        d.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\nunknown\t説明\t0\n",
+    )
+    .unwrap();
     let mut a = args(d.path());
     a.force = true;
     a.schema = Some(d.path().into());
@@ -109,7 +119,11 @@ fn outputs_reads_schema_and_strict_bad_eval() {
             .contains("unknown source: test")
     );
     assert_eq!(std::fs::read_to_string(d.path().join("book.annot.json")).unwrap(), text);
-    std::fs::write(d.path().join("sources.tsv"), "source\tdescription\ntest\t説明\n").unwrap();
+    std::fs::write(
+        d.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\ntest\t説明\t0\n",
+    )
+    .unwrap();
     let mut a = args(d.path());
     a.force = true;
     a.schema = Some(d.path().into());
@@ -125,6 +139,7 @@ fn outputs_reads_schema_and_strict_bad_eval() {
 #[test]
 fn validation_reports_all_rows_before_any_output() {
     let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
     let mut r = row("invalid", "bad", "alt", "wide", "");
     r.set("since", "".into());
     std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&[r])).unwrap();
@@ -138,10 +153,15 @@ fn validation_reports_all_rows_before_any_output() {
 #[test]
 fn schema_preserves_validation_errors_for_non_utf8_rows() {
     let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
     let header = master_table::COLUMNS.join("\t");
     std::fs::write(d.path().join("moves.tsv"), [header.as_bytes(), b"\n\xff\nbad\n"].concat())
         .unwrap();
-    std::fs::write(d.path().join("sources.tsv"), "source\tdescription\ntest\ttest\n").unwrap();
+    std::fs::write(
+        d.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\ntest\ttest\t0\n",
+    )
+    .unwrap();
     let mut a = args(d.path());
     a.schema = Some(d.path().into());
     let error = run_to(a, &mut Vec::new()).unwrap_err().to_string();
@@ -153,6 +173,7 @@ fn schema_preserves_validation_errors_for_non_utf8_rows() {
 fn main_evals_sum_keeps_integer_precision() {
     use super::super::reply_graph::HIRATE_KEY;
     let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
     let row = row(HIRATE_KEY, "7g7f", "main", "wide", "9007199254740992,-1,-9007199254740992");
     std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&[row])).unwrap();
     let mut a = args(d.path());

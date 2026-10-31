@@ -19,6 +19,7 @@ mod refutation;
 mod register;
 mod rejoin;
 mod reply_graph;
+mod schema;
 mod service;
 mod targets;
 #[cfg(test)]

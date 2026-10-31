@@ -30,6 +30,7 @@ pub(super) struct CheckArgs {
 
 #[derive(Deserialize)]
 pub(super) struct Annotation {
+    pub(super) version: u32,
     pub(super) book: AnnotationBook,
     pub(super) positions: BTreeMap<String, AnnotationPosition>,
 }
@@ -618,6 +619,7 @@ pub(super) fn run(args: CheckArgs) -> Result<()> {
 fn run_to(args: CheckArgs, out: &mut impl Write) -> Result<()> {
     ensure!(args.bad_eval.is_finite(), "bad-eval must be finite");
     let annot: Annotation = serde_json::from_reader(open(&args.annotation)?)?;
+    ensure!(matches!(annot.version, 1 | 2), "注釈の version は 1 または 2 にしてください");
     ensure!(annot.book.sha256 == digest(&args.db)?, "annotation book sha256 mismatch");
     validate_db(open(&args.db)?, &annot)?;
     let selections = read_preset(open(&args.preset)?)?;
@@ -911,7 +913,7 @@ mod tests {
         let preset = dir.path().join("book.explore.txt");
         let child = after(HIRATE_KEY, &["2g2f", "3c3d"]);
         std::fs::write(&db, format!("#YANEURAOU-DB2016 1.00\nsfen {HIRATE_KEY} 1\n7g7f none 0 1 1\n2g2f none 0 1 1\n9i9a none 0 1 1\nsfen {child} 3\n2f2e none 0 1 1\n")).unwrap();
-        let annot = serde_json::json!({"book":{"sha256":digest(&db).unwrap()},"positions":{
+        let annot = serde_json::json!({"version":2,"book":{"sha256":digest(&db).unwrap()},"positions":{
             HIRATE_KEY:{"moves":{
                 "7g7f":{"role":"main","evals":[0]},
                 "2g2f":{"role":"record","evals":[]},
@@ -930,6 +932,28 @@ mod tests {
         let mut output = Vec::new();
         assert!(run_to(args(-150.0), &mut output).is_ok());
         let text = String::from_utf8(output).unwrap();
+        for version in [1, 2] {
+            let mut versioned = annot.clone();
+            versioned["version"] = serde_json::json!(version);
+            std::fs::write(&annotation, serde_json::to_vec(&versioned).unwrap()).unwrap();
+            let mut result = Vec::new();
+            run_to(args(-150.0), &mut result).unwrap();
+            assert_eq!(String::from_utf8(result).unwrap(), text);
+        }
+        for version in [None, Some(0), Some(3)] {
+            let mut invalid = annot.clone();
+            match version {
+                Some(v) => {
+                    invalid["version"] = serde_json::json!(v);
+                }
+                None => {
+                    invalid.as_object_mut().unwrap().remove("version");
+                }
+            }
+            std::fs::write(&annotation, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(run_to(args(-150.0), &mut Vec::new()).is_err());
+        }
+        std::fs::write(&annotation, serde_json::to_vec(&annot).unwrap()).unwrap();
         assert!(text.contains("bad-eval reachable positions: 0"));
         assert!(text.contains("b exit ply=1: 1"));
         std::fs::write(&preset, format!("sfen {HIRATE_KEY} 2g2f 9i9a\n")).unwrap();
@@ -972,6 +996,7 @@ mod tests {
 
     fn annotation() -> Annotation {
         serde_json::from_value(serde_json::json!({
+            "version": 2,
             "book": {"sha256": "test"},
             "positions": {ROOT: {"moves": {
                 "5i4h": {"role": "main", "evals": [-150, -151]},
@@ -1082,7 +1107,8 @@ mod tests {
         let db = dir.path().join("book.db");
         let annotation = dir.path().join("book.annot.json");
         std::fs::write(&db, "").unwrap();
-        std::fs::write(&annotation, r#"{"book":{"sha256":"wrong"},"positions":{}}"#).unwrap();
+        std::fs::write(&annotation, r#"{"version":2,"book":{"sha256":"wrong"},"positions":{}}"#)
+            .unwrap();
         let result = run(CheckArgs {
             db,
             annotation,

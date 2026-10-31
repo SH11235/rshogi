@@ -417,25 +417,35 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
 
-`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手は 1 回の読みの値)・`expanded` (伸ばした手なら 1)・`rank` です。勝ち宣言の読みの局面は載せません。
+`registration_status.json` は `ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
+
+`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
 
 ### 定跡の元データへの登録
 
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
-  --conflicts conflicts.tsv [--alt-gap 40] [--apply] <木の出力先>...
+  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
 
-元データの表は `key ply move role source evals nodes lineage tier since note` の 11 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
+元データの表は `key ply move role source evals nodes cond value_kind lineage tier since note` の 13 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
+
+`cond` は `registration_status.json` の `fingerprint` から決めます。指紋の無い木には `--journal` を指定できます。候補の台帳は `--journal` を繰り返して全て渡してください。serve が動いている台帳も渡せます (lock を取らずに読み、末尾の書きかけの行は無視します)。読み始めた後の追記は照合対象に含めません。`d<段>.jsonl` の全ての読みを key・nodes_limit・実際の nodes・bestmove・MultiPV の手と cp と depth (順位を含む) で照合し、threads・hash・draw も候補の settings と一致する場合だけ候補に残します。各読みが一意の同じ指紋に一致した場合だけ採用します。見つからない読み、複数の指紋に一致する読み、条件が混ざる木、読みの無い木は `unknown` です。
+
+1 スレッドでノード数で止める読みはほぼ決定的なので、同じソースを別の機械で build した条件の台帳を 1 本だけ渡すと、その台帳の条件に決まることがあります。読みの一致だけでは実行した機械やバイナリを特定できません。候補の台帳は全部渡してください。各台帳を 1 回だけ読み、全ての木を突き合わせます。
+
+`--schema` があれば指紋に対応する conditions.tsv の name を使い、対応がなければ表への追加を促して失敗します。schema がなければ指紋の先頭 8 文字です。1 回の実行中に先頭 8 文字が同じ別の指紋を条件名に使おうとするとエラーになります。`--schema` の conditions.tsv で別の名前を付けてください。`cond=unknown` の木の数を stdout に出します。
+
+`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の `remaining + 1`。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと read・deep・ext です。
 
 規則 (局面ごと、先手・後手の手番の区別なし):
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
-- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep` / `ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
-- `source` が `read` / `deep` / `ext` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read` / `deep` / `ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
@@ -445,23 +455,59 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 book_mine master validate --master moves.tsv
 ```
 
-`--master` は必須です。入力を変更せず、次の 11 列をこの順で持つ TSV を検査します。
+`--master` は必須です。入力を変更せず、次の 13 列をこの順で持つ TSV を検査します。
 
 ```text
-key ply move role source evals nodes lineage tier since note
+key ply move role source evals nodes cond value_kind lineage tier since note
 ```
 
 - 見出しの完全一致、各行の列数、1 行以上の手があること。区切りはタブ、行末は LF または CRLF です。セル内のタブ・CR・LF は使えません。
 - `since` が空白だけでないこと、同じ `key` と `move` の重複がないこと。
 - `role` は `main` / `alt` / `record`、`tier` は `curated` / `wide`。
-- `ply` は空か ASCII の 10 進数字だけ。`evals` は空かカンマ区切りの整数です。各値と加算途中の合計は i64、偶数丸めした平均は i32 の範囲が必要です。小数・指数表記・値の前後の空白・空の要素は使えません。`record` の行も検査します。
+- `ply` は空か ASCII の 10 進数字だけ。`evals` は空かカンマ区切りの整数です。先頭の `+` (例 `+5`) も受け付けます。各値と加算途中の合計は i64、偶数丸めした平均は i32 の範囲が必要です。小数・指数表記・値の前後の空白・空の要素は使えません。`record` の行も検査します。
 - 局面に `main` / `alt` がある場合、`main` がちょうど 1 行あること。全行と `curated` の行だけでそれぞれ検査します。`record` だけの局面も受け付けます。
 - `key` は両玉を 1 枚ずつ含む SFEN の盤面・手番・持ち駒の 3 フィールドで、読み込んだ局面を書き出した正規形と一致すること。
 - `move` はその局面の合法手を表す USI 文字列であること (`record` も検査します)。
 
-`source` の語彙は検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
+`--schema` を省いた場合は語彙を検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
 
 誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。評価値の検査は `master audit` などの読み込み側と同じ規則です。
+
+### 元データの schema
+
+古い 11 列の見出しは移行が必要というエラーになります。旧書式を読むモードはありません。
+新しい列の構造は全ての読み込み・書き込みで検査します。
+
+| 列 | 意味と規則 |
+|---|---|
+| `cond` | evals が空なら空。それ以外は `[A-Za-z0-9._-]+` の条件名、`unknown` (確定できない)、`mixed` (異なる条件が混ざったと確認済み) |
+| `value_kind` | evals が空なら空。それ以外は `single` (evals は 1 個)、`mean:N` (N≥2、evals は N 個)、`tree:K` (K≥1、evals は 1 個)、`unknown` (個数を問わない)。N・K は ASCII の十進数字 |
+| `lineage` | 空、または `<種類>:<名前>` のカンマ区切り。種類は `[a-z][a-z0-9_-]*`。名前は空でなく、カンマ・タブ・改行・空白を含まない |
+| `nodes` | 読みのノード数の目安。cond がノード停止なら要求した上限、時間停止なら実測の丸め。複数回で異なる場合は最大。cond が unknown / mixed なら意味も不明な参考値。書式の検査は行わない |
+
+`master validate`・`export`・`add`・`add-reads`・`tree register`・`borrow value` は
+`--schema <dir>` を受け取ります。指定したディレクトリには次の全ての TSV が必要です。
+見出しは以下の順 (区切りはタブ)。行順を保ち、各表の最初の列の重複を拒否します。
+
+| 表 | 見出し |
+|---|---|
+| `sources.tsv` | `source description replaceable` |
+| `conditions.tsv` | `name fingerprint stop nodes_counting threads hash_mb multipv draw_black draw_white engine_sha256 eval machine note` |
+| `lineage_kinds.tsv` | `kind description` |
+
+sources の source と description は空不可。replaceable は `0` / `1` で、`1` は読みから作られ、
+木の結果で main と評価値を更新してよい source です (curated の main を保護する規則は別に適用)。
+conditions の name は cond の条件名の構造を満たし、予約値 unknown / mixed は使えません。
+fingerprint は空 (指紋の無い古い条件) か 64 桁の十六進です。空でない指紋は大文字・小文字を区別せず重複不可。
+他の列は不明なら空にできます。lineage_kinds の kind は lineage の種類の構造に従います。
+
+schema 指定時は、source・cond の名前・lineage の種類が対応する表にあることを検査します。
+省略時は語彙の照合だけを省き、構造の検査は行います。指定された dir や表の欠落・不正を
+既定値で補うことはありません。読み由来として更新できる既定の source は read・deep・ext です。
+
+```bash
+book_mine master validate --master moves.tsv --schema schema
+```
 
 ## `master add`: 元データへの行の追加と置換
 
@@ -471,11 +517,11 @@ book_mine master add --master moves.tsv --add add.tsv --apply --schema schema
 book_mine master add --master moves.tsv --add replacements.tsv --replace --apply
 ```
 
-`--master` と `--add` は同じ 11 列の TSV です。同じ `(key, move)` が既にあれば追加を省き、
+`--master` と `--add` は同じ 13 列の TSV です。同じ `(key, move)` が既にあれば追加を省き、
 role・tier・source に差があれば `skipped conflict: ...` に列ごとの差を出します。
 追加表の中の `(key, move)` の重複は、既存行と一致する場合もエラーです。
 元データと追加後の全体を `master validate` と同じ規則で検査し、検出した誤りをすべて報告します。
-`--schema <dir>` があれば、export と同じ `sources.tsv` で source の語彙も検査します。
+`--schema <dir>` があれば、下記の 3 表で source・cond・lineage の種類も検査します。
 
 `--replace` は curated の行も全列置き換えます。古い表から作った置き換え表で新しい note や evals を上書きしないよう注意してください。
 既存の `(key, move)` に一致する行が対象です。
@@ -520,6 +566,8 @@ nodes・ply・順序付きの (move, cp) が最大の読みの先頭手 (`fallba
 複数回の読みで選択から外れた手も、出現した回での差の平均が 40 未満なら record に残します。
 非合法手は行にせず、報告だけに残します。
 
+条件の記録がないログなので `cond=unknown`、lineage は空です。各手の evals が 1 個なら `value_kind=single`、N 個なら `mean:N` です (その手が現れた読みの回数)。`--schema` で入力と追加候補の語彙も検査します。
+
 候補の ply は浅い読みも含めた最小値です。evals は深い読みの順の値、nodes は深い読みの最大値です。
 追加する行の cp は整数値が必須です。小数・指数表記でも整数値なら十進整数で evals に保存します。
 整数にならない cp や、evals の合計・平均の範囲外は局面と手を示すエラーとし、
@@ -528,7 +576,7 @@ nodes・ply・順序付きの (move, cp) が最大の読みの先頭手 (`fallba
 nodes は有効 2 桁の指数表記、note の億ノード数は有効 2 桁に丸めてから表示します。
 note には読みの回数・1 位の回数・差の平均と、record にした理由を書きます。
 
-出力は `--out` の 11 列 TSV と、その名前に `.report.tsv` を付けた報告です。
+出力は `--out` の 13 列 TSV と、その名前に `.report.tsv` を付けた報告です。
 報告の列は key・reads・shallow_dropped・move・role・mean_gap・firsts・status・reason・
 existing_moves・compared_reads・multipv_lengths・compare_n・gaps・reread です。
 status は add / existing / illegal / not_selected、reason は single / consensus / fallback、
@@ -554,10 +602,10 @@ USI の手の順に並べます。入力は変更しません。
 
 | 引数 | 既定 | 意味 |
 |---|---|---|
-| `--master <tsv>` | 必須 | 11 列の元データ |
+| `--master <tsv>` | 必須 | 13 列の元データ |
 | `--out <prefix>` | 必須 | 下記 4 ファイルの接頭辞 |
 | `--tier wide\|curated` | `wide` | wide は全行、curated は curated の行だけ |
-| `--schema <dir>` | なし | `sources.tsv` による source の語彙検査と説明 |
+| `--schema <dir>` | なし | 3 表による source・cond・lineage の語彙検査 |
 | `--reads <path>...` | なし | JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。複数指定可 |
 | `--min-nodes <n>` | `900000000` | 取り込む reads のノード数の下限 (非負整数) |
 | `--draw-pin <cp>` | `3` | draw の指定が空の読みで、先頭の評価値の絶対値がこの値以下なら除く (非負整数) |
@@ -566,16 +614,11 @@ USI の手の順に並べます。入力は変更しません。
 | `--base <db>` | なし | 局面の追加・削除と、手の集合が変わった局面の数を表示 |
 | `--force` | 無効 | 既存の出力を置き換える |
 
-schema は見出しが `source	description` の `sources.tsv` を持ちます (区切りはタブ)。
-source と description は空でない値にし、source を重複させないでください。説明は日本語も使えます。
-指定時は、選択する tier にかかわらず元データの全行の source を検査し、
-注釈の `sources` に表の行順で書きます。ディレクトリや表が無い・不正ならエラーです。
-省略時は source の語彙を制限せず、注釈の `sources` は `{}` になります。
-stdout の `source:` は schema 指定時に表の行順、表に無い値はその後ろに辞書順で並べ、
-省略時は出現した値の辞書順になります。
+schema の表と検査は [元データの schema](#元データの-schema) を参照してください。
+`"sources"` には `sources.tsv` の source → description を行順で書きます。省略時は空のオブジェクトです。
 
 出力は次の 4 ファイルです。いずれかが既存なら `--force` が必要です。ディレクトリへの出力や、
-元データ・読みのファイル・base・sources.tsv と同じファイルへの出力は `--force` でも拒否します。
+元データ・読みのファイル・base・schema の各表と同じファイルへの出力は `--force` でも拒否します。
 全ファイルを出力先と同じディレクトリの一時ファイルに書き終え、既存の出力をそれぞれ
 同じディレクトリの一時名へ rename で退避してから、新しいファイルを順に確定します。
 途中で失敗したら、確定済みの新しい出力を削除し、退避した出力を元の名前に戻します。
@@ -591,12 +634,12 @@ stdout の `source:` は schema 指定時に表の行順、表に無い値はそ
 | `<prefix>.annot.json` | UTF-8、2 空白インデント、末尾改行付きの注釈 |
 
 各プリセットの冒頭には名前と DB のファイル名・SHA-256 が入ります。
-注釈の最上位の鍵は `format` (`rshogi-book-annotations`)、`version` (1)、
-`book` (`file` と `sha256`)、`sources`、`positions` の順です。
+注釈の最上位の鍵は `format` (`rshogi-book-annotations`)、`version` (2)、
+`book` (`file` と `sha256`)、`sources`、`positions` の順です。`master check` は version 1 と 2 の両方を受け付け、それ以外と version の欠落を拒否します。
 `positions` の鍵は手数を除いた SFEN で、各局面には次の値があります。
 
 - `ply`: 元データの同じ局面にある空でない ply の最小値。全て空なら null。
-- `moves`: USI の手を鍵とするオブジェクト。各手は `role`、`source`、`nodes`、`note`、
+- `moves`: USI の手を鍵とするオブジェクト。各手は `role`、`source`、`nodes`、`cond`、`value_kind`、`note`、
   `since`、`tier` の文字列、カンマで分けた `lineage` の配列、数値の配列 `evals`、
   相手の返信の配列 `replies`、整数 `depth_after` を持ちます。
 - `read`: 採用した読みがある場合だけ追加する集計。
@@ -696,7 +739,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
   [--opp-freq strong_games.db --min-weight 0.001]
 ```
 
-定跡の元データの表 (上の 11 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
+定跡の元データの表 (上の 13 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|
@@ -960,10 +1003,16 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 
 確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます (BookMiner の「伸ばしていない手が上回る」に当たる)。印の付いた局面は、どの根から着いても登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
 
+`--schema <dir>` で語彙と読み条件の名前を指定できます。台帳の条件名は指紋から決め、schema があれば対応する条件名、なければ先頭 8 文字です。対応する条件名がなければエラーです。
+
+`cond` は登録する手ごとに決めます。その手の行き先から辿る全候補の値の由来を確かめ、台帳の条件だけで決まると確認できた手に条件名を付けます。元データの出口を使う場合は、出口の行の cond と、元データ内で値を伝播した先の条件も同じ名前だと確認できることが必要です。確認できない出口に依存する手は `unknown` にします。同じ部分木でも、その出口に依存しない手には台帳の条件名を付けられます。最善手の選択や同値補正も候補の値に依存するため、行き先の全候補を保守的に検査します。依存先に循環がある手は、他の部分木に台帳の読みがあっても `unknown` です。循環だけの部分木も `unknown` になります。
+
+value_kind は後退解析のグラフで子局面への辺を持つ手なら `tree:K`、辺がなく読みの値を使う手なら `single` です。K は `max_plies − level` (最小 1)。出口の読みの手も部分木へ合流する場合は tree になります。K は切り出しの残り段数の目安であり、循環の長さや最善手順の長さではありません。
+
 登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 
 - 登録するのは自分の手番の局面だけです。伸ばした局面は伝播後の値、出口は読みの値で並べます。元データで止めた出口と印の付いた局面は登録しません。
-- 足す行は `source=ext`、`lineage=book:<大きい定跡のファイル名>@<内容の sha256 の先頭 8 文字>`、`nodes` は台帳の読みのノード数です。`ext` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
+- 足す行は `source=ext`、`lineage=book:<大きい定跡のファイル名>@<内容の sha256 の先頭 8 文字>`、`nodes` は台帳の読みのノード数です。schema を省くと `ext` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
 - 同じ局面が複数の根にあるときは、その局面から先の手数の余り (`--max-plies` − 段) の大きい根を使います。
 
 `--apply` の前に、登録後の元データを `master audit` と同じ伝播に通し (通らなければ止まる)、点検の数 (main が 1 位から `--line` 以上負ける局面) の前後を出します。`--apply` を省くと元データは変えません。

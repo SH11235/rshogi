@@ -2,6 +2,7 @@
 
 use super::journal::LockedFile;
 use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
+use super::model::child;
 use super::output::NODE_MOVES;
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
@@ -10,15 +11,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-/// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。`ext` は外部の定跡の
-/// 木を借りて自分の読みで値を付けた行 (`book_mine borrow value`)。
-const READ_SOURCES: [&str; 3] = ["read", "deep", "ext"];
+use super::schema::Schema;
 
 #[derive(Args, Debug)]
 pub(super) struct RegisterArgs {
     /// 定跡の元データの表 (TSV)
     #[arg(long)]
     master: PathBuf,
+    /// 語彙と読み条件の表を置いたディレクトリ
+    #[arg(long)]
+    schema: Option<PathBuf>,
+    /// 指紋の無い木の読みを照合する台帳 (読み取り専用)。候補を全て繰り返し指定
+    #[arg(long)]
+    journal: Vec<PathBuf>,
     /// 足す行の since 列
     #[arg(long)]
     since: String,
@@ -43,6 +48,8 @@ pub(super) struct RegisterArgs {
 pub(super) struct NodeMove {
     pub mv: String,
     pub value: i32,
+    pub value_kind: String,
+    pub cond: String,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +80,7 @@ pub(super) struct Options<'a> {
     pub source: &'a str,
     /// 足す行の lineage 列。
     pub lineage: &'a str,
+    pub schema: &'a Schema,
 }
 
 pub(super) fn run(args: RegisterArgs) -> Result<()> {
@@ -87,8 +95,12 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         "{} は既にあります (--conflicts は新しいファイルにしてください)",
         args.conflicts.display()
     );
+    let schema = Schema::load(args.schema.as_deref())?;
+    let mut unknown = 0;
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
+    let mut fingerprints = Vec::new();
+    let mut readings = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
         // 打ち間違えた出力先に lock のために dir を作らない。
         ensure!(dir.is_dir(), "{}: 木の出力先がありません", dir.display());
@@ -106,11 +118,39 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let text = std::fs::read_to_string(&path).with_context(|| {
             format!("{} を読めません (古い木は tree replay で作り直してください)", path.display())
         })?;
-        disagreements += merge(&mut nodes, parse_node_moves(&text, tree)?);
+        let fingerprint = tree_fingerprint(dir)?;
+        let tree_readings = tree_readings(dir)?;
+        let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
+        let parsed =
+            parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
+        readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
+            tree_readings
+        } else {
+            Vec::new()
+        });
+        fingerprints.push(fingerprint);
+        disagreements += merge(&mut nodes, parsed);
+    }
+    let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
+    let mut conditions = Vec::new();
+    for (fingerprint, matched) in fingerprints.into_iter().zip(matched) {
+        let cond = fingerprint
+            .or(matched)
+            .map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))?;
+        unknown += usize::from(cond == "unknown");
+        conditions.push(cond);
+    }
+    for node in nodes.values_mut() {
+        for mv in &mut node.moves {
+            mv.cond = conditions[node.tree].clone();
+        }
     }
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let rows = parse_master(&text)?;
+    for row in &rows {
+        schema.validate_row(row)?;
+    }
     let before = rows.len();
     let options = Options {
         since: &args.since,
@@ -118,6 +158,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         alt_gap: args.alt_gap,
         source: "read",
         lineage: "",
+        schema: &schema,
     };
     let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
@@ -142,6 +183,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         summary.conflicts,
         args.conflicts.display()
     );
+    println!("cond=unknown の木: {unknown}");
     if args.apply {
         write_atomic(&args.master, &format_master(&rows))?;
         println!("書き換えました: 行 {before} -> {}", rows.len());
@@ -167,7 +209,11 @@ fn write_new(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
+pub(super) fn parse_node_moves(
+    text: &str,
+    tree: usize,
+    known_nodes: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, Node>> {
     let mut lines = text.lines();
     ensure!(
         lines.next() == Some("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank"),
@@ -186,10 +232,31 @@ pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<Strin
         });
         node.remaining = cells[3].parse()?;
         node.nodes = cells[4].parse()?;
+        ensure!(matches!(cells[7], "0" | "1"), "{NODE_MOVES}: expanded は 0 / 1 にしてください");
         node.moves.push(NodeMove {
+            cond: "unknown".into(),
             mv: cells[5].to_owned(),
             value: cells[6].parse()?,
+            value_kind: if cells[7] == "1" {
+                "unknown".into()
+            } else {
+                "single".into()
+            },
         });
+    }
+    let remaining: BTreeMap<_, _> =
+        nodes.iter().map(|(key, node)| (key.clone(), node.remaining)).collect();
+    for (key, node) in &mut nodes {
+        for mv in &mut node.moves {
+            let destination = child(key, &mv.mv)?;
+            if let Some(depth) = remaining.get(&destination) {
+                let depth = depth.checked_add(1).context("行き先の remaining が大きすぎます")?;
+                mv.value_kind = format!("tree:{depth}");
+            } else if known_nodes.is_none_or(|known| known.contains(&destination)) {
+                // TSV にない局面への合流や、読みの一覧がない木では、伝播の有無や深さを確定できない。
+                mv.value_kind = "unknown".into();
+            }
+        }
     }
     Ok(nodes)
 }
@@ -291,6 +358,8 @@ pub(super) fn register(
                 ("source", options.source.into()),
                 ("evals", mv.value.to_string()),
                 ("nodes", nodes_text.clone()),
+                ("cond", mv.cond.clone()),
+                ("value_kind", mv.value_kind.clone()),
                 ("lineage", options.lineage.into()),
                 ("tier", "wide".into()),
                 ("since", options.since.into()),
@@ -310,7 +379,7 @@ pub(super) fn register(
             }
             Some(m) if rows[m].get("move") == best.mv => {}
             Some(m)
-                if READ_SOURCES.contains(&rows[m].get("source"))
+                if options.schema.replaceable(rows[m].get("source"))
                     && rows[m].get("tier") == "wide"
                     && !curated =>
             {
@@ -367,14 +436,32 @@ pub(super) fn register(
         }
         for &i in &existing {
             let row = &rows[i];
-            if row.get("role") == "record" || !READ_SOURCES.contains(&row.get("source")) {
+            if row.get("role") == "record" || !options.schema.replaceable(row.get("source")) {
                 continue;
             }
             if let Some(m) = node.moves.iter().find(|m| m.mv == row.get("move")) {
                 let value = m.value.to_string();
-                if row.get("evals") != value || row.get("nodes") != nodes_text {
+                // `+5` と `5` のように表記だけが違う値で、分かっている条件を失わない。
+                let same_value = row.get("evals").parse::<i64>().ok() == Some(i64::from(m.value))
+                    && row.get("nodes") == nodes_text;
+                let keep_known = |old: &str, new: &str| {
+                    if same_value && new == "unknown" && !old.is_empty() {
+                        old.to_owned()
+                    } else {
+                        new.to_owned()
+                    }
+                };
+                let cond = keep_known(row.get("cond"), &m.cond);
+                let kind = keep_known(row.get("value_kind"), &m.value_kind);
+                if row.get("evals") != value
+                    || row.get("nodes") != nodes_text
+                    || row.get("cond") != cond
+                    || row.get("value_kind") != kind
+                {
                     rows[i].set("evals", value);
                     rows[i].set("nodes", nodes_text.clone());
+                    rows[i].set("cond", cond);
+                    rows[i].set("value_kind", kind);
                     summary.evals_updated += 1;
                 }
             }
@@ -385,7 +472,66 @@ pub(super) fn register(
         (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
     });
     validate(&rows)?;
+    for row in &rows {
+        options.schema.validate_row(row)?;
+    }
     Ok((rows, conflicts, summary))
+}
+
+fn tree_fingerprint(dir: &Path) -> Result<Option<String>> {
+    let path = dir.join("registration_status.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let status: serde_json::Value = serde_json::from_slice(&bytes)?;
+            status
+                .get("fingerprint")
+                .map(|fp| {
+                    fp.as_str().context("fingerprint は文字列にしてください").map(str::to_owned)
+                })
+                .transpose()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
+    use std::io::BufRead;
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name
+            .strip_prefix('d')
+            .and_then(|s| s.strip_suffix(".jsonl"))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    let mut readings = Vec::new();
+    for path in paths {
+        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+            readings.push(serde_json::from_str(&line?)?);
+        }
+    }
+    Ok(readings)
+}
+
+#[cfg(test)]
+fn tree_condition(dir: &Path, journal: Option<&Path>, schema: &Schema) -> Result<String> {
+    let fingerprint = match tree_fingerprint(dir)? {
+        Some(fp) => Some(fp),
+        None => match journal {
+            Some(path) => {
+                super::journal::match_fingerprints(&[path.to_owned()], &[tree_readings(dir)?])?
+                    .remove(0)
+            }
+            None => None,
+        },
+    };
+    fingerprint.map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))
 }
 
 fn append(note: &str, text: String) -> String {
@@ -405,7 +551,18 @@ mod tests {
     const W: &str = "pos2 w -";
 
     fn row(key: &str, mv: &str, role: &str, source: &str, tier: &str, evals: &str) -> String {
-        format!("{key}\t10\t{mv}\t{role}\t{source}\t{evals}\t7e9\t\t{tier}\told\tn")
+        crate::book_tree::master_table::test_line(&[
+            ("key", key.into()),
+            ("ply", "10".into()),
+            ("move", mv.into()),
+            ("role", role.into()),
+            ("source", source.into()),
+            ("evals", evals.into()),
+            ("nodes", "7e9".into()),
+            ("tier", tier.into()),
+            ("since", "old".into()),
+            ("note", "n".into()),
+        ])
     }
     fn master(rows: &[String]) -> Vec<Row> {
         let mut text = COLUMNS.join("\t");
@@ -423,15 +580,23 @@ mod tests {
             moves: moves
                 .iter()
                 .map(|(m, v)| NodeMove {
+                    cond: "unknown".into(),
                     mv: (*m).into(),
                     value: *v,
+                    value_kind: if remaining >= 1 {
+                        format!("tree:{remaining}")
+                    } else {
+                        "single".into()
+                    },
                 })
                 .collect(),
             tree,
         }
     }
     fn options() -> Options<'static> {
+        static SCHEMA: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(Schema::default);
         Options {
+            schema: &SCHEMA,
             since: "tag",
             note: "plan",
             alt_gap: 40,
@@ -531,6 +696,9 @@ mod tests {
 
     #[test]
     fn run_checks_trees_and_writes_the_master_only_with_apply() {
+        const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let white = child(B, "5i4i").unwrap();
+        let w = white.as_str();
         let dir = tempfile::tempdir().unwrap();
         let master_path = dir.path().join("moves.tsv");
         let original = format_master(&master(&[row(B, "pinned", "main", "pin", "wide", "")]));
@@ -540,11 +708,13 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::write(
             tree.join(NODE_MOVES),
-            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t3\t0\t2\t1000000000\tbest\t40\t1\t1\n{W}\t4\t1\t1\t1000000000\tw1\t-5\t1\t1\n"),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t3\t0\t2\t1000000000\t5i4i\t40\t1\t1\n{w}\t4\t1\t1\t1000000000\t5a4a\t-5\t1\t1\n"),
         )
         .unwrap();
         let args = |trees: Vec<PathBuf>, apply| RegisterArgs {
             master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
@@ -561,16 +731,16 @@ mod tests {
                 .lines()
                 .nth(1)
                 .unwrap()
-                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\tbest\t40\t"))
+                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\t5i4i\t40\t"))
         );
         assert!(run(args(vec![tree.clone()], true)).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         std::fs::remove_file(dir.path().join("conflicts.tsv")).unwrap();
         run(args(vec![tree.clone()], true)).unwrap();
         let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
-        assert_eq!(find(&rows, W, "w1").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, w, "5a4a").unwrap().get("role"), "main");
         assert_eq!(
-            find(&rows, B, "best").unwrap().get("note"),
+            find(&rows, B, "5i4i").unwrap().get("note"),
             "木の伝播後の 1 位 (main と食い違い)"
         );
 
@@ -627,5 +797,259 @@ mod tests {
         assert!(register(rows, &nodes, &options()).is_err());
         assert_eq!(format_nodes(1_000_000_000), "1e9");
         assert_eq!(format_nodes(230_000_000), "2.3e8");
+    }
+    #[test]
+    fn expanded_and_metadata_changes_are_registered_without_value_changes() {
+        const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let white = child(B, "5i4i").unwrap();
+        let w = white.as_str();
+        let table = format!(
+            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t1\t0\t2\t100\t5i4i\t10\t1\t1\n{B}\t1\t0\t2\t100\t5i6i\t9\t0\t2\n{w}\t2\t1\t1\t100\t5a4a\t8\t1\t1\n"
+        );
+        let mut nodes = parse_node_moves(&table, 0, Some(&BTreeSet::new())).unwrap();
+        assert_eq!(nodes[B].moves[0].value_kind, "tree:2");
+        assert_eq!(nodes[B].moves[1].value_kind, "single");
+        assert_eq!(nodes[w].moves[0].value_kind, "unknown");
+        assert!(
+            parse_node_moves(&table.replace("\t1\t1\n", "\t2\t1\n"), 0, Some(&BTreeSet::new()))
+                .is_err()
+        );
+        let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
+        assert!(rows.iter().all(|r| r.get("lineage").is_empty()));
+        for node in nodes.values_mut() {
+            for mv in &mut node.moves {
+                mv.cond = "abcd1234".into();
+            }
+        }
+        let (rows, _, summary) = register(rows, &nodes, &options()).unwrap();
+        assert_eq!(summary.evals_updated, 3);
+        nodes.get_mut(B).unwrap().moves[0].value_kind = "tree:3".into();
+        let (rows, _, summary) = register(rows, &nodes, &options()).unwrap();
+        assert_eq!(summary.evals_updated, 1);
+        assert_eq!(find(&rows, B, "5i4i").unwrap().get("value_kind"), "tree:3");
+        let (_, _, summary) = register(rows, &nodes, &options()).unwrap();
+        assert_eq!(summary.evals_updated, 0);
+    }
+
+    #[test]
+    fn propagation_uses_child_remaining_and_never_flips_keys() {
+        const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let destination = child(ROOT, "5i4i").unwrap();
+        let flipped = rshogi_book::flipped_key(&format!("{destination} 1")).unwrap();
+        let flipped = crate::book_db::strip_ply(&flipped);
+        let header = "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n";
+        for expanded in [0, 1] {
+            let parent = format!("{ROOT}\t1\t4\t0\t100\t5i4i\t10\t{expanded}\t1\n");
+            let text = format!("{header}{parent}{destination}\t2\t1\t3\t100\t5a4a\t-10\t0\t1\n");
+            let nodes = parse_node_moves(&text, 0, Some(&BTreeSet::new())).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "tree:4");
+            let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
+            assert_eq!(find(&rows, ROOT, "5i4i").unwrap().get("value_kind"), "tree:4");
+
+            let text = format!("{header}{parent}{flipped}\t2\t1\t3\t100\t5i4i\t-10\t0\t1\n");
+            let nodes = parse_node_moves(&text, 0, Some(&BTreeSet::new())).unwrap();
+            assert_eq!(
+                nodes[ROOT].moves[0].value_kind,
+                if expanded == 0 { "single" } else { "unknown" }
+            );
+        }
+    }
+
+    #[test]
+    fn destinations_omitted_from_node_moves_have_unknown_depth() {
+        const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let destination = child(ROOT, "5i4i").unwrap();
+        for expanded in [0, 1] {
+            let text = format!(
+                "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{ROOT}\t1\t0\t2\t100\t5i4i\t-30000\t{expanded}\t1\n"
+            );
+            let nodes =
+                parse_node_moves(&text, 0, Some(&BTreeSet::from([destination.clone()]))).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "unknown");
+            let nodes = parse_node_moves(&text, 0, None).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "unknown");
+        }
+    }
+
+    #[test]
+    fn unchanged_values_preserve_known_metadata_but_changed_values_replace_it() {
+        let mut nodes = BTreeMap::from([(B.into(), node(&[("a", 10)], 2, 0))]);
+        nodes.get_mut(B).unwrap().moves[0].cond = "known".into();
+        let (original, _, _) = register(vec![], &nodes, &options()).unwrap();
+        for (cond, kind, expected_cond, expected_kind, updates) in [
+            ("unknown", "tree:2", "known", "tree:2", 0),
+            ("known", "unknown", "known", "tree:2", 0),
+            ("unknown", "unknown", "known", "tree:2", 0),
+            ("other", "unknown", "other", "tree:2", 1),
+            ("unknown", "single", "known", "single", 1),
+        ] {
+            let mv = &mut nodes.get_mut(B).unwrap().moves[0];
+            mv.cond = cond.into();
+            mv.value_kind = kind.into();
+            let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+            assert_eq!(rows[0].get("cond"), expected_cond);
+            assert_eq!(rows[0].get("value_kind"), expected_kind);
+            assert_eq!(summary.evals_updated, updates);
+        }
+        for change_nodes in [false, true] {
+            let n = nodes.get_mut(B).unwrap();
+            n.moves[0].cond = "unknown".into();
+            n.moves[0].value_kind = "unknown".into();
+            n.moves[0].value = if change_nodes { 10 } else { 11 };
+            n.nodes = if change_nodes {
+                2_000_000_000
+            } else {
+                1_000_000_000
+            };
+            let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+            assert_eq!(rows[0].get("cond"), "unknown");
+            assert_eq!(rows[0].get("value_kind"), "unknown");
+            assert_eq!(summary.evals_updated, 1);
+        }
+        let n = nodes.get_mut(B).unwrap();
+        n.moves[0].value = 10;
+        n.nodes = 1_000_000_000;
+        let mut plus = original.clone();
+        plus[0].set("evals", "+10".into());
+        let (rows, _, _) = register(plus, &nodes, &options()).unwrap();
+        assert_eq!(rows[0].get("evals"), "10");
+        assert_eq!(rows[0].get("cond"), "known");
+        assert_eq!(rows[0].get("value_kind"), "tree:2");
+    }
+
+    #[test]
+    fn tree_status_resolves_names_and_requires_registered_fingerprints() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::default();
+        assert_eq!(tree_condition(dir.path(), None, &schema).unwrap(), "unknown");
+        let fp = "a".repeat(64);
+        std::fs::write(
+            dir.path().join("registration_status.json"),
+            serde_json::json!({"ready":true,"unresolved":{},"fingerprint":fp}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(tree_condition(dir.path(), None, &schema).unwrap(), "aaaaaaaa");
+        crate::book_tree::schema::test_schema(dir.path());
+        std::fs::write(
+            dir.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\nread\t読み\t1\n",
+        )
+        .unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        assert!(
+            tree_condition(dir.path(), None, &schema)
+                .unwrap_err()
+                .to_string()
+                .contains("追加")
+        );
+        let path = dir.path().join("conditions.tsv");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            ["named".into(), fp]
+                .into_iter()
+                .chain(std::iter::repeat_n(String::new(), 11))
+                .collect::<Vec<_>>()
+                .join("\t")
+        ));
+        std::fs::write(path, text).unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        assert_eq!(tree_condition(dir.path(), None, &schema).unwrap(), "named");
+        std::fs::write(dir.path().join("registration_status.json"), r#"{"fingerprint":"bad"}"#)
+            .unwrap();
+        assert!(tree_condition(dir.path(), None, &schema).is_err());
+    }
+
+    #[test]
+    fn schema_replaceable_controls_main_and_values() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::book_tree::schema::test_schema(dir.path());
+        std::fs::write(
+            dir.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\ncustom\t読み\t1\nread\t保護\t0\n",
+        )
+        .unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        let options = Options {
+            schema: &schema,
+            ..options()
+        };
+        for (source, tier, replaced, updated) in [
+            ("custom", "wide", 1, 1),
+            ("custom", "curated", 0, 1),
+            ("read", "wide", 0, 0),
+        ] {
+            let rows = master(&[row(B, "a", "main", source, tier, "10")]);
+            let nodes = BTreeMap::from([(B.into(), node(&[("b", 30), ("a", 20)], 2, 0))]);
+            let (_, _, summary) = register(rows, &nodes, &options).unwrap();
+            assert_eq!(summary.replaced_main, replaced);
+            assert_eq!(summary.evals_updated, updated);
+        }
+    }
+    #[test]
+    fn legacy_tree_journal_matching_is_read_only_and_conservative() {
+        use crate::book_tree::journal::{Journal, Pv, Reading, Settings};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        std::fs::write(&engine, "test engine").unwrap();
+        let mut settings = Settings::new(&crate::book_tree::ReadingArgs {
+            engine_options: vec![format!("EvalFile={}", engine.display())],
+            engine,
+            nodes: 100,
+            multipv: 1,
+            hash: 16,
+        })
+        .unwrap();
+        let mut reading = Reading {
+            tag: "test".into(),
+            ply: 1,
+            key: "4k4/9/9/9/9/9/9/9/4K4 b -".into(),
+            nodes_limit: 100,
+            nodes: Some(100),
+            sec: 0.1,
+            threads: 1,
+            hash: 16,
+            draw: BTreeMap::new(),
+            multipv: vec![Pv {
+                mv: "5i4i".into(),
+                cp: 10,
+                depth: 1,
+            }],
+            bestmove: "5i4i".into(),
+        };
+        let journal = dir.path().join("journal.jsonl");
+        Journal::open(&journal, &settings.fingerprint)
+            .unwrap()
+            .append(reading.clone(), &settings, "test".into())
+            .unwrap();
+        let first = serde_json::to_string(&reading).unwrap();
+        std::fs::write(dir.path().join("d0.jsonl"), format!("{first}\n")).unwrap();
+        let schema = Schema::default();
+        assert_eq!(
+            tree_condition(dir.path(), Some(&journal), &schema).unwrap(),
+            settings.fingerprint[..8]
+        );
+        settings.engine_sha256 = "another".into();
+        settings.fingerprint = settings.computed_fingerprint().unwrap();
+        reading.multipv[0].cp = 20;
+        Journal::open(&journal, &settings.fingerprint)
+            .unwrap()
+            .append(reading.clone(), &settings, "test".into())
+            .unwrap();
+        std::fs::write(
+            dir.path().join("d1.jsonl"),
+            format!("{}\n", serde_json::to_string(&reading).unwrap()),
+        )
+        .unwrap();
+        let before = std::fs::read(&journal).unwrap();
+        assert_eq!(tree_condition(dir.path(), Some(&journal), &schema).unwrap(), "unknown");
+        reading.multipv[0].cp = 21;
+        std::fs::write(
+            dir.path().join("d1.jsonl"),
+            format!("{}\n", serde_json::to_string(&reading).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(tree_condition(dir.path(), Some(&journal), &schema).unwrap(), "unknown");
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
     }
 }
