@@ -5,8 +5,9 @@ use super::{
     NODES_HEADER, Node, RootInfo, Subtree, columns, side, turn,
 };
 use crate::book_backprop::DrawValues;
-use crate::book_tree::audit::{MasterValue, master_values, read_master};
+use crate::book_tree::audit::{MasterValue, master_values};
 use crate::book_tree::journal::digest;
+use crate::book_tree::master_table::read_master;
 use crate::book_tree::model::child;
 use crate::book_tree::targets::{DEFAULT_PRIORITY, Line, Opts, parse_root};
 use crate::common::io::write_atomic;

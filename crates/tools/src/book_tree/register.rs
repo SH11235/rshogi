@@ -1,6 +1,9 @@
 //! 木の出力 (node_moves.tsv) から定跡の元データの表に手を登録する。
 
 use super::journal::LockedFile;
+#[cfg(test)]
+use super::master_table::COLUMNS;
+use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
 use super::output::NODE_MOVES;
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
@@ -9,10 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-pub(super) const COLUMNS: [&str; 11] = [
-    "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
-];
-pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
 /// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。`ext` は外部の定跡の
 /// 木を借りて自分の読みで値を付けた行 (`book_mine borrow value`)。
 const READ_SOURCES: [&str; 3] = ["read", "deep", "ext"];
@@ -56,20 +55,6 @@ pub(super) struct Node {
     /// 伝播後の値の順。
     pub moves: Vec<NodeMove>,
     pub tree: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Row(pub Vec<String>);
-impl Row {
-    pub(super) fn get(&self, column: &str) -> &str {
-        &self.0[index(column)]
-    }
-    pub(super) fn set(&mut self, column: &str, value: String) {
-        self.0[index(column)] = value;
-    }
-}
-fn index(column: &str) -> usize {
-    COLUMNS.iter().position(|c| *c == column).expect("既知の列")
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -233,34 +218,6 @@ pub(super) fn merge(into: &mut BTreeMap<String, Node>, from: BTreeMap<String, No
     disagreements
 }
 
-pub(super) fn parse_master(text: &str) -> Result<Vec<Row>> {
-    let mut lines = text.lines();
-    ensure!(lines.next() == Some(COLUMNS.join("\t").as_str()), "元データの見出しが違います");
-    lines
-        .enumerate()
-        .map(|(i, line)| {
-            let cells: Vec<String> = line.split('\t').map(str::to_owned).collect();
-            ensure!(cells.len() == COLUMNS.len(), "元データの {} 行目の列の数が違います", i + 2);
-            ensure!(
-                ROLES.contains(&cells[index("role")].as_str()),
-                "元データの {} 行目の role が不正です",
-                i + 2
-            );
-            Ok(Row(cells))
-        })
-        .collect()
-}
-
-pub(super) fn format_master(rows: &[Row]) -> String {
-    let mut text = COLUMNS.join("\t");
-    text.push('\n');
-    for row in rows {
-        text.push_str(&row.0.join("\t"));
-        text.push('\n');
-    }
-    text
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Conflict {
     pub key: String,
@@ -328,18 +285,18 @@ pub(super) fn register(
             .collect();
         let nodes_text = format_nodes(node.nodes);
         let new_row = |mv: &NodeMove, role: &str, why: String| {
-            Row(vec![
-                key.clone(),
-                node.ply.clone(),
-                mv.mv.clone(),
-                role.into(),
-                options.source.into(),
-                mv.value.to_string(),
-                nodes_text.clone(),
-                options.lineage.into(),
-                "wide".into(),
-                options.since.into(),
-                format!("{why}{suffix}"),
+            Row::from_fields(&[
+                ("key", key.clone()),
+                ("ply", node.ply.clone()),
+                ("move", mv.mv.clone()),
+                ("role", role.into()),
+                ("source", options.source.into()),
+                ("evals", mv.value.to_string()),
+                ("nodes", nodes_text.clone()),
+                ("lineage", options.lineage.into()),
+                ("tier", "wide".into()),
+                ("since", options.since.into()),
+                ("note", format!("{why}{suffix}")),
             ])
         };
         let first_new = rows.len();
@@ -439,45 +396,6 @@ fn append(note: &str, text: String) -> String {
     } else {
         format!("{note}。{text}")
     }
-}
-
-/// 局面ごとに main がちょうど 1 つ (丁寧な定跡の行だけでも 1 つ) で、同じ手の行が重ならないこと。
-pub(super) fn validate(rows: &[Row]) -> Result<()> {
-    let mut seen = BTreeSet::new();
-    let mut groups: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
-    for row in rows {
-        ensure!(
-            seen.insert((row.get("key"), row.get("move"))),
-            "同じ手の行が重なっています: {} {}",
-            row.get("key"),
-            row.get("move")
-        );
-        groups.entry(row.get("key")).or_default().push(row);
-    }
-    for (key, entries) in groups {
-        let curated: Vec<_> =
-            entries.iter().copied().filter(|r| r.get("tier") == "curated").collect();
-        for subset in [entries, curated] {
-            if subset.iter().any(|r| r.get("role") != "record") {
-                ensure!(
-                    subset.iter().filter(|r| r.get("role") == "main").count() == 1,
-                    "{key}: main がちょうど 1 つではありません"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-/// 読みのノード数を元データの書き方 (1e9・2.3e8) にする。
-pub(super) fn format_nodes(nodes: u64) -> String {
-    if nodes == 0 {
-        return "0".into();
-    }
-    let text = format!("{:.2e}", nodes as f64);
-    let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
-    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-    format!("{mantissa}e{exponent}")
 }
 
 #[cfg(test)]

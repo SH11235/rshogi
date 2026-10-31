@@ -4,7 +4,8 @@
 //! 定跡の値は相手の手も定跡の手だけで伝播しているので、相手が定跡に無い手で別の定跡の局面へ合流すると、
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
-use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
+use super::audit::{evaluate, reject_same_file};
+use super::master_table::{MasterPosition, read_master};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, SideArg, build_filtered, selected_moves, thread_pool,
 };

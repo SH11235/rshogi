@@ -2,7 +2,8 @@
 //! 自分の定跡が切れて自分が読み始める局面とその重みを出す。木の根を選ぶのと、相手の定跡がその先どこまで
 //! 続くかを見るのに使う。
 
-use super::audit::{MasterPosition, read_master, reject_same_file};
+use super::audit::reject_same_file;
+use super::master_table::{MasterPosition, read_master};
 use super::refutation::format_queue;
 use super::reply_graph::{HIRATE_KEY, SideArg};
 use super::targets::{Line, MAX_DEPTH, Opts};

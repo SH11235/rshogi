@@ -6,11 +6,10 @@ use super::{Kind, Meta, RootInfo, Subtree, read_cut, side, turn};
 use crate::book_backprop::{
     BOOK_HEADER, BackpropOptions, DrawValues, MergeMode, propagate_values, read_graph,
 };
-use crate::book_tree::audit::{MasterValue, audit, master_values, parse_master_rows, read_master};
+use crate::book_tree::audit::{MasterValue, audit, master_values};
 use crate::book_tree::journal::{Reading, read_source};
-use crate::book_tree::register::{
-    self, Conflict, NodeMove, Options, format_master, merge, parse_master,
-};
+use crate::book_tree::master_table::{format_master, parse_master, parse_master_rows, read_master};
+use crate::book_tree::register::{self, Conflict, NodeMove, Options, merge};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
