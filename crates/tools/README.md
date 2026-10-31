@@ -7,6 +7,7 @@
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
+| 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
 ## ビルドと実行

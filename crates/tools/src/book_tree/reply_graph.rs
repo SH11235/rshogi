@@ -133,18 +133,28 @@ impl HashIndex {
     }
 }
 
+/// グラフに使う局面の指し手。
+pub(super) trait MoveSource: Sync {
+    fn move_text(&self, i: usize) -> &str;
+}
+
+impl MoveSource for MasterPosition {
+    fn move_text(&self, i: usize) -> &str {
+        &self.moves[i].mv
+    }
+}
+
 /// 元データの局面の索引。局面は key の順に番号を振る (番号の順は key の文字列の順と同じ)。
-pub(super) struct BookIndex<'a> {
-    list: Vec<(&'a str, &'a MasterPosition)>,
+pub(super) struct BookIndex<'a, P = MasterPosition> {
+    list: Vec<(&'a str, &'a P)>,
     packed: Vec<Packed>,
     hashes: HashIndex,
 }
 
-impl<'a> BookIndex<'a> {
+impl<'a, P: MoveSource> BookIndex<'a, P> {
     /// 元データの局面ごとに、詰めた形を元に戻すと同じ key になることを確かめてから索引を作る。
-    pub fn new(positions: &'a BTreeMap<String, MasterPosition>) -> Result<Self> {
-        let list: Vec<(&str, &MasterPosition)> =
-            positions.iter().map(|(k, p)| (k.as_str(), p)).collect();
+    pub fn new(positions: &'a BTreeMap<String, P>) -> Result<Self> {
+        let list: Vec<(&str, &P)> = positions.iter().map(|(k, p)| (k.as_str(), p)).collect();
         let mut packed = Vec::with_capacity(list.len());
         let mut hashes = HashIndex::default();
         // 束ごとに並べて求め、元の順に足す (中間の配列は束の大きさまで。エラーは key の順で最初のもの)。
@@ -178,7 +188,7 @@ impl<'a> BookIndex<'a> {
         self.list[i].0
     }
 
-    pub fn position(&self, i: usize) -> &'a MasterPosition {
+    pub fn position(&self, i: usize) -> &'a P {
         self.list[i].1
     }
 
@@ -227,8 +237,8 @@ fn unpack(packed: &Packed) -> Result<Position> {
 }
 
 /// 頂点 0 が根。頂点はすべて根から辿れる。局面は詰めた形で持ち、key の文字列は出力のときだけ作る。
-pub(super) struct ReplyGraph<'a> {
-    index: &'a BookIndex<'a>,
+pub(super) struct ReplyGraph<'a, P = MasterPosition> {
+    index: &'a BookIndex<'a, P>,
     packed: Vec<Packed>,
     /// 元データの局面の番号 (元データに無ければ [`NONE`])。
     master: Vec<u32>,
@@ -242,7 +252,7 @@ pub(super) struct ReplyGraph<'a> {
     pub pruned_positions: usize,
 }
 
-impl<'a> ReplyGraph<'a> {
+impl<'a, P: MoveSource> ReplyGraph<'a, P> {
     pub fn len(&self) -> usize {
         self.packed.len()
     }
@@ -277,7 +287,7 @@ impl<'a> ReplyGraph<'a> {
     pub fn move_text(&self, v: usize, i: usize) -> Cow<'a, str> {
         let edge = self.edges(v)[i];
         match (edge.book_move(), self.master(v)) {
-            (Some(j), Some(m)) => Cow::Borrowed(self.index.position(m).moves[j].mv.as_str()),
+            (Some(j), Some(m)) => Cow::Borrowed(self.index.position(m).move_text(j)),
             _ => Cow::Owned(edge.mv.to_usi()),
         }
     }
@@ -357,24 +367,24 @@ type Expansion = (Vec<(Move, u64, Packed, u32, u32)>, usize, bool);
 /// 計算量: 相手の手番の局面ごとに全合法手 (平均 80 前後) について、局面を進めずに行き先のハッシュ値を求め、
 /// 元データの局面と一致した手だけ局面を進めて詰めた形で確かめる。メモリは頂点ごとに約 70 バイト (詰めた局面と
 /// 索引)、辺ごとに 12 バイト。
-pub(super) fn build<'a>(
-    index: &'a BookIndex<'a>,
+pub(super) fn build<'a, P: MoveSource>(
+    index: &'a BookIndex<'a, P>,
     side: &str,
     start: &str,
-    select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
-) -> Result<ReplyGraph<'a>> {
+    select: impl Fn(usize, &P) -> Vec<usize> + Sync,
+) -> Result<ReplyGraph<'a, P>> {
     build_filtered(index, side, start, select, |_| true)
 }
 
 /// 元データにある自分の手番の局面のうち `expand(元データの番号)` が偽の局面では、手の生成と子局面の展開を
 /// 止める。相手の手番の局面は常に展開する。
-pub(super) fn build_filtered<'a>(
-    index: &'a BookIndex<'a>,
+pub(super) fn build_filtered<'a, P: MoveSource>(
+    index: &'a BookIndex<'a, P>,
     side: &str,
     start: &str,
-    select: impl Fn(usize, &MasterPosition) -> Vec<usize> + Sync,
+    select: impl Fn(usize, &P) -> Vec<usize> + Sync,
     expand: impl Fn(usize) -> bool + Sync,
-) -> Result<ReplyGraph<'a>> {
+) -> Result<ReplyGraph<'a, P>> {
     let black = side == "b";
     let mut graph = ReplyGraph {
         index,
@@ -389,7 +399,7 @@ pub(super) fn build_filtered<'a>(
     // 頂点のハッシュ値 → 番号。同じハッシュ値の別の局面は詰めた形で見分ける。
     let mut nodes = HashIndex::default();
     let mut intern =
-        |graph: &mut ReplyGraph, hash: u64, packed: Packed, master: u32, own: bool| -> u32 {
+        |graph: &mut ReplyGraph<P>, hash: u64, packed: Packed, master: u32, own: bool| -> u32 {
             if let Some(v) = nodes.find(hash, |v| graph.packed[v as usize] == packed) {
                 return v;
             }
@@ -419,7 +429,7 @@ pub(super) fn build_filtered<'a>(
             let position = index.position(master as usize);
             for i in select(master as usize, position) {
                 let mut child = pos.clone();
-                let Ok(mv) = apply_usi(&mut child, &position.moves[i].mv) else {
+                let Ok(mv) = apply_usi(&mut child, position.move_text(i)) else {
                     illegal += 1;
                     continue;
                 };
@@ -486,8 +496,44 @@ pub(super) fn apply_usi(pos: &mut Position, usi: &str) -> Result<Move> {
     Ok(mv)
 }
 
+/// 辺を複製せずに走査するための読み取り専用グラフ。
+pub(super) trait DirectedGraph {
+    fn len(&self) -> usize;
+    fn degree(&self, v: usize) -> usize;
+    fn target(&self, v: usize, i: usize) -> u32;
+}
+
+impl<P: MoveSource> DirectedGraph for ReplyGraph<'_, P> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn degree(&self, v: usize) -> usize {
+        self.edges(v).len()
+    }
+    fn target(&self, v: usize, i: usize) -> u32 {
+        self.edges(v)[i].to
+    }
+}
+
+impl DirectedGraph for [Vec<u32>] {
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn degree(&self, v: usize) -> usize {
+        self[v].len()
+    }
+    fn target(&self, v: usize, i: usize) -> u32 {
+        self[v][i]
+    }
+}
+
 /// 自明でない強連結成分 (頂点 2 つ以上)。成分の中は番号順、成分は先頭の番号順。
 pub(super) fn nontrivial_sccs(adjacency: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    nontrivial_sccs_graph(adjacency)
+}
+
+/// 隣接リストを複製せずに強連結成分を求める。
+pub(super) fn nontrivial_sccs_graph(adjacency: &(impl DirectedGraph + ?Sized)) -> Vec<Vec<u32>> {
     const UNSEEN: u32 = u32::MAX;
     let n = adjacency.len();
     let mut index = vec![UNSEEN; n];
@@ -509,7 +555,8 @@ pub(super) fn nontrivial_sccs(adjacency: &[Vec<u32>]) -> Vec<Vec<u32>> {
         stack.push(root);
         on_stack[root as usize] = true;
         while let Some(&mut (v, ref mut i)) = calls.last_mut() {
-            if let Some(&w) = adjacency[v as usize].get(*i) {
+            if *i < adjacency.degree(v as usize) {
+                let w = adjacency.target(v as usize, *i);
                 *i += 1;
                 if index[w as usize] == UNSEEN {
                     index[w as usize] = next;
