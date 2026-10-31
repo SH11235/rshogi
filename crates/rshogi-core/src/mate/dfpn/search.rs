@@ -984,6 +984,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 // 置換表の詰みは無駄合いを数える証明だけで、その手数は無駄合いを数えない手数の上限にもなる
                 // (持駒違いの局面に流用しても、全応手を数える手数は攻め方の持駒が多いほど短い)
                 let mut usable = probed.filter(|v| v.pn != 0 || v.mate_len <= child_len_limit);
+                // 上限より長い証明しか無い局面は、上限付きの探索が前に書いた未確定値から読み直す
+                // (確定値の表を先に引くので、完全一致の表に書いた未確定値はそのままでは読まれない)
+                if PIECES && usable.is_none() && probed.is_some() {
+                    usable = self.table.probe_unsettled(child_table_key);
+                }
                 if self.futility
                     && usable.is_none_or(|v| v.pn != 0)
                     && let Some(len) = self.tables.and_then(|t| t.mate_len(child_key))
