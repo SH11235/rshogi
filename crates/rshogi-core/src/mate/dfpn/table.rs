@@ -629,6 +629,22 @@ impl MateTable {
         })
     }
 
+    /// 同じ局面 (持駒も同じ) の完全一致のエントリの未確定値
+    pub fn probe_unsettled(&self, key: TableKey) -> Option<TableValue> {
+        self.read(&self.buckets[self.exact_index(key)], |entries| {
+            entries
+                .iter()
+                .find(|e| e.matches(key, self.generation) && !e.is_final())
+                .map(|e| TableValue {
+                    pn: e.pn_dn().0,
+                    dn: e.pn_dn().1,
+                    mate_len: e.mate_len(),
+                    min_depth: e.min_depth(),
+                    hand: key.hand,
+                })
+        })
+    }
+
     /// 同じ局面 (持駒も同じ) の完全一致のエントリがあるか
     #[cfg(test)]
     pub fn contains_exact(&self, key: TableKey) -> bool {
@@ -844,6 +860,20 @@ mod tests {
             assert_eq!(table.probe::<true>(k), Some(value(3, 5)));
             table.clear();
         }
+    }
+
+    #[test]
+    fn unsettled_value_is_kept_beside_proof() {
+        let table = MateTable::new(1, true);
+        let k = key(7, Hand::EMPTY);
+        table.store::<true>(k, proven(9, Hand::EMPTY), 1);
+        assert_eq!(table.probe_unsettled(k), None);
+        table.store::<true>(k, value(4, 6), 10);
+        assert_eq!(table.probe::<true>(k), Some(proven(9, Hand::EMPTY)));
+        assert_eq!(table.probe_unsettled(k), Some(value(4, 6)));
+        let exact_final = key(8, Hand::EMPTY);
+        table.store::<false>(exact_final, proven(9, Hand::EMPTY), 1);
+        assert_eq!(table.probe_unsettled(exact_final), None);
     }
 
     #[test]
