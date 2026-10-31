@@ -185,6 +185,10 @@ fn read_cut(dir: &Path) -> Result<(Meta, Vec<Subtree>)> {
     )
     .context("cut.json の形式が不正です")?;
     ensure!(meta.version == META_VERSION, "cut.json の版が違います: {}", meta.version);
+    ensure!(
+        meta.book.sha256.len() == 64 && meta.book.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+        "cut.json の book.sha256 が 64 桁の 16 進ではありません"
+    );
     let index: BTreeMap<&str, usize> =
         meta.roots.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
     let mut trees = vec![Subtree::default(); meta.roots.len()];

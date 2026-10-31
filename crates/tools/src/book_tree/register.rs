@@ -13,9 +13,9 @@ pub(super) const COLUMNS: [&str; 11] = [
     "key", "ply", "move", "role", "source", "evals", "nodes", "lineage", "tier", "since", "note",
 ];
 pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
-/// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。`peta` は大きい定跡の
+/// 読みから作った行。木の結果で main を替え、評価値を上書きしてよい。`ext` は外部の定跡の
 /// 木を借りて自分の読みで値を付けた行 (`book_mine borrow value`)。
-const READ_SOURCES: [&str; 3] = ["read", "deep", "peta"];
+const READ_SOURCES: [&str; 3] = ["read", "deep", "ext"];
 
 #[derive(Args, Debug)]
 pub(super) struct RegisterArgs {
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn deeper_tree_wins_and_rows_are_sorted_like_the_python_tools() {
+    fn deeper_tree_wins_and_rows_are_sorted_by_key_role_and_move() {
         let mut nodes = BTreeMap::from([(B.into(), node(&[("a", 10)], 1, 0))]);
         let deeper = BTreeMap::from([(B.into(), node(&[("b", 20), ("a", 0)], 3, 1))]);
         assert_eq!(merge(&mut nodes, deeper), 1);

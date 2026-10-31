@@ -57,7 +57,7 @@ impl Tree {
         }
         let mut report = String::new();
         for key in &self.root_order {
-            let candidates = python_list(&self.candidates[key]);
+            let candidates = quoted_list(&self.candidates[key]);
             if side(key) == self.def.own {
                 writeln!(
                     report,
@@ -161,7 +161,7 @@ impl Tree {
                     writeln!(
                         report,
                         "警告: 伸ばしていない手の読みの値が、候補の伝播後の 1 位を上回る (その手も伸ばしてから決める): {}",
-                        python_list(&above)
+                        quoted_list(&above)
                     )?;
                 }
             }
@@ -323,6 +323,6 @@ impl Tree {
     }
 }
 
-fn python_list(items: &[String]) -> String {
+fn quoted_list(items: &[String]) -> String {
     format!("[{}]", items.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", "))
 }

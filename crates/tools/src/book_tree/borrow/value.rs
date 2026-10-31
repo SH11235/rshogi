@@ -397,12 +397,13 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let rows = parse_master(&text)?;
     let before_rows = rows.len();
-    let lineage = format!("peta:{}", meta.book.name);
+    // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
+    let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);
     let options = Options {
         since: &args.since,
         note: &args.note,
         alt_gap: args.alt_gap,
-        source: "peta",
+        source: "ext",
         lineage: &lineage,
     };
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;

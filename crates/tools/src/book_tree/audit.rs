@@ -324,7 +324,7 @@ pub(super) fn parse_master_rows(
     Ok((positions, records))
 }
 
-/// カンマ区切りの読みの値の平均を、0.5 は偶数の側へ丸める (Python の `round` と同じ)。空なら `None`。
+/// カンマ区切りの読みの値の平均を、0.5 は偶数の側へ丸める (偶数丸め)。空なら `None`。
 fn mean_eval(text: &str) -> Result<Option<i32>> {
     if text.is_empty() {
         return Ok(None);

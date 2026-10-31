@@ -413,7 +413,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 ### 出力と登録可否
 
-木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、両方の手番の局面の手ごとの伝播後の値 `node_moves.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。
+木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、両方の手番の局面の手ごとの伝播後の値 `node_moves.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は根の候補、伸ばし直し、警告と最後の集計を含みます。
 
 未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
 
@@ -434,8 +434,8 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
-- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep` / `peta`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
-- `source` が `read` / `deep` / `peta` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (`source` が `read` / `deep` / `ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- `source` が `read` / `deep` / `ext` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
@@ -667,9 +667,9 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 ### 切り出し
 
 ```bash
-book_mine borrow cut --book peta.db --roots roots.jsonl --out cut1 \
+book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
   [--own-diff 30] [--opp-diff 100] [--opp-top 2] [--max-plies 20] [--max-positions 20000] \
-  [--check-every 2] [--master moves.tsv [--master-exit use|read]] [--extra marks.tsv] [--tag peta] [--priority 100]
+  [--check-every 2] [--master moves.tsv [--master-exit use|read]] [--extra marks.tsv] [--tag ext] [--priority 100]
 ```
 
 | オプション | 既定 | 説明 |
@@ -685,7 +685,7 @@ book_mine borrow cut --book peta.db --roots roots.jsonl --out cut1 \
 | `--master` | なし | 定跡の元データの表。ここにある局面 (根を除く) を出口にする |
 | `--master-exit` | `use` | `use`: 元データの値を使い、読まない (自分の手番は main、相手の手番は値の分かる手の 1 位。値は `master audit` と同じ伝播の値)。値が分からない局面は読む。`read`: 止めて読む |
 | `--extra` | なし | 足す手 (TSV、見出しに `key`・`move`。他の列は読まない)。`borrow value` の `marks.tsv` をそのまま渡せる。どの根でも、部分木の途中の自分の手番の局面に着いたら足す |
-| `--tag` / `--priority` | `peta` / 100 | キューの行の id (`<根の id>_<tag>_<b\|w>`) と priority |
+| `--tag` / `--priority` | `ext` / 100 | キューの行の id (`<根の id>_<tag>_<b\|w>`) と priority |
 
 切り出し方:
 
@@ -722,7 +722,7 @@ serve の 1 周ごとの処理 (0.1 秒ごと) は、前の周から読みが来
 
 ```bash
 book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.tsv \
-  --out value1 --since 20261101-peta [--note "..."] [--alt-gap 40] [--line 40] \
+  --out value1 --since 20261101-ext [--note "..."] [--alt-gap 40] [--line 40] \
   [--draw-value-black -70] [--draw-value-white 70] [--fingerprint <指紋>] [--apply]
 ```
 
@@ -740,7 +740,7 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 
 - 登録するのは自分の手番の局面だけです。伸ばした局面は伝播後の値、出口は読みの値で並べます。元データで止めた出口と印の付いた局面は登録しません。
-- 足す行は `source=peta`、`lineage=peta:<大きい定跡のファイル名>`、`nodes` は台帳の読みのノード数です。`peta` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
+- 足す行は `source=ext`、`lineage=book:<大きい定跡のファイル名>@<内容の sha256 の先頭 8 文字>`、`nodes` は台帳の読みのノード数です。`ext` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
 - 同じ局面が複数の根にあるときは、その局面から先の手数の余り (`--max-plies` − 段) の大きい根を使います。
 
 `--apply` の前に、登録後の元データを `master audit` と同じ伝播に通し (通らなければ止まる)、点検の数 (main が 1 位から `--line` 以上負ける局面) の前後を出します。`--apply` を省くと元データは変えません。
