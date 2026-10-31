@@ -438,13 +438,13 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 `--schema` があれば指紋に対応する conditions.tsv の name を使い、対応がなければ表への追加を促して失敗します。schema がなければ指紋の先頭 8 文字です。1 回の実行中に先頭 8 文字が同じ別の指紋を条件名に使おうとするとエラーになります。`--schema` の conditions.tsv で別の名前を付けてください。`cond=unknown` の木の数を stdout に出します。
 
-`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の `remaining + 1`。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと read・deep・ext です。
+`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の局面の残り段数 + 1 (`remaining + 1`)。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと `read`・`ext` です。
 
 規則 (局面ごと、先手・後手の手番の区別なし):
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
-- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read` / `deep` / `ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`pin` / `top` / `team` などの main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
 - 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
@@ -503,7 +503,7 @@ fingerprint は空 (指紋の無い古い条件) か 64 桁の十六進です。
 
 schema 指定時は、source・cond の名前・lineage の種類が対応する表にあることを検査します。
 省略時は語彙の照合だけを省き、構造の検査は行います。指定された dir や表の欠落・不正を
-既定値で補うことはありません。読み由来として更新できる既定の source は read・deep・ext です。
+既定値で補うことはありません。読み由来として更新できる既定の source は `read`・`ext` です。
 
 ```bash
 book_mine master validate --master moves.tsv --schema schema
@@ -1007,7 +1007,7 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 
 `cond` は登録する手ごとに決めます。その手の行き先から辿る全候補の値の由来を確かめ、台帳の条件だけで決まると確認できた手に条件名を付けます。元データの出口を使う場合は、出口の行の cond と、元データ内で値を伝播した先の条件も同じ名前だと確認できることが必要です。確認できない出口に依存する手は `unknown` にします。同じ部分木でも、その出口に依存しない手には台帳の条件名を付けられます。最善手の選択や同値補正も候補の値に依存するため、行き先の全候補を保守的に検査します。依存先に循環がある手は、他の部分木に台帳の読みがあっても `unknown` です。循環だけの部分木も `unknown` になります。
 
-value_kind は後退解析のグラフで子局面への辺を持つ手なら `tree:K`、辺がなく読みの値を使う手なら `single` です。K は `max_plies − level` (最小 1)。出口の読みの手も部分木へ合流する場合は tree になります。K は切り出しの残り段数の目安であり、循環の長さや最善手順の長さではありません。
+value_kind は後退解析のグラフで子局面への辺を持つ手なら `tree:K`、辺がなく読みの値を使う手なら `single` です。K は行き先の局面の残り段数 + 1 (`max_plies − 行き先の level + 1`)。出口の読みの手も部分木へ合流する場合は tree になります。K は切り出しの残り段数の目安であり、循環の長さや最善手順の長さではありません。
 
 登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 

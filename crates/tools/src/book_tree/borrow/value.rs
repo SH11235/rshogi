@@ -99,7 +99,7 @@ pub(super) struct MoveValue {
     /// 部分木の手 (大きい定跡の手か --extra の手)。偽なら出口の読みの手。
     pub expanded: bool,
     pub book_value: Option<i32>,
-    pub propagated: bool,
+    pub destination_level: Option<usize>,
     pub cond: String,
 }
 
@@ -339,7 +339,7 @@ pub(super) fn value_root(
                     },
                     mv: row.mv?.to_owned(),
                     value: value.new,
-                    propagated: value.edge.is_some(),
+                    destination_level: value.edge.map(|edge| tree.nodes[graph.key(edge.to)].level),
                     expanded: row.expanded,
                     book_value: row.book_value,
                 })
@@ -415,8 +415,8 @@ pub(super) fn register_nodes(
                         cond: m.cond.clone(),
                         mv: m.mv.clone(),
                         value: m.value,
-                        value_kind: if m.propagated {
-                            format!("tree:{}", max_plies.saturating_sub(node.level).max(1))
+                        value_kind: if let Some(level) = m.destination_level {
+                            format!("tree:{}", max_plies.saturating_sub(level).saturating_add(1))
                         } else {
                             "single".into()
                         },
