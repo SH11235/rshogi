@@ -444,7 +444,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] \
+  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] [--fill-replies] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001]
 ```
@@ -459,6 +459,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
+| `--fill-replies` | なし | 元データに無い相手の手番の局面を補って伝播する (下の「伝播の仕方」) |
 | `--refutation-table <PATH>` | なし | 反駁の表 (TSV) の出力先 (下の「反駁の点検」) |
 | `--refutation-margin <CP>` | `1` | 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す (1 以上) |
 | `--enqueue-out <PATH>` | なし | 反駁の局面を読み足す、`book_mine tree enqueue --from` に渡す行 (JSON Lines) の出力先 |
@@ -474,10 +475,11 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 - 手の値は `evals` の平均 (0.5 は偶数の側へ丸める) です。値は手番の側から見た値です。
 - 値の分かる手は、読みの値のある合法手と、book 内の子局面 (直接、または先後反転した局面) に値の分かる手がある手です (読みの値の無い手が続く線も、先に読みの値があれば分かる手になります)。分からない手は伝播にも、1 位の候補にも、main との比較にも使いません。
 - 伝播は `book_backprop --merge replace --skip-unusable-moves` と同じです。book 内に子局面のある手は子局面からの値、無い手は読みの値になります。
+- `--fill-replies` を渡すと、読みの値の無い手 (多数手など) を指した後の局面が元データに無ければ (先後反転した局面も無ければ)、その局面を、相手の合法手のうち元データの局面に着く手だけを持つ相手の手番の局面として補います。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の局面の読みの値が相手の手番の局面で途切れるためです。補った局面の値は定跡に入っている応手だけで決まるので、定跡に無い応手を見ない分だけ自分の側に甘い値です。この甘さは補った局面の上の局面の最大値を通って、さらに上の局面へ伝わります。読みの値のある手が直接か反転で着く局面は補いません (全ての応手を見た読みの値を直接は置き換えない)。反転した局面が元データにある局面へは応手を張りません (千日手の値が先後で違うと、反転で合流した局面を含む循環を伝播できないため)。補った局面そのものは点検の表・`--out-db` に出しませんが、補った局面を通って付いた値 (上の局面の読みの値のある手に伝わった値も含む) は、表・`--out-db`・反駁の点検 (`--refutation-table`・`--enqueue-out`) に普通の伝播の値として入り、区別されません。補った局面を通って、千日手の値が先後で違う循環に反転で合流すると止まることがあります (「反転キーで合流した…」のエラー)。そのときは `--fill-replies` を外してください。`master rejoin`・`master cycles`・`borrow` の伝播では補いません。
 
 点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
 
-標準出力に要約を出します: 局面数 (手番ごと)、手の数・値の分かる手の数・非合法手・除いた record、読みの値から伝播で変わった手の数と差の分布、読みの値が無く伝播で値が付いた手の数、main・alt が 2 手以上の局面数、main が 1 位から線未満・線以上負ける局面数、main の値が分からない局面数、循環 (自明でない強連結成分) の数。
+標準出力に要約を出します: 局面数 (手番ごと)、手の数・値の分かる手の数・非合法手・除いた record、読みの値から伝播で変わった手の数と差の分布、読みの値が無く伝播で値が付いた手の数、main・alt が 2 手以上の局面数、main が 1 位から線未満・線以上負ける局面数、main の値が分からない局面数、補った相手の手番の局面の数、循環 (自明でない強連結成分) の数。
 
 ### 反駁の点検
 

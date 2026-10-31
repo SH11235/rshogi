@@ -473,7 +473,7 @@ pub(super) fn build_filtered<'a>(
 }
 
 /// USI の手を合法性を確かめてから指し、指した手を返す。
-fn apply_usi(pos: &mut Position, usi: &str) -> Result<Move> {
+pub(super) fn apply_usi(pos: &mut Position, usi: &str) -> Result<Move> {
     let decoded = Move::from_usi(usi).with_context(|| format!("USI 指し手が不正です: {usi}"))?;
     let mv = pos
         .to_move(decoded)
