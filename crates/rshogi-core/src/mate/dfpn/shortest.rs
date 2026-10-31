@@ -382,9 +382,7 @@ impl<M: Copy + Eq> Walker<M> {
             if first.is_some() && !alternatives {
                 break;
             }
-            if st.is_drop(mv) && searcher.futile_drop(st, mv, d)?.is_some() {
-                continue;
-            }
+            // 短く詰む応手を先に除く。無駄合いの判定は別の局面を最短手数まで解くので重く、短く詰む合駒には要らない
             if d >= 4 {
                 st.do_move(mv);
                 let r = searcher.search(st, NodeArgs::unbounded(0, true, d - 3), &mut 0);
@@ -392,6 +390,9 @@ impl<M: Copy + Eq> Walker<M> {
                 if r?.is_proven() {
                     continue;
                 }
+            }
+            if st.is_drop(mv) && searcher.futile_drop(st, mv, d)?.is_some() {
+                continue;
             }
             first.get_or_insert(mv);
             st.do_move(mv);
