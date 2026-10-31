@@ -2,6 +2,7 @@
 
 use super::journal::LockedFile;
 use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
+use super::model::child;
 use super::output::NODE_MOVES;
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
@@ -118,13 +119,17 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             format!("{} を読めません (古い木は tree replay で作り直してください)", path.display())
         })?;
         let fingerprint = tree_fingerprint(dir)?;
+        let tree_readings = tree_readings(dir)?;
+        let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
+        let parsed =
+            parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
         readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
-            tree_readings(dir)?
+            tree_readings
         } else {
             Vec::new()
         });
         fingerprints.push(fingerprint);
-        disagreements += merge(&mut nodes, parse_node_moves(&text, tree)?);
+        disagreements += merge(&mut nodes, parsed);
     }
     let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
     let mut conditions = Vec::new();
@@ -204,7 +209,11 @@ fn write_new(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<String, Node>> {
+pub(super) fn parse_node_moves(
+    text: &str,
+    tree: usize,
+    known_nodes: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, Node>> {
     let mut lines = text.lines();
     ensure!(
         lines.next() == Some("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank"),
@@ -228,12 +237,26 @@ pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<Strin
             cond: "unknown".into(),
             mv: cells[5].to_owned(),
             value: cells[6].parse()?,
-            value_kind: if cells[7] == "1" && node.remaining >= 1 {
-                format!("tree:{}", node.remaining)
+            value_kind: if cells[7] == "1" {
+                "unknown".into()
             } else {
                 "single".into()
             },
         });
+    }
+    let remaining: BTreeMap<_, _> =
+        nodes.iter().map(|(key, node)| (key.clone(), node.remaining)).collect();
+    for (key, node) in &mut nodes {
+        for mv in &mut node.moves {
+            let destination = child(key, &mv.mv)?;
+            if let Some(depth) = remaining.get(&destination) {
+                let depth = depth.checked_add(1).context("行き先の remaining が大きすぎます")?;
+                mv.value_kind = format!("tree:{depth}");
+            } else if known_nodes.is_none_or(|known| known.contains(&destination)) {
+                // TSV にない局面への合流や、読みの一覧がない木では、伝播の有無や深さを確定できない。
+                mv.value_kind = "unknown".into();
+            }
+        }
     }
     Ok(nodes)
 }
@@ -673,6 +696,9 @@ mod tests {
 
     #[test]
     fn run_checks_trees_and_writes_the_master_only_with_apply() {
+        const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let white = child(B, "5i4i").unwrap();
+        let w = white.as_str();
         let dir = tempfile::tempdir().unwrap();
         let master_path = dir.path().join("moves.tsv");
         let original = format_master(&master(&[row(B, "pinned", "main", "pin", "wide", "")]));
@@ -682,7 +708,7 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::write(
             tree.join(NODE_MOVES),
-            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t3\t0\t2\t1000000000\tbest\t40\t1\t1\n{W}\t4\t1\t1\t1000000000\tw1\t-5\t1\t1\n"),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t3\t0\t2\t1000000000\t5i4i\t40\t1\t1\n{w}\t4\t1\t1\t1000000000\t5a4a\t-5\t1\t1\n"),
         )
         .unwrap();
         let args = |trees: Vec<PathBuf>, apply| RegisterArgs {
@@ -705,16 +731,16 @@ mod tests {
                 .lines()
                 .nth(1)
                 .unwrap()
-                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\tbest\t40\t"))
+                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\t5i4i\t40\t"))
         );
         assert!(run(args(vec![tree.clone()], true)).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         std::fs::remove_file(dir.path().join("conflicts.tsv")).unwrap();
         run(args(vec![tree.clone()], true)).unwrap();
         let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
-        assert_eq!(find(&rows, W, "w1").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, w, "5a4a").unwrap().get("role"), "main");
         assert_eq!(
-            find(&rows, B, "best").unwrap().get("note"),
+            find(&rows, B, "5i4i").unwrap().get("note"),
             "木の伝播後の 1 位 (main と食い違い)"
         );
 
@@ -774,14 +800,20 @@ mod tests {
     }
     #[test]
     fn expanded_and_metadata_changes_are_registered_without_value_changes() {
+        const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let white = child(B, "5i4i").unwrap();
+        let w = white.as_str();
         let table = format!(
-            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t1\t0\t2\t100\ta\t10\t1\t1\n{B}\t1\t0\t2\t100\tb\t9\t0\t2\n{W}\t2\t2\t0\t100\tx\t8\t1\t1\n"
+            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{B}\t1\t0\t2\t100\t5i4i\t10\t1\t1\n{B}\t1\t0\t2\t100\t5i6i\t9\t0\t2\n{w}\t2\t1\t1\t100\t5a4a\t8\t1\t1\n"
         );
-        let mut nodes = parse_node_moves(&table, 0).unwrap();
+        let mut nodes = parse_node_moves(&table, 0, Some(&BTreeSet::new())).unwrap();
         assert_eq!(nodes[B].moves[0].value_kind, "tree:2");
         assert_eq!(nodes[B].moves[1].value_kind, "single");
-        assert_eq!(nodes[W].moves[0].value_kind, "single");
-        assert!(parse_node_moves(&table.replace("\t1\t1\n", "\t2\t1\n"), 0).is_err());
+        assert_eq!(nodes[w].moves[0].value_kind, "unknown");
+        assert!(
+            parse_node_moves(&table.replace("\t1\t1\n", "\t2\t1\n"), 0, Some(&BTreeSet::new()))
+                .is_err()
+        );
         let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
         assert!(rows.iter().all(|r| r.get("lineage").is_empty()));
         for node in nodes.values_mut() {
@@ -794,9 +826,49 @@ mod tests {
         nodes.get_mut(B).unwrap().moves[0].value_kind = "tree:3".into();
         let (rows, _, summary) = register(rows, &nodes, &options()).unwrap();
         assert_eq!(summary.evals_updated, 1);
-        assert_eq!(find(&rows, B, "a").unwrap().get("value_kind"), "tree:3");
+        assert_eq!(find(&rows, B, "5i4i").unwrap().get("value_kind"), "tree:3");
         let (_, _, summary) = register(rows, &nodes, &options()).unwrap();
         assert_eq!(summary.evals_updated, 0);
+    }
+
+    #[test]
+    fn propagation_uses_child_remaining_and_never_flips_keys() {
+        const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let destination = child(ROOT, "5i4i").unwrap();
+        let flipped = rshogi_book::flipped_key(&format!("{destination} 1")).unwrap();
+        let flipped = crate::book_db::strip_ply(&flipped);
+        let header = "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n";
+        for expanded in [0, 1] {
+            let parent = format!("{ROOT}\t1\t4\t0\t100\t5i4i\t10\t{expanded}\t1\n");
+            let text = format!("{header}{parent}{destination}\t2\t1\t3\t100\t5a4a\t-10\t0\t1\n");
+            let nodes = parse_node_moves(&text, 0, Some(&BTreeSet::new())).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "tree:4");
+            let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
+            assert_eq!(find(&rows, ROOT, "5i4i").unwrap().get("value_kind"), "tree:4");
+
+            let text = format!("{header}{parent}{flipped}\t2\t1\t3\t100\t5i4i\t-10\t0\t1\n");
+            let nodes = parse_node_moves(&text, 0, Some(&BTreeSet::new())).unwrap();
+            assert_eq!(
+                nodes[ROOT].moves[0].value_kind,
+                if expanded == 0 { "single" } else { "unknown" }
+            );
+        }
+    }
+
+    #[test]
+    fn destinations_omitted_from_node_moves_have_unknown_depth() {
+        const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let destination = child(ROOT, "5i4i").unwrap();
+        for expanded in [0, 1] {
+            let text = format!(
+                "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{ROOT}\t1\t0\t2\t100\t5i4i\t-30000\t{expanded}\t1\n"
+            );
+            let nodes =
+                parse_node_moves(&text, 0, Some(&BTreeSet::from([destination.clone()]))).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "unknown");
+            let nodes = parse_node_moves(&text, 0, None).unwrap();
+            assert_eq!(nodes[ROOT].moves[0].value_kind, "unknown");
+        }
     }
 
     #[test]

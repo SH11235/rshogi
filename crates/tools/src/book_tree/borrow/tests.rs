@@ -320,6 +320,42 @@ fn value_root_propagates_exit_readings_and_marks_better_outside_moves() {
 }
 
 #[test]
+fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
+    let s = settings();
+    let tree = cut_root(&root(), &params(4, 100), &mut lookup, None, &BTreeMap::new()).unwrap();
+    let exit = key(&["5i5h", "5a4a"]);
+    let destination = key(&["5i4i", "5a4a", "4i5i"]);
+    assert_eq!(child(&exit, "5h5i").unwrap(), destination);
+    assert!(tree.nodes.contains_key(&destination));
+    assert!(!tree.edges.iter().any(|e| e.key == exit));
+    let mut cache = readings(&s, &[("5i6i", 0)]);
+    cache.insert(exit.clone(), reading(&exit, &[("5h5i", 100), ("5h6h", 10)], &s));
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeSet::new(),
+            cond: "test",
+        },
+        DrawValues::default(),
+        40,
+        work.path(),
+    )
+    .unwrap();
+    let joined = values.moves[&exit].iter().find(|m| m.mv == "5h5i").unwrap();
+    assert!(!joined.expanded);
+    assert!(joined.propagated);
+    assert_eq!(joined.value, 20);
+    let nodes = register_nodes(0, &root(), &tree, &values, &BTreeSet::new(), 4, s.nodes);
+    let moves = &nodes[&exit].moves;
+    assert_eq!(moves.iter().find(|m| m.mv == "5h5i").unwrap().value_kind, "tree:2");
+    assert_eq!(moves.iter().find(|m| m.mv == "5h6h").unwrap().value_kind, "single");
+}
+
+#[test]
 fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
     let s = settings();
     let e = key(&["5i4i", "5a4a"]);

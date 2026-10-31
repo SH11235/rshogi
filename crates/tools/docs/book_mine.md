@@ -419,7 +419,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 `registration_status.json` は `ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
 
-`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手は 1 回の読みの値)・`expanded` (伸ばした手なら 1)・`rank` です。勝ち宣言の読みの局面は載せません。
+`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
 
 ### 定跡の元データへの登録
 
@@ -438,7 +438,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 `--schema` があれば指紋に対応する conditions.tsv の name を使い、対応がなければ表への追加を促して失敗します。schema がなければ指紋の先頭 8 文字です。1 回の実行中に先頭 8 文字が同じ別の指紋を条件名に使おうとするとエラーになります。`--schema` の conditions.tsv で別の名前を付けてください。`cond=unknown` の木の数を stdout に出します。
 
-`value_kind` は expanded=1 かつ remaining≥1 の手なら `tree:<remaining>`、それ以外は `single`。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと read・deep・ext です。
+`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の `remaining + 1`。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと read・deep・ext です。
 
 規則 (局面ごと、先手・後手の手番の区別なし):
 

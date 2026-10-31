@@ -8,7 +8,7 @@
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
 | 外部の定跡の木を借りて自分の読みで値を付ける | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
-| 木の読みを全候補の台帳 (serve の稼働中も可) と照合して元データに登録する | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
+| 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手を検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
 | 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
 | 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
