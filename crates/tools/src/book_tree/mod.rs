@@ -1,5 +1,7 @@
 //! 条件付き台帳を共有する、独立した定跡の木の生成。
 
+mod add;
+mod add_reads;
 mod audit;
 mod book_diff;
 mod borrow;
@@ -124,6 +126,10 @@ pub struct MasterArgs {
 
 #[derive(Subcommand, Debug)]
 enum MasterCommand {
+    /// 元データへ行を追加・置換する
+    Add(add::AddArgs),
+    /// 読みのログから追加候補を作る
+    AddReads(add_reads::AddReadsArgs),
     /// 元データから定跡・プリセット・注釈を書き出す
     Export(export::ExportArgs),
     /// 2 つの定跡の局面と手の差分を表示する
@@ -145,6 +151,8 @@ enum MasterCommand {
 /// CLI の指定に従い元データを処理する。
 pub fn run_master(args: MasterArgs) -> Result<()> {
     match args.command {
+        MasterCommand::Add(args) => add::run(args),
+        MasterCommand::AddReads(args) => add_reads::run(args),
         MasterCommand::Export(args) => export::run(args),
         MasterCommand::Diff(args) => book_diff::run(args),
         MasterCommand::Validate(args) => master_table::run_validate(args),

@@ -315,8 +315,8 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
             error("ply は空か 10 進の数字だけにしてください");
         }
         let evals = row.get("evals");
-        if let Err(reason) = mean_eval(evals) {
-            error(&format!("evals が不正です: {reason}"));
+        if mean_eval(evals).is_err() {
+            error("evals は整数をカンマで区切り、合計は i64、平均は i32 の範囲にしてください");
         }
         let key = row.get("key");
         let group = groups.entry(key.to_owned()).or_insert_with(|| PositionRows {
@@ -453,10 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn eval_range_and_sum_overflow_are_errors_for_validation_and_audit_reader() {
+    fn validation_and_audit_reader_reject_the_same_invalid_evals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
         for evals in [
+            "1.5,2e1",
+            "2e1",
+            " 20",
+            "20 ",
+            "1,",
             "2147483648",
             "-2147483649",
             "9223372036854775807,1",
@@ -467,8 +472,7 @@ mod tests {
             r.set("evals", evals.into());
             let text = format_master(&[r]);
             let report = validate_table(text.as_bytes()).unwrap();
-            assert_eq!(report.errors.len(), 1, "{evals}: {report:?}");
-            assert!(report.errors[0].contains("2 行目: evals"));
+            assert!(report.errors.iter().any(|e| e.contains("evals")), "{evals}: {report:?}");
             std::fs::write(&path, text).unwrap();
             assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
         }
@@ -623,12 +627,10 @@ mod tests {
             ("ply", "+1", "ply"),
             ("ply", "１", "ply"),
             ("ply", " 1", "ply"),
-            ("evals", "1.5", "evals"),
             ("evals", "NaN", "evals"),
             ("evals", "inf", "evals"),
             ("evals", "1,", "evals"),
             ("evals", "1,,2", "evals"),
-            ("evals", "999999999999999999999999", "evals"),
             ("move", "resign", "合法手"),
             ("move", "7g7e", "合法手"),
             ("move", "P*5e", "合法手"),

@@ -24,7 +24,11 @@ fn resolved(path: &Path) -> Result<PathBuf> {
     Ok(crate::common::dedup::canonicalize_maybe_new(path)?)
 }
 
-pub(super) fn guard(outputs: &[PathBuf], inputs: &[PathBuf], force: bool) -> Result<()> {
+pub(in crate::book_tree) fn guard(
+    outputs: &[PathBuf],
+    inputs: &[PathBuf],
+    force: bool,
+) -> Result<()> {
     for output in outputs {
         ensure!(!output.is_dir(), "output is a directory: {}", output.display());
         let exists = match output.symlink_metadata() {
@@ -32,7 +36,7 @@ pub(super) fn guard(outputs: &[PathBuf], inputs: &[PathBuf], force: bool) -> Res
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => return Err(e.into()),
         };
-        ensure!(force || !exists, "output exists: {} (use --force)", output.display());
+        ensure!(force || !exists, "output exists: {}", output.display());
         let target = resolved(output)?;
         for input in inputs {
             ensure!(
@@ -47,7 +51,7 @@ pub(super) fn guard(outputs: &[PathBuf], inputs: &[PathBuf], force: bool) -> Res
     }
     Ok(())
 }
-pub(super) fn write(
+pub(in crate::book_tree) fn write(
     outputs: &[PathBuf],
     inputs: &[PathBuf],
     force: bool,
@@ -84,7 +88,7 @@ fn write_with(
         for path in outputs {
             match path.symlink_metadata() {
                 Ok(_) => {
-                    ensure!(force, "output exists: {} (use --force)", path.display());
+                    ensure!(force, "output exists: {}", path.display());
                     let parent = path
                         .parent()
                         .filter(|p| !p.as_os_str().is_empty())
