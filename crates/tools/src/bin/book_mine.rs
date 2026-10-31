@@ -3,6 +3,8 @@
 //! - `frontier`: book と開始局面から、次に掘る末端局面を列挙する
 //! - `expand`: 末端局面を MultiPV 探索し、局面と候補手を book に追加する
 //! - `run`: `frontier` → `expand` → 逆伝播 (`tools::book_backprop`) を周回する
+//! - `master export`: 元データから定跡・プリセット・注釈を書き出す
+//! - `master diff`: 2 つの定跡の局面と手を比較する
 //! - `master audit`: 定跡の元データの読みの値を逆伝播し、main を点検する
 //! - `master rejoin`: 相手の定跡に無い手で定跡に戻ると値が下がる所を一覧にする
 //! - `master cycles`: 相手の合法手で定跡に戻る千日手の循環を塞ぐ手を出す

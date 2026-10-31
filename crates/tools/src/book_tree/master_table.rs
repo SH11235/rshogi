@@ -228,8 +228,8 @@ fn write_validation_report(
 }
 
 #[derive(Default, Debug)]
-struct ValidationReport {
-    errors: Vec<String>,
+pub(super) struct ValidationReport {
+    pub(super) errors: Vec<String>,
     summary: String,
 }
 
@@ -248,7 +248,7 @@ fn without_line_ending(line: &str) -> &str {
     }
 }
 
-fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
+pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationReport> {
     use crate::book_db::{position_from_sfen, strip_ply};
     use rshogi_core::movegen::{MoveList, generate_legal_all};
     use std::fmt::Write as _;
