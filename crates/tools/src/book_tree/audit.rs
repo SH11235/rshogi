@@ -4,18 +4,21 @@
 use super::refutation::{self, RefutationOutputs};
 use super::register::{COLUMNS, ROLES};
 use super::rejoin::WeightArgs;
+use super::reply_graph::apply_usi;
 use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
 use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
     percentile, propagate_values, retain_known, write_book_atomic,
 };
-use crate::book_db::{static_position_from_sfen, strip_ply};
+use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use rayon::prelude::*;
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +69,10 @@ pub(super) struct AuditArgs {
         value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_PRIORITY - 99))
     )]
     priority: u32,
+    /// 読みの値の無い手を指した後の、元データに無い相手の手番の局面を、応手が元データの局面に着く手だけで補って伝播する
+    /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
+    #[arg(long)]
+    fill_replies: bool,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -160,6 +167,8 @@ pub(super) struct AuditSummary {
     pub unknown_main_multi: BySide,
     pub nontrivial_sccs: usize,
     pub max_scc_size: usize,
+    /// 伝播のために補った、元データに無い相手の手番の局面の数。
+    pub reply_positions: usize,
 }
 
 pub(super) fn run(args: AuditArgs) -> Result<()> {
@@ -198,7 +207,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (findings, summary, book) = audit(&positions, draws, args.line)?;
+    let (findings, summary, book) = audit(&positions, draws, args.line, args.fill_replies)?;
     write_atomic(&args.table, &format_table(&findings))?;
     if let Some(out) = &args.out_db {
         write_audited_db(out, &positions.0, &book)?;
@@ -379,19 +388,18 @@ fn write_audited_db(
 }
 
 /// 値の分かる手を求める。読みの値のある合法手と、book 内の子局面に値の分かる手がある手。
-fn known_moves(
-    positions: &BTreeMap<String, MasterPosition>,
-    graph: &Graph,
-) -> Result<Vec<Vec<bool>>> {
+fn known_moves(positions: &[(&str, &MasterPosition)], graph: &Graph) -> Result<Vec<Vec<bool>>> {
     let node_of: Vec<usize> = positions
-        .keys()
-        .map(|key| graph.find(key).with_context(|| format!("内部エラー: 局面がありません: {key}")))
+        .iter()
+        .map(|&(key, _)| {
+            graph.find(key).with_context(|| format!("内部エラー: 局面がありません: {key}"))
+        })
         .collect::<Result<_>>()?;
     let mut known: Vec<Vec<bool>> = Vec::with_capacity(positions.len());
     let mut node_known = vec![false; graph.len()];
     // (子局面, 親の局面の番号, 手の番号)。子局面の値が分かったら親の手も分かる。
     let mut waiting: Vec<(usize, usize, usize)> = Vec::new();
-    for (index, position) in positions.values().enumerate() {
+    for (index, &(_, position)) in positions.iter().enumerate() {
         let node = node_of[index];
         let moves: Vec<_> = graph.moves(node).collect();
         ensure!(moves.len() == position.moves.len(), "内部エラー: 手の数が合いません");
@@ -440,12 +448,176 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
     graph.find(strip_ply(&flipped)).filter(|&v| v != node)
 }
 
-/// 元データの値の分かる手だけを伝播する。(伝播後のグラフ, 局面ごと・手ごとの値の分かる手, 非合法手の数,
-/// 伝播の集計) を返す。key が正規の SFEN でなければ止まる。
+/// [`propagate`] の結果。
+struct Propagated {
+    graph: Graph,
+    /// 元データの局面ごと (key 順)・手ごとの値の分かる手。補った局面は含まない。
+    known: Vec<Vec<bool>>,
+    illegal_moves: usize,
+    stats: PropagationStats,
+    /// 補った相手の手番の局面の数。
+    reply_positions: usize,
+}
+
+/// 元データの手を指した後の局面のうち、元データに無いもの。
+enum Leaf<'a> {
+    /// 補わない局面 (読みの値のある手の行き先と、行き先を反転した局面)。
+    Blocked(&'a str),
+    /// 補う候補 (読みの値の無い手の行き先)。
+    Candidate(&'a str),
+}
+
+/// 局面の手の行き先のうち元データに無いものを `visit` に渡す。
+fn visit_leaves(
+    positions: &BTreeMap<String, MasterPosition>,
+    key: &str,
+    position: &MasterPosition,
+    mut visit: impl FnMut(Leaf<'_>),
+) -> Result<()> {
+    let mut pos = position_from_sfen(&format!("{key} 1"))?;
+    for m in &position.moves {
+        // 非合法手は book_backprop が数えて除外する。
+        let Ok(mv) = apply_usi(&mut pos, &m.mv) else {
+            continue;
+        };
+        let child = pos.to_sfen();
+        let child_key = strip_ply(&child);
+        let flipped = rshogi_book::flipped_key(&child);
+        let flipped = flipped.as_deref().map(strip_ply).filter(|&f| f != child_key);
+        if !positions.contains_key(child_key) && !flipped.is_some_and(|f| positions.contains_key(f))
+        {
+            // book_backprop は直接の子局面が無いと反転した局面に辺を張るので、反転した局面も補わない。
+            if let Some(flipped) = flipped {
+                visit(Leaf::Blocked(flipped));
+            }
+            visit(if m.eval.is_some() {
+                Leaf::Blocked(child_key)
+            } else {
+                Leaf::Candidate(child_key)
+            });
+        }
+        pos.undo_move(mv);
+    }
+    Ok(())
+}
+
+/// 読みの値の無い手を指した後の、元データに無い局面 (反転した局面も無いもの) を、相手の合法手のうち元データの局面に
+/// 着く手だけを持つ局面として補う。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の読みの値が
+/// 相手の手番の局面で途切れる。補った値は定跡に無い応手を見ない分だけ甘いので、読みの値のある手が着く局面は補わない。
+/// 反転した局面が元データにある局面へは応手を張らない (千日手の値が先後で違うと、反転で合流した循環を解けない)。
+fn reply_positions(
+    positions: &BTreeMap<String, MasterPosition>,
+) -> Result<BTreeMap<String, MasterPosition>> {
+    // 一度に持つ行き先を塊の局面の分に抑える。
+    const CHUNK: usize = 1 << 14;
+    let flipped_in_master = |sfen: &str| {
+        rshogi_book::flipped_key(sfen).is_some_and(|flipped| {
+            let flipped = strip_ply(&flipped);
+            flipped != strip_ply(sfen) && positions.contains_key(flipped)
+        })
+    };
+    // 補わない局面は key の hash で持つ。衝突は補わない側に倒れるだけ。
+    let hash = |key: &str| {
+        let mut hasher = std::hash::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    };
+    let entries: Vec<(&String, &MasterPosition)> = positions.iter().collect();
+    let mut blocked: Vec<u64> = Vec::new();
+    for chunk in entries.chunks(CHUNK) {
+        let part: Vec<Vec<u64>> = chunk
+            .par_iter()
+            .map(|&(key, position)| -> Result<Vec<u64>> {
+                let mut out = Vec::new();
+                visit_leaves(positions, key, position, |leaf| {
+                    if let Leaf::Blocked(k) = leaf {
+                        out.push(hash(k));
+                    }
+                })?;
+                Ok(out)
+            })
+            .collect::<Result<_>>()?;
+        blocked.extend(part.into_iter().flatten());
+    }
+    blocked.sort_unstable();
+    blocked.dedup();
+    // 別の局面から同じ局面に来たら、手数の小さい方を残す (並列の順によらず決める)。
+    let mut candidates: BTreeMap<String, u32> = BTreeMap::new();
+    for chunk in entries.chunks(CHUNK) {
+        let part: Vec<Vec<(String, u32)>> = chunk
+            .par_iter()
+            .map(|&(key, position)| -> Result<Vec<(String, u32)>> {
+                let ply = position.ply.parse::<u32>().map_or(1, |n| n.saturating_add(1));
+                let mut out = Vec::new();
+                visit_leaves(positions, key, position, |leaf| {
+                    if let Leaf::Candidate(k) = leaf
+                        && blocked.binary_search(&hash(k)).is_err()
+                    {
+                        out.push((k.to_owned(), ply));
+                    }
+                })?;
+                Ok(out)
+            })
+            .collect::<Result<_>>()?;
+        for (key, ply) in part.into_iter().flatten() {
+            let entry = candidates.entry(key).or_insert(ply);
+            *entry = (*entry).min(ply);
+        }
+    }
+    let replies: Vec<Option<(String, MasterPosition)>> = candidates
+        .into_par_iter()
+        .map(|(key, ply)| -> Result<Option<(String, MasterPosition)>> {
+            let mut pos = position_from_sfen(&format!("{key} 1"))?;
+            let mut legal = MoveList::new();
+            generate_legal_all(&pos, &mut legal);
+            let mut moves = Vec::new();
+            for &reply in legal.iter() {
+                pos.do_move(reply, pos.gives_check(reply));
+                let to = pos.to_sfen();
+                if positions.contains_key(strip_ply(&to)) && !flipped_in_master(&to) {
+                    moves.push(BookMove {
+                        mv: reply.to_usi(),
+                        eval: None,
+                    });
+                }
+                pos.undo_move(reply);
+            }
+            Ok((!moves.is_empty()).then(|| {
+                let position = MasterPosition {
+                    ply: ply.to_string(),
+                    source: String::new(),
+                    moves,
+                };
+                (key, position)
+            }))
+        })
+        .collect::<Result<_>>()?;
+    Ok(replies.into_iter().flatten().collect())
+}
+
+/// 局面の値の分かる手だけを伝播する。(伝播後のグラフ, 局面ごと・手ごとの値の分かる手, 非合法手の数, 伝播の集計)。
+fn propagate_entries(
+    all: &[(&str, &MasterPosition)],
+    draws: DrawValues,
+) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
+    let mut graph =
+        graph_from_entries(all.iter().map(|&(key, p)| {
+            (key, p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
+        }))?;
+    let illegal_moves = graph.illegal_moves;
+    let known = known_moves(all, &graph)?;
+    retain_known(&mut graph, &known)?;
+    let stats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
+    Ok((graph, known, illegal_moves, stats))
+}
+
+/// 元データの値の分かる手だけを伝播する。`fill_replies` なら元データに無い相手の手番の局面を補う
+/// ([`reply_positions`])。key が正規の SFEN でなければ止まる。
 fn propagate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
+    fill_replies: bool,
+) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
     let checks: Vec<Result<()>> = keys
@@ -462,14 +634,30 @@ fn propagate(
         })
         .collect();
     checks.into_iter().collect::<Result<()>>()?;
-    let mut graph = graph_from_entries(positions.iter().map(|(key, p)| {
-        (key.as_str(), p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
-    }))?;
-    let illegal_moves = graph.illegal_moves;
-    let known = known_moves(positions, &graph)?;
-    retain_known(&mut graph, &known)?;
-    let stats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
-    Ok((graph, known, illegal_moves, stats))
+    let replies = if fill_replies {
+        reply_positions(positions)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut all: Vec<(&str, &MasterPosition)> =
+        positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
+    // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
+    all.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws)?;
+    let known = all
+        .iter()
+        .zip(known_all)
+        .filter(|((key, _), _)| positions.contains_key(*key))
+        .map(|(_, known)| known)
+        .collect();
+    let reply_count = replies.len();
+    Ok(Propagated {
+        graph,
+        known,
+        illegal_moves,
+        stats,
+        reply_positions: reply_count,
+    })
 }
 
 /// 元データの局面の伝播後の値 (手番の側から)。値の分からない手は入れない。
@@ -486,7 +674,7 @@ pub(super) fn master_values(
     (positions, _): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
 ) -> Result<BTreeMap<String, MasterValue>> {
-    let (graph, known, _, _) = propagate(positions, draws)?;
+    let Propagated { graph, known, .. } = propagate(positions, draws, false)?;
     let mut values = BTreeMap::new();
     for ((key, _), known) in positions.iter().zip(&known) {
         let Some(node) = graph.find(key) else {
@@ -556,7 +744,7 @@ pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
 ) -> Result<Vec<Vec<Option<i32>>>> {
-    let (graph, known, _, _) = propagate(positions, draws)?;
+    let Propagated { graph, known, .. } = propagate(positions, draws, false)?;
     positions
         .iter()
         .zip(&known)
@@ -585,13 +773,21 @@ pub(super) fn audit(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
+    fill_replies: bool,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
         ..AuditSummary::default()
     };
-    let (graph, known, illegal_moves, stats) = propagate(positions, draws)?;
+    let Propagated {
+        graph,
+        known,
+        illegal_moves,
+        stats,
+        reply_positions,
+    } = propagate(positions, draws, fill_replies)?;
     summary.illegal_moves = illegal_moves;
+    summary.reply_positions = reply_positions;
     summary.nontrivial_sccs = stats.nontrivial_sccs;
     summary.max_scc_size = stats.max_scc_size;
     let mut findings = Vec::new();
@@ -725,6 +921,10 @@ pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValue
         sides(summary.unknown_main_multi)
     ));
     out(format!(
+        "補った相手の手番の局面 (元データに無く、応手が元データの局面に着く): {}",
+        summary.reply_positions
+    ));
+    out(format!(
         "循環 (自明でない強連結成分): {} (最大 {} 局面)",
         summary.nontrivial_sccs, summary.max_scc_size
     ));
@@ -760,7 +960,7 @@ mod tests {
         draws: DrawValues,
     ) -> Result<(Vec<Finding>, AuditSummary)> {
         let parsed = parse_master_rows(text.as_bytes())?;
-        let (findings, summary, _) = audit(&parsed, draws, line)?;
+        let (findings, summary, _) = audit(&parsed, draws, line, false)?;
         Ok((findings, summary))
     }
 
@@ -996,7 +1196,9 @@ mod tests {
             let all_path = dir.path().join("all.db");
             std::fs::write(&all_path, text_db(None)).unwrap();
             let all = read_graph(&all_path, BackpropOptions::default()).unwrap();
-            let known = known_moves(&positions, &all).unwrap();
+            let entries: Vec<(&str, &MasterPosition)> =
+                positions.iter().map(|(key, p)| (key.as_str(), p)).collect();
+            let known = known_moves(&entries, &all).unwrap();
             let known_path = dir.path().join("known.db");
             std::fs::write(&known_path, text_db(Some(&known))).unwrap();
             let mut rebuilt = read_graph(
@@ -1008,7 +1210,7 @@ mod tests {
             )
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
-            let (memory, actual_known, illegal, _) = propagate(&positions, draws).unwrap();
+            let (memory, actual_known, illegal, _) = propagate_entries(&entries, draws).unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
@@ -1042,6 +1244,86 @@ mod tests {
         }
     }
 
+    /// `--fill-replies` で点検し、(要約, ROOT の main の伝播後の値) を返す。
+    fn fill_audit(rows: &[(&str, &str, &str, &str)]) -> (AuditSummary, Option<i32>) {
+        let parsed = parse_master_rows(master(rows).as_bytes()).unwrap();
+        let (_, summary, book) = audit(&parsed, DrawValues::both(0), 1, true).unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let main = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
+            [0]
+        .as_ref()
+        .map(|m| m.value);
+        (summary, main)
+    }
+
+    #[test]
+    fn fill_replies_propagates_through_missing_opponent_position() {
+        // A (後手番) は元データに無い。A の応手 5a5b で着く B の読みの値が ROOT の main に届く。
+        let rows = [(ROOT, "5i4h", "main", ""), (B, "4h3h", "main", "50")];
+        let (summary, main) = fill_audit(&rows);
+        assert_eq!((summary.reply_positions, main), (1, Some(50)));
+        let (_, summary) = run_audit(&master(&rows), 1);
+        assert_eq!((summary.reply_positions, summary.unknown_main), (0, [1, 0]));
+    }
+
+    #[test]
+    fn fill_replies_keeps_read_values() {
+        // 読みの値のある手が A に着くなら、定跡の応手だけで決まる甘い値で置き換えない。
+        let (summary, main) =
+            fill_audit(&[(ROOT, "5i4h", "main", "10"), (B, "4h3h", "main", "50")]);
+        assert_eq!((summary.reply_positions, main), (0, Some(10)));
+        // 別の局面の読みの値のある手が A に着くときも補わない。
+        let c = "4k4/9/9/9/9/9/9/6K2/9 b -";
+        let (summary, main) = fill_audit(&[
+            (ROOT, "5i4h", "main", ""),
+            (c, "3h4h", "main", "10"),
+            (B, "4h3h", "main", "50"),
+        ]);
+        assert_eq!((summary.reply_positions, main), (0, None));
+    }
+
+    #[test]
+    fn fill_replies_keeps_smallest_ply_of_parents() {
+        // ROOT (1 手目) と c (9 手目) の読みの値の無い手が同じ A に着く。A は 1 つだけ補い、手数は小さい方。
+        let c = "4k4/9/9/9/9/9/9/6K2/9 b -";
+        let text = master(&[
+            (ROOT, "5i4h", "main", ""),
+            (c, "3h4h", "main", ""),
+            (B, "4h3h", "main", "50"),
+        ]);
+        let (mut positions, _) = parse_master_rows(text.as_bytes()).unwrap();
+        positions.get_mut(c).unwrap().ply = "9".into();
+        let replies = reply_positions(&positions).unwrap();
+        assert_eq!(replies.keys().collect::<Vec<_>>(), vec![A]);
+        assert_eq!(replies[A].ply, "2");
+    }
+
+    #[test]
+    fn fill_replies_skips_flipped_destinations_of_book_moves() {
+        // d の 5b6b の行き先 (A を反転した局面) は元データに無いので、A を補うと book_backprop がその辺を A に
+        // 張り替え、反転で合流する。そのため A も、A を反転した局面も補わない。
+        let d = "9/4k4/9/9/9/9/9/9/4K4 w -";
+        let (summary, main) = fill_audit(&[
+            (ROOT, "5i4h", "main", ""),
+            (d, "5b6b", "main", ""),
+            (B, "4h3h", "main", "50"),
+        ]);
+        assert_eq!((summary.reply_positions, main), (0, None));
+    }
+
+    #[test]
+    fn fill_replies_does_not_reach_flipped_positions() {
+        // B に値の分かる手が無く、反転した B にあるとき、A の応手を反転した B へ張り替えさせない。
+        let flipped = rshogi_book::flipped_key(&format!("{B} 1")).unwrap();
+        let flipped_b = strip_ply(&flipped);
+        let (summary, main) = fill_audit(&[
+            (ROOT, "5i4h", "main", ""),
+            (B, "4h3h", "main", ""),
+            (flipped_b, "6b6c", "main", "30"),
+        ]);
+        assert_eq!((summary.reply_positions, main), (0, None));
+    }
+
     #[test]
     fn rejects_non_canonical_keys() {
         // 正規の表記は持ち駒を飛・角・金・銀・桂・香・歩の順に並べる。
@@ -1073,6 +1355,7 @@ mod tests {
             refutation_depth: 2,
             refutation_max: None,
             priority: 100,
+            fill_replies: false,
             weight: WeightArgs {
                 opp_freq: None,
                 min_games: 3,
