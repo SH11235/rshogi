@@ -1,6 +1,6 @@
 ---
 name: teacher-data-convert
-description: "教師データ（PSV: PackedSfenValue, 40B 固定長）を数千万〜数十億局面規模で一括変換・再評価するときの運用スキル。psv_to_hcpe3（PSV→dlshogi 学習用 hcpe/hcpe3、任意で eval 焼き込み）と rescore_psv（PSV を内部 NNUE / qsearch / 外部 USI エンジン / ONNX で再評価）を、スレッド設定・進捗確認・出力検証の落とし穴を避けて正しく回す。「PSV を hcpe に変換」「教師データを大量変換」「rescore で再評価」「大規模に局面をスコア付け」「hcpe3 を作る」等で使用。"
+description: "教師データ（PSV: PackedSfenValue, 40B 固定長）を数千万〜数十億局面規模で一括変換・再評価するときの運用スキル。psv_to_hcpe3（PSV→dlshogi 学習用 hcpe/hcpe3、任意で eval 焼き込み）と rescore_psv（PSV を内部 NNUE / qsearch / 外部 USI エンジン / ONNX で再評価）を、スレッド設定・進捗確認・出力検証の落とし穴を避けて正しく回す。「PSV を hcpe に変換」「教師データを大量変換」「rescore で再評価」「大規模に局面をスコア付け」「hcpe3 を作る」「入玉の行だけ別のモデルで付け直した教師を作る」等で使用。"
 user-invocable: true
 ---
 
@@ -144,6 +144,39 @@ reference の無い本番実行は、終了時の stderr と出力サイズで�
   （ONNX は `Note: E 件のレコードでエラー`）の E − `Skipped (in check): S` の S。
   `--out-scores` は `<出力名>.done` があり、sidecar サイズ = 入力レコード数 × 2。
 - E > 0 は入力側の破損を示す。件数を記録し、想定外に多ければ入力を調べてから学習に使う。
+
+---
+
+## 入玉の行だけを別のラベルで付け直した教師 (`psv_entered`)
+
+入玉の行 (どちらかの玉が敵陣三段) は一般のラベラーの値が外れやすいので、そこだけ別のモデル (入玉向けに fine-tune した DL など) で付け直し、
+dual-label PSV にして trainer の gated モード (入玉の行は base score、それ以外は DL score) で読ませる。手順と形式は
+`crates/tools/docs/psv_entered.md`・`crates/tools/docs/psv_dual_label.md`。
+
+```bash
+# 1. 材料ごとに入玉の行を抜き出す
+cargo run -p tools --release --bin psv_entered -- extract --input material.psv --out entered/material.entered.psv
+# 2. 抜き出した行だけを付け直す (score だけを書き換えるモード。move16 や局面を書き換えるモードは 3 で一致しない)
+cargo run -p tools --release --bin rescore_psv -- --input entered/material.entered.psv --output-dir relabeled/ <ラベラーの引数>
+# 3. 元の材料と付け直した行から dual-label PSV を書く (元の score が DL でなければ --dl-scores に DL の sidecar)
+cargo run -p tools --release --bin psv_entered -- merge-dual --base material.psv \
+  --sparse relabeled/material.entered.psv --out dual/material.dual.psv [--dl-scores material.dl.i16]
+# 4. 材料の順に partition して dedup とシャッフルを 1 段で (first-wins なので、重なった局面は前の材料の行が残る)
+cargo run -p tools --release --bin psv_dedup_partition -- --partition-only --input "dual/<材料 A>/*.dual.psv" --temp-dir <tmp>
+#    (材料ごとに --partition-only を順に重ねる)
+cargo run -p tools --release --bin psv_dedup_partition -- --dedup-only --temp-dir <tmp> --output teacher.dual.psv --shuffle-seed <seed>
+```
+
+- **局面を組み立てる判定は CPU で律速する**。入玉の判定に `psv_gate_by_king_zone` のような 1 行ずつ局面を作る道具を挟むと、
+  数百億行では読み書きより遅くなる。`psv_entered` は packed sfen の玉のマスだけを読むので、ディスクの速さで回る。
+- **partition の一時領域は速いディスクに置く**。一時領域は入力と同じ大きさになり、HDD に置くと同じ HDD で読みと書きが重なる。
+  出力と同じファイルシステムなら、`--keep-temp` なしの dedup は partition を 1 つずつ消しながら書くので、空きは入力の 1.05 倍で足りる
+  (別のファイルシステムに出すときは、出力先に入力の 1.05 倍を求める)。`--keep-temp` なしで dedup が途中で止まると partition が欠けるので、
+  partition からやり直す。
+- **合わせる前の部品を残す**: 材料ごとの抜き出し・付け直し・DL の sidecar があれば、配合を変えたり別のラベラーで付け直したりするときに
+  材料の読み直しだけで済む。
+- 起動前に、小さな材料で旧手順 (または前回の出力) とバイト一致を確かめる (`cmp`)。`psv_dual_label validate` で
+  entered bit と玉の位置の一致も見る。
 
 ---
 
