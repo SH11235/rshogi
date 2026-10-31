@@ -257,7 +257,7 @@ impl<M: Copy + Eq> Walker<M> {
         let choice = if or_node {
             self.choose_attack(searcher, st, d, &mut first, &mut second)
         } else {
-            self.choose_defense(searcher, st, d, &mut first, &mut second)
+            self.choose_defense(searcher, st, d, &mut first)
         };
         self.return_buffer(first);
         self.return_buffer(second);
@@ -362,14 +362,14 @@ impl<M: Copy + Eq> Walker<M> {
         }))
     }
 
-    /// `replies` と `candidates` は空の作業領域
+    /// `replies` は空の作業領域。
+    /// 応手は生成順に、選ぶのに要る分だけ調べる (合駒は生成の最後なので、無駄合いの判定の多くを省ける)
     fn choose_defense<S: MateState<Mv = M>, const PIECES: bool>(
         &mut self,
         searcher: &mut Searcher<'_, S, PIECES>,
         st: &mut S,
         d: u16,
         replies: &mut Vec<M>,
-        candidates: &mut Vec<M>,
     ) -> Result<Option<Choice<M>>, Abort> {
         if d == 0 {
             return Ok(Some(Choice {
@@ -378,8 +378,13 @@ impl<M: Copy + Eq> Walker<M> {
             }));
         }
         st.generate(false, replies);
+        let alternatives = self.may_search_alternatives(st, searcher.attacker(), d, false);
+        let mut first = None;
         // 詰み手数がちょうど d − 1 の応手 (無駄合いを除く)
         for &mv in replies.iter() {
+            if first.is_some() && !alternatives {
+                break;
+            }
             if st.is_drop(mv) && searcher.futile_drop(st, mv, d)?.is_some() {
                 continue;
             }
@@ -391,15 +396,7 @@ impl<M: Copy + Eq> Walker<M> {
                     continue;
                 }
             }
-            candidates.push(mv);
-        }
-        let Some(&first) = candidates.first() else {
-            return Ok(None);
-        };
-        for &mv in candidates.iter() {
-            if mv != first && !self.may_search_alternatives(st, searcher.attacker(), d, false) {
-                break;
-            }
+            first.get_or_insert(mv);
             st.do_move(mv);
             let clean = self.choose(searcher, st, d - 1, true);
             st.undo_move(mv);
@@ -414,8 +411,8 @@ impl<M: Copy + Eq> Walker<M> {
                 None => return Ok(None),
             }
         }
-        Ok(Some(Choice {
-            mv: Some(first),
+        Ok(first.map(|mv| Choice {
+            mv: Some(mv),
             clean: false,
         }))
     }
