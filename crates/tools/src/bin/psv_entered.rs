@@ -463,6 +463,26 @@ mod tests {
     }
 
     #[test]
+    fn extract_and_merge_dual_are_deterministic() {
+        let count = 25;
+        let dir = tempdir().unwrap();
+        let base = write(dir.path(), "base.psv", &base_rows(count));
+        let (e1, e2) = (dir.path().join("e1.psv"), dir.path().join("e2.psv"));
+        extract(&base, &e1).unwrap();
+        extract(&base, &e2).unwrap();
+        assert_eq!(fs::read(&e1).unwrap(), fs::read(&e2).unwrap());
+        let sparse = write(dir.path(), "x.psv", &relabel(&fs::read(&e1).unwrap(), count));
+        let outs: Vec<(PathBuf, PathBuf)> = (0..2)
+            .map(|k| (dir.path().join(format!("d{k}.psv")), dir.path().join(format!("m{k}.bits"))))
+            .collect();
+        for (out, mask) in &outs {
+            merge_dual(&base, &sparse, None, out, Some(mask)).unwrap();
+        }
+        assert_eq!(fs::read(&outs[0].0).unwrap(), fs::read(&outs[1].0).unwrap());
+        assert_eq!(fs::read(&outs[0].1).unwrap(), fs::read(&outs[1].1).unwrap());
+    }
+
+    #[test]
     fn merge_dual_uses_dl_sidecar_when_given() {
         let count = 9;
         let dir = tempdir().unwrap();
