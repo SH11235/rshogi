@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master audit`・`master rejoin`・`master cycles`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -438,6 +438,30 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 - `source` が `read` / `deep` / `peta` の main・alt の行で木に値のある手は、`evals` と `nodes` を木の値に更新します。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
+
+
+## `master check`: 書き出した定跡とプリセットの検査
+
+```bash
+book_mine master check book.db book.annot.json book.default.explore.txt --threads 2
+book_mine master check book.db book.annot.json book.random.explore.txt --bad-eval -150
+```
+
+入力は順に YaneuraOu 形式の `.db`、手の注釈 `.annot.json`、プリセット `.explore.txt` です。入力は変更せず、結果を標準出力へ出します。`--bad-eval` は有限の数値 (既定 `-150`)、`--threads` はグラフ構築のスレッド数 (既定 `0` = 全コア) です。
+
+- 注釈の `book.sha256` と DB の SHA-256、局面ごとの手の集合の一致を確認します。DB の重複局面・重複手・空の局面はエラーです。
+- `preset membership errors` は DB に無い局面・手、`preset record selections` は role が `record` の手の選択です。それぞれ該当する局面・手を一覧にします。
+- 先手・後手それぞれを自分として初期局面から辿ります。自分はプリセットの手 (指定の無い局面は `main`) と DB の手の共通部分を使い、相手は合法手のうち DB 内の局面へ戻る手を使います。自分の非合法手は辺にせず、側ごとに `illegal own moves b/w` で除外数を出します。先後反転も行いません。プリセット行は `sfen <盤面> <手番> <持ち駒> <手>...` で、同じ局面の行は手の集合を併合します。
+- `bad-eval reachable positions` は、自分の手番で DB にある到達局面のうち、値が閾値以下の局面数です。値は `read.main`、main の `evals` の平均 (閾値判定は丸めなし、表示は有効 6 桁)、`read.top` の優先順で取り、いずれも無ければ `positions without a value` に数えます。循環の内部も検査し、悪い局面ごとに直前の自分の手と根からの手順例を出します。
+- 手順数は合流前の異なる手順を別々に数えます。辺が無い局面への到達を `exit ply=N`、循環する強連結成分への最初の到達を `cycle-entry ply=N` として集計します。`N` は到達局面までの初期局面からの手数です。相手が定跡外へ出る手は数えません。
+- 循環は 2 局面以上の強連結成分または自己ループです。成分ごとに局面数、内部の辺数、16 手以内の最短循環の手数、`within-16` (16 手以内か)、入口局面と根からの手順例を出します。入口例は別の循環成分を経由する場合もあります。`within-16` は遡る手数の目安で、実際の千日手成立や連続王手の判定ではありません。
+- 循環のある側の `total` は出口と循環入口の手順数の合計です。循環内の手順や最初の同一局面再訪までの手順数ではありません。循環の無い側では全出口までの総数・手数分布を正確に数え、`repetitions=0` を出します。カウントは `u128` で、上限を超える加算はエラーにします。
+
+終了コードは membership error または bad-eval の局面があれば **1**、無ければ **0** です。record の選択・値の無い局面・循環だけでは失敗にしません。入力不正や読み込み失敗も **1** です。
+
+メモリは入力の局面・手とグラフの頂点・辺に比例します。先後は順番に処理し、手順数は手数ごとの二面の配列で伝播するため、手順ごとの訪問済み集合は保持しません。SCC 分解は `O(V + E)`、分布は最大手数を `L` として最悪 `O((V + E) L)` (実際にはその手数で届く頂点・辺だけ) です。最短循環は成分内の辺だけを使い、各頂点から深さ 16 まで幅優先探索します。16 手以内に循環が無ければ `shortest-cycle=>16 within-16=false` とし、それ以上の長さは求めません。探索予算は成分ごとに頂点の取り出しと辺の検査の合計 10,000,000 回です (成分外への辺の検査も含む)。予算内に最短性を確定できなくても、16 手以内の循環が見つかっていれば、そのうち最も短い手数を `N` として `shortest-cycle=<=N within-16=true` とします。循環が 1 つも見つかっていない場合だけ `shortest-cycle=unknown within-16=unknown` とします。探索用の距離は頂点ごとに 1 バイトで、作業メモリは `O(V)` です。
+
+出力は各見出しの後に明細を置き、所属エラー、record 選択、bad-eval (先手・後手の順)、値の無い局面数、`paths b`、`paths w` の順です。循環成分の一覧と非合法手の数は各側の paths 節に含めます。bad-eval と paths の明細は一時ファイルに蓄えてから出力し、両側のグラフを同時に保持しません。
 
 
 ## `master audit`: 定跡の元データの点検
