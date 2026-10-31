@@ -871,6 +871,9 @@ mod tests {
         table.store::<true>(k, value(4, 6), 10);
         assert_eq!(table.probe::<true>(k), Some(proven(9, Hand::EMPTY)));
         assert_eq!(table.probe_unsettled(k), Some(value(4, 6)));
+        let exact_final = key(8, Hand::EMPTY);
+        table.store::<false>(exact_final, proven(9, Hand::EMPTY), 1);
+        assert_eq!(table.probe_unsettled(exact_final), None);
     }
 
     #[test]

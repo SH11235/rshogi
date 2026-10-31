@@ -975,11 +975,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 child.first_visit = false;
             } else {
                 let probed = self.table.probe::<PIECES>(child_table_key);
-                if let Some(v) = probed {
+                if probed.is_some() {
                     child.first_visit = false;
-                    if v.pn != 0 && v.dn != 0 && v.min_depth < child_depth {
-                        has_old_child = true;
-                    }
                 }
                 // 置換表の詰みは無駄合いを数える証明だけで、その手数は無駄合いを数えない手数の上限にもなる
                 // (持駒違いの局面に流用しても、全応手を数える手数は攻め方の持駒が多いほど短い)
@@ -988,6 +985,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 // (確定値の表を先に引くので、完全一致の表に書いた未確定値はそのままでは読まれない)
                 if PIECES && usable.is_none() && probed.is_some() {
                     usable = self.table.probe_unsettled(child_table_key);
+                }
+                if usable.is_some_and(|v| v.pn != 0 && v.dn != 0 && v.min_depth < child_depth) {
+                    has_old_child = true;
                 }
                 if self.futility
                     && usable.is_none_or(|v| v.pn != 0)
