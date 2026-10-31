@@ -386,7 +386,29 @@ fn cut_args(dir: &Path, out: &str, master: Option<PathBuf>) -> CutArgs {
 }
 
 #[test]
-fn cut_and_value_run_end_to_end_and_register_peta_rows() {
+fn read_cut_rejects_malformed_book_sha256() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write_book(&d.join("big.db"));
+    std::fs::write(
+        d.join("roots.jsonl"),
+        format!("{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\",\"depth\":6}}\n"),
+    )
+    .unwrap();
+    super::cut::run(cut_args(d, "cut", None)).unwrap();
+    assert!(read_cut(&d.join("cut")).is_ok());
+    let meta = d.join("cut").join(META);
+    let text = std::fs::read_to_string(&meta).unwrap();
+    let sha = serde_json::from_str::<serde_json::Value>(&text).unwrap()["book"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::write(&meta, text.replace(&sha, "abc")).unwrap();
+    assert!(read_cut(&d.join("cut")).is_err());
+}
+
+#[test]
+fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     write_book(&d.join("big.db"));
@@ -466,6 +488,10 @@ fn cut_and_value_run_end_to_end_and_register_peta_rows() {
     let find =
         |k: &str, m: &str| rows.iter().find(|r| r.0[0] == k && r.0[2] == m).map(|r| r.0.clone());
     let main = find(ROOT, "5i4i").unwrap();
+    let lineage = format!(
+        "book:big.db@{}",
+        &crate::book_tree::journal::digest(&d.join("big.db")).unwrap()[..8]
+    );
     assert_eq!(
         (
             main[3].as_str(),
@@ -474,7 +500,7 @@ fn cut_and_value_run_end_to_end_and_register_peta_rows() {
             main[7].as_str(),
             main[8].as_str()
         ),
-        ("main", "peta", "20", "peta:big.db", "wide")
+        ("main", "ext", "20", lineage.as_str(), "wide")
     );
     assert_eq!(find(ROOT, "5i5h").unwrap()[3], "alt");
     // 読み由来でない main は替えず、伝播後の 1 位を alt に足す。

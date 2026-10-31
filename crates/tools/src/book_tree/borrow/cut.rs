@@ -58,7 +58,7 @@ pub(super) struct CutArgs {
     #[arg(long)]
     extra: Option<PathBuf>,
     /// キューの行の id `<根の id>_<tag>_<b|w>` に入れる名前。読む局面の組を変えたら変える
-    #[arg(long, default_value = "peta")]
+    #[arg(long, default_value = "ext")]
     tag: String,
     /// キューの行の priority
     #[arg(long, default_value_t = DEFAULT_PRIORITY)]
@@ -86,7 +86,7 @@ impl CutArgs {
             master,
             master_exit: MasterExit::Use,
             extra: None,
-            tag: "peta".into(),
+            tag: "ext".into(),
             priority: DEFAULT_PRIORITY,
         }
     }

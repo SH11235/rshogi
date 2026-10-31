@@ -54,7 +54,7 @@ enum Command {
     Expand(ExpandArgs),
     /// frontier → expand → 逆伝播 を周回する
     Run(RunArgs),
-    /// 独立した木を共有キューで読み、Python 互換の登録材料を作る
+    /// 独立した木を共有キューで読み、定跡の元データへの登録材料を作る
     Tree(tools::book_tree::TreeArgs),
     /// 定跡の元データの表を点検する
     Master(tools::book_tree::MasterArgs),
