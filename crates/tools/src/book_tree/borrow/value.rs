@@ -450,11 +450,11 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .iter()
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
-    // 読みが不要な木に、無関係な台帳の条件を割り当てない。
     let schema = crate::book_tree::schema::Schema::load(args.schema.as_deref())?;
     let mut cond = "unknown".to_owned();
     let mut nodes_limit = 0;
     let mut readings = ReadingsOf::new();
+    // 読みが不要な木に、無関係な台帳の条件を割り当てない。
     if !wanted.is_empty() {
         let source =
             read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;

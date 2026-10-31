@@ -417,7 +417,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
 
-`registration_status.json` は`ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
+`registration_status.json` は `ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
 
 `node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手は 1 回の読みの値)・`expanded` (伸ばした手なら 1)・`rank` です。勝ち宣言の読みの局面は載せません。
 
@@ -434,7 +434,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 `cond` は `registration_status.json` の `fingerprint` から決めます。指紋の無い木には `--journal` を指定できます。候補の台帳は `--journal` を繰り返して全て渡してください。serve が動いている台帳も渡せます (lock を取らずに読み、末尾の書きかけの行は無視します)。読み始めた後の追記は照合対象に含めません。`d<段>.jsonl` の全ての読みを key・nodes_limit・実際の nodes・bestmove・MultiPV の手と cp と depth (順位を含む) で照合し、threads・hash・draw も候補の settings と一致する場合だけ候補に残します。各読みが一意の同じ指紋に一致した場合だけ採用します。見つからない読み、複数の指紋に一致する読み、条件が混ざる木、読みの無い木は `unknown` です。
 
-1 スレッドでノード数で止める読みはほぼ決定的なので、同じソースを別の機械で build した条件の台帳を 1 本だけ渡すと、その台帳の条件に決まることがあります。読みの一致だけでは実行した機械やバイナリを特定できません。候補の台帳は全部渡してください。台帳は共有ロックを取って読み取り専用で読み、不完全な末尾行は無視します。各台帳を 1 回だけ読み、全ての木を突き合わせます。
+1 スレッドでノード数で止める読みはほぼ決定的なので、同じソースを別の機械で build した条件の台帳を 1 本だけ渡すと、その台帳の条件に決まることがあります。読みの一致だけでは実行した機械やバイナリを特定できません。候補の台帳は全部渡してください。各台帳を 1 回だけ読み、全ての木を突き合わせます。
 
 `--schema` があれば指紋に対応する conditions.tsv の name を使い、対応がなければ表への追加を促して失敗します。schema がなければ指紋の先頭 8 文字です。1 回の実行中に先頭 8 文字が同じ別の指紋を条件名に使おうとするとエラーになります。`--schema` の conditions.tsv で別の名前を付けてください。`cond=unknown` の木の数を stdout に出します。
 

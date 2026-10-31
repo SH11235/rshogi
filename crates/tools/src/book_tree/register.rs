@@ -418,7 +418,9 @@ pub(super) fn register(
             }
             if let Some(m) = node.moves.iter().find(|m| m.mv == row.get("move")) {
                 let value = m.value.to_string();
-                let same_value = row.get("evals") == value && row.get("nodes") == nodes_text;
+                // `+5` と `5` のように表記だけが違う値で、分かっている条件を失わない。
+                let same_value = row.get("evals").parse::<i64>().ok() == Some(i64::from(m.value))
+                    && row.get("nodes") == nodes_text;
                 let keep_known = |old: &str, new: &str| {
                     if same_value && new == "unknown" && !old.is_empty() {
                         old.to_owned()
@@ -832,6 +834,15 @@ mod tests {
             assert_eq!(rows[0].get("value_kind"), "unknown");
             assert_eq!(summary.evals_updated, 1);
         }
+        let n = nodes.get_mut(B).unwrap();
+        n.moves[0].value = 10;
+        n.nodes = 1_000_000_000;
+        let mut plus = original.clone();
+        plus[0].set("evals", "+10".into());
+        let (rows, _, _) = register(plus, &nodes, &options()).unwrap();
+        assert_eq!(rows[0].get("evals"), "10");
+        assert_eq!(rows[0].get("cond"), "known");
+        assert_eq!(rows[0].get("value_kind"), "tree:2");
     }
 
     #[test]
