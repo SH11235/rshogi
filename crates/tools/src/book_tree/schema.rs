@@ -2,8 +2,9 @@
 use super::master_table::{self, Row};
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 const CONDITIONS: &str = "name\tfingerprint\tstop\tnodes_counting\tthreads\thash_mb\tmultipv\tdraw_black\tdraw_white\tengine_sha256\teval\tmachine\tnote";
@@ -23,6 +24,7 @@ pub(super) struct Schema {
     lineage_kinds: Vec<String>,
     replaceable: BTreeSet<String>,
     explicit: bool,
+    prefixes: Mutex<BTreeMap<String, String>>,
 }
 
 fn table(path: &Path, header: &str) -> Result<Vec<Vec<String>>> {
@@ -110,7 +112,17 @@ impl Schema {
         ensure!(valid_fingerprint(fingerprint), "fingerprint は 64 桁の 16 進にしてください");
         let fingerprint = fingerprint.to_ascii_lowercase();
         if !self.explicit {
-            return Ok(fingerprint[..8].into());
+            let prefix = fingerprint[..8].to_owned();
+            let mut prefixes = self
+                .prefixes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("条件名の照合に失敗しました"))?;
+            let previous = prefixes.entry(prefix.clone()).or_insert_with(|| fingerprint.clone());
+            ensure!(
+                previous == &fingerprint,
+                "指紋の先頭 8 文字 {prefix} が衝突しています。--schema の conditions.tsv で別の名前を付けてください"
+            );
+            return Ok(prefix);
         }
         self.conditions
             .iter()
@@ -148,7 +160,7 @@ impl Schema {
         self.vocabulary(row)
     }
 
-    pub(super) fn vocabulary_errors(&self, text: impl AsRef<[u8]>) -> Result<Vec<String>> {
+    pub(super) fn vocabulary_errors(&self, text: impl AsRef<[u8]>) -> Result<Vec<(usize, String)>> {
         let mut errors = Vec::new();
         if self.explicit {
             for (i, line) in text.as_ref().split(|b| *b == b'\n').enumerate().skip(1) {
@@ -156,7 +168,7 @@ impl Schema {
                     && let Ok(row) = Row::parse_line(line.trim_end_matches('\r'), i + 1)
                     && let Err(error) = self.vocabulary(&row)
                 {
-                    errors.push(format!("元データの {} 行目: {error}", i + 1));
+                    errors.push((i + 1, format!("元データの {} 行目: {error}", i + 1)));
                 }
             }
         }
@@ -166,7 +178,8 @@ impl Schema {
     pub(super) fn validate(&self, text: impl AsRef<[u8]>) -> Result<Vec<String>> {
         let mut errors = master_table::validate_table(text.as_ref())?.errors;
         errors.extend(self.vocabulary_errors(text)?);
-        Ok(errors)
+        errors.sort_by_key(|(at, _)| *at);
+        Ok(errors.into_iter().map(|(_, message)| message).collect())
     }
 }
 
@@ -203,6 +216,33 @@ mod tests {
         )
         .unwrap();
     }
+    #[test]
+    fn abbreviated_fingerprints_must_be_unambiguous() {
+        let schema = Schema::default();
+        let first = "a".repeat(64);
+        let second = format!("aaaaaaaa{}", "b".repeat(56));
+        assert_eq!(schema.condition(&first).unwrap(), "aaaaaaaa");
+        assert_eq!(schema.condition(&first.to_uppercase()).unwrap(), "aaaaaaaa");
+        let error = schema.condition(&second).unwrap_err().to_string();
+        assert!(error.contains("--schema") && error.contains("conditions.tsv"));
+        let dir = tempfile::tempdir().unwrap();
+        files(dir.path());
+        let path = dir.path().join("conditions.tsv");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(
+            &["second".to_owned(), second.clone()]
+                .into_iter()
+                .chain(std::iter::repeat_n(String::new(), 11))
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+        text.push('\n');
+        std::fs::write(path, text).unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        assert_eq!(schema.condition(&first).unwrap(), "named");
+        assert_eq!(schema.condition(&second).unwrap(), "second");
+    }
+
     #[test]
     fn missing_invalid_and_duplicate_tables_never_fall_back() {
         let d = tempfile::tempdir().unwrap();

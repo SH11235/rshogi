@@ -279,6 +279,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     .render();
     let bad = check::export_bad_progressions(
         check::Annotation {
+            version: 2,
             book: check::AnnotationBook {
                 sha256: digest.clone(),
             },

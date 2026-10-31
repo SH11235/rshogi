@@ -20,9 +20,9 @@ pub(super) struct RegisterArgs {
     /// 語彙と読み条件の表を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
-    /// 指紋の無い木の読みを照合する台帳 (読み取り専用)
+    /// 指紋の無い木の読みを照合する台帳 (読み取り専用)。候補を全て繰り返し指定
     #[arg(long)]
-    journal: Option<PathBuf>,
+    journal: Vec<PathBuf>,
     /// 足す行の since 列
     #[arg(long)]
     since: String,
@@ -48,6 +48,7 @@ pub(super) struct NodeMove {
     pub mv: String,
     pub value: i32,
     pub value_kind: String,
+    pub cond: String,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +59,6 @@ pub(super) struct Node {
     /// 伝播後の値の順。
     pub moves: Vec<NodeMove>,
     pub tree: usize,
-    pub cond: String,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -98,6 +98,8 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let mut unknown = 0;
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
+    let mut fingerprints = Vec::new();
+    let mut readings = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
         // 打ち間違えた出力先に lock のために dir を作らない。
         ensure!(dir.is_dir(), "{}: 木の出力先がありません", dir.display());
@@ -115,13 +117,28 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let text = std::fs::read_to_string(&path).with_context(|| {
             format!("{} を読めません (古い木は tree replay で作り直してください)", path.display())
         })?;
-        let cond = tree_condition(dir, args.journal.as_deref(), &schema)?;
+        let fingerprint = tree_fingerprint(dir)?;
+        readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
+            tree_readings(dir)?
+        } else {
+            Vec::new()
+        });
+        fingerprints.push(fingerprint);
+        disagreements += merge(&mut nodes, parse_node_moves(&text, tree)?);
+    }
+    let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
+    let mut conditions = Vec::new();
+    for (fingerprint, matched) in fingerprints.into_iter().zip(matched) {
+        let cond = fingerprint
+            .or(matched)
+            .map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))?;
         unknown += usize::from(cond == "unknown");
-        let mut parsed = parse_node_moves(&text, tree)?;
-        for node in parsed.values_mut() {
-            node.cond = cond.clone();
+        conditions.push(cond);
+    }
+    for node in nodes.values_mut() {
+        for mv in &mut node.moves {
+            mv.cond = conditions[node.tree].clone();
         }
-        disagreements += merge(&mut nodes, parsed);
     }
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
@@ -203,12 +220,12 @@ pub(super) fn parse_node_moves(text: &str, tree: usize) -> Result<BTreeMap<Strin
             nodes: 0,
             moves: Vec::new(),
             tree,
-            cond: "unknown".into(),
         });
         node.remaining = cells[3].parse()?;
         node.nodes = cells[4].parse()?;
         ensure!(matches!(cells[7], "0" | "1"), "{NODE_MOVES}: expanded は 0 / 1 にしてください");
         node.moves.push(NodeMove {
+            cond: "unknown".into(),
             mv: cells[5].to_owned(),
             value: cells[6].parse()?,
             value_kind: if cells[7] == "1" && node.remaining >= 1 {
@@ -318,7 +335,7 @@ pub(super) fn register(
                 ("source", options.source.into()),
                 ("evals", mv.value.to_string()),
                 ("nodes", nodes_text.clone()),
-                ("cond", node.cond.clone()),
+                ("cond", mv.cond.clone()),
                 ("value_kind", mv.value_kind.clone()),
                 ("lineage", options.lineage.into()),
                 ("tier", "wide".into()),
@@ -401,15 +418,24 @@ pub(super) fn register(
             }
             if let Some(m) = node.moves.iter().find(|m| m.mv == row.get("move")) {
                 let value = m.value.to_string();
-                let kind = m.value_kind.clone();
+                let same_value = row.get("evals") == value && row.get("nodes") == nodes_text;
+                let keep_known = |old: &str, new: &str| {
+                    if same_value && new == "unknown" && !old.is_empty() {
+                        old.to_owned()
+                    } else {
+                        new.to_owned()
+                    }
+                };
+                let cond = keep_known(row.get("cond"), &m.cond);
+                let kind = keep_known(row.get("value_kind"), &m.value_kind);
                 if row.get("evals") != value
                     || row.get("nodes") != nodes_text
-                    || row.get("cond") != node.cond
+                    || row.get("cond") != cond
                     || row.get("value_kind") != kind
                 {
                     rows[i].set("evals", value);
                     rows[i].set("nodes", nodes_text.clone());
-                    rows[i].set("cond", node.cond.clone());
+                    rows[i].set("cond", cond);
                     rows[i].set("value_kind", kind);
                     summary.evals_updated += 1;
                 }
@@ -427,9 +453,9 @@ pub(super) fn register(
     Ok((rows, conflicts, summary))
 }
 
-fn tree_condition(dir: &Path, journal: Option<&Path>, schema: &Schema) -> Result<String> {
+fn tree_fingerprint(dir: &Path) -> Result<Option<String>> {
     let path = dir.join("registration_status.json");
-    let fingerprint = match std::fs::read(&path) {
+    match std::fs::read(&path) {
         Ok(bytes) => {
             let status: serde_json::Value = serde_json::from_slice(&bytes)?;
             status
@@ -437,37 +463,48 @@ fn tree_condition(dir: &Path, journal: Option<&Path>, schema: &Schema) -> Result
                 .map(|fp| {
                     fp.as_str().context("fingerprint は文字列にしてください").map(str::to_owned)
                 })
-                .transpose()?
+                .transpose()
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    let fingerprint = match (fingerprint, journal) {
-        (Some(fp), _) => Some(fp),
-        (None, Some(journal)) => {
-            use std::io::BufRead;
-            let mut paths = Vec::new();
-            for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name
-                    .strip_prefix('d')
-                    .and_then(|s| s.strip_suffix(".jsonl"))
-                    .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-                {
-                    paths.push(entry.path());
-                }
-            }
-            paths.sort();
-            let mut readings = Vec::new();
-            for path in paths {
-                for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
-                    readings.push(serde_json::from_str(&line?)?);
-                }
-            }
-            super::journal::match_fingerprint(journal, &readings)?
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
+    use std::io::BufRead;
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name
+            .strip_prefix('d')
+            .and_then(|s| s.strip_suffix(".jsonl"))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            paths.push(entry.path());
         }
-        (None, None) => None,
+    }
+    paths.sort();
+    let mut readings = Vec::new();
+    for path in paths {
+        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+            readings.push(serde_json::from_str(&line?)?);
+        }
+    }
+    Ok(readings)
+}
+
+#[cfg(test)]
+fn tree_condition(dir: &Path, journal: Option<&Path>, schema: &Schema) -> Result<String> {
+    let fingerprint = match tree_fingerprint(dir)? {
+        Some(fp) => Some(fp),
+        None => match journal {
+            Some(path) => {
+                super::journal::match_fingerprints(&[path.to_owned()], &[tree_readings(dir)?])?
+                    .remove(0)
+            }
+            None => None,
+        },
     };
     fingerprint.map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))
 }
@@ -518,6 +555,7 @@ mod tests {
             moves: moves
                 .iter()
                 .map(|(m, v)| NodeMove {
+                    cond: "unknown".into(),
                     mv: (*m).into(),
                     value: *v,
                     value_kind: if remaining >= 1 {
@@ -528,7 +566,6 @@ mod tests {
                 })
                 .collect(),
             tree,
-            cond: "unknown".into(),
         }
     }
     fn options() -> Options<'static> {
@@ -649,7 +686,7 @@ mod tests {
         let args = |trees: Vec<PathBuf>, apply| RegisterArgs {
             master: master_path.clone(),
             schema: None,
-            journal: None,
+            journal: Vec::new(),
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
@@ -746,7 +783,9 @@ mod tests {
         let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
         assert!(rows.iter().all(|r| r.get("lineage").is_empty()));
         for node in nodes.values_mut() {
-            node.cond = "abcd1234".into();
+            for mv in &mut node.moves {
+                mv.cond = "abcd1234".into();
+            }
         }
         let (rows, _, summary) = register(rows, &nodes, &options()).unwrap();
         assert_eq!(summary.evals_updated, 3);
@@ -756,6 +795,43 @@ mod tests {
         assert_eq!(find(&rows, B, "a").unwrap().get("value_kind"), "tree:3");
         let (_, _, summary) = register(rows, &nodes, &options()).unwrap();
         assert_eq!(summary.evals_updated, 0);
+    }
+
+    #[test]
+    fn unchanged_values_preserve_known_metadata_but_changed_values_replace_it() {
+        let mut nodes = BTreeMap::from([(B.into(), node(&[("a", 10)], 2, 0))]);
+        nodes.get_mut(B).unwrap().moves[0].cond = "known".into();
+        let (original, _, _) = register(vec![], &nodes, &options()).unwrap();
+        for (cond, kind, expected_cond, expected_kind, updates) in [
+            ("unknown", "tree:2", "known", "tree:2", 0),
+            ("known", "unknown", "known", "tree:2", 0),
+            ("unknown", "unknown", "known", "tree:2", 0),
+            ("other", "unknown", "other", "tree:2", 1),
+            ("unknown", "single", "known", "single", 1),
+        ] {
+            let mv = &mut nodes.get_mut(B).unwrap().moves[0];
+            mv.cond = cond.into();
+            mv.value_kind = kind.into();
+            let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+            assert_eq!(rows[0].get("cond"), expected_cond);
+            assert_eq!(rows[0].get("value_kind"), expected_kind);
+            assert_eq!(summary.evals_updated, updates);
+        }
+        for change_nodes in [false, true] {
+            let n = nodes.get_mut(B).unwrap();
+            n.moves[0].cond = "unknown".into();
+            n.moves[0].value_kind = "unknown".into();
+            n.moves[0].value = if change_nodes { 10 } else { 11 };
+            n.nodes = if change_nodes {
+                2_000_000_000
+            } else {
+                1_000_000_000
+            };
+            let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+            assert_eq!(rows[0].get("cond"), "unknown");
+            assert_eq!(rows[0].get("value_kind"), "unknown");
+            assert_eq!(summary.evals_updated, 1);
+        }
     }
 
     #[test]

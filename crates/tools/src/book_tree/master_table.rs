@@ -304,13 +304,7 @@ pub(super) fn run_validate(args: ValidateArgs) -> Result<()> {
     let mut report = validate_table(BufReader::new(file))?;
     if args.schema.is_some() {
         report.errors.extend(schema.vocabulary_errors(std::fs::read(&args.master)?)?);
-        report.errors.sort_by_key(|error| {
-            error
-                .split_whitespace()
-                .nth(1)
-                .and_then(|at| at.parse::<usize>().ok())
-                .unwrap_or(0)
-        });
+        report.errors.sort_by_key(|(at, _)| *at);
     }
     write_validation_report(&report, std::io::stdout().lock())
 }
@@ -319,7 +313,7 @@ fn write_validation_report(
     report: &ValidationReport,
     mut stdout: impl std::io::Write,
 ) -> Result<()> {
-    for error in &report.errors {
+    for (_, error) in &report.errors {
         eprintln!("{error}");
     }
     ensure!(
@@ -333,7 +327,7 @@ fn write_validation_report(
 
 #[derive(Default, Debug)]
 pub(super) struct ValidationReport {
-    pub(super) errors: Vec<String>,
+    pub(super) errors: Vec<(usize, String)>,
     summary: String,
 }
 
@@ -506,7 +500,7 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
         }
     }
     errors.sort_by_key(|(at, _)| *at);
-    report.errors = errors.into_iter().map(|(_, message)| message).collect();
+    report.errors = errors;
     if report.errors.is_empty() {
         writeln!(report.summary, "positions={}, moves={count}", groups.len())?;
         for (tier, (positions, moves)) in tiers {
@@ -540,7 +534,12 @@ mod tests {
     }
 
     fn errors(rows: &[Row]) -> Vec<String> {
-        validate_table(format_master(rows).as_bytes()).unwrap().errors
+        validate_table(format_master(rows).as_bytes())
+            .unwrap()
+            .errors
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect()
     }
 
     #[test]
@@ -585,7 +584,7 @@ mod tests {
             r.set("evals", evals.into());
             let text = format_master(&[r]);
             let report = validate_table(text.as_bytes()).unwrap();
-            assert!(report.errors.iter().any(|e| e.contains("evals")), "{evals}: {report:?}");
+            assert!(report.errors.iter().any(|(_, e)| e.contains("evals")), "{evals}: {report:?}");
             std::fs::write(&path, text).unwrap();
             assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
         }
@@ -604,8 +603,8 @@ mod tests {
         ] {
             let report = validate_table(bytes.as_slice()).unwrap();
             assert_eq!(report.errors.len(), 2, "{report:?}");
-            assert_eq!(report.errors[0], format!("元データの {at} 行目: UTF-8 ではありません"));
-            assert!(report.errors[1].contains("列の数"));
+            assert_eq!(report.errors[0].1, format!("元データの {at} 行目: UTF-8 ではありません"));
+            assert!(report.errors[1].1.contains("列の数"));
             assert!(
                 read_rows(bytes.as_slice())
                     .and_then(|rows| rows.collect::<Result<Vec<_>>>())
@@ -614,7 +613,12 @@ mod tests {
         }
         let bytes = [header.as_bytes(), b"\n\xff"].concat();
         assert_eq!(
-            validate_table(bytes.as_slice()).unwrap().errors,
+            validate_table(bytes.as_slice())
+                .unwrap()
+                .errors
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>(),
             ["元データの 2 行目: UTF-8 ではありません"]
         );
     }
@@ -647,7 +651,7 @@ mod tests {
     fn malformed_rows_do_not_count_as_an_empty_table() {
         let text = format!("{}\nx\n", COLUMNS.join("\t"));
         let report = validate_table(text.as_bytes()).unwrap();
-        assert_eq!(report.errors, ["元データの 2 行目の列の数が違います"]);
+        assert_eq!(report.errors, [(2, "元データの 2 行目の列の数が違います".into())]);
         assert!(report.summary.is_empty());
     }
 
@@ -655,7 +659,7 @@ mod tests {
     fn validation_errors_do_not_write_a_summary_to_stdout() {
         let mut stdout = Vec::new();
         let report = ValidationReport {
-            errors: vec!["元データの 2 行目: evals が不正です".into()],
+            errors: vec![(2, "元データの 2 行目: evals が不正です".into())],
             summary: "positions=1, moves=1\n".into(),
         };
         assert!(write_validation_report(&report, &mut stdout).is_err());
@@ -694,7 +698,7 @@ mod tests {
                 .unwrap()
                 .errors
                 .iter()
-                .any(|e| e.contains("見出し"))
+                .any(|(_, e)| e.contains("見出し"))
         );
     }
 
@@ -776,7 +780,7 @@ mod tests {
         );
         let report = validate_table(text.as_bytes()).unwrap();
         assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].contains("1 行目"));
+        assert!(report.errors[0].1.contains("1 行目"));
     }
 
     #[test]
@@ -906,7 +910,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\t");
         assert!(parse_master(&old).unwrap_err().to_string().contains("移行"));
-        assert!(validate_table(old.as_bytes()).unwrap().errors[0].contains("移行"));
+        assert!(validate_table(old.as_bytes()).unwrap().errors[0].1.contains("移行"));
         let mut first = row("7g7f", "main", "wide");
         first.set("ply", "".into());
         let text = format_master(std::slice::from_ref(&first));
