@@ -16,6 +16,15 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### ツール
 
+- `rescore_psv` の ONNX モードで、複数の入力ファイルを 1 回の実行に渡したとき、セッション (TensorRT ではモデルの解析と
+  エンジンの読み込み) と入力バッファを最初に処理するファイルで作り、残りのファイルで使い回す。小さいファイルを多数処理する
+  ときの時間が縮む。CPU 推論では、旧版とも 1 ファイルずつ渡す場合とも出力が変わらないことを確認した (GPU では未確認)。
+  実行中にモデルファイルが置き換わるとエラーで止める (処理中だったファイルは完了にせず、次の実行で作り直す。TensorRT の
+  エンジンキャッシュはモデルの重みを見ないので、再実行の前にキャッシュも消す)。`--ort-profile` は実行全体で JSON を 1 つ書く。
+- `rescore_psv` の TensorRT 推論で、最後の端数バッチもゼロの特徴量で埋めて `--onnx-batch-size` 行で推論する。
+  それまでに無い小さい形のバッチでエンジンを作り直さない (作り直しは 1 回数十秒かかり、作り直したエンジンでは最下位
+  bit が変わりうる)。端数バッチの出力は、端数をそのままの形で推論していた版と最下位 bit が変わりうる。
+
 - tools の native 評価経路で `progresskpabsq16` (YaneuraOu / BulletOu SFNN の整数進行度) を選べるようにする。
   これまで明示エラーにしていた `rescore_psv` / `preprocess_psv` / `gensfen` / `rescore_hcpe` / `yardstick_label` /
   `label_bench_positions` / `bench_nnue_eval` / `verify_nnue_accumulator` / `nyugyoku_metrics` などが、USI の
