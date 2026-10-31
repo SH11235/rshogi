@@ -76,6 +76,10 @@ enum Command {
 struct Stats {
     records: u64,
     entered: u64,
+    /// merge-dual が上書きした元の move16 (offset 34-35) が 0 でなかった行数
+    overwritten_nonzero_move16: u64,
+    /// merge-dual が上書きした元の padding (offset 39) が 0 でなかった行数
+    overwritten_nonzero_padding: u64,
 }
 
 fn file_size(path: &Path) -> Result<u64> {
@@ -107,6 +111,7 @@ fn read_bytes<R: Read>(reader: &mut R, buffer: &mut Vec<u8>, bytes: usize) -> Re
 }
 
 /// 出力ごとの staging を作って書き、全部書けたら rename で公開する。失敗したら staging を消す。
+/// 主出力 (`outputs[0]`) は最後に公開するので、副出力の公開に失敗しても主出力は公開されない。
 struct Staged {
     pairs: Vec<(PathBuf, PathBuf)>,
 }
@@ -119,6 +124,9 @@ impl Staged {
         for (staging, out) in &pairs {
             all.push(staging);
             all.push(out);
+        }
+        for (_, out) in &pairs {
+            anyhow::ensure!(!out.is_dir(), "出力 {} がディレクトリです", out.display());
         }
         for path in &all {
             for input in inputs {
@@ -159,7 +167,7 @@ impl Staged {
                 staging.display()
             );
         }
-        for (staging, out) in &self.pairs {
+        for (staging, out) in self.pairs.iter().rev() {
             fs::rename(staging, out).with_context(|| {
                 format!("{} -> {} の公開に失敗", staging.display(), out.display())
             })?;
@@ -204,6 +212,7 @@ fn extract(input: &Path, out: &Path) -> Result<Stats> {
 }
 
 fn extract_with_chunk_records(input: &Path, out: &Path, chunk_records: usize) -> Result<Stats> {
+    anyhow::ensure!(chunk_records > 0, "chunk_records must be positive");
     let records = checked_psv_records(input)?;
     let staged = Staged::new(&[out], &[input])?;
     run_staged(&staged, |writers| {
@@ -249,6 +258,7 @@ fn merge_dual_with_chunk_records(
         "chunk_records must be a positive multiple of 8"
     );
     let records = checked_psv_records(base)?;
+    anyhow::ensure!(records > 0, "{} が空です (0 レコード)", base.display());
     let sparse_records = checked_psv_records(sparse)?;
     if let Some(scores) = dl_scores {
         let size = file_size(scores)?;
@@ -308,6 +318,12 @@ fn merge_dual_with_chunk_records(
                     mask[offset / 8] |= 1 << (offset % 8);
                     stats.entered += 1;
                 }
+                if record[DL_SCORE_OFFSET..DL_SCORE_OFFSET + 2] != [0, 0] {
+                    stats.overwritten_nonzero_move16 += 1;
+                }
+                if record[PADDING_OFFSET] != 0 {
+                    stats.overwritten_nonzero_padding += 1;
+                }
                 record[DL_SCORE_OFFSET..DL_SCORE_OFFSET + 2].copy_from_slice(&dl);
                 record[PADDING_OFFSET] = u8::from(entered);
             }
@@ -332,7 +348,9 @@ fn merge_dual_with_chunk_records(
 }
 
 fn main() -> Result<()> {
-    let stats = match Cli::parse().command {
+    let command = Cli::parse().command;
+    let is_merge = matches!(command, Command::MergeDual { .. });
+    let stats = match command {
         Command::Extract { input, out } => extract(&input, &out)?,
         Command::MergeDual {
             base,
@@ -344,6 +362,10 @@ fn main() -> Result<()> {
     };
     println!("records={}", stats.records);
     println!("entered={}", stats.entered);
+    if is_merge {
+        println!("overwritten_nonzero_move16={}", stats.overwritten_nonzero_move16);
+        println!("overwritten_nonzero_padding={}", stats.overwritten_nonzero_padding);
+    }
     Ok(())
 }
 
@@ -497,6 +519,19 @@ mod tests {
         let same = dir.path().join("same.psv");
         assert!(merge_dual(&base, &ext, None, &same, Some(&same)).is_err());
         assert_eq!(fs::read(&base).unwrap(), bytes);
+    }
+
+    #[test]
+    fn merge_dual_rejects_directory_output_without_publishing() {
+        let dir = tempdir().unwrap();
+        let base = write(dir.path(), "base.psv", &base_rows(3));
+        let ext = dir.path().join("ext.psv");
+        extract(&base, &ext).unwrap();
+        let out = dir.path().join("dual.psv");
+        let mask_dir = dir.path().join("mask");
+        fs::create_dir(&mask_dir).unwrap();
+        assert!(merge_dual(&base, &ext, None, &out, Some(&mask_dir)).is_err());
+        assert!(!out.exists() && !partial_path(&out).exists());
     }
 
     #[test]
