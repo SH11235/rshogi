@@ -104,7 +104,7 @@ impl Schema {
         if self.explicit {
             self.replaceable.contains(source)
         } else {
-            ["read", "deep", "ext"].contains(&source)
+            ["read", "ext"].contains(&source)
         }
     }
 
@@ -290,6 +290,7 @@ mod tests {
         assert!(!schema.replaceable("read"));
         assert!(!schema.replaceable("absent"));
         assert!(Schema::default().replaceable("read"));
+        assert!(Schema::default().replaceable("ext"));
         assert!(!Schema::default().replaceable("custom"));
         assert_eq!(schema.condition(&"A".repeat(64)).unwrap(), "named");
         assert!(schema.condition(&"b".repeat(64)).unwrap_err().to_string().contains("追加"));

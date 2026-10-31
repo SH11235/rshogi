@@ -635,7 +635,7 @@ mod tests {
     fn read_main_is_replaced_but_owner_and_curated_mains_become_conflicts() {
         let k3 = "pos3 b -";
         let rows = master(&[
-            row(B, "old", "main", "deep", "wide", "1,2"),
+            row(B, "old", "main", "read", "wide", "1,2"),
             row(B, "new", "alt", "read", "wide", "5"),
             row(W, "pinned", "main", "team", "wide", "9"),
             row(k3, "careful", "main", "read", "curated", "3"),

@@ -347,12 +347,39 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
     .unwrap();
     let joined = values.moves[&exit].iter().find(|m| m.mv == "5h5i").unwrap();
     assert!(!joined.expanded);
-    assert!(joined.propagated);
+    assert_eq!(joined.destination_level, Some(tree.nodes[&destination].level));
     assert_eq!(joined.value, 20);
     let nodes = register_nodes(0, &root(), &tree, &values, &BTreeSet::new(), 4, s.nodes);
     let moves = &nodes[&exit].moves;
     assert_eq!(moves.iter().find(|m| m.mv == "5h5i").unwrap().value_kind, "tree:2");
     assert_eq!(moves.iter().find(|m| m.mv == "5h6h").unwrap().value_kind, "single");
+
+    let mut rejoined = tree.clone();
+    rejoined.nodes.get_mut(&exit).unwrap().level = 4;
+    rejoined.nodes.get_mut(&destination).unwrap().level = 1;
+    let values = value_root(
+        &root(),
+        &rejoined,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeSet::new(),
+            cond: "test",
+        },
+        DrawValues::default(),
+        40,
+        work.path(),
+    )
+    .unwrap();
+    let borrowed = register_nodes(0, &root(), &rejoined, &values, &BTreeSet::new(), 4, s.nodes);
+    let table = format!(
+        "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{exit}\t5\t4\t0\t100\t5h5i\t20\t0\t1\n{destination}\t2\t1\t3\t100\t4a3a\t-20\t0\t1\n"
+    );
+    let registered =
+        crate::book_tree::register::parse_node_moves(&table, 0, Some(&BTreeSet::new())).unwrap();
+    let borrowed_kind = &borrowed[&exit].moves.iter().find(|m| m.mv == "5h5i").unwrap().value_kind;
+    assert_eq!(borrowed_kind, "tree:4");
+    assert_eq!(borrowed_kind, &registered[&exit].moves[0].value_kind);
 }
 
 #[test]
