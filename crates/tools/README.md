@@ -9,8 +9,8 @@
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
 | 外部の定跡の木を借りて自分の読みで値を付ける | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
 | 定跡の元データの書式・評価値・局面・合法手を全件検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
-| 元データに行を追加・置換する | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
-| 読みのログから追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
+| 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
+| 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
 | 元データから定跡・プリセット・注釈を書き出す（失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
 | 2 つの定跡の局面と手の差分を表示する | [book_mine master diff](docs/book_mine.md#master-diff-2-つの定跡の差分) |
 | 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |

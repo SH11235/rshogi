@@ -8,7 +8,7 @@ use super::{
     master_table::{self, Row},
 };
 use crate::book_db::position_from_sfen;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -178,9 +178,17 @@ fn select(master: &[Row], groups: &Groups, since: &str) -> Result<Selection> {
                     let evals = readings
                         .iter()
                         .filter_map(|r| score(r, mv))
-                        .map(numbers::display)
+                        .map(|value| {
+                            ensure!(
+                                value.is_integer(),
+                                "cp は整数にしてください: {key} | {mv}: {value}"
+                            );
+                            Ok(value.to_integer().to_string())
+                        })
                         .collect::<Result<Vec<_>>>()?
                         .join(",");
+                    master_table::mean_eval(&evals)
+                        .with_context(|| format!("evals が不正です: {key} | {mv}: {evals}"))?;
                     let mut note = format!(
                         "約 {} 億ノードの読み {} 回。1 位 {} 回、1 位からの差の平均 {}",
                         numbers::node_note(nodes)?,
@@ -243,7 +251,7 @@ fn report_bytes(report: &[[String; 15]]) -> Vec<u8> {
             if i > 0 {
                 text.push('\t');
             }
-            if cell.contains(['\t', '\n', '"']) {
+            if cell.contains(['\t', '\r', '\n', '"']) {
                 text.push('"');
                 text.push_str(&cell.replace('"', "\"\""));
                 text.push('"');

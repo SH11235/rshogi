@@ -80,6 +80,7 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
     let mut fresh = Vec::new();
     let mut replaced = 0;
     let mut changed = [0usize; 11];
+    let mut replacements = Vec::new();
     for row in &added {
         let pair = (row.get("key").to_owned(), row.get("move").to_owned());
         if !seen.insert(pair.clone()) {
@@ -91,6 +92,19 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
                 replaced += 1;
                 for (i, field) in COLUMNS.iter().enumerate() {
                     changed[i] += usize::from(old.get(field) != row.get(field));
+                }
+                if old.get("tier") != row.get("tier") || old.get("tier") == "curated" {
+                    let differences: Vec<_> = COLUMNS
+                        .iter()
+                        .filter(|f| old.get(f) != row.get(f))
+                        .map(|f| format!("{f}: {} -> {}", old.get(f), row.get(f)))
+                        .collect();
+                    replacements.push(format!(
+                        "replaced: {} | {}: {}",
+                        pair.0,
+                        pair.1,
+                        differences.join(", ")
+                    ));
                 }
                 rows[index] = row.clone();
             } else {
@@ -117,6 +131,9 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
     errors.extend(schema.validate(master_table::format_master(&rows))?);
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     sort_rows(&mut rows);
+    for replacement in replacements {
+        writeln!(out, "{replacement}")?;
+    }
     writeln!(out, "skipped existing rows: {}", added.len() - fresh.len() - replaced)?;
     if args.replace {
         writeln!(out, "replaced existing rows: {replaced}")?;
@@ -133,7 +150,7 @@ fn run_to(args: AddArgs, out: &mut impl Write) -> Result<()> {
         .collect::<BTreeSet<_>>()
         .len();
     writeln!(out, "added positions: {new_positions}; added moves: {}", fresh.len())?;
-    export::print_counts(&fresh, &Schema::addition_counts(), out)?;
+    export::print_counts(&fresh, &schema, out)?;
     for tier in ["curated", "wide"] {
         for role in ROLES {
             writeln!(

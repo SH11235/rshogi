@@ -121,18 +121,6 @@ impl Schema {
         }
         Ok(errors)
     }
-
-    pub(super) fn addition_counts() -> Self {
-        Self {
-            sources: [
-                "pin", "top", "deep", "selfplay", "team", "read", "plug", "fgbook",
-            ]
-            .into_iter()
-            .map(|s| (s.into(), String::new()))
-            .collect(),
-            check_sources: false,
-        }
-    }
 }
 pub(super) fn run(args: ExportArgs) -> Result<()> {
     run_to(args, &mut std::io::BufWriter::new(std::io::stdout().lock()))
@@ -434,7 +422,10 @@ pub(super) fn print_counts(rows: &[Row], schema: &Schema, out: &mut impl Write) 
         let values: Vec<_> = match field {
             "role" => ROLES.to_vec(),
             "source" if !schema.sources.is_empty() => {
-                schema.sources.iter().map(|(k, _)| k.as_str()).collect()
+                let mut values: Vec<_> = schema.sources.iter().map(|(k, _)| k.as_str()).collect();
+                let known: BTreeSet<_> = values.iter().copied().collect();
+                values.extend(counts.keys().copied().filter(|v| !known.contains(v)));
+                values
             }
             _ => counts.keys().copied().collect(),
         };

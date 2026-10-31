@@ -124,11 +124,11 @@ fn numeric_formats_and_quoted_report_fields() {
     assert!(String::from_utf8(bytes).unwrap().contains("\"bad\t\"\"move\""));
 }
 #[test]
-fn report_carriage_return_is_not_a_record_terminator() {
+fn report_carriage_return_is_quoted_like_python_3_11_and_later_csv() {
     let mut row = std::array::from_fn(|_| String::new());
     row[0] = "a\rb".into();
     let bytes = report_bytes(&[row]);
-    assert!(String::from_utf8(bytes).unwrap().contains("\na\rb\t"));
+    assert!(String::from_utf8(bytes).unwrap().contains("\n\"a\rb\"\t"));
 }
 
 fn args(dir: &std::path::Path) -> AddReadsArgs {
@@ -147,7 +147,7 @@ fn writes_both_outputs_and_guards_existing_input_and_invalid_tags() {
     let a = args(dir.path());
     let original = master_table::format_master(&[row("7g7f", "main")]);
     std::fs::write(&a.master, &original).unwrap();
-    std::fs::write(&a.logs[0], format!(r#"{{"key":"{HIRATE_KEY}","nodes":100,"ply":1,"multipv":[{{"move":"2g2f","cp":10.125}}]}}"#)).unwrap();
+    std::fs::write(&a.logs[0], format!(r#"{{"key":"{HIRATE_KEY}","nodes":100,"ply":1,"multipv":[{{"move":"2g2f","cp":10.0}}]}}"#)).unwrap();
     for tag in ["", " ", "x\t", "x\n", "x\r"] {
         let mut a = args(dir.path());
         a.since = tag.into();
@@ -168,7 +168,7 @@ fn writes_both_outputs_and_guards_existing_input_and_invalid_tags() {
     let mut out = Vec::new();
     run_to(args(dir.path()), &mut out).unwrap();
     let written = std::fs::read(&a.out).unwrap();
-    assert!(String::from_utf8(written.clone()).unwrap().contains("10.125"));
+    assert!(String::from_utf8(written.clone()).unwrap().contains("\t10\t"));
     assert!(report.is_file());
     assert!(run_to(args(dir.path()), &mut Vec::new()).is_err());
     assert_eq!(std::fs::read(&a.out).unwrap(), written);
@@ -203,4 +203,37 @@ fn invalid_master_leaves_both_outputs_absent() {
     assert!(error.contains("since") && error.contains("合法手"));
     assert!(!dir.path().join("out.tsv").exists());
     assert!(!dir.path().join("out.tsv.report.tsv").exists());
+}
+
+#[test]
+fn fractional_cp_errors_without_writing_and_integral_notation_round_trips() {
+    for (cp, expected) in [
+        ("1.5", None),
+        ("15e-1", None),
+        ("2e1", Some("20")),
+        ("20.0", Some("20")),
+        ("1000000000000", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let a = args(dir.path());
+        let original = master_table::format_master(&[row("2g2f", "main")]);
+        std::fs::write(&a.master, &original).unwrap();
+        std::fs::write(&a.logs[0], format!(r#"{{"key":"{HIRATE_KEY}","nodes":100,"ply":1,"draw":{{"b":0}},"multipv":[{{"move":"7g7f","cp":{cp}}}]}}"#)).unwrap();
+        let mut out = Vec::new();
+        let result = run_to(args(dir.path()), &mut out);
+        if let Some(expected) = expected {
+            result.unwrap();
+            let text = std::fs::read_to_string(&a.out).unwrap();
+            let rows = master_table::parse_master(&text).unwrap();
+            assert_eq!(rows[0].get("evals"), expected);
+            master_table::read_master(&a.out).unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(HIRATE_KEY) && error.contains("7g7f"), "{error}");
+            assert!(out.is_empty());
+            assert!(!a.out.exists());
+            assert!(!dir.path().join("out.tsv.report.tsv").exists());
+        }
+        assert_eq!(std::fs::read_to_string(&a.master).unwrap(), original);
+    }
 }

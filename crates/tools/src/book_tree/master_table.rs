@@ -315,10 +315,8 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
             error("ply は空か 10 進の数字だけにしてください");
         }
         let evals = row.get("evals");
-        if !evals.is_empty()
-            && !evals.split(',').all(|v| v.trim().parse::<f64>().is_ok_and(f64::is_finite))
-        {
-            error("evals は有限の数値をカンマで区切ってください");
+        if mean_eval(evals).is_err() {
+            error("evals は整数をカンマで区切り、合計は i64、平均は i32 の範囲にしてください");
         }
         let key = row.get("key");
         let group = groups.entry(key.to_owned()).or_insert_with(|| PositionRows {
@@ -455,10 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn finite_evals_validate_but_audit_reader_checks_integer_range() {
+    fn validation_and_audit_reader_reject_the_same_invalid_evals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
         for evals in [
+            "1.5,2e1",
+            "2e1",
+            " 20",
+            "20 ",
+            "1,",
             "2147483648",
             "-2147483649",
             "9223372036854775807,1",
@@ -469,7 +472,7 @@ mod tests {
             r.set("evals", evals.into());
             let text = format_master(&[r]);
             let report = validate_table(text.as_bytes()).unwrap();
-            assert!(report.errors.is_empty(), "{evals}: {report:?}");
+            assert!(report.errors.iter().any(|e| e.contains("evals")), "{evals}: {report:?}");
             std::fs::write(&path, text).unwrap();
             assert!(read_master(&path).unwrap_err().to_string().contains("2 行目の evals"));
         }

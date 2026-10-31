@@ -51,6 +51,15 @@ fn dry_run_apply_conflicts_and_main_replacement() {
     std::fs::write(&a.add, master_table::format_master(&[new_main.clone(), row("7g7f", "alt")]))
         .unwrap();
     let mut out = Vec::new();
+    let original = std::fs::read(&a.master).unwrap();
+    assert!(run_to(a, &mut out).unwrap_err().to_string().contains("evals"));
+    assert_eq!(std::fs::read(args(dir.path()).master).unwrap(), original);
+    new_main.set("evals", "1,20".into());
+    let mut a = args(dir.path());
+    a.apply = true;
+    a.replace = true;
+    std::fs::write(&a.add, master_table::format_master(&[new_main.clone(), row("7g7f", "alt")]))
+        .unwrap();
     run_to(a, &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains(
@@ -102,4 +111,66 @@ fn schema_checks_original_and_merged_sources() {
     std::fs::write(&a.add, master_table::format_master(&[alt])).unwrap();
     assert!(run_to(a, &mut Vec::new()).unwrap_err().to_string().contains("unknown source"));
     assert_eq!(std::fs::read_to_string(args(dir.path()).master).unwrap(), original);
+}
+
+#[test]
+fn replacement_reports_tier_changes_and_curated_column_changes() {
+    for (old_tier, new_tier) in [
+        ("wide", "curated"),
+        ("curated", "wide"),
+        ("curated", "curated"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = args(dir.path());
+        a.replace = true;
+        a.apply = true;
+        let mut old = row("7g7f", "main");
+        old.set("tier", old_tier.into());
+        old.set("note", "old".into());
+        old.set("evals", "10".into());
+        let mut new = old.clone();
+        new.set("tier", new_tier.into());
+        new.set("note", "new".into());
+        new.set("evals", "20".into());
+        std::fs::write(&a.master, master_table::format_master(&[old])).unwrap();
+        std::fs::write(&a.add, master_table::format_master(&[new.clone()])).unwrap();
+        let mut out = Vec::new();
+        run_to(a, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let line = out.lines().find(|l| l.starts_with("replaced: ")).unwrap();
+        assert!(line.starts_with(&format!("replaced: {HIRATE_KEY} | 7g7f: ")));
+        assert!(line.contains("evals: 10 -> 20"));
+        assert!(line.contains("note: old -> new"));
+        if old_tier != new_tier {
+            assert!(line.contains(&format!("tier: {old_tier} -> {new_tier}")));
+        }
+        assert_eq!(
+            std::fs::read_to_string(args(dir.path()).master).unwrap(),
+            master_table::format_master(&[new])
+        );
+    }
+}
+
+#[test]
+fn counts_use_schema_order_then_unknown_sources_or_lexical_order() {
+    let mut rows = Vec::new();
+    for source in ["zeta", "ext", "alpha"] {
+        let mut r = row("7g7f", "main");
+        r.set("source", source.into());
+        rows.push(r);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sources.tsv"), "source\tdescription\nzeta\tZ\nunused\tU\n")
+        .unwrap();
+    for (schema, expected) in [
+        (Schema::default(), "source: alpha=1, ext=1, zeta=1"),
+        (
+            Schema::load(Some(dir.path())).unwrap(),
+            "source: zeta=1, unused=0, alpha=1, ext=1",
+        ),
+    ] {
+        let mut out = Vec::new();
+        export::print_counts(&rows, &schema, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().lines().any(|line| line == expected));
+    }
 }
