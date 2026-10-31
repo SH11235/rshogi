@@ -29,32 +29,32 @@ pub(super) struct CheckArgs {
 }
 
 #[derive(Deserialize)]
-struct Annotation {
-    book: AnnotationBook,
-    positions: BTreeMap<String, AnnotationPosition>,
+pub(super) struct Annotation {
+    pub(super) book: AnnotationBook,
+    pub(super) positions: BTreeMap<String, AnnotationPosition>,
 }
 
 #[derive(Deserialize)]
-struct AnnotationBook {
-    sha256: String,
+pub(super) struct AnnotationBook {
+    pub(super) sha256: String,
 }
 
 #[derive(Deserialize)]
-struct AnnotationPosition {
-    moves: BTreeMap<String, AnnotationMove>,
-    read: Option<Reading>,
+pub(super) struct AnnotationPosition {
+    pub(super) moves: BTreeMap<String, AnnotationMove>,
+    pub(super) read: Option<Reading>,
 }
 
 #[derive(Deserialize)]
-struct AnnotationMove {
-    role: String,
-    evals: Vec<f64>,
+pub(super) struct AnnotationMove {
+    pub(super) role: String,
+    pub(super) evals: Vec<f64>,
 }
 
 #[derive(Deserialize)]
-struct Reading {
-    main: Option<f64>,
-    top: Option<f64>,
+pub(super) struct Reading {
+    pub(super) main: Option<f64>,
+    pub(super) top: Option<f64>,
 }
 
 impl AnnotationPosition {
@@ -670,11 +670,10 @@ fn run_to(args: CheckArgs, out: &mut impl Write) -> Result<()> {
 }
 
 pub(super) fn export_bad_progressions(
-    bytes: &[u8],
+    annot: Annotation,
     threshold: f64,
     out: &mut impl Write,
 ) -> Result<usize> {
-    let annot: Annotation = serde_json::from_slice(bytes)?;
     let pool = reply_graph::thread_pool(2)?;
     let index = pool.install(|| BookIndex::new(&annot.positions))?;
     let mut counts = Vec::new();

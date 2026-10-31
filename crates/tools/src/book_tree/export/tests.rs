@@ -162,3 +162,49 @@ fn main_evals_sum_keeps_integer_precision() {
     assert!(run_to(a, &mut out).is_err());
     assert!(String::from_utf8(out).unwrap().contains("eval=-0.333333 basis=evals"));
 }
+
+#[test]
+fn read_main_at_bad_eval_threshold_is_detected() {
+    use super::super::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(dir.path());
+    std::fs::write(
+        &a.master,
+        master_table::format_master(&[row(HIRATE_KEY, "7g7f", "main", "wide", "")]),
+    )
+    .unwrap();
+    let reads = dir.path().join("reads.jsonl");
+    std::fs::write(&reads, format!(r#"{{"key":"{HIRATE_KEY}","nodes":1000000000,"ply":1,"multipv":[{{"move":"7g7f","cp":1.2345678901234567e20}}]}}"#)).unwrap();
+    a.reads.push(reads);
+    a.bad_eval = 1.2345678901234567e20;
+    a.strict_bad_eval = true;
+    let mut stdout = Vec::new();
+    assert!(run_to(a, &mut stdout).unwrap_err().to_string().contains("strict-bad-eval"));
+    let text = String::from_utf8(stdout).unwrap();
+    assert!(text.contains("bad-eval reachable positions: 1"), "{text}");
+    assert!(text.contains("basis=main"), "{text}");
+    assert!(files::outputs(&dir.path().join("book")).iter().all(|p| !p.exists()));
+}
+
+#[test]
+fn eval_mean_rounds_exact_integer_quotient() {
+    use super::super::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(dir.path());
+    std::fs::write(
+        &a.master,
+        master_table::format_master(&[row(
+            HIRATE_KEY,
+            "7g7f",
+            "main",
+            "wide",
+            "9007199254740992,1,-9007199254740992",
+        )]),
+    )
+    .unwrap();
+    a.bad_eval = 0.3;
+    a.strict_bad_eval = true;
+    let mut stdout = Vec::new();
+    run_to(a, &mut stdout).unwrap();
+    assert!(String::from_utf8(stdout).unwrap().contains("bad-eval reachable positions: 0"));
+}

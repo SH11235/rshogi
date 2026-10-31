@@ -1,5 +1,5 @@
 //! 定跡の局面と記載順の手を比較する。
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::{
     collections::BTreeMap,
@@ -9,7 +9,9 @@ use std::{
 
 #[derive(Args, Debug)]
 pub(super) struct DiffArgs {
+    /// 比較元の定跡 (.db)
     old: PathBuf,
+    /// 比較先の定跡 (.db)
     new: PathBuf,
 }
 #[derive(Default)]
@@ -20,8 +22,13 @@ pub(super) struct DbPosition {
 pub(super) fn read(path: &Path, strict: bool) -> Result<BTreeMap<String, DbPosition>> {
     let mut book = BTreeMap::<String, DbPosition>::new();
     let mut current = None;
-    for (i, line) in BufReader::new(std::fs::File::open(path)?).lines().enumerate() {
-        let line = line?;
+    for (i, line) in BufReader::new(
+        std::fs::File::open(path).with_context(|| format!("開けません: {}", path.display()))?,
+    )
+    .lines()
+    .enumerate()
+    {
+        let line = line.with_context(|| format!("読めません: {}", path.display()))?;
         if strict {
             let fields: Vec<_> = line.split_whitespace().collect();
             if fields.is_empty() || line.starts_with('#') {

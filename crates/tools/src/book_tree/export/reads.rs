@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Reading {
     pub nodes: BigRational,
     pub ply: BigInt,
@@ -39,13 +39,19 @@ pub(super) fn expand(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         ensure!(path.exists(), "log input does not exist: {}", path.display());
         if path.is_dir() {
             for item in walkdir::WalkDir::new(path) {
-                let item = item?;
+                let item = item.with_context(|| format!("読めません: {}", path.display()))?;
                 if item.path().extension().is_some_and(|s| s == "jsonl") {
-                    files.insert(item.path().canonicalize()?);
+                    files.insert(
+                        item.path()
+                            .canonicalize()
+                            .with_context(|| format!("読めません: {}", item.path().display()))?,
+                    );
                 }
             }
         } else {
-            files.insert(path.canonicalize()?);
+            files.insert(
+                path.canonicalize().with_context(|| format!("読めません: {}", path.display()))?,
+            );
         }
     }
     ensure!(!files.is_empty(), "no JSONL inputs found");
@@ -127,8 +133,7 @@ pub(super) fn load(
     let minimum = BigRational::from_integer(min_nodes.into());
     let pin = BigRational::from_integer(draw_pin.into());
     ensure!(!minimum.is_negative() && !pin.is_negative(), "thresholds must be nonnegative");
-    let mut groups = Groups::new();
-    let mut seen: BTreeMap<(String, Reading), bool> = BTreeMap::new();
+    let mut seen: BTreeMap<String, BTreeMap<Reading, bool>> = BTreeMap::new();
     let mut below = BTreeSet::new();
     let mut counts = Counts::default();
     for path in paths {
@@ -158,17 +163,19 @@ pub(super) fn load(
                 counts.draw_pinned += 1;
                 return Ok(());
             }
-            let identity = (key.clone(), reading.clone());
-            if let Some(previous) = seen.get_mut(&identity) {
-                counts.duplicates += 1;
-                if draw && !*previous {
-                    *previous = true;
-                    counts.draw_unset_used -= 1;
+            match seen.entry(key).or_default().entry(reading) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    counts.duplicates += 1;
+                    if draw && !*entry.get() {
+                        entry.insert(true);
+                        counts.draw_unset_used -= 1;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(draw);
+                }
             }
-            seen.insert(identity, draw);
-            groups.entry(key).or_default().push(reading);
             counts.used += 1;
             if !draw {
                 counts.draw_unset_used += 1;
@@ -177,14 +184,20 @@ pub(super) fn load(
         })?;
     }
     counts.below_min_positions = below.len();
-    for readings in groups.values_mut() {
-        readings.sort();
-    }
+    let groups = seen
+        .into_iter()
+        .map(|(key, readings)| (key, readings.into_keys().collect()))
+        .collect();
     Ok((groups, counts))
 }
 fn load_file(path: &Path, process: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
-    for (i, line) in BufReader::new(std::fs::File::open(path)?).lines().enumerate() {
-        let line = line?;
+    for (i, line) in BufReader::new(
+        std::fs::File::open(path).with_context(|| format!("開けません: {}", path.display()))?,
+    )
+    .lines()
+    .enumerate()
+    {
+        let line = line.with_context(|| format!("読めません: {}", path.display()))?;
         let line = if i == 0 {
             line.strip_prefix('\u{feff}').unwrap_or(&line)
         } else {

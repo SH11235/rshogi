@@ -23,26 +23,37 @@ use std::{
 
 #[derive(Args, Debug)]
 pub(super) struct ExportArgs {
+    /// 元データの表 (moves.tsv)
     #[arg(long)]
     master: PathBuf,
+    /// 出力する 4 ファイルの共通の接頭辞
     #[arg(long)]
     out: PathBuf,
+    /// 書き出す定跡の範囲
     #[arg(long,default_value="wide",value_parser=["wide","curated"])]
     tier: String,
+    /// sources.tsv を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
+    /// 読みの JSONL ファイルまたは再帰的に探すディレクトリ
     #[arg(long,num_args=1..)]
     reads: Vec<PathBuf>,
+    /// 取り込む読みのノード数の下限
     #[arg(long, default_value = "900000000", value_parser = nonnegative_integer)]
     min_nodes: num_bigint::BigInt,
+    /// draw 未指定の読みを除く先頭評価値の絶対値の上限
     #[arg(long, default_value = "3", value_parser = nonnegative_integer)]
     draw_pin: num_bigint::BigInt,
+    /// 自分の手番の局面で、この値以下を報告する
     #[arg(long,default_value_t=-150.0,allow_hyphen_values=true)]
     bad_eval: f64,
+    /// 悪い到達局面があればファイルを書き出さずに失敗する
     #[arg(long)]
     strict_bad_eval: bool,
+    /// 局面と手の差分を報告する比較元の定跡 (.db)
     #[arg(long)]
     base: Option<PathBuf>,
+    /// 既存の出力ファイルを置き換える
     #[arg(long)]
     force: bool,
 }
@@ -64,7 +75,9 @@ impl Schema {
             return Ok(Self::default());
         };
         ensure!(dir.is_dir(), "schema is not a directory: {}", dir.display());
-        let text = std::fs::read_to_string(dir.join("sources.tsv"))?;
+        let path = dir.join("sources.tsv");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("読めません: {}", path.display()))?;
         let mut lines = text.lines();
         ensure!(lines.next() == Some("source\tdescription"), "invalid sources.tsv header");
         let mut sources = Vec::new();
@@ -106,16 +119,23 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     }
     let outputs = files::outputs(&args.out);
     files::guard(&outputs, &inputs, args.force)?;
-    let report = master_table::validate_table(BufReader::new(std::fs::File::open(&args.master)?))?;
+    let report = master_table::validate_table(BufReader::new(
+        std::fs::File::open(&args.master)
+            .with_context(|| format!("開けません: {}", args.master.display()))?,
+    ))
+    .with_context(|| format!("読めません: {}", args.master.display()))?;
     let mut errors = report.errors;
     if args.schema.is_some() {
         let known: BTreeSet<_> = schema.sources.iter().map(|(s, _)| s.as_str()).collect();
-        for (i, line) in BufReader::new(std::fs::File::open(&args.master)?)
-            .split(b'\n')
-            .enumerate()
-            .skip(1)
+        for (i, line) in BufReader::new(
+            std::fs::File::open(&args.master)
+                .with_context(|| format!("開けません: {}", args.master.display()))?,
+        )
+        .split(b'\n')
+        .enumerate()
+        .skip(1)
         {
-            let line = line?;
+            let line = line.with_context(|| format!("読めません: {}", args.master.display()))?;
             if let Ok(line) = std::str::from_utf8(&line)
                 && let Ok(row) = Row::parse_line(line.trim_end_matches('\r'), i + 1)
                 && !known.contains(row.get("source"))
@@ -129,7 +149,10 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         }
     }
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
-    let mut rows = master_table::parse_master(&std::fs::read_to_string(&args.master)?)?;
+    let mut rows = master_table::parse_master(
+        &std::fs::read_to_string(&args.master)
+            .with_context(|| format!("読めません: {}", args.master.display()))?,
+    )?;
     rows.retain(|r| args.tier == "wide" || r.get("tier") == "curated");
     rows.sort_by(|a, b| {
         (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
@@ -166,6 +189,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     let mut presets = ["default", "random"]
         .map(|name| format!("# preset: {name}\n# book: {filename} sha256 {digest}\n"));
     let mut positions = Vec::new();
+    let mut checked_positions = BTreeMap::new();
     let mut preset_count = 0;
     for (key, entries) in &groups {
         let selectable: Vec<_> = entries
@@ -186,6 +210,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
             .into_iter()
             .min();
         let mut moves = Vec::new();
+        let mut checked_moves = BTreeMap::new();
         for row in entries {
             let pair = (key.to_string(), row.get("move").to_string());
             let mut data: Vec<_> = ["role", "source", "nodes", "note", "since", "tier"]
@@ -201,6 +226,13 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
                 }),
             ));
             let values = evals(row)?;
+            checked_moves.insert(
+                row.get("move").to_owned(),
+                check::AnnotationMove {
+                    role: row.get("role").to_owned(),
+                    evals: values.clone(),
+                },
+            );
             data.push((
                 "evals",
                 Json::Array(
@@ -215,6 +247,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
             ("ply", ply.map_or(Json::Null, Json::integer)),
             ("moves", Json::object(moves)),
         ];
+        let mut checked_read = None;
         if let Some(reads) = read_groups.get(*key) {
             let kept = reads::deep(reads);
             if !kept.is_empty() {
@@ -229,6 +262,16 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
                     })
                     .collect();
                 let tops: Vec<_> = kept.iter().map(|r| r.scores[0].1.clone()).collect();
+                let top_value = numbers::mean(&tops)?;
+                let main_value = if values.is_empty() {
+                    None
+                } else {
+                    Some(numbers::mean(&values)?)
+                };
+                checked_read = Some(check::Reading {
+                    main: main_value,
+                    top: Some(top_value),
+                });
                 fields.push((
                     "read",
                     Json::object([
@@ -239,20 +282,24 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
                                 kept.iter().map(|r| &r.nodes).max().unwrap(),
                             )?),
                         ),
-                        ("top", Json::Number(numbers::repr(numbers::mean(&tops)?))),
+                        ("top", Json::Number(numbers::repr(top_value))),
                         (
                             "main",
-                            if values.is_empty() {
-                                Json::Null
-                            } else {
-                                Json::Number(numbers::repr(numbers::mean(&values)?))
-                            },
+                            main_value
+                                .map_or(Json::Null, |value| Json::Number(numbers::repr(value))),
                         ),
                         ("main_n", Json::integer(values.len())),
                     ]),
                 ));
             }
         }
+        checked_positions.insert(
+            key.to_string(),
+            check::AnnotationPosition {
+                moves: checked_moves,
+                read: checked_read,
+            },
+        );
         positions.push((*key, Json::object(fields)));
         if entries.iter().any(|r| r.get("role") == "main" && r.get("tier") == "curated")
             && entries.iter().any(|r| r.get("role") == "alt" && r.get("tier") == "wide")
@@ -280,7 +327,16 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         ("positions", Json::object(positions)),
     ])
     .render();
-    let bad = check::export_bad_progressions(annotation.as_bytes(), args.bad_eval, out)?;
+    let bad = check::export_bad_progressions(
+        check::Annotation {
+            book: check::AnnotationBook {
+                sha256: digest.clone(),
+            },
+            positions: checked_positions,
+        },
+        args.bad_eval,
+        out,
+    )?;
     out.flush()?;
     ensure!(
         !args.strict_bad_eval || bad == 0,

@@ -86,7 +86,7 @@
 | [`book_rescore`](book_rescore.md) | 候補手を USI / ONNX で評価し、内容指紋で再開を検査 |
 | [`book_extend`](book_extend.md) | USI bestmove を count=0 で候補集合へ追加 |
 | [`book_backprop`](book_backprop.md) | 千日手・連続王手を考慮した後退解析で評価値を逆伝播 |
-| [`book_mine`](book_mine.md) | 定跡の展開・借用 (借りる定跡は `.db` / `.ybb`。自分の読みで値を付けて `source=ext`・`lineage=book:<ファイル名>@<sha256 の先頭 8 文字>` で元データに登録)・元データからの書き出し (`master export`: DB・2 種のプリセット・注釈、source の語彙検査、読みの集計)・DB の差分 (`master diff`)・元データの全件検査 (`master validate`)・書き出した定跡とプリセットの検査 (`master check`)・監査 (main の点検 (元データに無い相手の手番の局面を補って伝播する `--fill-replies` つき)・反駁・再合流・循環を塞ぐ手。外す手の数が最小の組、外してよい手の制限つき)・読み始める局面と重みの辿り と、キュー・台帳を使う並列探索 |
+| [`book_mine`](book_mine.md) | 定跡の展開・借用 (借りる定跡は `.db` / `.ybb`。自分の読みで値を付けて `source=ext`・`lineage=book:<ファイル名>@<sha256 の先頭 8 文字>` で元データに登録)・元データからの書き出し (`master export`: DB・2 種のプリセット・注釈、source の語彙検査、読みの集計、出力失敗時の復元)・DB の差分 (`master diff`)・元データの全件検査 (`master validate`)・書き出した定跡とプリセットの検査 (`master check`)・監査 (main の点検 (元データに無い相手の手番の局面を補って伝播する `--fill-replies` つき)・反駁・再合流・循環を塞ぐ手。外す手の数が最小の組、外してよい手の制限つき)・読み始める局面と重みの辿り と、キュー・台帳を使う並列探索 |
 
 ## SPSA・パラメータ
 
