@@ -1271,7 +1271,7 @@ fn main() -> Result<()> {
         })
         .sum();
     let rprog = MultiFileProgress::new(overall_total, total_files, "rescore");
-    // ONNX セッションは最初に処理するファイルで作り、以降のファイルで使い回す。
+    // 全ファイルが skip される実行で ONNX Runtime を読み込まないよう、最初に処理するファイルで作る。
     #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
     let mut onnx_sessions: Option<OnnxSessions> = None;
     for (file_idx, input_path) in input_files.iter().enumerate() {
@@ -1324,6 +1324,11 @@ fn main() -> Result<()> {
             } else {
                 ("dlshogi", cli.dlshogi_onnx_model.as_ref().unwrap().as_path())
             };
+            // 前のファイルで作ったセッションのモデルが置き換わっていたら、ここで止める。マーカーの
+            // 判定は今のモデルファイルで fingerprint を作り、合わない完了済みの出力を消すため。
+            if let Some(sessions) = onnx_sessions.as_ref() {
+                sessions.model.ensure_unchanged(onnx_path)?;
+            }
             let decision = onnx_marker_decide(
                 &protection,
                 &cli,
@@ -4119,11 +4124,21 @@ impl Drop for PinnedPool {
     }
 }
 
+/// モデルファイルの置き換えで止めたときの、再実行の案内。
+///
+/// TensorRT EP のエンジンキャッシュは、モデルのファイル名とグラフの入出力・ノードの名前などで
+/// 引き当てて重みを見ない。キャッシュを残したまま再実行すると、古いモデルから作ったエンジンで推論する。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+const RERUN_AFTER_MODEL_CHANGE: &str = "Rerun to load the new model. With --onnx-tensorrt-cache, \
+     first delete the cached *.engine and *.profile files or use another cache directory: \
+     the TensorRT engine cache does not check the model weights.";
+
 /// ONNX セッションを作ったときのモデルファイル。
 ///
 /// セッションは実行中の全入力ファイルで使い回すため、途中でモデルファイルが置き換わると
-/// 古いモデルの出力に新しいモデルの fingerprint を付けてしまう。ファイルの処理を始める前と
-/// 完了マーカーを書く前に照合して止める。
+/// 古いモデルの出力に新しいモデルの fingerprint を付けてしまう。各ファイルの完了マーカーの
+/// 判定 (fingerprint が変わると出力を消す) の前と、完了マーカーを書く前に照合して止める。
+/// 照合するのはモデルの本体ファイルの path/size/mtime だけ (外部データの `.onnx.data` は見ない)。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 #[derive(Debug, PartialEq, Eq)]
 struct OnnxModelIdentity {
@@ -4151,7 +4166,7 @@ impl OnnxModelIdentity {
         anyhow::ensure!(
             current == *self,
             "ONNX model file changed after it was loaded: {} \
-             (size/mtime {}/{} -> {}/{}). Rerun to load the new model.",
+             (size/mtime {}/{} -> {}/{}). {RERUN_AFTER_MODEL_CHANGE}",
             current.path.display(),
             self.size,
             self.mtime_ns,
@@ -4186,17 +4201,15 @@ struct OnnxSessions {
 
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 impl OnnxSessions {
-    /// 初回の呼び出しでセッションを作り、2 回目以降はモデルファイルが変わっていないことを
-    /// 確かめて同じセッションを返す。全入力が skip される実行ではセッションを作らない。
+    /// 初回の呼び出しでセッションを作り、2 回目以降は同じセッションを返す。全入力が skip
+    /// される実行ではセッションを作らない。モデルファイルの置き換えは、main が各ファイルの
+    /// 完了マーカーの判定の前に照合する。
     fn get_or_create<'s>(
         slot: &'s mut Option<OnnxSessions>,
         config: &OnnxPipelineConfig<'_>,
     ) -> Result<&'s mut OnnxSessions> {
         match slot {
-            Some(sessions) => {
-                sessions.model.ensure_unchanged(config.onnx_path)?;
-                Ok(sessions)
-            }
+            Some(sessions) => Ok(sessions),
             None => Ok(slot.insert(OnnxSessions::new(config)?)),
         }
     }
@@ -4669,8 +4682,7 @@ where
 
     // 推論バッチ 1 個分の CPU 成果物（読み込み済み records + 構築済み特徴量 + フラグ）。
     // producer が埋め、consumer（主スレッド）が GPU 推論・書き出しに使う。f1/f2 等は
-    // slot プールで再利用し、ピークメモリは入力件数に非依存（PIPELINE_SLOTS 個ぶん）。
-    // f1/f2 は OnnxSessions のバッファを借りる（全入力ファイルで同じバッファを使う）。
+    // slot プールで再利用し、ピークメモリは入力件数に非依存（pipeline_slots 個ぶん）。
     struct PreparedBatch<'b> {
         f1: &'b mut HostBuf,
         f2: &'b mut HostBuf,
@@ -5551,7 +5563,7 @@ where
             }
             anyhow::bail!(
                 "ONNX model file changed while processing {}; discarded the output. \
-                 Rerun to load the new model.",
+                 {RERUN_AFTER_MODEL_CHANGE}",
                 input_path.display()
             );
         }
