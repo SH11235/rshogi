@@ -154,13 +154,15 @@ dual-label PSV にして trainer の gated モード (入玉の行は base score
 `crates/tools/docs/psv_entered.md`・`crates/tools/docs/psv_dual_label.md`。
 
 ```bash
+# 出力先の dir は作らないので先に作る
+mkdir -p entered relabeled dual/<材料 A>
 # 1. 材料ごとに入玉の行を抜き出す
 cargo run -p tools --release --bin psv_entered -- extract --input material.psv --out entered/material.entered.psv
 # 2. 抜き出した行だけを付け直す (score だけを書き換えるモード。move16 や局面を書き換えるモードは 3 で一致しない)
 cargo run -p tools --release --bin rescore_psv -- --input entered/material.entered.psv --output-dir relabeled/ <ラベラーの引数>
 # 3. 元の材料と付け直した行から dual-label PSV を書く (元の score が DL でなければ --dl-scores に DL の sidecar)
 cargo run -p tools --release --bin psv_entered -- merge-dual --base material.psv \
-  --sparse relabeled/material.entered.psv --out dual/material.dual.psv [--dl-scores material.dl.i16]
+  --sparse relabeled/material.entered.psv --out dual/<材料 A>/material.dual.psv [--dl-scores material.dl.i16]
 # 4. 材料の順に partition して dedup とシャッフルを 1 段で (first-wins なので、重なった局面は前の材料の行が残る)
 cargo run -p tools --release --bin psv_dedup_partition -- --partition-only --input "dual/<材料 A>/*.dual.psv" --temp-dir <tmp>
 #    (材料ごとに --partition-only を順に重ねる)
@@ -170,9 +172,13 @@ cargo run -p tools --release --bin psv_dedup_partition -- --dedup-only --temp-di
 - **局面を組み立てる判定は CPU で律速する**。入玉の判定に `psv_gate_by_king_zone` のような 1 行ずつ局面を作る道具を挟むと、
   数百億行では読み書きより遅くなる。`psv_entered` は packed sfen の玉のマスだけを読むので、ディスクの速さで回る。
 - **partition の一時領域は速いディスクに置く**。一時領域は入力と同じ大きさになり、HDD に置くと同じ HDD で読みと書きが重なる。
-  出力と同じファイルシステムなら、`--keep-temp` なしの dedup は partition を 1 つずつ消しながら書くので、空きは入力の 1.05 倍で足りる
-  (別のファイルシステムに出すときは、出力先に入力の 1.05 倍を求める)。`--keep-temp` なしで dedup が途中で止まると partition が欠けるので、
-  partition からやり直す。
+  空きの目安 (入力 = 全材料の合計バイト):
+  - `--partition-only`: 一時領域に、その呼び出しの入力の 1.05 倍 (材料ごとに重ねるので、最後には全材料ぶんの partition が残る)。
+  - `--dedup-only` を一時領域と同じファイルシステムに出す: `--keep-temp` なしなら partition を 1 つずつ消しながら書くので、
+    partition に加えて最大の partition の 1.05 倍ほど。`--keep-temp` ありなら入力の 1.05 倍。
+  - 別のファイルシステムに出す: 出力先に入力の 1.05 倍。
+
+  `--keep-temp` なしで dedup が途中で止まると partition が欠けるので、partition からやり直す。
 - **合わせる前の部品を残す**: 材料ごとの抜き出し・付け直し・DL の sidecar があれば、配合を変えたり別のラベラーで付け直したりするときに
   材料の読み直しだけで済む。
 - 起動前に、小さな材料で旧手順 (または前回の出力) とバイト一致を確かめる (`cmp`)。`psv_dual_label validate` で
