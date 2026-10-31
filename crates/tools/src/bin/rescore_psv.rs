@@ -1271,6 +1271,9 @@ fn main() -> Result<()> {
         })
         .sum();
     let rprog = MultiFileProgress::new(overall_total, total_files, "rescore");
+    // ONNX セッションは最初に処理するファイルで作り、以降のファイルで使い回す。
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    let mut onnx_sessions: Option<OnnxSessions> = None;
     for (file_idx, input_path) in input_files.iter().enumerate() {
         if INTERRUPTED.load(Ordering::SeqCst) {
             eprintln!("Processing interrupted");
@@ -1460,6 +1463,7 @@ fn main() -> Result<()> {
                 expand_output_path.as_deref(),
                 process_count,
                 &fprog,
+                &mut onnx_sessions,
             )?;
         }
         #[cfg(feature = "dlshogi-onnx")]
@@ -1472,6 +1476,7 @@ fn main() -> Result<()> {
                 (expand_output_path.as_deref(), replacement_output_path.as_deref()),
                 process_count,
                 &fprog,
+                &mut onnx_sessions,
             )?;
         }
         if !use_onnx && !use_dlshogi_onnx {
@@ -1538,6 +1543,15 @@ fn main() -> Result<()> {
         eprintln!();
     }
     rprog.finish();
+
+    // 全ファイルの処理を終えたらセッションを閉じる（`--ort-profile` の JSON はここで書く）。
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    if let Some(mut sessions) = onnx_sessions.take() {
+        if cli.ort_profile.is_some() {
+            sessions.end_profiling();
+        }
+        drop(sessions);
+    }
 
     // エンジン終了
     for mut eng in engines {
@@ -4033,7 +4047,7 @@ struct PinnedBuf {
 }
 
 // SAFETY: pinned host memory (cudaHostAlloc 由来) は任意の CPU スレッドからアクセス可能な
-// 通常のホストメモリである。スロット (= PinnedBuf を含む PreparedBatch) の所有権は mpsc
+// 通常のホストメモリである。スロット (= PinnedBuf への &mut を含む PreparedBatch) は mpsc
 // channel で move 移送され、同一バッファに同時アクセスするスレッドは高々 1 つに保たれる
 // (producer が書き込み → ready 送信 → consumer が読み取り → free 返却)。よって PinnedBuf を
 // スレッド間で送っても data race は発生しない。ort の `Allocator` 自体は Sync でないため、
@@ -4105,33 +4119,407 @@ impl Drop for PinnedPool {
     }
 }
 
+/// ONNX セッションを作ったときのモデルファイル。
+///
+/// セッションは実行中の全入力ファイルで使い回すため、途中でモデルファイルが置き換わると
+/// 古いモデルの出力に新しいモデルの fingerprint を付けてしまう。ファイルの処理を始める前と
+/// 完了マーカーを書く前に照合して止める。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[derive(Debug, PartialEq, Eq)]
+struct OnnxModelIdentity {
+    path: PathBuf,
+    size: u64,
+    mtime_ns: u128,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl OnnxModelIdentity {
+    fn capture(path: &std::path::Path) -> Result<Self> {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize {}", path.display()))?;
+        let (size, mtime_ns) = file_size_mtime_ns(&path)?;
+        Ok(Self {
+            path,
+            size,
+            mtime_ns,
+        })
+    }
+
+    fn ensure_unchanged(&self, path: &std::path::Path) -> Result<()> {
+        let current = Self::capture(path)?;
+        anyhow::ensure!(
+            current == *self,
+            "ONNX model file changed after it was loaded: {} \
+             (size/mtime {}/{} -> {}/{}). Rerun to load the new model.",
+            current.path.display(),
+            self.size,
+            self.mtime_ns,
+            current.size,
+            current.mtime_ns
+        );
+        Ok(())
+    }
+
+    /// 完了マーカーの fingerprint が記録するモデルが、このモデルと同じか。
+    fn matches(&self, fingerprint: &RunFingerprint) -> bool {
+        self.path == fingerprint.model_path
+            && self.size == fingerprint.model_size
+            && self.mtime_ns == fingerprint.model_mtime_ns
+    }
+}
+
+/// ONNX Runtime のセッションと入力特徴の host バッファ。1 回の実行の全入力ファイルで使い回す。
+///
+/// ファイルごとに作り直すと、TensorRT EP ではセッションの数だけモデルの解析と
+/// エンジンの読み込みを毎回やり直すため、小さい入力ファイルが多いと推論より長くかかる。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct OnnxSessions {
+    gpu_sessions: Vec<ort::session::Session>,
+    /// パイプラインの slot ごとの入力特徴バッファ (f1, f2)。数は 2 × セッション数。
+    slot_bufs: Vec<(HostBuf, HostBuf)>,
+    /// `slot_bufs` を pinned で確保できたときの所有者 (drop で free する)。`None` なら
+    /// `slot_bufs` は pageable で、出力バッファも pageable にする。
+    pinned_pool: Option<PinnedPool>,
+    model: OnnxModelIdentity,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl OnnxSessions {
+    /// 初回の呼び出しでセッションを作り、2 回目以降はモデルファイルが変わっていないことを
+    /// 確かめて同じセッションを返す。全入力が skip される実行ではセッションを作らない。
+    fn get_or_create<'s>(
+        slot: &'s mut Option<OnnxSessions>,
+        config: &OnnxPipelineConfig<'_>,
+    ) -> Result<&'s mut OnnxSessions> {
+        match slot {
+            Some(sessions) => {
+                sessions.model.ensure_unchanged(config.onnx_path)?;
+                Ok(sessions)
+            }
+            None => Ok(slot.insert(OnnxSessions::new(config)?)),
+        }
+    }
+
+    fn new(config: &OnnxPipelineConfig<'_>) -> Result<Self> {
+        use ort::ep::ExecutionProvider;
+        use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+        use ort::session::Session;
+
+        let OnnxPipelineConfig {
+            model_name,
+            onnx_path,
+            batch_size,
+            gpu_id,
+            sessions,
+            use_tensorrt,
+            tensorrt_cache,
+            f1_size,
+            f2_size,
+            profile_path,
+            ..
+        } = *config;
+
+        // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
+        //
+        // ort クレートは load-dynamic feature 有効時、ORT_DYLIB_PATH 環境変数で指定された
+        // ライブラリを dlopen する。未設定時はシステムパスから "libonnxruntime.so" を探すが、
+        // 見つからない場合にハングする（エラーではなくブロックする）。
+        //
+        // ort の default features には download-binaries（ビルド時に CPU 版ランタイムを
+        // 自動ダウンロード）が含まれるが、load-dynamic とは #[cfg] で排他のため共存不可。
+        // また download-binaries で取得されるのは CPU 版のみで GPU 版は提供されない。
+        //
+        // したがって load-dynamic を使い、ランタイムはユーザーが自前で用意する設計とする。
+        // GPU 推論がデフォルト。暗黙の CPU フォールバックは CUDA EP チェックで防止する。
+        //
+        // ORT_DYLIB_PATH は GPU/CPU どちらのモードでも必須。
+        // 未設定時に ort がシステムパスから探すとハングするため。
+        match std::env::var("ORT_DYLIB_PATH") {
+            Ok(path) if !path.is_empty() => {
+                if !std::path::Path::new(&path).is_file() {
+                    anyhow::bail!(
+                        "ORT_DYLIB_PATH is set to '{path}' but the file does not exist \
+                         (or is not a regular file).\n\
+                         Download ONNX Runtime from:\n  \
+                         https://github.com/microsoft/onnxruntime/releases"
+                    );
+                }
+                eprintln!("ORT_DYLIB_PATH: {path}");
+            }
+            _ => {
+                let mode_hint = if gpu_id >= 0 {
+                    "GPU inference requires a GPU-enabled ONNX Runtime (onnxruntime-linux-x64-gpu-*)."
+                } else {
+                    "CPU inference requires an ONNX Runtime library (GPU or CPU build)."
+                };
+                anyhow::bail!(
+                    "ORT_DYLIB_PATH environment variable is not set.\n\
+                     {mode_hint}\n\
+                     Download from: https://github.com/microsoft/onnxruntime/releases\n\
+                     Example:\n  \
+                     ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo run ..."
+                );
+            }
+        }
+
+        // ONNX Runtime セッション初期化
+        let model = OnnxModelIdentity::capture(onnx_path)?;
+        eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
+
+        // セッションを 1 本構築する。`--onnx-sessions` ≥ 2 のとき複数回呼ばれるため、
+        // EP 情報などのログと可用性チェックは verbose（1 本目）のみで行う。
+        // ORT profiling も 1 本目のセッションにのみ適用する。
+        let build_session = |verbose: bool| -> Result<Session> {
+            let builder = Session::builder()
+                .map_err(onnx_ort_err)?
+                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
+                .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+                .with_intra_threads(1)
+                .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+
+            let mut builder = match (verbose, profile_path) {
+                (true, Some(path)) => {
+                    eprintln!("ORT profiling enabled: {}", path.display());
+                    builder
+                        .with_profiling(path)
+                        .map_err(|e| anyhow::anyhow!("ORT profiling error: {e}"))?
+                }
+                _ => builder,
+            };
+
+            let session = if gpu_id >= 0 {
+                if use_tensorrt {
+                    if verbose {
+                        eprintln!("Using TensorRT (FP16) on GPU {gpu_id}");
+                    }
+
+                    let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
+                        .with_device_id(gpu_id)
+                        .with_fp16(true)
+                        .with_engine_cache(tensorrt_cache.is_some());
+                    let trt_ep = if let Some(cache_path) = tensorrt_cache {
+                        let cache_str = cache_path.to_str().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "TensorRT cache path contains non-UTF-8 characters: {}",
+                                cache_path.display()
+                            )
+                        })?;
+                        if verbose {
+                            eprintln!("TensorRT engine cache: {}", cache_path.display());
+                        }
+                        trt_ep.with_engine_cache_path(cache_str)
+                    } else {
+                        if verbose {
+                            eprintln!(
+                                "TensorRT engine cache: disabled (use --onnx-tensorrt-cache to enable)"
+                            );
+                        }
+                        trt_ep
+                    };
+
+                    if verbose {
+                        match trt_ep.is_available() {
+                            Ok(true) => eprintln!("TensorRT execution provider: available"),
+                            Ok(false) => {
+                                anyhow::bail!(
+                                    "TensorRTExecutionProvider is NOT available.\n\
+                                     Ensure TensorRT (libnvinfer.so.10) is in LD_LIBRARY_PATH.\n\
+                                     To use CUDA EP instead, omit --onnx-tensorrt."
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("WARNING: Failed to check TensorRT EP availability: {e}");
+                            }
+                        }
+                    }
+
+                    // TensorRT EP + CUDA EP をフォールバックとして登録
+                    let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                        .with_device_id(gpu_id)
+                        .build()
+                        .error_on_failure();
+                    let trt_ep = trt_ep.build().error_on_failure();
+
+                    builder
+                        .with_execution_providers([trt_ep, cuda_ep])
+                        .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP registration failed: {e}"))?
+                        .commit_from_file(onnx_path)
+                        .map_err(onnx_ort_err)?
+                } else {
+                    if verbose {
+                        eprintln!("Using CUDA GPU {gpu_id}");
+                    }
+
+                    let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                        .with_device_id(gpu_id);
+                    if verbose {
+                        match cuda_ep.is_available() {
+                            Ok(true) => eprintln!("CUDA execution provider: available"),
+                            Ok(false) => {
+                                anyhow::bail!(
+                                    "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
+                                     The library may be a CPU-only build.\n\
+                                     Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime.\n\
+                                     To use CPU inference instead, omit --onnx-gpu-id."
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
+                            }
+                        }
+                    }
+
+                    let ep = cuda_ep.build().error_on_failure();
+                    builder
+                        .with_execution_providers([ep])
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "CUDA EP registration failed (is onnxruntime-gpu installed?): {e}"
+                            )
+                        })?
+                        .commit_from_file(onnx_path)
+                        .map_err(onnx_ort_err)?
+                }
+            } else {
+                if verbose {
+                    eprintln!("Using CPU");
+                }
+                builder.commit_from_file(onnx_path).map_err(onnx_ort_err)?
+            };
+            Ok(session)
+        };
+
+        // GPU 推論時のみ複数セッションを許可する（CPU 推論は intra-op を奪い合うだけなので常に 1）。
+        // 2 本目以降は同じ TensorRT engine cache を読むだけなので構築は軽い。
+        let num_sessions = if gpu_id >= 0 { sessions.max(1) } else { 1 };
+        let mut gpu_sessions: Vec<Session> = Vec::with_capacity(num_sessions);
+        for i in 0..num_sessions {
+            gpu_sessions.push(build_session(i == 0)?);
+        }
+        if num_sessions > 1 {
+            eprintln!(
+                "ONNX sessions: {num_sessions} (in-flight multiplexing; outputs re-ordered by batch)"
+            );
+        }
+
+        eprintln!("{model_name} ONNX model loaded. Batch size: {batch_size}");
+
+        let pipeline_slots = 2 * num_sessions;
+        // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
+        // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
+        // GPU 推論 (gpu_id >= 0) のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
+        let mut pinned_pool = if gpu_id >= 0 {
+            MemoryInfo::new(
+                AllocationDevice::CUDA_PINNED,
+                gpu_id,
+                AllocatorType::Device,
+                MemoryType::CPUInput,
+            )
+            .and_then(|info| ort::memory::Allocator::new(&gpu_sessions[0], info))
+            .map(|allocator| PinnedPool {
+                allocator,
+                ptrs: Vec::new(),
+            })
+            .ok()
+        } else {
+            None
+        };
+
+        // 入力特徴バッファ (f1/f2) を pipeline_slots 個ぶん確保。pinned_pool があれば pinned で
+        // 全スロットを一括確保し、1 件でも失敗したら pool を捨てて全スロットを pageable Vec で
+        // 作り直す (all-or-nothing。pinned/pageable 混在を避ける)。確保したバッファは全入力
+        // ファイルで使い回し、pinned_pool は OnnxSessions の drop で free する。
+        let mut slot_bufs: Vec<(HostBuf, HostBuf)> = Vec::with_capacity(pipeline_slots);
+        let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
+            let mut ok = true;
+            for _ in 0..pipeline_slots {
+                // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
+                // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
+                // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
+                let f1 = pool.alloc_zeroed(batch_size * f1_size);
+                let f2 = pool.alloc_zeroed(batch_size * f2_size);
+                match (f1, f2) {
+                    (Ok(f1), Ok(f2)) => slot_bufs.push((HostBuf::Pinned(f1), HostBuf::Pinned(f2))),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok
+        } else {
+            false
+        };
+        if !pinned_ok {
+            if gpu_id >= 0 {
+                eprintln!(
+                    "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
+                );
+            }
+            // ここまでに確保した pinned (slot_bufs 内 + pool.ptrs に登録済) を解放する。
+            // PinnedBuf 自体は Drop を持たず、free は pinned_pool の drop に集約しているため、
+            // 先に slot_bufs を空にしてから pinned_pool を drop する (登録 ptr を 1 回ずつ free)。
+            slot_bufs.clear();
+            drop(pinned_pool.take());
+            for _ in 0..pipeline_slots {
+                slot_bufs.push((
+                    HostBuf::Paged(vec![0.0f32; batch_size * f1_size]),
+                    HostBuf::Paged(vec![0.0f32; batch_size * f2_size]),
+                ));
+            }
+        }
+
+        Ok(OnnxSessions {
+            gpu_sessions,
+            slot_bufs,
+            pinned_pool,
+            model,
+        })
+    }
+
+    /// `--ort-profile` の profiling を終えて JSON を書く (profiling は 1 本目のセッションだけ)。
+    fn end_profiling(&mut self) {
+        if let Some(session) = self.gpu_sessions.first_mut() {
+            match session.end_profiling() {
+                Ok(path) => eprintln!("ORT profile saved: {path}"),
+                Err(e) => eprintln!("ORT profile error: {e}"),
+            }
+        }
+    }
+}
+
 /// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
 ///
 /// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
 /// `build_features` クロージャで特徴量構築の差異を吸収する。
+/// セッションと入力特徴バッファは `onnx_sessions` のものをファイルをまたいで使い回す。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-fn process_file_with_onnx_pipeline<F>(
+fn process_file_with_onnx_pipeline<'s, F>(
     protection: &OutputProtection,
     config: &OnnxPipelineConfig<'_>,
     build_features: F,
     progress: &FileProgress,
+    onnx_sessions: &'s mut OnnxSessions,
 ) -> Result<()>
 where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
 {
     let OnnxPipelineConfig {
-        model_name,
+        // モデルはセッションを作るときに読み、fingerprint は build_run_fingerprint(config) で取る。
+        model_name: _,
         model_kind: _,
-        onnx_path,
+        onnx_path: _,
         input_path,
         output_path,
         out_scores,
         process_count,
         batch_size,
         gpu_id,
-        sessions,
+        // セッション数・TensorRT キャッシュ・profiling はセッションを作るときだけ使う。
+        sessions: _,
         use_tensorrt,
-        tensorrt_cache,
+        tensorrt_cache: _,
         score_clip,
         eval_scale,
         skip_in_check,
@@ -4140,7 +4528,7 @@ where
         f2_size,
         input1_channels,
         input2_channels,
-        profile_path,
+        profile_path: _,
         expand,
         qsearch_leaf_label,
         qsearch_max_ply,
@@ -4152,7 +4540,7 @@ where
         replacement_output,
     } = *config;
 
-    // marker 判定から Session/load 開始までの間に入力・モデルが変わっていないことを確認し、
+    // marker 判定から処理開始までの間に入力・モデルが変わっていないことを確認し、
     // この run の基準 fingerprint を固定する。完了時にも再検証し、run 中の差し替えを
     // 新しい条件の .done として誤って確定しない。
     let sidecar_start_fingerprint = if out_scores {
@@ -4163,7 +4551,6 @@ where
     } else {
         None
     };
-    use ort::ep::ExecutionProvider;
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
     use ort::value::TensorRef;
@@ -4187,189 +4574,18 @@ where
         }
     }
 
-    // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
-    //
-    // ort クレートは load-dynamic feature 有効時、ORT_DYLIB_PATH 環境変数で指定された
-    // ライブラリを dlopen する。未設定時はシステムパスから "libonnxruntime.so" を探すが、
-    // 見つからない場合にハングする（エラーではなくブロックする）。
-    //
-    // ort の default features には download-binaries（ビルド時に CPU 版ランタイムを
-    // 自動ダウンロード）が含まれるが、load-dynamic とは #[cfg] で排他のため共存不可。
-    // また download-binaries で取得されるのは CPU 版のみで GPU 版は提供されない。
-    //
-    // したがって load-dynamic を使い、ランタイムはユーザーが自前で用意する設計とする。
-    // GPU 推論がデフォルト。暗黙の CPU フォールバックは CUDA EP チェックで防止する。
-    //
-    // ORT_DYLIB_PATH は GPU/CPU どちらのモードでも必須。
-    // 未設定時に ort がシステムパスから探すとハングするため。
-    match std::env::var("ORT_DYLIB_PATH") {
-        Ok(path) if !path.is_empty() => {
-            if !std::path::Path::new(&path).is_file() {
-                anyhow::bail!(
-                    "ORT_DYLIB_PATH is set to '{path}' but the file does not exist \
-                     (or is not a regular file).\n\
-                     Download ONNX Runtime from:\n  \
-                     https://github.com/microsoft/onnxruntime/releases"
-                );
-            }
-            eprintln!("ORT_DYLIB_PATH: {path}");
-        }
-        _ => {
-            let mode_hint = if gpu_id >= 0 {
-                "GPU inference requires a GPU-enabled ONNX Runtime (onnxruntime-linux-x64-gpu-*)."
-            } else {
-                "CPU inference requires an ONNX Runtime library (GPU or CPU build)."
-            };
-            anyhow::bail!(
-                "ORT_DYLIB_PATH environment variable is not set.\n\
-                 {mode_hint}\n\
-                 Download from: https://github.com/microsoft/onnxruntime/releases\n\
-                 Example:\n  \
-                 ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo run ..."
-            );
-        }
-    }
-
-    // ONNX Runtime セッション初期化
-    eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
-
-    // セッションを 1 本構築する。`--onnx-sessions` ≥ 2 のとき複数回呼ばれるため、
-    // EP 情報などのログと可用性チェックは verbose（1 本目）のみで行う。
-    // ORT profiling も 1 本目のセッションにのみ適用する。
-    let build_session = |verbose: bool| -> Result<Session> {
-        let builder = Session::builder()
-            .map_err(onnx_ort_err)?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
-            .with_intra_threads(1)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
-
-        let mut builder = match (verbose, profile_path) {
-            (true, Some(path)) => {
-                eprintln!("ORT profiling enabled: {}", path.display());
-                builder
-                    .with_profiling(path)
-                    .map_err(|e| anyhow::anyhow!("ORT profiling error: {e}"))?
-            }
-            _ => builder,
-        };
-
-        let session = if gpu_id >= 0 {
-            if use_tensorrt {
-                if verbose {
-                    eprintln!("Using TensorRT (FP16) on GPU {gpu_id}");
-                }
-
-                let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
-                    .with_device_id(gpu_id)
-                    .with_fp16(true)
-                    .with_engine_cache(tensorrt_cache.is_some());
-                let trt_ep = if let Some(cache_path) = tensorrt_cache {
-                    let cache_str = cache_path.to_str().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "TensorRT cache path contains non-UTF-8 characters: {}",
-                            cache_path.display()
-                        )
-                    })?;
-                    if verbose {
-                        eprintln!("TensorRT engine cache: {}", cache_path.display());
-                    }
-                    trt_ep.with_engine_cache_path(cache_str)
-                } else {
-                    if verbose {
-                        eprintln!(
-                            "TensorRT engine cache: disabled (use --onnx-tensorrt-cache to enable)"
-                        );
-                    }
-                    trt_ep
-                };
-
-                if verbose {
-                    match trt_ep.is_available() {
-                        Ok(true) => eprintln!("TensorRT execution provider: available"),
-                        Ok(false) => {
-                            anyhow::bail!(
-                                "TensorRTExecutionProvider is NOT available.\n\
-                                 Ensure TensorRT (libnvinfer.so.10) is in LD_LIBRARY_PATH.\n\
-                                 To use CUDA EP instead, omit --onnx-tensorrt."
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("WARNING: Failed to check TensorRT EP availability: {e}");
-                        }
-                    }
-                }
-
-                // TensorRT EP + CUDA EP をフォールバックとして登録
-                let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(gpu_id)
-                    .build()
-                    .error_on_failure();
-                let trt_ep = trt_ep.build().error_on_failure();
-
-                builder
-                    .with_execution_providers([trt_ep, cuda_ep])
-                    .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP registration failed: {e}"))?
-                    .commit_from_file(onnx_path)
-                    .map_err(onnx_ort_err)?
-            } else {
-                if verbose {
-                    eprintln!("Using CUDA GPU {gpu_id}");
-                }
-
-                let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(gpu_id);
-                if verbose {
-                    match cuda_ep.is_available() {
-                        Ok(true) => eprintln!("CUDA execution provider: available"),
-                        Ok(false) => {
-                            anyhow::bail!(
-                                "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
-                                 The library may be a CPU-only build.\n\
-                                 Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime.\n\
-                                 To use CPU inference instead, omit --onnx-gpu-id."
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
-                        }
-                    }
-                }
-
-                let ep = cuda_ep.build().error_on_failure();
-                builder
-                    .with_execution_providers([ep])
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "CUDA EP registration failed (is onnxruntime-gpu installed?): {e}"
-                        )
-                    })?
-                    .commit_from_file(onnx_path)
-                    .map_err(onnx_ort_err)?
-            }
-        } else {
-            if verbose {
-                eprintln!("Using CPU");
-            }
-            builder.commit_from_file(onnx_path).map_err(onnx_ort_err)?
-        };
-        Ok(session)
-    };
-
-    // GPU 推論時のみ複数セッションを許可する（CPU 推論は intra-op を奪い合うだけなので常に 1）。
-    // 2 本目以降は同じ TensorRT engine cache を読むだけなので構築は軽い。
-    let num_sessions = if gpu_id >= 0 { sessions.max(1) } else { 1 };
-    let mut gpu_sessions: Vec<Session> = Vec::with_capacity(num_sessions);
-    for i in 0..num_sessions {
-        gpu_sessions.push(build_session(i == 0)?);
-    }
-    if num_sessions > 1 {
-        eprintln!(
-            "ONNX sessions: {num_sessions} (in-flight multiplexing; outputs re-ordered by batch)"
-        );
-    }
-
-    eprintln!("{model_name} ONNX model loaded. Batch size: {batch_size}");
+    let OnnxSessions {
+        gpu_sessions,
+        slot_bufs,
+        pinned_pool,
+        model: loaded_model,
+    } = onnx_sessions;
+    let pinned_ok = pinned_pool.is_some();
+    let num_sessions = gpu_sessions.len();
+    // TensorRT EP は、推論の入力形がそれまでに見た範囲より小さいとエンジンを作り直す
+    // (セッションごと。数十秒かかり、作り直したエンジンでは最下位 bit が変わりうる)。
+    // 最後の端数バッチもゼロで埋めて batch_size 行で推論し、どのファイルも同じエンジンで推論する。
+    let pad_to_batch = use_tensorrt;
 
     progress.set_message("Processing...");
 
@@ -4443,26 +4659,6 @@ where
     let mut total_processed: u64 = 0;
     let mut total_expanded: u64 = 0;
 
-    // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
-    // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
-    // GPU 推論 (gpu_id >= 0) のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
-    let mut pinned_pool = if gpu_id >= 0 {
-        MemoryInfo::new(
-            AllocationDevice::CUDA_PINNED,
-            gpu_id,
-            AllocatorType::Device,
-            MemoryType::CPUInput,
-        )
-        .and_then(|info| ort::memory::Allocator::new(&gpu_sessions[0], info))
-        .map(|allocator| PinnedPool {
-            allocator,
-            ptrs: Vec::new(),
-        })
-        .ok()
-    } else {
-        None
-    };
-
     // フェーズ別 wall time 計測（RESCORE_PHASE_TIMING=1 のとき末尾で出力）。read は reader、
     // build は producer、run と write の後処理分は各 GPU worker、write のファイル書き出し分
     // は writer と、それぞれ別スレッドで計測して合算するため、オーバーラップ分は各フェーズ
@@ -4474,9 +4670,10 @@ where
     // 推論バッチ 1 個分の CPU 成果物（読み込み済み records + 構築済み特徴量 + フラグ）。
     // producer が埋め、consumer（主スレッド）が GPU 推論・書き出しに使う。f1/f2 等は
     // slot プールで再利用し、ピークメモリは入力件数に非依存（PIPELINE_SLOTS 個ぶん）。
-    struct PreparedBatch {
-        f1: HostBuf,
-        f2: HostBuf,
+    // f1/f2 は OnnxSessions のバッファを借りる（全入力ファイルで同じバッファを使う）。
+    struct PreparedBatch<'b> {
+        f1: &'b mut HostBuf,
+        f2: &'b mut HostBuf,
         records: Vec<(PackedSfenValue, UnpackedSfen)>,
         stm_flags: Vec<bool>,
         in_checks: Vec<bool>,
@@ -4499,58 +4696,13 @@ where
     // セッション数・パイプライン化に依存せず旧・直列ループ実装と bit 一致する。
     // slot は free/ready の 2 本のチャネルで循環し、同時生存は pipeline_slots 個
     // （ピークメモリは入力件数に非依存）。
-    let pipeline_slots = 2 * num_sessions;
-
-    // 入力特徴バッファ (f1/f2) を pipeline_slots 個ぶん確保。pinned_pool があれば pinned で
-    // 全スロットを一括確保し、1 件でも失敗したら pool を捨てて全スロットを pageable Vec で
-    // 作り直す (all-or-nothing。pinned/pageable 混在を避ける)。pinned_pool への &mut 借用は
-    // ここで完結させ、thread::scope には確保済みバッファ (HostBuf) のみ move する
-    // (pinned_pool は scope 後の drop で free)。
-    let mut slot_bufs: Vec<(HostBuf, HostBuf)> = Vec::with_capacity(pipeline_slots);
-    let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
-        let mut ok = true;
-        for _ in 0..pipeline_slots {
-            // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
-            // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
-            // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
-            let f1 = pool.alloc_zeroed(batch_size * f1_size);
-            let f2 = pool.alloc_zeroed(batch_size * f2_size);
-            match (f1, f2) {
-                (Ok(f1), Ok(f2)) => slot_bufs.push((HostBuf::Pinned(f1), HostBuf::Pinned(f2))),
-                _ => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        ok
-    } else {
-        false
-    };
-    if !pinned_ok {
-        if gpu_id >= 0 {
-            eprintln!(
-                "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
-            );
-        }
-        // ここまでに確保した pinned (slot_bufs 内 + pool.ptrs に登録済) を解放する。
-        // PinnedBuf 自体は Drop を持たず、free は pinned_pool の drop に集約しているため、
-        // 先に slot_bufs を空にしてから pinned_pool を drop する (登録 ptr を 1 回ずつ free)。
-        slot_bufs.clear();
-        drop(pinned_pool.take());
-        for _ in 0..pipeline_slots {
-            slot_bufs.push((
-                HostBuf::Paged(vec![0.0f32; batch_size * f1_size]),
-                HostBuf::Paged(vec![0.0f32; batch_size * f2_size]),
-            ));
-        }
-    }
+    let pipeline_slots = slot_bufs.len();
 
     // GPU worker → writer。推論+後処理済みバッチ。書き出しバイト列まで worker 側で
     // 構築し、writer は seq 順に再整列して write するだけにする（後処理を GPU
     // クリティカルパスから外し、別セッションの推論と重ねる）。
-    struct DoneBatch {
-        slot: PreparedBatch,
+    struct DoneBatch<'b> {
+        slot: PreparedBatch<'b>,
         rescore_bytes: Vec<u8>,
         replacement_bytes: Vec<u8>,
         expand_bytes: Vec<u8>,
@@ -4558,7 +4710,7 @@ where
         clipped: u64,
         expanded: u64,
     }
-    let (done_tx, done_rx) = mpsc::channel::<(u64, Result<DoneBatch>)>();
+    let (done_tx, done_rx) = mpsc::channel::<(u64, Result<DoneBatch<'s>>)>();
 
     // ---- GPU worker × num_sessions: 推論 + 後処理 ----
     // TensorRT engine cache が未生成の初回実行に複数セッションが同時へエンジン構築・
@@ -4575,10 +4727,10 @@ where
     // 場合も drop によって待機側の recv が解除される。
     let run_gpu_worker = |worker_idx: usize,
                           session: &mut Session,
-                          done_tx: mpsc::Sender<(u64, Result<DoneBatch>)>,
+                          done_tx: mpsc::Sender<(u64, Result<DoneBatch<'s>>)>,
                           mut gate_tx: Option<mpsc::Sender<()>>,
                           gate_rx: &Mutex<mpsc::Receiver<()>>,
-                          ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch)>>|
+                          ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch<'s>)>>|
      -> (u128, u128) {
         let (mut t_run, mut t_write) = (0u128, 0u128);
         // expand 用 softmax バッファ（worker 内でバッチ間再利用）
@@ -4640,6 +4792,12 @@ where
                 break;
             }
             let actual_batch = batch.actual_batch;
+            // 推論する行数。埋めた行 (actual_batch 以降) の推論結果は読まない。
+            let infer_rows = if pad_to_batch {
+                batch_size
+            } else {
+                actual_batch
+            };
             // ort エラーは Result のまま writer へ送って伝播させる（ここで ? を使うと
             // writer が seq 待ちのままデッドロックするため）。
             let result = (|| -> Result<DoneBatch> {
@@ -4657,17 +4815,17 @@ where
                 //   実質同期 (CPU staging 介在) となり全体の ~96% を占めていた (nsys)。
                 //   入力 host バッファを pinned (page-locked) 化することでこの staging を
                 //   消し、真の async H2D にしている (HostBuf / PinnedPool 参照)。
-                let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
+                let shape1: [usize; 4] = [infer_rows, input1_channels, 9, 9];
                 let input1 = TensorRef::<f32>::from_array_view((
                     shape1,
-                    &batch.f1.as_slice()[..actual_batch * f1_size],
+                    &batch.f1.as_slice()[..infer_rows * f1_size],
                 ))
                 .map_err(onnx_ort_err)?;
 
-                let shape2: [usize; 4] = [actual_batch, input2_channels, 9, 9];
+                let shape2: [usize; 4] = [infer_rows, input2_channels, 9, 9];
                 let input2 = TensorRef::<f32>::from_array_view((
                     shape2,
-                    &batch.f2.as_slice()[..actual_batch * f2_size],
+                    &batch.f2.as_slice()[..infer_rows * f2_size],
                 ))
                 .map_err(onnx_ort_err)?;
 
@@ -4771,10 +4929,10 @@ where
                     let (policy_shape, policy_data) = outputs["output_policy"]
                         .try_extract_tensor::<f32>()
                         .map_err(onnx_ort_err)?;
-                    let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
+                    let expected_len = infer_rows * MAX_MOVE_LABEL_NUM;
                     if policy_data.len() != expected_len {
                         anyhow::bail!(
-                            "Policy output shape mismatch: expected [{actual_batch}, \
+                            "Policy output shape mismatch: expected [{infer_rows}, \
                                      {MAX_MOVE_LABEL_NUM}] ({expected_len} elements), got shape \
                                      {:?} ({} elements). Is the ONNX model a compatible policy \
                                      network?",
@@ -4867,11 +5025,11 @@ where
         (t_run, t_write)
     };
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
-        let (free_tx, free_rx) = mpsc::channel::<PreparedBatch>();
+        let (free_tx, free_rx) = mpsc::channel::<PreparedBatch<'s>>();
         // producer→GPU worker。バッチ通番 seq を添えて送り、writer が seq で再整列する。
         // Receiver は複数 worker で分け合う（Mutex 越しに recv した worker がそのバッチを
         // 担当する。担当順は任意でよく、出力順は writer の再整列が保証する）。
-        let (ready_tx, ready_rx) = mpsc::channel::<(u64, PreparedBatch)>();
+        let (ready_tx, ready_rx) = mpsc::channel::<(u64, PreparedBatch<'s>)>();
         let ready_rx = Arc::new(Mutex::new(ready_rx));
         for (f1, f2) in slot_bufs {
             free_tx
@@ -5022,8 +5180,14 @@ where
                     } = &mut slot;
                     let f1 = f1.as_mut_slice();
                     let f2 = f2.as_mut_slice();
-                    f1[..actual_batch * f1_size].fill(0.0);
-                    f2[..actual_batch * f2_size].fill(0.0);
+                    // 埋める行も推論に渡すので、前のバッチの特徴量を残さずゼロにする。
+                    let zero_rows = if pad_to_batch {
+                        batch_size
+                    } else {
+                        actual_batch
+                    };
+                    f1[..zero_rows * f1_size].fill(0.0);
+                    f2[..zero_rows * f2_size].fill(0.0);
                     let f1_slices: Vec<&mut [f32]> =
                         f1[..actual_batch * f1_size].chunks_mut(f1_size).collect();
                     let f2_slices: Vec<&mut [f32]> =
@@ -5294,14 +5458,6 @@ where
         );
     }
 
-    if profile_path.is_some() {
-        // profiling は 1 本目のセッションにのみ適用している（build_session 参照）。
-        match gpu_sessions[0].end_profiling() {
-            Ok(path) => eprintln!("ORT profile saved: {path}"),
-            Err(e) => eprintln!("ORT profile error: {e}"),
-        }
-    }
-
     // 出力ファイル本体の flush + sync は writer スレッドが終了時に実施済み
     //（マーカー書き出し前にクラッシュしても書き出し済みバイト列がディスクに着地している）。
     progress.finish_with_message("Done");
@@ -5385,6 +5541,20 @@ where
         } else {
             build_run_fingerprint(config)?
         };
+        // fingerprint のモデルはファイルの今の size/mtime。推論に使ったのはセッションを作ったときの
+        // モデルなので、置き換わっていたら完了にせず出力を空にする (marker の無い PSV 出力は
+        // 件数がそろえば完了扱いで skip されるため、残すと次の実行で作り直されない)。
+        if !loaded_model.matches(&fingerprint) {
+            protection.truncate(output_path, 0)?;
+            if out_scores {
+                remove_in_progress_marker(protection, output_path)?;
+            }
+            anyhow::bail!(
+                "ONNX model file changed while processing {}; discarded the output. \
+                 Rerun to load the new model.",
+                input_path.display()
+            );
+        }
         let rescore_size = fs::metadata(output_path)?.len();
         let expand_size = match expand {
             Some(e) => Some(fs::metadata(e.output_path)?.len()),
@@ -5426,6 +5596,7 @@ fn process_file_with_onnx(
     expand_output_path: Option<&std::path::Path>,
     process_count: u64,
     progress: &FileProgress,
+    onnx_sessions: &mut Option<OnnxSessions>,
 ) -> Result<()> {
     use tools::aobazero_features::{
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
@@ -5470,6 +5641,7 @@ fn process_file_with_onnx(
         qsearch_ls_progress_coeff_path: None,
         replacement_output: None,
     };
+    let onnx_sessions = OnnxSessions::get_or_create(onnx_sessions, &config)?;
     process_file_with_onnx_pipeline(
         protection,
         &config,
@@ -5477,6 +5649,7 @@ fn process_file_with_onnx(
             make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
         },
         progress,
+        onnx_sessions,
     )
 }
 
@@ -5493,6 +5666,7 @@ fn process_file_with_dlshogi_onnx(
     auxiliary_outputs: (Option<&std::path::Path>, Option<&std::path::Path>),
     process_count: u64,
     progress: &FileProgress,
+    onnx_sessions: &mut Option<OnnxSessions>,
 ) -> Result<()> {
     let (expand_output_path, replacement_output_path) = auxiliary_outputs;
     use tools::dlshogi_features::{
@@ -5538,6 +5712,7 @@ fn process_file_with_dlshogi_onnx(
         qsearch_ls_progress_coeff_path: cli.ls_progress_coeff.as_deref(),
         replacement_output: replacement_output_path,
     };
+    let onnx_sessions = OnnxSessions::get_or_create(onnx_sessions, &config)?;
     process_file_with_onnx_pipeline(
         protection,
         &config,
@@ -5545,6 +5720,7 @@ fn process_file_with_dlshogi_onnx(
             make_input_features(pos, f1, f2);
         },
         progress,
+        onnx_sessions,
     )
 }
 
@@ -6874,6 +7050,81 @@ mod marker_tests {
         cursor.read_exact(&mut record).unwrap();
         assert_eq!(PackedSfenValue::from_bytes(&record).unwrap().score, 300);
         assert!(seek_to_record(&mut cursor, u64::MAX).is_err());
+    }
+}
+
+#[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
+mod onnx_sessions_tests {
+    use super::*;
+
+    #[test]
+    fn model_identity_detects_replaced_model_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        std::fs::write(&model, b"weights-a").unwrap();
+        let loaded = OnnxModelIdentity::capture(&model).unwrap();
+        loaded.ensure_unchanged(&model).unwrap();
+
+        // 同じサイズの別の重みに置き換わっても、mtime の違いで止める。
+        let modified = std::fs::metadata(&model).unwrap().modified().unwrap();
+        std::fs::write(&model, b"weights-b").unwrap();
+        File::options()
+            .write(true)
+            .open(&model)
+            .unwrap()
+            .set_modified(modified + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(loaded.ensure_unchanged(&model).is_err());
+
+        // サイズが変わっても止める。
+        std::fs::write(&model, b"weights-longer").unwrap();
+        assert!(loaded.ensure_unchanged(&model).is_err());
+    }
+
+    #[test]
+    fn model_identity_matches_marker_fingerprint_until_model_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.psv");
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(&input, [0u8; PackedSfenValue::SIZE]).unwrap();
+        let config = OnnxPipelineConfig {
+            model_name: "dlshogi",
+            model_kind: "dlshogi",
+            onnx_path: &model,
+            input_path: &input,
+            output_path: &output,
+            out_scores: false,
+            process_count: 1,
+            batch_size: 1024,
+            gpu_id: -1,
+            sessions: 1,
+            use_tensorrt: false,
+            tensorrt_cache: None,
+            score_clip: 10000,
+            eval_scale: 600.0,
+            skip_in_check: false,
+            onnx_draw_ply: 0,
+            f1_size: 0,
+            f2_size: 0,
+            input1_channels: 0,
+            input2_channels: 0,
+            profile_path: None,
+            expand: None,
+            qsearch_leaf_label: false,
+            qsearch_max_ply: 16,
+            qsearch_nnue_path: None,
+            qsearch_ls_bucket_mode: None,
+            qsearch_ls_progress_buckets: None,
+            qsearch_ls_progress_coeff_path: None,
+            replacement_output: None,
+        };
+        let loaded = OnnxModelIdentity::capture(&model).unwrap();
+        assert!(loaded.matches(&build_run_fingerprint(&config).unwrap()));
+
+        std::fs::write(&model, b"weights-v2").unwrap();
+        assert!(!loaded.matches(&build_run_fingerprint(&config).unwrap()));
     }
 }
 
