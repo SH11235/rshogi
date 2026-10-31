@@ -6,8 +6,8 @@ use crate::book_db::{BookDb, BookMove, PositionEntry};
 use crate::book_tree::ReadingArgs;
 use crate::book_tree::audit::MasterValue;
 use crate::book_tree::journal::{Journal, Pv, Reading, Settings};
+use crate::book_tree::master_table::{COLUMNS, parse_master};
 use crate::book_tree::model::child;
-use crate::book_tree::register::{COLUMNS, parse_master};
 use crate::book_tree::targets::{Defaults, Line};
 use rshogi_book::BookEntryMove;
 use std::collections::BTreeSet;
@@ -485,8 +485,7 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     super::value::run(value_args("v2", true)).unwrap();
 
     let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
-    let find =
-        |k: &str, m: &str| rows.iter().find(|r| r.0[0] == k && r.0[2] == m).map(|r| r.0.clone());
+    let find = |k: &str, m: &str| rows.iter().find(|r| r.get("key") == k && r.get("move") == m);
     let main = find(ROOT, "5i4i").unwrap();
     let lineage = format!(
         "book:big.db@{}",
@@ -494,22 +493,22 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     );
     assert_eq!(
         (
-            main[3].as_str(),
-            main[4].as_str(),
-            main[5].as_str(),
-            main[7].as_str(),
-            main[8].as_str()
+            main.get("role"),
+            main.get("source"),
+            main.get("evals"),
+            main.get("lineage"),
+            main.get("tier")
         ),
         ("main", "ext", "20", lineage.as_str(), "wide")
     );
-    assert_eq!(find(ROOT, "5i5h").unwrap()[3], "alt");
+    assert_eq!(find(ROOT, "5i5h").unwrap().get("role"), "alt");
     // 読み由来でない main は替えず、伝播後の 1 位を alt に足す。
-    assert_eq!(find(&ab, "5h6h").unwrap()[3], "main");
-    assert_eq!(find(&ab, "5h4i").unwrap()[3], "alt");
+    assert_eq!(find(&ab, "5h6h").unwrap().get("role"), "main");
+    assert_eq!(find(&ab, "5h4i").unwrap().get("role"), "alt");
     // 相手の手番の局面は登録しない。
     assert!(find(&key(&["5i5h"]), "5a5b").is_none());
     // 自分の手番の出口は読みの値で登録する。
-    assert_eq!(find(&key(&["5i5h", "5a4a"]), "5h4h").unwrap()[3], "main");
+    assert_eq!(find(&key(&["5i5h", "5a4a"]), "5h4h").unwrap().get("role"), "main");
 
     // 読みが足りなければ何も書かずに止まる。
     let short = d.join("short.jsonl");
@@ -614,8 +613,8 @@ fn a_subtree_without_readings_is_valued_without_a_journal() {
     );
     super::value::run(args).unwrap();
     let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
-    let root_row = rows.iter().find(|r| r.0[0] == ROOT).unwrap();
-    assert_eq!((root_row.0[2].as_str(), root_row.0[5].as_str()), ("5i5h", "-70"));
+    let root_row = rows.iter().find(|r| r.get("key") == ROOT).unwrap();
+    assert_eq!((root_row.get("move"), root_row.get("evals")), ("5i5h", "-70"));
 }
 
 #[test]

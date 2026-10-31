@@ -4,9 +4,9 @@
 //! 先を伸ばしていない甘い手が伝播後の 1 位に繰り上がる。その局面を、伸ばしていない手を指した後の局面を
 //! 根にした木のキューの行とともに出す。
 
-use super::audit::{AuditedBook, AuditedMove, MasterPosition, Origin, audited_moves};
+use super::audit::{AuditedBook, AuditedMove, Origin, audited_moves};
+use super::master_table::MasterPosition;
 use super::model::child;
-use super::register::COLUMNS;
 use super::rejoin::{WeightArgs, reach_weights};
 use super::reply_graph::HIRATE_KEY;
 use super::targets::{Line, Opts};
@@ -174,19 +174,15 @@ pub(super) fn fill_best_sources(path: &Path, rows: &mut [Refutation]) -> Result<
     }
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
-    let col = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
-    let (key_col, move_col, role_col, source_col) =
-        (col("key"), col("move"), col("role"), col("source"));
     let mut found = vec![None; rows.len()];
-    // 見出しと列の数は `read_master` で検査済み。
+    // 見出し・列の数・role は read_master で検査済み。
     for line in BufReader::new(file).lines().skip(1) {
-        let line = line?;
-        let cells: Vec<&str> = line.split('\t').collect();
-        if cells[role_col] == "record" {
+        let row = super::master_table::Row::split_line(&line?);
+        if row.get("role") == "record" {
             continue;
         }
-        if let Some(&i) = wanted.get(&(cells[key_col], cells[move_col])) {
-            found[i] = Some(cells[source_col].to_owned());
+        if let Some(&i) = wanted.get(&(row.get("key"), row.get("move"))) {
+            found[i] = Some(row.get("source").to_owned());
         }
     }
     for (row, source) in rows.iter_mut().zip(found) {
@@ -369,7 +365,8 @@ pub(super) fn write_outputs(
 mod tests {
     use super::*;
     use crate::book_backprop::DrawValues;
-    use crate::book_tree::audit::{audit, parse_master_rows};
+    use crate::book_tree::audit::audit;
+    use crate::book_tree::master_table::{COLUMNS, parse_master_rows};
 
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
     /// ROOT から 5i4h。

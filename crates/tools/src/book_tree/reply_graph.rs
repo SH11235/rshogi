@@ -2,7 +2,7 @@
 //! 対局で RAMU が定跡を指し続けられる局面を、初期局面から辿る。先後反転した局面は引かない
 //! (対局の設定 `FlippedBook=false` と同じ)。
 
-use super::audit::MasterPosition;
+use super::master_table::MasterPosition;
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::packed_sfen::{pack_position, pack_static_position, unpack_sfen_to_parts};
 use anyhow::{Context, Result, anyhow, ensure};
@@ -598,8 +598,7 @@ pub(super) fn nontrivial_sccs_graph(adjacency: &(impl DirectedGraph + ?Sized)) -
 /// テスト用の小さい元データ。
 #[cfg(test)]
 pub(super) mod fixture {
-    use super::super::audit::{MasterPosition, parse_master_rows};
-    use super::super::register::COLUMNS;
+    use super::super::master_table::{COLUMNS, MasterPosition, parse_master_rows};
     use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
     use std::collections::BTreeMap;
     use std::fmt::Write as _;

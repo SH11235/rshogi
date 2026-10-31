@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を次の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -439,6 +439,30 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
+
+## `master validate`: 元データの全件検査
+
+```bash
+book_mine master validate --master moves.tsv
+```
+
+`--master` は必須です。入力を変更せず、次の 11 列をこの順で持つ TSV を検査します。
+
+```text
+key ply move role source evals nodes lineage tier since note
+```
+
+- 見出しの完全一致、各行の列数、1 行以上の手があること。区切りはタブ、行末は LF または CRLF です。セル内のタブ・CR・LF は使えません。
+- `since` が空白だけでないこと、同じ `key` と `move` の重複がないこと。
+- `role` は `main` / `alt` / `record`、`tier` は `curated` / `wide`。
+- `ply` は空か ASCII の 10 進数字だけ。`evals` は空かカンマ区切りの符号付き整数 (各値と加算途中の合計が i64 に収まり、偶数丸めした平均が i32 に収まること)。小数・空の要素・空白つきの値は使えません。`record` の行も検査します (読み込み側は `record` の `evals` を読まないので、`validate` の方が厳しくなります)。
+- 局面に `main` / `alt` がある場合、`main` がちょうど 1 行あること。全行と `curated` の行だけでそれぞれ検査します。`record` だけの局面も受け付けます。
+- `key` は両玉を 1 枚ずつ含む SFEN の盤面・手番・持ち駒の 3 フィールドで、読み込んだ局面を書き出した正規形と一致すること。
+- `move` はその局面の合法手を表す USI 文字列であること (`record` も検査します)。
+
+`source` の語彙は検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
+
+誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。`master audit` などの読み込み側も、`evals` の合計が i64 を超える場合はエラーになります。
 
 ## `master check`: 書き出した定跡とプリセットの検査
 

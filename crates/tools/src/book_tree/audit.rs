@@ -1,8 +1,8 @@
 //! 定跡の元データの読みの値を `book_backprop` の後退解析で伝播し、main が伝播後の 1 位から
 //! どれだけ負けるかを点検する。元データは書き換えない。
 
+use super::master_table::{BookMove, MasterPosition, read_master};
 use super::refutation::{self, RefutationOutputs};
-use super::register::{COLUMNS, ROLES};
 use super::rejoin::WeightArgs;
 use super::reply_graph::apply_usi;
 use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
@@ -12,14 +12,14 @@ use crate::book_backprop::{
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -78,22 +78,6 @@ pub(super) struct AuditArgs {
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
     #[arg(long, default_value_t = 0)]
     threads: usize,
-}
-
-/// 局面の main・alt の手。record は指さないので持たない。
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct BookMove {
-    pub mv: String,
-    /// 読みの値の平均を丸めた値 (手番の側から)。読みが無ければ `None`。
-    pub eval: Option<i32>,
-}
-
-/// 元データの局面。`moves[0]` が main。
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct MasterPosition {
-    pub ply: String,
-    pub source: String,
-    pub moves: Vec<BookMove>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,79 +243,6 @@ fn resolve(path: &Path) -> PathBuf {
         (Ok(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
-}
-
-/// 元データを読み、局面ごとに main・alt の手 (main が先頭) を集める。record は数だけ返す。
-pub(super) fn read_master(path: &Path) -> Result<(BTreeMap<String, MasterPosition>, usize)> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
-    parse_master_rows(BufReader::new(file))
-}
-
-pub(super) fn parse_master_rows(
-    reader: impl BufRead,
-) -> Result<(BTreeMap<String, MasterPosition>, usize)> {
-    let col = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
-    let (key_col, ply_col, move_col, role_col, source_col, evals_col) =
-        (col("key"), col("ply"), col("move"), col("role"), col("source"), col("evals"));
-    let mut lines = reader.lines();
-    let header = lines.next().transpose()?;
-    ensure!(
-        header.as_deref() == Some(COLUMNS.join("\t").as_str()),
-        "元データの見出しが違います"
-    );
-    let mut positions: BTreeMap<String, MasterPosition> = BTreeMap::new();
-    let mut records = 0;
-    for (i, line) in lines.enumerate() {
-        let line = line?;
-        let at = i + 2;
-        let cells: Vec<&str> = line.split('\t').collect();
-        ensure!(cells.len() == COLUMNS.len(), "元データの {at} 行目の列の数が違います");
-        let role = cells[role_col];
-        ensure!(ROLES.contains(&role), "元データの {at} 行目の role が不正です");
-        if role == "record" {
-            records += 1;
-            continue;
-        }
-        let eval = mean_eval(cells[evals_col])
-            .with_context(|| format!("元データの {at} 行目の evals が不正です"))?;
-        let position =
-            positions.entry(cells[key_col].to_owned()).or_insert_with(|| MasterPosition {
-                ply: String::new(),
-                source: String::new(),
-                moves: Vec::new(),
-            });
-        ensure!(
-            position.moves.iter().all(|m| m.mv != cells[move_col]),
-            "元データの {at} 行目の手が同じ局面で重なっています"
-        );
-        let book_move = BookMove {
-            mv: cells[move_col].to_owned(),
-            eval,
-        };
-        if role == "main" {
-            ensure!(position.ply.is_empty(), "元データの {at} 行目: 局面に main が 2 つあります");
-            position.ply = cells[ply_col].to_owned();
-            position.source = cells[source_col].to_owned();
-            position.moves.insert(0, book_move);
-        } else {
-            position.moves.push(book_move);
-        }
-    }
-    if let Some((key, _)) = positions.iter().find(|(_, p)| p.ply.is_empty()) {
-        bail!("main の無い局面があります: {key}");
-    }
-    Ok((positions, records))
-}
-
-/// カンマ区切りの読みの値の平均を、0.5 は偶数の側へ丸める (偶数丸め)。空なら `None`。
-fn mean_eval(text: &str) -> Result<Option<i32>> {
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let values: Vec<i64> = text.split(',').map(str::parse).collect::<Result<_, _>>()?;
-    let mean = values.iter().sum::<i64>() as f64 / values.len() as f64;
-    Ok(Some(i32::try_from(mean.round_ties_even() as i64)?))
 }
 
 /// 点検後のグラフと、元データの手との対応。
@@ -933,6 +844,7 @@ pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValue
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_table::{COLUMNS, mean_eval, parse_master_rows};
     use super::*;
 
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";

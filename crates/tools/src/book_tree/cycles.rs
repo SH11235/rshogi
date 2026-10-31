@@ -3,8 +3,10 @@
 
 mod exact;
 
-use super::audit::{MasterPosition, evaluate, read_master, reject_same_file};
-use super::register::{COLUMNS, format_master, parse_master, validate};
+use super::audit::{evaluate, reject_same_file};
+use super::master_table::{
+    MasterPosition, Row, format_master, parse_master, read_master, validate,
+};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, ReplyGraph, SideArg, build, nontrivial_sccs, selected_moves,
     thread_pool,
@@ -852,9 +854,6 @@ impl MoveBits {
 fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Result<MoveTags> {
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
-    let column = |name: &str| COLUMNS.iter().position(|c| *c == name).expect("既知の列");
-    let (key, mv, tier, since_column) =
-        (column("key"), column("move"), column("tier"), column("since"));
     let mut tags = MoveTags {
         curated: HashSet::new(),
         removable: if since.is_empty() {
@@ -864,16 +863,15 @@ fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Res
         },
     };
     for line in std::io::BufReader::new(file).lines().skip(1) {
-        let line = line?;
-        let cells: Vec<&str> = line.split('\t').collect();
-        if cells.get(tier) == Some(&"curated") {
-            tags.curated.insert((cells[key].to_owned(), cells[mv].to_owned()));
+        let row = Row::split_line(&line?);
+        if row.get_optional("tier") == Some("curated") {
+            tags.curated.insert((row.get("key").to_owned(), row.get("move").to_owned()));
         }
         if let Some(bits) = tags.removable.as_mut()
-            && cells.get(since_column).is_some_and(|s| since.iter().any(|t| t == s))
+            && row.get_optional("since").is_some_and(|s| since.iter().any(|t| t == s))
             // record の行は局面の手に無い (辺にもならない) ので印を付けない。
-            && let Some(m) = index.find(cells[key])
-            && let Some(j) = index.position(m).moves.iter().position(|x| x.mv == cells[mv])
+            && let Some(m) = index.find(row.get("key"))
+            && let Some(j) = index.position(m).moves.iter().position(|x| x.mv == row.get("move"))
         {
             bits.set(m, j);
         }
@@ -899,7 +897,7 @@ fn allowed_edges(graph: &ReplyGraph, removable: Option<&MoveBits>) -> Vec<bool> 
 
 /// 元データの行を書き換え、書き換えた行の数を返す。
 fn rewrite_rows<'a>(
-    rows: &mut [super::register::Row],
+    rows: &mut [Row],
     positions: &BTreeMap<String, MasterPosition>,
     plans: impl Iterator<Item = &'a SidePlan>,
     note: &str,
@@ -978,7 +976,7 @@ fn format_summary(r: &SideResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::audit::parse_master_rows;
+    use super::super::master_table::parse_master_rows;
     use super::super::reply_graph::fixture::{ROOT, after, master_text, positions};
     use super::*;
     use rand::{Rng, SeedableRng};
@@ -1148,7 +1146,7 @@ mod tests {
             (c.as_str(), "4h3h", "alt", "20", "curated"),
             (c.as_str(), "4h4i", "alt", "90", "wide"),
         ];
-        let mut text = super::super::register::COLUMNS.join("\t");
+        let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, tier) in rows {
             writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\t{tier}\tt\tn").unwrap();
@@ -1241,7 +1239,7 @@ mod tests {
             (c.as_str(), "4h5i", "main", "10", "old"),
             (c.as_str(), "4h3h", "alt", "0", "old"),
         ];
-        let mut text = super::super::register::COLUMNS.join("\t");
+        let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, since) in rows {
             writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\t{since}\tn").unwrap();
@@ -1294,7 +1292,7 @@ mod tests {
             (x.as_str(), "4h3h", "alt", "0", "old"),
             (z.as_str(), "5i4h", "main", "0", "old"),
         ];
-        let mut text = super::super::register::COLUMNS.join("\t");
+        let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, since) in rows {
             writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\t{since}\tn").unwrap();

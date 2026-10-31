@@ -6,6 +6,7 @@ mod check;
 mod cycles;
 mod file_lock;
 mod journal;
+mod master_table;
 mod model;
 mod output;
 mod paths;
@@ -121,6 +122,8 @@ pub struct MasterArgs {
 
 #[derive(Subcommand, Debug)]
 enum MasterCommand {
+    /// 元データの書式・局面・合法手を全件検査する
+    Validate(master_table::ValidateArgs),
     /// 書き出した定跡とプリセットの整合性・到達局面・循環への入口を検査する
     Check(check::CheckArgs),
     /// 読みの値を book_backprop で伝播し、main が伝播後の 1 位から負ける局面を点検する
@@ -136,6 +139,7 @@ enum MasterCommand {
 /// CLI の指定に従い元データを処理する。
 pub fn run_master(args: MasterArgs) -> Result<()> {
     match args.command {
+        MasterCommand::Validate(args) => master_table::run_validate(args),
         MasterCommand::Check(args) => check::run(args),
         MasterCommand::Audit(args) => audit::run(args),
         MasterCommand::Rejoin(args) => rejoin::run(args),
