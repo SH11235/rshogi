@@ -26,6 +26,7 @@
 | [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX policy で PSV の候補局面を展開 |
 | [`psv_gate_by_king_zone`](psv_gate_by_king_zone.md) | 入玉条件による score 合成と行対応 mask の生成 |
 | [`psv_dual_label`](psv_dual_label.md) | 通常・dual-label PSV と score / mask sidecar の相互変換 |
+| [`psv_entered`](psv_entered.md) | 入玉の行の抜き出しと、付け直した入玉の行からの dual-label PSV の作成 |
 | [`psv_select_by_mask`](psv_select_by_mask.md) | mask の bit 1 に対応する PSV 行を入力順に抽出 |
 | [`psv_scatter_by_mask`](psv_scatter_by_mask.md) | compact PSV の score を元 shard の mask 対応行へ反映 |
 | [`fix_scores`](fix_scores.md) | 元 PSV を保護して前処理済み PSV の score を復元 |
