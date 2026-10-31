@@ -119,8 +119,8 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
     }
     // 推定は詰将棋のルールの数え方に切り替えてから読む
     let estimated = estimate::estimate_pv(searcher, st, tables)?;
-    // 証明は予算で打ち切らない。打ち切ると、すべての応手を数える手数から 2 手ずつ縮める証明に戻り、長編ではそちらの
-    // 方がずっと重い。推定が受け方の応手を選び損ねていれば、その局面の証明が詰まないと分かって縮める証明に戻る
+    // 推定した手順の証明は予算で打ち切らない。打ち切ると、すべての応手を数える手数から 2 手ずつ縮める証明に戻り、長編ではそちらが
+    // 大幅に重くなることがある。推定が受け方の応手を選び損ねていれば、その局面の証明が詰まないと分かって縮める証明に戻る
     if let Some(pv) = estimated.filter(|pv| pv.len() <= usize::from(len))
         && prove_backward(searcher, st, &pv)?
     {
@@ -138,7 +138,7 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
 }
 
 /// 手順の局面を末端から根へ、残りの手数を上限にして証明する。すべて証明できれば `true`
-fn prove_backward<S: MateState, const PIECES: bool>(
+fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     pv: &[S::Mv],
@@ -151,7 +151,7 @@ fn prove_backward<S: MateState, const PIECES: bool>(
         st.undo_move(mv);
         if proven {
             let remaining = (pv.len() - i) as u16;
-            let r = searcher.search(st, NodeArgs::unbounded(0, i % 2 == 0, remaining), &mut 0);
+            let r = searcher.search_shared(st, NodeArgs::unbounded(0, i % 2 == 0, remaining));
             match r {
                 Ok(r) => proven = r.is_proven(),
                 Err(abort) => {
