@@ -24,6 +24,9 @@ pub(super) struct AddReadsArgs {
     /// 元データの表
     #[arg(long)]
     master: PathBuf,
+    /// 語彙と読み条件の表を置いたディレクトリ
+    #[arg(long)]
+    schema: Option<PathBuf>,
     /// 追加候補の表の出力先
     #[arg(long)]
     out: PathBuf,
@@ -207,6 +210,15 @@ fn select(master: &[Row], groups: &Groups, since: &str) -> Result<Selection> {
                         ("source", "read".into()),
                         ("tier", "wide".into()),
                         ("since", since.into()),
+                        ("cond", "unknown".into()),
+                        (
+                            "value_kind",
+                            if evals.split(',').count() == 1 {
+                                "single".into()
+                            } else {
+                                format!("mean:{}", evals.split(',').count())
+                            },
+                        ),
                         ("evals", evals),
                         ("nodes", numbers::rounded_nodes(nodes)?),
                         ("note", note),
@@ -271,20 +283,24 @@ fn run_to(args: AddReadsArgs, out: &mut impl Write) -> Result<()> {
         !args.since.trim().is_empty() && !args.since.contains(['\t', '\r', '\n']),
         "since must be nonempty and contain no tabs or newlines"
     );
+    let schema = Schema::load(args.schema.as_deref())?;
     let logs = reads::expand(&args.logs)?;
     let mut report_path = args.out.as_os_str().to_owned();
     report_path.push(".report.tsv");
     let outputs = [args.out, PathBuf::from(report_path)];
     let mut inputs = vec![args.master.clone()];
     inputs.extend(logs.iter().cloned());
+    if let Some(dir) = &args.schema {
+        inputs.extend(super::schema::paths(dir));
+    }
     files::guard(&outputs, &inputs, false)?;
     let (mut master, mut errors) = read_table(&args.master)?;
-    errors.extend(Schema::default().validate(master_table::format_master(&master))?);
+    errors.extend(schema.validate(master_table::format_master(&master))?);
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     let (groups, counts) = reads::load(&logs, args.min_nodes, args.draw_pin, None)?;
     let Selection { rows, report } = select(&master, &groups, &args.since)?;
     master.extend(rows.iter().cloned());
-    let errors = Schema::default().validate(master_table::format_master(&master))?;
+    let errors = schema.validate(master_table::format_master(&master))?;
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     files::write(
         &outputs,

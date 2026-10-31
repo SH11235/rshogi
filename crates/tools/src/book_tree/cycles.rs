@@ -1149,7 +1149,22 @@ mod tests {
         let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, tier) in rows {
-            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\t{tier}\tt\tn").unwrap();
+            writeln!(
+                text,
+                "{}",
+                crate::book_tree::master_table::test_line(&[
+                    ("key", key.to_string()),
+                    ("ply", "1".into()),
+                    ("move", mv.to_string()),
+                    ("role", role.to_string()),
+                    ("source", "read".into()),
+                    ("evals", evals.to_string()),
+                    ("tier", tier.to_string()),
+                    ("since", "t".into()),
+                    ("note", "n".into())
+                ])
+            )
+            .unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
         let master = dir.path().join("moves.tsv");
@@ -1242,7 +1257,22 @@ mod tests {
         let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, since) in rows {
-            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\t{since}\tn").unwrap();
+            writeln!(
+                text,
+                "{}",
+                crate::book_tree::master_table::test_line(&[
+                    ("key", key.to_string()),
+                    ("ply", "1".into()),
+                    ("move", mv.to_string()),
+                    ("role", role.to_string()),
+                    ("source", "read".into()),
+                    ("evals", evals.to_string()),
+                    ("tier", "wide".into()),
+                    ("since", since.to_string()),
+                    ("note", "n".into())
+                ])
+            )
+            .unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
         let master = dir.path().join("moves.tsv");
@@ -1295,7 +1325,22 @@ mod tests {
         let mut text = super::super::master_table::COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals, since) in rows {
-            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\t{since}\tn").unwrap();
+            writeln!(
+                text,
+                "{}",
+                crate::book_tree::master_table::test_line(&[
+                    ("key", key.to_string()),
+                    ("ply", "1".into()),
+                    ("move", mv.to_string()),
+                    ("role", role.to_string()),
+                    ("source", "read".into()),
+                    ("evals", evals.to_string()),
+                    ("tier", "wide".into()),
+                    ("since", since.to_string()),
+                    ("note", "n".into())
+                ])
+            )
+            .unwrap();
         }
         let p = parse_master_rows(text.as_bytes()).unwrap().0;
         let values = evaluate(&p, DrawValues::default()).unwrap();

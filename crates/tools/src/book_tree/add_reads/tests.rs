@@ -14,7 +14,7 @@ fn group(readings: Vec<Reading>) -> Groups {
     BTreeMap::from([(HIRATE_KEY.into(), readings)])
 }
 fn row(mv: &str, role: &str) -> Row {
-    Row::from_fields(&[
+    crate::book_tree::master_table::test_row(&[
         ("key", HIRATE_KEY.into()),
         ("ply", "1".into()),
         ("move", mv.into()),
@@ -133,6 +133,7 @@ fn report_carriage_return_is_quoted_like_python_3_11_and_later_csv() {
 
 fn args(dir: &std::path::Path) -> AddReadsArgs {
     AddReadsArgs {
+        schema: None,
         master: dir.join("master.tsv"),
         out: dir.join("out.tsv"),
         since: "cmp".into(),
@@ -235,5 +236,22 @@ fn fractional_cp_errors_without_writing_and_integral_notation_round_trips() {
             assert!(!dir.path().join("out.tsv.report.tsv").exists());
         }
         assert_eq!(std::fs::read_to_string(&a.master).unwrap(), original);
+    }
+}
+
+#[test]
+fn value_kind_counts_each_moves_actual_readings() {
+    let g = group(vec![
+        reading(1_000_000_000, 1, &[("7g7f", 10), ("2g2f", 0)]),
+        reading(1_000_000_000, 2, &[("7g7f", 10)]),
+    ]);
+    let selected = select(&[], &g, "test").unwrap();
+    let main = selected.rows.iter().find(|r| r.get("move") == "7g7f").unwrap();
+    let other = selected.rows.iter().find(|r| r.get("move") == "2g2f").unwrap();
+    assert_eq!(main.get("value_kind"), "mean:2");
+    assert_eq!(other.get("value_kind"), "single");
+    for row in selected.rows {
+        assert_eq!(row.get("cond"), "unknown");
+        assert_eq!(row.get("lineage"), "");
     }
 }

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[derive(Args, Debug)]
@@ -32,7 +32,7 @@ pub(super) struct ExportArgs {
     /// 書き出す定跡の範囲
     #[arg(long,default_value="wide",value_parser=["wide","curated"])]
     tier: String,
-    /// sources.tsv を置いたディレクトリ
+    /// source・読み条件・lineage の種類の表を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
     /// 読みの JSONL ファイルまたは再帰的に探すディレクトリ
@@ -65,63 +65,7 @@ pub(super) fn nonnegative_integer(text: &str) -> std::result::Result<num_bigint:
     Ok(value)
 }
 
-#[derive(Default)]
-pub(super) struct Schema {
-    sources: Vec<(String, String)>,
-    check_sources: bool,
-}
-impl Schema {
-    pub(super) fn load(dir: Option<&Path>) -> Result<Self> {
-        let Some(dir) = dir else {
-            return Ok(Self::default());
-        };
-        ensure!(dir.is_dir(), "schema is not a directory: {}", dir.display());
-        let path = dir.join("sources.tsv");
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("読めません: {}", path.display()))?;
-        let mut lines = text.lines();
-        ensure!(lines.next() == Some("source\tdescription"), "invalid sources.tsv header");
-        let mut sources = Vec::new();
-        let mut seen = BTreeSet::new();
-        for (i, line) in lines.enumerate() {
-            let fields: Vec<_> = line.split('\t').collect();
-            ensure!(
-                fields.len() == 2
-                    && !fields[0].trim().is_empty()
-                    && !fields[1].trim().is_empty()
-                    && !line.contains('\r'),
-                "sources.tsv:{}: invalid row",
-                i + 2
-            );
-            ensure!(seen.insert(fields[0]), "sources.tsv:{}: duplicate source", i + 2);
-            sources.push((fields[0].into(), fields[1].into()));
-        }
-        Ok(Self {
-            sources,
-            check_sources: true,
-        })
-    }
-    pub(super) fn validate(&self, text: impl AsRef<[u8]>) -> Result<Vec<String>> {
-        let bytes = text.as_ref();
-        let mut errors = master_table::validate_table(bytes)?.errors;
-        if self.check_sources {
-            let known: BTreeSet<_> = self.sources.iter().map(|(s, _)| s.as_str()).collect();
-            for (i, line) in bytes.split(|b| *b == b'\n').enumerate().skip(1) {
-                if let Ok(line) = std::str::from_utf8(line)
-                    && let Ok(row) = Row::parse_line(line.trim_end_matches('\r'), i + 1)
-                    && !known.contains(row.get("source"))
-                {
-                    errors.push(format!(
-                        "元データの {} 行目: unknown source: {}",
-                        i + 1,
-                        row.get("source")
-                    ));
-                }
-            }
-        }
-        Ok(errors)
-    }
-}
+pub(super) use super::schema::Schema;
 pub(super) fn run(args: ExportArgs) -> Result<()> {
     run_to(args, &mut std::io::BufWriter::new(std::io::stdout().lock()))
 }
@@ -139,7 +83,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         inputs.push(base.clone());
     }
     if let Some(dir) = &args.schema {
-        inputs.push(dir.join("sources.tsv"));
+        inputs.extend(super::schema::paths(dir));
     }
     let outputs = files::outputs(&args.out);
     files::guard(&outputs, &inputs, args.force)?;
@@ -210,10 +154,19 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         let mut checked_moves = BTreeMap::new();
         for row in entries {
             let pair = (key.to_string(), row.get("move").to_string());
-            let mut data: Vec<_> = ["role", "source", "nodes", "note", "since", "tier"]
-                .into_iter()
-                .map(|f| (f, Json::string(row.get(f))))
-                .collect();
+            let mut data: Vec<_> = [
+                "role",
+                "source",
+                "nodes",
+                "cond",
+                "value_kind",
+                "note",
+                "since",
+                "tier",
+            ]
+            .into_iter()
+            .map(|f| (f, Json::string(row.get(f))))
+            .collect();
             data.push((
                 "lineage",
                 Json::Array(if row.get("lineage").is_empty() {
@@ -309,7 +262,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     }
     let annotation = Json::object([
         ("format", Json::string("rshogi-book-annotations")),
-        ("version", Json::integer(1)),
+        ("version", Json::integer(2)),
         (
             "book",
             Json::object([

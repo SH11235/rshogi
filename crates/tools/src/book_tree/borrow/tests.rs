@@ -289,6 +289,10 @@ fn value_root_propagates_exit_readings_and_marks_better_outside_moves() {
     let values =
         value_root(&root(), &tree, &quiet, &BTreeMap::new(), draws, 40, work.path()).unwrap();
     assert!(values.marks.is_empty());
+    let nodes = register_nodes(0, &root(), &tree, &values, &BTreeSet::new(), 4, s.nodes);
+    assert_eq!(nodes[ROOT].moves[0].value_kind, "tree:4");
+    let exit = key(&["5i5h", "5a4a"]);
+    assert!(nodes[&exit].moves.iter().all(|m| m.value_kind == "single"));
 }
 
 #[test]
@@ -469,7 +473,20 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     let ab = key(&["5i5h", "5a5b"]);
     let master = d.join("moves.tsv");
     let original =
-        format!("{}\n{ab}\t3\t5h6h\tmain\tteam\t1\t1e9\t\twide\told\tn\n", COLUMNS.join("\t"));
+        crate::book_tree::master_table::format_master(&[crate::book_tree::master_table::test_row(
+            &[
+                ("key", ab.clone()),
+                ("ply", "3".into()),
+                ("move", "5h6h".into()),
+                ("role", "main".into()),
+                ("source", "team".into()),
+                ("evals", "1".into()),
+                ("nodes", "1e9".into()),
+                ("tier", "wide".into()),
+                ("since", "old".into()),
+                ("note", "n".into()),
+            ],
+        )]);
     std::fs::write(&master, &original).unwrap();
     let value_args = |out: &str, apply: bool| {
         ValueArgs::for_test(d.join("cut"), journal.clone(), master.clone(), d.join(out), apply)

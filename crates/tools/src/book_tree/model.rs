@@ -88,6 +88,7 @@ pub(super) struct Tree {
     pub root_order: Vec<String>,
     pub game: Edges,
     pub nodes: BTreeMap<String, Reading>,
+    pub reading_conditions: BTreeSet<Option<String>>,
     pub level: BTreeMap<String, usize>,
     pub ply: BTreeMap<String, u32>,
     pub edge: Edges,
@@ -170,6 +171,7 @@ impl Tree {
             root_order,
             game,
             nodes: BTreeMap::new(),
+            reading_conditions: BTreeSet::new(),
             level,
             edge: BTreeMap::new(),
             rule: BTreeMap::new(),
@@ -271,6 +273,7 @@ impl Tree {
                     let Some(reading) = cache.get(&key) else {
                         continue;
                     };
+                    self.reading_conditions.insert(cache.fingerprint().map(str::to_owned));
                     self.nodes.insert(key.clone(), reading.clone());
                 }
                 if self.roots.contains_key(&key) {

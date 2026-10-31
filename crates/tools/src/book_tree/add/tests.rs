@@ -1,7 +1,7 @@
 use super::super::reply_graph::HIRATE_KEY;
 use super::*;
 fn row(mv: &str, role: &str) -> Row {
-    Row::from_fields(&[
+    crate::book_tree::master_table::test_row(&[
         ("key", HIRATE_KEY.into()),
         ("ply", "1".into()),
         ("move", mv.into()),
@@ -23,6 +23,7 @@ fn args(dir: &Path) -> AddArgs {
 #[test]
 fn dry_run_apply_conflicts_and_main_replacement() {
     let dir = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(dir.path());
     let mut a = args(dir.path());
     let original = master_table::format_master(&[row("7g7f", "main")]);
     std::fs::write(&a.master, &original).unwrap();
@@ -47,6 +48,8 @@ fn dry_run_apply_conflicts_and_main_replacement() {
     a.replace = true;
     let mut new_main = row("2g2f", "main");
     new_main.set("note", "選択理由".into());
+    new_main.set("cond", "unknown".into());
+    new_main.set("value_kind", "unknown".into());
     new_main.set("evals", "1.5,2e1".into());
     std::fs::write(&a.add, master_table::format_master(&[new_main.clone(), row("7g7f", "alt")]))
         .unwrap();
@@ -63,7 +66,7 @@ fn dry_run_apply_conflicts_and_main_replacement() {
     run_to(a, &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
     assert!(out.contains(
-        "replaced existing rows: 2\nchanged role: 2\nchanged evals: 1\nchanged note: 1\n"
+        "replaced existing rows: 2\nchanged role: 2\nchanged evals: 1\nchanged cond: 1\nchanged value_kind: 1\nchanged note: 1\n"
     ));
     let a = args(dir.path());
     let merged = master_table::parse_master(&std::fs::read_to_string(a.master).unwrap()).unwrap();
@@ -72,6 +75,7 @@ fn dry_run_apply_conflicts_and_main_replacement() {
 #[test]
 fn duplicate_additions_invalid_merge_and_same_file_never_write() {
     let dir = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(dir.path());
     let a = args(dir.path());
     let original = master_table::format_master(&[row("7g7f", "main")]);
     std::fs::write(&a.master, &original).unwrap();
@@ -100,10 +104,15 @@ fn duplicate_additions_invalid_merge_and_same_file_never_write() {
 #[test]
 fn schema_checks_original_and_merged_sources() {
     let dir = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(dir.path());
     let mut a = args(dir.path());
     a.schema = Some(dir.path().into());
     a.apply = true;
-    std::fs::write(dir.path().join("sources.tsv"), "source\tdescription\nread\t読み\n").unwrap();
+    std::fs::write(
+        dir.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\nread\t読み\t0\n",
+    )
+    .unwrap();
     let original = master_table::format_master(&[row("7g7f", "main")]);
     std::fs::write(&a.master, &original).unwrap();
     let mut alt = row("2g2f", "alt");
@@ -121,6 +130,7 @@ fn replacement_reports_tier_changes_and_curated_column_changes() {
         ("curated", "curated"),
     ] {
         let dir = tempfile::tempdir().unwrap();
+        crate::book_tree::schema::test_schema(dir.path());
         let mut a = args(dir.path());
         a.replace = true;
         a.apply = true;
@@ -128,6 +138,8 @@ fn replacement_reports_tier_changes_and_curated_column_changes() {
         old.set("tier", old_tier.into());
         old.set("note", "old".into());
         old.set("evals", "10".into());
+        old.set("cond", "unknown".into());
+        old.set("value_kind", "unknown".into());
         let mut new = old.clone();
         new.set("tier", new_tier.into());
         new.set("note", "new".into());
@@ -160,8 +172,12 @@ fn counts_use_schema_order_then_unknown_sources_or_lexical_order() {
         rows.push(r);
     }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("sources.tsv"), "source\tdescription\nzeta\tZ\nunused\tU\n")
-        .unwrap();
+    crate::book_tree::schema::test_schema(dir.path());
+    std::fs::write(
+        dir.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\nzeta\tZ\t0\nunused\tU\t0\n",
+    )
+    .unwrap();
     for (schema, expected) in [
         (Schema::default(), "source: alpha=1, ext=1, zeta=1"),
         (
@@ -173,4 +189,21 @@ fn counts_use_schema_order_then_unknown_sources_or_lexical_order() {
         export::print_counts(&rows, &schema, &mut out).unwrap();
         assert!(String::from_utf8(out).unwrap().lines().any(|line| line == expected));
     }
+}
+
+#[test]
+fn identical_curated_replacement_has_no_empty_detail() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = args(d.path());
+    a.replace = true;
+    let mut row = row("7g7f", "main");
+    row.set("tier", "curated".into());
+    let text = master_table::format_master(&[row]);
+    std::fs::write(&a.master, &text).unwrap();
+    std::fs::write(&a.add, &text).unwrap();
+    let mut out = Vec::new();
+    run_to(a, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("replaced:"));
+    assert!(out.contains("replaced existing rows: 1"));
 }

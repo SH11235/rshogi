@@ -1081,3 +1081,50 @@ fn node_moves_lists_both_sides_with_propagated_values() {
         assert_eq!(node.remaining, tree.def.depth - tree.level[key]);
     }
 }
+
+#[test]
+fn registration_fingerprint_requires_uniform_reading_provenance() {
+    struct Cache<'a> {
+        rows: &'a BTreeMap<String, Reading>,
+        fingerprint: Option<&'a str>,
+    }
+    impl journal::Readings for Cache<'_> {
+        fn get(&self, key: &str) -> Option<&Reading> {
+            self.rows.get(key)
+        }
+        fn fingerprint(&self) -> Option<&str> {
+            self.fingerprint
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let rows = corpus(&settings);
+    for mixed in [false, true] {
+        let mut tree = Tree::load(definition(dir.path(), 2), &settings).unwrap();
+        let partial = BTreeMap::from([(ROOT.to_owned(), rows[ROOT].clone())]);
+        tree.advance(&Cache {
+            rows: &partial,
+            fingerprint: Some(&settings.fingerprint),
+        })
+        .unwrap();
+        let other = "b".repeat(64);
+        let cache = Cache {
+            rows: &rows,
+            fingerprint: Some(if mixed { &other } else { &settings.fingerprint }),
+        };
+        while !tree.finished {
+            assert!(tree.advance(&cache).unwrap().is_empty());
+        }
+        tree.write_outputs().unwrap();
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(tree.def.out.join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        if mixed {
+            assert!(status.get("fingerprint").is_none());
+        } else {
+            assert_eq!(status["fingerprint"], settings.fingerprint);
+        }
+        assert!(status.get("ready").is_some() && status.get("unresolved").is_some());
+    }
+}

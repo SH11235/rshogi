@@ -857,7 +857,21 @@ mod tests {
         let mut text = COLUMNS.join("\t");
         text.push('\n');
         for (key, mv, role, evals) in rows {
-            writeln!(text, "{key}\t1\t{mv}\t{role}\tread\t{evals}\t\t\twide\tt\t").unwrap();
+            writeln!(
+                text,
+                "{}",
+                crate::book_tree::master_table::test_line(&[
+                    ("key", key.to_string()),
+                    ("ply", "1".into()),
+                    ("move", mv.to_string()),
+                    ("role", role.to_string()),
+                    ("source", "read".into()),
+                    ("evals", evals.to_string()),
+                    ("tier", "wide".into()),
+                    ("since", "t".into())
+                ])
+            )
+            .unwrap();
         }
         text
     }

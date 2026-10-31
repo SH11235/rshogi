@@ -273,6 +273,9 @@ impl Drop for UnlockOnDrop {
 
 pub(super) trait Readings {
     fn get(&self, key: &str) -> Option<&Reading>;
+    fn fingerprint(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl Readings for BTreeMap<String, Reading> {
@@ -290,6 +293,9 @@ pub(super) struct Journal {
 }
 
 impl Readings for Journal {
+    fn fingerprint(&self) -> Option<&str> {
+        Some(&self.fingerprint)
+    }
     fn get(&self, key: &str) -> Option<&Reading> {
         self.records.get(key)
     }
@@ -589,6 +595,53 @@ fn merge_engine_version(known: &mut Settings, other: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// 木に残る全ての読みを台帳と照合する。複数条件に一致する読みも確定扱いにしない。
+pub(super) fn match_fingerprint(path: &Path, readings: &[Reading]) -> Result<Option<String>> {
+    type Signature = (String, u64, Vec<(String, i32)>);
+    fn signature(r: &Reading) -> Signature {
+        (
+            r.key.clone(),
+            r.nodes_limit,
+            r.multipv.iter().map(|p| (p.mv.clone(), p.cp)).collect(),
+        )
+    }
+    let mut wanted: BTreeMap<Signature, std::collections::BTreeSet<String>> = readings
+        .iter()
+        .map(|r| (signature(r), std::collections::BTreeSet::new()))
+        .collect();
+    let file = File::open(path).with_context(|| format!("台帳を読めません: {}", path.display()))?;
+    file_lock::try_lock_shared(&file)?;
+    let _unlock = UnlockOnDrop(file.try_clone()?);
+    for_each_complete_line(
+        &mut BufReader::new(file),
+        u64::MAX,
+        |bytes| {
+            let rec = parse_record(bytes)?;
+            if let Some(matches) = wanted.get_mut(&signature(&rec.reading)) {
+                if rec.settings.computed_fingerprint()? != rec.settings.fingerprint {
+                    bail!("台帳の指紋と条件が合いません");
+                }
+                rec.reading.validate(&rec.settings)?;
+                matches.insert(rec.settings.fingerprint);
+            }
+            Ok(())
+        },
+        &mut false,
+    )?;
+    let mut fingerprint = None;
+    for matches in wanted.values() {
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        let found = matches.first().expect("1 件の指紋");
+        if fingerprint.as_ref().is_some_and(|old| old != found) {
+            return Ok(None);
+        }
+        fingerprint = Some(found.clone());
+    }
+    Ok(fingerprint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +687,59 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn matching_tree_readings_requires_one_condition_for_every_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut a = record("", 0);
+        a.reading.multipv = vec![Pv {
+            mv: "9i8i".into(),
+            cp: 10,
+            depth: 2,
+        }];
+        a.reading.bestmove = "9i8i".into();
+        a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+        let mut b = record("", 8);
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        let write = |records: &[Record]| {
+            let mut file = File::create(&path).unwrap();
+            for rec in records {
+                write_record(&mut file, rec);
+            }
+        };
+        let readings = vec![a.reading.clone(), b.reading.clone()];
+        write(&[a.clone(), b.clone()]);
+        assert_eq!(
+            match_fingerprint(&path, &readings).unwrap(),
+            Some(a.settings.fingerprint.clone())
+        );
+        let mut changed = readings.clone();
+        changed[0].multipv[0].depth += 1;
+        assert!(match_fingerprint(&path, &changed).unwrap().is_some());
+        for change in [0, 1, 2] {
+            let mut changed = readings.clone();
+            match change {
+                0 => changed[0].nodes_limit += 1,
+                1 => changed[0].multipv[0].cp += 1,
+                _ => changed[0].multipv[0].mv = "9i8h".into(),
+            }
+            assert!(match_fingerprint(&path, &changed).unwrap().is_none());
+        }
+        write(std::slice::from_ref(&a));
+        assert!(match_fingerprint(&path, &readings).unwrap().is_none());
+        b.settings.engine_sha256 = "different".into();
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        write(&[a.clone(), b.clone()]);
+        assert!(match_fingerprint(&path, &readings).unwrap().is_none());
+        let mut ambiguous = a.clone();
+        ambiguous.settings = b.settings.clone();
+        write(&[a.clone(), ambiguous]);
+        assert!(match_fingerprint(&path, &[a.reading]).unwrap().is_none());
+        let before = std::fs::read(&path).unwrap();
+        assert!(match_fingerprint(&path, &[]).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

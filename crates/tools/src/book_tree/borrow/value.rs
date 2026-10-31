@@ -35,6 +35,9 @@ pub(super) struct ValueArgs {
     /// 定跡の元データの表 (TSV)
     #[arg(long)]
     master: PathBuf,
+    /// 語彙と読み条件の表を置いたディレクトリ
+    #[arg(long)]
+    schema: Option<PathBuf>,
     /// 結果の出力先 (まだ無い dir)
     #[arg(long)]
     out: PathBuf,
@@ -74,6 +77,7 @@ impl ValueArgs {
             cut,
             journal,
             fingerprint: None,
+            schema: None,
             master,
             out,
             since: "tag".into(),
@@ -95,6 +99,7 @@ pub(super) struct MoveValue {
     /// 部分木の手 (大きい定跡の手か --extra の手)。偽なら出口の読みの手。
     pub expanded: bool,
     pub book_value: Option<i32>,
+    pub propagated: bool,
 }
 
 /// 確認点の印: 候補の外の手が候補の最善を線以上上回る。
@@ -225,7 +230,7 @@ pub(super) fn value_root(
         let node = graph
             .find(key)
             .with_context(|| format!("内部エラー: 局面がありません: {key}"))?;
-        let values: Vec<i32> = graph.moves(node).map(|m| m.new).collect();
+        let values: Vec<_> = graph.moves(node).collect();
         ensure!(values.len() == rows.len(), "内部エラー: 手の数が合いません: {key}");
         let mut moves: Vec<MoveValue> = rows
             .iter()
@@ -233,7 +238,8 @@ pub(super) fn value_root(
             .filter_map(|(row, value)| {
                 Some(MoveValue {
                     mv: row.mv?.to_owned(),
-                    value,
+                    value: value.new,
+                    propagated: value.edge.is_some(),
                     expanded: row.expanded,
                     book_value: row.book_value,
                 })
@@ -308,9 +314,15 @@ pub(super) fn register_nodes(
                     .map(|m| NodeMove {
                         mv: m.mv.clone(),
                         value: m.value,
+                        value_kind: if m.propagated {
+                            format!("tree:{}", max_plies.saturating_sub(node.level).max(1))
+                        } else {
+                            "single".into()
+                        },
                     })
                     .collect(),
                 tree: index,
+                cond: "unknown".into(),
             },
         );
     }
@@ -339,6 +351,8 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
     // 読む局面が無い部分木 (循環だけで閉じた木) は千日手の値だけで解けるので、台帳を読まない。
+    let schema = crate::book_tree::schema::Schema::load(args.schema.as_deref())?;
+    let mut cond = "unknown".to_owned();
     let mut nodes_limit = 0;
     let mut readings = ReadingsOf::new();
     if !wanted.is_empty() {
@@ -352,6 +366,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
             source.settings.draw(),
             source.readings.len()
         );
+        cond = schema.condition(&source.settings.fingerprint)?;
         nodes_limit = source.settings.nodes;
         readings = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
     }
@@ -395,6 +410,12 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let rows = parse_master(&text)?;
+    for row in &rows {
+        schema.validate_row(row)?;
+    }
+    for node in nodes.values_mut() {
+        node.cond = cond.clone();
+    }
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
     let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);
@@ -404,6 +425,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         alt_gap: args.alt_gap,
         source: "ext",
         lineage: &lineage,
+        schema: &schema,
     };
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);

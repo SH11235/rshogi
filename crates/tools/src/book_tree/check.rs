@@ -930,6 +930,14 @@ mod tests {
         let mut output = Vec::new();
         assert!(run_to(args(-150.0), &mut output).is_ok());
         let text = String::from_utf8(output).unwrap();
+        for version in [1, 2] {
+            let mut versioned = annot.clone();
+            versioned["version"] = serde_json::json!(version);
+            std::fs::write(&annotation, serde_json::to_vec(&versioned).unwrap()).unwrap();
+            let mut result = Vec::new();
+            run_to(args(-150.0), &mut result).unwrap();
+            assert_eq!(String::from_utf8(result).unwrap(), text);
+        }
         assert!(text.contains("bad-eval reachable positions: 0"));
         assert!(text.contains("b exit ply=1: 1"));
         std::fs::write(&preset, format!("sfen {HIRATE_KEY} 2g2f 9i9a\n")).unwrap();
