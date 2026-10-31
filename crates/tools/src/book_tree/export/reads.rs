@@ -7,6 +7,7 @@ use num_traits::Signed;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader},
@@ -20,7 +21,7 @@ pub(super) struct Reading {
     pub scores: Vec<(String, BigRational)>,
 }
 pub(super) type Groups = BTreeMap<String, Vec<Reading>>;
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct Counts {
     pub lines: usize,
     pub malformed: usize,
@@ -125,15 +126,70 @@ fn parse(line: &str) -> Result<(String, Reading, bool)> {
     }
     Ok((key, Reading { nodes, ply, scores }, draw))
 }
+type Fingerprint = [u8; 16];
+
+fn key_fingerprint(key: &str) -> Fingerprint {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut result = [0; 16];
+    result.copy_from_slice(&digest[..16]);
+    result
+}
+
+fn reading_fingerprint(key: &str, reading: &Reading) -> Fingerprint {
+    fn field(hash: &mut Sha256, bytes: &[u8]) {
+        // 可変長の値の連結で、フィールド境界が異なる読みを同一視しないため。
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    fn rational(hash: &mut Sha256, value: &BigRational) {
+        field(hash, &value.numer().to_signed_bytes_le());
+        field(hash, &value.denom().to_signed_bytes_le());
+    }
+    let mut hash = Sha256::new();
+    field(&mut hash, key.as_bytes());
+    rational(&mut hash, &reading.nodes);
+    field(&mut hash, &reading.ply.to_signed_bytes_le());
+    for (mv, cp) in &reading.scores {
+        field(&mut hash, mv.as_bytes());
+        rational(&mut hash, cp);
+    }
+    let digest = hash.finalize();
+    let mut result = [0; 16];
+    result.copy_from_slice(&digest[..16]);
+    result
+}
+
+fn remember<K: Ord>(seen: &mut BTreeMap<K, bool>, key: K, draw: bool, counts: &mut Counts) {
+    match seen.entry(key) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            counts.duplicates += 1;
+            if draw && !*entry.get() {
+                entry.insert(true);
+                counts.draw_unset_used -= 1;
+            }
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(draw);
+            counts.used += 1;
+            if !draw {
+                counts.draw_unset_used += 1;
+            }
+        }
+    }
+}
+
+/// 読みを集計し、`retain_keys` が `None` なら全局面、`Some` なら指定局面の読みを返す。
 pub(super) fn load(
     paths: &[PathBuf],
     min_nodes: impl Into<BigInt>,
     draw_pin: impl Into<BigInt>,
+    retain_keys: Option<&BTreeSet<&str>>,
 ) -> Result<(Groups, Counts)> {
     let minimum = BigRational::from_integer(min_nodes.into());
     let pin = BigRational::from_integer(draw_pin.into());
     ensure!(!minimum.is_negative() && !pin.is_negative(), "thresholds must be nonnegative");
     let mut seen: BTreeMap<String, BTreeMap<Reading, bool>> = BTreeMap::new();
+    let mut summaries = BTreeMap::new();
     let mut below = BTreeSet::new();
     let mut counts = Counts::default();
     for path in paths {
@@ -145,7 +201,7 @@ pub(super) fn load(
             };
             if reading.nodes < minimum {
                 counts.below_min += 1;
-                below.insert(key);
+                below.insert(key_fingerprint(&key));
                 return Ok(());
             }
             if reading.scores.windows(2).any(|s| s[0].1 < s[1].1) {
@@ -163,22 +219,10 @@ pub(super) fn load(
                 counts.draw_pinned += 1;
                 return Ok(());
             }
-            match seen.entry(key).or_default().entry(reading) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    counts.duplicates += 1;
-                    if draw && !*entry.get() {
-                        entry.insert(true);
-                        counts.draw_unset_used -= 1;
-                    }
-                    return Ok(());
-                }
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(draw);
-                }
-            }
-            counts.used += 1;
-            if !draw {
-                counts.draw_unset_used += 1;
+            if retain_keys.is_none_or(|keys| keys.contains(key.as_str())) {
+                remember(seen.entry(key).or_default(), reading, draw, &mut counts);
+            } else {
+                remember(&mut summaries, reading_fingerprint(&key, &reading), draw, &mut counts);
             }
             Ok(())
         })?;
@@ -250,7 +294,17 @@ mod tests {
             event("900000000.1", "1", "13", "7g7f", "null"),
         ];
         std::fs::write(&path, format!("\u{feff}{}\n\n", lines.join("\n"))).unwrap();
-        let (groups, c) = load(&[path], 900_000_000, 3).unwrap();
+        let (groups, c) = load(std::slice::from_ref(&path), 900_000_000, 3, None).unwrap();
+        for keys in [BTreeSet::new(), BTreeSet::from([HIRATE_KEY])] {
+            let (selected, counts) =
+                load(std::slice::from_ref(&path), 900_000_000, 3, Some(&keys)).unwrap();
+            assert_eq!(counts, c);
+            if keys.is_empty() {
+                assert!(selected.is_empty());
+            } else {
+                assert_eq!(selected, groups);
+            }
+        }
         assert_eq!(
             (
                 c.lines,
@@ -281,7 +335,7 @@ mod tests {
             r#"[{"move":"7g7f","cp":10},{"move":"bad","cp":9}]}"#,
         ];
         std::fs::write(&path, lines.map(|l| format!("{prefix}{l}\n")).concat()).unwrap();
-        let (groups, c) = load(&[path], 0, 0).unwrap();
+        let (groups, c) = load(&[path], 0, 0, None).unwrap();
         assert_eq!((c.malformed, c.unsorted, c.used), (2, 1, 1));
         assert_eq!(groups[HIRATE_KEY][0].scores[1].0, "bad");
     }
@@ -361,7 +415,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reads.jsonl");
         std::fs::write(&path, lines.join("\n")).unwrap();
-        let (groups, counts) = load(&[path], 0, 0).unwrap();
+        let (groups, counts) = load(&[path], 0, 0, None).unwrap();
         assert!(groups.is_empty());
         assert_eq!(counts.lines, lines.len());
         assert_eq!(counts.malformed, lines.len());
@@ -369,6 +423,31 @@ mod tests {
             assert!(!parse(&event("100", "1", "12", "7g7f", draw)).unwrap().2);
         }
         assert!(!parse(&good.replace(r#","draw":null"#, "")).unwrap().2);
+    }
+
+    #[test]
+    fn fingerprints_preserve_normalized_identity_and_score_order() {
+        let (key, reading, _) = parse(&event("100", "1", "12", "7g7f", "null")).unwrap();
+        let expected = reading_fingerprint(&key, &reading);
+        let (_, equivalent, _) = parse(&event("1e2", "1", "12.0", "7g7f", r#"{"b":0}"#)).unwrap();
+        assert_eq!(reading_fingerprint(&key, &equivalent), expected);
+        for line in [
+            event("101", "1", "12", "7g7f", "null"),
+            event("100", "2", "12", "7g7f", "null"),
+            event("100", "1", "-12", "7g7f", "null"),
+            event("100", "1", "12.5", "7g7f", "null"),
+            event("100", "1", "12", "2g2f", "null"),
+        ] {
+            let (_, changed, _) = parse(&line).unwrap();
+            assert_ne!(reading_fingerprint(&key, &changed), expected);
+        }
+        assert_ne!(reading_fingerprint("other key", &reading), expected);
+        let mut ordered = reading;
+        ordered.scores.push(("2g2f".into(), BigRational::from_integer(12.into())));
+        let forward = reading_fingerprint(&key, &ordered);
+        assert_ne!(forward, expected);
+        ordered.scores.reverse();
+        assert_ne!(reading_fingerprint(&key, &ordered), forward);
     }
 
     #[test]

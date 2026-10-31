@@ -157,7 +157,8 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     rows.sort_by(|a, b| {
         (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
     });
-    let (read_groups, _) = reads::load(&logs, args.min_nodes, args.draw_pin)?;
+    let retained_keys = rows.iter().map(|row| row.get("key")).collect();
+    let (read_groups, _) = reads::load(&logs, args.min_nodes, args.draw_pin, Some(&retained_keys))?;
     let edges = graph::continuations(&rows)?;
     let active = rows
         .iter()

@@ -208,3 +208,64 @@ fn eval_mean_rounds_exact_integer_quotient() {
     run_to(a, &mut stdout).unwrap();
     assert!(String::from_utf8(stdout).unwrap().contains("bad-eval reachable positions: 0"));
 }
+
+#[test]
+fn reads_outside_tier_are_counted_but_do_not_change_outputs() {
+    use super::super::reply_graph::{HIRATE_KEY, fixture::after};
+    let dir = tempfile::tempdir().unwrap();
+    let child = after(HIRATE_KEY, &["7g7f", "3c3d"]);
+    let absent = after(HIRATE_KEY, &["2g2f", "8c8d"]);
+    let mut a = args(dir.path());
+    std::fs::write(
+        &a.master,
+        master_table::format_master(&[
+            row(HIRATE_KEY, "7g7f", "main", "curated", ""),
+            row(&child, "2g2f", "main", "wide", ""),
+        ]),
+    )
+    .unwrap();
+    let event = |key: &str, draw: &str| {
+        format!(
+            r#"{{"key":"{key}","nodes":1000000000,"ply":1,"multipv":[{{"move":"7g7f","cp":12}}],"draw":{draw}}}"#
+        )
+    };
+    let logs = dir.path().join("reads.jsonl");
+    let root = event(HIRATE_KEY, "null");
+    std::fs::write(&logs, &root).unwrap();
+    a.tier = "curated".into();
+    a.reads = vec![logs.clone()];
+    let mut expected_stdout = Vec::new();
+    run_to(a, &mut expected_stdout).unwrap();
+    let paths = files::outputs(&dir.path().join("book"));
+    let expected: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let child_event = event(&child, "null").replace("7g7f", "2g2f");
+    std::fs::write(
+        &logs,
+        [
+            root,
+            child_event.clone(),
+            child_event,
+            event(&absent, "null"),
+            event(&absent, r#"{"b":0}"#),
+            event(&absent, "null"),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let keys = BTreeSet::from([HIRATE_KEY]);
+    let (selected, counts) = reads::load(std::slice::from_ref(&logs), 0, 0, Some(&keys)).unwrap();
+    let (_, all_counts) = reads::load(std::slice::from_ref(&logs), 0, 0, None).unwrap();
+    assert_eq!(counts, all_counts);
+    assert_eq!((counts.used, counts.duplicates, counts.draw_unset_used), (3, 3, 2));
+    assert_eq!(selected.keys().map(String::as_str).collect::<Vec<_>>(), [HIRATE_KEY]);
+    let mut a = args(dir.path());
+    a.tier = "curated".into();
+    a.reads = vec![logs];
+    a.force = true;
+    let mut stdout = Vec::new();
+    run_to(a, &mut stdout).unwrap();
+    assert_eq!(stdout, expected_stdout);
+    for (path, expected) in paths.iter().zip(expected) {
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
