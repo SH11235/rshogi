@@ -139,7 +139,10 @@ required-features = ["csa-replay"]
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
 chrono.workspace = true
 flate2.workspace = true
 env_logger.workspace = true

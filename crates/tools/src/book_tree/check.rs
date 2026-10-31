@@ -29,35 +29,53 @@ pub(super) struct CheckArgs {
 }
 
 #[derive(Deserialize)]
-struct Annotation {
-    book: AnnotationBook,
-    positions: BTreeMap<String, AnnotationPosition>,
+pub(super) struct Annotation {
+    pub(super) book: AnnotationBook,
+    pub(super) positions: BTreeMap<String, AnnotationPosition>,
 }
 
 #[derive(Deserialize)]
-struct AnnotationBook {
-    sha256: String,
+pub(super) struct AnnotationBook {
+    pub(super) sha256: String,
 }
 
 #[derive(Deserialize)]
-struct AnnotationPosition {
-    moves: BTreeMap<String, AnnotationMove>,
-    read: Option<Reading>,
+pub(super) struct AnnotationPosition {
+    pub(super) moves: BTreeMap<String, AnnotationMove>,
+    pub(super) read: Option<Reading>,
 }
 
 #[derive(Deserialize)]
-struct AnnotationMove {
-    role: String,
-    evals: Vec<f64>,
+pub(super) struct AnnotationMove {
+    pub(super) role: String,
+    pub(super) evals: Vec<f64>,
 }
 
 #[derive(Deserialize)]
-struct Reading {
-    main: Option<f64>,
-    top: Option<f64>,
+pub(super) struct Reading {
+    pub(super) main: Option<f64>,
+    pub(super) top: Option<f64>,
 }
 
 impl AnnotationPosition {
+    fn export_value(&self) -> Result<(Option<f64>, &'static str)> {
+        use num_rational::BigRational;
+        use num_traits::ToPrimitive;
+        let (value, basis) = self.value();
+        if basis != "evals" {
+            return Ok((value, basis));
+        }
+        let values = &self.moves.values().find(|m| m.role == "main").context("main missing")?.evals;
+        let sum = values
+            .iter()
+            .map(|&v| BigRational::from_float(v).context("non-finite eval"))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .sum::<BigRational>();
+        let mean = sum / num_bigint::BigInt::from(values.len());
+        Ok((Some(mean.to_f64().context("eval overflow")?), basis))
+    }
+
     fn value(&self) -> (Option<f64>, &'static str) {
         if let Some(value) = self.read.as_ref().and_then(|r| r.main) {
             return (Some(value), "main");
@@ -185,18 +203,29 @@ struct Traversal {
     parent: Vec<u32>,
     parent_move: Vec<u32>,
     last_own: Vec<u32>,
+    order: Vec<usize>,
 }
 
 impl Traversal {
     fn new(graph: &ReplyGraph<'_, AnnotationPosition>) -> Self {
+        Self::with_order(graph, false)
+    }
+
+    fn with_order(graph: &ReplyGraph<'_, AnnotationPosition>, sorted: bool) -> Self {
         let mut parent = vec![NONE; graph.len()];
         let mut parent_move = vec![NONE; graph.len()];
         let mut last_own = vec![NONE; graph.len()];
         let mut seen = vec![false; graph.len()];
         let mut queue = VecDeque::from([0]);
         seen[0] = true;
+        let mut order = Vec::new();
         while let Some(v) = queue.pop_front() {
-            for (i, e) in graph.edges(v).iter().enumerate() {
+            order.push(v);
+            let mut edges: Vec<_> = graph.edges(v).iter().enumerate().collect();
+            if sorted {
+                edges.sort_by_key(|(i, _)| graph.move_text(v, *i));
+            }
+            for (i, e) in edges {
                 let w = e.to();
                 if !seen[w] {
                     seen[w] = true;
@@ -211,6 +240,7 @@ impl Traversal {
             parent,
             parent_move,
             last_own,
+            order,
         }
     }
 
@@ -262,8 +292,26 @@ fn evaluations(
     threshold: f64,
     out: &mut impl Write,
 ) -> Result<EvaluationCounts> {
+    evaluations_with_format(graph, index, annot, traversal, side, (threshold, false), out)
+}
+
+fn evaluations_with_format(
+    graph: &ReplyGraph<'_, AnnotationPosition>,
+    index: &BookIndex<'_, AnnotationPosition>,
+    annot: &Annotation,
+    traversal: &Traversal,
+    side: &str,
+    options: (f64, bool),
+    out: &mut impl Write,
+) -> Result<EvaluationCounts> {
+    let (threshold, quoted) = options;
     let mut counts = EvaluationCounts::default();
-    for v in 0..graph.len() {
+    let order = if quoted {
+        traversal.order.clone()
+    } else {
+        (0..graph.len()).collect()
+    };
+    for v in order {
         if !graph.own[v] {
             continue;
         }
@@ -272,7 +320,11 @@ fn evaluations(
         };
         let key = index.key(m);
         counts.reachable += 1;
-        let (value, basis) = annot.positions[key].value();
+        let (value, basis) = if quoted {
+            annot.positions[key].export_value()?
+        } else {
+            annot.positions[key].value()
+        };
         let Some(value) = value else {
             counts.unknown += 1;
             continue;
@@ -287,7 +339,14 @@ fn evaluations(
                 let key = graph.key(p)?;
                 let mv = graph.move_text(p, i);
                 let role = &annot.positions[&key].moves[mv.as_ref()].role;
-                writeln!(out, "    last own move (key, move, role): ({key}, {mv}, {role})")?;
+                if quoted {
+                    writeln!(
+                        out,
+                        "    last own move (key, move, role): ('{key}', '{mv}', '{role}')"
+                    )?;
+                } else {
+                    writeln!(out, "    last own move (key, move, role): ({key}, {mv}, {role})")?;
+                }
             } else {
                 writeln!(out, "    last own move (key, move, role): None")?;
             }
@@ -608,6 +667,48 @@ fn run_to(args: CheckArgs, out: &mut impl Write) -> Result<()> {
         "プリセットの所属エラーまたは bad-eval の局面があります"
     );
     Ok(())
+}
+
+pub(super) fn export_bad_progressions(
+    annot: Annotation,
+    threshold: f64,
+    out: &mut impl Write,
+) -> Result<usize> {
+    let pool = reply_graph::thread_pool(2)?;
+    let index = pool.install(|| BookIndex::new(&annot.positions))?;
+    let mut counts = Vec::new();
+    let mut details = Vec::new();
+    for side in ["b", "w"] {
+        let graph = pool.install(|| {
+            reply_graph::build(&index, side, HIRATE_KEY, |_, p| {
+                p.moves
+                    .values()
+                    .enumerate()
+                    .filter(|(_, m)| matches!(m.role.as_str(), "main" | "alt"))
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+        })?;
+        let traversal = Traversal::with_order(&graph, true);
+        counts.push(evaluations_with_format(
+            &graph,
+            &index,
+            &annot,
+            &traversal,
+            side,
+            (threshold, true),
+            &mut details,
+        )?);
+    }
+    let bad = counts.iter().map(|c| c.bad).sum::<usize>();
+    writeln!(out, "bad-eval reachable positions: {bad} (one example per position)")?;
+    out.write_all(&details)?;
+    writeln!(
+        out,
+        "positions without a value: b={}, w={} (of b={}, w={} reachable)",
+        counts[0].unknown, counts[1].unknown, counts[0].reachable, counts[1].reachable
+    )?;
+    Ok(bad)
 }
 
 #[cfg(test)]

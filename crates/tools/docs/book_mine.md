@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -463,6 +463,116 @@ key ply move role source evals nodes lineage tier since note
 `source` の語彙は検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
 
 誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。`master audit` などの読み込み側も、`evals` の合計が i64 を超える場合はエラーになります。
+
+## `master export`: 定跡・プリセット・注釈の書き出し
+
+```sh
+book_mine master export --master moves.tsv --out out/book --tier wide
+book_mine master export --master moves.tsv --out out/book --schema schema \
+  --reads reads.jsonl more-reads --min-nodes 900000000 --force
+```
+
+出力先の親ディレクトリは、書き出すときに必要なら作成します。元データ全体に `master validate` と同じ検査を行い、
+誤りがあれば全件報告して書き出しません。検査後に tier で絞り、局面の key、role (main、alt、record)、
+USI の手の順に並べます。入力は変更しません。
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `--master <tsv>` | 必須 | 11 列の元データ |
+| `--out <prefix>` | 必須 | 下記 4 ファイルの接頭辞 |
+| `--tier wide\|curated` | `wide` | wide は全行、curated は curated の行だけ |
+| `--schema <dir>` | なし | `sources.tsv` による source の語彙検査と説明 |
+| `--reads <path>...` | なし | JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。複数指定可 |
+| `--min-nodes <n>` | `900000000` | 取り込む reads のノード数の下限 (非負整数) |
+| `--draw-pin <cp>` | `3` | draw の指定が空の読みで、先頭の評価値の絶対値がこの値以下なら除く (非負整数) |
+| `--bad-eval <cp>` | `-150` | 到達局面の値がこの値以下なら報告 (有限値) |
+| `--strict-bad-eval` | 無効 | 悪い到達局面が 1 つでもあれば、非ゼロで終了し書き出さない |
+| `--base <db>` | なし | 局面の追加・削除と、手の集合が変わった局面の数を表示 |
+| `--force` | 無効 | 既存の出力を置き換える |
+
+schema は見出しが `source	description` の `sources.tsv` を持ちます (区切りはタブ)。
+source と description は空でない値にし、source を重複させないでください。説明は日本語も使えます。
+指定時は、選択する tier にかかわらず元データの全行の source を検査し、
+注釈の `sources` に表の行順で書きます。ディレクトリや表が無い・不正ならエラーです。
+省略時は source の語彙を制限せず、注釈の `sources` は `{}` になります。
+この場合、stdout の `source:` の行は source の値の辞書順になります。
+
+出力は次の 4 ファイルです。いずれかが既存なら `--force` が必要です。ディレクトリへの出力や、
+元データ・読みのファイル・base・sources.tsv と同じファイルへの出力は `--force` でも拒否します。
+全ファイルを出力先と同じディレクトリの一時ファイルに書き終え、既存の出力をそれぞれ
+同じディレクトリの一時名へ rename で退避してから、新しいファイルを順に確定します。
+途中で失敗したら、確定済みの新しい出力を削除し、退避した出力を元の名前に戻します。
+復元にも失敗した場合はエラーに退避先のパスを含めます。全て成功したら退避先を削除します。新しい出力を全て確定した後に退避先の削除だけが失敗した場合は、新しい出力を残したまま、退避先のパスを含むエラーで終わります。
+失敗時は残った一時ファイルを削除し、新しく作った親ディレクトリも空の場合だけ削除します。
+4 ファイル全体は単一の原子的操作ではありません。`--force` では退避から確定までの間、元の名前に出力が無い (退避先の一時名にだけある) 時間があり、クラッシュや電源断ではその状態や一部の出力が残り得ます。
+
+| ファイル | 内容 |
+|---|---|
+| `<prefix>.db` | `#YANEURAOU-DB2016 1.00`。局面は `sfen <key> 0`、手は `<move> none <value> 0 <count>`。main は value=100/count=2、alt は 100/1、record は -30000/0 |
+| `<prefix>.default.explore.txt` | main・alt が合計 2 手以上ある局面で main のみを選ぶプリセット |
+| `<prefix>.random.explore.txt` | 同じ局面で main・alt の全手を選ぶプリセット |
+| `<prefix>.annot.json` | UTF-8、2 空白インデント、末尾改行付きの注釈 |
+
+各プリセットの冒頭には名前と DB のファイル名・SHA-256 が入ります。
+注釈の最上位の鍵は `format` (`rshogi-book-annotations`)、`version` (1)、
+`book` (`file` と `sha256`)、`sources`、`positions` の順です。
+`positions` の鍵は手数を除いた SFEN で、各局面には次の値があります。
+
+- `ply`: 元データの同じ局面にある空でない ply の最小値。全て空なら null。
+- `moves`: USI の手を鍵とするオブジェクト。各手は `role`、`source`、`nodes`、`note`、
+  `since`、`tier` の文字列、カンマで分けた `lineage` の配列、数値の配列 `evals`、
+  相手の返信の配列 `replies`、整数 `depth_after` を持ちます。
+- `read`: 採用した読みがある場合だけ追加する集計。
+  `n` は読みの回数、`nodes` は最大ノード数を有効数字 2 桁の指数表記にした文字列
+  (例 `1.2e9`)、`top` は各読みの先頭の評価値の平均、`main` は元データの main が
+  読みに含まれた回の評価値の平均 (無ければ null)、`main_n` はその回数です。
+  平均は有理数で計算した後に浮動小数へ変換し、小数点以下 1 桁に偶数丸めします。
+  `12.0` のように整数値でも浮動小数として書きます。
+
+`replies` は、その手を指した後の相手の全合法手のうち、選択した tier の定跡局面に着く手を
+USI 順に並べたものです。`depth_after` は main・alt の辺だけから作る 2 手単位のグラフで、
+強連結成分を縮約して求めます。成分内の局面数を n とすると重みは `2 × (n − 1)`、
+成分間の辺の重みは 2 とし、最長路を求めます。同じ局面への返信だけなら 0、
+同じ成分の別局面ならその成分の最長路、別成分なら 2 と相手成分の最長路の和を候補にし、
+手ごとの最大値を使います。record は常に 0 です。実際に指せる手数や評価値を保証する値ではありません。
+
+reads はパスを正規化して重複を除き、パス順・行順で取り込みます。
+`--tier` で絞った後の定跡にある局面の読みは、MultiPV と数値を丸ごとメモリに保持します。
+それ以外は、重複集計のために読みの SHA-256 の先頭 16 バイトと draw のフラグだけを保持し、
+異なる読み 1 件あたりのメモリは管理領域を含めて固定の数十バイトです。
+ノード数不足の局面数も key の要約で数えます。メモリは対象局面の読みの総サイズと、
+対象外の異なる読み・ノード数不足の異なる局面の件数に比例します。
+対象外の読みは注釈に含めません。
+key は両玉を持つ SFEN の 3 フィールドを正規化し、ply は 1 以上の整数、
+multipv は重複のない文字列 move と有限な数値 cp の配列であることを検査します。
+nodes・cp は整数または小数です。整数はそのまま、小数の字面は f64 に読み、
+その最短の十進表現を正確な有理数にして比較・合計します。
+JSON の規格の外の値 (NaN・Infinity) を含む行は、使わない欄にある場合も malformed に数えます。
+不正な行、ノード数不足、評価値が降順でない読み、先頭が非合法手の読み、
+draw が未指定・null・空オブジェクトで先頭値が draw-pin の範囲内の読みを除きます。
+draw は null またはオブジェクトだけを受け付けます。
+key・nodes・ply・順序付きの (move, cp) が一致する読みは 1 回にまとめます。
+局面ごとの最大ノード数を N とし、`nodes × 3 > N` の読みだけを集計に使います。
+
+到達検査は初期局面から先手・後手を別々に辿り、自分は main・alt、
+相手は全合法手のうち定跡の局面へ着く手を使います。自分の手番の値は
+`read.main`、main の evals の平均、`read.top` の順に選びます。
+stdout には curated main と wide alt が混在する局面の警告、悪い到達局面と経路、
+値が無い局面数、base との差、tier・role・source・since の件数、
+プリセット局面数・返信リンク数・最大 depth_after、DB の SHA-256 をこの順に出します。
+
+## `master diff`: 2 つの定跡の差分
+
+```sh
+book_mine master diff old.db new.db
+```
+
+手数を除いた SFEN の 3 フィールドをキーに、局面数・追加・削除・手の変更の数と
+Markdown の表を stdout に出します。手の集合が同じでも記載順が異なれば変更です。
+評価値・深さ・count だけの違いは表示しません。手のない局面は比較から除きます。
+表は変更、追加、削除の順で、各区分は局面キー順です。変更・追加の手数は new、
+削除の手数は old の値です。同じ局面の複数のブロックは手を記載順に連結し、
+手数は最後のブロックの値を使います。
 
 ## `master check`: 書き出した定跡とプリセットの検査
 
