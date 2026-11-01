@@ -412,7 +412,7 @@ fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
             > thread_voting_value(best, min_score) * (best.pv_len > 2) as i64;
 
         if best_in_proven_win {
-            if summary.score > best.score {
+            if new_in_proven_win && summary.score > best.score {
                 best_idx = idx;
             }
         } else if best_in_proven_loss {
@@ -433,7 +433,8 @@ fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
     if best_idx != 0 {
         let main = &summaries[0];
         let selected = &summaries[best_idx];
-        if selected.best_move != main.best_move && !selected.score.is_mate_score() {
+        let selected_proven_mate = selected.bound == Bound::Exact && selected.score.is_mate_score();
+        if selected.best_move != main.best_move && !selected_proven_mate {
             let support_count =
                 summaries.iter().filter(|s| s.best_move == selected.best_move).count();
             if support_count < 2 {
@@ -1626,7 +1627,7 @@ where
     }
     effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
-    // MultiPV・skill・helper の結果も完了した反復の score/PV/順位で返す。
+    // 中断したとき、MultiPV・skill の順位や確定値を求める呼出側の結果を完了した反復へ戻すために保存する。
     let mut completed_root_moves = if worker.state.completed_depth > 0 {
         worker.state.root_moves.clone()
     } else {
@@ -1789,7 +1790,8 @@ where
             // 安定ソート [pv_idx..]
             worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
             // 📝 YaneuraOu行1539: 探索済みのPVライン全体も安定ソートして順位を保つ
-            // abortしたdepthは前の完了depthのinfoを最終出力とするため、このdepthのinfoは出さない。
+            // abortしたdepthのinfoは出さない。最終infoは反復深化の後に決めた結果 (完了した反復、
+            // または根の先頭に別の手が残った中断反復) から作る。
             // 完了済みラインの取りこぼしはMultiPV>1のみで許容し、探索状態のsortはYO準拠で維持する。
             worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
             if !pv_aborted {
@@ -2638,6 +2640,33 @@ mod tests {
 
         let idx = select_best_summary_index(&summaries);
         assert_eq!(idx, 1, "勝ち筋同士ではより短手数の詰みを優先する");
+    }
+
+    #[test]
+    fn test_select_best_summary_index_keeps_proven_win_over_bounded_shorter_win() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::mate_in(7),
+                bound: Bound::Exact,
+                completed_depth: 12,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::mate_in(5),
+                bound: Bound::Upper,
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 0);
     }
 
     #[test]
