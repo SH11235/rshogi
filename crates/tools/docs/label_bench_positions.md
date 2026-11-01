@@ -50,7 +50,7 @@ target/release/label_bench_positions \
 | `--ls-progress-buckets <N>` | — | progresskpabs の routing bucket 数。LayerStacks + progresskpabs では必須 |
 | `--ls-progress-coeff <FILE>` | — | progresskpabs 用の進行度係数（USI `LS_PROGRESS_COEFF` と同じ）。LayerStacks モデルをロードし bucket mode が progresskpabs のとき必須（非 LS モデルでは不要） |
 | `--depth <i32>` | 25 | 探索深さ上限（0=無制限）。`--nodes` と両方 0 は不可 |
-| `--nodes <u64>` | 500000 | 探索ノード数上限（0=無制限）。深さと併用し先に到達した方で停止。`--depth` と両方 0 は不可 |
+| `--nodes <u64>` | 500000 | 探索ノード数上限（0=無制限）。深さと併用し先に到達した方で停止。`--depth` と両方 0 は不可。上限で反復が途中で止まったときは、最後に完了した反復の評価値をラベルにする |
 | `--hash-mb <usize>` | 128 | 置換表サイズ（MB）。局面ごとに作り直すため過大にしない |
 | `--threads <usize>` | 0 | worker スレッド数（0=利用可能 CPU 数） |
 

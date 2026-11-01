@@ -77,7 +77,7 @@ rescore_hcpe \
 | `--ls-progress-coeff <PATH>` | — | progresskpabs 用係数（LS + progresskpabs で必須、kingrank9 では不要） |
 | `--spsa-params <PATH>` | — | SPSA 探索 params（USI `SPSAParamsFile` 同形式）を各局面の探索へ適用。未指定は engine 既定値 |
 | `--depth <i32>` | 15 | 探索深さ（固定 depth ラベリング） |
-| `--nodes <u64>` | 0 | 探索ノード上限（0=無制限）。depth を binding にするなら 0 |
+| `--nodes <u64>` | 0 | 探索ノード上限（0=無制限）。depth を binding にするなら 0。上限で反復が途中で止まったときは、最後に完了した反復の評価値をラベルにする |
 | `--hash-mb <usize>` | 32 | worker ごとの置換表サイズ（MB）。局面ごとに作り直すため過大にしない |
 | `--threads <usize>` | 0 | worker スレッド数（0=全コア）。出力は thread 数非依存に bit 一致 |
 | `--score-clip <i32>` | 32000 | 出力 eval を ±この値に clamp して i16 へ収める |

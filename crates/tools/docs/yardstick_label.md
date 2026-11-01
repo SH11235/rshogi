@@ -95,7 +95,7 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 | `--ls-progress-buckets <N>` | — | progresskpabs の routing bucket 数。LayerStacks + progresskpabs では必須 |
 | `--ls-progress-coeff <FILE>` | — | progresskpabs 用の進行度係数。LS モデル + progresskpabs のとき必須（kingrank9 では不要） |
 | `--depth <i32>` | 12 | 探索深さ上限（0 以下=無制限）。`--nodes` と両方 0 は不可 |
-| `--nodes <u64>` | 0 | 探索ノード数上限（0=無制限）。depth を変数にするなら 0 |
+| `--nodes <u64>` | 0 | 探索ノード数上限（0=無制限）。depth を変数にするなら 0。上限で反復が途中で止まったときは、最後に完了した反復の評価値をラベルにする |
 | `--hash-mb <usize>` | 128 | worker ごとの置換表サイズ（MB）。局面ごとに作り直すため過大にしない |
 | `--spsa-params <FILE>` | — | SPSA 探索パラメータ `.params`（USI `SPSAParamsFile` と同形式 CSV）を各局面の探索へ setoption 相当で適用（NNUE 探索モードのみ。`--onnx-model` では無視）。未指定は engine 既定値 |
 | `--threads <usize>` | 0 | worker スレッド数（0=全コア）。出力は thread 数非依存に bit 一致 |
