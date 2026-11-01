@@ -212,7 +212,8 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     );
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
     let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
-    // 一覧は台帳へ追記する前に書く。書けなければ台帳を変えずに失敗する。
+    // 一覧は読みを追記する前に書く。書けなければ読みを追記せずに失敗する
+    // (末尾の書きかけの行の切り詰めは、台帳を開くときにすでに済んでいる)。
     let (appended, skipped, conflicts) =
         journal.merge_all(incoming, &dst, args.on_conflict, |conflicts| {
             match &args.conflicts_out {
@@ -247,18 +248,23 @@ fn escape_tsv(field: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// 存在しないファイルは親の dir の実体とファイル名で、存在するファイルは実体で比べる。
+/// 存在するファイルは実体で、存在しないファイルは一番近い存在する祖先の実体に残りの部分を足して比べる
+/// (取り込み先の台帳の dir はまだ無くてよい)。
 fn same_path(a: &Path, b: &Path) -> Result<bool> {
     let resolve = |p: &Path| -> Result<PathBuf> {
-        if p.try_exists()? {
-            return Ok(std::fs::canonicalize(p)?);
-        }
-        let parent = match p.parent() {
-            Some(d) if !d.as_os_str().is_empty() => d,
-            _ => Path::new("."),
+        let mut base = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(p)
         };
-        let name = p.file_name().context("ファイル名がありません")?;
-        Ok(std::fs::canonicalize(parent)?.join(name))
+        let mut rest = Vec::new();
+        while !base.try_exists()? {
+            rest.push(base.file_name().context("パスを解決できません")?.to_owned());
+            base = base.parent().context("パスを解決できません")?.to_path_buf();
+        }
+        let mut resolved = std::fs::canonicalize(&base)?;
+        resolved.extend(rest.iter().rev());
+        Ok(resolved)
     };
     if a.try_exists()? && b.try_exists()? && same_file::is_same_file(a, b)? {
         return Ok(true);
@@ -266,8 +272,7 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
     Ok(resolve(a)? == resolve(b)?)
 }
 
-/// 同じ dir の一意な一時ファイルに書いて fsync してから置き換え、dir も fsync する
-/// (書きかけの一覧を残さず、別の取り込みと一時ファイルを取り合わない)。食い違いが 0 件でもヘッダだけの一覧を書く。
+/// 同じ dir の一時ファイルに書いて fsync してから置き換え、dir も fsync する (書きかけの一覧を残さない)。食い違いが 0 件でもヘッダだけの一覧を書く。
 fn write_conflicts(path: &Path, conflicts: &[Conflict]) -> Result<()> {
     use std::io::Write;
     let mut body = String::from(CONFLICT_HEADER);
@@ -288,20 +293,13 @@ fn write_conflicts(path: &Path, conflicts: &[Conflict]) -> Result<()> {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let name = path.file_name().context("--conflicts-out にファイル名がありません")?;
-    let tmp = dir.join(format!(".{}.{}.part", name.to_string_lossy(), std::process::id()));
-    let result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        file.write_all(body.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        std::fs::File::open(&dir)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    // 一時ファイルは同じ dir に一意な名前で作り、置き換えなかったときは自分が作ったものだけが消える。
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(body.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -649,13 +647,19 @@ mod tests {
         };
         assert_eq!(get(0).unwrap().bestmove, "resign");
         assert_eq!(get(1).unwrap().bestmove, "resign");
-        assert!(
-            std::fs::read_dir(dir.path()).unwrap().all(|e| !e
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".part"))
-        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.starts_with(".tmp")), "{names:?}");
+        drop(journal);
+
+        // 取り込み先の台帳の dir がまだ無くても、出力先との照合で失敗しない。
+        let fresh = dir.path().join("new-dir/dst.jsonl");
+        let mut fresh_args = args(OnConflict::KeepExisting, Some(dir.path().join("fresh.tsv")));
+        fresh_args.journal = fresh.clone();
+        run(fresh_args).unwrap();
+        assert!(fresh.exists());
     }
 
     #[test]
