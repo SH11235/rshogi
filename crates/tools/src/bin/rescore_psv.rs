@@ -4199,14 +4199,22 @@ fn discard_output_if_model_changed(
     output_path: &std::path::Path,
     out_scores: bool,
 ) -> Result<()> {
-    if let Err(e) = loaded.ensure_unchanged(model_path) {
-        protection.truncate(output_path, 0)?;
+    let Err(e) = loaded.ensure_unchanged(model_path) else {
+        return Ok(());
+    };
+    let discarded = protection.truncate(output_path, 0).and_then(|()| {
         if out_scores {
             remove_in_progress_marker(protection, output_path)?;
         }
-        return Err(e.context(format!("discarded the output of {}", input_path.display())));
+        Ok(())
+    });
+    if let Err(discard_error) = discarded {
+        return Err(discard_error.context(format!(
+            "{e:#}; could not discard the output {}. Delete it before rerunning",
+            output_path.display()
+        )));
     }
-    Ok(())
+    Err(e.context(format!("discarded the output of {}", input_path.display())))
 }
 
 /// ONNX Runtime のセッションと入力特徴の host バッファ。1 回の実行の全入力ファイルで使い回す。
@@ -7141,6 +7149,15 @@ mod onnx_sessions_tests {
             prepare_in_progress_marker(&protection, &scores, &start, false).unwrap(),
             Some(SidecarStartDecision::Truncate)
         );
+
+        // モデルが消えていると出力保護の検査で空にできないので、消すべき出力を案内する。
+        std::fs::write(&psv, [1, 2, 3]).unwrap();
+        std::fs::remove_file(&model).unwrap();
+        let error =
+            discard_output_if_model_changed(&protection, &loaded, &model, &input, &psv, false)
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("could not discard the output"));
+        assert_eq!(std::fs::read(&psv).unwrap(), [1, 2, 3]);
     }
 
     #[test]
