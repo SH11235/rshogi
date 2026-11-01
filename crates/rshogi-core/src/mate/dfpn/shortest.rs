@@ -138,6 +138,7 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
 }
 
 /// 手順の局面を末端から根へ、残りの手数を上限にして証明する。すべて証明できれば `true`
+/// 受け方の局面が予算内に証明できなければ、先に重い応手の先を証明しておく (`prove_heavy_replies`)
 fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
