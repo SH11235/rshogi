@@ -9,6 +9,49 @@ type Edges = BTreeMap<String, BTreeSet<String>>;
 pub(super) type Values = BTreeMap<String, BTreeMap<String, i32>>;
 pub(super) type Pending = BTreeMap<String, Vec<(i32, String)>>;
 
+#[derive(Debug)]
+struct WorkLimit;
+impl std::fmt::Display for WorkLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("影の処理上限")
+    }
+}
+impl std::error::Error for WorkLimit {}
+
+struct Work {
+    remaining: Option<usize>,
+}
+impl Work {
+    fn tick(&mut self) -> Result<()> {
+        if let Some(left) = &mut self.remaining {
+            if *left == 0 {
+                return Err(WorkLimit.into());
+            }
+            *left -= 1;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PrefetchCandidate {
+    pub key: String,
+    pub level: usize,
+    pub ply: u32,
+}
+
+#[derive(Default)]
+pub(super) struct PredictionReport {
+    pub candidates: Vec<PrefetchCandidate>,
+    pub limited: bool,
+    pub work: usize,
+    pub unread: BTreeSet<String>,
+    pub cyclic: BTreeSet<String>,
+}
+
+// 5,000 局面を複数回辿る構築・依存解析・展開を同じ予算で扱う。
+pub(super) const PREFETCH_WORK: usize = 500_000;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Definition {
@@ -134,6 +177,22 @@ impl Tree {
 
     /// 根と実戦の手順から木を作る。出力先には触れない。
     pub fn build(def: TreeParams, lines: &[GameLine]) -> Result<Self> {
+        Self::build_with_work(def, lines, &mut Work { remaining: None })
+    }
+
+    fn build_with_work(def: TreeParams, lines: &[GameLine], work: &mut Work) -> Result<Self> {
+        Self::build_borrowed(
+            def,
+            lines.iter().map(|(key, ply, moves)| (key.as_str(), *ply, moves.as_slice())),
+            work,
+        )
+    }
+
+    fn build_borrowed<'a>(
+        def: TreeParams,
+        lines: impl IntoIterator<Item = (&'a str, u32, &'a [String])>,
+        work: &mut Work,
+    ) -> Result<Self> {
         if !matches!(def.own.as_str(), "b" | "w") || def.opp_n == 0 || def.stop < 0 {
             bail!("own / opp_n / stop の指定が不正です");
         }
@@ -141,13 +200,13 @@ impl Tree {
         let mut root_order = Vec::new();
         let mut game: Edges = BTreeMap::new();
         for (root, ply, moves) in lines {
-            let ply = *ply;
+            work.tick()?;
             if ply == 0 {
                 bail!("ply は正数が必要です");
             }
             let pos = position_from_sfen(&format!("{root} {ply}"))?;
             let mut key = strip_ply(&pos.to_sfen()).to_owned();
-            if &key != root {
+            if key != root {
                 bail!("根の key は正規形が必要です");
             }
             if !roots.contains_key(&key) {
@@ -155,6 +214,7 @@ impl Tree {
             }
             roots.entry(key.clone()).or_insert(ply);
             for mv in moves.iter().take(def.depth.saturating_add(1)) {
+                work.tick()?;
                 let next = child(&key, mv)?;
                 game.entry(key).or_default().insert(mv.to_owned());
                 key = next;
@@ -255,8 +315,20 @@ impl Tree {
         (pick, extra)
     }
 
+    pub fn waiting(&self) -> &[(String, usize)] {
+        &self.waiting
+    }
+
     /// 台帳から要求済みの読みだけを取り込み、展開と段の緩和が止まるまで進める。
     pub fn advance(&mut self, cache: &impl Readings) -> Result<Vec<(String, usize)>> {
+        self.advance_with_work(cache, &mut Work { remaining: None })
+    }
+
+    fn advance_with_work(
+        &mut self,
+        cache: &impl Readings,
+        budget: &mut Work,
+    ) -> Result<Vec<(String, usize)>> {
         if self.finished || self.failed {
             return Ok(Vec::new());
         }
@@ -269,6 +341,7 @@ impl Tree {
         loop {
             let mut work: VecDeque<_> = self.level.keys().cloned().collect();
             while let Some(key) = work.pop_front() {
+                budget.tick()?;
                 if !self.nodes.contains_key(&key) {
                     let Some(reading) = cache.get(&key) else {
                         continue;
@@ -293,6 +366,7 @@ impl Tree {
                 self.edge.entry(key.clone()).or_default().extend(pick.into_iter().chain(extra));
                 // 既存の辺も辿り直し、浅い再発見を子孫と手数の両方へ伝える。
                 for mv in self.edge.get(&key).into_iter().flatten() {
+                    budget.tick()?;
                     let c = child(&key, mv)?;
                     let next_ply = ply.checked_add(1).context("手数の上限")?;
                     let changed = self.level.get(&c).is_none_or(|d| level + 1 < *d)
@@ -479,6 +553,314 @@ impl Tree {
     }
 }
 
+impl Tree {
+    /// 未読の依存と循環の祖先を除き、残った局面を子から順に一度だけ評価する。
+    #[cfg(test)]
+    fn prediction_values(&self, work: &mut Work) -> Result<Values> {
+        self.prediction_values_report(work, &mut PredictionReport::default())
+    }
+
+    fn prediction_values_report(
+        &self,
+        work: &mut Work,
+        report: &mut PredictionReport,
+    ) -> Result<Values> {
+        let mut keys = Vec::new();
+        let mut index = BTreeMap::new();
+        for key in self.level.keys() {
+            work.tick()?;
+            index.insert(key.as_str(), keys.len());
+            keys.push(key);
+        }
+        let n = keys.len();
+        let mut edges = vec![Vec::new(); n];
+        let mut reverse = vec![Vec::new(); n];
+        for (i, key) in keys.iter().enumerate() {
+            work.tick()?;
+            let Some(reading) = self.nodes.get(*key) else {
+                continue;
+            };
+            let mut moves = BTreeSet::new();
+            for mv in reading
+                .lines()
+                .iter()
+                .map(|p| &p.mv)
+                .chain(self.edge.get(*key).into_iter().flatten())
+            {
+                work.tick()?;
+                moves.insert(mv);
+            }
+            for mv in moves {
+                work.tick()?;
+                let c = child(key, mv)?;
+                if let Some(&j) = index.get(c.as_str()) {
+                    edges[i].push((mv.clone(), j));
+                    reverse[j].push(i);
+                }
+            }
+        }
+        let mut seen = vec![false; n];
+        let mut order = Vec::new();
+        for root in 0..n {
+            work.tick()?;
+            if seen[root] {
+                continue;
+            }
+            seen[root] = true;
+            let mut stack = vec![(root, 0)];
+            while let Some((i, next)) = stack.last_mut() {
+                work.tick()?;
+                if let Some((_, j)) = edges[*i].get(*next) {
+                    *next += 1;
+                    if !seen[*j] {
+                        seen[*j] = true;
+                        stack.push((*j, 0));
+                    }
+                } else {
+                    order.push(*i);
+                    stack.pop();
+                }
+            }
+        }
+        let mut component = vec![usize::MAX; n];
+        let mut sizes = Vec::new();
+        for &root in order.iter().rev() {
+            work.tick()?;
+            if component[root] != usize::MAX {
+                continue;
+            }
+            let id = sizes.len();
+            let mut size = 0;
+            component[root] = id;
+            let mut stack = vec![root];
+            while let Some(i) = stack.pop() {
+                work.tick()?;
+                size += 1;
+                for &j in &reverse[i] {
+                    work.tick()?;
+                    if component[j] == usize::MAX {
+                        component[j] = id;
+                        stack.push(j);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        let mut invalid = vec![0u8; n];
+        let mut stack = Vec::new();
+        for i in 0..n {
+            work.tick()?;
+            let mut self_loop = false;
+            for (_, j) in &edges[i] {
+                work.tick()?;
+                self_loop |= *j == i;
+            }
+            invalid[i] = u8::from(!self.nodes.contains_key(keys[i]))
+                | (u8::from(sizes[component[i]] > 1 || self_loop) << 1);
+            if invalid[i] != 0 {
+                stack.push(i);
+            }
+        }
+        while let Some(i) = stack.pop() {
+            work.tick()?;
+            for &j in &reverse[i] {
+                work.tick()?;
+                if invalid[j] | invalid[i] != invalid[j] {
+                    invalid[j] |= invalid[i];
+                    stack.push(j);
+                }
+            }
+        }
+        let mut values = Values::new();
+        let mut best = vec![0; n];
+        for i in order {
+            work.tick()?;
+            if invalid[i] != 0 {
+                if side(keys[i]) == self.def.own
+                    && self.level[keys[i]] < self.def.depth
+                    && self.edge.get(keys[i]).is_some_and(|e| !e.is_empty())
+                {
+                    if invalid[i] & 1 != 0 {
+                        report.unread.insert(keys[i].clone());
+                    }
+                    if invalid[i] & 2 != 0 {
+                        report.cyclic.insert(keys[i].clone());
+                    }
+                }
+                continue;
+            }
+            let reading = &self.nodes[keys[i]];
+            let mut rows = BTreeMap::new();
+            for pv in reading.lines() {
+                work.tick()?;
+                rows.insert(pv.mv.clone(), pv.cp);
+            }
+            for (mv, j) in &edges[i] {
+                work.tick()?;
+                rows.insert(mv.clone(), -best[*j]);
+            }
+            let mut maximum = None::<i32>;
+            for value in rows.values() {
+                work.tick()?;
+                maximum = Some(maximum.map_or(*value, |old| old.max(*value)));
+            }
+            best[i] = maximum.unwrap_or_else(|| {
+                if reading.bestmove == "win" {
+                    reading.multipv.first().map_or(0, |p| p.cp)
+                } else {
+                    0
+                }
+            });
+            values.insert(keys[i].clone(), rows);
+        }
+        Ok(values)
+    }
+
+    #[cfg(test)]
+    fn predict(&self, work: &mut Work) -> Result<Edges> {
+        self.predict_report(work, &mut PredictionReport::default())
+    }
+
+    fn predict_report(&self, work: &mut Work, report: &mut PredictionReport) -> Result<Edges> {
+        let values = self.prediction_values_report(work, report)?;
+        let mut predicted = Edges::new();
+        for (key, rows) in values {
+            work.tick()?;
+            if side(&key) != self.def.own || self.level[&key] >= self.def.depth {
+                continue;
+            }
+            let Some(edges) = self.edge.get(&key).filter(|e| !e.is_empty()) else {
+                continue;
+            };
+            let mut best = i32::MIN;
+            for mv in edges {
+                work.tick()?;
+                best = best.max(rows.get(mv).copied().unwrap_or(-99999));
+            }
+            for pv in self.nodes[&key].lines() {
+                work.tick()?;
+                if !edges.contains(&pv.mv) && pv.cp > best {
+                    predicted.entry(key.clone()).or_default().insert(pv.mv.clone());
+                }
+            }
+        }
+        Ok(predicted)
+    }
+
+    #[cfg(test)]
+    fn shadow(
+        &self,
+        lines: &[GameLine],
+        predicted: Edges,
+        cache: &impl Readings,
+        work: &mut Work,
+    ) -> Result<Self> {
+        self.shadow_borrowed(
+            lines.iter().map(|(key, ply, moves)| (key.as_str(), *ply, moves.as_slice())),
+            predicted,
+            cache,
+            work,
+        )
+    }
+
+    fn shadow_borrowed<'a>(
+        &self,
+        lines: impl IntoIterator<Item = (&'a str, u32, &'a [String])>,
+        predicted: Edges,
+        cache: &impl Readings,
+        work: &mut Work,
+    ) -> Result<Self> {
+        let mut def = self.def.clone();
+        def.rounds = 0;
+        let mut shadow = Self::build_borrowed(def, lines, work)?;
+        for (key, moves) in self.force.iter().chain(predicted.iter()) {
+            work.tick()?;
+            for mv in moves {
+                work.tick()?;
+                shadow.force.entry(key.clone()).or_default().insert(mv.clone());
+            }
+        }
+        shadow.advance_with_work(cache, work)?;
+        Ok(shadow)
+    }
+
+    /// 同じ定義と台帳から影を作る。上限に達した試行の候補は全て捨てる。
+    /// 呼び出し側は候補から本体の不足・実行中・失敗上限のキーを除く。
+    #[cfg(test)]
+    pub fn prefetch(
+        &self,
+        lines: &[GameLine],
+        cache: &impl Readings,
+        hold: bool,
+        limit: usize,
+    ) -> Result<Vec<PrefetchCandidate>> {
+        Ok(self.prefetch_report(lines, cache, hold, limit)?.candidates)
+    }
+
+    /// 上限による破棄と、読み依存による予測の除外を区別する。
+    #[cfg(test)]
+    pub fn prefetch_report(
+        &self,
+        lines: &[GameLine],
+        cache: &impl Readings,
+        hold: bool,
+        limit: usize,
+    ) -> Result<PredictionReport> {
+        self.prefetch_report_borrowed(
+            lines.iter().map(|(key, ply, moves)| (key.as_str(), *ply, moves.as_slice())),
+            cache,
+            hold,
+            limit,
+        )
+    }
+
+    /// 入力を複製せず、予算の範囲で影の手順を辿る。
+    pub fn prefetch_report_borrowed<'a>(
+        &self,
+        lines: impl IntoIterator<Item = (&'a str, u32, &'a [String])>,
+        cache: &impl Readings,
+        hold: bool,
+        limit: usize,
+    ) -> Result<PredictionReport> {
+        let mut report = PredictionReport::default();
+        if hold
+            || self.finished
+            || self.failed
+            || self.def.depth == 0
+            || self.round >= self.def.rounds
+        {
+            return Ok(report);
+        }
+        let mut work = Work {
+            remaining: Some(limit),
+        };
+        let attempt: Result<Vec<PrefetchCandidate>> = (|| {
+            let predicted = self.predict_report(&mut work, &mut report)?;
+            let shadow = self.shadow_borrowed(lines, predicted, cache, &mut work)?;
+            let mut candidates = Vec::new();
+            for (key, level) in shadow.waiting {
+                work.tick()?;
+                candidates.push(PrefetchCandidate {
+                    ply: shadow.ply[&key],
+                    key,
+                    level,
+                });
+            }
+            Ok(candidates)
+        })();
+        report.work = limit - work.remaining.unwrap_or(0);
+        match attempt {
+            Err(err) if err.is::<WorkLimit>() => {
+                report.limited = true;
+                report.unread.clear();
+                report.cyclic.clear();
+            }
+            result => report.candidates = result?,
+        }
+        Ok(report)
+    }
+}
+
 pub(super) fn remove_candidates(out: &Path) -> Result<()> {
     for name in ["own_nodes.tsv", super::output::NODE_MOVES] {
         match std::fs::remove_file(out.join(name)) {
@@ -492,5 +874,586 @@ pub(super) fn remove_candidates(out: &Path) -> Result<()> {
 fn push_unique(moves: &mut Vec<String>, mv: &str) {
     if !moves.iter().any(|m| m == mv) {
         moves.push(mv.into());
+    }
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::super::journal::Pv;
+    use super::*;
+    const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+
+    fn reading(key: &str, rows: &[(&str, i32)]) -> Reading {
+        Reading {
+            tag: "test".into(),
+            key: key.into(),
+            ply: 1,
+            nodes_limit: 1,
+            nodes: Some(1),
+            sec: 1.0,
+            threads: 1,
+            hash: 1,
+            draw: BTreeMap::new(),
+            bestmove: rows.first().map_or("resign", |r| r.0).into(),
+            multipv: rows
+                .iter()
+                .map(|(mv, cp)| Pv {
+                    mv: (*mv).into(),
+                    cp: *cp,
+                    depth: 1,
+                })
+                .collect(),
+        }
+    }
+    fn params() -> TreeParams {
+        TreeParams {
+            out: "unused".into(),
+            depth: 3,
+            opp_n: 1,
+            stop: 300,
+            own: "b".into(),
+            rounds: 1,
+            extra: vec![],
+            draw: 17,
+        }
+    }
+    fn fixture() -> (Tree, Vec<GameLine>, BTreeMap<String, Reading>) {
+        let a = child(ROOT, "5i4i").unwrap();
+        let c = child(ROOT, "5i5h").unwrap();
+        let second = child(&a, "5a4a").unwrap();
+        let lines = vec![(ROOT.into(), 11, vec![]), (second, 7, vec![])];
+        let cache = BTreeMap::from([
+            (ROOT.into(), reading(ROOT, &[("5i4i", 100), ("5i5h", 80), ("5i6i", 60)])),
+            (a.clone(), reading(&a, &[("5a5b", 500)])),
+            (c.clone(), reading(&c, &[("5a5b", 500)])),
+        ]);
+        let mut tree = Tree::build(params(), &lines).unwrap();
+        tree.advance(&cache).unwrap();
+        (tree, lines, cache)
+    }
+    fn unlimited() -> Work {
+        Work { remaining: None }
+    }
+    fn normalized(edges: &Edges) -> Edges {
+        edges
+            .iter()
+            .filter(|(_, e)| !e.is_empty())
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect()
+    }
+    fn assert_shadow(tree: &Tree, shadow: &Tree) {
+        assert_eq!(tree.nodes.keys().collect::<Vec<_>>(), shadow.nodes.keys().collect::<Vec<_>>());
+        assert_eq!(tree.level, shadow.level);
+        assert_eq!(tree.ply, shadow.ply);
+        assert_eq!(normalized(&tree.edge), normalized(&shadow.edge));
+        assert_eq!(normalized(&tree.rule), normalized(&shadow.rule));
+        assert_eq!(tree.candidates, shadow.candidates);
+        assert_eq!(tree.compare, shadow.compare);
+    }
+
+    #[test]
+    fn prediction_uses_raw_unexpanded_move_and_does_not_mutate_tree() {
+        let (tree, lines, cache) = fixture();
+        let before = format!("{tree:?}");
+        let predicted = tree.predict(&mut unlimited()).unwrap();
+        assert_eq!(predicted[ROOT], BTreeSet::from(["5i6i".into()]));
+        let shadow = tree.shadow(&lines, predicted, &cache, &mut unlimited()).unwrap();
+        assert!(tree.nodes.keys().all(|k| shadow.nodes.contains_key(k)));
+        let candidates = tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap();
+        let b = child(ROOT, "5i6i").unwrap();
+        assert!(candidates.contains(&PrefetchCandidate {
+            key: b,
+            level: 1,
+            ply: 12
+        }));
+        assert_eq!(format!("{tree:?}"), before);
+        assert_shadow(&tree, &tree.shadow(&lines, Edges::new(), &cache, &mut unlimited()).unwrap());
+    }
+
+    #[test]
+    fn unread_grandchild_and_level_multipv_dependency_block_prediction() {
+        let (mut tree, _, cache) = fixture();
+        let a = child(ROOT, "5i4i").unwrap();
+        let grandchild = child(&a, "5a5b").unwrap();
+        tree.level.insert(grandchild.clone(), 2);
+        assert!(!tree.predict(&mut unlimited()).unwrap().contains_key(ROOT));
+        let mut report = PredictionReport::default();
+        tree.prediction_values_report(&mut unlimited(), &mut report).unwrap();
+        assert!(report.unread.contains(ROOT));
+        assert!(!report.cyclic.contains(ROOT));
+        tree.nodes.insert(grandchild.clone(), reading(&grandchild, &[]));
+        assert!(tree.prediction_values(&mut unlimited()).unwrap().contains_key(ROOT));
+        let b = child(ROOT, "5i6i").unwrap();
+        tree.level.insert(b, 1);
+        assert!(!tree.prediction_values(&mut unlimited()).unwrap().contains_key(ROOT));
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn cyclic_components_and_their_ancestors_are_excluded() {
+        let (mut tree, _, _) = fixture();
+        let mut key = ROOT.to_owned();
+        for (depth, mv) in ["5i4i", "5a4a", "4i5i", "4a5a"].into_iter().enumerate() {
+            tree.level.insert(key.clone(), depth);
+            tree.nodes.insert(key.clone(), reading(&key, &[(mv, 10)]));
+            tree.edge.insert(key.clone(), BTreeSet::from([mv.into()]));
+            key = child(&key, mv).unwrap();
+        }
+        assert_eq!(key, ROOT);
+        assert!(!tree.prediction_values(&mut unlimited()).unwrap().contains_key(ROOT));
+        let ancestor = child(ROOT, "5i5h").unwrap();
+        let parent = child(&ancestor, "5a4a").unwrap();
+        tree.level.insert(parent.clone(), 0);
+        tree.nodes.insert(parent.clone(), reading(&parent, &[("5h5i", 0)]));
+        assert!(!tree.prediction_values(&mut unlimited()).unwrap().contains_key(&parent));
+        tree.edge.insert(parent.clone(), BTreeSet::from(["5h5i".into()]));
+        let mut report = PredictionReport::default();
+        tree.prediction_values_report(&mut unlimited(), &mut report).unwrap();
+        assert!(report.cyclic.contains(ROOT));
+        assert!(report.cyclic.contains(&parent));
+    }
+
+    #[test]
+    fn memoized_values_equal_negamax_on_acyclic_dependencies() {
+        let (tree, _, _) = fixture();
+        let nodes = tree.nodes.keys().cloned().collect();
+        assert_eq!(
+            tree.prediction_values(&mut unlimited()).unwrap(),
+            tree.negamax(&nodes).unwrap()
+        );
+    }
+
+    #[test]
+    fn inactive_and_exhausted_trees_do_not_predict() {
+        let (mut tree, lines, cache) = fixture();
+        assert!(tree.prefetch(&lines, &cache, true, PREFETCH_WORK).unwrap().is_empty());
+        tree.round = tree.def.rounds;
+        assert!(tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap().is_empty());
+        tree.round = 0;
+        tree.failed = true;
+        assert!(tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap().is_empty());
+        tree.failed = false;
+        tree.finished = true;
+        assert!(tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap().is_empty());
+        tree.finished = false;
+        tree.def.depth = 0;
+        assert!(tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap().is_empty());
+    }
+
+    #[test]
+    fn budget_stops_build_graph_and_expansion_without_partial_candidates() {
+        let (tree, lines, cache) = fixture();
+        for limit in 0..30 {
+            assert!(tree.prefetch(&lines, &cache, false, limit).unwrap().is_empty());
+        }
+        let mut work = Work { remaining: Some(2) };
+        let long = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a4a".into(), "4i5i".into()])];
+        assert!(Tree::build_with_work(params(), &long, &mut work).unwrap_err().is::<WorkLimit>());
+        assert_eq!(work.remaining, Some(0));
+        let mut shadow = Tree::build(params(), &lines).unwrap();
+        let mut work = Work { remaining: Some(2) };
+        assert!(shadow.advance_with_work(&cache, &mut work).unwrap_err().is::<WorkLimit>());
+        assert_eq!(work.remaining, Some(0));
+        let mut work = Work { remaining: Some(2) };
+        assert!(tree.prediction_values(&mut work).unwrap_err().is::<WorkLimit>());
+        assert_eq!(work.remaining, Some(0));
+    }
+
+    #[test]
+    fn stable_prediction_contains_round_end_extensions() {
+        let (mut tree, lines, mut cache) = fixture();
+        let predicted = tree.predict(&mut unlimited()).unwrap();
+        let other = lines[1].0.clone();
+        cache.insert(other.clone(), reading(&other, &[]));
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.round, 1);
+        assert!(
+            tree.force
+                .iter()
+                .all(|(key, moves)| moves.is_subset(predicted.get(key).unwrap()))
+        );
+    }
+
+    #[test]
+    fn shadow_matches_each_partial_layer_with_force_stop_and_multiple_roots() {
+        let (original, mut lines, mut full) = fixture();
+        lines[0].2 = vec!["5i4i".into(), "5a4a".into(), "4i5i".into()];
+        let second = lines[1].0.clone();
+        full.insert(second.clone(), reading(&second, &[("4i5i", 500)]));
+        let mut tree = Tree::build(original.def, &lines).unwrap();
+        tree.def.rounds = 0;
+        tree.force.insert(second, BTreeSet::from(["4i5i".into()]));
+        let mut cache = BTreeMap::new();
+        for _ in 0..5 {
+            let missing = tree.advance(&cache).unwrap();
+            assert_shadow(
+                &tree,
+                &tree.shadow(&lines, Edges::new(), &cache, &mut unlimited()).unwrap(),
+            );
+            for (key, _) in missing {
+                cache.insert(
+                    key.clone(),
+                    full.get(&key).cloned().unwrap_or_else(|| reading(&key, &[])),
+                );
+            }
+        }
+    }
+    #[test]
+    fn simulation_reuse_matches_rebuilding_with_deferred_shadows_and_shared_keys() {
+        use super::super::simulation::{
+            PrefetchOptions, Sample, Timing, preflight, simulate, simulate_prefetch,
+        };
+        use std::sync::Arc;
+        let (tree, lines, mut cache) = fixture();
+        let other = lines[1].0.clone();
+        let mut slow = reading(&other, &[]);
+        slow.sec = 10.0;
+        cache.insert(other, slow);
+        let b = child(ROOT, "5i6i").unwrap();
+        let mut answer = reading(&b, &[("5a5b", 500)]);
+        answer.sec = 20.0;
+        cache.insert(b.clone(), answer);
+        let mut samples = Vec::new();
+        for order in 0..7 {
+            let mut sample = Sample {
+                params: tree.def.clone(),
+                lines: lines.clone(),
+                answers: Arc::new(cache.clone()),
+                requested: BTreeSet::new(),
+                fingerprint: "test".into(),
+                priority: 100,
+                order,
+            };
+            preflight(&mut sample).unwrap();
+            samples.push(sample);
+        }
+        let unrelated = child(&b, "5a4a").unwrap();
+        let mut unused_answer = cache[&b].clone();
+        unused_answer.sec = 1000.0;
+        let mut unrelated_answer = reading(&unrelated, &[]);
+        unrelated_answer.sec = 1.5;
+        let mut extra = Sample {
+            params: TreeParams {
+                depth: 0,
+                ..tree.def.clone()
+            },
+            lines: vec![(unrelated.clone(), 1, vec![])],
+            answers: Arc::new(BTreeMap::from([
+                (unrelated.clone(), unrelated_answer),
+                (b.clone(), unused_answer),
+            ])),
+            requested: BTreeSet::new(),
+            fingerprint: "unrelated".into(),
+            priority: 100,
+            order: 8,
+        };
+        preflight(&mut extra).unwrap();
+        samples.push(extra);
+        let samples: Vec<_> = samples.iter().collect();
+        let baseline = simulate(&samples, 5, Timing::Maximum).unwrap();
+        for workers in [0, 1, 2, 4] {
+            let options = PrefetchOptions {
+                workers,
+                rebuilds_per_turn: 1,
+                record_candidates: true,
+                ..Default::default()
+            };
+            let reuse = simulate_prefetch(&samples, 5, options).unwrap();
+            let fresh = simulate_prefetch(
+                &samples,
+                5,
+                PrefetchOptions {
+                    reuse: false,
+                    ..options
+                },
+            )
+            .unwrap();
+            assert_eq!(reuse.candidates, fresh.candidates);
+            assert_eq!(reuse.trees_done, fresh.trees_done);
+            assert_eq!(reuse.workers_done, fresh.workers_done);
+            for (actual, expected) in reuse.trees.iter().zip(&baseline.trees) {
+                assert_shadow(expected, actual);
+                assert_eq!(actual.force, expected.force);
+            }
+            if workers == 0 {
+                assert_eq!(reuse.trees_done, baseline.elapsed);
+                assert_eq!(reuse.read, 0);
+            } else {
+                assert!(fresh.rebuilds > reuse.rebuilds);
+                assert_eq!(reuse.read, 1);
+                assert_eq!(reuse.used, 1);
+                assert_eq!(reuse.absent, 0);
+                assert_eq!(reuse.same_wait, 12.0);
+                assert_eq!(reuse.other_wait, 0.0);
+                assert_eq!(reuse.trees_done, 22.0);
+                assert!(reuse.trees_done < baseline.elapsed);
+            }
+        }
+    }
+    #[test]
+    fn prefetch_worker_cap_changes_distribution_and_completion() {
+        use super::super::simulation::{PrefetchOptions, Sample, preflight, simulate_prefetch};
+        use std::sync::Arc;
+        let (tree, lines, mut cache) = fixture();
+        let other = lines[1].0.clone();
+        let mut slow = reading(&other, &[]);
+        slow.sec = 10.0;
+        cache.insert(other, slow);
+        cache.insert(
+            ROOT.into(),
+            reading(ROOT, &[("5i4i", 100), ("5i5h", 80), ("5i6i", 60), ("5i4h", 50)]),
+        );
+        for mv in ["5i6i", "5i4h"] {
+            let key = child(ROOT, mv).unwrap();
+            let mut answer = reading(&key, &[("5a5b", 500)]);
+            answer.sec = 20.0;
+            cache.insert(key, answer);
+        }
+        let mut sample = Sample {
+            params: tree.def,
+            lines,
+            answers: Arc::new(cache),
+            requested: BTreeSet::new(),
+            fingerprint: "test".into(),
+            priority: 0,
+            order: 0,
+        };
+        preflight(&mut sample).unwrap();
+        let run = |workers| {
+            simulate_prefetch(
+                &[&sample],
+                5,
+                PrefetchOptions {
+                    workers,
+                    record_candidates: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let one = run(1);
+        let two = run(2);
+        assert!(one.candidates.iter().any(|(_, keys)| keys.len() == 2));
+        assert_eq!((one.max_concurrent, two.max_concurrent), (1, 2));
+        assert_eq!((one.read, two.read), (1, 2));
+        assert_eq!((one.no_slot, two.no_slot), (1, 0));
+        assert_eq!((one.trees_done, two.trees_done), (30.0, 22.0));
+        assert_eq!((one.added, two.added), (1, 1));
+        assert_eq!((one.added_moves, two.added_moves), (2, 2));
+        assert_eq!((one.same_positive, two.same_positive), (1, 2));
+        assert_eq!((one.same_max, two.same_max), (12.0, 12.0));
+        assert_eq!(one.other_positive, 0);
+    }
+
+    #[test]
+    fn prefetch_report_separates_limit_from_empty_candidates() {
+        let (tree, lines, cache) = fixture();
+        let limited = tree.prefetch_report(&lines, &cache, false, 0).unwrap();
+        assert!(limited.limited);
+        assert!(limited.candidates.is_empty());
+        let held = tree.prefetch_report(&lines, &cache, true, PREFETCH_WORK).unwrap();
+        assert!(!held.limited);
+        assert!(held.candidates.is_empty());
+    }
+
+    #[test]
+    fn simulation_missing_prediction_stops_and_drains_after_tree_completion() {
+        use super::super::simulation::{
+            PrefetchOptions, Sample, Timing, preflight, simulate_prefetch,
+        };
+        use std::sync::Arc;
+        let (tree, _, mut cache) = fixture();
+        let q = "9/5k3/9/9/9/9/9/5K3/9 b -";
+        let r = child(q, "4h4i").unwrap();
+        // 合流先が level に入ると、STOP で止まった枝の MultiPV の値も伝播で変わる。
+        let d = child(&r, "4b5b").unwrap();
+        let a = child(ROOT, "5i4i").unwrap();
+        assert_eq!(d, child(&a, "5a5b").unwrap());
+        let mut slow = reading(q, &[("4h4i", 0)]);
+        slow.sec = 10.0;
+        cache.insert(q.into(), slow);
+        let mut r_answer = reading(&r, &[("4b5b", 0)]);
+        r_answer.sec = 0.0;
+        cache.insert(r.clone(), r_answer);
+        let mut d_answer = reading(&d, &[("4i3i", 1000)]);
+        d_answer.sec = 0.0;
+        cache.insert(d.clone(), d_answer);
+        let mut sample = Sample {
+            params: tree.def,
+            lines: vec![(ROOT.into(), 1, vec![]), (q.into(), 1, vec![])],
+            answers: Arc::new(cache),
+            requested: BTreeSet::new(),
+            fingerprint: "test".into(),
+            priority: 0,
+            order: 0,
+        };
+        preflight(&mut sample).unwrap();
+        let b = child(ROOT, "5i6i").unwrap();
+        assert!(!sample.requested.contains(&b));
+        let mean = simulate_prefetch(&[&sample], 4, PrefetchOptions::default()).unwrap();
+        let max = simulate_prefetch(
+            &[&sample],
+            4,
+            PrefetchOptions {
+                fallback: Timing::Maximum,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mean.absent, 1);
+        assert_eq!(max.absent, 1);
+        assert_eq!(mean.read, 1);
+        assert_eq!(mean.used, 0);
+        assert_eq!(max.wasted_seconds, 10.0);
+        assert!(mean.wasted_seconds < max.wasted_seconds);
+        assert_eq!(mean.trees_done, max.trees_done);
+        assert!(max.workers_done > max.trees_done);
+    }
+    #[test]
+    fn borrowed_input_is_only_visited_within_budget() {
+        let (tree, _, cache) = fixture();
+        for count in [10, 1_000_000] {
+            let visited = std::cell::Cell::new(0);
+            let input = || {
+                (0..count).map(|_| {
+                    visited.set(visited.get() + 1);
+                    (ROOT, 1, [].as_slice())
+                })
+            };
+            let mut budget = Work { remaining: Some(1) };
+            assert!(
+                Tree::build_borrowed(params(), input(), &mut budget)
+                    .unwrap_err()
+                    .is::<WorkLimit>()
+            );
+            assert_eq!(visited.get(), 2);
+            visited.set(0);
+            let report = tree.prefetch_report_borrowed(input(), &cache, false, 1).unwrap();
+            assert!(report.limited);
+            assert_eq!(report.work, 1);
+            assert!(visited.get() <= 2);
+        }
+    }
+
+    #[test]
+    fn large_input_stops_exactly_at_the_work_limit() {
+        let lines: Vec<GameLine> = (0..6000)
+            .map(|ply| (ROOT.into(), ply + 1, vec!["5i4i".into(), "5a4a".into()]))
+            .collect();
+        let mut budget = Work {
+            remaining: Some(50),
+        };
+        let error = Tree::build_with_work(params(), &lines, &mut budget).unwrap_err();
+        assert!(error.is::<WorkLimit>());
+        assert_eq!(budget.remaining, Some(0));
+        let mut tree = Tree::build(params(), &[(ROOT.into(), 1, vec![])]).unwrap();
+        for n in 0..6000 {
+            tree.level.insert(format!("unread-{n}"), 1);
+        }
+        let mut budget = Work {
+            remaining: Some(50),
+        };
+        assert!(
+            tree.advance_with_work(&BTreeMap::<String, Reading>::new(), &mut budget)
+                .unwrap_err()
+                .is::<WorkLimit>()
+        );
+        assert_eq!(budget.remaining, Some(0));
+    }
+
+    #[test]
+    fn shadow_preserves_opponent_root_extra_and_own_root_comparison() {
+        let (_, lines, full) = fixture();
+        for own in ["b", "w"] {
+            let mut def = params();
+            def.own = own.into();
+            def.stop = 0;
+            def.extra = vec!["5i6i".into()];
+            def.rounds = 0;
+            let mut tree = Tree::build(def, &lines).unwrap();
+            let mut cache = BTreeMap::new();
+            for _ in 0..4 {
+                let missing = tree.advance(&cache).unwrap();
+                assert_shadow(
+                    &tree,
+                    &tree.shadow(&lines, Edges::new(), &cache, &mut unlimited()).unwrap(),
+                );
+                for (key, _) in missing {
+                    cache.insert(
+                        key.clone(),
+                        full.get(&key).cloned().unwrap_or_else(|| reading(&key, &[])),
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn simulation_separates_other_prefetch_occupancy_from_same_key_wait() {
+        use super::super::simulation::{
+            PrefetchOptions, Sample, Timing, preflight, simulate_prefetch,
+        };
+        use std::sync::Arc;
+        let (tree, _, mut cache) = fixture();
+        let q = "9/5k3/9/9/9/9/9/5K3/9 b -";
+        let r = child(q, "4h4i").unwrap();
+        let s = child(q, "4h5h").unwrap();
+        let d = child(&r, "4b5b").unwrap();
+        let b = child(ROOT, "5i6i").unwrap();
+        let mut slow = reading(q, &[("4h4i", 10), ("4h5h", 0)]);
+        slow.sec = 10.0;
+        cache.insert(q.into(), slow);
+        cache.insert(r.clone(), reading(&r, &[("4b5b", 0)]));
+        cache.insert(s.clone(), reading(&s, &[("4b5b", 500)]));
+        let mut leaf = reading(&d, &[("4i3i", 1000)]);
+        leaf.sec = 0.0;
+        cache.insert(d, leaf);
+        cache.insert(b.clone(), reading(&b, &[("5a5b", 0)]));
+        let mut sample = Sample {
+            params: tree.def,
+            lines: vec![(ROOT.into(), 1, vec![]), (q.into(), 1, vec![])],
+            answers: Arc::new(cache),
+            requested: BTreeSet::new(),
+            fingerprint: "test".into(),
+            priority: 0,
+            order: 0,
+        };
+        preflight(&mut sample).unwrap();
+        assert!(!sample.requested.contains(&b));
+        let result = simulate_prefetch(
+            &[&sample],
+            2,
+            PrefetchOptions {
+                workers: 1,
+                fallback: Timing::Maximum,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.read, 2);
+        assert_eq!(result.used, 0);
+        assert_eq!(result.absent, 1);
+        assert_eq!(result.same_wait, 0.0);
+        assert_eq!(result.other_wait, 1.0);
+        assert_eq!(result.other_p95, 1.0);
+        assert_eq!(result.workers_done, 14.0);
+        assert_eq!(result.wasted_seconds, 11.0);
+    }
+    #[test]
+    fn prediction_comparison_matches_unresolved_below_missing_move_sentinel() {
+        let (mut tree, _, _) = fixture();
+        for mv in ["5i4i", "5i5h"] {
+            let key = child(ROOT, mv).unwrap();
+            tree.nodes.insert(key.clone(), reading(&key, &[("5a5b", 100_000)]));
+        }
+        tree.nodes.get_mut(ROOT).unwrap().multipv[2].cp = -99_999;
+        let values = tree.prediction_values(&mut unlimited()).unwrap();
+        let expected: Edges = tree
+            .unresolved(&values)
+            .into_iter()
+            .map(|(key, rows)| (key, rows.into_iter().map(|(_, mv)| mv).collect()))
+            .collect();
+        let predicted = tree.predict(&mut unlimited()).unwrap();
+        assert_eq!(predicted[ROOT], BTreeSet::from(["5i6i".into()]));
+        assert_eq!(predicted, expected);
     }
 }

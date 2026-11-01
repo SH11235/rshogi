@@ -4,7 +4,7 @@ use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -234,6 +234,8 @@ struct Record {
     kind: String,
     settings: Settings,
     provenance: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    prefetch: bool,
     reading: Reading,
 }
 
@@ -290,6 +292,8 @@ pub(super) struct Journal {
     lock: LockedFile,
     fingerprint: String,
     records: BTreeMap<String, Reading>,
+    pub prefetched: BTreeSet<String>,
+    pub durations: VecDeque<f64>,
 }
 
 impl Readings for Journal {
@@ -346,6 +350,8 @@ impl Journal {
 
     fn load(mut lock: LockedFile, fingerprint: &str) -> Result<Self> {
         let mut records: BTreeMap<String, Reading> = BTreeMap::new();
+        let mut prefetched = BTreeSet::new();
+        let mut durations = VecDeque::new();
         scan(&mut lock, |rec| {
             if rec.settings.fingerprint != fingerprint {
                 return Ok(());
@@ -356,6 +362,15 @@ impl Journal {
             {
                 bail!("台帳の重複が矛盾します");
             }
+            if rec.prefetch {
+                prefetched.insert(rec.reading.key.clone());
+            }
+            if rec.provenance == "engine" {
+                durations.push_back(rec.reading.sec);
+                if durations.len() > 50 {
+                    durations.pop_front();
+                }
+            }
             records.insert(rec.reading.key.clone(), rec.reading);
             Ok(())
         })?;
@@ -363,6 +378,8 @@ impl Journal {
             lock,
             fingerprint: fingerprint.into(),
             records,
+            prefetched,
+            durations,
         })
     }
 
@@ -380,32 +397,59 @@ impl Journal {
         Ok((journal, settings.clone()))
     }
 
+    #[cfg(test)]
     pub fn append(
         &mut self,
         reading: Reading,
         settings: &Settings,
         provenance: String,
     ) -> Result<()> {
+        self.append_marked(reading, settings, provenance, false)
+    }
+
+    pub fn append_marked(
+        &mut self,
+        reading: Reading,
+        settings: &Settings,
+        provenance: String,
+        prefetch: bool,
+    ) -> Result<()> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と追記の条件が違います");
         }
         reading.validate(settings)?;
         let key = reading.key.clone();
-        if let Some(old) = self.records.get(&key) {
+        let reading = if let Some(old) = self.records.get(&key) {
             if !old.same_values(&reading) {
                 bail!("値の違う重複: {}", reading.key);
             }
-            return Ok(());
-        }
+            if !prefetch || self.prefetched.contains(&key) {
+                return Ok(());
+            }
+            // 取り込み元の印だけを足し、先に確定した手数と読みは保つ。
+            old.clone()
+        } else {
+            reading
+        };
         let rec = Record {
             kind: VERSION.into(),
             settings: settings.clone(),
             provenance,
+            prefetch,
             reading,
         };
         serde_json::to_writer(&mut self.lock.0, &rec)?;
         self.lock.0.write_all(b"\n")?;
         self.lock.0.sync_data()?;
+        if prefetch {
+            self.prefetched.insert(key.clone());
+        }
+        if rec.provenance == "engine" {
+            self.durations.push_back(rec.reading.sec);
+            if self.durations.len() > 50 {
+                self.durations.pop_front();
+            }
+        }
         self.records.insert(key, rec.reading);
         Ok(())
     }
@@ -414,6 +458,7 @@ impl Journal {
     /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込みの先の行) を残して、
     /// 残さなかった読みを検査しながら `sink` に渡す (食い違いを全件メモリに持たない)。
     /// `sink.before_append` は検査の後・追記の前に呼び、失敗すれば何も追記しない。
+    /// `prefetched` の局面は先読みの印を付けて追記する (取り込み元の印を引き継ぐ)。
     /// (追記した件数, 飛ばした件数, 食い違いの件数) を返す。飛ばした件数は食い違いを含む。
     pub fn merge_all(
         &mut self,
@@ -421,6 +466,7 @@ impl Journal {
         settings: &Settings,
         on_conflict: OnConflict,
         sink: &mut dyn ConflictSink,
+        prefetched: &BTreeSet<String>,
     ) -> Result<(usize, usize, usize)> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と取り込みの条件が違います");
@@ -454,7 +500,8 @@ impl Journal {
             if !self.records.contains_key(&reading.key) {
                 appended += 1;
             }
-            self.append(reading, settings, provenance)?;
+            let prefetch = prefetched.contains(&reading.key);
+            self.append_marked(reading, settings, provenance, prefetch)?;
         }
         Ok((appended, total - appended, conflicts))
     }
@@ -494,6 +541,7 @@ impl ConflictSink for NoConflictList {
 pub(super) struct Source {
     pub settings: Settings,
     pub readings: Vec<Reading>,
+    pub prefetched: BTreeSet<String>,
     /// 読んだ完全な行 (末尾の未確定行を除く) の SHA-256。
     pub sha256: String,
     /// 改行で終わらない末尾の行を無視したか。
@@ -551,6 +599,7 @@ pub(super) fn read_source(
     let mut reader = BufReader::new(file);
     let mut records: BTreeMap<String, Reading> = BTreeMap::new();
     // 残さない局面も重複の矛盾は確かめる。読みを持たずに、局面と値の SHA-256 の先頭 16 バイトだけを持つ。
+    let mut prefetched = BTreeSet::new();
     let mut skipped: HashMap<[u8; 16], [u8; 16]> = HashMap::new();
     for_each_complete_line(
         &mut reader,
@@ -584,6 +633,9 @@ pub(super) fn read_source(
             {
                 bail!("取り込み元の重複が矛盾します: {}", rec.reading.key);
             }
+            if rec.prefetch {
+                prefetched.insert(rec.reading.key.clone());
+            }
             records.insert(rec.reading.key.clone(), rec.reading);
             Ok(())
         },
@@ -592,6 +644,7 @@ pub(super) fn read_source(
     Ok(Source {
         settings,
         readings: records.into_values().collect(),
+        prefetched,
         sha256: format!("{:x}", hash.finalize()),
         ignored_tail,
     })
@@ -802,6 +855,7 @@ mod tests {
             kind: VERSION.into(),
             settings,
             provenance: "fixture".into(),
+            prefetch: false,
             reading,
         }
     }
@@ -809,6 +863,52 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn prefetch_metadata_and_recent_times_survive_load_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        for index in 1..=60 {
+            rec.provenance = "engine".into();
+            rec.prefetch = index == 60;
+            rec.reading.sec = f64::from(index);
+            write_record(&mut file, &rec);
+        }
+        rec.provenance = "journal:fixture".into();
+        rec.reading.sec = 999.0;
+        write_record(&mut file, &rec);
+        drop(file);
+        let journal = Journal::open(&path, &rec.settings.fingerprint).unwrap();
+        assert_eq!(journal.prefetched, BTreeSet::from([rec.reading.key.clone()]));
+        assert_eq!(journal.durations, (11..=60).map(f64::from).collect::<VecDeque<_>>());
+        drop(journal);
+        let source = read_source(&path, None, |_| true).unwrap();
+        let dst = dir.path().join("import.jsonl");
+        let mut journal = Journal::open(&dst, &rec.settings.fingerprint).unwrap();
+        let mut existing = rec.reading.clone();
+        existing.ply = 99;
+        journal.append(existing, &rec.settings, "journal:older".into()).unwrap();
+        journal
+            .merge_all(
+                source.readings.into_iter().map(|r| (r, "journal:fixture".into())).collect(),
+                &rec.settings,
+                OnConflict::Reject,
+                &mut NoConflictList,
+                &source.prefetched,
+            )
+            .unwrap();
+        drop(journal);
+        let journal = Journal::open(&dst, &rec.settings.fingerprint).unwrap();
+        assert!(journal.prefetched.contains(&rec.reading.key));
+        assert_eq!(journal.get(&rec.reading.key).unwrap().ply, 99);
+        assert!(journal.durations.is_empty());
+        let mut old = serde_json::to_value(&rec).unwrap();
+        old.as_object_mut().unwrap().remove("prefetch");
+        assert!(!serde_json::from_value::<Record>(old).unwrap().prefetch);
     }
 
     #[test]
