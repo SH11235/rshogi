@@ -12,6 +12,13 @@ use super::zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};
 /// 平手初期局面のSFEN
 pub const SFEN_HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
 
+/// SFEN・局面 JSON から受け付ける手数の上限 (下限は 0)。
+///
+/// 手数は指し手を実行するたびに 1 増える。上限を `i32` の半分に置くことで、読み込んだ後に
+/// 指し手を積んでも `i32` を越えない (越えるには約 10 億手分の状態スタックが要る)。
+/// 上限の近くから指し進めた局面の `to_sfen()` はこの値を越えることがあり、その出力は読み込めない。
+pub const MAX_GAME_PLY: i32 = i32::MAX / 2;
+
 /// SFENパースエラー
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SfenError {
@@ -21,7 +28,7 @@ pub enum SfenError {
     SideToMove(String),
     /// 手駒の形式が不正
     Hand(String),
-    /// 手数の形式が不正
+    /// 手数の形式が不正、または 0..=[`MAX_GAME_PLY`] の外
     Ply(String),
 }
 
@@ -31,7 +38,7 @@ impl std::fmt::Display for SfenError {
             SfenError::Board(s) => write!(f, "Invalid board: {s}"),
             SfenError::SideToMove(s) => write!(f, "Invalid side to move: {s}"),
             SfenError::Hand(s) => write!(f, "Invalid hand: {s}"),
-            SfenError::Ply(s) => write!(f, "Invalid ply: {s}"),
+            SfenError::Ply(s) => write!(f, "Invalid ply: {s} (expected 0..={MAX_GAME_PLY})"),
         }
     }
 }
@@ -53,7 +60,7 @@ pub struct StaticPosition {
 }
 
 impl StaticPosition {
-    /// SFEN を解析し、通常の局面と同じ駒在庫の検査を行う。
+    /// SFEN を解析し、通常の局面と同じ駒在庫の検査を行う。手数は 0..=[`MAX_GAME_PLY`] だけを受け付ける。
     pub fn from_sfen(sfen: &str) -> Result<Self, SfenError> {
         let mut position = Position::new();
         position.populate_sfen(sfen)?;
@@ -126,7 +133,7 @@ impl Position {
         self.set_sfen(SFEN_HIRATE).unwrap();
     }
 
-    /// SFEN文字列から局面を設定
+    /// SFEN文字列から局面を設定。手数は 0..=[`MAX_GAME_PLY`] だけを受け付ける。
     pub fn set_sfen(&mut self, sfen: &str) -> Result<(), SfenError> {
         self.populate_sfen(sfen)?;
         self.finalize_after_population()
@@ -161,7 +168,11 @@ impl Position {
 
         // 4. 手数（オプション）
         if parts.len() >= 4 {
-            self.game_ply = parts[3].parse().map_err(|_| SfenError::Ply(parts[3].to_string()))?;
+            let ply: i32 = parts[3].parse().map_err(|_| SfenError::Ply(parts[3].to_string()))?;
+            if !(0..=MAX_GAME_PLY).contains(&ply) {
+                return Err(SfenError::Ply(parts[3].to_string()));
+            }
+            self.game_ply = ply;
         } else {
             self.game_ply = 1;
         }
@@ -911,6 +922,47 @@ mod tests {
         let mut pos = Position::new();
         let result = pos.set_sfen("invalid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sfen_ply_range() {
+        let board = SFEN_HIRATE.rsplit_once(' ').unwrap().0;
+        for ply in [0, 1, MAX_GAME_PLY] {
+            let sfen = format!("{board} {ply}");
+            let mut pos = Position::new();
+            pos.set_sfen(&sfen).unwrap();
+            assert_eq!(pos.game_ply(), ply);
+            assert_eq!(StaticPosition::from_sfen(&sfen).unwrap().to_sfen(), sfen);
+        }
+        let above_max = (MAX_GAME_PLY + 1).to_string();
+        for ply in [
+            "-1",
+            above_max.as_str(),
+            "2147483647",
+            "-2147483648",
+            "2147483648",
+        ] {
+            let sfen = format!("{board} {ply}");
+            assert_eq!(Position::new().set_sfen(&sfen), Err(SfenError::Ply(ply.to_string())));
+            assert!(matches!(StaticPosition::from_sfen(&sfen), Err(SfenError::Ply(_))));
+        }
+    }
+
+    #[test]
+    fn test_moves_from_max_game_ply_stay_in_range() {
+        use crate::types::Move;
+        let board = SFEN_HIRATE.rsplit_once(' ').unwrap().0;
+        let mut pos = Position::new();
+        pos.set_sfen(&format!("{board} {MAX_GAME_PLY}")).unwrap();
+        let mv = Move::from_usi_strict("7g7f").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+        assert_eq!(pos.game_ply(), MAX_GAME_PLY + 1);
+        pos.do_null_move();
+        assert_eq!(pos.game_ply(), MAX_GAME_PLY + 1);
+        pos.undo_null_move();
+        pos.undo_move(mv);
+        assert_eq!(pos.game_ply(), MAX_GAME_PLY);
     }
 
     #[test]

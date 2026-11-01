@@ -4,7 +4,7 @@ use crate::types::json::{
 };
 use crate::types::{Color, File, Hand, Move, Piece, PieceType, Rank, Square};
 
-use super::{Position, SFEN_HIRATE};
+use super::{MAX_GAME_PLY, Position, SFEN_HIRATE};
 
 impl Position {
     /// 平手初期局面をJSON形式で取得する。
@@ -41,6 +41,7 @@ impl Position {
     }
 
     /// JSON形式から局面を復元する。玉は各色 0〜1 枚 (玉の無い側がある局面も受け付ける)。
+    /// 手数 (`ply`) は省略時 1 で、0..=[`MAX_GAME_PLY`] だけを受け付ける。
     pub fn from_board_state_json(json: &BoardStateJson) -> Result<Self, String> {
         if json.cells.len() != 9 {
             return Err(format!("cells must have 9 rows, but got {}", json.cells.len()));
@@ -48,7 +49,11 @@ impl Position {
 
         let mut position = Position::new();
         position.side_to_move = turn_to_color(&json.turn)?;
-        position.game_ply = json.ply.unwrap_or(1);
+        let ply = json.ply.unwrap_or(1);
+        if !(0..=MAX_GAME_PLY).contains(&ply) {
+            return Err(format!("ply must be in 0..={MAX_GAME_PLY}, but got {ply}"));
+        }
+        position.game_ply = ply;
 
         let mut black_king = None;
         let mut white_king = None;
@@ -468,6 +473,20 @@ mod tests {
         assert_eq!(piece.owner, "sente");
         assert_eq!(piece.piece_type, "B");
         assert_eq!(piece.promoted, None);
+    }
+
+    #[test]
+    fn test_json_ply_range() {
+        let mut board = Position::initial_board_json();
+        for ply in [None, Some(0), Some(MAX_GAME_PLY)] {
+            board.ply = ply;
+            let pos = Position::from_board_state_json(&board).unwrap();
+            assert_eq!(pos.game_ply(), ply.unwrap_or(1));
+        }
+        for ply in [-1, MAX_GAME_PLY + 1, i32::MAX, i32::MIN] {
+            board.ply = Some(ply);
+            assert!(Position::from_board_state_json(&board).is_err());
+        }
     }
 
     #[test]
