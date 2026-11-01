@@ -118,12 +118,24 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
         }
     }
     // 推定は詰将棋のルールの数え方に切り替えてから読む
-    let estimated = estimate::estimate_pv(searcher, st, tables)?;
+    let mut estimated = estimate::estimate_pv(searcher, st, tables)?;
     // 推定した手順の証明は予算で打ち切らない。打ち切ると、すべての応手を数える手数から 2 手ずつ縮める証明に戻り、長編ではそちらが
-    // 大幅に重くなることがある。推定が受け方の応手を選び損ねていれば、その局面の証明が詰まないと分かって縮める証明に戻る
-    if let Some(pv) = estimated.filter(|pv| pv.len() <= usize::from(len))
-        && prove_backward(searcher, st, &pv)?
-    {
+    // 大幅に重くなることがある。推定が受け方の応手を選び損ねていれば、その局面から先だけを推定し直して証明し直す
+    let mut repairs = 0;
+    let proven_pv = loop {
+        let Some(pv) = estimated.filter(|pv| pv.len() <= usize::from(len)) else {
+            break None;
+        };
+        match prove_backward(searcher, st, &pv)? {
+            None => break Some(pv),
+            Some(_) if repairs == MAX_REPAIRS => break None,
+            Some(i) => {
+                repairs += 1;
+                estimated = repair_pv(searcher, st, &pv, i)?;
+            }
+        }
+    };
+    if let Some(pv) = proven_pv {
         len = pv.len() as u16;
         if len >= 3 {
             let r = searcher.within(ROOT_DISPROOF_BUDGET, |s| {
@@ -137,20 +149,25 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
     descend(searcher, st, len)
 }
 
-/// 手順の局面を末端から根へ、残りの手数を上限にして証明する。すべて証明できれば `true`
+/// 推定の手順が誤っていたときに、誤った局面から先を推定し直す回数の上限。誤りは手順の末端に近い局面で
+/// 見つかることが多く 1 回は安いが、推定が何度も外れる題で膨らまないように抑える
+const MAX_REPAIRS: u32 = 16;
+
+/// 手順の局面を末端から根へ、残りの手数を上限にして証明する。すべて証明できれば `None`、証明できなかった
+/// 局面 (`pv[i]` を指す前の局面) があれば、それより根の側は読まずに `Some(i)` を返す。
 /// 受け方の局面が予算内に証明できなければ、先に重い応手の先を証明しておく (`prove_heavy_replies`)
 fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
     pv: &[S::Mv],
-) -> Result<bool, Abort> {
+) -> Result<Option<usize>, Abort> {
     for &mv in pv {
         st.do_move(mv);
     }
-    let mut proven = true;
+    let mut failed = None;
     for (i, &mv) in pv.iter().enumerate().rev() {
         st.undo_move(mv);
-        if proven {
+        if failed.is_none() {
             let remaining = (pv.len() - i) as u16;
             if i % 2 == 1
                 && remaining >= 4
@@ -163,7 +180,8 @@ fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
             }
             let r = searcher.search_shared(st, NodeArgs::unbounded(0, i % 2 == 0, remaining));
             match r {
-                Ok(r) => proven = r.is_proven(),
+                Ok(r) if !r.is_proven() => failed = Some(i),
+                Ok(_) => {}
                 Err(abort) => {
                     for &mv in pv[..i].iter().rev() {
                         st.undo_move(mv);
@@ -173,7 +191,52 @@ fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
             }
         }
     }
-    Ok(proven)
+    Ok(failed)
+}
+
+/// 手順 `pv` の `pv[i]` を指す前の局面が残りの手数で詰まないと分かったとき、その局面から先を推定し直した
+/// 手順を返す。受け方の局面なら、残りの手数 − 1 では詰まない応手 (無駄合いを除く) の後を推定する。
+/// 推定できなければ `None`。局面は呼び出し前の状態に戻して返る
+fn repair_pv<S: MateState + Clone + Send, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    st: &mut S,
+    pv: &[S::Mv],
+    i: usize,
+) -> Result<Option<Vec<S::Mv>>, Abort> {
+    for &mv in &pv[..i] {
+        st.do_move(mv);
+    }
+    let remaining = (pv.len() - i) as u16;
+    let result = (|| {
+        if i % 2 == 0 {
+            let tail = estimate::estimate_in_place(searcher, st)?;
+            return Ok(tail.map(|tail| [&pv[..i], &tail[..]].concat()));
+        }
+        let mut replies = Vec::new();
+        st.generate(false, &mut replies);
+        for reply in replies {
+            if st.is_drop(reply) && searcher.futile_drop(st, reply, remaining)?.is_some() {
+                continue;
+            }
+            st.do_move(reply);
+            let tail = (|| {
+                let r = searcher.search_shared(st, NodeArgs::unbounded(0, true, remaining - 1))?;
+                if r.is_proven() {
+                    return Ok(None);
+                }
+                estimate::estimate_in_place(searcher, st)
+            })();
+            st.undo_move(reply);
+            if let Some(tail) = tail? {
+                return Ok(Some([&pv[..i], &[reply], &tail[..]].concat()));
+            }
+        }
+        Ok(None)
+    })();
+    for &mv in pv[..i].iter().rev() {
+        st.undo_move(mv);
+    }
+    result
 }
 
 /// 受け方の局面を手順の詰み手数で直接読むときのノード予算。ほとんどの局面はこれで決まり、
