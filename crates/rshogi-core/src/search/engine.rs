@@ -786,15 +786,11 @@ impl Search {
 
     /// 置換表をクリア
     ///
-    /// 新しい置換表を作成して置き換える。
+    /// 作り直さずに、Threads と同じ数のスレッドで並列にゼロへ戻す (YaneuraOu と同じ)。
+    /// 作り直すと表の大きさに比例した時間がかかり、usinewgame の直後の go の持ち時間を食う。
     pub fn clear_tt(&mut self) {
-        // Arc経由では&mutが取れないので、同じサイズの新しいTTを作成して置き換える
-        self.tt = Arc::new(TranspositionTable::new(self.tt_size_mb));
-        // workerが存在する場合、TT参照を更新
-        if let Some(worker) = &mut self.worker {
-            worker.tt = Arc::clone(&self.tt);
-        }
-        self.thread_pool.update_tt(Arc::clone(&self.tt));
+        self.thread_pool.wait_for_search_finished();
+        self.tt.clear_in_place(self.num_threads);
     }
 
     /// TTの明示的Large Pages確保に成功したかを返す（Windows）。

@@ -102,6 +102,18 @@ impl DerefMut for ClusterTable {
     }
 }
 
+/// cluster の全 entry を未書込状態 (key・payload とも 0) に戻す。
+fn clear_clusters(clusters: &[Cluster]) {
+    for cluster in clusters {
+        for data in &cluster.data {
+            data.store(0, Ordering::Relaxed);
+        }
+        for key in &cluster.keys {
+            key.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// 置換表
 pub struct TranspositionTable {
     /// クラスターの配列
@@ -177,15 +189,28 @@ impl TranspositionTable {
     /// 消す呼び出し側でそれが重なると、コア数の二乗のスレッドが生まれるため分けている。
     /// 同じ表で探索中のスレッドがないときに呼ぶこと。
     pub fn clear_on_current_thread(&self) {
+        self.clear_in_place(1);
+    }
+
+    /// 再確保せずに全 entry を未書込状態に戻す。表を `threads` 個の区間に分けて並列に書く。
+    ///
+    /// 作り直す (確保してゼロで埋め、古い表を解放する) と、新しい page への初回書込みで
+    /// 表の大きさに比例した時間がかかり、usinewgame 直後の 1 手目の持ち時間を食う。
+    /// 同じ表で探索中のスレッドがないときに呼ぶこと。
+    pub fn clear_in_place(&self, threads: usize) {
         self.generation8.store(0, Ordering::Relaxed);
-        for cluster in self.table.iter() {
-            for data in &cluster.data {
-                data.store(0, Ordering::Relaxed);
-            }
-            for key in &cluster.keys {
-                key.store(0, Ordering::Relaxed);
-            }
+        let table: &[Cluster] = &self.table;
+        let threads = threads.max(1);
+        if threads == 1 || table.len() < threads * 1024 {
+            clear_clusters(table);
+            return;
         }
+        let chunk = table.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            for part in table.chunks(chunk) {
+                scope.spawn(move || clear_clusters(part));
+            }
+        });
     }
 
     /// 新しい探索を開始（世代を進める）
@@ -436,6 +461,27 @@ impl TtPrefetch for TranspositionTable {
 mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
+
+    /// 並列に区間を分ける大きさの表でも、全 cluster の全 entry と世代が 0 に戻る。
+    #[test]
+    fn clear_in_place_zeroes_every_cluster_with_threads() {
+        let tt = TranspositionTable::new(1);
+        assert!(tt.table.len() >= 3 * 1024);
+        let mut entry = TTEntry::new();
+        entry.save(7, Value::new(10), false, Bound::Lower, 20, Move::NONE, Value::ZERO, 0);
+        for cluster in tt.table.iter() {
+            for index in 0..CLUSTER_SIZE {
+                cluster.store(index, entry);
+            }
+        }
+        tt.new_search();
+        tt.clear_in_place(3);
+        assert_eq!(tt.generation(), 0);
+        for cluster in tt.table.iter() {
+            assert!(cluster.data.iter().all(|d| d.load(Ordering::Relaxed) == 0));
+            assert!(cluster.keys.iter().all(|k| k.load(Ordering::Relaxed) == 0));
+        }
+    }
 
     #[test]
     fn detached_writer_keeps_slot_and_reloads_payload() {
