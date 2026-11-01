@@ -33,7 +33,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use rshogi_core::mate::dfpn::{DfpnSolver, MateLimits, MateMode, MateResult, ShortestMode};
+use rshogi_core::mate::dfpn::{
+    DfpnSolver, LeftoverCheck, MateLimits, MateMode, MateResult, ShortestMode,
+};
 use rshogi_core::position::Position;
 use tools::output_path::ensure_safe_output_path;
 
@@ -96,6 +98,12 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     threads: usize,
 
+    /// `--shortest tsume` の手順が駒余りで終わるとき、変長駒余りの候補 (手順上の受け方の局面で、手順の応手より
+    /// 短く詰み、そこからの正解手順が駒余りなしで終わる応手) を探す。値は応手 1 つあたりのノード数の予算
+    /// (0 は無制限)。TSV に `leftover` `leftover_unchecked` `leftover_complete` の列を足す
+    #[arg(long)]
+    check_leftover: Option<u64>,
+
     /// 局面ごとの結果を書く TSV
     #[arg(long)]
     out: Option<PathBuf>,
@@ -108,6 +116,8 @@ struct Outcome {
     micros: u64,
     /// 正解の詰み手数 (入力の行か `--expect-mate-len`)
     expect: Option<usize>,
+    /// 変長駒余りの候補 (`--check-leftover`)
+    leftover: Option<LeftoverCheck>,
 }
 
 impl Outcome {
@@ -288,6 +298,38 @@ fn parse_mode(name: &str) -> Result<MateMode, String> {
     MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power のどちらか"))
 }
 
+/// TSV の 1 行。`leftover` なら変長駒余りの候補 (`手順の添字:応手:手数` をカンマ区切り)、調べきれなかった
+/// 応手の数、手順の終わりまで調べたかの列を足す
+fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result<()> {
+    write!(
+        w,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        o.sfen,
+        o.tag(),
+        o.pv_len(),
+        o.nodes,
+        o.micros,
+        o.pv_usi(),
+        o.expect.map_or(String::new(), |n| n.to_string())
+    )?;
+    if leftover {
+        let (list, unchecked, complete) = match &o.leftover {
+            Some(c) => (
+                c.variations
+                    .iter()
+                    .map(|v| format!("{}:{}:{}", v.ply, v.reply.to_usi(), v.len))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                c.unchecked.to_string(),
+                c.complete.to_string(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+        write!(w, "\t{list}\t{unchecked}\t{complete}")?;
+    }
+    writeln!(w)
+}
+
 fn flip_side_to_move(sfen: &str) -> String {
     let mut fields: Vec<&str> = sfen.split_whitespace().collect();
     if fields.len() > 1 {
@@ -375,12 +417,21 @@ fn solve_worker(
         pos.set_sfen(&sfen).expect("読み込み時に検査済み");
         let start = Instant::now();
         let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+        let nodes = solver.nodes();
+        let micros = start.elapsed().as_micros() as u64;
+        let leftover = match (&result, cli.check_leftover) {
+            (MateResult::Mate(pv), Some(per_reply)) => {
+                Some(solver.leftover_variations(&mut pos, pv, &limits, per_reply, &stop))
+            }
+            _ => None,
+        };
         let outcome = Outcome {
             sfen,
             result,
-            nodes: solver.nodes(),
-            micros: start.elapsed().as_micros() as u64,
+            nodes,
+            micros,
             expect,
+            leftover,
         };
         if results_tx.send((index, outcome)).is_err() {
             break;
@@ -398,6 +449,9 @@ fn main() -> Result<()> {
     }));
     if cli.stride == 0 || cli.offset >= cli.stride {
         bail!("--offset は --stride 未満にする");
+    }
+    if cli.check_leftover.is_some() && cli.shortest != Some(ShortestMode::Tsume) {
+        bail!("--check-leftover は --shortest tsume と組で使う");
     }
     let jobs = cli.jobs.max(1);
     // 解いている途中と書き出し待ちの局面数の上限 (遅い局面があっても並べ替え待ちが膨らまない)
@@ -418,7 +472,11 @@ fn main() -> Result<()> {
                 std::fs::File::create(path)
                     .with_context(|| format!("{} を作れない", path.display()))?,
             );
-            writeln!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv\texpect_len")?;
+            write!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv\texpect_len")?;
+            if cli.check_leftover.is_some() {
+                write!(w, "\tleftover\tleftover_unchecked\tleftover_complete")?;
+            }
+            writeln!(w)?;
             Some(w)
         }
         None => None,
@@ -451,17 +509,7 @@ fn main() -> Result<()> {
             while let Some(o) = pending.remove(&next) {
                 if let Some(w) = writer.as_mut()
                     && write_error.is_none()
-                    && let Err(e) = writeln!(
-                        w,
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        o.sfen,
-                        o.tag(),
-                        o.pv_len(),
-                        o.nodes,
-                        o.micros,
-                        o.pv_usi(),
-                        o.expect.map_or(String::new(), |n| n.to_string())
-                    )
+                    && let Err(e) = write_row(w, &o, cli.check_leftover.is_some())
                 {
                     write_error = Some(e);
                 }

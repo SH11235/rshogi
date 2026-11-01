@@ -419,3 +419,97 @@ impl<M: Copy + Eq> Walker<M> {
 fn hand_count(hand: Hand) -> u32 {
     PieceType::HAND_PIECES.iter().map(|&pt| hand.count(pt)).sum()
 }
+
+/// 変長駒余りの候補を探した結果
+pub(super) struct Leftovers<M> {
+    /// (手順の添字, 応手, 手順全体の手数)
+    pub found: Vec<(usize, M, u16)>,
+    /// 応手ごとの予算で調べきれなかった応手の数
+    pub unchecked: usize,
+    /// 探索全体の制限に達せずに手順の終わりまで調べたか
+    pub complete: bool,
+}
+
+/// 変長駒余りの候補 ([`super::DfpnSolver::leftover_variations`]): 手順 `pv` (根から、詰将棋のルールの正解手順)
+/// 上の受け方の局面で、手順の応手より短く詰むが、そこからの正解手順が駒余りなしで終わる応手。応手ごとに
+/// 予算 `per_reply` で打ち切り、探索全体の制限に達したらそこまでの候補を返す
+pub(super) fn leftover_variations<'a, S: MateState + Clone + Send, const PIECES: bool>(
+    searcher: &mut Searcher<'a, S, PIECES>,
+    st: &mut S,
+    tables: &'a ShortestTables,
+    pv: &[S::Mv],
+    per_reply: u64,
+) -> Leftovers<S::Mv> {
+    searcher.enable_shortest(true, tables);
+    let mut walker = Walker {
+        memo: HashMap::new(),
+        buffers: Vec::new(),
+        tie_break: true,
+    };
+    let mut out = Leftovers {
+        found: Vec::new(),
+        unchecked: 0,
+        complete: false,
+    };
+    let mut replies = Vec::with_capacity(crate::movegen::MAX_MOVES);
+    let mut done = 0;
+    let result: Result<(), Abort> = (|| {
+        for (i, &mv) in pv.iter().enumerate() {
+            let d = (pv.len() - i) as u16;
+            // 手順の応手は詰み手数 d − 1。それより 2 手以上短く詰む応手だけが変長の候補
+            if i % 2 == 1 && d >= 4 {
+                replies.clear();
+                st.generate(false, &mut replies);
+                for &reply in &replies {
+                    if reply == mv {
+                        continue;
+                    }
+                    let checked = searcher
+                        .within(per_reply, |s| shorter_clean_line(s, &mut walker, st, reply, d))?;
+                    match checked {
+                        Some(Some(len)) => out.found.push((i, reply, i as u16 + 1 + len)),
+                        Some(None) => {}
+                        None => out.unchecked += 1,
+                    }
+                }
+            }
+            st.do_move(mv);
+            done += 1;
+        }
+        Ok(())
+    })();
+    for &mv in pv[..done].iter().rev() {
+        st.undo_move(mv);
+    }
+    out.complete = result.is_ok();
+    out
+}
+
+/// 詰み手数 `d` の受け方の局面 `st` で、無駄合いでない応手 `reply` が d − 3 手以内に詰み、その正解手順が
+/// 駒余りなしで終わるなら、その詰み手数
+fn shorter_clean_line<S: MateState + Clone + Send, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    walker: &mut Walker<S::Mv>,
+    st: &mut S,
+    reply: S::Mv,
+    d: u16,
+) -> Result<Option<u16>, Abort> {
+    // 短く詰むかを先に調べる。無駄合いの判定は別の局面を最短手数まで解くので重い
+    st.do_move(reply);
+    let short = searcher.search(st, NodeArgs::unbounded(0, true, d - 3), &mut 0);
+    st.undo_move(reply);
+    let short = short?;
+    if !short.is_proven() || st.is_drop(reply) && searcher.futile_drop(st, reply, d)?.is_some() {
+        return Ok(None);
+    }
+    st.do_move(reply);
+    let result = (|| {
+        let len = descend(searcher, st, short.mate_len)?;
+        Ok(match walker.choose(searcher, st, len, true)? {
+            Some(true) => Some(len),
+            _ => None,
+        })
+    })();
+    st.undo_move(reply);
+    result
+}
