@@ -2129,3 +2129,90 @@ fn solve_returns_position_with_board_effects_rebuilt() {
         }
     }
 }
+
+/// 経路上の局面を通らずに `limit` 手以内に詰むか (攻め方の手番の `v`)。反復は詰まない扱い
+fn graph_mate_within(edges: &[Vec<u32>], v: u32, limit: u16, path: &mut Vec<u32>) -> bool {
+    if limit == 0 {
+        return false;
+    }
+    path.push(v);
+    let found = edges[v as usize].iter().any(|&reply| {
+        if path.contains(&reply) {
+            return false;
+        }
+        path.push(reply);
+        let kids = &edges[reply as usize];
+        let mated = kids.is_empty()
+            || limit >= 3
+                && kids.iter().all(|&next| {
+                    !path.contains(&next) && graph_mate_within(edges, next, limit - 2, path)
+                });
+        path.pop();
+        mated
+    });
+    path.pop();
+    found
+}
+
+/// 最短手順モードで上限を変えながら同じ表で解き直しても、経路に依存する不詰の使い回しが上限・経路の
+/// 違う局面を誤って不詰にしない
+#[test]
+fn length_limited_search_agrees_with_brute_force_on_random_graphs() {
+    use super::search::{NodeArgs, ShortestTables};
+
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x6AA0);
+    let mut mates = 0;
+    for case in 0..1_000 {
+        let k = rng.random_range(2..=7usize);
+        let mut edges = vec![Vec::new(); 2 * k];
+        for (v, kids) in edges.iter_mut().enumerate() {
+            for _ in 0..rng.random_range(0..=3) {
+                let target = if v < k {
+                    rng.random_range(k..2 * k)
+                } else {
+                    rng.random_range(0..k)
+                };
+                if !kids.contains(&(target as u32)) {
+                    kids.push(target as u32);
+                }
+            }
+        }
+        let mut limits: Vec<u16> = (1..=11).step_by(2).collect();
+        for i in (1..limits.len()).rev() {
+            limits.swap(i, rng.random_range(0..=i));
+        }
+        let table = MateTable::with_buckets(rng.random_range(1..=8));
+        let tables = ShortestTables::new();
+        let mut scratch = Scratch::new();
+        let stop = AtomicBool::new(false);
+        let mut progress = |_| {};
+        let budget = Budget {
+            stop: &stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: 2_000_000,
+            time_limit_ms: 0,
+            start: Instant::now(),
+            progress: &mut progress,
+        };
+        let mut searcher = Searcher::<_, false>::new(&table, &mut scratch, Color::Black, budget);
+        searcher.enable_shortest(false, &tables);
+        for root in 0..k as u32 {
+            for &limit in &limits {
+                let truth = graph_mate_within(&edges, root, limit, &mut Vec::new());
+                mates += usize::from(truth);
+                let mut graph = Graph::new(edges.clone(), root);
+                let result = searcher
+                    .search(&mut graph, NodeArgs::unbounded(0, true, limit), &mut 0)
+                    .unwrap_or_else(|_| panic!("case {case}: 打ち切り {edges:?}"));
+                assert_eq!(
+                    result.is_proven(),
+                    truth,
+                    "case {case} root={root} limit={limit} {edges:?}"
+                );
+            }
+        }
+    }
+    assert!(mates > 300);
+}

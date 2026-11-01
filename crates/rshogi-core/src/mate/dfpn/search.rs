@@ -407,22 +407,29 @@ impl ShortestTables {
         }
     }
 
-    /// 経路の末尾 `path` の後に局面 `key` が来たときに、覚えた経路に依存する不詰が使えるか
-    fn loop_disproof(&self, key: u64, path: &[u64]) -> Option<LoopDisproof> {
+    /// 経路の末尾 `path` の後に、詰み手数の上限 `len_limit` で局面 `key` が来たときに使える、覚えた
+    /// 経路に依存する不詰
+    fn loop_disproof(&self, key: u64, path: &[u64], len_limit: u16) -> Option<LoopDisproof> {
         let table = &self.slots.get()?.loops;
         let data = table[key as usize & (table.len() - 1)].get_with(|data| {
-            let span = usize::from(LoopDisproof::unpack(data).span);
-            (span <= path.len()).then(|| self.salted(segment_key(key, &path[path.len() - span..])))
+            let d = LoopDisproof::unpack(data);
+            let span = usize::from(d.span);
+            (LoopDisproof::tag_of(data) == LoopDisproof::tag(key)
+                && (1..=path.len()).contains(&span)
+                && len_limit <= d.limit)
+                .then(|| self.salted(segment_key(key, &path[path.len() - span..])))
         })?;
         Some(LoopDisproof::unpack(data))
     }
 
     /// 局面 `key` が、直前の経路 `segment` (祖先、古い順) が経路上にある限り不詰
     fn store_loop_disproof(&self, key: u64, segment: &[u64], disproof: LoopDisproof) {
-        if let Some(slots) = self.slots.get() {
+        if disproof.fits()
+            && let Some(slots) = self.slots.get()
+        {
             let table = &slots.loops;
             let salted = self.salted(segment_key(key, segment));
-            table[key as usize & (table.len() - 1)].set(salted, disproof.pack());
+            table[key as usize & (table.len() - 1)].set(salted, disproof.pack(key));
         }
     }
 
@@ -461,14 +468,46 @@ struct LoopDisproof {
 }
 
 impl LoopDisproof {
-    fn pack(self) -> u64 {
-        u64::from(self.span) | u64::from(self.limit) << 16 | u64::from(self.hand.raw()) << 32
+    const SPAN_BITS: u32 = 10;
+    const LIMIT_BITS: u32 = 12;
+    const NO_LIMIT: u64 = (1 << Self::LIMIT_BITS) - 1;
+
+    /// 値に入れる局面の鍵の一部。経路の区間の鍵を計算する前に、別の局面の値をほぼ弾く
+    fn tag(key: u64) -> u64 {
+        key >> (64 - (32 - Self::SPAN_BITS - Self::LIMIT_BITS))
+    }
+
+    fn tag_of(v: u64) -> u64 {
+        (v as u32 >> (Self::SPAN_BITS + Self::LIMIT_BITS)) as u64
+    }
+
+    /// 値に収まるか (区間が長すぎる・上限が大きすぎる結果は覚えない)
+    fn fits(self) -> bool {
+        u64::from(self.span) < 1 << Self::SPAN_BITS
+            && (self.limit == NO_LEN_LIMIT || u64::from(self.limit) < Self::NO_LIMIT)
+    }
+
+    fn pack(self, key: u64) -> u64 {
+        let limit = if self.limit == NO_LEN_LIMIT {
+            Self::NO_LIMIT
+        } else {
+            u64::from(self.limit)
+        };
+        u64::from(self.span)
+            | limit << Self::SPAN_BITS
+            | Self::tag(key) << (Self::SPAN_BITS + Self::LIMIT_BITS)
+            | u64::from(self.hand.raw()) << 32
     }
 
     fn unpack(v: u64) -> Self {
+        let limit = (v >> Self::SPAN_BITS) & Self::NO_LIMIT;
         Self {
-            span: v as u16,
-            limit: (v >> 16) as u16,
+            span: (v & ((1 << Self::SPAN_BITS) - 1)) as u16,
+            limit: if limit == Self::NO_LIMIT {
+                NO_LEN_LIMIT
+            } else {
+                limit as u16
+            },
             hand: Hand::from_raw((v >> 32) as u32),
         }
     }
@@ -956,9 +995,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 && child_result.is_disproven()
                 && child_result.is_conditional()
                 && st.is_drop(mv)
-                && let Some((proof, len)) = self.futile_drop(st, mv, len_limit)?
             {
-                self.scratch.children[best].set_futile(proof, len);
+                self.mark_futile_drop(st, best, mv, len_limit)?;
             }
             let child = &self.scratch.children[best];
             if child.is_final() && child.next != NO_NEXT {
@@ -987,6 +1025,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             && let Some(tables) = self.tables
         {
             let loop_depth = usize::from(result.loop_depth);
+            debug_assert_eq!(self.scratch.path.len(), depth + 1);
             tables.store_loop_disproof(
                 key.key,
                 &self.scratch.path[loop_depth..depth],
@@ -1111,9 +1150,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 let looped = if bounded || usable.is_some_and(|v| v.pn == 0 || v.dn == 0) {
                     None
                 } else {
-                    self.tables
-                        .and_then(|t| t.loop_disproof(child_key, &self.scratch.path))
-                        .filter(|d| child_len_limit <= d.limit)
+                    self.tables.and_then(|t| {
+                        t.loop_disproof(child_key, &self.scratch.path, child_len_limit)
+                    })
                 };
                 match usable {
                     _ if bounded => {
@@ -1172,9 +1211,30 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             if !st.is_drop(mv) || !(bounded || len_limit == 0 && unsettled) {
                 continue;
             }
-            if let Some((proof, len)) = self.futile_drop(st, mv, len_limit)? {
-                self.scratch.children[start + i].set_futile(proof, len);
+            self.mark_futile_drop(st, start + i, mv, len_limit)?;
+        }
+        Ok(())
+    }
+
+    /// 子 `index` の合駒 `drop` が無駄合いなら印を付ける
+    fn mark_futile_drop(
+        &mut self,
+        st: &mut S,
+        index: usize,
+        drop: S::Mv,
+        len_limit: u16,
+    ) -> Result<(), Abort> {
+        match self.futile_drop(st, drop, len_limit)? {
+            Some((proof, len)) => self.scratch.children[index].set_futile(proof, len),
+            // 上限を広げると無駄合いになりうる (取った後の詰みが上限内に収まる) ので、この合駒で
+            // 詰まないことは上限に依存する。上限に依存しない不詰として覚えると、上限の広い同じ局面を誤って不詰にする
+            None if self.futility && len_limit != NO_LEN_LIMIT => {
+                let child = &mut self.scratch.children[index];
+                if child.dn == 0 {
+                    child.limited = true;
+                }
             }
+            None => {}
         }
         Ok(())
     }
@@ -1874,12 +1934,13 @@ mod tests {
             hand: Hand::from_raw(5),
         };
         tables.store_loop_disproof(7, &[11, 13], disproof);
-        let found = tables.loop_disproof(7, &[3, 11, 13]).unwrap();
+        let found = tables.loop_disproof(7, &[3, 11, 13], 9).unwrap();
         assert_eq!((found.span, found.limit, found.hand), (2, 9, Hand::from_raw(5)));
-        assert!(tables.loop_disproof(7, &[11, 17]).is_none());
-        assert!(tables.loop_disproof(7, &[13]).is_none());
-        assert!(tables.loop_disproof(8, &[11, 13]).is_none());
+        assert!(tables.loop_disproof(7, &[11, 13], 10).is_none());
+        assert!(tables.loop_disproof(7, &[11, 17], 9).is_none());
+        assert!(tables.loop_disproof(7, &[13], 9).is_none());
+        assert!(tables.loop_disproof(8, &[11, 13], 9).is_none());
         tables.reset();
-        assert!(tables.loop_disproof(7, &[11, 13]).is_none());
+        assert!(tables.loop_disproof(7, &[11, 13], 9).is_none());
     }
 }
