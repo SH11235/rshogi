@@ -576,6 +576,16 @@ mod tests {
             .collect();
         assert_eq!(listed, [("resign", "win", "from-b"), ("resign", "win", "second")]);
         drop(journal);
+        let size = std::fs::metadata(&path).unwrap().len();
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let failing = vec![(reading(3, &dst, "resign"), "hook".to_owned())];
+        assert!(
+            journal
+                .merge_all(failing, &dst, OnConflict::KeepExisting, |_| bail!("一覧を書けない"))
+                .is_err()
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        drop(journal);
         let journal = Journal::open(&path, &dst.fingerprint).unwrap();
         for column in 0..3 {
             let key = reading(column, &dst, "resign").key;
