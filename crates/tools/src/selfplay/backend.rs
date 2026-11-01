@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
-use rshogi_core::types::{Color, Move};
+use rshogi_core::types::{Bound, Color, Move};
 
 use super::engine::EngineProcess;
-use super::types::{EvalLog, InfoSnapshot, SearchRequest, TimeArgs};
+use super::types::{EvalLog, InfoSnapshot, ScoreBound, SearchRequest, TimeArgs};
 
 // =============================================================================
 // 共通型
@@ -200,7 +200,11 @@ impl SearchBackend for NativeBackend {
         let eval = Some(EvalLog {
             // Native backendは単一SearchResultから構築するため、USI原文は存在しない。
             last_exact_primary: None,
-            score_bound: None,
+            score_bound: match result.bound {
+                Bound::Lower => Some(ScoreBound::Lowerbound),
+                Bound::Upper => Some(ScoreBound::Upperbound),
+                Bound::Exact | Bound::None => None,
+            },
             score_cp: if result.score.is_mate_score() {
                 None
             } else {

@@ -21,7 +21,7 @@ use super::{
 use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
 use crate::tt::TranspositionTable;
-use crate::types::{Depth, EnteringKingRule, MAX_PLY, Move, Value};
+use crate::types::{Bound, Depth, EnteringKingRule, MAX_PLY, Move, Value};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -36,6 +36,8 @@ pub struct SearchInfo {
     pub sel_depth: i32,
     /// 最善手のスコア
     pub score: Value,
+    /// `score` の種類。探索窓の外で返った値は下界・上界になる
+    pub bound: Bound,
     /// 探索ノード数
     pub nodes: u64,
     /// 経過時間（ミリ秒）
@@ -66,6 +68,11 @@ impl SearchInfo {
             } else {
                 format!("cp {}", self.score.to_cp())
             };
+        let score_str = match self.bound {
+            Bound::Lower => format!("{score_str} lowerbound"),
+            Bound::Upper => format!("{score_str} upperbound"),
+            Bound::Exact | Bound::None => score_str,
+        };
 
         let mut s = format!(
             "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
@@ -141,6 +148,8 @@ pub struct SearchResult {
     pub ponder_move: Move,
     /// 最善手のスコア
     pub score: Value,
+    /// `score` の種類。中断した反復の結果を返すとき、下界・上界になることがある
+    pub bound: Bound,
     /// 完了した探索深さ
     pub depth: Depth,
     /// 探索ノード数
@@ -550,6 +559,7 @@ fn get_best_thread_id(
 struct BestThreadResult {
     best_move: Move,
     score: Value,
+    bound: Bound,
     completed_depth: Depth,
     sel_depth: i32,
     nodes: u64,
@@ -585,6 +595,7 @@ fn collect_best_thread_result(
             } else {
                 Value::ZERO
             },
+            bound: Bound::Exact,
             completed_depth,
             sel_depth: worker.state.sel_depth,
             nodes,
@@ -615,12 +626,14 @@ fn collect_best_thread_result(
         .map(|rm| rm.score)
         .unwrap_or(worker.state.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
 
+    let bound = best_rm.map_or(Bound::Exact, |rm| rm.score_bound());
     let sel_depth = best_rm.map(|rm| rm.sel_depth).unwrap_or(worker.state.sel_depth);
     let pv = best_rm.map(|rm| rm.pv.clone()).unwrap_or_default();
 
     BestThreadResult {
         best_move,
         score,
+        bound,
         completed_depth,
         sel_depth,
         nodes,
@@ -1285,6 +1298,7 @@ impl Search {
                     BestThreadResult {
                         best_move,
                         score,
+                        bound: Bound::Exact,
                         completed_depth: r.completed_depth,
                         sel_depth: self.worker.as_ref().map(|w| w.state.sel_depth).unwrap_or(0),
                         nodes: r.nodes,
@@ -1313,6 +1327,7 @@ impl Search {
         let BestThreadResult {
             best_move,
             score,
+            bound,
             completed_depth,
             sel_depth,
             nodes: _best_nodes,
@@ -1374,6 +1389,7 @@ impl Search {
                 depth: completed_depth,
                 sel_depth,
                 score,
+                bound,
                 nodes: total_nodes,
                 time_ms,
                 nps,
@@ -1399,6 +1415,7 @@ impl Search {
             best_move,
             ponder_move,
             score,
+            bound,
             depth: completed_depth,
             nodes: total_nodes,
             pv,
@@ -1810,6 +1827,7 @@ where
                     depth,
                     sel_depth: root_move.sel_depth,
                     score: root_move.score,
+                    bound: root_move.score_bound(),
                     nodes: total_nodes,
                     time_ms,
                     nps,
@@ -1956,7 +1974,19 @@ where
     // 中断した反復の番兵や bound を、完了深さの結果と混ぜない。
     time_manager.publish_nodes(worker.state.nodes);
     if worker.state.abort && !completed_root_moves.is_empty() {
-        worker.state.root_moves = completed_root_moves;
+        // 中断した反復で探索を終えた根の手が完了した反復の最善手を上回ったときだけ、その結果を使う。
+        // 最善手が同じなら、aspiration の再探索中に止まった bound と短い PV より、完了した反復の値を返す。
+        // 未完了の探索から来た負け評価と、MultiPV の順位は完了した反復の結果へ戻す。
+        let head = &worker.state.root_moves[0];
+        let keep_partial = effective_multi_pv == 1
+            && head.mv() != completed_root_moves[0].mv()
+            && root_score_is_initialized(head.score)
+            && !head.score.is_loss();
+        if keep_partial {
+            worker.state.best_move = worker.state.root_moves[0].mv();
+        } else {
+            worker.state.root_moves = completed_root_moves;
+        }
     }
 
     effective_multi_pv
@@ -2795,6 +2825,7 @@ mod tests {
             depth: 5,
             sel_depth: 7,
             score: Value::new(123),
+            bound: Bound::Exact,
             nodes: 10000,
             time_ms: 500,
             nps: 20000,
@@ -2818,6 +2849,7 @@ mod tests {
             depth: 9,
             sel_depth: 9,
             score: Value::mate_in(5),
+            bound: Bound::Exact,
             nodes: 42,
             time_ms: 10,
             nps: 4200,
@@ -2836,6 +2868,7 @@ mod tests {
             depth: 9,
             sel_depth: 9,
             score: Value::mated_in(4),
+            bound: Bound::Exact,
             nodes: 42,
             time_ms: 10,
             nps: 4200,
@@ -2846,6 +2879,25 @@ mod tests {
 
         let usi = info.to_usi_string();
         assert!(usi.contains("score mate -4"));
+    }
+
+    #[test]
+    fn test_search_info_to_usi_marks_bound_after_score() {
+        let mut info = SearchInfo {
+            depth: 9,
+            sel_depth: 9,
+            score: Value::new(90),
+            bound: Bound::Lower,
+            nodes: 42,
+            time_ms: 10,
+            nps: 4200,
+            hashfull: 0,
+            pv: vec![],
+            multi_pv: 1,
+        };
+        assert!(info.to_usi_string().contains("score cp 100 lowerbound nodes"));
+        info.bound = Bound::Upper;
+        assert!(info.to_usi_string().contains("score cp 100 upperbound nodes"));
     }
 
     #[test]
