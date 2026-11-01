@@ -43,7 +43,7 @@ struct Cli {
     #[arg(long, value_enum, default_value = "progresskpabs")]
     bucket_mode: BucketMode,
 
-    /// progress.bin (YaneuraOu 互換 KP-absolute 進行度重み) のパス
+    /// progress.bin (f64 LE の KP-absolute 進行度重み) のパス
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
 

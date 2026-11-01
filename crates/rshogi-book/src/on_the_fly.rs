@@ -1,7 +1,7 @@
 //! 定跡ファイルを丸読みせず、probe のたびにファイル上の二分探索で局面を引く(BookOnTheFly)。
 //!
 //! 前提はファイルの `sfen` 行が手数を除いた SFEN のバイト順に並んでいること。手数込みの
-//! SFEN で並べたファイル(YaneuraOu の定跡書き出し)もこの順になる: 手数の直前の空白は
+//! SFEN で並べたファイルもこの順になる: 手数の直前の空白は
 //! 盤面・手番・持ち駒に現れるどの文字よりも小さいので、手数を除いても前後関係は変わらず、
 //! 手数違いの同一局面は隣り合う。
 //!
@@ -145,8 +145,8 @@ impl OnTheFlyFile {
         self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// 局面を引く。`sfen` 行があれば指し手の行が無くても空のエントリを返す (YaneuraOu の
-    /// on the fly と同じ。反転局面を引き直さず、優先定跡なら次のファイルへ進む)。丸読みは
+    /// 局面を引く。`sfen` 行があれば指し手の行が無くても空のエントリを返す
+    /// (反転局面を引き直さず、優先定跡なら次のファイルへ進む)。丸読みは
     /// 指し手の無い局面を登録しないので、その局面では `None` になる。
     pub(crate) fn find(&self, sfen: &str, ignore_ply: bool) -> io::Result<Option<PositionEntry>> {
         let target = strip_ply(sfen);
@@ -409,7 +409,7 @@ mod tests {
         let otf = |path| Book::open_on_the_fly(path, false).unwrap();
         assert_eq!(best(&[otf(&first)]), None);
         assert_eq!(best(&[otf(&first), otf(&second)]).as_deref(), Some("8c8d"));
-        // 丸読みは指し手の無い局面を登録しないので、反転局面に当たる (YaneuraOu と同じ)。
+        // 丸読みは指し手の無い局面を登録しないので、反転局面に当たる。
         assert_eq!(best(&[Book::from_path(&first, false).unwrap()]).as_deref(), Some("3c3d"));
         std::fs::remove_file(first).ok();
         std::fs::remove_file(second).ok();

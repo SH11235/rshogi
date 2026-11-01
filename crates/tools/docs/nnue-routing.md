@@ -1,7 +1,7 @@
 # tools の LayerStacks routing 対応
 
 native 評価経路で選べる mode は `progresskpabs`（tatara の f32）、`progresskpabsq16`
-（YaneuraOu / BulletOu SFNN の整数進行度）、`kingrank9` です。
+（Q16 係数を使う整数進行度）、`kingrank9` です。
 
 対象は `preprocess_psv`、`rescore_psv`、`gensfen` の native backend、
 `benchmark` の内部 API、`label_bench_positions`、`rescore_hcpe`、`yardstick_label`、
@@ -10,7 +10,7 @@ native 評価経路で選べる mode は `progresskpabs`（tatara の f32）、`
 `--bucket-mode` で選ぶ診断ツールです。
 
 progress 係数は USI の `LS_PROGRESS_COEFF` と同じ f64 LE の progress.bin を指定します。
-同じファイルから f32 の係数と、YaneuraOu と同じ `round(w * 65536)` の Q16 係数の両方を作ります。
+同じファイルから f32 の係数と、`round(w * 65536)` の Q16 係数の両方を作ります。
 `progresskpabs` と `progresskpabsq16` は量子化境界で異なる bucket を選ぶことがあるため、
 モデルの学習時と同じ mode を指定してください。
 `verify_nnue_accumulator` が受け付ける f32 形式の係数ファイルは `progresskpabsq16` には使えません。

@@ -112,7 +112,7 @@ impl MasterExit {
     }
 }
 
-/// 根の一覧の 1 行。BookMiner の木のキューの行もそのまま読める。
+/// `tree` のキューの行もそのまま読めるよう、`id`・`root`・`own` 以外の項目は無視する。
 #[derive(Debug, Deserialize)]
 struct RootLine {
     id: String,

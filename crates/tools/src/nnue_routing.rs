@@ -32,7 +32,7 @@ pub fn parse_native_layer_stack_bucket_mode(value: &str) -> Result<LayerStackBuc
 
 /// progress.bin から読んだ routing 係数。
 ///
-/// Q16 は YaneuraOu と同じく f64 の元値を `round(w * 65536)` するので、f32 へ丸めた後の値からは
+/// Q16 は f64 の元値を `round(w * 65536)` するので、f32 へ丸めた後の値からは
 /// 作れない。f64 の progress.bin から読んだときだけ Q16 係数を持つ。
 pub struct ProgressCoefficients {
     kpabs: Box<[f32]>,

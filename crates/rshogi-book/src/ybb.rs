@@ -8,7 +8,7 @@
 //! - moves: index の直後。1 手 4 byte (Move16 u16、評価値 i16)、flags bit0 なら
 //!   6 byte (+ depth u16)
 //!
-//! 局面は SFEN から YaneuraOu と同じビット列の PackedSfen を作り、index を二分探索して引く。
+//! 局面は SFEN から YaneuraOu 形式の PackedSfen を作り、index を二分探索して引く。
 //! ponder と採択回数は持たないので、それぞれ「指し手なし」と 0 として返す。
 
 use std::fs::File;
@@ -174,7 +174,7 @@ impl YbbBook {
 
     /// 局面を引く。`ignore_ply` が `false` なら手数も一致したときだけ返す。PackedSfen に
     /// できない SFEN は引けない局面として扱う。手の数が 0 の局面も空のエントリとして返す
-    /// (YaneuraOu は当たった局面の手が空でも FlippedBook の反転局面を引き直さない)。
+    /// (呼び出し側で FlippedBook の反転局面を引き直さないため)。
     pub(crate) fn find(&self, sfen: &str, ignore_ply: bool) -> io::Result<Option<PositionEntry>> {
         let Some((target, ply)) = pack_sfen(sfen) else {
             return Ok(None);
@@ -230,7 +230,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-// 駒の値は YaneuraOu と同じ (先後 << 4 | 駒種、成りは駒種に +8)。
+// 駒の値は「先後 << 4 | 駒種」で、成りは駒種に +8。
 const PAWN: u8 = 1;
 const GOLD: u8 = 7;
 const KING: u8 = 8;
@@ -238,7 +238,7 @@ const PROMOTE: u8 = 8;
 const WHITE: u8 = 16;
 const SQ_NB: u8 = 81;
 
-/// 手駒と駒箱を書き出す駒種の順 (歩香桂銀金角飛)。YaneuraOu の駒種の値の順とは違う。
+/// 手駒と駒箱を書き出す駒種の順 (歩香桂銀金角飛)。駒種を表す整数値の順とは違う。
 const PACK_HAND_ORDER: [u8; 7] = [1, 2, 3, 4, 7, 5, 6];
 
 /// 駒種 (成りを除く) ごとの盤上のハフマン符号 (code, bits)。添字 0 は空き升。
@@ -290,8 +290,9 @@ impl BitWriter {
 
 /// SFEN を YaneuraOu の PackedSfen (32 byte) と手数にする。手数が無ければ 1。
 ///
-/// 盤面の解釈は `.db` を `.ybb` にする YaneuraOu の変換器に合わせ、合法性は問わない
-/// (玉の無い局面は玉の位置を 81 にする)。駒が多すぎるなど 256 bit に収まらなければ `None`。
+/// `.ybb` の index のキーとビット単位で一致させるため、盤面の合法性は問わない。
+/// 玉の無い局面は玉の位置を 81 にする。
+/// 駒が多すぎるなど 256 bit に収まらなければ `None`。
 pub(crate) fn pack_sfen(sfen: &str) -> Option<([u8; 32], u64)> {
     let mut tokens = sfen.split_whitespace();
     let board_text = tokens.next()?;
@@ -435,8 +436,8 @@ fn piece_from_char(c: char) -> Option<u8> {
     })
 }
 
-/// YaneuraOu の Move16 を USI 文字列にする。特別な値と解釈できない値は YaneuraOu の変換器と
-/// 同じ文字列 (`none` / `null` / `resign` / `win`) にする。
+/// YaneuraOu の Move16 を USI 文字列にする。特別な値と解釈できない値は
+/// `none` / `null` / `resign` / `win` にする。
 fn move16_to_usi(m: u16) -> String {
     const MOVE_NULL: u16 = (1 << 7) + 1;
     const MOVE_RESIGN: u16 = (2 << 7) + 2;

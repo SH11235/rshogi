@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 use crate::config::BenchmarkConfig;
 
-/// YaneuraOu準拠のデフォルトベンチマーク局面
+/// デフォルトのベンチマーク用 4 局面
 pub const DEFAULT_POSITIONS: &[(&str, &str)] = &[
     // 1. 初期局面に近い局面
     (

@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。YaneuraOu-ScriptCollection の BookMiner (`peta_next` → 掘る → peta_shock → 周回) に相当する処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -186,7 +186,7 @@ cargo run -p tools --release --bin book_mine -- run \
 | `--out <path>` | 必須 | 最終周の book の書き出し先 |
 | `--iterations <N>` | `1` | 周回数 |
 | `--max-new-positions <N>` | なし | 累計追加局面数の上限 |
-| `--merge <min\|replace>` | `replace` | 逆伝播の合成。BookMiner 相当は `replace` |
+| `--merge <min\|replace>` | `replace` | 逆伝播の合成。`replace` は伝播した値で置き換える |
 | `--work-dir <dir>` | 必須 | 各周の成果物の保存先 |
 | `--resume` | | `--work-dir` の完了済みの周の続きから再開する |
 
@@ -225,7 +225,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 ## 範囲外
 
-- BookMiner の反駁 leaf (`pr`) などの他モード
+- `frontier` で、伝播後に最善へ繰り上がった未展開の手を優先して列挙するモードなど、上記以外のモード。反駁の点検は `master audit --refutation-table / --enqueue-out` でできます
 - 入玉局面のプレイアウトラベル (frontier の入玉フラグ出力まで)
 - 同値で depth の異なる非 best 手を `value - 1` する補正
 
@@ -884,7 +884,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 ### 反駁の点検
 
-YaneuraOu の `peta refutation` に当たります。読みの MultiPV の 2 位以下の値は 1 位より甘く出やすく、伝播で 1 位の手の先が掘られて値が下がると、先を伸ばしていない甘い手が伝播後の 1 位に繰り上がります。`--refutation-table` か `--enqueue-out` を渡すと、次の局面を出します。どちらも渡さなければ、上の表・要約・`--out-db` の出力は変わりません。
+読みの MultiPV の 2 位以下の値は 1 位より甘く出やすく、伝播で 1 位の手の先が掘られて値が下がると、先を伸ばしていない甘い手が伝播後の 1 位に繰り上がります。`--refutation-table` か `--enqueue-out` を渡すと、次の局面を出します。どちらも渡さなければ、上の表・要約・`--out-db` の出力は変わりません。
 
 - 伸ばした手 (`*_from` が `propagated`、book 内の子局面から値が来る手) と伸ばしていない手 (`eval`、1 回の読みの値) の両方に値の分かる手がある局面で、伸ばしていない手の最善 `best` が伸ばした手の最善 `expanded_best` を `--refutation-margin` 以上上回る局面 (同じ値なら元データの順で先の手を最善とします)。
 - 値は同値の -1 補正の前の値で比べます。伝播の書き出し (`--out-db` と `book_backprop`) は 1 位と同値で選ばなかった手を -1 するので、補正後の値で比べると同値の手が margin 1 で当たるためです。そのため反駁の表の値は、点検の表や `--out-db` の値と 1 違うことがあります。
@@ -904,7 +904,7 @@ YaneuraOu の `peta refutation` に当たります。読みの MultiPV の 2 位
 注意:
 
 - 点検の表は読み直しの候補です。木で伝播した値と 1 回の読みの値を比べるので、深さの違う値が混ざります。main を自動では替えません。
-- 相手の手も定跡の手だけで見るので、定跡の外の相手の手で同じ局面に戻る循環 (先手の千日手) と、定跡の外の相手の手で値の低い局面に合流する所は、この伝播では見つかりません (YaneuraOu の peta_shock も同じ)。それぞれ `master cycles` と `master rejoin` で調べます。
+- 相手の手も定跡の手だけで見るので、定跡の外の相手の手で同じ局面に戻る循環 (先手の千日手) と、定跡の外の相手の手で値の低い局面に合流する所は、この伝播では見つかりません。それぞれ `master cycles` と `master rejoin` で調べます。
 - 元データは全件を読み、局面数と手の数に比例するメモリを使います。伝播用のグラフは一時 `.db` を介さずメモリ内で1回だけ構築します。key の検査・索引の作成には読み取り専用の軽い局面を使い、利きの全升集計・NNUE の駒表・駒割の計算を省きます。手を指す経路では完全な `Position` を使います。頂点の展開では詰めた局面から完全な局面を直接構築し、在庫検査とハッシュ計算を1回だけ行います。値の分からない手と、手が無くなる局面を同じ配列内で除き、消えた直接の子局面に残る反転局面があれば辺を張り替えます。`rejoin` / `cycles` / `borrow` の元データの値の伝播もこの経路を使います。
 
 ## `master rejoin`: 相手の手で定跡に戻ると値が下がる局面
@@ -915,7 +915,7 @@ book_mine master rejoin --master moves.tsv --table rejoin.tsv \
   [--opp-freq strong_games.db --min-weight 0.001]
 ```
 
-自分 (RAMU) が定跡の手を指した後、相手が定跡に無い合法手を指して別の定跡の局面に戻るとき、戻った先の値がその手前で期待した値より `--line` 以上下がる所を一覧にします (YaneuraOu の `peta rejoin` に当たります)。`master audit` の伝播は相手の手も定跡の手だけで見るので、相手が定跡に無い手で合流すると手前の値が実際より高く見えます。一覧の「掘る局面」で相手の手を読み足すのが対処です。元データは書き換えません。
+自分 (RAMU) が定跡の手を指した後、相手が定跡に無い合法手を指して別の定跡の局面に戻るとき、戻った先の値がその手前で期待した値より `--line` 以上下がる所を一覧にします。`master audit` の伝播は相手の手も定跡の手だけで見るので、相手が定跡に無い手で合流すると手前の値が実際より高く見えます。一覧の「掘る局面」で相手の手を読み足すのが対処です。元データは書き換えません。
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|
@@ -1035,7 +1035,7 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 
 ## `borrow`: 大きい定跡の木を借りる
 
-大きい定跡 (YaneuraOu のペタショック定跡など) から、どの手を伸ばすかだけを借ります。値は自分のエンジンの読みで付け、大きい定跡の値は手を選ぶ当たりにだけ使います (登録する値には混ぜません)。読むべき出口が最初から全部分かるので、`tree serve` の並列を使い切って同時に読めます。
+大きい定跡から、どの手を伸ばすかだけを借ります。値は自分のエンジンの読みで付け、大きい定跡の値は手を選ぶ当たりにだけ使います (登録する値には混ぜません)。読むべき出口が最初から全部分かるので、`tree serve` の並列を使い切って同時に読めます。
 
 1. `borrow cut`: 根ごとに部分木を切り出し、読む局面 (出口と確認点) とキューの行を書く。
 2. `tree enqueue --from <cut>/targets.jsonl` → `tree serve` で読む (同じ台帳を他の木と使い回せる)。
@@ -1054,7 +1054,7 @@ book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
 | `--book` | 必須 | 大きい定跡。テキスト `.db` か YaneuraOu のバイナリ定跡 `.ybb` (ファイル先頭で見分ける)。丸読みせず、ファイル上で二分探索して引く (`rshogi-book` の BookOnTheFly)。`.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要があり、並んでいなければ開くときに止まる (並べ替えた写しを渡す)。`.ybb` は並べ替え不要。count を持たず、depth は持つ版 (flags の bit0) と持たない版があるが、切り出しは値しか使わないので結果は `.db` と同じ。ファイルは読むだけ |
 | `--roots` | 必須 | 根の一覧 (JSON Lines)。1 行に `id` (`[A-Za-z0-9_-]`)・`root` (`sfen ...` か `startpos moves ...`)・`own` (`b` / `w`、根の手番と同じ)。他の項目は読まないので、`tree` のキューの行もそのまま渡せる |
 | `--out` | 必須 | 出力先。まだ無い dir |
-| `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす (YaneuraOu の BookEvalDiff に当たる) |
+| `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす |
 | `--opp-diff` / `--opp-top` | 100 / 2 | 相手の手番: 値の上位 `--opp-top` 手と、最善からの差が `--opp-diff` 以内の手の和を伸ばす |
 | `--max-plies` | 20 | 根からの手数の上限。この手数の局面は出口 |
 | `--max-positions` | 20000 | 根ごとの局面数の上限。伸ばすとこれを超える局面は出口 |
@@ -1086,7 +1086,7 @@ book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
 
 ### 読み
 
-`tree serve` は段 0 の行の根 (`root` と `roots`) を読むだけで伸ばしません。読みの条件 (指紋) が同じなら、他の木や別の切り出しの読みも同じ台帳で使い回します。定跡の値をそろえるため、条件は BookMiner の木と同じにします (`--nodes 1000000000 --multipv 3 --hash 1024`、`DrawValueBlack=-70` / `DrawValueWhite=70`、Threads は 1 に固定)。
+`tree serve` は段 0 の行の根 (`root` と `roots`) を読むだけで伸ばしません。読みの条件 (指紋) が同じなら、他の木や別の切り出しの読みも同じ台帳で使い回します。定跡の値と読みの指紋をそろえて台帳を使い回すため、`tree` の木と同じ条件にします (例: `--nodes 1000000000 --multipv 3 --hash 1024`、`DrawValueBlack=-70` / `DrawValueWhite=70`、Threads は 1 に固定)。
 
 ```bash
 receipt=$(book_mine tree enqueue --state "$STATE" --from cut1/targets.jsonl)
@@ -1108,11 +1108,11 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 伝播:
 
 - 部分木を `.db` にして `book_backprop --merge replace` と同じ後退解析で解きます。切り出しと同じく、先後反転した局面へは辺を張りません。先手を自分として解く回は `--draw-value-black`、後手は `--draw-value-white` を千日手の値にします (部分木の中の循環)。
-- 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です (BookMiner の木の伝播は resign の葉を 0 にするので、詰みの絡む根では 1 位が食い違うことがあります)。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
+- 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です。`tree` の値 (model の伝播) は resign の葉を 0 にするので、詰みの絡む根では `borrow` と `tree` の 1 位が食い違うことがあります。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
 - 途中の局面の手は部分木の手だけです。確認点の読みは値に混ぜません。
 - 同じ値の手は、`book_backprop` の同値手の補正 (勝ちは出口へ短く届く手を残し、遠回りの手を 1 下げる) を受けます。
 
-確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます (BookMiner の「伸ばしていない手が上回る」に当たる)。印の付いた局面は、どの根から着いても登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
+確認点の印: 確認点の読みで、部分木の候補の外の手の値が、候補の伝播後の最善より `--line` 以上良ければ印を付けます。`master audit` の反駁の点検と同様に、伸ばしていない手が伝播後の候補を上回る局面を調べます。印の付いた局面は、どの根から着いても登録せず、`marks.tsv` に出します。その手を足して伸ばし直すときは、`--extra value1/marks.tsv` を付けて新しい `--tag` で切り直し、足りない局面を読ませてから値付けをやり直します。
 
 `--schema <dir>` で語彙と読み条件の名前を指定できます。台帳の条件名は指紋から決め、schema があれば対応する条件名、なければ先頭 8 文字です。対応する条件名がなければエラーです。
 
@@ -1132,7 +1132,7 @@ value_kind は後退解析のグラフで子局面への辺を持つ手なら `t
 
 | ファイル | 内容 |
 |---|---|
-| `roots.tsv` | 根ごとの伝播後の 1 位・2 位とその値、先手から見た 1 位の値、印の数。BookMiner の木の 1 位と比べるときに使う |
+| `roots.tsv` | 根ごとの伝播後の 1 位・2 位とその値、先手から見た 1 位の値、印の数。`tree` の木の 1 位と比べるときに使う |
 | `values.tsv` | 全局面の手の伝播後の値。`id key ply level side turn kind move value value_black expanded book_value` (`value` は手番の側、`value_black` は先手から見た値、`expanded` は部分木の手なら 1) |
 | `marks.tsv` | 印。`id key ply side move cp best best_value gap` |
 | `conflicts.tsv` | 食い違いの一覧 (`tree register` と同じ列で、最後の列は根の id) |

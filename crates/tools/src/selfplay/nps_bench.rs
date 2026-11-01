@@ -16,7 +16,7 @@ pub const BENCH_VERSION: &str = "spsa-bench-v1";
 pub const DEFAULT_REFERENCE_NPS: u64 = 350_000;
 /// `--min-nps-ratio` の既定値。
 pub const DEFAULT_MIN_NPS_RATIO: f64 = 0.5;
-/// 測る局面は benchmark ツールの既定局面 (YaneuraOu の bench と同じ 4 局面)。
+/// 測る局面は benchmark ツールの既定局面 (4 局面)。
 const BENCH_DEPTH: u32 = 16;
 /// cache と thread の立ち上がりを均すための warmup の深さ。同じ局面集合を 1 周する。
 const WARMUP_DEPTH: u32 = 12;

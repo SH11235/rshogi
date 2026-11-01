@@ -4,7 +4,6 @@
 //! 合法手の選択確率が閾値を超える手について次局面を生成し、新しい PSV ファイルに書き出す。
 //!
 //! AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`) の両方に対応。
-//! cshogi_util の expand_psv_from_policy.py 相当。
 //!
 //! # 使用例
 //!

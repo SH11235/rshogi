@@ -264,7 +264,7 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
 }
 
 // ============================================================
-// Policy move label (cshogi の make_move_label 相当)
+// Policy move label (移動方向と移動先から作る policy の出力の番号)
 // ============================================================
 
 /// ポリシーヘッドの移動方向ラベル
@@ -272,7 +272,7 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
 /// 10 方向 × 2 (不成り/成り) = 20 盤上方向 + 7 持ち駒 = 合計 27 カテゴリ。
 /// ポリシー出力サイズ: 27 × 81 = 2187。
 ///
-/// cshogi の `MOVE_DIRECTION` enum と同一順序。
+/// 値の順は学習済みモデルの policy 出力の並びそのものなので変えない。
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveDirection {
@@ -336,8 +336,7 @@ fn get_move_direction(dir_x: i32, dir_y: i32) -> MoveDirection {
 
 /// 指し手をポリシー出力のラベルインデックスに変換する
 ///
-/// cshogi の `__dlshogi_make_move_label` と同一ロジック。
-/// 後手番では盤面を 180 度回転して先手視点に正規化する。
+/// 学習済みモデルの policy 出力の番号と一致させる必要がある。後手番では盤面を 180 度回転して先手視点に正規化する。
 ///
 /// 戻り値は `0..2187` のインデックス。
 pub fn make_move_label(mv: Move, color: Color) -> usize {
@@ -384,8 +383,7 @@ pub fn make_move_label(mv: Move, color: Color) -> usize {
 
 /// 勝率 (0..1) をセンチポーン値に変換
 ///
-/// dlshogi の Eval_Coef に相当する逆変換。
-/// `scale` で bullet-shogi の --scale と整合させる。
+/// `scale` は学習側の --scale と揃える。
 /// winrate = sigmoid(cp / scale) の逆関数: cp = scale * ln(p / (1-p))
 pub fn winrate_to_cp(winrate: f32, scale: f32) -> i32 {
     let clamped = winrate.clamp(0.001, 0.999);
