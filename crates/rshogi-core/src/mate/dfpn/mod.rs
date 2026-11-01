@@ -166,6 +166,8 @@ pub struct DfpnSolver {
     shortest: Option<ShortestMode>,
     /// 最短手順モードの表 (最初に使うときに確保する)
     shortest_tables: ShortestTables,
+    /// 置換表に残っている探索の根の局面 (`leftover_variations` が置換表を使い回せるか)
+    table_root: Option<u64>,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -195,6 +197,7 @@ impl DfpnSolver {
             parallel_start: PARALLEL_START_NODES,
             shortest: None,
             shortest_tables: ShortestTables::new(),
+            table_root: None,
         }
     }
 
@@ -270,6 +273,7 @@ impl DfpnSolver {
             return MateResult::Unsupported;
         }
         self.table.clear();
+        self.table_root = Some(pos.key());
         let start = Instant::now();
         let kingless = pos.pieces(us, PieceType::King).is_empty();
         let result = {
@@ -331,22 +335,29 @@ pub struct LeftoverVariation {
 }
 
 /// [`DfpnSolver::leftover_variations`] の結果
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeftoverCheck {
     pub variations: Vec<LeftoverVariation>,
     /// 応手 1 つあたりの予算で調べきれなかった応手の数
     pub unchecked: usize,
+    /// 全体の制限 (ノード数・時間・停止) に達せずに手順の終わりまで調べたか。`false` なら `variations` は
+    /// 途中までの候補
+    pub complete: bool,
+    /// 探索したノード数
+    pub nodes: u64,
 }
 
 impl DfpnSolver {
     /// 詰将棋のルール ([`ShortestMode::Tsume`]) の正解手順 `pv` が詰上りで攻め方の持駒が余るとき、変長駒余りの
     /// 候補を探す: 手順上の受け方の局面で、手順の応手より短く詰むが、そこからの正解手順が駒余りなしで終わる
     /// 無駄合いでない応手。駒余りなしで終わる手順は `pv` の確認だけで返す (候補を探さない)。
+    /// `pv` は Tsume で求めた手順であること (手順上の局面の詰み手数を、残りの手数として使う)。
     ///
     /// 変長駒余りの慣習 (最長の手順が駒余りなら、駒余りの無い短い手順を作意とする) で答えが変わりうる所を
     /// 示すもので、その慣習での正解手順の証明ではない (候補の先でさらに受け方が選び直す変化は調べない)。
-    /// 応手ごとに `nodes_per_reply` ノードで打ち切り、全体は `limits` と `stop` で打ち切る (打ち切ったら
-    /// そこまでの候補)。直前に同じ局面を解いた置換表を使うと速い。
+    /// 応手ごとに `nodes_per_reply` ノードで打ち切り (0 は無制限)、全体は `limits` と `stop` で打ち切る
+    /// (打ち切ったらそこまでの候補)。直前に同じ局面を解いた置換表の詰みと不詰を使う (無駄合いを数えない
+    /// 数え方の詰み手数の表は作り直す。別の局面を解いた後なら置換表も空にする)。
     pub fn leftover_variations(
         &mut self,
         pos: &mut Position,
@@ -404,7 +415,18 @@ impl DfpnSolver {
             st.undo_move(mv);
         }
         if clean {
-            return LeftoverCheck::default();
+            return LeftoverCheck {
+                variations: Vec::new(),
+                unchecked: 0,
+                complete: true,
+                nodes: 0,
+            };
+        }
+        // 置換表の確定値は、持駒の総数が同じ局面どうしでしか流用できない (証明駒・反証駒の比較の前提)
+        let root = st.position().key();
+        if self.table_root != Some(root) {
+            self.table.clear();
+            self.table_root = Some(root);
         }
         let mut quiet = |_| {};
         let budget = Budget {
@@ -423,25 +445,28 @@ impl DfpnSolver {
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
         searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
-        let mut check = LeftoverCheck::default();
-        if let Ok((found, unchecked)) = shortest::leftover_variations(
-            &mut searcher,
-            st,
-            &self.shortest_tables,
-            pv,
-            nodes_per_reply,
-        ) {
-            check.unchecked = unchecked;
-            check.variations = found
+        // 応手ごとの予算 0 は、探索器の制限の 0 (無制限) と同じ意味にする
+        let per_reply = if nodes_per_reply == 0 {
+            u64::MAX
+        } else {
+            nodes_per_reply
+        };
+        let found =
+            shortest::leftover_variations(&mut searcher, st, &self.shortest_tables, pv, per_reply);
+        let check = LeftoverCheck {
+            variations: found
+                .found
                 .into_iter()
                 .map(|(ply, reply, len)| LeftoverVariation {
                     ply,
                     reply,
                     len: usize::from(len),
                 })
-                .collect();
-        }
-        self.nodes = searcher.nodes();
+                .collect(),
+            unchecked: found.unchecked,
+            complete: found.complete,
+            nodes: searcher.nodes(),
+        };
         self.table.set_concurrent(false);
         check
     }

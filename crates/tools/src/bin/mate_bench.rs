@@ -99,8 +99,8 @@ struct Cli {
     threads: usize,
 
     /// `--shortest tsume` の手順が駒余りで終わるとき、変長駒余りの候補 (手順上の受け方の局面で、手順の応手より
-    /// 短く詰み、そこからの正解手順が駒余りなしで終わる応手) を探す。値は応手 1 つあたりのノード数の予算。
-    /// TSV に `leftover` と `leftover_unchecked` の列を足す
+    /// 短く詰み、そこからの正解手順が駒余りなしで終わる応手) を探す。値は応手 1 つあたりのノード数の予算
+    /// (0 は無制限)。TSV に `leftover` `leftover_unchecked` `leftover_complete` の列を足す
     #[arg(long)]
     check_leftover: Option<u64>,
 
@@ -298,8 +298,8 @@ fn parse_mode(name: &str) -> Result<MateMode, String> {
     MateMode::from_name(name).ok_or_else(|| format!("{name}: Speed / Power のどちらか"))
 }
 
-/// TSV の 1 行。`leftover` なら変長駒余りの候補 (`手順の添字:応手:手数` をカンマ区切り) と、調べきれなかった
-/// 応手の数の列を足す
+/// TSV の 1 行。`leftover` なら変長駒余りの候補 (`手順の添字:応手:手数` をカンマ区切り)、調べきれなかった
+/// 応手の数、手順の終わりまで調べたかの列を足す
 fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result<()> {
     write!(
         w,
@@ -313,7 +313,7 @@ fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result
         o.expect.map_or(String::new(), |n| n.to_string())
     )?;
     if leftover {
-        let (list, unchecked) = match &o.leftover {
+        let (list, unchecked, complete) = match &o.leftover {
             Some(c) => (
                 c.variations
                     .iter()
@@ -321,10 +321,11 @@ fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result
                     .collect::<Vec<_>>()
                     .join(","),
                 c.unchecked.to_string(),
+                c.complete.to_string(),
             ),
-            None => (String::new(), String::new()),
+            None => (String::new(), String::new(), String::new()),
         };
-        write!(w, "\t{list}\t{unchecked}")?;
+        write!(w, "\t{list}\t{unchecked}\t{complete}")?;
     }
     writeln!(w)
 }
@@ -473,7 +474,7 @@ fn main() -> Result<()> {
             );
             write!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv\texpect_len")?;
             if cli.check_leftover.is_some() {
-                write!(w, "\tleftover\tleftover_unchecked")?;
+                write!(w, "\tleftover\tleftover_unchecked\tleftover_complete")?;
             }
             writeln!(w)?;
             Some(w)

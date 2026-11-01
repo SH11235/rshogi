@@ -937,8 +937,10 @@ fn leftover_variations_find_shorter_clean_lines() {
             panic!("{mode:?}");
         };
         assert_eq!(pv.len(), 5, "{mode:?}: {}", pv_usi(&pv));
+        let leftover_pv = pv.clone();
         let check = solver.leftover_variations(&mut pos, &pv, &limits, 100_000, &stop);
-        assert_eq!(check.unchecked, 0, "{mode:?}");
+        assert!(check.complete && check.unchecked == 0, "{mode:?}: {check:?}");
+        let first = check.variations.clone();
         assert!(!check.variations.is_empty(), "{mode:?}: {}", pv_usi(&pv));
         for v in &check.variations {
             assert_eq!((v.ply, v.len), (1, 3), "{mode:?}: {v:?}");
@@ -946,7 +948,9 @@ fn leftover_variations_find_shorter_clean_lines() {
             line.clear_checkers_without_king();
             line.do_move_with_missing_kings(pv[0]);
             assert!(!ref_is_futile(&mut line, v.reply, 4), "{mode:?}: {v:?}");
+            assert_ne!(v.reply, pv[1], "{mode:?}");
             line.do_move_with_missing_kings(v.reply);
+            assert_eq!(ref_len(&mut line, 1), Some(1), "{mode:?}: {v:?}");
             assert!(ref_clean(&mut line, 1, true, attacker), "{mode:?}: {v:?}");
         }
         // 駒余りなしで終わる手順には候補を探さない
@@ -955,6 +959,19 @@ fn leftover_variations_find_shorter_clean_lines() {
             panic!("{mode:?}");
         };
         let check = solver.leftover_variations(&mut clean, &pv, &limits, 100_000, &stop);
-        assert_eq!(check, LeftoverCheck::default(), "{mode:?}");
+        assert!(check.complete && check.variations.is_empty(), "{mode:?}: {check:?}");
+        // 別の局面を解いた後でも (置換表を作り直して) 同じ候補を返す
+        let mut pos = position(sfen);
+        let again = solver.leftover_variations(&mut pos, &leftover_pv, &limits, 100_000, &stop);
+        assert_eq!(again.variations, first, "{mode:?}");
+        assert!(again.complete, "{mode:?}");
+        // 全体の制限で打ち切ったら、途中までの結果として返す
+        let tight = MateLimits {
+            nodes: 1,
+            time_ms: 0,
+        };
+        let mut pos = position(sfen);
+        let check = solver.leftover_variations(&mut pos, &leftover_pv, &tight, 0, &stop);
+        assert!(!check.complete, "{mode:?}: {check:?}");
     }
 }
