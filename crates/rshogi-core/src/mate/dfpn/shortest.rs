@@ -138,6 +138,7 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
 }
 
 /// 手順の局面を末端から根へ、残りの手数を上限にして証明する。すべて証明できれば `true`
+/// 受け方の局面が予算内に証明できなければ、先に重い応手の先を証明しておく (`prove_heavy_replies`)
 fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
     searcher: &mut Searcher<'_, S, PIECES>,
     st: &mut S,
@@ -151,6 +152,15 @@ fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
         st.undo_move(mv);
         if proven {
             let remaining = (pv.len() - i) as u16;
+            if i % 2 == 1
+                && remaining >= 4
+                && let Err(abort) = prove_heavy_replies(searcher, st, mv, remaining)
+            {
+                for &mv in pv[..i].iter().rev() {
+                    st.undo_move(mv);
+                }
+                return Err(abort);
+            }
             let r = searcher.search_shared(st, NodeArgs::unbounded(0, i % 2 == 0, remaining));
             match r {
                 Ok(r) => proven = r.is_proven(),
@@ -164,6 +174,53 @@ fn prove_backward<S: MateState + Clone + Send, const PIECES: bool>(
         }
     }
     Ok(proven)
+}
+
+/// 受け方の局面を手順の詰み手数で直接読むときのノード予算。ほとんどの局面はこれで決まり、
+/// 決まらない局面だけを応手ごとの推定・証明に回す
+const HEAVY_NODE_BUDGET: u64 = if cfg!(test) { 30 } else { 2_000_000 };
+/// 手順外の応手 1 つを直接読むノード予算。超えた応手は手順を推定して末端から証明する
+const HEAVY_REPLY_BUDGET: u64 = if cfg!(test) { 30 } else { 1_000_000 };
+
+/// 手順上の受け方の局面 `st` (詰み手数 `remaining`、手順の応手 `pv_reply`) が予算内に証明できなければ、
+/// 予算内に証明できない応手ごとに、その先の手順を推定して末端から証明しておく
+fn prove_heavy_replies<S: MateState + Clone + Send, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    st: &mut S,
+    pv_reply: S::Mv,
+    remaining: u16,
+) -> Result<(), Abort> {
+    let quick = searcher.within(HEAVY_NODE_BUDGET, |s| {
+        s.search(st, NodeArgs::unbounded(0, false, remaining), &mut 0)
+    })?;
+    if quick.is_some() {
+        return Ok(());
+    }
+    let mut replies = Vec::new();
+    st.generate(false, &mut replies);
+    for reply in replies {
+        if reply == pv_reply || st.is_drop(reply) {
+            continue;
+        }
+        st.do_move(reply);
+        let result = (|| {
+            let r = searcher.within(HEAVY_REPLY_BUDGET, |s| {
+                s.search(st, NodeArgs::unbounded(0, true, remaining - 1), &mut 0)
+            })?;
+            if r.is_some() {
+                return Ok(());
+            }
+            // 証明に失敗しても表に残った結果が後の証明を軽くするので、成否は使わない
+            let est = estimate::estimate_in_place(searcher, st)?;
+            if let Some(sub) = est.filter(|p| p.len() < usize::from(remaining)) {
+                prove_backward(searcher, st, &sub)?;
+            }
+            Ok(())
+        })();
+        st.undo_move(reply);
+        result?;
+    }
+    Ok(())
 }
 
 /// 手順上の攻め方の局面を末端から根へ、残りの手数 − 2 を上限にして読む

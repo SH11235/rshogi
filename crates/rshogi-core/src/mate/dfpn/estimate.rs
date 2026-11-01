@@ -51,6 +51,14 @@ pub(super) fn estimate_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     tables: &'a ShortestTables,
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     searcher.enable_shortest(true, tables);
+    estimate_in_place(searcher, st)
+}
+
+/// 数え方を切り替えずに (最短手順モードの表を残して) 推定する
+pub(super) fn estimate_in_place<S: MateState + Clone + Send, const PIECES: bool>(
+    searcher: &mut Searcher<'_, S, PIECES>,
+    st: &mut S,
+) -> Result<Option<Vec<S::Mv>>, Abort> {
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;
     if !root.is_proven() {
         return Ok(None);
