@@ -4184,6 +4184,31 @@ impl OnnxModelIdentity {
     }
 }
 
+/// 推論に使ったのはセッションを作ったときのモデル。`model_path` が置き換わっていた (または
+/// 読めない) なら出力を空にしてエラーを返す。marker の無い PSV 出力を残すと、次の実行が続きから
+/// 別のモデルの値を追記するか、件数がそろっていれば完了扱いで skip する。
+///
+/// モデルが消えていると `protection` の検査 (読み取り専用の資源の canonicalize) で truncate
+/// できず、出力が残る。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn discard_output_if_model_changed(
+    protection: &OutputProtection,
+    loaded: &OnnxModelIdentity,
+    model_path: &std::path::Path,
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    out_scores: bool,
+) -> Result<()> {
+    if let Err(e) = loaded.ensure_unchanged(model_path) {
+        protection.truncate(output_path, 0)?;
+        if out_scores {
+            remove_in_progress_marker(protection, output_path)?;
+        }
+        return Err(e.context(format!("discarded the output of {}", input_path.display())));
+    }
+    Ok(())
+}
+
 /// ONNX Runtime のセッションと入力特徴の host バッファ。1 回の実行の全入力ファイルで使い回す。
 ///
 /// ファイルごとに作り直すと、TensorRT EP ではセッションの数だけモデルの解析と
@@ -5516,16 +5541,15 @@ where
         );
     }
 
-    // 推論に使ったのはセッションを作ったときのモデル。置き換わっていた (または読めない) なら、
-    // Ctrl-C で打ち切った場合も含めて出力を空にする。marker の無い PSV 出力を残すと、次の実行が
-    // 続きから別のモデルの値を追記するか、件数がそろっていれば完了扱いで skip する。
-    if let Err(e) = loaded_model.ensure_unchanged(config.onnx_path) {
-        protection.truncate(output_path, 0)?;
-        if out_scores {
-            remove_in_progress_marker(protection, output_path)?;
-        }
-        return Err(e.context(format!("discarded the output of {}", input_path.display())));
-    }
+    // Ctrl-C で打ち切った場合も含めて照合する。
+    discard_output_if_model_changed(
+        protection,
+        loaded_model,
+        config.onnx_path,
+        input_path,
+        output_path,
+        out_scores,
+    )?;
 
     // 完了マーカー書き出し（atomic rename）。
     // INTERRUPTED が立っている場合（Ctrl-C で残ファイル分を打ち切った場合）も
@@ -6604,7 +6628,7 @@ mod marker_tests {
         }
     }
 
-    fn test_fingerprint(out_scores: bool) -> RunFingerprint {
+    pub(super) fn test_fingerprint(out_scores: bool) -> RunFingerprint {
         let extra = if out_scores { "out_scores=true\n" } else { "" };
         parse_text(&base_marker(extra)).fingerprint
     }
@@ -7077,6 +7101,47 @@ mod marker_tests {
 #[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
 mod onnx_sessions_tests {
     use super::*;
+
+    #[test]
+    fn replaced_model_discards_output_so_next_run_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        let input = dir.path().join("in.psv");
+        std::fs::write(&model, b"weights-a").unwrap();
+        std::fs::write(&input, b"").unwrap();
+        let loaded = OnnxModelIdentity::capture(&model).unwrap();
+        let protection = OutputProtection {
+            inputs: vec![model.clone(), input.clone()],
+            outputs: Vec::new(),
+        };
+
+        // 置き換わっていなければ出力を残す (中断後に続きから再開できる)。
+        let psv = dir.path().join("out.psv");
+        std::fs::write(&psv, [1, 2, 3]).unwrap();
+        discard_output_if_model_changed(&protection, &loaded, &model, &input, &psv, false).unwrap();
+        assert_eq!(std::fs::read(&psv).unwrap(), [1, 2, 3]);
+
+        let scores = dir.path().join("out.scores.i16");
+        let start = marker_tests::test_fingerprint(true);
+        prepare_in_progress_marker(&protection, &scores, &start, false).unwrap();
+        std::fs::write(&scores, [1, 2, 3, 4]).unwrap();
+
+        std::fs::write(&model, b"weights-bb").unwrap();
+        let error =
+            discard_output_if_model_changed(&protection, &loaded, &model, &input, &psv, false)
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("ONNX model file changed"));
+        assert_eq!(std::fs::metadata(&psv).unwrap().len(), 0);
+
+        discard_output_if_model_changed(&protection, &loaded, &model, &input, &scores, true)
+            .unwrap_err();
+        assert_eq!(std::fs::metadata(&scores).unwrap().len(), 0);
+        assert!(!in_progress_marker_path_for(&scores).exists());
+        assert_eq!(
+            prepare_in_progress_marker(&protection, &scores, &start, false).unwrap(),
+            Some(SidecarStartDecision::Truncate)
+        );
+    }
 
     #[test]
     fn model_identity_detects_replaced_model_file() {
