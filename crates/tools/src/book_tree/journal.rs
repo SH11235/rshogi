@@ -411,22 +411,23 @@ impl Journal {
     }
 
     /// 全件を検査してから追記し、拒否時には台帳を変更しない。値の同じ重複は飛ばし、値の違う重複は `on_conflict` に従う。
-    /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込みの先の行) を残して食い違いとして返す。
-    /// `before_append` は検査の後・追記の前に食い違いを受け取り、失敗すれば台帳を変えずに失敗する。
-    /// (追記した件数, 飛ばした件数, 食い違い) を返す。飛ばした件数は食い違いを含む。
+    /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込みの先の行) を残して、
+    /// 残さなかった読みを検査しながら `sink` に渡す (食い違いを全件メモリに持たない)。
+    /// `sink.before_append` は検査の後・追記の前に呼び、失敗すれば何も追記しない。
+    /// (追記した件数, 飛ばした件数, 食い違いの件数) を返す。飛ばした件数は食い違いを含む。
     pub fn merge_all(
         &mut self,
         incoming: Vec<(Reading, String)>,
         settings: &Settings,
         on_conflict: OnConflict,
-        before_append: impl FnOnce(&[Conflict]) -> Result<()>,
-    ) -> Result<(usize, usize, Vec<Conflict>)> {
+        sink: &mut dyn ConflictSink,
+    ) -> Result<(usize, usize, usize)> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と取り込みの条件が違います");
         }
         let total = incoming.len();
         let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
-        let mut conflicts = Vec::new();
+        let mut conflicts = 0;
         for (reading, provenance) in incoming {
             reading.validate(settings)?;
             let existing = self
@@ -439,18 +440,15 @@ impl Journal {
                 match on_conflict {
                     OnConflict::Reject => bail!("値の違う重複: {}", reading.key),
                     OnConflict::KeepExisting => {
-                        conflicts.push(Conflict {
-                            existing: old.clone(),
-                            incoming: reading,
-                            provenance,
-                        });
+                        sink.conflict(old, &reading, &provenance)?;
+                        conflicts += 1;
                         continue;
                     }
                 }
             }
             pending.insert(reading.key.clone(), (reading, provenance));
         }
-        before_append(&conflicts)?;
+        sink.before_append()?;
         let mut appended = 0;
         for (reading, provenance) in pending.into_values() {
             if !self.records.contains_key(&reading.key) {
@@ -471,11 +469,25 @@ pub(super) enum OnConflict {
     KeepExisting,
 }
 
-/// 残した読みと、取り込まなかった読み。
-pub(super) struct Conflict {
-    pub existing: Reading,
-    pub incoming: Reading,
-    pub provenance: String,
+/// `merge_all` が残さなかった読みの受け取り先。
+pub(super) trait ConflictSink {
+    /// 残した読み・残さなかった読み・残さなかった読みの出どころを 1 件受け取る
+    fn conflict(&mut self, existing: &Reading, incoming: &Reading, provenance: &str) -> Result<()>;
+    /// 検査の後・追記の前に呼ぶ。失敗すれば何も追記しない
+    fn before_append(&mut self) -> Result<()>;
+}
+
+/// 食い違いを受け取らない (`OnConflict::Reject` で使う)。
+pub(super) struct NoConflictList;
+
+impl ConflictSink for NoConflictList {
+    fn conflict(&mut self, _: &Reading, incoming: &Reading, _: &str) -> Result<()> {
+        bail!("値の違う重複: {}", incoming.key)
+    }
+
+    fn before_append(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// 取り込み元の台帳から選んだ 1 条件の読み。

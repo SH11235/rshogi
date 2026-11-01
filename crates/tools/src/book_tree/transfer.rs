@@ -1,7 +1,9 @@
 //! 別の台帳 (別マシンの台帳の複製など) の読みを、取り込み先の条件で台帳に足す。
 
 use super::ReadingArgs;
-use super::journal::{Conflict, Journal, OnConflict, Settings, read_source};
+use super::journal::{
+    ConflictSink, Journal, NoConflictList, OnConflict, Reading, Settings, read_source,
+};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::io::Read;
@@ -210,26 +212,26 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
         forced.is_some(),
         args.from_journal.display()
     );
+    // 一覧の一時ファイルは台帳を開く前に作り、検査しながら書く。公開は読みを追記する前に行い、
+    // 書けなければ読みを追記せずに失敗する (末尾の書きかけの行の切り詰めは、台帳を開くときに行う)。
+    let mut list = match &args.conflicts_out {
+        Some(path) => Some(
+            ConflictTsv::create(path)
+                .with_context(|| format!("食い違いの一覧を {} に作れません", path.display()))?,
+        ),
+        None => None,
+    };
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
     let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
-    // 一覧は読みを追記する前に書く。書けなければ読みを追記せずに失敗する
-    // (末尾の書きかけの行の切り詰めは、台帳を開くときにすでに済んでいる)。
+    let sink: &mut dyn ConflictSink = match &mut list {
+        Some(list) => list,
+        None => &mut NoConflictList,
+    };
     let (appended, skipped, conflicts) =
-        journal.merge_all(incoming, &dst, args.on_conflict, |conflicts| {
-            match &args.conflicts_out {
-                Some(path) => write_conflicts(path, conflicts).with_context(|| {
-                    format!(
-                        "食い違い {} 件の一覧を {} に書けません",
-                        conflicts.len(),
-                        path.display()
-                    )
-                }),
-                None => Ok(()),
-            }
-        })?;
+        journal.merge_all(incoming, &dst, args.on_conflict, sink)?;
     println!("fingerprint={}", dst.fingerprint);
     println!("source_fingerprint={}", source.settings.fingerprint);
-    println!("appended={appended} skipped={skipped} conflicts={}", conflicts.len());
+    println!("appended={appended} skipped={skipped} conflicts={conflicts}");
     Ok(())
 }
 
@@ -272,34 +274,57 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
     Ok(resolve(a)? == resolve(b)?)
 }
 
-/// 同じ dir の一時ファイルに書いて fsync してから置き換え、dir も fsync する (書きかけの一覧を残さない)。食い違いが 0 件でもヘッダだけの一覧を書く。
-fn write_conflicts(path: &Path, conflicts: &[Conflict]) -> Result<()> {
-    use std::io::Write;
-    let mut body = String::from(CONFLICT_HEADER);
-    for c in conflicts {
-        let fields = [
-            escape_tsv(&c.incoming.key),
-            c.incoming.ply.to_string(),
-            escape_tsv(&c.existing.bestmove),
-            first_cp(&c.existing),
-            escape_tsv(&c.incoming.bestmove),
-            first_cp(&c.incoming),
-            escape_tsv(&c.provenance),
-        ];
-        body.push_str(&fields.join("\t"));
-        body.push('\n');
+/// 食い違いの一覧。同じ dir の一時ファイルに 1 行ずつ書き、`before_append` で fsync してから置き換え、dir も同期する
+/// (書きかけの一覧を残さない)。置き換えなかったときは、自分が作った一時ファイルだけが消える。
+/// 食い違いが 0 件でもヘッダだけの一覧を書く。
+struct ConflictTsv {
+    path: PathBuf,
+    dir: PathBuf,
+    tmp: Option<std::io::BufWriter<tempfile::NamedTempFile>>,
+}
+
+impl ConflictTsv {
+    fn create(path: &Path) -> Result<Self> {
+        use std::io::Write;
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let mut tmp = std::io::BufWriter::new(tempfile::NamedTempFile::new_in(&dir)?);
+        tmp.write_all(CONFLICT_HEADER.as_bytes())?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            dir,
+            tmp: Some(tmp),
+        })
     }
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    // 一時ファイルは同じ dir に一意な名前で作り、置き換えなかったときは自分が作ったものだけが消える。
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-    tmp.write_all(body.as_bytes())?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    std::fs::File::open(&dir)?.sync_all()?;
-    Ok(())
+}
+
+impl ConflictSink for ConflictTsv {
+    fn conflict(&mut self, existing: &Reading, incoming: &Reading, provenance: &str) -> Result<()> {
+        use std::io::Write;
+        let fields = [
+            escape_tsv(&incoming.key),
+            incoming.ply.to_string(),
+            escape_tsv(&existing.bestmove),
+            first_cp(existing),
+            escape_tsv(&incoming.bestmove),
+            first_cp(incoming),
+            escape_tsv(provenance),
+        ];
+        let tmp = self.tmp.as_mut().context("食い違いの一覧はもう置き換えました")?;
+        writeln!(tmp, "{}", fields.join("\t"))?;
+        Ok(())
+    }
+
+    fn before_append(&mut self) -> Result<()> {
+        let tmp = self.tmp.take().context("食い違いの一覧はもう置き換えました")?;
+        let tmp = tmp.into_inner().map_err(|e| e.into_error())?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.path).map_err(|e| e.error)?;
+        crate::common::io::sync_directory(&self.dir)
+            .with_context(|| format!("{} を置き換えた dir を同期できません", self.path.display()))
+    }
 }
 
 #[cfg(test)]
@@ -513,8 +538,9 @@ mod tests {
         let mut journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
         let incoming: Vec<_> =
             source.readings.iter().map(|r| (r.clone(), "copied".to_owned())).collect();
-        let (appended, skipped, _) =
-            journal.merge_all(incoming, &dst, OnConflict::Reject, |_| Ok(())).unwrap();
+        let (appended, skipped, _) = journal
+            .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+            .unwrap();
         assert_eq!((appended, skipped), (1, 1));
         drop(journal);
 
@@ -525,7 +551,11 @@ mod tests {
         changed.bestmove = "win".into();
         conflicting.tag = "new".into();
         let incoming = vec![(conflicting, "copied".into()), (changed, "copied".into())];
-        assert!(journal.merge_all(incoming, &dst, OnConflict::Reject, |_| Ok(())).is_err());
+        assert!(
+            journal
+                .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+                .is_err()
+        );
         assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), size);
         drop(journal);
         let journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
@@ -559,27 +589,34 @@ mod tests {
             (reading(2, &dst, "resign"), "new".to_owned()),
         ];
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
-        let (appended, skipped, conflicts) =
-            journal.merge_all(incoming, &dst, OnConflict::KeepExisting, |_| Ok(())).unwrap();
-        assert_eq!((appended, skipped), (2, 3));
-        let listed: Vec<_> = conflicts
-            .iter()
-            .map(|c| {
-                (
-                    c.existing.bestmove.as_str(),
-                    c.incoming.bestmove.as_str(),
-                    c.provenance.as_str(),
-                )
-            })
-            .collect();
-        assert_eq!(listed, [("resign", "win", "from-b"), ("resign", "win", "second")]);
+        let mut listed = Listed::default();
+        let (appended, skipped, conflicts) = journal
+            .merge_all(incoming, &dst, OnConflict::KeepExisting, &mut listed)
+            .unwrap();
+        assert_eq!((appended, skipped, conflicts), (2, 3, 2));
+        assert_eq!(
+            listed.rows,
+            [
+                ("resign".to_owned(), "win".to_owned(), "from-b".to_owned()),
+                ("resign".to_owned(), "win".to_owned(), "second".to_owned())
+            ]
+        );
+        assert!(listed.published);
         drop(journal);
         let size = std::fs::metadata(&path).unwrap().len();
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
         let failing = vec![(reading(3, &dst, "resign"), "hook".to_owned())];
         assert!(
             journal
-                .merge_all(failing, &dst, OnConflict::KeepExisting, |_| bail!("一覧を書けない"))
+                .merge_all(
+                    failing,
+                    &dst,
+                    OnConflict::KeepExisting,
+                    &mut Listed {
+                        fail: true,
+                        ..Default::default()
+                    }
+                )
                 .is_err()
         );
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
@@ -592,13 +629,50 @@ mod tests {
         }
 
         let out = dir.path().join("conflicts.tsv");
-        write_conflicts(&out, &conflicts).unwrap();
+        let mut tsv = ConflictTsv::create(&out).unwrap();
+        let (kept, dropped) = (reading(0, &dst, "resign"), reading(0, &dst, "win"));
+        tsv.conflict(&kept, &dropped, "a\tb").unwrap();
+        assert!(!out.exists());
+        tsv.before_append().unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(text.lines().count(), 3);
+        assert_eq!(text.lines().count(), 2);
         assert!(text.starts_with(CONFLICT_HEADER));
-        assert!(text.lines().nth(2).unwrap().ends_with("\tsecond"));
-        write_conflicts(&out, &[]).unwrap();
+        assert!(text.lines().nth(1).unwrap().ends_with("\tresign\t\twin\t\ta\\tb"), "{text}");
+        let mut empty = ConflictTsv::create(&out).unwrap();
+        empty.before_append().unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), CONFLICT_HEADER);
+    }
+
+    /// 食い違いを覚えておく受け取り先。`fail` なら追記の前に失敗する。
+    #[derive(Default)]
+    struct Listed {
+        rows: Vec<(String, String, String)>,
+        published: bool,
+        fail: bool,
+    }
+
+    impl ConflictSink for Listed {
+        fn conflict(
+            &mut self,
+            existing: &Reading,
+            incoming: &Reading,
+            provenance: &str,
+        ) -> Result<()> {
+            self.rows.push((
+                existing.bestmove.clone(),
+                incoming.bestmove.clone(),
+                provenance.to_owned(),
+            ));
+            Ok(())
+        }
+
+        fn before_append(&mut self) -> Result<()> {
+            if self.fail {
+                bail!("一覧を書けない");
+            }
+            self.published = true;
+            Ok(())
+        }
     }
 
     #[test]
