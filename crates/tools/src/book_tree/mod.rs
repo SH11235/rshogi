@@ -21,6 +21,8 @@ mod rejoin;
 mod reply_graph;
 mod schema;
 mod service;
+#[cfg(test)]
+mod simulation;
 mod targets;
 #[cfg(test)]
 mod tests;

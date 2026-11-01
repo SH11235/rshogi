@@ -1152,3 +1152,205 @@ fn registration_fingerprint_requires_uniform_reading_provenance() {
         assert!(status.get("ready").is_some() && status.get("unresolved").is_some());
     }
 }
+
+#[test]
+fn simulation_serial_bound_and_completion_order_preserve_tree() {
+    use super::simulation::{Sample, Timing, preflight, simulate};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let def = definition(dir.path(), 3);
+    let cache = corpus(&settings);
+    let mut expected = Tree::load(def.clone(), &settings).unwrap();
+    assert!(expected.advance(&cache).unwrap().is_empty());
+    assert!(expected.finished && !expected.force.is_empty());
+    let lines = std::fs::read_to_string(&def.paths)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let cols: Vec<_> = line.split('\t').collect();
+            (
+                cols[0].into(),
+                cols[1].parse().unwrap(),
+                cols[2].split_whitespace().map(str::to_owned).collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for reversed in [false, true] {
+        let mut answers = cache.clone();
+        let len = answers.len();
+        for (i, reading) in answers.values_mut().enumerate() {
+            reading.sec = if reversed { len - i } else { i + 1 } as f64;
+        }
+        let mut sample = Sample {
+            params: def.params(),
+            lines: lines.clone(),
+            answers: Arc::new(answers),
+            requested: BTreeSet::new(),
+            fingerprint: "condition-a".into(),
+            priority: 100,
+            order: 0,
+        };
+        preflight(&mut sample).unwrap();
+        for workers in [1, 4] {
+            for timing in [Timing::Maximum, Timing::Mean] {
+                let result = simulate(&[&sample], workers, timing).unwrap();
+                assert!(result.elapsed + 1e-9 >= result.lower);
+                if workers == 1 {
+                    let sum = match timing {
+                        Timing::Maximum => {
+                            expected.nodes.keys().map(|key| sample.answers[key].sec).sum::<f64>()
+                        }
+                        Timing::Mean => {
+                            sample.requested.iter().map(|key| sample.answers[key].sec).sum::<f64>()
+                                / sample.requested.len() as f64
+                                * expected.nodes.len() as f64
+                        }
+                    };
+                    assert!((result.elapsed - sum).abs() < 1e-9);
+                    assert!((result.elapsed - result.lower).abs() < 1e-9);
+                    assert!(result.utilization.iter().all(|u| (u - 1.0).abs() < 1e-9));
+                }
+                let actual = &result.trees[0];
+                assert_eq!(
+                    actual.nodes.keys().collect::<Vec<_>>(),
+                    expected.nodes.keys().collect::<Vec<_>>()
+                );
+                for (key, reading) in &actual.nodes {
+                    assert_eq!(
+                        serde_json::to_value(reading).unwrap(),
+                        serde_json::to_value(&sample.answers[key]).unwrap()
+                    );
+                }
+                assert_eq!(actual.edge, expected.edge);
+                assert_eq!(actual.force, expected.force);
+                assert_eq!(result.count, actual.nodes.len());
+            }
+        }
+    }
+}
+
+#[test]
+fn simulation_shared_keys_use_each_trees_answers_and_maximum_duration() {
+    use super::simulation::{Sample, Timing, preflight, simulate};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let mut params = definition(dir.path(), 0).params();
+    params.depth = 0;
+    let mut a = reading(ROOT, &[("5i5h", 30)], &settings);
+    a.sec = 2.0;
+    let mut b = reading(ROOT, &[("5i4i", 90)], &settings);
+    b.sec = 5.0;
+    let samples: Vec<_> = [a, b]
+        .into_iter()
+        .enumerate()
+        .map(|(i, answer)| {
+            let mut sample = Sample {
+                params: params.clone(),
+                lines: vec![(ROOT.into(), 1, vec![])],
+                answers: Arc::new(BTreeMap::from([(ROOT.into(), answer)])),
+                requested: BTreeSet::new(),
+                fingerprint: format!("condition-{i}"),
+                priority: 100,
+                order: i as u64,
+            };
+            preflight(&mut sample).unwrap();
+            sample
+        })
+        .collect();
+    for selected in [[&samples[0], &samples[1]], [&samples[1], &samples[0]]] {
+        let result = simulate(&selected, 2, Timing::Maximum).unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.elapsed, 5.0);
+        assert_eq!(result.lower, 2.5);
+        assert_eq!(result.mixed, 1);
+        let mean = simulate(&selected, 2, Timing::Mean).unwrap();
+        assert_eq!(mean.elapsed, 5.0);
+        assert_eq!(mean.lower, 5.0);
+        for (tree, sample) in result.trees.iter().zip(selected) {
+            assert_eq!(
+                serde_json::to_value(&tree.nodes[ROOT]).unwrap(),
+                serde_json::to_value(&sample.answers[ROOT]).unwrap()
+            );
+        }
+    }
+    let absent = Sample {
+        answers: Arc::new(BTreeMap::new()),
+        ..samples.into_iter().next().unwrap()
+    };
+    assert!(simulate(&[&absent], 2, Timing::Maximum).is_err());
+    assert!(simulate(&[], 0, Timing::Maximum).is_err());
+}
+
+#[test]
+fn simulation_later_demand_waits_for_busy_key_and_ignores_unused_answers() {
+    use super::simulation::{Sample, Timing, preflight, simulate};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let shared = child(ROOT, "5i5h").unwrap();
+    let mut root_answer = reading(ROOT, &[("5i5h", 30)], &settings);
+    root_answer.sec = 1.0;
+    let mut shared_answer = reading(&shared, &[("5a5b", 30)], &settings);
+    shared_answer.sec = 5.0;
+    let mut params = definition(dir.path(), 0).params();
+    params.depth = 0;
+    params.extra.clear();
+    params.own = "w".into();
+    let mut unused_root = root_answer.clone();
+    unused_root.sec = 100.0;
+    let unused_key = child(ROOT, "5i4i").unwrap();
+    let mut unused_answer = reading(&unused_key, &[("5a5b", 30)], &settings);
+    unused_answer.sec = 1000.0;
+    let mut first = Sample {
+        params: params.clone(),
+        lines: vec![(shared.clone(), 2, vec![])],
+        answers: Arc::new(BTreeMap::from([
+            (shared.clone(), shared_answer.clone()),
+            (ROOT.into(), unused_root),
+            (unused_key.clone(), unused_answer),
+        ])),
+        requested: BTreeSet::new(),
+        fingerprint: "first".into(),
+        priority: 100,
+        order: 0,
+    };
+    params.depth = 1;
+    shared_answer.sec = 2.0;
+    let mut second = Sample {
+        params,
+        lines: vec![(ROOT.into(), 1, vec![])],
+        answers: Arc::new(BTreeMap::from([
+            (ROOT.into(), root_answer),
+            (shared.clone(), shared_answer),
+        ])),
+        requested: BTreeSet::new(),
+        fingerprint: "second".into(),
+        priority: 100,
+        order: 1,
+    };
+    preflight(&mut first).unwrap();
+    preflight(&mut second).unwrap();
+    assert_eq!(first.requested, BTreeSet::from([shared.clone()]));
+    assert_eq!(second.requested, BTreeSet::from([ROOT.into(), shared.clone()]));
+    for selected in [[&first, &second], [&second, &first]] {
+        let result = simulate(&selected, 2, Timing::Maximum).unwrap();
+        assert_eq!(result.elapsed, 5.0);
+        assert_eq!(result.lower, 3.0);
+        assert_eq!(result.count, 2);
+        assert_eq!(result.mixed, 1);
+        assert!((result.utilization.iter().sum::<f64>() / 20.0 - 0.6).abs() < 1e-9);
+        for (tree, sample) in result.trees.iter().zip(selected) {
+            assert_eq!(tree.nodes.keys().cloned().collect::<BTreeSet<_>>(), sample.requested);
+            assert_eq!(tree.nodes[&shared].sec, sample.answers[&shared].sec);
+        }
+        let mean = simulate(&selected, 2, Timing::Mean).unwrap();
+        assert_eq!(mean.elapsed, 3.0);
+        assert_eq!(mean.lower, 3.0);
+        assert_eq!(mean.count, 2);
+    }
+}

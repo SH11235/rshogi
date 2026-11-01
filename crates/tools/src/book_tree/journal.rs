@@ -553,6 +553,49 @@ pub(super) fn read_source(
     })
 }
 
+#[cfg(test)]
+pub(super) fn simulation_readings(
+    path: &Path,
+    fingerprint: &str,
+) -> Result<BTreeMap<String, Reading>> {
+    let file = File::open(path)?;
+    // 追記中の台帳でも、読み始めの範囲の確定行だけを使えば書き手を止めずに再生できる。
+    let limit = file.metadata()?.len();
+    let mut settings: Option<Settings> = None;
+    let mut records: BTreeMap<String, Reading> = BTreeMap::new();
+    for_each_complete_line(
+        &mut BufReader::new(file.take(limit)),
+        limit,
+        |bytes| {
+            let rec = parse_record(bytes)?;
+            if rec.settings.fingerprint != fingerprint {
+                return Ok(());
+            }
+            if rec.settings.computed_fingerprint()? != fingerprint {
+                bail!("台帳の指紋と条件が合いません");
+            }
+            let selected = settings.get_or_insert_with(|| rec.settings.clone());
+            if !selected.same_condition(&rec.settings) {
+                bail!("同じ指紋の条件が一致しません");
+            }
+            merge_engine_version(selected, &rec.settings)?;
+            rec.reading.validate(&rec.settings)?;
+            if let Some(old) = records.get(&rec.reading.key)
+                && !old.same_values(&rec.reading)
+            {
+                bail!("台帳の重複が矛盾します: {}", rec.reading.key);
+            }
+            records.insert(rec.reading.key.clone(), rec.reading);
+            Ok(())
+        },
+        &mut false,
+    )?;
+    if settings.is_none() {
+        bail!("指紋が台帳にありません");
+    }
+    Ok(records)
+}
+
 fn for_each_complete_line(
     reader: &mut impl BufRead,
     limit: u64,
@@ -781,6 +824,30 @@ mod tests {
         assert!(match_fingerprint(&path, &[a.reading]).unwrap().is_none());
         let before = std::fs::read(&path).unwrap();
         assert!(match_fingerprint(&path, &[]).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn simulation_reads_locked_journal_and_preserves_unfinished_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut journal = Journal::open(&path, &rec.settings.fingerprint).unwrap();
+        journal.append(rec.reading.clone(), &rec.settings, "fixture".into()).unwrap();
+        let mut other = record("", 1);
+        other.settings.engine_sha256 = "other".into();
+        other.settings.fingerprint = other.settings.computed_fingerprint().unwrap();
+        write_record(&mut journal.lock.0, &other);
+        journal.lock.0.write_all(b"{").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let readings = simulation_readings(&path, &rec.settings.fingerprint).unwrap();
+        assert_eq!(readings.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&readings[&rec.reading.key]).unwrap(),
+            serde_json::to_value(&rec.reading).unwrap()
+        );
+        assert!(simulation_readings(&path, "absent").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
