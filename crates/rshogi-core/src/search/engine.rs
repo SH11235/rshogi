@@ -1253,8 +1253,10 @@ impl Search {
                 .expect("worker should be initialized by search_with_callback");
             collect_best_thread_result(worker, pos, &limits, skill_enabled, &mut skill)
         } else {
-            // Native: Use helper_threads() to access Thread objects directly
-            #[cfg(not(target_arch = "wasm32"))]
+            // Native: Use helper_threads() to access Thread objects directly.
+            // Wasm without wasm-threads: helper_threads() is always empty, so this
+            // yields None and the main worker result below is used.
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm-threads")))]
             let result = {
                 let mut result = None;
                 for thread in self.thread_pool.helper_threads() {
@@ -1318,10 +1320,6 @@ impl Search {
                     }
                 })
             };
-
-            // Wasm without wasm-threads: Always use main thread
-            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-            let result: Option<BestThreadResult> = None;
 
             result.unwrap_or_else(|| {
                 let worker = self

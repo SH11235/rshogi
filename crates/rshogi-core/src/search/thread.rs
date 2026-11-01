@@ -642,6 +642,12 @@ mod imp {
         best_move_changes_bits: AtomicU64,
     }
 
+    impl Default for HelperProgress {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl HelperProgress {
         pub fn new() -> Self {
             Self {
