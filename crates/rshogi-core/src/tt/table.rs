@@ -60,6 +60,7 @@ struct ClusterTable {
 
 // SAFETY: 共有参照から更新する格納要素はすべてatomicで、読み取りは所有値に復号する。
 // 割当の解放・resize・clearは &mut self を要求し、借用中のprobe writerとは共存しない。
+// &self で全体を消す clear_in_place も atomic への store だけを行う。
 unsafe impl Sync for ClusterTable {}
 
 impl ClusterTable {
@@ -200,7 +201,12 @@ impl TranspositionTable {
     pub fn clear_in_place(&self, threads: usize) {
         self.generation8.store(0, Ordering::Relaxed);
         let table: &[Cluster] = &self.table;
-        let threads = threads.max(1);
+        // wasm32 の std はスレッドを生成できず scope.spawn が panic するので、逐次で消す
+        let threads = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            threads.max(1)
+        };
         if threads == 1 || table.len() < threads * 1024 {
             clear_clusters(table);
             return;
