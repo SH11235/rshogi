@@ -104,7 +104,6 @@ sudo perf report -i perf_reuse.data
 - `perf.data`と`perf_results/`は`.gitignore`に追加済み
 - 結果はシステム環境（CPU、OS）に依存する
 - 複数スクリプトの並列実行が可能（各スクリプトは別々の `perf_*.data` ファイルを使用）
-- 計測結果の分析ドキュメント: `docs/performance/README.md`
 
 ## wasm の計測
 
