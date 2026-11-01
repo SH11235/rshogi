@@ -40,7 +40,7 @@ use table::MateTable;
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::{Move, PieceType};
+use crate::types::{Hand, Move, PieceType};
 
 /// 詰み探索の結果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +316,134 @@ impl<'a> EffectsPaused<'a> {
 impl Drop for EffectsPaused<'_> {
     fn drop(&mut self) {
         self.0.pause_board_effects(false);
+    }
+}
+
+/// 変長駒余りの候補 ([`DfpnSolver::leftover_variations`])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftoverVariation {
+    /// 応手の手順上の位置 (0 始まりの添字。受け方の手)
+    pub ply: usize,
+    /// 手順の応手の代わりに指す応手
+    pub reply: Move,
+    /// この応手を指し、以後を詰将棋のルールの正解手順で進めたときの手順全体の手数
+    pub len: usize,
+}
+
+/// [`DfpnSolver::leftover_variations`] の結果
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftoverCheck {
+    pub variations: Vec<LeftoverVariation>,
+    /// 応手 1 つあたりの予算で調べきれなかった応手の数
+    pub unchecked: usize,
+}
+
+impl DfpnSolver {
+    /// 詰将棋のルール ([`ShortestMode::Tsume`]) の正解手順 `pv` が詰上りで攻め方の持駒が余るとき、変長駒余りの
+    /// 候補を探す: 手順上の受け方の局面で、手順の応手より短く詰むが、そこからの正解手順が駒余りなしで終わる
+    /// 無駄合いでない応手。駒余りなしで終わる手順は `pv` の確認だけで返す (候補を探さない)。
+    ///
+    /// 変長駒余りの慣習 (最長の手順が駒余りなら、駒余りの無い短い手順を作意とする) で答えが変わりうる所を
+    /// 示すもので、その慣習での正解手順の証明ではない (候補の先でさらに受け方が選び直す変化は調べない)。
+    /// 応手ごとに `nodes_per_reply` ノードで打ち切り、全体は `limits` と `stop` で打ち切る (打ち切ったら
+    /// そこまでの候補)。直前に同じ局面を解いた置換表を使うと速い。
+    pub fn leftover_variations(
+        &mut self,
+        pos: &mut Position,
+        pv: &[Move],
+        limits: &MateLimits,
+        nodes_per_reply: u64,
+        stop: &AtomicBool,
+    ) -> LeftoverCheck {
+        let us = pos.side_to_move();
+        let start = Instant::now();
+        let kingless = pos.pieces(us, PieceType::King).is_empty();
+        let paused = EffectsPaused::new(pos);
+        if kingless {
+            let mut st = NoAttackerKing::new(paused.0.clone());
+            self.leftover_in_mode(&mut st, pv, *limits, nodes_per_reply, start, stop)
+        } else {
+            self.leftover_in_mode(paused.0, pv, *limits, nodes_per_reply, start, stop)
+        }
+    }
+
+    fn leftover_in_mode<S: RootState>(
+        &mut self,
+        st: &mut S,
+        pv: &[Move],
+        limits: MateLimits,
+        nodes_per_reply: u64,
+        start: Instant,
+        stop: &AtomicBool,
+    ) -> LeftoverCheck {
+        match self.mode {
+            MateMode::Speed => {
+                self.leftover_with::<S, false>(st, pv, limits, nodes_per_reply, start, stop)
+            }
+            MateMode::Power => {
+                self.leftover_with::<S, true>(st, pv, limits, nodes_per_reply, start, stop)
+            }
+        }
+    }
+
+    fn leftover_with<S: RootState, const PIECES: bool>(
+        &mut self,
+        st: &mut S,
+        pv: &[Move],
+        limits: MateLimits,
+        nodes_per_reply: u64,
+        start: Instant,
+        stop: &AtomicBool,
+    ) -> LeftoverCheck {
+        let attacker = st.position().side_to_move();
+        for &mv in pv {
+            st.do_move(mv);
+        }
+        let clean = st.position().hand(attacker) == Hand::EMPTY;
+        for &mv in pv.iter().rev() {
+            st.undo_move(mv);
+        }
+        if clean {
+            return LeftoverCheck::default();
+        }
+        let mut quiet = |_| {};
+        let budget = Budget {
+            stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: limits.nodes,
+            time_limit_ms: limits.time_ms,
+            start,
+            progress: &mut quiet,
+        };
+        self.helper_scratch.resize_with(self.threads - 1, Scratch::new);
+        self.table.set_concurrent(self.threads > 1);
+        let mut searcher =
+            Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
+        configure(&mut searcher, self.mode);
+        searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
+        let mut check = LeftoverCheck::default();
+        if let Ok((found, unchecked)) = shortest::leftover_variations(
+            &mut searcher,
+            st,
+            &self.shortest_tables,
+            pv,
+            nodes_per_reply,
+        ) {
+            check.unchecked = unchecked;
+            check.variations = found
+                .into_iter()
+                .map(|(ply, reply, len)| LeftoverVariation {
+                    ply,
+                    reply,
+                    len: usize::from(len),
+                })
+                .collect();
+        }
+        self.nodes = searcher.nodes();
+        self.table.set_concurrent(false);
+        check
     }
 }
 

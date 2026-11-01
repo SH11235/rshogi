@@ -914,3 +914,47 @@ fn estimate_mode_finds_zukou_001_intended_length() {
         }
     }
 }
+
+/// 正解手順 (5 手) は駒余りで終わるが、2 手目に別の応手を選ぶと 3 手で駒余りなしに詰む (変長駒余りの候補)
+#[test]
+fn leftover_variations_find_shorter_clean_lines() {
+    let sfen = "9/5k3/6Ps1/6G2/9/9/9/9/8K b 2G 1";
+    let mut pos = position(sfen);
+    pos.clear_checkers_without_king();
+    let attacker = pos.side_to_move();
+    assert_eq!(ref_len(&mut pos, 5), Some(5));
+    assert!(!ref_clean(&mut pos, 5, true, attacker));
+    for mode in MateMode::ALL {
+        let stop = AtomicBool::new(false);
+        let limits = MateLimits {
+            nodes: 2_000_000,
+            time_ms: 0,
+        };
+        let mut solver = DfpnSolver::with_mode(16, mode);
+        solver.set_shortest(Some(ShortestMode::Tsume));
+        let mut pos = position(sfen);
+        let MateResult::Mate(pv) = solver.solve(&mut pos, &limits, &stop, |_| {}) else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(pv.len(), 5, "{mode:?}: {}", pv_usi(&pv));
+        let check = solver.leftover_variations(&mut pos, &pv, &limits, 100_000, &stop);
+        assert_eq!(check.unchecked, 0, "{mode:?}");
+        assert!(!check.variations.is_empty(), "{mode:?}: {}", pv_usi(&pv));
+        for v in &check.variations {
+            assert_eq!((v.ply, v.len), (1, 3), "{mode:?}: {v:?}");
+            let mut line = position(sfen);
+            line.clear_checkers_without_king();
+            line.do_move_with_missing_kings(pv[0]);
+            assert!(!ref_is_futile(&mut line, v.reply, 4), "{mode:?}: {v:?}");
+            line.do_move_with_missing_kings(v.reply);
+            assert!(ref_clean(&mut line, 1, true, attacker), "{mode:?}: {v:?}");
+        }
+        // 駒余りなしで終わる手順には候補を探さない
+        let mut clean = position("4k4/9/4P4/9/9/9/9/9/9 b G 1");
+        let MateResult::Mate(pv) = solver.solve(&mut clean, &limits, &stop, |_| {}) else {
+            panic!("{mode:?}");
+        };
+        let check = solver.leftover_variations(&mut clean, &pv, &limits, 100_000, &stop);
+        assert_eq!(check, LeftoverCheck::default(), "{mode:?}");
+    }
+}
