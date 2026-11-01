@@ -48,7 +48,14 @@ target/release/rescore_psv \
   モードは CUDA EP より遅い）。
 - `--onnx-tensorrt-cache`: **実質必須**。初回にその GPU 向けエンジンをビルドして
   保存し（数十秒〜数分）、2 回目以降は再利用する。未指定だと毎回ビルドし直す。
-  キャッシュは GPU アーキ固有で、GPU を変えたら自動で再ビルドされる。
+  キャッシュは GPU アーキ固有で、GPU を変えたら自動で再ビルドされる。最後の端数
+  バッチも `--onnx-batch-size` 行に埋めて推論するので、入力ファイルの件数によって
+  エンジンを作り直すことはない（`--onnx-batch-size` を変えた最初の実行では、キャッシュの
+  入力形の範囲を広げるために 1 回作り直す）。
+  **キャッシュはモデルの重みを見ない**（モデルのファイル名と、グラフの入出力・ノードの
+  名前などで引き当てる）。モデルごとに別のディレクトリを指定し、モデルを置き換えたら
+  `*.engine` と `*.profile` を消す（そのキャッシュを使う実行が止まっているときに）。残すと、
+  重みだけが違うモデルでは古いモデルから作ったエンジンで推論する。
 - `--onnx-eval-scale 600`: 勝率→cp 変換スケール。dlshogi 系の標準値。
 - 長時間ジョブは `nohup` / `tmux` で流しっぱなしにする（非 TTY では自動で
   grep しやすいログ行形式になる）。
@@ -212,7 +219,7 @@ preset に足すときは、tools の `layerstack-arch` と、preset と同じ�
 | `--expand-threshold` | 10.0 | 展開する softmax 確率閾値 %（`(0, 100]`） |
 | `--expand-skip-parent-in-check` | false | 親局面が王手なら expand をスキップ（rescore 側は `--skip-in-check` で別制御） |
 | `--expand-skip-child-in-check` | false | 展開した子局面が王手なら expand 出力をスキップ |
-| `--ort-profile` | — | ORT profiling 出力先ディレクトリ（`session.run()` の内訳を JSON 出力、開発用） |
+| `--ort-profile` | — | ORT profiling 出力先ディレクトリ（1 本目のセッションの `session.run()` の内訳を、実行全体で JSON 1 つに出力。開発用。ORT は記録を 100 万件で打ち切り、エラーで終わった実行では JSON を書かない） |
 | `--qsearch-leaf-label` | false | ラベルのみ葉評価にする（`--nnue` 併用必須、レシピ参照） |
 | `--qsearch-leaf-replacement-output` | — | 葉置換 arm の同時出力先（レシピ参照） |
 
@@ -268,7 +275,20 @@ preset に足すときは、tools の `layerstack-arch` と、preset と同じ�
 数十〜数百 shard を逐次処理し、中断・設定変更があっても再開できる。クイック
 スタートのコマンドがそのままこの形（`--input "data/shard_*.bin"`）。
 `nohup` / `tmux` で流しっぱなしにしておき、GPU 温度で止めた後の再開や、モデル
-差し替え時の一括再スコアに使える。
+差し替え時の一括再スコアに使える（TensorRT では、モデルを差し替えたらエンジンキャッシュも
+消す。クイックスタートの `--onnx-tensorrt-cache` の説明を参照）。
+
+ONNX モードでは、セッション（TensorRT ではモデルの解析とエンジンの読み込み）と入力
+バッファを最初に処理するファイルで作り、残りのファイルで使い回す。小さいファイルが
+多いときは、ファイルごとに `rescore_psv` を起動するより 1 回の実行にまとめて渡す方が
+速い。数百個のパスを並べると Windows のコマンドラインの長さの上限（32,767 文字）を
+超えうるので、glob で渡す（引用符で囲んで shell に展開させない）。実行中にモデル
+ファイルが置き換わるとエラーで止まる（処理中だったファイルは `Ctrl-C` で打ち切った場合も含めて出力を空にし、次の実行で
+作り直す。TensorRT では再実行の前にエンジンキャッシュを消す）。ただし処理の終わりに
+モデルのファイルが無い（消してから置き直す途中など）と、出力を空にできずに止まる。その
+ときは処理中だったファイルの出力を消してから再実行する。置き換えの判定は
+モデルの本体ファイルのパス・サイズ・mtime で行う（完了マーカーも同じ）ので、外部
+データ（`.onnx.data`）だけを置き換えた場合は検出しない。
 
 ### score sidecar 出力（`--out-scores`）
 
@@ -437,9 +457,11 @@ LayerStacks NNUE では `--ls-bucket-mode` が必須です。`progresskpabs` は
 
 - 全モードでピークメモリは入力件数に非依存（NNUE / 探索 / 外部エンジンは
   100 万件チャンク、ONNX はバッチ単位の固定 slot パイプライン）。
-- **ONNX モード**: 出力は `--onnx-sessions` / `--threads` に依存せず bit 一致。
-  TensorRT は同一エンジンキャッシュ（warm）での実行が bit 再現の基準（cold の
-  初回ビルドでは最下位 bit が変わりうる）。
+- **ONNX モード**: 出力は `--onnx-sessions` / `--threads` に依存せず bit 一致。1 回の
+  実行に渡すファイルの分け方にも依存しない（CPU EP と、DL水匠・ONNX Runtime 1.24.2・
+  TensorRT 10.16 FP16・RTX 3080 Ti の CUDA / TensorRT EP で確認）。TensorRT は
+  同一エンジンキャッシュ（warm）での実行が bit 再現の基準（cold の初回ビルドや、エンジンを
+  作り直した後では最下位 bit が変わりうる）。
 - **`--search-depth`**: 出力は `--threads` に依存せず bit 一致する（探索状態を 256 局面の塊
   ごとに初期化するため。後述「探索モードの並列化」）。`--hash-mb`・深さ・`--max-nodes` を
   変えると出力も変わる。`--max-time` は時間で打ち切るため再現しない。
