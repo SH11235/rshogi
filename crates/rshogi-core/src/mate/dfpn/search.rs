@@ -1216,7 +1216,6 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         Ok(())
     }
 
-    /// 子 `index` の合駒 `drop` が無駄合いなら印を付ける
     fn mark_futile_drop(
         &mut self,
         st: &mut S,
