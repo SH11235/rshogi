@@ -411,13 +411,15 @@ impl Journal {
     }
 
     /// 全件を検査してから追記し、拒否時には台帳を変更しない。値の同じ重複は飛ばし、値の違う重複は `on_conflict` に従う。
-    /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込み元の先の行) を残して食い違いとして返す。
+    /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込みの先の行) を残して食い違いとして返す。
+    /// `before_append` は検査の後・追記の前に食い違いを受け取り、失敗すれば台帳を変えずに失敗する。
     /// (追記した件数, 飛ばした件数, 食い違い) を返す。飛ばした件数は食い違いを含む。
     pub fn merge_all(
         &mut self,
         incoming: Vec<(Reading, String)>,
         settings: &Settings,
         on_conflict: OnConflict,
+        before_append: impl FnOnce(&[Conflict]) -> Result<()>,
     ) -> Result<(usize, usize, Vec<Conflict>)> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と取り込みの条件が違います");
@@ -448,6 +450,7 @@ impl Journal {
             }
             pending.insert(reading.key.clone(), (reading, provenance));
         }
+        before_append(&conflicts)?;
         let mut appended = 0;
         for (reading, provenance) in pending.into_values() {
             if !self.records.contains_key(&reading.key) {

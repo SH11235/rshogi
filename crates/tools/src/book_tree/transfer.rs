@@ -28,10 +28,10 @@ pub(super) struct ImportJournalArgs {
     /// エンジンの版が違う・分からない読みも取り込む (探索の結果を変えない変更だけの版どうしで使う)
     #[arg(long)]
     force: bool,
-    /// 値の違う重複の扱い。keep-existing は取り込み先の値 (取り込み元の中なら先の行) を残す
+    /// 取り込み先と値の違う重複の扱い。keep-existing は取り込み先の値を残す (取り込み元の中の食い違いは常に拒否)
     #[arg(long, value_enum, default_value_t = OnConflict::Reject)]
     on_conflict: OnConflict,
-    /// keep-existing で残さなかった読みの一覧 (TSV) の書き出し先。keep-existing では必須
+    /// keep-existing で残さなかった読みの一覧 (TSV) の書き出し先。keep-existing でだけ使い、必須
     #[arg(long)]
     conflicts_out: Option<PathBuf>,
 }
@@ -169,8 +169,21 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
 }
 
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
-    if args.on_conflict == OnConflict::KeepExisting && args.conflicts_out.is_none() {
-        bail!("--on-conflict keep-existing には --conflicts-out が要ります");
+    match (args.on_conflict, &args.conflicts_out) {
+        (OnConflict::KeepExisting, None) => {
+            bail!("--on-conflict keep-existing には --conflicts-out が要ります")
+        }
+        (OnConflict::Reject, Some(_)) => {
+            bail!("--conflicts-out は --on-conflict keep-existing でだけ使えます")
+        }
+        _ => {}
+    }
+    if let Some(out) = &args.conflicts_out {
+        for journal in [&args.journal, &args.from_journal] {
+            if same_path(out, journal)? {
+                bail!("--conflicts-out が台帳 ({}) と同じです", journal.display());
+            }
+        }
     }
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
@@ -199,13 +212,20 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     );
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
     let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
-    let (appended, skipped, conflicts) = journal.merge_all(incoming, &dst, args.on_conflict)?;
-    if let Some(path) = &args.conflicts_out {
-        // 台帳へは追記済みなので、一覧を書けなければ件数だけは必ず出してから失敗する。
-        write_conflicts(path, &conflicts).with_context(|| {
-            format!("食い違い {} 件の一覧を {} に書けません", conflicts.len(), path.display())
+    // 一覧は台帳へ追記する前に書く。書けなければ台帳を変えずに失敗する。
+    let (appended, skipped, conflicts) =
+        journal.merge_all(incoming, &dst, args.on_conflict, |conflicts| {
+            match &args.conflicts_out {
+                Some(path) => write_conflicts(path, conflicts).with_context(|| {
+                    format!(
+                        "食い違い {} 件の一覧を {} に書けません",
+                        conflicts.len(),
+                        path.display()
+                    )
+                }),
+                None => Ok(()),
+            }
         })?;
-    }
     println!("fingerprint={}", dst.fingerprint);
     println!("source_fingerprint={}", source.settings.fingerprint);
     println!("appended={appended} skipped={skipped} conflicts={}", conflicts.len());
@@ -218,25 +238,70 @@ fn first_cp(reading: &super::journal::Reading) -> String {
     reading.lines().first().map(|pv| pv.cp.to_string()).unwrap_or_default()
 }
 
-/// 一時ファイルに書いてから置き換える (書きかけの一覧を残さない)。食い違いが 0 件でもヘッダだけの一覧を書く。
+/// 取り込み元のパスがタブ・改行を含んでも列と行が崩れないよう、`\` `\t` `\n` `\r` で書く。
+fn escape_tsv(field: &str) -> String {
+    field
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// 存在しないファイルは親の dir の実体とファイル名で、存在するファイルは実体で比べる。
+fn same_path(a: &Path, b: &Path) -> Result<bool> {
+    let resolve = |p: &Path| -> Result<PathBuf> {
+        if p.try_exists()? {
+            return Ok(std::fs::canonicalize(p)?);
+        }
+        let parent = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        let name = p.file_name().context("ファイル名がありません")?;
+        Ok(std::fs::canonicalize(parent)?.join(name))
+    };
+    if a.try_exists()? && b.try_exists()? && same_file::is_same_file(a, b)? {
+        return Ok(true);
+    }
+    Ok(resolve(a)? == resolve(b)?)
+}
+
+/// 同じ dir の一意な一時ファイルに書いて fsync してから置き換え、dir も fsync する
+/// (書きかけの一覧を残さず、別の取り込みと一時ファイルを取り合わない)。食い違いが 0 件でもヘッダだけの一覧を書く。
 fn write_conflicts(path: &Path, conflicts: &[Conflict]) -> Result<()> {
+    use std::io::Write;
     let mut body = String::from(CONFLICT_HEADER);
     for c in conflicts {
-        body.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            c.incoming.key,
-            c.incoming.ply,
-            c.existing.bestmove,
+        let fields = [
+            escape_tsv(&c.incoming.key),
+            c.incoming.ply.to_string(),
+            escape_tsv(&c.existing.bestmove),
             first_cp(&c.existing),
-            c.incoming.bestmove,
+            escape_tsv(&c.incoming.bestmove),
             first_cp(&c.incoming),
-            c.provenance
-        ));
+            escape_tsv(&c.provenance),
+        ];
+        body.push_str(&fields.join("\t"));
+        body.push('\n');
     }
-    let tmp = path.with_extension("tsv.part");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = path.file_name().context("--conflicts-out にファイル名がありません")?;
+    let tmp = dir.join(format!(".{}.{}.part", name.to_string_lossy(), std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(&dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -450,7 +515,9 @@ mod tests {
         let mut journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
         let incoming: Vec<_> =
             source.readings.iter().map(|r| (r.clone(), "copied".to_owned())).collect();
-        assert_eq!(journal.merge_all(incoming, &dst, OnConflict::Reject).unwrap().0, 1);
+        let (appended, skipped, _) =
+            journal.merge_all(incoming, &dst, OnConflict::Reject, |_| Ok(())).unwrap();
+        assert_eq!((appended, skipped), (1, 1));
         drop(journal);
 
         let mut conflicting = reading(3, &dst, "resign");
@@ -460,7 +527,7 @@ mod tests {
         changed.bestmove = "win".into();
         conflicting.tag = "new".into();
         let incoming = vec![(conflicting, "copied".into()), (changed, "copied".into())];
-        assert!(journal.merge_all(incoming, &dst, OnConflict::Reject).is_err());
+        assert!(journal.merge_all(incoming, &dst, OnConflict::Reject, |_| Ok(())).is_err());
         assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), size);
         drop(journal);
         let journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
@@ -495,7 +562,7 @@ mod tests {
         ];
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
         let (appended, skipped, conflicts) =
-            journal.merge_all(incoming, &dst, OnConflict::KeepExisting).unwrap();
+            journal.merge_all(incoming, &dst, OnConflict::KeepExisting, |_| Ok(())).unwrap();
         assert_eq!((appended, skipped), (2, 3));
         let listed: Vec<_> = conflicts
             .iter()
@@ -524,6 +591,66 @@ mod tests {
         assert!(text.lines().nth(2).unwrap().ends_with("\tsecond"));
         write_conflicts(&out, &[]).unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), CONFLICT_HEADER);
+    }
+
+    #[test]
+    fn keep_existing_on_the_command_writes_the_list_before_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "build a", "model");
+        let cond = settings(&m, None);
+        let src_path = dir.path().join("src.jsonl");
+        write_journal(
+            &src_path,
+            &[
+                (&cond, reading(0, &cond, "win")),
+                (&cond, reading(1, &cond, "resign")),
+            ],
+        );
+        let dst_path = dir.path().join("dst.jsonl");
+        write_journal(&dst_path, &[(&cond, reading(0, &cond, "resign"))]);
+        let before = std::fs::read(&dst_path).unwrap();
+        let args = |on_conflict, conflicts_out: Option<PathBuf>| ImportJournalArgs {
+            from_journal: src_path.clone(),
+            fingerprint: None,
+            journal: dst_path.clone(),
+            reading: reading_args(&m, 100, &["DrawValueBlack=-50"]),
+            force: false,
+            on_conflict,
+            conflicts_out,
+        };
+        let out = dir.path().join("conflicts.tsv");
+        assert!(run(args(OnConflict::Reject, None)).is_err());
+        assert!(run(args(OnConflict::KeepExisting, None)).is_err());
+        assert!(run(args(OnConflict::Reject, Some(out.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(dst_path.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(src_path.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(dir.path().join("none/c.tsv")))).is_err());
+        assert_eq!(std::fs::read(&dst_path).unwrap(), before);
+
+        run(args(OnConflict::KeepExisting, Some(out.clone()))).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        let rows: Vec<_> = text.lines().skip(1).collect();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with(&format!("{}\t1\tresign\t", reading(0, &cond, "win").key)));
+        let journal = Journal::open(&dst_path, &cond.fingerprint).unwrap();
+        let get = |c| {
+            super::super::journal::Readings::get(&journal, &reading(c, &cond, "resign").key)
+                .cloned()
+        };
+        assert_eq!(get(0).unwrap().bestmove, "resign");
+        assert_eq!(get(1).unwrap().bestmove, "resign");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part"))
+        );
+    }
+
+    #[test]
+    fn conflict_fields_are_escaped() {
+        assert_eq!(escape_tsv("a\tb\nc\rd\\e"), "a\\tb\\nc\\rd\\\\e");
     }
 
     /// serve が書いた台帳の条件 (ファイルのパスだけ置き換えたもの) と、そのとき記録された指紋。
