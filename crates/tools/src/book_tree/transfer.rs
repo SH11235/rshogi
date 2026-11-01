@@ -1,8 +1,10 @@
 //! 別の台帳 (別マシンの台帳の複製など) の読みを、取り込み先の条件で台帳に足す。
 
 use super::ReadingArgs;
-use super::journal::{Journal, Settings, read_source};
-use anyhow::{Result, bail};
+use super::journal::{
+    ConflictSink, Journal, NoConflictList, OnConflict, Reading, Settings, read_source,
+};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,6 +30,12 @@ pub(super) struct ImportJournalArgs {
     /// エンジンの版が違う・分からない読みも取り込む (探索の結果を変えない変更だけの版どうしで使う)
     #[arg(long)]
     force: bool,
+    /// 取り込み先と値の違う重複の扱い。keep-existing は取り込み先の値を残す (取り込み元の中の食い違いは常に拒否)
+    #[arg(long, value_enum, default_value_t = OnConflict::Reject)]
+    on_conflict: OnConflict,
+    /// keep-existing で残さなかった読みの一覧 (TSV) の書き出し先。keep-existing でだけ使い、必須
+    #[arg(long)]
+    conflicts_out: Option<PathBuf>,
 }
 
 /// `--source-version` に答えるエンジンならソースの版を返す。答えなければ `None`。
@@ -163,6 +171,22 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
 }
 
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
+    match (args.on_conflict, &args.conflicts_out) {
+        (OnConflict::KeepExisting, None) => {
+            bail!("--on-conflict keep-existing には --conflicts-out が要ります")
+        }
+        (OnConflict::Reject, Some(_)) => {
+            bail!("--conflicts-out は --on-conflict keep-existing でだけ使えます")
+        }
+        _ => {}
+    }
+    if let Some(out) = &args.conflicts_out {
+        for journal in [&args.journal, &args.from_journal] {
+            if same_path(out, journal)? {
+                bail!("--conflicts-out が台帳 ({}) と同じです", journal.display());
+            }
+        }
+    }
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
     warn_unknown_version(&args.reading.engine, &dst.engine_version);
@@ -188,13 +212,119 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
         forced.is_some(),
         args.from_journal.display()
     );
+    // 一覧の一時ファイルは台帳を開く前に作り、検査しながら書く。公開は読みを追記する前に行い、
+    // 書けなければ読みを追記せずに失敗する (末尾の書きかけの行の切り詰めは、台帳を開くときに行う)。
+    let mut list = match &args.conflicts_out {
+        Some(path) => Some(
+            ConflictTsv::create(path)
+                .with_context(|| format!("食い違いの一覧を {} に作れません", path.display()))?,
+        ),
+        None => None,
+    };
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
     let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
-    let (appended, skipped) = journal.append_all(incoming, &dst)?;
+    let sink: &mut dyn ConflictSink = match &mut list {
+        Some(list) => list,
+        None => &mut NoConflictList,
+    };
+    let (appended, skipped, conflicts) =
+        journal.merge_all(incoming, &dst, args.on_conflict, sink)?;
     println!("fingerprint={}", dst.fingerprint);
     println!("source_fingerprint={}", source.settings.fingerprint);
-    println!("appended={appended} skipped={skipped}");
+    println!("appended={appended} skipped={skipped} conflicts={conflicts}");
     Ok(())
+}
+
+const CONFLICT_HEADER: &str = "key\tply\texisting_bestmove\texisting_cp\tincoming_bestmove\tincoming_cp\tincoming_provenance\n";
+
+fn first_cp(reading: &super::journal::Reading) -> String {
+    reading.lines().first().map(|pv| pv.cp.to_string()).unwrap_or_default()
+}
+
+/// 取り込み元のパスがタブ・改行を含んでも列と行が崩れないよう、`\` `\t` `\n` `\r` で書く。
+fn escape_tsv(field: &str) -> String {
+    field
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// 存在するファイルは実体で、存在しないファイルは一番近い存在する祖先の実体に残りの部分を足して比べる
+/// (取り込み先の台帳の dir はまだ無くてよい)。
+fn same_path(a: &Path, b: &Path) -> Result<bool> {
+    let resolve = |p: &Path| -> Result<PathBuf> {
+        let mut base = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(p)
+        };
+        let mut rest = Vec::new();
+        while !base.try_exists()? {
+            rest.push(base.file_name().context("パスを解決できません")?.to_owned());
+            base = base.parent().context("パスを解決できません")?.to_path_buf();
+        }
+        let mut resolved = std::fs::canonicalize(&base)?;
+        resolved.extend(rest.iter().rev());
+        Ok(resolved)
+    };
+    if a.try_exists()? && b.try_exists()? && same_file::is_same_file(a, b)? {
+        return Ok(true);
+    }
+    Ok(resolve(a)? == resolve(b)?)
+}
+
+/// 食い違いの一覧。同じ dir の一時ファイルに 1 行ずつ書き、`before_append` で fsync してから置き換え、dir も同期する
+/// (書きかけの一覧を残さない)。置き換えなかったときは、自分が作った一時ファイルだけが消える。
+/// 食い違いが 0 件でもヘッダだけの一覧を書く。
+struct ConflictTsv {
+    path: PathBuf,
+    dir: PathBuf,
+    tmp: Option<std::io::BufWriter<tempfile::NamedTempFile>>,
+}
+
+impl ConflictTsv {
+    fn create(path: &Path) -> Result<Self> {
+        use std::io::Write;
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let mut tmp = std::io::BufWriter::new(tempfile::NamedTempFile::new_in(&dir)?);
+        tmp.write_all(CONFLICT_HEADER.as_bytes())?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            dir,
+            tmp: Some(tmp),
+        })
+    }
+}
+
+impl ConflictSink for ConflictTsv {
+    fn conflict(&mut self, existing: &Reading, incoming: &Reading, provenance: &str) -> Result<()> {
+        use std::io::Write;
+        let fields = [
+            escape_tsv(&incoming.key),
+            incoming.ply.to_string(),
+            escape_tsv(&existing.bestmove),
+            first_cp(existing),
+            escape_tsv(&incoming.bestmove),
+            first_cp(incoming),
+            escape_tsv(provenance),
+        ];
+        let tmp = self.tmp.as_mut().context("食い違いの一覧はもう置き換えました")?;
+        writeln!(tmp, "{}", fields.join("\t"))?;
+        Ok(())
+    }
+
+    fn before_append(&mut self) -> Result<()> {
+        let tmp = self.tmp.take().context("食い違いの一覧はもう置き換えました")?;
+        let tmp = tmp.into_inner().map_err(|e| e.into_error())?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.path).map_err(|e| e.error)?;
+        crate::common::io::sync_directory(&self.dir)
+            .with_context(|| format!("{} を置き換えた dir を同期できません", self.path.display()))
+    }
 }
 
 #[cfg(test)]
@@ -408,7 +538,10 @@ mod tests {
         let mut journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
         let incoming: Vec<_> =
             source.readings.iter().map(|r| (r.clone(), "copied".to_owned())).collect();
-        assert_eq!(journal.append_all(incoming, &dst).unwrap(), (1, 1));
+        let (appended, skipped, _) = journal
+            .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+            .unwrap();
+        assert_eq!((appended, skipped), (1, 1));
         drop(journal);
 
         let mut conflicting = reading(3, &dst, "resign");
@@ -418,7 +551,11 @@ mod tests {
         changed.bestmove = "win".into();
         conflicting.tag = "new".into();
         let incoming = vec![(conflicting, "copied".into()), (changed, "copied".into())];
-        assert!(journal.append_all(incoming, &dst).is_err());
+        assert!(
+            journal
+                .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+                .is_err()
+        );
         assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), size);
         drop(journal);
         let journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
@@ -430,6 +567,178 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, BTreeMap::from([(0, true), (1, false), (2, true), (3, false)]));
+    }
+
+    #[test]
+    fn keep_existing_keeps_the_first_value_and_lists_every_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "build a", "model");
+        let dst = settings(&m, Some(VERSION_A));
+        let path = dir.path().join("dst.jsonl");
+        write_journal(&path, &[(&dst, reading(0, &dst, "resign"))]);
+        let mut changed = reading(0, &dst, "resign");
+        changed.bestmove = "win".into();
+        let first = reading(1, &dst, "resign");
+        let mut second = reading(1, &dst, "resign");
+        second.bestmove = "win".into();
+        let incoming = vec![
+            (changed, "from-b".to_owned()),
+            (reading(0, &dst, "resign"), "same".to_owned()),
+            (first, "first".to_owned()),
+            (second, "second".to_owned()),
+            (reading(2, &dst, "resign"), "new".to_owned()),
+        ];
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let mut listed = Listed::default();
+        let (appended, skipped, conflicts) = journal
+            .merge_all(incoming, &dst, OnConflict::KeepExisting, &mut listed)
+            .unwrap();
+        assert_eq!((appended, skipped, conflicts), (2, 3, 2));
+        assert_eq!(
+            listed.rows,
+            [
+                ("resign".to_owned(), "win".to_owned(), "from-b".to_owned()),
+                ("resign".to_owned(), "win".to_owned(), "second".to_owned())
+            ]
+        );
+        assert!(listed.published);
+        drop(journal);
+        let size = std::fs::metadata(&path).unwrap().len();
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let failing = vec![(reading(3, &dst, "resign"), "hook".to_owned())];
+        assert!(
+            journal
+                .merge_all(
+                    failing,
+                    &dst,
+                    OnConflict::KeepExisting,
+                    &mut Listed {
+                        fail: true,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        drop(journal);
+        let journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        for column in 0..3 {
+            let key = reading(column, &dst, "resign").key;
+            let kept = super::super::journal::Readings::get(&journal, &key).unwrap();
+            assert_eq!(kept.bestmove, "resign");
+        }
+
+        let out = dir.path().join("conflicts.tsv");
+        let mut tsv = ConflictTsv::create(&out).unwrap();
+        let (kept, dropped) = (reading(0, &dst, "resign"), reading(0, &dst, "win"));
+        tsv.conflict(&kept, &dropped, "a\tb").unwrap();
+        assert!(!out.exists());
+        tsv.before_append().unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.starts_with(CONFLICT_HEADER));
+        assert!(text.lines().nth(1).unwrap().ends_with("\tresign\t\twin\t\ta\\tb"), "{text}");
+        let mut empty = ConflictTsv::create(&out).unwrap();
+        empty.before_append().unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), CONFLICT_HEADER);
+    }
+
+    /// 食い違いを覚えておく受け取り先。`fail` なら追記の前に失敗する。
+    #[derive(Default)]
+    struct Listed {
+        rows: Vec<(String, String, String)>,
+        published: bool,
+        fail: bool,
+    }
+
+    impl ConflictSink for Listed {
+        fn conflict(
+            &mut self,
+            existing: &Reading,
+            incoming: &Reading,
+            provenance: &str,
+        ) -> Result<()> {
+            self.rows.push((
+                existing.bestmove.clone(),
+                incoming.bestmove.clone(),
+                provenance.to_owned(),
+            ));
+            Ok(())
+        }
+
+        fn before_append(&mut self) -> Result<()> {
+            if self.fail {
+                bail!("一覧を書けない");
+            }
+            self.published = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn keep_existing_on_the_command_writes_the_list_before_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "build a", "model");
+        let cond = settings(&m, None);
+        let src_path = dir.path().join("src.jsonl");
+        write_journal(
+            &src_path,
+            &[
+                (&cond, reading(0, &cond, "win")),
+                (&cond, reading(1, &cond, "resign")),
+            ],
+        );
+        let dst_path = dir.path().join("dst.jsonl");
+        write_journal(&dst_path, &[(&cond, reading(0, &cond, "resign"))]);
+        let before = std::fs::read(&dst_path).unwrap();
+        let args = |on_conflict, conflicts_out: Option<PathBuf>| ImportJournalArgs {
+            from_journal: src_path.clone(),
+            fingerprint: None,
+            journal: dst_path.clone(),
+            reading: reading_args(&m, 100, &["DrawValueBlack=-50"]),
+            force: false,
+            on_conflict,
+            conflicts_out,
+        };
+        let out = dir.path().join("conflicts.tsv");
+        assert!(run(args(OnConflict::Reject, None)).is_err());
+        assert!(run(args(OnConflict::KeepExisting, None)).is_err());
+        assert!(run(args(OnConflict::Reject, Some(out.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(dst_path.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(src_path.clone()))).is_err());
+        assert!(run(args(OnConflict::KeepExisting, Some(dir.path().join("none/c.tsv")))).is_err());
+        assert_eq!(std::fs::read(&dst_path).unwrap(), before);
+
+        run(args(OnConflict::KeepExisting, Some(out.clone()))).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        let rows: Vec<_> = text.lines().skip(1).collect();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with(&format!("{}\t1\tresign\t", reading(0, &cond, "win").key)));
+        let journal = Journal::open(&dst_path, &cond.fingerprint).unwrap();
+        let get = |c| {
+            super::super::journal::Readings::get(&journal, &reading(c, &cond, "resign").key)
+                .cloned()
+        };
+        assert_eq!(get(0).unwrap().bestmove, "resign");
+        assert_eq!(get(1).unwrap().bestmove, "resign");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.starts_with(".tmp")), "{names:?}");
+        drop(journal);
+
+        // 取り込み先の台帳の dir がまだ無くても、出力先との照合で失敗しない。
+        let fresh = dir.path().join("new-dir/dst.jsonl");
+        let mut fresh_args = args(OnConflict::KeepExisting, Some(dir.path().join("fresh.tsv")));
+        fresh_args.journal = fresh.clone();
+        run(fresh_args).unwrap();
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn conflict_fields_are_escaped() {
+        assert_eq!(escape_tsv("a\tb\nc\rd\\e"), "a\\tb\\nc\\rd\\\\e");
     }
 
     /// serve が書いた台帳の条件 (ファイルのパスだけ置き換えたもの) と、そのとき記録された指紋。
@@ -595,6 +904,8 @@ mod tests {
             journal: dst_path.clone(),
             reading: reading_args(&b, 100, &[]),
             force,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
         };
         assert!(run(args(false)).is_err());
         assert!(!dst_path.exists() || std::fs::metadata(&dst_path).unwrap().len() == 0);
