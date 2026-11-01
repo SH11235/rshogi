@@ -65,6 +65,43 @@ impl Collector {
     }
 }
 
+pub(super) struct Demand<'a> {
+    pub priority: u32,
+    pub order: u64,
+    pub missing: Vec<(String, usize)>,
+    pub ply: &'a BTreeMap<String, u32>,
+}
+
+/// 局面ごとに、それを求める木の (優先度, 受付順, 段) の最小を取る。
+pub(super) fn reading_queue<'a>(
+    demands: impl IntoIterator<Item = Demand<'a>>,
+    running: &BTreeSet<String>,
+) -> Vec<(String, u32)> {
+    let mut queued: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
+    for demand in demands {
+        for (key, depth) in demand.missing {
+            if running.contains(&key) {
+                continue;
+            }
+            let rank = (demand.priority, demand.order, depth, demand.ply[&key]);
+            queued
+                .entry(key)
+                .and_modify(|r| {
+                    // 同順位の手数は、先に走査した木のものを保つ。
+                    if (rank.0, rank.1, rank.2) < (r.0, r.1, r.2) {
+                        *r = rank;
+                    }
+                })
+                .or_insert(rank);
+        }
+    }
+    let mut queue: Vec<_> = queued.into_iter().collect();
+    queue.sort_by(|(ka, (pa, oa, da, _)), (kb, (pb, ob, db, _))| {
+        (pa, oa, da, ka).cmp(&(pb, ob, db, kb))
+    });
+    queue.into_iter().map(|(key, (_, _, _, ply))| (key, ply)).collect()
+}
+
 struct Job {
     key: String,
     ply: u32,
@@ -932,8 +969,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 .values()
                 .filter_map(|w| w.busy.as_ref().map(|(k, _)| k.clone()))
                 .collect();
-            // 局面ごとに、それを求める木の (優先度, 受付順, 段) の最小を取る。
-            let mut queued: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
+            let mut demands = Vec::new();
             for (target, live) in checkpoint.targets.iter().zip(lives.iter_mut()) {
                 let tree = &mut live.tree;
                 if !live.prepared || target.hold || tree.finished || tree.failed {
@@ -965,20 +1001,12 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 }
                             }
                         } else {
-                            for (key, depth) in missing {
-                                if running.contains(&key) {
-                                    continue;
-                                }
-                                let rank = (target.priority, target.order, depth, tree.ply[&key]);
-                                queued
-                                    .entry(key)
-                                    .and_modify(|r| {
-                                        if (rank.0, rank.1, rank.2) < (r.0, r.1, r.2) {
-                                            *r = rank;
-                                        }
-                                    })
-                                    .or_insert(rank);
-                            }
+                            demands.push(Demand {
+                                priority: target.priority,
+                                order: target.order,
+                                missing,
+                                ply: &tree.ply,
+                            });
                         }
                     }
                     Err(e) => {
@@ -989,15 +1017,12 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     }
                 }
             }
-            let mut queue: Vec<_> = queued.into_iter().collect();
-            queue.sort_by(|(ka, (pa, oa, da, _)), (kb, (pb, ob, db, _))| {
-                (pa, oa, da, ka).cmp(&(pb, ob, db, kb))
-            });
+            let queue = reading_queue(demands, &running);
             let mut queue_len = queue.len();
             if !stopping {
                 let mut jobs = queue.into_iter();
                 for worker in workers.values_mut().filter(|w| w.busy.is_none()) {
-                    if let Some((key, (_, _, _, ply))) = jobs.next() {
+                    if let Some((key, ply)) = jobs.next() {
                         *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
                             Restart {
                                 key: Some(key.clone()),
@@ -1168,6 +1193,82 @@ fn file_stamp(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_queue_preserves_first_ply_on_equal_rank() {
+        let first = BTreeMap::from([("shared".into(), 19)]);
+        let second = BTreeMap::from([("shared".into(), 3)]);
+        let demands = [&first, &second].map(|ply| Demand {
+            priority: 2,
+            order: 7,
+            missing: vec![("shared".into(), 1)],
+            ply,
+        });
+        assert_eq!(reading_queue(demands, &BTreeSet::new()), [("shared".into(), 19)]);
+    }
+
+    #[test]
+    fn reading_queue_orders_equal_ranks_by_key_and_excludes_running() {
+        let ply = BTreeMap::from([("c".into(), 3), ("a".into(), 9), ("b".into(), 1)]);
+        let demand = Demand {
+            priority: 2,
+            order: 7,
+            missing: vec![("c".into(), 1), ("a".into(), 1), ("b".into(), 1)],
+            ply: &ply,
+        };
+        assert_eq!(
+            reading_queue([demand], &BTreeSet::from(["b".into()])),
+            [("a".into(), 9), ("c".into(), 3)]
+        );
+    }
+
+    #[test]
+    fn reading_queue_merges_by_priority_order_then_depth() {
+        let first = BTreeMap::from([("p".into(), 10), ("o".into(), 11), ("d".into(), 12)]);
+        let second = BTreeMap::from([("p".into(), 20), ("o".into(), 21), ("d".into(), 22)]);
+        let demands = vec![
+            Demand {
+                priority: 2,
+                order: 0,
+                missing: vec![("p".into(), 0)],
+                ply: &first,
+            },
+            Demand {
+                priority: 1,
+                order: 9,
+                missing: vec![("p".into(), 9)],
+                ply: &second,
+            },
+            Demand {
+                priority: 1,
+                order: 8,
+                missing: vec![("o".into(), 0)],
+                ply: &first,
+            },
+            Demand {
+                priority: 1,
+                order: 7,
+                missing: vec![("o".into(), 9)],
+                ply: &second,
+            },
+            Demand {
+                priority: 1,
+                order: 7,
+                missing: vec![("d".into(), 8)],
+                ply: &first,
+            },
+            Demand {
+                priority: 1,
+                order: 7,
+                missing: vec![("d".into(), 2)],
+                ply: &second,
+            },
+        ];
+        assert_eq!(
+            reading_queue(demands, &BTreeSet::new()),
+            [("d".into(), 22), ("o".into(), 21), ("p".into(), 20)]
+        );
+    }
 
     #[test]
     fn trace_buffer_drops_the_search_once_over_the_limit() {
