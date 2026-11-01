@@ -410,18 +410,21 @@ impl Journal {
         Ok(())
     }
 
-    /// 全件を検査してから追記し、拒否時には台帳を変更しない。値の同じ重複は飛ばし、値の違う重複は
-    /// 全体を拒否する。(追記した件数, 飛ばした件数) を返す。
-    pub fn append_all(
+    /// 全件を検査してから追記し、拒否時には台帳を変更しない。値の同じ重複は飛ばし、値の違う重複は `on_conflict` に従う。
+    /// `Reject` なら全体を拒否し、`KeepExisting` なら先にある値 (台帳の値、無ければ取り込み元の先の行) を残して食い違いとして返す。
+    /// (追記した件数, 飛ばした件数, 食い違い) を返す。飛ばした件数は食い違いを含む。
+    pub fn merge_all(
         &mut self,
         incoming: Vec<(Reading, String)>,
         settings: &Settings,
-    ) -> Result<(usize, usize)> {
+        on_conflict: OnConflict,
+    ) -> Result<(usize, usize, Vec<Conflict>)> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と取り込みの条件が違います");
         }
         let total = incoming.len();
         let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
+        let mut conflicts = Vec::new();
         for (reading, provenance) in incoming {
             reading.validate(settings)?;
             let existing = self
@@ -431,7 +434,17 @@ impl Journal {
             if let Some(old) = existing
                 && !old.same_values(&reading)
             {
-                bail!("値の違う重複: {}", reading.key);
+                match on_conflict {
+                    OnConflict::Reject => bail!("値の違う重複: {}", reading.key),
+                    OnConflict::KeepExisting => {
+                        conflicts.push(Conflict {
+                            existing: old.clone(),
+                            incoming: reading,
+                            provenance,
+                        });
+                        continue;
+                    }
+                }
             }
             pending.insert(reading.key.clone(), (reading, provenance));
         }
@@ -442,8 +455,24 @@ impl Journal {
             }
             self.append(reading, settings, provenance)?;
         }
-        Ok((appended, total - appended))
+        Ok((appended, total - appended, conflicts))
     }
+}
+
+/// 値の違う重複の扱い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum OnConflict {
+    /// 1 件でもあれば取り込み全体を拒否する
+    Reject,
+    /// 先にある値を残し、食い違いを一覧に出す
+    KeepExisting,
+}
+
+/// 残した読みと、取り込まなかった読み。
+pub(super) struct Conflict {
+    pub existing: Reading,
+    pub incoming: Reading,
+    pub provenance: String,
 }
 
 /// 取り込み元の台帳から選んだ 1 条件の読み。

@@ -424,6 +424,15 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 取り込み先の台帳は排他 lock を取って追記するので、その台帳を使っている serve を止めてから実行します (使用中なら lock の取得に失敗して何も書きません)。
 
+同じ局面の読みが取り込み先と取り込み元の両方にあるとき、値 (MultiPV の手・評価値・深さと bestmove) が同じなら取り込み元の行を飛ばします。値が違う重複 (取り込み元の中どうしも含む) の扱いは `--on-conflict` で選びます。
+
+| `--on-conflict` | 値の違う重複があるとき |
+|---|---|
+| `reject` (既定) | 1 件でもあれば取り込み全体を拒否し、台帳を変えない |
+| `keep-existing` | 先にある値 (取り込み先の値。取り込み先に無ければ取り込み元の先の行) を残し、残さなかった読みを `--conflicts-out` の TSV に書く。`--conflicts-out` は必須 |
+
+複数のマシンが同じ条件で読んだ台帳を合わせるときなど、食い違いを一覧で確かめて扱いを後から決めたいときに `keep-existing` を使います。一覧の列は `key`・`ply`・`existing_bestmove`・`existing_cp`・`incoming_bestmove`・`incoming_cp`・`incoming_provenance` で、評価値は MultiPV の 1 本目です。食い違いが 0 件でもヘッダだけの一覧を書きます。標準出力の最後の行は `appended=<追記> skipped=<飛ばした (食い違いを含む)> conflicts=<食い違い>` です。食い違いのあった局面を使う木の出力は、残した値で伝播したものとは限らないので、登録の前に `tree replay` で作り直すかを確かめてください。
+
 次がすべて同じときだけ、取り込み元の読みを取り込み先と同じ条件の読みとみなします。
 
 | 項目 | 比べ方 |

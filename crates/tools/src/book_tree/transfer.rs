@@ -1,8 +1,8 @@
 //! 別の台帳 (別マシンの台帳の複製など) の読みを、取り込み先の条件で台帳に足す。
 
 use super::ReadingArgs;
-use super::journal::{Journal, Settings, read_source};
-use anyhow::{Result, bail};
+use super::journal::{Conflict, Journal, OnConflict, Settings, read_source};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,12 @@ pub(super) struct ImportJournalArgs {
     /// エンジンの版が違う・分からない読みも取り込む (探索の結果を変えない変更だけの版どうしで使う)
     #[arg(long)]
     force: bool,
+    /// 値の違う重複の扱い。keep-existing は取り込み先の値 (取り込み元の中なら先の行) を残す
+    #[arg(long, value_enum, default_value_t = OnConflict::Reject)]
+    on_conflict: OnConflict,
+    /// keep-existing で残さなかった読みの一覧 (TSV) の書き出し先。keep-existing では必須
+    #[arg(long)]
+    conflicts_out: Option<PathBuf>,
 }
 
 /// `--source-version` に答えるエンジンならソースの版を返す。答えなければ `None`。
@@ -163,6 +169,9 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
 }
 
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
+    if args.on_conflict == OnConflict::KeepExisting && args.conflicts_out.is_none() {
+        bail!("--on-conflict keep-existing には --conflicts-out が要ります");
+    }
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
     warn_unknown_version(&args.reading.engine, &dst.engine_version);
@@ -190,10 +199,43 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     );
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
     let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
-    let (appended, skipped) = journal.append_all(incoming, &dst)?;
+    let (appended, skipped, conflicts) = journal.merge_all(incoming, &dst, args.on_conflict)?;
+    if let Some(path) = &args.conflicts_out {
+        // 台帳へは追記済みなので、一覧を書けなければ件数だけは必ず出してから失敗する。
+        write_conflicts(path, &conflicts).with_context(|| {
+            format!("食い違い {} 件の一覧を {} に書けません", conflicts.len(), path.display())
+        })?;
+    }
     println!("fingerprint={}", dst.fingerprint);
     println!("source_fingerprint={}", source.settings.fingerprint);
-    println!("appended={appended} skipped={skipped}");
+    println!("appended={appended} skipped={skipped} conflicts={}", conflicts.len());
+    Ok(())
+}
+
+const CONFLICT_HEADER: &str = "key\tply\texisting_bestmove\texisting_cp\tincoming_bestmove\tincoming_cp\tincoming_provenance\n";
+
+fn first_cp(reading: &super::journal::Reading) -> String {
+    reading.lines().first().map(|pv| pv.cp.to_string()).unwrap_or_default()
+}
+
+/// 一時ファイルに書いてから置き換える (書きかけの一覧を残さない)。食い違いが 0 件でもヘッダだけの一覧を書く。
+fn write_conflicts(path: &Path, conflicts: &[Conflict]) -> Result<()> {
+    let mut body = String::from(CONFLICT_HEADER);
+    for c in conflicts {
+        body.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            c.incoming.key,
+            c.incoming.ply,
+            c.existing.bestmove,
+            first_cp(&c.existing),
+            c.incoming.bestmove,
+            first_cp(&c.incoming),
+            c.provenance
+        ));
+    }
+    let tmp = path.with_extension("tsv.part");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -408,7 +450,7 @@ mod tests {
         let mut journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
         let incoming: Vec<_> =
             source.readings.iter().map(|r| (r.clone(), "copied".to_owned())).collect();
-        assert_eq!(journal.append_all(incoming, &dst).unwrap(), (1, 1));
+        assert_eq!(journal.merge_all(incoming, &dst, OnConflict::Reject).unwrap().0, 1);
         drop(journal);
 
         let mut conflicting = reading(3, &dst, "resign");
@@ -418,7 +460,7 @@ mod tests {
         changed.bestmove = "win".into();
         conflicting.tag = "new".into();
         let incoming = vec![(conflicting, "copied".into()), (changed, "copied".into())];
-        assert!(journal.append_all(incoming, &dst).is_err());
+        assert!(journal.merge_all(incoming, &dst, OnConflict::Reject).is_err());
         assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), size);
         drop(journal);
         let journal = Journal::open(&dst_path, &dst.fingerprint).unwrap();
@@ -430,6 +472,58 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, BTreeMap::from([(0, true), (1, false), (2, true), (3, false)]));
+    }
+
+    #[test]
+    fn keep_existing_keeps_the_first_value_and_lists_every_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "build a", "model");
+        let dst = settings(&m, Some(VERSION_A));
+        let path = dir.path().join("dst.jsonl");
+        write_journal(&path, &[(&dst, reading(0, &dst, "resign"))]);
+        let mut changed = reading(0, &dst, "resign");
+        changed.bestmove = "win".into();
+        let first = reading(1, &dst, "resign");
+        let mut second = reading(1, &dst, "resign");
+        second.bestmove = "win".into();
+        let incoming = vec![
+            (changed, "from-b".to_owned()),
+            (reading(0, &dst, "resign"), "same".to_owned()),
+            (first, "first".to_owned()),
+            (second, "second".to_owned()),
+            (reading(2, &dst, "resign"), "new".to_owned()),
+        ];
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let (appended, skipped, conflicts) =
+            journal.merge_all(incoming, &dst, OnConflict::KeepExisting).unwrap();
+        assert_eq!((appended, skipped), (2, 3));
+        let listed: Vec<_> = conflicts
+            .iter()
+            .map(|c| {
+                (
+                    c.existing.bestmove.as_str(),
+                    c.incoming.bestmove.as_str(),
+                    c.provenance.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(listed, [("resign", "win", "from-b"), ("resign", "win", "second")]);
+        drop(journal);
+        let journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        for column in 0..3 {
+            let key = reading(column, &dst, "resign").key;
+            let kept = super::super::journal::Readings::get(&journal, &key).unwrap();
+            assert_eq!(kept.bestmove, "resign");
+        }
+
+        let out = dir.path().join("conflicts.tsv");
+        write_conflicts(&out, &conflicts).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(text.starts_with(CONFLICT_HEADER));
+        assert!(text.lines().nth(2).unwrap().ends_with("\tsecond"));
+        write_conflicts(&out, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), CONFLICT_HEADER);
     }
 
     /// serve が書いた台帳の条件 (ファイルのパスだけ置き換えたもの) と、そのとき記録された指紋。
@@ -595,6 +689,8 @@ mod tests {
             journal: dst_path.clone(),
             reading: reading_args(&b, 100, &[]),
             force,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
         };
         assert!(run(args(false)).is_err());
         assert!(!dst_path.exists() || std::fs::metadata(&dst_path).unwrap().len() == 0);
