@@ -240,8 +240,9 @@ pub(super) struct Budget<'a> {
     pub progress: &'a mut dyn FnMut(MateProgress),
 }
 
-/// `Scratch::path_filter` の升の数 (2 の冪)
-const PATH_FILTER_SIZE: usize = 1 << 12;
+/// `Scratch::path_filter` の升の数 (2 の冪)。長編の経路は数百〜千局面になり、升が少ないと
+/// 反復でない局面でも経路の走査が多く起きる
+const PATH_FILTER_SIZE: usize = 1 << 14;
 
 #[inline]
 fn path_filter_index(key: u64) -> usize {
@@ -641,8 +642,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         budget: Budget<'a>,
     ) -> Self {
         debug_assert!(!PIECES || table.has_proof_pieces());
+        // 升は経路のキーの分だけ数えているので、表全体ではなく残った経路の升だけを 0 に戻す
+        // (無駄合いの判定で部分探索を作るたびに表全体を消すと重い)
+        for &key in &scratch.path {
+            scratch.path_filter[path_filter_index(key)] = 0;
+        }
         scratch.path.clear();
-        scratch.path_filter.fill(0);
         scratch.children.clear();
         Self {
             table,
