@@ -322,6 +322,7 @@ fn process_line(line: &str, hash_mb: usize, depth: i32, nodes: u64) -> Outcome {
 
     let mut limits = LimitsType::default();
     limits.depth = depth;
+    limits.return_completed_iteration = true;
     if nodes > 0 {
         limits.nodes = nodes;
     }

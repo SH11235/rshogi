@@ -2636,6 +2636,7 @@ fn process_record_with_search(
     // 探索を実行
     let mut limits = LimitsType::default();
     limits.depth = depth;
+    limits.return_completed_iteration = true;
     if max_nodes > 0 {
         limits.nodes = max_nodes;
     }

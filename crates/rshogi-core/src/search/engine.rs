@@ -1987,10 +1987,11 @@ where
         // 中断した反復で根の先頭に完了した反復と別の手が残っていれば、その手・評価値・PV を返す。
         // 評価値は窓の外の下界・上界のこともあり、bound として呼出側へ渡す。
         // 先頭が同じ手なら、aspiration の再探索中に止まった bound と短い PV より完了した反復の値を返す。
-        // 番兵の値、未完了の探索から来た負け評価、MultiPV の順位、再開に使う解析の完了結果は
-        // 完了した反復の結果へ戻す。
+        // 番兵の値、未完了の探索から来た負け評価、MultiPV の順位、再開に使う解析の完了結果、
+        // 確定値だけを求める呼出側 (`return_completed_iteration`) は完了した反復の結果へ戻す。
         let head = &worker.state.root_moves[0];
         let keep_partial = limits.analysis.is_none()
+            && !limits.return_completed_iteration
             && effective_multi_pv == 1
             && head.mv() != completed_root_moves[0].mv()
             && root_score_is_initialized(head.score)

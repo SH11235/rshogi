@@ -155,6 +155,21 @@ fn abort_with_different_head_move_returns_partial_result_with_bound() {
             assert_eq!(final_info.bound, bound);
             assert_eq!(final_info.pv, result.pv);
             assert_eq!(result.pv[0], result.best_move);
+
+            let mut search = Search::new(1);
+            search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
+            let completed_only = search.go(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    return_completed_iteration: true,
+                    ..Default::default()
+                },
+                None::<fn(&SearchInfo)>,
+            );
+            assert_eq!(completed_only.best_move.to_usi(), "2h6h");
+            assert_eq!(completed_only.score, completed.score);
+            assert_eq!(completed_only.bound, Bound::Exact);
         }
     });
 }
