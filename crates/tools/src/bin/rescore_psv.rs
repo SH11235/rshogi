@@ -5516,6 +5516,17 @@ where
         );
     }
 
+    // 推論に使ったのはセッションを作ったときのモデル。置き換わっていた (または読めない) なら、
+    // Ctrl-C で打ち切った場合も含めて出力を空にする。marker の無い PSV 出力を残すと、次の実行が
+    // 続きから別のモデルの値を追記するか、件数がそろっていれば完了扱いで skip する。
+    if let Err(e) = loaded_model.ensure_unchanged(config.onnx_path) {
+        protection.truncate(output_path, 0)?;
+        if out_scores {
+            remove_in_progress_marker(protection, output_path)?;
+        }
+        return Err(e.context(format!("discarded the output of {}", input_path.display())));
+    }
+
     // 完了マーカー書き出し（atomic rename）。
     // INTERRUPTED が立っている場合（Ctrl-C で残ファイル分を打ち切った場合）も
     // 書き出した分は完了扱いとはせず、marker を作らない。
@@ -5553,9 +5564,7 @@ where
         } else {
             build_run_fingerprint(config)?
         };
-        // fingerprint のモデルはファイルの今の size/mtime。推論に使ったのはセッションを作ったときの
-        // モデルなので、置き換わっていたら完了にせず出力を空にする (marker の無い PSV 出力は
-        // 件数がそろえば完了扱いで skip されるため、残すと次の実行で作り直されない)。
+        // 上の照合から fingerprint を取るまでの間の置き換えも、完了にせず出力を空にする。
         if !loaded_model.matches(&fingerprint) {
             protection.truncate(output_path, 0)?;
             if out_scores {
