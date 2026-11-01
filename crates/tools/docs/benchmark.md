@@ -2,7 +2,7 @@
 
 LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
 
-YaneuraOu の `bench` コマンド相当の標準ベンチマーク機能を提供します。
+指定した局面を探索し、処理時間・探索ノード数・NPS を測定します。
 
 ### 機能
 

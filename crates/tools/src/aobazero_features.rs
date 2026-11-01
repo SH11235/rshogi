@@ -299,8 +299,7 @@ pub fn make_input_features(
 
 /// 勝率 (0..1) をセンチポーン値に変換
 ///
-/// dlshogi の Eval_Coef に相当する逆変換。
-/// `scale` で bullet-shogi の --scale と整合させる。
+/// `scale` は学習側の --scale と揃える。
 /// winrate = sigmoid(cp / scale) の逆関数: cp = scale * ln(p / (1-p))
 pub fn winrate_to_cp(winrate: f32, scale: f32) -> i32 {
     let clamped = winrate.clamp(0.001, 0.999);

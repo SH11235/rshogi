@@ -672,7 +672,7 @@ fn csa_to_legal_move(pos: &Position, raw: &str) -> Result<Move> {
             return Ok(mv);
         }
     }
-    // YO 準拠の generate_legal は歩・大駒などの不成を生成しないため、
+    // generate_legal は歩・大駒などの不成を生成しないため、
     // AobaZero 等が指す不成は USI 経由で直接構築して擬似合法性のみ検証する。
     // 棋譜由来の手なので自玉の王手放置は実在せず、擬似合法性の検証で足りる。
     if let Some(usi) = csa_fallback_usi(pos, &spec, raw)

@@ -33,13 +33,10 @@
 ## 先後別の評価値差と depth 下限
 
 `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit` で、
-`BookEvalDiff` / `BookDepthLimit` を先手番と後手番で別の値にできます。名前と、`0` 以上の値の意味は
-YaneuraOu の `BOOK_OPTIONS V2` の同名オプションと同じです。ただし評価値差の基準は、rshogi が候補中の
-最大 value、YaneuraOu が count 順 (同 count なら value 順) の筆頭手の value なので、count の付いた定跡で
-count 最大の手が最大 value でないときは残る手が変わります。たとえば後手番で (value 100, count 10) と
-(value 120, count 5) の 2 手、`BookEvalWhiteDiff=0` なら、rshogi は value 120 の手だけを、YaneuraOu は
-両方を残します。count を持たない定跡 (`.ybb` やペタショック定跡) では一致します。この差は共通の
-`BookEvalDiff` にもあります。
+`BookEvalDiff` / `BookDepthLimit` を先手番と後手番で別の値にできます。評価値差の基準は、count によらず
+候補中の最大 value です。たとえば後手番で (value 100, count 10) と (value 120, count 5) の
+2 手、`BookEvalWhiteDiff=0` なら、value 120 の手だけを残します。共通の `BookEvalDiff` も
+候補中の最大 value を基準にします。
 
 - probe のたびに root 局面の手番側の値を見て、`0` 以上ならそれを、`-1` なら共通の値 (`BookEvalDiff` /
   `BookDepthLimit`) をその時点の値で使います。評価値差と depth 下限は別々に決まります。
@@ -52,8 +49,11 @@ count 最大の手が最大 value でないときは残る手が変わります�
 例: `BookEvalDiff=30`、`BookEvalBlackDiff=10`、`BookEvalWhiteDiff=-1` なら、評価値差は先手番 10・後手番 30。
 ここで `BookEvalDiff=50` にすると 10 / 50、さらに `BookEvalBlackDiff=-1` にすると 50 / 50 です。
 
-YaneuraOu の `BOOK_OPTIONS V2` の既定値に相当する設定にするには、次を明示的に送ります
-(`BookFile` は使う定跡に合わせる)。
+200 手目まで定跡を使い、評価値差を先後とも 0、depth 下限を先手は無効・後手は 5 にする設定例です
+(`BookFile` は使う定跡に合わせる)。`NarrowBook=false` で出現率による除外を無効にし、
+`ConsiderBookMoveCount=false` で count による重み付けをせず等確率で抽選します
+(`BookSelectValue` は既定の `false` を前提とします)。`IgnoreBookPly=true` で手数を無視して引き、
+`BookOnTheFly=true` で丸読みせずファイル上で検索します。
 
 ```text
 setoption name BookFile value user_book1.db
@@ -74,10 +74,11 @@ setoption name BookOnTheFly value true
 `isready` の時間が定跡の大きさに比例して増えるので、数百万局面を超える定跡では
 `setoption name BookOnTheFly value true` を使います。probe の結果 (候補手・value・depth・
 採択数と、各フィルタ・`IgnoreBookPly`・`FlippedBook`・`BookExploreFile` を通した後の選択) は
-手の無い局面 (下記) を除いて丸読みと同じです。
+ファイルが所定の順に並んでいれば、手の無い局面 (下記) を除いて丸読みと同じです。
+`.ybb` の on-the-fly では並びを検査しないので、並んでいないと当たらない局面が出ます。
 
 - **ファイルの並び**: `sfen` 行が SFEN の文字列 (バイト) 順に並んでいる必要があります。
-  rshogi の定跡ツールの出力と YaneuraOu の定跡書き出し (`.db`) はこの順です。手数の違う同じ
+  rshogi の定跡ツールの出力はこの順です。手数の違う同じ
   局面が隣り合っていれば、手数込みで並べても手数を除いて並べてもかまいません。`isready` で
   ファイルの 1,024 か所を抜き取って並びを確かめ、逆順を見つけたら
   `info string Error opening book file ...: book file is not sorted by SFEN ...` を出して
@@ -96,7 +97,7 @@ setoption name BookOnTheFly value true
   いるときのエラーは何も出さず、予想手なしで bestmove を返します。丸読みはこの場合 `isready`
   で読み込み自体が失敗します。
 - **手の無い局面**: 手の行が無い `sfen` 行に当たったら定跡なしとし、`FlippedBook` でも反転局面を
-  引き直しません (YaneuraOu の on the fly と同じ)。丸読みはこの局面を登録しないので反転局面を
+  引き直しません。丸読みはこの局面を登録しないので反転局面を
   引き直し、選ぶ手が丸読みと違い得る唯一の場合です。
 - 上の並び・抜き取り・読み出し量の説明はテキスト `.db` のものです。`.ybb` は[下記](#yaneuraou-のバイナリ定跡-ybb)。
 
@@ -129,9 +130,9 @@ RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- -
 `BookFile` に YaneuraOu の `.ybb` (`YANE-BINBOOK-V1`) を指定すると、テキスト `.db` と同じ
 オプションで使えます。形式はファイル先頭の magic で見分けます。`BookFile` に `.db` を指定して
 そのファイルが無く、拡張子を `.ybb` にしたファイルがあればそちらを読み、
-`info string book file fallback: <.db> -> <.ybb>` を出します (YaneuraOu と同じ)。
+`info string book file fallback: <.db> -> <.ybb>` を出します。
 
-- **引き方**: 局面から YaneuraOu と同じビット列の PackedSfen を作り、PackedSfen の順に並んだ
+- **引き方**: 局面から YaneuraOu 形式の PackedSfen を作り、PackedSfen の順に並んだ
   index を二分探索します。`IgnoreBookPly=false` では手数も一致したときだけ当たります (`.ybb` は
   同じ盤面を 1 つしか持てないので、手数違いの重複はありません)。`FlippedBook` は先後反転した
   局面で引き直し、手を反転します。玉が欠けた局面など PackedSfen にできない局面は引けません。
@@ -144,12 +145,13 @@ RSHOGI_BOOK_EQUIV_PATH=/path/to/book.db cargo test --release -p rshogi-book -- -
   `ConsiderBookMoveCount=false`) こと。count を使うと、`.db` は count で手を絞り重み付きで抽選する
   のに対し、`.ybb` は絞らず等確率なので選ぶ手が変わり得ます。
 - **手の無い局面**: 当たった局面の手が 0 個なら定跡なしとし、`FlippedBook` でも反転局面を
-  引き直しません (YaneuraOu と同じ)。手数が違って当たらなかったときは引き直します。
+  引き直しません。手数が違って当たらなかったときは引き直します。
 - **丸読み (`BookOnTheFly=false`)**: ファイル全体をそのまま読み込みます。メモリはファイルの大きさと
   同じで、`BookFile` などを変えて読み直すときは新旧が揃うまで一時的に 2 倍になります。大きい
   `.ybb` では `BookOnTheFly=true` を勧めます。`isready` の時間はファイルを読む時間です。
 - **`BookOnTheFly=true`**: header (32 byte) だけを読み、index も手もファイル上で引きます。並びの
-  抜き取り検査はしません (YaneuraOu の書き出しは PackedSfen 順)。1 回の検索で読むのは index の
+  抜き取り検査はしません。index は PackedSfen のバイト順に並んでいる必要があり、並んでいないと
+  当たらない局面が出ます。1 回の検索で読むのは index の
   44 byte を局面数の対数回と、その局面の手だけです。
 - **壊れたファイル**: 未知の flags・局面数に対して短すぎるファイル、拡張子が `.ybb` で magic が
   違うファイルは開くときに拒否します (header を確かめてから本体を読みます)。拡張子が `.ybb` でなく
@@ -166,8 +168,7 @@ RSHOGI_YBB_PATH=/path/to/book.ybb RSHOGI_YBB_DB_PATH=/path/to/book.db \
 
 ## 優先定跡
 
-YaneuraOu の優先定跡と同じ規則で、`BookFile` の前に別の定跡ファイルを引きます (probe 中の
-読み出しエラーの扱いだけは意図して違います。下記)。
+`BookFile` の前に、番号付きの別の定跡ファイルを引きます。
 `BookFile=user_book1.db` なら、同じディレクトリの次のファイルをこの順に引きます。
 
 ```text
@@ -188,11 +189,10 @@ user_book1.db
   進みます。当たったファイルで `BookEvalDiff` などのフィルタで候補が残らなくても、後ろのファイルは
   引きません。ponder の補完で子局面を引くときも同じ順です。手の行が無い `sfen` 行は、
   `BookOnTheFly=true` のテキスト `.db` と `.ybb` では「手が 0 個の局面」として次のファイルへ進み、
-  丸読みのテキスト `.db` では局面として登録しないので反転局面を引きます (YaneuraOu と同じ)。
-- **読み出しエラー (YaneuraOu と違う点)**: probe 中にファイルの読み出しエラーが起きたら、その局面は
-  定跡なしとし、後ろのファイルは引きません。YaneuraOu は載っていないものとして次のファイルへ
-  進みます。読めなかったファイルにその局面が載っていたか分からないので、優先度の低いファイルの手を
-  選ぶと、前のファイルで手を上書きした意図に反し得るためです。読み込み時 (`isready`) の失敗は
+  丸読みのテキスト `.db` では局面として登録しないので反転局面を引きます。
+- **読み出しエラー**: probe 中にファイルの読み出しエラーが起きたら、その局面は
+  定跡なしとし、後ろのファイルは引きません。読めなかったファイルにその局面が載っていたか
+  分からないので、優先度の低いファイルの手を選ぶと、前のファイルで手を上書きした意図に反し得るためです。読み込み時 (`isready`) の失敗は
   エラーの行で分かるので、そのファイルを飛ばして残りで続けます。
 - **オプション**: `BookOnTheFly`、`IgnoreBookPly`、`FlippedBook`、`BookEvalDiff` などは全ファイルに
   共通です。

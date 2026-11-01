@@ -1,4 +1,4 @@
-//! 定跡の展開ループ (YaneuraOu BookMiner 相当)。
+//! 定跡の展開ループ。
 //!
 //! - `frontier`: book と開始局面から、次に掘る末端局面を列挙する
 //! - `expand`: 末端局面を MultiPV 探索し、局面と候補手を book に追加する
@@ -40,9 +40,7 @@ const MATE_CAP: i32 = 30_000;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Parser, Debug)]
-#[command(
-    about = "定跡の末端局面を列挙し、MultiPV 探索で展開して逆伝播を周回する (BookMiner 相当)"
-)]
+#[command(about = "定跡の末端局面を列挙し、MultiPV 探索で展開して逆伝播を周回する")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -1155,7 +1153,7 @@ fn search_multipv(
         if lines.is_empty() {
             bail!("MultiPV の info score/pv が得られませんでした: {}", task.key);
         }
-        // BookMiner 準拠: K 行が最大値から delta 以内に収まるなら、まだ良い手が漏れている
+        // K 行が最大値から delta 以内に収まるなら、まだ良い手が漏れている
         // 可能性があるので K を増やす。打ち切られた最終ブロックは行ごとに深さが揃わず
         // 番号順が value 順と一致しないため、番号でなく value の最大・最小で判定する。
         let max_value = lines.iter().map(|l| l.value).max().unwrap_or(0);

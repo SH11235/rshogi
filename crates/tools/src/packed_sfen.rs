@@ -328,7 +328,7 @@ fn piece_type_from_index(index: usize) -> Option<PieceType> {
 
 /// PackedSfenをSFEN文字列に変換
 ///
-/// # ビットレイアウト (YaneuraOu `sfen_packer.cpp` 準拠)
+/// # ビットレイアウト (YaneuraOu の PackedSfen 形式)
 ///
 /// ```text
 /// bit 0       : 手番 (0=先手, 1=後手)
@@ -345,7 +345,7 @@ fn piece_type_from_index(index: usize) -> Option<PieceType> {
 /// **標準局面（盤上+手駒=40枚）のみ対応**
 ///
 /// このハフマン符号化形式は、盤上の駒と手駒の合計が40枚の場合に
-/// 常に256bit（32バイト）になるよう設計されています（YaneuraOu準拠）。
+/// 常に256bit（32バイト）になるよう設計されています。
 ///
 /// 駒落ち局面や詰将棋など、駒数が40枚未満の局面をpackしたデータでは、
 /// 末尾の0埋め部分が歩として誤読される可能性があります。
@@ -1379,7 +1379,7 @@ fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
 
 /// Position から PackedSfen を生成
 ///
-/// # ビットレイアウト (YaneuraOu `sfen_packer.cpp` 準拠)
+/// # ビットレイアウト (YaneuraOu の PackedSfen 形式)
 ///
 /// ```text
 /// bit 0       : 手番 (0=先手, 1=後手)

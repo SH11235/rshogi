@@ -1,6 +1,6 @@
 //! 将棋エンジンベンチマークツール
 //!
-//! YaneuraOu の bench コマンド相当の標準ベンチマークを提供します。
+//! 指定した局面を探索し、処理時間・探索ノード数・NPS を測定します。
 
 use std::path::PathBuf;
 
@@ -16,7 +16,7 @@ use tools::{BenchmarkConfig, EvalConfig, LimitType, runner};
     name = "benchmark",
     version,
     about = "将棋エンジン汎用ベンチマークツール",
-    long_about = "YaneuraOu の bench コマンド相当の標準ベンチマーク機能を提供します。"
+    long_about = "指定した局面を探索し、処理時間・探索ノード数・NPS を測定します。"
 )]
 struct Cli {
     /// 測定するスレッド数（カンマ区切り、例: \"1,2,4\"）

@@ -188,7 +188,7 @@ pub(crate) enum BucketModeArg {
     /// 進行度方式（progress.bin 必須）。ek_testset eval と同じ既定。
     #[value(name = "progresskpabs")]
     ProgressKpabs,
-    /// YaneuraOu / BulletOu SFNN 互換の整数進行度方式（f64 の progress.bin 必須）。
+    /// Q16 係数を使う整数進行度方式（f64 の progress.bin 必須）。
     #[value(name = "progresskpabsq16")]
     ProgressKpabsQ16,
     /// 両玉相対段方式（progress.bin 不要）。

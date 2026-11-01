@@ -187,8 +187,8 @@ impl Book {
 
     /// 定跡ファイルを開くだけで丸読みせず、probe のたびにファイルから引く(BookOnTheFly)。
     ///
-    /// テキスト `.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要がある
-    /// (YaneuraOu の定跡書き出しの順)。開くときに等間隔の抜き取りで並びを確かめ、
+    /// テキスト `.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要がある。
+    /// 開くときに等間隔の抜き取りで並びを確かめ、
     /// 逆順の箇所を見つけたら `InvalidData` を返す。`.ybb` は header だけを確かめ、
     /// index をファイル上で二分探索する。ファイルは開いたまま保持する。
     pub fn open_on_the_fly<P: AsRef<Path>>(path: P, ignore_ply: bool) -> io::Result<Self> {
@@ -259,7 +259,7 @@ impl Book {
 }
 
 /// 定跡ファイルのパスを解決する。`path` が無く、`.db` で終わり、拡張子を `.ybb` にした
-/// ファイルがあればそちらを返す。それ以外は `path` のまま (YaneuraOu の `BookFile` と同じ)。
+/// ファイルがあればそちらを返す。それ以外は `path` のまま。
 pub fn resolve_book_path(path: &Path) -> PathBuf {
     if !path.exists() && path.extension().is_some_and(|ext| ext == "db") {
         let ybb = path.with_extension("ybb");
@@ -277,7 +277,7 @@ pub fn resolve_book_path(path: &Path) -> PathBuf {
 /// を番号順に並べ、最初に欠けた番号で止める (番号は 3 桁未満なら 0 で埋める。1000 以降は 4 桁)。
 /// 各番号は `path` と同じ拡張子を先に探し、無ければもう一方 (`.db` と `.ybb`) を探す。両方あれば
 /// `path` と同じ拡張子の方を使い、`info` で知らせる。`path` が `.db` / `.ybb` で終わらなければ
-/// 優先定跡は探さない。YaneuraOu の優先定跡と同じ規則。
+/// 優先定跡は探さない。
 pub fn priority_book_paths(path: &Path, mut info: impl FnMut(&str)) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();

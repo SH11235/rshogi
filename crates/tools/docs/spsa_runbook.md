@@ -555,7 +555,7 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]] //base=2809
 | CORR | `SPSA_CORR_HIST_CONT_SS6` | 35 | correction history cont (ss-6) 更新係数 |
 
 `SPSA_CORR_CNT_SS6_WEIGHT=0`・`SPSA_CORR_HIST_CONT_SS6=0`・`SPSA_CORR_CNT_NO_MOVE=8×SPSA_CORR_CNT_WEIGHT` にすると、
-(ss-6) を使わず、前の手が無いときは `8 × cnt` を足す式 (YaneuraOu と同じ形) になる。
+(ss-6) を使わず、前の手が無いときは `8 × cnt` を足す式になる。
 
 History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)_HIST_INIT'`
 
@@ -1754,7 +1754,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
   USI option (`EvalFile` など)・`--engine-args`・`--cpu-affinity` の割り当て。NNUE 重みのプロセス間共有の有無も、
   engine が同じ環境変数で起動されるので本番と同じになる。探索するのは plus 側だけ (対局中も探索するのは手番側だけ)。
 - engine に送る探索定数は **run 開始時の θ₀** (resume でも gen0 snapshot の θ)。摂動や更新で NPS が変わっても倍率は動かない。
-- 局面は benchmark ツールの既定 4 局面 (YaneuraOu の bench と同じ局面)。各局面の前に `usinewgame` を送る。
+- 局面は benchmark ツールの既定 4 局面。各局面の前に `usinewgame` を送る。
   warmup として 4 局面を `go depth 12` で 1 周した後、`go depth 16` で 1 周を計測する。
 - slot の NPS = `engine が報告した nodes の合計 ÷ go から bestmove までの時間の合計 ÷ Threads`。倍率に使う NPS は slot 間の平均。
 - 1 局面の探索が 600 s を超える、または engine が nodes を報告しないと bench は失敗する。
@@ -1816,7 +1816,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 
 ### 17.6 rshogi の秒単位の時間管理 (`RoundUpToFullSecond`)
 
-rshogi の時間管理 (YaneuraOu 準拠) は既定で 1 手の思考時間を秒境界に切り上げ、最低思考時間に 1 秒の下限を掛け、
+rshogi の時間管理は既定で 1 手の思考時間を秒境界に切り上げ、最低思考時間に 1 秒の下限を掛け、
 残り時間の見積もりから 1 手 1 秒を引く。短い時計では 1 手の消費時間が秒単位に張り付き、倍率を掛けても探索量が比例して縮まない。
 `--nps-scaling` で短い TC を使うときは `--usi-option RoundUpToFullSecond=false` を渡してこの 3 つを外す
 (spsa が既定で入れる `MinimumThinkingTime=0` もそのまま 0 ms として効く)。NetworkDelay と残り時間を超えない制約は残る。
