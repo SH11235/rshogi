@@ -642,8 +642,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         budget: Budget<'a>,
     ) -> Self {
         debug_assert!(!PIECES || table.has_proof_pieces());
-        // 升は経路のキーの分だけ数えているので、表全体ではなく残った経路の升だけを 0 に戻す
-        // (無駄合いの判定で部分探索を作るたびに表全体を消すと重い)
+        // 升は経路のキーの分だけ数えている (panic で巻き戻った後も、残ったキーと数は対応する) ので、
+        // 表全体ではなく残った経路の升だけを 0 に戻す。無駄合いの判定で部分探索を作るたびに表全体を消さずに済む
         for &key in &scratch.path {
             scratch.path_filter[path_filter_index(key)] = 0;
         }
