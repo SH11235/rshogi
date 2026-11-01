@@ -120,6 +120,46 @@ fn abort_with_same_head_move_returns_completed_result() {
 }
 
 #[test]
+fn abort_with_different_head_move_returns_partial_result_with_bound() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    on_large_stack(|| {
+        // depth 10 の最善手は 2h6h。depth 11 では 8h2b+ が最初の窓で fail high し、
+        // 11_300 は再探索の途中 (下界のまま)、13_700 は再探索で fail low した直後に止まる。
+        for (nodes, bound) in [(11_300, Bound::Lower), (13_700, Bound::Upper)] {
+            let mut pos = Position::new();
+            pos.set_hirate();
+            for usi in ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e"] {
+                let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+                let check = pos.gives_check(mv);
+                pos.do_move(mv, check);
+            }
+            let mut search = Search::new(1);
+            search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
+            let mut infos = Vec::new();
+            let result = search.go(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    ..Default::default()
+                },
+                Some(|info: &SearchInfo| infos.push(info.clone())),
+            );
+            let completed = &infos[infos.len() - 2];
+            assert_eq!(completed.depth, 10);
+            assert_eq!(completed.pv[0].to_usi(), "2h6h");
+            assert_eq!(result.depth, 10);
+            assert_eq!(result.best_move.to_usi(), "8h2b+");
+            assert_eq!(result.bound, bound);
+            let final_info = infos.last().unwrap();
+            assert_eq!(final_info.bound, bound);
+            assert_eq!(final_info.pv, result.pv);
+            assert_eq!(result.pv[0], result.best_move);
+        }
+    });
+}
+
+#[test]
 fn partial_iteration_result_keeps_move_score_pv_and_bound_together() {
     let _guard = crate::eval::material::test_support::lock_material();
     crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);

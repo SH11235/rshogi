@@ -348,6 +348,7 @@ impl SearchProgress {
 struct ThreadSummary {
     id: usize,
     score: Value,
+    bound: Bound,
     completed_depth: Depth,
     best_move: Move,
     pv_len: usize,
@@ -360,6 +361,7 @@ impl ThreadSummary {
             Self {
                 id,
                 score: rm.score,
+                bound: rm.score_bound(),
                 completed_depth: worker.state.completed_depth,
                 best_move,
                 pv_len: rm.pv.len(),
@@ -397,10 +399,13 @@ fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
         let best_vote = *votes.get(&best.best_move).unwrap_or(&0);
         let new_vote = *votes.get(&summary.best_move).unwrap_or(&0);
 
-        let best_in_proven_win = best.score.is_win();
-        let new_in_proven_win = summary.score.is_win();
-        let best_in_proven_loss = is_proven_loss(best.score);
-        let new_in_proven_loss = is_proven_loss(summary.score);
+        // 中断した反復の bound 付きの詰み評価は証明済みとして扱わない。
+        let best_exact = best.bound == Bound::Exact;
+        let new_exact = summary.bound == Bound::Exact;
+        let best_in_proven_win = best_exact && best.score.is_win();
+        let new_in_proven_win = new_exact && summary.score.is_win();
+        let best_in_proven_loss = best_exact && is_proven_loss(best.score);
+        let new_in_proven_loss = new_exact && is_proven_loss(summary.score);
 
         let better_voting_value = thread_voting_value(summary, min_score)
             * (summary.pv_len > 2) as i64
@@ -506,6 +511,7 @@ fn collect_thread_summaries(
         summaries.push(ThreadSummary {
             id: result.thread_id,
             score: result.best_score,
+            bound: result.best_bound,
             completed_depth: result.completed_depth,
             best_move: result.best_move,
             // Wasm helper結果にはPV長がないため、切り詰め判定を不利にしない値を与える。
@@ -1298,7 +1304,12 @@ impl Search {
                     BestThreadResult {
                         best_move,
                         score,
-                        bound: Bound::Exact,
+                        // skill 有効時は MultiPV が 2 以上なので、中断した反復の結果は採用されず Exact になる。
+                        bound: if skill_enabled {
+                            Bound::Exact
+                        } else {
+                            r.best_bound
+                        },
                         completed_depth: r.completed_depth,
                         sel_depth: self.worker.as_ref().map(|w| w.state.sel_depth).unwrap_or(0),
                         nodes: r.nodes,
@@ -1971,14 +1982,16 @@ where
     // 反復深化が自然終了した場合も、終局分岐と同じ通知待機を通る。
     wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
 
-    // 中断した反復の番兵や bound を、完了深さの結果と混ぜない。
     time_manager.publish_nodes(worker.state.nodes);
     if worker.state.abort && !completed_root_moves.is_empty() {
-        // 中断した反復で探索を終えた根の手が完了した反復の最善手を上回ったときだけ、その結果を使う。
-        // 最善手が同じなら、aspiration の再探索中に止まった bound と短い PV より、完了した反復の値を返す。
-        // 未完了の探索から来た負け評価と、MultiPV の順位は完了した反復の結果へ戻す。
+        // 中断した反復で根の先頭に完了した反復と別の手が残っていれば、その手・評価値・PV を返す。
+        // 評価値は窓の外の下界・上界のこともあり、bound として呼出側へ渡す。
+        // 先頭が同じ手なら、aspiration の再探索中に止まった bound と短い PV より完了した反復の値を返す。
+        // 番兵の値、未完了の探索から来た負け評価、MultiPV の順位、再開に使う解析の完了結果は
+        // 完了した反復の結果へ戻す。
         let head = &worker.state.root_moves[0];
-        let keep_partial = effective_multi_pv == 1
+        let keep_partial = limits.analysis.is_none()
+            && effective_multi_pv == 1
             && head.mv() != completed_root_moves[0].mv()
             && root_score_is_initialized(head.score)
             && !head.score.is_loss();
@@ -2572,6 +2585,7 @@ mod tests {
             ThreadSummary {
                 id: 0,
                 score: Value::new(30),
+                bound: Bound::Exact,
                 completed_depth: 10,
                 best_move: m_2g2f,
                 pv_len: 4,
@@ -2579,6 +2593,7 @@ mod tests {
             ThreadSummary {
                 id: 1,
                 score: Value::new(28),
+                bound: Bound::Exact,
                 completed_depth: 9,
                 best_move: m_2g2f,
                 pv_len: 4,
@@ -2586,6 +2601,7 @@ mod tests {
             ThreadSummary {
                 id: 2,
                 score: Value::new(90),
+                bound: Bound::Exact,
                 completed_depth: 1,
                 best_move: m_6i7h,
                 pv_len: 4,
@@ -2604,6 +2620,7 @@ mod tests {
             ThreadSummary {
                 id: 0,
                 score: Value::mate_in(7),
+                bound: Bound::Exact,
                 completed_depth: 12,
                 best_move: m_2g2f,
                 pv_len: 4,
@@ -2611,6 +2628,7 @@ mod tests {
             ThreadSummary {
                 id: 1,
                 score: Value::mate_in(5),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_7g7f,
                 pv_len: 4,
@@ -2622,6 +2640,33 @@ mod tests {
     }
 
     #[test]
+    fn test_select_best_summary_index_does_not_treat_bounded_win_as_proven() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::mate_in(5),
+                bound: Bound::Upper,
+                completed_depth: 12,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::mate_in(7),
+                bound: Bound::Exact,
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
     fn test_select_best_summary_index_rejects_single_helper_outlier_move() {
         let m_2g2f = Move::from_usi("2g2f").expect("valid move");
         let m_6i7h = Move::from_usi("6i7h").expect("valid move");
@@ -2630,6 +2675,7 @@ mod tests {
             ThreadSummary {
                 id: 0,
                 score: Value::new(35),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_2g2f,
                 pv_len: 6,
@@ -2637,6 +2683,7 @@ mod tests {
             ThreadSummary {
                 id: 1,
                 score: Value::new(180),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_6i7h,
                 pv_len: 6,
@@ -2644,6 +2691,7 @@ mod tests {
             ThreadSummary {
                 id: 2,
                 score: Value::new(34),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_7g7f,
                 pv_len: 6,
@@ -2662,6 +2710,7 @@ mod tests {
             ThreadSummary {
                 id: 0,
                 score: Value::new(35),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_2g2f,
                 pv_len: 6,
@@ -2669,6 +2718,7 @@ mod tests {
             ThreadSummary {
                 id: 1,
                 score: Value::new(120),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_6i7h,
                 pv_len: 6,
@@ -2676,6 +2726,7 @@ mod tests {
             ThreadSummary {
                 id: 2,
                 score: Value::new(110),
+                bound: Bound::Exact,
                 completed_depth: 8,
                 best_move: m_6i7h,
                 pv_len: 6,
