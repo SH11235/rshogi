@@ -978,3 +978,181 @@ fn leftover_variations_find_shorter_clean_lines() {
         assert_eq!(pos.to_sfen(), position(sfen).to_sfen(), "{mode:?}: 局面を戻す");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 変長駒余りの規則の正解役 (受け方は駒余りなしで終わる応手の中で最長、無ければ駒余りの中で最長。
+// 攻め方は選ばれる手数が最短、同じ手数なら駒余りなし。無駄合いは詰将棋のルールの判定のまま)
+// ---------------------------------------------------------------------------
+
+/// 変長駒余りの規則での局面の値
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CfValue {
+    NoMate,
+    /// (残りの手数, 詰上りで攻め方の持駒が空か)
+    Mate(u32, bool),
+    /// 手数の予算で決められない
+    Unknown,
+}
+
+/// 正解役の無駄合いの判定に使う上限。残りの手数と分ける (残りが少ないと無駄合いと証明できない合駒が
+/// 有効な応手に数えられ、受け方の選択が変わる)
+const CF_FUTILITY_PLIES: u32 = 7;
+
+/// 受け方の局面の、無駄合いでない応手
+fn cf_replies(pos: &mut Position) -> Vec<Move> {
+    legal_moves_by_rules(pos)
+        .into_iter()
+        .filter(|&mv| !ref_is_futile(pos, mv, CF_FUTILITY_PLIES))
+        .collect()
+}
+
+/// 経路 `history` を通らず、受け方も協力して詰む最短の手数が `max` 手以内ならその手数 (規則で選ばれる
+/// 手数の下界)
+fn cf_coop_len(pos: &mut Position, or_node: bool, max: u32, history: &mut Vec<u64>) -> Option<u32> {
+    let key = pos.key();
+    if history.contains(&key) {
+        return None;
+    }
+    let moves = if or_node {
+        checks_by_rules(pos)
+    } else {
+        let replies = cf_replies(pos);
+        if replies.is_empty() {
+            return Some(0);
+        }
+        replies
+    };
+    if max == 0 {
+        return None;
+    }
+    history.push(key);
+    let mut best = None;
+    for mv in moves {
+        pos.do_move_with_missing_kings(mv);
+        let len = cf_coop_len(pos, !or_node, best.map_or(max, |b: u32| b - 1).min(max) - 1, history);
+        pos.undo_move(mv);
+        if let Some(len) = len {
+            best = Some(len + 1);
+            if len == 0 {
+                break;
+            }
+        }
+    }
+    history.pop();
+    best
+}
+
+/// 変長駒余りの規則での値を `budget` 手の予算で求める。予算内で決まらなければ `Unknown`
+/// (打ち切った子が選択を変えうるかは、協力して詰む最短の手数で判定する)
+fn ref_cf(
+    pos: &mut Position,
+    or_node: bool,
+    budget: u32,
+    history: &mut Vec<u64>,
+    attacker: Color,
+) -> CfValue {
+    let key = pos.key();
+    if history.contains(&key) {
+        return CfValue::NoMate;
+    }
+    let moves = if or_node {
+        let checks = checks_by_rules(pos);
+        if checks.is_empty() {
+            return CfValue::NoMate;
+        }
+        checks
+    } else {
+        let replies = cf_replies(pos);
+        if replies.is_empty() {
+            return CfValue::Mate(0, pos.hand(attacker) == Hand::EMPTY);
+        }
+        replies
+    };
+    if budget == 0 {
+        return CfValue::Unknown;
+    }
+    history.push(key);
+    let mut values = Vec::with_capacity(moves.len());
+    for &mv in &moves {
+        pos.do_move_with_missing_kings(mv);
+        values.push(ref_cf(pos, !or_node, budget - 1, history, attacker));
+        pos.undo_move(mv);
+    }
+    let value = if or_node {
+        let best = values
+            .iter()
+            .filter_map(|v| match *v {
+                CfValue::Mate(d, c) => Some((d, c)),
+                _ => None,
+            })
+            .min_by_key(|&(d, c)| (d, !c));
+        match best {
+            None if values.contains(&CfValue::Unknown) => CfValue::Unknown,
+            None => CfValue::NoMate,
+            Some((d, c)) => {
+                // 決まらなかった子が、より短いか同じ手数で駒余りなしの値を持ちうるなら決まらない
+                let beaten = moves.iter().zip(&values).any(|(&mv, v)| {
+                    if *v != CfValue::Unknown {
+                        return false;
+                    }
+                    pos.do_move_with_missing_kings(mv);
+                    let lb = cf_coop_len(pos, false, d, history);
+                    pos.undo_move(mv);
+                    lb.is_some_and(|lb| lb < d || !c)
+                });
+                if beaten { CfValue::Unknown } else { CfValue::Mate(d + 1, c) }
+            }
+        }
+    } else if values.contains(&CfValue::NoMate) {
+        CfValue::NoMate
+    } else if values.contains(&CfValue::Unknown) {
+        CfValue::Unknown
+    } else {
+        let pairs = values.iter().filter_map(|v| match *v {
+            CfValue::Mate(d, c) => Some((d, c)),
+            _ => None,
+        });
+        let (d, c) = pairs.max_by_key(|&(d, c)| (c, d)).expect("応手がある");
+        CfValue::Mate(d + 1, c)
+    };
+    history.pop();
+    value
+}
+
+/// 根 (攻め方の手番) の変長駒余りの規則での値。`max` 手の予算まで広げて決まらなければ `Unknown`
+fn ref_cf_root(pos: &mut Position, max: u32) -> CfValue {
+    let attacker = pos.side_to_move();
+    for budget in (1..=max).step_by(2) {
+        let v = ref_cf(pos, true, budget, &mut Vec::new(), attacker);
+        if v != CfValue::Unknown {
+            return v;
+        }
+    }
+    CfValue::Unknown
+}
+
+/// 乱択局面で、変長駒余りの規則が今の規則と手数・駒余りを変える局面を数える (仕様の検討用)
+#[test]
+#[ignore]
+fn survey_clean_first_rule_on_random_positions() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5807_0101);
+    let (mut tested, mut mates, mut differ, mut unknown) = (0, 0, 0, 0);
+    while tested < 200 {
+        let Some(mut pos) = random_tsume_position(&mut rng) else { continue };
+        tested += 1;
+        pos.clear_checkers_without_king();
+        let attacker = pos.side_to_move();
+        let Some(len) = ref_len(&mut pos, 5) else { continue };
+        mates += 1;
+        let clean = ref_clean(&mut pos, len, true, attacker);
+        match ref_cf_root(&mut pos, 5) {
+            CfValue::Mate(d, c) if (d, c) == (len, clean) => {}
+            CfValue::Unknown => unknown += 1,
+            v => {
+                differ += 1;
+                println!("{} tsume=({len},{clean}) cf={v:?}", pos.to_sfen());
+            }
+        }
+    }
+    println!("tested {tested} mates {mates} differ {differ} unknown {unknown}");
+}
