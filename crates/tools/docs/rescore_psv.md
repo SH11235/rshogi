@@ -456,9 +456,9 @@ LayerStacks NNUE では `--ls-bucket-mode` が必須です。`progresskpabs` は
 - 全モードでピークメモリは入力件数に非依存（NNUE / 探索 / 外部エンジンは
   100 万件チャンク、ONNX はバッチ単位の固定 slot パイプライン）。
 - **ONNX モード**: 出力は `--onnx-sessions` / `--threads` に依存せず bit 一致。1 回の
-  実行に渡すファイルの分け方にも依存しない（CPU 推論で確認。TensorRT・CUDA EP では
-  未確認）。TensorRT は同一エンジンキャッシュ（warm）での実行が bit 再現の基準（cold の
-  初回ビルドでは最下位 bit が変わりうる）。
+  実行に渡すファイルの分け方にも依存しない（CPU・CUDA・TensorRT EP で確認）。TensorRT は
+  同一エンジンキャッシュ（warm）での実行が bit 再現の基準（cold の初回ビルドや、エンジンを
+  作り直した後では最下位 bit が変わりうる）。
 - **`--search-depth`**: 出力は `--threads` に依存せず bit 一致する（探索状態を 256 局面の塊
   ごとに初期化するため。後述「探索モードの並列化」）。`--hash-mb`・深さ・`--max-nodes` を
   変えると出力も変わる。`--max-time` は時間で打ち切るため再現しない。
