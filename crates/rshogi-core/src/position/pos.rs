@@ -735,7 +735,7 @@ impl Position {
     /// 占有を先に渡し、Win64 でも両半分を汎用レジスタで受け取る。
     /// 利き計算本体は呼び出し元のコードサイズを抑えるためインライン化しない。
     ///
-    /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
+    /// silverEffect で HDK の斜め近接利き、
     /// goldEffect で HDK の直線近接利きを捕捉し、
     /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
     /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
@@ -840,11 +840,11 @@ impl Position {
         self.pinned_pieces_excluding(them, avoid)
     }
 
-    /// fromを取り除いた占有でのpin駒（やねうら王の`pinned_pieces<Them>(from)`相当）
+    /// fromを取り除いた占有でのpin駒
     ///
     /// avoid升の駒をoccupiedとpinner候補の両方から除外する。
     /// set_check_infoでのpin情報の更新とは異なり、
-    /// sniper同士の除外は行わない（YOの`pinned_pieces<C>(avoid)`に準拠）。
+    /// sniper同士の除外は行わない。
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
         let avoid_bb = Bitboard::from_square(avoid);
         let avoid_not = !avoid_bb;
@@ -1934,7 +1934,7 @@ impl Position {
     }
 
     // =========================================================================
-    // 入玉宣言勝ち（YaneuraOu DeclarationWin 準拠）
+    // 入玉宣言勝ち
     // =========================================================================
 
     /// 敵陣のBitboard（先手なら1-3段目、後手なら7-9段目）
@@ -1945,7 +1945,7 @@ impl Position {
         }
     }
 
-    /// 入玉宣言勝ちの判定（YaneuraOu `Position::DeclarationWin()` 準拠）
+    /// 入玉宣言勝ちの判定
     ///
     /// 条件を満たしていれば `Move::WIN`（24/27点法）または玉の移動手（トライルール）を返す。
     /// 条件を満たさなければ `Move::NONE` を返す。
@@ -1998,7 +1998,7 @@ impl Position {
         // 駒落ち補正（_H バリアント）
         if matches!(rule, EnteringKingRule::Point24H | EnteringKingRule::Point27H) {
             let total = self.count_total_piece_points();
-            // 56 - total が駒落ちの分。後手の必要点を減算（YO 準拠: 上手=後手）
+            // 56 - total が駒落ちの分。後手の必要点を減算（上手=後手）
             if total < 56 {
                 let deficit = 56 - total;
                 if us == Color::White {
@@ -2046,7 +2046,7 @@ impl Position {
 
     /// トライルール: 玉が敵の初期玉位置に移動できるか判定
     ///
-    /// 玉が既にトライ升にいる場合は `Move::NONE` を返す（YO 準拠）。
+    /// 玉が既にトライ升にいる場合は `Move::NONE` を返す。
     /// king_effect に自マスは含まれないため、隣接判定で除外される。
     /// この場合、前の手番でトライ升への移動が成立しておりサーバーが終局を判定するはず。
     fn try_rule_move(&self, us: Color) -> Move {
@@ -2058,7 +2058,7 @@ impl Position {
             Color::White => Square::new(File::File5, Rank::Rank9),
         };
 
-        // (1) 玉がトライ升に隣接しているか（ksq == try_sq の場合も false → YO 準拠）
+        // (1) 玉がトライ升に隣接しているか（ksq == try_sq の場合も false）
         if !king_effect(ksq).contains(try_sq) {
             return Move::NONE;
         }
@@ -2084,12 +2084,12 @@ impl Position {
 
     /// 全駒の合計点数（駒落ち判定用）
     ///
-    /// YO 準拠: 盤上の全駒数(玉含む) + 大駒数×4 + 手駒の合計。
+    /// 盤上の全駒数(玉含む) + 大駒数×4 + 手駒の合計。
     /// 大駒 = 5点、その他(玉含む) = 1点。平手の場合は 56。
     fn count_total_piece_points(&self) -> u32 {
         let big_set = PieceTypeSet::bishop_horse() | PieceTypeSet::rook_dragon();
 
-        // 盤上: YO の p1 + p2 * 4（玉も1点として計上）
+        // 盤上: 駒数 + 大駒数 * 4（玉も1点として計上）
         let all_count = self.occupied().count();
         let big_count = self.pieces_by_types(big_set).count();
         let board_score = all_count + big_count * 4;

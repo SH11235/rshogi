@@ -626,7 +626,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// 順伝播
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。
-    /// 密な行列積方式（YaneuraOuスタイル）で実装。
+    /// 密な行列積方式で実装。
     ///
     /// 入力は `INPUT_DIM` を32の倍数に切り上げた長さ以上とし、`INPUT_DIM` より後ろは呼び出し側がゼロで埋めておく。
     /// 入力のアライメントは問わない。
@@ -940,7 +940,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
 
-                // 4出力同時処理: 入力ロードを再利用（YaneuraOu dot4方式）
+                // 4出力同時処理: 入力ロードを再利用
                 if OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0 {
                     let mut j = 0;
                     while j < OUTPUT_DIM {
@@ -1033,7 +1033,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 /// 入力: i32、出力: u8（0-127にクランプ）
 ///
 /// SIMD最適化版（AVX2/SSE2/WASM対応）
-/// tanuki-/YaneuraOu の clipped_relu.h を参考にフォールスルー構造で実装。
+/// 入力サイズに応じたフォールスルー構造で実装。
 ///
 /// # パフォーマンス特性
 ///

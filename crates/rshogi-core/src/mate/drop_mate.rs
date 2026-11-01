@@ -1,4 +1,4 @@
-// 駒打ちによる1手詰め判定（YaneuraOu移植）
+// 駒打ちによる1手詰め判定
 
 use crate::bitboard::{
     Bitboard, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, silver_effect,

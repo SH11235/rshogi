@@ -1,10 +1,10 @@
 //! BonaPiece - 駒の種類と位置を一意に表現するインデックス
 //!
-//! YaneuraOu の NNUE 実装で用いられる BonaPiece に準拠した定義。
+//! 駒の種類・所有者・位置を表す特徴量インデックスの定義。
 //! - `PieceType` / 升 / 手番（視点）により一意なインデックスに写像する。
 //! - 玉は特徴量に含めないため、BonaPiece としては常に `ZERO` を返す。
 //!
-//! ## YaneuraOu BonaPiece定義 (DISTINGUISH_GOLDS無効時)
+//! ## BonaPiece定義（成金を金に統合）
 //!
 //! ### 手駒 (1〜89)
 //! - f_hand_pawn = 1, e_hand_pawn = 20 (各18枚分)
@@ -31,7 +31,7 @@
 use crate::types::{Color, Piece, PieceType, Square};
 
 // =============================================================================
-// YaneuraOu形式の手駒BonaPiece定数
+// 手駒BonaPiece定数
 // =============================================================================
 
 /// 手駒領域の終端
@@ -56,7 +56,7 @@ pub const E_HAND_BISHOP: u16 = 82;
 pub const E_HAND_ROOK: u16 = 88;
 
 // =============================================================================
-// YaneuraOu形式の盤上駒BonaPiece定数
+// 盤上駒BonaPiece定数
 // =============================================================================
 
 pub const F_PAWN: u16 = 90;
@@ -160,7 +160,6 @@ const _: () = {
 
 /// fe_end: BonaPieceの最大値
 ///
-/// YaneuraOu の HalfKP 用定義に基づく。
 /// fe_end = e_dragon + 81 = 1467 + 81 = 1548
 pub const FE_END: usize = 1548;
 
@@ -170,7 +169,6 @@ pub const FE_END: usize = 1548;
 
 /// 先手視点(fb)と後手視点(fw)の BonaPiece をペアで保持する構造体
 ///
-/// YaneuraOu の ExtBonaPiece に相当。
 /// PieceList の各エントリおよび DirtyPiece の変化情報に使用する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExtBonaPiece {
@@ -324,7 +322,6 @@ impl BonaPiece {
 
     /// 盤上の駒からBonaPieceを計算
     ///
-    /// YaneuraOuの定義に従う（evaluate.h参照）
     /// 視点（perspective）に応じて駒の位置とインデックスを変換
     pub fn from_piece_square(piece: Piece, sq: Square, perspective: Color) -> BonaPiece {
         if piece.is_none() {
@@ -344,7 +341,7 @@ impl BonaPiece {
         // 駒の色が視点と同じかどうか
         let is_friend = pc_color == perspective;
 
-        // 基本オフセット（YaneuraOuの定義に準拠）
+        // 基本オフセット
         // 盤上駒は fe_hand_end (90) から始まる
         let base = match pt {
             PieceType::Pawn => {
@@ -422,7 +419,6 @@ impl BonaPiece {
 
     /// 手駒からBonaPieceを計算
     ///
-    /// YaneuraOuの手駒BonaPiece定義に従う。
     /// 手駒は (駒種, 枚数) でインデックスが決まる。
     /// 枚数が増えると新しいBonaPieceになる（0→1枚でbase, 1→2枚でbase+1, ...）
     ///
@@ -481,7 +477,7 @@ mod tests {
 
         let is_friend = owner == perspective;
 
-        // YaneuraOu形式の手駒オフセット（1から始まる）
+        // 手駒オフセット（1から始まる）
         // 手駒は盤上駒より前に配置されている
         let base = match pt {
             PieceType::Pawn => {

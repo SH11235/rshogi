@@ -130,7 +130,7 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     st.evaluator.evaluate(pos)
 }
 
-/// EvalHash を介した NNUE 静的評価（YaneuraOu の `Eval::evaluate` 相当）
+/// EvalHash を介した NNUE 静的評価
 ///
 /// hit 時はアキュムレータを更新しない。後続ノードの `update_accumulator` は
 /// 未計算の祖先を遡って差分適用 / refresh するため、skip しても整合は保たれる。
@@ -199,9 +199,6 @@ pub(super) fn do_move_and_push_prefetched(
 }
 
 /// do_move + nodes++ + nnue_push をまとめたラッパー
-///
-/// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
-/// rshogi でも同等の一括処理を提供する。
 #[inline]
 pub(super) fn do_move_and_push<P: TtPrefetch>(
     st: &mut SearchState,
@@ -306,7 +303,7 @@ pub(super) fn set_cont_history_for_move(
 /// ContinuationHistory をクリア（null move用）
 /// sentinelテーブル(NO_PIECE, SQ_ZERO)を参照するようにする。
 /// cont_hist_keyをNoneにするとcorrection historyのcontinuation更新がスキップされてしまうため、
-/// sentinel keyを設定してYOと同じsentinelテーブルへの読み書きが行われるようにする。
+/// sentinel keyを設定してsentinelテーブルへの読み書きを継続する。
 #[inline]
 pub(super) fn clear_cont_history_for_null(st: &mut SearchState, ctx: &SearchContext<'_>, ply: i32) {
     let correction_sentinel = {

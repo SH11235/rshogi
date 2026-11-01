@@ -33,7 +33,7 @@ impl Bitboard {
         Bitboard { p: [p0, p1] }
     }
 
-    /// u64ペアから生成（YaneuraOuのBitboard(p0,p1)相当）
+    /// u64ペアから生成
     #[inline]
     pub const fn from_u64_pair(p0: u64, p1: u64) -> Bitboard {
         Bitboard::new(p0, p1)

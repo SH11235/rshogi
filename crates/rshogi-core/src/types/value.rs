@@ -1,6 +1,6 @@
 //! 評価値（Value）
 //!
-//! 値のスケールは YaneuraOu 準拠で、`Value::MATE` 付近を詰みスコアとして予約している。
+//! `Value::MATE` 付近を詰みスコアとして予約している。
 //! 通常の評価値は主に [-MATE_IN_MAX_PLY, MATE_IN_MAX_PLY] の範囲で用いる。
 
 /// 評価値
@@ -27,12 +27,12 @@ impl Value {
     /// この値を変更する場合は pruning.rs の安全性を再検証すること。
     pub const NONE: Value = Value(32002);
 
-    /// 最大探索深度内での詰みスコア (YaneuraOu準拠: MATE - MAX_PLY)
+    /// 最大探索深度内での詰みスコア
     pub const MATE_IN_MAX_PLY: Value = Value(Self::MATE.0 - crate::types::depth::MAX_PLY);
     /// 最大探索深度内での詰まされスコア
     pub const MATED_IN_MAX_PLY: Value = Value(-Self::MATE_IN_MAX_PLY.0);
 
-    /// 歩の内部評価値（YaneuraOu準拠: PawnValue = 90）
+    /// 歩の内部評価値
     ///
     /// USI `score cp` 出力時に `100 * value / PAWN_VALUE` で正規化するために使用。
     /// NNUEの内部スケールにおいて歩1枚 ≈ 90 に対応する。
@@ -92,7 +92,7 @@ impl Value {
         }
     }
 
-    /// 内部値をUSI centipawn値に変換（YaneuraOu準拠）
+    /// 内部値をUSI centipawn値に変換
     ///
     /// `100 * value / PAWN_VALUE` で正規化。詰みスコアはそのまま返す。
     #[inline]

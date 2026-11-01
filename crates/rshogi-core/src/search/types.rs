@@ -2,7 +2,7 @@
 //!
 //! - `NodeType`: ノードの種類（Root, PV, NonPV）
 //! - `Stack`: 探索スタック
-//! - `PvTable`: PV 三角配列（Reckless 由来のヒープ割り当てなし方式）
+//! - `PvTable`: PV 三角配列（ヒープ割り当てなし）
 //! - `RootMove`: ルート手の情報
 //! - `RootMoves`: ルート手のリスト
 
@@ -20,7 +20,7 @@ use std::ptr::NonNull;
 /// PV サイズ上限（MAX_PLY + 1）
 const PV_SIZE: usize = MAX_PLY as usize + 1;
 
-/// PV 三角配列（Reckless 由来）
+/// PV 三角配列
 ///
 /// 各 ply の PV を固定長配列で保持し、`Vec<Move>` のヒープ割り当てを回避する。
 /// `table[ply][0..len[ply]]` が ply の PV ライン。
@@ -111,7 +111,7 @@ impl NodeType {
 
 /// ContinuationHistoryを参照するためのキー情報
 ///
-/// YaneuraOu方式: 各ノードで指し手実行後に設定し、
+/// 各ノードで指し手実行後に設定し、
 /// 後続のノードでContinuationHistoryテーブルを参照する際に使用する。
 #[derive(Clone, Copy, Debug)]
 pub struct ContHistKey {
@@ -164,7 +164,7 @@ pub struct Stack {
     /// tree-changing な探索改善でのみ参照する。
     pub follow_pv: bool,
 
-    /// ContinuationCorrectionHistoryへの参照（YaneuraOu方式）
+    /// ContinuationCorrectionHistoryへの参照
     ///
     /// # Safety
     ///
@@ -175,7 +175,7 @@ pub struct Stack {
     /// - 参照先を所有する`HistoryCell`は`SearchWorker`の生存期間中に再配置されない
     pub cont_correction_ptr: NonNull<CorrectionPieceToHistory>,
 
-    /// ContinuationHistoryへの参照（YaneuraOu方式、MovePicker直結）
+    /// ContinuationHistoryへの参照
     ///
     /// sentinelをセットする前提のためOptionではなく生ポインタで保持する。
     ///
@@ -188,7 +188,7 @@ pub struct Stack {
     /// - 参照先は `SearchWorker::history` フィールドが所有しており、`SearchWorker` の生存期間中は有効
     pub cont_history_ptr: NonNull<PieceToHistory>,
 
-    /// ContinuationHistoryキー（YaneuraOu方式）
+    /// ContinuationHistoryキー
     /// do_move後に設定し、後続ノードでContinuationHistory参照に使用
     pub cont_hist_key: Option<ContHistKey>,
 
@@ -336,7 +336,7 @@ impl<const N: usize> Default for SmallMoveList<N> {
     }
 }
 
-/// 探索用の固定長指し手リスト（YaneuraOu SEARCHEDLIST_CAPACITY相当）
+/// 探索用の固定長指し手リスト
 pub const SEARCHED_MOVES_CAPACITY: usize = 32;
 
 /// quiets_tried / captures_tried 用の型エイリアス
@@ -459,7 +459,7 @@ impl RootMove {
         false
     }
 
-    /// 平均スコア・二乗平均スコアを蓄積（YaneuraOuのaspiration初期窓用）
+    /// 平均スコア・二乗平均スコアを蓄積（aspiration の初期窓用）
     pub fn accumulate_score_stats(&mut self, value: Value) {
         // average_score: 初回はそのまま、2回目以降は前回と現在の平均
         self.average_score = if self.average_score.raw() == -Value::INFINITE.raw() {
@@ -630,7 +630,6 @@ impl RootMoves {
 
     /// 指定範囲をスコア降順で安定ソート
     ///
-    /// YaneuraOuの std::stable_sort に相当。
     /// 同じスコアの場合、元の順序を保持する。
     ///
     /// # Arguments
@@ -681,7 +680,7 @@ impl RootMoves {
 
     /// 開始インデックスを指定して手を検索
     ///
-    /// YaneuraOuの `std::find(rootMoves.begin() + pvIdx, rootMoves.end(), move)` に対応。
+    /// start 以降から指定した手を探す。
     pub fn find_from(&self, mv: Move, start: usize) -> Option<usize> {
         self.moves[start..].iter().position(|rm| rm.mv() == mv).map(|i| i + start)
     }
@@ -999,7 +998,7 @@ mod tests {
         let restored = value_from_tt(converted, ply);
         assert_eq!(restored.raw(), loss.raw());
 
-        // 無効値はそのまま保持される（YaneuraOu value_from_tt 準拠）
+        // 無効値はそのまま保持される
         assert_eq!(value_to_tt(Value::NONE, ply), Value::NONE);
         assert_eq!(value_from_tt(Value::NONE, ply), Value::NONE);
     }

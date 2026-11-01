@@ -1,10 +1,10 @@
 //! 置換表エントリー
 //!
-//! TTEntry: 10バイトのコンパクトなエントリ構造（YaneuraOu CLUSTER_SIZE=3 準拠）
+//! TTEntry: 10バイトのコンパクトなエントリ構造
 //! TTData: 読み取り用のデータ構造
 //!
 //! # 16bitキーの採用
-//! YaneuraOu（CLUSTER_SIZE=3）準拠で16bitキーを使用。
+//! 16bit キーを使用。
 //! クラスターインデックスは64bitキーの上位ビットで決定し、
 //! クラスター内マッチングに下位16bitを使用する。
 //! 独立一様な短縮キーの偶然一致は最大3/65536程度。並行更新による混在の確率とは異なる。
@@ -14,7 +14,7 @@ use super::{GENERATION_CYCLE, GENERATION_MASK};
 use crate::types::{Bound, DEPTH_ENTRY_OFFSET, Move, Value};
 
 /// 置換表エントリー
-/// YaneuraOu（CLUSTER_SIZE=3）準拠の10バイト構造
+/// 10バイト構造
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct TTEntry {
@@ -97,7 +97,6 @@ impl TTEntry {
 
     /// エントリを読み取る
     pub fn read(&self) -> TTData {
-        // YaneuraOu準拠:
         // move16 はここで潰さずに生値を保持し、probe() 側の pos.to_move() で整合性検証する。
         let mv = Move::from_u16(self.move16);
         TTData {
@@ -115,7 +114,6 @@ impl TTEntry {
     /// # 引数が多い理由
     /// この関数は探索のホットパスで頻繁に呼ばれるため、
     /// 構造体にまとめるオーバーヘッドを避けて個別の引数として渡している。
-    /// YaneuraOu/Stockfishの実装に準拠。
     pub fn save(
         &mut self,
         key64: u64,

@@ -1,6 +1,6 @@
 //! nnue-pytorch LayerStacks アーキテクチャ
 //!
-//! nnue-pytorch の LayerStacks 構造を実装する。
+//! nnue-pytorch LayerStacks 形式のモデルを扱う。
 //! 9個のバケットを持ち、局面に応じてバケットを選択して推論を行う。
 //!
 //! ## アーキテクチャ
@@ -463,7 +463,7 @@ impl<
 
 /// SqrClippedReLU 変換（SIMD最適化版）
 ///
-/// nnue-pytorch の forward 処理:
+/// 学習時の浮動小数点演算:
 /// ```python
 /// l0_ = (us * cat([w, b], dim=1)) + (them * cat([b, w], dim=1))
 /// l0_ = clamp(l0_, 0.0, 1.0)
@@ -988,7 +988,6 @@ unsafe fn sqr_clipped_relu_write<const L1: usize>(
 
 /// バケットインデックスを計算
 ///
-/// nnue-pytorch の実装（training_data_loader.cpp:272-283）に基づく。
 /// 両玉の段（rank）に基づいてバケットを選択する。
 ///
 /// - 味方玉の段を3段階に分割: 0-2 → 0, 3-5 → 3, 6-8 → 6

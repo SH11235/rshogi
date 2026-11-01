@@ -1,4 +1,5 @@
-//! YaneuraOu SFNN の整数進行度 routing。tatara の f32 routing とは分離する。
+//! YaneuraOu SFNN モデル用の Q16 整数進行度 routing。tatara の浮動小数点形式とは区別する。
+//! 256 段階に量子化して振り分ける BulletOu 形式とは、バケット数1・2・4・8・16でのみ一致する。
 //!
 //! 探索用 stack は生成・reset 時に係数の Arc を取得し、探索中はロックなしで参照する。
 //! 静的 LayerStacks は視点別の部分和を DirtyPiece から更新する。係数を再設定した場合は
@@ -61,7 +62,7 @@ const THRESHOLDS: [&[i64]; MAX_LAYER_STACK_BUCKETS + 1] = [
         96098, 127527, 177475,
     ],
 ];
-/// raw f64 LE 係数を YaneuraOu と同じ round(w * 65536) / i32 clamp で量子化する。
+/// raw f64 LE 係数を round(w * 65536) / i32 clamp で量子化する。
 pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32]>, String> {
     if bytes.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * 8 {
         return Err("progress Q16 coefficient size mismatch".to_string());
@@ -323,8 +324,8 @@ mod tests {
 
     #[test]
     fn yo_thresholds_match_bulletou_scalar_progress_boundaries() {
-        // BulletOu game/outputs.rs: 256 logit thresholds, then integer value * N / 256.
-        // YaneuraOu evaluate_nnue.cpp: direct N logit thresholds with upper_bound.
+        // 256 段階に量子化してから整数値 * N / 256 で振り分けるモデル形式の境界。
+        // バケット数ごとの logit 閾値に対して upper_bound でバケットを選ぶ。
         let bullet: Vec<i64> = (1..256)
             .map(|i| {
                 let p = i as f64 / 256.0;
@@ -365,7 +366,7 @@ mod tests {
             pos.set_sfen(sfen).unwrap();
             let bk = pos.king_square(Color::Black).index() * FE_OLD_END;
             let wk = pos.king_square(Color::White).inverse().index() * FE_OLD_END;
-            // YO SumQ16 enumerates the two BonaPiece lists rather than board/hand scans.
+            // 両視点の BonaPiece リストを走査して Q16 係数を合算する。
             let reference: i64 = pos
                 .piece_list()
                 .piece_list_fb()

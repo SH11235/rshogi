@@ -29,7 +29,7 @@ impl Position {
     /// 指し手が現在の局面で pseudo-legal かどうかを確認する。
     /// 完全な合法性（自玉への王手回避など）はチェックしない。
     ///
-    /// YaneuraOuの実装を参考に、王手中の不正な手を早期リジェクトする。
+    /// 王手中の不正な手を早期リジェクトする。
     /// 行き所のない駒の打ち・不成は拒否する。合法な不成は探索用の省略をせず残す。
     ///
     /// ## パフォーマンスについて
@@ -165,7 +165,7 @@ impl Position {
                 return false;
             }
 
-            // 【参考実装】成らない手の制限（YaneuraOu の generate_all_legal_moves = false 相当）
+            // 全合法手生成モードでない場合の不成の制限
             // 特殊な詰み手順（歩不成での打ち歩詰め回避、角不成での利き調整など）の
             // 発見を可能にするため、本実装では有効化しない。
             // NPS改善も誤差範囲内だったため、制限しないことによるデメリットはない。
@@ -325,7 +325,7 @@ impl Position {
         );
 
         let start_len = moves.len();
-        // YaneuraOu標準のQUIETS相当: 成りも含む静かな手を生成する
+        // 成りも含む静かな手を生成する
         generate_with_type(self, GenType::Quiets, moves, None);
         moves.len() - start_len
     }
@@ -345,7 +345,7 @@ impl Position {
 
     /// SEE >= threshold かどうかを判定（swap/resアルゴリズム）
     ///
-    /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
+    /// 静的駒交換評価を判定する。
     /// 成りボーナスは考慮しない。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
         // PASSは駒交換が発生しないので >= 0
@@ -412,7 +412,7 @@ impl Position {
             // ピン処理 — ピンされた駒は攻撃に参加できない
             // pinners(~stm): stmの玉をピンしている(!stm側の)駒
             // rshogi の pinners[c] は「!c側の駒がc側の王をピンしている」という意味なので、
-            // stm の王をピンしている駒を取得するには pinners[stm] を使う（YOは pinners[~stm]）
+            // stm の王をピンしている駒を取得するには pinners[stm] を使う
             if !(self.state().pinners[stm.index()] & occupied).is_empty() {
                 stm_attackers &= !self.blockers_for_king(stm);
                 if stm_attackers.is_empty() {
@@ -526,7 +526,7 @@ impl Position {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
         }
         // Rook(990) を Horse(945) より先に選択
-        // 価値昇順ではないが、YOとのノード数一致のために順序を合わせる
+        // この順序は SEE の取り返し駒の選択に影響するため、固定した bench のノード数を保つよう変えない
         // Rook (990)
         let bb = attackers & self.pieces(stm, PieceType::Rook);
         if !bb.is_empty() {

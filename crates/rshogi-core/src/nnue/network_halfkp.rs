@@ -33,7 +33,7 @@
 //! # 特徴量
 //!
 //! - 入力次元: 125,388 (81キング位置 × 1,548 BonaPiece)
-//! - 従来の classic NNUE（水匠/tanuki互換）
+//! - 従来の classic NNUE
 
 use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
@@ -1111,7 +1111,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 
 /// アフィン変換層（ループ逆転最適化対応）
 ///
-/// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
+/// SIMD で積和演算を並列化する。
 /// 重みの格納レイアウトは `should_use_scrambled_weights()` で決まる:
 /// x86 AVX2 かつ OUTPUT が 8 の倍数、または x86 SSSE3 かつ OUTPUT が 4 の倍数では
 /// スクランブル形式 `weights[input_chunk][output][4]`、それ以外では行優先

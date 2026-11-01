@@ -130,7 +130,7 @@ pub fn set_eval_hash_enabled(enabled: bool) {
 
 /// スレッドセーフなEvalHashエントリ
 ///
-/// AtomicU64×2 + XORエンコーディングによる実装（Stockfish/YaneuraOu準拠）。
+/// AtomicU64×2 + XORエンコーディングによる実装。
 ///
 /// ## 設計原理
 /// - `key_xor = key ^ score` として格納
@@ -142,7 +142,6 @@ pub fn set_eval_hash_enabled(enabled: bool) {
 /// Relaxed orderingを使用。これは以下の理由で許容できる：
 /// 1. torn read は XOR 照合でほぼ確実にキャッシュミスに落ちる
 /// 2. 競合時の「偽陰性」（キャッシュミス）は許容される
-/// 3. Stockfish/YaneuraOuも同様のアプローチを採用
 ///
 /// Release/Acquireを使用しない理由：
 /// - x86_64では差がない（ハードウェアが強いメモリモデルを提供）

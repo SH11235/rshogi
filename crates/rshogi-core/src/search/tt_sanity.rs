@@ -1,7 +1,7 @@
 //! TT読み取りの健全性チェック補助
 //!
 //! lock-free TT は読み取り競合で自己矛盾データを拾うことがあるため、
-//! YaneuraOu の `is_valid(ttData.value)` 相当の防御を集約する。
+//! 置換表から読んだ値が有効範囲内かを確認する。
 //!
 //! `tt-trace` feature 有効時は TT trace / helper TT write 制御が利用可能になる。
 //! 環境変数: `RSHOGI_DEBUG_TT_TRACE`, `RSHOGI_DEBUG_TT_SANITY`,

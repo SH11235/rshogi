@@ -227,8 +227,8 @@ Edition 軸と直交する opt-in feature (`mimalloc` / `prepacked-nnue` / `sear
 feature 同士の排他 (`mimalloc` と `allocation-stats` 等) は xtask では検査せず、
 cargo build のエラーで検出される。
 
-`use-lazy-evaluate` は TT hit 時の非 PV ノードで NNUE を再評価せず TT の eval を再利用する
-(YaneuraOu の `USE_LAZY_EVALUATE` 相当)。置換表の衝突で別局面の eval を使うと探索木が変わるため、
+`use-lazy-evaluate` は TT hit 時の非 PV ノードで NNUE を再評価せず TT の eval を再利用する。
+置換表の衝突で別局面の eval を使うと探索木が変わるため、
 探索ノード数や指し手は既定 build とのビット一致を保証しない。計測・実験用で、既定は off のまま。
 TT eval を再利用したノードでは EvalHash hit と同じく NNUE アキュムレータを更新せず、後で評価する子孫ノードが
 計算済みの祖先から差分適用するか refresh する。祖先をたどれる範囲が親だけの threat / HalfKX 系の net では

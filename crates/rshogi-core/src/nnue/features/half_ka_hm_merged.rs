@@ -8,8 +8,6 @@
 //!
 //! 注意: nnue-pytorchのcoalesce済みモデル専用。
 //! Factorizationの重みはBase側に畳み込み済みのため、推論時はBaseのみで計算する。
-//!
-//! 参考実装: nnue-pytorch training_data_loader.cpp, serialize.py
 
 use super::Feature;
 use super::TriggerEvent;

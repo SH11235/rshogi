@@ -13,7 +13,7 @@ use crate::types::{Color, Piece, Square};
 
 use super::history::{CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE, PAWN_HISTORY_SIZE};
 
-/// pawnHistory初期値 (YO: pawnHistory.clear_range(-1238, ...))
+/// pawnHistory初期値
 pub(super) const PAWN_HISTORY_INIT: i16 = -1238;
 
 /// 複数スレッドから読み書きする履歴の 1 entry。更新式は `StatsEntry` と同じ。

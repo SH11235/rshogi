@@ -1,9 +1,9 @@
 //! NNUEネットワーク全体の構造と評価関数
 //!
 //! 以下のアーキテクチャをサポート:
-//! - **HalfKP**: classic NNUE（水匠/tanuki互換）
-//! - **HalfKaSplit**: nnue-pytorch互換（Non-mirror）
-//! - **HalfKaHmMerged^**: nnue-pytorch互換（Half-Mirror + Factorization）
+//! - **HalfKP**: classic NNUE
+//! - **HalfKaSplit**: Non-mirror
+//! - **HalfKaHmMerged^**: Half-Mirror + Factorization
 //!
 //! # 階層構造（4バリアント）
 //!
@@ -74,7 +74,7 @@ static NNUE_REQUIRES_BOARD_EFFECTS: AtomicBool = AtomicBool::new(false);
 /// 0 = 自動判定（Network 構造体の fv_scale を使用）
 /// 1以上 = 指定値でオーバーライド
 ///
-/// YaneuraOuと同様にエンジンオプションで設定可能。
+/// エンジンオプションで設定可能。
 /// 評価関数によって異なる値が必要な場合に使用。
 static FV_SCALE_OVERRIDE: AtomicI32 = AtomicI32::new(0);
 
@@ -136,11 +136,12 @@ pub fn parse_nnue_architecture(value: &str) -> Option<NNUEArchitectureOverride> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LayerStackBucketMode {
-    /// 両玉の相対段で 9 バケットを選択する YaneuraOu 互換方式
+    /// 両玉の相対段で 9 バケットを選択する方式
     KingRank9 = 0,
-    /// 進行度方式 (KP-absolute)。bucket 数は推論設定で明示する。
+    /// tatara モデル用の浮動小数点進行度方式 (KP-absolute)。bucket 数は推論設定で明示する。
     ProgressKPAbs = 4,
-    /// YaneuraOu / BulletOu SFNN 互換の Q16 整数進行度方式。
+    /// YaneuraOu SFNN モデル用の Q16 整数進行度方式。
+    /// 256 段階に量子化する BulletOu 形式とは、バケット数1・2・4・8・16でのみ振り分けが一致する。
     ProgressKPAbsQ16 = 5,
 }
 
@@ -195,10 +196,10 @@ pub fn load_progress_coeff_kpabs_from_bytes(bytes: &[u8]) -> Result<Box<[f32]>, 
 ///
 /// `OnceLock` で N 値ごとに lazy 初期化し、`ln(k / (N-k))` を pre-compute する。
 /// ホットパス (`progress_sum_to_bucket`) では slice を取って `partition_point`
-/// で `floor(sigmoid(sum) * N)` 相当を求める。tatara `progress_kpabs::bucket`
-/// (`floor(p * N).clamp(0, N-1)`) と等価: `t_k = ln(k / (N-k))` は `sigmoid(t_k) = k/N`
+/// で `floor(sigmoid(sum) * N).clamp(0, N-1)` を求める。`t_k = ln(k / (N-k))` は `sigmoid(t_k) = k/N`
 /// を満たすので、`sum >= t_k` となる k の個数がちょうど `floor(sigmoid(sum) * N)` になる
 /// (`sum = t_k` の境界ではどちらも k、`sum = +∞` ではどちらも N-1)。
+/// この式は、学習側の bucket の式 `floor(p * N).clamp(0, N-1)` と一致させる必要がある。
 ///
 /// 配列添字 N (`1..=MAX_LAYER_STACK_BUCKETS`) ごとに `OnceLock<Box<[f32]>>`。
 /// 添字 0 は使われない placeholder。
@@ -1566,7 +1567,7 @@ pub fn update_progresskpabs_sum_diff(
 
 /// progress_sum から bucket index を計算（閾値比較のみ）
 ///
-/// 戻り値は `[0, num_buckets)`。式は tatara の
+/// 戻り値は `[0, num_buckets)`。
 /// `floor(sigmoid(sum) × num_buckets).clamp(0, num_buckets - 1)` と等価。
 /// 閾値テーブルは N ごとに `OnceLock` で lazy 構築される
 /// (等価性の根拠は `layer_stack_progress_thresholds` の doc)。
@@ -3386,9 +3387,7 @@ mod tests {
 
     #[test]
     fn test_progress_bucket_thresholds_match_sigmoid() {
-        // tatara `progress_kpabs::bucket` の `floor(p * N).clamp(0, N-1)` と engine 側
-        // partition_point 方式が N ∈ {1, 2, 3, 4, 5, 8, 9, 12, 16} で一致することを
-        // 各 sum 値で確認。
+        // 浮動小数点演算の丸め差を含めて、sigmoid と閾値比較のバケット選択を照合する。
         let sigmoid_bucket = |sum: f32, n: usize| -> usize {
             let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
             let raw = (p * n as f32).floor() as i32;
@@ -3421,7 +3420,7 @@ mod tests {
             }
         }
         // 閾値 t_k ちょうど での tie-break: sum = t_k ⇔ sigmoid(t_k) = k/N で
-        // tatara floor(k) = k、engine partition_point = k。
+        // floor(k) と partition_point の結果はいずれも k になる。
         for n in 2..=MAX_LAYER_STACK_BUCKETS {
             for k in 1..n {
                 let t_k = ((k as f32) / (n as f32 - k as f32)).ln();

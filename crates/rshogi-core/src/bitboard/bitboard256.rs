@@ -202,7 +202,7 @@ impl Bitboard256 {
 
     /// 256bit unpack命令の実装（静的メソッド）
     ///
-    /// YaneuraOuのBitboard256::unpackと同等の処理。
+    /// 128bit ごとに、2 入力の上位・下位の 64bit レーンを交互に並べる。
     ///
     /// # Algorithm
     /// SSE2のunpackを2回適用：

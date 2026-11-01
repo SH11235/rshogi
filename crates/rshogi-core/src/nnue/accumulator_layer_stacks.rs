@@ -103,7 +103,7 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 // AccumulatorCacheLayerStacks - Finny Tables（玉位置×視点キャッシュ）
 // =============================================================================
 
-/// AccumulatorCaches のキャッシュエントリ（Finny Tables、Stockfish 風 piece_list 差分）
+/// AccumulatorCaches のキャッシュエントリ（Finny Tables、piece_list 差分）
 ///
 /// 各玉位置×視点ごとに、最後に計算したアキュムレータ値と、その時点の
 /// `PieceList` (perspective 固有の `piece_list_fb` / `piece_list_fw`) を保持。
@@ -229,7 +229,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         entry.valid = true;
     }
 
-    /// PSQT 付きキャッシュ refresh（Stockfish 風 piece_list 差分方式）
+    /// PSQT 付きキャッシュ refresh（piece_list 差分方式）
     ///
     /// main acc と PSQT acc を同一の slot 差分で更新する。各 slot 差分につき
     /// main FT の add/sub に加えて PSQT の add/sub（9-i32 SIMD）を呼ぶ。
@@ -600,10 +600,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     ///
     /// アキュムレータの差分更新における祖先探索には複数のアプローチがある:
     ///
-    /// - **YaneuraOu方式**: 1手前のみをチェック（`max_depth=1`。シンプルだが差分更新機会を逃す）
-    /// - **Stockfish方式**: スタックを遡って計算済み祖先を探し、各ステップで玉移動をチェック
+    /// - **直前局面のみの方式**: 1手前のみをチェック（`max_depth=1`。シンプルだが差分更新機会を逃す）
+    /// - **祖先探索方式**: スタックを遡って計算済み祖先を探し、各ステップで玉移動をチェック
     ///
-    /// 本実装は Stockfish 方式。遡及上限 `max_depth` は呼び出し側が **runtime のモデル種別**
+    /// 本実装は祖先探索方式。遡及上限 `max_depth` は呼び出し側が **runtime のモデル種別**
     /// (`has_threat`) で渡す（threat モデル=1 / それ以外=4。理由は呼び出し側コメント参照）。
     /// edition-universal など threat 非対応モデルも同一バイナリで動く構成があるため、
     /// compile-time feature でなく runtime で分ける。各ステップで玉移動があれば即座に打ち切る。

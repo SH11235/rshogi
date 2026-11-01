@@ -175,7 +175,7 @@ pub struct MovePicker {
     end_bad_captures: usize,
     end_captures: usize,
     end_generated: usize,
-    /// partial_insertion_sort の sorted 領域末尾位置（未使用だが YO 構造保持用）
+    /// partial_insertion_sort の sorted 領域末尾位置（未使用、書き込みのみ）
     end_good_quiets: usize,
 }
 
@@ -324,7 +324,7 @@ impl MovePicker {
 
     /// quiet手の生成をスキップ（LMP条件成立時に呼び出す）
     ///
-    /// YaneuraOu準拠: フラグのみ設定する。実際のステージ遷移は next_move() 側で処理される。
+    /// フラグのみ設定する。実際のステージ遷移は next_move() 側で処理される。
     pub fn skip_quiets(&mut self) {
         self.skip_quiets = true;
     }
@@ -388,7 +388,7 @@ impl MovePicker {
                     self.end_bad_captures = 0;
                     self.moves.clear();
 
-                    // YaneuraOu準拠: CaptureInit/QCaptureInit/ProbCutInit は同じ capture 生成を使う
+                    // CaptureInit/QCaptureInit/ProbCutInit は同じ capture 生成を使う
                     let count = if self.generate_all_legal_moves {
                         crate::movegen::generate_with_type(
                             pos,
@@ -422,7 +422,7 @@ impl MovePicker {
                     if let Some(m) = self.select_good_capture(pos) {
                         return m;
                     }
-                    // YaneuraOu準拠: 常に QuietInit へ遷移。skip_quiets は
+                    // 常に QuietInit へ遷移。skip_quiets は
                     // QuietInit/GoodQuiet/BadQuiet 側で判定する。
                     self.stage = Stage::QuietInit;
                 }
@@ -452,7 +452,7 @@ impl MovePicker {
 
                         self.score_quiets(pos, history, shared);
 
-                        // YaneuraOu準拠: 深さベースの閾値で部分ソート
+                        // 深さベースの閾値で部分ソート
                         // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
                         let limit = -3560 * self.depth;
                         let quiet_count = self.end_cur - self.end_captures;
@@ -474,9 +474,9 @@ impl MovePicker {
                 }
 
                 // ==============================
-                // 良い静かな手を返す（YaneuraOu準拠: value > GOOD_QUIET_THRESHOLD）
+                // 良い静かな手を返す
                 // partial_insertion_sortで高スコア手が先頭に来るが、
-                // YaneuraOu同様に全quiet手を走査してthreshold超の手を返す
+                // 全quiet手を走査してthreshold超の手を返す
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
@@ -500,18 +500,18 @@ impl MovePicker {
                         return m;
                     }
 
-                    // YaneuraOu準拠: endCapturesからquiet手全体を再走査
+                    // endCapturesからquiet手全体を再走査
                     self.cur = self.end_captures;
                     self.end_cur = self.end_generated;
                     self.stage = Stage::BadQuiet;
                 }
 
                 // ==============================
-                // 悪い静かな手を返す（YaneuraOu準拠: value <= GOOD_QUIET_THRESHOLD）
+                // 悪い静かな手を返す
                 // ==============================
                 Stage::BadQuiet => {
                     if !self.skip_quiets {
-                        // YaneuraOu準拠: endCaptures から全quiet手を再走査し、
+                        // endCaptures から全quiet手を再走査し、
                         // value <= GOOD_QUIET_THRESHOLD の手のみ返す
                         if let Some(m) = self.select_bad_quiet() {
                             return m;
@@ -718,7 +718,7 @@ impl MovePicker {
         None
     }
 
-    /// GoodQuiet用: value > GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
+    /// GoodQuiet用: value > GOOD_QUIET_THRESHOLD の手のみ返す
     fn select_good_quiet(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
@@ -736,7 +736,7 @@ impl MovePicker {
         None
     }
 
-    /// BadQuiet用: value <= GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
+    /// BadQuiet用: value <= GOOD_QUIET_THRESHOLD の手のみ返す
     fn select_bad_quiet(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
@@ -798,7 +798,7 @@ impl MovePicker {
 
 /// 部分ソート（ハイブリッド方式）
 ///
-/// YaneuraOu準拠の部分挿入ソート。
+/// 部分挿入ソート。
 ///
 /// `limit` 以上のスコアの手を先頭に集め、降順でソートする。
 /// 先頭要素（index 0）を初期 sorted 領域とみなし、index 1 から走査する。
@@ -812,7 +812,6 @@ impl MovePicker {
 /// - 挿入ソート相当
 #[inline]
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
-    // YaneuraOu: movepick.cpp partial_insertion_sort()
     //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
     //       if (p->value >= limit) {
     //           ExtMove tmp = *p, *q;
@@ -866,7 +865,6 @@ pub(crate) fn piece_value(pc: Piece) -> i32 {
         Gold | ProPawn | ProLance | ProKnight | ProSilver => 540,
         Bishop => 855,
         Rook => 990,
-        // YaneuraOu Eval::PieceValue 準拠
         Horse => 945,
         Dragon => 1395,
         King => 15000,

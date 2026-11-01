@@ -252,7 +252,7 @@ pub struct Search {
     best_previous_score: Option<Value>,
     /// 直前イテレーションの平均スコア
     best_previous_average_score: Option<Value>,
-    /// 直近のイテレーション値（YaneuraOuは4要素リングバッファ）
+    /// 直近のイテレーション値（4要素リングバッファ）
     iter_value: [Value; 4],
     /// iter_valueの書き込み位置
     iter_idx: usize,
@@ -275,9 +275,9 @@ pub struct Search {
 
     /// 引き分けまでの最大手数（エンジンオプション）
     max_moves_to_draw: i32,
-    /// YaneuraOuオプション `DrawValueBlack`
+    /// USI オプション `DrawValueBlack`
     draw_value_black: i32,
-    /// YaneuraOuオプション `DrawValueWhite`
+    /// USI オプション `DrawValueWhite`
     draw_value_white: i32,
     /// SPSA向け探索係数
     search_tune_params: SearchTuneParams,
@@ -861,7 +861,7 @@ impl Search {
     /// 新しい対局の前に、置換表と EvalHash 以外の探索状態を初期化する（usinewgame 時に呼ぶ）。
     ///
     /// 全 worker の履歴（`SearchWorker::clear`）、共有履歴、前の対局から持ち越す時間配分と
-    /// 手番反転検出の状態を戻す。Stockfish の `ThreadPool::clear()` 相当。
+    /// 手番反転検出の状態を戻す。
     /// 置換表と EvalHash は `clear_tt` / `clear_eval_hash` で別に消す。
     pub fn clear_for_new_game(&mut self) {
         if let Some(worker) = &mut self.worker {
@@ -977,7 +977,7 @@ impl Search {
         self.max_moves_to_draw
     }
 
-    /// YaneuraOuオプション `DrawValueBlack` を設定する。
+    /// USI オプション `DrawValueBlack` を設定する。
     ///
     /// 有効範囲は `[-30000, 30000]`。
     pub fn set_draw_value_black(&mut self, v: i32) {
@@ -992,7 +992,7 @@ impl Search {
         self.draw_value_black
     }
 
-    /// YaneuraOuオプション `DrawValueWhite` を設定する。
+    /// USI オプション `DrawValueWhite` を設定する。
     ///
     /// 有効範囲は `[-30000, 30000]`。
     pub fn set_draw_value_white(&mut self, v: i32) {
@@ -1118,7 +1118,7 @@ impl Search {
         // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
         let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
-        // go nodes は YaneuraOu と同じく全スレッドの合計で打ち切る。
+        // go nodes は全スレッドの合計で打ち切る。
         // helper が無いときは自分のノード数だけで判定し、共有カウンタの atomic 操作を避ける。
         limits.searched_nodes =
             (limits.nodes > 0 && helper_search_enabled).then(|| Arc::new(AtomicU64::new(0)));
@@ -1378,13 +1378,10 @@ impl Search {
             main_nodes.saturating_add(helper_nodes)
         };
 
-        // YO yaneuraou-search.cpp 1303-1333相当:
         // Lazy SMPで採択したbestThreadのPVをbestmove直前の最終infoとして再出力する。
-        // YO は「未送信 or 採択スレッドが main 以外 or 投了スコア」のときのみ MultiPV
-        // 全ラインを再出力するが、ここでは「最後の info の pv 先頭 == bestmove」を
-        // 全経路で保証する目的なので、採択ライン (multipv 1) の 1 行を常に出す。
+        // 最後の info の pv 先頭を bestmove に揃えるため、採択ライン (multipv 1) を出す。
         // score が番兵 (±INFINITE) のまま = depth 1 の初手完了前に中断した場合は
-        // 出さない (YO の previousScore フォールバック相当のガード)。
+        // 出さない。
         // Wasm helper 採択で PV を取得できない場合も bestmove 1 手の PV で保証を保つ。
         if let Some(callback) = on_info.as_mut()
             && limits.analysis.is_none()
@@ -1504,7 +1501,7 @@ impl Search {
     }
 }
 
-/// メインスレッド固有の可変状態（YO の SearchManager に対応）
+/// メインスレッド固有の可変状態
 ///
 /// `search_with_callback` 呼び出し前に `Search` のフィールドから構築し、
 /// 戻った後に書き戻す。
@@ -1548,11 +1545,11 @@ impl MainThreadState<'_> {
     }
 }
 
-/// YaneuraOu の iterative_deepening() に対応する統合反復深化ループ。
+/// メインスレッドとワーカーで共用する反復深化ループ。
 ///
 /// メインスレッドでは `main_state = Some(...)` で呼び出し、
 /// ヘルパースレッドでは `main_state = None` で呼び出す。
-/// YO の `if (mainThread)` パターンを `if let Some(ref mut ms) = main_state` で表現。
+/// `main_state` がある場合だけメインスレッド用の処理を行う。
 fn iterative_deepening<FInfo, FProgress>(
     worker: &mut SearchWorker,
     pos: &mut Position,
@@ -1586,12 +1583,12 @@ where
         worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
     }
 
-    // root の入玉宣言勝ちチェック（YO準拠）
-    // 探索内の宣言勝ち判定は probe_transposition で行う（YO の search() と同じ位置）。
+    // root の入玉宣言勝ちチェック
+    // 探索内の宣言勝ち判定は probe_transposition で行う。
     let decl_move = pos.declaration_win(worker.entering_king_rule);
     if decl_move != Move::NONE {
         // 宣言勝ち可能: root_moves に追加してスコア MATE を設定
-        // searchmoves に関係なく追加する（YO準拠）
+        // searchmoves に関係なく追加する
         if worker.state.root_moves.find(decl_move).is_none() {
             worker.state.root_moves.push(super::RootMove::new(decl_move));
         }
@@ -1789,22 +1786,22 @@ where
 
             // 安定ソート [pv_idx..]
             worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
-            // 📝 YaneuraOu行1539: 探索済みのPVライン全体も安定ソートして順位を保つ
+            // 探索済みのPVライン全体も安定ソートして順位を保つ
             // abortしたdepthのinfoは出さない。最終infoは反復深化の後に決めた結果 (完了した反復、
             // または根の先頭に別の手が残った中断反復) から作る。
-            // 完了済みラインの取りこぼしはMultiPV>1のみで許容し、探索状態のsortはYO準拠で維持する。
+            // 完了済みラインの取りこぼしはMultiPV>1のみで許容し、探索状態の安定ソートは中断時も維持する。
             worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
             if !pv_aborted {
                 processed_pv = pv_idx + 1;
             }
         }
 
-        // MultiPVループ完了後の最終ソート（YaneuraOu行1499）
+        // MultiPVループ完了後の最終ソート
         if !worker.state.abort && effective_multi_pv > 1 {
             worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
         }
 
-        // メインのみ: info出力（GUI詰まり防止のYO仕様）
+        // メインのみ: info出力（GUI詰まり防止）
         if let Some(ref ms) = main_state
             && processed_pv > 0
             && !depth_aborted
@@ -1858,7 +1855,7 @@ where
             worker.state.best_move = worker.state.root_moves[0].mv();
 
             // previous_scoreを次のiterationのためにシード
-            // （YaneuraOu行1304-1305: rm.previousScore = rm.score）
+            // 前回のスコアを保存する。
             for rm in worker.state.root_moves.iter_mut() {
                 rm.previous_score = rm.score;
             }

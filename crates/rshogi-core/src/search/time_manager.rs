@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // 定数
 // =============================================================================
 
-/// デフォルトの最小思考時間（ミリ秒） - YaneuraOu準拠
+/// デフォルトの最小思考時間（ミリ秒）
 const DEFAULT_MINIMUM_THINKING_TIME: TimePoint = 2000;
 
 /// デフォルトのネットワーク遅延（ミリ秒）
@@ -33,12 +33,11 @@ const MIN_MINIMUM_THINKING_TIME: TimePoint = 1000;
 /// 引き分けまでの最大手数のデフォルト値
 pub const DEFAULT_MAX_MOVES_TO_DRAW: i32 = 100000;
 
-/// 合法手1つの場合の時間上限（ミリ秒）- YaneuraOu準拠
+/// 合法手1つの場合の時間上限（ミリ秒）
 const SINGLE_MOVE_TIME_LIMIT: TimePoint = 500;
 
-/// 最善手不安定性係数の定数 - YaneuraOu準拠
+/// 最善手不安定性係数の定数
 /// bestMoveInstability = BASE + FACTOR * totBestMoveChanges / threads.size()
-/// 注: クランプなし（YaneuraOu準拠）
 const BEST_MOVE_INSTABILITY_BASE: f64 = 0.9929;
 const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8519;
 
@@ -46,7 +45,7 @@ const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8519;
 // 公開関数
 // =============================================================================
 
-/// MoveHorizon（残り手数見積もり）を計算（YaneuraOu準拠）
+/// MoveHorizon（残り手数見積もり）を計算
 ///
 /// # Arguments
 /// * `time_forfeit` - 切れ負けルールか（inc=0かつbyoyomi=0）
@@ -66,9 +65,9 @@ pub fn calculate_move_horizon(time_forfeit: bool, ply: i32) -> i32 {
     }
 }
 
-/// 最善手不安定性係数を計算（YaneuraOu準拠、クランプなし）
+/// 最善手不安定性係数を計算
 ///
-/// YaneuraOu: bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
+/// bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
 ///
 /// # Arguments
 /// * `tot_best_move_changes` - 最善手変更の累積カウント
@@ -78,7 +77,7 @@ pub fn calculate_best_move_instability(tot_best_move_changes: f64, thread_count:
         + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count.max(1) as f64
 }
 
-/// fallingEvalを計算（YaneuraOu準拠）
+/// fallingEvalを計算
 ///
 /// fallingEval = (11.396 + 2.035 * (best_prev_avg - best) + 0.968 * (iter_value - best)) / 100
 /// を [0.5786, 1.6752] にクランプする。
@@ -90,7 +89,7 @@ pub fn calculate_falling_eval(best_prev_avg: i32, iter_value: i32, best_value: i
     eval.clamp(0.5786, 1.6752)
 }
 
-/// timeReductionを計算（YaneuraOu準拠）
+/// timeReductionを計算
 ///
 /// timeReduction = 0.8 + 0.84 / (1.077 + exp(-0.527 * (depth - (last_best_move_depth + 11))))
 /// を返す。
@@ -101,7 +100,7 @@ pub fn calculate_time_reduction(completed_depth: i32, last_best_move_depth: i32)
     0.8 + 0.84 / (1.077 + (-k * (completed_depth as f64 - center)).exp())
 }
 
-/// nodesEffort を正規化する（YaneuraOu準拠）
+/// nodesEffort を正規化する
 #[inline]
 pub fn normalize_nodes_effort(effort: f64, nodes_total: u64) -> f64 {
     effort * 100000.0 / nodes_total.max(1) as f64
@@ -163,17 +162,17 @@ pub struct TimeManagement {
     /// 合法手が1つだった場合に500ms上限を再適用するためのフラグ
     single_move_limit: bool,
 
-    /// 前回のtime_reductionを保持（YaneuraOu準拠のreduction計算に使用）
+    /// 前回のtime_reductionを保持（reduction 計算に使用）
     previous_time_reduction: f64,
 
-    /// Ponderオプション（YaneuraOu準拠）
+    /// Ponderオプション
     usi_ponder: bool,
     stochastic_ponder: bool,
 
     /// 思考時間を秒境界に切り上げるか (`TimeOptions::round_up_to_full_second`)
     round_up_to_full_second: bool,
 
-    /// Ponder中に時間を使い切ったフラグ（stopOnPonderhit相当）
+    /// Ponder中に時間を使い切ったフラグ
     stop_on_ponderhit: bool,
 
     /// 動的な ponder 状態
@@ -231,7 +230,7 @@ impl TimeManagement {
         self.stochastic_ponder = opts.stochastic_ponder;
     }
 
-    /// 前回の time_reduction をセット（YO準拠の持ち回り用）
+    /// 前回の time_reduction をセット
     pub fn set_previous_time_reduction(&mut self, value: f64) {
         self.previous_time_reduction = value;
     }
@@ -266,7 +265,7 @@ impl TimeManagement {
         }
     }
 
-    /// round_up処理（YaneuraOu準拠）
+    /// round_up処理
     ///
     /// 1秒単位で繰り上げてdelayを引く。
     /// ただし、remain_timeよりは小さくなるように制限する。
@@ -440,10 +439,10 @@ impl TimeManagement {
         self.optimum_time = t1.min(self.optimum_time);
         self.maximum_time = t2.min(self.maximum_time);
 
-        // SlowMover は YaneuraOu 同様 optimum のみスケールする（秒読みの最終局面は除外）
+        // SlowMover は optimum のみスケールする（秒読みの最終局面は除外）
         self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
 
-        // Ponder時調整（YaneuraOu準拠）
+        // Ponder時調整
         // Ponderが有効でStochastic_Ponderが無効の場合、optimumTimeを25%増やす
         if self.usi_ponder && !self.stochastic_ponder {
             self.optimum_time += self.optimum_time / 4;
@@ -504,7 +503,7 @@ impl TimeManagement {
 
     /// 合法手1つの場合の時間制限適用
     ///
-    /// YaneuraOu準拠: 視聴者体験を向上させるため、合法手が1つだけの場合に
+    /// 視聴者体験を向上させるため、合法手が1つだけの場合に
     /// 使用時間を500ms以下に制限する（実際の制限はtotal_time計算後に適用）
     pub fn apply_single_move_limit(&mut self) {
         self.single_move_limit = true;
@@ -512,7 +511,7 @@ impl TimeManagement {
 
     /// 最善手不安定性係数を適用して optimum_time を調整
     ///
-    /// YaneuraOu準拠: bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
+    /// bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
     ///
     /// # Arguments
     /// * `tot_best_move_changes` - 最善手変更の累積カウント
@@ -535,7 +534,7 @@ impl TimeManagement {
         tot_best_move_changes: f64,
         thread_count: usize,
     ) -> f64 {
-        // YaneuraOu準拠: byoyomiモード (is_final_push=true) では時間を変更しない
+        // byoyomiモード (is_final_push=true) では時間を変更しない
         // byoyomiは固定時間なので、動的な調整は適用しない
         if self.is_final_push {
             return 1.0;
@@ -549,7 +548,7 @@ impl TimeManagement {
         falling_eval * reduction * instability
     }
 
-    /// 1イテレーションで使うべき totalTime（YaneuraOu準拠）を計算
+    /// 1イテレーションで使うべき totalTime を計算
     pub fn total_time_for_iteration(
         &mut self,
         falling_eval: f64,
@@ -577,7 +576,7 @@ impl TimeManagement {
         let is_pondering = self.is_pondering;
         let effective_elapsed = self.effective_elapsed(elapsed);
 
-        // YaneuraOu: completedDepth>=10 && nodesEffort>=97056 && elapsed > totalTime*0.6540 なら search_end 設定
+        // completedDepth>=10 && nodesEffort>=97056 && elapsed > totalTime*0.6540 なら search_end 設定
         if completed_depth >= 10
             && nodes_effort >= 97056.0
             && (effective_elapsed as f64) > total_time * 0.6540
@@ -654,7 +653,7 @@ impl TimeManagement {
         self.last_stop_threshold = None;
     }
 
-    /// stopOnPonderhit相当のフラグ取得
+    /// ponderhit 時に停止するフラグを取得
     #[inline]
     pub fn stop_on_ponderhit(&self) -> bool {
         self.stop_on_ponderhit
@@ -666,7 +665,7 @@ impl TimeManagement {
         self.is_pondering
     }
 
-    /// stop_on_ponderhit フラグをクリア（YOのfail-low時相当）
+    /// stop_on_ponderhit フラグをクリア
     pub fn reset_stop_on_ponderhit(&mut self) {
         self.stop_on_ponderhit = false;
     }
@@ -690,13 +689,13 @@ impl TimeManagement {
 
     /// 探索を停止すべきか判定（反復深化の境目で呼び出す）
     ///
-    /// YaneuraOu準拠: ノード単位のチェックでは best_move_stable は使わない。
+    /// ノード単位のチェックでは best_move_stable は使わない。
     /// best_move_changes は反復深化の境目での時間計算（apply_best_move_instability）にのみ影響する。
     ///
     /// # Arguments
     /// * `depth` - 現在の探索深さ
     pub fn should_stop(&mut self, depth: i32) -> bool {
-        let _ = depth; // 深さ条件はYaneuraOuでは使用しない
+        let _ = depth;
         let elapsed = self.elapsed();
         self.should_stop_internal(elapsed)
     }
@@ -727,17 +726,17 @@ impl TimeManagement {
             return true;
         }
 
-        // ponder中は時間による停止判定を行わない（USI/UCI仕様、YO準拠）
+        // ponder中は時間による停止判定を行わない（USI/UCI仕様）
         if self.is_pondering {
             return false;
         }
 
-        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する（YO準拠）
+        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する
         if self.search_end == 0 && self.stop_on_ponderhit {
             self.set_search_end(elapsed);
         }
 
-        // search_end が設定されている場合は、それを最優先に使う（YO準拠）
+        // search_end が設定されている場合は、それを最優先に使う
         if self.search_end > 0 {
             if elapsed >= self.search_end {
                 debug!(
@@ -797,7 +796,7 @@ impl TimeManagement {
         elapsed_raw.saturating_sub(self.ponderhit_offset()).max(0)
     }
 
-    /// ponderhitを検出した際の処理（YO準拠）
+    /// ponderhitを検出した際の処理
     ///
     /// - `ponderhit_time` を更新し、以後の `set_search_end()` の秒境界切り上げ計算に反映する。
     /// - movetime/rtimeの固定期限が設定済みなら、hitまでの時間を加算して予算を移す。
@@ -818,7 +817,7 @@ impl TimeManagement {
         self.is_pondering = false;
         self.last_stop_threshold = None;
 
-        // ponder中に時間を使い切っていた場合のみ、終了時刻を確定させる（YOの stopOnPonderhit 相当）
+        // ponder中に時間を使い切っていた場合のみ、終了時刻を確定させる
         if self.search_end == 0 && self.stop_on_ponderhit {
             let elapsed = self.elapsed();
             self.set_search_end(elapsed);
@@ -826,9 +825,7 @@ impl TimeManagement {
         self.ponderhit.store(false, Ordering::Relaxed);
     }
 
-    /// 探索終了時刻を設定（YaneuraOu準拠、秒境界に切り上げ）
-    ///
-    /// YaneuraOu timeman.cpp:314-341 の実装を再現
+    /// 探索終了時刻を設定（秒境界に切り上げ）
     ///
     /// # Arguments
     /// * `elapsed_ms` - 探索開始からの経過時間（ミリ秒）
@@ -842,12 +839,9 @@ impl TimeManagement {
         // ponderhit_time は init() で start_time に設定されるため、通常の探索では duration = 0
         let duration_start_to_ponderhit = self.ponderhit_offset();
 
-        // YaneuraOuのロジックを完全再現
-        // TimePoint t1 = e + startTime - ponderhitTime;
         // elapsed_ms は start_time からの経過なので、ponderhit調整が必要
         let t1 = elapsed_ms.saturating_sub(duration_start_to_ponderhit);
 
-        // TimePoint t2 = isFinalPush ? minimum() : minimum() + startTime - ponderhitTime;
         let t2 = if self.is_final_push {
             self.minimum_time
         } else {
@@ -857,7 +851,6 @@ impl TimeManagement {
         let max_time = std::cmp::max(t1, t2);
         let rounded = self.round_up(max_time);
 
-        // search_end = round_up(std::max(t1, t2)) + ponderhitTime - startTime;
         self.search_end = rounded.saturating_add(duration_start_to_ponderhit);
     }
 

@@ -1,4 +1,4 @@
-//! 探索内の入玉宣言勝ち判定（YO の search() と同じく probe_transposition で行う）。
+//! 探索内の入玉宣言勝ち判定（probe_transposition で行う）。
 use std::sync::Arc;
 
 use crate::eval::EvalHash;
@@ -114,7 +114,7 @@ fn in_tree_declaration_cuts_off_without_tt_write() {
                 )
             };
             assert_eq!(value, Some(Value::mate_in(ply + 1)));
-            // Move::WIN は置換表に書き出さない（YO準拠）。
+            // Move::WIN は置換表に書き出さない。
             assert!(!written);
         }
     });
@@ -249,7 +249,7 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
         // 先手は敵陣の駒が 9 枚で今は宣言できないが、大駒を敵陣に打つと 10 枚 29 点になり、
         // 後手のどの応手の後でも宣言できる。
         // 先手の盤上に歩を置かないのは、静止探索が歩の成りを bestMove として置換表に残すと
-        // 非 PV ノードでは宣言判定が省かれる（YO と同じ `!ttMove || PvNode` 条件）ため。
+        // 非 PV ノードでは宣言判定が省かれる（`!ttMove || PvNode` 条件）ため。
         let sfen = "KGG6/+S+S7/+P+P+P+P+P4/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
         let root = position(sfen);
         assert_eq!(root.declaration_win(EnteringKingRule::Point27), Move::NONE);

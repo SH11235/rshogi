@@ -1,4 +1,4 @@
-//! 遠方駒（香・角・飛）の利きをYaneuraOu互換のQugiyアルゴリズムで計算する
+//! 遠方駒（香・角・飛）の利きをQugiyアルゴリズムで計算する
 
 use crate::types::{Color, Square};
 
@@ -7,7 +7,7 @@ use super::{Bitboard, Bitboard256, FILE_BB, RANK_BB};
 
 const _: () = assert!(std::mem::align_of::<SliderTable>() >= 32);
 
-/// 8方向の単一レイ（やねうら王のEffect8::Directに対応）
+/// 8方向の単一レイ
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direct {
     RU = 0,
@@ -302,7 +302,6 @@ fn init_qugiy_step_effect() -> [[Bitboard; Square::NUM]; 6] {
 }
 
 /// 盤上の駒を考慮しない香の利きレイ（方向別ルックアップテーブル）
-/// YaneuraOu の lanceStepEffect 相当
 #[inline]
 pub fn lance_step_effect(color: Color, sq: Square) -> Bitboard {
     let table = slider_attacks();
@@ -433,7 +432,7 @@ pub fn rook_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     rook_rank_effect(sq, occupied) | rook_file_effect(sq, occupied)
 }
 
-/// 方向付きのレイ利き（やねうら王のrayEffectに相当）
+/// 方向付きのレイ利き
 #[inline]
 pub fn ray_effect(dir: Direct, sq: Square, occupied: Bitboard) -> Bitboard {
     match dir {

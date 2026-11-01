@@ -8,7 +8,7 @@
 //! - 世代管理
 //! - prefetch
 //!
-//! # YaneuraOu（CLUSTER_SIZE=3）準拠
+//! # 3 エントリのクラスター
 //!
 //! クラスターインデックスは64bitキーの上位ビットで決定し、
 //! クラスター内マッチングに下位16bitを使用する。
@@ -29,7 +29,7 @@ pub(crate) use table::TTWriter;
 pub use table::{ProbeResult, TranspositionTable};
 
 /// クラスターサイズ（エントリ数）
-/// YaneuraOu準拠: payload 8bytes × 3 + 短縮キー 2bytes × 3 + padding 2bytes = 32bytes
+/// payload 8bytes × 3 + 短縮キー 2bytes × 3 + padding 2bytes = 32bytes
 pub const CLUSTER_SIZE: usize = 3;
 
 /// Generation関連の定数

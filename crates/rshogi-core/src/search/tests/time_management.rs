@@ -139,7 +139,7 @@ fn test_movetime_sets_search_end_and_stop() {
     assert!(tm.should_stop(1), "movetime超過で停止する");
 }
 
-/// Deepデフォルトは遅延値が大きい（YaneuraOu DEEP相当）
+/// Deepデフォルトは遅延値が大きい
 #[test]
 fn test_time_options_deep_defaults() {
     let deep = TimeOptions::deep_defaults();
@@ -185,7 +185,7 @@ fn test_worker_best_move_changes_decay() {
 }
 
 // =============================================================================
-// Phase 1: YaneuraOu準拠 時間管理TDD
+// 時間管理のテスト
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -295,7 +295,7 @@ fn test_stochastic_ponder_no_increase() {
 // 1.6 bestMoveInstability係数修正
 // -----------------------------------------------------------------------------
 
-/// bestMoveInstability係数: YaneuraOu準拠 (0.9929 + 1.8519 * x)
+/// bestMoveInstability係数: (0.9929 + 1.8519 * x)
 #[test]
 fn test_best_move_instability_yaneuraou_coefficients() {
     use super::super::time_manager::calculate_best_move_instability;

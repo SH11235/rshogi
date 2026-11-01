@@ -1034,7 +1034,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
 /// アフィン変換層（ループ逆転最適化対応）
 ///
-/// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
+/// SIMD で積和演算を並列化する。
 /// 重みの格納レイアウトは `should_use_scrambled_weights()` で決まる:
 /// x86 AVX2 かつ OUTPUT が 8 の倍数、または x86 SSSE3 かつ OUTPUT が 4 の倍数では
 /// スクランブル形式 `weights[input_chunk][output][4]`、それ以外では行優先

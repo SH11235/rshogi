@@ -6,7 +6,6 @@
 //!
 //! 本モジュールは展開済みの重み配列を POSIX 共有メモリ（`shm_open` + `mmap`）に置き、
 //! 同一 UID・同一 eval 内容を読む全プロセスが 1 物理コピーを参照できるようにする。
-//! YaneuraOu commit `2a4cb3d`（`SystemWideSharedConstant<NnueNetworks>`）と同型の機構。
 //!
 //! # 設計の要点
 //!
