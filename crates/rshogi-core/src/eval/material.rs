@@ -131,7 +131,7 @@ pub fn get_scaled_pass_move_bonus(_ply: i32) -> i32 {
     PASS_MOVE_BONUS.load(Ordering::Relaxed)
 }
 
-/// Material評価の適用レベル（YaneuraOu MaterialLv に対応）
+/// Material評価の適用レベル
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialLevel {
     Lv1,
@@ -146,7 +146,7 @@ pub enum MaterialLevel {
 impl MaterialLevel {
     /// レベル値から MaterialLevel を取得
     ///
-    /// 注意: レベル5, 6は未実装（YaneuraOu互換性のため欠番）
+    /// レベル番号は USI option の値に合わせているため、未実装の5, 6は欠番とする。
     pub fn from_value(v: u8) -> Option<Self> {
         match v {
             1 => Some(MaterialLevel::Lv1),
@@ -174,7 +174,7 @@ impl MaterialLevel {
     }
 }
 
-/// デフォルトのMaterial評価レベル（YaneuraOu MaterialLv9 相当）
+/// デフォルトのMaterial評価レベル
 pub const DEFAULT_MATERIAL_LEVEL: MaterialLevel = MaterialLevel::Lv9;
 
 /// ランタイムで切り替え可能なMaterial評価レベル
@@ -229,7 +229,7 @@ pub fn material_needs_board_effects() -> bool {
     )
 }
 
-/// Apery(WCSC26)準拠の駒価値
+/// Material 評価用の駒価値
 pub(crate) fn base_piece_value(pt: PieceType) -> i32 {
     match pt {
         PieceType::Pawn => 90,
@@ -310,7 +310,7 @@ const LV7_THEIR_EFFECT_VALUE: [i32; 9] = make_effect_values(92);
 /// 利きの多重度に応じた評価値テーブル（LazyLockによる遅延初期化）
 static MULTI_EFFECT_VALUE: LazyLock<[i32; 11]> = LazyLock::new(|| {
     let mut arr = [0i32; 11];
-    // YaneuraOu の optimizer が出力した近似式
+    // 利きの多重度から評価値を求める近似式
     // 6365 - pow(0.8525, m-1) * 5341 (m=1..10)
     // 利きが増えるほど逓減しつつ上限に漸近する特性を再現するための定数
     for (m, value) in arr.iter_mut().enumerate().skip(1) {
@@ -349,14 +349,13 @@ static LV7_TABLES: LazyLock<Lv7Tables> = LazyLock::new(|| {
 });
 
 // 自駒への味方/敵の利きが 0/1/2 のときの補正係数（MaterialLv7-9）
-// 値は YaneuraOu から移植。後で 4096 で割って駒価値に掛ける。
+// 4096 で割って駒価値に掛ける係数。
 const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
 const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
 
 // 玉の位置ボーナス（先手視点の81升テーブル）
 // インデックス: (8 - file) + rank * 9 （先手1段1筋が先頭、左から9筋→1筋の順）
 // 高い値ほど玉にとって安全とみなす。後手は Inv(sq) でミラーし、符号を反転して用いる。
-// 値は YaneuraOu MaterialLv8/9 から移植。
 const KING_POS_BONUS: [i32; 81] = [
     875, 655, 830, 680, 770, 815, 720, 945, 755, 605, 455, 610, 595, 730, 610, 600, 590, 615, 565,
     640, 555, 525, 635, 565, 440, 600, 575, 520, 515, 580, 420, 640, 535, 565, 500, 510, 220, 355,
@@ -390,7 +389,7 @@ fn direction_of(king: Square, sq: Square) -> usize {
         df = -df;
     }
 
-    // 返り値の意味（YaneuraOuのバケット順）
+    // 返り値の意味
     // 0: 真上, 1: 右上上, 2: 右上, 3: 右右上, 4: 右
     // 5: 右右下, 6: 右下, 7: 右下下, 8: 真下, 9: 同じ升
     if df == 0 && dr == 0 {

@@ -95,10 +95,10 @@
 //!   (5 種 × 2 色 = 10 エントリ)
 //!
 //! 方向性駒は攻撃方向が駒色に依存する。perspective 基準正規化後の駒色
-//! (`oriented_color`) を attack LUT のキーに含める Stockfish FullThreats 準拠の
+//! (`oriented_color`) を attack LUT のキーに含める
 //! 設計を採用している。THREAT_DIMENSIONS は影響を受けず、index 空間は同一。
 //!
-//! ## 正規化 (Stockfish FullThreats 準拠)
+//! ## 正規化
 //!
 //! HalfKaHmMerged と同じ perspective 基準で正規化する:
 //!
@@ -413,7 +413,7 @@ fn pair_base(
 }
 
 // =============================================================================
-// from_offset テーブル + attack_order（色別 LUT、Stockfish 準拠）
+// from_offset テーブル + attack_order（色別 LUT）
 // =============================================================================
 
 /// 方向性駒かどうか
@@ -629,7 +629,7 @@ fn is_canonical_dead(
     mutual && (attacker_class as u8) < (attacked_class as u8)
 }
 
-/// Threat index を計算する（Stockfish 準拠: perspective 基準 + 色別 LUT）
+/// Threat index を計算する（perspective 基準 + 色別 LUT）
 ///
 /// 除外された pair の場合は `None` を返す。
 ///
@@ -672,7 +672,7 @@ fn threat_index(
 // マス正規化
 // =============================================================================
 
-/// マスを perspective 基準 + HM mirror で正規化（Stockfish 準拠）
+/// マスを perspective 基準 + HM mirror で正規化
 ///
 /// HalfKaHmMerged と同じ perspective 基準。
 /// 方向性駒の利き方向の整合は、色別 attack LUT で解決する。
@@ -743,7 +743,7 @@ pub fn append_active_threat_indices(
                     continue;
                 }
 
-                // Perspective 基準で正規化（Stockfish 準拠）
+                // Perspective 基準で正規化
                 let from_sq_n = normalize_sq(from_sq, perspective, hm);
                 let to_sq_n = normalize_sq(to_sq, perspective, hm);
 

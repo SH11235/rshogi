@@ -1,6 +1,6 @@
 //! 王手候補駒テーブル (CheckCandidateBB)
 //!
-//! YaneuraOu準拠の事前計算テーブル。敵玉の位置ごとに、直接王手を
+//! 事前計算テーブル。敵玉の位置ごとに、直接王手を
 //! 実現できる可能性のある駒の候補マスを保持する。
 //! generate_checks で非blocker駒のフィルタリングに使用し、
 //! 全駒走査を回避して王手生成を高速化する。
@@ -218,7 +218,7 @@ fn init_check_candidate() -> [[[Bitboard; Square::NUM]; CHECK_CANDIDATE_NUM]; Co
                 result[us.index()][4][ksq.index()] = target & !ksq_bb;
             }
 
-            // === HORSE (index 5, YaneuraOuではROOKスロットに格納) ===
+            // === HORSE (index 5) ===
             // horseEffect(ksq, empty) の各マスから horse 空盤利き
             {
                 let mut target = Bitboard::EMPTY;

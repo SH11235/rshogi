@@ -1,6 +1,6 @@
 //! PieceList - 全40駒の BonaPiece 管理と逆引きテーブル
 //!
-//! YaneuraOu の EvalList に相当する。
+//! 両視点の駒特徴量を駒番号で管理する。
 //! 全40駒（歩18, 香4, 桂4, 銀4, 金4, 角2, 飛2, 玉2）の BonaPiece を
 //! PieceNumber で管理し、Square → PieceNumber / BonaPiece(fb) → PieceNumber の
 //! 逆引きテーブルで O(1) アクセスを実現する。
@@ -10,7 +10,7 @@ use crate::types::Square;
 
 /// 駒番号（全40駒に対する一意な番号）
 ///
-/// YaneuraOu の PieceNumber に準拠した番号割り当て:
+/// 駒番号の割り当て:
 /// - 歩: 0-17 (18枚)
 /// - 香: 18-21 (4枚)
 /// - 桂: 22-25 (4枚)
@@ -66,7 +66,7 @@ const PT_TO_BASE_INDEX: [u8; 9] = [
 
 /// PieceList - 全40駒の BonaPiece 管理テーブル
 ///
-/// YaneuraOu の EvalList に相当。
+/// 両視点の駒特徴量を駒番号で管理する。
 /// 合計 ~332 bytes で L1 キャッシュ内に収まる。
 #[derive(Clone)]
 pub struct PieceList {

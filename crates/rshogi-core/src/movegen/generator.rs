@@ -125,8 +125,8 @@ fn generate_pawn_moves(
     }
 }
 
-/// YaneuraOu の GPM_BR と生成順序を揃えるため、角・飛を統合した bitboard の
-/// pop 順（移動元の升の昇順）で生成し、駒種は角の bitboard への所属で判定する。
+/// 角・飛を統合した bitboard の pop 順（移動元の升の昇順）で生成する。
+/// MovePicker の同点時の順序が探索木とノード数に影響するため、駒種別には分けない。
 fn generate_br_moves(
     pos: &Position,
     target: Bitboard,
@@ -162,7 +162,7 @@ fn generate_br_moves(
         let from_in_promo = promo_ranks.contains(from);
 
         if from_in_promo {
-            // 移動元が敵陣なら全ての移動先で成れる (YO: canPromote(Us, from) 分岐)
+            // 移動元が敵陣なら全ての移動先で成れる
             for to in attacks.iter() {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
@@ -171,7 +171,6 @@ fn generate_br_moves(
             }
         } else {
             // 移動元が非敵陣: まず敵陣への移動(成り)、次に非敵陣への移動(不成り)
-            // (YO: GPM_BR の target2/target 分割に準拠)
             let promo_targets = attacks & promo_ranks;
             let non_promo_targets = attacks & !promo_ranks;
 
@@ -196,8 +195,8 @@ fn generate_ghdk_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     generate_gold_major_moves::<true>(pos, target, buffer);
 }
 
-/// YaneuraOu の GPM_GHDK / GPM_GHD と生成順序を揃えるため、金相当・馬・龍と
-/// KING が真なら玉を統合した bitboard の pop 順（移動元の升の昇順）で生成する。
+/// 金相当・馬・龍と、KING が真なら玉を統合した bitboard の pop 順で生成する。
+/// 同点時の探索順と、固定した perft・bench のノード数を保つため、駒種別には分けない。
 #[inline]
 fn generate_gold_major_moves<const KING: bool>(
     pos: &Position,
@@ -248,7 +247,7 @@ fn generate_lance_moves(
     let rank1 = rank1_bb(us);
     let occupied = pos.occupied();
 
-    // YaneuraOu準拠: 成り手を先に全列挙、次に不成手を列挙 (2パス)
+    // 成り手を先に全列挙、次に不成手を列挙 (2パス)
     // All=false (include_non_promotions=false) でも3段目(後手なら7段目)不成は生成する
     // 1段目不成は行き場がないため常に除外、2段目不成は All 時のみ
     let rank12 = rank12_bb(us);
@@ -333,14 +332,13 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveB
         let from_in_promo = promo_ranks.contains(from);
 
         if from_in_promo {
-            // 敵陣からなら全ての移動先で成れる (YO: enemy_field(Us) & from 分岐)
+            // 敵陣からなら全ての移動先で成れる
             for to in attacks.iter() {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         } else {
             // 非敵陣: まず敵陣への移動(成り+不成り)、次に非敵陣への移動(不成りのみ)
-            // (YO: SILVER の target2/target 分割に準拠)
             let promo_targets = attacks & promo_ranks;
             let non_promo_targets = attacks & !promo_ranks;
 
@@ -361,7 +359,7 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveB
 
 /// 二歩にならない升のBitboardを返す
 ///
-/// YaneuraOu でも手番は受け取るが、処理は筋単位で対称のため色依存しない。
+/// 手番は受け取るが、処理は筋単位で対称のため色依存しない。
 fn pawn_drop_mask(us: Color, our_pawns: Bitboard) -> Bitboard {
     match us {
         Color::Black | Color::White => {} // 手番引数はシグネチャ整合のため保持（対称処理）
@@ -397,7 +395,7 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     let our_pawns = pos.pieces(us, PieceType::Pawn);
     let mut valid_targets = valid_targets & pawn_drop_mask(us, our_pawns);
 
-    // YO準拠: 打ち歩詰めチェック — 王手になる升は玉の前の1升のみ事前特定して1回だけ判定
+    // 打ち歩詰めチェック — 王手になる升は玉の前の1升のみ事前特定して1回だけ判定
     let them = !us;
     let them_king = pos.king_square(them);
     let pe = pawn_effect(them, them_king);
@@ -415,7 +413,7 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
 
 /// 歩以外の駒打ちを生成
 ///
-/// YaneuraOu準拠の生成順序:
+/// MovePicker の同点時や root の手の順が探索木とノード数を決めるため、次の生成順を固定する。
 /// - 外側ループ: マス（LSB順）
 /// - 内側ループ: 駒種（桂→香→銀→金→角→飛の順）
 /// - 段の制約でマスを3グループに分割:
@@ -429,7 +427,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
     let empties = !pos.occupied();
     let target = target & empties;
 
-    // YO準拠: 駒種配列を桂→香→銀→金→角→飛の順で構築
+    // 駒種配列を桂→香→銀→金→角→飛の順で構築
     // ダミー初期値として Pawn を使用（num 未満のインデックスのみ参照される）
     let dummy = (PieceType::Pawn, crate::types::Piece::make(us, PieceType::Pawn));
     let mut drops = [dummy; 6];
@@ -521,14 +519,14 @@ fn generate_non_evasions_core(
     pawn_promo_mode: PromotionMode,
     include_drops: bool,
 ) {
-    // 駒の移動 (YaneuraOu movegen.cpp:generate_general 準拠の生成順序)
+    // MovePicker の同点時と root の手の順を通じて探索木が変わるため、固定した bench のノード数を保つようこの生成順を変えない。
     generate_pawn_moves(pos, targets.pawn, buffer, pawn_promo_mode);
     generate_lance_moves(pos, targets.general, buffer, include_non_promotions);
     generate_knight_moves(pos, targets.general, buffer);
     generate_silver_moves(pos, targets.general, buffer);
-    // 角+飛: GPM_BR — 1つの bitboard にまとめて pop 順で生成
+    // 角+飛: 1つの bitboard にまとめて pop 順で生成
     generate_br_moves(pos, targets.general, buffer, include_non_promotions);
-    // 金相当+馬+龍+玉: GPM_GHDK — 1つの bitboard にまとめて pop 順で生成
+    // 金相当+馬+龍+玉: 1つの bitboard にまとめて pop 順で生成
     generate_ghdk_moves(pos, targets.general, buffer);
 
     if include_drops {
@@ -615,14 +613,14 @@ fn generate_evasions_with_promos(
     let drop_target = between; // 合駒は間の升
     let move_target = between | Bitboard::from_square(checker_sq); // 移動は間 + 王手駒
 
-    // 玉以外の駒による移動（targetを制限, YO evasion準拠の生成順序）
+    // 同点時の探索順と、固定した bench のノード数を保つため、王手回避でもこの駒種順を固定する。
     generate_pawn_moves(pos, move_target, buffer, pawn_promo_mode);
     generate_lance_moves(pos, move_target, buffer, include_non_promotions);
     generate_knight_moves(pos, move_target, buffer);
     generate_silver_moves(pos, move_target, buffer);
-    // 角+飛: GPM_BR
+    // 角+飛
     generate_br_moves(pos, move_target, buffer, include_non_promotions);
-    // 金相当+馬+龍（玉なし）: GPM_GHD
+    // 金相当+馬+龍（玉なし）
     generate_ghd_moves(pos, move_target, buffer);
 
     // 駒打ち（合駒のみ）
@@ -660,7 +658,7 @@ fn piece_effect(pt: PieceType, us: Color, from: Square, occupied: Bitboard) -> B
 }
 
 /// 1つの駒から指定targetへの移動手を生成（成り処理込み）
-/// YaneuraOu movegen.cpp の make_move_target_general 相当
+/// 移動先を限定して、駒種ごとに成り・不成の手を生成する。
 /// 開き王手用: targetは「pin_lineから外れた移動先」
 fn generate_moves_from_sq(
     pos: &Position,
@@ -790,7 +788,7 @@ fn generate_moves_from_sq(
 }
 
 /// 1つの駒から直接王手となる移動手のみ生成
-/// YaneuraOu movegen.cpp の make_move_check 準拠
+/// 移動先を限定して、成り王手・不成王手を生成する。
 ///
 /// 2パス方式:
 ///   Pass 1 (成り): effect ∩ check_squares(promoted_pt) ∩ target → 成り手を生成
@@ -816,7 +814,7 @@ fn generate_direct_check_from_sq(
         let check_sq_promoted = pos.check_squares(promoted_pt);
         let check_sq_raw = pos.check_squares(pt);
 
-        // --- Pass 1: 成り王手 (YO: make_move_target_pro<..., true>) ---
+        // --- Pass 1: 成り王手 ---
         // 成って王手になる移動先
         let promo_dst = effect & check_sq_promoted & target;
         // 成り条件: from か to が敵陣
@@ -830,13 +828,13 @@ fn generate_direct_check_from_sq(
             add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
         }
 
-        // --- Pass 2: 不成王手 (YO: make_move_target_pro<..., false>) ---
+        // --- Pass 2: 不成王手 ---
         // 不成で王手になる移動先
         let nonpro_dst = effect & check_sq_raw & target;
 
         match pt {
             PieceType::Pawn => {
-                // YO make_move_target_pro<PAWN, false>:
+                // 歩の不成王手:
                 //   All=false → !canPromote(Us, to) のみ生成
                 //   All=true  → rank_of(to) != RANK_1 のみ生成
                 let rank1 = rank1_bb(us);
@@ -849,7 +847,7 @@ fn generate_direct_check_from_sq(
                 }
             }
             PieceType::Lance => {
-                // YO make_move_target_pro<LANCE, false>:
+                // 香の不成王手:
                 //   All=false → rank >= 3 (先手) つまり !rank12
                 //   All=true  → rank != 1 つまり !rank1
                 let rank1 = rank1_bb(us);
@@ -864,7 +862,7 @@ fn generate_direct_check_from_sq(
                 }
             }
             PieceType::Knight => {
-                // YO make_move_target_pro<KNIGHT, false>:
+                // 桂の不成王手:
                 //   rank >= 3 (先手) つまり !rank12。AllフラグはKNIGHTに影響しない
                 let rank12 = rank12_bb(us);
                 for to in (nonpro_dst & !rank12).iter() {
@@ -872,13 +870,13 @@ fn generate_direct_check_from_sq(
                 }
             }
             PieceType::Silver => {
-                // YO make_move_target_pro<SILVER, false>: 常に生成
+                // 銀の不成王手: 常に生成
                 for to in nonpro_dst.iter() {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
             }
             PieceType::Bishop | PieceType::Rook => {
-                // YO make_move_target_pro<BISHOP/ROOK, false>:
+                // 角・飛の不成王手:
                 //   !(canPromote(Us, from) || canPromote(Us, to)) || All
                 //   = 成れない位置、または All=true のとき不成を生成
                 let mask = if include_non_promotions {
@@ -904,9 +902,9 @@ fn generate_direct_check_from_sq(
     }
 }
 
-/// 王手生成（YaneuraOu movegen.cpp generate_checks 準拠の順序）
+/// 王手生成
 ///
-/// 生成順序:
+/// 詰みの探索 (df-pn) の攻め方の手の順がノード数と結果の再現性を決めるため、次の生成順を固定する。
 /// 1. blockers (開き王手候補) を LSB 順に処理
 /// 2. 非 blocker の直接王手候補を LSB 順に処理
 /// 3. 駒打ち王手を PAWN, LANCE, KNIGHT, SILVER, GOLD, BISHOP, ROOK の順
@@ -928,7 +926,7 @@ fn generate_checks(
         !pos.pieces_c(us)
     };
 
-    // YaneuraOu準拠: y = blockers_for_king(Them) & pieces(Us)
+    // y = blockers_for_king(Them) & pieces(Us)
     let blockers = pos.blockers_for_king(them) & pos.pieces_c(us);
 
     // --- Phase 1: blockers (開き王手候補) を LSB 順に処理 ---
@@ -961,7 +959,7 @@ fn generate_checks(
     }
 
     // --- Phase 2: 非 blocker の直接王手候補を LSB 順に処理 ---
-    // YaneuraOu準拠: check_candidate_bb で直接王手可能な駒のみフィルタ
+    // check_candidate_bb で直接王手可能な駒のみフィルタ
     let candidates = (pos.pieces(us, PieceType::Pawn)
         & check_candidate_bb(us, PieceType::Pawn, them_king))
         | (pos.pieces(us, PieceType::Lance)
@@ -992,7 +990,7 @@ fn generate_checks(
     let empties = !occupied;
     let hand = pos.hand(us);
 
-    // 歩打ち王手（YO準拠: 二歩+打ち歩詰めをgenerate内で除外）
+    // 歩打ち王手（二歩と打ち歩詰めを生成時に除外）
     if hand.has(PieceType::Pawn) {
         let check_target = pos.check_squares(PieceType::Pawn) & empties;
         if !check_target.is_empty() {
@@ -1055,7 +1053,7 @@ fn generate_recaptures(
     pawn_promo_mode: PromotionMode,
 ) {
     let target = Bitboard::from_square(sq);
-    // YaneuraOuのRECAPTURESは移動のみ（駒打ちは含めない）
+    // 取り返し手の生成は移動のみ（駒打ちは含めない）
     let targets = GenerateTargets::new(target);
     generate_non_evasions_core(
         pos,
@@ -1113,7 +1111,7 @@ pub fn generate_with_type(
             generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
         }
         QuietsProMinus => {
-            // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+            // targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
             let pawn_target = !enemy_field(us) & empties;
             let targets = GenerateTargets {
                 general: empties,
@@ -1130,7 +1128,7 @@ pub fn generate_with_type(
             );
         }
         QuietsProMinusAll => {
-            // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+            // targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
             let pawn_target = !enemy_field(us) & empties;
             let targets = GenerateTargets {
                 general: empties,
@@ -1155,7 +1153,7 @@ pub fn generate_with_type(
             generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
         }
         CapturesProPlus => {
-            // YO準拠: targetPawn = (~pieces(Us) & enemy_field(Us)) | pieces(Them)
+            // targetPawn = (~pieces(Us) & enemy_field(Us)) | pieces(Them)
             // 歩は取り手に加え、敵陣への静かな成りも生成する
             let pawn_target = (!pos.pieces_c(us) & enemy_field(us)) | enemy;
             let targets = GenerateTargets {
@@ -1268,14 +1266,13 @@ pub fn generate_all(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
 
 /// 合法手を生成
 ///
-/// YO 準拠の swap-erase フィルタを使用。pseudo-legal 手のリストを走査し、
-/// 非合法手を末尾の手で上書きして除去する。これにより末尾側の手が前方に
-/// 移動するため、YO と同一の手順序を再現できる。
+/// 非合法手を末尾の手で上書きする swap-erase を使う。除去後の順序も探索木と
+/// ノード数に影響するため、固定した bench のノード数を保つには順序を保存するフィルタへ変更しない。
 pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     let mut buffer = ExtMoveBuffer::new();
     generate_all(pos, &mut buffer);
 
-    // YO の swap-erase パターン:
+    // swap-erase パターン:
     //   while (mlist != last) {
     //       if (!pos.legal(*mlist))
     //           *mlist = *(--last);
@@ -1411,7 +1408,7 @@ impl Position {
         knights | silvers | golds | bishops | rooks
     }
 
-    /// 打ち歩詰めかどうかをチェック（YaneuraOu: legal_drop）
+    /// 打ち歩詰めかどうかをチェック
     fn legal_pawn_drop_check(&self, to: Square) -> bool {
         let us = self.side_to_move();
         let them = !us;
@@ -1669,7 +1666,7 @@ mod tests {
 
     #[test]
     fn test_pawn_drop_mate_is_illegal() {
-        // YaneuraOuのlegal_drop相当: 5一玉に5二歩打ちが詰みになる配置は非合法。
+        // 5一玉に5二歩打ちが詰みになる配置は非合法。
         // 5三桂で4一/6一を利かせ、5三金で6二を、3三角で4二を抑える。5四飛で玉頭にも利きを通す。
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/3GN1B2/4R4/9/9/9/9/4K4 b P 1").unwrap();
@@ -2093,7 +2090,7 @@ mod tests {
 
     /// 全合法手（不成を含む）で数える perft。
     ///
-    /// YaneuraOu の perft と同じく、末端では手を進めずに合法手数だけを数える。
+    /// 末端では手を進めずに合法手数だけを数える。
     fn perft(pos: &mut Position, depth: u32) -> u64 {
         let mut list = MoveList::new();
         generate_legal_all(pos, &mut list);

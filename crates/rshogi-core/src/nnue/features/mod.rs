@@ -1,6 +1,6 @@
 //! NNUE特徴量モジュール
 //!
-//! YaneuraOu の FeatureSet/Feature 構造に準拠した特徴量定義。
+//! 特徴量とリフレッシュ条件の定義。
 //! 将来の sfnn 対応を見据えた拡張可能な設計。
 
 mod half_ka_hm_merged;
@@ -27,7 +27,7 @@ use crate::types::{Color, Square};
 // TriggerEvent - リフレッシュトリガー
 // =============================================================================
 
-/// リフレッシュトリガー（YO TriggerEvent 相当）
+/// リフレッシュトリガー
 ///
 /// アキュムレータの全計算が必要になる条件を定義する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub enum TriggerEvent {
 // Feature trait - 各特徴量型が実装する基本trait
 // =============================================================================
 
-/// Feature trait（YO Feature 相当）
+/// Feature trait
 ///
 /// 各特徴量型が実装する基本trait。
 /// 将来 sfnn 対応時に HalfKAv2 などを追加する際も同じインターフェースを使用する。
@@ -151,7 +151,7 @@ impl FeatureSet for HalfKPFeatureSet {
 // HalfKaHmMergedFeatureSet - HalfKaHmMerged^ NNUE 用の FeatureSet
 // =============================================================================
 
-/// HalfKaHmMerged^ 用の FeatureSet（nnue-pytorch互換）
+/// HalfKaHmMerged^ 用の FeatureSet
 ///
 /// Half-Mirror King + All pieces with Factorization
 pub struct HalfKaHmMergedFeatureSet;

@@ -126,7 +126,7 @@ pub(crate) fn compute_layer_stacks_bucket_index_with_q16(
     }
 }
 
-/// YaneuraOu KingRank9 と同じ両玉の相対段から bucket index を計算する。
+/// 両玉の相対段から bucket index を計算する。
 ///
 /// `num_buckets` は 9 でなければならない。USI は `isready` で事前検証する。
 #[inline]
@@ -759,7 +759,7 @@ impl<
             self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
         };
 
-        // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
+        // PSQT ショートカット ((stm - nstm) / 2)
         // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
         // 約2倍にカウントする。/2 はこの二重カウントを補正する正規化。
         #[cfg(feature = "nnue-psqt")]
@@ -1792,7 +1792,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     // 遡及上限は runtime のモデル種別で決める。non-threat は forward-chain の
                     // piece/PSQT 差分が玉移動 refresh より安く深さ 4 が速いが、threat モデルは
                     // path>=2 の forward update が threat accumulator を full 再列挙する(Finny 非対象)
-                    // ため refresh(piece は Finny)に落ちる深さ 1 が速い(1 は YaneuraOu 方式相当)。
+                    // ため refresh(piece は Finny)に落ちる深さ 1 が速い。
                     // edition-universal は threat 非対応モデルも同一バイナリで動くので runtime 判定。
                     #[cfg(feature = "nnue-effect-bucket")]
                     let max_depth = 0;
@@ -2966,7 +2966,7 @@ mod tests {
             let mut pos = Position::new();
             pos.set_sfen(sfen).expect("oracle SFEN should be valid");
 
-            // rshogi は段一=0、段九=8 で YO と同じ。inverse() が YO の Inv(sq) に対応する。
+            // 段一=0、段九=8。inverse() で盤面を180度回転する。
             assert_eq!(
                 compute_layer_stack_kingrank9_bucket_index(
                     &pos,

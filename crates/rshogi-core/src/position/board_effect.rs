@@ -105,7 +105,7 @@ pub(crate) fn compute_board_effects_and_long_effects(
             effects.apply_bitboard(color, effect_bb, 1);
 
             if has_long_effect(pc) {
-                // 長い利きは馬/龍の追加1マス利きを含めない（YaneuraOuのlong_effect定義に合わせる）。
+                // 長い利きは馬/龍の追加1マス利きを含めない。
                 let long_pc = pc.unpromote();
                 let long_bb = attacks_from(long_pc, sq, occupied);
                 let shift = if pc.color() == Color::Black { 0 } else { 8 };

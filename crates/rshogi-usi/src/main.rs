@@ -382,7 +382,7 @@ impl UsiEngine {
             "option name EnteringKingRule type combo default CSARule27 var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule"
         );
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
-        // 水匠5等は24、YaneuraOuデフォルトは16
+        // 水匠5等は24を使用する
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
             "option name LS_BUCKET_MODE type combo default unset var unset var progresskpabs var progresskpabsq16 var kingrank9"
@@ -1598,7 +1598,7 @@ impl UsiEngine {
     fn cmd_go(&mut self, tokens: &[&str]) -> Result<()> {
         // 既存の探索を停止（bestmove出力を抑制する）
         // GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
-        // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
+        // bestmoveがstdoutに出力されるとGUIが混乱する
         self.stop_search_silently();
         if tokens.get(1) == Some(&"mate") {
             self.cmd_go_mate(tokens);
@@ -1616,7 +1616,7 @@ impl UsiEngine {
             return Ok(());
         }
 
-        // Stochastic_Ponder では 1 手戻した局面から先読みする（YaneuraOu 準拠）
+        // Stochastic_Ponder では 1 手戻した局面から先読みする
         let mut pos = if self.stochastic_ponder && limits.ponder {
             self.stochastic_ponder_position().unwrap_or_else(|| self.position.clone())
         } else {
@@ -1815,7 +1815,7 @@ impl UsiEngine {
     /// goオプションを解析
     fn parse_go_options(&self, tokens: &[&str]) -> LimitsType {
         let mut limits = LimitsType::default();
-        // YaneuraOu準拠: go受信時点で探索開始時刻を記録し、この時刻を基準に時間管理する
+        // go受信時点で探索開始時刻を記録し、この時刻を基準に時間管理する
         limits.set_start_time();
         let mut idx = 1;
 
@@ -1944,7 +1944,7 @@ impl UsiEngine {
     /// 探索を停止するがbestmoveを出力しない（cmd_go内部で使用）
     ///
     /// GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
-    /// bestmoveを出力するとGUIが混乱する（YaneuraOu準拠）
+    /// bestmoveを出力するとGUIが混乱する
     fn stop_search_silently(&mut self) {
         self.suppress_bestmove.store(true, Ordering::SeqCst);
         if let Some(stop_flag) = &self.stop_flag {

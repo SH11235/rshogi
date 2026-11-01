@@ -37,7 +37,7 @@ pub struct LimitsType {
     pub movetime: TimePoint,
 
     /// rtime: ランダム化された固定思考時間（ミリ秒）
-    /// YaneuraOu互換の go rtime 用
+    /// go rtime 用
     pub rtime: TimePoint,
 
     /// 探索深さ固定（0以外なら有効）
@@ -56,7 +56,7 @@ pub struct LimitsType {
     pub ponder: bool,
 
     /// MultiPV（候補手複数探索）の数（1以上、デフォルト1）
-    /// YaneuraOu準拠: 複数の候補手を探索して表示する
+    /// 複数の候補手を探索して表示する
     pub multi_pv: usize,
 
     /// 探索対象の手のリスト

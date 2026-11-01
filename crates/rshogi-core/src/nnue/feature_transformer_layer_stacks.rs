@@ -473,8 +473,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         // Weights: i32 × FT::DIMENSIONS × num_buckets
         // layout: `psqt_weights[feature_idx * num_buckets + bucket]` (feature-major、
-        // 各 feature 内で bucket 連番)。tatara `save_quantised` (`crates/nnue-format/
-        // src/layerstack_weights.rs:518-541`) の write 順と対称。
+        // 各 feature 内で bucket 連番)。学習済みモデルの格納順を保って読み込む。
         let weight_count = FT::DIMENSIONS * num_buckets;
         #[cfg(feature = "prepacked-nnue")]
         if let Some(packed) = packed {
@@ -1138,7 +1137,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         acc.computed_score = false;
     }
 
-    /// 単一視点のキャッシュ経由 refresh (Stockfish 風 piece_list 差分方式)
+    /// 単一視点のキャッシュ経由 refresh (piece_list 差分方式)
     ///
     /// 現在の `PieceList` を直接 cache に渡し、cache 内で slot-wise 差分
     /// を取って add/sub を適用する。`append_active_indices` + `sort_unstable`

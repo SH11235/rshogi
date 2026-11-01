@@ -1,17 +1,17 @@
 //! BonaPiece for HalfKaHmMerged^ - Half-Mirror & Factorization版
 //!
 //! HalfKaHmMerged^アーキテクチャ用のBonaPiece定義。
-//! nnue-pytorchの実装に準拠し、以下の特徴を持つ:
+//! 以下の特徴を持つ:
 //! - キングバケット: 45バケット (Half-Mirror: 9段 × 5筋)
 //! - Factorization: 駒のみの特徴量を追加
 //!
-//! 注意: nnue-pytorchではDISTINGUISH_GOLDSは無効（成金は金と同じ扱い）。
+//! 成金は金と同じ扱い。
 //! これはHalfKPと同じBonaPieceレイアウトを使用する。
 
 use crate::types::{Color, Square};
 
 // =============================================================================
-// 定数定義（YaneuraOu evaluate.h準拠、DISTINGUISH_GOLDS無効）
+// 定数定義（成金を金に統合）
 // =============================================================================
 
 /// 手駒領域の終端
@@ -141,7 +141,7 @@ pub(crate) fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(Bo
 /// 玉位置を45バケット（9段 × 5筋）に圧縮。
 /// ファイル5-8（0-indexed）は4-1にミラーリング。
 ///
-/// C++実装 (training_data_loader.cpp make_index):
+/// 学習済みモデルの特徴量配置:
 /// ```cpp
 /// if (sq_k >= SQ_61) {  // file >= 6
 ///     sq_k = Mir(sq_k);  // file' = 8 - file
@@ -151,7 +151,7 @@ pub(crate) fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(Bo
 /// return e_king * sq_k + packed_p;
 /// ```
 ///
-/// 注意: nnue-pytorchで使われるYaneuraOuは `file * 9 + rank` 順で、Rust側も同じにする必要がある。
+/// 特徴量のマス番号は、学習側の `file * 9 + rank` 順と一致させる必要がある。
 #[inline]
 pub fn king_bucket(ksq: Square, perspective: Color) -> usize {
     // 視点に応じてマスを変換

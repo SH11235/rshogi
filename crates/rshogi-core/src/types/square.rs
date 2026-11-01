@@ -23,7 +23,7 @@ impl Square {
     pub const SQ_55: Square = Square(40);
     /// 9九
     pub const SQ_99: Square = Square(80);
-    // 方向定数（縦型Bitboardのやねうら王と同じ符号）
+    // 方向定数（縦型 Bitboard 用）
     pub const DELTA_D: i8 = 1; // 下(段+1)
     pub const DELTA_R: i8 = -9; // 右(筋-1)
     pub const DELTA_U: i8 = -1; // 上(段-1)
@@ -133,7 +133,7 @@ impl Square {
     }
     /// 方向オフセットを足したSquareを返す（盤外ならNone）
     ///
-    /// YaneuraOuのSQ_U/SQ_D/SQ_L/SQ_R等に対応するオフセットをそのまま扱える。
+    /// 上下左右などの方向を表すオフセットを扱う。
     #[inline]
     pub const fn offset(self, delta: i8) -> Option<Square> {
         let (df, dr) = match delta {

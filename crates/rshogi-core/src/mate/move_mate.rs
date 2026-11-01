@@ -1,6 +1,6 @@
 // 駒移動による1手詰め判定（近接王手のみを探索）
 //
-// YaneuraOu mate1ply_without_effect.cpp の移植（離し角・飛車は未対応）
+// 離し角・飛車による王手は未対応。
 
 use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,

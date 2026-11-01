@@ -1,6 +1,6 @@
 //! 駒（Piece）
 //!
-//! 内部表現は YaneuraOu の `Piece` に準拠した 5bit ラッパー。
+//! 内部表現は駒種と色を格納する 5bit ラッパー。
 //! - bit 0-3: `PieceType`（1..=14）。0 は `Piece::NONE` のみで使用される。
 //! - bit 4: `Color`（0 = Black, 1 = White）。
 //!

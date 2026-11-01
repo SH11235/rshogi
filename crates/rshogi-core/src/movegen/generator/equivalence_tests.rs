@@ -288,7 +288,7 @@ mod reference {
         let rank1 = rank1_bb(us);
         let occupied = pos.occupied();
 
-        // YaneuraOu準拠: 成り手を先に全列挙、次に不成手を列挙 (2パス)
+        // 成り手を先に全列挙、次に不成手を列挙 (2パス)
         // All=false (include_non_promotions=false) でも3段目(後手なら7段目)不成は生成する
         // 1段目不成は行き場がないため常に除外、2段目不成は All 時のみ
         let rank12 = rank12_bb(us);
@@ -367,7 +367,7 @@ mod reference {
             let moved_pc = pos.piece_on(from);
 
             if from_in_promo {
-                // 敵陣からなら全ての移動先で成れる (YO: enemy_field(Us) & from 分岐)
+                // 敵陣からなら全ての移動先で成れる
                 let promoted_pc = moved_pc.promote().unwrap();
                 for to in attacks.iter() {
                     add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
@@ -375,7 +375,6 @@ mod reference {
                 }
             } else {
                 // 非敵陣: まず敵陣への移動(成り+不成り)、次に非敵陣への移動(不成りのみ)
-                // (YO: SILVER の target2/target 分割に準拠)
                 let promo_targets = attacks & promo_ranks;
                 let non_promo_targets = attacks & !promo_ranks;
 
@@ -418,7 +417,7 @@ mod reference {
             let from_in_promo = promo_ranks.contains(from);
 
             if from_in_promo {
-                // 移動元が敵陣なら全ての移動先で成れる (YO: canPromote(Us, from) 分岐)
+                // 移動元が敵陣なら全ての移動先で成れる
                 let promoted_pc = pc.promote().unwrap();
                 for to in attacks.iter() {
                     add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
@@ -428,7 +427,6 @@ mod reference {
                 }
             } else {
                 // 移動元が非敵陣: まず敵陣への移動(成り)、次に非敵陣への移動(不成り)
-                // (YO: GPM_BR の target2/target 分割に準拠)
                 let promo_targets = attacks & promo_ranks;
                 let non_promo_targets = attacks & !promo_ranks;
 
@@ -514,14 +512,14 @@ mod reference {
         pawn_promo_mode: PromotionMode,
         include_drops: bool,
     ) {
-        // 駒の移動 (YaneuraOu movegen.cpp:generate_general 準拠の生成順序)
+        // 駒の移動
         generate_pawn_moves(pos, targets.pawn, buffer, pawn_promo_mode);
         generate_lance_moves(pos, targets.general, buffer, include_non_promotions);
         generate_knight_moves(pos, targets.general, buffer);
         generate_silver_moves(pos, targets.general, buffer);
-        // 角+飛: GPM_BR — 1つの bitboard にまとめて pop 順で生成
+        // 角+飛: 1つの bitboard にまとめて pop 順で生成
         generate_br_moves(pos, targets.general, buffer, include_non_promotions);
-        // 金相当+馬+龍+玉: GPM_GHDK — 1つの bitboard にまとめて pop 順で生成
+        // 金相当+馬+龍+玉: 1つの bitboard にまとめて pop 順で生成
         generate_ghdk_moves(pos, targets.general, buffer);
 
         if include_drops {
@@ -606,14 +604,14 @@ mod reference {
         let drop_target = between; // 合駒は間の升
         let move_target = between | Bitboard::from_square(checker_sq); // 移動は間 + 王手駒
 
-        // 玉以外の駒による移動（targetを制限, YO evasion準拠の生成順序）
+        // 玉以外の駒による移動（王手を解消する移動先に制限）
         generate_pawn_moves(pos, move_target, buffer, pawn_promo_mode);
         generate_lance_moves(pos, move_target, buffer, include_non_promotions);
         generate_knight_moves(pos, move_target, buffer);
         generate_silver_moves(pos, move_target, buffer);
-        // 角+飛: GPM_BR
+        // 角+飛
         generate_br_moves(pos, move_target, buffer, include_non_promotions);
-        // 金相当+馬+龍（玉なし）: GPM_GHD
+        // 金相当+馬+龍（玉なし）
         generate_ghd_moves(pos, move_target, buffer);
 
         // 駒打ち（合駒のみ）
@@ -636,7 +634,7 @@ mod reference {
         pawn_promo_mode: PromotionMode,
     ) {
         let target = Bitboard::from_square(sq);
-        // YaneuraOuのRECAPTURESは移動のみ（駒打ちは含めない）
+        // 取り返し手の生成は移動のみ（駒打ちは含めない）
         let targets = GenerateTargets::new(target);
         generate_non_evasions_core(
             pos,
@@ -693,7 +691,7 @@ mod reference {
                 generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
             }
             QuietsProMinus => {
-                // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+                // targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
                 let pawn_target = !enemy_field(us) & empties;
                 let targets = GenerateTargets {
                     general: empties,
@@ -710,7 +708,7 @@ mod reference {
                 );
             }
             QuietsProMinusAll => {
-                // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+                // targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
                 let pawn_target = !enemy_field(us) & empties;
                 let targets = GenerateTargets {
                     general: empties,
@@ -735,7 +733,7 @@ mod reference {
                 generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
             }
             CapturesProPlus => {
-                // YO準拠: targetPawn = (~pieces(Us) & enemy_field(Us)) | pieces(Them)
+                // targetPawn = (~pieces(Us) & enemy_field(Us)) | pieces(Them)
                 // 歩は取り手に加え、敵陣への静かな成りも生成する
                 let pawn_target = (!pos.pieces_c(us) & enemy_field(us)) | enemy;
                 let targets = GenerateTargets {
@@ -849,7 +847,7 @@ mod reference {
         let mut buffer = ExtMoveBuffer::new();
         generate_all(pos, &mut buffer);
 
-        // YO の swap-erase パターン:
+        // swap-erase パターン:
         //   while (mlist != last) {
         //       if (!pos.legal(*mlist))
         //           *mlist = *(--last);

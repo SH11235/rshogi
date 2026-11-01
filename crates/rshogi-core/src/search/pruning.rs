@@ -119,7 +119,7 @@ pub(super) fn step14_pruning(
                 }
             }
         } else if !step_ctx.follow_pv || !step_ctx.pv_node {
-            // Quiet moves — followPV かつ PV ノードの場合は pruning をスキップ（Stockfish 準拠）
+            // Quiet moves — followPV かつ PV ノードの場合は pruning をスキップ
             // ※ スキップ時は continuation history pruning / futility pruning / SEE pruning の
             //    全 3 チェックを通過する
             let moved_piece = step_ctx.mv.moved_piece_after();
@@ -420,7 +420,7 @@ where
     }
 
     // Step10直前の improving 再計算は VALUE_NONE を含めて評価する。
-    // in-check ノードは YO ではこの経路に入らないため、現実装では !in_check のみ維持する。
+    // 王手中は improving を更新しない。
     if !in_check {
         improving |= static_eval >= beta;
     }

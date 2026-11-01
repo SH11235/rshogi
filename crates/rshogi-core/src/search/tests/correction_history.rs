@@ -11,7 +11,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
         .unwrap();
 }
 
-/// (ss-2)/(ss-4) だけを参照し、前の手が無いときは `8 * cnt` を足す式 (YaneuraOu と同じ形) の値。
+/// (ss-2)/(ss-4) だけを参照し、前の手が無いときは `8 * cnt` を足す式の値。
 pub(super) fn correction_params_ss2_ss4_only() -> SearchTuneParams {
     SearchTuneParams {
         correction_value_pcv_weight: 9536,

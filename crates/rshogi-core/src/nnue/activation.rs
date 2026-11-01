@@ -7,8 +7,8 @@
 //! | 名前 | 数式 | 出力次元比 | 用途 |
 //! |------|------|-----------|------|
 //! | CReLU | `clamp(x, 0, QA)` | 1:1 | 従来互換 |
-//! | PairwiseCReLU | `clamp(a, 0, QA) * clamp(b, 0, QA) >> shift` | 2:1 | Stockfish方式 |
-//! | SCReLU | `clamp(x, 0, QA)²` | 1:1 | bullet-shogi互換 |
+//! | PairwiseCReLU | `clamp(a, 0, QA) * clamp(b, 0, QA) >> shift` | 2:1 | ペアごとの積 |
+//! | SCReLU | `clamp(x, 0, QA)²` | 1:1 | bullet-shogi SCReLU モデル用 |
 //!
 //! # アーキテクチャ文字列との対応
 //!
@@ -392,7 +392,7 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 ///
 /// `y[j] = clamp(a, 0, QA) * clamp(b, 0, QA) >> shift`
 ///
-/// Stockfishで使用される方式。入力の前半と後半をペアにして乗算し、
+/// 入力の前半と後半をペアにして乗算し、
 /// 出力次元を半分にする。
 #[derive(Clone, Copy, Default)]
 pub struct PairwiseCReLU;
@@ -411,7 +411,7 @@ impl FtActivation for PairwiseCReLU {
 
     #[inline]
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
-        // 中間層では通常のCReLUを使用（bullet-shogiと同じ）
+        // 中間層では通常のCReLUを使用
         // Pairwiseは最初のFT層のみに適用
         assert_eq!(input.len(), output.len());
         crelu_i32_to_u8(input, output);
@@ -468,9 +468,7 @@ fn pairwise_crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     //   必要なシフト量: log2(16129/127) ≈ 7.00 → shift=7
     //   実際の出力: (127*127)>>7 = 126 (許容範囲)
     //
-    // Stockfish/Reckless互換: この値は実測で最適化されており、
-    // shift=8（QA=255時、出力[0,254]）は実験で棋力が低下したため採用せず
-    //
+    // shift=8（QA=255時、出力[0,254]）は実験で棋力が下がったため採用しない。
     // SIMD シフト命令は定数が必要なため、分岐して処理
     if qa >= 255 {
         // STM perspective: input[0..l1] → output[0..quarter]
@@ -1111,7 +1109,7 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 ///
 /// `y = clamp(x, 0, QA)²`
 ///
-/// bullet-shogiで使用される活性化関数。
+/// bullet-shogi SCReLU モデル用の活性化関数。
 /// クリッピング後に二乗することで、より強い非線形性を持つ。
 #[derive(Clone, Copy, Default)]
 pub struct SCReLU;

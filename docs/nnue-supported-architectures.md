@@ -132,14 +132,15 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 | モデルの方式 | `LS_BUCKET_MODE` | 追加設定 |
 |--------------|-----------------|----------|
 | KingRank9 / SFNN k3k3 | `kingrank9` | なし。9バケットのモデルを使用 |
-| tatara の進行度方式 | `progresskpabs` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
-| YaneuraOu / BulletOu SFNN の進行度方式 | `progresskpabsq16` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
+| tatara モデルの浮動小数点進行度方式 | `progresskpabs` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
+| YaneuraOu SFNN モデルの Q16 整数進行度方式 | `progresskpabsq16` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
 
 - `LS_PROGRESS_BUCKETS` は学習時のバケット数を指定します。範囲は1〜16で、モデルの格納数以下です。
 - `LS_PROGRESS_COEFF` には、そのモデルの学習に使った進行度係数ファイルを指定します。バケット数1では不要です。
 - `kingrank9` では `LS_PROGRESS_BUCKETS` を0（未指定）、`LS_PROGRESS_COEFF` を未指定にします。
-- tatara と YaneuraOu 系の進行度方式は計算結果が異なるため、同じ係数ファイルでも置き換えて使わないでください。
-- YaneuraOu と BulletOu の進行度方式が一致するバケット数は2・4・8・16です。k3k3 と進行度を組み合わせた方式は未対応です。
+- `progresskpabs` と `progresskpabsq16` は計算結果が異なるため、同じ係数ファイルでも置き換えて使わないでください。
+- 学習に使ったツールとモデルの方式に合わせて `LS_BUCKET_MODE` を選んでください。`progresskpabsq16` は Q16 係数の和をバケット数ごとの logit 閾値と比較します。256 段階に量子化してから振り分ける BulletOu 形式とは、バケット数が1・2・4・8・16のときだけ振り分けが一致し、それ以外 (3 など) では学習側と合いません。
+- k3k3 と進行度を組み合わせた方式は未対応です。
 
 SFNN の振り分け方式への対応と、ファイル形式の互換性は別です。
 YaneuraOu SFNN 形式のファイルは、rshogi で読み込める形式への変換が必要です。

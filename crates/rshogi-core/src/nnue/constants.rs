@@ -1,6 +1,6 @@
 //! NNUE定数定義
 //!
-//! YaneuraOu の HalfKP 256x2-32-32 アーキテクチャに基づき、
+//! HalfKP 256x2-32-32 アーキテクチャに基づき、
 //! ネットワーク構造とスケーリングに関する定数をまとめる。
 
 /// 評価関数ファイルのバージョン（YaneuraOu互換）
@@ -13,13 +13,12 @@ pub const MAX_ARCH_LEN: usize = 4096;
 ///
 /// FV_SCALEは評価関数の訓練時に決まるパラメータ。
 /// 同じファイル形式でも評価関数によって異なる場合がある。
-/// 例: YaneuraOuのデフォルトは16だが、水匠5は24を使用。
+/// 例: 水匠5は24を使用。
 pub const FV_SCALE: i32 = 24;
 
 /// 評価値のスケーリング（デフォルト: 16）
 ///
-/// nnue-pytorchでハードコードされている値（kBiasScale = 600 * 16 = 9600）。
-/// YaneuraOuのデフォルト値でもある。
+/// nnue-pytorch モデル形式の出力スケール（kBiasScale = 600 * 16 = 9600）。
 /// bullet-shogiで学習したモデル（scale=600）もこの値で動作する。
 pub const FV_SCALE_HALFKA: i32 = 16;
 
@@ -39,7 +38,7 @@ pub const CACHE_LINE_SIZE: usize = 64;
 /// 変換後の次元数（片方の視点）
 pub const TRANSFORMED_FEATURE_DIMENSIONS: usize = 256;
 
-/// リフレッシュトリガーの数（YO kRefreshTriggers.size() 相当）
+/// リフレッシュトリガーの数
 /// HalfKP の場合は FriendKingMoved のみで 1
 ///
 /// 注意: この値を変更する場合、以下の箇所も更新が必要:
@@ -132,10 +131,10 @@ pub const HALFKA_MERGED_DIMENSIONS: usize = 81 * 1629; // 131,949
 /// 45（玉位置、Half-Mirror）× 1710（両玉別 plane の入力数）
 pub const HALFKA_HM_SPLIT_DIMENSIONS: usize = 45 * 1710; // 76,950
 
-/// 隠れ層1の次元数（YaneuraOu classic）
+/// 隠れ層1の次元数（classic NNUE）
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 
-/// 隠れ層2の次元数（YaneuraOu classic）
+/// 隠れ層2の次元数（classic NNUE）
 pub const HIDDEN2_DIMENSIONS: usize = 32;
 
 /// 出力次元数
@@ -204,7 +203,7 @@ pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
 // SCReLU (Squared Clipped ReLU) 用定数
 // =============================================================================
 
-/// SCReLU 量子化係数 (bullet-shogi 準拠)
+/// SCReLU 量子化係数 (bullet-shogi SCReLU モデル用)
 ///
 /// SCReLU では clamp(x, 0, QA)² を計算する。
 /// QA = 127 のとき、最大出力は 127² = 16,129。

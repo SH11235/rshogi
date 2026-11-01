@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_cluster_size() {
-        // クラスターは32バイト（YaneuraOu CLUSTER_SIZE=3 準拠）
+        // クラスターは32バイト
         assert_eq!(std::mem::size_of::<Cluster>(), 32);
     }
 }

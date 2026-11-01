@@ -49,13 +49,13 @@ pub const FROM_TO_SIZE: usize = 1 << 16;
 // 多くの履歴エントリは探索後に負の値になるため、
 // 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
 
-/// mainHistory初期値 (YO: mainHistoryDefault = 68)
+/// mainHistory初期値
 const MAIN_HISTORY_INIT: i16 = 68;
 
-/// captureHistory初期値 (YO: captureHistory.fill(-689))
+/// captureHistory初期値
 const CAPTURE_HISTORY_INIT: i16 = -689;
 
-/// continuationHistory初期値 (YO: continuationHistory.fill(-529))
+/// continuationHistory初期値
 pub const CONTINUATION_HISTORY_INIT: i16 = -529;
 
 /// 駒種の数（PieceType::NUM相当）
@@ -280,7 +280,7 @@ impl CapturePieceToHistory {
         unsafe { Box::<Self>::new_zeroed().assume_init() }
     }
 
-    /// YaneuraOu の `type_of(capturedPiece)` 相当。
+    /// 捕獲された駒の駒種を添字に、履歴値を取得する。
     ///
     /// 捕獲された駒そのものを渡す版。下位4bit（0=NONE, 1..14=PieceType）を
     /// インデックスに使うため、呼び出し側で `piece_type()` を取らなくてよい。
@@ -886,8 +886,7 @@ pub fn continuation_history_weight(tune_params: &SearchTuneParams, ply_back: usi
 /// ContinuationHistory近接ply（1手前）用のオフセット込みボーナスを計算
 ///
 /// `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
-/// 955/1024 倍率は呼び出し元で適用済みの bonus を受け取る（YO は `update_quiet_histories`
-/// 内で `bonus * 955 / 1024` してから `update_continuation_histories` に渡す構造）。
+/// 倍率は呼び出し元で適用済みの bonus を受け取る。
 #[inline]
 pub fn continuation_history_bonus_with_offset(
     bonus: i32,

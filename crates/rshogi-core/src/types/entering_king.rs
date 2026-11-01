@@ -1,6 +1,5 @@
 //! 入玉ルール（EnteringKingRule）
 //!
-//! YaneuraOu の `EnteringKingRule` に準拠。
 //! 入玉宣言勝ちの判定条件を決定するルール設定。
 
 /// 入玉ルール

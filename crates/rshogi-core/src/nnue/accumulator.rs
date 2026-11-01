@@ -703,7 +703,7 @@ impl<T: Zeroable> WeightBox<T> {
 /// Accumulatorの構造
 /// 入力特徴量をアフィン変換した結果を保持
 ///
-/// YaneuraOu の classic NNUE と同様に、トリガーごとに accumulation を分離。
+/// トリガーごとに accumulation を分離。
 /// `accumulation[perspective][trigger][dimension]` の構造で、
 /// transform 時にトリガーごとの値を合算する。
 /// 現在は NUM_REFRESH_TRIGGERS=1 なので従来と同等の動作。
@@ -776,7 +776,7 @@ impl Accumulator {
 // DirtyPiece - 差分更新用の駒移動情報（PieceNumber + ExtBonaPiece ベース）
 // =============================================================================
 
-/// 差分更新用の駒移動情報（YaneuraOu 準拠の新形式）
+/// 差分更新用の駒移動情報
 ///
 /// PieceNumber で変化した駒を識別し、old/new の ExtBonaPiece ペアで
 /// 盤上駒・手駒の区別なく統一的に変化を表現する。

@@ -51,9 +51,9 @@ use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_tr
 // 定数
 // =============================================================================
 
-/// YaneuraOuオプション `DrawValueBlack` のデフォルト値。
+/// USI オプション `DrawValueBlack` のデフォルト値。
 pub const DEFAULT_DRAW_VALUE_BLACK: i32 = -2;
-/// YaneuraOuオプション `DrawValueWhite` のデフォルト値。
+/// USI オプション `DrawValueWhite` のデフォルト値。
 pub const DEFAULT_DRAW_VALUE_WHITE: i32 = -2;
 
 #[inline]
@@ -277,9 +277,9 @@ pub(super) enum ProbeOutcome<'a> {
 
 /// 静的評価まわりの情報をまとめたコンテキスト
 pub(super) struct EvalContext {
-    /// TT境界情報で補正済みの評価値（YOの `eval` 相当）
+    /// TT境界情報で補正済みの評価値
     pub(super) eval: Value,
-    /// 局面の静的評価（YOの `ss->staticEval` 相当）
+    /// 局面の静的評価
     pub(super) static_eval: Value,
     pub(super) unadjusted_static_eval: Value,
     pub(super) correction_value: i32,
@@ -401,8 +401,7 @@ pub struct SearchContext<'a> {
     pub tune_params: &'a SearchTuneParams,
     /// LMR Reduction テーブルへの参照
     pub reductions: &'a Reductions,
-    /// 千日手評価値テーブル (YaneuraOu DrawValueBlack/DrawValueWhite 準拠)
-    /// drawValueTable[REPETITION_DRAW][Color] に相当
+    /// 千日手評価値テーブル（DrawValueBlack/DrawValueWhite）
     pub draw_value_table: [Value; 2],
     /// 入玉宣言勝ちルール（探索内の宣言勝ち判定に使う）
     pub entering_king_rule: EnteringKingRule,
@@ -452,7 +451,7 @@ impl DepthLivenessState {
         // A legal move normally consumes one ply and therefore remaining depth must eventually
         // decrease. Multi-extension, negative LMR and full-depth re-search can all produce a
         // child depth >= its parent's depth. A long consecutive run of such edges is the common
-        // liveness failure observed in both rshogi and YaneuraOu.
+        // liveness failure during search.
         //
         // Singular verification recurses at the same ply without making a move. It is a separate
         // search root for this purpose and must not be linked to the outer move path. NMP
@@ -547,7 +546,7 @@ pub struct SearchState {
     pub nmp_min_ply: i32,
     /// ルート手
     pub root_moves: RootMoves,
-    /// PV 三角配列（Reckless 由来、`Vec<Move>` のヒープ割り当て回避）
+    /// PV 三角配列（`Vec<Move>` のヒープ割り当て回避）
     pub pv_table: PvTable,
     /// 前回 iteration の PV ライン
     pub previous_pv: Vec<Move>,
@@ -730,14 +729,13 @@ pub struct SearchWorker {
     /// LMR Reduction テーブル（per-worker）
     pub reductions: Box<Reductions>,
 
-    /// YaneuraOuオプション `DrawValueBlack`。
+    /// USI オプション `DrawValueBlack`。
     pub draw_value_black: i32,
 
-    /// YaneuraOuオプション `DrawValueWhite`。
+    /// USI オプション `DrawValueWhite`。
     pub draw_value_white: i32,
 
-    /// 千日手評価値テーブル (YaneuraOu DrawValueBlack/DrawValueWhite 準拠)
-    /// drawValueTable[REPETITION_DRAW][Color] に相当。
+    /// 千日手評価値テーブル（DrawValueBlack/DrawValueWhite）
     /// Color::Black = 0, Color::White = 1
     pub draw_value_table: [Value; 2],
 
@@ -752,11 +750,9 @@ pub struct SearchWorker {
 }
 
 impl SearchWorker {
-    /// root quiet手の statScore を計算する（YO Step16 準拠）。
+    /// root quiet手の statScore を計算する。
     ///
-    /// YO の root では `contHist[0/1]` が sentinel を指すため、
-    /// `2 * mainHistory + contHist0 + contHist1` は
-    /// `2 * mainHistory + 2 * sentinel_contHistory` と等価になる。
+    /// root には直前の指し手がないため、継続履歴には番兵の値を2回加える。
     #[inline]
     fn root_quiet_stat_score(&self, mover: Color, mv: Move) -> i32 {
         let moved_piece = mv.moved_piece_after();
@@ -863,7 +859,7 @@ impl SearchWorker {
 
     /// ルート局面の static_eval を初期化し、未補正評価値を返す。
     ///
-    /// in-check ノードで参照される `(ss-2)->staticEval` 相当を安定化するため、
+    /// in-check ノードで参照される 2手前の static_evalを安定化するため、
     /// root 探索開始前に `stack[0].static_eval` を埋めておく。
     #[inline]
     /// ルート局面の static_eval を初期化し、(未補正評価値, correction_value) を返す。
@@ -989,7 +985,7 @@ impl SearchWorker {
         self.state.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
     }
 
-    /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
+    /// usinewgameで呼び出し：全履歴をクリア
     pub fn clear(&mut self) {
         // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
         unsafe { self.history.as_mut_unchecked() }.clear_with_params(&self.search_tune_params);
@@ -1016,7 +1012,7 @@ impl SearchWorker {
         self.state.nmp_min_ply = 0;
         if !resume {
             self.state.root_moves.clear();
-            // YaneuraOu / Stockfish は iterative_deepening の冒頭で Stack をゼロ初期化し、
+            // 探索開始時に Stack を初期化し、
             // continuation history の番兵を入れ直す。持ち越すと、qsearch の 1 手詰めの保存が
             // 読む stack[ply].tt_pv などに前の探索の値が残り、置換表を通して木が変わる。
             self.state.stack = init_stack_array();
@@ -1045,7 +1041,7 @@ impl SearchWorker {
         self.state.best_move_changes /= 2.0;
     }
 
-    /// 全合法手生成モードの設定（YaneuraOu互換）
+    /// 全合法手生成モードの設定
     pub fn set_generate_all_legal_moves(&mut self, flag: bool) {
         self.generate_all_legal_moves = flag;
     }
@@ -1145,8 +1141,7 @@ impl SearchWorker {
     }
 
     /// Step 19: PV search で qsearch に落ちそうな場合、TT手なら newDepth を最低1に引き上げ。
-    /// YaneuraOu の `search<Root>` テンプレートでは PV search の直前に1箇所だけ存在するが、
-    /// 本エンジン では search_root / search_root_for_pv の各 PV search パスで個別に呼ぶ必要がある。
+    /// search_root / search_root_for_pv の各 PV search パスで個別に呼ぶ必要がある。
     fn root_extend_new_depth(
         &self,
         mv: Move,
@@ -1236,7 +1231,7 @@ impl SearchWorker {
         // ttCapture (root LMRで使用)
         let tt_capture_root = tt_move_root.is_some() && pos.capture_stage(tt_move_root);
 
-        // Step 11. ProbCut（YO search<Root> と同一パス）
+        // Step 11. ProbCut
         // root でも ProbCut は実行される。search_node と同じ条件・処理を行う。
         let root_static_eval = self.state.stack[0].static_eval;
         let tt_ctx_root = TTContext {
@@ -1288,7 +1283,7 @@ impl SearchWorker {
             }
         }
 
-        // Step 12. A small Probcut idea（YO search<Root> と同一パス）
+        // Step 12. A small Probcut idea
         {
             let small_probcut_beta =
                 beta + Value::new(self.search_tune_params.small_probcut_beta_margin);
@@ -1507,7 +1502,7 @@ impl SearchWorker {
                     let stat_score = self.state.stack[0].stat_score;
                     r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
 
-                    // d計算 (YO: max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
+                    // d計算 (max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
                     let d =
                         std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2)) + 1; // +1 for PvNode
 
@@ -1931,7 +1926,6 @@ impl SearchWorker {
 
     /// 特定のPVライン（pv_idx）のみを探索
     ///
-    /// YaneuraOuのMultiPVループに相当。
     /// pv_idx以降の手のみを探索対象とし、0..pv_idxの手は固定とみなす。
     ///
     /// # Arguments
@@ -2167,7 +2161,7 @@ impl SearchWorker {
                     let stat_score = self.state.stack[0].stat_score;
                     r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
 
-                    // d計算 (YO: max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
+                    // d計算 (max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
                     let d =
                         std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2)) + 1; // +1 for PvNode
                     (
@@ -2419,7 +2413,7 @@ impl SearchWorker {
     ///
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
     /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
-    /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
+    /// 再探索やPV探索では all_node 扱いにするため false を渡す。
     pub(super) fn search_node<const NT: u8>(
         st: &mut SearchState,
         ctx: &SearchContext<'_>,
@@ -2458,7 +2452,7 @@ impl SearchWorker {
 
         // 親の PvTable::update はこの ply の行をそのままコピーする。千日手・中断・
         // Mate Distance Pruning 等の早期 return でも兄弟ノードの行を渡さないよう、
-        // それらより前に空にする (YaneuraOu / Stockfish が親側で (ss+1)->pv を clear するのと同等)。
+        // それらより前に空にする。
         if pv_node {
             st.pv_table.clear(ply as usize);
             st.pv_table.clear((ply + 1) as usize);
@@ -2644,14 +2638,13 @@ impl SearchWorker {
 
         // evalDiff によるヒストリ更新
         // in_check時はこのブロック自体がスキップされる
-        // （YOではMOVES_LOOPにジャンプするため、ここに到達しない）
         // 条件: !in_check && (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
         if !in_check && ply >= 1 {
             let prev_ply = (ply - 1) as usize;
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
 
-            // VALUE_NONEチェックは不要（YOは行わない）
+            // VALUE_NONEチェックは不要
             // VALUE_NONEの場合はclampにより-200に制限されるため問題ない
             if prev_move.is_normal() && !prev_in_check && !prior_capture {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
@@ -2804,9 +2797,8 @@ impl SearchWorker {
             &tt_ctx,
             ply,
             // NMP verification searchが同一plyでsearch_nodeを呼び
-            // stack[ply].static_evalを上書きする。YOはss->staticEvalをポインタ経由で
-            // 参照するため上書き後の値が見える。eval_ctx.static_eval (snapshot) ではなく
-            // live stack値を使う。
+            // stack[ply].static_evalを上書きするため、検証後の値を使う。
+            // eval_ctx.static_eval は検証前のスナップショットなので使わない。
             st.stack[ply as usize].static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
@@ -2823,7 +2815,7 @@ impl SearchWorker {
         // Step 12. A small Probcut idea（moves_loop直前）
         // =================================================================
         // TTのLower boundが十分深く、probCutBeta以上の値を持つなら即座にカット。
-        // in_check時もこのステップは実行される（YOではgoto moves_loopの先で実行）。
+        // in_check時もこのステップは実行される。
         {
             let small_probcut_beta = beta + Value::new(ctx.tune_params.small_probcut_beta_margin);
             if tt_bound.is_lower_or_exact()
@@ -3102,7 +3094,7 @@ impl SearchWorker {
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
             do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
-            // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
+            // ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -3427,7 +3419,6 @@ impl SearchWorker {
                 );
                 st.stack[ply as usize].reduction = 0;
 
-                // YaneuraOu Step18準拠:
                 // PvNodeでは zero-window で alpha を超えたら full PV再探索する。
                 if pv_node && value > alpha {
                     // ttMove由来のnewDepth下限補正
@@ -4101,7 +4092,7 @@ impl SearchWorker {
         // 条件: !inCheck && !(bestMove && capture(bestMove))
         //        && (bestValue > staticEval) == bool(bestMove)
         // bestMove有無で除数が異なる（有: /10, 無: /8）
-        // YOと同順序で、ttPv伝播・TT保存の後に更新する。
+        // ttPv伝播・TT保存の後に更新する。
         if !(in_check || best_move.is_some() && pos.is_capture(best_move))
             && (best_value > st.stack[ply as usize].static_eval) == best_move.is_some()
         {

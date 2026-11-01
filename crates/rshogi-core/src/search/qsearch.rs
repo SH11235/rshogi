@@ -363,9 +363,7 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     let cont_tables = cont_history_keys(st, ply);
-    // qsearchではquiet checksを生成しない
-    // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
-    // (movepick.cpp line 69)
+    // 王手されていない静止探索では quiet checks を生成しない。
     let mut mp = if in_check {
         MovePicker::new_evasions(pos, tt_move, ply, cont_tables, ctx.generate_all_legal_moves)
     } else {
@@ -374,7 +372,7 @@ pub(super) fn qsearch<const NT: u8>(
 
     let mut move_count = 0;
 
-    // 逐次 next_move 方式（YO qsearch と同じ。バッファへの事前 collect はしない）。
+    // 逐次 next_move 方式（バッファへの事前 collect はしない）。
     // qsearch の子ノードも qsearch なので、この部分木では MovePicker が読む history
     // （capture/main/continuation）は一切更新されない。よって手順は事前 collect と同一で、
     // beta カット時に残りステージの生成・スコアリング・ソートを丸ごと省ける。

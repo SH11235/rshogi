@@ -381,13 +381,13 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
         }
     }
 
-    // 宣言勝ち判定（YO準拠: 置換表に指し手がないとき、またはPVノードで毎回実施）
+    // 宣言勝ち判定（置換表に指し手がない場合、または PV ノードで実施）
     // - Root は engine.rs 側で root_moves に宣言手を加える形で扱うため、ここでは実施しない。
     // - 王手の有無は問わない（点数法は declaration_win 内で王手を弾く。トライルールは
     //   王手回避しながら入玉する手がありうる）。
-    // - 置換表には書き込まない（YO準拠）。Move::WIN を ttMove として保持すると probe 側の
+    // - 置換表には書き込まない。Move::WIN を ttMove として保持すると probe 側の
     //   扱いが煩雑になるうえ、再訪問時に再判定して枝刈りされることを期待する。
-    // - excludedMove は YO 同様に条件へ入れない。singular 検証探索は「ttMove 以外の最善」を
+    // - excludedMove は条件へ入れない。singular 検証探索は「ttMove 以外の最善」を
     //   問うもので、宣言勝ち（Move::WIN）は ttMove と別の手なので詰みスコアを返すのが正しい。
     //   ただしトライルールでは宣言手が通常の玉移動で、それ自体が除外手になりうるため、
     //   宣言手 == excludedMove のときだけは採用しない。
@@ -479,7 +479,7 @@ pub(super) fn compute_eval_context(
         // TTヒット && eval有効 && 非PVノード
         #[cfg(feature = "use-lazy-evaluate")]
         {
-            // USE_LAZY_EVALUATE相当: TT eval を再利用する。
+            // TT eval を再利用する。
             // EvalHash hit と同じくアキュムレータは更新しない。後で評価する子孫ノードが
             // 計算済みの祖先から差分適用 / refresh して追いつく。
             unadjusted_static_eval = tt_ctx.eval;
@@ -553,7 +553,7 @@ pub(super) fn compute_eval_context(
         inc_stat_by_depth!(st, tt_write_by_depth, 0);
     }
 
-    // YOの `eval` 相当: static_eval をベースに、TT境界値で補正する。
+    // static_eval をベースに、TT境界値で補正する。
     let mut eval = static_eval;
     if !in_check && tt_ctx.hit && tt_ctx.value != Value::NONE && {
         if tt_ctx.value > eval {

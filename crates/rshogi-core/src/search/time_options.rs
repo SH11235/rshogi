@@ -10,7 +10,7 @@ pub struct TimeOptions {
     pub slow_mover: i32,
     pub usi_ponder: bool,
     pub stochastic_ponder: bool,
-    /// 1 手の思考時間を秒境界に切り上げる (YaneuraOu 準拠)。
+    /// 1 手の思考時間を秒境界に切り上げる。
     ///
     /// false にすると秒境界への切り上げ、MinimumThinkingTime の 1 秒の下限、
     /// 残り時間の見積もりから 1 手 1 秒を引く項を外し、消費時間が時計に比例するようにする。
@@ -31,7 +31,6 @@ const DEFAULT_NETWORK_DELAY2: TimePoint = 1120;
 
 impl Default for TimeOptions {
     fn default() -> Self {
-        // YaneuraOu準拠のデフォルト値
         Self {
             network_delay: DEFAULT_NETWORK_DELAY,
             network_delay2: DEFAULT_NETWORK_DELAY2,
@@ -45,7 +44,7 @@ impl Default for TimeOptions {
 }
 
 impl TimeOptions {
-    /// Deep版のデフォルトを取得（YaneuraOuのYANEURAOU_ENGINE_DEEP相当）
+    /// Deep版のデフォルトを取得
     pub fn deep_defaults() -> Self {
         Self {
             network_delay: 400,

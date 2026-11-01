@@ -1,7 +1,7 @@
 //! HalfKP 特徴量
 //!
 //! 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
-//! YaneuraOu の `HalfKP<Friend>` に相当する。
+//! 自玉の位置と両軍の玉以外の駒を組み合わせる。
 
 use super::Feature;
 use super::TriggerEvent;
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_bona_piece_values() {
-        // BonaPieceの値がやねうら王の定義と一致することを確認
+        // BonaPiece のオフセットを確認
         use crate::nnue::bona_piece::{E_DRAGON, E_GOLD, E_PAWN, F_DRAGON, F_GOLD, F_PAWN};
 
         // 盤上駒のベース値

@@ -4,7 +4,8 @@ use super::{Piece, PieceType, Square};
 
 /// 指し手（32bit）
 ///
-/// 下位16bit（YaneuraOu互換）:
+/// 下位16bitは外部形式（PSV など）の Move16 と同じ配置で固定する。変更すると読み書きが壊れる。
+///
 /// - bit 0-6:  移動先 (to)
 /// - bit 7-13: 移動元 (from) / 駒打ちの場合はPieceType
 /// - bit 14:   駒打ちフラグ
@@ -32,7 +33,7 @@ impl Move {
     /// - PASS(0xC000)と同じ DROP+PROMOTE 同時立ちだが、to=1 で区別
     pub const WIN: Move = Move(0xC001);
 
-    // 下位16bitのマスク（YaneuraOu互換）
+    // 外部形式の Move16 の配置を保つため、下位16bitのマスクは固定する。
     const TO_MASK: u32 = 0x007F; // bit 0-6
     const FROM_MASK: u32 = 0x3F80; // bit 7-13
     const FROM_SHIFT: u32 = 7;
@@ -134,7 +135,7 @@ impl Move {
         unsafe { std::mem::transmute(piece) }
     }
 
-    /// 移動後の駒を取得（YaneuraOu互換）
+    /// 移動後の駒を取得
     /// 成りの場合は成った後の駒、駒打ちの場合は打った駒を返す
     /// 駒情報が設定されていない場合はPiece::NONEを返す
     #[inline]
@@ -214,9 +215,9 @@ impl Move {
 
     /// History用インデックス
     ///
-    /// YaneuraOu準拠: `m.raw()` (下位16bit) をそのまま使用。
+    /// `m.raw()` (下位16bit) をそのまま使用。
     /// bit 0-6: to, bit 7-13: from/駒種, bit 14: 打ちフラグ, bit 15: 成りフラグ
-    /// 成り/不成りで別エントリになる（YO互換）。
+    /// 成り/不成りで別エントリになる。
     #[inline]
     pub const fn history_index(self) -> usize {
         (self.0 & Self::LOWER_16BIT_MASK) as usize
@@ -228,7 +229,7 @@ impl Move {
         self.is_promote()
     }
 
-    /// 内部値を取得（下位16bitのみ、YaneuraOu互換）
+    /// 内部値を取得（下位16bitのみ）
     #[inline]
     pub const fn raw(self) -> u16 {
         (self.0 & Self::LOWER_16BIT_MASK) as u16
@@ -595,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_move_history_index() {
-        // YaneuraOu準拠: history_index = m.raw() (下位16bit)
+        // history_index = m.raw() (下位16bit)
         let from = Square::new(File::File7, Rank::Rank7);
         let to = Square::new(File::File7, Rank::Rank6);
 
