@@ -971,7 +971,10 @@ fn leftover_variations_find_shorter_clean_lines() {
             time_ms: 0,
         };
         let mut pos = position(sfen);
+        let solved_nodes = solver.nodes();
         let check = solver.leftover_variations(&mut pos, &leftover_pv, &tight, 0, &stop);
+        assert_eq!(solver.nodes(), solved_nodes, "{mode:?}");
         assert!(!check.complete, "{mode:?}: {check:?}");
+        assert_eq!(pos.to_sfen(), position(sfen).to_sfen(), "{mode:?}: 局面を戻す");
     }
 }
