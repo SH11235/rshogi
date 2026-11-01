@@ -26,6 +26,13 @@ fn progress(state: &Path) -> Value {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null)
 }
+fn journal_rows(state: &Path) -> Vec<Value> {
+    std::fs::read_to_string(state.join("journal.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
 fn mock_engine() -> &'static Path {
     static MOCK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     MOCK.get_or_init(|| {
@@ -1642,4 +1649,562 @@ fn depth_zero_line_reads_every_root_without_expanding() {
     assert!(!out(state, "flat", "b").join("d1.jsonl").exists());
     assert_eq!(searches(state), 3);
     stop(state, &mut server);
+}
+
+fn prefetch_fixture(state: &Path, mode: &str, delay: f64) -> (PathBuf, String, Value) {
+    std::fs::create_dir_all(state).unwrap();
+    std::fs::write(state.join("workers"), "3").unwrap();
+    let child = |key: &str, mv: &str| {
+        strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen()).to_owned()
+    };
+    let a = child(ROOT, "5i4i");
+    let second = child(&a, "5a4a");
+    let c = child(ROOT, "5i5h");
+    let predicted = child(ROOT, "5i6i");
+    let mut positions = BTreeMap::new();
+    positions.insert(
+        ROOT.to_owned(),
+        json!([{"move":"5i4i","cp":100,"depth":8},{"move":"5i5h","cp":80,"depth":8},{"move":"5i6i","cp":60,"depth":8}]),
+    );
+    positions.insert(a, json!([{"move":"5a5b","cp":500,"depth":8}]));
+    positions.insert(c, json!([{"move":"5a5b","cp":500,"depth":8}]));
+    let config = state.join("engine.json");
+    let mut data = json!({"positions":positions,"unknown_resign":true,"delay":0.0,"stop_mode":mode,"growing":true,"log":state.join("protocol.jsonl")});
+    data[format!("delay:{second}")] = json!(delay);
+    data[format!("delay:{predicted}")] = json!(30.0);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    let line = json!({"id":"predict","root":format!("sfen {ROOT} 11"),"roots":[format!("sfen {second} 7")],"own":"b","depth":1,"opts":{"opp_n":1,"stop":300,"rounds":1}});
+    (config, predicted, line)
+}
+
+fn start_prefetch(state: &Path, config: &Path) -> Server {
+    let mut command = serve_command(state, config, 3, 3, state.parent().unwrap());
+    command.arg("--prefetch");
+    Server(command.spawn().unwrap())
+}
+
+#[test]
+fn prefetch_stop_reuses_engine_and_persists_reasons_without_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, mut line) = prefetch_fixture(&state, "respond", 5.0);
+    configure_prefetch(&config, |data| data[format!("delay:{predicted}")] = json!(5.0));
+    enqueue(&state, line.clone());
+    enqueue(&state, json!({"id":"keep", "root":line["roots"][0], "own":"b", "depth":0}));
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    line["hold"] = json!(true);
+    enqueue(&state, line);
+    wait_for(|| progress(&state)["prefetch"]["stopped"]["no_demand"].as_u64().unwrap_or(0) >= 1);
+    let protocol_before = protocol(&state);
+    let stopped_pid = protocol_before.iter().find(|(_, s)| s == "stop").unwrap().0;
+    add_root(&state, "normal", &predicted);
+    wait_for(|| {
+        protocol(&state)
+            .iter()
+            .filter(|(pid, s)| *pid == stopped_pid && s.starts_with("go "))
+            .count()
+            >= 2
+    });
+    stop(&state, &mut server);
+    assert!(!alerts(&state).contains("RESTART"));
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
+    assert_eq!(stats["stopped"]["no_demand"], 1);
+    let mut resumed = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["status"] == "STOPPED");
+    stop(&state, &mut resumed);
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
+    assert_eq!(after["stopped"], stats["stopped"]);
+}
+
+#[test]
+fn prefetch_stop_deadline_survives_info_and_eof_is_anomaly() {
+    for mode in ["ignore", "info", "eof"] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let (config, _, mut line) = prefetch_fixture(&state, mode, 2.0);
+        configure_prefetch(&config, |data| data["growing"] = json!(false));
+        enqueue(&state, line.clone());
+        let mut server = start_prefetch(&state, &config);
+        wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+        line["hold"] = json!(true);
+        let started = Instant::now();
+        enqueue(&state, line);
+        wait_for(|| alerts(&state).contains("先読みの異常"));
+        assert!(started.elapsed() < Duration::from_secs(14), "{mode}");
+        assert_eq!(alerts(&state).matches("先読みの異常").count(), 1);
+        assert!(!alerts(&state).contains("局面の失敗"));
+        stop(&state, &mut server);
+    }
+}
+
+#[test]
+fn continuous_info_before_stop_cannot_delay_stop_or_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, mut line) = prefetch_fixture(&state, "info", 2.0);
+    configure_prefetch(&config, |data| data["flood_key"] = json!(predicted));
+    enqueue(&state, line.clone());
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    wait_for(|| {
+        progress(&state)["workers"].as_array().is_some_and(|workers| {
+            workers
+                .iter()
+                .any(|w| w["key"] == predicted && w["nodes"].as_u64().unwrap_or(0) > 0)
+        })
+    });
+    line["hold"] = json!(true);
+    let started = Instant::now();
+    enqueue(&state, line);
+    wait_for(|| protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    wait_for(|| alerts(&state).contains("stop の応答期限"));
+    assert!(started.elapsed() < Duration::from_secs(14));
+    stop(&state, &mut server);
+}
+
+#[test]
+fn normal_restart_does_not_change_prefetch_stop_statistics() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(state.join("workers"), "1").unwrap();
+    let config = fast_fixture(&state);
+    configure_prefetch(&config, |data| {
+        data["delay"] = json!(2.0);
+        data["growing"] = json!(true);
+    });
+    add_tree(&state, "normal");
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["workers"][0]["nodes"].as_u64().unwrap_or(0) > 0);
+    let before = progress(&state)["prefetch"].clone();
+    std::fs::write(state.join("restart/0"), "").unwrap();
+    wait_for(|| alerts(&state).contains("制御ファイル"));
+    stop(&state, &mut server);
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
+    assert_eq!(stats["stopped"], before["stopped"]);
+    assert_eq!(stats["discarded"], before["discarded"]);
+}
+
+fn configure_prefetch(config: &Path, change: impl FnOnce(&mut Value)) {
+    let mut data: Value = serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+    change(&mut data);
+    std::fs::write(config, serde_json::to_vec(&data).unwrap()).unwrap();
+}
+
+#[test]
+fn prefetch_completion_is_used_after_advance_and_replayed_after_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, line) = prefetch_fixture(&state, "respond", 2.0);
+    configure_prefetch(&config, |data| data[format!("delay:{predicted}")] = json!(0.1));
+    enqueue(&state, line);
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| targets_status(&state)["targets"][0]["ready"] == true);
+    wait_for(|| progress(&state)["prefetch"]["used"] == 1);
+    stop(&state, &mut server);
+    let ledger = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    let rows: Vec<Value> = ledger.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let prefetched: Vec<_> = rows.iter().filter(|r| r["prefetch"] == true).collect();
+    assert_eq!(prefetched.len(), 1);
+    assert_eq!(prefetched[0]["reading"]["key"], predicted);
+    assert_eq!(prefetched[0]["reading"]["ply"], 12);
+    let output = out(&state, "predict", "b");
+    let before: BTreeMap<_, _> = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file() && p.file_name().unwrap() != "tree.lock")
+        .map(|p| (p.file_name().unwrap().to_owned(), std::fs::read(&p).unwrap()))
+        .collect();
+    let mut resumed = start_prefetch(&state, &config);
+    stop(&state, &mut resumed);
+    assert_eq!(std::fs::read_to_string(state.join("journal.jsonl")).unwrap(), ledger);
+    for (name, bytes) in &before {
+        assert_eq!(&std::fs::read(output.join(name)).unwrap(), bytes, "{name:?}");
+    }
+    let def = replay_toml(&state, "predict", "");
+    let text = std::fs::read_to_string(&def)
+        .unwrap()
+        .replace("opp_n=2", "opp_n=1")
+        .replace("rounds=0", "rounds=1");
+    std::fs::write(&def, text).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--journal"])
+        .arg(state.join("journal.jsonl"))
+        .arg("--tree")
+        .arg(def)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    for (name, bytes) in before {
+        assert_eq!(std::fs::read(output.join(&name)).unwrap(), bytes, "{name:?}");
+    }
+}
+
+#[test]
+fn prefetch_promoted_demand_drains_on_stop_and_workers_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, line) = prefetch_fixture(&state, "respond", 2.0);
+    configure_prefetch(&config, |data| data[format!("delay:{predicted}")] = json!(3.0));
+    enqueue(&state, line);
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    add_root(&state, "normal", &predicted);
+    wait_for(|| {
+        progress(&state)["trees"]
+            .as_array()
+            .is_some_and(|trees| trees.iter().any(|t| t["id"] == "normal" && t["running"] == 1))
+    });
+    std::fs::write(state.join("workers"), "0").unwrap();
+    stop(&state, &mut server);
+    assert!(!protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+    let ledger = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    assert!(
+        ledger
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|r| r["prefetch"] == true && r["reading"]["key"] == predicted)
+    );
+}
+
+#[test]
+fn prefetch_shared_demand_survives_hold_and_generation_until_last_tree_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, mut first) = prefetch_fixture(&state, "respond", 6.0);
+    let mut second = first.clone();
+    second["id"] = json!("shared");
+    enqueue(&state, first.clone());
+    enqueue(&state, second.clone());
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    wait_for(|| {
+        protocol(&state)
+            .iter()
+            .any(|(_, cmd)| cmd.starts_with(&format!("position sfen {predicted} ")))
+    });
+    assert_eq!(
+        protocol(&state)
+            .iter()
+            .filter(|(_, cmd)| cmd.starts_with(&format!("position sfen {predicted} ")))
+            .count(),
+        1
+    );
+    first["hold"] = json!(true);
+    enqueue(&state, first.clone());
+    wait_for(|| targets_status(&state)["targets"][0]["state"] == "HELD");
+    assert!(!protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+    first["hold"] = json!(false);
+    first["depth"] = json!(0);
+    first["roots"] = json!([]);
+    enqueue(&state, first);
+    wait_for(|| {
+        targets_status(&state)["targets"][0]["generation"] == 2
+            && targets_status(&state)["targets"][0]["ready"] == true
+    });
+    assert!(!protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+    second["hold"] = json!(true);
+    enqueue(&state, second);
+    wait_for(|| progress(&state)["prefetch"]["stopped"]["no_demand"].as_u64().unwrap_or(0) >= 1);
+    stop(&state, &mut server);
+}
+
+#[test]
+fn prefetch_failure_limit_does_not_exhaust_normal_retry_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, line) = prefetch_fixture(&state, "respond", 3.0);
+    configure_prefetch(&config, |data| {
+        data[format!("delay:{predicted}")] = json!(0.0);
+        data["crash_key"] = json!(predicted);
+        data["crash_limit"] = json!(2);
+        data["crash_count_file"] = json!(state.join("crash-count"));
+    });
+    enqueue(&state, line);
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| targets_status(&state)["targets"][0]["ready"] == true);
+    stop(&state, &mut server);
+    assert_eq!(std::fs::read_to_string(state.join("crash-count")).unwrap(), "2");
+    assert_eq!(alerts(&state).matches("先読みの異常").count(), 1);
+    assert!(!alerts(&state).contains("局面の失敗"));
+    let ledger = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    let row = ledger
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|r| r["reading"]["key"] == predicted)
+        .unwrap();
+    assert_ne!(row["prefetch"], true);
+}
+
+#[test]
+fn prefetch_workers_reduction_stops_only_speculative_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, _, line) = prefetch_fixture(&state, "respond", 3.0);
+    enqueue(&state, line);
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    std::fs::write(state.join("workers"), "0").unwrap();
+    wait_for(|| progress(&state)["prefetch"]["stopped"]["workers"] == 1);
+    wait_for(|| progress(&state)["status"] == "STOPPED");
+    assert_eq!(protocol(&state).iter().filter(|(_, cmd)| cmd == "stop").count(), 1);
+    stop(&state, &mut server);
+}
+
+#[test]
+fn prefetch_stop_discards_and_work_budget_defers_stale_candidates() {
+    for (budget, cap) in [(0, 2), (500_000, 0), (500_000, 1)] {
+        let enabled = budget > 0 && cap > 0;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let (config, predicted, line) = prefetch_fixture(&state, "respond", 3.0);
+        enqueue(&state, line);
+        let mut command = serve_command(&state, &config, 3, 3, dir.path());
+        command
+            .args(["--prefetch", "--prefetch-work"])
+            .arg(budget.to_string())
+            .arg("--prefetch-workers")
+            .arg(cap.to_string());
+        let mut server = Server(command.spawn().unwrap());
+        if enabled {
+            wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+        } else {
+            wait_for(|| searches(&state) >= 3);
+            assert_eq!(progress(&state)["prefetch"]["running"], 0);
+            assert!(
+                !protocol(&state)
+                    .iter()
+                    .any(|(_, cmd)| cmd.starts_with(&format!("position sfen {predicted} ")))
+            );
+        }
+        stop(&state, &mut server);
+        assert_eq!(
+            protocol(&state).iter().filter(|(_, cmd)| cmd == "stop").count(),
+            usize::from(enabled)
+        );
+    }
+}
+
+#[test]
+fn prefetch_preemption_uses_recent_times_and_protects_observed_nodes() {
+    for (warm, growing, expected_stop) in [
+        (true, false, true),
+        (false, false, false),
+        (true, true, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let (config, predicted, line) = prefetch_fixture(&state, "respond", 8.0);
+        configure_prefetch(&config, |data| data["growing"] = json!(growing));
+        let seed = "4k4/9/9/9/9/9/9/9/K8 b -";
+        add_root(&state, "seed", seed);
+        let mut server = start(&state, &config);
+        wait_for(|| targets_status(&state)["targets"][0]["ready"] == true);
+        stop(&state, &mut server);
+        if warm {
+            use std::io::Write;
+            let path = state.join("journal.jsonl");
+            let ledger = std::fs::read_to_string(&path).unwrap();
+            let mut rec: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+            rec["reading"]["sec"] = json!(1000.0);
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for _ in 0..10 {
+                writeln!(file, "{rec}").unwrap();
+            }
+        }
+        std::fs::remove_file(state.join("stop")).unwrap();
+        std::fs::write(state.join("workers"), "2").unwrap();
+        enqueue(&state, line);
+        let mut server = start_prefetch(&state, &config);
+        wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+        if growing {
+            wait_for(|| {
+                progress(&state)["workers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|w| w["key"] == predicted && w["nodes"].as_u64().unwrap_or(0) >= 25)
+            });
+        }
+        add_root(&state, "arrived", "4k4/9/9/9/9/9/9/9/8K w -");
+        if expected_stop {
+            wait_for(|| progress(&state)["prefetch"]["stopped"]["preempt"] == 1);
+        } else {
+            wait_for(|| progress(&state)["queued"]["normal"] == 1);
+            assert!(!protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+        }
+        stop(&state, &mut server);
+        assert!(!alerts(&state).contains("RESTART"));
+    }
+}
+
+#[test]
+fn prefetch_normal_request_after_stop_write_waits_for_discard_before_redispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, predicted, mut line) = prefetch_fixture(&state, "respond", 5.0);
+    configure_prefetch(&config, |data| {
+        data["stop_delay_ms"] = json!(1500);
+        data[format!("delay:{predicted}")] = json!(5.0);
+    });
+    enqueue(&state, line.clone());
+    enqueue(&state, json!({"id":"keep", "root":line["roots"][0], "own":"b", "depth":0}));
+    let mut server = start_prefetch(&state, &config);
+    wait_for(|| progress(&state)["prefetch"]["running"] == 1);
+    line["hold"] = json!(true);
+    enqueue(&state, line);
+    wait_for(|| protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+    add_root(&state, "normal", &predicted);
+    wait_for(|| {
+        targets_status(&state)["targets"]
+            .as_array()
+            .is_some_and(|trees| trees.iter().any(|t| t["id"] == "normal"))
+    });
+    let position = format!("position sfen {predicted} ");
+    assert_eq!(protocol(&state).iter().filter(|(_, cmd)| cmd.starts_with(&position)).count(), 1);
+    wait_for(|| protocol(&state).iter().filter(|(_, cmd)| cmd.starts_with(&position)).count() == 2);
+    stop(&state, &mut server);
+    let ledger = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    let row = ledger
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|r| r["reading"]["key"] == predicted)
+        .unwrap();
+    assert_ne!(row["prefetch"], true);
+    assert!(!alerts(&state).contains("RESTART"));
+}
+
+#[test]
+fn prefetch_completed_readings_accept_early_and_missing_node_counts() {
+    for no_nodes in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let (config, predicted, line) = prefetch_fixture(&state, "respond", 2.0);
+        configure_prefetch(&config, |data| {
+            data["no_nodes"] = json!(no_nodes);
+            data["final_nodes"] = json!(1);
+            data["growing"] = json!(false);
+            data[format!("delay:{predicted}")] = json!(0.1);
+            data["positions"][&predicted] = json!([{"move":"5a5b", "cp":500, "depth":1}]);
+        });
+        enqueue(&state, line);
+        let mut server = start_prefetch(&state, &config);
+        wait_for(|| progress(&state)["prefetch"]["read"] == 1);
+        stop(&state, &mut server);
+        let ledger = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+        let row = ledger
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|r| r["reading"]["key"] == predicted)
+            .unwrap();
+        assert_eq!(row["prefetch"], true);
+        assert_eq!(row["reading"]["nodes"], if no_nodes { Value::Null } else { json!(1) });
+    }
+}
+
+#[test]
+fn normal_reads_survive_hold_and_generation_changes_with_prefetch_enabled() {
+    for new_generation in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let (config, _, _) = prefetch_fixture(&state, "respond", 0.0);
+        configure_prefetch(&config, |data| data[format!("delay:{ROOT}")] = json!(3.0));
+        std::fs::write(state.join("workers"), "1").unwrap();
+        let mut line = json!({"id":"normal","root":format!("sfen {ROOT} 1"),"own":"b","depth":0});
+        enqueue(&state, line.clone());
+        let mut server = start_prefetch(&state, &config);
+        wait_for(|| protocol(&state).iter().any(|(_, cmd)| cmd.starts_with("go ")));
+        line["hold"] = json!(true);
+        if new_generation {
+            line["depth"] = json!(1);
+        }
+        enqueue(&state, line);
+        wait_for(|| targets_status(&state)["targets"][0]["state"] == "HELD");
+        assert_eq!(
+            targets_status(&state)["targets"][0]["generation"],
+            if new_generation { 2 } else { 1 }
+        );
+        stop(&state, &mut server);
+        assert!(!protocol(&state).iter().any(|(_, cmd)| cmd == "stop"));
+        assert!(journal_rows(&state).iter().any(|r| r["reading"]["key"] == ROOT));
+        assert!(!alerts(&state).contains("RESTART"));
+    }
+}
+
+#[test]
+fn default_dispatch_and_progress_keep_normal_queue_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let (config, _, _) = prefetch_fixture(&state, "respond", 0.0);
+    let a = strip_ply(&child_position_after_move(&format!("{ROOT} 1"), "5i4i").unwrap().to_sfen())
+        .to_owned();
+    let second =
+        strip_ply(&child_position_after_move(&format!("{a} 1"), "5a4a").unwrap().to_sfen())
+            .to_owned();
+    configure_prefetch(&config, |data| {
+        data[format!("delay:{second}")] = json!(2.5);
+    });
+    std::fs::write(state.join("workers"), "1").unwrap();
+    enqueue(
+        &state,
+        json!({"id":"low","root":format!("sfen {ROOT} 11"),"roots":[format!("sfen {second} 7")],"own":"b","depth":0,"priority":10}),
+    );
+    enqueue(
+        &state,
+        json!({"id":"high","root":format!("sfen {second} 21"),"own":"b","depth":0,"priority":1}),
+    );
+    let mut server = start(&state, &config);
+    wait_for(|| progress(&state)["workers"][0]["key"] == second);
+    let snapshot = progress(&state);
+    assert_eq!(snapshot["queued"], 1);
+    assert_eq!(snapshot["status"], "RUNNING");
+    assert!(snapshot.get("prefetch").is_none());
+    assert_eq!(
+        snapshot.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "fingerprint",
+            "queued",
+            "run_id",
+            "status",
+            "trees",
+            "workers"
+        ]
+    );
+    for (index, requested, queued) in [(0, 2, 1), (1, 1, 0)] {
+        let tree = &snapshot["trees"][index];
+        assert_eq!(tree["read"], 0);
+        assert_eq!(tree["requested"], requested);
+        assert_eq!(tree["queued"], queued);
+        assert_eq!(tree["running"], 1);
+        assert_eq!(tree["finished"], false);
+        assert_eq!(tree["failed"], false);
+    }
+    wait_for(|| progress(&state)["status"] == "IDLE");
+    let snapshot = progress(&state);
+    assert_eq!(snapshot["queued"], 0);
+    assert_eq!(snapshot["trees"][0]["read"], 2);
+    assert_eq!(snapshot["trees"][1]["read"], 1);
+    assert!(
+        snapshot["trees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["finished"] == true && t["running"] == 0)
+    );
+    stop(&state, &mut server);
+    let positions: Vec<_> = protocol(&state)
+        .into_iter()
+        .filter_map(|(_, cmd)| cmd.strip_prefix("position sfen ").map(str::to_owned))
+        .collect();
+    assert_eq!(positions, [format!("{second} 21"), format!("{ROOT} 11")]);
+    let rows = journal_rows(&state);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.get("prefetch").is_none()));
+    assert_eq!(rows[0]["reading"]["key"], second);
+    assert_eq!(rows[1]["reading"]["key"], ROOT);
 }

@@ -228,7 +228,7 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
         None => &mut NoConflictList,
     };
     let (appended, skipped, conflicts) =
-        journal.merge_all(incoming, &dst, args.on_conflict, sink)?;
+        journal.merge_all(incoming, &dst, args.on_conflict, sink, &source.prefetched)?;
     println!("fingerprint={}", dst.fingerprint);
     println!("source_fingerprint={}", source.settings.fingerprint);
     println!("appended={appended} skipped={skipped} conflicts={conflicts}");
@@ -331,7 +331,7 @@ impl ConflictSink for ConflictTsv {
 mod tests {
     use super::*;
     use crate::book_tree::journal::{LockedFile, Reading};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     const VERSION_A: &str = "0123456789abcdef0123456789abcdef01234567";
     const VERSION_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
@@ -539,7 +539,7 @@ mod tests {
         let incoming: Vec<_> =
             source.readings.iter().map(|r| (r.clone(), "copied".to_owned())).collect();
         let (appended, skipped, _) = journal
-            .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+            .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList, &BTreeSet::new())
             .unwrap();
         assert_eq!((appended, skipped), (1, 1));
         drop(journal);
@@ -553,7 +553,13 @@ mod tests {
         let incoming = vec![(conflicting, "copied".into()), (changed, "copied".into())];
         assert!(
             journal
-                .merge_all(incoming, &dst, OnConflict::Reject, &mut NoConflictList)
+                .merge_all(
+                    incoming,
+                    &dst,
+                    OnConflict::Reject,
+                    &mut NoConflictList,
+                    &BTreeSet::new()
+                )
                 .is_err()
         );
         assert_eq!(std::fs::metadata(&dst_path).unwrap().len(), size);
@@ -591,7 +597,7 @@ mod tests {
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
         let mut listed = Listed::default();
         let (appended, skipped, conflicts) = journal
-            .merge_all(incoming, &dst, OnConflict::KeepExisting, &mut listed)
+            .merge_all(incoming, &dst, OnConflict::KeepExisting, &mut listed, &BTreeSet::new())
             .unwrap();
         assert_eq!((appended, skipped, conflicts), (2, 3, 2));
         assert_eq!(
@@ -615,7 +621,8 @@ mod tests {
                     &mut Listed {
                         fail: true,
                         ..Default::default()
-                    }
+                    },
+                    &BTreeSet::new(),
                 )
                 .is_err()
         );

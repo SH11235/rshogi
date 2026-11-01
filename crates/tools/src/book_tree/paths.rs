@@ -51,6 +51,7 @@ pub(super) fn reject_collisions(
             "STATUS",
             "ALERT",
             "progress.json",
+            "prefetch_stats.json",
             super::targets::CHECKPOINT,
         ] {
             let path = managed(&state.join(name))?;

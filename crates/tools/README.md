@@ -7,6 +7,7 @@
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
+| 台帳を共有して木を並列に読む (計算量に上限のある任意の先読み・停止統計つき) | [book_mine tree serve](docs/book_mine.md#空いた-worker-での先読み) |
 | 外部の定跡の木を借りて自分の読みで値を付ける | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
 | 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手を検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |

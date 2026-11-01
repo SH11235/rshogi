@@ -229,6 +229,13 @@ impl Resolved {
         }
     }
 
+    pub fn borrowed_lines(&self) -> impl Iterator<Item = (&str, u32, &[String])> {
+        let root = std::iter::once((self.key.as_str(), self.ply, [].as_slice()))
+            .take(usize::from(self.game.is_empty()));
+        root.chain(self.game.iter().map(|moves| (self.key.as_str(), self.ply, moves.as_slice())))
+            .chain(self.roots.iter().map(|(key, ply)| (key.as_str(), *ply, [].as_slice())))
+    }
+
     pub fn lines(&self) -> Vec<GameLine> {
         let mut lines: Vec<GameLine> = if self.game.is_empty() {
             vec![(self.key.clone(), self.ply, Vec::new())]

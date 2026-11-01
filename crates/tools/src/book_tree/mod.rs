@@ -86,6 +86,14 @@ struct ServeArgs {
     workers: usize,
     #[arg(long, default_value_t = 600)]
     stall_secs: u64,
+    #[arg(long)]
+    prefetch: bool,
+    #[arg(long)]
+    prefetch_workers: Option<usize>,
+    #[arg(long, default_value_t = 0.25)]
+    prefetch_preempt_below: f64,
+    #[arg(long, default_value_t = model::PREFETCH_WORK)]
+    prefetch_work: usize,
     #[arg(long, default_value_t = 3)]
     max_restarts: usize,
     /// 対象の出力の根。`<out-root>/<id>/<own>/g<世代>/` に書く。state に固定される
