@@ -63,6 +63,12 @@ pub struct LimitsType {
     /// 空なら全合法手を探索
     pub search_moves: Vec<crate::types::Move>,
 
+    /// 制限で反復が途中で止まったとき、完了した反復があればその最後の結果を返す。
+    /// 偽なら、中断した反復で根の先頭に別の手が残っていればその手と下界・上界の評価値を返す。
+    /// depth 1 も完了しないうちに止まった場合は、真でも中断した探索の結果になる。
+    /// 評価値を教師ラベルなど確定値として保存する呼出側が真にする。
+    pub return_completed_iteration: bool,
+
     /// 探索開始時刻
     pub(crate) start_time: Option<Instant>,
 
@@ -87,6 +93,7 @@ impl Default for LimitsType {
             ponder: false,
             multi_pv: 1, // デフォルトは1（通常探索）
             search_moves: Vec::new(),
+            return_completed_iteration: false,
             start_time: None,
             searched_nodes: None,
         }

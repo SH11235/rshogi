@@ -226,6 +226,7 @@ pub fn label_position(
     }
     let mut limits = LimitsType::default();
     limits.depth = depth;
+    limits.return_completed_iteration = true;
     if nodes > 0 {
         limits.nodes = nodes;
     }

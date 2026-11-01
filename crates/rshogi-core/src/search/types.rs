@@ -8,7 +8,7 @@
 
 use crate::movegen::{MoveList, generate_legal_with_pass};
 use crate::position::Position;
-use crate::types::{MAX_PLY, Move, Piece, RepetitionState, Square, Value};
+use crate::types::{Bound, MAX_PLY, Move, Piece, RepetitionState, Square, Value};
 
 use super::history::{CorrectionPieceToHistory, PieceToHistory};
 use std::ptr::NonNull;
@@ -432,6 +432,18 @@ impl RootMove {
     #[inline]
     pub fn mv(&self) -> Move {
         self.pv[0]
+    }
+
+    /// 最後に探索した窓に対する `score` の種類。窓の外で返った値は下界・上界になる。
+    #[inline]
+    pub fn score_bound(&self) -> Bound {
+        if self.score_lower_bound {
+            Bound::Lower
+        } else if self.score_upper_bound {
+            Bound::Upper
+        } else {
+            Bound::Exact
+        }
     }
 
     /// PVを更新

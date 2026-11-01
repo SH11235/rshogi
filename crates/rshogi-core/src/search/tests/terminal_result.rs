@@ -7,7 +7,7 @@ use crate::search::alpha_beta::SearchWorker;
 use crate::search::types::NodeType;
 use crate::search::{LimitsType, RootMoves, Search, SearchInfo, SearchTuneParams, TimeManagement};
 use crate::tt::TranspositionTable;
-use crate::types::{Move, Value};
+use crate::types::{Bound, Move, Value};
 
 fn on_large_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
@@ -81,7 +81,7 @@ fn terminal_searchmoves_empty_is_not_loss() {
 }
 
 #[test]
-fn aspiration_abort_returns_completed_result() {
+fn abort_with_same_head_move_returns_completed_result() {
     let _guard = crate::eval::material::test_support::lock_material();
     crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
     on_large_stack(|| {
@@ -94,13 +94,14 @@ fn aspiration_abort_returns_completed_result() {
             pos.do_move(mv, check);
         }
         let mut search = Search::new(1);
-        // nodes の上限と期待値は、この補正の設定で aspiration の再探索中に止まるよう選んである。
+        // nodes の上限と期待値は、この補正の設定で depth 11 の最初の窓の探索中、
+        // 根の先頭が完了した反復と同じ手のまま止まるよう選んである。
         search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
         let mut infos = Vec::new();
         let result = search.go(
             &mut pos,
             LimitsType {
-                nodes: 13_678,
+                nodes: 11_200,
                 ..Default::default()
             },
             Some(|info: &SearchInfo| infos.push(info.clone())),
@@ -115,6 +116,94 @@ fn aspiration_abort_returns_completed_result() {
         assert_eq!(result.score, completed.score);
         assert_eq!(infos.last().unwrap().pv, completed.pv);
         assert_eq!(result.ponder_move, completed.pv.get(1).copied().unwrap_or(Move::NONE));
+    });
+}
+
+#[test]
+fn abort_with_different_head_move_returns_partial_result_with_bound() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    on_large_stack(|| {
+        // depth 10 の最善手は 2h6h。depth 11 では 8h2b+ が最初の窓で fail high し、
+        // 11_300 は再探索の途中 (下界のまま)、13_700 は再探索で fail low した直後に止まる。
+        for (nodes, bound) in [(11_300, Bound::Lower), (13_700, Bound::Upper)] {
+            let mut pos = Position::new();
+            pos.set_hirate();
+            for usi in ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e"] {
+                let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+                let check = pos.gives_check(mv);
+                pos.do_move(mv, check);
+            }
+            let mut search = Search::new(1);
+            search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
+            let mut infos = Vec::new();
+            let result = search.go(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    ..Default::default()
+                },
+                Some(|info: &SearchInfo| infos.push(info.clone())),
+            );
+            let completed = &infos[infos.len() - 2];
+            assert_eq!(completed.depth, 10);
+            assert_eq!(completed.pv[0].to_usi(), "2h6h");
+            assert_eq!(result.depth, 10);
+            assert_eq!(result.best_move.to_usi(), "8h2b+");
+            assert_eq!(result.bound, bound);
+            let final_info = infos.last().unwrap();
+            assert_eq!(final_info.bound, bound);
+            assert_eq!(final_info.pv, result.pv);
+            assert_eq!(result.pv[0], result.best_move);
+
+            let mut search = Search::new(1);
+            search.set_search_tune_params(super::correction_history::correction_params_ss2_ss4_only());
+            let completed_only = search.go(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    return_completed_iteration: true,
+                    ..Default::default()
+                },
+                None::<fn(&SearchInfo)>,
+            );
+            assert_eq!(completed_only.best_move.to_usi(), "2h6h");
+            assert_eq!(completed_only.score, completed.score);
+            assert_eq!(completed_only.bound, Bound::Exact);
+        }
+    });
+}
+
+#[test]
+fn partial_iteration_result_keeps_move_score_pv_and_bound_together() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    on_large_stack(|| {
+        for nodes in (6_000..=30_000).step_by(1_500) {
+            let mut pos = Position::new();
+            pos.set_hirate();
+            let mut search = Search::new(1);
+            let mut infos = Vec::new();
+            let result = search.go(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    ..Default::default()
+                },
+                Some(|info: &SearchInfo| infos.push(info.clone())),
+            );
+            assert!(result.score.raw().abs() < Value::INFINITE.raw());
+            let final_info = infos.last().unwrap();
+            assert_eq!(result.best_move, final_info.pv[0]);
+            assert_eq!(result.score, final_info.score);
+            assert_eq!(result.bound, final_info.bound);
+            assert_eq!(result.pv, final_info.pv);
+            assert_eq!(result.ponder_move, final_info.pv.get(1).copied().unwrap_or(Move::NONE));
+            // 完了した反復の info は窓の中で確定した値だけを出す。
+            for info in &infos[..infos.len() - 1] {
+                assert_eq!(info.bound, Bound::Exact);
+            }
+        }
     });
 }
 

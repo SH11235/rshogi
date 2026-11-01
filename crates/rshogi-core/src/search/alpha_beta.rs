@@ -1673,6 +1673,8 @@ impl SearchWorker {
             if move_count == 1 || value > alpha {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
+                rm.score_lower_bound = value >= beta;
+                rm.score_upper_bound = value <= alpha;
                 rm.sel_depth = self.state.sel_depth;
                 // PVを更新（第1手はfail lowでも常に更新）
                 rm.pv.truncate(1);
@@ -2317,6 +2319,8 @@ impl SearchWorker {
             {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
+                rm.score_lower_bound = value >= beta;
+                rm.score_upper_bound = value <= alpha;
                 rm.sel_depth = self.state.sel_depth;
                 rm.accumulate_score_stats(value);
             }

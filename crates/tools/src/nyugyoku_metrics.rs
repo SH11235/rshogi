@@ -1214,6 +1214,7 @@ fn oracle_raw_search(
     search.set_entering_king_rule(rule);
     let mut limits = LimitsType::default();
     limits.depth = depth;
+    limits.return_completed_iteration = true;
     if let Some(nodes) = nodes {
         limits.nodes = nodes;
     }

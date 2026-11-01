@@ -232,7 +232,7 @@ preset に足すときは、tools の `layerstack-arch` と、preset と同じ�
 | `--search-depth` | — | 指定深さの alpha-beta 探索スコアを使用（`--use-qsearch` と排他） |
 | `--emit-bestmove` | false | `--search-depth` の探索結果の最善手を実 YaneuraOu PSV 形式 (A) で move16 に出力 |
 | `--hash-mb` | 64 | スレッドごとの置換表サイズ MB（`--search-depth` 時）。置換表は 256 局面の塊ごとに消す（後述「探索モードの並列化」） |
-| `--max-nodes` / `--max-time` | 0（無制限） | 1 局面あたりの探索ノード / ミリ秒上限（`--search-depth` 時のみ有効）。探索爆発ガード |
+| `--max-nodes` / `--max-time` | 0（無制限） | 1 局面あたりの探索ノード / ミリ秒上限（`--search-depth` 時のみ有効）。探索爆発ガード。上限で反復が途中で止まったときは、最後に完了した反復の評価値を書く |
 | `--max-ply` | 16 | qsearch の最大深さ |
 | `--apply-qsearch-leaf` | false | 局面を qsearch 葉に置換して出力 |
 | `--source-fv-scale` / `--target-fv-scale` | 24 / 24 | FV_SCALE 変換（通常は変換不要） |

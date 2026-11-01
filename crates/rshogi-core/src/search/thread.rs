@@ -604,7 +604,7 @@ mod imp {
     use crate::eval::EvalHash;
     use crate::position::Position;
     use crate::tt::TranspositionTable;
-    use crate::types::{Depth, Move, Value};
+    use crate::types::{Bound, Depth, Move, Value};
 
     use crate::search::engine::search_helper;
     use crate::search::{
@@ -627,6 +627,8 @@ mod imp {
         pub best_move: Move,
         /// 最善手のスコア
         pub best_score: Value,
+        /// `best_score` の種類。中断した反復の結果は下界・上界になることがある
+        pub best_bound: Bound,
         /// Top N moves for skill-based move selection.
         /// Contains (move, score) pairs from root_moves, used by skill.pick_best().
         /// Typically contains up to 4 moves (multi_pv when skill is enabled).
@@ -911,6 +913,11 @@ mod imp {
                             .get(0)
                             .map(|rm| rm.score)
                             .unwrap_or(Value::ZERO),
+                        best_bound: worker
+                            .state
+                            .root_moves
+                            .get(0)
+                            .map_or(Bound::Exact, |rm| rm.score_bound()),
                         top_moves,
                     };
                     match helper_results.lock() {
