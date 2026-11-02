@@ -108,6 +108,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `ProgressKpAbsWeights` を返す。係数の再設定・reset 後も取得済みの値を保持し、
   解放済みメモリへの参照を防ぐ。スライスを取る関数には `&weights` を渡す。
   探索stackは生成・reset時の係数を保持するため、再設定した係数はstackのreset後に反映される。
+- `Position::set_sfen`・`StaticPosition::from_sfen`・`Position::from_board_state_json` は、
+  手数が 0..=`MAX_GAME_PLY` (`i32::MAX / 2`) の外なら `SfenError::Ply` / `Err` を返す。
+  従来は負の手数や `i32::MAX` 付近の手数も受け付け、そこから指し手を実行すると手数が桁あふれした。
+  CSA サーバーの `initial_sfen` と USI の `position` も同じ範囲で拒否する (USI は従来どおり 1 以上)。
 
 ## v1.7.0 — 2026-10-11
 

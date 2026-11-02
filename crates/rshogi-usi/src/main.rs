@@ -3133,6 +3133,7 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
             "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - invalid",
             "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 0",
             "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - -1",
+            "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1073741824",
             "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1 extra",
             "position sfen 4k4/9/9/9/9/9/9/9/4K4 b - 2147483647 moves 5i5h",
             "position startpos moves 7g7e",

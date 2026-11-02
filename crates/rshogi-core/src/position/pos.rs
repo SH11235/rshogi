@@ -117,7 +117,8 @@ pub struct Position {
     pub(super) state_stack: Vec<StateInfo>,
     /// 現在の状態インデックス
     state_idx: usize,
-    /// 初期局面からの手数
+    /// 初期局面からの手数。読み込みで受け付けるのは 0..=[`super::MAX_GAME_PLY`] で、
+    /// 指し手の実行・巻き戻しで 1 ずつ増減する (負にはならない)。
     pub(super) game_ply: i32,
     /// 手番
     pub(super) side_to_move: Color,

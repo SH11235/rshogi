@@ -49,7 +49,7 @@ const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8519;
 ///
 /// # Arguments
 /// * `time_forfeit` - 切れ負けルールか（inc=0かつbyoyomi=0）
-/// * `ply` - 現在の手数
+/// * `ply` - 現在の手数 (負の値は 0 として扱う)
 ///
 /// # Returns
 /// 残り手数の見積もり
@@ -57,11 +57,11 @@ pub fn calculate_move_horizon(time_forfeit: bool, ply: i32) -> i32 {
     const MOVE_HORIZON: i32 = 160;
 
     if time_forfeit {
-        // 切れ負けルール: MoveHorizon + 40 - min(ply, 40)
-        MOVE_HORIZON + 40 - ply.min(40)
+        // 切れ負けルール: MoveHorizon + 40 - clamp(ply, 0, 40)
+        MOVE_HORIZON + 40 - ply.clamp(0, 40)
     } else {
-        // フィッシャールール: MoveHorizon + 20 - min(ply, 80)
-        MOVE_HORIZON + 20 - ply.min(80)
+        // フィッシャールール: MoveHorizon + 20 - clamp(ply, 0, 80)
+        MOVE_HORIZON + 20 - ply.clamp(0, 80)
     }
 }
 
@@ -387,8 +387,11 @@ impl TimeManagement {
         // move_horizon の近似 (MoveHorizon = 160 をベースに補正)
         let move_horizon = calculate_move_horizon(time_forfeit, ply);
 
-        // 残り手数 (MTG)
-        let mtg = (max_moves - ply + 2).min(move_horizon) / 2;
+        // 残り手数 (MTG)。MaxMovesToDraw は setoption で i32 の最大値まで入るので、
+        // `max_moves - ply + 2` は TimePoint (i64) で計算して桁あふれを避ける。
+        let mtg = (TimePoint::from(max_moves) - TimePoint::from(ply) + 2)
+            .min(TimePoint::from(move_horizon))
+            / 2;
         if mtg <= 0 {
             self.minimum_time = 500;
             self.optimum_time = 500;
@@ -412,17 +415,16 @@ impl TimeManagement {
 
         // remain_estimate = time + inc*mtg + byoyomi*mtg - (mtg+1)*1000
         // 1 手 1000ms は秒境界への切り上げで失う時間の見込みなので、切り上げないときは引かない
-        let mtg_i64 = mtg as TimePoint;
         let mut remain_estimate = time_left
-            .saturating_add(increment.saturating_mul(mtg_i64))
-            .saturating_add(byoyomi.saturating_mul(mtg_i64));
-        remain_estimate = remain_estimate.saturating_sub((mtg_i64 + 1) * self.second_floor(1000));
+            .saturating_add(increment.saturating_mul(mtg))
+            .saturating_add(byoyomi.saturating_mul(mtg));
+        remain_estimate = remain_estimate.saturating_sub((mtg + 1) * self.second_floor(1000));
         if remain_estimate < 0 {
             remain_estimate = 0;
         }
 
         // optimum: minimum + remain_estimate/mtg
-        let t1 = self.minimum_time + remain_estimate / mtg_i64;
+        let t1 = self.minimum_time + remain_estimate / mtg;
 
         // maximum: minimum + remain_estimate * max_ratio / mtg
         let mut max_ratio: f64 = 5.0;
@@ -431,7 +433,7 @@ impl TimeManagement {
             max_ratio = max_ratio.min(ratio.max(1.0));
         }
         let mut t2 =
-            self.minimum_time + (remain_estimate as f64 * max_ratio / mtg_i64 as f64) as TimePoint;
+            self.minimum_time + (remain_estimate as f64 * max_ratio / mtg as f64) as TimePoint;
         // maximum は残り時間の30%を上限
         let max_cap = (remain_estimate as f64 * 0.3) as TimePoint;
         t2 = t2.min(max_cap);
@@ -1085,6 +1087,37 @@ mod tests {
 
         assert!(tm.optimum() > 0);
         assert!(tm.optimum() < 30000);
+    }
+
+    #[test]
+    fn test_time_manager_init_extreme_max_moves_and_ply() {
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60000;
+        limits.set_start_time();
+
+        // MaxMovesToDraw は setoption で i32 の最大値まで受け付ける。残り手数は
+        // move_horizon で頭打ちになるので、既定の引き分け手数と同じ配分になる。
+        let mut tm = create_time_manager();
+        tm.init(&limits, Color::Black, 1, i32::MAX);
+        let mut expected = create_time_manager();
+        expected.init(&limits, Color::Black, 1, DEFAULT_MAX_MOVES_TO_DRAW);
+        assert_eq!((tm.optimum(), tm.maximum()), (expected.optimum(), expected.maximum()));
+
+        // 引き分けの手数を大きく越えた局面は最小の思考時間に落とす
+        let mut tm = create_time_manager();
+        tm.init(&limits, Color::Black, crate::position::MAX_GAME_PLY, 256);
+        assert_eq!(tm.optimum(), 500);
+        assert_eq!(tm.maximum(), 500);
+    }
+
+    #[test]
+    fn test_calculate_move_horizon_treats_negative_ply_as_zero() {
+        for time_forfeit in [false, true] {
+            assert_eq!(
+                calculate_move_horizon(time_forfeit, i32::MIN),
+                calculate_move_horizon(time_forfeit, 0)
+            );
+        }
     }
 
     #[test]
