@@ -104,6 +104,12 @@ struct Cli {
     #[arg(long)]
     check_leftover: Option<u64>,
 
+    /// 変長駒余りの規則 (受け方は駒余りなしで終わる応手の中で最長、無ければ駒余りの中で最長) の正解手順を、
+    /// 手数と選択を証明して求める (`--shortest` とは併用しない)。TSV に `clean` (詰上りで攻め方の持駒が空か) の
+    /// 列を足す
+    #[arg(long)]
+    clean_first: bool,
+
     /// 局面ごとの結果を書く TSV
     #[arg(long)]
     out: Option<PathBuf>,
@@ -118,6 +124,8 @@ struct Outcome {
     expect: Option<usize>,
     /// 変長駒余りの候補 (`--check-leftover`)
     leftover: Option<LeftoverCheck>,
+    /// `--clean-first` の詰上りで攻め方の持駒が空か
+    clean: bool,
 }
 
 impl Outcome {
@@ -300,7 +308,12 @@ fn parse_mode(name: &str) -> Result<MateMode, String> {
 
 /// TSV の 1 行。`leftover` なら変長駒余りの候補 (`手順の添字:応手:手数` をカンマ区切り)、調べきれなかった
 /// 応手の数、手順の終わりまで調べたかの列を足す
-fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result<()> {
+fn write_row(
+    w: &mut impl Write,
+    o: &Outcome,
+    leftover: bool,
+    clean_first: bool,
+) -> std::io::Result<()> {
     write!(
         w,
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -326,6 +339,13 @@ fn write_row(w: &mut impl Write, o: &Outcome, leftover: bool) -> std::io::Result
             None => (String::new(), String::new(), String::new()),
         };
         write!(w, "\t{list}\t{unchecked}\t{complete}")?;
+    }
+    if clean_first {
+        let clean = match o.result {
+            MateResult::Mate(_) => o.clean.to_string(),
+            _ => String::new(),
+        };
+        write!(w, "\t{clean}")?;
     }
     writeln!(w)
 }
@@ -416,7 +436,12 @@ fn solve_worker(
         let mut pos = Position::new();
         pos.set_sfen(&sfen).expect("読み込み時に検査済み");
         let start = Instant::now();
-        let result = solver.solve(&mut pos, &limits, &stop, |_| {});
+        let (result, clean) = if cli.clean_first {
+            let r = solver.clean_first(&mut pos, &limits, &stop);
+            (r.result, r.clean)
+        } else {
+            (solver.solve(&mut pos, &limits, &stop, |_| {}), false)
+        };
         let nodes = solver.nodes();
         let micros = start.elapsed().as_micros() as u64;
         let leftover = match (&result, cli.check_leftover) {
@@ -432,6 +457,7 @@ fn solve_worker(
             micros,
             expect,
             leftover,
+            clean,
         };
         if results_tx.send((index, outcome)).is_err() {
             break;
@@ -452,6 +478,9 @@ fn main() -> Result<()> {
     }
     if cli.check_leftover.is_some() && cli.shortest != Some(ShortestMode::Tsume) {
         bail!("--check-leftover は --shortest tsume と組で使う");
+    }
+    if cli.clean_first && cli.shortest.is_some() {
+        bail!("--clean-first は --shortest と併用しない");
     }
     let jobs = cli.jobs.max(1);
     // 解いている途中と書き出し待ちの局面数の上限 (遅い局面があっても並べ替え待ちが膨らまない)
@@ -475,6 +504,9 @@ fn main() -> Result<()> {
             write!(w, "sfen\tresult\tpv_len\tnodes\tmicros\tpv\texpect_len")?;
             if cli.check_leftover.is_some() {
                 write!(w, "\tleftover\tleftover_unchecked\tleftover_complete")?;
+            }
+            if cli.clean_first {
+                write!(w, "\tclean")?;
             }
             writeln!(w)?;
             Some(w)
@@ -509,11 +541,13 @@ fn main() -> Result<()> {
             while let Some(o) = pending.remove(&next) {
                 if let Some(w) = writer.as_mut()
                     && write_error.is_none()
-                    && let Err(e) = write_row(w, &o, cli.check_leftover.is_some())
+                    && let Err(e) = write_row(w, &o, cli.check_leftover.is_some(), cli.clean_first)
                 {
                     write_error = Some(e);
                 }
-                if summary.add(&o, cli.shortest.is_some()) && reported < MAX_REPORTED_ERRORS {
+                if summary.add(&o, cli.shortest.is_some() || cli.clean_first)
+                    && reported < MAX_REPORTED_ERRORS
+                {
                     reported += 1;
                     let expect = o.expect.unwrap_or(0);
                     let label = match o.tag() {
@@ -571,7 +605,7 @@ fn main() -> Result<()> {
         BUDGETS.iter().zip(&s.within_budget).map(|(b, c)| format!("{b}:{c}")).collect();
     println!("ノード予算ごとの判定数: {}", curve.join(" "));
     if s.expect_known > 0 {
-        let too_long = if cli.shortest.is_some() {
+        let too_long = if cli.shortest.is_some() || cli.clean_first {
             format!(" / 正解より長い (要確認) {}", s.expect_too_long)
         } else {
             String::new()

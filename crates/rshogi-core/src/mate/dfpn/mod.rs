@@ -17,6 +17,7 @@
 //! 持駒として与える。受け方の玉が無い局面と、手番でない側が王手されている局面は扱わない
 //! ([`MateResult::Unsupported`])。
 
+mod clean_first;
 mod estimate;
 mod pv;
 mod search;
@@ -469,6 +470,154 @@ impl DfpnSolver {
         };
         self.table.set_concurrent(false);
         check
+    }
+}
+
+/// [`DfpnSolver::clean_first`] の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanFirstResult {
+    /// 詰みなら変長駒余りの規則で両者が選ぶ手順。判定は [`DfpnSolver::solve`] と同じ
+    pub result: MateResult,
+    /// 詰みのとき、詰上りで攻め方の持駒が空か
+    pub clean: bool,
+    /// 探索したノード数 (判定、詰将棋のルールの探索、変長駒余りの規則の評価の合計)
+    pub nodes: u64,
+}
+
+impl DfpnSolver {
+    /// 変長駒余りの規則 (駒余りで終わる最長の応手より、駒余りなしで終わる応手の中で最長のものを選ぶ) での
+    /// 正解手順を、手数と選択を証明して求める。
+    ///
+    /// 受け方は、逃れる応手があれば不詰、すべて詰むなら駒余りなしで終わる応手の中で最長、無ければ駒余りで
+    /// 終わる応手の中で最長を選ぶ (受け方の各局面で再帰的に)。攻め方はこの規則で選ばれる手数が最短の王手、
+    /// 同じ手数なら駒余りなしを選ぶ。駒余りなしは詰上りで攻め方の持駒が空のこと。無駄合いは
+    /// [`ShortestMode::Tsume`] の判定のまま応手から除く。手数は Tsume の手数以下になる。
+    ///
+    /// 各局面の値を決めるので、手順の長い問題では Tsume より桁違いに重いことがある。判定は設定したスレッド数、
+    /// 値を決める段は 1 スレッドで解く。制限に達したら [`MateResult::Unknown`]。`pos` は呼び出し前の局面に
+    /// 戻して返る。
+    pub fn clean_first(
+        &mut self,
+        pos: &mut Position,
+        limits: &MateLimits,
+        stop: &AtomicBool,
+    ) -> CleanFirstResult {
+        self.nodes = 0;
+        let us = pos.side_to_move();
+        if pos.pieces(!us, PieceType::King).is_empty()
+            || !pos.attackers_to_c(pos.king_square(!us), us).is_empty()
+        {
+            return CleanFirstResult {
+                result: MateResult::Unsupported,
+                clean: false,
+                nodes: 0,
+            };
+        }
+        self.table.clear();
+        self.table_root = Some(pos.key());
+        let start = Instant::now();
+        let kingless = pos.pieces(us, PieceType::King).is_empty();
+        let found = {
+            let paused = EffectsPaused::new(pos);
+            if kingless {
+                let mut st = NoAttackerKing::new(paused.0.clone());
+                self.clean_first_in_mode(&mut st, *limits, start, stop)
+            } else {
+                self.clean_first_in_mode(paused.0, *limits, start, stop)
+            }
+        };
+        let (result, clean) = match found {
+            Some(Some((pv, clean))) => {
+                let valid = if kingless {
+                    verify::check_mate_pv_by_rules(pos, &pv, true)
+                } else {
+                    check_mate_pv(pos, &pv, true)
+                };
+                debug_assert!(valid, "変長駒余りの手順が検証を通らない: {}", pos.to_sfen());
+                if valid {
+                    (MateResult::Mate(pv), clean)
+                } else {
+                    (MateResult::Unknown, false)
+                }
+            }
+            Some(None) => (MateResult::NoMate, false),
+            None => (MateResult::Unknown, false),
+        };
+        CleanFirstResult {
+            result,
+            clean,
+            nodes: self.nodes,
+        }
+    }
+
+    fn clean_first_in_mode<S: RootState>(
+        &mut self,
+        st: &mut S,
+        limits: MateLimits,
+        start: Instant,
+        stop: &AtomicBool,
+    ) -> Option<Option<(Vec<Move>, bool)>> {
+        match self.mode {
+            MateMode::Speed => self.clean_first_with::<S, false>(st, limits, start, stop),
+            MateMode::Power => self.clean_first_with::<S, true>(st, limits, start, stop),
+        }
+    }
+
+    fn clean_first_with<S: RootState, const PIECES: bool>(
+        &mut self,
+        st: &mut S,
+        limits: MateLimits,
+        start: Instant,
+        stop: &AtomicBool,
+    ) -> Option<Option<(Vec<Move>, bool)>> {
+        let shortest = self.shortest.take();
+        let judged = self.run::<S, PIECES>(st, limits, start, stop, &mut |_| {});
+        self.shortest = shortest;
+        match judged? {
+            SolveOutcome::NoMate => return Some(None),
+            SolveOutcome::Mate(_) => {}
+        }
+        let judged_nodes = self.nodes;
+        let mut quiet = |_| {};
+        let budget = Budget {
+            stop,
+            halt: None,
+            cancel: None,
+            shared_nodes: None,
+            node_limit: match limits.nodes {
+                0 => 0,
+                n => n.saturating_sub(judged_nodes).max(1),
+            },
+            time_limit_ms: limits.time_ms,
+            start,
+            progress: &mut quiet,
+        };
+        let attacker = st.position().side_to_move();
+        let mut searcher =
+            Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
+        configure(&mut searcher, self.mode);
+        searcher.enable_shortest(true, &self.shortest_tables);
+        let mut solving = clean_first::Solving {
+            searcher: &mut searcher,
+            st,
+            attacker,
+            nodes: 0,
+            node_limit: match limits.nodes {
+                0 => 0,
+                n => n.saturating_sub(judged_nodes).max(1),
+            },
+            time_limit_ms: limits.time_ms,
+            start,
+            stop,
+        };
+        let solved = clean_first::CleanFirst::new().solve(&mut solving);
+        let evaluated = solving.nodes;
+        self.nodes = judged_nodes + searcher.nodes() + evaluated;
+        // 判定で詰んだ局面がこの規則で不詰になるのは食い違いなので、決まらなかったものとして扱う
+        match solved.ok()?? {
+            (clean_first::CfValue::NoMate, _) => None,
+            (clean_first::CfValue::Mate { clean, .. }, pv) => Some(Some((pv, clean))),
+        }
     }
 }
 
