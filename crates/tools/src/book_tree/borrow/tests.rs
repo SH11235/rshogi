@@ -889,6 +889,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         source: "ext",
         lineage: "book:big.db@00000000",
         schema: &schema,
+        replace_curated: false,
     };
     let draws = DrawValues {
         black: -70,
