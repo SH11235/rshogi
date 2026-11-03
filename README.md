@@ -84,6 +84,10 @@ rshogi-core = "0.9"
 `.cargo/config.toml` で `target-cpu=native` を指定しているので、`cargo build` だけで
 build したマシンの SIMD (AVX2 等) が有効になります。
 
+この workspace には USI エンジンのほか、70 本を超えるバイナリを持つ tools や CSA サーバー・クライアントが入っています。
+`-p` を付けない `cargo build --release` はそのすべてを build するので、時間とディスクを多く使います。
+使うものだけを `-p` と `--bin` で選んで build してください。Windows では実行ファイルに `.exe` が付きます。
+
 ### USI エンジンだけを使う
 
 ```bash
@@ -94,10 +98,19 @@ cargo build --profile production -p rshogi-usi
 cargo build --release -p rshogi-usi
 ```
 
-Windows では実行ファイルに `.exe` が付きます。どちらも既定の `edition-universal` で、対応する NNUE を実行時に読み分けます。
+どちらも既定の `edition-universal` で、対応する NNUE を実行時に読み分けます。
 
-`-p` を付けない `cargo build --release` は tools の多数のバイナリや CSA サーバー・クライアントを含む
-workspace の全 crate を build するので、時間とディスクを多く使います。エンジンだけが要るときは `-p rshogi-usi` を付けてください。
+### ツールを使う
+
+教師データの生成・加工、対局による棋力の比較、SPSA、定跡の整備などのツールは `tools` クレートにあります。
+使い方は [tools の README](crates/tools/README.md) と [目的別の全ツール一覧](crates/tools/docs/tools-reference.md) にあります。
+
+```bash
+# 使うツールだけを --bin で選ぶ。target/release/rescore_psv ができる
+cargo build --release -p tools --bin rescore_psv
+```
+
+`--bin` を付けない `cargo build --release -p tools` はそのすべてを build します。
 
 ### workspace 全体 (開発用)
 
