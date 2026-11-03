@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use super::search::{Abort, NO_LEN_LIMIT, NodeArgs, Searcher, ShortestTables};
 use super::state::MateState;
-use super::{ShortestMode, estimate};
+use super::{MateLineKind, ShortestMode, estimate};
 use crate::types::{Color, Hand, PieceType};
 
 // テストの局面は小さいので、予算を小さくして打ち切った後の道も通す
@@ -48,6 +48,7 @@ pub(super) fn shortest_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     st: &mut S,
     tables: &'a ShortestTables,
     mode: ShortestMode,
+    on_line: &mut dyn FnMut(MateLineKind, &[S::Mv]),
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     // 無駄合いを数えない手数は、すべての応手を数える手数以下。先に無駄合いの判定の要らない数え方で
     // 縮めておくと、無駄合いの判定 (別の局面を解く) をする上限付きの探索が減る
@@ -59,7 +60,7 @@ pub(super) fn shortest_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     }
     let tsume = mode == ShortestMode::Tsume;
     let len = if tsume {
-        tsume_len(searcher, st, tables, root.mate_len)?
+        tsume_len(searcher, st, tables, root.mate_len, on_line)?
     } else {
         descend(searcher, st, root.mate_len)?
     };
@@ -104,6 +105,7 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
     st: &mut S,
     tables: &'a ShortestTables,
     len: u16,
+    on_line: &mut dyn FnMut(MateLineKind, &[S::Mv]),
 ) -> Result<u16, Abort> {
     // すべての応手を数える手数は詰将棋のルールの手数以上なので、縮めた手数も上限に使える。最後の縮められない
     // 証明は長編で重いので、1 回ごとの予算で打ち切る
@@ -119,11 +121,15 @@ fn tsume_len<'a, S: MateState + Clone + Send, const PIECES: bool>(
     }
     // 推定は詰将棋のルールの数え方に切り替えてから読む
     let estimated = estimate::estimate_pv(searcher, st, tables)?;
+    if let Some(pv) = &estimated {
+        on_line(MateLineKind::Estimated, pv);
+    }
     // 推定した手順の証明は予算で打ち切らない。打ち切ると、すべての応手を数える手数から 2 手ずつ縮める証明に戻り、長編ではそちらが
     // 大幅に重くなることがある。推定が受け方の応手を選び損ねていれば、その局面の証明が詰まないと分かって縮める証明に戻る
     if let Some(pv) = estimated.filter(|pv| pv.len() <= usize::from(len))
         && prove_backward(searcher, st, &pv)?
     {
+        on_line(MateLineKind::Bounded, &pv);
         len = pv.len() as u16;
         if len >= 3 {
             let r = searcher.within(ROOT_DISPROOF_BUDGET, |s| {
