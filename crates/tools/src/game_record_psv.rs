@@ -50,7 +50,7 @@ pub struct ConvertedGame {
 /// 変換全体の集計。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ConversionStats {
-    /// 読み出した対局数。
+    /// 変換して書き出した対局数。
     pub games: u64,
     /// 書き出した PSV レコード数。
     pub positions: u64,
