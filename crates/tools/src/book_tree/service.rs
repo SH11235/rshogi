@@ -376,7 +376,8 @@ fn preempt_victims(
         threshold,
     );
     let mut urgent: Vec<_> = urgent.into_iter().filter(|c| c.1 < threshold).collect();
-    urgent.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    // 優先の先読みどうしでは、急がない (優先度の大きい) 木の読みから止める。
+    urgent.sort_by(|a, b| b.3.cmp(&a.3).then(a.1.total_cmp(&b.1)).then(a.0.cmp(&b.0)));
     for (id, _, _, limit) in urgent {
         let limit = limit.unwrap_or(u32::MAX);
         let before = waiting.iter().filter(|p| **p <= limit).count();
@@ -2418,6 +2419,9 @@ mod tests {
         assert_eq!(preempt_victims(mixed, &waiting, 0, 0.25), [4]);
         // 空きが優先度 0 の分を賄うなら、優先の先読みは止めない。
         assert!(preempt_victims(urgent.clone(), &waiting, 1, 0.25).is_empty());
+        // 優先の先読みどうしでは、優先度の大きい木の読みから止める。
+        let two = vec![(1, 0.05, 0, Some(0)), (2, 0.1, 5, Some(5))];
+        assert_eq!(preempt_victims(two, &waiting, 0, 0.25), [2]);
         // 進みが線を越えた読みは止めない。
         assert!(preempt_victims(vec![(1, 0.3, 5, Some(5))], &waiting, 0, 0.25).is_empty());
     }
