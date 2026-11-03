@@ -65,8 +65,10 @@ Rust で書かれた将棋エンジンです。
 
 - USI エンジンを floodgate などの CSA サーバーにつなぐ `csa_client` で、GUI を介さずに連続対局できます
   ([CSA クライアント](docs/csa-client.md))。
-- CSA プロトコルの対局サーバーを、手元の TCP サーバーとしても Cloudflare Workers 上でも動かせます
-  ([CSA サーバー](docs/csa-server/README.md))。
+- CSA プロトコルの対局サーバーを Cloudflare Workers 上で公開しています (`wss://rshogi-csa-server.sh11235.com`)。
+  `csa_client --target production` で接続し、同じルーム ID を指定して対局したり、ロビーで相手を待ったりできます。
+  自分のエンジンを別々のマシンから対局させる検証にも、ほかの人のエンジンとの対局にも使えます。
+- 同じ対局サーバーを手元の TCP サーバーとしても動かせます ([CSA サーバー](docs/csa-server/README.md))。
 
 ### オプショナルな独自ルール
 
