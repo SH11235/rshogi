@@ -98,6 +98,10 @@ struct ServeArgs {
     /// (`--prefetch` と一緒に使う。例 0.25)
     #[arg(long)]
     speculate_at: Option<f64>,
+    /// 優先度 (キューの priority) がこの値以下の木の子の先読みを、それより優先度の低い木の本来の
+    /// 読みより先に配り、横取りの対象から外す
+    #[arg(long)]
+    speculate_priority: Option<u32>,
     #[arg(long, default_value_t = 3)]
     max_restarts: usize,
     /// 対象の出力の根。`<out-root>/<id>/<own>/g<世代>/` に書く。state に固定される

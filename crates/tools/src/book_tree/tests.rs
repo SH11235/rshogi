@@ -848,6 +848,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         prefetch_preempt_below: 0.25,
         prefetch_work: super::model::PREFETCH_WORK,
         speculate_at: None,
+        speculate_priority: None,
         max_restarts: 0,
         out_root: out_root.to_owned(),
         opp_n: 2,
@@ -1465,4 +1466,24 @@ fn speculation_reaches_a_merged_position_at_its_shallowest_level() {
         .collect();
     assert_eq!(found[&merged], (2, 3));
     assert_eq!(found[&child(&merged, "4i3i").unwrap()], (3, 4));
+}
+
+#[test]
+fn serve_startup_rejects_speculate_options_without_their_prerequisites() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let def = definition(dir.path(), 0);
+    let out_root = dir.path().join("trees");
+    let journal = dir.path().join("journal.jsonl");
+    let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+    args.prefetch = true;
+    args.speculate_priority = Some(0);
+    let error = service::serve(args).unwrap_err();
+    assert!(error.to_string().contains("speculate-priority"), "{error:#}");
+    let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+    args.speculate_at = Some(0.25);
+    let error = service::serve(args).unwrap_err();
+    assert!(error.to_string().contains("speculate-at"), "{error:#}");
+    assert!(!journal.exists());
 }

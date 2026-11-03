@@ -2317,3 +2317,96 @@ fn speculative_child_found_wrong_after_the_parent_keeps_reading_to_completion() 
     // 子の MultiPV は 1 行なので途中の組が揃わず、孫は挙げない。
     assert_eq!(stats["speculated"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn speculate_priority_reads_urgent_children_before_lower_priority_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("workers"), "2").unwrap();
+    let child = |key: &str, mv: &str| {
+        strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen()).to_owned()
+    };
+    let root_moves = ["5i4i", "5i6i", "5i5h"];
+    let mut positions = BTreeMap::new();
+    positions.insert(
+        ROOT.to_owned(),
+        json!(
+            root_moves
+                .iter()
+                .map(|m| json!({"move":m,"cp":10,"depth":8}))
+                .collect::<Vec<_>>()
+        ),
+    );
+    let children: Vec<_> = root_moves.iter().map(|mv| child(ROOT, mv)).collect();
+    for key in &children {
+        positions.insert(key.clone(), json!([{"move":"5a4a","cp":20,"depth":8}]));
+    }
+    let config = state.join("engine.json");
+    let mut data = json!({"positions":positions,"unknown_resign":true,"delay":0.6,"mid_nodes":50,"log":state.join("protocol.jsonl")});
+    data[format!("delay:{ROOT}")] = json!(2.5);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    // 優先度の低い木の本来の読みを、worker の数より多く積んでおく。
+    let bulk: Vec<_> = ["9i", "8i", "7i", "6i", "4i", "3i", "2i", "1i"]
+        .iter()
+        .map(|sq| {
+            let file = sq.as_bytes()[0] - b'0';
+            let rank = format!(
+                "{}K{}",
+                if file < 9 {
+                    (9 - file).to_string()
+                } else {
+                    String::new()
+                },
+                if file > 1 {
+                    (file - 1).to_string()
+                } else {
+                    String::new()
+                }
+            );
+            format!("sfen 4k4/9/9/9/9/9/9/9/{rank} b - 1")
+        })
+        .collect();
+    enqueue(
+        &state,
+        json!({"id":"bulk","root":bulk[0],"roots":bulk[1..],"own":"b","depth":0,"priority":5}),
+    );
+    enqueue(
+        &state,
+        json!({"id":"urgent","root":format!("sfen {ROOT} 1"),"own":"b","depth":1,"priority":0,"opts":{"opp_n":2,"stop":300,"rounds":0}}),
+    );
+    let mut command = serve_command(&state, &config, 3, 3, state.parent().unwrap());
+    command.args([
+        "--prefetch",
+        "--speculate-at",
+        "0.25",
+        "--speculate-priority",
+        "0",
+    ]);
+    let mut server = Server(command.spawn().unwrap());
+    wait_for(|| {
+        progress(&state)["trees"]
+            .as_array()
+            .is_some_and(|trees| trees.len() == 2 && trees.iter().all(|t| t["finished"] == true))
+    });
+    stop(&state, &mut server);
+    let rows = journal_rows(&state);
+    let first_child = rows
+        .iter()
+        .position(|r| children.iter().any(|c| r["reading"]["key"] == *c))
+        .unwrap();
+    assert_eq!(rows[first_child]["prefetch"], true);
+    let bulk_before = rows[..first_child]
+        .iter()
+        .filter(|r| {
+            bulk.iter().any(|b| {
+                b.split_whitespace().skip(1).take(3).collect::<Vec<_>>().join(" ")
+                    == r["reading"]["key"].as_str().unwrap()
+            })
+        })
+        .count();
+    assert!(
+        bulk_before <= 1,
+        "優先する木の子は、優先度の低い木の読みを待たずに配る: {bulk_before}"
+    );
+}
