@@ -38,6 +38,14 @@ pub(super) trait MateState: Send + Sized + 'static {
     /// 置換表での識別子 (攻め方は `attacker`)
     fn table_key(&self, attacker: Color) -> TableKey;
 
+    /// 盤の各升の駒を `out` に書く。局面どうしの盤の違いの升数を数えるのに使う (既定は書かない = 違いを見ない)
+    fn board_cells(&self, _out: &mut [u8; 81]) {}
+
+    /// 盤の升のうち `cells` (`board_cells` の値) と駒が違う升の数
+    fn board_diff(&self, _cells: &[u8; 81]) -> u32 {
+        0
+    }
+
     /// 指し手 `m` を指した後の `key()`。局面は変えない。
     fn key_after(&self, m: Self::Mv) -> u64;
 
@@ -128,6 +136,18 @@ pub(super) trait MateState: Send + Sized + 'static {
 }
 
 impl MateState for Position {
+    fn board_cells(&self, out: &mut [u8; 81]) {
+        for sq in Square::all() {
+            out[sq.index()] = self.piece_on(sq).raw();
+        }
+    }
+
+    fn board_diff(&self, cells: &[u8; 81]) -> u32 {
+        Square::all()
+            .filter(|&sq| self.piece_on(sq).raw() != cells[sq.index()])
+            .count() as u32
+    }
+
     type Mv = Move;
 
     fn key(&self) -> u64 {
@@ -568,6 +588,14 @@ impl NoAttackerKing {
 }
 
 impl MateState for NoAttackerKing {
+    fn board_cells(&self, out: &mut [u8; 81]) {
+        self.pos.board_cells(out);
+    }
+
+    fn board_diff(&self, cells: &[u8; 81]) -> u32 {
+        self.pos.board_diff(cells)
+    }
+
     type Mv = Move;
 
     fn key(&self) -> u64 {

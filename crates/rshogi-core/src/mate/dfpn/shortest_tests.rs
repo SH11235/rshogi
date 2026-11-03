@@ -978,3 +978,73 @@ fn leftover_variations_find_shorter_clean_lines() {
         assert_eq!(pos.to_sfen(), position(sfen).to_sfen(), "{mode:?}: 局面を戻す");
     }
 }
+
+#[test]
+#[ignore]
+fn dbg_restoring_on_pv() {
+    use super::search::{Budget, Scratch, Searcher, ShortestTables};
+    use super::state::{MateState, NoAttackerKing};
+    use super::table::MateTable;
+    use crate::time::Instant;
+    let sfen = std::env::var("DBG_SFEN").unwrap();
+    let pv: Vec<String> = std::env::var("DBG_PV").unwrap().split(' ').map(str::to_string).collect();
+    let mut pos = position(&sfen);
+    pos.clear_checkers_without_king();
+    let attacker = pos.side_to_move();
+    let mut st = NoAttackerKing::new(pos);
+    let stop = AtomicBool::new(false);
+    let mut progress = |_| {};
+    let budget = Budget {
+        stop: &stop,
+        halt: None,
+        cancel: None,
+        shared_nodes: None,
+        node_limit: 0,
+        time_limit_ms: 0,
+        start: Instant::now(),
+        progress: &mut progress,
+    };
+    let table = MateTable::new(2048, true);
+    let tables = ShortestTables::new();
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::<_, true>::new(&table, &mut scratch, attacker, budget);
+    searcher.enable_shortest(true, &tables);
+    searcher.enable_restoring();
+    let (mut cells381, mut board381) = ([0u8; 81], 0u64);
+    for (i, usi) in pv.iter().enumerate() {
+        let mut moves = Vec::new();
+        st.generate(i % 2 == 0, &mut moves);
+        let mv = *moves.iter().find(|m| m.to_usi() == *usi).expect("手順の手");
+        let from: usize = std::env::var("DBG_FROM").map_or(0, |v| v.parse().unwrap());
+        if i % 2 == 1 && mv.is_drop() && i + 1 >= from {
+            let before = searcher.nodes();
+            let t = std::time::Instant::now();
+            eprintln!("DBG start ply {}", i + 1);
+            let lim: u16 = std::env::var("DBG_LIMIT").map_or((pv.len() - i) as u16, |v| v.parse().unwrap());
+            let bk = st.table_key(attacker);
+            let r = { let _ = lim; searcher.restores(&mut st, mv, bk, &tables) }.unwrap();
+            eprintln!(
+                "DBG ply {} {} futile={:?} nodes={} ms={}",
+                i + 1,
+                usi,
+                r,
+                searcher.nodes() - before,
+                t.elapsed().as_millis()
+            );
+        }
+        st.do_move(mv);
+        if std::env::var("DBG_CMP").is_ok() {
+            let tk = st.table_key(attacker);
+            if i + 1 == 381 {
+                st.board_cells(&mut cells381);
+                board381 = tk.board;
+            }
+            if i + 1 >= 382 && i + 1 <= 402 {
+                let mut nx = Vec::new();
+                st.generate(i % 2 == 1, &mut nx);
+                let names: Vec<String> = if i % 2 == 0 { nx.iter().map(|m| m.to_usi()).collect() } else { vec![] };
+                eprintln!("DBGCMP ply {} {} diff {} same_board {} hand {:?} next_moves {} {:?}", i + 1, usi, st.board_diff(&cells381), tk.board == board381, tk.hand, nx.len(), names);
+            }
+        }
+    }
+}

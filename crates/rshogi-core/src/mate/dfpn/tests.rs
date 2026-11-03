@@ -2216,3 +2216,49 @@ fn length_limited_search_agrees_with_brute_force_on_random_graphs() {
     }
     assert!(mates > 300);
 }
+
+/// 復元型の無駄合いの判定の探索: 攻め方は手を選べ、受け方はすべての手を指せる。目標は攻め方の手の後の局面
+#[test]
+fn restore_reach_needs_every_reply_to_reach_the_goal() {
+    use super::restore::{Goal, Reach, reach};
+    use super::search::Abort;
+    let goal = |n: u32| Goal {
+        attacker: Color::Black,
+        board: node_key(n),
+        cells: [0; 81],
+        hand: Hand::EMPTY,
+    };
+    let run = |edges: Vec<Vec<u32>>, target: u32, plies: u16| {
+        let mut graph = Graph::new(edges, 0);
+        let (mut nodes, mut moves) = (Vec::new(), Vec::new());
+        let r =
+            reach(&mut graph, goal(target), plies, 1000, &mut nodes, &mut moves, || Ok(()));
+        assert_eq!(graph.stack, vec![0]);
+        r.unwrap()
+    };
+    // 0 (攻め) → 1 (受け) → 2 (攻め) → 3 (目標)
+    let line = vec![vec![1], vec![2], vec![3], vec![]];
+    assert_eq!(run(line.clone(), 3, 8), Reach::Forced);
+    // 手数の上限の中で着かない
+    assert_eq!(run(line, 3, 2), Reach::Escapes);
+    // 受け方に、攻め方が王手できなくなる応手 4 がある
+    assert_eq!(run(vec![vec![1], vec![2, 4], vec![3], vec![], vec![]], 3, 8), Reach::Escapes);
+    // 受け方が詰む (応手が無い) のは着かない
+    assert_eq!(run(vec![vec![1], vec![], vec![3], vec![]], 3, 8), Reach::Escapes);
+    // 攻め方の手のうち、経路上の局面へ戻る手 (2 → 1) は使えず、もう 1 つの手で着く
+    assert_eq!(run(vec![vec![1], vec![2], vec![1, 3], vec![]], 3, 8), Reach::Forced);
+    // 予算の中で決まらない
+    let mut graph = Graph::new(vec![vec![1, 2], vec![0, 2], vec![1, 0]], 0);
+    let (mut nodes, mut moves) = (Vec::new(), Vec::new());
+    let r = reach(&mut graph, goal(9), 200, 3, &mut nodes, &mut moves, || Ok(()));
+    assert_eq!(r.unwrap(), Reach::Unknown);
+    // 打ち切ったら局面を戻して返す
+    let mut graph = Graph::new(vec![vec![1], vec![2], vec![3], vec![]], 0);
+    let mut calls = 0;
+    let r = reach(&mut graph, goal(3), 8, 1000, &mut nodes, &mut moves, || {
+        calls += 1;
+        if calls > 2 { Err(Abort) } else { Ok(()) }
+    });
+    assert!(r.is_err());
+    assert_eq!(graph.stack, vec![0]);
+}

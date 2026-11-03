@@ -34,6 +34,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::MateProgress;
+use super::restore::{self, GoalNode};
 use super::state::FULL_HAND;
 use super::state::MateState;
 use super::table::{MateTable, PN_INF, PN_MAX_FINITE, TableKey, TableValue};
@@ -273,6 +274,9 @@ pub(super) struct Scratch<M> {
     reply_moves: Vec<M>,
     /// 無駄合いの判定で取った駒を戻した局面 (`Option<S>`。局面の型は solve ごとに変わりうる)
     returned: Option<Box<dyn Any + Send>>,
+    /// 復元型の無駄合いの判定の探索木 (最初に使うときに確保する)
+    goal_nodes: Vec<GoalNode<M>>,
+    goal_moves: Vec<M>,
 }
 
 /// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) や、並列に解くスレッドとも共有する。
@@ -539,6 +543,16 @@ impl Futility {
 /// `ShortestTables` の無駄合いの表の要素数 (2 の冪)
 const FUTILITY_SIZE: usize = 1 << 16;
 
+/// 復元型の無駄合いの判定で、合駒の後から読む手数の上限。馬・龍で玉を一周させて元の王手に戻る手順
+/// (十数手) を含む長さ
+const RESTORE_PLIES: u16 = 48;
+
+/// 復元型の無駄合いの判定の探索木の節点数の上限
+const RESTORE_BUDGET: usize = if cfg!(test) { 2_000 } else { 20_000 };
+
+/// 復元型の無駄合いの判定を `ShortestTables` の無駄合いの表に覚えるとき、鍵に混ぜる値
+const RESTORE_MEMO_SALT: u64 = 0x5EE7_C0DE_0B5E_55ED;
+
 /// `ShortestTables` の手数の表の要素数 (2 の冪)
 const LEN_BOUNDS_SIZE: usize = 1 << 20;
 
@@ -559,6 +573,8 @@ impl<M> Scratch<M> {
             capture_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
             reply_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
             returned: None,
+            goal_nodes: Vec::new(),
+            goal_moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
         }
     }
 }
@@ -593,6 +609,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     shortest: bool,
     /// 最短手順モードで無駄合いを詰み手数に数えない
     futility: bool,
+    /// 無駄合いに復元型 (合駒を取った後に、攻め方の持駒が増えただけの合駒の前の局面へ戻せる合駒) も含める
+    restoring: bool,
     /// 最短手順モードの表
     tables: Option<&'a ShortestTables>,
     /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
@@ -600,6 +618,9 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     /// `search_shared` で、補助スレッドを起こす前に 1 スレッドで読むノード数
     serial_nodes: u64,
 }
+
+/// 補助スレッドと部分探索に引き継ぐ設定 (`Searcher::settings`)
+type Settings<'a> = (bool, u64, bool, bool, bool, Option<&'a ShortestTables>);
 
 /// `Searcher::solve_detached` の結果
 enum Detached {
@@ -666,6 +687,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             tie_seed: 0,
             shortest: false,
             futility: false,
+            restoring: false,
             tables: None,
             helpers: &mut [],
             serial_nodes: 0,
@@ -690,22 +712,29 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.serial_nodes = serial_nodes;
     }
 
-    fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
+    /// 無駄合いに復元型も含める (`restoring`)。最短手順モードで無駄合いを数えないときだけ効く
+    pub fn enable_restoring(&mut self) {
+        self.restoring = true;
+    }
+
+    fn settings(&self) -> Settings<'a> {
         (
             self.estimate,
             self.weak_disproof_step,
             self.shortest,
             self.futility,
+            self.restoring,
             self.tables,
         )
     }
 
-    fn apply_settings(&mut self, settings: (bool, u64, bool, bool, Option<&'a ShortestTables>)) {
+    fn apply_settings(&mut self, settings: Settings<'a>) {
         (
             self.estimate,
             self.weak_disproof_step,
             self.shortest,
             self.futility,
+            self.restoring,
             self.tables,
         ) = settings;
     }
@@ -813,6 +842,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         if let Some(halt) = self.budget.halt.take() {
             halt.store(true, Ordering::Relaxed);
         }
+    }
+
+    fn nodes_for_dbg(&self) -> u64 {
+        self.nodes
     }
 
     fn count_node(&mut self) -> Result<(), Abort> {
@@ -1268,8 +1301,10 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             return Ok(None);
         };
         // 同じ判定を探索中に何度も繰り返すので覚えておく
+        // 復元型を含める判定と含めない判定 (戻せるかを読む中) は結果が違うので、鍵を分ける
         let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-            .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+            .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+            ^ if self.restoring { RESTORE_MEMO_SALT } else { 0 };
         if let Some(e) = tables.futility(memo_key) {
             return Ok(e.futile.then_some((e.proof, e.len)));
         }
@@ -1283,6 +1318,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         {
             found = None;
         }
+        // 復元型は受け方の局面の詰み手数を決めない (取った後は元の局面の続きになる) ので、手数 0 の無駄合いにする
+        if found.is_none()
+            && self.restoring
+            && self.restores(st, drop, before, tables)?
+        {
+            found = Some((before.hand, 0));
+        }
         let (proof, len) = found.unwrap_or((Hand::EMPTY, 0));
         tables.store_futility(
             memo_key,
@@ -1293,6 +1335,85 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             },
         );
         Ok(found)
+    }
+
+    /// 受け方の局面 `st` (局面のキー `before`) の合駒 `drop` が復元型の無駄合いか: 王手している駒が合駒を取れ、
+    /// 合駒の後から攻め方が王手を続けて、合駒の前の局面と盤面・手番が同じで攻め方の持駒が合駒の駒 1 枚多い
+    /// 局面へ必ず戻せる。手数と節点数の上限の中で読み、決まらなければ無駄合いとしない
+    pub(super) fn restores(
+        &mut self,
+        st: &mut S,
+        drop: S::Mv,
+        before: TableKey,
+        tables: &ShortestTables,
+    ) -> Result<bool, Abort> {
+        // 上限に依存しないので、無駄合いの判定とは別に上限を鍵に入れずに覚える
+        let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            ^ RESTORE_MEMO_SALT.rotate_left(32);
+        if let Some(e) = tables.futility(memo_key) {
+            return Ok(e.futile);
+        }
+        let dbg_n0 = self.nodes_for_dbg();
+        st.do_move(drop);
+        let mut captures = std::mem::take(&mut self.scratch.capture_moves);
+        captures.clear();
+        st.interposition_captures(drop, &mut captures);
+        let result = match captures.first() {
+            Some(&capture) => {
+                let mut cells = [0; 81];
+                st.undo_move(drop);
+                st.board_cells(&mut cells);
+                st.do_move(drop);
+                let goal = restore::Goal {
+                    attacker: self.attacker,
+                    board: before.board,
+                    cells,
+                    hand: st.table_key_after(capture, self.attacker).hand,
+                };
+                let mut nodes = std::mem::take(&mut self.scratch.goal_nodes);
+                let mut moves = std::mem::take(&mut self.scratch.goal_moves);
+                let r = restore::reach(
+                    st,
+                    goal,
+                    RESTORE_PLIES,
+                    std::env::var("DBG_RBUDGET").map_or(RESTORE_BUDGET, |v| v.parse().unwrap()),
+                    &mut nodes,
+                    &mut moves,
+                    || self.count_node(),
+                );
+                if std::env::var("DBG_RBUDGET").is_ok() {
+                    eprintln!("DBGREACH {:?} tree {}", r, nodes.len());
+                }
+                self.scratch.goal_nodes = nodes;
+                self.scratch.goal_moves = moves;
+                r.map(|r| r == restore::Reach::Forced)
+            }
+            None => Ok(false),
+        };
+        self.scratch.capture_moves = captures;
+        st.undo_move(drop);
+        let restored = result?;
+        {
+            use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+            static CALLS: AtomicU64 = AtomicU64::new(0);
+            static HITS: AtomicU64 = AtomicU64::new(0);
+            static NODES: AtomicU64 = AtomicU64::new(0);
+            let c = CALLS.fetch_add(1, Relaxed) + 1;
+            HITS.fetch_add(u64::from(restored), Relaxed);
+            NODES.fetch_add(self.nodes_for_dbg() - dbg_n0, Relaxed);
+            if c.is_power_of_two() || restored {
+                eprintln!("DBGR calls {c} hits {} nodes {} restored {restored} total {}", HITS.load(Relaxed), NODES.load(Relaxed), self.nodes_for_dbg());
+            }
+        }
+        tables.store_futility(
+            memo_key,
+            Futility {
+                futile: restored,
+                proof: Hand::EMPTY,
+                len: 0,
+            },
+        );
+        Ok(restored)
     }
 
     fn futile_after_drop(
@@ -1467,6 +1588,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             sub.weak_disproof_step = weak_disproof_step;
             sub.shortest = true;
             sub.futility = true;
+            sub.restoring = self.restoring;
             sub.tables = tables;
             sub.next_progress_ms = self.next_progress_ms;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);

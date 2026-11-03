@@ -19,6 +19,7 @@
 
 mod estimate;
 mod pv;
+mod restore;
 mod search;
 mod shortest;
 mod state;
@@ -168,6 +169,8 @@ pub struct DfpnSolver {
     shortest_tables: ShortestTables,
     /// 置換表に残っている探索の根の局面 (`leftover_variations` が置換表を使い回せるか)
     table_root: Option<u64>,
+    /// 無駄合いに復元型を含める ([`DfpnSolver::set_restoring_futility`])
+    restoring: bool,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -198,6 +201,7 @@ impl DfpnSolver {
             shortest: None,
             shortest_tables: ShortestTables::new(),
             table_root: None,
+            restoring: false,
         }
     }
 
@@ -218,6 +222,19 @@ impl DfpnSolver {
     /// 探索と、推定で詰みを縮める探索は判定と同じスレッド数で解き、手順を選ぶ探索は 1 スレッドで解く。
     pub fn set_shortest(&mut self, shortest: Option<ShortestMode>) {
         self.shortest = shortest;
+    }
+
+    /// 無駄合いに「復元型の無駄合い」も含めるか (既定は含めない)。[`ShortestMode::Tsume`] と
+    /// [`ShortestMode::Estimate`] で効く。
+    ///
+    /// 復元型の無駄合い: 王手している駒が合駒を取れ、合駒の後から攻め方が王手を続けて、合駒の前の局面と盤面・
+    /// 手番が同じで攻め方の持駒が合駒の駒 1 枚多い局面へ、受け方がどう応じても戻せる合駒 (馬・龍で玉を一周させて
+    /// 元の王手に戻る手順で、取った合駒の分だけ持駒が増える形)。今の定義で有効な合駒だけを調べ、合駒の後を
+    /// 48 手・探索木 2 万節点までで読み、決まらなければ有効な合駒のままにする。戻せるかを読むときは、受け方の
+    /// 合駒を無駄合いとして除かずに数える (その分だけ無駄合いと判定する合駒は少ない側に寄る)。無駄合いの判定と
+    /// 同じく受け方の局面の詰み手数を決めない。
+    pub fn set_restoring_futility(&mut self, restoring: bool) {
+        self.restoring = restoring;
     }
 
     /// 探索するスレッド数を設定する (最低 1)。置換表は全スレッドで共有する。
@@ -537,6 +554,9 @@ impl DfpnSolver {
         let mut searcher =
             Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
         configure(&mut searcher, self.mode);
+        if self.restoring {
+            searcher.enable_restoring();
+        }
         searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
         if let Some(ms) = last_report_ms {
             searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
