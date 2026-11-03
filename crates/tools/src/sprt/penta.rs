@@ -33,7 +33,7 @@ pub enum GameSide {
 /// - `dd`: 2 分
 /// - `dl`: 1 分 1 敗
 /// - `ll`: 2 連敗
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Penta {
     pub ll: u64,
     pub dl: u64,

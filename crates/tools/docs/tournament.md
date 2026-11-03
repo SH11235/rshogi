@@ -300,7 +300,7 @@ concurrency を指定しても無視する（減らすのは可）。退役し�
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--sprt` | — | SPRT を有効化。境界到達で新規対局の供給を停止し、進行中ゲームを完了待ちで drain |
+| `--sprt` | — | SPRT を有効化。境界到達で新しいペアを止め、開始済みペアの 2 局目・再試行・進行中の対局を回収してから終了 |
 | `--sprt-test-label LABEL` | (必須) | H1 側（challenger）のエンジンラベル。正の nelo = このエンジンが強い |
 | `--sprt-base-label LABEL` | `--base-label` | H0 側（base）のエンジンラベル。省略時は `--base-label` を流用 |
 | `--sprt-nelo0 F` | 0.0 | H0 仮説の正規化 Elo（通常 0 = 差なし）。負値は `--sprt-nelo0 -10` のまま渡せる |
@@ -312,8 +312,8 @@ concurrency を指定しても無視する（減らすのは可）。退役し�
 #### SPRT 出力例
 
 ```
-[SPRT pair=1014 | test vs base] LLR=+2.950 (bounds -2.94..+2.94)  nelo=+38.05 ± 15.12  penta=[184, 15, 508, 17, 290]  state=accept_h1
-[SPRT] terminal decision reached; draining 15 in-flight game(s)...
+[SPRT pair=1014 | test vs base] LLR=+2.950 (bounds -2.94..+2.94)  nelo=+38.05 ± 15.12  penta=[184, 15, 508, 17, 290]  state=accept_h1 (stopped at pair=1014)
+[SPRT] terminal decision reached; draining 15 in-flight game(s) and closing started pairs...
 
 === SPRT Summary (test vs base) ===
 bounds: LLR ∈ [-2.944, +2.944]  (alpha=0.05, beta=0.05)
@@ -325,10 +325,15 @@ final:       pairs=1022, LLR=+2.889, decision=running
 ================================
 ```
 
-`stopped_at` は境界到達時点のスナップショット。`final` は drain 完了後の最終値で、
-進行中ゲームの結果を含むため LLR・ペア数が微差する。判定は `stopped_at` の時点で
+`stopped_at` は境界到達時点のスナップショット。`final` は回収完了後の最終値で、
+開始済みペアと進行中ゲームの結果を含むため LLR・ペア数が微差する。判定は `stopped_at` の時点で
 確定済みのため、`final` の `decision` が `running` と表示されることがあるが、
-判定結果が覆ることはない。
+判定結果が覆ることはない。停止後の進捗行の `state=` も停止時の判定と停止時のペア数を示す。
+
+境界到達後は新しいペアの 1 局目を出さない。1 局目を送信済みのペアには先後を入れ替えた
+2 局目を出し、error ペアの再試行も続けるので、正常に完走した run には片側だけのペアが残らない。
+`stopped_at` は meta.json の `sprt_stopped_at` にも保存され、analyze_selfplay の
+post-hoc 判定がこれを `stopped_at` として表示する。
 
 #### game error の再対局
 
@@ -340,8 +345,10 @@ JSONL の result 行には初回 0 の `attempt` が記録される。
 起動した engine process で行う。
 
 最終サマリと `meta.json` の `error_pairs`、`retried_pairs`、`exhausted_pairs` で状況を
-確認できる。2 回の再試行後も error を含むペアがあれば `invalid: true` となり、SPRT
-サマリにも警告が出る。これは統計的敗北ではなくインフラ障害を示し、終了コードは変わらない。
+確認できる。2 回の再試行後も error を含むペアがあれば `invalid: true` となる。
+これは統計的敗北ではなくインフラ障害を示すので、SPRT の採否は表示せず、終了コードは非ゼロとなる。
+`incomplete_pairs` または `unreturned_games` が正の run も同じく invalid とする
+（analyze_selfplay が不完全入力とみなす条件と同じ）。
 
 #### SPRT 用語
 

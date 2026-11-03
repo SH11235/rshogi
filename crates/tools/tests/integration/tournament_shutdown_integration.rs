@@ -192,3 +192,78 @@ fn recovered_complete_pair_is_rejected_by_analyzer_after_interruption() {
         assert_eq!(analysis["sprt"]["decision"], "invalid");
     }
 }
+
+#[test]
+fn sprt_stop_closes_started_pairs_and_records_stop_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let write_engine = |name: &str, bestmove: &str| {
+        let path = dir.path().join(name);
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    \
+                 usi) printf 'id name {name}\\nusiok\\n' ;;\n    \
+                 isready) printf 'readyok\\n' ;;\n    \
+                 go*) printf 'bestmove {bestmove}\\n' ;;\n    \
+                 quit) break ;;\n  esac\ndone\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    // winner は先手番で 1 手指し、loser は手番が来たら投了するので winner が全勝する。
+    let winner = write_engine("winner.sh", "7g7f");
+    let loser = write_engine("loser.sh", "resign");
+    let out = dir.path().join("out");
+    let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
+        .arg("--engine")
+        .arg(&winner)
+        .args(["--engine-label", "test", "--engine"])
+        .arg(&loser)
+        .args([
+            "--engine-label",
+            "base",
+            "--games",
+            "500",
+            "--nodes",
+            "1",
+            "--concurrency",
+            "3",
+            "--sprt",
+            "--sprt-test-label",
+            "test",
+            "--sprt-base-label",
+            "base",
+        ])
+        .arg("--out-dir")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["run_status"], "completed");
+    assert_eq!(meta["invalid"], false);
+    assert_eq!(meta["incomplete_pairs"], 0);
+    assert_eq!(meta["sprt_stopped_at"]["decision"], "accept_h1");
+    let stopped_pairs = meta["sprt_stopped_at"]["pairs"].as_u64().unwrap();
+    assert!(stopped_pairs < 500, "SPRT は target より前に止まるはず");
+
+    let jsonl = fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .unwrap();
+    let analysis = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .arg(&jsonl)
+        .args(["--json", "--sprt"])
+        .output()
+        .unwrap();
+    assert!(analysis.status.success(), "{}", String::from_utf8_lossy(&analysis.stderr));
+    let analysis: serde_json::Value = serde_json::from_slice(&analysis.stdout).unwrap();
+    assert_eq!(analysis["extra"]["invalid"], false);
+    assert_eq!(analysis["sprt"]["stopped_at"]["decision"], "accept_h1");
+    assert_eq!(analysis["sprt"]["stopped_at"]["pairs"], stopped_pairs);
+    assert!(analysis["sprt"]["pairs"].as_u64().unwrap() >= stopped_pairs);
+}

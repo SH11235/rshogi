@@ -74,7 +74,7 @@ use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
     ensure_start_positions_within_max_moves, load_start_positions,
 };
-use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, judge};
+use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, SprtStopLog, judge};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -489,6 +489,9 @@ struct TournamentMeta {
     incomplete_pairs: u32,
     /// 送信済みだが worker から結果を回収できなかったチケット数。
     unreturned_games: u32,
+    /// SPRT が最初に境界へ達した時点の集計。採否はこの値で決まる。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sprt_stopped_at: Option<SprtStopLog>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nps_scaling: Option<NpsScalingMeta>,
 }
@@ -663,6 +666,27 @@ impl SprtState {
         self.penta.pair_count()
     }
 
+    fn meta_log(&self) -> SprtMetaLog {
+        SprtMetaLog {
+            base_label: self.base_label.clone(),
+            test_label: self.test_label.clone(),
+            nelo0: self.params.nelo0,
+            nelo1: self.params.nelo1,
+            alpha: self.params.alpha,
+            beta: self.params.beta,
+        }
+    }
+
+    fn stop_log(&self) -> Option<SprtStopLog> {
+        self.stopped_at.as_ref().map(|snap| SprtStopLog {
+            hypothesis: self.meta_log(),
+            decision: snap.decision,
+            pairs: snap.pairs,
+            llr: snap.llr,
+            penta: snap.penta,
+        })
+    }
+
     fn snapshot(&self, decision: Decision) -> SprtSnapshot {
         SprtSnapshot {
             decision,
@@ -706,15 +730,16 @@ impl SprtState {
             hi,
             nelo_txt,
             self.penta,
-            match (self.stopped_at.as_ref(), judge(&self.params, self.penta)) {
-                (Some(snap), _) => snap.decision.as_str(),
-                (None, d) => d.as_str(),
+            match self.stopped_at.as_ref() {
+                Some(snap) =>
+                    format!("{} (stopped at pair={})", snap.decision.as_str(), snap.pairs),
+                None => judge(&self.params, self.penta).as_str().to_string(),
             }
         );
     }
 }
 
-fn print_sprt_final(state: &SprtState, retry: RetrySummary) {
+fn print_sprt_final(state: &SprtState) {
     let (lo, hi) = state.params.llr_bounds();
     let current_llr = state.params.llr(state.penta);
     let current_decision = judge(&state.params, state.penta);
@@ -754,9 +779,6 @@ fn print_sprt_final(state: &SprtState, retry: RetrySummary) {
         println!("             nelo=n/a  penta={}", state.penta);
     }
     println!("================================");
-    if retry.invalid {
-        println!("WARNING: invalid test — exhausted error pairs: {}", retry.exhausted_pairs);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,6 +1454,7 @@ fn main() -> Result<()> {
         run_status: RunStatus::Running,
         incomplete_pairs: 0,
         unreturned_games: 0,
+        sprt_stopped_at: None,
         nps_scaling: nps_scaling.clone(),
     };
     // meta.json 書き出し
@@ -1542,18 +1565,7 @@ fn main() -> Result<()> {
             // pair_indices は (min, max) 正規化済みなので両順序をカバーする。
             let sprt_meta = sprt_state.as_ref().and_then(|state| {
                 let pair = (state.base_idx.min(state.test_idx), state.base_idx.max(state.test_idx));
-                if pair == (i, j) {
-                    Some(SprtMetaLog {
-                        base_label: state.base_label.clone(),
-                        test_label: state.test_label.clone(),
-                        nelo0: state.params.nelo0,
-                        nelo1: state.params.nelo1,
-                        alpha: state.params.alpha,
-                        beta: state.params.beta,
-                    })
-                } else {
-                    None
-                }
+                (pair == (i, j)).then(|| state.meta_log())
             });
 
             // meta行を書く
@@ -1701,19 +1713,8 @@ fn main() -> Result<()> {
         // 送信前に target が下がった場合は `still_wanted` で再評価して破棄する。
         let offer: Option<Option<MatchTicket>> = if live_workers > desired_workers {
             Some(None)
-        } else if agg.stop_feeding && source.retry_queue.is_empty() {
-            None
         } else {
-            if agg.stop_feeding && pending.as_ref().is_some_and(|ticket| ticket.attempt == 0) {
-                pending = None;
-            }
-            if pending.as_ref().is_some_and(|t| !source.still_wanted(t)) {
-                pending = None; // target 減少で不要になった未送信チケットを破棄
-            }
-            if pending.is_none() {
-                pending = source.peek_ticket();
-            }
-            pending.clone().map(Some)
+            source.offer_ticket(&mut pending, agg.stop_feeding).map(Some)
         };
         let target_total = source.current_target_total();
 
@@ -1759,7 +1760,7 @@ fn main() -> Result<()> {
                         agg.completed,
                         max_workers,
                     );
-                    if source.has_next() && (!agg.stop_feeding || !source.retry_queue.is_empty())
+                    if source.offer_ticket(&mut pending, agg.stop_feeding).is_some()
                         || live_workers > desired_workers
                     {
                         continue;
@@ -1833,17 +1834,22 @@ fn main() -> Result<()> {
         );
     }
 
-    let mut retry_summary = source.retry_summary();
-    retry_summary.invalid |= run_status != RunStatus::Completed;
-    tournament_meta.retry = retry_summary;
-    tournament_meta.run_status = run_status;
-    tournament_meta.incomplete_pairs = source
+    let incomplete_pairs = source
         .emitted
         .iter()
         .sum::<u32>()
         .div_ceil(2)
         .saturating_sub(valid_completed / 2);
-    tournament_meta.unreturned_games = tickets_sent.saturating_sub(completed);
+    let unreturned_games = tickets_sent.saturating_sub(completed);
+    let mut retry_summary = source.retry_summary();
+    // analyze_selfplay の `run_meta_issue` と同じ条件で invalid にする。
+    retry_summary.invalid |=
+        run_status != RunStatus::Completed || incomplete_pairs > 0 || unreturned_games > 0;
+    tournament_meta.retry = retry_summary;
+    tournament_meta.run_status = run_status;
+    tournament_meta.incomplete_pairs = incomplete_pairs;
+    tournament_meta.unreturned_games = unreturned_games;
+    tournament_meta.sprt_stopped_at = sprt_state.as_ref().and_then(SprtState::stop_log);
     let meta_file = File::create(cli.out_dir.join("meta.json"))?;
     serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
 
@@ -1866,16 +1872,24 @@ fn main() -> Result<()> {
         retry_summary.exhausted_pairs,
         retry_summary.invalid,
     );
+    println!("Incomplete pairs: {}  Unreturned games: {}", incomplete_pairs, unreturned_games);
     println!("Output: {}", cli.out_dir.display());
     println!("===========================");
 
-    if run_status == RunStatus::Completed {
-        if let Some(state) = sprt_state.as_ref() {
-            print_sprt_final(state, retry_summary);
+    if run_status != RunStatus::Completed {
+        if sprt_state.is_some() {
+            println!("SPRT decision withheld: run did not complete.");
         }
-    } else {
-        println!("SPRT decision withheld: run did not complete.");
         bail!("tournament did not complete; recovered results and run status were saved");
+    }
+    if retry_summary.invalid {
+        if sprt_state.is_some() {
+            println!("SPRT decision withheld: invalid run (exhausted or incomplete pairs).");
+        }
+        bail!("tournament run is invalid; recovered results and run status were saved");
+    }
+    if let Some(state) = sprt_state.as_ref() {
+        print_sprt_final(state);
     }
 
     drop(output_guard);
@@ -1896,10 +1910,12 @@ fn handle_sprt_observation(
     let _ = state.observe(result);
     state.maybe_report(false);
     if !was_terminal && state.stopped_at.is_some() && !*stop_feeding {
-        // 境界到達: 新規チケット供給を止め、在庫（in-flight）だけ drain する。
+        // 境界到達: 新しいペアを止め、開始済みペアの 2 局目・再試行と in-flight を回収する。
         *stop_feeding = true;
         let inflight = tickets_sent.saturating_sub(completed);
-        println!("[SPRT] terminal decision reached; draining {inflight} in-flight game(s)...");
+        println!(
+            "[SPRT] terminal decision reached; draining {inflight} in-flight game(s) and closing started pairs..."
+        );
     }
 }
 
@@ -2105,13 +2121,26 @@ impl TicketSource {
         emitted < target_per_pair || !emitted.is_multiple_of(2)
     }
 
-    /// 現在の目標値で、まだ発行すべきチケットが残っているか。
-    fn has_next(&self) -> bool {
-        if !self.retry_queue.is_empty() {
-            return true;
+    /// 送信候補を `pending` に保持して返す。送信成功 (`commit_sent`) まで発行数は進めない。
+    ///
+    /// `stop_feeding` (SPRT 境界到達後) は新しいペアの 1 局目を出さず、開始済みペアの
+    /// 2 局目と error ペアの再試行だけを出す。
+    fn offer_ticket(
+        &self,
+        pending: &mut Option<MatchTicket>,
+        stop_feeding: bool,
+    ) -> Option<MatchTicket> {
+        let wanted = |ticket: &MatchTicket| {
+            self.still_wanted(ticket)
+                && (!stop_feeding || ticket.attempt > 0 || ticket.pair_slot == 1)
+        };
+        if pending.as_ref().is_some_and(|ticket| !wanted(ticket)) {
+            *pending = None;
         }
-        let target = self.target_per_pair();
-        self.emitted.iter().any(|&e| Self::pair_needs_more(e, target))
+        if pending.is_none() {
+            *pending = self.peek_ticket().filter(wanted);
+        }
+        pending.clone()
     }
 
     /// 次に発行すべきチケットを計算する（状態は進めない）。全ペアが目標到達なら `None`。
@@ -3245,7 +3274,7 @@ mod tests {
 
         let tickets = drain_source(&mut source);
         assert_eq!(tickets.len(), 4);
-        assert!(!source.has_next());
+        assert!(source.peek_ticket().is_none());
         // id 連番 0..4、pair_index = id/2、pair_slot = id%2
         let ids: Vec<u64> = tickets.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![0, 1, 2, 3]);
@@ -3262,11 +3291,11 @@ mod tests {
             TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         let first = drain_source(&mut source);
         assert_eq!(first.len(), 2);
-        assert!(!source.has_next());
+        assert!(source.peek_ticket().is_none());
 
         // 実行中に target を増やす → 追加分を発行できる
         target.store(3, Ordering::Relaxed); // 1 ペアあたり 6 局
-        assert!(source.has_next());
+        assert!(source.peek_ticket().is_some());
         let more = drain_source(&mut source);
         assert_eq!(more.len(), 4); // 6 - 2
 
@@ -3397,7 +3426,7 @@ mod tests {
         assert!(pull(&mut source).is_some());
         // target を発行済みより小さくする → それ以上は発行しない
         target.store(1, Ordering::Relaxed); // 1 ペアあたり 2 局（既に到達）
-        assert!(!source.has_next());
+        assert!(source.peek_ticket().is_none());
         assert!(pull(&mut source).is_none());
     }
 
@@ -3497,14 +3526,112 @@ mod tests {
         // 発行済み (=1, 奇数) より小さい target に下げる。
         target.store(0, Ordering::Relaxed);
         // 奇数 emitted のため 2 局目はまだ発行できる。
-        assert!(source.has_next());
+        assert!(source.peek_ticket().is_some());
         let slot1 = pull(&mut source).unwrap();
         assert_eq!(slot1.pair_slot, 1);
         assert_eq!(slot0.pair_index, slot1.pair_index);
         // ペアが完結したので以降は発行しない。
-        assert!(!source.has_next());
+        assert!(source.peek_ticket().is_none());
         assert!(pull(&mut source).is_none());
         assert_pentanomial_integrity(&[slot0, slot1]);
+    }
+
+    #[test]
+    fn sprt_stop_closes_open_pair_without_starting_new_pairs() {
+        // 停止前・ペア途中・ペア境界・カード切替の各境界で止める。
+        for sent_before_stop in 0usize..=7 {
+            let target = Arc::new(AtomicU32::new(2));
+            let mut source = TicketSource::new(
+                vec![(0, 1), (0, 2), (1, 2)],
+                1000,
+                target.clone(),
+                42,
+                super::StartposOrder::Random,
+            );
+            let mut tickets =
+                (0..sent_before_stop).map(|_| pull(&mut source).unwrap()).collect::<Vec<_>>();
+            let mut pending = source.peek_ticket();
+            let pending_id = pending.as_ref().unwrap().id;
+            // 停止後に target が増えても新しいペアは始めない。
+            target.store(10, Ordering::Relaxed);
+            if !sent_before_stop.is_multiple_of(2) {
+                let closing = source.offer_ticket(&mut pending, true).unwrap();
+                let first = tickets.last().unwrap();
+                assert_eq!(closing.id, pending_id);
+                assert_eq!(closing.pair_slot, 1);
+                assert_eq!(closing.pair_index, first.pair_index);
+                assert_eq!(closing.startpos_idx, first.startpos_idx);
+                assert_eq!(
+                    (closing.black_idx, closing.white_idx),
+                    (first.white_idx, first.black_idx)
+                );
+                // 送信より先に結果の受信が選ばれても、同じ未送信候補を保持する。
+                assert_eq!(source.offer_ticket(&mut pending, true).unwrap().id, closing.id);
+                source.commit_sent(&pending.take().unwrap());
+                tickets.push(closing);
+            }
+            assert!(source.offer_ticket(&mut pending, true).is_none());
+            assert!(pending.is_none());
+            assert_eq!(tickets.len(), sent_before_stop.div_ceil(2) * 2);
+            assert_pentanomial_integrity(&tickets);
+        }
+    }
+
+    #[test]
+    fn sprt_stop_keeps_retries_and_closes_open_pair() {
+        let target = Arc::new(AtomicU32::new(3));
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1000, target.clone(), 42, super::StartposOrder::Random);
+        let first = pull(&mut source).unwrap();
+        let second = pull(&mut source).unwrap();
+        let open = pull(&mut source).unwrap();
+        let mut pending = source.peek_ticket();
+        source.observe_result(&result(first.clone(), super::GameOutcome::Draw, true));
+        source.observe_result(&result(second.clone(), super::GameOutcome::Draw, false));
+        target.store(0, Ordering::Relaxed);
+
+        let mut sent = Vec::new();
+        while let Some(ticket) = source.offer_ticket(&mut pending, true) {
+            source.commit_sent(&pending.take().unwrap());
+            sent.push(ticket);
+        }
+        let closing: Vec<_> = sent.iter().filter(|t| t.attempt == 0).cloned().collect();
+        assert_eq!(closing.len(), 1);
+        assert_eq!(closing[0].pair_slot, 1);
+        assert_eq!(closing[0].pair_index, open.pair_index);
+        assert_pentanomial_integrity(&[open, closing[0].clone()]);
+        let retries: Vec<_> = sent.iter().filter(|t| t.attempt == 1).cloned().collect();
+        assert_eq!(retries.len(), 2);
+        for (retry, original) in retries.iter().zip([&first, &second]) {
+            assert_eq!(retry.pair_index, original.pair_index);
+            assert_eq!(retry.pair_slot, original.pair_slot);
+            assert_eq!(retry.startpos_idx, original.startpos_idx);
+            assert_eq!(
+                (retry.black_idx, retry.white_idx),
+                (original.black_idx, original.white_idx)
+            );
+        }
+        assert!(source.peek_ticket().is_none());
+    }
+
+    #[test]
+    fn offer_ticket_without_stop_follows_target_and_keeps_pair() {
+        let target = Arc::new(AtomicU32::new(2));
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1000, target.clone(), 42, super::StartposOrder::Random);
+        let mut pending = source.peek_ticket();
+        target.store(0, Ordering::Relaxed);
+        assert!(source.offer_ticket(&mut pending, false).is_none());
+        target.store(2, Ordering::Relaxed);
+        let first = source.offer_ticket(&mut pending, false).unwrap();
+        assert_eq!(first.pair_slot, 0);
+        source.commit_sent(&pending.take().unwrap());
+        target.store(0, Ordering::Relaxed);
+        let second = source.offer_ticket(&mut pending, false).unwrap();
+        assert_eq!(second.pair_slot, 1);
+        source.commit_sent(&pending.take().unwrap());
+        assert_pentanomial_integrity(&[first, second]);
+        assert!(source.offer_ticket(&mut pending, false).is_none());
     }
 
     #[test]
@@ -3710,7 +3837,7 @@ mod tests {
             source.observe_result(&result(ticket, super::GameOutcome::Draw, true));
         }
 
-        assert!(!source.has_next());
+        assert!(source.peek_ticket().is_none());
         assert_eq!(source.current_target_total(), 2);
         let summary = source.retry_summary();
         assert_eq!(summary.error_pairs, 1);

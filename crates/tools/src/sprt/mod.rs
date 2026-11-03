@@ -19,6 +19,6 @@ pub mod posthoc;
 
 pub use decision::{Decision, judge};
 pub use llr::SprtParameters;
-pub use meta::SprtMetaLog;
+pub use meta::{SprtMetaLog, SprtStopLog};
 pub use penta::{GameSide, Penta};
 pub use posthoc::collect_sprt_penta;

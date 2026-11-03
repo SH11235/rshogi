@@ -4318,8 +4318,7 @@ impl OnnxSessions {
         // EP 情報などのログと可用性チェックは verbose（1 本目）のみで行う。
         // ORT profiling も 1 本目のセッションにのみ適用する。
         let build_session = |verbose: bool| -> Result<Session> {
-            let builder = Session::builder()
-                .map_err(onnx_ort_err)?
+            let builder = tools::onnx_env::session_builder()?
                 .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
                 .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
                 .with_intra_threads(1)

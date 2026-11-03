@@ -46,7 +46,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`tournament`](tournament.md) | 複数エンジンの総当たり・先後交換対局、SPRT、動的制御、NPS 時計補正・Linux NUMA 固定 |
+| [`tournament`](tournament.md) | 複数エンジンの総当たり・先後交換対局、SPRT (境界到達後も開始済みペアを完結し、停止時の判定を meta.json に保存)、動的制御、NPS 時計補正・Linux NUMA 固定 |
 | [`analyze_selfplay`](analyze_selfplay.md) | 対局 JSONL の勝率・Elo・SPRT・開始局面別成績を集計 |
 | [`floodgate_record`](floodgate_record.md) | csa_client の対局ログから先後別・相手別成績と NPS を集計 |
 | [`floodgate_pipeline`](floodgate_pipeline.md) | Floodgate 棋譜の取得、128 棋譜ずつの局面抽出、live mirror |
