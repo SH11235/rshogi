@@ -69,6 +69,10 @@ struct Cli {
     /// 集計対象の手番
     #[arg(long, value_enum, default_value_t = SideArg::Both)]
     side: SideArg,
+    /// 定跡の区間をこの手番の即指しだけで決め、その間は両者の手を集計する
+    /// (相手の手は消費時間によらず入れる)。`--no-instant-filter` とは併用できない
+    #[arg(long, value_enum, conflicts_with = "no_instant_filter")]
+    book_of: Option<BookOf>,
     /// 集計後、採択回数がこの値未満の指し手を出力から除外する
     #[arg(long, default_value_t = 1)]
     min_count: u64,
@@ -83,6 +87,24 @@ enum SideArg {
     Black,
     /// 後手のみ
     White,
+}
+
+/// 定跡の区間を決める手番(CLI 引数)。
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum BookOf {
+    /// 先手
+    Black,
+    /// 後手
+    White,
+}
+
+impl BookOf {
+    fn side(self) -> Side {
+        match self {
+            BookOf::Black => Side::Black,
+            BookOf::White => Side::White,
+        }
+    }
 }
 
 impl SideArg {
@@ -105,6 +127,8 @@ struct BuildOptions {
     instant_threshold_sec: u32,
     winner_only: bool,
     side: SideArg,
+    /// 定跡の区間をこの手番の即指しだけで決める。`None` なら手番ごとに決める。
+    book_of: Option<Side>,
     min_count: u64,
 }
 
@@ -445,7 +469,19 @@ fn process_game(path: &Path, opts: &BuildOptions, agg: &mut Aggregator) {
         }
 
         // 消費時間による定跡手判定(手番側ごとの即指しプレフィックス)。
-        let in_prefix = if opts.instant_filter {
+        let in_prefix = if let (true, Some(book)) = (opts.instant_filter, opts.book_of) {
+            // 指定の手番が考えて指した手で区間が終わる。その手と以降は両者とも対象外。
+            if !in_book[book.idx()] {
+                false
+            } else if rec.side == book
+                && !rec.time_sec.is_some_and(|t| t <= opts.instant_threshold_sec)
+            {
+                in_book[book.idx()] = false;
+                false
+            } else {
+                true
+            }
+        } else if opts.instant_filter {
             let s = rec.side.idx();
             if !in_book[s] {
                 false
@@ -633,6 +669,7 @@ fn main() -> Result<()> {
         instant_threshold_sec: cli.instant_threshold_sec,
         winner_only: cli.winner_only,
         side: cli.side,
+        book_of: cli.book_of.map(BookOf::side),
         min_count: cli.min_count,
     };
 
@@ -663,6 +700,7 @@ mod tests {
             instant_threshold_sec: 1,
             winner_only: false,
             side: SideArg::Both,
+            book_of: None,
             min_count: 1,
         }
     }
@@ -725,6 +763,29 @@ mod tests {
             !s.contains(&format!("sfen {AFTER_7G7F_W}")),
             "後手の手が除外されず局面が出力された:\n{s}"
         );
+    }
+
+    #[test]
+    fn book_of_keeps_both_sides_until_that_side_thinks() {
+        // 後手は初手から長考、先手は 3 手目まで即指しで 5 手目に長考。
+        let games = &[(
+            "g.csa",
+            "V2.2\nPI\n+7776FU,T1\n-3334FU,T30\n+2726FU,T0\n-8384FU,T12\n+2625FU,T9\n-8485FU,T0\n%TORYO\n",
+        )];
+        let opts = BuildOptions {
+            instant_filter: true,
+            instant_threshold_sec: 1,
+            book_of: Some(Side::Black),
+            ..opts_all()
+        };
+        let s = out_string(games, &opts);
+        let moves: Vec<&str> = s
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("sfen"))
+            .filter_map(|l| l.split(' ').next())
+            .collect();
+        // 先手の定跡の間は、後手の長考の手も入る。先手が考えた 5 手目と、その後の手は入らない。
+        assert_eq!(moves, ["8c8d", "2g2f", "3c3d", "7g7f"], "{s}");
     }
 
     #[test]
