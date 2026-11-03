@@ -6,9 +6,11 @@ use super::{Kind, Meta, RootInfo, Subtree, read_cut, side, turn};
 use crate::book_backprop::{
     BOOK_HEADER, BackpropOptions, DrawValues, Graph, MergeMode, propagate_values, read_graph,
 };
-use crate::book_tree::audit::{MasterValue, audit, master_values};
+use crate::book_tree::audit::{MasterValue, audit, audited_moves, master_values};
 use crate::book_tree::journal::{Reading, read_source};
-use crate::book_tree::master_table::{format_master, parse_master, parse_master_rows, read_master};
+use crate::book_tree::master_table::{
+    Row, format_master, parse_master, parse_master_rows, positions_from_rows, read_master,
+};
 use crate::book_tree::register::{self, Conflict, NodeMove, Options, merge};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
@@ -382,6 +384,80 @@ pub(super) fn value_root(
     Ok(result)
 }
 
+/// `join_roots` で替わった数。
+pub(super) struct Joined {
+    /// 値が替わった手。
+    pub moves: usize,
+    /// 1 位の手が替わった局面。
+    pub best: usize,
+}
+
+/// 登録する手の値を、全部の根の手を元データに入れて `master audit` と同じ伝播で解いた値に替える。
+///
+/// 根ごとの伝播では、途中の局面の手は部分木の手だけになる。相手の手番の局面は大きい定跡の上位の手しか
+/// 持たないので、別の根がその局面を自分の手番として読んで見つけた手や、元データにある手が値に入らず、
+/// 木の持ち主に甘い値になる。登録後の点検は全体で伝播するので、根ごとの 1 位を main にすると点検で
+/// main が 1 位から負ける。ここで全体の値に揃えてから main を選ぶ。
+///
+/// 全部の手を入れるのは、alt にしない手も、全体で値が上がって 1 位になり得るため。値の替わった手は、
+/// 部分木の何段先の値かが決まらないので value_kind を unknown にし、cond は局面の全候補が台帳の
+/// 条件だけで決まると確かめられたときだけ残す。
+pub(super) fn join_roots(
+    rows: &[Row],
+    nodes: &mut BTreeMap<String, register::Node>,
+    options: &Options,
+    draws: DrawValues,
+    line: i32,
+    cond: &str,
+) -> Result<Joined> {
+    let every_move = Options {
+        alt_gap: i32::MAX,
+        ..*options
+    };
+    let (all_rows, _, _) = register::register(rows.to_vec(), nodes, &every_move)?;
+    // 行番号はファイルの行と同じ数え方 (見出しの次が 2)。
+    let book =
+        positions_from_rows(all_rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
+    let (_, _, audited) = audit(&book, draws, line, false)?;
+    let verified = master_conditions(&all_rows, &book.0, &audited, cond);
+    let index: BTreeMap<&str, usize> =
+        book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+    let mut joined = Joined { moves: 0, best: 0 };
+    for (key, node) in nodes.iter_mut() {
+        let (Some(position), Some(&i)) = (book.0.get(key), index.get(key.as_str())) else {
+            continue;
+        };
+        let values = audited_moves(&audited.graph, key, position, &audited.known[i])?;
+        let before = node.moves.first().map(|m| m.mv.clone());
+        for m in &mut node.moves {
+            let value = position
+                .moves
+                .iter()
+                .zip(&values)
+                .find(|(p, _)| p.mv == m.mv)
+                .and_then(|(_, v)| v.as_ref());
+            if let Some(v) = value
+                && v.value != m.value
+            {
+                m.value = v.value;
+                m.value_kind = "unknown".into();
+                m.cond = if verified.contains(key) {
+                    cond.to_owned()
+                } else {
+                    "unknown".into()
+                };
+                joined.moves += 1;
+            }
+        }
+        // 同じ値の手は根ごとの順 (部分木の手を先) を保つ。
+        node.moves.sort_by_key(|m| std::cmp::Reverse(m.value));
+        if node.moves.first().map(|m| &m.mv) != before.as_ref() {
+            joined.best += 1;
+        }
+    }
+    Ok(joined)
+}
+
 /// 登録する局面: 自分の手番で、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
 /// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
 pub(super) fn register_nodes(
@@ -530,6 +606,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         lineage: &lineage,
         schema: &schema,
     };
+    let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
@@ -544,6 +621,10 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
             summary.added_alt.get(s).unwrap_or(&0)
         );
     }
+    println!(
+        "全体の伝播で値が替わった手 {} / 1 位が替わった局面 {}",
+        joined.moves, joined.best
+    );
     println!(
         "main を伝播後の 1 位に替えた局面 {} / 評価値を伝播後の値にした行 {} / record なので足さなかった手 {} / 食い違い {} / 根をまたいで 1 位が違った局面 {disagreements} / 印 {}",
         summary.replaced_main,
