@@ -313,7 +313,7 @@ concurrency を指定しても無視する（減らすのは可）。退役し�
 
 ```
 [SPRT pair=1014 | test vs base] LLR=+2.950 (bounds -2.94..+2.94)  nelo=+38.05 ± 15.12  penta=[184, 15, 508, 17, 290]  state=accept_h1 (stopped at pair=1014)
-[SPRT] terminal decision reached; draining 15 in-flight game(s)...
+[SPRT] terminal decision reached; draining 15 in-flight game(s) and closing started pairs...
 
 === SPRT Summary (test vs base) ===
 bounds: LLR ∈ [-2.944, +2.944]  (alpha=0.05, beta=0.05)

@@ -661,3 +661,53 @@ fn mixed_csa_text_preserves_decisive_denominators_and_summary_unknowns() {
     assert_eq!(mixed_line, line);
     assert!(!mixed_text.contains("先後別集計:不明"));
 }
+
+fn write_stop_meta(dir: &Path, run_status: &str, nelo1: f64) {
+    let meta = json!({
+        "run_status": run_status,
+        "invalid": run_status != "completed",
+        "incomplete_pairs": 0,
+        "unreturned_games": 0,
+        "sprt_stopped_at": {
+            "base_label": "base", "test_label": "test",
+            "nelo0": 0.0, "nelo1": nelo1, "alpha": 0.05, "beta": 0.05,
+            "decision": "accept_h1", "pairs": 40, "llr": 3.0,
+            "penta": {"ll": 0, "dl": 0, "dd": 0, "wl": 0, "wd": 0, "ww": 40}
+        }
+    });
+    fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+}
+
+#[test]
+fn sprt_stop_is_shown_only_for_one_valid_run_with_same_hypothesis() {
+    let run = |run_status: &str, nelo1: f64| {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("pair.jsonl");
+        write_log(&log, true, &vec![("white_win", "black_win"); 100]);
+        write_stop_meta(dir.path(), run_status, nelo1);
+        (dir, log)
+    };
+
+    let (_valid_dir, valid) = run("completed", 10.0);
+    let (success, value) = analyze(&[&valid], false);
+    assert!(success);
+    assert_eq!(value["sprt"]["stopped_at"]["decision"], "accept_h1");
+    assert_eq!(value["sprt"]["stopped_at"]["pairs"], 40);
+    assert_eq!(value["sprt"]["pairs"], 100);
+
+    let (_other_dir, other_hypothesis) = run("completed", 5.0);
+    let (success, value) = analyze(&[&other_hypothesis], false);
+    assert!(success);
+    assert!(value["sprt"].get("stopped_at").is_none());
+
+    let (_second_dir, second) = run("completed", 10.0);
+    let (success, value) = analyze(&[&valid, &second], false);
+    assert!(success);
+    assert!(value["sprt"].get("stopped_at").is_none());
+
+    let (_interrupted_dir, interrupted) = run("interrupted", 10.0);
+    let (success, value) = analyze(&[&interrupted], true);
+    assert!(success);
+    assert_eq!(value["sprt"]["decision"], "invalid");
+    assert!(value["sprt"].get("stopped_at").is_none());
+}

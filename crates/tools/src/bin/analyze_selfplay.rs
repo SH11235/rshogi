@@ -1961,15 +1961,6 @@ fn main() -> Result<()> {
             },
             &mut extra.input_issues,
         );
-        if let Some(stop) = &json.stopped_at
-            && stop.decision.as_str() != json.decision
-        {
-            eprintln!(
-                "警告: 停止後に回収したペアを含む最終集計の判定 ({}) が、tournament の停止時の判定 ({}) と異なります。採否は停止時の判定に従います",
-                json.decision,
-                stop.decision.as_str()
-            );
-        }
         Some((total, json))
     } else {
         None
@@ -2016,6 +2007,20 @@ fn main() -> Result<()> {
     };
 
     let invalid = extra.retry.exhausted_pairs > 0 || !extra.input_issues.is_empty();
+    // invalid な run は tournament も採否を出さないので、停止時の判定も採否として示さない。
+    if let Some((_, output)) = sprt_payload.as_mut() {
+        if invalid {
+            output.stopped_at = None;
+        } else if let Some(stop) = &output.stopped_at
+            && stop.decision.as_str() != output.decision
+        {
+            eprintln!(
+                "警告: 停止後に回収したペアを含む最終集計の判定 ({}) が、tournament の停止時の判定 ({}) と異なります。採否は停止時の判定に従います",
+                output.decision,
+                stop.decision.as_str()
+            );
+        }
+    }
     if invalid {
         if let Some((_, output)) = sprt_payload.as_mut() {
             output.decision = "invalid".into();

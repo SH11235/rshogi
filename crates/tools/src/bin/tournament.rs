@@ -1877,11 +1877,15 @@ fn main() -> Result<()> {
     println!("===========================");
 
     if run_status != RunStatus::Completed {
-        println!("SPRT decision withheld: run did not complete.");
+        if sprt_state.is_some() {
+            println!("SPRT decision withheld: run did not complete.");
+        }
         bail!("tournament did not complete; recovered results and run status were saved");
     }
     if retry_summary.invalid {
-        println!("SPRT decision withheld: invalid run (exhausted or incomplete pairs).");
+        if sprt_state.is_some() {
+            println!("SPRT decision withheld: invalid run (exhausted or incomplete pairs).");
+        }
         bail!("tournament run is invalid; recovered results and run status were saved");
     }
     if let Some(state) = sprt_state.as_ref() {
@@ -1909,7 +1913,9 @@ fn handle_sprt_observation(
         // 境界到達: 新しいペアを止め、開始済みペアの 2 局目・再試行と in-flight を回収する。
         *stop_feeding = true;
         let inflight = tickets_sent.saturating_sub(completed);
-        println!("[SPRT] terminal decision reached; draining {inflight} in-flight game(s)...");
+        println!(
+            "[SPRT] terminal decision reached; draining {inflight} in-flight game(s) and closing started pairs..."
+        );
     }
 }
 
@@ -3268,7 +3274,7 @@ mod tests {
 
         let tickets = drain_source(&mut source);
         assert_eq!(tickets.len(), 4);
-        assert!(!source.peek_ticket().is_some());
+        assert!(source.peek_ticket().is_none());
         // id 連番 0..4、pair_index = id/2、pair_slot = id%2
         let ids: Vec<u64> = tickets.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![0, 1, 2, 3]);
@@ -3285,7 +3291,7 @@ mod tests {
             TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         let first = drain_source(&mut source);
         assert_eq!(first.len(), 2);
-        assert!(!source.peek_ticket().is_some());
+        assert!(source.peek_ticket().is_none());
 
         // 実行中に target を増やす → 追加分を発行できる
         target.store(3, Ordering::Relaxed); // 1 ペアあたり 6 局
@@ -3420,7 +3426,7 @@ mod tests {
         assert!(pull(&mut source).is_some());
         // target を発行済みより小さくする → それ以上は発行しない
         target.store(1, Ordering::Relaxed); // 1 ペアあたり 2 局（既に到達）
-        assert!(!source.peek_ticket().is_some());
+        assert!(source.peek_ticket().is_none());
         assert!(pull(&mut source).is_none());
     }
 
@@ -3525,7 +3531,7 @@ mod tests {
         assert_eq!(slot1.pair_slot, 1);
         assert_eq!(slot0.pair_index, slot1.pair_index);
         // ペアが完結したので以降は発行しない。
-        assert!(!source.peek_ticket().is_some());
+        assert!(source.peek_ticket().is_none());
         assert!(pull(&mut source).is_none());
         assert_pentanomial_integrity(&[slot0, slot1]);
     }
@@ -3831,7 +3837,7 @@ mod tests {
             source.observe_result(&result(ticket, super::GameOutcome::Draw, true));
         }
 
-        assert!(!source.peek_ticket().is_some());
+        assert!(source.peek_ticket().is_none());
         assert_eq!(source.current_target_total(), 2);
         let summary = source.retry_summary();
         assert_eq!(summary.error_pairs, 1);
