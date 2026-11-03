@@ -580,10 +580,21 @@ impl MateTable {
         }
     }
 
-    /// prefetch の無いアーキテクチャでは何もしない (bucket の位置の計算も省く)
+    /// prefetch 命令を使わないアーキテクチャ (wasm など) では、後で probe が読むエントリと同じキャッシュラインに
+    /// 実際に触れる (読んだ値は捨てる)。子どうしの読み込みは互いに依存しないので、待ちが重なる
     #[cfg(not(target_arch = "x86_64"))]
     #[inline]
-    pub fn prefetch<const PIECES: bool>(&self, _key: TableKey) {}
+    pub fn prefetch<const PIECES: bool>(&self, key: TableKey) {
+        let mut touched = self.buckets[self.exact_index(key)]
+            .version
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if PIECES {
+            touched ^= self.final_buckets[self.final_index(key)]
+                .version
+                .load(std::sync::atomic::Ordering::Relaxed);
+        }
+        std::hint::black_box(touched);
+    }
 
     /// 局面の値を引く。
     ///
