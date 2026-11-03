@@ -70,6 +70,8 @@ pub(super) struct Summary {
     pub added_main: BTreeMap<String, usize>,
     pub added_alt: BTreeMap<String, usize>,
     pub replaced_main: usize,
+    /// `replaced_main` のうち、curated の main を替えた局面。
+    pub replaced_curated: usize,
     pub evals_updated: usize,
     pub record_skipped: usize,
     pub conflicts: usize,
@@ -182,8 +184,9 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
     }
     println!(
-        "main を木の 1 位に替えた局面 {} / 評価値を伝播後の値にした行 {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
+        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
         summary.replaced_main,
+        summary.replaced_curated,
         summary.evals_updated,
         summary.record_skipped,
         summary.conflicts,
@@ -388,13 +391,22 @@ pub(super) fn register(
                 if options.schema.replaceable(rows[m].get("source"))
                     && (options.replace_curated || (rows[m].get("tier") == "wide" && !curated)) =>
             {
-                // curated の main を替えるときは新しい main を curated にし、丁寧な定跡の手順を切らない。
+                // curated の main を替えるときは新しい main を curated にし、この局面の curated の main を 1 つに保つ。
                 let tier = rows[m].get("tier").to_owned();
                 rows[m].set("role", "alt".into());
                 rows[m].set("tier", "wide".into());
+                let demoted = if tier == "curated" {
+                    summary.replaced_curated += 1;
+                    " (curated から wide)"
+                } else {
+                    ""
+                };
                 let note = append(
                     rows[m].get("note"),
-                    format!("{}: 木の伝播後の 1 位でないので main から alt", options.since),
+                    format!(
+                        "{}: 木の伝播後の 1 位でないので main から alt{demoted}",
+                        options.since
+                    ),
                 );
                 rows[m].set("note", note);
                 match find(&rows, &best.mv) {
@@ -708,8 +720,28 @@ mod tests {
         assert_eq!(get(W, "plugged"), ("main".into(), "curated".into()));
         assert_eq!(get(k3, "new"), ("main".into(), "wide".into()));
         assert_eq!(get(k3, "never"), ("record".into(), "curated".into()));
-        assert_eq!((summary.replaced_main, conflicts.len()), (2, 1));
+        assert_eq!((summary.replaced_main, summary.replaced_curated, conflicts.len()), (2, 1, 1));
+        assert!(find(&rows, B, "careful").unwrap().get("note").ends_with("(curated から wide)"));
         assert_eq!(conflicts[0].main, "plugged");
+    }
+
+    #[test]
+    fn replace_curated_promotes_an_existing_alt_with_the_main_tier() {
+        let rows = master(&[
+            row(B, "careful", "main", "read", "curated", "3"),
+            row(B, "better", "alt", "read", "wide", "1"),
+        ]);
+        let nodes = BTreeMap::from([(B.into(), node(&[("better", 60), ("careful", 0)], 1, 0))]);
+        let options = Options {
+            replace_curated: true,
+            ..options()
+        };
+        let (rows, conflicts, summary) = register(rows, &nodes, &options).unwrap();
+        let better = find(&rows, B, "better").unwrap();
+        assert_eq!((better.get("role"), better.get("tier")), ("main", "curated"));
+        let careful = find(&rows, B, "careful").unwrap();
+        assert_eq!((careful.get("role"), careful.get("tier")), ("alt", "wide"));
+        assert_eq!((summary.replaced_main, conflicts.len()), (1, 0));
     }
 
     #[test]
