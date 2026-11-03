@@ -10,6 +10,7 @@ mod game_history_integration;
 mod gensfen_resume_integration;
 mod gensfen_sidecar_integration;
 mod gensfen_teacher_labels_integration;
+mod hcpe3_to_psv_integration;
 mod net_spsa_finalize;
 mod pack_to_psv_integration;
 mod psv_scatter_by_mask_integration;

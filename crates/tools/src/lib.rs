@@ -89,6 +89,7 @@ pub mod dlshogi_features;
 pub mod ek_testset;
 #[cfg(feature = "layerstack-arch")]
 pub mod eval_sfens_tool;
+pub mod game_record_psv;
 pub mod hcpe;
 pub mod kif;
 pub mod kifu_publish;

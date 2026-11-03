@@ -1,22 +1,15 @@
 //! GenSfen の可変長 .pack 棋譜を40 byte固定長のPSVへ変換する。
 
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use tools::common::dedup::collect_input_paths;
-use tools::output_path::ensure_safe_output_path;
+use tools::game_record_psv::{ConversionStats, ConvertedGame, GameRecordFormat};
 use tools::packed_sfen::{PackedSfenValue, hcpe_move16_to_psv, move_to_hcpe_move16, pack_position};
-
-const MAX_BATCH_GAMES: usize = 128;
-const BATCH_POSITIONS: usize = 16 * 1024;
-const INPUT_BUFFER_SIZE: usize = 64 * 1024;
-const OUTPUT_BUFFER_SIZE: usize = 1024 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(name = "pack_to_psv")]
@@ -86,18 +79,6 @@ struct PackGame {
     start: StartPosition,
     moves: Vec<(u16, i16)>,
     result: u8,
-}
-
-struct PendingGame {
-    game: PackGame,
-    file_index: usize,
-    game_number: u64,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ConversionStats {
-    games: u64,
-    positions: u64,
 }
 
 fn read_bytes<const N: usize>(reader: &mut impl Read) -> io::Result<[u8; N]> {
@@ -211,124 +192,30 @@ fn convert_game(game: &PackGame) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-fn game_error(path: &Path, game_number: u64, error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("{} の対局 {game_number}: {error}", path.display()))
-}
+struct PackFormat;
 
-fn write_batch(
-    batch: &[PendingGame],
-    paths: &[PathBuf],
-    writer: &mut impl Write,
-    stats: &mut ConversionStats,
-) -> io::Result<()> {
-    if batch.is_empty() {
-        return Ok(());
+impl GameRecordFormat for PackFormat {
+    type Game = PackGame;
+    const TEMP_PREFIX: &'static str = ".pack_to_psv_";
+
+    fn read_game(&self, reader: &mut impl Read) -> io::Result<Option<PackGame>> {
+        read_game(reader)
     }
-    let results: Vec<_> = batch
-        .par_iter()
-        .map(|pending| {
-            convert_game(&pending.game)
-                .map_err(|error| game_error(&paths[pending.file_index], pending.game_number, error))
+
+    fn position_count(&self, game: &PackGame) -> usize {
+        game.moves.len()
+    }
+
+    fn convert_game(&self, game: &PackGame) -> io::Result<ConvertedGame> {
+        Ok(ConvertedGame {
+            psv: convert_game(game)?,
+            skipped_positions: 0,
         })
-        .collect();
-    for result in results {
-        let output = result?;
-        writer.write_all(&output)?;
-        stats.games += 1;
-        stats.positions += (output.len() / PackedSfenValue::SIZE) as u64;
     }
-    Ok(())
 }
 
 fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result<ConversionStats> {
-    let existing_permissions = match std::fs::symlink_metadata(output) {
-        Ok(metadata) if metadata.is_file() => Some(metadata.permissions()),
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("出力には通常ファイルを指定してください: {}", output.display()),
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    for path in paths {
-        ensure_safe_output_path(output, path)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    }
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(".pack_to_psv_").suffix(".tmp");
-    #[cfg(windows)]
-    if existing_permissions.as_ref().is_some_and(|permissions| permissions.readonly()) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "出力は読み取り専用です"));
-    }
-    #[cfg(unix)]
-    if existing_permissions.is_none() {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(std::fs::Permissions::from_mode(0o666));
-    }
-    let mut staged = builder.tempfile_in(parent)?;
-    let mut stats = ConversionStats::default();
-    {
-        let mut writer = BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, staged.as_file_mut());
-        let mut batch = Vec::with_capacity(MAX_BATCH_GAMES);
-        let mut batch_positions = 0;
-        let mut read_games = 0u64;
-        for (file_index, path) in paths.iter().enumerate() {
-            if max_games > 0 && read_games >= max_games {
-                break;
-            }
-            eprintln!("Reading: {}", path.display());
-            let mut reader = BufReader::with_capacity(INPUT_BUFFER_SIZE, File::open(path)?);
-            let mut game_number = 0;
-            while max_games == 0 || read_games < max_games {
-                let Some(game) = read_game(&mut reader)
-                    .map_err(|error| game_error(path, game_number + 1, error))?
-                else {
-                    break;
-                };
-                game_number += 1;
-                read_games += 1;
-                batch_positions += game.moves.len();
-                batch.push(PendingGame {
-                    game,
-                    file_index,
-                    game_number,
-                });
-                if batch.len() >= MAX_BATCH_GAMES || batch_positions >= BATCH_POSITIONS {
-                    write_batch(&batch, paths, &mut writer, &mut stats)?;
-                    batch.clear();
-                    batch_positions = 0;
-                }
-            }
-        }
-        write_batch(&batch, paths, &mut writer, &mut stats)?;
-        writer.flush()?;
-    }
-    #[cfg(unix)]
-    if let Some(permissions) = existing_permissions {
-        use std::os::unix::fs::PermissionsExt;
-        // 書込みで setuid/setgid が落ちるため、flush 後に権限を復元する。
-        // fchmod が成功しても非所属 group の setgid は落ち得るので、実値を確認する。
-        let expected_mode = permissions.mode() & 0o7777;
-        staged.as_file().set_permissions(permissions)?;
-        let actual_mode = staged.as_file().metadata()?.permissions().mode() & 0o7777;
-        if actual_mode != expected_mode {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "既存出力の mode bits を保持できません: expected={expected_mode:04o}, actual={actual_mode:04o}"
-                ),
-            ));
-        }
-    }
-    staged.as_file().sync_all()?;
-    staged.persist(output).map_err(|error| error.error)?;
-    Ok(stats)
+    tools::game_record_psv::convert_paths(&PackFormat, paths, output, max_games)
 }
 
 fn run(args: Args) -> io::Result<()> {
@@ -367,6 +254,7 @@ mod tests {
     use rshogi_core::types::Move;
     use std::io::Cursor;
     use tempfile::TempDir;
+    use tools::game_record_psv::MAX_BATCH_GAMES;
     use tools::packed_sfen::move_to_psv_move16;
 
     fn pack_game(moves: &[&str], score: i16, result: u8) -> Vec<u8> {
@@ -406,7 +294,8 @@ mod tests {
                 stats,
                 ConversionStats {
                     games,
-                    positions: games
+                    positions: games,
+                    skipped_positions: 0,
                 }
             );
             assert_eq!(std::fs::metadata(output).unwrap().len(), games * 40);
@@ -426,7 +315,8 @@ mod tests {
             stats,
             ConversionStats {
                 games: 1,
-                positions: 2
+                positions: 2,
+                skipped_positions: 0,
             }
         );
         let bytes = std::fs::read(output).unwrap();
@@ -456,7 +346,8 @@ mod tests {
             convert_paths(&[input], &output, 1).unwrap(),
             ConversionStats {
                 games: 1,
-                positions: 0
+                positions: 0,
+                skipped_positions: 0,
             }
         );
         assert!(std::fs::read(output).unwrap().is_empty());
@@ -670,33 +561,5 @@ mod tests {
             read_game(&mut Cursor::new(too_long)).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
-    }
-
-    #[test]
-    fn writer_failure_is_propagated() {
-        struct FailingWriter;
-        impl Write for FailingWriter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                assert!(!bytes.is_empty());
-                Err(io::Error::other("write failed"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let game = read_game(&mut Cursor::new(pack_game(&["7g7f"], 0, 0))).unwrap().unwrap();
-        let batch = [PendingGame {
-            game,
-            file_index: 0,
-            game_number: 1,
-        }];
-        let error = write_batch(
-            &batch,
-            &[PathBuf::from("input.pack")],
-            &mut FailingWriter,
-            &mut ConversionStats::default(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("write failed"));
     }
 }
