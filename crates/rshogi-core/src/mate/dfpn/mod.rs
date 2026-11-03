@@ -501,6 +501,26 @@ impl DfpnSolver {
             use std::sync::atomic::Ordering::Relaxed;
             let c = &search::DBG_RC;
             eprintln!("DBGRC nodes {} tries {} mated {} budget_out {} m_nodes {}", self.nodes, c[0].load(Relaxed), c[1].load(Relaxed), c[2].load(Relaxed), c[3].load(Relaxed));
+            search::DBG_SIZES.with(|v| {
+                let mut v = v.borrow_mut();
+                v.sort_unstable_by(|a, b| b.cmp(a));
+                let total: u64 = v.iter().sum();
+                let top = |f: f64| -> u64 { v.iter().take(((v.len() as f64 * f).ceil() as usize).max(1)).sum() };
+                eprintln!("DBGSIB count {} sib_nodes {} share {:.1}% top1% {:.1}% top10% {:.1}% max {} n_over_100k {}",
+                    v.len(), total, 100.0 * total as f64 / self.nodes.max(1) as f64,
+                    100.0 * top(0.01) as f64 / total.max(1) as f64, 100.0 * top(0.10) as f64 / total.max(1) as f64,
+                    v.first().copied().unwrap_or(0), v.iter().filter(|&&x| x >= 100_000).count());
+            });
+            search::DBG_HEAVY.with(|v| {
+                let mut v = v.borrow_mut();
+                v.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                for (n, c) in v.iter() {
+                    let hd = if c.hard_depth == u16::MAX { -1 } else { i32::from(c.hard_depth) };
+                    let ed = if c.extra_depth == u16::MAX { -1 } else { i32::from(c.extra_depth) };
+                    eprintln!("DBGHEAVY nodes {n} pos {} maxd {} hard_d {hd} unret {} illegal {} subst {} extra {} extra_d {ed} trunc {}",
+                        c.positions, c.max_depth, c.unretrievable, c.illegal, c.substituted, c.extra, c.truncated);
+                }
+            });
             return r;
         };
         // 正解手順を求める段階でも、進捗の間隔を判定の最後の通知から数える

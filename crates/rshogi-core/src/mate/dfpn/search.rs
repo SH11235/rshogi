@@ -978,11 +978,42 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 len_limit: args.child_len_limit(),
             };
             let child_nodes_before = self.nodes;
+            let outer = !or_node
+                && !self.shortest
+                && DBG_OUTER.with(|o| !o.get())
+                && st.drop_square(mv).is_some_and(|sq| {
+                    self.scratch.children[start..]
+                        .iter()
+                        .any(|c| c.pn == 0 && c.mv != mv && st.drop_square(c.mv) == Some(sq))
+                });
+            let mut copy_stat = CopyStat::default();
+            if outer {
+                DBG_OUTER.with(|o| o.set(true));
+                let sq = st.drop_square(mv);
+                if let Some(tmpl_mv) = self.scratch.children[start..]
+                    .iter()
+                    .find(|c| c.pn == 0 && c.mv != mv && st.drop_square(c.mv) == sq)
+                    .map(|c| c.mv)
+                {
+                    let mut tmpl = st.clone();
+                    tmpl.do_move(tmpl_mv);
+                    let mut tgt = st.clone();
+                    tgt.do_move(mv);
+                    self.dbg_copy_walk(&mut tmpl, &mut tgt, true, 1, &mut copy_stat);
+                }
+            }
             st.do_move(mv);
             let child_result = self.search(st, child_args, inc_flag);
             st.undo_move(mv);
-            let child_result = child_result?;
             let child_nodes = self.nodes - child_nodes_before;
+            if outer {
+                DBG_OUTER.with(|o| o.set(false));
+                DBG_SIZES.with(|v| v.borrow_mut().push(child_nodes));
+                if child_nodes >= 100_000 {
+                    DBG_HEAVY.with(|v| v.borrow_mut().push((child_nodes, copy_stat)));
+                }
+            }
+            let child_result = child_result?;
             if consumed_extension && child_result.is_conditional() {
                 // 条件付きの不詰は置換表に残らず、次に展開しても新しい局面に見える。
                 // 延長を消費したことにすると、延長が循環の外へ届かないまま尽きる。
@@ -1007,6 +1038,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 self.mark_futile_drop(st, best, mv, len_limit)?;
             }
             if PIECES
+                && DBG_RC_ON
                 && !or_node
                 && !self.shortest
                 && child_result.is_proven()
@@ -1423,6 +1455,79 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.scratch.capture_moves = captures;
         self.scratch.returned = Some(slot);
         result
+    }
+
+    fn dbg_copy_walk(&self, tmpl: &mut S, tgt: &mut S, or_node: bool, depth: u16, stat: &mut CopyStat) {
+        if stat.positions >= 2000 || depth >= 40 {
+            stat.truncated = true;
+            return;
+        }
+        stat.positions += 1;
+        stat.max_depth = stat.max_depth.max(depth);
+        if or_node {
+            let mut moves = Vec::new();
+            tmpl.generate(true, &mut moves);
+            let mut best: Option<(S::Mv, u16)> = None;
+            for &m in &moves {
+                tmpl.do_move(m);
+                let mut replies = Vec::new();
+                tmpl.generate(false, &mut replies);
+                tmpl.undo_move(m);
+                if replies.is_empty() {
+                    best = Some((m, 1));
+                    break;
+                }
+                let k = tmpl.table_key_after(m, self.attacker);
+                let pk = if PIECES { k } else { exact_key(k.key) };
+                if let Some(v) = self.table.probe::<PIECES>(pk)
+                    && v.pn == 0
+                    && best.is_none_or(|(_, l)| v.mate_len < l)
+                {
+                    best = Some((m, v.mate_len));
+                }
+            }
+            let Some((m, _)) = best else {
+                stat.unretrievable += 1;
+                stat.hard_depth = stat.hard_depth.min(depth);
+                return;
+            };
+            let mut tm = Vec::new();
+            tgt.generate(true, &mut tm);
+            let use_mv = if tm.contains(&m) {
+                m
+            } else if let Some(sq) = tmpl.drop_square(m)
+                && let Some(&alt) = tm.iter().find(|&&x| tgt.drop_square(x) == Some(sq))
+            {
+                stat.substituted += 1;
+                alt
+            } else {
+                stat.illegal += 1;
+                stat.hard_depth = stat.hard_depth.min(depth);
+                return;
+            };
+            tmpl.do_move(m);
+            tgt.do_move(use_mv);
+            self.dbg_copy_walk(tmpl, tgt, false, depth + 1, stat);
+            tgt.undo_move(use_mv);
+            tmpl.undo_move(m);
+        } else {
+            let mut tr = Vec::new();
+            tgt.generate(false, &mut tr);
+            let mut mr = Vec::new();
+            tmpl.generate(false, &mut mr);
+            for &r in &tr {
+                if mr.contains(&r) {
+                    tmpl.do_move(r);
+                    tgt.do_move(r);
+                    self.dbg_copy_walk(tmpl, tgt, true, depth + 1, stat);
+                    tgt.undo_move(r);
+                    tmpl.undo_move(r);
+                } else {
+                    stat.extra += 1;
+                    stat.extra_depth = stat.extra_depth.min(depth);
+                }
+            }
+        }
     }
 
     /// 受け方の手番の局面 `st` の、`len_limit` 手以内の最短の詰み手数とその証明駒 (上限を 2 手ずつ縮めて
@@ -2072,3 +2177,30 @@ mod tests {
 }
 
 pub(crate) static DBG_RC: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+const DBG_RC_ON: bool = false;
+thread_local! {
+    static DBG_OUTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static DBG_SIZES: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CopyStat {
+    pub positions: u32,
+    pub max_depth: u16,
+    pub hard_depth: u16,
+    pub unretrievable: u32,
+    pub illegal: u32,
+    pub substituted: u32,
+    pub extra: u32,
+    pub extra_depth: u16,
+    pub truncated: bool,
+}
+impl Default for CopyStat {
+    fn default() -> Self {
+        Self { positions: 0, max_depth: 0, hard_depth: u16::MAX, unretrievable: 0, illegal: 0, substituted: 0, extra: 0, extra_depth: u16::MAX, truncated: false }
+    }
+}
+thread_local! {
+    pub(crate) static DBG_HEAVY: std::cell::RefCell<Vec<(u64, CopyStat)>> = const { std::cell::RefCell::new(Vec::new()) };
+}

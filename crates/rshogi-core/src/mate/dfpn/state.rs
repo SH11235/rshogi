@@ -28,7 +28,7 @@ pub(super) const FULL_HAND: Hand = Hand::EMPTY
 pub(super) const PNDN_UNIT: u32 = 2;
 
 /// df-pn が局面に求める操作
-pub(super) trait MateState: Send + Sized + 'static {
+pub(super) trait MateState: Send + Sized + Clone + 'static {
     /// 指し手
     type Mv: Copy + Eq + Send;
 
