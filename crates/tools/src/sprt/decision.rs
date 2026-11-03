@@ -4,7 +4,8 @@ use super::llr::SprtParameters;
 use super::penta::Penta;
 
 /// SPRT の判定結果。
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     /// まだ境界に達していない。
     Running,

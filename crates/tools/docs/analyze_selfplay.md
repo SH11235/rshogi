@@ -22,6 +22,12 @@ Wald パラメータは `--sprt-nelo0` / `--sprt-nelo1` / `--sprt-alpha` /
 `--sprt-beta` で上書きできる。nelo は `--sprt-nelo0 -10` のようにスペース区切りの
 負値をそのまま渡せる。
 
+入力が 1 つの tournament run だけから成り、その meta.json に `sprt_stopped_at`
+（SPRT が最初に境界へ達した時点の集計）があれば、SPRT レポートと JSON の `sprt.stopped_at` に
+表示する。tournament の採否はこの停止時の判定で決まる。`decision` は停止後に回収した
+ペアも含めた最終集計の判定なので、両者が異なる場合は標準エラー出力に警告を出す。
+複数 run の合算や、ラベル・Wald パラメータを停止時と変えた解析では表示しない。
+
 ## 表示の視点
 
 - エンジンの `A(...)`, `B(...)` ラベルはエンジン ID の辞書順で決まる。

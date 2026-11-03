@@ -19,7 +19,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use tools::selfplay::CONTROL_HISTORY_FILE_NAME;
-use tools::sprt::{Penta, SprtMetaLog, SprtParameters, collect_sprt_penta, judge};
+use tools::sprt::{Penta, SprtMetaLog, SprtParameters, SprtStopLog, collect_sprt_penta, judge};
 
 #[path = "analyze_selfplay/adjudication_sweep.rs"]
 mod adjudication_sweep;
@@ -1427,7 +1427,58 @@ fn build_sprt_json(
             wd: penta.wd,
             ww: penta.ww,
         },
+        stopped_at: None,
     }
+}
+
+/// 入力が 1 つの tournament run だけから成るとき、その meta.json から SPRT の停止時の集計を読む。
+///
+/// 複数 run の合算や、解析の仮説 (ラベル・nelo・alpha・beta) が停止時と異なる場合は使わない。
+/// 読めない meta.json は `run_meta_issue` が不完全入力として報告済みなので読み飛ばし、
+/// `sprt_stopped_at` だけが読めない場合は `issues` に積む。
+fn load_sprt_stop(
+    files: &[&str],
+    expected: &SprtMetaLog,
+    issues: &mut Vec<String>,
+) -> Option<SprtStopLog> {
+    let meta_paths: BTreeSet<_> = files
+        .iter()
+        .filter(|path| !path.contains(".summary."))
+        .map(|path| Path::new(path).parent().unwrap_or(Path::new(".")).join("meta.json"))
+        .collect();
+    let mut stops = Vec::new();
+    for path in &meta_paths {
+        let Some(meta) = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            continue;
+        };
+        let Some(stop) = meta.get("sprt_stopped_at").filter(|v| !v.is_null()) else {
+            continue;
+        };
+        match serde_json::from_value::<SprtStopLog>(stop.clone()) {
+            Ok(stop) => stops.push(stop),
+            Err(error) => {
+                issues.push(format!("{}: sprt_stopped_at を読めません: {error}", path.display()))
+            }
+        }
+    }
+    if stops.is_empty() {
+        return None;
+    }
+    if meta_paths.len() > 1 {
+        eprintln!("情報: 複数の tournament run を合算したため、SPRT の停止時の判定は表示しません");
+        return None;
+    }
+    let stop = stops.remove(0);
+    if stop.hypothesis != *expected {
+        eprintln!(
+            "情報: 解析の SPRT 仮説が tournament の停止時と異なるため、停止時の判定は表示しません"
+        );
+        return None;
+    }
+    Some(stop)
 }
 
 fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
@@ -1464,6 +1515,15 @@ fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
         None => println!("elo:        n/a"),
     }
     println!("penta:      {} ({} 視点)", penta, output.test);
+    if let Some(stop) = &output.stopped_at {
+        println!(
+            "stopped_at: pairs={}, LLR={:+.3}, decision={}  penta={} — tournament の採否はこの判定",
+            stop.pairs,
+            stop.llr,
+            stop.decision.as_str(),
+            stop.penta
+        );
+    }
     println!("=================================");
 }
 
@@ -1483,6 +1543,9 @@ struct SprtJsonOutput {
     nelo: Option<SprtNelo>,
     logistic_elo: Option<SprtNelo>,
     penta: SprtPentaJson,
+    /// tournament が最初に境界へ達した時点の集計 (meta.json の `sprt_stopped_at`)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_at: Option<SprtStopLog>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1885,7 +1948,28 @@ fn main() -> Result<()> {
         }
         let params =
             SprtParameters::new(nelo0, nelo1, alpha, beta).map_err(|e| anyhow::anyhow!(e))?;
-        let json = build_sprt_json(total, &base_label, &test_label, params);
+        let mut json = build_sprt_json(total, &base_label, &test_label, params);
+        json.stopped_at = load_sprt_stop(
+            &accepted_files,
+            &SprtMetaLog {
+                base_label: base_label.clone(),
+                test_label: test_label.clone(),
+                nelo0,
+                nelo1,
+                alpha,
+                beta,
+            },
+            &mut extra.input_issues,
+        );
+        if let Some(stop) = &json.stopped_at
+            && stop.decision.as_str() != json.decision
+        {
+            eprintln!(
+                "警告: 停止後に回収したペアを含む最終集計の判定 ({}) が、tournament の停止時の判定 ({}) と異なります。採否は停止時の判定に従います",
+                json.decision,
+                stop.decision.as_str()
+            );
+        }
         Some((total, json))
     } else {
         None
