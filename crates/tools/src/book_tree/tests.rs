@@ -847,6 +847,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         prefetch_workers: None,
         prefetch_preempt_below: 0.25,
         prefetch_work: super::model::PREFETCH_WORK,
+        speculate_at: None,
         max_restarts: 0,
         out_root: out_root.to_owned(),
         opp_n: 2,
@@ -1357,4 +1358,111 @@ fn simulation_later_demand_waits_for_busy_key_and_ignores_unused_answers() {
         assert_eq!(mean.lower, 3.0);
         assert_eq!(mean.count, 2);
     }
+}
+
+#[test]
+fn top_group_keeps_the_last_full_group_from_multipv_one() {
+    let mut group = super::service::TopGroup::new(3);
+    let mut feed = |index: usize, mv: &str| {
+        group.push(
+            index,
+            &Pv {
+                mv: mv.into(),
+                cp: 0,
+                depth: 5,
+            },
+        )
+    };
+    feed(1, "5i4i");
+    feed(2, "5i6i");
+    feed(3, "5i5h");
+    let moves = |group: &super::service::TopGroup| -> Vec<String> {
+        group.complete.as_ref().unwrap().iter().map(|p| p.mv.clone()).collect()
+    };
+    assert_eq!(moves(&group), ["5i4i", "5i6i", "5i5h"]);
+    // 1 位から続かない組は捨て、揃った前の組を保つ。
+    let mut feed = |index: usize, mv: &str| {
+        group.push(
+            index,
+            &Pv {
+                mv: mv.into(),
+                cp: 0,
+                depth: 6,
+            },
+        )
+    };
+    feed(1, "5i6i");
+    feed(3, "5i4i");
+    feed(2, "5i5h");
+    assert_eq!(moves(&group), ["5i4i", "5i6i", "5i5h"]);
+}
+
+#[test]
+fn speculation_follows_tops_and_readings_within_depth_and_skips_tree_positions() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 2;
+    let mut tree = Tree::load(def, &s).unwrap();
+    let mut cache = BTreeMap::new();
+    tree.advance(&cache).unwrap();
+    let a = child(ROOT, "5i4i").unwrap();
+    let b = child(ROOT, "5i6h").unwrap();
+    let c = child(ROOT, "5i5h").unwrap();
+    let mut tops = BTreeMap::new();
+    tops.insert(ROOT.to_owned(), (vec!["5i6h".to_owned(), "5i4i".to_owned()], 10));
+    tops.insert(b.clone(), (vec!["5a5b".to_owned()], 400));
+    tops.insert(a.clone(), (vec!["5a5b".to_owned()], 0));
+    cache.insert(c.clone(), reading(&c, &[("5a4a", 0), ("5a5b", -10)], &s));
+    let found: BTreeMap<_, _> = tree
+        .speculate(&tops, &cache, 1000)
+        .into_iter()
+        .map(|c| (c.key, (c.level, c.ply)))
+        .collect();
+    // 根の途中の上位の手と実戦の手 (5i5h) の子。c は読み済みなので挙げずに、相手の手番の
+    // opp_n (1) 手と実戦の手 (5a5b) で辿る。値が stop 以上の b は辿らない。a は途中の手と実戦の手で辿る。
+    let mut expected = BTreeMap::from([(a.clone(), (1, 2)), (b.clone(), (1, 2))]);
+    for (parent, mv) in [(&a, "5a5b"), (&a, "5a4a"), (&c, "5a4a"), (&c, "5a5b")] {
+        expected.insert(child(parent, mv).unwrap(), (2, 3));
+    }
+    assert_eq!(found, expected);
+    let limited = tree.speculate(&tops, &cache, 1);
+    assert!(limited.iter().all(|c| c.level == 1) && limited.len() == 2, "浅い段から打ち切る");
+    // 根を読み終えたら根の子は木の局面なので挙げない。
+    cache.insert(ROOT.to_owned(), reading(ROOT, &[("5i4i", 10)], &s));
+    assert!(tree.speculate(&tops, &cache, 1000).is_empty());
+    tree.advance(&cache).unwrap();
+    let after: BTreeSet<_> =
+        tree.speculate(&tops, &cache, 1000).into_iter().map(|c| c.key).collect();
+    assert!(after.iter().all(|key| !tree.level.contains_key(key)));
+    assert!(after.contains(&child(&a, "5a5b").unwrap()));
+}
+
+#[test]
+fn speculation_reaches_a_merged_position_at_its_shallowest_level() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 0), &s).unwrap();
+    tree.advance(&BTreeMap::new()).unwrap();
+    let path = |moves: &[&str]| moves.iter().fold(ROOT.to_owned(), |k, m| child(&k, m).unwrap());
+    let shallow = path(&["5i4i"]);
+    let deep = path(&["5i5h", "5a4a", "5h4i"]);
+    tree.level.insert(shallow.clone(), 1);
+    tree.ply.insert(shallow.clone(), 2);
+    tree.level.insert(deep.clone(), 3);
+    tree.ply.insert(deep.clone(), 4);
+    let merged = child(&shallow, "5a5b").unwrap();
+    assert_eq!(merged, child(&deep, "4a5b").unwrap());
+    let tops = BTreeMap::from([
+        (shallow.clone(), (vec!["5a5b".to_owned()], 0)),
+        (deep.clone(), (vec!["4a5b".to_owned()], 0)),
+        (merged.clone(), (vec!["4i3i".to_owned()], 0)),
+    ]);
+    let found: BTreeMap<_, _> = tree
+        .speculate(&tops, &BTreeMap::new(), 1000)
+        .into_iter()
+        .map(|c| (c.key, (c.level, c.ply)))
+        .collect();
+    assert_eq!(found[&merged], (2, 3));
+    assert_eq!(found[&child(&merged, "4i3i").unwrap()], (3, 4));
 }

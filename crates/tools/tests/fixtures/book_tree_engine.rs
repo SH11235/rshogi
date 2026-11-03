@@ -107,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let started = Instant::now();
             let mut stopped = false;
             let mut nodes = 0;
+            let mut mid = config.get("mid_nodes").cloned();
             let flood = config.get("flood_key") == Some(&key);
             while started.elapsed().as_secs_f64() < delay {
                 if flood {
@@ -151,6 +152,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     nodes += 1;
                     println!("info nodes {nodes} depth 1");
+                    io::stdout().flush()?;
+                }
+                if let Some(mid_nodes) = mid.take() {
+                    for (index, row) in rows.iter().enumerate() {
+                        let fields: Vec<_> = row.split_whitespace().collect();
+                        println!(
+                            "info depth 5 nodes {mid_nodes} multipv {} score cp {} pv {}",
+                            index + 1,
+                            fields[1],
+                            fields[0]
+                        );
+                    }
                     io::stdout().flush()?;
                 }
                 if config.get("stagnant").is_some_and(|s| s == "true") && !rows.is_empty() {

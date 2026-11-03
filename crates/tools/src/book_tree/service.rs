@@ -23,13 +23,14 @@ pub(super) struct Collector {
     nodes: Option<u64>,
 }
 impl Collector {
-    pub fn info(&mut self, line: &str) -> Result<()> {
+    /// 取り込んだ行の multipv の番号を返す。
+    pub fn info(&mut self, line: &str) -> Result<Option<usize>> {
         if !line.starts_with("info") || !line.contains(" pv ") || !line.contains(" score ") {
-            return Ok(());
+            return Ok(None);
         }
         let tokens: Vec<_> = line.split_whitespace().collect();
         if tokens.contains(&"lowerbound") || tokens.contains(&"upperbound") {
-            return Ok(());
+            return Ok(None);
         }
         let get =
             |name| tokens.iter().position(|t| *t == name).and_then(|i| tokens.get(i + 1)).copied();
@@ -59,10 +60,43 @@ impl Collector {
         if let Some(nodes) = get("nodes") {
             self.nodes = Some(nodes.parse()?);
         }
-        Ok(())
+        Ok(Some(index))
     }
     pub fn finish(self) -> (Vec<Pv>, Option<u64>) {
         (self.last.into_values().collect(), self.nodes)
+    }
+}
+
+/// multipv 1 から順に出た 1 組の手。探索の途中の上位の手を取るのに使う。
+pub(super) struct TopGroup {
+    size: usize,
+    group: Vec<Pv>,
+    pub complete: Option<Vec<Pv>>,
+}
+impl TopGroup {
+    pub fn new(size: usize) -> Self {
+        Self {
+            size,
+            group: Vec::new(),
+            complete: None,
+        }
+    }
+    /// bound の行は値が確定していないので、途中の組を捨てる。
+    pub fn interrupt(&mut self) {
+        self.group.clear();
+    }
+    pub fn push(&mut self, index: usize, pv: &Pv) {
+        if index == 1 {
+            self.group.clear();
+        }
+        if index != self.group.len() + 1 {
+            self.group.clear();
+            return;
+        }
+        self.group.push(pv.clone());
+        if self.group.len() == self.size {
+            self.complete = Some(std::mem::take(&mut self.group));
+        }
     }
 }
 
@@ -110,6 +144,8 @@ struct Job {
 enum Event {
     Done(usize, String, bool, Option<StopReason>, Result<Outcome>, Option<Box<Trace>>),
     Info(usize, u64, u32),
+    /// 読みが `--speculate-at` を越えた局面の、その時点の上位の手と 1 位の値。
+    Speculate(String, Vec<String>, i32),
     Alert(String),
 }
 struct Worker {
@@ -120,6 +156,8 @@ struct Worker {
     nodes: u64,
     depth: u32,
     prefetch: bool,
+    /// 途中の上位の手から挙げた子の先読み。
+    speculative: bool,
     demand: BTreeSet<Request>,
     priority: u32,
 }
@@ -231,6 +269,12 @@ struct PrefetchStats {
     used: BTreeSet<String>,
     stopped: BTreeMap<StopReason, usize>,
     discarded: f64,
+    /// 途中の上位の手を出した局面の数。
+    #[serde(default)]
+    speculation_sources: usize,
+    /// 途中の上位の手から挙げて読み終えた子。`used` との共通部分が使われた数。
+    #[serde(default)]
+    speculated: BTreeSet<String>,
 }
 impl PrefetchStats {
     fn load(path: &Path) -> Result<Self> {
@@ -411,6 +455,7 @@ fn spawn_worker(
     let restart_worker = restart.clone();
     let tracing = args.trace_dir.is_some();
     let prefetch_enabled = args.prefetch;
+    let speculate_nodes = args.speculate_at.map(|at| (at * settings.nodes as f64).ceil() as u64);
     let handle = thread::spawn(move || {
         let cfg = EngineConfig {
             path: reading_args.engine.clone(),
@@ -460,6 +505,8 @@ fn spawn_worker(
                 let mut high_depth = 0;
                 let mut alerted = false;
                 let mut collector = Collector::default();
+                let mut tops = TopGroup::new(settings.multipv);
+                let mut speculated = speculate_nodes.is_none();
                 let mut drained_before_stop = 0;
                 loop {
                     let line = {
@@ -581,8 +628,28 @@ fn spawn_worker(
                             job.key
                         )));
                     }
-                    if restart_worker.lock().unwrap_or_else(|e| e.into_inner()).sent.is_none() {
-                        collector.info(&line).map_err(InvalidReading)?;
+                    let searching =
+                        restart_worker.lock().unwrap_or_else(|e| e.into_inner()).sent.is_none();
+                    if searching {
+                        match collector.info(&line).map_err(InvalidReading)? {
+                            Some(index) => tops.push(index, &collector.last[&index]),
+                            None if line.starts_with("info") && line.contains(" pv ") => {
+                                tops.interrupt()
+                            }
+                            None => {}
+                        }
+                    }
+                    if searching
+                        && !speculated
+                        && speculate_nodes.is_some_and(|at| high_nodes >= at)
+                        && let Some(group) = &tops.complete
+                    {
+                        speculated = true;
+                        let _ = events.send(Event::Speculate(
+                            job.key.clone(),
+                            group.iter().map(|pv| pv.mv.clone()).collect(),
+                            group[0].cp,
+                        ));
                     }
                 }
             })();
@@ -611,6 +678,7 @@ fn spawn_worker(
         nodes: 0,
         depth: 0,
         prefetch: false,
+        speculative: false,
         demand: BTreeSet::new(),
         priority: 0,
     }
@@ -624,6 +692,8 @@ struct Live {
     /// 終わった木の (読んだ局面数, 要る局面数)。終わった木は中身を縮めて保持する。
     ended: Option<(usize, usize)>,
     shadow: Vec<PrefetchCandidate>,
+    /// 読みかけの局面の途中の上位の手から挙げた子。
+    speculative: Vec<PrefetchCandidate>,
     dirty: bool,
     requests_dirty: bool,
     requests_active: bool,
@@ -636,6 +706,7 @@ impl Live {
             superseded: false,
             ended: None,
             shadow: Vec::new(),
+            speculative: Vec::new(),
             dirty: true,
             requests_dirty: true,
             requests_active: false,
@@ -662,6 +733,7 @@ impl Live {
                     .iter()
                     .map(|(key, _)| (key, false))
                     .chain(self.shadow.iter().map(|c| (&c.key, true)))
+                    .chain(self.speculative.iter().map(|c| (&c.key, true)))
                 {
                     if journal.get(key).is_none() && !failures.contains_key(key) {
                         requests.entry(key.clone()).or_default().insert(Request {
@@ -960,6 +1032,14 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     {
         bail!("prefetch-preempt-below は 0 以上 1 以下が必要です");
     }
+    if let Some(at) = args.speculate_at {
+        if !args.prefetch {
+            bail!("speculate-at は --prefetch と一緒に指定します");
+        }
+        if !at.is_finite() || !(0.0..1.0).contains(&at) || at == 0.0 {
+            bail!("speculate-at は 0 より大きく 1 未満が必要です");
+        }
+    }
     let defaults = Defaults {
         opp_n: args.opp_n,
         stop: args.stop,
@@ -1027,6 +1107,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let mut unused_prefetch = 0;
     let mut prefetch_failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut shadow_cursor = 0usize;
+    // 読みかけの局面の途中の上位の手。読み終えたら台帳の読みに替わるので消す。
+    let mut tops: BTreeMap<String, (Vec<String>, i32)> = BTreeMap::new();
+    let mut speculate_dirty = false;
     let mut requests: BTreeMap<String, BTreeSet<Request>> = BTreeMap::new();
     let mut lives = checkpoint
         .targets
@@ -1117,6 +1200,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                     !demand.is_empty()
                                 });
                                 checkpoint = next;
+                                speculate_dirty = true;
                             }
                             Err(error) => {
                                 queue_seen = None;
@@ -1171,6 +1255,15 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             while let Ok(event) = events_rx.try_recv() {
                 match event {
                     Event::Alert(message) => alerts.push(&message),
+                    Event::Speculate(key, moves, best) => {
+                        // 読み直し (RESTART など) で同じ局面がまた出しても、最初の 1 回だけを使う。
+                        if journal.get(&key).is_none() && !tops.contains_key(&key) {
+                            tops.insert(key, (moves, best));
+                            stats.speculation_sources += 1;
+                            stats_dirty = true;
+                            speculate_dirty = true;
+                        }
+                    }
                     Event::Info(id, nodes, depth) => {
                         if let Some(worker) = workers.get_mut(&id) {
                             worker.nodes = nodes;
@@ -1179,6 +1272,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     }
                     Event::Done(id, key, explicit, reason, result, trace) => {
                         let prefetch = workers.get(&id).is_some_and(|w| w.prefetch);
+                        let speculative = workers.get(&id).is_some_and(|w| w.speculative);
+                        speculate_dirty = true;
                         if result.is_err()
                             && prefetch
                             && let Some(reason) = reason
@@ -1212,6 +1307,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             }
                             Ok(Outcome::Completed(reading)) => {
                                 once.clear("spawn");
+                                tops.remove(&reading.key);
+                                if prefetch && speculative {
+                                    stats.speculated.insert(reading.key.clone());
+                                    stats_dirty = true;
+                                }
                                 let record = trace.map(|t| {
                                     json!({"key":reading.key,"ply":reading.ply,"fingerprint":settings.fingerprint,"worker":id,"started":t.started.to_rfc3339(),"finished":t.finished.to_rfc3339(),"bestmove":reading.bestmove,"lines":t.lines})
                                 });
@@ -1334,6 +1434,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     stats_dirty |= stats.mark(tree, &journal.prefetched);
                     live.requests_dirty = true;
                     live.dirty = true;
+                    speculate_dirty = true;
                 }
                 match advanced {
                     Ok(missing) => {
@@ -1394,6 +1495,45 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 )?;
             }
             let mut predicted: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
+            let speculating: BTreeSet<String> = workers
+                .values()
+                .filter(|w| w.speculative && !w.demand.iter().any(|r| !r.predicted))
+                .filter_map(|w| w.busy.as_ref().map(|(key, _)| key.clone()))
+                .collect();
+            if args.speculate_at.is_some() && speculate_dirty {
+                speculate_dirty = false;
+                for (target, live) in checkpoint.targets.iter().zip(&mut lives) {
+                    let tree = &live.tree;
+                    let mut next = if target.hold || !live.prepared || tree.def.depth == 0 {
+                        Vec::new()
+                    } else {
+                        tree.speculate(&tops, &journal, super::model::SPECULATE_WORK)
+                    };
+                    // 読み始めた子は、親の読みで外れと分かっても読み終える。
+                    for old in &live.speculative {
+                        if speculating.contains(&old.key) && !next.iter().any(|c| c.key == old.key)
+                        {
+                            next.push(old.clone());
+                        }
+                    }
+                    if next != live.speculative {
+                        live.speculative = next;
+                        live.requests_dirty = true;
+                    }
+                }
+            }
+            let speculative_keys: BTreeSet<String> = lives
+                .iter()
+                .flat_map(|live| live.speculative.iter().map(|c| c.key.clone()))
+                .collect();
+            if !tops.is_empty() {
+                // 止められて木からも外れた局面の途中の手は、もう使わない。
+                tops.retain(|key, _| {
+                    speculative_keys.contains(key)
+                        || workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+                        || lives.iter().any(|live| live.tree.level.contains_key(key))
+                });
+            }
             if args.prefetch {
                 for (target, live) in checkpoint.targets.iter().zip(&mut lives) {
                     live.refresh_requests(target, &journal, &failures, &mut requests);
@@ -1422,11 +1562,30 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             })
                             .or_insert(rank);
                     }
+                    for candidate in &live.speculative {
+                        if journal.get(&candidate.key).is_some()
+                            || failures.contains_key(&candidate.key)
+                            || prefetch_failures.get(&candidate.key).copied().unwrap_or(0) >= 2
+                        {
+                            continue;
+                        }
+                        let rank = (target.priority, target.order, candidate.level, candidate.ply);
+                        predicted
+                            .entry(candidate.key.clone())
+                            .and_modify(|old| {
+                                if (rank.0, rank.1, rank.2) < (old.0, old.1, old.2) {
+                                    *old = rank;
+                                }
+                            })
+                            .or_insert(rank);
+                    }
                 }
                 for (id, worker) in &mut workers {
                     let Some((key, _)) = &worker.busy else {
                         continue;
                     };
+                    // 伸ばし直しの予測で始めた読みが後から子の候補になったときも、読み終える側に入れる。
+                    worker.speculative |= worker.prefetch && speculative_keys.contains(key);
                     worker.demand = requests.get(key).cloned().unwrap_or_default();
                     worker.priority = checkpoint
                         .targets
@@ -1556,6 +1715,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         worker.nodes = 0;
                         worker.depth = 0;
                         worker.prefetch = prefetch;
+                        worker.speculative = prefetch && speculative_keys.contains(&key);
                         worker.priority = priority;
                         worker.demand = requests.get(&key).cloned().unwrap_or_default();
                         worker
@@ -1613,6 +1773,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     progress["queued"] = json!({"normal": queue_len, "prefetch": pref_queue_len});
                     progress["prefetch"] = json!({"queued": pref_queue_len, "running": pref_active, "stopped": stats.stopped, "discarded": stats.discarded, "read": journal.prefetched.len(), "used": stats.used.len(), "unused": unused_prefetch});
                 }
+                if args.speculate_at.is_some() {
+                    let used = stats.speculated.intersection(&stats.used).count();
+                    progress["speculate"] = json!({"sources": stats.speculation_sources, "running": speculating.len(), "read": stats.speculated.len(), "used": used, "unused": stats.speculated.len() - used});
+                }
                 monitor(
                     &args.state.join("progress.json"),
                     &serde_json::to_string_pretty(&progress)?,
@@ -1669,6 +1833,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 if ended && written {
                     live.ended = Some((read, required));
                     live.shadow.clear();
+                    live.speculative.clear();
                     live.tree.shrink();
                 }
             }

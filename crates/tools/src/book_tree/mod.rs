@@ -94,6 +94,10 @@ struct ServeArgs {
     prefetch_preempt_below: f64,
     #[arg(long, default_value_t = model::PREFETCH_WORK)]
     prefetch_work: usize,
+    /// 読みがノード数のこの割合を越えたら、その時点の MultiPV の上位の手の子を先読みに回す
+    /// (`--prefetch` と一緒に使う。例 0.25)
+    #[arg(long)]
+    speculate_at: Option<f64>,
     #[arg(long, default_value_t = 3)]
     max_restarts: usize,
     /// 対象の出力の根。`<out-root>/<id>/<own>/g<世代>/` に書く。state に固定される
