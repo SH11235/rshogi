@@ -9,6 +9,7 @@
 //!   (どの手を入れるかは生成時フラグで制御し、統合は別工程)。
 //! - 「定跡手」の判定は**消費時間**で行う: 各手番側の初手から連続して消費時間が
 //!   閾値以下(即指し)である間をその側の定跡内プレフィックスとみなす。
+//!   `--book-of` を付けると、区間を指定の手番の即指しだけで決め、その間は両者の手を入れる。
 //! - 決定性(同一入力→出力 byte 一致)を担保する。集計は可換な加算のみで行い、
 //!   出力生成は SFEN 昇順・指し手ソートで完全に順序づける。
 //!
@@ -468,7 +469,7 @@ fn process_game(path: &Path, opts: &BuildOptions, agg: &mut Aggregator) {
             break;
         }
 
-        // 消費時間による定跡手判定(手番側ごとの即指しプレフィックス)。
+        // 消費時間による定跡手判定(`--book-of` なら指定の手番の、無ければ手番側ごとの即指しプレフィックス)。
         let in_prefix = if let (true, Some(book)) = (opts.instant_filter, opts.book_of) {
             // 指定の手番が考えて指した手で区間が終わる。その手と以降は両者とも対象外。
             if !in_book[book.idx()] {
@@ -786,6 +787,28 @@ mod tests {
             .collect();
         // 先手の定跡の間は、後手の長考の手も入る。先手が考えた 5 手目と、その後の手は入らない。
         assert_eq!(moves, ["8c8d", "2g2f", "3c3d", "7g7f"], "{s}");
+    }
+
+    #[test]
+    fn book_of_white_counts_black_moves_and_stops_on_missing_time() {
+        // 先手の手は消費時間が無くても入る。後手の 4 手目は消費時間が無いので区間が終わる。
+        let games = &[(
+            "g.csa",
+            "V2.2\nPI\n+7776FU\n-3334FU,T0\n+2726FU,T40\n-8384FU\n+2625FU,T0\n%TORYO\n",
+        )];
+        let opts = BuildOptions {
+            instant_filter: true,
+            instant_threshold_sec: 1,
+            book_of: Some(Side::White),
+            ..opts_all()
+        };
+        let s = out_string(games, &opts);
+        let moves: Vec<&str> = s
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("sfen"))
+            .filter_map(|l| l.split(' ').next())
+            .collect();
+        assert_eq!(moves, ["2g2f", "3c3d", "7g7f"], "{s}");
     }
 
     #[test]
