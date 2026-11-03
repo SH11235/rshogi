@@ -10,7 +10,7 @@ NNUE は HalfKP / HalfKA 系と LayerStacks に対応し、既定の `edition-un
 
 ```toml
 [dependencies]
-rshogi-core = "0.8"
+rshogi-core = "0.9"
 ```
 
 ## 最小の探索例
