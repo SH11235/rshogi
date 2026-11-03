@@ -13,6 +13,9 @@ NNUE は HalfKP / HalfKA 系と LayerStacks に対応し、既定の `edition-un
 rshogi-core = "0.9"
 ```
 
+Rust 1.92 以上が必要です。0.8 系から更新する場合は、
+[CHANGELOG](https://github.com/SH11235/rshogi/blob/main/CHANGELOG.md) の「rshogi-core 0.9.0 / ライブラリ利用者の移行」を確認してください。
+
 ## 最小の探索例
 
 探索前に NNUE を読み込むか、Material 評価を明示的に有効にしてください。
