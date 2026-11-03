@@ -276,11 +276,12 @@ pub(super) struct Scratch<M> {
 }
 
 /// 探索の設定のうち、局面を切り離して読む探索器へ引き継ぐもの
-type Settings<'a> = (bool, u64, bool, bool, Option<&'a ShortestTables>, &'a [u64]);
+type Settings<'a> = (bool, u64, bool, bool, Option<&'a ShortestTables>, &'a [(u64, Hand)]);
 
-/// 受け方の局面 (キー `position_key`) の合駒 (`MateState::move_key` が `move_key`) を表す値
-pub(super) fn restoring_drop_key(position_key: u64, move_key: u64) -> u64 {
-    position_key ^ move_key.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+/// 受け方の局面の盤 (盤面のキー `board_key`、持駒を含まない) と合駒 (`MateState::move_key` が `move_key`)
+/// を表す値
+pub(super) fn restoring_drop_key(board_key: u64, move_key: u64) -> u64 {
+    board_key ^ move_key.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) や、並列に解くスレッドとも共有する。
@@ -603,8 +604,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     futility: bool,
     /// 最短手順モードの表
     tables: Option<&'a ShortestTables>,
-    /// 復元型の無駄合いとして除く合駒 (`restoring_drop_key` の値、昇順)
-    restoring_drops: &'a [u64],
+    /// 復元型の無駄合いとして除く合駒 (`restoring_drop_key` の値と攻め方の持駒の下限、値の昇順)
+    restoring_drops: &'a [(u64, Hand)],
     /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
     helpers: &'a mut [Scratch<S::Mv>],
     /// `search_shared` で、補助スレッドを起こす前に 1 スレッドで読むノード数
@@ -702,7 +703,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     }
 
     /// 復元型の無駄合いとして除く合駒を渡す (`restoring_drop_key` の値、昇順)
-    pub fn set_restoring_drops(&mut self, drops: &'a [u64]) {
+    pub fn set_restoring_drops(&mut self, drops: &'a [(u64, Hand)]) {
         self.restoring_drops = drops;
     }
 
@@ -1255,9 +1256,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             return None;
         }
         let before = st.table_key(self.attacker);
-        self.restoring_drops
-            .binary_search(&restoring_drop_key(before.key, st.move_key(drop)))
-            .is_ok()
+        let key = restoring_drop_key(before.board, st.move_key(drop));
+        let from = self.restoring_drops.partition_point(|&(k, _)| k < key);
+        // 攻め方の持駒が多いほど戻る筋は残るので、記録した持駒以上の局面でも除く
+        self.restoring_drops[from..]
+            .iter()
+            .take_while(|&&(k, _)| k == key)
+            .any(|&(_, hand)| before.hand.is_superior_or_equal(hand))
             .then_some(before.hand)
     }
 

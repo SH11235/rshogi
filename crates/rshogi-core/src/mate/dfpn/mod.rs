@@ -171,7 +171,7 @@ pub struct DfpnSolver {
     /// 無駄合いに復元型を含める ([`DfpnSolver::set_restoring_futility`])
     restoring: bool,
     /// 復元型の無駄合いとして除く合駒 (`search::restoring_drop_key` の値、昇順)
-    restoring_drops: Vec<u64>,
+    restoring_drops: Vec<(u64, Hand)>,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -541,9 +541,6 @@ impl DfpnSolver {
         self.helper_scratch.resize_with(self.threads - 1, Scratch::new);
         self.table.set_concurrent(self.threads > 1);
         self.restoring_drops.clear();
-        if let Ok(f) = std::env::var("DBG_DROPS_IN") {
-            self.restoring_drops = std::fs::read_to_string(f).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
-        }
         let pv = loop {
             let budget = Budget {
                 stop,
@@ -577,9 +574,6 @@ impl DfpnSolver {
                 break None;
             };
             let added = self.restoring && add_restoring_drops(st, attacker, &pv, &mut self.restoring_drops);
-            if let Ok(f) = std::env::var("DBG_DROPS_OUT") {
-                std::fs::write(f, self.restoring_drops.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")).unwrap();
-            }
             if !added
             {
                 break Some(pv);
@@ -763,25 +757,40 @@ fn add_restoring_drops<S: RootState>(
     st: &mut S,
     attacker: Color,
     pv: &[Move],
-    drops: &mut Vec<u64>,
+    drops: &mut Vec<(u64, Hand)>,
 ) -> bool {
-    let before = drops.len();
-    // 合駒ごとに (合駒の前の盤面, 戻ったときに要る攻め方の持駒, 合駒の値)
-    let mut pending: Vec<(u64, Hand, u64)> = Vec::new();
+    let mut added = false;
+    // 合駒ごとに (合駒の前の盤面, 合駒の前の攻め方の持駒, 戻ったときに要る攻め方の持駒, 合駒の値, 手数)
+    let mut pending: Vec<(u64, Hand, Hand, u64, usize)> = Vec::new();
     for (i, &mv) in pv.iter().enumerate() {
         let defender = i % 2 == 1;
         if defender && mv.is_drop() {
             let key = st.table_key(attacker);
-            let value = search::restoring_drop_key(key.key, st.move_key(mv));
-            pending.push((key.board, key.hand.add(mv.drop_piece_type()), value));
+            let value = search::restoring_drop_key(key.board, st.move_key(mv));
+            pending.push((key.board, key.hand, key.hand.add(mv.drop_piece_type()), value, i));
         }
         st.do_move(mv);
         if !defender {
             let key = st.table_key(attacker);
-            pending.retain(|&(board, hand, value)| {
-                let back = board == key.board && key.hand.is_superior_or_equal(hand);
+            pending.retain(|&(board, hand, need, value, ply)| {
+                let back = board == key.board && key.hand.is_superior_or_equal(need);
                 if back {
-                    drops.push(value);
+                    // 記録済みの持駒以下で除く合駒なら、この合駒も既に除かれている
+                    let known = drops
+                        .iter()
+                        .any(|&(k, h)| k == value && hand.is_superior_or_equal(h));
+                    eprintln!(
+                        "DBGDROP ply {} {} hand {:?} back_at {} known {}",
+                        ply + 1,
+                        pv[ply].to_usi(),
+                        hand,
+                        i + 1,
+                        known
+                    );
+                    if !known {
+                        drops.push((value, hand));
+                        added = true;
+                    }
                 }
                 !back
             });
@@ -790,9 +799,8 @@ fn add_restoring_drops<S: RootState>(
     for &mv in pv.iter().rev() {
         st.undo_move(mv);
     }
-    drops.sort_unstable();
-    drops.dedup();
-    drops.len() > before
+    drops.sort_unstable_by_key(|&(k, h)| (k, h.raw()));
+    added
 }
 
 trait RootState: state::MateState<Mv = Move> + Clone + Send {
