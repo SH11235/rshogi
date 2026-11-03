@@ -506,6 +506,11 @@ impl DfpnSolver {
             progress(p)
         };
         let outcome = self.run::<S, PIECES>(st, limits, start, stop, &mut tracked);
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let c = &search::DBG_RC;
+            eprintln!("DBGRC first_search nodes {} tries {} mated {} budget_out {} m_nodes {}", self.nodes, c[0].load(Relaxed), c[1].load(Relaxed), c[2].load(Relaxed), c[3].load(Relaxed));
+        }
         if !matches!(outcome, Some(SolveOutcome::Mate(_))) {
             return outcome;
         }

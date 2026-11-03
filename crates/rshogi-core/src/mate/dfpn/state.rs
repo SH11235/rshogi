@@ -100,6 +100,11 @@ pub(super) trait MateState: Send + Sized + 'static {
     }
 
     /// 指し手を区別する値 (無駄合いの判定の結果を覚えるときの鍵)
+    /// 駒打ちなら打つ升の番号
+    fn drop_square(&self, _m: Self::Mv) -> Option<u8> {
+        None
+    }
+
     fn move_key(&self, _m: Self::Mv) -> u64 {
         0
     }
@@ -345,6 +350,10 @@ impl MateState for Position {
 
     fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
         self.checked_mate_1ply(true)
+    }
+
+    fn drop_square(&self, m: Move) -> Option<u8> {
+        m.is_drop().then(|| m.to().index() as u8)
     }
 
     fn is_drop(&self, m: Move) -> bool {
@@ -634,6 +643,10 @@ impl MateState for NoAttackerKing {
 
     fn mate_1ply_with_proof(&mut self) -> Option<(Move, Hand)> {
         self.checked_mate_1ply(true)
+    }
+
+    fn drop_square(&self, m: Move) -> Option<u8> {
+        m.is_drop().then(|| m.to().index() as u8)
     }
 
     fn is_drop(&self, m: Move) -> bool {

@@ -957,6 +957,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         if *inc_flag > 0 {
             extend_thresholds(&current, &mut thpn, &mut thdn);
         }
+        let mut tried_squares = 0u128;
 
         while !current.is_final() && current.pn < thpn && current.dn < thdn {
             let (best, child_thpn, child_thdn) = self.select(start, or_node, thpn, thdn);
@@ -976,10 +977,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 thdn: child_thdn,
                 len_limit: args.child_len_limit(),
             };
+            let child_nodes_before = self.nodes;
             st.do_move(mv);
             let child_result = self.search(st, child_args, inc_flag);
             st.undo_move(mv);
             let child_result = child_result?;
+            let child_nodes = self.nodes - child_nodes_before;
             if consumed_extension && child_result.is_conditional() {
                 // 条件付きの不詰は置換表に残らず、次に展開しても新しい局面に見える。
                 // 延長を消費したことにすると、延長が循環の外へ届かないまま尽きる。
@@ -1002,6 +1005,19 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 && st.is_drop(mv)
             {
                 self.mark_futile_drop(st, best, mv, len_limit)?;
+            }
+            if PIECES
+                && !or_node
+                && !self.shortest
+                && child_result.is_proven()
+                && let Some(sq) = st.drop_square(mv)
+                && tried_squares & (1u128 << sq) == 0
+                && self.scratch.children[start..]
+                    .iter()
+                    .any(|c| !c.is_final() && st.drop_square(c.mv) == Some(sq))
+            {
+                tried_squares |= 1u128 << sq;
+                self.prove_returned_capture(st, mv, child_nodes)?;
             }
             let child = &self.scratch.children[best];
             if child.is_final() && child.next != NO_NEXT {
@@ -1364,6 +1380,51 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         result
     }
 
+    /// 受け方の局面 `st` の合駒 `drop` が詰んだとき、合駒を取って取った駒を受け方に戻した局面 M を
+    /// `budget` ノードまで読む。M が詰めば、同じ升へのほかの合駒を取った局面は M と盤が同じで攻め方の
+    /// 持駒が多いだけなので、置換表の証明駒の流用で詰みになる
+    fn prove_returned_capture(&mut self, st: &mut S, drop: S::Mv, budget: u64) -> Result<(), Abort> {
+        let mut captures = std::mem::take(&mut self.scratch.capture_moves);
+        captures.clear();
+        st.do_move(drop);
+        st.interposition_captures(drop, &mut captures);
+        let mut slot = match self.scratch.returned.take().map(|b| b.downcast::<Option<S>>()) {
+            Some(Ok(slot)) => slot,
+            _ => Box::new(None),
+        };
+        let mut result = Ok(());
+        for &capture in &captures {
+            st.do_move(capture);
+            let built = st.captured_piece_returned_into(self.attacker, &mut slot);
+            st.undo_move(capture);
+            let Some(returned) = Option::as_mut(&mut *slot).filter(|_| built) else {
+                continue;
+            };
+            DBG_RC[0].fetch_add(1, Ordering::Relaxed);
+            let n0 = self.nodes;
+            let solved = self.within(budget.max(64), |s| s.solve_detached_plain(returned));
+            DBG_RC[3].fetch_add(self.nodes - n0, Ordering::Relaxed);
+            match solved {
+                Ok(Some(Detached::Mated(..))) => {
+                    DBG_RC[1].fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                Ok(Some(Detached::Escaped)) => {}
+                Ok(None) => {
+                    DBG_RC[2].fetch_add(1, Ordering::Relaxed);
+                }
+                Err(abort) => {
+                    result = Err(abort);
+                    break;
+                }
+            }
+        }
+        st.undo_move(drop);
+        self.scratch.capture_moves = captures;
+        self.scratch.returned = Some(slot);
+        result
+    }
+
     /// 受け方の手番の局面 `st` の、`len_limit` 手以内の最短の詰み手数とその証明駒 (上限を 2 手ずつ縮めて
     /// 証明し直す)
     fn shortest_detached(
@@ -1470,6 +1531,67 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             sub.tables = tables;
             sub.next_progress_ms = self.next_progress_ms;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
+            (result, sub.nodes, sub.reported, sub.next_progress_ms)
+        };
+        self.next_progress_ms = next_progress_ms;
+        self.scratch.sub = Some(scratch);
+        self.nodes += nodes;
+        // 部分探索が全スレッドの合計に足し込んだ分は、この探索から足し込み直さない
+        self.reported += reported;
+        match result? {
+            r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
+            _ => Ok(Detached::Escaped),
+        }
+    }
+
+    fn solve_detached_plain(
+        &mut self,
+        st: &mut S,
+    ) -> Result<Detached, Abort> {
+        let mut scratch = self.scratch.sub.take().unwrap_or_else(|| Box::new(Scratch::new()));
+        let remaining = match self.budget.node_limit {
+            0 => 0,
+            limit => limit.saturating_sub(self.nodes).max(1),
+        };
+        let (table, attacker, tables) = (self.table, self.attacker, self.tables);
+        let (estimate, weak_disproof_step) = (self.estimate, self.weak_disproof_step);
+        let (stop, halt, cancel, start) =
+            (self.budget.stop, self.budget.halt, self.budget.cancel, self.budget.start);
+        let (shared_nodes, time_limit_ms) = (self.budget.shared_nodes, self.budget.time_limit_ms);
+        // 部分探索のノード数は 0 から数えるので、進捗にはこの探索で読んだ分を足して渡す (並列に解くときは
+        // 部分探索も全スレッドの合計で知らせる)。通知の間隔は部分探索に引き継いで戻すので、入れ子になっても
+        // 探索全体で約 1 秒ごとになる
+        let base = if shared_nodes.is_some() {
+            0
+        } else {
+            self.nodes
+        };
+        let parent_progress = &mut *self.budget.progress;
+        let mut forward = |p: MateProgress| {
+            parent_progress(MateProgress {
+                nodes: base + p.nodes,
+                ..p
+            })
+        };
+        let budget = Budget {
+            stop,
+            halt,
+            cancel,
+            shared_nodes,
+            node_limit: remaining,
+            time_limit_ms,
+            start,
+            progress: &mut forward,
+        };
+        let (result, nodes, reported, next_progress_ms) = {
+            let mut sub = Searcher::<S, PIECES>::new(table, &mut scratch, attacker, budget);
+            sub.estimate = estimate;
+            sub.weak_disproof_step = weak_disproof_step;
+            sub.shortest = false;
+            sub.futility = false;
+            sub.tables = tables;
+            sub.next_progress_ms = self.next_progress_ms;
+            let result = sub.search(st, NodeArgs::unbounded(0, false, NO_LEN_LIMIT), &mut 0);
             (result, sub.nodes, sub.reported, sub.next_progress_ms)
         };
         self.next_progress_ms = next_progress_ms;
@@ -1948,3 +2070,5 @@ mod tests {
         assert!(tables.loop_disproof(7, &[11, 13], 9).is_none());
     }
 }
+
+pub(crate) static DBG_RC: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
