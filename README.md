@@ -44,7 +44,7 @@ Rust で書かれた将棋エンジンです。
   [CSA クライアント](docs/csa-client.md))。
 - 開発用のツールとして、エンジン同士の対局と SPRT (`tournament`)、探索パラメータと NNUE の重みの SPSA (`spsa`)、
   教師データの生成と付け直し (`gensfen`・`rescore_psv`)、定跡の作成と点検 (`book_mine`) があります。
-  教師の付け直しには、NNUE のほか外部の USI エンジンや dlshogi 系の ONNX モデルを使えます。
+  教師の付け直しには NNUE のほか外部の USI エンジンや dlshogi 系の ONNX モデルを使えます。
   一覧は [tools の README](crates/tools/README.md)。
 - NNUE の学習には学習器 [tatara](https://github.com/SH11235/tatara) を使っています。tatara が書き出す
   推論用の形式のモデルを `EvalFile` で読み込めます。
@@ -81,19 +81,38 @@ rshogi-core = "0.9"
 
 ## ビルド
 
-`.cargo/config.toml` で `target-cpu=native` を採用しているため、`cargo build` だけで
-build マシンの SIMD (AVX2 等) は自動で有効になる。
+`.cargo/config.toml` で `target-cpu=native` を指定しているので、`cargo build` だけで
+build したマシンの SIMD (AVX2 等) が有効になります。
+
+### USI エンジンだけを使う
 
 ```bash
-# 開発用 build (全 NNUE arch を runtime dispatch)
+# 対局用 (LTO を最大にした production profile)。target/production/rshogi-usi ができる
+cargo build --profile production -p rshogi-usi
+
+# 動作確認用 (build が速い)。target/release/rshogi-usi ができる
+cargo build --release -p rshogi-usi
+```
+
+Windows では実行ファイルに `.exe` が付きます。どちらも既定の `edition-universal` で、対応する NNUE を実行時に読み分けます。
+
+`-p` を付けない `cargo build --release` は tools の多数のバイナリや CSA サーバー・クライアントを含む
+workspace の全 crate を build するので、時間とディスクを多く使います。エンジンだけが要るときは `-p rshogi-usi` を付けてください。
+
+### workspace 全体 (開発用)
+
+```bash
+# 全 crate の build (全 NNUE arch を runtime dispatch)
 cargo build --release
 
 # テスト実行
 cargo test
 ```
 
-複数 NNUE architecture binary を `engines/` 配下で並行管理したい場合 (selfplay / SPRT /
-tournament 等) は `cargo xtask` 経由で preset edition ごとに別 binary を build できる:
+### edition ごとの build
+
+NNUE の構成ごとのバイナリを `engines/` に並べて管理したい場合 (selfplay / SPRT / tournament など) は、
+`cargo xtask` で preset edition ごとに別のバイナリを build します。
 
 ```bash
 # 利用可能な preset edition を列挙
@@ -113,8 +132,8 @@ cargo xtask build --edition X --features mimalloc
 cargo xtask list-binaries
 ```
 
-詳細は [`docs/build.md`](docs/build.md) を参照。
-保守者向けの crates.io publish・engine tag・GitHub Release の手順は [RELEASING.md](RELEASING.md) を参照。
+詳細は [`docs/build.md`](docs/build.md) を参照してください。
+保守者向けの crates.io publish・engine tag・GitHub Release の手順は [RELEASING.md](RELEASING.md) にあります。
 
 ## このエンジンを使用したアプリ
 
