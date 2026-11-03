@@ -1511,6 +1511,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             sub.shortest = true;
             sub.futility = true;
             sub.tables = tables;
+            sub.restoring_drops = self.restoring_drops;
             sub.next_progress_ms = self.next_progress_ms;
             let result = sub.search(st, NodeArgs::unbounded(0, or_node, len_limit), &mut 0);
             (result, sub.nodes, sub.reported, sub.next_progress_ms)
