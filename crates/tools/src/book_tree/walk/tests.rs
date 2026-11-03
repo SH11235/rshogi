@@ -468,3 +468,24 @@ fn bad_start_moves_are_rejected() {
     let err = run_from(long, ROOT).unwrap_err().to_string();
     assert!(err.contains("--max-ply"), "{err}");
 }
+
+#[test]
+fn empty_start_moves_start_at_the_initial_position_and_max_ply_bounds_them() {
+    for empty in [None, Some(""), Some("  ")] {
+        assert_eq!(start_position(ROOT, empty).unwrap(), (ROOT.to_owned(), Vec::new()));
+    }
+    let (start, start_moves) = start_position(ROOT, Some("5i4h")).unwrap();
+    let mut at_limit = options();
+    at_limit.max_ply = 1;
+    let rows = walk_side(
+        &positions(&master_rows()),
+        &mut sources(Some(freq()), None),
+        "b",
+        &start,
+        &start_moves,
+        at_limit,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].stop, rows[0].ply), (Stop::Max, 1));
+}
