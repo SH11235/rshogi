@@ -601,6 +601,9 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     serial_nodes: u64,
 }
 
+/// 無駄合いの判定の前に、駒打ち以外の応手が上限内に詰まないかを確かめるときの応手ごとのノード数
+const QUICK_ESCAPE_NODES: u64 = 64;
+
 /// `Searcher::solve_detached` の結果
 enum Detached {
     /// 上限内に詰む (証明駒, 詰み手数)
@@ -1252,6 +1255,8 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// 合駒を取る 2 手が挟まるだけで、合駒が無かったときより詰みが長くならない合駒だけが無駄合いになり、
     /// 受け方の局面の詰み手数を決めることはない。取り返せる合駒と、取った後の詰みが長くなる合駒は有効な合駒として数える。
     /// M が `len_limit` の中で詰まなければ、無駄合いでもこの局面は上限内に詰まないので、無駄合いとしない。
+    /// 駒打ち以外の応手が `len_limit` − 1 手以内に詰まないとすぐ分かるときも、同じ理由で無駄合いとしない
+    /// (M を上限まで読んで詰まないと示すより、たいていずっと軽い)。
     /// M と応手の後の局面は手順から外れた局面なので、経路を持たずに、この探索全体の制限の中で読み切る
     /// (読み切れなければ `Abort`)。盤上の駒の総数は変わらないので、置換表はそのまま共有できる。
     pub(super) fn futile_drop(
@@ -1273,10 +1278,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         if let Some(e) = tables.futility(memo_key) {
             return Ok(e.futile.then_some((e.proof, e.len)));
         }
-        st.do_move(drop);
-        let result = self.futile_after_drop(st, drop, before, len_limit);
-        st.undo_move(drop);
-        let mut found = result?;
+        let escaped = len_limit != NO_LEN_LIMIT && self.quick_reply_escape(st, len_limit)?;
+        let mut found = if escaped {
+            None
+        } else {
+            st.do_move(drop);
+            let result = self.futile_after_drop(st, drop, before, len_limit);
+            st.undo_move(drop);
+            result?
+        };
         if let Some((_, len)) = found
             && len > 0
             && !self.has_reply_lasting(st, len)?
@@ -1384,6 +1394,43 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         Ok(Some(best))
     }
 
+    /// 受け方の局面 `st` (詰み手数の上限 `len_limit`) に、`len_limit` − 1 手以内に詰まないとすぐ分かる駒打ち
+    /// 以外の応手があるか。応手ごとに `QUICK_ESCAPE_NODES` ノードまでしか読まない (詰む局面では全応手を
+    /// 読むことになり、無駄合いの判定の入れ子の中で読む量が膨らむ)
+    fn quick_reply_escape(&mut self, st: &mut S, len_limit: u16) -> Result<bool, Abort> {
+        let reply_limit = len_limit.saturating_sub(1);
+        let mut replies = std::mem::take(&mut self.scratch.reply_moves);
+        replies.clear();
+        generate_replies(st, &mut replies);
+        let mut result = Ok(false);
+        for &mv in &replies {
+            if st.is_drop(mv) {
+                continue;
+            }
+            // 攻め方の詰み手数は 1 以上
+            if reply_limit == 0 {
+                result = Ok(true);
+                break;
+            }
+            st.do_move(mv);
+            let solved = self.solve_detached_capped(st, true, reply_limit, QUICK_ESCAPE_NODES);
+            st.undo_move(mv);
+            match solved {
+                Ok(Some(Detached::Escaped)) => {
+                    result = Ok(true);
+                    break;
+                }
+                Ok(_) => {}
+                Err(abort) => {
+                    result = Err(abort);
+                    break;
+                }
+            }
+        }
+        self.scratch.reply_moves = replies;
+        result
+    }
+
     /// 受け方の局面 `st` に、`len` 手より短く詰まない (詰み手数 + 1 が `len` 以上の) 駒打ち以外の応手があるか
     fn has_reply_lasting(&mut self, st: &mut S, len: u16) -> Result<bool, Abort> {
         let mut replies = std::mem::take(&mut self.scratch.reply_moves);
@@ -1426,11 +1473,26 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         or_node: bool,
         len_limit: u16,
     ) -> Result<Detached, Abort> {
+        self.solve_detached_capped(st, or_node, len_limit, 0)
+            .map(|r| r.expect("ノード数の上限なしなら結論が出る"))
+    }
+
+    /// `solve_detached` を、この部分探索だけのノード数の上限 `cap` (0 は無制限) で読む。`cap` で
+    /// 打ち切ったら `None`
+    fn solve_detached_capped(
+        &mut self,
+        st: &mut S,
+        or_node: bool,
+        len_limit: u16,
+        cap: u64,
+    ) -> Result<Option<Detached>, Abort> {
         let mut scratch = self.scratch.sub.take().unwrap_or_else(|| Box::new(Scratch::new()));
         let remaining = match self.budget.node_limit {
             0 => 0,
             limit => limit.saturating_sub(self.nodes).max(1),
         };
+        let capped = cap != 0 && (remaining == 0 || cap < remaining);
+        let remaining = if capped { cap } else { remaining };
         let (table, attacker, tables) = (self.table, self.attacker, self.tables);
         let (estimate, weak_disproof_step) = (self.estimate, self.weak_disproof_step);
         let (stop, halt, cancel, start) =
@@ -1477,9 +1539,12 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.nodes += nodes;
         // 部分探索が全スレッドの合計に足し込んだ分は、この探索から足し込み直さない
         self.reported += reported;
-        match result? {
-            r if r.is_proven() => Ok(Detached::Mated(r.hand, r.mate_len)),
-            _ => Ok(Detached::Escaped),
+        match result {
+            // 部分探索の上限を超えたのでなければ、全体の打ち切り
+            Err(_) if capped && nodes > cap => Ok(None),
+            Err(abort) => Err(abort),
+            Ok(r) if r.is_proven() => Ok(Some(Detached::Mated(r.hand, r.mate_len))),
+            Ok(_) => Ok(Some(Detached::Escaped)),
         }
     }
 
