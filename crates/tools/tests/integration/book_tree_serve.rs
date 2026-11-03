@@ -2263,3 +2263,57 @@ fn speculation_reads_children_and_grandchildren_before_the_parent_finishes() {
         serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
     assert_eq!(stats["speculation_sources"], 4);
 }
+
+#[test]
+fn speculative_child_found_wrong_after_the_parent_keeps_reading_to_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("workers"), "4").unwrap();
+    let child = |key: &str, mv: &str| {
+        strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen()).to_owned()
+    };
+    let root_moves = ["5i4i", "5i6i", "5i5h"];
+    let mut positions = BTreeMap::new();
+    positions.insert(
+        ROOT.to_owned(),
+        json!(
+            root_moves
+                .iter()
+                .map(|m| json!({"move":m,"cp":10,"depth":8}))
+                .collect::<Vec<_>>()
+        ),
+    );
+    let children: Vec<_> = root_moves.iter().map(|mv| child(ROOT, mv)).collect();
+    for key in &children {
+        positions.insert(key.clone(), json!([{"move":"5a4a","cp":20,"depth":8}]));
+    }
+    let config = state.join("engine.json");
+    let mut data = json!({"positions":positions,"unknown_resign":true,"delay":0.2,"mid_nodes":50,"log":state.join("protocol.jsonl")});
+    data[format!("delay:{ROOT}")] = json!(0.5);
+    // 外れの子は親より遅く終わり、その間も木は採用した子の先の読みを待つ。
+    data[format!("delay:{}", children[0])] = json!(1.0);
+    data[format!("delay:{}", children[1])] = json!(2.5);
+    data[format!("delay:{}", children[2])] = json!(2.5);
+    data[format!("delay:{}", child(&children[0], "5a4a"))] = json!(3.0);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    enqueue(
+        &state,
+        json!({"id":"spec","root":format!("sfen {ROOT} 1"),"own":"b","depth":2,"opts":{"opp_n":1,"stop":300,"rounds":0}}),
+    );
+    let mut command = serve_command(&state, &config, 3, 3, state.parent().unwrap());
+    command.args(["--prefetch", "--speculate-at", "0.25"]);
+    let mut server = Server(command.spawn().unwrap());
+    wait_for(|| progress(&state)["trees"][0]["finished"] == true);
+    stop(&state, &mut server);
+    let rows = journal_rows(&state);
+    for key in &children[1..] {
+        let row = rows.iter().find(|r| r["reading"]["key"] == *key).unwrap();
+        assert_eq!(row["prefetch"], true);
+    }
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
+    assert_eq!(stats["stopped"], json!({}));
+    // 子の MultiPV は 1 行なので途中の組が揃わず、孫は挙げない。
+    assert_eq!(stats["speculated"].as_array().unwrap().len(), 3);
+}

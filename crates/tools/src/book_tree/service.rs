@@ -81,6 +81,10 @@ impl TopGroup {
             complete: None,
         }
     }
+    /// bound の行は値が確定していないので、途中の組を捨てる。
+    pub fn interrupt(&mut self) {
+        self.group.clear();
+    }
     pub fn push(&mut self, index: usize, pv: &Pv) {
         if index == 1 {
             self.group.clear();
@@ -624,12 +628,19 @@ fn spawn_worker(
                             job.key
                         )));
                     }
-                    if restart_worker.lock().unwrap_or_else(|e| e.into_inner()).sent.is_none()
-                        && let Some(index) = collector.info(&line).map_err(InvalidReading)?
-                    {
-                        tops.push(index, &collector.last[&index]);
+                    let searching =
+                        restart_worker.lock().unwrap_or_else(|e| e.into_inner()).sent.is_none();
+                    if searching {
+                        match collector.info(&line).map_err(InvalidReading)? {
+                            Some(index) => tops.push(index, &collector.last[&index]),
+                            None if line.starts_with("info") && line.contains(" pv ") => {
+                                tops.interrupt()
+                            }
+                            None => {}
+                        }
                     }
-                    if !speculated
+                    if searching
+                        && !speculated
                         && speculate_nodes.is_some_and(|at| high_nodes >= at)
                         && let Some(group) = &tops.complete
                     {
@@ -1189,6 +1200,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                     !demand.is_empty()
                                 });
                                 checkpoint = next;
+                                speculate_dirty = true;
                             }
                             Err(error) => {
                                 queue_seen = None;
@@ -1485,7 +1497,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             let mut predicted: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
             let speculating: BTreeSet<String> = workers
                 .values()
-                .filter(|w| w.speculative)
+                .filter(|w| w.speculative && !w.demand.iter().any(|r| !r.predicted))
                 .filter_map(|w| w.busy.as_ref().map(|(key, _)| key.clone()))
                 .collect();
             if args.speculate_at.is_some() && speculate_dirty {
@@ -1495,7 +1507,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let mut next = if target.hold || !live.prepared || tree.def.depth == 0 {
                         Vec::new()
                     } else {
-                        tree.speculate(&tops, &journal)
+                        tree.speculate(&tops, &journal, args.prefetch_work)
                     };
                     // 読み始めた子は、親の読みで外れと分かっても読み終える。
                     for old in &live.speculative {
@@ -1509,7 +1521,19 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         live.requests_dirty = true;
                     }
                 }
+                // 止められて木からも外れた局面の途中の手は、もう使わない。
+                tops.retain(|key, _| {
+                    workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+                        || lives.iter().any(|live| {
+                            live.tree.level.contains_key(key)
+                                || live.speculative.iter().any(|c| &c.key == key)
+                        })
+                });
             }
+            let speculative_keys: BTreeSet<String> = lives
+                .iter()
+                .flat_map(|live| live.speculative.iter().map(|c| c.key.clone()))
+                .collect();
             if args.prefetch {
                 for (target, live) in checkpoint.targets.iter().zip(&mut lives) {
                     live.refresh_requests(target, &journal, &failures, &mut requests);
@@ -1560,6 +1584,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let Some((key, _)) = &worker.busy else {
                         continue;
                     };
+                    // 伸ばし直しの予測で始めた読みが後から子の候補になったときも、読み終える側に入れる。
+                    worker.speculative |= worker.prefetch && speculative_keys.contains(key);
                     worker.demand = requests.get(key).cloned().unwrap_or_default();
                     worker.priority = checkpoint
                         .targets
@@ -1689,8 +1715,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         worker.nodes = 0;
                         worker.depth = 0;
                         worker.prefetch = prefetch;
-                        worker.speculative = prefetch
-                            && lives.iter().any(|l| l.speculative.iter().any(|c| c.key == key));
+                        worker.speculative = prefetch && speculative_keys.contains(&key);
                         worker.priority = priority;
                         worker.demand = requests.get(&key).cloned().unwrap_or_default();
                         worker

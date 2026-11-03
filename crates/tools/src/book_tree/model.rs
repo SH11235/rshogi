@@ -815,56 +815,76 @@ impl Tree {
     }
 
     /// 読み終えていない局面の途中の上位の手 (`tops`: 手と 1 位の値) から、親の読みを待たずに
-    /// 読み始める子を挙げる。挙げた子にも途中の上位の手か台帳の読みがあれば、その子も辿る。
-    /// 木にすでにある局面は本来の需要なので挙げない。
+    /// 読み始める子を挙げる。挙げた子も、途中の上位の手があればその全部の手で、台帳の読みが
+    /// あれば木と同じ規則 (自分の手番 1 手・相手の手番 opp_n 手) で辿る。木にある局面と
+    /// 読み済みの局面は挙げない。辿る局面が `limit` に達したら浅い段から打ち切る。
     pub fn speculate(
         &self,
         tops: &BTreeMap<String, (Vec<String>, i32)>,
         cache: &impl Readings,
+        limit: usize,
     ) -> Vec<PrefetchCandidate> {
-        let mut found = Vec::new();
         if self.finished || self.failed {
-            return found;
+            return Vec::new();
         }
-        let mut seen = BTreeSet::new();
-        let mut pending: VecDeque<_> = self
-            .waiting
-            .iter()
-            .filter(|(key, level)| *level < self.def.depth && cache.get(key).is_none())
-            .map(|(key, level)| (key.clone(), *level, self.ply[key], false))
-            .collect();
-        while let Some((key, level, ply, speculative)) = pending.pop_front() {
-            if level >= self.def.depth {
-                continue;
+        // 合流した局面を浅い段で辿り直せるよう、段の小さい順に処理する。
+        let mut pending = BTreeSet::new();
+        for key in tops.keys() {
+            if let Some(&level) = self.level.get(key)
+                && level < self.def.depth
+                && !self.nodes.contains_key(key)
+                && cache.get(key).is_none()
+            {
+                pending.insert((level, key.clone(), self.ply[key]));
             }
-            let read = if speculative { cache.get(&key) } else { None };
-            let (moves, best) = match (read, tops.get(&key)) {
-                (Some(reading), _) => (
-                    reading.lines().iter().map(|pv| pv.mv.clone()).collect(),
-                    reading.lines().first().map_or(0, |pv| pv.cp),
-                ),
-                (None, Some((moves, best))) => (moves.clone(), *best),
-                (None, None) => continue,
-            };
-            let follow = self.roots.contains_key(&key) || best.abs() < self.def.stop;
-            let game = self.game.get(&key).into_iter().flatten();
-            for mv in moves.iter().filter(|_| follow).chain(game) {
+        }
+        let mut found: BTreeMap<String, (usize, u32)> = BTreeMap::new();
+        let mut visited = 0;
+        while let Some((level, key, ply)) = pending.pop_first() {
+            if level >= self.def.depth || visited >= limit {
+                break;
+            }
+            visited += 1;
+            let in_tree = self.level.contains_key(&key);
+            let mut moves: Vec<&str> = Vec::new();
+            if !in_tree && let Some(reading) = cache.get(&key) {
+                let lines = reading.lines();
+                if lines.first().is_some_and(|pv| pv.cp.abs() < self.def.stop) {
+                    let n = if side(&key) == self.def.own {
+                        1
+                    } else {
+                        self.def.opp_n
+                    };
+                    moves.extend(lines.iter().take(n).map(|pv| pv.mv.as_str()));
+                }
+            } else if let Some((top, best)) = tops.get(&key)
+                && (self.roots.contains_key(&key) || best.abs() < self.def.stop)
+            {
+                moves.extend(top.iter().map(String::as_str));
+                moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
+            }
+            for mv in moves {
                 let Ok(next) = child(&key, mv) else {
                     continue;
                 };
-                if self.level.contains_key(&next) || !seen.insert(next.clone()) {
+                let next_level = level + 1;
+                if self.level.contains_key(&next)
+                    || found.get(&next).is_some_and(|(l, _)| *l <= next_level)
+                {
                     continue;
                 }
                 let next_ply = ply.saturating_add(1);
-                found.push(PrefetchCandidate {
-                    key: next.clone(),
-                    level: level + 1,
-                    ply: next_ply,
-                });
-                pending.push_back((next, level + 1, next_ply, true));
+                if let Some(old) = found.insert(next.clone(), (next_level, next_ply)) {
+                    pending.remove(&(old.0, next.clone(), old.1));
+                }
+                pending.insert((next_level, next, next_ply));
             }
         }
         found
+            .into_iter()
+            .filter(|(key, _)| cache.get(key).is_none())
+            .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
+            .collect()
     }
 
     /// 入力を複製せず、予算の範囲で影の手順を辿る。
