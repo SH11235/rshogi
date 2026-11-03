@@ -580,8 +580,8 @@ impl MateTable {
         }
     }
 
-    /// prefetch 命令の無いアーキテクチャ (wasm) では bucket を実際に読む。値を使うのは後なので、続く子の
-    /// 読み込みと待ちが重なる
+    /// prefetch 命令を使わないアーキテクチャ (wasm など) では、後で probe が読むエントリと同じキャッシュラインに
+    /// 実際に触れる (読んだ値は捨てる)。子どうしの読み込みは互いに依存しないので、待ちが重なる
     #[cfg(not(target_arch = "x86_64"))]
     #[inline]
     pub fn prefetch<const PIECES: bool>(&self, key: TableKey) {
