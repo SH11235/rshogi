@@ -100,6 +100,8 @@ pub mod nnue_saturation_tool;
 // nyugyoku_metrics は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
 pub mod nyugyoku_metrics;
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+pub mod onnx_env;
 #[cfg(feature = "dlshogi-onnx")]
 pub mod onnx_value;
 pub mod ort_teardown;

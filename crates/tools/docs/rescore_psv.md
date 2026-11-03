@@ -113,6 +113,12 @@ ONNX Runtime を実行時に dlopen するために必須（未設定はエラ�
 TensorRT を使わない場合は TensorRT のパスを省略できる。GPU モードでは起動時に
 CUDA が利用可能かチェックし、CPU への暗黙フォールバックを防止する。
 
+ONNX モデルを読むツール（rescore_psv、expand_psv_from_policy、book_rescore、label_bench_dl、
+policy_rollout_psv、yardstick_label）は、最初の session を作る前に ONNX Runtime の
+テレメトリを無効にする。Microsoft が配布する Windows 版は既定でテレメトリ（モデルの
+メタデータや推論回数など）を送るため。無効にできなかった場合はモデルを読まずにエラーで止まる。
+これは ONNX Runtime 以外の通信が無いことを保証するものではない。
+
 ### Windows / 特定 GPU の補足
 
 - Windows は同一バージョンの Windows 版を導入し、`LD_LIBRARY_PATH` の代わりに
@@ -536,6 +542,7 @@ ONNX external tensor、ORT が生成する profile JSON、TensorRT cache は列�
 |---|---|---|
 | `ORT_DYLIB_PATH environment variable is not set` | 環境変数未設定 | `ORT_DYLIB_PATH` に `libonnxruntime.so` のパスを設定 |
 | `ORT_DYLIB_PATH is set to '...' but the file does not exist` | パスが間違っている | ファイルパスを確認 |
+| `ONNX Runtime environment was configured before telemetry could be disabled` | テレメトリを無効にする前に ONNX Runtime の環境が作られた（ツールの不具合） | issue で報告する |
 | `CUDAExecutionProvider is NOT available` | CPU 版ランタイムを使っている | GPU 版ランタイムをダウンロードして `ORT_DYLIB_PATH` を修正 |
 | `libcudnn.so.9: cannot open shared object file` | cuDNN が見つからない | cuDNN 9 をインストールし `LD_LIBRARY_PATH` に追加 |
 | `CUDA EP registration failed` | CUDA/cuDNN のバージョン不一致等 | CUDA Toolkit・cuDNN のバージョンを確認 |

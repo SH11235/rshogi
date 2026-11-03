@@ -104,8 +104,7 @@ impl OnnxValueEvaluator {
 
         eprintln!("Loading dlshogi ONNX model: {}", cfg.model_path.display());
 
-        let mut builder = Session::builder()
-            .map_err(ort_err)?
+        let mut builder = crate::onnx_env::session_builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
             .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
             .with_intra_threads(1)
