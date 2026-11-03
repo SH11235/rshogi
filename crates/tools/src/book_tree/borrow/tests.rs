@@ -1,5 +1,5 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
-use super::value::{ValueArgs, ValueInput, register_nodes, value_root};
+use super::value::{ValueArgs, ValueInput, join_roots, register_nodes, value_root};
 use super::*;
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, BookMove, PositionEntry};
@@ -852,4 +852,68 @@ fn cut_reads_ybb_like_the_sorted_db_it_was_converted_from() {
         );
         assert!(from_db.lines().count() > 1, "{name}");
     }
+}
+
+#[test]
+fn values_are_joined_across_roots_before_choosing_the_main() {
+    use crate::book_tree::register::{self, Node, NodeMove, Options};
+    use crate::book_tree::schema::Schema;
+    let node = |ply: &str, tree: usize, moves: &[(&str, i32)]| Node {
+        ply: ply.into(),
+        remaining: 2,
+        nodes: 100,
+        moves: moves
+            .iter()
+            .map(|(m, v)| NodeMove {
+                cond: "test".into(),
+                mv: (*m).into(),
+                value: *v,
+                value_kind: "tree:2".into(),
+            })
+            .collect(),
+        tree,
+    };
+    // 後手の根の木は、5a5b の後の先手の手を大きい定跡の 5h4i だけで見て 5a5b を 1 位にした。
+    // 先手の根の木はその局面を読み、5h6h が先手に大きく良いと分かっている。
+    let a = key(&["5i5h"]);
+    let ab = key(&["5i5h", "5a5b"]);
+    let mut nodes = BTreeMap::from([
+        (a.clone(), node("2", 1, &[("5a5b", -10), ("5a4a", -30)])),
+        (ab.clone(), node("3", 0, &[("5h6h", 200), ("5h4i", 10)])),
+    ]);
+    let schema = Schema::default();
+    let options = Options {
+        since: "tag",
+        note: "",
+        alt_gap: 40,
+        source: "ext",
+        lineage: "book:big.db@00000000",
+        schema: &schema,
+    };
+    let draws = DrawValues {
+        black: -70,
+        white: 70,
+    };
+    let joined = join_roots(&[], &mut nodes, &options, draws, 40, "test").unwrap();
+    assert_eq!((joined.moves, joined.best), (1, 1));
+    let moves: Vec<(&str, i32, &str, &str)> = nodes[&a]
+        .moves
+        .iter()
+        .map(|m| (m.mv.as_str(), m.value, m.cond.as_str(), m.value_kind.as_str()))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            ("5a4a", -30, "test", "tree:2"),
+            ("5a5b", -200, "test", "unknown")
+        ]
+    );
+    // 全体の値で main を選ぶので、登録後の点検で main が 1 位から負けない。
+    let (rows, _, _) = register::register(Vec::new(), &nodes, &options).unwrap();
+    let roles: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.get("key") == a)
+        .map(|r| (r.get("move"), r.get("role")))
+        .collect();
+    assert_eq!(roles, [("5a4a", "main")]);
 }
