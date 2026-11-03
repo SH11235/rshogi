@@ -49,6 +49,10 @@ pub(super) struct PredictionReport {
     pub cyclic: BTreeSet<String>,
 }
 
+// 読みかけの局面の子の先読みで、1 本の木が 1 回に辿る局面の上限。読みかけは worker の数ほどで、
+// 1 局面から辿るのは MultiPV と opp_n の手なので、通常はこれより十分少ない。
+pub(super) const SPECULATE_WORK: usize = 5_000;
+
 // 5,000 局面を複数回辿る構築・依存解析・展開を同じ予算で扱う。
 pub(super) const PREFETCH_WORK: usize = 500_000;
 
@@ -816,7 +820,7 @@ impl Tree {
 
     /// 読み終えていない局面の途中の上位の手 (`tops`: 手と 1 位の値) から、親の読みを待たずに
     /// 読み始める子を挙げる。挙げた子も、途中の上位の手があればその全部の手で、台帳の読みが
-    /// あれば木と同じ規則 (自分の手番 1 手・相手の手番 opp_n 手) で辿る。木にある局面と
+    /// あれば木と同じ規則 (自分の手番 1 手・相手の手番 opp_n 手と実戦の手) で辿る。木にある局面と
     /// 読み済みの局面は挙げない。辿る局面が `limit` に達したら浅い段から打ち切る。
     pub fn speculate(
         &self,
@@ -856,6 +860,7 @@ impl Tree {
                         self.def.opp_n
                     };
                     moves.extend(lines.iter().take(n).map(|pv| pv.mv.as_str()));
+                    moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
                 }
             } else if let Some((top, best)) = tops.get(&key)
                 && (self.roots.contains_key(&key) || best.abs() < self.def.stop)

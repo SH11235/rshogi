@@ -2295,7 +2295,7 @@ fn speculative_child_found_wrong_after_the_parent_keeps_reading_to_completion() 
     data[format!("delay:{}", children[0])] = json!(1.0);
     data[format!("delay:{}", children[1])] = json!(2.5);
     data[format!("delay:{}", children[2])] = json!(2.5);
-    data[format!("delay:{}", child(&children[0], "5a4a"))] = json!(3.0);
+    data[format!("delay:{}", child(&children[0], "5a4a"))] = json!(6.0);
     std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
     enqueue(
         &state,

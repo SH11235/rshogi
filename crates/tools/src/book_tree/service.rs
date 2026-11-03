@@ -1507,7 +1507,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let mut next = if target.hold || !live.prepared || tree.def.depth == 0 {
                         Vec::new()
                     } else {
-                        tree.speculate(&tops, &journal, args.prefetch_work)
+                        tree.speculate(&tops, &journal, super::model::SPECULATE_WORK)
                     };
                     // 読み始めた子は、親の読みで外れと分かっても読み終える。
                     for old in &live.speculative {
@@ -1521,19 +1521,19 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         live.requests_dirty = true;
                     }
                 }
-                // 止められて木からも外れた局面の途中の手は、もう使わない。
-                tops.retain(|key, _| {
-                    workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
-                        || lives.iter().any(|live| {
-                            live.tree.level.contains_key(key)
-                                || live.speculative.iter().any(|c| &c.key == key)
-                        })
-                });
             }
             let speculative_keys: BTreeSet<String> = lives
                 .iter()
                 .flat_map(|live| live.speculative.iter().map(|c| c.key.clone()))
                 .collect();
+            if !tops.is_empty() {
+                // 止められて木からも外れた局面の途中の手は、もう使わない。
+                tops.retain(|key, _| {
+                    speculative_keys.contains(key)
+                        || workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+                        || lives.iter().any(|live| live.tree.level.contains_key(key))
+                });
+            }
             if args.prefetch {
                 for (target, live) in checkpoint.targets.iter().zip(&mut lives) {
                     live.refresh_requests(target, &journal, &failures, &mut requests);
