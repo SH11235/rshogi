@@ -548,7 +548,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
-  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--apply] <木の出力先>...
+  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
@@ -567,7 +567,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
-- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
+- 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。`--replace-curated` を付けると、`curated` の局面でも main の source が置き換えてよいものなら木の 1 位を main にします。元の main は alt にして `tier=wide` に移し、新しい main は元の main の `tier` を引き継ぎます (`curated` の main を替えても丁寧な定跡の手順が切れない)。`record` の行と、置き換えない source の main はこの指定でも替えません。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
 - 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
@@ -1111,7 +1111,7 @@ serve の 1 周ごとの処理 (0.1 秒ごと) は、前の周から読みが来
 
 ```bash
 book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.tsv \
-  --out value1 --since 20261101-ext [--note "..."] [--alt-gap 40] [--line 40] \
+  --out value1 --since 20261101-ext [--note "..."] [--alt-gap 40] [--replace-curated] [--line 40] \
   [--draw-value-black -70] [--draw-value-white 70] [--fingerprint <指紋>] [--apply]
 ```
 
@@ -1141,7 +1141,7 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 
 value_kind は後退解析のグラフで子局面への辺を持つ手なら `tree:K`、辺がなく読みの値を使う手なら `single` です。K は行き先の局面の残り段数 + 1 (`max_plies − 行き先の level + 1`)。出口の読みの手も部分木へ合流する場合は tree になります。K は切り出しの残り段数の目安であり、循環の長さや最善手順の長さではありません。
 
-登録の規則は `tree register` と同じです (`--alt-gap`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
+登録の規則は `tree register` と同じです (`--alt-gap`、`--replace-curated`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 
 - 登録するのは自分の手番の局面だけです。伸ばした局面は伝播後の値、出口は読みの値で並べます。元データで止めた出口と印の付いた局面は登録しません。
 - 足す行は `source=ext`、`lineage=book:<大きい定跡のファイル名>@<内容の sha256 の先頭 8 文字>`、`nodes` は台帳の読みのノード数です。schema を省くと `ext` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。

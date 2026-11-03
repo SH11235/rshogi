@@ -52,6 +52,9 @@ pub(super) struct ValueArgs {
     /// main からこの値未満の差の手を alt にする
     #[arg(long, default_value_t = 40)]
     alt_gap: i32,
+    /// curated の行がある局面でも、main の source が置き換えてよいものなら main を伝播後の 1 位に替える
+    #[arg(long)]
+    replace_curated: bool,
     /// 確認点で、候補の外の手が候補の最善よりこの値以上良ければ印を付ける
     #[arg(long, default_value_t = 40)]
     line: i32,
@@ -85,6 +88,7 @@ impl ValueArgs {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            replace_curated: false,
             line: 40,
             draw_value_black: -70,
             draw_value_white: 70,
@@ -605,6 +609,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         source: "ext",
         lineage: &lineage,
         schema: &schema,
+        replace_curated: args.replace_curated,
     };
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
