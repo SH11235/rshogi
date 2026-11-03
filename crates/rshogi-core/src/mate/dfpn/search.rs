@@ -1077,7 +1077,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         self.scratch.moves.clear();
         st.generate(or_node, &mut self.scratch.moves);
-        // 置換表を引く前に子の bucket をまとめて読み込ませ、キャッシュミスの待ちを重ねる
+        // 置換表を引く前に子の bucket をまとめて読み込ませ、キャッシュミスの待ちを重ねる。読み込みは鍵を
+        // 作り終えてから短いループで出す: prefetch 命令の無い wasm では実際に読むので、鍵の計算と交互だと
+        // 同時に待てるミスが少ない
         self.scratch.child_keys.clear();
         for &mv in &self.scratch.moves {
             let key = if PIECES {
@@ -1085,11 +1087,13 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             } else {
                 exact_key(st.key_after(mv))
             };
-            self.table.prefetch::<PIECES>(key);
             if let Some(tables) = self.tables {
                 tables.prefetch_loop(key.key);
             }
             self.scratch.child_keys.push(key);
+        }
+        for &key in &self.scratch.child_keys {
+            self.table.prefetch::<PIECES>(key);
         }
 
         let child_depth = (depth + 1) as u16;
