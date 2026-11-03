@@ -848,6 +848,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         prefetch_preempt_below: 0.25,
         prefetch_work: super::model::PREFETCH_WORK,
         speculate_at: None,
+        speculate_priority: None,
         max_restarts: 0,
         out_root: out_root.to_owned(),
         opp_n: 2,
