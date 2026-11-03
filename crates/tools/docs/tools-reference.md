@@ -80,7 +80,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`book_from_csa`](book_from_csa.md) | CSA 棋譜から即指し・レート・勝敗で絞ったテキスト定跡を生成 |
+| [`book_from_csa`](book_from_csa.md) | CSA 棋譜から即指し・レート・勝敗で絞ったテキスト定跡を生成 (`--book-of` で片方の手番の定跡が続く間の両者の手) |
 | [`book_kachi_label`](book_kachi_label.md) | CSA の宣言勝ち決着率を定跡の候補手へ付与 |
 | [`book_prepwalk`](book_prepwalk.md) | 相手の準備を自分の定跡で辿り、出口と準備の残り手数を集計 |
 | [`book_rescore`](book_rescore.md) | 候補手を USI / ONNX で評価し、内容指紋で再開を検査 |
