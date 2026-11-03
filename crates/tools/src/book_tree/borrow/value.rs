@@ -415,7 +415,9 @@ pub(super) fn join_roots(
         ..*options
     };
     let (all_rows, _, _) = register::register(rows.to_vec(), nodes, &every_move)?;
-    let book = positions_from_rows(all_rows.iter().cloned().enumerate().map(Ok))?;
+    // 行番号はファイルの行と同じ数え方 (見出しの次が 2)。
+    let book =
+        positions_from_rows(all_rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
     let (_, _, audited) = audit(&book, draws, line, false)?;
     let verified = master_conditions(&all_rows, &book.0, &audited, cond);
     let index: BTreeMap<&str, usize> =

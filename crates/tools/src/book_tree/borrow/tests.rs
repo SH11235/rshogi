@@ -916,4 +916,24 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         .map(|r| (r.get("move"), r.get("role")))
         .collect();
     assert_eq!(roles, [("5a4a", "main")]);
+    // 登録後の点検でも、登録した手の値は全体の伝播の値と同じで、main は 1 位から負けない。
+    let book = crate::book_tree::master_table::positions_from_rows(
+        rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))),
+    )
+    .unwrap();
+    let (findings, _, _) = crate::book_tree::audit::audit(&book, draws, 1, false).unwrap();
+    assert!(findings.is_empty());
+    let values = crate::book_tree::audit::evaluate(&book.0, draws).unwrap();
+    let i = book.0.keys().position(|k| *k == a).unwrap();
+    assert_eq!(values[i], [Some(-30)]);
+
+    // 先の局面の手に台帳と違う条件の値があれば、替わった手の条件は分からないとする。
+    let mut other = BTreeMap::from([
+        (a.clone(), node("2", 1, &[("5a5b", -10), ("5a4a", -30)])),
+        (ab.clone(), node("3", 0, &[("5h6h", 200), ("5h4i", 10)])),
+    ]);
+    other.get_mut(&ab).unwrap().moves[1].cond = "other".into();
+    join_roots(&[], &mut other, &options, draws, 40, "test").unwrap();
+    let moved = other[&a].moves.iter().find(|m| m.mv == "5a5b").unwrap();
+    assert_eq!((moved.value, moved.cond.as_str()), (-200, "unknown"));
 }
