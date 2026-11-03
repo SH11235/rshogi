@@ -50,16 +50,19 @@ pub struct ConvertedGame {
 /// 変換全体の集計。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ConversionStats {
+    /// 読み出した対局数。
     pub games: u64,
+    /// 書き出した PSV レコード数。
     pub positions: u64,
+    /// 形式の規約で学習対象から外した局面数の合計。
     pub skipped_positions: u64,
 }
 
 /// 変換待ちの 1 局と、エラー表示用の出所。
-pub struct PendingGame<G> {
-    pub game: G,
-    pub file_index: usize,
-    pub game_number: u64,
+struct PendingGame<G> {
+    game: G,
+    file_index: usize,
+    game_number: u64,
 }
 
 fn game_error(path: &Path, game_number: u64, error: io::Error) -> io::Error {
@@ -67,7 +70,7 @@ fn game_error(path: &Path, game_number: u64, error: io::Error) -> io::Error {
 }
 
 /// バッチ内の対局を並列に展開し、入力順に書き出す。
-pub fn write_batch<F: GameRecordFormat>(
+fn write_batch<F: GameRecordFormat>(
     format: &F,
     batch: &[PendingGame<F::Game>],
     paths: &[PathBuf],

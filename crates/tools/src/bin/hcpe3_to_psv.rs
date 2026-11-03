@@ -137,6 +137,8 @@ fn start_position(hcp: &[u8; 32]) -> io::Result<Position> {
 
 fn convert_game(game: &Hcpe3Game) -> io::Result<ConvertedGame> {
     let mut pos = start_position(&game.hcp)?;
+    pos.try_reserve_move_history(game.moves.len())
+        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error.to_string()))?;
     let searched = game.moves.iter().filter(|record| record.searched).count();
     let mut converted = ConvertedGame {
         psv: Vec::with_capacity(searched * PackedSfenValue::SIZE),
