@@ -32,8 +32,9 @@ Rust で書かれた将棋エンジンです。
 
 ### ブラウザでも並列探索する
 
-- `wasm32-unknown-unknown` と `wasm32-wasip1` 向けに build でき、`wasm-threads` を付けると Web Worker で
-  並列に探索します。[Ramu Shogi](https://ramu-shogi.sh11235.com/) はこの構成でブラウザ上で探索しています。
+- `wasm32-unknown-unknown` と `wasm32-wasip1` 向けに build できます。`wasm32-unknown-unknown` で
+  `wasm-threads` を付け、アプリ側で Web Worker のスレッドプールを初期化すると、ブラウザ上で並列に探索します。
+  [Ramu Shogi](https://ramu-shogi.sh11235.com/) はこの構成で探索しています。
 - `AnalysisSession` で、止めた解析を完了した反復から再開できます ([局面解析セッション](docs/analysis-session.md))。
 
 ### 対局の場と開発用のツールを同じリポジトリに置く
