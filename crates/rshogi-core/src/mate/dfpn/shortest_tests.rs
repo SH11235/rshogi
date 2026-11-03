@@ -983,8 +983,14 @@ fn leftover_variations_find_shorter_clean_lines() {
 /// 最短の手順はそれより長くない
 #[test]
 fn tsume_mode_reports_lines_before_shortest() {
-    let sfen = "9/5k3/6Ps1/6G2/9/9/9/9/8K b 2G 1";
-    for mode in MateMode::ALL {
+    // 攻め方の玉が無い局面も同じ経路で知らせる
+    for (sfen, mode) in [
+        "9/5k3/6Ps1/6G2/9/9/9/9/8K b 2G 1",
+        "9/5k3/6Ps1/6G2/9/9/9/9/9 b 2G 1",
+    ]
+    .into_iter()
+    .flat_map(|sfen| MateMode::ALL.map(|mode| (sfen, mode)))
+    {
         let stop = AtomicBool::new(false);
         let limits = MateLimits {
             nodes: 2_000_000,
@@ -1007,7 +1013,11 @@ fn tsume_mode_reports_lines_before_shortest() {
         let kinds: Vec<_> = lines.iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, [MateLineKind::Estimated, MateLineKind::Bounded], "{mode:?}");
         for (kind, line) in &lines {
-            assert!(check_mate_pv(&mut pos, line, true), "{mode:?} {kind:?}: {}", pv_usi(line));
+            assert!(
+                check_mate_pv_by_rules(&pos, line, true),
+                "{sfen} {mode:?} {kind:?}: {}",
+                pv_usi(line)
+            );
             assert!(pv.len() <= line.len(), "{mode:?} {kind:?}: {}", pv_usi(line));
         }
 

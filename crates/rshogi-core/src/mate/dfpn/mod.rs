@@ -287,6 +287,8 @@ impl DfpnSolver {
     /// [`DfpnSolver::solve`] と同じく解き、[`ShortestMode::Tsume`] では最短の手順を求め終わる前に分かった
     /// 詰み手順を `on_line` で知らせる (推定した手順、次にその手数以内で詰むことの証明。どちらも起きないことがある)。
     /// 最短の証明は長編で桁違いに重いので、先に手順を見せたい呼び出し側が使う。ほかのモードでは `on_line` を呼ばない。
+    /// `on_line` は探索中のスレッドから同期で呼ばれ、戻ると探索を続ける。知らせた後に制限や停止で打ち切ると
+    /// 結果は [`MateResult::Unknown`] になるが、知らせた手順の意味 ([`MateLineKind`]) はそのまま成り立つ。
     pub fn solve_with_lines(
         &mut self,
         pos: &mut Position,
