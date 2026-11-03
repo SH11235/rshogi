@@ -110,7 +110,7 @@ v1.7.0 以降の、詰み探索の追加と探索の更新、定跡ファイル�
 - `get_layer_stack_progress_kpabs_q16_weights()` を追加した。設定済みの Q16 進行度係数を bucket mode
   によらず取得する。
 - リポジトリ内の `rshogi-book` クレートを直接使う場合: `Book::len` / `Book::is_empty` は `Book::position_count`
-  (丸読みの局面数。on the fly では `None`) に置き換えた。`Book` は `Clone` でなくなった。`probe` /
+  (テキストの `.db` の丸読みでは局面数、`BookOnTheFly` では `None`、`.ybb` ではヘッダーの局面数) に置き換えた。`Book` は `Clone` でなくなった。`probe` /
   `probe_with_explore` は定跡を `&[Book]` で受け取る (#1305, #1333)。
 - 不正な SFEN・LEB128・Pairwise のモデルを読み込み時に拒否し、宣言されたテンソルを確保する前に
   payload の長さを検証する (#1236, #1327)。NNUE の SIMD は整列していない入力でも正しく動く。
