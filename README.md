@@ -34,7 +34,7 @@ Rust で書かれた将棋エンジンです。
 
 - `wasm32-unknown-unknown` と `wasm32-wasip1` 向けに build できます。`wasm32-unknown-unknown` で
   `wasm-threads` を付け、アプリ側で Web Worker のスレッドプールを初期化すると、ブラウザ上で並列に探索します。
-  [Ramu Shogi](https://ramu-shogi.sh11235.com/) はこの構成で探索しています。
+  [ラム将棋](https://ramu-shogi.sh11235.com/) はこの構成で探索しています。
 - `AnalysisSession` で、止めた解析を完了した反復から再開できます ([局面解析セッション](docs/analysis-session.md))。
 
 ### 対局の場と開発用のツールを同じリポジトリに置く
@@ -137,7 +137,8 @@ cargo xtask list-binaries
 
 ## このエンジンを使用したアプリ
 
-- [Ramu Shogi](https://ramu-shogi.sh11235.com/) - Web 将棋アプリ
+- [ラム将棋](https://ramu-shogi.sh11235.com/) - Web とデスクトップで使える将棋アプリです。手元の NNUE 評価関数を
+  読み込んで、対局や局面の検討に使えます。ほかに、定跡の木の表示や、CSA サーバーの対局の観戦・棋譜の閲覧などの機能があります。
 
 ## 参考・影響
 
