@@ -61,7 +61,7 @@ pub(super) fn estimate_in_place<S: MateState + Clone + Send, const PIECES: bool>
 ) -> Result<Option<Vec<S::Mv>>, Abort> {
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;
     if !root.is_proven() {
-        return Ok(None);
+        { eprintln!("DBGNONE estimate.rs:64"); return Ok(None) };
     }
     let limit = root.mate_len;
     let mut effort = Effort {
@@ -171,7 +171,7 @@ fn choose_attack<S: MateState + Clone + Send, const PIECES: bool>(
     proven: &mut Vec<(S::Mv, u16)>,
 ) -> Result<Option<(S::Mv, u16)>, Abort> {
     let Some(len) = attack_len(searcher, st, len_limit, effort, proven)? else {
-        return Ok(None);
+        { eprintln!("DBGNONE estimate.rs:174"); return Ok(None) };
     };
     // 1 手詰めの近道で証明された局面は子を展開していない (応手が無駄合いだけの王手は近道を通らない)
     if len == 1
@@ -197,7 +197,7 @@ fn attack_len<S: MateState + Clone + Send, const PIECES: bool>(
     searcher.capture_proven(0);
     let r = searcher.search(st, NodeArgs::unbounded(0, true, len_limit), &mut 0)?;
     if !r.is_proven() {
-        return Ok(None);
+        { eprintln!("DBGNONE estimate.rs:200"); return Ok(None) };
     }
     proven.clear();
     proven.extend_from_slice(searcher.proven_children());

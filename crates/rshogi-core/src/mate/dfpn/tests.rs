@@ -2216,3 +2216,69 @@ fn length_limited_search_agrees_with_brute_force_on_random_graphs() {
     }
     assert!(mates > 300);
 }
+
+/// 合駒を取った馬が 3 手で元の升に戻り、受け方の玉も元に戻ると、合駒の前と盤面が同じで攻め方の歩が 1 枚多い
+#[test]
+fn restoring_drops_are_found_where_the_line_comes_back() {
+    let mut pos = position("8k/9/9/9/+B8/9/9/9/4K4 b p 1");
+    let line = ["5i5h", "P*8e", "9e8e", "1a2a", "8e9d", "2a1a", "9d9e"];
+    let mut pv = Vec::new();
+    for usi in line {
+        let mv = legal_moves(&pos).into_iter().find(|m| m.to_usi() == usi).expect("合法手");
+        pv.push(mv);
+        pos.do_move(mv, pos.gives_check(mv));
+    }
+    for &mv in pv.iter().rev() {
+        pos.undo_move(mv);
+    }
+    let mut drops = Vec::new();
+    // 戻る前で終わる手順には無い
+    assert!(!add_restoring_drops(&mut pos, Color::Black, &pv[..6], &mut drops));
+    assert!(add_restoring_drops(&mut pos, Color::Black, &pv, &mut drops));
+    // 合駒の前の局面と合駒で表す
+    pos.do_move(pv[0], false);
+    let expect = search::restoring_drop_key(pos.key(), u64::from(pv[1].raw()));
+    pos.undo_move(pv[0]);
+    assert_eq!(drops, vec![expect]);
+    // 同じ合駒は加え直さない
+    assert!(!add_restoring_drops(&mut pos, Color::Black, &pv, &mut drops));
+    assert_eq!(pos.to_sfen(), position("8k/9/9/9/+B8/9/9/9/4K4 b p 1").to_sfen());
+}
+
+#[test]
+#[ignore]
+fn dbg_restoring_plies() {
+    let sfen = std::env::var("DBG_SFEN").unwrap();
+    let pv: Vec<String> = std::env::var("DBG_PV").unwrap().split(' ').map(str::to_string).collect();
+    let mut pos = position(&sfen);
+    pos.clear_checkers_without_king();
+    let mut st = NoAttackerKing::new(pos);
+    let mut mvs = Vec::new();
+    for (i, usi) in pv.iter().enumerate() {
+        let mut moves = Vec::new();
+        st.generate(i % 2 == 0, &mut moves);
+        let mv = *moves.iter().find(|m| m.to_usi() == *usi).expect("手");
+        mvs.push(mv);
+        st.do_move(mv);
+    }
+    for &mv in mvs.iter().rev() {
+        st.undo_move(mv);
+    }
+    let mut pending: Vec<(u64, Hand, usize)> = Vec::new();
+    for (i, &mv) in mvs.iter().enumerate() {
+        if i % 2 == 1 && mv.is_drop() {
+            let k = st.table_key(Color::Black);
+            pending.push((k.board, k.hand.add(mv.drop_piece_type()), i));
+        }
+        st.do_move(mv);
+        if i % 2 == 0 {
+            let k = st.table_key(Color::Black);
+            pending.retain(|&(b, h, j)| {
+                let back = b == k.board && k.hand.is_superior_or_equal(h);
+                if back { eprintln!("DBGP drop ply {} {} back at ply {}", j + 1, pv[j], i + 1); }
+                !back
+            });
+        }
+    }
+    for &(_, _, j) in &pending { eprintln!("DBGP not back: ply {} {}", j + 1, pv[j]); }
+}

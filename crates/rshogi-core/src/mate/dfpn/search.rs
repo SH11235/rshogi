@@ -275,6 +275,14 @@ pub(super) struct Scratch<M> {
     returned: Option<Box<dyn Any + Send>>,
 }
 
+/// 探索の設定のうち、局面を切り離して読む探索器へ引き継ぐもの
+type Settings<'a> = (bool, u64, bool, bool, Option<&'a ShortestTables>, &'a [u64]);
+
+/// 受け方の局面 (キー `position_key`) の合駒 (`MateState::move_key` が `move_key`) を表す値
+pub(super) fn restoring_drop_key(position_key: u64, move_key: u64) -> u64 {
+    position_key ^ move_key.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
 /// 最短手順モードの表。無駄合いの判定で解く局面 (別の作業領域で解く) や、並列に解くスレッドとも共有する。
 ///
 /// 置換表と分けるのは、ここに書く値が無駄合いの数え方に依存するため。上限付きの不詰は上限と組でしか
@@ -595,6 +603,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     futility: bool,
     /// 最短手順モードの表
     tables: Option<&'a ShortestTables>,
+    /// 復元型の無駄合いとして除く合駒 (`restoring_drop_key` の値、昇順)
+    restoring_drops: &'a [u64],
     /// 補助スレッドの作業領域 (`search_shared` で同じ局面を並列に読む。空なら 1 スレッド)
     helpers: &'a mut [Scratch<S::Mv>],
     /// `search_shared` で、補助スレッドを起こす前に 1 スレッドで読むノード数
@@ -667,6 +677,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             shortest: false,
             futility: false,
             tables: None,
+            restoring_drops: &[],
             helpers: &mut [],
             serial_nodes: 0,
         }
@@ -690,23 +701,30 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         self.serial_nodes = serial_nodes;
     }
 
-    fn settings(&self) -> (bool, u64, bool, bool, Option<&'a ShortestTables>) {
+    /// 復元型の無駄合いとして除く合駒を渡す (`restoring_drop_key` の値、昇順)
+    pub fn set_restoring_drops(&mut self, drops: &'a [u64]) {
+        self.restoring_drops = drops;
+    }
+
+    fn settings(&self) -> Settings<'a> {
         (
             self.estimate,
             self.weak_disproof_step,
             self.shortest,
             self.futility,
             self.tables,
+            self.restoring_drops,
         )
     }
 
-    fn apply_settings(&mut self, settings: (bool, u64, bool, bool, Option<&'a ShortestTables>)) {
+    fn apply_settings(&mut self, settings: Settings<'a>) {
         (
             self.estimate,
             self.weak_disproof_step,
             self.shortest,
             self.futility,
             self.tables,
+            self.restoring_drops,
         ) = settings;
     }
 
@@ -1203,6 +1221,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     fn mark_futile_drops(&mut self, st: &mut S, len_limit: u16) -> Result<(), Abort> {
         let n = self.scratch.moves.len();
         let start = self.scratch.children.len() - n;
+        // 復元型は詰む合駒でも除く (読んで上限内に詰んだ合駒は無駄合いかを調べないため)
+        if self.futility && !self.restoring_drops.is_empty() {
+            for i in 0..n {
+                let mv = self.scratch.moves[i];
+                if let Some(proof) = self.restoring_drop(st, mv) {
+                    self.scratch.children[start + i].set_futile(proof, 0);
+                }
+            }
+        }
         let all_drops = self.scratch.moves.iter().all(|&mv| st.is_drop(mv));
         if len_limit == 0 && !all_drops {
             return Ok(());
@@ -1219,6 +1246,19 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             self.mark_futile_drop(st, start + i, mv, len_limit)?;
         }
         Ok(())
+    }
+
+    /// 合駒 `drop` が復元型の無駄合いとして除く合駒なら、その証明駒 (合駒の前の攻め方の持駒)。
+    /// 復元型は受け方の局面の詰み手数を決めない (取った後は合駒の前の局面の続きになる) ので、手数 0 の無駄合いにする
+    fn restoring_drop(&self, st: &S, drop: S::Mv) -> Option<Hand> {
+        if self.restoring_drops.is_empty() || !st.is_drop(drop) {
+            return None;
+        }
+        let before = st.table_key(self.attacker);
+        self.restoring_drops
+            .binary_search(&restoring_drop_key(before.key, st.move_key(drop)))
+            .is_ok()
+            .then_some(before.hand)
     }
 
     fn mark_futile_drop(
@@ -1267,6 +1307,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         let Some(tables) = self.tables else {
             return Ok(None);
         };
+        if let Some(proof) = self.restoring_drop(st, drop) {
+            return Ok(Some((proof, 0)));
+        }
         // 同じ判定を探索中に何度も繰り返すので覚えておく
         let memo_key = (before.key ^ st.move_key(drop).wrapping_mul(0x9E37_79B9_7F4A_7C15))
             .wrapping_add(u64::from(len_limit).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));

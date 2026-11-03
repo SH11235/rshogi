@@ -104,6 +104,11 @@ struct Cli {
     #[arg(long)]
     check_leftover: Option<u64>,
 
+    /// `--shortest tsume` / `estimate` で、無駄合いに復元型 (合駒の後、攻め方の持駒が増えただけの合駒の前の
+    /// 局面へ戻る合駒) も含める。正解手順の中で戻っている合駒を除いて求め直す
+    #[arg(long)]
+    restoring_futility: bool,
+
     /// 局面ごとの結果を書く TSV
     #[arg(long)]
     out: Option<PathBuf>,
@@ -408,6 +413,7 @@ fn solve_worker(
     let mut solver = DfpnSolver::with_mode(cli.hash_mb, cli.mode);
     solver.set_threads(cli.threads);
     solver.set_shortest(cli.shortest);
+    solver.set_restoring_futility(cli.restoring_futility);
     loop {
         let job = jobs_rx.lock().expect("受け口のロック").recv();
         let Ok((index, sfen, expect)) = job else {

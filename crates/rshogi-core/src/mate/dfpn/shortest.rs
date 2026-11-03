@@ -55,7 +55,7 @@ pub(super) fn shortest_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
     // 証明は置換表に残っているので、読み直すと証明した手数が分かる
     let root = searcher.search(st, NodeArgs::unbounded(0, true, NO_LEN_LIMIT), &mut 0)?;
     if !root.is_proven() {
-        return Ok(None);
+        { eprintln!("DBGNONE shortest.rs:58"); return Ok(None) };
     }
     let tsume = mode == ShortestMode::Tsume;
     let len = if tsume {
@@ -70,7 +70,7 @@ pub(super) fn shortest_pv<'a, S: MateState + Clone + Send, const PIECES: bool>(
         tie_break: tsume,
     };
     if walker.choose(searcher, st, len, true)?.is_none() {
-        return Ok(None);
+        { eprintln!("DBGNONE shortest.rs:73"); return Ok(None) };
     }
     let mut pv = Vec::with_capacity(usize::from(len));
     let mut d = len;
@@ -317,7 +317,7 @@ impl<M: Copy + Eq> Walker<M> {
         self.return_buffer(second);
         let choice = choice?;
         let Some(choice) = choice else {
-            return Ok(None);
+            { eprintln!("DBGNONE shortest.rs:320"); return Ok(None) };
         };
         self.memo.insert(key, choice);
         Ok(Some(choice.clean))
@@ -349,7 +349,7 @@ impl<M: Copy + Eq> Walker<M> {
         searcher.capture_proven(0);
         let r = searcher.search(st, NodeArgs::unbounded(0, true, d), &mut 0)?;
         if !r.is_proven() || r.mate_len != d {
-            return Ok(None);
+            { eprintln!("DBGNONE shortest.rs:352"); return Ok(None) };
         }
         tried.extend(
             searcher
@@ -362,7 +362,7 @@ impl<M: Copy + Eq> Walker<M> {
             // 1 手詰めの近道で証明された局面は子を展開していない
             match st.mate_1ply() {
                 Some(mv) if d == 1 => tried.push(mv),
-                _ => return Ok(None),
+                _ => { eprintln!("DBGNONE shortest.rs:365"); return Ok(None) },
             }
         }
         let first = tried[0];
@@ -378,7 +378,7 @@ impl<M: Copy + Eq> Walker<M> {
                     }));
                 }
                 Some(false) => {}
-                None if mv == first => return Ok(None),
+                None if mv == first => { eprintln!("DBGNONE shortest.rs:381"); return Ok(None) },
                 None => {}
             }
             if !self.may_search_alternatives(st, searcher.attacker(), d, true) {
@@ -463,7 +463,17 @@ impl<M: Copy + Eq> Walker<M> {
                     }));
                 }
                 Some(false) => {}
-                None => return Ok(None),
+                None => { eprintln!("DBGNONE shortest.rs:466"); return Ok(None) },
+            }
+        }
+        if first.is_none() {
+            eprintln!("DBGDEF d {d} replies {}", replies.len());
+            for &mv in replies.iter() {
+                st.do_move(mv);
+                let r = searcher.search(st, NodeArgs::unbounded(0, true, d - 1), &mut 0)?;
+                st.undo_move(mv);
+                let fut = if st.is_drop(mv) { searcher.futile_drop(st, mv, d)? } else { None };
+                eprintln!("DBGDEF  drop {} proven {} len {} futile {:?}", st.is_drop(mv), r.is_proven(), r.mate_len, fut.map(|f| f.1));
             }
         }
         Ok(first.map(|mv| Choice {
@@ -557,7 +567,7 @@ fn shorter_clean_line<S: MateState + Clone + Send, const PIECES: bool>(
     st.undo_move(reply);
     let short = short?;
     if !short.is_proven() || st.is_drop(reply) && searcher.futile_drop(st, reply, d)?.is_some() {
-        return Ok(None);
+        { eprintln!("DBGNONE shortest.rs:560"); return Ok(None) };
     }
     st.do_move(reply);
     let result = (|| {

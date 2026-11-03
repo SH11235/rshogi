@@ -40,7 +40,7 @@ use table::MateTable;
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::{Hand, Move, PieceType};
+use crate::types::{Color, Hand, Move, PieceType};
 
 /// 詰み探索の結果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +168,10 @@ pub struct DfpnSolver {
     shortest_tables: ShortestTables,
     /// 置換表に残っている探索の根の局面 (`leftover_variations` が置換表を使い回せるか)
     table_root: Option<u64>,
+    /// 無駄合いに復元型を含める ([`DfpnSolver::set_restoring_futility`])
+    restoring: bool,
+    /// 復元型の無駄合いとして除く合駒 (`search::restoring_drop_key` の値、昇順)
+    restoring_drops: Vec<u64>,
 }
 
 /// 並列に解くとき、最初にこのノード数までは 1 スレッドで解く
@@ -198,6 +202,8 @@ impl DfpnSolver {
             shortest: None,
             shortest_tables: ShortestTables::new(),
             table_root: None,
+            restoring: false,
+            restoring_drops: Vec::new(),
         }
     }
 
@@ -218,6 +224,18 @@ impl DfpnSolver {
     /// 探索と、推定で詰みを縮める探索は判定と同じスレッド数で解き、手順を選ぶ探索は 1 スレッドで解く。
     pub fn set_shortest(&mut self, shortest: Option<ShortestMode>) {
         self.shortest = shortest;
+    }
+
+    /// 無駄合いに「復元型の無駄合い」も含めるか (既定は含めない)。[`ShortestMode::Tsume`] と
+    /// [`ShortestMode::Estimate`] で効く。
+    ///
+    /// 復元型の無駄合い: 合駒の後、攻め方が王手を続けて、合駒の前の局面と盤面・手番が同じで攻め方の持駒が
+    /// 合駒の前以上の局面へ戻る合駒 (馬・龍で玉を一周させて元の王手に戻る手順で、取った合駒の分だけ持駒が
+    /// 増える形)。正解手順を求めた後、手順の中でそう戻っている合駒を無駄合いとして除き、正解手順を求め直す
+    /// (戻る合駒が手順に無くなるまで繰り返す)。手順に現れない合駒は調べないので、得られる手順はこの規則に
+    /// 合うが、この規則での最短の証明ではない。
+    pub fn set_restoring_futility(&mut self, restoring: bool) {
+        self.restoring = restoring;
     }
 
     /// 探索するスレッド数を設定する (最低 1)。置換表は全スレッドで共有する。
@@ -510,45 +528,66 @@ impl DfpnSolver {
             return outcome;
         }
         let judged_nodes = self.nodes;
-        // 新しい Searcher のノード数は 0 から数えるので、進捗には判定で読んだ分を足して渡す
+        // 新しい Searcher のノード数は 0 から数えるので、進捗には前の段階で読んだ分を足して渡す
+        let done = std::cell::Cell::new(judged_nodes);
         let mut continued = |p: MateProgress| {
             progress(MateProgress {
-                nodes: judged_nodes + p.nodes,
+                nodes: done.get() + p.nodes,
                 ..p
             })
-        };
-        let budget = Budget {
-            stop,
-            halt: None,
-            cancel: None,
-            shared_nodes: None,
-            node_limit: match limits.nodes {
-                0 => 0,
-                n => n.saturating_sub(judged_nodes).max(1),
-            },
-            time_limit_ms: limits.time_ms,
-            start,
-            progress: &mut continued,
         };
         let attacker = st.position().side_to_move();
         // 正解手順を求める段階の重い探索 (`Searcher::search_shared`) も、判定と同じスレッド数で読む
         self.helper_scratch.resize_with(self.threads - 1, Scratch::new);
         self.table.set_concurrent(self.threads > 1);
-        let mut searcher =
-            Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
-        configure(&mut searcher, self.mode);
-        searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
-        if let Some(ms) = last_report_ms {
-            searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
+        self.restoring_drops.clear();
+        if let Ok(f) = std::env::var("DBG_DROPS_IN") {
+            self.restoring_drops = std::fs::read_to_string(f).unwrap().split_whitespace().map(|x| x.parse().unwrap()).collect();
         }
-        let pv = if shortest_mode == ShortestMode::Estimate {
-            estimate::estimate_pv(&mut searcher, st, &self.shortest_tables)
-        } else {
-            shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode)
+        let pv = loop {
+            let budget = Budget {
+                stop,
+                halt: None,
+                cancel: None,
+                shared_nodes: None,
+                node_limit: match limits.nodes {
+                    0 => 0,
+                    n => n.saturating_sub(done.get()).max(1),
+                },
+                time_limit_ms: limits.time_ms,
+                start,
+                progress: &mut continued,
+            };
+            let mut searcher =
+                Searcher::<_, PIECES>::new(&self.table, &mut self.scratch, attacker, budget);
+            configure(&mut searcher, self.mode);
+            searcher.set_restoring_drops(&self.restoring_drops);
+            searcher.set_helpers(&mut self.helper_scratch, self.parallel_start);
+            if let Some(ms) = last_report_ms {
+                searcher.set_next_progress(ms + search::PROGRESS_INTERVAL_MS);
+            }
+            let pv = if shortest_mode == ShortestMode::Estimate {
+                estimate::estimate_pv(&mut searcher, st, &self.shortest_tables)
+            } else {
+                shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode)
+            };
+            done.set(done.get() + searcher.nodes());
+            eprintln!("DBGIT drops {} result {:?} nodes {} ms {}", self.restoring_drops.len(), pv.as_ref().map(|p| p.as_ref().map(|v| v.len())).map_err(|_| "abort"), done.get(), start.elapsed().as_millis());
+            let Ok(Some(pv)) = pv else {
+                break None;
+            };
+            let added = self.restoring && add_restoring_drops(st, attacker, &pv, &mut self.restoring_drops);
+            if let Ok(f) = std::env::var("DBG_DROPS_OUT") {
+                std::fs::write(f, self.restoring_drops.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")).unwrap();
+            }
+            if !added
+            {
+                break Some(pv);
+            }
         };
-        self.nodes = judged_nodes + searcher.nodes();
+        self.nodes = done.get();
         self.table.set_concurrent(false);
-        pv.ok().flatten().map(SolveOutcome::Mate)
+        pv.map(SolveOutcome::Mate)
     }
 
     /// 制限 (`limits`、`start` からの時間) の中で解く
@@ -718,6 +757,44 @@ impl DfpnSolver {
 type HelperResult = (Option<SolveOutcome<Move>>, u64);
 
 /// 根の局面 (並列に解くときは補助スレッドごとに複製する)
+/// 手順 `pv` (根から) の中で、受け方の合駒の後に、合駒の前と盤面が同じで攻め方 `attacker` の持駒が合駒の前に
+/// 合駒の駒を足した以上の受け方の局面へ戻っている合駒を `drops` に加える (昇順を保つ)。新しく加えたら `true`
+fn add_restoring_drops<S: RootState>(
+    st: &mut S,
+    attacker: Color,
+    pv: &[Move],
+    drops: &mut Vec<u64>,
+) -> bool {
+    let before = drops.len();
+    // 合駒ごとに (合駒の前の盤面, 戻ったときに要る攻め方の持駒, 合駒の値)
+    let mut pending: Vec<(u64, Hand, u64)> = Vec::new();
+    for (i, &mv) in pv.iter().enumerate() {
+        let defender = i % 2 == 1;
+        if defender && mv.is_drop() {
+            let key = st.table_key(attacker);
+            let value = search::restoring_drop_key(key.key, st.move_key(mv));
+            pending.push((key.board, key.hand.add(mv.drop_piece_type()), value));
+        }
+        st.do_move(mv);
+        if !defender {
+            let key = st.table_key(attacker);
+            pending.retain(|&(board, hand, value)| {
+                let back = board == key.board && key.hand.is_superior_or_equal(hand);
+                if back {
+                    drops.push(value);
+                }
+                !back
+            });
+        }
+    }
+    for &mv in pv.iter().rev() {
+        st.undo_move(mv);
+    }
+    drops.sort_unstable();
+    drops.dedup();
+    drops.len() > before
+}
+
 trait RootState: state::MateState<Mv = Move> + Clone + Send {
     fn position(&self) -> &Position;
 }
