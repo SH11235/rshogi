@@ -17,37 +17,42 @@ Rust で書かれた将棋エンジンです。
   でモデルの構成に固定したバイナリを作り、`engines/` に構成名を付けて並べて管理します。
 - 対応範囲は [サポートされている NNUE アーキテクチャ](docs/nnue-supported-architectures.md) にまとめています。
 
-### 詰将棋のルールで正解手順を求める詰み探索
+### 教師データ・棋力評価・SPSA のツール
 
-- `go mate` に df-pn で応答し、置換表を共有した複数スレッドで解けます (`MateThreads`)。
-- `MateShortest=Tsume` で、無駄合いを数えず、同じ手数なら駒余りを避ける詰将棋のルールの最短手順を返します。
-  攻め方の玉が無い局面も解けます。詳細は [rshogi-usi の README](crates/rshogi-usi/README.md#詰み探索-go-mate)。
+- 教師データの生成 (`gensfen`) と、評価値の付け直し (`rescore_psv`) ができます。付け直しには NNUE のほか、
+  外部の USI エンジンや dlshogi 系の ONNX モデルを使えます。重複の除去やシャッフルなどの加工のツールもあり、
+  億単位の局面を扱う前提で作っています。
+- エンジン同士の対局と SPRT による棋力の比較 (`tournament`)、探索パラメータと NNUE の重みの SPSA (`spsa`)、
+  定跡の作成と点検 (`book_mine`) ができます。
+- 使い方は [tools の README](crates/tools/README.md) を参照してください。NNUE の学習には学習器
+  [tatara](https://github.com/SH11235/tatara) を使っています。tatara が書き出す推論用の形式のモデルを
+  `EvalFile` で読み込めます。
 
-### 大きい定跡をファイルから直接引く
+### やねうら王形式の定跡に対応
 
-- YaneuraOu 形式の定跡 (`.db`) とバイナリ定跡 (`.ybb`) を読みます。`BookOnTheFly=true` なら丸読みせず、
-  probe のたびにファイルを二分探索して引きます。
-- 番号付きの優先定跡と、評価値の差・depth の下限の先後別の指定に対応しています。
-  詳細は [rshogi-book の README](crates/rshogi-book/README.md)。
+- やねうら王形式の定跡ファイル (`.db`) とバイナリ定跡 (`.ybb`) をそのまま使えます。
+- `BookOnTheFly=true` にすると定跡をメモリに読み込まず、局面ごとにファイルから引きます。
+  メモリに収まらない大きさの定跡も使えます。
+- 番号付きの優先定跡と、採用する評価値の差や depth の下限を先手・後手で別に指定する設定に対応しています。
+  詳細は [rshogi-book の README](crates/rshogi-book/README.md) を参照してください。
 
-### ブラウザでも並列探索する
+### 詰将棋エンジン (開発中)
 
-- `wasm32-unknown-unknown` と `wasm32-wasip1` 向けに build できます。`wasm32-unknown-unknown` で
-  `wasm-threads` を付け、アプリ側で Web Worker のスレッドプールを初期化すると、ブラウザ上で並列に探索します。
-  [ラム将棋](https://ramu-shogi.sh11235.com/) はこの構成で探索しています。
-- `AnalysisSession` で、止めた解析を完了した反復から再開できます ([局面解析セッション](docs/analysis-session.md))。
+- `go mate` に df-pn の詰み探索で応答します。詰将棋のルールでの最短手順も求められます。
 
-### 対局の場と開発用のツールを同じリポジトリに置く
+### Web アプリへの組み込み
 
-- CSA プロトコルの対局サーバー (TCP 版と Cloudflare Workers 版) と、USI エンジンを floodgate などの
-  CSA サーバーにつなぐ `csa_client` があります ([CSA サーバー](docs/csa-server/README.md) /
-  [CSA クライアント](docs/csa-client.md))。
-- 開発用のツールとして、エンジン同士の対局と SPRT (`tournament`)、探索パラメータと NNUE の重みの SPSA (`spsa`)、
-  教師データの生成と付け直し (`gensfen`・`rescore_psv`)、定跡の作成と点検 (`book_mine`) があります。
-  教師の付け直しには NNUE のほか外部の USI エンジンや dlshogi 系の ONNX モデルを使えます。
-  一覧は [tools の README](crates/tools/README.md)。
-- NNUE の学習には学習器 [tatara](https://github.com/SH11235/tatara) を使っています。tatara が書き出す
-  推論用の形式のモデルを `EvalFile` で読み込めます。
+- エンジンのコアを `rshogi-core` として crates.io で公開しています。WebAssembly 向けにも build でき、
+  `wasm-threads` で並列探索に対応します。[ラム将棋](https://ramu-shogi.sh11235.com/) はこの構成で
+  ブラウザ上で探索しています。
+- 止めた解析を、完了した反復から再開できる API (`AnalysisSession`) があります。
+
+### CSA の対局サーバーとクライアント
+
+- USI エンジンを floodgate などの CSA サーバーにつなぐ `csa_client` で、GUI を介さずに連続対局できます
+  ([CSA クライアント](docs/csa-client.md))。
+- CSA プロトコルの対局サーバーを、手元の TCP サーバーとしても Cloudflare Workers 上でも動かせます
+  ([CSA サーバー](docs/csa-server/README.md))。
 
 ### オプショナルな独自ルール
 
