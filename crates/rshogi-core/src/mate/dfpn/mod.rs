@@ -497,7 +497,11 @@ impl DfpnSolver {
         progress: &mut dyn FnMut(MateProgress),
     ) -> Option<SolveOutcome<Move>> {
         let Some(shortest_mode) = self.shortest else {
-            return self.run::<S, PIECES>(st, limits, start, stop, progress);
+            let r = self.run::<S, PIECES>(st, limits, start, stop, progress);
+            use std::sync::atomic::Ordering::Relaxed;
+            let c = &search::DBG_RC;
+            eprintln!("DBGRC nodes {} tries {} mated {} budget_out {} m_nodes {}", self.nodes, c[0].load(Relaxed), c[1].load(Relaxed), c[2].load(Relaxed), c[3].load(Relaxed));
+            return r;
         };
         // 正解手順を求める段階でも、進捗の間隔を判定の最後の通知から数える
         let mut last_report_ms = None;

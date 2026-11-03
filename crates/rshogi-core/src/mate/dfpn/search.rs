@@ -1402,7 +1402,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             };
             DBG_RC[0].fetch_add(1, Ordering::Relaxed);
             let n0 = self.nodes;
-            let solved = self.within(budget.max(64), |s| s.solve_detached_plain(returned));
+            let solved = self.within(budget.saturating_mul(std::env::var("RCMUL").map_or(1, |v| v.parse().unwrap())).max(64), |s| s.solve_detached_plain(returned));
             DBG_RC[3].fetch_add(self.nodes - n0, Ordering::Relaxed);
             match solved {
                 Ok(Some(Detached::Mated(..))) => {
