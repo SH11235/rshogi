@@ -76,6 +76,24 @@ pub struct MateProgress {
     pub elapsed_ms: u64,
 }
 
+/// 最短手順モード ([`ShortestMode::Tsume`]) で、最短の手順を求め終わる前に分かった詰み手順
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MateLine<'a> {
+    /// 手順について分かっていること
+    pub kind: MateLineKind,
+    /// 攻め方の手から始まる詰み手順 (最後の局面に受け方の無駄合いだけが残ることがある)
+    pub pv: &'a [Move],
+}
+
+/// [`MateLine`] の手順について分かっていること
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MateLineKind {
+    /// 推定した正解手順。手順の手数で詰むことも、最短であることも証明していない
+    Estimated,
+    /// 根がこの手順の手数以内で詰むことを証明した (最短とは限らない。受け方の応手が正解手順と違うことがある)
+    Bounded,
+}
+
 /// 詰み探索の進め方
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MateMode {
@@ -261,7 +279,23 @@ impl DfpnSolver {
         pos: &mut Position,
         limits: &MateLimits,
         stop: &AtomicBool,
+        progress: impl FnMut(MateProgress),
+    ) -> MateResult {
+        self.solve_with_lines(pos, limits, stop, progress, |_| {})
+    }
+
+    /// [`DfpnSolver::solve`] と同じく解き、[`ShortestMode::Tsume`] では最短の手順を求め終わる前に分かった
+    /// 詰み手順を `on_line` で知らせる (推定した手順、次にその手数以内で詰むことの証明。どちらも起きないことがある)。
+    /// 最短の証明は長編で桁違いに重いので、先に手順を見せたい呼び出し側が使う。ほかのモードでは `on_line` を呼ばない。
+    /// `on_line` は探索中のスレッドから同期で呼ばれ、戻ると探索を続ける。知らせた後に制限や停止で打ち切ると
+    /// 結果は [`MateResult::Unknown`] になるが、知らせた手順の意味 ([`MateLineKind`]) はそのまま成り立つ。
+    pub fn solve_with_lines(
+        &mut self,
+        pos: &mut Position,
+        limits: &MateLimits,
+        stop: &AtomicBool,
         mut progress: impl FnMut(MateProgress),
+        mut on_line: impl FnMut(MateLine<'_>),
     ) -> MateResult {
         self.nodes = 0;
         // 受け方の玉が無ければ詰みの意味が無い。手番でない側が王手されている局面は将棋として成立せず、
@@ -280,9 +314,9 @@ impl DfpnSolver {
             let paused = EffectsPaused::new(pos);
             if kingless {
                 let mut st = NoAttackerKing::new(paused.0.clone());
-                self.run_mode(&mut st, *limits, start, stop, &mut progress)
+                self.run_mode(&mut st, *limits, start, stop, &mut progress, &mut on_line)
             } else {
-                self.run_mode(paused.0, *limits, start, stop, &mut progress)
+                self.run_mode(paused.0, *limits, start, stop, &mut progress, &mut on_line)
             }
         };
         let futile_end =
@@ -480,10 +514,15 @@ impl DfpnSolver {
         start: Instant,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
+        on_line: &mut dyn FnMut(MateLine<'_>),
     ) -> Option<SolveOutcome<Move>> {
         match self.mode {
-            MateMode::Speed => self.run_with_pv::<S, false>(st, limits, start, stop, progress),
-            MateMode::Power => self.run_with_pv::<S, true>(st, limits, start, stop, progress),
+            MateMode::Speed => {
+                self.run_with_pv::<S, false>(st, limits, start, stop, progress, on_line)
+            }
+            MateMode::Power => {
+                self.run_with_pv::<S, true>(st, limits, start, stop, progress, on_line)
+            }
         }
     }
 
@@ -495,6 +534,7 @@ impl DfpnSolver {
         start: Instant,
         stop: &AtomicBool,
         progress: &mut dyn FnMut(MateProgress),
+        on_line: &mut dyn FnMut(MateLine<'_>),
     ) -> Option<SolveOutcome<Move>> {
         let Some(shortest_mode) = self.shortest else {
             return self.run::<S, PIECES>(st, limits, start, stop, progress);
@@ -544,7 +584,13 @@ impl DfpnSolver {
         let pv = if shortest_mode == ShortestMode::Estimate {
             estimate::estimate_pv(&mut searcher, st, &self.shortest_tables)
         } else {
-            shortest::shortest_pv(&mut searcher, st, &self.shortest_tables, shortest_mode)
+            shortest::shortest_pv(
+                &mut searcher,
+                st,
+                &self.shortest_tables,
+                shortest_mode,
+                &mut |kind, pv| on_line(MateLine { kind, pv }),
+            )
         };
         self.nodes = judged_nodes + searcher.nodes();
         self.table.set_concurrent(false);

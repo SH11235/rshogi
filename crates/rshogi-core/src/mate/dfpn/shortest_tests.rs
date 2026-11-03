@@ -978,3 +978,52 @@ fn leftover_variations_find_shorter_clean_lines() {
         assert_eq!(pos.to_sfen(), position(sfen).to_sfen(), "{mode:?}: 局面を戻す");
     }
 }
+
+/// Tsume は最短の手順を返す前に、推定した手順とその手数以内で詰む証明を順に知らせる。どちらも詰み手順で、
+/// 最短の手順はそれより長くない
+#[test]
+fn tsume_mode_reports_lines_before_shortest() {
+    // 攻め方の玉が無い局面も同じ経路で知らせる
+    for (sfen, mode) in [
+        "9/5k3/6Ps1/6G2/9/9/9/9/8K b 2G 1",
+        "9/5k3/6Ps1/6G2/9/9/9/9/9 b 2G 1",
+    ]
+    .into_iter()
+    .flat_map(|sfen| MateMode::ALL.map(|mode| (sfen, mode)))
+    {
+        let stop = AtomicBool::new(false);
+        let limits = MateLimits {
+            nodes: 2_000_000,
+            time_ms: 0,
+        };
+        let mut solver = DfpnSolver::with_mode(16, mode);
+        solver.set_shortest(Some(ShortestMode::Tsume));
+        let mut pos = position(sfen);
+        let mut lines = Vec::new();
+        let result = solver.solve_with_lines(
+            &mut pos,
+            &limits,
+            &stop,
+            |_| {},
+            |line| lines.push((line.kind, line.pv.to_vec())),
+        );
+        let MateResult::Mate(pv) = result else {
+            panic!("{mode:?}");
+        };
+        let kinds: Vec<_> = lines.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, [MateLineKind::Estimated, MateLineKind::Bounded], "{mode:?}");
+        for (kind, line) in &lines {
+            assert!(
+                check_mate_pv_by_rules(&pos, line, true),
+                "{sfen} {mode:?} {kind:?}: {}",
+                pv_usi(line)
+            );
+            assert!(pv.len() <= line.len(), "{mode:?} {kind:?}: {}", pv_usi(line));
+        }
+
+        solver.set_shortest(Some(ShortestMode::All));
+        let mut called = false;
+        solver.solve_with_lines(&mut pos, &limits, &stop, |_| {}, |_| called = true);
+        assert!(!called, "{mode:?}");
+    }
+}
