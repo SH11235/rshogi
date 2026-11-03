@@ -14,10 +14,206 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
-### ツール
+## v1.8.0 — 2026-11-04
+
+v1.7.0 以降の、詰み探索の追加と探索の更新、定跡ファイルの読み方の拡充、定跡・SPSA・教師データの
+ツールの追加を中心としたリリース。USI エンジンは df-pn による `go mate` に応答し、詰将棋のルールでの
+最短手順も求められるようになった。探索は correction history と pawn history をスレッド間で共有し、
+`go nodes` を全スレッドの合計で打ち切る。定跡は YaneuraOu のバイナリ形式 `.ybb`、ファイルから引く
+`BookOnTheFly`、番号付きの優先定跡に対応した。`rshogi-core` は公開 API の互換性のない変更を含むため
+0.9.0 になる。
+
+詳細は各 PR を参照。
+
+### 互換性のない変更と移行手順
+
+- **`go mate N` は df-pn の詰み探索になる** (#1213): 従来は「N 手以内の詰みを見つけたら通常探索を
+  止める」扱いだった。USI 仕様に合わせ、`N` をミリ秒の制限時間として詰みを探し、`bestmove` では
+  なく `checkmate <手順>` / `checkmate nomate` / `checkmate timeout` で応答する。`go mate` の後に `bestmove` を
+  待つスクリプトや GUI の連携は、`checkmate` の行を読むように直すこと。手数で上限を付ける指定は無くなった。
+- **`go nodes` は全スレッドの合計ノード数で打ち切る** (#1260): `Threads` が 2 以上のとき、各スレッドが
+  自分のノード数で判定していた方式から、補助スレッドを含む合計での判定に変えた。同じ `go nodes` の値でも
+  探索量は従来より少なくなる。`Threads=1` の結果は変わらない。`Threads` が 2 以上で `go nodes` を使う SPRT・SPSA・
+  教師生成の結果は、従来の版の結果と同じ条件として混ぜないこと。従来に近い探索量にするには、値を `Threads` 倍にする (目安)。
+- **時間・ノードの制限で止まった反復の結果を返す場合がある** (#1371): 中断した反復で根の先頭に
+  完了した反復と別の手が残っていれば、その手・評価値・PV を返す。根の評価値に bound を持たせ、
+  USI の `info` に `lowerbound` / `upperbound` を付ける。教師ラベルを作るツール (`rescore_psv` など) は
+  従来どおり完了した反復の結果を使う。`info` の評価値を記録・集計するスクリプトは、`lowerbound` / `upperbound` が
+  付いた値を正確な値として扱わないこと。
+- **`position` コマンドを全体で検証してから局面を更新する** (#1238): 不正な SFEN・指し手を含む
+  `position` は局面を部分的に書き換えず、直前の正常な局面を保つ。同じ色の玉が 2 枚ある局面と、
+  歩を打って詰ます手を拒否する。手数は 1..=`MAX_GAME_PLY` (`i32::MAX / 2`) の範囲だけを受け付ける (#1381)。
+- **`MinimumThinkingTime` の宣言の下限を 0 にした** (#1312): GUI から 0 を設定できる。
+  `RoundUpToFullSecond` が既定の `true` なら、エンジン側で 1000 ms に上げるので挙動は変わらない。
+- **`book_backprop` の循環の解き方を後退解析にした** (#1268): `--max-iters` を削除した。`min` では
+  一部の手の値と最善手が変わる。千日手の値は `--draw-value-black` / `--draw-value-white` で先後別に
+  指定でき、`--draw-value` は両方に同じ値を入れる。双方が王手をかけ続ける循環はエラーにする。`--max-iters` を
+  指定しているスクリプトからは外し、更新前後の出力を同じ条件として混ぜないこと。
+- **CSA の対局ログ (JSONL) に `interrupted` / `censored` の結果を足した** (#1277): 中断・打切りを
+  引き分けとして保存していた。勝敗集計・教師抽出では除き、KIF・replay では未決として表示する。
+  外部で JSONL を読むツールは新しい値への対応が必要。
+- **教師・評価ラベルを書くツールは、入力やモデルと同じ実体への出力を拒否する** (#1229, #1269)。
+  対象は `yardstick_label`、`label_bench_positions`、`label_bench_dl`、`yardstick_score`、`rescore_psv`。
+  出力には入力・モデルとは別のパスを指定すること。
+- **`spsa` の params ファイルに形式の宣言が要る** (#1224): `# spsa-format: c-end-r-end-v1` の宣言が無い
+  ファイルはエラーにする。宣言の無い既存のファイルは、末尾の 2 列が c_end / r_end であることを確かめてから
+  `--assume-c-end-r-end` を付けて読む (再開時は `--resume` と併用)。旧来の step / delta の形式は読み替えない。
+- **`csa_client` の棋譜のファイル名に対局の識別子が入る** (#1326): 対局開始時刻・プロセス ID・対局 ID から
+  作る識別子を、末尾の対局者の組より前に挿入する。任意のテンプレートでも対局者の組を末尾に補う。
+  既存の完成済みファイルは上書きせず、保存エラーにする。棋譜のファイル名を決め打ちして探しているスクリプトは、
+  識別子が入った名前に合わせて直すこと。
+- **`csa_client` の keepalive の既定を 60 秒から 30 秒にした** (#1326): 60 秒を前提にしたサーバー側の設定は
+  見直すこと。
+- **`analyze_selfplay` は CSA の対局ログを単局として集計する** (#1272): 対局ペアとして数えていた。
+  CSA のログでは `--allow-partial` を付けても `--sprt` を拒否する。
+- **定跡のグラフを扱うツールは既定で全コアを使う** (#1310): `book_backprop` と `book_mine master audit` /
+  `rejoin` / `cycles` / `borrow value` は従来 1 スレッドだった。ほかの計算と同じ機械で使うときは
+  `--threads` で数を指定する (`borrow value` には無いので `RAYON_NUM_THREADS`)。出力はスレッド数によらない。
+- **`book_mine tree import` (Python のスクリプトで読んだ結果の取り込み) を削除した** (#1294)。
+
+### rshogi-core 0.9.0 / ライブラリ利用者の移行
+
+公開 API に互換性のない変更があるため 0.9.0 にした。`"0.8"` で依存している場合は `"0.9"` に上げること。
+
+- `LimitsType::mate` を削除した (#1213)。詰み探索は `rshogi_core::mate::dfpn` の `DfpnSolver` を使う。
+- `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく
+  `ProgressKpAbsWeights` を返す。係数の再設定・reset 後も取得済みの値を保持し、
+  解放済みメモリへの参照を防ぐ。スライスを取る関数には `&weights` を渡す。
+  探索スタックは生成時・reset 時の係数を持つので、係数を再設定しても探索スタックを reset するまで反映されない。
+- `Position::set_sfen`・`StaticPosition::from_sfen`・`Position::from_board_state_json` は、
+  手数が 0..=`MAX_GAME_PLY` (`i32::MAX / 2`) の外なら `SfenError::Ply` / `Err` を返す。
+  従来は負の手数や `i32::MAX` 付近の手数も受け付け、そこから指し手を実行すると手数が桁あふれした。
+  CSA サーバーの `initial_sfen` と USI の `position` も同じ範囲で拒否する (USI は従来どおり 1 以上)。
+- 探索は時間・ノードの制限で止まった反復の結果も返すようになった (#1371)。従来どおり完了した反復の結果だけを
+  使うには `limits.return_completed_iteration = true` を指定する (既定は `false`)。深さ 1 の反復も完了していなければ
+  途中の結果になるので、教師・評価ラベルに使うときは深さと `bound` も確かめる。
+- `Search::clear_histories` を削除した (#1341)。新しい対局の前の初期化には `Search::clear_for_new_game` を使う。
+  置換表と EvalHash は従来どおり `clear_tt` / `clear_eval_hash` で別に消す。
+- 探索の内部の型を公開 API として使っている場合は次の変更に合わせる。
+  - pawn history と、局面キーで引く correction history をスレッド間で共有する表 (`SharedHistories`) に移した (#1311)。
+    `PawnHistory`、`HistoryTables::pawn_history`、`CorrectionHistory` の pawn / minor / non-pawn の
+    取得・更新メソッド、`Position::pawn_history_index` を削除した。
+  - `MovePicker::next_move(pos, history)` は `next_move(pos, history, shared)` になった。`shared` は `&SharedHistories`。
+    `ThreadPool::new` と `ThreadPool::set_num_threads` は `eval_hash` の直後に `Arc<SharedHistories>` を受け取る。
+    同じ探索に参加するスレッドには同じ共有の表を渡す。
+  - `SearchResult` / `SearchInfo` に `bound`、`TimeOptions` に `round_up_to_full_second`、
+    `SearchTuneParams` に correction history の定数、`SearchContext` に `shared`、`wasm-threads` の
+    `HelperResult` に `best_bound` を足した (#1309, #1311, #1312, #1371)。構造体の
+    リテラルで作っているコードは新しいフィールドを指定する。
+- `StaticPosition` を追加した (#1318)。SFEN / 盤面と手駒から、利きの全升集計・NNUE の駒表・駒割を作らず
+  読み取り専用の局面を構築できる。指し手の実行や評価には `into_position()` で完全な局面へ変換する。
+- `Position::key_after` を公開した (#1310)。合法手を指した後の `Position::key` を、局面を進めずに求める。
+- `AnalysisSession` を追加した (#1203)。局面と探索設定を固定した解析セッションで、止めた探索を
+  完了した反復から再開できる。詳細は [docs/analysis-session.md](docs/analysis-session.md)。
+- 玉の無い側がある局面の合法手生成 `movegen::generate_legal_allowing_missing_kings` と、
+  その局面での棋譜の再生を公開した (#1303)。
+- `get_layer_stack_progress_kpabs_q16_weights()` を追加した。設定済みの Q16 進行度係数を bucket mode
+  によらず取得する。
+- リポジトリ内の `rshogi-book` クレートを直接使う場合: `Book::len` / `Book::is_empty` は `Book::position_count`
+  (テキストの `.db` の丸読みでは局面数、`BookOnTheFly` では `None`、`.ybb` ではヘッダーの局面数) に置き換えた。`Book` は `Clone` でなくなった。`probe` /
+  `probe_with_explore` は定跡を `&[Book]` で受け取る (#1305, #1333)。
+- 不正な SFEN・LEB128・Pairwise のモデルを読み込み時に拒否し、宣言されたテンソルを確保する前に
+  payload の長さを検証する (#1236, #1327)。NNUE の SIMD は整列していない入力でも正しく動く。
+
+### 詰み探索 (`go mate`)
+
+- **df-pn による `go mate`** (#1213): 置換表は `MateHashMB` (既定 64) で指定する。探索中に同じ局面へ
+  戻る手順は攻め方の失敗とし、打ち切り (時間・ノード数・`stop`) は不詰と区別して `timeout` を返す。
+  返す手順は合法・王手の連続・詰みの終端を検証してから出す。
+- **探索の進め方 `MateMode`** (#1245, #1299): `Speed` (詰めろの判定のように不詰が多い用途向け) と
+  `Power` (既定。証明駒・反証駒、子の pn/dn の初期値の見積もりを使い、長手数・難問を解く) から選ぶ。
+- **複数スレッドで解く `MateThreads`** (#1273, #1293): 置換表を全スレッドで共有する。最初の 1 万ノードは
+  1 スレッドで解き、決まらなければ並列に切り替える。
+- **最短手順 `MateShortest`** (#1321, #1339): `Tsume` は詰将棋のルール (無駄合いを数えず、同手数なら
+  駒余りを避ける) での最短手順、`All` は合駒もすべて応手として数えた最短手順、`Estimate` は詰将棋の
+  正解手順を最短と証明せずに速く推定する。既定の `Off` は詰むかどうかだけを速く調べる。
+- 攻め方の玉が無い局面 (多くの詰将棋) を解ける (#1300)。
+- 長編の詰将棋で、手順を辿るときに調べる応手を減らし、重い受け方の局面は応手ごとに推定してから証明する。
+  経路に依存する不詰を覚えて使い回す (#1354, #1355, #1359, #1361, #1368, #1375, #1380 など)。
+- `mate_bench` で局面集の解く時間・ノード数・手数を測れる (#1223)。`--check-leftover` で変長駒余りの
+  候補を検出する (#1369)。wasm で測るベンチと Node.js の WASI 起動スクリプトも追加した (#1240)。
+
+### USI エンジン / 探索
+
+- **correction history に (ss-6) の continuation の項と、前の手が無いときの定数を足した** (#1309)。
+  定数はすべて `SearchTuneParams` で調整できる。
+- **pawn history と局面キーで引く correction history をスレッド間で共有する** (#1311): `Threads=1` では
+  表の大きさ・初期値・更新式が従来と同じで、探索は変わらない。
+- **`RoundUpToFullSecond`** (#1312): `false` にすると、1 手の思考時間を秒の境界へ切り上げる処理と、
+  最小思考時間の 1000 ms の下限を外す。短い持ち時間で時計の倍率と探索量を比例させたいとき
+  (SPSA の NPS 補正など) に使う。既定の `true` は従来どおり。
+- **置換表のクリアを `Threads` 本で並列に行う** (#1378): 表を確保し直さずにゼロで埋める。
+  `USI_Hash` 8 GB で、`usinewgame` と `isready` (クリア 2 回) にかかる時間が 17.7〜24.5 秒から
+  3.6〜3.7 秒になった。
+- **L2=64 の LayerStacks** (#1205): `layerstacks-halfka_hm_merged-{1536,2304,3072}x16x64-none` の
+  edition を追加した。`edition-universal` もヘッダーの寸法から 64 幅のモデルを評価できる。
+- 先後別の定跡オプション `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` /
+  `BookDepthWhiteLimit` を追加した (#1334)。既定 `-1` は共通の `BookEvalDiff` / `BookDepthLimit`
+  を使い、従来どおり。`0` 以上を送ると root 局面がその手番のときだけその値を使う。既存のオプションと既定値は変わらない。
+  depth 下限で定跡を使わなかったときの info string に、使った下限の値を添えた。`rshogi-book` の `BookOptions` に
+  `eval_black_diff` 等の 4 項目 (`Option<i32>`) を足した。詳細は `crates/rshogi-book/README.md`。
+- 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した (#1305)
+  (既定 `false` で従来どおり丸読み)。`sfen` 行が SFEN の文字列順に並んだ `.db` が必要で、
+  `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。
+- YaneuraOu のバイナリ定跡 `.ybb` を読めるようにした (#1331。丸読みと `BookOnTheFly` の両方)。ファイル先頭の
+  magic で見分ける。`BookFile` に `.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む。
+  `.ybb` は ponder と採択回数を持たないので、ponder は子局面を引いて補い、
+  `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしない。
+- 優先定跡に対応した (#1333)。`BookFile=user_book1.db` のとき、同じディレクトリの
+  `user_book1-000.db`、`user_book1-001.ybb`、… を番号順に先に引き、局面が載っていなければ次へ、
+  最後に `user_book1.db` を引く (各番号は `.db` / `.ybb` のどちらでもよい)。優先定跡のファイルが
+  無ければ従来どおり。`rshogi-book` に、引く順のパスを返す `priority_book_paths` を足した。
+- `BookOnTheFly=true` のテキスト `.db` で、手の行が無い `sfen` 行に当たったら反転局面を引き直さず
+  定跡なしとする (従来は `FlippedBook` で反転局面を引いていた)。丸読みは変わらない。
+
+### CSA クライアント / サーバー
+
+- **棋譜の公開と取り込み** (#1196, #1197, #1198): `kifu_publish` で floodgate (wdoor) や自己対局の棋譜を
+  棋譜サーバーへ送れる。`csa_client` の棋譜は wdoor と同じ書式にし、終局理由の取りこぼしを直した。
+  JSONL の `meta` / `move` / `result` のプレイヤー識別子をそろえた (#1254)。
+  Workers に wdoor の対局 ID・CSA 本文の取り込み API と、大会などのイベントのメタデータを足した。
+- **Workers の private 招待で対局を開始・再接続できる** (#1287)。
+- **Workers の棋譜を別の R2 bucket へバックアップし、欠けた棋譜を復元する経路** (#1235): `KIFU_BACKUP_BUCKET`
+  が無い環境では無効。
+- `csa_client` はロビーで 60 秒待つと打ち切っていたのを直し、送信ログの LOGIN のパスワードと再接続トークンを
+  伏せる (#1326)。不正な CSA の指し手は panic せずエラーにする (#1225)。
+- TCP の再接続を待つ間も相手の着手と時計を処理し、再接続時の残り時間を探索の上限へ反映する (#1267, #1275)。
+- Lobby の未認証接続の寿命と保持数を制限し、TCP の受信行とチャットの配信に上限を設けた (#1219, #1233, #1264)。
+
+### 対局評価と SPSA (tournament / spsa / analyze_selfplay)
+
+- **`spsa --dispatch async`** (#1301, #1307): 1 台の中で、pair ごとに結果が届いた順に θ を更新する。
+  Fischer の時計の NPS 補正 (`--nps-scaling`)、1 局の時間の上限、時間切れの率による停止を備える。
+- `spsa` は確定した局の棋譜を `games.jsonl` に追記する (#1302)。
+- `tournament` に `--nps-scaling` と `--cpu-affinity numa` を足した (#1325)。SPSA と同じ時計の条件で
+  SPRT にかけられる。
+- 両側の評価値の一致による裁定 `--adjudicate-agreement` を `tournament` と `spsa` に足し、その閾値を記録済みの
+  対局から決める `analyze_selfplay --adjudication-sweep` を足した (#1307)。
+- `tournament` のフィッシャー時計で、加算分まで使った消費時間が残り時間に反映されなかった問題を直した (#1199)。
+
+### 定跡ツール
+
+- **`book_mine tree`** (#1209, #1210, #1237, #1243, #1244, #1372, #1373, #1385, #1386): 段で待たずに
+  定跡の木を読み、複数の木で 1 組のエンジンを共有する。対象のキュー、両方の手番の木から元データへの登録、
+  別の機械で読んだ結果の取り込み、伸ばし直しの待ちを埋める先読みを備える。
+- **`book_mine master`** (#1304, #1308, #1332, #1338, #1340, #1353, #1356, #1363〜#1367): 定跡の元データ
+  (`moves.tsv`) の検査・追加・書き出し (`.db`・プリセット)・差分と、main の逆伝播による点検、
+  相手の手で戻る局面と千日手の循環の点検、反駁の点検、相手の見立てごとに読み始める局面を出す `walk` を備える。
+- **`book_mine borrow`** (#1306, #1383): 大きい定跡の木を借り、自分の読みで値を付けて元データに登録する。
+- `book_prepwalk` を追加した (#1241)。相手の定跡の木を自分の定跡で辿り、相手の準備がどこまで続くかを調べる。
+- `book_from_csa --book-of` を追加した (#1384)。指定した手番の定跡が続く間は両者の手を集計する。
+- `book_mine master audit` の反駁の点検 (#1332): `--refutation-table` で、伝播後の 1 位が先を伸ばしていない手で、
+  伸ばした手の最善を `--refutation-margin` (既定 1) 以上上回る局面を書き、`--enqueue-out` でその手の後の局面を根にした
+  `tree enqueue --from` の行を書く。オプションを付けなければ既存の出力は変わらない。
+- `book_mine borrow cut` の `--book` に `.ybb` を渡せる (#1331)。
+- `book_backprop` のピークメモリを、225 万局面の `--merge replace` で 4.4 GiB から 0.93 GiB に減らし、書き出す値が循環で破られないかを
+  検査する (#1257, #1295, #1298)。`book_mine` の各処理はグラフを詰めた配列で持ち、読み取り専用の局面で
+  局面を引く (#1310, #1313, #1315〜#1319)。
+
+### 教師データ / 評価・計測ツール
 
 - `rescore_psv` の ONNX モードで、複数の入力ファイルを 1 回の実行に渡したとき、セッション (TensorRT ではモデルの解析と
-  エンジンの読み込み) と入力バッファを最初に処理するファイルで作り、残りのファイルで使い回す。小さいファイルを多数処理する
+  エンジンの読み込み) と入力バッファを最初に処理するファイルで作り、残りのファイルで使い回す (#1362)。小さいファイルを多数処理する
   ときの時間が縮む。CPU 推論と、DL水匠・ONNX Runtime 1.24.2・TensorRT 10.16 FP16・RTX 3080 Ti の CUDA / TensorRT 推論で、
   旧版とも 1 ファイルずつ渡す場合とも出力が変わらないことを確認した (TensorRT は同じエンジンキャッシュでの比較)。
   実行中にモデルファイルが置き換わるとエラーで止める (処理中だったファイルは Ctrl-C で打ち切った場合も含めて
@@ -25,9 +221,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   キャッシュも消す)。`--ort-profile` は実行全体で JSON を 1 つ書く。
 - `rescore_psv` の TensorRT 推論で、最後の端数バッチもゼロの特徴量で埋めて `--onnx-batch-size` 行で推論する。
   それまでに無い小さい形のバッチでエンジンを作り直さない (作り直しは 1 回数十秒かかり、作り直したエンジンでは最下位
-  bit が変わりうる)。同じエンジンでは、端数をそのままの形で推論していた版と端数バッチの出力も一致した。
-
-- tools の native 評価経路で `progresskpabsq16` (YaneuraOu / BulletOu SFNN の整数進行度) を選べるようにする。
+  bit が変わりうる)。同じエンジンでは、端数をそのままの形で推論していた版と端数バッチの出力も一致した (#1362)。
+- `rescore_psv` の探索は局面を動的に配り、探索スタックを `go` ごとに初期化する (#1341)。
+- tools を単一の NNUE 構成だけで build できるようにした (#1342)。`edition-universal` を外した構成別の
+  build で `rescore_psv` などを動かせる。手順は `crates/tools/README.md`。
+- tools の native 評価経路で `progresskpabsq16` (YaneuraOu / BulletOu SFNN の整数進行度) を選べるようにする (#1345)。
   これまで明示エラーにしていた `rescore_psv` / `preprocess_psv` / `gensfen` / `rescore_hcpe` / `yardstick_label` /
   `label_bench_positions` / `bench_nnue_eval` / `verify_nnue_accumulator` / `nyugyoku_metrics` などが、USI の
   `LS_PROGRESS_COEFF` と同じ f64 の progress.bin から Q16 係数を作って使う。`eval_sfens` と `nnue_saturation` は
@@ -36,82 +234,23 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `--bucket-mode` を省いて進行度の option だけを指定した従来の呼び出しは `progresskpabs` として動く。
   出力 JSON に `bucket_mode` を追加し、LayerStacks 以外では `bucket_mode` / `progress_buckets` が `null` になる。
 - `bench_nnue_eval` の進行度 bucket のマイクロベンチは、指定した方式 (f32 / Q16) で計測し、JSON に `mode` を出す。
-
-- `psv_profile` を追加。PSV 教師データの手数の帯ごとの入玉 (先手玉・後手玉・相入玉)・宣言できる局面・勝敗と、シャッフル前の
+- `psv_profile` を追加した (#1335)。PSV 教師データの手数の帯ごとの入玉 (先手玉・後手玉・相入玉)・宣言できる局面・勝敗と、シャッフル前の
   棋譜順の PSV では対局ごとの終局 (宣言勝ちか、開始・終局の手数) を集計し、`--json` で保存する。
+- `policy_rollout_psv` を追加した (#1314)。dlshogi 系の ONNX モデルの policy で種の局面から指し進め、
+  途中の局面を PSV に書き出す。
+- `psv_entered` を追加した (#1357)。入玉の行 (どちらかの玉が敵陣三段) を抜き出し、付け直した行と元の PSV から
+  dual-label PSV を 1 回の読みで作る。
+- `pack_to_psv` を上限のあるメモリで流して処理し、出力を安全に置き換える (#1234)。`prep_hcpe` の shuffle は
+  メモリの予算で方式を切り替える (#1330)。`preprocess_psv` などの入力の保護と再開の判定を直した (#1280, #1329)。
 
-- `book_mine master audit` に反駁の点検 (YaneuraOu の `peta refutation` に当たる) を追加。`--refutation-table` で、伝播後の
-  1 位が先を伸ばしていない手で、伸ばした手の最善を `--refutation-margin` (既定 1) 以上上回る局面を書き、`--enqueue-out` で
-  その手の後の局面を根にした `tree enqueue --from` の行を書く (priority は `--priority` + 表の順位)。重みは `master rejoin`
-  と同じ `--opp-freq` などで付ける。値は同値の -1 補正の前の値で比べる。オプションを付けなければ既存の出力は変わらない。
+### ビルド
 
-- `book_mine master rejoin` / `cycles` の頂点の展開では完全な局面を直接構築し、在庫検査とハッシュ計算の重複を省く。
+- `cargo xtask build --target` で `wasm32-wasip1` / `wasm32-unknown-unknown` を指定し、edition ごとの
+  wasm を `engines/` に置ける (#1282)。USI の crate に `wasm-threads` を足した。
 
-- `book_backprop` と `book_mine` の局面索引・key 検査に、評価用の初期化を省く読み取り専用局面を使う。
-  手を指す経路は完全な `Position` を維持し、出力は変わらない。
+### 依存ライブラリ
 
-- `book_mine master audit` / `rejoin` / `cycles` / `borrow` の元データの伝播では、一時定跡を経ず
-  メモリ内でグラフを1回作り、値の分からない手を配列内で除去して伝播する。出力は変わらない。
-
-- `book_mine master rejoin` は `--opp-freq` と正の `--min-weight` の併用時に下限未満の自分の手番の局面の展開を止める。
-  一覧の事後フィルタだけだった挙動から変わり、下限未満の局面を経由する先は調査対象から外れる。既定の下限 0 の出力は維持。
-  止めるのは自分の手番の局面だけで、相手の手番の局面は重みによらず展開する (alt の手の先で重み 0 になる相手の局面で止めると、
-  重みの大きい局面の alt の行が一覧から消えるため)。
-
-- `book_mine master cycles` は外した後の循環を同じグラフの辺を絞って数え直し、グラフの再構築を省く。出力は変わらない。
-
-- `book_mine master rejoin` / `cycles` のグラフを詰めた局面と連続した辺の配列で保持し、
-  `cycles` の書き換え用の行は `--apply` 時だけ読み込んでメモリを削減。
-
-- `book_backprop` (と、同じ処理を使う `book_mine master audit` / `rejoin` / `cycles` / `borrow value`) の定跡のグラフ作りを、
-  局面の塊ごとに並べて処理するようにした。出力は変わらない。既定は全コアを使う (従来は 1 スレッド) ので、
-  ほかの計算と同じ機械で使うときは `--threads` で数を指定する (`borrow value` には無いので `RAYON_NUM_THREADS`)。
-- `book_backprop` と `book_mine master audit` / `rejoin` / `cycles` に `--threads` (0 = 全コア) を足した。
-  rejoin / cycles はグラフ作り・先手と後手・循環ごとの外し方も並べて解く。出力はスレッド数によらない。
-
-- `book_mine borrow cut` の `--book` に YaneuraOu の `.ybb` を渡せるようにした。
-  `.ybb` は並べ替え不要で、切り出しの結果は変換元の `.db` と同じ。
-
-### USI エンジン
-
-- 先後別の定跡オプション `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit`
-  (YaneuraOu の `BOOK_OPTIONS V2` と同じ名前) を追加した。既定 `-1` は共通の `BookEvalDiff` / `BookDepthLimit`
-  を使い、従来どおり。`0` 以上を送ると root 局面がその手番のときだけその値を使う。既存のオプションと既定値は変わらない。
-  depth 下限で定跡を使わなかったときの info string に、使った下限の値を添えた。`rshogi-book` の `BookOptions` に
-  `eval_black_diff` 等の 4 項目 (`Option<i32>`) を足した。詳細は `crates/rshogi-book/README.md`。
-- 定跡を丸読みせず、probe のたびにファイル上の二分探索で引く `BookOnTheFly` を追加した
-  (既定 `false` で従来どおり丸読み)。`sfen` 行が SFEN の文字列順に並んだ `.db` が必要で、
-  `isready` のたびにファイルを開き直す。詳細は `crates/rshogi-book/README.md`。
-- `rshogi-book` の `Book::len` / `Book::is_empty` は `Book::position_count`
-  (丸読みの局面数。on the fly では `None`) に置き換えた。`Book` は `Clone` でなくなった。
-- YaneuraOu のバイナリ定跡 `.ybb` を読めるようにした (丸読みと `BookOnTheFly` の両方)。ファイル先頭の
-  magic で見分ける。`BookFile` に `.db` を指定してそのファイルが無く、同名の `.ybb` があればそちらを読む
-  (YaneuraOu と同じ)。`.ybb` は ponder と採択回数を持たないので、ponder は子局面を引いて補い、
-  `ConsiderBookMoveCount` は等確率、`NarrowBook` は何もしない。
-- YaneuraOu の優先定跡に対応した。`BookFile=user_book1.db` のとき、同じディレクトリの
-  `user_book1-000.db`、`user_book1-001.ybb`、… を番号順に先に引き、局面が載っていなければ次へ、
-  最後に `user_book1.db` を引く (各番号は `.db` / `.ybb` のどちらでもよい)。優先定跡のファイルが
-  無ければ従来どおり。`rshogi-book` の `probe` / `probe_with_explore` は定跡を `&[Book]` で受け取る
-  ようにし、引く順のパスを返す `priority_book_paths` を足した。
-- `BookOnTheFly=true` のテキスト `.db` で、手の行が無い `sfen` 行に当たったら反転局面を引き直さず
-  定跡なしとする (YaneuraOu と同じ。従来は `FlippedBook` で反転局面を引いていた)。丸読みは変わらない。
-
-### rshogi-core / ライブラリ利用者の移行
-
-- `get_layer_stack_progress_kpabs_q16_weights()` を追加。設定済みの Q16 進行度係数を bucket mode によらず取得する。
-
-- `StaticPosition` を追加。SFEN / 盤面と手駒から、利きの全升集計・NNUE の駒表・駒割を作らず
-  読み取り専用の局面を構築できる。指し手の実行や評価には `into_position()` で完全な局面へ変換する。
-
-- `Position::key_after` を公開した。合法手を指した後の `Position::key` を、局面を進めずに求める。
-- `get_layer_stack_progress_kpabs_weights()` は `&'static [f32]` ではなく
-  `ProgressKpAbsWeights` を返す。係数の再設定・reset 後も取得済みの値を保持し、
-  解放済みメモリへの参照を防ぐ。スライスを取る関数には `&weights` を渡す。
-  探索stackは生成・reset時の係数を保持するため、再設定した係数はstackのreset後に反映される。
-- `Position::set_sfen`・`StaticPosition::from_sfen`・`Position::from_board_state_json` は、
-  手数が 0..=`MAX_GAME_PLY` (`i32::MAX / 2`) の外なら `SfenError::Ply` / `Err` を返す。
-  従来は負の手数や `i32::MAX` 付近の手数も受け付け、そこから指し手を実行すると手数が桁あふれした。
-  CSA サーバーの `initial_sfen` と USI の `position` も同じ範囲で拒否する (USI は従来どおり 1 以上)。
+- tokio を 1.53.3 (RUSTSEC-2026-0386)、rustls を 0.23.46 に更新した (#1204, #1261)。
 
 ## v1.7.0 — 2026-10-11
 
