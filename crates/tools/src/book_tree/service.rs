@@ -356,6 +356,37 @@ fn select_victims(
     candidates.into_iter().take(needed).map(|(id, _, _)| id).collect()
 }
 
+/// 横取りする先読みを選ぶ。`waiting` は本来の列の優先度 (先頭から)、`spare` は空き・譲り待ちの worker 数。
+/// 普通の先読みから先に止め、優先の先読み (`Some(優先度)`) は、その優先度以下の本来の読みのうち
+/// 空き・先に止めた分で足りない数だけ止める。
+fn preempt_victims(
+    candidates: Vec<(usize, f64, u32, Option<u32>)>,
+    waiting: &[u32],
+    spare: usize,
+    threshold: f64,
+) -> Vec<usize> {
+    let needed = waiting.len().saturating_sub(spare);
+    let (urgent, plain): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| c.3.is_some());
+    let mut chosen = select_victims(
+        plain
+            .into_iter()
+            .map(|(id, progress, priority, _)| (id, progress, priority))
+            .collect(),
+        needed,
+        threshold,
+    );
+    let mut urgent: Vec<_> = urgent.into_iter().filter(|c| c.1 < threshold).collect();
+    urgent.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    for (id, _, _, limit) in urgent {
+        let limit = limit.unwrap_or(u32::MAX);
+        let before = waiting.iter().filter(|p| **p <= limit).count();
+        if chosen.len() < needed && before > spare + chosen.len() {
+            chosen.push(id);
+        }
+    }
+    chosen
+}
+
 #[derive(Default)]
 struct Restart {
     key: Option<String>,
@@ -1709,15 +1740,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         })
                         .count();
                     let free = workers.values().filter(|w| w.busy.is_none()).count();
-                    let needed = queue_len.saturating_sub(yielding + free);
                     let mut victims = Vec::new();
                     for (id, worker) in &workers {
-                        // 優先の先読みは、それより優先度の大きい本来の読みには譲らない。
-                        if !speculative(&worker)
-                            || worker
-                                .urgent
-                                .is_some_and(|p| queue.first().is_none_or(|(_, _, head)| p < *head))
-                        {
+                        if !speculative(&worker) {
                             continue;
                         }
                         let control = worker.restart.lock().unwrap_or_else(|e| e.into_inner());
@@ -1730,10 +1755,17 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             continue;
                         };
                         if progress < args.prefetch_preempt_below {
-                            victims.push((*id, progress, worker.priority));
+                            victims.push((*id, progress, worker.priority, worker.urgent));
                         }
                     }
-                    for id in select_victims(victims, needed, args.prefetch_preempt_below) {
+                    let waiting: Vec<u32> =
+                        queue.iter().map(|(_, _, priority)| *priority).collect();
+                    for id in preempt_victims(
+                        victims,
+                        &waiting,
+                        yielding + free,
+                        args.prefetch_preempt_below,
+                    ) {
                         workers[&id]
                             .restart
                             .lock()
@@ -2368,6 +2400,26 @@ mod tests {
         cache.insert(child, reading);
         assert!(queue(&mut trees, &cache, &BTreeSet::new()).is_empty());
         assert!(trees.iter().all(|tree| tree.finished && tree.nodes.len() == 2));
+    }
+
+    #[test]
+    fn preemption_stops_plain_prefetch_first_and_urgent_only_for_waiting_at_its_priority() {
+        // 本来の列は優先度 0 が 1 件と 10 が 2 件。空きは無い。
+        let waiting = [0, 10, 10];
+        let urgent = vec![
+            (1, 0.1, 5, Some(5)),
+            (2, 0.2, 5, Some(5)),
+            (3, 0.05, 5, Some(5)),
+        ];
+        assert_eq!(preempt_victims(urgent.clone(), &waiting, 0, 0.25), [3]);
+        // 普通の先読みがあれば、そちらから止める。
+        let mut mixed = urgent.clone();
+        mixed.push((4, 0.2, 10, None));
+        assert_eq!(preempt_victims(mixed, &waiting, 0, 0.25), [4]);
+        // 空きが優先度 0 の分を賄うなら、優先の先読みは止めない。
+        assert!(preempt_victims(urgent.clone(), &waiting, 1, 0.25).is_empty());
+        // 進みが線を越えた読みは止めない。
+        assert!(preempt_victims(vec![(1, 0.3, 5, Some(5))], &waiting, 0, 0.25).is_empty());
     }
 
     #[test]
