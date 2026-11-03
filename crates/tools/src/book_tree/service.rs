@@ -152,6 +152,23 @@ fn reading_queue_ranked<'a>(
         .collect()
 }
 
+/// 優先する木の子の先読みの key ごとに、(優先度, 受付順, 段, 手数) の最小を取る。
+fn urgent_ranks<'a>(
+    trees: impl IntoIterator<Item = (u32, u64, &'a [PrefetchCandidate])>,
+) -> BTreeMap<String, (u32, u64, usize, u32)> {
+    let mut ranks: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
+    for (priority, order, candidates) in trees {
+        for c in candidates {
+            let rank = (priority, order, c.level, c.ply);
+            ranks
+                .entry(c.key.clone())
+                .and_modify(|old| *old = (*old).min(rank))
+                .or_insert(rank);
+        }
+    }
+    ranks
+}
+
 struct Job {
     key: String,
     ply: u32,
@@ -173,8 +190,9 @@ struct Worker {
     prefetch: bool,
     /// 途中の上位の手から挙げた子の先読み。
     speculative: bool,
-    /// `--speculate-priority` の木の、外れと分かっていない子の先読み。横取りされない。
-    urgent: bool,
+    /// `--speculate-priority` の木の、外れと分かっていない子の先読みなら、それを求める優先する木の
+    /// 優先度の最小。これより優先度の大きい本来の読みには横取りされない。
+    urgent: Option<u32>,
     demand: BTreeSet<Request>,
     priority: u32,
 }
@@ -696,7 +714,7 @@ fn spawn_worker(
         depth: 0,
         prefetch: false,
         speculative: false,
-        urgent: false,
+        urgent: None,
         demand: BTreeSet::new(),
         priority: 0,
     }
@@ -713,7 +731,7 @@ struct Live {
     /// 読みかけの局面の途中の上位の手から挙げた子。
     speculative: Vec<PrefetchCandidate>,
     /// `speculative` のうち、`--speculate-priority` の木で今の読みから挙がった子 (外れと分かったものを除く)。
-    urgent: BTreeSet<String>,
+    urgent: Vec<PrefetchCandidate>,
     dirty: bool,
     requests_dirty: bool,
     requests_active: bool,
@@ -727,7 +745,7 @@ impl Live {
             ended: None,
             shadow: Vec::new(),
             speculative: Vec::new(),
-            urgent: BTreeSet::new(),
+            urgent: Vec::new(),
             dirty: true,
             requests_dirty: true,
             requests_active: false,
@@ -1534,9 +1552,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         tree.speculate(&tops, &journal, super::model::SPECULATE_WORK)
                     };
                     live.urgent = if args.speculate_priority.is_some_and(|p| target.priority <= p) {
-                        next.iter().map(|c| c.key.clone()).collect()
+                        next.clone()
                     } else {
-                        BTreeSet::new()
+                        Vec::new()
                     };
                     // 読み始めた子は、親の読みで外れと分かっても読み終える。
                     for old in &live.speculative {
@@ -1555,8 +1573,14 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 .iter()
                 .flat_map(|live| live.speculative.iter().map(|c| c.key.clone()))
                 .collect();
-            let urgent_keys: BTreeSet<String> =
-                lives.iter().flat_map(|live| live.urgent.iter().cloned()).collect();
+            let urgent_ranks = urgent_ranks(
+                checkpoint
+                    .targets
+                    .iter()
+                    .zip(&lives)
+                    .filter(|(target, live)| !target.hold && live.ended.is_none())
+                    .map(|(target, live)| (target.priority, target.order, live.urgent.as_slice())),
+            );
             if !tops.is_empty() {
                 // 止められて木からも外れた局面の途中の手は、もう使わない。
                 tops.retain(|key, _| {
@@ -1618,9 +1642,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     // 伸ばし直しの予測で始めた読みが後から子の候補になったときも、読み終える側に入れる。
                     worker.speculative |= worker.prefetch && speculative_keys.contains(key);
                     worker.demand = requests.get(key).cloned().unwrap_or_default();
-                    worker.urgent = worker.prefetch
-                        && urgent_keys.contains(key)
-                        && !worker.demand.iter().any(|r| !r.predicted);
+                    worker.urgent = urgent_ranks
+                        .get(key)
+                        .filter(|_| worker.prefetch && !worker.demand.iter().any(|r| !r.predicted))
+                        .map(|rank| rank.0);
                     worker.priority = checkpoint
                         .targets
                         .iter()
@@ -1655,7 +1680,13 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     .filter(|w| w.restart.lock().unwrap_or_else(|e| e.into_inner()).stop.is_none())
                     .count()
                     .saturating_sub(cap);
-                for worker in workers.values().rev().filter(speculative) {
+                // 上限を超えた分は、優先しない先読みから止める。
+                let order = workers.values().rev().filter(speculative);
+                for worker in order
+                    .clone()
+                    .filter(|w| w.urgent.is_none())
+                    .chain(order.filter(|w| w.urgent.is_some()))
+                {
                     if excess == 0 {
                         break;
                     }
@@ -1681,7 +1712,12 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let needed = queue_len.saturating_sub(yielding + free);
                     let mut victims = Vec::new();
                     for (id, worker) in &workers {
-                        if !speculative(&worker) || worker.urgent {
+                        // 優先の先読みは、それより優先度の大きい本来の読みには譲らない。
+                        if !speculative(&worker)
+                            || worker
+                                .urgent
+                                .is_some_and(|p| queue.first().is_none_or(|(_, _, head)| p < *head))
+                        {
                             continue;
                         }
                         let control = worker.restart.lock().unwrap_or_else(|e| e.into_inner());
@@ -1716,8 +1752,14 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             pref_queue.sort_by(|(ka, a), (kb, b)| (a.0, a.1, a.2, ka).cmp(&(b.0, b.1, b.2, kb)));
             let mut pref_queue_len = pref_queue.len();
             // 優先する木の先読みは、それより優先度の低い木の本来の読みより先に配る。
+            // 優先の先読みの順と比べる優先度は、優先する木の需要だけから取る。
             let (urgent_queue, pref_queue): (Vec<_>, Vec<_>) =
-                pref_queue.into_iter().partition(|(key, _)| urgent_keys.contains(key));
+                pref_queue.into_iter().partition(|(key, _)| urgent_ranks.contains_key(key));
+            let mut urgent_queue: Vec<_> =
+                urgent_queue.into_iter().map(|(key, _)| (urgent_ranks[&key], key)).collect();
+            urgent_queue.sort();
+            let urgent_queue: Vec<_> =
+                urgent_queue.into_iter().map(|(rank, key)| (key, rank)).collect();
             let mut pref_active = workers
                 .values()
                 .filter(|w| {
@@ -1765,7 +1807,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         worker.depth = 0;
                         worker.prefetch = prefetch;
                         worker.speculative = prefetch && speculative_keys.contains(&key);
-                        worker.urgent = prefetch && urgent_keys.contains(&key);
+                        worker.urgent =
+                            urgent_ranks.get(&key).filter(|_| prefetch).map(|rank| rank.0);
                         worker.priority = priority;
                         worker.demand = requests.get(&key).cloned().unwrap_or_default();
                         worker
@@ -1825,7 +1868,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 }
                 if args.speculate_at.is_some() {
                     let used = stats.speculated.intersection(&stats.used).count();
-                    let urgent = workers.values().filter(|w| w.urgent && w.busy.is_some()).count();
+                    let urgent =
+                        workers.values().filter(|w| w.urgent.is_some() && w.busy.is_some()).count();
                     progress["speculate"] = json!({"sources": stats.speculation_sources, "running": speculating.len(), "urgent": urgent, "read": stats.speculated.len(), "used": used, "unused": stats.speculated.len() - used});
                 }
                 monitor(
@@ -2324,6 +2368,21 @@ mod tests {
         cache.insert(child, reading);
         assert!(queue(&mut trees, &cache, &BTreeSet::new()).is_empty());
         assert!(trees.iter().all(|tree| tree.finished && tree.nodes.len() == 2));
+    }
+
+    #[test]
+    fn urgent_ranks_take_the_minimum_over_prioritized_trees_only() {
+        let candidate = |key: &str, level, ply| PrefetchCandidate {
+            key: key.into(),
+            level,
+            ply,
+        };
+        let a = [candidate("x", 2, 30), candidate("y", 1, 20)];
+        let b = [candidate("x", 1, 25)];
+        let ranks = urgent_ranks([(5, 2, &a[..]), (3, 7, &b[..])]);
+        assert_eq!(ranks["x"], (3, 7, 1, 25));
+        assert_eq!(ranks["y"], (5, 2, 1, 20));
+        assert_eq!(ranks.len(), 2);
     }
 
     #[test]
