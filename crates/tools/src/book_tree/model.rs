@@ -814,6 +814,59 @@ impl Tree {
         )
     }
 
+    /// 読み終えていない局面の途中の上位の手 (`tops`: 手と 1 位の値) から、親の読みを待たずに
+    /// 読み始める子を挙げる。挙げた子にも途中の上位の手か台帳の読みがあれば、その子も辿る。
+    /// 木にすでにある局面は本来の需要なので挙げない。
+    pub fn speculate(
+        &self,
+        tops: &BTreeMap<String, (Vec<String>, i32)>,
+        cache: &impl Readings,
+    ) -> Vec<PrefetchCandidate> {
+        let mut found = Vec::new();
+        if self.finished || self.failed {
+            return found;
+        }
+        let mut seen = BTreeSet::new();
+        let mut pending: VecDeque<_> = self
+            .waiting
+            .iter()
+            .filter(|(key, level)| *level < self.def.depth && cache.get(key).is_none())
+            .map(|(key, level)| (key.clone(), *level, self.ply[key], false))
+            .collect();
+        while let Some((key, level, ply, speculative)) = pending.pop_front() {
+            if level >= self.def.depth {
+                continue;
+            }
+            let read = if speculative { cache.get(&key) } else { None };
+            let (moves, best) = match (read, tops.get(&key)) {
+                (Some(reading), _) => (
+                    reading.lines().iter().map(|pv| pv.mv.clone()).collect(),
+                    reading.lines().first().map_or(0, |pv| pv.cp),
+                ),
+                (None, Some((moves, best))) => (moves.clone(), *best),
+                (None, None) => continue,
+            };
+            let follow = self.roots.contains_key(&key) || best.abs() < self.def.stop;
+            let game = self.game.get(&key).into_iter().flatten();
+            for mv in moves.iter().filter(|_| follow).chain(game) {
+                let Ok(next) = child(&key, mv) else {
+                    continue;
+                };
+                if self.level.contains_key(&next) || !seen.insert(next.clone()) {
+                    continue;
+                }
+                let next_ply = ply.saturating_add(1);
+                found.push(PrefetchCandidate {
+                    key: next.clone(),
+                    level: level + 1,
+                    ply: next_ply,
+                });
+                pending.push_back((next, level + 1, next_ply, true));
+            }
+        }
+        found
+    }
+
     /// 入力を複製せず、予算の範囲で影の手順を辿る。
     pub fn prefetch_report_borrowed<'a>(
         &self,

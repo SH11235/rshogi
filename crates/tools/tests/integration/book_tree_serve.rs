@@ -2208,3 +2208,58 @@ fn default_dispatch_and_progress_keep_normal_queue_contract() {
     assert_eq!(rows[0]["reading"]["key"], second);
     assert_eq!(rows[1]["reading"]["key"], ROOT);
 }
+
+#[test]
+fn speculation_reads_children_and_grandchildren_before_the_parent_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("workers"), "4").unwrap();
+    let child = |key: &str, mv: &str| {
+        strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen()).to_owned()
+    };
+    let root_moves = ["5i4i", "5i6i", "5i5h"];
+    let mut positions = BTreeMap::new();
+    positions.insert(
+        ROOT.to_owned(),
+        json!(
+            root_moves
+                .iter()
+                .map(|m| json!({"move":m,"cp":10,"depth":8}))
+                .collect::<Vec<_>>()
+        ),
+    );
+    let children: Vec<_> = root_moves.iter().map(|mv| child(ROOT, mv)).collect();
+    for key in &children {
+        positions.insert(key.clone(), json!([{"move":"5a4a","cp":20,"depth":8},{"move":"5a6a","cp":10,"depth":8},{"move":"5a5b","cp":0,"depth":8}]));
+    }
+    let config = state.join("engine.json");
+    let mut data = json!({"positions":positions,"unknown_resign":true,"delay":0.3,"mid_nodes":50,"log":state.join("protocol.jsonl")});
+    data[format!("delay:{ROOT}")] = json!(3.0);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    enqueue(
+        &state,
+        json!({"id":"spec","root":format!("sfen {ROOT} 1"),"own":"b","depth":2,"opts":{"opp_n":2,"stop":300,"rounds":0}}),
+    );
+    let mut command = serve_command(&state, &config, 3, 3, state.parent().unwrap());
+    command.args(["--prefetch", "--speculate-at", "0.25"]);
+    let mut server = Server(command.spawn().unwrap());
+    wait_for(|| progress(&state)["trees"][0]["finished"] == true);
+    wait_for(|| progress(&state)["speculate"]["used"].as_u64().unwrap_or(0) >= 1);
+    let report = progress(&state)["speculate"].clone();
+    stop(&state, &mut server);
+    let rows = journal_rows(&state);
+    let root_row = rows.iter().position(|r| r["reading"]["key"] == ROOT).unwrap();
+    let grandchild = child(&children[0], "5a4a");
+    for key in [&children[0], &children[1], &children[2], &grandchild] {
+        let row = rows.iter().position(|r| r["reading"]["key"] == *key).unwrap();
+        assert!(row < root_row, "{key} は親の読みより先に読み終える");
+        assert_eq!(rows[row]["prefetch"], true);
+    }
+    // 自分の手番の根は 1 位の子だけを伸ばすので、残りの 2 つの子は外れとして数える。
+    assert_eq!(report["sources"], 4);
+    assert!(report["unused"].as_u64().unwrap() >= 2, "{report}");
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(state.join("prefetch_stats.json")).unwrap()).unwrap();
+    assert_eq!(stats["speculation_sources"], 4);
+}
