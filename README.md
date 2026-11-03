@@ -106,7 +106,7 @@ rshogi-core = "0.9"
 build したマシンの SIMD (AVX2 等) が有効になります。
 
 この workspace には USI エンジンのほか、70 本を超えるバイナリを持つ tools や CSA サーバー・クライアントが入っています。
-`-p` を付けない `cargo build --release` はそのすべてを build するので、時間とディスクを多く使います。
+`-p` を付けない `cargo build --release` はこれらの crate を全部 build するので、時間とディスクを多く使います。
 使うものだけを `-p` と `--bin` で選んで build してください。Windows では実行ファイルに `.exe` が付きます。
 
 ### USI エンジンだけを使う
@@ -131,7 +131,7 @@ cargo build --release -p rshogi-usi
 cargo build --release -p tools --bin rescore_psv
 ```
 
-`--bin` を付けない `cargo build --release -p tools` はそのすべてを build します。
+`--bin` を付けない `cargo build --release -p tools` は tools のバイナリを全部 build します。
 
 ### workspace 全体 (開発用)
 
