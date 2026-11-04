@@ -516,14 +516,12 @@ fn reference_negamax(tree: &Tree, nodes: &BTreeSet<String>) -> super::model::Val
                 continue;
             }
             let value = if c == key || path.contains(&c) {
-                {
-                    let own = if key.split(' ').nth(1) == Some("b") {
-                        tree.def.draw_black
-                    } else {
-                        tree.def.draw_white
-                    };
-                    own.unwrap_or(tree.def.draw)
-                }
+                let own = if key.split(' ').nth(1) == Some("b") {
+                    tree.def.draw_black
+                } else {
+                    tree.def.draw_white
+                };
+                own.unwrap_or(tree.def.draw)
             } else {
                 let mut ancestors = path.clone();
                 ancestors.push(key.into());
