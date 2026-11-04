@@ -1669,13 +1669,14 @@ engine の異常終了・切断・watchdog・spawn/初期化の失敗は、ま�
 
 | 生成物 | 内容 |
 |---|---|
-| `journal.jsonl` | 追記専用の記録。`dispatch` (確定値)・`received` (2 局の結果)・`accept` (適用順)・`attempt_failed`・`duplicate` |
+| `journal.jsonl` | 追記専用の記録。`dispatch` (確定値)・`received` (2 局の結果)・`accept` (適用順)・`attempt_failed`・`duplicate`・`calibration` (§17)・`worker_joined` (§18) |
 | `snapshots/snapshot-NNNNNN.json` | θ と照合用の状態。`snapshot-000000.json` は開始時の θ と param 定義で、常に残す。ほかは最新 2 世代 |
 | `meta.json` | format v5。seed・L・schedule・param 定義と対局条件の fingerprint・spsa binary の sha256・最新 snapshot・status |
 | `stats.csv` / `values.csv` | journal から作る派生物 (下) |
 | `games.jsonl` | 確定した局の棋譜。§16 |
 | `state.params` | 最新 snapshot の θ (6 桁表示の view)。resume は読まない (無くても壊れていても再開できる) |
 | `final.params` | 完走時の θ |
+| `remote/w<番号>.log` | `--remote-worker` の各 worker の stderr (追記)。§18 |
 
 `--resume` (lock が残っていれば `--force-unlock` も) で再開する。meta の seed を使い、`--seed` は省略するか同じ値にする。
 param の定義と開始時の θ は gen0 snapshot から読み、`--init-from` は使わない。
@@ -1844,14 +1845,16 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
 |---|---:|---|
 | `--remote-worker CMD` | なし | worker を起動する shell コマンド。複数指定できる。coordinator の `--concurrency`・`--cpu-affinity` は使わない |
 | `--worker-stdio` | off | worker として動く (`CMD` の中で使う)。`--run-dir` は要らない。slot 数は worker の `--concurrency` |
-| `--remote-timeout-sec S` | 300 | この間 worker から何も届かなければ切れたとみなす。worker は 30 秒ごとに heartbeat を送る |
+| `--remote-timeout-sec S` | 300 | この間相手から何も届かなければ切れたとみなす (60 以上)。coordinator と worker は互いに 30 秒ごとに heartbeat を送る |
 | `--allow-worker-engine-sha256 SHA` | なし | coordinator の `--engine-path` と別の build (例: AVX-512 版) を worker に許す。複数指定できる |
 
 - worker には coordinator と同じ対局条件を渡す: engine の引数・USI option・`--threads`・`--hash-mb`・時計・`--nodes`・
   `--max-moves`・開始局面・`--engine-param-mapping`・`--adjudicate-agreement`・`--nps-scaling` と `--reference-nps`。
   起動時に worker が fingerprint を送り、違う項目があればその worker を外す (stderr に項目名と両方の値を出す)。
   ファイルを指す USI option (`EvalFile` など) はパスではなく中身の sha256 で比べるので、機械ごとにパスが違ってよい。
+  ディレクトリを指す option や `--engine-args` の中のパスは文字列のまま比べるので、全ての機械で揃える。
   engine は sha256 が coordinator の `--engine-path` か `--allow-worker-engine-sha256` と一致すること。
+  coordinator は engine を起動しないが、比べる sha256 を取るため engine と `EvalFile` などの実体を手元にも置く。
 - 摂動の値・開始局面の番号・θ₀ は coordinator が送る。worker は params ファイルを読まない。
 - 全ての worker が `ready` になるか外れるまで待ってから始める。1 台も始められなければ、fresh では旧 run の成果物を消す前に止まる。
 - `--max-lag` の既定は、始められた worker の slot の合計の 4 倍。
@@ -1861,9 +1864,12 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   (journal の `dispatch` の `clock` が attempt ごとに変わる)。
 - journal の `worker_joined` に、始められた worker の名前 (`w1`, `w2`, ... は `--remote-worker` の順)・hostname・slot 数・
   engine の sha256・較正の index を残す。各 worker の stderr は `<run-dir>/remote/w<番号>.log` に追記する。
+- worker の stdout のうち JSON でない行 (ssh 先の shell の初期化が出す motd など) は、coordinator の stderr に出して読み飛ばす。
 - worker が切れたとき (出力の終わり・壊れた行・`--remote-timeout-sec` の超過・worker の致命的なエラー) は、その worker の
   process group を止め、実行中だった pair を attempt の失敗 (`reason` が `remote worker w<番号> lost: ...`) として
   残りの worker で指し直す。失敗の数は `--max-pair-attempts` に数える。全ての worker が切れたら snapshot を残して止まる。
   切れた worker の再接続や途中参加はしない。同じ run-dir の `--resume` で worker を並べ直して再開する。
-- coordinator が終わると worker の stdin が閉じ、worker は指している対局を止めて終わる。ssh の切断も同じ扱いになるよう、
-  `ServerAliveInterval` を付けておく。
+- coordinator が終わると worker の stdin が閉じ、worker は指している対局を止めて終わる。経路が半開きのまま切れて
+  stdin の終わりが届かないときも、worker は coordinator の heartbeat が `--remote-timeout-sec` 途絶えた時点で止まる。
+  手元の ssh が早く切断に気づくよう `ServerAliveInterval` を付けておく。同じ機械で resume する前には、
+  前の worker が残っていないことを確かめる (残っていると bench と対局が CPU を取り合う)。

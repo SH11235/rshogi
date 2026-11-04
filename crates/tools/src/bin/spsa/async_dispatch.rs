@@ -898,7 +898,7 @@ fn sum_by_side(moves: &GameMoves) -> ([u64; 2], [u64; 2]) {
 }
 
 /// journal に載せない 1 局の棋譜。games.jsonl にだけ書く。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct GameDetail {
     game_id: u32,
     startpos_sfen: String,
@@ -1740,6 +1740,7 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
     if cli.reference_nps == Some(0) {
         bail!("--reference-nps must be >= 1");
     }
+    remote::validate_cli(cli)?;
     for (flag, value) in [
         ("--min-nps-ratio", cli.min_nps_ratio),
         ("--max-timeout-rate", cli.max_timeout_rate),
@@ -2066,19 +2067,21 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         .context("failed to locate the spsa binary")
         .and_then(|exe| sha256_hex_of_file(&exe))?;
 
-    // worker の bench と足切りは、fresh で旧 run の成果物を消す前に済ませる。
-    let mut fleet = if cli.remote_workers.is_empty() {
-        None
-    } else {
+    // worker の bench と足切りは、fresh では旧 run の成果物を消す前、resume では meta の照合の後に済ませる。
+    let connect = || -> Result<Option<remote::RemoteFleet>> {
+        if cli.remote_workers.is_empty() {
+            return Ok(None);
+        }
         let (_, theta0) = theta0_engine_values(cli, &params, resume)?;
-        Some(remote::RemoteFleet::connect(remote::FleetSetup {
+        Ok(Some(remote::RemoteFleet::connect(remote::FleetSetup {
             cli,
             fingerprint: &fingerprint,
             params: &params,
             application_mask: &masks.application,
             theta0,
-        })?)
+        })?))
     };
+    let mut fleet;
 
     let meta = if resume {
         let meta = load_async_meta(&meta_path)?;
@@ -2097,8 +2100,10 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 meta.game_records
             );
         }
+        fleet = connect()?;
         meta
     } else {
+        fleet = connect()?;
         let slots = fleet.as_ref().map_or(cli.concurrency, remote::RemoteFleet::total_slots);
         let max_lag = match cli.max_lag {
             Some(lag) => lag,

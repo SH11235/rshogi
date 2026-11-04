@@ -6,8 +6,9 @@
 //!
 //! やりとり: worker → `hello` (対局条件の fingerprint) → coordinator → `init` (param 名・θ₀) →
 //! worker → `ready` (`--nps-scaling` ならその機械の bench) → `task` と `done` / `failed` の繰り返し。
-//! worker は一定間隔で `heartbeat` を送り、coordinator は `--remote-timeout-sec` の間何も届かない
-//! worker を切れたとみなす。coordinator が stdin を閉じると worker は対局を止めて終わる。
+//! 両方向に一定間隔で `heartbeat` を送り、`--remote-timeout-sec` の間相手から何も届かなければ切れたとみなす
+//! (coordinator はその worker を外し、worker は対局を止めて終わる)。coordinator が stdin を閉じたときも
+//! worker は対局を止めて終わる。
 
 use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
@@ -21,6 +22,8 @@ use super::*;
 const PROTOCOL_VERSION: u32 = 1;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_REMOTE_TIMEOUT_SEC: u64 = 300;
+/// heartbeat 1 回の遅れで切らないよう、timeout は heartbeat の間隔の 2 倍以上にする。
+const MIN_REMOTE_TIMEOUT_SEC: u64 = 2 * HEARTBEAT_INTERVAL.as_secs();
 /// 終了時に stdin を閉じてから worker の終了を待つ時間。過ぎたら process group ごと止める。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -62,8 +65,10 @@ enum ToWorker {
         #[serde(with = "exact_f64")]
         theta0: Vec<f64>,
         nps_bench: bool,
+        timeout_sec: u64,
     },
     Task(WireTask),
+    Heartbeat,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,13 +78,6 @@ struct WireBench {
     depth: u32,
     warmup_depth: u32,
     positions: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct WireDetail {
-    game_id: u32,
-    startpos_sfen: String,
-    moves: GameMoves,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,7 +96,7 @@ enum FromWorker {
         pair_id: u32,
         attempt: u32,
         games: Box<[GameRecord; 2]>,
-        details: Box<[WireDetail; 2]>,
+        details: Box<[GameDetail; 2]>,
         retries: u32,
     },
     Failed {
@@ -133,6 +131,30 @@ impl Output {
         out.write_all(&line).context("failed to write to stdout")?;
         out.flush().context("failed to flush stdout")
     }
+}
+
+/// coordinator 側の `--remote-worker` 系の flag の検証 (`--dispatch async` の検証から呼ぶ)。
+pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
+    if cli.remote_workers.is_empty() {
+        for (flag, given) in [
+            ("--remote-timeout-sec", cli.remote_timeout_sec.is_some()),
+            ("--allow-worker-engine-sha256", !cli.allow_worker_engine_sha256.is_empty()),
+        ] {
+            if given {
+                bail!("{flag} は --remote-worker と一緒に指定してください");
+            }
+        }
+        return Ok(());
+    }
+    if !cfg!(unix) {
+        bail!(
+            "--remote-worker は Unix の coordinator でだけ使えます (worker を sh -c で起動するため)"
+        );
+    }
+    if cli.remote_timeout_sec.is_some_and(|sec| sec < MIN_REMOTE_TIMEOUT_SEC) {
+        bail!("--remote-timeout-sec must be >= {MIN_REMOTE_TIMEOUT_SEC}");
+    }
+    Ok(())
 }
 
 /// `--worker-stdio` の入口。続けられないエラーは `fatal` で coordinator に伝えてから終わる。
@@ -208,17 +230,22 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
         });
     }
     let inbox = spawn_stdin_reader();
-    let (wire_params, application_mask, theta0, nps_bench) = match inbox.recv() {
-        Ok(Ok(ToWorker::Init {
-            params,
-            application_mask,
-            theta0,
-            nps_bench,
-        })) => (params, application_mask, theta0, nps_bench),
-        Ok(Ok(ToWorker::Task(_))) => bail!("init より先に task が届きました"),
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Ok(()),
+    let (wire_params, application_mask, theta0, nps_bench, timeout_sec) = loop {
+        match inbox.recv() {
+            Ok(Ok(ToWorker::Init {
+                params,
+                application_mask,
+                theta0,
+                nps_bench,
+                timeout_sec,
+            })) => break (params, application_mask, theta0, nps_bench, timeout_sec),
+            Ok(Ok(ToWorker::Heartbeat)) => {}
+            Ok(Ok(ToWorker::Task(_))) => bail!("init より先に task が届きました"),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(()),
+        }
     };
+    let timeout = Duration::from_secs(timeout_sec);
     if application_mask.len() != wire_params.len() || theta0.len() != wire_params.len() {
         bail!("init の param 数が揃っていません");
     }
@@ -267,10 +294,14 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
 
     std::thread::scope(|scope| -> Result<()> {
         let pool = AsyncPool::new(scope, cli.concurrency, ctx, cli.engine_retries, &faults)?;
+        // bench の間に溜まった heartbeat は select で順に読むので、ここから数え始める。
+        let mut last_seen = Instant::now();
         loop {
             crossbeam_channel::select! {
                 recv(inbox) -> message => match message {
+                    Ok(Ok(ToWorker::Heartbeat)) => last_seen = Instant::now(),
                     Ok(Ok(ToWorker::Task(task))) => {
+                        last_seen = Instant::now();
                         if task.start_pos_index >= start_positions.len() {
                             bail!(
                                 "pair {}: start_pos_index {} が開始局面の数 {} を超えています",
@@ -304,6 +335,12 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
                     let message = message.context("worker pool closed")??;
                     out.send(&to_wire(message))?;
                 }
+                // 経路が半開きのまま切れると stdin の終わりが届かないので、coordinator の heartbeat の途絶で止める。
+                default(POLL_INTERVAL) => {
+                    if last_seen.elapsed() > timeout {
+                        bail!("coordinator から {} 秒何も届きません", timeout.as_secs());
+                    }
+                }
             }
         }
     })
@@ -317,21 +354,13 @@ fn to_wire(message: WorkerMessage) -> FromWorker {
             games,
             details,
             retries,
-        } => {
-            let [first, second] = *details;
-            let wire = |detail: GameDetail| WireDetail {
-                game_id: detail.game_id,
-                startpos_sfen: detail.startpos_sfen,
-                moves: detail.moves,
-            };
-            FromWorker::Done {
-                pair_id,
-                attempt,
-                games: Box::new(games),
-                details: Box::new([wire(first), wire(second)]),
-                retries,
-            }
-        }
+        } => FromWorker::Done {
+            pair_id,
+            attempt,
+            games: Box::new(games),
+            details,
+            retries,
+        },
         WorkerMessage::Failed {
             pair_id,
             attempt,
@@ -417,6 +446,13 @@ enum Event {
     Closed(String),
 }
 
+/// reader / writer の thread から届く event。`at` は受け取った時刻で、処理の遅れで切断と誤判定しないために使う。
+struct Received {
+    owner: usize,
+    at: Instant,
+    event: Event,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkerState {
     /// `hello` 待ち。
@@ -429,8 +465,10 @@ enum WorkerState {
 
 struct RemoteWorker {
     name: String,
-    child: Child,
-    stdin: Option<ChildStdin>,
+    /// 止めて回収するまで持つ。回収後の pid は再利用され得るので、process group の kill はその前にだけ送る。
+    child: Option<Child>,
+    /// 書き込み thread への送り口。落とすと thread が終わり、worker の stdin が閉じる。
+    outbox: Option<crossbeam_channel::Sender<Vec<u8>>>,
     state: WorkerState,
     host: String,
     slots: usize,
@@ -441,7 +479,7 @@ struct RemoteWorker {
 
 pub(super) struct RemoteFleet {
     workers: Vec<RemoteWorker>,
-    events: crossbeam_channel::Receiver<(usize, Event)>,
+    events: crossbeam_channel::Receiver<Received>,
     timeout: Duration,
     /// 実行中の (pair, attempt) を渡した worker。
     assigned: HashMap<(u32, u32), usize>,
@@ -452,9 +490,19 @@ pub(super) struct RemoteFleet {
 
 fn spawn_reader(
     owner: usize,
+    name: String,
     stdout: ChildStdout,
-    events: crossbeam_channel::Sender<(usize, Event)>,
+    events: crossbeam_channel::Sender<Received>,
 ) {
+    let send = move |event| {
+        events
+            .send(Received {
+                owner,
+                at: Instant::now(),
+                event,
+            })
+            .is_ok()
+    };
     std::thread::spawn(move || {
         let reason = (|| {
             for line in BufReader::new(stdout).lines() {
@@ -462,27 +510,84 @@ fn spawn_reader(
                     Ok(line) => line,
                     Err(error) => return format!("failed to read worker output: {error}"),
                 };
+                // ssh 先の shell の初期化 (motd・rc ファイルの echo) が stdout に書くことがある。
+                // spsa の行は必ず JSON の object なので、それ以外は読み飛ばす。
+                if !line.trim_start().starts_with('{') {
+                    if !line.trim().is_empty() {
+                        eprintln!(
+                            "remote worker {name}: ignoring non-protocol output: {line:.200}"
+                        );
+                    }
+                    continue;
+                }
                 let event = match serde_json::from_str::<FromWorker>(&line) {
                     Ok(message) => Event::Message(Box::new(message)),
                     Err(error) => {
                         return format!("invalid message from worker: {error}: {line:.200}");
                     }
                 };
-                if events.send((owner, event)).is_err() {
+                if !send(event) {
                     return String::new();
                 }
             }
             "worker closed its output".into()
         })();
-        let _ = events.send((owner, Event::Closed(reason)));
+        send(Event::Closed(reason));
     });
 }
 
-/// `sh -c` とその子 (ssh 等) を process group ごと止める。
-fn kill_group(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
+/// worker の stdin へ書く thread。worker が読まなくなっても coordinator の thread は止まらない
+/// (詰まった書き込みは、timeout でその worker の process group を止めたときに失敗して終わる)。
+/// 送るものが無い間は heartbeat を送る。
+fn spawn_writer(
+    owner: usize,
+    mut stdin: ChildStdin,
+    events: crossbeam_channel::Sender<Received>,
+) -> Result<crossbeam_channel::Sender<Vec<u8>>> {
+    let heartbeat = to_line(&ToWorker::Heartbeat)?;
+    let (tx, rx) = unbounded::<Vec<u8>>();
+    std::thread::spawn(move || {
+        loop {
+            let line = match rx.recv_timeout(HEARTBEAT_INTERVAL) {
+                Ok(line) => line,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => heartbeat.clone(),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
+            if let Err(error) = stdin.write_all(&line).and_then(|()| stdin.flush()) {
+                let _ = events.send(Received {
+                    owner,
+                    at: Instant::now(),
+                    event: Event::Closed(format!("failed to send to worker: {error}")),
+                });
+                break;
+            }
+        }
+    });
+    Ok(tx)
+}
+
+/// leader を回収せずに (pid を手放さずに) 終わったかを見る。
+fn leader_exited(child: &Child) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_to_string(format!("/proc/{}/stat", child.id())) {
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state == "Z"),
+            Err(_) => true,
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = child;
+        false
+    }
+}
+
+/// `sh -c` とその子 (ssh 等) を process group ごと止めて leader を回収する。leader が先に終わっていても
+/// 子が group に残り得るので、group への kill は常に送る (回収前なので pid は再利用されていない)。
+fn kill_group(mut child: Child) {
     #[cfg(unix)]
     let _ = Command::new("kill")
         .args(["-KILL", "--", &format!("-{}", child.id())])
@@ -532,13 +637,14 @@ impl RemoteFleet {
                 .spawn()
                 .with_context(|| format!("failed to start remote worker {name}: {command}"))?;
             let stdout = child.stdout.take().context("worker stdout is not piped")?;
-            let stdin = child.stdin.take();
-            spawn_reader(owner, stdout, tx.clone());
+            let stdin = child.stdin.take().context("worker stdin is not piped")?;
+            spawn_reader(owner, name.clone(), stdout, tx.clone());
+            let outbox = spawn_writer(owner, stdin, tx.clone())?;
             eprintln!("remote worker {name}: {command} (stderr: {})", log_path.display());
             fleet.workers.push(RemoteWorker {
                 name,
-                child,
-                stdin,
+                child: Some(child),
+                outbox: Some(outbox),
                 state: WorkerState::Starting,
                 host: String::new(),
                 slots: 0,
@@ -562,6 +668,7 @@ impl RemoteFleet {
             application_mask: setup.application_mask.to_vec(),
             theta0: setup.theta0,
             nps_bench: cli.nps_scaling,
+            timeout_sec,
         })?;
         let mut engine_shas = vec![setup.fingerprint.engine_sha256.clone()];
         engine_shas.extend(cli.allow_worker_engine_sha256.iter().map(|sha| sha.to_lowercase()));
@@ -574,10 +681,12 @@ impl RemoteFleet {
             .iter()
             .any(|w| matches!(w.state, WorkerState::Starting | WorkerState::Initializing))
         {
-            fleet.expire();
-            let (owner, event) = match fleet.events.recv_timeout(POLL_INTERVAL) {
+            let Received { owner, at, event } = match fleet.events.recv_timeout(POLL_INTERVAL) {
                 Ok(received) => received,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    fleet.expire();
+                    continue;
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     for owner in 0..fleet.workers.len() {
                         fleet.lose(owner, "worker output closed");
@@ -589,7 +698,7 @@ impl RemoteFleet {
             if worker.state == WorkerState::Lost {
                 continue;
             }
-            worker.last_seen = Instant::now();
+            worker.last_seen = at;
             let message = match event {
                 Event::Message(message) => *message,
                 Event::Closed(reason) => {
@@ -642,7 +751,7 @@ impl RemoteFleet {
                                 engine_sha256: fingerprint.engine_sha256,
                                 bench: None,
                             });
-                            fleet.write(owner, &init);
+                            fleet.write(owner, init.clone());
                         }
                         Err(error) => fleet.lose(owner, &format!("{error:#}")),
                     }
@@ -683,6 +792,7 @@ impl RemoteFleet {
                 (_, FromWorker::Fatal { message }) => fleet.lose(owner, &message),
                 (state, _) => fleet.lose(owner, &format!("unexpected message in state {state:?}")),
             }
+            fleet.expire();
         }
         fleet
             .joined
@@ -714,15 +824,14 @@ impl RemoteFleet {
         self.workers[owner].clock = Some(clock);
     }
 
-    /// 1 行を送る。書けなければその worker を切る。
-    fn write(&mut self, owner: usize, line: &[u8]) {
-        let worker = &mut self.workers[owner];
-        let written = match worker.stdin.as_mut() {
-            Some(stdin) => stdin.write_all(line).and_then(|()| stdin.flush()),
-            None => Err(std::io::Error::other("stdin is closed")),
-        };
-        if let Err(error) = written {
-            self.lose(owner, &format!("failed to send to worker: {error}"));
+    /// 1 行を書き込み thread に渡す。thread が終わっていればその worker を切る。
+    fn write(&mut self, owner: usize, line: Vec<u8>) {
+        let sent = self.workers[owner]
+            .outbox
+            .as_ref()
+            .is_some_and(|outbox| outbox.send(line).is_ok());
+        if !sent {
+            self.lose(owner, "worker input is closed");
         }
     }
 
@@ -735,8 +844,10 @@ impl RemoteFleet {
         eprintln!("remote worker {} ({}) lost: {reason}", worker.name, worker.host);
         worker.state = WorkerState::Lost;
         worker.in_flight = 0;
-        worker.stdin = None;
-        kill_group(&mut worker.child);
+        worker.outbox = None;
+        if let Some(child) = worker.child.take() {
+            kill_group(child);
+        }
         let reason = format!("remote worker {} lost: {reason}", worker.name);
         let mut lost: Vec<(u32, u32)> = self
             .assigned
@@ -766,12 +877,13 @@ impl RemoteFleet {
     }
 
     /// 対局中の event を処理し、coordinator へ渡す結果があれば返す。
-    fn handle(&mut self, owner: usize, event: Event) -> Option<WorkerMessage> {
+    fn handle(&mut self, received: Received) -> Option<WorkerMessage> {
+        let Received { owner, at, event } = received;
         let worker = &mut self.workers[owner];
         if worker.state == WorkerState::Lost {
             return None;
         }
-        worker.last_seen = Instant::now();
+        worker.last_seen = at;
         let message = match event {
             Event::Message(message) => *message,
             Event::Closed(reason) => {
@@ -788,17 +900,11 @@ impl RemoteFleet {
                 details,
                 retries,
             } => {
-                let [first, second] = *details;
-                let detail = |wire: WireDetail| GameDetail {
-                    game_id: wire.game_id,
-                    startpos_sfen: wire.startpos_sfen,
-                    moves: wire.moves,
-                };
                 let message = WorkerMessage::Done {
                     pair_id,
                     attempt,
                     games: *games,
-                    details: Box::new([detail(first), detail(second)]),
+                    details,
                     retries,
                 };
                 (pair_id, attempt, message)
@@ -867,7 +973,7 @@ impl Executor for RemoteFleet {
         }))?;
         self.assigned.insert((task.pair_id, task.attempt), owner);
         self.workers[owner].in_flight += 1;
-        self.write(owner, &line);
+        self.write(owner, line);
         Ok(())
     }
 
@@ -882,8 +988,8 @@ impl Executor for RemoteFleet {
                 bail!(reason);
             }
             match self.events.recv_timeout(POLL_INTERVAL) {
-                Ok((owner, event)) => {
-                    if let Some(message) = self.handle(owner, event) {
+                Ok(received) => {
+                    if let Some(message) = self.handle(received) {
                         return Ok(Ok(message));
                     }
                 }
@@ -898,14 +1004,23 @@ impl Executor for RemoteFleet {
     }
 
     fn try_recv(&mut self) -> Option<Result<WorkerMessage>> {
-        self.expire();
+        // 届いている event を先に処理してから期限を見る (処理の遅れを切断と取り違えない)。
+        let mut drained = false;
         loop {
             if let Some(message) = self.pending.pop_front() {
                 return Some(message);
             }
-            let (owner, event) = self.events.try_recv().ok()?;
-            if let Some(message) = self.handle(owner, event) {
-                return Some(Ok(message));
+            match self.events.try_recv() {
+                Ok(received) => {
+                    if let Some(message) = self.handle(received) {
+                        return Some(Ok(message));
+                    }
+                }
+                Err(_) if drained => return None,
+                Err(_) => {
+                    drained = true;
+                    self.expire();
+                }
             }
         }
     }
@@ -921,14 +1036,16 @@ impl Executor for RemoteFleet {
 impl Drop for RemoteFleet {
     fn drop(&mut self) {
         for worker in &mut self.workers {
-            worker.stdin = None;
+            worker.outbox = None;
         }
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         for worker in &mut self.workers {
-            while Instant::now() < deadline && matches!(worker.child.try_wait(), Ok(None)) {
-                std::thread::sleep(Duration::from_millis(50));
+            if let Some(child) = worker.child.take() {
+                while Instant::now() < deadline && !leader_exited(&child) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                kill_group(child);
             }
-            kill_group(&mut worker.child);
         }
     }
 }

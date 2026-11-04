@@ -1,5 +1,6 @@
 //! `spsa --dispatch async --remote-worker` の結合テスト。worker は同じ機械の別 process
 //! (`spsa --worker-stdio`) として起動し、stdin/stdout のやりとり・取りこぼし・再配布を確かめる。
+#![cfg(unix)]
 
 use std::path::Path;
 
@@ -70,11 +71,14 @@ fn stderr(output: &std::process::Output) -> String {
 #[test]
 fn two_remote_workers_finish_the_run() {
     let test = PoolTest::new();
+    // ssh 先の shell が stdout に書く行 (motd 等) は読み飛ばす。
     let workers = [
-        worker_command(2, &NODES, &[]),
+        format!("echo welcome; {}", worker_command(2, &NODES, &[])),
         worker_command(2, &NODES, &[]),
     ];
-    assert_success(&run(&test, "value_driven", 8, &NODES, &workers, &[], &[]));
+    let output = run(&test, "value_driven", 8, &NODES, &workers, &[], &[]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("w1: ignoring non-protocol output: welcome"));
     let meta = test.meta();
     assert_eq!(meta["status"], "completed");
     assert_eq!(meta["completed_pairs"], 8);
@@ -220,4 +224,60 @@ fn resume_with_remote_workers_appends_new_calibrations() {
         .collect();
     assert_eq!(indexes, [0, 1, 2, 3]);
     assert_eq!(test.meta()["tc_calibrations"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn worker_that_cannot_start_reports_its_error() {
+    let test = PoolTest::new();
+    let broken = worker_command(1, &NODES, &[]).replace(FAKE_ENGINE_BIN, "/nonexistent/engine");
+    let workers = [worker_command(1, &NODES, &[]), broken];
+    let output = run(&test, "value_driven", 2, &NODES, &workers, &[], &[]);
+    assert_success(&output);
+    let stderr = stderr(&output);
+    assert!(stderr.contains("remote worker w2 () lost:"), "{stderr}");
+    assert!(stderr.contains("/nonexistent/engine"), "{stderr}");
+    assert_eq!(kinds(&test, "worker_joined").len(), 1);
+}
+
+#[test]
+fn retried_pair_uses_the_clock_of_the_machine_that_plays_it() {
+    let test = PoolTest::new();
+    let limit = ["--btime", "20000", "--binc", "200"];
+    let extra = ["--nps-scaling", "--random-startpos", "false"];
+    let workers = [
+        worker_command(1, &limit, &extra),
+        format!(
+            "{} | {{ for i in 1 2 3; do IFS= read -r line && printf '%s\\n' \"$line\"; done; }}",
+            worker_command(2, &limit, &extra)
+        ),
+    ];
+    let env = [("SPSA_TEST_ENGINE_BENCH_NODES", Path::new("35000"))];
+    assert_success(&run(&test, "fischer_script", 6, &limit, &workers, &extra, &env));
+    let failed = kinds(&test, "attempt_failed");
+    assert!(!failed.is_empty());
+    let dispatches = kinds(&test, "dispatch");
+    for f in &failed {
+        let calibrations: Vec<_> = dispatches
+            .iter()
+            .filter(|d| d["pair_id"] == f["pair_id"])
+            .map(|d| d["clock"]["calibration"].as_u64().unwrap())
+            .collect();
+        // w2 (較正 1) で切れた pair は w1 (較正 0) で指し直す。
+        assert_eq!(calibrations.first(), Some(&1), "{calibrations:?}");
+        assert_eq!(calibrations.last(), Some(&0), "{calibrations:?}");
+    }
+}
+
+#[test]
+fn remote_timeout_must_cover_two_heartbeats() {
+    let test = PoolTest::new();
+    let workers = [worker_command(1, &NODES, &[])];
+    let output =
+        run(&test, "value_driven", 2, &NODES, &workers, &["--remote-timeout-sec", "59"], &[]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("--remote-timeout-sec must be >= 60"),
+        "{}",
+        stderr(&output)
+    );
 }
