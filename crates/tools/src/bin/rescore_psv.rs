@@ -4944,8 +4944,9 @@ where
 
     // ---- GPU worker × num_sessions: 推論 + 後処理 ----
     // 最初のバッチは先導役 (各 `--onnx-gpu-id` 項目の 1 本目) が 1 本ずつ順に推論する
-    // (`WarmupGate`)。cold cache でもエンジンの構築とキャッシュの書き込みが競合せず、後の
-    // セッションは書かれたキャッシュを読むので、同じ GPU のセッションは同一エンジンで推論する。
+    // (`WarmupGate`)。`--onnx-tensorrt-cache` を指定したときは、cold cache でもエンジンの構築と
+    // キャッシュの書き込みが競合せず、後のセッションは書かれたキャッシュを読むので、同じ GPU の
+    // セッションは同一エンジンで推論する (指定しないとキャッシュは無効で、各セッションが作る)。
     let warmup = WarmupGate::new(*warmup_leaders);
     let want_replacement = replacement_output.is_some();
     // worker 本体。worker 0 は主スレッドで直接実行する（writer 分離後の主スレッドを
@@ -7402,13 +7403,21 @@ mod onnx_sessions_tests {
         let quiet = |took_rx: &mpsc::Receiver<(usize, u64)>| {
             assert!(took_rx.recv_timeout(Duration::from_millis(50)).is_err());
         };
+        let next_took = |took_rx: &mpsc::Receiver<(usize, u64)>| {
+            took_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("expected a worker to take a batch")
+        };
         let took_by = |took_rx: &mpsc::Receiver<(usize, u64)>, n: usize| {
-            let mut took: Vec<(usize, u64)> = (0..n).map(|_| took_rx.recv().unwrap()).collect();
+            let mut took: Vec<(usize, u64)> = (0..n).map(|_| next_took(took_rx)).collect();
             took.sort();
             took
         };
 
         let written = thread::scope(|scope| {
+            // assertion が失敗して unwind したときも送信側を drop し、待っている worker を
+            // recv の失敗で抜けさせる (scope の join で止まらないように)。
+            let release_txs = release_txs;
             let pipeline = scope.spawn(|| {
                 run_simulated_pipeline(WORKERS, 2, 6, None, |worker, seq| {
                     took_tx.lock().unwrap().send((worker, seq)).unwrap();
@@ -7417,7 +7426,7 @@ mod onnx_sessions_tests {
                 })
             });
             // 最初は先導役 0 だけが取る。
-            assert_eq!(took_rx.recv().unwrap(), (0, 0));
+            assert_eq!(next_took(&took_rx), (0, 0));
             quiet(&took_rx);
             release_txs[0].send(()).unwrap();
             // 先導役 0 が終えると先導役 1 の番。2 本目の worker はまだ取らない。
