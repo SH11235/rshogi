@@ -55,9 +55,12 @@ pub(super) struct ValueArgs {
     /// curated の行がある局面でも、main の source が置き換えてよいものなら main を伝播後の 1 位に替える
     #[arg(long)]
     replace_curated: bool,
-    /// 確認点で、候補の外の手が候補の最善よりこの値以上良ければ印を付ける
+    /// 確認点で、候補の外の手が候補の最善よりこの値以上良ければ印を付ける。登録後の点検の線も兼ねる
     #[arg(long, default_value_t = 40)]
     line: i32,
+    /// 確認点で、候補の外の手があれば `--line` によらず一番良い手に印を付ける (足して伸ばす手を集めるとき)
+    #[arg(long)]
+    mark_all: bool,
     /// 先手を自分として解くときの千日手の値 (対局の DrawValueBlack に揃える)
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
@@ -90,6 +93,7 @@ impl ValueArgs {
             alt_gap: 40,
             replace_curated: false,
             line: 40,
+            mark_all: false,
             draw_value_black: -70,
             draw_value_white: 70,
             apply,
@@ -224,12 +228,15 @@ fn leaf_value(reading: &Reading) -> i32 {
 }
 
 /// 部分木を伝播する。出口は読みの手 (元データで止めた出口は元データの値)、途中の局面は部分木の手を持つ。
+///
+/// 確認点では、候補の外の手のうち一番良い手が候補の最善より `mark_line` 以上良ければ印を付ける。
+/// `None` なら差によらず印を付ける。
 pub(super) fn value_root(
     root: &RootInfo,
     tree: &Subtree,
     input: &ValueInput,
     draws: DrawValues,
-    line: i32,
+    mark_line: Option<i32>,
     work: &Path,
 ) -> Result<RootValues> {
     let ValueInput {
@@ -370,7 +377,9 @@ pub(super) fn value_root(
                     .filter(|p| !moves.iter().any(|m| m.mv == p.mv))
                     .max_by_key(|p| p.cp);
                 if let Some(p) = outside
-                    && i64::from(p.cp) >= i64::from(best.value) + i64::from(line)
+                    && mark_line.is_none_or(|line| {
+                        i64::from(p.cp) >= i64::from(best.value) + i64::from(line)
+                    })
                 {
                     result.marks.push(Mark {
                         key: key.to_owned(),
@@ -583,11 +592,12 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         cond: &cond,
     };
 
+    let mark_line = (!args.mark_all).then_some(args.line);
     let all = meta
         .roots
         .iter()
         .zip(&trees)
-        .map(|(root, tree)| value_root(root, tree, &input, draws, args.line, work.path()))
+        .map(|(root, tree)| value_root(root, tree, &input, draws, mark_line, work.path()))
         .collect::<Result<Vec<_>>>()?;
     let marked: BTreeSet<&str> =
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
