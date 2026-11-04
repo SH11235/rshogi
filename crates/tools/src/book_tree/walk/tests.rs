@@ -139,7 +139,7 @@ fn book_first_uses_book_moves_and_falls_back_to_frequency_outside_the_book() {
     let rows = walk(&mut sources(Some(freq()), Some(book())), "b", first);
     assert!(close(find(&rows, Stop::Own, &after(&a, &["5a5b"])).weight, 0.9));
     assert!(close(find(&rows, Stop::Own, &after(&a, &["5a4b"])).weight, 0.1));
-    assert!(rows.iter().all(|r| r.stop != Stop::Rare));
+    assert!(close(rows.iter().map(|r| r.weight).sum(), 1.0));
     // 定跡に無い局面は頻度で指す。
     let rows = walk(&mut sources(Some(freq()), Some(Table::new())), "b", first);
     assert!(close(find(&rows, Stop::Own, &after(&a, &["5a5b"])).weight, 0.6));
