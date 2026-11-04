@@ -86,11 +86,24 @@ pub fn measure<K, F>(
 where
     F: Fn(usize, &AtomicBool) -> Result<(EngineProcess, K)> + Sync,
 {
-    let cancel = AtomicBool::new(false);
+    measure_cancellable(slots, threads, timeout_margin_ms, &AtomicBool::new(false), prepare)
+}
+
+/// [`measure`] に外からの中止を足したもの。`cancel` が立つと、各 slot は探索中の局面を終えた所で
+/// [`BenchCancelled`] で止まる。
+pub fn measure_cancellable<K, F>(
+    slots: usize,
+    threads: usize,
+    timeout_margin_ms: u64,
+    cancel: &AtomicBool,
+    prepare: F,
+) -> Result<BenchResult>
+where
+    F: Fn(usize, &AtomicBool) -> Result<(EngineProcess, K)> + Sync,
+{
     let per_slot: Vec<Result<(u64, u64)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..slots)
             .map(|idx| {
-                let cancel = &cancel;
                 let prepare = &prepare;
                 scope.spawn(move || {
                     let result = bench_slot(idx, timeout_margin_ms, prepare, cancel);

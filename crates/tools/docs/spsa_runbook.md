@@ -1871,5 +1871,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   切れた worker の再接続や途中参加はしない。同じ run-dir の `--resume` で worker を並べ直して再開する。
 - coordinator が終わると worker の stdin が閉じ、worker は指している対局を止めて終わる。経路が半開きのまま切れて
   stdin の終わりが届かないときも、worker は coordinator の heartbeat が `--remote-timeout-sec` 途絶えた時点で止まる。
+  `--nps-scaling` の bench の途中でも同じで、探索中の局面を終えた所で bench を止める。
+- 完走済みの run を `--resume` したときは worker を起動しない。
   手元の ssh が早く切断に気づくよう `ServerAliveInterval` を付けておく。同じ機械で resume する前には、
   前の worker が残っていないことを確かめる (残っていると bench と対局が CPU を取り合う)。

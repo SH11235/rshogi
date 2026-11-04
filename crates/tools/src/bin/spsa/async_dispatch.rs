@@ -385,6 +385,8 @@ struct AsyncCore<'a> {
     counters: CoreCounters,
     /// 再生中、直前の `received` の pair。続く `accept` の後も保留なら保留回数に数える。
     replay_hold_check: Option<u32>,
+    /// 再生した journal に `worker_joined` があった。それ以降の指し直しは時計が変わり得る。
+    replay_remote: bool,
 }
 
 impl<'a> AsyncCore<'a> {
@@ -400,6 +402,7 @@ impl<'a> AsyncCore<'a> {
             retry: BTreeSet::new(),
             counters: CoreCounters::default(),
             replay_hold_check: None,
+            replay_remote: false,
         }
     }
 
@@ -777,10 +780,12 @@ impl<'a> AsyncCore<'a> {
                 if let Some(entry) = self.pairs.get_mut(&pair_id) {
                     // 失敗した attempt (retry_wait) か、coordinator の停止で中断した attempt
                     // (in_flight のまま次の dispatch が来る) だけを置き換える。確定値は同じであること。
-                    // 時計は指す機械で変わり得る (`--remote-worker`) ので比べない。
+                    // `--remote-worker` の run では時計が指す機械で変わり得るので比べない。
                     let mut expected = entry.dispatch.clone();
                     expected.attempt += 1;
-                    expected.clock = dispatch.clock;
+                    if self.replay_remote {
+                        expected.clock = dispatch.clock;
+                    }
                     if entry.status == PairStatus::Held || *dispatch != expected {
                         bail!("journal: unexpected re-dispatch of pair {pair_id}");
                     }
@@ -839,7 +844,11 @@ impl<'a> AsyncCore<'a> {
                 Ok(None)
             }
             // 時計は dispatch が持つので、再生では状態を変えない。
-            JournalRecord::Calibration(_) | JournalRecord::WorkerJoined { .. } => Ok(None),
+            JournalRecord::Calibration(_) => Ok(None),
+            JournalRecord::WorkerJoined { .. } => {
+                self.replay_remote = true;
+                Ok(None)
+            }
         }
     }
 
@@ -2100,7 +2109,12 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 meta.game_records
             );
         }
-        fleet = connect()?;
+        // 完走済みの run は対局しないので worker を起動しない (bench と journal への追記を避ける)。
+        fleet = if meta.status == RunStatus::Completed {
+            None
+        } else {
+            connect()?
+        };
         meta
     } else {
         fleet = connect()?;
@@ -2171,7 +2185,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     };
     // fresh は旧 run の成果物を消す前に測り、足切りに掛かる機械では何も書かずに止める。
     // resume は journal を再生して残りの pair 数 (= 本番の worker 数) を確かめてから測る。
-    let local_nps_scaling = cli.nps_scaling && fleet.is_none();
+    let local_nps_scaling = cli.nps_scaling && cli.remote_workers.is_empty();
     let fresh_bench = if local_nps_scaling && !resume {
         Some(run_nps_bench(bench_input(cli.concurrency.min(total_pairs as usize)))?)
     } else {
@@ -2498,7 +2512,8 @@ fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
         cpu_affinities: cpu_affinities.as_deref(),
     };
     eprintln!("nps bench: {} slot(s) x {} thread(s) ...", input.slots, cli.threads);
-    let result = nps_bench::measure(ctx, input.slots, &theta0, cli.threads)?;
+    let result =
+        nps_bench::measure(ctx, input.slots, &theta0, cli.threads, &AtomicBool::new(false))?;
     eprintln!("{}", result.summary());
     result.ensure_above_floor(
         reference_nps(cli),
@@ -3269,6 +3284,46 @@ mod tests {
         );
         assert!(result.stop.is_none(), "{:?}", result.stop);
         assert!(core.is_complete());
+    }
+
+    #[test]
+    fn remote_retry_with_a_new_clock_replays_bit_for_bit() {
+        let fixture = Fixture::new(vec![param("X", false, 50.0, (0.0, 100.0), 4.0)], None, 3);
+        let clock = |calibration| PairClock {
+            btime: 1000 + u64::from(calibration),
+            binc: 10,
+            calibration,
+        };
+        let mut core = fixture.core(4);
+        core.env.clock_per_attempt = true;
+        let mut journal = vec![JournalRecord::WorkerJoined {
+            name: "w1".into(),
+            host: "h".into(),
+            slots: 1,
+            engine_sha256: "e".into(),
+            calibration: Some(0),
+        }];
+        core.env.clock = Some(clock(0));
+        journal.push(JournalRecord::Dispatch(core.next_dispatch().unwrap().unwrap()));
+        let (failed, _) = core.on_failed(0, 1, "lost".into()).unwrap();
+        let mut outputs = vec![failed];
+        core.env.clock = Some(clock(1));
+        let retry = core.next_dispatch().unwrap().unwrap();
+        assert_eq!((retry.attempt, retry.clock), (2, Some(clock(1))));
+        outputs.push(CoreOutput::Journal(JournalRecord::Dispatch(retry)));
+        outputs.extend(core.on_done(0, 2, games(1, -1)).unwrap());
+        journal.extend(outputs.into_iter().filter_map(|output| match output {
+            CoreOutput::Journal(record) => Some(record),
+            CoreOutput::Applied(_) => None,
+        }));
+
+        let replayed = replay_all(&fixture, 4, &journal);
+        assert_eq!(theta_bits(&replayed.params), theta_bits(&core.params));
+        assert_eq!(replayed.checkpoint(), core.checkpoint());
+        // worker_joined の無い (local の) journal では、時計の違う指し直しを拒む。
+        let mut local = fixture.core(4);
+        let rejected = journal[1..].iter().try_for_each(|record| local.replay(record).map(drop));
+        assert!(rejected.is_err());
     }
 
     #[test]

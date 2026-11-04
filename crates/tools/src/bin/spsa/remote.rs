@@ -121,17 +121,51 @@ fn to_line<T: Serialize>(message: &T) -> Result<Vec<u8>> {
 // worker (`--worker-stdio`)
 // =============================================================================
 
-/// stdout は応答専用。heartbeat の thread と行が混ざらないよう 1 行ずつ lock して書く。
-struct Output(Mutex<std::io::Stdout>);
+/// stdout (応答専用) へ書く thread への送り口。coordinator が読まなくなって書き込みが詰まっても、
+/// 送る側 (結果の受け渡し・切断の監視) は止まらない。行は 1 本の thread が順に書くので混ざらない。
+struct Output {
+    tx: Mutex<Option<crossbeam_channel::Sender<Vec<u8>>>>,
+    done: crossbeam_channel::Receiver<()>,
+}
 
 impl Output {
+    fn spawn(mut writer: impl Write + Send + 'static) -> Self {
+        let (tx, rx) = unbounded::<Vec<u8>>();
+        let (done_tx, done) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            for line in rx {
+                if writer.write_all(&line).and_then(|()| writer.flush()).is_err() {
+                    break;
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        Self {
+            tx: Mutex::new(Some(tx)),
+            done,
+        }
+    }
+
     fn send(&self, message: &FromWorker) -> Result<()> {
         let line = to_line(message)?;
-        let mut out = self.0.lock().map_err(|_| anyhow::anyhow!("stdout lock poisoned"))?;
-        out.write_all(&line).context("failed to write to stdout")?;
-        out.flush().context("failed to flush stdout")
+        let tx = self.tx.lock().map_err(|_| anyhow::anyhow!("stdout lock poisoned"))?;
+        match tx.as_ref() {
+            Some(tx) => tx.send(line).map_err(|_| anyhow::anyhow!("stdout is closed")),
+            None => bail!("stdout is closed"),
+        }
+    }
+
+    /// 送り口を閉じ、溜まった行を書き終えるのを `wait` まで待つ (詰まっていれば待たずに終わる)。
+    fn finish(&self, wait: Duration) {
+        if let Ok(mut tx) = self.tx.lock() {
+            tx.take();
+        }
+        let _ = self.done.recv_timeout(wait);
     }
 }
+
+/// 終了時に、最後の行 (`fatal` など) を書き出すのを待つ上限。
+const OUTPUT_FINISH_WAIT: Duration = Duration::from_secs(5);
 
 /// coordinator 側の `--remote-worker` 系の flag の検証 (`--dispatch async` の検証から呼ぶ)。
 pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
@@ -173,13 +207,14 @@ pub(crate) fn run_worker(cli: &Cli) -> Result<()> {
     {
         bail!("--nps-scaling では Threads を --usi-option ではなく --threads で指定してください");
     }
-    let out = Arc::new(Output(Mutex::new(std::io::stdout())));
+    let out = Arc::new(Output::spawn(std::io::stdout()));
     let result = serve(cli, &out);
     if let Err(error) = &result {
         let _ = out.send(&FromWorker::Fatal {
             message: format!("{error:#}"),
         });
     }
+    out.finish(OUTPUT_FINISH_WAIT);
     result
 }
 
@@ -278,7 +313,17 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
     };
     let bench = if nps_bench {
         eprintln!("nps bench: {} slot(s) x {} thread(s) ...", cli.concurrency, cli.threads);
-        let result = nps_bench::measure(ctx, cli.concurrency, &theta0, cli.threads)?;
+        let cancel = AtomicBool::new(false);
+        let finished = AtomicBool::new(false);
+        let (result, watched) = std::thread::scope(|scope| {
+            let watcher =
+                scope.spawn(|| watch_coordinator_during_bench(&inbox, &finished, &cancel, timeout));
+            let result = nps_bench::measure(ctx, cli.concurrency, &theta0, cli.threads, &cancel);
+            finished.store(true, Ordering::Release);
+            (result, watcher.join())
+        });
+        watched.map_err(|_| anyhow::anyhow!("bench watcher panic"))??;
+        let result = result?;
         eprintln!("{}", result.summary());
         Some(WireBench {
             slot_nps: result.slot_nps,
@@ -344,6 +389,40 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
             }
         }
     })
+}
+
+/// bench の間も coordinator の切断 (stdin の終わり・heartbeat の途絶) を見て、切れたら bench を止める。
+/// bench が終わると (`finished`) 何もせずに戻る。
+fn watch_coordinator_during_bench(
+    inbox: &crossbeam_channel::Receiver<Result<ToWorker>>,
+    finished: &AtomicBool,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<()> {
+    let mut last_seen = Instant::now();
+    let stop = |error: anyhow::Error| {
+        cancel.store(true, Ordering::Release);
+        Err(error)
+    };
+    while !finished.load(Ordering::Acquire) {
+        match inbox.recv_timeout(POLL_INTERVAL) {
+            Ok(Ok(ToWorker::Heartbeat)) => last_seen = Instant::now(),
+            Ok(Ok(_)) => return stop(anyhow::anyhow!("ready より先に init / task が届きました")),
+            Ok(Err(error)) => return stop(error),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if last_seen.elapsed() > timeout {
+                    return stop(anyhow::anyhow!(
+                        "coordinator から {} 秒何も届きません",
+                        timeout.as_secs()
+                    ));
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return stop(anyhow::anyhow!("coordinator が入力を閉じました"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn to_wire(message: WorkerMessage) -> FromWorker {
@@ -578,6 +657,7 @@ fn leader_exited(child: &Child) -> bool {
             Err(_) => true,
         }
     }
+    // 回収せずに終了を知る手段が std に無いので、Linux 以外では終了時に猶予を使い切ってから止める。
     #[cfg(not(target_os = "linux"))]
     {
         let _ = child;
@@ -588,12 +668,18 @@ fn leader_exited(child: &Child) -> bool {
 /// `sh -c` とその子 (ssh 等) を process group ごと止めて leader を回収する。leader が先に終わっていても
 /// 子が group に残り得るので、group への kill は常に送る (回収前なので pid は再利用されていない)。
 fn kill_group(mut child: Child) {
+    // libc::kill は unsafe なので、group への送信は kill コマンドに任せる。
     #[cfg(unix)]
-    let _ = Command::new("kill")
+    if let Err(error) = Command::new("kill")
         .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        eprintln!(
+            "warning: kill を起動できず worker の process group を止められません (sh の子が残り得ます): {error}"
+        );
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -1096,6 +1182,32 @@ mod tests {
                 .unwrap();
         let keys: Vec<&str> = diff.iter().map(|d| d.split(':').next().unwrap()).collect();
         assert_eq!(keys, ["threads", "usi_option_files", "usi_options"]);
+    }
+
+    /// 書き込みが詰まった stdout を模す (書き込みが永久に戻らない)。
+    struct StuckWriter;
+
+    impl Write for StuckWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::park();
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(0)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stuck_stdout_does_not_block_the_sender() {
+        let out = Output::spawn(StuckWriter);
+        let start = Instant::now();
+        for _ in 0..1000 {
+            out.send(&FromWorker::Heartbeat).unwrap();
+        }
+        out.finish(Duration::from_millis(100));
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(out.send(&FromWorker::Heartbeat).is_err());
     }
 
     #[test]

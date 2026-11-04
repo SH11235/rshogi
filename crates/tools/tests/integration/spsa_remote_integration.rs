@@ -268,6 +268,9 @@ fn retried_pair_uses_the_clock_of_the_machine_that_plays_it() {
     }
 }
 
+/// heartbeat の途絶による切断そのものは、timeout の下限 (60 秒) のため結合テストにしない。
+/// 途絶の判定は stdin の終わりと同じ停止経路を通る (`worker_stops_its_bench_when_the_coordinator_goes_away`、
+/// `pairs_of_a_lost_worker_are_played_again_elsewhere`)。
 #[test]
 fn remote_timeout_must_cover_two_heartbeats() {
     let test = PoolTest::new();
@@ -280,4 +283,60 @@ fn remote_timeout_must_cover_two_heartbeats() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn worker_stops_its_bench_when_the_coordinator_goes_away() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // 1 局面 3 秒の bench (8 局面で 24 秒) の途中で stdin を閉じると、探索中の局面を終えた所で止まる。
+    let limit = ["--btime", "20000", "--binc", "200"];
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(worker_command(1, &limit, &["--nps-scaling"]))
+        .env("SPSA_TEST_ENGINE_MODE", "fischer_script")
+        .env("SPSA_TEST_ENGINE_BENCH_SLEEP_MS", "3000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut hello = String::new();
+    stdout.read_line(&mut hello).unwrap();
+    assert!(hello.contains(r#""type":"hello""#), "{hello}");
+    let mut stdin = child.stdin.take().unwrap();
+    let init = r#"{"type":"init","params":[{"name":"SPSA_TEST_INT","is_int":true}],"application_mask":[true],"theta0":["5.0"],"nps_bench":true,"timeout_sec":300}"#;
+    writeln!(stdin, "{init}").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let closed = Instant::now();
+    drop(stdin);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if closed.elapsed() > Duration::from_secs(15) {
+            child.kill().unwrap();
+            panic!("worker kept running its bench after stdin closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success());
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).unwrap();
+    assert!(rest.contains("coordinator が入力を閉じました"), "{rest}");
+}
+
+#[test]
+fn resuming_a_completed_run_does_not_start_workers() {
+    let test = PoolTest::new();
+    let workers = [worker_command(1, &NODES, &[])];
+    assert_success(&run(&test, "value_driven", 2, &NODES, &workers, &[], &[]));
+    let journal = test.bytes("journal.jsonl");
+    // 起動されれば失敗する worker でも、完走済みの run の resume は通り、journal も変わらない。
+    let resume = ["--resume", "--force-unlock"];
+    assert_success(&run(&test, "value_driven", 2, &NODES, &["exit 3".into()], &resume, &[]));
+    assert_eq!(test.bytes("journal.jsonl"), journal);
+    assert_eq!(test.meta()["status"], "completed");
 }
