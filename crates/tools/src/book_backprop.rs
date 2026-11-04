@@ -1521,8 +1521,8 @@ fn write_certified(
     let n = graph.len();
     let mirrored_values: Vec<Option<i32>> =
         (0..n).map(|v| mirrored(graph, v).map(|m| m.value)).collect();
-    // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は保証手だけを残す。
-    let mut restricted = vec![false; n];
+    // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は、破れた向きの保証手だけを残す。
+    let mut restricted = vec![Restriction::default(); n];
     loop {
         assign_outputs(graph, params, results, mirrored, &restricted);
         let conflicts = flip_conflicts(graph, params, mirrored);
@@ -1532,18 +1532,21 @@ fn write_certified(
             );
         }
         let violations = certify(graph, params, &mirrored_values);
-        if violations.nodes.is_empty() {
+        if violations.stored.is_empty() && violations.flipped.is_empty() {
             break;
         }
-        let fresh: Vec<_> = violations.nodes.iter().copied().filter(|&v| !restricted[v]).collect();
-        if fresh.is_empty() {
+        let mut progressed = false;
+        for &v in &violations.stored {
+            progressed |= !std::mem::replace(&mut restricted[v].stored, true);
+        }
+        for &v in &violations.flipped {
+            progressed |= !std::mem::replace(&mut restricted[v].flipped, true);
+        }
+        if !progressed {
             bail!("{}", violations.message(graph));
         }
-        for v in fresh {
-            restricted[v] = true;
-        }
     }
-    let count = restricted.iter().filter(|&&r| r).count();
+    let count = restricted.iter().filter(|r| r.any()).count();
     if count > 0 {
         eprintln!("同値手を選ぶと保証が破れる {} 局面で、保証手以外の同値手を -1 しました", count);
     }
@@ -1912,14 +1915,31 @@ impl Side {
 ///
 /// 反転キーで合流した向きにも届く局面では、その向きでも値を保つ手から選ぶ。千日手の値が先後で違うと、
 /// 保存されている向きで短く出口へ向かう手が、反対の向きでは最善でないことがあるため。
+/// 保証検査で約束が破れた向き。破れた向きの保証手だけを残す。
+///
+/// 保存されている 1 行の並びを両方の向きで共有するので、反転キーで合流した向きで破れた局面は、その向きで解いた
+/// 保証手を残す。保存されている向きの保証手と違っても、保存されている向きで同値の手なら書き出せる。
+#[derive(Debug, Clone, Copy, Default)]
+struct Restriction {
+    stored: bool,
+    flipped: bool,
+}
+
+impl Restriction {
+    fn any(self) -> bool {
+        self.stored || self.flipped
+    }
+}
+
 fn assign_outputs(
     graph: &mut Graph,
     params: BestParams,
     results: &ResultsOf<'_>,
     mirrored: &ResultsOf<'_>,
-    restricted: &[bool],
+    restricted: &[Restriction],
 ) {
-    for (node, &restricted) in restricted.iter().enumerate() {
+    for (node, &restriction) in restricted.iter().enumerate() {
+        let restricted = restriction.any();
         let preserved = graph.preserved(node);
         let result = results(graph, node);
         let mirror = mirrored(graph, node);
@@ -1930,7 +1950,15 @@ fn assign_outputs(
         };
         let chosen = result.as_ref().and_then(|r| {
             if restricted {
-                return r.guaranteed;
+                // 両方の向きで破れて保証手が違えば 1 行では表せないので、保存されている向きの保証手のまま検査で止める。
+                let flipped_guarantee = mirror
+                    .as_ref()
+                    .and_then(|m| m.guaranteed)
+                    .filter(|&g| r.rows[g].is_some_and(|(value, _)| value == r.value));
+                return match flipped_guarantee {
+                    Some(g) if restriction.flipped && !restriction.stored => Some(g),
+                    _ => r.guaranteed,
+                };
             }
             if let Some(c) = [r.preferred, r.guaranteed].into_iter().flatten().find(|&c| common(c))
             {
@@ -1987,7 +2015,9 @@ fn assign_outputs(
 /// 保証検査で見つかった局面。
 struct Violations {
     /// 保存されている向きで約束が破られる局面。
-    nodes: BTreeSet<usize>,
+    stored: BTreeSet<usize>,
+    /// 反転キーで合流した向きで約束が破られる局面。
+    flipped: BTreeSet<usize>,
     perpetual_check: BTreeSet<usize>,
     repetition: BTreeSet<usize>,
 }
@@ -1998,11 +2028,12 @@ impl Violations {
             nodes.iter().take(5).map(|&v| graph.key(v)).collect::<Vec<_>>().join(" / ")
         };
         format!(
-            "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環へ持ち込まれる {} 局面 [{}]、千日手へ逃げられる {} 局面 [{}]",
+            "逆伝播した値の保証検査に失敗しました。book は出力しません: 連続王手で負ける循環へ持ち込まれる {} 局面 [{}]、千日手へ逃げられる {} 局面 [{}] (うち反転キーで合流した向きで破れる {} 局面)",
             self.perpetual_check.len(),
             sample(&self.perpetual_check),
             self.repetition.len(),
-            sample(&self.repetition)
+            sample(&self.repetition),
+            self.flipped.len()
         )
     }
 }
@@ -2017,7 +2048,8 @@ impl Violations {
 /// 値の整合は前提にせず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
 fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<i32>]) -> Violations {
     let mut violations = Violations {
-        nodes: BTreeSet::new(),
+        stored: BTreeSet::new(),
+        flipped: BTreeSet::new(),
         perpetual_check: BTreeSet::new(),
         repetition: BTreeSet::new(),
     };
@@ -2048,9 +2080,16 @@ fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<i32>]) -> Viola
         drop(comp);
         let repetition = states.violations(&states.reach(seeds, follows), |s| states.own(s) > draw);
 
-        violations.nodes.extend(perpetual.iter().chain(&repetition));
-        violations.perpetual_check.extend(perpetual);
-        violations.repetition.extend(repetition);
+        for &s in perpetual.iter().chain(&repetition) {
+            let v = s / 2;
+            if s % 2 == graph.color(v) {
+                violations.stored.insert(v);
+            } else {
+                violations.flipped.insert(v);
+            }
+        }
+        violations.perpetual_check.extend(perpetual.iter().map(|s| s / 2));
+        violations.repetition.extend(repetition.iter().map(|s| s / 2));
     }
     violations
 }
@@ -2257,14 +2296,13 @@ impl<'a> CertifyStates<'a> {
         seeds
     }
 
-    /// 届く状態のうち、自分の手番で `promises` を満たす値を約束している局面を返す。
+    /// 届く状態のうち、自分の手番で `promises` を満たす値を約束している状態を返す。
     /// 相手の手番の値は相手の約束で、`min` では相手側の上界なので自分の約束にはならない。
     /// 相手の手番から悪い循環へ届く道は自分の手番の局面を通るので、ここで見落としは出ない。
     /// 反転キーで合流した向きも、保存されている向きの行がその向きの値を保つと確かめてから数える。
     fn violations(&self, reached: &[bool], promises: impl Fn(usize) -> bool) -> BTreeSet<usize> {
         (0..self.len())
             .filter(|&s| !self.is_opponent(s) && self.real[s] && reached[s] && promises(s))
-            .map(|s| s / 2)
             .collect()
     }
 }
@@ -2814,7 +2852,7 @@ mod tests {
             },
             &vec![None; rows.len()],
         );
-        if violations.nodes.is_empty() {
+        if violations.stored.is_empty() && violations.flipped.is_empty() {
             Ok(())
         } else {
             bail!("{}", violations.message(&graph))
@@ -2998,6 +3036,28 @@ mod tests {
         };
         propagate_values(&mut graph, draws, MergeMode::Replace).unwrap();
         assert_eq!(values(&graph)[1], [-71, -70]);
+    }
+
+    #[test]
+    fn flipped_orientation_keeps_the_move_that_exits_for_the_flipped_side() {
+        // X (後手番で保存) は A から反転キーで先手番としても届く。後手 (千日手 0) から見て X の 2 手は同値 -28 で、
+        // 遠回りの Y へ進む手を選ぶ。先手 (千日手 -70) の向きでは Y で後手が Z へ進んで X へ戻る循環を続けられるので、
+        // X の先手は葉の手を選ばないと -28 を保てない。
+        let rows: [&[_]; 5] = [
+            &[(0, Some(1))],
+            &[(0, Some(2)), (-28, None)],
+            &[(0, Some(3)), (28, None)],
+            &[(0, Some(4))],
+            &[(0, Some(1))],
+        ];
+        let black = [false, false, true, false, true];
+        let mut graph = rows_graph(&rows, &[false; 5], &black);
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        propagate_values(&mut graph, draws, MergeMode::Replace).unwrap();
+        assert_eq!(values(&graph)[1], [-29, -28]);
     }
 
     #[test]
