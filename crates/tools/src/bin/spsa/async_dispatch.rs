@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
 
+#[path = "remote.rs"]
+mod remote;
+pub(super) use remote::run_worker;
+
 /// `meta.json` の async 用 format_version。batch の v4 とは別 schema。
 pub(super) const ASYNC_META_FORMAT_VERSION: u32 = 5;
 /// pair 単位の乱数は `compute_batch_prep` を batch_pairs=1・batch 番号=pair_id で呼んで作る。
@@ -153,7 +157,8 @@ struct DispatchRecord {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalRecord {
     Dispatch(DispatchRecord),
-    /// NPS の較正。以後の新しい pair の時計がこの倍率で決まる。
+    /// NPS の較正。以後の新しい pair の時計がこの倍率で決まる (`--remote-worker` では worker ごとに 1 件で、
+    /// その worker で指す pair に使う)。
     Calibration(TcCalibration),
     /// 結果の受信。適用 (`Accept`) とは別に記録し、保留中の結果も crash で失わない。
     Received {
@@ -173,6 +178,17 @@ enum JournalRecord {
     Duplicate {
         pair_id: u32,
         attempt: u32,
+    },
+    /// `--remote-worker` の worker が加わった。`calibration` はその機械の NPS の較正の index。
+    /// `spsa_sha256` は worker の spsa binary (対局の進め方は worker 側のコードで決まるので、版を残す)。
+    WorkerJoined {
+        name: String,
+        host: String,
+        slots: usize,
+        engine_sha256: String,
+        spsa_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calibration: Option<u32>,
     },
 }
 
@@ -210,6 +226,9 @@ struct CoreEnv<'a> {
     max_pair_attempts: u32,
     /// 新しい pair に付ける時計 (`--nps-scaling` のときだけ)。
     clock: Option<PairClock>,
+    /// 再 attempt にも `clock` を付け直す。`--remote-worker` では指す機械ごとに時計が違うので、
+    /// 指し直す機械の時計に合わせる。
+    clock_per_attempt: bool,
     /// 時間切れの率の上限と、率の分母の下限。
     max_timeout_rate: f64,
     timeout_rate_min_games: u32,
@@ -369,6 +388,8 @@ struct AsyncCore<'a> {
     counters: CoreCounters,
     /// 再生中、直前の `received` の pair。続く `accept` の後も保留なら保留回数に数える。
     replay_hold_check: Option<u32>,
+    /// 再生した journal に `worker_joined` があった。それ以降の指し直しは時計が変わり得る。
+    replay_remote: bool,
 }
 
 impl<'a> AsyncCore<'a> {
@@ -384,6 +405,7 @@ impl<'a> AsyncCore<'a> {
             retry: BTreeSet::new(),
             counters: CoreCounters::default(),
             replay_hold_check: None,
+            replay_remote: false,
         }
     }
 
@@ -462,6 +484,9 @@ impl<'a> AsyncCore<'a> {
             let received = self.counters.received;
             let entry = self.pairs.get_mut(&pair_id).context("retry pair is missing")?;
             entry.dispatch.attempt += 1;
+            if self.env.clock_per_attempt {
+                entry.dispatch.clock = self.env.clock;
+            }
             entry.status = PairStatus::InFlight;
             entry.received_at_dispatch = received;
             self.counters.dispatched_attempts += 1;
@@ -758,12 +783,17 @@ impl<'a> AsyncCore<'a> {
                 if let Some(entry) = self.pairs.get_mut(&pair_id) {
                     // 失敗した attempt (retry_wait) か、coordinator の停止で中断した attempt
                     // (in_flight のまま次の dispatch が来る) だけを置き換える。確定値は同じであること。
+                    // `--remote-worker` の run では時計が指す機械で変わり得るので比べない。
                     let mut expected = entry.dispatch.clone();
                     expected.attempt += 1;
+                    if self.replay_remote {
+                        expected.clock = dispatch.clock;
+                    }
                     if entry.status == PairStatus::Held || *dispatch != expected {
                         bail!("journal: unexpected re-dispatch of pair {pair_id}");
                     }
                     entry.dispatch.attempt = dispatch.attempt;
+                    entry.dispatch.clock = dispatch.clock;
                     entry.status = PairStatus::InFlight;
                     entry.received_at_dispatch = self.counters.received;
                     self.retry.remove(&pair_id);
@@ -818,6 +848,10 @@ impl<'a> AsyncCore<'a> {
             }
             // 時計は dispatch が持つので、再生では状態を変えない。
             JournalRecord::Calibration(_) => Ok(None),
+            JournalRecord::WorkerJoined { .. } => {
+                self.replay_remote = true;
+                Ok(None)
+            }
         }
     }
 
@@ -876,7 +910,7 @@ fn sum_by_side(moves: &GameMoves) -> ([u64; 2], [u64; 2]) {
 }
 
 /// journal に載せない 1 局の棋譜。games.jsonl にだけ書く。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct GameDetail {
     game_id: u32,
     startpos_sfen: String,
@@ -1348,7 +1382,8 @@ struct AsyncMeta {
     /// resume で一致を求める。
     #[serde(default)]
     game_records: bool,
-    /// NPS の較正の履歴 (journal の `calibration` と同じ内容)。最後の 1 件が新しい pair に使われる。
+    /// NPS の較正の履歴 (journal の `calibration` と同じ内容)。local では最後の 1 件が新しい pair に使われ、
+    /// `--remote-worker` では pair を指す worker の較正が使われる。
     #[serde(default)]
     tc_calibrations: Vec<TcCalibration>,
     /// 受信した局の数と、そのうち時計の時間切れの局の数。
@@ -1622,10 +1657,10 @@ impl CsvOutputs {
             Ok((path, BufWriter::new(file)))
         };
         let mut stats = (!cli.no_stats_csv)
-            .then(|| open(default_stats_csv_path(&cli.run_dir)))
+            .then(|| open(default_stats_csv_path(cli.run_dir())))
             .transpose()?;
         let mut values = (!cli.no_param_values_csv)
-            .then(|| open(default_param_values_csv_path(&cli.run_dir)))
+            .then(|| open(default_param_values_csv_path(cli.run_dir())))
             .transpose()?;
         if let Some((_, writer)) = stats.as_mut() {
             write_stats_header(writer)?;
@@ -1718,6 +1753,7 @@ pub(super) fn validate_cli(cli: &Cli) -> Result<()> {
     if cli.reference_nps == Some(0) {
         bail!("--reference-nps must be >= 1");
     }
+    remote::validate_cli(cli)?;
     for (flag, value) in [
         ("--min-nps-ratio", cli.min_nps_ratio),
         ("--max-timeout-rate", cli.max_timeout_rate),
@@ -1760,7 +1796,7 @@ struct Store<'a> {
 
 impl Store<'_> {
     fn snapshot_dir(&self) -> PathBuf {
-        self.cli.run_dir.join(SNAPSHOT_DIR)
+        self.cli.run_dir().join(SNAPSHOT_DIR)
     }
 
     /// core の出力を順に永続化する。snapshot は出力をすべて書いた後にだけ取る
@@ -1778,7 +1814,8 @@ impl Store<'_> {
                         }
                         JournalRecord::Dispatch(_)
                         | JournalRecord::Duplicate { .. }
-                        | JournalRecord::Calibration(_) => {}
+                        | JournalRecord::Calibration(_)
+                        | JournalRecord::WorkerJoined { .. } => {}
                     }
                 }
                 CoreOutput::Applied(row) => {
@@ -1831,9 +1868,9 @@ impl Store<'_> {
         self.meta.received_games = core.counters.games;
         self.meta.timeout_games = core.counters.timeouts;
         self.meta.updated_at_utc = Utc::now().to_rfc3339();
-        write_json_durable(&default_meta_path(&self.cli.run_dir), &self.meta, true)?;
+        write_json_durable(&default_meta_path(self.cli.run_dir()), &self.meta, true)?;
         self.faults.hit("meta_written");
-        write_params(&state_params_path(&self.cli.run_dir), &core.params)?;
+        write_params(&state_params_path(self.cli.run_dir()), &core.params)?;
         self.generation = generation;
         self.applied_since_snapshot = 0;
         self.remove_old_snapshots()
@@ -1960,8 +1997,8 @@ fn check_resume_meta(
 /// async の resume で使う param を gen0 の定義と最新 snapshot の θ から作る。
 /// `state.params` は 6 桁表示の view で、丸めた値が範囲外に見えることもあるので読まない。
 pub(super) fn load_resume_params(cli: &Cli) -> Result<Vec<SpsaParam>> {
-    let meta = load_async_meta(&default_meta_path(&cli.run_dir))?;
-    let snapshot_dir = cli.run_dir.join(SNAPSHOT_DIR);
+    let meta = load_async_meta(&default_meta_path(cli.run_dir()))?;
+    let snapshot_dir = cli.run_dir().join(SNAPSHOT_DIR);
     let initial: Snapshot = read_json(&snapshot_dir.join(snapshot_file_name(0)))?;
     let latest: Snapshot = read_json(&snapshot_dir.join(&meta.snapshot))?;
     let (Some(definitions), Some(comments)) = (initial.definitions, initial.comments) else {
@@ -2022,7 +2059,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         engine_path,
         fresh_seed,
     } = setup;
-    let run_dir = cli.run_dir.as_path();
+    let run_dir = cli.run_dir();
     let state_params = state_params_path(run_dir);
     let meta_path = default_meta_path(run_dir);
     let journal_path = run_dir.join(JOURNAL_FILE);
@@ -2043,6 +2080,25 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         .context("failed to locate the spsa binary")
         .and_then(|exe| sha256_hex_of_file(&exe))?;
 
+    // worker の bench と足切りは、fresh では旧 run の成果物 (journal・snapshot) を消す前、resume では meta の照合の後に
+    // 済ませる。`--force-init` の meta・CSV・final.params の削除と `--init-from` による state.params の上書きは、
+    // main の初期化で先に済んでいる。local の `--nps-scaling` の足切りと
+    // 同じ扱いで、初期化の順序を入れ替えると batch と共有の起動の経路が変わるため揃えていない。
+    let connect = || -> Result<Option<remote::RemoteFleet>> {
+        if cli.remote_workers.is_empty() {
+            return Ok(None);
+        }
+        let (_, theta0) = theta0_engine_values(cli, &params, resume)?;
+        Ok(Some(remote::RemoteFleet::connect(remote::FleetSetup {
+            cli,
+            fingerprint: &fingerprint,
+            params: &params,
+            application_mask: &masks.application,
+            theta0,
+        })?))
+    };
+    let mut fleet;
+
     let meta = if resume {
         let meta = load_async_meta(&meta_path)?;
         check_resume_meta(&meta, cli, total_pairs, schedule, &fingerprint, &param_definition_sha)?;
@@ -2060,14 +2116,22 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 meta.game_records
             );
         }
+        // 完走済みの run は対局しないので worker を起動しない (bench と journal への追記を避ける)。
+        fleet = if meta.status == RunStatus::Completed {
+            None
+        } else {
+            connect()?
+        };
         meta
     } else {
+        fleet = connect()?;
+        let slots = fleet.as_ref().map_or(cli.concurrency, remote::RemoteFleet::total_slots);
         let max_lag = match cli.max_lag {
             Some(lag) => lag,
-            None => u32::try_from(cli.concurrency)
+            None => u32::try_from(slots)
                 .ok()
                 .and_then(|w| w.checked_mul(4))
-                .context("--max-lag overflow (4 × --concurrency)")?,
+                .context("--max-lag overflow (4 × slots)")?,
         };
         let init = InitMetaSnapshot::for_fresh_start(
             action,
@@ -2128,7 +2192,8 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     };
     // fresh は旧 run の成果物を消す前に測り、足切りに掛かる機械では何も書かずに止める。
     // resume は journal を再生して残りの pair 数 (= 本番の worker 数) を確かめてから測る。
-    let fresh_bench = if cli.nps_scaling && !resume {
+    let local_nps_scaling = cli.nps_scaling && cli.remote_workers.is_empty();
+    let fresh_bench = if local_nps_scaling && !resume {
         Some(run_nps_bench(bench_input(cli.concurrency.min(total_pairs as usize)))?)
     } else {
         None
@@ -2148,6 +2213,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         max_lag: meta.max_lag,
         max_pair_attempts: cli.max_pair_attempts.unwrap_or(3),
         clock: None,
+        clock_per_attempt: false,
         max_timeout_rate: cli.max_timeout_rate.unwrap_or(DEFAULT_MAX_TIMEOUT_RATE),
         timeout_rate_min_games: cli
             .timeout_rate_min_games
@@ -2262,7 +2328,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     };
     let bench = match fresh_bench {
         Some(bench) => Some(bench),
-        None if cli.nps_scaling && !core.is_complete() => {
+        None if local_nps_scaling && !core.is_complete() => {
             let remaining = (total_pairs - core.completed) as usize;
             // 足切りの理由を meta の stop_reason に残す (別の機械からそのまま resume できる)。
             match run_nps_bench(bench_input(cli.concurrency.min(remaining))) {
@@ -2286,9 +2352,53 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     } else {
         store.meta.tc_calibrations = calibrations;
     }
+    if let Some(fleet) = fleet.as_mut() {
+        for joined in fleet.take_joined() {
+            let calibration = match joined.bench {
+                Some(bench) => {
+                    let mut calibration =
+                        new_calibration(cli, bench, store.meta.tc_calibrations.len())?;
+                    calibration.host = format!("{} {}", joined.name, joined.host);
+                    store.journal.append(&JournalRecord::Calibration(calibration.clone()))?;
+                    let clock = PairClock {
+                        btime: calibration.btime,
+                        binc: calibration.binc,
+                        calibration: calibration.index,
+                    };
+                    fleet.set_clock(joined.owner, clock);
+                    eprintln!(
+                        "worker {}: btime={} binc={} (scale {:.4}, measured {:.0} nps/thread)",
+                        joined.name,
+                        clock.btime,
+                        clock.binc,
+                        calibration.scale,
+                        calibration.measured_nps
+                    );
+                    let index = calibration.index;
+                    store.meta.tc_calibrations.push(calibration);
+                    Some(index)
+                }
+                None => None,
+            };
+            store.journal.append(&JournalRecord::WorkerJoined {
+                name: joined.name,
+                host: joined.host,
+                slots: joined.slots,
+                engine_sha256: joined.engine_sha256,
+                spsa_sha256: joined.spsa_sha256,
+                calibration,
+            })?;
+        }
+        store.publish(&core, RunStatus::Running, None)?;
+    }
+    // remote の run を local で resume したときも、中断した pair はこの機械の時計で指し直す。
+    core.env.clock_per_attempt = fleet.is_some() || core.replay_remote;
 
     let remaining = total_pairs - core.completed;
-    let worker_count = cli.concurrency.min(remaining as usize);
+    let worker_count = fleet
+        .as_ref()
+        .map_or(cli.concurrency, remote::RemoteFleet::total_slots)
+        .min(remaining as usize);
     eprintln!("=== SPSA Async Startup ===");
     eprintln!("launch action:  {}", action.launch_label());
     eprintln!("origin mode:    {}", store.meta.init_mode);
@@ -2320,7 +2430,11 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
     }
     eprintln!("=== End Summary ===");
 
-    if !core.is_complete() {
+    if let Some(fleet) = fleet.as_mut()
+        && !core.is_complete()
+    {
+        coordinate(&mut core, &mut store, fleet, base_tc)?;
+    } else if !core.is_complete() {
         let cpu_affinities = plan_cpu_affinities(cli, worker_count)?;
         std::thread::scope(|scope| -> Result<()> {
             let pool = AsyncPool::new(
@@ -2339,7 +2453,13 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 cli.engine_retries,
                 &faults,
             )?;
-            coordinate(&mut core, &mut store, &pool, worker_count, base_tc)
+            let mut executor = LocalExecutor {
+                pool: &pool,
+                slots: worker_count,
+                clock: core.env.clock,
+                in_flight: HashSet::new(),
+            };
+            coordinate(&mut core, &mut store, &mut executor, base_tc)
         })?;
     }
 
@@ -2369,16 +2489,26 @@ struct NpsBenchInput<'a> {
     slots: usize,
 }
 
-/// run 開始時の θ₀ (resume では gen0 snapshot の θ) で bench を走らせ、足切りを確かめる。
-fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
-    let cli = input.cli;
-    let mut theta0_params = input.params.to_vec();
-    if input.resume {
+/// run 開始時の θ₀ (resume では gen0 snapshot の θ) の param と engine 送信値。
+fn theta0_engine_values(
+    cli: &Cli,
+    params: &[SpsaParam],
+    resume: bool,
+) -> Result<(Vec<SpsaParam>, Vec<f64>)> {
+    let mut theta0_params = params.to_vec();
+    if resume {
         let initial: Snapshot =
-            read_json(&cli.run_dir.join(SNAPSHOT_DIR).join(snapshot_file_name(0)))?;
+            read_json(&cli.run_dir().join(SNAPSHOT_DIR).join(snapshot_file_name(0)))?;
         apply_theta(&mut theta0_params, &initial)?;
     }
-    let theta0: Vec<f64> = theta0_params.iter().map(fixed_engine_value).collect();
+    let theta0 = theta0_params.iter().map(fixed_engine_value).collect();
+    Ok((theta0_params, theta0))
+}
+
+/// run 開始時の θ₀ で bench を走らせ、足切りを確かめる。
+fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
+    let cli = input.cli;
+    let (theta0_params, theta0) = theta0_engine_values(cli, input.params, input.resume)?;
     let cpu_affinities = plan_cpu_affinities(cli, input.slots)?;
     let ctx = WorkerContext {
         base_cfg: input.base_cfg,
@@ -2391,7 +2521,8 @@ fn run_nps_bench(input: NpsBenchInput<'_>) -> Result<nps_bench::BenchResult> {
         cpu_affinities: cpu_affinities.as_deref(),
     };
     eprintln!("nps bench: {} slot(s) x {} thread(s) ...", input.slots, cli.threads);
-    let result = nps_bench::measure(ctx, input.slots, &theta0, cli.threads)?;
+    let result =
+        nps_bench::measure(ctx, input.slots, &theta0, cli.threads, &AtomicBool::new(false))?;
     eprintln!("{}", result.summary());
     result.ensure_above_floor(
         reference_nps(cli),
@@ -2554,12 +2685,80 @@ fn report_missing_game_records(path: &Path, received: &[(u32, u32)]) -> Result<(
     Ok(())
 }
 
-/// 空いた worker に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
+/// pair を渡す先の slot。`clock` はその slot で指す pair に付ける時計。
+#[derive(Clone, Copy)]
+struct Slot {
+    owner: usize,
+    clock: Option<PairClock>,
+}
+
+/// pair を指す先。同じ process の worker pool と、別の機械の worker (`remote`)。
+trait Executor {
+    fn free_slot(&self) -> Option<Slot>;
+    fn send(&mut self, owner: usize, task: PairTask) -> Result<()>;
+    fn recv(&mut self) -> Result<Result<WorkerMessage>>;
+    fn try_recv(&mut self) -> Option<Result<WorkerMessage>>;
+    /// 実行中の pair が無く、新しい slot も空かない理由 (worker が全て切れた等)。
+    fn idle_reason(&self) -> Option<String>;
+}
+
+/// 実行中の (pair, attempt) の集合から、結果の届いた attempt を外す。
+fn settle_in_flight(in_flight: &mut HashSet<(u32, u32)>, message: &Result<WorkerMessage>) {
+    if let Ok(
+        WorkerMessage::Done {
+            pair_id, attempt, ..
+        }
+        | WorkerMessage::Failed {
+            pair_id, attempt, ..
+        },
+    ) = message
+    {
+        in_flight.remove(&(*pair_id, *attempt));
+    }
+}
+
+struct LocalExecutor<'p, 's> {
+    pool: &'p AsyncPool<'s>,
+    slots: usize,
+    clock: Option<PairClock>,
+    in_flight: HashSet<(u32, u32)>,
+}
+
+impl Executor for LocalExecutor<'_, '_> {
+    fn free_slot(&self) -> Option<Slot> {
+        (self.in_flight.len() < self.slots).then_some(Slot {
+            owner: 0,
+            clock: self.clock,
+        })
+    }
+
+    fn send(&mut self, _owner: usize, task: PairTask) -> Result<()> {
+        self.in_flight.insert((task.pair_id, task.attempt));
+        self.pool.send(task)
+    }
+
+    fn recv(&mut self) -> Result<Result<WorkerMessage>> {
+        let message = self.pool.recv()?;
+        settle_in_flight(&mut self.in_flight, &message);
+        Ok(message)
+    }
+
+    fn try_recv(&mut self) -> Option<Result<WorkerMessage>> {
+        let message = self.pool.try_recv()?;
+        settle_in_flight(&mut self.in_flight, &message);
+        Some(message)
+    }
+
+    fn idle_reason(&self) -> Option<String> {
+        None
+    }
+}
+
+/// 空いた slot に pair を渡し、結果を到着順に処理する。停止は snapshot を残して Err。
 fn coordinate(
     core: &mut AsyncCore<'_>,
     store: &mut Store<'_>,
-    pool: &AsyncPool<'_>,
-    worker_count: usize,
+    executor: &mut dyn Executor,
     base_tc: TimeControl,
 ) -> Result<()> {
     let mut in_flight = HashSet::new();
@@ -2568,7 +2767,8 @@ fn coordinate(
         if let Some(reason) = core.exhausted_retry().or_else(|| core.timeout_stop_reason()) {
             return store.stop(core, anyhow::anyhow!(reason));
         }
-        while in_flight.len() < worker_count {
+        while let Some(slot) = executor.free_slot() {
+            core.env.clock = slot.clock;
             let Some(dispatch) = core.next_dispatch()? else {
                 break;
             };
@@ -2577,34 +2777,39 @@ fn coordinate(
             let (plus, minus) = core.engine_values(&dispatch);
             let (tc, game_time_limit_ms) = pair_time_control(store.cli, base_tc, &dispatch);
             in_flight.insert((dispatch.pair_id, dispatch.attempt));
-            pool.send(PairTask {
-                pair_id: dispatch.pair_id,
-                attempt: dispatch.attempt,
-                start_pos_index: dispatch.start_pos_index,
-                plus,
-                minus,
-                tc,
-                game_time_limit_ms,
-            })?;
+            executor.send(
+                slot.owner,
+                PairTask {
+                    pair_id: dispatch.pair_id,
+                    attempt: dispatch.attempt,
+                    start_pos_index: dispatch.start_pos_index,
+                    plus,
+                    minus,
+                    tc,
+                    game_time_limit_ms,
+                },
+            )?;
         }
-        let stalled = if in_flight.len() < worker_count {
+        let stalled = if executor.free_slot().is_some() {
             core.stall_reason()
         } else {
             None
         };
         // 停滞と判定しても、受信済みで未処理の結果があればそれを先に処理する。
-        let message = match (stalled, pool.try_recv()) {
+        let message = match (stalled, executor.try_recv()) {
             (_, Some(message)) => message,
             (Some(reason), None) => return store.stop(core, anyhow::anyhow!(reason)),
             (None, None) if in_flight.is_empty() => {
-                // 最古の未確定 pair は常に適用か dispatch ができるので、ここへは来ない。
-                return store.stop(core, anyhow::anyhow!("no runnable pair"));
+                // 最古の未確定 pair は常に適用か dispatch ができるので、slot がある限りここへは来ない。
+                let reason = executor.idle_reason().unwrap_or_else(|| "no runnable pair".into());
+                return store.stop(core, anyhow::anyhow!(reason));
             }
-            (None, None) => match pool.recv() {
+            (None, None) => match executor.recv() {
                 Ok(message) => message,
                 Err(error) => return store.stop(core, error),
             },
         };
+        settle_in_flight(&mut in_flight, &message);
         let message = match message {
             Ok(message) => message,
             Err(error) => return store.stop(core, error),
@@ -2617,7 +2822,6 @@ fn coordinate(
                 details,
                 retries,
             } => {
-                in_flight.remove(&(pair_id, attempt));
                 // received より先に durable にする。失敗したら core を進めずに終わり、
                 // snapshot も書かない (journal と core がずれない)。
                 if let (Some(writer), Some(dispatch)) =
@@ -2638,7 +2842,6 @@ fn coordinate(
                 attempt,
                 reason,
             } => {
-                in_flight.remove(&(pair_id, attempt));
                 let message =
                     format!("attempt failed pair={pair_id} attempt={attempt} cause={reason}");
                 let (output, stop) = core.on_failed(pair_id, attempt, reason)?;
@@ -2725,6 +2928,7 @@ mod tests {
                 max_lag,
                 max_pair_attempts: 3,
                 clock: None,
+                clock_per_attempt: false,
                 max_timeout_rate: 1.0,
                 timeout_rate_min_games: 0,
             }
@@ -3089,6 +3293,47 @@ mod tests {
         );
         assert!(result.stop.is_none(), "{:?}", result.stop);
         assert!(core.is_complete());
+    }
+
+    #[test]
+    fn remote_retry_with_a_new_clock_replays_bit_for_bit() {
+        let fixture = Fixture::new(vec![param("X", false, 50.0, (0.0, 100.0), 4.0)], None, 3);
+        let clock = |calibration| PairClock {
+            btime: 1000 + u64::from(calibration),
+            binc: 10,
+            calibration,
+        };
+        let mut core = fixture.core(4);
+        core.env.clock_per_attempt = true;
+        let mut journal = vec![JournalRecord::WorkerJoined {
+            name: "w1".into(),
+            host: "h".into(),
+            slots: 1,
+            engine_sha256: "e".into(),
+            spsa_sha256: "s".into(),
+            calibration: Some(0),
+        }];
+        core.env.clock = Some(clock(0));
+        journal.push(JournalRecord::Dispatch(core.next_dispatch().unwrap().unwrap()));
+        let (failed, _) = core.on_failed(0, 1, "lost".into()).unwrap();
+        let mut outputs = vec![failed];
+        core.env.clock = Some(clock(1));
+        let retry = core.next_dispatch().unwrap().unwrap();
+        assert_eq!((retry.attempt, retry.clock), (2, Some(clock(1))));
+        outputs.push(CoreOutput::Journal(JournalRecord::Dispatch(retry)));
+        outputs.extend(core.on_done(0, 2, games(1, -1)).unwrap());
+        journal.extend(outputs.into_iter().filter_map(|output| match output {
+            CoreOutput::Journal(record) => Some(record),
+            CoreOutput::Applied(_) => None,
+        }));
+
+        let replayed = replay_all(&fixture, 4, &journal);
+        assert_eq!(theta_bits(&replayed.params), theta_bits(&core.params));
+        assert_eq!(replayed.checkpoint(), core.checkpoint());
+        // worker_joined の無い (local の) journal では、時計の違う指し直しを拒む。
+        let mut local = fixture.core(4);
+        let rejected = journal[1..].iter().try_for_each(|record| local.replay(record).map(drop));
+        assert!(rejected.is_err());
     }
 
     #[test]

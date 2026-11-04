@@ -13,11 +13,13 @@ pub(super) fn measure(
     slots: usize,
     theta0: &[f64],
     threads: usize,
+    cancel: &AtomicBool,
 ) -> Result<BenchResult> {
-    tools::selfplay::nps_bench::measure(
+    tools::selfplay::nps_bench::measure_cancellable(
         slots,
         threads,
         ctx.game_cfg.timeout_margin_ms,
+        cancel,
         |idx, cancel| {
             let (mut plus, minus) = spawn_worker_engines(ctx, idx, cancel, true)?;
             apply_parameter_vector(
