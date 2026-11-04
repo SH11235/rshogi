@@ -414,12 +414,10 @@ fn worker_stops_when_the_coordinator_stops_reading_its_output() {
     let mut stdin = child.stdin.take().unwrap();
     let init = r#"{"type":"init","params":[{"name":"SPSA_TEST_INT","is_int":true}],"application_mask":[true],"theta0":["5.0"],"nps_bench":false,"timeout_sec":300}"#;
     writeln!(stdin, "{init}").unwrap();
-    // 閉じた pipe への書き込みで気づく。並列のテストの fork が pipe を一瞬持っている間の `ready` の書き込みは
-    // 通ってしまうことがあるので、対局の結果を書かせて確実に書き込みを起こす。
-    let task = r#"{"type":"task","pair_id":0,"attempt":1,"start_pos_index":0,"plus":["5.0"],"minus":["5.0"],"tc":{"black_time":0,"white_time":0,"black_inc":0,"white_inc":0,"byoyomi":0},"game_time_limit_ms":null}"#;
-    // `ready` の書き込みで先に気づいて止まっていれば task は書けない (それも期待どおり)。
-    let _ = writeln!(stdin, "{task}");
+    // 閉じた pipe への書き込みで気づく。並列のテストの fork が pipe を一瞬持っている間の書き込みは通ってしまうので、
+    // 止まるまで task を送り続けて結果の書き込みを繰り返させる (止まった後の書き込みの失敗は無視する)。
     let start = Instant::now();
+    let mut pair_id = 0u32;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -428,7 +426,12 @@ fn worker_stops_when_the_coordinator_stops_reading_its_output() {
             child.kill().unwrap();
             panic!("worker kept running after its output closed");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        let task = format!(
+            r#"{{"type":"task","pair_id":{pair_id},"attempt":1,"start_pos_index":0,"plus":["5.0"],"minus":["5.0"],"tc":{{"black_time":0,"white_time":0,"black_inc":0,"white_inc":0,"byoyomi":0}},"game_time_limit_ms":null}}"#
+        );
+        let _ = writeln!(stdin, "{task}");
+        pair_id += 1;
+        std::thread::sleep(Duration::from_millis(500));
     };
     assert!(!status.success());
     drop(stdin);
