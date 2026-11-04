@@ -123,11 +123,11 @@ fn no_usable_worker_stops_before_creating_async_artifacts() {
 #[test]
 fn pairs_of_a_lost_worker_are_played_again_elsewhere() {
     let test = PoolTest::new();
-    // 2 台目は hello・ready・最初の結果の 3 行だけ届けて切れる。
+    // 2 台目は hello・ready・最初の結果の 3 行だけ届けて、機械ごと落ちる (process group を止める)。
     let workers = [
         worker_command(2, &NODES, &[]),
         format!(
-            "{} | {{ for i in 1 2 3; do IFS= read -r line && printf '%s\\n' \"$line\"; done; }}",
+            "{} | {{ for i in 1 2 3; do IFS= read -r line && printf '%s\\n' \"$line\"; done; kill -KILL 0; }}",
             worker_command(2, &NODES, &[])
         ),
     ];
@@ -247,7 +247,7 @@ fn retried_pair_uses_the_clock_of_the_machine_that_plays_it() {
     let workers = [
         worker_command(1, &limit, &extra),
         format!(
-            "{} | {{ for i in 1 2 3; do IFS= read -r line && printf '%s\\n' \"$line\"; done; }}",
+            "{} | {{ for i in 1 2 3; do IFS= read -r line && printf '%s\\n' \"$line\"; done; kill -KILL 0; }}",
             worker_command(2, &limit, &extra)
         ),
     ];
@@ -340,4 +340,86 @@ fn resuming_a_completed_run_does_not_start_workers() {
     assert_success(&run(&test, "value_driven", 2, &NODES, &["exit 3".into()], &resume, &[]));
     assert_eq!(test.bytes("journal.jsonl"), journal);
     assert_eq!(test.meta()["status"], "completed");
+}
+
+#[test]
+fn local_resume_of_a_remote_run_replays_interrupted_pairs_on_the_local_clock() {
+    let test = PoolTest::new();
+    let limit = ["--btime", "20000", "--binc", "200"];
+    let extra = ["--nps-scaling", "--random-startpos", "false"];
+    let workers = [
+        worker_command(1, &limit, &extra),
+        worker_command(1, &limit, &extra),
+    ];
+    let bench = Path::new("35000");
+    // 最初の適用の直後に落ちると、もう 1 台の pair が実行中のまま残る。
+    let crash = run(
+        &test,
+        "fischer_script",
+        4,
+        &limit,
+        &workers,
+        &extra,
+        &[
+            ("SPSA_TEST_ENGINE_BENCH_NODES", bench),
+            ("RSHOGI_SPSA_FAULT", Path::new("after_accept:1")),
+        ],
+    );
+    assert_eq!(crash.status.code(), Some(86), "{}", stderr(&crash));
+    let mut resume = extra.to_vec();
+    resume.extend(["--resume", "--force-unlock"]);
+    assert_success(&run(
+        &test,
+        "fischer_script",
+        4,
+        &limit,
+        &[],
+        &resume,
+        &[("SPSA_TEST_ENGINE_BENCH_NODES", bench)],
+    ));
+    // 較正は w1・w2 の 0・1 と、手元の 2。
+    assert_eq!(kinds(&test, "calibration").len(), 3);
+    let dispatches = kinds(&test, "dispatch");
+    let retried: Vec<_> =
+        dispatches.iter().filter(|d| d["attempt"].as_u64().unwrap() > 1).collect();
+    assert!(!retried.is_empty());
+    assert!(retried.iter().all(|d| d["clock"]["calibration"] == 2), "{retried:?}");
+}
+
+#[test]
+fn worker_stops_when_the_coordinator_stops_reading_its_output() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // stdin は開いたまま。出力の pipe が閉じたことだけで止まる (止まらないと sh が pipe を持ち続ける)。
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec {}", worker_command(1, &NODES, &[])))
+        .env("SPSA_TEST_ENGINE_MODE", "value_driven")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut hello = String::new();
+    stdout.read_line(&mut hello).unwrap();
+    assert!(hello.contains(r#""type":"hello""#), "{hello}");
+    drop(stdout);
+    let mut stdin = child.stdin.take().unwrap();
+    let init = r#"{"type":"init","params":[{"name":"SPSA_TEST_INT","is_int":true}],"application_mask":[true],"theta0":["5.0"],"nps_bench":false,"timeout_sec":300}"#;
+    writeln!(stdin, "{init}").unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(15) {
+            child.kill().unwrap();
+            panic!("worker kept running after its output closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success());
+    drop(stdin);
 }

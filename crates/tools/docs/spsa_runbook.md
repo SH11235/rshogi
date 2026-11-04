@@ -1856,7 +1856,8 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   engine は sha256 が coordinator の `--engine-path` か `--allow-worker-engine-sha256` と一致すること。
   coordinator は engine を起動しないが、比べる sha256 を取るため engine と `EvalFile` などの実体を手元にも置く。
 - 摂動の値・開始局面の番号・θ₀ は coordinator が送る。worker は params ファイルを読まない。
-- 全ての worker が `ready` になるか外れるまで待ってから始める。1 台も始められなければ、fresh では旧 run の成果物を消す前に止まる。
+- 全ての worker が `ready` になるか外れるまで待ってから始める。1 台も始められなければ、fresh では旧 run の journal・snapshot を
+  消す前に止まる (§17.3 の足切りと同じく、`--force-init` で先に消える meta・CSV を除く)。
 - `--max-lag` の既定は、始められた worker の slot の合計の 4 倍。
 - `--nps-scaling` では、worker ごとに自分の slot 数で bench を走らせ、`--min-nps-ratio` を下回る worker を外す。
   較正は worker ごとに journal の `calibration` に 1 行書き、`host` は `w<番号> <hostname>`。その worker で指す pair には
@@ -1875,5 +1876,5 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   coordinator の `--remote-timeout-sec` を知らないので、既定の 300 秒で見る。
   手元の ssh が早く切断に気づくよう `ServerAliveInterval` を付けておく。同じ機械で resume する前には、
   前の worker が残っていないことを確かめる (残っていると bench と対局が CPU を取り合う)。
-- 完走済みの run を `--resume` したときは worker を起動しない。`--remote-worker` で始めた run を `--remote-worker` なしで
-  resume すると手元の機械で続きを指し、中断した pair もこの機械の時計で指し直す。
+- 完走済みの run を `--resume` したときは worker を起動しない。一度でも `--remote-worker` で回した run を
+  `--remote-worker` なしで resume すると手元の機械で続きを指し、中断した pair もこの機械の時計で指し直す。

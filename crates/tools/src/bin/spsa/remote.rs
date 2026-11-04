@@ -155,6 +155,16 @@ impl Output {
         }
     }
 
+    /// 書き込みに失敗して thread が終わった (coordinator 側が出力を閉じた)。worker はこれを切断として止まる。
+    /// 止まらないと、`sh -c` の leader が coordinator への pipe を持ったまま残り、coordinator に終わりが届かない。
+    fn closed(&self) -> &crossbeam_channel::Receiver<()> {
+        &self.done
+    }
+
+    fn is_closed(&self) -> bool {
+        !self.done.is_empty()
+    }
+
     /// 送り口を閉じ、溜まった行を書き終えるのを `wait` まで待つ (詰まっていれば待たずに終わる)。
     fn finish(&self, wait: Duration) {
         if let Ok(mut tx) = self.tx.lock() {
@@ -282,6 +292,9 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
             Ok(Ok(ToWorker::Task(_))) => bail!("init より先に task が届きました"),
             Ok(Err(error)) => return Err(error),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if out.is_closed() {
+                    bail!("coordinator への出力が閉じました");
+                }
                 if last_seen.elapsed() > handshake_timeout {
                     bail!(
                         "init を待つ間 coordinator から {} 秒何も届きません",
@@ -328,8 +341,8 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
         let cancel = AtomicBool::new(false);
         let finished = AtomicBool::new(false);
         let (result, watched) = std::thread::scope(|scope| {
-            let watcher =
-                scope.spawn(|| watch_coordinator_during_bench(&inbox, &finished, &cancel, timeout));
+            let watcher = scope
+                .spawn(|| watch_coordinator_during_bench(&inbox, out, &finished, &cancel, timeout));
             let result = nps_bench::measure(ctx, cli.concurrency, &theta0, cli.threads, &cancel);
             finished.store(true, Ordering::Release);
             (result, watcher.join())
@@ -392,6 +405,7 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
                     let message = message.context("worker pool closed")??;
                     out.send(&to_wire(message))?;
                 }
+                recv(out.closed()) -> _ => bail!("coordinator への出力が閉じました"),
                 // 経路が半開きのまま切れると stdin の終わりが届かないので、coordinator の heartbeat の途絶で止める。
                 default(POLL_INTERVAL) => {
                     if last_seen.elapsed() > timeout {
@@ -407,6 +421,7 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
 /// bench が終わると (`finished`) 何もせずに戻る。
 fn watch_coordinator_during_bench(
     inbox: &crossbeam_channel::Receiver<Result<ToWorker>>,
+    out: &Output,
     finished: &AtomicBool,
     cancel: &AtomicBool,
     timeout: Duration,
@@ -422,6 +437,9 @@ fn watch_coordinator_during_bench(
             Ok(Ok(_)) => return stop(anyhow::anyhow!("ready より先に init / task が届きました")),
             Ok(Err(error)) => return stop(error),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if out.is_closed() {
+                    return stop(anyhow::anyhow!("coordinator への出力が閉じました"));
+                }
                 if last_seen.elapsed() > timeout {
                     return stop(anyhow::anyhow!(
                         "coordinator から {} 秒何も届きません",
