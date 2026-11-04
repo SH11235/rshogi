@@ -584,7 +584,8 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     estimate: bool,
     /// 攻め方の局面の dn を子の和でなく WPNS で数えるときの、子 1 つあたりの加算量 (0 なら和で数える)
     weak_disproof_step: u64,
-    /// 1+ε の余裕として 2 番目の子の φ に掛ける倍率 (2^16 倍の固定小数点)。`None` は既定の 1/3。
+    /// 1+ε の余裕として 2 番目の子の φ に掛ける倍率 (2^16 倍の固定小数点)。`None` は既定 (上限なしの探索は 1/3、
+    /// 詰み手数の上限付きの探索は攻め方の局面で 1、受け方の局面で 1/20。`Searcher::select`)。
     /// 子を選ぶたびに計算するので、割り算を避ける (既定は定数の割り算で掛け算になる)。
     slack: Option<u64>,
     /// 0 でなければ、φ が同じ子のどれを選ぶかをこの値で決める (並列に解くスレッドごとに変える)
@@ -958,8 +959,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             extend_thresholds(&current, &mut thpn, &mut thdn);
         }
 
+        let bounded = len_limit != NO_LEN_LIMIT;
         while !current.is_final() && current.pn < thpn && current.dn < thdn {
-            let (best, child_thpn, child_thdn) = self.select(start, or_node, thpn, thdn);
+            let (best, child_thpn, child_thdn) = self.select(start, or_node, bounded, thpn, thdn);
             let child = &mut self.scratch.children[best];
             let mv = child.mv;
             // 新しい局面を展開したら TCA の延長を 1 段減らす
@@ -1701,8 +1703,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         }
     }
 
-    /// 次に読む子 (`scratch.children` の添字) と、その子に渡す閾値を選ぶ
-    fn select(&self, start: usize, or_node: bool, thpn: u32, thdn: u32) -> (usize, u32, u32) {
+    /// 次に読む子 (`scratch.children` の添字) と、その子に渡す閾値を選ぶ。`bounded` は詰み手数の上限付きの探索か
+    fn select(
+        &self,
+        start: usize,
+        or_node: bool,
+        bounded: bool,
+        thpn: u32,
+        thdn: u32,
+    ) -> (usize, u32, u32) {
         let children = &self.scratch.children[start..];
         // φ = OR なら pn、AND なら dn (小さいほど有望)。δ はその相方。
         let phi = |c: &Child<S::Mv>| if or_node { c.pn } else { c.dn };
@@ -1733,9 +1742,15 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         // 1+ε (Pawlewicz & Lew 2007): 2 番目の子の φ を 1 超えた時点で戻ると、最善の子が入れ替わるたびに
         // 子を少し読んでは戻る往復を繰り返す。2 番目の φ の約 1/3 (最低 1) の余裕を持たせる (経験的に 1/3 前後が良く、
         // 1/2 以上では増える)。
+        // 詰み手数の上限付きの探索は、上限内に詰まないことを示す読みがほとんどを占める。そこでは受け方の局面で
+        // 余裕を絞って逃れる応手への乗り換えを早め、攻め方の局面で余裕を広げて選んだ王手を長く読み続ける方が、
+        // 長編で読むノードが減る (経験的に選んだ値。攻め方の余裕も絞ると大きく膨らみ、攻め方の余裕を 2 番目の φ の
+        // 3 倍まで広げると解き終わらなくなる題がある)。
         let widen = match self.slack {
-            None => u64::from(second_phi / 3),
             Some(q16) => (u64::from(second_phi) * q16) >> 16,
+            None if !bounded => u64::from(second_phi / 3),
+            None if or_node => u64::from(second_phi),
+            None => u64::from(second_phi / 20),
         }
         .max(1);
         let child_thphi = thphi.min((u64::from(second_phi) + widen).min(u64::from(PN_INF)) as u32);
