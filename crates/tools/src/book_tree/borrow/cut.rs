@@ -6,7 +6,7 @@ use super::{
 };
 use crate::book_backprop::DrawValues;
 use crate::book_tree::audit::{MasterValue, master_values};
-use crate::book_tree::journal::digest;
+use crate::book_tree::journal::{digest, read_source};
 use crate::book_tree::master_table::read_master;
 use crate::book_tree::model::child;
 use crate::book_tree::targets::{DEFAULT_PRIORITY, Line, Opts, parse_root};
@@ -64,6 +64,17 @@ pub(super) struct CutArgs {
     /// キューの行の priority
     #[arg(long, default_value_t = DEFAULT_PRIORITY)]
     priority: u32,
+    /// 読む局面を、局面ごとにどれか 1 つに割り当てて、分け先ごとのキュー (`parts/part-<i>.jsonl`) にも書く。
+    /// 値は分け先ごとの速さの比 (カンマ区切り、例 `55,65,78`)。根の順に初めて出た局面から、
+    /// 割り当て済みの数を速さで割った値が一番小さい分け先に入れる
+    #[arg(long, value_delimiter = ',')]
+    parts: Vec<u32>,
+    /// `--parts` の分け先から、この台帳に読みのある局面を除く (serve が書いている台帳は複製して渡す)
+    #[arg(long)]
+    skip_journal: Option<PathBuf>,
+    /// `--skip-journal` の台帳で使う読みの条件の指紋 (台帳に条件が複数あるとき)
+    #[arg(long, requires = "skip_journal")]
+    fingerprint: Option<String>,
 }
 
 #[cfg(test)]
@@ -89,11 +100,19 @@ impl CutArgs {
             extra: None,
             tag: "ext".into(),
             priority: DEFAULT_PRIORITY,
+            parts: Vec::new(),
+            skip_journal: None,
+            fingerprint: None,
         }
     }
 
     pub(super) fn set_check_every(&mut self, every: usize) {
         self.check_every = every;
+    }
+
+    pub(super) fn set_parts(&mut self, parts: Vec<u32>, skip_journal: Option<PathBuf>) {
+        self.parts = parts;
+        self.skip_journal = skip_journal;
     }
 }
 
@@ -143,6 +162,11 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     };
     ensure!(params.own_diff >= 0 && params.opp_diff >= 0, "差は 0 以上にしてください");
     ensure!(params.max_positions >= 1, "--max-positions は 1 以上にしてください");
+    ensure!(args.parts.iter().all(|&v| v > 0), "--parts の速さは 1 以上にしてください");
+    ensure!(
+        args.skip_journal.is_none() || !args.parts.is_empty(),
+        "--skip-journal は --parts と一緒に指定してください"
+    );
     ensure!(
         !args.tag.is_empty() && args.tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
         "--tag は [A-Za-z0-9-] にしてください"
@@ -195,6 +219,7 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
         "id\town\tin_book\tpositions\tinner\texit_nobook\texit_depth\texit_cap\texit_master\tchecks\treads\textra_used\n",
     );
     let mut reads: BTreeMap<String, u32> = BTreeMap::new();
+    let mut first_seen: Vec<String> = Vec::new();
     let mut queue = String::new();
     let mut extras_used: BTreeSet<(String, String)> = BTreeSet::new();
     let mut lookup = |sfen: &str| book.entry_moves(sfen).map_err(anyhow::Error::from);
@@ -224,7 +249,10 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
                 u8::from(node.read)
             )?;
             if node.read {
-                let ply = reads.entry(key.clone()).or_insert(node.ply);
+                let ply = reads.entry(key.clone()).or_insert_with(|| {
+                    first_seen.push(key.clone());
+                    node.ply
+                });
                 *ply = (*ply).min(node.ply);
             }
         }
@@ -272,6 +300,9 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     write_atomic(&args.out.join("reads.tsv"), &read_list)?;
     write_atomic(&args.out.join("targets.jsonl"), &queue)?;
     write_atomic(&args.out.join("summary.tsv"), &summary)?;
+    if !args.parts.is_empty() {
+        write_parts(&args, &reads, &first_seen)?;
+    }
     let meta = Meta {
         version: META_VERSION.into(),
         book: info,
@@ -502,6 +533,69 @@ pub(super) fn cut_root(
     }
     tree.edges.sort_by(|a, b| (&a.key, &a.mv).cmp(&(&b.key, &b.mv)));
     Ok(tree)
+}
+
+/// 読む局面を `--parts` 個に分けて `parts/part-<i>.jsonl` に書く。同じ局面を 2 つの分け先で読まない
+/// ように、局面ごとに 1 つの分け先に割り当てる。
+fn write_parts(args: &CutArgs, reads: &BTreeMap<String, u32>, first_seen: &[String]) -> Result<()> {
+    let skip: BTreeSet<String> = match &args.skip_journal {
+        Some(path) => {
+            let source =
+                read_source(path, args.fingerprint.as_deref(), |key| reads.contains_key(key))?;
+            println!(
+                "台帳の条件 {} の読みがある局面 {} を分け先から除く",
+                source.settings.fingerprint,
+                source.readings.len()
+            );
+            source.readings.into_iter().map(|r| r.key).collect()
+        }
+        None => BTreeSet::new(),
+    };
+    let mut parts: Vec<[Vec<String>; 2]> = vec![[Vec::new(), Vec::new()]; args.parts.len()];
+    for key in first_seen.iter().filter(|k| !skip.contains(*k)) {
+        // 入れた後の数 / 速さ が最小の分け先 (同じなら番号の小さい方)。比べるのは
+        // (n_i + 1) / v_i < (n_j + 1) / v_j を掛け算にした形。
+        let load = |i: usize| (parts[i][0].len() + parts[i][1].len() + 1) as u64;
+        let best = (0..parts.len())
+            .min_by(|&i, &j| {
+                (load(i) * u64::from(args.parts[j])).cmp(&(load(j) * u64::from(args.parts[i])))
+            })
+            .expect("分け先がある");
+        let s = usize::from(side(key) == "w");
+        parts[best][s].push(format!("sfen {key} {}", reads[key]));
+    }
+    let dir = args.out.join("parts");
+    std::fs::create_dir(&dir)?;
+    let mut counts = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let mut text = String::new();
+        for (s, sfens) in ["b", "w"].iter().zip(part) {
+            let Some((first, rest)) = sfens.split_first() else {
+                continue;
+            };
+            let id = format!("{}_p{i}_{s}", args.tag);
+            check_id(&id).context("--tag を短くしてください")?;
+            let line = Line {
+                id,
+                root: first.clone(),
+                roots: rest.to_vec(),
+                own: (*s).to_owned(),
+                depth: 0,
+                priority: args.priority,
+                hold: false,
+                game: Vec::new(),
+                opts: Opts::default(),
+                memo: Some(format!("borrow cut の読む局面の分け先 {i} (手番 {s})")),
+            };
+            line.check()?;
+            text.push_str(&serde_json::to_string(&line)?);
+            text.push('\n');
+        }
+        write_atomic(&dir.join(format!("part-{i}.jsonl")), &text)?;
+        counts.push(part[0].len() + part[1].len());
+    }
+    println!("分け先ごとの読む局面 {counts:?} (台帳にあって除いた局面 {})", skip.len());
+    Ok(())
 }
 
 /// 読む局面を手番ごとに段 0 のキューの行にする (同じ行の根は同じ手番が必要)。

@@ -8,7 +8,7 @@ use crate::book_tree::audit::MasterValue;
 use crate::book_tree::journal::{Journal, Pv, Reading, Settings};
 use crate::book_tree::master_table::{COLUMNS, parse_master};
 use crate::book_tree::model::child;
-use crate::book_tree::targets::{Defaults, Line};
+use crate::book_tree::targets::{DEFAULT_PRIORITY, Defaults, Line};
 use rshogi_book::BookEntryMove;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -276,7 +276,7 @@ fn value_root_propagates_exit_readings_and_marks_better_outside_moves() {
             cond: "test",
         },
         draws,
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
@@ -308,11 +308,28 @@ fn value_root_propagates_exit_readings_and_marks_better_outside_moves() {
             cond: "test",
         },
         draws,
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
     assert!(values.marks.is_empty());
+    let values_all = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &quiet,
+            master: &BTreeMap::new(),
+            master_known: &BTreeSet::new(),
+            cond: "test",
+        },
+        draws,
+        None,
+        work.path(),
+    )
+    .unwrap();
+    // 線を外すと、候補の外の 5i6i (59) が最善 (20) から 40 未満でも印になる。
+    let marks: Vec<_> = values_all.marks.iter().map(|m| (m.key.as_str(), m.mv.as_str())).collect();
+    assert_eq!(marks, [(ROOT, "5i6i")]);
     let nodes = register_nodes(0, &root(), &tree, &values, &BTreeSet::new(), 4, s.nodes);
     assert_eq!(nodes[ROOT].moves[0].value_kind, "tree:4");
     let exit = key(&["5i5h", "5a4a"]);
@@ -341,7 +358,7 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
             cond: "test",
         },
         DrawValues::default(),
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
@@ -367,7 +384,7 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
             cond: "test",
         },
         DrawValues::default(),
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
@@ -415,7 +432,7 @@ fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
             cond: "test",
         },
         draws,
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
@@ -466,7 +483,7 @@ fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
             cond: "test",
         },
         draws,
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
@@ -528,7 +545,7 @@ fn master_exit_conditions_follow_each_move_without_tainting_independent_branches
                 cond: "ledger",
             },
             DrawValues::default(),
-            40,
+            Some(40),
             work.path(),
         )
         .unwrap();
@@ -647,6 +664,38 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
         j.append(r.clone(), &s, "test".into()).unwrap();
     }
     drop(j);
+
+    // --parts: 読む局面を速さの比で分け、どの局面も 1 つの分け先だけに入る。台帳にある局面は除く。
+    let part_keys = |out: &str| -> Vec<Vec<String>> {
+        (0..2)
+            .map(|i| {
+                let text =
+                    std::fs::read_to_string(d.join(out).join(format!("parts/part-{i}.jsonl")))
+                        .unwrap();
+                text.lines()
+                    .flat_map(|t| {
+                        let line: Line = serde_json::from_str(t).unwrap();
+                        assert_eq!((line.depth, line.priority), (0, DEFAULT_PRIORITY));
+                        std::iter::once(line.root).chain(line.roots)
+                    })
+                    .map(|sfen| sfen.split(' ').skip(1).take(3).collect::<Vec<_>>().join(" "))
+                    .collect()
+            })
+            .collect()
+    };
+    let mut args = cut_args(d, "cut_parts", None);
+    args.set_parts(vec![2, 1], None);
+    super::cut::run(args).unwrap();
+    let parts = part_keys("cut_parts");
+    let all: BTreeSet<String> = parts.iter().flatten().cloned().collect();
+    assert_eq!(all.len(), parts.iter().map(Vec::len).sum::<usize>());
+    assert_eq!(all, cache.keys().cloned().collect());
+    assert!(parts[0].len() >= parts[1].len() && parts[0].len() <= 2 * parts[1].len() + 2);
+    let mut args = cut_args(d, "cut_skip", None);
+    args.set_parts(vec![2, 1], Some(journal.clone()));
+    super::cut::run(args).unwrap();
+    assert!(part_keys("cut_skip").iter().all(Vec::is_empty));
+
     let ab = key(&["5i5h", "5a5b"]);
     let master = d.join("moves.tsv");
     let original =
@@ -756,7 +805,7 @@ fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
             cond: "test",
         },
         draws,
-        40,
+        Some(40),
         work.path(),
     )
     .unwrap();
