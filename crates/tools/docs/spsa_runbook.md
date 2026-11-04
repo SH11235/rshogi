@@ -1778,7 +1778,8 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 ### 17.3 resume (別の機械を含む)
 
 - resume でも bench を測り直し、**新しい倍率は新しい pair から**使う。落ちた時点で実行中だった pair と再 attempt 待ちの pair は、
-  dispatch 時の時計のまま指し直す。機械を移っても同じ pair の条件は変わらない。
+  dispatch 時の時計のまま指し直す。機械を移っても同じ pair の条件は変わらない。`--remote-worker` を使った run は例外で、
+  bench は worker ごとに走らせ、指し直しには指す機械の時計を付け直す (§18)。
 - 基準 TC (`--btime` / `--binc`)・`--reference-nps`・bench の版は fingerprint で一致を求める。変えるときは新しい run-dir で始める。
 - bench の slot 数は、resume では journal を再生した後の残りの pair 数で決める (本番の worker 数と同じ)。
 - 足切り (`--min-nps-ratio`) に掛かると、較正を書かずに止まる。fresh では旧 run の journal・snapshot も残る
@@ -1865,7 +1866,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   その較正の時計を付ける。切れた worker の pair を指し直すときは、指し直す機械の時計に付け直す
   (journal の `dispatch` の `clock` が attempt ごとに変わる)。
 - journal の `worker_joined` に、始められた worker の名前 (`w1`, `w2`, ... は `--remote-worker` の順)・hostname・slot 数・
-  engine の sha256・較正の index を残す。各 worker の stderr は `<run-dir>/remote/w<番号>.log` に追記する。
+  engine と worker の spsa binary の sha256・較正の index を残す。spsa binary は照合しないので、worker にも coordinator と同じ build を置く。各 worker の stderr は `<run-dir>/remote/w<番号>.log` に追記する。
 - worker の stdout のうち JSON でない行 (ssh 先の shell の初期化が出す motd など) は、coordinator の stderr に出して読み飛ばす。
 - worker が切れたとき (出力の終わり・壊れた行・`--remote-timeout-sec` の超過・worker の致命的なエラー) は、その worker の
   process group を止め、実行中だった pair を attempt の失敗 (`reason` が `remote worker w<番号> lost: ...`) として

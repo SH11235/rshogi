@@ -88,6 +88,10 @@ fn two_remote_workers_finish_the_run() {
     let names: Vec<&str> = joined.iter().map(|j| j["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["w1", "w2"]);
     assert!(joined.iter().all(|j| j["slots"] == 2 && j.get("calibration").is_none()));
+    // worker の spsa は coordinator と同じ binary。
+    let spsa = joined[0]["spsa_sha256"].as_str().unwrap();
+    assert_eq!(spsa.len(), 64);
+    assert!(joined.iter().all(|j| j["spsa_sha256"] == spsa));
     assert_eq!(kinds(&test, "accept").len(), 8);
     assert_eq!(records(&test, "games.jsonl").len(), 16);
     assert!(test.path("run").join("remote/w1.log").is_file());
@@ -410,6 +414,10 @@ fn worker_stops_when_the_coordinator_stops_reading_its_output() {
     let mut stdin = child.stdin.take().unwrap();
     let init = r#"{"type":"init","params":[{"name":"SPSA_TEST_INT","is_int":true}],"application_mask":[true],"theta0":["5.0"],"nps_bench":false,"timeout_sec":300}"#;
     writeln!(stdin, "{init}").unwrap();
+    // 閉じた pipe への書き込みで気づく。並列のテストの fork が pipe を一瞬持っている間の `ready` の書き込みは
+    // 通ってしまうことがあるので、対局の結果を書かせて確実に書き込みを起こす。
+    let task = r#"{"type":"task","pair_id":0,"attempt":1,"start_pos_index":0,"plus":["5.0"],"minus":["5.0"],"tc":{"black_time":0,"white_time":0,"black_inc":0,"white_inc":0,"byoyomi":0},"game_time_limit_ms":null}"#;
+    writeln!(stdin, "{task}").unwrap();
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {

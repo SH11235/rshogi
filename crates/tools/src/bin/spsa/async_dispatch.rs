@@ -157,7 +157,8 @@ struct DispatchRecord {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalRecord {
     Dispatch(DispatchRecord),
-    /// NPS の較正。以後の新しい pair の時計がこの倍率で決まる。
+    /// NPS の較正。以後の新しい pair の時計がこの倍率で決まる (`--remote-worker` では worker ごとに 1 件で、
+    /// その worker で指す pair に使う)。
     Calibration(TcCalibration),
     /// 結果の受信。適用 (`Accept`) とは別に記録し、保留中の結果も crash で失わない。
     Received {
@@ -179,11 +180,13 @@ enum JournalRecord {
         attempt: u32,
     },
     /// `--remote-worker` の worker が加わった。`calibration` はその機械の NPS の較正の index。
+    /// `spsa_sha256` は worker の spsa binary (対局の進め方は worker 側のコードで決まるので、版を残す)。
     WorkerJoined {
         name: String,
         host: String,
         slots: usize,
         engine_sha256: String,
+        spsa_sha256: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         calibration: Option<u32>,
     },
@@ -1379,7 +1382,8 @@ struct AsyncMeta {
     /// resume で一致を求める。
     #[serde(default)]
     game_records: bool,
-    /// NPS の較正の履歴 (journal の `calibration` と同じ内容)。最後の 1 件が新しい pair に使われる。
+    /// NPS の較正の履歴 (journal の `calibration` と同じ内容)。local では最後の 1 件が新しい pair に使われ、
+    /// `--remote-worker` では pair を指す worker の較正が使われる。
     #[serde(default)]
     tc_calibrations: Vec<TcCalibration>,
     /// 受信した局の数と、そのうち時計の時間切れの局の数。
@@ -2381,6 +2385,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 host: joined.host,
                 slots: joined.slots,
                 engine_sha256: joined.engine_sha256,
+                spsa_sha256: joined.spsa_sha256,
                 calibration,
             })?;
         }
@@ -3305,6 +3310,7 @@ mod tests {
             host: "h".into(),
             slots: 1,
             engine_sha256: "e".into(),
+            spsa_sha256: "s".into(),
             calibration: Some(0),
         }];
         core.env.clock = Some(clock(0));

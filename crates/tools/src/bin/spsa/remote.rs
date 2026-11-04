@@ -88,6 +88,7 @@ enum FromWorker {
         host: String,
         slots: usize,
         fingerprint: Box<RunFingerprint>,
+        spsa_sha256: String,
     },
     Ready {
         bench: Option<WireBench>,
@@ -257,11 +258,15 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
     let fingerprint = RunFingerprint::new(cli, &base_cfg)?;
     let (game_cfg, base_tc) = build_game_setup(cli);
     let faults = FaultPlan::from_env()?;
+    let spsa_sha256 = std::env::current_exe()
+        .context("failed to locate the spsa binary")
+        .and_then(|exe| sha256_hex_of_file(&exe))?;
     out.send(&FromWorker::Hello {
         protocol: PROTOCOL_VERSION,
         host: read_hostname(),
         slots: cli.concurrency,
         fingerprint: Box::new(fingerprint),
+        spsa_sha256,
     })?;
     {
         let out = Arc::clone(out);
@@ -547,6 +552,7 @@ pub(super) struct Joined {
     pub(super) host: String,
     pub(super) slots: usize,
     pub(super) engine_sha256: String,
+    pub(super) spsa_sha256: String,
     pub(super) bench: Option<nps_bench::BenchResult>,
 }
 
@@ -831,6 +837,7 @@ impl RemoteFleet {
                         host,
                         slots,
                         fingerprint,
+                        spsa_sha256,
                     },
                 ) => {
                     let checked = (|| -> Result<()> {
@@ -865,6 +872,7 @@ impl RemoteFleet {
                                 host: worker.host.clone(),
                                 slots,
                                 engine_sha256: fingerprint.engine_sha256,
+                                spsa_sha256,
                                 bench: None,
                             });
                             fleet.write(owner, init.clone());
