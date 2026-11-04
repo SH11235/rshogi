@@ -435,28 +435,35 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
 #[test]
 fn cycle_values_use_the_draw_of_the_side_that_closes_the_cycle() {
     let s = settings();
-    let dir = tempfile::tempdir().unwrap();
-    let mut def = definition(dir.path(), 0);
-    def.draw = 17;
-    def.draw_black = Some(-70);
-    def.draw_white = Some(70);
-    let mut tree = Tree::load(def, &s).unwrap();
-    let mut key = ROOT.to_owned();
-    for mv in ["5i4i", "5a4a", "4i5i", "4a5a"] {
-        tree.nodes.insert(key.clone(), reading(&key, &[(mv, 0)], &s));
-        tree.edge.insert(key.clone(), BTreeSet::from([mv.into()]));
-        key = child(&key, mv).unwrap();
-    }
-    let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
-    // 4 手の循環は相手が閉じる。先手番の局面は後手が閉じた値 (後手から見て +70) を返して −70、
-    // 後手番の局面は先手が閉じた値 (先手から見て −70) を返して +70。どちらも千日手を先手 −70 と見る。
-    for (key, edges) in &tree.edge {
-        let expected = if key.split(' ').nth(1) == Some("b") {
-            -70
-        } else {
-            70
-        };
-        assert_eq!(values[key][edges.first().unwrap()], expected, "{key}");
+    // 4 手の循環は相手が閉じるので、各局面の値は閉じた側の値の符号を返したもの。
+    // (draw_black, draw_white) → (先手番の局面の値, 後手番の局面の値)。省いた側は draw (17)。
+    for (black, white, expected) in [
+        (Some(-70), Some(70), (-70, 70)),
+        (Some(-70), None, (-17, 70)),
+        (None, Some(30), (-30, -17)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut def = definition(dir.path(), 0);
+        def.draw = 17;
+        def.draw_black = black;
+        def.draw_white = white;
+        let mut tree = Tree::load(def, &s).unwrap();
+        let mut key = ROOT.to_owned();
+        for mv in ["5i4i", "5a4a", "4i5i", "4a5a"] {
+            tree.nodes.insert(key.clone(), reading(&key, &[(mv, 0)], &s));
+            tree.edge.insert(key.clone(), BTreeSet::from([mv.into()]));
+            key = child(&key, mv).unwrap();
+        }
+        let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+        for (key, edges) in &tree.edge {
+            let want = if key.split(' ').nth(1) == Some("b") {
+                expected.0
+            } else {
+                expected.1
+            };
+            assert_eq!(values[key][edges.first().unwrap()], want, "{black:?} {white:?} {key}");
+        }
+        assert_eq!(values, reference_values(&tree));
     }
 }
 
@@ -509,7 +516,14 @@ fn reference_negamax(tree: &Tree, nodes: &BTreeSet<String>) -> super::model::Val
                 continue;
             }
             let value = if c == key || path.contains(&c) {
-                tree.def.draw
+                {
+                    let own = if key.split(' ').nth(1) == Some("b") {
+                        tree.def.draw_black
+                    } else {
+                        tree.def.draw_white
+                    };
+                    own.unwrap_or(tree.def.draw)
+                }
             } else {
                 let mut ancestors = path.clone();
                 ancestors.push(key.into());
