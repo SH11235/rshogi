@@ -58,6 +58,7 @@ fn options() -> WalkOptions {
             min_games: 3,
             book_diff: 30,
             book_best: 0.9,
+            book_first: false,
         },
     }
 }
@@ -122,6 +123,27 @@ fn large_book_diff_keeps_every_move_without_overflow() {
         ..options().opp
     };
     assert_eq!(book_moves(&moves, opp).len(), 2);
+}
+
+#[test]
+fn book_first_uses_book_moves_and_falls_back_to_frequency_outside_the_book() {
+    let a = after(ROOT, &["5i4h"]);
+    let first = WalkOptions {
+        opp: OppOptions {
+            book_first: true,
+            ..options().opp
+        },
+        ..options()
+    };
+    // 定跡に A があるので、局数の多い頻度 (5a5b 0.6・5a4b 0.3) でなく定跡の手 (0.9・0.1) で指す。
+    let rows = walk(&mut sources(Some(freq()), Some(book())), "b", first);
+    assert!(close(find(&rows, Stop::Own, &after(&a, &["5a5b"])).weight, 0.9));
+    assert!(close(find(&rows, Stop::Own, &after(&a, &["5a4b"])).weight, 0.1));
+    assert!(close(rows.iter().map(|r| r.weight).sum(), 1.0));
+    // 定跡に無い局面は頻度で指す。
+    let rows = walk(&mut sources(Some(freq()), Some(Table::new())), "b", first);
+    assert!(close(find(&rows, Stop::Own, &after(&a, &["5a5b"])).weight, 0.6));
+    assert!(close(find(&rows, Stop::Rare, &a).weight, 0.1));
 }
 
 #[test]
@@ -326,6 +348,7 @@ fn args(dir: &Path, master: PathBuf, freq: Option<PathBuf>, big: PathBuf, n: usi
         opp_book: Some(big),
         opp_book_diff: 30,
         opp_book_best: 0.9,
+        opp_book_first: false,
         cont_max: 100,
         enqueue_out: Some(dir.join(format!("queue{n}.jsonl"))),
         depth: 1,

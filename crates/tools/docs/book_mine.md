@@ -1008,7 +1008,7 @@ book_mine master cycles --master moves.tsv --table cycles.tsv \
 
 ```bash
 book_mine master walk --master moves.tsv --table walk.tsv \
-  [--opp-freq strong_games.db] [--opp-book big.ybb --opp-book-diff 30 --opp-book-best 0.9] \
+  [--opp-freq strong_games.db] [--opp-book big.ybb --opp-book-diff 30 --opp-book-best 0.9 [--opp-book-first]] \
   [--min-weight 0.005 --enqueue-out queue.jsonl --depth 6 --priority 300 --tag x19 --game-from-book] \
   [--start-moves "2g2f"]
 ```
@@ -1028,6 +1028,7 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 | `--opp-book <PATH>` | なし | 相手の手の大きい定跡 (`.db` か `.ybb`。`.db` は `borrow cut` と同じく手数を除いた SFEN の順に並んでいること)。ファイルから引くので丸読みしない |
 | `--opp-book-diff <CP>` | `30` | 大きい定跡で指すとき、最善の値からこの差以内の手を指す |
 | `--opp-book-best <P>` | `0.9` | 大きい定跡で指すとき、最善 (同じ値の手は等分) の重み。残りを差以内の他の手で等分する (差以内の手が最善だけなら最善に 1) |
+| `--opp-book-first` | 無効 | 相手の手番では `--opp-book` を先に引き、局面があればその手だけで指す。定跡に無い局面だけ `--opp-freq` の頻度で指す。相手が自分の定跡を持つときに、その定跡を外れた後に手順の入れ替わりで定跡に戻る線も辿るため。`--opp-book` が要る |
 | `--cont-max <N>` | `100` | 大きい定跡の最善を両者が指し続けた手順を辿る手数の上限 |
 | `--enqueue-out <PATH>` | なし | 自分が読み始める局面のうち重みが `--min-weight` 以上のものを、`tree enqueue --from` の行 (JSON Lines) に書く |
 | `--depth <N>` / `--priority <N>` / `--tag <NAME>` | `6` / `300` / `walk` | キューの行の段数・priority の始まり (重みの順位 0〜99 を足す)・id `<tag>_<根の手数>_<局面の hash 16 桁>_<b\|w>` の名前 (`[A-Za-z0-9_-]` の 1〜40 文字) |
@@ -1038,7 +1039,7 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 
 - 自分の手番では元データの main を指します (対局の default プリセットと同じ)。行が無ければ `own` で止めます。
 - `--start-moves` を渡すと、その手順を指した局面から同じ規則で辿ります (その局面が元データに無く自分の手番なら、そこが `own`)。一覧の `ply`・`moves` とキューの行の根の手数・`memo` の手順は、初期局面からの手数・手順 (`--start-moves` を前に含む) です。
-- 相手の手番では、`--opp-freq` の局数が `--min-games` 以上の局面なら、局数が `--min-games` 以上の手を局数の割合で指します。局数の少ない手に行った分と、局数の足りない局面は、`--opp-book` があればその手で指します (同じ手は重みを足します)。局数が足りず大きい定跡にも無ければ `out`、局数の少ない手のうち大きい定跡で埋まらなかった分 (局数が足りていて全部の手が少ない局面を含みます) と指せない手の分は `rare` で止めます。重みが 0 になる手 (`--opp-book-best` が 0 か 1 のとき) は辿りません。
+- 相手の手番では、`--opp-freq` の局数が `--min-games` 以上の局面なら、局数が `--min-games` 以上の手を局数の割合で指します。局数の少ない手に行った分と、局数の足りない局面は、`--opp-book` があればその手で指します (同じ手は重みを足します)。局数が足りず大きい定跡にも無ければ `out`、局数の少ない手のうち大きい定跡で埋まらなかった分 (局数が足りていて全部の手が少ない局面を含みます) と指せない手の分は `rare` で止めます。重みが 0 になる手 (`--opp-book-best` が 0 か 1 のとき) は辿りません。`--opp-book-first` では順が逆で、大きい定跡に手のある局面はその手だけで指し、無い局面だけ上の頻度の規則で指します (頻度で指した後の局数の少ない手の分は、大きい定跡にも無いので `rare`)。大きい定跡に手はあるがどれも指せない局面は、頻度に戻らずその分を `rare` にします。
 - 重みが `--weight-floor` 未満なら `tiny`、`--max-ply` 手に達したら `max` で止めます。同じ手数で同じ局面に来た重みは足し合わせ、手順は最初に辿ったものを残します。止まった重みの合計は手番ごとに 1 です。
 - 大きい定跡の手は書かれたままの局面で引きます (先後反転では引きません)。`--opp-freq` だけなら `master rejoin` の重みと同じ辿り方で、相手の局数が足りずに止まった分が `out` と `rare` に出ます。
 

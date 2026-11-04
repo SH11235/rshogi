@@ -56,6 +56,10 @@ pub(super) struct WalkArgs {
     /// 大きい定跡で指すとき、最善 (同じ値の手は等分) に割り当てる重み。残りを差以内の他の手で等分する
     #[arg(long, default_value_t = 0.9)]
     opp_book_best: f64,
+    /// 相手の手番では大きい定跡を先に引き、局面があればその手だけで指す。無い局面だけ `--opp-freq` の頻度で指す
+    /// (相手が自分の定跡を持つときの辿り方。定跡を外れた後に手順の入れ替わりで定跡に戻る線も辿る)
+    #[arg(long, requires = "opp_book")]
+    opp_book_first: bool,
     /// 自分が読み始める局面から、大きい定跡の最善を両者が指し続けた手順をこの手数まで辿る
     #[arg(long, default_value_t = 100)]
     cont_max: usize,
@@ -185,6 +189,7 @@ struct OppOptions {
     min_games: u64,
     book_diff: i32,
     book_best: f64,
+    book_first: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,11 +213,21 @@ fn advance(key: &str, mv: &str) -> Result<String> {
 /// 相手の手番の局面で、相手が指す手と重み (重みは正、足して 1 未満なら残りは `Rare`)。局数が足りず大きい定跡にも
 /// 無く、手が分からなければ `None`。局数が `min_games` 以上の局面では、局数が `min_games` 以上の手を頻度で指す。
 /// 局数の少ない手に行った分と、局数の足りない局面は、大きい定跡があればその手で指す (同じ手は重みを足す)。
+/// `book_first` なら、大きい定跡に手のある局面はその手だけで指し、頻度は定跡に無い局面だけで使う。
 fn opponent_moves(
     key: &str,
     src: &mut Sources,
     opp: OppOptions,
 ) -> Result<Option<Vec<(String, f64)>>> {
+    if opp.book_first
+        && let Some(book) = src.book.as_mut()
+    {
+        let mut out = book_moves(book.moves(key)?, opp);
+        out.retain(|(_, share)| *share > 0.0);
+        if !out.is_empty() {
+            return Ok(Some(out));
+        }
+    }
     let mut out: Vec<(String, f64)> = Vec::new();
     let mut rest = 1.0;
     let mut enough_games = false;
@@ -475,6 +490,7 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
             min_games: args.min_games,
             book_diff: args.opp_book_diff,
             book_best: args.opp_book_best,
+            book_first: args.opp_book_first,
         },
     };
     let mut rows = Vec::new();
