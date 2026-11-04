@@ -66,7 +66,7 @@ pub(super) struct CutArgs {
     priority: u32,
     /// 読む局面を、局面ごとにどれか 1 つに割り当てて、分け先ごとのキュー (`parts/part-<i>.jsonl`) にも書く。
     /// 値は分け先ごとの速さの比 (カンマ区切り、例 `55,65,78`)。根の順に初めて出た局面から、
-    /// 割り当て済みの数を速さで割った値が一番小さい分け先に入れる
+    /// (割り当て済みの数 + 1) / 速さ が一番小さい分け先に入れる
     #[arg(long, value_delimiter = ',')]
     parts: Vec<u32>,
     /// `--parts` の分け先から、この台帳に読みのある局面を除く (serve が書いている台帳は複製して渡す)
@@ -110,9 +110,15 @@ impl CutArgs {
         self.check_every = every;
     }
 
-    pub(super) fn set_parts(&mut self, parts: Vec<u32>, skip_journal: Option<PathBuf>) {
+    pub(super) fn set_parts(
+        &mut self,
+        parts: Vec<u32>,
+        skip_journal: Option<PathBuf>,
+        fingerprint: Option<String>,
+    ) {
         self.parts = parts;
         self.skip_journal = skip_journal;
+        self.fingerprint = fingerprint;
     }
 }
 

@@ -684,17 +684,44 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
             .collect()
     };
     let mut args = cut_args(d, "cut_parts", None);
-    args.set_parts(vec![2, 1], None);
+    args.set_parts(vec![2, 1], None, None);
     super::cut::run(args).unwrap();
     let parts = part_keys("cut_parts");
     let all: BTreeSet<String> = parts.iter().flatten().cloned().collect();
     assert_eq!(all.len(), parts.iter().map(Vec::len).sum::<usize>());
     assert_eq!(all, cache.keys().cloned().collect());
-    assert!(parts[0].len() >= parts[1].len() && parts[0].len() <= 2 * parts[1].len() + 2);
-    let mut args = cut_args(d, "cut_skip", None);
-    args.set_parts(vec![2, 1], Some(journal.clone()));
+    // (割り当て済み + 1) / 速さ が最小の分け先へ (同じなら番号の小さい方): 速さ 2:1 なら 0,0,1 の繰り返し。
+    let n = all.len();
+    let expected0 = (0..n).filter(|i| i % 3 != 2).count();
+    assert_eq!((parts[0].len(), parts[1].len()), (expected0, n - expected0));
+    // 同じ入力なら同じ分け方。
+    let mut args = cut_args(d, "cut_parts2", None);
+    args.set_parts(vec![2, 1], None, None);
     super::cut::run(args).unwrap();
-    assert!(part_keys("cut_skip").iter().all(Vec::is_empty));
+    for i in 0..2 {
+        let f = format!("parts/part-{i}.jsonl");
+        assert_eq!(
+            std::fs::read(d.join("cut_parts").join(&f)).unwrap(),
+            std::fs::read(d.join("cut_parts2").join(&f)).unwrap()
+        );
+    }
+    // 台帳に読みのある局面だけを除く (一部だけ持つ台帳、指紋を指定)。
+    let partial = d.join("partial.jsonl");
+    let mut j = Journal::open(&partial, &s.fingerprint).unwrap();
+    let known: BTreeSet<String> = cache.keys().take(n / 2).cloned().collect();
+    for k in &known {
+        j.append(cache[k].clone(), &s, "test".into()).unwrap();
+    }
+    drop(j);
+    let mut args = cut_args(d, "cut_skip", None);
+    args.set_parts(vec![2, 1], Some(partial), Some(s.fingerprint.clone()));
+    super::cut::run(args).unwrap();
+    let rest: BTreeSet<String> = part_keys("cut_skip").into_iter().flatten().collect();
+    assert_eq!(rest, all.difference(&known).cloned().collect());
+    let mut args = cut_args(d, "cut_skip_all", None);
+    args.set_parts(vec![2, 1], Some(journal.clone()), None);
+    super::cut::run(args).unwrap();
+    assert!(part_keys("cut_skip_all").iter().all(Vec::is_empty));
 
     let ab = key(&["5i5h", "5a5b"]);
     let master = d.join("moves.tsv");
