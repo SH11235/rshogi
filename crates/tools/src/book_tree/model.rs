@@ -75,6 +75,12 @@ pub(super) struct Definition {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub draw: i32,
+    /// 先手番の局面で循環に入る手の値 (先手から見た値)。省くと `draw`
+    #[serde(default)]
+    pub draw_black: Option<i32>,
+    /// 後手番の局面で循環に入る手の値 (後手から見た値)。省くと `draw`
+    #[serde(default)]
+    pub draw_white: Option<i32>,
 }
 impl Definition {
     pub fn params(&self) -> TreeParams {
@@ -87,6 +93,8 @@ impl Definition {
             rounds: self.rounds,
             extra: self.extra.clone(),
             draw: self.draw,
+            draw_black: self.draw_black,
+            draw_white: self.draw_white,
         }
     }
 
@@ -116,6 +124,20 @@ pub(super) struct TreeParams {
     pub rounds: usize,
     pub extra: Vec<String>,
     pub draw: i32,
+    pub draw_black: Option<i32>,
+    pub draw_white: Option<i32>,
+}
+
+impl TreeParams {
+    /// `key` の手番の側が循環に入る手に付ける値 (手番の側から見た値)。
+    fn draw_for(&self, key: &str) -> i32 {
+        let own = if side(key) == "b" {
+            self.draw_black
+        } else {
+            self.draw_white
+        };
+        own.unwrap_or(self.draw)
+    }
 }
 
 /// 根の局面 key・手数と、根からの実戦の手順。
@@ -485,7 +507,7 @@ impl Tree {
             path.insert(key.to_owned());
             for (mv, c) in children.get(key).into_iter().flatten() {
                 let value = if path.contains(c) {
-                    tree.def.draw
+                    tree.def.draw_for(key)
                 } else {
                     -val(tree, c, children, path).0
                 };
@@ -993,6 +1015,8 @@ mod prefetch_tests {
             rounds: 1,
             extra: vec![],
             draw: 17,
+            draw_black: None,
+            draw_white: None,
         }
     }
     fn fixture() -> (Tree, Vec<GameLine>, BTreeMap<String, Reading>) {

@@ -2310,6 +2310,8 @@ mod tests {
             rounds: 0,
             extra: vec![],
             draw: 0,
+            draw_black: None,
+            draw_white: None,
         };
         let mut tree = Tree::build(def.clone(), &[(key.clone(), 1, vec![])]).unwrap();
         let prefetched = BTreeSet::from([key.clone(), "unused".into()]);

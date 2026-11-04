@@ -53,6 +53,12 @@ pub struct EnqueueArgs {
     rounds: Option<usize>,
     #[arg(long, conflicts_with_all = ["from", "repair"], allow_hyphen_values = true)]
     draw: Option<i32>,
+    /// 先手番の局面で循環に入る手の値 (先手から見た値)。省くと --draw
+    #[arg(long, conflicts_with_all = ["from", "repair"], allow_hyphen_values = true)]
+    draw_black: Option<i32>,
+    /// 後手番の局面で循環に入る手の値 (後手から見た値)。省くと --draw
+    #[arg(long, conflicts_with_all = ["from", "repair"], allow_hyphen_values = true)]
+    draw_white: Option<i32>,
     /// 根で伸ばす手。繰り返して複数
     #[arg(long, conflicts_with_all = ["from", "repair"])]
     extra: Vec<String>,
@@ -93,6 +99,8 @@ fn line_from_args(args: &EnqueueArgs) -> Result<Line> {
             stop: args.stop,
             rounds: args.rounds,
             draw: args.draw,
+            draw_black: args.draw_black,
+            draw_white: args.draw_white,
             extra: (!args.extra.is_empty()).then(|| args.extra.clone()),
         },
         memo: args.memo.clone(),

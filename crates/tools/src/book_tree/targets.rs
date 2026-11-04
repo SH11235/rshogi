@@ -32,6 +32,12 @@ pub(super) struct Opts {
     pub rounds: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw: Option<i32>,
+    /// 先手番の局面で循環に入る手の値 (先手から見た値)。省くと `draw`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_black: Option<i32>,
+    /// 後手番の局面で循環に入る手の値 (後手から見た値)。省くと `draw`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_white: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<Vec<String>>,
 }
@@ -160,8 +166,14 @@ impl Line {
         if let Some(v) = o.rounds {
             check_range("rounds", v, 0, 10)?;
         }
-        if let Some(v) = o.draw {
-            check_range("draw", v, -30000, 30000)?;
+        for (name, v) in [
+            ("draw", o.draw),
+            ("draw_black", o.draw_black),
+            ("draw_white", o.draw_white),
+        ] {
+            if let Some(v) = v {
+                check_range(name, v, -30000, 30000)?;
+            }
         }
         if let Some(extra) = &o.extra {
             if extra.len() > MAX_EXTRA {
@@ -192,6 +204,8 @@ impl Line {
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),
             draw: self.opts.draw.unwrap_or(defaults.draw),
+            draw_black: self.opts.draw_black,
+            draw_white: self.opts.draw_white,
             extra: self.opts.extra.clone().unwrap_or_default(),
             game: self.game.clone(),
         })
@@ -212,6 +226,10 @@ pub(super) struct Resolved {
     pub stop: i32,
     pub rounds: usize,
     pub draw: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_black: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_white: Option<i32>,
     pub extra: Vec<String>,
     pub game: Vec<Vec<String>>,
 }
@@ -226,6 +244,8 @@ impl Resolved {
             rounds: self.rounds,
             extra: self.extra.clone(),
             draw: self.draw,
+            draw_black: self.draw_black,
+            draw_white: self.draw_white,
         }
     }
 
