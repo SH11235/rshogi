@@ -125,9 +125,16 @@ pub(super) trait MateState: Send + Sized + 'static {
 
     /// 指し手を戻す
     fn undo_move(&mut self, m: Self::Mv);
+
+    fn debug_sfen(&self) -> String {
+        String::new()
+    }
 }
 
 impl MateState for Position {
+    fn debug_sfen(&self) -> String {
+        self.to_sfen()
+    }
     type Mv = Move;
 
     fn key(&self) -> u64 {
@@ -569,6 +576,10 @@ impl NoAttackerKing {
 
 impl MateState for NoAttackerKing {
     type Mv = Move;
+
+    fn debug_sfen(&self) -> String {
+        self.pos.to_sfen()
+    }
 
     fn key(&self) -> u64 {
         Position::key(&self.pos)

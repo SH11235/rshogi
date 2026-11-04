@@ -29,6 +29,14 @@
 //! - 打ち切り (ノード数・時間・停止) は `Abort` で全体を中断する。
 //!   上限に達したノードに値を返させると、不詰と取り違えたり、同じ子を選び続けたりする。
 
+thread_local! {
+    pub(super) static DBG_S: std::cell::RefCell<std::collections::HashMap<u64, u64>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    pub(super) static DBG_SIGMA: std::cell::RefCell<Option<std::collections::HashMap<u64, u64>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static DBG_G: std::cell::RefCell<std::collections::HashMap<u64, Vec<u64>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    pub(super) static DBG_W: std::cell::RefCell<std::collections::HashMap<u64, u64>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static DBG_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 use std::any::Any;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -79,6 +87,7 @@ pub(super) struct NodeResult {
     /// 攻め方の持駒の条件。詰みは証明駒、経路や上限に依存しない不詰は反証駒、
     /// それ以外 (未確定と条件付きの不詰) は局面の持駒。
     pub hand: Hand,
+    pub dbg_w: u64,
 }
 
 /// 不詰が経路上の祖先に依存しないことを表す `loop_depth`
@@ -94,6 +103,7 @@ impl NodeResult {
             limited: false,
             depth_limited: false,
             hand,
+            dbg_w: 1,
         }
     }
 
@@ -106,6 +116,7 @@ impl NodeResult {
             limited,
             depth_limited: false,
             hand,
+            dbg_w: 1,
         }
     }
 
@@ -159,6 +170,7 @@ struct Child<M> {
     active: bool,
     /// 後回しの組でこの手の次の手 (フレーム内の添字)。`NO_NEXT` なら無い。
     next: u16,
+    dbg_w: u64,
 }
 
 /// `Child::next` の「次の手が無い」
@@ -380,7 +392,7 @@ impl ShortestTables {
     }
 
     /// 局面 `key` が何手以内に詰まないと分かっているか
-    fn len_bound(&self, key: u64) -> Option<u16> {
+    pub(super) fn len_bound(&self, key: u64) -> Option<u16> {
         self.get(|s| &s.len_bounds, key).map(|v| v as u16)
     }
 
@@ -573,6 +585,7 @@ pub(super) struct Searcher<'a, S: MateState, const PIECES: bool> {
     /// 攻め方 (ルートの手番)。置換表の持駒はこちらの持駒で表す
     attacker: Color,
     nodes: u64,
+    dbg_no_drops: bool,
     /// `budget.shared_nodes` に足し込み済みのノード数
     reported: u64,
     next_check: u64,
@@ -654,6 +667,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             scratch,
             attacker,
             nodes: 0,
+            dbg_no_drops: false,
             reported: 0,
             // 最初のノードで停止フラグを確かめる (開始前に立っていたら何も返さない)
             next_check: 0,
@@ -676,6 +690,14 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
     /// `tables` に覚えておき、`futility` なら受け方の無駄合いを詰み手数に数えない。
     /// `futility` では、詰みは置換表に書かず `tables` に局面の完全一致で書く (`ShortestTables`)。
     /// 覚えた値は無駄合いの数え方で変わるので、呼ぶたびに捨てる。
+    pub(super) fn dbg_set_no_drops(&mut self) {
+        self.dbg_no_drops = true;
+    }
+
+    pub(super) fn dbg_nodes(&self) -> u64 {
+        self.nodes
+    }
+
     pub fn enable_shortest(&mut self, futility: bool, tables: &'a ShortestTables) {
         self.shortest = true;
         self.futility = futility;
@@ -994,6 +1016,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             child.limited = child_result.limited;
             child.depth_limited = child_result.depth_limited;
             child.hand = child_result.hand;
+            child.dbg_w = child_result.dbg_w;
             // 合駒が上限や経路のために詰まなかったら、無駄合いかを調べる
             if self.shortest
                 && !or_node
@@ -1045,6 +1068,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 },
             );
         }
+        if result.is_disproven() {
+            DBG_W.with(|m| m.borrow_mut().insert(key.key, result.dbg_w));
+        }
         if self.shortest
             && result.is_len_bounded()
             && let Some(tables) = self.tables
@@ -1077,6 +1103,25 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
         };
         self.scratch.moves.clear();
         st.generate(or_node, &mut self.scratch.moves);
+        if self.dbg_no_drops && !or_node {
+            self.scratch.moves.retain(|&mv| !st.is_drop(mv));
+        }
+        if !or_node {
+            let attacker = self.attacker;
+            DBG_SIGMA.with(|sg| {
+                if let Some(sig) = sg.borrow().as_ref()
+                    && let Some(&ck) = sig.get(&st.table_key(attacker).key)
+                    && self.scratch.moves.iter().any(|&m| st.table_key_after(m, attacker).key == ck)
+                {
+                    if std::env::var_os("DBG_ORDER").is_some() {
+                        let i = self.scratch.moves.iter().position(|&m| st.table_key_after(m, attacker).key == ck).unwrap();
+                        self.scratch.moves.swap(0, i);
+                    } else {
+                        self.scratch.moves.retain(|&m| st.table_key_after(m, attacker).key == ck);
+                    }
+                }
+            });
+        }
         // 置換表を引く前に子の bucket をまとめて読み込ませ、キャッシュミスの待ちを重ねる。読み込みは鍵を
         // 作り終えてから短いループで出す: prefetch 命令の無い wasm では実際に読むので、鍵の計算と交互だと
         // 同時に待てるミスが少ない
@@ -1115,6 +1160,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 first_visit: true,
                 active: true,
                 next: NO_NEXT,
+                dbg_w: 1,
             };
             if let Some(loop_depth) = self.repetition_depth(child_key) {
                 // 経路上の局面に戻る手は読むまでもなくこの経路では不詰。先に確定させておかないと、
@@ -1188,6 +1234,9 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                     None if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
                     None => {}
                 }
+            }
+            if child.dn == 0 && child.loop_depth == NO_LOOP {
+                child.dbg_w = DBG_W.with(|m| m.borrow().get(&child_key).copied().unwrap_or(1));
             }
             self.scratch.children.push(child);
         }
@@ -1344,7 +1393,24 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                 continue;
             };
             debug_assert_eq!(returned_state.key(), returned.key);
-            match self.shortest_detached(returned_state, len_limit) {
+            let dbg_n0 = self.nodes;
+            DBG_DEPTH.with(|d| d.set(d.get() + 1));
+            let dbg_r = self.shortest_detached(returned_state, len_limit);
+            let dbg_depth = DBG_DEPTH.with(|d| {
+                d.set(d.get() - 1);
+                d.get()
+            });
+            if self.nodes - dbg_n0 >= 1_000_000 {
+                eprintln!(
+                    "HEAVYM\t{}\t{}\t{}\t{}\t{}",
+                    len_limit,
+                    self.nodes - dbg_n0,
+                    dbg_depth,
+                    matches!(dbg_r, Ok(Some(_))),
+                    returned_state.debug_sfen()
+                );
+            }
+            match dbg_r {
                 Ok(Some((proof, len))) => {
                     let proof = if PIECES { proof } else { before.hand };
                     // 取る手が複数 (成・不成) なら、詰み手数の短い方
@@ -1698,6 +1764,7 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             limited: false,
             depth_limited: false,
             hand: Hand::EMPTY,
+            dbg_w: 1,
         }
     }
 
@@ -1858,8 +1925,25 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
             } else {
                 loop_depth
             };
+            {
+                let k = st.table_key(self.attacker).key;
+                let ks: Vec<u64> = if or_node {
+                    children.iter().map(|c| st.table_key_after(c.mv, self.attacker).key).collect()
+                } else {
+                    let ck = st.table_key_after(escape().mv, self.attacker).key;
+                    DBG_S.with(|m| m.borrow_mut().insert(k, ck));
+                    vec![ck]
+                };
+                DBG_G.with(|m| m.borrow_mut().insert(k, ks));
+            }
+            let dbg_w = if or_node {
+                children.iter().fold(1u64, |a, c| a.saturating_add(c.dbg_w))
+            } else {
+                1 + escape().dbg_w
+            };
             let result = NodeResult {
                 depth_limited,
+                dbg_w,
                 ..NodeResult::disproven(loop_depth, limited, disproof)
             };
             return if result.is_conditional() {

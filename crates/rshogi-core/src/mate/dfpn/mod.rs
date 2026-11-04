@@ -29,6 +29,8 @@ mod verify;
 mod shortest_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fixed_exp;
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
