@@ -1092,7 +1092,7 @@ impl UsiEngine {
                     search.set_draw_value_black(v);
                 }
                 if let Ok(v) = value.parse::<i32>() {
-                    self.book_options.draw_value_black = v;
+                    self.book_options.draw_value_black = v.clamp(-30000, 30000);
                 }
             }
             "DrawValueWhite" => {
@@ -1102,7 +1102,7 @@ impl UsiEngine {
                     search.set_draw_value_white(v);
                 }
                 if let Ok(v) = value.parse::<i32>() {
-                    self.book_options.draw_value_white = v;
+                    self.book_options.draw_value_white = v.clamp(-30000, 30000);
                 }
             }
             "MultiPV" => {
@@ -3331,6 +3331,10 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 assert_eq!(search.draw_value_white(), -456);
                 assert_eq!(engine.book_options.draw_value_black, 123);
                 assert_eq!(engine.book_options.draw_value_white, -456);
+                engine.cmd_setoption(&["setoption", "name", "DrawValueBlack", "value", "40000"]);
+                engine.cmd_setoption(&["setoption", "name", "DrawValueWhite", "value", "-40000"]);
+                assert_eq!(engine.book_options.draw_value_black, 30000);
+                assert_eq!(engine.book_options.draw_value_white, -30000);
             })
             .unwrap()
             .join()

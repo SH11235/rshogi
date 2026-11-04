@@ -8,7 +8,7 @@
 //!    定跡が複数ある(優先定跡)ときは先頭から順にファイルごとにこれを行い、指し手が 1 つ以上ある
 //!    最初の局面を使う
 //! 4. `to_move` + pseudo-legal + legal で合法性検証、非合法は info string 警告して除去。
-//!    指すと直近 16 手以内の局面へ戻る手は、値が手番の側の `DrawValueBlack` / `DrawValueWhite` より良ければ
+//!    指すと直近 16 手以内の局面へ戻る手は、値が手番の側の `DrawValueBlack` / `DrawValueWhite` より良いか自分の連続王手なら
 //!    info string で知らせて除去 (戻ると同じ手順を繰り返して千日手になるため)。
 //!    explore 登録局面はここで合法な定跡手との積集合から等確率で選び、ponder 解決へ進む。
 //! 5. `BookDepthLimit`(0 で無効): 筆頭手 depth 不足なら局面ごと不採用
@@ -427,7 +427,7 @@ pub fn probe_with_explore(
                 info(message);
             }
         })?;
-    skip_repeating_moves(position, options, &mut candidates, &mut info);
+    let repeat_floor = skip_repeating_moves(position, options, &mut candidates, &mut info);
 
     // explore は合法な定跡手との積集合から等確率で選ぶ。通常の絞り込みより優先。
     if let (Some(explore), Some(moves)) = (explore, explore_moves) {
@@ -473,7 +473,8 @@ pub fn probe_with_explore(
 
     // 6. 評価値フィルタ。
     {
-        let top_value = candidates.iter().map(|c| c.value).max().unwrap_or(0);
+        // 外した繰り返す手は千日手の値とみなし、残った手をそれと比べる。
+        let top_value = candidates.iter().map(|c| c.value).chain(repeat_floor).max().unwrap_or(0);
         let side_limit = if position.side_to_move() == Color::Black {
             options.eval_black_limit
         } else {
@@ -542,40 +543,43 @@ pub fn probe_with_explore(
     })
 }
 
-/// 過去の局面へ戻る定跡手のうち、値が手番の側の千日手の値より良い手を候補から外す。
+/// 過去の局面へ戻る定跡手のうち、値が手番の側の千日手の値より良い手と、自分の連続王手の循環に入る手を
+/// 候補から外す。外した手があれば手番の側の千日手の値を返す。
 ///
-/// 定跡は同じ局面で同じ手を選ぶので、局面が戻ると同じ手順を繰り返して千日手になり、定跡の値を保てない。
-/// 戻るかは局面の履歴 (直近 16 手まで) で判定する。値が千日手の値以下の手は、繰り返しても損をしないので残す。
+/// 定跡は同じ局面で同じ手を選び得るので、局面が戻ると同じ手順を繰り返して千日手になり、定跡の値を保てない。
+/// 戻るかは局面の履歴 (直近 16 手まで) で判定する。値が千日手の値以下の手と、相手の連続王手の循環
+/// (相手の反則負け) に入る手は、繰り返しても損をしないので残す。
 fn skip_repeating_moves(
     position: &Position,
     options: &BookOptions,
     candidates: &mut Vec<Candidate>,
     info: &mut impl FnMut(&str),
-) {
+) -> Option<i32> {
     let draw = if position.side_to_move() == Color::Black {
         options.draw_value_black
     } else {
         options.draw_value_white
     };
+    let before = candidates.len();
     candidates.retain(|c| {
-        if c.value <= draw {
-            return true;
-        }
         let mut after = position.clone();
         let gives_check = after.gives_check(c.mv);
         after.do_move(c.mv, gives_check);
-        let repeats = matches!(
-            after.repetition_state(i32::MAX),
-            RepetitionState::Draw | RepetitionState::Win | RepetitionState::Lose
-        );
-        if repeats {
+        // 状態は指した後の手番 (相手) から見たもの。Win は相手の勝ち = 自分の連続王手。
+        let skip = match after.repetition_state(i32::MAX) {
+            RepetitionState::Draw => c.value > draw,
+            RepetitionState::Win => true,
+            _ => false,
+        };
+        if skip {
             info(&format!(
-                "book move {} repeats a previous position (value {} > draw value {}), skipped.",
+                "book move {} repeats a previous position (value {}, draw value {}), skipped.",
                 c.move_usi, c.value, draw
             ));
         }
-        !repeats
+        !skip
     });
+    (candidates.len() != before).then_some(draw)
 }
 
 #[cfg(test)]
@@ -943,6 +947,31 @@ mod tests {
         assert!(messages.iter().any(|m| m.contains("book move 5i5h repeats")), "{messages:?}");
         // 千日手の値が定跡の値以上なら、戻っても損をしないので使う。
         assert_eq!(probe_with(&back, 50).0.as_deref(), Some("5i5h"));
+    }
+
+    #[test]
+    fn repeating_move_uses_side_draw_value_and_draw_floor() {
+        let after_58 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B2K2R1/LNSG1GSNL w - 2";
+        let data = format!("{HEADER}\nsfen {after_58}\n5a5b none 50 16 100\n3c3d none -40 16 1\n");
+        let book = Book::from_reader(data.as_bytes(), true).unwrap();
+        let back = play(after_58, &["5a5b", "5h5i", "5b5a", "5i5h"]);
+        let probe_with = |draw_value_white: i32, eval_diff: i32| {
+            let options = BookOptions {
+                select_value: true,
+                eval_diff,
+                eval_white_limit: -1000,
+                draw_value_black: 1000,
+                draw_value_white,
+                ..Default::default()
+            };
+            probe(std::slice::from_ref(&book), &back, &options, &mut SeqRng::new(vec![0]), no_info)
+                .map(|r| r.best_move.to_usi())
+        };
+        // 後手番は DrawValueWhite で決める。
+        assert_eq!(probe_with(50, 300).as_deref(), Some("5a5b"));
+        assert_eq!(probe_with(-2, 300).as_deref(), Some("3c3d"));
+        // 外した手は千日手の値とみなすので、残った手が千日手の値から評価値差より悪ければ探索に任せる。
+        assert_eq!(probe_with(-2, 30), None);
     }
 
     #[test]

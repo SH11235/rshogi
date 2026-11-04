@@ -70,7 +70,9 @@ impl BookExploreList {
     pub(crate) fn warn_skipped(&mut self, sfen: &str, mv: &str, info: &mut dyn FnMut(&str)) {
         let key = normalize_key(sfen, true);
         if self.warned.insert((key.clone(), mv.to_string())) {
-            info(&format!("book explore: skipped {mv} at {key} (illegal or not in book)"));
+            info(&format!(
+                "book explore: skipped {mv} at {key} (illegal, not in book, or repeats a previous position)"
+            ));
         }
     }
 }
