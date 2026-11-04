@@ -80,6 +80,8 @@ fn definition(dir: &Path, rounds: usize) -> Definition {
         extra: vec!["5i6i".into()],
         fingerprint: None,
         draw: 17,
+        draw_black: None,
+        draw_white: None,
     }
 }
 fn corpus(settings: &Settings) -> BTreeMap<String, Reading> {
@@ -428,6 +430,34 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
         assert_eq!(values[key][edges.first().unwrap()], -17);
     }
     assert_eq!(values, reference_values(&tree));
+}
+
+#[test]
+fn cycle_values_use_the_draw_of_the_side_that_closes_the_cycle() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.draw = 17;
+    def.draw_black = Some(-70);
+    def.draw_white = Some(70);
+    let mut tree = Tree::load(def, &s).unwrap();
+    let mut key = ROOT.to_owned();
+    for mv in ["5i4i", "5a4a", "4i5i", "4a5a"] {
+        tree.nodes.insert(key.clone(), reading(&key, &[(mv, 0)], &s));
+        tree.edge.insert(key.clone(), BTreeSet::from([mv.into()]));
+        key = child(&key, mv).unwrap();
+    }
+    let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+    // 4 手の循環は相手が閉じる。先手番の局面は後手が閉じた値 (後手から見て +70) を返して −70、
+    // 後手番の局面は先手が閉じた値 (先手から見て −70) を返して +70。どちらも千日手を先手 −70 と見る。
+    for (key, edges) in &tree.edge {
+        let expected = if key.split(' ').nth(1) == Some("b") {
+            -70
+        } else {
+            70
+        };
+        assert_eq!(values[key][edges.first().unwrap()], expected, "{key}");
+    }
 }
 
 #[test]
