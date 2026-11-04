@@ -265,8 +265,12 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
         });
     }
     let inbox = spawn_stdin_reader();
+    // init が届くまでは coordinator の `--remote-timeout-sec` を知らないので、既定値で途絶を見る
+    // (coordinator は init より前から heartbeat を送る)。
+    let handshake_timeout = Duration::from_secs(DEFAULT_REMOTE_TIMEOUT_SEC);
+    let mut last_seen = Instant::now();
     let (wire_params, application_mask, theta0, nps_bench, timeout_sec) = loop {
-        match inbox.recv() {
+        match inbox.recv_timeout(POLL_INTERVAL) {
             Ok(Ok(ToWorker::Init {
                 params,
                 application_mask,
@@ -274,10 +278,18 @@ fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
                 nps_bench,
                 timeout_sec,
             })) => break (params, application_mask, theta0, nps_bench, timeout_sec),
-            Ok(Ok(ToWorker::Heartbeat)) => {}
+            Ok(Ok(ToWorker::Heartbeat)) => last_seen = Instant::now(),
             Ok(Ok(ToWorker::Task(_))) => bail!("init より先に task が届きました"),
             Ok(Err(error)) => return Err(error),
-            Err(_) => return Ok(()),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if last_seen.elapsed() > handshake_timeout {
+                    bail!(
+                        "init を待つ間 coordinator から {} 秒何も届きません",
+                        handshake_timeout.as_secs()
+                    );
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(()),
         }
     };
     let timeout = Duration::from_secs(timeout_sec);

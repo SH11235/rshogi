@@ -2381,9 +2381,10 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
                 calibration,
             })?;
         }
-        core.env.clock_per_attempt = true;
         store.publish(&core, RunStatus::Running, None)?;
     }
+    // remote の run を local で resume したときも、中断した pair はこの機械の時計で指し直す。
+    core.env.clock_per_attempt = fleet.is_some() || core.replay_remote;
 
     let remaining = total_pairs - core.completed;
     let worker_count = fleet

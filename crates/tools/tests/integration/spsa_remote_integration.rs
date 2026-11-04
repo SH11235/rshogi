@@ -268,7 +268,8 @@ fn retried_pair_uses_the_clock_of_the_machine_that_plays_it() {
     }
 }
 
-/// heartbeat の途絶による切断そのものは、timeout の下限 (60 秒) のため結合テストにしない。
+/// heartbeat の途絶による切断そのもの (init 待ち・bench 中・対局中のどれも) は、timeout の下限
+/// (60 秒、init 待ちは 300 秒) のため結合テストにしない。
 /// 途絶の判定は stdin の終わりと同じ停止経路を通る (`worker_stops_its_bench_when_the_coordinator_goes_away`、
 /// `pairs_of_a_lost_worker_are_played_again_elsewhere`)。
 #[test]
