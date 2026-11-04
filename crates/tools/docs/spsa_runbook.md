@@ -1782,7 +1782,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
 - 基準 TC (`--btime` / `--binc`)・`--reference-nps`・bench の版は fingerprint で一致を求める。変えるときは新しい run-dir で始める。
 - bench の slot 数は、resume では journal を再生した後の残りの pair 数で決める (本番の worker 数と同じ)。
 - 足切り (`--min-nps-ratio`) に掛かると、較正を書かずに止まる。fresh では旧 run の journal・snapshot も残る
-  (`--force-init` で先に消える meta・CSV を除く)。resume では再生で確定する分だけを書いて止まり、別の機械でそのまま再開できる。
+  (`--force-init` で先に消える meta・CSV・`final.params` と、`--init-from` で上書きされる `state.params` を除く)。resume では再生で確定する分だけを書いて止まり、別の機械でそのまま再開できる。
 - 完走済みの run の resume では bench を走らせない。
 
 ### 17.4 時間切れと 1 局の上限
@@ -1857,7 +1857,8 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pair
   coordinator は engine を起動しないが、比べる sha256 を取るため engine と `EvalFile` などの実体を手元にも置く。
 - 摂動の値・開始局面の番号・θ₀ は coordinator が送る。worker は params ファイルを読まない。
 - 全ての worker が `ready` になるか外れるまで待ってから始める。1 台も始められなければ、fresh では旧 run の journal・snapshot を
-  消す前に止まる (§17.3 の足切りと同じく、`--force-init` で先に消える meta・CSV を除く)。
+  消す前に止まる (§17.3 の足切りと同じく、`--force-init` で先に消える meta・CSV・`final.params` と、
+  `--init-from` で上書きされる `state.params` を除く)。
 - `--max-lag` の既定は、始められた worker の slot の合計の 4 倍。
 - `--nps-scaling` では、worker ごとに自分の slot 数で bench を走らせ、`--min-nps-ratio` を下回る worker を外す。
   較正は worker ごとに journal の `calibration` に 1 行書き、`host` は `w<番号> <hostname>`。その worker で指す pair には

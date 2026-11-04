@@ -352,7 +352,8 @@ fn local_resume_of_a_remote_run_replays_interrupted_pairs_on_the_local_clock() {
         worker_command(1, &limit, &extra),
     ];
     let bench = Path::new("35000");
-    // 最初の適用の直後に落ちると、もう 1 台の pair が実行中のまま残る。
+    // 最初の適用 (= 最初に記録された結果) の直後に落ちるので、もう 1 台に渡した pair は結果が journal に無く、
+    // resume で必ず指し直しになる。
     let crash = run(
         &test,
         "fischer_script",

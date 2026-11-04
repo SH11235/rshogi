@@ -2077,7 +2077,8 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         .and_then(|exe| sha256_hex_of_file(&exe))?;
 
     // worker の bench と足切りは、fresh では旧 run の成果物 (journal・snapshot) を消す前、resume では meta の照合の後に
-    // 済ませる。`--force-init` の meta・CSV の削除は main の初期化で先に済んでいる。local の `--nps-scaling` の足切りと
+    // 済ませる。`--force-init` の meta・CSV・final.params の削除と `--init-from` による state.params の上書きは、
+    // main の初期化で先に済んでいる。local の `--nps-scaling` の足切りと
     // 同じ扱いで、初期化の順序を入れ替えると batch と共有の起動の経路が変わるため揃えていない。
     let connect = || -> Result<Option<remote::RemoteFleet>> {
         if cli.remote_workers.is_empty() {
