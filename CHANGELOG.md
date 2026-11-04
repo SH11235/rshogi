@@ -14,6 +14,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### 教師データ / 評価・計測ツール
+
+- `rescore_psv` の ONNX モードで、`--onnx-gpu-id 0,1` のようにカンマ区切りで複数の GPU を指定できるようにした。
+  GPU ごとに `--onnx-sessions` 本のセッションを作り、空いたセッションが次のバッチを取る。出力の順序は GPU 1 つのときと
+  同じで、番号を 1 つだけ指定したときの動きは変わらない。機種の違う GPU を混ぜると、どのバッチをどの GPU が処理したかで
+  出力の最下位 bit が変わりうる (`crates/tools/docs/rescore_psv.md`)。
+
 ## v1.8.0 — 2026-11-04
 
 v1.7.0 以降の、詰み探索の追加と探索の更新、定跡ファイルの読み方の拡充、定跡・SPSA・教師データの
