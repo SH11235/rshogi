@@ -1,0 +1,1011 @@
+//! `--remote-worker` / `--worker-stdio`: 対局を別の機械の worker に任せる。
+//!
+//! coordinator は worker を `sh -c <command>` で起動し (ssh 越しを想定)、stdin/stdout の JSON 行で
+//! pair を渡して結果を受け取る。対局は worker の機械の中で完結させ、通信の往復を時計に乗せない。
+//! θ・journal・snapshot は coordinator だけが持ち、worker は渡された設定値で 2 局指して返すだけ。
+//!
+//! やりとり: worker → `hello` (対局条件の fingerprint) → coordinator → `init` (param 名・θ₀) →
+//! worker → `ready` (`--nps-scaling` ならその機械の bench) → `task` と `done` / `failed` の繰り返し。
+//! worker は一定間隔で `heartbeat` を送り、coordinator は `--remote-timeout-sec` の間何も届かない
+//! worker を切れたとみなす。coordinator が stdin を閉じると worker は対局を止めて終わる。
+
+use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use super::*;
+
+const PROTOCOL_VERSION: u32 = 1;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_REMOTE_TIMEOUT_SEC: u64 = 300;
+/// 終了時に stdin を閉じてから worker の終了を待つ時間。過ぎたら process group ごと止める。
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct WireParam {
+    name: String,
+    is_int: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WireClock {
+    black_time: u64,
+    white_time: u64,
+    black_inc: u64,
+    white_inc: u64,
+    byoyomi: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct WireTask {
+    pair_id: u32,
+    attempt: u32,
+    start_pos_index: usize,
+    #[serde(with = "exact_f64")]
+    plus: Vec<f64>,
+    #[serde(with = "exact_f64")]
+    minus: Vec<f64>,
+    tc: WireClock,
+    game_time_limit_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToWorker {
+    Init {
+        params: Vec<WireParam>,
+        application_mask: Vec<bool>,
+        #[serde(with = "exact_f64")]
+        theta0: Vec<f64>,
+        nps_bench: bool,
+    },
+    Task(WireTask),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct WireBench {
+    slot_nps: Vec<f64>,
+    nps: f64,
+    depth: u32,
+    warmup_depth: u32,
+    positions: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireDetail {
+    game_id: u32,
+    startpos_sfen: String,
+    moves: GameMoves,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum FromWorker {
+    Hello {
+        protocol: u32,
+        host: String,
+        slots: usize,
+        fingerprint: Box<RunFingerprint>,
+    },
+    Ready {
+        bench: Option<WireBench>,
+    },
+    Done {
+        pair_id: u32,
+        attempt: u32,
+        games: Box<[GameRecord; 2]>,
+        details: Box<[WireDetail; 2]>,
+        retries: u32,
+    },
+    Failed {
+        pair_id: u32,
+        attempt: u32,
+        reason: String,
+    },
+    Heartbeat,
+    /// worker が続けられない (engine が起動しない等)。coordinator はその worker を切る。
+    Fatal {
+        message: String,
+    },
+}
+
+fn to_line<T: Serialize>(message: &T) -> Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(message).context("failed to encode message")?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+// =============================================================================
+// worker (`--worker-stdio`)
+// =============================================================================
+
+/// stdout は応答専用。heartbeat の thread と行が混ざらないよう 1 行ずつ lock して書く。
+struct Output(Mutex<std::io::Stdout>);
+
+impl Output {
+    fn send(&self, message: &FromWorker) -> Result<()> {
+        let line = to_line(message)?;
+        let mut out = self.0.lock().map_err(|_| anyhow::anyhow!("stdout lock poisoned"))?;
+        out.write_all(&line).context("failed to write to stdout")?;
+        out.flush().context("failed to flush stdout")
+    }
+}
+
+/// `--worker-stdio` の入口。続けられないエラーは `fatal` で coordinator に伝えてから終わる。
+pub(crate) fn run_worker(cli: &Cli) -> Result<()> {
+    if !cli.remote_workers.is_empty() {
+        bail!("--worker-stdio と --remote-worker は同時に指定できません");
+    }
+    if cli.concurrency == 0 {
+        bail!("--concurrency must be >= 1");
+    }
+    if cli.threads == 0 {
+        bail!("--threads must be >= 1");
+    }
+    if cli.nps_scaling
+        && tools::selfplay::nps_bench::sets_threads_option(cli.usi_options.iter().flatten())
+    {
+        bail!("--nps-scaling では Threads を --usi-option ではなく --threads で指定してください");
+    }
+    let out = Arc::new(Output(Mutex::new(std::io::stdout())));
+    let result = serve(cli, &out);
+    if let Err(error) = &result {
+        let _ = out.send(&FromWorker::Fatal {
+            message: format!("{error:#}"),
+        });
+    }
+    result
+}
+
+/// stdin の行を読む thread。読み終わり (coordinator が閉じた) は channel の切断で伝わる。
+/// 終了時に join しない (stdin の読み込みは中断できない)。
+fn spawn_stdin_reader() -> crossbeam_channel::Receiver<Result<ToWorker>> {
+    let (tx, rx) = unbounded();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let message = line.context("failed to read stdin").and_then(|line| {
+                serde_json::from_str(&line).context("invalid message from coordinator")
+            });
+            let stop = message.is_err();
+            if tx.send(message).is_err() || stop {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn serve(cli: &Cli, out: &Arc<Output>) -> Result<()> {
+    let engine_path = resolve_engine_path(cli)?;
+    let translator = match &cli.engine_param_mapping {
+        Some(path) => EngineNameTranslator::from_mapping_file(path)?,
+        None => EngineNameTranslator::empty(),
+    };
+    let start_positions = load_run_start_positions(cli)?;
+    let base_cfg = build_engine_config(cli, engine_path);
+    let fingerprint = RunFingerprint::new(cli, &base_cfg)?;
+    let (game_cfg, base_tc) = build_game_setup(cli);
+    let faults = FaultPlan::from_env()?;
+    out.send(&FromWorker::Hello {
+        protocol: PROTOCOL_VERSION,
+        host: read_hostname(),
+        slots: cli.concurrency,
+        fingerprint: Box::new(fingerprint),
+    })?;
+    {
+        let out = Arc::clone(out);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(HEARTBEAT_INTERVAL);
+                if out.send(&FromWorker::Heartbeat).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let inbox = spawn_stdin_reader();
+    let (wire_params, application_mask, theta0, nps_bench) = match inbox.recv() {
+        Ok(Ok(ToWorker::Init {
+            params,
+            application_mask,
+            theta0,
+            nps_bench,
+        })) => (params, application_mask, theta0, nps_bench),
+        Ok(Ok(ToWorker::Task(_))) => bail!("init より先に task が届きました"),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    if application_mask.len() != wire_params.len() || theta0.len() != wire_params.len() {
+        bail!("init の param 数が揃っていません");
+    }
+    // worker が使うのは engine へ送る名前と整数の丸めだけ。範囲や更新の係数は coordinator が持つ。
+    let params: Vec<SpsaParam> = wire_params
+        .into_iter()
+        .map(|p| SpsaParam {
+            type_name: if p.is_int { "int" } else { "float" }.into(),
+            name: p.name,
+            is_int: p.is_int,
+            value: 0.0,
+            min: 0.0,
+            max: 0.0,
+            c_end: 0.0,
+            r_end: 0.0,
+            comment: String::new(),
+            not_used: false,
+        })
+        .collect();
+    let cpu_affinities = plan_cpu_affinities(cli, cli.concurrency)?;
+    let ctx = WorkerContext {
+        base_cfg: &base_cfg,
+        params: &params,
+        start_positions: &start_positions,
+        game_cfg: &game_cfg,
+        tc: base_tc,
+        translator: &translator,
+        application_mask: &application_mask,
+        cpu_affinities: cpu_affinities.as_deref(),
+    };
+    let bench = if nps_bench {
+        eprintln!("nps bench: {} slot(s) x {} thread(s) ...", cli.concurrency, cli.threads);
+        let result = nps_bench::measure(ctx, cli.concurrency, &theta0, cli.threads)?;
+        eprintln!("{}", result.summary());
+        Some(WireBench {
+            slot_nps: result.slot_nps,
+            nps: result.nps,
+            depth: result.depth,
+            warmup_depth: result.warmup_depth,
+            positions: result.positions,
+        })
+    } else {
+        None
+    };
+    out.send(&FromWorker::Ready { bench })?;
+
+    std::thread::scope(|scope| -> Result<()> {
+        let pool = AsyncPool::new(scope, cli.concurrency, ctx, cli.engine_retries, &faults)?;
+        loop {
+            crossbeam_channel::select! {
+                recv(inbox) -> message => match message {
+                    Ok(Ok(ToWorker::Task(task))) => {
+                        if task.start_pos_index >= start_positions.len() {
+                            bail!(
+                                "pair {}: start_pos_index {} が開始局面の数 {} を超えています",
+                                task.pair_id,
+                                task.start_pos_index,
+                                start_positions.len()
+                            );
+                        }
+                        pool.send(PairTask {
+                            pair_id: task.pair_id,
+                            attempt: task.attempt,
+                            start_pos_index: task.start_pos_index,
+                            plus: task.plus,
+                            minus: task.minus,
+                            tc: TimeControl::new(
+                                task.tc.black_time,
+                                task.tc.white_time,
+                                task.tc.black_inc,
+                                task.tc.white_inc,
+                                task.tc.byoyomi,
+                            ),
+                            game_time_limit_ms: task.game_time_limit_ms,
+                        })?;
+                    }
+                    Ok(Ok(ToWorker::Init { .. })) => bail!("init が 2 度届きました"),
+                    Ok(Err(error)) => return Err(error),
+                    // coordinator が stdin を閉じた。指している対局は pool の破棄で止める。
+                    Err(_) => return Ok(()),
+                },
+                recv(pool.results) -> message => {
+                    let message = message.context("worker pool closed")??;
+                    out.send(&to_wire(message))?;
+                }
+            }
+        }
+    })
+}
+
+fn to_wire(message: WorkerMessage) -> FromWorker {
+    match message {
+        WorkerMessage::Done {
+            pair_id,
+            attempt,
+            games,
+            details,
+            retries,
+        } => {
+            let [first, second] = *details;
+            let wire = |detail: GameDetail| WireDetail {
+                game_id: detail.game_id,
+                startpos_sfen: detail.startpos_sfen,
+                moves: detail.moves,
+            };
+            FromWorker::Done {
+                pair_id,
+                attempt,
+                games: Box::new(games),
+                details: Box::new([wire(first), wire(second)]),
+                retries,
+            }
+        }
+        WorkerMessage::Failed {
+            pair_id,
+            attempt,
+            reason,
+        } => FromWorker::Failed {
+            pair_id,
+            attempt,
+            reason,
+        },
+    }
+}
+
+// =============================================================================
+// coordinator (`--remote-worker`)
+// =============================================================================
+
+/// 実行環境のパス (EvalFile 等) は機械ごとに違うので、ファイルを指す USI option は中身の sha256 で比べる。
+/// engine は `--allow-worker-engine-sha256` で別 build を許すので別に比べる。
+fn portable_fingerprint(fingerprint: &RunFingerprint) -> RunFingerprint {
+    let files: HashMap<&str, &str> = fingerprint
+        .usi_option_files
+        .iter()
+        .map(|(name, sha)| (name.as_str(), sha.as_str()))
+        .collect();
+    let mut portable = fingerprint.clone();
+    portable.engine_sha256 = String::new();
+    portable.usi_options = fingerprint
+        .usi_options
+        .iter()
+        .map(|option| match option.split_once('=') {
+            Some((name, _)) if files.contains_key(name.trim()) => {
+                format!("{}=<file sha256 {}>", name.trim(), files[name.trim()])
+            }
+            _ => option.clone(),
+        })
+        .collect();
+    portable
+}
+
+/// 2 つの fingerprint で値の違う項目名。
+fn fingerprint_diff(expected: &RunFingerprint, actual: &RunFingerprint) -> Result<Vec<String>> {
+    let expected = serde_json::to_value(expected)?;
+    let actual = serde_json::to_value(actual)?;
+    let (Some(expected), Some(actual)) = (expected.as_object(), actual.as_object()) else {
+        bail!("fingerprint must be an object");
+    };
+    let mut keys: Vec<&String> = expected.keys().chain(actual.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys
+        .into_iter()
+        .filter(|key| expected.get(*key) != actual.get(*key))
+        .map(|key| {
+            format!(
+                "{key}: coordinator={} worker={}",
+                expected.get(key).unwrap_or(&serde_json::Value::Null),
+                actual.get(key).unwrap_or(&serde_json::Value::Null)
+            )
+        })
+        .collect())
+}
+
+pub(super) struct FleetSetup<'a> {
+    pub(super) cli: &'a Cli,
+    pub(super) fingerprint: &'a RunFingerprint,
+    pub(super) params: &'a [SpsaParam],
+    pub(super) application_mask: &'a [bool],
+    pub(super) theta0: Vec<f64>,
+}
+
+/// 対局を始められた worker。coordinator が journal に記録する。
+pub(super) struct Joined {
+    pub(super) owner: usize,
+    pub(super) name: String,
+    pub(super) host: String,
+    pub(super) slots: usize,
+    pub(super) engine_sha256: String,
+    pub(super) bench: Option<nps_bench::BenchResult>,
+}
+
+enum Event {
+    Message(Box<FromWorker>),
+    Closed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerState {
+    /// `hello` 待ち。
+    Starting,
+    /// `init` を送って `ready` 待ち。
+    Initializing,
+    Ready,
+    Lost,
+}
+
+struct RemoteWorker {
+    name: String,
+    child: Child,
+    stdin: Option<ChildStdin>,
+    state: WorkerState,
+    host: String,
+    slots: usize,
+    clock: Option<PairClock>,
+    in_flight: usize,
+    last_seen: Instant,
+}
+
+pub(super) struct RemoteFleet {
+    workers: Vec<RemoteWorker>,
+    events: crossbeam_channel::Receiver<(usize, Event)>,
+    timeout: Duration,
+    /// 実行中の (pair, attempt) を渡した worker。
+    assigned: HashMap<(u32, u32), usize>,
+    /// 切れた worker の pair の失敗。coordinator へ順に返す。
+    pending: VecDeque<Result<WorkerMessage>>,
+    joined: Vec<Joined>,
+}
+
+fn spawn_reader(
+    owner: usize,
+    stdout: ChildStdout,
+    events: crossbeam_channel::Sender<(usize, Event)>,
+) {
+    std::thread::spawn(move || {
+        let reason = (|| {
+            for line in BufReader::new(stdout).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => return format!("failed to read worker output: {error}"),
+                };
+                let event = match serde_json::from_str::<FromWorker>(&line) {
+                    Ok(message) => Event::Message(Box::new(message)),
+                    Err(error) => {
+                        return format!("invalid message from worker: {error}: {line:.200}");
+                    }
+                };
+                if events.send((owner, event)).is_err() {
+                    return String::new();
+                }
+            }
+            "worker closed its output".into()
+        })();
+        let _ = events.send((owner, Event::Closed(reason)));
+    });
+}
+
+/// `sh -c` とその子 (ssh 等) を process group ごと止める。
+fn kill_group(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl RemoteFleet {
+    /// worker を全て起動し、`ready` か切断まで待つ。1 台も始められなければ Err。
+    pub(super) fn connect(setup: FleetSetup<'_>) -> Result<Self> {
+        let cli = setup.cli;
+        let timeout_sec = cli.remote_timeout_sec.unwrap_or(DEFAULT_REMOTE_TIMEOUT_SEC);
+        let log_dir = cli.run_dir().join("remote");
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("failed to create {}", log_dir.display()))?;
+        let (tx, events) = unbounded();
+        let mut fleet = Self {
+            workers: Vec::new(),
+            events,
+            timeout: Duration::from_secs(timeout_sec),
+            assigned: HashMap::new(),
+            pending: VecDeque::new(),
+            joined: Vec::new(),
+        };
+        for (owner, command) in cli.remote_workers.iter().enumerate() {
+            let name = format!("w{}", owner + 1);
+            let log_path = log_dir.join(format!("{name}.log"));
+            let log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .with_context(|| format!("failed to open {}", log_path.display()))?;
+            let mut shell = Command::new("sh");
+            shell
+                .arg("-c")
+                .arg(command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(log);
+            // 切るときに sh の子 (ssh 等) まで止められるよう、worker ごとに process group を分ける。
+            #[cfg(unix)]
+            shell.process_group(0);
+            let mut child = shell
+                .spawn()
+                .with_context(|| format!("failed to start remote worker {name}: {command}"))?;
+            let stdout = child.stdout.take().context("worker stdout is not piped")?;
+            let stdin = child.stdin.take();
+            spawn_reader(owner, stdout, tx.clone());
+            eprintln!("remote worker {name}: {command} (stderr: {})", log_path.display());
+            fleet.workers.push(RemoteWorker {
+                name,
+                child,
+                stdin,
+                state: WorkerState::Starting,
+                host: String::new(),
+                slots: 0,
+                clock: None,
+                in_flight: 0,
+                last_seen: Instant::now(),
+            });
+        }
+        drop(tx);
+
+        let expected = portable_fingerprint(setup.fingerprint);
+        let init = to_line(&ToWorker::Init {
+            params: setup
+                .params
+                .iter()
+                .map(|p| WireParam {
+                    name: p.name.clone(),
+                    is_int: p.is_int,
+                })
+                .collect(),
+            application_mask: setup.application_mask.to_vec(),
+            theta0: setup.theta0,
+            nps_bench: cli.nps_scaling,
+        })?;
+        let mut engine_shas = vec![setup.fingerprint.engine_sha256.clone()];
+        engine_shas.extend(cli.allow_worker_engine_sha256.iter().map(|sha| sha.to_lowercase()));
+        let reference = reference_nps(cli);
+        let min_ratio =
+            cli.min_nps_ratio.unwrap_or(tools::selfplay::nps_bench::DEFAULT_MIN_NPS_RATIO);
+
+        while fleet
+            .workers
+            .iter()
+            .any(|w| matches!(w.state, WorkerState::Starting | WorkerState::Initializing))
+        {
+            fleet.expire();
+            let (owner, event) = match fleet.events.recv_timeout(POLL_INTERVAL) {
+                Ok(received) => received,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    for owner in 0..fleet.workers.len() {
+                        fleet.lose(owner, "worker output closed");
+                    }
+                    break;
+                }
+            };
+            let worker = &mut fleet.workers[owner];
+            if worker.state == WorkerState::Lost {
+                continue;
+            }
+            worker.last_seen = Instant::now();
+            let message = match event {
+                Event::Message(message) => *message,
+                Event::Closed(reason) => {
+                    fleet.lose(owner, &reason);
+                    continue;
+                }
+            };
+            match (worker.state, message) {
+                (_, FromWorker::Heartbeat) => {}
+                (
+                    WorkerState::Starting,
+                    FromWorker::Hello {
+                        protocol,
+                        host,
+                        slots,
+                        fingerprint,
+                    },
+                ) => {
+                    let checked = (|| -> Result<()> {
+                        if protocol != PROTOCOL_VERSION {
+                            bail!("protocol {protocol} (coordinator {PROTOCOL_VERSION})");
+                        }
+                        if !engine_shas.contains(&fingerprint.engine_sha256) {
+                            bail!(
+                                "engine sha256 {} は coordinator の engine とも \
+                                 --allow-worker-engine-sha256 とも一致しません",
+                                fingerprint.engine_sha256
+                            );
+                        }
+                        let diff =
+                            fingerprint_diff(&expected, &portable_fingerprint(&fingerprint))?;
+                        if !diff.is_empty() {
+                            bail!("対局条件が coordinator と違います: {}", diff.join("; "));
+                        }
+                        if slots == 0 {
+                            bail!("worker の slot 数が 0 です");
+                        }
+                        Ok(())
+                    })();
+                    match checked {
+                        Ok(()) => {
+                            worker.host = host;
+                            worker.slots = slots;
+                            worker.state = WorkerState::Initializing;
+                            fleet.joined.push(Joined {
+                                owner,
+                                name: worker.name.clone(),
+                                host: worker.host.clone(),
+                                slots,
+                                engine_sha256: fingerprint.engine_sha256,
+                                bench: None,
+                            });
+                            fleet.write(owner, &init);
+                        }
+                        Err(error) => fleet.lose(owner, &format!("{error:#}")),
+                    }
+                }
+                (WorkerState::Initializing, FromWorker::Ready { bench }) => {
+                    let bench = bench.map(|b| nps_bench::BenchResult {
+                        slot_nps: b.slot_nps,
+                        nps: b.nps,
+                        depth: b.depth,
+                        warmup_depth: b.warmup_depth,
+                        positions: b.positions,
+                    });
+                    let checked = match (&bench, cli.nps_scaling) {
+                        (Some(bench), true) => bench.ensure_above_floor(reference, min_ratio),
+                        (None, true) => Err(anyhow::anyhow!("--nps-scaling の bench が届きません")),
+                        _ => Ok(()),
+                    };
+                    match checked {
+                        Ok(()) => {
+                            if let Some(bench) = &bench {
+                                eprintln!(
+                                    "worker {} ({}): {}",
+                                    worker.name,
+                                    worker.host,
+                                    bench.summary()
+                                );
+                            }
+                            worker.state = WorkerState::Ready;
+                            if let Some(joined) =
+                                fleet.joined.iter_mut().find(|joined| joined.owner == owner)
+                            {
+                                joined.bench = bench;
+                            }
+                        }
+                        Err(error) => fleet.lose(owner, &format!("{error:#}")),
+                    }
+                }
+                (_, FromWorker::Fatal { message }) => fleet.lose(owner, &message),
+                (state, _) => fleet.lose(owner, &format!("unexpected message in state {state:?}")),
+            }
+        }
+        fleet
+            .joined
+            .retain(|joined| fleet.workers[joined.owner].state == WorkerState::Ready);
+        // hello の到着順ではなく `--remote-worker` の順に記録する (較正の index を起動順に揃える)。
+        fleet.joined.sort_by_key(|joined| joined.owner);
+        if fleet.joined.is_empty() {
+            bail!(
+                "対局を始められる remote worker がありません (各 worker の stderr は {})",
+                log_dir.display()
+            );
+        }
+        Ok(fleet)
+    }
+
+    pub(super) fn total_slots(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|w| w.state == WorkerState::Ready)
+            .map(|w| w.slots)
+            .sum()
+    }
+
+    pub(super) fn take_joined(&mut self) -> Vec<Joined> {
+        std::mem::take(&mut self.joined)
+    }
+
+    pub(super) fn set_clock(&mut self, owner: usize, clock: PairClock) {
+        self.workers[owner].clock = Some(clock);
+    }
+
+    /// 1 行を送る。書けなければその worker を切る。
+    fn write(&mut self, owner: usize, line: &[u8]) {
+        let worker = &mut self.workers[owner];
+        let written = match worker.stdin.as_mut() {
+            Some(stdin) => stdin.write_all(line).and_then(|()| stdin.flush()),
+            None => Err(std::io::Error::other("stdin is closed")),
+        };
+        if let Err(error) = written {
+            self.lose(owner, &format!("failed to send to worker: {error}"));
+        }
+    }
+
+    /// worker を切り、その worker の実行中の pair を失敗として返す。
+    fn lose(&mut self, owner: usize, reason: &str) {
+        let worker = &mut self.workers[owner];
+        if worker.state == WorkerState::Lost {
+            return;
+        }
+        eprintln!("remote worker {} ({}) lost: {reason}", worker.name, worker.host);
+        worker.state = WorkerState::Lost;
+        worker.in_flight = 0;
+        worker.stdin = None;
+        kill_group(&mut worker.child);
+        let reason = format!("remote worker {} lost: {reason}", worker.name);
+        let mut lost: Vec<(u32, u32)> = self
+            .assigned
+            .iter()
+            .filter(|(_, assigned)| **assigned == owner)
+            .map(|(key, _)| *key)
+            .collect();
+        lost.sort_unstable();
+        for (pair_id, attempt) in lost {
+            self.assigned.remove(&(pair_id, attempt));
+            self.pending.push_back(Ok(WorkerMessage::Failed {
+                pair_id,
+                attempt,
+                reason: reason.clone(),
+            }));
+        }
+    }
+
+    fn expire(&mut self) {
+        for owner in 0..self.workers.len() {
+            let worker = &self.workers[owner];
+            if worker.state != WorkerState::Lost && worker.last_seen.elapsed() > self.timeout {
+                let reason = format!("no message for {} s", self.timeout.as_secs());
+                self.lose(owner, &reason);
+            }
+        }
+    }
+
+    /// 対局中の event を処理し、coordinator へ渡す結果があれば返す。
+    fn handle(&mut self, owner: usize, event: Event) -> Option<WorkerMessage> {
+        let worker = &mut self.workers[owner];
+        if worker.state == WorkerState::Lost {
+            return None;
+        }
+        worker.last_seen = Instant::now();
+        let message = match event {
+            Event::Message(message) => *message,
+            Event::Closed(reason) => {
+                self.lose(owner, &reason);
+                return None;
+            }
+        };
+        let (pair_id, attempt, message) = match message {
+            FromWorker::Heartbeat => return None,
+            FromWorker::Done {
+                pair_id,
+                attempt,
+                games,
+                details,
+                retries,
+            } => {
+                let [first, second] = *details;
+                let detail = |wire: WireDetail| GameDetail {
+                    game_id: wire.game_id,
+                    startpos_sfen: wire.startpos_sfen,
+                    moves: wire.moves,
+                };
+                let message = WorkerMessage::Done {
+                    pair_id,
+                    attempt,
+                    games: *games,
+                    details: Box::new([detail(first), detail(second)]),
+                    retries,
+                };
+                (pair_id, attempt, message)
+            }
+            FromWorker::Failed {
+                pair_id,
+                attempt,
+                reason,
+            } => {
+                let reason = format!("{} ({}): {reason}", worker.name, worker.host);
+                (
+                    pair_id,
+                    attempt,
+                    WorkerMessage::Failed {
+                        pair_id,
+                        attempt,
+                        reason,
+                    },
+                )
+            }
+            FromWorker::Fatal { message } => {
+                self.lose(owner, &message);
+                return None;
+            }
+            FromWorker::Hello { .. } | FromWorker::Ready { .. } => {
+                self.lose(owner, "unexpected handshake message while playing");
+                return None;
+            }
+        };
+        if self.assigned.get(&(pair_id, attempt)) == Some(&owner) {
+            self.assigned.remove(&(pair_id, attempt));
+            self.workers[owner].in_flight -= 1;
+        }
+        Some(message)
+    }
+}
+
+impl Executor for RemoteFleet {
+    fn free_slot(&self) -> Option<Slot> {
+        self.workers
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.state == WorkerState::Ready && w.in_flight < w.slots)
+            .max_by_key(|(owner, w)| (w.slots - w.in_flight, std::cmp::Reverse(*owner)))
+            .map(|(owner, w)| Slot {
+                owner,
+                clock: w.clock,
+            })
+    }
+
+    fn send(&mut self, owner: usize, task: PairTask) -> Result<()> {
+        let line = to_line(&ToWorker::Task(WireTask {
+            pair_id: task.pair_id,
+            attempt: task.attempt,
+            start_pos_index: task.start_pos_index,
+            plus: task.plus,
+            minus: task.minus,
+            tc: WireClock {
+                black_time: task.tc.black_time,
+                white_time: task.tc.white_time,
+                black_inc: task.tc.black_inc,
+                white_inc: task.tc.white_inc,
+                byoyomi: task.tc.byoyomi,
+            },
+            game_time_limit_ms: task.game_time_limit_ms,
+        }))?;
+        self.assigned.insert((task.pair_id, task.attempt), owner);
+        self.workers[owner].in_flight += 1;
+        self.write(owner, &line);
+        Ok(())
+    }
+
+    fn recv(&mut self) -> Result<Result<WorkerMessage>> {
+        loop {
+            if let Some(message) = self.try_recv() {
+                return Ok(message);
+            }
+            if let Some(reason) = self.idle_reason()
+                && self.assigned.is_empty()
+            {
+                bail!(reason);
+            }
+            match self.events.recv_timeout(POLL_INTERVAL) {
+                Ok((owner, event)) => {
+                    if let Some(message) = self.handle(owner, event) {
+                        return Ok(Ok(message));
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    for owner in 0..self.workers.len() {
+                        self.lose(owner, "worker output closed");
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<Result<WorkerMessage>> {
+        self.expire();
+        loop {
+            if let Some(message) = self.pending.pop_front() {
+                return Some(message);
+            }
+            let (owner, event) = self.events.try_recv().ok()?;
+            if let Some(message) = self.handle(owner, event) {
+                return Some(Ok(message));
+            }
+        }
+    }
+
+    fn idle_reason(&self) -> Option<String> {
+        self.workers
+            .iter()
+            .all(|w| w.state == WorkerState::Lost)
+            .then(|| "all remote workers are lost".into())
+    }
+}
+
+impl Drop for RemoteFleet {
+    fn drop(&mut self) {
+        for worker in &mut self.workers {
+            worker.stdin = None;
+        }
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        for worker in &mut self.workers {
+            while Instant::now() < deadline && matches!(worker.child.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            kill_group(&mut worker.child);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fingerprint() -> RunFingerprint {
+        RunFingerprint {
+            engine_sha256: "e".into(),
+            engine_args: Vec::new(),
+            usi_options: vec!["EvalFile=/a/nn.bin".into(), "Hash=16".into()],
+            usi_option_files: vec![("EvalFile".into(), "abc".into())],
+            engine_param_mapping_sha256: None,
+            startpos_sha256: Some("s".into()),
+            sfen: None,
+            random_startpos: true,
+            nodes: None,
+            byoyomi: 0,
+            btime: Some(10_000),
+            binc: 100,
+            threads: 1,
+            hash_mb: 16,
+            max_moves: 320,
+            nodes_timeout_ms: 1,
+            timeout_margin_ms: 1,
+            adjudicate_agreement: None,
+            nps_scaling: None,
+        }
+    }
+
+    #[test]
+    fn option_file_paths_and_engine_build_do_not_affect_the_comparison() {
+        let coordinator = fingerprint();
+        let mut worker = fingerprint();
+        worker.usi_options[0] = "EvalFile = /b/nn.bin".into();
+        worker.engine_sha256 = "other".into();
+        let diff =
+            fingerprint_diff(&portable_fingerprint(&coordinator), &portable_fingerprint(&worker))
+                .unwrap();
+        assert!(diff.is_empty(), "{diff:?}");
+
+        worker.usi_option_files[0].1 = "def".into();
+        worker.threads = 2;
+        let diff =
+            fingerprint_diff(&portable_fingerprint(&coordinator), &portable_fingerprint(&worker))
+                .unwrap();
+        let keys: Vec<&str> = diff.iter().map(|d| d.split(':').next().unwrap()).collect();
+        assert_eq!(keys, ["threads", "usi_option_files", "usi_options"]);
+    }
+
+    #[test]
+    fn task_values_round_trip_bit_for_bit() {
+        let task = ToWorker::Task(WireTask {
+            pair_id: 3,
+            attempt: 2,
+            start_pos_index: 7,
+            plus: vec![0.1 + 0.2, -1.0e-300, 12345.678901234567],
+            minus: vec![f64::MIN_POSITIVE, 2.0f64.sqrt(), -0.0],
+            tc: WireClock {
+                black_time: 1,
+                white_time: 2,
+                black_inc: 3,
+                white_inc: 4,
+                byoyomi: 5,
+            },
+            game_time_limit_ms: Some(9),
+        });
+        let line = to_line(&task).unwrap();
+        let back: ToWorker = serde_json::from_slice(&line).unwrap();
+        let (ToWorker::Task(a), ToWorker::Task(b)) = (&task, &back) else {
+            panic!("not a task");
+        };
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a.plus), bits(&b.plus));
+        assert_eq!(bits(&a.minus), bits(&b.minus));
+        assert_eq!(task, back);
+    }
+}

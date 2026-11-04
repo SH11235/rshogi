@@ -1771,6 +1771,7 @@ spsa --dispatch async --run-dir "$RUN" --init-from canonical.params   --total-pa
   meta の履歴は resume のたびに journal から作り直す。
 - 新しい pair の journal の `dispatch` は確定した時計 `clock: {btime, binc, calibration}` を持つ。
   同じ pair の 2 局、infra error の後の再 attempt、resume 後の指し直しは、すべてこの値で指す。
+  `--remote-worker` の run だけは、再 attempt を指す機械の時計に付け直す ([§18](#18-別の機械の-worker---remote-worker))。
 - 起動時の要約に `clock: btime=... binc=... (reference ... x scale ...)` を出す。
 
 ### 17.3 resume (別の機械を含む)
@@ -1821,3 +1822,48 @@ rshogi の時間管理は既定で 1 手の思考時間を秒境界に切り上�
 `--nps-scaling` で短い TC を使うときは `--usi-option RoundUpToFullSecond=false` を渡してこの 3 つを外す
 (spsa が既定で入れる `MinimumThinkingTime=0` もそのまま 0 ms として効く)。NetworkDelay と残り時間を超えない制約は残る。
 大会・floodgate など秒単位で時間を数える対局では既定 (true) のまま使う。
+
+## 18. 別の機械の worker (`--remote-worker`)
+
+`--dispatch async` の対局を、ssh で入れる別の機械 (借用機など) に任せる。coordinator は θ・journal・snapshot を持ち、
+各 worker を `sh -c <コマンド>` で起動して stdin/stdout の JSON 行で pair を渡す。対局は worker の機械の中で完結するので、
+通信の往復は持ち時間に乗らない。coordinator 自身は engine を起動しない。
+
+```bash
+W="/path/to/spsa --worker-stdio --engine-path /path/to/rshogi-usi --concurrency 15 --threads 1 --hash-mb 256 \
+   --btime 20000 --binc 200 --nps-scaling --startpos-file /path/to/startpos.txt \
+   --usi-option EvalFile=/path/to/nn.bin"
+spsa --dispatch async --run-dir "$RUN" --init-from canonical.params --total-pairs 20000 \
+  --btime 20000 --binc 200 --nps-scaling --startpos-file startpos.txt --threads 1 --hash-mb 256 \
+  --usi-option EvalFile=nn.bin \
+  --remote-worker "ssh -o ServerAliveInterval=30 -p 12345 root@host1 '$W'" \
+  --remote-worker "ssh -o ServerAliveInterval=30 -p 23456 root@host2 '$W'"
+```
+
+| オプション | 既定値 | 意味 |
+|---|---:|---|
+| `--remote-worker CMD` | なし | worker を起動する shell コマンド。複数指定できる。coordinator の `--concurrency`・`--cpu-affinity` は使わない |
+| `--worker-stdio` | off | worker として動く (`CMD` の中で使う)。`--run-dir` は要らない。slot 数は worker の `--concurrency` |
+| `--remote-timeout-sec S` | 300 | この間 worker から何も届かなければ切れたとみなす。worker は 30 秒ごとに heartbeat を送る |
+| `--allow-worker-engine-sha256 SHA` | なし | coordinator の `--engine-path` と別の build (例: AVX-512 版) を worker に許す。複数指定できる |
+
+- worker には coordinator と同じ対局条件を渡す: engine の引数・USI option・`--threads`・`--hash-mb`・時計・`--nodes`・
+  `--max-moves`・開始局面・`--engine-param-mapping`・`--adjudicate-agreement`・`--nps-scaling` と `--reference-nps`。
+  起動時に worker が fingerprint を送り、違う項目があればその worker を外す (stderr に項目名と両方の値を出す)。
+  ファイルを指す USI option (`EvalFile` など) はパスではなく中身の sha256 で比べるので、機械ごとにパスが違ってよい。
+  engine は sha256 が coordinator の `--engine-path` か `--allow-worker-engine-sha256` と一致すること。
+- 摂動の値・開始局面の番号・θ₀ は coordinator が送る。worker は params ファイルを読まない。
+- 全ての worker が `ready` になるか外れるまで待ってから始める。1 台も始められなければ、fresh では旧 run の成果物を消す前に止まる。
+- `--max-lag` の既定は、始められた worker の slot の合計の 4 倍。
+- `--nps-scaling` では、worker ごとに自分の slot 数で bench を走らせ、`--min-nps-ratio` を下回る worker を外す。
+  較正は worker ごとに journal の `calibration` に 1 行書き、`host` は `w<番号> <hostname>`。その worker で指す pair には
+  その較正の時計を付ける。切れた worker の pair を指し直すときは、指し直す機械の時計に付け直す
+  (journal の `dispatch` の `clock` が attempt ごとに変わる)。
+- journal の `worker_joined` に、始められた worker の名前 (`w1`, `w2`, ... は `--remote-worker` の順)・hostname・slot 数・
+  engine の sha256・較正の index を残す。各 worker の stderr は `<run-dir>/remote/w<番号>.log` に追記する。
+- worker が切れたとき (出力の終わり・壊れた行・`--remote-timeout-sec` の超過・worker の致命的なエラー) は、その worker の
+  process group を止め、実行中だった pair を attempt の失敗 (`reason` が `remote worker w<番号> lost: ...`) として
+  残りの worker で指し直す。失敗の数は `--max-pair-attempts` に数える。全ての worker が切れたら snapshot を残して止まる。
+  切れた worker の再接続や途中参加はしない。同じ run-dir の `--resume` で worker を並べ直して再開する。
+- coordinator が終わると worker の stdin が閉じ、worker は指している対局を止めて終わる。ssh の切断も同じ扱いになるよう、
+  `ServerAliveInterval` を付けておく。

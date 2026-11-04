@@ -83,8 +83,8 @@ struct Cli {
     /// 通常は `runs/spsa/$(date -u +%Y%m%d_%H%M%S)_<tag>` のように毎回新規 dir を
     /// 切る。`--init-from <canonical>` を併用すると初回起動時に canonical を
     /// `<run-dir>/state.params` に複製する。
-    #[arg(long)]
-    run_dir: PathBuf,
+    #[arg(long, required_unless_present = "worker_stdio")]
+    run_dir: Option<PathBuf>,
 
     /// SPSA の総 game pair 数 (fishtest `num_iter` と等価)。
     /// total_games = 2 × total_pairs。schedule の `k` 軸の上限としても使われる。
@@ -107,6 +107,28 @@ struct Cli {
     /// 既定は 4 × --concurrency (未較正の初期値)。
     #[arg(long)]
     max_lag: Option<u32>,
+
+    /// async 専用: 対局を別の機械の worker に任せる。値は worker を起動する shell コマンドで、
+    /// `sh -c` で実行する (例: `ssh host /path/to/spsa --worker-stdio ...`)。複数指定できる。
+    /// 指定すると coordinator 自身は engine を起動しない (`--concurrency` は worker 側で指定する)。
+    #[arg(long = "remote-worker")]
+    remote_workers: Vec<String>,
+
+    /// `--remote-worker` の worker から何も届かない時間がこれを超えたら、切れたとみなして
+    /// その worker の pair を他へ回す (秒、既定 300)。
+    #[arg(long)]
+    remote_timeout_sec: Option<u64>,
+
+    /// `--remote-worker` の worker が使ってよい engine の sha256 (coordinator の `--engine-path` と
+    /// 別 build、例えば AVX-512 版を使うときに指定する)。複数指定できる。
+    #[arg(long = "allow-worker-engine-sha256")]
+    allow_worker_engine_sha256: Vec<String>,
+
+    /// worker として起動し、stdin で受けた pair を指して stdout に結果を返す
+    /// (`--remote-worker` の起動コマンドから使う)。engine・対局条件・`--concurrency` は
+    /// coordinator と同じ flag で指定する。
+    #[arg(long, default_value_t = false)]
+    worker_stdio: bool,
 
     /// async 専用: 1 pair の失敗 attempt 数の上限 (既定 3)。達したら snapshot を残して停止する。
     #[arg(long)]
@@ -386,6 +408,13 @@ struct Cli {
     /// v4 エントリを参照。
     #[arg(long, default_value_t = false)]
     parallel_seeds: bool,
+}
+
+impl Cli {
+    /// `--worker-stdio` 以外では clap が `--run-dir` を必須にしている。
+    fn run_dir(&self) -> &Path {
+        self.run_dir.as_deref().unwrap_or_else(|| Path::new(""))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -681,7 +710,8 @@ struct GameTaskResult {
 /// 最後の要素は終局を表す `resign` / `win` / `illegal` / `none` になり得る。
 /// `reason` が `timeout` のときは最後の要素が指し手の形でも盤面に適用されていない。
 /// 評価値・深さ・nodes は主 PV の info を項目ごとに上書きした最後の値で、全要素 null の列は省く。
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct GameMoves {
     moves: Vec<String>,
     elapsed_ms: Vec<u64>,
@@ -3377,6 +3407,9 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     validate_cli_finite(&cli)?;
+    if cli.worker_stdio {
+        return async_dispatch::run_worker(&cli);
+    }
     match cli.dispatch {
         DispatchMode::Batch => {
             for (flag, given) in [
@@ -3389,6 +3422,9 @@ fn main() -> Result<()> {
                 ("--min-nps-ratio", cli.min_nps_ratio.is_some()),
                 ("--max-timeout-rate", cli.max_timeout_rate.is_some()),
                 ("--timeout-rate-min-games", cli.timeout_rate_min_games.is_some()),
+                ("--remote-worker", !cli.remote_workers.is_empty()),
+                ("--remote-timeout-sec", cli.remote_timeout_sec.is_some()),
+                ("--allow-worker-engine-sha256", !cli.allow_worker_engine_sha256.is_empty()),
             ] {
                 if given {
                     bail!("{flag} は --dispatch async 専用です");
@@ -3523,21 +3559,21 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
-    std::fs::create_dir_all(&cli.run_dir)
-        .with_context(|| format!("failed to create run-dir {}", cli.run_dir.display()))?;
+    std::fs::create_dir_all(cli.run_dir())
+        .with_context(|| format!("failed to create run-dir {}", cli.run_dir().display()))?;
 
     // 同一 run-dir に対する二重起動を防ぐため、最初に exclusive lock を取る。
     // 取得失敗時は他プロセスが state.params/meta.json/CSV を書き換える危険が
     // あるので即 bail。lock は process 終了時 (Drop) に自動削除されるが、
     // SIGKILL / 電源断で残留した場合は --force-unlock で消せる。
-    let _run_dir_lock = RunDirLock::acquire(&cli.run_dir, cli.force_unlock)?;
+    let _run_dir_lock = RunDirLock::acquire(cli.run_dir(), cli.force_unlock)?;
 
-    let state_params = state_params_path(&cli.run_dir);
+    let state_params = state_params_path(cli.run_dir());
 
     // ========================================================================
     // init/resume 分岐: decide_init_action で意思決定 → apply_init_action で副作用を実行
     // ========================================================================
-    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.run_dir));
+    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(cli.run_dir()));
     let init_action = decide_init_action(
         cli.init_from.is_some(),
         state_params.exists(),
@@ -3553,7 +3589,7 @@ fn main() -> Result<()> {
     // append 運用を保護するため)。一方 --meta-file の override 先は active resume
     // state とみなし `apply_init_action` 側で別途削除される。詳細は
     // `default_force_init_cleanup_paths` の doc を参照。
-    let force_init_cleanup_paths = default_force_init_cleanup_paths(&cli.run_dir);
+    let force_init_cleanup_paths = default_force_init_cleanup_paths(cli.run_dir());
     let force_init_cleanup_refs: Vec<&Path> =
         force_init_cleanup_paths.iter().map(|p| p.as_path()).collect();
     let translator = match &cli.engine_param_mapping {
@@ -3644,8 +3680,8 @@ fn main() -> Result<()> {
                 let recorded = meta.game_records.or_else(|| {
                     let non_empty =
                         |path: PathBuf| std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
-                    let written = non_empty(default_games_jsonl_path(&cli.run_dir))
-                        || non_empty(default_batches_jsonl_path(&cli.run_dir));
+                    let written = non_empty(default_games_jsonl_path(cli.run_dir()))
+                        || non_empty(default_batches_jsonl_path(cli.run_dir()));
                     written.then_some(true)
                 });
                 if let Some(recorded) = recorded
@@ -3827,7 +3863,7 @@ fn main() -> Result<()> {
                 // 「前回の確定値」が見え続ける (= apply 入力に誤投入される)。fresh 系は
                 // すべてここで能動削除する (force-init の cleanup paths にも入っているが、
                 // CopyInitFromFresh / UseExistingFresh では cleanup paths は呼ばれないため)。
-                remove_stale_final_params_for_fresh_start(&cli.run_dir)?;
+                remove_stale_final_params_for_fresh_start(cli.run_dir())?;
                 let snapshot = InitMetaSnapshot::for_fresh_start(
                     &effective_action,
                     &state_params,
@@ -3883,7 +3919,7 @@ fn main() -> Result<()> {
     // これより手前で bail する経路では run-dir に副作用を残さない不変条件を
     // 守るため、CSV rotate (FS 副作用) はこの位置にまとめている。
     if needs_v3_csv_rotate {
-        let rotated = rotate_v3_csv_files_for_silent_migrate(&cli.run_dir)?;
+        let rotated = rotate_v3_csv_files_for_silent_migrate(cli.run_dir())?;
         for p in &rotated {
             eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
         }
@@ -3892,7 +3928,7 @@ fn main() -> Result<()> {
     let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
         None
     } else {
-        Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(&cli.run_dir)))
+        Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(cli.run_dir())))
     };
     let mut stats_csv_writer = if let Some(path) = stats_csv_path.as_deref() {
         Some(open_stats_csv_writer(path, cli.resume)?)
@@ -3905,7 +3941,7 @@ fn main() -> Result<()> {
         Some(
             cli.param_values_csv
                 .clone()
-                .unwrap_or_else(|| default_param_values_csv_path(&cli.run_dir)),
+                .unwrap_or_else(|| default_param_values_csv_path(cli.run_dir())),
         )
     };
     let mut param_values_csv_writer = if let Some(path) = param_values_csv_path.as_deref() {
@@ -3974,8 +4010,8 @@ fn main() -> Result<()> {
         if !cli.resume {
             // fresh start で前の run の棋譜を今回の run のものと誤読させない。
             for path in [
-                default_games_jsonl_path(&cli.run_dir),
-                default_batches_jsonl_path(&cli.run_dir),
+                default_games_jsonl_path(cli.run_dir()),
+                default_batches_jsonl_path(cli.run_dir()),
             ] {
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
@@ -3989,7 +4025,7 @@ fn main() -> Result<()> {
         }
         None
     } else {
-        Some(BatchRecordWriter::open(&cli.run_dir, cli.resume)?)
+        Some(BatchRecordWriter::open(cli.run_dir(), cli.resume)?)
     };
 
     if is_fresh_start {
@@ -4220,7 +4256,7 @@ fn main() -> Result<()> {
     // state.params は反復ごとに更新され続ける live state なので、外部ツール
     // (tune.py apply 等) に渡す確定スナップショットとして final.params を別 path で
     // 提供する。これにより SPSA を裏で続行しつつ確定値の apply を並行実行できる。
-    let final_path = cli.run_dir.join("final.params");
+    let final_path = cli.run_dir().join("final.params");
     write_params(&final_path, &params)?;
     eprintln!("final params written: {}", final_path.display());
 

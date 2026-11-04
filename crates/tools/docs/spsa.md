@@ -12,6 +12,8 @@ USIエンジンのパラメータを対局結果から調整する。起点を `
   Fischer の対局では、開始時に測った NPS で持ち時間を補正する `--nps-scaling`、1 局の上限、時間切れの率での停止、
   両側の評価の一致による裁定 `--adjudicate-agreement` を使える
   ([runbook §17](spsa_runbook.md#17-fischer-と-nps-による時計の補正---nps-scaling))。
+  対局を ssh などで別の機械の worker に任せる `--remote-worker` も使える
+  ([runbook §18](spsa_runbook.md#18-別の機械の-worker---remote-worker))。
 
 ## 棋譜と摂動の記録
 

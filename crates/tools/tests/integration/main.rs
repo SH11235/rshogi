@@ -24,6 +24,7 @@ mod spsa_fischer_integration;
 mod spsa_game_records_integration;
 mod spsa_params_format;
 mod spsa_plot_output;
+mod spsa_remote_integration;
 mod spsa_run_dir_integration;
 mod spsa_schedule_validation;
 // 診断 bin は required-features で外れても `CARGO_BIN_EXE_*` は定義されるため、実行時に
