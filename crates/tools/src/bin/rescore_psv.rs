@@ -3246,7 +3246,8 @@ struct OnnxPipelineConfig<'a> {
     /// `--onnx-gpu-id` の GPU 番号列。`[-1]` は CPU 推論。
     gpu_ids: &'a [i32],
     /// GPU 1 つあたりの推論セッション数（`--onnx-sessions`）。2 以上で in-flight 多重化。
-    /// 出力はバッチ順に再整列されセッション数・GPU の割り当てに依存しないため fingerprint には含めない。
+    /// GPU 構成とセッション数は fingerprint に含めない。出力の順序はバッチ順に再整列されて
+    /// 変わらず、構成を変えても完了済みの出力は作り直さずに再利用する（単一 GPU のマーカーとも互換）。
     sessions: usize,
     use_tensorrt: bool,
     tensorrt_cache: Option<&'a std::path::Path>,
@@ -4316,7 +4317,7 @@ impl WarmupGate {
                 .wait_while(guard, |finished| *finished < turn)
                 .expect("warmup mutex poisoned"),
         );
-        (worker_idx < self.leaders).then_some(WarmupTurn { gate: self })
+        (worker_idx < self.leaders).then(|| WarmupTurn { gate: self })
     }
 }
 
@@ -4359,6 +4360,33 @@ impl<T> SeqReorder<T> {
         let item = self.pending.remove(&self.next_seq)?;
         self.next_seq += 1;
         Some(item)
+    }
+}
+
+/// GPU worker の受信ループ。共有の受け口から空いた worker がバッチを取り、`process` の結果を
+/// 通し番号付きで writer へ送る。`process` が `true` (EOF sentinel) を返すか、結果が `Err`
+/// か、writer が受け口を閉じたら終える。先導役は最初のバッチを送った時点で番を進める。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn drive_pull_worker<B, D>(
+    mut warmup_turn: Option<WarmupTurn<'_>>,
+    ready_rx: &Mutex<mpsc::Receiver<(u64, B)>>,
+    done_tx: &mpsc::Sender<(u64, Result<D>)>,
+    mut process: impl FnMut(B) -> (Result<D>, bool),
+) {
+    loop {
+        // recv を Mutex 内で待つ: ロック保持者だけが次のバッチを取り、他 worker は
+        // ロック待ちで並ぶ（取り合いの順序は出力に影響しない）。
+        let msg = ready_rx.lock().expect("ready_rx mutex poisoned").recv();
+        let Ok((seq, batch)) = msg else {
+            break; // producer 終了・供給済みバッチも処理済み
+        };
+        let (result, last) = process(batch);
+        let failed = result.is_err();
+        if done_tx.send((seq, result)).is_err() || failed || last {
+            break;
+        }
+        // 初バッチ完了（= TRT engine 確定・キャッシュ書き込み済み）。次の番へ進める。
+        drop(warmup_turn.take());
     }
 }
 
@@ -4929,7 +4957,7 @@ where
                           ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch<'s>)>>|
      -> (u128, u128) {
         // 下の早期 return でも drop で番が進むよう、最初に番を待つ。
-        let mut warmup_turn = warmup.wait(worker_idx);
+        let warmup_turn = warmup.wait(worker_idx);
         let (mut t_run, mut t_write) = (0u128, 0u128);
         // expand 用 softmax バッファ（worker 内でバッチ間再利用）
         let mut logits_buf: Vec<f32> = Vec::with_capacity(600);
@@ -4960,30 +4988,20 @@ where
             }
         };
         let output_mem = &output_mem;
-        loop {
-            // recv を Mutex 内で待つ: ロック保持者だけが次のバッチを取り、他 worker は
-            // ロック待ちで並ぶ（取り合いの順序は出力に影響しない）。
-            let msg = ready_rx.lock().expect("ready_rx mutex poisoned").recv();
-            let (seq, batch) = match msg {
-                Ok(x) => x,
-                Err(_) => break, // producer 終了・供給済みバッチも処理済み
-            };
+        drive_pull_worker(warmup_turn, ready_rx, &done_tx, |batch| {
             if batch.actual_batch == 0 {
                 // EOF / 中断 sentinel はそのまま writer へ中継（最終 seq なので writer
                 // は全バッチ書き出し後に必ず最後に処理する）。
-                let _ = done_tx.send((
-                    seq,
-                    Ok(DoneBatch {
-                        slot: batch,
-                        rescore_bytes: Vec::new(),
-                        replacement_bytes: Vec::new(),
-                        expand_bytes: Vec::new(),
-                        skipped: 0,
-                        clipped: 0,
-                        expanded: 0,
-                    }),
-                ));
-                break;
+                let sentinel = DoneBatch {
+                    slot: batch,
+                    rescore_bytes: Vec::new(),
+                    replacement_bytes: Vec::new(),
+                    expand_bytes: Vec::new(),
+                    skipped: 0,
+                    clipped: 0,
+                    expanded: 0,
+                };
+                return (Ok(sentinel), true);
             }
             let actual_batch = batch.actual_batch;
             // 推論する行数。埋めた行 (actual_batch 以降) の推論結果は読まない。
@@ -5205,13 +5223,8 @@ where
                     expanded,
                 })
             })();
-            let failed = result.is_err();
-            if done_tx.send((seq, result)).is_err() || failed {
-                break;
-            }
-            // 初バッチ完了（= TRT engine 確定・キャッシュ書き込み済み）。次の番へ進める。
-            drop(warmup_turn.take());
-        }
+            (result, false)
+        });
         (t_run, t_write)
     };
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
@@ -7314,81 +7327,152 @@ mod onnx_sessions_tests {
         assert_eq!(reorder.pop_next(), None);
     }
 
-    /// GPU worker と同じ形 (共有 receiver から取る worker、`WarmupGate`、`SeqReorder`) を
-    /// 速さの違う worker で回す。
-    fn run_pull_workers(
-        delays_ms: &[u64],
-        leaders: usize,
-        batches: u64,
-    ) -> (Vec<u64>, Vec<usize>, Vec<(usize, &'static str)>) {
-        use std::time::Duration;
-        let (ready_tx, ready_rx) = mpsc::channel::<u64>();
-        for seq in 0..batches {
-            ready_tx.send(seq).unwrap();
-        }
-        drop(ready_tx);
-        let ready_rx = Mutex::new(ready_rx);
-        let (done_tx, done_rx) = mpsc::channel::<(u64, u64)>();
-        let gate = WarmupGate::new(leaders);
-        let events = Mutex::new(Vec::new());
-        let counts: Vec<AtomicU64> = delays_ms.iter().map(|_| AtomicU64::new(0)).collect();
-        thread::scope(|scope| {
-            for (worker, &delay) in delays_ms.iter().enumerate() {
-                let done_tx = done_tx.clone();
-                let (ready_rx, gate, events, counts) = (&ready_rx, &gate, &events, &counts);
-                scope.spawn(move || {
-                    let mut turn = gate.wait(worker);
-                    events.lock().unwrap().push((worker, "start"));
-                    loop {
-                        let Ok(seq) = ready_rx.lock().unwrap().recv() else {
-                            break;
-                        };
-                        thread::sleep(Duration::from_millis(delay));
-                        counts[worker].fetch_add(1, Ordering::Relaxed);
-                        done_tx.send((seq, seq * 10)).unwrap();
-                        if let Some(first) = turn.take() {
-                            events.lock().unwrap().push((worker, "first done"));
-                            drop(first);
-                        }
-                    }
-                });
-            }
-        });
-        drop(done_tx);
+    #[test]
+    fn warmup_followers_do_not_advance_the_turn_counter() {
+        let gate = WarmupGate::new(1);
+        drop(gate.wait(0));
+        assert_eq!(*gate.finished.lock().unwrap(), 1);
+        assert!(gate.wait(1).is_none());
+        assert!(gate.wait(3).is_none());
+        assert_eq!(*gate.finished.lock().unwrap(), 1);
+    }
+
+    /// 模擬の writer: `SeqReorder` で並べ直し、`Err` か `fail_at` の番号で止まる
+    /// (実パイプラインの writer と同じく、止まると受け口を閉じる)。
+    fn simulated_writer(
+        done_rx: mpsc::Receiver<(u64, Result<u64>)>,
+        fail_at: Option<u64>,
+    ) -> Result<Vec<u64>> {
         let mut reorder = SeqReorder::new();
         let mut written = Vec::new();
-        for (seq, value) in done_rx {
-            reorder.insert(seq, value);
+        for (seq, done) in done_rx {
+            reorder.insert(seq, done?);
             while let Some(value) = reorder.pop_next() {
+                if Some(value) == fail_at {
+                    anyhow::bail!("simulated write error at {value}");
+                }
                 written.push(value);
             }
         }
-        let counts = counts.iter().map(|c| c.load(Ordering::Relaxed) as usize).collect();
-        (written, counts, events.into_inner().unwrap())
+        Ok(written)
     }
 
-    #[test]
-    fn pull_workers_write_in_order_and_fast_worker_takes_more() {
-        // worker 0, 1 が先導役 (GPU 2 枚の各 1 本目)、worker 2, 3 が 2 本目。1 と 3 が遅い GPU。
-        let (written, counts, events) = run_pull_workers(&[1, 8, 1, 8], 2, 80);
-        assert_eq!(written, (0..80).map(|seq| seq * 10).collect::<Vec<_>>());
-        assert_eq!(counts.iter().sum::<usize>(), 80);
-        assert!(counts[0] + counts[2] > 2 * (counts[1] + counts[3]), "{counts:?}");
-
-        let position = |event: (usize, &'static str)| {
-            events.iter().position(|&e| e == event).unwrap_or_else(|| panic!("{event:?}"))
-        };
-        assert!(position((0, "first done")) < position((1, "start")));
-        for follower in [2, 3] {
-            assert!(position((1, "first done")) < position((follower, "start")));
+    /// `drive_pull_worker` を worker ごとのスレッドで回す。`process` は (worker, seq) を受け取る。
+    fn run_simulated_pipeline(
+        workers: usize,
+        leaders: usize,
+        batches: u64,
+        fail_write_at: Option<u64>,
+        process: impl Fn(usize, u64) -> (Result<u64>, bool) + Sync,
+    ) -> Result<Vec<u64>> {
+        let (ready_tx, ready_rx) = mpsc::channel::<(u64, u64)>();
+        for seq in 0..batches {
+            ready_tx.send((seq, seq)).unwrap();
         }
+        drop(ready_tx);
+        let ready_rx = Mutex::new(ready_rx);
+        let (done_tx, done_rx) = mpsc::channel::<(u64, Result<u64>)>();
+        let gate = WarmupGate::new(leaders);
+        thread::scope(|scope| {
+            for worker in 0..workers {
+                let done_tx = done_tx.clone();
+                let (ready_rx, gate, process) = (&ready_rx, &gate, &process);
+                scope.spawn(move || {
+                    let turn = gate.wait(worker);
+                    drive_pull_worker(turn, ready_rx, &done_tx, |seq| process(worker, seq));
+                });
+            }
+            drop(done_tx);
+            simulated_writer(done_rx, fail_write_at)
+        })
     }
 
     #[test]
-    fn leader_without_batches_still_releases_the_rest() {
-        let (written, counts, _) = run_pull_workers(&[0, 0, 0], 2, 0);
+    fn simulated_pull_workers_serialize_first_batches_and_restore_order() {
+        use std::time::Duration;
+        // worker 0, 1 が先導役 (GPU 2 枚の各 1 本目)、worker 2, 3 が 2 本目。各 worker は
+        // バッチを取ったことを知らせ、テストが許すまで結果を返さない。
+        const WORKERS: usize = 4;
+        let (took_tx, took_rx) = mpsc::channel::<(usize, u64)>();
+        let took_tx = Mutex::new(took_tx);
+        let (release_txs, release_rxs): (Vec<_>, Vec<_>) =
+            (0..WORKERS).map(|_| mpsc::channel::<()>()).unzip();
+        let release_rxs: Vec<Mutex<mpsc::Receiver<()>>> =
+            release_rxs.into_iter().map(Mutex::new).collect();
+        let quiet = |took_rx: &mpsc::Receiver<(usize, u64)>| {
+            assert!(took_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        };
+        let took_by = |took_rx: &mpsc::Receiver<(usize, u64)>, n: usize| {
+            let mut took: Vec<(usize, u64)> = (0..n).map(|_| took_rx.recv().unwrap()).collect();
+            took.sort();
+            took
+        };
+
+        let written = thread::scope(|scope| {
+            let pipeline = scope.spawn(|| {
+                run_simulated_pipeline(WORKERS, 2, 6, None, |worker, seq| {
+                    took_tx.lock().unwrap().send((worker, seq)).unwrap();
+                    release_rxs[worker].lock().unwrap().recv().unwrap();
+                    (Ok(seq), false)
+                })
+            });
+            // 最初は先導役 0 だけが取る。
+            assert_eq!(took_rx.recv().unwrap(), (0, 0));
+            quiet(&took_rx);
+            release_txs[0].send(()).unwrap();
+            // 先導役 0 が終えると先導役 1 の番。2 本目の worker はまだ取らない。
+            let took = took_by(&took_rx, 2);
+            assert_eq!(took.iter().map(|&(w, _)| w).collect::<Vec<_>>(), vec![0, 1]);
+            let mut seqs: Vec<u64> = took.iter().map(|&(_, seq)| seq).collect();
+            seqs.sort();
+            assert_eq!(seqs, vec![1, 2]);
+            quiet(&took_rx);
+            // 先導役 1 が終えると全員が取る (先導役 0 はまだ 2 個目を保持中)。
+            release_txs[1].send(()).unwrap();
+            let took = took_by(&took_rx, 3);
+            assert_eq!(took.iter().map(|&(w, _)| w).collect::<Vec<_>>(), vec![1, 2, 3]);
+            // 後から取ったバッチから先に返し、writer が通し番号順に並べ直すことを見る。
+            for worker in [3, 2, 1, 0] {
+                release_txs[worker].send(()).unwrap();
+            }
+            pipeline.join().unwrap()
+        })
+        .unwrap();
+        assert_eq!(written, (0..6).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn simulated_pipeline_ends_when_batches_are_fewer_than_leaders() {
+        let written = run_simulated_pipeline(4, 3, 1, None, |_, seq| (Ok(seq), false)).unwrap();
+        assert_eq!(written, vec![0]);
+        let written = run_simulated_pipeline(3, 2, 0, None, |_, seq| (Ok(seq), false)).unwrap();
         assert!(written.is_empty());
-        assert_eq!(counts, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn simulated_pipeline_ends_at_eof_sentinel() {
+        // 最後のバッチ (sentinel) を処理した worker は抜け、他は受け口が閉じて抜ける。
+        let written = run_simulated_pipeline(3, 2, 5, None, |_, seq| (Ok(seq), seq == 4)).unwrap();
+        assert_eq!(written, (0..5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn simulated_pipeline_propagates_leader_first_batch_error() {
+        let err = run_simulated_pipeline(3, 2, 20, None, |worker, seq| {
+            if worker == 0 && seq == 0 {
+                (Err(anyhow::anyhow!("leader failed")), false)
+            } else {
+                (Ok(seq), false)
+            }
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("leader failed"), "{err}");
+    }
+
+    #[test]
+    fn simulated_pipeline_stops_workers_when_writer_fails() {
+        let err = run_simulated_pipeline(4, 2, 50, Some(3), |_, seq| (Ok(seq), false)).unwrap_err();
+        assert!(err.to_string().contains("simulated write error at 3"), "{err}");
     }
 
     #[test]
