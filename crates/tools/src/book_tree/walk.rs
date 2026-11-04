@@ -74,6 +74,9 @@ pub(super) struct WalkArgs {
     /// キューの行の `game` に、大きい定跡の最善を両者が指し続けた手順を入れる (木がその手を必ず読む)
     #[arg(long, requires = "opp_book")]
     game_from_book: bool,
+    /// 初期局面からこの手順 (USI を空白区切り) を指した局面から辿り始める。手は元データに無くてもよい
+    #[arg(long, value_name = "USI")]
+    start_moves: Option<String>,
 }
 
 /// 止まり方。
@@ -309,18 +312,20 @@ fn stop_row(
     })
 }
 
-/// `side` を自分として初期局面 `start` から辿り、止まった局面を返す。同じ手数で同じ局面に来た重みは足し合わせる。
+/// `side` を自分として、初期局面から `start_moves` を指した局面 `start` から辿り、止まった局面を返す。
+/// 同じ手数で同じ局面に来た重みは足し合わせる。
 fn walk_side(
     positions: &BTreeMap<String, MasterPosition>,
     src: &mut Sources,
     side: &'static str,
     start: &str,
+    start_moves: &[String],
     options: WalkOptions,
 ) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     let mut layer: BTreeMap<String, (f64, Vec<String>)> =
-        BTreeMap::from([(start.to_owned(), (1.0, Vec::new()))]);
-    for ply in 0..=options.max_ply {
+        BTreeMap::from([(start.to_owned(), (1.0, start_moves.to_vec()))]);
+    for ply in start_moves.len()..=options.max_ply {
         let mut next: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
         let mut put = |key: String, weight: f64, path: &[String], mv: &str| {
             let entry = next.entry(key).or_insert_with(|| {
@@ -427,8 +432,26 @@ fn book_probe(book: &Book) -> Probe<'_> {
     Probe::new(move |sfen: &str| Ok(book.entry_moves(sfen)?))
 }
 
-fn run_from(args: WalkArgs, start: &str) -> Result<()> {
+/// 初期局面 `initial` から `--start-moves` を指した局面と、その手順。
+fn start_position(initial: &str, start_moves: Option<&str>) -> Result<(String, Vec<String>)> {
+    let moves: Vec<String> =
+        start_moves.unwrap_or_default().split_whitespace().map(str::to_owned).collect();
+    let mut key = initial.to_owned();
+    for (i, mv) in moves.iter().enumerate() {
+        key = advance(&key, mv).with_context(|| format!("--start-moves の {} 手目", i + 1))?;
+    }
+    Ok((key, moves))
+}
+
+fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
     check_args(&args)?;
+    let (start, start_moves) = start_position(initial, args.start_moves.as_deref())?;
+    ensure!(
+        start_moves.len() <= args.max_ply,
+        "--start-moves の手数 {} が --max-ply {} を超えています",
+        start_moves.len(),
+        args.max_ply
+    );
     let (positions, _) = read_master(&args.master)?;
     let freq = args.opp_freq.as_deref().map(open_book).transpose()?;
     if let (Some(book), Some(path)) = (&freq, &args.opp_freq) {
@@ -456,7 +479,7 @@ fn run_from(args: WalkArgs, start: &str) -> Result<()> {
     };
     let mut rows = Vec::new();
     for &side in args.side.sides() {
-        rows.extend(walk_side(&positions, &mut src, side, start, options)?);
+        rows.extend(walk_side(&positions, &mut src, side, &start, &start_moves, options)?);
     }
     rows.sort_by(|a, b| {
         a.side

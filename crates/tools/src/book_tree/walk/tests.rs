@@ -63,7 +63,7 @@ fn options() -> WalkOptions {
 }
 
 fn walk(src: &mut Sources, side: &'static str, options: WalkOptions) -> Vec<Row> {
-    walk_side(&positions(&master_rows()), src, side, ROOT, options).unwrap()
+    walk_side(&positions(&master_rows()), src, side, ROOT, &[], options).unwrap()
 }
 
 fn find<'a>(rows: &'a [Row], stop: Stop, key: &str) -> &'a Row {
@@ -332,6 +332,7 @@ fn args(dir: &Path, master: PathBuf, freq: Option<PathBuf>, big: PathBuf, n: usi
         priority: 300,
         tag: "x19".into(),
         game_from_book: true,
+        start_moves: None,
     }
 }
 
@@ -400,4 +401,91 @@ fn ybb_frequency_book_is_rejected() {
     let ybb = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rshogi-book/testdata/small.ybb");
     let err = run_from(args(dir.path(), master, Some(ybb), big, 1), ROOT).unwrap_err();
     assert!(err.to_string().contains("--opp-freq"), "{err}");
+}
+
+#[test]
+fn start_moves_walk_from_the_position_with_the_moves_in_front() {
+    let a = after(ROOT, &["5i4h"]);
+    let master = positions(&master_rows());
+    let from_root =
+        walk_side(&master, &mut sources(Some(freq()), Some(book())), "b", ROOT, &[], options())
+            .unwrap();
+    let (start, start_moves) = start_position(ROOT, Some(" 5i4h ")).unwrap();
+    assert_eq!((start.as_str(), start_moves.as_slice()), (a.as_str(), &["5i4h".to_owned()][..]));
+    // 根の main を前に指しただけなので、根から辿ったのと同じ行になる。
+    let from_a = walk_side(
+        &master,
+        &mut sources(Some(freq()), Some(book())),
+        "b",
+        &start,
+        &start_moves,
+        options(),
+    )
+    .unwrap();
+    assert_eq!(from_a, from_root);
+}
+
+#[test]
+fn start_moves_outside_master_stop_there_as_own() {
+    let master = positions(&master_rows());
+    let (start, start_moves) = start_position(ROOT, Some("5i6h")).unwrap();
+    let rows =
+        walk_side(&master, &mut sources(None, Some(book())), "w", &start, &start_moves, options())
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].stop, rows[0].ply, rows[0].moves.clone()), (Stop::Own, 1, start_moves));
+    assert!(close(rows[0].weight, 1.0));
+}
+
+#[test]
+fn start_moves_write_full_moves_and_root_ply_to_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let (master, freq, big) = write_inputs(dir.path());
+    let mut start = args(dir.path(), master, Some(freq), big, 1);
+    start.side = SideArg::W;
+    start.min_weight = 0.0;
+    start.start_moves = Some("5i6h".into());
+    run_from(start, ROOT).unwrap();
+    let table = std::fs::read_to_string(dir.path().join("walk1.tsv")).unwrap();
+    let row: Vec<&str> = table.lines().nth(1).unwrap().split('\t').collect();
+    assert_eq!((row[0], row[1], row[2], row[9]), ("w", "own", "1", "5i6h"));
+    let queue = std::fs::read_to_string(dir.path().join("queue1.jsonl")).unwrap();
+    let lines: Vec<Line> = queue.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, format!("sfen {} 2", after(ROOT, &["5i6h"])));
+    assert!(lines[0].memo.as_deref().unwrap().ends_with(" moves=5i6h"));
+}
+
+#[test]
+fn bad_start_moves_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (master, freq, big) = write_inputs(dir.path());
+    let err = start_position(ROOT, Some("5i4h 5i4h")).unwrap_err();
+    assert!(format!("{err:#}").contains("--start-moves の 2 手目"), "{err:#}");
+    let mut long = args(dir.path(), master, Some(freq), big, 1);
+    long.max_ply = 1;
+    long.start_moves = Some("5i4h 5a5b".into());
+    let err = run_from(long, ROOT).unwrap_err().to_string();
+    assert!(err.contains("--max-ply"), "{err}");
+}
+
+#[test]
+fn empty_start_moves_start_at_the_initial_position_and_max_ply_bounds_them() {
+    for empty in [None, Some(""), Some("  ")] {
+        assert_eq!(start_position(ROOT, empty).unwrap(), (ROOT.to_owned(), Vec::new()));
+    }
+    let (start, start_moves) = start_position(ROOT, Some("5i4h")).unwrap();
+    let mut at_limit = options();
+    at_limit.max_ply = 1;
+    let rows = walk_side(
+        &positions(&master_rows()),
+        &mut sources(Some(freq()), None),
+        "b",
+        &start,
+        &start_moves,
+        at_limit,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].stop, rows[0].ply), (Stop::Max, 1));
 }

@@ -1009,7 +1009,8 @@ book_mine master cycles --master moves.tsv --table cycles.tsv \
 ```bash
 book_mine master walk --master moves.tsv --table walk.tsv \
   [--opp-freq strong_games.db] [--opp-book big.ybb --opp-book-diff 30 --opp-book-best 0.9] \
-  [--min-weight 0.005 --enqueue-out queue.jsonl --depth 6 --priority 300 --tag x19 --game-from-book]
+  [--min-weight 0.005 --enqueue-out queue.jsonl --depth 6 --priority 300 --tag x19 --game-from-book] \
+  [--start-moves "2g2f"]
 ```
 
 自分 (RAMU) は元データの main を指し、相手は強い対局の手の頻度か大きい定跡の手で指すとして初期局面から辿り、止まった局面とそこに来る重みを一覧にします。自分の手番で元データに行の無い局面 (自分が定跡を出て読み始める局面) が、木の根の候補です。大きい定跡を渡すと、その局面から大きい定跡の最善を両者が指し続けた手順の長さと終わりの値も出すので、相手が定跡でどこまで進めてくるかが分かります。元データは書き換えません。
@@ -1031,10 +1032,12 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 | `--enqueue-out <PATH>` | なし | 自分が読み始める局面のうち重みが `--min-weight` 以上のものを、`tree enqueue --from` の行 (JSON Lines) に書く |
 | `--depth <N>` / `--priority <N>` / `--tag <NAME>` | `6` / `300` / `walk` | キューの行の段数・priority の始まり (重みの順位 0〜99 を足す)・id `<tag>_<根の手数>_<局面の hash 16 桁>_<b\|w>` の名前 (`[A-Za-z0-9_-]` の 1〜40 文字) |
 | `--game-from-book` | 無効 | キューの行の `game` に、大きい定跡の最善を両者が指し続けた手順の最初の `depth+1` 手を入れる (木がその手を読みの順位によらず伸ばす)。`--opp-book` が要る |
+| `--start-moves <USI>` | なし | 初期局面からこの手順 (空白区切り) を指した局面から、重み 1 で辿り始める。手は元データや定跡に無くてもよい。合法でない手があるか、手数が `--max-ply` を超えるとエラーで終わる。main 以外の作戦 (初手の alt など) の側で読み始める局面を出すのに使う。別の手順の結果を同じキューに積むなら `--tag` を分ける (同じ局面・同じ根の手数は同じ id になる) |
 
 辿り方:
 
 - 自分の手番では元データの main を指します (対局の default プリセットと同じ)。行が無ければ `own` で止めます。
+- `--start-moves` を渡すと、その手順を指した局面から同じ規則で辿ります (その局面が元データに無く自分の手番なら、そこが `own`)。一覧の `ply`・`moves` とキューの行の根の手数・`memo` の手順は、初期局面からの手数・手順 (`--start-moves` を前に含む) です。
 - 相手の手番では、`--opp-freq` の局数が `--min-games` 以上の局面なら、局数が `--min-games` 以上の手を局数の割合で指します。局数の少ない手に行った分と、局数の足りない局面は、`--opp-book` があればその手で指します (同じ手は重みを足します)。局数が足りず大きい定跡にも無ければ `out`、局数の少ない手のうち大きい定跡で埋まらなかった分 (局数が足りていて全部の手が少ない局面を含みます) と指せない手の分は `rare` で止めます。重みが 0 になる手 (`--opp-book-best` が 0 か 1 のとき) は辿りません。
 - 重みが `--weight-floor` 未満なら `tiny`、`--max-ply` 手に達したら `max` で止めます。同じ手数で同じ局面に来た重みは足し合わせ、手順は最初に辿ったものを残します。止まった重みの合計は手番ごとに 1 です。
 - 大きい定跡の手は書かれたままの局面で引きます (先後反転では引きません)。`--opp-freq` だけなら `master rejoin` の重みと同じ辿り方で、相手の局数が足りずに止まった分が `out` と `rare` に出ます。
