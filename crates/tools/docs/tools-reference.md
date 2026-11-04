@@ -93,7 +93,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`spsa`](spsa.md) | 永続エンジンプールで同期 / 非同期 SPSA を実行し、途中再開 |
+| [`spsa`](spsa.md) | 永続エンジンプールで同期 / 非同期 SPSA を実行し、途中再開。非同期では対局を別の機械の worker に任せられる (`--remote-worker`) |
 | [`spsa_param_diff`](spsa_param_diff.md) | SPSA パラメータと既定値・履歴の差を集計 |
 | [`generate_spsa_params`](generate_spsa_params.md) | 探索パラメータの既定値から c_end / r_end 形式の params を生成 |
 | [`generate_net_spsa_params`](generate_net_spsa_params.md) | LayerStacks の重み delta 用 SPSA params を生成 |
