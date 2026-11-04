@@ -1091,12 +1091,18 @@ impl UsiEngine {
                 {
                     search.set_draw_value_black(v);
                 }
+                if let Ok(v) = value.parse::<i32>() {
+                    self.book_options.draw_value_black = v;
+                }
             }
             "DrawValueWhite" => {
                 if let Ok(v) = value.parse::<i32>()
                     && let Some(search) = self.search.as_mut()
                 {
                     search.set_draw_value_white(v);
+                }
+                if let Ok(v) = value.parse::<i32>() {
+                    self.book_options.draw_value_white = v;
                 }
             }
             "MultiPV" => {
@@ -3323,6 +3329,8 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 let search = engine.search.as_ref().expect("search exists");
                 assert_eq!(search.draw_value_black(), 123);
                 assert_eq!(search.draw_value_white(), -456);
+                assert_eq!(engine.book_options.draw_value_black, 123);
+                assert_eq!(engine.book_options.draw_value_white, -456);
             })
             .unwrap()
             .join()

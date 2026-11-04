@@ -30,6 +30,12 @@
 `BookSelectValue` を評価します。`BookSelectValue=false` の場合は従来どおり
 `NarrowBook` を適用し、その後 `ConsiderBookMoveCount` または等確率抽選で選びます。
 
+合法性検証では、指すと直近 16 手以内の局面へ戻る手も除きます。ただし値が手番の側の千日手の値
+(`DrawValueBlack` / `DrawValueWhite`) 以下の手は、繰り返しても損をしないので残します。定跡は同じ局面で
+同じ手を選ぶので、局面が戻ると同じ手順を繰り返して千日手になり、定跡の値を保てないためです。除いた手は
+`info string book move <手> repeats a previous position ...` で知らせ、候補が残らなければ探索します。
+explore の指定手も同じく除きます。
+
 ## 先後別の評価値差と depth 下限
 
 `BookEvalBlackDiff` / `BookEvalWhiteDiff` / `BookDepthBlackLimit` / `BookDepthWhiteLimit` で、

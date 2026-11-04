@@ -7,7 +7,9 @@
 //! 3. find(ply 込みキー / IgnoreBookPly)。miss かつ FlippedBook なら反転局面で再検索し指し手反転。
 //!    定跡が複数ある(優先定跡)ときは先頭から順にファイルごとにこれを行い、指し手が 1 つ以上ある
 //!    最初の局面を使う
-//! 4. `to_move` + pseudo-legal + legal で合法性検証、非合法は info string 警告して除去
+//! 4. `to_move` + pseudo-legal + legal で合法性検証、非合法は info string 警告して除去。
+//!    指すと直近 16 手以内の局面へ戻る手は、値が手番の側の `DrawValueBlack` / `DrawValueWhite` より良ければ
+//!    info string で知らせて除去 (戻ると同じ手順を繰り返して千日手になるため)。
 //!    explore 登録局面はここで合法な定跡手との積集合から等確率で選び、ponder 解決へ進む。
 //! 5. `BookDepthLimit`(0 で無効): 筆頭手 depth 不足なら局面ごと不採用
 //! 6. `BookEvalDiff` / `BookEvalBlackLimit` / `BookEvalWhiteLimit`: 下限未満を除去
@@ -20,6 +22,8 @@
 //! 11. bestmove(+ ponder)を返す
 
 use rshogi_core::position::Position;
+use rshogi_core::search::{DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE};
+use rshogi_core::types::RepetitionState;
 use rshogi_core::types::{Color, Move};
 
 use std::borrow::Cow;
@@ -113,6 +117,10 @@ pub struct BookOptions {
     pub depth_black_limit: Option<i32>,
     /// `BookDepthWhiteLimit`: 後手番の `depth_limit`。`None` なら `depth_limit` を使う。
     pub depth_white_limit: Option<i32>,
+    /// `DrawValueBlack`: 先手番の千日手の値。過去の局面へ戻る定跡手は、値がこれより良ければ使わない。
+    pub draw_value_black: i32,
+    /// `DrawValueWhite`: 後手番の千日手の値。
+    pub draw_value_white: i32,
 }
 
 /// root 局面の手番で決まる評価値差・depth 下限と、info string に出すオプション名。
@@ -170,6 +178,8 @@ impl Default for BookOptions {
             eval_white_diff: None,
             depth_black_limit: None,
             depth_white_limit: None,
+            draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
+            draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
         }
     }
 }
@@ -417,6 +427,7 @@ pub fn probe_with_explore(
                 info(message);
             }
         })?;
+    skip_repeating_moves(position, options, &mut candidates, &mut info);
 
     // explore は合法な定跡手との積集合から等確率で選ぶ。通常の絞り込みより優先。
     if let (Some(explore), Some(moves)) = (explore, explore_moves) {
@@ -529,6 +540,42 @@ pub fn probe_with_explore(
         best_move,
         ponder_move,
     })
+}
+
+/// 過去の局面へ戻る定跡手のうち、値が手番の側の千日手の値より良い手を候補から外す。
+///
+/// 定跡は同じ局面で同じ手を選ぶので、局面が戻ると同じ手順を繰り返して千日手になり、定跡の値を保てない。
+/// 戻るかは局面の履歴 (直近 16 手まで) で判定する。値が千日手の値以下の手は、繰り返しても損をしないので残す。
+fn skip_repeating_moves(
+    position: &Position,
+    options: &BookOptions,
+    candidates: &mut Vec<Candidate>,
+    info: &mut impl FnMut(&str),
+) {
+    let draw = if position.side_to_move() == Color::Black {
+        options.draw_value_black
+    } else {
+        options.draw_value_white
+    };
+    candidates.retain(|c| {
+        if c.value <= draw {
+            return true;
+        }
+        let mut after = position.clone();
+        let gives_check = after.gives_check(c.mv);
+        after.do_move(c.mv, gives_check);
+        let repeats = matches!(
+            after.repetition_state(i32::MAX),
+            RepetitionState::Draw | RepetitionState::Win | RepetitionState::Lose
+        );
+        if repeats {
+            info(&format!(
+                "book move {} repeats a previous position (value {} > draw value {}), skipped.",
+                c.move_usi, c.value, draw
+            ));
+        }
+        !repeats
+    });
 }
 
 #[cfg(test)]
@@ -857,6 +904,47 @@ mod tests {
         assert_eq!(messages.last().unwrap(), "book explore loaded: 2 entries");
     }
 
+    fn play(sfen: &str, moves: &[&str]) -> Position {
+        let mut p = pos(sfen);
+        for usi in moves {
+            let mv = p.to_move(Move::from_usi(usi).unwrap()).unwrap();
+            let gives_check = p.gives_check(mv);
+            p.do_move(mv, gives_check);
+        }
+        p
+    }
+
+    #[test]
+    fn repeating_move_is_skipped_only_when_better_than_draw() {
+        let data = format!("{HEADER}\nsfen {HIRATE}\n5i5h none 50 16 100\n7g7f none 40 16 1\n");
+        // 局面が戻ると手数だけが違うので、手数を見ずに引く。
+        let book = Book::from_reader(data.as_bytes(), true).unwrap();
+        let back = play(HIRATE, &["5i5h", "5a5b", "5h5i", "5b5a"]);
+        let probe_with = |position: &Position, draw_value_black: i32| {
+            let options = BookOptions {
+                select_value: true,
+                eval_diff: 300,
+                draw_value_black,
+                ..Default::default()
+            };
+            let mut messages = Vec::new();
+            let result = probe(
+                std::slice::from_ref(&book),
+                position,
+                &options,
+                &mut SeqRng::new(vec![0]),
+                |m| messages.push(m.to_string()),
+            );
+            (result.map(|r| r.best_move.to_usi()), messages)
+        };
+        assert_eq!(probe_with(&pos(HIRATE), -2).0.as_deref(), Some("5i5h"));
+        let (best, messages) = probe_with(&back, -2);
+        assert_eq!(best.as_deref(), Some("7g7f"), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("book move 5i5h repeats")), "{messages:?}");
+        // 千日手の値が定跡の値以上なら、戻っても損をしないので使う。
+        assert_eq!(probe_with(&back, 50).0.as_deref(), Some("5i5h"));
+    }
+
     #[test]
     fn probe_hits_and_returns_bestmove() {
         let data = format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 30 16 100\n");
@@ -1008,7 +1096,7 @@ mod tests {
             ..Default::default()
         };
         let (best, messages) = probe_info(&book, HIRATE, &opts);
-        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert_eq!(best.as_deref(), Some("7g7f"), "{messages:?}");
         assert!(!filtered(&messages), "{messages:?}");
         let (_, messages) = probe_info(&book, AFTER_7G7F, &opts);
         assert!(has(&messages, "BookEvalDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
@@ -1042,7 +1130,7 @@ mod tests {
             "{messages:?}"
         );
         let (best, messages) = probe_info(&book, HIRATE, &opts);
-        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert_eq!(best.as_deref(), Some("7g7f"), "{messages:?}");
         assert!(has(&messages, "BookEvalDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
 
         let opts = BookOptions {
@@ -1071,7 +1159,7 @@ mod tests {
             ..Default::default()
         };
         let (best, messages) = probe_info(&book, HIRATE, &opts);
-        assert_eq!(best.as_deref(), Some("7g7f"));
+        assert_eq!(best.as_deref(), Some("7g7f"), "{messages:?}");
         assert!(has(&messages, "BookEvalBlackDiff = 0 : 2 moves to 1 moves."), "{messages:?}");
 
         let opts = BookOptions {
