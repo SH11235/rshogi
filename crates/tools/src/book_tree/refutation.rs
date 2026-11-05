@@ -5,7 +5,7 @@
 //! 根にした木のキューの行とともに出す。
 
 use super::audit::{AuditedBook, AuditedMove, Origin, audited_moves};
-use super::master_table::MasterPosition;
+use super::master_table::{MasterPosition, Row};
 use super::model::child;
 use super::rejoin::{WeightArgs, reach_weights};
 use super::reply_graph::HIRATE_KEY;
@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// 反駁の表の 1 行。値は手番の側から見た伝播後の値で、同値の -1 補正の前の値。
@@ -165,19 +164,13 @@ pub(super) fn find(
     Ok((rows, summary))
 }
 
-/// 反駁の行の `best_source` を元データの `best` の行の source で埋める。`read_master` は手ごとの source を
-/// 持たないので、当たった局面の分だけ読み直して引く。
-pub(super) fn fill_best_sources(path: &Path, rows: &mut [Refutation]) -> Result<()> {
+fn fill_best_sources(master: &[Row], rows: &mut [Refutation]) -> Result<()> {
     let mut wanted: HashMap<(&str, &str), usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         wanted.insert((r.key.as_str(), r.best.mv.as_str()), i);
     }
-    let file =
-        std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
     let mut found = vec![None; rows.len()];
-    // 見出し・列の数・role は read_master で検査済み。
-    for line in BufReader::new(file).lines().skip(1) {
-        let row = super::master_table::Row::split_line(&line?);
+    for row in master {
         if row.get("role") == "record" {
             continue;
         }
@@ -187,7 +180,7 @@ pub(super) fn fill_best_sources(path: &Path, rows: &mut [Refutation]) -> Result<
     }
     for (row, source) in rows.iter_mut().zip(found) {
         row.best_source = source.with_context(|| {
-            format!("元データが読み込みの途中で変わりました: {} {}", row.key, row.best.mv)
+            format!("元データに対象の手がありません: {} {}", row.key, row.best.mv)
         })?;
     }
     Ok(())
@@ -333,7 +326,7 @@ pub(super) struct RefutationOutputs<'a> {
 
 /// 反駁の表とキューの行を書き、要約を返す。
 pub(super) fn write_outputs(
-    master: &Path,
+    master: &[Row],
     positions: &BTreeMap<String, MasterPosition>,
     book: &AuditedBook,
     outputs: &RefutationOutputs<'_>,
@@ -413,10 +406,8 @@ mod tests {
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
         let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, false).unwrap();
         let (mut rows, summary) = find(&parsed.0, &book, margin, weights, min_weight).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("moves.tsv");
-        std::fs::write(&path, text).unwrap();
-        fill_best_sources(&path, &mut rows).unwrap();
+        fill_best_sources(&super::super::master_table::parse_master(text).unwrap(), &mut rows)
+            .unwrap();
         (rows, summary)
     }
 
