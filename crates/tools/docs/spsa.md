@@ -133,3 +133,11 @@ name,int,10,0,100,5,0.002
 旧 `step,delta` ファイルはこのフラグで読み替えない。値列を新canonicalへ移し、
 `c_end/r_end` を明示的に設計し直して新runを開始する。
 [形式と移行の詳細](spsa_runbook.md#7-params-ファイルの形式と移行) を参照。
+
+## run-dir の写しの照合 (`--verify-resume`)
+
+`--resume --verify-resume` は、resume と同じ照合 (meta と CLI の一致、journal の再生と snapshot の bit 一致) だけを行って終わる。
+worker を起動せず (`--remote-worker` があっても)、journal には書かない。`stats.csv`・`values.csv` は再生から作り直す。
+動いている run-dir の写しが resume できるかを確かめるのに使い、`--run-dir` には写し先を渡す。
+`--worker-stdio` と batch では使えない。写し方と注意は
+[runbook §15.3](spsa_runbook.md#153-run-dir-と-resume) を参照。
