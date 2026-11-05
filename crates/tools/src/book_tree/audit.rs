@@ -220,7 +220,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         others.extend(outputs[..i].iter().copied());
         reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
-    let full_rows = args.apply || args.demote_alts || refutation;
+    let full_rows = args.apply || args.demote_alts;
     let (original, mut rows, positions, curated_records) = if full_rows {
         let original = std::fs::read(&args.master)?;
         let rows = parse_master(std::str::from_utf8(&original)?)?;
@@ -232,20 +232,29 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
             positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
         (original, rows, positions, BTreeSet::new())
     } else {
-        let positions = master_table::read_master(&args.master)?;
         let reader = std::io::BufReader::new(std::fs::File::open(&args.master)?);
         let mut rows = Vec::new();
         let mut curated_records = BTreeSet::new();
-        for row in master_table::read_rows(reader)? {
-            let (_, row) = row?;
+        let mut seen = BTreeSet::new();
+        let positions = positions_from_rows(master_table::read_rows(reader)?.map(|entry| {
+            let (at, row) = entry?;
             schema.validate_row(&row)?;
+            ensure!(
+                seen.insert((row.get("key").to_owned(), row.get("move").to_owned())),
+                "同じ手の行が重なっています: {} {}",
+                row.get("key"),
+                row.get("move")
+            );
             if row.get("role") != "record" {
-                rows.push(row);
-            } else if row.get("tier") == "curated" && positions.0.contains_key(row.get("key")) {
+                rows.push(row.clone());
+            } else if row.get("tier") == "curated" {
                 // record の列を保持せず、置換を保護する局面だけを覚える。
                 curated_records.insert(row.get("key").to_owned());
             }
-        }
+            Ok((at, row))
+        }))?;
+        drop(seen);
+        curated_records.retain(|key| positions.0.contains_key(key));
         master_table::validate(&rows)?;
         (Vec::new(), rows, positions, curated_records)
     };
@@ -1627,23 +1636,70 @@ mod tests {
     #[test]
     fn lightweight_audit_matches_full_rows_outputs() {
         let dir = tempfile::tempdir().unwrap();
-        let original = replacement_fixture();
+        let mut rows = parse_master(&replacement_fixture()).unwrap();
+        rows[0].set("evals", "100".into());
+        let original = format_master(&rows);
         let path = dir.path().join("moves.tsv");
         std::fs::write(&path, &original).unwrap();
-        let mut args = test_args(dir.path());
-        args.out_db = Some(dir.path().join("light.db"));
-        run(args).unwrap();
-        let table = std::fs::read(dir.path().join("audit.tsv")).unwrap();
-        let mut args = test_args(dir.path());
-        args.out_db = Some(dir.path().join("full.db"));
-        args.refutation_table = Some(dir.path().join("refutation.tsv"));
-        run(args).unwrap();
-        assert_eq!(table, std::fs::read(dir.path().join("audit.tsv")).unwrap());
+        for (name, demote_alts) in [("light", false), ("full", true)] {
+            let mut args = test_args(dir.path());
+            args.demote_alts = demote_alts;
+            args.table = dir.path().join(format!("{name}.tsv"));
+            args.out_db = Some(dir.path().join(format!("{name}.db")));
+            args.refutation_table = Some(dir.path().join(format!("{name}.refutation.tsv")));
+            args.enqueue_out = Some(dir.path().join(format!("{name}.jsonl")));
+            run(args).unwrap();
+        }
+        for suffix in ["tsv", "db", "refutation.tsv", "jsonl"] {
+            assert_eq!(
+                std::fs::read(dir.path().join(format!("light.{suffix}"))).unwrap(),
+                std::fs::read(dir.path().join(format!("full.{suffix}"))).unwrap(),
+                "{suffix}"
+            );
+        }
         assert_eq!(
-            std::fs::read(dir.path().join("light.db")).unwrap(),
-            std::fs::read(dir.path().join("full.db")).unwrap()
+            std::fs::read_to_string(dir.path().join("light.refutation.tsv"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("light.jsonl")).unwrap().lines().count(),
+            1
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn lightweight_audit_rejects_duplicate_record_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        for roles in [
+            ["record", "record"],
+            ["main", "record"],
+            ["record", "main"],
+            ["alt", "record"],
+            ["record", "alt"],
+        ] {
+            let other_role = if roles.contains(&"main") {
+                "alt"
+            } else {
+                "main"
+            };
+            let text = master(&[
+                (ROOT, "5i6h", other_role, "10"),
+                (ROOT, "5i4h", roles[0], "0"),
+                (ROOT, "5i4h", roles[1], "0"),
+            ]);
+            std::fs::write(dir.path().join("moves.tsv"), text).unwrap();
+            for demote_alts in [false, true] {
+                let mut args = test_args(dir.path());
+                args.demote_alts = demote_alts;
+                let error = run(args).unwrap_err().to_string();
+                assert!(error.contains("同じ手の行が重なっています"), "{roles:?}: {error}");
+            }
+            assert!(!dir.path().join("audit.tsv").exists());
+        }
     }
 
     #[test]
