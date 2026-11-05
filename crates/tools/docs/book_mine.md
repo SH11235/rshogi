@@ -675,6 +675,8 @@ book_mine master hold-early --before before/moves.tsv --master moves.tsv \
 
 `tree register`・`master audit` の後で、版を作る前からある序盤の局面の main を戻し、
 替わろうとした手を owner が後で判断するための一覧にします。
+`master cycles --apply` より前 (`tree register`・`master audit --apply` の直後) に流します。cycles の後に流すと、
+cycles が循環を塞ぐために外した手を main に戻すことがあります。
 
 | 引数 | 既定 | 意味 |
 |---|---|---|
@@ -701,7 +703,7 @@ ply・key の順に並べます。値は evals の平均を既存の規則で偶
 先手から見た値です。値がなければ空欄にします。stdout には対象局面数 (先手番・後手番別) と
 書き戻した局面数を出します。
 
-両入力と変更後の表を `master validate` と同じ規則で検査します。検査で失敗した場合は書き込みません。
+両入力と変更後の表を `master validate` と同じ規則で検査します。検査で失敗した場合は `--apply` の有無によらず一覧も master も書き込みません。
 `--apply` を省くと一覧だけを書き、master は変更しません。保存には一時ファイルからの原子的な
 置換を使い、master が読み込み時から変わっていれば保存を拒否します。既存行の順序は保持し、
 復元した行は末尾に追加します。改行は LF になります。master を書き換える他のコマンドと同時に
