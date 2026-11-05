@@ -607,3 +607,80 @@ fn file_valued_usi_option_is_fingerprinted_after_trimming() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("対局条件が meta と異なります"), "{}", stderr(&output));
 }
+
+#[test]
+fn verify_resume_checks_the_replay_without_playing_or_writing_the_journal() {
+    let reference = reference_run();
+    let test = PoolTest::new();
+    let interval = ["--snapshot-interval", "2"];
+    let output = run_async(
+        &test,
+        "value_driven",
+        6,
+        1,
+        &interval,
+        &[("RSHOGI_SPSA_FAULT", Path::new("after_accept:3"))],
+    );
+    assert_eq!(output.status.code(), Some(86), "{}", stderr(&output));
+    let journal_before = test.bytes("journal.jsonl");
+
+    let verify = [
+        "--snapshot-interval",
+        "2",
+        "--resume",
+        "--force-unlock",
+        "--verify-resume",
+    ];
+    let output = run_async(&test, "value_driven", 6, 1, &verify, &[]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("verify-resume ok"), "{}", stderr(&output));
+    assert_eq!(test.bytes("journal.jsonl"), journal_before);
+    assert!(!test.path("run/final.params").exists());
+    assert_eq!(test.meta()["status"], "running");
+    // `--remote-worker` を付けても worker を起動しない (起動すれば、すぐ終わる worker で接続に失敗する)。
+    let mut with_worker = verify.to_vec();
+    with_worker.extend_from_slice(&["--remote-worker", "exit 1"]);
+    assert_success(&run_async(&test, "value_driven", 6, 1, &with_worker, &[]));
+    assert_eq!(test.bytes("journal.jsonl"), journal_before);
+
+    // 照合だけの起動の後も、ふつうの resume は中断なしと同じ θ に着く。
+    let resume = ["--snapshot-interval", "2", "--resume", "--force-unlock"];
+    assert_success(&run_async(&test, "value_driven", 6, 1, &resume, &[]));
+    assert_eq!(final_theta(&test), final_theta(&reference));
+}
+
+#[test]
+fn verify_resume_rejects_a_journal_shorter_than_the_snapshot() {
+    let test = PoolTest::new();
+    let output = run_async(
+        &test,
+        "value_driven",
+        6,
+        1,
+        &["--snapshot-interval", "2"],
+        &[("RSHOGI_SPSA_FAULT", Path::new("after_accept:3"))],
+    );
+    assert_eq!(output.status.code(), Some(86), "{}", stderr(&output));
+    let journal = test.bytes("journal.jsonl");
+    let first_line = journal.iter().position(|&b| b == b'\n').unwrap() + 1;
+    std::fs::write(test.path("run/journal.jsonl"), &journal[..first_line]).unwrap();
+
+    let verify = [
+        "--snapshot-interval",
+        "2",
+        "--resume",
+        "--force-unlock",
+        "--verify-resume",
+    ];
+    let output = run_async(&test, "value_driven", 6, 1, &verify, &[]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("record 境界にありません"), "{}", stderr(&output));
+}
+
+#[test]
+fn verify_resume_needs_resume() {
+    let test = PoolTest::new();
+    let output = run_async(&test, "value_driven", 2, 1, &["--verify-resume"], &[]);
+    assert!(!output.status.success());
+    assert!(!test.path("run/journal.jsonl").exists());
+}

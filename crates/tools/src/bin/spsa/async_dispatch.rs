@@ -2117,7 +2117,7 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             );
         }
         // 完走済みの run は対局しないので worker を起動しない (bench と journal への追記を避ける)。
-        fleet = if meta.status == RunStatus::Completed {
+        fleet = if meta.status == RunStatus::Completed || cli.verify_resume {
             None
         } else {
             connect()?
@@ -2277,6 +2277,13 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
             );
         }
         csv.commit()?;
+        if cli.verify_resume {
+            eprintln!(
+                "verify-resume ok: snapshot {} matches the replay (journal {valid_len} bytes, {} pairs applied)",
+                latest.generation, core.completed
+            );
+            return Ok(());
+        }
         let games = if !cli.no_game_records {
             report_missing_game_records(&default_games_jsonl_path(run_dir), &received)?;
             Some(open_jsonl_writer(&default_games_jsonl_path(run_dir), true)?)

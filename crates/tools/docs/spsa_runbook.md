@@ -1684,6 +1684,11 @@ journal を先頭から再生して θ と CSV を作り直し、最新 snapshot
 落ちた時点で実行中だった pair は同じ確定値で指し直す (失敗数は増やさない)。受信済みで適用を待っていた結果は失わない。
 journal の末尾の書きかけの行だけを捨て、途中の行が壊れていれば止まる。
 
+`--resume` に `--verify-resume` を足すと、上の照合 (meta と CLI の一致、再生と snapshot の bit 一致) だけを行って終わる。
+worker は起動せず (`--remote-worker` があっても)、journal には書かない (`stats.csv`・`values.csv` は再生から作り直す)。
+動いている run-dir の写しが resume できる組かを確かめるのに使う。写しには `meta.json`・`snapshot-000000.json`・
+meta が指す snapshot・`journal.jsonl` (この順に写す) が要り、resume と同じ引数で、写しを `--run-dir` にして起動する。
+
 resume で一致を要求するもの (不一致は拒否し、上書きの手段はない。変えたいときは新しい run-dir で始める):
 `--total-pairs` と schedule 系の値 (bit 単位で比べる)、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、
 engine binary の sha256・`--engine-args`・既定値注入後の USI option・値がファイルを指す USI option の内容の sha256、mapping、
