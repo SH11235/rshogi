@@ -76,6 +76,7 @@ pub(super) struct Summary {
     pub record_skipped: usize,
     pub bench_revived: usize,
     pub bench_protected: usize,
+    pub bench_curated_without_main: usize,
     pub conflicts: usize,
 }
 
@@ -188,12 +189,13 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
     }
     println!(
-        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / 保護された控え {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
+        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / 保護された控え {} / curated の main が無い控え {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
         summary.replaced_main,
         summary.replaced_curated,
         summary.evals_updated,
         summary.bench_revived,
         summary.bench_protected,
+        summary.bench_curated_without_main,
         summary.record_skipped,
         summary.conflicts,
         args.conflicts.display()
@@ -344,6 +346,8 @@ pub(super) fn register(
         let existing = by_key.get(key).cloned().unwrap_or_default();
         let find =
             |rows: &[Row], mv: &str| existing.iter().copied().find(|&i| rows[i].get("move") == mv);
+        let main = existing.iter().copied().find(|&i| rows[i].get("role") == "main");
+        let curated_main = main.is_some_and(|i| rows[i].get("tier") == "curated");
         let playable: Vec<&NodeMove> = node
             .moves
             .iter()
@@ -356,7 +360,13 @@ pub(super) fn register(
                 let protected =
                     bench.is_some_and(|i| !options.schema.replaceable(rows[i].get("source")));
                 summary.bench_protected += usize::from(protected);
-                !record && !protected && (options.revive_bench || bench.is_none())
+                let curated_without_main =
+                    bench.is_some_and(|i| rows[i].get("tier") == "curated" && !curated_main);
+                summary.bench_curated_without_main += usize::from(curated_without_main);
+                !record
+                    && !protected
+                    && !curated_without_main
+                    && (options.revive_bench || bench.is_none())
             })
             .collect();
         let Some(best) = playable.first().copied() else {
@@ -372,10 +382,15 @@ pub(super) fn register(
             if let Some(i) = find(&rows, &candidate.mv)
                 && rows[i].get("role") == "bench"
             {
-                rows[i].set("role", "alt".into());
+                let role = if main.is_none() && candidate.mv == best.mv {
+                    "main"
+                } else {
+                    "alt"
+                };
+                rows[i].set("role", role.into());
                 let note = append(
                     rows[i].get("note"),
-                    format!("{}: 値が戻ったので bench から alt", options.since),
+                    format!("{}: 値が戻ったので bench から {role}", options.since),
                 );
                 rows[i].set("note", note);
                 summary.bench_revived += 1;
@@ -400,7 +415,6 @@ pub(super) fn register(
             ])
         };
         let first_new = rows.len();
-        let main = existing.iter().copied().find(|&i| rows[i].get("role") == "main");
         let curated = existing.iter().any(|&i| rows[i].get("tier") == "curated");
         match main {
             None => {
@@ -413,8 +427,8 @@ pub(super) fn register(
                     rows[i].set("role", "main".into());
                 } else {
                     rows.push(new_row(best, "main", "木の伝播後の 1 位".into()));
+                    *summary.added_main.entry(side.clone()).or_default() += 1;
                 }
-                *summary.added_main.entry(side.clone()).or_default() += 1;
             }
             Some(m) if rows[m].get("move") == best.mv => {}
             Some(m)
@@ -912,6 +926,10 @@ mod tests {
                             "bench"
                         }
                     );
+                    if !has_main && enabled && !protected {
+                        assert!(best.get("note").ends_with("bench から main"));
+                        assert!(summary.added_main.is_empty());
+                    }
                     if protected {
                         assert_eq!(best, &original);
                     }
@@ -919,6 +937,41 @@ mod tests {
                     assert_eq!(summary.bench_revived, usize::from(enabled && !protected));
                     validate(&rows).unwrap();
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn curated_bench_without_curated_main_is_excluded_from_candidates() {
+        for has_main in [false, true] {
+            for replace_curated in [false, true] {
+                let mut input = vec![row(B, "bench", "bench", "read", "curated", "-999")];
+                if has_main {
+                    input.push(row(B, "old", "main", "read", "wide", "0"));
+                }
+                let moves = if has_main {
+                    vec![("bench", 100), ("old", 0)]
+                } else {
+                    vec![("new", 100), ("bench", 99)]
+                };
+                let nodes = BTreeMap::from([(B.into(), node(&moves, 1, 0))]);
+                let (rows, _, summary) = register(
+                    master(&input),
+                    &nodes,
+                    &Options {
+                        replace_curated,
+                        ..options()
+                    },
+                )
+                .unwrap();
+                assert_eq!(find(&rows, B, "bench").unwrap().get("role"), "bench");
+                assert_eq!(summary.bench_curated_without_main, 1);
+                assert_eq!(summary.bench_revived, 0);
+                assert_eq!(
+                    find(&rows, B, if has_main { "old" } else { "new" }).unwrap().get("role"),
+                    "main"
+                );
+                validate(&rows).unwrap();
             }
         }
     }

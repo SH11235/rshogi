@@ -567,7 +567,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 規則 (局面ごと、先手・後手の手番の区別なし):
 
-- 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。`bench` (控え) 自身の source が schema で置換可能で、木の 1 位か、1 位との差が `--alt-gap` 未満なら alt に戻します。1 位なら既存の alt と同じ条件で main にでき、置換可能な source の評価値も更新します。main が無い局面でも、復帰した 1 位の控えを main にします。source が置換不可の控えは候補から除外して変更せず、「保護された控え」として別集計します。集計に「bench から戻した手」も出します。`borrow value` は控えを復帰・main 昇格させず、控えの行を変更しません。控えの復帰は `tree register` と `master audit --revive-bench` で行います。
+- 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。`bench` (控え) 自身の source が schema で置換可能で、木の 1 位か、1 位との差が `--alt-gap` 未満なら alt に戻します。1 位なら既存の alt と同じ条件で main にでき、置換可能な source の評価値も更新します。main が無い局面でも、復帰した 1 位の控えを main にし、note に main への復帰と記します。この手は main の追加数には含めず、復帰数に数えます。curated の main がない局面の curated の控えは、`--replace-curated` の有無によらず復帰・昇格の候補から除き、「curated の main が無い控え」として別集計します。source が置換不可の控えは候補から除外して変更せず、「保護された控え」として別集計します。集計に「bench から戻した手」も出します。`borrow value` は控えを復帰・main 昇格させず、控えの行を変更しません。控えの復帰は `tree register` と `master audit --revive-bench` で行います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
 - 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。`--replace-curated` を付けると、`curated` の局面でも main の source が置き換えてよいものなら木の 1 位を main にします。元の main は alt にして `tier=wide` に移し、新しい main は元の main の `tier` を引き継ぎ、局面の `curated` の main を 1 つに保ちます (新しい main の行き先に `curated` の行が無ければ、丁寧な定跡の書き出しはそこで終わります)。元の main の note に `(curated から wide)` を足し、集計に curated の main を替えた局面の数を出します。`record` の行と、置き換えない source の main はこの指定でも替えません。一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree` (値は手番の側から) です。
 - 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
@@ -864,7 +864,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
   --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] [--fill-replies] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
-  [--apply --since TAG] [--replace-curated] [--demote-alts --bad-eval -150] [--revive-bench]
+  [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
 ```
 
 定跡の元データの表 (上の 13 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。`--apply` を省くと元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データ・頻度の定跡・schema の表と同じファイル、または出力先どうしが同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
@@ -876,6 +876,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--apply` | なし | 条件を満たす局面の main を置換し、元データを原子的に保存する |
 | `--replace-curated` | なし | curated の行がある局面でも main の置換・alt の降格を行う |
 | `--demote-alts` | なし | main の置換判定後、悪い alt を bench (控え) にする。`--apply` なしでは件数だけ確認する |
+| `--demote-line <CP>` | `100` | alt の降格・bench の復帰に使う差の閾値 (1 以上)。点検・main 置換の `--line` とは独立 |
 | `--revive-bench` | なし | 値が戻った bench を alt に戻す。`--apply` なしでは件数だけ確認する。`--fill-replies` とは併用不可 |
 | `--bad-eval <CP>` | `-150` | alt の降格に使う値の上限 (手番側からの整数値) |
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
@@ -896,7 +897,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
 
-通常の点検と反駁出力 (`--refutation-table` / `--enqueue-out`) は、元データを 1 回読み、record を含む全行の局面キーと手の重複を検査します。record 行は数えて列を破棄し、main・alt 行、重複検査用の局面キーと手、curated の保護に必要な局面キーを保持します。`--apply` または `--demote-alts` を指定した場合は全行を保持します。
+通常の点検と反駁出力 (`--refutation-table` / `--enqueue-out`) は、元データを 1 回読み、record を含む全行の局面キーと手の重複を検査します。record 行は数えて列を破棄し、main・alt 行、重複検査用の局面キーと手、curated の保護に必要な局面キーを保持します。`--apply`・`--demote-alts`・`--revive-bench` のいずれかを指定した場合は全行を保持します。
 
 `--apply` は開始時に全行を一度読み、key と move の組で更新します。保存前に表の整合性を検査し、ファイルのバイト列を読み直して、開始時と異なれば保存を拒否します。保存は原子的に行い、見出し・列順・行順を保持し、改行は `master cycles --apply` と同じく LF に統一します。master の書換えに共通のロックはなく、バイト比較後から保存までの変更は検出できません。`master add`・`tree register --apply`・`master cycles --apply`・`borrow value --apply`・`master audit --apply` など、master を書き換えるコマンドは一度に 1 つだけ実行してください。
 
@@ -909,11 +910,13 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 参照する最善値は、由来が `propagated` の手と main (由来を問わない) のうち最大の値です。伸ばしていない alt の 1 回の読みは参照に使いません。参照値が無い局面は降格を見送ります。
 
 - (a) 手番側からの値が `--bad-eval` 以下、かつ参照する最善値より厳密に低い。同値は残し、最善値自体が `--bad-eval` 以下でも、より悪い alt は降格します。
-- (b) 参照する最善値との差が `--line` 以上。両方の条件を満たす手は (b) に数えます。
+- (b) 参照する最善値との差が `--demote-line` (既定 100) 以上。両方の条件を満たす手は (b) に数えます。
 
-置換後の main と、この実行で main から alt に替えた手は降格せず、record は変更しません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ降格せず、その局面数を別に出します。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から bench (控え) (基準との差 N / 値 V)` (基準は伸ばした手と main の値の最大) を追記します。降格する alt の数は手番別・理由別に出します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。`--demote-alts` と `--fill-replies` は、確認だけの場合も併用できません。
+互角の範囲では 40〜70 の差は評価の揺れに収まるため、差による降格は明確に悪い 100 以上を既定にします。`--bad-eval` 以下の手は引き続き条件 (a) で降格します。点検と main の置換には `--line` (既定 40) を使います。
 
-`--revive-bench` は、開始時に bench だった手を判定します。控えの手は伝播グラフに加えず、子局面 (直接の局面が無ければ先後反転した局面) への辺を、その手を指す側の千日手の値で解いた後退解析の結果から評価します。先後で千日手の値が違う場合、子局面の最善値を単純に反転した値とは異なります。子局面の値が無ければ、その手の読みの値を使います。値が分かり、`--bad-eval` より大きく、降格と同じ基準の最善値との差が `--line` 未満なら alt に戻します。基準値が不明なら戻しません。schema の source 保護と `--replace-curated` は降格と同じです。`--replace-curated` があっても、その局面に curated の main がない curated の控えは復帰させず、別に件数を出します。note に `<since>: 値が戻ったので bench から alt` を追記し、先手番・後手番別の件数を出します。同じ実行で降格した手は復帰させず、復帰した手を再び降格させません。保存には `--apply` が必要です。`master cycles --apply` による循環防止の降格先は引き続き record です。
+置換後の main と、この実行で main から alt に替えた手は降格せず、record は変更しません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ降格せず、その局面数を別に出します。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から bench (控え) (基準との差 N / 値 V / demote-line D / bad-eval B)` (基準は伸ばした手と main の値の最大) を追記します。降格する alt の数は手番別・理由別に出し、判定に使う demote-line と bad-eval も表示します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。`--demote-alts` と `--fill-replies` は、確認だけの場合も併用できません。
+
+`--revive-bench` は、開始時に bench だった手を判定します。控えの手は伝播グラフに加えず、子局面 (直接の局面が無ければ先後反転した局面) への辺を、その手を指す側の千日手の値で解いた後退解析の結果から評価します。先後で千日手の値が違う場合、子局面の最善値を単純に反転した値とは異なります。子局面の値が無ければ、その手の読みの値を使います。値が分かり、`--bad-eval` より大きく、降格と同じ基準の最善値との差が `--demote-line` (既定 100) 未満なら alt に戻します。基準値が不明なら戻しません。schema の source 保護と `--replace-curated` は降格と同じです。`--replace-curated` があっても、その局面に curated の main がない curated の控えは復帰させず、別に件数を出します。note に `<since>: 値が戻ったので bench から alt (基準との差 N / 値 V / demote-line D / bad-eval B)` を追記し、先手番・後手番別の件数を出します。同じ実行で降格した手は復帰させず、復帰した手を再び降格させません。保存には `--apply` が必要です。`master cycles --apply` による循環防止の降格先は引き続き record です。
 
 伝播の仕方:
 

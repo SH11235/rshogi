@@ -57,6 +57,9 @@ pub(super) struct AuditArgs {
     /// 点検の線。main が伝播後の 1 位からこの値以上負ける局面を表に出す
     #[arg(long, default_value_t = 40)]
     line: i32,
+    /// alt の降格・bench の復帰を判定する基準値との差
+    #[arg(long, default_value_t = 100)]
+    demote_line: i32,
     /// 先手を自分として解くときの千日手の値 (対局の DrawValueBlack に揃える)
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
@@ -180,10 +183,14 @@ pub(super) struct AuditSummary {
 }
 
 pub(super) fn run(args: AuditArgs) -> Result<()> {
+    run_with_revivals(args).map(|_| ())
+}
+
+fn run_with_revivals(args: AuditArgs) -> Result<Revivals> {
     super::reply_graph::thread_pool(args.threads)?.install(|| run_in_pool(args))
 }
 
-fn run_in_pool(args: AuditArgs) -> Result<()> {
+fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     ensure!(!args.apply || args.since.is_some(), "--apply には --since が必要です");
     if let Some(since) = &args.since {
         ensure!(!since.trim().is_empty(), "--since を指定してください");
@@ -199,6 +206,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         "--revive-bench と --fill-replies は併用できません"
     );
     let schema = Schema::load(args.schema.as_deref())?;
+    ensure!(args.demote_line > 0, "--demote-line は 1 以上にしてください");
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
     let refutation = args.refutation_table.is_some() || args.enqueue_out.is_some();
@@ -227,7 +235,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         others.extend(outputs[..i].iter().copied());
         reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
-    let full_rows = args.apply || args.demote_alts;
+    let full_rows = args.apply || args.demote_alts || args.revive_bench;
     let (original, mut rows, positions, curated_records) = if full_rows {
         let original = std::fs::read(&args.master)?;
         let rows = parse_master(std::str::from_utf8(&original)?)?;
@@ -314,6 +322,9 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
     {
         write_master(&args.master, &original, &rows)?;
     }
+    if args.demote_alts || args.revive_bench {
+        println!("控えの判定: demote-line {} / bad-eval {}", args.demote_line, args.bad_eval);
+    }
     if args.revive_bench {
         println!(
             "bench から alt に戻す手: 先手番 {}・後手番 {} / curated の main が無い控え {}",
@@ -332,7 +343,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         },
         replacements.format()
     );
-    Ok(())
+    Ok(revivals)
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -534,7 +545,7 @@ fn demote_alts(
                 continue;
             };
             let gap = best - value;
-            let by_gap = gap >= i64::from(args.line);
+            let by_gap = gap >= i64::from(args.demote_line);
             let by_bad = value <= i64::from(args.bad_eval) && value < best;
             if !by_gap && !by_bad {
                 continue;
@@ -546,8 +557,8 @@ fn demote_alts(
             row.set("role", "bench".into());
             let note = row.get("note");
             let since = args.since.as_deref().unwrap_or("確認");
-            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から bench (控え) (基準との差 {gap} / 値 {value})",
-                if note.is_empty() { "" } else { "。" }));
+            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から bench (控え) (基準との差 {gap} / 値 {value} / demote-line {} / bad-eval {})",
+                if note.is_empty() { "" } else { "。" }, args.demote_line, args.bad_eval));
             schema.validate_row(row)?;
             if by_gap {
                 summary.gap[side] += 1;
@@ -649,7 +660,7 @@ fn revive_bench(
         else {
             continue;
         };
-        if value <= i64::from(args.bad_eval) || best - value >= i64::from(args.line) {
+        if value <= i64::from(args.bad_eval) || best - value >= i64::from(args.demote_line) {
             continue;
         }
         row.set("role", "alt".into());
@@ -658,8 +669,8 @@ fn revive_bench(
         row.set(
             "note",
             format!(
-                "{note}{}{since}: 値が戻ったので bench から alt",
-                if note.is_empty() { "" } else { "。" }
+                "{note}{}{since}: 値が戻ったので bench から alt (基準との差 {} / 値 {value} / demote-line {} / bad-eval {})",
+                if note.is_empty() { "" } else { "。" }, best - value, args.demote_line, args.bad_eval
             ),
         );
         schema.validate_row(row)?;
@@ -1740,6 +1751,7 @@ mod tests {
             schema: None,
             table: dir.join("audit.tsv"),
             line: 1,
+            demote_line: 100,
             draw_value_black: -70,
             draw_value_white: 0,
             out_db: None,
@@ -2041,6 +2053,7 @@ mod tests {
         args.apply = true;
         args.since = Some("tag".into());
         args.line = 40;
+        args.demote_line = 40;
         run(args).unwrap();
         let text = std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap();
         assert!(run_audit(&text, 40).0.is_empty());
@@ -2098,11 +2111,56 @@ mod tests {
         let mut args = test_args(dir.path());
         args.draw_value_black = -70;
         args.draw_value_white = 0;
-        args.line = 15;
+        args.demote_line = 15;
         let summary =
             revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
         assert_eq!(summary.revived, [0, 0]);
         assert_eq!(rows[1].get("role"), "bench");
+    }
+
+    #[test]
+    fn cli_separates_replacement_and_demotion_thresholds() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: AuditArgs,
+        }
+        use clap::Parser;
+        let base = ["audit", "--master", "moves.tsv", "--table", "audit.tsv"];
+        let defaults = Cli::try_parse_from(base).unwrap().args;
+        assert_eq!((defaults.line, defaults.demote_line), (40, 100));
+        let custom = Cli::try_parse_from(base.into_iter().chain(["--demote-line", "70"]))
+            .unwrap()
+            .args;
+        assert_eq!((custom.line, custom.demote_line), (40, 70));
+    }
+
+    #[test]
+    fn standalone_revival_dry_run_matches_apply_with_default_demote_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = master(&[
+            (ROOT, "5i6h", "main", "100"),
+            (ROOT, "5i4h", "bench", "1"),
+            (ROOT, "5i5h", "bench", "0"),
+        ]);
+        for apply in [false, true] {
+            let mut args = test_args(dir.path());
+            std::fs::write(&args.master, &text).unwrap();
+            args.revive_bench = true;
+            args.apply = apply;
+            args.since = Some("tag".into());
+            args.line = 40;
+            let result = run_with_revivals(args).unwrap();
+            assert_eq!(result.revived, [1, 0]);
+            let saved = std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap();
+            if apply {
+                let rows = parse_master(&saved).unwrap();
+                assert_eq!(rows[1].get("role"), "alt");
+                assert_eq!(rows[2].get("role"), "bench");
+            } else {
+                assert_eq!(saved, text);
+            }
+        }
     }
 
     #[test]
@@ -2160,6 +2218,7 @@ mod tests {
                     args.revive_bench = enabled;
                     args.demote_alts = true;
                     args.line = 40;
+                    args.demote_line = 40;
                     args.since = Some("tag".into());
                     run(args).unwrap();
                     let updated = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -2168,7 +2227,11 @@ mod tests {
                         if apply && enabled { expected } else { "bench" }
                     );
                     if updated[1].get("role") == "alt" {
-                        assert_eq!(updated[1].get("note"), "tag: 値が戻ったので bench から alt");
+                        assert!(
+                            updated[1]
+                                .get("note")
+                                .starts_with("tag: 値が戻ったので bench から alt (")
+                        );
                     }
                 }
             }
@@ -2188,6 +2251,7 @@ mod tests {
             }
             let mut args = test_args(dir.path());
             args.line = 40;
+            args.demote_line = 40;
             args.replace_curated = false;
             assert_eq!(
                 revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args)
@@ -2291,6 +2355,10 @@ mod tests {
         let cases = [
             (-140, -150, 40, "bench", [1, 0], [0, 0]),
             (100, 60, 40, "bench", [0, 0], [1, 0]),
+            (100, 60, 100, "alt", [0, 0], [0, 0]),
+            (100, 30, 100, "alt", [0, 0], [0, 0]),
+            (100, 1, 100, "alt", [0, 0], [0, 0]),
+            (100, 0, 100, "bench", [0, 0], [1, 0]),
             (100, 100, 1, "alt", [0, 0], [0, 0]),
             (-200, -200, 1, "alt", [0, 0], [0, 0]),
             (-200, -210, 40, "bench", [1, 0], [0, 0]),
@@ -2308,7 +2376,7 @@ mod tests {
             let original = parse_master(&text).unwrap();
             let mut rows = original.clone();
             let mut args = test_args(dir.path());
-            args.line = line;
+            args.demote_line = line;
             args.since = Some("tag".into());
             let result =
                 demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
@@ -2325,7 +2393,7 @@ mod tests {
                 assert_eq!(
                     rows[1].get("note"),
                     format!(
-                        "tag: 伝播後の値が悪いので alt から bench (控え) (基準との差 {} / 値 {alt})",
+                        "tag: 伝播後の値が悪いので alt から bench (控え) (基準との差 {} / 値 {alt} / demote-line {line} / bad-eval -150)",
                         main - alt
                     )
                 );
@@ -2349,6 +2417,7 @@ mod tests {
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.line = 40;
+        args.demote_line = 40;
         args.since = Some("tag".into());
         let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
         assert_eq!(result.total(), 0);
@@ -2376,6 +2445,7 @@ mod tests {
         args.demote_alts = true;
         args.since = Some("tag".into());
         args.line = 40;
+        args.demote_line = 40;
         run(args).unwrap();
         let rows = parse_master(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(rows[0].get("role"), "alt");
@@ -2441,6 +2511,7 @@ mod tests {
                 let original = rows.clone();
                 let mut args = test_args(dir.path());
                 args.line = 40;
+                args.demote_line = 40;
                 let result =
                     demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
                 assert_eq!(result.total(), 0);
@@ -2499,6 +2570,7 @@ mod tests {
         args.demote_alts = true;
         args.revive_bench = true;
         args.line = 40;
+        args.demote_line = 40;
         run(args).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
@@ -2508,6 +2580,7 @@ mod tests {
         args.demote_alts = true;
         args.revive_bench = true;
         args.line = 40;
+        args.demote_line = 40;
         args.apply = true;
         args.since = Some("tag".into());
         args.out_db = Some(dir.path().join("audited.db"));
