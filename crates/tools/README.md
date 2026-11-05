@@ -17,6 +17,7 @@
 | 元データから定跡・プリセット・注釈を書き出す（失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
 | 2 つの定跡の局面と手の差分を表示する | [book_mine master diff](docs/book_mine.md#master-diff-2-つの定跡の差分) |
 | 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |
+| main の置換と悪い alt の record への降格（`--apply`・`--replace-curated`・`--demote-alts`） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
 ## ビルドと実行

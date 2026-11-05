@@ -1,7 +1,9 @@
 //! 定跡の元データの読みの値を `book_backprop` の後退解析で伝播し、main が伝播後の 1 位から
 //! どれだけ負けるかを点検し、指定時には main を置き換える。
 
-use super::master_table::{BookMove, MasterPosition, Row, format_master, read_master, read_rows};
+use super::master_table::{
+    self, BookMove, MasterPosition, Row, format_master, parse_master, positions_from_rows,
+};
 use super::refutation::{self, RefutationOutputs};
 use super::rejoin::WeightArgs;
 use super::reply_graph::apply_usi;
@@ -17,10 +19,10 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -31,6 +33,15 @@ pub(super) struct AuditArgs {
     /// 伝播後の 1 位を main にして元データを保存する
     #[arg(long, requires = "since")]
     apply: bool,
+    /// curated の行がある局面でも main を置換する
+    #[arg(long)]
+    replace_curated: bool,
+    /// 悪い alt を record にする (--apply なしでは件数だけ確認)
+    #[arg(long)]
+    demote_alts: bool,
+    /// alt を降格する値の上限 (手番側からの値)
+    #[arg(long, default_value_t = -150, allow_hyphen_values = true)]
+    bad_eval: i32,
     /// 置換の note に付けるタグ (--apply 時は必須)
     #[arg(long)]
     since: Option<String>,
@@ -81,7 +92,7 @@ pub(super) struct AuditArgs {
     priority: u32,
     /// 読みの値の無い手を指した後の、元データに無い相手の手番の局面を、応手が元データの局面に着く手だけで補って伝播する
     /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "apply")]
     fill_replies: bool,
     #[command(flatten)]
     weight: WeightArgs,
@@ -175,6 +186,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         ensure!(!since.trim().is_empty(), "--since を指定してください");
         ensure!(!since.contains(['\t', '\r', '\n']), "since にタブや改行は使えません");
     }
+    ensure!(!(args.apply && args.fill_replies), "--apply と --fill-replies は併用できません");
     let schema = Schema::load(args.schema.as_deref())?;
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
@@ -188,6 +200,8 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
     if let Some(freq) = &args.weight.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
+    let schema_paths = args.schema.as_deref().map(super::schema::paths);
+    inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
     let outputs: Vec<(&str, &Path)> = [
         ("--table", Some(args.table.as_path())),
         ("--out-db", args.out_db.as_deref()),
@@ -202,17 +216,25 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         others.extend(outputs[..i].iter().copied());
         reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
-    let positions = read_master(&args.master)?;
+    let original = std::fs::read(&args.master)?;
+    let mut rows = parse_master(std::str::from_utf8(&original)?)?;
+    master_table::validate(&rows)?;
+    for row in &rows {
+        schema.validate_row(row)?;
+    }
+    let positions =
+        positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
     let (findings, summary, book) = audit(&positions, draws, args.line, args.fill_replies)?;
     let (changes, replacements) = plan_replacements(
-        &args.master,
+        &rows,
         &findings,
         &schema,
         args.since.as_deref().unwrap_or("確認"),
+        args.replace_curated,
     )?;
     write_atomic(&args.table, &format_table(&findings))?;
     if let Some(out) = &args.out_db {
@@ -229,10 +251,20 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
             priority: args.priority,
             weight: &args.weight,
         };
-        print!("{}", refutation::write_outputs(&args.master, &positions.0, &book, &outputs)?);
+        print!("{}", refutation::write_outputs(&rows, &positions.0, &book, &outputs)?);
     }
-    if args.apply && !changes.is_empty() {
-        write_replacements(&args.master, &changes)?;
+    rewrite_rows(&mut rows, &changes);
+    let demotions = if args.demote_alts {
+        Some(demote_alts(&mut rows, &positions.0, &book, &schema, &args)?)
+    } else {
+        None
+    };
+    master_table::validate(&rows)?;
+    if args.apply && (!changes.is_empty() || demotions.as_ref().is_some_and(|d| d.total() > 0)) {
+        write_master(&args.master, &original, &rows)?;
+    }
+    if let Some(demotions) = demotions {
+        println!("{}", demotions.format());
     }
     println!(
         "{}: {}",
@@ -250,6 +282,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
 struct ReplacementSummary {
     replaced: BySide,
     curated: usize,
+    skipped_curated: usize,
     protected: usize,
     eval: usize,
     missing: usize,
@@ -258,10 +291,11 @@ struct ReplacementSummary {
 impl ReplacementSummary {
     fn format(&self) -> String {
         format!(
-            "置換する局面: 先手番 {}・後手番 {} (うち curated {}), source が置換対象でない局面 {}, 1 位が伸ばしていない手なので替えなかった局面 {}, 対象行が無いか main・alt でない局面 {}",
+            "置換する局面: 先手番 {}・後手番 {} (うち curated {}), curated なので替えなかった局面 {}, source が置換対象でない局面 {}, 1 位が伸ばしていない手なので替えなかった局面 {}, 対象行が無いか main・alt でない局面 {}",
             self.replaced[0],
             self.replaced[1],
             self.curated,
+            self.skipped_curated,
             self.protected,
             self.eval,
             self.missing
@@ -269,35 +303,34 @@ impl ReplacementSummary {
     }
 }
 
+type Changes = BTreeMap<(String, String), Row>;
+
 fn plan_replacements(
-    path: &Path,
+    rows: &[Row],
     findings: &[Finding],
     schema: &Schema,
     since: &str,
-) -> Result<(BTreeMap<usize, Row>, ReplacementSummary)> {
-    let candidates: BTreeMap<_, _> = findings.iter().map(|f| (f.key.as_str(), f)).collect();
-    let mut selected = BTreeMap::new();
-    for row in read_rows(BufReader::new(std::fs::File::open(path)?))? {
-        let (at, row) = row?;
-        schema.validate_row(&row).with_context(|| format!("元データの {at} 行目"))?;
-        if let Some(f) = candidates.get(row.get("key"))
-            && row.get("role") != "record"
-            && (row.get("move") == f.main.mv || row.get("move") == f.best.mv)
-        {
-            selected.insert((row.get("key").to_owned(), row.get("move").to_owned()), (at, row));
-        }
-    }
+    replace_curated: bool,
+) -> Result<(Changes, ReplacementSummary)> {
+    let selected: BTreeMap<_, _> =
+        rows.iter().map(|row| ((row.get("key"), row.get("move")), row)).collect();
+    let curated_keys: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| row.get("tier") == "curated")
+        .map(|row| row.get("key"))
+        .collect();
     let mut changes = BTreeMap::new();
     let mut summary = ReplacementSummary::default();
-    // 伝播は main・alt 全手の最大値なので、役割を替えても値は変わらず、再伝播は不要。
+    // 役割の交換では局面の値は変わらない。assign_outputs の同値 -1 補正だけは
+    // 手の間を移るので、再点検で差 1 が出ることがある。
     for f in findings {
         if f.best.origin == Origin::Eval {
             summary.eval += 1;
             continue;
         }
-        let main = selected.get(&(f.key.clone(), f.main.mv.clone()));
-        let best = selected.get(&(f.key.clone(), f.best.mv.clone()));
-        let (Some((main_at, main)), Some((best_at, best))) = (main, best) else {
+        let main = selected.get(&(f.key.as_str(), f.main.mv.as_str()));
+        let best = selected.get(&(f.key.as_str(), f.best.mv.as_str()));
+        let (Some(&main), Some(&best)) = (main, best) else {
             summary.missing += 1;
             continue;
         };
@@ -307,6 +340,10 @@ fn plan_replacements(
         }
         if !schema.replaceable(main.get("source")) {
             summary.protected += 1;
+            continue;
+        }
+        if !replace_curated && curated_keys.contains(f.key.as_str()) {
+            summary.skipped_curated += 1;
             continue;
         }
         let tier = main.get("tier");
@@ -338,33 +375,119 @@ fn plan_replacements(
             );
             schema.validate_row(row)?;
         }
-        changes.insert(*main_at, old);
-        changes.insert(*best_at, new);
+        changes.insert((f.key.clone(), f.main.mv.clone()), old);
+        changes.insert((f.key.clone(), f.best.mv.clone()), new);
         summary.replaced[usize::from(f.key.split_whitespace().nth(1) == Some("w"))] += 1;
         summary.curated += usize::from(curated);
     }
     Ok((changes, summary))
 }
 
-fn write_replacements(path: &Path, changes: &BTreeMap<usize, Row>) -> Result<()> {
-    write_book_atomic(path, |mut writer| {
-        let mut reader = BufReader::new(std::fs::File::open(path)?);
-        let mut line = String::new();
-        let mut at = 0;
-        while reader.read_line(&mut line)? != 0 {
-            at += 1;
-            if let Some(row) = changes.get(&at) {
-                let text = format_master(std::slice::from_ref(row));
-                let (_, body) = text.split_once('\n').context("元データの見出しがありません")?;
-                writer.write_all(body.as_bytes())?;
-            } else {
-                writer.write_all(line.as_bytes())?;
-            }
-            line.clear();
+fn rewrite_rows(rows: &mut [Row], changes: &Changes) {
+    for row in rows {
+        if let Some(updated) = changes.get(&(row.get("key").into(), row.get("move").into())) {
+            *row = updated.clone();
         }
-        writer.into_inner().map_err(|e| e.into_error())?;
-        Ok(())
-    })
+    }
+}
+
+fn write_master(path: &Path, original: &[u8], rows: &[Row]) -> Result<()> {
+    master_table::validate(rows)?;
+    let text = format_master(rows);
+    ensure!(std::fs::read(path)? == original, "元データが点検中に変更されたため保存しません");
+    write_atomic(path, &text)
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct DemotionSummary {
+    bad: BySide,
+    gap: BySide,
+    unknown: usize,
+    protected: usize,
+}
+
+impl DemotionSummary {
+    fn total(&self) -> usize {
+        self.bad.iter().chain(&self.gap).sum()
+    }
+
+    fn format(&self) -> String {
+        format!(
+            "record に降格する alt: 先手番 {}・後手番 {} / 理由 (a) 値: 先手番 {}・後手番 {} / 理由 (b) 差: 先手番 {}・後手番 {} / 値が不明 {} / source が保護対象 {}",
+            self.bad[0] + self.gap[0],
+            self.bad[1] + self.gap[1],
+            self.bad[0],
+            self.bad[1],
+            self.gap[0],
+            self.gap[1],
+            self.unknown,
+            self.protected
+        )
+    }
+}
+
+fn demote_alts(
+    rows: &mut [Row],
+    positions: &BTreeMap<String, MasterPosition>,
+    book: &AuditedBook,
+    schema: &Schema,
+    args: &AuditArgs,
+) -> Result<DemotionSummary> {
+    let mut indices: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        indices.entry(row.get("key")).or_default().push(i);
+    }
+    let groups: Vec<_> = positions
+        .iter()
+        .map(|(key, position)| {
+            (key, position, indices.get(key.as_str()).cloned().unwrap_or_default())
+        })
+        .collect();
+    drop(indices);
+    let mut summary = DemotionSummary::default();
+    for ((key, position, indices), known) in groups.into_iter().zip(&book.known) {
+        let moves = audited_moves(&book.graph, key, position, known)?;
+        let values: BTreeMap<_, _> = moves
+            .iter()
+            .flatten()
+            .map(|m| (m.mv.as_str(), i64::from(m.value) + i64::from(m.tie_lowered)))
+            .collect();
+        let best = values.values().copied().max();
+        let side = usize::from(key.split_whitespace().nth(1) == Some("w"));
+        for i in indices {
+            let row = &mut rows[i];
+            if row.get("role") != "alt" {
+                continue;
+            }
+            let Some(&value) = values.get(row.get("move")) else {
+                summary.unknown += 1;
+                continue;
+            };
+            let best = best.context("内部エラー: 1 位の値がありません")?;
+            let gap = best - value;
+            let by_gap = gap >= i64::from(args.line);
+            let by_bad = value <= i64::from(args.bad_eval) && best > i64::from(args.bad_eval);
+            if !by_gap && !by_bad {
+                continue;
+            }
+            if !schema.replaceable(row.get("source")) {
+                summary.protected += 1;
+                continue;
+            }
+            row.set("role", "record".into());
+            let note = row.get("note");
+            let since = args.since.as_deref().unwrap_or("確認");
+            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から record (1 位との差 {gap} / 値 {value})",
+                if note.is_empty() { "" } else { "。" }));
+            schema.validate_row(row)?;
+            if by_gap {
+                summary.gap[side] += 1;
+            } else {
+                summary.bad[side] += 1;
+            }
+        }
+    }
+    Ok(summary)
 }
 
 /// 出力先が入力のどれかと同じファイルなら止める (出力の書き出しで入力を壊さないため)。
@@ -1413,6 +1536,38 @@ mod tests {
         assert!(error.to_string().contains("正規の SFEN"), "{error}");
     }
 
+    fn test_args(dir: &Path) -> AuditArgs {
+        AuditArgs {
+            master: dir.join("moves.tsv"),
+            apply: false,
+            replace_curated: true,
+            demote_alts: false,
+            bad_eval: -150,
+            since: None,
+            schema: None,
+            table: dir.join("audit.tsv"),
+            line: 1,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            out_db: None,
+            refutation_table: None,
+            refutation_margin: 1,
+            enqueue_out: None,
+            refutation_depth: 2,
+            refutation_max: None,
+            priority: 100,
+            fill_replies: false,
+            weight: WeightArgs {
+                opp_freq: None,
+                min_games: 3,
+                max_ply: 80,
+                weight_floor: 1e-5,
+                min_weight: 0.0,
+            },
+            threads: 1,
+        }
+    }
+
     fn replacement_fixture() -> String {
         let text = master(&[
             (ROOT, "5i6h", "main", "10"),
@@ -1434,11 +1589,19 @@ mod tests {
         std::fs::write(&path, &text).unwrap();
         let (findings, _) = run_audit(&text, 40);
         assert_eq!(findings.len(), 1);
-        let (changes, summary) =
-            plan_replacements(&path, &findings, &Schema::default(), "tag").unwrap();
+        let (changes, summary) = plan_replacements(
+            &parse_master(&text).unwrap(),
+            &findings,
+            &Schema::default(),
+            "tag",
+            true,
+        )
+        .unwrap();
         assert_eq!(summary.replaced, [1, 0]);
         assert_eq!(summary.curated, 1);
-        write_replacements(&path, &changes).unwrap();
+        let mut rewritten = parse_master(&text).unwrap();
+        rewrite_rows(&mut rewritten, &changes);
+        write_master(&path, text.as_bytes(), &rewritten).unwrap();
         let after = std::fs::read_to_string(path).unwrap();
         let original = super::super::master_table::parse_master(&text).unwrap();
         let rows = super::super::master_table::parse_master(&after).unwrap();
@@ -1466,8 +1629,14 @@ mod tests {
         std::fs::write(&path, &text).unwrap();
         let (mut findings, _) = run_audit(&text, 40);
         findings[0].best.origin = Origin::Eval;
-        let (changes, summary) =
-            plan_replacements(&path, &findings, &Schema::default(), "tag").unwrap();
+        let (changes, summary) = plan_replacements(
+            &parse_master(&text).unwrap(),
+            &findings,
+            &Schema::default(),
+            "tag",
+            true,
+        )
+        .unwrap();
         assert!(changes.is_empty());
         assert_eq!(summary.eval, 1);
         findings[0].best.origin = Origin::Propagated;
@@ -1478,17 +1647,271 @@ mod tests {
         )
         .unwrap();
         let schema = Schema::load(Some(dir.path())).unwrap();
-        let (changes, summary) = plan_replacements(&path, &findings, &schema, "tag").unwrap();
+        let (changes, summary) =
+            plan_replacements(&parse_master(&text).unwrap(), &findings, &schema, "tag", true)
+                .unwrap();
         assert!(changes.is_empty());
         assert_eq!(summary.protected, 1);
         for mv in ["5i5h", "missing"] {
             findings[0].best.mv = mv.into();
-            let (changes, summary) =
-                plan_replacements(&path, &findings, &Schema::default(), "tag").unwrap();
+            let (changes, summary) = plan_replacements(
+                &parse_master(&text).unwrap(),
+                &findings,
+                &Schema::default(),
+                "tag",
+                true,
+            )
+            .unwrap();
             assert!(changes.is_empty());
             assert_eq!(summary.missing, 1);
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    }
+
+    #[test]
+    fn curated_rows_require_opt_in_even_when_record() {
+        for index in [0, 2] {
+            let mut rows = parse_master(&replacement_fixture()).unwrap();
+            rows[0].set("tier", "wide".into());
+            rows[index].set("tier", "curated".into());
+            let (findings, _) = run_audit(&format_master(&rows), 40);
+            let (changes, summary) =
+                plan_replacements(&rows, &findings, &Schema::default(), "tag", false).unwrap();
+            assert!(changes.is_empty());
+            assert_eq!(summary.skipped_curated, 1);
+            let (changes, summary) =
+                plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+            assert_eq!(changes.len(), 2);
+            assert_eq!(summary.replaced, [1, 0]);
+        }
+    }
+
+    #[test]
+    fn rewrite_checks_concurrent_changes_and_normalizes_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        let original = replacement_fixture().replace('\n', "\r\n");
+        let rows = parse_master(&original).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        write_master(&path, original.as_bytes(), &rows).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format_master(&rows));
+        let concurrent = format!("{} ", format_master(&rows));
+        std::fs::write(&path, &concurrent).unwrap();
+        assert!(write_master(&path, original.as_bytes(), &rows).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), concurrent);
+        let mut invalid = rows.clone();
+        invalid[1].set("role", "main".into());
+        assert!(write_master(&path, concurrent.as_bytes(), &invalid).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), concurrent);
+    }
+
+    #[test]
+    fn multiple_replacements_include_white_and_flipped_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows = parse_master(&replacement_fixture()).unwrap();
+        let black_rows = rows.clone();
+        for row in &black_rows {
+            let mut flipped = row.clone();
+            let key = rshogi_book::flipped_key(&format!("{} 1", row.get("key"))).unwrap();
+            flipped.set("key", strip_ply(&key).into());
+            let mv: String = row
+                .get("move")
+                .chars()
+                .map(|c| match c {
+                    '1'..='9' => char::from(b'0' + 10 - (c as u8 - b'0')),
+                    'a'..='i' => char::from(b'a' + b'i' - c as u8),
+                    _ => c,
+                })
+                .collect();
+            flipped.set("move", mv);
+            rows.push(flipped);
+        }
+        std::fs::write(dir.path().join("moves.tsv"), format_master(&rows)).unwrap();
+        let mut args = test_args(dir.path());
+        args.apply = true;
+        args.since = Some("tag".into());
+        args.line = 40;
+        run(args).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap();
+        assert!(run_audit(&text, 40).0.is_empty());
+        let updated = parse_master(&text).unwrap();
+        assert_eq!(updated.iter().filter(|r| r.get("note").contains("alt から main")).count(), 2);
+
+        let text = master(&[
+            (ROOT, "5i6h", "main", "-100"),
+            (ROOT, "5i4h", "alt", ""),
+            (A_FLIPPED, "5i5h", "main", "30"),
+        ]);
+        let (findings, _) = run_audit(&text, 40);
+        assert_eq!(findings.len(), 1);
+        let mut rows = parse_master(&text).unwrap();
+        let (changes, _) =
+            plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+        rewrite_rows(&mut rows, &changes);
+        assert_eq!(rows[1].get("role"), "main");
+        assert!(run_audit(&format_master(&rows), 40).0.is_empty());
+    }
+
+    #[test]
+    fn demotions_use_values_before_tie_adjustment_and_keep_other_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (-140, -150, 40, "record", [1, 0], [0, 0]),
+            (100, 60, 40, "record", [0, 0], [1, 0]),
+            (100, 100, 1, "alt", [0, 0], [0, 0]),
+            (-200, -200, 1, "alt", [0, 0], [0, 0]),
+            (-200, -210, 40, "alt", [0, 0], [0, 0]),
+            (-200, -240, 40, "record", [0, 0], [1, 0]),
+        ];
+        for (main, alt, line, role, bad, gap) in cases {
+            let text = master(&[
+                (ROOT, "5i6h", "main", &main.to_string()),
+                (ROOT, "5i4h", "alt", &alt.to_string()),
+                (ROOT, "5i5h", "record", "-999"),
+                (ROOT, "5i4i", "alt", ""),
+            ]);
+            let positions = parse_master_rows(text.as_bytes()).unwrap();
+            let (_, _, book) = audit(&positions, DrawValues::both(0), line, false).unwrap();
+            let original = parse_master(&text).unwrap();
+            let mut rows = original.clone();
+            let mut args = test_args(dir.path());
+            args.line = line;
+            args.since = Some("tag".into());
+            let result =
+                demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+            assert_eq!(result.bad, bad);
+            assert_eq!(result.gap, gap);
+            assert_eq!(result.unknown, 1);
+            assert_eq!(rows[1].get("role"), role);
+            assert_eq!(rows[0], original[0]);
+            assert_eq!(rows[2..], original[2..]);
+            for column in COLUMNS.into_iter().filter(|c| !["role", "note"].contains(c)) {
+                assert_eq!(rows[1].get(column), original[1].get(column));
+            }
+            if role == "record" {
+                assert_eq!(
+                    rows[1].get("note"),
+                    format!(
+                        "tag: 伝播後の値が悪いので alt から record (1 位との差 {} / 値 {alt})",
+                        main - alt
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn demotions_keep_protected_sources_and_new_main() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::schema::test_schema(dir.path());
+        std::fs::write(
+            dir.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\nread\t保護\t0\n",
+        )
+        .unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        let text = replacement_fixture();
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        let mut args = test_args(dir.path());
+        args.line = 40;
+        args.since = Some("tag".into());
+        let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
+        assert_eq!(result.total(), 0);
+        let (changes, _) =
+            plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+        rewrite_rows(&mut rows, &changes);
+        let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
+        assert_eq!(result.protected, 1);
+        assert_eq!(rows[0].get("role"), "alt");
+        let result =
+            demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+        assert_eq!(result.gap, [1, 0]);
+        assert_eq!(rows[0].get("role"), "record");
+        assert_eq!(rows[1].get("role"), "main");
+    }
+
+    #[test]
+    fn demote_only_apply_keeps_dry_run_and_outputs_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = master(&[
+            (ROOT, "5i6h", "main", "100"),
+            (ROOT, "5i4h", "alt", "60"),
+            ("4k4/9/9/9/9/9/9/9/4K4 w -", "5a6b", "main", "100"),
+            ("4k4/9/9/9/9/9/9/9/4K4 w -", "5a4b", "alt", "60"),
+        ]);
+        let path = dir.path().join("moves.tsv");
+        std::fs::write(&path, &text).unwrap();
+        let mut args = test_args(dir.path());
+        args.demote_alts = true;
+        args.line = 40;
+        run(args).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        let mut args = test_args(dir.path());
+        args.demote_alts = true;
+        args.line = 40;
+        args.apply = true;
+        args.since = Some("tag".into());
+        args.out_db = Some(dir.path().join("audited.db"));
+        let summary =
+            demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+        assert_eq!(summary.gap, [1, 1]);
+        run(args).unwrap();
+        let updated = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(updated, rows);
+        let db = std::fs::read_to_string(dir.path().join("audited.db")).unwrap();
+        assert!(db.contains("5i4h none 60"));
+        assert!(db.contains("5a4b none 60"));
+    }
+
+    #[test]
+    fn schema_outputs_and_fill_replies_apply_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::schema::test_schema(dir.path());
+        std::fs::write(
+            dir.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\nread\t読み\t1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("moves.tsv"), replacement_fixture()).unwrap();
+        let mut args = test_args(dir.path());
+        args.schema = Some(dir.path().into());
+        run(args).unwrap();
+        for path in super::super::schema::paths(dir.path()) {
+            let original = std::fs::read(&path).unwrap();
+            for output in 0..4 {
+                let mut args = test_args(dir.path());
+                args.schema = Some(dir.path().into());
+                match output {
+                    0 => args.table = path.clone(),
+                    1 => args.out_db = Some(path.clone()),
+                    2 => args.refutation_table = Some(path.clone()),
+                    _ => args.enqueue_out = Some(path.clone()),
+                }
+                let error = run(args).unwrap_err();
+                assert!(format!("{error:#}").contains("同じです"), "{error:#}");
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            }
+        }
+        let mut args = test_args(dir.path());
+        args.apply = true;
+        args.since = Some("tag".into());
+        args.fill_replies = true;
+        assert!(run(args).unwrap_err().to_string().contains("--fill-replies"));
+        for apply in [false, true] {
+            let mut args = test_args(dir.path());
+            args.apply = apply;
+            args.since = Some("tag".into());
+            args.schema = Some(dir.path().into());
+            let invalid = replacement_fixture().replace("\tread\t", "\tunregistered\t");
+            std::fs::write(&args.master, &invalid).unwrap();
+            assert!(run(args).is_err());
+            assert_eq!(std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap(), invalid);
+        }
     }
 
     #[test]
@@ -1502,30 +1925,9 @@ mod tests {
         ]);
         std::fs::write(&master_path, &text).unwrap();
         let args = |table: &str, out_db: Option<&str>| AuditArgs {
-            master: master_path.clone(),
-            apply: false,
-            since: None,
-            schema: None,
             table: dir.path().join(table),
-            line: 1,
-            draw_value_black: -70,
-            draw_value_white: 0,
             out_db: out_db.map(|p| dir.path().join(p)),
-            refutation_table: None,
-            refutation_margin: 1,
-            enqueue_out: None,
-            refutation_depth: 2,
-            refutation_max: None,
-            priority: 100,
-            fill_replies: false,
-            weight: WeightArgs {
-                opp_freq: None,
-                min_games: 3,
-                max_ply: 80,
-                weight_floor: 1e-5,
-                min_weight: 0.0,
-            },
-            threads: 1,
+            ..test_args(dir.path())
         };
         assert!(run(args("moves.tsv", None)).is_err());
         assert!(run(args("audit.tsv", Some("audit.tsv"))).is_err());
@@ -1577,6 +1979,6 @@ mod tests {
         run(apply).unwrap();
         let updated = std::fs::read_to_string(&master_path).unwrap();
         assert_ne!(updated, text);
-        assert_eq!(read_master(&master_path).unwrap().0[ROOT].moves[0].mv, "5i4h");
+        assert_eq!(master_table::read_master(&master_path).unwrap().0[ROOT].moves[0].mv, "5i4h");
     }
 }
