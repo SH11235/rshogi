@@ -9,6 +9,7 @@ mod check;
 mod cycles;
 mod export;
 mod file_lock;
+mod hold_early;
 mod journal;
 mod master_table;
 mod model;
@@ -149,6 +150,8 @@ enum MasterCommand {
     Add(add::AddArgs),
     /// 読みのログから追加候補を作る
     AddReads(add_reads::AddReadsArgs),
+    /// 序盤の main の替わりを保留に戻す
+    HoldEarly(hold_early::HoldEarlyArgs),
     /// 元データから定跡・プリセット・注釈を書き出す
     Export(export::ExportArgs),
     /// 2 つの定跡の局面と手の差分を表示する
@@ -172,6 +175,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
     match args.command {
         MasterCommand::Add(args) => add::run(args),
         MasterCommand::AddReads(args) => add_reads::run(args),
+        MasterCommand::HoldEarly(args) => hold_early::run(args),
         MasterCommand::Export(args) => export::run(args),
         MasterCommand::Diff(args) => book_diff::run(args),
         MasterCommand::Validate(args) => master_table::run_validate(args),
