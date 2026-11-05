@@ -918,8 +918,8 @@ fn rewrite_rows<'a>(
             continue;
         };
         ensure!(
-            row.get("role") != "record",
-            "内部エラー: record の行です: {} {}",
+            !super::master_table::is_unplayed(row.get("role")),
+            "内部エラー: 指さない行 (record・bench) です: {} {}",
             pair.0,
             pair.1
         );

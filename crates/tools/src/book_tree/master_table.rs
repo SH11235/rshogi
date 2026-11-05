@@ -20,7 +20,11 @@ pub(super) const COLUMNS: [&str; 13] = [
     "since",
     "note",
 ];
-pub(super) const ROLES: [&str; 3] = ["main", "alt", "record"];
+pub(super) const ROLES: [&str; 4] = ["main", "alt", "bench", "record"];
+
+pub(super) fn is_unplayed(role: &str) -> bool {
+    matches!(role, "bench" | "record")
+}
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Row(Vec<String>);
 impl Row {
@@ -129,7 +133,7 @@ pub(super) fn test_line(fields: &[(&str, String)]) -> String {
     test_row(fields).0.join("\t")
 }
 
-/// 局面の main・alt の手。record は指さないので持たない。
+/// 局面の main・alt の手。bench・record は指さないので持たない。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BookMove {
     pub mv: String,
@@ -174,7 +178,7 @@ pub(super) fn format_master(rows: &[Row]) -> String {
     text
 }
 
-/// 局面ごとに main・alt の手を main を先頭に集め、record は数だけ返す。
+/// 局面ごとに main・alt の手を main を先頭に集め、bench・record は数だけ返す。
 pub(super) fn read_master(path: &Path) -> Result<(BTreeMap<String, MasterPosition>, usize)> {
     let file =
         std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
@@ -196,7 +200,7 @@ pub(super) fn positions_from_rows(
     for row in rows {
         let (at, row) = row?;
         let role = row.get("role");
-        if role == "record" {
+        if is_unplayed(role) {
             records += 1;
             continue;
         }
@@ -265,7 +269,7 @@ pub(super) fn validate(rows: &[Row]) -> Result<()> {
         let curated: Vec<_> =
             entries.iter().copied().filter(|r| r.get("tier") == "curated").collect();
         for subset in [entries, curated] {
-            if subset.iter().any(|r| r.get("role") != "record") {
+            if subset.iter().any(|r| !is_unplayed(r.get("role"))) {
                 ensure!(
                     subset.iter().filter(|r| r.get("role") == "main").count() == 1,
                     "{key}: main がちょうど 1 つではありません"
@@ -409,7 +413,7 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
         }
         let role = row.get("role");
         if !ROLES.contains(&role) {
-            error("role が不正です (main/alt/record)");
+            error("role が不正です (main/alt/bench/record)");
         }
         let tier = row.get("tier");
         if !tiers.contains_key(tier) {
@@ -540,6 +544,17 @@ mod tests {
             .into_iter()
             .map(|(_, message)| message)
             .collect()
+    }
+
+    #[test]
+    fn bench_is_valid_and_unplayed() {
+        let rows = [row("7g7f", "main", "wide"), row("2g2f", "bench", "wide")];
+        assert!(errors(&rows).is_empty());
+        validate(&rows).unwrap();
+        let (positions, unplayed) = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        assert_eq!(unplayed, 1);
+        assert_eq!(positions.values().next().unwrap().moves.len(), 1);
+        assert!(validate(&[row("7g7f", "alt", "wide"), row("2g2f", "bench", "wide")]).is_err());
     }
 
     #[test]
@@ -728,7 +743,7 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(
             report.summary,
-            "positions=1, moves=3\ntier curated: positions=1, moves=1\ntier wide: positions=1, moves=2\nrole alt: 1\nrole main: 1\nrole record: 1\nsource 自由な出典: 3\n"
+            "positions=1, moves=3\ntier curated: positions=1, moves=1\ntier wide: positions=1, moves=2\nrole alt: 1\nrole bench: 0\nrole main: 1\nrole record: 1\nsource 自由な出典: 3\n"
         );
         assert!(errors(&[row("7g7f", "record", "curated")]).is_empty());
     }

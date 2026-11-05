@@ -102,7 +102,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     let edges = graph::continuations(&rows)?;
     let active = rows
         .iter()
-        .filter(|r| r.get("role") != "record")
+        .filter(|r| !super::master_table::is_unplayed(r.get("role")))
         .map(|r| (r.get("key").into(), r.get("move").into()))
         .collect();
     let depths = graph::depths(&edges, &active);
@@ -135,7 +135,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     for (key, entries) in &groups {
         let selectable: Vec<_> = entries
             .iter()
-            .filter(|r| r.get("role") != "record")
+            .filter(|r| !super::master_table::is_unplayed(r.get("role")))
             .map(|r| r.get("move"))
             .collect();
         if selectable.len() >= 2 {

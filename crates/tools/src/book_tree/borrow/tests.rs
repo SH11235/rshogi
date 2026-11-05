@@ -897,6 +897,26 @@ fn a_subtree_without_readings_is_valued_without_a_journal() {
     let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
     let root_row = rows.iter().find(|r| r.get("key") == ROOT).unwrap();
     assert_eq!((root_row.get("move"), root_row.get("evals")), ("5i5h", "-70"));
+    let mut rows = rows;
+    for row in &mut rows {
+        if row.get("key") == ROOT {
+            row.set("role", "bench".into());
+        }
+    }
+    std::fs::write(&master, crate::book_tree::master_table::format_master(&rows)).unwrap();
+    let args = ValueArgs::for_test(
+        d.join("cut"),
+        d.join("absent.jsonl"),
+        master.clone(),
+        d.join("bench"),
+        true,
+    );
+    super::value::run(args).unwrap();
+    let updated = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+    assert_eq!(
+        updated.iter().find(|r| r.get("key") == ROOT).unwrap(),
+        rows.iter().find(|r| r.get("key") == ROOT).unwrap()
+    );
 }
 
 #[test]
@@ -966,6 +986,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         lineage: "book:big.db@00000000",
         schema: &schema,
         replace_curated: false,
+        revive_bench: false,
     };
     let draws = DrawValues {
         black: -70,
