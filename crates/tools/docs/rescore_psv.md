@@ -215,8 +215,8 @@ preset に足すときは、tools の `layerstack-arch` と、preset と同じ�
 | `--dlshogi-onnx-model` | — | dlshogi 系 ONNX モデルパス |
 | `--onnx-model` | — | AobaZero 系 ONNX モデルパス（`aobazero-onnx` feature） |
 | `--onnx-batch-size` | 1024 | 推論バッチサイズ（チューニング指針参照） |
-| `--onnx-gpu-id` | 0 | GPU 番号（複数 GPU 時の選択。`-1` で CPU 推論） |
-| `--onnx-sessions` | 2 | GPU 推論の多重化数（1〜4、CPU 推論では常に 1）。VRAM は増える（チューニング指針参照） |
+| `--onnx-gpu-id` | 0 | GPU 番号。`0,1` のようにカンマ区切りで複数の GPU を使う（レシピ「複数 GPU で推論する」参照）。`-1` で CPU 推論（他の番号と併用不可） |
+| `--onnx-sessions` | 2 | GPU 1 つあたりの推論の多重化数（1〜4、CPU 推論では常に 1）。VRAM は増える（チューニング指針参照） |
 | `--onnx-tensorrt` | false | TensorRT EP（FP16）を使用 |
 | `--onnx-tensorrt-cache` | — | TensorRT エンジンキャッシュ保存先（実質必須） |
 | `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール（正の有限値） |
@@ -262,7 +262,7 @@ preset に足すときは、tools の `layerstack-arch` と、preset と同じ�
   出力がバッチサイズ / セッション数に依らず sha256 一致することを確認済み
   （一般保証ではないので、厳密な再現性が要る場合は同一設定で流し切る）。
   ホスト RAM 側も特徴量バッファがバッチサイズ × セッション数に比例して増える。
-  バッファは 2 × sessions slot 確保され、1 slot = batch × 1 局面の特徴量サイズ
+  バッファは 2 × 全セッション数（GPU の数 × `--onnx-sessions`）slot 確保され、1 slot = batch × 1 局面の特徴量サイズ
   （dlshogi 系は 9,639 f32 ≈ 38 KiB）なので、既定 1024 × sessions 2 では概算
   約 150 MiB。CPU 推論（`--onnx-gpu-id -1`）や省メモリ環境では 256/512 も
   含めて計測して選ぶ。
@@ -295,6 +295,43 @@ ONNX モードでは、セッション（TensorRT ではモデルの解析とエ
 ときは処理中だったファイルの出力を消してから再実行する。置き換えの判定は
 モデルの本体ファイルのパス・サイズ・mtime で行う（完了マーカーも同じ）ので、外部
 データ（`.onnx.data`）だけを置き換えた場合は検出しない。
+
+### 複数 GPU で推論する（`--onnx-gpu-id 0,1`）
+
+```bash
+rescore_psv --input "data/shard_*.bin" --output-dir rescored/ \
+  --dlshogi-onnx-model model.onnx --onnx-gpu-id 0,1 \
+  --onnx-tensorrt --onnx-tensorrt-cache trt_cache/
+```
+
+- GPU ごとに `--onnx-sessions` 本のセッションを作る（上の例は既定 2 で計 4 本）。バッチは
+  空いたセッションが次を取るので、速さの違う GPU を混ぜても遅い方の速さに揃うわけではない。
+  ただし出力はバッチの通し番号の順に書くので、遅い GPU が処理中のバッチより後の結果は書けずに
+  バッファ（セッション数の 2 倍のバッチ）に溜まる。速さがおよそ 3 倍以上違う GPU を混ぜると、
+  バッファが埋まって速い GPU が待つ。番号を 1 つだけ指定したときは、その GPU だけで推論する。
+- 複数 GPU の動作は、GPU が 1 つの機械で同じ番号を重ねる指定（下の `0,0`）でだけ確かめている。
+  GPU 0 以外のデバイスや、複数の GPU を積んだ機械での実行は確かめていない。
+- 同じ番号を重ねて書ける（`--onnx-gpu-id 0,0` は GPU 0 に 2 × `--onnx-sessions` 本）。GPU が
+  1 つの機械で、複数 GPU の配り方を試すのに使える。
+- 出力の順序: GPU の数・割り当てによらず、GPU 1 つのときと同じ（バッチの通し番号の順に書く）。
+- 推論の値: 複数 GPU で GPU 1 つのときと値が一致するかは確かめていない（一般保証ではない）。
+  バッチの割り当ては実行ごとに変わるので、GPU ごとに推論の値がずれれば、同じ入力でも実行の
+  たびに出力がずれうる。特に機種の違う GPU を混ぜると、TensorRT のエンジンや CUDA の
+  カーネルが GPU ごとに違うため、最下位 bit が変わりうる。値の再現性が要るなら GPU 1 つで流す。
+- 完了マーカーは GPU の構成（`--onnx-gpu-id`・`--onnx-sessions`）を記録しない。構成を変えて
+  再実行しても完了済みの出力はそのまま再利用し、途中の出力は続きから書く。新しい構成で
+  作り直したいときは、出力と `<出力名>.done`（`--out-scores` では `<出力名>.in-progress` も）を消してから実行する。
+- TensorRT のエンジンキャッシュは、全 GPU で 1 つの `--onnx-tensorrt-cache` を共有してよい。
+  ONNX Runtime の TensorRT EP はキャッシュのファイル名に GPU の compute capability を付ける
+  （`..._fp16_sm86.engine` など）ので、世代の違う GPU は別のファイルになる。compute capability が
+  同じ GPU は同じファイルを使い、最初に推論した GPU で作ったエンジンを他の GPU も読む（各
+  `--onnx-gpu-id` の項目の 1 本目のセッションが、指定した順に 1 本ずつ最初のバッチを推論するので、
+  キャッシュの書き込みは競合しない。エンジンが無いときは、各 GPU の 1 本目のエンジン作りが順に走るので、作り終わるまでの時間は GPU の数だけ延びる）。compute capability が同じでも機種が違う GPU（メモリの
+  量が違うなど）では、TensorRT は他の機種で作ったエンジンを推奨しておらず、読めないこともある。
+  その場合は GPU ごとに別の実行に分け、それぞれ別のキャッシュディレクトリを渡す。
+- GPU を増やすと、特徴量を作る CPU 側（`--threads`）が次に律速になりうる。GPU 使用率が上がらない
+  ときは `RESCORE_PHASE_TIMING=1` で `build` の割合を見る。
+- `--ort-profile` は全体の 1 本目のセッション（最初の GPU）だけを記録する。
 
 ### score sidecar 出力（`--out-scores`）
 
@@ -463,7 +500,9 @@ LayerStacks NNUE では `--ls-bucket-mode` が必須です。`progresskpabs` は
 
 - 全モードでピークメモリは入力件数に非依存（NNUE / 探索 / 外部エンジンは
   100 万件チャンク、ONNX はバッチ単位の固定 slot パイプライン）。
-- **ONNX モード**: 出力は `--onnx-sessions` / `--threads` に依存せず bit 一致。1 回の
+- **ONNX モード**: 出力は `--onnx-sessions` / `--threads` に依存せず bit 一致（GPU 1 つでの確認。
+  複数 GPU での値の一致は未確認で、機種の違う GPU を混ぜると最下位 bit が変わりうる。
+  レシピ「複数 GPU で推論する」参照）。1 回の
   実行に渡すファイルの分け方にも依存しない（CPU EP と、DL水匠・ONNX Runtime 1.24.2・
   TensorRT 10.16 FP16・RTX 3080 Ti の CUDA / TensorRT EP で確認）。TensorRT は
   同一エンジンキャッシュ（warm）での実行が bit 再現の基準（cold の初回ビルドや、エンジンを

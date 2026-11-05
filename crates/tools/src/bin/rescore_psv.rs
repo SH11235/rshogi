@@ -261,12 +261,18 @@ struct Cli {
     #[arg(long, default_value_t = 1024)]
     onnx_batch_size: usize,
 
-    /// ONNX推論の GPU ID（-1=CPU）
-    #[arg(long, default_value_t = 0)]
-    onnx_gpu_id: i32,
+    /// ONNX推論の GPU ID（-1=CPU）。`0,1` のようにカンマ区切りで複数の GPU を指定すると、
+    /// GPU ごとに `--onnx-sessions` 本のセッションを作り、空いたセッションが次のバッチを取る。
+    #[arg(
+        long,
+        default_value = "0",
+        value_parser = parse_onnx_gpu_ids,
+        allow_negative_numbers = true
+    )]
+    onnx_gpu_id: OnnxGpuIds,
 
-    /// ONNX推論セッション数（GPU 推論時のみ有効、CPU 推論では常に 1）。
-    /// 2 以上で複数セッション round-robin により H2D/D2H 転送と compute をオーバーラップ
+    /// GPU 1 つあたりの ONNX推論セッション数（GPU 推論時のみ有効、CPU 推論では常に 1）。
+    /// 2 以上で複数セッションが空いた順にバッチを取り、H2D/D2H 転送と compute をオーバーラップ
     /// させる（in-flight 多重化）。出力はバッチ順に再整列される。同一 TensorRT
     /// エンジンキャッシュならセッション数に依存せず出力が一致することを
     /// dlshogi 系 + TensorRT の実測で確認済み（全モデル / EP の一般保証ではない）。
@@ -340,6 +346,45 @@ use tools::output_path::{
     ensure_distinct_output_paths, ensure_safe_output_file, ensure_safe_output_path,
     ensure_safe_output_paths,
 };
+
+/// `--onnx-gpu-id` の値。GPU 番号の列 (重複可) か、CPU 推論を表す `[-1]`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OnnxGpuIds(Vec<i32>);
+
+impl OnnxGpuIds {
+    fn is_cpu(&self) -> bool {
+        self.0 == [-1]
+    }
+
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    fn ids(&self) -> &[i32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for OnnxGpuIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ids: Vec<String> = self.0.iter().map(i32::to_string).collect();
+        f.write_str(&ids.join(","))
+    }
+}
+
+fn parse_onnx_gpu_ids(value: &str) -> std::result::Result<OnnxGpuIds, String> {
+    let ids = value
+        .split(',')
+        .map(|part| {
+            let part = part.trim();
+            part.parse::<i32>().map_err(|_| format!("invalid GPU id '{part}' in '{value}'"))
+        })
+        .collect::<std::result::Result<Vec<i32>, String>>()?;
+    if ids.len() > 1 && ids.contains(&-1) {
+        return Err(format!("-1 (CPU) cannot be combined with GPU ids: '{value}'"));
+    }
+    if let Some(id) = ids.iter().find(|&&id| id < -1) {
+        return Err(format!("GPU id must be -1 (CPU) or >= 0, got {id}"));
+    }
+    Ok(OnnxGpuIds(ids))
+}
 
 struct OutputProtection {
     inputs: Vec<PathBuf>,
@@ -652,7 +697,7 @@ fn onnx_marker_decide(
         out_scores: cli.out_scores,
         process_count,
         batch_size: cli.onnx_batch_size,
-        gpu_id: cli.onnx_gpu_id,
+        gpu_ids: cli.onnx_gpu_id.ids(),
         sessions: cli.onnx_sessions as usize,
         use_tensorrt: cli.onnx_tensorrt,
         tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
@@ -931,7 +976,7 @@ fn main() -> Result<()> {
             "--dlshogi-onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth"
         );
     }
-    if cli.onnx_tensorrt && cli.onnx_gpu_id < 0 {
+    if cli.onnx_tensorrt && cli.onnx_gpu_id.is_cpu() {
         anyhow::bail!("--onnx-tensorrt requires a GPU (--onnx-gpu-id >= 0)");
     }
     if use_engine && (cli.use_qsearch || cli.search_depth.is_some()) {
@@ -3198,9 +3243,11 @@ struct OnnxPipelineConfig<'a> {
     out_scores: bool,
     process_count: u64,
     batch_size: usize,
-    gpu_id: i32,
-    /// GPU 推論セッション数（`--onnx-sessions`）。2 以上で in-flight 多重化。
-    /// 出力はバッチ順に再整列されセッション数に依存しないため fingerprint には含めない。
+    /// `--onnx-gpu-id` の GPU 番号列。`[-1]` は CPU 推論。
+    gpu_ids: &'a [i32],
+    /// GPU 1 つあたりの推論セッション数（`--onnx-sessions`）。2 以上で in-flight 多重化。
+    /// GPU 構成とセッション数は fingerprint に含めない。出力の順序はバッチ順に再整列されて
+    /// 変わらず、構成を変えても完了済みの出力は作り直さずに再利用する（単一 GPU のマーカーとも互換）。
     sessions: usize,
     use_tensorrt: bool,
     tensorrt_cache: Option<&'a std::path::Path>,
@@ -4218,6 +4265,131 @@ fn discard_output_if_model_changed(
     Err(e.context(format!("discarded the output of {}", input_path.display())))
 }
 
+/// セッションごとの GPU 番号。`--onnx-gpu-id` の各項目に 1 本ずつ配る一巡を `sessions_per_gpu`
+/// 回繰り返す並びにして、先頭の `warmup_leader_count` 本が各項目の 1 本目になるようにする。
+/// CPU 推論は intra-op のスレッドを奪い合うだけなので常に 1 本。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn session_gpu_ids(gpu_ids: &[i32], sessions_per_gpu: usize) -> Vec<i32> {
+    if gpu_ids.first().is_none_or(|&id| id < 0) {
+        return vec![-1];
+    }
+    (0..sessions_per_gpu.max(1)).flat_map(|_| gpu_ids.iter().copied()).collect()
+}
+
+/// `session_gpu_ids` の先頭から、最初のバッチを 1 本ずつ順に推論するセッションの数。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn warmup_leader_count(gpu_ids: &[i32]) -> usize {
+    if gpu_ids.first().is_none_or(|&id| id < 0) {
+        1
+    } else {
+        gpu_ids.len()
+    }
+}
+
+/// TensorRT EP は動的な入力形のエンジンを最初の推論で作り、キャッシュがあればそこから読む。
+/// 同じキャッシュを書くセッションが同時に作ると書き込みが競合し、セッションごとに別の
+/// エンジン (最下位 bit が違いうる) になるため、先導役 (`turn` 0..leaders) は 1 本ずつ順に
+/// 最初のバッチを推論し、残りのセッションは先導役が全員終えてから受信を始める。
+/// 先導役は 1 バッチも処理せずに終わっても `WarmupTurn` の drop で番を進める。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct WarmupGate {
+    finished: Mutex<usize>,
+    cv: std::sync::Condvar,
+    leaders: usize,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl WarmupGate {
+    fn new(leaders: usize) -> Self {
+        Self {
+            finished: Mutex::new(0),
+            cv: std::sync::Condvar::new(),
+            leaders,
+        }
+    }
+
+    /// `worker_idx` の番まで待つ。先導役なら番を進める義務 (`WarmupTurn`) を返す。
+    fn wait(&self, worker_idx: usize) -> Option<WarmupTurn<'_>> {
+        let turn = worker_idx.min(self.leaders);
+        let guard = self.finished.lock().expect("warmup mutex poisoned");
+        drop(
+            self.cv
+                .wait_while(guard, |finished| *finished < turn)
+                .expect("warmup mutex poisoned"),
+        );
+        (worker_idx < self.leaders).then(|| WarmupTurn { gate: self })
+    }
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct WarmupTurn<'g> {
+    gate: &'g WarmupGate,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl Drop for WarmupTurn<'_> {
+    fn drop(&mut self) {
+        *self.gate.finished.lock().expect("warmup mutex poisoned") += 1;
+        self.gate.cv.notify_all();
+    }
+}
+
+/// 番号付きで順不同に届く結果を、通し番号の順に取り出す。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct SeqReorder<T> {
+    pending: std::collections::BTreeMap<u64, T>,
+    next_seq: u64,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl<T> SeqReorder<T> {
+    fn new() -> Self {
+        Self {
+            pending: std::collections::BTreeMap::new(),
+            next_seq: 0,
+        }
+    }
+
+    fn insert(&mut self, seq: u64, item: T) {
+        let previous = self.pending.insert(seq, item);
+        debug_assert!(previous.is_none() && seq >= self.next_seq, "duplicate seq {seq}");
+    }
+
+    /// 次の通し番号の結果が届いていれば取り出す。
+    fn pop_next(&mut self) -> Option<T> {
+        let item = self.pending.remove(&self.next_seq)?;
+        self.next_seq += 1;
+        Some(item)
+    }
+}
+
+/// GPU worker の受信ループ。共有の受け口から空いた worker がバッチを取り、`process` の結果を
+/// 通し番号付きで writer へ送る。`process` が `true` (EOF sentinel) を返すか、結果が `Err`
+/// か、writer が受け口を閉じたら終える。先導役は最初のバッチを送った時点で番を進める。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn drive_pull_worker<B, D>(
+    mut warmup_turn: Option<WarmupTurn<'_>>,
+    ready_rx: &Mutex<mpsc::Receiver<(u64, B)>>,
+    done_tx: &mpsc::Sender<(u64, Result<D>)>,
+    mut process: impl FnMut(B) -> (Result<D>, bool),
+) {
+    loop {
+        // recv を Mutex 内で待つ: ロック保持者だけが次のバッチを取り、他 worker は
+        // ロック待ちで並ぶ（取り合いの順序は出力に影響しない）。
+        let msg = ready_rx.lock().expect("ready_rx mutex poisoned").recv();
+        let Ok((seq, batch)) = msg else {
+            break; // producer 終了・供給済みバッチも処理済み
+        };
+        let (result, last) = process(batch);
+        let failed = result.is_err();
+        if done_tx.send((seq, result)).is_err() || failed || last {
+            break;
+        }
+        // 初バッチ完了（= TRT engine 確定・キャッシュ書き込み済み）。次の番へ進める。
+        drop(warmup_turn.take());
+    }
+}
+
 /// ONNX Runtime のセッションと入力特徴の host バッファ。1 回の実行の全入力ファイルで使い回す。
 ///
 /// ファイルごとに作り直すと、TensorRT EP ではセッションの数だけモデルの解析と
@@ -4225,6 +4397,10 @@ fn discard_output_if_model_changed(
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 struct OnnxSessions {
     gpu_sessions: Vec<ort::session::Session>,
+    /// `gpu_sessions` と同じ並びの、各セッションの GPU 番号 (CPU 推論は -1)。
+    session_gpus: Vec<i32>,
+    /// `gpu_sessions` の先頭からこの本数が、最初のバッチを 1 本ずつ順に推論する (`WarmupGate`)。
+    warmup_leaders: usize,
     /// パイプラインの slot ごとの入力特徴バッファ (f1, f2)。数は 2 × セッション数。
     slot_bufs: Vec<(HostBuf, HostBuf)>,
     /// `slot_bufs` を pinned で確保できたときの所有者 (drop で free する)。`None` なら
@@ -4257,7 +4433,7 @@ impl OnnxSessions {
             model_name,
             onnx_path,
             batch_size,
-            gpu_id,
+            gpu_ids,
             sessions,
             use_tensorrt,
             tensorrt_cache,
@@ -4266,6 +4442,7 @@ impl OnnxSessions {
             profile_path,
             ..
         } = *config;
+        let use_gpu = gpu_ids.first().is_some_and(|&id| id >= 0);
 
         // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
         //
@@ -4295,7 +4472,7 @@ impl OnnxSessions {
                 eprintln!("ORT_DYLIB_PATH: {path}");
             }
             _ => {
-                let mode_hint = if gpu_id >= 0 {
+                let mode_hint = if use_gpu {
                     "GPU inference requires a GPU-enabled ONNX Runtime (onnxruntime-linux-x64-gpu-*)."
                 } else {
                     "CPU inference requires an ONNX Runtime library (GPU or CPU build)."
@@ -4314,10 +4491,9 @@ impl OnnxSessions {
         let model = OnnxModelIdentity::capture(onnx_path)?;
         eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
 
-        // セッションを 1 本構築する。`--onnx-sessions` ≥ 2 のとき複数回呼ばれるため、
-        // EP 情報などのログと可用性チェックは verbose（1 本目）のみで行う。
-        // ORT profiling も 1 本目のセッションにのみ適用する。
-        let build_session = |verbose: bool| -> Result<Session> {
+        // セッションを 1 本構築する。EP の可用性チェックと ORT profiling は全体の 1 本目
+        // (`verbose`) だけ、使う GPU のログは `--onnx-gpu-id` の項目ごとの 1 本目 (`announce`) で出す。
+        let build_session = |gpu_id: i32, verbose: bool, announce: bool| -> Result<Session> {
             let builder = tools::onnx_env::session_builder()?
                 .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
                 .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
@@ -4336,7 +4512,7 @@ impl OnnxSessions {
 
             let session = if gpu_id >= 0 {
                 if use_tensorrt {
-                    if verbose {
+                    if announce {
                         eprintln!("Using TensorRT (FP16) on GPU {gpu_id}");
                     }
 
@@ -4393,7 +4569,7 @@ impl OnnxSessions {
                         .commit_from_file(onnx_path)
                         .map_err(onnx_ort_err)?
                 } else {
-                    if verbose {
+                    if announce {
                         eprintln!("Using CUDA GPU {gpu_id}");
                     }
 
@@ -4436,12 +4612,13 @@ impl OnnxSessions {
             Ok(session)
         };
 
-        // GPU 推論時のみ複数セッションを許可する（CPU 推論は intra-op を奪い合うだけなので常に 1）。
         // 2 本目以降は同じ TensorRT engine cache を読むだけなので構築は軽い。
-        let num_sessions = if gpu_id >= 0 { sessions.max(1) } else { 1 };
+        let session_gpus = session_gpu_ids(gpu_ids, sessions);
+        let warmup_leaders = warmup_leader_count(gpu_ids);
+        let num_sessions = session_gpus.len();
         let mut gpu_sessions: Vec<Session> = Vec::with_capacity(num_sessions);
-        for i in 0..num_sessions {
-            gpu_sessions.push(build_session(i == 0)?);
+        for (i, &gpu_id) in session_gpus.iter().enumerate() {
+            gpu_sessions.push(build_session(gpu_id, i == 0, i < warmup_leaders)?);
         }
         if num_sessions > 1 {
             eprintln!(
@@ -4454,11 +4631,15 @@ impl OnnxSessions {
         let pipeline_slots = 2 * num_sessions;
         // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
         // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
-        // GPU 推論 (gpu_id >= 0) のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
-        let mut pinned_pool = if gpu_id >= 0 {
+        // GPU 推論のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
+        // slot はどの GPU のセッションにも渡るため、全 GPU から pinned として使えるメモリが要る。
+        // ORT の CUDA pinned allocator は cudaMallocHost で確保し、64 bit の UVA 環境ではこれが
+        // portable (全デバイスの context で pinned 扱い) になるので、1 本目のセッションの
+        // allocator で一括確保する。
+        let mut pinned_pool = if use_gpu {
             MemoryInfo::new(
                 AllocationDevice::CUDA_PINNED,
-                gpu_id,
+                session_gpus[0],
                 AllocatorType::Device,
                 MemoryType::CPUInput,
             )
@@ -4498,7 +4679,7 @@ impl OnnxSessions {
             false
         };
         if !pinned_ok {
-            if gpu_id >= 0 {
+            if use_gpu {
                 eprintln!(
                     "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
                 );
@@ -4518,6 +4699,8 @@ impl OnnxSessions {
 
         Ok(OnnxSessions {
             gpu_sessions,
+            session_gpus,
+            warmup_leaders,
             slot_bufs,
             pinned_pool,
             model,
@@ -4561,8 +4744,8 @@ where
         out_scores,
         process_count,
         batch_size,
-        gpu_id,
-        // セッション数・TensorRT キャッシュ・profiling はセッションを作るときだけ使う。
+        // GPU の割り当て・セッション数・TensorRT キャッシュ・profiling はセッションを作るときだけ使う。
+        gpu_ids: _,
         sessions: _,
         use_tensorrt,
         tensorrt_cache: _,
@@ -4602,7 +4785,6 @@ where
     use ort::value::TensorRef;
     use rshogi_core::movegen::{MoveList, generate_legal};
     // ONNX パイプライン専用のため fn 内 use（top-level だと non-ONNX ビルドで unused-import）。
-    use std::collections::BTreeMap;
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
 
     /// 合法手のロジットを softmax 正規化して `out` に書き込む
@@ -4622,6 +4804,8 @@ where
 
     let OnnxSessions {
         gpu_sessions,
+        session_gpus,
+        warmup_leaders,
         slot_bufs,
         pinned_pool,
         model: loaded_model,
@@ -4734,7 +4918,8 @@ where
     // - producer: rayon 並列特徴量構築
     // - GPU worker × num_sessions: 各自の ORT セッションで推論し後処理（score 変換 /
     //   シリアライズ / expand）まで行う。num_sessions ≥ 2 なら別セッション＝別 CUDA
-    //   ストリームで in-flight 多重化され、H2D/D2H 転送と compute が重なる
+    //   ストリームで in-flight 多重化され、H2D/D2H 転送と compute が重なる。バッチは空いた
+    //   worker が取るので、速さの違う GPU が混ざっても遅い GPU の分だけ待たない
     // - writer（主スレッド）: バッチ index（seq）で再整列してファイルへ書き出し
     // 決定性: バッチ構成は reader の直列段階で不変に確定し、どのセッションで推論しても
     // 同一エンジンなら結果は同一、書き出しは seq 順に再整列するため、出力はスレッド数・
@@ -4758,25 +4943,22 @@ where
     let (done_tx, done_rx) = mpsc::channel::<(u64, Result<DoneBatch<'s>>)>();
 
     // ---- GPU worker × num_sessions: 推論 + 後処理 ----
-    // TensorRT engine cache が未生成の初回実行に複数セッションが同時へエンジン構築・
-    // キャッシュ書き込みで競合しないよう、2 本目以降の worker は 1 本目の最初のバッチ
-    // 完了（= エンジン確定・cache 書き込み済み）を待ってから受信を始める。これにより
-    // cold cache でも全セッションが同一エンジンをロードし、出力の bit 一致が保たれる。
-    let (gate_tx, gate_rx) = mpsc::channel::<()>();
-    let gate_rx = Arc::new(Mutex::new(gate_rx));
-    let mut gate_tx = Some(gate_tx);
+    // 最初のバッチは先導役 (各 `--onnx-gpu-id` 項目の 1 本目) が 1 本ずつ順に推論する
+    // (`WarmupGate`)。`--onnx-tensorrt-cache` を指定したときは、cold cache でもエンジンの構築と
+    // キャッシュの書き込みが競合せず、後のセッションは書かれたキャッシュを読むので、同じ GPU の
+    // セッションは同一エンジンで推論する (指定しないとキャッシュは無効で、各セッションが作る)。
+    let warmup = WarmupGate::new(*warmup_leaders);
     let want_replacement = replacement_output.is_some();
     // worker 本体。worker 0 は主スレッドで直接実行する（writer 分離後の主スレッドを
     // 遊ばせず、総スレッド数を最小に保つ）。2 本目以降のセッションのみスレッドを spawn する。
-    // gate の送り手は worker 0 のみが持つ。worker 0 が 1 バッチも処理せず終了した
-    // 場合も drop によって待機側の recv が解除される。
     let run_gpu_worker = |worker_idx: usize,
+                          gpu_id: i32,
                           session: &mut Session,
                           done_tx: mpsc::Sender<(u64, Result<DoneBatch<'s>>)>,
-                          mut gate_tx: Option<mpsc::Sender<()>>,
-                          gate_rx: &Mutex<mpsc::Receiver<()>>,
                           ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch<'s>)>>|
      -> (u128, u128) {
+        // 下の早期 return でも drop で番が進むよう、最初に番を待つ。
+        let warmup_turn = warmup.wait(worker_idx);
         let (mut t_run, mut t_write) = (0u128, 0u128);
         // expand 用 softmax バッファ（worker 内でバッチ間再利用）
         let mut logits_buf: Vec<f32> = Vec::with_capacity(600);
@@ -4807,34 +4989,20 @@ where
             }
         };
         let output_mem = &output_mem;
-        if worker_idx != 0 {
-            // worker 0 の初バッチ完了通知（または worker 0 終了による切断）を待つ。
-            let _ = gate_rx.lock().expect("gate_rx mutex poisoned").recv();
-        }
-        loop {
-            // recv を Mutex 内で待つ: ロック保持者だけが次のバッチを取り、他 worker は
-            // ロック待ちで並ぶ（取り合いの順序は出力に影響しない）。
-            let msg = ready_rx.lock().expect("ready_rx mutex poisoned").recv();
-            let (seq, batch) = match msg {
-                Ok(x) => x,
-                Err(_) => break, // producer 終了・供給済みバッチも処理済み
-            };
+        drive_pull_worker(warmup_turn, ready_rx, &done_tx, |batch| {
             if batch.actual_batch == 0 {
                 // EOF / 中断 sentinel はそのまま writer へ中継（最終 seq なので writer
                 // は全バッチ書き出し後に必ず最後に処理する）。
-                let _ = done_tx.send((
-                    seq,
-                    Ok(DoneBatch {
-                        slot: batch,
-                        rescore_bytes: Vec::new(),
-                        replacement_bytes: Vec::new(),
-                        expand_bytes: Vec::new(),
-                        skipped: 0,
-                        clipped: 0,
-                        expanded: 0,
-                    }),
-                ));
-                break;
+                let sentinel = DoneBatch {
+                    slot: batch,
+                    rescore_bytes: Vec::new(),
+                    replacement_bytes: Vec::new(),
+                    expand_bytes: Vec::new(),
+                    skipped: 0,
+                    clipped: 0,
+                    expanded: 0,
+                };
+                return (Ok(sentinel), true);
             }
             let actual_batch = batch.actual_batch;
             // 推論する行数。埋めた行 (actual_batch 以降) の推論結果は読まない。
@@ -5056,17 +5224,8 @@ where
                     expanded,
                 })
             })();
-            let failed = result.is_err();
-            if done_tx.send((seq, result)).is_err() || failed {
-                break;
-            }
-            // 初バッチ完了（= TRT engine 確定）。待機中の他 worker を全て解放する。
-            if let Some(gate) = gate_tx.take() {
-                for _ in 1..num_sessions {
-                    let _ = gate.send(());
-                }
-            }
-        }
+            (result, false)
+        });
         (t_run, t_write)
     };
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
@@ -5342,16 +5501,14 @@ where
 
         // 2 本目以降のセッション用 worker スレッドを spawn（worker 0 は後で主スレッドで実行）。
         let mut worker_handles = Vec::with_capacity(num_sessions - 1);
-        let mut sessions_iter = gpu_sessions.iter_mut();
-        let session0 = sessions_iter.next().expect("num_sessions >= 1");
-        for (i, session) in sessions_iter.enumerate() {
+        let mut sessions_iter = gpu_sessions.iter_mut().zip(session_gpus.iter().copied());
+        let (session0, gpu0) = sessions_iter.next().expect("num_sessions >= 1");
+        for (i, (session, gpu_id)) in sessions_iter.enumerate() {
             let done_tx = done_tx.clone();
             let ready_rx = Arc::clone(&ready_rx);
-            let gate_rx = Arc::clone(&gate_rx);
             let worker = &run_gpu_worker;
-            worker_handles.push(
-                scope.spawn(move || worker(i + 1, session, done_tx, None, &gate_rx, &ready_rx)),
-            );
+            worker_handles
+                .push(scope.spawn(move || worker(i + 1, gpu_id, session, done_tx, &ready_rx)));
         }
 
         // ---- writer: seq 再整列 + 書き出し ----
@@ -5376,8 +5533,7 @@ where
                 errors: 0,
                 t_write: 0,
             };
-            let mut pending: BTreeMap<u64, DoneBatch> = BTreeMap::new();
-            let mut next_seq: u64 = 0;
+            let mut pending: SeqReorder<DoneBatch> = SeqReorder::new();
             'writer_loop: loop {
                 // 全 worker が終了して done が閉じたらループを抜ける（正常系は sentinel 処理の
                 // break で抜ける。こちらの経路は reader エラー等で sentinel が届かない場合）。
@@ -5390,8 +5546,7 @@ where
                 let done = done?;
                 pending.insert(seq, done);
                 // 揃った分だけ seq 順に書き出す。pending は同時生存 slot 数で抑えられる。
-                while let Some(done) = pending.remove(&next_seq) {
-                    next_seq += 1;
+                while let Some(done) = pending.pop_next() {
                     let phase_t = Instant::now();
                     // sidecar は i16 列だけで行ずれを事後検出できない。reader / producer
                     // 由来のどちらのエラーも、当該バッチの最初の byte より前で拒否する。
@@ -5457,8 +5612,7 @@ where
         // done_tx の元 Sender は worker 0 に move して終了時に drop させる（spawn した
         // worker が全て終了した時点で done が閉じ、writer も必ず終了できる）。
         {
-            let gate_tx0 = gate_tx.take();
-            let (r, w) = run_gpu_worker(0, session0, done_tx, gate_tx0, &gate_rx, &ready_rx);
+            let (r, w) = run_gpu_worker(0, gpu0, session0, done_tx, &ready_rx);
             t_run += r;
             t_write += w;
         }
@@ -5671,7 +5825,7 @@ fn process_file_with_onnx(
         out_scores: cli.out_scores,
         process_count,
         batch_size: cli.onnx_batch_size,
-        gpu_id: cli.onnx_gpu_id,
+        gpu_ids: cli.onnx_gpu_id.ids(),
         sessions: cli.onnx_sessions as usize,
         use_tensorrt: cli.onnx_tensorrt,
         tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
@@ -5741,7 +5895,7 @@ fn process_file_with_dlshogi_onnx(
         out_scores: cli.out_scores,
         process_count,
         batch_size: cli.onnx_batch_size,
-        gpu_id: cli.onnx_gpu_id,
+        gpu_ids: cli.onnx_gpu_id.ids(),
         sessions: cli.onnx_sessions as usize,
         use_tensorrt: cli.onnx_tensorrt,
         tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
@@ -7106,9 +7260,229 @@ mod marker_tests {
     }
 }
 
+#[cfg(test)]
+mod onnx_gpu_ids_tests {
+    use super::*;
+
+    fn parse_cli_gpu_ids(value: Option<&str>) -> std::result::Result<OnnxGpuIds, clap::Error> {
+        let mut args = vec!["rescore_psv", "--input", "in.psv", "--output-dir", "out"];
+        if let Some(value) = value {
+            args.extend(["--onnx-gpu-id", value]);
+        }
+        Cli::try_parse_from(args).map(|cli| cli.onnx_gpu_id)
+    }
+
+    #[test]
+    fn single_ids_keep_existing_meaning() {
+        assert_eq!(parse_cli_gpu_ids(None).unwrap(), OnnxGpuIds(vec![0]));
+        assert_eq!(parse_cli_gpu_ids(Some("1")).unwrap(), OnnxGpuIds(vec![1]));
+        let cpu = parse_cli_gpu_ids(Some("-1")).unwrap();
+        assert!(cpu.is_cpu());
+        assert_eq!(cpu.to_string(), "-1");
+        assert!(!OnnxGpuIds(vec![0]).is_cpu());
+    }
+
+    #[test]
+    fn comma_separated_ids_keep_order_and_duplicates() {
+        assert_eq!(parse_onnx_gpu_ids("0,1").unwrap(), OnnxGpuIds(vec![0, 1]));
+        assert_eq!(parse_onnx_gpu_ids(" 1, 0 ").unwrap(), OnnxGpuIds(vec![1, 0]));
+        let same_gpu = parse_cli_gpu_ids(Some("0,0")).unwrap();
+        assert_eq!(same_gpu, OnnxGpuIds(vec![0, 0]));
+        assert_eq!(same_gpu.to_string(), "0,0");
+    }
+
+    #[test]
+    fn malformed_ids_are_rejected() {
+        for value in ["", "0,", ",1", "a", "0;1", "-2", "-1,0", "0,-1"] {
+            assert!(parse_onnx_gpu_ids(value).is_err(), "{value:?} must be rejected");
+        }
+        assert!(parse_cli_gpu_ids(Some("-1,0")).is_err());
+    }
+}
+
 #[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
 mod onnx_sessions_tests {
     use super::*;
+
+    #[test]
+    fn sessions_are_listed_round_by_round_with_leaders_first() {
+        assert_eq!(session_gpu_ids(&[0], 2), vec![0, 0]);
+        assert_eq!(warmup_leader_count(&[0]), 1);
+        assert_eq!(session_gpu_ids(&[0, 1], 2), vec![0, 1, 0, 1]);
+        assert_eq!(warmup_leader_count(&[0, 1]), 2);
+        assert_eq!(session_gpu_ids(&[0, 0], 1), vec![0, 0]);
+        assert_eq!(session_gpu_ids(&[-1], 4), vec![-1]);
+        assert_eq!(warmup_leader_count(&[-1]), 1);
+    }
+
+    #[test]
+    fn reorder_releases_results_in_sequence_order() {
+        let mut reorder = SeqReorder::new();
+        reorder.insert(2, "c");
+        reorder.insert(1, "b");
+        assert_eq!(reorder.pop_next(), None);
+        reorder.insert(0, "a");
+        assert_eq!(reorder.pop_next(), Some("a"));
+        assert_eq!(reorder.pop_next(), Some("b"));
+        assert_eq!(reorder.pop_next(), Some("c"));
+        assert_eq!(reorder.pop_next(), None);
+    }
+
+    #[test]
+    fn warmup_followers_do_not_advance_the_turn_counter() {
+        let gate = WarmupGate::new(1);
+        drop(gate.wait(0));
+        assert_eq!(*gate.finished.lock().unwrap(), 1);
+        assert!(gate.wait(1).is_none());
+        assert!(gate.wait(3).is_none());
+        assert_eq!(*gate.finished.lock().unwrap(), 1);
+    }
+
+    /// 模擬の writer: `SeqReorder` で並べ直し、`Err` か `fail_at` の番号で止まる
+    /// (実パイプラインの writer と同じく、止まると受け口を閉じる)。
+    fn simulated_writer(
+        done_rx: mpsc::Receiver<(u64, Result<u64>)>,
+        fail_at: Option<u64>,
+    ) -> Result<Vec<u64>> {
+        let mut reorder = SeqReorder::new();
+        let mut written = Vec::new();
+        for (seq, done) in done_rx {
+            reorder.insert(seq, done?);
+            while let Some(value) = reorder.pop_next() {
+                if Some(value) == fail_at {
+                    anyhow::bail!("simulated write error at {value}");
+                }
+                written.push(value);
+            }
+        }
+        Ok(written)
+    }
+
+    /// `drive_pull_worker` を worker ごとのスレッドで回す。`process` は (worker, seq) を受け取る。
+    fn run_simulated_pipeline(
+        workers: usize,
+        leaders: usize,
+        batches: u64,
+        fail_write_at: Option<u64>,
+        process: impl Fn(usize, u64) -> (Result<u64>, bool) + Sync,
+    ) -> Result<Vec<u64>> {
+        let (ready_tx, ready_rx) = mpsc::channel::<(u64, u64)>();
+        for seq in 0..batches {
+            ready_tx.send((seq, seq)).unwrap();
+        }
+        drop(ready_tx);
+        let ready_rx = Mutex::new(ready_rx);
+        let (done_tx, done_rx) = mpsc::channel::<(u64, Result<u64>)>();
+        let gate = WarmupGate::new(leaders);
+        thread::scope(|scope| {
+            for worker in 0..workers {
+                let done_tx = done_tx.clone();
+                let (ready_rx, gate, process) = (&ready_rx, &gate, &process);
+                scope.spawn(move || {
+                    let turn = gate.wait(worker);
+                    drive_pull_worker(turn, ready_rx, &done_tx, |seq| process(worker, seq));
+                });
+            }
+            drop(done_tx);
+            simulated_writer(done_rx, fail_write_at)
+        })
+    }
+
+    #[test]
+    fn simulated_pull_workers_serialize_first_batches_and_restore_order() {
+        use std::time::Duration;
+        // worker 0, 1 が先導役 (GPU 2 枚の各 1 本目)、worker 2, 3 が 2 本目。各 worker は
+        // バッチを取ったことを知らせ、テストが許すまで結果を返さない。
+        const WORKERS: usize = 4;
+        let (took_tx, took_rx) = mpsc::channel::<(usize, u64)>();
+        let took_tx = Mutex::new(took_tx);
+        let (release_txs, release_rxs): (Vec<_>, Vec<_>) =
+            (0..WORKERS).map(|_| mpsc::channel::<()>()).unzip();
+        let release_rxs: Vec<Mutex<mpsc::Receiver<()>>> =
+            release_rxs.into_iter().map(Mutex::new).collect();
+        let quiet = |took_rx: &mpsc::Receiver<(usize, u64)>| {
+            assert!(took_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        };
+        let next_took = |took_rx: &mpsc::Receiver<(usize, u64)>| {
+            took_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("expected a worker to take a batch")
+        };
+        let took_by = |took_rx: &mpsc::Receiver<(usize, u64)>, n: usize| {
+            let mut took: Vec<(usize, u64)> = (0..n).map(|_| next_took(took_rx)).collect();
+            took.sort();
+            took
+        };
+
+        let written = thread::scope(|scope| {
+            // assertion が失敗して unwind したときも送信側を drop し、待っている worker を
+            // recv の失敗で抜けさせる (scope の join で止まらないように)。
+            let release_txs = release_txs;
+            let pipeline = scope.spawn(|| {
+                run_simulated_pipeline(WORKERS, 2, 6, None, |worker, seq| {
+                    took_tx.lock().unwrap().send((worker, seq)).unwrap();
+                    release_rxs[worker].lock().unwrap().recv().unwrap();
+                    (Ok(seq), false)
+                })
+            });
+            // 最初は先導役 0 だけが取る。
+            assert_eq!(next_took(&took_rx), (0, 0));
+            quiet(&took_rx);
+            release_txs[0].send(()).unwrap();
+            // 先導役 0 が終えると先導役 1 の番。2 本目の worker はまだ取らない。
+            let took = took_by(&took_rx, 2);
+            assert_eq!(took.iter().map(|&(w, _)| w).collect::<Vec<_>>(), vec![0, 1]);
+            let mut seqs: Vec<u64> = took.iter().map(|&(_, seq)| seq).collect();
+            seqs.sort();
+            assert_eq!(seqs, vec![1, 2]);
+            quiet(&took_rx);
+            // 先導役 1 が終えると全員が取る (先導役 0 はまだ 2 個目を保持中)。
+            release_txs[1].send(()).unwrap();
+            let took = took_by(&took_rx, 3);
+            assert_eq!(took.iter().map(|&(w, _)| w).collect::<Vec<_>>(), vec![1, 2, 3]);
+            // 後から取ったバッチから先に返し、writer が通し番号順に並べ直すことを見る。
+            for worker in [3, 2, 1, 0] {
+                release_txs[worker].send(()).unwrap();
+            }
+            pipeline.join().unwrap()
+        })
+        .unwrap();
+        assert_eq!(written, (0..6).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn simulated_pipeline_ends_when_batches_are_fewer_than_leaders() {
+        let written = run_simulated_pipeline(4, 3, 1, None, |_, seq| (Ok(seq), false)).unwrap();
+        assert_eq!(written, vec![0]);
+        let written = run_simulated_pipeline(3, 2, 0, None, |_, seq| (Ok(seq), false)).unwrap();
+        assert!(written.is_empty());
+    }
+
+    #[test]
+    fn simulated_pipeline_ends_at_eof_sentinel() {
+        // 最後のバッチ (sentinel) を処理した worker は抜け、他は受け口が閉じて抜ける。
+        let written = run_simulated_pipeline(3, 2, 5, None, |_, seq| (Ok(seq), seq == 4)).unwrap();
+        assert_eq!(written, (0..5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn simulated_pipeline_propagates_leader_first_batch_error() {
+        let err = run_simulated_pipeline(3, 2, 20, None, |worker, seq| {
+            if worker == 0 && seq == 0 {
+                (Err(anyhow::anyhow!("leader failed")), false)
+            } else {
+                (Ok(seq), false)
+            }
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("leader failed"), "{err}");
+    }
+
+    #[test]
+    fn simulated_pipeline_stops_workers_when_writer_fails() {
+        let err = run_simulated_pipeline(4, 2, 50, Some(3), |_, seq| (Ok(seq), false)).unwrap_err();
+        assert!(err.to_string().contains("simulated write error at 3"), "{err}");
+    }
 
     #[test]
     fn replaced_model_discards_output_so_next_run_starts_over() {
@@ -7201,7 +7575,7 @@ mod onnx_sessions_tests {
             out_scores: false,
             process_count: 1,
             batch_size: 1024,
-            gpu_id: -1,
+            gpu_ids: &[-1],
             sessions: 1,
             use_tensorrt: false,
             tensorrt_cache: None,
