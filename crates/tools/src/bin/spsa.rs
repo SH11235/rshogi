@@ -133,7 +133,12 @@ struct Cli {
     /// async 専用: `--resume` の照合 (meta と CLI の一致、journal の再生と snapshot の bit 一致) だけを行って終わる。
     /// worker は起動せず、journal にも書かない (stats・values の CSV は再生から作り直す)。
     /// run-dir の写しが resume できる組かを確かめるのに使う。
-    #[arg(long, default_value_t = false, requires = "resume")]
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "resume",
+        conflicts_with = "worker_stdio"
+    )]
     verify_resume: bool,
 
     /// async 専用: 1 pair の失敗 attempt 数の上限 (既定 3)。達したら snapshot を残して停止する。

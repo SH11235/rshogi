@@ -608,6 +608,27 @@ fn file_valued_usi_option_is_fingerprinted_after_trimming() {
     assert!(stderr(&output).contains("対局条件が meta と異なります"), "{}", stderr(&output));
 }
 
+/// verify の前後で変わってはいけないファイル (CSV は作り直すので除く)。
+fn untouched_by_verify(test: &PoolTest) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<String> = ["journal.jsonl", "meta.json", "state.params", "games.jsonl"]
+        .map(String::from)
+        .to_vec();
+    let mut snapshots: Vec<String> = std::fs::read_dir(test.path("run/snapshots"))
+        .unwrap()
+        .map(|entry| format!("snapshots/{}", entry.unwrap().file_name().to_string_lossy()))
+        .collect();
+    snapshots.sort();
+    files.extend(snapshots);
+    files
+        .into_iter()
+        .filter(|file| test.path(&format!("run/{file}")).exists())
+        .map(|file| {
+            let bytes = test.bytes(&file);
+            (file, bytes)
+        })
+        .collect()
+}
+
 #[test]
 fn verify_resume_checks_the_replay_without_playing_or_writing_the_journal() {
     let reference = reference_run();
@@ -622,7 +643,8 @@ fn verify_resume_checks_the_replay_without_playing_or_writing_the_journal() {
         &[("RSHOGI_SPSA_FAULT", Path::new("after_accept:3"))],
     );
     assert_eq!(output.status.code(), Some(86), "{}", stderr(&output));
-    let journal_before = test.bytes("journal.jsonl");
+    let before = untouched_by_verify(&test);
+    assert!(before.iter().any(|(file, _)| file == "games.jsonl"));
 
     let verify = [
         "--snapshot-interval",
@@ -634,19 +656,60 @@ fn verify_resume_checks_the_replay_without_playing_or_writing_the_journal() {
     let output = run_async(&test, "value_driven", 6, 1, &verify, &[]);
     assert_success(&output);
     assert!(stderr(&output).contains("verify-resume ok"), "{}", stderr(&output));
-    assert_eq!(test.bytes("journal.jsonl"), journal_before);
+    assert_eq!(untouched_by_verify(&test), before);
     assert!(!test.path("run/final.params").exists());
-    assert_eq!(test.meta()["status"], "running");
     // `--remote-worker` を付けても worker を起動しない (起動すれば、すぐ終わる worker で接続に失敗する)。
     let mut with_worker = verify.to_vec();
     with_worker.extend_from_slice(&["--remote-worker", "exit 1"]);
     assert_success(&run_async(&test, "value_driven", 6, 1, &with_worker, &[]));
-    assert_eq!(test.bytes("journal.jsonl"), journal_before);
+    assert_eq!(untouched_by_verify(&test), before);
 
     // 照合だけの起動の後も、ふつうの resume は中断なしと同じ θ に着く。
     let resume = ["--snapshot-interval", "2", "--resume", "--force-unlock"];
     assert_success(&run_async(&test, "value_driven", 6, 1, &resume, &[]));
     assert_eq!(final_theta(&test), final_theta(&reference));
+}
+
+#[test]
+fn verify_resume_accepts_a_copy_of_meta_gen0_latest_snapshot_and_journal() {
+    let source = PoolTest::new();
+    let output = run_async(
+        &source,
+        "value_driven",
+        6,
+        1,
+        &["--snapshot-interval", "2"],
+        &[("RSHOGI_SPSA_FAULT", Path::new("after_accept:5"))],
+    );
+    assert_eq!(output.status.code(), Some(86), "{}", stderr(&output));
+    let latest = source.meta()["snapshot"].as_str().unwrap().to_owned();
+    assert_ne!(latest, "snapshot-000000.json");
+
+    let copy = PoolTest::new();
+    std::fs::create_dir_all(copy.path("run/snapshots")).unwrap();
+    for file in [
+        "meta.json".to_owned(),
+        "snapshots/snapshot-000000.json".to_owned(),
+        format!("snapshots/{latest}"),
+        "journal.jsonl".to_owned(),
+    ] {
+        std::fs::write(copy.path(&format!("run/{file}")), source.bytes(&file)).unwrap();
+    }
+    let verify = [
+        "--snapshot-interval",
+        "2",
+        "--resume",
+        "--verify-resume",
+        "--no-game-records",
+    ];
+    let output = run_async(&copy, "value_driven", 6, 1, &verify, &[]);
+    // 写しは棋譜の有無を元の run と揃えないと照合で止まる (meta の game_records)。
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("game records"), "{}", stderr(&output));
+    let verify = ["--snapshot-interval", "2", "--resume", "--verify-resume"];
+    let output = run_async(&copy, "value_driven", 6, 1, &verify, &[]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("verify-resume ok"), "{}", stderr(&output));
 }
 
 #[test]
@@ -678,9 +741,19 @@ fn verify_resume_rejects_a_journal_shorter_than_the_snapshot() {
 }
 
 #[test]
-fn verify_resume_needs_resume() {
+fn verify_resume_needs_resume_and_is_not_a_worker() {
     let test = PoolTest::new();
     let output = run_async(&test, "value_driven", 2, 1, &["--verify-resume"], &[]);
     assert!(!output.status.success());
     assert!(!test.path("run/journal.jsonl").exists());
+    let output = run_async(
+        &test,
+        "value_driven",
+        2,
+        1,
+        &["--resume", "--verify-resume", "--worker-stdio"],
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--worker-stdio"), "{}", stderr(&output));
 }
