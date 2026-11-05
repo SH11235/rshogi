@@ -1489,6 +1489,39 @@ pub fn propagate_values(
     Ok(stats)
 }
 
+/// グラフに辺を加えず、指定した子局面への手を指す側から見た補正前の値を返す。
+pub(crate) fn evaluate_edges(
+    graph: &Graph,
+    draws: DrawValues,
+    edges: &[(usize, bool)],
+) -> Result<Vec<i32>> {
+    let params = BestParams {
+        draws,
+        merge: MergeMode::Replace,
+        skip_unusable_moves: graph.options.skip_unusable_moves,
+    };
+    let mut values = vec![0; edges.len()];
+    for black in [true, false] {
+        let roots: Vec<_> = edges
+            .iter()
+            .filter(|(_, side)| *side == black)
+            .map(|&(v, _)| (v, usize::from(black)))
+            .collect();
+        if roots.is_empty() {
+            continue;
+        }
+        let game = SideGame::with_roots(graph, params, black, &roots)?;
+        let solution = book_retrograde::solve(&game)?;
+        let side = game.into_side(solution);
+        for (i, &(to, mover_black)) in edges.iter().enumerate() {
+            if mover_black == black {
+                values[i] = side.edge_value(to);
+            }
+        }
+    }
+    Ok(values)
+}
+
 /// best 値の変化 `(変化の大きさ, 局面, 変化前, 変化後)` を大きい順 (同じ大きさは SFEN 順) に並べ、上位だけを残す。
 fn top_changes(graph: &Graph, changed: &mut Vec<(i32, u32, i32, i32)>) {
     changed.sort_by(|a, b| {
@@ -1639,6 +1672,15 @@ impl Target {
 
 impl<'a> SideGame<'a> {
     fn new(graph: &'a Graph, params: BestParams, black: bool) -> Result<Self> {
+        Self::with_roots(graph, params, black, &[])
+    }
+
+    fn with_roots(
+        graph: &'a Graph,
+        params: BestParams,
+        black: bool,
+        roots: &[(usize, usize)],
+    ) -> Result<Self> {
         let n = graph.len();
         if n > (NONE / 2) as usize {
             bail!("局面が多すぎて後退解析できません: {n}");
@@ -1669,6 +1711,7 @@ impl<'a> SideGame<'a> {
         };
         let mut reachable = vec![[false; 2]; n];
         let mut stack: Vec<u32> = (0..n).map(|v| (v * 2 + graph.color(v)) as u32).collect();
+        stack.extend(roots.iter().map(|&(v, c)| (v * 2 + c) as u32));
         for &s in &stack {
             reachable[s as usize / 2][s as usize % 2] = true;
         }
@@ -1872,6 +1915,10 @@ struct Side {
 }
 
 impl Side {
+    fn edge_value(&self, to: usize) -> i32 {
+        self.values[self.state[to][1 - self.me] as usize] + self.draw
+    }
+
     /// 局面 `v` を実際の手番の側を自分として解いた結果。その向きで届かない局面は `None`。
     fn result(&self, graph: &Graph, params: BestParams, v: usize) -> Option<NodeResult> {
         let s = self.state[v][self.me];
@@ -1897,7 +1944,14 @@ impl Side {
                     self.state[to][1 - self.me]
                 } as usize;
                 let distance = (self.distance[target] != NONE).then(|| self.distance[target] + 1);
-                Some((self.values[target] + draw, distance))
+                Some((
+                    if params.merge == MergeMode::Replace {
+                        self.edge_value(to)
+                    } else {
+                        self.values[target] + draw
+                    },
+                    distance,
+                ))
             })
             .collect();
         let row = |j: u32| (j != NONE).then_some(j as usize);

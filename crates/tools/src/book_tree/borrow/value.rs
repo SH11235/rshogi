@@ -620,6 +620,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         lineage: &lineage,
         schema: &schema,
         replace_curated: args.replace_curated,
+        revive_bench: false,
     };
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;

@@ -5,7 +5,7 @@ use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master,
 use super::model::child;
 use super::output::NODE_MOVES;
 use crate::common::io::write_atomic;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -75,6 +75,7 @@ pub(super) struct Summary {
     pub evals_updated: usize,
     pub record_skipped: usize,
     pub bench_revived: usize,
+    pub bench_protected: usize,
     pub conflicts: usize,
 }
 
@@ -89,6 +90,7 @@ pub(super) struct Options<'a> {
     pub schema: &'a Schema,
     /// curated の局面でも main を木の 1 位に替える。
     pub replace_curated: bool,
+    pub revive_bench: bool,
 }
 
 pub(super) fn run(args: RegisterArgs) -> Result<()> {
@@ -168,6 +170,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         lineage: "",
         schema: &schema,
         replace_curated: args.replace_curated,
+        revive_bench: true,
     };
     let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
@@ -185,11 +188,12 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
     }
     println!(
-        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
+        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / 保護された控え {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
         summary.replaced_main,
         summary.replaced_curated,
         summary.evals_updated,
         summary.bench_revived,
+        summary.bench_protected,
         summary.record_skipped,
         summary.conflicts,
         args.conflicts.display()
@@ -348,7 +352,11 @@ pub(super) fn register(
                 if record {
                     summary.record_skipped += 1;
                 }
-                !record
+                let bench = find(&rows, &m.mv).filter(|&i| rows[i].get("role") == "bench");
+                let protected =
+                    bench.is_some_and(|i| !options.schema.replaceable(rows[i].get("source")));
+                summary.bench_protected += usize::from(protected);
+                !record && !protected && (options.revive_bench || bench.is_none())
             })
             .collect();
         let Some(best) = playable.first().copied() else {
@@ -359,6 +367,7 @@ pub(super) fn register(
             .copied()
             .filter(|m| best.value - m.value < options.alt_gap)
             .collect();
+        let best_was_bench = find(&rows, &best.mv).is_some_and(|i| rows[i].get("role") == "bench");
         for candidate in std::iter::once(best).chain(alts.iter().copied()) {
             if let Some(i) = find(&rows, &candidate.mv)
                 && rows[i].get("role") == "bench"
@@ -396,9 +405,15 @@ pub(super) fn register(
         match main {
             None => {
                 if let Some(i) = find(&rows, &best.mv) {
-                    bail!("{key}: main の無い局面に {} の行があります", rows[i].get("move"));
+                    ensure!(
+                        best_was_bench,
+                        "{key}: main の無い局面に {} の行があります",
+                        rows[i].get("move")
+                    );
+                    rows[i].set("role", "main".into());
+                } else {
+                    rows.push(new_row(best, "main", "木の伝播後の 1 位".into()));
                 }
-                rows.push(new_row(best, "main", "木の伝播後の 1 位".into()));
                 *summary.added_main.entry(side.clone()).or_default() += 1;
             }
             Some(m) if rows[m].get("move") == best.mv => {}
@@ -476,7 +491,10 @@ pub(super) fn register(
         }
         for &i in &existing {
             let row = &rows[i];
-            if row.get("role") == "record" || !options.schema.replaceable(row.get("source")) {
+            if row.get("role") == "record"
+                || (row.get("role") == "bench" && !options.revive_bench)
+                || !options.schema.replaceable(row.get("source"))
+            {
                 continue;
             }
             if let Some(m) = node.moves.iter().find(|m| m.mv == row.get("move")) {
@@ -643,6 +661,7 @@ mod tests {
             source: "read",
             lineage: "",
             replace_curated: false,
+            revive_bench: true,
         }
     }
     fn find<'a>(rows: &'a [Row], key: &str, mv: &str) -> Option<&'a Row> {
@@ -848,6 +867,60 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::remove_file(tree.join(NODE_MOVES)).unwrap();
         assert!(run(args(vec![tree], false)).is_err());
+    }
+
+    #[test]
+    fn bench_source_and_caller_control_revival_without_main() {
+        for has_main in [false, true] {
+            for enabled in [false, true] {
+                for protected in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    crate::book_tree::schema::test_schema(dir.path());
+                    std::fs::write(
+                        dir.path().join("sources.tsv"),
+                        format!(
+                            "source\tdescription\treplaceable\nread\t読み\t1\ncustom\t控え\t{}\n",
+                            usize::from(!protected)
+                        ),
+                    )
+                    .unwrap();
+                    let schema = Schema::load(Some(dir.path())).unwrap();
+                    let mut input = vec![row(B, "best", "bench", "custom", "wide", "-999")];
+                    if has_main {
+                        input.push(row(B, "old", "main", "read", "wide", "0"));
+                    }
+                    let rows = master(&input);
+                    let original = find(&rows, B, "best").unwrap().clone();
+                    let nodes =
+                        BTreeMap::from([(B.into(), node(&[("best", 100), ("old", 0)], 1, 0))]);
+                    let (rows, _, summary) = register(
+                        rows,
+                        &nodes,
+                        &Options {
+                            schema: &schema,
+                            revive_bench: enabled,
+                            ..options()
+                        },
+                    )
+                    .unwrap();
+                    let best = find(&rows, B, "best").unwrap();
+                    assert_eq!(
+                        best.get("role"),
+                        if enabled && !protected {
+                            "main"
+                        } else {
+                            "bench"
+                        }
+                    );
+                    if protected {
+                        assert_eq!(best, &original);
+                    }
+                    assert_eq!(summary.bench_protected, usize::from(protected));
+                    assert_eq!(summary.bench_revived, usize::from(enabled && !protected));
+                    validate(&rows).unwrap();
+                }
+            }
+        }
     }
 
     #[test]

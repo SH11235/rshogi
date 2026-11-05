@@ -10,8 +10,8 @@ use super::reply_graph::apply_usi;
 use super::schema::Schema;
 use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
 use crate::book_backprop::{
-    DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, graph_from_entries, parse_row,
-    percentile, propagate_values, retain_known, write_book_atomic,
+    DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
+    graph_from_entries, parse_row, percentile, propagate_values, retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
@@ -304,18 +304,21 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
     let revivals = if args.revive_bench {
         revive_bench(&mut rows, &positions.0, &book, &schema, &args)?
     } else {
-        [0, 0]
+        Revivals::default()
     };
     master_table::validate(&rows)?;
     if args.apply
         && (!changes.is_empty()
             || demotions.as_ref().is_some_and(|d| d.total() > 0)
-            || revivals.iter().sum::<usize>() > 0)
+            || revivals.revived.iter().sum::<usize>() > 0)
     {
         write_master(&args.master, &original, &rows)?;
     }
     if args.revive_bench {
-        println!("bench から alt に戻す手: 先手番 {}・後手番 {}", revivals[0], revivals[1]);
+        println!(
+            "bench から alt に戻す手: 先手番 {}・後手番 {} / curated の main が無い控え {}",
+            revivals.revived[0], revivals.revived[1], revivals.curated_without_main
+        );
     }
     if let Some(demotions) = demotions {
         println!("{}", demotions.format());
@@ -565,13 +568,19 @@ fn reference_best(moves: &[Option<AuditedMove>], position: &MasterPosition) -> O
         .max()
 }
 
+#[derive(Default, Debug)]
+struct Revivals {
+    revived: BySide,
+    curated_without_main: usize,
+}
+
 fn revive_bench(
     rows: &mut [Row],
     positions: &BTreeMap<String, MasterPosition>,
     book: &AuditedBook,
     schema: &Schema,
     args: &AuditArgs,
-) -> Result<BySide> {
+) -> Result<Revivals> {
     let curated: BTreeSet<String> = rows
         .iter()
         .filter(|r| r.get("tier") == "curated")
@@ -585,12 +594,43 @@ fn revive_bench(
             references.insert(key.as_str(), best);
         }
     }
-    let mut summary = [0, 0];
-    for row in rows {
+    let curated_mains: BTreeSet<_> = rows
+        .iter()
+        .filter(|r| r.get("tier") == "curated" && r.get("role") == "main")
+        .map(|r| r.get("key").to_owned())
+        .collect();
+    let targets: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            if r.get("role") == "bench" {
+                bench_target(r, &book.graph)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<_>>()?;
+    let edges: Vec<_> = targets.iter().flatten().copied().collect();
+    let values = evaluate_edges(
+        &book.graph,
+        DrawValues {
+            black: args.draw_value_black,
+            white: args.draw_value_white,
+        },
+        &edges,
+    )?;
+    let mut edge_values = values.into_iter();
+    let values: Vec<_> =
+        targets.iter().map(|target| target.and_then(|_| edge_values.next())).collect();
+    let mut summary = Revivals::default();
+    for (row, propagated) in rows.iter_mut().zip(values) {
         if row.get("role") != "bench"
             || !schema.replaceable(row.get("source"))
             || (!args.replace_curated && curated.contains(row.get("key")))
         {
+            continue;
+        }
+        if row.get("tier") == "curated" && !curated_mains.contains(row.get("key")) {
+            summary.curated_without_main += 1;
             continue;
         }
         // 開始時に指せた手は復帰対象にしない。降格と復帰を同じ実行で往復させない。
@@ -603,7 +643,10 @@ fn revive_bench(
         let Some(&best) = references.get(row.get("key")) else {
             continue;
         };
-        let Some(value) = bench_value(row, &book.graph)? else {
+        let Some(value) = propagated
+            .map(i64::from)
+            .or(master_table::mean_eval(row.get("evals"))?.map(i64::from))
+        else {
             continue;
         };
         if value <= i64::from(args.bad_eval) || best - value >= i64::from(args.line) {
@@ -620,12 +663,12 @@ fn revive_bench(
             ),
         );
         schema.validate_row(row)?;
-        summary[usize::from(row.get("key").split_whitespace().nth(1) == Some("w"))] += 1;
+        summary.revived[usize::from(row.get("key").split_whitespace().nth(1) == Some("w"))] += 1;
     }
     Ok(summary)
 }
 
-fn bench_value(row: &Row, graph: &Graph) -> Result<Option<i64>> {
+fn bench_target(row: &Row, graph: &Graph) -> Result<Option<(usize, bool)>> {
     let mut pos = position_from_sfen(&format!("{} 1", row.get("key")))?;
     if apply_usi(&mut pos, row.get("move")).is_err() {
         return Ok(None);
@@ -634,18 +677,9 @@ fn bench_value(row: &Row, graph: &Graph) -> Result<Option<i64>> {
     let node = graph
         .find(strip_ply(&child))
         .or_else(|| rshogi_book::flipped_key(&child).and_then(|key| graph.find(strip_ply(&key))));
-    if let Some(node) = node {
-        // 控えの辺をグラフに足すと局面の最善値や循環が変わるので、確定済みの子の値だけを見る。
-        if let Some(value) = graph
-            .moves(node)
-            .filter(|m| m.usable)
-            .map(|m| i64::from(m.new) + i64::from(m.tie_lowered))
-            .max()
-        {
-            return Ok(Some(-value));
-        }
-    }
-    Ok(master_table::mean_eval(row.get("evals"))?.map(i64::from))
+    Ok(node
+        .filter(|&node| graph.moves(node).any(|m| m.usable))
+        .map(|node| (node, row.get("key").split_whitespace().nth(1) == Some("b"))))
 }
 
 /// 出力先が入力のどれかと同じファイルなら止める (出力の書き出しで入力を壊さないため)。
@@ -2030,6 +2064,77 @@ mod tests {
     }
 
     #[test]
+    fn bench_revival_respects_mover_draw_in_asymmetric_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = super::super::model::child(B, "4h3h").unwrap();
+        let d = super::super::model::child(&c, "5b5a").unwrap();
+        let text = master(&[
+            (ROOT, "5i6h", "main", "-30"),
+            (ROOT, "5i4h", "bench", "999"),
+            (A, "5a6a", "main", "30"),
+            (A, "5a5b", "alt", "0"),
+            (B, "4h5h", "main", "-50"),
+            (B, "4h3h", "alt", "0"),
+            (&c, "5b5a", "main", "0"),
+            (&d, "3h4h", "main", "0"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let draws = DrawValues {
+            black: -70,
+            white: 0,
+        };
+        let (_, _, book) = audit(&positions, draws, 15, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        let target = bench_target(&rows[1], &book.graph).unwrap().unwrap();
+        let naive = -book
+            .graph
+            .moves(target.0)
+            .filter(|m| m.usable)
+            .map(|m| m.new + i32::from(m.tie_lowered))
+            .max()
+            .unwrap();
+        assert_eq!(naive, -30);
+        assert_eq!(evaluate_edges(&book.graph, draws, &[target]).unwrap(), [-50]);
+        let mut args = test_args(dir.path());
+        args.draw_value_black = -70;
+        args.draw_value_white = 0;
+        args.line = 15;
+        let summary =
+            revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+        assert_eq!(summary.revived, [0, 0]);
+        assert_eq!(rows[1].get("role"), "bench");
+    }
+
+    #[test]
+    fn curated_bench_without_curated_main_is_counted_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = master(&[
+            (ROOT, "5i6h", "main", "0"),
+            (ROOT, "5i4h", "bench", "0"),
+            (ROOT, "5i5h", "record", "0"),
+        ]);
+        let mut rows = parse_master(&text).unwrap();
+        rows[1].set("tier", "curated".into());
+        rows[2].set("tier", "curated".into());
+        let text = format_master(&rows);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let mut args = test_args(dir.path());
+        args.replace_curated = true;
+        let summary =
+            revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+        assert_eq!(summary.revived, [0, 0]);
+        assert_eq!(summary.curated_without_main, 1);
+        master_table::validate(&rows).unwrap();
+        std::fs::write(&args.master, &text).unwrap();
+        args.revive_bench = true;
+        args.apply = true;
+        args.since = Some("tag".into());
+        run(args).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap(), text);
+    }
+
+    #[test]
     fn bench_revival_thresholds_protection_and_apply() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
@@ -2085,14 +2190,17 @@ mod tests {
             args.line = 40;
             args.replace_curated = false;
             assert_eq!(
-                revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap(),
+                revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args)
+                    .unwrap()
+                    .revived,
                 [0, 0]
             );
             if curated {
                 args.replace_curated = true;
                 assert_eq!(
                     revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args)
-                        .unwrap(),
+                        .unwrap()
+                        .revived,
                     [1, 0]
                 );
             }
@@ -2113,7 +2221,15 @@ mod tests {
         let positions = parse_master_rows(text.as_bytes()).unwrap();
         let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
         let mut rows = parse_master(&text).unwrap();
-        assert_eq!(bench_value(&rows[1], &book.graph).unwrap(), Some(10));
+        assert_eq!(
+            evaluate_edges(
+                &book.graph,
+                DrawValues::both(0),
+                &[bench_target(&rows[1], &book.graph).unwrap().unwrap()]
+            )
+            .unwrap(),
+            [10]
+        );
         let result = revive_bench(
             &mut rows,
             &positions.0,
@@ -2121,7 +2237,8 @@ mod tests {
             &Schema::default(),
             &test_args(dir.path()),
         )
-        .unwrap();
+        .unwrap()
+        .revived;
         assert_eq!(result, [1, 1]);
     }
 
@@ -2145,7 +2262,8 @@ mod tests {
                     &Schema::default(),
                     &test_args(dir.path())
                 )
-                .unwrap(),
+                .unwrap()
+                .revived,
                 expected
             );
         }
