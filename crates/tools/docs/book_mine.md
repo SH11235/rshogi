@@ -893,7 +893,9 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
 
-開始時に全行を一度読み、key と move の組で更新します。保存前に表の整合性を検査し、ファイルのバイト列を読み直して、開始時と異なれば保存を拒否します。保存は原子的に行い、見出し・列順・行順を保持し、改行は `master cycles --apply` と同じく LF に統一します。master の書換えに共通のロックはなく、バイト比較後から保存までの変更は検出できません。`master add`・`tree register --apply`・`master cycles --apply`・`borrow value --apply`・`master audit --apply` など、master を書き換えるコマンドは一度に 1 つだけ実行してください。
+通常の点検は record 行を数えて破棄し、main・alt 行と curated の保護に必要な局面キーだけを保持します。`--apply`・`--demote-alts`・反証出力 (`--refutation-table` / `--enqueue-out`) を指定した場合は全行を保持します。
+
+`--apply` は開始時に全行を一度読み、key と move の組で更新します。保存前に表の整合性を検査し、ファイルのバイト列を読み直して、開始時と異なれば保存を拒否します。保存は原子的に行い、見出し・列順・行順を保持し、改行は `master cycles --apply` と同じく LF に統一します。master の書換えに共通のロックはなく、バイト比較後から保存までの変更は検出できません。`master add`・`tree register --apply`・`master cycles --apply`・`borrow value --apply`・`master audit --apply` など、master を書き換えるコマンドは一度に 1 つだけ実行してください。
 
 置換する局面の先手番・後手番別の数、うち元の main が curated の数、curated なので替えなかった局面、source が置換対象でない数、1 位が伸ばしていない手なので替えなかった数を出します。対象の手の行が無いか record だった場合も、替えずに数を出します。`--apply` が無ければ「確認だけ (--apply なし)」として同じ判定の件数を出します。点検の表・`--out-db`・反駁の表・キューは、すべて書き換え前の状態に基づく出力です。
 

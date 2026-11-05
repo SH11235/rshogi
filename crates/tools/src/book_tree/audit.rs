@@ -220,14 +220,35 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         others.extend(outputs[..i].iter().copied());
         reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
-    let original = std::fs::read(&args.master)?;
-    let mut rows = parse_master(std::str::from_utf8(&original)?)?;
-    master_table::validate(&rows)?;
-    for row in &rows {
-        schema.validate_row(row)?;
-    }
-    let positions =
-        positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
+    let full_rows = args.apply || args.demote_alts || refutation;
+    let (original, mut rows, positions, curated_records) = if full_rows {
+        let original = std::fs::read(&args.master)?;
+        let rows = parse_master(std::str::from_utf8(&original)?)?;
+        master_table::validate(&rows)?;
+        for row in &rows {
+            schema.validate_row(row)?;
+        }
+        let positions =
+            positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
+        (original, rows, positions, BTreeSet::new())
+    } else {
+        let positions = master_table::read_master(&args.master)?;
+        let reader = std::io::BufReader::new(std::fs::File::open(&args.master)?);
+        let mut rows = Vec::new();
+        let mut curated_records = BTreeSet::new();
+        for row in master_table::read_rows(reader)? {
+            let (_, row) = row?;
+            schema.validate_row(&row)?;
+            if row.get("role") != "record" {
+                rows.push(row);
+            } else if row.get("tier") == "curated" && positions.0.contains_key(row.get("key")) {
+                // record の列を保持せず、置換を保護する局面だけを覚える。
+                curated_records.insert(row.get("key").to_owned());
+            }
+        }
+        master_table::validate(&rows)?;
+        (Vec::new(), rows, positions, curated_records)
+    };
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -235,6 +256,7 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
     let (findings, summary, book) = audit(&positions, draws, args.line, args.fill_replies)?;
     let (changes, replacements) = plan_replacements(
         &rows,
+        &curated_records,
         &findings,
         &schema,
         args.since.as_deref().unwrap_or("確認"),
@@ -311,6 +333,7 @@ type Changes = BTreeMap<(String, String), Row>;
 
 fn plan_replacements(
     rows: &[Row],
+    curated_records: &BTreeSet<String>,
     findings: &[Finding],
     schema: &Schema,
     since: &str,
@@ -346,7 +369,9 @@ fn plan_replacements(
             summary.protected += 1;
             continue;
         }
-        if !replace_curated && curated_keys.contains(f.key.as_str()) {
+        if !replace_curated
+            && (curated_keys.contains(f.key.as_str()) || curated_records.contains(&f.key))
+        {
             summary.skipped_curated += 1;
             continue;
         }
@@ -1600,6 +1625,53 @@ mod tests {
     }
 
     #[test]
+    fn lightweight_audit_matches_full_rows_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = replacement_fixture();
+        let path = dir.path().join("moves.tsv");
+        std::fs::write(&path, &original).unwrap();
+        let mut args = test_args(dir.path());
+        args.out_db = Some(dir.path().join("light.db"));
+        run(args).unwrap();
+        let table = std::fs::read(dir.path().join("audit.tsv")).unwrap();
+        let mut args = test_args(dir.path());
+        args.out_db = Some(dir.path().join("full.db"));
+        args.refutation_table = Some(dir.path().join("refutation.tsv"));
+        run(args).unwrap();
+        assert_eq!(table, std::fs::read(dir.path().join("audit.tsv")).unwrap());
+        assert_eq!(
+            std::fs::read(dir.path().join("light.db")).unwrap(),
+            std::fs::read(dir.path().join("full.db")).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn curated_records_protect_replacements_without_retaining_rows() {
+        let text = replacement_fixture();
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, _, _) = audit(&positions, DrawValues::both(0), 1, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        rows[0].set("tier", "wide".into());
+        rows[2].set("tier", "curated".into());
+        let (_, expected) =
+            plan_replacements(&rows, &BTreeSet::new(), &findings, &Schema::default(), "tag", false)
+                .unwrap();
+        rows.retain(|row| row.get("role") != "record");
+        let (_, actual) = plan_replacements(
+            &rows,
+            &BTreeSet::from([ROOT.to_owned()]),
+            &findings,
+            &Schema::default(),
+            "tag",
+            false,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.skipped_curated, 1);
+    }
+
+    #[test]
     fn propagated_best_inherits_curated_tier_and_preserves_other_columns() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("moves.tsv");
@@ -1609,6 +1681,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         let (changes, summary) = plan_replacements(
             &parse_master(&text).unwrap(),
+            &BTreeSet::new(),
             &findings,
             &Schema::default(),
             "tag",
@@ -1649,6 +1722,7 @@ mod tests {
         findings[0].best.origin = Origin::Eval;
         let (changes, summary) = plan_replacements(
             &parse_master(&text).unwrap(),
+            &BTreeSet::new(),
             &findings,
             &Schema::default(),
             "tag",
@@ -1665,15 +1739,22 @@ mod tests {
         )
         .unwrap();
         let schema = Schema::load(Some(dir.path())).unwrap();
-        let (changes, summary) =
-            plan_replacements(&parse_master(&text).unwrap(), &findings, &schema, "tag", true)
-                .unwrap();
+        let (changes, summary) = plan_replacements(
+            &parse_master(&text).unwrap(),
+            &BTreeSet::new(),
+            &findings,
+            &schema,
+            "tag",
+            true,
+        )
+        .unwrap();
         assert!(changes.is_empty());
         assert_eq!(summary.protected, 1);
         for mv in ["5i5h", "missing"] {
             findings[0].best.mv = mv.into();
             let (changes, summary) = plan_replacements(
                 &parse_master(&text).unwrap(),
+                &BTreeSet::new(),
                 &findings,
                 &Schema::default(),
                 "tag",
@@ -1693,12 +1774,26 @@ mod tests {
             rows[0].set("tier", "wide".into());
             rows[index].set("tier", "curated".into());
             let (findings, _) = run_audit(&format_master(&rows), 40);
-            let (changes, summary) =
-                plan_replacements(&rows, &findings, &Schema::default(), "tag", false).unwrap();
+            let (changes, summary) = plan_replacements(
+                &rows,
+                &BTreeSet::new(),
+                &findings,
+                &Schema::default(),
+                "tag",
+                false,
+            )
+            .unwrap();
             assert!(changes.is_empty());
             assert_eq!(summary.skipped_curated, 1);
-            let (changes, summary) =
-                plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+            let (changes, summary) = plan_replacements(
+                &rows,
+                &BTreeSet::new(),
+                &findings,
+                &Schema::default(),
+                "tag",
+                true,
+            )
+            .unwrap();
             assert_eq!(changes.len(), 2);
             assert_eq!(summary.replaced, [1, 0]);
         }
@@ -1764,7 +1859,8 @@ mod tests {
         assert_eq!(findings.len(), 1);
         let mut rows = parse_master(&text).unwrap();
         let (changes, _) =
-            plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+            plan_replacements(&rows, &BTreeSet::new(), &findings, &Schema::default(), "tag", true)
+                .unwrap();
         rewrite_rows(&mut rows, &changes);
         assert_eq!(rows[1].get("role"), "main");
         assert!(run_audit(&format_master(&rows), 40).0.is_empty());
@@ -1838,7 +1934,8 @@ mod tests {
         let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
         assert_eq!(result.total(), 0);
         let (changes, _) =
-            plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
+            plan_replacements(&rows, &BTreeSet::new(), &findings, &Schema::default(), "tag", true)
+                .unwrap();
         rewrite_rows(&mut rows, &changes);
         let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
         assert_eq!(result.protected, 0);
