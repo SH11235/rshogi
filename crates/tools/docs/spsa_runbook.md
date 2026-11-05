@@ -1686,8 +1686,12 @@ journal の末尾の書きかけの行だけを捨て、途中の行が壊れて
 
 `--resume` に `--verify-resume` を足すと、上の照合 (meta と CLI の一致、再生と snapshot の bit 一致) だけを行って終わる。
 worker は起動せず (`--remote-worker` があっても)、journal には書かない (`stats.csv`・`values.csv` は再生から作り直す)。
-動いている run-dir の写しが resume できる組かを確かめるのに使う。写しには `meta.json`・`snapshot-000000.json`・
-meta が指す snapshot・`journal.jsonl` (この順に写す) が要り、resume と同じ引数で、写しを `--run-dir` にして起動する。
+動いている run-dir の写しが resume できる組かを確かめるのに使う。写しには `meta.json`・`snapshots/snapshot-000000.json`・
+`snapshots/<meta の snapshot>`・`journal.jsonl` (この順に写す) が要り、resume と同じ引数で、写しを `--run-dir` にして起動する。
+- 照合には meta に記録された spsa binary と同じもの、engine、値がファイルを指す USI option のファイルが要る。
+- run は gen0 と最新 2 世代の snapshot しか残さないので、写している間に世代が進むと meta が指す snapshot が無くなり、写しに失敗する。
+  そのときは写し直す (誤って ok にはならない)。journal の末尾の書きかけの行は resume と同じく捨てる。
+- `--run-dir` は必ず写し先にする。動いている run-dir に `--force-unlock` と一緒に付けると、その run の lock を消してしまう。
 
 resume で一致を要求するもの (不一致は拒否し、上書きの手段はない。変えたいときは新しい run-dir で始める):
 `--total-pairs` と schedule 系の値 (bit 単位で比べる)、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、

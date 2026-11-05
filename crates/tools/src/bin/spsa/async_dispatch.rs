@@ -2278,6 +2278,8 @@ pub(super) fn run(setup: AsyncSetup<'_>) -> Result<()> {
         }
         csv.commit()?;
         if cli.verify_resume {
+            // resume が続けて行う適用待ちの結果の適用まで確かめる (メモリ上の処理だけで、journal には書かない)。
+            core.finish_replay()?;
             eprintln!(
                 "verify-resume ok: snapshot {} matches the replay (journal {valid_len} bytes, {} pairs applied)",
                 latest.generation, core.completed

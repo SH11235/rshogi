@@ -710,6 +710,14 @@ fn verify_resume_accepts_a_copy_of_meta_gen0_latest_snapshot_and_journal() {
     let output = run_async(&copy, "value_driven", 6, 1, &verify, &[]);
     assert_success(&output);
     assert!(stderr(&output).contains("verify-resume ok"), "{}", stderr(&output));
+
+    // 動いている run の写しでは journal の末尾が書きかけになり得る。resume と同じく捨てて照合する。
+    let mut journal = source.bytes("journal.jsonl");
+    journal.extend_from_slice(b"{\"kind\":\"acc");
+    std::fs::write(copy.path("run/journal.jsonl"), &journal).unwrap();
+    let output = run_async(&copy, "value_driven", 6, 1, &verify, &[]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("verify-resume ok"), "{}", stderr(&output));
 }
 
 #[test]
