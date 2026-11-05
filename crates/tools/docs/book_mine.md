@@ -861,15 +861,18 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 book_mine master audit --master moves.tsv --table audit.tsv \
   --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] [--fill-replies] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
-  [--opp-freq strong_games.db --min-weight 0.001]
+  [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] [--apply --since TAG]
 ```
 
-定跡の元データの表 (上の 13 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
+定跡の元データの表 (上の 13 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。`--apply` を省くと元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データと同じファイル、または `--table` と `--out-db` が同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|
 | `--master <PATH>` | 必須 | 定跡の元データの表 |
 | `--table <PATH>` | 必須 | 点検の表 (TSV) の出力先 |
+| `--apply` | なし | 条件を満たす局面の main を置換し、元データを原子的に保存する |
+| `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
+| `--schema <DIR>` | なし | 語彙と読み条件の表。sources.tsv の replaceable=1 の source だけ置換できる。省略時は read・ext |
 | `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
@@ -883,6 +886,10 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--priority <N>` | `100` | キューの行の priority の基準 (`borrow cut` の `--priority` と同じ意味)。表の順位を足す |
 | `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁の表の重み。`master rejoin` と同じ意味 (`--min-weight` は表から落とす下限)。`--opp-freq` は反駁の出力と一緒に使う |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
+
+`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`record` と `evals`、その他の列は変更せず、見出し・列順・行順を保持します。`--schema` 指定時は各行の語彙と読み条件も検査します。
+
+置換する局面の先手番・後手番別の数、うち元の main が curated の数、source が置換対象でない数、1 位が伸ばしていない手なので替えなかった数を出します。対象の手の行が無いか record だった場合も、替えずに数を出します。`--apply` が無ければ「確認だけ (--apply なし)」と同じ判定の件数を出します。点検の表と `.db` は置換前の main に基づく出力です。伝播は main・alt の全手の最大値を使うため、main の置換後に再伝播する必要はありません。
 
 伝播の仕方:
 
