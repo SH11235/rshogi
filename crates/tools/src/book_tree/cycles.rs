@@ -918,7 +918,7 @@ fn rewrite_rows<'a>(
             continue;
         };
         ensure!(
-            row.get("role") != "record",
+            !super::master_table::is_unplayed(row.get("role")),
             "内部エラー: record の行です: {} {}",
             pair.0,
             pair.1

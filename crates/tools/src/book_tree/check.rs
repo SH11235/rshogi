@@ -167,7 +167,7 @@ fn membership(annot: &Annotation, selections: &Selections, out: &mut impl Write)
                     writeln!(error_details, "  unknown move: {key} | {mv}")?;
                     errors += 1;
                 }
-                Some(m) if m.role == "record" => {
+                Some(m) if super::master_table::is_unplayed(&m.role) => {
                     writeln!(record_details, "  record selection: {key} | {mv}")?;
                     records += 1;
                     has_record = true;
@@ -916,7 +916,7 @@ mod tests {
         let annot = serde_json::json!({"version":2,"book":{"sha256":digest(&db).unwrap()},"positions":{
             HIRATE_KEY:{"moves":{
                 "7g7f":{"role":"main","evals":[0]},
-                "2g2f":{"role":"record","evals":[]},
+                "2g2f":{"role":"bench","evals":[]},
                 "9i9a":{"role":"record","evals":[]}}},
             child:{"moves":{"2f2e":{"role":"main","evals":[-150,-150,-151]}}}
         }});

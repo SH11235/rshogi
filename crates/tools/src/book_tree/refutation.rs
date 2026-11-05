@@ -171,7 +171,7 @@ fn fill_best_sources(master: &[Row], rows: &mut [Refutation]) -> Result<()> {
     }
     let mut found = vec![None; rows.len()];
     for row in master {
-        if row.get("role") == "record" {
+        if super::master_table::is_unplayed(row.get("role")) {
             continue;
         }
         if let Some(&i) = wanted.get(&(row.get("key"), row.get("move"))) {

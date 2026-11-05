@@ -74,6 +74,7 @@ pub(super) struct Summary {
     pub replaced_curated: usize,
     pub evals_updated: usize,
     pub record_skipped: usize,
+    pub bench_revived: usize,
     pub conflicts: usize,
 }
 
@@ -184,10 +185,11 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
     }
     println!(
-        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
+        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
         summary.replaced_main,
         summary.replaced_curated,
         summary.evals_updated,
+        summary.bench_revived,
         summary.record_skipped,
         summary.conflicts,
         args.conflicts.display()
@@ -357,6 +359,19 @@ pub(super) fn register(
             .copied()
             .filter(|m| best.value - m.value < options.alt_gap)
             .collect();
+        for candidate in std::iter::once(best).chain(alts.iter().copied()) {
+            if let Some(i) = find(&rows, &candidate.mv)
+                && rows[i].get("role") == "bench"
+            {
+                rows[i].set("role", "alt".into());
+                let note = append(
+                    rows[i].get("note"),
+                    format!("{}: 値が戻ったので bench から alt", options.since),
+                );
+                rows[i].set("note", note);
+                summary.bench_revived += 1;
+            }
+        }
         let nodes_text = format_nodes(node.nodes);
         let new_row = |mv: &NodeMove, role: &str, why: String| {
             Row::from_fields(&[
@@ -833,6 +848,31 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::remove_file(tree.join(NODE_MOVES)).unwrap();
         assert!(run(args(vec![tree], false)).is_err());
+    }
+
+    #[test]
+    fn bench_best_and_close_alts_return() {
+        for source in ["read", "protected"] {
+            let rows = master(&[
+                row(B, "old", "main", source, "wide", "0"),
+                row(B, "best", "bench", "read", "wide", "-999"),
+                row(B, "close", "bench", "read", "wide", "-999"),
+                row(B, "bad", "bench", "read", "wide", "-999"),
+            ]);
+            let nodes = BTreeMap::from([(
+                B.into(),
+                node(&[("best", 100), ("close", 99), ("old", 0), ("bad", -999)], 1, 0),
+            )]);
+            let (rows, _, summary) = register(rows, &nodes, &options()).unwrap();
+            assert_eq!(
+                find(&rows, B, "best").unwrap().get("role"),
+                if source == "read" { "main" } else { "alt" }
+            );
+            assert_eq!(find(&rows, B, "best").unwrap().get("evals"), "100");
+            assert_eq!(find(&rows, B, "close").unwrap().get("role"), "alt");
+            assert_eq!(find(&rows, B, "bad").unwrap().get("role"), "bench");
+            assert_eq!(summary.bench_revived, 2);
+        }
     }
 
     #[test]

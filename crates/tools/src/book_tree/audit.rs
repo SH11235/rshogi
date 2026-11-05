@@ -36,9 +36,12 @@ pub(super) struct AuditArgs {
     /// curated の行がある局面でも main の置換・alt の降格を行う
     #[arg(long)]
     replace_curated: bool,
-    /// 悪い alt を record にする (--apply なしでは件数だけ確認)
+    /// 悪い alt を bench (控え) にする (--apply なしでは件数だけ確認)
     #[arg(long)]
     demote_alts: bool,
+    /// 値が戻った bench (控え) を alt に戻す (--apply なしでは件数だけ確認)
+    #[arg(long, conflicts_with = "fill_replies")]
+    revive_bench: bool,
     /// alt を降格する値の上限 (手番側からの値)
     #[arg(long, default_value_t = -150, allow_hyphen_values = true)]
     bad_eval: i32,
@@ -191,6 +194,10 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         !(args.demote_alts && args.fill_replies),
         "--demote-alts と --fill-replies は併用できません"
     );
+    ensure!(
+        !(args.revive_bench && args.fill_replies),
+        "--revive-bench と --fill-replies は併用できません"
+    );
     let schema = Schema::load(args.schema.as_deref())?;
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
@@ -294,9 +301,21 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
     } else {
         None
     };
+    let revivals = if args.revive_bench {
+        revive_bench(&mut rows, &positions.0, &book, &schema, &args)?
+    } else {
+        [0, 0]
+    };
     master_table::validate(&rows)?;
-    if args.apply && (!changes.is_empty() || demotions.as_ref().is_some_and(|d| d.total() > 0)) {
+    if args.apply
+        && (!changes.is_empty()
+            || demotions.as_ref().is_some_and(|d| d.total() > 0)
+            || revivals.iter().sum::<usize>() > 0)
+    {
         write_master(&args.master, &original, &rows)?;
+    }
+    if args.revive_bench {
+        println!("bench から alt に戻す手: 先手番 {}・後手番 {}", revivals[0], revivals[1]);
     }
     if let Some(demotions) = demotions {
         println!("{}", demotions.format());
@@ -452,7 +471,7 @@ impl DemotionSummary {
 
     fn format(&self) -> String {
         format!(
-            "record に降格する alt: 先手番 {}・後手番 {} / 理由 (a) 値: 先手番 {}・後手番 {} / 理由 (b) 差: 先手番 {}・後手番 {} / 値が不明 {} / source が保護対象 {} / curated なので降格しなかった局面 {}",
+            "bench (控え) に降格する alt: 先手番 {}・後手番 {} / 理由 (a) 値: 先手番 {}・後手番 {} / 理由 (b) 差: 先手番 {}・後手番 {} / 値が不明 {} / source が保護対象 {} / curated なので降格しなかった局面 {}",
             self.bad[0] + self.gap[0],
             self.bad[1] + self.gap[1],
             self.bad[0],
@@ -496,12 +515,7 @@ fn demote_alts(
             .flatten()
             .map(|m| (m.mv.as_str(), i64::from(m.value) + i64::from(m.tie_lowered)))
             .collect();
-        let best = moves
-            .iter()
-            .flatten()
-            .filter(|m| m.origin == Origin::Propagated || m.mv == position.moves[0].mv)
-            .map(|m| values[m.mv.as_str()])
-            .max();
+        let best = reference_best(&moves, position);
         let side = usize::from(key.split_whitespace().nth(1) == Some("w"));
         for i in indices {
             let row = &mut rows[i];
@@ -526,10 +540,10 @@ fn demote_alts(
                 summary.protected += 1;
                 continue;
             }
-            row.set("role", "record".into());
+            row.set("role", "bench".into());
             let note = row.get("note");
             let since = args.since.as_deref().unwrap_or("確認");
-            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から record (基準との差 {gap} / 値 {value})",
+            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から bench (控え) (基準との差 {gap} / 値 {value})",
                 if note.is_empty() { "" } else { "。" }));
             schema.validate_row(row)?;
             if by_gap {
@@ -540,6 +554,98 @@ fn demote_alts(
         }
     }
     Ok(summary)
+}
+
+fn reference_best(moves: &[Option<AuditedMove>], position: &MasterPosition) -> Option<i64> {
+    moves
+        .iter()
+        .flatten()
+        .filter(|m| m.origin == Origin::Propagated || m.mv == position.moves[0].mv)
+        .map(|m| i64::from(m.value) + i64::from(m.tie_lowered))
+        .max()
+}
+
+fn revive_bench(
+    rows: &mut [Row],
+    positions: &BTreeMap<String, MasterPosition>,
+    book: &AuditedBook,
+    schema: &Schema,
+    args: &AuditArgs,
+) -> Result<BySide> {
+    let curated: BTreeSet<String> = rows
+        .iter()
+        .filter(|r| r.get("tier") == "curated")
+        .map(|r| r.get("key").to_owned())
+        .collect();
+    let mut references = BTreeMap::new();
+    for ((key, position), known) in positions.iter().zip(&book.known) {
+        let moves = audited_moves(&book.graph, key, position, known)?;
+        let best = reference_best(&moves, position);
+        if let Some(best) = best {
+            references.insert(key.as_str(), best);
+        }
+    }
+    let mut summary = [0, 0];
+    for row in rows {
+        if row.get("role") != "bench"
+            || !schema.replaceable(row.get("source"))
+            || (!args.replace_curated && curated.contains(row.get("key")))
+        {
+            continue;
+        }
+        // 開始時に指せた手は復帰対象にしない。降格と復帰を同じ実行で往復させない。
+        if positions
+            .get(row.get("key"))
+            .is_some_and(|p| p.moves.iter().any(|m| m.mv == row.get("move")))
+        {
+            continue;
+        }
+        let Some(&best) = references.get(row.get("key")) else {
+            continue;
+        };
+        let Some(value) = bench_value(row, &book.graph)? else {
+            continue;
+        };
+        if value <= i64::from(args.bad_eval) || best - value >= i64::from(args.line) {
+            continue;
+        }
+        row.set("role", "alt".into());
+        let note = row.get("note");
+        let since = args.since.as_deref().unwrap_or("確認");
+        row.set(
+            "note",
+            format!(
+                "{note}{}{since}: 値が戻ったので bench から alt",
+                if note.is_empty() { "" } else { "。" }
+            ),
+        );
+        schema.validate_row(row)?;
+        summary[usize::from(row.get("key").split_whitespace().nth(1) == Some("w"))] += 1;
+    }
+    Ok(summary)
+}
+
+fn bench_value(row: &Row, graph: &Graph) -> Result<Option<i64>> {
+    let mut pos = position_from_sfen(&format!("{} 1", row.get("key")))?;
+    if apply_usi(&mut pos, row.get("move")).is_err() {
+        return Ok(None);
+    }
+    let child = pos.to_sfen();
+    let node = graph
+        .find(strip_ply(&child))
+        .or_else(|| rshogi_book::flipped_key(&child).and_then(|key| graph.find(strip_ply(&key))));
+    if let Some(node) = node {
+        // 控えの辺をグラフに足すと局面の最善値や循環が変わるので、確定済みの子の値だけを見る。
+        if let Some(value) = graph
+            .moves(node)
+            .filter(|m| m.usable)
+            .map(|m| i64::from(m.new) + i64::from(m.tie_lowered))
+            .max()
+        {
+            return Ok(Some(-value));
+        }
+    }
+    Ok(master_table::mean_eval(row.get("evals"))?.map(i64::from))
 }
 
 /// 出力先が入力のどれかと同じファイルなら止める (出力の書き出しで入力を壊さないため)。
@@ -1127,7 +1233,7 @@ pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValue
     out(format!("千日手の値: 先手 {} / 後手 {}", draws.black, draws.white));
     out(format!("局面: {}", sides(summary.positions)));
     out(format!(
-        "手 (main・alt): {} / 値の分かる手 {} / 非合法手 {} / record (除外) {}",
+        "手 (main・alt): {} / 値の分かる手 {} / 非合法手 {} / bench・record (除外) {}",
         summary.moves, summary.known_moves, summary.illegal_moves, summary.records
     ));
     if changed > 0 {
@@ -1594,6 +1700,7 @@ mod tests {
             apply: false,
             replace_curated: true,
             demote_alts: false,
+            revive_bench: false,
             bad_eval: -150,
             since: None,
             schema: None,
@@ -1923,15 +2030,153 @@ mod tests {
     }
 
     #[test]
+    fn bench_revival_thresholds_protection_and_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        for (main, bench, child, expected) in [
+            ("100", "61", None, "alt"),
+            ("100", "60", None, "bench"),
+            ("-140", "-150", None, "bench"),
+            ("100", "", None, "bench"),
+            ("100", "999", Some("0"), "bench"),
+            ("100", "-999", Some("-100"), "alt"),
+        ] {
+            for apply in [false, true] {
+                for enabled in [false, true] {
+                    let mut input =
+                        vec![(ROOT, "5i6h", "main", main), (ROOT, "5i4h", "bench", bench)];
+                    if let Some(child) = child {
+                        input.push((A, "5a5b", "main", child));
+                    }
+                    let text = master(&input);
+                    std::fs::write(&path, &text).unwrap();
+                    let mut args = test_args(dir.path());
+                    args.apply = apply;
+                    args.revive_bench = enabled;
+                    args.demote_alts = true;
+                    args.line = 40;
+                    args.since = Some("tag".into());
+                    run(args).unwrap();
+                    let updated = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                    assert_eq!(
+                        updated[1].get("role"),
+                        if apply && enabled { expected } else { "bench" }
+                    );
+                    if updated[1].get("role") == "alt" {
+                        assert_eq!(updated[1].get("note"), "tag: 値が戻ったので bench から alt");
+                    }
+                }
+            }
+        }
+        let text = master(&[
+            (ROOT, "5i6h", "main", "100"),
+            (ROOT, "5i4h", "bench", "100"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        for curated in [false, true] {
+            let mut rows = parse_master(&text).unwrap();
+            if curated {
+                rows[0].set("tier", "curated".into());
+            } else {
+                rows[1].set("source", "protected".into());
+            }
+            let mut args = test_args(dir.path());
+            args.line = 40;
+            args.replace_curated = false;
+            assert_eq!(
+                revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap(),
+                [0, 0]
+            );
+            if curated {
+                args.replace_curated = true;
+                assert_eq!(
+                    revive_bench(&mut rows, &positions.0, &book, &Schema::default(), &args)
+                        .unwrap(),
+                    [1, 0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bench_revival_uses_flipped_children_and_counts_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let white = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let text = master(&[
+            (ROOT, "5i6h", "main", "0"),
+            (ROOT, "5i4h", "bench", "-999"),
+            (A_FLIPPED, "5i5h", "main", "-10"),
+            (white, "5a6b", "main", "0"),
+            (white, "5a4b", "bench", "10"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        assert_eq!(bench_value(&rows[1], &book.graph).unwrap(), Some(10));
+        let result = revive_bench(
+            &mut rows,
+            &positions.0,
+            &book,
+            &Schema::default(),
+            &test_args(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(result, [1, 1]);
+    }
+
+    #[test]
+    fn bench_revival_reference_excludes_direct_alt_and_requires_known_main_or_expansion() {
+        let dir = tempfile::tempdir().unwrap();
+        for (main, expected) in [("0", [1, 0]), ("", [0, 0])] {
+            let text = master(&[
+                (ROOT, "5i6h", "main", main),
+                (ROOT, "5i5h", "alt", "9999"),
+                (ROOT, "5i4h", "bench", "0"),
+            ]);
+            let positions = parse_master_rows(text.as_bytes()).unwrap();
+            let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+            let mut rows = parse_master(&text).unwrap();
+            assert_eq!(
+                revive_bench(
+                    &mut rows,
+                    &positions.0,
+                    &book,
+                    &Schema::default(),
+                    &test_args(dir.path())
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn bench_does_not_change_playable_values() {
+        let text = master(&[
+            (ROOT, "5i6h", "main", "10"),
+            (ROOT, "5i4h", "bench", "9999"),
+            (A, "5a5b", "main", "-9999"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let values = master_values(&positions, DrawValues::both(0)).unwrap();
+        assert_eq!(values[ROOT].best, Some(10));
+        let mut rows = parse_master(&text).unwrap();
+        rows.retain(|r| r.get("role") != "bench");
+        let without = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        assert_eq!(values, master_values(&without, DrawValues::both(0)).unwrap());
+    }
+
+    #[test]
     fn demotions_use_values_before_tie_adjustment_and_keep_other_columns() {
         let dir = tempfile::tempdir().unwrap();
         let cases = [
-            (-140, -150, 40, "record", [1, 0], [0, 0]),
-            (100, 60, 40, "record", [0, 0], [1, 0]),
+            (-140, -150, 40, "bench", [1, 0], [0, 0]),
+            (100, 60, 40, "bench", [0, 0], [1, 0]),
             (100, 100, 1, "alt", [0, 0], [0, 0]),
             (-200, -200, 1, "alt", [0, 0], [0, 0]),
-            (-200, -210, 40, "record", [1, 0], [0, 0]),
-            (-200, -240, 40, "record", [0, 0], [1, 0]),
+            (-200, -210, 40, "bench", [1, 0], [0, 0]),
+            (-200, -240, 40, "bench", [0, 0], [1, 0]),
         ];
         for (main, alt, line, role, bad, gap) in cases {
             let text = master(&[
@@ -1958,11 +2203,11 @@ mod tests {
             for column in COLUMNS.into_iter().filter(|c| !["role", "note"].contains(c)) {
                 assert_eq!(rows[1].get(column), original[1].get(column));
             }
-            if role == "record" {
+            if role == "bench" {
                 assert_eq!(
                     rows[1].get("note"),
                     format!(
-                        "tag: 伝播後の値が悪いので alt から record (基準との差 {} / 値 {alt})",
+                        "tag: 伝播後の値が悪いので alt から bench (控え) (基準との差 {} / 値 {alt})",
                         main - alt
                     )
                 );
@@ -2050,7 +2295,7 @@ mod tests {
                 run(args).unwrap();
                 let updated = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 assert_eq!(updated, rows);
-                assert_eq!(updated[1].get("role"), if replace_curated { "record" } else { "alt" });
+                assert_eq!(updated[1].get("role"), if replace_curated { "bench" } else { "alt" });
                 if !replace_curated {
                     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
                 }
@@ -2134,6 +2379,7 @@ mod tests {
         std::fs::write(&path, &text).unwrap();
         let mut args = test_args(dir.path());
         args.demote_alts = true;
+        args.revive_bench = true;
         args.line = 40;
         run(args).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
@@ -2142,6 +2388,7 @@ mod tests {
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.demote_alts = true;
+        args.revive_bench = true;
         args.line = 40;
         args.apply = true;
         args.since = Some("tag".into());

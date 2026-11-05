@@ -51,90 +51,94 @@ fn args(dir: &Path) -> ExportArgs {
 }
 #[test]
 fn outputs_reads_schema_and_strict_bad_eval() {
-    use super::super::reply_graph::{HIRATE_KEY, fixture::after};
-    let d = tempfile::tempdir().unwrap();
-    crate::book_tree::schema::test_schema(d.path());
-    let root = HIRATE_KEY;
-    let child = after(root, &["7g7f", "3c3d"]);
-    let rows = [
-        row(root, "7g7f", "main", "curated", "-200,-201"),
-        row(root, "2g2f", "alt", "wide", ""),
-        row(root, "5g5f", "record", "wide", ""),
-        row(&child, "2g2f", "main", "wide", "12"),
-    ];
-    std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&rows)).unwrap();
-    let mut a = args(d.path());
-    a.strict_bad_eval = true;
-    let mut output = Vec::new();
-    assert!(run_to(a, &mut output).is_err());
-    assert!(String::from_utf8(output).unwrap().contains("bad-eval reachable positions: 1"));
-    assert!(files::outputs(&d.path().join("book")).iter().all(|p| !p.exists()));
-    run_to(args(d.path()), &mut Vec::new()).unwrap();
-    let db = std::fs::read_to_string(d.path().join("book.db")).unwrap();
-    assert!(db.starts_with("#YANEURAOU-DB2016 1.00\n"));
-    assert!(db.contains("7g7f none 100 0 2\n2g2f none 100 0 1\n5g5f none -30000 0 0\n"));
-    let annotation: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(d.path().join("book.annot.json")).unwrap()).unwrap();
-    assert_eq!(annotation["sources"], serde_json::json!({}));
-    assert_eq!(annotation["version"], 2);
-    assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["cond"], "unknown");
-    assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["value_kind"], "unknown");
-    assert_eq!(
-        annotation["positions"][root]["moves"]["7g7f"]["replies"],
-        serde_json::json!(["3c3d"])
-    );
-    assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["depth_after"], 2);
-    assert_eq!(annotation["positions"][root]["moves"]["5g5f"]["depth_after"], 0);
-    let digest = format!("{:x}", Sha256::digest(db.as_bytes()));
-    assert_eq!(
-        std::fs::read_to_string(d.path().join("book.default.explore.txt")).unwrap(),
-        format!("# preset: default\n# book: book.db sha256 {digest}\nsfen {root} 7g7f\n")
-    );
-    assert_eq!(
-        std::fs::read_to_string(d.path().join("book.random.explore.txt")).unwrap(),
-        format!("# preset: random\n# book: book.db sha256 {digest}\nsfen {root} 7g7f 2g2f\n")
-    );
-    let logs = d.path().join("reads.jsonl");
-    std::fs::write(&logs,format!(r#"{{"key":"{root}","ply":1,"nodes":1000000000,"multipv":[{{"move":"2g2f","cp":12}},{{"move":"7g7f","cp":10}}]}}"#)).unwrap();
-    let mut a = args(d.path());
-    a.force = true;
-    a.reads = vec![logs];
-    a.strict_bad_eval = true;
-    run_to(a, &mut Vec::new()).unwrap();
-    let text = std::fs::read_to_string(d.path().join("book.annot.json")).unwrap();
-    assert!(text.contains("\"top\": 12.0"));
-    assert!(text.contains("\"main\": 10.0"));
-    std::fs::write(
-        d.path().join("sources.tsv"),
-        "source\tdescription\treplaceable\nunknown\t説明\t0\n",
-    )
-    .unwrap();
-    let mut a = args(d.path());
-    a.force = true;
-    a.schema = Some(d.path().into());
-    assert!(
-        run_to(a, &mut Vec::new())
-            .unwrap_err()
-            .to_string()
-            .contains("unknown source: test")
-    );
-    assert_eq!(std::fs::read_to_string(d.path().join("book.annot.json")).unwrap(), text);
-    std::fs::write(
-        d.path().join("sources.tsv"),
-        "source\tdescription\treplaceable\ntest\t説明\t0\n",
-    )
-    .unwrap();
-    let mut a = args(d.path());
-    a.force = true;
-    a.schema = Some(d.path().into());
-    a.tier = "curated".into();
-    run_to(a, &mut Vec::new()).unwrap();
-    let annotation: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(d.path().join("book.annot.json")).unwrap())
-            .unwrap();
-    assert_eq!(annotation["sources"], serde_json::json!({"test":"説明"}));
-    assert_eq!(annotation["positions"].as_object().unwrap().len(), 1);
-    assert_eq!(annotation["positions"][root]["moves"].as_object().unwrap().len(), 1);
+    for unplayed in ["record", "bench"] {
+        use super::super::reply_graph::{HIRATE_KEY, fixture::after};
+        let d = tempfile::tempdir().unwrap();
+        crate::book_tree::schema::test_schema(d.path());
+        let root = HIRATE_KEY;
+        let child = after(root, &["7g7f", "3c3d"]);
+        let rows = [
+            row(root, "7g7f", "main", "curated", "-200,-201"),
+            row(root, "2g2f", "alt", "wide", ""),
+            row(root, "5g5f", unplayed, "wide", ""),
+            row(&child, "2g2f", "main", "wide", "12"),
+        ];
+        std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&rows)).unwrap();
+        let mut a = args(d.path());
+        a.strict_bad_eval = true;
+        let mut output = Vec::new();
+        assert!(run_to(a, &mut output).is_err());
+        assert!(String::from_utf8(output).unwrap().contains("bad-eval reachable positions: 1"));
+        assert!(files::outputs(&d.path().join("book")).iter().all(|p| !p.exists()));
+        run_to(args(d.path()), &mut Vec::new()).unwrap();
+        let db = std::fs::read_to_string(d.path().join("book.db")).unwrap();
+        assert!(db.starts_with("#YANEURAOU-DB2016 1.00\n"));
+        assert!(db.contains("7g7f none 100 0 2\n2g2f none 100 0 1\n5g5f none -30000 0 0\n"));
+        let annotation: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join("book.annot.json")).unwrap())
+                .unwrap();
+        assert_eq!(annotation["sources"], serde_json::json!({}));
+        assert_eq!(annotation["version"], 2);
+        assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["cond"], "unknown");
+        assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["value_kind"], "unknown");
+        assert_eq!(
+            annotation["positions"][root]["moves"]["7g7f"]["replies"],
+            serde_json::json!(["3c3d"])
+        );
+        assert_eq!(annotation["positions"][root]["moves"]["7g7f"]["depth_after"], 2);
+        assert_eq!(annotation["positions"][root]["moves"]["5g5f"]["depth_after"], 0);
+        let digest = format!("{:x}", Sha256::digest(db.as_bytes()));
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("book.default.explore.txt")).unwrap(),
+            format!("# preset: default\n# book: book.db sha256 {digest}\nsfen {root} 7g7f\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("book.random.explore.txt")).unwrap(),
+            format!("# preset: random\n# book: book.db sha256 {digest}\nsfen {root} 7g7f 2g2f\n")
+        );
+        let logs = d.path().join("reads.jsonl");
+        std::fs::write(&logs,format!(r#"{{"key":"{root}","ply":1,"nodes":1000000000,"multipv":[{{"move":"2g2f","cp":12}},{{"move":"7g7f","cp":10}}]}}"#)).unwrap();
+        let mut a = args(d.path());
+        a.force = true;
+        a.reads = vec![logs];
+        a.strict_bad_eval = true;
+        run_to(a, &mut Vec::new()).unwrap();
+        let text = std::fs::read_to_string(d.path().join("book.annot.json")).unwrap();
+        assert!(text.contains("\"top\": 12.0"));
+        assert!(text.contains("\"main\": 10.0"));
+        std::fs::write(
+            d.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\nunknown\t説明\t0\n",
+        )
+        .unwrap();
+        let mut a = args(d.path());
+        a.force = true;
+        a.schema = Some(d.path().into());
+        assert!(
+            run_to(a, &mut Vec::new())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown source: test")
+        );
+        assert_eq!(std::fs::read_to_string(d.path().join("book.annot.json")).unwrap(), text);
+        std::fs::write(
+            d.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\ntest\t説明\t0\n",
+        )
+        .unwrap();
+        let mut a = args(d.path());
+        a.force = true;
+        a.schema = Some(d.path().into());
+        a.tier = "curated".into();
+        run_to(a, &mut Vec::new()).unwrap();
+        let annotation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(d.path().join("book.annot.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(annotation["sources"], serde_json::json!({"test":"説明"}));
+        assert_eq!(annotation["positions"].as_object().unwrap().len(), 1);
+        assert_eq!(annotation["positions"][root]["moves"].as_object().unwrap().len(), 1);
+    }
 }
 #[test]
 fn validation_reports_all_rows_before_any_output() {
