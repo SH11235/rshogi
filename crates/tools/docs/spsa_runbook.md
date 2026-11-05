@@ -1691,7 +1691,7 @@ worker は起動せず (`--remote-worker` があっても)、journal には書�
 - 照合には meta に記録された spsa binary と同じもの、engine、値がファイルを指す USI option のファイルが要る。
 - run は gen0 と最新 2 世代の snapshot しか残さないので、写している間に世代が進むと meta が指す snapshot が無くなり、写しに失敗する。
   そのときは写し直す (誤って ok にはならない)。journal の末尾の書きかけの行は resume と同じく捨てる。
-- `--run-dir` は必ず写し先にする。動いている run-dir に `--force-unlock` と一緒に付けると、その run の lock を消してしまう。
+- `--run-dir` は必ず写し先にする。動いている run-dir に `--force-unlock` と一緒に付けると、その run の lock を消し、`stats.csv`・`values.csv` を置き換えてしまう (動いている run はその後の行を置き換え前のファイルに書く)。
 
 resume で一致を要求するもの (不一致は拒否し、上書きの手段はない。変えたいときは新しい run-dir で始める):
 `--total-pairs` と schedule 系の値 (bit 単位で比べる)、`--max-lag`、param の定義 (順序・型・範囲・c_end/r_end・active/適用対象)、

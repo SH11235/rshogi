@@ -753,7 +753,21 @@ fn verify_resume_needs_resume_and_is_not_a_worker() {
     let test = PoolTest::new();
     let output = run_async(&test, "value_driven", 2, 1, &["--verify-resume"], &[]);
     assert!(!output.status.success());
+    assert!(stderr(&output).contains("--resume"), "{}", stderr(&output));
     assert!(!test.path("run/journal.jsonl").exists());
+    let output = test.run_with(
+        "value_driven",
+        2,
+        1,
+        &["--dispatch", "batch", "--resume", "--verify-resume"],
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("--verify-resume は --dispatch async 専用です"),
+        "{}",
+        stderr(&output)
+    );
     let output = run_async(
         &test,
         "value_driven",
