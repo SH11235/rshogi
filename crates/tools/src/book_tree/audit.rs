@@ -495,7 +495,7 @@ fn demote_alts(
             row.set("role", "record".into());
             let note = row.get("note");
             let since = args.since.as_deref().unwrap_or("確認");
-            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から record (1 位との差 {gap} / 値 {value})",
+            row.set("note", format!("{note}{}{since}: 伝播後の値が悪いので alt から record (基準との差 {gap} / 値 {value})",
                 if note.is_empty() { "" } else { "。" }));
             schema.validate_row(row)?;
             if by_gap {
@@ -1810,7 +1810,7 @@ mod tests {
                 assert_eq!(
                     rows[1].get("note"),
                     format!(
-                        "tag: 伝播後の値が悪いので alt から record (1 位との差 {} / 値 {alt})",
+                        "tag: 伝播後の値が悪いので alt から record (基準との差 {} / 値 {alt})",
                         main - alt
                     )
                 );

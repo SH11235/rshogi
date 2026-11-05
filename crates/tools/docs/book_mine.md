@@ -906,7 +906,7 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 - (a) 手番側からの値が `--bad-eval` 以下、かつ参照する最善値より厳密に低い。同値は残し、最善値自体が `--bad-eval` 以下でも、より悪い alt は降格します。
 - (b) 参照する最善値との差が `--line` 以上。両方の条件を満たす手は (b) に数えます。
 
-置換後の main と、この実行で main から alt に替えた手は降格せず、record は変更しません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ降格せず、その局面数を別に出します。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から record (1 位との差 N / 値 V)` を追記します。降格する alt の数は手番別・理由別に出します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。`--demote-alts` と `--fill-replies` は、確認だけの場合も併用できません。
+置換後の main と、この実行で main から alt に替えた手は降格せず、record は変更しません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ降格せず、その局面数を別に出します。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から record (基準との差 N / 値 V)` (基準は伸ばした手と main の値の最大) を追記します。降格する alt の数は手番別・理由別に出します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。`--demote-alts` と `--fill-replies` は、確認だけの場合も併用できません。
 
 伝播の仕方:
 
