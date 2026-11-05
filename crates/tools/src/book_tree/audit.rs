@@ -252,10 +252,10 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
                 row.get("key"),
                 row.get("move")
             );
-            if row.get("role") != "record" {
+            if !master_table::is_unplayed(row.get("role")) {
                 rows.push(row.clone());
             } else if row.get("tier") == "curated" {
-                // record の列を保持せず、置換を保護する局面だけを覚える。
+                // 指さない行 (record・bench) の列を保持せず、置換を保護する局面だけを覚える。
                 curated_records.insert(row.get("key").to_owned());
             }
             Ok((at, row))
