@@ -872,7 +872,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--master <PATH>` | 必須 | 定跡の元データの表 |
 | `--table <PATH>` | 必須 | 点検の表 (TSV) の出力先 |
 | `--apply` | なし | 条件を満たす局面の main を置換し、元データを原子的に保存する |
-| `--replace-curated` | なし | curated の行がある局面でも main を置換する |
+| `--replace-curated` | なし | curated の行がある局面でも main の置換・alt の降格を行う |
 | `--demote-alts` | なし | main の置換判定後、悪い alt を record にする。`--apply` なしでは件数だけ確認する |
 | `--bad-eval <CP>` | `-150` | alt の降格に使う値の上限 (手番側からの整数値) |
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
@@ -881,7 +881,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
-| `--fill-replies` | なし | 元データに無い相手の手番の局面を補って伝播する (下の「伝播の仕方」)。`--apply` とは併用不可 |
+| `--fill-replies` | なし | 元データに無い相手の手番の局面を補って伝播する (下の「伝播の仕方」)。`--apply`・`--demote-alts` とは併用不可 (確認だけの場合も含む) |
 | `--refutation-table <PATH>` | なし | 反駁の表 (TSV) の出力先 (下の「反駁の点検」) |
 | `--refutation-margin <CP>` | `1` | 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す (1 以上) |
 | `--enqueue-out <PATH>` | なし | 反駁の局面を読み足す、`book_mine tree enqueue --from` に渡す行 (JSON Lines) の出力先 |
@@ -891,9 +891,9 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁の表の重み。`master rejoin` と同じ意味 (`--min-weight` は表から落とす下限)。`--opp-freq` は反駁の出力と一緒に使う |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
-`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
 
-開始時に全行を一度読み、key と move の組で更新します。保存前に表の整合性を検査し、ファイルのバイト列を読み直して、開始時と異なれば保存を拒否します。保存は原子的に行い、見出し・列順・行順を保持し、改行は `master cycles --apply` と同じく LF に統一します。
+開始時に全行を一度読み、key と move の組で更新します。保存前に表の整合性を検査し、ファイルのバイト列を読み直して、開始時と異なれば保存を拒否します。保存は原子的に行い、見出し・列順・行順を保持し、改行は `master cycles --apply` と同じく LF に統一します。master の書換えに共通のロックはなく、バイト比較後から保存までの変更は検出できません。`master add`・`tree register --apply`・`master cycles --apply`・`borrow value --apply`・`master audit --apply` など、master を書き換えるコマンドは一度に 1 つだけ実行してください。
 
 置換する局面の先手番・後手番別の数、うち元の main が curated の数、curated なので替えなかった局面、source が置換対象でない数、1 位が伸ばしていない手なので替えなかった数を出します。対象の手の行が無いか record だった場合も、替えずに数を出します。`--apply` が無ければ「確認だけ (--apply なし)」として同じ判定の件数を出します。点検の表・`--out-db`・反駁の表・キューは、すべて書き換え前の状態に基づく出力です。
 
@@ -901,10 +901,12 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 
 `--demote-alts` は main の置換判定後、全局面の alt を次の条件で record にします。値は点検で求めた手ごとの伝播値を使い、同値の -1 補正を戻して比較するため、同値の手を差だけで降格しません。
 
-- (a) 手番側からの値が `--bad-eval` 以下。ただし局面の 1 位も `--bad-eval` 以下なら、この条件では降格しません。
-- (b) 局面の 1 位との差が `--line` 以上。両方の条件を満たす手は (b) に数えます。
+参照する最善値は、由来が `propagated` の手と main (由来を問わない) のうち最大の値です。伸ばしていない alt の 1 回の読みは参照に使いません。参照値が無い局面は降格を見送ります。
 
-置換後の main は降格せず、record は変更しません。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から record (1 位との差 N / 値 V)` を追記します。降格する alt の数は手番別・理由別に出します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。
+- (a) 手番側からの値が `--bad-eval` 以下、かつ参照する最善値より厳密に低い。同値は残し、最善値自体が `--bad-eval` 以下でも、より悪い alt は降格します。
+- (b) 参照する最善値との差が `--line` 以上。両方の条件を満たす手は (b) に数えます。
+
+置換後の main と、この実行で main から alt に替えた手は降格せず、record は変更しません。curated の行が 1 行でもある局面は、record も含めて、`--replace-curated` が無ければ降格せず、その局面数を別に出します。値が不明な alt と schema で置換不可の source の降格候補は残し、別々に数えます。tier・evals などは変更せず、note に `<since>: 伝播後の値が悪いので alt から record (1 位との差 N / 値 V)` を追記します。降格する alt の数は手番別・理由別に出します。`--demote-alts` だけなら元データは保存せず、main の置換候補も考慮した件数を確認できます。`--demote-alts` と `--fill-replies` は、確認だけの場合も併用できません。
 
 伝播の仕方:
 

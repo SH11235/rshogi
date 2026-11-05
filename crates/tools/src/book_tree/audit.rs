@@ -33,7 +33,7 @@ pub(super) struct AuditArgs {
     /// 伝播後の 1 位を main にして元データを保存する
     #[arg(long, requires = "since")]
     apply: bool,
-    /// curated の行がある局面でも main を置換する
+    /// curated の行がある局面でも main の置換・alt の降格を行う
     #[arg(long)]
     replace_curated: bool,
     /// 悪い alt を record にする (--apply なしでは件数だけ確認)
@@ -187,6 +187,10 @@ fn run_in_pool(args: AuditArgs) -> Result<()> {
         ensure!(!since.contains(['\t', '\r', '\n']), "since にタブや改行は使えません");
     }
     ensure!(!(args.apply && args.fill_replies), "--apply と --fill-replies は併用できません");
+    ensure!(
+        !(args.demote_alts && args.fill_replies),
+        "--demote-alts と --fill-replies は併用できません"
+    );
     let schema = Schema::load(args.schema.as_deref())?;
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
@@ -404,6 +408,7 @@ struct DemotionSummary {
     gap: BySide,
     unknown: usize,
     protected: usize,
+    skipped_curated: usize,
 }
 
 impl DemotionSummary {
@@ -413,7 +418,7 @@ impl DemotionSummary {
 
     fn format(&self) -> String {
         format!(
-            "record に降格する alt: 先手番 {}・後手番 {} / 理由 (a) 値: 先手番 {}・後手番 {} / 理由 (b) 差: 先手番 {}・後手番 {} / 値が不明 {} / source が保護対象 {}",
+            "record に降格する alt: 先手番 {}・後手番 {} / 理由 (a) 値: 先手番 {}・後手番 {} / 理由 (b) 差: 先手番 {}・後手番 {} / 値が不明 {} / source が保護対象 {} / curated なので降格しなかった局面 {}",
             self.bad[0] + self.gap[0],
             self.bad[1] + self.gap[1],
             self.bad[0],
@@ -421,7 +426,8 @@ impl DemotionSummary {
             self.gap[0],
             self.gap[1],
             self.unknown,
-            self.protected
+            self.protected,
+            self.skipped_curated
         )
     }
 }
@@ -446,27 +452,39 @@ fn demote_alts(
     drop(indices);
     let mut summary = DemotionSummary::default();
     for ((key, position, indices), known) in groups.into_iter().zip(&book.known) {
+        if !args.replace_curated && indices.iter().any(|&i| rows[i].get("tier") == "curated") {
+            summary.skipped_curated += 1;
+            continue;
+        }
         let moves = audited_moves(&book.graph, key, position, known)?;
         let values: BTreeMap<_, _> = moves
             .iter()
             .flatten()
             .map(|m| (m.mv.as_str(), i64::from(m.value) + i64::from(m.tie_lowered)))
             .collect();
-        let best = values.values().copied().max();
+        let best = moves
+            .iter()
+            .flatten()
+            .filter(|m| m.origin == Origin::Propagated || m.mv == position.moves[0].mv)
+            .map(|m| values[m.mv.as_str()])
+            .max();
         let side = usize::from(key.split_whitespace().nth(1) == Some("w"));
         for i in indices {
             let row = &mut rows[i];
-            if row.get("role") != "alt" {
+            // 置換前の main は、役割が alt に変わっても候補として残す。
+            if row.get("role") != "alt" || row.get("move") == position.moves[0].mv {
                 continue;
             }
             let Some(&value) = values.get(row.get("move")) else {
                 summary.unknown += 1;
                 continue;
             };
-            let best = best.context("内部エラー: 1 位の値がありません")?;
+            let Some(best) = best else {
+                continue;
+            };
             let gap = best - value;
             let by_gap = gap >= i64::from(args.line);
-            let by_bad = value <= i64::from(args.bad_eval) && best > i64::from(args.bad_eval);
+            let by_bad = value <= i64::from(args.bad_eval) && value < best;
             if !by_gap && !by_bad {
                 continue;
             }
@@ -1760,7 +1778,7 @@ mod tests {
             (100, 60, 40, "record", [0, 0], [1, 0]),
             (100, 100, 1, "alt", [0, 0], [0, 0]),
             (-200, -200, 1, "alt", [0, 0], [0, 0]),
-            (-200, -210, 40, "alt", [0, 0], [0, 0]),
+            (-200, -210, 40, "record", [1, 0], [0, 0]),
             (-200, -240, 40, "record", [0, 0], [1, 0]),
         ];
         for (main, alt, line, role, bad, gap) in cases {
@@ -1801,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn demotions_keep_protected_sources_and_new_main() {
+    fn demotions_keep_old_and_new_main() {
         let dir = tempfile::tempdir().unwrap();
         super::super::schema::test_schema(dir.path());
         std::fs::write(
@@ -1823,13 +1841,131 @@ mod tests {
             plan_replacements(&rows, &findings, &Schema::default(), "tag", true).unwrap();
         rewrite_rows(&mut rows, &changes);
         let result = demote_alts(&mut rows, &positions.0, &book, &schema, &args).unwrap();
-        assert_eq!(result.protected, 1);
+        assert_eq!(result.protected, 0);
         assert_eq!(rows[0].get("role"), "alt");
         let result =
             demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
-        assert_eq!(result.gap, [1, 0]);
-        assert_eq!(rows[0].get("role"), "record");
+        assert_eq!(result.total(), 0);
+        assert_eq!(rows[0].get("role"), "alt");
         assert_eq!(rows[1].get("role"), "main");
+    }
+
+    #[test]
+    fn run_preserves_replaced_main_as_alt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        std::fs::write(&path, replacement_fixture()).unwrap();
+        let mut args = test_args(dir.path());
+        args.apply = true;
+        args.demote_alts = true;
+        args.since = Some("tag".into());
+        args.line = 40;
+        run(args).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(rows[0].get("role"), "alt");
+        assert_eq!(rows[1].get("role"), "main");
+    }
+
+    #[test]
+    fn run_demotions_protect_any_curated_row_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        for curated in 0..3 {
+            for replace_curated in [false, true] {
+                let text = master(&[
+                    (ROOT, "5i6h", "main", "100"),
+                    (ROOT, "5i4h", "alt", "0"),
+                    (ROOT, "5i5h", "record", "-999"),
+                ]);
+                let mut rows = parse_master(&text).unwrap();
+                rows[curated].set("tier", "curated".into());
+                if curated == 1 {
+                    rows[0].set("tier", "curated".into());
+                }
+                let text = format_master(&rows);
+                std::fs::write(&path, &text).unwrap();
+                let mut args = test_args(dir.path());
+                args.replace_curated = replace_curated;
+                args.apply = true;
+                args.demote_alts = true;
+                args.since = Some("tag".into());
+                let positions = parse_master_rows(text.as_bytes()).unwrap();
+                let (_, _, book) = audit(&positions, DrawValues::both(0), 1, false).unwrap();
+                let result =
+                    demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+                assert_eq!(result.skipped_curated, usize::from(!replace_curated));
+                run(args).unwrap();
+                let updated = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                assert_eq!(updated, rows);
+                assert_eq!(updated[1].get("role"), if replace_curated { "record" } else { "alt" });
+                if !replace_curated {
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn demotions_ignore_eval_only_alts_as_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        for main in ["0", ""] {
+            for child in [false, true] {
+                let mut input = vec![
+                    (ROOT, "5i6h", "main", main),
+                    (ROOT, "5i5h", "alt", "100"),
+                    (ROOT, "5i4h", "alt", "50"),
+                ];
+                if child {
+                    input.push((A, "5a5b", "main", "-50"));
+                }
+                let text = master(&input);
+                let positions = parse_master_rows(text.as_bytes()).unwrap();
+                let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+                let mut rows = parse_master(&text).unwrap();
+                let original = rows.clone();
+                let mut args = test_args(dir.path());
+                args.line = 40;
+                let result =
+                    demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
+                assert_eq!(result.total(), 0);
+                assert_eq!(rows, original);
+            }
+        }
+    }
+
+    #[test]
+    fn demotions_keep_protected_alt_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::schema::test_schema(dir.path());
+        std::fs::write(
+            dir.path().join("sources.tsv"),
+            "source\tdescription\treplaceable\nread\t保護\t0\n",
+        )
+        .unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        let text = master(&[(ROOT, "5i6h", "main", "100"), (ROOT, "5i4h", "alt", "0")]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let mut rows = parse_master(&text).unwrap();
+        let result =
+            demote_alts(&mut rows, &positions.0, &book, &schema, &test_args(dir.path())).unwrap();
+        assert_eq!(result.protected, 1);
+        assert_eq!(result.total(), 0);
+        assert_eq!(rows[1].get("role"), "alt");
+    }
+
+    #[test]
+    fn demote_alts_and_fill_replies_are_rejected_even_in_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for apply in [false, true] {
+            let mut args = test_args(dir.path());
+            args.apply = apply;
+            args.since = Some("tag".into());
+            args.demote_alts = true;
+            args.fill_replies = true;
+            assert!(run(args).unwrap_err().to_string().contains("--fill-replies"));
+            assert!(!dir.path().join("audit.tsv").exists());
+        }
     }
 
     #[test]
