@@ -136,7 +136,8 @@ pub(super) fn read_checked_lines(
     path: &Path,
     mut visit: impl FnMut(Line, Root) -> Result<()>,
 ) -> Result<()> {
-    for (n, text) in BufReader::new(File::open(path)?).lines().enumerate() {
+    let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
+    for (n, text) in BufReader::new(file).lines().enumerate() {
         let location = || format!("{}:{}", path.display(), n + 1);
         let text = text.with_context(location)?;
         if text.trim().is_empty() {
