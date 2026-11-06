@@ -1019,7 +1019,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))),
     )
     .unwrap();
-    let (findings, _, _) = crate::book_tree::audit::audit(&book, draws, 1, false).unwrap();
+    let (findings, _, _) = crate::book_tree::audit::audit(&book, draws, 1, false, None).unwrap();
     assert!(findings.is_empty());
     let values = crate::book_tree::audit::evaluate(&book.0, draws).unwrap();
     let i = book.0.keys().position(|k| *k == a).unwrap();

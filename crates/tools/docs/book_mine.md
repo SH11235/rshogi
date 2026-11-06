@@ -969,7 +969,7 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] [--fill-replies] \
+  --draw-value-black -70 --draw-value-white 0 [--line 40] [--deep-plies N] [--out-db audited.db] [--fill-replies] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
@@ -990,6 +990,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
 | `--schema <DIR>` | なし | 語彙と読み条件の表。sources.tsv の replaceable=1 の source だけ置換できる。省略時は read・ext |
 | `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す |
+| `--deep-plies <N>` | なし | 差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。同じ局面に戻ったら止める |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
@@ -1003,7 +1004,9 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁の表の重み。`master rejoin` と同じ意味 (`--min-weight` は表から落とす下限)。`--opp-freq` は反駁の出力と一緒に使う |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
-点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+
+`--deep-plies` の継続手数には、最初の main・1 位の手を含めず、その先の元データで role が main の手だけを数えます。伝播後の最善手や `--fill-replies` で補った手は辿りません。指定時は、線未満でも対象にした局面数を先手番・後手番別に要約へ出します。
 
 通常の点検と反駁出力 (`--refutation-table` / `--enqueue-out`) は、元データを 1 回読み、record を含む全行の局面キーと手の重複を検査します。record 行は数えて列を破棄し、main・alt 行、重複検査用の局面キーと手、curated の保護に必要な局面キーを保持します。`--apply`・`--demote-alts`・`--revive-bench` のいずれかを指定した場合は全行を保持します。
 
