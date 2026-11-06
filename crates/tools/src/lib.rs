@@ -131,3 +131,6 @@ pub use config::{BenchmarkConfig, EvalConfig, LimitType};
 pub use positions::{DEFAULT_POSITIONS, load_positions};
 pub use report::{Aggregate, BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
 pub use system::{SystemInfo, collect_system_info};
+
+/// tournament JSONL の先後交換ペアの選別。
+pub mod tournament_pairs;

@@ -20,6 +20,7 @@ mod register;
 mod rejoin;
 mod reply_graph;
 mod schema;
+mod seeds;
 mod service;
 #[cfg(test)]
 mod simulation;
@@ -46,6 +47,8 @@ pub struct TreeArgs {
 
 #[derive(Subcommand, Debug)]
 enum TreeCommand {
+    /// 自己対局の棋譜から次に読む木のキューの行を作る
+    Seeds(seeds::SeedsArgs),
     /// キューの対象を共有エンジンで読む
     Serve(ServeArgs),
     /// キューに対象を足す (検査してから追記し、受領を出す)
@@ -186,6 +189,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
 /// CLI の指定に従い木を処理する。
 pub fn run(args: TreeArgs) -> Result<()> {
     match args.command {
+        TreeCommand::Seeds(args) => seeds::run(args),
         TreeCommand::Serve(args) => service::serve(args),
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),
