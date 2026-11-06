@@ -711,3 +711,32 @@ fn sprt_stop_is_shown_only_for_one_valid_run_with_same_hypothesis() {
     assert_eq!(value["sprt"]["decision"], "invalid");
     assert!(value["sprt"].get("stopped_at").is_none());
 }
+
+#[test]
+fn duplicate_slot_warnings_include_path_and_aggregation_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("duplicates.jsonl");
+    write_log(&path, true, &[("black_win", "white_win")]);
+    let text = fs::read_to_string(&path).unwrap();
+    let rows: Vec<_> = text.lines().collect();
+    fs::write(
+        &path,
+        format!("{}\n{}\n{}\n{}\n{}\n", rows[0], rows[1], rows[1], rows[2], rows[2]),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for (slot, state) in [(0, "が重複しています"), (1, "は既に集計済みです")] {
+        assert!(stderr.contains(&format!(
+            "警告: {} — 直接対決の pair_index=0, attempt=0, slot={slot} {state}。重複結果を除外します。",
+            path.display()
+        )), "{stderr}");
+    }
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["progress"]["done"], 2);
+}

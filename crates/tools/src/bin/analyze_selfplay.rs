@@ -837,8 +837,7 @@ fn parse_normal_file_inner(
         Vec::new()
     };
     let mut game_moves: BTreeMap<u32, StartposMoves> = BTreeMap::new();
-    let mut pair_buffer: BTreeMap<(u32, u32), [Option<ResultLog>; 2]> = BTreeMap::new();
-    let mut completed_pairs: HashSet<(u32, u32)> = HashSet::new();
+    let mut pair_buffer = tools::tournament_pairs::ResultPairs::default();
     let mut seq = 0u32;
     let mut error_pairs = HashSet::new();
     let mut retried_pairs = HashSet::new();
@@ -987,44 +986,17 @@ fn parse_normal_file_inner(
                 retried_pairs.insert(pair_index);
             }
             let key = (pair_index, result.attempt);
-            if completed_pairs.contains(&key) {
-                eprintln!(
-                    "警告: {path} — 直接対決の pair_index={pair_index}, attempt={}, slot={slot} は既に集計済みです。重複結果を除外します。",
-                    result.attempt
-                );
-                continue;
-            }
-            let entry = pair_buffer.entry(key).or_insert([None, None]);
-            if entry[slot].is_some() {
-                eprintln!(
-                    "警告: {path} — 直接対決の pair_index={pair_index}, attempt={}, slot={slot} が重複しています。重複結果を除外します。",
-                    result.attempt
-                );
-                continue;
-            }
-            entry[slot] = Some(result);
-            if entry.iter().all(Option::is_some) {
-                let completed = pair_buffer
-                    .remove(&key)
-                    .with_context(|| format!("ペア集計状態が失われました: {path}"))?;
-                let has_error = completed.iter().flatten().any(|game| game.error.unwrap_or(false));
+            if let Some(completed) = pair_buffer.push(Path::new(path), key, slot, result) {
+                let has_error = completed.iter().any(|game| game.error.unwrap_or(false));
                 if has_error {
                     if key.1 >= 2 {
                         exhausted_pairs.insert(pair_index);
                     }
                 } else {
                     for (slot, game) in completed.iter().enumerate() {
-                        record_valid_result(
-                            game.as_ref().unwrap(),
-                            &black,
-                            &white,
-                            meta_parsed,
-                            slot,
-                            &mut stats,
-                        );
+                        record_valid_result(game, &black, &white, meta_parsed, slot, &mut stats);
                     }
                 }
-                completed_pairs.insert(key);
             }
         }
         // move行・metrics行等はスキップ
@@ -1033,11 +1005,11 @@ fn parse_normal_file_inner(
     if stats.extra.csa_single_game && stats.extra.completed_games != 1 {
         bail!("CSA単局ログに終局resultがありません: {path}");
     }
-    stats.extra.incomplete_pairs = pair_buffer.len();
-    if !pair_buffer.is_empty() {
+    stats.extra.incomplete_pairs = pair_buffer.incomplete();
+    if pair_buffer.incomplete() != 0 {
         eprintln!(
             "情報: {path} — {} ペアが未完了（片スロット欠け）のため直接対決集計から除外されました",
-            pair_buffer.len()
+            pair_buffer.incomplete()
         );
     }
 

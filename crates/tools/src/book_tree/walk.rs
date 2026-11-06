@@ -171,7 +171,7 @@ struct Row {
 type Lookup<'a> = Box<dyn FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a>;
 
 /// 定跡の引き方。同じ局面は 1 回だけ引き、引いた局面だけを持つ。
-struct Probe<'a> {
+pub(super) struct Probe<'a> {
     lookup: Lookup<'a>,
     cache: HashMap<String, Vec<BookEntryMove>>,
 }
@@ -185,7 +185,7 @@ impl<'a> Probe<'a> {
     }
 
     /// 定跡ファイルの順の手。無ければ空。
-    fn moves(&mut self, key: &str) -> Result<&[BookEntryMove]> {
+    pub(super) fn moves(&mut self, key: &str) -> Result<&[BookEntryMove]> {
         if !self.cache.contains_key(key) {
             let moves = (self.lookup)(&format!("{key} 1"))?;
             self.cache.insert(key.to_owned(), moves);
@@ -205,7 +205,7 @@ impl<'a> Probe<'a> {
             .map(|m| (m.move_usi.clone(), m.value)))
     }
 
-    fn games(&mut self, key: &str) -> Result<u64> {
+    pub(super) fn games(&mut self, key: &str) -> Result<u64> {
         Ok(self.moves(key)?.iter().map(|m| m.move_count).sum())
     }
 }
@@ -451,13 +451,7 @@ fn check_args(args: &WalkArgs) -> Result<()> {
     );
     ensure!(args.opp_book_diff >= 0, "--opp-book-diff は 0 以上にしてください");
     ensure!(args.depth <= MAX_DEPTH, "--depth は {MAX_DEPTH} 以下にしてください");
-    ensure!(
-        !args.tag.is_empty()
-            && args.tag.len() <= MAX_TAG_LEN
-            && args.tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-        "--tag は [A-Za-z0-9_-] の 1〜{MAX_TAG_LEN} 文字にしてください: {}",
-        args.tag
-    );
+    check_tag(&args.tag)?;
     args.queue_opts().check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
     if let Some(freq) = &args.opp_freq {
@@ -477,11 +471,11 @@ fn check_args(args: &WalkArgs) -> Result<()> {
     Ok(())
 }
 
-fn open_book(path: &Path) -> Result<Book> {
+pub(super) fn open_book(path: &Path) -> Result<Book> {
     Book::open_on_the_fly(path, true).with_context(|| format!("{} を開けません", path.display()))
 }
 
-fn book_probe(book: &Book) -> Probe<'_> {
+pub(super) fn book_probe(book: &Book) -> Probe<'_> {
     Probe::new(move |sfen: &str| Ok(book.entry_moves(sfen)?))
 }
 
@@ -602,9 +596,9 @@ fn merged_own(rows: &[Row]) -> BTreeMap<(&'static str, &str), (f64, &Row)> {
     merged
 }
 
-type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
+pub(super) type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
 
-fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
+pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
     let mut latest = BTreeMap::new();
     for path in paths {
         read_checked_lines(path, |line, root| {
@@ -696,7 +690,6 @@ fn queue_lines(
     });
     let mut lines = Vec::new();
     for (rank, (weight, r)) in picked.iter().enumerate() {
-        let digest = format!("{:x}", Sha256::digest(&r.key));
         let root_ply = r.ply + 1;
         let game = if args.game_from_book && !r.cont.is_empty() {
             vec![r.cont.iter().take(args.depth + 1).cloned().collect()]
@@ -704,7 +697,7 @@ fn queue_lines(
             Vec::new()
         };
         let line = Line {
-            id: format!("{}_{root_ply}_{}_{}", args.tag, &digest[..16], r.side),
+            id: queue_id(&args.tag, root_ply, &r.key, r.side),
             root: format!("sfen {} {root_ply}", r.key),
             roots: Vec::new(),
             own: r.side.to_owned(),
@@ -759,3 +752,20 @@ fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> Strin
 
 #[cfg(test)]
 mod tests;
+
+/// キューの id に使う tag を検査する。
+pub(super) fn check_tag(tag: &str) -> Result<()> {
+    ensure!(
+        !tag.is_empty()
+            && tag.len() <= MAX_TAG_LEN
+            && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        "--tag は [A-Za-z0-9_-] の 1〜{MAX_TAG_LEN} 文字にしてください: {tag}"
+    );
+    Ok(())
+}
+
+/// 同じ根・手数・側で安定したキュー id を作る。
+pub(super) fn queue_id(tag: &str, ply: usize, key: &str, own: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(key));
+    format!("{tag}_{ply}_{}_{own}", &digest[..16])
+}
