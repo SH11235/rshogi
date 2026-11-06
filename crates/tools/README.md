@@ -8,7 +8,7 @@
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
 | 探索定数を SPSA で調整する (複数の機械の worker に対局を任せる `--remote-worker`、run-dir の写しの照合 `--verify-resume` も) | [spsa](docs/spsa.md) / [運用手順](docs/spsa_runbook.md) |
-| 自己対局の定跡出口から木のキューの行を作る | [book_mine tree seeds](docs/book_mine.md#tree-seeds-自己対局から次に読む根を作る) |
+| 自己対局の定跡出口を件数と少数の ID 見本で集計し、木のキューの行を作る | [book_mine tree seeds](docs/book_mine.md#tree-seeds-自己対局から次に読む根を作る) |
 | 台帳を共有して木を並列に読む (計算量に上限のある任意の先読み・読みかけの局面の途中の上位の手で子を先に読む `--speculate-at`・その先読みを優先度の高い木で先に配る `--speculate-priority`・停止統計つき) | [book_mine tree serve](docs/book_mine.md#空いた-worker-での先読み) |
 | 外部の定跡の木を借りて自分の読みで値を付ける (main は元データ全体で伝播し直した値で選ぶ) | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
 | 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可、curated の局面の main も替える `--replace-curated`) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |

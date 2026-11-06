@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -111,25 +111,39 @@ struct Primary {
     score: PrimaryScore,
 }
 
-fn visit_json(path: &Path, mut visit: impl FnMut(serde_json::Value) -> Result<()>) -> Result<()> {
-    for (n, line) in BufReader::new(File::open(path)?).lines().enumerate() {
-        let line = line?;
+fn visit_json(
+    path: &Path,
+    mut visit: impl FnMut(u64, serde_json::Value) -> Result<()>,
+) -> Result<()> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = String::new();
+    let mut offset = 0;
+    let mut n = 0;
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        let start = offset;
+        offset += bytes as u64;
+        n += 1;
         if line.trim().is_empty() {
             continue;
         }
-        let context = || format!("{}:{}", path.display(), n + 1);
+        let context = || format!("{}:{n}", path.display());
         let value = serde_json::from_str(&line).with_context(context)?;
-        visit(value).with_context(context)?;
+        visit(start, value).with_context(context)?;
     }
     Ok(())
 }
 
-fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
+fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
     let mut pairs = ResultPairs::default();
     let mut valid = BTreeMap::new();
     let mut seq = 0;
     let mut in_progress = 0;
-    visit_json(path, |value| {
+    visit_json(path, |offset, value| {
         if value["type"] != "result" {
             return Ok(());
         }
@@ -137,10 +151,10 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
         let key = (result.pair_index.unwrap_or(seq / 2), result.attempt);
         let slot = result.pair_slot.unwrap_or(seq % 2).min(1) as usize;
         seq += 1;
-        if let Some(pair) = pairs.push(path, key, slot, result)
-            && pair.iter().all(|r| !r.error.unwrap_or(false))
+        if let Some(pair) = pairs.push(path, key, slot, (result, offset))
+            && pair.iter().all(|(r, _)| !r.error.unwrap_or(false))
         {
-            for result in pair {
+            for (result, offset) in pair {
                 if result.outcome == "in_progress" {
                     in_progress += 1;
                     continue;
@@ -155,7 +169,7 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
                     "game_id が重複しています: {}",
                     result.game_id
                 );
-                valid.insert(result.game_id, result);
+                valid.insert(result.game_id, offset);
             }
         }
         Ok(())
@@ -169,28 +183,36 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
     Ok(valid)
 }
 
-// tournament は複数局の move を交互に書くため、終局していない局の手順だけを保持する。
+// 有効なスロットは ID と結果行の位置だけ残す。同じ ID の除外結果が先行しても、
+// 最初の手順と採用された結果を組み合わせるため、結果本体は必要時に読み直す。
 fn visit_games(
     path: &Path,
-    valid: &BTreeMap<u32, GameResult>,
+    valid: &BTreeMap<u32, u64>,
     mut visit: impl FnMut(&GameResult, &[Move]) -> Result<()>,
 ) -> Result<()> {
     let mut active: BTreeMap<u32, Vec<Move>> = BTreeMap::new();
-    let mut done = BTreeSet::new();
-    visit_json(path, |value| {
+    let mut remaining = valid.clone();
+    let mut result_reader = BufReader::new(File::open(path)?);
+    visit_json(path, |offset, value| {
         match value["type"].as_str() {
             Some("move") => {
                 let id: u32 = serde_json::from_value(value["game_id"].clone())?;
-                if valid.contains_key(&id) && !done.contains(&id) {
+                if remaining.contains_key(&id) {
                     let mv: Move = serde_json::from_value(value)?;
                     active.entry(mv.game_id).or_default().push(mv);
                 }
             }
             Some("result") => {
                 let id: u32 = serde_json::from_value(value["game_id"].clone())?;
-                if let Some(result) = valid.get(&id)
-                    && done.insert(id)
-                {
+                if let Some(selected_offset) = remaining.remove(&id) {
+                    let result: GameResult = if selected_offset == offset {
+                        serde_json::from_value(value)?
+                    } else {
+                        result_reader.seek(SeekFrom::Start(selected_offset))?;
+                        let mut line = String::new();
+                        result_reader.read_line(&mut line)?;
+                        serde_json::from_str(&line)?
+                    };
                     let moves = active.remove(&id).unwrap_or_default();
                     for pair in moves.windows(2) {
                         ensure!(
@@ -198,7 +220,7 @@ fn visit_games(
                             "手順が不連続: game_id={id}"
                         );
                     }
-                    visit(result, &moves)?;
+                    visit(&result, &moves)?;
                 }
             }
             _ => {}
@@ -277,11 +299,14 @@ fn early(
     Ok(false)
 }
 
+const ID_SAMPLES: usize = 8;
+
 #[derive(Default)]
 struct RootData {
     ply: u32,
-    games: BTreeSet<String>,
-    lines: BTreeMap<Vec<String>, BTreeSet<String>>,
+    games: u64,
+    samples: BTreeSet<String>,
+    lines: BTreeMap<Vec<String>, u64>,
     early: bool,
 }
 
@@ -290,10 +315,14 @@ impl RootData {
         if self.ply == 0 || other.ply < self.ply {
             self.ply = other.ply;
         }
-        self.games.extend(other.games);
+        self.games += other.games;
+        self.samples.extend(other.samples);
+        while self.samples.len() > ID_SAMPLES {
+            self.samples.pop_last();
+        }
         self.early |= other.early;
-        for (line, ids) in other.lines {
-            self.lines.entry(line).or_default().extend(ids);
+        for (line, count) in other.lines {
+            *self.lines.entry(line).or_default() += count;
         }
     }
 }
@@ -332,28 +361,49 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     reject_same_file(&args.table, &inputs)?;
     inputs.push(("--table", &args.table));
     reject_same_file(&args.out, &inputs)?;
-    let valid: Vec<_> = args.games.iter().map(|p| valid_results(p)).collect::<Result<_>>()?;
+    let valid: Vec<_> = args.games.iter().map(|p| valid_game_ids(p)).collect::<Result<_>>()?;
     let mut non_sweep = BTreeSet::new();
     let mut non_sweep_roots = BTreeSet::new();
+    // 合流前の接頭手順ごとに採否を決めてから、各局内で根と手順を重複排除する。
+    let mut prefixes: BTreeMap<(String, String, Vec<String>), u64> = BTreeMap::new();
     for (path, valid) in args.games.iter().zip(&valid) {
         visit_games(path, valid, |result, moves| {
-            if result.outcome != "black_win"
-                && let Some(start) = origin(moves)
-            {
-                non_sweep.insert(parse_root(&format!("sfen {}", moves[start].sfen_before))?.key);
-                for &offset in &args.offsets {
-                    if let Some(index) = start.checked_add(offset)
-                        && let Some(root) = root_at(moves, index)?
-                    {
-                        non_sweep_roots.insert(root.key);
+            let Some(start) = origin(moves) else {
+                return Ok(());
+            };
+            let origin_key = parse_root(&format!("sfen {}", moves[start].sfen_before))?.key;
+            let non_black_win = result.outcome != "black_win";
+            if non_black_win {
+                non_sweep.insert(origin_key.clone());
+            }
+            for &offset in &args.offsets {
+                let Some(index) = start.checked_add(offset) else {
+                    continue;
+                };
+                if index > moves.len()
+                    || (index == moves.len() && !moves.last().is_some_and(played))
+                {
+                    continue;
+                }
+                if non_black_win && let Some(root) = root_at(moves, index)? {
+                    non_sweep_roots.insert(root.key);
+                }
+                let prefix: Vec<_> =
+                    moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
+                for own in ["b", "w"] {
+                    if own == "w" && !non_black_win {
+                        continue;
                     }
+                    *prefixes
+                        .entry((origin_key.clone(), own.to_owned(), prefix.clone()))
+                        .or_default() += 1;
                 }
             }
             Ok(())
         })?;
     }
-    // オフセット先は、合流前の起点と完全に同じ接頭手順で局数を判定する。
-    let mut prefixes: BTreeMap<(String, String, Vec<String>), (String, RootData)> = BTreeMap::new();
+    prefixes.retain(|(origin, _, _), _| non_sweep.contains(origin));
+    let mut roots: BTreeMap<(String, String), RootData> = BTreeMap::new();
     for (file, (path, valid)) in args.games.iter().zip(&valid).enumerate() {
         visit_games(path, valid, |result, moves| {
             let Some(start) = origin(moves) else {
@@ -368,6 +418,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                     continue;
                 }
                 let early = early(result, moves, start, own, &args)?;
+                let mut game_roots: BTreeMap<String, RootData> = BTreeMap::new();
                 for &offset in &args.offsets {
                     let Some(index) = start.checked_add(offset) else {
                         continue;
@@ -377,37 +428,35 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                     };
                     let prefix: Vec<_> =
                         moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
+                    if !prefix.is_empty()
+                        && prefixes[&(origin_key.clone(), own.to_owned(), prefix)]
+                            < args.min_games_offset as u64
+                    {
+                        continue;
+                    }
                     let line: Vec<_> = moves[index..]
                         .iter()
                         .take(args.depth + 1)
                         .take_while(|m| played(m))
                         .map(|m| m.move_usi.clone())
                         .collect();
-                    let id = format!("{file}:{}", result.game_id);
-                    let mut data = RootData {
-                        ply: root.ply,
-                        early,
-                        ..RootData::default()
-                    };
-                    data.games.insert(id.clone());
-                    if !line.is_empty() {
-                        data.lines.entry(line).or_default().insert(id);
+                    let data = game_roots.entry(root.key).or_default();
+                    if data.ply == 0 || root.ply < data.ply {
+                        data.ply = root.ply;
                     }
-                    let entry = prefixes
-                        .entry((origin_key.clone(), own.to_owned(), prefix))
-                        .or_insert_with(|| (root.key, RootData::default()));
-                    entry.1.merge(data);
+                    if !line.is_empty() {
+                        data.lines.insert(line, 1);
+                    }
+                }
+                for (key, mut data) in game_roots {
+                    data.games = 1;
+                    data.samples.insert(format!("{file}:{}", result.game_id));
+                    data.early = early;
+                    roots.entry((key, own.to_owned())).or_default().merge(data);
                 }
             }
             Ok(())
         })?;
-    }
-    let mut roots: BTreeMap<(String, String), RootData> = BTreeMap::new();
-    for ((_, own, prefix), (key, data)) in prefixes {
-        if !prefix.is_empty() && data.games.len() < args.min_games_offset {
-            continue;
-        }
-        roots.entry((key, own)).or_default().merge(data);
     }
     let excluded = excluded_positions(&args.exclude_queue)?;
     let freq = args.opp_freq.as_deref().map(open_book).transpose()?;
@@ -458,7 +507,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             p
         };
         let mut lines: Vec<_> = data.lines.into_iter().collect();
-        lines.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        lines.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let line = Line {
             id: queue_id(&args.tag, data.ply as usize, &key, &own),
             root: format!("sfen {key} {}", data.ply),
@@ -472,12 +521,11 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             memo: None,
         };
         line.check()?;
+        let samples = data.samples.into_iter().collect::<Vec<_>>().join(",");
         writeln!(
             table,
-            "{own}\t{}\t{priority}\t{class}\t{}\t{key}\t{}\t{weight}",
-            data.ply,
-            data.games.len(),
-            data.games.into_iter().collect::<Vec<_>>().join(",")
+            "{own}\t{}\t{priority}\t{class}\t{}\t{key}\t{samples};total={}\t{weight}",
+            data.ply, data.games, data.games
         )?;
         *counts.entry((own, class)).or_default() += 1;
         queue.push(line);

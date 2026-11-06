@@ -206,7 +206,7 @@ fn failed_duplicate_and_incomplete_attempts_are_excluded() {
     rows.extend(game(4, &initial(), PATH, 0, "white_win"));
     rows.push(json!({"type":"result","game_id":99,"pair_index":0,"pair_slot":0,"attempt":1,"outcome":"white_win","plies":10}));
     write_games(dir.path(), &rows);
-    let valid = valid_results(&dir.path().join("games.jsonl")).unwrap();
+    let valid = valid_game_ids(&dir.path().join("games.jsonl")).unwrap();
     assert_eq!(valid.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
     run(args(dir.path())).unwrap();
     assert!(lines(dir.path()).is_empty());
@@ -293,7 +293,7 @@ fn missing_evals_and_legacy_pair_metadata() {
         }
     }
     write_games(dir.path(), &rows);
-    assert_eq!(valid_results(&dir.path().join("games.jsonl")).unwrap().len(), 2);
+    assert_eq!(valid_game_ids(&dir.path().join("games.jsonl")).unwrap().len(), 2);
     run(args(dir.path())).unwrap();
     assert!(lines(dir.path()).is_empty());
 }
@@ -351,14 +351,14 @@ fn in_progress_game_is_excluded_but_completed_partner_is_used() {
     rows.last_mut().unwrap()["error"] = json!(false);
     rows.extend(game(1, &initial(), PATH, 0, "draw"));
     write_games(dir.path(), &rows);
-    let valid = valid_results(&dir.path().join("games.jsonl")).unwrap();
+    let valid = valid_game_ids(&dir.path().join("games.jsonl")).unwrap();
     assert_eq!(valid.keys().copied().collect::<Vec<_>>(), vec![1]);
     run(args(dir.path())).unwrap();
     let out = lines(dir.path());
     assert_eq!(out.len(), 2);
     assert!(out.iter().all(|line| parse_root(&line.root).unwrap().ply == 1));
     let table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
-    assert!(table.lines().skip(1).all(|line| line.split('\t').nth(6) == Some("0:1")));
+    assert!(table.lines().skip(1).all(|line| line.split('\t').nth(6) == Some("0:1;total=1")));
 }
 
 #[test]
@@ -408,4 +408,89 @@ fn canonical_input_aliases_do_not_inflate_game_counts() {
     run(opts).unwrap();
     assert_eq!(queue, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
     assert_eq!(table, std::fs::read(dir.path().join("table.tsv")).unwrap());
+}
+
+#[test]
+fn cyclic_roots_match_original_bytes_with_bounded_samples() {
+    let dir = TempDir::new().unwrap();
+    let cycle = ["5i6h", "5a6b", "6h5i", "6b5a"].repeat(3);
+    let mut rows = vec![
+        json!({"type":"result","game_id":100,"outcome":"white_win","pair_index":0,"pair_slot":0,"error":true}),
+        json!({"type":"result","game_id":101,"outcome":"draw","pair_index":0,"pair_slot":1}),
+    ];
+    let mut delayed = vec![];
+    for id in [10, 2, 0, 8, 6, 4, 11, 3, 1, 9, 7, 5] {
+        let mut entries = game(id, &initial(), &cycle, 0, "draw");
+        let mut result = entries.pop().unwrap();
+        result["attempt"] = json!(1);
+        rows.extend(entries);
+        if id % 2 == 0 {
+            rows.push(result);
+        } else {
+            delayed.push(result);
+        }
+    }
+    rows.extend(delayed);
+    rows.push(json!({"type":"result","game_id":999,"outcome":"white_win","pair_index":0,"pair_slot":0,"attempt":1}));
+    write_games(dir.path(), &rows);
+    let mut opts = args(dir.path());
+    opts.offsets = vec![0, 4, 8, 12];
+    run(opts).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("queue.jsonl")).unwrap(),
+        include_str!("seeds-original-queue.jsonl")
+    );
+    let original_table = include_str!("seeds-original-table.tsv");
+    let expected = original_table
+        .lines()
+        .map(|row| {
+            let mut fields: Vec<_> = row.split('\t').map(str::to_owned).collect();
+            if fields[6] != "game_ids" {
+                let samples = fields[6].split(',').take(ID_SAMPLES).collect::<Vec<_>>().join(",");
+                fields[6] = format!("{samples};total={}", fields[4]);
+            }
+            fields.join("\t") + "\n"
+        })
+        .collect::<String>();
+    assert_eq!(std::fs::read_to_string(dir.path().join("table.tsv")).unwrap(), expected);
+    let mut opts = args(dir.path());
+    opts.offsets = vec![12, 8, 4, 0];
+    run(opts).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("queue.jsonl")).unwrap(),
+        include_str!("seeds-original-queue.jsonl")
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("table.tsv")).unwrap(), expected);
+}
+
+#[test]
+fn selected_result_is_used_even_when_an_excluded_result_with_same_id_comes_first() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    rows.last_mut().unwrap()["error"] = json!(true);
+    rows.push(json!({"type":"result","game_id":99,"outcome":"draw","pair_index":0,"pair_slot":1}));
+    rows.push(json!({"type":"result","game_id":0,"outcome":"white_win","plies":10,"pair_index":0,"pair_slot":0,"attempt":1}));
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    rows.last_mut().unwrap()["attempt"] = json!(1);
+    write_games(dir.path(), &rows);
+    // バイト位置は空行と CRLF を含む入力でも結果行の先頭を指す必要がある。
+    let path = dir.path().join("games.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("\r\n{}", text.replace('\n', "\r\n"))).unwrap();
+    let selected = valid_game_ids(&path).unwrap();
+    let mut seen = vec![];
+    visit_games(&path, &selected, |result, moves| {
+        seen.push((result.game_id, result.outcome.clone(), moves.len()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        seen,
+        vec![
+            (0, "white_win".into(), PATH.len()),
+            (1, "draw".into(), PATH.len())
+        ]
+    );
+    run(args(dir.path())).unwrap();
+    assert!(lines(dir.path()).iter().any(|line| line.own == "b" && line.priority == 2));
 }
