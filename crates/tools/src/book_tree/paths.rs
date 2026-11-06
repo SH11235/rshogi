@@ -45,6 +45,7 @@ pub(super) fn reject_collisions(
             super::targets::STATUS_FILE,
             super::targets::RUN_DIR,
             "restart",
+            "import",
             "lock",
             "workers",
             "stop",
