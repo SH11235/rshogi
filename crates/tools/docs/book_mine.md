@@ -340,7 +340,7 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 
 TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late)、`games` (根を通る種の局数)、
 `key` (手数なし SFEN)、`game_ids`、`weight` です。`game_ids` は `ファイル番号:game_id` をカンマで並べます。
-ファイル番号は重複を除きパスを文字列順に並べた入力の 0 始まりの番号です。
+ファイル番号は正準パスにして重複を除き、その文字列順に並べた入力の 0 始まりの番号です。
 除外した根は TSV にも出しません。標準出力には側ごとの除外数・early/late の出力行数と合計を出します。
 
 入力は行単位で走査し、結果の選別、全勝起点の判定、根の集計のため計 3 回読みます。棋譜全体は保持せず、
