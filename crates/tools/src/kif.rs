@@ -349,8 +349,6 @@ fn export_game_to_kif<W: Write>(
         written_moves += 1;
         let line = format_move_kif(written_moves, &pos, mv, elapsed_ms, total_time);
         writeln!(writer, "{line}")?;
-        // 評価値・詰みの向きは指す前の手番で決まる。読み筋は指した後の局面から書く。
-        let mover = pos.side_to_move();
         let gives_check = if mv.is_pass() {
             false
         } else {
@@ -362,7 +360,8 @@ fn export_game_to_kif<W: Write>(
         } else {
             total_white = total_time;
         }
-        for comment in eval_comment_lines(&pos, mover, mv, entry.eval.as_ref()) {
+        // 評価値・詰みの向きは指した側（指す前の手番）で決まる。読み筋は指した後の局面から書く。
+        for comment in eval_comment_lines(&pos, side, mv, entry.eval.as_ref()) {
             writeln!(writer, "{comment}")?;
         }
     }
@@ -1229,8 +1228,8 @@ mod tests {
                 {
                     "game_id": 1, "ply": 2, "move_usi": "3c3d",
                     "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
-                    // 空きマスから動く手・末尾の壊れた手の手前で打ち切る。
-                    "eval": {"score_cp": 30, "pv": ["3c3d", "2g2f", "5d5e"]},
+                    // 末尾の壊れた手（8c8dx）の手前で打ち切る。
+                    "eval": {"score_cp": 30, "pv": ["3c3d", "2g2f", "8c8dx", "5c5d"]},
                 },
                 {
                     "game_id": 1, "ply": 3, "move_usi": "2g2f",
@@ -1246,7 +1245,8 @@ mod tests {
                 {
                     "game_id": 1, "ply": 5, "move_usi": "2f2e",
                     "sfen_before": "lnsgkgsnl/1r5b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b - 5",
-                    "eval": {"score_mate": 3},
+                    // 空きマスから動く手（5d5e）の手前で打ち切り、指した後の手順が無ければ書かない。
+                    "eval": {"score_mate": 3, "pv": ["2f2e", "5d5e"]},
                 },
                 {
                     "game_id": 1, "ply": 6, "move_usi": "8d8e",
@@ -1265,7 +1265,7 @@ mod tests {
         assert!(text.contains("**評価値=-30\n**読み筋=▲２六歩(27)\n"), "{text}");
         assert!(text.contains("**詰み=後手勝ち:5手\n   4"), "{text}");
         assert!(text.contains("**詰み=後手勝ち\n   5"), "{text}");
-        assert!(text.contains("**詰み=先手勝ち:3手\n"), "{text}");
+        assert!(text.contains("**詰み=先手勝ち:3手\n   6"), "{text}");
         assert!(text.contains("**評価値=2147483648\n"), "{text}");
         Ok(())
     }
