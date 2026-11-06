@@ -10,6 +10,7 @@ mod cycles;
 mod export;
 mod file_lock;
 mod journal;
+mod live_import;
 mod master_table;
 mod model;
 mod output;
@@ -24,6 +25,7 @@ mod seeds;
 mod service;
 #[cfg(test)]
 mod simulation;
+mod source_buckets;
 mod targets;
 #[cfg(test)]
 mod tests;

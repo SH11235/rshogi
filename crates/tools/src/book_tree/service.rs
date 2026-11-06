@@ -1094,6 +1094,40 @@ impl Once {
     }
 }
 
+fn invalidate_imported(lives: &mut [Live], appended: &BTreeSet<String>) -> bool {
+    if appended.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for live in lives {
+        if live
+            .tree
+            .level
+            .keys()
+            .chain(live.shadow.iter().chain(&live.speculative).map(|c| &c.key))
+            .any(|key| appended.contains(key))
+        {
+            live.dirty = true;
+            live.requests_dirty = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn poll_imports(
+    imports: &mut super::live_import::Inbox,
+    journal: &mut Journal,
+    settings: &Settings,
+    alerts: &mut Alerts,
+    lives: &mut [Live],
+) -> Result<bool> {
+    if let Some(message) = imports.poll(journal, settings)? {
+        alerts.push(&message);
+    }
+    Ok(invalidate_imported(lives, imports.appended()))
+}
+
 fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     if args.stall_secs == 0 {
         bail!("stall-secs は正数が必要です");
@@ -1170,6 +1204,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     )
     .context("状態のファイルを書けません")?;
     let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
+    let mut imports = super::live_import::Inbox::new(&args.state)?;
     let stats_path = args.state.join("prefetch_stats.json");
     let mut stats = if args.prefetch {
         PrefetchStats::load(&stats_path)?
@@ -1389,12 +1424,15 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 let record = trace.map(|t| {
                                     json!({"key":reading.key,"ply":reading.ply,"fingerprint":settings.fingerprint,"worker":id,"started":t.started.to_rfc3339(),"finished":t.finished.to_rfc3339(),"bestmove":reading.bestmove,"lines":t.lines})
                                 });
-                                journal.append_marked(
-                                    reading,
+                                if !imports.complete_worker(
+                                    &mut journal,
                                     &settings,
-                                    "engine".into(),
+                                    reading,
                                     prefetch,
-                                )?;
+                                    |message| alerts.push(message),
+                                )? {
+                                    continue;
+                                }
                                 // 探索の記録は読みの結果に関わらないので、書けなくても読みは止めない。
                                 if let (Some(log), Some(record)) = (trace_log.as_mut(), record) {
                                     match log.append(&record) {
@@ -1451,6 +1489,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         }
                     }
                 }
+            }
+            if !stopping {
+                speculate_dirty |=
+                    poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives)
+                        .context("台帳の取り込みを継続できません")?;
             }
             for entry in std::fs::read_dir(args.state.join("restart"))? {
                 let entry = entry?;
@@ -1965,12 +2008,14 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     live.tree.shrink();
                 }
             }
-            let text = serde_json::to_string_pretty(&StatusFile::new(
+            let mut status_value = serde_json::to_value(StatusFile::new(
                 run_id,
                 &checkpoint,
                 statuses,
                 queue_error.clone(),
             ))?;
+            status_value["import"] = imports.status();
+            let text = serde_json::to_string_pretty(&status_value)?;
             if status_written.as_ref() != Some(&text) {
                 match write_atomic(&status_path, &text) {
                     Ok(()) => {
@@ -2036,6 +2081,115 @@ fn file_stamp(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invalid_import_reports_alert_and_keeps_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = super::super::tests::settings();
+        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
+        let mut journal =
+            super::Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
+        let mut alerts = super::Alerts {
+            state: dir.path(),
+            pending: std::collections::VecDeque::new(),
+        };
+        std::fs::write(dir.path().join("import/bad.jsonl"), "invalid\n").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(std::time::Instant::now() < deadline);
+            super::poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut [])
+                .unwrap();
+            alerts.flush();
+            if imports.status()["state"] == "failed" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            std::fs::read_to_string(dir.path().join("ALERT"))
+                .unwrap()
+                .contains("取り込み失敗")
+        );
+        super::poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut []).unwrap();
+    }
+
+    #[test]
+    fn import_iteration_removes_requests_and_advances_only_affected_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = super::super::tests::settings();
+        let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let other = super::super::model::child(root, "5i5h").unwrap();
+        let chunk: String = [root, &other].iter().enumerate().map(|(id, key)| {
+            format!("{}\n", json!({"id":format!("tree{id}"),"root":format!("sfen {key} 1"),"own":"b","depth":0}))
+        }).collect();
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+        };
+        let (checkpoint, built) = Checkpoint::new(
+            dir.path().join("trees"),
+            settings.fingerprint.clone(),
+        )
+        .apply(chunk.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty());
+        let mut lives: Vec<_> = built
+            .into_iter()
+            .map(|(_, tree)| {
+                let mut live = Live::new(tree);
+                live.prepared = true;
+                live
+            })
+            .collect();
+        let mut journal =
+            Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
+        let mut requests = BTreeMap::new();
+        for (live, target) in lives.iter_mut().zip(&checkpoint.targets) {
+            assert!(!live.tree.advance(&journal).unwrap().is_empty());
+            live.refresh_requests(target, &journal, &BTreeMap::new(), &mut requests);
+            live.dirty = false;
+        }
+        assert_eq!(requests.len(), 2);
+        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
+        let source = dir.path().join("import/source.jsonl");
+        let answer = super::super::tests::reading(root, &[], &settings);
+        Journal::open(&source, &settings.fingerprint)
+            .unwrap()
+            .append(answer, &settings, "fixture".into())
+            .unwrap();
+        let mut alerts = Alerts {
+            state: dir.path(),
+            pending: VecDeque::new(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline);
+            let changed =
+                poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives)
+                    .unwrap();
+            assert!(!lives[1].dirty);
+            if changed {
+                assert!(lives[0].dirty && lives[0].requests_dirty);
+                break;
+            }
+            assert!(!lives[0].dirty);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for (live, target) in lives.iter_mut().zip(&checkpoint.targets) {
+            live.tree.advance(&journal).unwrap();
+            live.refresh_requests(target, &journal, &BTreeMap::new(), &mut requests);
+        }
+        assert!(lives[0].tree.finished);
+        assert!(!lives[1].tree.finished);
+        assert!(!requests.contains_key(root));
+        assert!(requests.contains_key(&other));
+        lives[0].dirty = false;
+        assert!(
+            !poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives).unwrap()
+        );
+        assert!(lives.iter().all(|live| !live.dirty));
+    }
+
     use super::*;
 
     #[test]
