@@ -989,8 +989,8 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--bad-eval <CP>` | `-150` | alt の降格に使う値の上限 (手番側からの整数値) |
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
 | `--schema <DIR>` | なし | 語彙と読み条件の表。sources.tsv の replaceable=1 の source だけ置換できる。省略時は read・ext |
-| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す |
-| `--deep-plies <N>` | なし | 差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。同じ局面に戻ったら止める |
+| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す。`--deep-plies` を指定したときは線未満の局面も対象にする |
+| `--deep-plies <N>` | なし | 差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。N は 1 以上。直接のキーが無ければ反転キーでも続きを辿り、同じ局面に戻ったら止める |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |

@@ -54,11 +54,11 @@ pub(super) struct AuditArgs {
     /// 点検の表 (TSV) の出力先
     #[arg(long)]
     table: PathBuf,
-    /// 点検の線。main が伝播後の 1 位からこの値以上負ける局面を表に出す
+    /// 点検の線。main が伝播後の 1 位からこの値以上負ける局面を表に出す。--deep-plies 指定時は線未満も対象にする
     #[arg(long, default_value_t = 40)]
     line: i32,
     /// 両方の手の先で元データの main が N 手以上続けば、正の差が --line 未満でも対象にする
-    #[arg(long)]
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     deep_plies: Option<usize>,
     /// alt の降格・bench の復帰を判定する基準値との差
     #[arg(long, default_value_t = 100)]
@@ -1176,9 +1176,18 @@ fn main_continues_after(
     if apply_usi(&mut pos, mv).is_err() {
         return Ok(false);
     }
-    let mut visited = BTreeSet::new();
+    let mut visited = BTreeSet::from([key.to_owned()]);
     for _ in 0..limit {
-        let sfen = pos.to_sfen();
+        let mut sfen = pos.to_sfen();
+        if !positions.contains_key(strip_ply(&sfen)) {
+            let Some(flipped) = rshogi_book::flipped_key(&sfen)
+                .filter(|flipped| positions.contains_key(strip_ply(flipped)))
+            else {
+                return Ok(false);
+            };
+            pos = position_from_sfen(&flipped)?;
+            sfen = flipped;
+        }
         let key = strip_ply(&sfen);
         if !visited.insert(key.to_owned()) {
             return Ok(false);
@@ -1506,6 +1515,59 @@ mod tests {
     }
 
     #[test]
+    fn deep_plies_follows_flipped_continuation() {
+        let mut rows = parse_master(&deep_fixture()).unwrap();
+        for row in &mut rows {
+            if [A, B].contains(&row.get("key")) {
+                let flipped = rshogi_book::flipped_key(row.get("key")).unwrap();
+                row.set("key", strip_ply(&flipped).to_owned());
+                row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+            }
+        }
+        let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!(findings[0].gap(), 20);
+        assert_eq!(summary.deep_below_line, [1, 0]);
+    }
+
+    #[test]
+    fn deep_plies_includes_below_line_for_white() {
+        let mut rows = parse_master(&deep_fixture()).unwrap();
+        for row in &mut rows {
+            let flipped = rshogi_book::flipped_key(row.get("key")).unwrap();
+            row.set("key", strip_ply(&flipped).to_owned());
+            row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+        }
+        let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        let flipped_root = rshogi_book::flipped_key(ROOT).unwrap();
+        assert_eq!(findings[0].key, strip_ply(&flipped_root));
+        assert_eq!(findings[0].gap(), 20);
+        assert_eq!(summary.below_line, [0, 1]);
+        assert_eq!(summary.at_or_above_line, [0, 0]);
+        assert_eq!(summary.deep_below_line, [0, 1]);
+    }
+
+    #[test]
+    fn deep_plies_keeps_at_or_above_line_with_short_continuations() {
+        let text = master(&[(ROOT, "5i4h", "main", "0"), (ROOT, "5i6h", "alt", "40")]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!(findings[0].gap(), 40);
+        assert_eq!(summary.at_or_above_line, [1, 0]);
+        assert_eq!(summary.below_line, [0, 0]);
+        assert_eq!(summary.deep_below_line, [0, 0]);
+    }
+
+    #[test]
     fn deep_plies_excludes_below_line_when_either_continuation_is_short() {
         for short_leaf in [B, "9/4k4/9/9/9/9/9/3K5/9 b -"] {
             let mut rows = parse_master(&deep_fixture()).unwrap();
@@ -1540,7 +1602,8 @@ mod tests {
             ("9/4k4/9/9/9/9/9/9/4K4 w -", "5b5a", "main", "0"),
         ]);
         let (positions, _) = parse_master_rows(text.as_bytes()).unwrap();
-        assert!(main_continues_after(&positions, ROOT, "5i4h", 4).unwrap());
+        assert!(main_continues_after(&positions, ROOT, "5i4h", 3).unwrap());
+        assert!(!main_continues_after(&positions, ROOT, "5i4h", 4).unwrap());
         assert!(!main_continues_after(&positions, ROOT, "5i4h", usize::MAX).unwrap());
     }
 
@@ -2256,6 +2319,26 @@ mod tests {
             .unwrap()
             .args;
         assert_eq!((custom.line, custom.demote_line), (40, 70));
+    }
+
+    #[test]
+    fn cli_deep_plies_requires_positive_value() {
+        #[derive(clap::Parser, Debug)]
+        struct Cli {
+            #[command(flatten)]
+            args: AuditArgs,
+        }
+        use clap::Parser;
+        let base = ["audit", "--master", "moves.tsv", "--table", "audit.tsv"];
+        assert!(Cli::try_parse_from(base).unwrap().args.deep_plies.is_none());
+        assert_eq!(
+            Cli::try_parse_from(base.into_iter().chain(["--deep-plies", "0"]))
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::ValueValidation
+        );
+        let args = Cli::try_parse_from(base.into_iter().chain(["--deep-plies", "1"])).unwrap().args;
+        assert_eq!(args.deep_plies, Some(1));
     }
 
     #[test]
