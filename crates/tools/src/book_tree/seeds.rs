@@ -428,11 +428,14 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                     };
                     let prefix: Vec<_> =
                         moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
-                    if !prefix.is_empty()
-                        && prefixes[&(origin_key.clone(), own.to_owned(), prefix)]
-                            < args.min_games_offset as u64
-                    {
-                        continue;
+                    if !prefix.is_empty() {
+                        // 2 回目の走査で数えた組なので必ずある。無ければ走査の間に入力が変わった。
+                        let n = *prefixes
+                            .get(&(origin_key.clone(), own.to_owned(), prefix))
+                            .context("走査の間に棋譜が変わりました (手順の局数が見つかりません)")?;
+                        if n < args.min_games_offset as u64 {
+                            continue;
+                        }
                     }
                     let line: Vec<_> = moves[index..]
                         .iter()
