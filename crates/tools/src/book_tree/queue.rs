@@ -9,7 +9,7 @@ use clap::Args;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -133,25 +133,19 @@ pub(super) fn enqueue(args: EnqueueArgs) -> Result<()> {
         Vec::new()
     } else if let Some(from) = &args.from {
         let mut lines = Vec::new();
-        for (n, text) in BufReader::new(File::open(from)?).lines().enumerate() {
-            let text = text?;
-            if text.trim().is_empty() {
-                continue;
-            }
-            let line: Line = serde_json::from_str(&text)
-                .with_context(|| format!("{}:{}", from.display(), n + 1))?;
+        super::targets::read_checked_lines(from, |line, _| {
             lines.push(line);
-        }
+            Ok(())
+        })?;
         if lines.is_empty() {
             bail!("足す行がありません: {}", from.display());
         }
         lines
     } else {
-        vec![line_from_args(&args)?]
-    };
-    for line in &lines {
+        let line = line_from_args(&args)?;
         line.check().with_context(|| format!("id={}", line.id))?;
-    }
+        vec![line]
+    };
     let lock = open_lock(&args.state)?;
     if args.repair {
         repair(&queue)?;

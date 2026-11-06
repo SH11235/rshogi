@@ -6,14 +6,14 @@ use super::audit::reject_same_file;
 use super::master_table::{MasterPosition, read_master};
 use super::refutation::format_queue;
 use super::reply_graph::{HIRATE_KEY, SideArg};
-use super::targets::{Line, MAX_DEPTH, Opts};
+use super::targets::{Line, MAX_DEPTH, Opts, parse_root, read_checked_lines};
 use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rshogi_book::{Book, BookEntryMove};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -66,6 +66,27 @@ pub(super) struct WalkArgs {
     /// 自分が読み始める局面のうち、重みが `--min-weight` 以上のものを木のキューの行 (JSON Lines) に書く
     #[arg(long)]
     enqueue_out: Option<PathBuf>,
+    /// キューに書く根の手数 (SFEN) の上限
+    #[arg(long, requires = "enqueue_out")]
+    max_root_ply: Option<usize>,
+    /// 既に積んだ木のキュー (JSON Lines)。繰り返して複数
+    #[arg(long, requires = "enqueue_out")]
+    exclude_queue: Vec<PathBuf>,
+    /// キューの行の相手の手の数 (1〜8)
+    #[arg(long, requires = "enqueue_out")]
+    opp_n: Option<usize>,
+    /// キューの行の打ち切り値 (1〜30000)
+    #[arg(long, requires = "enqueue_out")]
+    stop: Option<i32>,
+    /// キューの行の読み直し回数 (0〜10)
+    #[arg(long, requires = "enqueue_out")]
+    rounds: Option<usize>,
+    /// 先手番で循環に入る手の値 (-30000〜30000)
+    #[arg(long, requires = "enqueue_out", allow_hyphen_values = true)]
+    draw_black: Option<i32>,
+    /// 後手番で循環に入る手の値 (-30000〜30000)
+    #[arg(long, requires = "enqueue_out", allow_hyphen_values = true)]
+    draw_white: Option<i32>,
     /// キューの行の段数
     #[arg(long, default_value_t = 6)]
     depth: usize,
@@ -81,6 +102,19 @@ pub(super) struct WalkArgs {
     /// 初期局面からこの手順 (USI を空白区切り) を指した局面から辿り始める。手は元データに無くてもよい
     #[arg(long, value_name = "USI")]
     start_moves: Option<String>,
+}
+
+impl WalkArgs {
+    fn queue_opts(&self) -> Opts {
+        Opts {
+            opp_n: self.opp_n,
+            stop: self.stop,
+            rounds: self.rounds,
+            draw_black: self.draw_black,
+            draw_white: self.draw_white,
+            ..Opts::default()
+        }
+    }
 }
 
 /// 止まり方。
@@ -424,12 +458,16 @@ fn check_args(args: &WalkArgs) -> Result<()> {
         "--tag は [A-Za-z0-9_-] の 1〜{MAX_TAG_LEN} 文字にしてください: {}",
         args.tag
     );
+    args.queue_opts().check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
     if let Some(freq) = &args.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
     if let Some(book) = &args.opp_book {
         inputs.push(("--opp-book", book.as_path()));
+    }
+    for path in &args.exclude_queue {
+        inputs.push(("--exclude-queue", path.as_path()));
     }
     reject_same_file(&args.table, &inputs)?;
     if let Some(out) = &args.enqueue_out {
@@ -460,6 +498,7 @@ fn start_position(initial: &str, start_moves: Option<&str>) -> Result<(String, V
 
 fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
     check_args(&args)?;
+    let excluded = excluded_positions(&args.exclude_queue)?;
     let (start, start_moves) = start_position(initial, args.start_moves.as_deref())?;
     ensure!(
         start_moves.len() <= args.max_ply,
@@ -507,8 +546,11 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
     write_atomic(&args.table, &format_table(&rows))?;
     let queued = match &args.enqueue_out {
         Some(out) => {
-            let lines = queue_lines(&rows, &args)?;
+            let (lines, counts) = queue_lines(&rows, &args, &excluded)?;
             write_atomic(out, &format_queue(&lines)?)?;
+            if !args.exclude_queue.is_empty() {
+                print!("{}", counts.format());
+            }
             Some(lines.len())
         }
         None => None,
@@ -560,12 +602,95 @@ fn merged_own(rows: &[Row]) -> BTreeMap<(&'static str, &str), (f64, &Row)> {
     merged
 }
 
+type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
+
+fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
+    let mut latest = BTreeMap::new();
+    for path in paths {
+        read_checked_lines(path, |line, root| {
+            latest.insert(line.id.clone(), (line, root));
+            Ok(())
+        })?;
+    }
+    let mut excluded = Excluded::new();
+    for (id, (line, root)) in latest {
+        if line.depth == 0 {
+            continue;
+        }
+        let sides = line.sides();
+        let mut add = |key: &str, own: &str| {
+            excluded.entry((key.to_owned(), own.to_owned())).or_default().insert(id.clone());
+        };
+        for own in &sides {
+            add(&root.key, own);
+            for more in &line.roots {
+                add(&parse_root(more)?.key, own);
+            }
+        }
+        for moves in &line.game {
+            let mut key = root.key.clone();
+            for mv in moves.iter().take(line.depth + 1) {
+                key = super::model::child(&key, mv)?;
+                for own in &sides {
+                    if super::model::side(&key) == own {
+                        add(&key, own);
+                    }
+                }
+            }
+        }
+    }
+    Ok(excluded)
+}
+
+#[derive(Default, Debug)]
+struct ExclusionCounts {
+    sides: BTreeMap<String, usize>,
+    ids: BTreeMap<String, usize>,
+}
+
+impl ExclusionCounts {
+    fn format(&self) -> String {
+        let mut text = String::new();
+        for side in ["b", "w"] {
+            writeln!(
+                text,
+                "{side}: 既存の木で除いたキューの行 {}",
+                self.sides.get(side).unwrap_or(&0)
+            )
+            .expect("String への書き込み");
+        }
+        for (id, count) in &self.ids {
+            writeln!(text, "既存の id={id}: 除いたキューの行 {count}")
+                .expect("String への書き込み");
+        }
+        text
+    }
+}
+
 /// 重みが `--min-weight` 以上の読み始める局面を、重みの順にキューの行にする。同じ局面に別の手数で来た行は
 /// 重みを足して 1 行にし、根の手数は最も小さい手数にする。キューは同じ id の根の手数が変わる行を受け付けないので、
 /// id に根の手数を入れ、重みが入れ替わっても同じ局面・同じ手数は同じ id になるようにする。
-fn queue_lines(rows: &[Row], args: &WalkArgs) -> Result<Vec<Line>> {
+fn queue_lines(
+    rows: &[Row],
+    args: &WalkArgs,
+    excluded: &Excluded,
+) -> Result<(Vec<Line>, ExclusionCounts)> {
+    let mut counts = ExclusionCounts::default();
     let mut picked: Vec<(f64, &Row)> =
         merged_own(rows).into_values().filter(|(w, _)| *w >= args.min_weight).collect();
+    picked.retain(|(_, r)| {
+        if args.max_root_ply.is_some_and(|max| r.ply + 1 > max) {
+            return false;
+        }
+        if let Some(ids) = excluded.get(&(r.key.clone(), r.side.to_owned())) {
+            *counts.sides.entry(r.side.to_owned()).or_default() += 1;
+            for id in ids {
+                *counts.ids.entry(id.clone()).or_default() += 1;
+            }
+            return false;
+        }
+        true
+    });
     picked.sort_by(|a, b| {
         b.0.total_cmp(&a.0).then(a.1.side.cmp(b.1.side)).then(a.1.key.cmp(&b.1.key))
     });
@@ -587,13 +712,13 @@ fn queue_lines(rows: &[Row], args: &WalkArgs) -> Result<Vec<Line>> {
             priority: args.priority + rank.min(99) as u32,
             hold: false,
             game,
-            opts: Opts::default(),
+            opts: args.queue_opts(),
             memo: Some(format!("walk weight={weight:.5} moves={}", r.moves.join(" "))),
         };
         line.check().with_context(|| format!("キューの行の検査: {}", r.key))?;
         lines.push(line);
     }
-    Ok(lines)
+    Ok((lines, counts))
 }
 
 fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> String {

@@ -5,6 +5,8 @@ use crate::book_db::{parse_position_line, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub(super) const QUEUE: &str = "targets.jsonl";
@@ -42,6 +44,30 @@ pub(super) struct Opts {
     pub extra: Option<Vec<String>>,
 }
 impl Opts {
+    /// キューで指定できる値の範囲を検査する。
+    pub fn check(&self) -> Result<()> {
+        let o = self;
+        if let Some(v) = o.opp_n {
+            check_range("opp_n", v, 1, 8)?;
+        }
+        if let Some(v) = o.stop {
+            check_range("stop", v, 1, 30000)?;
+        }
+        if let Some(v) = o.rounds {
+            check_range("rounds", v, 0, 10)?;
+        }
+        for (name, v) in [
+            ("draw", o.draw),
+            ("draw_black", o.draw_black),
+            ("draw_white", o.draw_white),
+        ] {
+            if let Some(v) = v {
+                check_range(name, v, -30000, 30000)?;
+            }
+        }
+        Ok(())
+    }
+
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
@@ -105,6 +131,25 @@ pub(super) fn parse_root(root: &str) -> Result<Root> {
     Ok(Root { key, ply })
 }
 
+/// JSON Lines を逐次読み込み、enqueue と同じ検査を通して渡す。
+pub(super) fn read_checked_lines(
+    path: &Path,
+    mut visit: impl FnMut(Line, Root) -> Result<()>,
+) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
+    for (n, text) in BufReader::new(file).lines().enumerate() {
+        let location = || format!("{}:{}", path.display(), n + 1);
+        let text = text.with_context(location)?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        let line: Line = serde_json::from_str(&text).with_context(location)?;
+        let root = line.check().with_context(location)?;
+        visit(line, root).with_context(location)?;
+    }
+    Ok(())
+}
+
 fn check_range<T: PartialOrd + std::fmt::Display>(name: &str, v: T, lo: T, hi: T) -> Result<()> {
     if v < lo || v > hi {
         bail!("{name} は {lo}〜{hi} が必要です: {v}");
@@ -156,26 +201,8 @@ impl Line {
                 key = child(&key, mv).with_context(|| format!("game の手が不正です: {mv}"))?;
             }
         }
-        let o = &self.opts;
-        if let Some(v) = o.opp_n {
-            check_range("opp_n", v, 1, 8)?;
-        }
-        if let Some(v) = o.stop {
-            check_range("stop", v, 1, 30000)?;
-        }
-        if let Some(v) = o.rounds {
-            check_range("rounds", v, 0, 10)?;
-        }
-        for (name, v) in [
-            ("draw", o.draw),
-            ("draw_black", o.draw_black),
-            ("draw_white", o.draw_white),
-        ] {
-            if let Some(v) = v {
-                check_range(name, v, -30000, 30000)?;
-            }
-        }
-        if let Some(extra) = &o.extra {
+        self.opts.check()?;
+        if let Some(extra) = &self.opts.extra {
             if extra.len() > MAX_EXTRA {
                 bail!("extra は {MAX_EXTRA} 手までです");
             }
