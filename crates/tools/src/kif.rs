@@ -368,6 +368,8 @@ fn export_game_to_kif<W: Write>(
         .as_ref()
         .filter(|r| !is_incomplete_result(csa, &r.outcome, Some(&r.reason)));
     let terminal = match result {
+        // 打ち切り（selfplay の cancelled / game_time_limit / watchdog）は勝敗が付いていない。
+        Some(r) if r.outcome == "in_progress" => Some("中断"),
         Some(r) => terminal_move_label(&r.reason, &r.outcome, pos.side_to_move(), csa),
         None if game.result.is_some() => Some("中断"),
         None => None,
@@ -387,12 +389,7 @@ fn export_game_to_kif<W: Write>(
         (Some("draw"), _) => "引き分け",
         _ => "中断",
     };
-    writeln!(
-        writer,
-        "
-まで{}手で{}",
-        written_moves, summary
-    )?;
+    writeln!(writer, "\nまで{}手で{}", written_moves, summary)?;
     Ok(())
 }
 
@@ -410,6 +407,12 @@ fn terminal_move_label(
         MoverWins,
         Draw,
     }
+    let winner = match outcome {
+        "black_win" => Some(Color::Black),
+        "white_win" => Some(Color::White),
+        "draw" => None,
+        _ => return None,
+    };
     let (label, expect) = match reason {
         "resign" => ("投了", Expect::MoverLoses),
         // csa_client は理由行の無い `#WIN` / `#LOSE` を `win` / `lose` と書く（投了などの通常の決着）。
@@ -418,18 +421,16 @@ fn terminal_move_label(
         "win" | "win_declaration" => ("入玉勝ち", Expect::MoverWins),
         "timeout" | "time_up" => ("切れ負け", Expect::MoverLoses),
         "illegal_move" => ("反則負け", Expect::MoverLoses),
-        // 連続王手の千日手は、最後に王手を掛けた側（直前に指した側）の負け。
-        "sennichite_perpetual_check" | "oute_sennichite" => ("反則勝ち", Expect::MoverWins),
+        // 連続王手の千日手は王手を掛け続けた側の負け。循環を閉じたのが王手か逃げる手かで、
+        // 次に指す番の側が勝つことも負けることもある。
+        "sennichite_perpetual_check" | "oute_sennichite" if winner == Some(side_to_move) => {
+            ("反則勝ち", Expect::MoverWins)
+        }
+        "sennichite_perpetual_check" | "oute_sennichite" => ("反則負け", Expect::MoverLoses),
         "sennichite" => ("千日手", Expect::Draw),
         // CSA の旧ログの `max_moves` は引き分けか打ち切りか決められないので、語を書かない。
         "max_moves" if !csa => ("持将棋", Expect::Draw),
         "jishogi" => ("持将棋", Expect::Draw),
-        _ => return None,
-    };
-    let winner = match outcome {
-        "black_win" => Some(Color::Black),
-        "white_win" => Some(Color::White),
-        "draw" => None,
         _ => return None,
     };
     let consistent = match expect {
@@ -601,7 +602,8 @@ pub(crate) fn format_move_label(ply: u32, pos: &Position, mv: Move) -> String {
         let from = mv.from();
         let piece_type = pos.piece_on(from).piece_type();
         // 成る手は「駒名＋成」（`２二角成`）で書く。成った後の駒名（`２二馬`）で書くと、
-        // KIF では既に成っている駒の移動と読まれる。成らない手に「不成」は付けない（KIF の仕様）。
+        // KIF では既に成っている駒の移動と読まれる。成らない手には何も付けない（「不成」を
+        // 読めない KIF の読み手がある）。
         let promotion = if mv.is_promote() { "成" } else { "" };
         let suffix = format!("({}{})", square_file_digit(from), square_rank_digit(from));
         (format!("{}{}", piece_label(piece_type, false), promotion), suffix)
@@ -1055,6 +1057,16 @@ mod tests {
             terminal_move_label("sennichite_perpetual_check", "white_win", White, false),
             Some("反則勝ち")
         );
+        // 逃げる手で循環が閉じたとき（王手を掛け続けた先手が次に指す番）。
+        assert_eq!(
+            terminal_move_label("sennichite_perpetual_check", "white_win", Black, false),
+            Some("反則負け")
+        );
+        assert_eq!(
+            terminal_move_label("oute_sennichite", "white_win", Black, true),
+            Some("反則負け")
+        );
+        assert_eq!(terminal_move_label("oute_sennichite", "draw", Black, true), None);
         assert_eq!(terminal_move_label("sennichite", "draw", Black, false), Some("千日手"));
         assert_eq!(terminal_move_label("max_moves", "draw", Black, false), Some("持将棋"));
         assert_eq!(terminal_move_label("max_moves", "draw", Black, true), None);
@@ -1100,18 +1112,8 @@ mod tests {
             "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
         }]);
         for (reason, line, summary) in [
-            (
-                "sennichite",
-                "   2 千日手
-",
-                "まで1手で千日手",
-            ),
-            (
-                "max_moves",
-                "   2 持将棋
-",
-                "まで1手で持将棋",
-            ),
+            ("sennichite", "   2 千日手\n", "まで1手で千日手"),
+            ("max_moves", "   2 持将棋\n", "まで1手で持将棋"),
             ("adjudication_draw", "", "まで1手で引き分け"),
         ] {
             let text = kif_for(

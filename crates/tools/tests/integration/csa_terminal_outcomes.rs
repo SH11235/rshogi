@@ -39,25 +39,41 @@ fn fixture(dir: &Path, result: &GameResult, reason: &str) -> PathBuf {
     write_game_jsonl(dir, &record, &CsaClientConfig::default(), result).unwrap()
 }
 
-fn check_readers(path: &Path, unfinished: bool, expected: &str, publish_ok: bool) {
+fn check_readers(path: &Path, unfinished: bool, expected: &str, reason: &str, publish_ok: bool) {
     let outputs = tempfile::tempdir().unwrap();
     let kif = outputs.path().join("game.kif");
     tools::kif::convert_jsonl_to_kif(path, &kif, &tools::kif::GameFilter::default()).unwrap();
     let kif = fs::read_to_string(kif).unwrap();
-    let endings: &[&str] = if unfinished {
-        &["中断"]
+    let meta: Value =
+        serde_json::from_str(fs::read_to_string(path).unwrap().lines().next().unwrap()).unwrap();
+    let selfplay = meta["source"] == "tournament";
+    // 千日手と分かる引き分けはその語で書く。最大手数は selfplay なら持将棋、CSA は決められない。
+    let draw_word = match reason {
+        "sennichite" => Some("千日手"),
+        "max_moves" if selfplay => Some("持将棋"),
+        _ => None,
+    };
+    let ending = if unfinished {
+        "中断"
     } else {
         match expected {
-            "black_win" => &["先手の勝ち"],
-            "white_win" => &["後手の勝ち"],
-            // 引き分けは、千日手・持将棋と分かれば、その語で書く。
-            _ => &["引き分け", "千日手", "持将棋"],
+            "black_win" => "先手の勝ち",
+            "white_win" => "後手の勝ち",
+            _ => draw_word.unwrap_or("引き分け"),
         }
     };
-    assert!(
-        endings.iter().any(|ending| kif.contains(&format!("まで1手で{ending}"))),
-        "{kif}"
-    );
+    assert!(kif.contains(&format!("まで1手で{ending}")), "{kif}");
+    // 終局の行: 7g7f の後は後手番なので、先手の勝ちの投了と、語の決まる引き分けだけが書ける。
+    let terminal = match (expected, reason) {
+        _ if unfinished => Some("中断"),
+        ("black_win", "resign") => Some("投了"),
+        ("draw", _) => draw_word,
+        _ => None,
+    };
+    match terminal {
+        Some(label) => assert!(kif.contains(&format!("\n   2 {label}\n")), "{kif}"),
+        None => assert!(!kif.contains("\n   2 "), "{kif}"),
+    }
     if unfinished {
         assert!(!kif.contains("引き分け"));
     }
@@ -139,7 +155,7 @@ fn writer_terminal_results_reach_readers_without_inventing_draws() {
             if unfinished {
                 assert!(row.get("winner").is_none());
             }
-            check_readers(&path, unfinished, expected, !unfinished && !reason.is_empty());
+            check_readers(&path, unfinished, expected, reason, !unfinished && !reason.is_empty());
             let analysis = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
                 .arg(&path)
                 .arg("--json")
@@ -217,7 +233,7 @@ fn legacy_reasons_are_csa_only_and_ambiguous_max_moves_stays_draw() {
             rewrite(&path, source, reason);
             let unfinished =
                 source != Some("tournament") && matches!(reason, "interrupted" | "censored");
-            check_readers(&path, unfinished, "draw", reason == "max_moves");
+            check_readers(&path, unfinished, "draw", reason, reason == "max_moves");
             let flood = Command::new(env!("CARGO_BIN_EXE_floodgate_record"))
                 .arg("--dir")
                 .arg(dir.path())
@@ -256,7 +272,7 @@ fn legacy_reasons_are_csa_only_and_ambiguous_max_moves_stays_draw() {
     }
     let dir = tempfile::tempdir().unwrap();
     let path = fixture(dir.path(), &GameResult::Draw, "max_moves");
-    check_readers(&path, false, "draw", true);
+    check_readers(&path, false, "draw", "max_moves", true);
 }
 
 fn check_partial_analysis(incomplete: &Path) {
@@ -283,6 +299,26 @@ fn check_partial_analysis(incomplete: &Path) {
             String::from_utf8_lossy(&output.stderr)
                 .contains("CSA単局ログは独立した対局ペアではない")
         );
+    }
+}
+
+#[test]
+fn csa_win_without_reason_line_is_written_as_resignation() {
+    for (result, reason, expected) in [
+        (GameResult::Win, "win", Some("   2 投了")),
+        (GameResult::Lose, "lose", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(dir.path(), &result, reason);
+        let output = dir.path().join("game.kif");
+        tools::kif::convert_jsonl_to_kif(&path, &output, &tools::kif::GameFilter::default())
+            .unwrap();
+        let text = fs::read_to_string(output).unwrap();
+        assert!(!text.contains("入玉勝ち"), "{text}");
+        match expected {
+            Some(line) => assert!(text.contains(line), "{text}"),
+            None => assert!(!text.contains("\n   2 "), "{text}"),
+        }
     }
 }
 
