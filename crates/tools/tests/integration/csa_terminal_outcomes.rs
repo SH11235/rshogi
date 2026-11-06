@@ -44,16 +44,20 @@ fn check_readers(path: &Path, unfinished: bool, expected: &str, publish_ok: bool
     let kif = outputs.path().join("game.kif");
     tools::kif::convert_jsonl_to_kif(path, &kif, &tools::kif::GameFilter::default()).unwrap();
     let kif = fs::read_to_string(kif).unwrap();
-    let ending = if unfinished {
-        "中断"
+    let endings: &[&str] = if unfinished {
+        &["中断"]
     } else {
         match expected {
-            "black_win" => "先手の勝ち",
-            "white_win" => "後手の勝ち",
-            _ => "引き分け",
+            "black_win" => &["先手の勝ち"],
+            "white_win" => &["後手の勝ち"],
+            // 引き分けは、千日手・持将棋と分かれば、その語で書く。
+            _ => &["引き分け", "千日手", "持将棋"],
         }
     };
-    assert!(kif.contains(&format!("まで1手で{ending}")), "{kif}");
+    assert!(
+        endings.iter().any(|ending| kif.contains(&format!("まで1手で{ending}"))),
+        "{kif}"
+    );
     if unfinished {
         assert!(!kif.contains("引き分け"));
     }
