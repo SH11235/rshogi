@@ -315,6 +315,24 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 | `--opp-freq` | なし | `master walk` と同じ、手数を除いた SFEN 順のテキスト頻度定跡。手の count の合計を根の局数とする |
 | `--opp-book` | なし | `master walk` と同じ `.db` / `.ybb` の大きい定跡。根に手があるかを調べる |
 | `--exclude-queue` | なし、繰り返し可 | `master walk` と同じ除外。最後の同一 id を使い、段数 0 は除外に使わない。根・追加の根と側、および game の depth+1 手以内の自分の手番の局面と側が一致する行を除く |
+| `--update-out <JSONL>` | なし | `--exclude-queue` が必要。同じ根・同じ own の既存行に不足する game を足した完全な行を出す |
+
+`--update-out` は、指定ファイル順・行順で最後の同一 id の行を使います。depth 1 以上で、
+`root` の局面 (SFEN 手数は不問) と `own` の文字列が種と一致する行が対象です。
+`own=bw` と種の `b` / `w` は一致しません。追加の根や `game` の途中の局面だけで一致する行は、従来どおり除外するだけです。
+既存行の `id`・`root`・`roots`・`own`・`depth`・`priority`・`hold`・`opts` を保持し、
+既存の `game` は手順も順序も変えません。種の手順は既存 depth+1 手まで集計し、局数降順、同数なら USI 手順の文字列順で
+先頭 `--max-lines` 本を選び、既存 `game` の最初の depth+1 手と一致しないものだけを末尾に足します。
+追加本数を memo の末尾にも付け、追加がなければその行を出しません。更新行は id 順です。
+標準出力に更新 id ごとの元ファイルのパスと追加本数を出します。
+元ファイルがある台の state に、その id の更新行だけを `tree enqueue --from` で積み直してください。
+複数台の更新行を一つの state にまとめて投入しないでください。
+
+```sh
+book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds.tsv --tag holes \
+  --exclude-queue machine-a/targets.jsonl --exclude-queue machine-b/targets.jsonl \
+  --update-out updates.jsonl
+```
 
 結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
 両スロットが揃い、どちらにも `error=true` がない組だけを使い、重複スロットは最初の結果を保持します。
@@ -327,8 +345,10 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 同じ局が複数の経路で同じ根に来ても局数は 1 と数えます。id は walk と同じ
 `<tag>_<根のSFEN手数>_<局面のSHA-256の先頭16桁>_<b|w>` です。
 
-根を通る種の局のどれかが、起点から指定手数以内にその側の負けで終局したか、
-その範囲の `eval.last_exact_primary.score` がその側から見て `-collapse-cp` 以下なら early です。
+局ごとに、起点から指定手数以内に終局したか、その範囲の `eval.last_exact_primary.score` が
+最終的に負けた側から見て `-collapse-cp` 以下なら early と判定します。引分の局は、どちらかの側から見て
+その閾値以下になれば early です。同じ局から作る種には own によらず同じ判定を使い、
+根を通る種の局のどれかが early なら、その根と own の行を early にします。
 評価値は指した側からの値を先後に合わせて使い、両エンジンの読みを対象にします。起点の読みを距離 0 とし、
 距離 collapse-plies の読みも含めます。終局は起点の手を 1 手目として数えます (result の `plies`、省略時は最後の move の `ply`)。詰みは通常の cp より強い
 勝ち負けとして扱い、exact primary のない eval は崩れの判定には使いません。

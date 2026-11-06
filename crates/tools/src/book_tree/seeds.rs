@@ -2,7 +2,7 @@
 
 use super::audit::reject_same_file;
 use super::refutation::format_queue;
-use super::targets::{Line, Opts, Root, parse_root};
+use super::targets::{Line, Opts, Root, parse_root, read_checked_lines};
 use super::walk::{book_probe, check_tag, excluded_positions, open_book, queue_id};
 use crate::common::io::write_atomic;
 use crate::selfplay::types::PrimaryScore;
@@ -58,6 +58,8 @@ pub(super) struct SeedsArgs {
     opp_book: Option<PathBuf>,
     #[arg(long)]
     exclude_queue: Vec<PathBuf>,
+    #[arg(long, requires = "exclude_queue")]
+    update_out: Option<PathBuf>,
 }
 
 impl SeedsArgs {
@@ -254,17 +256,16 @@ fn origin(moves: &[Move]) -> Option<usize> {
     moves.iter().position(|m| m.eval.is_some())
 }
 
-fn early(
-    result: &GameResult,
-    moves: &[Move],
-    start: usize,
-    own: &str,
-    args: &SeedsArgs,
-) -> Result<bool> {
+fn early(result: &GameResult, moves: &[Move], start: usize, args: &SeedsArgs) -> Result<bool> {
     let first = moves[start].ply;
-    let loses = matches!((own, result.outcome.as_str()), ("b", "white_win") | ("w", "black_win"));
+    let loser = match result.outcome.as_str() {
+        "white_win" => Some("b"),
+        "black_win" => Some("w"),
+        "draw" => None,
+        _ => anyhow::bail!("不正な outcome: {}", result.outcome),
+    };
     let end = result.plies.unwrap_or_else(|| moves.last().map_or(first, |m| m.ply));
-    if loses && end.saturating_sub(first.saturating_sub(1)) <= args.collapse_plies {
+    if end.saturating_sub(first.saturating_sub(1)) <= args.collapse_plies {
         return Ok(true);
     }
     for mv in &moves[start..] {
@@ -287,12 +288,12 @@ fn early(
             PrimaryScore::MateWin => i64::MAX,
             PrimaryScore::MateLoss => -i64::MAX,
         };
-        let own_score = if mv.side_to_move == own {
-            score
-        } else {
-            -score
+        let loser_score = match loser {
+            Some(side) if mv.side_to_move == side => score,
+            Some(_) => -score,
+            None => -score.abs(),
         };
-        if own_score <= -i64::from(args.collapse_cp) {
+        if loser_score <= -i64::from(args.collapse_cp) {
             return Ok(true);
         }
     }
@@ -306,7 +307,7 @@ struct RootData {
     ply: u32,
     games: u64,
     samples: BTreeSet<String>,
-    lines: BTreeMap<Vec<String>, u64>,
+    lines: BTreeMap<(usize, Vec<String>), u64>,
     early: bool,
 }
 
@@ -325,6 +326,69 @@ impl RootData {
             *self.lines.entry(line).or_default() += count;
         }
     }
+}
+
+fn ranked_lines(data: &RootData, depth: usize) -> Vec<(Vec<String>, u64)> {
+    let mut lines: Vec<_> = data
+        .lines
+        .iter()
+        .filter(|((d, _), _)| *d == depth)
+        .map(|((_, moves), count)| (moves.clone(), *count))
+        .collect();
+    lines.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    lines
+}
+
+fn add_lines(line: &mut Line, data: &RootData, max_lines: usize) -> usize {
+    let mut known: BTreeSet<_> = line
+        .game
+        .iter()
+        .map(|moves| moves.iter().take(line.depth + 1).cloned().collect::<Vec<_>>())
+        .collect();
+    let mut added = 0;
+    for (moves, _) in ranked_lines(data, line.depth).into_iter().take(max_lines) {
+        if known.insert(moves.clone()) {
+            line.game.push(moves);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        let memo = line.memo.get_or_insert_default();
+        if !memo.is_empty() {
+            memo.push_str("; ");
+        }
+        memo.push_str(&format!("seeds: game に {added} 本追加"));
+    }
+    added
+}
+
+fn read_updates(paths: &[PathBuf]) -> Result<BTreeMap<String, Existing>> {
+    let mut updates = BTreeMap::new();
+    for path in paths {
+        read_checked_lines(path, |line, root| {
+            updates.insert(
+                line.id.clone(),
+                Existing {
+                    line,
+                    root,
+                    source: path.clone(),
+                },
+            );
+            Ok(())
+        })?;
+    }
+    updates.retain(|_, row| row.line.depth > 0);
+    Ok(updates)
+}
+
+struct Existing {
+    line: Line,
+    root: Root,
+    source: PathBuf,
+}
+
+fn update_notice(id: &str, path: &Path, added: usize) -> String {
+    format!("積み直し id={id}: 元ファイル={} / 追加 {added} 本", path.display())
 }
 
 pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
@@ -361,6 +425,22 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     reject_same_file(&args.table, &inputs)?;
     inputs.push(("--table", &args.table));
     reject_same_file(&args.out, &inputs)?;
+    inputs.push(("--out", &args.out));
+    if let Some(path) = &args.update_out {
+        reject_same_file(path, &inputs)?;
+    }
+    let mut updates = if args.update_out.is_some() {
+        read_updates(&args.exclude_queue)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut update_depths = BTreeMap::<(String, String), BTreeSet<usize>>::new();
+    for row in updates.values() {
+        update_depths
+            .entry((row.root.key.clone(), row.line.own.clone()))
+            .or_default()
+            .insert(row.line.depth);
+    }
     let valid: Vec<_> = args.games.iter().map(|p| valid_game_ids(p)).collect::<Result<_>>()?;
     let mut non_sweep = BTreeSet::new();
     let mut non_sweep_roots = BTreeSet::new();
@@ -413,11 +493,11 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             if !non_sweep.contains(&origin_key) {
                 return Ok(());
             }
+            let early = early(result, moves, start, &args)?;
             for own in ["b", "w"] {
                 if own == "w" && result.outcome == "black_win" {
                     continue;
                 }
-                let early = early(result, moves, start, own, &args)?;
                 let mut game_roots: BTreeMap<String, RootData> = BTreeMap::new();
                 for &offset in &args.offsets {
                     let Some(index) = start.checked_add(offset) else {
@@ -437,18 +517,23 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                             continue;
                         }
                     }
-                    let line: Vec<_> = moves[index..]
-                        .iter()
-                        .take(args.depth + 1)
-                        .take_while(|m| played(m))
-                        .map(|m| m.move_usi.clone())
-                        .collect();
+                    let depths = update_depths.get(&(root.key.clone(), own.to_owned()));
                     let data = game_roots.entry(root.key).or_default();
                     if data.ply == 0 || root.ply < data.ply {
                         data.ply = root.ply;
                     }
-                    if !line.is_empty() {
-                        data.lines.insert(line, 1);
+                    for depth in
+                        std::iter::once(args.depth).chain(depths.into_iter().flatten().copied())
+                    {
+                        let line: Vec<_> = moves[index..]
+                            .iter()
+                            .take(depth + 1)
+                            .take_while(|m| played(m))
+                            .map(|m| m.move_usi.clone())
+                            .collect();
+                        if !line.is_empty() {
+                            data.lines.insert((depth, line), 1);
+                        }
                     }
                 }
                 for (key, mut data) in game_roots {
@@ -468,11 +553,23 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     let mut book = book.as_ref().map(book_probe);
     let mut excluded_counts = BTreeMap::<String, usize>::new();
     let mut picked = Vec::new();
+    let mut update_counts = BTreeMap::new();
     for ((key, own), data) in roots {
         if own == "b" && !non_sweep_roots.contains(&key) {
             continue;
         }
-        if excluded.contains_key(&(key.clone(), own.clone())) {
+        if let Some(ids) = excluded.get(&(key.clone(), own.clone())) {
+            for id in ids {
+                if let Some(row) = updates.get_mut(id)
+                    && row.root.key == key
+                    && row.line.own == own
+                {
+                    let added = add_lines(&mut row.line, &data, args.max_lines);
+                    if added > 0 {
+                        update_counts.insert(id.clone(), added);
+                    }
+                }
+            }
             *excluded_counts.entry(own).or_default() += 1;
             continue;
         }
@@ -509,8 +606,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             rank = rank.checked_add(1).context("rank overflow")?;
             p
         };
-        let mut lines: Vec<_> = data.lines.into_iter().collect();
-        lines.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let lines = ranked_lines(&data, args.depth);
         let line = Line {
             id: queue_id(&args.tag, data.ply as usize, &key, &own),
             root: format!("sfen {key} {}", data.ply),
@@ -534,6 +630,13 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
         queue.push(line);
     }
     let queue_text = format_queue(&queue)?;
+    if let Some(path) = &args.update_out {
+        let rows: Vec<_> = update_counts.keys().map(|id| updates[id].line.clone()).collect();
+        for row in &rows {
+            row.check()?;
+        }
+        write_atomic(path, &format_queue(&rows)?)?;
+    }
     write_atomic(&args.table, &table)?;
     write_atomic(&args.out, &queue_text)?;
     for own in ["b", "w"] {
@@ -543,6 +646,9 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             counts.get(&(own.to_owned(), "early")).unwrap_or(&0),
             counts.get(&(own.to_owned(), "late")).unwrap_or(&0)
         );
+    }
+    for (id, added) in update_counts {
+        println!("{}", update_notice(&id, &updates[&id].source, added));
     }
     println!("キューの行 {}", queue.len());
     Ok(())

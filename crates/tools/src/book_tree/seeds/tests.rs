@@ -23,13 +23,14 @@ fn args(dir: &Path) -> SeedsArgs {
         offsets: vec![0, 6, 12],
         min_games_offset: 2,
         max_lines: 3,
-        collapse_plies: 30,
+        collapse_plies: 0,
         collapse_cp: 150,
         priority_early: 2,
         priority_late: 100,
         opp_freq: None,
         opp_book: None,
         exclude_queue: vec![],
+        update_out: None,
     }
 }
 
@@ -93,7 +94,7 @@ fn exit_sweep_and_sides() {
     assert_eq!(root[0].own, "b");
     assert_eq!(root[1].own, "w");
     let table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
-    assert!(table.lines().any(|l| l.starts_with("b\t3\t2\tearly\t2\t")));
+    assert!(table.lines().any(|l| l.starts_with("b\t3\t100\tlate\t2\t")));
     assert!(table.lines().any(|l| l.starts_with("w\t3\t100\tlate\t1\t")));
     rows.last_mut().unwrap()["outcome"] = json!("draw");
     write_games(dir.path(), &rows);
@@ -162,7 +163,7 @@ fn exact_scores_sign_mate_and_terminal_boundary() {
     run(opts).unwrap();
     let out = lines(dir.path());
     assert_eq!(out.iter().find(|l| l.own == "b").unwrap().priority, 2);
-    assert_eq!(out.iter().find(|l| l.own == "w").unwrap().priority, 100);
+    assert_eq!(out.iter().find(|l| l.own == "w").unwrap().priority, 2);
     rows[1]["eval"]["last_exact_primary"]["score"] = json!({"mate":-3});
     write_games(dir.path(), &rows);
     let mut opts = args(dir.path());
@@ -177,17 +178,19 @@ fn exact_scores_sign_mate_and_terminal_boundary() {
         .take(PATH.len())
         .map(|v| serde_json::from_value(v).unwrap())
         .collect();
-    assert!(early(&result, &moves, 0, "b", &args(dir.path())).unwrap());
+    let mut boundary = args(dir.path());
+    boundary.collapse_plies = 30;
+    assert!(early(&result, &moves, 0, &boundary).unwrap());
     let result = GameResult {
         plies: Some(31),
         ..result
     };
-    assert!(!early(&result, &moves, 0, "b", &args(dir.path())).unwrap());
+    assert!(!early(&result, &moves, 0, &boundary).unwrap());
     let result = GameResult {
         plies: None,
         ..result
     };
-    assert!(early(&result, &moves, 0, "b", &args(dir.path())).unwrap());
+    assert!(early(&result, &moves, 0, &boundary).unwrap());
 }
 
 #[test]
@@ -230,7 +233,9 @@ fn exclusion_reuses_roots_and_game_positions() {
     std::fs::write(&path, format_queue(&[excluded]).unwrap()).unwrap();
     let mut opts = args(dir.path());
     opts.exclude_queue.push(path);
+    opts.update_out = Some(dir.path().join("updates.jsonl"));
     run(opts).unwrap();
+    assert!(std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap().is_empty());
     let remaining = lines(dir.path());
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].own, "w");
@@ -301,6 +306,7 @@ fn missing_evals_and_legacy_pair_metadata() {
 #[test]
 fn queue_option_and_output_collision_checks() {
     let dir = TempDir::new().unwrap();
+    write_games(dir.path(), &[]);
     let mut opts = args(dir.path());
     opts.opp_n = Some(0);
     assert!(run(opts).is_err());
@@ -310,6 +316,14 @@ fn queue_option_and_output_collision_checks() {
     let mut opts = args(dir.path());
     opts.out = opts.table.clone();
     assert!(run(opts).is_err());
+    for target in ["games.jsonl", "queue.jsonl", "table.tsv", "exclude.jsonl"] {
+        let mut opts = args(dir.path());
+        let path = dir.path().join("exclude.jsonl");
+        std::fs::write(&path, "").unwrap();
+        opts.exclude_queue.push(path);
+        opts.update_out = Some(dir.path().join(target));
+        assert!(run(opts).is_err());
+    }
 }
 
 #[test]
@@ -491,6 +505,178 @@ fn selected_result_is_used_even_when_an_excluded_result_with_same_id_comes_first
             (1, "draw".into(), PATH.len())
         ]
     );
-    run(args(dir.path())).unwrap();
+    let mut opts = args(dir.path());
+    opts.collapse_plies = 30;
+    run(opts).unwrap();
     assert!(lines(dir.path()).iter().any(|line| line.own == "b" && line.priority == 2));
+}
+
+#[test]
+fn early_uses_final_loser_for_both_seed_sides() {
+    let dir = TempDir::new().unwrap();
+    for (outcome, cp, expected) in [
+        ("white_win", 150, false),
+        ("white_win", -150, true),
+        ("black_win", -150, false),
+        ("black_win", 150, true),
+        ("draw", 150, true),
+        ("draw", -150, true),
+        ("draw", 149, false),
+    ] {
+        let mut rows = game(0, &initial(), PATH, 0, outcome);
+        rows[0]["eval"]["last_exact_primary"]["score"] = json!({"cp":cp});
+        let result: GameResult = serde_json::from_value(rows.pop().unwrap()).unwrap();
+        let moves: Vec<Move> =
+            rows.into_iter().map(|r| serde_json::from_value(r).unwrap()).collect();
+        assert_eq!(early(&result, &moves, 0, &args(dir.path())).unwrap(), expected);
+    }
+    for (cp, priority) in [(-150, 2), (150, 100)] {
+        let mut rows = game(0, &initial(), PATH, 0, "white_win");
+        rows[0]["eval"]["last_exact_primary"]["score"] = json!({"cp":cp});
+        rows.extend(game(1, &initial(), PATH, 0, "white_win"));
+        write_games(dir.path(), &rows);
+        run(args(dir.path())).unwrap();
+        let out = lines(dir.path());
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|l| l.priority == priority));
+    }
+    for outcome in ["black_win", "white_win", "draw"] {
+        let result: GameResult =
+            serde_json::from_value(json!({"game_id":0,"outcome":outcome,"plies":1})).unwrap();
+        let moves: Vec<Move> = game(0, &initial(), PATH, 0, outcome)
+            .into_iter()
+            .take(PATH.len())
+            .map(|r| serde_json::from_value(r).unwrap())
+            .collect();
+        let mut opts = args(dir.path());
+        opts.collapse_plies = 1;
+        assert!(early(&result, &moves, 0, &opts).unwrap());
+    }
+}
+
+#[test]
+fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    let mut other = PATH.to_vec();
+    other[0] = "6g6f";
+    rows.extend(game(1, &initial(), &other, 0, "draw"));
+    rows.extend(game(2, &initial(), &other, 0, "draw"));
+    rows.extend(game(3, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut existing = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    existing.id = "existing".into();
+    existing.depth = 1;
+    existing.root = format!("sfen {HIRATE_KEY} 99");
+    existing.opts.opp_n = Some(4);
+    existing.opts.draw_black = Some(-70);
+    existing.game = vec![PATH.iter().map(|s| s.to_string()).collect()];
+    existing.priority = 321;
+    existing.hold = true;
+    existing.memo = Some("保持するメモ".into());
+    let original = existing.clone();
+    let old_path = dir.path().join("old-machine.jsonl");
+    let path = dir.path().join("machine.jsonl");
+    let mut old = existing.clone();
+    old.game.clear();
+    old.priority = 999;
+    std::fs::write(&old_path, format_queue(&[old]).unwrap()).unwrap();
+    std::fs::write(&path, format_queue(&[existing]).unwrap()).unwrap();
+    let make_opts = || {
+        let mut opts = args(dir.path());
+        opts.exclude_queue = vec![old_path.clone(), path.clone()];
+        opts.update_out = Some(dir.path().join("updates.jsonl"));
+        opts
+    };
+    let loaded = read_updates(&make_opts().exclude_queue).unwrap();
+    assert_eq!(loaded["existing"].source, path);
+    assert_eq!(loaded["existing"].line, original);
+    run(make_opts()).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(updated.game[0], original.game[0]);
+    assert_eq!(updated.game[1], vec!["6g6f", "3c3d"]);
+    assert_eq!(updated.game.len(), 2);
+    let mut expected = original;
+    expected.game = updated.game.clone();
+    expected.memo = Some("保持するメモ; seeds: game に 1 本追加".into());
+    assert_eq!(updated, expected);
+    run(make_opts()).unwrap();
+    assert_eq!(text, std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap());
+    std::fs::write(&path, text).unwrap();
+    run(make_opts()).unwrap();
+    assert!(std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap().is_empty());
+}
+
+#[test]
+fn additions_follow_counts_then_usi_order() {
+    let mut line = Line {
+        id: "order".into(),
+        root: "startpos".into(),
+        roots: vec![],
+        own: "b".into(),
+        depth: 1,
+        priority: 2,
+        hold: false,
+        game: vec![vec!["7g7f".into()]],
+        opts: Opts::default(),
+        memo: None,
+    };
+    let mut data = RootData::default();
+    data.lines.insert((1, vec!["2g2f".into()]), 2);
+    data.lines.insert((1, vec!["6g6f".into()]), 3);
+    data.lines.insert((1, vec!["1g1f".into()]), 2);
+    assert_eq!(add_lines(&mut line, &data, 3), 3);
+    assert_eq!(line.game, vec![vec!["7g7f"], vec!["6g6f"], vec!["1g1f"], vec!["2g2f"]]);
+}
+
+#[test]
+fn update_notice_records_source_and_count() {
+    assert_eq!(
+        update_notice("tree-a", Path::new("machine-a/targets.jsonl"), 2),
+        "積み直し id=tree-a: 元ファイル=machine-a/targets.jsonl / 追加 2 本"
+    );
+}
+
+#[test]
+fn update_uses_existing_depth_and_ignores_transit_roots() {
+    let dir = TempDir::new().unwrap();
+    let mut changed = PATH.to_vec();
+    changed.swap(6, 8);
+    let mut rows = game(0, &initial(), &changed, 0, "draw");
+    rows.extend(game(1, &initial(), &changed, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut existing = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    existing.game = vec![PATH.iter().map(|s| s.to_string()).collect()];
+    let path = dir.path().join("machine.jsonl");
+    std::fs::write(&path, format_queue(&[existing.clone()]).unwrap()).unwrap();
+    let make_opts = || {
+        let mut opts = args(dir.path());
+        opts.depth = 1;
+        opts.exclude_queue = vec![path.clone()];
+        opts.update_out = Some(dir.path().join("updates.jsonl"));
+        opts
+    };
+    run(make_opts()).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(updated.game.len(), 2);
+    assert_eq!(updated.game[1], changed[..7]);
+    assert_eq!(updated.root, existing.root);
+    assert_eq!(updated.depth, 6);
+    assert!(!lines(dir.path()).iter().any(|l| l.own == "b"));
+    existing.depth = 0;
+    std::fs::write(&path, format_queue(&[updated, existing]).unwrap()).unwrap();
+    assert!(read_updates(std::slice::from_ref(&path)).unwrap().is_empty());
+    run(make_opts()).unwrap();
+    assert!(std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap().is_empty());
+    assert!(lines(dir.path()).iter().any(|l| l.own == "b"));
 }
