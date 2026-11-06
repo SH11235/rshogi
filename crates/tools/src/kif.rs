@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use rshogi_core::movegen::is_legal_with_pass;
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, Move, PieceType, Square};
+use rshogi_core::types::{Color, File as BoardFile, Move, PieceType, Rank, Square};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -181,7 +181,6 @@ struct MoveEntry {
 struct ResultEntry {
     outcome: String,
     reason: String,
-    plies: u32,
     #[serde(default)]
     pair_slot: Option<u32>,
 }
@@ -245,7 +244,7 @@ fn export_game_to_kif<W: Write>(
     game_id: u32,
     game: &GameLog,
 ) -> Result<()> {
-    let (mut pos, start_sfen) = start_position_for_game(game_id, &game.moves)?;
+    let mut pos = start_position_for_game(game_id, &game.moves)?;
 
     let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
     let (mut black_name, mut white_name) = engine_names_for(meta);
@@ -300,8 +299,10 @@ fn export_game_to_kif<W: Write>(
     }
     let (btime, wtime) =
         meta.map(|m| (m.settings.btime, m.settings.white_time())).unwrap_or((0, 0));
-    writeln!(writer, "開始日時：{}", timestamp)?;
-    writeln!(writer, "手合割：平手")?;
+    writeln!(writer, "開始日時：{}", format_kif_datetime(&timestamp))?;
+    if is_hirate(&pos) {
+        writeln!(writer, "手合割：平手")?;
+    }
     writeln!(writer, "先手：{}", black_name)?;
     writeln!(writer, "後手：{}", white_name)?;
     writeln!(writer, "持ち時間：先手{}ms / 後手{}ms", btime, wtime)?;
@@ -315,13 +316,16 @@ fn export_game_to_kif<W: Write>(
             settings.white_increment()
         )?;
     }
-    writeln!(writer, "開始局面：{}", start_sfen)?;
+    if !is_hirate(&pos) {
+        write_bod(writer, &pos)?;
+    }
     writeln!(writer, "手数----指手---------消費時間--")?;
 
     let mut moves = game.moves.clone();
     moves.sort_by_key(|m| m.ply);
     let mut total_black = 0u64;
     let mut total_white = 0u64;
+    let mut written_moves = 0u32;
 
     for entry in moves {
         if entry.timed_out
@@ -341,7 +345,8 @@ fn export_game_to_kif<W: Write>(
         } else {
             total_white + elapsed_ms
         };
-        let line = format_move_kif(entry.ply, &pos, mv, elapsed_ms, total_time);
+        written_moves += 1;
+        let line = format_move_kif(written_moves, &pos, mv, elapsed_ms, total_time);
         writeln!(writer, "{line}")?;
         let gives_check = if mv.is_pass() {
             false
@@ -357,34 +362,187 @@ fn export_game_to_kif<W: Write>(
         write_eval_comments(writer, entry.eval.as_ref())?;
     }
 
-    let final_plies = game
+    let csa = meta.is_some_and(|m| is_csa_jsonl(m.source.as_deref(), m.engine_cmd.note.as_deref()));
+    let result = game
         .result
         .as_ref()
-        .map(|r| r.plies)
-        .or_else(|| game.moves.last().map(|m| m.ply))
-        .unwrap_or(0);
+        .filter(|r| !is_incomplete_result(csa, &r.outcome, Some(&r.reason)));
+    let terminal = match result {
+        // 打ち切り（selfplay の cancelled / game_time_limit / watchdog）は勝敗が付いていない。
+        Some(r) if r.outcome == "in_progress" => Some("中断"),
+        Some(r) => terminal_move_label(&r.reason, &r.outcome, pos.side_to_move(), csa),
+        None if game.result.is_some() => Some("中断"),
+        None => None,
+    };
+    if let Some(label) = terminal {
+        writeln!(writer, "{:>4} {}", written_moves + 1, label)?;
+    }
     if let Some(res) = game.result.as_ref()
         && res.reason != "max_moves"
     {
-        writeln!(writer, "**終了理由={}", res.reason)?;
+        writeln!(writer, "*終了理由={}", res.reason)?;
     }
-    let csa = meta.is_some_and(|m| is_csa_jsonl(m.source.as_deref(), m.engine_cmd.note.as_deref()));
-    let outcome = game
-        .result
-        .as_ref()
-        .filter(|r| !is_incomplete_result(csa, &r.outcome, Some(&r.reason)))
-        .map(|r| r.outcome.as_str());
-    let summary = match outcome {
-        Some("black_win") => format!("まで{}手で先手の勝ち", final_plies),
-        Some("white_win") => format!("まで{}手で後手の勝ち", final_plies),
-        Some("draw") => format!("まで{}手で引き分け", final_plies),
-        _ => format!("まで{}手で中断", final_plies),
+    let summary = match (result.map(|r| r.outcome.as_str()), terminal) {
+        (Some("black_win"), _) => "先手の勝ち",
+        (Some("white_win"), _) => "後手の勝ち",
+        (Some("draw"), Some(label @ ("千日手" | "持将棋"))) => label,
+        (Some("draw"), _) => "引き分け",
+        _ => "中断",
     };
-    writeln!(writer, "\n{}", summary)?;
+    writeln!(writer, "\nまで{}手で{}", written_moves, summary)?;
     Ok(())
 }
 
-fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<(Position, String)> {
+/// 終局の行（`201 投了` など）に書く語。KIF の終局の語は「次に指す番の側」から見た意味を持つ
+/// （投了・切れ負け・反則負けは手番側の負け、入玉勝ち・反則勝ちは手番側の勝ち）ので、
+/// 記録された勝敗と食い違うとき、対応する語が無いときは None（`*終了理由=` のコメントだけ残す）。
+fn terminal_move_label(
+    reason: &str,
+    outcome: &str,
+    side_to_move: Color,
+    csa: bool,
+) -> Option<&'static str> {
+    enum Expect {
+        MoverLoses,
+        MoverWins,
+        Draw,
+    }
+    let winner = match outcome {
+        "black_win" => Some(Color::Black),
+        "white_win" => Some(Color::White),
+        "draw" => None,
+        _ => return None,
+    };
+    let (label, expect) = match reason {
+        "resign" => ("投了", Expect::MoverLoses),
+        // csa_client は理由行の無い `#WIN` / `#LOSE` を `win` / `lose` と書く（投了などの通常の決着）。
+        "win" | "lose" if csa => ("投了", Expect::MoverLoses),
+        // selfplay の `win` はエンジンの入玉宣言（`bestmove win`）。
+        "win" | "win_declaration" => ("入玉勝ち", Expect::MoverWins),
+        "timeout" | "time_up" => ("切れ負け", Expect::MoverLoses),
+        "illegal_move" => ("反則負け", Expect::MoverLoses),
+        // 連続王手の千日手は王手を掛け続けた側の負け。循環を閉じたのが王手か逃げる手かで、
+        // 次に指す番の側が勝つことも負けることもある。
+        "sennichite_perpetual_check" | "oute_sennichite" if winner == Some(side_to_move) => {
+            ("反則勝ち", Expect::MoverWins)
+        }
+        "sennichite_perpetual_check" | "oute_sennichite" => ("反則負け", Expect::MoverLoses),
+        "sennichite" => ("千日手", Expect::Draw),
+        // CSA の旧ログの `max_moves` は引き分けか打ち切りか決められないので、語を書かない。
+        "max_moves" if !csa => ("持将棋", Expect::Draw),
+        "jishogi" => ("持将棋", Expect::Draw),
+        _ => return None,
+    };
+    let consistent = match expect {
+        Expect::MoverLoses => winner == Some(!side_to_move),
+        Expect::MoverWins => winner == Some(side_to_move),
+        Expect::Draw => winner.is_none(),
+    };
+    consistent.then_some(label)
+}
+
+/// RFC 3339 の時刻を KIF の慣例 `YYYY/MM/DD HH:MM:SS`（時刻に付いていた時差のまま）にする。
+/// 読めなければそのまま返す。
+fn format_kif_datetime(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|t| t.format("%Y/%m/%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| timestamp.to_owned())
+}
+
+/// 平手の初期配置・持ち駒なし・先手番か（手数は見ない）。
+fn is_hirate(pos: &Position) -> bool {
+    let sfen = pos.to_sfen();
+    let fields: Vec<&str> = sfen.split_whitespace().take(3).collect();
+    fields
+        == [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
+            "b",
+            "-",
+        ]
+}
+
+/// 開始局面を KIF の局面図（BOD）で書く。平手以外の開始局面は、KIF ではこの形でしか表せない。
+fn write_bod<W: Write>(writer: &mut W, pos: &Position) -> Result<()> {
+    const RANKS: [&str; 9] = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    writeln!(writer, "後手の持駒：{}", format_hand(pos, Color::White))?;
+    writeln!(writer, "  ９ ８ ７ ６ ５ ４ ３ ２ １")?;
+    writeln!(writer, "+---------------------------+")?;
+    for (rank, rank_label) in Rank::ALL.into_iter().zip(RANKS) {
+        let mut row = String::from("|");
+        for file in BoardFile::ALL.into_iter().rev() {
+            let piece = pos.piece_on(Square::new(file, rank));
+            if piece.is_none() {
+                row.push_str(" ・");
+            } else {
+                row.push(if piece.color() == Color::White {
+                    'v'
+                } else {
+                    ' '
+                });
+                row.push_str(bod_piece_char(piece.piece_type()));
+            }
+        }
+        row.push('|');
+        row.push_str(rank_label);
+        writeln!(writer, "{row}")?;
+    }
+    writeln!(writer, "+---------------------------+")?;
+    writeln!(writer, "先手の持駒：{}", format_hand(pos, Color::Black))?;
+    if pos.side_to_move() == Color::White {
+        writeln!(writer, "後手番")?;
+    }
+    Ok(())
+}
+
+/// 局面図の 1 マスに書く 1 文字の駒名。
+fn bod_piece_char(piece_type: PieceType) -> &'static str {
+    match piece_type {
+        PieceType::ProLance => "杏",
+        PieceType::ProKnight => "圭",
+        PieceType::ProSilver => "全",
+        other => piece_label(other, false),
+    }
+}
+
+/// 持ち駒の欄（`飛　角　歩二　`、無ければ `なし`）。
+fn format_hand(pos: &Position, color: Color) -> String {
+    const ORDER: [PieceType; 7] = [
+        PieceType::Rook,
+        PieceType::Bishop,
+        PieceType::Gold,
+        PieceType::Silver,
+        PieceType::Knight,
+        PieceType::Lance,
+        PieceType::Pawn,
+    ];
+    let hand = pos.hand(color);
+    let mut text = String::new();
+    for piece_type in ORDER {
+        let count = hand.count(piece_type);
+        if count == 0 {
+            continue;
+        }
+        text.push_str(piece_label(piece_type, false));
+        if count > 1 {
+            text.push_str(&kanji_count(count));
+        }
+        text.push('　');
+    }
+    if text.is_empty() {
+        "なし".to_owned()
+    } else {
+        text
+    }
+}
+
+/// 持ち駒の枚数（2〜18）の漢数字。
+fn kanji_count(n: u32) -> String {
+    const DIGITS: [&str; 10] = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    let tens = if n >= 10 { "十" } else { "" };
+    format!("{}{}", tens, DIGITS[(n % 10) as usize])
+}
+
+fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<Position> {
     let first = moves
         .first()
         .ok_or_else(|| anyhow!("game {} has no moves; cannot infer start position", game_id))?;
@@ -392,8 +550,7 @@ fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<(Positio
     pos.set_sfen(&first.sfen_before).map_err(|e| {
         anyhow!("game {}: failed to parse sfen_before '{}': {}", game_id, first.sfen_before, e)
     })?;
-    let sfen = pos.to_sfen();
-    Ok((pos, sfen))
+    Ok(pos)
 }
 
 fn engine_names_for(meta: Option<&KifMeta>) -> (String, String) {
@@ -443,10 +600,13 @@ pub(crate) fn format_move_label(ply: u32, pos: &Position, mv: Move) -> String {
         (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())
     } else {
         let from = mv.from();
-        let piece = pos.piece_on(from);
-        let promoted = piece.piece_type().is_promoted() || mv.is_promote();
+        let piece_type = pos.piece_on(from).piece_type();
+        // 成る手は「駒名＋成」（`２二角成`）で書く。成った後の駒名（`２二馬`）で書くと、
+        // KIF では既に成っている駒の移動と読まれる。成らない手には何も付けない（「不成」を
+        // 読めない KIF の読み手がある）。
+        let promotion = if mv.is_promote() { "成" } else { "" };
         let suffix = format!("({}{})", square_file_digit(from), square_rank_digit(from));
-        (piece_label(piece.piece_type(), promoted).to_string(), suffix)
+        (format!("{}{}", piece_label(piece_type, false), promotion), suffix)
     };
     format!("{:>4} {}{}{}{}", ply, prefix, dest, label, from_suffix)
 }
@@ -658,7 +818,7 @@ mod tests {
         assert!(kif.contains("後手：white"), "kif:\n{}", kif);
         assert!(kif.contains("▲"), "kif:\n{}", kif);
         assert!(kif.contains("△"), "kif:\n{}", kif);
-        assert!(kif.contains("まで2手で引き分け"), "kif:\n{}", kif);
+        assert!(kif.contains("まで2手で持将棋"), "kif:\n{}", kif);
     }
 
     #[test]
@@ -700,7 +860,7 @@ mod tests {
         for terminal in ["resign", "win", "timeout", "illegal", "none"] {
             write_terminal_game(&input, terminal)?;
             convert_jsonl_to_kif(&input, &output, &GameFilter::default())?;
-            assert!(std::fs::read_to_string(&output)?.contains("まで1手で中断"));
+            assert!(std::fs::read_to_string(&output)?.contains("まで0手で中断"));
         }
         Ok(())
     }
@@ -778,7 +938,8 @@ mod tests {
         export_game_to_kif(&mut output, None, 1, &game)?;
         let text = String::from_utf8(output)?;
         assert!(!text.contains("▲"));
-        assert!(text.contains("まで1手で後手の勝ち"));
+        assert!(text.contains("   1 切れ負け"));
+        assert!(text.contains("まで0手で後手の勝ち"));
         Ok(())
     }
     #[test]
@@ -843,5 +1004,141 @@ mod tests {
         let text = String::from_utf8(output)?;
         assert!(text.lines().any(|line| line == "先手：engine"));
         Ok(())
+    }
+
+    fn kif_for(moves: serde_json::Value, result: Option<serde_json::Value>) -> Result<String> {
+        let game = GameLog {
+            moves: serde_json::from_value(moves)?,
+            result: result.map(serde_json::from_value).transpose()?,
+        };
+        let mut output = Vec::new();
+        export_game_to_kif(&mut output, None, 1, &game)?;
+        Ok(String::from_utf8(output)?)
+    }
+
+    #[test]
+    fn promotion_is_written_after_the_unpromoted_piece_name() -> Result<()> {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3")
+            .map_err(|e| anyhow!("{e}"))?;
+        let label = |usi: &str| format_move_label(3, &pos, Move::from_usi(usi).unwrap());
+        assert_eq!(label("8h2b+"), "   3 ▲２二角成(88)");
+        assert_eq!(label("8h2b"), "   3 ▲２二角(88)");
+        assert_eq!(label("8h7g"), "   3 ▲７七角(88)");
+
+        // 後手の成り（7〜9 段）と、成駒の移動。
+        pos.set_sfen("4k4/9/9/9/9/9/2s6/9/4K4 w - 1").map_err(|e| anyhow!("{e}"))?;
+        let label = |usi: &str| format_move_label(1, &pos, Move::from_usi(usi).unwrap());
+        assert_eq!(label("7g7h+"), "   1 △７八銀成(77)");
+        assert_eq!(label("7g7h"), "   1 △７八銀(77)");
+        pos.set_sfen("4k4/9/9/9/9/9/2+s6/9/4K4 w - 1").map_err(|e| anyhow!("{e}"))?;
+        let label = |usi: &str| format_move_label(1, &pos, Move::from_usi(usi).unwrap());
+        assert_eq!(label("7g7h"), "   1 △７八成銀(77)");
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_lines_follow_the_side_to_move_and_the_recorded_result() {
+        use Color::{Black, White};
+        // 先手が指した後（後手番）に後手が投了・時間切れ → 先手の勝ち。
+        assert_eq!(terminal_move_label("resign", "black_win", White, false), Some("投了"));
+        assert_eq!(terminal_move_label("timeout", "black_win", White, false), Some("切れ負け"));
+        assert_eq!(terminal_move_label("time_up", "black_win", White, true), Some("切れ負け"));
+        // 勝敗と食い違う語は書かない。
+        assert_eq!(terminal_move_label("resign", "white_win", White, false), None);
+        // CSA の理由行の無い #WIN は投了扱い、selfplay の win は入玉宣言。
+        assert_eq!(terminal_move_label("win", "black_win", White, true), Some("投了"));
+        assert_eq!(terminal_move_label("win", "black_win", Black, false), Some("入玉勝ち"));
+        assert_eq!(
+            terminal_move_label("win_declaration", "white_win", White, true),
+            Some("入玉勝ち")
+        );
+        assert_eq!(
+            terminal_move_label("sennichite_perpetual_check", "white_win", White, false),
+            Some("反則勝ち")
+        );
+        // 逃げる手で循環が閉じたとき（王手を掛け続けた先手が次に指す番）。
+        assert_eq!(
+            terminal_move_label("sennichite_perpetual_check", "white_win", Black, false),
+            Some("反則負け")
+        );
+        assert_eq!(
+            terminal_move_label("oute_sennichite", "white_win", Black, true),
+            Some("反則負け")
+        );
+        assert_eq!(terminal_move_label("oute_sennichite", "draw", Black, true), None);
+        assert_eq!(terminal_move_label("sennichite", "draw", Black, false), Some("千日手"));
+        assert_eq!(terminal_move_label("max_moves", "draw", Black, false), Some("持将棋"));
+        assert_eq!(terminal_move_label("max_moves", "draw", Black, true), None);
+        assert_eq!(terminal_move_label("adjudication_draw", "draw", Black, false), None);
+    }
+
+    #[test]
+    fn non_hirate_start_is_written_as_a_board_diagram() -> Result<()> {
+        let sfen = "l1sg3nl/1r3kg2/p1npppsp1/2p3p1p/1p5P1/2P2PP1P/PPSPP1N2/5S1R1/LN1GKG2L w Bb 24";
+        let text = kif_for(
+            serde_json::json!([{"game_id": 1, "ply": 1, "sfen_before": sfen, "move_usi": "7a6b"}]),
+            None,
+        )?;
+        assert!(!text.contains("手合割"), "{text}");
+        assert!(!text.contains("開始局面"), "{text}");
+        assert!(text.contains("後手の持駒：角　\n"), "{text}");
+        assert!(text.contains("|v香 ・v銀v金 ・ ・ ・v桂v香|一\n"), "{text}");
+        assert!(text.contains("| 香 桂 ・ 金 玉 金 ・ ・ 香|九\n"), "{text}");
+        assert!(text.contains("先手の持駒：角　\n後手番\n"), "{text}");
+        assert!(text.contains("   1 △６二銀(71)"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn resignation_is_a_terminal_line_and_not_counted_as_a_move() -> Result<()> {
+        let text = kif_for(
+            serde_json::json!([{
+                "game_id": 1, "ply": 1, "move_usi": "7g7f",
+                "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            }]),
+            Some(serde_json::json!({"outcome": "black_win", "reason": "resign", "plies": 2})),
+        )?;
+        assert!(text.contains("手合割：平手\n"), "{text}");
+        assert!(text.contains("\n   2 投了\n"), "{text}");
+        assert!(text.contains("まで1手で先手の勝ち"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn draw_summaries_name_repetition_and_max_moves() -> Result<()> {
+        let moves = serde_json::json!([{
+            "game_id": 1, "ply": 1, "move_usi": "7g7f",
+            "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        }]);
+        for (reason, line, summary) in [
+            ("sennichite", "   2 千日手\n", "まで1手で千日手"),
+            ("max_moves", "   2 持将棋\n", "まで1手で持将棋"),
+            ("adjudication_draw", "", "まで1手で引き分け"),
+        ] {
+            let text = kif_for(
+                moves.clone(),
+                Some(serde_json::json!({"outcome": "draw", "reason": reason, "plies": 1})),
+            )?;
+            assert!(text.contains(line), "{text}");
+            assert!(text.contains(summary), "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hand_counts_are_kanji_numerals() {
+        assert_eq!(kanji_count(2), "二");
+        assert_eq!(kanji_count(10), "十");
+        assert_eq!(kanji_count(18), "十八");
+    }
+
+    #[test]
+    fn kif_datetime_keeps_the_recorded_offset() {
+        assert_eq!(
+            format_kif_datetime("2026-11-06T18:53:43.665256126+00:00"),
+            "2026/11/06 18:53:43"
+        );
+        assert_eq!(format_kif_datetime("-"), "-");
     }
 }
