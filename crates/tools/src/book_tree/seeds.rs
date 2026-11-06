@@ -128,6 +128,7 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
     let mut pairs = ResultPairs::default();
     let mut valid = BTreeMap::new();
     let mut seq = 0;
+    let mut in_progress = 0;
     visit_json(path, |value| {
         if value["type"] != "result" {
             return Ok(());
@@ -136,10 +137,14 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
         let key = (result.pair_index.unwrap_or(seq / 2), result.attempt);
         let slot = result.pair_slot.unwrap_or(seq % 2).min(1) as usize;
         seq += 1;
-        if let Some(pair) = pairs.push(key, slot, result)
+        if let Some(pair) = pairs.push(path, key, slot, result)
             && pair.iter().all(|r| !r.error.unwrap_or(false))
         {
             for result in pair {
+                if result.outcome == "in_progress" {
+                    in_progress += 1;
+                    continue;
+                }
                 ensure!(
                     matches!(result.outcome.as_str(), "black_win" | "white_win" | "draw"),
                     "不正な outcome: {}",
@@ -155,6 +160,9 @@ fn valid_results(path: &Path) -> Result<BTreeMap<u32, GameResult>> {
         }
         Ok(())
     })?;
+    if in_progress > 0 {
+        println!("警告: {}: outcome=in_progress の {in_progress} 局を種から除外", path.display());
+    }
     if pairs.incomplete() > 0 {
         eprintln!("{}: 未完了の {} ペアを除外", path.display(), pairs.incomplete());
     }
@@ -303,6 +311,11 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             && args.priority_late <= super::targets::MAX_PRIORITY,
         "priority が大きすぎます"
     );
+    args.games = args
+        .games
+        .iter()
+        .map(|p| p.canonicalize().with_context(|| format!("--games: {}", p.display())))
+        .collect::<Result<_>>()?;
     args.games.sort();
     args.games.dedup();
     args.offsets.push(0);
@@ -321,12 +334,20 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     reject_same_file(&args.out, &inputs)?;
     let valid: Vec<_> = args.games.iter().map(|p| valid_results(p)).collect::<Result<_>>()?;
     let mut non_sweep = BTreeSet::new();
+    let mut non_sweep_roots = BTreeSet::new();
     for (path, valid) in args.games.iter().zip(&valid) {
         visit_games(path, valid, |result, moves| {
             if result.outcome != "black_win"
                 && let Some(start) = origin(moves)
             {
                 non_sweep.insert(parse_root(&format!("sfen {}", moves[start].sfen_before))?.key);
+                for &offset in &args.offsets {
+                    if let Some(index) = start.checked_add(offset)
+                        && let Some(root) = root_at(moves, index)?
+                    {
+                        non_sweep_roots.insert(root.key);
+                    }
+                }
             }
             Ok(())
         })?;
@@ -396,6 +417,9 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     let mut excluded_counts = BTreeMap::<String, usize>::new();
     let mut picked = Vec::new();
     for ((key, own), data) in roots {
+        if own == "b" && !non_sweep_roots.contains(&key) {
+            continue;
+        }
         if excluded.contains_key(&(key.clone(), own.clone())) {
             *excluded_counts.entry(own).or_default() += 1;
             continue;

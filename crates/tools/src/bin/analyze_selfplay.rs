@@ -986,7 +986,7 @@ fn parse_normal_file_inner(
                 retried_pairs.insert(pair_index);
             }
             let key = (pair_index, result.attempt);
-            if let Some(completed) = pair_buffer.push(key, slot, result) {
+            if let Some(completed) = pair_buffer.push(Path::new(path), key, slot, result) {
                 let has_error = completed.iter().any(|game| game.error.unwrap_or(false));
                 if has_error {
                     if key.1 >= 2 {

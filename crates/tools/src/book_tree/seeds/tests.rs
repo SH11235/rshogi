@@ -343,3 +343,69 @@ fn sweep_selection_spans_files_and_file_order_is_stable() {
     assert_eq!(first, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
     assert_eq!(table, std::fs::read_to_string(dir.path().join("table.tsv")).unwrap());
 }
+
+#[test]
+fn in_progress_game_is_excluded_but_completed_partner_is_used() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "in_progress");
+    rows.last_mut().unwrap()["error"] = json!(false);
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    let valid = valid_results(&dir.path().join("games.jsonl")).unwrap();
+    assert_eq!(valid.keys().copied().collect::<Vec<_>>(), vec![1]);
+    run(args(dir.path())).unwrap();
+    let out = lines(dir.path());
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().all(|line| parse_root(&line.root).unwrap().ply == 1));
+    let table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
+    assert!(table.lines().skip(1).all(|line| line.split('\t').nth(6) == Some("0:1")));
+}
+
+#[test]
+fn offset_black_sweep_is_excluded_from_mixed_origin() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    rows.extend(game(1, &initial(), PATH, 0, "black_win"));
+    let mut other = PATH.to_vec();
+    other[0] = "6g6f";
+    rows.extend(game(2, &initial(), &other, 0, "draw"));
+    rows.extend(game(3, &initial(), &other, 0, "white_win"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let out = lines(dir.path());
+    let swept = parse_root(&format!("sfen {}", after(&PATH[..6]))).unwrap().key;
+    assert!(!out.iter().any(|line| parse_root(&line.root).unwrap().key == swept));
+    for own in ["b", "w"] {
+        assert!(
+            out.iter()
+                .any(|line| line.own == own && parse_root(&line.root).unwrap().ply == 1)
+        );
+        assert!(
+            out.iter()
+                .any(|line| line.own == own && parse_root(&line.root).unwrap().ply == 7)
+        );
+    }
+}
+
+#[test]
+fn canonical_input_aliases_do_not_inflate_game_counts() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let queue = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
+    let mut opts = args(dir.path());
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    opts.games.push(dir.path().join("sub/../games.jsonl"));
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("alias.jsonl");
+        std::os::unix::fs::symlink(&opts.games[0], &alias).unwrap();
+        opts.games.push(alias);
+    }
+    run(opts).unwrap();
+    assert_eq!(queue, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
+    assert_eq!(table, std::fs::read(dir.path().join("table.tsv")).unwrap());
+}

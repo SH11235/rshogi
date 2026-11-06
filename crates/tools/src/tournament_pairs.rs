@@ -1,6 +1,7 @@
 //! tournament の先後交換ペアの重複排除。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// `(pair_index, attempt)` ごとに両スロットを揃える。重複スロットは最初の結果を保持する。
 pub struct ResultPairs<T> {
@@ -19,19 +20,28 @@ impl<T> Default for ResultPairs<T> {
 
 impl<T> ResultPairs<T> {
     /// 結果を受け取り、両スロットが揃ったときだけ返す。slot は 0 または 1。
-    pub fn push(&mut self, key: (u32, u32), slot: usize, result: T) -> Option<[T; 2]> {
-        if slot > 1 || self.completed.contains(&key) {
+    /// path は重複・不正スロットの警告に表示する入力ファイル。
+    pub fn push(&mut self, path: &Path, key: (u32, u32), slot: usize, result: T) -> Option<[T; 2]> {
+        if slot > 1 {
+            eprintln!("警告: {} — 不正な slot={slot} の結果を除外します。", path.display());
+            return None;
+        }
+        if self.completed.contains(&key) {
             eprintln!(
-                "警告: pair_index={}, attempt={}, slot={slot} の重複または不正な結果を除外します",
-                key.0, key.1
+                "警告: {} — 直接対決の pair_index={}, attempt={}, slot={slot} は既に集計済みです。重複結果を除外します。",
+                path.display(),
+                key.0,
+                key.1
             );
             return None;
         }
         let entry = self.pending.entry(key).or_insert_with(|| [None, None]);
         if entry[slot].is_some() {
             eprintln!(
-                "警告: pair_index={}, attempt={}, slot={slot} の重複結果を除外します",
-                key.0, key.1
+                "警告: {} — 直接対決の pair_index={}, attempt={}, slot={slot} が重複しています。重複結果を除外します。",
+                path.display(),
+                key.0,
+                key.1
             );
             return None;
         }

@@ -295,11 +295,12 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 `tournament` の JSON Lines を読み、enqueue に渡す行を生成します。エンジンや稼働中のキューには触れません。
 同じ起点の先手が全勝なら出力せず、それ以外の起点では全局を `own=b` の種にし、後手勝ち・引分の局を
 `own=w` の種にもします。起点は最初に `eval` が付いた move の `sfen_before` です。`eval` がなければ
-その局は使いません。起点の同一性は SFEN の手数を除いた局面で判断し、`startpos_idx` は使いません。
+その局は使いません。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
+起点と根の同一性は SFEN の手数を除いた局面で判断し、`startpos_idx` は使いません。
 
 | 指定 | 既定 | 意味 |
 | --- | --- | --- |
-| `--games <JSONL>` | 必須、繰り返し可 | tournament の棋譜。同じパスの重複は除く |
+| `--games <JSONL>` | 必須、繰り返し可 | tournament の棋譜。正準パス (canonicalize) が同じ入力の重複は除く |
 | `--out <JSONL>` / `--table <TSV>` | 必須 | キューの行と判断用一覧 |
 | `--tag <NAME>` | 必須 | id の先頭。[A-Za-z0-9_-] の 1〜40 文字 |
 | `--depth` | 6 | 木の段数 (0〜20)。`game` は根から最大 depth+1 手 |
@@ -317,6 +318,7 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 
 結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
 両スロットが揃い、どちらにも `error=true` がない組だけを使い、重複スロットは最初の結果を保持します。
+`outcome=in_progress` の局は種から除外し、その件数を標準出力に警告として出します。同じペアの完了局は使います。
 片スロットだけの組や失敗した attempt のもう一方の局も使いません。pair の情報がない旧形式では result の
 出現順の `seq/2`・`seq%2` にフォールバックします。並列ログでは明示 pair のある現行形式を使ってください。
 複数の成功 attempt があれば analyzer と同じくそれぞれを使います。ファイルをまたぐペアの結合はしません。
