@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::output_path::ensure_safe_output_path;
 use crate::selfplay::EvalLog;
+use crate::selfplay::position::is_legal_game_move;
 
 /// 変換対象を絞り込むフィルタ。
 #[derive(Default, Debug, Clone)]
@@ -348,8 +349,8 @@ fn export_game_to_kif<W: Write>(
         written_moves += 1;
         let line = format_move_kif(written_moves, &pos, mv, elapsed_ms, total_time);
         writeln!(writer, "{line}")?;
-        // 評価値の向きと読み筋は、指す前の局面で決まる。
-        let comments = eval_comment_lines(&pos, entry.eval.as_ref());
+        // 評価値・詰みの向きは指す前の手番で決まる。読み筋は指した後の局面から書く。
+        let mover = pos.side_to_move();
         let gives_check = if mv.is_pass() {
             false
         } else {
@@ -361,7 +362,7 @@ fn export_game_to_kif<W: Write>(
         } else {
             total_white = total_time;
         }
-        for comment in comments {
+        for comment in eval_comment_lines(&pos, mover, mv, entry.eval.as_ref()) {
             writeln!(writer, "{comment}")?;
         }
     }
@@ -682,12 +683,19 @@ pub(crate) fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str
 
 /// 1 手に付いていた探索の情報を、ShogiHome と同じ KIF のコメント行（`**評価値=…` など）にする。
 ///
-/// ShogiHome が読む書式に合わせる: 評価値・詰みは先手から見た向き（ログの値は手番側から見た値）、
-/// 読み筋は指す前の局面からの KIF の表記（`▲７六歩(77)△３四歩(33)`）。
+/// ShogiHome が書く・読む書式に合わせる:
+/// - 評価値・詰みは先手から見た向き（ログの値は、指した側 `mover` から見た値）
+/// - 読み筋は指した後の局面 `after` から、指した手を除いた KIF の表記（`△３四歩(33)▲２二角成(88)`）。
+///   読み筋が指した手から始まらないときは書かない
+///
 /// 深さ・ノード数のほか、選択深さ・探索時間・NPS も同じ形で添える。
-fn eval_comment_lines(pos: &Position, eval: Option<&EvalLog>) -> Vec<String> {
+fn eval_comment_lines(
+    after: &Position,
+    mover: Color,
+    played: Move,
+    eval: Option<&EvalLog>,
+) -> Vec<String> {
     let Some(eval) = eval else { return Vec::new() };
-    let mover = pos.side_to_move();
     let color_label = |color: Color| {
         if color == Color::Black {
             "先手"
@@ -707,15 +715,23 @@ fn eval_comment_lines(pos: &Position, eval: Option<&EvalLog>) -> Vec<String> {
             lines.push(format!("**詰み={}勝ち", color_label(winner)));
         }
         (_, _, Some(cp)) => {
-            let cp = if mover == Color::Black { cp } else { -cp };
+            // i32::MIN を反転しても桁あふれしないよう i64 で反転する。
+            let cp = if mover == Color::Black {
+                i64::from(cp)
+            } else {
+                -i64::from(cp)
+            };
             lines.push(format!("**評価値={cp}"));
         }
         _ => {}
     }
-    if let Some(pv) = eval.pv.as_ref().map(|pv| format_pv(pos, pv))
-        && !pv.is_empty()
+    if let Some(pv) = eval.pv.as_ref()
+        && pv.first().and_then(|usi| Move::from_usi_strict(usi)) == Some(played)
     {
-        lines.push(format!("**読み筋={pv}"));
+        let text = format_pv(after, &pv[1..]);
+        if !text.is_empty() {
+            lines.push(format!("**読み筋={text}"));
+        }
     }
     if let Some(depth) = eval.depth {
         lines.push(format!("**深さ={depth}"));
@@ -735,14 +751,16 @@ fn eval_comment_lines(pos: &Position, eval: Option<&EvalLog>) -> Vec<String> {
     lines
 }
 
-/// USI の読み筋を、指す前の局面から KIF の表記でつなげる（`▲７六歩(77)△３四歩(33)`）。
+/// USI の読み筋を、局面 `pos` から KIF の表記でつなげる（`▲７六歩(77)△３四歩(33)`）。
 /// 読めない手・指せない手・パス（KIF の読み筋に書けない）の手前で打ち切る。
 fn format_pv(pos: &Position, pv: &[String]) -> String {
     let mut pos = pos.clone();
     let mut text = String::new();
     for usi in pv {
-        let Some(mv) = Move::from_usi(usi) else { break };
-        if mv.is_pass() || !is_legal_with_pass(&pos, mv) {
+        let Some(mv) = Move::from_usi_strict(usi) else {
+            break;
+        };
+        if mv.is_pass() || !is_legal_game_move(&pos, mv) {
             break;
         }
         text.push(if pos.side_to_move() == Color::Black {
@@ -1198,41 +1216,57 @@ mod tests {
     }
 
     #[test]
-    fn eval_comments_follow_the_shogihome_format_from_black_view() -> Result<()> {
+    fn eval_comments_follow_the_shogihome_format() -> Result<()> {
+        let start = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let text = kif_for(
             serde_json::json!([
                 {
-                    "game_id": 1, "ply": 1, "move_usi": "7g7f",
-                    "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
-                    "eval": {"score_cp": 50, "depth": 20, "nodes": 1000, "pv": ["7g7f", "3c3d", "8h2b+"]},
+                    "game_id": 1, "ply": 1, "move_usi": "7g7f", "sfen_before": start,
+                    // 角を取ったあと、取った角を打つ手まで読む。
+                    "eval": {"score_cp": 50, "depth": 20, "nodes": 1000,
+                             "pv": ["7g7f", "3c3d", "8h2b+", "3a2b", "B*4e"]},
                 },
                 {
                     "game_id": 1, "ply": 2, "move_usi": "3c3d",
                     "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
-                    "eval": {"score_cp": 30, "pv": ["3c3d", "9z9z"]},
+                    // 空きマスから動く手・末尾の壊れた手の手前で打ち切る。
+                    "eval": {"score_cp": 30, "pv": ["3c3d", "2g2f", "5d5e"]},
                 },
                 {
                     "game_id": 1, "ply": 3, "move_usi": "2g2f",
                     "sfen_before": "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
-                    "eval": {"score_mate": -5},
+                    // 指した手から始まらない読み筋は書かない。
+                    "eval": {"score_mate": -5, "pv": ["8h2b+", "3a2b"]},
                 },
                 {
                     "game_id": 1, "ply": 4, "move_usi": "8c8d",
                     "sfen_before": "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL w - 4",
-                    "eval": {"score_mate_sign": 1},
+                    "eval": {"score_mate_sign": 1, "pv": ["8c8dx", "2f2e"]},
+                },
+                {
+                    "game_id": 1, "ply": 5, "move_usi": "2f2e",
+                    "sfen_before": "lnsgkgsnl/1r5b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b - 5",
+                    "eval": {"score_mate": 3},
+                },
+                {
+                    "game_id": 1, "ply": 6, "move_usi": "8d8e",
+                    "sfen_before": "lnsgkgsnl/1r5b1/p1pppp1pp/1p4p2/7P1/2P6/PP1PPPP1P/1B5R1/LNSGKGSNL w - 6",
+                    "eval": {"score_cp": -2147483648},
                 },
             ]),
             None,
         )?;
         assert!(!text.contains("*info"), "{text}");
         assert!(
-            text.contains("**評価値=50\n**読み筋=▲７六歩(77)△３四歩(33)▲２二角成(88)\n**深さ=20\n**ノード数=1000\n"),
+            text.contains("**評価値=50\n**読み筋=△３四歩(33)▲２二角成(88)△２二銀(31)▲４五角打\n**深さ=20\n**ノード数=1000\n"),
             "{text}"
         );
-        // 後手の手番の値は、符号を反転して先手から見た値にする。読めない手の手前で読み筋を打ち切る。
-        assert!(text.contains("**評価値=-30\n**読み筋=△３四歩(33)\n"), "{text}");
-        assert!(text.contains("**詰み=後手勝ち:5手\n"), "{text}");
-        assert!(text.contains("**詰み=後手勝ち\n"), "{text}");
+        // 後手の手番の値は、符号を反転して先手から見た値にする。
+        assert!(text.contains("**評価値=-30\n**読み筋=▲２六歩(27)\n"), "{text}");
+        assert!(text.contains("**詰み=後手勝ち:5手\n   4"), "{text}");
+        assert!(text.contains("**詰み=後手勝ち\n   5"), "{text}");
+        assert!(text.contains("**詰み=先手勝ち:3手\n"), "{text}");
+        assert!(text.contains("**評価値=2147483648\n"), "{text}");
         Ok(())
     }
 }
