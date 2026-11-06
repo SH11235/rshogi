@@ -658,10 +658,14 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
-  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--apply] <木の出力先>...
+  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--skip-keys skip.txt] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
+
+`--skip-keys <FILE>` で、一部の局面だけを登録から除外できます。ファイルは 1 行に 1 局面の SFEN キー (盤・手番・持ち駒の 3 フィールド) を書きます。手数つきの 4 フィールドも受け付けます。SFEN を局面として読み直して正規化するため、手数 (`+1` などの表記を含む) や持ち駒の並び順の違いは照合に影響しません。空行と、前後の空白を除いて `#` で始まる行は無視し、不正な SFEN はファイル名・行番号つきでエラーにします。指定した局面と、その先後反転キーで合流する局面を除外します。指定局面には main・alt を足さず、既存の全行の main・評価値・控えなども変更しません。指定局面の子の局面 (木の先) の行は今までどおり足されます。
+
+複数の木にある同じ局面は 1 局面として数え、「指定で取り込まなかった局面 N」を出します。「木どうしで 1 位が違った局面」は除外した局面を含みません。ファイル内の重複は正規化後にまとめ、指定した向きも反転した向きも木に無かった指定は「指定したが木に無かった局面 M」に数えます。木の行ではない既存の元データの局面は、反転キーも木に無い場合、`--skip-keys` に書いても問題は解消せず、この M に含まれます。その場合、原因は木が足した先の局面の手にあるため、別に調べる必要があります。
 
 元データの表は `key ply move role source evals nodes cond value_kind lineage tier since note` の 13 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `bench` (控え、指さない手) / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
 
@@ -966,6 +970,8 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 出力は各見出しの後に明細を置き、所属エラー、record 選択、bad-eval (先手・後手の順)、値の無い局面数、`paths b`、`paths w` の順です。循環成分の一覧と非合法手の数は各側の paths 節に含めます。bad-eval と paths の明細は一時ファイルに蓄えてから出力し、両側のグラフを同時に保持しません。
 
 ## `master audit`: 定跡の元データの点検
+
+逆伝播の保証検査で「千日手へ逃げられる」などのエラーや「反転キーで合流した」衝突が出た場合、エラーには該当局面の総数と先頭 5 局面のキーを表示します。反転衝突では `(保存 -15・反対 -16)` のように各向きの値も表示します。値はそれぞれの向きの手番の側から見た値です。木の登録によって発生した場合は、登録前の元データを用意し、エラーに出たキーだけ (値の括弧は除く) を 1 行ずつ `skip.txt` に書いて `tree register --skip-keys skip.txt` で登録し直し、再度 `master audit` を実行してください。6 局面以上ある場合や、新たに問題が見つかった場合は除外キーを追加して繰り返します。指定局面の子の局面 (木の先) の行は今までどおり足されます。列挙された局面が木の行ではなく既存の元データの局面なら、反転キーも木に無い限り「指定したが木に無かった局面」に数えられ、`--skip-keys` に書いても解消しません。原因は木が足した先の局面の手にあるため、別に調べる必要があります。除外した局面が再登録の後も同じエラーに列挙されるときも、原因はその先の局面の手にあります。除外は既存の行を削除しないため、既に登録済みの元データに同じ指定で再登録するだけでは問題の行は取り除けません。
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \

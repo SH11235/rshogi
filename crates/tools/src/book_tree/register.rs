@@ -4,11 +4,13 @@ use super::journal::LockedFile;
 use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
 use super::model::child;
 use super::output::NODE_MOVES;
+use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use super::schema::Schema;
@@ -36,6 +38,9 @@ pub(super) struct RegisterArgs {
     /// curated の行がある局面でも、main の source が置き換えてよいものなら main を木の 1 位に替える
     #[arg(long)]
     replace_curated: bool,
+    /// 取り込まない局面の SFEN キーを 1 行に 1 つ書いたファイル
+    #[arg(long, value_name = "FILE")]
+    skip_keys: Option<PathBuf>,
     /// main を残して木の 1 位と食い違った局面の一覧 (TSV)。まだ無いファイルに限る
     #[arg(long)]
     conflicts: PathBuf,
@@ -107,9 +112,11 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         args.conflicts.display()
     );
     let schema = Schema::load(args.schema.as_deref())?;
+    let skip_keys = args.skip_keys.as_deref().map(read_skip_keys).transpose()?.unwrap_or_default();
     let mut unknown = 0;
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
+    let mut skipped = BTreeSet::new();
     let mut fingerprints = Vec::new();
     let mut readings = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
@@ -132,7 +139,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let fingerprint = tree_fingerprint(dir)?;
         let tree_readings = tree_readings(dir)?;
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
-        let parsed =
+        let mut parsed =
             parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
         readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
             tree_readings
@@ -140,6 +147,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             Vec::new()
         });
         fingerprints.push(fingerprint);
+        skipped.extend(skip_nodes(&mut parsed, &skip_keys));
         disagreements += merge(&mut nodes, parsed);
     }
     let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
@@ -173,6 +181,8 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         replace_curated: args.replace_curated,
         revive_bench: true,
     };
+    let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
+    let skipped = skipped.len();
     let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
         "key\tply\tside\tmain\tmain_source\tmain_tier\tmain_tree_value\ttree_best\ttree_value\ttree\n",
@@ -201,6 +211,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         args.conflicts.display()
     );
     println!("cond=unknown の木: {unknown}");
+    println!("指定で取り込まなかった局面 {skipped} / 指定したが木に無かった局面 {missing}");
     if args.apply {
         write_atomic(&args.master, &format_master(&rows))?;
         println!("書き換えました: 行 {before} -> {}", rows.len());
@@ -208,6 +219,54 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         println!("確認だけ (--apply なし): 行 {before} -> {}", rows.len());
     }
     Ok(())
+}
+
+fn read_skip_keys(path: &Path) -> Result<BTreeSet<String>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("{} を読めません", path.display()))?;
+    let mut keys = BTreeSet::new();
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let line =
+            line.with_context(|| format!("{}: {} 行目を読めません", path.display(), i + 1))?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parsed = || -> Result<String> {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            ensure!(matches!(parts.len(), 3 | 4), "SFEN は 3 または 4 フィールドにしてください");
+            let key = parts[..3].join(" ");
+            let sfen = format!("{key} {}", parts.get(3).unwrap_or(&"1"));
+            let position = position_from_sfen(&sfen)?;
+            Ok(strip_ply(&position.to_sfen()).to_owned())
+        };
+        keys.insert(parsed().with_context(|| {
+            format!("{}: {} 行目の局面キーが不正です: {line}", path.display(), i + 1)
+        })?);
+    }
+    Ok(keys)
+}
+
+fn contains_orientation(keys: &BTreeSet<String>, key: &str) -> bool {
+    keys.contains(key)
+        || rshogi_book::flipped_key(&format!("{key} 1"))
+            .is_some_and(|flipped| keys.contains(strip_ply(&flipped)))
+}
+
+fn skip_nodes(nodes: &mut BTreeMap<String, Node>, keys: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut skipped = BTreeSet::new();
+    for key in keys {
+        if nodes.remove(key).is_some() {
+            skipped.insert(key.clone());
+        }
+        if let Some(flipped) = rshogi_book::flipped_key(&format!("{key} 1")) {
+            let flipped = strip_ply(&flipped);
+            if nodes.remove(flipped).is_some() {
+                skipped.insert(flipped.to_owned());
+            }
+        }
+    }
+    skipped
 }
 
 /// 食い違いの一覧は確認だけの実行でも書くので、まだ無いファイルにだけ書く。既にあるファイル (元データ・
@@ -706,6 +765,122 @@ mod tests {
     }
 
     #[test]
+    fn skip_keys_preserve_existing_rows_and_omit_new_positions() {
+        let b = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let w = child(b, "5i4i").unwrap();
+        let added = child(&w, "5a4a").unwrap();
+        let absent = child(&added, "4i3i").unwrap();
+        let original = master(&[
+            row(b, "5i6i", "main", "read", "curated", "1,2"),
+            row(b, "5i4i", "alt", "read", "wide", "3"),
+            row(b, "5i5h", "bench", "read", "wide", "4"),
+        ]);
+        let mut nodes = BTreeMap::from([
+            (b.into(), node(&[("5i4i", 50), ("5i5h", 49), ("5i6h", 48)], 2, 0)),
+            (w.clone(), node(&[("5a4a", 10)], 1, 0)),
+            (added.clone(), node(&[("4i3i", 20), ("4i4h", 19)], 0, 0)),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.txt");
+        std::fs::write(&path, format!("# 除外\n\n {b} 17 \n{w}\n{b}\n{absent}\n")).unwrap();
+        let keys = read_skip_keys(&path).unwrap();
+        assert_eq!(keys.len(), 3);
+        let skipped = skip_nodes(&mut nodes, &keys);
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(keys.iter().filter(|key| !contains_orientation(&skipped, key)).count(), 1);
+        let options = Options {
+            replace_curated: true,
+            ..options()
+        };
+        let (rows, conflicts, summary) = register(original.clone(), &nodes, &options).unwrap();
+        let preserved: Vec<_> = rows.iter().filter(|r| r.get("key") == b).cloned().collect();
+        assert_eq!(format_master(&preserved), format_master(&original));
+        assert!(!rows.iter().any(|r| r.get("key") == w));
+        assert_eq!(find(&rows, &added, "4i3i").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, &added, "4i4h").unwrap().get("role"), "alt");
+        assert_eq!(summary.added_main["b"], 1);
+        assert_eq!(summary.added_alt["b"], 1);
+        assert_eq!(summary.evals_updated, 0);
+        assert_eq!(summary.replaced_main, 0);
+        assert_eq!(summary.bench_revived, 0);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn skip_keys_normalize_ply_and_hand_order() {
+        let key = "4k4/9/9/9/9/9/9/9/4K4 b 2BP";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.txt");
+        for input in [
+            format!("{key} 17"),
+            format!("{key} +1"),
+            format!("{key} -0"),
+            key.replace("2BP", "P2B"),
+            format!("{} +1", key.replace("2BP", "P2B")),
+        ] {
+            std::fs::write(&path, &input).unwrap();
+            let keys = read_skip_keys(&path).unwrap();
+            assert_eq!(keys, BTreeSet::from([key.to_owned()]), "{input}");
+            let mut nodes = BTreeMap::from([(key.into(), node(&[("5i4i", 90)], 0, 0))]);
+            assert_eq!(skip_nodes(&mut nodes, &keys).len(), 1, "{input}");
+            let original = master(&[row(key, "5i4i", "main", "read", "wide", "3")]);
+            let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+            assert_eq!(format_master(&rows), format_master(&original), "{input}");
+            assert_eq!(summary.evals_updated, 0);
+        }
+    }
+
+    #[test]
+    fn skipped_positions_do_not_count_as_tree_disagreements() {
+        let key = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let keys = BTreeSet::from([key.to_owned()]);
+        let mut merged = BTreeMap::new();
+        let mut skipped = BTreeSet::new();
+        let mut disagreements = 0;
+        for (tree, mv) in ["5i4i", "5i6i"].into_iter().enumerate() {
+            let mut nodes = BTreeMap::from([(key.into(), node(&[(mv, 10)], 0, tree))]);
+            skipped.extend(skip_nodes(&mut nodes, &keys));
+            disagreements += merge(&mut merged, nodes);
+        }
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(disagreements, 0);
+    }
+
+    #[test]
+    fn skip_keys_match_both_orientations_and_reject_invalid_sfen() {
+        let b = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let flipped = rshogi_book::flipped_key(&format!("{b} 1")).unwrap();
+        let flipped = strip_ply(&flipped);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skip.txt");
+        std::fs::write(&path, format!("{b}\n")).unwrap();
+        let mut nodes = BTreeMap::from([
+            (b.into(), node(&[("5i4i", 10)], 0, 0)),
+            (flipped.into(), node(&[("5a4a", 10)], 0, 0)),
+        ]);
+        let keys = read_skip_keys(&path).unwrap();
+        assert_eq!(skip_nodes(&mut nodes, &keys).len(), 2);
+        assert!(nodes.is_empty());
+        nodes.insert(flipped.into(), node(&[("5a4a", 10)], 0, 0));
+        let skipped = skip_nodes(&mut nodes, &keys);
+        assert_eq!(skipped.len(), 1);
+        assert!(contains_orientation(&skipped, b));
+        assert!(nodes.is_empty());
+        for invalid in [
+            "pos1 b -".to_owned(),
+            b.replace(" b ", " x "),
+            b.replace(" b -", " b X"),
+            format!("{b} bad"),
+            format!("{b} 1 extra"),
+            "4k4/9/9/9/9/9/9/9/4K4 b".to_owned(),
+        ] {
+            std::fs::write(&path, format!("# 除外\n{invalid}\n")).unwrap();
+            let error = read_skip_keys(&path).unwrap_err();
+            assert!(error.to_string().contains("2 行目の局面キーが不正"), "{error}");
+        }
+    }
+
+    #[test]
     fn read_main_is_replaced_but_owner_and_curated_mains_become_conflicts() {
         let k3 = "pos3 b -";
         let rows = master(&[
@@ -847,6 +1022,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             replace_curated: false,
+            skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
             apply,
             trees,
@@ -872,6 +1048,21 @@ mod tests {
             find(&rows, B, "5i4i").unwrap().get("note"),
             "木の伝播後の 1 位 (main と食い違い)"
         );
+
+        let skipped_original =
+            format_master(&master(&[row(B, "5i4i", "main", "read", "wide", "7")]));
+        std::fs::write(&master_path, &skipped_original).unwrap();
+        let skip_path = dir.path().join("skip.txt");
+        std::fs::write(&skip_path, format!("{B}\n")).unwrap();
+        let mut skipping = args(vec![tree.clone()], true);
+        skipping.skip_keys = Some(skip_path);
+        skipping.conflicts = dir.path().join("skipped-conflicts.tsv");
+        run(skipping).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert_eq!(find(&rows, B, "5i4i").unwrap().get("evals"), "7");
+        let preserved: Vec<_> = rows.iter().filter(|row| row.get("key") == B).cloned().collect();
+        assert_eq!(format_master(&preserved), skipped_original);
+        assert_eq!(find(&rows, w, "5a4a").unwrap().get("role"), "main");
 
         let missing = dir.path().join("typo");
         assert!(run(args(vec![missing.clone()], false)).is_err());
