@@ -835,8 +835,9 @@ impl UsiEngine {
     }
 
     fn report_eval_hash_page_status(&mut self, hash: &rshogi_core::eval::EvalHash) {
+        // 空の表は一時的に手放しただけのことがある。報告済みの状態を残し、
+        // 確保し直したときに前回の報告と比べて変化を伝える。
         if hash.is_empty() {
-            self.reported_eval_hash_page_status = TtPageStatus::Regular;
             return;
         }
         let current = if hash.uses_large_pages() {
@@ -2590,6 +2591,8 @@ mod tests {
                 engine.eval_hash_size_mb = 0;
                 engine.reported_eval_hash_page_status = TtPageStatus::LargePages;
                 engine.report_eval_hash_page_status(&rshogi_core::eval::EvalHash::new(0));
+                assert_eq!(engine.reported_eval_hash_page_status, TtPageStatus::LargePages);
+                engine.report_eval_hash_page_status(&rshogi_core::eval::EvalHash::new(1));
                 assert_eq!(engine.reported_eval_hash_page_status, TtPageStatus::Regular);
                 engine.eval_hash_size_mb = 256;
                 engine.cmd_setoption(&[
