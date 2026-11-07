@@ -1,5 +1,6 @@
 //! 序盤の既存局面の main を戻し、保留する変更を一覧にする。
 use super::{
+    deep::{Continuation, DeepArgs, ReplyFrequency},
     export::files,
     master_table::{Row, format_master, mean_eval, parse_master},
     schema::{self, Schema},
@@ -26,9 +27,11 @@ pub(super) struct HoldEarlyArgs {
     /// before の main の ply がこの値未満の局面を対象にする
     #[arg(long, default_value_t = 20)]
     below_ply: u64,
-    /// 両方の手の後に main が N 手以上続く場合は替わった main を残す (計数上限 60 手)
+    /// 両方の手の後に main が N 手以上続く場合は替わった main を残す (頻度定跡なしでは計数上限 60 手)
     #[arg(long)]
     continuation: Option<usize>,
+    #[command(flatten)]
+    deep: DeepArgs,
     /// 分類によらず保留する局面キーの一覧 (1 行 1 キー)
     #[arg(long)]
     hold_keys: Option<PathBuf>,
@@ -97,6 +100,9 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     if let Some(path) = &args.hold_keys {
         protected.push(path.clone());
     }
+    if let Some(path) = &args.deep.deep_opp_freq {
+        protected.push(path.clone());
+    }
     if let Some(dir) = &args.schema {
         protected.extend(schema::paths(dir));
     }
@@ -104,6 +110,12 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     protected.push(args.master.clone());
     files::guard(std::slice::from_ref(&args.out), &protected, true)?;
     let schema = Schema::load(args.schema.as_deref())?;
+    let freq = args
+        .deep
+        .deep_opp_freq
+        .as_deref()
+        .map(|path| ReplyFrequency::read(path, args.deep.deep_min_games))
+        .transpose()?;
     let mut hold_keys = BTreeSet::new();
     if let Some(path) = &args.hold_keys {
         for line in BufReader::new(File::open(path)?).lines() {
@@ -144,9 +156,19 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
         if let Some(&index) = mains.get(old.get("key"))
             && rows[index].get("move") != old.get("move")
         {
-            let old_depth = continuation_depth(old.get("key"), old.get("move"), &rows, &mains)?;
-            let new_depth =
-                continuation_depth(old.get("key"), rows[index].get("move"), &rows, &mains)?;
+            let depth = |mv: &str| {
+                if let Some(freq) = &freq {
+                    Continuation {
+                        freq,
+                        main: |key: &str| mains.get(key).map(|&i| rows[i].get("move").to_owned()),
+                    }
+                    .after(old.get("key"), mv, args.continuation.unwrap_or(60))
+                } else {
+                    continuation_depth(old.get("key"), mv, &rows, &mains)
+                }
+            };
+            let old_depth = depth(old.get("move"))?;
+            let new_depth = depth(rows[index].get("move"))?;
             let replace = !hold_keys.contains(old.get("key"))
                 && args.continuation.is_some_and(|n| old_depth >= n && new_depth >= n);
             changes.push((ply, old, index, old_depth, new_depth, replace));
@@ -231,6 +253,9 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
         counts[0],
         counts[1]
     )?;
+    if let Some(path) = &args.deep.deep_opp_freq {
+        writeln!(stdout, "継続判定の相手頻度定跡: {}", path.display())?;
+    }
     writeln!(stdout, "分類: hold {held}, replace {}", changes.len() - held)?;
     writeln!(stdout, "書き戻した局面: {}", if args.apply { held } else { 0 })?;
     Ok(())

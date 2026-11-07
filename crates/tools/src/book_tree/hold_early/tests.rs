@@ -21,6 +21,10 @@ fn args(dir: &std::path::Path, before: &[Row], current: &[Row], apply: bool) -> 
         master: dir.join("moves.tsv"),
         below_ply: 20,
         continuation: None,
+        deep: DeepArgs {
+            deep_opp_freq: None,
+            deep_min_games: 3,
+        },
         hold_keys: None,
         schema: None,
         since: "held".into(),
@@ -379,4 +383,96 @@ fn hold_early_cli_defaults() {
     assert_eq!(args.continuation, Some(6));
     assert_eq!(args.hold_keys, Some(PathBuf::from("keys.txt")));
     assert!(args.apply);
+}
+
+#[test]
+fn frequent_missing_replies_hold_the_change() {
+    for flipped in [false, true] {
+        for (count, minimum, enabled, expected_depth) in [
+            (3, 3, true, 1),
+            (2, 3, true, 2),
+            (44, 45, true, 2),
+            (44, 3, false, 2),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let before = [row("b", "19", "5i5h", "main", "wide", "100")];
+            let mut current = vec![row("b", "19", "5i4h", "main", "wide", "200")];
+            branch(&mut current, "5i5h", &["5a5b", "5h5g"]);
+            branch(&mut current, "5i4h", &["5a5b", "4h4g"]);
+            let key = current[3].get("key");
+            let (freq_key, mv) = if flipped {
+                (rshogi_book::flipped_key(key).unwrap(), "5i6h")
+            } else {
+                (format!("{key} 1"), "5a4b")
+            };
+            let freq = dir.path().join("freq.db");
+            std::fs::write(&freq, format!("sfen {freq_key}\n{mv} none 0 0 {count}\n")).unwrap();
+            let mut args = args(dir.path(), &before, &current, true);
+            args.continuation = Some(2);
+            args.deep.deep_min_games = minimum;
+            args.deep.deep_opp_freq = enabled.then_some(freq);
+            let out = args.out.clone();
+            let master = args.master.clone();
+            let mut stdout = Vec::new();
+            run_to(args, &mut stdout).unwrap();
+            let table = std::fs::read_to_string(out).unwrap();
+            let class = if expected_depth == 1 {
+                "hold"
+            } else {
+                "replace"
+            };
+            assert!(
+                table
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .ends_with(&format!("\t2\t{expected_depth}\t{class}"))
+            );
+            let rows = parse_master(&std::fs::read_to_string(master).unwrap()).unwrap();
+            assert_eq!(
+                rows.iter()
+                    .find(|r| r.get("key") == before[0].get("key") && r.get("role") == "main")
+                    .unwrap()
+                    .get("move"),
+                if expected_depth == 1 { "5i5h" } else { "5i4h" }
+            );
+            assert_eq!(
+                String::from_utf8(stdout).unwrap().contains("継続判定の相手頻度定跡:"),
+                enabled
+            );
+        }
+    }
+}
+
+#[test]
+fn frequency_continuation_stops_at_cycle_and_limit() {
+    let mut rows = vec![row("b", "19", "5i5h", "main", "wide", "")];
+    branch(&mut rows, "5i5h", &["5a5b", "5h5i", "5b5a"]);
+    let mains: BTreeMap<_, _> = rows.iter().map(|r| (r.get("key"), r.get("move"))).collect();
+    let freq = ReplyFrequency::default();
+    let continuation = Continuation {
+        freq: &freq,
+        main: |key: &str| mains.get(key).map(|m| (*m).to_owned()),
+    };
+    for (limit, expected) in [(0, 0), (2, 2), (6, 3)] {
+        assert_eq!(continuation.after(rows[0].get("key"), "5i5h", limit).unwrap(), expected);
+    }
+}
+
+#[test]
+fn deep_frequency_is_protected_from_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let current = [row("b", "19", "5i5h", "main", "wide", "")];
+    for master in [false, true] {
+        let mut args = args(dir.path(), &current, &current, true);
+        let path = if master {
+            args.master.clone()
+        } else {
+            args.out.clone()
+        };
+        std::fs::write(&path, "frequency").unwrap();
+        args.deep.deep_opp_freq = Some(path.clone());
+        assert!(run(args).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "frequency");
+    }
 }
