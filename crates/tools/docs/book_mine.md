@@ -370,7 +370,7 @@ book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds
 0 始まりの順位を priority-late に足します。どちらも指定しないときは late の優先度は一定です。
 優先度がキューの上限 1000000 を超える指定はエラーになります。
 
-TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late)、`games` (根を通る種の局数)、
+TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late/sweep)、`games` (根を通る種の局数)、
 `key` (手数なし SFEN)、`game_ids`、`weight` です。`game_ids` は `ファイル番号:game_id` の文字列順で
 先頭の最大 8 件をカンマで並べ、`;total=総局数` を付けます (例: `0:1,0:10;total=2`)。
 全 ID の一覧ではなく決定的な見本です。総局数は `games` 列と同じです。
