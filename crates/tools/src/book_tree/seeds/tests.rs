@@ -703,6 +703,39 @@ fn update_skips_rows_that_change_the_root_or_side() {
 }
 
 #[test]
+fn update_ignores_a_last_row_that_serve_rejects() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut first = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    first.id = "existing".into();
+    first.depth = 1;
+    first.game = vec![vec!["6g6f".into(), "3c3d".into()]];
+    let mut rejected = first.clone();
+    rejected.own = "w".into();
+    let first_path = dir.path().join("first.jsonl");
+    let rejected_path = dir.path().join("rejected.jsonl");
+    std::fs::write(&first_path, format_queue(std::slice::from_ref(&first)).unwrap()).unwrap();
+    std::fs::write(&rejected_path, format_queue(&[rejected]).unwrap()).unwrap();
+    let mut opts = args(dir.path());
+    opts.exclude_queue = vec![first_path, rejected_path];
+    let output = dir.path().join("updates.jsonl");
+    opts.update_out = Some(output.clone());
+    run(opts).unwrap();
+    let text = std::fs::read_to_string(output).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(updated.id, "existing");
+    assert_eq!(updated.own, "b");
+    assert_eq!(updated.game[0], first.game[0]);
+    assert_eq!(updated.game.len(), 2);
+}
+
+#[test]
 fn additions_follow_counts_then_usi_order() {
     let mut line = Line {
         id: "order".into(),
