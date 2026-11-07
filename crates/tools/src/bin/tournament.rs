@@ -195,7 +195,7 @@ struct Cli {
     /// Start position file (USI position lines, one per line)
     #[arg(long)]
     startpos_file: Option<PathBuf>,
-    /// 開始局面の割り当て順。cycle はファイルを読み直して均一巡回する。
+    /// 開始局面の割り当て順。sequential は seed を使わない。cycle はファイルを読み直して均一巡回する。
     #[arg(long, value_enum, default_value_t = StartposOrder::Random)]
     startpos_order: StartposOrder,
 
@@ -2175,6 +2175,7 @@ impl TicketSource {
         if pending.as_ref().is_some_and(|ticket| !wanted(ticket)) {
             *pending = None;
         }
+        // cycle の新しい組は、待っている間の読み直しと最新の組数で選び直す
         if self.cycle.is_some()
             && pending.as_ref().is_some_and(|t| t.attempt == 0 && t.pair_slot == 0)
         {
@@ -2191,6 +2192,7 @@ impl TicketSource {
     /// 状態を進めないため、`peek_ticket` で得たチケットを送信前に保持している間に
     /// `target_games` が変化しても、`still_wanted` で現在値に対して再評価できる。
     /// 送信が確定したら `commit_sent` で状態を進める。
+    /// cycle では発行の状態は進めないが、新しい組の 1 局目を計算するときに局面ファイルを読み直す。
     fn peek_ticket(&self) -> Option<MatchTicket> {
         if let Some(retry) = self.retry_queue.front() {
             let mut ticket = retry.clone();

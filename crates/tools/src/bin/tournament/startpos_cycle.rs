@@ -22,17 +22,27 @@ fn parse_positions(content: &str, max_moves: u32) -> Result<Vec<Arc<CyclePositio
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        let (name, payload) = match line.split_once('\t') {
-            Some((name, payload)) => {
-                if name.trim().is_empty() {
-                    bail!("empty startpos name on line {}", index + 1);
-                }
-                (Some(name.trim()), payload)
-            }
-            None => (None, line),
-        };
-        let (mut defs, commands) = load_start_positions(None, Some(payload.trim()), None, None)
-            .with_context(|| format!("invalid startpos on line {}", index + 1))?;
+        // 名前なしの既存形式は局面の中の空白に TAB を使えるので、行全体が局面として読めるかを先に試す
+        let (name, (mut defs, commands)) =
+            match load_start_positions(None, Some(line.trim()), None, None) {
+                Ok(loaded) => (None, loaded),
+                Err(unnamed_error) => match line.split_once('\t') {
+                    Some((name, payload)) => {
+                        if name.trim().is_empty() {
+                            bail!("empty startpos name on line {}", index + 1);
+                        }
+                        let loaded = load_start_positions(None, Some(payload.trim()), None, None)
+                            .with_context(|| {
+                            format!("invalid startpos on line {}", index + 1)
+                        })?;
+                        (Some(name.trim()), loaded)
+                    }
+                    None => {
+                        return Err(unnamed_error)
+                            .with_context(|| format!("invalid startpos on line {}", index + 1));
+                    }
+                },
+            };
         defs[0].source_line = Some(index + 1);
         ensure_start_positions_within_max_moves(&defs, max_moves)?;
         let command = commands.into_iter().next().expect("one position");
@@ -68,8 +78,10 @@ pub(super) struct CycleState {
 
 impl CycleState {
     pub fn load(path: PathBuf, max_moves: u32) -> Result<Self> {
-        let metadata = std::fs::metadata(&path)?;
-        let content = std::fs::read_to_string(&path)?;
+        let metadata = std::fs::metadata(&path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         Ok(Self {
             positions: parse_positions(&content, max_moves)?,
             signature: (metadata.modified()?, metadata.len()),
@@ -101,15 +113,18 @@ impl CycleState {
     }
 
     fn reload(&mut self) -> Result<()> {
-        let metadata = std::fs::metadata(&self.path)?;
+        let metadata = std::fs::metadata(&self.path)
+            .with_context(|| format!("failed to stat {}", self.path.display()))?;
         let signature = (metadata.modified()?, metadata.len());
         if signature == self.signature {
             return Ok(());
         }
-        let content = std::fs::read_to_string(&self.path)?;
+        let content = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read {}", self.path.display()))?;
         let sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
         if sha256 != self.sha256 {
-            let positions = parse_positions(&content, self.max_moves)?;
+            let positions = parse_positions(&content, self.max_moves)
+                .with_context(|| format!("invalid {}", self.path.display()))?;
             let old: HashSet<_> = self.positions.iter().map(|p| &p.name).collect();
             let new: HashSet<_> = positions.iter().map(|p| &p.name).collect();
             let added = new.difference(&old).count();
@@ -201,12 +216,18 @@ mod tests {
         assert_eq!(positions[0].name, "opening");
         assert_eq!(positions[0].command, "position startpos moves 7g7f");
         assert_eq!(positions[1].name, &format!("{:x}", Sha256::digest(b"position startpos"))[..12]);
+        let unnamed_tab = parse_positions("position startpos moves\t7g7f\n", 512).unwrap();
+        assert_eq!(unnamed_tab[0].command, "position startpos moves 7g7f");
+        assert_eq!(
+            unnamed_tab[0].name,
+            &format!("{:x}", Sha256::digest(b"position startpos moves 7g7f"))[..12]
+        );
         let raw = format!("{}\n", rshogi_core::position::SFEN_HIRATE);
         assert!(parse_positions(&raw, 512).unwrap()[0].command.starts_with("position sfen "));
         for invalid in [
             "a\tposition startpos\na\tposition startpos moves 7g7f",
             "position startpos\nposition  startpos",
-            "\tposition startpos",
+            "\tposition startpos moves invalid",
             "a\t",
             "a\tposition startpos moves invalid",
             "# empty",
