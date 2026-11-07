@@ -174,7 +174,8 @@ fn move_sort_key(book_move: &BookMove) -> &str {
     book_move.move_usi.as_deref().unwrap_or("none")
 }
 
-fn parse_move_line(line: &str) -> Option<BookMove> {
+/// 定跡の候補手の行を読む。空の行は候補手にしない。
+pub(crate) fn parse_move_line(line: &str) -> Option<BookMove> {
     let mut tokens = line.split_whitespace();
     let move_usi = tokens.next().map(parse_move_field)?;
     let ponder_usi = tokens.next().map(parse_move_field).unwrap_or(None);

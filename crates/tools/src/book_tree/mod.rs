@@ -10,7 +10,9 @@ mod cycles;
 mod export;
 mod file_lock;
 mod journal;
+mod line_db;
 mod live_import;
+mod master_index;
 mod master_table;
 mod model;
 mod output;
@@ -170,6 +172,8 @@ enum MasterCommand {
     Cycles(cycles::CyclesArgs),
     /// 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す
     Walk(walk::WalkArgs),
+    /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
+    LineDb(line_db::LineDbArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -185,6 +189,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Rejoin(args) => rejoin::run(args),
         MasterCommand::Cycles(args) => cycles::run(args),
         MasterCommand::Walk(args) => walk::run(args),
+        MasterCommand::LineDb(args) => line_db::run(args),
     }
 }
 
