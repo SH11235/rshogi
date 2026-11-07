@@ -52,6 +52,9 @@ pub(super) struct SeedsArgs {
     priority_early: u32,
     #[arg(long, default_value_t = 100)]
     priority_late: u32,
+    /// 先手全勝の起点から、全敗した後手側の根を early と同じ優先度で作る
+    #[arg(long)]
+    sweep_loser: bool,
     #[arg(long)]
     opp_freq: Option<PathBuf>,
     #[arg(long)]
@@ -60,6 +63,9 @@ pub(super) struct SeedsArgs {
     exclude_queue: Vec<PathBuf>,
     #[arg(long, requires = "exclude_queue")]
     update_out: Option<PathBuf>,
+    /// 積み直す id・元ファイル・追加本数を TSV に出す
+    #[arg(long, requires = "update_out")]
+    update_sources: Option<PathBuf>,
 }
 
 impl SeedsArgs {
@@ -309,6 +315,7 @@ struct RootData {
     samples: BTreeSet<String>,
     lines: BTreeMap<(usize, Vec<String>), u64>,
     early: bool,
+    sweep: bool,
 }
 
 impl RootData {
@@ -322,6 +329,7 @@ impl RootData {
             self.samples.pop_last();
         }
         self.early |= other.early;
+        self.sweep |= other.sweep;
         for (line, count) in other.lines {
             *self.lines.entry(line).or_default() += count;
         }
@@ -416,6 +424,10 @@ fn update_notice(id: &str, path: &Path, added: usize) -> String {
 }
 
 pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
+    ensure!(
+        args.update_sources.is_none() || args.update_out.is_some(),
+        "update-sources には update-out が必要です"
+    );
     check_tag(&args.tag)?;
     args.opts().check()?;
     ensure!(args.depth <= super::targets::MAX_DEPTH, "depth が大きすぎます");
@@ -451,6 +463,10 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     reject_same_file(&args.out, &inputs)?;
     inputs.push(("--out", &args.out));
     if let Some(path) = &args.update_out {
+        reject_same_file(path, &inputs)?;
+        inputs.push(("--update-out", path));
+    }
+    if let Some(path) = &args.update_sources {
         reject_same_file(path, &inputs)?;
     }
     let mut updates = if args.update_out.is_some() {
@@ -506,7 +522,19 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             Ok(())
         })?;
     }
-    prefixes.retain(|(origin, _, _), _| non_sweep.contains(origin));
+    prefixes = prefixes
+        .into_iter()
+        .filter_map(|((origin, own, prefix), count)| {
+            if non_sweep.contains(&origin) {
+                Some(((origin, own, prefix), count))
+            } else if args.sweep_loser && own == "b" {
+                // 全勝起点の全局の接頭手順を、全敗した後手側の局数として使う。
+                Some(((origin, "w".to_owned(), prefix), count))
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut roots: BTreeMap<(String, String), RootData> = BTreeMap::new();
     for (file, (path, valid)) in args.games.iter().zip(&valid).enumerate() {
         visit_games(path, valid, |result, moves| {
@@ -514,12 +542,14 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                 return Ok(());
             };
             let origin_key = parse_root(&format!("sfen {}", moves[start].sfen_before))?.key;
-            if !non_sweep.contains(&origin_key) {
+            let sweep = !non_sweep.contains(&origin_key);
+            if sweep && !args.sweep_loser {
                 return Ok(());
             }
-            let early = early(result, moves, start, &args)?;
+            let early = sweep || early(result, moves, start, &args)?;
             for own in ["b", "w"] {
-                if own == "w" && result.outcome == "black_win" {
+                if (sweep && own == "b") || (!sweep && own == "w" && result.outcome == "black_win")
+                {
                     continue;
                 }
                 let mut game_roots: BTreeMap<String, RootData> = BTreeMap::new();
@@ -564,6 +594,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                     data.games = 1;
                     data.samples.insert(format!("{file}:{}", result.game_id));
                     data.early = early;
+                    data.sweep = sweep;
                     roots.entry((key, own.to_owned())).or_default().merge(data);
                 }
             }
@@ -619,7 +650,13 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     let mut table = String::from("own\troot_ply\tpriority\tclass\tgames\tkey\tgame_ids\tweight\n");
     let mut counts = BTreeMap::<(String, &str), usize>::new();
     for (key, own, data, weight) in picked {
-        let class = if data.early { "early" } else { "late" };
+        let class = if data.sweep {
+            "sweep"
+        } else if data.early {
+            "early"
+        } else {
+            "late"
+        };
         let priority = if data.early {
             args.priority_early
         } else {
@@ -661,15 +698,26 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
         }
         write_atomic(path, &format_queue(&rows)?)?;
     }
+    if let Some(path) = &args.update_sources {
+        let mut sources = String::from("id\tsource\tadded\n");
+        for (id, added) in &update_counts {
+            writeln!(sources, "{id}\t{}\t{added}", updates[id].source.display())?;
+        }
+        write_atomic(path, &sources)?;
+    }
     write_atomic(&args.table, &table)?;
     write_atomic(&args.out, &queue_text)?;
     for own in ["b", "w"] {
-        println!(
+        print!(
             "{own}: 除外 {} 行 / early {} 行 / late {} 行",
             excluded_counts.get(own).unwrap_or(&0),
             counts.get(&(own.to_owned(), "early")).unwrap_or(&0),
             counts.get(&(own.to_owned(), "late")).unwrap_or(&0)
         );
+        if args.sweep_loser {
+            print!(" / sweep {} 行", counts.get(&(own.to_owned(), "sweep")).unwrap_or(&0));
+        }
+        println!();
     }
     for (id, added) in update_counts {
         println!("{}", update_notice(&id, &updates[&id].source, added));

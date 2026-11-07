@@ -27,10 +27,12 @@ fn args(dir: &Path) -> SeedsArgs {
         collapse_cp: 150,
         priority_early: 2,
         priority_late: 100,
+        sweep_loser: false,
         opp_freq: None,
         opp_book: None,
         exclude_queue: vec![],
         update_out: None,
+        update_sources: None,
     }
 }
 
@@ -356,6 +358,13 @@ fn sweep_selection_spans_files_and_file_order_is_stable() {
     run(opts).unwrap();
     assert_eq!(first, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
     assert_eq!(table, std::fs::read_to_string(dir.path().join("table.tsv")).unwrap());
+    let mut opts = args(dir.path());
+    opts.games = vec![a.join("games.jsonl"), b.join("games.jsonl")];
+    opts.offsets = vec![0];
+    opts.sweep_loser = true;
+    run(opts).unwrap();
+    assert_eq!(first, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
+    assert_eq!(table, std::fs::read_to_string(dir.path().join("table.tsv")).unwrap());
 }
 
 #[test]
@@ -590,6 +599,7 @@ fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
         let mut opts = args(dir.path());
         opts.exclude_queue = vec![old_path.clone(), path.clone()];
         opts.update_out = Some(dir.path().join("updates.jsonl"));
+        opts.update_sources = Some(dir.path().join("sources.tsv"));
         opts
     };
     let loaded = read_updates(&make_opts().exclude_queue).unwrap();
@@ -598,6 +608,10 @@ fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
     run(make_opts()).unwrap();
     let text = std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap();
     let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sources.tsv")).unwrap(),
+        format!("id\tsource\tadded\nexisting\t{}\t1\n", path.display())
+    );
     assert_eq!(updated.game[0], original.game[0]);
     assert_eq!(updated.game[1], vec!["6g6f", "3c3d"]);
     assert_eq!(updated.game.len(), 2);
@@ -610,6 +624,10 @@ fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
     std::fs::write(&path, text).unwrap();
     run(make_opts()).unwrap();
     assert!(std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sources.tsv")).unwrap(),
+        "id\tsource\tadded\n"
+    );
 }
 
 #[test]
@@ -802,4 +820,101 @@ fn update_uses_existing_depth_and_ignores_transit_roots() {
     run(make_opts()).unwrap();
     assert!(std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap().is_empty());
     assert!(lines(dir.path()).iter().any(|l| l.own == "b"));
+}
+
+#[test]
+fn sweep_loser_only_adds_white_roots_and_preserves_mixed_rows() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    rows.extend(game(1, &initial(), PATH, 0, "black_win"));
+    let mixed = after(&["6g6f", "4c4d"]);
+    rows.extend(game(2, &mixed, PATH, 0, "black_win"));
+    rows.extend(game(3, &mixed, PATH, 0, "white_win"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let original = lines(dir.path());
+    assert_eq!(original.len(), 3);
+    let original_table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
+    let mut opts = args(dir.path());
+    opts.sweep_loser = true;
+    opts.priority_early = 7;
+    run(opts).unwrap();
+    let out = lines(dir.path());
+    for line in &original {
+        assert_eq!(out.iter().find(|row| row.id == line.id).unwrap(), line);
+    }
+    let added: Vec<_> = out.iter().filter(|row| !original.iter().any(|l| l.id == row.id)).collect();
+    assert_eq!(added.len(), 2);
+    assert!(added.iter().all(|row| row.own == "w" && row.priority == 7));
+    assert!(added.iter().any(|row| parse_root(&row.root).unwrap().ply == 7));
+    let table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
+    for row in original_table.lines().skip(1) {
+        assert!(table.lines().any(|line| line == row));
+    }
+    assert_eq!(table.lines().filter(|row| row.split('\t').nth(3) == Some("sweep")).count(), 2);
+    let first = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let mut opts = args(dir.path());
+    opts.sweep_loser = true;
+    opts.priority_early = 7;
+    run(opts).unwrap();
+    assert_eq!(first, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
+}
+
+#[test]
+fn sweep_loser_uses_shared_prefix_threshold_and_existing_updates() {
+    let dir = TempDir::new().unwrap();
+    let mut other = PATH.to_vec();
+    other[0] = "6g6f";
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    rows.extend(game(1, &initial(), &other, 0, "black_win"));
+    write_games(dir.path(), &rows);
+    let make_opts = || {
+        let mut opts = args(dir.path());
+        opts.sweep_loser = true;
+        opts
+    };
+    run(make_opts()).unwrap();
+    let out = lines(dir.path());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].game.len(), 2);
+    let mut existing = out[0].clone();
+    existing.game.truncate(1);
+    existing.priority = 321;
+    let path = dir.path().join("existing.jsonl");
+    std::fs::write(&path, format_queue(&[existing.clone()]).unwrap()).unwrap();
+    let mut opts = make_opts();
+    opts.exclude_queue = vec![path];
+    let update = dir.path().join("updates.jsonl");
+    opts.update_out = Some(update.clone());
+    run(opts).unwrap();
+    assert!(lines(dir.path()).is_empty());
+    let updated: Line =
+        serde_json::from_str(std::fs::read_to_string(update).unwrap().trim()).unwrap();
+    assert_eq!(updated.id, existing.id);
+    assert_eq!(updated.priority, 321);
+    assert_eq!(updated.game.len(), 2);
+}
+
+#[test]
+fn update_sources_requires_update_out_and_rejects_collisions() {
+    let dir = TempDir::new().unwrap();
+    write_games(dir.path(), &[]);
+    let mut opts = args(dir.path());
+    opts.update_sources = Some(dir.path().join("sources.tsv"));
+    assert!(run(opts).is_err());
+    let exclude = dir.path().join("existing.jsonl");
+    std::fs::write(&exclude, "").unwrap();
+    for target in [
+        "games.jsonl",
+        "queue.jsonl",
+        "table.tsv",
+        "existing.jsonl",
+        "updates.jsonl",
+    ] {
+        let mut opts = args(dir.path());
+        opts.exclude_queue = vec![exclude.clone()];
+        opts.update_out = Some(dir.path().join("updates.jsonl"));
+        opts.update_sources = Some(dir.path().join(target));
+        assert!(run(opts).is_err());
+    }
 }
