@@ -775,9 +775,10 @@ impl UsiEngine {
             .context("NNUE delta reload requested, but the loaded EvalFile path is unknown")?;
         self.load_nnue_with_current_deltas(&path)
             .with_context(|| format!("failed to reload NNUE file {}", path.display()))?;
+        let allocated = self.allocated_eval_hash_mb();
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
-            search.resize_eval_hash(self.eval_hash_size_mb);
+            search.resize_eval_hash(allocated);
         }
         self.maybe_report_page_status();
         Ok(())
@@ -808,8 +809,17 @@ impl UsiEngine {
         self.reported_page_status = current;
     }
 
+    /// 実際に確保する EvalHash の大きさ。`UseEvalHash=false` では引かない表を持たない。
+    fn allocated_eval_hash_mb(&self) -> usize {
+        if self.use_eval_hash {
+            self.eval_hash_size_mb
+        } else {
+            0
+        }
+    }
+
     fn report_eval_hash_page_status(&mut self, hash: &rshogi_core::eval::EvalHash) {
-        if self.eval_hash_size_mb == 0 {
+        if self.allocated_eval_hash_mb() == 0 {
             self.reported_eval_hash_page_status = TtPageStatus::Regular;
             return;
         }
@@ -1058,10 +1068,13 @@ impl UsiEngine {
             }
             "EvalHash" => {
                 if let Ok(size) = value.parse::<usize>()
-                    && let Some(search) = self.search.as_mut()
+                    && self.search.is_some()
                 {
-                    search.resize_eval_hash(size);
                     self.eval_hash_size_mb = size;
+                    let allocated = self.allocated_eval_hash_mb();
+                    if let Some(search) = self.search.as_mut() {
+                        search.resize_eval_hash(allocated);
+                    }
                 }
                 self.maybe_report_page_status();
             }
@@ -1077,6 +1090,13 @@ impl UsiEngine {
                 let v = value == "true" || value == "1";
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
+                // 有効化時の確保は次の go 直前まで遅らせ、無効化時はすぐ手放す。
+                if !v
+                    && let Some(search) = self.search.as_mut()
+                    && search.eval_hash_size_mb() != 0
+                {
+                    search.resize_eval_hash(0);
+                }
             }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
@@ -1632,12 +1652,12 @@ impl UsiEngine {
         let mut search = self.search.take().unwrap_or_else(|| {
             Search::new_with_eval_hash_large_pages(
                 self.tt_size_mb,
-                self.eval_hash_size_mb,
+                self.allocated_eval_hash_mb(),
                 self.eval_hash_large_pages,
             )
         });
-        if search.eval_hash_size_mb() != self.eval_hash_size_mb {
-            search.resize_eval_hash(self.eval_hash_size_mb);
+        if search.eval_hash_size_mb() != self.allocated_eval_hash_mb() {
+            search.resize_eval_hash(self.allocated_eval_hash_mb());
         }
         self.report_eval_hash_page_status(&search.eval_hash());
         search.set_skill_options(self.skill_options);
@@ -2009,7 +2029,7 @@ impl UsiEngine {
                     eprintln!("info string search thread panicked, resetting Search");
                     let mut search = Search::new_with_eval_hash_large_pages(
                         self.tt_size_mb,
-                        self.eval_hash_size_mb,
+                        self.allocated_eval_hash_mb(),
                         self.eval_hash_large_pages,
                     );
                     search.set_skill_options(self.skill_options);
@@ -2487,6 +2507,31 @@ mod tests {
         assert!(
             page_status_message(HugePageHint, Regular).is_some_and(|m| m.contains("regular pages"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn use_eval_hash_false_keeps_eval_hash_unallocated() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                let size = |engine: &UsiEngine| engine.search.as_ref().unwrap().eval_hash_size_mb();
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "false"]);
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "16"]);
+                assert_eq!(size(&engine), 0);
+                assert_eq!(engine.allocated_eval_hash_mb(), 0);
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "true"]);
+                assert_eq!(engine.allocated_eval_hash_mb(), 16);
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "16"]);
+                assert_eq!(size(&engine), 16);
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "false"]);
+                assert_eq!(size(&engine), 0);
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "true"]);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
