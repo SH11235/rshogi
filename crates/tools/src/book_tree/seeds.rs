@@ -363,9 +363,14 @@ fn add_lines(line: &mut Line, data: &RootData, max_lines: usize) -> usize {
 }
 
 fn read_updates(paths: &[PathBuf]) -> Result<BTreeMap<String, Existing>> {
-    let mut updates = BTreeMap::new();
+    let mut updates: BTreeMap<String, Existing> = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |line, root| {
+        read_checked_lines(path, |mut line, root, _| {
+            let mut game = updates.remove(&line.id).map(|row| row.line.game).unwrap_or_default();
+            game.append(&mut line.game);
+            let mut known = BTreeSet::new();
+            game.retain(|moves| known.insert(moves.clone()));
+            line.game = game;
             updates.insert(
                 line.id.clone(),
                 Existing {

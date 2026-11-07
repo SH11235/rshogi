@@ -613,6 +613,58 @@ fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
 }
 
 #[test]
+fn update_merges_all_games_and_uses_last_fields() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    rows.extend(game(2, &initial(), &["6g6f", "3c3d"], 0, "draw"));
+    rows.extend(game(3, &initial(), &["2g2f", "8c8d"], 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut first = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    first.id = "existing".into();
+    first.depth = 1;
+    first.game = vec![vec!["6g6f".into(), "3c3d".into()]];
+    first.hold = false;
+    let mut last = first.clone();
+    last.game = vec![vec!["2g2f".into(), "8c8d".into()]];
+    last.hold = true;
+    last.priority = 321;
+    last.opts.opp_n = Some(4);
+    last.memo = Some("保持するメモ".into());
+    let first_path = dir.path().join("first.jsonl");
+    let last_path = dir.path().join("last.jsonl");
+    std::fs::write(&first_path, format_queue(&[first.clone(), first.clone()]).unwrap()).unwrap();
+    let mut repeated = last.clone();
+    repeated.game.extend(first.game.clone());
+    std::fs::write(&last_path, format_queue(&[repeated]).unwrap()).unwrap();
+    let mut opts = args(dir.path());
+    opts.exclude_queue = vec![first_path.clone(), last_path.clone()];
+    let output = dir.path().join("updates.jsonl");
+    opts.update_out = Some(output.clone());
+    run(opts).unwrap();
+    let text = std::fs::read_to_string(output).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    let mut expected = last;
+    expected.game = vec![
+        first.game[0].clone(),
+        expected.game[0].clone(),
+        vec!["7g7f".into(), "3c3d".into()],
+    ];
+    expected.memo = Some("保持するメモ; seeds: game に 1 本追加".into());
+    assert_eq!(updated, expected);
+    let reversed = read_updates(&[last_path, first_path]).unwrap();
+    assert!(!reversed["existing"].line.hold);
+    assert_eq!(
+        reversed["existing"].line.game,
+        vec![expected.game[1].clone(), first.game[0].clone()]
+    );
+}
+
+#[test]
 fn additions_follow_counts_then_usi_order() {
     let mut line = Line {
         id: "order".into(),

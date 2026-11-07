@@ -601,7 +601,7 @@ pub(super) type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
 pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
     let mut latest = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |line, root| {
+        read_checked_lines(path, |line, root, _| {
             latest.insert(line.id.clone(), (line, root));
             Ok(())
         })?;
