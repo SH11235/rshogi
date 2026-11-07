@@ -537,7 +537,9 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
             .then(a.key.cmp(&b.key))
             .then(a.ply.cmp(&b.ply))
     });
-    write_atomic(&args.table, &format_table(&rows))?;
+    let mut index =
+        super::master_index::MasterIndex::open(&args.master, &super::schema::Schema::load(None)?)?;
+    write_atomic(&args.table, &format_table_with_entries(&rows, &mut index, initial)?)?;
     let queued = match &args.enqueue_out {
         Some(out) => {
             let (lines, counts) = queue_lines(&rows, &args, &excluded)?;
@@ -553,15 +555,37 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
     Ok(())
 }
 
-fn format_table(rows: &[Row]) -> String {
+fn format_table_with_entries(
+    rows: &[Row],
+    index: &mut super::master_index::MasterIndex,
+    initial: &str,
+) -> Result<String> {
     let mut text = String::from(
-        "side\tstop\tply\tweight\tgames\tbook_moves\tcont_plies\tcont_end_black\tkey\tmoves\tcont\n",
+        "side\tstop\tply\tweight\tgames\tbook_moves\tcont_plies\tcont_end_black\tkey\tmoves\tcont\tentry_move\tentry_value_black\tentry_value_kind\tentry_source\n",
     );
     let opt = |v: Option<String>| v.unwrap_or_default();
     for r in rows {
+        let entry_move = r.moves.last().map(String::as_str).unwrap_or("");
+        let mut value = String::new();
+        let mut kind = String::new();
+        let mut source = String::new();
+        if !r.moves.is_empty() {
+            let mut key = initial.to_owned();
+            for mv in &r.moves[..r.moves.len() - 1] {
+                key = advance(&key, mv)?;
+            }
+            if let Some(row) = index.rows(&key)?.iter().find(|row| row.get("move") == entry_move) {
+                if let Some(first) = row.get("evals").split(',').next().filter(|s| !s.is_empty()) {
+                    let v = i128::from(first.parse::<i64>()?);
+                    value = if black_to_move(&key) { v } else { -v }.to_string();
+                }
+                kind = row.get("value_kind").to_owned();
+                source = row.get("source").to_owned();
+            }
+        }
         writeln!(
             text,
-            "{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             r.side,
             r.stop.as_str(),
             r.ply,
@@ -577,10 +601,14 @@ fn format_table(rows: &[Row]) -> String {
             r.key,
             r.moves.join(" "),
             r.cont.join(" "),
+            entry_move,
+            value,
+            kind,
+            source,
         )
         .expect("String への書き込み");
     }
-    text
+    Ok(text)
 }
 
 /// `Own` の行を (側, 局面) ごとにまとめた重みと代表の行。代表は手数の最も小さい行 (同じ手数なら `rows` で先の行)。

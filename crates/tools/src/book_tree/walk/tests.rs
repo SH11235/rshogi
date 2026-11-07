@@ -747,3 +747,52 @@ fn run_filters_only_queue_and_protects_exclusion_inputs() {
     assert!(run_from(invalid, ROOT).is_err());
     assert_eq!(read("queue1.jsonl"), before);
 }
+
+#[test]
+fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = after(ROOT, &["5i4h"]);
+    let master = master_text(&[
+        (ROOT, "5i4h", "main", "12,88"),
+        (&a, "5a5b", "main", "34,90"),
+        (&a, "5a6b", "alt", ""),
+    ]);
+    let path = dir.path().join("master.tsv");
+    std::fs::write(&path, master).unwrap();
+    let mut index = super::super::master_index::MasterIndex::open(
+        &path,
+        &super::super::schema::Schema::load(None).unwrap(),
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    for (stop, moves) in [
+        (Stop::Own, vec!["5i4h"]),
+        (Stop::Out, vec!["5i4h", "5a5b"]),
+        (Stop::Rare, vec!["5i4h", "5a4b"]),
+        (Stop::Tiny, vec![]),
+        (Stop::Max, vec!["5i4h", "5a5b"]),
+        (Stop::Max, vec!["5i4h", "5a6b"]),
+    ] {
+        rows.push(
+            stop_row(
+                &mut Sources::default(),
+                "b",
+                stop,
+                moves.len(),
+                1.0,
+                ROOT,
+                &moves.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        );
+    }
+    let table = format_table_with_entries(&rows, &mut index, ROOT).unwrap();
+    let lines: Vec<Vec<&str>> = table.lines().skip(1).map(|s| s.split('\t').collect()).collect();
+    assert_eq!(&lines[0][11..13], &["5i4h", "12"]);
+    assert_eq!(&lines[1][11..13], &["5a5b", "-34"]);
+    assert_eq!(&lines[2][11..], &["5a4b", "", "", ""]);
+    assert_eq!(&lines[3][11..], &["", "", "", ""]);
+    assert_eq!(&lines[4][11..13], &["5a5b", "-34"]);
+    assert_eq!(&lines[0][13..], &["unknown", "read"]);
+    assert_eq!(&lines[5][11..], &["5a6b", "", "", "read"]);
+}

@@ -16,6 +16,7 @@
 | 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
 | 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
 | 元データから定跡・プリセット・条件と探索深さの注釈を書き出す（tree 台帳以外は照合から除外し、失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
+| 注目の線から元データと DONE の木を合わせ、伝播値つきの定跡をビュアー用に作る | [book_mine master line-db](docs/book_mine.md#master-line-db-注目の線を辿る定跡) |
 | 2 つの定跡の局面と手の差分を表示する | [book_mine master diff](docs/book_mine.md#master-diff-2-つの定跡の差分) |
 | 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |
 | main の置換と、旧 main・curated を保護した悪い alt の bench（控え）への降格・値が `--bad-eval` より大きく基準との差が `--demote-line` (既定 100) 未満の控えの復帰（`--apply`・`--replace-curated`・`--demote-alts`・`--revive-bench`。降格・復帰は `--demote-line 100`、点検・main 置換は `--line 40`） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
