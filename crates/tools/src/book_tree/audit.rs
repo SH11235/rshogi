@@ -1,6 +1,7 @@
 //! 定跡の元データの読みの値を `book_backprop` の後退解析で伝播し、main が伝播後の 1 位から
 //! どれだけ負けるかを点検し、指定時には main を置き換える。
 
+use super::deep::{Continuation, DeepArgs};
 use super::master_table::{
     self, BookMove, MasterPosition, Row, format_master, parse_master, positions_from_rows,
 };
@@ -13,7 +14,7 @@ use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
     graph_from_entries, parse_row, percentile, propagate_values, retain_known, write_book_atomic,
 };
-use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
+use crate::book_db::{BookDb, position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -60,6 +61,8 @@ pub(super) struct AuditArgs {
     /// 両方の手の先で元データの main が N 手以上続けば、正の差が --line 未満でも対象にする
     #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     deep_plies: Option<usize>,
+    #[command(flatten)]
+    deep: DeepArgs,
     /// alt の降格・bench の復帰を判定する基準値との差
     #[arg(long, default_value_t = 100)]
     demote_line: i32,
@@ -224,6 +227,13 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     if let Some(freq) = &args.weight.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
+    if let Some(freq) = &args.deep.deep_opp_freq {
+        inputs.push(("--deep-opp-freq", freq.as_path()));
+        if args.apply {
+            reject_same_file(&args.master, &[("--deep-opp-freq", freq.as_path())])?;
+        }
+    }
+    let deep_freq = args.deep.deep_opp_freq.as_deref().map(BookDb::read).transpose()?;
     let schema_paths = args.schema.as_deref().map(super::schema::paths);
     inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
     let outputs: Vec<(&str, &Path)> = [
@@ -282,8 +292,14 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (findings, summary, book) =
-        audit(&positions, draws, args.line, args.fill_replies, args.deep_plies)?;
+    let (findings, summary, book) = audit_with_deep(
+        &positions,
+        draws,
+        args.line,
+        args.fill_replies,
+        args.deep_plies,
+        deep_freq.as_ref().map(|f| (f, args.deep.deep_min_games)),
+    )?;
     let (changes, replacements) = plan_replacements(
         &rows,
         &curated_records,
@@ -297,6 +313,9 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         write_audited_db(out, &positions.0, &book)?;
     }
     print!("{}", format_summary(&summary, args.line, draws, args.deep_plies));
+    if let Some(path) = &args.deep.deep_opp_freq {
+        println!("継続判定の相手頻度定跡: {}", path.display());
+    }
     if refutation {
         let outputs = RefutationOutputs {
             table: args.refutation_table.as_deref(),
@@ -1204,11 +1223,22 @@ fn main_continues_after(
 
 /// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
 pub(super) fn audit(
+    book: &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    fill_replies: bool,
+    deep_plies: Option<usize>,
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
+    audit_with_deep(book, draws, line, fill_replies, deep_plies, None)
+}
+
+fn audit_with_deep(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
     fill_replies: bool,
     deep_plies: Option<usize>,
+    deep_freq: Option<(&BookDb, u64)>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
@@ -1266,9 +1296,26 @@ pub(super) fn audit(
             let Some(limit) = deep_plies else {
                 continue;
             };
-            if !main_continues_after(positions, key, &main.mv, limit)?
-                || !main_continues_after(positions, key, &best.mv, limit)?
-            {
+            let continues = |mv: &str| -> Result<bool> {
+                if let Some((freq, min_games)) = deep_freq {
+                    let continuation = Continuation {
+                        freq,
+                        min_games,
+                        main: |key: &str| {
+                            if let Some(p) = positions.get(key) {
+                                return p.moves.first().map(|m| m.mv.clone());
+                            }
+                            let flipped = rshogi_book::flipped_key(key)?;
+                            let m = positions.get(strip_ply(&flipped))?.moves.first()?;
+                            rshogi_book::flip_usi_move(&m.mv)
+                        },
+                    };
+                    Ok(continuation.after(key, mv, limit)? >= limit)
+                } else {
+                    main_continues_after(positions, key, mv, limit)
+                }
+            };
+            if !continues(&main.mv)? || !continues(&best.mv)? {
                 continue;
             }
             summary.deep_below_line[side] += 1;
@@ -1497,6 +1544,39 @@ mod tests {
     }
 
     #[test]
+    fn deep_frequency_requires_coverage_of_frequent_replies() {
+        for flipped in [false, true] {
+            for (count, minimum, enabled, expected) in [
+                (3, 3, true, 0),
+                (2, 3, true, 1),
+                (44, 45, true, 1),
+                (44, 3, false, 1),
+            ] {
+                let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
+                let (key, mv) = if flipped {
+                    (rshogi_book::flipped_key(A).unwrap(), "5i6h")
+                } else {
+                    (format!("{A} 1"), "5a4b")
+                };
+                let freq =
+                    BookDb::from_reader(format!("sfen {key}\n{mv} none 0 0 {count}\n").as_bytes())
+                        .unwrap();
+                let (findings, summary, _) = audit_with_deep(
+                    &parsed,
+                    DrawValues::both(0),
+                    40,
+                    false,
+                    Some(2),
+                    enabled.then_some((&freq, minimum)),
+                )
+                .unwrap();
+                assert_eq!(findings.len(), expected);
+                assert_eq!(summary.deep_below_line, [expected, 0]);
+            }
+        }
+    }
+
+    #[test]
     fn deep_plies_includes_below_line_when_both_continuations_are_long_enough() {
         let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
         let (findings, summary, _) =
@@ -1531,6 +1611,17 @@ mod tests {
         assert_eq!(findings[0].key, ROOT);
         assert_eq!(findings[0].gap(), 20);
         assert_eq!(summary.deep_below_line, [1, 0]);
+        let empty = BookDb::default();
+        let (findings, _, _) =
+            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some((&empty, 3)))
+                .unwrap();
+        assert_eq!(findings.len(), 1);
+        let freq =
+            BookDb::from_reader(format!("sfen {A} 1\n5a4b none 0 0 44\n").as_bytes()).unwrap();
+        let (findings, _, _) =
+            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some((&freq, 3)))
+                .unwrap();
+        assert!(findings.is_empty());
     }
 
     #[test]
@@ -1937,6 +2028,10 @@ mod tests {
             table: dir.join("audit.tsv"),
             line: 1,
             deep_plies: None,
+            deep: DeepArgs {
+                deep_opp_freq: None,
+                deep_min_games: 3,
+            },
             demote_line: 100,
             draw_value_black: -70,
             draw_value_white: 0,

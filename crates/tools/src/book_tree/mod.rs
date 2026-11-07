@@ -7,6 +7,7 @@ mod book_diff;
 mod borrow;
 mod check;
 mod cycles;
+mod deep;
 mod export;
 mod file_lock;
 mod hold_early;
