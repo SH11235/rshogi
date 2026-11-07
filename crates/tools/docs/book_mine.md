@@ -298,7 +298,7 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 `own=w` の種にもします。起点は最初に `eval` が付いた move の `sfen_before` です。`eval` がなければ
 その局は使いません。`--sweep-loser` を付けると、先手全勝の起点からも全敗した `own=w` の種だけを作ります。
 その場合も根・offsets・局数の下限・手順の選択・除外・積み直しは通常の `own=w` と同じ規則です。
-先手全勝でない起点の採否は変わりません。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
+先手全勝でない起点の採否は変わりません (ただし sweep の根と同じ局面の `own=w` の根は 1 行に合わさり、その行の class は sweep、priority は `--priority-early` になります)。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
 起点と根の同一性は SFEN の手数を除いた局面で判断し、`startpos_idx` は使いません。
 
 | 指定 | 既定 | 意味 |
