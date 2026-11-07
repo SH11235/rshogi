@@ -296,7 +296,9 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 `tournament` の JSON Lines を読み、enqueue に渡す行を生成します。エンジンや稼働中のキューには触れません。
 同じ起点の先手が全勝なら出力せず、それ以外の起点では全局を `own=b` の種にし、後手勝ち・引分の局を
 `own=w` の種にもします。起点は最初に `eval` が付いた move の `sfen_before` です。`eval` がなければ
-その局は使いません。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
+その局は使いません。`--sweep-loser` を付けると、先手全勝の起点からも全敗した `own=w` の種だけを作ります。
+その場合も根・offsets・局数の下限・手順の選択・除外・積み直しは通常の `own=w` と同じ規則です。
+先手全勝でない起点の採否は変わりません (ただし sweep の根と同じ局面の `own=w` の根は 1 行に合わさり、その行の class は sweep、priority は `--priority-early` になります)。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
 起点と根の同一性は SFEN の手数を除いた局面で判断し、`startpos_idx` は使いません。
 
 | 指定 | 既定 | 意味 |
@@ -312,11 +314,13 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 | `--max-lines` | 3 | 根の `game` の最大本数 (正数)。その手順を通った局数の降順、同数なら USI 手順の文字列順 |
 | `--collapse-plies` | 30 | 起点からの早い崩れを見る手数 |
 | `--collapse-cp` | 150 | 早い崩れとする不利な評価値の絶対値 (正数) |
-| `--priority-early` / `--priority-late` | 2 / 100 | early の固定優先度と late の優先度の始まり。小さい値から処理 |
+| `--priority-early` / `--priority-late` | 2 / 100 | early・sweep の固定優先度と late の優先度の始まり。小さい値から処理 |
+| `--sweep-loser` | off | 先手全勝の起点から全敗した後手側 (`own=w`) の根を作る。優先度は `--priority-early`、表の class は `sweep` |
 | `--opp-freq` | なし | `master walk` と同じ、手数を除いた SFEN 順のテキスト頻度定跡。手の count の合計を根の局数とする |
 | `--opp-book` | なし | `master walk` と同じ `.db` / `.ybb` の大きい定跡。根に手があるかを調べる |
 | `--exclude-queue` | なし、繰り返し可 | `master walk` と同じ除外。id ごとに最初の行の根と `own` に固定して違う行は飛ばし、有効な行の `game` を合わせる (段数などそれ以外の欄は最後の有効な行)。段数 0 は除外に使わない。根・追加の根と側、および game の depth+1 手以内の自分の手番の局面と側が一致する行を除く |
 | `--update-out <JSONL>` | なし | `--exclude-queue` が必要。同じ根・同じ own の既存行に不足する game を足した完全な行を出す |
+| `--update-sources <TSV>` | なし | `--update-out` が必要。更新行ごとの `id`・`source`・`added` を見出し付き TSV に出す |
 
 `--exclude-queue` は受付の順に渡してください。`--update-out` は、同じ id の行の `game` を全部合わせ、
 最初に現れた順で同じ手順の重複を除きます。最初の行と `root` (局面と手数) か `own` が違う行は serve が拒否する行なので、合わせる対象にも最後の欄の元にもせず、警告を出して飛ばします。既存の木との重複を見る除外の判定も同じ規則で、有効な行の `game` を全部合わせて使います。それ以外の欄 (`priority`・`hold`・`depth`・`opts`・`memo` など) は、
@@ -328,13 +332,16 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 先頭 `--max-lines` 本を選び、統合した `game` の最初の depth+1 手と一致しないものだけを末尾に足します。
 「追加 N 本」は統合後に新しく足した本数です。追加本数を memo の末尾にも付け、追加がなければその行を出しません。更新行は id 順です。
 標準出力に更新 id ごとの元ファイルのパスと追加本数を出します。
+`--update-sources` を指定すると同じ内容を `id<TAB>source<TAB>added` の TSV に id 順で保存します。
+`source` は指定順で最後の有効な既存行を読んだ `--exclude-queue` のパス、`added` は新しく足した進行の本数です。
+追加のない id は含めず、更新行がなければ見出しだけを出します。
 元ファイルがある台の state に、その id の更新行だけを `tree enqueue --from` で積み直してください。
 複数台の更新行を一つの state にまとめて投入しないでください。
 
 ```sh
 book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds.tsv --tag holes \
   --exclude-queue machine-a/targets.jsonl --exclude-queue machine-b/targets.jsonl \
-  --update-out updates.jsonl
+  --update-out updates.jsonl --update-sources update-sources.tsv
 ```
 
 結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
@@ -352,6 +359,8 @@ book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds
 最終的に負けた側から見て `-collapse-cp` 以下なら early と判定します。引分の局は、どちらかの側から見て
 その閾値以下になれば early です。同じ局から作る種には own によらず同じ判定を使い、
 根を通る種の局のどれかが early なら、その根と own の行を early にします。
+先手全勝の起点から採用した種があれば、合流後も class は `sweep` とし、early と同じ優先度・並びで扱います。
+`--sweep-loser` 指定時は標準出力の先後別の要約にも sweep の行数を追加します。
 評価値は指した側からの値を先後に合わせて使い、両エンジンの読みを対象にします。起点の読みを距離 0 とし、
 距離 collapse-plies の読みも含めます。終局は起点の手を 1 手目として数えます (result の `plies`、省略時は最後の move の `ply`)。詰みは通常の cp より強い
 勝ち負けとして扱い、exact primary のない eval は崩れの判定には使いません。
@@ -361,7 +370,7 @@ book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds
 0 始まりの順位を priority-late に足します。どちらも指定しないときは late の優先度は一定です。
 優先度がキューの上限 1000000 を超える指定はエラーになります。
 
-TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late)、`games` (根を通る種の局数)、
+TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late/sweep)、`games` (根を通る種の局数)、
 `key` (手数なし SFEN)、`game_ids`、`weight` です。`game_ids` は `ファイル番号:game_id` の文字列順で
 先頭の最大 8 件をカンマで並べ、`;total=総局数` を付けます (例: `0:1,0:10;total=2`)。
 全 ID の一覧ではなく決定的な見本です。総局数は `games` 列と同じです。
