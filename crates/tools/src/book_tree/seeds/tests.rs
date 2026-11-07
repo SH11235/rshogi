@@ -28,6 +28,8 @@ fn args(dir: &Path) -> SeedsArgs {
         priority_early: 2,
         priority_late: 100,
         sweep_loser: false,
+        chance_cp: None,
+        chance_back: 6,
         opp_freq: None,
         opp_book: None,
         exclude_queue: vec![],
@@ -917,4 +919,208 @@ fn update_sources_requires_update_out_and_rejects_collisions() {
         opts.update_sources = Some(dir.path().join(target));
         assert!(run(opts).is_err());
     }
+}
+
+fn set_score(rows: &mut [serde_json::Value], index: usize, score: serde_json::Value) {
+    rows[index]["eval"] = json!({"last_exact_primary": {"score": score}});
+}
+
+fn table(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("table.tsv")).unwrap()
+}
+
+#[test]
+fn chance_adds_only_non_winners_first_crossing_without_offset_threshold() {
+    for (outcome, own, cp) in [("black_win", "w", -500), ("white_win", "b", 500)] {
+        let dir = TempDir::new().unwrap();
+        let mut rows = game(0, &initial(), PATH, 1, outcome);
+        set_score(&mut rows, 7, json!({"cp": cp}));
+        set_score(&mut rows, 8, json!({"cp": cp}));
+        set_score(&mut rows, 9, json!({"cp": -cp * 2}));
+        rows.extend(game(1, &initial(), PATH, 1, outcome));
+        write_games(dir.path(), &rows);
+        let mut opts = args(dir.path());
+        opts.chance_cp = Some(500);
+        opts.min_games_offset = 100;
+        opts.priority_early = 7;
+        run(opts).unwrap();
+        let added: Vec<_> = lines(dir.path())
+            .into_iter()
+            .filter(|l| parse_root(&l.root).unwrap().ply != 2)
+            .collect();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].own, own);
+        assert_eq!(parse_root(&added[0].root).unwrap().ply, 3);
+        assert_eq!(added[0].priority, 7);
+        assert_eq!(added[0].game[0], PATH[2..9]);
+        assert!(
+            table(dir.path())
+                .lines()
+                .any(|l| l.starts_with(&format!("{own}\t3\t7\tchance\t1\t")))
+        );
+    }
+}
+
+#[test]
+fn chance_ignores_missing_exact_scores_below_threshold_and_winners() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    set_score(&mut rows, 7, json!({"cp": 500}));
+    set_score(&mut rows, 8, json!({"cp": 1000}));
+    rows[6]["eval"] = json!({"last_exact_primary": null});
+    rows.extend(game(1, &initial(), PATH, 0, "black_win"));
+    write_games(dir.path(), &rows);
+    let mut opts = args(dir.path());
+    opts.chance_cp = Some(501);
+    run(opts).unwrap();
+    assert!(lines(dir.path()).is_empty());
+}
+
+#[test]
+fn chance_skips_origin_even_when_revisited_and_does_not_seek_later_crossings() {
+    for back in [0, 6, usize::MAX] {
+        let dir = TempDir::new().unwrap();
+        let path = ["5i5h", "5a5b", "5h5i", "5b5a", "7g7f", "3c3d"];
+        let mut rows = game(0, &initial(), &path, 0, "black_win");
+        set_score(&mut rows, 4, json!({"cp": -500}));
+        set_score(&mut rows, 5, json!({"cp": 500}));
+        rows.extend(game(1, &initial(), &path, 0, "black_win"));
+        write_games(dir.path(), &rows);
+        let mut opts = args(dir.path());
+        opts.chance_cp = Some(500);
+        opts.chance_back = back;
+        run(opts).unwrap();
+        assert!(lines(dir.path()).is_empty());
+    }
+}
+
+#[test]
+fn chance_draw_uses_both_sides_and_mate_scores() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    set_score(&mut rows, 7, json!({"mate": 3}));
+    set_score(&mut rows, 8, json!({"mate": 0}));
+    set_score(&mut rows, 9, json!({"mate": -2}));
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    let mut opts = args(dir.path());
+    opts.chance_cp = Some(i32::MAX);
+    opts.chance_back = 0;
+    run(opts).unwrap();
+    let out = lines(dir.path());
+    assert!(out.iter().any(|l| l.own == "w" && parse_root(&l.root).unwrap().ply == 8));
+    assert!(out.iter().any(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 10));
+    assert_eq!(
+        table(dir.path())
+            .lines()
+            .filter(|l| l.split('\t').nth(3) == Some("chance"))
+            .count(),
+        2
+    );
+    assert_eq!(score_value(&PrimaryScore::MateWin), i64::MAX);
+    assert_eq!(score_value(&PrimaryScore::MateLoss), -i64::MAX);
+}
+
+#[test]
+fn chance_merges_existing_classes_without_double_counting() {
+    for class in ["late", "early", "sweep"] {
+        let dir = TempDir::new().unwrap();
+        let outcome = if class == "sweep" {
+            "black_win"
+        } else {
+            "draw"
+        };
+        let mut rows = game(0, &initial(), PATH, 0, outcome);
+        set_score(&mut rows, 8, json!({"cp": -500}));
+        rows.extend(game(1, &initial(), PATH, 0, outcome));
+        write_games(dir.path(), &rows);
+        let mut opts = args(dir.path());
+        opts.chance_cp = Some(500);
+        opts.chance_back = 2;
+        opts.sweep_loser = class == "sweep";
+        opts.collapse_plies = if class == "early" { 30 } else { 0 };
+        run(opts).unwrap();
+        let expected = if class == "late" { "chance" } else { class };
+        assert!(
+            table(dir.path())
+                .lines()
+                .any(|l| l.starts_with(&format!("w\t7\t2\t{expected}\t2\t")))
+        );
+        assert_eq!(
+            lines(dir.path())
+                .iter()
+                .filter(|l| l.own == "w" && parse_root(&l.root).unwrap().ply == 7)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn chance_disabled_preserves_original_output_and_rejects_nonpositive_cp() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    set_score(&mut rows, 8, json!({"cp": -500}));
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let original = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let original_table = table(dir.path());
+    let mut opts = args(dir.path());
+    opts.chance_back = 0;
+    run(opts).unwrap();
+    assert_eq!(original, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
+    assert_eq!(original_table, table(dir.path()));
+    for cp in [0, -1] {
+        let mut opts = args(dir.path());
+        opts.chance_cp = Some(cp);
+        assert!(run(opts).is_err());
+    }
+}
+
+#[test]
+fn chance_shares_weights_exclusion_and_update_depth() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "black_win");
+    set_score(&mut rows, 8, json!({"cp": -500}));
+    let mut other = PATH.to_vec();
+    other[6] = "6g6f";
+    let mut second = game(1, &initial(), &other, 0, "black_win");
+    set_score(&mut second, 8, json!({"cp": -500}));
+    rows.extend(second);
+    write_games(dir.path(), &rows);
+    let key = parse_root(&format!("sfen {}", after(&PATH[..6]))).unwrap().key;
+    let freq = dir.path().join("freq.db");
+    std::fs::write(&freq, format!("#YANEURAOU-DB2016 1.00\nsfen {key} 1\n6i7h none 0 1 20\n"))
+        .unwrap();
+    let make_opts = || {
+        let mut opts = args(dir.path());
+        opts.chance_cp = Some(500);
+        opts.chance_back = 2;
+        opts.opp_freq = Some(freq.clone());
+        opts.opp_book = Some(freq.clone());
+        opts
+    };
+    run(make_opts()).unwrap();
+    let out = lines(dir.path());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].game.len(), 2);
+    assert!(table(dir.path()).lines().nth(1).unwrap().ends_with("\t21"));
+    let mut existing = out[0].clone();
+    existing.depth = 1;
+    existing.priority = 321;
+    existing.game = vec![vec!["6i7h".into(), "4a3b".into()]];
+    let queue = dir.path().join("existing.jsonl");
+    std::fs::write(&queue, format_queue(&[existing.clone()]).unwrap()).unwrap();
+    let mut opts = make_opts();
+    opts.exclude_queue = vec![queue];
+    let update = dir.path().join("update.jsonl");
+    opts.update_out = Some(update.clone());
+    run(opts).unwrap();
+    assert!(lines(dir.path()).is_empty());
+    let updated: Line =
+        serde_json::from_str(std::fs::read_to_string(update).unwrap().trim()).unwrap();
+    assert_eq!(updated.priority, 321);
+    assert_eq!(updated.depth, 1);
+    assert_eq!(updated.game, vec![existing.game[0].clone(), vec!["6g6f".into(), "4a3b".into()]]);
 }

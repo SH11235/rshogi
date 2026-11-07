@@ -52,6 +52,12 @@ pub(super) struct SeedsArgs {
     priority_early: u32,
     #[arg(long, default_value_t = 100)]
     priority_late: u32,
+    /// 勝たなかった側が途中でこの評価値以上になった局から、その側の根を足す
+    #[arg(long)]
+    chance_cp: Option<i32>,
+    /// chance-cp に初めて届いた手の何手前を根にするか (起点より前には戻らない)
+    #[arg(long, default_value_t = 6)]
+    chance_back: usize,
     /// 先手全勝の起点から、全敗した後手側の根を early と同じ優先度で作る
     #[arg(long)]
     sweep_loser: bool,
@@ -262,6 +268,48 @@ fn origin(moves: &[Move]) -> Option<usize> {
     moves.iter().position(|m| m.eval.is_some())
 }
 
+fn score_value(score: &PrimaryScore) -> i64 {
+    match score {
+        PrimaryScore::Cp(cp) => i64::from(*cp),
+        PrimaryScore::Mate(n) => {
+            if *n > 0 {
+                i64::MAX
+            } else {
+                -i64::MAX
+            }
+        }
+        PrimaryScore::MateWin => i64::MAX,
+        PrimaryScore::MateLoss => -i64::MAX,
+    }
+}
+
+fn chance_index(
+    moves: &[Move],
+    start: usize,
+    own: &str,
+    args: &SeedsArgs,
+) -> Result<Option<usize>> {
+    let Some(cp) = args.chance_cp else {
+        return Ok(None);
+    };
+    for (index, mv) in moves.iter().enumerate().skip(start) {
+        let Some(primary) = mv.eval.as_ref().and_then(|e| e.last_exact_primary.as_ref()) else {
+            continue;
+        };
+        ensure!(matches!(mv.side_to_move.as_str(), "b" | "w"), "不正な side_to_move");
+        let score = score_value(&primary.score);
+        let score = if mv.side_to_move == own {
+            score
+        } else {
+            -score
+        };
+        if score >= i64::from(cp) {
+            return Ok(Some(index.saturating_sub(args.chance_back).max(start)));
+        }
+    }
+    Ok(None)
+}
+
 fn early(result: &GameResult, moves: &[Move], start: usize, args: &SeedsArgs) -> Result<bool> {
     let first = moves[start].ply;
     let loser = match result.outcome.as_str() {
@@ -282,18 +330,7 @@ fn early(result: &GameResult, moves: &[Move], start: usize, args: &SeedsArgs) ->
             continue;
         };
         ensure!(matches!(mv.side_to_move.as_str(), "b" | "w"), "不正な side_to_move");
-        let score = match primary.score {
-            PrimaryScore::Cp(cp) => i64::from(cp),
-            PrimaryScore::Mate(n) => {
-                if n > 0 {
-                    i64::MAX
-                } else {
-                    -i64::MAX
-                }
-            }
-            PrimaryScore::MateWin => i64::MAX,
-            PrimaryScore::MateLoss => -i64::MAX,
-        };
+        let score = score_value(&primary.score);
         let loser_score = match loser {
             Some(side) if mv.side_to_move == side => score,
             Some(_) => -score,
@@ -316,6 +353,7 @@ struct RootData {
     lines: BTreeMap<(usize, Vec<String>), u64>,
     early: bool,
     sweep: bool,
+    chance: bool,
 }
 
 impl RootData {
@@ -330,6 +368,7 @@ impl RootData {
         }
         self.early |= other.early;
         self.sweep |= other.sweep;
+        self.chance |= other.chance;
         for (line, count) in other.lines {
             *self.lines.entry(line).or_default() += count;
         }
@@ -435,6 +474,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
         args.min_games_offset > 0 && args.max_lines > 0 && args.collapse_cp > 0,
         "min-games-offset、max-lines、collapse-cp は正数が必要です"
     );
+    ensure!(args.chance_cp.is_none_or(|cp| cp > 0), "chance-cp は正数が必要です");
     ensure!(
         args.priority_early <= super::targets::MAX_PRIORITY
             && args.priority_late <= super::targets::MAX_PRIORITY,
@@ -543,36 +583,52 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             };
             let origin_key = parse_root(&format!("sfen {}", moves[start].sfen_before))?.key;
             let sweep = !non_sweep.contains(&origin_key);
-            if sweep && !args.sweep_loser {
-                return Ok(());
-            }
             let early = sweep || early(result, moves, start, &args)?;
             for own in ["b", "w"] {
-                if (sweep && own == "b") || (!sweep && own == "w" && result.outcome == "black_win")
-                {
-                    continue;
-                }
+                let regular = if sweep {
+                    args.sweep_loser && own == "w"
+                } else {
+                    own == "b" || result.outcome != "black_win"
+                };
+                let won = result.outcome == if own == "b" { "black_win" } else { "white_win" };
+                let chance = if won {
+                    None
+                } else {
+                    chance_index(moves, start, own, &args)?
+                };
+                let offsets =
+                    args.offsets.iter().filter(|_| regular).filter_map(|offset| {
+                        start.checked_add(*offset).map(|index| (index, false))
+                    });
                 let mut game_roots: BTreeMap<String, RootData> = BTreeMap::new();
-                for &offset in &args.offsets {
-                    let Some(index) = start.checked_add(offset) else {
-                        continue;
-                    };
+                for (index, is_chance) in offsets.chain(chance.map(|index| (index, true))) {
                     let Some(root) = root_at(moves, index)? else {
                         continue;
                     };
-                    let prefix: Vec<_> =
-                        moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
-                    if !prefix.is_empty() {
-                        // 2 回目の走査で数えた組なので必ずある。無ければ走査の間に入力が変わった。
-                        let n = *prefixes
-                            .get(&(origin_key.clone(), own.to_owned(), prefix))
-                            .context("走査の間に棋譜が変わりました (手順の局数が見つかりません)")?;
-                        if n < args.min_games_offset as u64 {
+                    if is_chance {
+                        if root.key == origin_key {
                             continue;
+                        }
+                    } else {
+                        let prefix: Vec<_> =
+                            moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
+                        if !prefix.is_empty() {
+                            // 2 回目の走査で数えた組なので必ずある。無ければ走査の間に入力が変わった。
+                            let n = *prefixes
+                                .get(&(origin_key.clone(), own.to_owned(), prefix))
+                                .context(
+                                    "走査の間に棋譜が変わりました (手順の局数が見つかりません)",
+                                )?;
+                            if n < args.min_games_offset as u64 {
+                                continue;
+                            }
                         }
                     }
                     let depths = update_depths.get(&(root.key.clone(), own.to_owned()));
                     let data = game_roots.entry(root.key).or_default();
+                    data.chance |= is_chance;
+                    data.early |= !is_chance && early;
+                    data.sweep |= !is_chance && sweep;
                     if data.ply == 0 || root.ply < data.ply {
                         data.ply = root.ply;
                     }
@@ -593,8 +649,6 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                 for (key, mut data) in game_roots {
                     data.games = 1;
                     data.samples.insert(format!("{file}:{}", result.game_id));
-                    data.early = early;
-                    data.sweep = sweep;
                     roots.entry((key, own.to_owned())).or_default().merge(data);
                 }
             }
@@ -610,7 +664,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     let mut picked = Vec::new();
     let mut update_counts = BTreeMap::new();
     for ((key, own), data) in roots {
-        if own == "b" && !non_sweep_roots.contains(&key) {
+        if own == "b" && !data.chance && !non_sweep_roots.contains(&key) {
             continue;
         }
         if let Some(ids) = excluded.get(&(key.clone(), own.clone())) {
@@ -638,8 +692,8 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
         picked.push((key, own, data, weight));
     }
     picked.sort_by(|a, b| {
-        b.2.early
-            .cmp(&a.2.early)
+        (b.2.early || b.2.chance)
+            .cmp(&(a.2.early || a.2.chance))
             .then(b.3.cmp(&a.3))
             .then(a.1.cmp(&b.1))
             .then(a.0.cmp(&b.0))
@@ -654,10 +708,12 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             "sweep"
         } else if data.early {
             "early"
+        } else if data.chance {
+            "chance"
         } else {
             "late"
         };
-        let priority = if data.early {
+        let priority = if data.early || data.chance {
             args.priority_early
         } else {
             let p = args
@@ -708,16 +764,27 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     write_atomic(&args.table, &table)?;
     write_atomic(&args.out, &queue_text)?;
     for own in ["b", "w"] {
-        print!(
+        let mut summary = format!(
             "{own}: 除外 {} 行 / early {} 行 / late {} 行",
             excluded_counts.get(own).unwrap_or(&0),
             counts.get(&(own.to_owned(), "early")).unwrap_or(&0),
             counts.get(&(own.to_owned(), "late")).unwrap_or(&0)
         );
         if args.sweep_loser {
-            print!(" / sweep {} 行", counts.get(&(own.to_owned(), "sweep")).unwrap_or(&0));
+            write!(
+                summary,
+                " / sweep {} 行",
+                counts.get(&(own.to_owned(), "sweep")).unwrap_or(&0)
+            )?;
         }
-        println!();
+        if args.chance_cp.is_some() {
+            write!(
+                summary,
+                " / chance {} 行",
+                counts.get(&(own.to_owned(), "chance")).unwrap_or(&0)
+            )?;
+        }
+        println!("{summary}");
     }
     for (id, added) in update_counts {
         println!("{}", update_notice(&id, &updates[&id].source, added));
