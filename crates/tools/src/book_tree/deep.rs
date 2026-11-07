@@ -3,8 +3,9 @@ use crate::book_db::{apply_usi_move, parse_move_line, position_from_sfen, strip_
 use anyhow::{Context, Result};
 use clap::Args;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
+    hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
@@ -23,6 +24,15 @@ pub(super) struct DeepArgs {
 #[derive(Default)]
 pub(super) struct ReplyFrequency {
     moves: BTreeMap<String, BTreeSet<String>>,
+    // 下限未満の手しか無い局面も「直接キーで見つかった」と扱い、反転キーへ落ちないための印。
+    // 全局面のキーを持つと大きいので、キーの 64 ビットのハッシュだけを持つ。
+    present: HashSet<u64>,
+}
+
+fn key_hash(key: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl ReplyFrequency {
@@ -45,7 +55,9 @@ impl ReplyFrequency {
                 continue;
             }
             if let Some(sfen) = line.strip_prefix("sfen ") {
-                key = Some(strip_ply(sfen.trim()).to_owned());
+                let k = strip_ply(sfen.trim()).to_owned();
+                result.present.insert(key_hash(&k));
+                key = Some(k);
             } else if let Some(key) = &key
                 && let Some(m) = parse_move_line(line)
                 && m.count >= min_games
@@ -60,6 +72,9 @@ impl ReplyFrequency {
     fn replies(&self, key: &str) -> BTreeSet<String> {
         if let Some(moves) = self.moves.get(key) {
             return moves.clone();
+        }
+        if self.present.contains(&key_hash(key)) {
+            return BTreeSet::new();
         }
         rshogi_book::flipped_key(key)
             .and_then(|flipped| self.moves.get(strip_ply(&flipped)))
@@ -201,6 +216,23 @@ mod tests {
                 BTreeSet::from(["3c3d".to_owned(), "4c4d".to_owned()]),
             )])
         );
+    }
+
+    #[test]
+    fn direct_key_with_only_rare_moves_does_not_fall_back_to_flipped_key() {
+        let direct = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let flipped = rshogi_book::flipped_key(&format!("{direct} 1")).unwrap();
+        let text = format!(
+            "#YANEURAOU-DB2016\nsfen {direct} 1\n5i5h none 0 0 2\nsfen {flipped}\n5a5b none 0 0 9\n"
+        );
+        let freq = ReplyFrequency::from_reader(text.as_bytes(), 3).unwrap();
+        assert!(freq.replies(direct).is_empty());
+        let only_flipped = ReplyFrequency::from_reader(
+            format!("#YANEURAOU-DB2016\nsfen {flipped}\n5a5b none 0 0 9\n").as_bytes(),
+            3,
+        )
+        .unwrap();
+        assert_eq!(only_flipped.replies(direct).len(), 1);
     }
 
     #[test]
