@@ -34,8 +34,11 @@ floodgate = true
 [server.keepalive]
 # tcp は TCP 経路の SO_KEEPALIVE。ping_interval_sec は CSA 空行を送る間隔で、
 # ロビー待機中は LOBBY_PONG を送って登録の有効期限を延長する。0 は周期送信なし。
+# unacked_timeout_sec は送ったデータの確認応答が来ないまま切断とみなすまでの秒数
+# (Linux の TCP_USER_TIMEOUT)。0 は OS 既定 (再送をあきらめるまで約 15 分)。
 tcp = false
 ping_interval_sec = 30
+unacked_timeout_sec = 60
 
 [engine]
 # ローカル USI エンジンへの絶対パス。release ビルド推奨。

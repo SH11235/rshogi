@@ -61,7 +61,7 @@ rshogi-csa = { path = "../rshogi-csa" }
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
 
 # `libc` は engine.rs の `pre_exec` で `setpgid` を呼ぶ unix 経路、および
-# transport.rs の TCP keepalive (`SO_KEEPALIVE`) で使われる。両方とも library
+# transport の TCP keepalive (`SO_KEEPALIVE`) と `TCP_USER_TIMEOUT` で使われる。どれも library
 # コード側のため feature gate せず常時必須。
 libc = "0.2"
 

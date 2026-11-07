@@ -80,6 +80,9 @@ impl TransportTarget {
 pub struct ConnectOpts {
     /// TCP SO_KEEPALIVE を有効化する（TCP 経路でのみ参照）。
     pub tcp_keepalive: bool,
+    /// 送ったデータが確認応答されないまま経過したら接続を失敗させる時間
+    /// (Linux の `TCP_USER_TIMEOUT`)。`None` なら OS 既定。TCP・WebSocket の両経路で使う。
+    pub unacked_timeout: Option<Duration>,
     /// WebSocket Upgrade 時の Origin ヘッダ値。`None` なら送信しない。
     /// 指定する場合は接続先の `WS_ALLOWED_ORIGINS` に含まれる値を使う。
     pub ws_origin: Option<String>,
@@ -105,13 +108,18 @@ impl CsaTransport {
     /// 解析済みの `TransportTarget` に対して接続する。
     pub fn connect(target: &TransportTarget, opts: &ConnectOpts) -> Result<Self> {
         match target {
-            TransportTarget::Tcp { host, port } => {
-                Ok(Self::Tcp(TcpTransport::connect(host, *port, opts.tcp_keepalive)?))
-            }
+            TransportTarget::Tcp { host, port } => Ok(Self::Tcp(TcpTransport::connect(
+                host,
+                *port,
+                opts.tcp_keepalive,
+                opts.unacked_timeout,
+            )?)),
             #[cfg(feature = "websocket")]
-            TransportTarget::WebSocket { url } => {
-                Ok(Self::WebSocket(WsTransport::connect(url, opts.ws_origin.as_deref())?))
-            }
+            TransportTarget::WebSocket { url } => Ok(Self::WebSocket(WsTransport::connect(
+                url,
+                opts.ws_origin.as_deref(),
+                opts.unacked_timeout,
+            )?)),
         }
     }
 
@@ -163,9 +171,74 @@ impl CsaTransport {
     }
 }
 
+/// 経路の途中でパケットが捨てられると、keep-alive の書き込みはカーネルの送信バッファに
+/// 入って成功し続け、再送をあきらめるまで (Linux 既定の `tcp_retries2=15` で約 15 分)
+/// 切断に気づけない。確認応答の来ない時間に上限を掛けて、読み書きを `ETIMEDOUT` で失敗させる。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn set_unacked_timeout(stream: &std::net::TcpStream, timeout: Duration) {
+    use std::os::unix::io::AsRawFd;
+    let ms = unacked_timeout_ms(timeout);
+    // SAFETY: fd は有効なソケット。&ms は呼び出しの間生きている c_uint を指し、長さはその大きさ。
+    let ret = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            &ms as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        log::warn!("TCP_USER_TIMEOUT 設定失敗: {}", std::io::Error::last_os_error());
+    }
+}
+
+/// カーネルは値を signed `int` として読み、負値を `EINVAL` で拒否するので `c_int::MAX` で頭打ちにする。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn unacked_timeout_ms(timeout: Duration) -> libc::c_uint {
+    let max = libc::c_int::MAX as u128;
+    timeout.as_millis().min(max) as libc::c_uint
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) fn set_unacked_timeout(_stream: &std::net::TcpStream, _timeout: Duration) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn unacked_timeout_ms_caps_at_c_int_max() {
+        assert_eq!(unacked_timeout_ms(Duration::from_secs(60)), 60_000);
+        assert_eq!(
+            unacked_timeout_ms(Duration::from_secs(u64::MAX)),
+            libc::c_int::MAX as libc::c_uint
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn unacked_timeout_is_set_on_the_socket() {
+        use std::os::unix::io::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        set_unacked_timeout(&stream, Duration::from_millis(1500));
+        let mut ms: libc::c_uint = 0;
+        let mut len = std::mem::size_of::<libc::c_uint>() as libc::socklen_t;
+        // SAFETY: fd は有効なソケット。ms と len は有効なポインタ。
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_USER_TIMEOUT,
+                &mut ms as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(ms, 1500);
+    }
 
     #[test]
     fn target_parses_tcp_default() {

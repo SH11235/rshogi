@@ -160,6 +160,7 @@ impl CsaConnection {
             &TransportTarget::from_host_port(host, port)?,
             &ConnectOpts {
                 tcp_keepalive,
+                unacked_timeout: None,
                 ws_origin: None,
             },
         )

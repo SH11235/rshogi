@@ -24,7 +24,12 @@ impl Drop for TcpTransport {
 }
 
 impl TcpTransport {
-    pub(super) fn connect(host: &str, port: u16, tcp_keepalive: bool) -> Result<Self> {
+    pub(super) fn connect(
+        host: &str,
+        port: u16,
+        tcp_keepalive: bool,
+        unacked_timeout: Option<Duration>,
+    ) -> Result<Self> {
         let addr_str = format!("{host}:{port}");
         log::info!("[CSA/TCP] 接続中: {addr_str}");
         let addrs: Vec<_> = addr_str
@@ -59,6 +64,9 @@ impl TcpTransport {
 
         if tcp_keepalive {
             set_tcp_keepalive(&stream)?;
+        }
+        if let Some(timeout) = unacked_timeout {
+            super::set_unacked_timeout(&stream, timeout);
         }
         let _ = stream.set_nodelay(true);
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;

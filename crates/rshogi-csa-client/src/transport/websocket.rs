@@ -62,7 +62,11 @@ impl Drop for WsTransport {
 }
 
 impl WsTransport {
-    pub(super) fn connect(url: &str, origin: Option<&str>) -> Result<Self> {
+    pub(super) fn connect(
+        url: &str,
+        origin: Option<&str>,
+        unacked_timeout: Option<Duration>,
+    ) -> Result<Self> {
         log::info!("[CSA/WS] 接続中: {url}");
         let mut request: Request = url
             .into_client_request()
@@ -90,6 +94,9 @@ impl WsTransport {
         // thread でも read_message が long-block しないようにする。
         let stream = stream_of_ws(&ws).ok_or_else(|| anyhow!("未対応の WebSocket stream"))?;
         let _ = stream.set_nodelay(true);
+        if let Some(timeout) = unacked_timeout {
+            super::set_unacked_timeout(stream, timeout);
+        }
         stream.set_read_timeout(Some(Duration::from_millis(100)))?;
         let shutdown_stream = stream.try_clone()?;
 
