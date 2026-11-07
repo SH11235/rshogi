@@ -161,6 +161,14 @@ fn master_row_with_empty_ply_still_wins_over_tree() {
 }
 
 #[test]
+fn row_sfen_falls_back_to_ply_one_when_ply_is_unreadable() {
+    let key = strip_ply(SFEN_HIRATE);
+    assert_eq!(row_sfen(key, "7"), format!("{key} 7"));
+    assert_eq!(row_sfen(key, ""), format!("{key} 1"));
+    assert_eq!(row_sfen(key, "99999999999999999999"), format!("{key} 1"));
+}
+
+#[test]
 fn newer_tree_wins_even_when_read_before_older_tree() {
     let dir = tempfile::tempdir().unwrap();
     let mut positions = Positions::new();

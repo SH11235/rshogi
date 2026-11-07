@@ -163,6 +163,17 @@ fn insert_move(
     Ok(())
 }
 
+/// 元データの行の局面の SFEN。元データの ply は空や SFEN で表せない大きさも許すので、
+/// そのままでは読めない ply は 1 にする (盤面キーと合法性の判定に ply は効かない)。
+fn row_sfen(key: &str, ply: &str) -> String {
+    let sfen = format!("{key} {ply}");
+    if !ply.is_empty() && position_from_sfen(&sfen).is_ok() {
+        sfen
+    } else {
+        format!("{key} 1")
+    }
+}
+
 fn read_tree(
     tree: &TreeInput,
     positions: &mut Positions,
@@ -240,8 +251,7 @@ fn assemble(
                 &mut positions,
                 &mut pending,
                 &prefix,
-                // 空の ply は検査で許されるが、そのまま繋ぐと末尾の空白で木と別の盤面キーになる。
-                &format!("{key} {}", Some(row.get("ply")).filter(|p| !p.is_empty()).unwrap_or("1")),
+                &row_sfen(&key, row.get("ply")),
                 mv,
                 None,
             )?;
