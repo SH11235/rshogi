@@ -578,7 +578,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// Threat 重み (i8) を i16 アキュムレータに加算（SIMD 最適化）
     ///
     /// i8 重みを i16 に sign-extend してから加算。
-    /// AVX2: `_mm256_cvtepi8_epi16` で 16 要素ずつ変換 + `_mm256_add_epi16`。
+    /// AVX-512BW は32要素、AVX2 は16要素ずつ符号拡張して加算する。
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn add_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
@@ -589,8 +589,43 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
         let weights = self.threat_weight_row(index);
 
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: 行と accumulator の長さは L1。32要素単位の読み書きと
+            // prefetch はその範囲内で、非整列ロード・ストアを使う。
+            // cfg は AVX-512F/BW を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let a = accumulation.as_mut_ptr();
+                let w = weights.as_ptr();
+                for offset in [512, 768, 1024, 1280] {
+                    if L1 > offset {
+                        _mm_prefetch(w.add(offset), _MM_HINT_T0);
+                    }
+                }
+                for i in 0..L1 / 32 {
+                    let offset = i * 32;
+                    let x = _mm512_loadu_si512(a.add(offset).cast());
+                    let b = _mm256_loadu_si256(w.add(offset).cast());
+                    let y = _mm512_cvtepi8_epi16(b);
+                    _mm512_storeu_si512(a.add(offset).cast(), _mm512_add_epi16(x, y));
+                }
+            }
+            for i in L1 / 32 * 32..L1 {
+                accumulation[i] = accumulation[i].wrapping_add(i16::from(weights[i]));
+            }
+        }
+
         // AVX2: 128bit i8 → 256bit i16 sign-extend + add, L1/16 iterations
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
         {
             // SAFETY:
             // - `acc_ptr`: 呼び出し元が `AccumulatorLayerStacks::get_threat_mut()`
@@ -634,7 +669,14 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
 
         // スカラーフォールバック（AVX2 非対応環境のみコンパイル）
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            )
+        )))]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_add(w as i16);
         }
@@ -649,8 +691,43 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
         let weights = self.threat_weight_row(index);
 
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: 行と accumulator の長さは L1。32要素単位の読み書きと
+            // prefetch はその範囲内で、非整列ロード・ストアを使う。
+            // cfg は AVX-512F/BW を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let a = accumulation.as_mut_ptr();
+                let w = weights.as_ptr();
+                for offset in [512, 768, 1024, 1280] {
+                    if L1 > offset {
+                        _mm_prefetch(w.add(offset), _MM_HINT_T0);
+                    }
+                }
+                for i in 0..L1 / 32 {
+                    let offset = i * 32;
+                    let x = _mm512_loadu_si512(a.add(offset).cast());
+                    let b = _mm256_loadu_si256(w.add(offset).cast());
+                    let y = _mm512_cvtepi8_epi16(b);
+                    _mm512_storeu_si512(a.add(offset).cast(), _mm512_sub_epi16(x, y));
+                }
+            }
+            for i in L1 / 32 * 32..L1 {
+                accumulation[i] = accumulation[i].wrapping_sub(i16::from(weights[i]));
+            }
+        }
+
         // AVX2: 128bit i8 → 256bit i16 sign-extend + sub
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
         {
             // SAFETY: `add_threat_weights` と同じ契約。
             // - `acc_ptr`: `accumulation: &mut [i16; L1]` の親は
@@ -689,7 +766,14 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
 
         // スカラーフォールバック（AVX2 非対応環境のみコンパイル）
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            )
+        )))]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_sub(w as i16);
         }
@@ -2269,6 +2353,46 @@ mod tests {
             has_threat: false,
             _ft: PhantomData,
         }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn threat_row_updates_match_wrapping_scalar() {
+        fn check<const N: usize>() {
+            let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
+            let mut weights = AlignedBox::<i8>::new_zeroed(N * 2);
+            for (i, w) in weights.iter_mut().enumerate() {
+                *w = (i as u8).wrapping_mul(73) as i8;
+            }
+            ft.threat_weights = weights.into();
+            let mut actual = Aligned([0i16; N]);
+            for (i, x) in actual.0.iter_mut().enumerate() {
+                *x = if i % 2 == 0 {
+                    i16::MAX - (i % 7) as i16
+                } else {
+                    i16::MIN + (i % 7) as i16
+                };
+            }
+            let initial = actual.0;
+            for row in 0..2 {
+                let mut expected = initial;
+                for (i, x) in expected.iter_mut().enumerate() {
+                    *x = x.wrapping_add(i16::from(ft.threat_weights[row * N + i]));
+                }
+                actual.0 = initial;
+                ft.add_threat_weights(&mut actual.0, row);
+                assert_eq!(actual.0, expected);
+                ft.sub_threat_weights(&mut actual.0, row);
+                assert_eq!(actual.0, initial);
+                for (i, x) in expected.iter_mut().enumerate() {
+                    *x = initial[i].wrapping_sub(i16::from(ft.threat_weights[row * N + i]));
+                }
+                ft.sub_threat_weights(&mut actual.0, row);
+                assert_eq!(actual.0, expected);
+            }
+        }
+        check::<48>();
+        check::<64>();
     }
 
     fn check_fused_from_source_wrapping_reference<const PAIRS: usize>() {
