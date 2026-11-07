@@ -155,45 +155,14 @@ pub(super) fn apply_weight_changes_to_two<const L1: usize>(
         target_feature = "avx512bw"
     ))]
     if L1.is_multiple_of(32) {
-        use std::arch::x86_64::*;
-        // 幅が tile に満たない場合も SIMD で処理する。
-        let tile_regs = if L1.is_multiple_of(32 * 8) { 8 } else { 1 };
-        let cache_ptr = cache.as_mut_ptr();
-        let output_ptr = accumulation.as_mut_ptr();
-        let source = biases.map_or(cache_ptr.cast_const(), |bias| bias.as_ptr());
-        // SAFETY: cfg が命令セットを保証する。入出力の長さは L1 と検証済みで、
-        // L1 は tile 幅の倍数。重み行は slice で境界を検証してから読む。
-        // 非整列 load/store を用い、各ポインタは該当 tile の範囲内のみ参照する。
-        // source が cache を指す場合も tile 全体を読み終えてから同じ範囲へ書く。
-        unsafe {
-            for offset in (0..L1).step_by(32 * tile_regs) {
-                let mut tile = [_mm512_setzero_si512(); 8];
-                for (k, value) in tile[..tile_regs].iter_mut().enumerate() {
-                    *value = _mm512_loadu_si512(source.add(offset + k * 32).cast());
-                }
-                for index in removed.iter() {
-                    let row = &weights[index * L1..][..L1];
-                    for (k, value) in tile[..tile_regs].iter_mut().enumerate() {
-                        *value = _mm512_sub_epi16(
-                            *value,
-                            _mm512_loadu_si512(row.as_ptr().add(offset + k * 32).cast()),
-                        );
-                    }
-                }
-                for index in added.iter() {
-                    let row = &weights[index * L1..][..L1];
-                    for (k, value) in tile[..tile_regs].iter_mut().enumerate() {
-                        *value = _mm512_add_epi16(
-                            *value,
-                            _mm512_loadu_si512(row.as_ptr().add(offset + k * 32).cast()),
-                        );
-                    }
-                }
-                for (k, &value) in tile[..tile_regs].iter().enumerate() {
-                    _mm512_storeu_si512(cache_ptr.add(offset + k * 32).cast(), value);
-                    _mm512_storeu_si512(output_ptr.add(offset + k * 32).cast(), value);
-                }
-            }
+        // 2304 / 3072 では 24 register の tile で重み行の読み直しを減らす (1536 以下は未計測のため 8)。
+        if L1 >= 2304 && L1.is_multiple_of(32 * 24) {
+            apply_tiles_avx512::<L1, 24>(cache, biases, accumulation, weights, removed, added);
+        } else if L1.is_multiple_of(32 * 8) {
+            apply_tiles_avx512::<L1, 8>(cache, biases, accumulation, weights, removed, added);
+        } else {
+            // 幅が tile に満たない場合も SIMD で処理する。
+            apply_tiles_avx512::<L1, 1>(cache, biases, accumulation, weights, removed, added);
         }
         return;
     }
@@ -350,6 +319,63 @@ pub(super) fn apply_weight_changes_to_two<const L1: usize>(
     }
 }
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    target_feature = "avx512bw"
+))]
+#[inline]
+fn apply_tiles_avx512<const L1: usize, const REGS: usize>(
+    cache: &mut [i16],
+    biases: Option<&[i16]>,
+    accumulation: &mut [i16],
+    weights: &[i16],
+    removed: &IndexList<{ PieceNumber::NB }>,
+    added: &IndexList<{ PieceNumber::NB }>,
+) {
+    use std::arch::x86_64::*;
+    assert!(L1.is_multiple_of(32 * REGS));
+    assert_eq!(cache.len(), L1);
+    assert_eq!(accumulation.len(), L1);
+    let cache_ptr = cache.as_mut_ptr();
+    let output_ptr = accumulation.as_mut_ptr();
+    let source = biases.map_or(cache_ptr.cast_const(), |bias| bias.as_ptr());
+    // SAFETY: cfg が命令セットを保証する。入出力の長さは L1 と検証済みで (bias は呼び出し側で検証)、
+    // L1 は tile 幅の倍数。重み行は slice で境界を検証してから読む。
+    // 非整列 load/store を用い、各ポインタは該当 tile の範囲内のみ参照する。
+    // source が cache を指す場合も tile 全体を読み終えてから同じ範囲へ書く。
+    unsafe {
+        for offset in (0..L1).step_by(32 * REGS) {
+            let mut tile = [_mm512_setzero_si512(); REGS];
+            for (k, value) in tile.iter_mut().enumerate() {
+                *value = _mm512_loadu_si512(source.add(offset + k * 32).cast());
+            }
+            for index in removed.iter() {
+                let row = &weights[index * L1..][..L1];
+                for (k, value) in tile.iter_mut().enumerate() {
+                    *value = _mm512_sub_epi16(
+                        *value,
+                        _mm512_loadu_si512(row.as_ptr().add(offset + k * 32).cast()),
+                    );
+                }
+            }
+            for index in added.iter() {
+                let row = &weights[index * L1..][..L1];
+                for (k, value) in tile.iter_mut().enumerate() {
+                    *value = _mm512_add_epi16(
+                        *value,
+                        _mm512_loadu_si512(row.as_ptr().add(offset + k * 32).cast()),
+                    );
+                }
+            }
+            for (k, &value) in tile.iter().enumerate() {
+                _mm512_storeu_si512(cache_ptr.add(offset + k * 32).cast(), value);
+                _mm512_storeu_si512(output_ptr.add(offset + k * 32).cast(), value);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +445,7 @@ mod tests {
         check_tiles::<768>();
         check_tiles::<1024>();
         check_tiles::<1536>();
+        check_tiles::<2304>();
+        check_tiles::<3072>();
     }
 }
