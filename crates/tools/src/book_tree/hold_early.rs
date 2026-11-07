@@ -72,11 +72,17 @@ fn continuation_depth(
 ) -> Result<usize> {
     let mut position = position_from_sfen(&format!("{key} 1"))?;
     apply_usi_move(&mut position, mv)?;
+    // 循環は定跡が先へ伸びていないので、`master audit --deep-plies` と同じく同じ局面に戻ったところで止める。
+    let mut seen = BTreeSet::from([key.to_owned()]);
     for depth in 0..60 {
         let sfen = position.to_sfen();
-        let Some(&index) = mains.get(strip_ply(&sfen)) else {
+        let child = strip_ply(&sfen);
+        let Some(&index) = mains.get(child) else {
             return Ok(depth);
         };
+        if !seen.insert(child.to_owned()) {
+            return Ok(depth);
+        }
         apply_usi_move(&mut position, rows[index].get("move"))?;
     }
     Ok(60)
@@ -110,9 +116,9 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     }
     let before = std::fs::read_to_string(&args.before)?;
     let original = std::fs::read_to_string(&args.master)?;
-    for text in [&before, &original] {
+    for (path, text) in [(&args.before, &before), (&args.master, &original)] {
         let errors = schema.validate(text)?;
-        ensure!(errors.is_empty(), "{}", errors.join("\n"));
+        ensure!(errors.is_empty(), "{}: {}", path.display(), errors.join("\n"));
     }
     let before = parse_master(&before)?;
     let mut rows = parse_master(&original)?;

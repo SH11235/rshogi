@@ -248,11 +248,11 @@ fn hold_keys_is_protected_from_outputs() {
 }
 
 #[test]
-fn continuation_counts_cycles_up_to_sixty() {
+fn continuation_stops_when_main_returns_to_a_seen_position() {
     let mut rows = vec![row("b", "19", "5i5h", "main", "wide", "")];
     branch(&mut rows, "5i5h", &["5a5b", "5h5i", "5b5a"]);
     let mains = rows.iter().enumerate().map(|(i, r)| (r.get("key").to_owned(), i)).collect();
-    assert_eq!(continuation_depth(rows[0].get("key"), "5i5h", &rows, &mains).unwrap(), 60);
+    assert_eq!(continuation_depth(rows[0].get("key"), "5i5h", &rows, &mains).unwrap(), 3);
 }
 
 #[test]
