@@ -3,9 +3,8 @@ use crate::book_db::{apply_usi_move, parse_move_line, position_from_sfen, strip_
 use anyhow::{Context, Result};
 use clap::Args;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fs::File,
-    hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
@@ -24,49 +23,55 @@ pub(super) struct DeepArgs {
 #[derive(Default)]
 pub(super) struct ReplyFrequency {
     moves: BTreeMap<String, BTreeSet<String>>,
-    // 下限未満の手しか無い局面も「直接キーで見つかった」と扱い、反転キーへ落ちないための印。
-    // 全局面のキーを持つと大きいので、キーの 64 ビットのハッシュだけを持つ。衝突すると反転キーを
-    // 引かないだけで、別の局面の手を返すことはない (応手が欠けて続く手数が短く出る側に倒れる)。
-    present: HashSet<u64>,
-}
-
-fn key_hash(key: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
+    // 下限未満の手しか無い直接キーの局面でも反転キーへ落ちないための印。反転キーが `moves` にある
+    // 局面だけを持つので、大きさは残した手の数に比例し、頻度定跡の局面数にはよらない。
+    shadowed: BTreeSet<String>,
 }
 
 impl ReplyFrequency {
-    /// 下限以上の応手を持つ局面キーと指し手だけを読み込む。
+    /// 下限以上の応手を持つ局面キーと指し手だけを読み込む (ファイルを 2 回読む)。
     pub fn read(path: &Path, min_games: u64) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("頻度定跡を開けません: {}", path.display()))?;
-        Self::from_reader(BufReader::new(file), min_games)
+        let open = || {
+            File::open(path)
+                .map(BufReader::new)
+                .with_context(|| format!("頻度定跡を開けません: {}", path.display()))
+        };
+        Self::from_readers(open, min_games)
             .with_context(|| format!("頻度定跡を読めません: {}", path.display()))
     }
 
-    /// 頻度定跡の行を読みながら、下限未満の手を除外する。
-    pub(super) fn from_reader(reader: impl BufRead, min_games: u64) -> Result<Self> {
+    #[cfg(test)]
+    pub(super) fn from_reader(text: &[u8], min_games: u64) -> Result<Self> {
+        Self::from_readers(|| Ok(text), min_games)
+    }
+
+    /// 1 回目で下限以上の手を、2 回目でその反転キーにあたる直接キーの局面を集める。
+    fn from_readers<R: BufRead>(
+        mut open: impl FnMut() -> Result<R>,
+        min_games: u64,
+    ) -> Result<Self> {
         let mut result = Self::default();
-        let mut key = None;
-        for line in reader.lines() {
-            let line = line?;
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.trim().is_empty() || line.starts_with('#') || line.starts_with("//") {
-                continue;
-            }
-            if let Some(sfen) = line.strip_prefix("sfen ") {
-                let k = strip_ply(sfen.trim()).to_owned();
-                result.present.insert(key_hash(&k));
-                key = Some(k);
-            } else if let Some(key) = &key
-                && let Some(m) = parse_move_line(line)
+        for_each_line(open()?, |key, line| {
+            if let Some(m) = parse_move_line(line)
                 && m.count >= min_games
                 && let Some(mv) = m.move_usi
             {
-                result.moves.entry(key.clone()).or_default().insert(mv);
+                result.moves.entry(key.to_owned()).or_default().insert(mv);
             }
-        }
+        })?;
+        let mut last = None;
+        for_each_line(open()?, |key, _| {
+            if last.as_deref() == Some(key) {
+                return;
+            }
+            last = Some(key.to_owned());
+            if !result.moves.contains_key(key)
+                && rshogi_book::flipped_key(key)
+                    .is_some_and(|flipped| result.moves.contains_key(strip_ply(&flipped)))
+            {
+                result.shadowed.insert(key.to_owned());
+            }
+        })?;
         Ok(result)
     }
 
@@ -74,7 +79,7 @@ impl ReplyFrequency {
         if let Some(moves) = self.moves.get(key) {
             return moves.clone();
         }
-        if self.present.contains(&key_hash(key)) {
+        if self.shadowed.contains(key) {
             return BTreeSet::new();
         }
         rshogi_book::flipped_key(key)
@@ -84,6 +89,24 @@ impl ReplyFrequency {
             .filter_map(|mv| rshogi_book::flip_usi_move(mv))
             .collect()
     }
+}
+
+/// 局面の手の行ごとに `(局面キー, 行)` を渡す。手の行の無い局面は渡さない。
+fn for_each_line(reader: impl BufRead, mut f: impl FnMut(&str, &str)) -> Result<()> {
+    let mut key = None;
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        if let Some(sfen) = line.strip_prefix("sfen ") {
+            key = Some(strip_ply(sfen.trim()).to_owned());
+        } else if let Some(key) = &key {
+            f(key, line);
+        }
+    }
+    Ok(())
 }
 
 pub(super) struct Continuation<'a, F> {
