@@ -1,7 +1,7 @@
 //! 定跡の元データの読みの値を `book_backprop` の後退解析で伝播し、main が伝播後の 1 位から
 //! どれだけ負けるかを点検し、指定時には main を置き換える。
 
-use super::deep::{Continuation, DeepArgs};
+use super::deep::{Continuation, DeepArgs, ReplyFrequency};
 use super::master_table::{
     self, BookMove, MasterPosition, Row, format_master, parse_master, positions_from_rows,
 };
@@ -14,7 +14,7 @@ use crate::book_backprop::{
     DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
     graph_from_entries, parse_row, percentile, propagate_values, retain_known, write_book_atomic,
 };
-use crate::book_db::{BookDb, position_from_sfen, static_position_from_sfen, strip_ply};
+use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -222,6 +222,10 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         refutation || args.weight.opp_freq.is_none(),
         "--opp-freq は --refutation-table か --enqueue-out と一緒に使います"
     );
+    ensure!(
+        args.deep_plies.is_some() || args.deep.deep_opp_freq.is_none(),
+        "--deep-opp-freq は --deep-plies と一緒に使います"
+    );
     args.weight.check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
     if let Some(freq) = &args.weight.opp_freq {
@@ -233,7 +237,12 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
             reject_same_file(&args.master, &[("--deep-opp-freq", freq.as_path())])?;
         }
     }
-    let deep_freq = args.deep.deep_opp_freq.as_deref().map(BookDb::read).transpose()?;
+    let deep_freq = args
+        .deep
+        .deep_opp_freq
+        .as_deref()
+        .map(|path| ReplyFrequency::read(path, args.deep.deep_min_games))
+        .transpose()?;
     let schema_paths = args.schema.as_deref().map(super::schema::paths);
     inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
     let outputs: Vec<(&str, &Path)> = [
@@ -298,7 +307,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         args.line,
         args.fill_replies,
         args.deep_plies,
-        deep_freq.as_ref().map(|f| (f, args.deep.deep_min_games)),
+        deep_freq.as_ref(),
     )?;
     let (changes, replacements) = plan_replacements(
         &rows,
@@ -1238,7 +1247,7 @@ fn audit_with_deep(
     line: i32,
     fill_replies: bool,
     deep_plies: Option<usize>,
-    deep_freq: Option<(&BookDb, u64)>,
+    deep_freq: Option<&ReplyFrequency>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
@@ -1297,10 +1306,9 @@ fn audit_with_deep(
                 continue;
             };
             let continues = |mv: &str| -> Result<bool> {
-                if let Some((freq, min_games)) = deep_freq {
+                if let Some(freq) = deep_freq {
                     let continuation = Continuation {
                         freq,
-                        min_games,
                         main: |key: &str| {
                             if let Some(p) = positions.get(key) {
                                 return p.moves.first().map(|m| m.mv.clone());
@@ -1558,16 +1566,18 @@ mod tests {
                 } else {
                     (format!("{A} 1"), "5a4b")
                 };
-                let freq =
-                    BookDb::from_reader(format!("sfen {key}\n{mv} none 0 0 {count}\n").as_bytes())
-                        .unwrap();
+                let freq = ReplyFrequency::from_reader(
+                    format!("sfen {key}\n{mv} none 0 0 {count}\n").as_bytes(),
+                    minimum,
+                )
+                .unwrap();
                 let (findings, summary, _) = audit_with_deep(
                     &parsed,
                     DrawValues::both(0),
                     40,
                     false,
                     Some(2),
-                    enabled.then_some((&freq, minimum)),
+                    enabled.then_some(&freq),
                 )
                 .unwrap();
                 assert_eq!(findings.len(), expected);
@@ -1611,16 +1621,16 @@ mod tests {
         assert_eq!(findings[0].key, ROOT);
         assert_eq!(findings[0].gap(), 20);
         assert_eq!(summary.deep_below_line, [1, 0]);
-        let empty = BookDb::default();
+        let empty = ReplyFrequency::default();
         let (findings, _, _) =
-            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some((&empty, 3)))
+            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some(&empty))
                 .unwrap();
         assert_eq!(findings.len(), 1);
         let freq =
-            BookDb::from_reader(format!("sfen {A} 1\n5a4b none 0 0 44\n").as_bytes()).unwrap();
-        let (findings, _, _) =
-            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some((&freq, 3)))
+            ReplyFrequency::from_reader(format!("sfen {A} 1\n5a4b none 0 0 44\n").as_bytes(), 3)
                 .unwrap();
+        let (findings, _, _) =
+            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some(&freq)).unwrap();
         assert!(findings.is_empty());
     }
 
@@ -2974,6 +2984,9 @@ mod tests {
         with_refutation.refutation_table = Some(dir.path().join("refutation.tsv"));
         with_refutation.enqueue_out = Some(dir.path().join("audit2.tsv"));
         assert!(run(with_refutation).is_err());
+        let mut deep_freq_only = args("audit2.tsv", None);
+        deep_freq_only.deep.deep_opp_freq = Some(dir.path().join("freq.db"));
+        assert!(run(deep_freq_only).unwrap_err().to_string().contains("--deep-plies"));
         let mut opp_freq_only = args("audit2.tsv", None);
         opp_freq_only.weight.opp_freq = Some(dir.path().join("freq.db"));
         assert!(run(opp_freq_only).is_err());

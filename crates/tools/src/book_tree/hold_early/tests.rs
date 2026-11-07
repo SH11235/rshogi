@@ -449,10 +449,9 @@ fn frequency_continuation_stops_at_cycle_and_limit() {
     let mut rows = vec![row("b", "19", "5i5h", "main", "wide", "")];
     branch(&mut rows, "5i5h", &["5a5b", "5h5i", "5b5a"]);
     let mains: BTreeMap<_, _> = rows.iter().map(|r| (r.get("key"), r.get("move"))).collect();
-    let freq = BookDb::default();
+    let freq = ReplyFrequency::default();
     let continuation = Continuation {
         freq: &freq,
-        min_games: 3,
         main: |key: &str| mains.get(key).map(|m| (*m).to_owned()),
     };
     for (limit, expected) in [(0, 0), (2, 2), (6, 3)] {

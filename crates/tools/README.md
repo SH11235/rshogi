@@ -24,7 +24,7 @@
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
 `master audit --deep-plies N`（N は 1 以上）は、両方の手の先で元データの main が N 手以上続けば線未満も対象にします。直接のキーが無いときは反転キーでも続きを辿ります。
-`master audit` と `master hold-early` は `--deep-opp-freq <PATH>` で頻度定跡を渡すと、相手の main に加えて `--deep-min-games <N>` (既定 3) 局以上の応手をすべて辿り、最短の継続手数で判定します。
+`master audit` と `master hold-early` は `--deep-opp-freq <PATH>` で頻度定跡を渡すと、相手の main に加えて `--deep-min-games <N>` (既定 3) 局以上の応手をすべて辿り、最短の継続手数で判定します。頻度定跡は読み込み時に下限未満の手を除外します。audit では `--deep-plies` が必要で、`--deep-min-games` の明示指定には頻度定跡が必要です。
 
 控え（bench）の復帰は `tree register`（控え自身の source 保護を適用）と `master audit --revive-bench` で行い、`borrow value` では復帰させません。書き出しでは record と同じく DB に -30000 で残し、プリセットから除きます。
 

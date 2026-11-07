@@ -1,11 +1,11 @@
 //! 序盤の既存局面の main を戻し、保留する変更を一覧にする。
 use super::{
-    deep::{Continuation, DeepArgs},
+    deep::{Continuation, DeepArgs, ReplyFrequency},
     export::files,
     master_table::{Row, format_master, mean_eval, parse_master},
     schema::{self, Schema},
 };
-use crate::book_db::{BookDb, apply_usi_move, position_from_sfen, strip_ply};
+use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Result, ensure};
 use clap::Args;
@@ -110,7 +110,12 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     protected.push(args.master.clone());
     files::guard(std::slice::from_ref(&args.out), &protected, true)?;
     let schema = Schema::load(args.schema.as_deref())?;
-    let freq = args.deep.deep_opp_freq.as_deref().map(BookDb::read).transpose()?;
+    let freq = args
+        .deep
+        .deep_opp_freq
+        .as_deref()
+        .map(|path| ReplyFrequency::read(path, args.deep.deep_min_games))
+        .transpose()?;
     let mut hold_keys = BTreeSet::new();
     if let Some(path) = &args.hold_keys {
         for line in BufReader::new(File::open(path)?).lines() {
@@ -155,7 +160,6 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
                 if let Some(freq) = &freq {
                     Continuation {
                         freq,
-                        min_games: args.deep.deep_min_games,
                         main: |key: &str| mains.get(key).map(|&i| rows[i].get("move").to_owned()),
                     }
                     .after(old.get("key"), mv, args.continuation.unwrap_or(60))
