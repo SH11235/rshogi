@@ -25,7 +25,8 @@ pub(super) struct DeepArgs {
 pub(super) struct ReplyFrequency {
     moves: BTreeMap<String, BTreeSet<String>>,
     // 下限未満の手しか無い局面も「直接キーで見つかった」と扱い、反転キーへ落ちないための印。
-    // 全局面のキーを持つと大きいので、キーの 64 ビットのハッシュだけを持つ。
+    // 全局面のキーを持つと大きいので、キーの 64 ビットのハッシュだけを持つ。衝突すると反転キーを
+    // 引かないだけで、別の局面の手を返すことはない (応手が欠けて続く手数が短く出る側に倒れる)。
     present: HashSet<u64>,
 }
 
