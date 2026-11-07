@@ -665,6 +665,36 @@ fn update_merges_all_games_and_uses_last_fields() {
 }
 
 #[test]
+fn update_does_not_merge_games_of_a_different_root_or_side() {
+    let dir = TempDir::new().unwrap();
+    let base = Line {
+        id: "changed".into(),
+        root: "startpos".into(),
+        roots: vec![],
+        own: "b".into(),
+        depth: 1,
+        priority: 2,
+        hold: false,
+        game: vec![vec!["7g7f".into(), "3c3d".into()]],
+        opts: Opts::default(),
+        memo: None,
+    };
+    let mut other_side = base.clone();
+    other_side.own = "w".into();
+    other_side.game = vec![vec!["2g2f".into(), "8c8d".into()]];
+    let mut other_root = base.clone();
+    other_root.root = "startpos moves 7g7f".into();
+    other_root.game = vec![vec!["3c3d".into(), "2g2f".into()]];
+    let path = dir.path().join("queue.jsonl");
+    std::fs::write(&path, format_queue(&[base.clone(), other_side.clone()]).unwrap()).unwrap();
+    let updates = read_updates(std::slice::from_ref(&path)).unwrap();
+    assert_eq!(updates["changed"].line.game, other_side.game);
+    std::fs::write(&path, format_queue(&[base, other_root.clone()]).unwrap()).unwrap();
+    let updates = read_updates(std::slice::from_ref(&path)).unwrap();
+    assert_eq!(updates["changed"].line.game, other_root.game);
+}
+
+#[test]
 fn additions_follow_counts_then_usi_order() {
     let mut line = Line {
         id: "order".into(),

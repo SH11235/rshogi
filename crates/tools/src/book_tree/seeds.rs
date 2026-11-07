@@ -366,7 +366,12 @@ fn read_updates(paths: &[PathBuf]) -> Result<BTreeMap<String, Existing>> {
     let mut updates: BTreeMap<String, Existing> = BTreeMap::new();
     for path in paths {
         read_checked_lines(path, |mut line, root, _| {
-            let mut game = updates.remove(&line.id).map(|row| row.line.game).unwrap_or_default();
+            // 根や手番の側を替えた行の前の進行は、別の木の手順なので合わせない。
+            let mut game = updates
+                .remove(&line.id)
+                .filter(|row| row.root.key == root.key && row.line.own == line.own)
+                .map(|row| row.line.game)
+                .unwrap_or_default();
             game.append(&mut line.game);
             let mut known = BTreeSet::new();
             game.retain(|moves| known.insert(moves.clone()));
@@ -638,7 +643,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     if let Some(path) = &args.update_out {
         let rows: Vec<_> = update_counts.keys().map(|id| updates[id].line.clone()).collect();
         for row in &rows {
-            row.check()?;
+            row.check().with_context(|| format!("積み直しの行 id={}", row.id))?;
         }
         write_atomic(path, &format_queue(&rows)?)?;
     }
