@@ -736,7 +736,7 @@ impl<
             target_feature = "avx512bw",
             target_feature = "avx512vnni"
         ))]
-        let raw_score = if L1 == 1536 && LS_L1_OUT == 16 {
+        let raw_score = if matches!(L1, 1536 | 2304 | 3072) && LS_L1_OUT == 16 {
             self.with_combined_accumulators(acc, side_to_move, |us, them| {
                 self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
             })
@@ -3175,8 +3175,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn synthetic_1536x16_evaluate_with_bucket_matches_legacy_both_sides() {
+    fn synthetic_evaluate_with_bucket_matches_legacy_both_sides<const N: usize, const L2: usize>() {
         use super::super::ls_feature_spec::HalfKpSpec;
         use super::*;
         use rand::{Rng, SeedableRng};
@@ -3186,24 +3185,24 @@ mod tests {
         let mut bytes = Vec::new();
         for _ in 0..DEFAULT_NUM_BUCKETS {
             bytes.extend_from_slice(&0u32.to_le_bytes());
-            for (input, output) in [(1536, 16), (32, 32), (32, 1)] {
+            for (input, output) in [(N, 16), (32, L2), (L2, 1)] {
                 for _ in 0..output {
                     bytes.extend_from_slice(&rng.random_range(-1024i32..1024).to_le_bytes());
                 }
                 bytes.extend((0..input * output).map(|_| rng.random_range(-8i8..8) as u8));
             }
         }
-        let network = NetworkLayerStacks::<1536, 16, 30, 32, HalfKpSpec> {
+        let network = NetworkLayerStacks::<N, 16, 30, 32, HalfKpSpec, L2> {
             feature_transformer: FeatureTransformerLayerStacks::for_output_transform_tests(),
             layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
             num_buckets: DEFAULT_NUM_BUCKETS,
             _ft: PhantomData,
         };
-        let mut acc = AccumulatorLayerStacks::<1536>::new();
+        let mut acc = AccumulatorLayerStacks::<N>::new();
         for _ in 0..8 {
             for perspective in 0..2 {
-                for i in 0..1536 {
+                for i in 0..N {
                     acc.accumulation[perspective][i] = rng.random_range(-32..160);
                 }
             }
@@ -3216,12 +3215,12 @@ mod tests {
                 })
                 .unwrap();
                 // 自然順のスカラー変換と従来の密 L1 を参照にし、視点の順序も検証する。
-                let mut transformed = Aligned([0u8; 1536]);
-                for (perspective, base) in [(side, 0), (!side, 768)] {
+                let mut transformed = Aligned([0u8; N]);
+                for (perspective, base) in [(side, 0), (!side, (N / 2))] {
                     let values = acc.get(perspective as usize);
-                    for i in 0..768 {
+                    for i in 0..(N / 2) {
                         transformed.0[base + i] = ((i32::from(values[i]).clamp(0, 127)
-                            * i32::from(values[i + 768]).clamp(0, 127))
+                            * i32::from(values[i + (N / 2)]).clamp(0, 127))
                             >> 7) as u8;
                     }
                 }
@@ -3236,6 +3235,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn synthetic_fused_shapes_evaluate_with_bucket_match_legacy() {
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>();
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>();
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>();
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>();
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

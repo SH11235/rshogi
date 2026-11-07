@@ -1,4 +1,4 @@
-//! 1536×16 の LayerStacks L1 と FT 出力変換を融合する VNNI カーネル。
+//! L1=1536 / 2304 / 3072、出力16 の LayerStacks L1 と FT 出力変換を融合する VNNI カーネル。
 
 #[cfg(all(
     target_arch = "x86_64",
@@ -11,19 +11,19 @@ pub(super) mod avx512 {
     use super::super::layers::AffineTransform;
     use std::arch::x86_64::*;
 
-    /// reorder だけが構築する、64B 境界の [24][4][4][64] 融合用重み。
+    /// reorder だけが構築する、64B 境界の [INPUT / 64][4][4][64] 融合用重み。
     /// 内部バッファの長さ・配置は構築後に変更しない。
-    pub(crate) struct FusedWeights(AlignedBox<i8>);
+    pub(crate) struct FusedWeights<const INPUT: usize>(AlignedBox<i8>);
 
     pub(crate) fn reorder<const INPUT: usize, const OUTPUT: usize>(
         l1: &AffineTransform<INPUT, OUTPUT>,
-    ) -> Option<FusedWeights> {
-        if INPUT != 1536 || OUTPUT != 16 {
+    ) -> Option<FusedWeights<INPUT>> {
+        if !matches!(INPUT, 1536 | 2304 | 3072) || OUTPUT != 16 {
             return None;
         }
-        let mut weights = AlignedBox::new_zeroed(1536 * 16);
+        let mut weights = AlignedBox::new_zeroed(INPUT * OUTPUT);
         // packus の lane L / dword j を、出力 4g+d の重みへ対応付ける。
-        for k in 0..24 {
+        for k in 0..INPUT / 64 {
             for g in 0..4 {
                 for j in 0..4 {
                     for lane in 0..4 {
@@ -44,12 +44,12 @@ pub(super) mod avx512 {
     /// 正常終了と unwind のどちらでも、編集した L1 から融合用重みを再構築する。
     pub(crate) fn edit_l1<const INPUT: usize, const OUTPUT: usize>(
         l1: &mut AffineTransform<INPUT, OUTPUT>,
-        weights: &mut Option<FusedWeights>,
+        weights: &mut Option<FusedWeights<INPUT>>,
         edit: impl FnOnce(&mut AffineTransform<INPUT, OUTPUT>),
     ) {
         struct Rebuild<'a, const INPUT: usize, const OUTPUT: usize> {
             l1: &'a mut AffineTransform<INPUT, OUTPUT>,
-            weights: &'a mut Option<FusedWeights>,
+            weights: &'a mut Option<FusedWeights<INPUT>>,
         }
         impl<const INPUT: usize, const OUTPUT: usize> Drop for Rebuild<'_, INPUT, OUTPUT> {
             fn drop(&mut self) {
@@ -61,12 +61,12 @@ pub(super) mod avx512 {
     }
 
     /// # Safety
-    /// acc は少なくとも offset+832 個の i16 を指し、offset は 0..=704。
+    /// acc は N 個の i16 を指し、offset は64の倍数で offset+64 <= N/2。
     #[inline]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-    unsafe fn pack64(acc: *const i16, offset: usize) -> __m512i {
-        // SAFETY: 呼び出し側が 1536 要素中の offset..offset+64 と
-        // offset+768..offset+832 を保証する。unaligned load を使う。
+    unsafe fn pack64<const N: usize>(acc: *const i16, offset: usize) -> __m512i {
+        // SAFETY: 呼び出し側が offset..offset+64 とその N/2 先が入力内であることを
+        // 保証する。unaligned load を使う。
         // clamp 後の積は最大16129で i16 に収まり、右シフト後は0..=126。
         unsafe {
             let zero = _mm512_setzero_si512();
@@ -80,11 +80,11 @@ pub(super) mod avx512 {
                 max,
             );
             let b0 = _mm512_min_epi16(
-                _mm512_max_epi16(_mm512_loadu_si512(acc.add(offset + 768).cast()), zero),
+                _mm512_max_epi16(_mm512_loadu_si512(acc.add(offset + N / 2).cast()), zero),
                 max,
             );
             let b1 = _mm512_min_epi16(
-                _mm512_max_epi16(_mm512_loadu_si512(acc.add(offset + 800).cast()), zero),
+                _mm512_max_epi16(_mm512_loadu_si512(acc.add(offset + N / 2 + 32).cast()), zero),
                 max,
             );
             let p0 = _mm512_srli_epi16::<7>(_mm512_mullo_epi16(a0, b0));
@@ -93,11 +93,7 @@ pub(super) mod avx512 {
         }
     }
 
-    /// 重みロードを積和のメモリオペランドへ畳み込ませず、register 形式を保つ。
-    /// intrinsic の最適化による load-op 化と spill を避けるため、inline asm の
-    /// `zmm_reg` でオペランドを固定する。融合カーネル全体の ETW search-only
-    /// （5 局面 × 5 秒 × ABBA、main 9de40f85 比）は、既定配置で NPS +3.93%、
-    /// cycles/node −3.4%。配置別の結果と検証条件は docs/performance/ls-l1-kernels.md を参照。
+    // register を固定し、重みロードの load-op 化と spill を避ける。
     #[inline]
     fn dpbusd_register(mut sum: __m512i, input: __m512i, weight: __m512i) -> __m512i {
         // SAFETY: モジュールの cfg が AVX512VNNI を保証する。すべて512bit registerで、
@@ -118,20 +114,20 @@ pub(super) mod avx512 {
     pub(crate) fn fused<const N: usize, const OUT: usize>(
         us: &[i16; N],
         them: &[i16; N],
-        weights: &FusedWeights,
+        weights: &FusedWeights<N>,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
-        assert_eq!(N, 1536);
+        assert!(matches!(N, 1536 | 2304 | 3072));
         assert_eq!(OUT, 16);
         let mut output = [0; OUT];
         // SAFETY: cfg が命令セットを保証する。入力・重み・出力の寸法は確認済み。
-        // FusedWeights は reorder の [24][4][4][64] 配置と64B境界を保証する。
+        // FusedWeights は reorder の [N / 64][4][4][64] 配置と64B境界を保証する。
         // pack64 は各視点の範囲内だけを読み、store は4出力ずつ行う。
         unsafe {
             let mut sums = [[_mm512_setzero_si512(); 4]; 4];
-            for (acc, base) in [(us, 0), (them, 12)] {
-                for block in 0..12 {
-                    let x = pack64(acc.as_ptr(), block * 64);
+            for (acc, base) in [(us, 0), (them, N / 128)] {
+                for block in 0..N / 128 {
+                    let x = pack64::<N>(acc.as_ptr(), block * 64);
                     let broadcasts = [
                         _mm512_shuffle_epi32::<0x00>(x),
                         _mm512_shuffle_epi32::<0x55>(x),

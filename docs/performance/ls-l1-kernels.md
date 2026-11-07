@@ -1,24 +1,9 @@
 # LayerStacks L1 の融合 VNNI カーネル
 
-静的 LayerStacks の L1=1536、L1 出力=16 では、FT 出力変換と L1 積和を
+静的 LayerStacks の L1=1536 / 2304 / 3072、L1 出力=16 では、FT 出力変換と L1 積和を
 融合して計算する。build の `target_feature` に `avx512f` / `avx512bw` /
 `avx512vnni` がすべてある場合に有効になる。それ以外の形状・ISA と動的な
 universal 経路は従来の変換・密 L1 を使う。
-
-## 採用結果
-
-最終版と main `9de40f85`（評価器 PR #1140 merge 後）を比較した
-ETW search-only（5 局面 × 5 秒 × ABBA）の結果は以下のとおり。
-
-| 関数配置 | NPS | cycles/node |
-| --- | ---: | ---: |
-| 既定 | +3.93% | −3.4% |
-| `-align-all-functions=6` | +4.03% | −3.4% |
-| `-align-all-functions=5` | +1.39% | −0.8% |
-
-固定 depth 1〜18 × 5 局面で nodes / score / PV / bestmove が base と一致した。
-参考として、最終版より前の同一バイナリ内での従来経路との比較は NPS +2.26% だった。
-採用の根拠は上表の最終版の結果であり、CPU・コンパイラ・関数配置で改善率は変わる。
 
 ## 変換と積和
 
@@ -31,17 +16,20 @@ ETW search-only（5 局面 × 5 秒 × ABBA）の結果は以下のとおり。
 `dpbusd_register` は、オペランドを register に固定して spill と
 重みロードの load-op 化（積和のメモリオペランドへの畳み込み）を避けるため、
 積和の 1 命令を inline asm の `zmm_reg` オペランドで指定する。
-上表はこの inline asm を含む融合カーネル全体の結果であり、asm 単独の改善率ではない。
 最後に組と lane の和を取り、bias を一度加えて既存の後段へ渡す。
 積和は 2^32 を法とする加算なので、分割と加算順序によらず一致する。
 
 ## 融合用の重みと編集
 
-各 bucket は通常の L1 重みに加え、並べ替え済みコピーを 24 KiB 持つ
-（9 bucket では 216 KiB）。`FusedWeights` は `reorder` だけが構築でき、
-要素数 1536×16、64B アラインメント、重みの配置を不変条件とする。
+各 bucket は通常の L1 重みに加え、並べ替え済みコピーを L1×16 B 持つ
+（1536 / 2304 / 3072 では 24 / 36 / 48 KiB、9 bucket では 216 / 324 / 432 KiB）。
+`FusedWeights` は `reorder` だけが構築でき、
+要素数 L1×16、64B アラインメント、重みの配置を不変条件とする。
 通常ロードと prepacked ロードで読み込んだ層から直接コピーを構築する。
 対象外の形状・ISA にはコピーを確保せず、評価中の確保もない。
+
+各視点は L1/2 要素を出力し、64 要素ずつ 12 / 18 / 24 block に分ける。
+後半の因子は accumulator の L1/2 先から読む。両視点を合わせた block 数は L1/64。
 
 元の重み配置を `old[chunk][output][byte]` とすると、コピーは
 `new[block][group][j][lane][dword][byte]` で、次の写像を使う。
@@ -60,16 +48,26 @@ new[block][group][j][lane][dword][byte] = old[chunk][output][byte]
 ## 検証
 
 ```sh
-cargo build -p rshogi-usi --no-default-features --features edition-layerstacks-halfka_hm_merged-1536x16x32-none
-cargo test -p rshogi-core --no-default-features --features edition-layerstacks-halfka_hm_merged-1536x16x32-none
-cargo test -p rshogi-core --no-default-features --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,prepacked-nnue,diagnostics
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics synthetic_fused_shapes
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics kernel_tests
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x16x64-none,prepacked-nnue,diagnostics packed_fused_shapes
 ```
 
-非 ignore のテストで、合成重みの 1536×16 ネットワークを使い、全 9 bucket の
+非 ignore のテストで、合成重みの L1=1536 / 2304 / 3072、出力16 のネットワークを使い、全 9 bucket の
 `evaluate_with_bucket` が先手番・後手番ともスカラー変換＋従来の密 L1 と一致することを確認する。
 accumulator は直接入力し、このテストで使わない FT / PSQT / Threat 重みは確保しない。
 カーネル単体では乱数重み、i16 全域と境界入力、i32 bias の wrap、L1 の編集・差し替え・
 unwind、prepacked の copy-on-write を参照実装と照合する。
+
+AVX-512 を持たない機械ではカーネルを実行せず、次の静的検査だけを行う。
+明示的な `--target` により build script / proc macro は host 向けに構築する。
+
+```sh
+RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo check -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics
+RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo clippy -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x16x64-none,prepacked-nnue,diagnostics -- -D warnings
+```
+
+カーネルの実行テストには対応 ISA を有効にした build が必要。
 
 命令列はコンパイラと ISA に依存する。最終 production build の逆アセンブルで、
 融合 loop の `vpdpbusd` が register オペランドを使い、loop 内に zmm の
