@@ -240,7 +240,8 @@ fn assemble(
                 &mut positions,
                 &mut pending,
                 &prefix,
-                &format!("{key} {}", row.get("ply")),
+                // 空の ply は検査で許されるが、そのまま繋ぐと末尾の空白で木と別の盤面キーになる。
+                &format!("{key} {}", Some(row.get("ply")).filter(|p| !p.is_empty()).unwrap_or("1")),
                 mv,
                 None,
             )?;

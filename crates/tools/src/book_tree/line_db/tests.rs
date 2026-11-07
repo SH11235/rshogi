@@ -144,6 +144,23 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
 }
 
 #[test]
+fn master_row_with_empty_ply_still_wins_over_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = args(dir.path());
+    let root = after(&a.moves);
+    let line = row(&root, "2g2f", "main", "100")
+        .replace(&format!("\t{}\t", root.split_whitespace().last().unwrap()), "\t\t");
+    std::fs::write(&a.master, format!("{}\n{line}\n", COLUMNS.join("\t"))).unwrap();
+    tree(&a.tree_out[0].join("t"), &root, &[(&root, "2g2f none 999 12 1")]);
+    let mut inputs = vec![];
+    let trees = discover(&a.tree_out, &mut inputs).unwrap();
+    let mut index = MasterIndex::open(&a.master, &Schema::load(None).unwrap()).unwrap();
+    let (selected, _, _) = assemble(&a, &mut index, trees).unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(selected[strip_ply(&root)].moves["2g2f"].mv.value, 100);
+}
+
+#[test]
 fn newer_tree_wins_even_when_read_before_older_tree() {
     let dir = tempfile::tempdir().unwrap();
     let mut positions = Positions::new();
