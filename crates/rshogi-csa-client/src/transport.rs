@@ -178,7 +178,7 @@ impl CsaTransport {
 pub(crate) fn set_unacked_timeout(stream: &std::net::TcpStream, timeout: Duration) {
     use std::os::unix::io::AsRawFd;
     let ms = unacked_timeout_ms(timeout);
-    // SAFETY: fd は有効なソケット。ms は有効なポインタで、長さは c_uint。
+    // SAFETY: fd は有効なソケット。&ms は呼び出しの間生きている c_uint を指し、長さはその大きさ。
     let ret = unsafe {
         libc::setsockopt(
             stream.as_raw_fd(),

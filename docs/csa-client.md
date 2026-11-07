@@ -116,7 +116,8 @@ Linux の `TCP_USER_TIMEOUT` を TCP・WebSocket の両経路の接続に設定�
 断の後に何かを送ってから `unacked_timeout_sec` 後になる。相手の手番や対局待ちでは空行を
 `ping_interval_sec` ごとに送るので、断から最長でおよそ `ping_interval_sec + unacked_timeout_sec` 後。
 自分の手番で engine が読んでいる間は空行を送らないので、指し手を送ってから `unacked_timeout_sec` 後になる。
-`ping_interval_sec = 0` のときは、次に指し手などを送るまで気づかない。短い断は TCP の再送でそのまま回復する。
+`ping_interval_sec = 0` のときは、次に指し手などを送るまで気づかない (`tcp = true` の SO_KEEPALIVE の probe が先に
+失敗すればそこで気づくが、probe は OS 既定で 2 時間の無通信の後に始まる)。短い断は TCP の再送でそのまま回復する。
 Linux 以外では設定しない。
 
 ### `[engine]` — USIエンジン
