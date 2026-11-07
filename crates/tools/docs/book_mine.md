@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -734,7 +734,7 @@ key ply move role source evals nodes cond value_kind lineage tier since note
 | `lineage` | 空、または `<種類>:<名前>` のカンマ区切り。種類は `[a-z][a-z0-9_-]*`。名前は空でなく、カンマ・タブ・改行・空白を含まない |
 | `nodes` | 読みのノード数の目安。cond がノード停止なら要求した上限、時間停止なら実測の丸め。複数回で異なる場合は最大。cond が unknown / mixed なら意味も不明な参考値。書式の検査は行わない |
 
-`master validate`・`export`・`add`・`add-reads`・`tree register`・`borrow value` は
+`master validate`・`export`・`add`・`add-reads`・`hold-early`・`tree register`・`borrow value` は
 `--schema <dir>` を受け取ります。指定したディレクトリには次の全ての TSV が必要です。
 見出しは以下の順 (区切りはタブ)。行順を保ち、各表の最初の列の重複を拒否します。
 
@@ -787,6 +787,66 @@ stdout には既存行の省略数、新しい局面と手の数、tier・role�
 既定は dry run で `OK (dry run): rows A -> B; no files written` と終わります。
 `--apply` の場合だけ一時ファイルへ全行を書き、元データを置き換えて `applied: rows A -> B` と報告します。
 検査に失敗したら書き換えません。元データと追加表が同じファイルなら、dry run でも拒否します。
+
+## `master hold-early`: 序盤の main の替わりを保留に戻す
+
+```bash
+book_mine master hold-early --before before/moves.tsv --master moves.tsv \
+  --since release-tag --out release.main_changes_held.tsv
+book_mine master hold-early --before before/moves.tsv --master moves.tsv \
+  --since release-tag --out release.main_changes_held.tsv --schema schema \
+  --continuation 6 --hold-keys hold.keys --apply
+```
+
+`tree register`・`master audit` の後で、版を作る前からある序盤の局面の main を戻し、
+替わろうとした手と継続手数による分類を一覧にします。`--continuation` を省くと、対象をすべて保留します。
+`master cycles --apply` より前 (`tree register`・`master audit --apply` の直後) に流します。cycles の後に流すと、
+cycles が循環を塞ぐために外した手を main に戻すことがあります。
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `--before <PATH>` | 必須 | 版を作る前の元データ (13 列 TSV) |
+| `--master <PATH>` | 必須 | 登録・監査後の元データ |
+| `--below-ply <N>` | `20` | before の main の ply が N 未満の局面を対象にする |
+| `--continuation <N>` | なし | 旧手・新手の後で main がともに N 手以上続く局面は replace とし、新しい main を残す |
+| `--hold-keys <FILE>` | なし | 分類によらず hold にする局面キー (1 行 1 キー) |
+| `--schema <DIR>` | なし | 他の master コマンドと同じ語彙・読み条件の表 |
+| `--since <TAG>` | 必須 | 書き戻す 2 行の note に付けるタグ |
+| `--out <PATH>` | 必須 | 対象の変更と分類の一覧 TSV (既存なら置換) |
+| `--apply` | 無効 | 検査後、hold の局面だけ master に書き戻す |
+
+両方の表に main があり、その手が異なる局面だけを対象にします。before にない局面、
+before の main の ply が空の局面は対象外です。既定では 19 手目までが対象で、20 手目は含みません。
+
+継続手数は、変更前の `--master` を使い、旧手・新手をそれぞれ指した後の局面から main を
+辿って数えます。最初の旧手・新手自身は含まず、最大 60 手までです。盤・手番・持ち駒のキーを
+そのまま照合し、手数は含めず、先後反転もしません。main がない局面か、すでに通った局面に戻ったところ (循環) で止まります (`master audit --deep-plies` と同じ扱い)。
+`--continuation N` 指定時は両方が N 手以上なら `replace`、片方でも不足なら `hold` です。
+N は非負整数で、0 ならすべて replace、60 より大きければすべて hold になります。
+`--hold-keys` に含む局面はこの判定に優先して hold にします。空行と、前後の空白を除いた先頭が
+`#` の行は無視します。ファイルにあるだけでは対象を増やさず、main が替わっていない局面には何もしません。
+全対象の分類は書き戻し前に確定します。
+
+hold で戻す手が master にあれば、読みの値などを保持して role を main、tier を before の main と
+同じにします。なければ before の行を復元します。替わろうとした手の role は alt にし、
+before の main が curated なら tier を wide にします。両行の note の末尾に
+`<TAG>: 20 手目より前、読みが浅いので保留 (今の main)` を追記します
+(既存 note との区切りは `; `、手数は `--below-ply` に従います)。since 列は変更しません。
+replace の局面の行は変更しません。他の候補手の行も保持します。
+
+一覧の列は `ply side key old_main old_source old_tier old_value_black new_main new_value_black old_depth new_depth class`
+です (区切りはタブ、side は `b` / `w`)。既存の列順を保ち、末尾の 3 列に継続手数と分類を出します。
+old 側は before、new 側は変更前の master から取り、ply・key の順に並べます。
+値は evals の平均を既存の規則で偶数丸めし、後手番では符号を反転した先手から見た値です。
+値がなければ空欄にします。stdout には対象局面数 (先手番・後手番別)、hold・replace の局面数と
+書き戻した局面数を出します。
+
+両入力と変更後の表を `master validate` と同じ規則で検査します。検査で失敗した場合は `--apply` の有無によらず一覧も master も書き込みません。
+`--apply` を省くと一覧だけを書き、master は変更しません。保存には一時ファイルからの原子的な
+置換を使い、master が読み込み時から変わっていれば保存を拒否します。既存行の順序は保持し、
+復元した行は末尾に追加します。改行は LF になります。master を書き換える他のコマンドと同時に
+実行しないでください。一覧は master より先に保存するため、master の保存に失敗しても一覧が残る場合があります。
+既存の master の編集経路と同様、表と索引をメモリに保持します。
 
 ## `master add-reads`: 読みから追加候補を作る
 
