@@ -59,19 +59,19 @@ impl ReplyFrequency {
                 result.moves.entry(key.to_owned()).or_default().insert(mv);
             }
         })?;
-        let mut last = None;
-        for_each_line(open()?, |key, _| {
-            if last.as_deref() == Some(key) {
-                return;
+        // 手の行の無い sfen 行も直接キーとして見つかった扱いにする (`BookDb::find` と同じ)。
+        for line in open()?.lines() {
+            let line = line?;
+            if let Some(sfen) = line.trim_end_matches(['\r', '\n']).strip_prefix("sfen ") {
+                let key = strip_ply(sfen.trim());
+                if !result.moves.contains_key(key)
+                    && rshogi_book::flipped_key(key)
+                        .is_some_and(|flipped| result.moves.contains_key(strip_ply(&flipped)))
+                {
+                    result.shadowed.insert(key.to_owned());
+                }
             }
-            last = Some(key.to_owned());
-            if !result.moves.contains_key(key)
-                && rshogi_book::flipped_key(key)
-                    .is_some_and(|flipped| result.moves.contains_key(strip_ply(&flipped)))
-            {
-                result.shadowed.insert(key.to_owned());
-            }
-        })?;
+        }
         Ok(result)
     }
 
@@ -257,6 +257,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(only_flipped.replies(direct).len(), 1);
+    }
+
+    #[test]
+    fn direct_key_without_move_lines_does_not_fall_back_in_either_order() {
+        let direct = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let flipped = rshogi_book::flipped_key(&format!("{direct} 1")).unwrap();
+        let empty = format!("sfen {direct} 1\n");
+        let other = format!("sfen {flipped}\n5i6h none 0 0 3\n");
+        for text in [format!("{empty}{other}"), format!("{other}{empty}")] {
+            let freq = ReplyFrequency::from_reader(text.as_bytes(), 3).unwrap();
+            let db = crate::book_db::BookDb::from_reader(text.as_bytes()).unwrap();
+            let hit = db.find(&format!("{direct} 1")).unwrap();
+            assert!(!hit.flipped && db.entries[&hit.key].moves.is_empty());
+            assert!(freq.replies(direct).is_empty());
+        }
     }
 
     #[test]
