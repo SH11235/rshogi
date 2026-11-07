@@ -3,7 +3,8 @@
 use super::{export::files, master_index::MasterIndex, schema::Schema};
 use crate::book_backprop::{BackpropOptions, DrawValues, MergeMode, backprop_file_with};
 use crate::book_db::{
-    BOOK_HEADER, BookMove, child_position_after_move, parse_move_line, strip_ply,
+    BOOK_HEADER, BookMove, apply_usi_move, child_position_after_move, parse_move_line,
+    position_from_sfen, strip_ply,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -119,10 +120,13 @@ struct SelectedPosition {
 }
 
 type Positions = BTreeMap<String, SelectedPosition>;
+/// 根より前の局面 (盤面キー) と、その局面の SFEN・指定された手。
+type Prefix = BTreeMap<String, (String, BookMove)>;
 
 fn insert_move(
     positions: &mut Positions,
     pending: &mut VecDeque<String>,
+    prefix: &Prefix,
     sfen: &str,
     mv: BookMove,
     tree: Option<&TreeInput>,
@@ -130,11 +134,18 @@ fn insert_move(
     let Some(usi) = mv.move_usi.as_deref() else {
         return Ok(());
     };
-    let Ok(child) = child_position_after_move(sfen, usi) else {
-        return Ok(());
-    };
-    pending.push_back(strip_ply(&child.to_sfen()).to_owned());
     let key = strip_ply(sfen).to_owned();
+    // 根より前の局面は指定の 1 手だけにするので、木に同じ局面があっても他の手の先は辿らない。
+    if prefix.contains_key(&key) {
+        return Ok(());
+    }
+    // 親局面が読めないのは入力の誤りなので止め、非合法手だけを捨てる。
+    let mut child =
+        position_from_sfen(sfen).with_context(|| format!("局面を読めません: {sfen}"))?;
+    if apply_usi_move(&mut child, usi).is_err() {
+        return Ok(());
+    }
+    pending.push_back(strip_ply(&child.to_sfen()).to_owned());
     pending.push_back(key.clone());
     let position = positions.entry(key).or_default();
     if position.sfen.is_empty() {
@@ -156,6 +167,7 @@ fn read_tree(
     tree: &TreeInput,
     positions: &mut Positions,
     pending: &mut VecDeque<String>,
+    prefix: &Prefix,
 ) -> Result<()> {
     let path = tree.dir.join("tree.db");
     let mut sfen = String::new();
@@ -167,7 +179,7 @@ fn read_tree(
         } else if !sfen.is_empty()
             && let Some(mv) = parse_move_line(&line)
         {
-            insert_move(positions, pending, &sfen, mv, Some(tree))?;
+            insert_move(positions, pending, prefix, &sfen, mv, Some(tree))?;
         }
     }
     Ok(())
@@ -181,7 +193,7 @@ fn assemble(
     let mut positions = Positions::new();
     let mut pending = VecDeque::new();
     let mut sfen = SFEN_HIRATE.to_owned();
-    let mut prefix = BTreeMap::new();
+    let mut prefix = Prefix::new();
     for usi in args.moves.split_whitespace() {
         let child = child_position_after_move(&sfen, usi)?;
         let mv = BookMove {
@@ -227,13 +239,14 @@ fn assemble(
             insert_move(
                 &mut positions,
                 &mut pending,
+                &prefix,
                 &format!("{key} {}", row.get("ply")),
                 mv,
                 None,
             )?;
         }
         for tree in trees.remove(&key).unwrap_or_default() {
-            read_tree(&tree, &mut positions, &mut pending)
+            read_tree(&tree, &mut positions, &mut pending, &prefix)
                 .with_context(|| format!("木を読めません: {}", tree.dir.display()))?;
             used.push(tree.dir);
         }

@@ -160,6 +160,7 @@ fn newer_tree_wins_even_when_read_before_older_tree() {
         insert_move(
             &mut positions,
             &mut pending,
+            &Prefix::new(),
             SFEN_HIRATE,
             parse_move_line(&format!("7g7f none {value} 10 1")).unwrap(),
             Some(tree),
@@ -170,6 +171,7 @@ fn newer_tree_wins_even_when_read_before_older_tree() {
     insert_move(
         &mut positions,
         &mut pending,
+        &Prefix::new(),
         SFEN_HIRATE,
         parse_move_line("7g7f none 30 0 2").unwrap(),
         None,
@@ -178,12 +180,32 @@ fn newer_tree_wins_even_when_read_before_older_tree() {
     insert_move(
         &mut positions,
         &mut pending,
+        &Prefix::new(),
         SFEN_HIRATE,
         parse_move_line("7g7f none 400 10 1").unwrap(),
         Some(&new),
     )
     .unwrap();
     assert_eq!(positions[strip_ply(SFEN_HIRATE)].moves["7g7f"].mv.value, 30);
+}
+
+#[test]
+fn prefix_position_in_tree_is_not_expanded_and_bad_parent_sfen_fails() {
+    let mut positions = Positions::new();
+    let mut pending = VecDeque::new();
+    let mut prefix = Prefix::new();
+    let mv = parse_move_line("2g2f none 0 0 1").unwrap();
+    prefix.insert(strip_ply(SFEN_HIRATE).to_owned(), (SFEN_HIRATE.to_owned(), mv.clone()));
+    insert_move(&mut positions, &mut pending, &prefix, SFEN_HIRATE, mv.clone(), None).unwrap();
+    assert!(positions.is_empty());
+    assert!(pending.is_empty());
+
+    let err =
+        insert_move(&mut positions, &mut pending, &Prefix::new(), "not-a-sfen b - 1", mv, None);
+    assert!(err.is_err());
+    let illegal = parse_move_line("1a1b none 0 0 1").unwrap();
+    insert_move(&mut positions, &mut pending, &Prefix::new(), SFEN_HIRATE, illegal, None).unwrap();
+    assert!(positions.is_empty());
 }
 
 #[test]
