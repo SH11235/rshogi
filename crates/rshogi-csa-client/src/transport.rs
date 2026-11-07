@@ -177,7 +177,7 @@ impl CsaTransport {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn set_unacked_timeout(stream: &std::net::TcpStream, timeout: Duration) {
     use std::os::unix::io::AsRawFd;
-    let ms = libc::c_uint::try_from(timeout.as_millis()).unwrap_or(libc::c_uint::MAX);
+    let ms = unacked_timeout_ms(timeout);
     // SAFETY: fd は有効なソケット。ms は有効なポインタで、長さは c_uint。
     let ret = unsafe {
         libc::setsockopt(
@@ -193,11 +193,28 @@ pub(crate) fn set_unacked_timeout(stream: &std::net::TcpStream, timeout: Duratio
     }
 }
 
+/// カーネルは値を signed `int` として読み、負値を `EINVAL` で拒否するので `c_int::MAX` で頭打ちにする。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn unacked_timeout_ms(timeout: Duration) -> libc::c_uint {
+    let max = libc::c_int::MAX as u128;
+    timeout.as_millis().min(max) as libc::c_uint
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_unacked_timeout(_stream: &std::net::TcpStream, _timeout: Duration) {}
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn unacked_timeout_ms_caps_at_c_int_max() {
+        assert_eq!(unacked_timeout_ms(Duration::from_secs(60)), 60_000);
+        assert_eq!(
+            unacked_timeout_ms(Duration::from_secs(u64::MAX)),
+            libc::c_int::MAX as libc::c_uint
+        );
+    }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]

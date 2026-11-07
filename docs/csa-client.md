@@ -112,8 +112,11 @@ unacked_timeout_sec = 60  # 送ったデータの確認応答が来ないまま 
 カーネルの送信バッファに入って成功し続ける。`unacked_timeout_sec` が 0 だと、カーネルが再送を
 あきらめるまで (Linux 既定の `tcp_retries2=15` で約 15 分) 切断に気づかない。`unacked_timeout_sec` は
 Linux の `TCP_USER_TIMEOUT` を TCP・WebSocket の両経路の接続に設定し、確認応答の来ない状態が
-この秒数を超えたら読み書きをエラーにする。空行を `ping_interval_sec` ごとに送るので、切断に気づくのは
-断から最長で `ping_interval_sec + unacked_timeout_sec` 後。短い断は TCP の再送でそのまま回復する。
+この秒数を超えたら読み書きをエラーにする。この設定は自分から送信を始めないので、切断に気づくのは
+断の後に何かを送ってから `unacked_timeout_sec` 後になる。相手の手番や対局待ちでは空行を
+`ping_interval_sec` ごとに送るので、断から最長でおよそ `ping_interval_sec + unacked_timeout_sec` 後。
+自分の手番で engine が読んでいる間は空行を送らないので、指し手を送ってから `unacked_timeout_sec` 後になる。
+`ping_interval_sec = 0` のときは、次に指し手などを送るまで気づかない。短い断は TCP の再送でそのまま回復する。
 Linux 以外では設定しない。
 
 ### `[engine]` — USIエンジン
