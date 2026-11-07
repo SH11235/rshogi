@@ -99,6 +99,23 @@ Workers 版への接続は
 [Cloudflare Workers (WebSocket) で対局する](#cloudflare-workers-websocket-で対局する)
 を参照。
 
+#### `[server.keepalive]` — 生存確認と切断の検知
+
+```toml
+[server.keepalive]
+tcp = true                # SO_KEEPALIVE
+ping_interval_sec = 30    # CSA 空行 / LOBBY_PONG の送信間隔。0 で周期送信なし、正値は 30 以上
+unacked_timeout_sec = 60  # 送ったデータの確認応答が来ないまま 60 秒で切断とみなす。0 で OS 既定
+```
+
+経路の途中でパケットが捨てられる切れ方 (相手から RST が返らない) では、keep-alive の空行の送信は
+カーネルの送信バッファに入って成功し続ける。`unacked_timeout_sec` が 0 だと、カーネルが再送を
+あきらめるまで (Linux 既定の `tcp_retries2=15` で約 15 分) 切断に気づかない。`unacked_timeout_sec` は
+Linux の `TCP_USER_TIMEOUT` を TCP・WebSocket の両経路の接続に設定し、確認応答の来ない状態が
+この秒数を超えたら読み書きをエラーにする。空行を `ping_interval_sec` ごとに送るので、切断に気づくのは
+断から最長で `ping_interval_sec + unacked_timeout_sec` 後。短い断は TCP の再送でそのまま回復する。
+Linux 以外では設定しない。
+
 ### `[engine]` — USIエンジン
 
 ```toml

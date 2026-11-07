@@ -457,6 +457,7 @@ fn run_one_game(
     let target = TransportTarget::from_host_port(&host, config.server.port)?;
     let opts = ConnectOpts {
         tcp_keepalive: config.server.keepalive.tcp,
+        unacked_timeout: config.server.keepalive.unacked_timeout(),
         ws_origin: config.server.ws_origin.clone(),
     };
     let mut conn = CsaConnection::connect_with_target(&target, &opts)?;
@@ -626,6 +627,7 @@ fn acquire_lobby_match(
     let target = TransportTarget::from_host_port(&config.server.host, config.server.port)?;
     let opts = ConnectOpts {
         tcp_keepalive: config.server.keepalive.tcp,
+        unacked_timeout: config.server.keepalive.unacked_timeout(),
         ws_origin: config.server.ws_origin.clone(),
     };
     let mut conn = CsaConnection::connect_with_target(&target, &opts)?;

@@ -97,6 +97,7 @@ fn ws_transport_send_then_recv_line() {
         &target,
         &ConnectOpts {
             tcp_keepalive: false,
+            unacked_timeout: None,
             ws_origin: Some("http://localhost".to_owned()),
         },
     )
@@ -128,6 +129,7 @@ fn ws_transport_reader_thread_delivers_multiple_lines() {
         &target,
         &ConnectOpts {
             tcp_keepalive: false,
+            unacked_timeout: None,
             ws_origin: Some("http://localhost".to_owned()),
         },
     )
@@ -171,6 +173,7 @@ fn ws_transport_splits_multiline_frame_into_lines() {
         &target,
         &ConnectOpts {
             tcp_keepalive: false,
+            unacked_timeout: None,
             ws_origin: Some("http://localhost".to_owned()),
         },
     )
@@ -215,6 +218,7 @@ fn ws_transport_reader_thread_splits_multiline_frame() {
         &target,
         &ConnectOpts {
             tcp_keepalive: false,
+            unacked_timeout: None,
             ws_origin: Some("http://localhost".to_owned()),
         },
     )
@@ -252,6 +256,7 @@ fn ws_transport_empty_text_frame_treated_as_keepalive() {
         &target,
         &ConnectOpts {
             tcp_keepalive: false,
+            unacked_timeout: None,
             ws_origin: Some("http://localhost".to_owned()),
         },
     )

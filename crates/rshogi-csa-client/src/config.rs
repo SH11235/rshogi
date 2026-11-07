@@ -61,6 +61,18 @@ pub struct KeepaliveConfig {
     pub tcp: bool,
     /// CSA 空行 / ロビーの `LOBBY_PONG` 間隔（秒）。0 で周期送信なし。
     pub ping_interval_sec: u64,
+    /// 送ったデータへの確認応答が来ないまま、この秒数を超えたら接続を切れたとみなす
+    /// (Linux の `TCP_USER_TIMEOUT`)。0 で OS 既定 (再送をあきらめるまで約 15 分)。
+    /// 他の OS では設定しない。
+    pub unacked_timeout_sec: u64,
+}
+
+impl KeepaliveConfig {
+    /// `unacked_timeout_sec` を接続オプションの値にする。0 は OS 既定のまま。
+    pub fn unacked_timeout(&self) -> Option<std::time::Duration> {
+        (self.unacked_timeout_sec > 0)
+            .then(|| std::time::Duration::from_secs(self.unacked_timeout_sec))
+    }
 }
 
 impl Default for KeepaliveConfig {
@@ -68,6 +80,7 @@ impl Default for KeepaliveConfig {
         Self {
             tcp: true,
             ping_interval_sec: 30,
+            unacked_timeout_sec: 60,
         }
     }
 }
@@ -248,6 +261,18 @@ impl CsaClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unacked_timeout_defaults_to_60s_and_zero_keeps_os_default() {
+        let config: CsaClientConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.server.keepalive.unacked_timeout(),
+            Some(std::time::Duration::from_secs(60))
+        );
+        let config: CsaClientConfig =
+            toml::from_str("[server.keepalive]\nunacked_timeout_sec = 0\n").unwrap();
+        assert_eq!(config.server.keepalive.unacked_timeout(), None);
+    }
 
     #[test]
     fn jsonl_dir_defaults_under_record_dir() {
