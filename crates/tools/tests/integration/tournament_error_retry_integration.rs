@@ -128,3 +128,89 @@ fn new_game_error_retires_worker_and_retry_uses_new_processes() {
         "printf 'bestmove resign\\n'",
     );
 }
+
+#[test]
+fn cycle_tournament_records_positions_and_analyzer_uses_result_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine.sh");
+    write_engine(
+        &engine,
+        "#!/bin/sh\nwhile IFS= read -r line; do\ncase \"$line\" in\nusi) printf 'usiok\\n' ;;\nisready) printf 'readyok\\n' ;;\ngo*) printf 'bestmove resign\\n' ;;\nquit) break ;;\nesac\ndone\n",
+    );
+    let positions = dir.path().join("positions");
+    fs::write(&positions, "first\tposition startpos\nsecond\tposition startpos moves 7g7f\nthird\tposition startpos moves 2g2f\n").unwrap();
+    let out = dir.path().join("out");
+    let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
+        .arg("--engine")
+        .arg(&engine)
+        .args(["--engine-label", "a", "--engine"])
+        .arg(&engine)
+        .args([
+            "--engine-label",
+            "b",
+            "--games",
+            "9",
+            "--concurrency",
+            "2",
+            "--nodes",
+            "1",
+            "--startpos-order",
+            "cycle",
+            "--startpos-file",
+        ])
+        .arg(&positions)
+        .arg("--out-dir")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let meta: Value = serde_json::from_slice(&fs::read(out.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["settings"]["startpos_order"], "cycle");
+    assert_eq!(meta["start_positions"].as_array().unwrap().len(), 3);
+    let log = out.join("pair-0-1__a-vs-b.jsonl");
+    let lines: Vec<Value> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect();
+    for name in ["first", "second", "third"] {
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line["type"] == "result" && line["startpos_name"] == name)
+                .count(),
+            6
+        );
+    }
+    // 読み直し後の index は起動時の meta と対応しない。
+    let lines: Vec<String> = lines
+        .into_iter()
+        .map(|mut line| {
+            if line["type"] == "result" {
+                line["startpos_idx"] = 0.into();
+            }
+            line.to_string()
+        })
+        .collect();
+    fs::write(&log, lines.join("\n")).unwrap();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+        command.arg("--by-startpos").arg(&out);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        if json {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let rows = value["by_startpos"]["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 3);
+            assert!(rows.iter().all(|row| row["games"] == 6 && row["startpos_name"].is_string()));
+        } else {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for name in ["first", "second", "third"] {
+                assert!(text.contains(&format!("[{name}]")));
+            }
+        }
+    }
+}
