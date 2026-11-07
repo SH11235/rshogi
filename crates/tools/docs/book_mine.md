@@ -319,7 +319,7 @@ book_mine tree enqueue --state tree-state --from seeds.jsonl
 | `--update-out <JSONL>` | なし | `--exclude-queue` が必要。同じ根・同じ own の既存行に不足する game を足した完全な行を出す |
 
 `--exclude-queue` は受付の順に渡してください。`--update-out` は、同じ id の行の `game` を全部合わせ、
-最初に現れた順で同じ手順の重複を除きます。途中で `root` の局面か `own` を替えた行があれば、それより前の行の `game` は別の木の手順なので合わせません。それ以外の欄 (`priority`・`hold`・`depth`・`opts`・`memo` など) は、
+最初に現れた順で同じ手順の重複を除きます。最初の行と `root` (局面と手数) か `own` が違う行は serve が拒否する行なので、合わせる対象にも最後の欄の元にもせず、警告を出して飛ばします。それ以外の欄 (`priority`・`hold`・`depth`・`opts`・`memo` など) は、
 指定ファイル順・行順で最後の行の値を使います。depth 1 以上で、
 `root` の局面 (SFEN 手数は不問) と `own` の文字列が種と一致する行が対象です。
 `own=bw` と種の `b` / `w` は一致しません。追加の根や `game` の途中の局面だけで一致する行は、従来どおり除外するだけです。

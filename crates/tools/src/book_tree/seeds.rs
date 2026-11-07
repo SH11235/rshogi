@@ -365,13 +365,27 @@ fn add_lines(line: &mut Line, data: &RootData, max_lines: usize) -> usize {
 fn read_updates(paths: &[PathBuf]) -> Result<BTreeMap<String, Existing>> {
     let mut updates: BTreeMap<String, Existing> = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |mut line, root, _| {
-            // 根や手番の側を替えた行の前の進行は、別の木の手順なので合わせない。
-            let mut game = updates
-                .remove(&line.id)
-                .filter(|row| row.root.key == root.key && row.line.own == line.own)
-                .map(|row| row.line.game)
-                .unwrap_or_default();
+        read_checked_lines(path, |mut line, root, n| {
+            let mut game = match updates.remove(&line.id) {
+                Some(row) => {
+                    // serve は id ごとに最初の行の根 (局面と手数) と own を固定し、替えた行を拒否する。
+                    // 拒否される行は合わせる対象にも最後の欄の元にもしない。
+                    if row.root.key != root.key
+                        || row.root.ply != root.ply
+                        || row.line.own != line.own
+                    {
+                        eprintln!(
+                            "警告: {}:{n} の id={} は最初の行と根か own が違うので使いません (serve が拒否する行)",
+                            path.display(),
+                            line.id
+                        );
+                        updates.insert(line.id.clone(), row);
+                        return Ok(());
+                    }
+                    row.line.game
+                }
+                None => Vec::new(),
+            };
             game.append(&mut line.game);
             let mut known = BTreeSet::new();
             game.retain(|moves| known.insert(moves.clone()));
