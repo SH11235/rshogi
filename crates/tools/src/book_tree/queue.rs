@@ -7,7 +7,7 @@ use super::targets::{
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -133,7 +133,11 @@ pub(super) fn enqueue(args: EnqueueArgs) -> Result<()> {
         Vec::new()
     } else if let Some(from) = &args.from {
         let mut lines = Vec::new();
-        super::targets::read_checked_lines(from, |line, _| {
+        let mut first_lines = BTreeMap::new();
+        super::targets::read_checked_lines(from, |line, _, number| {
+            if let Some(first) = first_lines.insert(line.id.clone(), number) {
+                bail!("入力内で id={} が重複しています: {first} 行目と {number} 行目", line.id);
+            }
             lines.push(line);
             Ok(())
         })?;
@@ -354,5 +358,67 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
             }
         }
         std::thread::sleep(POLL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: EnqueueArgs,
+    }
+
+    fn enqueue_from(state: &Path, from: &Path) -> Result<()> {
+        let cli = Cli::try_parse_from([
+            std::ffi::OsStr::new("enqueue"),
+            std::ffi::OsStr::new("--state"),
+            state.as_os_str(),
+            std::ffi::OsStr::new("--from"),
+            from.as_os_str(),
+        ])?;
+        enqueue(cli.args)
+    }
+
+    #[test]
+    fn duplicate_input_ids_report_physical_lines_without_appending() {
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state");
+        let from = dir.path().join("input.jsonl");
+        let row = json!({"id":"same", "root":"startpos", "own":"b", "depth":1});
+        std::fs::write(&from, format!("{row}\n")).unwrap();
+        enqueue_from(&state, &from).unwrap();
+        let before = std::fs::read(state.join(QUEUE)).unwrap();
+        for game in [json!([]), json!([["7g7f"]])] {
+            let mut duplicate = row.clone();
+            duplicate["game"] = game;
+            std::fs::write(&from, format!("\n{row}\n\n{duplicate}\n")).unwrap();
+            let error = format!("{:#}", enqueue_from(&state, &from).unwrap_err());
+            assert!(error.contains("id=same"), "{error}");
+            assert!(error.contains("2 行目と 4 行目"), "{error}");
+            assert_eq!(std::fs::read(state.join(QUEUE)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn existing_queue_id_can_be_replaced() {
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state");
+        let from = dir.path().join("input.jsonl");
+        for hold in [false, true] {
+            let row = json!({"id":"same", "root":"startpos", "own":"b", "depth":1, "hold":hold});
+            std::fs::write(&from, format!("{row}\n")).unwrap();
+            enqueue_from(&state, &from).unwrap();
+        }
+        let text = std::fs::read_to_string(state.join(QUEUE)).unwrap();
+        let rows: Vec<Line> = text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].hold);
+        assert!(rows[1].hold);
     }
 }

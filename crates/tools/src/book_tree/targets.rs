@@ -131,10 +131,10 @@ pub(super) fn parse_root(root: &str) -> Result<Root> {
     Ok(Root { key, ply })
 }
 
-/// JSON Lines を逐次読み込み、enqueue と同じ検査を通して渡す。
+/// JSON Lines を逐次読み込み、enqueue と同じ検査を通して、1 始まりの行番号とともに渡す。
 pub(super) fn read_checked_lines(
     path: &Path,
-    mut visit: impl FnMut(Line, Root) -> Result<()>,
+    mut visit: impl FnMut(Line, Root, usize) -> Result<()>,
 ) -> Result<()> {
     let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
     for (n, text) in BufReader::new(file).lines().enumerate() {
@@ -145,7 +145,7 @@ pub(super) fn read_checked_lines(
         }
         let line: Line = serde_json::from_str(&text).with_context(location)?;
         let root = line.check().with_context(location)?;
-        visit(line, root).with_context(location)?;
+        visit(line, root, n + 1).with_context(location)?;
     }
     Ok(())
 }

@@ -599,9 +599,23 @@ fn merged_own(rows: &[Row]) -> BTreeMap<(&'static str, &str), (f64, &Row)> {
 pub(super) type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
 
 pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
-    let mut latest = BTreeMap::new();
+    let mut latest: BTreeMap<String, (Line, super::targets::Root)> = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |line, root| {
+        read_checked_lines(path, |mut line, root, _| {
+            if let Some((first, first_root)) = latest.get(&line.id) {
+                // serve は id ごとに最初の行の根 (局面と手数) と own を固定し、替えた行を拒否する。
+                if first_root.key != root.key || first_root.ply != root.ply || first.own != line.own
+                {
+                    return Ok(());
+                }
+                let mut game = first.game.clone();
+                for moves in line.game.drain(..) {
+                    if !game.contains(&moves) {
+                        game.push(moves);
+                    }
+                }
+                line.game = game;
+            }
             latest.insert(line.id.clone(), (line, root));
             Ok(())
         })?;

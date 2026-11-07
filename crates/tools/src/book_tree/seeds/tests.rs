@@ -613,6 +613,129 @@ fn update_lines_preserve_fields_order_and_compare_depth_prefixes() {
 }
 
 #[test]
+fn update_merges_all_games_and_uses_last_fields() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    rows.extend(game(2, &initial(), &["6g6f", "3c3d"], 0, "draw"));
+    rows.extend(game(3, &initial(), &["2g2f", "8c8d"], 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut first = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    first.id = "existing".into();
+    first.depth = 1;
+    first.game = vec![vec!["6g6f".into(), "3c3d".into()]];
+    first.hold = false;
+    let mut last = first.clone();
+    last.game = vec![vec!["2g2f".into(), "8c8d".into()]];
+    last.hold = true;
+    last.priority = 321;
+    last.opts.opp_n = Some(4);
+    last.memo = Some("保持するメモ".into());
+    let first_path = dir.path().join("first.jsonl");
+    let last_path = dir.path().join("last.jsonl");
+    std::fs::write(&first_path, format_queue(&[first.clone(), first.clone()]).unwrap()).unwrap();
+    let mut repeated = last.clone();
+    repeated.game.extend(first.game.clone());
+    std::fs::write(&last_path, format_queue(&[repeated]).unwrap()).unwrap();
+    let mut opts = args(dir.path());
+    opts.exclude_queue = vec![first_path.clone(), last_path.clone()];
+    let output = dir.path().join("updates.jsonl");
+    opts.update_out = Some(output.clone());
+    run(opts).unwrap();
+    let text = std::fs::read_to_string(output).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    let mut expected = last;
+    expected.game = vec![
+        first.game[0].clone(),
+        expected.game[0].clone(),
+        vec!["7g7f".into(), "3c3d".into()],
+    ];
+    expected.memo = Some("保持するメモ; seeds: game に 1 本追加".into());
+    assert_eq!(updated, expected);
+    let reversed = read_updates(&[last_path, first_path]).unwrap();
+    assert!(!reversed["existing"].line.hold);
+    assert_eq!(
+        reversed["existing"].line.game,
+        vec![expected.game[1].clone(), first.game[0].clone()]
+    );
+}
+
+#[test]
+fn update_skips_rows_that_change_the_root_or_side() {
+    let dir = TempDir::new().unwrap();
+    let base = Line {
+        id: "changed".into(),
+        root: "startpos".into(),
+        roots: vec![],
+        own: "b".into(),
+        depth: 1,
+        priority: 2,
+        hold: false,
+        game: vec![vec!["7g7f".into(), "3c3d".into()]],
+        opts: Opts::default(),
+        memo: None,
+    };
+    let mut other_side = base.clone();
+    other_side.own = "w".into();
+    other_side.game = vec![vec!["2g2f".into(), "8c8d".into()]];
+    other_side.hold = true;
+    let mut other_root = base.clone();
+    other_root.root = "startpos moves 7g7f".into();
+    other_root.game = vec![vec!["3c3d".into(), "2g2f".into()]];
+    let mut again = base.clone();
+    again.game = vec![vec!["2g2f".into(), "3c3d".into()]];
+    again.priority = 5;
+    let path = dir.path().join("queue.jsonl");
+    std::fs::write(
+        &path,
+        format_queue(&[base.clone(), other_side, other_root, again.clone()]).unwrap(),
+    )
+    .unwrap();
+    let updates = read_updates(std::slice::from_ref(&path)).unwrap();
+    let row = &updates["changed"].line;
+    assert_eq!(row.game, vec![base.game[0].clone(), again.game[0].clone()]);
+    assert_eq!(row.priority, 5);
+    assert!(!row.hold);
+}
+
+#[test]
+fn update_ignores_a_last_row_that_serve_rejects() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(0, &initial(), PATH, 0, "draw");
+    rows.extend(game(1, &initial(), PATH, 0, "draw"));
+    write_games(dir.path(), &rows);
+    run(args(dir.path())).unwrap();
+    let mut first = lines(dir.path())
+        .into_iter()
+        .find(|l| l.own == "b" && parse_root(&l.root).unwrap().ply == 1)
+        .unwrap();
+    first.id = "existing".into();
+    first.depth = 1;
+    first.game = vec![vec!["6g6f".into(), "3c3d".into()]];
+    let mut rejected = first.clone();
+    rejected.own = "w".into();
+    let first_path = dir.path().join("first.jsonl");
+    let rejected_path = dir.path().join("rejected.jsonl");
+    std::fs::write(&first_path, format_queue(std::slice::from_ref(&first)).unwrap()).unwrap();
+    std::fs::write(&rejected_path, format_queue(&[rejected]).unwrap()).unwrap();
+    let mut opts = args(dir.path());
+    opts.exclude_queue = vec![first_path, rejected_path];
+    let output = dir.path().join("updates.jsonl");
+    opts.update_out = Some(output.clone());
+    run(opts).unwrap();
+    let text = std::fs::read_to_string(output).unwrap();
+    let updated: Line = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(updated.id, "existing");
+    assert_eq!(updated.own, "b");
+    assert_eq!(updated.game[0], first.game[0]);
+    assert_eq!(updated.game.len(), 2);
+}
+
+#[test]
 fn additions_follow_counts_then_usi_order() {
     let mut line = Line {
         id: "order".into(),

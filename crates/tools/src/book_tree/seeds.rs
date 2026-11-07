@@ -363,9 +363,33 @@ fn add_lines(line: &mut Line, data: &RootData, max_lines: usize) -> usize {
 }
 
 fn read_updates(paths: &[PathBuf]) -> Result<BTreeMap<String, Existing>> {
-    let mut updates = BTreeMap::new();
+    let mut updates: BTreeMap<String, Existing> = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |line, root| {
+        read_checked_lines(path, |mut line, root, n| {
+            let mut game = match updates.remove(&line.id) {
+                Some(row) => {
+                    // serve は id ごとに最初の行の根 (局面と手数) と own を固定し、替えた行を拒否する。
+                    // 拒否される行は合わせる対象にも最後の欄の元にもしない。
+                    if row.root.key != root.key
+                        || row.root.ply != root.ply
+                        || row.line.own != line.own
+                    {
+                        eprintln!(
+                            "警告: {}:{n} の id={} は最初の行と根か own が違うので使いません (serve が拒否する行)",
+                            path.display(),
+                            line.id
+                        );
+                        updates.insert(line.id.clone(), row);
+                        return Ok(());
+                    }
+                    row.line.game
+                }
+                None => Vec::new(),
+            };
+            game.append(&mut line.game);
+            let mut known = BTreeSet::new();
+            game.retain(|moves| known.insert(moves.clone()));
+            line.game = game;
             updates.insert(
                 line.id.clone(),
                 Existing {
@@ -633,7 +657,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
     if let Some(path) = &args.update_out {
         let rows: Vec<_> = update_counts.keys().map(|id| updates[id].line.clone()).collect();
         for row in &rows {
-            row.check()?;
+            row.check().with_context(|| format!("積み直しの行 id={}", row.id))?;
         }
         write_atomic(path, &format_queue(&rows)?)?;
     }
