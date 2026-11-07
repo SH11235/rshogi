@@ -22,7 +22,7 @@
 | `NarrowBook` | `false` | count 情報がある場合、出現率 10% 未満の手を除外する。 |
 | `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。同値は count 大、さらに同値なら USI 昇順。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
 | `ConsiderBookMoveCount` | `false` | `true` なら count 比例抽選する。全 count が 0 の場合は等確率。 |
-| `IgnoreBookPly` | `false` | SFEN の手数を無視して局面を引く。 |
+| `IgnoreBookPly` | `true` | SFEN の手数を無視して局面を引く。`false` にすると手数も一致したときだけ当たる (対局の開始前に決まった手が入る大会や、途中局面からの対局では手数がずれて当たらなくなる)。 |
 | `FlippedBook` | `true` | miss 時に先後反転局面で再検索する。 |
 | `BookOnTheFly` | `false` | `true` なら定跡を丸読みせず、probe のたびにファイルから引く。大きい定跡向け。[下記](#大きい定跡を丸読みせずに使う-bookonthefly)参照。 |
 

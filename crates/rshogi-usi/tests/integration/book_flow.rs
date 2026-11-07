@@ -424,7 +424,7 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
             "option name NarrowBook type check default false",
             "option name BookSelectValue type check default false",
             "option name ConsiderBookMoveCount type check default false",
-            "option name IgnoreBookPly type check default false",
+            "option name IgnoreBookPly type check default true",
             "option name FlippedBook type check default true",
             "option name BookOnTheFly type check default false",
         ],
