@@ -175,6 +175,8 @@ fn book_hits_by_default_when_game_ply_differs_from_db_ply() {
     let stdout = run_engine(&input);
     let _ = std::fs::remove_file(&path);
 
+    // 定跡から指すと探索しないので、探索の info 行が出ないことで当たったことを確かめる。
+    assert!(!stdout.contains("info depth"), "searched instead of using the book:\n{stdout}");
     assert_eq!(
         first_bestmove(&stdout),
         Some("bestmove 7g7f ponder 3c3d"),
