@@ -833,7 +833,8 @@ stdout には読みの取込・除外数、浅い読みの除外数、対象局�
 ```sh
 book_mine master export --master moves.tsv --out out/book --tier wide
 book_mine master export --master moves.tsv --out out/book --schema schema \
-  --reads reads.jsonl more-reads --min-nodes 900000000 --force
+  --reads reads.jsonl more-reads --min-nodes 900000000 \
+  --journal state/journal.jsonl more-journals --force
 ```
 
 出力先の親ディレクトリは、書き出すときに必要なら作成します。元データ全体に `master validate` と同じ検査を行い、
@@ -849,6 +850,7 @@ bench は record と同じく `.db` に value=-30000/count=0 で残し、どの�
 | `--tier wide\|curated` | `wide` | wide は全行、curated は curated の行だけ |
 | `--schema <dir>` | なし | 3 表による source・cond・lineage の語彙検査 |
 | `--reads <path>...` | なし | JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。複数指定可 |
+| `--journal <path>...` | なし | 深さを照合する tree 台帳の JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。tree 台帳でないファイルは飛ばす。複数指定可 |
 | `--min-nodes <n>` | `900000000` | 取り込む reads のノード数の下限 (非負整数) |
 | `--draw-pin <cp>` | `3` | draw の指定が空の読みで、先頭の評価値の絶対値がこの値以下なら除く (非負整数) |
 | `--bad-eval <cp>` | `-150` | 到達局面の値がこの値以下なら報告 (有限値) |
@@ -858,9 +860,13 @@ bench は record と同じく `.db` に value=-30000/count=0 で残し、どの�
 
 schema の表と検査は [元データの schema](#元データの-schema) を参照してください。
 `"sources"` には `sources.tsv` の source → description を行順で書きます。省略時は空のオブジェクトです。
+`"conditions"` は `conditions.tsv` の name を鍵とし、各行の name 以外の列を文字列で写します。
+`fingerprint`、`eval`、`stop`、`threads`、`hash_mb`、`multipv`、`machine`、`note` のほか、
+`engine_sha256`、`nodes_counting`、`draw_black`、`draw_white` も含みます。空欄は空文字列です。
+`--schema` 省略時は `sources` と同じく空のオブジェクトです。手の `cond` から条件の説明を引けます。
 
 出力は次の 4 ファイルです。いずれかが既存なら `--force` が必要です。ディレクトリへの出力や、
-元データ・読みのファイル・base・schema の各表と同じファイルへの出力は `--force` でも拒否します。
+元データ・読みのファイル・台帳・base・schema の各表と同じファイルへの出力は `--force` でも拒否します。
 全ファイルを出力先と同じディレクトリの一時ファイルに書き終え、既存の出力をそれぞれ
 同じディレクトリの一時名へ rename で退避してから、新しいファイルを順に確定します。
 途中で失敗したら、確定済みの新しい出力を削除し、退避した出力を元の名前に戻します。
@@ -877,19 +883,45 @@ schema の表と検査は [元データの schema](#元データの-schema) を�
 
 各プリセットの冒頭には名前と DB のファイル名・SHA-256 が入ります。
 注釈の最上位の鍵は `format` (`rshogi-book-annotations`)、`version` (2)、
-`book` (`file` と `sha256`)、`sources`、`positions` の順です。`master check` は version 1 と 2 の両方を受け付け、それ以外と version の欠落を拒否します。
+`book` (`file` と `sha256`)、`sources`、`conditions`、`positions` の順です。
+条件の説明と深さは欄の追加であり既存の意味を変えないため、version は 2 のままです。`master check` は version 1 と 2 の両方を受け付け、それ以外と version の欠落を拒否します。
 `positions` の鍵は手数を除いた SFEN で、各局面には次の値があります。
 
 - `ply`: 元データの同じ局面にある空でない ply の最小値。全て空なら null。
 - `moves`: USI の手を鍵とするオブジェクト。各手は `role`、`source`、`nodes`、`cond`、`value_kind`、`note`、
   `since`、`tier` の文字列、カンマで分けた `lineage` の配列、数値の配列 `evals`、
   相手の返信の配列 `replies`、整数 `depth_after` を持ちます。
+  `--journal` を指定し、`cond` から指紋を特定できた手には、探索深さの整数配列 `depths` も追加します。
 - `read`: 採用した読みがある場合だけ追加する集計。
   `n` は読みの回数、`nodes` は最大ノード数を有効数字 2 桁の指数表記にした文字列
   (例 `1.2e9`)、`top` は各読みの先頭の評価値の平均、`main` は元データの main が
   読みに含まれた回の評価値の平均 (無ければ null)、`main_n` はその回数です。
   平均は有理数で計算した後に浮動小数へ変換し、小数点以下 1 桁に偶数丸めします。
   `12.0` のように整数値でも浮動小数として書きます。
+
+`depths` は同じ条件・局面の読みの MultiPV にその手があった回ごとの `depth` を小さい順に並べます。
+別の読みに同じ深さがあれば、その値は複数回残します。対象の読みが無い手は `[]` です。
+`--journal` 省略時や `cond=unknown` など指紋を特定できない手では欄を省略します。
+欄なしは未照合、空配列は照合したが該当する読みなしを表します。
+schema 指定時は条件名から指紋を解決し、指紋が空欄の条件には `depths` を書きません。
+schema 未指定時だけ台帳の指紋の先頭 8 桁から解決し、先頭が衝突する場合はエラーにします。
+
+台帳は `tree serve` の形式を使います (`kind` は形式の版、`provenance=engine` が engine の読み)。
+最初の確定行が JSON でない、`kind` が無い、または `kind` が `book-tree-` で始まらないファイルと、
+確定行の無いファイル (空ファイルを含む) は丸ごと飛ばし、
+`journal: skipped (not a tree journal): <path>` を stderr に出します。
+tree 台帳と判定したファイルでは、不正な確定行や異なる形式の版はエラーにします。
+engine の行は出力対象外の局面も読みの妥当性と指紋・条件の一致を検査し、不正ならエラーにします。
+末尾の改行の無い未完了行だけを無視します。入力の変更やロック取得はしません。
+他の台帳から取り込んだ行 (`provenance` が `engine` でない行) は数えません。元の台帳も `--journal` に渡してください。
+各ファイルを開いた時点のサイズまで行ごとに読み、出力対象の局面の読みだけを保持します。
+重複判定は台帳と同じく MultiPV 全体の move/cp/depth と bestmove を使い、
+同じ指紋・手数を除いて正規化した局面の重複はファイルをまたいでも 1 回に数えます。
+nodes・計測時間・手数だけが違う読みも重複です。異なる深さの読みは別々に残します。
+engine の行数、engine 以外の行数、採用数、重複数、未完了の末尾を無視したファイル数、
+飛ばしたファイル数 (`skipped-files`)、エラー数 (不正な確定行では最初のエラーで終了) を stderr に出します。
+`--reads` のノード数・draw の絞り込みは `--journal` には適用しません。
+`.db` の値・深さ・採択数には探索深さを使いません。
 
 `replies` は、その手を指した後の相手の全合法手のうち、選択した tier の定跡局面に着く手を
 USI 順に並べたものです。`depth_after` は main・alt の辺だけから作る 2 手単位のグラフで、

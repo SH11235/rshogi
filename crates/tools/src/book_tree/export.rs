@@ -1,6 +1,7 @@
 //! 元データから定跡・プリセット・注釈を書き出す。
 pub(super) mod files;
 mod graph;
+mod journal_depths;
 mod json;
 pub(super) mod numbers;
 pub(super) mod reads;
@@ -38,6 +39,9 @@ pub(super) struct ExportArgs {
     /// 読みの JSONL ファイルまたは再帰的に探すディレクトリ
     #[arg(long,num_args=1..)]
     reads: Vec<PathBuf>,
+    /// 深さを照合する tree 台帳の JSONL ファイルまたはディレクトリ
+    #[arg(long, num_args=1..)]
+    journal: Vec<PathBuf>,
     /// 取り込む読みのノード数の下限
     #[arg(long, default_value = "900000000", value_parser = nonnegative_integer)]
     min_nodes: num_bigint::BigInt,
@@ -77,8 +81,14 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     } else {
         reads::expand(&args.reads)?
     };
+    let journals = if args.journal.is_empty() {
+        vec![]
+    } else {
+        reads::expand(&args.journal)?
+    };
     let mut inputs = vec![args.master.clone()];
     inputs.extend(logs.iter().cloned());
+    inputs.extend(journals.iter().cloned());
     if let Some(base) = &args.base {
         inputs.push(base.clone());
     }
@@ -99,6 +109,11 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     });
     let retained_keys = rows.iter().map(|row| row.get("key")).collect();
     let (read_groups, _) = reads::load(&logs, args.min_nodes, args.draw_pin, Some(&retained_keys))?;
+    let journal_depths = if args.journal.is_empty() {
+        journal_depths::Depths::default()
+    } else {
+        journal_depths::load(&journals, &retained_keys)?
+    };
     let edges = graph::continuations(&rows)?;
     let active = rows
         .iter()
@@ -175,6 +190,11 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
                     row.get("lineage").split(',').map(Json::string).collect()
                 }),
             ));
+            if !args.journal.is_empty()
+                && let Some(values) = journal_depths.depths(&schema, row)?
+            {
+                data.push(("depths", Json::Array(values.into_iter().map(Json::integer).collect())));
+            }
             let values = evals(row)?;
             checked_moves.insert(
                 row.get("move").to_owned(),
@@ -273,6 +293,12 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         (
             "sources",
             Json::object(schema.sources.iter().map(|(k, v)| (k, Json::string(v)))),
+        ),
+        (
+            "conditions",
+            Json::object(schema.condition_details.iter().map(|(name, fields)| {
+                (name, Json::object(fields.iter().map(|(k, v)| (k, Json::string(v)))))
+            })),
         ),
         ("positions", Json::object(positions)),
     ])

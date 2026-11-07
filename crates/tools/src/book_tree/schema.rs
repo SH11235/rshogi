@@ -21,6 +21,7 @@ pub(super) fn valid_fingerprint(s: &str) -> bool {
 pub(super) struct Schema {
     pub(super) sources: Vec<(String, String)>,
     conditions: Vec<(String, String)>,
+    pub(super) condition_details: Vec<(String, BTreeMap<String, String>)>,
     lineage_kinds: Vec<String>,
     replaceable: BTreeSet<String>,
     explicit: bool,
@@ -89,6 +90,14 @@ impl Schema {
                 );
                 ensure!(fingerprints.insert(fp.clone()), "conditions.tsv: duplicate fingerprint");
             }
+            let mut details: BTreeMap<_, _> = CONDITIONS
+                .split('\t')
+                .skip(1)
+                .zip(row.iter().skip(1))
+                .map(|(column, value)| (column.to_owned(), value.clone()))
+                .collect();
+            details.insert("fingerprint".to_owned(), fp.clone());
+            schema.condition_details.push((row[0].clone(), details));
             schema.conditions.push((row[0].clone(), fp));
         }
         seen.clear();
@@ -98,6 +107,17 @@ impl Schema {
             schema.lineage_kinds.push(row[0].clone());
         }
         Ok(schema)
+    }
+
+    pub(super) fn is_explicit(&self) -> bool {
+        self.explicit
+    }
+
+    pub(super) fn fingerprint_for(&self, name: &str) -> Option<&str> {
+        self.conditions
+            .iter()
+            .find(|(n, fp)| n == name && !fp.is_empty())
+            .map(|(_, fp)| fp.as_str())
     }
 
     pub(super) fn replaceable(&self, source: &str) -> bool {
