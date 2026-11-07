@@ -728,19 +728,29 @@ pub(super) fn visit_records(
     path: &Path,
     mut visit: impl FnMut(Record) -> Result<()>,
 ) -> Result<Option<bool>> {
-    let file = File::open(path)?;
-    let limit = file.metadata()?.len();
+    let file = File::open(path).with_context(|| format!("台帳: {}", path.display()))?;
+    let limit = file.metadata().with_context(|| format!("台帳: {}", path.display()))?.len();
     let mut reader = BufReader::new(file.take(limit));
     let mut first = Vec::new();
     let n = reader.read_until(b'\n', &mut first)?;
     if !first.ends_with(b"\n") {
         return Ok(None);
     }
-    let Ok(record) = parse_record(&first) else {
+    let is_tree = serde_json::from_slice::<serde_json::Value>(&first)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .map(|kind| kind.starts_with("book-tree-"))
+        })
+        .unwrap_or(false);
+    if !is_tree {
         return Ok(None);
-    };
+    }
     let mut ignored_tail = false;
-    visit(record)
+    parse_record(&first)
+        .and_then(&mut visit)
         .and_then(|()| {
             for_each_complete_line(
                 &mut reader,

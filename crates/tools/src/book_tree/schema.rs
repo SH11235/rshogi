@@ -90,12 +90,13 @@ impl Schema {
                 );
                 ensure!(fingerprints.insert(fp.clone()), "conditions.tsv: duplicate fingerprint");
             }
-            let details = CONDITIONS
+            let mut details: BTreeMap<_, _> = CONDITIONS
                 .split('\t')
                 .skip(1)
                 .zip(row.iter().skip(1))
                 .map(|(column, value)| (column.to_owned(), value.clone()))
                 .collect();
+            details.insert("fingerprint".to_owned(), fp.clone());
             schema.condition_details.push((row[0].clone(), details));
             schema.conditions.push((row[0].clone(), fp));
         }
@@ -106,6 +107,10 @@ impl Schema {
             schema.lineage_kinds.push(row[0].clone());
         }
         Ok(schema)
+    }
+
+    pub(super) fn is_explicit(&self) -> bool {
+        self.explicit
     }
 
     pub(super) fn fingerprint_for(&self, name: &str) -> Option<&str> {

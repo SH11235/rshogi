@@ -18,7 +18,10 @@ impl Depths {
         let cond = row.get("cond");
         let fingerprint = if let Some(fp) = schema.fingerprint_for(cond) {
             fp
-        } else if cond.len() == 8 && cond.bytes().all(|b| b.is_ascii_hexdigit()) {
+        } else if !schema.is_explicit()
+            && cond.len() == 8
+            && cond.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             let prefix = cond.to_ascii_lowercase();
             let mut matches = self.fingerprints.iter().filter(|fp| fp.starts_with(&prefix));
             let Some(fp) = matches.next() else {
@@ -59,18 +62,22 @@ pub(super) fn load(paths: &[PathBuf], keys: &BTreeSet<&str>) -> Result<Depths> {
                 }
                 engine += 1;
                 ensure!(valid_fingerprint(&rec.settings.fingerprint), "台帳の指紋が不正です");
+                ensure!(
+                    rec.settings.computed_fingerprint()? == rec.settings.fingerprint,
+                    "台帳の指紋と条件が一致しません"
+                );
                 let fp = rec.settings.fingerprint.to_ascii_lowercase();
                 result.fingerprints.insert(fp.clone());
                 let key = strip_ply(
                     &position_from_sfen(&format!("{} 1", strip_ply(&rec.reading.key)))?.to_sfen(),
                 )
                 .to_owned();
-                if !keys.contains(key.as_str()) {
-                    return Ok(());
-                }
                 let mut reading = rec.reading;
                 reading.key = key.clone();
                 reading.validate(&rec.settings)?;
+                if !keys.contains(key.as_str()) {
+                    return Ok(());
+                }
                 let readings = result.readings.entry((fp, key)).or_default();
                 if readings.iter().any(|old| old.same_values(&reading)) {
                     duplicates += 1;
@@ -89,12 +96,37 @@ pub(super) fn load(paths: &[PathBuf], keys: &BTreeSet<&str>) -> Result<Depths> {
         }
         Ok(())
     })();
-    if !paths.is_empty() {
-        eprintln!(
-            "journal: engine={engine}, non-engine={other}, used={used}, duplicates={duplicates}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
-            usize::from(scan.is_err())
-        );
-    }
+    eprintln!(
+        "journal: engine={engine}, non-engine={other}, used={used}, duplicates={duplicates}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
+        usize::from(scan.is_err())
+    );
     scan?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_collision_requires_schema_and_empty_schema_fingerprint_has_no_depths() {
+        let depths = Depths {
+            fingerprints: BTreeSet::from(["a".repeat(64), format!("aaaaaaaa{}", "b".repeat(56))]),
+            ..Depths::default()
+        };
+        let row = crate::book_tree::master_table::test_row(&[("cond", "aaaaaaaa".into())]);
+        let error = depths.depths(&Schema::default(), &row).unwrap_err();
+        assert!(error.to_string().contains("衝突"));
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::book_tree::schema::test_schema(dir.path());
+        std::fs::write(dir.path().join("sources.tsv"), "source\tdescription\treplaceable\n")
+            .unwrap();
+        let path = dir.path().join("conditions.tsv");
+        let mut table = std::fs::read_to_string(&path).unwrap();
+        table.push_str(&format!("aaaaaaaa{}\n", "\t".repeat(12)));
+        std::fs::write(path, table).unwrap();
+        let schema = Schema::load(Some(dir.path())).unwrap();
+        assert_eq!(depths.depths(&schema, &row).unwrap(), None);
+    }
 }

@@ -109,7 +109,11 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     });
     let retained_keys = rows.iter().map(|row| row.get("key")).collect();
     let (read_groups, _) = reads::load(&logs, args.min_nodes, args.draw_pin, Some(&retained_keys))?;
-    let journal_depths = journal_depths::load(&journals, &retained_keys)?;
+    let journal_depths = if args.journal.is_empty() {
+        journal_depths::Depths::default()
+    } else {
+        journal_depths::load(&journals, &retained_keys)?
+    };
     let edges = graph::continuations(&rows)?;
     let active = rows
         .iter()
