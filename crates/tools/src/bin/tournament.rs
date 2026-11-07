@@ -47,6 +47,7 @@
 ///
 /// 変更は `<out-dir>/control_history.jsonl` に追記され、`pair_index` 整合は維持されるため
 /// `analyze_selfplay` の集計と矛盾しない。
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -75,6 +76,10 @@ use tools::selfplay::{
     ensure_start_positions_within_max_moves, load_start_positions,
 };
 use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, SprtStopLog, judge};
+
+#[path = "tournament/startpos_cycle.rs"]
+mod startpos_cycle;
+use startpos_cycle::{CyclePosition, CycleState};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -190,7 +195,7 @@ struct Cli {
     /// Start position file (USI position lines, one per line)
     #[arg(long)]
     startpos_file: Option<PathBuf>,
-    /// 開始局面の割り当て順。sequential は seed を使わない。
+    /// 開始局面の割り当て順。cycle はファイルを読み直して均一巡回する。
     #[arg(long, value_enum, default_value_t = StartposOrder::Random)]
     startpos_order: StartposOrder,
 
@@ -274,6 +279,7 @@ struct MatchTicket {
     white_idx: usize,
     /// 開始局面インデックス
     startpos_idx: usize,
+    cycle_position: Option<Arc<CyclePosition>>,
     /// 同じ startpos の先後入替ペアの通し番号（0, 1, 2, ... = ペアの index）
     pair_index: u32,
     /// ペア内のスロット: 0 = 1 局目, 1 = 2 局目（先後入替）
@@ -334,6 +340,10 @@ struct ResultLogEntry<'a> {
     attempt: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     startpos_idx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startpos: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startpos_name: Option<&'a str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     error: bool,
 }
@@ -398,6 +408,7 @@ impl NpsScalingMeta {
 enum StartposOrder {
     Random,
     Sequential,
+    Cycle,
 }
 
 #[derive(Serialize)]
@@ -1012,7 +1023,10 @@ fn worker_main(
             return;
         }
 
-        let start_pos = &start_positions[ticket.startpos_idx];
+        let start_pos = ticket
+            .cycle_position
+            .as_ref()
+            .map_or_else(|| &start_positions[ticket.startpos_idx], |position| &position.parsed);
         // 時計はエンジン index に依存せず、各局の先後に割り当てる。
         let tc = time_control;
         let config = GameConfig {
@@ -1282,8 +1296,28 @@ fn main() -> Result<()> {
     validate_nps_scaling(&cli, &engine_nodes)?;
 
     // 開始局面のロード
-    let (start_defs, start_commands) =
-        load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
+    let cycle = if cli.startpos_order == StartposOrder::Cycle {
+        let path = cli
+            .startpos_file
+            .as_ref()
+            .context("--startpos-order cycle requires --startpos-file")?;
+        Some(CycleState::load(path.clone(), cli.max_moves)?)
+    } else {
+        None
+    };
+    let (start_defs, start_commands) = if let Some(cycle) = &cycle {
+        let commands: Vec<_> = cycle.positions.iter().map(|p| p.command.clone()).collect();
+        let defs = commands
+            .iter()
+            .map(|command| {
+                load_start_positions(None, Some(command), None, None)
+                    .map(|(mut defs, _)| defs.remove(0))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        (defs, commands)
+    } else {
+        load_start_positions(cli.startpos_file.as_deref(), None, None, None)?
+    };
     ensure_start_positions_within_max_moves(&start_defs, cli.max_moves)?;
 
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
@@ -1529,6 +1563,8 @@ fn main() -> Result<()> {
         seed,
         cli.startpos_order,
     );
+
+    source.cycle = cycle.map(RefCell::new);
 
     let mode_label = if base_idx.is_some() {
         "base-vs-N"
@@ -2055,6 +2091,7 @@ fn append_control_history(path: &Path, entry: &ControlHistoryEntry) -> Result<()
 /// 再試行チケットは新しい `id` を得る一方、元の `pair_index` / `pair_slot` を引き継ぐ。
 /// 各ペアの通常発行数は常に偶数境界で次ペアへ移るため、2 局ペアが境界をまたがない。
 struct TicketSource {
+    cycle: Option<RefCell<CycleState>>,
     startpos_order: StartposOrder,
     pair_indices: Vec<(usize, usize)>,
     start_defs_len: usize,
@@ -2087,6 +2124,7 @@ impl TicketSource {
     ) -> Self {
         let pair_count = pair_indices.len();
         TicketSource {
+            cycle: None,
             startpos_order,
             pair_indices,
             start_defs_len,
@@ -2137,6 +2175,11 @@ impl TicketSource {
         if pending.as_ref().is_some_and(|ticket| !wanted(ticket)) {
             *pending = None;
         }
+        if self.cycle.is_some()
+            && pending.as_ref().is_some_and(|t| t.attempt == 0 && t.pair_slot == 0)
+        {
+            *pending = None;
+        }
         if pending.is_none() {
             *pending = self.peek_ticket().filter(wanted);
         }
@@ -2176,11 +2219,23 @@ impl TicketSource {
         let normal_emitted: u32 = self.emitted.iter().copied().sum();
         let pair_index = normal_emitted / 2;
         let local_pair_index = game_idx / 2;
+        let cycle_selection = self.cycle.as_ref().map(|cycle| {
+            let mut cycle = cycle.borrow_mut();
+            if game_idx.is_multiple_of(2) {
+                cycle.refresh();
+                cycle.select(pair_pos)
+            } else {
+                cycle.open_pairs[&pair_pos].clone()
+            }
+        });
         Some(MatchTicket {
             id,
+            cycle_position: cycle_selection.as_ref().map(|(_, p)| p.clone()),
             black_idx,
             white_idx,
-            startpos_idx: if self.startpos_order == StartposOrder::Sequential {
+            startpos_idx: if let Some((idx, _)) = cycle_selection {
+                idx
+            } else if self.startpos_order == StartposOrder::Sequential {
                 local_pair_index as usize % self.start_defs_len
             } else {
                 deterministic_startpos_index(
@@ -2208,6 +2263,16 @@ impl TicketSource {
         }
         let pair = (ticket.black_idx.min(ticket.white_idx), ticket.black_idx.max(ticket.white_idx));
         if let Some(pos) = self.pair_indices.iter().position(|&p| p == pair) {
+            if let Some(cycle) = &self.cycle {
+                let mut cycle = cycle.borrow_mut();
+                if ticket.pair_slot == 0 {
+                    let position = ticket.cycle_position.as_ref().expect("cycle position").clone();
+                    *cycle.counts[pos].entry(position.name.clone()).or_default() += 1;
+                    cycle.open_pairs.insert(pos, (ticket.startpos_idx, position));
+                } else {
+                    cycle.open_pairs.remove(&pos);
+                }
+            }
             self.emitted[pos] += 1;
         }
     }
@@ -2483,6 +2548,8 @@ fn process_result(
             pair_slot: Some(result.ticket.pair_slot),
             attempt: result.ticket.attempt,
             startpos_idx: Some(result.ticket.startpos_idx as u32),
+            startpos: result.ticket.cycle_position.as_ref().map(|p| p.command.as_str()),
+            startpos_name: result.ticket.cycle_position.as_ref().map(|p| p.name.as_str()),
             error: result.error,
         };
         pw.write_json(&result_entry)?;
@@ -3250,6 +3317,7 @@ mod tests {
                 id: 0,
                 black_idx: 0,
                 white_idx: 1,
+                cycle_position: None,
                 startpos_idx: 0,
                 pair_index: 0,
                 pair_slot: 0,
@@ -3883,6 +3951,7 @@ mod tests {
                 id: 0,
                 black_idx,
                 white_idx,
+                cycle_position: None,
                 startpos_idx: pair_index as usize,
                 pair_index,
                 pair_slot,
