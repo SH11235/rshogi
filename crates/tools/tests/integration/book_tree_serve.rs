@@ -2410,3 +2410,48 @@ fn speculate_priority_reads_urgent_children_before_lower_priority_trees() {
         "優先する木の子は、優先度の低い木の読みを待たずに配る: {bulk_before}"
     );
 }
+
+#[test]
+fn live_import_satisfies_queued_requests_and_finishes_tree_without_workers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let config = fast_fixture(&state);
+    enqueue(
+        &state,
+        json!({"id":"seed","root":format!("sfen {ROOT} 1"),"own":"b","depth":0,"opts":{"rounds":0}}),
+    );
+    let mut server = start(&state, &config);
+    wait_for(|| status(&out(&state, "seed", "b")) == "DONE\n");
+    std::fs::write(state.join("workers"), "0").unwrap();
+    wait_for(|| progress(&state)["workers"].as_array().is_some_and(Vec::is_empty));
+    add_tree(&state, "imported");
+    wait_for(|| progress(&state)["queued"].as_u64().is_some_and(|n| n > 0));
+    assert_ne!(status(&out(&state, "imported", "b")), "DONE\n");
+    let before = searches(&state);
+    let template = journal_rows(&state).remove(0);
+    let data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let mut text = String::new();
+    for (key, rows) in data["positions"].as_object().unwrap() {
+        if key == ROOT {
+            continue;
+        }
+        let mut record = template.clone();
+        record["provenance"] = "fixture-import".into();
+        record["reading"]["key"] = key.clone().into();
+        record["reading"]["ply"] = 2.into();
+        record["reading"]["bestmove"] = rows[0]["move"].clone();
+        record["reading"]["multipv"] = rows.clone();
+        text.push_str(&format!("{record}\n"));
+    }
+    let temporary = state.join("import/batch.tmp");
+    std::fs::write(&temporary, text).unwrap();
+    std::fs::rename(temporary, state.join("import/batch.jsonl")).unwrap();
+    wait_for(|| status(&out(&state, "imported", "b")) == "DONE\n");
+    wait_for(|| progress(&state)["queued"] == 0);
+    assert!(state.join("import/done/batch.jsonl").exists());
+    assert_eq!(searches(&state), before);
+    assert_eq!(journal_rows(&state).len(), 4);
+    assert!(alerts(&state).is_empty());
+    stop(&state, &mut server);
+}

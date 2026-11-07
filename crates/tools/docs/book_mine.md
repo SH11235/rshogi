@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -279,9 +279,110 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 | `memo` | 自由 (道具は読まない) |
 
 - 行は差分でなく完全な指定で、同じ `id` では検査を通った最後の行が有効です。`root` と `own` は `id` ごとに固定で、変えた行は拒否します (別の `id` で足す)。拒否した行は `targets.status.json` の `rejected` (バイト範囲・`id`・理由) と ALERT に残り、有効な定義は前のままです。
+- `--from` の入力内で同じ `id` が重複すると、id と重複した両方の行番号を示して、追記前にエラーにします。既に受付にある id と同じ行は、定義・hold・priority などの差し替えとして受け付けます。
 - enqueue は行の形と局面・手順の合法性を serve と同じ関数で検査し、通らなければ何も書かずに非 0 で終わります。`<state>/targets.lock` を取ってから、末尾が行の境界であることを確かめ、まとめて 1 回で追記して fsync し、受領を標準出力に出します。末尾に書きかけの行があれば何も変えずに非 0 で終わるので、`--repair` で切り詰めてください (切り詰めた中身を標準エラーに出します)。書き込みが途中で失敗したときは受領を出しません。どこまで入ったかは、キューの改行で終わった行と `targets.status.json` の `processed_bytes`・`rejected` で確かめます。
 - キューは手で書いてもかまいませんが、検査と lock がありません。serve は `targets.lock` を共有で取ってから最後の改行までを読み (enqueue の追記と fsync が終わった行だけを読む)、書きかけの行は次の周回に回します。処理済みの範囲の内容が変わったら、戻るまで受付を止めて ALERT と `targets.status.json` の `queue_error` に書きます (読みは続けます)。キューが通常のファイルでない場合も同じです (起動時にリンクなら起動を拒否します)。戻せないとき (処理済みの行が失われたときなど) は、新しい state dir で起動して `--journal` で同じ台帳を指定し、続けたい対象を足し直します。
 - 段数・`opts`・`game` を変えた行は、既定で解決した定義が今の世代と違うので新しい世代を作り、台帳にある局面は読み直しません。priority・hold・memo だけが違う行は世代を変えません。`opts` を省いた項目は、その行を処理したときの serve の既定で解決して保存します。起動オプションを変えた後に priority だけを変えた行を足すと、解決後の値が変わって新しい世代になります。世代を変えたくないときは解決済みの値を `opts` に書いてください。
+
+### `tree seeds`: 自己対局から次に読む根を作る
+
+```sh
+book_mine tree seeds --games matches/games.jsonl --games rematch/games.jsonl \
+  --out seeds.jsonl --table seeds.tsv --tag holes \
+  --depth 6 --opp-n 2 --stop 300 --rounds 3 --draw-black -70 --draw-white 70
+book_mine tree enqueue --state tree-state --from seeds.jsonl
+```
+
+`tournament` の JSON Lines を読み、enqueue に渡す行を生成します。エンジンや稼働中のキューには触れません。
+同じ起点の先手が全勝なら出力せず、それ以外の起点では全局を `own=b` の種にし、後手勝ち・引分の局を
+`own=w` の種にもします。起点は最初に `eval` が付いた move の `sfen_before` です。`eval` がなければ
+その局は使いません。`--sweep-loser` を付けると、先手全勝の起点からも全敗した `own=w` の種だけを作ります。
+その場合も根・offsets・局数の下限・手順の選択・除外・積み直しは通常の `own=w` と同じ規則です。
+先手全勝でない起点の採否は変わりません (ただし sweep の根と同じ局面の `own=w` の根は 1 行に合わさり、その行の class は sweep、priority は `--priority-early` になります)。オフセット先の根も、その根を通る局がすべて先手勝ちなら `own=b` を出力しません。
+起点と根の同一性は SFEN の手数を除いた局面で判断し、`startpos_idx` は使いません。
+
+| 指定 | 既定 | 意味 |
+| --- | --- | --- |
+| `--games <JSONL>` | 必須、繰り返し可 | tournament の棋譜。正準パス (canonicalize) が同じ入力の重複は除く |
+| `--out <JSONL>` / `--table <TSV>` | 必須 | キューの行と判断用一覧 |
+| `--tag <NAME>` | 必須 | id の先頭。[A-Za-z0-9_-] の 1〜40 文字 |
+| `--depth` | 6 | 木の段数 (0〜20)。`game` は根から最大 depth+1 手 |
+| `--opp-n` / `--stop` / `--rounds` | 省略 | opts に書く相手の手数・打ち切り値・読み直し回数。範囲と省略時の扱いは `master walk` と同じ |
+| `--draw-black` / `--draw-white` | 省略 | opts の先後別の循環値 (-30000〜30000) |
+| `--offsets` | `0,6,12` | 起点から根までの手数。0 は常に含む。重複は除く |
+| `--min-games-offset` | 2 | 0 より先の根に必要な局数 (正数)。同じ側の種で、同じ起点からその根までの全手順が一致する局だけ数える |
+| `--max-lines` | 3 | 根の `game` の最大本数 (正数)。その手順を通った局数の降順、同数なら USI 手順の文字列順 |
+| `--collapse-plies` | 30 | 起点からの早い崩れを見る手数 |
+| `--collapse-cp` | 150 | 早い崩れとする不利な評価値の絶対値 (正数) |
+| `--priority-early` / `--priority-late` | 2 / 100 | early・sweep の固定優先度と late の優先度の始まり。小さい値から処理 |
+| `--sweep-loser` | off | 先手全勝の起点から全敗した後手側 (`own=w`) の根を作る。優先度は `--priority-early`、表の class は `sweep` |
+| `--opp-freq` | なし | `master walk` と同じ、手数を除いた SFEN 順のテキスト頻度定跡。手の count の合計を根の局数とする |
+| `--opp-book` | なし | `master walk` と同じ `.db` / `.ybb` の大きい定跡。根に手があるかを調べる |
+| `--exclude-queue` | なし、繰り返し可 | `master walk` と同じ除外。id ごとに最初の行の根と `own` に固定して違う行は飛ばし、有効な行の `game` を合わせる (段数などそれ以外の欄は最後の有効な行)。段数 0 は除外に使わない。根・追加の根と側、および game の depth+1 手以内の自分の手番の局面と側が一致する行を除く |
+| `--update-out <JSONL>` | なし | `--exclude-queue` が必要。同じ根・同じ own の既存行に不足する game を足した完全な行を出す |
+| `--update-sources <TSV>` | なし | `--update-out` が必要。更新行ごとの `id`・`source`・`added` を見出し付き TSV に出す |
+
+`--exclude-queue` は受付の順に渡してください。`--update-out` は、同じ id の行の `game` を全部合わせ、
+最初に現れた順で同じ手順の重複を除きます。最初の行と `root` (局面と手数) か `own` が違う行は serve が拒否する行なので、合わせる対象にも最後の欄の元にもせず、警告を出して飛ばします。既存の木との重複を見る除外の判定も同じ規則で、有効な行の `game` を全部合わせて使います。それ以外の欄 (`priority`・`hold`・`depth`・`opts`・`memo` など) は、
+指定ファイル順・行順で最後の行の値を使います。depth 1 以上で、
+`root` の局面 (SFEN 手数は不問) と `own` の文字列が種と一致する行が対象です。
+`own=bw` と種の `b` / `w` は一致しません。追加の根や `game` の途中の局面だけで一致する行は、従来どおり除外するだけです。
+既存行の `id`・`root`・`roots`・`own`・`depth`・`priority`・`hold`・`opts` を保持し、
+統合した `game` の手順と順序を保持します。種の手順は既存 depth+1 手まで集計し、局数降順、同数なら USI 手順の文字列順で
+先頭 `--max-lines` 本を選び、統合した `game` の最初の depth+1 手と一致しないものだけを末尾に足します。
+「追加 N 本」は統合後に新しく足した本数です。追加本数を memo の末尾にも付け、追加がなければその行を出しません。更新行は id 順です。
+標準出力に更新 id ごとの元ファイルのパスと追加本数を出します。
+`--update-sources` を指定すると同じ内容を `id<TAB>source<TAB>added` の TSV に id 順で保存します。
+`source` は指定順で最後の有効な既存行を読んだ `--exclude-queue` のパス、`added` は新しく足した進行の本数です。
+追加のない id は含めず、更新行がなければ見出しだけを出します。
+元ファイルがある台の state に、その id の更新行だけを `tree enqueue --from` で積み直してください。
+複数台の更新行を一つの state にまとめて投入しないでください。
+
+```sh
+book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds.tsv --tag holes \
+  --exclude-queue machine-a/targets.jsonl --exclude-queue machine-b/targets.jsonl \
+  --update-out updates.jsonl --update-sources update-sources.tsv
+```
+
+結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
+両スロットが揃い、どちらにも `error=true` がない組だけを使い、重複スロットは最初の結果を保持します。
+`outcome=in_progress` の局は種から除外し、その件数を標準出力に警告として出します。同じペアの完了局は使います。
+片スロットだけの組や失敗した attempt のもう一方の局も使いません。pair の情報がない旧形式では result の
+出現順の `seq/2`・`seq%2` にフォールバックします。並列ログでは明示 pair のある現行形式を使ってください。
+複数の成功 attempt があれば analyzer と同じくそれぞれを使います。ファイルをまたぐペアの結合はしません。
+
+オフセットの局数検査を通した後、根の局面と `own` ごとに合流をまとめます。根の SFEN 手数は最小値です。
+同じ局が複数の経路で同じ根に来ても局数は 1 と数えます。id は walk と同じ
+`<tag>_<根のSFEN手数>_<局面のSHA-256の先頭16桁>_<b|w>` です。
+
+局ごとに、起点から指定手数以内に終局したか、その範囲の `eval.last_exact_primary.score` が
+最終的に負けた側から見て `-collapse-cp` 以下なら early と判定します。引分の局は、どちらかの側から見て
+その閾値以下になれば early です。同じ局から作る種には own によらず同じ判定を使い、
+根を通る種の局のどれかが early なら、その根と own の行を early にします。
+先手全勝の起点から採用した種があれば、合流後も class は `sweep` とし、early と同じ優先度・並びで扱います。
+`--sweep-loser` 指定時は標準出力の先後別の要約にも sweep の行数を追加します。
+評価値は指した側からの値を先後に合わせて使い、両エンジンの読みを対象にします。起点の読みを距離 0 とし、
+距離 collapse-plies の読みも含めます。終局は起点の手を 1 手目として数えます (result の `plies`、省略時は最後の move の `ply`)。詰みは通常の cp より強い
+勝ち負けとして扱い、exact primary のない eval は崩れの判定には使いません。
+
+残りは late で、重みは **頻度定跡の根の局数 + 大きい定跡に根の手があれば 1** です。
+外部定跡を指定したときは、出力する late 全体を重み降順 (同数は own、局面キー順) に並べ、
+0 始まりの順位を priority-late に足します。どちらも指定しないときは late の優先度は一定です。
+優先度がキューの上限 1000000 を超える指定はエラーになります。
+
+TSV の列は `own`、`root_ply` (SFEN 手数)、`priority`、`class` (early/late/sweep)、`games` (根を通る種の局数)、
+`key` (手数なし SFEN)、`game_ids`、`weight` です。`game_ids` は `ファイル番号:game_id` の文字列順で
+先頭の最大 8 件をカンマで並べ、`;total=総局数` を付けます (例: `0:1,0:10;total=2`)。
+全 ID の一覧ではなく決定的な見本です。総局数は `games` 列と同じです。
+ファイル番号は正準パスにして重複を除き、その文字列順に並べた入力の 0 始まりの番号です。
+除外した根は TSV にも出しません。標準出力には側ごとの除外数・early/late の出力行数と合計を出します。
+
+入力は行単位で走査し、結果の選別、全勝起点の判定と接頭手順の局数検査、根の集計のため計 3 回読みます。
+結果の選別後は有効なスロットの ID と結果行のバイト位置だけを残し、結果本体は終局行で読み直します。
+同じ ID の除外結果が先行していても、最初の手順と採用した結果を組み合わせます。
+保持するのはペア受領の状態と有効 ID・結果行の位置、終局していない局の手順、起点・接頭手順・根・手順の種類ごとの集計です。
+根ごとには局数と最大 8 件の ID、手順ごとには局数だけを保持します。根や手順が同じ局を追加しても、
+その集計が保持する ID の数は増えません。出力は入力が同じならバイト一致します。
 
 ### 世代と出力先
 
@@ -320,6 +421,25 @@ book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 journal、state dir とその管理ファイル (キュー・lock・チェックポイント・状態のファイルなど) がシンボリックリンクなら、リンク先の有無によらず拒否します。親 dir の途中のリンクと未作成部分の `..` は解決して比較します。journal と state の管理パスの衝突も拒否します。replay では、木の出力 dir（配下の生成物全体）と journal・state・paths.tsv・定義ファイルの衝突を拒否します。
 
 プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / HELD / STOPPED / DONE / NOT_READY / FAIL / SUPERSEDED` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木 (id・手番・世代・priority・hold) の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。キューの読み取りと出力先の用意の失敗は、内容が変わるまで 1 回通知して次の周回でやり直します。STATUS は内容が変わった場合だけ書きます。終了した木（DONE / NOT_READY / FAIL）の出力 dir を削除しても再作成しません。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します（終了した木の出力 dir が残っている場合）。journal と成果物の書き込み失敗はエラーとして扱います。
+
+### 動かしたまま別の台帳を取り込む
+
+serve が作る `<state>/import/` に、`tree import-journal --from-journal` で読める台帳の複製を置けます。書き込み中のファイルを受け付けないよう、同じ dir の別の拡張子で書き終えてから、一意な名前の `*.jsonl` に rename してください。公開後は変更しません。
+
+```bash
+cp /path/to/combined-journal.jsonl /path/to/state/import/hourly-001.tmp
+mv /path/to/state/import/hourly-001.tmp /path/to/state/import/hourly-001.jsonl
+```
+
+`.jsonl` 以外は読みません。ファイル名順に 1 本ずつ検査し、nodes・MultiPV・hash・option・参照ファイルの内容が serve と同じ行だけを取り込みます。別の条件の行は数えて飛ばすので、複数の条件を含む台帳をそのまま渡せます。エンジンの照合は [`import-journal`](#別の台帳の読みの取り込み) と同じで、同じバイナリか同じソースの版が必要です。受付には `--force` 相当の指定はありません。同じ条件の行の指紋や読みの検査に失敗した場合、取り込み元の中で同じ局面の値が食い違う場合、空ファイルの場合は、そのファイルを追記せずに拒否します。改行で終わらない末尾の行は `import-journal` と同じく無視し、状態の `ignored_tail` に記録します。
+
+検査は別スレッドでストリーミングし、`import/` 内の一時ファイルを使います。局面・値の短いハッシュと入力の行番号を、局面のハッシュで分けたバケットに書き出します。初期分割数は入力サイズから決め、1 バケットが 262,144 局面を超えた場合は再分割するため、重複検査の表は入力行数によらず約 64 MiB 以下に収まります。先読みの印もディスク上で最初の行へ集約します。追記には入力順の一時台帳を使い、同じ値の重複は追記せず、従来どおり元の行数で件数と食い違い一覧を記録します。一時ディスクには対象行のコピーに加え、1 行あたり 42 バイトの検査情報が必要で、再分割中は該当バケット分がさらに必要です (取り込み先の台帳を保持するメモリは別です)。同じ指紋に版情報のない旧行と版の分かる行が混ざる場合は、全行から集めた版情報で互換性を判定します。全体の検査後、worker の完了回収と木の進行・読みの割り当ての間に追記します。1 周回で最大 1024 行を読み、読み取りが 5ms に達した場合もそこで区切ります。その周回の行をまとめて追記し、最後に 1 回だけ `sync_data` します。検査・書き込み・同期に要する時間はこの 5ms に加わるため、周回全体の所要時間の上限ではありません。追記した局面を要求している木の先読みだけを再計算し、待っていた木をエンジンで読まずに進めます。
+
+取り込み先に同じ局面がある場合、同じ値なら飛ばし、異なる値なら `keep-existing` と同じく先の値を残します。既に worker が読んでいる場合も、先に台帳へ入った方を残し、後から完了した worker の結果は追記せずに数え、台帳と値が異なる場合は `ALERT` に記録します。取り込み元の先読みの印は、新しく追記する局面に引き継ぎます。同じ局面が複数行ある場合、後の行にだけ印があっても引き継ぎます。
+
+完了したファイルは `import/done/<名前>.jsonl` へ移り、食い違いは `import/done/<名前>.jsonl.conflicts.tsv` に書きます (列とエスケープは `import-journal` と同じ、0 件ならヘッダだけ)。異常終了で `done/` に残った一覧の一時ファイル (`.tmp*`) は再開には使わず、serve 停止中に削除できます。失敗したファイルは `import/failed/` に移り、理由を `ALERT` と `targets.status.json` の `import.reason` に出して次のファイルへ進みます。
+
+ログと `targets.status.json` の `import` に、最新ファイルの状態と `counts` (`appended`: 追記、`skipped_same`: 同じ値、`conflicts`: 食い違い、`skipped_condition`: 別の条件) を出します。件数は入力の行ごとです。`discarded_worker` は起動中に後着結果を捨てた累計です。中断時は受付に残ったファイルを次の起動で検査し直し、追記済みの行は飛ばします。処理済みファイルを再投入しても同じ値の読みは増えません。再開時の件数は再処理した時点の値になります。先読みの読み・使用・未使用の統計には、取り込み元で先読みの印が付いた局面も含まれます。`speculated` の集計には、先読み worker が完了したものの台帳への追記を見送った後着結果も含まれます。
 
 ### 空いた worker での先読み
 
@@ -505,7 +625,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 取り込み元に条件が複数あれば `--fingerprint` で選びます (省略時は唯一の条件)。取り込み元は共有 lock で読み、ファイルを変更しません。serve などが書き込み中の台帳は拒否するので、複製してから渡します。改行で終わらない末尾の行は無視します。選んだ条件の行は、どの行も条件の中身から計算し直した指紋が選んだ指紋と合い、版とファイル型 option のパスを除いて同じ条件であることを確かめ、合わない行があれば取り込みません (モデルを別のパスへ移した後に serve が追記した行は同じ条件です)。
 
-取り込み先の台帳は排他 lock を取って追記するので、その台帳を使っている serve を止めてから実行します (使用中なら lock の取得に失敗して何も書きません)。
+取り込み先の台帳は排他 lock を取って追記するので、その台帳を使っている serve を止めてから実行します (使用中なら lock の取得に失敗して何も書きません)。動かしたまま取り込む場合は、[serve の受付 dir](#動かしたまま別の台帳を取り込む) に台帳の複製を置きます。
 
 同じ局面の読みが取り込み先と取り込み元の両方にあるとき、値 (MultiPV の手・評価値・深さと bestmove) が同じなら取り込み元の行を飛ばします。取り込み先と値が違う重複の扱いは `--on-conflict` で選びます。取り込み元の中で値が食い違う重複は、`--on-conflict` によらず常に拒否します (1 台のマシンの台帳には起きないはずの食い違いなので、取り込み元を調べます)。
 
@@ -550,10 +670,14 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
-  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--apply] <木の出力先>...
+  --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--skip-keys skip.txt] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
+
+`--skip-keys <FILE>` で、一部の局面だけを登録から除外できます。ファイルは 1 行に 1 局面の SFEN キー (盤・手番・持ち駒の 3 フィールド) を書きます。手数つきの 4 フィールドも受け付けます。SFEN を局面として読み直して正規化するため、手数 (`+1` などの表記を含む) や持ち駒の並び順の違いは照合に影響しません。空行と、前後の空白を除いて `#` で始まる行は無視し、不正な SFEN はファイル名・行番号つきでエラーにします。指定した局面と、その先後反転キーで合流する局面を除外します。指定局面には main・alt を足さず、既存の全行の main・評価値・控えなども変更しません。指定局面の子の局面 (木の先) の行は今までどおり足されます。
+
+複数の木にある同じ局面は 1 局面として数え、「指定で取り込まなかった局面 N」を出します。「木どうしで 1 位が違った局面」は除外した局面を含みません。ファイル内の重複は正規化後にまとめ、指定した向きも反転した向きも木に無かった指定は「指定したが木に無かった局面 M」に数えます。木の行ではない既存の元データの局面は、反転キーも木に無い場合、`--skip-keys` に書いても問題は解消せず、この M に含まれます。その場合、原因は木が足した先の局面の手にあるため、別に調べる必要があります。
 
 元データの表は `key ply move role source evals nodes cond value_kind lineage tier since note` の 13 列 (見出し行つき) です。`key` は SFEN の盤・手番・持ち駒、`role` は `main` (局面ごとにちょうど 1 つ) / `alt` / `bench` (控え、指さない手) / `record` (指さない手)、`tier` は `curated` / `wide`、`evals` は手番の側から見た値 (カンマ区切りで複数可) です。
 
@@ -670,11 +794,12 @@ stdout には既存行の省略数、新しい局面と手の数、tier・role�
 book_mine master hold-early --before before/moves.tsv --master moves.tsv \
   --since release-tag --out release.main_changes_held.tsv
 book_mine master hold-early --before before/moves.tsv --master moves.tsv \
-  --since release-tag --out release.main_changes_held.tsv --schema schema --apply
+  --since release-tag --out release.main_changes_held.tsv --schema schema \
+  --continuation 6 --hold-keys hold.keys --apply
 ```
 
 `tree register`・`master audit` の後で、版を作る前からある序盤の局面の main を戻し、
-替わろうとした手を owner が後で判断するための一覧にします。
+替わろうとした手と継続手数による分類を一覧にします。`--continuation` を省くと、対象をすべて保留します。
 `master cycles --apply` より前 (`tree register`・`master audit --apply` の直後) に流します。cycles の後に流すと、
 cycles が循環を塞ぐために外した手を main に戻すことがあります。
 
@@ -683,24 +808,37 @@ cycles が循環を塞ぐために外した手を main に戻すことがあり�
 | `--before <PATH>` | 必須 | 版を作る前の元データ (13 列 TSV) |
 | `--master <PATH>` | 必須 | 登録・監査後の元データ |
 | `--below-ply <N>` | `20` | before の main の ply が N 未満の局面を対象にする |
+| `--continuation <N>` | なし | 旧手・新手の後で main がともに N 手以上続く局面は replace とし、新しい main を残す |
+| `--hold-keys <FILE>` | なし | 分類によらず hold にする局面キー (1 行 1 キー) |
 | `--schema <DIR>` | なし | 他の master コマンドと同じ語彙・読み条件の表 |
 | `--since <TAG>` | 必須 | 書き戻す 2 行の note に付けるタグ |
-| `--out <PATH>` | 必須 | 保留する変更の一覧 TSV (既存なら置換) |
-| `--apply` | 無効 | 検査後に master を書き戻す |
+| `--out <PATH>` | 必須 | 対象の変更と分類の一覧 TSV (既存なら置換) |
+| `--apply` | 無効 | 検査後、hold の局面だけ master に書き戻す |
 
 両方の表に main があり、その手が異なる局面だけを対象にします。before にない局面、
 before の main の ply が空の局面は対象外です。既定では 19 手目までが対象で、20 手目は含みません。
 
-戻す手が master にあれば、読みの値などを保持して role を main にします。なければ before の行を
-復元します。before の main が curated なら、戻す手を curated、替わろうとした手を wide にします。
-替わろうとした手の role は alt にします。両行の note の末尾にタグと
-「20 手目より前の main の替わりを保留に戻した」旨を追記します (手数は `--below-ply` に従います)。
-since 列は変更しません。
+継続手数は、変更前の `--master` を使い、旧手・新手をそれぞれ指した後の局面から main を
+辿って数えます。最初の旧手・新手自身は含まず、最大 60 手までです。盤・手番・持ち駒のキーを
+そのまま照合し、手数は含めず、先後反転もしません。main がない局面で止まり、循環も上限まで数えます。
+`--continuation N` 指定時は両方が N 手以上なら `replace`、片方でも不足なら `hold` です。
+N は非負整数で、0 ならすべて replace、60 より大きければすべて hold になります。
+`--hold-keys` に含む局面はこの判定に優先して hold にします。空行と、前後の空白を除いた先頭が
+`#` の行は無視します。ファイルにあるだけでは対象を増やさず、main が替わっていない局面には何もしません。
+全対象の分類は書き戻し前に確定します。
 
-一覧の列は `ply side key old_main old_source old_tier old_value_black new_main new_value_black`
-です (区切りはタブ、side は `b` / `w`)。old 側は before、new 側は変更前の master から取り、
-ply・key の順に並べます。値は evals の平均を既存の規則で偶数丸めし、後手番では符号を反転した
-先手から見た値です。値がなければ空欄にします。stdout には対象局面数 (先手番・後手番別) と
+hold で戻す手が master にあれば、読みの値などを保持して role を main、tier を before の main と
+同じにします。なければ before の行を復元します。替わろうとした手の role は alt にし、
+before の main が curated なら tier を wide にします。両行の note の末尾に
+`<TAG>: 20 手目より前、読みが浅いので保留 (今の main)` を追記します
+(既存 note との区切りは `; `、手数は `--below-ply` に従います)。since 列は変更しません。
+replace の局面の行は変更しません。他の候補手の行も保持します。
+
+一覧の列は `ply side key old_main old_source old_tier old_value_black new_main new_value_black old_depth new_depth class`
+です (区切りはタブ、side は `b` / `w`)。既存の列順を保ち、末尾の 3 列に継続手数と分類を出します。
+old 側は before、new 側は変更前の master から取り、ply・key の順に並べます。
+値は evals の平均を既存の規則で偶数丸めし、後手番では符号を反転した先手から見た値です。
+値がなければ空欄にします。stdout には対象局面数 (先手番・後手番別)、hold・replace の局面数と
 書き戻した局面数を出します。
 
 両入力と変更後の表を `master validate` と同じ規則で検査します。検査で失敗した場合は `--apply` の有無によらず一覧も master も書き込みません。
@@ -764,7 +902,8 @@ stdout には読みの取込・除外数、浅い読みの除外数、対象局�
 ```sh
 book_mine master export --master moves.tsv --out out/book --tier wide
 book_mine master export --master moves.tsv --out out/book --schema schema \
-  --reads reads.jsonl more-reads --min-nodes 900000000 --force
+  --reads reads.jsonl more-reads --min-nodes 900000000 \
+  --journal state/journal.jsonl more-journals --force
 ```
 
 出力先の親ディレクトリは、書き出すときに必要なら作成します。元データ全体に `master validate` と同じ検査を行い、
@@ -780,6 +919,7 @@ bench は record と同じく `.db` に value=-30000/count=0 で残し、どの�
 | `--tier wide\|curated` | `wide` | wide は全行、curated は curated の行だけ |
 | `--schema <dir>` | なし | 3 表による source・cond・lineage の語彙検査 |
 | `--reads <path>...` | なし | JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。複数指定可 |
+| `--journal <path>...` | なし | 深さを照合する tree 台帳の JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。tree 台帳でないファイルは飛ばす。複数指定可 |
 | `--min-nodes <n>` | `900000000` | 取り込む reads のノード数の下限 (非負整数) |
 | `--draw-pin <cp>` | `3` | draw の指定が空の読みで、先頭の評価値の絶対値がこの値以下なら除く (非負整数) |
 | `--bad-eval <cp>` | `-150` | 到達局面の値がこの値以下なら報告 (有限値) |
@@ -789,9 +929,13 @@ bench は record と同じく `.db` に value=-30000/count=0 で残し、どの�
 
 schema の表と検査は [元データの schema](#元データの-schema) を参照してください。
 `"sources"` には `sources.tsv` の source → description を行順で書きます。省略時は空のオブジェクトです。
+`"conditions"` は `conditions.tsv` の name を鍵とし、各行の name 以外の列を文字列で写します。
+`fingerprint`、`eval`、`stop`、`threads`、`hash_mb`、`multipv`、`machine`、`note` のほか、
+`engine_sha256`、`nodes_counting`、`draw_black`、`draw_white` も含みます。空欄は空文字列です。
+`--schema` 省略時は `sources` と同じく空のオブジェクトです。手の `cond` から条件の説明を引けます。
 
 出力は次の 4 ファイルです。いずれかが既存なら `--force` が必要です。ディレクトリへの出力や、
-元データ・読みのファイル・base・schema の各表と同じファイルへの出力は `--force` でも拒否します。
+元データ・読みのファイル・台帳・base・schema の各表と同じファイルへの出力は `--force` でも拒否します。
 全ファイルを出力先と同じディレクトリの一時ファイルに書き終え、既存の出力をそれぞれ
 同じディレクトリの一時名へ rename で退避してから、新しいファイルを順に確定します。
 途中で失敗したら、確定済みの新しい出力を削除し、退避した出力を元の名前に戻します。
@@ -808,19 +952,45 @@ schema の表と検査は [元データの schema](#元データの-schema) を�
 
 各プリセットの冒頭には名前と DB のファイル名・SHA-256 が入ります。
 注釈の最上位の鍵は `format` (`rshogi-book-annotations`)、`version` (2)、
-`book` (`file` と `sha256`)、`sources`、`positions` の順です。`master check` は version 1 と 2 の両方を受け付け、それ以外と version の欠落を拒否します。
+`book` (`file` と `sha256`)、`sources`、`conditions`、`positions` の順です。
+条件の説明と深さは欄の追加であり既存の意味を変えないため、version は 2 のままです。`master check` は version 1 と 2 の両方を受け付け、それ以外と version の欠落を拒否します。
 `positions` の鍵は手数を除いた SFEN で、各局面には次の値があります。
 
 - `ply`: 元データの同じ局面にある空でない ply の最小値。全て空なら null。
 - `moves`: USI の手を鍵とするオブジェクト。各手は `role`、`source`、`nodes`、`cond`、`value_kind`、`note`、
   `since`、`tier` の文字列、カンマで分けた `lineage` の配列、数値の配列 `evals`、
   相手の返信の配列 `replies`、整数 `depth_after` を持ちます。
+  `--journal` を指定し、`cond` から指紋を特定できた手には、探索深さの整数配列 `depths` も追加します。
 - `read`: 採用した読みがある場合だけ追加する集計。
   `n` は読みの回数、`nodes` は最大ノード数を有効数字 2 桁の指数表記にした文字列
   (例 `1.2e9`)、`top` は各読みの先頭の評価値の平均、`main` は元データの main が
   読みに含まれた回の評価値の平均 (無ければ null)、`main_n` はその回数です。
   平均は有理数で計算した後に浮動小数へ変換し、小数点以下 1 桁に偶数丸めします。
   `12.0` のように整数値でも浮動小数として書きます。
+
+`depths` は同じ条件・局面の読みの MultiPV にその手があった回ごとの `depth` を小さい順に並べます。
+別の読みに同じ深さがあれば、その値は複数回残します。対象の読みが無い手は `[]` です。
+`--journal` 省略時や `cond=unknown` など指紋を特定できない手では欄を省略します。
+欄なしは未照合、空配列は照合したが該当する読みなしを表します。
+schema 指定時は条件名から指紋を解決し、指紋が空欄の条件には `depths` を書きません。
+schema 未指定時だけ台帳の指紋の先頭 8 桁から解決し、先頭が衝突する場合はエラーにします。
+
+台帳は `tree serve` の形式を使います (`kind` は形式の版、`provenance=engine` が engine の読み)。
+最初の確定行が JSON でない、`kind` が無い、または `kind` が `book-tree-` で始まらないファイルと、
+確定行の無いファイル (空ファイルを含む) は丸ごと飛ばし、
+`journal: skipped (not a tree journal): <path>` を stderr に出します。
+tree 台帳と判定したファイルでは、不正な確定行や異なる形式の版はエラーにします。
+engine の行は出力対象外の局面も読みの妥当性と指紋・条件の一致を検査し、不正ならエラーにします。
+末尾の改行の無い未完了行だけを無視します。入力の変更やロック取得はしません。
+他の台帳から取り込んだ行 (`provenance` が `engine` でない行) は数えません。元の台帳も `--journal` に渡してください。
+各ファイルを開いた時点のサイズまで行ごとに読み、出力対象の局面の読みだけを保持します。
+重複判定は台帳と同じく MultiPV 全体の move/cp/depth と bestmove を使い、
+同じ指紋・手数を除いて正規化した局面の重複はファイルをまたいでも 1 回に数えます。
+nodes・計測時間・手数だけが違う読みも重複です。異なる深さの読みは別々に残します。
+engine の行数、engine 以外の行数、採用数、重複数、未完了の末尾を無視したファイル数、
+飛ばしたファイル数 (`skipped-files`)、エラー数 (不正な確定行では最初のエラーで終了) を stderr に出します。
+`--reads` のノード数・draw の絞り込みは `--journal` には適用しません。
+`.db` の値・深さ・採択数には探索深さを使いません。
 
 `replies` は、その手を指した後の相手の全合法手のうち、選択した tier の定跡局面に着く手を
 USI 順に並べたものです。`depth_after` は main・alt の辺だけから作る 2 手単位のグラフで、
@@ -905,9 +1075,11 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 
 ## `master audit`: 定跡の元データの点検
 
+逆伝播の保証検査で「千日手へ逃げられる」などのエラーや「反転キーで合流した」衝突が出た場合、エラーには該当局面の総数と先頭 5 局面のキーを表示します。反転衝突では `(保存 -15・反対 -16)` のように各向きの値も表示します。値はそれぞれの向きの手番の側から見た値です。木の登録によって発生した場合は、登録前の元データを用意し、エラーに出たキーだけ (値の括弧は除く) を 1 行ずつ `skip.txt` に書いて `tree register --skip-keys skip.txt` で登録し直し、再度 `master audit` を実行してください。6 局面以上ある場合や、新たに問題が見つかった場合は除外キーを追加して繰り返します。指定局面の子の局面 (木の先) の行は今までどおり足されます。列挙された局面が木の行ではなく既存の元データの局面なら、反転キーも木に無い限り「指定したが木に無かった局面」に数えられ、`--skip-keys` に書いても解消しません。原因は木が足した先の局面の手にあるため、別に調べる必要があります。除外した局面が再登録の後も同じエラーに列挙されるときも、原因はその先の局面の手にあります。除外は既存の行を削除しないため、既に登録済みの元データに同じ指定で再登録するだけでは問題の行は取り除けません。
+
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--out-db audited.db] [--fill-replies] \
+  --draw-value-black -70 --draw-value-white 0 [--line 40] [--deep-plies N] [--out-db audited.db] [--fill-replies] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
@@ -927,7 +1099,8 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--bad-eval <CP>` | `-150` | alt の降格に使う値の上限 (手番側からの整数値) |
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
 | `--schema <DIR>` | なし | 語彙と読み条件の表。sources.tsv の replaceable=1 の source だけ置換できる。省略時は read・ext |
-| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す |
+| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す。`--deep-plies` を指定したときは線未満の局面も対象にする |
+| `--deep-plies <N>` | なし | 差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。N は 1 以上。直接のキーが無ければ反転キーでも続きを辿り、同じ局面に戻ったら止める |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
 | `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
@@ -941,7 +1114,9 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁の表の重み。`master rejoin` と同じ意味 (`--min-weight` は表から落とす下限)。`--opp-freq` は反駁の出力と一緒に使う |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
-点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、差が `--line` 以上で、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+
+`--deep-plies` の継続手数には、最初の main・1 位の手を含めず、その先の元データで role が main の手だけを数えます。伝播後の最善手や `--fill-replies` で補った手は辿りません。指定時は、線未満でも対象にした局面数を先手番・後手番別に要約へ出します。
 
 通常の点検と反駁出力 (`--refutation-table` / `--enqueue-out`) は、元データを 1 回読み、record を含む全行の局面キーと手の重複を検査します。record 行は数えて列を破棄し、main・alt 行、重複検査用の局面キーと手、curated の保護に必要な局面キーを保持します。`--apply`・`--demote-alts`・`--revive-bench` のいずれかを指定した場合は全行を保持します。
 
@@ -1113,6 +1288,10 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 | `--opp-book-first` | 無効 | 相手の手番では `--opp-book` を先に引き、局面があればその手だけで指す。定跡に無い局面だけ `--opp-freq` の頻度で指す。相手が自分の定跡を持つときに、その定跡を外れた後に手順の入れ替わりで定跡に戻る線も辿るため。`--opp-book` が要る |
 | `--cont-max <N>` | `100` | 大きい定跡の最善を両者が指し続けた手順を辿る手数の上限 |
 | `--enqueue-out <PATH>` | なし | 自分が読み始める局面のうち重みが `--min-weight` 以上のものを、`tree enqueue --from` の行 (JSON Lines) に書く |
+| `--max-root-ply <N>` | なし | キューに書く根の手数 (SFEN の手数、一覧の `ply + 1`) の上限。同じ局面に別の手数で来た行をまとめた後の最小値で判定。`--enqueue-out` が要る |
+| `--exclude-queue <PATH>` | なし | 既存のキュー (JSON Lines) の木と同じ局面・同じ自分の側の根を除く (木の根と、`game` の最初の `depth+1` 手で通る局面)。繰り返して複数。`--enqueue-out` が要る |
+| `--opp-n <N>` / `--stop <N>` / `--rounds <N>` | なし | キューの行の `opts` に指定した値だけを書く。範囲は 1〜8 / 1〜30000 / 0〜10。`--enqueue-out` が要る |
+| `--draw-black <CP>` / `--draw-white <CP>` | なし | キューの行の `opts` に先手番 / 後手番で循環に入る手の値を書く (各手番側から見た値、-30000〜30000)。指定した項目だけを書き、省くと serve の既定で解決する。`--enqueue-out` が要る |
 | `--depth <N>` / `--priority <N>` / `--tag <NAME>` | `6` / `300` / `walk` | キューの行の段数・priority の始まり (重みの順位 0〜99 を足す)・id `<tag>_<根の手数>_<局面の hash 16 桁>_<b\|w>` の名前 (`[A-Za-z0-9_-]` の 1〜40 文字) |
 | `--game-from-book` | 無効 | キューの行の `game` に、大きい定跡の最善を両者が指し続けた手順の最初の `depth+1` 手を入れる (木がその手を読みの順位によらず伸ばす)。`--opp-book` が要る |
 | `--start-moves <USI>` | なし | 初期局面からこの手順 (空白区切り) を指した局面から、重み 1 で辿り始める。手は元データや定跡に無くてもよい。合法でない手があるか、手数が `--max-ply` を超えるとエラーで終わる。main 以外の作戦 (初手の alt など) の側で読み始める局面を出すのに使う。別の手順の結果を同じキューに積むなら `--tag` を分ける (同じ局面・同じ根の手数は同じ id になる) |
@@ -1125,11 +1304,15 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 - 重みが `--weight-floor` 未満なら `tiny`、`--max-ply` 手に達したら `max` で止めます。同じ手数で同じ局面に来た重みは足し合わせ、手順は最初に辿ったものを残します。止まった重みの合計は手番ごとに 1 です。
 - 大きい定跡の手は書かれたままの局面で引きます (先後反転では引きません)。`--opp-freq` だけなら `master rejoin` の重みと同じ辿り方で、相手の局数が足りずに止まった分が `out` と `rare` に出ます。
 
-一覧の列は `side stop ply weight games book_moves cont_plies cont_end_black key moves cont` です。`ply` は初期局面からの手数、`games` は `--opp-freq` のその局面の局数、`book_moves` は大きい定跡のその局面の手の数、`cont` は `own` の局面から大きい定跡の最善を両者が指し続けた手順 (局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`--cont-max` 手で止めます)、`cont_plies` はその手数、`cont_end_black` は最後に引けた局面の最善の値を先手から見た値 (プラス = 先手良し) です。手番ごとに重みの大きい順に並べます。標準出力には手番ごとに、止まり方ごとの重み、読み始める重みの手数の帯ごとの合計、読み始める局面の数 (同じ局面に別の手数で来たものは 1 つ) を出します。
+一覧の列は `side stop ply weight games book_moves cont_plies cont_end_black key moves cont entry_move entry_value_black entry_value_kind entry_source` です。`ply` は初期局面からの手数、`games` は `--opp-freq` のその局面の局数、`book_moves` は大きい定跡のその局面の手の数、`cont` は `own` の局面から大きい定跡の最善を両者が指し続けた手順 (局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`--cont-max` 手で止めます)、`cont_plies` はその手数、`cont_end_black` は最後に引けた局面の最善の値を先手から見た値 (プラス = 先手良し) です。`entry_move` は止まった局面に入った最後の手 (USI)、`entry_value_black` は元データのその手の `evals` の先頭を先手から見た値に直したもの、`entry_value_kind` と `entry_source` はその行の `value_kind` と `source` です。どの止まり方にも付け、手が元データに無ければ値・由来・source は空、`evals` が空なら値は空、根で止まって手順が空なら 4 列とも空です。既存の 11 列の順と意味は変わりません。手番ごとに重みの大きい順に並べます。標準出力には手番ごとに、止まり方ごとの重み、読み始める重みの手数の帯ごとの合計、読み始める局面の数 (同じ局面に別の手数で来たものは 1 つ) を出します。
 
 キューの行は、同じ局面に別の手数で来た `own` の行の重みを足して 1 行にし (根の手数は最も小さい手数、`memo` の手順はその手数の手順)、重みの大きい順に priority を付けます。キューは同じ id で根の手数が変わる行を受け付けないので、id は局面と根の手数で決めます。同じ `--tag` で作り直すと、重みが入れ替わっても同じ局面・同じ根の手数は同じ id になります。出力先が入力のどれかと同じか、`--enqueue-out` と `--table` が同じファイルなら (別の書き方のパスでも) 止まります。
 
-計算量: 辿る局面の数は重みの下限で決まり、局面ごとに局面を 1 回進めます。頻度の定跡と大きい定跡は、辿った局面ごとに 1 回だけファイルから引き、丸読みしません。メモリは元データと辿った局面の数で決まり、定跡ファイルの大きさによりません。約 7,800 局面の元データ、強い対局 (1 年分) から作った 88 万局面の頻度の定跡、1,900 万局面の `.ybb` で、両方の手番 1 スレッド約 2 秒・ピーク約 45 MB でした。
+`--max-root-ply` と `--exclude-queue` はキューの行だけに適用し、一覧と読み始める局面・重みの要約は変えません。例えば根の手数が 30 未満のものだけを積むには `--max-root-ply 29` を渡します。priority の順位は条件で絞った後に付けます。`opts` は指定した項目だけを書き、全て省けば `opts` 自体を書きません。
+
+`--exclude-queue` は `tree enqueue --from` の入力や serve の `<state>/targets.jsonl` を読めます。指定したファイルの順、各ファイルの行順に読みます。同じ id は serve と同じく最初の行の `root` (局面と手数) と `own` に固定し、それと違う行 (serve が拒否する行) は飛ばします。有効な行の `game` は最初に現れた順で重複なく合わせ、段数・`roots` などそれ以外の欄は最後の有効な行の値を使います (同じ id の前の行で足した手順も除外の対象に入る)。全行を enqueue と同じ関数で検査し、不正な行があれば (後の行で上書きされるものや、使う範囲より先の `game` の手も) エラーで止まります。段数が 1 以上の行について、`root`・`roots` と自分の側の組、および `root` から各 `game` の最初の `depth+1` 手を指して通る自分の手番の局面と側の組を除外対象にします。手数は一致条件に含めず、`own=bw` は両方の側を対象にします。段数 0 の行は除外対象にしません。serve の `targets.jsonl` には serve が拒否した行も残りますが、根と `own` を変えた行は上の規則で飛ばします。それ以外の理由で拒否された行があるキューでは `targets.status.json` の `rejected` を先に確かめてください。改行で終わらない書きかけの行があると、検査で止まります。標準出力には既存の木で除いた行数を側ごとに出し、既存 id ごとの件数も出します。複数の id に一致した行は側ごとの合計では 1 行、id ごとの件数では各 id に数えます。
+
+計算量: 辿る局面の数は重みの下限で決まり、局面ごとに局面を 1 回進めます。頻度の定跡と大きい定跡は、辿った局面ごとに 1 回だけファイルから引き、丸読みしません。メモリは元データと辿った局面の数、および除外キューの id ごとの有効な定義 (同じ id の有効な行の別々の `game` の手順を合わせた分を含む) と除外対象の局面・側・id の組数で決まり、定跡ファイルの大きさによりません。除外キューを使わない場合は、約 7,800 局面の元データ、強い対局 (1 年分) から作った 88 万局面の頻度の定跡、1,900 万局面の `.ybb` で、両方の手番 1 スレッド約 2 秒・ピーク約 45 MB でした。
 
 ## `borrow`: 大きい定跡の木を借りる
 
@@ -1253,3 +1436,50 @@ value_kind は後退解析のグラフで子局面への辺を持つ手なら `t
 
 - 相手の手も部分木の手だけで見るので、部分木の外の相手の手で戻る循環 (先手の千日手) は、この伝播では見つかりません (`master audit` と同じ)。
 - 元データの局面で止めた出口の値は、`value` を実行したときの元データから求めます。切り出しの後に元データが変わり、値が分からなくなった局面があれば止まります。
+
+
+## `master line-db`: 注目の線を辿る定跡
+
+```bash
+book_mine master line-db --master moves.tsv \
+  --moves "7g7f 3c3d 2g2f" \
+  --tree-out tree-out-a tree-out-b --out line.db
+```
+
+初期局面から根までの手順を指定し、根から到達する元データと完了した木を合わせた
+YaneuraOu 形式の `.db` を作ります。ビュアーで注目の線を辿るための資料です。
+元データと木は書き換えません。
+
+| 引数 | 既定値 | 意味 |
+| --- | --- | --- |
+| `--master` | 必須 | 13 列の元データ TSV |
+| `--moves` | 必須 | 初期局面から根までの USI の手順。初期局面を根にするなら空文字列。非合法手や局面の繰り返しはエラー |
+| `--tree-out` | 必須、複数指定・繰り返し可 | `tree serve --out-root` のディレクトリ。再帰的に木を探す |
+| `--out` | 必須 | 出力する `.db` のファイル名 (接頭辞ではない) |
+| `--schema` | 省略 | 他の master コマンドと同じ語彙・読み条件の表。指定時は source・cond・lineage の語彙も検査 |
+| `--draw-value-black` | `-70` | 先手を自分として解くときの千日手の値 (手番側から) |
+| `--draw-value-white` | `70` | 後手を自分として解くときの千日手の値 (手番側から) |
+| `--force` | なし | 既存の出力を置き換える。入力と同じファイルへの出力は許可しない |
+
+根より前の各局面には、指定した手順の 1 手だけを入れます。根以降では元データの
+`main` と `alt` を辿り、`record` と `bench` は入れません。読みの値は `evals` の先頭
+(手番側からの整数値。空なら仮の値 0)、採択数は `main` が 2、`alt` が 1 です。
+木から入れた手は `tree.db` の値・採択数をそのまま使います。
+
+`STATUS` の先頭の語が `DONE` の木について、`d0.jsonl` の最初の行の `key` を根として
+索引化します。根以降の局面と、採用したどの手の行き先の局面も対象にし、その局面を根にした
+木の `tree.db` を全て合わせます。木の内部にしかない局面や手の先からも元データと別の木を
+辿り続けます。同じ局面の同じ手は元データを優先し、元データに無ければ `tree.db` の
+更新時刻が新しい木を使います。同時刻ならディレクトリのパスが辞書順で後の木を使います。
+局面は書かれたままの盤面キーで引きます (先後反転した局面では元データと木を探しません)。
+根より前の局面と同じ局面が木にあっても、その局面の他の手の先は辿りません。
+
+非合法手・`none` などの使えない手を除き、全体を既存の `book_backprop --merge replace`
+と同じ関数で伝播して書き出します。根までの手順にも伝播後の値が付きます。
+標準出力は `局面数`、`手の数`、使用した木のディレクトリ (`木`)、根の各手の
+先手から見た伝播値 (`根<TAB>USI<TAB>値`) です。
+
+木ごとの DONE 判定と根の読み取りは 1 回で、`tree.db` は必要になった木だけ 1 行ずつ読みます。
+元データは一時ファイルに固定数のハッシュバケットで索引化し、必要な局面の行だけを読みます。
+組み合わせる定跡のグラフをメモリに保持するため、メモリ使用量は採用した局面・手の数に比例します。
+一時ファイルには元データの索引と伝播前後の定跡を置くので、一時ディレクトリの空き容量を確保してください。

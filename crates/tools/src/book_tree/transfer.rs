@@ -117,7 +117,11 @@ fn known_version(settings: &Settings) -> Option<&str> {
 
 /// 取り込み元の読みを取り込み先の条件の読みとみなせるかを確かめる。版だけが違う・分からないときは
 /// `force` で許し、その理由を返す。
-fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Option<String>> {
+pub(super) fn check_compatible(
+    src: &Settings,
+    dst: &Settings,
+    force: bool,
+) -> Result<Option<String>> {
     let mut errors = Vec::new();
     for (name, a, b) in [
         ("nodes", src.nodes.to_string(), dst.nodes.to_string()),
@@ -147,6 +151,10 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
     if !errors.is_empty() {
         bail!("取り込み元と取り込み先の条件が違います (元 / 先): {}", errors.join("; "));
     }
+    check_engine_compatible(src, dst, force)
+}
+
+fn check_engine_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Option<String>> {
     // 同じバイナリなら版を問わない。違うバイナリは同じソースの版のときだけ同じ条件とする。
     if src.engine_sha256 == dst.engine_sha256 {
         return Ok(None);
@@ -168,6 +176,13 @@ fn check_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Optio
             }
         }
     }
+}
+
+/// バイナリとソースの版を除く読み条件の一致。
+pub(super) fn same_reading_condition(src: &Settings, dst: &Settings) -> bool {
+    let mut src = src.clone();
+    src.engine_sha256 = dst.engine_sha256.clone();
+    check_compatible(&src, dst, false).is_ok()
 }
 
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
@@ -277,14 +292,23 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
 /// 食い違いの一覧。同じ dir の一時ファイルに 1 行ずつ書き、`before_append` で fsync してから置き換え、dir も同期する
 /// (書きかけの一覧を残さない)。置き換えなかったときは、自分が作った一時ファイルだけが消える。
 /// 食い違いが 0 件でもヘッダだけの一覧を書く。
-struct ConflictTsv {
+pub(super) struct ConflictTsv {
     path: PathBuf,
     dir: PathBuf,
     tmp: Option<std::io::BufWriter<tempfile::NamedTempFile>>,
 }
 
 impl ConflictTsv {
-    fn create(path: &Path) -> Result<Self> {
+    /// 公開前の一覧を同期する。複数周回に分けて追記する取り込みで使う。
+    pub(super) fn checkpoint(&mut self) -> Result<()> {
+        use std::io::Write;
+        let tmp = self.tmp.as_mut().context("食い違いの一覧はもう置き換えました")?;
+        tmp.flush()?;
+        tmp.get_ref().as_file().sync_data()?;
+        Ok(())
+    }
+
+    pub(super) fn create(path: &Path) -> Result<Self> {
         use std::io::Write;
         let dir = match path.parent() {
             Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),

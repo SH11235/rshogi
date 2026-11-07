@@ -550,8 +550,7 @@ mod tests {
         target_feature = "avx512bw",
         target_feature = "avx512vnni"
     ))]
-    #[test]
-    fn packed_fused_l1_matches_after_copy_on_write() {
+    fn packed_fused_l1_matches_after_copy_on_write<const N: usize>() {
         use crate::nnue::layer_stacks::{LayerStacks, assert_fused_l1_matches_reference};
         use crate::nnue::net_bin_layout::TensorBinLayout;
         // FC セクションだけを作り、FT の巨大な fixture を必要とせず read_packed を検証する。
@@ -570,7 +569,7 @@ mod tests {
         for bucket in 0..9 {
             raw.write_all(&[0; 4]).unwrap();
             packed_bytes.write_all(&[0; 4]).unwrap();
-            for (input, output) in [(1536, 16), (30, 32), (32, 1)] {
+            for (input, output) in [(N, 16), (30, 32), (32, 1)] {
                 let biases_start = raw.get_ref().len();
                 for out in 0..output {
                     raw.write_all(&((out * 31 + bucket * 7) as i32).to_le_bytes()).unwrap();
@@ -601,22 +600,36 @@ mod tests {
             ranges: [0..packed_bytes.get_ref().len(), 0..0, 0..0, 0..0],
             used: Cell::new(0),
         };
-        type Stacks = LayerStacks<1536, 16, 30, 32>;
+        type Stacks<const N: usize> = LayerStacks<N, 16, 30, 32>;
         raw.set_position(0);
-        let original = Stacks::read(&mut raw, 9).unwrap();
-        let mut stacks = Stacks::read_packed(&mut packed.metadata().unwrap(), 9, &packed).unwrap();
+        let original = Stacks::<N>::read(&mut raw, 9).unwrap();
+        let mut stacks =
+            Stacks::<N>::read_packed(&mut packed.metadata().unwrap(), 9, &packed).unwrap();
         let us = std::array::from_fn(|i| ((i * 53) % 383) as i16 - 128);
         let them = std::array::from_fn(|i| ((i * 71) % 383) as i16 - 128);
         for (a, b) in original.buckets.iter().zip(&mut stacks.buckets) {
             assert_eq!(&*a.l1().weights, &*b.l1().weights);
             assert_fused_l1_matches_reference(b, &us, &them);
             b.edit_l1(|l1| {
-                l1.apply_file_weight_delta(1536 * 3 + 973, 17);
+                l1.apply_file_weight_delta(N * 3 + 973, 17);
             });
             assert_ne!(&*a.l1().weights, &*b.l1().weights);
             assert_fused_l1_matches_reference(b, &us, &them);
         }
         assert_eq!(std::fs::read(&fixture.packed).unwrap(), packed_bytes.into_inner());
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni"
+    ))]
+    #[test]
+    fn packed_fused_shapes_match_after_copy_on_write() {
+        packed_fused_l1_matches_after_copy_on_write::<1536>();
+        packed_fused_l1_matches_after_copy_on_write::<2304>();
+        packed_fused_l1_matches_after_copy_on_write::<3072>();
     }
 
     #[test]

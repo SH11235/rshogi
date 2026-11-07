@@ -95,7 +95,7 @@ sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 ## 運用ノート
 
 - 本ツールは同一盤面を最小 ply に集約して出力するため、実戦で異なる手数で同一局面に
-  合流(transposition)した場合にもヒットさせるには、エンジン側で
-  `IgnoreBookPly=true` を設定して使うことを推奨する。
+  合流(transposition)した場合にもヒットさせるには、エンジン側の `IgnoreBookPly` を既定の
+  `true` のまま使う (`false` にすると手数違いで合流した局面には当たらない)。
 - 既存 `.db` への追記・マージ機能は意図的に持たない(常に新規ファイルを生成する)。
   複数 book の統合が必要な場合は別工程として明示的に行う。

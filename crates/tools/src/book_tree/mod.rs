@@ -11,6 +11,9 @@ mod export;
 mod file_lock;
 mod hold_early;
 mod journal;
+mod line_db;
+mod live_import;
+mod master_index;
 mod master_table;
 mod model;
 mod output;
@@ -21,9 +24,11 @@ mod register;
 mod rejoin;
 mod reply_graph;
 mod schema;
+mod seeds;
 mod service;
 #[cfg(test)]
 mod simulation;
+mod source_buckets;
 mod targets;
 #[cfg(test)]
 mod tests;
@@ -47,6 +52,8 @@ pub struct TreeArgs {
 
 #[derive(Subcommand, Debug)]
 enum TreeCommand {
+    /// 自己対局の棋譜から次に読む木のキューの行を作る
+    Seeds(seeds::SeedsArgs),
     /// キューの対象を共有エンジンで読む
     Serve(ServeArgs),
     /// キューに対象を足す (検査してから追記し、受領を出す)
@@ -168,6 +175,8 @@ enum MasterCommand {
     Cycles(cycles::CyclesArgs),
     /// 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す
     Walk(walk::WalkArgs),
+    /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
+    LineDb(line_db::LineDbArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -184,12 +193,14 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Rejoin(args) => rejoin::run(args),
         MasterCommand::Cycles(args) => cycles::run(args),
         MasterCommand::Walk(args) => walk::run(args),
+        MasterCommand::LineDb(args) => line_db::run(args),
     }
 }
 
 /// CLI の指定に従い木を処理する。
 pub fn run(args: TreeArgs) -> Result<()> {
     match args.command {
+        TreeCommand::Seeds(args) => seeds::run(args),
         TreeCommand::Serve(args) => service::serve(args),
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),

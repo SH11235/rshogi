@@ -72,7 +72,7 @@ pub struct LayerStackBucket<
         target_feature = "avx512bw",
         target_feature = "avx512vnni"
     ))]
-    fused_weights: Option<super::ls_l1_kernel::avx512::FusedWeights>,
+    fused_weights: Option<super::ls_l1_kernel::avx512::FusedWeights<L1>>,
 }
 
 impl<
@@ -161,7 +161,9 @@ impl<
     ))]
     #[inline]
     pub(super) fn propagate_accumulators(&self, us: &[i16; L1], them: &[i16; L1]) -> i32 {
-        let weights = self.fused_weights.as_ref().expect("1536x16 bucket has fused weights");
+        let Some(weights) = self.fused_weights.as_ref() else {
+            return self.propagate(&sqr_clipped_relu_new(us, them).0);
+        };
         let l1_out = super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases);
         self.propagate_from_l1(&l1_out)
     }
@@ -1176,6 +1178,7 @@ mod tests {
         check::<768>();
         check::<1024>();
         check::<1536>();
+        check::<2304>();
         check::<3072>();
     }
 
@@ -1645,10 +1648,10 @@ mod tests {
     target_feature = "avx512bw",
     target_feature = "avx512vnni"
 ))]
-pub(super) fn assert_fused_l1_matches_reference(
-    bucket: &LayerStackBucket<1536, 16, 30, 32>,
-    us: &[i16; 1536],
-    them: &[i16; 1536],
+pub(super) fn assert_fused_l1_matches_reference<const N: usize>(
+    bucket: &LayerStackBucket<N, 16, 30, 32>,
+    us: &[i16; N],
+    them: &[i16; N],
 ) {
     use super::ls_l1_kernel::avx512;
     let legacy = sqr_clipped_relu_new(us, them);
@@ -1656,7 +1659,7 @@ pub(super) fn assert_fused_l1_matches_reference(
     for (out, value) in expected.iter_mut().enumerate() {
         for (i, &input) in legacy.0.iter().enumerate() {
             *value = value
-                .wrapping_add(i32::from(input) * i32::from(bucket.l1.file_weight(out * 1536 + i)));
+                .wrapping_add(i32::from(input) * i32::from(bucket.l1.file_weight(out * N + i)));
         }
     }
     let mut dense = [0; 16];
@@ -1681,21 +1684,20 @@ mod kernel_tests {
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
 
-    type Bucket = LayerStackBucket<1536, 16, 30, 32>;
-
-    fn random_bucket(rng: &mut Xoshiro256PlusPlus) -> Bucket {
+    fn random_bucket<const N: usize>(
+        rng: &mut Xoshiro256PlusPlus,
+    ) -> LayerStackBucket<N, 16, 30, 32> {
         let mut bytes = Vec::new();
-        for (input, output) in [(1536, 16), (32, 32), (32, 1)] {
+        for (input, output) in [(N, 16), (32, 32), (32, 1)] {
             for _ in 0..output {
                 bytes.extend_from_slice(&rng.random_range(-8192i32..8192).to_le_bytes());
             }
             bytes.extend((0..input * output).map(|_| rng.random::<u8>()));
         }
-        Bucket::read(&mut &bytes[..]).unwrap()
+        LayerStackBucket::read(&mut &bytes[..]).unwrap()
     }
 
-    #[test]
-    fn all_buckets_full_range_and_weight_edits_match() {
+    fn all_buckets_full_range_and_weight_edits_match<const N: usize>() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_0016_0064);
         let boundaries = [
             i16::MIN,
@@ -1712,11 +1714,11 @@ mod kernel_tests {
             i16::MAX,
         ];
         for _ in 0..DEFAULT_NUM_BUCKETS {
-            let mut bucket = random_bucket(&mut rng);
-            let mut us = [0; 1536];
-            let mut them = [0; 1536];
+            let mut bucket = random_bucket::<N>(&mut rng);
+            let mut us = [0; N];
+            let mut them = [0; N];
             for case in 0..64 {
-                for i in 0..1536 {
+                for i in 0..N {
                     us[i] = if case < boundaries.len() {
                         boundaries[(i + case) % boundaries.len()]
                     } else {
@@ -1732,47 +1734,66 @@ mod kernel_tests {
             }
             // .bin の論理index経由の delta と、層全体の差し替えを両方検証する。
             bucket.edit_l1(|l1| {
-                l1.apply_file_weight_delta(1536 * 7 + 991, 17);
+                l1.apply_file_weight_delta(N * 7 + 991, 17);
                 l1.biases[15] += 123;
             });
             assert_fused_l1_matches_reference(&bucket, &us, &them);
-            let replacement = random_bucket(&mut rng);
+            let replacement = random_bucket::<N>(&mut rng);
             bucket.edit_l1(|l1| *l1 = replacement.l1);
             assert_fused_l1_matches_reference(&bucket, &us, &them);
         }
     }
 
-    #[test]
-    fn fused_covers_every_i16_value() {
+    fn fused_covers_every_i16_value<const N: usize>() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(123);
-        let bucket = random_bucket(&mut rng);
-        let mut us = [127; 1536];
-        let mut them = [127; 1536];
-        for start in (0..65536).step_by(768) {
-            for i in 0..768 {
+        let bucket = random_bucket::<N>(&mut rng);
+        let mut us = [127; N];
+        let mut them = [127; N];
+        for start in (0..65536).step_by(N / 2) {
+            for i in 0..N / 2 {
                 us[i] = (start + i) as i16;
-                them[i + 768] = (start + i) as i16;
+                them[i + N / 2] = (start + i) as i16;
             }
             assert_fused_l1_matches_reference(&bucket, &us, &them);
         }
     }
 
-    #[test]
-    fn fused_l1_wraps_like_dense_with_extreme_biases() {
+    fn fused_l1_wraps_like_dense_with_extreme_biases<const N: usize>() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
-        let mut bucket = random_bucket(&mut rng);
+        let mut bucket = random_bucket::<N>(&mut rng);
         bucket.edit_l1(|l1| {
             for (i, bias) in l1.biases.iter_mut().enumerate() {
                 *bias = if i % 2 == 0 { i32::MIN } else { i32::MAX };
             }
         });
-        let us = [127; 1536];
+        let us = [127; N];
         let mut expected = [0; 16];
         bucket.l1.propagate_7bit(&sqr_clipped_relu_new(&us, &us).0, &mut expected);
         assert_eq!(
             expected,
             avx512::fused(&us, &us, bucket.fused_weights.as_ref().unwrap(), &bucket.l1.biases)
         );
+    }
+
+    #[test]
+    fn fused_supported_shapes_match_dense() {
+        fn check<const N: usize>() {
+            all_buckets_full_range_and_weight_edits_match::<N>();
+            fused_covers_every_i16_value::<N>();
+            fused_l1_wraps_like_dense_with_extreme_biases::<N>();
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+            let mut bucket = random_bucket::<N>(&mut rng);
+            bucket.fused_weights = None;
+            let us = std::array::from_fn(|_| rng.random());
+            let them = std::array::from_fn(|_| rng.random());
+            assert_eq!(
+                bucket.propagate(&sqr_clipped_relu_new(&us, &them).0),
+                bucket.propagate_accumulators(&us, &them)
+            );
+        }
+        check::<1536>();
+        check::<2304>();
+        check::<3072>();
     }
 
     #[test]
@@ -1783,23 +1804,30 @@ mod kernel_tests {
         }
         check::<768, 16, 30, 32>();
         check::<1536, 32, 62, 64>();
+        check::<2048, 16, 30, 32>();
+        check::<2304, 32, 62, 64>();
     }
 
     #[test]
     fn interrupted_edit_rebuilds_fused_weights() {
-        let mut bucket = Bucket::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bucket.edit_l1(|l1| {
-                l1.weights.make_mut().fill(1);
-                panic!("edit interrupted");
-            });
-        }));
-        assert!(result.is_err());
-        assert!(bucket.fused_weights.is_some());
-        let us = [127; 1536];
-        assert_eq!(
-            bucket.propagate(&sqr_clipped_relu_new(&us, &us).0),
-            bucket.propagate_accumulators(&us, &us)
-        );
+        fn check<const N: usize>() {
+            let mut bucket = LayerStackBucket::<N, 16, 30, 32>::new();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bucket.edit_l1(|l1| {
+                    l1.weights.make_mut().fill(1);
+                    panic!("edit interrupted");
+                });
+            }));
+            assert!(result.is_err());
+            assert!(bucket.fused_weights.is_some());
+            let us = [127; N];
+            assert_eq!(
+                bucket.propagate(&sqr_clipped_relu_new(&us, &us).0),
+                bucket.propagate_accumulators(&us, &us)
+            );
+        }
+        check::<1536>();
+        check::<2304>();
+        check::<3072>();
     }
 }

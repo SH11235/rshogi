@@ -1186,8 +1186,11 @@ impl<'a, S: MateState, const PIECES: bool> Searcher<'a, S, PIECES> {
                         child.mate_len = v.mate_len;
                         child.hand = v.hand;
                     }
-                    // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)
-                    None if self.estimate => (child.pn, child.dn) = st.initial_pn_dn(mv, or_node),
+                    // 置換表の値を使えない子だけ見積もる (見積もりは利きを数えるので軽くない)。
+                    // 上限が 0 の子 (受け方の局面) は打ち切られなければ初めて読んだときに確定するので、見積もりは探索の順序にしか効かない
+                    None if self.estimate && child_len_limit != 0 => {
+                        (child.pn, child.dn) = st.initial_pn_dn(mv, or_node)
+                    }
                     None => {}
                 }
             }

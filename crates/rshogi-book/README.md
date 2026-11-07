@@ -22,7 +22,7 @@
 | `NarrowBook` | `false` | count 情報がある場合、出現率 10% 未満の手を除外する。 |
 | `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。同値は count 大、さらに同値なら USI 昇順。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
 | `ConsiderBookMoveCount` | `false` | `true` なら count 比例抽選する。全 count が 0 の場合は等確率。 |
-| `IgnoreBookPly` | `false` | SFEN の手数を無視して局面を引く。 |
+| `IgnoreBookPly` | `true` | SFEN の手数を無視して局面を引く。既定では手数違いの同じ局面の候補を 1 つにまとめて引く。手数ごとに別の手を選ぶ定跡では `false` を指定する (手数も一致したときだけ当たる。対局の開始前に決まった手が入る大会や、途中局面からの対局では手数がずれて当たらなくなる)。 |
 | `FlippedBook` | `true` | miss 時に先後反転局面で再検索する。 |
 | `BookOnTheFly` | `false` | `true` なら定跡を丸読みせず、probe のたびにファイルから引く。大きい定跡向け。[下記](#大きい定跡を丸読みせずに使う-bookonthefly)参照。 |
 
@@ -60,7 +60,7 @@ explore の指定手も同じく除きます。
 200 手目まで定跡を使い、評価値差を先後とも 0、depth 下限を先手は無効・後手は 5 にする設定例です
 (`BookFile` は使う定跡に合わせる)。`NarrowBook=false` で出現率による除外を無効にし、
 `ConsiderBookMoveCount=false` で count による重み付けをせず等確率で抽選します
-(`BookSelectValue` は既定の `false` を前提とします)。`IgnoreBookPly=true` で手数を無視して引き、
+(`BookSelectValue` は既定の `false` を前提とします)。`IgnoreBookPly=true` (既定と同じ) で手数を無視して引き、
 `BookOnTheFly=true` で丸読みせずファイル上で検索します。
 
 ```text

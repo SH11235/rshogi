@@ -224,19 +224,21 @@ impl Reading {
         Ok(())
     }
 
-    fn same_values(&self, other: &Self) -> bool {
+    /// 手数・計測情報を除く、台帳の重複判定に使う値の一致。
+    pub(super) fn same_values(&self, other: &Self) -> bool {
         self.multipv == other.multipv && self.bestmove == other.bestmove
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Record {
-    kind: String,
-    settings: Settings,
-    provenance: String,
+/// 台帳に保存する条件付きの読み。
+pub(super) struct Record {
+    pub kind: String,
+    pub settings: Settings,
+    pub provenance: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    prefetch: bool,
-    reading: Reading,
+    pub prefetch: bool,
+    pub reading: Reading,
 }
 
 pub(super) struct LockedFile(pub File);
@@ -414,6 +416,18 @@ impl Journal {
         provenance: String,
         prefetch: bool,
     ) -> Result<()> {
+        self.append_unsynced(reading, settings, provenance, prefetch)?;
+        self.lock.0.sync_data()?;
+        Ok(())
+    }
+
+    fn append_unsynced(
+        &mut self,
+        reading: Reading,
+        settings: &Settings,
+        provenance: String,
+        prefetch: bool,
+    ) -> Result<()> {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と追記の条件が違います");
         }
@@ -438,9 +452,9 @@ impl Journal {
             prefetch,
             reading,
         };
-        serde_json::to_writer(&mut self.lock.0, &rec)?;
-        self.lock.0.write_all(b"\n")?;
-        self.lock.0.sync_data()?;
+        let mut bytes = serde_json::to_vec(&rec)?;
+        bytes.push(b'\n');
+        self.lock.0.write_all(&bytes)?;
         if prefetch {
             self.prefetched.insert(key.clone());
         }
@@ -492,16 +506,22 @@ impl Journal {
                     }
                 }
             }
-            pending.insert(reading.key.clone(), (reading, provenance));
+            pending.entry(reading.key.clone()).or_insert((reading, provenance));
         }
         sink.before_append()?;
         let mut appended = 0;
+        let mut wrote = false;
         for (reading, provenance) in pending.into_values() {
             if !self.records.contains_key(&reading.key) {
                 appended += 1;
             }
             let prefetch = prefetched.contains(&reading.key);
-            self.append_marked(reading, settings, provenance, prefetch)?;
+            self.append_unsynced(reading, settings, provenance, prefetch)?;
+            wrote = true;
+        }
+        // 新しい局面が 0 件でも、同じ値に先読みの印を足した行は書いているので、その行を失わないよう同期する。
+        if wrote {
+            self.lock.0.sync_data()?;
         }
         Ok((appended, total - appended, conflicts))
     }
@@ -609,23 +629,9 @@ pub(super) fn read_source(
             if rec.settings.fingerprint != settings.fingerprint {
                 return Ok(());
             }
-            // 指紋が同じでも条件の中身が違う行は、指紋の付け間違いか改変なので取り込まない。
-            if rec.settings.computed_fingerprint()? != settings.fingerprint
-                || !rec.settings.same_condition(&settings)
-            {
-                bail!("取り込み元に指紋と条件の合わない行があります: {}", rec.reading.key);
-            }
-            merge_engine_version(&mut settings, &rec.settings)?;
-            rec.reading.validate(&rec.settings)?;
+            validate_source_record(&rec, &mut settings)?;
             if !keep(&rec.reading.key) {
-                let short = |bytes: &[u8]| -> [u8; 16] {
-                    Sha256::digest(bytes)[..16].try_into().expect("16 バイト")
-                };
-                let values =
-                    short(&serde_json::to_vec(&(&rec.reading.multipv, &rec.reading.bestmove))?);
-                if *skipped.entry(short(rec.reading.key.as_bytes())).or_insert(values) != values {
-                    bail!("取り込み元の重複が矛盾します: {}", rec.reading.key);
-                }
+                remember_values(&mut skipped, &rec.reading)?;
                 return Ok(());
             }
             if let Some(old) = records.get(&rec.reading.key)
@@ -717,12 +723,159 @@ fn for_each_complete_line(
     Ok(())
 }
 
-fn parse_record(bytes: &[u8]) -> Result<Record> {
+/// 最初の確定行が tree 台帳でなければ None、それ以外は確定行を走査して末尾の有無を返す。
+pub(super) fn visit_records(
+    path: &Path,
+    mut visit: impl FnMut(Record) -> Result<()>,
+) -> Result<Option<bool>> {
+    let file = File::open(path).with_context(|| format!("台帳: {}", path.display()))?;
+    let limit = file.metadata().with_context(|| format!("台帳: {}", path.display()))?.len();
+    let mut reader = BufReader::new(file.take(limit));
+    let mut first = Vec::new();
+    let n = reader.read_until(b'\n', &mut first)?;
+    if !first.ends_with(b"\n") {
+        return Ok(None);
+    }
+    let is_tree = serde_json::from_slice::<serde_json::Value>(&first)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .map(|kind| kind.starts_with("book-tree-"))
+        })
+        .unwrap_or(false);
+    if !is_tree {
+        return Ok(None);
+    }
+    let mut ignored_tail = false;
+    parse_record(&first)
+        .and_then(&mut visit)
+        .and_then(|()| {
+            for_each_complete_line(
+                &mut reader,
+                limit - n as u64,
+                |bytes| visit(parse_record(bytes)?),
+                &mut ignored_tail,
+            )
+        })
+        .with_context(|| format!("台帳: {}", path.display()))?;
+    Ok(Some(ignored_tail))
+}
+
+pub(super) fn parse_record(bytes: &[u8]) -> Result<Record> {
     let rec: Record = serde_json::from_slice(bytes).context("tree 台帳の形式が不正です")?;
     if rec.kind != VERSION || rec.settings.version != VERSION {
         bail!("台帳の版が違います");
     }
     Ok(rec)
+}
+
+/// 読みを保持せず、同じ局面に異なる値が混ざっていないか確かめる。
+fn remember_values(seen: &mut HashMap<[u8; 16], [u8; 16]>, reading: &Reading) -> Result<()> {
+    let short = |bytes: &[u8]| -> [u8; 16] {
+        Sha256::digest(bytes)[..16].try_into().expect("16 バイト")
+    };
+    let values = short(&serde_json::to_vec(&(&reading.multipv, &reading.bestmove))?);
+    if *seen.entry(short(reading.key.as_bytes())).or_insert(values) != values {
+        bail!("取り込み元の重複が矛盾します: {}", reading.key);
+    }
+    Ok(())
+}
+
+/// 全体を検査した取り込み元の、同じ条件の完全な行。
+pub(super) struct StagedSource {
+    pub file: File,
+    pub sha256: String,
+    pub row_marks: File,
+    pub skipped_condition: usize,
+    pub ignored_tail: bool,
+}
+
+/// 全体を検査してから、同じ条件の行だけを一時ファイルに渡す。
+pub(super) fn stage_live_source(path: &Path, dst: &Settings) -> Result<StagedSource> {
+    super::paths::reject_symlink(path)?;
+    if !std::fs::metadata(path)?.is_file() {
+        bail!("取り込み元は通常のファイルが必要です");
+    }
+    let file = File::open(path)?;
+    file_lock::try_lock_shared(&file).context("取り込み元の台帳が使用中です")?;
+    let _unlock = UnlockOnDrop(file.try_clone()?);
+    let mut reader = BufReader::new(file);
+    let mut staged =
+        tempfile::tempfile_in(path.parent().context("取り込み元の親 dir がありません")?)?;
+    let mut hash = Sha256::new();
+    let mut conditions: BTreeMap<String, Settings> = BTreeMap::new();
+    let mut complete = 0u64;
+    let mut ignored_tail = false;
+    for_each_complete_line(
+        &mut reader,
+        u64::MAX,
+        |bytes| {
+            hash.update(bytes);
+            complete += bytes.len() as u64;
+            let rec = parse_record(bytes)?;
+            let known = conditions
+                .entry(rec.settings.fingerprint.clone())
+                .or_insert_with(|| rec.settings.clone());
+            merge_engine_version(known, &rec.settings)?;
+            Ok(())
+        },
+        &mut ignored_tail,
+    )?;
+    if conditions.is_empty() {
+        bail!("取り込み元の台帳が空です");
+    }
+    let mut compatible = BTreeSet::new();
+    for (fp, known) in &conditions {
+        if super::transfer::same_reading_condition(known, dst) || fp == &dst.fingerprint {
+            super::transfer::check_compatible(known, dst, false)?;
+            compatible.insert(fp.clone());
+        }
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let dir = path.parent().context("取り込み元の親 dir がありません")?;
+    let mut buckets = super::source_buckets::Buckets::new(dir, complete)?;
+    let mut rows = 0;
+    let mut foreign = 0;
+    for_each_complete_line(
+        &mut reader,
+        complete,
+        |bytes| {
+            let rec = parse_record(bytes)?;
+            if !compatible.contains(&rec.settings.fingerprint) {
+                foreign += 1;
+                return Ok(());
+            }
+            let known =
+                conditions.get_mut(&rec.settings.fingerprint).context("条件がありません")?;
+            validate_source_record(&rec, known)?;
+            buckets.push(&rec.reading, rows, rec.prefetch)?;
+            rows += 1;
+            staged.write_all(bytes)?;
+            Ok(())
+        },
+        &mut false,
+    )?;
+    let row_marks = buckets.finish(dir, rows)?;
+    staged.seek(SeekFrom::Start(0))?;
+    Ok(StagedSource {
+        file: staged,
+        sha256: format!("{:x}", hash.finalize()),
+        row_marks,
+        skipped_condition: foreign,
+        ignored_tail,
+    })
+}
+
+fn validate_source_record(rec: &Record, settings: &mut Settings) -> Result<()> {
+    if rec.settings.computed_fingerprint()? != settings.fingerprint
+        || !rec.settings.same_condition(settings)
+    {
+        bail!("取り込み元に指紋と条件の合わない行があります: {}", rec.reading.key);
+    }
+    merge_engine_version(settings, &rec.settings)?;
+    rec.reading.validate(&rec.settings)
 }
 
 /// 版を記録する前の行と後の行が同じ指紋に混ざる。指紋はバイナリの内容を含むので、分かった版を採る。
@@ -863,6 +1016,45 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn staged_source_preserves_rows_and_aggregates_marks_without_retaining_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.jsonl");
+        let mut first = record("", 0);
+        first.settings.fingerprint = first.settings.computed_fingerprint().unwrap();
+        let mut second = record(&first.settings.fingerprint, 8);
+        second.prefetch = true;
+        let mut duplicate = first.clone();
+        duplicate.prefetch = true;
+        duplicate.reading.ply = 99;
+        let mut foreign = first.clone();
+        foreign.settings.nodes += 1;
+        foreign.settings.fingerprint = foreign.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        for rec in [&first, &second, &duplicate, &foreign] {
+            write_record(&mut file, rec);
+        }
+        file.write_all(b"unfinished").unwrap();
+        drop(file);
+        let mut expected = Vec::new();
+        for rec in [&first, &second, &duplicate] {
+            serde_json::to_writer(&mut expected, rec).unwrap();
+            expected.push(b'\n');
+        }
+        for _ in 0..2 {
+            let mut source = stage_live_source(&path, &first.settings).unwrap();
+            let mut rows = Vec::new();
+            source.file.read_to_end(&mut rows).unwrap();
+            assert_eq!(rows, expected);
+            let mut marks = Vec::new();
+            source.row_marks.read_to_end(&mut marks).unwrap();
+            assert_eq!(marks, [1, 1, 2]);
+            assert_eq!(source.skipped_condition, 1);
+            assert!(source.ignored_tail);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

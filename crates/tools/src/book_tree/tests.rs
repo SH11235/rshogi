@@ -7,7 +7,7 @@ use std::path::Path;
 
 const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
 
-fn settings() -> Settings {
+pub(super) fn settings() -> Settings {
     Settings::new(&ReadingArgs {
         engine: std::env::current_exe().unwrap(),
         engine_options: vec![
@@ -29,7 +29,7 @@ fn legal(key: &str) -> Vec<String> {
     moves.sort();
     moves
 }
-fn reading(key: &str, rows: &[(&str, i32)], settings: &Settings) -> Reading {
+pub(super) fn reading(key: &str, rows: &[(&str, i32)], settings: &Settings) -> Reading {
     let mut mp: Vec<_> = rows
         .iter()
         .map(|(m, v)| Pv {
@@ -1528,4 +1528,318 @@ fn serve_startup_rejects_speculate_options_without_their_prerequisites() {
     let error = service::serve(args).unwrap_err();
     assert!(error.to_string().contains("speculate-at"), "{error:#}");
     assert!(!journal.exists());
+}
+
+fn import_file(path: &Path, settings: &Settings, readings: &[Reading]) {
+    let mut journal = Journal::open(path, &settings.fingerprint).unwrap();
+    for reading in readings {
+        journal.append(reading.clone(), settings, "fixture".into()).unwrap();
+    }
+}
+
+fn drain_import(
+    inbox: &mut super::live_import::Inbox,
+    journal: &mut Journal,
+    settings: &Settings,
+) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut messages = Vec::new();
+    loop {
+        assert!(std::time::Instant::now() < deadline, "{}", inbox.status());
+        if let Some(message) = inbox.poll(journal, settings).unwrap() {
+            messages.push(message);
+        }
+        if matches!(inbox.status()["state"].as_str(), Some("done" | "failed")) {
+            return messages;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+    let settings = settings();
+    let existing = reading(ROOT, &[("5i5h", 10)], &settings);
+    let other_key = child(ROOT, "5i5h").unwrap();
+    let added = reading(&other_key, &[], &settings);
+    let mut conflict = existing.clone();
+    conflict.multipv[0].cp += 1;
+    let dst = dir.path().join("dst.jsonl");
+    let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
+    journal.append(existing.clone(), &settings, "engine".into()).unwrap();
+    let source = dir.path().join("source.jsonl");
+    import_file(&source, &settings, &[conflict, added.clone()]);
+    let same = dir.path().join("same.jsonl");
+    import_file(&same, &settings, std::slice::from_ref(&existing));
+    // 同じ値の重複と食い違いは別の受付ファイルで扱う。
+    let first = state.join("import/01.jsonl");
+    std::fs::copy(&same, &first).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
+    let mut foreign = settings.clone();
+    foreign.nodes += 1;
+    foreign.fingerprint = foreign.computed_fingerprint().unwrap();
+    let foreign_path = dir.path().join("foreign.jsonl");
+    import_file(&foreign_path, &foreign, &[reading(ROOT, &[], &foreign)]);
+    let mut combined = Vec::new();
+    for line in std::fs::read_to_string(&source).unwrap().lines() {
+        let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+        record["prefetch"] = true.into();
+        combined.extend(serde_json::to_vec(&record).unwrap());
+        combined.push(b'\n');
+    }
+    combined.extend_from_within(..);
+    combined.extend(std::fs::read(&foreign_path).unwrap());
+    std::fs::write(state.join("import/02.jsonl"), combined).unwrap();
+    let tree_dir = dir.path().join("tree");
+    std::fs::create_dir(&tree_dir).unwrap();
+    let mut def = definition(&tree_dir, 0);
+    def.depth = 0;
+    def.extra.clear();
+    std::fs::write(&def.paths, format!("{other_key}\t2\t\n")).unwrap();
+    let mut tree = Tree::load(def, &settings).unwrap();
+    let missing = tree.advance(&journal).unwrap();
+    assert!(missing.iter().any(|(key, _)| key == &other_key));
+    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert_eq!(inbox.status()["counts"]["conflicts"], 2);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_condition"], 1);
+    assert!(state.join("import/done/02.jsonl").exists());
+    assert_eq!(journal.get(ROOT), Some(&existing));
+    assert_eq!(journal.get(&other_key), Some(&added));
+    assert!(journal.prefetched.contains(&other_key));
+    assert!(!journal.prefetched.contains(ROOT));
+    let tsv = std::fs::read_to_string(state.join("import/done/02.jsonl.conflicts.tsv")).unwrap();
+    assert_eq!(tsv.lines().count(), 3);
+    assert_eq!(tsv.lines().nth(1), tsv.lines().nth(2));
+    assert!(tsv.contains("existing_bestmove"));
+    tree.advance(&journal).unwrap();
+    assert!(tree.finished);
+    let size = std::fs::metadata(&dst).unwrap().len();
+    let mut late = added.clone();
+    late.multipv[0].cp += 50;
+    let mut alerts = Vec::new();
+    assert!(
+        !inbox
+            .complete_worker(&mut journal, &settings, late, true, |m| alerts.push(m.to_owned()))
+            .unwrap()
+    );
+    assert_eq!(alerts.len(), 1);
+    assert!(alerts[0].contains(&other_key));
+    assert!(
+        !inbox
+            .complete_worker(&mut journal, &settings, added.clone(), true, |_| panic!("同じ値"))
+            .unwrap()
+    );
+    assert_eq!(inbox.status()["discarded_worker"], 2);
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), size);
+    std::fs::copy(state.join("import/done/02.jsonl"), state.join("import/03.jsonl")).unwrap();
+    drain_import(&mut inbox, &mut journal, &settings);
+    assert_eq!(inbox.status()["counts"]["appended"], 0);
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), size);
+}
+
+#[test]
+fn live_import_rejects_whole_invalid_file_and_ignores_unpublished_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let dst = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
+    let good = dir.path().join("good.jsonl");
+    import_file(&good, &settings, &[reading(ROOT, &[], &settings)]);
+    let mut bad = std::fs::read(&good).unwrap();
+    bad.extend(b"not json\n");
+    std::fs::write(dir.path().join("import/01.jsonl"), bad).unwrap();
+    std::fs::write(dir.path().join("import/writing.tmp"), "not json").unwrap();
+    let messages = drain_import(&mut inbox, &mut journal, &settings);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("取り込み失敗"));
+    assert!(dir.path().join("import/failed/01.jsonl").exists());
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
+    std::fs::copy(&good, dir.path().join("import/02.jsonl")).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    inbox.poll(&mut journal, &settings).unwrap();
+    assert!(dir.path().join("import/writing.tmp").exists());
+    assert!(!dir.path().join("import/failed/writing.tmp").exists());
+}
+
+#[test]
+fn live_import_restarts_after_partial_append_without_duplicate_records() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let source = dir.path().join("import/01.jsonl");
+    let row = |col| match col {
+        0 => "K8".to_owned(),
+        8 => "8K".to_owned(),
+        n => format!("{n}K{}", 8 - n),
+    };
+    let mut readings = Vec::new();
+    for white in 0..9 {
+        for black in 0..9 {
+            let key = format!("{}/9/9/9/9/9/9/9/{} b -", row(white).to_lowercase(), row(black));
+            readings.push(reading(&key, &[], &settings));
+        }
+    }
+    import_file(&source, &settings, &readings);
+    let dst = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline);
+        inbox.poll_short(&mut journal, &settings).unwrap();
+        if inbox.status()["state"] == "appending" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(inbox.status()["counts"]["appended"].as_u64().unwrap() < 81);
+    assert!(source.exists());
+    drop(inbox);
+    drop(journal);
+    // 周回の途中で、完全な行と次の行の一部だけが永続化された状態を再現する。
+    let persisted = std::fs::read_to_string(&dst).unwrap().lines().count();
+    let source_bytes = std::fs::read_to_string(&source).unwrap();
+    let rows: Vec<_> = source_bytes.split_inclusive('\n').collect();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&dst).unwrap();
+        file.write_all(rows[persisted].as_bytes()).unwrap();
+        let tail = rows[persisted + 1].as_bytes();
+        file.write_all(&tail[..tail.len() / 2]).unwrap();
+        file.sync_data().unwrap();
+    }
+    let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    drain_import(&mut inbox, &mut journal, &settings);
+    for reading in &readings {
+        assert_eq!(journal.get(&reading.key), Some(reading));
+    }
+    assert_eq!(std::fs::read_to_string(&dst).unwrap().lines().count(), 81);
+}
+
+#[test]
+fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appending() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let good = dir.path().join("good.jsonl");
+    let original = reading(ROOT, &[], &settings);
+    import_file(&good, &settings, std::slice::from_ref(&original));
+    let first = std::fs::read(&good).unwrap();
+    let mut rec: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    rec["reading"]["multipv"][0]["cp"] = 12345.into();
+    let mut conflict = first.clone();
+    conflict.extend(serde_json::to_vec(&rec).unwrap());
+    conflict.push(b'\n');
+    let mut forged: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    forged["settings"]["fingerprint"] = "forged".into();
+    let mut forged = serde_json::to_vec(&forged).unwrap();
+    forged.push(b'\n');
+    for (i, bytes) in [conflict, forged].into_iter().enumerate() {
+        let state = dir.path().join(i.to_string());
+        let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+        let dst = state.join("journal.jsonl");
+        let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
+        std::fs::write(state.join("import/01.jsonl"), bytes).unwrap();
+        assert_eq!(drain_import(&mut inbox, &mut journal, &settings).len(), 1);
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn live_import_checks_other_binaries_by_source_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dst = settings();
+    dst.engine_version = Some("stable-source".into());
+    let mut src = dst.clone();
+    src.engine_sha256 = "other-cpu-build".into();
+    src.fingerprint = src.computed_fingerprint().unwrap();
+    let path = dir.path().join("compatible.jsonl");
+    import_file(&path, &src, &[reading(ROOT, &[], &src)]);
+    let staged = super::journal::stage_live_source(&path, &dst).unwrap();
+    assert!(staged.file.metadata().unwrap().len() > 0);
+    assert_eq!(staged.skipped_condition, 0);
+    src.engine_version = Some("different-source".into());
+    let path = dir.path().join("incompatible.jsonl");
+    import_file(&path, &src, &[reading(ROOT, &[], &src)]);
+    assert!(super::journal::stage_live_source(&path, &dst).is_err());
+}
+
+#[test]
+fn live_import_merges_known_version_before_checking_compatibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dst = settings();
+    dst.engine_version = Some("stable-source".into());
+    let mut src = dst.clone();
+    src.engine_sha256 = "other-cpu-build".into();
+    src.fingerprint = src.computed_fingerprint().unwrap();
+    let path = dir.path().join("source.jsonl");
+    import_file(&path, &src, &[reading(ROOT, &[], &src)]);
+    let known = std::fs::read_to_string(&path).unwrap();
+    let mut old: serde_json::Value = serde_json::from_str(&known).unwrap();
+    old["settings"]["engine_version"] = serde_json::Value::Null;
+    let old = format!("{old}\n");
+    for bytes in [format!("{old}{known}"), format!("{known}{old}")] {
+        std::fs::write(&path, bytes).unwrap();
+        let staged = super::journal::stage_live_source(&path, &dst).unwrap();
+        assert_eq!(staged.skipped_condition, 0);
+        assert_eq!(std::io::BufRead::lines(std::io::BufReader::new(staged.file)).count(), 2);
+    }
+}
+
+#[test]
+fn live_import_batch_keeps_first_duplicate_metadata() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let first = reading(ROOT, &[], &settings);
+    let source = dir.path().join("source.jsonl");
+    import_file(&source, &settings, std::slice::from_ref(&first));
+    let bytes = std::fs::read_to_string(source).unwrap();
+    let mut later: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    later["reading"]["sec"] = 99.into();
+    later["reading"]["ply"] = 20.into();
+    later["prefetch"] = true.into();
+    std::fs::write(dir.path().join("import/duplicates.jsonl"), format!("{bytes}{later}\n"))
+        .unwrap();
+    let mut journal =
+        Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
+    drain_import(&mut inbox, &mut journal, &settings);
+    assert_eq!(journal.get(ROOT), Some(&first));
+    assert!(journal.prefetched.contains(ROOT));
+    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
+}
+
+#[test]
+fn live_import_preserves_prefetch_from_duplicate_in_later_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let first = reading(ROOT, &[], &settings);
+    let source = dir.path().join("source.jsonl");
+    import_file(&source, &settings, std::slice::from_ref(&first));
+    let bytes = std::fs::read_to_string(source).unwrap();
+    let mut later: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    later["prefetch"] = true.into();
+    let incoming = format!("{}{later}\n", bytes.repeat(1024));
+    std::fs::write(dir.path().join("import/duplicates.jsonl"), incoming).unwrap();
+    let path = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&path, &settings.fingerprint).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    assert!(journal.prefetched.contains(ROOT));
+    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1024);
+    drop(journal);
+    let journal = Journal::open(&path, &settings.fingerprint).unwrap();
+    assert!(journal.prefetched.contains(ROOT));
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
 }

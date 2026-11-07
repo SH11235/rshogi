@@ -1559,9 +1559,19 @@ fn write_certified(
     loop {
         assign_outputs(graph, params, results, mirrored, &restricted);
         let conflicts = flip_conflicts(graph, params, mirrored);
-        if conflicts > 0 {
+        if !conflicts.is_empty() {
+            let sample = conflicts
+                .iter()
+                .take(5)
+                .map(|&(v, stored, flipped)| {
+                    format!("{} (保存 {stored}・反対 {flipped})", graph.key(v))
+                })
+                .collect::<Vec<_>>()
+                .join(" / ");
             bail!(
-                "反転キーで合流した {conflicts} 局面で、保存されている向きの行が反対の向きの値を保ちません。                 1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください"
+                "反転キーで合流した {} 局面 [{}] で、保存されている向きの行が反対の向きの値を保ちません。1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください",
+                conflicts.len(),
+                sample
             );
         }
         let violations = certify(graph, params, &mirrored_values);
@@ -1587,26 +1597,30 @@ fn write_certified(
 }
 
 /// 反転キーで合流した向きで、書き出し値が最大の行のどれを指しても、その向きで解いた値を保つか。
-/// 保たない局面の数を返す。千日手の値が先後で同じなら、両方の向きは同じ問題なので 0 になる。
-fn flip_conflicts(graph: &Graph, params: BestParams, mirrored: &ResultsOf<'_>) -> usize {
+/// 保たない局面と保存・反対の向きの値を返す。千日手の値が先後で同じなら空になる。
+fn flip_conflicts(
+    graph: &Graph,
+    params: BestParams,
+    mirrored: &ResultsOf<'_>,
+) -> Vec<(usize, i32, i32)> {
     (0..graph.len())
-        .filter(|&v| {
-            let Some(mirror) = mirrored(graph, v) else {
-                return false;
-            };
+        .filter_map(|v| {
+            let mirror = mirrored(graph, v)?;
             let rows = graph.rows(v);
             let best = rows
                 .clone()
                 .filter(|&row| params.counts(graph, row))
                 .map(|row| graph.new[row])
-                .max();
-            rows.enumerate().any(|(idx, row)| {
-                params.counts(graph, row)
-                    && Some(graph.new[row]) == best
-                    && mirror.rows[idx].is_none_or(|(value, _)| value != mirror.value)
-            })
+                .max()?;
+            rows.enumerate()
+                .any(|(idx, row)| {
+                    params.counts(graph, row)
+                        && graph.new[row] == best
+                        && mirror.rows[idx].is_none_or(|(value, _)| value != mirror.value)
+                })
+                .then_some((v, best, mirror.value))
         })
-        .count()
+        .collect()
 }
 
 /// 先手 (`black`) か後手を自分とした後退解析の問題。千日手の値を自分の側の値に固定した 2 人零和の問題で、
@@ -3050,6 +3064,35 @@ mod tests {
     }
 
     #[test]
+    fn flip_conflict_message_limits_keys_but_keeps_total_count() {
+        let rows: [&[_]; 7] = [&[(50, None)]; 7];
+        let mut graph = rows_graph(&rows, &[false; 7], &[true; 7]);
+        let params = BestParams {
+            draws: DrawValues::default(),
+            merge: MergeMode::Replace,
+            skip_unusable_moves: false,
+        };
+        let stored = |_: &Graph, _: usize| {
+            Some(NodeResult {
+                value: 50,
+                rows: vec![Some((50, Some(0)))],
+                guaranteed: Some(0),
+                preferred: Some(0),
+            })
+        };
+        let flipped = |g: &Graph, v: usize| stored(g, v).map(|r| NodeResult { value: 100, ..r });
+        assert_eq!(flip_conflicts(&graph, params, &flipped).len(), 7);
+        let error = write_certified(&mut graph, params, &stored, &flipped).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("反転キーで合流した 7 局面 ["), "{error}");
+        for v in 0..5 {
+            assert!(message.contains(&format!("{} (保存 50・反対 100)", graph.key(v))), "{error}");
+        }
+        assert!(!message.contains(graph.key(5)), "{error}");
+        assert!(!message.contains(graph.key(6)), "{error}");
+    }
+
+    #[test]
     fn flipped_orientation_that_needs_another_move_is_rejected() {
         // B と C 以降は反転キーで合流し、A から進むと C は後手番になる。先手は千日手を -70 とみて C で -50 の葉を選ぶが、
         // 千日手を 0 とみる後手には循環を続ける方が良いので、保存されている 1 行では両方の向きを表せない。
@@ -3063,12 +3106,25 @@ mod tests {
         ];
         let black = [false, false, true, false, true, false];
         let mut graph = rows_graph(&rows, &[false; 6], &black);
+        graph.sfens = Texts::default();
+        for (i, side) in black.iter().enumerate() {
+            graph
+                .sfens
+                .push(&format!(
+                    "4k4/9/9/9/9/9/9/9/4K4 {} {} 1",
+                    if *side { "b" } else { "w" },
+                    if i == 0 { "-".into() } else { format!("{i}P") }
+                ))
+                .unwrap();
+        }
+        let key = graph.key(2).to_owned();
         let draws = DrawValues {
             black: -70,
             white: 0,
         };
         let error = propagate_values(&mut graph, draws, MergeMode::Replace).unwrap_err();
-        assert!(error.to_string().contains("反転キーで合流した"), "{error}");
+        assert!(error.to_string().contains("反転キーで合流した 1 局面"), "{error}");
+        assert!(error.to_string().contains(&format!("[{key} (保存 -50・反対 0)]")), "{error}");
         // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
         let mut graph = rows_graph(&rows, &[false; 6], &black);
         propagate_values(&mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();

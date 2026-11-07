@@ -74,7 +74,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `Threads` | Number of search threads (`go nodes N` limits the total across all threads) | 1 |
 | `USI_Hash` | Hash table size in MB | 256 |
 | `EvalHash` | Evaluation hash size (MiB, 0 for an empty table) | 256 |
-| `UseEvalHash` | Use the evaluation hash | true |
+| `UseEvalHash` | Use the evaluation hash (false also skips allocating the `EvalHash` table) | true |
 | `EvalHashLargePages` | Attempt Large Pages allocation for EvalHash (false uses a regular Vec allocation) | true |
 | `NetworkDelay` | Network delay compensation (ms) | 0 |
 | `NetworkDelay2` | Additional delay for uncertain situations | 0 |

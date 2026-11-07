@@ -51,12 +51,15 @@ pub(super) struct AuditArgs {
     /// 語彙と読み条件の表を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
-    /// 点検の表 (TSV) の出力先。main が 1 位から --line 以上負ける局面を書く
+    /// 点検の表 (TSV) の出力先
     #[arg(long)]
     table: PathBuf,
-    /// 点検の線。main が伝播後の 1 位からこの値以上負ける局面を表に出す
+    /// 点検の線。main が伝播後の 1 位からこの値以上負ける局面を表に出す。--deep-plies 指定時は線未満も対象にする
     #[arg(long, default_value_t = 40)]
     line: i32,
+    /// 両方の手の先で元データの main が N 手以上続けば、正の差が --line 未満でも対象にする
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    deep_plies: Option<usize>,
     /// alt の降格・bench の復帰を判定する基準値との差
     #[arg(long, default_value_t = 100)]
     demote_line: i32,
@@ -173,6 +176,8 @@ pub(super) struct AuditSummary {
     pub below_line: BySide,
     /// main が 1 位から線以上負ける局面の数。
     pub at_or_above_line: BySide,
+    /// 両方の先が指定手数以上続くため、線未満でも対象にした局面の数。
+    pub deep_below_line: BySide,
     pub unknown_main: BySide,
     /// main の値が分からない局面のうち、main・alt が 2 手以上の局面の数。
     pub unknown_main_multi: BySide,
@@ -277,7 +282,8 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (findings, summary, book) = audit(&positions, draws, args.line, args.fill_replies)?;
+    let (findings, summary, book) =
+        audit(&positions, draws, args.line, args.fill_replies, args.deep_plies)?;
     let (changes, replacements) = plan_replacements(
         &rows,
         &curated_records,
@@ -290,7 +296,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     if let Some(out) = &args.out_db {
         write_audited_db(out, &positions.0, &book)?;
     }
-    print!("{}", format_summary(&summary, args.line, draws));
+    print!("{}", format_summary(&summary, args.line, draws, args.deep_plies));
     if refutation {
         let outputs = RefutationOutputs {
             table: args.refutation_table.as_deref(),
@@ -1160,12 +1166,49 @@ pub(super) fn evaluate(
         .collect()
 }
 
+fn main_continues_after(
+    positions: &BTreeMap<String, MasterPosition>,
+    key: &str,
+    mv: &str,
+    limit: usize,
+) -> Result<bool> {
+    let mut pos = position_from_sfen(&format!("{key} 1"))?;
+    if apply_usi(&mut pos, mv).is_err() {
+        return Ok(false);
+    }
+    let mut visited = BTreeSet::from([key.to_owned()]);
+    for _ in 0..limit {
+        let mut sfen = pos.to_sfen();
+        if !positions.contains_key(strip_ply(&sfen)) {
+            let Some(flipped) = rshogi_book::flipped_key(&sfen)
+                .filter(|flipped| positions.contains_key(strip_ply(flipped)))
+            else {
+                return Ok(false);
+            };
+            pos = position_from_sfen(&flipped)?;
+            sfen = flipped;
+        }
+        let key = strip_ply(&sfen);
+        if !visited.insert(key.to_owned()) {
+            return Ok(false);
+        }
+        let Some(main) = positions.get(key).and_then(|p| p.moves.first()) else {
+            return Ok(false);
+        };
+        if apply_usi(&mut pos, &main.mv).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
 pub(super) fn audit(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
     fill_replies: bool,
+    deep_plies: Option<usize>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
@@ -1220,16 +1263,25 @@ pub(super) fn audit(
         }
         if gap < line {
             summary.below_line[side] += 1;
+            let Some(limit) = deep_plies else {
+                continue;
+            };
+            if !main_continues_after(positions, key, &main.mv, limit)?
+                || !main_continues_after(positions, key, &best.mv, limit)?
+            {
+                continue;
+            }
+            summary.deep_below_line[side] += 1;
         } else {
             summary.at_or_above_line[side] += 1;
-            findings.push(Finding {
-                key: key.clone(),
-                ply: position.ply.clone(),
-                source: position.source.clone(),
-                main: main.clone(),
-                best: best.clone(),
-            });
         }
+        findings.push(Finding {
+            key: key.clone(),
+            ply: position.ply.clone(),
+            source: position.source.clone(),
+            main: main.clone(),
+            best: best.clone(),
+        });
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
     Ok((findings, summary, AuditedBook { graph, known }))
@@ -1267,7 +1319,12 @@ pub(super) fn format_table(findings: &[Finding]) -> String {
     text
 }
 
-pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValues) -> String {
+pub(super) fn format_summary(
+    summary: &AuditSummary,
+    line: i32,
+    draws: DrawValues,
+    deep_plies: Option<usize>,
+) -> String {
     let sides = |c: BySide| format!("{} (先手番 {} / 後手番 {})", c[0] + c[1], c[0], c[1]);
     let changed: usize = summary.abs_deltas.values().sum();
     let mut text = String::new();
@@ -1307,6 +1364,12 @@ pub(super) fn format_summary(summary: &AuditSummary, line: i32, draws: DrawValue
         "main が 1 位から {line} 以上負ける局面: {}",
         sides(summary.at_or_above_line)
     ));
+    if let Some(limit) = deep_plies {
+        out(format!(
+            "両方の先が {limit} 手以上続くので線未満でも対象にした局面: 先手番 {}・後手番 {}",
+            summary.deep_below_line[0], summary.deep_below_line[1]
+        ));
+    }
     out(format!(
         "main の値が分からない局面: {} / うち main・alt が 2 手以上: {}",
         sides(summary.unknown_main),
@@ -1367,7 +1430,7 @@ mod tests {
         draws: DrawValues,
     ) -> Result<(Vec<Finding>, AuditSummary)> {
         let parsed = parse_master_rows(text.as_bytes())?;
-        let (findings, summary, _) = audit(&parsed, draws, line, false)?;
+        let (findings, summary, _) = audit(&parsed, draws, line, false, None)?;
         Ok((findings, summary))
     }
 
@@ -1420,6 +1483,128 @@ mod tests {
         let (findings, summary) = run_audit(&text, 51);
         assert_eq!(findings.len(), 1);
         assert_eq!(summary.below_line, [0, 1]);
+    }
+
+    fn deep_fixture() -> String {
+        master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", ""),
+            (A, "5a5b", "main", "-20"),
+            (B, "4h4g", "main", "20"),
+            ("4k4/9/9/9/9/9/9/3K5/9 w -", "5a5b", "main", "-40"),
+            ("9/4k4/9/9/9/9/9/3K5/9 b -", "6h6g", "main", "40"),
+        ])
+    }
+
+    #[test]
+    fn deep_plies_includes_below_line_when_both_continuations_are_long_enough() {
+        let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!(findings[0].gap(), 20);
+        assert_eq!(summary.below_line, [1, 0]);
+        assert_eq!(summary.at_or_above_line, [0, 0]);
+        assert_eq!(summary.deep_below_line, [1, 0]);
+        assert!(
+            format_summary(&summary, 40, DrawValues::both(0), Some(2)).contains(
+                "両方の先が 2 手以上続くので線未満でも対象にした局面: 先手番 1・後手番 0"
+            )
+        );
+    }
+
+    #[test]
+    fn deep_plies_follows_flipped_continuation() {
+        let mut rows = parse_master(&deep_fixture()).unwrap();
+        for row in &mut rows {
+            if [A, B].contains(&row.get("key")) {
+                let flipped = rshogi_book::flipped_key(row.get("key")).unwrap();
+                row.set("key", strip_ply(&flipped).to_owned());
+                row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+            }
+        }
+        let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!(findings[0].gap(), 20);
+        assert_eq!(summary.deep_below_line, [1, 0]);
+    }
+
+    #[test]
+    fn deep_plies_includes_below_line_for_white() {
+        let mut rows = parse_master(&deep_fixture()).unwrap();
+        for row in &mut rows {
+            let flipped = rshogi_book::flipped_key(row.get("key")).unwrap();
+            row.set("key", strip_ply(&flipped).to_owned());
+            row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+        }
+        let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        let flipped_root = rshogi_book::flipped_key(ROOT).unwrap();
+        assert_eq!(findings[0].key, strip_ply(&flipped_root));
+        assert_eq!(findings[0].gap(), 20);
+        assert_eq!(summary.below_line, [0, 1]);
+        assert_eq!(summary.at_or_above_line, [0, 0]);
+        assert_eq!(summary.deep_below_line, [0, 1]);
+    }
+
+    #[test]
+    fn deep_plies_keeps_at_or_above_line_with_short_continuations() {
+        let text = master(&[(ROOT, "5i4h", "main", "0"), (ROOT, "5i6h", "alt", "40")]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, summary, _) =
+            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].key, ROOT);
+        assert_eq!(findings[0].gap(), 40);
+        assert_eq!(summary.at_or_above_line, [1, 0]);
+        assert_eq!(summary.below_line, [0, 0]);
+        assert_eq!(summary.deep_below_line, [0, 0]);
+    }
+
+    #[test]
+    fn deep_plies_excludes_below_line_when_either_continuation_is_short() {
+        for short_leaf in [B, "9/4k4/9/9/9/9/9/3K5/9 b -"] {
+            let mut rows = parse_master(&deep_fixture()).unwrap();
+            rows.retain(|row| row.get("key") != short_leaf);
+            let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+            let (findings, summary, _) =
+                audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+            assert!(findings.is_empty(), "{short_leaf}");
+            assert_eq!(summary.below_line, [1, 0]);
+            assert_eq!(summary.deep_below_line, [0, 0]);
+        }
+        let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
+        let (findings, _, _) = audit(&parsed, DrawValues::both(0), 40, false, Some(3)).unwrap();
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn without_deep_plies_long_continuations_still_respect_line() {
+        let (findings, summary) = run_audit(&deep_fixture(), 40);
+        assert!(findings.is_empty());
+        assert_eq!(summary.below_line, [1, 0]);
+        assert_eq!(summary.deep_below_line, [0, 0]);
+        assert!(!format_summary(&summary, 40, DrawValues::both(0), None).contains("両方の先が"));
+    }
+
+    #[test]
+    fn main_continuation_stops_at_repeated_position() {
+        let text = master(&[
+            (ROOT, "5i4h", "main", "0"),
+            (A, "5a5b", "main", "0"),
+            (B, "4h5i", "main", "0"),
+            ("9/4k4/9/9/9/9/9/9/4K4 w -", "5b5a", "main", "0"),
+        ]);
+        let (positions, _) = parse_master_rows(text.as_bytes()).unwrap();
+        assert!(main_continues_after(&positions, ROOT, "5i4h", 3).unwrap());
+        assert!(!main_continues_after(&positions, ROOT, "5i4h", 4).unwrap());
+        assert!(!main_continues_after(&positions, ROOT, "5i4h", usize::MAX).unwrap());
     }
 
     #[test]
@@ -1654,7 +1839,7 @@ mod tests {
     /// `--fill-replies` で点検し、(要約, ROOT の main の伝播後の値) を返す。
     fn fill_audit(rows: &[(&str, &str, &str, &str)]) -> (AuditSummary, Option<i32>) {
         let parsed = parse_master_rows(master(rows).as_bytes()).unwrap();
-        let (_, summary, book) = audit(&parsed, DrawValues::both(0), 1, true).unwrap();
+        let (_, summary, book) = audit(&parsed, DrawValues::both(0), 1, true, None).unwrap();
         let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
         let main = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
             [0]
@@ -1751,6 +1936,7 @@ mod tests {
             schema: None,
             table: dir.join("audit.tsv"),
             line: 1,
+            deep_plies: None,
             demote_line: 100,
             draw_value_black: -70,
             draw_value_white: 0,
@@ -1859,7 +2045,7 @@ mod tests {
     fn curated_records_protect_replacements_without_retaining_rows() {
         let text = replacement_fixture();
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (findings, _, _) = audit(&positions, DrawValues::both(0), 1, false).unwrap();
+        let (findings, _, _) = audit(&positions, DrawValues::both(0), 1, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         rows[0].set("tier", "wide".into());
         rows[2].set("tier", "curated".into());
@@ -2096,7 +2282,7 @@ mod tests {
             black: -70,
             white: 0,
         };
-        let (_, _, book) = audit(&positions, draws, 15, false).unwrap();
+        let (_, _, book) = audit(&positions, draws, 15, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let target = bench_target(&rows[1], &book.graph).unwrap().unwrap();
         let naive = -book
@@ -2133,6 +2319,26 @@ mod tests {
             .unwrap()
             .args;
         assert_eq!((custom.line, custom.demote_line), (40, 70));
+    }
+
+    #[test]
+    fn cli_deep_plies_requires_positive_value() {
+        #[derive(clap::Parser, Debug)]
+        struct Cli {
+            #[command(flatten)]
+            args: AuditArgs,
+        }
+        use clap::Parser;
+        let base = ["audit", "--master", "moves.tsv", "--table", "audit.tsv"];
+        assert!(Cli::try_parse_from(base).unwrap().args.deep_plies.is_none());
+        assert_eq!(
+            Cli::try_parse_from(base.into_iter().chain(["--deep-plies", "0"]))
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::ValueValidation
+        );
+        let args = Cli::try_parse_from(base.into_iter().chain(["--deep-plies", "1"])).unwrap().args;
+        assert_eq!(args.deep_plies, Some(1));
     }
 
     #[test]
@@ -2176,7 +2382,7 @@ mod tests {
         rows[2].set("tier", "curated".into());
         let text = format_master(&rows);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         let mut args = test_args(dir.path());
         args.replace_curated = true;
         let summary =
@@ -2241,7 +2447,7 @@ mod tests {
             (ROOT, "5i4h", "bench", "100"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         for curated in [false, true] {
             let mut rows = parse_master(&text).unwrap();
             if curated {
@@ -2283,7 +2489,7 @@ mod tests {
             (white, "5a4b", "bench", "10"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         assert_eq!(
             evaluate_edges(
@@ -2316,7 +2522,7 @@ mod tests {
                 (ROOT, "5i4h", "bench", "0"),
             ]);
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+            let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
             let mut rows = parse_master(&text).unwrap();
             assert_eq!(
                 revive_bench(
@@ -2372,7 +2578,7 @@ mod tests {
                 (ROOT, "5i4i", "alt", ""),
             ]);
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let (_, _, book) = audit(&positions, DrawValues::both(0), line, false).unwrap();
+            let (_, _, book) = audit(&positions, DrawValues::both(0), line, false, None).unwrap();
             let original = parse_master(&text).unwrap();
             let mut rows = original.clone();
             let mut args = test_args(dir.path());
@@ -2413,7 +2619,7 @@ mod tests {
         let schema = Schema::load(Some(dir.path())).unwrap();
         let text = replacement_fixture();
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (findings, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (findings, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.line = 40;
@@ -2476,7 +2682,7 @@ mod tests {
                 args.demote_alts = true;
                 args.since = Some("tag".into());
                 let positions = parse_master_rows(text.as_bytes()).unwrap();
-                let (_, _, book) = audit(&positions, DrawValues::both(0), 1, false).unwrap();
+                let (_, _, book) = audit(&positions, DrawValues::both(0), 1, false, None).unwrap();
                 let result =
                     demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
                 assert_eq!(result.skipped_curated, usize::from(!replace_curated));
@@ -2506,7 +2712,7 @@ mod tests {
                 }
                 let text = master(&input);
                 let positions = parse_master_rows(text.as_bytes()).unwrap();
-                let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+                let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
                 let mut rows = parse_master(&text).unwrap();
                 let original = rows.clone();
                 let mut args = test_args(dir.path());
@@ -2532,7 +2738,7 @@ mod tests {
         let schema = Schema::load(Some(dir.path())).unwrap();
         let text = master(&[(ROOT, "5i6h", "main", "100"), (ROOT, "5i4h", "alt", "0")]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let result =
             demote_alts(&mut rows, &positions.0, &book, &schema, &test_args(dir.path())).unwrap();
@@ -2574,7 +2780,7 @@ mod tests {
         run(args).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.demote_alts = true;

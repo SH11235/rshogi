@@ -4,10 +4,16 @@ use super::{
     master_table::{Row, format_master, mean_eval, parse_master},
     schema::{self, Schema},
 };
+use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Result, ensure};
 use clap::Args;
-use std::{collections::BTreeMap, io::Write, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+};
 
 #[derive(Args, Debug)]
 pub(super) struct HoldEarlyArgs {
@@ -20,6 +26,12 @@ pub(super) struct HoldEarlyArgs {
     /// before の main の ply がこの値未満の局面を対象にする
     #[arg(long, default_value_t = 20)]
     below_ply: u64,
+    /// 両方の手の後に main が N 手以上続く場合は替わった main を残す (計数上限 60 手)
+    #[arg(long)]
+    continuation: Option<usize>,
+    /// 分類によらず保留する局面キーの一覧 (1 行 1 キー)
+    #[arg(long)]
+    hold_keys: Option<PathBuf>,
     /// 語彙と読み条件の表を置いたディレクトリ
     #[arg(long)]
     schema: Option<PathBuf>,
@@ -52,12 +64,33 @@ fn value_black(row: &Row) -> Result<String> {
         .unwrap_or_default())
 }
 
+fn continuation_depth(
+    key: &str,
+    mv: &str,
+    rows: &[Row],
+    mains: &BTreeMap<String, usize>,
+) -> Result<usize> {
+    let mut position = position_from_sfen(&format!("{key} 1"))?;
+    apply_usi_move(&mut position, mv)?;
+    for depth in 0..60 {
+        let sfen = position.to_sfen();
+        let Some(&index) = mains.get(strip_ply(&sfen)) else {
+            return Ok(depth);
+        };
+        apply_usi_move(&mut position, rows[index].get("move"))?;
+    }
+    Ok(60)
+}
+
 fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     ensure!(
         !args.since.trim().is_empty() && !args.since.contains(['\t', '\r', '\n']),
         "since は空でない 1 セルのタグにしてください"
     );
     let mut protected = vec![args.before.clone()];
+    if let Some(path) = &args.hold_keys {
+        protected.push(path.clone());
+    }
     if let Some(dir) = &args.schema {
         protected.extend(schema::paths(dir));
     }
@@ -65,6 +98,16 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     protected.push(args.master.clone());
     files::guard(std::slice::from_ref(&args.out), &protected, true)?;
     let schema = Schema::load(args.schema.as_deref())?;
+    let mut hold_keys = BTreeSet::new();
+    if let Some(path) = &args.hold_keys {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let line = line?;
+            let key = line.trim();
+            if !key.is_empty() && !key.starts_with('#') {
+                hold_keys.insert(key.to_owned());
+            }
+        }
+    }
     let before = std::fs::read_to_string(&args.before)?;
     let original = std::fs::read_to_string(&args.master)?;
     for text in [&before, &original] {
@@ -95,15 +138,21 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
         if let Some(&index) = mains.get(old.get("key"))
             && rows[index].get("move") != old.get("move")
         {
-            changes.push((ply, old, index));
+            let old_depth = continuation_depth(old.get("key"), old.get("move"), &rows, &mains)?;
+            let new_depth =
+                continuation_depth(old.get("key"), rows[index].get("move"), &rows, &mains)?;
+            let replace = !hold_keys.contains(old.get("key"))
+                && args.continuation.is_some_and(|n| old_depth >= n && new_depth >= n);
+            changes.push((ply, old, index, old_depth, new_depth, replace));
         }
     }
     changes.sort_by(|a, b| (a.0, a.1.get("key")).cmp(&(b.0, b.1.get("key"))));
     let mut table = String::from(
-        "ply\tside\tkey\told_main\told_source\told_tier\told_value_black\tnew_main\tnew_value_black\n",
+        "ply\tside\tkey\told_main\told_source\told_tier\told_value_black\tnew_main\tnew_value_black\told_depth\tnew_depth\tclass\n",
     );
     let mut counts = [0usize; 2];
-    for (ply, old, index) in &changes {
+    let mut held = 0;
+    for (ply, old, index, old_depth, new_depth, replace) in &changes {
         let key = old.get("key");
         let side = key.split_whitespace().nth(1).unwrap_or("");
         counts[usize::from(side == "w")] += 1;
@@ -119,10 +168,17 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
                 value_black(old)?,
                 new.get("move").into(),
                 value_black(new)?,
+                old_depth.to_string(),
+                new_depth.to_string(),
+                if *replace { "replace" } else { "hold" }.into(),
             ]
             .join("\t"),
         );
         table.push('\n');
+        if *replace {
+            continue;
+        }
+        held += 1;
         let restored = match indices.get(&(key.to_owned(), old.get("move").to_owned())) {
             Some(&i) => i,
             None => {
@@ -131,8 +187,8 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
             }
         };
         rows[restored].set("role", "main".into());
+        rows[restored].set("tier", old.get("tier").into());
         if old.get("tier") == "curated" {
-            rows[restored].set("tier", "curated".into());
             rows[*index].set("tier", "wide".into());
         }
         rows[*index].set("role", "alt".into());
@@ -141,8 +197,8 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
             rows[i].set(
                 "note",
                 format!(
-                    "{note}{}{}: {} 手目より前の main の替わりを保留に戻した",
-                    if note.is_empty() { "" } else { "。" },
+                    "{note}{}{}: {} 手目より前、読みが浅いので保留 (今の main)",
+                    if note.is_empty() { "" } else { "; " },
                     args.since,
                     args.below_ply
                 ),
@@ -154,7 +210,7 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
     files::guard(std::slice::from_ref(&args.out), &protected, true)?;
     write_atomic(&args.out, &table)?;
-    if args.apply && !changes.is_empty() {
+    if args.apply && held > 0 {
         files::guard(std::slice::from_ref(&args.master), &protected[..protected.len() - 1], true)?;
         ensure!(
             std::fs::read_to_string(&args.master)? == original,
@@ -169,7 +225,8 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
         counts[0],
         counts[1]
     )?;
-    writeln!(stdout, "書き戻した局面: {}", if args.apply { changes.len() } else { 0 })?;
+    writeln!(stdout, "分類: hold {held}, replace {}", changes.len() - held)?;
+    writeln!(stdout, "書き戻した局面: {}", if args.apply { held } else { 0 })?;
     Ok(())
 }
 

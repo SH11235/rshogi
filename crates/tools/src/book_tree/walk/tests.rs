@@ -290,7 +290,7 @@ fn queue_merges_plies_into_the_shortest_root_with_a_stable_id() {
     let dir = tempfile::tempdir().unwrap();
     let args = args(dir.path(), PathBuf::new(), None, PathBuf::new(), 1);
     let key = after(ROOT, &["5i4h", "5a5b"]);
-    let lines = |rows: &[Row]| queue_lines(rows, &args).unwrap();
+    let lines = |rows: &[Row]| queue_lines(rows, &args, &Excluded::new()).unwrap().0;
     let first = lines(&[own_row(&key, 4, 0.4), own_row(&key, 2, 0.2)]);
     let swapped = lines(&[own_row(&key, 4, 0.2), own_row(&key, 2, 0.4)]);
     assert_eq!(first.len(), 1);
@@ -351,6 +351,13 @@ fn args(dir: &Path, master: PathBuf, freq: Option<PathBuf>, big: PathBuf, n: usi
         opp_book_first: false,
         cont_max: 100,
         enqueue_out: Some(dir.join(format!("queue{n}.jsonl"))),
+        max_root_ply: None,
+        exclude_queue: Vec::new(),
+        opp_n: None,
+        stop: None,
+        rounds: None,
+        draw_black: None,
+        draw_white: None,
         depth: 1,
         priority: 300,
         tag: "x19".into(),
@@ -511,4 +518,281 @@ fn empty_start_moves_start_at_the_initial_position_and_max_ply_bounds_them() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].stop, rows[0].ply), (Stop::Max, 1));
+}
+
+fn queue_args(dir: &Path) -> WalkArgs {
+    args(dir, PathBuf::new(), None, PathBuf::new(), 1)
+}
+
+fn existing_line() -> Line {
+    Line {
+        id: "existing".into(),
+        root: format!("sfen {ROOT} 9"),
+        roots: Vec::new(),
+        own: "b".into(),
+        depth: 1,
+        priority: 100,
+        hold: false,
+        game: Vec::new(),
+        opts: Opts::default(),
+        memo: None,
+    }
+}
+
+fn exclusions(dir: &Path, lines: &[Line]) -> Excluded {
+    let path = dir.join("exclude.jsonl");
+    std::fs::write(&path, format_queue(lines).unwrap()).unwrap();
+    excluded_positions(&[path]).unwrap()
+}
+
+#[test]
+fn queue_max_root_ply_uses_the_merged_minimum_sfen_ply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = queue_args(dir.path());
+    args.max_root_ply = Some(3);
+    let rows = vec![
+        own_row(ROOT, 8, 0.3),
+        own_row(ROOT, 2, 0.3),
+        own_row(&after(ROOT, &["5i4h", "5a5b"]), 4, 0.8),
+    ];
+    let (lines, _) = queue_lines(&rows, &args, &Excluded::new()).unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, format!("sfen {ROOT} 3"));
+    args.max_root_ply = Some(2);
+    assert!(queue_lines(&rows, &args, &Excluded::new()).unwrap().0.is_empty());
+}
+
+#[test]
+fn queue_excludes_roots_by_position_and_own_and_counts_every_matching_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = queue_args(dir.path());
+    let more = after(ROOT, &["5i4h", "5a5b"]);
+    let mut line = existing_line();
+    line.roots.push(format!("sfen {more} 33"));
+    let mut other = line.clone();
+    other.id = "other".into();
+    let excluded = exclusions(dir.path(), &[line, other]);
+    let mut white = own_row(ROOT, 0, 0.8);
+    white.side = "w";
+    let rows = vec![own_row(ROOT, 0, 0.8), own_row(&more, 2, 0.8), white];
+    let (lines, counts) = queue_lines(&rows, &args, &excluded).unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].own, "w");
+    assert_eq!(counts.sides["b"], 2);
+    assert_eq!(counts.ids, BTreeMap::from([("existing".into(), 2), ("other".into(), 2)]));
+    assert!(counts.format().contains("w: 既存の木で除いたキューの行 0"));
+}
+
+#[test]
+fn queue_excludes_game_positions_only_for_own_within_depth_plus_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = queue_args(dir.path());
+    let moves = ["5i4h", "5a5b", "4h3h", "5b5c"];
+    let mut line = existing_line();
+    line.depth = 2;
+    line.game = vec![moves.iter().map(|m| (*m).into()).collect()];
+    for own in ["b", "w", "bw"] {
+        line.own = own.into();
+        let excluded = exclusions(dir.path(), &[line.clone()]);
+        for n in 1..=4 {
+            for side in ["b", "w"] {
+                let mut row = own_row(&after(ROOT, &moves[..n]), n, 1.0);
+                row.side = side;
+                let expected = n <= 3 && own.contains(side) && (n % 2 == 0) == (side == "b");
+                let (lines, _) = queue_lines(&[row], &args, &excluded).unwrap();
+                assert_eq!(lines.is_empty(), expected, "own={own} side={side} n={n}");
+            }
+        }
+    }
+}
+
+#[test]
+fn queue_exclusion_uses_last_id_across_files_and_ignores_depth_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut line = existing_line();
+    let path1 = dir.path().join("first.jsonl");
+    let path2 = dir.path().join("last.jsonl");
+    std::fs::write(&path1, format_queue(&[line.clone()]).unwrap()).unwrap();
+    line.depth = 0;
+    assert!(exclusions(dir.path(), &[line.clone()]).is_empty());
+    assert!(exclusions(dir.path(), &[existing_line(), line.clone()]).is_empty());
+    assert!(!exclusions(dir.path(), &[line.clone(), existing_line()]).is_empty());
+    std::fs::write(&path2, format_queue(&[line]).unwrap()).unwrap();
+    assert!(excluded_positions(&[path1, path2]).unwrap().is_empty());
+}
+
+#[test]
+fn queue_opts_are_optional_and_use_enqueue_ranges_even_without_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = queue_args(dir.path());
+    let rows = [own_row(ROOT, 0, 1.0)];
+    let serialized = |args: &WalkArgs| {
+        let (lines, _) = queue_lines(&rows, args, &Excluded::new()).unwrap();
+        serde_json::to_value(&lines[0]).unwrap()
+    };
+    assert!(serialized(&args).get("opts").is_none());
+    args.opp_n = Some(8);
+    args.stop = Some(30000);
+    args.rounds = Some(0);
+    args.draw_black = Some(-30000);
+    args.draw_white = Some(30000);
+    assert_eq!(
+        serialized(&args)["opts"],
+        serde_json::json!({
+            "opp_n": 8, "stop": 30000, "rounds": 0, "draw_black": -30000, "draw_white": 30000
+        })
+    );
+    args.opp_n = Some(0);
+    assert!(check_args(&args).unwrap_err().to_string().contains("opp_n"));
+}
+
+#[test]
+fn queue_exclusion_rejects_invalid_lines_including_superseded_and_unused_game_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.jsonl");
+    let mut invalid = existing_line();
+    invalid.game = vec![vec!["5i4h".into(), "5a5b".into(), "1a1b".into()]];
+    for text in [
+        "{broken".to_owned(),
+        format_queue(&[invalid.clone(), existing_line()]).unwrap(),
+        {
+            invalid.depth = 0;
+            format_queue(&[invalid]).unwrap()
+        },
+        {
+            let mut line = existing_line();
+            line.own = "bad".into();
+            format_queue(&[line]).unwrap()
+        },
+        {
+            let mut line = existing_line();
+            line.opts.stop = Some(0);
+            format_queue(&[line]).unwrap()
+        },
+    ] {
+        std::fs::write(&path, text).unwrap();
+        let error = excluded_positions(std::slice::from_ref(&path)).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid.jsonl:1"));
+    }
+}
+
+#[test]
+fn walk_new_flags_require_enqueue_out() {
+    use clap::Parser;
+    #[derive(Parser, Debug)]
+    struct Cli {
+        #[command(flatten)]
+        walk: WalkArgs,
+    }
+    for (flag, value) in [
+        ("--max-root-ply", "29"),
+        ("--exclude-queue", "queue.jsonl"),
+        ("--opp-n", "3"),
+        ("--stop", "500"),
+        ("--rounds", "2"),
+        ("--draw-black", "-100"),
+        ("--draw-white", "100"),
+    ] {
+        let base = [
+            "walk",
+            "--master",
+            "moves.tsv",
+            "--table",
+            "walk.tsv",
+            flag,
+            value,
+        ];
+        assert_eq!(
+            Cli::try_parse_from(base).unwrap_err().kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--enqueue-out", "out.jsonl"])).is_ok()
+        );
+    }
+}
+
+#[test]
+fn run_filters_only_queue_and_protects_exclusion_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (master, freq, big) = write_inputs(dir.path());
+    let base = |n| args(dir.path(), master.clone(), Some(freq.clone()), big.clone(), n);
+    run_from(base(1), ROOT).unwrap();
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+    let mut filtered = base(2);
+    filtered.max_root_ply = Some(2);
+    run_from(filtered, ROOT).unwrap();
+    assert!(read("queue2.jsonl").is_empty());
+    assert_eq!(read("walk1.tsv"), read("walk2.tsv"));
+    let mut filtered = base(3);
+    filtered.exclude_queue = vec![dir.path().join("queue1.jsonl")];
+    run_from(filtered, ROOT).unwrap();
+    assert!(read("queue3.jsonl").is_empty());
+    assert_eq!(read("walk1.tsv"), read("walk3.tsv"));
+    for table in [false, true] {
+        let mut same = base(4);
+        same.exclude_queue = vec![dir.path().join("queue1.jsonl")];
+        if table {
+            same.table = dir.path().join("queue1.jsonl");
+        } else {
+            same.enqueue_out = Some(dir.path().join("queue1.jsonl"));
+        }
+        assert!(run_from(same, ROOT).is_err());
+    }
+    let before = read("queue1.jsonl");
+    let mut invalid = base(1);
+    let path = dir.path().join("bad.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    invalid.exclude_queue = vec![path];
+    assert!(run_from(invalid, ROOT).is_err());
+    assert_eq!(read("queue1.jsonl"), before);
+}
+
+#[test]
+fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = after(ROOT, &["5i4h"]);
+    let master = master_text(&[
+        (ROOT, "5i4h", "main", "12,88"),
+        (&a, "5a5b", "main", "34,90"),
+        (&a, "5a6b", "alt", ""),
+    ]);
+    let path = dir.path().join("master.tsv");
+    std::fs::write(&path, master).unwrap();
+    let mut index = super::super::master_index::MasterIndex::open(
+        &path,
+        &super::super::schema::Schema::load(None).unwrap(),
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    for (stop, moves) in [
+        (Stop::Own, vec!["5i4h"]),
+        (Stop::Out, vec!["5i4h", "5a5b"]),
+        (Stop::Rare, vec!["5i4h", "5a4b"]),
+        (Stop::Tiny, vec![]),
+        (Stop::Max, vec!["5i4h", "5a5b"]),
+        (Stop::Max, vec!["5i4h", "5a6b"]),
+    ] {
+        rows.push(
+            stop_row(
+                &mut Sources::default(),
+                "b",
+                stop,
+                moves.len(),
+                1.0,
+                ROOT,
+                &moves.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        );
+    }
+    let table = format_table_with_entries(&rows, &mut index, ROOT).unwrap();
+    let lines: Vec<Vec<&str>> = table.lines().skip(1).map(|s| s.split('\t').collect()).collect();
+    assert_eq!(&lines[0][11..13], &["5i4h", "12"]);
+    assert_eq!(&lines[1][11..13], &["5a5b", "-34"]);
+    assert_eq!(&lines[2][11..], &["5a4b", "", "", ""]);
+    assert_eq!(&lines[3][11..], &["", "", "", ""]);
+    assert_eq!(&lines[4][11..13], &["5a5b", "-34"]);
+    assert_eq!(&lines[0][13..], &["unknown", "read"]);
+    assert_eq!(&lines[5][11..], &["5a6b", "", "", "read"]);
 }

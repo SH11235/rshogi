@@ -237,6 +237,11 @@ impl EvalHash {
         }
     }
 
+    /// 表を持たない (大きさ 0) かを返す。
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Windows の明示的な Large Pages 確保に成功したかを返す。
     pub fn uses_large_pages(&self) -> bool {
         self.allocation_kind().is_explicit_large_pages()

@@ -143,8 +143,10 @@ struct ResultLog {
     game_id: Option<u32>,
     #[serde(default)]
     startpos_idx: Option<usize>,
-    #[serde(skip)]
+    #[serde(default)]
     startpos: Option<String>,
+    #[serde(default)]
+    startpos_name: Option<String>,
     #[serde(skip)]
     moves: StartposMoves,
     #[serde(default)]
@@ -273,6 +275,7 @@ impl StartposMoves {
 
 #[derive(Default)]
 struct StartposRow {
+    names: BTreeSet<String>,
     games: u64,
     black_wins: u64,
     white_wins: u64,
@@ -309,6 +312,9 @@ impl StartposStats {
             return;
         };
         let row = self.rows.entry(startpos.clone()).or_default();
+        if let Some(name) = &result.startpos_name {
+            row.names.insert(name.clone());
+        }
         row.games += 1;
         row.black_wins += u64::from(result.outcome == "black_win");
         row.white_wins += u64::from(result.outcome == "white_win");
@@ -327,6 +333,7 @@ impl StartposStats {
         self.excluded_games += other.excluded_games;
         for (position, src) in other.rows {
             let dst = self.rows.entry(position).or_default();
+            dst.names.extend(src.names);
             dst.games += src.games;
             dst.black_wins += src.black_wins;
             dst.white_wins += src.white_wins;
@@ -350,11 +357,15 @@ impl StartposStats {
             let prefixes: Vec<_> = [10, 20, 40].into_iter().enumerate().map(|(i, plies)| {
                 serde_json::json!({"plies": plies, "unique": row.prefix_counts()[i], "games": row.prefix_games[i]})
             }).collect();
-            serde_json::json!({"startpos": position, "games": row.games,
+            let mut value = serde_json::json!({"startpos": position, "games": row.games,
                 "black_wins": row.black_wins, "white_wins": row.white_wins, "draws": row.draws,
                 "black_score_rate": (row.black_wins as f64 + 0.5 * row.draws as f64) / row.games as f64,
                 "reasons": row.reasons, "average_plies": average(row.plies, row.games),
-                "average_seconds": average(row.elapsed_ms, row.games) / 1000.0, "prefixes": prefixes})
+                "average_seconds": average(row.elapsed_ms, row.games) / 1000.0, "prefixes": prefixes});
+            if !row.names.is_empty() {
+                value["startpos_name"] = row.names.iter().cloned().collect::<Vec<_>>().join(", ").into();
+            }
+            value
         }).collect();
         serde_json::json!({"excluded_games": self.excluded_games, "rows": rows})
     }
@@ -362,7 +373,13 @@ impl StartposStats {
     fn print_text(&self) {
         println!("\n開始局面別集計（除外 {} 局）", self.excluded_games);
         for (i, position) in self.rows.keys().enumerate() {
-            println!("{}: {}", i + 1, position);
+            let names = &self.rows[position].names;
+            let suffix = if names.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", names.iter().cloned().collect::<Vec<_>>().join(", "))
+            };
+            println!("{}: {}{}", i + 1, position, suffix);
         }
         println!(
             "番号 対局数 先手勝 後手勝 引分 先手得点率 平均手数 平均秒 10/20/40手の相異手順数/対象局数 終局理由"
@@ -837,8 +854,7 @@ fn parse_normal_file_inner(
         Vec::new()
     };
     let mut game_moves: BTreeMap<u32, StartposMoves> = BTreeMap::new();
-    let mut pair_buffer: BTreeMap<(u32, u32), [Option<ResultLog>; 2]> = BTreeMap::new();
-    let mut completed_pairs: HashSet<(u32, u32)> = HashSet::new();
+    let mut pair_buffer = tools::tournament_pairs::ResultPairs::default();
     let mut seq = 0u32;
     let mut error_pairs = HashSet::new();
     let mut retried_pairs = HashSet::new();
@@ -930,8 +946,10 @@ fn parse_normal_file_inner(
             let mut result: ResultLog = serde_json::from_value(value)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
             if by_startpos {
-                result.startpos =
-                    result.startpos_idx.and_then(|idx| start_positions.get(idx).cloned());
+                if result.startpos.is_none() {
+                    result.startpos =
+                        result.startpos_idx.and_then(|idx| start_positions.get(idx).cloned());
+                }
                 result.moves =
                     result.game_id.and_then(|id| game_moves.remove(&id)).unwrap_or_default();
             }
@@ -987,44 +1005,17 @@ fn parse_normal_file_inner(
                 retried_pairs.insert(pair_index);
             }
             let key = (pair_index, result.attempt);
-            if completed_pairs.contains(&key) {
-                eprintln!(
-                    "警告: {path} — 直接対決の pair_index={pair_index}, attempt={}, slot={slot} は既に集計済みです。重複結果を除外します。",
-                    result.attempt
-                );
-                continue;
-            }
-            let entry = pair_buffer.entry(key).or_insert([None, None]);
-            if entry[slot].is_some() {
-                eprintln!(
-                    "警告: {path} — 直接対決の pair_index={pair_index}, attempt={}, slot={slot} が重複しています。重複結果を除外します。",
-                    result.attempt
-                );
-                continue;
-            }
-            entry[slot] = Some(result);
-            if entry.iter().all(Option::is_some) {
-                let completed = pair_buffer
-                    .remove(&key)
-                    .with_context(|| format!("ペア集計状態が失われました: {path}"))?;
-                let has_error = completed.iter().flatten().any(|game| game.error.unwrap_or(false));
+            if let Some(completed) = pair_buffer.push(Path::new(path), key, slot, result) {
+                let has_error = completed.iter().any(|game| game.error.unwrap_or(false));
                 if has_error {
                     if key.1 >= 2 {
                         exhausted_pairs.insert(pair_index);
                     }
                 } else {
                     for (slot, game) in completed.iter().enumerate() {
-                        record_valid_result(
-                            game.as_ref().unwrap(),
-                            &black,
-                            &white,
-                            meta_parsed,
-                            slot,
-                            &mut stats,
-                        );
+                        record_valid_result(game, &black, &white, meta_parsed, slot, &mut stats);
                     }
                 }
-                completed_pairs.insert(key);
             }
         }
         // move行・metrics行等はスキップ
@@ -1033,11 +1024,11 @@ fn parse_normal_file_inner(
     if stats.extra.csa_single_game && stats.extra.completed_games != 1 {
         bail!("CSA単局ログに終局resultがありません: {path}");
     }
-    stats.extra.incomplete_pairs = pair_buffer.len();
-    if !pair_buffer.is_empty() {
+    stats.extra.incomplete_pairs = pair_buffer.incomplete();
+    if pair_buffer.incomplete() != 0 {
         eprintln!(
             "情報: {path} — {} ペアが未完了（片スロット欠け）のため直接対決集計から除外されました",
-            pair_buffer.len()
+            pair_buffer.incomplete()
         );
     }
 
@@ -3149,6 +3140,54 @@ mod tests {
         let got = res.expect("good file should still provide meta");
         assert_eq!(got.base_label, "v100");
     }
+    #[test]
+    fn by_startpos_prefers_result_position_and_preserves_names() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cycle.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"meta", "settings":{"games":1}, "engine_cmd":{
+                "path_black":"base", "path_white":"test", "label_black":"base", "label_white":"test"
+            }})
+        )
+        .unwrap();
+        for slot in 0..2 {
+            writeln!(file, "{}", serde_json::json!({"type":"result", "game_id":slot,
+                "pair_index":0, "pair_slot":slot, "outcome":"draw", "plies":0,
+                "startpos_idx":0, "startpos":"position startpos moves 7g7f", "startpos_name":"opening"
+            })).unwrap();
+        }
+        drop(file);
+        std::fs::write(
+            dir.path().join("meta.json"),
+            serde_json::json!({
+                "start_positions":["position startpos"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for with_meta in [true, false] {
+            if !with_meta {
+                std::fs::remove_file(dir.path().join("meta.json")).unwrap();
+            }
+            let stats = parse_normal_file(path.to_str().unwrap(), true)
+                .unwrap()
+                .extra
+                .by_startpos
+                .unwrap();
+            assert_eq!(stats.rows.len(), 1);
+            assert_eq!(stats.rows["position startpos moves 7g7f"].games, 2);
+            assert_eq!(stats.excluded_games, 0);
+            assert_eq!(stats.json()["rows"][0]["startpos_name"], "opening");
+            let mut merged = StartposStats::default();
+            merged.merge(stats);
+            assert_eq!(merged.json()["rows"][0]["startpos_name"], "opening");
+        }
+    }
+
     #[test]
     fn by_startpos_merges_runs_and_excludes_failed_attempts_and_legacy() {
         let mut combined = StartposStats::default();

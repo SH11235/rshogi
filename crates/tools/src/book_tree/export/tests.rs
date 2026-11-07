@@ -41,6 +41,7 @@ fn args(dir: &Path) -> ExportArgs {
         tier: "wide".into(),
         schema: None,
         reads: vec![],
+        journal: vec![],
         min_nodes: 900_000_000.into(),
         draw_pin: 3.into(),
         bad_eval: -150.0,
@@ -293,4 +294,243 @@ fn reads_outside_tier_are_discarded_without_changing_outputs() {
     for (path, expected) in paths.iter().zip(expected) {
         assert_eq!(std::fs::read(path).unwrap(), expected);
     }
+}
+
+fn journal_record(depth: u32) -> serde_json::Value {
+    use crate::book_tree::journal::Settings;
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let version = "book-tree-v1/newgame-ready/node-calib-last-multipv-v1";
+    let mut settings: Settings = serde_json::from_value(serde_json::json!({
+        "fingerprint": "", "version": version, "engine_sha256": "engine-hash",
+        "options": {}, "content_sha256": {}, "nodes": 1000, "multipv": 2, "hash": 256
+    }))
+    .unwrap();
+    settings.fingerprint = settings.computed_fingerprint().unwrap();
+    serde_json::json!({
+        "kind": version, "provenance": "engine", "settings": settings,
+        "reading": {"tag": "test", "ply": 1, "key": HIRATE_KEY, "nodes_limit": 1000,
+            "nodes": 1000, "sec": 1.0, "threads": 1, "hash": 256, "draw": {},
+            "multipv": [{"move": "7g7f", "cp": 10, "depth": depth}], "bestmove": "7g7f"}
+    })
+}
+
+#[test]
+fn journal_depths_match_conditions_and_preserve_db() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let d = tempfile::tempdir().unwrap();
+    crate::book_tree::schema::test_schema(d.path());
+    std::fs::write(
+        d.path().join("sources.tsv"),
+        "source\tdescription\treplaceable\ntest\t説明\t0\n",
+    )
+    .unwrap();
+    let conditions = d.path().join("conditions.tsv");
+    let mut table = std::fs::read_to_string(&conditions).unwrap();
+    let fp = journal_record(30)["settings"]["fingerprint"].as_str().unwrap().to_owned();
+    let uppercase_fp = fp.to_ascii_uppercase();
+    let values = [
+        uppercase_fp.as_str(),
+        "nodes:1000",
+        "engine",
+        "1",
+        "256",
+        "2",
+        "0",
+        "0",
+        "engine-hash",
+        "評価関数",
+        "計算機",
+        "条件の説明",
+    ];
+    table.push_str(&format!("named\t{}\n", values.join("\t")));
+    std::fs::write(conditions, table).unwrap();
+    let mut rows = vec![
+        row(HIRATE_KEY, "7g7f", "main", "wide", "10"),
+        row(HIRATE_KEY, "2g2f", "alt", "wide", "10"),
+        row(HIRATE_KEY, "5g5f", "record", "wide", "1"),
+    ];
+    rows[0].set("cond", "named".into());
+    rows[1].set("cond", "named".into());
+    std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&rows)).unwrap();
+    let mut a = args(d.path());
+    a.schema = Some(d.path().into());
+    run_to(a, &mut Vec::new()).unwrap();
+    let preserved: Vec<_> = files::outputs(&d.path().join("book"))
+        .iter()
+        .take(3)
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    let db = preserved[0].clone();
+    let annotation = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(d.path().join("book.annot.json")).unwrap()).unwrap()
+    };
+    let before = annotation();
+    assert!(before["positions"][HIRATE_KEY]["moves"]["7g7f"].get("depths").is_none());
+    let expected: serde_json::Map<_, _> = [
+        "fingerprint",
+        "stop",
+        "nodes_counting",
+        "threads",
+        "hash_mb",
+        "multipv",
+        "draw_black",
+        "draw_white",
+        "engine_sha256",
+        "eval",
+        "machine",
+        "note",
+    ]
+    .into_iter()
+    .zip(values)
+    .map(|(k, v)| (k.into(), serde_json::json!(v)))
+    .collect();
+    let mut expected = expected;
+    expected.insert("fingerprint".into(), serde_json::json!(fp));
+    assert_eq!(before["conditions"], serde_json::json!({"named": expected}));
+    let logs = d.path().join("journals");
+    std::fs::create_dir_all(logs.join("nested")).unwrap();
+    std::fs::write(logs.join("journal_extend_r1.jsonl"), "{\"kind\":\"parent\"}\n{invalid}\n")
+        .unwrap();
+    std::fs::write(logs.join("targets.jsonl"), "{\"id\":\"target\"}\n").unwrap();
+    std::fs::write(logs.join("empty.jsonl"), "").unwrap();
+    let first = journal_record(30);
+    let mut copy = first.clone();
+    copy["reading"]["key"] = serde_json::json!(format!("{HIRATE_KEY} 99"));
+    copy["reading"]["nodes"] = serde_json::json!(900);
+    let mut other = journal_record(90);
+    other["provenance"] = serde_json::json!("journal:import");
+    let mut foreign = journal_record(80);
+    let mut settings: crate::book_tree::journal::Settings =
+        serde_json::from_value(foreign["settings"].clone()).unwrap();
+    settings.engine_sha256 = "other-engine".into();
+    settings.fingerprint = settings.computed_fingerprint().unwrap();
+    foreign["settings"] = serde_json::to_value(settings).unwrap();
+    std::fs::write(logs.join("one.jsonl"), format!("{first}\n{foreign}\n")).unwrap();
+    let second = logs.join("nested/two.jsonl");
+    std::fs::write(&second, format!("{copy}\n{}\n{other}\n{{unfinished", journal_record(20)))
+        .unwrap();
+    let journal_before = std::fs::read(&second).unwrap();
+    let mut a = args(d.path());
+    a.schema = Some(d.path().into());
+    a.journal = vec![logs.clone(), logs.join("one.jsonl")];
+    a.force = true;
+    run_to(a, &mut Vec::new()).unwrap();
+    let after = annotation();
+    let moves = &after["positions"][HIRATE_KEY]["moves"];
+    assert_eq!(moves["7g7f"]["depths"], serde_json::json!([20, 30]));
+    assert_eq!(moves["2g2f"]["depths"], serde_json::json!([]));
+    assert!(moves["5g5f"].get("depths").is_none());
+    assert_eq!(after["conditions"], before["conditions"]);
+    let mut without_depths = after.clone();
+    for position in without_depths["positions"].as_object_mut().unwrap().values_mut() {
+        for mv in position["moves"].as_object_mut().unwrap().values_mut() {
+            mv.as_object_mut().unwrap().remove("depths");
+        }
+    }
+    assert_eq!(without_depths, before);
+    for (path, bytes) in files::outputs(&d.path().join("book")).iter().zip(&preserved) {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(after["version"], 2);
+    assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
+    assert_eq!(std::fs::read(&second).unwrap(), journal_before);
+
+    rows[0].set("cond", fp[..8].into());
+    rows[1].set("cond", fp[..8].into());
+    std::fs::write(d.path().join("moves.tsv"), master_table::format_master(&rows)).unwrap();
+    let mut a = args(d.path());
+    a.journal = vec![logs.clone()];
+    a.force = true;
+    run_to(a, &mut Vec::new()).unwrap();
+    assert_eq!(
+        annotation()["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
+        serde_json::json!([20, 30])
+    );
+    assert_eq!(annotation()["conditions"], serde_json::json!({}));
+
+    std::fs::write(&second, format!("{first}\n{{invalid}}\n")).unwrap();
+    let mut a = args(d.path());
+    a.journal = vec![logs.clone()];
+    a.force = true;
+    assert!(run_to(a, &mut Vec::new()).is_err());
+    assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
+
+    let mut invalid = first.clone();
+    invalid["reading"]["nodes_limit"] = serde_json::json!(0);
+    std::fs::write(second, format!("{first}\n{invalid}\n")).unwrap();
+    let mut a = args(d.path());
+    a.journal = vec![logs];
+    a.force = true;
+    assert!(run_to(a, &mut Vec::new()).is_err());
+    assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
+}
+
+#[test]
+fn journal_depths_skip_files_without_a_tree_first_record() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("input.jsonl");
+    for contents in [
+        "",
+        "{unfinished",
+        "{\"kind\":\"parent\"}\n{invalid}\n",
+        "{invalid}\n",
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        let mut visited = 0;
+        let result = crate::book_tree::journal::visit_records(&path, |_| {
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(result, None);
+        assert_eq!(visited, 0);
+    }
+}
+
+#[test]
+fn journal_depths_reject_invalid_tree_records() {
+    use crate::book_tree::reply_graph::{HIRATE_KEY, fixture::after};
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("input.jsonl");
+    let keys = BTreeSet::from([HIRATE_KEY]);
+    for case in ["depth", "version", "fingerprint", "outside"] {
+        let mut record = journal_record(30);
+        match case {
+            "depth" => {
+                record["reading"]["multipv"][0].as_object_mut().unwrap().remove("depth");
+            }
+            "version" => record["kind"] = serde_json::json!("book-tree-unsupported"),
+            "fingerprint" => record["settings"]["fingerprint"] = serde_json::json!("a".repeat(64)),
+            "outside" => {
+                record["reading"]["key"] = serde_json::json!(after(HIRATE_KEY, &["7g7f"]));
+                record["reading"]["nodes_limit"] = serde_json::json!(0);
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        let error = journal_depths::load(std::slice::from_ref(&path), &keys).err().unwrap();
+        assert!(format!("{error:#}").contains(path.to_str().unwrap()), "{case}: {error:#}");
+    }
+}
+
+#[test]
+fn journal_depths_include_all_multipv_and_distinct_scores() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("input.jsonl");
+    let mut first = journal_record(30);
+    first["reading"]["multipv"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"move": "2g2f", "cp": 5, "depth": 25}));
+    let mut second = first.clone();
+    second["reading"]["multipv"][0]["cp"] = serde_json::json!(20);
+    std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+    let depths = journal_depths::load(&[path], &BTreeSet::from([HIRATE_KEY])).unwrap();
+    let schema = Schema::default();
+    let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+    r.set("cond", first["settings"]["fingerprint"].as_str().unwrap()[..8].into());
+    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![30, 30]));
+    r.set("move", "2g2f".into());
+    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![25, 25]));
 }

@@ -431,7 +431,7 @@ pub(super) fn join_roots(
     // 行番号はファイルの行と同じ数え方 (見出しの次が 2)。
     let book =
         positions_from_rows(all_rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
-    let (_, _, audited) = audit(&book, draws, line, false)?;
+    let (_, _, audited) = audit(&book, draws, line, false, None)?;
     let verified = master_conditions(&all_rows, &book.0, &audited, cond);
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
@@ -576,7 +576,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
     let master_rows = read_master(&args.master)?;
     let master = master_values(&master_rows, draws)?;
-    let (_, before, audited) = audit(&master_rows, draws, args.line, false)?;
+    let (_, before, audited) = audit(&master_rows, draws, args.line, false, None)?;
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let rows = parse_master(&text)?;
@@ -626,7 +626,8 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
-    let (_, after, _) = audit(&parse_master_rows(registered.as_bytes())?, draws, args.line, false)?;
+    let (_, after, _) =
+        audit(&parse_master_rows(registered.as_bytes())?, draws, args.line, false, None)?;
 
     std::fs::create_dir_all(&args.out)?;
     write_outputs(&args.out, &meta, &trees, &all, &conflicts)?;
@@ -784,7 +785,7 @@ mod tests {
             let master =
                 positions_from_rows(rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))
                     .unwrap();
-            let (_, _, book) = audit(&master, DrawValues::default(), 40, false).unwrap();
+            let (_, _, book) = audit(&master, DrawValues::default(), 40, false, None).unwrap();
             assert_eq!(
                 master_conditions(&rows, &master.0, &book, "ledger"),
                 expected.into_iter().collect()
