@@ -52,8 +52,10 @@ pub(super) struct SeedsArgs {
     priority_early: u32,
     #[arg(long, default_value_t = 100)]
     priority_late: u32,
+    /// 勝たなかった側が途中でこの評価値以上になった局から、その側の根を足す
     #[arg(long)]
     chance_cp: Option<i32>,
+    /// chance-cp に初めて届いた手の何手前を根にするか (起点より前には戻らない)
     #[arg(long, default_value_t = 6)]
     chance_back: usize,
     /// 先手全勝の起点から、全敗した後手側の根を early と同じ優先度で作る
@@ -611,6 +613,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
                         let prefix: Vec<_> =
                             moves[start..index].iter().map(|m| m.move_usi.clone()).collect();
                         if !prefix.is_empty() {
+                            // 2 回目の走査で数えた組なので必ずある。無ければ走査の間に入力が変わった。
                             let n = *prefixes
                                 .get(&(origin_key.clone(), own.to_owned(), prefix))
                                 .context(
