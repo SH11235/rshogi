@@ -220,7 +220,7 @@ impl UsiEngine {
         reset_layer_stack_progress_buckets();
 
         Self {
-            // EvalHash は最初の `go` 直前まで遅延確保する。
+            // EvalHash は isready (無ければ最初の `go` 直前) まで遅延確保する。
             // selfplay のように起動直後に setoption でサイズを下げるケースで、
             // 先に既定 256MB を確保してしまう無駄を避ける。
             search: Some(Search::new_with_eval_hash_large_pages(tt_size_mb, 0, true)),
@@ -527,6 +527,11 @@ impl UsiEngine {
                 routing_bucket_count
             );
         }
+        // 確保と 0 埋めを持ち時間に入れないよう、setoption が出そろった readyok の前に済ませる。
+        if let Some(mut search) = self.search.take() {
+            self.prepare_eval_hash(&mut search);
+            self.search = Some(search);
+        }
         self.maybe_report_page_status();
         self.maybe_load_book();
         self.maybe_load_book_explore();
@@ -775,9 +780,12 @@ impl UsiEngine {
             .context("NNUE delta reload requested, but the loaded EvalFile path is unknown")?;
         self.load_nnue_with_current_deltas(&path)
             .with_context(|| format!("failed to reload NNUE file {}", path.display()))?;
+        // 旧 net の評価値を残さないよう表を手放し、次の isready か go の直前に確保し直す。
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
-            search.resize_eval_hash(self.eval_hash_size_mb);
+            if search.eval_hash_size_mb() != 0 {
+                search.resize_eval_hash(0);
+            }
         }
         self.maybe_report_page_status();
         Ok(())
@@ -808,9 +816,28 @@ impl UsiEngine {
         self.reported_page_status = current;
     }
 
+    /// 実際に確保する EvalHash の大きさ。`UseEvalHash=false` では引かない表を持たない。
+    fn allocated_eval_hash_mb(&self) -> usize {
+        if self.use_eval_hash {
+            self.eval_hash_size_mb
+        } else {
+            0
+        }
+    }
+
+    /// isready と go の直前に、EvalHash を設定どおりの大きさにそろえる。setoption では確保しない。
+    fn prepare_eval_hash(&mut self, search: &mut Search) {
+        let allocated = self.allocated_eval_hash_mb();
+        if search.eval_hash_size_mb() != allocated {
+            search.resize_eval_hash(allocated);
+        }
+        self.report_eval_hash_page_status(&search.eval_hash());
+    }
+
     fn report_eval_hash_page_status(&mut self, hash: &rshogi_core::eval::EvalHash) {
-        if self.eval_hash_size_mb == 0 {
-            self.reported_eval_hash_page_status = TtPageStatus::Regular;
+        // 空の表は一時的に手放しただけのことがある。報告済みの状態を残し、
+        // 確保し直したときに前回の報告と比べて変化を伝える。
+        if hash.is_empty() {
             return;
         }
         let current = if hash.uses_large_pages() {
@@ -1057,11 +1084,19 @@ impl UsiEngine {
                 }
             }
             "EvalHash" => {
+                // 確保は isready まで遅らせる。GUI は EvalHash を UseEvalHash より先に送るので、
+                // ここで確保すると UseEvalHash=false でも一度は表を確保して手放すことになる。
                 if let Ok(size) = value.parse::<usize>()
-                    && let Some(search) = self.search.as_mut()
+                    && self.search.is_some()
                 {
-                    search.resize_eval_hash(size);
                     self.eval_hash_size_mb = size;
+                    let allocated = self.allocated_eval_hash_mb();
+                    if let Some(search) = self.search.as_mut()
+                        && search.eval_hash_size_mb() != 0
+                        && search.eval_hash_size_mb() != allocated
+                    {
+                        search.resize_eval_hash(0);
+                    }
                 }
                 self.maybe_report_page_status();
             }
@@ -1069,6 +1104,10 @@ impl UsiEngine {
                 let large_pages = value == "true" || value == "1";
                 self.eval_hash_large_pages = large_pages;
                 if let Some(search) = self.search.as_mut() {
+                    // ページ種別を替えるときも setoption では確保せず、表を手放してから切り替える。
+                    if search.eval_hash_size_mb() != 0 {
+                        search.resize_eval_hash(0);
+                    }
                     search.set_eval_hash_large_pages(large_pages);
                 }
                 self.maybe_report_page_status();
@@ -1077,6 +1116,14 @@ impl UsiEngine {
                 let v = value == "true" || value == "1";
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
+                // 有効化時の確保は次の isready か go の直前まで遅らせ、無効化時はすぐ手放す。
+                if !v
+                    && let Some(search) = self.search.as_mut()
+                    && search.eval_hash_size_mb() != 0
+                {
+                    search.resize_eval_hash(0);
+                }
+                self.maybe_report_page_status();
             }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
@@ -1632,14 +1679,11 @@ impl UsiEngine {
         let mut search = self.search.take().unwrap_or_else(|| {
             Search::new_with_eval_hash_large_pages(
                 self.tt_size_mb,
-                self.eval_hash_size_mb,
+                self.allocated_eval_hash_mb(),
                 self.eval_hash_large_pages,
             )
         });
-        if search.eval_hash_size_mb() != self.eval_hash_size_mb {
-            search.resize_eval_hash(self.eval_hash_size_mb);
-        }
-        self.report_eval_hash_page_status(&search.eval_hash());
+        self.prepare_eval_hash(&mut search);
         search.set_skill_options(self.skill_options);
         // stop/ponderhitフラグをリセット（スレッド生成前に行い、go()内での競合を防ぐ）
         search.reset_flags();
@@ -2007,9 +2051,10 @@ impl UsiEngine {
                 }
                 Err(_) => {
                     eprintln!("info string search thread panicked, resetting Search");
+                    // EvalHash は直後に届き得る setoption を反映してから isready / go で確保する。
                     let mut search = Search::new_with_eval_hash_large_pages(
                         self.tt_size_mb,
-                        self.eval_hash_size_mb,
+                        0,
                         self.eval_hash_large_pages,
                     );
                     search.set_skill_options(self.skill_options);
@@ -2489,6 +2534,51 @@ mod tests {
         );
     }
 
+    /// cmd_go が探索を始める直前の EvalHash の準備だけを行う。
+    fn prepare_for_go(engine: &mut UsiEngine) {
+        let mut search = engine.search.take().unwrap();
+        engine.prepare_eval_hash(&mut search);
+        engine.search = Some(search);
+    }
+
+    #[test]
+    #[serial]
+    fn use_eval_hash_false_keeps_eval_hash_unallocated() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let size = |engine: &UsiEngine| engine.search.as_ref().unwrap().eval_hash_size_mb();
+                let mut engine = UsiEngine::new();
+                // GUI が送る順 (EvalHash が先)。setoption の時点では確保しない。
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "16"]);
+                assert_eq!(size(&engine), 0);
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "false"]);
+                prepare_for_go(&mut engine);
+                assert_eq!(size(&engine), 0);
+                assert!(engine.search.as_ref().unwrap().eval_hash().is_empty());
+
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "true"]);
+                assert_eq!(size(&engine), 0);
+                prepare_for_go(&mut engine);
+                assert_eq!(size(&engine), 16);
+
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "false"]);
+                assert_eq!(size(&engine), 0);
+                engine.cmd_setoption(&["setoption", "name", "UseEvalHash", "value", "true"]);
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "8"]);
+                prepare_for_go(&mut engine);
+                assert_eq!(size(&engine), 8);
+                // 大きさを変えると確保済みの表は手放し、次の go で確保し直す。
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "4"]);
+                assert_eq!(size(&engine), 0);
+                prepare_for_go(&mut engine);
+                assert_eq!(size(&engine), 4);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     #[serial]
     fn eval_hash_large_pages_option_survives_resize() {
@@ -2501,6 +2591,8 @@ mod tests {
                 engine.eval_hash_size_mb = 0;
                 engine.reported_eval_hash_page_status = TtPageStatus::LargePages;
                 engine.report_eval_hash_page_status(&rshogi_core::eval::EvalHash::new(0));
+                assert_eq!(engine.reported_eval_hash_page_status, TtPageStatus::LargePages);
+                engine.report_eval_hash_page_status(&rshogi_core::eval::EvalHash::new(1));
                 assert_eq!(engine.reported_eval_hash_page_status, TtPageStatus::Regular);
                 engine.eval_hash_size_mb = 256;
                 engine.cmd_setoption(&[
@@ -2512,11 +2604,14 @@ mod tests {
                 ]);
                 assert_eq!(engine.search.as_ref().unwrap().eval_hash_size_mb(), 0);
                 engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "1"]);
+                prepare_for_go(&mut engine);
                 let regular = engine.search.as_ref().unwrap().eval_hash();
                 assert!(!regular.uses_large_pages());
                 assert!(!regular.huge_page_hint_requested());
                 regular.store(1, 42);
                 engine.cmd_setoption(&["setoption", "name", "EvalHashLargePages", "value", "true"]);
+                assert_eq!(engine.search.as_ref().unwrap().eval_hash_size_mb(), 0);
+                prepare_for_go(&mut engine);
                 let allocated = engine.search.as_ref().unwrap().eval_hash();
                 assert!(!Arc::ptr_eq(&regular, &allocated));
                 assert_eq!(allocated.probe(1), None);
@@ -2528,6 +2623,7 @@ mod tests {
                     "false",
                 ]);
                 engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "3"]);
+                prepare_for_go(&mut engine);
                 assert!(!engine.eval_hash_large_pages);
                 let resized = engine.search.as_ref().unwrap().eval_hash();
                 assert!(!resized.uses_large_pages());
