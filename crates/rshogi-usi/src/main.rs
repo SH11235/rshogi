@@ -220,7 +220,7 @@ impl UsiEngine {
         reset_layer_stack_progress_buckets();
 
         Self {
-            // EvalHash は最初の `go` 直前まで遅延確保する。
+            // EvalHash は isready (無ければ最初の `go` 直前) まで遅延確保する。
             // selfplay のように起動直後に setoption でサイズを下げるケースで、
             // 先に既定 256MB を確保してしまう無駄を避ける。
             search: Some(Search::new_with_eval_hash_large_pages(tt_size_mb, 0, true)),
@@ -527,6 +527,11 @@ impl UsiEngine {
                 routing_bucket_count
             );
         }
+        // 確保と 0 埋めを持ち時間に入れないよう、setoption が出そろった readyok の前に済ませる。
+        if let Some(mut search) = self.search.take() {
+            self.prepare_eval_hash(&mut search);
+            self.search = Some(search);
+        }
         self.maybe_report_page_status();
         self.maybe_load_book();
         self.maybe_load_book_explore();
@@ -775,7 +780,7 @@ impl UsiEngine {
             .context("NNUE delta reload requested, but the loaded EvalFile path is unknown")?;
         self.load_nnue_with_current_deltas(&path)
             .with_context(|| format!("failed to reload NNUE file {}", path.display()))?;
-        // 旧 net の評価値を残さないよう表を手放し、次の go の直前に確保し直す。
+        // 旧 net の評価値を残さないよう表を手放し、次の isready か go の直前に確保し直す。
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
             if search.eval_hash_size_mb() != 0 {
@@ -820,7 +825,7 @@ impl UsiEngine {
         }
     }
 
-    /// go の直前に、EvalHash を設定どおりの大きさにそろえる。setoption では確保しない。
+    /// isready と go の直前に、EvalHash を設定どおりの大きさにそろえる。setoption では確保しない。
     fn prepare_eval_hash(&mut self, search: &mut Search) {
         let allocated = self.allocated_eval_hash_mb();
         if search.eval_hash_size_mb() != allocated {
@@ -1078,7 +1083,7 @@ impl UsiEngine {
                 }
             }
             "EvalHash" => {
-                // 確保は go の直前まで遅らせる。GUI は EvalHash を UseEvalHash より先に送るので、
+                // 確保は isready まで遅らせる。GUI は EvalHash を UseEvalHash より先に送るので、
                 // ここで確保すると UseEvalHash=false でも一度は表を確保して手放すことになる。
                 if let Ok(size) = value.parse::<usize>()
                     && self.search.is_some()
@@ -1098,6 +1103,10 @@ impl UsiEngine {
                 let large_pages = value == "true" || value == "1";
                 self.eval_hash_large_pages = large_pages;
                 if let Some(search) = self.search.as_mut() {
+                    // ページ種別を替えるときも setoption では確保せず、表を手放してから切り替える。
+                    if search.eval_hash_size_mb() != 0 {
+                        search.resize_eval_hash(0);
+                    }
                     search.set_eval_hash_large_pages(large_pages);
                 }
                 self.maybe_report_page_status();
@@ -1106,7 +1115,7 @@ impl UsiEngine {
                 let v = value == "true" || value == "1";
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
-                // 有効化時の確保は次の go 直前まで遅らせ、無効化時はすぐ手放す。
+                // 有効化時の確保は次の isready か go の直前まで遅らせ、無効化時はすぐ手放す。
                 if !v
                     && let Some(search) = self.search.as_mut()
                     && search.eval_hash_size_mb() != 0
@@ -2041,9 +2050,10 @@ impl UsiEngine {
                 }
                 Err(_) => {
                     eprintln!("info string search thread panicked, resetting Search");
+                    // EvalHash は直後に届き得る setoption を反映してから isready / go で確保する。
                     let mut search = Search::new_with_eval_hash_large_pages(
                         self.tt_size_mb,
-                        self.allocated_eval_hash_mb(),
+                        0,
                         self.eval_hash_large_pages,
                     );
                     search.set_skill_options(self.skill_options);
@@ -2597,6 +2607,8 @@ mod tests {
                 assert!(!regular.huge_page_hint_requested());
                 regular.store(1, 42);
                 engine.cmd_setoption(&["setoption", "name", "EvalHashLargePages", "value", "true"]);
+                assert_eq!(engine.search.as_ref().unwrap().eval_hash_size_mb(), 0);
+                prepare_for_go(&mut engine);
                 let allocated = engine.search.as_ref().unwrap().eval_hash();
                 assert!(!Arc::ptr_eq(&regular, &allocated));
                 assert_eq!(allocated.probe(1), None);
