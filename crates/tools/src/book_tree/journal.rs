@@ -723,6 +723,36 @@ fn for_each_complete_line(
     Ok(())
 }
 
+/// 最初の確定行が tree 台帳でなければ None、それ以外は確定行を走査して末尾の有無を返す。
+pub(super) fn visit_records(
+    path: &Path,
+    mut visit: impl FnMut(Record) -> Result<()>,
+) -> Result<Option<bool>> {
+    let file = File::open(path)?;
+    let limit = file.metadata()?.len();
+    let mut reader = BufReader::new(file.take(limit));
+    let mut first = Vec::new();
+    let n = reader.read_until(b'\n', &mut first)?;
+    if !first.ends_with(b"\n") {
+        return Ok(None);
+    }
+    let Ok(record) = parse_record(&first) else {
+        return Ok(None);
+    };
+    let mut ignored_tail = false;
+    visit(record)
+        .and_then(|()| {
+            for_each_complete_line(
+                &mut reader,
+                limit - n as u64,
+                |bytes| visit(parse_record(bytes)?),
+                &mut ignored_tail,
+            )
+        })
+        .with_context(|| format!("台帳: {}", path.display()))?;
+    Ok(Some(ignored_tail))
+}
+
 pub(super) fn parse_record(bytes: &[u8]) -> Result<Record> {
     let rec: Record = serde_json::from_slice(bytes).context("tree 台帳の形式が不正です")?;
     if rec.kind != VERSION || rec.settings.version != VERSION {
