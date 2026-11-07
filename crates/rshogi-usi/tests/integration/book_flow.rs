@@ -3,6 +3,7 @@
 //! - YANEURAOU-DB2016 形式の実 `.db` フィクスチャを与えて position→go で bestmove が返ること
 //! - BookFile=no_book（既定）では定跡関連の出力が一切無く従来挙動が不変であること
 //! - 片側正規化定跡に FlippedBook でヒットすること
+//! - 既定 (IgnoreBookPly=true) では定跡の手数と対局の手数が違ってもヒットすること
 //! - 優先定跡 (`<BookFile の名前>-000.db` 等) を BookFile より先に引くこと
 //! - 先後別の定跡オプション (`BookEvalWhiteDiff` 等) を宣言し、root 局面の手番側で使うこと
 
@@ -148,6 +149,34 @@ fn book_hit_returns_bestmove_from_db() {
 
     assert!(stdout.contains("book loaded"), "book load info missing:\n{stdout}");
     // 候補が 1 手なので抽選に依らず 7g7f ponder 3c3d が確定する。
+    assert_eq!(
+        first_bestmove(&stdout),
+        Some("bestmove 7g7f ponder 3c3d"),
+        "unexpected bestmove:\n{stdout}"
+    );
+}
+
+#[test]
+fn book_hits_by_default_when_game_ply_differs_from_db_ply() {
+    // 手数 1 で登録した平手初期局面に、玉の往復 4 手で戻った手数 5 の局面から当たること (IgnoreBookPly の既定 true)。
+    let db = "#YANEURAOU-DB2016 1.00\n\
+              sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n\
+              7g7f 3c3d 30 16 100\n";
+    let path = write_temp_db("ply", db);
+    let path_str = path.to_string_lossy();
+
+    let input = format!(
+        "{MATERIAL_INIT}\
+         setoption name BookFile value {path_str}\n\
+         isready\n\
+         position startpos moves 5i5h 5a5b 5h5i 5b5a\n\
+         go depth 10\n"
+    );
+    let stdout = run_engine(&input);
+    let _ = std::fs::remove_file(&path);
+
+    // 定跡から指すと探索しないので、探索の info 行が出ないことで当たったことを確かめる。
+    assert!(!stdout.contains("info depth"), "searched instead of using the book:\n{stdout}");
     assert_eq!(
         first_bestmove(&stdout),
         Some("bestmove 7g7f ponder 3c3d"),
@@ -424,7 +453,7 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
             "option name NarrowBook type check default false",
             "option name BookSelectValue type check default false",
             "option name ConsiderBookMoveCount type check default false",
-            "option name IgnoreBookPly type check default false",
+            "option name IgnoreBookPly type check default true",
             "option name FlippedBook type check default true",
             "option name BookOnTheFly type check default false",
         ],

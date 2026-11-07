@@ -261,7 +261,7 @@ impl UsiEngine {
             book_explore_file: String::new(),
             book_explore: None,
             book_dir: "book".to_string(),
-            ignore_book_ply: false,
+            ignore_book_ply: true,
             book_on_the_fly: false,
             books: Vec::new(),
             book_loaded_sig: None,
@@ -423,7 +423,7 @@ impl UsiEngine {
         println!("option name NarrowBook type check default false");
         println!("option name BookSelectValue type check default false");
         println!("option name ConsiderBookMoveCount type check default false");
-        println!("option name IgnoreBookPly type check default false");
+        println!("option name IgnoreBookPly type check default true");
         println!("option name FlippedBook type check default true");
         println!("option name BookOnTheFly type check default false");
         for spec in SearchTuneParams::option_specs() {
