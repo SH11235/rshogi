@@ -105,7 +105,7 @@ Workers 版への接続は
 [server.keepalive]
 tcp = true                # SO_KEEPALIVE
 ping_interval_sec = 30    # CSA 空行 / LOBBY_PONG の送信間隔。0 で周期送信なし、正値は 30 以上
-unacked_timeout_sec = 60  # 送ったデータの確認応答が来ないまま 60 秒で切断とみなす。0 で OS 既定
+unacked_timeout_sec = 60  # 送ったデータの確認応答が来ないまま 60 秒で切断とみなす。0 で OS 既定、正値は 10 以上
 ```
 
 経路の途中でパケットが捨てられる切れ方 (相手から RST が返らない) では、keep-alive の空行の送信は

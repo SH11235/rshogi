@@ -254,6 +254,12 @@ impl CsaClientConfig {
         {
             bail!("keepalive.ping_interval_sec must be >= 30 (CSA protocol requirement)");
         }
+        // 数秒だと損失のある回線で再送が数回重なるだけで満了し、生きている接続を切ってしまう。
+        if self.server.keepalive.unacked_timeout_sec > 0
+            && self.server.keepalive.unacked_timeout_sec < 10
+        {
+            bail!("keepalive.unacked_timeout_sec must be 0 or >= 10");
+        }
         Ok(())
     }
 }
@@ -272,6 +278,19 @@ mod tests {
         let config: CsaClientConfig =
             toml::from_str("[server.keepalive]\nunacked_timeout_sec = 0\n").unwrap();
         assert_eq!(config.server.keepalive.unacked_timeout(), None);
+    }
+
+    #[test]
+    fn validate_rejects_unacked_timeout_below_10s() {
+        let mut config: CsaClientConfig = toml::from_str(
+            "[server]\nid = \"x\"\n[engine]\npath = \"/bin/true\"\n[server.keepalive]\nunacked_timeout_sec = 5\n",
+        )
+        .unwrap();
+        assert!(config.validate().is_err());
+        config.server.keepalive.unacked_timeout_sec = 10;
+        assert!(config.validate().is_ok());
+        config.server.keepalive.unacked_timeout_sec = 0;
+        assert!(config.validate().is_ok());
     }
 
     #[test]

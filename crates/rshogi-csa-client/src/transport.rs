@@ -205,6 +205,7 @@ pub(crate) fn set_unacked_timeout(_stream: &std::net::TcpStream, _timeout: Durat
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
@@ -238,7 +239,6 @@ mod tests {
         assert_eq!(ret, 0);
         assert_eq!(ms, 1500);
     }
-    use super::*;
 
     #[test]
     fn target_parses_tcp_default() {
