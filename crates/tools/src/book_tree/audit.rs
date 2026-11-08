@@ -1191,6 +1191,7 @@ fn propagate_for_sides(
                 .and_modify(|p| p.moves.extend(record.moves.clone()))
                 .or_insert_with(|| record.clone());
         }
+        // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
         let mut result = propagate_with(&expanded, draws, fill, true)?;
         // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
         let mut usage = RecordUsage::default();
