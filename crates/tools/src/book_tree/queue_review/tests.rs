@@ -486,3 +486,11 @@ fn previous_hold_files_are_preserved_and_failed_trees_are_counted() {
             .contains("\t92\tinf\t1\n")
     );
 }
+
+#[test]
+fn memo_moves_stop_at_trailing_text() {
+    let memo = "walk weight=0.003 moves=7g7f 3c3d / 深さ 10 段・相手 2 手に (22 手目まで)";
+    assert_eq!(super::memo_moves(Some(memo)).unwrap(), vec!["7g7f", "3c3d"]);
+    let memo = "walk weight=0.003 moves=7g7f P*5e 8h2b+ next=x";
+    assert_eq!(super::memo_moves(Some(memo)).unwrap(), vec!["7g7f", "P*5e", "8h2b+"]);
+}

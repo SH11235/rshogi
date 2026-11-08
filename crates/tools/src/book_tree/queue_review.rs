@@ -326,7 +326,19 @@ fn memo_moves(memo: Option<&str>) -> Option<Vec<&str>> {
         .0
         + 6;
     let text = memo[start..].split([';', ',', '\n', '\r', '；']).next().unwrap_or_default();
-    Some(text.split_whitespace().take_while(|token| !token.contains('=')).collect())
+    // memo は手順の後に説明の文が続くことがあるので、USI の手でない最初の語で止める。
+    Some(text.split_whitespace().take_while(|token| is_usi_move(token)).collect())
+}
+fn is_usi_move(token: &str) -> bool {
+    let b = token.as_bytes();
+    let file = |c: u8| (b'1'..=b'9').contains(&c);
+    let rank = |c: u8| (b'a'..=b'i').contains(&c);
+    match b {
+        [p, b'*', f, r] => b"PLNSGBR".contains(p) && file(*f) && rank(*r),
+        [f1, r1, f2, r2] => file(*f1) && rank(*r1) && file(*f2) && rank(*r2),
+        [f1, r1, f2, r2, b'+'] => file(*f1) && rank(*r1) && file(*f2) && rank(*r2),
+        _ => false,
+    }
 }
 enum MemoPath {
     Seed,
