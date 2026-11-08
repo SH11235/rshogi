@@ -344,14 +344,20 @@ fn apply_tiles_avx512<const L1: usize, const REGS: usize>(
     // L1 は tile 幅の倍数。重み行は slice で境界を検証してから読む。
     // 非整列 load/store を用い、各ポインタは該当 tile の範囲内のみ参照する。
     // source が cache を指す場合も tile 全体を読み終えてから同じ範囲へ書く。
+    // 次行の prefetch は REGS=24 の tile 内の先頭2 cache line だけを対象にする。
     unsafe {
         for offset in (0..L1).step_by(32 * REGS) {
             let mut tile = [_mm512_setzero_si512(); REGS];
             for (k, value) in tile.iter_mut().enumerate() {
                 *value = _mm512_loadu_si512(source.add(offset + k * 32).cast());
             }
-            for index in removed.iter() {
+            for (position, index) in removed.iter().enumerate() {
                 let row = &weights[index * L1..][..L1];
+                if REGS == 24 && position + 1 < removed.len() {
+                    let next = &weights[removed.get(position + 1) * L1..][..L1];
+                    _mm_prefetch(next.as_ptr().add(offset).cast(), _MM_HINT_T0);
+                    _mm_prefetch(next.as_ptr().add(offset + 32).cast(), _MM_HINT_T0);
+                }
                 for (k, value) in tile.iter_mut().enumerate() {
                     *value = _mm512_sub_epi16(
                         *value,
@@ -359,8 +365,13 @@ fn apply_tiles_avx512<const L1: usize, const REGS: usize>(
                     );
                 }
             }
-            for index in added.iter() {
+            for (position, index) in added.iter().enumerate() {
                 let row = &weights[index * L1..][..L1];
+                if REGS == 24 && position + 1 < added.len() {
+                    let next = &weights[added.get(position + 1) * L1..][..L1];
+                    _mm_prefetch(next.as_ptr().add(offset).cast(), _MM_HINT_T0);
+                    _mm_prefetch(next.as_ptr().add(offset + 32).cast(), _MM_HINT_T0);
+                }
                 for (k, value) in tile.iter_mut().enumerate() {
                     *value = _mm512_add_epi16(
                         *value,
