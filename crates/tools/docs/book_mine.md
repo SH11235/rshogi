@@ -453,8 +453,66 @@ book_mine tree queue-review \
 | `--table <TSV>` | 必須 | 未着手の根ごとの分類表 |
 | `--boxes <TSV>` | 必須 | 台ごとの残りと読める量の表 |
 | `--hold-out <DIR>` | 必須 | 台ごとの hold 候補の JSON Lines を出す dir |
-| `--prefix <NAME>` | qrhold | hold 出力のファイル名の先頭。英数字・`_`・`-` |
+| `--prefix <NAME>` | qrhold | hold 出力と計画の積み荷のファイル名の先頭。英数字・`_`・`-` |
 | `--hold-class <CLASS>` | 追加なし、繰り返し可 | reach-low に加えて保留候補にする class |
+| `--plan-out <DIR>` | なし | 指定時だけ、台ごとの積み荷 `<prefix>_<box>.jsonl` と `<prefix>_plan.tsv` を作る。hold 候補とは別の出力先を使う |
+| `--max-ratio <F>` | 0.95 | 計画の残り/読める量の上限。有限の非負数 |
+| `--box-deadlines` | 無効 | 台の dir の `deadline` (Unix 秒の整数 1 行) と cutoff の早い方を締めにする。無い台は cutoff |
+| `--condition <NAME>=<LABEL>` | 空ラベル、繰り返し可 | 台の読み条件のラベル。同じ条件の台には同じラベルを付ける |
+| `--add <JSONL>` | なし、繰り返し可 | 新規の木の行。`tree enqueue --from` と同じ形 |
+| `--update <JSONL>` | なし、繰り返し可 | 既存の木への足し込み行。`tree seeds --update-out` の出力など |
+| `--update-size <N>` | 30 | hold false の台へ足し込みを送る id あたりの追加局面数の仮定 |
+
+`--add`・`--update`・`--condition` と、明示指定する `--max-ratio`・`--update-size` には `--plan-out` が必要です。
+`--box-deadlines` は計画を出さない場合にも `--boxes` の hours・capacity・ratio に反映します。
+計画の例 (通常の点検引数に追加):
+
+```sh
+--plan-out dispatch --prefix batch01 --max-ratio 0.95 --box-deadlines \
+--condition box-a=model-a --condition box-b=model-a \
+--add new-trees.jsonl --update extra-lines.jsonl --update-size 30
+```
+
+計画は点検時点の remaining から始め、次の順で作ります。capacity が 0 の台の計画 ratio は無限大です。
+
+1. 足し込みの id を全台の progress で探します。hold false で failed でない台が 1 台ならそこへ、
+   2 台以上ならエラーです。0 台なら、その id のある全台へ送り、hold は保持します。
+   どこにもなければ `drop-update` にします。送り先の最後の受付行の game・memo だけを置き換え、
+   載せ替えた行の合法性を受付と同じ検査で確認し、不正なら送り先の台と id を含むエラーにします。
+   hold false の台の見込み量に update-size を id ごとに 1 回加えます。同じ id の足し込みは最後の game・memo を使います。
+   failed が無い progress は false として読みます。
+2. 上限を超える台を名前順に点検します。未着手の木を reach-low 優先、priority の大きい順、
+   同点は id の逆順に見ます。reach-low は元の台で hold にします。それ以外は、移した後に上限以内となる
+   他の台のうち、移した後の ratio が最小の台へ移します。同点は台の名前順です。
+   同じ id を受付または計画に既に持つ台は、既存の木を置き換えてしまうため移動先から除きます (hold を含む)。
+   元の行は hold true、移し先は hold false にし、定義を変えず世代を増やしません。
+   移し先には、移動元の台へ実際に送った最後の足し込みの game・memo も反映します。
+   移せなければ priority 100 以上は hold、100 未満は動かさず `keep-over` にします。
+   元の台が上限以内になったら止めます。hold・移動では、初期の remaining と同じく木ごとの
+   `max(tree-size, requested) - read` (下限 0) と、移動元の台に足し込み済みの update-size 分の見込み量を引き、移し先に同量を足します。
+   bw は両側とも未着手の場合だけ対象にし、側ごとに求めた見込み量を一緒に扱います。
+3. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
+   追加後に上限以内となる台のうち追加後の ratio が最小の台、同点は名前順です。
+   入る台がなければ、条件を満たす台のうち現在の ratio 最小の台へ hold true で置き (`add-hold`)、
+   見込み量は増やしません。受付済みの id や新規行どうしの id の重複はエラーです。
+
+「同じ根」は root・roots のいずれかの局面が手数を除いて一致し、id が違うことです。
+移動の重複判定は全台の受付 (hold を含む) で調べます。新規行は移動後の配置に合わせて割り振ります。移動は、元と同じ条件ラベルの台へ、
+または同じ根の別 id が一つもない場合に限り別のラベルの台へ行います。
+新規行の条件ラベルは、台ごと・id ごとに計画行があればその行 (hold を含む)、なければ受付行を使い、
+その最終状態の hold false の行だけから根ごとに集めます。移動元や保留にした木のラベルは残さず、
+`add-hold` の行もラベルを追加しません。
+ラベルが 1 種類の根は同じラベルの台に置き、既に複数種類ある根やラベルのない根は条件で縛りません。
+hold false で追加した新規行のラベルは後続の割り振りに反映します。
+root・roots のすべての根の条件を満たす台がなければエラーです。
+止めた台をこの照合から外す場合は、その台を `--box` に渡さないでください。
+
+`<prefix>_plan.tsv` の列は `action / id / own / priority / from / to / reason` です。
+action は `update`・`update-held`・`drop-update`・`hold-low`・`move`・`hold-over`・`keep-over`・`add`・`add-hold`。
+台ごとの積み荷はこの順で生成し、同じ id が再び出たら後の行だけを残します。
+行の無い台の JSONL は作りません。出力 dir は必要に応じて作り、既存の `<prefix>_*.jsonl` または `<prefix>_plan.tsv` があれば
+エラーにして上書きしません。標準出力には各台の計画 ratio の前後を表示します。
+計画は写しを前提とするため、投入前に受付・進捗の変化を確認してください。
 
 速さ・重み・下限には有限の非負数を指定します。`--walk-table` を省くと到達の重みは無く、
 主根で手順のある木は not-reached または path-mismatch になります。表の `side` 列があれば指定した側の行だけを読みます。

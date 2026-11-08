@@ -55,6 +55,27 @@ pub(super) struct QueueReviewArgs {
     /// reach-low に加えて hold 行にする分類 (繰り返し可)
     #[arg(long, value_enum)]
     hold_class: Vec<Class>,
+    /// 台ごとの積み荷と <prefix>_plan.tsv の出力先
+    #[arg(long)]
+    plan_out: Option<PathBuf>,
+    /// 計画後の残り/読める量の上限
+    #[arg(long, default_value_t = 0.95, requires = "plan_out")]
+    max_ratio: f64,
+    /// 台の deadline と cutoff の早い方を締めに使う
+    #[arg(long)]
+    box_deadlines: bool,
+    /// 台の読み条件 (NAME=LABEL、繰り返し可)
+    #[arg(long, requires = "plan_out")]
+    condition: Vec<String>,
+    /// 新規の木の JSON Lines (繰り返し可)
+    #[arg(long, requires = "plan_out")]
+    add: Vec<PathBuf>,
+    /// 既存の木への足し込み JSON Lines (繰り返し可)
+    #[arg(long, requires = "plan_out")]
+    update: Vec<PathBuf>,
+    /// 足し込みのある id あたりの追加局面数の仮定
+    #[arg(long, default_value_t = 30, requires = "plan_out")]
+    update_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -95,8 +116,15 @@ struct TreeProgress {
     priority: u32,
     hold: bool,
     finished: bool,
+    #[serde(default)]
+    failed: bool,
     read: u64,
     requested: u64,
+}
+impl TreeProgress {
+    fn remaining(&self, tree_size: u64) -> u64 {
+        tree_size.max(self.requested).saturating_sub(self.read)
+    }
 }
 #[derive(Deserialize)]
 struct WorkerProgress {
@@ -431,8 +459,15 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     let walk = load_walk(&args, &mut inputs)?;
     let start: Vec<_> =
         args.start_moves.as_deref().unwrap_or_default().split_whitespace().collect();
-    let hours =
-        (args.cutoff.signed_duration_since(now).num_milliseconds() as f64 / 3_600_000.0).max(0.0);
+    let metrics = boxes
+        .iter()
+        .map(|b| box_metrics(&args, b, now, &rate, &box_rate, &mut inputs))
+        .collect::<Result<Vec<_>>>()?;
+    let plan = args
+        .plan_out
+        .as_ref()
+        .map(|_| plan::build(&args, &boxes, &metrics, &walk, &mut inputs))
+        .transpose()?;
     let mut duplicates: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     for b in &boxes {
         for tree in b.progress.trees.iter().filter(|t| !t.finished && !t.hold) {
@@ -450,6 +485,10 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
             .iter()
             .map(|b| args.hold_out.join(format!("{}_{}.jsonl", args.prefix, b.name))),
     );
+    let review_outputs = outputs.len();
+    if let Some(plan) = &plan {
+        outputs.extend(plan.outputs.iter().cloned());
+    }
     let resolved: Vec<_> = outputs
         .iter()
         .map(|p| crate::common::dedup::canonicalize_maybe_new(p))
@@ -465,28 +504,34 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         }
     }
     files::write_generated(&outputs, &inputs, true, |temporary| {
+        let (temporary, planned) = temporary.split_at_mut(review_outputs);
+        if let Some(plan) = &plan {
+            for (file, bytes) in planned.iter_mut().zip(&plan.payloads) {
+                file.write_all(bytes)?;
+            }
+        }
         let (table, rest) = temporary.split_at_mut(1);
         let (summary, holds) = rest.split_at_mut(1);
         let mut table = BufWriter::new(table[0].as_file_mut());
         let mut summary = BufWriter::new(summary[0].as_file_mut());
         writeln!(table, "box\tid\town\tpriority\troot\tclass\treach_weight\tdup_of")?;
         writeln!(summary, "box\tworkers\trate\thours\tcapacity\tremaining\tratio\tunstarted")?;
-        for (b, hold) in boxes.iter().zip(holds) {
+        for ((b, hold), metric) in boxes.iter().zip(holds).zip(&metrics) {
             let mut hold = BufWriter::new(hold.as_file_mut());
             let mut paths = BTreeMap::new();
-            let speed = box_rate.get(&b.name).copied().unwrap_or_else(|| {
-                rate.get(&b.name).copied().unwrap_or(args.default_rate)
-                    * b.progress.workers.len() as f64
-            });
-            let capacity = speed * hours;
-            ensure!(speed.is_finite() && capacity.is_finite(), "速さ・読める量が大きすぎます");
+            let BoxMetrics {
+                speed,
+                hours,
+                capacity,
+                ..
+            } = *metric;
             let mut remaining = 0u64;
             let mut unstarted = 0;
             let mut counts = BTreeMap::<Class, usize>::new();
             let mut hold_sides = BTreeMap::<String, usize>::new();
             for tree in b.progress.trees.iter().filter(|t| !t.finished && !t.hold) {
                 remaining = remaining
-                    .checked_add(args.tree_size.max(tree.requested).saturating_sub(tree.read))
+                    .checked_add(tree.remaining(args.tree_size))
                     .context("残りの量が大きすぎます")?;
                 let queued = &b.queue[&tree.id];
                 let running =
@@ -579,9 +624,68 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         }
         table.flush()?;
         summary.flush()?;
+        if let Some(plan) = &plan {
+            for (i, b) in boxes.iter().enumerate() {
+                writeln!(
+                    stdout,
+                    "{}: 計画 残り/読める量={:.3} → {:.3}",
+                    b.name,
+                    plan::ratio(metrics[i].remaining, metrics[i].capacity),
+                    plan::ratio(plan.remaining[i], metrics[i].capacity)
+                )?;
+            }
+        }
         Ok(())
     })
 }
 
 #[cfg(test)]
 mod tests;
+
+struct BoxMetrics {
+    speed: f64,
+    hours: f64,
+    capacity: f64,
+    remaining: f64,
+}
+
+fn box_metrics(
+    args: &QueueReviewArgs,
+    b: &BoxData,
+    now: DateTime<Utc>,
+    rate: &BTreeMap<String, f64>,
+    box_rate: &BTreeMap<String, f64>,
+    inputs: &mut Vec<PathBuf>,
+) -> Result<BoxMetrics> {
+    let mut cutoff = args.cutoff.with_timezone(&Utc);
+    let deadline = b.dir.join("deadline");
+    if args.box_deadlines && deadline.try_exists()? {
+        let text = std::fs::read_to_string(&deadline)?;
+        let timestamp: i64 = text.trim().parse().context("deadline は Unix 秒の整数が必要です")?;
+        cutoff =
+            cutoff.min(DateTime::from_timestamp(timestamp, 0).context("deadline が範囲外です")?);
+        inputs.push(deadline);
+    }
+    let hours =
+        (cutoff.signed_duration_since(now).num_milliseconds() as f64 / 3_600_000.0).max(0.0);
+    let speed = box_rate.get(&b.name).copied().unwrap_or_else(|| {
+        rate.get(&b.name).copied().unwrap_or(args.default_rate) * b.progress.workers.len() as f64
+    });
+    let capacity = speed * hours;
+    ensure!(speed.is_finite() && capacity.is_finite(), "速さ・読める量が大きすぎます");
+    let remaining = b
+        .progress
+        .trees
+        .iter()
+        .filter(|t| !t.finished && !t.hold)
+        .try_fold(0u64, |sum, t| sum.checked_add(t.remaining(args.tree_size)))
+        .context("残りの量が大きすぎます")? as f64;
+    Ok(BoxMetrics {
+        speed,
+        hours,
+        capacity,
+        remaining,
+    })
+}
+
+mod plan;
