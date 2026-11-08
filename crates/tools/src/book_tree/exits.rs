@@ -199,10 +199,11 @@ fn classify(entry: &Entry, ply: usize, args: &ExitsArgs) -> Class {
         }
         let weak = matches!(entry.kind.as_str(), "" | "single" | "unknown")
             || entry.kind.starts_with("mean:")
-            || entry.kind.strip_prefix("tree:").is_some_and(|n| {
-                let n = n.trim_start_matches('0');
-                n.is_empty() || (n.len() == 1 && n.as_bytes()[0] < b'6')
-            });
+            || entry
+                .kind
+                .strip_prefix("tree:")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| n < 6);
         if weak {
             return Class::WeakShallow;
         }
