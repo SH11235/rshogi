@@ -41,7 +41,7 @@ pub(super) struct AuditArgs {
     #[arg(long)]
     demote_alts: bool,
     /// 値が戻った bench (控え) を alt に戻す (--apply なしでは件数だけ確認)
-    #[arg(long, conflicts_with = "fill_replies")]
+    #[arg(long, conflicts_with_all = ["fill_replies", "bridge_replies"])]
     revive_bench: bool,
     /// alt を降格する値の上限 (手番側からの値)
     #[arg(long, default_value_t = -150, allow_hyphen_values = true)]
@@ -106,6 +106,13 @@ pub(super) struct AuditArgs {
     /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
     #[arg(long, conflicts_with = "apply")]
     fill_replies: bool,
+    /// --fill-replies に加えて、読みの値のある手を指した後の元データに無い相手の手番の局面も補う。補った局面には、
+    /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
+    #[arg(long, conflicts_with_all = ["apply", "fill_replies"])]
+    bridge_replies: bool,
+    /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
+    #[arg(long, requires = "bridge_replies")]
+    bridge_table: Option<PathBuf>,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -186,6 +193,8 @@ pub(super) struct AuditSummary {
     pub unknown_main_multi: BySide,
     pub nontrivial_sccs: usize,
     pub max_scc_size: usize,
+    /// 補った局面のうち、着く手の読みの値を残した局面の数 (`--bridge-replies`)。
+    pub bridged_positions: usize,
     /// 伝播のために補った、元データに無い相手の手番の局面の数。
     pub reply_positions: usize,
 }
@@ -204,14 +213,28 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         ensure!(!since.trim().is_empty(), "--since を指定してください");
         ensure!(!since.contains(['\t', '\r', '\n']), "since にタブや改行は使えません");
     }
-    ensure!(!(args.apply && args.fill_replies), "--apply と --fill-replies は併用できません");
+    let fill = if args.bridge_replies {
+        Fill::Bridge
+    } else if args.fill_replies {
+        Fill::Unread
+    } else {
+        Fill::Off
+    };
     ensure!(
-        !(args.demote_alts && args.fill_replies),
-        "--demote-alts と --fill-replies は併用できません"
+        !(args.apply && fill != Fill::Off),
+        "--apply と --fill-replies・--bridge-replies は併用できません"
     );
     ensure!(
-        !(args.revive_bench && args.fill_replies),
-        "--revive-bench と --fill-replies は併用できません"
+        !(args.demote_alts && fill != Fill::Off),
+        "--demote-alts と --fill-replies・--bridge-replies は併用できません"
+    );
+    ensure!(
+        !(args.revive_bench && fill != Fill::Off),
+        "--revive-bench と --fill-replies・--bridge-replies は併用できません"
+    );
+    ensure!(
+        args.bridge_table.is_none() || args.bridge_replies,
+        "--bridge-table は --bridge-replies と一緒に使います"
     );
     let schema = Schema::load(args.schema.as_deref())?;
     ensure!(args.demote_line > 0, "--demote-line は 1 以上にしてください");
@@ -250,6 +273,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         ("--out-db", args.out_db.as_deref()),
         ("--refutation-table", args.refutation_table.as_deref()),
         ("--enqueue-out", args.enqueue_out.as_deref()),
+        ("--bridge-table", args.bridge_table.as_deref()),
     ]
     .into_iter()
     .filter_map(|(name, path)| Some((name, path?)))
@@ -301,14 +325,8 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (findings, summary, book) = audit_with_deep(
-        &positions,
-        draws,
-        args.line,
-        args.fill_replies,
-        args.deep_plies,
-        deep_freq.as_ref(),
-    )?;
+    let (findings, summary, book) =
+        audit_with_deep(&positions, draws, args.line, fill, args.deep_plies, deep_freq.as_ref())?;
     let (changes, replacements) = plan_replacements(
         &rows,
         &curated_records,
@@ -318,6 +336,11 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         args.replace_curated,
     )?;
     write_atomic(&args.table, &format_table(&findings))?;
+    if let Some(path) = &args.bridge_table {
+        let worse = bridge_findings(&positions.0, draws, &book, args.line)?;
+        write_atomic(path, &format_bridge_table(&worse))?;
+        println!("補って main の値が {} 以上悪くなった局面: {}", args.line, worse.len());
+    }
     if let Some(out) = &args.out_db {
         write_audited_db(out, &positions.0, &book)?;
     }
@@ -874,6 +897,17 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
     graph.find(strip_ply(&flipped)).filter(|&v| v != node)
 }
 
+/// 元データに無い相手の手番の局面を補うか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fill {
+    /// 補わない。
+    Off,
+    /// 読みの値の無い手の行き先だけを補う (`--fill-replies`)。
+    Unread,
+    /// 読みの値のある手の行き先も補う (`--bridge-replies`)。
+    Bridge,
+}
+
 /// [`propagate`] の結果。
 struct Propagated {
     graph: Graph,
@@ -883,14 +917,16 @@ struct Propagated {
     stats: PropagationStats,
     /// 補った相手の手番の局面の数。
     reply_positions: usize,
+    /// 補った局面のうち、読みの値を「定跡に無い応手」の値として残した局面の数。
+    bridged_positions: usize,
 }
 
 /// 元データの手を指した後の局面のうち、元データに無いもの。
 enum Leaf<'a> {
     /// 補わない局面 (読みの値のある手の行き先と、行き先を反転した局面)。
     Blocked(&'a str),
-    /// 補う候補 (読みの値の無い手の行き先)。
-    Candidate(&'a str),
+    /// 補う候補と、そこへ着く手の読みの値 (手を指した側から。読みの値の無い手は `None`)。
+    Candidate(&'a str, Option<i32>),
 }
 
 /// 局面の手の行き先のうち元データに無いものを `visit` に渡す。
@@ -898,6 +934,7 @@ fn visit_leaves(
     positions: &BTreeMap<String, MasterPosition>,
     key: &str,
     position: &MasterPosition,
+    fill: Fill,
     mut visit: impl FnMut(Leaf<'_>),
 ) -> Result<()> {
     let mut pos = position_from_sfen(&format!("{key} 1"))?;
@@ -916,10 +953,9 @@ fn visit_leaves(
             if let Some(flipped) = flipped {
                 visit(Leaf::Blocked(flipped));
             }
-            visit(if m.eval.is_some() {
-                Leaf::Blocked(child_key)
-            } else {
-                Leaf::Candidate(child_key)
+            visit(match (m.eval, fill) {
+                (Some(_), Fill::Unread) => Leaf::Blocked(child_key),
+                (eval, _) => Leaf::Candidate(child_key, eval),
             });
         }
         pos.undo_move(mv);
@@ -927,12 +963,20 @@ fn visit_leaves(
     Ok(())
 }
 
-/// 読みの値の無い手を指した後の、元データに無い局面 (反転した局面も無いもの) を、相手の合法手のうち元データの局面に
-/// 着く手だけを持つ局面として補う。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の読みの値が
-/// 相手の手番の局面で途切れる。補った値は定跡に無い応手を見ない分だけ甘いので、読みの値のある手が着く局面は補わない。
-/// 反転した局面が元データにある局面へは応手を張らない (千日手の値が先後で違うと、反転で合流した循環を解けない)。
+/// 手を指した後の、元データに無い局面 (反転した局面も無いもの) を、相手の合法手のうち元データの局面に着く手だけを
+/// 持つ局面として補う。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の読みの値が相手の手番の
+/// 局面で途切れる。反転した局面が元データにある局面へは応手を張らない (千日手の値が先後で違うと、反転で合流した循環を
+/// 解けない)。
+///
+/// 補った値は定跡に無い応手を見ない分だけ甘い。`Fill::Unread` では読みの値のある手が着く局面は補わない。
+/// `Fill::Bridge` では補い、着く手の読みの値 (相手の全部の応手を見た値) を、元データの局面に着かない合法手 1 つの
+/// 値として残す。相手は手を指した側に悪い方を選ぶので、手の値は読みの値と定跡の応手の先の値の悪い方になり、
+/// 読みの値より甘くならない。読みの値のある手が複数の局面から着くときは、手を指した側に一番悪い読みの値を残す
+/// (同じ局面に読みの値の無い手からも着けば、その手にも効く)。残す先の合法手が無い局面 (全部の応手が元データの
+/// 局面か反転した局面に着く) は補わない。
 fn reply_positions(
     positions: &BTreeMap<String, MasterPosition>,
+    fill: Fill,
 ) -> Result<BTreeMap<String, MasterPosition>> {
     // 一度に持つ行き先を塊の局面の分に抑える。
     const CHUNK: usize = 1 << 14;
@@ -955,7 +999,7 @@ fn reply_positions(
             .par_iter()
             .map(|&(key, position)| -> Result<Vec<u64>> {
                 let mut out = Vec::new();
-                visit_leaves(positions, key, position, |leaf| {
+                visit_leaves(positions, key, position, fill, |leaf| {
                     if let Leaf::Blocked(k) = leaf {
                         out.push(hash(k));
                     }
@@ -968,45 +1012,67 @@ fn reply_positions(
     blocked.sort_unstable();
     blocked.dedup();
     // 別の局面から同じ局面に来たら、手数の小さい方を残す (並列の順によらず決める)。
-    let mut candidates: BTreeMap<String, u32> = BTreeMap::new();
+    // (手数の最小, 着く手の読みの値の最小 (手を指した側から))。
+    let mut candidates: BTreeMap<String, (u32, Option<i32>)> = BTreeMap::new();
     for chunk in entries.chunks(CHUNK) {
-        let part: Vec<Vec<(String, u32)>> = chunk
+        let part: Vec<Vec<(String, u32, Option<i32>)>> = chunk
             .par_iter()
-            .map(|&(key, position)| -> Result<Vec<(String, u32)>> {
+            .map(|&(key, position)| -> Result<Vec<(String, u32, Option<i32>)>> {
                 let ply = position.ply.parse::<u32>().map_or(1, |n| n.saturating_add(1));
                 let mut out = Vec::new();
-                visit_leaves(positions, key, position, |leaf| {
-                    if let Leaf::Candidate(k) = leaf
+                visit_leaves(positions, key, position, fill, |leaf| {
+                    if let Leaf::Candidate(k, eval) = leaf
                         && blocked.binary_search(&hash(k)).is_err()
                     {
-                        out.push((k.to_owned(), ply));
+                        out.push((k.to_owned(), ply, eval));
                     }
                 })?;
                 Ok(out)
             })
             .collect::<Result<_>>()?;
-        for (key, ply) in part.into_iter().flatten() {
-            let entry = candidates.entry(key).or_insert(ply);
-            *entry = (*entry).min(ply);
+        for (key, ply, eval) in part.into_iter().flatten() {
+            let entry = candidates.entry(key).or_insert((ply, eval));
+            entry.0 = entry.0.min(ply);
+            entry.1 = match (entry.1, eval) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
         }
     }
     let replies: Vec<Option<(String, MasterPosition)>> = candidates
         .into_par_iter()
-        .map(|(key, ply)| -> Result<Option<(String, MasterPosition)>> {
+        .map(|(key, (ply, cap))| -> Result<Option<(String, MasterPosition)>> {
             let mut pos = position_from_sfen(&format!("{key} 1"))?;
             let mut legal = MoveList::new();
             generate_legal_all(&pos, &mut legal);
             let mut moves = Vec::new();
+            // 読みの値を残す、元データの局面にも反転した局面にも着かない合法手 (生成順の最初)。
+            let mut outside = None;
             for &reply in legal.iter() {
                 pos.do_move(reply, pos.gives_check(reply));
                 let to = pos.to_sfen();
-                if positions.contains_key(strip_ply(&to)) && !flipped_in_master(&to) {
+                let flipped = flipped_in_master(&to);
+                if positions.contains_key(strip_ply(&to)) && !flipped {
                     moves.push(BookMove {
                         mv: reply.to_usi(),
                         eval: None,
                     });
+                } else if outside.is_none() && !flipped && !positions.contains_key(strip_ply(&to)) {
+                    outside = Some(reply.to_usi());
                 }
                 pos.undo_move(reply);
+            }
+            if let Some(eval) = cap {
+                let Some(mv) = outside else {
+                    return Ok(None);
+                };
+                if moves.is_empty() {
+                    return Ok(None);
+                }
+                moves.push(BookMove {
+                    mv,
+                    eval: Some(-eval),
+                });
             }
             Ok((!moves.is_empty()).then(|| {
                 let position = MasterPosition {
@@ -1037,12 +1103,12 @@ fn propagate_entries(
     Ok((graph, known, illegal_moves, stats))
 }
 
-/// 元データの値の分かる手だけを伝播する。`fill_replies` なら元データに無い相手の手番の局面を補う
+/// 元データの値の分かる手だけを伝播する。`fill` に応じて元データに無い相手の手番の局面を補う
 /// ([`reply_positions`])。key が正規の SFEN でなければ止まる。
 fn propagate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
-    fill_replies: bool,
+    fill: Fill,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
@@ -1060,11 +1126,14 @@ fn propagate(
         })
         .collect();
     checks.into_iter().collect::<Result<()>>()?;
-    let replies = if fill_replies {
-        reply_positions(positions)?
-    } else {
+    let replies = if fill == Fill::Off {
         BTreeMap::new()
+    } else {
+        reply_positions(positions, fill)?
     };
+    // 読みの値を残した局面は、元データの局面に着かない手 (値のある行) を持つ。
+    let bridged_count =
+        replies.values().filter(|p| p.moves.iter().any(|m| m.eval.is_some())).count();
     let mut all: Vec<(&str, &MasterPosition)> =
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
@@ -1083,6 +1152,7 @@ fn propagate(
         illegal_moves,
         stats,
         reply_positions: reply_count,
+        bridged_positions: bridged_count,
     })
 }
 
@@ -1100,7 +1170,7 @@ pub(super) fn master_values(
     (positions, _): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
 ) -> Result<BTreeMap<String, MasterValue>> {
-    let Propagated { graph, known, .. } = propagate(positions, draws, false)?;
+    let Propagated { graph, known, .. } = propagate(positions, draws, Fill::Off)?;
     let mut values = BTreeMap::new();
     for ((key, _), known) in positions.iter().zip(&known) {
         let Some(node) = graph.find(key) else {
@@ -1170,7 +1240,7 @@ pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
 ) -> Result<Vec<Vec<Option<i32>>>> {
-    let Propagated { graph, known, .. } = propagate(positions, draws, false)?;
+    let Propagated { graph, known, .. } = propagate(positions, draws, Fill::Off)?;
     positions
         .iter()
         .zip(&known)
@@ -1230,22 +1300,111 @@ fn main_continues_after(
     Ok(true)
 }
 
+/// `--bridge-table` の 1 行。値は手番の側から。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgeFinding {
+    key: String,
+    ply: String,
+    main: String,
+    /// 補わないときの main の値。
+    plain: i32,
+    /// 補ったときの main の値。
+    bridged: i32,
+    /// 補ったときの 1 位の手と値。
+    best: String,
+    best_value: i32,
+}
+
+/// 補ったとき (`book`) の main の値が、補わないときより `line` 以上悪くなった局面 (悪くなった量の大きい順、
+/// 同じなら key 順)。
+fn bridge_findings(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    book: &AuditedBook,
+    line: i32,
+) -> Result<Vec<BridgeFinding>> {
+    let plain = propagate(positions, draws, Fill::Off)?;
+    let mut out = Vec::new();
+    for (((key, position), known), plain_known) in
+        positions.iter().zip(&book.known).zip(&plain.known)
+    {
+        let Some(old) = audited_moves(&plain.graph, key, position, plain_known)?
+            .first()
+            .cloned()
+            .flatten()
+            .map(|m| m.value)
+        else {
+            continue;
+        };
+        let moves = audited_moves(&book.graph, key, position, known)?;
+        let Some(main) = moves.first().cloned().flatten() else {
+            continue;
+        };
+        if old - main.value < line {
+            continue;
+        }
+        let best = moves
+            .iter()
+            .flatten()
+            .max_by_key(|m| m.value)
+            .context("内部エラー: 値の分かる手がありません")?;
+        out.push(BridgeFinding {
+            key: key.clone(),
+            ply: position.ply.clone(),
+            main: main.mv.clone(),
+            plain: old,
+            bridged: main.value,
+            best: best.mv.clone(),
+            best_value: best.value,
+        });
+    }
+    out.sort_by(|a, b| (b.plain - b.bridged).cmp(&(a.plain - a.bridged)).then(a.key.cmp(&b.key)));
+    Ok(out)
+}
+
+/// `--bridge-table` の TSV。値は手番の側からと、先手から見た値の両方。
+fn format_bridge_table(rows: &[BridgeFinding]) -> String {
+    let mut text = String::from(
+        "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\n",
+    );
+    for r in rows {
+        let white = r.key.split(' ').nth(1) == Some("w");
+        let black = |v: i32| if white { -v } else { v };
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            r.key,
+            r.ply,
+            if white { "w" } else { "b" },
+            r.main,
+            r.plain,
+            r.bridged,
+            r.plain - r.bridged,
+            r.best,
+            r.best_value,
+            black(r.plain),
+            black(r.bridged)
+        );
+    }
+    text
+}
+
 /// 元データを伝播して main を点検する。点検の表 (差の大きい順)・要約・伝播後のグラフを返す。
 pub(super) fn audit(
     book: &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
-    fill_replies: bool,
+    fill: Fill,
     deep_plies: Option<usize>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
-    audit_with_deep(book, draws, line, fill_replies, deep_plies, None)
+    audit_with_deep(book, draws, line, fill, deep_plies, None)
 }
 
 fn audit_with_deep(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
-    fill_replies: bool,
+    fill: Fill,
     deep_plies: Option<usize>,
     deep_freq: Option<&ReplyFrequency>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
@@ -1259,9 +1418,11 @@ fn audit_with_deep(
         illegal_moves,
         stats,
         reply_positions,
-    } = propagate(positions, draws, fill_replies)?;
+        bridged_positions,
+    } = propagate(positions, draws, fill)?;
     summary.illegal_moves = illegal_moves;
     summary.reply_positions = reply_positions;
+    summary.bridged_positions = bridged_positions;
     summary.nontrivial_sccs = stats.nontrivial_sccs;
     summary.max_scc_size = stats.max_scc_size;
     let mut findings = Vec::new();
@@ -1431,8 +1592,8 @@ pub(super) fn format_summary(
         sides(summary.unknown_main_multi)
     ));
     out(format!(
-        "補った相手の手番の局面 (元データに無く、応手が元データの局面に着く): {}",
-        summary.reply_positions
+        "補った相手の手番の局面 (元データに無く、応手が元データの局面に着く): {} / うち読みの値を残した局面: {}",
+        summary.reply_positions, summary.bridged_positions
     ));
     out(format!(
         "循環 (自明でない強連結成分): {} (最大 {} 局面)",
@@ -1485,7 +1646,7 @@ mod tests {
         draws: DrawValues,
     ) -> Result<(Vec<Finding>, AuditSummary)> {
         let parsed = parse_master_rows(text.as_bytes())?;
-        let (findings, summary, _) = audit(&parsed, draws, line, false, None)?;
+        let (findings, summary, _) = audit(&parsed, draws, line, Fill::Off, None)?;
         Ok((findings, summary))
     }
 
@@ -1575,7 +1736,7 @@ mod tests {
                     &parsed,
                     DrawValues::both(0),
                     40,
-                    false,
+                    Fill::Off,
                     Some(2),
                     enabled.then_some(&freq),
                 )
@@ -1590,7 +1751,7 @@ mod tests {
     fn deep_plies_includes_below_line_when_both_continuations_are_long_enough() {
         let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
         let (findings, summary, _) =
-            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+            audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2)).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].key, ROOT);
         assert_eq!(findings[0].gap(), 20);
@@ -1616,21 +1777,22 @@ mod tests {
         }
         let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
         let (findings, summary, _) =
-            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+            audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2)).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].key, ROOT);
         assert_eq!(findings[0].gap(), 20);
         assert_eq!(summary.deep_below_line, [1, 0]);
         let empty = ReplyFrequency::default();
         let (findings, _, _) =
-            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some(&empty))
+            audit_with_deep(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2), Some(&empty))
                 .unwrap();
         assert_eq!(findings.len(), 1);
         let freq =
             ReplyFrequency::from_reader(format!("sfen {A} 1\n5a4b none 0 0 44\n").as_bytes(), 3)
                 .unwrap();
         let (findings, _, _) =
-            audit_with_deep(&parsed, DrawValues::both(0), 40, false, Some(2), Some(&freq)).unwrap();
+            audit_with_deep(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2), Some(&freq))
+                .unwrap();
         assert!(findings.is_empty());
     }
 
@@ -1644,7 +1806,7 @@ mod tests {
         }
         let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
         let (findings, summary, _) =
-            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+            audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2)).unwrap();
         assert_eq!(findings.len(), 1);
         let flipped_root = rshogi_book::flipped_key(ROOT).unwrap();
         assert_eq!(findings[0].key, strip_ply(&flipped_root));
@@ -1659,7 +1821,7 @@ mod tests {
         let text = master(&[(ROOT, "5i4h", "main", "0"), (ROOT, "5i6h", "alt", "40")]);
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
         let (findings, summary, _) =
-            audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+            audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2)).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].key, ROOT);
         assert_eq!(findings[0].gap(), 40);
@@ -1675,13 +1837,13 @@ mod tests {
             rows.retain(|row| row.get("key") != short_leaf);
             let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
             let (findings, summary, _) =
-                audit(&parsed, DrawValues::both(0), 40, false, Some(2)).unwrap();
+                audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(2)).unwrap();
             assert!(findings.is_empty(), "{short_leaf}");
             assert_eq!(summary.below_line, [1, 0]);
             assert_eq!(summary.deep_below_line, [0, 0]);
         }
         let parsed = parse_master_rows(deep_fixture().as_bytes()).unwrap();
-        let (findings, _, _) = audit(&parsed, DrawValues::both(0), 40, false, Some(3)).unwrap();
+        let (findings, _, _) = audit(&parsed, DrawValues::both(0), 40, Fill::Off, Some(3)).unwrap();
         assert!(findings.is_empty());
     }
 
@@ -1940,13 +2102,77 @@ mod tests {
     /// `--fill-replies` で点検し、(要約, ROOT の main の伝播後の値) を返す。
     fn fill_audit(rows: &[(&str, &str, &str, &str)]) -> (AuditSummary, Option<i32>) {
         let parsed = parse_master_rows(master(rows).as_bytes()).unwrap();
-        let (_, summary, book) = audit(&parsed, DrawValues::both(0), 1, true, None).unwrap();
+        let (_, summary, book) =
+            audit(&parsed, DrawValues::both(0), 1, Fill::Unread, None).unwrap();
         let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
         let main = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
             [0]
         .as_ref()
         .map(|m| m.value);
         (summary, main)
+    }
+
+    /// `--bridge-replies` で点検し、(要約, ROOT の main の伝播後の値) を返す。
+    fn bridge_audit(rows: &[(&str, &str, &str, &str)]) -> (AuditSummary, Option<i32>) {
+        let parsed = parse_master_rows(master(rows).as_bytes()).unwrap();
+        let (_, summary, book) =
+            audit(&parsed, DrawValues::both(0), 1, Fill::Bridge, None).unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let main = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
+            [0]
+        .as_ref()
+        .map(|m| m.value);
+        (summary, main)
+    }
+
+    #[test]
+    fn bridge_replies_takes_book_reply_when_worse_than_read() {
+        // ROOT の 5i4h の読みは +50 だが、A の応手 5a5b で着く B の読みは -100 (先手から)。相手は悪い方を選ぶ。
+        let (summary, main) =
+            bridge_audit(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]);
+        assert_eq!((summary.reply_positions, summary.bridged_positions, main), (1, 1, Some(-100)));
+        // 補わなければ読みの値のまま。
+        let (_, main) = fill_audit(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]);
+        assert_eq!(main, Some(50));
+    }
+
+    #[test]
+    fn bridge_replies_keeps_read_when_book_reply_is_better() {
+        // B が +200 でも、読みの値 +50 は定跡に無い応手も見た値なので、それより甘くしない。
+        let (_, main) = bridge_audit(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "200")]);
+        assert_eq!(main, Some(50));
+    }
+
+    #[test]
+    fn bridge_replies_uses_worst_read_of_parents() {
+        // ROOT (+50) と c (+10、どちらも先手から) の手が同じ A に着く。A に残すのは先手に悪い +10 で、ROOT の手にも効く。
+        let c = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        let (_, main) = bridge_audit(&[
+            (ROOT, "5i4h", "main", "50"),
+            (c, "5h4h", "main", "10"),
+            (B, "4h3h", "main", "200"),
+        ]);
+        assert_eq!(main, Some(10));
+    }
+
+    #[test]
+    fn bridge_table_lists_worsened_mains() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(
+            &args.master,
+            master(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]),
+        )
+        .unwrap();
+        args.bridge_replies = true;
+        args.bridge_table = Some(dir.path().join("bridge.tsv"));
+        args.draw_value_black = 0;
+        args.line = 40;
+        run_in_pool(args).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("bridge.tsv")).unwrap();
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(rows.len(), 2, "{text}");
+        assert_eq!(rows[1], format!("{ROOT}\t1\tb\t5i4h\t50\t-100\t150\t5i4h\t-100\t50\t-100"));
     }
 
     #[test]
@@ -1986,7 +2212,7 @@ mod tests {
         ]);
         let (mut positions, _) = parse_master_rows(text.as_bytes()).unwrap();
         positions.get_mut(c).unwrap().ply = "9".into();
-        let replies = reply_positions(&positions).unwrap();
+        let replies = reply_positions(&positions, Fill::Unread).unwrap();
         assert_eq!(replies.keys().collect::<Vec<_>>(), vec![A]);
         assert_eq!(replies[A].ply, "2");
     }
@@ -2053,6 +2279,8 @@ mod tests {
             refutation_max: None,
             priority: 100,
             fill_replies: false,
+            bridge_replies: false,
+            bridge_table: None,
             weight: WeightArgs {
                 opp_freq: None,
                 min_games: 3,
@@ -2150,7 +2378,7 @@ mod tests {
     fn curated_records_protect_replacements_without_retaining_rows() {
         let text = replacement_fixture();
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (findings, _, _) = audit(&positions, DrawValues::both(0), 1, false, None).unwrap();
+        let (findings, _, _) = audit(&positions, DrawValues::both(0), 1, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         rows[0].set("tier", "wide".into());
         rows[2].set("tier", "curated".into());
@@ -2387,7 +2615,7 @@ mod tests {
             black: -70,
             white: 0,
         };
-        let (_, _, book) = audit(&positions, draws, 15, false, None).unwrap();
+        let (_, _, book) = audit(&positions, draws, 15, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let target = bench_target(&rows[1], &book.graph).unwrap().unwrap();
         let naive = -book
@@ -2487,7 +2715,7 @@ mod tests {
         rows[2].set("tier", "curated".into());
         let text = format_master(&rows);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         let mut args = test_args(dir.path());
         args.replace_curated = true;
         let summary =
@@ -2552,7 +2780,7 @@ mod tests {
             (ROOT, "5i4h", "bench", "100"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         for curated in [false, true] {
             let mut rows = parse_master(&text).unwrap();
             if curated {
@@ -2594,7 +2822,7 @@ mod tests {
             (white, "5a4b", "bench", "10"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         assert_eq!(
             evaluate_edges(
@@ -2627,7 +2855,7 @@ mod tests {
                 (ROOT, "5i4h", "bench", "0"),
             ]);
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+            let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
             let mut rows = parse_master(&text).unwrap();
             assert_eq!(
                 revive_bench(
@@ -2683,7 +2911,8 @@ mod tests {
                 (ROOT, "5i4i", "alt", ""),
             ]);
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let (_, _, book) = audit(&positions, DrawValues::both(0), line, false, None).unwrap();
+            let (_, _, book) =
+                audit(&positions, DrawValues::both(0), line, Fill::Off, None).unwrap();
             let original = parse_master(&text).unwrap();
             let mut rows = original.clone();
             let mut args = test_args(dir.path());
@@ -2724,7 +2953,8 @@ mod tests {
         let schema = Schema::load(Some(dir.path())).unwrap();
         let text = replacement_fixture();
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (findings, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (findings, _, book) =
+            audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.line = 40;
@@ -2787,7 +3017,8 @@ mod tests {
                 args.demote_alts = true;
                 args.since = Some("tag".into());
                 let positions = parse_master_rows(text.as_bytes()).unwrap();
-                let (_, _, book) = audit(&positions, DrawValues::both(0), 1, false, None).unwrap();
+                let (_, _, book) =
+                    audit(&positions, DrawValues::both(0), 1, Fill::Off, None).unwrap();
                 let result =
                     demote_alts(&mut rows, &positions.0, &book, &Schema::default(), &args).unwrap();
                 assert_eq!(result.skipped_curated, usize::from(!replace_curated));
@@ -2817,7 +3048,8 @@ mod tests {
                 }
                 let text = master(&input);
                 let positions = parse_master_rows(text.as_bytes()).unwrap();
-                let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+                let (_, _, book) =
+                    audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
                 let mut rows = parse_master(&text).unwrap();
                 let original = rows.clone();
                 let mut args = test_args(dir.path());
@@ -2843,7 +3075,7 @@ mod tests {
         let schema = Schema::load(Some(dir.path())).unwrap();
         let text = master(&[(ROOT, "5i6h", "main", "100"), (ROOT, "5i4h", "alt", "0")]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let result =
             demote_alts(&mut rows, &positions.0, &book, &schema, &test_args(dir.path())).unwrap();
@@ -2885,7 +3117,7 @@ mod tests {
         run(args).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, false, None).unwrap();
+        let (_, _, book) = audit(&positions, DrawValues::both(0), 40, Fill::Off, None).unwrap();
         let mut rows = parse_master(&text).unwrap();
         let mut args = test_args(dir.path());
         args.demote_alts = true;

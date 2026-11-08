@@ -358,7 +358,7 @@ pub(super) fn write_outputs(
 mod tests {
     use super::*;
     use crate::book_backprop::DrawValues;
-    use crate::book_tree::audit::audit;
+    use crate::book_tree::audit::{Fill, audit};
     use crate::book_tree::master_table::{COLUMNS, parse_master_rows};
 
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
@@ -404,7 +404,7 @@ mod tests {
         min_weight: f64,
     ) -> (Vec<Refutation>, RefutationSummary) {
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, false, None).unwrap();
+        let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, Fill::Off, None).unwrap();
         let (mut rows, summary) = find(&parsed.0, &book, margin, weights, min_weight).unwrap();
         fill_best_sources(&super::super::master_table::parse_master(text).unwrap(), &mut rows)
             .unwrap();
@@ -481,7 +481,7 @@ mod tests {
             (A, "5a5b", "main", "read", "-10"),
         ]);
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
-        let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, false, None).unwrap();
+        let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, Fill::Off, None).unwrap();
         let root = &parsed.0[ROOT];
         let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
         let audited = audited_moves(&book.graph, ROOT, root, &book.known[index]).unwrap();
