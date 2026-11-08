@@ -514,3 +514,23 @@ fn stop_that_is_also_passed_through_stays_reach_partial() {
             .any(|l| l.starts_with("B\tboth\t") && l.contains("\treach-partial\t"))
     );
 }
+
+#[test]
+fn rare_stop_is_not_final_reach() {
+    let d = TempDir::new().unwrap();
+    let path = walk(d.path(), "b\trare\t0.0002\t7g7f 3c3d\nb\town\t0.9\t7g7f 8c8d 2g2f\n");
+    let b = d.path().join("b");
+    let rows = vec![row("rare_root", "7g7f 3c3d")];
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    enqueue(&b, "only", 0, &rows);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("B={}", b.display())];
+    a.walk_table = vec![format!("b={}", path.display())];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = std::fs::read_to_string(d.path().join("review.tsv")).unwrap();
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("B\trare_root\t") && l.contains("\treach-partial\t"))
+    );
+}

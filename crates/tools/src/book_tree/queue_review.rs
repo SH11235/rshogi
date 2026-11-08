@@ -296,8 +296,12 @@ fn load_walk(args: &QueueReviewArgs, inputs: &mut Vec<PathBuf>) -> Result<Walk> 
                 start.iter().copied().chain(moves).collect()
             };
             let keys = path_keys(&full).with_context(|| format!("{}:{}", path.display(), n + 2))?;
-            walk.stops.insert((side.into(), keys.last().context("空の手順です")?.clone()));
-            // rare の止まりは相手の手番の局面で、そこから先へ続く行もあるので、途中で通る局面を別に覚える。
+            // own の止まり (自分が読み始める局面) だけが、そこへ来る重みを全部持つ行き止まり。
+            // rare などは残りの重みが先へ続き、合流で別の手順に載ることがあるので確定に使わない。
+            if cells[stop] == "own" {
+                walk.stops.insert((side.into(), keys.last().context("空の手順です")?.clone()));
+            }
+            // 止まりでも別の行が先へ通る局面は、重みが確定しないので別に覚える。
             for key in &keys[start.len().min(keys.len())..keys.len().saturating_sub(1)] {
                 walk.passed.insert((side.into(), key.clone()));
             }
