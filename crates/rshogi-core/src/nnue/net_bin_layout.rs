@@ -117,7 +117,7 @@ pub enum NetBinPatchError {
 /// FT の両半分と全 bucket の L1 入力列を同じ順序に並べ替える。
 ///
 /// `permutation[new]` は元の列番号。出力は標準の LayerStacks `.bin` であり、
-/// FT bias に対する外部 delta の index も変換後の順序になる。
+/// FT bias と L1 weight に対する外部 index も変換後の順序になる。
 pub fn permute_ft_columns<R: Read + Seek, W: Write>(
     input: &mut R,
     output: &mut W,
@@ -153,14 +153,16 @@ pub fn permute_ft_columns<R: Read + Seek, W: Write>(
         copy_range(input, output, pos..bucket.l1.weights.start)?;
         input.seek(SeekFrom::Start(u64_from_usize(bucket.l1.weights.start, "L1 weights")?))?;
         let mut row = vec![0u8; checked_padded_input(layout.l1)?];
+        let mut reordered = row.clone();
         for _ in 0..layout.l2 {
             input.read_exact(&mut row)?;
             for view in 0..2 {
-                for &old in permutation {
-                    output.write_all(&row[view * half + old..view * half + old + 1])?;
+                for (new, &old) in permutation.iter().enumerate() {
+                    reordered[view * half + new] = row[view * half + old];
                 }
             }
-            output.write_all(&row[layout.l1..])?;
+            reordered[layout.l1..].copy_from_slice(&row[layout.l1..]);
+            output.write_all(&reordered)?;
         }
         pos = bucket.l1.weights.end;
     }
@@ -179,6 +181,7 @@ fn permute_leb128_rows<R: Read + Seek, W: Write>(
     let width = permutation.len() * 2;
     let mut tokens = Vec::with_capacity(width * 3);
     let mut ranges = Vec::with_capacity(width);
+    let mut reordered = Vec::with_capacity(width * 3);
     for _ in 0..rows {
         tokens.clear();
         ranges.clear();
@@ -205,11 +208,14 @@ fn permute_leb128_rows<R: Read + Seek, W: Write>(
             }
             ranges.push(start..tokens.len());
         }
+        reordered.clear();
         for view in 0..2 {
             for &old in permutation {
-                output.write_all(&tokens[ranges[view * permutation.len() + old].clone()])?;
+                reordered
+                    .extend_from_slice(&tokens[ranges[view * permutation.len() + old].clone()]);
             }
         }
+        output.write_all(&reordered)?;
     }
     let mut extra = [0u8; 1];
     if reader.read(&mut extra)? != 0 {
@@ -1106,6 +1112,55 @@ mod tests {
         let mut restored = Vec::new();
         permute_ft_columns(&mut Cursor::new(&transformed), &mut restored, &permutation).unwrap();
         assert_eq!(restored, model.bytes);
+    }
+
+    #[test]
+    fn ft_column_permutation_preserves_activated_l1_outputs() {
+        let model = build_synthetic_layer_stacks_with_ft_values(
+            "HalfKP",
+            <HalfKPFeatureSet as FeatureSetTrait>::DIMENSIONS,
+            64,
+            8,
+            32,
+            2,
+            SyntheticFtConfig {
+                encoding: SyntheticFtEncoding::Leb128Split,
+                values: SyntheticFtValues::SignedBoundaries,
+            },
+        );
+        let permutation: Vec<_> = (0..32).map(|i| (i * 5) % 32).collect();
+        let mut transformed = Vec::new();
+        permute_ft_columns(&mut Cursor::new(&model.bytes), &mut transformed, &permutation).unwrap();
+        let original = LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let changed = LayerStacksBinLayout::from_bytes(&transformed).unwrap();
+        let first = std::array::from_fn::<_, 64, _>(|i| (i as i16 * 23) - 350);
+        let second = std::array::from_fn::<_, 64, _>(|i| 300 - (i as i16 * 17));
+        let permute_acc = |acc: &[i16; 64]| {
+            std::array::from_fn::<_, 64, _>(|i| acc[(i / 32) * 32 + permutation[i % 32]])
+        };
+        for (us, them) in [(&first, &second), (&second, &first)] {
+            let old = super::super::layer_stacks::sqr_clipped_relu_new(us, them).0;
+            let new = super::super::layer_stacks::sqr_clipped_relu_new(
+                &permute_acc(us),
+                &permute_acc(them),
+            )
+            .0;
+            for (before, after) in original.buckets.iter().zip(&changed.buckets) {
+                for out in 0..8 {
+                    let dot = |input: &[u8; 64], weights: &[u8]| {
+                        input.iter().zip(weights).fold(0i32, |sum, (&x, &w)| {
+                            sum.wrapping_add(i32::from(x) * i32::from(w as i8))
+                        })
+                    };
+                    let old_weights = before.l1.weights.start + out * 64;
+                    let new_weights = after.l1.weights.start + out * 64;
+                    assert_eq!(
+                        dot(&old, &model.bytes[old_weights..old_weights + 64]),
+                        dot(&new, &transformed[new_weights..new_weights + 64]),
+                    );
+                }
+            }
+        }
     }
 
     fn replace_combined_ft_payload(bytes: &[u8], payload: &[u8]) -> Vec<u8> {
