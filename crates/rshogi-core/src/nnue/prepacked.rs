@@ -548,9 +548,12 @@ mod tests {
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     fn packed_fused_l1_matches_after_copy_on_write<const N: usize>() {
+        if !crate::nnue::ls_l1_kernel::avx512::supported::<N, 16>() {
+            return;
+        }
         use crate::nnue::layer_stacks::{LayerStacks, assert_fused_l1_matches_reference};
         use crate::nnue::net_bin_layout::TensorBinLayout;
         // FC セクションだけを作り、FT の巨大な fixture を必要とせず read_packed を検証する。
@@ -623,7 +626,7 @@ mod tests {
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     #[test]
     fn packed_fused_shapes_match_after_copy_on_write() {

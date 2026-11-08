@@ -734,9 +734,9 @@ impl<
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
-            target_feature = "avx512vnni"
+            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         ))]
-        let raw_score = if matches!(L1, 1536 | 2304 | 3072) && LS_L1_OUT == 16 {
+        let raw_score = if super::ls_l1_kernel::avx512::supported::<L1, LS_L1_OUT>() {
             #[cfg(feature = "nnue-threat")]
             let fused_threat = if self.feature_transformer.has_threat {
                 let (us, them) = if side_to_move == Color::Black {
@@ -777,7 +777,7 @@ impl<
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
-            target_feature = "avx512vnni"
+            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         )))]
         let raw_score = {
             let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
