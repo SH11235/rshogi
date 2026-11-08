@@ -1118,6 +1118,41 @@ fn plan_checks_update_game_against_destination_root() {
 }
 
 #[test]
+fn plan_move_does_not_inherit_update_sent_only_to_another_box() {
+    let d = TempDir::new().unwrap();
+    let original = row("same", "7g7f");
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![original.clone()]),
+            ("B", vec![]),
+            ("C", vec![original.clone()]),
+        ],
+    );
+    let mut failed = progress(&original, 0, 0);
+    failed["failed"] = json!(true);
+    fixture_box(&d.path().join("C"), vec![failed], vec![]);
+    a.box_rate = vec!["A=10".into(), "B=10".into(), "C=1".into()];
+    a.update_size = 2;
+    let mut update = original.clone();
+    update["game"] = json!([["8c8d", "2g2f"]]);
+    update["memo"] = json!("extra game");
+    a.update = vec![input_rows(d.path(), "updates", &[update.clone()])];
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert_eq!(cargo_rows(d.path(), "A"), [update]);
+    assert_eq!(cargo_rows(d.path(), "B"), std::slice::from_ref(&original));
+    let mut held = original;
+    held["hold"] = json!(true);
+    assert_eq!(cargo_rows(d.path(), "C"), [held]);
+    assert!(plan_table(d.path()).contains("move\tsame\tb\t42\tC\tB\t"));
+    assert!(stdout.contains("A: 計画 残り/読める量=0.500 → 0.600"), "{stdout}");
+    assert!(stdout.contains("B: 計画 残り/読める量=0.000 → 0.500"), "{stdout}");
+    assert!(stdout.contains("C: 計画 残り/読める量=5.000 → 0.000"), "{stdout}");
+}
+
+#[test]
 fn plan_counts_update_size_once_and_moves_it_with_tree() {
     for moving in [false, true] {
         let d = TempDir::new().unwrap();

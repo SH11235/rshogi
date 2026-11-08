@@ -127,7 +127,6 @@ pub(super) fn build(
     for q in &adds {
         ensure!(ids.insert(q.line.id.clone()), "add の id が重複しています: {}", q.line.id);
     }
-    let mut latest = BTreeMap::new();
     let mut updated_ids = BTreeSet::new();
     let mut plan = Plan {
         outputs: Vec::new(),
@@ -137,7 +136,6 @@ pub(super) fn build(
         table: b"action\tid\town\tpriority\tfrom\tto\treason\n".to_vec(),
     };
     for q in &updates {
-        latest.insert(q.line.id.clone(), q);
         let owners: Vec<_> = boxes
             .iter()
             .enumerate()
@@ -271,7 +269,7 @@ pub(super) fn build(
                 plan.emit(i, updated(&source, None, true));
                 plan.remaining[i] = (plan.remaining[i] - amount).max(0.0);
                 if let Some(j) = destination {
-                    plan.emit(j, updated(&q.raw, latest.get(&q.line.id).copied(), false));
+                    plan.emit(j, updated(&source, None, false));
                     plan.remaining[j] += amount;
                     plan.record("move", q, &b.name, &boxes[j].name, "capacity")?;
                 } else {
