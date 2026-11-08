@@ -753,13 +753,20 @@ impl<
             } else {
                 None
             };
+            #[cfg(feature = "nnue-threat")]
+            {
+                fused_threat.unwrap_or_else(|| {
+                    self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                        self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
+                    })
+                })
+            }
             #[cfg(not(feature = "nnue-threat"))]
-            let fused_threat: Option<i32> = None;
-            fused_threat.unwrap_or_else(|| {
+            {
                 self.with_combined_accumulators(acc, side_to_move, |us, them| {
                     self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
                 })
-            })
+            }
         } else {
             let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
                 sqr_clipped_relu_new(us, them)

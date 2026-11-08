@@ -11,7 +11,7 @@ use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
-#[cfg(any(test, feature = "nnue-psqt"))]
+#[cfg(test)]
 use super::finny::piece_list_diff_mask;
 use super::finny::{apply_weight_changes_to_two, collect_piece_list_diff};
 
@@ -121,7 +121,7 @@ struct AccCacheEntry<const L1: usize> {
     /// キャッシュされた PSQT アキュムレータ値
     ///
     /// `refresh_or_cache_with_psqt` の `add_psqt_fn` / `sub_psqt_fn` で
-    /// main acc と同一の差分タイミングで更新される。
+    /// main acc と同じ差分リストで更新される。
     ///
     /// メモリフットプリント: `nnue-psqt` 有効時、各エントリは
     /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (4 × MAX_LAYER_STACK_BUCKETS bytes)` +
@@ -229,98 +229,64 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         entry.valid = true;
     }
 
-    /// PSQT 付きキャッシュ refresh（piece_list 差分方式）
-    ///
-    /// main acc と PSQT acc を同一の slot 差分で更新する。各 slot 差分につき
-    /// main FT の add/sub に加えて PSQT の add/sub（9-i32 SIMD）を呼ぶ。
-    /// cache miss 時は両方を biases から full refresh する。
-    ///
-    /// 既存の `refresh_or_cache` と比較して PSQT を Finny Tables に載せる経路:
-    /// 玉移動時の PSQT フル再計算（40 駒 × num_buckets bucket = 数百 i32 加算）を
-    /// slot 差分（通常 0〜数 slot）に置き換える。
-    ///
-    /// # 引数
-    ///
-    /// 上記 `refresh_or_cache` に加えて:
-    /// - `psqt_biases`: PSQT バイアス [MAX_LAYER_STACK_BUCKETS]（実体は対称差設計で常にゼロ、
-    ///   ただし cache hit 時は参照せず `entry.psqt_accumulation` を直接ロードする）
-    /// - `psqt_acc`: 更新先の PSQT アキュムレータ
-    /// - `add_psqt_fn`: PSQT 加算関数（9-i32 SIMD: `add_psqt_weights`）
-    /// - `sub_psqt_fn`: PSQT 減算関数（9-i32 SIMD: `sub_psqt_weights`）
-    ///
-    /// # 引数数について
-    ///
-    /// 引数 11 個（うちクロージャ 5 つ）+ `#[allow(clippy::too_many_arguments)]`
-    /// 指定。構造体で束ねる選択肢もあるが、ホットパス（per-do_move 呼び出し）で
-    /// クロージャを呼び出すため **モノモルフィズム + インライン展開が必須**。
-    /// generic Fn パラメータの直接渡しが現状最も高速で、構造体経由（特に
-    /// `Box<dyn Fn>` での動的 dispatch）は NPS 退行のリスクがある。
-    /// 可読性は犠牲になるが性能優先の設計。
+    /// PSQT を含む cache と accumulator を同じ駒の差分で更新する。
     #[cfg(feature = "nnue-psqt")]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn refresh_or_cache_with_psqt<FI, FA, FS, FAP, FSP>(
+    pub(crate) fn refresh_or_cache_with_psqt<FI, FAP, FSP>(
         &mut self,
-        king_sq: Square,
-        perspective: Color,
+        key: (Square, Color),
         piece_list: &[BonaPiece; PieceNumber::NB],
         biases: &[i16; L1],
         psqt_biases: &[i32; MAX_LAYER_STACK_BUCKETS],
         accumulation: &mut [i16; L1],
         psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
+        weights: &[i16],
         idx_fn: FI,
-        add_fn: FA,
-        sub_fn: FS,
         add_psqt_fn: FAP,
         sub_psqt_fn: FSP,
     ) where
         FI: Fn(BonaPiece) -> usize,
-        FA: Fn(&mut [i16; L1], usize),
-        FS: Fn(&mut [i16; L1], usize),
         FAP: Fn(&mut [i32; MAX_LAYER_STACK_BUCKETS], usize),
         FSP: Fn(&mut [i32; MAX_LAYER_STACK_BUCKETS], usize),
     {
-        let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
-
-        if entry.valid {
+        let entry = &mut self.entries[key.0.raw() as usize][key.1 as usize];
+        let was_valid = entry.valid;
+        // panic 時は、main / PSQT の片方だけ更新された cache を再利用しない。
+        entry.valid = false;
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        if was_valid {
             crate::nnue::stats::count_cache_hit!();
-            accumulation.copy_from_slice(&entry.accumulation);
+            collect_piece_list_diff(
+                &entry.piece_list,
+                piece_list,
+                idx_fn,
+                &mut removed,
+                &mut added,
+            );
+            crate::nnue::stats::count_refresh_diff!(removed.len() + added.len());
             *psqt_acc = entry.psqt_accumulation;
-
-            let mut diff_count = 0usize;
-            let mut mask = piece_list_diff_mask(&entry.piece_list, piece_list);
-            while mask != 0 {
-                let slot = mask.trailing_zeros() as usize;
-                mask &= mask - 1;
-                let cached_bp = entry.piece_list[slot];
-                let current_bp = piece_list[slot];
-                if cached_bp != BonaPiece::ZERO {
-                    let idx = idx_fn(cached_bp);
-                    sub_fn(accumulation, idx);
-                    sub_psqt_fn(psqt_acc, idx);
-                    diff_count += 1;
-                }
-                if current_bp != BonaPiece::ZERO {
-                    let idx = idx_fn(current_bp);
-                    add_fn(accumulation, idx);
-                    add_psqt_fn(psqt_acc, idx);
-                    diff_count += 1;
-                }
-            }
-            crate::nnue::stats::count_refresh_diff!(diff_count);
         } else {
             crate::nnue::stats::count_cache_miss!();
-            accumulation.copy_from_slice(biases);
+            added.extend(
+                piece_list.iter().filter(|bp| **bp != BonaPiece::ZERO).map(|&bp| idx_fn(bp)),
+            );
             *psqt_acc = *psqt_biases;
-            for &bp in piece_list.iter() {
-                if bp != BonaPiece::ZERO {
-                    let idx = idx_fn(bp);
-                    add_fn(accumulation, idx);
-                    add_psqt_fn(psqt_acc, idx);
-                }
-            }
         }
-
-        entry.accumulation.copy_from_slice(accumulation);
+        apply_weight_changes_to_two::<L1>(
+            &mut entry.accumulation,
+            (!was_valid).then_some(biases),
+            accumulation,
+            weights,
+            &removed,
+            &added,
+        );
+        for index in removed.iter() {
+            sub_psqt_fn(psqt_acc, index);
+        }
+        for index in added.iter() {
+            add_psqt_fn(psqt_acc, index);
+        }
         entry.psqt_accumulation = *psqt_acc;
         entry.piece_list.copy_from_slice(piece_list);
         entry.valid = true;
@@ -1186,24 +1152,14 @@ mod tests {
                                 let psqt_biases = [i32::MAX - 11; MAX_LAYER_STACK_BUCKETS];
                                 let mut psqt = [0; MAX_LAYER_STACK_BUCKETS];
                                 psqt_cache.refresh_or_cache_with_psqt(
-                                    king,
-                                    perspective,
+                                    (king, perspective),
                                     &current,
                                     &biases,
                                     &psqt_biases,
                                     &mut actual,
                                     &mut psqt,
+                                    &weights,
                                     idx_fn,
-                                    |acc, idx| {
-                                        for (lane, value) in acc.iter_mut().enumerate() {
-                                            *value = value.wrapping_add(weight(idx, lane));
-                                        }
-                                    },
-                                    |acc, idx| {
-                                        for (lane, value) in acc.iter_mut().enumerate() {
-                                            *value = value.wrapping_sub(weight(idx, lane));
-                                        }
-                                    },
                                     |acc, idx| {
                                         for value in acc {
                                             *value = value.wrapping_add(idx as i32);
@@ -1586,27 +1542,16 @@ mod tests {
         let mut acc = [0i16; TEST_L1];
         let mut psqt_acc = [0i32; MAX_LAYER_STACK_BUCKETS];
         cache.refresh_or_cache_with_psqt(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &piece_list,
             &biases,
             &psqt_biases,
             &mut acc,
             &mut psqt_acc,
+            &test_weights(),
             |bp| bp.0 as usize,
-            |a, idx| a[0] = a[0].wrapping_add(idx as i16),
-            |a, idx| a[0] = a[0].wrapping_sub(idx as i16),
-            |p, idx| {
-                // bucket b に対し idx + b を加える（bucket ごとに区別できる値）
-                for (b, v) in p.iter_mut().enumerate() {
-                    *v = v.wrapping_add(idx as i32 + b as i32);
-                }
-            },
-            |p, idx| {
-                for (b, v) in p.iter_mut().enumerate() {
-                    *v = v.wrapping_sub(idx as i32 + b as i32);
-                }
-            },
+            test_add_psqt,
+            test_sub_psqt,
         );
 
         assert_eq!(acc[0], 15);
@@ -1625,89 +1570,160 @@ mod tests {
     #[test]
     fn test_psqt_refresh_or_cache_hit_updates_psqt() {
         let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
-        let king_sq = Square::SQ_55;
-        let perspective = Color::Black;
         let biases = [0i16; TEST_L1];
         let psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
-
-        let add_main = |a: &mut [i16; TEST_L1], idx: usize| {
-            a[0] = a[0].wrapping_add(idx as i16);
-        };
-        let sub_main = |a: &mut [i16; TEST_L1], idx: usize| {
-            a[0] = a[0].wrapping_sub(idx as i16);
-        };
-        let add_psqt = |p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize| {
-            for (b, v) in p.iter_mut().enumerate() {
-                *v = v.wrapping_add(idx as i32 + b as i32);
-            }
-        };
-        let sub_psqt = |p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize| {
-            for (b, v) in p.iter_mut().enumerate() {
-                *v = v.wrapping_sub(idx as i32 + b as i32);
-            }
-        };
 
         // 1 回目: slot 0-2 = [5, 10, 15]
         let mut pl1 = [BonaPiece::ZERO; PieceNumber::NB];
         pl1[0] = BonaPiece(5);
         pl1[1] = BonaPiece(10);
         pl1[2] = BonaPiece(15);
-        let mut acc1 = [0i16; TEST_L1];
-        let mut psqt1 = [0i32; MAX_LAYER_STACK_BUCKETS];
-        cache.refresh_or_cache_with_psqt(
-            king_sq,
-            perspective,
-            &pl1,
-            &biases,
-            &psqt_biases,
-            &mut acc1,
-            &mut psqt1,
-            |bp| bp.0 as usize,
-            add_main,
-            sub_main,
-            add_psqt,
-            sub_psqt,
-        );
+        refresh_psqt_cached(&mut cache, &pl1, &biases, &psqt_biases);
 
         // 2 回目: slot 2 の 15 → 20 に変化
         let mut pl2 = pl1;
         pl2[2] = BonaPiece(20);
-        let mut acc2 = [0i16; TEST_L1];
-        let mut psqt2 = [0i32; MAX_LAYER_STACK_BUCKETS];
-        cache.refresh_or_cache_with_psqt(
-            king_sq,
-            perspective,
-            &pl2,
-            &biases,
-            &psqt_biases,
-            &mut acc2,
-            &mut psqt2,
-            |bp| bp.0 as usize,
-            add_main,
-            sub_main,
-            add_psqt,
-            sub_psqt,
-        );
+        let (acc2, psqt2) = refresh_psqt_cached(&mut cache, &pl2, &biases, &psqt_biases);
 
         // cache hit 経由の結果が full refresh と完全一致することを確認
         let mut cache2 = AccumulatorCacheLayerStacks::<TEST_L1>::new();
-        let mut acc_full = [0i16; TEST_L1];
-        let mut psqt_full = [0i32; MAX_LAYER_STACK_BUCKETS];
-        cache2.refresh_or_cache_with_psqt(
-            king_sq,
-            perspective,
-            &pl2,
-            &biases,
-            &psqt_biases,
-            &mut acc_full,
-            &mut psqt_full,
-            |bp| bp.0 as usize,
-            add_main,
-            sub_main,
-            add_psqt,
-            sub_psqt,
-        );
+        let (acc_full, psqt_full) = refresh_psqt_cached(&mut cache2, &pl2, &biases, &psqt_biases);
         assert_eq!(acc2, acc_full, "main acc: cache hit vs full refresh");
         assert_eq!(psqt2, psqt_full, "psqt acc: cache hit vs full refresh");
+    }
+
+    /// 非ゼロ bias で hit を連ねても bias が二重に入らず、各段で full refresh と一致する。
+    #[cfg(feature = "nnue-psqt")]
+    #[test]
+    fn test_psqt_refresh_or_cache_hit_chain_with_biases() {
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+        let mut biases = [0i16; TEST_L1];
+        biases[0] = 100;
+        biases[1] = -3;
+        let mut psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
+        for (b, v) in psqt_biases.iter_mut().enumerate() {
+            *v = 1000 - b as i32;
+        }
+
+        let mut pl1 = [BonaPiece::ZERO; PieceNumber::NB];
+        pl1[0] = BonaPiece(5);
+        pl1[1] = BonaPiece(10);
+        pl1[2] = BonaPiece(15);
+        let mut pl2 = pl1;
+        pl2[2] = BonaPiece(20);
+        // slot 1 が消え、slot 39 に新しい駒が現れる。
+        let mut pl3 = pl2;
+        pl3[1] = BonaPiece::ZERO;
+        pl3[PieceNumber::NB - 1] = BonaPiece(7);
+
+        for pl in [&pl1, &pl2, &pl2, &pl3, &pl3, &pl1] {
+            let (acc, psqt) = refresh_psqt_cached(&mut cache, pl, &biases, &psqt_biases);
+            let mut fresh = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+            let (acc_full, psqt_full) = refresh_psqt_cached(&mut fresh, pl, &biases, &psqt_biases);
+            assert_eq!(acc, acc_full);
+            assert_eq!(psqt, psqt_full);
+
+            let pieces: Vec<i32> = pl
+                .iter()
+                .filter(|bp| **bp != BonaPiece::ZERO)
+                .map(|bp| i32::from(bp.0))
+                .collect();
+            assert_eq!(i32::from(acc[0]), 100 + pieces.iter().sum::<i32>());
+            assert_eq!(acc[1], -3);
+            for (b, v) in psqt.iter().enumerate() {
+                let expected: i32 = pieces.iter().map(|idx| idx + b as i32).sum();
+                assert_eq!(*v, 1000 - b as i32 + expected, "bucket {b}");
+            }
+            let entry = &cache.entries[Square::SQ_55.raw() as usize][Color::Black as usize];
+            assert!(entry.valid);
+            assert_eq!(entry.accumulation, acc);
+            assert_eq!(entry.psqt_accumulation, psqt);
+            assert_eq!(entry.piece_list, *pl);
+        }
+    }
+
+    /// main acc 更新後に PSQT 更新が panic しても、次回は miss として両方を再計算する。
+    #[cfg(feature = "nnue-psqt")]
+    #[test]
+    fn test_psqt_refresh_or_cache_panic_invalidates_entry() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+        let mut biases = [0i16; TEST_L1];
+        biases[0] = 50;
+        let psqt_biases = [7i32; MAX_LAYER_STACK_BUCKETS];
+
+        let mut pl1 = [BonaPiece::ZERO; PieceNumber::NB];
+        pl1[0] = BonaPiece(5);
+        pl1[1] = BonaPiece(10);
+        refresh_psqt_cached(&mut cache, &pl1, &biases, &psqt_biases);
+
+        let mut pl2 = pl1;
+        pl2[1] = BonaPiece(12);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut acc = [0i16; TEST_L1];
+            let mut psqt = [0i32; MAX_LAYER_STACK_BUCKETS];
+            cache.refresh_or_cache_with_psqt(
+                (Square::SQ_55, Color::Black),
+                &pl2,
+                &biases,
+                &psqt_biases,
+                &mut acc,
+                &mut psqt,
+                &test_weights(),
+                |bp| bp.0 as usize,
+                test_add_psqt,
+                |_, _| panic!("psqt update failed"),
+            );
+        }));
+        assert!(result.is_err());
+        let entry = &cache.entries[Square::SQ_55.raw() as usize][Color::Black as usize];
+        assert!(!entry.valid);
+
+        let (acc, psqt) = refresh_psqt_cached(&mut cache, &pl2, &biases, &psqt_biases);
+        let mut fresh = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+        let (acc_full, psqt_full) = refresh_psqt_cached(&mut fresh, &pl2, &biases, &psqt_biases);
+        assert_eq!(acc, acc_full);
+        assert_eq!(psqt, psqt_full);
+        assert_eq!(acc[0], 50 + 5 + 12);
+    }
+
+    /// bucket b に対し idx + b を加える（bucket ごとに区別できる値）
+    #[cfg(feature = "nnue-psqt")]
+    fn test_add_psqt(p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize) {
+        for (b, v) in p.iter_mut().enumerate() {
+            *v = v.wrapping_add(idx as i32 + b as i32);
+        }
+    }
+
+    #[cfg(feature = "nnue-psqt")]
+    fn test_sub_psqt(p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize) {
+        for (b, v) in p.iter_mut().enumerate() {
+            *v = v.wrapping_sub(idx as i32 + b as i32);
+        }
+    }
+
+    /// SQ_55 / 先手視点の entry を `test_weights` と恒等 index で refresh する。
+    #[cfg(feature = "nnue-psqt")]
+    fn refresh_psqt_cached(
+        cache: &mut AccumulatorCacheLayerStacks<TEST_L1>,
+        piece_list: &[BonaPiece; PieceNumber::NB],
+        biases: &[i16; TEST_L1],
+        psqt_biases: &[i32; MAX_LAYER_STACK_BUCKETS],
+    ) -> ([i16; TEST_L1], [i32; MAX_LAYER_STACK_BUCKETS]) {
+        let mut acc = [0i16; TEST_L1];
+        let mut psqt = [0i32; MAX_LAYER_STACK_BUCKETS];
+        cache.refresh_or_cache_with_psqt(
+            (Square::SQ_55, Color::Black),
+            piece_list,
+            biases,
+            psqt_biases,
+            &mut acc,
+            &mut psqt,
+            &test_weights(),
+            |bp| bp.0 as usize,
+            test_add_psqt,
+            test_sub_psqt,
+        );
+        (acc, psqt)
     }
 }
