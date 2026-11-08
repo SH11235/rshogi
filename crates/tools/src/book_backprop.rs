@@ -138,7 +138,7 @@ impl BestParams {
 pub struct Graph {
     /// 書き出しで読み直す入力。
     source: Option<PathBuf>,
-    options: BackpropOptions,
+    pub(crate) options: BackpropOptions,
     /// 局面の代表 SFEN (同じ key の行のうち最小 ply の行)。
     sfens: Texts,
     node_flags: Vec<u8>,
@@ -1004,6 +1004,7 @@ pub fn read_graph(path: &Path, options: BackpropOptions) -> Result<Graph> {
 /// key 順の元データから、一時ファイルを経ずに伝播用グラフを作る。
 pub(crate) fn graph_from_entries<'a, M>(
     entries: impl IntoIterator<Item = (&'a str, &'a str, M)>,
+    options: BackpropOptions,
 ) -> Result<Graph>
 where
     M: IntoIterator<Item = (&'a str, Option<i32>)>,
@@ -1059,10 +1060,11 @@ where
         input.all_depth0.push(depth0);
         input.unexplored.push(unexplored);
     }
-    build_graph(None, BackpropOptions::default(), scan, input)
+    build_graph(None, options, scan, input)
 }
 
-/// 値の分かる手だけを残し、消えた直接の子局面は残る反転局面への辺に張り替える。
+/// 値の分かる手だけを残し、消えた直接の子局面は残る反転局面への辺に張り替える
+/// (`skip_flipped_children` のグラフでは張り替えない)。
 pub(crate) fn retain_known(graph: &mut Graph, known: &[Vec<bool>]) -> Result<()> {
     ensure!(
         graph.source.is_none() && graph.added.is_empty(),
@@ -1113,7 +1115,10 @@ pub(crate) fn retain_known(graph: &mut Graph, known: &[Vec<bool>]) -> Result<()>
                 if remap[to] != NONE {
                     flags |= graph.row_flags[r] & ROW_FLIP;
                     remap[to]
-                } else if graph.row_flags[r] & ROW_FLIP == 0 && flipped[to] != NONE {
+                } else if !graph.options.skip_flipped_children
+                    && graph.row_flags[r] & ROW_FLIP == 0
+                    && flipped[to] != NONE
+                {
                     flags |= ROW_FLIP;
                     flipped[to]
                 } else {

@@ -11,7 +11,7 @@ use super::reply_graph::apply_usi;
 use super::schema::Schema;
 use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
 use crate::book_backprop::{
-    DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
+    BackpropOptions, DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
     graph_from_entries, parse_row, percentile, propagate_values, retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
@@ -41,7 +41,7 @@ pub(super) struct AuditArgs {
     #[arg(long)]
     demote_alts: bool,
     /// 値が戻った bench (控え) を alt に戻す (--apply なしでは件数だけ確認)
-    #[arg(long, conflicts_with_all = ["fill_replies", "bridge_replies"])]
+    #[arg(long, conflicts_with = "fill_replies")]
     revive_bench: bool,
     /// alt を降格する値の上限 (手番側からの値)
     #[arg(long, default_value_t = -150, allow_hyphen_values = true)]
@@ -106,9 +106,9 @@ pub(super) struct AuditArgs {
     /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
     #[arg(long, conflicts_with = "apply")]
     fill_replies: bool,
-    /// --fill-replies の補い方に加えて (--fill-replies とは同時に指定しない)、読みの値のある手を指した後の元データに無い相手の手番の局面も補う。補った局面には、
+    /// 読みの値のある手を指した後の、元データに無い相手の手番の局面を補う (--fill-replies とは同時に指定しない)。補った局面には、
     /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
-    #[arg(long, conflicts_with_all = ["apply", "fill_replies"])]
+    #[arg(long, conflicts_with = "fill_replies")]
     bridge_replies: bool,
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
     #[arg(long, requires = "bridge_replies")]
@@ -221,16 +221,16 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         Fill::Off
     };
     ensure!(
-        !(args.apply && fill != Fill::Off),
-        "--apply と --fill-replies・--bridge-replies は併用できません"
+        !(args.apply && fill == Fill::Unread),
+        "--apply と --fill-replies は併用できません"
     );
     ensure!(
-        !(args.demote_alts && fill != Fill::Off),
-        "--demote-alts と --fill-replies・--bridge-replies は併用できません"
+        !(args.demote_alts && fill == Fill::Unread),
+        "--demote-alts と --fill-replies は併用できません"
     );
     ensure!(
-        !(args.revive_bench && fill != Fill::Off),
-        "--revive-bench と --fill-replies・--bridge-replies は併用できません"
+        !(args.revive_bench && fill == Fill::Unread),
+        "--revive-bench と --fill-replies は併用できません"
     );
     ensure!(
         args.bridge_table.is_none() || args.bridge_replies,
@@ -742,9 +742,13 @@ fn bench_target(row: &Row, graph: &Graph) -> Result<Option<(usize, bool)>> {
         return Ok(None);
     }
     let child = pos.to_sfen();
-    let node = graph
-        .find(strip_ply(&child))
-        .or_else(|| rshogi_book::flipped_key(&child).and_then(|key| graph.find(strip_ply(&key))));
+    // 反転の辺を張らないグラフ (--bridge-replies) では、伝播と同じく反転した局面を使わない。
+    let node = graph.find(strip_ply(&child)).or_else(|| {
+        if graph.options.skip_flipped_children {
+            return None;
+        }
+        rshogi_book::flipped_key(&child).and_then(|key| graph.find(strip_ply(&key)))
+    });
     Ok(node
         .filter(|&node| graph.moves(node).any(|m| m.usable))
         .map(|node| (node, row.get("key").split_whitespace().nth(1) == Some("b"))))
@@ -838,6 +842,7 @@ fn write_audited_db(
 
 /// 値の分かる手を求める。読みの値のある合法手と、book 内の子局面に値の分かる手がある手。
 fn known_moves(positions: &[(&str, &MasterPosition)], graph: &Graph) -> Result<Vec<Vec<bool>>> {
+    let skip_flipped = graph.options.skip_flipped_children;
     let node_of: Vec<usize> = positions
         .iter()
         .map(|&(key, _)| {
@@ -862,7 +867,8 @@ fn known_moves(positions: &[(&str, &MasterPosition)], graph: &Graph) -> Result<V
                 waiting.push((edge.to, index, i));
                 // 直接の子局面の値が分からなくても、反転した局面の値が分かれば、値の分かる手だけを
                 // 書く 2 回目のグラフでは辺が反転した局面に張られる。
-                if !edge.via_flip
+                if !skip_flipped
+                    && !edge.via_flip
                     && let Some(flipped) = flipped_node(graph, edge.to)
                 {
                     waiting.push((flipped, index, i));
@@ -953,10 +959,12 @@ fn visit_leaves(
             if let Some(flipped) = flipped {
                 visit(Leaf::Blocked(flipped));
             }
-            visit(match (m.eval, fill) {
-                (Some(_), Fill::Unread) => Leaf::Blocked(child_key),
-                (eval, _) => Leaf::Candidate(child_key, eval),
-            });
+            match (m.eval, fill) {
+                (Some(_), Fill::Unread) => visit(Leaf::Blocked(child_key)),
+                // 読みの値の無い手の行き先は上限を付けられず甘くなるので、Bridge では補わない。
+                (None, Fill::Bridge) => {}
+                (eval, _) => visit(Leaf::Candidate(child_key, eval)),
+            }
         }
         pos.undo_move(mv);
     }
@@ -972,7 +980,7 @@ fn visit_leaves(
 /// `Fill::Bridge` では補い、着く手の読みの値 (相手の全部の応手を見た値) を、元データの局面に着かない合法手 1 つの
 /// 値として残す。相手は手を指した側に悪い方を選ぶので、手の値は読みの値と定跡の応手の先の値の悪い方になり、
 /// 読みの値より甘くならない。読みの値のある手が複数の局面から着くときは、手を指した側に一番悪い読みの値を残す
-/// (同じ局面に読みの値の無い手からも着けば、その手にも効く)。残す先の合法手が無い局面 (全部の応手が元データの
+/// (同じ局面に読みの値の無い手からも着けば、その手にも効く。読みの値の無い手だけが着く局面は補わない)。残す先の合法手が無い局面 (全部の応手が元データの
 /// 局面か、反転した局面か、補う候補の局面に着く) は補わない。
 fn reply_positions(
     positions: &BTreeMap<String, MasterPosition>,
@@ -1103,11 +1111,18 @@ fn reply_positions(
 fn propagate_entries(
     all: &[(&str, &MasterPosition)],
     draws: DrawValues,
+    skip_flipped: bool,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
-    let mut graph =
-        graph_from_entries(all.iter().map(|&(key, p)| {
+    let options = BackpropOptions {
+        skip_flipped_children: skip_flipped,
+        ..BackpropOptions::default()
+    };
+    let mut graph = graph_from_entries(
+        all.iter().map(|&(key, p)| {
             (key, p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
-        }))?;
+        }),
+        options,
+    )?;
     let illegal_moves = graph.illegal_moves;
     let known = known_moves(all, &graph)?;
     retain_known(&mut graph, &known)?;
@@ -1121,6 +1136,17 @@ fn propagate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
     fill: Fill,
+) -> Result<Propagated> {
+    propagate_with(positions, draws, fill, fill == Fill::Bridge)
+}
+
+/// [`propagate`] の本体。`skip_flipped` なら反転した局面へ辺を張らない。`Fill::Bridge` は補った辺が反転で合流する
+/// 局面を千日手の値の違う循環に入れると止まる (1 行で両方の向きの値を表せない) ので、反転の辺を張らずに解く。
+fn propagate_with(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    fill: Fill,
+    skip_flipped: bool,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
@@ -1150,7 +1176,7 @@ fn propagate(
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
     all.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws)?;
+    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws, skip_flipped)?;
     let known = all
         .iter()
         .zip(known_all)
@@ -1335,7 +1361,8 @@ fn bridge_findings(
     book: &AuditedBook,
     line: i32,
 ) -> Result<Vec<BridgeFinding>> {
-    let plain = propagate(positions, draws, Fill::Off)?;
+    // 補った伝播と同じく反転の辺を張らずに比べ、補ったことによる差だけを出す。
+    let plain = propagate_with(positions, draws, Fill::Off, true)?;
     let mut out = Vec::new();
     for (((key, position), known), plain_known) in
         positions.iter().zip(&book.known).zip(&plain.known)
@@ -2077,7 +2104,8 @@ mod tests {
             )
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
-            let (memory, actual_known, illegal, _) = propagate_entries(&entries, draws).unwrap();
+            let (memory, actual_known, illegal, _) =
+                propagate_entries(&entries, draws, false).unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
@@ -2199,6 +2227,98 @@ mod tests {
             .as_ref()
             .map(|m| m.value);
         assert_eq!((summary.bridged_positions, main), (1, Some(-100)));
+    }
+
+    #[test]
+    fn bridge_replies_apply_replaces_main() {
+        // 補うと main 5i4h は B の -100 になり、元データの局面 c に着く 5i6h (+20) が 1 位になるので、--apply で
+        // main を替える。補った局面 (A) は元データに書かない。
+        let c = "4k4/9/9/9/9/9/9/3K5/9 w -";
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(
+            &args.master,
+            master(&[
+                (ROOT, "5i4h", "main", "50"),
+                (ROOT, "5i6h", "alt", "20"),
+                (B, "4h3h", "main", "-100"),
+                (c, "5a4a", "main", "-20"),
+            ]),
+        )
+        .unwrap();
+        args.bridge_replies = true;
+        args.apply = true;
+        args.since = Some("t2".into());
+        args.line = 40;
+        run_in_pool(args).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap();
+        let rows = super::super::master_table::parse_master(&text).unwrap();
+        let main: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("key") == ROOT && r.get("role") == "main")
+            .map(|r| r.get("move").to_owned())
+            .collect();
+        assert_eq!(main, ["5i6h"]);
+        assert!(!rows.iter().any(|r| r.get("key") == A));
+    }
+
+    #[test]
+    fn bridge_replies_does_not_follow_flipped_children() {
+        // ROOT の 5i4h の直接の子局面 A は無く、反転した局面だけがある。補わない伝播は反転した局面の値を使い、
+        // 補う伝播は反転の辺を張らずに読みの値 +50 を使う。
+        let flipped = rshogi_book::flipped_key(&format!("{A} 1")).unwrap();
+        let flipped_a = strip_ply(&flipped).to_owned();
+        let rows = [
+            (ROOT, "5i4h", "main", "50"),
+            (flipped_a.as_str(), "5i5h", "main", "100"),
+        ];
+        let parsed = parse_master_rows(master(&rows).as_bytes()).unwrap();
+        let main = |fill: Fill| {
+            let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, fill, None).unwrap();
+            let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+            audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()[0]
+                .as_ref()
+                .map(|m| m.value)
+        };
+        assert_eq!(main(Fill::Off), Some(-100));
+        assert_eq!(main(Fill::Bridge), Some(50));
+    }
+
+    #[test]
+    fn bridge_replies_does_not_fill_after_unread_moves() {
+        // 読みの値の無い 5i4h の行き先 A は補わない (補うと定跡の応手だけの甘い値になる)。
+        let (summary, main) =
+            bridge_audit(&[(ROOT, "5i4h", "main", ""), (B, "4h3h", "main", "50")]);
+        assert_eq!((summary.reply_positions, main), (0, None));
+    }
+
+    #[test]
+    fn bridge_replies_revive_does_not_use_flipped_child() {
+        // bench 5i4h の直接の子局面は無く、反転した局面だけが元データにある。補う伝播は反転の辺を張らないので、
+        // 復帰の判定も読みの値 -999 を使い、bench のまま残す。補わなければ反転した局面の値で alt に戻す。
+        let rows = [
+            (ROOT, "5i6h", "main", "0"),
+            (ROOT, "5i4h", "bench", "-999"),
+            (A_FLIPPED, "5i5h", "main", "-10"),
+        ];
+        for (bridge, expected) in [(true, "bench"), (false, "alt")] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            std::fs::write(&args.master, master(&rows)).unwrap();
+            args.bridge_replies = bridge;
+            args.revive_bench = true;
+            args.apply = true;
+            args.since = Some("t2".into());
+            run_in_pool(args).unwrap();
+            let text = std::fs::read_to_string(dir.path().join("moves.tsv")).unwrap();
+            let role = super::super::master_table::parse_master(&text)
+                .unwrap()
+                .iter()
+                .find(|r| r.get("key") == ROOT && r.get("move") == "5i4h")
+                .map(|r| r.get("role").to_owned())
+                .unwrap();
+            assert_eq!(role, expected, "bridge {bridge}");
+        }
     }
 
     #[test]
