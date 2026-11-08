@@ -417,6 +417,86 @@ book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 
 `wait` は次を同じ 1 回の読み取りで満たしたときに、対象ごとの `id`・`own`・`generation`・`state`・`ready`・`out` を JSON で出して 0 で終わります: `processed_bytes` が受領の `end` 以上、受領の範囲 `[start, end)` に拒否が無い、`all_ended` が真 (`--ids` を付けたらその対象と受領の範囲で足した `id` が終わった状態)、状態のファイルを書いた serve 自身が生きている (状態の `run_id` の起動ごとの lock が取られている)。受領の範囲に拒否があればその理由を出して非 0、serve が落ちていれば非 0 で終わります。範囲の外の拒否 (他の書き手の行や同じ `id` の過去の拒否) は見ません。受領の範囲が未処理のまま `queue_error` が 2 秒続けば、その理由を出して非 0 で終わります (チェックポイントを一時的に書けない場合も含みます。直した後に待ち直してください)。`--ids` に状態に無い id を渡すと (打ち間違いや、別の受領で足してまだ処理されていない id)、待たずに非 0 で終わります。状態のファイルが前の起動のもの (その `run_id` の lock が取られていない) なら、state の lock で新しい serve が動いているかを確かめ、動いていれば新しい状態が出るまで待ち、動いていなければ非 0 で終わります。lock は共有 lock で一瞬試すだけです (serve は起動時に state の lock を 1 秒ほど待ち直すので、待機と起動が重なっても起動は失敗しません)。
 
+### `tree queue-review`: 台ごとの残りと未着手の木を点検する
+
+複数の台の受付と進みの写しを読み、締めまでに読める量、未着手の木の到達の重みと重複、
+保留候補の行を出します。受付や稼働中の serve には書き込みません。
+
+```sh
+book_mine tree queue-review \
+  --box box-a=/path/to/box-a --box box-b=/path/to/box-b \
+  --rate box-a=1.44 --box-rate box-b=20 \
+  --cutoff 2026-12-01T09:00:00+09:00 \
+  --walk-table b=walk-black.tsv --walk-table w=walk-white.tsv \
+  --table queue-review.tsv --boxes queue-boxes.tsv --hold-out hold-candidates
+```
+
+各台の dir には `enqueue/*.jsonl` と、その受付の受領 `<file>.jsonl.receipt`
+(`{"start":0,"end":100,"lines":1}` の形)、`fetch/progress.json` を置きます。
+受領名は `<file>.receipt` でも読めます。同じ JSONL に両方の受領名がある場合はエラーです。
+受領のない JSONL は読みません。受領の `start` が小さい順に読み、同じ id は最後の行を使います。
+受領の範囲の重なり・行数違い、受付と progress の対象・own・priority・hold の不一致はエラーです。
+受付と progress は同じ時点の写しを用意してください。
+
+| 引数 | 既定 | 内容 |
+| --- | --- | --- |
+| `--box <NAME>=<DIR>` | 必須、繰り返し可 | 台の名前と写しの dir。名前は英数字・`_`・`-` |
+| `--rate <NAME>=<N>` | `--default-rate` | worker あたりの局面/時 |
+| `--default-rate <N>` | 1.44 | 台別に指定しない worker の速さ |
+| `--box-rate <NAME>=<N>` | なし | 台全体の局面/時。worker 数と `--rate` による計算を上書き |
+| `--cutoff <RFC3339>` | 必須 | 締めの時刻。実行時点からの時間を使い、過ぎていれば 0 時間 |
+| `--tree-size <N>` | 92 | 木ごとの局面数の仮定 (正数) |
+| `--walk-table <b\|w>=<TSV>` | なし、繰り返し可 | `master walk --table` の表。同じ側の複数表は重みを加算 |
+| `--start-moves <USI>` | 初期局面 | 初期局面からの開始手順。表・memo がこの手順で始まる場合は二重に指さず、相対手順なら前に足す |
+| `--value-floor <W>` | 0.001 | reach-high と reach-low の境界 (以上が high) |
+| `--table <TSV>` | 必須 | 未着手の根ごとの分類表 |
+| `--boxes <TSV>` | 必須 | 台ごとの残りと読める量の表 |
+| `--hold-out <DIR>` | 必須 | 台ごとの hold 候補の JSON Lines を出す dir |
+| `--prefix <NAME>` | qrhold | hold 出力のファイル名の先頭。英数字・`_`・`-` |
+| `--hold-class <CLASS>` | 追加なし、繰り返し可 | reach-low に加えて保留候補にする class |
+
+速さ・重み・下限には有限の非負数を指定します。`--walk-table` を省くと到達の重みは無く、
+手順のある木は not-reached または path-mismatch になります。表の `side` 列があれば指定した側の行だけを読みます。
+表の各行の `moves` を合法性を確認しながら指し直し、開始局面・途中・止まりの局面に `weight` を足します。
+同じ行で同じ局面を再訪しても、その行の重みは 1 回だけ足します。異なる行の重みは加算します。
+`stop=out` の止まりは「ペタの外の出口」として別に重みを加算します。
+
+未着手は、finished でも hold でもなく、read が 0 で、どの worker の key もその木の
+`root`・`roots` の局面でない木です。局面の比較では SFEN の手数を除きます。
+`--table` は `box / id / own / priority / root / class / reach_weight / dup_of` の順です。
+追加の根がある木は根ごとに行を出します。`own=bw` の受付は serve と同じく b・w を別々に点検します。
+
+| class | 判定 |
+| --- | --- |
+| seed | memo に `moves=` がない。到達の重みで測らない |
+| path-mismatch | memo の手順が非合法、または指し終えた局面が根と違う |
+| beyond-out | 正しい memo の手順が、同じ own の walk の out の出口を通る。最初に通った出口の重みを引き継ぐ |
+| reach-high | 同じ own の表で根の到達の重みが下限以上 |
+| reach-low | 同じ own の表で根の到達の重みが下限未満 |
+| not-reached | 正しい memo の手順があり、出口も根の到達の重みもない |
+
+memo は `moves=` の後の空白区切りの USI 手順を使い、`;`・`；`・`,`・改行や次の `名前=値`
+で終えます。手順の不一致は出口や到達の重みより先に判定します。
+`reach_weight` は seed・not-reached・path-mismatch では空欄です。
+`dup_of` は同じ根・同じ own を持つ別の台または別 id を `台:id` のカンマ区切りで示します。
+相手の木は未着手に限らず、finished でも hold でもなければ重複として数えます。
+
+`--boxes` は `box / workers / rate / hours / capacity / remaining / ratio / unstarted` の順です。
+`rate` は台全体の局面/時、`capacity = rate × hours`、`remaining` は finished でも hold でもない
+各木の `max(tree_size, requested) − read` (負なら 0) の和です。
+`ratio = remaining / capacity` で、1 を超えると見積もった量を締めまでに読み切れません。
+読める量が 0 で残りがあれば `inf`、両方 0 なら 0 とします。重複の分は残りから引きません。
+標準出力にも台ごとの割合と class ごとの本数を出します。複数根の木が異なる class に入る場合は、
+それぞれの class に 1 本ずつ数えます。
+
+`--hold-out` には `<prefix>_<NAME>.jsonl` を各台について作ります (候補が無ければ空ファイル)。
+既定では reach-low だけを対象にし、最後の受付行の JSON の `hold` だけを true にします。
+複数根の木はすべての根、`own=bw` の木は両側が未着手で対象 class に入る場合だけ出力します。
+seed・beyond-out・not-reached・reach-high・path-mismatch は既定では保留にしません。
+今の main から辿れなくなったことだけを理由に、読む価値が低いと判断しないためです。
+出力先は台の dir の外に置いてください。入力と同じファイルや出力先どうしの重複はエラーです。
+既存の出力ファイルは上書きします。出した hold 候補を受付に積む操作は、このコマンドでは行いません。
+
 ### 並列数・停止・監視
 
 - `<state>/workers` の整数を書き換えて並列数を変更します。初回の既定16。既存の workers ファイルがあれば再起動時も `--workers` より優先します。不正な内容の通知は内容または mtime が変わるまで1回です。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
