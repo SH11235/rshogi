@@ -1,50 +1,96 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 
-const BUCKETS: usize = 65_536;
 const SORT_BYTES: usize = 1024 * 1024;
 const SORT_ROWS: usize = 2048;
 
 pub(super) struct Seen {
-    file: File,
-    heads: Vec<u64>,
+    reader: BufReader<File>,
+    #[cfg(test)]
+    pub(super) reads: usize,
+    #[cfg(test)]
+    pub(super) merges: usize,
 }
 
 impl Seen {
-    pub(super) fn new() -> Result<Self> {
-        let mut file = tempfile::tempfile()?;
-        file.write_all(&[0])?;
+    pub(super) fn new(start: &str) -> Result<Self> {
+        let mut writer = BufWriter::new(tempfile::tempfile()?);
+        write_record(
+            &mut writer,
+            &Record {
+                key: vec![start.into()],
+                value: String::new(),
+            },
+        )?;
+        let mut file = writer.into_inner()?;
+        file.rewind()?;
         Ok(Self {
-            file,
-            heads: vec![0; BUCKETS],
+            reader: BufReader::new(file),
+            #[cfg(test)]
+            reads: 0,
+            #[cfg(test)]
+            merges: 0,
         })
     }
 
-    pub(super) fn insert(&mut self, key: &str) -> Result<bool> {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(key.as_bytes());
-        let bucket = usize::from(u16::from_le_bytes([hash[0], hash[1]]));
-        let mut offset = self.heads[bucket];
-        while offset != 0 {
-            self.file.seek(SeekFrom::Start(offset))?;
-            let mut word = [0; 8];
-            self.file.read_exact(&mut word)?;
-            offset = u64::from_le_bytes(word);
-            self.file.read_exact(&mut word)?;
-            let mut text = vec![0; usize::try_from(u64::from_le_bytes(word))?];
-            self.file.read_exact(&mut text)?;
-            if text == key.as_bytes() {
-                return Ok(false);
-            }
+    pub(super) fn advance(&mut self, candidates: Sorter) -> Result<(BufReader<File>, usize)> {
+        let mut candidates = candidates.finish()?;
+        self.reader.rewind()?;
+        let mut old = self.read_seen()?;
+        let mut merged = BufWriter::new(tempfile::tempfile()?);
+        let mut next = Sorter::new();
+        let mut last = None;
+        let mut added = 0;
+        #[cfg(test)]
+        {
+            self.merges += 1;
         }
-        let offset = self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&self.heads[bucket].to_le_bytes())?;
-        self.file.write_all(&(key.len() as u64).to_le_bytes())?;
-        self.file.write_all(key.as_bytes())?;
-        self.heads[bucket] = offset;
-        Ok(true)
+        while let Some(record) = read_record(&mut candidates)? {
+            #[cfg(test)]
+            {
+                self.reads += 1;
+            }
+            let key = &record.key[0];
+            if last.as_ref() == Some(key) {
+                continue;
+            }
+            while old.as_ref().is_some_and(|r| r.key[0] < *key) {
+                write_record(&mut merged, old.as_ref().context("到達済みの行がありません")?)?;
+                old = self.read_seen()?;
+            }
+            if old.as_ref().is_none_or(|r| r.key[0] != *key) {
+                write_record(
+                    &mut merged,
+                    &Record {
+                        key: vec![key.clone()],
+                        value: String::new(),
+                    },
+                )?;
+                // キー順の照合後に発見順へ戻し、次層の親の展開順を保つ。
+                next.push(vec![record.key[1].clone(), key.clone()], record.value)?;
+                added += 1;
+            }
+            last = Some(key.clone());
+        }
+        while let Some(record) = old {
+            write_record(&mut merged, &record)?;
+            old = self.read_seen()?;
+        }
+        let mut file = merged.into_inner()?;
+        file.rewind()?;
+        self.reader = BufReader::new(file);
+        Ok((next.finish()?, added))
+    }
+
+    fn read_seen(&mut self) -> Result<Option<Record>> {
+        let record = read_record(&mut self.reader)?;
+        #[cfg(test)]
+        {
+            self.reads += usize::from(record.is_some());
+        }
+        Ok(record)
     }
 }
 

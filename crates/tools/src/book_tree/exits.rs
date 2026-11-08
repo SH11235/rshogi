@@ -13,7 +13,7 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 mod disk;
@@ -318,22 +318,20 @@ fn traverse(index: &mut MasterIndex, args: &ExitsArgs, initial: &str) -> Result<
             });
         start = child(&start, mv).with_context(|| format!("--start-moves の {} 手目", i + 1))?;
     }
-    let mut seen = Seen::new()?;
-    seen.insert(&start)?;
+    let mut seen = Seen::new(&start)?;
     let mut visited = 1;
     let mut records = Sorter::new();
-    let mut layer = tempfile::tempfile()?;
-    serde_json::to_writer(&mut layer, &(start, start_entry))?;
-    layer.write_all(b"\n")?;
+    let mut first = Sorter::new();
+    first.push(vec![String::new(), start], serde_json::to_string(&start_entry)?)?;
+    let mut layer = first.finish()?;
     let mut ply = moves.len();
     let mut sequence = 0u64;
     loop {
-        layer.rewind()?;
-        let reader = BufReader::new(layer);
-        let mut next = BufWriter::new(tempfile::tempfile()?);
-        let mut added = false;
-        for text in reader.lines() {
-            let (key, entry): (String, Entry) = serde_json::from_str(&text?)?;
+        let layer_start = sequence;
+        let mut candidates = Sorter::new();
+        while let Some(record) = read_record(&mut layer)? {
+            let key = record.key[1].clone();
+            let entry: Entry = serde_json::from_str(&record.value)?;
             let rows = index.rows(&key)?;
             if !rows.iter().any(|r| matches!(r.get("role"), "main" | "alt")) {
                 let exit = Exit {
@@ -370,19 +368,19 @@ fn traverse(index: &mut MasterIndex, args: &ExitsArgs, initial: &str) -> Result<
                     ],
                     serde_json::to_string(&entry)?,
                 )?;
-                // 層内の発見順を保ち、同じ最短手数の代表の入口を変えない。
-                if seen.insert(&child)? {
-                    visited += 1;
-                    serde_json::to_writer(&mut next, &(child, entry))?;
-                    next.write_all(b"\n")?;
-                    added = true;
-                }
+                candidates
+                    .push(vec![child, format!("{sequence:020}")], serde_json::to_string(&entry)?)?;
             }
         }
-        if !added {
+        if sequence == layer_start {
             break;
         }
-        layer = next.into_inner()?;
+        let (next, added) = seen.advance(candidates)?;
+        visited += added;
+        if added == 0 {
+            break;
+        }
+        layer = next;
         ply += 1;
     }
     Ok(Traversal {

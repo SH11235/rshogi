@@ -475,21 +475,43 @@ fn external_sort_spills_merges_and_preserves_equal_key_order() {
 }
 
 #[test]
-fn seen_checks_full_keys_even_when_bucket_hashes_collide() {
-    use sha2::{Digest, Sha256};
-    let mut buckets = BTreeMap::new();
-    let (first, second) = (0..100_000)
-        .find_map(|i| {
-            let key = format!("position-{i}");
-            let hash = Sha256::digest(key.as_bytes());
-            buckets.insert([hash[0], hash[1]], key.clone()).map(|old| (old, key))
-        })
-        .unwrap();
-    let mut seen = Seen::new().unwrap();
-    assert!(seen.insert(&first).unwrap());
-    assert!(seen.insert(&second).unwrap());
-    assert!(!seen.insert(&first).unwrap());
-    assert!(!seen.insert(&second).unwrap());
+fn seen_merges_each_layer_with_linear_reads_and_first_discovery_order() {
+    for size in [10_000, 40_000] {
+        let mut seen = Seen::new("position-00000000").unwrap();
+        for layer in 0..3 {
+            let mut candidates = Sorter::new();
+            for i in (0..size).rev() {
+                let key = format!("position-{:08}", layer * size / 2 + i);
+                for duplicate in 0..2 {
+                    candidates
+                        .push(
+                            vec![key.clone(), format!("{:020}", (size - i) * 2 + duplicate)],
+                            format!("{i}:{duplicate}"),
+                        )
+                        .unwrap();
+                }
+            }
+            let before = seen.reads;
+            let (mut next, added) = seen.advance(candidates).unwrap();
+            let old_count = if layer == 0 {
+                1
+            } else {
+                size + (layer - 1) * size / 2
+            };
+            assert_eq!(seen.reads - before, old_count + 2 * size);
+            assert_eq!(seen.merges, layer + 1);
+            assert_eq!(added, if layer == 0 { size - 1 } else { size / 2 });
+            let mut count = 0;
+            let mut previous = None;
+            while let Some(record) = read_record(&mut next).unwrap() {
+                assert!(previous.as_ref().is_none_or(|p| p < &record.key));
+                assert!(record.value.ends_with(":0"));
+                previous = Some(record.key);
+                count += 1;
+            }
+            assert_eq!(count, added);
+        }
+    }
 }
 
 #[test]
@@ -537,4 +559,59 @@ fn streamed_outputs_match_collected_order_and_validation_failure_preserves_files
     assert!(run(a).is_err());
     assert_eq!(std::fs::read_to_string(table_path).unwrap(), expected_table);
     assert_eq!(std::fs::read_to_string(queue_path).unwrap(), expected_queue);
+}
+
+#[test]
+fn seen_checks_full_keys_even_when_bucket_hashes_collide() {
+    use sha2::{Digest, Sha256};
+    let mut buckets = BTreeMap::new();
+    let (first, second) = (0..100_000)
+        .find_map(|i| {
+            let key = format!("position-{i}");
+            let hash = Sha256::digest(key.as_bytes());
+            buckets.insert([hash[0], hash[1]], key.clone()).map(|old| (old, key))
+        })
+        .unwrap();
+    let mut seen = Seen::new(&first).unwrap();
+    let mut candidates = Sorter::new();
+    for (i, key) in [&first, &second, &first, &second].into_iter().enumerate() {
+        candidates.push(vec![key.clone(), format!("{i:020}")], i.to_string()).unwrap();
+    }
+    let (mut next, added) = seen.advance(candidates).unwrap();
+    assert_eq!(added, 1);
+    let record = read_record(&mut next).unwrap().unwrap();
+    assert_eq!(record.key[1], second);
+    assert_eq!(record.value, "1");
+    assert!(read_record(&mut next).unwrap().is_none());
+}
+
+#[test]
+fn representative_follows_parent_discovery_order_across_sorted_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = args(dir.path(), "w");
+    let left = after(ROOT, &["5i6h"]);
+    let right = after(ROOT, &["5i4h"]);
+    let left2 = after(&left, &["5a5b"]);
+    let right2 = after(&right, &["5a5b"]);
+    let joined = after(&left2, &["6h5h"]);
+    assert_eq!(joined, after(&right2, &["4h5h"]));
+    for reverse in [false, true] {
+        let mut roots = vec![(ROOT, "5i6h", "main", ""), (ROOT, "5i4h", "alt", "")];
+        if reverse {
+            roots.reverse();
+        }
+        roots.extend([
+            (left.as_str(), "5a5b", "main", ""),
+            (right.as_str(), "5a5b", "main", ""),
+            (left2.as_str(), "6h5h", "main", "10"),
+            (right2.as_str(), "4h5h", "main", "20"),
+        ]);
+        write_master(&a, &roots);
+        let (_, exits) = walk(&a, ROOT);
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].key, joined);
+        assert_eq!(exits[0].ply, 3);
+        assert_eq!(exits[0].entry.value, Some(if reverse { 20 } else { 10 }));
+        assert_eq!(exits[0].entries.len(), 2);
+    }
 }
