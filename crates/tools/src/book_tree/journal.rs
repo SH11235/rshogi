@@ -833,6 +833,7 @@ pub(super) fn stage_live_source(
     let mut compatible = BTreeSet::new();
     for (fp, known) in &conditions {
         if accept_fingerprint.contains(fp) {
+            super::transfer::check_accepted(known, dst)?;
             compatible.insert(fp.clone());
         } else if super::transfer::same_reading_condition(known, dst) || fp == &dst.fingerprint {
             super::transfer::check_compatible(known, dst, false)?;

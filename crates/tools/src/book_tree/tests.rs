@@ -1929,3 +1929,62 @@ fn live_import_accepts_only_listed_foreign_net_and_keeps_destination_settings() 
         }
     }
 }
+
+#[test]
+fn live_import_rejects_accepted_condition_mismatches_before_any_append_and_continues() {
+    use super::journal::Readings;
+    let dst = settings();
+    for field in [
+        "nodes",
+        "hash",
+        "multipv",
+        "DrawValueBlack",
+        "DrawValueWhite",
+        "option",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = dst.clone();
+        match field {
+            "nodes" => src.nodes += 1,
+            "hash" => {
+                src.hash += 1;
+                src.options.insert("USI_Hash".into(), src.hash.to_string());
+            }
+            "multipv" => {
+                src.multipv -= 1;
+                src.options.insert("MultiPV".into(), src.multipv.to_string());
+            }
+            "option" => {
+                src.options.insert("SlowMover".into(), "50".into());
+            }
+            key => {
+                src.options.insert(key.into(), "0".into());
+            }
+        }
+        src.fingerprint = src.computed_fingerprint().unwrap();
+        let mut inbox =
+            super::live_import::Inbox::new(dir.path(), BTreeSet::from([src.fingerprint.clone()]))
+                .unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let existing = reading(ROOT, &[], &dst);
+        journal.append(existing, &dst, "fixture".into()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let other_key = child(ROOT, "5i5h").unwrap();
+        let source = dir.path().join("import/01.jsonl");
+        import_file(&source, &dst, &[reading(&other_key, &[], &dst)]);
+        let mut incoming = reading(ROOT, &[], &src);
+        incoming.multipv.truncate(src.multipv);
+        import_file(&source, &src, &[incoming]);
+        let messages = drain_import(&mut inbox, &mut journal, &dst);
+        assert_eq!(messages.len(), 1, "{field}");
+        assert!(messages[0].contains("取り込み失敗"), "{messages:?}");
+        assert!(messages[0].contains(field), "{messages:?}");
+        assert!(dir.path().join("import/failed/01.jsonl").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{field}");
+        import_file(&dir.path().join("import/02.jsonl"), &dst, &[reading(&other_key, &[], &dst)]);
+        assert!(drain_import(&mut inbox, &mut journal, &dst).is_empty());
+        assert!(dir.path().join("import/done/02.jsonl").exists());
+        assert!(journal.get(&other_key).is_some());
+    }
+}
