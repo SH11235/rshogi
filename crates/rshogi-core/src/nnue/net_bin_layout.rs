@@ -114,6 +114,110 @@ pub enum NetBinPatchError {
     Delta(NetDeltaError),
 }
 
+/// FT の両半分と全 bucket の L1 入力列を同じ順序に並べ替える。
+///
+/// `permutation[new]` は元の列番号。出力は標準の LayerStacks `.bin` であり、
+/// FT bias に対する外部 delta の index も変換後の順序になる。
+pub fn permute_ft_columns<R: Read + Seek, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    permutation: &[usize],
+) -> io::Result<()> {
+    let layout = LayerStacksBinLayout::from_reader(input)?;
+    let half = layout.l1 / 2;
+    if layout.l1 % 2 != 0 || permutation.len() != half {
+        return Err(invalid("FT permutation length does not match half of the FT width"));
+    }
+    let mut seen = vec![false; half];
+    for &index in permutation {
+        if index >= half || std::mem::replace(&mut seen[index], true) {
+            return Err(invalid("FT permutation must be a bijection"));
+        }
+    }
+    if layout.threat_weights.is_some() || layout.psqt.is_some() {
+        return Err(invalid("FT permutation does not support Threat or PSQT models"));
+    }
+    let ft = &layout.feature_transformer;
+    copy_range(input, output, 0..ft.biases.start)?;
+    permute_leb128_rows(input, output, ft.biases.clone(), 1, permutation)?;
+    copy_range(input, output, ft.biases.end..ft.weights.start)?;
+    permute_leb128_rows(
+        input,
+        output,
+        ft.weights.clone(),
+        layout.ft_input_dimensions,
+        permutation,
+    )?;
+    let mut pos = ft.weights.end;
+    for bucket in &layout.buckets {
+        copy_range(input, output, pos..bucket.l1.weights.start)?;
+        input.seek(SeekFrom::Start(u64_from_usize(bucket.l1.weights.start, "L1 weights")?))?;
+        let mut row = vec![0u8; checked_padded_input(layout.l1)?];
+        for _ in 0..layout.l2 {
+            input.read_exact(&mut row)?;
+            for view in 0..2 {
+                for &old in permutation {
+                    output.write_all(&row[view * half + old..view * half + old + 1])?;
+                }
+            }
+            output.write_all(&row[layout.l1..])?;
+        }
+        pos = bucket.l1.weights.end;
+    }
+    copy_range(input, output, pos..layout.fc_data.source.end)
+}
+
+fn permute_leb128_rows<R: Read + Seek, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    payload: Range<usize>,
+    rows: usize,
+    permutation: &[usize],
+) -> io::Result<()> {
+    input.seek(SeekFrom::Start(u64_from_usize(payload.start, "FT payload")?))?;
+    let mut reader = std::io::BufReader::new(input.take(payload.len() as u64));
+    let width = permutation.len() * 2;
+    let mut tokens = Vec::with_capacity(width * 3);
+    let mut ranges = Vec::with_capacity(width);
+    for _ in 0..rows {
+        tokens.clear();
+        ranges.clear();
+        for _ in 0..width {
+            let start = tokens.len();
+            let mut value = 0i128;
+            let mut shift = 0;
+            loop {
+                let mut byte = [0u8; 1];
+                reader.read_exact(&mut byte)?;
+                tokens.push(byte[0]);
+                if shift >= 70 {
+                    return Err(invalid("FT LEB128 value exceeds maximum encoding length"));
+                }
+                value |= i128::from(byte[0] & 0x7f) << shift;
+                shift += 7;
+                if byte[0] & 0x80 == 0 {
+                    if byte[0] & 0x40 != 0 {
+                        value |= !0i128 << shift;
+                    }
+                    i16::try_from(value).map_err(|_| invalid("FT LEB128 value outside i16"))?;
+                    break;
+                }
+            }
+            ranges.push(start..tokens.len());
+        }
+        for view in 0..2 {
+            for &old in permutation {
+                output.write_all(&tokens[ranges[view * permutation.len() + old].clone()])?;
+            }
+        }
+    }
+    let mut extra = [0u8; 1];
+    if reader.read(&mut extra)? != 0 {
+        return Err(invalid("FT LEB128 payload has trailing data"));
+    }
+    Ok(())
+}
+
 impl fmt::Display for NetBinPatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -890,6 +994,118 @@ mod tests {
             bucket,
             index,
         }
+    }
+
+    #[test]
+    fn ft_column_permutation_round_trips_both_encodings() {
+        for encoding in [
+            SyntheticFtEncoding::Leb128Combined,
+            SyntheticFtEncoding::Leb128Split,
+        ] {
+            let model = build_synthetic_layer_stacks_with_ft_values(
+                "HalfKP",
+                <HalfKPFeatureSet as FeatureSetTrait>::DIMENSIONS,
+                32,
+                8,
+                32,
+                2,
+                SyntheticFtConfig {
+                    encoding,
+                    values: SyntheticFtValues::SignedBoundaries,
+                },
+            );
+            let permutation: Vec<_> = (0..16).map(|i| (i * 5) % 16).collect();
+            let mut inverse = vec![0; 16];
+            for (new, &old) in permutation.iter().enumerate() {
+                inverse[old] = new;
+            }
+            let mut transformed = Vec::new();
+            permute_ft_columns(&mut Cursor::new(&model.bytes), &mut transformed, &permutation)
+                .unwrap();
+            let original_layout = LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+            let transformed_layout = LayerStacksBinLayout::from_bytes(&transformed).unwrap();
+            for view in 0..2 {
+                for (new, &old) in permutation.iter().enumerate() {
+                    assert_eq!(
+                        transformed_layout.ft_biases[view * 16 + new],
+                        original_layout.ft_biases[view * 16 + old]
+                    );
+                    for (before, after) in
+                        original_layout.buckets.iter().zip(&transformed_layout.buckets)
+                    {
+                        for output in 0..8 {
+                            assert_eq!(
+                                transformed[after.l1.weights.start + output * 32 + view * 16 + new],
+                                model.bytes
+                                    [before.l1.weights.start + output * 32 + view * 16 + old],
+                            );
+                        }
+                    }
+                }
+            }
+            let mut restored = Vec::new();
+            permute_ft_columns(&mut Cursor::new(&transformed), &mut restored, &inverse).unwrap();
+            assert_eq!(restored, model.bytes);
+            assert!(
+                permute_ft_columns(&mut Cursor::new(&model.bytes), &mut Vec::new(), &[0; 16])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ft_column_permutation_rejects_corrupt_values_and_trailing_data() {
+        for payload in [vec![0x80], vec![0x80, 0x80, 0x02, 0], vec![0, 0, 0]] {
+            assert!(
+                permute_leb128_rows(
+                    &mut Cursor::new(&payload),
+                    &mut Vec::new(),
+                    0..payload.len(),
+                    1,
+                    &[0],
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ft_column_permutation_preserves_padded_l1_rows() {
+        let model = build_synthetic_layer_stacks_with_ft_encoding(
+            "HalfKP",
+            <HalfKPFeatureSet as FeatureSetTrait>::DIMENSIONS,
+            34,
+            8,
+            32,
+            2,
+            SyntheticFtEncoding::Leb128Split,
+        );
+        let permutation: Vec<_> = (0..17).rev().collect();
+        let mut transformed = Vec::new();
+        permute_ft_columns(&mut Cursor::new(&model.bytes), &mut transformed, &permutation).unwrap();
+        let original = LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let changed = LayerStacksBinLayout::from_bytes(&transformed).unwrap();
+        for (before, after) in original.buckets.iter().zip(&changed.buckets) {
+            for output in 0..8 {
+                let before_row = before.l1.weights.start + output * 64;
+                let after_row = after.l1.weights.start + output * 64;
+                assert_eq!(
+                    &model.bytes[before_row + 34..before_row + 64],
+                    &transformed[after_row + 34..after_row + 64],
+                );
+                for view in 0..2 {
+                    for (new, &old) in permutation.iter().enumerate() {
+                        assert_eq!(
+                            transformed[after_row + view * 17 + new],
+                            model.bytes[before_row + view * 17 + old],
+                        );
+                    }
+                }
+            }
+        }
+        let mut restored = Vec::new();
+        permute_ft_columns(&mut Cursor::new(&transformed), &mut restored, &permutation).unwrap();
+        assert_eq!(restored, model.bytes);
     }
 
     fn replace_combined_ft_payload(bytes: &[u8], payload: &[u8]) -> Vec<u8> {
