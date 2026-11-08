@@ -1334,16 +1334,14 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         #[cfg(feature = "nnue-psqt")]
         if self.has_psqt {
             cache.refresh_or_cache_with_psqt(
-                king_sq,
-                perspective,
+                (king_sq, perspective),
                 piece_list,
                 &self.biases.0,
                 &self.psqt_biases,
                 accumulation,
                 psqt_acc,
+                &self.weights,
                 idx_fn,
-                |acc, idx| self.add_weights(acc, idx),
-                |acc, idx| self.sub_weights(acc, idx),
                 |pacc, idx| self.add_psqt_weights(pacc, idx),
                 |pacc, idx| self.sub_psqt_weights(pacc, idx),
             );
