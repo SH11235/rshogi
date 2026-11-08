@@ -113,6 +113,7 @@ layerstacks-512x16x32  = []
 layerstacks-1024x16x32 = []
 layerstacks-3072x16x32 = []
 layerstacks-2304x16x64 = []
+layerstacks-2304-sparse-l1 = []
 layerstacks-3072x16x64 = []
 layerstacks-1536x16x64 = []
 

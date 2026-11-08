@@ -69,6 +69,7 @@
 | [`verify_nnue_accumulator`](verify_nnue_accumulator.md) | NNUE の差分更新と再計算の一致を検証 |
 | [`dump_effect_bucket_golden`](dump_effect_bucket_golden.md) | effect bucket の active index を設定別に dump |
 | [`prepack_nnue`](prepack_nnue.md) | LayerStacks FT を事前展開して共有読み込み用コンテナを生成 |
+| [`permute_nnue_ft`](permute_nnue_ft.md) | LayerStacks の FT と L1 列を評価値を保って並べ替え |
 | [`extract_bench_positions`](extract_bench_positions.md) | CSA / 自己対局 JSONL からラベル品質測定用の局面を抽出 |
 | [`label_bench_positions`](label_bench_positions.md) | ベンチ局面へ深い NNUE 探索の評価ラベルを付与 |
 | [`label_bench_dl`](label_bench_dl.md) | ベンチ局面へ dlshogi ONNX の静的評価を付与 |

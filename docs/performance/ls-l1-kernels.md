@@ -8,8 +8,8 @@ AVX-512 で計算する。build の `target_feature` に `avx512f` / `avx512bw` 
 
 ## 変換と積和
 
-1536 / 2304 と Threat 経路では、各視点の accumulator から 64 出力を生成し、register に保持したまま積和する。
-自然順への permutation や中間 u8 バッファへの store は行わない。
+1536 / 2304 と Threat 経路では、各視点の accumulator から 64 出力を生成し、register に保持したまま積和する。2304 は `layerstacks-2304-sparse-l1` feature により通常経路を疎 L1 に切り替えられる。これはモデルのゼロ塊率により遅くなる場合があるため、対象モデルで計測して選択する。VNNI または 2304 の静的 LayerStacks がないビルドでは、この feature は経路を変更しない。
+密融合経路では自然順への permutation や中間 u8 バッファへの store は行わない。
 変換式は `clamp(a,0,127) * clamp(b,0,127) >> 7`。
 
 `packus(p0,p1)` の結果を `vpshufd` の `0x00/0x55/0xaa/0xff` で複製し、
