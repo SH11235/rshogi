@@ -1204,7 +1204,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     )
     .context("状態のファイルを書けません")?;
     let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
-    let mut imports = super::live_import::Inbox::new(&args.state)?;
+    let mut imports = super::live_import::Inbox::new(
+        &args.state,
+        args.accept_fingerprint.iter().cloned().collect(),
+    )?;
     let stats_path = args.state.join("prefetch_stats.json");
     let mut stats = if args.prefetch {
         PrefetchStats::load(&stats_path)?
@@ -2085,7 +2088,8 @@ mod tests {
     fn invalid_import_reports_alert_and_keeps_polling() {
         let dir = tempfile::tempdir().unwrap();
         let settings = super::super::tests::settings();
-        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
+        let mut imports =
+            super::super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
         let mut journal =
             super::Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
         let mut alerts = super::Alerts {
@@ -2150,7 +2154,8 @@ mod tests {
             live.dirty = false;
         }
         assert_eq!(requests.len(), 2);
-        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
+        let mut imports =
+            super::super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
         let source = dir.path().join("import/source.jsonl");
         let answer = super::super::tests::reading(root, &[], &settings);
         Journal::open(&source, &settings.fingerprint)

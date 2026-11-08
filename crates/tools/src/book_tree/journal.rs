@@ -792,8 +792,12 @@ pub(super) struct StagedSource {
     pub ignored_tail: bool,
 }
 
-/// 全体を検査してから、同じ条件の行だけを一時ファイルに渡す。
-pub(super) fn stage_live_source(path: &Path, dst: &Settings) -> Result<StagedSource> {
+/// 全体を検査してから、互換性のある条件と明示的に受け入れた条件の行を一時ファイルに渡す。
+pub(super) fn stage_live_source(
+    path: &Path,
+    dst: &Settings,
+    accept_fingerprint: &BTreeSet<String>,
+) -> Result<StagedSource> {
     super::paths::reject_symlink(path)?;
     if !std::fs::metadata(path)?.is_file() {
         bail!("取り込み元は通常のファイルが必要です");
@@ -828,7 +832,10 @@ pub(super) fn stage_live_source(path: &Path, dst: &Settings) -> Result<StagedSou
     }
     let mut compatible = BTreeSet::new();
     for (fp, known) in &conditions {
-        if super::transfer::same_reading_condition(known, dst) || fp == &dst.fingerprint {
+        if accept_fingerprint.contains(fp) {
+            super::transfer::check_accepted(known, dst)?;
+            compatible.insert(fp.clone());
+        } else if super::transfer::same_reading_condition(known, dst) || fp == &dst.fingerprint {
             super::transfer::check_compatible(known, dst, false)?;
             compatible.insert(fp.clone());
         }
@@ -1044,7 +1051,7 @@ mod tests {
             expected.push(b'\n');
         }
         for _ in 0..2 {
-            let mut source = stage_live_source(&path, &first.settings).unwrap();
+            let mut source = stage_live_source(&path, &first.settings, &BTreeSet::new()).unwrap();
             let mut rows = Vec::new();
             source.file.read_to_end(&mut rows).unwrap();
             assert_eq!(rows, expected);

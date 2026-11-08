@@ -65,7 +65,7 @@ enum TreeCommand {
     Wait(queue::WaitArgs),
     /// 受付と進みの写しから未着手の木を点検し、保留候補の行を書く
     QueueReview(queue_review::QueueReviewArgs),
-    /// 別の台帳の読みを、条件が同じと確かめてから取り込み先の条件で足す
+    /// 別の台帳の読みを取り込み先の条件で足す
     ImportJournal(transfer::ImportJournalArgs),
     /// 台帳だけから木を再生成する
     Replay(ReplayArgs),
@@ -87,8 +87,20 @@ struct ReadingArgs {
     hash: u32,
 }
 
+fn parse_accepted_fingerprint(value: &str) -> std::result::Result<String, String> {
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("fingerprint は 64 桁の小文字の 16 進数で指定してください".into())
+    }
+}
+
 #[derive(Args, Debug)]
 struct ServeArgs {
+    /// 条件の違いを承知で取り込む元の指紋 (複数指定可)
+    #[arg(long, value_name = "FP", value_parser = parse_accepted_fingerprint)]
+    accept_fingerprint: Vec<String>,
     #[arg(long)]
     state: PathBuf,
     #[arg(long)]

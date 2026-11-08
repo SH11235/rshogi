@@ -21,6 +21,9 @@ pub(super) struct ImportJournalArgs {
     /// 取り込み元の条件の指紋。省略時は取り込み元の唯一の条件
     #[arg(long)]
     fingerprint: Option<String>,
+    /// 条件の違いを承知で取り込む元の指紋 (複数指定可)
+    #[arg(long, value_name = "FP", value_parser = super::parse_accepted_fingerprint)]
+    accept_fingerprint: Vec<String>,
     /// 取り込み先の台帳
     #[arg(long)]
     journal: PathBuf,
@@ -145,13 +148,26 @@ pub(super) fn check_compatible(
     };
     let src_keys: Vec<_> = src.options.keys().collect();
     let dst_keys: Vec<_> = dst.options.keys().collect();
-    if src_keys != dst_keys || plain(src) != plain(dst) {
+    if src_keys != dst_keys {
+        errors.push(format!("option keys: {src_keys:?} / {dst_keys:?}"));
+    }
+    if plain(src) != plain(dst) {
         errors.push(format!("option: {:?} / {:?}", plain(src), plain(dst)));
     }
     if !errors.is_empty() {
         bail!("取り込み元と取り込み先の条件が違います (元 / 先): {}", errors.join("; "));
     }
     check_engine_compatible(src, dst, force)
+}
+
+/// 明示的な受理でも、参照ファイルの内容とエンジン以外の条件は一致が必要。
+pub(super) fn check_accepted(src: &Settings, dst: &Settings) -> Result<()> {
+    let mut src = src.clone();
+    src.content_sha256 = dst.content_sha256.clone();
+    src.engine_sha256 = dst.engine_sha256.clone();
+    src.engine_version = dst.engine_version.clone();
+    check_compatible(&src, dst, false)?;
+    Ok(())
 }
 
 fn check_engine_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Option<String>> {
@@ -216,15 +232,23 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     if source.ignored_tail {
         eprintln!("取り込み元の末尾の改行で終わらない行は無視しました");
     }
-    let forced = check_compatible(&source.settings, &dst, args.force)?;
+    let accepted = args.accept_fingerprint.contains(&source.settings.fingerprint);
+    let forced = if accepted {
+        check_accepted(&source.settings, &dst)?;
+        None
+    } else {
+        check_compatible(&source.settings, &dst, args.force)?
+    };
+    let acceptance = if accepted { ":accepted=true" } else { "" };
     if let Some(reason) = &forced {
         eprintln!("--force: {reason}");
     }
     let provenance = format!(
-        "journal:sha256={}:fingerprint={}:force={}:path={}",
+        "journal:sha256={}:fingerprint={}:force={}{}:path={}",
         source.sha256,
         source.settings.fingerprint,
         forced.is_some(),
+        acceptance,
         args.from_journal.display()
     );
     // 一覧の一時ファイルは台帳を開く前に作り、検査しながら書く。公開は読みを追記する前に行い、
@@ -524,6 +548,68 @@ mod tests {
     }
 
     #[test]
+    fn accepted_only_relaxes_file_contents_and_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = settings(&machine(dir.path(), "a", "engine a", "model a"), None);
+        let dst = settings(&machine(dir.path(), "b", "engine b", "model b"), Some(VERSION_B));
+        src.engine_version = Some(VERSION_A.into());
+        src.content_sha256.insert("implicit:SPSAParamsFile".into(), "a".repeat(64));
+        check_accepted(&src, &dst).unwrap();
+        for field in [
+            "nodes",
+            "multipv",
+            "hash",
+            "DrawValueBlack",
+            "DrawValueWhite",
+            "option",
+        ] {
+            let mut changed = src.clone();
+            match field {
+                "nodes" => changed.nodes += 1,
+                "multipv" => changed.multipv += 1,
+                "hash" => changed.hash += 1,
+                "option" => {
+                    changed.options.remove("EvalFile");
+                }
+                key => {
+                    changed.options.insert(key.into(), "0".into());
+                }
+            }
+            let err = check_accepted(&changed, &dst).unwrap_err().to_string();
+            assert!(err.contains(field), "{field}: {err}");
+        }
+        let mut larger = dst.clone();
+        larger.multipv += 1;
+        assert!(check_accepted(&src, &larger).unwrap_err().to_string().contains("multipv"));
+    }
+
+    #[test]
+    fn import_journal_rejects_accepted_nodes_mismatch_without_changing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "engine", "model");
+        let src = Settings::new(&reading_args(&m, 200, &[])).unwrap();
+        let dst = Settings::new(&reading_args(&m, 100, &[])).unwrap();
+        let source = dir.path().join("src.jsonl");
+        let destination = dir.path().join("dst.jsonl");
+        write_journal(&source, &[(&src, reading(0, &src, "resign"))]);
+        write_journal(&destination, &[(&dst, reading(1, &dst, "resign"))]);
+        let before = std::fs::read(&destination).unwrap();
+        let err = run(ImportJournalArgs {
+            from_journal: source,
+            fingerprint: None,
+            accept_fingerprint: vec![src.fingerprint.clone()],
+            journal: destination.clone(),
+            reading: reading_args(&m, 100, &[]),
+            force: true,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("nodes"), "{err:#}");
+        assert_eq!(std::fs::read(destination).unwrap(), before);
+    }
+
+    #[test]
     fn source_is_read_without_modification_and_merged_all_or_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
@@ -725,6 +811,7 @@ mod tests {
         let args = |on_conflict, conflicts_out: Option<PathBuf>| ImportJournalArgs {
             from_journal: src_path.clone(),
             fingerprint: None,
+            accept_fingerprint: Vec::new(),
             journal: dst_path.clone(),
             reading: reading_args(&m, 100, &["DrawValueBlack=-50"]),
             force: false,
@@ -894,6 +981,77 @@ mod tests {
         assert!(err.contains("missing.jsonl"), "{err}");
     }
 
+    #[test]
+    fn import_journal_accepts_listed_foreign_net_and_keeps_destination_settings() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ImportJournalArgs,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let a = machine(dir.path(), "a", "engine", "source model");
+        let b = machine(dir.path(), "b", "other engine", "destination model");
+        let src = Settings::new(&reading_args(&a, 100, &[])).unwrap();
+        let dst_args = reading_args(&b, 100, &[]);
+        let dst = Settings::new(&dst_args).unwrap();
+        assert_ne!(src.content_sha256, dst.content_sha256);
+        assert_ne!(src.fingerprint, dst.fingerprint);
+        let source = dir.path().join("src.jsonl");
+        let destination = dir.path().join("dst.jsonl");
+        write_journal(&source, &[(&src, reading(0, &src, "resign"))]);
+        write_journal(&destination, &[(&dst, reading(1, &dst, "resign"))]);
+        let before = std::fs::read(&destination).unwrap();
+        let base = vec![
+            "test".to_owned(),
+            "--from-journal".into(),
+            source.display().to_string(),
+            "--journal".into(),
+            destination.display().to_string(),
+            "--engine".into(),
+            b.engine.display().to_string(),
+            "--engine-option".into(),
+            format!("EvalFile={}", b.model.display()),
+            "--nodes".into(),
+            "100".into(),
+            "--multipv".into(),
+            "1".into(),
+            "--hash".into(),
+            "16".into(),
+        ];
+        let rejected = Cli::try_parse_from(&base).unwrap();
+        let err = run(rejected.args).unwrap_err();
+        assert!(err.to_string().contains("条件が違います"), "{err:#}");
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        let mut accepted = base;
+        accepted.extend([
+            "--accept-fingerprint".into(),
+            "f".repeat(64),
+            "--accept-fingerprint".into(),
+            src.fingerprint.clone(),
+        ]);
+        let other = Settings::new(&reading_args(&a, 200, &[])).unwrap();
+        write_journal(&source, &[(&other, reading(2, &other, "resign"))]);
+        let err = run(Cli::try_parse_from(&accepted).unwrap().args).unwrap_err();
+        assert!(err.to_string().contains("--fingerprint"), "{err:#}");
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        accepted.extend(["--fingerprint".into(), src.fingerprint.clone()]);
+        run(Cli::try_parse_from(accepted).unwrap().args).unwrap();
+        let text = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let record: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(record["settings"], serde_json::to_value(&dst).unwrap());
+        let sha = super::super::journal::digest(&source).unwrap();
+        assert_eq!(
+            record["provenance"],
+            format!(
+                "journal:sha256={sha}:fingerprint={}:force=false:accepted=true:path={}",
+                src.fingerprint,
+                source.display()
+            )
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn version_query_gives_up_when_a_child_keeps_stdout_open() {
@@ -932,6 +1090,7 @@ mod tests {
         let args = |force| ImportJournalArgs {
             from_journal: src_path.clone(),
             fingerprint: None,
+            accept_fingerprint: Vec::new(),
             journal: dst_path.clone(),
             reading: reading_args(&b, 100, &[]),
             force,
