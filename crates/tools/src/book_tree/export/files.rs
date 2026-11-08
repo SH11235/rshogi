@@ -65,23 +65,55 @@ fn write_with(
     force: bool,
     payloads: &[Vec<u8>],
     before_commit: impl FnOnce() -> Result<()>,
-    mut before_persist: impl FnMut(usize) -> Result<()>,
+    before_persist: impl FnMut(usize) -> Result<()>,
 ) -> Result<()> {
     ensure!(outputs.len() == payloads.len(), "output count mismatch");
+    write_generated_with(
+        outputs,
+        inputs,
+        force,
+        |temporary| {
+            for (file, bytes) in temporary.iter_mut().zip(payloads) {
+                file.write_all(bytes)?;
+            }
+            Ok(())
+        },
+        before_commit,
+        before_persist,
+    )
+}
+
+pub(in crate::book_tree) fn write_generated(
+    outputs: &[PathBuf],
+    inputs: &[PathBuf],
+    force: bool,
+    generate: impl FnOnce(&mut [tempfile::NamedTempFile]) -> Result<()>,
+) -> Result<()> {
+    write_generated_with(outputs, inputs, force, generate, || Ok(()), |_| Ok(()))
+}
+fn write_generated_with(
+    outputs: &[PathBuf],
+    inputs: &[PathBuf],
+    force: bool,
+    generate: impl FnOnce(&mut [tempfile::NamedTempFile]) -> Result<()>,
+    before_commit: impl FnOnce() -> Result<()>,
+    mut before_persist: impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
     guard(outputs, inputs, force)?;
     let mut created_dirs = Vec::new();
     let mut backups = Vec::new();
     let mut committed = Vec::new();
     let result = (|| -> Result<()> {
         let mut temporary = Vec::new();
-        for (path, bytes) in outputs.iter().zip(payloads) {
+        for path in outputs {
             let parent =
                 path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
             create_parents(parent, &mut created_dirs)?;
-            let mut file = tempfile::NamedTempFile::new_in(parent)?;
-            file.write_all(bytes)?;
+            temporary.push(tempfile::NamedTempFile::new_in(parent)?);
+        }
+        generate(&mut temporary)?;
+        for file in &mut temporary {
             file.flush()?;
-            temporary.push(file);
         }
         before_commit()?;
         guard(outputs, inputs, force)?;
@@ -177,6 +209,25 @@ fn create_parents(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generation_failure_preserves_outputs_and_cleans_staging() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("old.tsv");
+        std::fs::write(&old, "original").unwrap();
+        let nested = d.path().join("new/nested/table.tsv");
+        assert!(
+            write_generated(&[old.clone(), nested], &[], true, |files| {
+                files[0].write_all(b"partial")?;
+                anyhow::bail!("injected generation failure")
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "original");
+        let remaining: Vec<_> =
+            std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(remaining, [old]);
+    }
+
     #[test]
     fn guard_and_staging_cleanup() {
         let d = tempfile::tempdir().unwrap();

@@ -71,14 +71,16 @@ fn queued(row: Value) -> Queued {
         .chain(&line.roots)
         .map(|r| parse_root(r).unwrap().key)
         .collect();
+    let primary_root = parse_root(&line.root).unwrap().key;
     Queued {
+        primary_root,
         line,
         raw: row,
         roots,
     }
 }
 fn class(q: &Queued, walk: &Walk) -> (Class, Option<f64>) {
-    classify(q, q.roots.first().unwrap(), "b", walk, 0.001, &[])
+    classify(q, q.roots.first().unwrap(), "b", walk, 0.001, &memo_path(q, &[]))
 }
 
 #[test]
@@ -91,7 +93,7 @@ fn reach_sums_intermediate_positions_and_out_inherits() {
     let mut a = args(dir.path());
     a.walk_table = vec![format!("b={}", path.display())];
     let w = load_walk(&a, &mut vec![]).unwrap();
-    assert_eq!(class(&queued(row("middle", "7g7f")), &w), (Class::ReachLow, Some(0.0005)));
+    assert_eq!(class(&queued(row("middle", "7g7f")), &w), (Class::ReachPartial, Some(0.0005)));
     assert_eq!(
         class(&queued(row("after", "7g7f 3c3d 2g2f")), &w),
         (Class::BeyondOut, Some(0.0002))
@@ -101,7 +103,7 @@ fn reach_sums_intermediate_positions_and_out_inherits() {
     a.value_floor = 0.0005;
     let q = queued(row("equal", "7g7f"));
     assert_eq!(
-        classify(&q, q.roots.first().unwrap(), "b", &w, a.value_floor, &[]).0,
+        classify(&q, q.roots.first().unwrap(), "b", &w, a.value_floor, &memo_path(&q, &[])).0,
         Class::ReachHigh
     );
 }
@@ -185,7 +187,7 @@ fn receipt_order_latest_row_duplicates_remaining_and_hold_preservation() {
     let table = std::fs::read_to_string(d.path().join("review.tsv")).unwrap();
     let line = table.lines().find(|l| l.starts_with("A\tlow\t")).unwrap();
     assert!(line.contains("\tb\t42\t"));
-    assert!(line.ends_with("A:other,B:duplicate"));
+    assert!(line.ends_with("A:other,B:duplicate;total=2"));
     assert!(!table.contains("\tbusy\t"));
     assert!(!table.contains("\tread\t"));
     let boxes = std::fs::read_to_string(d.path().join("boxes.tsv")).unwrap();
@@ -215,7 +217,7 @@ fn start_moves_full_and_relative_paths_agree() {
     r["memo"] = json!("moves=3c3d;");
     let q = queued(r);
     assert_eq!(
-        classify(&q, q.roots.first().unwrap(), "b", &w, 0.001, &["7g7f"]).0,
+        classify(&q, q.roots.first().unwrap(), "b", &w, 0.001, &memo_path(&q, &["7g7f"])).0,
         Class::ReachHigh
     );
 }
@@ -244,7 +246,8 @@ fn multi_roots_and_bw_do_not_hold_protected_sides() {
     let table = std::fs::read_to_string(d.path().join("review.tsv")).unwrap();
     assert!(table.contains("reach-low"));
     assert!(table.contains("reach-high"));
-    assert!(table.contains("path-mismatch"));
+    assert!(table.contains("extra-root"));
+    assert!(!table.contains("path-mismatch"));
     assert_eq!(std::fs::read_to_string(d.path().join("hold/qrhold_B.jsonl")).unwrap(), "");
     assert!(
         std::fs::read_to_string(d.path().join("boxes.tsv"))
@@ -300,6 +303,10 @@ fn cli_registers_queue_review_and_defaults() {
         "holds",
         "--hold-class",
         "not-reached",
+        "--hold-class",
+        "reach-partial",
+        "--hold-class",
+        "extra-root",
     ])
     .unwrap();
     let super::super::TreeCommand::QueueReview(args) = cli.tree.command else {
@@ -309,7 +316,7 @@ fn cli_registers_queue_review_and_defaults() {
     assert_eq!(args.tree_size, 92);
     assert_eq!(args.value_floor, 0.001);
     assert_eq!(args.prefix, "qrhold");
-    assert_eq!(args.hold_class, [Class::NotReached]);
+    assert_eq!(args.hold_class, [Class::NotReached, Class::ReachPartial, Class::ExtraRoot]);
 }
 
 #[test]
@@ -365,4 +372,117 @@ fn inconsistent_snapshots_and_overlapping_receipts_fail_without_output() {
         assert!(run_at(a, now(), &mut vec![]).is_err());
         assert!(!d.path().join("review.tsv").exists());
     }
+}
+
+#[test]
+fn merged_walk_paths_keep_intermediate_reach_partial() {
+    let d = TempDir::new().unwrap();
+    assert_eq!(root("7g7f 3c3d 2g2f 8c8d"), root("2g2f 8c8d 7g7f 3c3d"));
+    let path = walk(
+        d.path(),
+        "b\town\t0.002\t7g7f 3c3d 2g2f 8c8d 2f2e\nb\town\t0.0002\t2g2f 8c8d 9g9f\n",
+    );
+    let b = d.path().join("b");
+    let rows = vec![row("middle", "2g2f 8c8d"), row("stop", "2g2f 8c8d 9g9f")];
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    enqueue(&b, "only", 0, &rows);
+    for explicit in [false, true] {
+        let mut a = args(d.path());
+        a.box_specs = vec![format!("B={}", b.display())];
+        a.walk_table = vec![format!("b={}", path.display())];
+        if explicit {
+            a.hold_class = vec![Class::ReachPartial];
+        }
+        run_at(a, now(), &mut vec![]).unwrap();
+        let table = std::fs::read_to_string(d.path().join("review.tsv")).unwrap();
+        assert!(
+            table
+                .lines()
+                .find(|l| l.starts_with("B\tmiddle\t"))
+                .unwrap()
+                .contains("\treach-partial\t0.0002\t")
+        );
+        assert!(
+            table
+                .lines()
+                .find(|l| l.starts_with("B\tstop\t"))
+                .unwrap()
+                .contains("\treach-low\t0.0002\t")
+        );
+        let hold = std::fs::read_to_string(d.path().join("hold/qrhold_B.jsonl")).unwrap();
+        let ids: Vec<String> = hold
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            ids,
+            if explicit {
+                vec!["middle", "stop"]
+            } else {
+                vec!["stop"]
+            }
+        );
+    }
+}
+
+#[test]
+fn memo_moves_requires_a_word_boundary() {
+    for memo in ["start_moves=7g7f", "othermoves=7g7f", "_moves=7g7f"] {
+        assert!(memo_moves(Some(memo)).is_none());
+    }
+    assert_eq!(memo_moves(Some("start_moves=2g2f; moves=7g7f")), Some(vec!["7g7f"]));
+}
+
+#[test]
+fn duplicate_ids_are_bounded_and_deterministic() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("b");
+    let rows: Vec<_> = (0..12).map(|i| row(&format!("id{i:02}"), "7g7f")).collect();
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    enqueue(&b, "only", 0, &rows);
+    let run = || {
+        let mut a = args(d.path());
+        a.box_specs = vec![format!("B={}", b.display())];
+        run_at(a, now(), &mut vec![]).unwrap();
+        std::fs::read_to_string(d.path().join("review.tsv")).unwrap()
+    };
+    let table = run();
+    assert_eq!(table, run());
+    for line in table.lines().skip(1) {
+        let cells: Vec<_> = line.split('\t').collect();
+        let (ids, total) = cells[7].split_once(";total=").unwrap();
+        assert_eq!(total, "11");
+        let expected: Vec<_> = rows
+            .iter()
+            .filter_map(|r| {
+                let id = r["id"].as_str().unwrap();
+                (id != cells[1]).then(|| format!("B:{id}"))
+            })
+            .take(8)
+            .collect();
+        assert_eq!(ids, expected.join(","));
+    }
+}
+
+#[test]
+fn previous_hold_files_are_preserved_and_failed_trees_are_counted() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("b");
+    let r = row("failed", "7g7f");
+    let mut p = progress(&r, 0, 0);
+    p["failed"] = json!(true);
+    fixture_box(&b, vec![p], vec![]);
+    enqueue(&b, "only", 0, &[r]);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("B={}", b.display())];
+    std::fs::create_dir_all(&a.hold_out).unwrap();
+    let previous = a.hold_out.join("previous_A.jsonl");
+    std::fs::write(&previous, "previous\n").unwrap();
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(std::fs::read_to_string(previous).unwrap(), "previous\n");
+    assert!(
+        std::fs::read_to_string(d.path().join("boxes.tsv"))
+            .unwrap()
+            .contains("\t92\tinf\t1\n")
+    );
 }

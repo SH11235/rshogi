@@ -437,6 +437,7 @@ book_mine tree queue-review \
 受領のない JSONL は読みません。受領の `start` が小さい順に読み、同じ id は最後の行を使います。
 受領の範囲の重なり・行数違い、受付と progress の対象・own・priority・hold の不一致はエラーです。
 受付と progress は同じ時点の写しを用意してください。
+受付の受領の範囲に serve が拒否した行がないことが前提です。`tree wait` などで確かめてください。
 
 | 引数 | 既定 | 内容 |
 | --- | --- | --- |
@@ -456,9 +457,12 @@ book_mine tree queue-review \
 | `--hold-class <CLASS>` | 追加なし、繰り返し可 | reach-low に加えて保留候補にする class |
 
 速さ・重み・下限には有限の非負数を指定します。`--walk-table` を省くと到達の重みは無く、
-手順のある木は not-reached または path-mismatch になります。表の `side` 列があれば指定した側の行だけを読みます。
+主根で手順のある木は not-reached または path-mismatch になります。表の `side` 列があれば指定した側の行だけを読みます。
 表の各行の `moves` を合法性を確認しながら指し直し、開始局面・途中・止まりの局面に `weight` を足します。
 同じ行で同じ局面を再訪しても、その行の重みは 1 回だけ足します。異なる行の重みは加算します。
+walk の表は同じ手数・同じ局面への合流をまとめ、`moves` には最初の手順だけを残します。
+そのため、途中の局面の重みは下限です。同じ own のどの行の止まり (`key`) にもない根は、
+重みが下限未満でも reach-low とせず reach-partial にします。
 `stop=out` の止まりは「ペタの外の出口」として別に重みを加算します。
 
 未着手は、finished でも hold でもなく、read が 0 で、どの worker の key もその木の
@@ -468,22 +472,26 @@ book_mine tree queue-review \
 
 | class | 判定 |
 | --- | --- |
+| extra-root | `roots` の追加の根。memo の手順による判定は `root` だけに行う |
 | seed | memo に `moves=` がない。到達の重みで測らない |
 | path-mismatch | memo の手順が非合法、または指し終えた局面が根と違う |
 | beyond-out | 正しい memo の手順が、同じ own の walk の out の出口を通る。最初に通った出口の重みを引き継ぐ |
 | reach-high | 同じ own の表で根の到達の重みが下限以上 |
-| reach-low | 同じ own の表で根の到達の重みが下限未満 |
+| reach-low | 同じ own の表の止まりにある根で、到達の重みが下限未満 |
+| reach-partial | 同じ own の表の途中だけにある根で、到達の重みが下限未満 |
 | not-reached | 正しい memo の手順があり、出口も根の到達の重みもない |
 
-memo は `moves=` の後の空白区切りの USI 手順を使い、`;`・`；`・`,`・改行や次の `名前=値`
+memo は語の途中 (`start_moves=` など) の `moves=` を除き、`moves=` の後の空白区切りの USI 手順を使い、`;`・`；`・`,`・改行や次の `名前=値`
 で終えます。手順の不一致は出口や到達の重みより先に判定します。
-`reach_weight` は seed・not-reached・path-mismatch では空欄です。
-`dup_of` は同じ根・同じ own を持つ別の台または別 id を `台:id` のカンマ区切りで示します。
+`reach_weight` は reach-partial でも算出した値をそのまま示し、extra-root・seed・not-reached・path-mismatch では空欄です。
+`dup_of` は同じ根・同じ own を持つ別の台または別 id を `台:id` のカンマ区切りで最大 8 件示し、`;total=N` を付けます。
+N は自分を除いた重複の本数です。重複がなければ空欄です。
 相手の木は未着手に限らず、finished でも hold でもなければ重複として数えます。
 
 `--boxes` は `box / workers / rate / hours / capacity / remaining / ratio / unstarted` の順です。
 `rate` は台全体の局面/時、`capacity = rate × hours`、`remaining` は finished でも hold でもない
 各木の `max(tree_size, requested) − read` (負なら 0) の和です。
+progress の failed の木も、他の条件を満たせば残りと未着手に数えます。
 `ratio = remaining / capacity` で、1 を超えると見積もった量を締めまでに読み切れません。
 読める量が 0 で残りがあれば `inf`、両方 0 なら 0 とします。重複の分は残りから引きません。
 標準出力にも台ごとの割合と class ごとの本数を出します。複数根の木が異なる class に入る場合は、
@@ -492,10 +500,11 @@ memo は `moves=` の後の空白区切りの USI 手順を使い、`;`・`；`�
 `--hold-out` には `<prefix>_<NAME>.jsonl` を各台について作ります (候補が無ければ空ファイル)。
 既定では reach-low だけを対象にし、最後の受付行の JSON の `hold` だけを true にします。
 複数根の木はすべての根、`own=bw` の木は両側が未着手で対象 class に入る場合だけ出力します。
-seed・beyond-out・not-reached・reach-high・path-mismatch は既定では保留にしません。
+extra-root・seed・beyond-out・not-reached・reach-high・reach-partial・path-mismatch は既定では保留にしません。
 今の main から辿れなくなったことだけを理由に、読む価値が低いと判断しないためです。
 出力先は台の dir の外に置いてください。入力と同じファイルや出力先どうしの重複はエラーです。
-既存の出力ファイルは上書きします。出した hold 候補を受付に積む操作は、このコマンドでは行いません。
+既存の出力ファイルは上書きします。`--hold-out` の前回のファイルは削除しません
+(今回と同じ名前のファイルは上書きします)。出した hold 候補を受付に積む操作は、このコマンドでは行いません。
 
 ### 並列数・停止・監視
 
