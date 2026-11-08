@@ -99,7 +99,7 @@ pub(super) fn find(
     let mut rows = Vec::new();
     for ((key, position), known) in positions.iter().zip(&book.known) {
         let side = usize::from(key.split(' ').nth(1) == Some("w"));
-        let mut audited = audited_moves(&book.graph, key, position, known)?;
+        let mut audited = audited_moves(book.graph_for(key), key, position, known)?;
         // 伝播の書き出しは 1 位と同値で選ばなかった手を -1 する。そのまま比べると、伸ばした手と伸ばして
         // いない手が同値でも margin 1 で当たる。
         for m in audited.iter_mut().flatten() {
@@ -484,7 +484,7 @@ mod tests {
         let (_, _, book) = audit(&parsed, DrawValues::both(0), 1, Fill::Off, None).unwrap();
         let root = &parsed.0[ROOT];
         let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
-        let audited = audited_moves(&book.graph, ROOT, root, &book.known[index]).unwrap();
+        let audited = audited_moves(book.graph_for(ROOT), ROOT, root, &book.known[index]).unwrap();
         assert!(audited.iter().flatten().any(|m| m.tie_lowered && m.value == 9));
         let (rows, summary) = run_find(&text, 1, None, 0.0);
         assert!(rows.is_empty());
