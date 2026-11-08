@@ -494,3 +494,23 @@ fn memo_moves_stop_at_trailing_text() {
     let memo = "walk weight=0.003 moves=7g7f P*5e 8h2b+ next=x";
     assert_eq!(super::memo_moves(Some(memo)).unwrap(), vec!["7g7f", "P*5e", "8h2b+"]);
 }
+
+#[test]
+fn stop_that_is_also_passed_through_stays_reach_partial() {
+    let d = TempDir::new().unwrap();
+    let path = walk(d.path(), "b\trare\t0.0002\t7g7f 3c3d\nb\town\t0.0003\t7g7f 3c3d 2g2f\n");
+    let b = d.path().join("b");
+    let rows = vec![row("both", "7g7f 3c3d")];
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    enqueue(&b, "only", 0, &rows);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("B={}", b.display())];
+    a.walk_table = vec![format!("b={}", path.display())];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = std::fs::read_to_string(d.path().join("review.tsv")).unwrap();
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("B\tboth\t") && l.contains("\treach-partial\t"))
+    );
+}

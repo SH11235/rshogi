@@ -119,6 +119,7 @@ struct Walk {
     reach: BTreeMap<(String, String), f64>,
     out: BTreeMap<(String, String), f64>,
     stops: BTreeSet<(String, String)>,
+    passed: BTreeSet<(String, String)>,
 }
 
 fn assignment(text: &str) -> Result<(&str, &str)> {
@@ -296,6 +297,10 @@ fn load_walk(args: &QueueReviewArgs, inputs: &mut Vec<PathBuf>) -> Result<Walk> 
             };
             let keys = path_keys(&full).with_context(|| format!("{}:{}", path.display(), n + 2))?;
             walk.stops.insert((side.into(), keys.last().context("空の手順です")?.clone()));
+            // rare の止まりは相手の手番の局面で、そこから先へ続く行もあるので、途中で通る局面を別に覚える。
+            for key in &keys[start.len().min(keys.len())..keys.len().saturating_sub(1)] {
+                walk.passed.insert((side.into(), key.clone()));
+            }
             if cells[stop] == "out" {
                 *walk
                     .out
@@ -385,7 +390,9 @@ fn classify(
         Some(value) => (
             if value >= floor {
                 Class::ReachHigh
-            } else if walk.stops.contains(&(own.to_owned(), root.to_owned())) {
+            } else if walk.stops.contains(&(own.to_owned(), root.to_owned()))
+                && !walk.passed.contains(&(own.to_owned(), root.to_owned()))
+            {
                 Class::ReachLow
             } else {
                 Class::ReachPartial
