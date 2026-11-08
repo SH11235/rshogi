@@ -333,6 +333,10 @@ nohup setsid -w bash -c 'echo $$ > "$1/PID"; shift; exec "$@"' _ "$OUT" \
 
 並列度や局数の変更は kill/restart せず `<out-dir>/control.json` を書き換える
 (`{"target_games": N, "concurrency": M}`、どちらも任意。対局境界で反映)。
+`target_games` の単位は CLI の `--games` と同じ「各方向あたり」で、2 エンジンなら合計の局数はその 2 倍
+(進捗表示の分母も 2 倍で出る。合計 100 局で止めるなら 50)。
+書き換えたら tournament の出力に `[control] applied: target_games=...` が出たことを確かめる。JSON として読めないと
+`[control] ... のパースに失敗したため無視します` を出して前の値のまま続く (shell の引用符で崩れやすいので、ファイルを作ってから置く)。
 `target_games` を減らしても発行済みペアのもう片側は完結する。セマンティクスの詳細は
 `crates/tools/docs/tournament.md` の「実行中の目標局数変更と先後交換ペア」と
 `crates/tools/src/bin/tournament.rs` 冒頭の doc コメントを参照する。
