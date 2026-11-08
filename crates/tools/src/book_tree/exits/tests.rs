@@ -26,7 +26,22 @@ fn args(dir: &Path, own: &str) -> ExitsArgs {
 
 fn walk(args: &ExitsArgs, initial: &str) -> (usize, Vec<Exit>) {
     let mut index = MasterIndex::open(&args.master, &Schema::load(None).unwrap()).unwrap();
-    traverse(&mut index, args, initial).unwrap()
+    let mut traversal = traverse(&mut index, args, initial).unwrap();
+    let covered = coverage(args).unwrap();
+    let mut exits = Vec::new();
+    while let Some(mut exit) = traversal.next_exit().unwrap() {
+        cover(&mut exit, &covered);
+        let mut entries = BTreeMap::new();
+        traversal
+            .entries(&exit, |entry| {
+                entries.insert((entry.key.clone(), entry.mv.clone()), entry.clone());
+                Ok(())
+            })
+            .unwrap();
+        exit.entries = entries;
+        exits.push(exit);
+    }
+    (traversal.visited, exits)
 }
 
 fn write_master(args: &ExitsArgs, rows: &[(&str, &str, &str, &str)]) {
@@ -434,4 +449,92 @@ fn cycles_stop_and_alt_only_is_not_an_exit_on_own_turn() {
     let (count, exits) = walk(&a, ROOT);
     assert_eq!(count, 1);
     assert!(exits.is_empty());
+}
+
+#[test]
+fn external_sort_spills_merges_and_preserves_equal_key_order() {
+    fn sorted() -> Vec<(Vec<String>, String)> {
+        let mut sorter = Sorter::new();
+        for i in (0..20_000).rev() {
+            sorter.push(vec![format!("{:05}", i % 3000)], i.to_string()).unwrap();
+        }
+        let mut reader = sorter.finish().unwrap();
+        let mut result = Vec::new();
+        while let Some(record) = read_record(&mut reader).unwrap() {
+            result.push((record.key, record.value));
+        }
+        result
+    }
+    let mut expected: Vec<_> = (0..20_000)
+        .rev()
+        .map(|i| (vec![format!("{:05}", i % 3000)], i.to_string()))
+        .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(sorted(), expected);
+    assert_eq!(sorted(), expected);
+}
+
+#[test]
+fn seen_checks_full_keys_even_when_bucket_hashes_collide() {
+    use sha2::{Digest, Sha256};
+    let mut buckets = BTreeMap::new();
+    let (first, second) = (0..100_000)
+        .find_map(|i| {
+            let key = format!("position-{i}");
+            let hash = Sha256::digest(key.as_bytes());
+            buckets.insert([hash[0], hash[1]], key.clone()).map(|old| (old, key))
+        })
+        .unwrap();
+    let mut seen = Seen::new().unwrap();
+    assert!(seen.insert(&first).unwrap());
+    assert!(seen.insert(&second).unwrap());
+    assert!(!seen.insert(&first).unwrap());
+    assert!(!seen.insert(&second).unwrap());
+}
+
+#[test]
+fn incoming_dedup_uses_last_row_but_representative_uses_first_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = args(dir.path(), "b");
+    write_master(&a, &[(ROOT, "5i4h", "main", "10"), (ROOT, "5i4h", "main", "20")]);
+    let (_, exits) = walk(&a, ROOT);
+    assert_eq!(exits[0].entry.value, Some(10));
+    assert_eq!(exits[0].entries.len(), 1);
+    assert_eq!(exits[0].entries.values().next().unwrap().value, Some(20));
+}
+
+#[test]
+fn streamed_outputs_match_collected_order_and_validation_failure_preserves_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(dir.path(), "w");
+    let one = after(HIRATE_KEY, &["7g7f"]);
+    let two = after(HIRATE_KEY, &["2g2f"]);
+    write_master(
+        &a,
+        &[
+            (HIRATE_KEY, "7g7f", "main", ""),
+            (HIRATE_KEY, "2g2f", "alt", ""),
+            (HIRATE_KEY, "5g5f", "alt", ""),
+            (&one, "3c3d", "main", "-90"),
+            (&two, "8c8d", "main", "-100"),
+        ],
+    );
+    a.target_white = Some(80);
+    a.enqueue_class = vec![Class::NovalueShallow, Class::Short];
+    let (_, exits) = walk(&a, HIRATE_KEY);
+    let expected_table = table(&exits, "w");
+    let expected_queue = format_queue(&queue(&exits, &a).unwrap()).unwrap();
+    let table_path = a.table.clone();
+    let queue_path = dir.path().join("out.jsonl");
+    a.enqueue_out = Some(queue_path.clone());
+    run(a).unwrap();
+    assert_eq!(std::fs::read_to_string(&table_path).unwrap(), expected_table);
+    assert_eq!(std::fs::read_to_string(&queue_path).unwrap(), expected_queue);
+    let mut a = args(dir.path(), "w");
+    a.target_white = Some(80);
+    a.priority = MAX_PRIORITY;
+    a.enqueue_out = Some(queue_path.clone());
+    assert!(run(a).is_err());
+    assert_eq!(std::fs::read_to_string(table_path).unwrap(), expected_table);
+    assert_eq!(std::fs::read_to_string(queue_path).unwrap(), expected_queue);
 }
