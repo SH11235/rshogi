@@ -164,6 +164,18 @@ impl<
         let Some(weights) = self.fused_weights.as_ref() else {
             return self.propagate(&sqr_clipped_relu_new(us, them).0);
         };
+        #[cfg(target_feature = "avx512vnni")]
+        let l1_out = if L1 == 3072 {
+            super::ls_l1_kernel::avx512::sparse_index_only(
+                us,
+                them,
+                &self.l1.weights[..],
+                &self.l1.biases,
+            )
+        } else {
+            super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases)
+        };
+        #[cfg(not(target_feature = "avx512vnni"))]
         let l1_out = super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases);
         self.propagate_from_l1(&l1_out)
     }
@@ -1694,6 +1706,11 @@ pub(super) fn assert_fused_l1_matches_reference<const N: usize>(
     assert_eq!(expected, dense);
     let fused = avx512::fused(us, them, bucket.fused_weights.as_ref().unwrap(), &bucket.l1.biases);
     assert_eq!(expected, fused);
+    #[cfg(target_feature = "avx512vnni")]
+    if N == 3072 {
+        let sparse = avx512::sparse_index_only(us, them, &bucket.l1.weights[..], &bucket.l1.biases);
+        assert_eq!(expected, sparse);
+    }
     let score = bucket.propagate(&legacy.0);
     assert_eq!(score, bucket.propagate_accumulators(us, them));
 }
@@ -1796,6 +1813,23 @@ mod kernel_tests {
         let us = [127; N];
         let mut expected = [0; 16];
         bucket.l1.propagate_7bit(&sqr_clipped_relu_new(&us, &us).0, &mut expected);
+        #[cfg(target_feature = "avx512vnni")]
+        if N == 3072 {
+            assert_eq!(
+                expected,
+                avx512::sparse_index_only(&us, &us, &bucket.l1.weights[..], &bucket.l1.biases)
+            );
+            let zeros = [0; N];
+            assert_eq!(
+                bucket.l1.biases,
+                avx512::sparse_index_only(
+                    &zeros,
+                    &zeros,
+                    &bucket.l1.weights[..],
+                    &bucket.l1.biases
+                )
+            );
+        }
         assert_eq!(
             expected,
             avx512::fused(&us, &us, bucket.fused_weights.as_ref().unwrap(), &bucket.l1.biases)
