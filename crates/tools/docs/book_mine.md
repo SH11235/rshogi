@@ -1251,7 +1251,7 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--deep-plies N] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv]] \
+  --draw-value-black -70 --draw-value-white 0 [--line 40] [--deep-plies N] [--opp-records] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv]] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
@@ -1281,6 +1281,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--fill-replies` | なし | 元データに無い相手の手番の局面を補って伝播する (下の「伝播の仕方」)。`--apply`・`--demote-alts`・`--revive-bench` とは併用不可 (確認だけの場合も含む) |
 | `--bridge-replies` | なし | `--fill-replies` と違い、読みの値のある手の行き先を補い、その手の読みの値を残して伝播する (下の「伝播の仕方」)。`--apply`・`--demote-alts`・`--revive-bench` と併用でき、点検・main の置換・降格・復帰を補った伝播の値で決める。読みの値の無い手の行き先は補わない。`--fill-replies` とは併用不可 |
 | `--bridge-table <PATH>` | なし | `--bridge-replies` で、main の値が補わないときより `--line` 以上悪くなった局面の表 (TSV) |
+| `--opp-records` | なし | 相手の手番の record のうち、evals に読みの値がある手も伝播に使う。自分の手番の record は除外し、role は変更しない |
 | `--refutation-table <PATH>` | なし | 反駁の表 (TSV) の出力先 (下の「反駁の点検」) |
 | `--refutation-margin <CP>` | `1` | 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す (1 以上) |
 | `--enqueue-out <PATH>` | なし | 反駁の局面を読み足す、`book_mine tree enqueue --from` に渡す行 (JSON Lines) の出力先 |
@@ -1327,12 +1328,13 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 
 伝播の仕方:
 
-- main・alt の手だけを使います。`bench`・`record` (指さない手) は除きます。
+- 既定では main・alt の手だけを使います。`bench`・`record` (指さない手) は除きます。`--opp-records` を指定したときだけ、下記の規則で相手の record を加えます。
 - 手の値は `evals` の平均 (0.5 は偶数の側へ丸める) です。値は手番の側から見た値です。
 - 値の分かる手は、読みの値のある合法手と、book 内の子局面 (直接、または先後反転した局面) に値の分かる手がある手です (読みの値の無い手が続く線も、先に読みの値があれば分かる手になります)。分からない手は伝播にも、1 位の候補にも、main との比較にも使いません。
 - 伝播は `book_backprop --merge replace --skip-unusable-moves` と同じです。book 内に子局面のある手は子局面からの値、無い手は読みの値になります。
 - `--fill-replies` を渡すと、読みの値の無い手 (多数手など) を指した後の局面が元データに無ければ (先後反転した局面も無ければ)、その局面を、相手の合法手のうち元データの局面に着く手だけを持つ相手の手番の局面として補います。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の局面の読みの値が相手の手番の局面で途切れるためです。補った局面の値は定跡に入っている応手だけで決まるので、定跡に無い応手を見ない分だけ自分の側に甘い値です。この甘さは補った局面の上の局面の最大値を通って、さらに上の局面へ伝わります。読みの値のある手が直接か反転で着く局面は補いません (全ての応手を見た読みの値を直接は置き換えない)。反転した局面が元データにある局面へは応手を張りません (千日手の値が先後で違うと、反転で合流した局面を含む循環を伝播できないため)。補った局面そのものは点検の表・`--out-db` に出しませんが、補った局面を通って付いた値 (上の局面の読みの値のある手に伝わった値も含む) は、表・`--out-db`・反駁の点検 (`--refutation-table`・`--enqueue-out`) に普通の伝播の値として入り、区別されません。補った局面を通って、千日手の値が先後で違う循環に反転で合流すると止まることがあります (「反転キーで合流した…」のエラー)。そのときは `--fill-replies` を外してください。`master rejoin`・`master cycles`・`master hold-early`・`master export`・`borrow`・`tree register` の伝播では補いません。
 - `--bridge-replies` を渡すと、`--fill-replies` と違い、読みの値のある手の行き先を補います (読みの値の無い手の行き先は、上限を付けられず甘くなるので補いません)。元データが自分の手番の局面だけを持つ区間 (外部定跡から借りた行など) では、手の値はその手を登録したときの読みの値のままで、先の局面の値が手前に伝わらないためです。補った局面には、着く手の読みの値を、元データの局面にも反転した局面にも着かない合法手 1 つ (生成順の最初) の値として残します。読みの値は相手の全部の応手を見た値で、相手は手を指した側に悪い方を選ぶので、手の値は読みの値と、定跡の応手の先の値の悪い方になり、読みの値より甘くなりません。同じ局面に読みの値のある手が複数の局面から着くときは、手を指した側に一番悪い読みの値を残します (同じ局面に読みの値の無い手からも着けば、その手にも同じ値が効きます)。残す合法手は、補う候補の局面とその反転にも着かないものに限ります (着くと残した値が補った局面の値で置き換わるため)。残す先の合法手が無い局面は補いません。補う伝播では反転した局面へ辺を張りません (直接の子局面が無い手は、反転した局面があっても読みの値を使い、点検・置換・降格・復帰もその値で判定します。読みの値の無い手は値の分からない手になります)。補った辺が反転で合流する局面を千日手の値が先後で違う循環に入れると、1 行で両方の向きの値を表せず止まるためで、これにより千日手の値は対局と同じ (先後で違う値) のまま流せます。要約に、補った局面の数と、そのうち読みの値を残した局面の数を出します。`--apply` と併用すると、点検の表・main の置換・`--demote-alts`・`--revive-bench` は補った伝播の値で決まります (`--revive-bench` の控えの手の値も、直接の子局面が無ければ反転した局面を使わず読みの値で判定します)。`master rejoin`・`master cycles`・`master hold-early`・`master export`・`borrow`・`tree register` の伝播は補わないので、後の登録で main を補わない値で選び直すことがあります (版の手順では登録の後に audit を流すので、最後は補った値で決まります)。
+- `--opp-records` を渡すと、先手用と後手用に分けて伝播します。先手用では後手番の record を相手の手として加え、先手番の record は除外します。後手用では先手番の record を加え、後手番の record は除外します。record は `evals` の読みの値 (複数あれば通常と同じ平均) がある手だけを使い、その先に子局面があれば値を伝播します。読みの値の無い record は、子局面があっても使いません。record だけの局面も相手の応手として使えます。点検・main の置換・alt の降格・bench の復帰・各出力の値には、局面の手番に合う伝播を使います。record 自体を main・alt に戻したり、`--out-db` に出したりはしません。`--bridge-replies`・`--deep-plies`・`--deep-opp-freq` などと併用でき、`--bridge-table` の比較元も同じ record の規則で伝播します。千日手の値と反転の扱いは各オプションの既存の規則に従います。要約には、合法かつ読みの値のある record を相手の手として使った局面の数を追加します (同じ局面の複数の record は一局面)。循環の件数は先手用・後手用の伝播の合計です。省略時は従来どおり main・alt だけを使い、要約も変わりません。他のサブコマンドの伝播には影響しません。
 - `--bridge-table` は、補わないで伝播したときと補ったときの main の値を局面ごとに比べ、補ったときに `--line` 以上悪くなった局面を、悪くなった量の大きい順 (同じなら key 順) に書きます。列は `key ply side main plain bridged drop best best_value plain_black bridged_black` で、`plain`・`bridged`・`best_value` は手番の側から、`plain_black`・`bridged_black` は先手から見た値、`best` は補ったときの 1 位の手です。補わない側の伝播も、補う側と同じく反転した局面へ辺を張らずに解くので、表の差は補ったことによる差だけです。
 
 点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。

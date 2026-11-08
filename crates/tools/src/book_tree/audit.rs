@@ -110,6 +110,9 @@ pub(super) struct AuditArgs {
     /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
     #[arg(long, conflicts_with = "fill_replies")]
     bridge_replies: bool,
+    /// 相手の手番では、読みの値のある record も伝播に使う
+    #[arg(long)]
+    opp_records: bool,
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
     #[arg(long, requires = "bridge_replies")]
     bridge_table: Option<PathBuf>,
@@ -173,6 +176,7 @@ pub(super) struct AuditSummary {
     /// main・alt の手の数。
     pub moves: usize,
     pub records: usize,
+    pub opponent_record_positions: Option<usize>,
     /// 値の分かる手の数。
     pub known_moves: usize,
     pub illegal_moves: usize,
@@ -308,7 +312,9 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
                 row.get("key"),
                 row.get("move")
             );
-            if !master_table::is_unplayed(row.get("role")) {
+            if !master_table::is_unplayed(row.get("role"))
+                || (args.opp_records && row.get("role") == "record")
+            {
                 rows.push(row.clone());
             } else if row.get("tier") == "curated" {
                 // 指さない行 (record・bench) の列を保持せず、置換を保護する局面だけを覚える。
@@ -325,8 +331,16 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (findings, summary, book) =
-        audit_with_deep(&positions, draws, args.line, fill, args.deep_plies, deep_freq.as_ref())?;
+    let records = args.opp_records.then(|| record_positions(&rows)).transpose()?;
+    let (findings, summary, book) = audit_with_records(
+        &positions,
+        draws,
+        args.line,
+        fill,
+        args.deep_plies,
+        deep_freq.as_ref(),
+        records.as_ref(),
+    )?;
     let (changes, replacements) = plan_replacements(
         &rows,
         &curated_records,
@@ -337,7 +351,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     )?;
     write_atomic(&args.table, &format_table(&findings))?;
     if let Some(path) = &args.bridge_table {
-        let worse = bridge_findings(&positions.0, draws, &book, args.line)?;
+        let worse = bridge_findings(&positions.0, draws, &book, args.line, records.as_ref())?;
         write_atomic(path, &format_bridge_table(&worse))?;
         println!("補って main の値が {} 以上悪くなった局面: {}", args.line, worse.len());
     }
@@ -580,7 +594,7 @@ fn demote_alts(
             summary.skipped_curated += 1;
             continue;
         }
-        let moves = audited_moves(&book.graph, key, position, known)?;
+        let moves = audited_moves(book.graph_for(key), key, position, known)?;
         let values: BTreeMap<_, _> = moves
             .iter()
             .flatten()
@@ -656,7 +670,7 @@ fn revive_bench(
         .collect();
     let mut references = BTreeMap::new();
     for ((key, position), known) in positions.iter().zip(&book.known) {
-        let moves = audited_moves(&book.graph, key, position, known)?;
+        let moves = audited_moves(book.graph_for(key), key, position, known)?;
         let best = reference_best(&moves, position);
         if let Some(best) = best {
             references.insert(key.as_str(), best);
@@ -667,28 +681,32 @@ fn revive_bench(
         .filter(|r| r.get("tier") == "curated" && r.get("role") == "main")
         .map(|r| r.get("key").to_owned())
         .collect();
-    let targets: Vec<_> = rows
-        .iter()
-        .map(|r| {
-            if r.get("role") == "bench" {
-                bench_target(r, &book.graph)
-            } else {
-                Ok(None)
+    let draws = DrawValues {
+        black: args.draw_value_black,
+        white: args.draw_value_white,
+    };
+    let mut values = vec![None; rows.len()];
+    for side in ["b", "w"] {
+        let graph = if side == "b" {
+            &book.graph
+        } else {
+            book.white_graph.as_ref().unwrap_or(&book.graph)
+        };
+        let mut indices = Vec::new();
+        let mut edges = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            if row.get("role") == "bench"
+                && row.get("key").split_whitespace().nth(1) == Some(side)
+                && let Some(target) = bench_target(row, graph)?
+            {
+                indices.push(i);
+                edges.push(target);
             }
-        })
-        .collect::<Result<_>>()?;
-    let edges: Vec<_> = targets.iter().flatten().copied().collect();
-    let values = evaluate_edges(
-        &book.graph,
-        DrawValues {
-            black: args.draw_value_black,
-            white: args.draw_value_white,
-        },
-        &edges,
-    )?;
-    let mut edge_values = values.into_iter();
-    let values: Vec<_> =
-        targets.iter().map(|target| target.and_then(|_| edge_values.next())).collect();
+        }
+        for (i, value) in indices.into_iter().zip(evaluate_edges(graph, draws, &edges)?) {
+            values[i] = Some(value);
+        }
+    }
     let mut summary = Revivals::default();
     for (row, propagated) in rows.iter_mut().zip(values) {
         if row.get("role") != "bench"
@@ -791,6 +809,17 @@ fn resolve(path: &Path) -> PathBuf {
 pub(super) struct AuditedBook {
     pub graph: Graph,
     pub known: Vec<Vec<bool>>,
+    white_graph: Option<Graph>,
+}
+
+impl AuditedBook {
+    pub(super) fn graph_for(&self, key: &str) -> &Graph {
+        if key.split_whitespace().nth(1) == Some("w") {
+            self.white_graph.as_ref().unwrap_or(&self.graph)
+        } else {
+            &self.graph
+        }
+    }
 }
 
 fn write_audited_db(
@@ -801,11 +830,12 @@ fn write_audited_db(
     write_book_atomic(path, |mut writer| {
         writeln!(writer, "{}", crate::book_backprop::BOOK_HEADER)?;
         for ((key, position), known) in positions.iter().zip(&book.known) {
-            let Some(node) = book.graph.find(key) else {
+            let graph = book.graph_for(key);
+            let Some(node) = graph.find(key) else {
                 continue;
             };
-            writeln!(writer, "sfen {}", book.graph.sfen(node))?;
-            let mut values = book.graph.moves(node);
+            writeln!(writer, "sfen {}", graph.sfen(node))?;
+            let mut values = graph.moves(node);
             let mut rows = Vec::new();
             for (i, m) in position.moves.iter().enumerate().filter(|(i, _)| known[*i]) {
                 let value = values.next().context("内部エラー: 手の数が合いません")?.new;
@@ -1107,6 +1137,98 @@ fn reply_positions(
     Ok(replies.into_iter().flatten().collect())
 }
 
+fn record_positions(rows: &[Row]) -> Result<BTreeMap<String, MasterPosition>> {
+    let mut records = BTreeMap::<String, MasterPosition>::new();
+    for row in rows.iter().filter(|r| r.get("role") == "record") {
+        let Some(eval) = master_table::mean_eval(row.get("evals"))? else {
+            continue;
+        };
+        records
+            .entry(row.get("key").to_owned())
+            .or_insert_with(|| MasterPosition {
+                ply: row.get("ply").to_owned(),
+                source: String::new(),
+                moves: Vec::new(),
+            })
+            .moves
+            .push(BookMove {
+                mv: row.get("move").to_owned(),
+                eval: Some(eval),
+            });
+    }
+    Ok(records)
+}
+
+fn propagate_for_sides(
+    positions: &BTreeMap<String, MasterPosition>,
+    records: Option<&BTreeMap<String, MasterPosition>>,
+    draws: DrawValues,
+    fill: Fill,
+    skip_flipped: bool,
+) -> Result<(Propagated, Option<Graph>, usize)> {
+    let Some(records) = records else {
+        return Ok((propagate_with(positions, draws, fill, skip_flipped)?, None, 0));
+    };
+    let solve = |opponent: &str| -> Result<(Propagated, usize, usize)> {
+        let mut expanded = positions.clone();
+        for (key, record) in records {
+            if key.split_whitespace().nth(1) != Some(opponent) {
+                continue;
+            }
+            expanded
+                .entry(key.clone())
+                .and_modify(|p| p.moves.extend(record.moves.clone()))
+                .or_insert_with(|| record.clone());
+        }
+        let mut result = propagate_with(&expanded, draws, fill, skip_flipped)?;
+        // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
+        let mut count = 0;
+        let mut illegal_records = 0;
+        let mut known = Vec::with_capacity(positions.len());
+        for ((key, _), mask) in expanded.iter().zip(&result.known) {
+            let playable = positions.get(key).map_or(0, |p| p.moves.len());
+            illegal_records += mask.iter().skip(playable).filter(|&&k| !k).count();
+            if mask.iter().skip(playable).any(|&k| k) {
+                count += 1;
+            }
+            if positions.contains_key(key) {
+                known.push(mask[..playable].to_vec());
+            }
+        }
+        result.known = known;
+        Ok((result, count, illegal_records))
+    };
+    let (mut black, black_count, _) = solve("w")?;
+    let (white, white_count, white_illegal_records) = solve("b")?;
+    for ((key, _), (b, w)) in positions.iter().zip(black.known.iter_mut().zip(white.known)) {
+        if key.split_whitespace().nth(1) == Some("w") {
+            *b = w;
+        }
+    }
+    black.illegal_moves += white_illegal_records;
+    black.stats.nontrivial_sccs += white.stats.nontrivial_sccs;
+    black.stats.max_scc_size = black.stats.max_scc_size.max(white.stats.max_scc_size);
+    // 同じ補完局面が両方の伝播に現れても、要約では一局面と数える。
+    let mut replies = BTreeSet::new();
+    let mut bridged = BTreeSet::new();
+    for (graph, opponent) in [(&black.graph, "w"), (&white.graph, "b")] {
+        for node in 0..graph.len() {
+            let key = graph.key(node);
+            if !positions.contains_key(key)
+                && !(records.contains_key(key) && key.split_whitespace().nth(1) == Some(opponent))
+            {
+                replies.insert(key.to_owned());
+                if graph.moves(node).any(|m| m.edge.is_none()) {
+                    bridged.insert(key.to_owned());
+                }
+            }
+        }
+    }
+    black.reply_positions = replies.len();
+    black.bridged_positions = bridged.len();
+    Ok((black, Some(white.graph), black_count + white_count))
+}
+
 /// 局面の値の分かる手だけを伝播する。(伝播後のグラフ, 局面ごと・手ごとの値の分かる手, 非合法手の数, 伝播の集計)。
 fn propagate_entries(
     all: &[(&str, &MasterPosition)],
@@ -1360,14 +1482,20 @@ fn bridge_findings(
     draws: DrawValues,
     book: &AuditedBook,
     line: i32,
+    records: Option<&BTreeMap<String, MasterPosition>>,
 ) -> Result<Vec<BridgeFinding>> {
     // 補った伝播と同じく反転の辺を張らずに比べ、補ったことによる差だけを出す。
-    let plain = propagate_with(positions, draws, Fill::Off, true)?;
+    let (plain, white_graph, _) = propagate_for_sides(positions, records, draws, Fill::Off, true)?;
+    let plain = AuditedBook {
+        graph: plain.graph,
+        known: plain.known,
+        white_graph,
+    };
     let mut out = Vec::new();
     for (((key, position), known), plain_known) in
         positions.iter().zip(&book.known).zip(&plain.known)
     {
-        let Some(old) = audited_moves(&plain.graph, key, position, plain_known)?
+        let Some(old) = audited_moves(plain.graph_for(key), key, position, plain_known)?
             .first()
             .cloned()
             .flatten()
@@ -1375,7 +1503,7 @@ fn bridge_findings(
         else {
             continue;
         };
-        let moves = audited_moves(&book.graph, key, position, known)?;
+        let moves = audited_moves(book.graph_for(key), key, position, known)?;
         let Some(main) = moves.first().cloned().flatten() else {
             continue;
         };
@@ -1440,17 +1568,32 @@ pub(super) fn audit(
 }
 
 fn audit_with_deep(
-    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+    book: &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     line: i32,
     fill: Fill,
     deep_plies: Option<usize>,
     deep_freq: Option<&ReplyFrequency>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
+    audit_with_records(book, draws, line, fill, deep_plies, deep_freq, None)
+}
+
+fn audit_with_records(
+    (positions, records): &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    fill: Fill,
+    deep_plies: Option<usize>,
+    deep_freq: Option<&ReplyFrequency>,
+    opponent_records: Option<&BTreeMap<String, MasterPosition>>,
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
         ..AuditSummary::default()
     };
+    let (propagated, white_graph, record_count) =
+        propagate_for_sides(positions, opponent_records, draws, fill, fill == Fill::Bridge)?;
+    summary.opponent_record_positions = opponent_records.map(|_| record_count);
     let Propagated {
         graph,
         known,
@@ -1458,21 +1601,26 @@ fn audit_with_deep(
         stats,
         reply_positions,
         bridged_positions,
-    } = propagate(positions, draws, fill)?;
+    } = propagated;
+    let book = AuditedBook {
+        graph,
+        known,
+        white_graph,
+    };
     summary.illegal_moves = illegal_moves;
     summary.reply_positions = reply_positions;
     summary.bridged_positions = bridged_positions;
     summary.nontrivial_sccs = stats.nontrivial_sccs;
     summary.max_scc_size = stats.max_scc_size;
     let mut findings = Vec::new();
-    for ((key, position), known) in positions.iter().zip(&known) {
+    for ((key, position), known) in positions.iter().zip(&book.known) {
         let side = usize::from(key.split(' ').nth(1) == Some("w"));
         summary.positions[side] += 1;
         summary.moves += position.moves.len();
         if position.moves.len() >= 2 {
             summary.multi_move_positions[side] += 1;
         }
-        let audited = audited_moves(&graph, key, position, known)?;
+        let audited = audited_moves(book.graph_for(key), key, position, known)?;
         for m in audited.iter().flatten() {
             summary.known_moves += 1;
             match m.eval {
@@ -1539,7 +1687,7 @@ fn audit_with_deep(
         });
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
-    Ok((findings, summary, AuditedBook { graph, known }))
+    Ok((findings, summary, book))
 }
 
 pub(super) fn format_table(findings: &[Finding]) -> String {
@@ -1593,6 +1741,9 @@ pub(super) fn format_summary(
         "手 (main・alt): {} / 値の分かる手 {} / 非合法手 {} / bench・record (除外) {}",
         summary.moves, summary.known_moves, summary.illegal_moves, summary.records
     ));
+    if let Some(count) = summary.opponent_record_positions {
+        out(format!("record を相手の手として使った局面: {count}"));
+    }
     if changed > 0 {
         let buckets = delta_buckets(&summary.abs_deltas)
             .into_iter()
@@ -1687,6 +1838,197 @@ mod tests {
         let parsed = parse_master_rows(text.as_bytes())?;
         let (findings, summary, _) = audit(&parsed, draws, line, Fill::Off, None)?;
         Ok((findings, summary))
+    }
+
+    fn opponent_record_fixture(record_eval: &str) -> String {
+        master(&[
+            (A, "5a5b", "main", "200"),
+            (A, "5a4a", "alt", "-100"),
+            ("5k3/9/9/9/9/9/9/5K3/9 b -", "4h3h", "main", "100"),
+            (B, "4h5h", "main", "-200"),
+            (B, "4h3g", "record", record_eval),
+            ("9/4k4/9/9/9/9/6K2/9/9 w -", "5b6b", "main", "-900"),
+        ])
+    }
+
+    #[test]
+    fn opponent_records_replace_white_main_and_preserve_record_role() {
+        for full in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            let text = opponent_record_fixture("400");
+            std::fs::write(&args.master, &text).unwrap();
+            args.opp_records = true;
+            args.apply = full;
+            args.since = Some("確認".into());
+            args.out_db = Some(dir.path().join("audit.db"));
+            let master_path = args.master.clone();
+            let table_path = args.table.clone();
+            let db_path = args.out_db.clone().unwrap();
+            run(args).unwrap();
+            let table = std::fs::read_to_string(table_path).unwrap();
+            assert!(table.contains("5a4a"));
+            assert!(table.contains("-900"));
+            let db = std::fs::read_to_string(db_path).unwrap();
+            assert!(db.contains("5a5b none -900"));
+            assert!(!db.contains("4h3g"));
+            let rows = parse_master(&std::fs::read_to_string(master_path).unwrap()).unwrap();
+            assert_eq!(
+                rows.iter().find(|r| r.get("role") == "record").unwrap().get("move"),
+                "4h3g"
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|r| r.get("key") == A && r.get("role") == "main")
+                    .unwrap()
+                    .get("move"),
+                if full { "5a4a" } else { "5a5b" }
+            );
+        }
+    }
+
+    #[test]
+    fn opponent_records_do_not_use_own_records_or_unread_records() {
+        for eval in ["400", ""] {
+            let text = opponent_record_fixture(eval);
+            let rows = parse_master(&text).unwrap();
+            let positions = parse_master_rows(text.as_bytes()).unwrap();
+            let records = record_positions(&rows).unwrap();
+            let (findings, summary, book) = audit_with_records(
+                &positions,
+                DrawValues::both(0),
+                1,
+                Fill::Off,
+                None,
+                None,
+                Some(&records),
+            )
+            .unwrap();
+            let index = positions.0.keys().position(|k| k == B).unwrap();
+            let moves =
+                audited_moves(book.graph_for(B), B, &positions.0[B], &book.known[index]).unwrap();
+            assert_eq!(moves.len(), 1);
+            assert_eq!(moves[0].as_ref().unwrap().value, -200);
+            assert_eq!(summary.opponent_record_positions, Some(usize::from(!eval.is_empty())));
+            assert_eq!(findings.iter().any(|f| f.key == A), !eval.is_empty());
+        }
+    }
+
+    #[test]
+    fn opponent_records_demotion_and_revival_use_white_values() {
+        for demote in [false, true] {
+            for enabled in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let text = master(&[
+                    (A, "5a4a", "main", "-100"),
+                    (A, "5a5b", if demote { "alt" } else { "bench" }, "200"),
+                    (B, "4h5h", "main", "-200"),
+                    (B, "4h3g", "record", "900"),
+                ]);
+                let mut args = test_args(dir.path());
+                std::fs::write(&args.master, text).unwrap();
+                args.opp_records = enabled;
+                args.demote_alts = demote;
+                args.revive_bench = !demote;
+                args.apply = true;
+                args.line = 10000;
+                args.since = Some("確認".into());
+                let path = args.master.clone();
+                run(args).unwrap();
+                let rows = parse_master(&std::fs::read_to_string(path).unwrap()).unwrap();
+                let candidate =
+                    rows.iter().find(|r| r.get("key") == A && r.get("move") == "5a5b").unwrap();
+                assert_eq!(candidate.get("role"), if enabled { "bench" } else { "alt" });
+            }
+        }
+    }
+
+    #[test]
+    fn opponent_records_include_record_only_positions_and_both_sides() {
+        let text = master(&[
+            (ROOT, "5i4h", "main", "200"),
+            (ROOT, "5i6h", "alt", "-100"),
+            (A, "5a5b", "record", "900"),
+            (A, "5a4a", "record", "800"),
+            (B, "4h3g", "main", "-400"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let (findings, summary, book) = audit_with_records(
+            &positions,
+            DrawValues::both(0),
+            1,
+            Fill::Off,
+            None,
+            None,
+            Some(&records),
+        )
+        .unwrap();
+        assert!(findings.iter().any(|f| f.key == ROOT && f.best.mv == "5i6h"));
+        assert_eq!(summary.opponent_record_positions, Some(1));
+        assert_eq!(book.known.len(), positions.0.len());
+        assert!(!positions.0.contains_key(A));
+    }
+
+    #[test]
+    fn audit_without_opponent_records_preserves_outputs() {
+        let text = opponent_record_fixture("400");
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, summary, book) =
+            audit(&positions, DrawValues::both(0), 1, Fill::Off, None).unwrap();
+        assert!(findings.is_empty());
+        assert_eq!(summary.opponent_record_positions, None);
+        assert!(!format_summary(&summary, 1, DrawValues::both(0), None).contains("相手の手として"));
+        for full in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            std::fs::write(&args.master, &text).unwrap();
+            args.apply = full;
+            args.since = Some("確認".into());
+            args.out_db = Some(dir.path().join("actual.db"));
+            let table = args.table.clone();
+            let db = args.out_db.clone().unwrap();
+            run(args).unwrap();
+            let expected = dir.path().join("expected.db");
+            write_audited_db(&expected, &positions.0, &book).unwrap();
+            assert_eq!(std::fs::read_to_string(table).unwrap(), format_table(&findings));
+            assert_eq!(std::fs::read(db).unwrap(), std::fs::read(expected).unwrap());
+        }
+    }
+
+    #[test]
+    fn opponent_records_bridge_replies_and_bridge_table_use_same_side() {
+        let text = master(&[
+            (A, "5a5b", "main", "200"),
+            (A, "5a4a", "alt", "-100"),
+            ("5k3/9/9/9/9/9/9/5K3/9 b -", "4h3h", "main", "100"),
+            (B, "4h5h", "main", "-200"),
+            (B, "4h3g", "record", "900"),
+            ("9/3k5/9/9/9/9/6K2/9/9 b -", "3g2f", "main", "400"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(&args.master, text).unwrap();
+        args.opp_records = true;
+        args.bridge_replies = true;
+        args.apply = true;
+        args.since = Some("確認".into());
+        args.bridge_table = Some(dir.path().join("bridge.tsv"));
+        let bridge_table = args.bridge_table.clone().unwrap();
+        let master_path = args.master.clone();
+        run(args).unwrap();
+        let table = std::fs::read_to_string(bridge_table).unwrap();
+        assert!(!table.contains(A));
+        assert!(std::fs::read_to_string(dir.path().join("audit.tsv")).unwrap().contains("-400"));
+        let rows = parse_master(&std::fs::read_to_string(master_path).unwrap()).unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.get("key") == A && r.get("role") == "main")
+                .unwrap()
+                .get("move"),
+            "5a4a"
+        );
+        assert_eq!(rows.iter().find(|r| r.get("move") == "4h3g").unwrap().get("role"), "record");
     }
 
     #[test]
@@ -2128,6 +2470,7 @@ mod tests {
                 &AuditedBook {
                     graph: memory,
                     known,
+                    white_graph: None,
                 },
             )
             .unwrap();
@@ -2446,6 +2789,7 @@ mod tests {
             priority: 100,
             fill_replies: false,
             bridge_replies: false,
+            opp_records: false,
             bridge_table: None,
             weight: WeightArgs {
                 opp_freq: None,
@@ -2814,6 +3158,22 @@ mod tests {
         let base = ["audit", "--master", "moves.tsv", "--table", "audit.tsv"];
         let defaults = Cli::try_parse_from(base).unwrap().args;
         assert_eq!((defaults.line, defaults.demote_line), (40, 100));
+        assert!(!defaults.opp_records);
+        let combined = Cli::try_parse_from(base.into_iter().chain([
+            "--opp-records",
+            "--bridge-replies",
+            "--deep-plies",
+            "2",
+            "--deep-opp-freq",
+            "frequency.db",
+            "--revive-bench",
+            "--demote-alts",
+        ]))
+        .unwrap()
+        .args;
+        assert!(combined.opp_records);
+        assert!(combined.bridge_replies);
+
         let custom = Cli::try_parse_from(base.into_iter().chain(["--demote-line", "70"]))
             .unwrap()
             .args;
