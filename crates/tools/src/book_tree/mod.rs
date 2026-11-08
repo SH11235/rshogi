@@ -21,6 +21,7 @@ mod model;
 mod output;
 mod paths;
 mod queue;
+mod queue_review;
 mod refutation;
 mod register;
 mod rejoin;
@@ -62,6 +63,8 @@ enum TreeCommand {
     Enqueue(queue::EnqueueArgs),
     /// 受領の範囲の対象が処理され、終わるまで待つ
     Wait(queue::WaitArgs),
+    /// 受付と進みの写しから未着手の木を点検し、保留候補の行を書く
+    QueueReview(queue_review::QueueReviewArgs),
     /// 別の台帳の読みを、条件が同じと確かめてから取り込み先の条件で足す
     ImportJournal(transfer::ImportJournalArgs),
     /// 台帳だけから木を再生成する
@@ -209,6 +212,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Serve(args) => service::serve(args),
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),
+        TreeCommand::QueueReview(args) => queue_review::run(args),
         TreeCommand::Register(args) => register::run(args),
         TreeCommand::ImportJournal(args) => transfer::run(args),
         TreeCommand::Replay(args) => {
