@@ -8,6 +8,7 @@ mod borrow;
 mod check;
 mod cycles;
 mod deep;
+mod exits;
 mod export;
 mod file_lock;
 mod hold_early;
@@ -176,6 +177,8 @@ enum MasterCommand {
     Cycles(cycles::CyclesArgs),
     /// 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す
     Walk(walk::WalkArgs),
+    /// 自分は main、相手は main・alt を指して到達する出口を一覧にする
+    Exits(exits::ExitsArgs),
     /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
     LineDb(line_db::LineDbArgs),
 }
@@ -194,6 +197,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Rejoin(args) => rejoin::run(args),
         MasterCommand::Cycles(args) => cycles::run(args),
         MasterCommand::Walk(args) => walk::run(args),
+        MasterCommand::Exits(args) => exits::run(args),
         MasterCommand::LineDb(args) => line_db::run(args),
     }
 }
