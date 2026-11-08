@@ -45,6 +45,7 @@ impl ConflictSink for CheckpointList<'_> {
 /// serve が lock を保持したまま、検査済みの読みを少量ずつ台帳へ取り込む受付。
 pub(super) struct Inbox {
     dir: PathBuf,
+    accept_fingerprint: BTreeSet<String>,
     path: Option<PathBuf>,
     preparing: Option<JoinHandle<Result<StagedSource>>>,
     staged: Option<Staged>,
@@ -55,7 +56,7 @@ pub(super) struct Inbox {
 
 impl Inbox {
     /// 受付と処理済み・失敗ファイルの置き場を作る。
-    pub fn new(state: &Path) -> Result<Self> {
+    pub fn new(state: &Path, accept_fingerprint: BTreeSet<String>) -> Result<Self> {
         let dir = state.join("import");
         for path in [&dir, &dir.join("done"), &dir.join("failed")] {
             super::paths::reject_symlink(path)?;
@@ -63,6 +64,7 @@ impl Inbox {
         }
         Ok(Self {
             dir,
+            accept_fingerprint,
             path: None,
             preparing: None,
             staged: None,
@@ -135,10 +137,11 @@ impl Inbox {
             if let Some(path) = paths.into_iter().next() {
                 let source = path.clone();
                 let settings = settings.clone();
+                let accept_fingerprint = self.accept_fingerprint.clone();
                 self.status = serde_json::json!({"file":path.file_name(), "state":"validating"});
                 self.path = Some(path);
                 self.preparing = Some(thread::spawn(move || {
-                    super::journal::stage_live_source(&source, &settings)
+                    super::journal::stage_live_source(&source, &settings, &accept_fingerprint)
                 }));
             }
             return Ok(None);
@@ -211,10 +214,16 @@ impl Inbox {
                 staged.counts.skipped_same += 1;
                 continue;
             }
+            let acceptance = if self.accept_fingerprint.contains(&rec.settings.fingerprint) {
+                ":accepted=true"
+            } else {
+                ""
+            };
             let provenance = format!(
-                "journal:sha256={}:fingerprint={}:force=false:path={}",
+                "journal:sha256={}:fingerprint={}:force=false{}:path={}",
                 staged.sha256,
                 rec.settings.fingerprint,
+                acceptance,
                 path.display()
             );
             let first = journal.get(&rec.reading.key).is_none()

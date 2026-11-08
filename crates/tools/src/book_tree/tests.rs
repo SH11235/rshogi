@@ -874,6 +874,7 @@ fn replay_rejects_journal_and_paths_collisions_before_changing_outputs() {
 
 fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> ServeArgs {
     ServeArgs {
+        accept_fingerprint: Vec::new(),
         state: state.to_owned(),
         journal: Some(journal.to_owned()),
         reading: ReadingArgs {
@@ -1561,7 +1562,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
-    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+    let mut inbox = super::live_import::Inbox::new(&state, Default::default()).unwrap();
     let settings = settings();
     let existing = reading(ROOT, &[("5i5h", 10)], &settings);
     let other_key = child(ROOT, "5i5h").unwrap();
@@ -1648,7 +1649,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
 fn live_import_rejects_whole_invalid_file_and_ignores_unpublished_files() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
     let dst = dir.path().join("journal.jsonl");
     let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
     let good = dir.path().join("good.jsonl");
@@ -1674,7 +1675,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
     let source = dir.path().join("import/01.jsonl");
     let row = |col| match col {
         0 => "K8".to_owned(),
@@ -1717,7 +1718,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
         file.sync_data().unwrap();
     }
     let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
-    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
     drain_import(&mut inbox, &mut journal, &settings);
     for reading in &readings {
         assert_eq!(journal.get(&reading.key), Some(reading));
@@ -1744,7 +1745,7 @@ fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appendin
     forged.push(b'\n');
     for (i, bytes) in [conflict, forged].into_iter().enumerate() {
         let state = dir.path().join(i.to_string());
-        let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+        let mut inbox = super::live_import::Inbox::new(&state, Default::default()).unwrap();
         let dst = state.join("journal.jsonl");
         let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
         std::fs::write(state.join("import/01.jsonl"), bytes).unwrap();
@@ -1763,13 +1764,13 @@ fn live_import_checks_other_binaries_by_source_version() {
     src.fingerprint = src.computed_fingerprint().unwrap();
     let path = dir.path().join("compatible.jsonl");
     import_file(&path, &src, &[reading(ROOT, &[], &src)]);
-    let staged = super::journal::stage_live_source(&path, &dst).unwrap();
+    let staged = super::journal::stage_live_source(&path, &dst, &Default::default()).unwrap();
     assert!(staged.file.metadata().unwrap().len() > 0);
     assert_eq!(staged.skipped_condition, 0);
     src.engine_version = Some("different-source".into());
     let path = dir.path().join("incompatible.jsonl");
     import_file(&path, &src, &[reading(ROOT, &[], &src)]);
-    assert!(super::journal::stage_live_source(&path, &dst).is_err());
+    assert!(super::journal::stage_live_source(&path, &dst, &Default::default()).is_err());
 }
 
 #[test]
@@ -1788,7 +1789,7 @@ fn live_import_merges_known_version_before_checking_compatibility() {
     let old = format!("{old}\n");
     for bytes in [format!("{old}{known}"), format!("{known}{old}")] {
         std::fs::write(&path, bytes).unwrap();
-        let staged = super::journal::stage_live_source(&path, &dst).unwrap();
+        let staged = super::journal::stage_live_source(&path, &dst, &Default::default()).unwrap();
         assert_eq!(staged.skipped_condition, 0);
         assert_eq!(std::io::BufRead::lines(std::io::BufReader::new(staged.file)).count(), 2);
     }
@@ -1799,7 +1800,7 @@ fn live_import_batch_keeps_first_duplicate_metadata() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
     let first = reading(ROOT, &[], &settings);
     let source = dir.path().join("source.jsonl");
     import_file(&source, &settings, std::slice::from_ref(&first));
@@ -1823,7 +1824,7 @@ fn live_import_batch_keeps_first_duplicate_metadata() {
 fn live_import_preserves_prefetch_from_duplicate_in_later_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
     let first = reading(ROOT, &[], &settings);
     let source = dir.path().join("source.jsonl");
     import_file(&source, &settings, std::slice::from_ref(&first));
@@ -1842,4 +1843,89 @@ fn live_import_preserves_prefetch_from_duplicate_in_later_chunk() {
     let journal = Journal::open(&path, &settings.fingerprint).unwrap();
     assert!(journal.prefetched.contains(ROOT));
     assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn accepted_fingerprints_are_repeatable_and_validated_on_both_commands() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: TreeArgs,
+    }
+    let fp = "0123456789abcdef".repeat(4);
+    let other = "f".repeat(64);
+    for command in ["import-journal", "serve"] {
+        let mut base = vec!["test", command, "--engine", "engine", "--nodes", "100"];
+        if command == "serve" {
+            base.extend(["--state", "state", "--out-root", "out"]);
+        } else {
+            base.extend(["--from-journal", "source", "--journal", "destination"]);
+        }
+        let mut valid = base.clone();
+        valid.extend(["--accept-fingerprint", &fp, "--accept-fingerprint", &other]);
+        let parsed = Cli::try_parse_from(valid).unwrap();
+        if let TreeCommand::Serve(args) = parsed.tree.command {
+            assert_eq!(args.accept_fingerprint, [fp.clone(), other.clone()]);
+        }
+        for invalid in [
+            "".into(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let mut args = base.clone();
+            args.extend(["--accept-fingerprint", &invalid]);
+            let err = Cli::try_parse_from(args).err().unwrap().to_string();
+            assert!(err.contains("64 桁の小文字の 16 進数"), "{err}");
+        }
+    }
+}
+
+#[test]
+fn live_import_accepts_only_listed_foreign_net_and_keeps_destination_settings() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let dst = settings();
+    let mut src = dst.clone();
+    src.content_sha256.insert("EvalFile".into(), "a".repeat(64));
+    src.fingerprint = src.computed_fingerprint().unwrap();
+    assert_ne!(src.fingerprint, dst.fingerprint);
+    let mut unlisted = src.clone();
+    unlisted.content_sha256.insert("EvalFile".into(), "b".repeat(64));
+    unlisted.fingerprint = unlisted.computed_fingerprint().unwrap();
+    let other_key = child(ROOT, "5i5h").unwrap();
+    for accept in [false, true] {
+        let state = dir.path().join(accept.to_string());
+        let accepted = if accept {
+            BTreeSet::from([src.fingerprint.clone()])
+        } else {
+            BTreeSet::new()
+        };
+        let mut inbox = super::live_import::Inbox::new(&state, accepted).unwrap();
+        let path = state.join("journal.jsonl");
+        let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+        let source = state.join("import/source.jsonl");
+        import_file(&source, &src, &[reading(ROOT, &[], &src)]);
+        import_file(&source, &unlisted, &[reading(&other_key, &[], &unlisted)]);
+        assert!(drain_import(&mut inbox, &mut journal, &dst).is_empty());
+        assert_eq!(inbox.status()["counts"]["appended"], usize::from(accept));
+        assert_eq!(inbox.status()["counts"]["skipped_condition"], if accept { 1 } else { 2 });
+        assert_eq!(journal.get(ROOT).is_some(), accept);
+        assert!(journal.get(&other_key).is_none());
+        let text = std::fs::read_to_string(&path).unwrap();
+        if accept {
+            let record: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(record["settings"]["fingerprint"], dst.fingerprint);
+            assert_eq!(record["settings"], serde_json::to_value(&dst).unwrap());
+            let provenance = record["provenance"].as_str().unwrap();
+            assert!(provenance.contains(&format!(
+                "fingerprint={}:force=false:accepted=true:path=",
+                src.fingerprint
+            )));
+        } else {
+            assert!(text.is_empty());
+        }
+    }
 }
