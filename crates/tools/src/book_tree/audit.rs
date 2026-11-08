@@ -106,7 +106,7 @@ pub(super) struct AuditArgs {
     /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
     #[arg(long, conflicts_with = "apply")]
     fill_replies: bool,
-    /// --fill-replies に加えて、読みの値のある手を指した後の元データに無い相手の手番の局面も補う。補った局面には、
+    /// --fill-replies の補い方に加えて (--fill-replies とは同時に指定しない)、読みの値のある手を指した後の元データに無い相手の手番の局面も補う。補った局面には、
     /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
     #[arg(long, conflicts_with_all = ["apply", "fill_replies"])]
     bridge_replies: bool,
@@ -973,7 +973,7 @@ fn visit_leaves(
 /// 値として残す。相手は手を指した側に悪い方を選ぶので、手の値は読みの値と定跡の応手の先の値の悪い方になり、
 /// 読みの値より甘くならない。読みの値のある手が複数の局面から着くときは、手を指した側に一番悪い読みの値を残す
 /// (同じ局面に読みの値の無い手からも着けば、その手にも効く)。残す先の合法手が無い局面 (全部の応手が元データの
-/// 局面か反転した局面に着く) は補わない。
+/// 局面か、反転した局面か、補う候補の局面に着く) は補わない。
 fn reply_positions(
     positions: &BTreeMap<String, MasterPosition>,
     fill: Fill,
@@ -1039,6 +1039,13 @@ fn reply_positions(
             };
         }
     }
+    // 読みの値を残す手は、補う候補の局面 (とその反転) にも着かせない。着くと book_backprop がその手に辺を張り、
+    // 残した値が補った局面の値で置き換わる。
+    let pending: BTreeSet<String> = candidates.keys().cloned().collect();
+    let in_pending = |sfen: &str| {
+        pending.contains(strip_ply(sfen))
+            || rshogi_book::flipped_key(sfen).is_some_and(|f| pending.contains(strip_ply(&f)))
+    };
     let replies: Vec<Option<(String, MasterPosition)>> = candidates
         .into_par_iter()
         .map(|(key, (ply, cap))| -> Result<Option<(String, MasterPosition)>> {
@@ -1051,13 +1058,18 @@ fn reply_positions(
             for &reply in legal.iter() {
                 pos.do_move(reply, pos.gives_check(reply));
                 let to = pos.to_sfen();
-                let flipped = flipped_in_master(&to);
-                if positions.contains_key(strip_ply(&to)) && !flipped {
-                    moves.push(BookMove {
-                        mv: reply.to_usi(),
-                        eval: None,
-                    });
-                } else if outside.is_none() && !flipped && !positions.contains_key(strip_ply(&to)) {
+                if positions.contains_key(strip_ply(&to)) {
+                    if !flipped_in_master(&to) {
+                        moves.push(BookMove {
+                            mv: reply.to_usi(),
+                            eval: None,
+                        });
+                    }
+                } else if cap.is_some()
+                    && outside.is_none()
+                    && !flipped_in_master(&to)
+                    && !in_pending(&to)
+                {
                     outside = Some(reply.to_usi());
                 }
                 pos.undo_move(reply);
@@ -2153,6 +2165,40 @@ mod tests {
             (B, "4h3h", "main", "200"),
         ]);
         assert_eq!(main, Some(10));
+    }
+
+    #[test]
+    fn bridge_replies_keeps_cap_when_outside_move_reaches_another_filled_position() {
+        // A に読みの値 +50 を残す手 5a4a の行き先は、c (後手番) の手の行き先として補う局面でもある。そこへ辺を
+        // 張らせると残した値が補った局面の値で置き換わり、ROOT の手が +50 より甘くなる。
+        let c = "6k2/9/9/9/9/9/9/5K3/9 w -";
+        let d = "5k3/9/9/9/9/9/9/9/4K4 w -";
+        let (_, main) = bridge_audit(&[
+            (ROOT, "5i4h", "main", "50"),
+            (B, "4h3h", "main", "200"),
+            (c, "3a4a", "main", "-200"),
+            (d, "4a3a", "main", "-200"),
+        ]);
+        assert!(main.is_some_and(|v| v <= 50), "{main:?}");
+    }
+
+    #[test]
+    fn bridge_replies_flips_sign_for_white_mover() {
+        // 後手の手 5a4b (読み +30、後手から) の後の先手番の局面 E は元データに無く、E の ▲5i4h で着く局面の読みが
+        // 後手から -100。後手は悪い方を取られて -100 になる。
+        let w = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let f = "9/5k3/9/9/9/9/9/5K3/9 w -";
+        let parsed = parse_master_rows(
+            master(&[(w, "5a4b", "main", "30"), (f, "4b5b", "main", "-100")]).as_bytes(),
+        )
+        .unwrap();
+        let (_, summary, book) =
+            audit(&parsed, DrawValues::both(0), 1, Fill::Bridge, None).unwrap();
+        let index = parsed.0.keys().position(|k| k == w).unwrap();
+        let main = audited_moves(&book.graph, w, &parsed.0[w], &book.known[index]).unwrap()[0]
+            .as_ref()
+            .map(|m| m.value);
+        assert_eq!((summary.bridged_positions, main), (1, Some(-100)));
     }
 
     #[test]
