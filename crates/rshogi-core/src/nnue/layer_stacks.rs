@@ -168,6 +168,33 @@ impl<
         self.propagate_from_l1(&l1_out)
     }
 
+    #[cfg(all(
+        feature = "nnue-threat",
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni"
+    ))]
+    #[inline]
+    pub(super) fn propagate_accumulators_with_threat(
+        &self,
+        us: &[i16; L1],
+        them: &[i16; L1],
+        us_threat: &[i16; L1],
+        them_threat: &[i16; L1],
+    ) -> Option<i32> {
+        let weights = self.fused_weights.as_ref()?;
+        let l1_out = super::ls_l1_kernel::avx512::fused_with_threat(
+            us,
+            them,
+            us_threat,
+            them_threat,
+            weights,
+            &self.l1.biases,
+        );
+        Some(self.propagate_from_l1(&l1_out))
+    }
+
     /// ファイルから読み込み
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         let l1 = AffineTransform::read(reader)?;
@@ -1790,6 +1817,56 @@ mod kernel_tests {
                 bucket.propagate(&sqr_clipped_relu_new(&us, &them).0),
                 bucket.propagate_accumulators(&us, &them)
             );
+        }
+        check::<1536>();
+        check::<2304>();
+        check::<3072>();
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn fused_threat_matches_wrapped_accumulators() {
+        fn check<const N: usize>() {
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0153_6512);
+            let bucket = random_bucket::<N>(&mut rng);
+            let values = [i16::MIN, i16::MAX, -128, -1, 0, 1, 127, 128];
+            for case in 0..16 {
+                let us = std::array::from_fn::<_, N, _>(|i| {
+                    if case < 8 {
+                        values[(i + case) % 8]
+                    } else {
+                        rng.random()
+                    }
+                });
+                let them = std::array::from_fn::<_, N, _>(|i| {
+                    if case < 8 {
+                        values[(i * 3 + case) % 8]
+                    } else {
+                        rng.random()
+                    }
+                });
+                let ut = std::array::from_fn::<_, N, _>(|i| {
+                    if case < 8 {
+                        values[(i * 5 + case) % 8]
+                    } else {
+                        rng.random()
+                    }
+                });
+                let tt = std::array::from_fn::<_, N, _>(|i| {
+                    if case < 8 {
+                        values[(i * 7 + case) % 8]
+                    } else {
+                        rng.random()
+                    }
+                });
+                let uc = std::array::from_fn(|i| us[i].wrapping_add(ut[i]));
+                let tc = std::array::from_fn(|i| them[i].wrapping_add(tt[i]));
+                let weights = bucket.fused_weights.as_ref().unwrap();
+                assert_eq!(
+                    avx512::fused(&uc, &tc, weights, &bucket.l1.biases),
+                    avx512::fused_with_threat(&us, &them, &ut, &tt, weights, &bucket.l1.biases)
+                );
+            }
         }
         check::<1536>();
         check::<2304>();

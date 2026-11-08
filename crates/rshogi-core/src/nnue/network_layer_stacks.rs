@@ -737,8 +737,28 @@ impl<
             target_feature = "avx512vnni"
         ))]
         let raw_score = if matches!(L1, 1536 | 2304 | 3072) && LS_L1_OUT == 16 {
-            self.with_combined_accumulators(acc, side_to_move, |us, them| {
-                self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
+            #[cfg(feature = "nnue-threat")]
+            let fused_threat = if self.feature_transformer.has_threat {
+                let (us, them) = if side_to_move == Color::Black {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                };
+                self.layer_stacks.buckets[bucket_index].propagate_accumulators_with_threat(
+                    acc.get(us),
+                    acc.get(them),
+                    acc.get_threat(us),
+                    acc.get_threat(them),
+                )
+            } else {
+                None
+            };
+            #[cfg(not(feature = "nnue-threat"))]
+            let fused_threat: Option<i32> = None;
+            fused_threat.unwrap_or_else(|| {
+                self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                    self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
+                })
             })
         } else {
             let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
@@ -3181,7 +3201,9 @@ mod tests {
         }
     }
 
-    fn synthetic_evaluate_with_bucket_matches_legacy_both_sides<const N: usize, const L2: usize>() {
+    fn synthetic_evaluate_with_bucket_matches_legacy_both_sides<const N: usize, const L2: usize>(
+        use_threat: bool,
+    ) {
         use super::super::ls_feature_spec::HalfKpSpec;
         use super::*;
         use rand::{Rng, SeedableRng};
@@ -3205,11 +3227,31 @@ mod tests {
             num_buckets: DEFAULT_NUM_BUCKETS,
             _ft: PhantomData,
         };
+        #[cfg(feature = "nnue-threat")]
+        let network = {
+            let mut network = network;
+            network.feature_transformer.has_threat = use_threat;
+            network
+        };
+        #[cfg(not(feature = "nnue-threat"))]
+        assert!(!use_threat);
         let mut acc = AccumulatorLayerStacks::<N>::new();
         for _ in 0..8 {
             for perspective in 0..2 {
                 for i in 0..N {
                     acc.accumulation[perspective][i] = rng.random_range(-32..160);
+                    #[cfg(feature = "nnue-threat")]
+                    if use_threat {
+                        if i % 31 == 0 {
+                            acc.accumulation[perspective][i] = i16::MAX;
+                            acc.threat_accumulation[perspective][i] = 1;
+                        } else if i % 2 == 0 {
+                            acc.threat_accumulation[perspective][i] = rng.random_range(-64..64);
+                        } else {
+                            acc.accumulation[perspective][i] = rng.random();
+                            acc.threat_accumulation[perspective][i] = rng.random();
+                        }
+                    }
                 }
             }
             for side in [Color::Black, Color::White] {
@@ -3225,9 +3267,20 @@ mod tests {
                 for (perspective, base) in [(side, 0), (!side, (N / 2))] {
                     let values = acc.get(perspective as usize);
                     for i in 0..(N / 2) {
-                        transformed.0[base + i] = ((i32::from(values[i]).clamp(0, 127)
-                            * i32::from(values[i + (N / 2)]).clamp(0, 127))
-                            >> 7) as u8;
+                        #[cfg(feature = "nnue-threat")]
+                        let (a, b) = if use_threat {
+                            let threat = acc.get_threat(perspective as usize);
+                            (
+                                values[i].wrapping_add(threat[i]),
+                                values[i + N / 2].wrapping_add(threat[i + N / 2]),
+                            )
+                        } else {
+                            (values[i], values[i + N / 2])
+                        };
+                        #[cfg(not(feature = "nnue-threat"))]
+                        let (a, b) = (values[i], values[i + N / 2]);
+                        transformed.0[base + i] =
+                            ((i32::from(a).clamp(0, 127) * i32::from(b).clamp(0, 127)) >> 7) as u8;
                     }
                 }
                 for bucket in 0..DEFAULT_NUM_BUCKETS {
@@ -3245,10 +3298,16 @@ mod tests {
 
     #[test]
     fn synthetic_fused_shapes_evaluate_with_bucket_match_legacy() {
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>();
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>();
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>();
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>();
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(false);
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>(false);
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn synthetic_fused_threat_evaluate_matches_legacy_both_sides() {
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト
