@@ -550,3 +550,49 @@ fn family_with_multiple_ft_ok() {
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
+
+#[test]
+fn fused_1536_requires_a_single_measured_architecture() {
+    let required = [
+        "layerstack-arch",
+        "ft-halfka_hm_merged",
+        "layerstacks-1536x16x32",
+    ];
+    assert!(use_avx512bw_fused_1536(&lookup(&required)));
+    let mut specific = required.to_vec();
+    specific.push("mode-specific");
+    assert!(use_avx512bw_fused_1536(&lookup(&specific)));
+    for feature in [
+        "mode-family",
+        "mode-universal",
+        "nnue-runtime-dimensions",
+        "nnue-threat",
+        "nnue-psqt",
+        "nnue-effect-bucket",
+        "ft-halfkp",
+        "ft-halfka_split",
+        "ft-halfka_merged",
+        "ft-halfka_hm_split",
+        "layerstacks-1536x32x32",
+        "layerstacks-768x16x32",
+        "layerstacks-768x8x32",
+        "layerstacks-512x16x32",
+        "layerstacks-1024x16x32",
+        "layerstacks-3072x16x32",
+        "layerstacks-2304x16x64",
+        "layerstacks-3072x16x64",
+        "layerstacks-1536x16x64",
+    ] {
+        let mut features = required.to_vec();
+        features.push(feature);
+        assert!(!use_avx512bw_fused_1536(&lookup(&features)), "{feature}");
+    }
+    for missing in 0..required.len() {
+        let features: Vec<_> = required
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| (i != missing).then_some(*f))
+            .collect();
+        assert!(!use_avx512bw_fused_1536(&lookup(&features)));
+    }
+}

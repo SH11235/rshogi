@@ -1,6 +1,44 @@
 // build.rs と tests/integration/build_rs_checks.rs から `include!` される純粋ロジック。
 // 環境変数や Cargo 連携には依存させず、`has_feature` lookup を引数で受け取る。
 
+const LAYERSTACK_FEATURES: &[&str] = &[
+    "layerstacks-1536x16x32",
+    "layerstacks-1536x32x32",
+    "layerstacks-768x16x32",
+    "layerstacks-768x8x32",
+    "layerstacks-512x16x32",
+    "layerstacks-1024x16x32",
+    "layerstacks-3072x16x32",
+    "layerstacks-2304x16x64",
+    "layerstacks-3072x16x64",
+    "layerstacks-1536x16x64",
+];
+
+const FT_FEATURES: &[&str] = &[
+    "ft-halfkp",
+    "ft-halfka_split",
+    "ft-halfka_merged",
+    "ft-halfka_hm_split",
+    "ft-halfka_hm_merged",
+];
+
+fn use_avx512bw_fused_1536(has_feature: &dyn Fn(&str) -> bool) -> bool {
+    let excluded = [
+        "mode-family",
+        "mode-universal",
+        "nnue-runtime-dimensions",
+        "nnue-threat",
+        "nnue-psqt",
+        "nnue-effect-bucket",
+    ];
+    has_feature("layerstack-arch")
+        && has_feature("ft-halfka_hm_merged")
+        && has_feature("layerstacks-1536x16x32")
+        && FT_FEATURES.iter().filter(|f| has_feature(f)).count() == 1
+        && LAYERSTACK_FEATURES.iter().filter(|f| has_feature(f)).count() == 1
+        && excluded.iter().all(|f| !has_feature(f))
+}
+
 /// Cargo feature 組合せの整合性を検証する。
 ///
 /// 不正組合せが見つかれば `Err(message)` を返す。
@@ -17,31 +55,12 @@ fn validate_feature_combination(
     let mode_count =
         (mode_universal as u8) + (mode_family as u8) + (mode_specific as u8);
 
-    let layerstacks_features: &[&str] = &[
-        "layerstacks-1536x16x32",
-        "layerstacks-1536x32x32",
-        "layerstacks-768x16x32",
-        "layerstacks-768x8x32",
-        "layerstacks-512x16x32",
-        "layerstacks-1024x16x32",
-        "layerstacks-3072x16x32",
-        "layerstacks-2304x16x64",
-        "layerstacks-3072x16x64",
-        "layerstacks-1536x16x64",
-    ];
-    let layerstacks_count = layerstacks_features
+    let layerstacks_count = LAYERSTACK_FEATURES
         .iter()
         .filter(|f| has_feature(f))
         .count();
 
-    let ft_features: &[&str] = &[
-        "ft-halfkp",
-        "ft-halfka_split",
-        "ft-halfka_merged",
-        "ft-halfka_hm_split",
-        "ft-halfka_hm_merged",
-    ];
-    let ft_count = ft_features.iter().filter(|f| has_feature(f)).count();
+    let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
     if has_feature("nnue-effect-bucket") {
         if !mode_specific {

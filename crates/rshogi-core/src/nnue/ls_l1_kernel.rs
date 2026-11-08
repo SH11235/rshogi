@@ -1,10 +1,10 @@
-//! L1=1536 / 2304 / 3072、出力16 の LayerStacks L1 と FT 出力変換を融合する VNNI カーネル。
+//! L1=1536 / 2304 / 3072、出力16 の LayerStacks L1 と FT 出力変換を融合する AVX-512 カーネル。
 
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    target_feature = "avx512vnni"
+    any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
 ))]
 pub(super) mod avx512 {
     use super::super::accumulator::AlignedBox;
@@ -15,10 +15,19 @@ pub(super) mod avx512 {
     /// 内部バッファの長さ・配置は構築後に変更しない。
     pub(crate) struct FusedWeights<const INPUT: usize>(AlignedBox<i8>);
 
+    // 非 VNNI の融合は、性能を確認した通常 LayerStacks に限る。
+    pub(crate) const fn supported<const INPUT: usize, const OUTPUT: usize>() -> bool {
+        OUTPUT == 16
+            && if cfg!(target_feature = "avx512vnni") {
+                matches!(INPUT, 1536 | 2304 | 3072)
+            } else {
+                !cfg!(any(feature = "nnue-threat", feature = "nnue-psqt")) && matches!(INPUT, 1536)
+            }
+    }
     pub(crate) fn reorder<const INPUT: usize, const OUTPUT: usize>(
         l1: &AffineTransform<INPUT, OUTPUT>,
     ) -> Option<FusedWeights<INPUT>> {
-        if !matches!(INPUT, 1536 | 2304 | 3072) || OUTPUT != 16 {
+        if !supported::<INPUT, OUTPUT>() {
             return None;
         }
         let mut weights = AlignedBox::new_zeroed(INPUT * OUTPUT);
@@ -64,7 +73,7 @@ pub(super) mod avx512 {
     /// acc は N 個の i16 を指し、THREAT のとき threat も N 個を指す。
     /// offset は64の倍数で offset+64 <= N/2。
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    #[target_feature(enable = "avx512f,avx512bw")]
     unsafe fn pack64<const N: usize, const THREAT: bool>(
         acc: *const i16,
         threat: *const i16,
@@ -95,6 +104,7 @@ pub(super) mod avx512 {
     }
 
     // register を固定し、重みロードの load-op 化と spill を避ける。
+    #[cfg(target_feature = "avx512vnni")]
     #[inline]
     fn dpbusd_register(mut sum: __m512i, input: __m512i, weight: __m512i) -> __m512i {
         // SAFETY: モジュールの cfg が AVX512VNNI を保証する。すべて512bit registerで、
@@ -109,6 +119,18 @@ pub(super) mod avx512 {
             );
         }
         sum
+    }
+
+    #[cfg(not(target_feature = "avx512vnni"))]
+    #[inline]
+    fn dpbusd_register(sum: __m512i, input: __m512i, weight: __m512i) -> __m512i {
+        // SAFETY: cfg が AVX-512F/BW を保証する。input は 0..=126 なので
+        // 隣接2項の積和は i16 の範囲に収まり、飽和しない。
+        unsafe {
+            let pairs = _mm512_maddubs_epi16(input, weight);
+            let products = _mm512_madd_epi16(pairs, _mm512_set1_epi16(1));
+            _mm512_add_epi32(sum, products)
+        }
     }
 
     #[inline]
@@ -150,7 +172,12 @@ pub(super) mod avx512 {
         // FusedWeights は reorder の [N / 64][4][4][64] 配置と64B境界を保証する。
         // pack64 は各視点の範囲内だけを読み、store は4出力ずつ行う。
         unsafe {
-            let mut sums = [[_mm512_setzero_si512(); 4]; 4];
+            const CHAINS: usize = if cfg!(target_feature = "avx512vnni") {
+                4
+            } else {
+                2
+            };
+            let mut sums = [[_mm512_setzero_si512(); CHAINS]; 4];
             for (acc, threat, base) in [(us, us_threat, 0), (them, them_threat, N / 128)] {
                 for block in 0..N / 128 {
                     let x = pack64::<N, THREAT>(acc.as_ptr(), threat.as_ptr(), block * 64);
@@ -162,7 +189,8 @@ pub(super) mod avx512 {
                     ];
                     let w = weights.0.as_ptr().add((base + block) * 1024).cast::<__m512i>();
                     for (g, group) in sums.iter_mut().enumerate() {
-                        for (j, sum) in group.iter_mut().enumerate() {
+                        for j in 0..4 {
+                            let sum = &mut group[j % CHAINS];
                             *sum = dpbusd_register(
                                 *sum,
                                 broadcasts[j],
@@ -173,10 +201,13 @@ pub(super) mod avx512 {
                 }
             }
             for (g, group) in sums.iter().enumerate() {
+                #[cfg(target_feature = "avx512vnni")]
                 let sum = _mm512_add_epi32(
                     _mm512_add_epi32(group[0], group[1]),
                     _mm512_add_epi32(group[2], group[3]),
                 );
+                #[cfg(not(target_feature = "avx512vnni"))]
+                let sum = _mm512_add_epi32(group[0], group[1]);
                 let halves = _mm256_add_epi32(
                     _mm512_castsi512_si256(sum),
                     _mm512_extracti64x4_epi64::<1>(sum),

@@ -70,7 +70,7 @@ pub struct LayerStackBucket<
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     fused_weights: Option<super::ls_l1_kernel::avx512::FusedWeights<L1>>,
 }
@@ -112,7 +112,7 @@ impl<
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
-            target_feature = "avx512vnni"
+            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         ))]
         let fused_weights = super::ls_l1_kernel::avx512::reorder(&l1);
         Self {
@@ -123,7 +123,7 @@ impl<
                 target_arch = "x86_64",
                 target_feature = "avx512f",
                 target_feature = "avx512bw",
-                target_feature = "avx512vnni"
+                any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
             ))]
             fused_weights,
         }
@@ -141,14 +141,14 @@ impl<
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
-            target_feature = "avx512vnni"
+            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         ))]
         super::ls_l1_kernel::avx512::edit_l1(&mut self.l1, &mut self.fused_weights, edit);
         #[cfg(not(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
-            target_feature = "avx512vnni"
+            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         )))]
         edit(&mut self.l1);
     }
@@ -157,7 +157,7 @@ impl<
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     #[inline]
     pub(super) fn propagate_accumulators(&self, us: &[i16; L1], them: &[i16; L1]) -> i32 {
@@ -173,7 +173,7 @@ impl<
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     #[inline]
     pub(super) fn propagate_accumulators_with_threat(
@@ -247,7 +247,7 @@ impl<
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
-        target_feature = "avx512vnni"
+        any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
     fn propagate_from_l1(&self, l1_out: &[i32; LS_L1_OUT]) -> i32 {
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
@@ -1673,7 +1673,7 @@ mod tests {
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    target_feature = "avx512vnni"
+    any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
 ))]
 pub(super) fn assert_fused_l1_matches_reference<const N: usize>(
     bucket: &LayerStackBucket<N, 16, 30, 32>,
@@ -1703,7 +1703,7 @@ pub(super) fn assert_fused_l1_matches_reference<const N: usize>(
     target_arch = "x86_64",
     target_feature = "avx512f",
     target_feature = "avx512bw",
-    target_feature = "avx512vnni"
+    any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
 ))]
 mod kernel_tests {
     use super::super::ls_l1_kernel::avx512;
@@ -1802,9 +1802,24 @@ mod kernel_tests {
         );
     }
 
+    #[cfg(not(target_feature = "avx512vnni"))]
+    #[test]
+    fn non_vnni_1536_allocates_fused_weights() {
+        assert!(avx512::supported::<1536, 16>());
+        assert!(LayerStackBucket::<1536, 16, 30, 32>::new().fused_weights.is_some());
+    }
+
     #[test]
     fn fused_supported_shapes_match_dense() {
         fn check<const N: usize>() {
+            if !avx512::supported::<N, 16>() {
+                assert!(
+                    random_bucket::<N>(&mut Xoshiro256PlusPlus::seed_from_u64(42))
+                        .fused_weights
+                        .is_none()
+                );
+                return;
+            }
             all_buckets_full_range_and_weight_edits_match::<N>();
             fused_covers_every_i16_value::<N>();
             fused_l1_wraps_like_dense_with_extreme_biases::<N>();
@@ -1829,6 +1844,10 @@ mod kernel_tests {
         fn check<const N: usize>() {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0153_6512);
             let bucket = random_bucket::<N>(&mut rng);
+            if !avx512::supported::<N, 16>() {
+                assert!(bucket.fused_weights.is_none());
+                return;
+            }
             let values = [i16::MIN, i16::MAX, -128, -1, 0, 1, 127, 128];
             for case in 0..16 {
                 let us = std::array::from_fn::<_, N, _>(|i| {
@@ -1889,6 +1908,10 @@ mod kernel_tests {
     fn interrupted_edit_rebuilds_fused_weights() {
         fn check<const N: usize>() {
             let mut bucket = LayerStackBucket::<N, 16, 30, 32>::new();
+            if !avx512::supported::<N, 16>() {
+                assert!(bucket.fused_weights.is_none());
+                return;
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 bucket.edit_l1(|l1| {
                     l1.weights.make_mut().fill(1);

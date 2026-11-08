@@ -19,6 +19,10 @@ fn has_feature(name: &str) -> bool {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/checks.rs");
+    println!("cargo:rustc-check-cfg=cfg(ls_avx512bw_fused_1536)");
+    if use_avx512bw_fused_1536(&has_feature) {
+        println!("cargo:rustc-cfg=ls_avx512bw_fused_1536");
+    }
 
     if let Err(msg) = validate_feature_combination(&has_feature) {
         panic!("rshogi-core build.rs: {msg}");
