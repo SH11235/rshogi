@@ -18,6 +18,13 @@ fn args(dir: &Path) -> QueueReviewArgs {
         hold_out: dir.join("hold"),
         prefix: "qrhold".into(),
         hold_class: vec![],
+        plan_out: None,
+        max_ratio: 0.95,
+        box_deadlines: false,
+        condition: vec![],
+        add: vec![],
+        update: vec![],
+        update_size: 30,
     }
 }
 use std::path::Path;
@@ -316,6 +323,10 @@ fn cli_registers_queue_review_and_defaults() {
     assert_eq!(args.tree_size, 92);
     assert_eq!(args.value_floor, 0.001);
     assert_eq!(args.prefix, "qrhold");
+    assert!(args.plan_out.is_none());
+    assert_eq!(args.max_ratio, 0.95);
+    assert_eq!(args.update_size, 30);
+    assert!(!args.box_deadlines);
     assert_eq!(args.hold_class, [Class::NotReached, Class::ReachPartial, Class::ExtraRoot]);
 }
 
@@ -384,7 +395,19 @@ fn merged_walk_paths_keep_intermediate_reach_partial() {
     );
     let b = d.path().join("b");
     let rows = vec![row("middle", "2g2f 8c8d"), row("stop", "2g2f 8c8d 9g9f")];
-    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    fixture_box(
+        &b,
+        rows.iter()
+            .flat_map(|r| {
+                r["own"].as_str().unwrap().chars().map(|own| {
+                    let mut tree = progress(r, 0, 0);
+                    tree["own"] = json!(own.to_string());
+                    tree
+                })
+            })
+            .collect(),
+        vec![],
+    );
     enqueue(&b, "only", 0, &rows);
     for explicit in [false, true] {
         let mut a = args(d.path());
@@ -438,7 +461,19 @@ fn duplicate_ids_are_bounded_and_deterministic() {
     let d = TempDir::new().unwrap();
     let b = d.path().join("b");
     let rows: Vec<_> = (0..12).map(|i| row(&format!("id{i:02}"), "7g7f")).collect();
-    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    fixture_box(
+        &b,
+        rows.iter()
+            .flat_map(|r| {
+                r["own"].as_str().unwrap().chars().map(|own| {
+                    let mut tree = progress(r, 0, 0);
+                    tree["own"] = json!(own.to_string());
+                    tree
+                })
+            })
+            .collect(),
+        vec![],
+    );
     enqueue(&b, "only", 0, &rows);
     let run = || {
         let mut a = args(d.path());
@@ -501,7 +536,19 @@ fn stop_that_is_also_passed_through_stays_reach_partial() {
     let path = walk(d.path(), "b\town\t0.0002\t7g7f 3c3d\nb\town\t0.0003\t7g7f 3c3d 2g2f\n");
     let b = d.path().join("b");
     let rows = vec![row("both", "7g7f 3c3d")];
-    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    fixture_box(
+        &b,
+        rows.iter()
+            .flat_map(|r| {
+                r["own"].as_str().unwrap().chars().map(|own| {
+                    let mut tree = progress(r, 0, 0);
+                    tree["own"] = json!(own.to_string());
+                    tree
+                })
+            })
+            .collect(),
+        vec![],
+    );
     enqueue(&b, "only", 0, &rows);
     let mut a = args(d.path());
     a.box_specs = vec![format!("B={}", b.display())];
@@ -521,7 +568,19 @@ fn rare_stop_is_not_final_reach() {
     let path = walk(d.path(), "b\trare\t0.0002\t7g7f 3c3d\nb\town\t0.9\t7g7f 8c8d 2g2f\n");
     let b = d.path().join("b");
     let rows = vec![row("rare_root", "7g7f 3c3d")];
-    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    fixture_box(
+        &b,
+        rows.iter()
+            .flat_map(|r| {
+                r["own"].as_str().unwrap().chars().map(|own| {
+                    let mut tree = progress(r, 0, 0);
+                    tree["own"] = json!(own.to_string());
+                    tree
+                })
+            })
+            .collect(),
+        vec![],
+    );
     enqueue(&b, "only", 0, &rows);
     let mut a = args(d.path());
     a.box_specs = vec![format!("B={}", b.display())];
@@ -533,4 +592,604 @@ fn rare_stop_is_not_final_reach() {
             .lines()
             .any(|l| l.starts_with("B\trare_root\t") && l.contains("\treach-partial\t"))
     );
+}
+
+fn plan_args(dir: &Path, rows: &[(&str, Vec<Value>)]) -> QueueReviewArgs {
+    let mut a = args(dir);
+    a.plan_out = Some(dir.join("plan"));
+    a.tree_size = 10;
+    for (name, rows) in rows {
+        let b = dir.join(name);
+        fixture_box(
+            &b,
+            rows.iter()
+                .flat_map(|r| {
+                    r["own"].as_str().unwrap().chars().map(|own| {
+                        let mut tree = progress(r, 0, 0);
+                        tree["own"] = json!(own.to_string());
+                        tree
+                    })
+                })
+                .collect(),
+            vec![],
+        );
+        enqueue(&b, "only", 0, rows);
+        a.box_specs.push(format!("{name}={}", b.display()));
+        a.box_rate.push(format!("{name}=10"));
+    }
+    a
+}
+fn cargo_rows(dir: &Path, name: &str) -> Vec<Value> {
+    let path = dir.join(format!("plan/qrhold_{name}.jsonl"));
+    if !path.exists() {
+        return vec![];
+    }
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect()
+}
+fn input_rows(dir: &Path, name: &str, rows: &[Value]) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+    path
+}
+fn plan_table(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("plan/qrhold_plan.tsv")).unwrap()
+}
+
+#[test]
+fn plan_moves_in_priority_order_and_merges_update_without_changing_definition() {
+    let d = TempDir::new().unwrap();
+    let mut urgent = row("urgent", "7g7f");
+    urgent["priority"] = json!(1);
+    let mut later = row("later", "2g2f");
+    later["priority"] = json!(200);
+    let mut a = plan_args(d.path(), &[("B", vec![]), ("A", vec![urgent.clone(), later.clone()])]);
+    a.update_size = 2;
+    let mut update = later.clone();
+    update["memo"] = json!("new memo");
+    update["game"] = json!([["8c8d", "7g7f"]]);
+    update["priority"] = json!(999);
+    a.update = vec![input_rows(d.path(), "update.jsonl", &[update.clone()])];
+    let before = std::fs::read(d.path().join("A/enqueue/only.jsonl")).unwrap();
+    run_at(a, now(), &mut vec![]).unwrap();
+    let source = cargo_rows(d.path(), "A");
+    assert_eq!(source.len(), 1);
+    assert_eq!(source[0]["hold"], true);
+    let destination = cargo_rows(d.path(), "B");
+    assert_eq!(destination.len(), 1);
+    later["game"] = update["game"].clone();
+    later["memo"] = update["memo"].clone();
+    assert_eq!(destination[0], later);
+    assert!(plan_table(d.path()).contains("move\tlater\tb\t200\tA\tB\t"));
+    assert_eq!(std::fs::read(d.path().join("A/enqueue/only.jsonl")).unwrap(), before);
+}
+
+#[test]
+fn plan_moves_or_holds_requested_remaining_per_side() {
+    for own in ["b", "bw"] {
+        for can_move in [false, true] {
+            let d = TempDir::new().unwrap();
+            let mut moving = row("moving", "7g7f");
+            moving["own"] = json!(own);
+            moving["priority"] = json!(200);
+            let mut a =
+                plan_args(d.path(), &[("A", vec![moving.clone()]), ("B", vec![]), ("C", vec![])]);
+            let trees = own
+                .chars()
+                .enumerate()
+                .map(|(i, side)| {
+                    let mut tree = progress(&moving, 0, 30 + i as u64 * 10);
+                    tree["own"] = json!(side.to_string());
+                    tree
+                })
+                .collect();
+            fixture_box(&d.path().join("A"), trees, vec![]);
+            a.box_rate = vec![
+                "A=1".into(),
+                "B=10".into(),
+                format!("C={}", if can_move { 50 } else { 10 }),
+            ];
+            let mut stdout = Vec::new();
+            run_at(a, now(), &mut stdout).unwrap();
+            let stdout = String::from_utf8(stdout).unwrap();
+            let initial = if own == "b" { "15.000" } else { "35.000" };
+            assert!(stdout.contains(&format!("A: 計画 残り/読める量={initial} → 0.000")));
+            assert!(stdout.contains("B: 計画 残り/読める量=0.000 → 0.000"));
+            assert!(cargo_rows(d.path(), "B").is_empty());
+            moving["hold"] = json!(true);
+            assert_eq!(cargo_rows(d.path(), "A"), [moving.clone()]);
+            if can_move {
+                moving["hold"] = json!(false);
+                assert_eq!(cargo_rows(d.path(), "C"), [moving]);
+                let ratio = if own == "b" { "0.300" } else { "0.700" };
+                assert!(stdout.contains(&format!("C: 計画 残り/読める量=0.000 → {ratio}")));
+                assert!(plan_table(d.path()).contains("move\tmoving\t"));
+            } else {
+                assert!(cargo_rows(d.path(), "C").is_empty());
+                assert!(plan_table(d.path()).contains("hold-over\tmoving\t"));
+            }
+        }
+    }
+}
+
+#[test]
+fn plan_move_preserves_same_id_in_destination_receipts() {
+    let d = TempDir::new().unwrap();
+    let moving = row("same", "7g7f");
+    let mut existing = row("same", "2g2f");
+    existing["hold"] = json!(true);
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![moving.clone()]),
+            ("B", vec![existing]),
+            ("C", vec![]),
+        ],
+    );
+    a.box_rate = vec!["A=1".into(), "B=100".into(), "C=50".into()];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert!(cargo_rows(d.path(), "B").is_empty());
+    assert_eq!(cargo_rows(d.path(), "C"), [moving]);
+    assert!(plan_table(d.path()).contains("move\tsame\tb\t42\tA\tC\t"));
+}
+
+#[test]
+fn plan_move_preserves_same_id_already_in_plan() {
+    let d = TempDir::new().unwrap();
+    let first = row("same", "7g7f");
+    let mut second = row("same", "2g2f");
+    second["priority"] = json!(200);
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![first.clone()]),
+            ("B", vec![]),
+            ("C", vec![second.clone()]),
+        ],
+    );
+    a.box_rate = vec!["A=1".into(), "B=100".into(), "C=1".into()];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(cargo_rows(d.path(), "B"), [first]);
+    second["hold"] = json!(true);
+    assert_eq!(cargo_rows(d.path(), "C"), [second]);
+    let table = plan_table(d.path());
+    assert!(table.contains("move\tsame\tb\t42\tA\tB\t"));
+    assert!(table.contains("hold-over\tsame\tb\t200\tC\tC\t"));
+}
+
+#[test]
+fn plan_holds_low_before_high_priority_and_keeps_important_overflow() {
+    let d = TempDir::new().unwrap();
+    let low = row("low", "7g7f");
+    let mut high = row("high", "2g2f");
+    high["priority"] = json!(200);
+    let important = row("important", "9g9f");
+    let mut a = plan_args(d.path(), &[("A", vec![low, high, important])]);
+    a.box_rate = vec!["A=1".into()];
+    let w = walk(d.path(), "b\town\t0.0002\t7g7f\n");
+    a.walk_table = vec![format!("b={}", w.display())];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = plan_table(d.path());
+    let actions: Vec<_> = table.lines().skip(1).map(|l| l.split('\t').next().unwrap()).collect();
+    assert_eq!(actions, ["hold-low", "hold-over", "keep-over"]);
+    assert_eq!(cargo_rows(d.path(), "A").len(), 2);
+}
+
+#[test]
+fn plan_shared_extra_root_blocks_other_condition_but_unique_root_can_move() {
+    for shared in [false, true] {
+        let d = TempDir::new().unwrap();
+        let moving = row("moving", "7g7f");
+        let mut peer = row("peer", "2g2f");
+        peer["hold"] = json!(true);
+        if shared {
+            peer["roots"] = json!([root("7g7f")]);
+        }
+        let mut a = plan_args(d.path(), &[("A", vec![moving, peer]), ("B", vec![])]);
+        a.box_rate = vec!["A=1".into(), "B=10".into()];
+        a.condition = vec!["A=one".into(), "B=two".into()];
+        run_at(a, now(), &mut vec![]).unwrap();
+        assert_eq!(cargo_rows(d.path(), "B").len(), usize::from(!shared));
+        assert_eq!(plan_table(d.path()).contains("keep-over"), shared);
+    }
+}
+
+#[test]
+fn plan_update_uses_live_owner_or_all_held_copies_and_drops_missing() {
+    let d = TempDir::new().unwrap();
+    let live = row("live", "7g7f");
+    let mut copy = live.clone();
+    copy["hold"] = json!(true);
+    copy["priority"] = json!(777);
+    let mut held = row("held", "2g2f");
+    held["hold"] = json!(true);
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![live.clone(), held.clone()]),
+            ("B", vec![copy, held.clone()]),
+        ],
+    );
+    a.box_rate = vec!["A=100".into(), "B=100".into()];
+    let mut update = live;
+    update["memo"] = json!("new");
+    update["priority"] = json!(123);
+    a.update = vec![input_rows(
+        d.path(),
+        "updates",
+        &[update, held, row("missing", "9g9f")],
+    )];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let a_rows = cargo_rows(d.path(), "A");
+    assert_eq!(a_rows.len(), 2);
+    assert_eq!(a_rows[0]["priority"], 42);
+    assert_eq!(a_rows[0]["memo"], "new");
+    assert_eq!(cargo_rows(d.path(), "B").len(), 1);
+    let table = plan_table(d.path());
+    assert_eq!(table.matches("update-held\t").count(), 2);
+    assert!(table.contains("drop-update\tmissing"));
+}
+
+#[test]
+fn plan_adds_by_priority_groups_roots_and_holds_when_full() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("B", vec![]), ("A", vec![])]);
+    a.condition = vec!["A=one".into(), "B=two".into()];
+    let mut first = row("first", "7g7f");
+    first["priority"] = json!(1);
+    let second = row("second", "7g7f");
+    let third = row("third", "2g2f");
+    a.add = vec![input_rows(d.path(), "adds", &[second, third, first])];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let rows = cargo_rows(d.path(), "A");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "first");
+    assert_eq!(rows[0]["hold"], false);
+    assert_eq!(rows[1]["id"], "second");
+    assert_eq!(rows[1]["hold"], true);
+    assert_eq!(cargo_rows(d.path(), "B")[0]["id"], "third");
+    assert!(plan_table(d.path()).contains("add-hold\tsecond"));
+}
+
+#[test]
+fn plan_add_ignores_held_copies_in_receipts_and_updates() {
+    for update_held in [false, true] {
+        let d = TempDir::new().unwrap();
+        let mut copy = row("copy", "2g2f");
+        copy["roots"] = json!([root("7g7f")]);
+        copy["hold"] = json!(true);
+        let live = row("live", "7g7f");
+        let mut a = plan_args(d.path(), &[("A", vec![copy.clone()]), ("B", vec![live])]);
+        a.box_rate = vec!["A=100".into(), "B=100".into()];
+        a.condition = vec!["A=one".into(), "B=two".into()];
+        if update_held {
+            a.update = vec![input_rows(d.path(), "updates", std::slice::from_ref(&copy))];
+        }
+        let added = row("new", "7g7f");
+        a.add = vec![input_rows(d.path(), "adds", std::slice::from_ref(&added))];
+        run_at(a, now(), &mut vec![]).unwrap();
+        assert_eq!(cargo_rows(d.path(), "B"), [added]);
+        assert_eq!(cargo_rows(d.path(), "A"), if update_held { vec![copy] } else { vec![] });
+        assert!(plan_table(d.path()).contains("add\tnew\tb\t42\t\tB\t"));
+    }
+}
+
+#[test]
+fn plan_add_allows_another_condition_for_roots_with_multiple_live_labels() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![row("first", "7g7f")]),
+            ("B", vec![row("second", "7g7f")]),
+            ("C", vec![]),
+        ],
+    );
+    a.box_rate = vec!["A=100".into(), "B=100".into(), "C=100".into()];
+    a.condition = vec!["A=one".into(), "B=two".into(), "C=three".into()];
+    let added = row("new", "7g7f");
+    a.add = vec![input_rows(d.path(), "adds", std::slice::from_ref(&added))];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(cargo_rows(d.path(), "C"), [added]);
+    assert!(cargo_rows(d.path(), "A").is_empty());
+    assert!(cargo_rows(d.path(), "B").is_empty());
+    assert!(plan_table(d.path()).contains("add\tnew\tb\t42\t\tC\t"));
+}
+
+#[test]
+fn plan_add_hold_does_not_constrain_later_adds_to_its_condition() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![]), ("B", vec![])]);
+    a.box_rate = vec!["A=5".into(), "B=10".into()];
+    a.condition = vec!["A=one".into(), "B=two".into()];
+    let mut first = row("first", "7g7f");
+    first["own"] = json!("bw");
+    first["priority"] = json!(1);
+    let second = row("second", "7g7f");
+    a.add = vec![input_rows(
+        d.path(),
+        "adds",
+        &[first.clone(), second.clone()],
+    )];
+    run_at(a, now(), &mut vec![]).unwrap();
+    first["hold"] = json!(true);
+    assert_eq!(cargo_rows(d.path(), "A"), [first]);
+    assert_eq!(cargo_rows(d.path(), "B"), [second]);
+    let table = plan_table(d.path());
+    assert!(table.contains("add-hold\tfirst\tbw\t1\t\tA\t"));
+    assert!(table.contains("add\tsecond\tb\t42\t\tB\t"));
+}
+
+#[test]
+fn box_deadlines_change_capacity_even_without_plan_and_missing_uses_cutoff() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![]), ("B", vec![])]);
+    a.plan_out = None;
+    a.box_deadlines = true;
+    std::fs::write(d.path().join("A/deadline"), format!("{}\n", now().timestamp() + 3600)).unwrap();
+    run_at(a, now(), &mut vec![]).unwrap();
+    let summary = std::fs::read_to_string(d.path().join("boxes.tsv")).unwrap();
+    assert!(summary.contains("A\t0\t10\t1\t10\t0\t0\t0"), "{summary}");
+    assert!(summary.contains("B\t0\t10\t2\t20\t0\t0\t0"));
+}
+
+#[test]
+fn plan_is_deterministic_rejects_existing_cargo_and_duplicate_add_ids() {
+    let d = TempDir::new().unwrap();
+    let r = row("existing", "7g7f");
+    let mut a = plan_args(d.path(), &[("B", vec![]), ("A", vec![r.clone()])]);
+    let input = input_rows(d.path(), "adds", &[row("new", "2g2f")]);
+    a.add = vec![input.clone()];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = plan_table(d.path());
+    let b_bytes = std::fs::read(d.path().join("plan/qrhold_B.jsonl")).unwrap();
+    let mut a = args(d.path());
+    a.box_specs = vec![
+        format!("A={}", d.path().join("A").display()),
+        format!("B={}", d.path().join("B").display()),
+    ];
+    a.plan_out = Some(d.path().join("plan"));
+    a.tree_size = 10;
+    a.box_rate = vec!["A=10".into(), "B=10".into()];
+    a.add = vec![input];
+    assert!(run_at(a, now(), &mut vec![]).is_err());
+    assert_eq!(plan_table(d.path()), table);
+    std::fs::remove_dir_all(d.path().join("plan")).unwrap();
+    let mut a = args(d.path());
+    a.box_specs = vec![
+        format!("A={}", d.path().join("A").display()),
+        format!("B={}", d.path().join("B").display()),
+    ];
+    a.plan_out = Some(d.path().join("plan"));
+    a.tree_size = 10;
+    a.box_rate = vec!["A=10".into(), "B=10".into()];
+    a.add = vec![d.path().join("adds")];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(plan_table(d.path()), table);
+    assert_eq!(std::fs::read(d.path().join("plan/qrhold_B.jsonl")).unwrap(), b_bytes);
+    std::fs::remove_dir_all(d.path().join("plan")).unwrap();
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("A={}", d.path().join("A").display())];
+    a.plan_out = Some(d.path().join("plan"));
+    a.add = vec![input_rows(d.path(), "duplicate", &[r])];
+    assert!(run_at(a, now(), &mut vec![]).is_err());
+    assert!(!d.path().join("plan").exists());
+}
+
+#[test]
+fn plan_rejects_multiple_live_update_owners_but_failed_is_not_an_owner() {
+    for failed in [false, true] {
+        let d = TempDir::new().unwrap();
+        let r = row("same", "7g7f");
+        let mut a = plan_args(d.path(), &[("A", vec![r.clone()]), ("B", vec![r.clone()])]);
+        let mut p = progress(&r, 0, 0);
+        p["failed"] = json!(failed);
+        fixture_box(&d.path().join("B"), vec![p], vec![]);
+        a.box_rate = vec!["A=100".into(), "B=100".into()];
+        a.update = vec![input_rows(d.path(), "updates", &[r])];
+        assert_eq!(run_at(a, now(), &mut vec![]).is_ok(), failed);
+        if failed {
+            assert!(cargo_rows(d.path(), "B").is_empty());
+        }
+    }
+}
+
+#[test]
+fn plan_does_not_move_read_or_running_trees_and_zero_capacity_add_is_held() {
+    let d = TempDir::new().unwrap();
+    let read = row("read", "7g7f");
+    let running = row("running", "2g2f");
+    let mut a = plan_args(d.path(), &[("A", vec![read.clone(), running.clone()]), ("B", vec![])]);
+    fixture_box(
+        &d.path().join("A"),
+        vec![progress(&read, 1, 0), progress(&running, 0, 0)],
+        vec![json!({"key":parse_root(running["root"].as_str().unwrap()).unwrap().key})],
+    );
+    a.box_rate = vec!["A=0".into(), "B=0".into()];
+    a.add = vec![input_rows(d.path(), "adds", &[row("new", "9g9f")])];
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    assert_eq!(cargo_rows(d.path(), "A").len(), 1);
+    assert_eq!(cargo_rows(d.path(), "A")[0]["id"], "new");
+    assert_eq!(cargo_rows(d.path(), "A")[0]["hold"], true);
+    assert!(!d.path().join("plan/qrhold_B.jsonl").exists());
+    assert!(String::from_utf8(stdout).unwrap().contains("B: 計画 残り/読める量=inf → inf"));
+}
+
+#[test]
+fn deadline_uses_earliest_cutoff_and_rejects_invalid_contents() {
+    for (offset, expected) in [
+        (10_800, Some("\t2\t20\t")),
+        (-1, Some("\t0\t0\t")),
+        (0, None),
+    ] {
+        let d = TempDir::new().unwrap();
+        let mut a = plan_args(d.path(), &[("A", vec![])]);
+        a.box_deadlines = true;
+        std::fs::write(
+            d.path().join("A/deadline"),
+            if expected.is_some() {
+                format!("{}\n", now().timestamp() + offset)
+            } else {
+                "invalid\n".into()
+            },
+        )
+        .unwrap();
+        let result = run_at(a, now(), &mut vec![]);
+        if let Some(expected) = expected {
+            result.unwrap();
+            assert!(
+                std::fs::read_to_string(d.path().join("boxes.tsv")).unwrap().contains(expected)
+            );
+        } else {
+            assert!(result.is_err());
+            assert!(!d.path().join("review.tsv").exists());
+        }
+    }
+}
+
+#[test]
+fn plan_output_cannot_share_hold_directory_or_overwrite_an_input() {
+    for shared_hold in [false, true] {
+        let d = TempDir::new().unwrap();
+        let mut a = plan_args(d.path(), &[("A", vec![])]);
+        if shared_hold {
+            a.plan_out = Some(a.hold_out.clone());
+        } else {
+            std::fs::create_dir_all(d.path().join("plan")).unwrap();
+            let input =
+                input_rows(&d.path().join("plan"), "qrhold_plan.tsv", &[row("new", "7g7f")]);
+            a.add = vec![input];
+        }
+        assert!(run_at(a, now(), &mut vec![]).is_err());
+        assert!(!d.path().join("review.tsv").exists());
+    }
+}
+
+#[test]
+fn plan_add_uses_only_destination_label_after_cross_condition_move() {
+    let d = TempDir::new().unwrap();
+    let mut moving = row("moving", "7g7f");
+    moving["own"] = json!("bw");
+    let mut a = plan_args(d.path(), &[("A", vec![moving]), ("B", vec![])]);
+    a.box_rate = vec!["A=7.5".into(), "B=20".into()];
+    a.condition = vec!["A=one".into(), "B=two".into()];
+    let added = row("new", "7g7f");
+    a.add = vec![input_rows(d.path(), "adds", std::slice::from_ref(&added))];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert!(plan_table(d.path()).contains("move\tmoving\tbw\t42\tA\tB\t"));
+    assert!(cargo_rows(d.path(), "B").contains(&added));
+    let source = cargo_rows(d.path(), "A");
+    assert_eq!(source.len(), 1);
+    assert_eq!(source[0]["hold"], true);
+}
+
+#[test]
+fn plan_add_ignores_label_of_tree_held_for_overflow() {
+    let d = TempDir::new().unwrap();
+    let mut held = row("held", "7g7f");
+    held["own"] = json!("bw");
+    held["priority"] = json!(200);
+    let mut a = plan_args(d.path(), &[("A", vec![held]), ("B", vec![])]);
+    a.box_rate = vec!["A=1".into(), "B=10".into()];
+    a.condition = vec!["A=one".into(), "B=two".into()];
+    let added = row("new", "7g7f");
+    a.add = vec![input_rows(d.path(), "adds", std::slice::from_ref(&added))];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert!(plan_table(d.path()).contains("hold-over\theld\t"));
+    assert_eq!(cargo_rows(d.path(), "B"), [added]);
+}
+
+#[test]
+fn plan_checks_update_game_against_destination_root() {
+    let d = TempDir::new().unwrap();
+    let original = row("same", "7g7f");
+    let mut a = plan_args(d.path(), &[("A", vec![original])]);
+    let mut update = row("same", "7g7f 3c3d");
+    update["game"] = json!([["2g2f"]]);
+    a.update = vec![input_rows(d.path(), "updates", &[update])];
+    let error = format!("{:#}", run_at(a, now(), &mut vec![]).unwrap_err());
+    assert!(error.contains("台=A id=same"), "{error}");
+    assert!(error.contains("game の手が不正"), "{error}");
+    assert!(!d.path().join("plan").exists());
+}
+
+#[test]
+fn plan_counts_update_size_once_and_moves_it_with_tree() {
+    for moving in [false, true] {
+        let d = TempDir::new().unwrap();
+        let original = row("same", "7g7f");
+        let mut a = plan_args(d.path(), &[("A", vec![original.clone()]), ("B", vec![])]);
+        a.box_rate = vec![format!("A={}", if moving { 1 } else { 10 }), "B=10".into()];
+        a.update_size = 2;
+        let mut update = original.clone();
+        update["memo"] = json!("last");
+        a.update = vec![input_rows(d.path(), "updates", &[original, update.clone()])];
+        let mut stdout = Vec::new();
+        run_at(a, now(), &mut stdout).unwrap();
+        let stdout = String::from_utf8(stdout).unwrap();
+        if moving {
+            assert!(stdout.contains("A: 計画 残り/読める量=5.000 → 0.000"), "{stdout}");
+            assert!(stdout.contains("B: 計画 残り/読める量=0.000 → 0.600"), "{stdout}");
+            assert_eq!(cargo_rows(d.path(), "B"), [update]);
+        } else {
+            assert!(stdout.contains("A: 計画 残り/読める量=0.500 → 0.600"), "{stdout}");
+            assert_eq!(cargo_rows(d.path(), "A"), [update]);
+        }
+    }
+}
+
+#[test]
+fn plan_refuses_existing_prefixed_table_even_without_cargo() {
+    let d = TempDir::new().unwrap();
+    let a = plan_args(d.path(), &[("A", vec![])]);
+    std::fs::create_dir_all(d.path().join("plan")).unwrap();
+    let path = d.path().join("plan/qrhold_plan.tsv");
+    std::fs::write(&path, "existing").unwrap();
+    assert!(run_at(a, now(), &mut vec![]).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing");
+    assert!(!d.path().join("review.tsv").exists());
+}
+
+#[test]
+fn cli_requires_plan_for_explicit_planning_options_except_deadlines() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    let base = [
+        "tree",
+        "queue-review",
+        "--box",
+        "A=/path/to/a",
+        "--cutoff",
+        "2026-11-08T12:00:00+09:00",
+        "--table",
+        "review.tsv",
+        "--boxes",
+        "boxes.tsv",
+        "--hold-out",
+        "holds",
+    ];
+    for option in [
+        ["--add", "add.jsonl"],
+        ["--update", "update.jsonl"],
+        ["--condition", "A=one"],
+        ["--max-ratio", "0.95"],
+        ["--update-size", "30"],
+    ] {
+        let mut argv = base.to_vec();
+        argv.extend(option);
+        let error = Cli::try_parse_from(&argv).err().unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--plan-out"));
+        argv.extend(["--plan-out", "plan"]);
+        assert!(Cli::try_parse_from(argv).is_ok());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--box-deadlines"])).is_ok());
 }
