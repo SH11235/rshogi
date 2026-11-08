@@ -141,17 +141,18 @@ pub(super) mod avx512 {
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
         use std::mem::MaybeUninit;
-        assert!(matches!(N, 2304 | 3072));
+        assert_eq!(N, 3072);
         assert_eq!(OUT, 16);
         assert!(weights.len() >= N * OUT);
         let mut values = [MaybeUninit::<u32>::uninit(); 768];
         let mut indices = [MaybeUninit::<u16>::uninit(); 768 + 16];
         let mut count = 0usize;
         let mut output = [0; OUT];
-        // SAFETY: N は 2304 または 3072。pack64 の参照範囲は両視点の配列内。
+        // SAFETY: N は 3072。pack64 の参照範囲は両視点の配列内。
         // 各 block は values の 16 要素を初期化し、indices は圧縮結果を最大 16 個ずつ書く。
         // count <= N/4、配列末尾には 16 要素の余白がある。積和では初期化済み index と
         // 対応する values、長さ N*16 の重み行だけを読み、16 要素の output に書く。
+        // AVX-512 の L1 重みは [chunk][出力][4 byte] なので、各 chunk は連続 64 byte。
         unsafe {
             let permutation =
                 _mm512_setr_epi32(0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);

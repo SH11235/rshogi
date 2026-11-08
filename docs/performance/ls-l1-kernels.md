@@ -1,13 +1,14 @@
-# LayerStacks L1 の融合 VNNI カーネル
+# LayerStacks L1 の AVX-512 カーネル
 
 静的 LayerStacks の L1=1536 / 2304 / 3072、L1 出力=16 では、FT 出力変換と L1 積和を
-融合して計算する。build の `target_feature` に `avx512f` / `avx512bw` /
-`avx512vnni` がすべてある場合に有効になる。それ以外の形状・ISA と動的な
-universal 経路は従来の変換・密 L1 を使う。
+AVX-512 で計算する。build の `target_feature` に `avx512f` / `avx512bw` /
+`avx512vnni` がすべてある場合に有効になる。非 VNNI の AVX-512F/BW では、
+通常 LayerStacks の 1536 に限り非 VNNI の融合経路を使う。それ以外の形状・ISA と
+動的な universal 経路は従来の変換・密 L1 を使う。
 
 ## 変換と積和
 
-各視点の accumulator から 64 出力を生成し、register に保持したまま積和する。
+1536 / 2304 と Threat 経路では、各視点の accumulator から 64 出力を生成し、register に保持したまま積和する。
 自然順への permutation や中間 u8 バッファへの store は行わない。
 変換式は `clamp(a,0,127) * clamp(b,0,127) >> 7`。
 
@@ -18,6 +19,10 @@ universal 経路は従来の変換・密 L1 を使う。
 積和の 1 命令を inline asm の `zmm_reg` オペランドで指定する。
 最後に組と lane の和を取り、bias を一度加えて既存の後段へ渡す。
 積和は 2^32 を法とする加算なので、分割と加算順序によらず一致する。
+3072 の通常経路では、変換結果を自然順のバッファに置き、非ゼロの 4 byte 塊の位置を
+u16 に圧縮する。対応する重みだけを読み、4 本の独立した `vpdpbusd` の積和に分ける。
+4 byte がすべてゼロの塊だけを除外し、最後に bias を加えるため、密な計算と一致する。
+Threat を含む場合は上記の融合経路を使う。
 
 ## 融合用の重みと編集
 

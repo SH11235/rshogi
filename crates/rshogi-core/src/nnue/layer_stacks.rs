@@ -165,7 +165,7 @@ impl<
             return self.propagate(&sqr_clipped_relu_new(us, them).0);
         };
         #[cfg(target_feature = "avx512vnni")]
-        let l1_out = if matches!(L1, 2304 | 3072) {
+        let l1_out = if L1 == 3072 {
             super::ls_l1_kernel::avx512::sparse_index_only(
                 us,
                 them,
@@ -1707,7 +1707,7 @@ pub(super) fn assert_fused_l1_matches_reference<const N: usize>(
     let fused = avx512::fused(us, them, bucket.fused_weights.as_ref().unwrap(), &bucket.l1.biases);
     assert_eq!(expected, fused);
     #[cfg(target_feature = "avx512vnni")]
-    if matches!(N, 2304 | 3072) {
+    if N == 3072 {
         let sparse = avx512::sparse_index_only(us, them, &bucket.l1.weights[..], &bucket.l1.biases);
         assert_eq!(expected, sparse);
     }
@@ -1814,7 +1814,7 @@ mod kernel_tests {
         let mut expected = [0; 16];
         bucket.l1.propagate_7bit(&sqr_clipped_relu_new(&us, &us).0, &mut expected);
         #[cfg(target_feature = "avx512vnni")]
-        if matches!(N, 2304 | 3072) {
+        if N == 3072 {
             assert_eq!(
                 expected,
                 avx512::sparse_index_only(&us, &us, &bucket.l1.weights[..], &bucket.l1.biases)
