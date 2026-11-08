@@ -177,6 +177,7 @@ pub(super) struct AuditSummary {
     pub moves: usize,
     pub records: usize,
     pub opponent_record_positions: Option<usize>,
+    pub opponent_record_moves: usize,
     /// 値の分かる手の数。
     pub known_moves: usize,
     pub illegal_moves: usize,
@@ -1159,17 +1160,27 @@ fn record_positions(rows: &[Row]) -> Result<BTreeMap<String, MasterPosition>> {
     Ok(records)
 }
 
+#[derive(Default)]
+struct RecordUsage {
+    positions: usize,
+    moves: usize,
+}
+
 fn propagate_for_sides(
     positions: &BTreeMap<String, MasterPosition>,
     records: Option<&BTreeMap<String, MasterPosition>>,
     draws: DrawValues,
     fill: Fill,
     skip_flipped: bool,
-) -> Result<(Propagated, Option<Graph>, usize)> {
+) -> Result<(Propagated, Option<Graph>, RecordUsage)> {
     let Some(records) = records else {
-        return Ok((propagate_with(positions, draws, fill, skip_flipped)?, None, 0));
+        return Ok((
+            propagate_with(positions, draws, fill, skip_flipped)?,
+            None,
+            RecordUsage::default(),
+        ));
     };
-    let solve = |opponent: &str| -> Result<(Propagated, usize, usize)> {
+    let solve = |opponent: &str| -> Result<(Propagated, RecordUsage)> {
         let mut expanded = positions.clone();
         for (key, record) in records {
             if key.split_whitespace().nth(1) != Some(opponent) {
@@ -1180,32 +1191,32 @@ fn propagate_for_sides(
                 .and_modify(|p| p.moves.extend(record.moves.clone()))
                 .or_insert_with(|| record.clone());
         }
-        let mut result = propagate_with(&expanded, draws, fill, skip_flipped)?;
+        let mut result = propagate_with(&expanded, draws, fill, true)?;
         // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
-        let mut count = 0;
+        let mut usage = RecordUsage::default();
         let mut illegal_records = 0;
         let mut known = Vec::with_capacity(positions.len());
         for ((key, _), mask) in expanded.iter().zip(&result.known) {
             let playable = positions.get(key).map_or(0, |p| p.moves.len());
             illegal_records += mask.iter().skip(playable).filter(|&&k| !k).count();
-            if mask.iter().skip(playable).any(|&k| k) {
-                count += 1;
-            }
+            let used = mask.iter().skip(playable).filter(|&&k| k).count();
+            usage.moves += used;
+            usage.positions += usize::from(used > 0);
             if positions.contains_key(key) {
                 known.push(mask[..playable].to_vec());
             }
         }
         result.known = known;
-        Ok((result, count, illegal_records))
+        result.illegal_moves -= illegal_records;
+        Ok((result, usage))
     };
-    let (mut black, black_count, _) = solve("w")?;
-    let (white, white_count, white_illegal_records) = solve("b")?;
+    let (mut black, black_usage) = solve("w")?;
+    let (white, white_usage) = solve("b")?;
     for ((key, _), (b, w)) in positions.iter().zip(black.known.iter_mut().zip(white.known)) {
         if key.split_whitespace().nth(1) == Some("w") {
             *b = w;
         }
     }
-    black.illegal_moves += white_illegal_records;
     black.stats.nontrivial_sccs += white.stats.nontrivial_sccs;
     black.stats.max_scc_size = black.stats.max_scc_size.max(white.stats.max_scc_size);
     // 同じ補完局面が両方の伝播に現れても、要約では一局面と数える。
@@ -1226,7 +1237,14 @@ fn propagate_for_sides(
     }
     black.reply_positions = replies.len();
     black.bridged_positions = bridged.len();
-    Ok((black, Some(white.graph), black_count + white_count))
+    Ok((
+        black,
+        Some(white.graph),
+        RecordUsage {
+            positions: black_usage.positions + white_usage.positions,
+            moves: black_usage.moves + white_usage.moves,
+        },
+    ))
 }
 
 /// 局面の値の分かる手だけを伝播する。(伝播後のグラフ, 局面ごと・手ごとの値の分かる手, 非合法手の数, 伝播の集計)。
@@ -1591,9 +1609,11 @@ fn audit_with_records(
         records: *records,
         ..AuditSummary::default()
     };
-    let (propagated, white_graph, record_count) =
+    let (propagated, white_graph, record_usage) =
         propagate_for_sides(positions, opponent_records, draws, fill, fill == Fill::Bridge)?;
-    summary.opponent_record_positions = opponent_records.map(|_| record_count);
+    summary.opponent_record_positions = opponent_records.map(|_| record_usage.positions);
+    summary.opponent_record_moves = record_usage.moves;
+    summary.records -= record_usage.moves;
     let Propagated {
         graph,
         known,
@@ -1742,7 +1762,10 @@ pub(super) fn format_summary(
         summary.moves, summary.known_moves, summary.illegal_moves, summary.records
     ));
     if let Some(count) = summary.opponent_record_positions {
-        out(format!("record を相手の手として使った局面: {count}"));
+        out(format!(
+            "相手の手として使った record {} / 局面 {count}",
+            summary.opponent_record_moves
+        ));
     }
     if changed > 0 {
         let buckets = delta_buckets(&summary.abs_deltas)
@@ -1971,14 +1994,122 @@ mod tests {
     }
 
     #[test]
+    fn opponent_records_skip_flipped_children_for_both_sides() {
+        for flipped in [false, true] {
+            for direct_record in [false, true] {
+                let mut input = vec![
+                    (ROOT, "5i4h", "main", "200"),
+                    (A_FLIPPED, "5i5h", "main", "30"),
+                    (A_FLIPPED, "5i6h", "record", "900"),
+                    ("5k3/9/9/9/9/9/9/9/4K4 w -", "4a5a", "main", "100"),
+                ];
+                if direct_record {
+                    input.push((A, "5a5b", "record", "800"));
+                }
+                let mut rows = parse_master(&master(&input)).unwrap();
+                if flipped {
+                    for row in &mut rows {
+                        let key = rshogi_book::flipped_key(row.get("key")).unwrap();
+                        row.set("key", strip_ply(&key).to_owned());
+                        row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+                    }
+                }
+                let key = rows[0].get("key");
+                let positions = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+                let records = record_positions(&rows).unwrap();
+                let (_, _, book) = audit_with_records(
+                    &positions,
+                    DrawValues::both(0),
+                    1,
+                    Fill::Off,
+                    None,
+                    None,
+                    Some(&records),
+                )
+                .unwrap();
+                let graph = book.graph_for(key);
+                assert!(graph.options.skip_flipped_children);
+                let value = graph.moves(graph.find(key).unwrap()).next().unwrap();
+                assert_eq!(value.new, if direct_record { -800 } else { 200 });
+                assert_eq!(value.edge.is_some(), direct_record);
+                let parent = rows[3].get("key");
+                let graph = book.graph_for(parent);
+                let value = graph.moves(graph.find(parent).unwrap()).next().unwrap();
+                assert_eq!(value.new, -200);
+                assert!(value.edge.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn opponent_records_summary_separates_used_records_from_exclusions_and_illegal_moves() {
+        let text = master(&[
+            (ROOT, "1a1b", "main", "0"),
+            (ROOT, "5i6h", "alt", "0"),
+            (ROOT, "5i5h", "bench", "0"),
+            (ROOT, "5i4h", "record", "10"),
+            (ROOT, "5i6i", "record", "40"),
+            (ROOT, "5i4i", "record", ""),
+            (ROOT, "1b1c", "record", "20"),
+            (A, "5a5b", "record", "900"),
+            (A, "5a4a", "record", "800"),
+            (A, "5a6a", "record", ""),
+            (A, "1a1b", "record", "30"),
+        ]);
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let (_, summary, _) = audit_with_records(
+            &positions,
+            DrawValues::both(0),
+            1,
+            Fill::Off,
+            None,
+            None,
+            Some(&records),
+        )
+        .unwrap();
+        assert_eq!(summary.moves, 2);
+        assert_eq!(summary.illegal_moves, 1);
+        assert_eq!(summary.records, 5);
+        assert_eq!(summary.opponent_record_moves, 4);
+        assert_eq!(summary.opponent_record_positions, Some(2));
+        let text = format_summary(&summary, 1, DrawValues::both(0), None);
+        assert!(text.contains("非合法手 1 / bench・record (除外) 5"));
+        assert!(text.contains("相手の手として使った record 4 / 局面 2"));
+    }
+
+    #[test]
     fn audit_without_opponent_records_preserves_outputs() {
+        const EXPECTED_SUMMARY: &str = "千日手の値: 先手 0 / 後手 0
+局面: 4 (先手番 2 / 後手番 2)
+手 (main・alt): 5 / 値の分かる手 5 / 非合法手 0 / bench・record (除外) 1
+読みの値から伝播で変わった手: 0
+読みの値が無く伝播で値が付いた手: 0
+main・alt が 2 手以上の局面: 1 (先手番 0 / 後手番 1)
+main が 1 位から 1〜0 負ける局面: 0 (先手番 0 / 後手番 0)
+main が 1 位から 1 以上負ける局面: 0 (先手番 0 / 後手番 0)
+main の値が分からない局面: 0 (先手番 0 / 後手番 0) / うち main・alt が 2 手以上: 0 (先手番 0 / 後手番 0)
+補った相手の手番の局面 (元データに無く、応手が元データの局面に着く): 0 / うち読みの値を残した局面: 0
+循環 (自明でない強連結成分): 0 (最大 1 局面)
+";
+        const EXPECTED_TABLE: &str = "key\tply\tside\tsource\tmain\tmain_value\tmain_from\tmain_eval\tbest\tbest_value\tbest_from\tbest_eval\tgap\tmain_value_black\tbest_value_black\n";
+        const EXPECTED_DB: &str = "#YANEURAOU-DB2016 1.00
+sfen 4k4/9/9/9/9/9/9/5K3/9 w - 1
+5a5b none 200 1 2
+5a4a none -100 1 1
+sfen 5k3/9/9/9/9/9/9/5K3/9 b - 1
+4h3h none 100 1 2
+sfen 9/4k4/9/9/9/9/6K2/9/9 w - 1
+5b6b none -900 1 2
+sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
+4h5h none -200 1 2
+";
         let text = opponent_record_fixture("400");
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let (findings, summary, book) =
+        let (findings, summary, _) =
             audit(&positions, DrawValues::both(0), 1, Fill::Off, None).unwrap();
         assert!(findings.is_empty());
-        assert_eq!(summary.opponent_record_positions, None);
-        assert!(!format_summary(&summary, 1, DrawValues::both(0), None).contains("相手の手として"));
+        assert_eq!(format_summary(&summary, 1, DrawValues::both(0), None), EXPECTED_SUMMARY);
         for full in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let mut args = test_args(dir.path());
@@ -1988,11 +2119,11 @@ mod tests {
             args.out_db = Some(dir.path().join("actual.db"));
             let table = args.table.clone();
             let db = args.out_db.clone().unwrap();
+            let master = args.master.clone();
             run(args).unwrap();
-            let expected = dir.path().join("expected.db");
-            write_audited_db(&expected, &positions.0, &book).unwrap();
-            assert_eq!(std::fs::read_to_string(table).unwrap(), format_table(&findings));
-            assert_eq!(std::fs::read(db).unwrap(), std::fs::read(expected).unwrap());
+            assert_eq!(std::fs::read_to_string(table).unwrap(), EXPECTED_TABLE);
+            assert_eq!(std::fs::read_to_string(db).unwrap(), EXPECTED_DB);
+            assert_eq!(std::fs::read_to_string(master).unwrap(), text);
         }
     }
 
