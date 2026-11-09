@@ -549,18 +549,21 @@ pub(super) fn collect_nodes(
     (disagreements, opponent)
 }
 
-/// 自分の手番として登録する局面から、前の回に相手の手番として残した同じ出所の `record` を外す。
+/// 自分の手番として登録する局面から、同じ出所の `tier=wide` の `record` (前の回に相手の手番として残した行) を外し、
+/// 外した行の数を返す。
 pub(super) fn drop_own_records(
     rows: &mut Vec<Row>,
     nodes: &BTreeMap<String, register::Node>,
     source: &str,
-) {
+) -> usize {
+    let before = rows.len();
     rows.retain(|r| {
         !(nodes.contains_key(r.get("key"))
             && r.get("role") == "record"
             && r.get("source") == source
             && r.get("tier") == "wide")
     });
+    before - rows.len()
 }
 
 /// 相手の手番の局面の手を `record` の行で残し、足した行と値を更新した行の数を返す。元データに無い (局面, 手) は
@@ -727,7 +730,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     // record の行も register の並べ替えと schema の検査を通す。前の回に相手の手番として残した record の局面を、
     // 今回は自分の手番として登録するなら、その record は外す (record の手は main・alt の候補から除かれるため)。
     let mut rows = rows;
-    drop_own_records(&mut rows, &nodes, options.source);
+    let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
@@ -758,7 +761,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         all.iter().map(|v| v.marks.len()).sum::<usize>()
     );
     println!(
-        "相手の手番の局面の record: 足した手 {records_added} / 値を更新した手 {records_updated}"
+        "相手の手番の局面の record: 足した手 {records_added} / 値を更新した手 {records_updated} / 自分の手番として登録するので外した手 {records_dropped}"
     );
     let line_count =
         |s: &crate::book_tree::audit::AuditSummary| s.at_or_above_line[0] + s.at_or_above_line[1];

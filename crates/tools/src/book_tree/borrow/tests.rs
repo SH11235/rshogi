@@ -1182,7 +1182,7 @@ fn records_left_on_a_position_now_registered_as_own_are_dropped() {
             tree: 0,
         },
     )]);
-    drop_own_records(&mut rows, &nodes, "ext");
+    assert_eq!(drop_own_records(&mut rows, &nodes, "ext"), 1);
     let left: Vec<_> = rows.iter().map(|r| (r.get("key") == own, r.get("move"))).collect();
     assert_eq!(left, [(true, "5a4a"), (false, "5a5b")]);
 }
