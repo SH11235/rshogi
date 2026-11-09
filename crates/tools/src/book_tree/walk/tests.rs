@@ -791,6 +791,24 @@ fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
         );
     }
     let table = format_table_with_entries(&rows, &mut index, ROOT, None).unwrap();
+    let mut stats = vec![<[records::Reach; 3]>::default(); rows.len()];
+    stats[1][0].games = 2;
+    stats[1][0].score = 1.5;
+    stats[1][0].black_wins = 1;
+    stats[1][0].draws = 1;
+    stats[1][0].after.insert(30, 2);
+    let with = format_table_with_entries(&rows, &mut index, ROOT, Some(&stats)).unwrap();
+    let widths: Vec<_> = with.lines().map(|l| l.split('\t').count()).collect();
+    assert!(widths.iter().all(|&w| w == 25), "{widths:?}");
+    let second: Vec<_> = with.lines().nth(2).unwrap().split('\t').collect();
+    assert_eq!(&second[15..], &["2", "0.75", "0", "", "0", "", "30", "1", "0", "1"]);
+    assert_eq!(
+        with.lines()
+            .skip(1)
+            .map(|l| l.rsplitn(11, '\t').last().unwrap())
+            .collect::<Vec<_>>(),
+        table.lines().skip(1).collect::<Vec<_>>()
+    );
     let lines: Vec<Vec<&str>> = table.lines().skip(1).map(|s| s.split('\t').collect()).collect();
     assert_eq!(&lines[0][11..13], &["5i4h", "12"]);
     assert_eq!(&lines[1][11..13], &["5a5b", "-34"]);

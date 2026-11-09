@@ -1,10 +1,10 @@
 //! 強い対局の棋譜が、walk の止まりの局面とその手前の局面に着いたときの勝敗。
 
-use super::Row;
+use super::{HIRATE_KEY, Row};
 use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -29,8 +29,8 @@ pub(super) struct Reach {
     pub black_wins: u64,
     pub white_wins: u64,
     pub draws: u64,
-    /// 着いた局面から終局までの手数 (止まりの局面だけ)。
-    pub after: Vec<usize>,
+    /// 着いた局面から終局までの手数ごとの局数 (止まりの局面だけ)。局数に比例して増えないよう度数で持つ。
+    pub after: BTreeMap<usize, u64>,
 }
 impl Reach {
     pub fn score_text(&self) -> String {
@@ -42,9 +42,15 @@ impl Reach {
     }
     /// 上側の中央値 (要素数が偶数なら大きい方)。
     pub fn median_after(&self) -> String {
-        let mut after = self.after.clone();
-        after.sort_unstable();
-        after.get(after.len() / 2).map(|v| v.to_string()).unwrap_or_default()
+        let total: u64 = self.after.values().sum();
+        let mut seen = 0;
+        for (&len, &count) in &self.after {
+            seen += count;
+            if seen > total / 2 {
+                return len.to_string();
+            }
+        }
+        String::new()
     }
 }
 
@@ -61,6 +67,7 @@ pub(super) fn reach_stats(
     path: &Path,
     options: &RecordOptions,
 ) -> Result<Vec<[Reach; 3]>> {
+    // 行の手順は walk の初期局面から、棋譜は平手から始まる。
     let mut targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (i, row) in rows.iter().enumerate() {
         let mut keys = vec![initial.to_owned()];
@@ -101,7 +108,7 @@ pub(super) fn reach_stats(
             continue;
         }
         let limit = game.mv.len().min(options.max_ply);
-        let mut pos = position_from_sfen(&format!("{initial} 1"))?;
+        let mut pos = position_from_sfen(&format!("{HIRATE_KEY} 1"))?;
         let mut seen = HashSet::new();
         for p in 0..=limit {
             let sfen = pos.to_sfen();
@@ -123,7 +130,7 @@ pub(super) fn reach_stats(
                         _ => reach.draws += 1,
                     }
                     if j == 0 {
-                        reach.after.push(game.mv.len() - p);
+                        *reach.after.entry(game.mv.len() - p).or_default() += 1;
                     }
                 }
             }
@@ -142,7 +149,7 @@ pub(super) fn reach_stats(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{HIRATE_KEY, Stop};
+    use super::super::Stop;
     use super::*;
 
     fn row(side: &'static str, moves: &[&str]) -> Row {
@@ -185,7 +192,14 @@ mod tests {
         let long = [
             "7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b", "2e2d", "2c2d",
         ];
-        let rows = [row("b", &exit), row("w", &long)];
+        // 22 手の行。20 手前は 7g7f 3c3d の後の局面で、その順で指した対局 1 だけが着く。
+        let shuffle = ["5i5h", "5a5b", "5h5i", "5b5a"].repeat(5);
+        let longer: Vec<&str> = ["7g7f", "3c3d"]
+            .into_iter()
+            .chain(shuffle.iter().copied().take(18))
+            .chain(["2g2f", "8c8d"])
+            .collect();
+        let rows = [row("b", &exit), row("w", &long), row("b", &longer)];
         let options = RecordOptions {
             min_rate: 3800.0,
             max_ply: 130,
@@ -199,6 +213,8 @@ mod tests {
         let ten = &stats[1][1];
         assert_eq!((ten.games, ten.score_text(), ten.draws), (3, "0.50".into(), 1));
         assert!(ten.after.is_empty());
+        let twenty = &stats[2][2];
+        assert_eq!((twenty.games, twenty.score_text()), (1, "1.00".into()));
         let options = RecordOptions {
             min_rate: 3800.0,
             max_ply: 3,

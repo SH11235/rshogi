@@ -103,7 +103,7 @@ pub(super) struct WalkArgs {
     #[arg(long, value_name = "USI")]
     start_moves: Option<String>,
     /// 強い対局の棋譜 (1 局 1 行の JSON Lines、`.gz` も可)。止まりの局面とその手前に着いた局数と勝敗の列を足す
-    #[arg(long)]
+    #[arg(long, value_name = "PATH")]
     opp_records: Option<PathBuf>,
     /// `--opp-records` で数える対局の、両者のレートの下限
     #[arg(long, default_value_t = 3800.0, requires = "opp_records")]
