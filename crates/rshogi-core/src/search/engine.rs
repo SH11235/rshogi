@@ -1241,8 +1241,10 @@ impl Search {
 
     /// 次の `prepare_numa_networks` で返す理由に `message` を足す。
     #[cfg(target_os = "linux")]
+    // 固定の失敗は helper が覚えたままで go のたびに同じ理由が返るので、同じ文は重ねない。
     fn add_numa_report(&mut self, message: String) {
         self.numa_report = Some(match self.numa_report.take() {
+            Some(earlier) if earlier.split("; ").any(|m| m == message) => earlier,
             Some(earlier) => format!("{earlier}; {message}"),
             None => message,
         });
