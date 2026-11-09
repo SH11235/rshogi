@@ -90,11 +90,13 @@ pub(super) fn build(
 ) -> Result<Plan> {
     nonnegative(args.max_ratio)?;
     let dir = args.plan_out.as_ref().context("plan-out が必要です")?;
-    ensure!(
-        crate::common::dedup::canonicalize_maybe_new(dir)?
-            != crate::common::dedup::canonicalize_maybe_new(&args.hold_out)?,
-        "plan-out と hold-out は別の dir にしてください"
-    );
+    if let Some(hold_out) = &args.hold_out {
+        ensure!(
+            crate::common::dedup::canonicalize_maybe_new(dir)?
+                != crate::common::dedup::canonicalize_maybe_new(hold_out)?,
+            "plan-out と hold-out は別の dir にしてください"
+        );
+    }
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries {
