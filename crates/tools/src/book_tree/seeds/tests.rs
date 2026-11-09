@@ -688,6 +688,7 @@ fn update_merges_all_games_and_uses_last_fields() {
 fn update_skips_rows_that_change_the_root_or_side() {
     let dir = TempDir::new().unwrap();
     let base = Line {
+        group: None,
         id: "changed".into(),
         root: "startpos".into(),
         roots: vec![],
@@ -758,6 +759,7 @@ fn update_ignores_a_last_row_that_serve_rejects() {
 #[test]
 fn additions_follow_counts_then_usi_order() {
     let mut line = Line {
+        group: None,
         id: "order".into(),
         root: "startpos".into(),
         roots: vec![],

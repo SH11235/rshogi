@@ -526,6 +526,7 @@ fn queue_args(dir: &Path) -> WalkArgs {
 
 fn existing_line() -> Line {
     Line {
+        group: None,
         id: "existing".into(),
         root: format!("sfen {ROOT} 9"),
         roots: Vec::new(),

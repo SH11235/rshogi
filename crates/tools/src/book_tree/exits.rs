@@ -480,6 +480,7 @@ fn queue_line(e: &Exit, rank: usize, args: &ExitsArgs) -> Result<Line> {
         .context("priority が大きすぎます")?;
     let root_ply = e.ply.checked_add(1).context("根の手数が大きすぎます")?;
     let line = Line {
+        group: None,
         id: queue_id(&args.tag, root_ply, &e.key, args.side.as_str()),
         root: format!("sfen {} {root_ply}", e.key),
         roots: Vec::new(),

@@ -1644,6 +1644,7 @@ fn bridge_queue_line(row: &BridgeFinding, rank: usize, args: &AuditArgs) -> Resu
     let side = super::model::side(&row.key);
     let digest = format!("{:x}", Sha256::digest(format!("{} {}", row.key, row.main)));
     let line = Line {
+        group: None,
         id: format!("{}_bridge_{side}", &digest[..16]),
         root: format!("sfen {} {ply}", row.key),
         roots: Vec::new(),

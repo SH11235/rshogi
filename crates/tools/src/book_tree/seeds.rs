@@ -725,6 +725,7 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
         };
         let lines = ranked_lines(&data, args.depth);
         let line = Line {
+            group: None,
             id: queue_id(&args.tag, data.ply as usize, &key, &own),
             root: format!("sfen {key} {}", data.ply),
             roots: Vec::new(),
