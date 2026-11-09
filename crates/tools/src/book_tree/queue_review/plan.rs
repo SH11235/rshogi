@@ -4,10 +4,29 @@ pub(super) struct Plan {
     pub outputs: Vec<PathBuf>,
     pub payloads: Vec<Vec<u8>>,
     pub remaining: Vec<f64>,
+    /// 台ごとの priority ごとの見込み量。serve は priority の小さい順に読むので、
+    /// 木が締めまでに読めるかは自分の priority 以下の量で決まる。
+    load: Vec<BTreeMap<u32, f64>>,
     rows: Vec<Vec<Value>>,
     table: Vec<u8>,
 }
 impl Plan {
+    fn put(&mut self, i: usize, priority: u32, amount: f64) {
+        self.remaining[i] += amount;
+        *self.load[i].entry(priority).or_default() += amount;
+    }
+    fn take(&mut self, i: usize, priority: u32, amount: f64) {
+        self.remaining[i] = (self.remaining[i] - amount).max(0.0);
+        if let Some(value) = self.load[i].get_mut(&priority) {
+            *value -= amount;
+            if *value <= 0.0 {
+                self.load[i].remove(&priority);
+            }
+        }
+    }
+    fn ahead(&self, i: usize, priority: u32) -> f64 {
+        self.load[i].range(..=priority).map(|(_, v)| v).sum()
+    }
     fn emit(&mut self, destination: usize, raw: Value) {
         let rows = &mut self.rows[destination];
         if let Some(index) = rows.iter().position(|r| r["id"] == raw["id"]) {
@@ -37,6 +56,16 @@ pub(super) fn ratio(remaining: f64, capacity: f64) -> f64 {
         f64::INFINITY
     } else {
         remaining / capacity
+    }
+}
+
+fn hours(amount: f64, speed: f64) -> f64 {
+    if amount == 0.0 {
+        0.0
+    } else if speed == 0.0 {
+        f64::INFINITY
+    } else {
+        amount / speed
     }
 }
 
@@ -81,9 +110,9 @@ fn updated(raw: &Value, update: Option<&Queued>, hold: bool) -> Value {
     raw
 }
 
-pub(super) fn build(
+pub(super) fn build<'a>(
     args: &QueueReviewArgs,
-    boxes: &[BoxData],
+    boxes: &'a [BoxData],
     metrics: &[BoxMetrics],
     walk: &Walk,
     inputs: &mut Vec<PathBuf>,
@@ -104,7 +133,8 @@ pub(super) fn build(
                 let name = name.to_string_lossy();
                 ensure!(
                     !(name.starts_with(&format!("{}_", args.prefix)) && name.ends_with(".jsonl"))
-                        && name != format!("{}_plan.tsv", args.prefix),
+                        && name != format!("{}_plan.tsv", args.prefix)
+                        && name != format!("{}_bands.tsv", args.prefix),
                     "計画の積み荷が既にあります: {name}"
                 );
             }
@@ -129,14 +159,32 @@ pub(super) fn build(
     for q in &adds {
         ensure!(ids.insert(q.line.id.clone()), "add の id が重複しています: {}", q.line.id);
     }
+    ensure!(
+        args.bands.windows(2).all(|w| w[0] < w[1]),
+        "bands は小さい順に重複なく並べてください"
+    );
+    if let Some(hours) = args.balance_hours {
+        nonnegative(hours)?;
+    }
     let mut updated_ids = BTreeSet::new();
     let mut plan = Plan {
         outputs: Vec::new(),
         payloads: Vec::new(),
         remaining: metrics.iter().map(|m| m.remaining).collect(),
+        load: boxes
+            .iter()
+            .map(|b| {
+                let mut load = BTreeMap::<u32, f64>::new();
+                for t in b.progress.trees.iter().filter(|t| !t.finished && !t.hold) {
+                    *load.entry(t.priority).or_default() += t.remaining(args.tree_size) as f64;
+                }
+                load
+            })
+            .collect(),
         rows: vec![Vec::new(); boxes.len()],
         table: b"action\tid\town\tpriority\tfrom\tto\treason\n".to_vec(),
     };
+    let initial_load = plan.load.clone();
     for q in &updates {
         let owners: Vec<_> = boxes
             .iter()
@@ -174,7 +222,7 @@ pub(super) fn build(
             })?;
             plan.emit(i, raw);
             if !held && updated_ids.insert((i, q.line.id.clone())) {
-                plan.remaining[i] += args.update_size as f64;
+                plan.put(i, original.line.priority, args.update_size as f64);
             }
             plan.record(
                 if held { "update-held" } else { "update" },
@@ -197,14 +245,13 @@ pub(super) fn build(
         args.start_moves.as_deref().unwrap_or_default().split_whitespace().collect();
     let mut order: Vec<_> = (0..boxes.len()).collect();
     order.sort_by_key(|&i| &boxes[i].name);
-    let best = |remaining: &[f64], candidates: Vec<usize>, amount: f64| {
+    // 行き先の候補のうち、評価値の最小の台 (同点は名前順)。
+    let best = |candidates: Vec<usize>, value: &dyn Fn(usize) -> f64| {
         candidates.into_iter().min_by(|&a, &b| {
-            ratio(remaining[a] + amount, metrics[a].capacity)
-                .total_cmp(&ratio(remaining[b] + amount, metrics[b].capacity))
-                .then_with(|| boxes[a].name.cmp(&boxes[b].name))
+            value(a).total_cmp(&value(b)).then_with(|| boxes[a].name.cmp(&boxes[b].name))
         })
     };
-    for &i in &order {
+    let candidates = |i: usize| {
         let b = &boxes[i];
         let mut candidates = Vec::new();
         for q in b.queue.values() {
@@ -231,60 +278,131 @@ pub(super) fn build(
                 .then_with(|| b.line.priority.cmp(&a.line.priority))
                 .then_with(|| b.line.id.cmp(&a.line.id))
         });
-        for (q, low) in candidates {
-            if ratio(plan.remaining[i], metrics[i].capacity) <= args.max_ratio {
-                break;
-            }
-            // bw は受付行を分割できないため、両側の見込み量を一緒に移す。
-            let amount = b
-                .progress
-                .trees
-                .iter()
-                .filter(|t| t.id == q.line.id && !t.finished && !t.hold)
-                .map(|t| t.remaining(args.tree_size) as f64)
-                .sum::<f64>()
-                + if updated_ids.contains(&(i, q.line.id.clone())) {
-                    args.update_size as f64
-                } else {
-                    0.0
-                };
-            let destination = if low {
-                None
+        candidates
+    };
+    // bw は受付行を分割できないため、両側の見込み量を一緒に移す。
+    let amount_of = |i: usize, q: &Queued| {
+        boxes[i]
+            .progress
+            .trees
+            .iter()
+            .filter(|t| t.id == q.line.id && !t.finished && !t.hold)
+            .map(|t| t.remaining(args.tree_size) as f64)
+            .sum::<f64>()
+            + if updated_ids.contains(&(i, q.line.id.clone())) {
+                args.update_size as f64
             } else {
+                0.0
+            }
+    };
+    let movable = |plan: &Plan, i: usize, j: usize, q: &Queued| {
+        j != i
+            && !boxes[j].queue.contains_key(&q.line.id)
+            && !plan.rows[j].iter().any(|r| r["id"] == q.line.id)
+            && (labels[i] == labels[j] || !shared(q))
+    };
+    let shift = |plan: &mut Plan, i: usize, destination: Option<usize>, q: &Queued, amount: f64| {
+        let source = plan.rows[i].iter().find(|r| r["id"] == q.line.id).unwrap_or(&q.raw).clone();
+        plan.emit(i, updated(&source, None, true));
+        plan.take(i, q.line.priority, amount);
+        if let Some(j) = destination {
+            plan.emit(j, updated(&source, None, false));
+            plan.put(j, q.line.priority, amount);
+        }
+    };
+    let mut removed = BTreeSet::new();
+    let mut kept = BTreeSet::new();
+    let overflow = |plan: &mut Plan,
+                    removed: &mut BTreeSet<(usize, &'a str)>,
+                    kept: &mut BTreeSet<(usize, &'a str)>|
+     -> Result<()> {
+        for &i in &order {
+            let b = &boxes[i];
+            for (q, low) in candidates(i) {
+                if ratio(plan.remaining[i], metrics[i].capacity) <= args.max_ratio {
+                    break;
+                }
+                if removed.contains(&(i, q.line.id.as_str())) {
+                    continue;
+                }
+                // 自分の priority 以下の量が読める量に収まる木は、後ろの木を外せば読めるので動かさない。
+                if !low
+                    && ratio(plan.ahead(i, q.line.priority), metrics[i].capacity) <= args.max_ratio
+                {
+                    continue;
+                }
+                let amount = amount_of(i, q);
+                let p = q.line.priority;
+                let destination = if low {
+                    None
+                } else {
+                    let available = order
+                        .iter()
+                        .copied()
+                        .filter(|&j| {
+                            movable(plan, i, j, q)
+                                && ratio(plan.ahead(j, p) + amount, metrics[j].capacity)
+                                    <= args.max_ratio
+                        })
+                        .collect();
+                    best(available, &|j| ratio(plan.ahead(j, p) + amount, metrics[j].capacity))
+                };
+                if low || destination.is_some() || p >= 100 {
+                    shift(plan, i, destination, q, amount);
+                    removed.insert((i, q.line.id.as_str()));
+                    if let Some(j) = destination {
+                        plan.record("move", q, &b.name, &boxes[j].name, "capacity")?;
+                    } else {
+                        plan.record(
+                            if low { "hold-low" } else { "hold-over" },
+                            q,
+                            &b.name,
+                            &b.name,
+                            if low { "reach-low" } else { "no-capacity" },
+                        )?;
+                    }
+                } else if kept.insert((i, q.line.id.as_str())) {
+                    plan.record("keep-over", q, &b.name, &b.name, "priority-below-100")?;
+                }
+            }
+        }
+        Ok(())
+    };
+    overflow(&mut plan, &mut removed, &mut kept)?;
+    if let (Some(limit), Some(limit_hours)) = (args.balance_priority, args.balance_hours) {
+        let finish = |plan: &Plan, j: usize, extra: f64| {
+            hours(plan.ahead(j, limit) + extra, metrics[j].speed)
+        };
+        for &i in &order {
+            let mut band: Vec<_> =
+                candidates(i).into_iter().filter(|(q, _)| q.line.priority <= limit).collect();
+            band.sort_by(|(a, _), (b, _)| {
+                b.line.priority.cmp(&a.line.priority).then_with(|| b.line.id.cmp(&a.line.id))
+            });
+            for (q, _) in band {
+                if finish(&plan, i, 0.0) <= limit_hours {
+                    break;
+                }
+                if removed.contains(&(i, q.line.id.as_str())) {
+                    continue;
+                }
+                let amount = amount_of(i, q);
+                let p = q.line.priority;
                 let available = order
                     .iter()
                     .copied()
                     .filter(|&j| {
-                        j != i
-                            && !boxes[j].queue.contains_key(&q.line.id)
-                            && !plan.rows[j].iter().any(|r| r["id"] == q.line.id)
-                            && (labels[i] == labels[j] || !shared(q))
-                            && ratio(plan.remaining[j] + amount, metrics[j].capacity)
+                        movable(&plan, i, j, q)
+                            && finish(&plan, j, amount) <= limit_hours
+                            && ratio(plan.ahead(j, p) + amount, metrics[j].capacity)
                                 <= args.max_ratio
                     })
                     .collect();
-                best(&plan.remaining, available, amount)
-            };
-            if low || destination.is_some() || q.line.priority >= 100 {
-                let source =
-                    plan.rows[i].iter().find(|r| r["id"] == q.line.id).unwrap_or(&q.raw).clone();
-                plan.emit(i, updated(&source, None, true));
-                plan.remaining[i] = (plan.remaining[i] - amount).max(0.0);
-                if let Some(j) = destination {
-                    plan.emit(j, updated(&source, None, false));
-                    plan.remaining[j] += amount;
-                    plan.record("move", q, &b.name, &boxes[j].name, "capacity")?;
-                } else {
-                    plan.record(
-                        if low { "hold-low" } else { "hold-over" },
-                        q,
-                        &b.name,
-                        &b.name,
-                        if low { "reach-low" } else { "no-capacity" },
-                    )?;
+                if let Some(j) = best(available, &|j| finish(&plan, j, amount)) {
+                    shift(&mut plan, i, Some(j), q, amount);
+                    removed.insert((i, q.line.id.as_str()));
+                    plan.record("balance", q, &boxes[i].name, &boxes[j].name, "band-hours")?;
                 }
-            } else {
-                plan.record("keep-over", q, &b.name, &b.name, "priority-below-100")?;
             }
         }
     }
@@ -322,24 +440,28 @@ pub(super) fn build(
             .collect();
         ensure!(!allowed.is_empty(), "add の根に一致する条件の台がありません: {}", q.line.id);
         let amount = args.tree_size as f64 * q.line.sides().len() as f64;
+        let p = q.line.priority;
+        let fill = |plan: &Plan, i: usize, extra: f64| {
+            ratio(plan.ahead(i, p) + extra, metrics[i].capacity)
+        };
         let available = allowed
             .iter()
             .copied()
-            .filter(|&i| ratio(plan.remaining[i] + amount, metrics[i].capacity) <= args.max_ratio)
+            .filter(|&i| fill(&plan, i, amount) <= args.max_ratio)
             .collect();
         // hold の入力行は読ませない指定なので、読める量を使わずに hold のまま置く。
         let destination = if q.line.hold {
             None
         } else {
-            best(&plan.remaining, available, amount)
+            best(available, &|i| fill(&plan, i, amount))
         };
         let held = destination.is_none();
         let i = destination
-            .or_else(|| best(&plan.remaining, allowed, 0.0))
+            .or_else(|| best(allowed, &|i| ratio(plan.remaining[i], metrics[i].capacity)))
             .context("台がありません")?;
         plan.emit(i, updated(&q.raw, None, held));
         if !held {
-            plan.remaining[i] += amount;
+            plan.put(i, p, amount);
             for root in &q.roots {
                 root_labels.entry(root.clone()).or_default().insert(labels[i].clone());
             }
@@ -358,8 +480,41 @@ pub(super) fn build(
             },
         )?;
     }
+    // 新しい木の割り振りで後ろに押し出された木を、もう一度移すか保留にする。
+    overflow(&mut plan, &mut removed, &mut kept)?;
+    let mut bands = b"box\tpriority_lo\tpriority_hi\tbefore_remaining\tbefore_hours\tafter_remaining\tafter_hours\tcutoff_hours\n".to_vec();
+    for &i in &order {
+        let mut low = 0u32;
+        for high in args.bands.iter().copied().map(Some).chain([None]) {
+            let in_band = |load: &BTreeMap<u32, f64>| -> (f64, f64) {
+                let upto = high.unwrap_or(u32::MAX);
+                // 空の f64 の和は -0 になるので 0 から足す。
+                (
+                    load.range(low..=upto).fold(0.0, |sum, (_, v)| sum + v),
+                    load.range(..=upto).fold(0.0, |sum, (_, v)| sum + v),
+                )
+            };
+            let (before, before_total) = in_band(&initial_load[i]);
+            let (after, after_total) = in_band(&plan.load[i]);
+            writeln!(
+                bands,
+                "{}\t{low}\t{}\t{before}\t{}\t{after}\t{}\t{}",
+                boxes[i].name,
+                high.map(|h| h.to_string()).unwrap_or_default(),
+                hours(before_total, metrics[i].speed),
+                hours(after_total, metrics[i].speed),
+                metrics[i].hours
+            )?;
+            match high.and_then(|h| h.checked_add(1)) {
+                Some(next) => low = next,
+                None => break,
+            }
+        }
+    }
     plan.outputs.push(dir.join(format!("{}_plan.tsv", args.prefix)));
     plan.payloads.push(std::mem::take(&mut plan.table));
+    plan.outputs.push(dir.join(format!("{}_bands.tsv", args.prefix)));
+    plan.payloads.push(bands);
     for &i in &order {
         if plan.rows[i].is_empty() {
             continue;
