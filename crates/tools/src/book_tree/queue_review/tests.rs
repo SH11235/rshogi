@@ -1906,3 +1906,115 @@ fn group_minimum_uses_final_line_hold_after_bw_and_started_rules() {
     assert_eq!(out.get("finished"), Some(&(json!(40), json!(false))), "{out:?}");
     assert_eq!(out.get("urgent"), Some(&(json!(40), json!(false))), "{out:?}");
 }
+
+#[test]
+fn rerank_scores_added_trees_with_the_same_measure_and_group() {
+    let d = TempDir::new().unwrap();
+    let mut existing = row("existing", "7g7f");
+    existing["priority"] = json!(100);
+    existing["group"] = json!("x");
+    let mut a = plan_args(d.path(), &[("A", vec![existing])]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.rerank_out = Some(d.path().join("rerank"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.002\t7g7f\nb\town\t0.005\t2g2f\n").display()
+    )];
+    let mut urgent = row("urgent", "2g2f");
+    urgent["priority"] = json!(100);
+    urgent["group"] = json!("x");
+    let mut unknown = row("unknown", "5g5f");
+    unknown["priority"] = json!(100);
+    a.add = vec![input_rows(
+        d.path(),
+        "add.jsonl",
+        &[urgent.clone(), unknown],
+    )];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("\turgent\tb\tnew\t") && l.contains("\tB\t100\t40\t")),
+        "{table}"
+    );
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("A\texisting\t") && l.contains("\tC\t100\t40\t")),
+        "{table}"
+    );
+    let read = |name: &str| -> Vec<Value> {
+        std::fs::read_to_string(d.path().join("rerank").join(name))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let added = read("qrhold_rerank-add.jsonl");
+    assert_eq!(
+        added
+            .iter()
+            .map(|r| (r["id"].clone(), r["priority"].clone(), r["hold"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("unknown"), json!(100), json!(true)),
+            (json!("urgent"), json!(40), json!(false))
+        ]
+    );
+    assert_eq!(read("qrhold_rerank_A.jsonl")[0]["priority"], json!(40));
+}
+
+#[test]
+fn rerank_add_rejects_accepted_or_duplicate_ids() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![row("same", "7g7f")])]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.002\t7g7f\n").display()
+    )];
+    a.add = vec![input_rows(d.path(), "add.jsonl", &[row("same", "2g2f")])];
+    let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+    assert!(error.contains("受付済み"), "{error}");
+}
+
+#[test]
+fn cli_add_needs_plan_or_rerank_output() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    let base = [
+        "tree",
+        "queue-review",
+        "--box",
+        "A=/path/to/a",
+        "--cutoff",
+        "2026-11-08T12:00:00+09:00",
+        "--add",
+        "add.jsonl",
+        "--walk-table",
+        "b=walk.tsv",
+        "--master",
+        "moves.tsv",
+    ];
+    assert!(Cli::try_parse_from(base).is_err());
+    for option in [
+        ["--rerank-table", "r.tsv"],
+        ["--rerank-out", "r"],
+        ["--plan-out", "p"],
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(option)).is_ok());
+    }
+}

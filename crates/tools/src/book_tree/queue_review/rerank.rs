@@ -163,6 +163,41 @@ pub(super) fn build(
             locations.entry((&tree.id, &tree.own)).or_default().push((i, tree));
         }
     }
+    // 新しい木は台の番号の代わりに boxes.len() を使い、未着手・hold の写しを持たない木として採点する。
+    let new_index = boxes.len();
+    let adds = plan::load(&args.add, inputs)?;
+    let mut new_queue = BTreeMap::new();
+    for q in adds {
+        ensure!(
+            boxes.iter().all(|b| !b.queue.contains_key(&q.line.id)),
+            "add の id は受付済みです: {}",
+            q.line.id
+        );
+        let id = q.line.id.clone();
+        ensure!(new_queue.insert(id.clone(), q).is_none(), "add の id が重複しています: {id}");
+    }
+    let new_trees: Vec<_> = new_queue
+        .values()
+        .flat_map(|q| {
+            q.line.sides().into_iter().map(|own| TreeProgress {
+                id: q.line.id.clone(),
+                own,
+                priority: q.line.priority,
+                hold: q.line.hold,
+                finished: false,
+                failed: false,
+                read: 0,
+                requested: 0,
+            })
+        })
+        .collect();
+    let queued_at = |i: usize, id: &str| -> &Queued {
+        if i == new_index {
+            &new_queue[id]
+        } else {
+            &boxes[i].queue[id]
+        }
+    };
     let walk_sides: BTreeSet<_> = args
         .walk_table
         .iter()
@@ -187,6 +222,16 @@ pub(super) fn build(
             let queued = &boxes[i].queue[&tree.id];
             targets.push((i, tree, queued, shelved, parse_root(&queued.line.root)?));
         }
+    }
+    for tree in &new_trees {
+        ensure!(
+            walk_sides.contains(tree.own.as_str()),
+            "add の own={} に必要な --walk-table {}=... がありません",
+            tree.own,
+            tree.own
+        );
+        let queued = &new_queue[&tree.id];
+        targets.push((new_index, tree, queued, false, parse_root(&queued.line.root)?));
     }
     let roots: Vec<_> = targets
         .iter()
@@ -216,11 +261,12 @@ pub(super) fn build(
             })
         };
         let running = tree.read > 0
-            || boxes[i]
-                .progress
-                .workers
-                .iter()
-                .any(|w| w.key.as_ref().is_some_and(|k| queued.roots.contains(strip_ply(k))));
+            || boxes.get(i).is_some_and(|b| {
+                b.progress
+                    .workers
+                    .iter()
+                    .any(|w| w.key.as_ref().is_some_and(|k| queued.roots.contains(strip_ply(k))))
+            });
         let hold = if running {
             tree.hold
         } else if shelved && class != 'D' {
@@ -264,12 +310,12 @@ pub(super) fn build(
     }
     for ((i, id), (_, hold)) in &mut lines {
         if started.contains(&(*i, id.as_str())) {
-            *hold = boxes[*i].queue[id].line.hold;
+            *hold = queued_at(*i, id).line.hold;
         }
     }
     // 受付行に書く最終の hold で group の最小を取る。bw の片側や読み途中の規則で
     // 行ごとの hold と受付行の hold は食い違うことがある。
-    let group_of = |(i, id): &(usize, String)| boxes[*i].queue[id].line.group.as_deref();
+    let group_of = |(i, id): &(usize, String)| queued_at(*i, id).line.group.as_deref();
     let mut group_min: BTreeMap<&str, u32> = BTreeMap::new();
     for (key, &(priority, hold)) in &lines {
         if let Some(group) = group_of(key).filter(|_| !hold) {
@@ -319,7 +365,9 @@ pub(super) fn build(
         lowered += usize::from(row.priority > tree.priority);
         released += usize::from(tree.hold && !row.hold);
         held += usize::from(!tree.hold && row.hold);
-        let state = if tree.hold {
+        let state = if row.box_index == new_index {
+            "new"
+        } else if tree.hold {
             "held"
         } else if row.running {
             "running"
@@ -329,7 +377,7 @@ pub(super) fn build(
         writeln!(
             table,
             "{}\t{}\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            boxes[row.box_index].name,
+            boxes.get(row.box_index).map_or("", |b| b.name.as_str()),
             tree.id,
             tree.own,
             row.ply,
@@ -372,6 +420,20 @@ pub(super) fn build(
             result
                 .outputs
                 .push(dir.join(format!("{}_rerank_{}.jsonl", args.prefix, b.name)));
+            result.payloads.push(bytes);
+        }
+        if !new_queue.is_empty() {
+            // 台の名前は英数字・_・- なので、`_rerank-add` は台ごとの出力名と重ならない。
+            let mut bytes = Vec::new();
+            for (id, q) in &new_queue {
+                let (priority, hold) = result.lines[&(new_index, id.clone())];
+                let mut raw = q.raw.clone();
+                raw["priority"] = priority.into();
+                raw["hold"] = hold.into();
+                serde_json::to_writer(&mut bytes, &raw)?;
+                writeln!(bytes)?;
+            }
+            result.outputs.push(dir.join(format!("{}_rerank-add.jsonl", args.prefix)));
             result.payloads.push(bytes);
         }
     }

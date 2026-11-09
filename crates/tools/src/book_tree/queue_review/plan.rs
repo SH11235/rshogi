@@ -40,7 +40,7 @@ pub(super) fn ratio(remaining: f64, capacity: f64) -> f64 {
     }
 }
 
-fn load(paths: &[PathBuf], inputs: &mut Vec<PathBuf>) -> Result<Vec<Queued>> {
+pub(super) fn load(paths: &[PathBuf], inputs: &mut Vec<PathBuf>) -> Result<Vec<Queued>> {
     let mut rows = Vec::new();
     for path in paths {
         inputs.push(path.clone());

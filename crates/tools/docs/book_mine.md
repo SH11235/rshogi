@@ -467,11 +467,11 @@ book_mine tree queue-review \
 | `--max-ratio <F>` | 0.95 | 計画の残り/読める量の上限。有限の非負数 |
 | `--box-deadlines` | 無効 | 台の dir の `deadline` (Unix 秒の整数 1 行) と cutoff の早い方を締めにする。無い台は cutoff |
 | `--condition <NAME>=<LABEL>` | 空ラベル、繰り返し可 | 台の読み条件のラベル。同じ条件の台には同じラベルを付ける |
-| `--add <JSONL>` | なし、繰り返し可 | 新規の木の行。`tree enqueue --from` と同じ形 |
+| `--add <JSONL>` | なし、繰り返し可 | 新規の木の行。`tree enqueue --from` と同じ形。計画で割り振るか、再採点で既存の木と並べて採点する (`--plan-out`・`--rerank-table`・`--rerank-out` のどれかが必要) |
 | `--update <JSONL>` | なし、繰り返し可 | 既存の木への足し込み行。`tree seeds --update-out` の出力など |
 | `--update-size <N>` | 30 | hold false の台へ足し込みを送る id あたりの追加局面数の仮定 |
 
-`--add`・`--update`・`--condition` と、明示指定する `--max-ratio`・`--update-size` には `--plan-out` が必要です。
+`--update`・`--condition` と、明示指定する `--max-ratio`・`--update-size` には `--plan-out` が必要です。
 `--box-deadlines` は計画を出さない場合にも `--boxes` の hours・capacity・ratio に反映します。
 計画の例 (通常の点検引数に追加):
 
@@ -520,6 +520,11 @@ D の priority は保持します。
 棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
+`--add` の木も再採点の対象にし、既存の木と同じ区分・priority の規則で採点します。新しい木は未着手で、棚上げではありません
+(hold=true の行はそのまま hold、hold=false の行は D かつ effective=0 で priority が `--rerank-keep-below` 以上なら hold を付けます)。
+受付済みの id や `--add` どうしで重複する id はエラーです。表では box が空、state が new です。
+`--rerank-out` には、`--add` の全部の行を priority・hold だけ替えて `<prefix>_rerank-add.jsonl` に出します (変わらない行も出します)。
+これを `--plan-out` の `--add` に渡すと、同じ物差しの priority で台へ割り振れます。`--group-table` の rerank の行は台にある木だけを数え、`--add` の木は入りません。
 同じ `group` の木は、受付行に書く最終の priority・hold (下の `own=bw` と読み途中の規則を当てた後) で、hold でない行の priority の最小にそろえます。
 hold の行は最小の計算に入れず、priority も変えません。そろえるのは数字を小さくする変更だけで、`--rerank-keep-below` で保持する木にも当てます。
 表の new_priority も、受付行が hold でなければそろえた値です。
@@ -528,7 +533,7 @@ hold は両側とも停止可能な場合だけ付けます。片側でも読み
 表と集計は側ごとの提案を示します。
 
 再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root group`
-の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は held、running (読み途中)、queued です。group は受付行の `group` (無ければ空) です。
+の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は new (`--add` の木)、held、running (読み途中)、queued です。group は受付行の `group` (無ければ空) です。
 標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数とそのうち group でそろえた数、hold を外す / 付ける数を出します。
 
 `--group-table` は台ごとに、finished・failed・hold でない木を priority の小さい順 (同点は progress の順) に並べ、

@@ -19,6 +19,7 @@ use std::{
 };
 
 #[derive(Args, Debug)]
+#[command(group = clap::ArgGroup::new("add_target").args(["plan_out", "rerank_table", "rerank_out"]).multiple(true))]
 pub(super) struct QueueReviewArgs {
     /// 台の名前と、enqueue/・fetch/ を置いた dir (NAME=DIR、繰り返し可)
     #[arg(long = "box", required = true)]
@@ -88,8 +89,8 @@ pub(super) struct QueueReviewArgs {
     /// 台の読み条件 (NAME=LABEL、繰り返し可)
     #[arg(long, requires = "plan_out")]
     condition: Vec<String>,
-    /// 新規の木の JSON Lines (繰り返し可)
-    #[arg(long, requires = "plan_out")]
+    /// 新規の木の JSON Lines (繰り返し可)。計画で割り振るか、再採点で既存の木と並べて採点する
+    #[arg(long, requires = "add_target")]
     add: Vec<PathBuf>,
     /// 既存の木への足し込み JSON Lines (繰り返し可)
     #[arg(long, requires = "plan_out")]
