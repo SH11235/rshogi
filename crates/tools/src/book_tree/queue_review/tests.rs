@@ -1906,3 +1906,179 @@ fn group_minimum_uses_final_line_hold_after_bw_and_started_rules() {
     assert_eq!(out.get("finished"), Some(&(json!(40), json!(false))), "{out:?}");
     assert_eq!(out.get("urgent"), Some(&(json!(40), json!(false))), "{out:?}");
 }
+
+#[test]
+fn rerank_scores_added_trees_with_the_same_measure_and_group() {
+    let d = TempDir::new().unwrap();
+    let mut existing = row("existing", "7g7f");
+    existing["priority"] = json!(100);
+    existing["group"] = json!("x");
+    let mut a = plan_args(d.path(), &[("A", vec![existing])]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.rerank_out = Some(d.path().join("rerank"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.002\t7g7f\nb\town\t0.005\t2g2f\n").display()
+    )];
+    let mut urgent = row("urgent", "2g2f");
+    urgent["priority"] = json!(100);
+    urgent["group"] = json!("x");
+    let mut unknown = row("unknown", "5g5f");
+    unknown["priority"] = json!(100);
+    a.add = vec![input_rows(
+        d.path(),
+        "add.jsonl",
+        &[urgent.clone(), unknown],
+    )];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("\turgent\tb\tnew\t") && l.contains("\tB\t100\t40\t")),
+        "{table}"
+    );
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("A\texisting\t") && l.contains("\tC\t100\t40\t")),
+        "{table}"
+    );
+    let read = |name: &str| -> Vec<Value> {
+        std::fs::read_to_string(d.path().join("rerank").join(name))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let added = read("qrhold_rerank-add.jsonl");
+    assert_eq!(
+        added
+            .iter()
+            .map(|r| (r["id"].clone(), r["priority"].clone(), r["hold"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("unknown"), json!(100), json!(true)),
+            (json!("urgent"), json!(40), json!(false))
+        ]
+    );
+    assert_eq!(read("qrhold_rerank_A.jsonl")[0]["priority"], json!(40));
+}
+
+fn rerank_add_args(d: &Path, walk_rows: &str, adds: &[Value]) -> QueueReviewArgs {
+    let mut a = plan_args(d, &[("A", vec![row("accepted", "9g9f")])]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_out = Some(d.join("rerank"));
+    a.walk_table = vec![format!("b={}", walk(d, walk_rows).display())];
+    a.add = vec![input_rows(d, "add.jsonl", adds)];
+    a
+}
+
+#[test]
+fn rerank_add_rejects_accepted_or_duplicate_ids_and_missing_side_table() {
+    for (adds, message) in [
+        (vec![row("accepted", "2g2f")], "受付済み"),
+        (vec![row("twice", "2g2f"), row("twice", "5g5f")], "重複"),
+        (
+            vec![{
+                let mut r = row("white", "2g2f");
+                r["own"] = json!("w");
+                r
+            }],
+            "--walk-table w=",
+        ),
+    ] {
+        let d = TempDir::new().unwrap();
+        let a = rerank_add_args(d.path(), "b\town\t0.002\t7g7f\n", &adds);
+        let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+        assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
+fn rerank_add_bw_and_held_rows_follow_existing_rules() {
+    let d = TempDir::new().unwrap();
+    let mut both = row("both", "2g2f");
+    both["own"] = json!("bw");
+    both["priority"] = json!(100);
+    let mut held = row("held", "5g5f");
+    held["priority"] = json!(100);
+    held["hold"] = json!(true);
+    let mut a =
+        rerank_add_args(d.path(), "b\town\t0.005\t2g2f\nb\town\t0.005\t5g5f\n", &[both, held]);
+    let white = d.path().join("white.tsv");
+    std::fs::write(&white, "side\tstop\tweight\tmoves\nw\town\t0.0005\t9g9f\n").unwrap();
+    a.walk_table.push(format!("w={}", white.display()));
+    run_at(a, now(), &mut vec![]).unwrap();
+    let out: Vec<(Value, Value, Value)> =
+        std::fs::read_to_string(d.path().join("rerank/qrhold_rerank-add.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                (v["id"].clone(), v["priority"].clone(), v["hold"].clone())
+            })
+            .collect();
+    // bw は b 側の B (40) と w 側の D・hold を、受付行で priority は小さい方・hold は両側の積にまとめる。
+    // hold の新しい木は棚上げとして A〜C なら hold を外す。
+    assert_eq!(
+        out,
+        vec![
+            (json!("both"), json!(40), json!(false)),
+            (json!("held"), json!(40), json!(false))
+        ]
+    );
+}
+
+#[test]
+fn plan_keeps_held_add_rows_held_without_using_capacity() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![])]);
+    let mut held = row("held", "7g7f");
+    held["hold"] = json!(true);
+    a.add = vec![input_rows(d.path(), "adds", &[held, row("live", "2g2f")])];
+    a.tree_size = 19;
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = plan_table(d.path());
+    assert!(table.contains("add-hold\theld\tb\t42\t\tA\tinput-hold"), "{table}");
+    assert!(table.contains("add\tlive\tb\t42\t\tA\tcapacity"), "{table}");
+}
+
+#[test]
+fn cli_add_needs_plan_or_rerank_output() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    let base = [
+        "tree",
+        "queue-review",
+        "--box",
+        "A=/path/to/a",
+        "--cutoff",
+        "2026-11-08T12:00:00+09:00",
+        "--add",
+        "add.jsonl",
+        "--walk-table",
+        "b=walk.tsv",
+        "--master",
+        "moves.tsv",
+    ];
+    assert!(Cli::try_parse_from(base).is_err());
+    for option in [
+        ["--rerank-table", "r.tsv"],
+        ["--rerank-out", "r"],
+        ["--plan-out", "p"],
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(option)).is_ok());
+    }
+}

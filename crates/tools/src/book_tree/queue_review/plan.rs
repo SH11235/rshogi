@@ -40,7 +40,7 @@ pub(super) fn ratio(remaining: f64, capacity: f64) -> f64 {
     }
 }
 
-fn load(paths: &[PathBuf], inputs: &mut Vec<PathBuf>) -> Result<Vec<Queued>> {
+pub(super) fn load(paths: &[PathBuf], inputs: &mut Vec<PathBuf>) -> Result<Vec<Queued>> {
     let mut rows = Vec::new();
     for path in paths {
         inputs.push(path.clone());
@@ -327,7 +327,12 @@ pub(super) fn build(
             .copied()
             .filter(|&i| ratio(plan.remaining[i] + amount, metrics[i].capacity) <= args.max_ratio)
             .collect();
-        let destination = best(&plan.remaining, available, amount);
+        // hold の入力行は読ませない指定なので、読める量を使わずに hold のまま置く。
+        let destination = if q.line.hold {
+            None
+        } else {
+            best(&plan.remaining, available, amount)
+        };
         let held = destination.is_none();
         let i = destination
             .or_else(|| best(&plan.remaining, allowed, 0.0))
@@ -344,7 +349,13 @@ pub(super) fn build(
             q,
             "",
             &boxes[i].name,
-            if held { "no-capacity" } else { "capacity" },
+            if q.line.hold {
+                "input-hold"
+            } else if held {
+                "no-capacity"
+            } else {
+                "capacity"
+            },
         )?;
     }
     plan.outputs.push(dir.join(format!("{}_plan.tsv", args.prefix)));
