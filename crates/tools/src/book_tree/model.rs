@@ -485,6 +485,15 @@ impl Tree {
     }
 
     pub fn negamax(&self, nodes: &BTreeSet<String>) -> Result<Values> {
+        self.negamax_within(nodes, NEGAMAX_EXACT_CALLS)
+    }
+
+    /// `negamax` の本体。`exact_calls` は循環の中を手順ごとに数える呼び出しの上限。
+    pub(super) fn negamax_within(
+        &self,
+        nodes: &BTreeSet<String>,
+        exact_calls: usize,
+    ) -> Result<Values> {
         let mut children: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for key in nodes {
             let moves: BTreeSet<_> = self.nodes[key]
@@ -504,7 +513,7 @@ impl Tree {
         // 循環 (強連結成分) に入らない局面からは手順の上の祖先に戻れない (戻れれば同じ成分になる)。
         // その値は手順に依らないので一度だけ計算する。合流の多い木で手順ごとに数え直すと指数的に遅くなる。
         // 循環の中の局面は手順ごとに数え直すが、大きな循環が重なる木ではそれも爆発するので、呼び出しが
-        // NEGAMAX_EXACT_CALLS を超えたら循環の中の局面も最初に求めた値を使い回す (別の手順から来たときの
+        // `exact_calls` を超えたら循環の中の局面も最初に求めた値を使い回す (別の手順から来たときの
         // 千日手の判定を引き継がない近似)。
         fn val(
             tree: &Tree,
@@ -513,6 +522,7 @@ impl Tree {
             cyclic: &BTreeSet<String>,
             memo: &mut BTreeMap<String, i32>,
             calls: &mut usize,
+            exact_calls: usize,
             path: &mut BTreeSet<String>,
         ) -> (i32, BTreeMap<String, i32>) {
             *calls += 1;
@@ -524,7 +534,7 @@ impl Tree {
                 } else if let Some(&v) = memo.get(c) {
                     -v
                 } else {
-                    -val(tree, c, children, cyclic, memo, calls, path).0
+                    -val(tree, c, children, cyclic, memo, calls, exact_calls, path).0
                 };
                 rows.insert(mv.clone(), value);
             }
@@ -536,7 +546,7 @@ impl Tree {
                 .then(|| reading.multipv.first().map(|p| p.cp))
                 .flatten();
             let value = rows.values().copied().max().or(win).unwrap_or(0);
-            if !cyclic.contains(key) || *calls > NEGAMAX_EXACT_CALLS {
+            if !cyclic.contains(key) || *calls > exact_calls {
                 memo.insert(key.to_owned(), value);
             }
             (value, rows)
@@ -546,9 +556,18 @@ impl Tree {
         Ok(nodes
             .iter()
             .map(|key| {
-                let rows =
-                    val(self, key, &children, &cyclic, &mut memo, &mut calls, &mut BTreeSet::new())
-                        .1;
+                let mut path = BTreeSet::new();
+                let rows = val(
+                    self,
+                    key,
+                    &children,
+                    &cyclic,
+                    &mut memo,
+                    &mut calls,
+                    exact_calls,
+                    &mut path,
+                )
+                .1;
                 (key.clone(), rows)
             })
             .collect())
