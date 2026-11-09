@@ -21,7 +21,7 @@
 | 注目の線から元データと DONE の木を合わせ、伝播値つきの定跡をビュアー用に作る | [book_mine master line-db](docs/book_mine.md#master-line-db-注目の線を辿る定跡) |
 | 2 つの定跡の局面と手の差分を表示する | [book_mine master diff](docs/book_mine.md#master-diff-2-つの定跡の差分) |
 | 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |
-| main の置換と、旧 main・curated を保護した悪い alt の bench（控え）への降格・値が `--bad-eval` より大きく基準との差が `--demote-line` (既定 100) 未満の控えの復帰（`--apply`・`--replace-curated`・`--demote-alts`・`--revive-bench`。降格・復帰は `--demote-line 100`、点検・main 置換は `--line 40`。`--opp-records` で相手の record も伝播に使い、反転した局面へは辺を張らない） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
+| 伝播の切れ目の局面を重み順に並べ、既存の木との重複を除いたキューにする `--bridge-enqueue-out` と、main の置換と、旧 main・curated を保護した悪い alt の bench（控え）への降格・値が `--bad-eval` より大きく基準との差が `--demote-line` (既定 100) 未満の控えの復帰（`--apply`・`--replace-curated`・`--demote-alts`・`--revive-bench`。降格・復帰は `--demote-line 100`、点検・main 置換は `--line 40`。`--opp-records` で相手の record も伝播に使い、反転した局面へは辺を張らない） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
 | 自分は main、相手は main・alt を指して辿れる出口を層ごとの外部ソート・到達済みキーのマージで分類し、既存の木との重複を除いてキューにする | [book_mine master exits](docs/book_mine.md#master-exits-元データを辿って出口を列挙する) |
 | LayerStacks の FT と L1 の列を並べ替える | [permute_nnue_ft](docs/permute_nnue_ft.md) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |

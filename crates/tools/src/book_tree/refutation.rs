@@ -321,7 +321,8 @@ pub(super) struct RefutationOutputs<'a> {
     pub depth: usize,
     pub max: Option<usize>,
     pub priority: u32,
-    pub weight: &'a WeightArgs,
+    pub weights: Option<&'a SideWeights>,
+    pub min_weight: f64,
 }
 
 /// 反駁の表とキューの行を書き、要約を返す。
@@ -331,9 +332,8 @@ pub(super) fn write_outputs(
     book: &AuditedBook,
     outputs: &RefutationOutputs<'_>,
 ) -> Result<String> {
-    let weights = side_weights(positions, outputs.weight)?;
     let (mut rows, summary) =
-        find(positions, book, outputs.margin, weights.as_ref(), outputs.weight.min_weight)?;
+        find(positions, book, outputs.margin, outputs.weights, outputs.min_weight)?;
     fill_best_sources(master, &mut rows)?;
     if let Some(path) = outputs.table {
         crate::common::io::write_atomic(path, &format_table(&rows))?;
@@ -351,7 +351,13 @@ pub(super) fn write_outputs(
         }
         None => None,
     };
-    Ok(format_summary(&summary, outputs.margin, rows.len(), weights.is_some(), queued))
+    Ok(format_summary(
+        &summary,
+        outputs.margin,
+        rows.len(),
+        outputs.weights.is_some(),
+        queued,
+    ))
 }
 
 #[cfg(test)]

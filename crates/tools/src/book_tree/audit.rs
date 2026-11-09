@@ -5,11 +5,13 @@ use super::deep::{Continuation, DeepArgs, ReplyFrequency};
 use super::master_table::{
     self, BookMove, MasterPosition, Row, format_master, parse_master, positions_from_rows,
 };
-use super::refutation::{self, RefutationOutputs};
+use super::refutation::{self, RefutationOutputs, SideWeights};
 use super::rejoin::WeightArgs;
 use super::reply_graph::apply_usi;
 use super::schema::Schema;
-use super::targets::{DEFAULT_PRIORITY, MAX_DEPTH, MAX_PRIORITY};
+use super::targets::{
+    DEFAULT_PRIORITY, Line, MAX_DEPTH, MAX_PRIORITY, Opts, parse_root, read_checked_lines,
+};
 use crate::book_backprop::{
     BackpropOptions, DrawValues, Graph, MergeMode, PropagationStats, delta_buckets, evaluate_edges,
     graph_from_entries, parse_row, percentile, propagate_values, retain_known, write_book_atomic,
@@ -20,6 +22,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
@@ -116,11 +119,49 @@ pub(super) struct AuditArgs {
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
     #[arg(long, requires = "bridge_replies")]
     bridge_table: Option<PathBuf>,
+    /// bridge の局面を根にした tree enqueue --from の行 (JSON Lines)
+    #[arg(long, requires = "bridge_replies")]
+    bridge_enqueue_out: Option<PathBuf>,
+    #[arg(long, default_value_t = 6, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=MAX_DEPTH as u64))]
+    bridge_depth: usize,
+    /// キューの行数の上限 (表の順で先から)
+    #[arg(long)]
+    bridge_max: Option<usize>,
+    #[arg(long, default_value_t = DEFAULT_PRIORITY, value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_PRIORITY - 99)))]
+    bridge_priority: u32,
+    #[arg(long)]
+    bridge_opp_n: Option<usize>,
+    #[arg(long, allow_hyphen_values = true)]
+    bridge_stop: Option<i32>,
+    #[arg(long)]
+    bridge_rounds: Option<usize>,
+    #[arg(long, allow_hyphen_values = true)]
+    bridge_draw_black: Option<i32>,
+    #[arg(long, allow_hyphen_values = true)]
+    bridge_draw_white: Option<i32>,
+    /// 指定順に読み、id ごとの最後の行を使う
+    #[arg(long)]
+    bridge_exclude_queue: Vec<PathBuf>,
+    #[arg(long, default_value_t = 6)]
+    bridge_exclude_min_depth: usize,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
     #[arg(long, default_value_t = 0)]
     threads: usize,
+}
+
+impl AuditArgs {
+    fn bridge_opts(&self) -> Opts {
+        Opts {
+            opp_n: self.bridge_opp_n,
+            stop: self.bridge_stop,
+            rounds: self.bridge_rounds,
+            draw_black: self.bridge_draw_black,
+            draw_white: self.bridge_draw_white,
+            ..Opts::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,24 +279,32 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         "--revive-bench と --fill-replies は併用できません"
     );
     ensure!(
-        args.bridge_table.is_none() || args.bridge_replies,
-        "--bridge-table は --bridge-replies と一緒に使います"
+        (args.bridge_table.is_none() && args.bridge_enqueue_out.is_none()) || args.bridge_replies,
+        "--bridge-table / --bridge-enqueue-out は --bridge-replies と一緒に使います"
     );
     let schema = Schema::load(args.schema.as_deref())?;
     ensure!(args.demote_line > 0, "--demote-line は 1 以上にしてください");
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     ensure!(args.refutation_margin > 0, "--refutation-margin は 1 以上にしてください");
     let refutation = args.refutation_table.is_some() || args.enqueue_out.is_some();
+    let bridge_output = args.bridge_table.is_some() || args.bridge_enqueue_out.is_some();
     ensure!(
-        refutation || args.weight.opp_freq.is_none(),
-        "--opp-freq は --refutation-table か --enqueue-out と一緒に使います"
+        refutation || bridge_output || args.weight.opp_freq.is_none(),
+        "--opp-freq は --refutation-table / --enqueue-out / --bridge-table / --bridge-enqueue-out と一緒に使います"
     );
+    args.bridge_opts().check()?;
     ensure!(
         args.deep_plies.is_some() || args.deep.deep_opp_freq.is_none(),
         "--deep-opp-freq は --deep-plies と一緒に使います"
     );
     args.weight.check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
+    for path in &args.bridge_exclude_queue {
+        if args.apply {
+            reject_same_file(&args.master, &[("--bridge-exclude-queue", path.as_path())])?;
+        }
+        inputs.push(("--bridge-exclude-queue", path.as_path()));
+    }
     if let Some(freq) = &args.weight.opp_freq {
         inputs.push(("--opp-freq", freq.as_path()));
     }
@@ -279,6 +328,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         ("--refutation-table", args.refutation_table.as_deref()),
         ("--enqueue-out", args.enqueue_out.as_deref()),
         ("--bridge-table", args.bridge_table.as_deref()),
+        ("--bridge-enqueue-out", args.bridge_enqueue_out.as_deref()),
     ]
     .into_iter()
     .filter_map(|(name, path)| Some((name, path?)))
@@ -350,11 +400,33 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         args.since.as_deref().unwrap_or("確認"),
         args.replace_curated,
     )?;
+    let weights = refutation::side_weights(&positions.0, &args.weight)?;
+    // 除外キューの読み込みや行の検査で失敗したときに表だけが更新されないよう、bridge の出力は書く前に全部作る。
+    let bridge = if bridge_output {
+        let mut worse = bridge_findings(&positions.0, draws, &book, args.line, records.as_ref())?;
+        weight_bridge_findings(&mut worse, weights.as_ref(), args.weight.min_weight);
+        let table = args.bridge_table.as_ref().map(|_| format_bridge_table(&worse));
+        let queue = match &args.bridge_enqueue_out {
+            Some(_) => {
+                let (lines, excluded) = bridge_queue(&worse, &args)?;
+                Some((refutation::format_queue(&lines)?, lines.len(), excluded))
+            }
+            None => None,
+        };
+        Some((worse.len(), table, queue))
+    } else {
+        None
+    };
     write_atomic(&args.table, &format_table(&findings))?;
-    if let Some(path) = &args.bridge_table {
-        let worse = bridge_findings(&positions.0, draws, &book, args.line, records.as_ref())?;
-        write_atomic(path, &format_bridge_table(&worse))?;
-        println!("補って main の値が {} 以上悪くなった局面: {}", args.line, worse.len());
+    if let Some((found, table, queue)) = bridge {
+        if let (Some(path), Some(text)) = (&args.bridge_table, table) {
+            write_atomic(path, &text)?;
+        }
+        if let (Some(path), Some((text, queued, excluded))) = (&args.bridge_enqueue_out, queue) {
+            write_atomic(path, &text)?;
+            println!("補った切れ目のキューの行: {queued} (除外 {excluded})");
+        }
+        println!("補って main の値が {} 以上悪くなった局面: {found}", args.line);
     }
     if let Some(out) = &args.out_db {
         write_audited_db(out, &positions.0, &book)?;
@@ -371,10 +443,12 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
             depth: args.refutation_depth,
             max: args.refutation_max,
             priority: args.priority,
-            weight: &args.weight,
+            weights: weights.as_ref(),
+            min_weight: args.weight.min_weight,
         };
         print!("{}", refutation::write_outputs(&rows, &positions.0, &book, &outputs)?);
     }
+    drop(weights);
     rewrite_rows(&mut rows, &changes);
     let demotions = if args.demote_alts {
         Some(demote_alts(&mut rows, &positions.0, &book, &schema, &args)?)
@@ -1480,7 +1554,7 @@ fn main_continues_after(
 }
 
 /// `--bridge-table` の 1 行。値は手番の側から。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct BridgeFinding {
     key: String,
     ply: String,
@@ -1492,10 +1566,10 @@ struct BridgeFinding {
     /// 補ったときの 1 位の手と値。
     best: String,
     best_value: i32,
+    weight: Option<f64>,
 }
 
-/// 補ったとき (`book`) の main の値が、補わないときより `line` 以上悪くなった局面 (悪くなった量の大きい順、
-/// 同じなら key 順)。
+/// 補ったとき (`book`) の main の値が、補わないときより `line` 以上悪くなった局面。
 fn bridge_findings(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
@@ -1542,23 +1616,94 @@ fn bridge_findings(
             bridged: main.value,
             best: best.mv.clone(),
             best_value: best.value,
+            weight: None,
         });
     }
-    out.sort_by(|a, b| (b.plain - b.bridged).cmp(&(a.plain - a.bridged)).then(a.key.cmp(&b.key)));
     Ok(out)
+}
+
+fn weight_bridge_findings(rows: &mut Vec<BridgeFinding>, weights: Option<&SideWeights>, min: f64) {
+    for row in rows.iter_mut() {
+        let side = usize::from(super::model::side(&row.key) == "w");
+        row.weight = weights.map(|w| w[side].get(&row.key).copied().unwrap_or(0.0));
+    }
+    rows.retain(|r| r.weight.is_none_or(|w| w >= min));
+    rows.sort_by(|a, b| {
+        b.weight
+            .unwrap_or(0.0)
+            .total_cmp(&a.weight.unwrap_or(0.0))
+            .then_with(|| (b.plain - b.bridged).cmp(&(a.plain - a.bridged)))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+}
+
+fn bridge_queue_line(row: &BridgeFinding, rank: usize, args: &AuditArgs) -> Result<Line> {
+    let ply: u32 = row.ply.trim().parse().ok().filter(|&p| p > 0).with_context(|| {
+        format!("キューの行には 1 以上の手数が要ります: {} {:?}", row.key, row.ply)
+    })?;
+    let side = super::model::side(&row.key);
+    let digest = format!("{:x}", Sha256::digest(format!("{} {}", row.key, row.main)));
+    let line = Line {
+        id: format!("{}_bridge_{side}", &digest[..16]),
+        root: format!("sfen {} {ply}", row.key),
+        roots: Vec::new(),
+        own: side.to_owned(),
+        depth: args.bridge_depth,
+        priority: args.bridge_priority + rank.min(99) as u32,
+        hold: false,
+        game: vec![vec![row.main.clone()]],
+        opts: args.bridge_opts(),
+        memo: Some(format!(
+            "bridge main={} plain={} bridged={} best={} best_value={}",
+            row.main, row.plain, row.bridged, row.best, row.best_value
+        )),
+    };
+    line.check().with_context(|| format!("キューの行の検査: {}", row.key))?;
+    Ok(line)
+}
+
+fn bridge_queue(rows: &[BridgeFinding], args: &AuditArgs) -> Result<(Vec<Line>, usize)> {
+    let mut latest = BTreeMap::new();
+    for path in &args.bridge_exclude_queue {
+        read_checked_lines(path, |line, _, _| {
+            latest.insert(line.id.clone(), line);
+            Ok(())
+        })?;
+    }
+    let mut covered = BTreeSet::new();
+    for line in latest.into_values() {
+        if line.hold || line.depth < args.bridge_exclude_min_depth {
+            continue;
+        }
+        for root in std::iter::once(&line.root).chain(&line.roots) {
+            let key = parse_root(root)?.key;
+            if line.own.contains(super::model::side(&key)) {
+                covered.insert(key);
+            }
+        }
+    }
+    let excluded = rows.iter().filter(|r| covered.contains(&r.key)).count();
+    let lines = rows
+        .iter()
+        .filter(|r| !covered.contains(&r.key))
+        .take(args.bridge_max.unwrap_or(usize::MAX))
+        .enumerate()
+        .map(|(rank, row)| bridge_queue_line(row, rank, args))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((lines, excluded))
 }
 
 /// `--bridge-table` の TSV。値は手番の側からと、先手から見た値の両方。
 fn format_bridge_table(rows: &[BridgeFinding]) -> String {
     let mut text = String::from(
-        "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\n",
+        "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\tweight\n",
     );
     for r in rows {
         let white = r.key.split(' ').nth(1) == Some("w");
         let black = |v: i32| if white { -v } else { v };
         let _ = writeln!(
             text,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             r.key,
             r.ply,
             if white { "w" } else { "b" },
@@ -1569,7 +1714,8 @@ fn format_bridge_table(rows: &[BridgeFinding]) -> String {
             r.best,
             r.best_value,
             black(r.plain),
-            black(r.bridged)
+            black(r.bridged),
+            r.weight.map_or_else(String::new, |w| format!("{w:.6}"))
         );
     }
     text
@@ -2813,7 +2959,292 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let text = std::fs::read_to_string(dir.path().join("bridge.tsv")).unwrap();
         let rows: Vec<&str> = text.lines().collect();
         assert_eq!(rows.len(), 2, "{text}");
-        assert_eq!(rows[1], format!("{ROOT}\t1\tb\t5i4h\t50\t-100\t150\t5i4h\t-100\t50\t-100"));
+        assert_eq!(rows[1], format!("{ROOT}\t1\tb\t5i4h\t50\t-100\t150\t5i4h\t-100\t50\t-100\t"));
+    }
+
+    fn bridge_row(key: &str, main: &str, drop: i32) -> BridgeFinding {
+        BridgeFinding {
+            key: key.into(),
+            ply: "7".into(),
+            main: main.into(),
+            plain: 50,
+            bridged: 50 - drop,
+            best: main.into(),
+            best_value: 50 - drop,
+            weight: None,
+        }
+    }
+
+    #[test]
+    fn bridge_queue_preserves_root_side_main_and_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        args.bridge_depth = 8;
+        args.bridge_priority = 321;
+        args.bridge_opp_n = Some(3);
+        args.bridge_stop = Some(90);
+        args.bridge_rounds = Some(2);
+        args.bridge_draw_black = Some(-70);
+        args.bridge_draw_white = Some(-20);
+        for (key, mv, side, id) in [
+            (ROOT, "5i4h", "b", "18064834fcf08122_bridge_b"),
+            (A, "5a5b", "w", "8c610a1b413a2d6e_bridge_w"),
+        ] {
+            let row = bridge_row(key, mv, 150);
+            let line = bridge_queue_line(&row, 2, &args).unwrap();
+            assert_eq!(line.root, format!("sfen {key} 7"));
+            assert_eq!(line.own, side);
+            assert_eq!(line.game, vec![vec![mv]]);
+            assert!(line.roots.is_empty());
+            assert!(!line.hold);
+            assert_eq!((line.depth, line.priority), (8, 323));
+            assert_eq!(line.id, id);
+            assert_eq!(line.opts, args.bridge_opts());
+            assert_eq!(
+                line.memo.as_deref(),
+                Some(
+                    format!("bridge main={mv} plain=50 bridged=-100 best={mv} best_value=-100")
+                        .as_str()
+                )
+            );
+            assert_eq!(bridge_queue_line(&row, 100, &args).unwrap().priority, 420);
+            line.check().unwrap();
+        }
+    }
+
+    #[test]
+    fn bridge_queue_excludes_latest_active_roots_before_ranking_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        let rows = vec![bridge_row(ROOT, "5i4h", 150), bridge_row(B, "4h3h", 100)];
+        let mut line = bridge_queue_line(&rows[0], 0, &args).unwrap();
+        line.roots = vec![format!("sfen {B} 3")];
+        let first = dir.path().join("first.jsonl");
+        let last = dir.path().join("last.jsonl");
+        std::fs::write(&first, refutation::format_queue(&[line.clone()]).unwrap()).unwrap();
+        line.hold = true;
+        std::fs::write(&last, refutation::format_queue(&[line.clone()]).unwrap()).unwrap();
+        args.bridge_exclude_queue = vec![first.clone(), last.clone()];
+        assert_eq!(bridge_queue(&rows, &args).unwrap().0.len(), 2);
+        args.bridge_exclude_queue = vec![last, first.clone()];
+        let (lines, excluded) = bridge_queue(&rows, &args).unwrap();
+        assert!(lines.is_empty());
+        assert_eq!(excluded, 2);
+        line.hold = false;
+        line.roots.clear();
+        std::fs::write(&first, refutation::format_queue(&[line.clone()]).unwrap()).unwrap();
+        args.bridge_exclude_queue = vec![first.clone()];
+        args.bridge_max = Some(1);
+        let (lines, excluded) = bridge_queue(&rows, &args).unwrap();
+        assert_eq!(excluded, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].root.contains(B));
+        assert_eq!(lines[0].priority, DEFAULT_PRIORITY);
+        for (depth, own) in [(5, "b"), (6, "w")] {
+            line.depth = depth;
+            line.own = own.into();
+            std::fs::write(&first, refutation::format_queue(&[line.clone()]).unwrap()).unwrap();
+            assert_eq!(bridge_queue(&rows, &args).unwrap().1, 0);
+        }
+    }
+
+    #[test]
+    fn bridge_weights_sort_by_side_weight_drop_and_key_and_filter_table_and_queue() {
+        use std::collections::HashMap;
+        let dir = tempfile::tempdir().unwrap();
+        let args = test_args(dir.path());
+        let input = vec![
+            bridge_row(ROOT, "5i4h", 150),
+            bridge_row(A, "5a5b", 100),
+            bridge_row(B, "4h3h", 100),
+        ];
+        let weights: SideWeights = [
+            HashMap::from([(ROOT.into(), 0.2), (A.into(), 99.0), (B.into(), 0.5)]),
+            HashMap::from([(A.into(), 0.5), (ROOT.into(), 99.0)]),
+        ];
+        let mut rows = input.clone();
+        weight_bridge_findings(&mut rows, Some(&weights), 0.2);
+        let mut tied = [A, B];
+        tied.sort();
+        assert_eq!(
+            rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            [tied[0], tied[1], ROOT]
+        );
+        rows.iter_mut().find(|r| r.key == B).unwrap().bridged = -200;
+        weight_bridge_findings(&mut rows, Some(&weights), 0.3);
+        assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), [B, A]);
+        let table = format_bridge_table(&rows);
+        assert!(table.lines().next().unwrap().ends_with("\tweight"));
+        assert!(table.lines().skip(1).all(|r| r.ends_with("\t0.500000")));
+        assert_eq!(bridge_queue(&rows, &args).unwrap().0.len(), 2);
+        weight_bridge_findings(&mut rows, Some(&weights), 0.6);
+        assert_eq!(format_bridge_table(&rows).lines().count(), 1);
+        assert!(bridge_queue(&rows, &args).unwrap().0.is_empty());
+        let mut rows = input;
+        weight_bridge_findings(&mut rows, None, 1.0);
+        assert_eq!(rows[0].key, ROOT);
+        assert_eq!(rows.len(), 3);
+        assert!(format_bridge_table(&rows).lines().skip(1).all(|r| r.ends_with('\t')));
+    }
+
+    #[test]
+    fn bridge_enqueue_requires_bridge_replies_and_valid_options() {
+        #[derive(clap::Parser, Debug)]
+        struct Cli {
+            #[command(flatten)]
+            args: AuditArgs,
+        }
+        use clap::Parser;
+        let base = [
+            "audit",
+            "--master",
+            "moves.tsv",
+            "--table",
+            "audit.tsv",
+            "--bridge-enqueue-out",
+            "queue.jsonl",
+        ];
+        assert_eq!(
+            Cli::try_parse_from(base).unwrap_err().kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let args = Cli::try_parse_from(base.into_iter().chain([
+            "--bridge-replies",
+            "--bridge-draw-black",
+            "-70",
+            "--bridge-draw-white",
+            "-10",
+        ]))
+        .unwrap()
+        .args;
+        assert!(args.bridge_table.is_none());
+        assert_eq!(args.bridge_depth, 6);
+        assert_eq!(args.bridge_priority, DEFAULT_PRIORITY);
+        assert_eq!(args.bridge_exclude_min_depth, 6);
+        args.bridge_opts().check().unwrap();
+        for extra in [["--bridge-depth", "999"], ["--bridge-priority", "1000000"]] {
+            assert!(
+                Cli::try_parse_from(base.into_iter().chain(["--bridge-replies"]).chain(extra))
+                    .is_err()
+            );
+        }
+        let args = Cli::try_parse_from(base.into_iter().chain([
+            "--bridge-replies",
+            "--bridge-stop",
+            "-1",
+        ]))
+        .unwrap()
+        .args;
+        assert!(args.bridge_opts().check().is_err());
+    }
+
+    #[test]
+    fn bridge_outputs_accept_frequency_alone_and_with_refutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let freq = dir.path().join("freq.db");
+        std::fs::write(&freq, "#YANEURAOU-DB2016 1.00\n").unwrap();
+        std::fs::write(
+            dir.path().join("moves.tsv"),
+            master(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]),
+        )
+        .unwrap();
+        for (table, queue, refutation) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let mut args = test_args(dir.path());
+            args.bridge_replies = true;
+            args.weight.opp_freq = Some(freq.clone());
+            args.bridge_table = table.then(|| dir.path().join("bridge.tsv"));
+            args.bridge_enqueue_out = queue.then(|| dir.path().join("bridge.jsonl"));
+            args.refutation_table = refutation.then(|| dir.path().join("refutation.tsv"));
+            run_in_pool(args).unwrap();
+            if table {
+                assert!(
+                    std::fs::read_to_string(dir.path().join("bridge.tsv"))
+                        .unwrap()
+                        .lines()
+                        .nth(1)
+                        .unwrap()
+                        .ends_with("\t0.000000")
+                );
+            }
+            if queue {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("bridge.jsonl"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bridge_enqueue_works_without_bridge_table_and_rejects_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(
+            &args.master,
+            master(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]),
+        )
+        .unwrap();
+        args.bridge_replies = true;
+        let out = dir.path().join("bridge.jsonl");
+        args.bridge_enqueue_out = Some(out.clone());
+        run_in_pool(args).unwrap();
+        let mut count = 0;
+        read_checked_lines(&out, |line, _, _| {
+            assert_eq!(line.root, format!("sfen {ROOT} 1"));
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
+        for collision in [
+            out.clone(),
+            dir.path().join("audit.tsv"),
+            dir.path().join("moves.tsv"),
+        ] {
+            let mut args = test_args(dir.path());
+            args.bridge_replies = true;
+            args.bridge_enqueue_out = Some(collision);
+            args.bridge_exclude_queue = vec![out.clone()];
+            assert!(run_in_pool(args).is_err());
+        }
+    }
+
+    #[test]
+    fn bad_bridge_exclude_queue_writes_no_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(
+            &args.master,
+            master(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]),
+        )
+        .unwrap();
+        args.bridge_replies = true;
+        args.bridge_table = Some(dir.path().join("bridge.tsv"));
+        args.bridge_enqueue_out = Some(dir.path().join("bridge.jsonl"));
+        args.bridge_exclude_queue = vec![dir.path().join("missing.jsonl")];
+        assert!(run_in_pool(args).is_err());
+        for name in ["audit.tsv", "bridge.tsv", "bridge.jsonl"] {
+            assert!(!dir.path().join(name).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn bridge_queue_line_rejects_rows_without_ply() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = test_args(dir.path());
+        for ply in ["", "0"] {
+            let mut row = bridge_row(ROOT, "5i4h", 150);
+            row.ply = ply.into();
+            let err = bridge_queue_line(&row, 0, &args).unwrap_err();
+            assert!(format!("{err:#}").contains("手数"), "{err:#}");
+        }
     }
 
     #[test]
@@ -2923,6 +3354,17 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             bridge_replies: false,
             opp_records: false,
             bridge_table: None,
+            bridge_enqueue_out: None,
+            bridge_depth: 6,
+            bridge_max: None,
+            bridge_priority: DEFAULT_PRIORITY,
+            bridge_opp_n: None,
+            bridge_stop: None,
+            bridge_rounds: None,
+            bridge_draw_black: None,
+            bridge_draw_white: None,
+            bridge_exclude_queue: Vec::new(),
+            bridge_exclude_min_depth: 6,
             weight: WeightArgs {
                 opp_freq: None,
                 min_games: 3,
