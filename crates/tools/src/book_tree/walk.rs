@@ -102,6 +102,15 @@ pub(super) struct WalkArgs {
     /// 初期局面からこの手順 (USI を空白区切り) を指した局面から辿り始める。手は元データに無くてもよい
     #[arg(long, value_name = "USI")]
     start_moves: Option<String>,
+    /// 強い対局の棋譜 (1 局 1 行の JSON Lines、`.gz` も可)。止まりの局面とその手前に着いた局数と勝敗の列を足す
+    #[arg(long, value_name = "PATH")]
+    opp_records: Option<PathBuf>,
+    /// `--opp-records` で数える対局の、両者のレートの下限
+    #[arg(long, default_value_t = 3800.0, requires = "opp_records")]
+    records_min_rate: f64,
+    /// `--opp-records` で、1 局を初期局面からこの手数まで見る
+    #[arg(long, default_value_t = 130, requires = "opp_records")]
+    records_max_ply: usize,
 }
 
 impl WalkArgs {
@@ -463,6 +472,10 @@ fn check_args(args: &WalkArgs) -> Result<()> {
     for path in &args.exclude_queue {
         inputs.push(("--exclude-queue", path.as_path()));
     }
+    if let Some(records) = &args.opp_records {
+        inputs.push(("--opp-records", records.as_path()));
+    }
+    ensure!(args.records_min_rate.is_finite(), "--records-min-rate は有限の数にしてください");
     reject_same_file(&args.table, &inputs)?;
     if let Some(out) = &args.enqueue_out {
         inputs.push(("--table", args.table.as_path()));
@@ -539,7 +552,21 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
     });
     let mut index =
         super::master_index::MasterIndex::open(&args.master, &super::schema::Schema::load(None)?)?;
-    write_atomic(&args.table, &format_table_with_entries(&rows, &mut index, initial)?)?;
+    let records = args
+        .opp_records
+        .as_deref()
+        .map(|path| {
+            let options = records::RecordOptions {
+                min_rate: args.records_min_rate,
+                max_ply: args.records_max_ply,
+            };
+            records::reach_stats(&rows, initial, path, &options)
+        })
+        .transpose()?;
+    write_atomic(
+        &args.table,
+        &format_table_with_entries(&rows, &mut index, initial, records.as_deref())?,
+    )?;
     let queued = match &args.enqueue_out {
         Some(out) => {
             let (lines, counts) = queue_lines(&rows, &args, &excluded)?;
@@ -559,12 +586,17 @@ fn format_table_with_entries(
     rows: &[Row],
     index: &mut super::master_index::MasterIndex,
     initial: &str,
+    records: Option<&[[records::Reach; 3]]>,
 ) -> Result<String> {
     let mut text = String::from(
-        "side\tstop\tply\tweight\tgames\tbook_moves\tcont_plies\tcont_end_black\tkey\tmoves\tcont\tentry_move\tentry_value_black\tentry_value_kind\tentry_source\n",
+        "side\tstop\tply\tweight\tgames\tbook_moves\tcont_plies\tcont_end_black\tkey\tmoves\tcont\tentry_move\tentry_value_black\tentry_value_kind\tentry_source",
     );
+    if records.is_some() {
+        text.push_str("\tn0\tscore0\tn10\tscore10\tn20\tscore20\tmedian_len_after\tblack_wins0\twhite_wins0\tdraws0");
+    }
+    text.push('\n');
     let opt = |v: Option<String>| v.unwrap_or_default();
-    for r in rows {
+    for (i, r) in rows.iter().enumerate() {
         let entry_move = r.moves.last().map(String::as_str).unwrap_or("");
         let mut value = String::new();
         let mut kind = String::new();
@@ -607,6 +639,25 @@ fn format_table_with_entries(
             source,
         )
         .expect("String への書き込み");
+        if let Some(records) = records {
+            text.pop();
+            let [at, ten, twenty] = &records[i];
+            writeln!(
+                text,
+                "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                at.games,
+                at.score_text(),
+                ten.games,
+                ten.score_text(),
+                twenty.games,
+                twenty.score_text(),
+                at.median_after(),
+                at.black_wins,
+                at.white_wins,
+                at.draws
+            )
+            .expect("String への書き込み");
+        }
     }
     Ok(text)
 }
@@ -793,6 +844,7 @@ fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> Strin
     text
 }
 
+mod records;
 #[cfg(test)]
 mod tests;
 
