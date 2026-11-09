@@ -778,8 +778,10 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     // 読み由来でない main は替えず、伝播後の 1 位を alt に足す。
     assert_eq!(find(&ab, "5h6h").unwrap().get("role"), "main");
     assert_eq!(find(&ab, "5h4i").unwrap().get("role"), "alt");
-    // 相手の手番の局面も登録し、伝播で先の局面の値が手前に伝わるようにする。
-    assert_eq!(find(&key(&["5i5h"]), "5a5b").unwrap().get("source"), "ext");
+    // 相手の手番の局面の手は、指さない record として残す (読みの値つき)。
+    let reply = find(&key(&["5i5h"]), "5a5b").unwrap();
+    assert_eq!((reply.get("role"), reply.get("source")), ("record", "ext"));
+    assert!(!reply.get("evals").is_empty());
     // 自分の手番の出口は読みの値で登録する。
     assert_eq!(find(&key(&["5i5h", "5a4a"]), "5h4h").unwrap().get("role"), "main");
 
@@ -860,7 +862,7 @@ fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
     };
     own_values.moves.get_mut(&opp).unwrap().retain(|m| m.mv == "5a4a");
     let mut nodes = BTreeMap::new();
-    collect_nodes(
+    let (_, opponent) = collect_nodes(
         &mut nodes,
         &[root(), other],
         &[tree.clone(), tree.clone()],
@@ -877,6 +879,21 @@ fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
     );
     assert_eq!(nodes[&opp].moves.iter().map(|m| m.mv.as_str()).collect::<Vec<_>>(), ["5a4a"]);
     assert!(nodes.contains_key(ROOT));
+    // 自分の手番として持つ根のある局面は、相手の手番の局面として返さない。
+    assert!(!opponent.contains_key(&opp));
+    let (_, alone) = collect_nodes(
+        &mut BTreeMap::new(),
+        &[root()],
+        std::slice::from_ref(&tree),
+        &[RootValues {
+            moves: values.moves.clone(),
+            marks: Vec::new(),
+        }],
+        &BTreeSet::new(),
+        4,
+        100,
+    );
+    assert!(alone.contains_key(&opp) && !alone.contains_key(ROOT));
     let marked = BTreeSet::from([ab.as_str()]);
     let without = register_nodes(0, &root(), "own", &tree, &values, &marked, 4, 100);
     assert!(without.contains_key(ROOT) && !without.contains_key(&ab));
