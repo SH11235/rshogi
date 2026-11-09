@@ -113,7 +113,8 @@ pub(super) struct AuditArgs {
     /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
     #[arg(long, conflicts_with = "fill_replies")]
     bridge_replies: bool,
-    /// 相手の手番では、読みの値のある record も伝播に使う
+    /// 相手の手番では、読みの値のある record も伝播に使う。record だけの相手の手番の局面には、着く手の読みの値を
+    /// --bridge-replies と同じ形で残すので、手の値は読みの値と record の先の値の悪い方になる
     #[arg(long)]
     opp_records: bool,
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
@@ -1210,6 +1211,84 @@ fn reply_positions(
     Ok(replies.into_iter().flatten().collect())
 }
 
+/// record だけで足す相手の手番の局面ごとの、読みの値の上限の手。
+///
+/// record だけの局面は record の手しか応手を持たないので、値が手を指した側に甘くなる。--bridge-replies と同じく、
+/// 着く手の読みの値 (相手の全部の応手を見た値) のうち手を指した側に一番悪い値を、record に無く、行き先が伝播の
+/// 局面に無く、行き先からどの応手も伝播の局面に着かない (--bridge-replies に補われない) 合法手 1 つ (生成順の最初)
+/// の値として置き、手の値を読みの値と record の先の値の悪い方にする。
+/// 読みの値のある手が着かない局面は返さない。置ける手が無い局面は `None` を返す。
+fn record_caps(
+    positions: &BTreeMap<String, MasterPosition>,
+    records: &BTreeMap<String, MasterPosition>,
+    opponent: &str,
+) -> Result<BTreeMap<String, Option<BookMove>>> {
+    let added = |key: &str| {
+        key.split_whitespace().nth(1) == Some(opponent)
+            && records.contains_key(key)
+            && !positions.contains_key(key)
+    };
+    let mut worst: BTreeMap<String, i32> = BTreeMap::new();
+    for (key, position) in positions {
+        if key.split_whitespace().nth(1) == Some(opponent) {
+            continue;
+        }
+        let mut pos = position_from_sfen(&format!("{key} 1"))?;
+        for m in &position.moves {
+            let Some(eval) = m.eval else {
+                continue;
+            };
+            let Ok(mv) = apply_usi(&mut pos, &m.mv) else {
+                continue;
+            };
+            let child = strip_ply(&pos.to_sfen()).to_owned();
+            pos.undo_move(mv);
+            if added(&child) {
+                let entry = worst.entry(child).or_insert(eval);
+                *entry = (*entry).min(eval);
+            }
+        }
+    }
+    let mut caps = BTreeMap::new();
+    for (key, eval) in worst {
+        let mut pos = position_from_sfen(&format!("{key} 1"))?;
+        let mut legal = MoveList::new();
+        generate_legal_all(&pos, &mut legal);
+        let recorded = &records[&key].moves;
+        let mut cap = None;
+        for &reply in legal.iter() {
+            let usi = reply.to_usi();
+            if recorded.iter().any(|r| r.mv == usi) {
+                continue;
+            }
+            pos.do_move(reply, pos.gives_check(reply));
+            let to = strip_ply(&pos.to_sfen()).to_owned();
+            // --bridge-replies は、読みの値のある手の行き先で、応手が伝播の局面に着く局面を補う。補われると上限の手に
+            // 辺が張られて値が置き換わるので、行き先からどの応手も伝播の局面に着かない手を選ぶ。
+            let leaf = !positions.contains_key(&to) && !added(&to) && {
+                let mut next = MoveList::new();
+                generate_legal_all(&pos, &mut next);
+                !next.iter().any(|&m| {
+                    pos.do_move(m, pos.gives_check(m));
+                    let k = strip_ply(&pos.to_sfen()).to_owned();
+                    pos.undo_move(m);
+                    positions.contains_key(&k) || added(&k)
+                })
+            };
+            pos.undo_move(reply);
+            if leaf {
+                cap = Some(BookMove {
+                    mv: usi,
+                    eval: Some(-eval),
+                });
+                break;
+            }
+        }
+        caps.insert(key, cap);
+    }
+    Ok(caps)
+}
+
 fn record_positions(rows: &[Row]) -> Result<BTreeMap<String, MasterPosition>> {
     let mut records = BTreeMap::<String, MasterPosition>::new();
     for row in rows.iter().filter(|r| r.get("role") == "record") {
@@ -1254,14 +1333,23 @@ fn propagate_for_sides(
     };
     let solve = |opponent: &str| -> Result<(Propagated, RecordUsage)> {
         let mut expanded = positions.clone();
+        let caps = record_caps(positions, records, opponent)?;
         for (key, record) in records {
             if key.split_whitespace().nth(1) != Some(opponent) {
                 continue;
             }
-            expanded
-                .entry(key.clone())
-                .and_modify(|p| p.moves.extend(record.moves.clone()))
-                .or_insert_with(|| record.clone());
+            if let Some(position) = expanded.get_mut(key) {
+                position.moves.extend(record.moves.clone());
+                continue;
+            }
+            let mut position = record.clone();
+            match caps.get(key) {
+                None => {}
+                Some(Some(cap)) => position.moves.push(cap.clone()),
+                // 上限を置ける手が無ければ、record で伝播せず、着く手の読みの値をそのまま使わせる。
+                Some(None) => continue,
+            }
+            expanded.insert(key.clone(), position);
         }
         // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
         let mut result = propagate_with(&expanded, draws, fill, true)?;
@@ -1271,8 +1359,14 @@ fn propagate_for_sides(
         let mut known = Vec::with_capacity(positions.len());
         for ((key, _), mask) in expanded.iter().zip(&result.known) {
             let playable = positions.get(key).map_or(0, |p| p.moves.len());
-            illegal_records += mask.iter().skip(playable).filter(|&&k| !k).count();
-            let used = mask.iter().skip(playable).filter(|&&k| k).count();
+            // 足した上限の手は record ではないので、record の手の分だけを数える。
+            let added = match records.get(key) {
+                Some(r) if key.split_whitespace().nth(1) == Some(opponent) => r.moves.len(),
+                _ => 0,
+            };
+            let record_mask = || mask.iter().skip(playable).take(added);
+            illegal_records += record_mask().filter(|&&k| !k).count();
+            let used = record_mask().filter(|&&k| k).count();
             usage.moves += used;
             usage.positions += usize::from(used > 0);
             if positions.contains_key(key) {
@@ -2794,6 +2888,150 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         // 補わなければ読みの値のまま。
         let (_, main) = fill_audit(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]);
         assert_eq!(main, Some(50));
+    }
+
+    #[test]
+    fn opponent_records_keep_the_read_value_as_a_cap_on_record_only_positions() {
+        // A は record だけの局面。record の 5a5b で着く B は先手 +200 だが、5i4h の読みの値 +50 が上限になる。
+        let text = master(&[
+            (ROOT, "5i4h", "main", "50"),
+            (A, "5a5b", "record", "-200"),
+            (B, "4h3h", "main", "200"),
+        ]);
+        let rows = parse_master(&text).unwrap();
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&rows).unwrap();
+        let main = |fill| {
+            let (_, _, book) = audit_with_records(
+                &parsed,
+                DrawValues::both(0),
+                1,
+                fill,
+                None,
+                None,
+                Some(&records),
+            )
+            .unwrap();
+            let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+            audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()[0]
+                .as_ref()
+                .map(|m| m.value)
+        };
+        assert_eq!(main(Fill::Off), Some(50));
+        assert_eq!(main(Fill::Bridge), Some(50));
+        // record の先が読みの値より悪ければ、その値になる。
+        let text = master(&[
+            (ROOT, "5i4h", "main", "50"),
+            (A, "5a5b", "record", "100"),
+            (B, "4h3h", "main", "-100"),
+        ]);
+        let rows = parse_master(&text).unwrap();
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&rows).unwrap();
+        let (_, _, book) = audit_with_records(
+            &parsed,
+            DrawValues::both(0),
+            1,
+            Fill::Off,
+            None,
+            None,
+            Some(&records),
+        )
+        .unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let value = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
+            [0]
+        .as_ref()
+        .map(|m| m.value);
+        assert_eq!(value, Some(-100));
+    }
+
+    #[test]
+    fn record_cap_avoids_destinations_that_bridge_replies_would_fill() {
+        // 上限の手の最初の候補 X の行き先 D から、元データの局面 P に着く応手がある。D は --bridge-replies で
+        // 補われて上限の値が置き換わるので、X は選ばない。
+        let mut pos = position_from_sfen(&format!("{A} 1")).unwrap();
+        let mut legal = MoveList::new();
+        generate_legal_all(&pos, &mut legal);
+        let x = legal.iter().map(|m| m.to_usi()).find(|m| m != "5a5b").unwrap();
+        let d = crate::book_tree::model::child(A, &x).unwrap();
+        pos = position_from_sfen(&format!("{d} 1")).unwrap();
+        let mut replies = MoveList::new();
+        generate_legal_all(&pos, &mut replies);
+        let p =
+            crate::book_tree::model::child(&d, &replies.iter().next().unwrap().to_usi()).unwrap();
+        let text = master(&[
+            (ROOT, "5i4h", "main", "50"),
+            (A, "5a5b", "record", "-300"),
+            (&p, "5a5b", "main", "-500"),
+        ]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let caps = record_caps(&parsed.0, &records, "w").unwrap();
+        let cap = caps[A].as_ref().unwrap();
+        assert_ne!(cap.mv, x);
+        let (_, _, book) = audit_with_records(
+            &parsed,
+            DrawValues::both(0),
+            1,
+            Fill::Bridge,
+            None,
+            None,
+            Some(&records),
+        )
+        .unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let value = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
+            [0]
+        .as_ref()
+        .map(|m| m.value);
+        assert_eq!(value, Some(50));
+    }
+
+    #[test]
+    fn record_only_positions_are_capped_even_when_no_reply_reaches_the_master() {
+        // A の record はどれも元データの外へ行く (先の局面の値は record の evals)。record に無い合法手に
+        // 読みの値 +50 を置くので、5i4h は +50 より良くならない。合法手を全部 record が持てば上限を置けないので、
+        // record の局面を伝播に入れず、読みの値がそのまま効く。
+        for recorded in [
+            &["5a5b", "5a4a", "5a6a"][..],
+            &["5a5b", "5a4a", "5a6a", "5a4b", "5a6b"],
+        ] {
+            let mut rows = vec![(ROOT, "5i4h", "main", "50")];
+            for mv in recorded {
+                rows.push((A, mv, "record", "-300"));
+            }
+            let text = master(&rows);
+            let parsed = parse_master_rows(text.as_bytes()).unwrap();
+            let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+            let caps = record_caps(&parsed.0, &records, "w").unwrap();
+            match &caps[A] {
+                Some(cap) => {
+                    assert_eq!(recorded.len(), 3);
+                    assert!(!records[A].moves.iter().any(|m| m.mv == cap.mv));
+                    assert_eq!(cap.eval, Some(-50));
+                }
+                None => assert_eq!(recorded.len(), 5),
+            }
+            for fill in [Fill::Off, Fill::Bridge] {
+                let (_, _, book) = audit_with_records(
+                    &parsed,
+                    DrawValues::both(0),
+                    1,
+                    fill,
+                    None,
+                    None,
+                    Some(&records),
+                )
+                .unwrap();
+                let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+                let value = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index])
+                    .unwrap()[0]
+                    .as_ref()
+                    .map(|m| m.value);
+                assert_eq!(value, Some(50), "{recorded:?} {fill:?}");
+            }
+        }
     }
 
     #[test]

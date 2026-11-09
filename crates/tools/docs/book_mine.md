@@ -1383,7 +1383,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--bridge-opp-n <N>` / `--bridge-stop <CP>` / `--bridge-rounds <N>` | なし | 木の応手数 (1〜8)、打ち切り値 (1〜30000)、再読の回数 (0〜10) を行の opts に指定 |
 | `--bridge-draw-black <CP>` / `--bridge-draw-white <CP>` | なし | 木の先手番・後手番の循環の値 (-30000〜30000、それぞれの手番側から) を opts に指定 |
 | `--bridge-exclude-queue <PATH>` / `--bridge-exclude-min-depth <N>` | なし / `6` | 繰り返し可。指定順に読み id ごとの最後の行を採用。深さが下限以上、own が局面の手番側を含む active な行の root・roots と同じ局面をキューから除く。表には残し、hold だけで覆われた局面は除かない |
-| `--opp-records` | なし | 相手の手番の record のうち、evals に読みの値がある手も伝播に使う。自分の手番の record は除外し、反転した局面へ辺を張らない。role は変更しない |
+| `--opp-records` | なし | 相手の手番の record のうち、evals に読みの値がある手も伝播に使う。自分の手番の record は除外し、反転した局面へ辺を張らない。role は変更しない。元データに record だけを持つ相手の手番の局面には、着く手の読みの値のうち手を指した側に一番悪い値を、record に無く、行き先が伝播の局面に無く、行き先からどの応手も伝播の局面に着かない (`--bridge-replies` に補われない) 合法手 1 つ (生成順の最初) の値として置くので、手の値は読みの値と record の先の値の悪い方になる。置ける手が無い局面の record は伝播に使わない (読みの値がそのまま効く)。`--bridge-replies` の有無によらない |
 | `--refutation-table <PATH>` | なし | 反駁の表 (TSV) の出力先 (下の「反駁の点検」) |
 | `--refutation-margin <CP>` | `1` | 反駁の線。伸ばしていない手の最善が伸ばした手の最善をこの値以上上回る局面を出す (1 以上) |
 | `--enqueue-out <PATH>` | なし | 反駁の局面を読み足す、`book_mine tree enqueue --from` に渡す行 (JSON Lines) の出力先 |
@@ -1888,7 +1888,11 @@ value_kind は後退解析のグラフで子局面への辺を持つ手なら `t
 
 登録の規則は `tree register` と同じです (`--alt-gap`、`--replace-curated`、読み由来でない main は替えずに食い違いを一覧に出す、`record` の手は足さない)。違いは次のとおりです。
 
-- 登録するのは自分の手番の局面だけです。伸ばした局面は伝播後の値、出口は読みの値で並べます。元データで止めた出口と印の付いた局面は登録しません。
+- 部分木の自分の手番の局面を、伸ばした局面は伝播後の値、出口は読みの値で並べて main・alt として登録します。元データで止めた出口と印の付いた局面は登録しません。
+- 部分木の相手の手番の局面の手は `record` (指さない手) の行で残します (evals は伝播後の値、出口は読みの値、`source=ext`)。元データに同じ局面・同じ手の行が無ければ足し、`source=ext`・`tier=wide` の record があり値が違えば、値 (evals・nodes・cond・value_kind・lineage・since) を今回のものに替えます。それ以外の既存の行には触りません。今回自分の手番として登録する局面の `source=ext`・`tier=wide` の record (前の回に相手の手番として残した行など) は、外してから登録します。
+  切り出しで伸ばした大きい定跡の手 (上位 `--opp-top` 手と差 `--opp-diff` 以内) で、読んで確かめていないので、逆の手番で対局するときに定跡として指さないためです。
+  既定の `master audit` は record を使わないので、これらの局面は `--bridge-replies` で今までどおり補われます。`master audit --opp-records` を付けると record で先の局面の値が手前に伝わります (下の上限つき)。
+  同じ局面を別の根が自分の手番として持つときは、その根の自分の手番の局面として登録し、record は足しません。標準出力に、record で足した手・値を替えた手・自分の手番として登録するので外した手の数を出します。
 - 足す行は `source=ext`、`lineage=book:<大きい定跡のファイル名>@<内容の sha256 の先頭 8 文字>`、`nodes` は台帳の読みのノード数です。schema を省くと `ext` の行は読み由来として、後の `tree register` / `borrow value` で main を替え、`evals` を更新してよい行に数えます。
 - 同じ局面が複数の根にあるときは、その局面から先の手数の余り (`--max-plies` − 段) の大きい根を使います。
 

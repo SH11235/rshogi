@@ -471,11 +471,12 @@ pub(super) fn join_roots(
     Ok(joined)
 }
 
-/// 登録する局面: 自分の手番で、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
-/// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
+/// 登録する局面: 部分木の局面のうち手番が `turn` (`own` / `opp`) のもので、元データで止めた出口と印の付いた
+/// 局面を除く。印はどの根で付いても除く (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
 pub(super) fn register_nodes(
     index: usize,
     root: &RootInfo,
+    turn_of: &str,
     tree: &Subtree,
     values: &RootValues,
     marked: &BTreeSet<&str>,
@@ -485,7 +486,10 @@ pub(super) fn register_nodes(
     let mut nodes = BTreeMap::new();
     for (key, node) in &tree.nodes {
         // 元データの局面は元データの値と手を残す (読み直した出口でも替えない)。
-        if side(key) != root.own || node.kind == Kind::Master || marked.contains(key.as_str()) {
+        if turn(key, &root.own) != turn_of
+            || node.kind == Kind::Master
+            || marked.contains(key.as_str())
+        {
             continue;
         }
         let moves = &values.moves[key];
@@ -516,6 +520,105 @@ pub(super) fn register_nodes(
         );
     }
     nodes
+}
+
+/// 全部の根の登録する局面を集め、根の間で食い違った局面の数と、相手の手番の局面を返す。
+///
+/// 自分の手番の局面は `nodes` に入れて main・alt を選ぶ。相手の手番の局面は別に返し、元データには指さない
+/// `record` の手として残す (読んで確かめていない大きい定跡の手なので、逆の手番で対局するときに定跡として
+/// 指さない)。同じ局面を別の根が自分の手番として持つときは、読んで確かめた候補を持つその根を使う。
+pub(super) fn collect_nodes(
+    nodes: &mut BTreeMap<String, register::Node>,
+    roots: &[RootInfo],
+    trees: &[Subtree],
+    values: &[RootValues],
+    marked: &BTreeSet<&str>,
+    max_plies: usize,
+    nodes_limit: u64,
+) -> (usize, BTreeMap<String, register::Node>) {
+    let mut disagreements = 0;
+    let mut opponent = BTreeMap::new();
+    for (turn_of, into) in [("own", &mut *nodes), ("opp", &mut opponent)] {
+        for (index, ((root, tree), values)) in roots.iter().zip(trees).zip(values).enumerate() {
+            let found =
+                register_nodes(index, root, turn_of, tree, values, marked, max_plies, nodes_limit);
+            disagreements += merge(into, found);
+        }
+    }
+    opponent.retain(|key, _| !nodes.contains_key(key));
+    (disagreements, opponent)
+}
+
+/// 自分の手番として登録する局面から、同じ出所の `tier=wide` の `record` (前の回に相手の手番として残した行) を外し、
+/// 外した行の数を返す。
+pub(super) fn drop_own_records(
+    rows: &mut Vec<Row>,
+    nodes: &BTreeMap<String, register::Node>,
+    source: &str,
+) -> usize {
+    let before = rows.len();
+    rows.retain(|r| {
+        !(nodes.contains_key(r.get("key"))
+            && r.get("role") == "record"
+            && r.get("source") == source
+            && r.get("tier") == "wide")
+    });
+    before - rows.len()
+}
+
+/// 相手の手番の局面の手を `record` の行で残し、足した行と値を更新した行の数を返す。元データに無い (局面, 手) は
+/// 足し、同じ出所 (`options.source`) の record は値を今回のものに更新する。それ以外の既存の行には触らない。
+pub(super) fn append_records(
+    rows: &mut Vec<Row>,
+    opponent: &BTreeMap<String, register::Node>,
+    options: &Options,
+) -> (usize, usize) {
+    let index: BTreeMap<(String, String), usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| ((r.get("key").to_owned(), r.get("move").to_owned()), i))
+        .collect();
+    let (mut added, mut updated) = (0, 0);
+    for (key, node) in opponent {
+        let nodes = crate::book_tree::master_table::format_nodes(node.nodes);
+        for m in &node.moves {
+            let fields = [
+                ("key", key.clone()),
+                ("ply", node.ply.clone()),
+                ("move", m.mv.clone()),
+                ("role", "record".to_owned()),
+                ("source", options.source.to_owned()),
+                ("evals", m.value.to_string()),
+                ("nodes", nodes.clone()),
+                ("cond", m.cond.clone()),
+                ("value_kind", m.value_kind.clone()),
+                ("lineage", options.lineage.to_owned()),
+                ("tier", "wide".to_owned()),
+                ("since", options.since.to_owned()),
+                ("note", options.note.to_owned()),
+            ];
+            match index.get(&(key.clone(), m.mv.clone())) {
+                None => {
+                    rows.push(Row::from_fields(&fields));
+                    added += 1;
+                }
+                Some(&i)
+                    if rows[i].get("role") == "record"
+                        && rows[i].get("source") == options.source
+                        && rows[i].get("tier") == "wide"
+                        && fields[5..10].iter().any(|(c, v)| rows[i].get(c) != v) =>
+                {
+                    for (column, value) in &fields[5..10] {
+                        rows[i].set(column, value.clone());
+                    }
+                    rows[i].set("since", options.since.to_owned());
+                    updated += 1;
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    (added, updated)
 }
 
 fn black(key: &str, value: i32) -> i32 {
@@ -602,13 +705,15 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let marked: BTreeSet<&str> =
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
     let mut nodes = BTreeMap::new();
-    let mut disagreements = 0;
-    for (index, ((root, tree), values)) in meta.roots.iter().zip(&trees).zip(&all).enumerate() {
-        disagreements += merge(
-            &mut nodes,
-            register_nodes(index, root, tree, values, &marked, meta.params.max_plies, nodes_limit),
-        );
-    }
+    let (disagreements, opponent) = collect_nodes(
+        &mut nodes,
+        &meta.roots,
+        &trees,
+        &all,
+        &marked,
+        meta.params.max_plies,
+        nodes_limit,
+    );
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
     let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);
@@ -622,6 +727,11 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         replace_curated: args.replace_curated,
         revive_bench: false,
     };
+    // record の行も register の並べ替えと schema の検査を通す。前の回に相手の手番として残した record の局面を、
+    // 今回は自分の手番として登録するなら、その record は外す (record の手は main・alt の候補から除かれるため)。
+    let mut rows = rows;
+    let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
+    let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
@@ -649,6 +759,9 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         summary.record_skipped,
         summary.conflicts,
         all.iter().map(|v| v.marks.len()).sum::<usize>()
+    );
+    println!(
+        "相手の手番の局面の record: 足した手 {records_added} / 値を更新した手 {records_updated} / 自分の手番として登録するので外した手 {records_dropped}"
     );
     let line_count =
         |s: &crate::book_tree::audit::AuditSummary| s.at_or_above_line[0] + s.at_or_above_line[1];
