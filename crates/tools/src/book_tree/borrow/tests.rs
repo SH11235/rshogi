@@ -1,7 +1,7 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
 use super::value::{
-    RootValues, ValueArgs, ValueInput, append_records, collect_nodes, join_roots, register_nodes,
-    value_root,
+    RootValues, ValueArgs, ValueInput, append_records, collect_nodes, drop_own_records, join_roots,
+    register_nodes, value_root,
 };
 use super::*;
 use crate::book_backprop::DrawValues;
@@ -1150,4 +1150,39 @@ fn append_records_adds_new_moves_and_refreshes_only_own_source_records() {
     assert_eq!(get("5a4a").get("evals"), "1");
     assert_eq!((get("5a6a").get("role"), get("5a6a").get("evals")), ("bench", "1"));
     assert_eq!((get("5a4b").get("role"), get("5a4b").get("evals")), ("record", "-50"));
+}
+
+#[test]
+fn records_left_on_a_position_now_registered_as_own_are_dropped() {
+    use crate::book_tree::master_table::test_row;
+    let own = key(&["5i5h"]);
+    let other = key(&["5i4i"]);
+    let row = |k: &str, mv: &str, source: &str| {
+        let mut r = test_row(&[
+            ("key", k.into()),
+            ("move", mv.into()),
+            ("role", "record".into()),
+        ]);
+        r.set("source", source.into());
+        r.set("tier", "wide".into());
+        r
+    };
+    let mut rows = vec![
+        row(&own, "5a5b", "ext"),
+        row(&own, "5a4a", "read"),
+        row(&other, "5a5b", "ext"),
+    ];
+    let nodes = BTreeMap::from([(
+        own.clone(),
+        crate::book_tree::register::Node {
+            ply: "2".into(),
+            remaining: 0,
+            nodes: 1,
+            moves: Vec::new(),
+            tree: 0,
+        },
+    )]);
+    drop_own_records(&mut rows, &nodes, "ext");
+    let left: Vec<_> = rows.iter().map(|r| (r.get("key") == own, r.get("move"))).collect();
+    assert_eq!(left, [(true, "5a4a"), (false, "5a5b")]);
 }

@@ -549,6 +549,20 @@ pub(super) fn collect_nodes(
     (disagreements, opponent)
 }
 
+/// 自分の手番として登録する局面から、前の回に相手の手番として残した同じ出所の `record` を外す。
+pub(super) fn drop_own_records(
+    rows: &mut Vec<Row>,
+    nodes: &BTreeMap<String, register::Node>,
+    source: &str,
+) {
+    rows.retain(|r| {
+        !(nodes.contains_key(r.get("key"))
+            && r.get("role") == "record"
+            && r.get("source") == source
+            && r.get("tier") == "wide")
+    });
+}
+
 /// 相手の手番の局面の手を `record` の行で残し、足した行と値を更新した行の数を返す。元データに無い (局面, 手) は
 /// 足し、同じ出所 (`options.source`) の record は値を今回のものに更新する。それ以外の既存の行には触らない。
 pub(super) fn append_records(
@@ -588,7 +602,8 @@ pub(super) fn append_records(
                 Some(&i)
                     if rows[i].get("role") == "record"
                         && rows[i].get("source") == options.source
-                        && rows[i].get("tier") == "wide" =>
+                        && rows[i].get("tier") == "wide"
+                        && fields[5..10].iter().any(|(c, v)| rows[i].get(c) != v) =>
                 {
                     for (column, value) in &fields[5..10] {
                         rows[i].set(column, value.clone());
@@ -709,8 +724,10 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         replace_curated: args.replace_curated,
         revive_bench: false,
     };
-    // record の行も register の並べ替えと schema の検査を通す。
+    // record の行も register の並べ替えと schema の検査を通す。前の回に相手の手番として残した record の局面を、
+    // 今回は自分の手番として登録するなら、その record は外す (record の手は main・alt の候補から除かれるため)。
     let mut rows = rows;
+    drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;

@@ -1215,7 +1215,8 @@ fn reply_positions(
 ///
 /// record だけの局面は record の手しか応手を持たないので、値が手を指した側に甘くなる。--bridge-replies と同じく、
 /// 着く手の読みの値 (相手の全部の応手を見た値) のうち手を指した側に一番悪い値を、record に無く、行き先が伝播の
-/// 局面に無い合法手 1 つ (生成順の最初) の値として置き、手の値を読みの値と record の先の値の悪い方にする。
+/// 局面に無く、行き先からどの応手も伝播の局面に着かない (--bridge-replies に補われない) 合法手 1 つ (生成順の最初)
+/// の値として置き、手の値を読みの値と record の先の値の悪い方にする。
 /// 読みの値のある手が着かない局面は返さない。置ける手が無い局面は `None` を返す。
 fn record_caps(
     positions: &BTreeMap<String, MasterPosition>,
@@ -1262,8 +1263,20 @@ fn record_caps(
             }
             pos.do_move(reply, pos.gives_check(reply));
             let to = strip_ply(&pos.to_sfen()).to_owned();
+            // --bridge-replies は、読みの値のある手の行き先で、応手が伝播の局面に着く局面を補う。補われると上限の手に
+            // 辺が張られて値が置き換わるので、行き先からどの応手も伝播の局面に着かない手を選ぶ。
+            let leaf = !positions.contains_key(&to) && !added(&to) && {
+                let mut next = MoveList::new();
+                generate_legal_all(&pos, &mut next);
+                !next.iter().any(|&m| {
+                    pos.do_move(m, pos.gives_check(m));
+                    let k = strip_ply(&pos.to_sfen()).to_owned();
+                    pos.undo_move(m);
+                    positions.contains_key(&k) || added(&k)
+                })
+            };
             pos.undo_move(reply);
-            if !positions.contains_key(&to) && !added(&to) {
+            if leaf {
                 cap = Some(BookMove {
                     mv: usi,
                     eval: Some(-eval),
@@ -2931,6 +2944,48 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         .as_ref()
         .map(|m| m.value);
         assert_eq!(value, Some(-100));
+    }
+
+    #[test]
+    fn record_cap_avoids_destinations_that_bridge_replies_would_fill() {
+        // 上限の手の最初の候補 X の行き先 D から、元データの局面 P に着く応手がある。D は --bridge-replies で
+        // 補われて上限の値が置き換わるので、X は選ばない。
+        let mut pos = position_from_sfen(&format!("{A} 1")).unwrap();
+        let mut legal = MoveList::new();
+        generate_legal_all(&pos, &mut legal);
+        let x = legal.iter().map(|m| m.to_usi()).find(|m| m != "5a5b").unwrap();
+        let d = crate::book_tree::model::child(A, &x).unwrap();
+        pos = position_from_sfen(&format!("{d} 1")).unwrap();
+        let mut replies = MoveList::new();
+        generate_legal_all(&pos, &mut replies);
+        let p =
+            crate::book_tree::model::child(&d, &replies.iter().next().unwrap().to_usi()).unwrap();
+        let text = master(&[
+            (ROOT, "5i4h", "main", "50"),
+            (A, "5a5b", "record", "-300"),
+            (&p, "5a5b", "main", "-500"),
+        ]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let caps = record_caps(&parsed.0, &records, "w").unwrap();
+        let cap = caps[A].as_ref().unwrap();
+        assert_ne!(cap.mv, x);
+        let (_, _, book) = audit_with_records(
+            &parsed,
+            DrawValues::both(0),
+            1,
+            Fill::Bridge,
+            None,
+            None,
+            Some(&records),
+        )
+        .unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let value = audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index]).unwrap()
+            [0]
+        .as_ref()
+        .map(|m| m.value);
+        assert_eq!(value, Some(50));
     }
 
     #[test]
