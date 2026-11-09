@@ -471,11 +471,11 @@ pub(super) fn join_roots(
     Ok(joined)
 }
 
-/// 登録する局面: 自分の手番で、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
-/// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
+/// 登録する局面: 部分木の局面のうち、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
+/// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。相手の手番の局面も登録する。
+/// 自分の手番の局面だけを元データに入れると、間の相手の手番の局面が無く、先の局面の値が手前に伝わらない。
 pub(super) fn register_nodes(
     index: usize,
-    root: &RootInfo,
     tree: &Subtree,
     values: &RootValues,
     marked: &BTreeSet<&str>,
@@ -485,7 +485,7 @@ pub(super) fn register_nodes(
     let mut nodes = BTreeMap::new();
     for (key, node) in &tree.nodes {
         // 元データの局面は元データの値と手を残す (読み直した出口でも替えない)。
-        if side(key) != root.own || node.kind == Kind::Master || marked.contains(key.as_str()) {
+        if node.kind == Kind::Master || marked.contains(key.as_str()) {
             continue;
         }
         let moves = &values.moves[key];
@@ -603,10 +603,10 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
-    for (index, ((root, tree), values)) in meta.roots.iter().zip(&trees).zip(&all).enumerate() {
+    for (index, (tree, values)) in trees.iter().zip(&all).enumerate() {
         disagreements += merge(
             &mut nodes,
-            register_nodes(index, root, tree, values, &marked, meta.params.max_plies, nodes_limit),
+            register_nodes(index, tree, values, &marked, meta.params.max_plies, nodes_limit),
         );
     }
     let before_rows = rows.len();
