@@ -363,6 +363,9 @@ fn args(dir: &Path, master: PathBuf, freq: Option<PathBuf>, big: PathBuf, n: usi
         tag: "x19".into(),
         game_from_book: true,
         start_moves: None,
+        opp_records: None,
+        records_min_rate: 3800.0,
+        records_max_ply: 130,
     }
 }
 
@@ -787,7 +790,7 @@ fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
             .unwrap(),
         );
     }
-    let table = format_table_with_entries(&rows, &mut index, ROOT).unwrap();
+    let table = format_table_with_entries(&rows, &mut index, ROOT, None).unwrap();
     let lines: Vec<Vec<&str>> = table.lines().skip(1).map(|s| s.split('\t').collect()).collect();
     assert_eq!(&lines[0][11..13], &["5i4h", "12"]);
     assert_eq!(&lines[1][11..13], &["5a5b", "-34"]);

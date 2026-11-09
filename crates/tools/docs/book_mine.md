@@ -1598,6 +1598,8 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 | `--depth <N>` / `--priority <N>` / `--tag <NAME>` | `6` / `300` / `walk` | キューの行の段数・priority の始まり (重みの順位 0〜99 を足す)・id `<tag>_<根の手数>_<局面の hash 16 桁>_<b\|w>` の名前 (`[A-Za-z0-9_-]` の 1〜40 文字) |
 | `--game-from-book` | 無効 | キューの行の `game` に、大きい定跡の最善を両者が指し続けた手順の最初の `depth+1` 手を入れる (木がその手を読みの順位によらず伸ばす)。`--opp-book` が要る |
 | `--start-moves <USI>` | なし | 初期局面からこの手順 (空白区切り) を指した局面から、重み 1 で辿り始める。手は元データや定跡に無くてもよい。合法でない手があるか、手数が `--max-ply` を超えるとエラーで終わる。main 以外の作戦 (初手の alt など) の側で読み始める局面を出すのに使う。別の手順の結果を同じキューに積むなら `--tag` を分ける (同じ局面・同じ根の手数は同じ id になる) |
+| `--opp-records <PATH>` | なし | 強い対局の 1 局 1 行の JSON Lines (`.gz` 可)。止まりの局面とその 10・20 手前に着いた局数・得点・勝敗の列を一覧の末尾に足す |
+| `--records-min-rate <R>` / `--records-max-ply <N>` | `3800` / `130` | `--opp-records` で数える対局の両者のレートの下限と、1 局を見る手数。`--opp-records` が要る |
 
 辿り方:
 
@@ -1607,7 +1609,13 @@ book_mine master walk --master moves.tsv --table walk.tsv \
 - 重みが `--weight-floor` 未満なら `tiny`、`--max-ply` 手に達したら `max` で止めます。同じ手数で同じ局面に来た重みは足し合わせ、手順は最初に辿ったものを残します。止まった重みの合計は手番ごとに 1 です。
 - 大きい定跡の手は書かれたままの局面で引きます (先後反転では引きません)。`--opp-freq` だけなら `master rejoin` の重みと同じ辿り方で、相手の局数が足りずに止まった分が `out` と `rare` に出ます。
 
-一覧の列は `side stop ply weight games book_moves cont_plies cont_end_black key moves cont entry_move entry_value_black entry_value_kind entry_source` です。`ply` は初期局面からの手数、`games` は `--opp-freq` のその局面の局数、`book_moves` は大きい定跡のその局面の手の数、`cont` は `own` の局面から大きい定跡の最善を両者が指し続けた手順 (局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`--cont-max` 手で止めます)、`cont_plies` はその手数、`cont_end_black` は最後に引けた局面の最善の値を先手から見た値 (プラス = 先手良し) です。`entry_move` は止まった局面に入った最後の手 (USI)、`entry_value_black` は元データのその手の `evals` の先頭を先手から見た値に直したもの、`entry_value_kind` と `entry_source` はその行の `value_kind` と `source` です。どの止まり方にも付け、手が元データに無ければ値・由来・source は空、`evals` が空なら値は空、根で止まって手順が空なら 4 列とも空です。既存の 11 列の順と意味は変わりません。手番ごとに重みの大きい順に並べます。標準出力には手番ごとに、止まり方ごとの重み、読み始める重みの手数の帯ごとの合計、読み始める局面の数 (同じ局面に別の手数で来たものは 1 つ) を出します。
+一覧の列は `side stop ply weight games book_moves cont_plies cont_end_black key moves cont entry_move entry_value_black entry_value_kind entry_source` です。`ply` は初期局面からの手数、`games` は `--opp-freq` のその局面の局数、`book_moves` は大きい定跡のその局面の手の数、`cont` は `own` の局面から大きい定跡の最善を両者が指し続けた手順 (局面が繰り返すか、定跡に無くなるか、定跡の手が指せないか、`--cont-max` 手で止めます)、`cont_plies` はその手数、`cont_end_black` は最後に引けた局面の最善の値を先手から見た値 (プラス = 先手良し) です。`entry_move` は止まった局面に入った最後の手 (USI)、`entry_value_black` は元データのその手の `evals` の先頭を先手から見た値に直したもの、`entry_value_kind` と `entry_source` はその行の `value_kind` と `source` です。どの止まり方にも付け、手が元データに無ければ値・由来・source は空、`evals` が空なら値は空、根で止まって手順が空なら 4 列とも空です。
+`--opp-records <JSONL>` (強い対局の 1 局 1 行の JSON Lines、拡張子 `.gz` なら gzip。各行は `br`・`wr` (両者のレート)・`res` (`b`・`w`・`d`)・`mv` (手ごとの配列で先頭が USI の手) を持つ) を渡すと、
+列 `n0 score0 n10 score10 n20 score20 median_len_after black_wins0 white_wins0 draws0` を末尾に足します。
+止まりの局面 (0)・その 10 手前・20 手前の局面のそれぞれについて、着いた対局の数 n と、行の side から見た得点 (勝ち 1・引き分け 0.5) の平均 score (小数 2 桁、0 局なら空) です。
+手順が足りず手前の局面が無ければ 0 局です。median_len_after は止まりの局面から終局までの手数の中央値 (偶数個なら大きい方)、black_wins0・white_wins0・draws0 は止まりの局面に着いた対局の勝敗の内訳です。
+数えるのは両者のレートが `--records-min-rate` (既定 3800) 以上で `res` が `b`・`w`・`d` の対局で、初期局面から `--records-max-ply` (既定 130) 手までの局面を局面で照らします (手順違いの合流も数え、1 局で同じ行・同じ手前の局面は 1 回)。
+棋譜の途中に指せない手があれば、その対局はそこまでの局面だけを数えます。棋譜は 1 行ずつ読み、行の局面だけを覚えます。既存の 11 列の順と意味は変わりません。手番ごとに重みの大きい順に並べます。標準出力には手番ごとに、止まり方ごとの重み、読み始める重みの手数の帯ごとの合計、読み始める局面の数 (同じ局面に別の手数で来たものは 1 つ) を出します。
 
 キューの行は、同じ局面に別の手数で来た `own` の行の重みを足して 1 行にし (根の手数は最も小さい手数、`memo` の手順はその手数の手順)、重みの大きい順に priority を付けます。キューは同じ id で根の手数が変わる行を受け付けないので、id は局面と根の手数で決めます。同じ `--tag` で作り直すと、重みが入れ替わっても同じ局面・同じ根の手数は同じ id になります。出力先が入力のどれかと同じか、`--enqueue-out` と `--table` が同じファイルなら (別の書き方のパスでも) 止まります。
 
