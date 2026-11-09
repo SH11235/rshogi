@@ -202,39 +202,12 @@ impl NumaReplicas {
     /// スレッドを 1 本も割り当てていない node を除き、node の CPU に固定した一時スレッドの上で
     /// `source` を深く写す。確保と書き込みをそのスレッドが行うので、写しはその node に載る。
     pub(crate) fn build(plan: Arc<NumaPlan>, source: Arc<NNUENetwork>) -> Result<Self, String> {
-        let used = plan.threads_per_node();
-        let per_node = std::thread::scope(|scope| {
-            let handles: Vec<_> =
-                plan.node_cpus
-                    .iter()
-                    .zip(&used)
-                    .map(|(cpus, &threads)| {
-                        (threads > 0).then(|| {
-                            let source = &source;
-                            std::thread::Builder::new()
-                                .spawn_scoped(scope, move || -> Result<Arc<NNUENetwork>, String> {
-                                    pin_current_thread(cpus)?;
-                                    source.try_deep_clone().map(Arc::new).map_err(|e| {
-                                        format!("cannot allocate a network replica: {e}")
-                                    })
-                                })
-                                .map_err(|e| format!("cannot spawn a NUMA replica thread: {e}"))
-                        })
-                    })
-                    .collect();
-            // 最初の失敗で集約を打ち切っても、残りのスレッドは scope の終わりで join される。
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .map(|spawned| {
-                            spawned?
-                                .join()
-                                .map_err(|_| "NUMA replica thread panicked".to_string())?
-                        })
-                        .transpose()
-                })
-                .collect::<Result<Vec<_>, String>>()
+        let per_node = run_on_each_used_node(&plan, &*source, |cpus, source| {
+            pin_current_thread(cpus)?;
+            source
+                .try_deep_clone()
+                .map(Arc::new)
+                .map_err(|e| format!("cannot allocate a network replica: {e}"))
         })?;
         Ok(Self {
             plan,
@@ -251,6 +224,60 @@ impl NumaReplicas {
             local: Arc::clone(local),
         })
     }
+}
+
+/// スレッドを 1 本以上割り当てた node ごとに一時スレッドを起こし、`work(node の CPU, input)` を
+/// 並べて実行する。戻り値は node ごとの結果 (スレッドの無い node は `None`)。
+///
+/// 起こせなかった・失敗した・panic したスレッドがあれば最初の理由を Err で返す。panic を
+/// join せずに残すと `thread::scope` 自身が panic するので、起こしたスレッドは全て join する。
+fn run_on_each_used_node<S, R, F>(
+    plan: &NumaPlan,
+    input: &S,
+    work: F,
+) -> Result<Vec<Option<R>>, String>
+where
+    S: Sync + ?Sized,
+    R: Send,
+    F: Fn(&[usize], &S) -> Result<R, String> + Sync,
+{
+    let used = plan.threads_per_node();
+    std::thread::scope(|scope| {
+        let work = &work;
+        let handles: Vec<_> = plan
+            .node_cpus
+            .iter()
+            .zip(&used)
+            .map(|(cpus, &threads)| {
+                (threads > 0).then(|| {
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, move || work(cpus, input))
+                        .map_err(|e| format!("cannot spawn a NUMA node thread: {e}"))
+                })
+            })
+            .collect();
+        let mut first_error = None;
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let result = handle.map(|spawned| {
+                spawned.and_then(|handle| {
+                    handle.join().map_err(|_| "NUMA node thread panicked".to_string())?
+                })
+            });
+            match result {
+                Some(Err(reason)) => {
+                    first_error.get_or_insert(reason);
+                    results.push(None);
+                }
+                Some(Ok(value)) => results.push(Some(value)),
+                None => results.push(None),
+            }
+        }
+        match first_error {
+            Some(reason) => Err(reason),
+            None => Ok(results),
+        }
+    })
 }
 
 /// `NumaPolicy=auto` の判定結果。
@@ -432,6 +459,29 @@ mod tests {
         assert_eq!(plan.cpus_of_thread(0), &[0, 1, 2, 3]);
         assert_eq!(plan.cpus_of_thread(4), &[4, 5, 6, 7]);
         assert_eq!(plan, NumaPlan::new(&topology, 5));
+    }
+
+    #[test]
+    fn run_on_each_used_node_joins_every_thread_before_reporting_failure() {
+        let topology = NumaTopology {
+            nodes: vec![vec![0], vec![1], vec![2]],
+            allowed: vec![0, 1, 2],
+        };
+        let plan = NumaPlan::new(&topology, 3);
+        let finished = std::sync::atomic::AtomicUsize::new(0);
+        let result = run_on_each_used_node(&plan, &(), |cpus, ()| -> Result<(), String> {
+            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match cpus[0] {
+                0 => Err("node 0 failed".to_string()),
+                _ => panic!("injected replica panic"),
+            }
+        });
+        assert_eq!(result.unwrap_err(), "node 0 failed");
+        assert_eq!(finished.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let plan = NumaPlan::new(&topology, 2);
+        let ok = run_on_each_used_node(&plan, &(), |cpus, ()| Ok(cpus[0])).unwrap();
+        assert_eq!(ok, vec![Some(0), Some(1), None]);
     }
 
     #[test]
