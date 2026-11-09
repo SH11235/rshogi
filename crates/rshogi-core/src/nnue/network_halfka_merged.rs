@@ -350,6 +350,7 @@ impl<const L1: usize> Default for AccumulatorStackHalfKaMerged<L1> {
 // =============================================================================
 
 /// HalfKaMerged Feature Transformer
+#[derive(Clone)]
 pub struct FeatureTransformerHalfKaMerged<const L1: usize> {
     /// バイアス [L1]
     pub biases: Vec<i16>,
@@ -1040,6 +1041,7 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
 /// スクランブル形式 `weights[input_chunk][output][4]`、それ以外では行優先
 /// `weights[output][input]`。
 /// スクランブル形式ではループ逆転で入力をブロードキャストして全出力に同時適用する。
+#[derive(Clone)]
 pub struct AffineTransformHalfKaMerged<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
@@ -1471,6 +1473,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaMerged<INPUT,
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
+#[derive(Clone)]
 pub struct NetworkHalfKaMerged<
     const L1: usize,
     const FT_OUT: usize,

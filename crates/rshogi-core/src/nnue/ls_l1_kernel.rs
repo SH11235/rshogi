@@ -13,6 +13,7 @@ pub(super) mod avx512 {
 
     /// reorder だけが構築する、64B 境界の [INPUT / 64][4][4][64] 融合用重み。
     /// 内部バッファの長さ・配置は構築後に変更しない。
+    #[derive(Clone)]
     pub(crate) struct FusedWeights<const INPUT: usize>(AlignedBox<i8>);
 
     // 非 VNNI の融合は、性能を確認した通常 LayerStacks に限る。

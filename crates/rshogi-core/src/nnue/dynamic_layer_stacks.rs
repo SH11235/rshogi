@@ -167,6 +167,7 @@ impl DynamicLayerStacksCache {
     }
 }
 
+#[derive(Clone)]
 struct DynamicLsBucket {
     l1: DynamicAffine,
     l2: DynamicAffine,
@@ -185,6 +186,7 @@ struct DynamicLayerStacksSignature {
 }
 
 /// Runtime-dimension LayerStacks network.
+#[derive(Clone)]
 pub struct DynamicLayerStacksNetwork {
     spec: ArchitectureSpec,
     feature: RuntimeLsFeature,

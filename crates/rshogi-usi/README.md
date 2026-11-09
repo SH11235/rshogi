@@ -72,6 +72,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | Option | Description | Default |
 |--------|-------------|---------|
 | `Threads` | Number of search threads (`go nodes N` limits the total across all threads) | 1 |
+| `NumaPolicy` | `none` / `auto`。`auto` は Linux で使える CPU が 2 つ以上の NUMA node にまたがるときだけ、探索スレッドを CPU 数に比例して node に割り当てて node の CPU 集合に固定し、NNUE の重みの写しを node ごとに 1 つ持つ。写しはプロセスごとの私有ヒープに置くので、重みの大きさ × node 数のメモリを余分に使い、プロセス間で重みを共有メモリに置いていてもその分は減らない。置換表・EvalHash・スレッド間で共有する履歴は今までどおり 1 つを共有する。node が 1 つのとき・Linux 以外では `none` と同じに振る舞い、`info string` で理由を出す。写しは isready (評価関数・Threads の変更後) で作り直す。写しを作れなかったときは理由を出して `none` と同じに戻り、再び `setoption name NumaPolicy value auto` を送るまで無効のまま。写しは同じ値なので評価値は `none` と変わらない | none |
 | `USI_Hash` | Hash table size in MB | 256 |
 | `EvalHash` | Evaluation hash size (MiB, 0 for an empty table) | 256 |
 | `UseEvalHash` | Use the evaluation hash (false also skips allocating the `EvalHash` table) | true |

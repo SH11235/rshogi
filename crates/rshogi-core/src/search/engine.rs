@@ -10,13 +10,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use super::numa::{NumaPlan, NumaReplicas, NumaTopology};
 use super::time_manager::{
     DEFAULT_MAX_MOVES_TO_DRAW, calculate_falling_eval, calculate_time_reduction,
     normalize_nodes_effort,
 };
 use super::{
-    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, RootMove, SearchTuneParams,
-    SearchWorker, SharedHistories, Skill, SkillOptions, ThreadPool, TimeManagement,
+    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, NumaPolicy, RootMove,
+    SearchTuneParams, SearchWorker, SharedHistories, Skill, SkillOptions, ThreadPool,
+    TimeManagement,
 };
 use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
@@ -283,9 +286,23 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
+    /// `NumaPolicy=auto` で有効なときだけ持つ状態。`none` や無効のときは `None` のまま。
+    #[cfg(target_os = "linux")]
+    numa: Option<NumaState>,
+    /// `go` の中で起きた NUMA の失敗の理由。次の `prepare_numa_networks` で返す。
+    #[cfg(target_os = "linux")]
+    numa_report: Option<String>,
     /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
     #[cfg(test)]
     corrupt_public_pv: Option<Vec<Move>>,
+}
+
+/// `NumaPolicy=auto` で有効なときの topology・割り当て・写し。
+#[cfg(target_os = "linux")]
+struct NumaState {
+    topology: NumaTopology,
+    plan: Arc<NumaPlan>,
+    replicas: Option<NumaReplicas>,
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -768,6 +785,10 @@ impl Search {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
             entering_king_rule: EnteringKingRule::default(),
+            #[cfg(target_os = "linux")]
+            numa: None,
+            #[cfg(target_os = "linux")]
+            numa_report: None,
             #[cfg(test)]
             corrupt_public_pv: None,
         }
@@ -1031,6 +1052,8 @@ impl Search {
             }
         }
         self.num_threads = num;
+        #[cfg(target_os = "linux")]
+        self.update_numa_plan();
         self.thread_pool.set_num_threads(
             num,
             Arc::clone(&self.tt),
@@ -1044,6 +1067,63 @@ impl Search {
     /// 探索スレッド数を取得
     pub fn num_threads(&self) -> usize {
         self.num_threads
+    }
+
+    /// USI オプション `NumaPolicy` を設定し、利用者に伝える 1 行 (有効にした割り当て、または
+    /// `none` と同じに振る舞う理由) を返す。`none` を設定したときは `None` を返す。
+    ///
+    /// 有効になると helper を node ごとに固定して作り直し、重みの写しは次の
+    /// [`Search::prepare_numa_networks`] か `go` で作る。
+    pub fn set_numa_policy(&mut self, policy: NumaPolicy) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let (topology, message) = match policy {
+                NumaPolicy::None => (None, None),
+                NumaPolicy::Auto => match super::numa::detect() {
+                    super::numa::NumaDetection::MultiNode(topology) => (Some(topology), None),
+                    super::numa::NumaDetection::Disabled(reason) => {
+                        (None, Some(format!("NumaPolicy=auto: {reason}; behaving as none")))
+                    }
+                },
+            };
+            match topology {
+                Some(topology) => self.enable_numa(topology),
+                None => {
+                    if self.numa.is_some() {
+                        self.release_numa_networks();
+                        self.numa = None;
+                        self.rebuild_helpers(None);
+                    }
+                }
+            }
+            message.or_else(|| self.numa.as_ref().map(|numa| numa.plan.describe()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            (policy == NumaPolicy::Auto)
+                .then(|| "NumaPolicy=auto: supported only on Linux; behaving as none".to_string())
+        }
+    }
+
+    /// `NumaPolicy=auto` で有効なとき、ロード済みの評価関数の写しを node ごとに作り、各スレッドに
+    /// 渡す。評価関数・Threads・NumaPolicy が前回から変わっていなければ何もしない。
+    ///
+    /// 評価関数のロード後 (isready) に呼ぶと、最初の `go` の持ち時間で写しを作らずに済む。
+    /// 呼ばなくても `go` の開始時に同じ処理をする。写しを作れなかったときは NUMA を無効にして
+    /// 共有の重みに戻し、その理由を返す。CPU 固定に失敗したスレッドがあればその理由も返す。
+    /// 前回からの間に `go` の中で起きた失敗があれば、その理由も返す。
+    pub fn prepare_numa_networks(&mut self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(message) = self.sync_numa_networks() {
+                self.add_numa_report(message);
+            }
+            self.numa_report.take()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     /// 探索チューニングパラメータを取得
@@ -1070,6 +1150,130 @@ impl Search {
         let result = params.set_from_usi_name(name, value)?;
         self.set_search_tune_params(params);
         Some(result)
+    }
+
+    /// `topology` に従ってスレッドを node に割り当て、helper を固定して作り直す。
+    #[cfg(target_os = "linux")]
+    fn enable_numa(&mut self, topology: NumaTopology) {
+        if self.numa.as_ref().is_some_and(|numa| numa.topology == topology) {
+            return;
+        }
+        self.release_numa_networks();
+        let plan = Arc::new(NumaPlan::new(&topology, self.num_threads));
+        self.numa = Some(NumaState {
+            topology,
+            plan: Arc::clone(&plan),
+            replicas: None,
+        });
+        self.rebuild_helpers(Some(plan));
+    }
+
+    /// 計画を作り直し、変わったら helper を新しい割り当てで作り直させる。古い写しも手放す。
+    #[cfg(target_os = "linux")]
+    fn update_numa_plan(&mut self) {
+        let Some(numa) = &self.numa else {
+            return;
+        };
+        let plan = NumaPlan::new(&numa.topology, self.num_threads);
+        if *numa.plan == plan {
+            return;
+        }
+        let plan = Arc::new(plan);
+        self.release_numa_networks();
+        if let Some(numa) = &mut self.numa {
+            numa.plan = Arc::clone(&plan);
+        }
+        self.thread_pool.set_numa_plan(Some(plan));
+    }
+
+    /// 全スレッドから写しを外し、写しの組を捨てる。
+    #[cfg(target_os = "linux")]
+    fn release_numa_networks(&mut self) {
+        if let Some(worker) = &mut self.worker {
+            worker.set_numa_network(None);
+        }
+        self.thread_pool.set_numa_networks(|_| None);
+        if let Some(numa) = &mut self.numa {
+            numa.replicas = None;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_numa_networks(&mut self) -> Option<String> {
+        let numa = self.numa.as_ref()?;
+        let plan = Arc::clone(&numa.plan);
+        let global = crate::nnue::get_network();
+        let fresh = match (&numa.replicas, &global) {
+            (Some(replicas), Some(global)) => {
+                Arc::ptr_eq(&replicas.source, global) && Arc::ptr_eq(&replicas.plan, &plan)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !fresh {
+            self.release_numa_networks();
+            if let Some(global) = global {
+                match NumaReplicas::build(plan, global) {
+                    Ok(replicas) => {
+                        if let Some(numa) = &mut self.numa {
+                            numa.replicas = Some(replicas);
+                        }
+                    }
+                    Err(reason) => {
+                        self.fall_back_to_shared_network();
+                        return Some(format!(
+                            "NumaPolicy=auto: cannot build per-node networks ({reason}); \
+                             behaving as none"
+                        ));
+                    }
+                }
+            }
+        }
+        let replicas = self.numa.as_ref().and_then(|numa| numa.replicas.as_ref());
+        if let Some(worker) = &mut self.worker {
+            worker.set_numa_network(replicas.and_then(|r| r.for_thread(0)));
+        }
+        self.thread_pool.set_numa_networks(|id| replicas.and_then(|r| r.for_thread(id)));
+        self.thread_pool
+            .numa_pin_error()
+            .map(|reason| format!("NumaPolicy=auto: {reason}"))
+    }
+
+    /// 次の `prepare_numa_networks` で返す理由に `message` を足す。
+    #[cfg(target_os = "linux")]
+    // 固定の失敗は helper が覚えたままで go のたびに同じ理由が返るので、同じ文は重ねない。
+    fn add_numa_report(&mut self, message: String) {
+        self.numa_report = Some(match self.numa_report.take() {
+            Some(earlier) if earlier.split("; ").any(|m| m == message) => earlier,
+            Some(earlier) => format!("{earlier}; {message}"),
+            None => message,
+        });
+    }
+
+    /// 写しを作れなかったときに NUMA をやめ、共有の重みで探索を続けられる状態に戻す。
+    ///
+    /// `go` の中からも呼ばれ、そこで helper を作り直すと探索の直前に履歴を失うので、作り直さずに
+    /// 各 helper をプロセスが使える CPU 全体へ固定し直す。
+    #[cfg(target_os = "linux")]
+    fn fall_back_to_shared_network(&mut self) {
+        self.release_numa_networks();
+        if let Some(numa) = self.numa.take() {
+            self.thread_pool.release_numa_plan(numa.topology.allowed());
+        }
+    }
+
+    /// helper を `plan` の割り当て (`None` なら固定なし) で作り直す。
+    #[cfg(target_os = "linux")]
+    fn rebuild_helpers(&mut self, plan: Option<Arc<NumaPlan>>) {
+        self.thread_pool.set_numa_plan(plan);
+        self.thread_pool.set_num_threads(
+            self.num_threads,
+            Arc::clone(&self.tt),
+            Arc::clone(&self.eval_hash),
+            Arc::clone(&self.shared_histories),
+            self.max_moves_to_draw,
+            self.search_tune_params,
+        );
     }
 
     /// 探索を実行
@@ -1127,6 +1331,26 @@ impl Search {
         // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
+        // NUMA が有効なら main スレッド (go を呼んだスレッド) も thread 0 の node に固定し、
+        // go を抜けるときに元の CPU 集合へ戻す。写しの用意は固定より前に済ませ、失敗しても
+        // 共有の重みで探索を続ける。失敗の理由は次の prepare_numa_networks (isready) で返す。
+        #[cfg(target_os = "linux")]
+        let numa_affinity = {
+            if let Some(message) = self.sync_numa_networks() {
+                self.add_numa_report(message);
+            }
+            match self.numa.as_ref().map(|numa| numa.plan.cpus_of_thread(0).to_vec()) {
+                Some(cpus) => match super::numa::AffinityGuard::pin(&cpus) {
+                    Ok(guard) => Some(guard),
+                    Err(reason) => {
+                        self.add_numa_report(format!("NumaPolicy=auto: {reason}"));
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
+
         // workerは遅延初期化、再利用する
         let tt_clone = Arc::clone(&self.tt);
         let eval_hash_clone = Arc::clone(&self.eval_hash);
@@ -1145,6 +1369,11 @@ impl Search {
                 search_tune_params,
             )
         });
+
+        #[cfg(target_os = "linux")]
+        if let Some(replicas) = self.numa.as_ref().and_then(|numa| numa.replicas.as_ref()) {
+            worker.set_numa_network(replicas.for_thread(0));
+        }
 
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
@@ -1413,6 +1642,9 @@ impl Search {
 
         // 探索統計レポートを取得（search-stats feature有効時のみ内容あり）
         let stats_report = self.worker.as_ref().map(|w| w.get_stats_report()).unwrap_or_default();
+
+        #[cfg(target_os = "linux")]
+        drop(numa_affinity);
 
         SearchResult {
             best_move,
@@ -3084,3 +3316,7 @@ mod tests {
 #[cfg(test)]
 #[path = "tests/public_pv.rs"]
 mod public_pv_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "halfkx-arch"))]
+#[path = "numa_search_tests.rs"]
+mod numa_search_tests;

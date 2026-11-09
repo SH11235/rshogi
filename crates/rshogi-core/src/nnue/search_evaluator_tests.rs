@@ -3,12 +3,12 @@ use super::*;
 use crate as core;
 #[path = "../../tests/common/search_models.rs"]
 mod search_models;
-use crate::nnue::{self, AccumulatorStackVariant};
+use crate::nnue::{self, AccumulatorStackVariant, get_network};
 use crate::position::SFEN_HIRATE;
 
 fn prepared() -> SearchEvaluator {
     let mut evaluator = SearchEvaluator::Uninitialized;
-    evaluator.prepare();
+    evaluator.prepare(get_network());
     evaluator
 }
 
@@ -433,7 +433,7 @@ fn check_models() {
         }
         let original_value = eager.evaluate(&pos);
         let root_storage = accumulation_address(&eager);
-        eager.prepare();
+        eager.prepare(get_network());
         assert_eq!(accumulation_address(&eager), root_storage, "{name}: stack reuse");
         compare(&mut eager, &mut legacy, &mut cache, &pos);
         let mut buckets = std::collections::BTreeSet::new();
@@ -475,13 +475,13 @@ fn check_models() {
         reused.evaluate(&pos);
         let reused_root = accumulation_address(&reused);
         reused.push(DirtyPiece::default());
-        reused.prepare();
+        reused.prepare(get_network());
         assert_eq!(accumulation_address(&reused), reused_root);
         let mut initial = Position::new();
         initial.set_sfen(SFEN_HIRATE).unwrap();
         assert_eq!(reused.evaluate(&initial), original_value);
         assert_eq!(snapshot(&reused), original);
-        reused.prepare();
+        reused.prepare(get_network());
         assert_eq!(reused.evaluate(&pos), eager.evaluate(&pos));
         assert_eq!(snapshot(&reused), snapshot(&eager));
         for mv in moves.into_iter().rev() {
@@ -564,7 +564,7 @@ fn check_models() {
         }
         let mut replaced = prepared();
         replaced.evaluate(&pos);
-        reused.prepare();
+        reused.prepare(get_network());
         assert_eq!(reused.evaluate(&pos), replaced.evaluate(&pos));
         assert_eq!(snapshot(&reused), snapshot(&replaced));
         assert_ne!(snapshot(&replaced), original, "{name}: net 再読み込みの bias");
@@ -664,7 +664,7 @@ fn check_loader_matrix() {
         let result = nnue::init_nnue_from_bytes(&bytes);
         if enabled {
             result.unwrap_or_else(|error| panic!("{name}: {error}"));
-            evaluator.prepare();
+            evaluator.prepare(get_network());
             let network = get_network().unwrap();
             let mut legacy = AccumulatorStackVariant::from_network(&network);
             compare(&mut evaluator, &mut legacy, &mut None, &pos);

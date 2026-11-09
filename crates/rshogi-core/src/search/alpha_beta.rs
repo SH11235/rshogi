@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
+use crate::nnue::get_network;
 use crate::nnue::search_evaluator::SearchEvaluator;
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -26,6 +27,8 @@ use super::history::{
     low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
+#[cfg(target_os = "linux")]
+use super::numa::NumaNetwork;
 use super::types::{
     ContHistKey, NodeType, PvTable, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE,
     SearchedMoveList, StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
@@ -742,6 +745,10 @@ pub struct SearchWorker {
     /// 入玉宣言勝ちルール
     pub entering_king_rule: EnteringKingRule,
 
+    /// `NumaPolicy=auto` のとき、このスレッドの node に置いた重みの写し。
+    #[cfg(target_os = "linux")]
+    pub(super) numa_network: Option<NumaNetwork>,
+
     // =========================================================================
     // 探索状態（SearchState）
     // =========================================================================
@@ -829,6 +836,8 @@ impl SearchWorker {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             draw_value_table: [Value::ZERO; 2],
             entering_king_rule: EnteringKingRule::default(),
+            #[cfg(target_os = "linux")]
+            numa_network: None,
             state: SearchState::new(),
         });
         worker.reset_cont_history_ptrs();
@@ -985,6 +994,20 @@ impl SearchWorker {
         self.state.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
     }
 
+    /// 読む重みの写しを差し替える。前の写しを持つ評価器の状態も捨て、古い写しを手放す。
+    #[cfg(target_os = "linux")]
+    pub(super) fn set_numa_network(&mut self, network: Option<NumaNetwork>) {
+        let unchanged = match (&self.numa_network, &network) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.local, &b.local),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            self.numa_network = network;
+            self.state.evaluator = SearchEvaluator::Uninitialized;
+        }
+    }
+
     /// usinewgameで呼び出し：全履歴をクリア
     pub fn clear(&mut self) {
         // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
@@ -1027,7 +1050,11 @@ impl SearchWorker {
                 .low_ply_history
                 .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
         }
-        self.state.evaluator.prepare();
+        #[cfg(target_os = "linux")]
+        let network = NumaNetwork::select(self.numa_network.as_ref(), get_network());
+        #[cfg(not(target_os = "linux"))]
+        let network = get_network();
+        self.state.evaluator.prepare(network);
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.state.calls_cnt = 0;

@@ -18,6 +18,7 @@ use crate::types::{Color, MAX_PLY, Square, Value};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::alloc::alloc;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 
@@ -296,6 +297,9 @@ const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
 enum AlignedBoxBacking {
     /// `new_zeroed` がグローバルアロケータで確保した通常ヒープ。Drop で `dealloc`。
     Heap(Layout),
+    /// 確保に失敗した複製の代わりに置く長さ 0 の箱。何も確保しておらず Drop でも何もしない。
+    /// メモリ不足のときにさらに確保して abort しないために使う。
+    Empty,
     /// file の読み取り専用 mapping を共有所有。Drop では `owner` の解放のみ。
     /// read-only 専用で、可変参照は `WeightBox` 経由の複製後にしか得られない。
     #[cfg(all(windows, feature = "prepacked-nnue"))]
@@ -540,7 +544,8 @@ impl<T> Deref for AlignedBox<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: ptr は有効で、len 要素分のメモリが確保されている
+        // SAFETY: ptr は有効で、len 要素分のメモリが確保されている。`Empty` の ptr は
+        // T に整列した dangling で len は 0 なので、長さ 0 のスライスとして有効。
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
@@ -561,6 +566,7 @@ impl<T> DerefMut for AlignedBox<T> {
                 // 確保した有効ポインタで、len 要素分を排他的に所有する。
                 unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
             }
+            AlignedBoxBacking::Empty => &mut [],
             #[cfg(target_os = "linux")]
             AlignedBoxBacking::Shared { .. } => {
                 // 共有メモリは複数プロセスから参照される read-only 領域。可変参照を
@@ -595,6 +601,7 @@ impl<T> Drop for AlignedBox<T> {
                     dealloc(self.ptr as *mut u8, *layout);
                 }
             }
+            AlignedBoxBacking::Empty => {}
             #[cfg(target_os = "linux")]
             AlignedBoxBacking::Shared { map_base, map_len } => {
                 // SAFETY: map_base / map_len は from_shared が受け取った mmap 領域
@@ -609,12 +616,62 @@ impl<T> Drop for AlignedBox<T> {
     }
 }
 
+impl<T> AlignedBox<T> {
+    /// 何も確保しない長さ 0 の箱。
+    fn empty_unallocated() -> Self {
+        Self {
+            ptr: std::ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+            backing: AlignedBoxBacking::Empty,
+        }
+    }
+}
+
 impl<T: Zeroable> Clone for AlignedBox<T> {
     fn clone(&self) -> Self {
-        let mut new_box = Self::new_zeroed(self.len);
+        let mut new_box = match FALLIBLE_CLONE.with(Cell::get) {
+            None => Self::new_zeroed(self.len),
+            Some(true) => return Self::empty_unallocated(),
+            Some(false) => match Self::try_new_zeroed(self.len) {
+                Ok(new_box) => new_box,
+                Err(_) => {
+                    FALLIBLE_CLONE.with(|state| state.set(Some(true)));
+                    return Self::empty_unallocated();
+                }
+            },
+        };
         new_box.copy_from_slice(self);
         new_box
     }
+}
+
+thread_local! {
+    /// [`try_clone_weights`] の実行中だけ `Some`。`Some(true)` は確保に失敗したことを表す。
+    static FALLIBLE_CLONE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// `clone` の中で行う `AlignedBox` の確保を、失敗しても abort しないようにして実行する。
+///
+/// 重みの複製は派生した `Clone` を通るので、確保の失敗を戻り値で伝えられない。そこで実行中の
+/// 確保失敗を thread-local に記録し、失敗した箱とそれ以降の箱は確保しない空の箱にしておき、
+/// 終わってから結果ごと捨てる。
+/// 空の箱を含む途中の値は外へ出さない。重み以外の小さな確保 (`Vec` や `Box`) の失敗は従来どおり。
+pub(crate) fn try_clone_weights<R>(clone: impl FnOnce() -> R) -> std::io::Result<R> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FALLIBLE_CLONE.with(|state| state.set(None));
+        }
+    }
+    FALLIBLE_CLONE.with(|state| state.set(Some(false)));
+    let reset = Reset;
+    let value = clone();
+    let failed = FALLIBLE_CLONE.with(Cell::get) == Some(true);
+    drop(reset);
+    if failed {
+        return Err(std::io::ErrorKind::OutOfMemory.into());
+    }
+    Ok(value)
 }
 
 // SAFETY: T が Send なら AlignedBox<T> も Send
@@ -659,6 +716,13 @@ impl<T: mapped_element::Element> WeightBox<T> {
         len: usize,
     ) -> std::io::Result<Self> {
         AlignedBox::from_mapped(owner, offset, len).map(Self)
+    }
+}
+
+/// 複製は backing によらず私有ヒープへの深い写しになる。
+impl<T: Zeroable> Clone for WeightBox<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -1205,6 +1269,25 @@ impl AccumulatorCacheGeneric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_clone_weights_copies_or_reports_allocation_failure() {
+        let mut source = AlignedBox::<i16>::new_zeroed(1000);
+        source[7] = 3;
+        let copy = try_clone_weights(|| source.clone()).unwrap();
+        assert_eq!(&copy[..], &source[..]);
+
+        // 確保に失敗した状態を作り、途中の値を捨てて Err になることを確かめる。
+        let result = try_clone_weights(|| {
+            FALLIBLE_CLONE.with(|state| state.set(Some(true)));
+            let failed = source.clone();
+            assert!(failed.is_empty() && matches!(failed.backing, AlignedBoxBacking::Empty));
+            failed
+        });
+        assert!(result.is_err());
+        assert_eq!(FALLIBLE_CLONE.with(Cell::get), None);
+        assert_eq!(&source.clone()[..], &source[..]);
+    }
 
     #[test]
     fn aligned_box_fallible_allocation_preserves_zeroes_and_alignment() {
