@@ -479,7 +479,7 @@ book_mine tree queue-review \
 --add new-trees.jsonl --update extra-lines.jsonl --update-size 30
 ```
 
-再採点は `--rerank-table`・`--rerank-out` の片方だけでも使えます。`--walk-table` が 1 つ以上と `--master <moves.tsv>` が必要です。
+再採点は `--rerank-table`・`--rerank-out` の片方だけでも使えます。`--master <moves.tsv>` と、再採点の対象の木の own ごとの `--walk-table b=...` / `--walk-table w=...` が必要です。対象に b と w の両方があれば両側の表を指定してください。対象の側の表が無い場合はエラーにします。
 `--rerank-out` は `--hold-out`・`--plan-out` と併用できません。同じ最新の受付行から作る更新を順に積むと、後の行が前の priority・hold を上書きするためです。別々に実行し、先の更新を受け付けた後の受付を次の入力に使ってください。`--rerank-table` だけなら点検・計画と併用できます。
 再採点だけなら `--table`・`--boxes`・`--hold-out` を省略できます。通常の点検を出す場合はこの 3 つを揃えます。
 
@@ -498,7 +498,7 @@ own の手番では main・alt の辺だけ、相手の手番では record を�
 到達した局面の reach に、経路中の own の alt 1 回につき 0.5 を掛け、候補の最大を採用します。
 重みのある局面に着いた経路はそこで止めます。根自体に重みがあれば branch=reach です。
 branch_ply は採用した局面から根までの手数です。同じ重みなら短い経路を採用し、候補がなければ両列とも 0 です。
-逆辺は元データ全体から一度だけ作り、木ごとに訪問済みの局面と減衰を記録して重複探索を抑えます。
+すべての木の逆探索を段ごとにまとめ、各段で元データを逐次読みします（最大 16 回）。元データ全体の逆辺は保持せず、探索中の局面と木ごとの訪問済み局面・alt 数だけを保持し、alt 数が減る場合だけ再訪します。
 区分の判定には `effective = max(reach, branch)` を使います。
 未達は `entry_value_black` が空でなく、b の表で target-black 未満、w の表で target-white 以上の場合です。
 列がない古い walk 表は failing=0 として扱います。開始手順より前の局面は集計に含めません。

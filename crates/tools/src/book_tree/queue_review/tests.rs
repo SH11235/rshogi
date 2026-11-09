@@ -1454,10 +1454,11 @@ fn rerank_bw_scores_each_side_and_preserves_shared_row() {
         a.hold_out = None;
         a.rerank_table = Some(d.path().join("rerank.tsv"));
         a.rerank_out = Some(d.path().join("rerank"));
-        a.walk_table = vec![format!(
-            "b={}",
-            walk(d.path(), "b\town\t0.005\t7g7f\n").display()
-        )];
+        let walk_path = walk(d.path(), "b\town\t0.005\t7g7f\n");
+        a.walk_table = vec![
+            format!("b={}", walk_path.display()),
+            format!("w={}", walk_path.display()),
+        ];
         run_at(a, now(), &mut vec![]).unwrap();
         let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
         assert!(text.contains("\tb\theld\t1\t0.005\t0.005\t0\t0\tfalse\tB"));
@@ -1654,10 +1655,11 @@ fn rerank_worker_at_any_root_preserves_hold_with_zero_read() {
         a.hold_out = None;
         a.rerank_table = Some(d.path().join("rerank.tsv"));
         a.rerank_out = Some(d.path().join("rerank"));
-        a.walk_table = vec![format!(
-            "b={}",
-            walk(d.path(), "b\town\t0.01\t7g7f\n").display()
-        )];
+        let walk_path = walk(d.path(), "b\town\t0.01\t7g7f\n");
+        a.walk_table = vec![
+            format!("b={}", walk_path.display()),
+            format!("w={}", walk_path.display()),
+        ];
         run_at(a, now(), &mut vec![]).unwrap();
         let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
         for line in table.lines().skip(1) {
@@ -1712,5 +1714,23 @@ fn rerank_cli_rejects_other_update_outputs() {
         }
         let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
         assert!(error.contains("併用できません"), "{error}");
+    }
+}
+
+#[test]
+fn rerank_requires_walk_table_for_each_target_side() {
+    for missing in ["b", "w"] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("both", "7g7f");
+        r["own"] = json!("bw");
+        let mut a = plan_args(d.path(), &[("A", vec![r])]);
+        a.plan_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        let side = if missing == "b" { "w" } else { "b" };
+        let path = walk(d.path(), "");
+        a.walk_table = vec![format!("{side}={}", path.display())];
+        let error = run_at(a, now(), &mut vec![]).unwrap_err();
+        assert!(error.to_string().contains(&format!("--walk-table {missing}=")), "{error:#}");
+        assert!(!d.path().join("rerank.tsv").exists());
     }
 }
