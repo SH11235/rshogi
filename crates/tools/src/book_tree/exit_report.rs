@@ -217,7 +217,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
-    // 伝播の切れ目の重みは、その局面を通る walk の行の重みの和 (同じ行で同じ局面は 1 回)。
+    // 伝播の切れ目の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (同じ行で同じ局面は 1 回)。
     // 手順は bridge の表の局面の分だけ持つ (walk の全局面の手順は持たない)。
     let mut bridge_keys = BTreeSet::new();
     if let Some(bridge) = &args.bridge {
