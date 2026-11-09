@@ -228,11 +228,11 @@ struct Sources<'a> {
 
 /// 相手の手の決め方。
 #[derive(Debug, Clone, Copy)]
-struct OppOptions {
-    min_games: u64,
-    book_diff: i32,
-    book_best: f64,
-    book_first: bool,
+pub(super) struct OppOptions {
+    pub min_games: u64,
+    pub book_diff: i32,
+    pub book_best: f64,
+    pub book_first: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,7 +303,7 @@ fn opponent_moves(
 
 /// 大きい定跡で指す手と重み (足して 1)。最善 (同じ値の手は等分) に `book_best`、最善から `book_diff` 以内の
 /// 残りの手に `1 - book_best` を等分する。差以内の手が最善だけなら最善に 1。
-fn book_moves(moves: &[BookEntryMove], opp: OppOptions) -> Vec<(String, f64)> {
+pub(super) fn book_moves(moves: &[BookEntryMove], opp: OppOptions) -> Vec<(String, f64)> {
     let Some(best) = moves.iter().map(|m| m.value).max() else {
         return Vec::new();
     };
