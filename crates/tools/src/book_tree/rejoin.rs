@@ -104,7 +104,7 @@ pub(super) struct WeightArgs {
     /// 相手の手の頻度の定跡 (`book_from_csa` の .db、手の count を局数として使う)。渡すと重みを付ける
     #[arg(long)]
     pub opp_freq: Option<PathBuf>,
-    /// 重み: 相手の局数がこれ未満の局面と手では辿るのを止める
+    /// 重み: 相手の局数がこれ未満の局面と手では頻度で指さない (`--opp-book` が無ければそこで止める)
     #[arg(long, default_value_t = 3)]
     pub min_games: u64,
     /// 重み: 初期局面からこの手数まで辿る
@@ -398,7 +398,8 @@ pub(super) fn find_rejoins(
 }
 
 /// 自分の側の局面に来る重み。自分は main を指し、相手は局面ごとの強い対局の手の頻度で指す。相手の局数が
-/// `min_games` 未満の局面・手、自分の手番で元データに無い局面、重みが `floor` 未満の局面、`max_ply` 手で止める。
+/// `min_games` 未満の局面・手の分は大きい定跡 (`book`) の手で指し、それも無ければ止める。自分の手番で元データに
+/// 無い局面、重みが `floor` 未満の局面、`max_ply` 手で止める。
 /// 同じ手数で同じ局面に来た重みは足し合わせ、局面の重みは手数をまたいで足す。
 pub(super) fn reach_weights(
     positions: &BTreeMap<String, MasterPosition>,
@@ -665,10 +666,40 @@ mod tests {
         assert!(close(weights[&after(&a, &["5a5b"])], 0.1));
         assert!(!weights.contains_key(&after(&a, &["5a4b"])));
 
-        let mut with_book = args(dir.path(), 40, None);
+        // 頻度の定跡に局面が無ければ、局面の重み全部を大きい定跡で指す。
+        options.book_first = false;
+        let empty = BookDb::default();
+        let weights = reach_weights(&positions, &empty, "b", ROOT, options).unwrap();
+        assert!(close(weights[&after(&a, &["5a6b"])], 0.9));
+        assert!(close(weights[&after(&a, &["5a5b"])], 0.1));
+
+        let freq_path = dir.path().join("freq.db");
+        std::fs::write(&freq_path, freq().to_db_string()).unwrap();
+        let mut with_book = args(dir.path(), 40, Some(freq_path));
         with_book.weight.opp_book = Some(book.clone());
         with_book.table = book.clone();
+        let before = std::fs::read_to_string(&book).unwrap();
         assert!(run_from(with_book, ROOT).is_err());
+        assert_eq!(std::fs::read_to_string(&book).unwrap(), before);
+        let mut bad = args(dir.path(), 40, None);
+        bad.weight.opp_book_best = 1.5;
+        assert!(bad.weight.check().is_err());
+        bad.weight.opp_book_best = 0.9;
+        bad.weight.opp_book_diff = -1;
+        assert!(bad.weight.check().is_err());
+    }
+
+    #[test]
+    fn cli_opp_book_needs_opp_freq() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            weight: WeightArgs,
+        }
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["t", "--opp-book", "b.db"]).is_err());
+        assert!(Cli::try_parse_from(["t", "--opp-book", "b.db", "--opp-freq", "f.db"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "--opp-book-first"]).is_err());
     }
 
     #[test]
