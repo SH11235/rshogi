@@ -1969,22 +1969,86 @@ fn rerank_scores_added_trees_with_the_same_measure_and_group() {
     assert_eq!(read("qrhold_rerank_A.jsonl")[0]["priority"], json!(40));
 }
 
-#[test]
-fn rerank_add_rejects_accepted_or_duplicate_ids() {
-    let d = TempDir::new().unwrap();
-    let mut a = plan_args(d.path(), &[("A", vec![row("same", "7g7f")])]);
+fn rerank_add_args(d: &Path, walk_rows: &str, adds: &[Value]) -> QueueReviewArgs {
+    let mut a = plan_args(d, &[("A", vec![row("accepted", "9g9f")])]);
     a.plan_out = None;
     a.table = None;
     a.boxes = None;
     a.hold_out = None;
-    a.rerank_table = Some(d.path().join("rerank.tsv"));
-    a.walk_table = vec![format!(
-        "b={}",
-        walk(d.path(), "b\town\t0.002\t7g7f\n").display()
-    )];
-    a.add = vec![input_rows(d.path(), "add.jsonl", &[row("same", "2g2f")])];
-    let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
-    assert!(error.contains("受付済み"), "{error}");
+    a.rerank_out = Some(d.join("rerank"));
+    a.walk_table = vec![format!("b={}", walk(d, walk_rows).display())];
+    a.add = vec![input_rows(d, "add.jsonl", adds)];
+    a
+}
+
+#[test]
+fn rerank_add_rejects_accepted_or_duplicate_ids_and_missing_side_table() {
+    for (adds, message) in [
+        (vec![row("accepted", "2g2f")], "受付済み"),
+        (vec![row("twice", "2g2f"), row("twice", "5g5f")], "重複"),
+        (
+            vec![{
+                let mut r = row("white", "2g2f");
+                r["own"] = json!("w");
+                r
+            }],
+            "--walk-table w=",
+        ),
+    ] {
+        let d = TempDir::new().unwrap();
+        let a = rerank_add_args(d.path(), "b\town\t0.002\t7g7f\n", &adds);
+        let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+        assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
+fn rerank_add_bw_and_held_rows_follow_existing_rules() {
+    let d = TempDir::new().unwrap();
+    let mut both = row("both", "2g2f");
+    both["own"] = json!("bw");
+    both["priority"] = json!(100);
+    let mut held = row("held", "5g5f");
+    held["priority"] = json!(100);
+    held["hold"] = json!(true);
+    let mut a =
+        rerank_add_args(d.path(), "b\town\t0.005\t2g2f\nb\town\t0.005\t5g5f\n", &[both, held]);
+    let white = d.path().join("white.tsv");
+    std::fs::write(&white, "side\tstop\tweight\tmoves\nw\town\t0.0005\t9g9f\n").unwrap();
+    a.walk_table.push(format!("w={}", white.display()));
+    run_at(a, now(), &mut vec![]).unwrap();
+    let out: Vec<(Value, Value, Value)> =
+        std::fs::read_to_string(d.path().join("rerank/qrhold_rerank-add.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                (v["id"].clone(), v["priority"].clone(), v["hold"].clone())
+            })
+            .collect();
+    // bw は b 側の B (40) と w 側の D・hold を、受付行で priority は小さい方・hold は両側の積にまとめる。
+    // hold の新しい木は棚上げとして A〜C なら hold を外す。
+    assert_eq!(
+        out,
+        vec![
+            (json!("both"), json!(40), json!(false)),
+            (json!("held"), json!(40), json!(false))
+        ]
+    );
+}
+
+#[test]
+fn plan_keeps_held_add_rows_held_without_using_capacity() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![])]);
+    let mut held = row("held", "7g7f");
+    held["hold"] = json!(true);
+    a.add = vec![input_rows(d.path(), "adds", &[held, row("live", "2g2f")])];
+    a.tree_size = 19;
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = plan_table(d.path());
+    assert!(table.contains("add-hold\theld\tb\t42\t\tA\tinput-hold"), "{table}");
+    assert!(table.contains("add\tlive\tb\t42\t\tA\tcapacity"), "{table}");
 }
 
 #[test]

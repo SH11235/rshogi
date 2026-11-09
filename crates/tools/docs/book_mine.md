@@ -459,7 +459,7 @@ book_mine tree queue-review \
 | `--plan-out <DIR>` | なし | 指定時だけ、台ごとの積み荷 `<prefix>_<box>.jsonl` と `<prefix>_plan.tsv` を作る。hold 候補とは別の出力先を使う |
 | `--master <TSV>` | なし | 再採点に必須の元データ (`moves.tsv`) |
 | `--rerank-table <TSV>` | なし | 全台の未完了・未失敗の木を再採点した表 |
-| `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority または hold が変わる行だけを出力。`--hold-out`・`--plan-out` と併用不可 |
+| `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority または hold が変わる行だけを出力。`--add` があれば `<prefix>_rerank-add.jsonl` も出す。`--hold-out`・`--plan-out` と併用不可 |
 | `--rerank-keep-below <N>` | 10 | 現在の priority が N 未満なら保持し、新たな hold を付けない。hold 解除の候補には含める |
 | `--boost-queue <JSONL>` | なし、繰り返し可 | `tree seeds` などの行の root・roots を重要度が上がった局面として扱う |
 | `--group-table <TSV>` | なし | 受付行の `group` ごとの、締めまでに読み切る見込みの表。再採点と一緒なら再採点後の見込みも出す |
@@ -520,11 +520,13 @@ D の priority は保持します。
 棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
-`--add` の木も再採点の対象にし、既存の木と同じ区分・priority の規則で採点します。新しい木は未着手で、棚上げではありません
-(hold=true の行はそのまま hold、hold=false の行は D かつ effective=0 で priority が `--rerank-keep-below` 以上なら hold を付けます)。
+`--add` の木も再採点の対象にし、既存の木と同じ区分・priority の規則で採点します。新しい木は居場所が 1 つの未着手の木として扱い、
+hold=true の行は全台 hold の木と同じく棚上げ (A〜C なら hold を外す)、hold=false の行は D かつ effective=0 で priority が `--rerank-keep-below` 以上なら hold を付けます。
 受付済みの id や `--add` どうしで重複する id はエラーです。表では box が空、state が new です。
 `--rerank-out` には、`--add` の全部の行を priority・hold だけ替えて `<prefix>_rerank-add.jsonl` に出します (変わらない行も出します)。
-これを `--plan-out` の `--add` に渡すと、同じ物差しの priority で台へ割り振れます。`--group-table` の rerank の行は台にある木だけを数え、`--add` の木は入りません。
+これを `--plan-out` の `--add` に渡すと、同じ物差しの priority で台へ割り振れます (計画は hold=true の行を読める量に数えず hold のまま置きます)。
+`--add` の木も group 揃えに加わるので、同じ group の既存の木の priority が `--add` の木に合わせて小さくなり、台ごとの更新行に出ることがあります。
+標準出力の区分・上げる/下げる・hold の数には `--add` の木も入ります。`--group-table` の rerank の行は台にある木だけを数え、`--add` の木は入りません。
 同じ `group` の木は、受付行に書く最終の priority・hold (下の `own=bw` と読み途中の規則を当てた後) で、hold でない行の priority の最小にそろえます。
 hold の行は最小の計算に入れず、priority も変えません。そろえるのは数字を小さくする変更だけで、`--rerank-keep-below` で保持する木にも当てます。
 表の new_priority も、受付行が hold でなければそろえた値です。
@@ -566,7 +568,7 @@ trees・priority の幅・full/part/none・remaining は hold でない木、hel
 3. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
    追加後に上限以内となる台のうち追加後の ratio が最小の台、同点は名前順です。
    入る台がなければ、条件を満たす台のうち現在の ratio 最小の台へ hold true で置き (`add-hold`)、
-   見込み量は増やしません。受付済みの id や新規行どうしの id の重複はエラーです。
+   見込み量は増やしません。hold=true の入力行も同じ台へ hold のまま置きます (`add-hold`、理由 `input-hold`)。受付済みの id や新規行どうしの id の重複はエラーです。
 
 「同じ根」は root・roots のいずれかの局面が手数を除いて一致し、id が違うことです。
 移動の重複判定は全台の受付 (hold を含む) で調べます。新規行は移動後の配置に合わせて割り振ります。移動は、元と同じ条件ラベルの台へ、

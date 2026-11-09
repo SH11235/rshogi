@@ -163,7 +163,7 @@ pub(super) fn build(
             locations.entry((&tree.id, &tree.own)).or_default().push((i, tree));
         }
     }
-    // 新しい木は台の番号の代わりに boxes.len() を使い、未着手・hold の写しを持たない木として採点する。
+    // 新しい木は台の番号の代わりに boxes.len() を使い、居場所が 1 つの未着手の木として採点する。
     let new_index = boxes.len();
     let adds = plan::load(&args.add, inputs)?;
     let mut new_queue = BTreeMap::new();
@@ -231,7 +231,8 @@ pub(super) fn build(
             tree.own
         );
         let queued = &new_queue[&tree.id];
-        targets.push((new_index, tree, queued, false, parse_root(&queued.line.root)?));
+        // 居場所が 1 つなので、hold の行は既存の全台 hold の木と同じく棚上げとして扱う。
+        targets.push((new_index, tree, queued, tree.hold, parse_root(&queued.line.root)?));
     }
     let roots: Vec<_> = targets
         .iter()
@@ -423,7 +424,7 @@ pub(super) fn build(
             result.payloads.push(bytes);
         }
         if !new_queue.is_empty() {
-            // 台の名前は英数字・_・- なので、`_rerank-add` は台ごとの出力名と重ならない。
+            // 台ごとの出力名は `_rerank_` で続くので、`_rerank-add` とは重ならない。
             let mut bytes = Vec::new();
             for (id, q) in &new_queue {
                 let (priority, hold) = result.lines[&(new_index, id.clone())];
