@@ -15,6 +15,7 @@ mod hold_early;
 mod journal;
 mod line_db;
 mod live_import;
+mod main_line;
 mod master_index;
 mod master_table;
 mod model;
@@ -196,6 +197,8 @@ enum MasterCommand {
     Exits(exits::ExitsArgs),
     /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
     LineDb(line_db::LineDbArgs),
+    /// 初期局面から先手と後手の main を交互に指し、定跡が切れる所と、そこを根にした木の行を出す
+    MainLine(main_line::MainLineArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -214,6 +217,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Walk(args) => walk::run(args),
         MasterCommand::Exits(args) => exits::run(args),
         MasterCommand::LineDb(args) => line_db::run(args),
+        MasterCommand::MainLine(args) => main_line::run(args),
     }
 }
 
