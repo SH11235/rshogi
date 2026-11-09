@@ -1706,7 +1706,7 @@ book_mine master main-line --master moves.tsv --table main-line.tsv \
 | `--table <TSV>` | なし | 辿った手順の表 |
 | `--max-ply <N>` | 400 | 辿る手数の上限 |
 | `--enqueue-out <JSONL>` | なし | 切れた局面を根にした own=bw の木の行 (`tree enqueue --from` の形) |
-| `--tag` / `--depth` / `--priority` | mainline / 6 / 10 | 木の行の id の先頭・段数・priority |
+| `--tag` / `--depth` / `--priority` | mainline / 6 / 10 | 木の行の id の先頭 (`[A-Za-z0-9_-]` の 1〜40 文字)・段数・priority |
 | `--opp-n` / `--stop` / `--rounds` / `--draw-black` / `--draw-white` | なし | 木の行の `opts` |
 
 切れる理由 (reason) は次のとおりです。
@@ -1720,11 +1720,11 @@ book_mine master main-line --master moves.tsv --table main-line.tsv \
 | `max-ply` | `--max-ply` 手まで辿った | 出さない |
 
 標準出力には、切れた手数・理由・次の手番、初期局面からの手順 (`moves=`)、切れた局面 (`sfen <局面> <手数>`) を出します。
-表は `ply key move value_black reason` の列を持ちます。辿った手ごとに 1 行 (value_black は main の行の読みの値の平均を先手から見た値、無ければ空) で、
+表は `ply key move value_black reason` の列を持ちます。ply はその局面までに指した手数 (初期局面が 0) で、辿った手ごとに 1 行 (value_black は main の行の読みの値の平均を先手から見た値、無ければ空) で、
 最後に切れた局面の行 (move・value_black が空、reason が理由) を置きます。
 木の行は、根が切れた局面 (手数は初期局面からの手数 + 1)、id が `<tag>_<根の手数>_<局面の sha256 の先頭 16 桁>_bw`、
 memo が `main-line reason=<reason> moves=<手順>` です。木の行を出さない理由のときは、空の JSONL を書きます。
-元データはディスクのバケットに索引化して、辿る局面の行だけを読みます。
+元データはディスクのバケットに索引化して、辿る局面の行だけを読みます。辿った局面に main が 2 行以上あればエラーにします。
 
 ## `borrow`: 大きい定跡の木を借りる
 

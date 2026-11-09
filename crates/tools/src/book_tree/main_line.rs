@@ -151,7 +151,10 @@ fn walk(index: &mut MasterIndex, max_ply: usize) -> Result<Walked> {
                 Stop::FlippedOnly
             };
         }
-        let Some(main) = rows.iter().find(|r| r.get("role") == "main") else {
+        let mains: Vec<_> = rows.iter().filter(|r| r.get("role") == "main").collect();
+        // 索引は行ごとの検査しかしないので、局面ごとに main が 1 つという元データの規則をここで確かめる。
+        ensure!(mains.len() <= 1, "main が {} 行ある局面です: {key}", mains.len());
+        let Some(main) = mains.first() else {
             let roles: BTreeSet<_> = rows.iter().map(|r| r.get("role").to_owned()).collect();
             break Stop::NoMain(roles.into_iter().collect());
         };
@@ -202,21 +205,8 @@ fn run_to(args: MainLineArgs, stdout: &mut impl Write) -> Result<()> {
     )?;
     writeln!(stdout, "moves={}", moves.join(" "))?;
     writeln!(stdout, "sfen {} {}", walked.key, ply + 1)?;
-    if let Some(path) = &args.table {
-        let mut bytes = b"ply\tkey\tmove\tvalue_black\treason\n".to_vec();
-        for (i, step) in walked.steps.iter().enumerate() {
-            writeln!(
-                bytes,
-                "{i}\t{}\t{}\t{}\t",
-                step.key,
-                step.mv,
-                step.value_black.map(|v| v.to_string()).unwrap_or_default()
-            )?;
-        }
-        writeln!(bytes, "{ply}\t{}\t\t\t{}", walked.key, walked.stop.name())?;
-        write_atomic(path, &bytes)?;
-    }
-    if let Some(path) = &args.enqueue_out {
+    // 木の行を作って検査してから書き出し、片方だけ新しい組を残さない。
+    let queued = if args.enqueue_out.is_some() {
         let mut bytes = Vec::new();
         if walked.stop.readable() {
             let root_ply = ply + 1;
@@ -243,7 +233,26 @@ fn run_to(args: MainLineArgs, stdout: &mut impl Write) -> Result<()> {
         } else {
             writeln!(stdout, "{} は読む局面ではないので木の行を出しません", walked.stop.name())?;
         }
+        Some(bytes)
+    } else {
+        None
+    };
+    if let Some(path) = &args.table {
+        let mut bytes = b"ply\tkey\tmove\tvalue_black\treason\n".to_vec();
+        for (i, step) in walked.steps.iter().enumerate() {
+            writeln!(
+                bytes,
+                "{i}\t{}\t{}\t{}\t",
+                step.key,
+                step.mv,
+                step.value_black.map(|v| v.to_string()).unwrap_or_default()
+            )?;
+        }
+        writeln!(bytes, "{ply}\t{}\t\t\t{}", walked.key, walked.stop.name())?;
         write_atomic(path, &bytes)?;
+    }
+    if let (Some(path), Some(bytes)) = (&args.enqueue_out, &queued) {
+        write_atomic(path, bytes)?;
     }
     Ok(())
 }

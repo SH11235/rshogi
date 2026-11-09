@@ -85,13 +85,12 @@ fn flipped_only_and_no_main_stop_with_tree_lines() {
     let flipped =
         crate::book_db::strip_ply(&rshogi_book::flipped_key(&format!("{after} 1")).unwrap())
             .to_owned();
-    let mut mirror = test_row(&[
+    let mirror = test_row(&[
         ("key", flipped),
         ("move", "7g7f".into()),
         ("role", "main".into()),
         ("evals", String::new()),
     ]);
-    mirror.set("evals", String::new());
     let stdout = run_with(&d, &[row(&[], "7g7f", "main", ""), mirror], &[]);
     assert!(stdout.starts_with("1 手で切れる。理由: flipped-only"), "{stdout}");
     assert_eq!(lines(&d)[0].memo.as_deref(), Some("main-line reason=flipped-only moves=7g7f"));
@@ -137,4 +136,25 @@ fn outputs_must_differ_from_inputs() {
         let args = Cli::try_parse_from(argv).unwrap().args;
         assert!(run_to(args, &mut Vec::new()).is_err());
     }
+}
+
+#[test]
+fn stop_at_max_ply_keeps_readable_reason_and_two_mains_fail() {
+    let d = TempDir::new().unwrap();
+    let stdout = run_with(&d, &[row(&[], "7g7f", "main", "")], &["--max-ply", "1"]);
+    assert!(stdout.starts_with("1 手で切れる。理由: missing"), "{stdout}");
+    assert_eq!(lines(&d).len(), 1);
+
+    let d = TempDir::new().unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(
+        &master,
+        format_master(&[row(&[], "7g7f", "main", ""), row(&[], "2g2f", "main", "")]),
+    )
+    .unwrap();
+    let args = Cli::try_parse_from(["test", "--master", master.to_str().unwrap()])
+        .unwrap()
+        .args;
+    let error = run_to(args, &mut Vec::new()).unwrap_err().to_string();
+    assert!(error.contains("main が 2 行"), "{error}");
 }
