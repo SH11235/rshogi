@@ -89,6 +89,10 @@ impl Definition {
     pub fn params(&self) -> TreeParams {
         TreeParams {
             out: self.out.clone(),
+            multipv: None,
+            nodes: None,
+            require_condition: false,
+            preferred_fingerprint: self.fingerprint.clone(),
             depth: self.depth,
             opp_n: self.opp_n,
             stop: self.stop,
@@ -119,6 +123,10 @@ impl Definition {
 /// 木の伸ばし方と出力先。定義の入力 (TOML と paths.tsv、キューの行) によらない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TreeParams {
+    pub multipv: Option<usize>,
+    pub nodes: Option<u64>,
+    pub require_condition: bool,
+    pub preferred_fingerprint: Option<String>,
     pub out: PathBuf,
     pub depth: usize,
     pub opp_n: usize,
@@ -179,10 +187,7 @@ pub(super) struct Tree {
 }
 impl Tree {
     /// TOML の定義と paths.tsv から木を作る。出力先には触れない。
-    pub fn load(def: Definition, settings: &Settings) -> Result<Self> {
-        if def.fingerprint.as_ref().is_some_and(|fp| fp != &settings.fingerprint) {
-            bail!("木の読み条件とプロセスの指紋が違います");
-        }
+    pub fn load(def: Definition, settings: Option<&Settings>) -> Result<Self> {
         if let Some(expected) = &def.paths_sha256
             && &digest(&def.paths)? != expected
         {
@@ -201,7 +206,27 @@ impl Tree {
                 cols[2].split_whitespace().map(str::to_owned).collect(),
             ));
         }
-        Self::build(def.params(), &lines)
+        let mut tree = Self::build(def.params(), &lines)?;
+        if let Some(settings) = settings {
+            tree.def.multipv = Some(settings.multipv);
+            tree.def.nodes = Some(settings.nodes);
+        }
+        Ok(tree)
+    }
+
+    /// 木で優先する読み条件を設定する。
+    pub fn set_condition(&mut self, settings: &Settings) {
+        self.def.preferred_fingerprint = Some(settings.fingerprint.clone());
+        self.def.multipv = Some(settings.multipv);
+        self.def.nodes = Some(settings.nodes);
+    }
+
+    fn reading<'a>(&self, cache: &'a impl Readings, key: &str) -> Option<&'a Reading> {
+        let preferred = self.def.preferred_fingerprint.as_deref();
+        if self.def.require_condition && preferred.is_some_and(|fp| !cache.has_exact(key, fp)) {
+            return None;
+        }
+        cache.get_preferred(key, preferred)
     }
 
     /// 根と実戦の手順から木を作る。出力先には触れない。
@@ -363,7 +388,9 @@ impl Tree {
         }
         // 不足の局面のどれにも読みが来ていなければ、全局面を辿り直しても同じ不足になる
         // (状態が変わるのは不足の局面の読みを取り込んだときだけ)。毎周の処理を不足の数に比例させる。
-        if !self.waiting.is_empty() && self.waiting.iter().all(|(k, _)| cache.get(k).is_none()) {
+        if !self.waiting.is_empty()
+            && self.waiting.iter().all(|(k, _)| self.reading(cache, k).is_none())
+        {
             return Ok(self.waiting.clone());
         }
         self.waiting.clear();
@@ -372,10 +399,14 @@ impl Tree {
             while let Some(key) = work.pop_front() {
                 budget.tick()?;
                 if !self.nodes.contains_key(&key) {
-                    let Some(reading) = cache.get(&key) else {
+                    let Some(reading) = self.reading(cache, &key) else {
                         continue;
                     };
-                    self.reading_conditions.insert(cache.fingerprint().map(str::to_owned));
+                    self.reading_conditions.insert(
+                        cache
+                            .condition(&key, self.def.preferred_fingerprint.as_deref())
+                            .map(str::to_owned),
+                    );
                     self.nodes.insert(key.clone(), reading.clone());
                 }
                 if self.roots.contains_key(&key) {
@@ -891,7 +922,7 @@ impl Tree {
     /// 読み済みの局面は挙げない。辿る局面が `limit` に達したら浅い段から打ち切る。
     pub fn speculate(
         &self,
-        tops: &BTreeMap<String, (Vec<String>, i32)>,
+        tops: &BTreeMap<String, (Vec<String>, i32, usize)>,
         cache: &impl Readings,
         limit: usize,
     ) -> Vec<PrefetchCandidate> {
@@ -900,11 +931,12 @@ impl Tree {
         }
         // 合流した局面を浅い段で辿り直せるよう、段の小さい順に処理する。
         let mut pending = BTreeSet::new();
-        for key in tops.keys() {
-            if let Some(&level) = self.level.get(key)
+        for (key, (_, _, multipv)) in tops {
+            if self.def.multipv.is_none_or(|own| own == *multipv)
+                && let Some(&level) = self.level.get(key)
                 && level < self.def.depth
                 && !self.nodes.contains_key(key)
-                && cache.get(key).is_none()
+                && self.reading(cache, key).is_none()
             {
                 pending.insert((level, key.clone(), self.ply[key]));
             }
@@ -918,7 +950,7 @@ impl Tree {
             visited += 1;
             let in_tree = self.level.contains_key(&key);
             let mut moves: Vec<&str> = Vec::new();
-            if !in_tree && let Some(reading) = cache.get(&key) {
+            if !in_tree && let Some(reading) = self.reading(cache, &key) {
                 let lines = reading.lines();
                 if lines.first().is_some_and(|pv| pv.cp.abs() < self.def.stop) {
                     let n = if side(&key) == self.def.own {
@@ -929,7 +961,8 @@ impl Tree {
                     moves.extend(lines.iter().take(n).map(|pv| pv.mv.as_str()));
                     moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
                 }
-            } else if let Some((top, best)) = tops.get(&key)
+            } else if let Some((top, best, multipv)) = tops.get(&key)
+                && self.def.multipv.is_none_or(|own| own == *multipv)
                 && (self.roots.contains_key(&key) || best.abs() < self.def.stop)
             {
                 moves.extend(top.iter().map(String::as_str));
@@ -954,7 +987,7 @@ impl Tree {
         }
         found
             .into_iter()
-            .filter(|(key, _)| cache.get(key).is_none())
+            .filter(|(key, _)| self.reading(cache, key).is_none())
             .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
             .collect()
     }
@@ -1124,6 +1157,10 @@ mod prefetch_tests {
     fn params() -> TreeParams {
         TreeParams {
             out: "unused".into(),
+            multipv: None,
+            nodes: None,
+            require_condition: false,
+            preferred_fingerprint: None,
             depth: 3,
             opp_n: 1,
             stop: 300,
@@ -1686,5 +1723,63 @@ mod prefetch_tests {
         let predicted = tree.predict(&mut unlimited()).unwrap();
         assert_eq!(predicted[ROOT], BTreeSet::from(["5i6i".into()]));
         assert_eq!(predicted, expected);
+    }
+    #[test]
+    fn tree_prefers_its_condition_and_waits_for_exact_when_required() {
+        struct Cache {
+            old: Reading,
+            own: Option<Reading>,
+        }
+        impl Readings for Cache {
+            fn get(&self, key: &str) -> Option<&Reading> {
+                (key == ROOT).then_some(self.own.as_ref().unwrap_or(&self.old))
+            }
+            fn get_preferred(&self, key: &str, preferred: Option<&str>) -> Option<&Reading> {
+                if key != ROOT {
+                    return None;
+                }
+                if preferred == Some("old") {
+                    Some(&self.old)
+                } else {
+                    self.get(key)
+                }
+            }
+            fn condition(&self, key: &str, preferred: Option<&str>) -> Option<&str> {
+                self.get_preferred(key, preferred)?;
+                Some(if preferred == Some("old") || self.own.is_none() {
+                    "old"
+                } else {
+                    "own"
+                })
+            }
+            fn has_exact(&self, key: &str, fp: &str) -> bool {
+                key == ROOT && (fp == "old" || fp == "own" && self.own.is_some())
+            }
+        }
+        let mut cache = Cache {
+            old: reading(ROOT, &[("5i4i", 100)]),
+            own: None,
+        };
+        let mut def = params();
+        def.depth = 0;
+        def.preferred_fingerprint = Some("own".into());
+        let lines = vec![(ROOT.into(), 1, vec![])];
+        let mut fallback = Tree::build(def.clone(), &lines).unwrap();
+        assert!(fallback.advance(&cache).unwrap().is_empty());
+        assert_eq!(fallback.reading_conditions, BTreeSet::from([Some("old".into())]));
+        def.require_condition = true;
+        let mut exact = Tree::build(def.clone(), &lines).unwrap();
+        assert_eq!(exact.advance(&cache).unwrap(), vec![(ROOT.into(), 0)]);
+        assert_eq!(exact.advance(&cache).unwrap(), vec![(ROOT.into(), 0)]);
+        cache.own = Some(reading(ROOT, &[("5i5h", 200)]));
+        assert!(exact.advance(&cache).unwrap().is_empty());
+        assert_eq!(exact.nodes[ROOT].bestmove, "5i5h");
+        assert_eq!(exact.reading_conditions, BTreeSet::from([Some("own".into())]));
+        def.require_condition = false;
+        def.preferred_fingerprint = Some("old".into());
+        let mut preferred = Tree::build(def, &lines).unwrap();
+        preferred.advance(&cache).unwrap();
+        assert_eq!(preferred.nodes[ROOT].bestmove, "5i4i");
+        assert_eq!(preferred.reading_conditions, BTreeSet::from([Some("old".into())]));
     }
 }

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = BTreeMap::new();
     let mut key = String::new();
+    let mut multipv = usize::MAX;
     let mut newgame = false;
     let mut ready = false;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -40,6 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter_map(|l| l.split_once('\t'))
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect();
+        } else if let Some(value) = line.strip_prefix("setoption name MultiPV value ") {
+            multipv = value.parse()?;
         } else if line == "usinewgame" {
             newgame = true;
             ready = false;
@@ -97,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None if resign => "",
                 None => return Err("局面がありません".into()),
             };
-            let rows: Vec<_> = rows.split('|').filter(|r| !r.is_empty()).collect();
+            let rows: Vec<_> = rows.split('|').filter(|r| !r.is_empty()).take(multipv).collect();
             let delay: f64 = config
                 .get(&format!("delay:{key}"))
                 .or_else(|| config.get("delay"))
@@ -117,7 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     stdout.flush()?;
                 }
-                match rx.recv_timeout(if flood { Duration::ZERO } else { Duration::from_millis(50) }) {
+                match rx.recv_timeout(if flood {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(50)
+                }) {
                     Ok(line) => {
                         let line = line?;
                         if let Some(path) = config.get("log") {

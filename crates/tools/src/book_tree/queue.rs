@@ -103,6 +103,7 @@ fn line_from_args(args: &EnqueueArgs) -> Result<Line> {
             draw_black: args.draw_black,
             draw_white: args.draw_white,
             extra: (!args.extra.is_empty()).then(|| args.extra.clone()),
+            ..Opts::default()
         },
         memo: args.memo.clone(),
     })

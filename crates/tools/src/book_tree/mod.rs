@@ -67,7 +67,7 @@ enum TreeCommand {
     Wait(queue::WaitArgs),
     /// 受付と進みの写しから未着手の木を点検し、保留候補の行を書く
     QueueReview(Box<queue_review::QueueReviewArgs>),
-    /// 別の台帳の読みを取り込み先の条件で足す
+    /// 別の台帳の読みを元の条件のまま足す
     ImportJournal(transfer::ImportJournalArgs),
     /// 台帳だけから木を再生成する
     Replay(ReplayArgs),
@@ -100,7 +100,7 @@ fn parse_accepted_fingerprint(value: &str) -> std::result::Result<String, String
 
 #[derive(Args, Debug)]
 struct ServeArgs {
-    /// 条件の違いを承知で取り込む元の指紋 (複数指定可)
+    /// 互換用の非推奨オプション (動作に影響しない)
     #[arg(long, value_name = "FP", value_parser = parse_accepted_fingerprint)]
     accept_fingerprint: Vec<String>,
     #[arg(long)]
@@ -158,7 +158,7 @@ struct ReplayArgs {
     journal: PathBuf,
     #[arg(long)]
     tree: PathBuf,
-    /// serve が表示する読み条件の指紋。省略時は台帳内の唯一の条件
+    /// 優先する読み条件の指紋。無い局面や省略時はノード上限最大、PV 行数最多、指紋最小の順で選ぶ
     #[arg(long)]
     fingerprint: Option<String>,
 }
@@ -248,7 +248,9 @@ pub fn run(args: TreeArgs) -> Result<()> {
             let result = (|| -> Result<bool> {
                 let (journal, settings) =
                     Journal::select(journal_lock, args.fingerprint.as_deref())?;
-                let mut tree = Tree::load(definition, &settings)?;
+                let mut tree = Tree::load(definition, settings.as_ref())?;
+                tree.def.preferred_fingerprint =
+                    args.fingerprint.clone().or(tree.def.preferred_fingerprint);
                 loop {
                     let missing = tree.advance(&journal)?;
                     if tree.finished {

@@ -37,9 +37,17 @@ impl Buckets {
     }
 
     /// 値の比較には台帳の重複検査と同じ SHA-256 の先頭 16 バイトを使う。
-    pub fn push(&mut self, reading: &Reading, row: u64, prefetch: bool) -> Result<()> {
+    pub fn push(
+        &mut self,
+        reading: &Reading,
+        fingerprint: &str,
+        row: u64,
+        prefetch: bool,
+    ) -> Result<()> {
         let mut entry = [0; ENTRY_BYTES];
-        entry[..16].copy_from_slice(&Sha256::digest(reading.key.as_bytes())[..16]);
+        entry[..16].copy_from_slice(
+            &Sha256::digest(serde_json::to_vec(&(fingerprint, &reading.key))?)[..16],
+        );
         let values = serde_json::to_vec(&(&reading.multipv, &reading.bestmove))?;
         entry[16..32].copy_from_slice(&Sha256::digest(values)[..16]);
         entry[32..40].copy_from_slice(&row.to_le_bytes());
