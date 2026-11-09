@@ -1,6 +1,7 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
 use super::value::{
-    RootValues, ValueArgs, ValueInput, collect_nodes, join_roots, register_nodes, value_root,
+    RootValues, ValueArgs, ValueInput, append_records, collect_nodes, join_roots, register_nodes,
+    value_root,
 };
 use super::*;
 use crate::book_backprop::DrawValues;
@@ -1088,4 +1089,65 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
     join_roots(&[], &mut other, &options, draws, 40, "test").unwrap();
     let moved = other[&a].moves.iter().find(|m| m.mv == "5a5b").unwrap();
     assert_eq!((moved.value, moved.cond.as_str()), (-200, "unknown"));
+}
+
+#[test]
+fn append_records_adds_new_moves_and_refreshes_only_own_source_records() {
+    use crate::book_tree::master_table::test_row;
+    use crate::book_tree::register::{Node, NodeMove, Options};
+    let opp = key(&["5i5h"]);
+    let row = |mv: &str, role: &str, source: &str, tier: &str| {
+        let mut r = test_row(&[
+            ("key", opp.clone()),
+            ("move", mv.into()),
+            ("role", role.into()),
+            ("evals", "1".into()),
+        ]);
+        r.set("source", source.into());
+        r.set("tier", tier.into());
+        r
+    };
+    let mut rows = vec![
+        row("5a5b", "record", "ext", "wide"),
+        row("5a4a", "record", "read", "wide"),
+        row("5a6a", "bench", "ext", "wide"),
+    ];
+    let schema = crate::book_tree::schema::Schema::load(None).unwrap();
+    let options = Options {
+        since: "v2",
+        note: "",
+        alt_gap: 30,
+        source: "ext",
+        lineage: "book:big.db@00000000",
+        schema: &schema,
+        replace_curated: false,
+        revive_bench: false,
+    };
+    let node = |mv: &str, value: i32| NodeMove {
+        cond: "test".into(),
+        mv: mv.into(),
+        value,
+        value_kind: "single".into(),
+    };
+    let opponent = BTreeMap::from([(
+        opp.clone(),
+        Node {
+            ply: "2".into(),
+            remaining: 0,
+            nodes: 100,
+            moves: vec![
+                node("5a5b", -20),
+                node("5a4a", -30),
+                node("5a6a", -40),
+                node("5a4b", -50),
+            ],
+            tree: 0,
+        },
+    )]);
+    assert_eq!(append_records(&mut rows, &opponent, &options), (1, 1));
+    let get = |mv: &str| rows.iter().find(|r| r.get("move") == mv).unwrap();
+    assert_eq!((get("5a5b").get("evals"), get("5a5b").get("since")), ("-20", "v2"));
+    assert_eq!(get("5a4a").get("evals"), "1");
+    assert_eq!((get("5a6a").get("role"), get("5a6a").get("evals")), ("bench", "1"));
+    assert_eq!((get("5a4b").get("role"), get("5a4b").get("evals")), ("record", "-50"));
 }

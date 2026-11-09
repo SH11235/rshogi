@@ -549,41 +549,58 @@ pub(super) fn collect_nodes(
     (disagreements, opponent)
 }
 
-/// 相手の手番の局面の手を、元データに無い (局面, 手) だけ `record` の行で足し、足した行の数を返す。
+/// 相手の手番の局面の手を `record` の行で残し、足した行と値を更新した行の数を返す。元データに無い (局面, 手) は
+/// 足し、同じ出所 (`options.source`) の record は値を今回のものに更新する。それ以外の既存の行には触らない。
 pub(super) fn append_records(
     rows: &mut Vec<Row>,
     opponent: &BTreeMap<String, register::Node>,
     options: &Options,
-) -> usize {
-    let existing: BTreeSet<(String, String)> = rows
+) -> (usize, usize) {
+    let index: BTreeMap<(String, String), usize> = rows
         .iter()
-        .map(|r| (r.get("key").to_owned(), r.get("move").to_owned()))
+        .enumerate()
+        .map(|(i, r)| ((r.get("key").to_owned(), r.get("move").to_owned()), i))
         .collect();
-    let before = rows.len();
+    let (mut added, mut updated) = (0, 0);
     for (key, node) in opponent {
         let nodes = crate::book_tree::master_table::format_nodes(node.nodes);
         for m in &node.moves {
-            if existing.contains(&(key.clone(), m.mv.clone())) {
-                continue;
-            }
-            rows.push(Row::from_fields(&[
+            let fields = [
                 ("key", key.clone()),
                 ("ply", node.ply.clone()),
                 ("move", m.mv.clone()),
-                ("role", "record".into()),
-                ("source", options.source.into()),
+                ("role", "record".to_owned()),
+                ("source", options.source.to_owned()),
                 ("evals", m.value.to_string()),
                 ("nodes", nodes.clone()),
                 ("cond", m.cond.clone()),
                 ("value_kind", m.value_kind.clone()),
-                ("lineage", options.lineage.into()),
-                ("tier", "wide".into()),
-                ("since", options.since.into()),
-                ("note", options.note.into()),
-            ]));
+                ("lineage", options.lineage.to_owned()),
+                ("tier", "wide".to_owned()),
+                ("since", options.since.to_owned()),
+                ("note", options.note.to_owned()),
+            ];
+            match index.get(&(key.clone(), m.mv.clone())) {
+                None => {
+                    rows.push(Row::from_fields(&fields));
+                    added += 1;
+                }
+                Some(&i)
+                    if rows[i].get("role") == "record"
+                        && rows[i].get("source") == options.source
+                        && rows[i].get("tier") == "wide" =>
+                {
+                    for (column, value) in &fields[5..10] {
+                        rows[i].set(column, value.clone());
+                    }
+                    rows[i].set("since", options.since.to_owned());
+                    updated += 1;
+                }
+                Some(_) => {}
+            }
         }
     }
-    rows.len() - before
+    (added, updated)
 }
 
 fn black(key: &str, value: i32) -> i32 {
@@ -692,9 +709,11 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         replace_curated: args.replace_curated,
         revive_bench: false,
     };
+    // record の行も register の並べ替えと schema の検査を通す。
+    let mut rows = rows;
+    let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
-    let (mut rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
-    let records = append_records(&mut rows, &opponent, &options);
+    let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
     let (_, after, _) =
@@ -721,7 +740,9 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         summary.conflicts,
         all.iter().map(|v| v.marks.len()).sum::<usize>()
     );
-    println!("相手の手番の局面に record で足した手 {records}");
+    println!(
+        "相手の手番の局面の record: 足した手 {records_added} / 値を更新した手 {records_updated}"
+    );
     let line_count =
         |s: &crate::book_tree::audit::AuditSummary| s.at_or_above_line[0] + s.at_or_above_line[1];
     println!(
