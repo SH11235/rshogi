@@ -471,11 +471,12 @@ pub(super) fn join_roots(
     Ok(joined)
 }
 
-/// 登録する局面: 部分木の局面のうち、元データで止めた出口と印の付いた局面を除く。印はどの根で付いても除く
-/// (同じ局面が別の根で確認点にならない段に合流していても登録しない)。相手の手番の局面も登録する。
-/// 自分の手番の局面だけを元データに入れると、間の相手の手番の局面が無く、先の局面の値が手前に伝わらない。
+/// 登録する局面: 部分木の局面のうち手番が `turn` (`own` / `opp`) のもので、元データで止めた出口と印の付いた
+/// 局面を除く。印はどの根で付いても除く (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
 pub(super) fn register_nodes(
     index: usize,
+    root: &RootInfo,
+    turn_of: &str,
     tree: &Subtree,
     values: &RootValues,
     marked: &BTreeSet<&str>,
@@ -485,7 +486,10 @@ pub(super) fn register_nodes(
     let mut nodes = BTreeMap::new();
     for (key, node) in &tree.nodes {
         // 元データの局面は元データの値と手を残す (読み直した出口でも替えない)。
-        if node.kind == Kind::Master || marked.contains(key.as_str()) {
+        if turn(key, &root.own) != turn_of
+            || node.kind == Kind::Master
+            || marked.contains(key.as_str())
+        {
             continue;
         }
         let moves = &values.moves[key];
@@ -516,6 +520,35 @@ pub(super) fn register_nodes(
         );
     }
     nodes
+}
+
+/// 全部の根の登録する局面を集め、根の間で食い違った局面の数を返す。
+///
+/// 相手の手番の局面も登録する。自分の手番の局面だけでは、間の相手の手番の局面が元データに無く、先の局面の
+/// 値が手前に伝わらない。同じ局面を別の根が自分の手番として持つときは、読んで確かめた候補を持つその根を使う
+/// (相手の手番の局面は切り出しで伸ばした大きい定跡の手しか持たない)。
+pub(super) fn collect_nodes(
+    nodes: &mut BTreeMap<String, register::Node>,
+    roots: &[RootInfo],
+    trees: &[Subtree],
+    values: &[RootValues],
+    marked: &BTreeSet<&str>,
+    max_plies: usize,
+    nodes_limit: u64,
+) -> usize {
+    let mut disagreements = 0;
+    let mut opponent = BTreeMap::new();
+    for (turn_of, into) in [("own", &mut *nodes), ("opp", &mut opponent)] {
+        for (index, ((root, tree), values)) in roots.iter().zip(trees).zip(values).enumerate() {
+            let found =
+                register_nodes(index, root, turn_of, tree, values, marked, max_plies, nodes_limit);
+            disagreements += merge(into, found);
+        }
+    }
+    for (key, node) in opponent {
+        nodes.entry(key).or_insert(node);
+    }
+    disagreements
 }
 
 fn black(key: &str, value: i32) -> i32 {
@@ -603,12 +636,15 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
     let mut nodes = BTreeMap::new();
     let mut disagreements = 0;
-    for (index, (tree, values)) in trees.iter().zip(&all).enumerate() {
-        disagreements += merge(
-            &mut nodes,
-            register_nodes(index, tree, values, &marked, meta.params.max_plies, nodes_limit),
-        );
-    }
+    disagreements += collect_nodes(
+        &mut nodes,
+        &meta.roots,
+        &trees,
+        &all,
+        &marked,
+        meta.params.max_plies,
+        nodes_limit,
+    );
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
     let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);

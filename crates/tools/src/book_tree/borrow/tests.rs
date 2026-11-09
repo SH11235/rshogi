@@ -1,5 +1,7 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
-use super::value::{ValueArgs, ValueInput, join_roots, register_nodes, value_root};
+use super::value::{
+    RootValues, ValueArgs, ValueInput, collect_nodes, join_roots, register_nodes, value_root,
+};
 use super::*;
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, BookMove, PositionEntry};
@@ -330,7 +332,7 @@ fn value_root_propagates_exit_readings_and_marks_better_outside_moves() {
     // 線を外すと、候補の外の 5i6i (59) が最善 (20) から 40 未満でも印になる。
     let marks: Vec<_> = values_all.marks.iter().map(|m| (m.key.as_str(), m.mv.as_str())).collect();
     assert_eq!(marks, [(ROOT, "5i6i")]);
-    let nodes = register_nodes(0, &tree, &values, &BTreeSet::new(), 4, s.nodes);
+    let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, s.nodes);
     assert_eq!(nodes[ROOT].moves[0].value_kind, "tree:4");
     let exit = key(&["5i5h", "5a4a"]);
     assert!(nodes[&exit].moves.iter().all(|m| m.value_kind == "single"));
@@ -366,7 +368,7 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
     assert!(!joined.expanded);
     assert_eq!(joined.destination_level, Some(tree.nodes[&destination].level));
     assert_eq!(joined.value, 20);
-    let nodes = register_nodes(0, &tree, &values, &BTreeSet::new(), 4, s.nodes);
+    let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, s.nodes);
     let moves = &nodes[&exit].moves;
     assert_eq!(moves.iter().find(|m| m.mv == "5h5i").unwrap().value_kind, "tree:2");
     assert_eq!(moves.iter().find(|m| m.mv == "5h6h").unwrap().value_kind, "single");
@@ -388,7 +390,8 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
         work.path(),
     )
     .unwrap();
-    let borrowed = register_nodes(0, &rejoined, &values, &BTreeSet::new(), 4, s.nodes);
+    let borrowed =
+        register_nodes(0, &root(), "own", &rejoined, &values, &BTreeSet::new(), 4, s.nodes);
     let table = format!(
         "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{exit}\t5\t4\t0\t100\t5h5i\t20\t0\t1\n{destination}\t2\t1\t3\t100\t4a3a\t-20\t0\t1\n"
     );
@@ -549,7 +552,7 @@ fn master_exit_conditions_follow_each_move_without_tainting_independent_branches
             work.path(),
         )
         .unwrap();
-        let nodes = register_nodes(0, &tree, &values, &BTreeSet::new(), 4, s.nodes);
+        let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, s.nodes);
         let moves = &nodes[ROOT].moves;
         assert_eq!(moves.iter().find(|m| m.mv == "5i4i").unwrap().cond, expected);
         assert_eq!(moves.iter().find(|m| m.mv == "5i5h").unwrap().cond, "ledger");
@@ -838,14 +841,44 @@ fn a_mark_from_any_root_keeps_the_position_out_of_registration() {
     .unwrap();
     assert!(values.marks.is_empty());
     let ab = key(&["5i5h", "5a5b"]);
-    let all = register_nodes(0, &tree, &values, &BTreeSet::new(), 4, 100);
+    let all = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, 100);
     assert!(all.contains_key(ROOT) && all.contains_key(&ab));
-    // 相手の手番の局面も、部分木の手と伝播後の値で登録する。
     let opp = key(&["5i5h"]);
-    assert_eq!(all[&opp].moves.first().map(|m| m.mv.as_str()), Some("5a5b"));
-    assert!(all[&opp].moves.iter().all(|m| m.value_kind.starts_with("tree:")));
+    assert!(!all.contains_key(&opp));
+    // 相手の手番の局面は、部分木の手と伝播後の値で別に集める。
+    let theirs = register_nodes(0, &root(), "opp", &tree, &values, &BTreeSet::new(), 4, 100);
+    assert!(!theirs.contains_key(ROOT));
+    assert_eq!(theirs[&opp].moves.first().map(|m| m.mv.as_str()), Some("5a5b"));
+    assert!(theirs[&opp].moves.iter().all(|m| m.value_kind.starts_with("tree:")));
+    // 別の根がその局面を自分の手番として持てば、相手の手番の根の局面より先に使う。
+    let mut other = root();
+    other.id = "r2".into();
+    other.own = "w".into();
+    let mut own_values = RootValues {
+        moves: values.moves.clone(),
+        marks: Vec::new(),
+    };
+    own_values.moves.get_mut(&opp).unwrap().retain(|m| m.mv == "5a4a");
+    let mut nodes = BTreeMap::new();
+    collect_nodes(
+        &mut nodes,
+        &[root(), other],
+        &[tree.clone(), tree.clone()],
+        &[
+            RootValues {
+                moves: values.moves.clone(),
+                marks: Vec::new(),
+            },
+            own_values,
+        ],
+        &BTreeSet::new(),
+        4,
+        100,
+    );
+    assert_eq!(nodes[&opp].moves.iter().map(|m| m.mv.as_str()).collect::<Vec<_>>(), ["5a4a"]);
+    assert!(nodes.contains_key(ROOT));
     let marked = BTreeSet::from([ab.as_str()]);
-    let without = register_nodes(0, &tree, &values, &marked, 4, 100);
+    let without = register_nodes(0, &root(), "own", &tree, &values, &marked, 4, 100);
     assert!(without.contains_key(ROOT) && !without.contains_key(&ab));
     assert_eq!(without[ROOT].remaining, 4);
 }
