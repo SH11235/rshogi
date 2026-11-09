@@ -449,13 +449,19 @@ book_mine tree queue-review \
 | `--tree-size <N>` | 92 | 木ごとの局面数の仮定 (正数) |
 | `--walk-table <b\|w>=<TSV>` | なし、繰り返し可 | `master walk --table` の表。同じ側の複数表は重みを加算 |
 | `--start-moves <USI>` | 初期局面 | 初期局面からの開始手順。表・memo がこの手順で始まる場合は二重に指さず、相対手順なら前に足す |
-| `--value-floor <W>` | 0.001 | reach-high と reach-low の境界 (以上が high) |
-| `--table <TSV>` | 必須 | 未着手の根ごとの分類表 |
-| `--boxes <TSV>` | 必須 | 台ごとの残りと読める量の表 |
-| `--hold-out <DIR>` | 必須 | 台ごとの hold 候補の JSON Lines を出す dir |
-| `--prefix <NAME>` | qrhold | hold 出力と計画の積み荷のファイル名の先頭。英数字・`_`・`-` |
+| `--value-floor <W>` | 0.001 | reach-high と reach-low、および再採点の C と D の境界 (以上が high / C) |
+| `--table <TSV>` | 通常の点検では必須 | 未着手の根ごとの分類表 |
+| `--boxes <TSV>` | 通常の点検では必須 | 台ごとの残りと読める量の表 |
+| `--hold-out <DIR>` | 通常の点検では必須 | 台ごとの hold 候補の JSON Lines を出す dir |
+| `--prefix <NAME>` | qrhold | hold・計画・再採点の JSONL 名の先頭。英数字・`_`・`-` |
 | `--hold-class <CLASS>` | 追加なし、繰り返し可 | reach-low に加えて保留候補にする class |
 | `--plan-out <DIR>` | なし | 指定時だけ、台ごとの積み荷 `<prefix>_<box>.jsonl` と `<prefix>_plan.tsv` を作る。hold 候補とは別の出力先を使う |
+| `--master <TSV>` | なし | 再採点に必須の元データ (`moves.tsv`) |
+| `--rerank-table <TSV>` | なし | 全台の未完了・未失敗の木を再採点した表 |
+| `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority または hold が変わる行だけを出力。`--hold-out`・`--plan-out` と併用不可 |
+| `--rerank-keep-below <N>` | 10 | 現在の priority が N 未満なら保持し、新たな hold を付けない。hold 解除の候補には含める |
+| `--boost-queue <JSONL>` | なし、繰り返し可 | `tree seeds` などの行の root・roots を重要度が上がった局面として扱う |
+| `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | walk の出口の目標。先手は先手評価が black 以上、後手は white 未満なら未達扱いにしない |
 | `--max-ratio <F>` | 0.95 | 計画の残り/読める量の上限。有限の非負数 |
 | `--box-deadlines` | 無効 | 台の dir の `deadline` (Unix 秒の整数 1 行) と cutoff の早い方を締めにする。無い台は cutoff |
 | `--condition <NAME>=<LABEL>` | 空ラベル、繰り返し可 | 台の読み条件のラベル。同じ条件の台には同じラベルを付ける |
@@ -472,6 +478,53 @@ book_mine tree queue-review \
 --condition box-a=model-a --condition box-b=model-a \
 --add new-trees.jsonl --update extra-lines.jsonl --update-size 30
 ```
+
+再採点は `--rerank-table`・`--rerank-out` の片方だけでも使えます。`--master <moves.tsv>` と、再採点の対象の木の own ごとの `--walk-table b=...` / `--walk-table w=...` が必要です。対象に b と w の両方があれば両側の表を指定してください。対象の側の表が無い場合はエラーにします。
+`--rerank-out` は `--hold-out`・`--plan-out` と併用できません。同じ最新の受付行から作る更新を順に積むと、後の行が前の priority・hold を上書きするためです。別々に実行し、先の更新を受け付けた後の受付を次の入力に使ってください。`--rerank-table` だけなら点検・計画と併用できます。
+再採点だけなら `--table`・`--boxes`・`--hold-out` を省略できます。通常の点検を出す場合はこの 3 つを揃えます。
+
+```sh
+book_mine tree queue-review \
+  --box box-a=/path/to/box-a --box box-b=/path/to/box-b \
+  --cutoff 2026-12-01T09:00:00+09:00 \
+  --walk-table b=walk-black.tsv --walk-table w=walk-white.tsv \
+  --master moves.tsv --rerank-table rerank.tsv --rerank-out rerank --boost-queue seeds.jsonl
+```
+
+再採点は memo の手順を使わず、受付の root の局面と progress の own で判定します。
+reach は同じ側の walk の到達重み、failing はその局面を通る目標未達の行の重みの合計です。
+branch は元データの逆辺を根から最大 16 手たどり、同じ own の walk に重みのある局面が見つかったときの補完重みです。
+own の手番では main・alt の辺だけ、相手の手番では record を含むすべての辺をたどります。
+到達した局面の reach に、経路中の own の alt 1 回につき 0.5 を掛け、候補の最大を採用します。
+重みのある局面に着いた経路はそこで止めます。根自体に重みがあれば branch=reach です。
+branch_ply は採用した局面から根までの手数です。同じ重みなら短い経路を採用し、候補がなければ両列とも 0 です。
+すべての木の逆探索を段ごとにまとめ、各段で元データを逐次読みします（最大 16 回）。元データ全体の逆辺は保持せず、探索中の局面と木ごとの訪問済み局面・alt 数だけを保持し、alt 数が減る場合だけ再訪します。
+区分の判定には `effective = max(reach, branch)` を使います。
+未達は `entry_value_black` が空でなく、b の表で target-black 未満、w の表で target-white 以上の場合です。
+列がない古い walk 表は failing=0 として扱います。開始手順より前の局面は集計に含めません。
+
+| class | 条件 (上から優先) | priority の基準 |
+| --- | --- | --- |
+| A | failing ≥ 0.005、または boost の根 | 10 |
+| B | effective ≥ 0.005 | 40 |
+| C | effective ≥ value-floor | 100 |
+| D | 上記以外 | 現在値を保持 |
+
+A〜C の priority は `min(現在値, 基準 + min(root の手数 / 5 の切り捨て, 19))` とし、数字を小さくする変更だけを提案します。
+D の priority は保持します。
+居場所と棚上げは finished・failed を含む全台の行から判定します。同じ id・own がどこかの台で finished または failed なら、その側は表にも更新行にも出しません。
+同じ id・own が複数台にある場合、hold でない台を居場所とし、他の台の hold 行は表にも出しません。
+全台で hold なら棚上げとし、`--box` の指定順で最初の台だけを対象にします。
+棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
+現在の priority が `--rerank-keep-below` 以上の場合だけです。
+read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
+`own=bw` は表では先後別に採点します。受付行の priority・hold は共通なので、JSONL は小さい priority を採用し、
+hold は両側とも停止可能な場合だけ付けます。片側でも読み途中なら元の hold を保持します。
+表と集計は側ごとの提案を示します。
+
+再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root`
+の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は held、running (読み途中)、queued です。
+標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数、hold を外す / 付ける数を出します。
 
 計画は点検時点の remaining から始め、次の順で作ります。capacity が 0 の台の計画 ratio は無限大です。
 

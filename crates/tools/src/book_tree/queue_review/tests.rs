@@ -3,6 +3,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 fn args(dir: &Path) -> QueueReviewArgs {
+    let master = dir.join("master.tsv");
+    std::fs::write(&master, super::super::master_table::COLUMNS.join("\t") + "\n").unwrap();
     QueueReviewArgs {
         box_specs: vec![],
         rate: vec![],
@@ -13,9 +15,9 @@ fn args(dir: &Path) -> QueueReviewArgs {
         walk_table: vec![],
         start_moves: None,
         value_floor: 0.001,
-        table: dir.join("review.tsv"),
-        boxes: dir.join("boxes.tsv"),
-        hold_out: dir.join("hold"),
+        table: Some(dir.join("review.tsv")),
+        boxes: Some(dir.join("boxes.tsv")),
+        hold_out: Some(dir.join("hold")),
         prefix: "qrhold".into(),
         hold_class: vec![],
         plan_out: None,
@@ -25,6 +27,13 @@ fn args(dir: &Path) -> QueueReviewArgs {
         add: vec![],
         update: vec![],
         update_size: 30,
+        master: Some(master),
+        rerank_table: None,
+        rerank_out: None,
+        rerank_keep_below: 10,
+        boost_queue: vec![],
+        target_black: 50,
+        target_white: 80,
     }
 }
 use std::path::Path;
@@ -282,7 +291,7 @@ fn explicit_hold_class_and_output_guards() {
     );
     let mut a = args(d.path());
     a.box_specs = vec![format!("B={}", b.display())];
-    a.table = b.join("enqueue/overwrite.jsonl");
+    a.table = Some(b.join("enqueue/overwrite.jsonl"));
     assert!(run_at(a, now(), &mut vec![]).is_err());
     assert!(!b.join("enqueue/overwrite.jsonl").exists());
 }
@@ -510,8 +519,8 @@ fn previous_hold_files_are_preserved_and_failed_trees_are_counted() {
     enqueue(&b, "only", 0, &[r]);
     let mut a = args(d.path());
     a.box_specs = vec![format!("B={}", b.display())];
-    std::fs::create_dir_all(&a.hold_out).unwrap();
-    let previous = a.hold_out.join("previous_A.jsonl");
+    std::fs::create_dir_all(a.hold_out.as_ref().unwrap()).unwrap();
+    let previous = a.hold_out.as_ref().unwrap().join("previous_A.jsonl");
     std::fs::write(&previous, "previous\n").unwrap();
     run_at(a, now(), &mut vec![]).unwrap();
     assert_eq!(std::fs::read_to_string(previous).unwrap(), "previous\n");
@@ -1057,7 +1066,7 @@ fn plan_output_cannot_share_hold_directory_or_overwrite_an_input() {
         let d = TempDir::new().unwrap();
         let mut a = plan_args(d.path(), &[("A", vec![])]);
         if shared_hold {
-            a.plan_out = Some(a.hold_out.clone());
+            a.plan_out = a.hold_out.clone();
         } else {
             std::fs::create_dir_all(d.path().join("plan")).unwrap();
             let input =
@@ -1227,4 +1236,501 @@ fn cli_requires_plan_for_explicit_planning_options_except_deadlines() {
         assert!(Cli::try_parse_from(argv).is_ok());
     }
     assert!(Cli::try_parse_from(base.into_iter().chain(["--box-deadlines"])).is_ok());
+}
+
+#[test]
+fn rerank_classes_and_priority_protection() {
+    for (reach, failing, boost, floor, expected) in [
+        (0.0, 0.005, false, 0.001, 'A'),
+        (0.0, 0.0, true, 0.001, 'A'),
+        (0.005, 0.004, false, 0.001, 'B'),
+        (0.001, 0.0, false, 0.001, 'C'),
+        (0.0009, 0.0, false, 0.001, 'D'),
+        (0.0009, 0.0, false, 0.0005, 'C'),
+    ] {
+        assert_eq!(rerank::class(reach, failing, boost, floor), expected);
+    }
+    let d = TempDir::new().unwrap();
+    let mut urgent = row("urgent", "7g7f");
+    urgent["priority"] = json!(9);
+    urgent["hold"] = json!(true);
+    let mut boundary = row("boundary", "7g7f");
+    boundary["priority"] = json!(10);
+    boundary["root"] = json!(format!(
+        "sfen {} 120",
+        parse_root(boundary["root"].as_str().unwrap()).unwrap().key
+    ));
+    let mut a = plan_args(
+        d.path(),
+        &[(
+            "A",
+            vec![urgent, boundary, {
+                let mut r = row("planned", "7g7f");
+                r["priority"] = json!(25);
+                r
+            }],
+        )],
+    );
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.rerank_out = Some(d.path().join("rerank"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.005\t7g7f\n").display()
+    )];
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(text.contains("\tB\t9\t9\ttrue\tfalse\ttrue\t0\t"), "{text}");
+    assert!(text.contains("\tB\t25\t25\tfalse\tfalse"), "{text}");
+    assert!(text.contains("\tB\t10\t10\tfalse\tfalse\tfalse\t0\t"), "{text}");
+    assert!(
+        String::from_utf8(stdout)
+            .unwrap()
+            .contains("priority: 上げる=0 下げる=0、hold: 外す=1 付ける=0")
+    );
+}
+
+#[test]
+fn rerank_shelved_moved_running_and_latest_raw_rows() {
+    let d = TempDir::new().unwrap();
+    let mut shelved = row("shelved", "7g7f");
+    shelved["hold"] = json!(true);
+    let mut moved = row("moved", "2g2f");
+    moved["hold"] = json!(true);
+    let mut destination = moved.clone();
+    destination["hold"] = json!(false);
+    let mut running_held = shelved.clone();
+    running_held["id"] = json!("running-held");
+    let running = row("running", "9g9f");
+    let done = row("done", "1g1f");
+    let failed = row("failed", "3g3f");
+    let mut latest = row("latest", "8g8f");
+    latest.as_object_mut().unwrap().remove("opts");
+    latest.as_object_mut().unwrap().remove("game");
+    latest["memo"] = json!("moves=invalid");
+    let mut a = plan_args(
+        d.path(),
+        &[
+            (
+                "Z",
+                vec![
+                    shelved.clone(),
+                    moved.clone(),
+                    running_held.clone(),
+                    running.clone(),
+                    done.clone(),
+                    failed.clone(),
+                    latest.clone(),
+                ],
+            ),
+            ("A", vec![shelved.clone(), destination.clone()]),
+        ],
+    );
+    let mut done_p = progress(&done, 0, 0);
+    done_p["finished"] = json!(true);
+    let mut failed_p = progress(&failed, 0, 0);
+    failed_p["failed"] = json!(true);
+    fixture_box(
+        &d.path().join("Z"),
+        vec![
+            progress(&shelved, 0, 0),
+            progress(&moved, 0, 0),
+            progress(&running_held, 1, 0),
+            progress(&running, 1, 0),
+            done_p,
+            failed_p,
+            progress(&latest, 0, 0),
+        ],
+        vec![],
+    );
+    for entry in std::fs::read_dir(d.path().join("Z/enqueue")).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let mut old = latest.clone();
+    old["priority"] = json!(100);
+    old["memo"] = json!("old memo");
+    let end = enqueue(
+        &d.path().join("Z"),
+        "z-old",
+        0,
+        &[
+            old,
+            shelved.clone(),
+            moved,
+            running_held,
+            running,
+            done,
+            failed,
+        ],
+    );
+    enqueue(&d.path().join("Z"), "a-new", end, &[latest.clone()]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.rerank_out = Some(d.path().join("rerank"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.005\t7g7f\n").display()
+    )];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(text.contains("Z\tshelved\tb\theld"));
+    assert!(!text.contains("A\tshelved"));
+    assert!(!text.contains("Z\tmoved"));
+    assert!(text.contains("A\tmoved\tb\tqueued"));
+    assert!(!text.contains("\tdone\t") && !text.contains("\tfailed\t"));
+    assert!(text.contains("\tB\t42\t40\ttrue\ttrue\ttrue\t1\t"));
+    assert!(text.contains("\tD\t42\t42\tfalse\tfalse\tfalse\t1\t"));
+    let rows: Vec<Value> = std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_Z.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    latest["hold"] = json!(true);
+    assert!(rows.contains(&latest), "{rows:?}");
+    assert!(!d.path().join("review.tsv").exists());
+}
+
+#[test]
+fn rerank_failing_walk_values_sides_start_and_boost_roots() {
+    let d = TempDir::new().unwrap();
+    let path = d.path().join("values.tsv");
+    std::fs::write(&path, "side\tstop\tweight\tmoves\tentry_value_black\nb\tout\t0.005\t7g7f 3c3d\t49\nb\tout\t0.1\t7g7f 8c8d\t50\nw\tout\t0.006\t7g7f 3c3d\t81\nw\tout\t0.1\t7g7f 8c8d\t80\nw\tout\t0.2\t7g7f 4c4d\t79\nb\town\t0.1\t7g7f\t\n").unwrap();
+    let mut a = args(d.path());
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.start_moves = Some("7g7f".into());
+    a.walk_table = vec![
+        format!("b={}", path.display()),
+        format!("w={}", path.display()),
+    ];
+    let w = load_walk(&a, &mut vec![]).unwrap();
+    let key = parse_root(&root("7g7f")).unwrap().key;
+    assert_eq!(w.failing[&("b".into(), key.clone())], 0.005);
+    assert!((w.failing[&("w".into(), key.clone())] - 0.106).abs() < 1e-12);
+    let boundary = parse_root(&root("7g7f 8c8d")).unwrap().key;
+    assert_eq!(w.failing[&("w".into(), boundary)], 0.1);
+    let reached = parse_root(&root("7g7f 4c4d")).unwrap().key;
+    assert!(!w.failing.contains_key(&("w".into(), reached)));
+    assert!(!w.failing.contains_key(&("b".into(), HIRATE_KEY.into())));
+    let old = walk(d.path(), "b\town\t0.1\t7g7f\n");
+    a.walk_table = vec![format!("b={}", old.display())];
+    assert!(load_walk(&a, &mut vec![]).unwrap().failing.is_empty());
+
+    let mut boost = row("boost", "7g7f");
+    boost["roots"] = json!([root("2g2f")]);
+    let boost_path = input_rows(d.path(), "boost", &[boost]);
+    let mut a = plan_args(d.path(), &[("A", vec![row("primary", "7g7f"), row("extra", "2g2f")])]);
+    a.plan_out = None;
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.walk_table = vec![format!("b={}", old.display())];
+    a.boost_queue = vec![boost_path];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert_eq!(text.lines().filter(|l| l.contains("\ttrue\tA\t")).count(), 2);
+}
+
+#[test]
+fn rerank_bw_scores_each_side_and_preserves_shared_row() {
+    for read in [0, 1] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("both", "7g7f");
+        r["own"] = json!("bw");
+        r["hold"] = json!(true);
+        let mut a = plan_args(d.path(), &[("A", vec![r.clone()])]);
+        let mut b = progress(&r, read, 0);
+        b["own"] = json!("b");
+        let mut w = progress(&r, 0, 0);
+        w["own"] = json!("w");
+        fixture_box(&d.path().join("A"), vec![b, w], vec![]);
+        a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        a.rerank_out = Some(d.path().join("rerank"));
+        let walk_path = walk(d.path(), "b\town\t0.005\t7g7f\n");
+        a.walk_table = vec![
+            format!("b={}", walk_path.display()),
+            format!("w={}", walk_path.display()),
+        ];
+        run_at(a, now(), &mut vec![]).unwrap();
+        let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+        assert!(text.contains("\tb\theld\t1\t0.005\t0.005\t0\t0\tfalse\tB"));
+        assert!(text.contains("\tw\theld\t1\t0\t0\t0\t0\tfalse\tD"));
+        let emitted: Value = serde_json::from_str(
+            &std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl")).unwrap(),
+        )
+        .unwrap();
+        r["priority"] = json!(40);
+        r["hold"] = json!(read > 0);
+        assert_eq!(emitted, r);
+    }
+}
+
+#[test]
+fn rerank_cli_requires_walk_and_master_but_no_review_outputs() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    let base = [
+        "tree",
+        "queue-review",
+        "--box",
+        "A=/path/to/a",
+        "--cutoff",
+        "2026-11-08T12:00:00+09:00",
+    ];
+    for option in [
+        ["--rerank-table", "rerank.tsv"],
+        ["--rerank-out", "rerank"],
+        ["--boost-queue", "seeds.jsonl"],
+        ["--rerank-keep-below", "10"],
+        ["--target-black", "50"],
+        ["--target-white", "80"],
+    ] {
+        let argv: Vec<_> = base.into_iter().chain(option).collect();
+        let error = Cli::try_parse_from(&argv).err().unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--walk-table"));
+        assert!(
+            Cli::try_parse_from(argv.iter().copied().chain(["--walk-table", "b=walk.tsv"]))
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(argv.into_iter().chain([
+                "--walk-table",
+                "b=walk.tsv",
+                "--master",
+                "moves.tsv"
+            ]))
+            .is_ok()
+        );
+    }
+    let d = TempDir::new().unwrap();
+    let mut a = args(d.path());
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    assert!(run_at(a, now(), &mut vec![]).unwrap_err().to_string().contains("walk-table"));
+}
+
+#[test]
+fn rerank_branch_effective_and_zero_only_hold() {
+    use super::super::master_table;
+    for weight in [0.02, 0.0002] {
+        let d = TempDir::new().unwrap();
+        let mut protected = row("protected", "2g2f");
+        protected["priority"] = json!(9);
+        let mut a = plan_args(
+            d.path(),
+            &[("A", vec![row("branch", "7g7f 3c3d"), row("zero", "9g9f"), protected])],
+        );
+        a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        a.rerank_out = Some(d.path().join("rerank"));
+        let keys = path_keys(&["7g7f", "3c3d"]).unwrap();
+        let rows = vec![
+            master_table::Row::from_fields(&[
+                ("key", keys[0].clone()),
+                ("move", "7g7f".into()),
+                ("role", "alt".into()),
+            ]),
+            master_table::Row::from_fields(&[
+                ("key", keys[1].clone()),
+                ("move", "3c3d".into()),
+                ("role", "record".into()),
+            ]),
+        ];
+        std::fs::write(a.master.as_ref().unwrap(), master_table::format_master(&rows)).unwrap();
+        a.walk_table = vec![format!(
+            "b={}",
+            walk(d.path(), &format!("b\town\t{weight}\t\n")).display()
+        )];
+        let mut stdout = vec![];
+        run_at(a, now(), &mut stdout).unwrap();
+        let text = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+        let values: Vec<_> = text
+            .lines()
+            .find(|l| l.starts_with("A\tbranch\t"))
+            .unwrap()
+            .split('\t')
+            .collect();
+        assert_eq!(values[5], "0");
+        assert_eq!(values[6].parse::<f64>().unwrap(), weight * 0.5);
+        assert_eq!(values[7], "2");
+        assert_eq!(values[10], if weight > 0.001 { "B" } else { "D" });
+        assert_eq!(values[14], "false");
+        assert!(text.contains("\tD\t9\t9\tfalse\tfalse"));
+        assert!(text.contains("\tD\t42\t42\tfalse\ttrue"));
+        assert!(String::from_utf8(stdout).unwrap().contains("下げる=0"));
+    }
+}
+
+#[test]
+fn rerank_completed_destination_excludes_only_matching_side() {
+    for status in ["finished", "failed"] {
+        for own in ["b", "bw"] {
+            let d = TempDir::new().unwrap();
+            let mut source = row("moved", "7g7f");
+            source["own"] = json!(own);
+            source["hold"] = json!(true);
+            let mut destination = source.clone();
+            destination["hold"] = json!(false);
+            let mut a =
+                plan_args(d.path(), &[("A", vec![source]), ("B", vec![destination.clone()])]);
+            let mut done = progress(&destination, 0, 0);
+            done["own"] = json!("b");
+            done[status] = json!(true);
+            let mut trees = vec![done];
+            if own == "bw" {
+                let mut white = progress(&destination, 0, 0);
+                white["own"] = json!("w");
+                trees.push(white);
+            }
+            fixture_box(&d.path().join("B"), trees, vec![]);
+            a.plan_out = None;
+            a.table = None;
+            a.boxes = None;
+            a.hold_out = None;
+            a.rerank_table = Some(d.path().join("rerank.tsv"));
+            a.rerank_out = Some(d.path().join("rerank"));
+            let walk_path = walk(d.path(), "b\town\t0.01\t7g7f\nw\town\t0.01\t7g7f\n");
+            a.walk_table = vec![
+                format!("b={}", walk_path.display()),
+                format!("w={}", walk_path.display()),
+            ];
+            run_at(a, now(), &mut vec![]).unwrap();
+            let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+            assert!(!table.contains("\tmoved\tb\t"), "{table}");
+            assert_eq!(table.lines().count(), if own == "bw" { 2 } else { 1 });
+            assert!(
+                std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl"))
+                    .unwrap()
+                    .is_empty()
+            );
+            let updates =
+                std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_B.jsonl")).unwrap();
+            if own == "bw" {
+                assert!(table.contains("B\tmoved\tw\t"));
+                let update: Value = serde_json::from_str(&updates).unwrap();
+                assert_eq!(update["priority"], 40);
+            } else {
+                assert!(updates.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn rerank_worker_at_any_root_preserves_hold_with_zero_read() {
+    for held in [false, true] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("running", "7g7f");
+        r["own"] = json!("bw");
+        r["roots"] = json!([root("2g2f")]);
+        r["hold"] = json!(held);
+        let mut a = plan_args(d.path(), &[("A", vec![r.clone()])]);
+        let mut black = progress(&r, 0, 0);
+        black["own"] = json!("b");
+        let mut white = black.clone();
+        white["own"] = json!("w");
+        fixture_box(
+            &d.path().join("A"),
+            vec![black, white],
+            vec![json!({"key": root("2g2f").strip_prefix("sfen ").unwrap()})],
+        );
+        a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        a.rerank_out = Some(d.path().join("rerank"));
+        let walk_path = walk(d.path(), "b\town\t0.01\t7g7f\n");
+        a.walk_table = vec![
+            format!("b={}", walk_path.display()),
+            format!("w={}", walk_path.display()),
+        ];
+        run_at(a, now(), &mut vec![]).unwrap();
+        let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+        for line in table.lines().skip(1) {
+            let cells: Vec<_> = line.split('\t').collect();
+            assert_eq!(cells[14], held.to_string());
+            assert_eq!(cells[3], if held { "held" } else { "running" });
+        }
+        let updates =
+            std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl")).unwrap();
+        let update: Value = serde_json::from_str(&updates).unwrap();
+        assert_eq!(update["hold"], held);
+        assert_eq!(update["priority"], 40);
+    }
+}
+
+#[test]
+fn rerank_cli_rejects_other_update_outputs() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    for output in ["--hold-out", "--plan-out"] {
+        let error = Cli::try_parse_from([
+            "tree",
+            "queue-review",
+            "--box",
+            "A=/path/to/a",
+            "--cutoff",
+            "2026-11-08T12:00:00+09:00",
+            "--walk-table",
+            "b=walk.tsv",
+            "--master",
+            "moves.tsv",
+            "--rerank-out",
+            "rerank",
+            output,
+            "other",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(error.to_string().contains("--rerank-out"));
+        assert!(error.to_string().contains(output));
+        let d = TempDir::new().unwrap();
+        let mut a = args(d.path());
+        a.rerank_out = Some(d.path().join("rerank"));
+        if output == "--plan-out" {
+            a.hold_out = None;
+            a.plan_out = Some(d.path().join("plan"));
+        }
+        let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+        assert!(error.contains("併用できません"), "{error}");
+    }
+}
+
+#[test]
+fn rerank_requires_walk_table_for_each_target_side() {
+    for missing in ["b", "w"] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("both", "7g7f");
+        r["own"] = json!("bw");
+        let mut a = plan_args(d.path(), &[("A", vec![r])]);
+        a.plan_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        let side = if missing == "b" { "w" } else { "b" };
+        let path = walk(d.path(), "");
+        a.walk_table = vec![format!("{side}={}", path.display())];
+        let error = run_at(a, now(), &mut vec![]).unwrap_err();
+        assert!(error.to_string().contains(&format!("--walk-table {missing}=")), "{error:#}");
+        assert!(!d.path().join("rerank.tsv").exists());
+    }
 }

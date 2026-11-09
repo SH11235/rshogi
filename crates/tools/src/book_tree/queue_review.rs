@@ -44,12 +44,12 @@ pub(super) struct QueueReviewArgs {
     start_moves: Option<String>,
     #[arg(long, default_value_t = 0.001)]
     value_floor: f64,
-    #[arg(long)]
-    table: PathBuf,
-    #[arg(long)]
-    boxes: PathBuf,
-    #[arg(long)]
-    hold_out: PathBuf,
+    #[arg(long, requires_all = ["boxes", "hold_out"])]
+    table: Option<PathBuf>,
+    #[arg(long, requires_all = ["table", "hold_out"])]
+    boxes: Option<PathBuf>,
+    #[arg(long, requires_all = ["table", "boxes"])]
+    hold_out: Option<PathBuf>,
     #[arg(long, default_value = "qrhold")]
     prefix: String,
     /// reach-low に加えて hold 行にする分類 (繰り返し可)
@@ -58,6 +58,24 @@ pub(super) struct QueueReviewArgs {
     /// 台ごとの積み荷と <prefix>_plan.tsv の出力先
     #[arg(long)]
     plan_out: Option<PathBuf>,
+    /// 再採点に使う定跡の元データ (moves.tsv)
+    #[arg(long)]
+    master: Option<PathBuf>,
+    /// 未完了の木の再採点表
+    #[arg(long, requires_all = ["walk_table", "master"])]
+    rerank_table: Option<PathBuf>,
+    /// 台ごとの priority・hold 更新行の出力先 (hold-out・plan-out と併用不可)
+    #[arg(long, requires_all = ["walk_table", "master"], conflicts_with_all = ["hold_out", "plan_out"])]
+    rerank_out: Option<PathBuf>,
+    #[arg(long, default_value_t = 10, requires_all = ["walk_table", "master"])]
+    rerank_keep_below: u32,
+    /// 重要度が上がった根の JSON Lines (繰り返し可)
+    #[arg(long, requires_all = ["walk_table", "master"])]
+    boost_queue: Vec<PathBuf>,
+    #[arg(long, default_value_t = 50, requires_all = ["walk_table", "master"])]
+    target_black: i32,
+    #[arg(long, default_value_t = 80, requires_all = ["walk_table", "master"])]
+    target_white: i32,
     /// 計画後の残り/読める量の上限
     #[arg(long, default_value_t = 0.95, requires = "plan_out")]
     max_ratio: f64,
@@ -146,6 +164,7 @@ struct BoxData {
 struct Walk {
     reach: BTreeMap<(String, String), f64>,
     out: BTreeMap<(String, String), f64>,
+    failing: BTreeMap<(String, String), f64>,
     stops: BTreeSet<(String, String)>,
     passed: BTreeSet<(String, String)>,
 }
@@ -304,6 +323,7 @@ fn load_walk(args: &QueueReviewArgs, inputs: &mut Vec<PathBuf>) -> Result<Walk> 
                 .with_context(|| format!("walk の列がありません: {name}"))
         };
         let (moves, weight, stop) = (column("moves")?, column("weight")?, column("stop")?);
+        let value_column = columns.iter().position(|c| *c == "entry_value_black");
         let side_column = columns.iter().position(|c| *c == "side");
         for (n, text) in lines.enumerate() {
             let text = text?;
@@ -339,13 +359,38 @@ fn load_walk(args: &QueueReviewArgs, inputs: &mut Vec<PathBuf>) -> Result<Walk> 
                     .entry((side.into(), keys.last().context("空の手順です")?.clone()))
                     .or_default() += weight;
             }
+            let failing = if args.reranking() {
+                value_column
+                    .filter(|&i| !cells[i].is_empty())
+                    .map(|i| -> Result<bool> {
+                        let value: i32 = cells[i].parse().with_context(|| {
+                            format!("{}:{}: entry_value_black が不正です", path.display(), n + 2)
+                        })?;
+                        Ok(if side == "b" {
+                            value < args.target_black
+                        } else {
+                            value >= args.target_white
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             for key in keys.into_iter().skip(start.len()).collect::<BTreeSet<_>>() {
+                if failing {
+                    *walk.failing.entry((side.into(), key.clone())).or_default() += weight;
+                }
                 *walk.reach.entry((side.into(), key)).or_default() += weight;
             }
         }
     }
     ensure!(
-        walk.reach.values().chain(walk.out.values()).all(|v| v.is_finite()),
+        walk.reach
+            .values()
+            .chain(walk.out.values())
+            .chain(walk.failing.values())
+            .all(|v| v.is_finite()),
         "到達の重みが大きすぎます"
     );
     Ok(walk)
@@ -439,6 +484,24 @@ pub(super) fn run(args: QueueReviewArgs) -> Result<()> {
     run_at(args, Utc::now(), &mut std::io::stdout().lock())
 }
 fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) -> Result<()> {
+    ensure!(
+        args.rerank_out.is_none() || (args.hold_out.is_none() && args.plan_out.is_none()),
+        "--rerank-out は --hold-out・--plan-out と併用できません。同じ受付行の priority・hold を上書きするため、別々に実行して更新後の受付を使ってください"
+    );
+    let review = args.table.is_some() || args.boxes.is_some() || args.hold_out.is_some();
+    ensure!(
+        review || args.reranking() || args.plan_out.is_some(),
+        "点検・計画・再採点の出力先が必要です"
+    );
+    ensure!(
+        !review || (args.table.is_some() && args.boxes.is_some() && args.hold_out.is_some()),
+        "点検には table・boxes・hold-out が必要です"
+    );
+    ensure!(
+        !args.reranking() || !args.walk_table.is_empty(),
+        "再採点には walk-table が必要です"
+    );
+    ensure!(!args.reranking() || args.master.is_some(), "再採点には master が必要です");
     nonnegative(args.default_rate)?;
     nonnegative(args.value_floor)?;
     ensure!(args.tree_size > 0, "tree-size は正数が必要です");
@@ -479,15 +542,22 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
             }
         }
     }
-    let mut outputs = vec![args.table.clone(), args.boxes.clone()];
-    outputs.extend(
-        boxes
-            .iter()
-            .map(|b| args.hold_out.join(format!("{}_{}.jsonl", args.prefix, b.name))),
-    );
+    let rerank = args
+        .reranking()
+        .then(|| rerank::build(&args, &boxes, &walk, &mut inputs))
+        .transpose()?;
+    let mut outputs = Vec::new();
+    if let (Some(table), Some(summary), Some(hold)) = (&args.table, &args.boxes, &args.hold_out) {
+        outputs.extend([table.clone(), summary.clone()]);
+        outputs
+            .extend(boxes.iter().map(|b| hold.join(format!("{}_{}.jsonl", args.prefix, b.name))));
+    }
     let review_outputs = outputs.len();
     if let Some(plan) = &plan {
         outputs.extend(plan.outputs.iter().cloned());
+    }
+    if let Some(rerank) = &rerank {
+        outputs.extend(rerank.outputs.iter().cloned());
     }
     let resolved: Vec<_> = outputs
         .iter()
@@ -504,126 +574,134 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         }
     }
     files::write_generated(&outputs, &inputs, true, |temporary| {
-        let (temporary, planned) = temporary.split_at_mut(review_outputs);
+        let (temporary, rest) = temporary.split_at_mut(review_outputs);
+        let (planned, reranked) = rest.split_at_mut(plan.as_ref().map_or(0, |p| p.outputs.len()));
+        if let Some(rerank) = &rerank {
+            for (file, bytes) in reranked.iter_mut().zip(&rerank.payloads) {
+                file.write_all(bytes)?;
+            }
+            writeln!(stdout, "{}", rerank.summary)?;
+        }
         if let Some(plan) = &plan {
             for (file, bytes) in planned.iter_mut().zip(&plan.payloads) {
                 file.write_all(bytes)?;
             }
         }
-        let (table, rest) = temporary.split_at_mut(1);
-        let (summary, holds) = rest.split_at_mut(1);
-        let mut table = BufWriter::new(table[0].as_file_mut());
-        let mut summary = BufWriter::new(summary[0].as_file_mut());
-        writeln!(table, "box\tid\town\tpriority\troot\tclass\treach_weight\tdup_of")?;
-        writeln!(summary, "box\tworkers\trate\thours\tcapacity\tremaining\tratio\tunstarted")?;
-        for ((b, hold), metric) in boxes.iter().zip(holds).zip(&metrics) {
-            let mut hold = BufWriter::new(hold.as_file_mut());
-            let mut paths = BTreeMap::new();
-            let BoxMetrics {
-                speed,
-                hours,
-                capacity,
-                ..
-            } = *metric;
-            let mut remaining = 0u64;
-            let mut unstarted = 0;
-            let mut counts = BTreeMap::<Class, usize>::new();
-            let mut hold_sides = BTreeMap::<String, usize>::new();
-            for tree in b.progress.trees.iter().filter(|t| !t.finished && !t.hold) {
-                remaining = remaining
-                    .checked_add(tree.remaining(args.tree_size))
-                    .context("残りの量が大きすぎます")?;
-                let queued = &b.queue[&tree.id];
-                let running =
-                    b.progress.workers.iter().any(|w| {
+        if review {
+            let (table, rest) = temporary.split_at_mut(1);
+            let (summary, holds) = rest.split_at_mut(1);
+            let mut table = BufWriter::new(table[0].as_file_mut());
+            let mut summary = BufWriter::new(summary[0].as_file_mut());
+            writeln!(table, "box\tid\town\tpriority\troot\tclass\treach_weight\tdup_of")?;
+            writeln!(summary, "box\tworkers\trate\thours\tcapacity\tremaining\tratio\tunstarted")?;
+            for ((b, hold), metric) in boxes.iter().zip(holds).zip(&metrics) {
+                let mut hold = BufWriter::new(hold.as_file_mut());
+                let mut paths = BTreeMap::new();
+                let BoxMetrics {
+                    speed,
+                    hours,
+                    capacity,
+                    ..
+                } = *metric;
+                let mut remaining = 0u64;
+                let mut unstarted = 0;
+                let mut counts = BTreeMap::<Class, usize>::new();
+                let mut hold_sides = BTreeMap::<String, usize>::new();
+                for tree in b.progress.trees.iter().filter(|t| !t.finished && !t.hold) {
+                    remaining = remaining
+                        .checked_add(tree.remaining(args.tree_size))
+                        .context("残りの量が大きすぎます")?;
+                    let queued = &b.queue[&tree.id];
+                    let running = b.progress.workers.iter().any(|w| {
                         w.key.as_ref().is_some_and(|k| queued.roots.contains(strip_ply(k)))
                     });
-                if tree.read != 0 || running {
-                    continue;
+                    if tree.read != 0 || running {
+                        continue;
+                    }
+                    unstarted += 1;
+                    let path = paths.entry(&tree.id).or_insert_with(|| memo_path(queued, &start));
+                    let mut hold_tree = true;
+                    let mut tree_classes = BTreeSet::new();
+                    for root in &queued.roots {
+                        let (class, weight) =
+                            classify(queued, root, &tree.own, &walk, args.value_floor, path);
+                        tree_classes.insert(class);
+                        hold_tree &= class == Class::ReachLow || args.hold_class.contains(&class);
+                        let dup = duplicates[&(root.clone(), tree.own.clone())]
+                            .iter()
+                            .filter(|(name, id)| *name != b.name || *id != tree.id)
+                            .take(8)
+                            .map(|(name, id)| format!("{name}:{id}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let total = duplicates[&(root.clone(), tree.own.clone())].len() - 1;
+                        let dup = if total == 0 {
+                            dup
+                        } else {
+                            format!("{dup};total={total}")
+                        };
+                        writeln!(
+                            table,
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            b.name,
+                            tree.id,
+                            tree.own,
+                            tree.priority,
+                            root,
+                            class.name(),
+                            weight.map(|w| w.to_string()).unwrap_or_default(),
+                            dup
+                        )?;
+                    }
+                    for class in tree_classes {
+                        *counts.entry(class).or_default() += 1;
+                    }
+                    if hold_tree {
+                        *hold_sides.entry(tree.id.clone()).or_default() += 1;
+                    }
                 }
-                unstarted += 1;
-                let path = paths.entry(&tree.id).or_insert_with(|| memo_path(queued, &start));
-                let mut hold_tree = true;
-                let mut tree_classes = BTreeSet::new();
-                for root in &queued.roots {
-                    let (class, weight) =
-                        classify(queued, root, &tree.own, &walk, args.value_floor, path);
-                    tree_classes.insert(class);
-                    hold_tree &= class == Class::ReachLow || args.hold_class.contains(&class);
-                    let dup = duplicates[&(root.clone(), tree.own.clone())]
-                        .iter()
-                        .filter(|(name, id)| *name != b.name || *id != tree.id)
-                        .take(8)
-                        .map(|(name, id)| format!("{name}:{id}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let total = duplicates[&(root.clone(), tree.own.clone())].len() - 1;
-                    let dup = if total == 0 {
-                        dup
-                    } else {
-                        format!("{dup};total={total}")
-                    };
-                    writeln!(
-                        table,
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        b.name,
-                        tree.id,
-                        tree.own,
-                        tree.priority,
-                        root,
-                        class.name(),
-                        weight.map(|w| w.to_string()).unwrap_or_default(),
-                        dup
-                    )?;
+                for (id, count) in hold_sides {
+                    let queued = &b.queue[&id];
+                    // bw の片側だけを hold にすると、同じ受付行でもう片側まで止まる。
+                    if count == queued.line.sides().len() {
+                        let mut raw = queued.raw.clone();
+                        raw["hold"] = Value::Bool(true);
+                        serde_json::to_writer(&mut hold, &raw)?;
+                        writeln!(hold)?;
+                    }
                 }
-                for class in tree_classes {
-                    *counts.entry(class).or_default() += 1;
+                let ratio = if capacity > 0.0 {
+                    remaining as f64 / capacity
+                } else if remaining == 0 {
+                    0.0
+                } else {
+                    f64::INFINITY
+                };
+                writeln!(
+                    summary,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    b.name,
+                    b.progress.workers.len(),
+                    speed,
+                    hours,
+                    capacity,
+                    remaining,
+                    ratio,
+                    unstarted
+                )?;
+                writeln!(
+                    stdout,
+                    "{}: 残り/読める量={ratio:.3} ({remaining}/{capacity:.3})、未着手={unstarted}",
+                    b.name
+                )?;
+                for (class, count) in counts {
+                    writeln!(stdout, "  {}: {count}", class.name())?;
                 }
-                if hold_tree {
-                    *hold_sides.entry(tree.id.clone()).or_default() += 1;
-                }
+                hold.flush()?;
             }
-            for (id, count) in hold_sides {
-                let queued = &b.queue[&id];
-                // bw の片側だけを hold にすると、同じ受付行でもう片側まで止まる。
-                if count == queued.line.sides().len() {
-                    let mut raw = queued.raw.clone();
-                    raw["hold"] = Value::Bool(true);
-                    serde_json::to_writer(&mut hold, &raw)?;
-                    writeln!(hold)?;
-                }
-            }
-            let ratio = if capacity > 0.0 {
-                remaining as f64 / capacity
-            } else if remaining == 0 {
-                0.0
-            } else {
-                f64::INFINITY
-            };
-            writeln!(
-                summary,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                b.name,
-                b.progress.workers.len(),
-                speed,
-                hours,
-                capacity,
-                remaining,
-                ratio,
-                unstarted
-            )?;
-            writeln!(
-                stdout,
-                "{}: 残り/読める量={ratio:.3} ({remaining}/{capacity:.3})、未着手={unstarted}",
-                b.name
-            )?;
-            for (class, count) in counts {
-                writeln!(stdout, "  {}: {count}", class.name())?;
-            }
-            hold.flush()?;
+            table.flush()?;
+            summary.flush()?;
         }
-        table.flush()?;
-        summary.flush()?;
         if let Some(plan) = &plan {
             for (i, b) in boxes.iter().enumerate() {
                 writeln!(
@@ -689,3 +767,10 @@ fn box_metrics(
 }
 
 mod plan;
+
+impl QueueReviewArgs {
+    fn reranking(&self) -> bool {
+        self.rerank_table.is_some() || self.rerank_out.is_some()
+    }
+}
+mod rerank;
