@@ -64,8 +64,8 @@ pub(super) struct QueueReviewArgs {
     /// 未完了の木の再採点表
     #[arg(long, requires_all = ["walk_table", "master"])]
     rerank_table: Option<PathBuf>,
-    /// 台ごとの priority・hold 更新行の出力先
-    #[arg(long, requires_all = ["walk_table", "master"])]
+    /// 台ごとの priority・hold 更新行の出力先 (hold-out・plan-out と併用不可)
+    #[arg(long, requires_all = ["walk_table", "master"], conflicts_with_all = ["hold_out", "plan_out"])]
     rerank_out: Option<PathBuf>,
     #[arg(long, default_value_t = 10, requires_all = ["walk_table", "master"])]
     rerank_keep_below: u32,
@@ -369,7 +369,7 @@ fn load_walk(args: &QueueReviewArgs, inputs: &mut Vec<PathBuf>) -> Result<Walk> 
                         Ok(if side == "b" {
                             value < args.target_black
                         } else {
-                            value > args.target_white
+                            value >= args.target_white
                         })
                     })
                     .transpose()?
@@ -484,6 +484,10 @@ pub(super) fn run(args: QueueReviewArgs) -> Result<()> {
     run_at(args, Utc::now(), &mut std::io::stdout().lock())
 }
 fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) -> Result<()> {
+    ensure!(
+        args.rerank_out.is_none() || (args.hold_out.is_none() && args.plan_out.is_none()),
+        "--rerank-out は --hold-out・--plan-out と併用できません。同じ受付行の priority・hold を上書きするため、別々に実行して更新後の受付を使ってください"
+    );
     let review = args.table.is_some() || args.boxes.is_some() || args.hold_out.is_some();
     ensure!(
         review || args.reranking() || args.plan_out.is_some(),

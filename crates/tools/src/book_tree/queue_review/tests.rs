@@ -1272,6 +1272,9 @@ fn rerank_classes_and_priority_protection() {
         )],
     );
     a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
     a.rerank_table = Some(d.path().join("rerank.tsv"));
     a.rerank_out = Some(d.path().join("rerank"));
     a.walk_table = vec![format!(
@@ -1398,7 +1401,7 @@ fn rerank_shelved_moved_running_and_latest_raw_rows() {
 fn rerank_failing_walk_values_sides_start_and_boost_roots() {
     let d = TempDir::new().unwrap();
     let path = d.path().join("values.tsv");
-    std::fs::write(&path, "side\tstop\tweight\tmoves\tentry_value_black\nb\tout\t0.005\t7g7f 3c3d\t49\nb\tout\t0.1\t7g7f 8c8d\t50\nw\tout\t0.006\t7g7f 3c3d\t81\nw\tout\t0.1\t7g7f 8c8d\t80\nb\town\t0.1\t7g7f\t\n").unwrap();
+    std::fs::write(&path, "side\tstop\tweight\tmoves\tentry_value_black\nb\tout\t0.005\t7g7f 3c3d\t49\nb\tout\t0.1\t7g7f 8c8d\t50\nw\tout\t0.006\t7g7f 3c3d\t81\nw\tout\t0.1\t7g7f 8c8d\t80\nw\tout\t0.2\t7g7f 4c4d\t79\nb\town\t0.1\t7g7f\t\n").unwrap();
     let mut a = args(d.path());
     a.rerank_table = Some(d.path().join("rerank.tsv"));
     a.start_moves = Some("7g7f".into());
@@ -1409,7 +1412,11 @@ fn rerank_failing_walk_values_sides_start_and_boost_roots() {
     let w = load_walk(&a, &mut vec![]).unwrap();
     let key = parse_root(&root("7g7f")).unwrap().key;
     assert_eq!(w.failing[&("b".into(), key.clone())], 0.005);
-    assert_eq!(w.failing[&("w".into(), key.clone())], 0.006);
+    assert!((w.failing[&("w".into(), key.clone())] - 0.106).abs() < 1e-12);
+    let boundary = parse_root(&root("7g7f 8c8d")).unwrap().key;
+    assert_eq!(w.failing[&("w".into(), boundary)], 0.1);
+    let reached = parse_root(&root("7g7f 4c4d")).unwrap().key;
+    assert!(!w.failing.contains_key(&("w".into(), reached)));
     assert!(!w.failing.contains_key(&("b".into(), HIRATE_KEY.into())));
     let old = walk(d.path(), "b\town\t0.1\t7g7f\n");
     a.walk_table = vec![format!("b={}", old.display())];
@@ -1442,6 +1449,9 @@ fn rerank_bw_scores_each_side_and_preserves_shared_row() {
         w["own"] = json!("w");
         fixture_box(&d.path().join("A"), vec![b, w], vec![]);
         a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
         a.rerank_table = Some(d.path().join("rerank.tsv"));
         a.rerank_out = Some(d.path().join("rerank"));
         a.walk_table = vec![format!(
@@ -1522,6 +1532,9 @@ fn rerank_branch_effective_and_zero_only_hold() {
             &[("A", vec![row("branch", "7g7f 3c3d"), row("zero", "9g9f"), protected])],
         );
         a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
         a.rerank_table = Some(d.path().join("rerank.tsv"));
         a.rerank_out = Some(d.path().join("rerank"));
         let keys = path_keys(&["7g7f", "3c3d"]).unwrap();
@@ -1559,5 +1572,145 @@ fn rerank_branch_effective_and_zero_only_hold() {
         assert!(text.contains("\tD\t9\t9\tfalse\tfalse"));
         assert!(text.contains("\tD\t42\t42\tfalse\ttrue"));
         assert!(String::from_utf8(stdout).unwrap().contains("下げる=0"));
+    }
+}
+
+#[test]
+fn rerank_completed_destination_excludes_only_matching_side() {
+    for status in ["finished", "failed"] {
+        for own in ["b", "bw"] {
+            let d = TempDir::new().unwrap();
+            let mut source = row("moved", "7g7f");
+            source["own"] = json!(own);
+            source["hold"] = json!(true);
+            let mut destination = source.clone();
+            destination["hold"] = json!(false);
+            let mut a =
+                plan_args(d.path(), &[("A", vec![source]), ("B", vec![destination.clone()])]);
+            let mut done = progress(&destination, 0, 0);
+            done["own"] = json!("b");
+            done[status] = json!(true);
+            let mut trees = vec![done];
+            if own == "bw" {
+                let mut white = progress(&destination, 0, 0);
+                white["own"] = json!("w");
+                trees.push(white);
+            }
+            fixture_box(&d.path().join("B"), trees, vec![]);
+            a.plan_out = None;
+            a.table = None;
+            a.boxes = None;
+            a.hold_out = None;
+            a.rerank_table = Some(d.path().join("rerank.tsv"));
+            a.rerank_out = Some(d.path().join("rerank"));
+            let walk_path = walk(d.path(), "b\town\t0.01\t7g7f\nw\town\t0.01\t7g7f\n");
+            a.walk_table = vec![
+                format!("b={}", walk_path.display()),
+                format!("w={}", walk_path.display()),
+            ];
+            run_at(a, now(), &mut vec![]).unwrap();
+            let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+            assert!(!table.contains("\tmoved\tb\t"), "{table}");
+            assert_eq!(table.lines().count(), if own == "bw" { 2 } else { 1 });
+            assert!(
+                std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl"))
+                    .unwrap()
+                    .is_empty()
+            );
+            let updates =
+                std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_B.jsonl")).unwrap();
+            if own == "bw" {
+                assert!(table.contains("B\tmoved\tw\t"));
+                let update: Value = serde_json::from_str(&updates).unwrap();
+                assert_eq!(update["priority"], 40);
+            } else {
+                assert!(updates.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn rerank_worker_at_any_root_preserves_hold_with_zero_read() {
+    for held in [false, true] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("running", "7g7f");
+        r["own"] = json!("bw");
+        r["roots"] = json!([root("2g2f")]);
+        r["hold"] = json!(held);
+        let mut a = plan_args(d.path(), &[("A", vec![r.clone()])]);
+        let mut black = progress(&r, 0, 0);
+        black["own"] = json!("b");
+        let mut white = black.clone();
+        white["own"] = json!("w");
+        fixture_box(
+            &d.path().join("A"),
+            vec![black, white],
+            vec![json!({"key": root("2g2f").strip_prefix("sfen ").unwrap()})],
+        );
+        a.plan_out = None;
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
+        a.rerank_table = Some(d.path().join("rerank.tsv"));
+        a.rerank_out = Some(d.path().join("rerank"));
+        a.walk_table = vec![format!(
+            "b={}",
+            walk(d.path(), "b\town\t0.01\t7g7f\n").display()
+        )];
+        run_at(a, now(), &mut vec![]).unwrap();
+        let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+        for line in table.lines().skip(1) {
+            let cells: Vec<_> = line.split('\t').collect();
+            assert_eq!(cells[14], held.to_string());
+            assert_eq!(cells[3], if held { "held" } else { "running" });
+        }
+        let updates =
+            std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl")).unwrap();
+        let update: Value = serde_json::from_str(&updates).unwrap();
+        assert_eq!(update["hold"], held);
+        assert_eq!(update["priority"], 40);
+    }
+}
+
+#[test]
+fn rerank_cli_rejects_other_update_outputs() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    for output in ["--hold-out", "--plan-out"] {
+        let error = Cli::try_parse_from([
+            "tree",
+            "queue-review",
+            "--box",
+            "A=/path/to/a",
+            "--cutoff",
+            "2026-11-08T12:00:00+09:00",
+            "--walk-table",
+            "b=walk.tsv",
+            "--master",
+            "moves.tsv",
+            "--rerank-out",
+            "rerank",
+            output,
+            "other",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(error.to_string().contains("--rerank-out"));
+        assert!(error.to_string().contains(output));
+        let d = TempDir::new().unwrap();
+        let mut a = args(d.path());
+        a.rerank_out = Some(d.path().join("rerank"));
+        if output == "--plan-out" {
+            a.hold_out = None;
+            a.plan_out = Some(d.path().join("plan"));
+        }
+        let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+        assert!(error.contains("併用できません"), "{error}");
     }
 }

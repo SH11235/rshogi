@@ -23,6 +23,7 @@ struct Row<'a> {
     priority: u32,
     hold: bool,
     shelved: bool,
+    running: bool,
 }
 
 struct ReverseEdge {
@@ -126,11 +127,12 @@ pub(super) fn build(
     let mut started = BTreeSet::new();
     for (i, b) in boxes.iter().enumerate() {
         for tree in &b.progress.trees {
-            if tree.read > 0 {
+            if tree.read > 0
+                || b.progress.workers.iter().any(|w| {
+                    w.key.as_ref().is_some_and(|k| b.queue[&tree.id].roots.contains(strip_ply(k)))
+                })
+            {
                 started.insert((i, tree.id.as_str()));
-            }
-            if tree.finished || tree.failed {
-                continue;
             }
             locations.entry((&tree.id, &tree.own)).or_default().push((i, tree));
         }
@@ -138,6 +140,9 @@ pub(super) fn build(
     let mut rows = Vec::new();
     for locations in locations.into_values() {
         let shelved = locations.iter().all(|(_, tree)| tree.hold);
+        if locations.iter().any(|(_, tree)| tree.finished || tree.failed) {
+            continue;
+        }
         for &(i, tree) in &locations {
             if tree.hold && (!shelved || i != locations[0].0) {
                 continue;
@@ -164,7 +169,12 @@ pub(super) fn build(
                     tree.priority.min((base + (root.ply / 5).min(19)).min(MAX_PRIORITY))
                 })
             };
-            let hold = if tree.read > 0 {
+            let running =
+                tree.read > 0
+                    || boxes[i].progress.workers.iter().any(|w| {
+                        w.key.as_ref().is_some_and(|k| queued.roots.contains(strip_ply(k)))
+                    });
+            let hold = if running {
                 tree.hold
             } else if shelved && class != 'D' {
                 false
@@ -191,6 +201,7 @@ pub(super) fn build(
                 priority,
                 hold,
                 shelved,
+                running,
             });
         }
     }
@@ -220,7 +231,7 @@ pub(super) fn build(
         held += usize::from(!tree.hold && row.hold);
         let state = if tree.hold {
             "held"
-        } else if tree.read > 0 {
+        } else if row.running {
             "running"
         } else {
             "queued"
@@ -323,6 +334,8 @@ mod tests {
         for (roles, own, expected) in [
             (["alt", "record"], "b", 0.02),
             (["main", "record"], "b", 0.04),
+            (["main", "bench"], "b", 0.04),
+            (["bench", "main"], "w", 0.04),
             (["record", "main"], "b", 0.0),
             (["bench", "main"], "b", 0.0),
             (["record", "alt"], "w", 0.02),
@@ -338,6 +351,22 @@ mod tests {
             walk.reach.insert((own.into(), keys[2].clone()), 0.01);
             assert_eq!(g.branch(&keys[2], own, &walk), (0.01, 0));
         }
+    }
+
+    #[test]
+    fn branch_longer_path_with_fewer_alts_wins() {
+        let (mut g, keys) = graph(&["7g7f", "3c3d", "2g2f", "8c8d"], &["main"; 4]);
+        g.0.entry(keys[4].clone()).or_default().insert(
+            0,
+            ReverseEdge {
+                parent: keys[0].clone(),
+                main: false,
+                played: true,
+            },
+        );
+        let mut walk = Walk::default();
+        walk.reach.insert(("b".into(), keys[0].clone()), 0.04);
+        assert_eq!(g.branch(&keys[4], "b", &walk), (0.04, 4));
     }
 
     #[test]
