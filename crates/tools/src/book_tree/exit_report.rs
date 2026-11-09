@@ -218,6 +218,14 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
     // 伝播の切れ目の重みは、その局面を通る walk の行の重みの和 (同じ行で同じ局面は 1 回)。
+    // 手順は bridge の表の局面の分だけ持つ (walk の全局面の手順は持たない)。
+    let mut bridge_keys = BTreeSet::new();
+    if let Some(bridge) = &args.bridge {
+        read_tsv(bridge, |row| {
+            bridge_keys.insert(column(row, "key")?.to_owned());
+            Ok(())
+        })?;
+    }
     let mut through: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
     let mut walk_rows = Vec::new();
     read_tsv(&args.walk, |row| {
@@ -232,7 +240,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let mut seen = BTreeSet::new();
         // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
-            if seen.insert(key) {
+            if bridge_keys.contains(key) && seen.insert(key) {
                 let entry =
                     through.entry(key.clone()).or_insert_with(|| (0.0, moves[..i].to_vec()));
                 entry.0 += weight;
