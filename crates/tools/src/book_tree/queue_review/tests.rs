@@ -2095,7 +2095,7 @@ fn plan_actions(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn plan_places_urgent_add_by_its_band_and_holds_pushed_out_filler() {
+fn plan_places_urgent_add_by_its_band_and_reports_pushed_out_filler() {
     let d = TempDir::new().unwrap();
     let filler = |id: &str, moves: &str| {
         let mut r = row(id, moves);
