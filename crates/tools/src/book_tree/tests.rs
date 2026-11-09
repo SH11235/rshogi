@@ -433,6 +433,35 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
 }
 
 #[test]
+fn transpositions_into_a_cycle_match_the_reference_and_finish_past_the_exact_budget() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.draw = 17;
+    let mut tree = Tree::load(def, &s).unwrap();
+    // 根から 2 通りの手順で同じ局面 (玉 3i・相手玉 4a) に合流し、そこから 4 手の循環に入る。
+    let put = |tree: &mut Tree, key: &str, moves: &[&str]| {
+        let lines: Vec<_> = moves.iter().map(|m| (*m, 0)).collect();
+        tree.nodes.insert(key.to_owned(), reading(key, &lines, &s));
+        tree.edge
+            .insert(key.to_owned(), moves.iter().map(|m| (*m).to_owned()).collect());
+        moves.iter().map(|m| child(key, m).unwrap()).collect::<Vec<_>>()
+    };
+    let [a1, a2]: [String; 2] = put(&mut tree, ROOT, &["5i4i", "5i4h"]).try_into().unwrap();
+    let [b1]: [String; 1] = put(&mut tree, &a1, &["5a4a"]).try_into().unwrap();
+    let [b2]: [String; 1] = put(&mut tree, &a2, &["5a4a"]).try_into().unwrap();
+    let [c]: [String; 1] = put(&mut tree, &b1, &["4i3i"]).try_into().unwrap();
+    assert_eq!(put(&mut tree, &b2, &["4h3i"]), std::slice::from_ref(&c));
+    let [d]: [String; 1] = put(&mut tree, &c, &["4a5a"]).try_into().unwrap();
+    let [e]: [String; 1] = put(&mut tree, &d, &["3i4i"]).try_into().unwrap();
+    assert_eq!(put(&mut tree, &e, &["5a4a"]), std::slice::from_ref(&b1));
+    let nodes: BTreeSet<String> = tree.nodes.keys().cloned().collect();
+    assert_eq!(tree.negamax(&nodes).unwrap(), reference_values(&tree));
+    let approximate = tree.negamax_within(&nodes, 0).unwrap();
+    assert_eq!(approximate.keys().collect::<Vec<_>>(), nodes.iter().collect::<Vec<_>>());
+}
+
+#[test]
 fn cycle_values_use_the_draw_of_the_side_that_closes_the_cycle() {
     let s = settings();
     // 4 手の循環は相手が閉じるので、各局面の値は閉じた側の値の符号を返したもの。

@@ -5,6 +5,9 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+/// `Tree::negamax` が循環の中の局面を手順ごとに厳密に数える呼び出しの上限 (超えると近似に切り替える)。
+const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
+
 type Edges = BTreeMap<String, BTreeSet<String>>;
 pub(super) type Values = BTreeMap<String, BTreeMap<String, i32>>;
 pub(super) type Pending = BTreeMap<String, Vec<(i32, String)>>;
@@ -482,6 +485,15 @@ impl Tree {
     }
 
     pub fn negamax(&self, nodes: &BTreeSet<String>) -> Result<Values> {
+        self.negamax_within(nodes, NEGAMAX_EXACT_CALLS)
+    }
+
+    /// `negamax` の本体。`exact_calls` は循環の中を手順ごとに数える呼び出しの上限。
+    pub(super) fn negamax_within(
+        &self,
+        nodes: &BTreeSet<String>,
+        exact_calls: usize,
+    ) -> Result<Values> {
         let mut children: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for key in nodes {
             let moves: BTreeSet<_> = self.nodes[key]
@@ -497,19 +509,32 @@ impl Tree {
                 }
             }
         }
+        let cyclic = cyclic_nodes(&children);
+        // 循環 (強連結成分) に入らない局面からは手順の上の祖先に戻れない (戻れれば同じ成分になる)。
+        // その値は手順に依らないので一度だけ計算する。合流の多い木で手順ごとに数え直すと指数的に遅くなる。
+        // 循環の中の局面は手順ごとに数え直すが、大きな循環が重なる木ではそれも爆発するので、呼び出しが
+        // `exact_calls` を超えたら循環の中の局面も最初に求めた値を使い回す (別の手順から来たときの
+        // 千日手の判定を引き継がない近似)。
         fn val(
             tree: &Tree,
             key: &str,
             children: &BTreeMap<String, Vec<(String, String)>>,
+            cyclic: &BTreeSet<String>,
+            memo: &mut BTreeMap<String, i32>,
+            calls: &mut usize,
+            exact_calls: usize,
             path: &mut BTreeSet<String>,
         ) -> (i32, BTreeMap<String, i32>) {
+            *calls += 1;
             let mut rows = tree.raw_rows(key);
             path.insert(key.to_owned());
             for (mv, c) in children.get(key).into_iter().flatten() {
                 let value = if path.contains(c) {
                     tree.def.draw_for(key)
+                } else if let Some(&v) = memo.get(c) {
+                    -v
                 } else {
-                    -val(tree, c, children, path).0
+                    -val(tree, c, children, cyclic, memo, calls, exact_calls, path).0
                 };
                 rows.insert(mv.clone(), value);
             }
@@ -520,11 +545,31 @@ impl Tree {
             let win = (rows.is_empty() && reading.bestmove == "win")
                 .then(|| reading.multipv.first().map(|p| p.cp))
                 .flatten();
-            (rows.values().copied().max().or(win).unwrap_or(0), rows)
+            let value = rows.values().copied().max().or(win).unwrap_or(0);
+            if !cyclic.contains(key) || *calls > exact_calls {
+                memo.insert(key.to_owned(), value);
+            }
+            (value, rows)
         }
+        let mut memo = BTreeMap::new();
+        let mut calls = 0;
         Ok(nodes
             .iter()
-            .map(|key| (key.clone(), val(self, key, &children, &mut BTreeSet::new()).1))
+            .map(|key| {
+                let mut path = BTreeSet::new();
+                let rows = val(
+                    self,
+                    key,
+                    &children,
+                    &cyclic,
+                    &mut memo,
+                    &mut calls,
+                    exact_calls,
+                    &mut path,
+                )
+                .1;
+                (key.clone(), rows)
+            })
             .collect())
     }
 
@@ -977,6 +1022,77 @@ fn push_unique(moves: &mut Vec<String>, mv: &str) {
     }
 }
 
+/// 強連結成分の大きさが 2 以上か自己ループを持つ局面 (循環に入る局面) を返す。
+fn cyclic_nodes(children: &BTreeMap<String, Vec<(String, String)>>) -> BTreeSet<String> {
+    let mut keys: Vec<&str> = Vec::new();
+    let mut index = BTreeMap::new();
+    for (key, list) in children {
+        for name in std::iter::once(key).chain(list.iter().map(|(_, c)| c)) {
+            index.entry(name.as_str()).or_insert_with(|| {
+                keys.push(name.as_str());
+                keys.len() - 1
+            });
+        }
+    }
+    let n = keys.len();
+    let mut edges = vec![Vec::new(); n];
+    let mut reverse = vec![Vec::new(); n];
+    let mut self_loop = vec![false; n];
+    for (key, list) in children {
+        let i = index[key.as_str()];
+        for (_, c) in list {
+            let j = index[c.as_str()];
+            edges[i].push(j);
+            reverse[j].push(i);
+            self_loop[i] |= i == j;
+        }
+    }
+    let mut seen = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for root in 0..n {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        let mut stack = vec![(root, 0)];
+        while let Some((i, next)) = stack.last_mut() {
+            if let Some(&j) = edges[*i].get(*next) {
+                *next += 1;
+                if !seen[j] {
+                    seen[j] = true;
+                    stack.push((j, 0));
+                }
+            } else {
+                order.push(*i);
+                stack.pop();
+            }
+        }
+    }
+    let mut component = vec![usize::MAX; n];
+    let mut cyclic = BTreeSet::new();
+    for &root in order.iter().rev() {
+        if component[root] != usize::MAX {
+            continue;
+        }
+        component[root] = root;
+        let mut group = Vec::new();
+        let mut stack = vec![root];
+        while let Some(i) = stack.pop() {
+            group.push(i);
+            for &j in &reverse[i] {
+                if component[j] == usize::MAX {
+                    component[j] = root;
+                    stack.push(j);
+                }
+            }
+        }
+        if group.len() > 1 || self_loop[root] {
+            cyclic.extend(group.into_iter().map(|i| keys[i].to_owned()));
+        }
+    }
+    cyclic
+}
+
 #[cfg(test)]
 mod prefetch_tests {
     use super::super::journal::Pv;
@@ -1113,6 +1229,19 @@ mod prefetch_tests {
         tree.prediction_values_report(&mut unlimited(), &mut report).unwrap();
         assert!(report.cyclic.contains(ROOT));
         assert!(report.cyclic.contains(&parent));
+    }
+
+    #[test]
+    fn cyclic_nodes_are_members_of_cycles_and_self_loops() {
+        let edge = |a: &str, b: &str| (format!("{a}{b}"), b.to_owned());
+        let children = BTreeMap::from([
+            ("a".to_owned(), vec![edge("a", "b")]),
+            ("b".to_owned(), vec![edge("b", "c"), edge("b", "d")]),
+            ("c".to_owned(), vec![edge("c", "a")]),
+            ("d".to_owned(), vec![edge("d", "e")]),
+            ("e".to_owned(), vec![edge("e", "e")]),
+        ]);
+        assert_eq!(cyclic_nodes(&children), BTreeSet::from(["a", "b", "c", "e"].map(String::from)));
     }
 
     #[test]
