@@ -400,20 +400,33 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         args.since.as_deref().unwrap_or("確認"),
         args.replace_curated,
     )?;
-    write_atomic(&args.table, &format_table(&findings))?;
     let weights = refutation::side_weights(&positions.0, &args.weight)?;
-    if bridge_output {
+    // 除外キューの読み込みや行の検査で失敗したときに表だけが更新されないよう、bridge の出力は書く前に全部作る。
+    let bridge = if bridge_output {
         let mut worse = bridge_findings(&positions.0, draws, &book, args.line, records.as_ref())?;
         weight_bridge_findings(&mut worse, weights.as_ref(), args.weight.min_weight);
-        if let Some(path) = &args.bridge_table {
-            write_atomic(path, &format_bridge_table(&worse))?;
+        let table = args.bridge_table.as_ref().map(|_| format_bridge_table(&worse));
+        let queue = match &args.bridge_enqueue_out {
+            Some(_) => {
+                let (lines, excluded) = bridge_queue(&worse, &args)?;
+                Some((refutation::format_queue(&lines)?, lines.len(), excluded))
+            }
+            None => None,
+        };
+        Some((worse.len(), table, queue))
+    } else {
+        None
+    };
+    write_atomic(&args.table, &format_table(&findings))?;
+    if let Some((found, table, queue)) = bridge {
+        if let (Some(path), Some(text)) = (&args.bridge_table, table) {
+            write_atomic(path, &text)?;
         }
-        if let Some(path) = &args.bridge_enqueue_out {
-            let (lines, excluded) = bridge_queue(&worse, &args)?;
-            write_atomic(path, &refutation::format_queue(&lines)?)?;
-            println!("補った切れ目のキューの行: {} (除外 {excluded})", lines.len());
+        if let (Some(path), Some((text, queued, excluded))) = (&args.bridge_enqueue_out, queue) {
+            write_atomic(path, &text)?;
+            println!("補った切れ目のキューの行: {queued} (除外 {excluded})");
         }
-        println!("補って main の値が {} 以上悪くなった局面: {}", args.line, worse.len());
+        println!("補って main の値が {} 以上悪くなった局面: {found}", args.line);
     }
     if let Some(out) = &args.out_db {
         write_audited_db(out, &positions.0, &book)?;
@@ -1625,11 +1638,14 @@ fn weight_bridge_findings(rows: &mut Vec<BridgeFinding>, weights: Option<&SideWe
 }
 
 fn bridge_queue_line(row: &BridgeFinding, rank: usize, args: &AuditArgs) -> Result<Line> {
+    let ply: u32 = row.ply.trim().parse().ok().filter(|&p| p > 0).with_context(|| {
+        format!("キューの行には 1 以上の手数が要ります: {} {:?}", row.key, row.ply)
+    })?;
     let side = super::model::side(&row.key);
     let digest = format!("{:x}", Sha256::digest(format!("{} {}", row.key, row.main)));
     let line = Line {
         id: format!("{}_bridge_{side}", &digest[..16]),
-        root: format!("sfen {} {}", row.key, row.ply),
+        root: format!("sfen {} {ply}", row.key),
         roots: Vec::new(),
         own: side.to_owned(),
         depth: args.bridge_depth,
@@ -3197,6 +3213,37 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             args.bridge_enqueue_out = Some(collision);
             args.bridge_exclude_queue = vec![out.clone()];
             assert!(run_in_pool(args).is_err());
+        }
+    }
+
+    #[test]
+    fn bad_bridge_exclude_queue_writes_no_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(
+            &args.master,
+            master(&[(ROOT, "5i4h", "main", "50"), (B, "4h3h", "main", "-100")]),
+        )
+        .unwrap();
+        args.bridge_replies = true;
+        args.bridge_table = Some(dir.path().join("bridge.tsv"));
+        args.bridge_enqueue_out = Some(dir.path().join("bridge.jsonl"));
+        args.bridge_exclude_queue = vec![dir.path().join("missing.jsonl")];
+        assert!(run_in_pool(args).is_err());
+        for name in ["audit.tsv", "bridge.tsv", "bridge.jsonl"] {
+            assert!(!dir.path().join(name).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn bridge_queue_line_rejects_rows_without_ply() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = test_args(dir.path());
+        for ply in ["", "0"] {
+            let mut row = bridge_row(ROOT, "5i4h", 150);
+            row.ply = ply.into();
+            let err = bridge_queue_line(&row, 0, &args).unwrap_err();
+            assert!(format!("{err:#}").contains("手数"), "{err:#}");
         }
     }
 
