@@ -95,6 +95,20 @@ pub(super) struct QueueReviewArgs {
     /// 既存の木への足し込み JSON Lines (繰り返し可)
     #[arg(long, requires = "plan_out")]
     update: Vec<PathBuf>,
+    /// 計画の帯の上端の priority (カンマ区切り、小さい順)。最後の帯は上端なし
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "9,26,60,120",
+        requires = "plan_out"
+    )]
+    bands: Vec<u32>,
+    /// 帯の偏りを均す priority の上限 (この priority 以下の木を移す)
+    #[arg(long, requires_all = ["plan_out", "balance_hours"])]
+    balance_priority: Option<u32>,
+    /// 帯の読み終わりの目標時間 (balance-priority 以下の量 / 台の速さ)
+    #[arg(long, requires = "balance_priority")]
+    balance_hours: Option<f64>,
     /// 足し込みのある id あたりの追加局面数の仮定
     #[arg(long, default_value_t = 30, requires = "plan_out")]
     update_size: u64,

@@ -469,9 +469,11 @@ book_mine tree queue-review \
 | `--condition <NAME>=<LABEL>` | 空ラベル、繰り返し可 | 台の読み条件のラベル。同じ条件の台には同じラベルを付ける |
 | `--add <JSONL>` | なし、繰り返し可 | 新規の木の行。`tree enqueue --from` と同じ形。計画で割り振るか、再採点で既存の木と並べて採点する (`--plan-out`・`--rerank-table`・`--rerank-out` のどれかが必要) |
 | `--update <JSONL>` | なし、繰り返し可 | 既存の木への足し込み行。`tree seeds --update-out` の出力など |
+| `--bands <P,...>` | 9,26,60,120 | 計画の帯の上端の priority (小さい順)。`<prefix>_bands.tsv` の区切り |
+| `--balance-priority <P>` / `--balance-hours <H>` | なし | 両方で指定。P 以下の帯の読み終わり時間が H 時間を超える台から木を移す |
 | `--update-size <N>` | 30 | hold false の台へ足し込みを送る id あたりの追加局面数の仮定 |
 
-`--update`・`--condition` と、明示指定する `--max-ratio`・`--update-size` には `--plan-out` が必要です。
+`--update`・`--condition`・`--balance-priority` と、明示指定する `--max-ratio`・`--update-size`・`--bands` には `--plan-out` が必要です。
 `--box-deadlines` は計画を出さない場合にも `--boxes` の hours・capacity・ratio に反映します。
 計画の例 (通常の点検引数に追加):
 
@@ -555,9 +557,13 @@ trees・priority の幅・full/part/none・remaining は hold でない木、hel
    載せ替えた行の合法性を受付と同じ検査で確認し、不正なら送り先の台と id を含むエラーにします。
    hold false の台の見込み量に update-size を id ごとに 1 回加えます。同じ id の足し込みは最後の game・memo を使います。
    failed が無い progress は false として読みます。
+serve は priority の小さい順に読むので、木が締めまでに読めるかは、その台の「その木の priority 以下の見込み量」(以下、帯の量) で決まります。
+台に入るか・移せるかの判定は、台全体の remaining ではなく帯の量で行います。
+
 2. 上限を超える台を名前順に点検します。未着手の木を reach-low 優先、priority の大きい順、
-   同点は id の逆順に見ます。reach-low は元の台で hold にします。それ以外は、移した後に上限以内となる
-   他の台のうち、移した後の ratio が最小の台へ移します。同点は台の名前順です。
+   同点は id の逆順に見ます。reach-low は元の台で hold にします。それ以外は、その台での帯の量が
+   読める量 × max-ratio 以内の木は動かしません (後ろの木を外せば読めるため)。超える木は、移した後に
+   移し先での帯の量 + 木の量が上限以内となる他の台のうち、その比が最小の台へ移します。同点は台の名前順です。
    同じ id を受付または計画に既に持つ台は、既存の木を置き換えてしまうため移動先から除きます (hold を含む)。
    元の行は hold true、移し先は hold false にし、定義を変えず世代を増やしません。
    移し先には、移動元の台へ実際に送った最後の足し込みの game・memo も反映します。
@@ -565,10 +571,21 @@ trees・priority の幅・full/part/none・remaining は hold でない木、hel
    元の台が上限以内になったら止めます。hold・移動では、初期の remaining と同じく木ごとの
    `max(tree-size, requested) - read` (下限 0) と、移動元の台に足し込み済みの update-size 分の見込み量を引き、移し先に同量を足します。
    bw は両側とも未着手の場合だけ対象にし、側ごとに求めた見込み量を一緒に扱います。
-3. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
-   追加後に上限以内となる台のうち追加後の ratio が最小の台、同点は名前順です。
+3. `--balance-priority P --balance-hours H` があれば、P 以下の帯の読み終わり時間 (P 以下の見込み量 / 台の速さ) が H を超える台を
+   名前順に見て、P 以下の未着手の木 (reach-low を除く) を priority の大きい順 (同点は id の逆順) に、読み終わり時間が H 以下に収まる他の台へ移します
+   (`balance`、理由 `band-hours`)。移し先はその木の帯の量でも上限以内で、移した後の読み終わり時間が最小の台です (同点は名前順)。
+   移し先の条件 (同じ id、条件ラベル、同じ根) と見込み量の扱いは 2 と同じです。元の台の読み終わり時間が H 以下になったら止めます。
+4. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
+   追加後に帯の量 + 木の量が上限以内となる台のうち、その比が最小の台、同点は名前順です。
    入る台がなければ、条件を満たす台のうち現在の ratio 最小の台へ hold true で置き (`add-hold`)、
    見込み量は増やしません。hold=true の入力行も同じ台へ hold のまま置きます (`add-hold`、理由 `input-hold`)。受付済みの id や新規行どうしの id の重複はエラーです。
+5. 移し込みや新規行で後ろへ押し出された木は動かし直しません。計画の後でも帯の量が上限を超える hold でない未着手の木
+   (受付の木・移し込んだ木・新規行。`keep-over` を記録した木を除く) を `over` (理由 `band-over`) として記録します。
+   priority 100 以上でも hold にはしません (serve は priority の小さい順に読むので、急ぎの木の妨げにならない)。
+   これらは締めまでに読み切れない見込みなので、次の点検で priority・置き場を見直してください。
+
+帯の量が収まる木は動かさないので、計画の後も台全体の ratio (標準出力の「計画 残り/読める量」) が max-ratio を超えることがあります。
+締めまでに読めるかは `<prefix>_bands.tsv` の after_hours と cutoff_hours、`over` の行で確かめます。
 
 「同じ根」は root・roots のいずれかの局面が手数を除いて一致し、id が違うことです。
 移動の重複判定は全台の受付 (hold を含む) で調べます。新規行は移動後の配置に合わせて割り振ります。移動は、元と同じ条件ラベルの台へ、
@@ -582,9 +599,15 @@ root・roots のすべての根の条件を満たす台がなければエラー�
 止めた台をこの照合から外す場合は、その台を `--box` に渡さないでください。
 
 `<prefix>_plan.tsv` の列は `action / id / own / priority / from / to / reason` です。
-action は `update`・`update-held`・`drop-update`・`hold-low`・`move`・`hold-over`・`keep-over`・`add`・`add-hold`。
+action は `update`・`update-held`・`drop-update`・`hold-low`・`move`・`hold-over`・`keep-over`・`balance`・`add`・`add-hold`・`over`。
+表は判断の順の記録で、同じ id に複数の行があれば後の行が最終です (例: `keep-over` の後に `balance` で移した木)。
+
+`<prefix>_bands.tsv` は台ごと・帯ごとに `box / priority_lo / priority_hi / before_remaining / before_hours / after_remaining / after_hours / cutoff_hours`
+の列を持ちます。帯は `--bands` の上端で区切り (既定 `9,26,60,120` で 0〜9・10〜26・27〜60・61〜120・121〜)、最後の帯の priority_hi は空です。
+remaining はその帯の見込み量、hours はその帯の上端以下の見込み量の合計を台の速さで割った読み終わり時間 (速さ 0 で量があれば inf)、
+before は点検時点、after は計画の後、cutoff_hours は締めまでの時間です。
 台ごとの積み荷はこの順で生成し、同じ id が再び出たら後の行だけを残します。
-行の無い台の JSONL は作りません。出力 dir は必要に応じて作り、既存の `<prefix>_*.jsonl` または `<prefix>_plan.tsv` があれば
+行の無い台の JSONL は作りません。出力 dir は必要に応じて作り、既存の `<prefix>_*.jsonl`・`<prefix>_plan.tsv`・`<prefix>_bands.tsv` があれば
 エラーにして上書きしません。標準出力には各台の計画 ratio の前後を表示します。
 計画は写しを前提とするため、投入前に受付・進捗の変化を確認してください。
 

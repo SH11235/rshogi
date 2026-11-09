@@ -27,6 +27,9 @@ fn args(dir: &Path) -> QueueReviewArgs {
         add: vec![],
         update: vec![],
         update_size: 30,
+        bands: vec![9, 26, 60, 120],
+        balance_priority: None,
+        balance_hours: None,
         master: Some(master),
         rerank_table: None,
         rerank_out: None,
@@ -2081,4 +2084,163 @@ fn cli_add_needs_plan_or_rerank_output() {
     ] {
         assert!(Cli::try_parse_from(base.into_iter().chain(option)).is_ok());
     }
+}
+
+fn plan_actions(dir: &Path) -> Vec<String> {
+    plan_table(dir)
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').take(2).collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+#[test]
+fn plan_places_urgent_add_by_its_band_and_reports_pushed_out_filler() {
+    let d = TempDir::new().unwrap();
+    let filler = |id: &str, moves: &str| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(1000);
+        r
+    };
+    let mut a = plan_args(d.path(), &[("A", vec![filler("f1", "7g7f"), filler("f2", "2g2f")])]);
+    let mut urgent = row("urgent", "5g5f");
+    urgent["priority"] = json!(2);
+    a.add = vec![input_rows(d.path(), "adds", &[urgent])];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(plan_actions(d.path()), ["hold-over f2", "add urgent", "over f1"]);
+    let rows = cargo_rows(d.path(), "A");
+    assert!(rows.iter().any(|r| r["id"] == "urgent" && r["hold"] == false));
+}
+
+#[test]
+fn plan_moves_to_a_box_whose_band_has_room_and_keeps_trees_within_capacity() {
+    let d = TempDir::new().unwrap();
+    let with = |id: &str, moves: &str, priority: u32| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r
+    };
+    let a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![with("first", "7g7f", 10), with("second", "2g2f", 50)]),
+            ("B", vec![with("b1", "5g5f", 1000), with("b2", "6g6f", 1000)]),
+        ],
+    );
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(plan_actions(d.path()), ["move second", "hold-over b2", "hold-over b1"]);
+    assert!(
+        cargo_rows(d.path(), "B")
+            .iter()
+            .any(|r| r["id"] == "second" && r["hold"] == false)
+    );
+}
+
+#[test]
+fn plan_balance_moves_urgent_band_and_reports_band_hours() {
+    let d = TempDir::new().unwrap();
+    let with = |id: &str, moves: &str, priority: u32| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r
+    };
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![with("u1", "7g7f", 5), with("u2", "2g2f", 6)]),
+            ("B", vec![]),
+        ],
+    );
+    a.box_rate = vec!["A=20".into(), "B=40".into()];
+    a.balance_priority = Some(26);
+    a.balance_hours = Some(0.5);
+    run_at(a, now(), &mut vec![]).unwrap();
+    let table = plan_table(d.path());
+    assert!(table.contains("balance\tu2\tb\t6\tA\tB\tband-hours"), "{table}");
+    let bands = std::fs::read_to_string(d.path().join("plan/qrhold_bands.tsv")).unwrap();
+    let mut lines = bands.lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "box\tpriority_lo\tpriority_hi\tbefore_remaining\tbefore_hours\tafter_remaining\tafter_hours\tcutoff_hours"
+        )
+    );
+    assert_eq!(lines.next(), Some("A\t0\t9\t20\t1\t10\t0.5\t2"));
+    assert_eq!(lines.nth(3), Some("A\t121\t\t0\t1\t0\t0.5\t2"));
+    assert_eq!(lines.next(), Some("B\t0\t9\t0\t0\t10\t0.25\t2"));
+}
+
+#[test]
+fn bands_must_increase_and_balance_needs_hours() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![])]);
+    a.bands = vec![26, 9];
+    assert!(run_at(a, now(), &mut vec![]).unwrap_err().to_string().contains("bands"));
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: super::super::TreeArgs,
+    }
+    use clap::Parser;
+    let base = [
+        "tree",
+        "queue-review",
+        "--box",
+        "A=/path/to/a",
+        "--cutoff",
+        "2026-11-08T12:00:00+09:00",
+        "--plan-out",
+        "plan",
+    ];
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--balance-priority", "26"])).is_err());
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain([
+            "--balance-priority",
+            "26",
+            "--balance-hours",
+            "8"
+        ]))
+        .is_ok()
+    );
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--bands", "5,20"])).is_ok());
+}
+
+#[test]
+fn plan_reports_moved_tree_pushed_out_by_a_later_add() {
+    let d = TempDir::new().unwrap();
+    let with = |id: &str, moves: &str, priority: u32| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r
+    };
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![with("first", "7g7f", 1), with("later", "2g2f", 100)]),
+            ("B", vec![]),
+        ],
+    );
+    a.max_ratio = 1.0;
+    a.box_rate = vec!["A=5".into(), "B=10".into()];
+    let mut both = with("both", "5g5f", 2);
+    both["own"] = json!("bw");
+    a.add = vec![input_rows(d.path(), "adds", &[both])];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(plan_actions(d.path()), ["move later", "add both", "over later"]);
+    assert!(plan_table(d.path()).ends_with("over\tlater\tb\t100\tB\tB\tband-over\n"));
+}
+
+#[test]
+fn plan_update_size_counts_in_the_band_of_its_tree() {
+    let d = TempDir::new().unwrap();
+    let mut urgent = row("urgent", "7g7f");
+    urgent["priority"] = json!(5);
+    let mut a = plan_args(d.path(), &[("A", vec![urgent.clone()])]);
+    let mut update = urgent.clone();
+    update["game"] = json!([["8c8d"]]);
+    a.update = vec![input_rows(d.path(), "updates", &[update])];
+    a.update_size = 3;
+    run_at(a, now(), &mut vec![]).unwrap();
+    let bands = std::fs::read_to_string(d.path().join("plan/qrhold_bands.tsv")).unwrap();
+    assert!(bands.lines().any(|l| l == "A\t0\t9\t10\t1\t13\t1.3\t2"), "{bands}");
 }
