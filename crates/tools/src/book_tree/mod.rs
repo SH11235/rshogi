@@ -8,6 +8,7 @@ mod borrow;
 mod check;
 mod cycles;
 mod deep;
+mod exit_report;
 mod exits;
 mod export;
 mod file_lock;
@@ -199,6 +200,8 @@ enum MasterCommand {
     LineDb(line_db::LineDbArgs),
     /// 初期局面から先手と後手の main を交互に指し、定跡が切れる所と、そこを根にした木の行を出す
     MainLine(main_line::MainLineArgs),
+    /// walk の止まりと伝播の切れ目を、有望・塞ぎたい・浅い・値の出所が弱いに分けて報告する
+    ExitReport(exit_report::ExitReportArgs),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -218,6 +221,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Exits(args) => exits::run(args),
         MasterCommand::LineDb(args) => line_db::run(args),
         MasterCommand::MainLine(args) => main_line::run(args),
+        MasterCommand::ExitReport(args) => exit_report::run(args),
     }
 }
 

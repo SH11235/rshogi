@@ -620,6 +620,42 @@ fn move_text(pos: &Position, mv: Move) -> String {
     format!("{dest}{label}{from_suffix}")
 }
 
+/// 初期局面からの USI の手順を、移動元を付けない短い棋譜の表記 (`▲２六歩 △同歩`) にする。
+pub(crate) fn usi_moves_to_short_kif(moves: &[&str]) -> Result<String> {
+    let mut pos = Position::new();
+    pos.set_hirate();
+    let mut out = Vec::with_capacity(moves.len());
+    let mut previous: Option<Square> = None;
+    for usi in moves {
+        let decoded = Move::from_usi(usi).ok_or_else(|| anyhow!("USI 指し手が不正です: {usi}"))?;
+        let mv = pos
+            .to_move(decoded)
+            .filter(|&mv| mv != Move::NONE && pos.pseudo_legal(mv) && pos.is_legal(mv))
+            .ok_or_else(|| anyhow!("非合法手です: {usi}"))?;
+        let mark = if pos.side_to_move() == Color::Black {
+            "▲"
+        } else {
+            "△"
+        };
+        let text = if mv.is_drop() {
+            format!("{}{}打", square_label_kanji(mv.to()), piece_label(mv.drop_piece_type(), false))
+        } else {
+            let dest = if previous == Some(mv.to()) {
+                "同".to_owned()
+            } else {
+                square_label_kanji(mv.to())
+            };
+            let piece = piece_label(pos.piece_on(mv.from()).piece_type(), false);
+            format!("{dest}{piece}{}", if mv.is_promote() { "成" } else { "" })
+        };
+        out.push(format!("{mark}{text}"));
+        previous = Some(mv.to());
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+    }
+    Ok(out.join(" "))
+}
+
 fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
     let label = format_move_label(ply, pos, mv);
     let per_move = format_mm_ss(elapsed_ms);
