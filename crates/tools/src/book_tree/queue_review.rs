@@ -818,9 +818,10 @@ pub(super) struct TreeState {
     pub state: String,
 }
 
-/// `NAME=DIR` の台の受付と進みの写しを `tree queue-review` と同じ検査で読み、木ごとの状態を返す。
-pub(super) fn tree_states(specs: &[String]) -> Result<Vec<TreeState>> {
+/// `NAME=DIR` の台の受付と進みの写しを `tree queue-review` と同じ検査で読み、木ごとの状態と読んだファイルを返す。
+pub(super) fn tree_states(specs: &[String]) -> Result<(Vec<TreeState>, Vec<PathBuf>)> {
     let mut states = Vec::new();
+    let mut inputs = Vec::new();
     let mut names = BTreeSet::new();
     for text in specs {
         let (name, dir) = assignment(text)?;
@@ -828,7 +829,7 @@ pub(super) fn tree_states(specs: &[String]) -> Result<Vec<TreeState>> {
             safe_name(name) && names.insert(name.to_owned()),
             "台の名前は重複のない英数字・_・- にしてください: {name}"
         );
-        let b = load_box(name, PathBuf::from(dir), &mut Vec::new())?;
+        let b = load_box(name, PathBuf::from(dir), &mut inputs)?;
         for tree in &b.progress.trees {
             let queued = &b.queue[&tree.id];
             let state = if tree.finished {
@@ -850,5 +851,5 @@ pub(super) fn tree_states(specs: &[String]) -> Result<Vec<TreeState>> {
             });
         }
     }
-    Ok(states)
+    Ok((states, inputs))
 }

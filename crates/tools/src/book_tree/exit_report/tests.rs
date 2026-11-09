@@ -189,3 +189,119 @@ fn needs_an_output_and_rejects_overwriting_inputs() {
         assert!(run_to(Cli::try_parse_from(argv).unwrap().args, &mut Vec::new()).is_err());
     }
 }
+
+#[test]
+fn queued_trees_list_every_box_both_sides_and_skip_depth_zero() {
+    let d = TempDir::new().unwrap();
+    let exit = ["7g7f", "3c3d", "2g2f", "8c8d"];
+    let root = format!("sfen {} 5", key_after(&exit));
+    let line = |id: &str, own: &str, depth: usize| {
+        serde_json::json!({"id": id, "root": root, "own": own, "depth": depth}).to_string()
+    };
+    let progress = |trees: &[(&str, &str, bool, bool, u64)]| {
+        let trees: Vec<_> = trees
+            .iter()
+            .map(|(id, own, finished, hold, read)| {
+                serde_json::json!({"id": id, "own": own, "priority": 100, "hold": hold,
+                    "finished": finished, "read": read, "requested": 92})
+            })
+            .collect();
+        serde_json::json!({"trees": trees, "workers": []}).to_string()
+    };
+    let make_box = |name: &str, lines: &[String], trees: &[(&str, &str, bool, bool, u64)]| {
+        let dir = d.path().join(name);
+        std::fs::create_dir_all(dir.join("enqueue")).unwrap();
+        std::fs::create_dir_all(dir.join("fetch")).unwrap();
+        let text = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+        std::fs::write(dir.join("enqueue/a.jsonl"), &text).unwrap();
+        std::fs::write(
+            dir.join("enqueue/a.jsonl.receipt"),
+            serde_json::json!({"start": 0, "end": text.len(), "lines": lines.len()}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("fetch/progress.json"), progress(trees)).unwrap();
+        format!("{name}={}", dir.display())
+    };
+    let mut held = serde_json::from_str::<serde_json::Value>(&line("same", "b", 6)).unwrap();
+    held["hold"] = serde_json::json!(true);
+    let a = make_box(
+        "A",
+        &[
+            line("both", "bw", 6),
+            line("shallow", "b", 0),
+            line("same", "b", 6),
+        ],
+        &[
+            ("both", "b", false, false, 40),
+            ("both", "w", true, false, 92),
+            ("shallow", "b", false, false, 0),
+            ("same", "b", true, false, 92),
+        ],
+    );
+    let b = make_box("B", &[held.to_string()], &[("same", "b", false, true, 0)]);
+    let walk = [walk_line("b", "out", 0.02, &exit)];
+    let (_, table, _) = run_report(&d, &walk, &["--box", &a, "--box", &b]);
+    assert!(table.contains("\tboth (A, 40/92); same (A, DONE); same (B, hold)\t"), "{table}");
+    let progress_path = d.path().join("A/fetch/progress.json");
+    let master = d.path().join("moves.tsv");
+    let walk_path = d.path().join("walk.tsv");
+    let argv = [
+        "test",
+        "--master",
+        master.to_str().unwrap(),
+        "--walk",
+        walk_path.to_str().unwrap(),
+        "--box",
+        &a,
+        "--table",
+        progress_path.to_str().unwrap(),
+    ];
+    assert!(run_to(Cli::try_parse_from(argv).unwrap().args, &mut Vec::new()).is_err());
+}
+
+#[test]
+fn rejoin_without_weights_is_an_error() {
+    let d = TempDir::new().unwrap();
+    let rejoin = d.path().join("rejoin.tsv");
+    let key = key_after(&["2g2f"]);
+    std::fs::write(
+        &rejoin,
+        format!(
+            "side\tkey\tply\tmove\trole\texpected\tdig\trejoin_move\trejoin\trejoin_main\trejoin_value\tdrop\texpected_black\trejoin_value_black\tweight\tdig_games\trejoin_games\n\
+             w\t{key}\t2\t8c8d\tmain\t0\t\t3c3d\t\t\t\t\t0\t120\t\t\t\n"
+        ),
+    )
+    .unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[master_row(&[], "7g7f", "", "")])).unwrap();
+    let walk = d.path().join("walk.tsv");
+    std::fs::write(&walk, format!("{WALK_HEADER}\n")).unwrap();
+    let out = d.path().join("out.tsv");
+    let argv = [
+        "test",
+        "--master",
+        master.to_str().unwrap(),
+        "--walk",
+        walk.to_str().unwrap(),
+        "--rejoin",
+        rejoin.to_str().unwrap(),
+        "--table",
+        out.to_str().unwrap(),
+    ];
+    let error = format!(
+        "{:#}",
+        run_to(Cli::try_parse_from(argv).unwrap().args, &mut Vec::new()).unwrap_err()
+    );
+    assert!(error.contains("--opp-freq"), "{error}");
+}
+
+#[test]
+fn short_kif_writes_same_square_promotion_drop_and_promoted_pieces() {
+    let moves = [
+        "7g7f", "3c3d", "8h2b+", "3a2b", "B*4e", "2b3c", "4e3d", "4a3b", "3d2c+", "3c2d", "2c1b",
+    ];
+    assert_eq!(
+        usi_moves_to_short_kif(&moves).unwrap(),
+        "▲７六歩 △３四歩 ▲２二角成 △同銀 ▲４五角打 △３三銀 ▲３四角 △３二金 ▲２三角成 △２四銀 ▲１二馬"
+    );
+}

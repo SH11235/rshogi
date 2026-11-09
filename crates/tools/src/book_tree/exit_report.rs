@@ -210,7 +210,11 @@ pub(super) fn run(args: ExitReportArgs) -> Result<()> {
 
 fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     args.check()?;
-    let states = tree_states(&args.box_specs)?;
+    let (states, box_inputs) = tree_states(&args.box_specs)?;
+    for output in [&args.table, &args.markdown].into_iter().flatten() {
+        let inputs: Vec<_> = box_inputs.iter().map(|p| ("--box", p.as_path())).collect();
+        reject_same_file(output, &inputs)?;
+    }
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
     // 伝播の切れ目の重みは、その局面を通る walk の行の重みの和 (同じ行で同じ局面は 1 回)。
@@ -294,6 +298,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 return Ok(());
             }
             let side = column(row, "side")?;
+            ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
             let replaced = gaps.get(key).filter(|(gap, ..)| *gap >= args.gap_line);
@@ -325,15 +330,21 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     if let Some(rejoin) = &args.rejoin {
         read_tsv(rejoin, |row| {
             let side = column(row, "side")?;
+            ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
             let value: i64 = column(row, "rejoin_value_black")?
                 .parse()
                 .context("rejoin_value_black が不正です")?;
             if args.meets(Some(value), side) != Some(false) {
                 return Ok(());
             }
-            let weight: f64 = column(row, "weight")?.parse().unwrap_or(0.0);
-            let games: f64 = column(row, "rejoin_games")?.parse().unwrap_or(0.0);
-            let dig: f64 = column(row, "dig_games")?.parse().unwrap_or(0.0);
+            // 重みの欄は --opp-freq なしの rejoin では空になる。0 とみなすと行が黙って消える。
+            let number = |name: &str| -> Result<f64> {
+                column(row, name)?.parse().with_context(|| {
+                    format!("{name} が数ではありません (rejoin は --opp-freq を付けた表が必要です)")
+                })
+            };
+            let (weight, games, dig) =
+                (number("weight")?, number("rejoin_games")?, number("dig_games")?);
             // 表の weight は局面の重みなので、その手で戻る割合に直す。
             let effective = weight * games / dig.max(1.0);
             if effective < args.gap_min_weight {
@@ -604,12 +615,7 @@ fn markdown(
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.persist(path)?;
-    Ok(())
+    crate::common::io::write_atomic(path, std::str::from_utf8(bytes)?)
 }
 
 #[cfg(test)]

@@ -174,12 +174,7 @@ fn walk(index: &mut MasterIndex, max_ply: usize) -> Result<Walked> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.persist(path)?;
-    Ok(())
+    crate::common::io::write_atomic(path, std::str::from_utf8(bytes)?)
 }
 
 pub(super) fn run(args: MainLineArgs) -> Result<()> {
