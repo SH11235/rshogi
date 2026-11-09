@@ -1740,6 +1740,51 @@ book_mine master main-line --master moves.tsv --table main-line.tsv \
 memo が `main-line reason=<reason> moves=<手順>` です。木の行を出さない理由のときは、空の JSONL を書きます。
 元データはディスクのバケットに索引化して、辿る局面の行だけを読みます。辿った局面に main が 2 行以上あればエラーにします。
 
+## `master exit-report`: 版ごとの出口の報告
+
+`master walk` の止まりと、伝播の切れ目 (`master audit --bridge-replies`)・定跡に戻る手 (`master rejoin`) の表を合わせて、
+出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出します。
+
+```sh
+book_mine master exit-report --master moves.tsv --walk walk.tsv \
+  --rejoin rejoin.tsv --bridge bridge.tsv --bridge-audit bridge_audit.tsv \
+  --box box-a=/path/to/box-a --title v59 --table exits.tsv --markdown exits.md
+```
+
+| 引数 | 既定 | 内容 |
+| --- | --- | --- |
+| `--master <TSV>` | 必須 | 元データ。RAMU の最後の手の値と出所を引く |
+| `--schema <DIR>` | なし | 語彙の表 |
+| `--walk <TSV>` | 必須 | `master walk --table` の表 (先手・後手の両方を含めてよい) |
+| `--rejoin <TSV>` | なし | `master rejoin --table` の表 |
+| `--bridge <TSV>` / `--bridge-audit <TSV>` | なし | 同じ `master audit --bridge-replies` の `--bridge-table` と `--table`。両方で指定 |
+| `--box <NAME>=<DIR>` | なし、繰り返し可 | 受付と進みの写し。`tree queue-review --box` と同じ形・同じ検査 |
+| `--min-weight <W>` | 0.008 | walk の止まりを載せる重みの下限 |
+| `--gap-min-weight <W>` | 0.001 | 伝播の切れ目と rejoin を載せる重み (来る割合) の下限 |
+| `--gap-line <N>` | 40 | main が 1 位から負ける差がこれ以上なら、補いで main が替わる局面とみなす |
+| `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | 出口の目標。先手は先手から見た値がこれ以上、後手はこれ未満で届く |
+| `--table <TSV>` / `--markdown <MD>` | どちらか必須 | 全部の行の表と報告 |
+| `--title <NAME>` | 空 | 報告の見出しの版の名前 |
+
+walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以上) は、手順の中で RAMU (表の side) が最後に指した手を元データで引き、
+その手の evals の平均 (先手から見た値) と value_kind で分けます。
+
+| class | 条件 |
+| --- | --- |
+| `good` | stop が own 以外で、value_kind が `tree` で始まり目標に届く |
+| `bad` | stop が own 以外で、value_kind が `tree` で始まり目標に届かない (値が無いものを含む) |
+| `shallow` | stop が own (相手のよくある応手が定跡に無い)。値は直前の RAMU の手の値で、出口の値ではない |
+| `weak` | stop が own 以外で、value_kind が `tree` で始まらない |
+| `gap` | bridge の表の局面のうち、walk の重みが `--gap-min-weight` 以上で、補った値 (bridged_black) が目標に届かないか、audit の gap が `--gap-line` 以上 |
+| `rejoin` | rejoin の表の行のうち、戻った先の値が目標に届かず、来る割合 (weight × rejoin_games / dig_games) が `--gap-min-weight` 以上 |
+
+gap の重みは、その局面を通る walk の行の重みの和 (1 行で同じ局面は 1 回) で、手順はその局面を最初に通った行の手順です。
+表は `class side ply weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
+ply は walk の行・rejoin の行の ply、gap は局面の手番の手が何手目か。queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。
+extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move) です。
+報告は 1 (good)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
+標準出力には class ごとの行の数を出します。
+
 ## `borrow`: 大きい定跡の木を借りる
 
 大きい定跡から、どの手を伸ばすかだけを借ります。値は自分のエンジンの読みで付け、大きい定跡の値は手を選ぶ当たりにだけ使います (登録する値には混ぜません)。読むべき出口が最初から全部分かるので、`tree serve` の並列を使い切って同時に読めます。

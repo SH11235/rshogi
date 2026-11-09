@@ -24,6 +24,7 @@
 | 伝播の切れ目の局面を重み順に並べ、既存の木との重複を除いたキューにする `--bridge-enqueue-out` と、main の置換と、旧 main・curated を保護した悪い alt の bench（控え）への降格・値が `--bad-eval` より大きく基準との差が `--demote-line` (既定 100) 未満の控えの復帰（`--apply`・`--replace-curated`・`--demote-alts`・`--revive-bench`。降格・復帰は `--demote-line 100`、点検・main 置換は `--line 40`。`--opp-records` で相手の record も伝播に使い、反転した局面へは辺を張らない） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
 | 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す (`--opp-records` で強い対局が止まりの局面とその 10・20 手前に着いた局数・得点・勝敗の列) | [book_mine master walk](docs/book_mine.md#master-walk-自分が読み始める局面と重み) |
 | 初期局面から先手と後手の main を交互に直接キーで辿り、定跡が切れる局面 (局面なし・反転キーでだけある・main なし・循環) と理由、そこを根にした own=bw の木の行を出す | [book_mine master main-line](docs/book_mine.md#master-main-line-main-対-main-で定跡が切れる所) |
+| walk の止まりと伝播の切れ目・定跡に戻る手の表を合わせ、出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出す (受付の木の照合つき) | [book_mine master exit-report](docs/book_mine.md#master-exit-report-版ごとの出口の報告) |
 | 自分は main、相手は main・alt を指して辿れる出口を層ごとの外部ソート・到達済みキーのマージで分類し、既存の木との重複を除いてキューにする | [book_mine master exits](docs/book_mine.md#master-exits-元データを辿って出口を列挙する) |
 | LayerStacks の FT と L1 の列を並べ替える | [permute_nnue_ft](docs/permute_nnue_ft.md) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |

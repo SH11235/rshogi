@@ -806,3 +806,49 @@ impl QueueReviewArgs {
 }
 mod group;
 mod rerank;
+
+/// 台の受付の木 1 本 (側ごと) と進みの状態。
+pub(super) struct TreeState {
+    pub box_name: String,
+    pub id: String,
+    pub own: String,
+    pub depth: usize,
+    pub roots: BTreeSet<String>,
+    /// `DONE`・`failed`・`hold`・`<read>/<requested>`。
+    pub state: String,
+}
+
+/// `NAME=DIR` の台の受付と進みの写しを `tree queue-review` と同じ検査で読み、木ごとの状態を返す。
+pub(super) fn tree_states(specs: &[String]) -> Result<Vec<TreeState>> {
+    let mut states = Vec::new();
+    let mut names = BTreeSet::new();
+    for text in specs {
+        let (name, dir) = assignment(text)?;
+        ensure!(
+            safe_name(name) && names.insert(name.to_owned()),
+            "台の名前は重複のない英数字・_・- にしてください: {name}"
+        );
+        let b = load_box(name, PathBuf::from(dir), &mut Vec::new())?;
+        for tree in &b.progress.trees {
+            let queued = &b.queue[&tree.id];
+            let state = if tree.finished {
+                "DONE".to_owned()
+            } else if tree.failed {
+                "failed".to_owned()
+            } else if tree.hold {
+                "hold".to_owned()
+            } else {
+                format!("{}/{}", tree.read, tree.requested)
+            };
+            states.push(TreeState {
+                box_name: b.name.clone(),
+                id: tree.id.clone(),
+                own: tree.own.clone(),
+                depth: queued.line.depth,
+                roots: queued.roots.clone(),
+                state,
+            });
+        }
+    }
+    Ok(states)
+}
