@@ -9,13 +9,21 @@ use crate::nnue::NNUENetwork;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NumaTopology {
     nodes: Vec<Vec<usize>>,
+    /// 検出時にプロセスが使えた CPU。固定を解くときはこの集合へ戻す。
+    allowed: Vec<usize>,
 }
 
 impl NumaTopology {
     /// 実機の topology に依らず多 node の経路を試すための構築口。
     #[cfg(all(test, feature = "halfkx-arch"))]
     pub(crate) fn from_nodes(nodes: Vec<Vec<usize>>) -> Self {
-        Self { nodes }
+        let mut allowed: Vec<usize> = nodes.iter().flatten().copied().collect();
+        allowed.sort_unstable();
+        Self { nodes, allowed }
+    }
+
+    pub(crate) fn allowed(&self) -> &[usize] {
+        &self.allowed
     }
 }
 
@@ -83,7 +91,10 @@ pub(crate) fn read_topology(node_root: &Path, allowed: &[usize]) -> Result<NumaT
     if nodes.is_empty() {
         return Err(format!("no usable NUMA node under {}", node_root.display()));
     }
-    Ok(NumaTopology { nodes })
+    Ok(NumaTopology {
+        nodes,
+        allowed: allowed.to_vec(),
+    })
 }
 
 /// 各 node の CPU 数に比例して `num_threads` 本を配る (最大剰余法、同点は node 番号の小さい方)。
@@ -202,7 +213,10 @@ impl NumaReplicas {
                         let source = &source;
                         scope.spawn(move || -> Result<Arc<NNUENetwork>, String> {
                             pin_current_thread(cpus)?;
-                            Ok(Arc::new(source.deep_clone()))
+                            source
+                                .try_deep_clone()
+                                .map(Arc::new)
+                                .map_err(|e| format!("cannot allocate a network replica: {e}"))
                         })
                     })
                 })
@@ -291,6 +305,27 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), String> {
     Ok(())
 }
 
+/// 呼び出したスレッドを `cpus` に固定し、drop で固定前の CPU 集合へ戻す。
+pub(crate) struct AffinityGuard {
+    previous: Vec<usize>,
+}
+
+impl AffinityGuard {
+    pub(crate) fn pin(cpus: &[usize]) -> Result<Self, String> {
+        let previous = current_affinity().map_err(|e| format!("sched_getaffinity failed: {e}"))?;
+        pin_current_thread(cpus)?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for AffinityGuard {
+    fn drop(&mut self) {
+        // drop からは失敗を伝えられない。戻す先はこのスレッドが直前まで使えていた集合なので、
+        // 失敗するのは cpuset が外から縮められた場合だけ。
+        let _ = pin_current_thread(&self.previous);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +386,7 @@ mod tests {
         let allowed = [0, 1, 2, 12, 13];
         let topology = read_topology(dir.path(), &allowed).unwrap();
         assert_eq!(topology.nodes, [vec![0, 1, 2], vec![12, 13]]);
+        assert_eq!(topology.allowed(), allowed);
     }
 
     #[test]
@@ -385,6 +421,7 @@ mod tests {
     fn plan_assigns_threads_deterministically() {
         let topology = NumaTopology {
             nodes: vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+            allowed: (0..8).collect(),
         };
         let plan = NumaPlan::new(&topology, 5);
         assert_eq!(plan.thread_nodes, vec![0, 0, 0, 1, 1]);

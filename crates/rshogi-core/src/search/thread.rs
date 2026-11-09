@@ -92,21 +92,28 @@ mod imp {
             self.search_tune_params = search_tune_params;
 
             for id in 1..=helper_count {
-                let thread = Thread::new(
+                let worker = WorkerArgs {
                     id,
-                    Arc::clone(&tt),
-                    Arc::clone(&eval_hash),
-                    Arc::clone(&shared_histories),
-                    Arc::clone(&self.stop),
-                    Arc::clone(&self.ponderhit),
-                    Arc::clone(&self.increase_depth_shared),
+                    tt: Arc::clone(&tt),
+                    eval_hash: Arc::clone(&eval_hash),
+                    shared_histories: Arc::clone(&shared_histories),
                     max_moves_to_draw,
                     search_tune_params,
-                );
+                };
+                let signals = Signals {
+                    stop: Arc::clone(&self.stop),
+                    ponderhit: Arc::clone(&self.ponderhit),
+                    increase_depth_shared: Arc::clone(&self.increase_depth_shared),
+                };
                 #[cfg(target_os = "linux")]
-                if let Some(plan) = &self.numa_plan {
-                    thread.pin_to(plan.cpus_of_thread(id).to_vec());
-                }
+                let thread = match &self.numa_plan {
+                    Some(plan) => {
+                        Thread::new_pinned(worker, signals, plan.cpus_of_thread(id).to_vec())
+                    }
+                    None => Thread::new(worker, signals),
+                };
+                #[cfg(not(target_os = "linux"))]
+                let thread = Thread::new(worker, signals);
                 self.threads.push(thread);
             }
         }
@@ -118,6 +125,19 @@ mod imp {
             self.wait_for_search_finished();
             self.threads.clear();
             self.numa_plan = plan;
+        }
+
+        /// 割り当てを外し、helper を作り直さずに `cpus` (プロセスが使える CPU 全体) へ固定し直す。
+        ///
+        /// 作り直すと新しいスレッドは呼び出し元の固定を継ぐので、固定された探索スレッドから
+        /// 呼ばれても helper が 1 node に閉じ込められないよう、各 helper 自身に固定し直させる。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn release_numa_plan(&mut self, cpus: &[usize]) {
+            self.wait_for_search_finished();
+            self.numa_plan = None;
+            for thread in &self.threads {
+                thread.pin_to(cpus.to_vec());
+            }
         }
 
         /// helper の CPU 固定に失敗した最初の理由。
@@ -278,28 +298,40 @@ mod imp {
         handle: Option<JoinHandle<()>>,
     }
 
-    impl Thread {
-        fn new(
-            id: usize,
-            tt: Arc<TranspositionTable>,
-            eval_hash: Arc<EvalHash>,
-            shared_histories: Arc<SharedHistories>,
-            stop: Arc<AtomicBool>,
-            ponderhit: Arc<AtomicBool>,
-            increase_depth_shared: Arc<AtomicBool>,
-            max_moves_to_draw: i32,
-            search_tune_params: SearchTuneParams,
-        ) -> Self {
-            let worker = SearchWorker::new_with_shared(
-                tt,
-                eval_hash,
-                shared_histories,
-                max_moves_to_draw,
-                id,
-                search_tune_params,
-            );
+    /// helper の SearchWorker を作るための引数。
+    struct WorkerArgs {
+        id: usize,
+        tt: Arc<TranspositionTable>,
+        eval_hash: Arc<EvalHash>,
+        shared_histories: Arc<SharedHistories>,
+        max_moves_to_draw: i32,
+        search_tune_params: SearchTuneParams,
+    }
+
+    impl WorkerArgs {
+        fn build(self) -> Box<SearchWorker> {
+            SearchWorker::new_with_shared(
+                self.tt,
+                self.eval_hash,
+                self.shared_histories,
+                self.max_moves_to_draw,
+                self.id,
+                self.search_tune_params,
+            )
+        }
+    }
+
+    /// main と共有する停止・ponderhit・深さ延長のフラグ。
+    struct Signals {
+        stop: Arc<AtomicBool>,
+        ponderhit: Arc<AtomicBool>,
+        increase_depth_shared: Arc<AtomicBool>,
+    }
+
+    impl ThreadInner {
+        fn new(worker: Box<SearchWorker>, signals: Signals) -> Arc<Self> {
             let progress = Arc::new(SearchProgress::new());
-            let inner = Arc::new(ThreadInner {
+            Arc::new(Self {
                 worker: Mutex::new(worker),
                 state: Mutex::new(ThreadState {
                     searching: true,
@@ -307,18 +339,62 @@ mod imp {
                     task: None,
                 }),
                 condvar: Condvar::new(),
-                stop,
-                ponderhit,
-                increase_depth_shared,
+                stop: signals.stop,
+                ponderhit: signals.ponderhit,
+                increase_depth_shared: signals.increase_depth_shared,
                 progress,
                 #[cfg(target_os = "linux")]
                 pin_error: Mutex::new(None),
-            });
+            })
+        }
+    }
+
+    impl Thread {
+        fn new(worker: WorkerArgs, signals: Signals) -> Self {
+            let id = worker.id;
+            let inner = ThreadInner::new(worker.build(), signals);
             let inner_clone = Arc::clone(&inner);
             let handle = std::thread::Builder::new()
                 .stack_size(SEARCH_STACK_SIZE)
                 .spawn(move || idle_loop(inner_clone))
                 .expect("failed to spawn search helper thread");
+
+            let thread = Self {
+                id,
+                inner,
+                handle: Some(handle),
+            };
+            thread.wait_for_search_finished();
+            thread
+        }
+
+        /// `cpus` に固定してから、そのスレッドの上で SearchWorker を確保・初期化する。
+        /// 履歴などスレッドごとの表は first-touch で固定先の node のメモリに載る。
+        #[cfg(target_os = "linux")]
+        fn new_pinned(worker: WorkerArgs, signals: Signals, cpus: Vec<usize>) -> Self {
+            let id = worker.id;
+            let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+            let (inner_tx, inner_rx) = std::sync::mpsc::channel::<Arc<ThreadInner>>();
+            let handle = std::thread::Builder::new()
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn(move || {
+                    let pin_error = pin_current_thread(&cpus).err();
+                    if worker_tx.send((worker.build(), pin_error)).is_err() {
+                        return;
+                    }
+                    if let Ok(inner) = inner_rx.recv() {
+                        idle_loop(inner);
+                    }
+                })
+                .expect("failed to spawn search helper thread");
+            let (worker, pin_error) = worker_rx
+                .recv()
+                .expect("search helper thread exited before creating its worker");
+            let inner = ThreadInner::new(worker, signals);
+            *inner.pin_error.lock().unwrap() = pin_error;
+            inner_tx
+                .send(Arc::clone(&inner))
+                .expect("search helper thread exited before starting its idle loop");
 
             let thread = Self {
                 id,
@@ -341,7 +417,7 @@ mod imp {
             self.schedule_task(ThreadTask::ClearHistories);
         }
 
-        /// 固定はそのスレッド自身が行う必要があるので task として渡し、終わるまで待つ。
+        /// 固定し直しはそのスレッド自身が行う必要があるので task として渡し、終わるまで待つ。
         #[cfg(target_os = "linux")]
         fn pin_to(&self, cpus: Vec<usize>) {
             self.schedule_task(ThreadTask::Pin(cpus));

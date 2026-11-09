@@ -3,16 +3,33 @@
 use super::*;
 use crate::nnue::network_halfkp::halfkp_loader_fixture;
 use crate::nnue::{NNUENetwork, get_network, init_nnue_from_bytes};
-use crate::search::numa::{NumaNetwork, NumaTopology, current_affinity};
+use crate::search::numa::{NumaNetwork, NumaTopology, current_affinity, parse_cpulist};
 
 const ARCH: &str = "Features=HalfKP(Friend)[125388->256x2],l2=32,l3=32";
 const STACK_SIZE: usize = 64 * 1024 * 1024;
 
-fn fake_two_node_topology() -> NumaTopology {
+fn halves() -> (Vec<usize>, Vec<usize>) {
     let cpus = current_affinity().unwrap();
     assert!(cpus.len() >= 2, "CPU が 2 つ以上必要");
     let (first, second) = cpus.split_at(cpus.len() / 2);
-    NumaTopology::from_nodes(vec![first.to_vec(), second.to_vec()])
+    (first.to_vec(), second.to_vec())
+}
+
+fn fake_two_node_topology() -> NumaTopology {
+    let (first, second) = halves();
+    NumaTopology::from_nodes(vec![first, second])
+}
+
+/// このプロセスの全スレッドの CPU 集合。
+fn thread_affinities() -> Vec<Vec<usize>> {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.unwrap().path().join("status")).ok())
+        .map(|status| {
+            let line = status.lines().find(|l| l.starts_with("Cpus_allowed_list:")).unwrap();
+            parse_cpulist(line.trim_start_matches("Cpus_allowed_list:")).unwrap()
+        })
+        .collect()
 }
 
 fn search_nodes(search: &mut Search) -> (u64, Move) {
@@ -61,10 +78,13 @@ fn check_numa_wiring() {
     assert!(worker_network(plain.worker.as_ref().unwrap()).is_none());
 
     // 2 node・2 スレッド: main は node 0、helper は node 1 の写しを読む。
+    let all_cpus = current_affinity().unwrap();
+    let (_, second_node) = halves();
     let mut numa = Search::new_with_eval_hash(16, 1);
     numa.set_num_threads(2);
     numa.enable_numa(fake_two_node_topology());
     assert!(numa.prepare_numa_networks().is_none(), "固定と写しの作成に成功する");
+    assert!(thread_affinities().contains(&second_node), "helper は node 1 に固定される");
     let replicas = numa.numa.as_ref().unwrap().replicas.as_ref().unwrap();
     assert!(same(&replicas.source, &global));
     let main_replica = replicas.for_thread(0).unwrap();
@@ -73,8 +93,24 @@ fn check_numa_wiring() {
     assert!(!same(&helper_replica.local, &global));
     assert!(!same(&main_replica.local, &helper_replica.local), "node ごとに別の写し");
 
+    // go は呼んだスレッドを固定して探索し、抜けるときに元の CPU 集合へ戻す。
+    search_nodes(&mut numa);
+    assert_eq!(current_affinity().unwrap(), all_cpus);
+
+    // 写しを作れなかったときの退避: helper は作り直さずに全 CPU へ固定し直す。
+    let helper_id = numa.thread_pool.helper_threads()[0].id();
+    numa.fall_back_to_shared_network();
+    assert!(numa.numa.is_none());
+    assert_eq!(numa.thread_pool.helper_threads()[0].id(), helper_id);
+    assert!(helper_networks(&numa).iter().all(Option::is_none));
+    assert!(thread_affinities().iter().all(|cpus| *cpus == all_cpus));
+    numa.enable_numa(fake_two_node_topology());
+    assert!(numa.prepare_numa_networks().is_none());
+
     // 1 スレッドの固定深さ探索は none と同じ木になる。
     numa.set_num_threads(1);
+    numa.reset_to_fresh_state();
+    numa.clear_eval_hash();
     assert!(helper_networks(&numa).is_empty());
     assert_eq!(search_nodes(&mut numa), expected);
     let main = worker_network(numa.worker.as_ref().unwrap()).unwrap();
@@ -93,12 +129,13 @@ fn check_numa_wiring() {
     numa.clear_eval_hash();
     assert_eq!(search_nodes(&mut numa), expected);
 
-    // none に戻すと写しを捨て、helper も写しを持たない。
+    // none に戻すと写しを捨て、helper も写しを持たず、どのスレッドも固定されない。
     numa.set_num_threads(2);
     assert!(numa.set_numa_policy(NumaPolicy::None).is_none());
     assert!(numa.numa.is_none());
     assert!(worker_network(numa.worker.as_ref().unwrap()).is_none());
     assert!(helper_networks(&numa).iter().all(Option::is_none));
+    assert!(thread_affinities().iter().all(|cpus| *cpus == all_cpus));
 }
 
 #[test]

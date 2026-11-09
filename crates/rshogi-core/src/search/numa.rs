@@ -30,9 +30,10 @@ impl NumaPolicy {
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(all(test, target_os = "linux", feature = "halfkx-arch"))]
-pub(crate) use linux::current_affinity;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    NumaDetection, NumaNetwork, NumaPlan, NumaReplicas, NumaTopology, detect, pin_current_thread,
+    AffinityGuard, NumaDetection, NumaNetwork, NumaPlan, NumaReplicas, NumaTopology, detect,
+    pin_current_thread,
 };
+#[cfg(all(test, target_os = "linux", feature = "halfkx-arch"))]
+pub(crate) use linux::{current_affinity, parse_cpulist};

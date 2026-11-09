@@ -18,6 +18,7 @@ use crate::types::{Color, MAX_PLY, Square, Value};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::alloc::alloc;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 
@@ -611,10 +612,48 @@ impl<T> Drop for AlignedBox<T> {
 
 impl<T: Zeroable> Clone for AlignedBox<T> {
     fn clone(&self) -> Self {
-        let mut new_box = Self::new_zeroed(self.len);
+        let mut new_box = match FALLIBLE_CLONE.with(Cell::get) {
+            None => Self::new_zeroed(self.len),
+            Some(true) => return Self::new_zeroed(0),
+            Some(false) => match Self::try_new_zeroed(self.len) {
+                Ok(new_box) => new_box,
+                Err(_) => {
+                    FALLIBLE_CLONE.with(|state| state.set(Some(true)));
+                    return Self::new_zeroed(0);
+                }
+            },
+        };
         new_box.copy_from_slice(self);
         new_box
     }
+}
+
+thread_local! {
+    /// [`try_clone_weights`] の実行中だけ `Some`。`Some(true)` は確保に失敗したことを表す。
+    static FALLIBLE_CLONE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// `clone` の中で行う `AlignedBox` の確保を、失敗しても abort しないようにして実行する。
+///
+/// 重みの複製は派生した `Clone` を通るので、確保の失敗を戻り値で伝えられない。そこで実行中の
+/// 確保失敗を thread-local に記録し、失敗した箱は空にしておき、終わってから結果ごと捨てる。
+/// 空の箱を含む途中の値は外へ出さない。重み以外の小さな確保 (`Vec` や `Box`) の失敗は従来どおり。
+pub(crate) fn try_clone_weights<R>(clone: impl FnOnce() -> R) -> std::io::Result<R> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FALLIBLE_CLONE.with(|state| state.set(None));
+        }
+    }
+    FALLIBLE_CLONE.with(|state| state.set(Some(false)));
+    let reset = Reset;
+    let value = clone();
+    let failed = FALLIBLE_CLONE.with(Cell::get) == Some(true);
+    drop(reset);
+    if failed {
+        return Err(std::io::ErrorKind::OutOfMemory.into());
+    }
+    Ok(value)
 }
 
 // SAFETY: T が Send なら AlignedBox<T> も Send
@@ -1212,6 +1251,23 @@ impl AccumulatorCacheGeneric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_clone_weights_copies_or_reports_allocation_failure() {
+        let mut source = AlignedBox::<i16>::new_zeroed(1000);
+        source[7] = 3;
+        let copy = try_clone_weights(|| source.clone()).unwrap();
+        assert_eq!(&copy[..], &source[..]);
+
+        // 確保に失敗した状態を作り、途中の値を捨てて Err になることを確かめる。
+        let result = try_clone_weights(|| {
+            FALLIBLE_CLONE.with(|state| state.set(Some(true)));
+            source.clone()
+        });
+        assert!(result.is_err());
+        assert_eq!(FALLIBLE_CLONE.with(Cell::get), None);
+        assert_eq!(&source.clone()[..], &source[..]);
+    }
 
     #[test]
     fn aligned_box_fallible_allocation_preserves_zeroes_and_alignment() {

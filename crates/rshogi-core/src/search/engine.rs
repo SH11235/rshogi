@@ -286,11 +286,12 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
-    /// USI オプション `NumaPolicy`
-    numa_policy: NumaPolicy,
     /// `NumaPolicy=auto` で有効なときだけ持つ状態。`none` や無効のときは `None` のまま。
     #[cfg(target_os = "linux")]
     numa: Option<NumaState>,
+    /// `go` の中で起きた NUMA の失敗の理由。次の `prepare_numa_networks` で返す。
+    #[cfg(target_os = "linux")]
+    numa_report: Option<String>,
     /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
     #[cfg(test)]
     corrupt_public_pv: Option<Vec<Move>>,
@@ -784,9 +785,10 @@ impl Search {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
             entering_king_rule: EnteringKingRule::default(),
-            numa_policy: NumaPolicy::None,
             #[cfg(target_os = "linux")]
             numa: None,
+            #[cfg(target_os = "linux")]
+            numa_report: None,
             #[cfg(test)]
             corrupt_public_pv: None,
         }
@@ -1073,7 +1075,6 @@ impl Search {
     /// 有効になると helper を node ごとに固定して作り直し、重みの写しは次の
     /// [`Search::prepare_numa_networks`] か `go` で作る。
     pub fn set_numa_policy(&mut self, policy: NumaPolicy) -> Option<String> {
-        self.numa_policy = policy;
         #[cfg(target_os = "linux")]
         {
             let (topology, message) = match policy {
@@ -1104,21 +1105,21 @@ impl Search {
         }
     }
 
-    /// 現在の `NumaPolicy`。
-    pub fn numa_policy(&self) -> NumaPolicy {
-        self.numa_policy
-    }
-
     /// `NumaPolicy=auto` で有効なとき、ロード済みの評価関数の写しを node ごとに作り、各スレッドに
     /// 渡す。評価関数・Threads・NumaPolicy が前回から変わっていなければ何もしない。
     ///
     /// 評価関数のロード後 (isready) に呼ぶと、最初の `go` の持ち時間で写しを作らずに済む。
     /// 呼ばなくても `go` の開始時に同じ処理をする。写しを作れなかったときは NUMA を無効にして
     /// 共有の重みに戻し、その理由を返す。CPU 固定に失敗したスレッドがあればその理由も返す。
+    /// 前回からの間に `go` の中で起きた失敗があれば、その理由も返す。
     pub fn prepare_numa_networks(&mut self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
-            self.sync_numa_networks()
+            let message = self.sync_numa_networks();
+            match (self.numa_report.take(), message) {
+                (Some(earlier), Some(now)) => Some(format!("{earlier}; {now}")),
+                (earlier, now) => earlier.or(now),
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1220,8 +1221,7 @@ impl Search {
                         }
                     }
                     Err(reason) => {
-                        self.numa = None;
-                        self.rebuild_helpers(None);
+                        self.fall_back_to_shared_network();
                         return Some(format!(
                             "NumaPolicy=auto: cannot build per-node networks ({reason}); \
                              behaving as none"
@@ -1238,6 +1238,18 @@ impl Search {
         self.thread_pool
             .numa_pin_error()
             .map(|reason| format!("NumaPolicy=auto: {reason}"))
+    }
+
+    /// 写しを作れなかったときに NUMA をやめ、共有の重みで探索を続けられる状態に戻す。
+    ///
+    /// `go` の中 (main スレッドを固定した後) からも呼ばれるので helper は作り直さず、
+    /// 各 helper をプロセスが使える CPU 全体へ固定し直す。
+    #[cfg(target_os = "linux")]
+    fn fall_back_to_shared_network(&mut self) {
+        self.release_numa_networks();
+        if let Some(numa) = self.numa.take() {
+            self.thread_pool.release_numa_plan(numa.topology.allowed());
+        }
     }
 
     /// helper を `plan` の割り当て (`None` なら固定なし) で作り直す。
@@ -1309,14 +1321,25 @@ impl Search {
         // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
-        // NUMA が有効なら main スレッド (go を呼んだスレッド) も thread 0 の node に固定する。
-        // 固定や写しの作成に失敗しても探索は続けられ (写しが無ければ共有の重みを読む)、
-        // 利用者への報告は isready の prepare_numa_networks が受け持つ。
+        // NUMA が有効なら main スレッド (go を呼んだスレッド) も thread 0 の node に固定し、
+        // go を抜けるときに元の CPU 集合へ戻す。写しの用意は固定より前に済ませ、失敗しても
+        // 共有の重みで探索を続ける。失敗の理由は次の prepare_numa_networks (isready) で返す。
         #[cfg(target_os = "linux")]
-        if let Some(cpus) = self.numa.as_ref().map(|numa| numa.plan.cpus_of_thread(0).to_vec()) {
-            let _ = super::numa::pin_current_thread(&cpus);
-            let _ = self.sync_numa_networks();
-        }
+        let numa_affinity = {
+            if let Some(message) = self.sync_numa_networks() {
+                self.numa_report = Some(message);
+            }
+            match self.numa.as_ref().map(|numa| numa.plan.cpus_of_thread(0).to_vec()) {
+                Some(cpus) => match super::numa::AffinityGuard::pin(&cpus) {
+                    Ok(guard) => Some(guard),
+                    Err(reason) => {
+                        self.numa_report = Some(format!("NumaPolicy=auto: {reason}"));
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
 
         // workerは遅延初期化、再利用する
         let tt_clone = Arc::clone(&self.tt);
@@ -1609,6 +1632,9 @@ impl Search {
 
         // 探索統計レポートを取得（search-stats feature有効時のみ内容あり）
         let stats_report = self.worker.as_ref().map(|w| w.get_stats_report()).unwrap_or_default();
+
+        #[cfg(target_os = "linux")]
+        drop(numa_affinity);
 
         SearchResult {
             best_move,

@@ -483,13 +483,13 @@ pub enum NNUENetwork {
 }
 
 impl NNUENetwork {
-    /// 重みを含めて丸ごと複製する。
+    /// 重みを含めて丸ごと複製する。重みの確保に失敗したら abort せずに `OutOfMemory` を返す。
     ///
     /// 複製先は呼び出したスレッドが確保して書き込むので、Linux の first-touch により
     /// そのスレッドが動いている NUMA node のメモリに載る。共有メモリや file mapping の
     /// backing を持つ重みも私有ヒープへ写す。
-    pub fn deep_clone(&self) -> Self {
-        match self {
+    pub fn try_deep_clone(&self) -> io::Result<Self> {
+        super::accumulator::try_clone_weights(|| match self {
             #[cfg(feature = "nnue-runtime-dimensions")]
             Self::DynamicHalfKx(net) => Self::DynamicHalfKx(Arc::new((**net).clone())),
             #[cfg(feature = "nnue-runtime-dimensions")]
@@ -501,7 +501,7 @@ impl NNUENetwork {
             Self::HalfKP(net) => Self::HalfKP(Arc::new((**net).clone())),
             #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(net) => Self::LayerStacks(Arc::new((**net).clone())),
-        }
+        })
     }
 
     fn requires_board_effects(&self) -> bool {
