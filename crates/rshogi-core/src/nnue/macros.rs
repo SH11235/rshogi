@@ -53,6 +53,7 @@ macro_rules! define_l1_variants {
         ///
         /// L2/L3/活性化の組み合わせごとにバリアントを持つ。
         /// 新しい組み合わせ追加は、このマクロ定義に1行追加するだけ。
+        #[derive(Clone)]
         pub enum $Enum {
             $(
                 $Var(Box<$Ty>),

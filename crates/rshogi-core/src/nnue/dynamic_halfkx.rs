@@ -107,6 +107,7 @@ impl RuntimeFeatureSet {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct DynamicAffine {
     input_dim: usize,
     padded_input: usize,
@@ -296,6 +297,7 @@ impl DynamicAffine {
 }
 
 /// Runtime-dimension HalfKX network.
+#[derive(Clone)]
 pub struct DynamicHalfKxNetwork {
     spec: ArchitectureSpec,
     feature_set: RuntimeFeatureSet,

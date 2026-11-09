@@ -483,6 +483,27 @@ pub enum NNUENetwork {
 }
 
 impl NNUENetwork {
+    /// 重みを含めて丸ごと複製する。
+    ///
+    /// 複製先は呼び出したスレッドが確保して書き込むので、Linux の first-touch により
+    /// そのスレッドが動いている NUMA node のメモリに載る。共有メモリや file mapping の
+    /// backing を持つ重みも私有ヒープへ写す。
+    pub fn deep_clone(&self) -> Self {
+        match self {
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicHalfKx(net) => Self::DynamicHalfKx(Arc::new((**net).clone())),
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicLayerStacks(net) => Self::DynamicLayerStacks(Arc::new((**net).clone())),
+            Self::HalfKaSplit(net) => Self::HalfKaSplit(Arc::new((**net).clone())),
+            Self::HalfKaHmMerged(net) => Self::HalfKaHmMerged(Arc::new((**net).clone())),
+            Self::HalfKaMerged(net) => Self::HalfKaMerged(Arc::new((**net).clone())),
+            Self::HalfKaHmSplit(net) => Self::HalfKaHmSplit(Arc::new((**net).clone())),
+            Self::HalfKP(net) => Self::HalfKP(Arc::new((**net).clone())),
+            #[cfg(feature = "layerstack-arch")]
+            Self::LayerStacks(net) => Self::LayerStacks(Arc::new((**net).clone())),
+        }
+    }
+
     fn requires_board_effects(&self) -> bool {
         #[cfg(feature = "nnue-runtime-dimensions")]
         if let Self::DynamicLayerStacks(net) = self {

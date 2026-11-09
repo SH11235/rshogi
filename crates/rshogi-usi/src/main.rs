@@ -28,8 +28,8 @@ use rshogi_core::nnue::{
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
-    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
-    SearchInfo, SearchResult, SearchTuneParams,
+    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, NumaPolicy, PonderhitHandle,
+    Search, SearchInfo, SearchResult, SearchTuneParams,
 };
 use rshogi_core::types::{Color, EnteringKingRule, Move, PieceType};
 use serde_json::json;
@@ -343,6 +343,7 @@ impl UsiEngine {
         // オプション（将来的に追加）
         println!("option name USI_Hash type spin default 256 min 1 max 4096");
         println!("option name Threads type spin default 1 min 1 max 512");
+        println!("option name NumaPolicy type combo default none var none var auto");
         println!("option name USI_Ponder type check default false");
         println!("option name Stochastic_Ponder type check default false");
         println!("option name MultiPV type spin default 1 min 1 max 500");
@@ -530,6 +531,10 @@ impl UsiEngine {
         // 確保と 0 埋めを持ち時間に入れないよう、setoption が出そろった readyok の前に済ませる。
         if let Some(mut search) = self.search.take() {
             self.prepare_eval_hash(&mut search);
+            // 評価関数の読み直しや Threads の変更の後でも、node ごとの写しを go の前に作り直しておく。
+            if let Some(message) = search.prepare_numa_networks() {
+                println!("info string {message}");
+            }
             self.search = Some(search);
         }
         self.maybe_report_page_status();
@@ -959,6 +964,16 @@ impl UsiEngine {
                     search.set_num_threads(num);
                 }
             }
+            "NumaPolicy" => match NumaPolicy::from_usi(&value) {
+                Some(policy) => {
+                    if let Some(search) = self.search.as_mut()
+                        && let Some(message) = search.set_numa_policy(policy)
+                    {
+                        println!("info string {message}");
+                    }
+                }
+                None => println!("info string unknown NumaPolicy value: {value}"),
+            },
             "NetworkDelay" => {
                 if let Ok(v) = value.parse::<i64>()
                     && let Some(search) = self.search.as_mut()

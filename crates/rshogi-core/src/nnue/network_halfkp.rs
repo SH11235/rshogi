@@ -364,6 +364,7 @@ impl<const L1: usize> Default for AccumulatorStackHalfKP<L1> {
 ///
 /// static版と同じくbiasesをインラインで保持し、ポインタ間接参照を排除。
 #[repr(C, align(64))]
+#[derive(Clone)]
 pub struct FeatureTransformerHalfKP<const L1: usize> {
     /// バイアス [L1]（64バイトアラインメント、インライン）
     pub biases: AlignedI16<L1>,
@@ -1117,6 +1118,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 /// スクランブル形式 `weights[input_chunk][output][4]`、それ以外では行優先
 /// `weights[output][input]`。
 /// スクランブル形式ではループ逆転で入力をブロードキャストして全出力に同時適用する。
+#[derive(Clone)]
 pub struct AffineTransformHalfKP<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
@@ -1546,6 +1548,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
+#[derive(Clone)]
 pub struct NetworkHalfKP<
     const L1: usize,
     const FT_OUT: usize,

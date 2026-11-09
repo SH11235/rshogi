@@ -198,6 +198,7 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 /// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
 /// FT::DIMENSIONS 次元 + L1 次元 Feature Transformer + `num_buckets` 個の bucket
 /// による LayerStacks。`num_buckets` は net file の header から読まれる。
+#[derive(Clone)]
 pub struct NetworkLayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -1084,6 +1085,7 @@ pub type NetworkLayerStacks1536x16x64 = NetworkLayerStacks<
 ///
 /// **重要**: 大会ビルドでは必ず単一 (FT, 寸法) のみを有効化すること。複数
 /// バリアントを同時有効にすると dispatch match の overhead が出る (実測 ~5%)。
+#[derive(Clone)]
 pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     #[cfg(feature = "layerstacks-1536x16x32")]
     L1536x16x32(
@@ -2223,6 +2225,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
 ///
 /// active な FT variant は `ft-*` feature で、active な寸法の variant は `layerstacks-*` feature で
 /// 制御される。
+#[derive(Clone)]
 pub enum LayerStacksNetwork {
     #[cfg(feature = "nnue-effect-bucket")]
     HalfKaHmMergedEffectBucket(LsNetByFt<HalfKaHmMergedSpec>),

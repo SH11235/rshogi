@@ -15,7 +15,7 @@ use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
 use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
 #[cfg(feature = "halfkx-arch")]
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
-use super::{DirtyPiece, NNUENetwork, get_network};
+use super::{DirtyPiece, NNUENetwork};
 #[cfg(feature = "layerstack-arch")]
 use super::{LayerStacksAccCache, LayerStacksAccStack, LayerStacksNetwork};
 #[cfg(feature = "nnue-runtime-dimensions")]
@@ -140,8 +140,8 @@ pub(crate) enum SearchEvaluator {
 }
 
 impl SearchEvaluator {
-    pub(crate) fn prepare(&mut self) {
-        let network = get_network();
+    /// `network` は探索スレッドが読む重み (通常は `get_network()`、NUMA 有効時は node の写し)。
+    pub(crate) fn prepare(&mut self, network: Option<Arc<NNUENetwork>>) {
         // 静的 LayerStacks の探索はロード済み net を MaterialLevel より優先する。
         #[cfg(feature = "layerstack-arch")]
         if let Some(net) = &network

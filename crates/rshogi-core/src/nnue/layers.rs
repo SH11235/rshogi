@@ -462,6 +462,7 @@ pub(crate) unsafe fn haddx4(
 }
 
 /// アフィン変換層
+#[derive(Clone)]
 pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
     pub biases: [i32; OUTPUT_DIM],

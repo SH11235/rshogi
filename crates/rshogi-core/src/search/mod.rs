@@ -17,6 +17,7 @@ mod eval_helpers;
 mod history;
 mod limits;
 mod movepicker;
+mod numa;
 mod pruning;
 mod qsearch;
 mod search_helpers;
@@ -42,6 +43,7 @@ pub use engine::*;
 pub use history::*;
 pub use limits::*;
 pub use movepicker::*;
+pub use numa::NumaPolicy;
 pub use shared_history::SharedHistories;
 pub use skill::*;
 #[cfg(feature = "search-stats")]

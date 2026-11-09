@@ -100,6 +100,7 @@ fn feature_index_from_bona_piece<FT: LsFeatureSpec>(
 ///
 /// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
 #[repr(C, align(64))]
+#[derive(Clone)]
 pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     /// バイアス `[L1]`
     pub biases: Aligned<[i16; L1]>,

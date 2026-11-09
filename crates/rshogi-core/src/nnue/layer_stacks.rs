@@ -53,6 +53,7 @@ pub struct LsSaturationCounts {
 /// - Output: LS_L2_OUT → 1
 ///
 /// 各層は `AffineTransform` を使用し、AVX512/AVX2/SSSE3/WASM SIMD128 に対応。
+#[derive(Clone)]
 pub struct LayerStackBucket<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -380,6 +381,7 @@ impl<
 ///
 /// `buckets` は load 時に 1 回だけ `Vec::with_capacity` + push で構築され、
 /// 以後 **read-only**。ホットパスでは indexing のみで再 alloc は発生しない。
+#[derive(Clone)]
 pub struct LayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,

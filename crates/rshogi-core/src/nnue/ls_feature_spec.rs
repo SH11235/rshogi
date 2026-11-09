@@ -59,6 +59,7 @@ pub trait LsFeatureSpec: 'static {
 }
 
 /// HalfKP (classic NNUE) 用の LS FT 仕様。
+#[derive(Clone)]
 pub struct HalfKpSpec;
 
 impl LsFeatureSpec for HalfKpSpec {
@@ -82,6 +83,7 @@ impl LsFeatureSpec for HalfKpSpec {
 }
 
 /// HalfKaSplit (non-mirror, 両玉別 plane) 用の LS FT 仕様。
+#[derive(Clone)]
 pub struct HalfKaSplitSpec;
 
 impl LsFeatureSpec for HalfKaSplitSpec {
@@ -99,6 +101,7 @@ impl LsFeatureSpec for HalfKaSplitSpec {
 }
 
 /// HalfKaMerged (non-mirror, 両玉同一 plane) 用の LS FT 仕様。
+#[derive(Clone)]
 pub struct HalfKaMergedSpec;
 
 impl LsFeatureSpec for HalfKaMergedSpec {
@@ -117,6 +120,7 @@ impl LsFeatureSpec for HalfKaMergedSpec {
 }
 
 /// HalfKaHmSplit (Half-Mirror, 両玉別 plane) 用の LS FT 仕様。
+#[derive(Clone)]
 pub struct HalfKaHmSplitSpec;
 
 impl LsFeatureSpec for HalfKaHmSplitSpec {
@@ -138,6 +142,7 @@ impl LsFeatureSpec for HalfKaHmSplitSpec {
 }
 
 /// HalfKaHmMerged (Half-Mirror, 両玉同一 plane、現状の v100 系) 用の LS FT 仕様。
+#[derive(Clone)]
 pub struct HalfKaHmMergedSpec;
 
 impl LsFeatureSpec for HalfKaHmMergedSpec {

@@ -13,6 +13,8 @@ mod imp {
     use crate::types::Depth;
 
     use crate::search::engine::{SearchProgress, search_helper};
+    #[cfg(target_os = "linux")]
+    use crate::search::numa::{NumaNetwork, NumaPlan, pin_current_thread};
     use crate::search::{
         LimitsType, SearchTuneParams, SearchWorker, SharedHistories, TimeManagement, TimeOptions,
     };
@@ -26,6 +28,9 @@ mod imp {
         ponderhit: Arc<AtomicBool>,
         increase_depth_shared: Arc<AtomicBool>,
         search_tune_params: SearchTuneParams,
+        /// `NumaPolicy=auto` で有効なときのスレッドと node の対応。`None` ならスレッドを固定しない。
+        #[cfg(target_os = "linux")]
+        numa_plan: Option<Arc<NumaPlan>>,
     }
 
     impl ThreadPool {
@@ -53,6 +58,8 @@ mod imp {
                 ponderhit,
                 increase_depth_shared,
                 search_tune_params,
+                #[cfg(target_os = "linux")]
+                numa_plan: None,
             };
             pool.set_num_threads(
                 num_threads,
@@ -85,7 +92,7 @@ mod imp {
             self.search_tune_params = search_tune_params;
 
             for id in 1..=helper_count {
-                self.threads.push(Thread::new(
+                let thread = Thread::new(
                     id,
                     Arc::clone(&tt),
                     Arc::clone(&eval_hash),
@@ -95,7 +102,42 @@ mod imp {
                     Arc::clone(&self.increase_depth_shared),
                     max_moves_to_draw,
                     search_tune_params,
-                ));
+                );
+                #[cfg(target_os = "linux")]
+                if let Some(plan) = &self.numa_plan {
+                    thread.pin_to(plan.cpus_of_thread(id).to_vec());
+                }
+                self.threads.push(thread);
+            }
+        }
+
+        /// スレッドと node の対応を差し替える。helper は作り直すまで前の固定のままなので、
+        /// ここで全て破棄し、続く `set_num_threads` で新しい対応のもとに作り直させる。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn set_numa_plan(&mut self, plan: Option<Arc<NumaPlan>>) {
+            self.wait_for_search_finished();
+            self.threads.clear();
+            self.numa_plan = plan;
+        }
+
+        /// helper の CPU 固定に失敗した最初の理由。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn numa_pin_error(&self) -> Option<String> {
+            self.threads
+                .iter()
+                .find_map(|thread| thread.inner.pin_error.lock().unwrap().clone())
+        }
+
+        /// 各 helper が読む重みの写しを差し替える。`network_for` は helper の id を受け取る。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn set_numa_networks(
+            &self,
+            mut network_for: impl FnMut(usize) -> Option<NumaNetwork>,
+        ) {
+            self.wait_for_search_finished();
+            for thread in &self.threads {
+                let network = network_for(thread.id);
+                thread.with_worker(|worker| worker.set_numa_network(network));
             }
         }
 
@@ -199,6 +241,8 @@ mod imp {
         ponderhit: Arc<AtomicBool>,
         increase_depth_shared: Arc<AtomicBool>,
         progress: Arc<SearchProgress>,
+        #[cfg(target_os = "linux")]
+        pin_error: Mutex<Option<String>>,
     }
 
     struct ThreadState {
@@ -210,6 +254,9 @@ mod imp {
     enum ThreadTask {
         Search(Box<SearchTask>),
         ClearHistories,
+        /// このスレッドを与えた CPU 集合に固定する。
+        #[cfg(target_os = "linux")]
+        Pin(Vec<usize>),
     }
 
     struct SearchTask {
@@ -264,6 +311,8 @@ mod imp {
                 ponderhit,
                 increase_depth_shared,
                 progress,
+                #[cfg(target_os = "linux")]
+                pin_error: Mutex::new(None),
             });
             let inner_clone = Arc::clone(&inner);
             let handle = std::thread::Builder::new()
@@ -290,6 +339,13 @@ mod imp {
 
         fn clear_worker(&self) {
             self.schedule_task(ThreadTask::ClearHistories);
+        }
+
+        /// 固定はそのスレッド自身が行う必要があるので task として渡し、終わるまで待つ。
+        #[cfg(target_os = "linux")]
+        fn pin_to(&self, cpus: Vec<usize>) {
+            self.schedule_task(ThreadTask::Pin(cpus));
+            self.wait_for_search_finished();
         }
 
         fn schedule_task(&self, task: ThreadTask) {
@@ -401,6 +457,10 @@ mod imp {
                     inner.progress.reset();
                     let mut worker = inner.worker.lock().unwrap();
                     worker.clear();
+                }
+                #[cfg(target_os = "linux")]
+                Some(ThreadTask::Pin(cpus)) => {
+                    *inner.pin_error.lock().unwrap() = pin_current_thread(&cpus).err();
                 }
                 None => {}
             }

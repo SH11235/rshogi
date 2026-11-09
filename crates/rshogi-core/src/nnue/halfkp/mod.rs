@@ -43,6 +43,7 @@ use crate::types::Value;
 ///
 /// L1 サイズごとにバリアントを持つ。
 /// L2/L3/活性化の追加で変更不要（L1 enum 内に閉じる）。
+#[derive(Clone)]
 pub enum HalfKPNetwork {
     L256(HalfKPL256),
     L512(HalfKPL512),

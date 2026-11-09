@@ -662,6 +662,13 @@ impl<T: mapped_element::Element> WeightBox<T> {
     }
 }
 
+/// 複製は backing によらず私有ヒープへの深い写しになる。
+impl<T: Zeroable> Clone for WeightBox<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 impl<T> Deref for WeightBox<T> {
     type Target = [T];
 
