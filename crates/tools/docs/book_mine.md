@@ -520,7 +520,9 @@ D の priority は保持します。
 棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
-同じ `group` の木は、再採点後に hold でない木の new_priority の最小にそろえます (hold の木は最小の計算に入れず、priority も変えません)。そろえた結果は数字を小さくする変更だけです。
+同じ `group` の木は、受付行に書く最終の priority・hold (下の `own=bw` と読み途中の規則を当てた後) で、hold でない行の priority の最小にそろえます。
+hold の行は最小の計算に入れず、priority も変えません。そろえるのは数字を小さくする変更だけで、`--rerank-keep-below` で保持する木にも当てます。
+表の new_priority も、受付行が hold でなければそろえた値です。
 `own=bw` は表では先後別に採点します。受付行の priority・hold は共通なので、JSONL は小さい priority を採用し、
 hold は両側とも停止可能な場合だけ付けます。片側でも読み途中なら元の hold を保持します。
 表と集計は側ごとの提案を示します。
@@ -535,7 +537,7 @@ hold は両側とも停止可能な場合だけ付けます。片側でも読み
 読み途中の木も priority の順に並べるだけで先に置きません。表は `group basis trees held boxes priority_min priority_max full part none remaining`
 の列をタブ区切りで持ち、group の昇順です。basis は current (今の受付) と、再採点と一緒のときだけ rerank (再採点の更新行を受け付けた後の priority・hold) の 2 行です。
 trees・priority の幅・full/part/none・remaining は hold でない木、held は hold の木の数で、`own=bw` は先後を別の木として数えます。boxes はその group の hold でない木がある台です。
-標準出力には basis ごとに group の数と、全部 full・全部 none・混在の group の数を出します。
+標準出力には basis ごとに group の数と、全部 full・全部 none・混在・全部 hold (hold でない木が無い) の group の数を出します。
 `--group-table` だけなら walk 表・元データは要りません。
 
 計画は点検時点の remaining から始め、次の順で作ります。capacity が 0 の台の計画 ratio は無限大です。

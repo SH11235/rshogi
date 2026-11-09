@@ -2490,6 +2490,34 @@ mod tests {
     }
 
     #[test]
+    fn group_only_change_keeps_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = "sfen 4k4/9/9/9/9/9/9/9/4K4 b - 11";
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+        };
+        let first = format!("{}\n", json!({"id":"t","root":root,"own":"b","depth":1}));
+        let (checkpoint, built) = Checkpoint::new(dir.path().join("trees"), "fp".into()).apply(
+            first.as_bytes(),
+            &defaults,
+            &Sha256::new(),
+            &[],
+        );
+        assert_eq!(built.len(), 1);
+        let second = format!(
+            "{}\n",
+            json!({"id":"t","root":root,"own":"b","depth":1,"priority":5,"group":"g"})
+        );
+        let (checkpoint, built) =
+            checkpoint.apply(second.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty() && built.is_empty());
+        assert_eq!((checkpoint.targets[0].generation, checkpoint.targets[0].priority), (1, 5));
+    }
+
+    #[test]
     fn fixed_readings_preserve_normal_dispatch_across_shared_trees() {
         let dir = tempfile::tempdir().unwrap();
         let root = "4k4/9/9/9/9/9/9/9/4K4 b -";

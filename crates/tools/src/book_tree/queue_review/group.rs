@@ -49,14 +49,15 @@ fn simulate<'a>(
         let mut total = 0u64;
         for (priority, tree, group) in active {
             let remaining = tree.remaining(tree_size);
-            let reach = if (total + remaining) as f64 <= capacity {
+            let after = total.checked_add(remaining).context("残りの量が大きすぎます")?;
+            let reach = if after as f64 <= capacity {
                 Reach::Full
             } else if (total as f64) < capacity {
                 Reach::Part
             } else {
                 Reach::None
             };
-            total = total.checked_add(remaining).context("残りの量が大きすぎます")?;
+            total = after;
             let Some(group) = group else {
                 continue;
             };
@@ -95,9 +96,11 @@ pub(super) fn table(
     let mut tables = Vec::new();
     for (basis, lines) in bases {
         let groups = simulate(boxes, metrics, tree_size, lines)?;
-        let (mut full, mut none, mut mixed) = (0, 0, 0);
-        for stats in groups.values().filter(|s| s.trees > 0) {
-            if stats.full == stats.trees {
+        let (mut full, mut none, mut mixed, mut shelved) = (0, 0, 0, 0);
+        for stats in groups.values() {
+            if stats.trees == 0 {
+                shelved += 1;
+            } else if stats.full == stats.trees {
                 full += 1;
             } else if stats.none == stats.trees {
                 none += 1;
@@ -106,7 +109,7 @@ pub(super) fn table(
             }
         }
         summary.push(format!(
-            "group ({basis}): {} 組、全部読み切る={full} 手が付かない={none} 混在={mixed}",
+            "group ({basis}): {} 組、全部読み切る={full} 手が付かない={none} 混在={mixed} 全部 hold={shelved}",
             groups.len()
         ));
         tables.push((basis, groups));

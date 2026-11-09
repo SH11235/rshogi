@@ -251,16 +251,44 @@ pub(super) fn build(
             running,
         });
     }
+    let mut lines = LineStates::new();
+    for row in &rows {
+        let desired = (row.priority, row.hold);
+        lines
+            .entry((row.box_index, row.tree.id.clone()))
+            .and_modify(|previous| {
+                previous.0 = previous.0.min(desired.0);
+                previous.1 &= desired.1;
+            })
+            .or_insert(desired);
+    }
+    for ((i, id), (_, hold)) in &mut lines {
+        if started.contains(&(*i, id.as_str())) {
+            *hold = boxes[*i].queue[id].line.hold;
+        }
+    }
+    // 受付行に書く最終の hold で group の最小を取る。bw の片側や読み途中の規則で
+    // 行ごとの hold と受付行の hold は食い違うことがある。
+    let group_of = |(i, id): &(usize, String)| boxes[*i].queue[id].line.group.as_deref();
     let mut group_min: BTreeMap<&str, u32> = BTreeMap::new();
-    for row in rows.iter().filter(|r| !r.hold) {
-        if let Some(group) = row.queued.line.group.as_deref() {
-            let min = group_min.entry(group).or_insert(row.priority);
-            *min = (*min).min(row.priority);
+    for (key, &(priority, hold)) in &lines {
+        if let Some(group) = group_of(key).filter(|_| !hold) {
+            let min = group_min.entry(group).or_insert(priority);
+            *min = (*min).min(priority);
+        }
+    }
+    let aligned_min = |key: &(usize, String), hold: bool| {
+        group_of(key).filter(|_| !hold).and_then(|g| group_min.get(g)).copied()
+    };
+    for (key, (priority, hold)) in &mut lines {
+        if let Some(min) = aligned_min(key, *hold) {
+            *priority = (*priority).min(min);
         }
     }
     let mut aligned = 0;
-    for row in rows.iter_mut().filter(|r| !r.hold) {
-        if let Some(&min) = row.queued.line.group.as_deref().and_then(|g| group_min.get(g))
+    for row in &mut rows {
+        let key = (row.box_index, row.tree.id.clone());
+        if let Some(min) = aligned_min(&key, lines[&key].1)
             && min < row.priority
         {
             row.priority = min;
@@ -279,12 +307,11 @@ pub(super) fn build(
         outputs: Vec::new(),
         payloads: Vec::new(),
         summary: String::new(),
-        lines: BTreeMap::new(),
+        lines,
     };
     let mut counts = BTreeMap::from([('A', 0), ('B', 0), ('C', 0), ('D', 0)]);
     let (mut raised, mut lowered, mut released, mut held) = (0, 0, 0, 0);
     let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\n".to_vec();
-    let mut updates: BTreeMap<(usize, &str), (u32, bool)> = BTreeMap::new();
     for row in &rows {
         let tree = row.tree;
         *counts.entry(row.class).or_default() += 1;
@@ -321,23 +348,6 @@ pub(super) fn build(
             row.queued.line.root,
             row.queued.line.group.as_deref().unwrap_or_default()
         )?;
-        let desired = (row.priority, row.hold);
-        updates
-            .entry((row.box_index, &tree.id))
-            .and_modify(|previous| {
-                previous.0 = previous.0.min(desired.0);
-                previous.1 &= desired.1;
-            })
-            .or_insert(desired);
-    }
-    for (&(i, id), &(priority, hold)) in &updates {
-        let queued = &boxes[i].queue[id];
-        let hold = if started.contains(&(i, id)) {
-            queued.line.hold
-        } else {
-            hold
-        };
-        result.lines.insert((i, id.to_owned()), (priority, hold));
     }
     if let Some(path) = &args.rerank_table {
         result.outputs.push(path.clone());
