@@ -305,9 +305,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         }
         inputs.push(("--bridge-exclude-queue", path.as_path()));
     }
-    if let Some(freq) = &args.weight.opp_freq {
-        inputs.push(("--opp-freq", freq.as_path()));
-    }
+    inputs.extend(args.weight.inputs());
     if let Some(freq) = &args.deep.deep_opp_freq {
         inputs.push(("--deep-opp-freq", freq.as_path()));
         if args.apply {
@@ -3372,6 +3370,10 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
                 max_ply: 80,
                 weight_floor: 1e-5,
                 min_weight: 0.0,
+                opp_book: None,
+                opp_book_diff: 30,
+                opp_book_best: 0.9,
+                opp_book_first: false,
             },
             threads: 1,
         }

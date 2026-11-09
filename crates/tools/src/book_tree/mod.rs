@@ -186,7 +186,7 @@ enum MasterCommand {
     /// 書き出した定跡とプリセットの整合性・到達局面・循環への入口を検査する
     Check(check::CheckArgs),
     /// 読みの値を book_backprop で伝播し、main が伝播後の 1 位から負ける局面を点検する
-    Audit(audit::AuditArgs),
+    Audit(Box<audit::AuditArgs>),
     /// 相手の定跡に無い手で定跡に戻ると、戻った先の値が手前で期待した値より下がる所を一覧にする
     Rejoin(rejoin::RejoinArgs),
     /// 相手の合法手で定跡に戻る千日手の循環を、自分の手番の手を外して塞ぐ手の組を出す
@@ -211,7 +211,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Diff(args) => book_diff::run(args),
         MasterCommand::Validate(args) => master_table::run_validate(args),
         MasterCommand::Check(args) => check::run(args),
-        MasterCommand::Audit(args) => audit::run(args),
+        MasterCommand::Audit(args) => audit::run(*args),
         MasterCommand::Rejoin(args) => rejoin::run(args),
         MasterCommand::Cycles(args) => cycles::run(args),
         MasterCommand::Walk(args) => walk::run(args),

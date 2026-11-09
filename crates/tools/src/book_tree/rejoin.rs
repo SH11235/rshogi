@@ -104,7 +104,7 @@ pub(super) struct WeightArgs {
     /// 相手の手の頻度の定跡 (`book_from_csa` の .db、手の count を局数として使う)。渡すと重みを付ける
     #[arg(long)]
     pub opp_freq: Option<PathBuf>,
-    /// 重み: 相手の局数がこれ未満の局面と手では辿るのを止める
+    /// 重み: 相手の局数がこれ未満の局面と手では頻度で指さない (`--opp-book` が無ければそこで止める)
     #[arg(long, default_value_t = 3)]
     pub min_games: u64,
     /// 重み: 初期局面からこの手数まで辿る
@@ -116,6 +116,19 @@ pub(super) struct WeightArgs {
     /// 一覧に出す重みの下限 (`--opp-freq` を渡したときだけ使う)。rejoin は自分の手番の局面の展開にも使う
     #[arg(long, default_value_t = 0.0)]
     pub min_weight: f64,
+    /// 重み: 相手の手の大きい定跡 (.db か .ybb)。`--opp-freq` の局数が足りない局面ではこの定跡の手で指す
+    /// (`master walk --opp-book` と同じ辿り方)
+    #[arg(long, requires = "opp_freq")]
+    pub opp_book: Option<PathBuf>,
+    /// 重み: 大きい定跡で指すとき、最善の値からこの差以内の手を指す
+    #[arg(long, default_value_t = 30, requires = "opp_book")]
+    pub opp_book_diff: i32,
+    /// 重み: 大きい定跡で指すとき、最善 (同じ値の手は等分) に割り当てる重み。残りを差以内の他の手で等分する
+    #[arg(long, default_value_t = 0.9, requires = "opp_book")]
+    pub opp_book_best: f64,
+    /// 重み: 相手の手番では大きい定跡を先に引き、局面があればその手だけで指す
+    #[arg(long, requires = "opp_book")]
+    pub opp_book_first: bool,
 }
 
 impl WeightArgs {
@@ -124,24 +137,49 @@ impl WeightArgs {
             self.weight_floor >= 0.0 && self.min_weight >= 0.0,
             "重みの下限は 0 以上にしてください"
         );
+        ensure!(
+            (0.0..=1.0).contains(&self.opp_book_best),
+            "--opp-book-best は 0〜1 にしてください"
+        );
+        ensure!(self.opp_book_diff >= 0, "--opp-book-diff は 0 以上にしてください");
         Ok(())
     }
 
-    pub fn options(&self) -> WeightOptions {
+    pub fn options(&self) -> WeightOptions<'_> {
         WeightOptions {
             min_games: self.min_games,
             max_ply: self.max_ply,
             floor: self.weight_floor,
+            book: self.opp_book.as_deref(),
+            book_diff: self.opp_book_diff,
+            book_best: self.opp_book_best,
+            book_first: self.opp_book_first,
         }
+    }
+
+    /// 入力のファイル (出力と同じでないかの検査に使う)。
+    pub fn inputs(&self) -> Vec<(&'static str, &std::path::Path)> {
+        let mut inputs = Vec::new();
+        if let Some(freq) = &self.opp_freq {
+            inputs.push(("--opp-freq", freq.as_path()));
+        }
+        if let Some(book) = &self.opp_book {
+            inputs.push(("--opp-book", book.as_path()));
+        }
+        inputs
     }
 }
 
 /// 重みの付け方。
 #[derive(Debug, Clone, Copy)]
-pub(super) struct WeightOptions {
+pub(super) struct WeightOptions<'a> {
     pub min_games: u64,
     pub max_ply: usize,
     pub floor: f64,
+    pub book: Option<&'a std::path::Path>,
+    pub book_diff: i32,
+    pub book_best: f64,
+    pub book_first: bool,
 }
 
 pub(super) fn run(args: RejoinArgs) -> Result<()> {
@@ -152,9 +190,7 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
     ensure!(args.line > 0, "--line は 1 以上にしてください");
     args.weight.check()?;
     let mut inputs = vec![("--master", args.master.as_path())];
-    if let Some(freq) = &args.weight.opp_freq {
-        inputs.push(("--opp-freq", freq.as_path()));
-    }
+    inputs.extend(args.weight.inputs());
     reject_same_file(&args.table, &inputs)?;
     let (positions, _) = read_master(&args.master)?;
     let draws = DrawValues {
@@ -362,15 +398,24 @@ pub(super) fn find_rejoins(
 }
 
 /// 自分の側の局面に来る重み。自分は main を指し、相手は局面ごとの強い対局の手の頻度で指す。相手の局数が
-/// `min_games` 未満の局面・手、自分の手番で元データに無い局面、重みが `floor` 未満の局面、`max_ply` 手で止める。
+/// `min_games` 未満の局面・手の分は大きい定跡 (`book`) の手で指し、それも無ければ止める。自分の手番で元データに
+/// 無い局面、重みが `floor` 未満の局面、`max_ply` 手で止める。
 /// 同じ手数で同じ局面に来た重みは足し合わせ、局面の重みは手数をまたいで足す。
 pub(super) fn reach_weights(
     positions: &BTreeMap<String, MasterPosition>,
     freq: &BookDb,
     side: &str,
     start: &str,
-    options: WeightOptions,
+    options: WeightOptions<'_>,
 ) -> Result<HashMap<String, f64>> {
+    // 先手と後手を並べて辿るので、大きい定跡は呼び出しごとに開く。
+    let book = options.book.map(super::walk::open_book).transpose()?;
+    let opp = super::walk::OppOptions {
+        min_games: options.min_games,
+        book_diff: options.book_diff,
+        book_best: options.book_best,
+        book_first: options.book_first,
+    };
     let mut reach: HashMap<String, f64> = HashMap::new();
     let mut layer: BTreeMap<String, f64> = BTreeMap::from([(start.to_owned(), 1.0)]);
     for ply in 0..=options.max_ply {
@@ -393,18 +438,43 @@ pub(super) fn reach_weights(
                 }
                 continue;
             }
-            let Some(entry) = freq.entries.get(&key) else {
-                continue;
+            // 大きい定跡の手の割り振りは `master walk --opp-book` と同じ。
+            let book_shares = |book: &rshogi_book::Book| -> Result<Vec<(String, f64)>> {
+                let moves = book.entry_moves(&format!("{key} 1"))?;
+                let mut shares = super::walk::book_moves(&moves, opp);
+                shares.retain(|(_, share)| *share > 0.0);
+                Ok(shares)
             };
-            let total: u64 = entry.moves.iter().map(|m| m.count).sum();
-            if total < options.min_games {
-                continue;
+            if options.book_first
+                && let Some(book) = &book
+            {
+                let shares = book_shares(book)?;
+                if !shares.is_empty() {
+                    for (mv, share) in shares {
+                        advance(&mv, weight * share);
+                    }
+                    continue;
+                }
             }
-            for m in &entry.moves {
-                if let Some(mv) = &m.move_usi
-                    && m.count >= options.min_games
-                {
-                    advance(mv, weight * m.count as f64 / total as f64);
+            let mut rest = 1.0;
+            if let Some(entry) = freq.entries.get(&key) {
+                let total: u64 = entry.moves.iter().map(|m| m.count).sum();
+                if total >= options.min_games && total > 0 {
+                    for m in &entry.moves {
+                        if let Some(mv) = &m.move_usi
+                            && m.count >= options.min_games
+                        {
+                            advance(mv, weight * m.count as f64 / total as f64);
+                            rest -= m.count as f64 / total as f64;
+                        }
+                    }
+                }
+            }
+            if let Some(book) = &book
+                && rest > 1e-12
+            {
+                for (mv, share) in book_shares(book)? {
+                    advance(&mv, weight * rest * share);
                 }
             }
         }
@@ -492,6 +562,10 @@ mod tests {
                 max_ply: 80,
                 weight_floor: 1e-5,
                 min_weight: 0.0,
+                opp_book: None,
+                opp_book_diff: 30,
+                opp_book_best: 0.9,
+                opp_book_first: false,
             },
             threads: 0,
         }
@@ -537,6 +611,10 @@ mod tests {
             min_games: 3,
             max_ply: 80,
             floor: 1e-5,
+            book: None,
+            book_diff: 30,
+            book_best: 0.9,
+            book_first: false,
         };
         let weights = reach_weights(&positions, &freq(), "b", ROOT, options).unwrap();
         let a = after(ROOT, &["5i4h"]);
@@ -553,6 +631,75 @@ mod tests {
         let table = std::fs::read_to_string(dir.path().join("rejoin.tsv")).unwrap();
         let cells: Vec<&str> = table.lines().nth(1).unwrap().split('\t').collect();
         assert_eq!(cells[14..], ["1.000000", "10", "3"]);
+    }
+
+    #[test]
+    fn weights_fill_rare_share_from_book_like_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = write_master(dir.path());
+        let (positions, _) = read_master(&master).unwrap();
+        let a = after(ROOT, &["5i4h"]);
+        let book = dir.path().join("book.db");
+        std::fs::write(
+            &book,
+            format!("#YANEURAOU-DB2016 1.00\nsfen {a} 2\n5a6b none 50 0 1\n5a5b none 40 0 1\n5a4b none 0 0 1\n"),
+        )
+        .unwrap();
+        let mut options = WeightOptions {
+            min_games: 3,
+            max_ply: 80,
+            floor: 1e-5,
+            book: Some(&book),
+            book_diff: 30,
+            book_best: 0.9,
+            book_first: false,
+        };
+        let close = |x: f64, y: f64| (x - y).abs() < 1e-12;
+        // 局数が min_games 未満の 5a6b に行く 0.1 を、大きい定跡の最善 0.9・差以内の 5a5b 0.1 で割り振る。
+        let weights = reach_weights(&positions, &freq(), "b", ROOT, options).unwrap();
+        assert!(close(weights[&after(&a, &["5a5b"])], 0.61));
+        assert!(close(weights[&after(&a, &["5a4b"])], 0.3));
+        assert!(close(weights[&after(&a, &["5a6b"])], 0.09));
+        options.book_first = true;
+        let weights = reach_weights(&positions, &freq(), "b", ROOT, options).unwrap();
+        assert!(close(weights[&after(&a, &["5a6b"])], 0.9));
+        assert!(close(weights[&after(&a, &["5a5b"])], 0.1));
+        assert!(!weights.contains_key(&after(&a, &["5a4b"])));
+
+        // 頻度の定跡に局面が無ければ、局面の重み全部を大きい定跡で指す。
+        options.book_first = false;
+        let empty = BookDb::default();
+        let weights = reach_weights(&positions, &empty, "b", ROOT, options).unwrap();
+        assert!(close(weights[&after(&a, &["5a6b"])], 0.9));
+        assert!(close(weights[&after(&a, &["5a5b"])], 0.1));
+
+        let freq_path = dir.path().join("freq.db");
+        std::fs::write(&freq_path, freq().to_db_string()).unwrap();
+        let mut with_book = args(dir.path(), 40, Some(freq_path));
+        with_book.weight.opp_book = Some(book.clone());
+        with_book.table = book.clone();
+        let before = std::fs::read_to_string(&book).unwrap();
+        assert!(run_from(with_book, ROOT).is_err());
+        assert_eq!(std::fs::read_to_string(&book).unwrap(), before);
+        let mut bad = args(dir.path(), 40, None);
+        bad.weight.opp_book_best = 1.5;
+        assert!(bad.weight.check().is_err());
+        bad.weight.opp_book_best = 0.9;
+        bad.weight.opp_book_diff = -1;
+        assert!(bad.weight.check().is_err());
+    }
+
+    #[test]
+    fn cli_opp_book_needs_opp_freq() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            weight: WeightArgs,
+        }
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["t", "--opp-book", "b.db"]).is_err());
+        assert!(Cli::try_parse_from(["t", "--opp-book", "b.db", "--opp-freq", "f.db"]).is_ok());
+        assert!(Cli::try_parse_from(["t", "--opp-book-first"]).is_err());
     }
 
     #[test]
