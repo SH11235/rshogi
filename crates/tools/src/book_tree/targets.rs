@@ -21,6 +21,7 @@ pub(super) const DEFAULT_PRIORITY: u32 = 100;
 pub(super) const MAX_PRIORITY: u32 = 1_000_000;
 pub(super) const MAX_DEPTH: usize = 20;
 const MAX_EXTRA: usize = 8;
+const MAX_GROUP: usize = 128;
 
 /// 伸ばし方の値。書かない項目は serve の既定で解決する。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +99,9 @@ pub(super) struct Line {
     pub opts: Opts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memo: Option<String>,
+    /// 一緒に読み切りたい木のまとまりの名前。serve は使わず、`tree queue-review` が読む。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// 根の局面 (手数を除く key と手数)。
@@ -188,6 +192,11 @@ impl Line {
         }
         check_range("depth", self.depth, 0, MAX_DEPTH)?;
         check_range("priority", self.priority, 0, MAX_PRIORITY)?;
+        if let Some(group) = &self.group
+            && (group.is_empty() || group.len() > MAX_GROUP || group.chars().any(char::is_control))
+        {
+            bail!("group は制御文字を含まない 1〜{MAX_GROUP} バイトが必要です: {group:?}");
+        }
         let root = parse_root(&self.root)?;
         for more in &self.roots {
             let more = parse_root(more)?;

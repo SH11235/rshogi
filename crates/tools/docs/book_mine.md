@@ -277,12 +277,13 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 | `game` | 根からの実戦の手順 (USI の配列の配列)。各手順の最初の `depth+1` 手を局面別に合わせる |
 | `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`draw`・`draw_black`・`draw_white` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす) |
 | `memo` | 自由 (道具は読まない) |
+| `group` | 一緒に読み切りたい木のまとまりの名前 (制御文字を含まない 1〜128 バイト)。serve は使わず、`tree queue-review` の再採点と `--group-table` が読む。この欄を知らない古い serve は行を拒否する |
 
 - 行は差分でなく完全な指定で、同じ `id` では検査を通った最後の行が有効です。`root` と `own` は `id` ごとに固定で、変えた行は拒否します (別の `id` で足す)。拒否した行は `targets.status.json` の `rejected` (バイト範囲・`id`・理由) と ALERT に残り、有効な定義は前のままです。
 - `--from` の入力内で同じ `id` が重複すると、id と重複した両方の行番号を示して、追記前にエラーにします。既に受付にある id と同じ行は、定義・hold・priority などの差し替えとして受け付けます。
 - enqueue は行の形と局面・手順の合法性を serve と同じ関数で検査し、通らなければ何も書かずに非 0 で終わります。`<state>/targets.lock` を取ってから、末尾が行の境界であることを確かめ、まとめて 1 回で追記して fsync し、受領を標準出力に出します。末尾に書きかけの行があれば何も変えずに非 0 で終わるので、`--repair` で切り詰めてください (切り詰めた中身を標準エラーに出します)。書き込みが途中で失敗したときは受領を出しません。どこまで入ったかは、キューの改行で終わった行と `targets.status.json` の `processed_bytes`・`rejected` で確かめます。
 - キューは手で書いてもかまいませんが、検査と lock がありません。serve は `targets.lock` を共有で取ってから最後の改行までを読み (enqueue の追記と fsync が終わった行だけを読む)、書きかけの行は次の周回に回します。処理済みの範囲の内容が変わったら、戻るまで受付を止めて ALERT と `targets.status.json` の `queue_error` に書きます (読みは続けます)。キューが通常のファイルでない場合も同じです (起動時にリンクなら起動を拒否します)。戻せないとき (処理済みの行が失われたときなど) は、新しい state dir で起動して `--journal` で同じ台帳を指定し、続けたい対象を足し直します。
-- 段数・`opts`・`game` を変えた行は、既定で解決した定義が今の世代と違うので新しい世代を作り、台帳にある局面は読み直しません。priority・hold・memo だけが違う行は世代を変えません。`opts` を省いた項目は、その行を処理したときの serve の既定で解決して保存します。起動オプションを変えた後に priority だけを変えた行を足すと、解決後の値が変わって新しい世代になります。世代を変えたくないときは解決済みの値を `opts` に書いてください。
+- 段数・`opts`・`game` を変えた行は、既定で解決した定義が今の世代と違うので新しい世代を作り、台帳にある局面は読み直しません。priority・hold・memo・group だけが違う行は世代を変えません。`opts` を省いた項目は、その行を処理したときの serve の既定で解決して保存します。起動オプションを変えた後に priority だけを変えた行を足すと、解決後の値が変わって新しい世代になります。世代を変えたくないときは解決済みの値を `opts` に書いてください。
 
 ### `tree seeds`: 自己対局から次に読む根を作る
 
@@ -461,6 +462,7 @@ book_mine tree queue-review \
 | `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority または hold が変わる行だけを出力。`--hold-out`・`--plan-out` と併用不可 |
 | `--rerank-keep-below <N>` | 10 | 現在の priority が N 未満なら保持し、新たな hold を付けない。hold 解除の候補には含める |
 | `--boost-queue <JSONL>` | なし、繰り返し可 | `tree seeds` などの行の root・roots を重要度が上がった局面として扱う |
+| `--group-table <TSV>` | なし | 受付行の `group` ごとの、締めまでに読み切る見込みの表。再採点と一緒なら再採点後の見込みも出す |
 | `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | walk の出口の目標。先手は先手評価が black 以上、後手は white 未満なら未達扱いにしない |
 | `--max-ratio <F>` | 0.95 | 計画の残り/読める量の上限。有限の非負数 |
 | `--box-deadlines` | 無効 | 台の dir の `deadline` (Unix 秒の整数 1 行) と cutoff の早い方を締めにする。無い台は cutoff |
@@ -518,13 +520,25 @@ D の priority は保持します。
 棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
+同じ `group` の木は、受付行に書く最終の priority・hold (下の `own=bw` と読み途中の規則を当てた後) で、hold でない行の priority の最小にそろえます。
+hold の行は最小の計算に入れず、priority も変えません。そろえるのは数字を小さくする変更だけで、`--rerank-keep-below` で保持する木にも当てます。
+表の new_priority も、受付行が hold でなければそろえた値です。
 `own=bw` は表では先後別に採点します。受付行の priority・hold は共通なので、JSONL は小さい priority を採用し、
 hold は両側とも停止可能な場合だけ付けます。片側でも読み途中なら元の hold を保持します。
 表と集計は側ごとの提案を示します。
 
-再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root`
-の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は held、running (読み途中)、queued です。
-標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数、hold を外す / 付ける数を出します。
+再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root group`
+の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は held、running (読み途中)、queued です。group は受付行の `group` (無ければ空) です。
+標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数とそのうち group でそろえた数、hold を外す / 付ける数を出します。
+
+`--group-table` は台ごとに、finished・failed・hold でない木を priority の小さい順 (同点は progress の順) に並べ、
+木ごとの残り `max(tree-size, requested) - read` (下限 0) を積み上げて、その台の読める量 (`--boxes` の capacity と同じ) と比べます。
+積み上げた後も読める量以内なら full (読み切る見込み)、積み上げる前が読める量未満なら part (途中まで)、それ以外は none (手が付かない) です。
+読み途中の木も priority の順に並べるだけで先に置きません。表は `group basis trees held boxes priority_min priority_max full part none remaining`
+の列をタブ区切りで持ち、group の昇順です。basis は current (今の受付) と、再採点と一緒のときだけ rerank (再採点の更新行を受け付けた後の priority・hold) の 2 行です。
+trees・priority の幅・full/part/none・remaining は hold でない木、held は hold の木の数で、`own=bw` は先後を別の木として数えます。boxes はその group の hold でない木がある台です。
+標準出力には basis ごとに group の数と、全部 full・全部 none・混在・全部 hold (hold でない木が無い) の group の数を出します。
+`--group-table` だけなら walk 表・元データは要りません。
 
 計画は点検時点の remaining から始め、次の順で作ります。capacity が 0 の台の計画 ratio は無限大です。
 

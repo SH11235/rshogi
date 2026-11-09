@@ -582,6 +582,7 @@ fn write_parts(args: &CutArgs, reads: &BTreeMap<String, u32>, first_seen: &[Stri
             let id = format!("{}_p{i}_{s}", args.tag);
             check_id(&id).context("--tag を短くしてください")?;
             let line = Line {
+                group: None,
                 id,
                 root: first.clone(),
                 roots: rest.to_vec(),
@@ -619,6 +620,7 @@ fn queue_lines(root: &RootInfo, tree: &Subtree, tag: &str, priority: u32) -> Res
         let id = format!("{}_{tag}_{s}", root.id);
         check_id(&id).context("根の id か --tag を短くしてください")?;
         let line = Line {
+            group: None,
             id,
             root: first,
             roots: keys.collect(),

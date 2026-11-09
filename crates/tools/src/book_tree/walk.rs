@@ -739,6 +739,7 @@ fn queue_lines(
             Vec::new()
         };
         let line = Line {
+            group: None,
             id: queue_id(&args.tag, root_ply, &r.key, r.side),
             root: format!("sfen {} {root_ply}", r.key),
             roots: Vec::new(),

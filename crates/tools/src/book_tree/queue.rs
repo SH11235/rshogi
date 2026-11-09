@@ -82,6 +82,7 @@ pub struct WaitArgs {
 fn line_from_args(args: &EnqueueArgs) -> Result<Line> {
     let need = |name: &str| format!("--id では --{name} が必要です");
     Ok(Line {
+        group: None,
         id: args.id.clone().context("--id が必要です")?,
         root: args.root.clone().with_context(|| need("root"))?,
         roots: Vec::new(),

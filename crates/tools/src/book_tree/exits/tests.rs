@@ -174,6 +174,7 @@ fn classification_boundaries_and_precedence() {
 
 fn line(id: &str, key: &str, own: &str, depth: usize, hold: bool) -> Line {
     Line {
+        group: None,
         id: id.into(),
         root: format!("sfen {key} 1"),
         roots: Vec::new(),

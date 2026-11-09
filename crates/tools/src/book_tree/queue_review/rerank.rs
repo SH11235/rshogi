@@ -2,10 +2,15 @@ use super::super::targets::{MAX_PRIORITY, read_checked_lines};
 use super::super::{master_table, model};
 use super::*;
 
+/// 台の番号と id ごとの受付行の priority・hold。
+pub(super) type LineStates = BTreeMap<(usize, String), (u32, bool)>;
+
 pub(super) struct Rerank {
     pub outputs: Vec<PathBuf>,
     pub payloads: Vec<Vec<u8>>,
     pub summary: String,
+    /// 台と id ごとの更新後の受付行の priority・hold (変わらない行を含む)。
+    pub lines: LineStates,
 }
 
 struct Row<'a> {
@@ -246,6 +251,50 @@ pub(super) fn build(
             running,
         });
     }
+    let mut lines = LineStates::new();
+    for row in &rows {
+        let desired = (row.priority, row.hold);
+        lines
+            .entry((row.box_index, row.tree.id.clone()))
+            .and_modify(|previous| {
+                previous.0 = previous.0.min(desired.0);
+                previous.1 &= desired.1;
+            })
+            .or_insert(desired);
+    }
+    for ((i, id), (_, hold)) in &mut lines {
+        if started.contains(&(*i, id.as_str())) {
+            *hold = boxes[*i].queue[id].line.hold;
+        }
+    }
+    // 受付行に書く最終の hold で group の最小を取る。bw の片側や読み途中の規則で
+    // 行ごとの hold と受付行の hold は食い違うことがある。
+    let group_of = |(i, id): &(usize, String)| boxes[*i].queue[id].line.group.as_deref();
+    let mut group_min: BTreeMap<&str, u32> = BTreeMap::new();
+    for (key, &(priority, hold)) in &lines {
+        if let Some(group) = group_of(key).filter(|_| !hold) {
+            let min = group_min.entry(group).or_insert(priority);
+            *min = (*min).min(priority);
+        }
+    }
+    let aligned_min = |key: &(usize, String), hold: bool| {
+        group_of(key).filter(|_| !hold).and_then(|g| group_min.get(g)).copied()
+    };
+    for (key, (priority, hold)) in &mut lines {
+        if let Some(min) = aligned_min(key, *hold) {
+            *priority = (*priority).min(min);
+        }
+    }
+    let mut aligned = 0;
+    for row in &mut rows {
+        let key = (row.box_index, row.tree.id.clone());
+        if let Some(min) = aligned_min(&key, lines[&key].1)
+            && min < row.priority
+        {
+            row.priority = min;
+            aligned += 1;
+        }
+    }
     rows.sort_by(|a, b| {
         a.priority
             .cmp(&b.priority)
@@ -258,11 +307,11 @@ pub(super) fn build(
         outputs: Vec::new(),
         payloads: Vec::new(),
         summary: String::new(),
+        lines,
     };
     let mut counts = BTreeMap::from([('A', 0), ('B', 0), ('C', 0), ('D', 0)]);
     let (mut raised, mut lowered, mut released, mut held) = (0, 0, 0, 0);
-    let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\n".to_vec();
-    let mut updates: BTreeMap<(usize, &str), (u32, bool)> = BTreeMap::new();
+    let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\n".to_vec();
     for row in &rows {
         let tree = row.tree;
         *counts.entry(row.class).or_default() += 1;
@@ -279,7 +328,7 @@ pub(super) fn build(
         };
         writeln!(
             table,
-            "{}\t{}\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             boxes[row.box_index].name,
             tree.id,
             tree.own,
@@ -296,18 +345,9 @@ pub(super) fn build(
             row.hold,
             row.shelved,
             tree.read,
-            row.queued.line.root
+            row.queued.line.root,
+            row.queued.line.group.as_deref().unwrap_or_default()
         )?;
-        if args.rerank_out.is_some() {
-            let desired = (row.priority, row.hold);
-            updates
-                .entry((row.box_index, &tree.id))
-                .and_modify(|previous| {
-                    previous.0 = previous.0.min(desired.0);
-                    previous.1 &= desired.1;
-                })
-                .or_insert(desired);
-        }
     }
     if let Some(path) = &args.rerank_table {
         result.outputs.push(path.clone());
@@ -316,13 +356,10 @@ pub(super) fn build(
     if let Some(dir) = &args.rerank_out {
         for (i, b) in boxes.iter().enumerate() {
             let mut bytes = Vec::new();
-            for ((_, id), &(priority, mut hold)) in
-                updates.iter().filter(|((index, _), _)| *index == i)
+            for ((_, id), &(priority, hold)) in
+                result.lines.iter().filter(|((index, _), _)| *index == i)
             {
-                let queued = &b.queue[*id];
-                if started.contains(&(i, *id)) {
-                    hold = queued.line.hold;
-                }
+                let queued = &b.queue[id];
                 if priority == queued.line.priority && hold == queued.line.hold {
                     continue;
                 }
@@ -339,7 +376,7 @@ pub(super) fn build(
         }
     }
     result.summary = format!(
-        "再採点: A={} B={} C={} D={}\npriority: 上げる={raised} 下げる={lowered}、hold: 外す={released} 付ける={held}",
+        "再採点: A={} B={} C={} D={}\npriority: 上げる={raised} 下げる={lowered} (うち group 揃え={aligned})、hold: 外す={released} 付ける={held}",
         counts[&'A'], counts[&'B'], counts[&'C'], counts[&'D']
     );
     Ok(result)

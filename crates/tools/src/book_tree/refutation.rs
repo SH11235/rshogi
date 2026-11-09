@@ -237,6 +237,7 @@ pub(super) fn queue_line(row: &Refutation, rank: usize, depth: usize, base: u32)
     let side = if row.black() { "b" } else { "w" };
     let digest = format!("{:x}", Sha256::digest(format!("{} {}", row.key, row.best.mv)));
     let line = Line {
+        group: None,
         id: format!("{}_refut_{side}", &digest[..16]),
         root: format!("sfen {root} {}", ply + 1),
         roots: Vec::new(),

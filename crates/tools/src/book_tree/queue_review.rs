@@ -69,6 +69,9 @@ pub(super) struct QueueReviewArgs {
     rerank_out: Option<PathBuf>,
     #[arg(long, default_value_t = 10, requires_all = ["walk_table", "master"])]
     rerank_keep_below: u32,
+    /// 受付行の group ごとの、締めまでに読み切る見込みの表
+    #[arg(long)]
+    group_table: Option<PathBuf>,
     /// 重要度が上がった根の JSON Lines (繰り返し可)
     #[arg(long, requires_all = ["walk_table", "master"])]
     boost_queue: Vec<PathBuf>,
@@ -490,8 +493,8 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     );
     let review = args.table.is_some() || args.boxes.is_some() || args.hold_out.is_some();
     ensure!(
-        review || args.reranking() || args.plan_out.is_some(),
-        "点検・計画・再採点の出力先が必要です"
+        review || args.reranking() || args.plan_out.is_some() || args.group_table.is_some(),
+        "点検・計画・再採点・group 表の出力先が必要です"
     );
     ensure!(
         !review || (args.table.is_some() && args.boxes.is_some() && args.hold_out.is_some()),
@@ -546,6 +549,11 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         .reranking()
         .then(|| rerank::build(&args, &boxes, &walk, &mut inputs))
         .transpose()?;
+    let groups = args
+        .group_table
+        .as_ref()
+        .map(|_| group::table(&boxes, &metrics, args.tree_size, rerank.as_ref().map(|r| &r.lines)))
+        .transpose()?;
     let mut outputs = Vec::new();
     if let (Some(table), Some(summary), Some(hold)) = (&args.table, &args.boxes, &args.hold_out) {
         outputs.extend([table.clone(), summary.clone()]);
@@ -558,6 +566,9 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     }
     if let Some(rerank) = &rerank {
         outputs.extend(rerank.outputs.iter().cloned());
+    }
+    if let Some(path) = &args.group_table {
+        outputs.push(path.clone());
     }
     let resolved: Vec<_> = outputs
         .iter()
@@ -575,7 +586,12 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     }
     files::write_generated(&outputs, &inputs, true, |temporary| {
         let (temporary, rest) = temporary.split_at_mut(review_outputs);
-        let (planned, reranked) = rest.split_at_mut(plan.as_ref().map_or(0, |p| p.outputs.len()));
+        let (planned, rest) = rest.split_at_mut(plan.as_ref().map_or(0, |p| p.outputs.len()));
+        let (reranked, grouped) = rest.split_at_mut(rerank.as_ref().map_or(0, |r| r.outputs.len()));
+        if let Some((bytes, summary)) = &groups {
+            grouped[0].write_all(bytes)?;
+            writeln!(stdout, "{summary}")?;
+        }
         if let Some(rerank) = &rerank {
             for (file, bytes) in reranked.iter_mut().zip(&rerank.payloads) {
                 file.write_all(bytes)?;
@@ -773,4 +789,5 @@ impl QueueReviewArgs {
         self.rerank_table.is_some() || self.rerank_out.is_some()
     }
 }
+mod group;
 mod rerank;

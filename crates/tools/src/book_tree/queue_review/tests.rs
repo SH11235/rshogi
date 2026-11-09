@@ -31,6 +31,7 @@ fn args(dir: &Path) -> QueueReviewArgs {
         rerank_table: None,
         rerank_out: None,
         rerank_keep_below: 10,
+        group_table: None,
         boost_queue: vec![],
         target_black: 50,
         target_white: 80,
@@ -1290,7 +1291,7 @@ fn rerank_classes_and_priority_protection() {
     assert!(
         String::from_utf8(stdout)
             .unwrap()
-            .contains("priority: 上げる=0 下げる=0、hold: 外す=1 付ける=0")
+            .contains("priority: 上げる=0 下げる=0 (うち group 揃え=0)、hold: 外す=1 付ける=0")
     );
 }
 
@@ -1733,4 +1734,175 @@ fn rerank_requires_walk_table_for_each_target_side() {
         assert!(error.to_string().contains(&format!("--walk-table {missing}=")), "{error:#}");
         assert!(!d.path().join("rerank.tsv").exists());
     }
+}
+
+#[test]
+fn rerank_aligns_group_to_its_smallest_live_priority_and_group_table_compares() {
+    let d = TempDir::new().unwrap();
+    let grouped = |id: &str, moves: &str, priority: u32, hold: bool| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r["hold"] = json!(hold);
+        r["group"] = json!("x");
+        r
+    };
+    let mut lone = row("lone", "5g5f");
+    lone["priority"] = json!(45);
+    let rows = vec![
+        grouped("g1", "7g7f", 50, false),
+        grouped("g2", "2g2f", 120, false),
+        grouped("g3", "6g6f", 5, true),
+        lone,
+    ];
+    let mut a = plan_args(d.path(), &[("A", rows)]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.group_table = Some(d.path().join("groups.tsv"));
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let current = std::fs::read_to_string(d.path().join("groups.tsv")).unwrap();
+    assert_eq!(
+        current,
+        "group\tbasis\ttrees\theld\tboxes\tpriority_min\tpriority_max\tfull\tpart\tnone\tremaining\n\
+         x\tcurrent\t2\t1\tA\t50\t120\t1\t0\t1\t20\n"
+    );
+    let mut a = plan_args(d.path(), &[]);
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.tree_size = 10;
+    a.box_specs = vec![format!("A={}", d.path().join("A").display())];
+    a.box_rate = vec!["A=10".into()];
+    a.group_table = Some(d.path().join("groups2.tsv"));
+    a.rerank_table = Some(d.path().join("rerank.tsv"));
+    a.rerank_out = Some(d.path().join("rerank"));
+    a.walk_table = vec![format!(
+        "b={}",
+        walk(d.path(), "b\town\t0.005\t7g7f\nb\town\t0.0005\t2g2f\nb\town\t0.0005\t5g5f\n")
+            .display()
+    )];
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.contains("上げる=2 下げる=0 (うち group 揃え=1)"), "{stdout}");
+    assert!(
+        stdout.contains("group (current): 1 組、全部読み切る=0 手が付かない=0 混在=1 全部 hold=0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("group (rerank): 1 組、全部読み切る=1 手が付かない=0 混在=0 全部 hold=0"),
+        "{stdout}"
+    );
+    let table = std::fs::read_to_string(d.path().join("groups2.tsv")).unwrap();
+    assert!(
+        table.ends_with(
+            "x\tcurrent\t2\t1\tA\t50\t120\t1\t0\t1\t20\nx\trerank\t2\t1\tA\t40\t40\t2\t0\t0\t20\n"
+        ),
+        "{table}"
+    );
+    let rerank = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(
+        rerank.lines().any(|l| l.starts_with("A\tg2\t")
+            && l.contains("\tD\t120\t40\t")
+            && l.ends_with("\tx")),
+        "{rerank}"
+    );
+    assert!(
+        rerank
+            .lines()
+            .any(|l| l.starts_with("A\tg3\t") && l.contains("\t5\t5\ttrue\ttrue\t")),
+        "{rerank}"
+    );
+    let out: Vec<Value> = std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let g2 = out.iter().find(|r| r["id"] == "g2").unwrap();
+    assert_eq!((g2["priority"].clone(), g2["group"].clone()), (json!(40), json!("x")));
+}
+
+#[test]
+fn group_must_be_short_printable_text() {
+    for (group, ok) in [
+        (json!("x57kf:w:41"), true),
+        (json!(""), false),
+        (json!("a\tb"), false),
+        (json!("a".repeat(129)), false),
+    ] {
+        let mut r = row("g", "7g7f");
+        r["group"] = group;
+        let line: Line = serde_json::from_value(r).unwrap();
+        assert_eq!(line.check().is_ok(), ok);
+    }
+}
+
+#[test]
+fn group_minimum_uses_final_line_hold_after_bw_and_started_rules() {
+    let d = TempDir::new().unwrap();
+    let line = |id: &str, moves: &str, own: &str, hold: bool, group: &str| {
+        let mut r = row(id, moves);
+        r["own"] = json!(own);
+        r["priority"] = json!(100);
+        r["hold"] = json!(hold);
+        r["group"] = json!(group);
+        r
+    };
+    let side = |r: &Value, own: &str, read: u64, finished: bool| {
+        let mut t = progress(r, read, 0);
+        t["own"] = json!(own);
+        t["finished"] = json!(finished);
+        t
+    };
+    // shelved は棚上げで片側が読み途中、finished は片側が読み終わった bw の行。
+    let shelved = line("shelved", "7g7f", "bw", true, "x");
+    let live = line("live", "2g2f", "b", false, "x");
+    let finished = line("finished", "5g5f", "bw", false, "y");
+    let urgent = line("urgent", "6g6f", "b", false, "y");
+    let b = d.path().join("A");
+    fixture_box(
+        &b,
+        vec![
+            side(&shelved, "b", 1, false),
+            side(&shelved, "w", 0, false),
+            side(&live, "b", 0, false),
+            side(&finished, "b", 0, false),
+            side(&finished, "w", 5, true),
+            side(&urgent, "b", 0, false),
+        ],
+        vec![],
+    );
+    enqueue(&b, "only", 0, &[shelved, live, finished, urgent]);
+    let mut a = args(d.path());
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.box_specs = vec![format!("A={}", b.display())];
+    a.rerank_out = Some(d.path().join("rerank"));
+    let black = d.path().join("black.tsv");
+    std::fs::write(&black, "side\tstop\tweight\tmoves\nb\town\t0.002\t2g2f\nb\town\t0.005\t6g6f\n")
+        .unwrap();
+    let white = d.path().join("white.tsv");
+    std::fs::write(&white, "side\tstop\tweight\tmoves\nw\town\t0.005\t7g7f\n").unwrap();
+    a.walk_table = vec![
+        format!("b={}", black.display()),
+        format!("w={}", white.display()),
+    ];
+    run_at(a, now(), &mut vec![]).unwrap();
+    let out: BTreeMap<String, (Value, Value)> =
+        std::fs::read_to_string(d.path().join("rerank/qrhold_rerank_A.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                (v["id"].as_str().unwrap().to_owned(), (v["priority"].clone(), v["hold"].clone()))
+            })
+            .collect();
+    assert_eq!(out.get("shelved"), Some(&(json!(40), json!(true))), "{out:?}");
+    assert_eq!(out.get("live"), None, "{out:?}");
+    assert_eq!(out.get("finished"), Some(&(json!(40), json!(false))), "{out:?}");
+    assert_eq!(out.get("urgent"), Some(&(json!(40), json!(false))), "{out:?}");
 }
