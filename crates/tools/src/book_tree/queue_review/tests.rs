@@ -2107,7 +2107,7 @@ fn plan_places_urgent_add_by_its_band_and_holds_pushed_out_filler() {
     urgent["priority"] = json!(2);
     a.add = vec![input_rows(d.path(), "adds", &[urgent])];
     run_at(a, now(), &mut vec![]).unwrap();
-    assert_eq!(plan_actions(d.path()), ["hold-over f2", "add urgent", "hold-over f1"]);
+    assert_eq!(plan_actions(d.path()), ["hold-over f2", "add urgent", "over f1"]);
     let rows = cargo_rows(d.path(), "A");
     assert!(rows.iter().any(|r| r["id"] == "urgent" && r["hold"] == false));
 }
@@ -2203,4 +2203,44 @@ fn bands_must_increase_and_balance_needs_hours() {
         .is_ok()
     );
     assert!(Cli::try_parse_from(base.into_iter().chain(["--bands", "5,20"])).is_ok());
+}
+
+#[test]
+fn plan_reports_moved_tree_pushed_out_by_a_later_add() {
+    let d = TempDir::new().unwrap();
+    let with = |id: &str, moves: &str, priority: u32| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r
+    };
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("A", vec![with("first", "7g7f", 1), with("later", "2g2f", 100)]),
+            ("B", vec![]),
+        ],
+    );
+    a.max_ratio = 1.0;
+    a.box_rate = vec!["A=5".into(), "B=10".into()];
+    let mut both = with("both", "5g5f", 2);
+    both["own"] = json!("bw");
+    a.add = vec![input_rows(d.path(), "adds", &[both])];
+    run_at(a, now(), &mut vec![]).unwrap();
+    assert_eq!(plan_actions(d.path()), ["move later", "add both", "over later"]);
+    assert!(plan_table(d.path()).ends_with("over\tlater\tb\t100\tB\tB\tband-over\n"));
+}
+
+#[test]
+fn plan_update_size_counts_in_the_band_of_its_tree() {
+    let d = TempDir::new().unwrap();
+    let mut urgent = row("urgent", "7g7f");
+    urgent["priority"] = json!(5);
+    let mut a = plan_args(d.path(), &[("A", vec![urgent.clone()])]);
+    let mut update = urgent.clone();
+    update["game"] = json!([["8c8d"]]);
+    a.update = vec![input_rows(d.path(), "updates", &[update])];
+    a.update_size = 3;
+    run_at(a, now(), &mut vec![]).unwrap();
+    let bands = std::fs::read_to_string(d.path().join("plan/qrhold_bands.tsv")).unwrap();
+    assert!(bands.lines().any(|l| l == "A\t0\t9\t10\t1\t13\t1.3\t2"), "{bands}");
 }

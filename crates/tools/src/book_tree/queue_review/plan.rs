@@ -312,9 +312,11 @@ pub(super) fn build<'a>(
     };
     let mut removed = BTreeSet::new();
     let mut kept = BTreeSet::new();
+    let mut moved_in: Vec<(usize, &Queued)> = Vec::new();
     let overflow = |plan: &mut Plan,
                     removed: &mut BTreeSet<(usize, &'a str)>,
-                    kept: &mut BTreeSet<(usize, &'a str)>|
+                    kept: &mut BTreeSet<(usize, &'a str)>,
+                    moved_in: &mut Vec<(usize, &'a Queued)>|
      -> Result<()> {
         for &i in &order {
             let b = &boxes[i];
@@ -351,6 +353,7 @@ pub(super) fn build<'a>(
                     shift(plan, i, destination, q, amount);
                     removed.insert((i, q.line.id.as_str()));
                     if let Some(j) = destination {
+                        moved_in.push((j, q));
                         plan.record("move", q, &b.name, &boxes[j].name, "capacity")?;
                     } else {
                         plan.record(
@@ -368,7 +371,7 @@ pub(super) fn build<'a>(
         }
         Ok(())
     };
-    overflow(&mut plan, &mut removed, &mut kept)?;
+    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in)?;
     if let (Some(limit), Some(limit_hours)) = (args.balance_priority, args.balance_hours) {
         let finish = |plan: &Plan, j: usize, extra: f64| {
             hours(plan.ahead(j, limit) + extra, metrics[j].speed)
@@ -379,7 +382,11 @@ pub(super) fn build<'a>(
             band.sort_by(|(a, _), (b, _)| {
                 b.line.priority.cmp(&a.line.priority).then_with(|| b.line.id.cmp(&a.line.id))
             });
-            for (q, _) in band {
+            for (q, low) in band {
+                // reach-low の木は読み終わりを均すために他の台の量を使う価値がない。
+                if low {
+                    continue;
+                }
                 if finish(&plan, i, 0.0) <= limit_hours {
                     break;
                 }
@@ -401,6 +408,7 @@ pub(super) fn build<'a>(
                 if let Some(j) = best(available, &|j| finish(&plan, j, amount)) {
                     shift(&mut plan, i, Some(j), q, amount);
                     removed.insert((i, q.line.id.as_str()));
+                    moved_in.push((j, q));
                     plan.record("balance", q, &boxes[i].name, &boxes[j].name, "band-hours")?;
                 }
             }
@@ -425,6 +433,7 @@ pub(super) fn build<'a>(
         }
     }
     adds.sort_by_key(|q| q.line.priority);
+    let mut added = Vec::new();
     for q in &adds {
         let allowed: Vec<_> = order
             .iter()
@@ -462,6 +471,7 @@ pub(super) fn build<'a>(
         plan.emit(i, updated(&q.raw, None, held));
         if !held {
             plan.put(i, p, amount);
+            added.push((i, q));
             for root in &q.roots {
                 root_labels.entry(root.clone()).or_default().insert(labels[i].clone());
             }
@@ -480,8 +490,23 @@ pub(super) fn build<'a>(
             },
         )?;
     }
-    // 新しい木の割り振りで後ろに押し出された木を、もう一度移すか保留にする。
-    overflow(&mut plan, &mut removed, &mut kept)?;
+    // 移し込みや新規行で後ろへ押し出された木は動かし直さず、帯の量が上限を超えたまま残る木として記録する。
+    let mut over: Vec<(usize, &Queued)> = Vec::new();
+    for &i in &order {
+        for (q, _) in candidates(i) {
+            let key = (i, q.line.id.as_str());
+            if !removed.contains(&key) && !kept.contains(&key) {
+                over.push((i, q));
+            }
+        }
+    }
+    over.extend(moved_in.iter().copied());
+    over.extend(added.iter().copied());
+    for (i, q) in over {
+        if ratio(plan.ahead(i, q.line.priority), metrics[i].capacity) > args.max_ratio {
+            plan.record("over", q, &boxes[i].name, &boxes[i].name, "band-over")?;
+        }
+    }
     let mut bands = b"box\tpriority_lo\tpriority_hi\tbefore_remaining\tbefore_hours\tafter_remaining\tafter_hours\tcutoff_hours\n".to_vec();
     for &i in &order {
         let mut low = 0u32;

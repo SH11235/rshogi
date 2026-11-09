@@ -572,14 +572,19 @@ serve は priority の小さい順に読むので、木が締めまでに読め�
    `max(tree-size, requested) - read` (下限 0) と、移動元の台に足し込み済みの update-size 分の見込み量を引き、移し先に同量を足します。
    bw は両側とも未着手の場合だけ対象にし、側ごとに求めた見込み量を一緒に扱います。
 3. `--balance-priority P --balance-hours H` があれば、P 以下の帯の読み終わり時間 (P 以下の見込み量 / 台の速さ) が H を超える台を
-   名前順に見て、P 以下の未着手の木を priority の大きい順 (同点は id の逆順) に、読み終わり時間が H 以下に収まる他の台へ移します
+   名前順に見て、P 以下の未着手の木 (reach-low を除く) を priority の大きい順 (同点は id の逆順) に、読み終わり時間が H 以下に収まる他の台へ移します
    (`balance`、理由 `band-hours`)。移し先はその木の帯の量でも上限以内で、移した後の読み終わり時間が最小の台です (同点は名前順)。
    移し先の条件 (同じ id、条件ラベル、同じ根) と見込み量の扱いは 2 と同じです。元の台の読み終わり時間が H 以下になったら止めます。
 4. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
    追加後に帯の量 + 木の量が上限以内となる台のうち、その比が最小の台、同点は名前順です。
    入る台がなければ、条件を満たす台のうち現在の ratio 最小の台へ hold true で置き (`add-hold`)、
    見込み量は増やしません。hold=true の入力行も同じ台へ hold のまま置きます (`add-hold`、理由 `input-hold`)。受付済みの id や新規行どうしの id の重複はエラーです。
-5. 新規行で後ろへ押し出された木を、2 と同じ規則でもう一度移すか hold にします。`keep-over` は木ごとに 1 回だけ記録します。
+5. 移し込みや新規行で後ろへ押し出された木は動かし直しません。計画の後でも帯の量が上限を超える hold でない未着手の木
+   (受付の木・移し込んだ木・新規行。`keep-over` を記録した木を除く) を `over` (理由 `band-over`) として記録します。
+   これらは締めまでに読み切れない見込みなので、次の点検で priority・置き場を見直してください。
+
+帯の量が収まる木は動かさないので、計画の後も台全体の ratio (標準出力の「計画 残り/読める量」) が max-ratio を超えることがあります。
+締めまでに読めるかは `<prefix>_bands.tsv` の after_hours と cutoff_hours、`over` の行で確かめます。
 
 「同じ根」は root・roots のいずれかの局面が手数を除いて一致し、id が違うことです。
 移動の重複判定は全台の受付 (hold を含む) で調べます。新規行は移動後の配置に合わせて割り振ります。移動は、元と同じ条件ラベルの台へ、
@@ -593,7 +598,8 @@ root・roots のすべての根の条件を満たす台がなければエラー�
 止めた台をこの照合から外す場合は、その台を `--box` に渡さないでください。
 
 `<prefix>_plan.tsv` の列は `action / id / own / priority / from / to / reason` です。
-action は `update`・`update-held`・`drop-update`・`hold-low`・`move`・`hold-over`・`keep-over`・`balance`・`add`・`add-hold`。
+action は `update`・`update-held`・`drop-update`・`hold-low`・`move`・`hold-over`・`keep-over`・`balance`・`add`・`add-hold`・`over`。
+表は判断の順の記録で、同じ id に複数の行があれば後の行が最終です (例: `keep-over` の後に `balance` で移した木)。
 
 `<prefix>_bands.tsv` は台ごと・帯ごとに `box / priority_lo / priority_hi / before_remaining / before_hours / after_remaining / after_hours / cutoff_hours`
 の列を持ちます。帯は `--bands` の上端で区切り (既定 `9,26,60,120` で 0〜9・10〜26・27〜60・61〜120・121〜)、最後の帯の priority_hi は空です。
