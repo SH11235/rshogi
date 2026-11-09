@@ -57,7 +57,7 @@ impl Buckets {
         Ok(())
     }
 
-    /// 全バケットを検査し、先読み印 (bit 0) と重複の印 (bit 1) を行番号で返す。
+    /// 全バケットを検査し、先読み印 (bit 0)、同値重複 (bit 1)、値の衝突 (bit 2) を行番号で返す。
     pub fn finish(self, dir: &Path, rows: u64) -> Result<File> {
         let mut marks = tempfile::tempfile_in(dir)?;
         marks.set_len(rows)?;
@@ -100,7 +100,9 @@ fn validate_bucket(
         let hash: [u8; 16] = entry[16..32].try_into()?;
         if let Some(old) = seen.get_mut(&key) {
             if old.hash != hash {
-                bail!("取り込み元の重複が矛盾します (key hash: {key:x?})");
+                marks.seek(SeekFrom::Start(u64::from_le_bytes(entry[32..40].try_into()?)))?;
+                marks.write_all(&[4])?;
+                return Ok(());
             }
             old.prefetch |= entry[40] != 0;
             marks.seek(SeekFrom::Start(u64::from_le_bytes(entry[32..40].try_into()?)))?;
@@ -193,13 +195,13 @@ mod tests {
     }
 
     #[test]
-    fn recursive_split_rejects_conflicts_in_late_duplicates() {
+    fn recursive_split_skips_conflicts_in_late_duplicates() {
         let rows = [
             entry(0, 9, 0, false),
             entry(1, 8, 1, false),
             entry(0, 7, 2, true),
         ];
-        assert!(validate(&rows, 1).unwrap_err().to_string().contains("重複が矛盾"));
+        assert_eq!(validate(&rows, 1).unwrap(), [0, 0, 4]);
     }
 
     #[test]

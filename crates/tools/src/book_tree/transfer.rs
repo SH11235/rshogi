@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_out_positions_still_reject_conflicting_duplicates() {
+    fn filtered_out_positions_skip_conflicting_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
         let src = settings(&a, None);
@@ -780,11 +780,11 @@ mod tests {
         let source = read_source(&path, None, keep).unwrap();
         assert_eq!(source.readings, std::slice::from_ref(&kept));
         write_lines(&path, &lines("win"));
-        assert!(read_source(&path, None, keep).is_err());
+        assert_eq!(read_source(&path, None, keep).unwrap().readings, [kept]);
     }
 
     #[test]
-    fn every_selected_record_must_match_its_fingerprint() {
+    fn source_skips_invalid_rows_and_accepts_version_differences() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
         let src = settings(&a, None);
@@ -795,9 +795,15 @@ mod tests {
         tampered.nodes = 200;
         let lying = record_json(&tampered, &reading(1, &tampered, "resign"));
         write_lines(&path, &[good.clone(), lying.clone()]);
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert_eq!(read_source(&path, None, |_| true).unwrap().readings.len(), 1);
         write_lines(&path, &[lying]);
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert!(read_source(&path, None, |_| true).unwrap().readings.is_empty());
+        assert!(
+            read_source(&path, Some(&src.fingerprint), |_| true)
+                .unwrap()
+                .readings
+                .is_empty()
+        );
 
         // モデルを別のパスへ移した後の行は同じ条件として受け入れる。
         let moved_dir = dir.path().join("moved");
@@ -830,9 +836,8 @@ mod tests {
                 record_json(&changed_draw, &reading(3, &src, "resign")),
             ],
         );
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert_eq!(read_source(&path, None, |_| true).unwrap().readings.len(), 1);
 
-        // 選ばない条件の版の食い違いは問わない。
         let other = Settings::new(&reading_args(&a, 300, &[])).unwrap();
         let versioned = |v: &str| {
             let mut s = other.clone();
@@ -841,7 +846,10 @@ mod tests {
         };
         write_lines(&path, &[good.clone(), versioned(VERSION_A), versioned(VERSION_B)]);
         assert_eq!(read_source(&path, Some(&src.fingerprint), |_| true).unwrap().readings.len(), 1);
-        assert!(read_source(&path, Some(&other.fingerprint), |_| true).is_err());
+        assert_eq!(
+            read_source(&path, Some(&other.fingerprint), |_| true).unwrap().readings.len(),
+            1
+        );
 
         std::fs::write(&path, "").unwrap();
         let err = read_source(&path, None, |_| true).err().unwrap().to_string();
@@ -928,5 +936,36 @@ mod tests {
         .unwrap();
         assert!(err.to_string().contains("同じ台帳"), "{err}");
         assert_eq!(std::fs::read(&src_path).unwrap(), before);
+    }
+    #[test]
+    fn import_same_fingerprint_with_different_versions_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "engine", "build", "model");
+        let dst = settings(&m, Some(VERSION_A));
+        let src = settings(&m, Some(VERSION_B));
+        assert_eq!(dst.fingerprint, src.fingerprint);
+        let source = dir.path().join("source.jsonl");
+        let destination = dir.path().join("destination.jsonl");
+        let original = reading(0, &dst, "resign");
+        let added = [reading(1, &src, "resign"), reading(2, &src, "resign")];
+        write_journal(&destination, &[(&dst, original.clone())]);
+        write_journal(&source, &[(&src, added[0].clone()), (&src, added[1].clone())]);
+        let counts = import(ImportJournalArgs {
+            from_journal: source,
+            fingerprint: None,
+            accept_fingerprint: Vec::new(),
+            journal: destination.clone(),
+            reading: reading_args(&m, 100, &[]),
+            force: false,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
+        })
+        .unwrap();
+        assert_eq!(counts, (2, 0, 0));
+        let journal = Journal::open(&destination, &dst.fingerprint).unwrap();
+        for r in [&original, &added[0], &added[1]] {
+            assert_eq!(journal.get_exact(&r.key, &dst.fingerprint), Some(r));
+        }
+        assert!(journal.skipped_rows.is_empty());
     }
 }

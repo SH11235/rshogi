@@ -1765,7 +1765,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
 }
 
 #[test]
-fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appending() {
+fn live_import_skips_source_conflicts_and_invalid_fingerprints() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
     let good = dir.path().join("good.jsonl");
@@ -1787,8 +1787,10 @@ fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appendin
         let dst = state.join("journal.jsonl");
         let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
         std::fs::write(state.join("import/01.jsonl"), bytes).unwrap();
-        assert_eq!(drain_import(&mut inbox, &mut journal).len(), 1);
-        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
+        assert!(drain_import(&mut inbox, &mut journal).is_empty());
+        assert_eq!(journal.get_exact(&original.key, &settings.fingerprint).is_some(), i == 0);
+        assert_eq!(inbox.status()["counts"]["skipped_conflicting"], usize::from(i == 0));
+        assert_eq!(inbox.status()["counts"]["skipped_invalid"], usize::from(i == 1));
     }
 }
 
@@ -2151,4 +2153,34 @@ fn live_import_two_conditions_is_idempotent() {
     assert_eq!(inbox.status()["counts"]["appended"], 0);
     assert_eq!(inbox.status()["counts"]["skipped_same"], 4);
     assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+}
+
+#[test]
+fn live_import_preserves_versions_and_adds_missing_prefetch_on_existing_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dst = settings();
+    dst.engine_version = Some("destination".into());
+    let mut src = dst.clone();
+    src.engine_version = Some("source".into());
+    let path = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+    let existing = reading(ROOT, &[], &dst);
+    journal.append(existing.clone(), &dst, "fixture".into()).unwrap();
+    let added = reading(&child(ROOT, "5i5h").unwrap(), &[], &src);
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let source_path = dir.path().join("import/01.jsonl");
+    let mut source = Journal::open(&source_path, &src.fingerprint).unwrap();
+    source.append_marked(existing.clone(), &src, "fixture".into(), true).unwrap();
+    source.append(added.clone(), &src, "fixture".into()).unwrap();
+    drop(source);
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
+    assert!(journal.prefetched.contains(ROOT));
+    drop(journal);
+    let journal = Journal::open(&path, &dst.fingerprint).unwrap();
+    assert_eq!(journal.get_exact(ROOT, &dst.fingerprint), Some(&existing));
+    assert_eq!(journal.get_exact(&added.key, &src.fingerprint), Some(&added));
+    assert!(journal.prefetched.contains(ROOT));
+    assert!(journal.skipped_rows.is_empty());
 }

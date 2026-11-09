@@ -1085,6 +1085,16 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
     let i = book.0.keys().position(|k| *k == a).unwrap();
     assert_eq!(values[i], [Some(-30)]);
 
+    let mut reassigned = BTreeMap::from([
+        (a.clone(), node("2", 1, &[("5a5b", -10), ("5a4a", -30)])),
+        (ab.clone(), node("3", 0, &[("5h6h", 200), ("5h4i", 10)])),
+    ]);
+    let (master_rows, _, _) = register::register(Vec::new(), &reassigned, &options).unwrap();
+    reassigned.get_mut(&a).unwrap().moves[0].cond = "unknown".into();
+    join_roots(&master_rows, &mut reassigned, &options, draws, 40).unwrap();
+    let moved = reassigned[&a].moves.iter().find(|m| m.mv == "5a5b").unwrap();
+    assert_eq!((moved.value, moved.cond.as_str()), (-200, "test"));
+
     // 先の局面の手に台帳と違う条件の値があれば、替わった手の条件は分からないとする。
     let mut other = BTreeMap::from([
         (a.clone(), node("2", 1, &[("5a5b", -10), ("5a4a", -30)])),

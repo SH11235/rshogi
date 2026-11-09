@@ -20,6 +20,8 @@ struct Counts {
     skipped_same: usize,
     conflicts: usize,
     skipped_condition: usize,
+    skipped_invalid: usize,
+    skipped_conflicting: usize,
 }
 
 struct Staged {
@@ -155,6 +157,7 @@ impl Inbox {
                         list,
                         counts: Counts {
                             skipped_condition: source.skipped_condition,
+                            skipped_invalid: source.skipped_invalid,
                             ..Counts::default()
                         },
                         eof: false,
@@ -193,9 +196,13 @@ impl Inbox {
             let rec = parse_record(&bytes)?;
             let mut marks = [0];
             staged.row_marks.read_exact(&mut marks)?;
+            if marks[0] & 4 != 0 {
+                staged.counts.skipped_conflicting += 1;
+                continue;
+            }
             let existing = journal.get_exact(&rec.reading.key, &rec.settings.fingerprint);
             // 食い違いは重複行も一覧に残す。未追記の重複は、この周回の最初の行で取り込む。
-            if existing.is_some_and(|old| old.same_values(&rec.reading))
+            if (existing.is_some_and(|old| old.same_values(&rec.reading)) && marks[0] & 1 == 0)
                 || (marks[0] & 2 != 0 && existing.is_none())
             {
                 staged.counts.skipped_same += 1;
@@ -207,11 +214,11 @@ impl Inbox {
                 rec.settings.fingerprint,
                 path.display()
             );
-            if journal.get_exact(&rec.reading.key, &rec.settings.fingerprint).is_none() {
+            if marks[0] & 1 != 0 {
+                prefetched.insert((rec.settings.fingerprint.clone(), rec.reading.key.clone()));
+            }
+            if existing.is_none() {
                 self.appended.insert(rec.reading.key.clone());
-                if marks[0] & 1 != 0 {
-                    prefetched.insert((rec.settings.fingerprint.clone(), rec.reading.key.clone()));
-                }
             }
             incoming.push((rec.reading, Arc::new(rec.settings), provenance));
         }

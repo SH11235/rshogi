@@ -573,9 +573,7 @@ pub(super) fn join_roots(
             {
                 m.value = v.value;
                 m.value_kind = "unknown".into();
-                if verified.get(key) != Some(&m.cond) {
-                    m.cond = "unknown".into();
-                }
+                m.cond = verified.get(key).cloned().unwrap_or_else(|| "unknown".into());
                 joined.moves += 1;
             }
         }

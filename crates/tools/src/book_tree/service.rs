@@ -409,8 +409,11 @@ struct Restart {
     go: Option<Instant>,
 }
 impl Restart {
-    fn progress(&self, expected: f64, nodes: u64, limit: u64) -> Option<f64> {
-        Some((self.go?.elapsed().as_secs_f64() / expected).max(nodes as f64 / limit as f64))
+    fn progress(&self, seconds_per_node: f64, nodes: u64, limit: u64) -> Option<f64> {
+        Some(
+            (self.go?.elapsed().as_secs_f64() / (seconds_per_node * limit as f64))
+                .max(nodes as f64 / limit as f64),
+        )
     }
     fn stop(&mut self, reason: StopReason) {
         if self.key.is_some() && self.stop.is_none() && !self.requested {
@@ -1465,8 +1468,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 stats_dirty = true;
                                 *stats.stopped.entry(reason).or_default() += 1;
                                 stats.discarded += amount.max(
-                                    median(&journal.durations)
-                                        .map_or(0.0, |expected| sec / expected),
+                                    median(&journal.durations).map_or(0.0, |expected| {
+                                        sec / (expected * cond.nodes as f64)
+                                    }),
                                 );
                             }
                             Ok(Outcome::Completed(reading)) => {
@@ -2445,13 +2449,14 @@ mod tests {
     #[test]
     fn progress_uses_go_and_observed_nodes_to_protect_work() {
         let mut control = Restart::default();
-        assert!(control.progress(10.0, 0, 100).is_none());
+        assert!(control.progress(0.1, 0, 100).is_none());
         control.go = Some(Instant::now() - Duration::from_secs(2));
-        let progress = control.progress(10.0, 0, 100).unwrap();
+        let progress = control.progress(0.1, 0, 100).unwrap();
         assert!((0.2..0.21).contains(&progress));
-        assert_eq!(control.progress(10.0, 50, 100), Some(0.5));
+        assert!((0.1..0.11).contains(&control.progress(0.1, 0, 200).unwrap()));
+        assert_eq!(control.progress(0.1, 50, 100), Some(0.5));
         assert!(
-            select_victims(vec![(0, control.progress(10.0, 25, 100).unwrap(), 0)], 1, 0.25)
+            select_victims(vec![(0, control.progress(0.1, 25, 100).unwrap(), 0)], 1, 0.25)
                 .is_empty()
         );
     }
