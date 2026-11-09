@@ -10,7 +10,6 @@ const STACK_SIZE: usize = 64 * 1024 * 1024;
 
 fn halves() -> (Vec<usize>, Vec<usize>) {
     let cpus = current_affinity().unwrap();
-    assert!(cpus.len() >= 2, "CPU が 2 つ以上必要");
     let (first, second) = cpus.split_at(cpus.len() / 2);
     (first.to_vec(), second.to_vec())
 }
@@ -62,6 +61,10 @@ fn same(a: &Arc<NNUENetwork>, b: &Arc<NNUENetwork>) -> bool {
 }
 
 fn check_numa_wiring() {
+    if current_affinity().unwrap().len() < 2 {
+        println!("skipped: 仮の 2 node を作るには使える CPU が 2 つ以上必要");
+        return;
+    }
     init_nnue_from_bytes(&halfkp_loader_fixture(256, ARCH)).unwrap();
     let global = get_network().unwrap();
 

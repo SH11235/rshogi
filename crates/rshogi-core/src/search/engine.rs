@@ -1115,11 +1115,10 @@ impl Search {
     pub fn prepare_numa_networks(&mut self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
-            let message = self.sync_numa_networks();
-            match (self.numa_report.take(), message) {
-                (Some(earlier), Some(now)) => Some(format!("{earlier}; {now}")),
-                (earlier, now) => earlier.or(now),
+            if let Some(message) = self.sync_numa_networks() {
+                self.add_numa_report(message);
             }
+            self.numa_report.take()
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1240,9 +1239,18 @@ impl Search {
             .map(|reason| format!("NumaPolicy=auto: {reason}"))
     }
 
+    /// 次の `prepare_numa_networks` で返す理由に `message` を足す。
+    #[cfg(target_os = "linux")]
+    fn add_numa_report(&mut self, message: String) {
+        self.numa_report = Some(match self.numa_report.take() {
+            Some(earlier) => format!("{earlier}; {message}"),
+            None => message,
+        });
+    }
+
     /// 写しを作れなかったときに NUMA をやめ、共有の重みで探索を続けられる状態に戻す。
     ///
-    /// `go` の中 (main スレッドを固定した後) からも呼ばれるので helper は作り直さず、
+    /// `go` の中からも呼ばれ、そこで helper を作り直すと探索の直前に履歴を失うので、作り直さずに
     /// 各 helper をプロセスが使える CPU 全体へ固定し直す。
     #[cfg(target_os = "linux")]
     fn fall_back_to_shared_network(&mut self) {
@@ -1327,13 +1335,13 @@ impl Search {
         #[cfg(target_os = "linux")]
         let numa_affinity = {
             if let Some(message) = self.sync_numa_networks() {
-                self.numa_report = Some(message);
+                self.add_numa_report(message);
             }
             match self.numa.as_ref().map(|numa| numa.plan.cpus_of_thread(0).to_vec()) {
                 Some(cpus) => match super::numa::AffinityGuard::pin(&cpus) {
                     Ok(guard) => Some(guard),
                     Err(reason) => {
-                        self.numa_report = Some(format!("NumaPolicy=auto: {reason}"));
+                        self.add_numa_report(format!("NumaPolicy=auto: {reason}"));
                         None
                     }
                 },

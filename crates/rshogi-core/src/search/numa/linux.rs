@@ -204,29 +204,33 @@ impl NumaReplicas {
     pub(crate) fn build(plan: Arc<NumaPlan>, source: Arc<NNUENetwork>) -> Result<Self, String> {
         let used = plan.threads_per_node();
         let per_node = std::thread::scope(|scope| {
-            let handles: Vec<_> = plan
-                .node_cpus
-                .iter()
-                .zip(&used)
-                .map(|(cpus, &threads)| {
-                    (threads > 0).then(|| {
-                        let source = &source;
-                        scope.spawn(move || -> Result<Arc<NNUENetwork>, String> {
-                            pin_current_thread(cpus)?;
-                            source
-                                .try_deep_clone()
-                                .map(Arc::new)
-                                .map_err(|e| format!("cannot allocate a network replica: {e}"))
+            let handles: Vec<_> =
+                plan.node_cpus
+                    .iter()
+                    .zip(&used)
+                    .map(|(cpus, &threads)| {
+                        (threads > 0).then(|| {
+                            let source = &source;
+                            std::thread::Builder::new()
+                                .spawn_scoped(scope, move || -> Result<Arc<NNUENetwork>, String> {
+                                    pin_current_thread(cpus)?;
+                                    source.try_deep_clone().map(Arc::new).map_err(|e| {
+                                        format!("cannot allocate a network replica: {e}")
+                                    })
+                                })
+                                .map_err(|e| format!("cannot spawn a NUMA replica thread: {e}"))
                         })
                     })
-                })
-                .collect();
+                    .collect();
+            // 最初の失敗で集約を打ち切っても、残りのスレッドは scope の終わりで join される。
             handles
                 .into_iter()
                 .map(|handle| {
                     handle
-                        .map(|h| {
-                            h.join().map_err(|_| "NUMA replica thread panicked".to_string())?
+                        .map(|spawned| {
+                            spawned?
+                                .join()
+                                .map_err(|_| "NUMA replica thread panicked".to_string())?
                         })
                         .transpose()
                 })
