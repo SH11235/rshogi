@@ -228,8 +228,10 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let moves: Vec<String> =
             column(row, "moves")?.split_whitespace().map(str::to_owned).collect();
         let keys = keys_before(&moves)?;
+        let last = column(row, "key")?.to_owned();
         let mut seen = BTreeSet::new();
-        for (i, key) in keys.iter().enumerate() {
+        // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
+        for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
             if seen.insert(key) {
                 let entry =
                     through.entry(key.clone()).or_insert_with(|| (0.0, moves[..i].to_vec()));
@@ -277,8 +279,15 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     if let (Some(bridge), Some(audit)) = (&args.bridge, &args.bridge_audit) {
         let mut gaps = BTreeMap::new();
+        // audit の表は元データ全体の局面を持ちうるので、報告に載りうる局面 (重みの下限以上) で gap の大きい行だけを持つ。
         read_tsv(audit, |row| {
             let gap: i32 = column(row, "gap")?.parse().context("gap が不正です")?;
+            let key = column(row, "key")?;
+            if gap < args.gap_line
+                || through.get(key).is_none_or(|(weight, _)| *weight < args.gap_min_weight)
+            {
+                return Ok(());
+            }
             gaps.insert(
                 column(row, "key")?.to_owned(),
                 (
@@ -301,7 +310,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
-            let replaced = gaps.get(key).filter(|(gap, ..)| *gap >= args.gap_line);
+            let replaced = gaps.get(key);
             if replaced.is_none() && args.meets(Some(bridged), side) != Some(false) {
                 return Ok(());
             }

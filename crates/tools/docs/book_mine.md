@@ -1778,7 +1778,7 @@ walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以�
 | `gap` | bridge の表の局面のうち、walk の重みが `--gap-min-weight` 以上で、補った値 (bridged_black) が目標に届かないか、audit の gap が `--gap-line` 以上 |
 | `rejoin` | rejoin の表の行のうち、戻った先の値が目標に届かず、来る割合 (weight × rejoin_games / dig_games) が `--gap-min-weight` 以上 |
 
-gap の重みは、その局面を通る walk の行の重みの和 (1 行で同じ局面は 1 回) で、手順はその局面を最初に通った行の手順です。
+gap の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (1 行で同じ局面は 1 回) で、手順はその局面を最初に通った行の手順です。audit の表は、重みの下限以上で gap が `--gap-line` 以上の局面の行だけを持ちます。
 表は `class side ply weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
 ply は walk の行・rejoin の行の ply、gap は局面の手番の手が何手目か。queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move) です。

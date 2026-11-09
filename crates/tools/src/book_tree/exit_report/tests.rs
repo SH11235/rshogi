@@ -305,3 +305,38 @@ fn short_kif_writes_same_square_promotion_drop_and_promoted_pieces() {
         "▲７六歩 △３四歩 ▲２二角成 △同銀 ▲４五角打 △３三銀 ▲３四角 △３二金 ▲２三角成 △２四銀 ▲１二馬"
     );
 }
+
+#[test]
+fn gap_at_walk_stop_position_uses_the_row_weight() {
+    let d = TempDir::new().unwrap();
+    let exit = ["7g7f", "3c3d", "2g2f"];
+    let walk = [walk_line("b", "max", 0.02, &exit)];
+    let key = key_after(&exit);
+    let bridge = d.path().join("bridge.tsv");
+    std::fs::write(
+        &bridge,
+        format!(
+            "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\tweight\n\
+             {key}\t4\tw\t8c8d\t0\t-100\t100\t\t\t0\t100\t\n"
+        ),
+    )
+    .unwrap();
+    let audit = d.path().join("audit.tsv");
+    std::fs::write(
+        &audit,
+        "key\tply\tside\tsource\tmain\tmain_value\tmain_from\tmain_eval\tbest\tbest_value\tbest_from\tbest_eval\tgap\tmain_value_black\tbest_value_black\n",
+    )
+    .unwrap();
+    let (stdout, table, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--bridge",
+            bridge.to_str().unwrap(),
+            "--bridge-audit",
+            audit.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("gap=1"), "{stdout}");
+    assert!(table.contains("gap\tw\t4\t0.02\t+100\t\t届かない"), "{table}");
+}
