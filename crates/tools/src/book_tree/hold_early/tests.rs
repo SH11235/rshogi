@@ -657,4 +657,15 @@ fn cuts_outputs_require_continuation_and_reject_collisions() {
         std::fs::read_to_string(dir.path().join("before.tsv")).unwrap(),
         format_master(&rows)
     );
+    for (continuation, frequency, ok) in [(60, false, true), (61, false, false), (61, true, true)] {
+        let mut args = super::tests::args(dir.path(), &rows, &rows, false);
+        args.continuation = Some(continuation);
+        args.cuts_out = Some(dir.path().join("cuts.tsv"));
+        if frequency {
+            let freq = dir.path().join("freq.db");
+            std::fs::write(&freq, "#YANEURAOU-DB2016\n").unwrap();
+            args.deep.deep_opp_freq = Some(freq);
+        }
+        assert_eq!(run_to(args, &mut Vec::new()).is_ok(), ok);
+    }
 }

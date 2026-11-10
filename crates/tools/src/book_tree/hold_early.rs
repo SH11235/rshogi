@@ -59,7 +59,7 @@ pub(super) struct HoldEarlyArgs {
     /// キューの行の段数
     #[arg(long, default_value_t = 6, requires = "cuts_enqueue_out", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=MAX_DEPTH as u64))]
     cuts_depth: usize,
-    /// キューの行の priority の基準。保留の局面の手数の順位 (0 始まり、99 で頭打ち) を足す
+    /// キューの行の priority の基準。保留の局面の手数・根の手数・局面キーの順の順位 (0 始まり、99 で頭打ち) を足す
     #[arg(long, default_value_t = DEFAULT_PRIORITY, requires = "cuts_enqueue_out", value_parser = clap::value_parser!(u32).range(0..=i64::from(MAX_PRIORITY - 99)))]
     cuts_priority: u32,
     /// キューの行の相手の手の数 (1〜8)
@@ -284,6 +284,13 @@ fn run_to(args: HoldEarlyArgs, stdout: &mut impl Write) -> Result<()> {
     };
     guard_outputs()?;
     check_tag(&args.cuts_tag).context("--cuts-tag")?;
+    // 頻度定跡なしの計数は 60 手で打ち切って途切れを持たないので、それより長い N では hold の枝の途切れを出せない。
+    ensure!(
+        args.deep.deep_opp_freq.is_some()
+            || (args.cuts_out.is_none() && args.cuts_enqueue_out.is_none())
+            || args.continuation.is_none_or(|n| n <= 60),
+        "--cuts-out / --cuts-enqueue-out は、--deep-opp-freq なしでは --continuation 60 以下で使います"
+    );
     args.cuts_opts().check()?;
     let schema = Schema::load(args.schema.as_deref())?;
     let freq = args

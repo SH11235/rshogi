@@ -212,7 +212,7 @@ impl<F: Fn(&str) -> Option<String>> Continuation<'_, F> {
         Ok(self.after_with_cut(key, mv, limit)?.0)
     }
 
-    /// `after` の値と、上限に届かなければ最短の枝が途切れた局面。同じ長さの枝は main を先に、応手は USI の順に選ぶ。
+    /// `after` の値と、上限に届かなければ最短の枝が途切れた局面。同じ長さの枝は手の USI の順で先のものを選ぶ。
     pub fn after_with_cut(
         &self,
         key: &str,
@@ -266,12 +266,14 @@ impl<F: Fn(&str) -> Option<String>> Continuation<'_, F> {
         {
             return Ok(cached.clone());
         }
+        let mut moves = BTreeSet::new();
         let main = (self.main)(key);
+        if let Some(main) = &main {
+            moves.insert(main.clone());
+        }
         let opponent = (key.split_whitespace().nth(1) == Some("w")) != own;
-        // 値は手の順によらないが、同じ長さの枝から途切れを選ぶときに main を優先するため main を先に辿る。
-        let mut moves: Vec<String> = main.iter().cloned().collect();
         if opponent {
-            moves.extend(self.freq.replies(key).into_iter().filter(|mv| main.as_ref() != Some(mv)));
+            moves.extend(self.freq.replies(key));
         }
         path.insert(key.to_owned());
         let pos = position_from_sfen(&format!("{key} 1"))?;
@@ -475,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn cut_reports_the_shortest_branch_preferring_main_on_ties() {
+    fn cut_reports_the_shortest_branch_in_usi_order_on_ties() {
         let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let mut pos = position_from_sfen(&format!("{root} 1")).unwrap();
         apply_usi_move(&mut pos, "5i5h").unwrap();
@@ -491,11 +493,12 @@ mod tests {
             moves: moves.iter().map(|m| (*m).to_owned()).collect(),
         };
         for (main, replies, expected) in [
-            (Some("5a5b"), "5a4b", (1, cut(&after("5a5b"), Stop::Own, &["5a5b"]))),
+            (Some("5a5b"), "5a4b", (1, cut(&after("5a4b"), Stop::Own, &["5a4b"]))),
             (None, "5a4b", (1, cut(&after("5a4b"), Stop::Own, &["5a4b"]))),
             (None, "", (0, cut(&opponent, Stop::Opp, &[]))),
             (None, "1a1b", (0, cut(&opponent, Stop::NoLegal, &[]))),
             (Some("1a1b"), "5a4b", (0, cut(&opponent, Stop::Illegal, &[]))),
+            (Some("9a9b"), "5a4b", (1, cut(&after("5a4b"), Stop::Own, &["5a4b"]))),
         ] {
             let text = replies
                 .split_whitespace()
