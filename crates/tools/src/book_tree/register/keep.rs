@@ -4,6 +4,7 @@ use super::Node;
 use crate::book_backprop::{DrawValues, Graph, MoveValue};
 use crate::book_tree::audit::{Fill, audit, audited_moves};
 use crate::book_tree::master_table::{Row, positions_from_rows};
+use crate::book_tree::switch::{SingleRead, SwitchRule, from_child};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +25,7 @@ impl Kept {
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::book_tree) struct KeepRule {
+    pub rule: SwitchRule,
     pub line: i32,
     pub min_depth: usize,
     pub draws: DrawValues,
@@ -88,17 +90,20 @@ impl Depths<'_> {
     }
 }
 
-/// `before` から `after` (仮に登録した元データ) で main が替わった局面のうち、`after` を伝播した値で元の main が
-/// 新しい main を `rule.line` 以上上回り、元の main の値が `rule.min_depth` 局面以上先の読みから来た局面。
+/// `before` から `after` (仮に登録した元データ) で main が替わった局面のうち、main を替えずに残す局面と、そのうち
+/// 片方の値が 1 回の読みの局面。`SwitchRule::Line` では `after` を伝播した値で元の main が新しい main を
+/// `rule.line` 以上上回り、元の main の値が `rule.min_depth` 局面以上先の読みから来た局面を残す。
+/// `SwitchRule::Propagated` では、両方の値が手の先の局面から来て新しい main が上回る局面だけを替える。
 pub(in crate::book_tree) fn kept_mains(
     before: &[Row],
     after: &[Row],
     nodes: &BTreeMap<String, Node>,
     rule: KeepRule,
-) -> Result<BTreeMap<String, Kept>> {
+) -> Result<(BTreeMap<String, Kept>, Vec<SingleRead>)> {
     let mut kept = BTreeMap::new();
-    if rule.line == 0 {
-        return Ok(kept);
+    let mut singles = Vec::new();
+    if rule.rule == SwitchRule::Line && rule.line == 0 {
+        return Ok((kept, singles));
     }
     let old = mains(before);
     let new = mains(after);
@@ -110,7 +115,7 @@ pub(in crate::book_tree) fn kept_mains(
         })
         .collect();
     if changed.is_empty() {
-        return Ok(kept);
+        return Ok((kept, singles));
     }
     let book = positions_from_rows(after.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
     // 点検の表は使わないので、線を最大にして表を作らせない。
@@ -149,6 +154,42 @@ pub(in crate::book_tree) fn kept_mains(
         else {
             continue;
         };
+        if rule.rule == SwitchRule::Propagated {
+            let in_master = |k: &str| master.contains(k);
+            let (old_from, new_from) =
+                (from_child(graph, in_master, &old), from_child(graph, in_master, &new));
+            if old_from && new_from && new_value > old_value {
+                continue;
+            }
+            if !(old_from && new_from) {
+                let moves = [(old_from, old_move), (new_from, new_move)]
+                    .into_iter()
+                    .filter(|(from, _)| !from)
+                    .map(|(_, mv)| mv.to_owned())
+                    .collect();
+                singles.push(SingleRead {
+                    key: key.to_owned(),
+                    ply: position.ply.clone(),
+                    main: old_move.to_owned(),
+                    main_value: old_value,
+                    best: new_move.to_owned(),
+                    best_value: new_value,
+                    moves,
+                    weight: None,
+                });
+            }
+            let (old_depth, new_depth) = (depths.of_move(old), depths.of_move(new));
+            kept.insert(
+                key.to_owned(),
+                Kept {
+                    old_value,
+                    old_depth,
+                    new_value,
+                    new_depth,
+                },
+            );
+            continue;
+        }
         if old_value - new_value < rule.line {
             continue;
         }
@@ -166,5 +207,5 @@ pub(in crate::book_tree) fn kept_mains(
             );
         }
     }
-    Ok(kept)
+    Ok((kept, singles))
 }

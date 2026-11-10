@@ -35,6 +35,7 @@ mod service;
 mod simulation;
 mod source_buckets;
 mod status;
+mod switch;
 mod targets;
 #[cfg(test)]
 mod tests;

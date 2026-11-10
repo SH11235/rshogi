@@ -32,6 +32,7 @@
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
 `master audit --deep-plies N`（N は 1 以上）は、両方の手の先で元データの main が N 手以上続けば線未満も対象にします。直接のキーが無いときは反転キーでも続きを辿ります。
+`master audit` と `tree register` の `--switch-rule propagated` は線を使わず、main と 1 位の値がどちらも手の先の局面から来ていれば差が 1 でも main を替え、片方が 1 回の読みなら替えずに、その手を伸ばす木の行を `--single-enqueue-out` に出します (`--exclude-queue` で既に積んだ木を除く)。
 `master audit` と `master rejoin` の重み (`--opp-freq`) は `--opp-book <PATH>` で、局数が足りない局面と局数の少ない手に行く分を大きい定跡の手で辿ります (`master walk --opp-book` と同じ割り振り)。
 `master audit` と `master hold-early` は `--deep-opp-freq <PATH>` で頻度定跡を渡すと、相手の main に加えて `--deep-min-games <N>` (既定 3) 局以上の応手をすべて辿り、最短の継続手数で判定します。頻度定跡は読み込み時に下限未満の手を除外します。audit では `--deep-plies` が必要で、`--deep-min-games` の明示指定には頻度定跡が必要です。
 
