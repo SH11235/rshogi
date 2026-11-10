@@ -2361,27 +2361,32 @@ fn box_without_progress_keeps_the_receipt_arrival_order() {
 
 #[test]
 fn move_retries_after_the_destination_sheds_its_own_trees_regardless_of_names() {
-    for (source, destination) in [("A", "B"), ("Y", "B")] {
-        let d = TempDir::new().unwrap();
-        let with = |id: &str, moves: &str, priority: u32| {
-            let mut r = row(id, moves);
-            r["priority"] = json!(priority);
-            r
-        };
-        let a = plan_args(
-            d.path(),
-            &[
-                (source, vec![with("first", "7g7f", 10), with("second", "2g2f", 50)]),
-                (destination, vec![with("b1", "5g5f", 1000), with("b2", "6g6f", 1000)]),
-            ],
-        );
-        run_at(a, now(), &mut vec![]).unwrap();
-        let table = plan_table(d.path());
-        assert!(
-            table.contains(&format!("move\tsecond\tb\t50\t{source}\t{destination}\t")),
-            "{table}"
-        );
-        assert!(!table.contains("keep-over"), "{table}");
+    for priority in [50, 150] {
+        for source in ["A", "Y"] {
+            let d = TempDir::new().unwrap();
+            let with = |id: &str, moves: &str, priority: u32| {
+                let mut r = row(id, moves);
+                r["priority"] = json!(priority);
+                r
+            };
+            let a = plan_args(
+                d.path(),
+                &[
+                    (source, vec![with("first", "7g7f", 10), with("second", "2g2f", priority)]),
+                    ("B", vec![with("b1", "5g5f", 1000), with("b2", "6g6f", 1000)]),
+                ],
+            );
+            run_at(a, now(), &mut vec![]).unwrap();
+            let table = plan_table(d.path());
+            let moved = format!("move\tsecond\tb\t{priority}\t{source}\tB\tcapacity\n");
+            assert!(table.contains(&moved), "{table}");
+            assert!(!table.contains("keep-over"), "{table}");
+            let held = |name: &str| {
+                cargo_rows(d.path(), name).iter().find(|r| r["id"] == "second").unwrap()["hold"]
+                    .clone()
+            };
+            assert_eq!((held(source), held("B")), (json!(true), json!(false)));
+        }
     }
 }
 

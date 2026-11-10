@@ -352,6 +352,7 @@ pub(super) fn build<'a>(
                     removed: &mut BTreeSet<(usize, &'a str)>,
                     kept: &mut BTreeSet<(usize, &'a str)>,
                     moved_in: &mut Vec<(usize, &'a Queued)>,
+                    held: &mut Vec<(usize, &'a Queued)>,
                     last: bool|
      -> Result<()> {
         for &i in &order {
@@ -393,6 +394,9 @@ pub(super) fn build<'a>(
                         moved_in.push((j, q));
                         plan.record("move", q, &b.name, &boxes[j].name, "capacity")?;
                     } else {
+                        if !low {
+                            held.push((i, q));
+                        }
                         plan.record(
                             if low { "hold-low" } else { "hold-over" },
                             q,
@@ -410,8 +414,32 @@ pub(super) fn build<'a>(
     };
     // 移し先の上限は台全体の量で見るので、名前順で後の台が自分の木を外した後なら入る木がある。
     // 移せなかった priority 100 未満の木は、全台を一巡した後にもう一度だけ移し先を探す。
-    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, false)?;
-    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, true)?;
+    let mut held = Vec::new();
+    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, &mut held, false)?;
+    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, &mut held, true)?;
+    // hold-over にした木も同じ理由で探し直す。元の台では hold のまま、量も引いてあるので、移し先へ置くだけでよい。
+    for (i, q) in held {
+        let amount = amount_of(i, q);
+        let p = q.line.priority;
+        let available = order
+            .iter()
+            .copied()
+            .filter(|&j| {
+                movable(&plan, i, j, q)
+                    && ratio(plan.ahead(j, p) + amount, metrics[j].capacity) <= args.max_ratio
+                    && room(&plan, j, p, amount)
+            })
+            .collect();
+        if let Some(j) = best(available, &|j| ratio(plan.ahead(j, p) + amount, metrics[j].capacity))
+        {
+            let source = plan.rows[i].iter().find(|r| r["id"] == q.line.id).unwrap_or(&q.raw);
+            let row = updated(source, None, false);
+            plan.emit(j, row);
+            plan.put(j, p, amount);
+            moved_in.push((j, q));
+            plan.record("move", q, &boxes[i].name, &boxes[j].name, "capacity")?;
+        }
+    }
     if let (Some(limit), Some(limit_hours)) = (args.balance_priority, args.balance_hours) {
         let finish = |plan: &Plan, j: usize, extra: f64| {
             hours(plan.ahead(j, limit) + extra, metrics[j].speed)
