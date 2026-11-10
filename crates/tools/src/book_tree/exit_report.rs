@@ -98,7 +98,10 @@ struct Item {
     extra: Vec<(&'static str, String)>,
 }
 
-fn read_tsv(path: &Path, mut visit: impl FnMut(&BTreeMap<&str, &str>) -> Result<()>) -> Result<()> {
+pub(super) fn read_tsv(
+    path: &Path,
+    mut visit: impl FnMut(&BTreeMap<&str, &str>) -> Result<()>,
+) -> Result<()> {
     let mut lines = BufReader::new(
         File::open(path).with_context(|| format!("開けません: {}", path.display()))?,
     )
@@ -119,7 +122,7 @@ fn read_tsv(path: &Path, mut visit: impl FnMut(&BTreeMap<&str, &str>) -> Result<
     Ok(())
 }
 
-fn column<'a>(row: &BTreeMap<&str, &'a str>, name: &str) -> Result<&'a str> {
+pub(super) fn column<'a>(row: &BTreeMap<&str, &'a str>, name: &str) -> Result<&'a str> {
     row.get(name).copied().with_context(|| format!("列がありません: {name}"))
 }
 
@@ -438,7 +441,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn fmt_value(value: Option<i64>) -> String {
+pub(super) fn fmt_value(value: Option<i64>) -> String {
     match value {
         Some(v) if v > 0 => format!("+{v}"),
         Some(v) => v.to_string(),
@@ -468,18 +471,18 @@ fn queued_text(states: &[TreeState], key: &str, own: &str) -> String {
     }
 }
 
-fn kif(moves: &[String]) -> Result<String> {
+pub(super) fn kif(moves: &[String]) -> Result<String> {
     usi_moves_to_short_kif(&moves.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// 手順の後に 1 手を足した最後の手の表記。
-fn kif_last(moves: &[String], mv: &str) -> Result<String> {
+pub(super) fn kif_last(moves: &[String], mv: &str) -> Result<String> {
     let mut all = moves.to_vec();
     all.push(mv.to_owned());
     Ok(kif(&all)?.rsplit(' ').next().unwrap_or_default().to_owned())
 }
 
-fn side_name(side: &str) -> &'static str {
+pub(super) fn side_name(side: &str) -> &'static str {
     if side == "b" { "先手" } else { "後手" }
 }
 

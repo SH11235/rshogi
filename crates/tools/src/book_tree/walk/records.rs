@@ -54,7 +54,7 @@ impl Reach {
     }
 }
 
-pub(super) struct RecordOptions {
+pub(in super::super) struct RecordOptions {
     pub min_rate: f64,
     pub max_ply: usize,
 }
@@ -81,6 +81,61 @@ pub(super) fn reach_stats(
         }
     }
     let mut stats = vec![<[Reach; 3]>::default(); rows.len()];
+    let mut seen = HashSet::new();
+    scan_games(path, options, |game| {
+        if game.first {
+            seen.clear();
+        }
+        let Some(list) = targets.get(game.key) else {
+            return;
+        };
+        for &(i, j) in list {
+            if !seen.insert((i, j)) {
+                continue;
+            }
+            let reach = &mut stats[i][j];
+            reach.games += 1;
+            reach.score += if rows[i].side == "b" {
+                game.black_score
+            } else {
+                1.0 - game.black_score
+            };
+            match game.result {
+                "b" => reach.black_wins += 1,
+                "w" => reach.white_wins += 1,
+                _ => reach.draws += 1,
+            }
+            if j == 0 {
+                *reach.after.entry(game.len - game.ply).or_default() += 1;
+            }
+        }
+    })?;
+    Ok(stats)
+}
+
+/// 対局が 1 つの局面に着いたこと。
+pub(in super::super) struct GameAt<'a> {
+    /// その対局の最初の局面 (初期局面) なら真。
+    pub first: bool,
+    /// 手数を除いた SFEN。
+    pub key: &'a str,
+    /// 初期局面から指した手数。
+    pub ply: usize,
+    /// 対局の手数。
+    pub len: usize,
+    /// `b`・`w`・`d`。
+    pub result: &'a str,
+    /// 先手から見た得点 (勝ち 1・引き分け 0.5)。
+    pub black_score: f64,
+}
+
+/// 両者のレートが `min_rate` 以上で勝敗 (b・w・d) のある対局の、平手から `max_ply` 手までの各局面を順に渡す。
+/// 棋譜の途中に指せない手があれば、そこまでの局面だけを渡す。
+pub(in super::super) fn scan_games(
+    path: &Path,
+    options: &RecordOptions,
+    mut visit: impl FnMut(&GameAt),
+) -> Result<()> {
     let file =
         std::fs::File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
     let reader: Box<dyn BufRead> = if path.extension().is_some_and(|e| e == "gz") {
@@ -98,7 +153,7 @@ pub(super) fn reach_stats(
         let rated =
             matches!((game.br, game.wr), (Some(b), Some(w)) if b.min(w) >= options.min_rate);
         let res = game.res.as_deref().unwrap_or_default();
-        let result = match res {
+        let black_score = match res {
             "b" => 1.0,
             "w" => 0.0,
             "d" => 0.5,
@@ -109,42 +164,26 @@ pub(super) fn reach_stats(
         }
         let limit = game.mv.len().min(options.max_ply);
         let mut pos = position_from_sfen(&format!("{HIRATE_KEY} 1"))?;
-        let mut seen = HashSet::new();
         for p in 0..=limit {
             let sfen = pos.to_sfen();
-            if let Some(list) = targets.get(strip_ply(&sfen)) {
-                for &(i, j) in list {
-                    if !seen.insert((i, j)) {
-                        continue;
-                    }
-                    let reach = &mut stats[i][j];
-                    reach.games += 1;
-                    reach.score += if rows[i].side == "b" {
-                        result
-                    } else {
-                        1.0 - result
-                    };
-                    match res {
-                        "b" => reach.black_wins += 1,
-                        "w" => reach.white_wins += 1,
-                        _ => reach.draws += 1,
-                    }
-                    if j == 0 {
-                        *reach.after.entry(game.mv.len() - p).or_default() += 1;
-                    }
-                }
-            }
+            visit(&GameAt {
+                first: p == 0,
+                key: strip_ply(&sfen),
+                ply: p,
+                len: game.mv.len(),
+                result: res,
+                black_score,
+            });
             if p == limit {
                 break;
             }
-            // 棋譜の途中に指せない手があれば、そこまでの局面だけを数える。
             let mv = game.mv[p].first().and_then(|m| m.as_str()).unwrap_or_default();
             if apply_usi_move(&mut pos, mv).is_err() {
                 break;
             }
         }
     }
-    Ok(stats)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -159,6 +198,7 @@ mod tests {
             ply: moves.len(),
             weight: 0.1,
             key: String::new(),
+            tag: 0,
             moves: moves.iter().map(|m| (*m).to_owned()).collect(),
             games: None,
             book_moves: None,

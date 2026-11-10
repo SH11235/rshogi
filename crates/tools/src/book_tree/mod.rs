@@ -20,6 +20,7 @@ mod main_line;
 mod master_index;
 mod master_table;
 mod model;
+mod opening_report;
 mod output;
 mod paths;
 mod queue;
@@ -206,6 +207,8 @@ enum MasterCommand {
     MainLine(main_line::MainLineArgs),
     /// walk の止まりと伝播の切れ目を、有望・塞ぎたい・浅い・値の出所が弱いに分けて報告する
     ExitReport(exit_report::ExitReportArgs),
+    /// 戦型の候補ごとに RAMU の手を替えて辿り、出口の値・確度・強い対局の実績・危ない局面を比べる
+    OpeningReport(Box<opening_report::OpeningReportArgs>),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -226,6 +229,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::LineDb(args) => line_db::run(args),
         MasterCommand::MainLine(args) => main_line::run(args),
         MasterCommand::ExitReport(args) => exit_report::run(args),
+        MasterCommand::OpeningReport(args) => opening_report::run(*args),
     }
 }
 
