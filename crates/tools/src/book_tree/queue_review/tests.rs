@@ -30,6 +30,8 @@ fn args(dir: &Path) -> QueueReviewArgs {
         bands: vec![9, 26, 60, 120],
         balance_priority: None,
         balance_hours: None,
+        move_max_ratio: 1.0,
+        move_band_factor: 1.0,
         master: Some(master),
         rerank_table: None,
         rerank_out: None,
@@ -1230,6 +1232,8 @@ fn cli_requires_plan_for_explicit_planning_options_except_deadlines() {
         ["--condition", "A=one"],
         ["--max-ratio", "0.95"],
         ["--update-size", "30"],
+        ["--move-max-ratio", "inf"],
+        ["--move-band-factor", "1.5"],
     ] {
         let mut argv = base.to_vec();
         argv.extend(option);
@@ -2120,13 +2124,16 @@ fn plan_moves_to_a_box_whose_band_has_room_and_keeps_trees_within_capacity() {
         r["priority"] = json!(priority);
         r
     };
-    let a = plan_args(
+    let mut a = plan_args(
         d.path(),
         &[
             ("A", vec![with("first", "7g7f", 10), with("second", "2g2f", 50)]),
             ("B", vec![with("b1", "5g5f", 1000), with("b2", "6g6f", 1000)]),
         ],
     );
+    // B は自分の後ろの木を外す前は満杯なので、移す先の上限を外して帯の量だけで選ばせる。
+    a.move_max_ratio = f64::INFINITY;
+    a.move_band_factor = f64::INFINITY;
     run_at(a, now(), &mut vec![]).unwrap();
     assert_eq!(plan_actions(d.path()), ["move second", "hold-over b2", "hold-over b1"]);
     assert!(
@@ -2243,4 +2250,97 @@ fn plan_update_size_counts_in_the_band_of_its_tree() {
     run_at(a, now(), &mut vec![]).unwrap();
     let bands = std::fs::read_to_string(d.path().join("plan/qrhold_bands.tsv")).unwrap();
     assert!(bands.lines().any(|l| l == "A\t0\t9\t10\t1\t13\t1.3\t2"), "{bands}");
+}
+
+#[test]
+fn box_without_progress_counts_receipts_as_unstarted() {
+    let d = TempDir::new().unwrap();
+    let mut both = row("both", "7g7f");
+    both["own"] = json!("bw");
+    let mut a = plan_args(d.path(), &[("A", vec![both, row("single", "2g2f")]), ("B", vec![])]);
+    std::fs::remove_file(d.path().join("A/fetch/progress.json")).unwrap();
+    run_at(a, now(), &mut vec![]).unwrap();
+    let summary = std::fs::read_to_string(d.path().join("boxes.tsv")).unwrap();
+    assert!(summary.lines().any(|l| l == "A\t0\t10\t2\t20\t30\t1.5\t3"), "{summary}");
+    assert!(plan_table(d.path()).contains("move\tsingle\tb\t42\tA\tB\tcapacity"));
+
+    // 進みの記録がある台は、受付が progress より新しければ今までどおり止める。
+    let d = TempDir::new().unwrap();
+    a = plan_args(d.path(), &[("A", vec![row("old", "7g7f")])]);
+    enqueue(&d.path().join("A"), "newer", 10_000, &[row("new", "2g2f")]);
+    let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+    assert!(error.contains("progress に無い受付"), "{error}");
+}
+
+#[test]
+fn move_keeps_destination_total_within_move_max_ratio() {
+    for limit in [1.0, f64::INFINITY] {
+        let d = TempDir::new().unwrap();
+        let with = |id: &str, moves: &str, priority: u32| {
+            let mut r = row(id, moves);
+            r["priority"] = json!(priority);
+            r
+        };
+        let mut a = plan_args(
+            d.path(),
+            &[
+                ("A", vec![with("first", "7g7f", 10), with("second", "2g2f", 50)]),
+                (
+                    "B",
+                    vec![
+                        with("b1", "5g5f", 1000),
+                        with("b2", "6g6f", 1000),
+                        with("b3", "1g1f", 1000),
+                        with("b4", "9g9f", 1000),
+                    ],
+                ),
+            ],
+        );
+        a.box_rate = vec!["A=10".into(), "B=22".into()];
+        a.move_max_ratio = limit;
+        a.move_band_factor = f64::INFINITY;
+        run_at(a, now(), &mut vec![]).unwrap();
+        let expected = if limit.is_finite() {
+            "keep-over second"
+        } else {
+            "move second"
+        };
+        assert!(
+            plan_actions(d.path()).contains(&expected.to_owned()),
+            "{}",
+            plan_table(d.path())
+        );
+    }
+}
+
+#[test]
+fn balance_does_not_stretch_a_band_beyond_the_slowest_box_before() {
+    for factor in [1.0, f64::INFINITY] {
+        let d = TempDir::new().unwrap();
+        let with = |id: &str, moves: &str, priority: u32| {
+            let mut r = row(id, moves);
+            r["priority"] = json!(priority);
+            r
+        };
+        let started = ["7g7f 3c3d", "7g7f 8c8d", "7g7f 4c4d", "7g7f 1c1d"];
+        let mut a_rows = vec![with("a1", "7g7f", 1)];
+        a_rows.extend(started.iter().enumerate().map(|(i, m)| with(&format!("s{i}"), m, 6)));
+        let mut a = plan_args(
+            d.path(),
+            &[
+                ("A", a_rows.clone()),
+                ("B", vec![with("b1", "2g2f", 1), with("b2", "5g5f", 1)]),
+            ],
+        );
+        let trees = a_rows.iter().map(|r| progress(r, u64::from(r["id"] != "a1"), 0)).collect();
+        fixture_box(&d.path().join("A"), trees, vec![]);
+        a.cutoff = "2026-11-12T12:00:00+09:00".parse().unwrap();
+        a.bands = vec![1, 6];
+        a.balance_priority = Some(6);
+        a.balance_hours = Some(3.0);
+        a.move_band_factor = factor;
+        run_at(a, now(), &mut vec![]).unwrap();
+        let moved = plan_table(d.path()).contains("balance\ta1\tb\t1\tA\tB\tband-hours");
+        assert_eq!(moved, factor.is_infinite(), "{}", plan_table(d.path()));
+    }
 }

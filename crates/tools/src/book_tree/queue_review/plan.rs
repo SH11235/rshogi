@@ -185,6 +185,41 @@ pub(super) fn build<'a>(
         table: b"action\tid\town\tpriority\tfrom\tto\treason\n".to_vec(),
     };
     let initial_load = plan.load.clone();
+    for (name, value) in [
+        ("move-max-ratio", args.move_max_ratio),
+        ("move-band-factor", args.move_band_factor),
+    ] {
+        ensure!(value >= 0.0, "{name} は非負数 (inf 可) が必要です: {value}");
+    }
+    // 帯の上端 (最後の帯は上端なし)。bands.tsv の after_hours と同じく、上端以下の量を台の速さで割る。
+    let highs: Vec<u32> = args.bands.iter().copied().chain([u32::MAX]).collect();
+    // 速さ 0 の台は読み終わりが無限になり上限が外れるので、最大に入れない。
+    let band_limits: Vec<f64> = highs
+        .iter()
+        .map(|&high| {
+            let before = (0..boxes.len())
+                .map(|i| {
+                    hours(
+                        initial_load[i].range(..=high).fold(0.0, |sum, (_, v)| sum + v),
+                        metrics[i].speed,
+                    )
+                })
+                .filter(|h| h.is_finite())
+                .fold(0.0, f64::max);
+            if args.move_band_factor.is_infinite() {
+                f64::INFINITY
+            } else {
+                before * args.move_band_factor
+            }
+        })
+        .collect();
+    // 移す先があふれないこと、同じ priority の木を 1 台に寄せて帯の読み終わりを延ばさないこと。
+    let room = |plan: &Plan, j: usize, p: u32, amount: f64| {
+        ratio(plan.remaining[j] + amount, metrics[j].capacity) <= args.move_max_ratio
+            && highs.iter().zip(&band_limits).filter(|&(&high, _)| high >= p).all(
+                |(&high, &limit)| hours(plan.ahead(j, high) + amount, metrics[j].speed) <= limit,
+            )
+    };
     for q in &updates {
         let owners: Vec<_> = boxes
             .iter()
@@ -345,6 +380,7 @@ pub(super) fn build<'a>(
                             movable(plan, i, j, q)
                                 && ratio(plan.ahead(j, p) + amount, metrics[j].capacity)
                                     <= args.max_ratio
+                                && room(plan, j, p, amount)
                         })
                         .collect();
                     best(available, &|j| ratio(plan.ahead(j, p) + amount, metrics[j].capacity))
@@ -403,6 +439,7 @@ pub(super) fn build<'a>(
                             && finish(&plan, j, amount) <= limit_hours
                             && ratio(plan.ahead(j, p) + amount, metrics[j].capacity)
                                 <= args.max_ratio
+                            && room(&plan, j, p, amount)
                     })
                     .collect();
                 if let Some(j) = best(available, &|j| finish(&plan, j, amount)) {

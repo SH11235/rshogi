@@ -109,6 +109,13 @@ pub(super) struct QueueReviewArgs {
     /// 帯の読み終わりの目標時間 (balance-priority 以下の量 / 台の速さ)
     #[arg(long, requires = "balance_priority")]
     balance_hours: Option<f64>,
+    /// move・balance の移す先の、移した後の残り/読める量 (全 priority) の上限。inf で外す
+    #[arg(long, default_value_t = 1.0, requires = "plan_out")]
+    move_max_ratio: f64,
+    /// move・balance の移す先の帯の読み終わり時間 (bands.tsv の after_hours) の上限を、
+    /// 移す前の全台の同じ帯の before_hours の最大の何倍にするか。inf で外す
+    #[arg(long, default_value_t = 1.0, requires = "plan_out")]
+    move_band_factor: f64,
     /// 足し込みのある id あたりの追加局面数の仮定
     #[arg(long, default_value_t = 30, requires = "plan_out")]
     update_size: u64,
@@ -177,6 +184,8 @@ struct BoxData {
     dir: PathBuf,
     queue: BTreeMap<String, Queued>,
     progress: Progress,
+    /// `fetch/progress.json` が無く、受付の木をすべて未着手として補った台。
+    progress_missing: bool,
 }
 #[derive(Default)]
 struct Walk {
@@ -277,9 +286,39 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         ensure!(count == receipt.lines, "受領の行数と一致しません: {}", path.display());
     }
     let progress_path = dir.join("fetch/progress.json");
-    let progress: Progress = serde_json::from_reader(File::open(&progress_path)?)
-        .with_context(|| format!("進みのファイルが不正です: {}", progress_path.display()))?;
-    inputs.push(progress_path);
+    let progress_missing = !progress_path.try_exists()?;
+    let progress = if progress_missing {
+        // 立てた直後の台は最初の回収より前に計画することがある。受付の木はまだどれも読んでいない。
+        let trees: Vec<_> = queue
+            .values()
+            .flat_map(|q| {
+                q.line.sides().into_iter().map(|own| TreeProgress {
+                    id: q.line.id.clone(),
+                    own,
+                    priority: q.line.priority,
+                    hold: q.line.hold,
+                    finished: false,
+                    failed: false,
+                    read: 0,
+                    requested: 0,
+                })
+            })
+            .collect();
+        eprintln!(
+            "{name}: 進みの記録 {} が無いので、読んでいる木が 0 本の空の台として扱います (受付の木 {} 本を未着手として数えます)",
+            progress_path.display(),
+            trees.len()
+        );
+        Progress {
+            trees,
+            workers: Vec::new(),
+        }
+    } else {
+        let progress: Progress = serde_json::from_reader(File::open(&progress_path)?)
+            .with_context(|| format!("進みのファイルが不正です: {}", progress_path.display()))?;
+        inputs.push(progress_path);
+        progress
+    };
     let mut ids = BTreeSet::new();
     for tree in &progress.trees {
         ensure!(
@@ -308,6 +347,7 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         dir,
         queue,
         progress,
+        progress_missing,
     })
 }
 
@@ -780,6 +820,12 @@ fn box_metrics(
     let speed = box_rate.get(&b.name).copied().unwrap_or_else(|| {
         rate.get(&b.name).copied().unwrap_or(args.default_rate) * b.progress.workers.len() as f64
     });
+    if b.progress_missing && !box_rate.contains_key(&b.name) {
+        eprintln!(
+            "{}: 進みの記録が無く worker 数が分からないので、--box-rate が無い間は速さ 0 として扱います",
+            b.name
+        );
+    }
     let capacity = speed * hours;
     ensure!(speed.is_finite() && capacity.is_finite(), "速さ・読める量が大きすぎます");
     let remaining = b
