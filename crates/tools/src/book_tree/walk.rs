@@ -379,6 +379,8 @@ pub(super) trait Tagger {
     fn start(&mut self, key: &str) -> Result<u32>;
     /// 印 `tag` の重みが `parent` から `mv` を指して `child` に進んだ後の印。
     fn step(&mut self, tag: u32, parent: &str, mv: &str, child: &str) -> Result<u32>;
+    /// 重みが `--weight-floor` 未満に分かれた印を、同じ局面のほかの重みと足し合わせやすい粗い印に替える。
+    fn coarsen(&mut self, tag: u32) -> u32;
 }
 
 /// 印を付けない (どの重みも印 0)。
@@ -390,6 +392,9 @@ impl Tagger for NoTag {
     }
     fn step(&mut self, tag: u32, _: &str, _: &str, _: &str) -> Result<u32> {
         Ok(tag)
+    }
+    fn coarsen(&mut self, tag: u32) -> u32 {
+        tag
     }
 }
 
@@ -436,6 +441,24 @@ pub(super) fn walk_side_with(
         (1.0, from.start_moves.to_vec()),
     )]);
     for ply in from.start_moves.len()..=options.max_ply {
+        // 重みの下限は印をまたいで同じ局面に来た重みの和で見る (印で分けても止まる所を変えない)。
+        // 和が下限以上の局面で下限未満に分かれた重みは、粗い印に替えて足し合わせ、分かれ方が増え続けないようにする。
+        let mut total: HashMap<String, f64> = HashMap::new();
+        for ((key, _), (weight, _)) in &layer {
+            *total.entry(key.clone()).or_default() += weight;
+        }
+        let small: Vec<(String, u32)> = layer
+            .iter()
+            .filter(|((key, _), (weight, _))| {
+                *weight < options.floor && total[key] >= options.floor
+            })
+            .map(|(at, _)| at.clone())
+            .collect();
+        for (key, tag) in small {
+            let (weight, path) = layer.remove(&(key.clone(), tag)).expect("層にある");
+            let coarse = tagger.coarsen(tag);
+            layer.entry((key, coarse)).or_insert((0.0, path)).0 += weight;
+        }
         let mut next: Layer = BTreeMap::new();
         let mut put = |key: (String, u32), weight: f64, path: &[String], mv: &str| {
             let entry = next.entry(key).or_insert_with(|| {
@@ -453,7 +476,7 @@ pub(super) fn walk_side_with(
                 rows.push(stop(src, Stop::Max, weight)?);
                 continue;
             }
-            if weight < options.floor {
+            if total[&key] < options.floor {
                 rows.push(stop(src, Stop::Tiny, weight)?);
                 continue;
             }

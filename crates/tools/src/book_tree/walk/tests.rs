@@ -819,3 +819,75 @@ fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
     assert_eq!(&lines[0][13..], &["unknown", "read"]);
     assert_eq!(&lines[5][11..], &["5a6b", "", "", "read"]);
 }
+
+/// E1 と E2 の重みを別の印にする。
+struct SplitAt(String, String);
+
+impl Tagger for SplitAt {
+    fn start(&mut self, _: &str) -> Result<u32> {
+        Ok(0)
+    }
+    fn step(&mut self, tag: u32, parent: &str, _: &str, _: &str) -> Result<u32> {
+        Ok(if parent == self.0 {
+            1
+        } else if parent == self.1 {
+            2
+        } else {
+            tag
+        })
+    }
+    fn coarsen(&mut self, _: u32) -> u32 {
+        0
+    }
+}
+
+/// 2 本の手順が F で合流する (それぞれ重み 0.25)。下限 0.3 は合流した 0.5 で判定し、印の違う 0.25 ずつは粗い印で足す。
+#[test]
+fn tags_split_weights_without_changing_where_the_walk_stops() {
+    let b = after(ROOT, &["5i4h", "5a5b"]);
+    let c = after(&b, &["4h3h"]);
+    let (d1, d2) = (after(&c, &["5b5c"]), after(&c, &["5b4c"]));
+    let (e1, e2) = (after(&d1, &["3h3g"]), after(&d2, &["3h3g"]));
+    let master = positions(&[
+        (ROOT, "5i4h", "main", ""),
+        (&b, "4h3h", "main", ""),
+        (&d1, "3h3g", "main", ""),
+        (&d2, "3h3g", "main", ""),
+    ]);
+    let freq = BTreeMap::from([
+        (after(ROOT, &["5i4h"]), vec![("5a5b", 0, 10)]),
+        (c.clone(), vec![("5b5c", 0, 5), ("5b4c", 0, 5)]),
+        (e1.clone(), vec![("5c4d", 0, 5), ("5c6d", 0, 5)]),
+        (e2.clone(), vec![("4c4d", 0, 5), ("4c3d", 0, 5)]),
+    ]);
+    let options = WalkOptions {
+        floor: 0.3,
+        ..options()
+    };
+    let sums = |rows: &[Row]| {
+        let mut sums: BTreeMap<(&str, String), f64> = BTreeMap::new();
+        for r in rows {
+            *sums.entry((r.stop.as_str(), r.key.clone())).or_default() += r.weight;
+        }
+        sums
+    };
+    let plain = walk_side(&master, &mut sources(Some(freq.clone()), None), "b", ROOT, &[], options)
+        .unwrap();
+    let overrides = HashMap::new();
+    let from = WalkFrom {
+        start: ROOT,
+        start_moves: &[],
+        overrides: &overrides,
+    };
+    let mut tagger = SplitAt(e1, e2);
+    let tagged =
+        walk_side_with(&master, &mut sources(Some(freq), None), "b", &from, &mut tagger, options)
+            .unwrap();
+    assert_eq!(sums(&plain), sums(&tagged));
+    let f = after(&after(&d1, &["3h3g"]), &["5c4d"]);
+    let own: Vec<&Row> = tagged.iter().filter(|r| r.stop == Stop::Own).collect();
+    assert_eq!(own.len(), 1);
+    assert_eq!((own[0].key.as_str(), own[0].tag), (f.as_str(), 0));
+    assert!(close(own[0].weight, 0.5));
+    assert_eq!(tagged.iter().filter(|r| r.stop == Stop::Tiny).count(), 2);
+}

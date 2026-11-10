@@ -202,18 +202,20 @@ fn parse_candidates(text: &str) -> Result<Vec<Candidate>> {
     for (n, line) in lines {
         let at = || format!("候補の表の {} 行目", n + 1);
         let cells: Vec<&str> = line.split('\t').collect();
-        ensure!(cells.len() == 3, "{}: 列は 3 つです", at());
+        // override が空の行は、エディタで末尾のタブが消えても読めるように 2 列も受け付ける。
+        ensure!(matches!(cells.len(), 2 | 3), "{}: 列は 3 つです", at());
         let name = cells[0].trim();
         ensure!(!name.is_empty(), "{}: name が空です", at());
         ensure!(out.iter().all(|c| c.name != name), "{}: name が重なっています: {name}", at());
-        let side = match cells[1] {
+        let side = match cells[1].trim() {
             "b" => "b",
             "w" => "w",
             other => bail!("{}: side は b か w です: {other}", at()),
         };
         let mut overrides = Vec::new();
         let mut by_key = HashMap::new();
-        for part in cells[2].split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let cell = cells.get(2).copied().unwrap_or_default();
+        for part in cell.split(';').map(str::trim).filter(|p| !p.is_empty()) {
             let (prefix, mv) = part
                 .split_once(':')
                 .with_context(|| format!("{}: override は <手順>:<手> です: {part}", at()))?;
@@ -268,16 +270,19 @@ fn parse_danger(text: &str) -> Result<HashSet<(&'static str, String)>> {
             "w" => "w",
             other => bail!("危ない局面の表の {} 行目: side は b か w です: {other}", n + 1),
         };
-        let key = cells[key_at];
-        position_check(key).with_context(|| format!("危ない局面の表の {} 行目", n + 1))?;
-        out.insert((side, key.to_owned()));
+        let key = normalize_key(cells[key_at])
+            .with_context(|| format!("危ない局面の表の {} 行目", n + 1))?;
+        out.insert((side, key));
     }
     Ok(out)
 }
 
-fn position_check(key: &str) -> Result<()> {
-    crate::book_db::position_from_sfen(&format!("{key} 1"))?;
-    Ok(())
+/// 盤・手番・持ち駒 (手数は付いていてもよい) を、辿りの局面と同じ書き方に直す。
+fn normalize_key(text: &str) -> Result<String> {
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    ensure!(matches!(fields.len(), 3 | 4), "局面は盤・手番・持ち駒 (と手数) です: {text}");
+    let pos = crate::book_db::position_from_sfen(&format!("{} 1", fields[..3].join(" ")))?;
+    Ok(crate::book_db::strip_ply(&pos.to_sfen()).to_owned())
 }
 
 /// 局面に番号を付け、同じ局面と同じ手の行き先を 1 回だけ求める。
@@ -365,8 +370,10 @@ struct Exit {
     path: Vec<u32>,
     value: Option<i64>,
     kind: String,
-    /// 同じ局面に 2 回着いた (千日手の循環に入った)。
+    /// 千日手に着いた (循環を回り続けて max で止まったか、own の出口の外部定跡の続きが同じ局面に戻る)。
     draw: bool,
+    /// 通った分岐と、その局面で相手が指した手。
+    branches: Vec<(usize, Option<String>)>,
     /// 最初に通った危ない局面 (強い対局の判定か `--danger` の表)。
     first_danger: Option<u32>,
     /// 強い対局で危ない局面を通った。
@@ -422,7 +429,7 @@ fn weighted_quantile(values: &[(i64, f64)], q: f64) -> Option<i64> {
 /// 先手から見た値と value_kind。
 type OwnValue = (Option<i64>, String);
 
-/// 出口の値。`master exit-report` と同じく、手順の中で RAMU が最後に指した元データの手の evals の平均 (先手から見た値) と value_kind。
+/// 元データの手の値の引き方。
 struct Values<'a> {
     index: &'a mut MasterIndex,
     /// (局面, 手) → 元データの行の (値, value_kind)。行が無ければ `None`。
@@ -430,38 +437,24 @@ struct Values<'a> {
 }
 
 impl Values<'_> {
-    fn last_own(
-        &mut self,
-        keys: &Keys,
-        path: &[u32],
-        moves: &[String],
-        own: &str,
-    ) -> Result<(Option<i64>, String)> {
-        for i in (0..moves.len()).rev() {
-            let key = &keys.names[path[i] as usize];
-            if side(key) != own {
-                continue;
-            }
-            let slot = (path[i], moves[i].clone());
-            if !self.cache.contains_key(&slot) {
-                let found =
-                    match self.index.rows(key)?.into_iter().find(|r| r.get("move") == moves[i]) {
-                        Some(row) => {
-                            let sign = if own == "b" { 1 } else { -1 };
-                            Some((
-                                mean_eval(row.get("evals"))?.map(|v| i64::from(v) * sign),
-                                row.get("value_kind").to_owned(),
-                            ))
-                        }
-                        None => None,
-                    };
-                self.cache.insert(slot.clone(), found);
-            }
-            if let Some(found) = &self.cache[&slot] {
-                return Ok(found.clone());
-            }
+    /// 局面 `key` (番号 `id`、`own` の手番) で指した `mv` の行の evals の平均 (先手から見た値) と value_kind。
+    /// 行が無ければ値なし。
+    fn of(&mut self, id: u32, key: &str, mv: &str, own: &str) -> Result<OwnValue> {
+        let slot = (id, mv.to_owned());
+        if !self.cache.contains_key(&slot) {
+            let found = match self.index.rows(key)?.into_iter().find(|r| r.get("move") == mv) {
+                Some(row) => {
+                    let sign = if own == "b" { 1 } else { -1 };
+                    Some((
+                        mean_eval(row.get("evals"))?.map(|v| i64::from(v) * sign),
+                        row.get("value_kind").to_owned(),
+                    ))
+                }
+                None => None,
+            };
+            self.cache.insert(slot.clone(), found);
         }
-        Ok((None, String::new()))
+        Ok(self.cache[&slot].clone().unwrap_or((None, String::new())))
     }
 }
 
@@ -480,6 +473,11 @@ fn branch_keys(
         } else {
             format!("{} で {}", kif(prefix)?, kif_last(prefix, mv)?)
         };
+        // 別の override が手順違いで同じ局面に着くなら 1 つの分岐にまとめる。
+        if let Some(entry) = out.iter_mut().find(|(at, _, _)| *at == id) {
+            entry.2 = format!("{}、{label}", entry.2);
+            continue;
+        }
         let mut moves = prefix.clone();
         moves.push(mv.clone());
         out.push((id, moves, label));
@@ -513,31 +511,35 @@ struct State {
     listed: bool,
     /// 通った分岐 (`Report::branches` の添字) と、その局面で相手が指した手 (まだなら `None`)。
     branches: Vec<(usize, Option<String>)>,
-    /// 通った循環の局面 (番号順)。`repeated` になったら空にする。
-    cycle_seen: Vec<u32>,
-    /// 同じ局面に 2 回着いた。
-    repeated: bool,
+    /// RAMU が最後に指した手 (局面, 手)。出口の値はこの手の値で、同じ局面に来ても最後の手の違う重みは混ぜない。
+    last_move: Option<(u32, String)>,
 }
 
 /// 局面に番号を付け、辿りで指した手の行き来を集めるだけの印。
 struct Collect<'a> {
     keys: &'a mut Keys,
     edges: HashSet<(u32, u32)>,
+    visited: &'a mut HashSet<u32>,
 }
 
 impl Tagger for Collect<'_> {
     fn start(&mut self, key: &str) -> Result<u32> {
-        self.keys.id(key);
+        let id = self.keys.id(key);
+        self.visited.insert(id);
         Ok(0)
     }
     fn step(&mut self, _: u32, parent: &str, _: &str, child: &str) -> Result<u32> {
         let edge = (self.keys.id(parent), self.keys.id(child));
         self.edges.insert(edge);
+        self.visited.insert(edge.1);
         Ok(0)
+    }
+    fn coarsen(&mut self, tag: u32) -> u32 {
+        tag
     }
 }
 
-/// 辿りの行き来の循環に入っている局面。同じ局面に 2 回着く重みはこの局面でしか起きない。
+/// 辿りの行き来の循環 (強連結成分) に入っている局面。
 fn cycle_nodes(edges: &HashSet<(u32, u32)>, len: usize) -> HashSet<u32> {
     let mut adjacency = vec![Vec::new(); len];
     for &(from, to) in edges {
@@ -555,31 +557,26 @@ struct Tags<'a> {
     branches: HashMap<u32, usize>,
     auto: &'a HashSet<u32>,
     listed: &'a HashSet<u32>,
-    cycles: &'a HashSet<u32>,
+    own: &'static str,
 }
 
 impl Tags<'_> {
     fn enter(&mut self, mut state: State, id: u32) -> u32 {
         let (auto, listed) = (self.auto.contains(&id), self.listed.contains(&id));
-        state.auto |= auto;
-        state.listed |= listed;
-        if state.first_danger.is_none() && (auto || listed) {
+        if !state.auto && !state.listed && (auto || listed) {
             state.first_danger = Some(id);
         }
-        if !state.repeated && self.cycles.contains(&id) {
-            match state.cycle_seen.binary_search(&id) {
-                Ok(_) => {
-                    state.repeated = true;
-                    state.cycle_seen.clear();
-                }
-                Err(at) => state.cycle_seen.insert(at, id),
-            }
-        }
+        state.auto |= auto;
+        state.listed |= listed;
         if let Some(&b) = self.branches.get(&id)
             && state.branches.iter().all(|(i, _)| *i != b)
         {
             state.branches.push((b, None));
         }
+        self.intern(state)
+    }
+
+    fn intern(&mut self, state: State) -> u32 {
         if let Some(&tag) = self.ids.get(&state) {
             return tag;
         }
@@ -598,12 +595,22 @@ impl Tagger for Tags<'_> {
     fn step(&mut self, tag: u32, parent: &str, mv: &str, child: &str) -> Result<u32> {
         let id = self.keys.id(child);
         let mut state = self.states[tag as usize].clone();
-        if let Some(&b) = self.branches.get(&self.keys.id(parent))
+        let parent_id = self.keys.id(parent);
+        if side(parent) == self.own {
+            state.last_move = Some((parent_id, mv.to_owned()));
+        }
+        if let Some(&b) = self.branches.get(&parent_id)
             && let Some(entry) = state.branches.iter_mut().find(|(i, r)| *i == b && r.is_none())
         {
             entry.1 = Some(mv.to_owned());
         }
         Ok(self.enter(state, id))
+    }
+    /// 最初に通った危ない局面を忘れる (通ったかどうかは残す)。危ない局面ごとの一覧から小さく分かれた重みが抜ける。
+    fn coarsen(&mut self, tag: u32) -> u32 {
+        let mut state = self.states[tag as usize].clone();
+        state.first_danger = None;
+        self.intern(state)
     }
 }
 
@@ -630,13 +637,30 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
     };
     let options = args.walk_options();
     let mut keys = Keys::default();
+    // 分岐の局面は辿りで来なくても強い対局の局数を出すので、先に番号を付ける。
+    let mut branch_sets = Vec::with_capacity(candidates.len());
+    for candidate in &candidates {
+        let branches: Vec<Branch> = branch_keys(candidate, &positions, &mut keys)?
+            .into_iter()
+            .map(|(key, moves, label)| Branch {
+                key,
+                moves,
+                label,
+                reach: 0.0,
+                replies: BTreeMap::new(),
+            })
+            .collect();
+        branch_sets.push(branches);
+    }
     // 強い対局で危ない局面かは局面ごとの局数で決まり、循環は辿りの行き来で決まるので、先に一度辿って集める。
     let mut cycles = Vec::with_capacity(candidates.len());
+    let mut visited = HashSet::new();
     for candidate in &candidates {
         let from = walk_from(&candidate.by_key);
         let mut collect = Collect {
             keys: &mut keys,
             edges: HashSet::new(),
+            visited: &mut visited,
         };
         walk_side_with(&positions, &mut src, candidate.side, &from, &mut collect, options)?;
         let edges = collect.edges;
@@ -668,18 +692,22 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
         cache: HashMap::new(),
     };
     let mut reports = Vec::new();
-    for (candidate, cycles) in candidates.into_iter().zip(&cycles) {
+    if let Some(listed) = &listed {
+        for side in ["b", "w"] {
+            let total = listed.iter().filter(|(s, _)| *s == side).count();
+            if total > 0 {
+                let reached = listed
+                    .iter()
+                    .filter(|(s, key)| {
+                        *s == side && keys.ids.get(key).is_some_and(|id| visited.contains(id))
+                    })
+                    .count();
+                println!("危ない局面の表 ({side}): {total} 局面のうち辿りで来るもの {reached}");
+            }
+        }
+    }
+    for ((candidate, cycles), branches) in candidates.into_iter().zip(&cycles).zip(branch_sets) {
         let own = candidate.side;
-        let branches: Vec<Branch> = branch_keys(&candidate, &positions, &mut keys)?
-            .into_iter()
-            .map(|(key, moves, label)| Branch {
-                key,
-                moves,
-                label,
-                reach: 0.0,
-                replies: BTreeMap::new(),
-            })
-            .collect();
         let auto: HashSet<u32> = games
             .iter()
             .enumerate()
@@ -701,7 +729,7 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
             branches: branches.iter().enumerate().map(|(i, b)| (b.key, i)).collect(),
             auto: &auto,
             listed: &listed_ids,
-            cycles,
+            own,
         };
         let from = walk_from(&candidate.by_key);
         let rows = walk_side_with(&positions, &mut src, own, &from, &mut tags, options)?;
@@ -715,9 +743,13 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
         for mut row in rows {
             let state = &states[row.tag as usize];
             let path = keys.path(&row.moves)?;
-            let (value, kind) = values.last_own(&keys, &path, &row.moves, own)?;
-            // own の出口から外部定跡の最善を両者が指し続けた手順が、出口の局面か手順の中の局面に戻るか。
-            let mut at = *path.last().expect("初期局面がある");
+            let (value, kind) = match &state.last_move {
+                Some((id, mv)) => values.of(*id, &keys.names[*id as usize], mv, own)?,
+                None => (None, String::new()),
+            };
+            // own の出口から外部定跡の最善を両者が指し続けた手順が、出口の局面かその続きの手順の中の局面に戻るか。
+            let at_exit = *path.last().expect("初期局面がある");
+            let mut at = at_exit;
             let mut seen: HashSet<u32> = HashSet::from([at]);
             let mut repeated = false;
             for mv in &std::mem::take(&mut row.cont) {
@@ -728,7 +760,8 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
                 at = keys.child(at, mv)?;
                 repeated = !seen.insert(at);
             }
-            let draw = state.repeated || repeated;
+            // max で止まった局面が循環の中なら、循環から出られずに回り続けた重み。
+            let draw = repeated || (row.stop == Stop::Max && cycles.contains(&at_exit));
             // 出口とその 10・20 手前は、行の手順 (同じ局面に来た手順のうち最初の 1 つ) で決める。
             let black_below = own == "b"
                 && [0usize, 10, 20].iter().any(|off| {
@@ -762,6 +795,7 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
                 value,
                 kind,
                 draw,
+                branches: state.branches.clone(),
                 first_danger: state.first_danger,
                 auto: state.auto,
                 listed: state.listed,
@@ -868,25 +902,34 @@ impl Summary {
         }
         let mut branch_games = 0;
         let mut branch_points = 0.0;
-        let mut deviate = 0.0;
-        let mut deviate_values = Vec::new();
         for b in &report.branches {
             let g = games[b.key as usize];
             branch_games += g.games;
             branch_points += g.score(own).unwrap_or(0.0) * g.games as f64;
-            let top = b
-                .replies
-                .iter()
-                .filter(|(m, _)| !m.starts_with("stop:"))
-                .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
-                .map(|(m, _)| m.as_str());
-            for (m, (w, vals)) in &b.replies {
-                if Some(m.as_str()) != top && !m.starts_with("stop:") {
-                    deviate += w;
-                    deviate_values.extend(vals.iter().copied());
-                }
-            }
         }
+        let tops: Vec<Option<&str>> = report
+            .branches
+            .iter()
+            .map(|b| {
+                b.replies
+                    .iter()
+                    .filter(|(m, _)| !m.starts_with("stop:"))
+                    .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+                    .map(|(m, _)| m.as_str())
+            })
+            .collect();
+        // いずれかの分岐で最も多い手以外に進んだ重みを、1 本の重みにつき 1 回数える。
+        let deviates = |e: &Exit| {
+            e.branches
+                .iter()
+                .any(|(b, reply)| reply.as_deref().is_some_and(|m| Some(m) != tops[*b]))
+        };
+        let deviate = weight_of(&|e| deviates(e));
+        let deviate_values: Vec<(i64, f64)> = exits
+            .iter()
+            .filter(|e| deviates(e))
+            .filter_map(|e| e.value.map(|v| (v, e.row.weight)))
+            .collect();
         let ratio = |points: f64, n: u64| (n > 0).then(|| points / n as f64);
         Self {
             mean,
@@ -949,7 +992,8 @@ fn format_table(reports: &[Report], summaries: &[Summary]) -> String {
             r.candidate.side.to_owned(),
             override_text(&r.candidate),
             r.override_weight.map(w).unwrap_or_default(),
-            opt_f(s.mean, 1),
+            // -0.04 を "-0.0" と書かない。
+            opt_f(s.mean.map(|m| if m.abs() < 0.05 { 0.0 } else { m }), 1),
         ];
         cells.extend(s.quantiles.iter().map(|q| q.map(|v| v.to_string()).unwrap_or_default()));
         cells.extend(b);
@@ -1004,7 +1048,7 @@ fn markdown(inputs: &Inputs, reports: &[Report], summaries: &[Summary]) -> Resul
     writeln!(out, "# {title}\n")?;
     writeln!(
         out,
-        "候補ごとに、RAMU の手番の決めた局面では main の代わりに決めた手を指し、相手は強い対局の頻度 (足りなければ外部定跡) で指すとして初期局面から辿った (`master walk` と同じ辿り)。重み = 辿り全体を 100% とした割合 (RAMU の側の辿りだけ)。値 = 出口の局面までに RAMU が最後に指した定跡の手の値 (元データの evals の平均、評価値、プラス = 先手良し)。値の無い出口は平均・分位に入れない。千日手 = 辿りで同じ局面に 2 回着く (千日手の循環に入る) 重み。own の出口は、外部定跡の最善を両者が指し続けた手順が同じ局面に戻るものも数える。強い対局 = 両者 R{} 以上の対局の局数と RAMU の側の得点 (勝ち 1・引き分け 0.5)。\n",
+        "候補ごとに、RAMU の手番の決めた局面では main の代わりに決めた手を指し、相手は強い対局の頻度 (足りなければ外部定跡) で指すとして初期局面から辿った (`master walk` と同じ辿り)。重み = 辿り全体を 100% とした割合 (RAMU の側の辿りだけ)。値 = 出口の局面までに RAMU が最後に指した手の値 (元データの evals の平均、評価値、プラス = 先手良し。その手に元データの行が無ければ値なし)。値の無い出口は平均・分位に入れない。千日手 = 辿りの循環 (局面の行き来の輪) の中で max の手数に達した (循環を回り続けた) 重みと、own の出口で外部定跡の最善を両者が指し続けた手順が同じ局面に戻る重み。強い対局 = 両者 R{} 以上の対局の局数と RAMU の側の得点 (勝ち 1・引き分け 0.5)。\n",
         args.records_min_rate
     )?;
     for side in ["b", "w"] {
@@ -1035,7 +1079,7 @@ fn markdown(inputs: &Inputs, reports: &[Report], summaries: &[Summary]) -> Resul
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 r.candidate.name,
                 r.branches.iter().map(|b| b.label.as_str()).collect::<Vec<_>>().join("、"),
-                r.override_weight.map(pct).unwrap_or_else(|| "—".into()),
+                pct(r.override_weight.unwrap_or_else(|| r.branches.iter().map(|b| b.reach).sum())),
                 s.mean.map(|m| fmt_value(Some(m.round() as i64))).unwrap_or_else(|| "—".into()),
                 q(0),
                 q(1),

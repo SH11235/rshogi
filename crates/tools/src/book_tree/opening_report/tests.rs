@@ -78,38 +78,36 @@ fn weighted_quantile_takes_the_first_value_reaching_the_share() {
     assert_eq!(weighted_quantile(&[], 0.5), None);
 }
 
-/// 先手が 5i4h、後手が 5a4a か 5a6a (半々)。5a4a の後は 4h5i 4a5a で初めの局面に戻り、5a6a の後は定跡が切れる。
-fn cycle_rows() -> (Vec<Row>, Vec<State>) {
+/// 先手が 5i4h、後手が 5a4a、先手が 4h5i、後手が 4a5a で初めの局面に戻る。`leak` 局なら 5a4a の局面で 5a6a も指して
+/// 定跡が切れる。max で止まった重みのうち循環の局面のものを返す。
+fn weight_left_in_cycle(leak: u64) -> f64 {
     let p1 = after(ROOT, &["5i4h"]);
     let p2 = after(&p1, &["5a4a"]);
     let p3 = after(&p2, &["4h5i"]);
     let master = positions(&[(ROOT, "5i4h", "main", "0"), (&p2, "4h5i", "main", "0")]);
     let table: BTreeMap<String, Vec<(&str, u64)>> = BTreeMap::from([
-        (p1, vec![("5a4a", 6), ("5a6a", 6)]),
+        (p1, vec![("5a4a", 10), ("5a6a", leak)]),
         (p3, vec![("4a5a", 10)]),
     ]);
-    let probe = || {
-        let table = table.clone();
-        Probe::new(move |sfen: &str| {
-            Ok(table
-                .get(strip_ply(sfen))
-                .into_iter()
-                .flatten()
-                .map(|(m, n)| BookEntryMove {
-                    move_usi: (*m).into(),
-                    value: 0,
-                    depth: 10,
-                    move_count: *n,
-                })
-                .collect())
-        })
-    };
+    let probe = Probe::new(move |sfen: &str| {
+        Ok(table
+            .get(strip_ply(sfen))
+            .into_iter()
+            .flatten()
+            .map(|(m, n)| BookEntryMove {
+                move_usi: (*m).into(),
+                value: 0,
+                depth: 10,
+                move_count: *n,
+            })
+            .collect())
+    });
     let options = WalkOptions {
         max_ply: 40,
-        floor: 1e-6,
+        floor: 1e-9,
         cont_max: 100,
         opp: OppOptions {
-            min_games: 3,
+            min_games: 1,
             book_diff: 30,
             book_best: 0.9,
             book_first: false,
@@ -123,39 +121,31 @@ fn cycle_rows() -> (Vec<Row>, Vec<State>) {
     };
     let mut keys = Keys::default();
     let mut src = Sources {
-        freq: Some(probe()),
+        freq: Some(probe),
         book: None,
     };
+    let mut visited = HashSet::new();
     let mut collect = Collect {
         keys: &mut keys,
         edges: HashSet::new(),
+        visited: &mut visited,
     };
-    walk_side_with(&master, &mut src, "b", &from, &mut collect, options).unwrap();
+    let rows = walk_side_with(&master, &mut src, "b", &from, &mut collect, options).unwrap();
     let edges = collect.edges;
     let cycles = cycle_nodes(&edges, keys.names.len());
     assert_eq!(cycles.len(), 4);
-    let none = HashSet::new();
-    let mut tags = Tags {
-        keys: &mut keys,
-        states: Vec::new(),
-        ids: HashMap::new(),
-        branches: HashMap::new(),
-        auto: &none,
-        listed: &none,
-        cycles: &cycles,
-    };
-    let rows = walk_side_with(&master, &mut src, "b", &from, &mut tags, options).unwrap();
-    (rows, tags.states)
+    rows.iter()
+        .filter(|r| r.stop == Stop::Max && cycles.contains(&keys.ids[&r.key]))
+        .map(|r| r.weight)
+        .sum()
 }
 
 #[test]
-fn repeated_weight_counts_only_the_share_that_comes_back() {
-    let (rows, states) = cycle_rows();
-    let repeated: f64 =
-        rows.iter().filter(|r| states[r.tag as usize].repeated).map(|r| r.weight).sum();
-    let total: f64 = rows.iter().map(|r| r.weight).sum();
-    assert!((total - 1.0).abs() < 1e-9, "{total}");
-    assert!((repeated - 0.5).abs() < 1e-4, "{repeated}");
+fn draw_weight_is_what_keeps_circling_until_max() {
+    assert!((weight_left_in_cycle(0) - 1.0).abs() < 1e-9);
+    // 1 周ごとに 1/11 が抜けるので、40 手 (10 周) 後に残るのは (10/11)^10。
+    let left = weight_left_in_cycle(1);
+    assert!((left - (10.0f64 / 11.0).powi(10)).abs() < 1e-9, "{left}");
 }
 
 struct Fixture {
@@ -290,7 +280,7 @@ fn report_compares_candidates_by_exit_values_and_danger() {
     let md = std::fs::read_to_string(f.args.markdown.as_ref().unwrap()).unwrap();
     for needle in [
         "# t の戦型の比較",
-        "| main | 初手 ▲２六歩 (main) | — | +56 |",
+        "| main | 初手 ▲２六歩 (main) | 100.0% | +56 |",
         "| first76 | 初手 ▲７六歩 | 100.0% | +30 |",
         "| △８四歩 | 60.0% | +60 |",
         "| △３四歩 | 40.0% | +50 |",
@@ -314,4 +304,55 @@ fn report_rejects_outputs_that_overwrite_inputs() {
     let mut args = f.args.clone();
     (args.table, args.markdown) = (None, None);
     assert!(run(args).is_err());
+}
+
+/// 2g2f の後、後手 3c3d (6 局)・4c4d (4 局) のどちらにも先手は 7g7f (+100 と -100) を指し、後手の残りの歩突きで同じ局面に合流する。
+#[test]
+fn merged_flows_keep_the_value_of_their_own_last_move() {
+    let f = fixture();
+    let rows = [
+        (HIRATE_KEY.to_owned(), "2g2f", "main", "0"),
+        (hirate(&["2g2f", "3c3d"]), "7g7f", "main", "100"),
+        (hirate(&["2g2f", "4c4d"]), "7g7f", "main", "-100"),
+    ];
+    let rows: Vec<_> = rows.iter().map(|(k, m, r, e)| (k.as_str(), *m, *r, *e)).collect();
+    std::fs::write(&f.args.master, master_text(&rows)).unwrap();
+    write_book(
+        f.args.opp_freq.as_ref().unwrap(),
+        &vec![
+            (hirate(&["2g2f"]), vec![("3c3d", 6), ("4c4d", 4)]),
+            (hirate(&["2g2f", "3c3d", "7g7f"]), vec![("4c4d", 10)]),
+            (hirate(&["2g2f", "4c4d", "7g7f"]), vec![("3c3d", 10)]),
+        ],
+    );
+    // 2 つ目の候補は 3c3d の後に元データに無い 6g6f を指す。2 つの override は手順違いで同じ局面に着く。
+    std::fs::write(
+        &f.args.candidates,
+        "name\tside\toverride\nmain\tb\nalt\tb\t2g2f 3c3d:6g6f; 2g2f 8c8d:7g7f; 7g7f 8c8d:2g2f\n",
+    )
+    .unwrap();
+    let mut args = f.args.clone();
+    (args.opp_records, args.danger) = (None, None);
+    run(args).unwrap();
+    let rows = table_rows(f.args.table.as_ref().unwrap());
+    let main = &rows[0];
+    assert_eq!((main["mean_black"].as_str(), main["ge100"].as_str()), ("20.0", "0.600000"));
+    assert_eq!((main["p10"].as_str(), main["p90"].as_str()), ("-100", "100"));
+    assert_eq!(
+        (main["deviate"].as_str(), main["deviate_median"].as_str()),
+        ("0.400000", "-100")
+    );
+    // 6g6f の後は相手の手が分からず止まり、値は 6g6f の行が無いので無い (手前の 2g2f の値を使わない)。
+    let alt = &rows[1];
+    assert_eq!((alt["no_value"].as_str(), alt["mean_black"].as_str()), ("0.600000", "-100.0"));
+    assert_eq!(alt["override_weight"], "0.600000");
+    let md = std::fs::read_to_string(f.args.markdown.as_ref().unwrap()).unwrap();
+    assert!(md.contains("▲２六歩 △８四歩 で ▲７六歩、▲７六歩 △８四歩 で ▲２六歩"), "{md}");
+}
+
+#[test]
+fn danger_keys_accept_a_trailing_ply() {
+    let key = hirate(&["7g7f"]);
+    let danger = parse_danger(&format!("side\tkey\nw\t{key} 2\n")).unwrap();
+    assert!(danger.contains(&("w", key)));
 }
