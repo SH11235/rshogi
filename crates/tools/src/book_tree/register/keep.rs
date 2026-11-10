@@ -37,26 +37,55 @@ fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
         .collect()
 }
 
-/// 手の値がいくつ先の局面の読みから来たか。最善の応手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
-/// 局面で、着いた手の読みの値 (定跡に無い応手) が最善なら、その局面は数えない (値は手の読みそのもの)。
-fn depth(graph: &Graph, master: &BTreeSet<&str>, start: MoveValue) -> usize {
-    let mut depth = 0;
-    let mut current = start;
-    let mut seen = BTreeSet::new();
-    while let Some(edge) = current.edge {
-        if !seen.insert(edge.to) {
-            break;
-        }
-        let Some(next) = graph.moves(edge.to).max_by_key(|m| m.new) else {
-            break;
-        };
-        if next.edge.is_none() && !master.contains(graph.key(edge.to)) {
-            break;
-        }
-        depth += 1;
-        current = next;
+/// 手の値がいくつ先の局面の読みから来たか。最善の手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
+/// 局面で、着いた手の読みの値 (定跡に無い応手) が最善なら、その局面は数えない (値は手の読みそのもの)。循環に
+/// 入ったら循環の局面までを数える。局面ごとの数は辿り始めによらないので、辿った局面の数を覚えて使い回す。
+struct Depths<'a> {
+    graph: &'a Graph,
+    master: &'a BTreeSet<&'a str>,
+    memo: BTreeMap<usize, usize>,
+}
+
+impl Depths<'_> {
+    fn of_move(&mut self, mv: MoveValue) -> usize {
+        mv.edge.map_or(0, |edge| self.of_node(edge.to))
     }
-    depth
+
+    fn of_node(&mut self, start: usize) -> usize {
+        let mut path: Vec<usize> = Vec::new();
+        let mut on_path = BTreeMap::new();
+        let mut node = start;
+        let mut depth = loop {
+            if let Some(&known) = self.memo.get(&node) {
+                break known;
+            }
+            if let Some(&at) = on_path.get(&node) {
+                let cycle = path.len() - at;
+                for &v in &path[at..] {
+                    self.memo.insert(v, cycle);
+                }
+                path.truncate(at);
+                break cycle;
+            }
+            let Some(best) = self.graph.moves(node).max_by_key(|m| m.new) else {
+                self.memo.insert(node, 0);
+                break 0;
+            };
+            let Some(edge) = best.edge else {
+                let own = usize::from(self.master.contains(self.graph.key(node)));
+                self.memo.insert(node, own);
+                break own;
+            };
+            on_path.insert(node, path.len());
+            path.push(node);
+            node = edge.to;
+        };
+        for &v in path.iter().rev() {
+            depth += 1;
+            self.memo.insert(v, depth);
+        }
+        self.memo[&start]
+    }
 }
 
 /// `before` から `after` (仮に登録した元データ) で main が替わった局面のうち、`after` を伝播した値で元の main が
@@ -90,12 +119,18 @@ pub(in crate::book_tree) fn kept_mains(
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
     let master: BTreeSet<&str> = book.0.keys().map(String::as_str).collect();
+    // 相手の record を使わない伝播なので、手番によらず同じグラフになる。
+    let mut depths = Depths {
+        graph: &audited.graph,
+        master: &master,
+        memo: BTreeMap::new(),
+    };
     for (key, old_move, new_move) in changed {
         let (Some(&i), Some(position)) = (index.get(key), book.0.get(key)) else {
             continue;
         };
         let known = &audited.known[i];
-        let graph = audited.graph_for(key);
+        let graph = &audited.graph;
         let Some(node) = graph.find(key) else {
             continue;
         };
@@ -117,9 +152,9 @@ pub(in crate::book_tree) fn kept_mains(
         if old_value - new_value < rule.line {
             continue;
         }
-        let old_depth = depth(graph, &master, old);
+        let old_depth = depths.of_move(old);
         if old_depth >= rule.min_depth {
-            let new_depth = depth(graph, &master, new);
+            let new_depth = depths.of_move(new);
             kept.insert(
                 key.to_owned(),
                 Kept {
