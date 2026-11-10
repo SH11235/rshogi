@@ -3,12 +3,12 @@
 use super::model::{child, side};
 use super::refutation::SideWeights;
 use super::targets::{DEFAULT_PRIORITY, Line, MAX_DEPTH, MAX_PRIORITY, Opts};
-use super::targets::{parse_root, read_checked_lines};
+use super::targets::{Root, parse_root, read_checked_lines};
 use super::walk::{check_tag, queue_id};
 use crate::book_backprop::{Graph, MoveValue};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -74,7 +74,7 @@ pub(super) struct SingleQueueArgs {
     #[arg(long, default_value = "single", requires = "single_enqueue_out")]
     pub single_tag: String,
     /// 既に積んだ木のキュー (JSON Lines)。繰り返して複数。1 回の読みの手を、その局面の手番の側で
-    /// `game` の depth+1 手以内に指す木か、その手を指した後の局面を根に同じ側で読む木があれば、その手を行に入れない
+    /// `game` の depth 手以内に指す木か、その手を指した後の局面を根に同じ側で読む木があれば、その手を行に入れない
     #[arg(long, requires = "single_enqueue_out")]
     pub exclude_queue: Vec<PathBuf>,
 }
@@ -136,29 +136,47 @@ struct Queued {
 
 /// 局面を根にしただけの木は、1 回の読みのまま残った手を伸ばさなかった木でもあり得るので、根の一致では除かない。
 fn queued(paths: &[PathBuf]) -> Result<Queued> {
-    let mut queued = Queued::default();
+    // serve と同じく、id ごとに最初の行の根と own に固定して違う行は飛ばし、game は合わせ、段数などは最後の行を使う。
+    let mut latest: BTreeMap<String, (Line, Root)> = BTreeMap::new();
     for path in paths {
-        read_checked_lines(path, |line, root, _| {
-            if line.depth == 0 {
-                return Ok(());
-            }
-            for own in line.sides() {
-                queued.roots.insert((root.key.clone(), own.clone()));
-                for more in &line.roots {
-                    queued.roots.insert((parse_root(more)?.key, own.clone()));
+        read_checked_lines(path, |mut line, root, _| {
+            if let Some((first, first_root)) = latest.get(&line.id) {
+                if first_root != &root || first.own != line.own {
+                    return Ok(());
                 }
-            }
-            for moves in &line.game {
-                let mut key = root.key.clone();
-                for mv in moves.iter().take(line.depth + 1) {
-                    if line.own.contains(side(&key)) {
-                        queued.moves.insert((key.clone(), mv.clone(), side(&key).to_owned()));
+                let mut game = first.game.clone();
+                for moves in line.game.drain(..) {
+                    if !game.contains(&moves) {
+                        game.push(moves);
                     }
-                    key = child(&key, mv)?;
                 }
+                line.game = game;
             }
+            latest.insert(line.id.clone(), (line, root));
             Ok(())
         })?;
+    }
+    let mut queued = Queued::default();
+    for (line, root) in latest.into_values() {
+        if line.depth == 0 {
+            continue;
+        }
+        for own in line.sides() {
+            queued.roots.insert((root.key.clone(), own.clone()));
+            for more in &line.roots {
+                queued.roots.insert((parse_root(more)?.key, own.clone()));
+            }
+        }
+        for moves in &line.game {
+            let mut key = root.key.clone();
+            // 段数 depth の局面は読むだけで手を伸ばさないので、game の手は depth 手目まで。
+            for mv in moves.iter().take(line.depth) {
+                if line.own.contains(side(&key)) {
+                    queued.moves.insert((key.clone(), mv.clone(), side(&key).to_owned()));
+                }
+                key = child(&key, mv)?;
+            }
+        }
     }
     Ok(queued)
 }

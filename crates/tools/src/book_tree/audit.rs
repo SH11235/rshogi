@@ -3513,6 +3513,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         for (root, own, depth, game, expected) in [
             (&root, "b", 6, "", 0),
             (&root, "b", 6, r#","game":[["5i5h","5a5b"]]"#, 1),
+            (&root, "b", 1, r#","game":[["5i5h","5a5b"]]"#, 1),
             (&root, "b", 0, r#","game":[["5i5h"]]"#, 0),
             (&root, "b", 6, r#","game":[["5i4h"]]"#, 0),
             (&root, "w", 6, r#","game":[["5i5h"]]"#, 0),
@@ -3530,6 +3531,35 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             let (lines, excluded) = switch::queue(std::slice::from_ref(&read), &args).unwrap();
             assert_eq!((lines.len(), excluded), (1 - expected, expected), "{root} {own} {game}");
         }
+        // 段数 depth の局面は伸ばさないので、game の depth+1 手目は除外に使わない。
+        let deep = SingleRead {
+            key: B.into(),
+            moves: vec!["4h3h".into()],
+            ..read.clone()
+        };
+        for (depth, expected) in [(2, 0), (3, 1)] {
+            std::fs::write(
+                &args.exclude_queue[0],
+                format!(
+                    r#"{{"id":"x","root":"{root}","own":"b","depth":{depth},"game":[["5i4h","5a5b","4h3h"]]}}"#
+                ) + "\n",
+            )
+            .unwrap();
+            let (_, excluded) = switch::queue(std::slice::from_ref(&deep), &args).unwrap();
+            assert_eq!(excluded, expected, "depth {depth}");
+        }
+        // id ごとに最初の行の根に固定するので、根を替えた行は除外に使わない。
+        std::fs::write(
+            &args.exclude_queue[0],
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"x","root":"ROOTW","own":"w","depth":6}"#.replace("ROOTW", &next),
+                r#"{"id":"x","root":"ROOTB","own":"b","depth":6,"game":[["5i5h"]]}"#
+                    .replace("ROOTB", &root)
+            ),
+        )
+        .unwrap();
+        assert_eq!(switch::queue(std::slice::from_ref(&read), &args).unwrap().1, 0);
         // 両方が 1 回の読みなら、積んでいない手だけを行に入れる。
         std::fs::write(
             &args.exclude_queue[0],
