@@ -2430,16 +2430,30 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
     lone["hold"] = json!(true);
     let mut white = row("white", "2g2f");
     white["own"] = json!("w");
-    let mut a = plan_args(d.path(), &[("Z", vec![orig, lone]), ("A", vec![renamed, white])]);
+    let mut bw_orig = row("bw_orig", "6g6f");
+    bw_orig["own"] = json!("bw");
+    bw_orig["hold"] = json!(true);
+    let b_copy = row("b_copy", "6g6f");
+    let mut pair1 = row("pair1", "5g5f");
+    pair1["hold"] = json!(true);
+    let mut pair2 = pair1.clone();
+    pair2["id"] = json!("pair2");
+    let mut a = plan_args(
+        d.path(),
+        &[
+            ("Z", vec![orig, lone, bw_orig, pair1]),
+            ("A", vec![renamed, white, b_copy, pair2]),
+        ],
+    );
     rerank_only(
         &mut a,
         d.path(),
-        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nw\town\t0.0\t7g7f\n",
+        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nb\town\t0.005\t6g6f\nb\town\t0.005\t5g5f\n",
     );
     let white_dir = d.path().join("white");
     std::fs::create_dir_all(&white_dir).unwrap();
     a.walk_table
-        .push(format!("w={}", walk(&white_dir, "w\town\t0.0\t9g9f\n").display()));
+        .push(format!("w={}", walk(&white_dir, "w\town\t0.005\t6g6f\n").display()));
     let mut stdout = Vec::new();
     run_at(a, now(), &mut stdout).unwrap();
     let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
@@ -2458,11 +2472,32 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
         .iter()
         .map(|r| (r["id"].as_str().unwrap(), r["hold"].as_bool().unwrap()))
         .collect();
-    assert_eq!(holds, vec![("lone", false), ("orig", true)]);
+    // bw の行は後手側に写しが無くても、先手側の写しで行ごと hold を残す。
+    // 2 本とも hold の写しは --box の順で最初の Z:pair1 だけを外す。
+    assert_eq!(
+        holds,
+        vec![
+            ("bw_orig", true),
+            ("lone", false),
+            ("orig", true),
+            ("pair1", false)
+        ]
+    );
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("A\tpair2\tb\theld\t") && l.ends_with("\tZ:pair1")),
+        "{table}"
+    );
+    assert!(
+        rerank_rows(d.path(), "A")
+            .iter()
+            .any(|r| r["id"] == "pair2" && r["hold"] == true)
+    );
     assert!(
         String::from_utf8(stdout)
             .unwrap()
-            .contains("名前を変えた写しがあるので hold を外さない=1")
+            .contains("名前を変えた写しがあるので hold を外さない=3")
     );
 }
 
@@ -2480,7 +2515,11 @@ fn rerank_tiers_apply_first_matching_row_to_live_lines_only() {
         &[(
             "A",
             vec![
-                with("x49br_1", "7g7f", 8, false),
+                {
+                    let mut r = with("x49br_1", "7g7f", 8, false);
+                    r["group"] = json!("old");
+                    r
+                },
                 with("x49br_2", "2g2f", 30, false),
                 with("x58i8_1", "6g6f", 50, false),
                 with("x58i8_2", "5g5f", 4, false),
@@ -2492,12 +2531,23 @@ fn rerank_tiers_apply_first_matching_row_to_live_lines_only() {
     rerank_only(
         &mut a,
         d.path(),
-        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nb\town\t0.005\t6g6f\n",
+        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nb\town\t0.005\t6g6f\nb\town\t0.005\t4g4f\n",
     );
+    let white_dir = d.path().join("white");
+    std::fs::create_dir_all(&white_dir).unwrap();
+    a.walk_table
+        .push(format!("w={}", walk(&white_dir, "w\town\t0.005\t9g9f\n").display()));
+    let mut added = with("x58i8_new", "4g4f", 50, false);
+    added["own"] = json!("bw");
+    let add = d.path().join("add.jsonl");
+    std::fs::write(&add, format!("{added}\n")).unwrap();
+    a.add = vec![add];
+    a.group_table = Some(d.path().join("groups.tsv"));
     let tiers = d.path().join("tiers.tsv");
     std::fs::write(
         &tiers,
         "name\tmatch\tclass\told_priority\tpriority\tgroup\n\
+         new\tx58i8_new\tB\t*\t=5\tnewgrp\n\
          prop\tx49br*\t*\t..8\t=2\tprop\n\
          seed\tx58i8*\tABC\t*\t=3\t\n\
          seed-d\tx58i8*\tD\t..4\t=13\t\n\
@@ -2559,9 +2609,24 @@ fn rerank_tiers_apply_first_matching_row_to_live_lines_only() {
     );
     let stdout = String::from_utf8(stdout).unwrap();
     assert!(
-        stdout.contains("段 (受付行): prop=1 rest=1 seed=1 seed-d=1、当たらない=0"),
+        stdout.contains("段 (受付行): new=1 prop=1 rest=1 seed=1 seed-d=1、当たらない=0"),
         "{stdout}"
     );
+    // bw の --add の行は先後の良い方の区分 (先手 B・後手 D) で照合し、group も書き換える。
+    let added: Vec<Value> =
+        std::fs::read_to_string(d.path().join("rerank/qrhold_rerank-add.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    assert_eq!(
+        (added[0]["priority"].as_u64(), added[0]["group"].as_str()),
+        (Some(5), Some("newgrp"))
+    );
+    let groups = std::fs::read_to_string(d.path().join("groups.tsv")).unwrap();
+    assert!(groups.contains("old\tcurrent\t1\t0\tA\t8\t8\t"), "{groups}");
+    assert!(groups.contains("prop\trerank\t1\t0\tA\t2\t2\t"), "{groups}");
+    assert!(groups.contains("old\trerank\t0\t0\t"), "{groups}");
 }
 
 #[test]

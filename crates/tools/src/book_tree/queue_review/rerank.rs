@@ -206,20 +206,47 @@ pub(super) fn build(
             &boxes[i].queue[id]
         }
     };
-    // 名前を変えて別の台へ移した木は id が違うので、居場所を id でまとめる棚上げの判定では
-    // 見つからない。根の局面と own の側で照合し、写しのある行の hold は外さない。
-    let mut copies: BTreeMap<(&str, String), Vec<(usize, &str)>> = BTreeMap::new();
-    let all_lines = boxes
-        .iter()
-        .enumerate()
-        .flat_map(|(i, b)| b.queue.values().map(move |q| (i, q)))
-        .chain(new_queue.values().map(|q| (new_index, q)));
-    for (i, q) in all_lines {
-        for side in q.line.sides() {
-            copies.entry((q.primary_root.as_str(), side)).or_default().push((i, &q.line.id));
+    // 名前を変えて移した木は id が違うので、居場所を id でまとめる棚上げの判定では見つからない。
+    // 根の局面と own の側で照合し、別の id の写しが動いているか終わっていれば hold を外さない。
+    // 写しがどれも hold なら、並びの最初 (--box の順、同じ台なら id 順、--add は最後) の id だけを外す候補にする。
+    struct Copy<'a> {
+        index: usize,
+        id: &'a str,
+        held: bool,
+    }
+    let mut copies: BTreeMap<(&str, &str), Vec<Copy>> = BTreeMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        for tree in &b.progress.trees {
+            let q = &b.queue[&tree.id];
+            copies
+                .entry((q.primary_root.as_str(), tree.own.as_str()))
+                .or_default()
+                .push(Copy {
+                    index: i,
+                    id: &tree.id,
+                    held: tree.hold && !tree.finished && !tree.failed,
+                });
         }
     }
+    for tree in &new_trees {
+        copies
+            .entry((new_queue[&tree.id].primary_root.as_str(), tree.own.as_str()))
+            .or_default()
+            .push(Copy {
+                index: new_index,
+                id: &tree.id,
+                held: tree.hold,
+            });
+    }
     let box_name = |i: usize| boxes.get(i).map_or("add", |b| b.name.as_str());
+    let copy_of = |root: &str, own: &str, id: &str| -> Option<String> {
+        let all = &copies[&(root, own)];
+        let blocking = all
+            .iter()
+            .find(|c| c.id != id && !c.held)
+            .or_else(|| all.first().filter(|first| first.id != id))?;
+        Some(format!("{}:{}", box_name(blocking.index), blocking.id))
+    };
     let walk_sides: BTreeSet<_> = args
         .walk_table
         .iter()
@@ -304,12 +331,7 @@ pub(super) fn build(
             tree.hold
         };
         let copy_of = (tree.hold && !hold)
-            .then(|| {
-                copies[&(queued.primary_root.as_str(), tree.own.clone())]
-                    .iter()
-                    .find(|(_, id)| *id != tree.id)
-                    .map(|&(j, id)| format!("{}:{id}", box_name(j)))
-            })
+            .then(|| copy_of(&queued.primary_root, &tree.own, &tree.id))
             .flatten();
         let hold = hold || copy_of.is_some();
         rows.push(Row {
@@ -331,6 +353,11 @@ pub(super) fn build(
             copy_of,
         });
     }
+    let rows_with_copy: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| row.copy_of.is_some())
+        .map(|row| (row.box_index, row.tree.id.clone()))
+        .collect();
     let mut lines = LineStates::new();
     for row in &rows {
         let desired = (row.priority, row.hold);
@@ -341,6 +368,17 @@ pub(super) fn build(
                 previous.1 &= desired.1;
             })
             .or_insert(desired);
+    }
+    // own=bw の片側だけに写しがあっても、受付行の hold は共通なので行ごと残す。
+    for row in rows.iter_mut().filter(|row| row.tree.hold) {
+        if rows_with_copy.contains(&(row.box_index, row.tree.id.clone())) {
+            row.hold = true;
+        }
+    }
+    for key in &rows_with_copy {
+        if let Some(line) = lines.get_mut(key) {
+            line.1 = true;
+        }
     }
     for ((i, id), (_, hold)) in &mut lines {
         if started.contains(&(*i, id.as_str())) {
@@ -425,7 +463,7 @@ pub(super) fn build(
     };
     let mut counts = BTreeMap::from([('A', 0), ('B', 0), ('C', 0), ('D', 0)]);
     let (mut raised, mut lowered, mut released, mut held) = (0, 0, 0, 0);
-    let kept_copies = rows.iter().filter(|row| row.copy_of.is_some()).count();
+    let kept_copies = rows_with_copy.len();
     let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\ttier\trerank_priority\tcopy_of\n".to_vec();
     for row in &rows {
         let key = (row.box_index, row.tree.id.clone());
