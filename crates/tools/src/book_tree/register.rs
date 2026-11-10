@@ -17,7 +17,7 @@ use std::fmt::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use super::audit::reject_same_file;
+use super::audit::{reject_same_file, resolve, resolve_output};
 use super::schema::Schema;
 use super::switch::{self, SingleQueueArgs, SwitchRule};
 pub(super) use keep::Kept;
@@ -156,8 +156,21 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             ("--conflicts", args.conflicts.as_path()),
         ];
         inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
-        inputs.extend(args.trees.iter().map(|p| ("木の出力先", p.as_path())));
+        inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
+        inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
+        let schema_paths = args.schema.as_deref().map(super::schema::paths);
+        inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
         reject_same_file(out, &inputs).context("--single-enqueue-out の出力先")?;
+        // 木の出力先の中のファイル (node_moves.tsv など) を書き換えない。
+        let resolved = resolve_output(out)?;
+        for tree in &args.trees {
+            ensure!(
+                !resolved.starts_with(resolve(tree)),
+                "--single-enqueue-out の出力先 {} が木の出力先 {} の中です",
+                out.display(),
+                tree.display()
+            );
+        }
     }
     // 木を読む前に止める。書き出しの最後でも create_new で同じことを確かめる。
     ensure!(
@@ -1394,6 +1407,11 @@ mod tests {
             trees: vec![tree.clone()],
         };
         assert!(run(args(Some(20))).is_err());
+        let node_moves = std::fs::read(tree.join(NODE_MOVES)).unwrap();
+        let mut inside = args(None);
+        inside.single.single_enqueue_out = Some(tree.join(NODE_MOVES));
+        assert!(run(inside).is_err());
+        assert_eq!(std::fs::read(tree.join(NODE_MOVES)).unwrap(), node_moves);
         run(args(None)).unwrap();
         let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
         assert_eq!(find(&rows, W, "5a4a").unwrap().get("role"), "main");

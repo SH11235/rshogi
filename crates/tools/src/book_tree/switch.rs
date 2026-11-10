@@ -3,10 +3,12 @@
 use super::model::{child, side};
 use super::refutation::SideWeights;
 use super::targets::{DEFAULT_PRIORITY, Line, MAX_DEPTH, MAX_PRIORITY, Opts};
-use super::walk::{check_tag, excluded_positions, queue_id};
+use super::targets::{parse_root, read_checked_lines};
+use super::walk::{check_tag, queue_id};
 use crate::book_backprop::{Graph, MoveValue};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -18,16 +20,19 @@ pub(super) enum SwitchRule {
     Propagated,
 }
 
-/// 手の値が手の先の局面の値から来たか。補った相手の手番の局面 (元データに無い) で着いた手の読みの値が最善なら、
-/// その値は手の 1 回の読みそのもの。最善の選び方は `tree register` の段数 (`Depths`) と揃える。
-pub(super) fn from_child(graph: &Graph, in_master: impl Fn(&str) -> bool, mv: &MoveValue) -> bool {
+/// 手の値が手の先の局面の値から来たか。`capped` は、元データに無く、着く手の読みの値を最後の手として残した
+/// 局面 (`--bridge-replies` で補った局面、`--opp-records` の record だけの局面)。その局面で残した値が最善なら、
+/// 手の値は 1 回の読みそのもの。record の読みなど、辺の無いほかの手が最善なら先の局面の値として数える。
+pub(super) fn from_child(graph: &Graph, capped: impl Fn(&str) -> bool, mv: &MoveValue) -> bool {
     let Some(edge) = mv.edge else {
         return false;
     };
-    let Some(best) = graph.moves(edge.to).max_by_key(|m| m.new) else {
+    let moves: Vec<MoveValue> = graph.moves(edge.to).collect();
+    // 同値なら後の手を取る (`tree register` の段数 `Depths` の選び方と揃える)。
+    let Some((i, best)) = moves.iter().enumerate().max_by_key(|(_, m)| m.new) else {
         return false;
     };
-    in_master(graph.key(edge.to)) || best.edge.is_some()
+    best.edge.is_some() || !(capped(graph.key(edge.to)) && i + 1 == moves.len())
 }
 
 #[derive(Args, Debug)]
@@ -68,8 +73,8 @@ pub(super) struct SingleQueueArgs {
     /// キューの行の id `<tag>_<根の手数>_<局面の hash>_<b|w>` に入れる名前 ([A-Za-z0-9_-] の 1〜40 文字)
     #[arg(long, default_value = "single", requires = "single_enqueue_out")]
     pub single_tag: String,
-    /// 既に積んだ木のキュー (JSON Lines、`master walk --exclude-queue` と同じ除外)。繰り返して複数。
-    /// 局面か、1 回の読みの手を指した後の局面を同じ側で読む木があれば行を出さない
+    /// 既に積んだ木のキュー (JSON Lines)。繰り返して複数。1 回の読みの手を、その局面の手番の側で
+    /// `game` の depth+1 手以内に指す木か、その手を指した後の局面を根に同じ側で読む木があれば、その手を行に入れない
     #[arg(long, requires = "single_enqueue_out")]
     pub exclude_queue: Vec<PathBuf>,
 }
@@ -122,18 +127,58 @@ pub(super) fn rank(reads: &mut Vec<SingleRead>, weights: Option<&SideWeights>, m
     });
 }
 
-/// 並べた順にキューの行にする。返す数は既存の木で除いた局面の数。
+/// 既に積んだ木が伸ばす手 (局面, 手, 側) と、根に読む局面 (局面, 側)。
+#[derive(Default)]
+struct Queued {
+    moves: BTreeSet<(String, String, String)>,
+    roots: BTreeSet<(String, String)>,
+}
+
+/// 局面を根にしただけの木は、1 回の読みのまま残った手を伸ばさなかった木でもあり得るので、根の一致では除かない。
+fn queued(paths: &[PathBuf]) -> Result<Queued> {
+    let mut queued = Queued::default();
+    for path in paths {
+        read_checked_lines(path, |line, root, _| {
+            if line.depth == 0 {
+                return Ok(());
+            }
+            for own in line.sides() {
+                queued.roots.insert((root.key.clone(), own.clone()));
+                for more in &line.roots {
+                    queued.roots.insert((parse_root(more)?.key, own.clone()));
+                }
+            }
+            for moves in &line.game {
+                let mut key = root.key.clone();
+                for mv in moves.iter().take(line.depth + 1) {
+                    if line.own.contains(side(&key)) {
+                        queued.moves.insert((key.clone(), mv.clone(), side(&key).to_owned()));
+                    }
+                    key = child(&key, mv)?;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(queued)
+}
+
+/// 既に積んだ木が伸ばす手を除き、並べた順にキューの行にする。返す数は手が全部除かれた局面の数。
 pub(super) fn queue(reads: &[SingleRead], args: &SingleQueueArgs) -> Result<(Vec<Line>, usize)> {
-    let excluded = excluded_positions(&args.exclude_queue)?;
+    let queued = queued(&args.exclude_queue)?;
     let mut kept = Vec::new();
     for r in reads {
-        let own = side(&r.key);
-        let mut covered = excluded.contains_key(&(r.key.clone(), own.to_owned()));
+        let own = side(&r.key).to_owned();
+        let mut moves = Vec::new();
         for mv in &r.moves {
-            covered |= excluded.contains_key(&(child(&r.key, mv)?, own.to_owned()));
+            let covered = queued.moves.contains(&(r.key.clone(), mv.clone(), own.clone()))
+                || queued.roots.contains(&(child(&r.key, mv)?, own.clone()));
+            if !covered {
+                moves.push(mv.clone());
+            }
         }
-        if !covered {
-            kept.push(r);
+        if !moves.is_empty() {
+            kept.push(SingleRead { moves, ..r.clone() });
         }
     }
     let excluded = reads.len() - kept.len();
@@ -141,7 +186,7 @@ pub(super) fn queue(reads: &[SingleRead], args: &SingleQueueArgs) -> Result<(Vec
         .into_iter()
         .take(args.single_max.unwrap_or(usize::MAX))
         .enumerate()
-        .map(|(rank, r)| line(r, rank, args))
+        .map(|(rank, r)| line(&r, rank, args))
         .collect::<Result<Vec<_>>>()?;
     Ok((lines, excluded))
 }

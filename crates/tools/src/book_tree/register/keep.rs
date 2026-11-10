@@ -155,9 +155,9 @@ pub(in crate::book_tree) fn kept_mains(
             continue;
         };
         if rule.rule == SwitchRule::Propagated {
-            let in_master = |k: &str| master.contains(k);
+            let capped = |k: &str| audited.capped.contains(k);
             let (old_from, new_from) =
-                (from_child(graph, in_master, &old), from_child(graph, in_master, &new));
+                (from_child(graph, capped, &old), from_child(graph, capped, &new));
             if old_from && new_from && new_value > old_value {
                 continue;
             }

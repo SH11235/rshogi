@@ -553,17 +553,20 @@ struct ReplacementSummary {
 
 impl ReplacementSummary {
     fn format(&self) -> String {
-        let main_eval = self.main_eval.map_or_else(String::new, |n| {
-            format!(", main の値が 1 回の読みなので替えなかった局面 {n}")
-        });
+        let eval = match self.main_eval {
+            None => format!("1 位が伸ばしていない手なので替えなかった局面 {}", self.eval),
+            Some(n) => format!(
+                "1 位の値が 1 回の読みなので替えなかった局面 {}, main の値が 1 回の読みなので替えなかった局面 {n}",
+                self.eval
+            ),
+        };
         format!(
-            "置換する局面: 先手番 {}・後手番 {} (うち curated {}), curated なので替えなかった局面 {}, source が置換対象でない局面 {}, 1 位が伸ばしていない手なので替えなかった局面 {}{main_eval}, 対象行が無いか main・alt でない局面 {}",
+            "置換する局面: 先手番 {}・後手番 {} (うち curated {}), curated なので替えなかった局面 {}, source が置換対象でない局面 {}, {eval}, 対象行が無いか main・alt でない局面 {}",
             self.replaced[0],
             self.replaced[1],
             self.curated,
             self.skipped_curated,
             self.protected,
-            self.eval,
             self.missing
         )
     }
@@ -961,7 +964,7 @@ pub(super) fn reject_same_file(output: &Path, inputs: &[(&str, &Path)]) -> Resul
 }
 
 /// 出力先の親ディレクトリを作ってから [`resolve`] する。親が無いと同じファイルを指す別の書き方を見分けられない。
-fn resolve_output(path: &Path) -> Result<PathBuf> {
+pub(super) fn resolve_output(path: &Path) -> Result<PathBuf> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("{} を作れません", parent.display()))?;
@@ -970,7 +973,7 @@ fn resolve_output(path: &Path) -> Result<PathBuf> {
 }
 
 /// 同じファイルかを比べるためのパス。まだ無いファイルは親ディレクトリを解決して名前を付ける。
-fn resolve(path: &Path) -> PathBuf {
+pub(super) fn resolve(path: &Path) -> PathBuf {
     if let Ok(path) = path.canonicalize() {
         return path;
     }
@@ -989,6 +992,8 @@ pub(super) struct AuditedBook {
     pub graph: Graph,
     pub known: Vec<Vec<bool>>,
     white_graph: Option<Graph>,
+    /// 元データに無く、着く手の読みの値を最後の手として残した局面 ([`super::switch::from_child`])。
+    pub capped: BTreeSet<String>,
 }
 
 impl AuditedBook {
@@ -1134,6 +1139,8 @@ struct Propagated {
     reply_positions: usize,
     /// 補った局面のうち、読みの値を「定跡に無い応手」の値として残した局面の数。
     bridged_positions: usize,
+    /// 元データに無く、着く手の読みの値を最後の手として残した局面。
+    capped: BTreeSet<String>,
 }
 
 /// 元データの手を指した後の局面のうち、元データに無いもの。
@@ -1439,6 +1446,7 @@ fn propagate_for_sides(
     let solve = |opponent: &str| -> Result<(Propagated, RecordUsage)> {
         let mut expanded = positions.clone();
         let caps = record_caps(positions, records, opponent)?;
+        let mut capped = BTreeSet::new();
         for (key, record) in records {
             if key.split_whitespace().nth(1) != Some(opponent) {
                 continue;
@@ -1450,7 +1458,10 @@ fn propagate_for_sides(
             let mut position = record.clone();
             match caps.get(key) {
                 None => {}
-                Some(Some(cap)) => position.moves.push(cap.clone()),
+                Some(Some(cap)) => {
+                    capped.insert(key.clone());
+                    position.moves.push(cap.clone());
+                }
                 // 上限を置ける手が無ければ、record で伝播せず、着く手の読みの値をそのまま使わせる。
                 Some(None) => continue,
             }
@@ -1458,6 +1469,7 @@ fn propagate_for_sides(
         }
         // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
         let mut result = propagate_with(&expanded, draws, fill, true)?;
+        result.capped.extend(capped);
         // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
         let mut usage = RecordUsage::default();
         let mut illegal_records = 0;
@@ -1509,6 +1521,7 @@ fn propagate_for_sides(
     }
     black.reply_positions = replies.len();
     black.bridged_positions = bridged.len();
+    black.capped.extend(white.capped);
     Ok((
         black,
         Some(white.graph),
@@ -1582,8 +1595,12 @@ fn propagate_with(
         reply_positions(positions, fill)?
     };
     // 読みの値を残した局面は、元データの局面に着かない手 (値のある行) を持つ。
-    let bridged_count =
-        replies.values().filter(|p| p.moves.iter().any(|m| m.eval.is_some())).count();
+    let capped: BTreeSet<String> = replies
+        .iter()
+        .filter(|(_, p)| p.moves.iter().any(|m| m.eval.is_some()))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let bridged_count = capped.len();
     let mut all: Vec<(&str, &MasterPosition)> =
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
@@ -1603,6 +1620,7 @@ fn propagate_with(
         stats,
         reply_positions: reply_count,
         bridged_positions: bridged_count,
+        capped,
     })
 }
 
@@ -1780,6 +1798,7 @@ fn bridge_findings(
         graph: plain.graph,
         known: plain.known,
         white_graph,
+        capped: plain.capped,
     };
     let mut out = Vec::new();
     for (((key, position), known), plain_known) in
@@ -1996,11 +2015,13 @@ fn audit_select(
         stats,
         reply_positions,
         bridged_positions,
+        capped,
     } = propagated;
     let book = AuditedBook {
         graph,
         known,
         white_graph,
+        capped,
     };
     summary.illegal_moves = illegal_moves;
     summary.reply_positions = reply_positions;
@@ -2063,7 +2084,7 @@ fn audit_select(
         if rule == SwitchRule::Propagated {
             // 補った相手の手番の局面で着いた手の読みの値が最善なら、辺があっても値は 1 回の読みなので数え直す。
             let graph = book.graph_for(key);
-            let in_master = |k: &str| positions.contains_key(k);
+            let capped = |k: &str| book.capped.contains(k);
             let node =
                 graph.find(key).context("内部エラー: main のある局面がグラフにありません")?;
             let in_graph: Vec<MoveValue> = graph.moves(node).collect();
@@ -2074,7 +2095,7 @@ fn audit_select(
                     .position(|x| x.mv == m.mv)
                     .context("内部エラー: 手がありません")?;
                 let g = known[..j].iter().filter(|&&k| k).count();
-                if !from_child(graph, in_master, &in_graph[g]) {
+                if !from_child(graph, capped, &in_graph[g]) {
                     m.origin = Origin::Eval;
                 }
             }
@@ -3045,6 +3066,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
                     graph: memory,
                     known,
                     white_graph: None,
+                    capped: BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -3325,11 +3347,20 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
 
     /// `--switch-rule propagated` で `--apply` し、(ROOT の main, キューの行) を返す。
     fn propagated_switch(rows: &[(&str, &str, &str, &str)], bridge: bool) -> (String, Vec<Line>) {
+        propagated_switch_with(rows, bridge, false)
+    }
+
+    fn propagated_switch_with(
+        rows: &[(&str, &str, &str, &str)],
+        bridge: bool,
+        opp_records: bool,
+    ) -> (String, Vec<Line>) {
         let dir = tempfile::tempdir().unwrap();
         let mut args = test_args(dir.path());
         std::fs::write(&args.master, master(rows)).unwrap();
         let queue = dir.path().join("single.jsonl");
         args.bridge_replies = bridge;
+        args.opp_records = opp_records;
         args.apply = true;
         args.since = Some("t2".into());
         args.line = 40;
@@ -3407,6 +3438,19 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
     }
 
     #[test]
+    fn switch_rule_rejects_options_of_the_other_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(&args.master, master(&[(ROOT, "5i4h", "main", "10")])).unwrap();
+        args.single.single_enqueue_out = Some(dir.path().join("single.jsonl"));
+        assert!(run_in_pool(args).is_err());
+        let mut args = test_args(dir.path());
+        args.switch_rule = SwitchRule::Propagated;
+        args.deep_plies = Some(6);
+        assert!(run_in_pool(args).is_err());
+    }
+
+    #[test]
     fn propagated_rule_treats_a_bridged_read_as_a_single_read() {
         // 補った A では、定跡の応手 5a5b の先 B (+100) より着く手の読みの値 +50 が悪いので、5i4h の値は読みそのもの。
         let c = "4k4/9/9/9/9/9/9/3K5/9 w -";
@@ -3428,6 +3472,28 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
     }
 
     #[test]
+    fn propagated_rule_counts_a_record_reply_as_a_value_from_the_child() {
+        // A は record だけの局面。record 5a4a の読みが着く手の読み (+10) より A の手番に良ければ、5i4h の値は
+        // A の先の値なので、両方とも伝播の値として替える。
+        let c = "4k4/9/9/9/9/9/9/3K5/9 w -";
+        let rows = [
+            (ROOT, "5i4h", "main", "10"),
+            (ROOT, "5i6h", "alt", "20"),
+            (A, "5a4a", "record", "-5"),
+            (c, "5a4a", "main", "-16"),
+        ];
+        let (main, lines) = propagated_switch_with(&rows, false, true);
+        assert_eq!(main, "5i6h");
+        assert!(lines.is_empty());
+        // record が悪ければ 5i4h の値は着く手の読みそのもの。
+        let mut worse = rows;
+        worse[2].3 = "-20";
+        let (main, lines) = propagated_switch_with(&worse, false, true);
+        assert_eq!(main, "5i4h");
+        assert_eq!(lines[0].game, vec![vec!["5i4h".to_owned()]]);
+    }
+
+    #[test]
     fn single_queue_skips_positions_already_queued() {
         let read = SingleRead {
             key: ROOT.into(),
@@ -3441,34 +3507,45 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         };
         let dir = tempfile::tempdir().unwrap();
         let mut args = switch::test_args();
-        for (root, own, expected) in [
-            (format!("sfen {ROOT} 1"), "b", 1),
-            (
-                format!("sfen {} 2", crate::book_tree::model::child(ROOT, "5i5h").unwrap()),
-                "b",
-                1,
-            ),
-            (
-                format!("sfen {} 2", crate::book_tree::model::child(ROOT, "5i5h").unwrap()),
-                "w",
-                0,
-            ),
-            (
-                format!("sfen {} 2", crate::book_tree::model::child(ROOT, "5i4h").unwrap()),
-                "b",
-                0,
-            ),
+        let after = crate::book_tree::model::child(ROOT, "5i5h").unwrap();
+        let root = format!("sfen {ROOT} 1");
+        let next = format!("sfen {after} 2");
+        for (root, own, depth, game, expected) in [
+            (&root, "b", 6, "", 0),
+            (&root, "b", 6, r#","game":[["5i5h","5a5b"]]"#, 1),
+            (&root, "b", 0, r#","game":[["5i5h"]]"#, 0),
+            (&root, "b", 6, r#","game":[["5i4h"]]"#, 0),
+            (&root, "w", 6, r#","game":[["5i5h"]]"#, 0),
+            (&next, "b", 6, "", 1),
+            (&next, "w", 6, "", 0),
         ] {
             let path = dir.path().join("queue.jsonl");
             std::fs::write(
                 &path,
-                format!(r#"{{"id":"x","root":"{root}","own":"{own}","depth":6}}"#) + "\n",
+                format!(r#"{{"id":"x","root":"{root}","own":"{own}","depth":{depth}{game}}}"#)
+                    + "\n",
             )
             .unwrap();
             args.exclude_queue = vec![path];
             let (lines, excluded) = switch::queue(std::slice::from_ref(&read), &args).unwrap();
-            assert_eq!((lines.len(), excluded), (1 - expected, expected), "{root} {own}");
+            assert_eq!((lines.len(), excluded), (1 - expected, expected), "{root} {own} {game}");
         }
+        // 両方が 1 回の読みなら、積んでいない手だけを行に入れる。
+        std::fs::write(
+            &args.exclude_queue[0],
+            format!(r#"{{"id":"x","root":"{next}","own":"b","depth":6}}"#) + "\n",
+        )
+        .unwrap();
+        let both = SingleRead {
+            moves: vec!["5i4h".into(), "5i5h".into()],
+            ..read
+        };
+        let (lines, excluded) = switch::queue(std::slice::from_ref(&both), &args).unwrap();
+        assert_eq!(excluded, 0);
+        assert_eq!(lines[0].game, vec![vec!["5i4h".to_owned()]]);
+        args.exclude_queue.clear();
+        args.single_max = Some(0);
+        assert!(switch::queue(&[both], &args).unwrap().0.is_empty());
     }
 
     #[test]
