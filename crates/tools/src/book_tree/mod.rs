@@ -34,6 +34,7 @@ mod service;
 #[cfg(test)]
 mod simulation;
 mod source_buckets;
+mod status;
 mod targets;
 #[cfg(test)]
 mod tests;
@@ -61,6 +62,8 @@ enum TreeCommand {
     Seeds(seeds::SeedsArgs),
     /// キューの対象を共有エンジンで読む
     Serve(ServeArgs),
+    /// 複数の台の進みと局面の増加を含む残り時間を表示する
+    Status(status::StatusArgs),
     /// キューに対象を足す (検査してから追記し、受領を出す)
     Enqueue(queue::EnqueueArgs),
     /// 受領の範囲の対象が処理され、終わるまで待つ
@@ -230,6 +233,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
     match args.command {
         TreeCommand::Seeds(args) => seeds::run(args),
         TreeCommand::Serve(args) => service::serve(args),
+        TreeCommand::Status(args) => status::run(args),
         TreeCommand::Enqueue(args) => queue::enqueue(args),
         TreeCommand::Wait(args) => queue::wait(args),
         TreeCommand::QueueReview(args) => queue_review::run(*args),
