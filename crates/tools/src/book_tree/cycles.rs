@@ -37,7 +37,7 @@ pub(super) struct CyclesArgs {
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
     /// 手の値の伝播に使う、後手を自分として解くときの千日手の値
-    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     /// 元データを書き換える (外す手を record に、main を替える局面の替わりの手を main にする)。
     /// 省くと一覧と要約だけを出す

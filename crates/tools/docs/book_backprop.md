@@ -9,7 +9,7 @@ cargo run -p tools --release --bin book_backprop -- \
   --book in.db \
   --out out.db \
   --draw-value-black -70 \
-  --draw-value-white 0 \
+  --draw-value-white 70 \
   --merge min \
   --report report.md
 ```
@@ -25,9 +25,9 @@ cargo run -p tools --release --bin book_backprop -- \
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|
-| `--draw-value <CP>` | `0` | 千日手の値 (手番の側から見た値)。先手・後手とも同じ値にする |
-| `--draw-value-black <CP>` | `--draw-value` | 先手を自分として解くときの千日手の値。エンジンの `DrawValueBlack` に当たる |
-| `--draw-value-white <CP>` | `--draw-value` | 後手を自分として解くときの千日手の値。エンジンの `DrawValueWhite` に当たる |
+| `--draw-value <CP>` | なし | 千日手の値 (手番の側から見た値)。先手・後手とも同じ値にする |
+| `--draw-value-black <CP>` | `--draw-value`、それも無ければ `-70` | 先手を自分として解くときの千日手の値。エンジンの `DrawValueBlack` に当たる |
+| `--draw-value-white <CP>` | `--draw-value`、それも無ければ `70` | 後手を自分として解くときの千日手の値。エンジンの `DrawValueWhite` に当たる |
 | `--merge <MODE>` | `min` | book 内子局面からの伝播値と既存ラベル値の合成。`min` または `replace` |
 | `--report <PATH>` | なし | Markdown レポートの出力先 |
 | `--skip-unusable-moves` | off | 非合法手と `none` 行を局面の best (と best 変化の集計) から除く。行自体は値を変えずに書き出す |
@@ -58,7 +58,7 @@ cargo run -p tools --release --bin book_backprop -- \
 
 ### 先手・後手をそれぞれ自分として解く
 
-逆伝播は、先手を自分とした回と後手を自分とした回の 2 回解きます。各回は千日手の値を自分の側の値 (`--draw-value-black` / `--draw-value-white`) に固定した 2 人零和の問題で、相手から見た千日手の値はその符号反転です。先手番の局面の値は先手の回から、後手番の局面の値は後手の回から書き出します。対局のエンジンが先手番で千日手を避け (`DrawValueBlack=-70`)、後手番で避けない (`DrawValueWhite=0`) なら、同じ値を渡すとエンジンの判断と揃います。
+逆伝播は、先手を自分とした回と後手を自分とした回の 2 回解きます。各回は千日手の値を自分の側の値 (`--draw-value-black` / `--draw-value-white`) に固定した 2 人零和の問題で、相手から見た千日手の値はその符号反転です。先手番の局面の値は先手の回から、後手番の局面の値は後手の回から書き出します。対局のエンジンが先手番で千日手を避け (`DrawValueBlack=-70`)、後手番で千日手を歓迎する (`DrawValueWhite=70`) なら、同じ値 (既定) を渡すとエンジンの判断と揃います。
 
 各回は次の規則で値を決めます。
 

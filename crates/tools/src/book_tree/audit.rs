@@ -73,7 +73,7 @@ pub(super) struct AuditArgs {
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
     /// 後手を自分として解くときの千日手の値 (対局の DrawValueWhite に揃える)
-    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     /// 値の分かる手だけを載せた、伝播後の値つき .db の出力先
     #[arg(long)]
@@ -535,8 +535,6 @@ fn plan_replacements(
         .collect();
     let mut changes = BTreeMap::new();
     let mut summary = ReplacementSummary::default();
-    // 役割の交換では局面の値は変わらない。assign_outputs の同値 -1 補正だけは
-    // 手の間を移るので、再点検で差 1 が出ることがある。
     for f in findings {
         if f.best.origin == Origin::Eval {
             summary.eval += 1;
@@ -1898,12 +1896,29 @@ fn audit_with_records(
             }
             continue;
         };
-        // 同じ値なら main を 1 位とみなす (main が先頭なので最初の最大値)。
-        let best = audited
+        // 伝播の書き出しは勝ち側の同値の手のうち出口まで短い手だけを残し、ほかを -1 する。補正後の値で
+        // 比べると同値の局面で main が 1 位でなくなり、木ごとに main が行き来するので、補正を戻して比べる。
+        // 同じ値なら main を 1 位とみなし、main 以外の同値は伝播が残した手を取る。
+        let raw = |m: &AuditedMove| m.value + i32::from(m.tie_lowered);
+        let (_, best) = audited
             .iter()
-            .flatten()
-            .reduce(|best, m| if m.value > best.value { m } else { best })
+            .enumerate()
+            .filter_map(|(i, m)| m.as_ref().map(|m| (i, m)))
+            .reduce(|(bi, best), (i, m)| {
+                let (v, bv) = (raw(m), raw(best));
+                if v > bv || (v == bv && bi != 0 && best.tie_lowered && !m.tie_lowered) {
+                    (i, m)
+                } else {
+                    (bi, best)
+                }
+            })
             .expect("main がある");
+        let restore = |m: &AuditedMove| AuditedMove {
+            value: raw(m),
+            tie_lowered: false,
+            ..m.clone()
+        };
+        let (main, best) = (restore(main), restore(best));
         let gap = best.value - main.value;
         if gap == 0 {
             continue;
@@ -1942,8 +1957,8 @@ fn audit_with_records(
             key: key.clone(),
             ply: position.ply.clone(),
             source: position.source.clone(),
-            main: main.clone(),
-            best: best.clone(),
+            main,
+            best,
         });
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
@@ -2451,6 +2466,34 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let (findings, summary) = run_audit(&text, 51);
         assert_eq!(findings.len(), 1);
         assert_eq!(summary.below_line, [0, 1]);
+    }
+
+    #[test]
+    fn tied_main_stays_first_even_when_lowered_by_tie_break() {
+        // 5i4h (A → B の 2 手先の読み) と 5i6h (1 手先の読み) が同値 10 で、出口まで短い 5i6h が残り
+        // main の 5i4h が -1 される。
+        let tied = |alt_reply: &str| {
+            master(&[
+                (ROOT, "5i4h", "main", ""),
+                (ROOT, "5i6h", "alt", ""),
+                (A, "5a5b", "main", ""),
+                (B, "4h4g", "main", "10"),
+                ("4k4/9/9/9/9/9/9/3K5/9 w -", "5a5b", "main", alt_reply),
+            ])
+        };
+        let text = tied("-10");
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, _, book) = audit(&parsed, DrawValues::both(0), 1, Fill::Off, None).unwrap();
+        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+        let root =
+            audited_moves(book.graph_for(ROOT), ROOT, &parsed.0[ROOT], &book.known[index]).unwrap();
+        assert!(root[0].as_ref().is_some_and(|m| m.tie_lowered && m.value == 9));
+        assert!(findings.is_empty());
+
+        let (findings, _) = run_audit(&tied("-11"), 1);
+        assert_eq!(findings.len(), 1);
+        assert_eq!((findings[0].main.value, findings[0].best.mv.as_str()), (10, "5i6h"));
+        assert_eq!(findings[0].gap(), 1);
     }
 
     fn deep_fixture() -> String {

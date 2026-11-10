@@ -16,12 +16,12 @@ struct Cli {
     #[arg(long)]
     out: PathBuf,
     /// 千日手の値 (手番の側から見た値)。先手・後手とも同じ値にする
-    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
-    draw_value: i32,
-    /// 先手を自分として解くときの千日手の値。`--draw-value` より優先する
+    #[arg(long, allow_negative_numbers = true)]
+    draw_value: Option<i32>,
+    /// 先手を自分として解くときの千日手の値。`--draw-value` より優先し、どちらも省くと -70
     #[arg(long, allow_negative_numbers = true)]
     draw_value_black: Option<i32>,
-    /// 後手を自分として解くときの千日手の値。`--draw-value` より優先する
+    /// 後手を自分として解くときの千日手の値。`--draw-value` より優先し、どちらも省くと 70
     #[arg(long, allow_negative_numbers = true)]
     draw_value_white: Option<i32>,
     #[arg(long)]
@@ -42,6 +42,15 @@ struct Cli {
     threads: usize,
 }
 
+impl Cli {
+    fn draws(&self) -> DrawValues {
+        DrawValues {
+            black: self.draw_value_black.or(self.draw_value).unwrap_or(-70),
+            white: self.draw_value_white.or(self.draw_value).unwrap_or(70),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let report: Option<&Path> = cli.report.as_deref();
@@ -53,17 +62,7 @@ fn main() -> Result<()> {
     };
     let pool = rayon::ThreadPoolBuilder::new().num_threads(cli.threads).build()?;
     pool.install(|| {
-        backprop_file_with(
-            &cli.book,
-            &cli.out,
-            report,
-            DrawValues {
-                black: cli.draw_value_black.unwrap_or(cli.draw_value),
-                white: cli.draw_value_white.unwrap_or(cli.draw_value),
-            },
-            cli.merge,
-            options,
-        )
+        backprop_file_with(&cli.book, &cli.out, report, cli.draws(), cli.merge, options)
     })?;
     Ok(())
 }
@@ -106,7 +105,9 @@ mod tests {
             "-5",
         ])
         .unwrap();
-        assert_eq!(cli.draw_value, -5);
+        assert_eq!((cli.draws().black, cli.draws().white), (-5, -5));
+        let cli = Cli::try_parse_from(["book_backprop", "--book", "a", "--out", "b"]).unwrap();
+        assert_eq!((cli.draws().black, cli.draws().white), (-70, 70));
     }
 
     #[test]
