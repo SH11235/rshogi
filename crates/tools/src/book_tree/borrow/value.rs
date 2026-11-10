@@ -110,6 +110,7 @@ pub(super) struct MoveValue {
     pub expanded: bool,
     pub book_value: Option<i32>,
     pub destination_level: Option<usize>,
+    pub nodes: u64,
     pub cond: String,
 }
 
@@ -409,7 +410,7 @@ pub(super) fn value_root(
         }
     }
     let mut result = RootValues::default();
-    for (key, rows) in written {
+    for (&key, rows) in &written {
         let node = graph
             .find(key)
             .with_context(|| format!("内部エラー: 局面がありません: {key}"))?;
@@ -430,6 +431,7 @@ pub(super) fn value_root(
                     mv: row.mv?.to_owned(),
                     value: value.new,
                     destination_level: value.edge.map(|edge| tree.nodes[graph.key(edge.to)].level),
+                    nodes: 0,
                     expanded: row.expanded,
                     book_value: row.book_value,
                 })
@@ -479,8 +481,18 @@ pub(super) fn value_root(
         result.moves.insert(key.to_owned(), moves);
     }
     let counts = selected_backing_nodes(&selected_children, &own_nodes, &backing_nodes);
-    for (node, count) in counts.into_iter().enumerate() {
-        result.nodes.insert(graph.key(node).to_owned(), count);
+    for (node, &count) in counts.iter().enumerate() {
+        let key = graph.key(node);
+        for m in result.moves.get_mut(key).into_iter().flatten() {
+            m.nodes = written[key]
+                .iter()
+                .zip(graph.moves(node))
+                .find(|(row, _)| row.mv == Some(m.mv.as_str()))
+                .and_then(|(_, value)| value.edge.map(|edge| counts[edge.to]))
+                .filter(|count| *count > 0)
+                .unwrap_or(count);
+        }
+        result.nodes.insert(key.to_owned(), count);
     }
     Ok(result)
 }
@@ -584,6 +596,39 @@ pub(super) fn join_roots(
         }
     }
     Ok(joined)
+}
+
+/// 合流後の最善手に沿って、直接の読みが無い局面のノード上限を揃える。
+pub(super) fn joined_nodes(
+    nodes: &mut BTreeMap<String, register::Node>,
+    values: &[RootValues],
+    readings: &ReadingsOf,
+) -> Result<()> {
+    let index: BTreeMap<_, _> =
+        nodes.keys().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
+    let mut selected = vec![None; nodes.len()];
+    let mut own = vec![0; nodes.len()];
+    let mut fallback = vec![0; nodes.len()];
+    for (i, (key, node)) in nodes.iter().enumerate() {
+        own[i] = readings.get(key).map_or(0, |r| r.nodes_limit);
+        fallback[i] = node.nodes;
+        if let Some(best) = node.moves.first() {
+            let child = crate::book_tree::model::child(key, &best.mv)?;
+            selected[i] = index.get(child.as_str()).copied();
+            if let Some(m) = values
+                .get(node.tree)
+                .and_then(|root| root.moves.get(key))
+                .and_then(|moves| moves.iter().find(|m| m.mv == best.mv))
+            {
+                fallback[i] = m.nodes;
+            }
+        }
+    }
+    let counts = selected_backing_nodes(&selected, &own, &fallback);
+    for (node, count) in nodes.values_mut().zip(counts) {
+        node.nodes = count;
+    }
+    Ok(())
 }
 
 /// 登録する局面: 部分木の局面のうち手番が `turn` (`own` / `opp`) のもので、元データで止めた出口と印の付いた
@@ -848,6 +893,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line)?;
+    joined_nodes(&mut nodes, &all, &readings)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。

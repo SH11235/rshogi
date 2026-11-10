@@ -1,7 +1,7 @@
 use super::cut::{CutArgs, MasterExit, MasterStop, cut_root, select};
 use super::value::{
     RootValues, ValueArgs, ValueInput, append_records, collect_nodes, drop_own_records, join_roots,
-    register_nodes, value_root,
+    joined_nodes, register_nodes, value_root,
 };
 use super::*;
 use crate::book_backprop::DrawValues;
@@ -1107,6 +1107,108 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
 }
 
 #[test]
+fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
+    use super::value::MoveValue;
+    use crate::book_tree::register::{self, Node, NodeMove, Options};
+    use crate::book_tree::schema::Schema;
+    let a = key(&["5i5h"]);
+    let ab = key(&["5i5h", "5a5b"]);
+    let ac = key(&["5i5h", "5a4a"]);
+    let mut roots = [RootValues::default(), RootValues::default()];
+    let mut nodes = BTreeMap::new();
+    for (key, ply, tree, moves) in [
+        (ROOT, "1", 0, vec![("5i5h", 10, 100)]),
+        (a.as_str(), "2", 1, vec![("5a5b", -10, 100), ("5a4a", -30, 900)]),
+        (ab.as_str(), "3", 0, vec![("5h6h", 200, 100), ("5h4i", 10, 100)]),
+        (ac.as_str(), "3", 0, vec![("5h4h", 30, 100)]),
+    ] {
+        roots[tree].moves.insert(
+            key.into(),
+            moves
+                .iter()
+                .map(|(mv, value, nodes)| MoveValue {
+                    mv: (*mv).into(),
+                    value: *value,
+                    nodes: *nodes,
+                    expanded: true,
+                    book_value: None,
+                    destination_level: None,
+                    cond: "test".into(),
+                })
+                .collect(),
+        );
+        nodes.insert(
+            key.into(),
+            Node {
+                ply: ply.into(),
+                remaining: 2,
+                nodes: moves[0].2,
+                tree,
+                moves: moves
+                    .into_iter()
+                    .map(|(mv, value, _)| NodeMove {
+                        mv: mv.into(),
+                        value,
+                        cond: "test".into(),
+                        value_kind: "tree:2".into(),
+                    })
+                    .collect(),
+            },
+        );
+    }
+    let settings = settings();
+    let mut deeper = reading(&ac, &[("5h4h", 30)], &settings);
+    deeper.nodes_limit = 900;
+    let readings = BTreeMap::from([
+        (ab.clone(), reading(&ab, &[("5h6h", 200), ("5h4i", 10)], &settings)),
+        (ac.clone(), deeper),
+    ]);
+    let schema = Schema::default();
+    let options = Options {
+        since: "tag",
+        note: "",
+        alt_gap: 40,
+        source: "ext",
+        lineage: "book:test",
+        schema: &schema,
+        replace_curated: false,
+        revive_bench: false,
+    };
+    let draws = DrawValues {
+        black: -70,
+        white: 70,
+    };
+    assert_eq!(nodes[&a].moves[0].mv, "5a5b");
+    assert_eq!(nodes[&a].nodes, 100);
+    let original = nodes.clone();
+    join_roots(&[], &mut nodes, &options, draws, 40).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    assert_eq!(nodes[&a].moves[0].mv, "5a4a");
+    assert_eq!(nodes[&a].nodes, 900);
+    assert_eq!(nodes[ROOT].nodes, 900);
+    assert_eq!(nodes[&ab].nodes, 100);
+    assert_eq!(nodes[&ac].nodes, 900);
+    let (rows, _, _) = register::register(Vec::new(), &nodes, &options).unwrap();
+    for key in [a.as_str(), ROOT] {
+        let main = rows.iter().find(|r| r.get("key") == key && r.get("role") == "main").unwrap();
+        assert_eq!(main.get("nodes"), "9e2");
+    }
+    nodes = original;
+    join_roots(&rows, &mut nodes, &options, draws, 40).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    let (again, _, _) = register::register(rows.clone(), &nodes, &options).unwrap();
+    assert_eq!(
+        crate::book_tree::master_table::format_master(&rows),
+        crate::book_tree::master_table::format_master(&again)
+    );
+    nodes.remove(&ac);
+    nodes.get_mut(&a).unwrap().nodes = 100;
+    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    assert_eq!(nodes[&a].nodes, 900);
+    assert_eq!(nodes[ROOT].nodes, 900);
+}
+
+#[test]
 fn append_records_adds_new_moves_and_refreshes_only_own_source_records() {
     use crate::book_tree::master_table::test_row;
     use crate::book_tree::register::{Node, NodeMove, Options};
@@ -1303,6 +1405,8 @@ fn value_root_preserves_own_nodes_and_selected_descendants_nodes() {
     let branch = key(&["5i5h"]);
     assert_eq!(values.moves[&branch][0].mv, "5a5b");
     assert_eq!(values.nodes[&branch], 100);
+    assert_eq!(values.moves[&branch].iter().find(|m| m.mv == "5a5b").unwrap().nodes, 100);
+    assert_eq!(values.moves[&branch].iter().find(|m| m.mv == "5a4a").unwrap().nodes, 900);
     let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, &cache);
     assert_eq!(nodes[ROOT].nodes, 2000);
 }

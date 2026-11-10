@@ -468,7 +468,7 @@ impl Journal {
             self.prefetched.insert(key.clone());
             self.prefetch_conditions.insert((id, key.clone()));
         }
-        if rec.provenance == "engine" {
+        if rec.provenance == "engine" && rec.reading.nodes_limit > 0 {
             self.durations.push_back(rec.reading.sec / rec.reading.nodes_limit as f64);
             if self.durations.len() > 50 {
                 self.durations.pop_front();
@@ -1129,7 +1129,8 @@ pub(super) fn match_fingerprints(
         let limit = file.metadata()?.len();
         let mut validity = Validity::default();
         let mut skipped = BTreeMap::<String, SkippedRows>::new();
-        let dir = tempfile::tempdir()?;
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = tempfile::Builder::new().prefix(".journal-match-").tempdir_in(parent)?;
         let mut buckets = super::source_buckets::Buckets::new(dir.path(), limit)?;
         let mut reader = BufReader::new(file.take(limit));
         let mut rows = 0;
@@ -1508,7 +1509,24 @@ mod tests {
     }
 
     #[test]
-    fn load_skips_tampered_fingerprints_and_inconsistent_settings() {
+    fn remember_does_not_time_zero_node_readings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rec = record("", 0);
+        rec.provenance = "engine".into();
+        rec.reading.nodes_limit = 0;
+        let mut journal = Journal::open(&dir.path().join("journal"), "").unwrap();
+        for sec in [0.0, 0.1] {
+            rec.reading.sec = sec;
+            journal.remember(rec.clone());
+        }
+        assert!(journal.durations.is_empty());
+        rec.reading.nodes_limit = 100;
+        journal.remember(rec);
+        assert_eq!(journal.durations, VecDeque::from([0.001]));
+    }
+
+    #[test]
+    fn load_skips_tampered_fingerprints_and_accepts_equivalent_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal");
         let mut original = record("", 0);
