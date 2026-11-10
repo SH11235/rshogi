@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、元データの手で辿れる出口を列挙する `master exits`、戦型の候補ごとに RAMU の手を替えて辿り比べる `master opening-report`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、元データの手で辿れる出口を列挙する `master exits`、外部定跡と値が食い違う局面を出す `master opp-book-diff`、戦型の候補ごとに RAMU の手を替えて辿り比べる `master opening-report`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -2016,6 +2016,60 @@ name	side	override
 
 計算量: 候補ごとに 2 回辿ります (1 回目で局面と手の行き来を集め、強い対局を数える局面と循環を決める)。2 回目の辿りの行は、分けた重みの数だけ増えます。強い対局の棋譜は 1 回だけ 1 行ずつ読み、辿った局面だけを数えます。
 約 22 万行の元データ、86 MB のテキスト `.db` の頻度の定跡、1,900 万局面の `.ybb`、両者 R3800 以上が約 3.9 万局の棋譜で、候補 10 本 (先手 4・後手 6) が release build の 1 スレッドで約 50 秒・ピーク約 310 MB でした。
+
+## `master opp-book-diff`: 外部定跡と食い違う局面
+
+`master walk` と同じ辿りで RAMU の手番に来る局面を集め、元データの main の伝播の値と、外部定跡 (`--opp-book`) のその局面の値を比べて、食い違う局面を表と報告にします。外部定跡の値は別のエンジン・別の物差しの値なので、手を決めるのには使わず、RAMU の読みで確かめる所の当たりにだけ使います。元データ・受付は書き換えません。
+
+```sh
+book_mine master opp-book-diff --master moves.tsv --schema schema \
+  --opp-book big.ybb --opp-freq strong_games.db --opp-records games.jsonl.gz \
+  [--exclude-queue targets.jsonl] --table diff.tsv --markdown diff.md --enqueue-out queue.jsonl
+```
+
+| 引数 | 既定 | 内容 |
+| --- | --- | --- |
+| `--master <TSV>` | 必須 | 元データ |
+| `--schema <DIR>` | なし | 語彙の表 |
+| `--opp-book <PATH>` | 必須 | 比べる外部定跡 (`.db` か `.ybb`)。辿りでも `master walk --opp-book` と同じく相手の手に使う |
+| `--side <b\|w\|both>` | `both` | RAMU の側 |
+| `--opp-freq`・`--min-games`・`--max-ply`・`--weight-floor`・`--opp-book-diff`・`--opp-book-best`・`--opp-book-first` | walk と同じ | 辿り方 (`master walk` と同じ意味・既定) |
+| `--cont-max <N>` | `100` | 比べた局面から定跡が切れる所まで、と、そこからの外部定跡の続きを辿る手数の上限 |
+| `--min-weight <W>` | `0.002` | 比べる局面の重みの下限 |
+| `--min-gap <CP>` | `80` | 差か逆向きの差がこれ以上の局面を出す |
+| `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `70` | 伝播の千日手の値 (`master audit` と同じ) |
+| `--threads <N>` | `0` | 伝播のスレッド数 (0 = 全コア) |
+| `--opp-records <PATH>` | なし | 強い対局の棋譜 (`master walk --opp-records` と同じ形)。比べた局面に着いた局数と得点の列を足す |
+| `--records-min-rate <R>` / `--records-max-ply <N>` | `3800` / `130` | `--opp-records` で数える対局のレートの下限と手数 |
+| `--exclude-queue <PATH>` | なし、繰り返し可 | 既に積んだ木のキュー。`master walk --exclude-queue` と同じ照合 (根・`roots` と、`game` の最初の `depth+1` 手で通る局面) で、定跡が切れる所と同じ局面・同じ側の木の id を `queued` に出し、キューの行から除く |
+| `--enqueue-out <PATH>` | なし | 差が `--min-gap` 以上の局面から定跡が切れた所を根にした `tree enqueue --from` の行 (JSON Lines) |
+| `--depth`・`--priority`・`--tag` | `6`・`300`・`oppdiff` | キューの行の段数・priority の始まり (順位 0〜99 を足す)・id `<tag>_<根の手数>_<局面の hash 16 桁>_<b\|w>` の名前 |
+| `--opp-n`・`--stop`・`--rounds`・`--draw-black`・`--draw-white` | `3`・`300`・`3`・`-70`・`70` | キューの行の `opts` |
+| `--table <TSV>` / `--markdown <MD>` | なし | 表と報告。`--enqueue-out` と合わせてどれかが必須 |
+| `--title <NAME>` | 空 | 報告の見出しの版の名前 |
+
+比べる局面と重み:
+
+- 辿りは `master walk` と同じです (RAMU は元データの main、相手は `--opp-freq` の頻度か外部定跡の手)。対象は、RAMU の手番で元データに main がある局面のうち、重みが `--min-weight` 以上のものです。相手の手番に来る重みは混ぜません。
+- 重みは、その局面を通る辿りの割合です。1 本の辿りで同じ局面に何度来ても (千日手の繰り返し) 1 回だけ数え、別の手数で来た辿りの重みは足します。止まり方 (`--weight-floor`・`--max-ply`) は walk と同じく、同じ手数・同じ局面の重みの合計で決めます。手順は最も少ない手数で最初に辿ったものです。
+
+比べる値:
+
+- 私たちの値は、元データ全体を `master audit --bridge-replies` と同じ計算で伝播した main の値です (同値の手の -1 の補正は audit と同じく戻します)。main の値が分からない局面と、外部定跡に無い局面は比べず、要約に数だけ出します。
+- 外部定跡の値は、その局面の同じ手の値 (無ければ空) と、1 位の手 (同じ値なら定跡ファイルで先の手) とその値です。
+- 差 `gap` = 私たちの値 − 外部定跡の同じ手の値 (外部定跡に main が無ければ 1 位の値) で、外部定跡が RAMU の側に悪いと見る量です。逆向きの差 `reverse` = 外部定跡の 1 位の値 − 私たちの値です。どちらかが `--min-gap` 以上の局面を出します。
+
+定跡が切れる所: 比べた局面から、RAMU は元データの main、相手は外部定跡の 1 位 (無いか指せなければ元データの main) を指して進み、RAMU の手番で元データに無い局面に着いた所です (`cut_end=own`)。相手の手が無ければ `out`、局面が繰り返せば `cycle`、`--cont-max` 手で `max` です。`own` の局面からは、walk の `cont` と同じく外部定跡の 1 位を両者が指し続けた手順と、最後に引けた局面の 1 位の値を出します。
+
+表の列は `side ply weight gap reverse main ours ours_black main_from main_kind ext_same ext_same_black ext_best ext_best_value ext_best_value_black cut_end cut_ply cut_key cut_moves cont cont_end_black queued n0 score0 key moves` です。`ply` は main が何手目か、値は手番の側 (RAMU) から見た値と、`_black` の付く列は先手から見た値 (プラス = 先手良し) です。`main_from` は audit の `eval` (1 回の読み) か `propagated` (先の局面から伝播)、`main_kind` は元データの main の行の `value_kind` (`tree:N` は N 段の木) です。`cut_ply` は定跡が切れた局面で RAMU が指す手が何手目か、`cut_moves` は比べた局面からそこまでの手順です。`n0`・`score0` は `--opp-records` の対局がその局面に着いた局数と RAMU の側から見た得点です。手番ごとに、差と逆向きの差の大きい方の大きい順、同じなら重みの大きい順に並べます。
+
+報告は RAMU の先手・後手ごとに「外部定跡の方が RAMU に悪い」(`gap`) と「外部定跡の 1 位の方が RAMU に良い」(`reverse`) の節に分け、それぞれ差の大きい順 (同じなら重みの大きい順) に、手数・重み (%)・差 (点)・手 (漢字)・値 (先手から見た値、点)・定跡が切れる所・外部定跡の続き・受付・強い対局の局数・手順 (漢字の棋譜) を書きます。
+
+キューの行は、`gap` が `--min-gap` 以上で定跡が切れた所 (`own`) のある局面から作ります。同じ根・同じ側は 1 行にまとめ (根の手数は最も小さい手数)、`game` に外部定跡の続きの最初の `depth+1` 手、`memo` にまとめた局面の手数・差・重みを入れます。並びと priority の順位は、まとめた局面のうち差の最も大きい局面 (同じなら重みの大きい局面) の差・重みの順です。`--exclude-queue` で受付に同じ根・同じ側の木がある所は積みません。
+
+標準出力には手番ごとに、比べた局面の数と除いた数、差・逆向きの差が `--min-gap` 以上の局面の数と差の帯 (`--min-gap` から 100・150・200・300・500 で区切る) ごとの数、キューの行の数を出します。
+
+計算量: 伝播は `master audit` と同じで、元データ全体の大きさで決まります。辿りは walk と同じ局面を通り、外部定跡は辿った局面ごとに 1 回だけファイルから引きます。辿った手に循環 (千日手で同じ辿りに 2 回来うる局面の組、手の向きの強連結成分) があれば、もう 1 回辿り、その成分の中だけで通った RAMU の手番の局面の組ごとに重みを分けて持ちます (成分を出た辿りは戻れないので、成分を出るときに組を空にする)。分ける組の数は循環の大きさで決まり、元データや定跡の大きさにはよりません。
 
 ## `borrow`: 大きい定跡の木を借りる
 

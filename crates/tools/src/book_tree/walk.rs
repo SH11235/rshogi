@@ -930,6 +930,7 @@ fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> Strin
     text
 }
 
+pub(super) mod opp_book_diff;
 pub(super) mod records;
 #[cfg(test)]
 mod tests;
