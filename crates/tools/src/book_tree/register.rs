@@ -1205,6 +1205,53 @@ mod tests {
     }
 
     #[test]
+    fn run_lists_kept_mains_with_values_from_both_sides() {
+        const W: &str = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let a = child(W, "5a4a").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        let original = format_master(&master(&[
+            row(W, "5a4a", "main", "read", "wide", "10"),
+            row(&a, "5i4i", "main", "read", "wide", "-50"),
+        ]));
+        std::fs::write(&master_path, &original).unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::write(
+            tree.join(NODE_MOVES),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{W}\t4\t0\t0\t1000000000\t5a6a\t30\t0\t1\n{W}\t4\t0\t0\t1000000000\t5a4a\t5\t0\t2\n"),
+        )
+        .unwrap();
+        run(RegisterArgs {
+            master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            replace_curated: false,
+            skip_keys: None,
+            conflicts: dir.path().join("conflicts.tsv"),
+            apply: true,
+            keep_line: 20,
+            keep_min_depth: 1,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            trees: vec![tree],
+        })
+        .unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert_eq!(find(&rows, W, "5a4a").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, W, "5a6a").unwrap().get("role"), "alt");
+        let conflicts = std::fs::read_to_string(dir.path().join("conflicts.tsv")).unwrap();
+        let line = conflicts.lines().nth(1).unwrap();
+        assert!(line.starts_with(&format!("{W}\t4\tw\t5a4a\tread\twide\t5\t5a6a\t30\t")));
+        assert!(line.ends_with("\tkeep\t50\t1\t30\t0\t20\t-50\t-30"), "{line}");
+    }
+
+    #[test]
     fn bench_source_and_caller_control_revival_without_main() {
         for has_main in [false, true] {
             for enabled in [false, true] {

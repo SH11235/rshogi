@@ -7,7 +7,7 @@ use crate::book_tree::master_table::{Row, positions_from_rows};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// main を残した局面の、仮に登録した元データを伝播した値 (手番の側から) と、その値が何手先の読みから来たか。
+/// main を残した局面の、仮に登録した元データを伝播した値 (手番の側から) と、その値がいくつ先の局面の読みから来たか。
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::book_tree) struct Kept {
     pub old_value: i32,
@@ -37,7 +37,7 @@ fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
         .collect()
 }
 
-/// 手の値が何手先の読みから来たか。最善の応手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
+/// 手の値がいくつ先の局面の読みから来たか。最善の応手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
 /// 局面で、着いた手の読みの値 (定跡に無い応手) が最善なら、その局面は数えない (値は手の読みそのもの)。
 fn depth(graph: &Graph, master: &BTreeSet<&str>, start: MoveValue) -> usize {
     let mut depth = 0;
@@ -60,7 +60,7 @@ fn depth(graph: &Graph, master: &BTreeSet<&str>, start: MoveValue) -> usize {
 }
 
 /// `before` から `after` (仮に登録した元データ) で main が替わった局面のうち、`after` を伝播した値で元の main が
-/// 新しい main を `rule.line` 以上上回り、元の main の値が `rule.min_depth` 手以上先の読みから来た局面。
+/// 新しい main を `rule.line` 以上上回り、元の main の値が `rule.min_depth` 局面以上先の読みから来た局面。
 pub(in crate::book_tree) fn kept_mains(
     before: &[Row],
     after: &[Row],
@@ -84,8 +84,9 @@ pub(in crate::book_tree) fn kept_mains(
         return Ok(kept);
     }
     let book = positions_from_rows(after.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
+    // 点検の表は使わないので、線を最大にして表を作らせない。
     let (_, _, audited) =
-        audit(&book, rule.draws, 1, rule.fill, None).context("main を替える前の伝播")?;
+        audit(&book, rule.draws, i32::MAX, rule.fill, None).context("main を替える前の伝播")?;
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
     let master: BTreeSet<&str> = book.0.keys().map(String::as_str).collect();
@@ -100,28 +101,34 @@ pub(in crate::book_tree) fn kept_mains(
         };
         let moves = audited_moves(graph, key, position, known)?;
         let in_graph: Vec<MoveValue> = graph.moves(node).collect();
-        let value = |mv: &str| -> Option<(i32, usize)> {
+        let value = |mv: &str| -> Option<(i32, MoveValue)> {
             let j = position.moves.iter().position(|m| m.mv == mv)?;
             let audited = moves[j].as_ref()?;
             // グラフには値の分かる手だけが元データの順で入っている。
             let g = known[..j].iter().filter(|&&k| k).count();
             // 同値の -1 は書き出しで 1 手を選ぶための印なので、比べるときは戻す。
-            let value = audited.value + i32::from(audited.tie_lowered);
-            Some((value, depth(graph, &master, in_graph[g])))
+            Some((audited.value + i32::from(audited.tie_lowered), in_graph[g]))
         };
-        let (Some((old_value, old_depth)), Some((new_value, new_depth))) =
-            (value(old_move), value(new_move))
+        // 値の分からない手は比べられないので、従来どおり木の 1 位に替える。
+        let (Some((old_value, old)), Some((new_value, new))) = (value(old_move), value(new_move))
         else {
             continue;
         };
-        let found = Kept {
-            old_value,
-            old_depth,
-            new_value,
-            new_depth,
-        };
-        if found.gap() >= rule.line && old_depth >= rule.min_depth {
-            kept.insert(key.to_owned(), found);
+        if old_value - new_value < rule.line {
+            continue;
+        }
+        let old_depth = depth(graph, &master, old);
+        if old_depth >= rule.min_depth {
+            let new_depth = depth(graph, &master, new);
+            kept.insert(
+                key.to_owned(),
+                Kept {
+                    old_value,
+                    old_depth,
+                    new_value,
+                    new_depth,
+                },
+            );
         }
     }
     Ok(kept)
