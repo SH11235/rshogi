@@ -531,8 +531,9 @@ D の priority は保持します。
 全台で hold なら棚上げとし、`--box` の指定順で最初の台だけを対象にします。
 棚上げの未着手の A〜C は hold を外します。ただし、別の id で根の局面 (盤・手番・持ち駒、`root` の局面だけで `roots` は見ない) と own の側が同じ木 (名前を変えて移した写し、同じ台のものも含む) が
 `--box` のどれかの受付か `--add` にあり、その写しが hold でない (読んでいる・読み待ち) か finished・failed なら hold を外しません。
-写しがどれも hold なら、`--box` の順 (同じ台の中は id の順、`--add` は最後) で最初の木だけを外す候補にし、ほかは hold のまま残します。
-`own=bw` の行は先後それぞれの側で照合し、片側にでも写しがあれば受付行ごと hold を残します。
+写しがどれも hold なら、`--box` の順 (同じ台の中は progress の順、`--add` は最後) で最初の木だけを外す候補にし、ほかは hold のまま残します。
+その最初の木が読み途中で hold を保持する場合や D の場合は、どの写しの hold も外れません。
+`own=bw` の行は先後それぞれの側で照合し、片側にでも写しがあれば (その側の区分によらず) 受付行ごと hold を残します。
 照合は `--box` に渡した台だけで行うので、写しが渡していない台にあると見つかりません。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
@@ -553,9 +554,9 @@ hold は両側とも停止可能な場合だけ付けます。片側でも読み
 再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root group tier rerank_priority copy_of`
 の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は new (`--add` の木)、held、running (読み途中)、queued です。group は更新後の受付行の `group` (無ければ空) です。
 tier は当たった段の行の name (段の表が無いか当たらなければ空)、rerank_priority は段を当てる前の priority (再採点と group 揃えの後)、new_priority は段を当てた後の priority です。
-copy_of は写しがあるので hold を外さなかった行の、写しの `<台>:<id>` です (`--add` の木は台を `add` と書きます)。
+copy_of は hold の行で、hold を外さない理由になる写しの `<台>:<id>` です (`--add` の木は台を `add` と書きます)。
 標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数とそのうち group でそろえた数、hold を外す / 付ける数を出します。
-写しで hold を残した行があればその数を、段の表があれば段ごとの受付行の数と、hold でないのにどの段にも当たらなかった受付行の数を出します。
+写しが無ければ hold を外していた受付行があればその数を、段の表があれば段ごとの受付行の数と、hold でないのにどの段にも当たらなかった受付行の数を出します。
 
 #### 段の表 (`--rerank-tiers`)
 

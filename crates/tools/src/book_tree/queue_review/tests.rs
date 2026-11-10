@@ -2438,11 +2438,15 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
     pair1["hold"] = json!(true);
     let mut pair2 = pair1.clone();
     pair2["id"] = json!("pair2");
+    let mut bw_d = row("bw_d", "3g3f");
+    bw_d["own"] = json!("bw");
+    bw_d["hold"] = json!(true);
+    let act_copy = row("act_copy", "3g3f");
     let mut a = plan_args(
         d.path(),
         &[
-            ("Z", vec![orig, lone, bw_orig, pair1]),
-            ("A", vec![renamed, white, b_copy, pair2]),
+            ("Z", vec![orig, lone, bw_orig, pair1, bw_d]),
+            ("A", vec![renamed, white, b_copy, pair2, act_copy]),
         ],
     );
     rerank_only(
@@ -2452,8 +2456,10 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
     );
     let white_dir = d.path().join("white");
     std::fs::create_dir_all(&white_dir).unwrap();
-    a.walk_table
-        .push(format!("w={}", walk(&white_dir, "w\town\t0.005\t6g6f\n").display()));
+    a.walk_table.push(format!(
+        "w={}",
+        walk(&white_dir, "w\town\t0.005\t6g6f\nw\town\t0.005\t3g3f\n").display()
+    ));
     let mut stdout = Vec::new();
     run_at(a, now(), &mut stdout).unwrap();
     let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
@@ -2473,10 +2479,12 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
         .map(|r| (r["id"].as_str().unwrap(), r["hold"].as_bool().unwrap()))
         .collect();
     // bw の行は後手側に写しが無くても、先手側の写しで行ごと hold を残す。
+    // 写しのある先手側が D (もとから hold のまま) でも同じ。
     // 2 本とも hold の写しは --box の順で最初の Z:pair1 だけを外す。
     assert_eq!(
         holds,
         vec![
+            ("bw_d", true),
             ("bw_orig", true),
             ("lone", false),
             ("orig", true),
@@ -2497,7 +2505,7 @@ fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
     assert!(
         String::from_utf8(stdout)
             .unwrap()
-            .contains("名前を変えた写しがあるので hold を外さない=3")
+            .contains("名前を変えた写しがあるので hold を外さない=4")
     );
 }
 

@@ -32,6 +32,8 @@ struct Row<'a> {
     running: bool,
     /// 段の表を当てる前の priority (再採点と group 揃えの後)。
     rerank_priority: u32,
+    /// 写しの照合の前に hold を外す提案だったか。
+    released: bool,
     /// 同じ根・同じ own の別の id の行 (`<台>:<id>`)。あれば hold を外さない。
     copy_of: Option<String>,
 }
@@ -208,7 +210,7 @@ pub(super) fn build(
     };
     // 名前を変えて移した木は id が違うので、居場所を id でまとめる棚上げの判定では見つからない。
     // 根の局面と own の側で照合し、別の id の写しが動いているか終わっていれば hold を外さない。
-    // 写しがどれも hold なら、並びの最初 (--box の順、同じ台なら id 順、--add は最後) の id だけを外す候補にする。
+    // 写しがどれも hold なら、並びの最初 (--box の順、同じ台なら progress の順、--add は最後) の id だけを外す候補にする。
     struct Copy<'a> {
         index: usize,
         id: &'a str,
@@ -330,9 +332,11 @@ pub(super) fn build(
         } else {
             tree.hold
         };
-        let copy_of = (tree.hold && !hold)
-            .then(|| copy_of(&queued.primary_root, &tree.own, &tree.id))
-            .flatten();
+        // own=bw の行は片側の hold を外さなくても受付行の hold が外れ得るので、
+        // 区分によらず hold の側はすべて照合し、受付行に反映するときに使う。
+        let copy_of =
+            tree.hold.then(|| copy_of(&queued.primary_root, &tree.own, &tree.id)).flatten();
+        let released = tree.hold && !hold;
         let hold = hold || copy_of.is_some();
         rows.push(Row {
             box_index: i,
@@ -350,6 +354,7 @@ pub(super) fn build(
             shelved,
             running,
             rerank_priority: priority,
+            released,
             copy_of,
         });
     }
@@ -380,6 +385,13 @@ pub(super) fn build(
             line.1 = true;
         }
     }
+    let kept_copies = rows_with_copy
+        .iter()
+        .filter(|key| {
+            rows.iter()
+                .any(|row| row.released && (row.box_index, &row.tree.id) == (key.0, &key.1))
+        })
+        .count();
     for ((i, id), (_, hold)) in &mut lines {
         if started.contains(&(*i, id.as_str())) {
             *hold = queued_at(*i, id).line.hold;
@@ -463,7 +475,6 @@ pub(super) fn build(
     };
     let mut counts = BTreeMap::from([('A', 0), ('B', 0), ('C', 0), ('D', 0)]);
     let (mut raised, mut lowered, mut released, mut held) = (0, 0, 0, 0);
-    let kept_copies = rows_with_copy.len();
     let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\ttier\trerank_priority\tcopy_of\n".to_vec();
     for row in &rows {
         let key = (row.box_index, row.tree.id.clone());
