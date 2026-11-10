@@ -140,17 +140,92 @@ impl Visited {
 struct Cached {
     depth: usize,
     visited: Option<Rc<Visited>>,
+    /// 上限に届かなかったときの、最短の枝の途切れ。
+    cut: Option<Rc<Trail>>,
+}
+
+/// 継続が途切れた理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stop {
+    /// 自分の手番で main がない。
+    Own,
+    /// 相手の手番で main も辿る応手もない。
+    Opp,
+    /// 経路上の局面に戻った。
+    Cycle,
+    /// main が指せない。
+    Illegal,
+    /// main がなく、辿る応手がどれも指せない。
+    NoLegal,
+}
+
+impl Stop {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Stop::Own => "own",
+            Stop::Opp => "opp",
+            Stop::Cycle => "cycle",
+            Stop::Illegal => "illegal",
+            Stop::NoLegal => "no_legal",
+        }
+    }
+}
+
+/// 途切れた局面までの手順。memo で共有するので、局面ごとに先頭の手を足した鎖にする。
+enum Trail {
+    End { key: String, stop: Stop },
+    Move { mv: String, next: Rc<Trail> },
+}
+
+/// 最短の枝が途切れた局面 (手数を除くキー)、理由、根の手の後からそこまでの手順。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Cut {
+    pub key: String,
+    pub stop: Stop,
+    pub moves: Vec<String>,
+}
+
+impl Cut {
+    fn from_trail(mut trail: &Trail) -> Self {
+        let mut moves = Vec::new();
+        loop {
+            match trail {
+                Trail::End { key, stop } => {
+                    return Self {
+                        key: key.clone(),
+                        stop: *stop,
+                        moves,
+                    };
+                }
+                Trail::Move { mv, next } => {
+                    moves.push(mv.clone());
+                    trail = next;
+                }
+            }
+        }
+    }
 }
 
 impl<F: Fn(&str) -> Option<String>> Continuation<'_, F> {
     /// 根の手を除き、各分岐で辿れる継続手数の最小値を上限まで返す。
     pub fn after(&self, key: &str, mv: &str, limit: usize) -> Result<usize> {
+        Ok(self.after_with_cut(key, mv, limit)?.0)
+    }
+
+    /// `after` の値と、上限に届かなければ最短の枝が途切れた局面。同じ長さの枝は main を先に、応手は USI の順に選ぶ。
+    pub fn after_with_cut(
+        &self,
+        key: &str,
+        mv: &str,
+        limit: usize,
+    ) -> Result<(usize, Option<Cut>)> {
         let mut pos = position_from_sfen(&format!("{key} 1"))?;
         apply_usi_move(&mut pos, mv)?;
         let own = key.split_whitespace().nth(1) == Some("w");
         let mut path = BTreeSet::from([key.to_owned()]);
         let mut memo = BTreeMap::new();
-        Ok(self.depth(strip_ply(&pos.to_sfen()), own, limit, &mut path, &mut memo)?.depth)
+        let result = self.depth(strip_ply(&pos.to_sfen()), own, limit, &mut path, &mut memo)?;
+        Ok((result.depth, result.cut.as_deref().map(Cut::from_trail)))
     }
 
     fn depth(
@@ -164,16 +239,24 @@ impl<F: Fn(&str) -> Option<String>> Continuation<'_, F> {
         let mut result = Cached {
             depth: 0,
             visited: None,
+            cut: None,
         };
         if remaining == 0 {
             return Ok(result);
         }
+        let end = |stop| {
+            Some(Rc::new(Trail::End {
+                key: key.to_owned(),
+                stop,
+            }))
+        };
         let mut visited = Visited {
             key: key.to_owned(),
             children: Vec::new(),
         };
         if path.contains(key) {
             result.visited = Some(Rc::new(visited));
+            result.cut = end(Stop::Cycle);
             return Ok(result);
         }
         let cache_key = (key.to_owned(), remaining);
@@ -183,37 +266,56 @@ impl<F: Fn(&str) -> Option<String>> Continuation<'_, F> {
         {
             return Ok(cached.clone());
         }
-        let mut moves = BTreeSet::new();
         let main = (self.main)(key);
-        if let Some(main) = &main {
-            moves.insert(main.clone());
-        }
-        if (key.split_whitespace().nth(1) == Some("w")) != own {
-            moves.extend(self.freq.replies(key));
+        let opponent = (key.split_whitespace().nth(1) == Some("w")) != own;
+        // 値は手の順によらないが、同じ長さの枝から途切れを選ぶときに main を優先するため main を先に辿る。
+        let mut moves: Vec<String> = main.iter().cloned().collect();
+        if opponent {
+            moves.extend(self.freq.replies(key).into_iter().filter(|mv| main.as_ref() != Some(mv)));
         }
         path.insert(key.to_owned());
         let pos = position_from_sfen(&format!("{key} 1"))?;
         let mut shortest = remaining;
+        let mut cut = None;
         let mut legal_moves = 0;
         for mv in &moves {
             let mut child = pos.clone();
             if apply_usi_move(&mut child, mv).is_err() {
                 if main.as_ref() == Some(mv) {
                     shortest = 0;
+                    cut = end(Stop::Illegal);
                     break;
                 }
                 continue;
             }
             legal_moves += 1;
             let next = self.depth(strip_ply(&child.to_sfen()), own, remaining - 1, path, memo)?;
-            shortest = shortest.min(1 + next.depth);
+            if 1 + next.depth < shortest {
+                shortest = 1 + next.depth;
+                cut = next.cut.map(|next| {
+                    Rc::new(Trail::Move {
+                        mv: mv.clone(),
+                        next,
+                    })
+                });
+            }
             visited.children.extend(next.visited);
             if shortest == 1 {
                 break;
             }
         }
         path.remove(key);
+        if legal_moves == 0 && shortest != 0 {
+            cut = end(if !moves.is_empty() {
+                Stop::NoLegal
+            } else if opponent {
+                Stop::Opp
+            } else {
+                Stop::Own
+            });
+        }
         result.depth = if legal_moves == 0 { 0 } else { shortest };
+        result.cut = cut;
         result.visited = Some(Rc::new(visited));
         // 祖先への循環で打ち切った値は、別の経路では短すぎるので保存しない。
         if result.visited.as_ref().is_none_or(|v| v.is_disjoint(path)) {
@@ -370,6 +472,68 @@ mod tests {
             assert_eq!(AuditCli::try_parse_from(audit).is_ok(), with_freq);
             assert_eq!(HoldCli::try_parse_from(hold).is_ok(), with_freq);
         }
+    }
+
+    #[test]
+    fn cut_reports_the_shortest_branch_preferring_main_on_ties() {
+        let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let mut pos = position_from_sfen(&format!("{root} 1")).unwrap();
+        apply_usi_move(&mut pos, "5i5h").unwrap();
+        let opponent = strip_ply(&pos.to_sfen()).to_owned();
+        let after = |mv: &str| {
+            let mut child = pos.clone();
+            apply_usi_move(&mut child, mv).unwrap();
+            strip_ply(&child.to_sfen()).to_owned()
+        };
+        let cut = |key: &str, stop, moves: &[&str]| Cut {
+            key: key.to_owned(),
+            stop,
+            moves: moves.iter().map(|m| (*m).to_owned()).collect(),
+        };
+        for (main, replies, expected) in [
+            (Some("5a5b"), "5a4b", (1, cut(&after("5a5b"), Stop::Own, &["5a5b"]))),
+            (None, "5a4b", (1, cut(&after("5a4b"), Stop::Own, &["5a4b"]))),
+            (None, "", (0, cut(&opponent, Stop::Opp, &[]))),
+            (None, "1a1b", (0, cut(&opponent, Stop::NoLegal, &[]))),
+            (Some("1a1b"), "5a4b", (0, cut(&opponent, Stop::Illegal, &[]))),
+        ] {
+            let text = replies
+                .split_whitespace()
+                .map(|mv| format!("{mv} none 0 0 3\n"))
+                .collect::<String>();
+            let freq =
+                ReplyFrequency::from_reader(format!("sfen {opponent} 2\n{text}").as_bytes(), 3)
+                    .unwrap();
+            let continuation = Continuation {
+                freq: &freq,
+                main: |key: &str| main.filter(|_| key == opponent).map(str::to_owned),
+            };
+            let (depth, found) = continuation.after_with_cut(root, "5i5h", 6).unwrap();
+            assert_eq!((depth, found), (expected.0, Some(expected.1)));
+        }
+    }
+
+    #[test]
+    fn cut_stops_at_cycle_and_is_absent_at_the_limit() {
+        let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let mut pos = position_from_sfen(&format!("{root} 1")).unwrap();
+        let mut mains = BTreeMap::new();
+        for mv in ["5i5h", "5a5b", "5h5i", "5b5a"] {
+            mains.insert(strip_ply(&pos.to_sfen()).to_owned(), mv);
+            apply_usi_move(&mut pos, mv).unwrap();
+        }
+        let freq = ReplyFrequency::default();
+        let continuation = Continuation {
+            freq: &freq,
+            main: |key: &str| mains.get(key).map(|m| (*m).to_owned()),
+        };
+        let cycle = Cut {
+            key: root.to_owned(),
+            stop: Stop::Cycle,
+            moves: ["5a5b", "5h5i", "5b5a"].map(str::to_owned).to_vec(),
+        };
+        assert_eq!(continuation.after_with_cut(root, "5i5h", 6).unwrap(), (3, Some(cycle)));
+        assert_eq!(continuation.after_with_cut(root, "5i5h", 3).unwrap(), (3, None));
     }
 
     #[test]

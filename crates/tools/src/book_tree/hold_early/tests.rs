@@ -30,6 +30,17 @@ fn args(dir: &std::path::Path, before: &[Row], current: &[Row], apply: bool) -> 
         since: "held".into(),
         out: dir.join("held.tsv"),
         apply,
+        cuts_out: None,
+        cuts_enqueue_out: None,
+        cuts_depth: 6,
+        cuts_priority: DEFAULT_PRIORITY,
+        cuts_opp_n: None,
+        cuts_stop: None,
+        cuts_rounds: None,
+        cuts_draw_black: None,
+        cuts_draw_white: None,
+        cuts_tag: "held".into(),
+        cuts_exclude_queue: Vec::new(),
     };
     std::fs::write(&args.before, format_master(before)).unwrap();
     std::fs::write(&args.master, format_master(current)).unwrap();
@@ -256,7 +267,7 @@ fn continuation_stops_when_main_returns_to_a_seen_position() {
     let mut rows = vec![row("b", "19", "5i5h", "main", "wide", "")];
     branch(&mut rows, "5i5h", &["5a5b", "5h5i", "5b5a"]);
     let mains = rows.iter().enumerate().map(|(i, r)| (r.get("key").to_owned(), i)).collect();
-    assert_eq!(continuation_depth(rows[0].get("key"), "5i5h", &rows, &mains).unwrap(), 3);
+    assert_eq!(continuation_depth(rows[0].get("key"), "5i5h", &rows, &mains).unwrap().0, 3);
 }
 
 #[test]
@@ -304,7 +315,7 @@ fn continuation_matches_hands_and_turn_without_ply() {
         (child.replace(" w P", " b P"), 0),
     ] {
         let mains = BTreeMap::from([(lookup, 0)]);
-        assert_eq!(continuation_depth(key, "5i5h", &rows, &mains).unwrap(), expected);
+        assert_eq!(continuation_depth(key, "5i5h", &rows, &mains).unwrap().0, expected);
     }
 }
 
@@ -475,4 +486,175 @@ fn deep_frequency_is_protected_from_outputs() {
         assert!(run(args).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "frequency");
     }
+}
+
+fn child_key(moves: &[&str]) -> String {
+    let mut position = position_from_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap();
+    for mv in moves {
+        apply_usi_move(&mut position, mv).unwrap();
+    }
+    strip_ply(&position.to_sfen()).to_owned()
+}
+
+#[test]
+fn cuts_list_short_branches_of_held_changes_and_queue_their_ends() {
+    for frequency in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let before = [row("b", "19", "5i5h", "main", "wide", "100")];
+        let mut current = vec![
+            row("b", "19", "5i4h", "main", "wide", "200"),
+            row("w", "19", "5a5b", "main", "wide", ""),
+        ];
+        branch(&mut current, "5i5h", &["5a5b"]);
+        branch(&mut current, "5i4h", &["5a5b", "4h4g"]);
+        let mut args = args(dir.path(), &before, &current, false);
+        args.continuation = Some(2);
+        if frequency {
+            let freq = dir.path().join("freq.db");
+            std::fs::write(&freq, "#YANEURAOU-DB2016\n").unwrap();
+            args.deep.deep_opp_freq = Some(freq);
+        }
+        args.cuts_out = Some(dir.path().join("cuts.tsv"));
+        args.cuts_enqueue_out = Some(dir.path().join("cuts.jsonl"));
+        args.cuts_priority = 7;
+        args.cuts_stop = Some(90);
+        let cuts_out = args.cuts_out.clone().unwrap();
+        let queue_out = args.cuts_enqueue_out.clone().unwrap();
+        let mut stdout = Vec::new();
+        run_to(args, &mut stdout).unwrap();
+        let end = child_key(&["5i5h", "5a5b"]);
+        assert_eq!(
+            std::fs::read_to_string(&cuts_out).unwrap(),
+            format!(
+                "ply\tside\tkey\twhich\tmove\tdepth\tcut_ply\tcut_key\tstop\tmoves\n\
+                 19\tb\t{}\told\t5i5h\t1\t21\t{end}\town\t5i5h 5a5b\n",
+                before[0].get("key")
+            )
+        );
+        let lines: Vec<Line> = std::fs::read_to_string(&queue_out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].id, queue_id("held", 21, &end, "b"));
+        assert_eq!(lines[0].root, format!("sfen {end} 21"));
+        assert_eq!((lines[0].own.as_str(), lines[0].depth, lines[0].priority), ("b", 6, 7));
+        assert_eq!(lines[0].opts.stop, Some(90));
+        assert_eq!(
+            lines[0].memo.as_deref(),
+            Some(
+                format!(
+                    "hold-early hold_ply=19 ply=19 key={} old=5i5h depth=1",
+                    before[0].get("key")
+                )
+                .as_str()
+            )
+        );
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(stdout.contains("継続が足りない枝: 1 (途切れた局面と側: 1)"), "{stdout}");
+        assert!(stdout.contains("途切れた局面のキューの行: 1 (既存の木で除外 0)"), "{stdout}");
+    }
+}
+
+#[test]
+fn cuts_stop_at_missing_opponent_main_and_skip_replaced_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = [row("b", "19", "5i5h", "main", "wide", "100")];
+    let mut current = vec![row("b", "19", "5i4h", "main", "wide", "200")];
+    branch(&mut current, "5i4h", &["5a5b", "4h4g"]);
+    let mut args = args(dir.path(), &before, &current, false);
+    args.continuation = Some(2);
+    args.cuts_out = Some(dir.path().join("cuts.tsv"));
+    let cuts_out = args.cuts_out.clone().unwrap();
+    run_to(args, &mut Vec::new()).unwrap();
+    let table = std::fs::read_to_string(&cuts_out).unwrap();
+    let row = table.lines().nth(1).unwrap();
+    assert!(row.ends_with(&format!("\t0\t20\t{}\topp\t5i5h", child_key(&["5i5h"]))), "{row}");
+    assert_eq!(table.lines().count(), 2);
+
+    let mut current = current.clone();
+    branch(&mut current, "5i5h", &["5a5b", "5h5g"]);
+    let mut args = super::tests::args(dir.path(), &before, &current, false);
+    args.continuation = Some(2);
+    args.cuts_out = Some(cuts_out.clone());
+    run_to(args, &mut Vec::new()).unwrap();
+    assert_eq!(std::fs::read_to_string(&cuts_out).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn cuts_queue_skips_roots_already_queued_for_the_same_side() {
+    for (own, excluded) in [("b", true), ("bw", true), ("w", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let before = [row("b", "19", "5i5h", "main", "wide", "100")];
+        let mut current = vec![row("b", "19", "5i4h", "main", "wide", "200")];
+        branch(&mut current, "5i5h", &["5a5b"]);
+        branch(&mut current, "5i4h", &["5a5b", "4h4g"]);
+        let mut args = args(dir.path(), &before, &current, false);
+        args.continuation = Some(2);
+        let end = child_key(&["5i5h", "5a5b"]);
+        let queued = Line {
+            group: None,
+            id: "queued".into(),
+            root: format!("sfen {end} 3"),
+            roots: Vec::new(),
+            own: own.into(),
+            depth: 6,
+            priority: 1,
+            hold: false,
+            game: Vec::new(),
+            opts: Opts::default(),
+            memo: None,
+        };
+        let queue = dir.path().join("queue.jsonl");
+        std::fs::write(&queue, format_queue(&[queued]).unwrap()).unwrap();
+        args.cuts_exclude_queue = vec![queue.clone()];
+        args.cuts_enqueue_out = Some(dir.path().join("cuts.jsonl"));
+        let out = args.cuts_enqueue_out.clone().unwrap();
+        let mut stdout = Vec::new();
+        run_to(args, &mut stdout).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap().is_empty(), excluded);
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(stdout.contains(&format!("既存の木で除外 {}", u8::from(excluded))), "{stdout}");
+    }
+}
+
+#[test]
+fn cuts_outputs_require_continuation_and_reject_collisions() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: HoldEarlyArgs,
+    }
+    let base = [
+        "hold", "--before", "b.tsv", "--master", "m.tsv", "--since", "t", "--out", "o.tsv",
+    ];
+    for extra in [
+        &["--cuts-out", "c.tsv"][..],
+        &["--cuts-enqueue-out", "c.jsonl"][..],
+    ] {
+        assert!(Cli::try_parse_from(base.iter().chain(extra)).is_err());
+        let with = base.iter().chain(&["--continuation", "6"]).chain(extra);
+        assert!(Cli::try_parse_from(with).is_ok());
+    }
+    assert!(
+        Cli::try_parse_from(base.iter().chain(&["--continuation", "6", "--cuts-stop", "9"]))
+            .is_err()
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let rows = [row("b", "19", "5i5h", "main", "wide", "")];
+    let mut args = args(dir.path(), &rows, &rows, false);
+    args.continuation = Some(2);
+    args.cuts_out = Some(args.out.clone());
+    assert!(run_to(args, &mut Vec::new()).is_err());
+    let mut args = super::tests::args(dir.path(), &rows, &rows, false);
+    args.continuation = Some(2);
+    args.cuts_enqueue_out = Some(args.before.clone());
+    assert!(run_to(args, &mut Vec::new()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("before.tsv")).unwrap(),
+        format_master(&rows)
+    );
 }
