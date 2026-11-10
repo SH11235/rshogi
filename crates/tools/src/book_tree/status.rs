@@ -51,6 +51,7 @@ struct Snapshot {
     progress: Progress,
     stale: bool,
     rate: Option<f64>,
+    nps_per_engine: Option<f64>,
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -72,6 +73,8 @@ struct Row {
     remaining_mean: f64,
     remaining_p80: f64,
     positions_per_hour: Option<f64>,
+    nps_per_engine: Option<f64>,
+    nps_total: Option<f64>,
     hours_until_idle_mean: Option<f64>,
     hours_until_idle_p80: Option<f64>,
     depth_histogram: BTreeMap<String, usize>,
@@ -132,14 +135,15 @@ fn snapshot(
     let rate = journal
         .map(|path| journal_rate(path, progress.workers.len()))
         .transpose()?
-        .flatten();
+        .unwrap_or_default();
     Ok(Snapshot {
         status,
         depths,
         notice,
         progress,
         stale: age.as_secs_f64() > stale_hours * 3600.0,
-        rate,
+        rate: rate.positions_per_hour,
+        nps_per_engine: rate.nps_per_engine,
     })
 }
 
@@ -175,16 +179,23 @@ fn queue_depths(path: &Path) -> Result<BTreeMap<String, usize>> {
     Ok(depths)
 }
 
-fn journal_rate(path: &Path, workers: usize) -> Result<Option<f64>> {
+#[derive(Default, Debug, PartialEq)]
+struct JournalRates {
+    positions_per_hour: Option<f64>,
+    nps_per_engine: Option<f64>,
+}
+
+fn journal_rate(path: &Path, workers: usize) -> Result<JournalRates> {
     let mut file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
     tail_rate(&mut file, workers)
 }
 
-fn tail_rate<R: Read + Seek>(file: &mut R, workers: usize) -> Result<Option<f64>> {
+fn tail_rate<R: Read + Seek>(file: &mut R, workers: usize) -> Result<JournalRates> {
     let mut position = file.seek(SeekFrom::End(0))?;
     let mut suffix = Vec::new();
     let mut count = 0;
     let mut seconds = 0.0;
+    let mut nps = Vec::with_capacity(SAMPLES);
     while position > 0 {
         let size = position.min(CHUNK as u64) as usize;
         position -= size as u64;
@@ -195,19 +206,24 @@ fn tail_rate<R: Read + Seek>(file: &mut R, workers: usize) -> Result<Option<f64>
         let mut end = buffer.len();
         for start in (0..buffer.len()).rev().filter(|&i| buffer[i] == b'\n') {
             let line = &buffer[start + 1..end];
-            if add_duration(line, &mut count, &mut seconds)? && count == SAMPLES {
-                return Ok(rate(workers, count, seconds));
+            if add_duration(line, &mut count, &mut seconds, &mut nps)? && count == SAMPLES {
+                return Ok(rate(workers, count, seconds, nps));
             }
             end = start;
         }
         ensure!(end <= MAX_LINE, "台帳の行が上限 {MAX_LINE} bytes を超えています");
         suffix = buffer[..end].to_vec();
     }
-    add_duration(&suffix, &mut count, &mut seconds)?;
-    Ok(rate(workers, count, seconds))
+    add_duration(&suffix, &mut count, &mut seconds, &mut nps)?;
+    Ok(rate(workers, count, seconds, nps))
 }
 
-fn add_duration(line: &[u8], count: &mut usize, seconds: &mut f64) -> Result<bool> {
+fn add_duration(
+    line: &[u8],
+    count: &mut usize,
+    seconds: &mut f64,
+    nps: &mut Vec<f64>,
+) -> Result<bool> {
     if line.iter().all(u8::is_ascii_whitespace) {
         return Ok(false);
     }
@@ -219,13 +235,34 @@ fn add_duration(line: &[u8], count: &mut usize, seconds: &mut f64) -> Result<boo
     {
         *count += 1;
         *seconds += record.reading.sec;
+        if let Some(nodes) = record.reading.nodes
+            && record.reading.sec > 0.0
+        {
+            let sample = nodes as f64 / record.reading.sec;
+            if sample.is_finite() {
+                nps.push(sample);
+            }
+        }
         return Ok(true);
     }
     Ok(false)
 }
 
-fn rate(workers: usize, count: usize, seconds: f64) -> Option<f64> {
-    (count > 0 && seconds > 0.0).then(|| workers as f64 * 3600.0 * count as f64 / seconds)
+fn rate(workers: usize, count: usize, seconds: f64, mut nps: Vec<f64>) -> JournalRates {
+    nps.sort_unstable_by(f64::total_cmp);
+    let nps_per_engine = (!nps.is_empty()).then(|| {
+        let middle = nps.len() / 2;
+        if nps.len().is_multiple_of(2) {
+            nps[middle - 1] / 2.0 + nps[middle] / 2.0
+        } else {
+            nps[middle]
+        }
+    });
+    JournalRates {
+        positions_per_hour: (count > 0 && seconds > 0.0)
+            .then(|| workers as f64 * 3600.0 * count as f64 / seconds),
+        nps_per_engine,
+    }
 }
 
 #[derive(Default)]
@@ -312,6 +349,8 @@ fn row(path: &Path, snapshot: &Result<Snapshot>, pool: &Pool) -> Row {
     row.workers_total = snapshot.progress.workers.len();
     row.workers_busy = snapshot.progress.workers.iter().filter(|w| w.key.is_some()).count();
     row.positions_per_hour = snapshot.rate;
+    row.nps_per_engine = snapshot.nps_per_engine;
+    row.nps_total = snapshot.nps_per_engine.map(|nps| nps * row.workers_total as f64);
     for tree in &snapshot.status.targets {
         match tree.state.as_str() {
             "RUNNING" => row.trees_running += 1,
@@ -353,6 +392,8 @@ fn total(rows: &[Row]) -> Row {
     };
     let mut complete_rate = true;
     let mut sum_rate = 0.0;
+    let mut complete_nps = true;
+    let mut sum_nps = 0.0;
     for row in rows.iter().filter(|r| r.status == "ok") {
         total.status = "ok".into();
         total.not_ready += row.not_ready;
@@ -370,6 +411,11 @@ fn total(rows: &[Row]) -> Row {
         for (depth, count) in &row.depth_histogram {
             *total.depth_histogram.entry(depth.clone()).or_default() += count;
         }
+        if let Some(nps) = row.nps_total {
+            sum_nps += nps;
+        } else {
+            complete_nps = false;
+        }
         if let Some(rate) = row.positions_per_hour {
             sum_rate += rate;
         } else {
@@ -378,6 +424,11 @@ fn total(rows: &[Row]) -> Row {
     }
     total.positions_per_hour =
         (complete_rate && rows.iter().any(|r| r.status == "ok")).then_some(sum_rate);
+    total.nps_total = (complete_nps && total.status == "ok").then_some(sum_nps);
+    total.nps_per_engine = total
+        .nps_total
+        .filter(|_| total.workers_total > 0)
+        .map(|nps| nps / total.workers_total as f64);
     set_hours(&mut total);
     total
 }
@@ -386,11 +437,12 @@ fn render(rows: &[Row], json: bool, mut out: impl Write) -> Result<()> {
     if !json {
         writeln!(
             out,
-            "| 台 (state) | 状態 | engine 稼働/全 | 木 読み中/待ち/終わった (うち読めずに終わった)/保留 | 局面 読んだ/必要 | 残り 見えている分 | 残り 伸びを見込む 平均/80%点 | 1 時間に読む局面 | 手が空くまで 平均/80%点 (時間) | 深さ×木の数 |"
+            "| 台 (state) | 状態 | engine 稼働/全 | 木 読み中/待ち/終わった (うち読めずに終わった)/保留 | 局面 読んだ/必要 | 残り 見えている分 | 残り 伸びを見込む 平均/80%点 | 1 時間に読む局面 | 1 engine の NPS | 合計 NPS | 手が空くまで 平均/80%点 (時間) | 深さ×木の数 |"
         )?;
-        writeln!(out, "|---|---|---:|---:|---:|---:|---:|---:|---:|---|")?;
+        writeln!(out, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")?;
     }
     let number = |n: Option<f64>| n.map_or_else(|| "-".into(), |v| format!("{v:.1}"));
+    let nps = |n: Option<f64>| n.map_or_else(|| "-".into(), |v| format!("{:.2}M", v / 1e6));
     let escape = |s: &str| s.replace('|', "\\|").replace(['\n', '\r'], " ");
     for row in rows {
         if json {
@@ -410,7 +462,7 @@ fn render(rows: &[Row], json: bool, mut out: impl Write) -> Result<()> {
             .join(", ");
         writeln!(
             out,
-            "| {} | {} | {}/{} | {}/{}/{} (うち読めず {})/{} | {}/{} | {} | {:.0}/{:.0} | {} | {}/{} | {} |",
+            "| {} | {} | {}/{} | {}/{}/{} (うち読めず {})/{} | {}/{} | {} | {:.0}/{:.0} | {} | {} | {} | {}/{} | {} |",
             escape(row.state.as_deref().unwrap_or("合計")),
             escape(&status),
             row.workers_busy,
@@ -426,6 +478,8 @@ fn render(rows: &[Row], json: bool, mut out: impl Write) -> Result<()> {
             row.remaining_mean,
             row.remaining_p80,
             row.positions_per_hour.map_or_else(|| "-".into(), |v| format!("{v:.0}")),
+            nps(row.nps_per_engine),
+            nps(row.nps_total),
             number(row.hours_until_idle_mean),
             number(row.hours_until_idle_p80),
             histogram
@@ -713,7 +767,7 @@ mod tests {
         assert!(table.contains("残り 伸びを見込む 平均/80%点 | 1 時間に読む局面"));
         assert!(table.contains("手が空くまで 平均/80%点 (時間) | 深さ×木の数"));
         assert!(table.contains("0/0/3 (うち読めず 1)/0"));
-        assert!(table.contains("| 1235/2346 | - | 12.3/23.5 |"));
+        assert!(table.contains("| 1235/2346 | - | - | - | 12.3/23.5 |"));
     }
 
     #[test]
@@ -815,11 +869,15 @@ mod tests {
             "remaining_mean",
             "remaining_p80",
             "positions_per_hour",
+            "nps_per_engine",
+            "nps_total",
             "hours_until_idle_mean",
             "hours_until_idle_p80",
             "depth_histogram",
         ];
         for value in values {
+            assert!(value["nps_per_engine"].is_null());
+            assert!(value["nps_total"].is_null());
             let object = value.as_object().unwrap();
             assert_eq!(object.len(), expected.len());
             for key in expected {
@@ -875,13 +933,32 @@ mod tests {
         assert!(run(args(vec!["a".into(), "b".into()], 2.0)).is_err());
         assert!(run(args(vec![], -1.0)).is_err());
         assert!(run(args(vec![], f64::NAN)).is_err());
-        assert_eq!(tail_rate(&mut Cursor::new(b"{bad}\n"), 1).unwrap(), None);
-        assert_eq!(tail_rate(&mut Cursor::new(journal_line("engine", -1.0, 0)), 1).unwrap(), None);
-        assert_eq!(tail_rate(&mut Cursor::new(journal_line("engine", 0.0, 0)), 1).unwrap(), None);
+        assert_eq!(tail_rate(&mut Cursor::new(b"{bad}\n"), 1).unwrap().positions_per_hour, None);
+        assert_eq!(
+            tail_rate(&mut Cursor::new(journal_line("engine", -1.0, 0)), 1)
+                .unwrap()
+                .positions_per_hour,
+            None
+        );
+        assert_eq!(
+            tail_rate(&mut Cursor::new(journal_line("engine", 0.0, 0)), 1)
+                .unwrap()
+                .positions_per_hour,
+            None
+        );
     }
 
     fn journal_line(provenance: &str, seconds: f64, padding: usize) -> Vec<u8> {
-        let record = json!({
+        journal_line_with_nodes(provenance, seconds, padding, Some(100))
+    }
+
+    fn journal_line_with_nodes(
+        provenance: &str,
+        seconds: f64,
+        padding: usize,
+        nodes: Option<u64>,
+    ) -> Vec<u8> {
+        let mut record = json!({
             "kind":"book-tree-reading-v1", "provenance":provenance,
             "settings":{"fingerprint":"test", "version":"test", "engine_sha256":"test",
                 "options":{}, "content_sha256":{}, "nodes":100, "multipv":1, "hash":1},
@@ -890,9 +967,98 @@ mod tests {
                 "multipv":[], "bestmove":"resign"},
             "padding":"x".repeat(padding)
         });
+        if let Some(nodes) = nodes {
+            record["reading"]["nodes"] = json!(nodes);
+        } else {
+            record["reading"].as_object_mut().unwrap().remove("nodes");
+        }
         let mut bytes = record.to_string().into_bytes();
         bytes.push(b'\n');
         bytes
+    }
+
+    #[test]
+    fn journal_tail_nps_median_skips_missing_nodes_and_nonpositive_seconds() {
+        let mut bytes = journal_line_with_nodes("engine", 10.0, 0, Some(10_000_000));
+        bytes.extend(journal_line_with_nodes("engine", 20.0, 0, Some(60_000_000)));
+        bytes.extend(journal_line_with_nodes("engine", 30.0, 0, None));
+        bytes.extend(journal_line_with_nodes("engine", 0.0, 0, Some(100_000_000)));
+        bytes.extend(journal_line_with_nodes("engine", -1.0, 0, Some(100_000_000)));
+        bytes.extend(journal_line_with_nodes("journal:other", 1.0, 0, Some(100_000_000)));
+        let rates = tail_rate(&mut Cursor::new(&bytes), 2).unwrap();
+        assert_eq!(rates.positions_per_hour, Some(480.0));
+        assert_eq!(rates.nps_per_engine, Some(2_000_000.0));
+        bytes.extend(journal_line_with_nodes("engine", 10.0, 0, Some(90_000_000)));
+        assert_eq!(
+            tail_rate(&mut Cursor::new(bytes), 2).unwrap().nps_per_engine,
+            Some(3_000_000.0)
+        );
+        for (sec, nodes) in [(10.0, None), (0.0, Some(100)), (-1.0, Some(100))] {
+            assert_eq!(
+                tail_rate(&mut Cursor::new(journal_line_with_nodes("engine", sec, 0, nodes)), 2)
+                    .unwrap()
+                    .nps_per_engine,
+                None
+            );
+        }
+        let zero_nodes = journal_line_with_nodes("engine", 10.0, 0, Some(0));
+        assert_eq!(tail_rate(&mut Cursor::new(zero_nodes), 2).unwrap().nps_per_engine, Some(0.0));
+    }
+
+    #[test]
+    fn state_and_total_nps_use_all_workers_and_exclude_stale_states() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path(), vec![], 3);
+        let journal = dir.path().join("journal.jsonl");
+        std::fs::write(&journal, journal_line_with_nodes("engine", 10.0, 0, Some(7_500_000)))
+            .unwrap();
+        let now = SystemTime::now();
+        let first = snapshot(dir.path(), Some(&journal), 2.0, now);
+        let first = row(dir.path(), &first, &Pool::new());
+        assert_eq!(first.workers_busy, 1);
+        assert_eq!(first.nps_per_engine, Some(750_000.0));
+        assert_eq!(first.nps_total, Some(1_500_000.0));
+        let second = Row {
+            status: "ok".into(),
+            workers_total: 4,
+            nps_per_engine: Some(3_350_000.0),
+            nps_total: Some(13_400_000.0),
+            ..Row::default()
+        };
+        let stale = snapshot(dir.path(), Some(&journal), 2.0, now + Duration::from_secs(3 * 3600));
+        let stale = row(dir.path(), &stale, &Pool::new());
+        let mut rows = vec![first, second, stale];
+        let summed = total(&rows);
+        assert_eq!(summed.workers_total, 6);
+        assert_eq!(summed.nps_total, Some(14_900_000.0));
+        assert_eq!(summed.nps_per_engine, Some(14_900_000.0 / 6.0));
+        rows.push(summed);
+        let mut output = Vec::new();
+        render(&rows, true, &mut output).unwrap();
+        let values: Vec<serde_json::Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(values[0]["nps_per_engine"], 750_000.0);
+        assert_eq!(values[0]["nps_total"], 1_500_000.0);
+        assert_eq!(values[3]["nps_total"], 14_900_000.0);
+        assert_eq!(values[3]["nps_per_engine"], 14_900_000.0 / 6.0);
+        output.clear();
+        render(&rows, false, &mut output).unwrap();
+        let table = std::str::from_utf8(&output).unwrap();
+        assert!(table.contains("1 時間に読む局面 | 1 engine の NPS | 合計 NPS |"));
+        assert!(table.contains("| 0.75M | 1.50M |"));
+        assert!(table.contains("| 2.48M | 14.90M |"));
+        rows[0].nps_total = None;
+        assert_eq!(total(&rows[..3]).nps_total, None);
+        assert_eq!(total(&[]).nps_per_engine, None);
+        let zero_workers = Row {
+            status: "ok".into(),
+            nps_total: Some(0.0),
+            ..Row::default()
+        };
+        assert_eq!(total(&[zero_workers]).nps_per_engine, None);
     }
 
     struct CountedReader {
@@ -930,10 +1096,20 @@ mod tests {
             cursor: Cursor::new(bytes),
             bytes_read: 0,
         };
-        assert_eq!(tail_rate(&mut reader, 2).unwrap(), Some(120.0));
+        let rates = tail_rate(&mut reader, 2).unwrap();
+        assert_eq!(rates.positions_per_hour, Some(120.0));
+        assert_eq!(rates.nps_per_engine, Some(100.0 / 60.0));
         assert!(reader.bytes_read > CHUNK);
         assert!(reader.bytes_read <= CHUNK * 12);
         assert!(reader.bytes_read < length);
+
+        let mut bytes = journal_line("engine", 1.0, 0);
+        for _ in 0..SAMPLES {
+            bytes.extend(journal_line_with_nodes("engine", 60.0, 0, None));
+        }
+        let rates = tail_rate(&mut Cursor::new(bytes), 2).unwrap();
+        assert_eq!(rates.positions_per_hour, Some(120.0));
+        assert_eq!(rates.nps_per_engine, None);
     }
 
     #[test]
@@ -947,15 +1123,17 @@ mod tests {
         bytes.extend_from_slice(b"{partial");
         let length = bytes.len() as u64;
         let mut cursor = Cursor::new(bytes);
-        assert_eq!(tail_rate(&mut cursor, 2).unwrap(), Some(120.0));
+        assert_eq!(tail_rate(&mut cursor, 2).unwrap().positions_per_hour, Some(120.0));
         assert!(cursor.position() >= length - (CHUNK * 8) as u64);
         assert_eq!(
-            tail_rate(&mut Cursor::new(journal_line("engine", 120.0, 0)), 1).unwrap(),
+            tail_rate(&mut Cursor::new(journal_line("engine", 120.0, 0)), 1)
+                .unwrap()
+                .positions_per_hour,
             Some(30.0)
         );
         let mut line = journal_line("engine", 120.0, 0);
         line.pop();
-        assert_eq!(tail_rate(&mut Cursor::new(line), 1).unwrap(), Some(30.0));
-        assert_eq!(tail_rate(&mut Cursor::new(b""), 1).unwrap(), None);
+        assert_eq!(tail_rate(&mut Cursor::new(line), 1).unwrap().positions_per_hour, Some(30.0));
+        assert_eq!(tail_rate(&mut Cursor::new(b""), 1).unwrap(), JournalRates::default());
     }
 }

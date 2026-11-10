@@ -438,6 +438,8 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 - 局面: active な木 (RUNNING、QUEUED) の `read` / `required` の合計。可視の残りは各木の `max(required - read, 0)` の合計。
 - 増加を含む残り: 指定した全stateの DONE の `read` を実績として共有します。同じ `(id, own)` は1件とし (`own=bw` の先後は別の木)、最大の `read` を持つ実績のdepth・世代を使います (同値なら指定順で最初の実績)。対象の木と `(depth, generation >= 2)` が同じで、`read >= 対象の required` の実績が10件以上あれば、その平均と80パーセンタイル (`sorted[int(0.8 * n)]`) を終了時の局面数とします。10件未満なら同じdepthの全世代でやり直し、それも不足なら `required` を使います。各木の `max(予測局面数, required) - read` を0以上として合計します。
 - 局面/時: 台帳の末尾から `provenance = "engine"` の有効な最新400件 (不足時はある分) の `reading.sec` の平均で、`worker総数 × 3600 / 平均秒` を計算します。prefetch・speculative の読みも含むので、実際に木が進む速さとしてはやや楽観的です。不正なJSON・形式不正・負のsecの行は飛ばします。サンプルなし・平均秒が0なら速さは不明です。
+- 1 engine の NPS: 局面/時と同じ最新400件のうち、`reading.nodes` があり `reading.sec > 0` の行で `nodes / sec` の中央値を取ります (偶数件は中央2件の平均)。該当する行がなければ不明です。nodes の無い行も局面/時には含めます。
+- 合計 NPS: 1 engine の NPS × 全 worker 数です。NPS は読む木ごとのノード上限によらず台の探索速度を表し、局面/時は読む木のノード上限に左右されます。どちらも prefetch・speculative の読みを含みます。NPS は100万単位、小数2桁で `0.75M` のように表示し、不明なら `-` です。
 - idleまでの時間: 増加を含む残り (平均 / p80) を局面/時で割った時間です。合計は各台の残りの和 / 速さの和です。台ごとの終了時間の最大値ではなく、仕事を均等に配れる場合の目安です。合計対象に速さ不明の台があれば合計の速さ・時間も不明です。
 - 深さ×木の数: `accepted.json` の受付済み定義を `(id, own, generation)` で照合し、active な木の深さごとの数を表示します。DONE の実績の深さにも同じ定義を使います。世代が一致しない木は深さ不明です。`accepted.json` が欠損・読めない場合は `targets.jsonl` の同じ id の最初の有効行を近似値として使い、状態欄と JSON の `reason` にその旨を出します。この近似では世代ごとの深さ変更は反映できません。キューの不正行・8 MiB を超える行・改行のない末尾は飛ばし、取得できない木は `不明` に入れます。
 
@@ -449,10 +451,11 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 
 `targets.status.json`・`progress.json` や指定した台帳の欠損・読み取りエラーは `unreadable` と理由をその台の行に出し、他の台の処理を続けて終了コード0で終わります。
 `progress.json` の更新から `--stale-hours` (既定2時間、非負数) を超えた台は `stale` と表示します。
-`stale`・`unreadable` は合計から除外します。合計対象が0台なら合計行のstatusは `empty` で、速さ・時間は不明です。読み取れたstaleな台のDONEも推定の実績には含めます。
+`stale`・`unreadable` は合計から除外します。合計 NPS は対象の台の合計 NPS を足し、合計行の 1 engine の NPS はそれを対象の全 worker 数で割ります。対象の台に NPS 不明があれば合計の NPS も不明で、worker 総数が0なら 1 engine の NPS は不明です。合計対象が0台なら合計行のstatusは `empty` で、速さ・時間は不明です。読み取れたstaleな台のDONEも推定の実績には含めます。
 
 JSONLのキーは全行共通です。`kind` は `state` / `total`、`state` は指定パス (合計は `null`)、`status` は `ok` / `stale` / `unreadable` / `empty` (合計のみ)、`reason` はエラー理由または深さの近似値を使った通知 (通常は `null`) です。
-数値は `workers_busy`, `workers_total`, `trees_running`, `trees_waiting`, `trees_done`, `not_ready`, `trees_held`, `positions_read`, `positions_required`, `remaining_visible`, `remaining_mean`, `remaining_p80`, `positions_per_hour`, `hours_until_idle_mean`, `hours_until_idle_p80`。
+数値は `workers_busy`, `workers_total`, `trees_running`, `trees_waiting`, `trees_done`, `not_ready`, `trees_held`, `positions_read`, `positions_required`, `remaining_visible`, `remaining_mean`, `remaining_p80`, `positions_per_hour`, `nps_per_engine`, `nps_total`, `hours_until_idle_mean`, `hours_until_idle_p80`。
+`nps_per_engine`・`nps_total` は nodes/秒の数値で、不明なら `null` です。
 `depth_histogram` はdepth文字列 (`不明` を含む) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
 
 ### `tree queue-review`: 台ごとの残りと未着手の木を点検する
