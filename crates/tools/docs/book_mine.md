@@ -1039,7 +1039,8 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
   --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--skip-keys skip.txt] \
-  [--keep-line 20] [--keep-min-depth 1] [--bridge-replies] [--draw-value-black -70] [--draw-value-white 70] [--apply] <木の出力先>...
+  [--switch-rule line [--keep-line 20] [--keep-min-depth 1] | --switch-rule propagated [--single-enqueue-out single.jsonl [--exclude-queue queue.jsonl]...]] \
+  [--bridge-replies] [--draw-value-black -70] [--draw-value-white 70] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
@@ -1063,8 +1064,9 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。`bench` (控え) 自身の source が schema で置換可能で、木の 1 位か、1 位との差が `--alt-gap` 未満なら alt に戻します。1 位なら既存の alt と同じ条件で main にでき、置換可能な source の評価値も更新します。main が無い局面でも、復帰した 1 位の控えを main にし、note に main への復帰と記します。この手は main の追加数には含めず、復帰数に数えます。curated の main がない局面の curated の控えは、`--replace-curated` の有無によらず復帰・昇格の候補から除き、「curated の main が無い控え」として別集計します。source が置換不可の控えは候補から除外して変更せず、「保護された控え」として別集計します。集計に「bench から戻した手」も出します。`borrow value` は控えを復帰・main 昇格させず、控えの行を変更しません。控えの復帰は `tree register` と `master audit --revive-bench` で行います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
 - 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。`--replace-curated` を付けると、`curated` の局面でも main の source が置き換えてよいものなら木の 1 位を main にします。元の main は alt にして `tier=wide` に移し、新しい main は元の main の `tier` を引き継ぎ、局面の `curated` の main を 1 つに保ちます (新しい main の行き先に `curated` の行が無ければ、丁寧な定跡の書き出しはそこで終わります)。元の main の note に `(curated から wide)` を足し、集計に curated の main を替えた局面の数を出します。`record` の行と、置き換えない source の main はこの指定でも替えません。
-- main を替える前に、仮に登録した元データを `master audit` と同じ伝播 (`--bridge-replies`・`--draw-value-black`・`--draw-value-white` は `master audit` の同じ名前の指定と同じ意味) で解き、元の main と木の 1 位の伝播後の値を比べます。元の main が `--keep-line` (既定 20、0 で比べない) 以上上回り、元の main の値が `--keep-min-depth` (既定 1) 局面以上先の読みから来ていれば、main を替えずに木の 1 位を alt で足し、`--conflicts` の一覧に出します。木は根の局面から読むので、元の main の先にある元データの深い読みが入らず、木の値だけで比べると深い値を浅い値で替えることがあるためです。登録後の元データで比べるので、木が元の main の先を読み直した分は値に入り、続く `master audit` が見る値とも揃います (版の手順の `master audit` と同じ `--bridge-replies`・千日手の値を渡してください)。`--keep-line` を `master audit --line` より小さくするのは、`audit` が戻さない差の局面を拾うためです。`--keep-min-depth 1` は、元の main の値が、その手の 1 回の読みの値のまま (元データに先の局面が無いか、補った局面で定跡に無い応手が最善) のときは残しません。段数は、手の行き先から最善の手を辿り、読みの値で止まるまでの局面の数です (循環に入ったらそこまで)。元の main か木の 1 位の値が分からない (読みの値も先の局面の値も無い) 局面は比べずに替えます。比べる伝播は `master audit --opp-records` のように相手の record を使うことはしません。元の main が木の読み (MultiPV) に入っていないかどうかでは比べ方を変えません (一覧の `main_tree_value` が `-` の局面がそれです)。集計の「食い違い」に、元の main の値が上なので残した局面の数を添えます。
-- 一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree reason main_value main_depth best_value best_depth gap main_value_black best_value_black` です。`reason` は、元の main の値が上なので残した局面が `keep`、source・curated で替えなかった局面が `protected` です。`main_value`・`best_value` は上の伝播後の値 (手番の側から)、`main_depth`・`best_depth` はその段数、`gap` は `main_value − best_value`、`*_black` は先手から見た値です。`protected` の局面ではこれらの列は `-` です。`main_tree_value`・`tree_value` は木の値 (手番の側から) で、`main_tree_value` は元の main が木の読みに無ければ `-` です。
+- main を替える前に、仮に登録した元データを `master audit` と同じ伝播 (`--bridge-replies`・`--draw-value-black`・`--draw-value-white` は `master audit` の同じ名前の指定と同じ意味) で解き、元の main と木の 1 位の伝播後の値を比べます。元の main が `--keep-line` (既定 20、0 で比べない) 以上上回り、元の main の値が `--keep-min-depth` (既定 1) 局面以上先の読みから来ていれば、main を替えずに木の 1 位を alt で足し、`--conflicts` の一覧に出します。木は根の局面から読むので、元の main の先にある元データの深い読みが入らず、木の値だけで比べると深い値を浅い値で替えることがあるためです。登録後の元データで比べるので、木が元の main の先を読み直した分は値に入り、続く `master audit` が見る値とも揃います (版の手順の `master audit` と同じ `--bridge-replies`・千日手の値を渡してください)。`--keep-line` を `master audit --line` より小さくするのは、`audit` が戻さない差の局面を拾うためです。`--keep-min-depth 1` は、元の main の値が、その手の 1 回の読みの値のまま (元データに先の局面が無いか、補った局面で定跡に無い応手が最善) のときは残しません。段数は、手の行き先から最善の手を辿り、読みの値で止まるまでの局面の数です (循環に入ったらそこまで)。元の main か木の 1 位の値が分からない (読みの値も先の局面の値も無い) 局面は比べずに替えます。比べる伝播は `master audit --opp-records` のように相手の record を使うことはしません。元の main が木の読み (MultiPV) に入っていないかどうかでは比べ方を変えません (一覧の `main_tree_value` が `-` の局面がそれです)。集計の「食い違い」に、元の main の値が上なので残した局面 (`--switch-rule propagated` では残した全局面) の数を添えます。
+- `--switch-rule propagated` では `--keep-line`・`--keep-min-depth` を使わず (指定すると止まります)、同じ伝播の値で `master audit --switch-rule propagated` と同じ規則で決めます。元の main と木の 1 位の値がどちらも手の先の局面の値から来ていれば、木の 1 位が 1 でも上回るときだけ替え、同じ値か元の main が上なら残します。どちらかの値が 1 回の読み (元データに手の先の局面が無いか、補った局面で定跡に無い応手が最善) なら替えず、どちらも `--conflicts` の一覧に `reason=keep` で出します (段数 0 の側が 1 回の読み)。`--single-enqueue-out` を渡すと、1 回の読みの手を伸ばす木の行を書きます (形と `--exclude-queue` の除外は `master audit --single-enqueue-out` と同じで、木の 1 位が元の main を上回る差の大きい順に並べます)。値の分からない手の局面は今までどおり替えます。
+- 一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree reason main_value main_depth best_value best_depth gap main_value_black best_value_black` です。`reason` は、元の main の値が上なので残した局面 (`--switch-rule propagated` では同じ値の局面と、片方の値が 1 回の読みなので残した局面も) が `keep`、source・curated で替えなかった局面が `protected` です。`main_value`・`best_value` は上の伝播後の値 (手番の側から)、`main_depth`・`best_depth` はその段数、`gap` は `main_value − best_value`、`*_black` は先手から見た値です。`protected` の局面ではこれらの列は `-` です。`main_tree_value`・`tree_value` は木の値 (手番の側から) で、`main_tree_value` は元の main が木の読みに無ければ `-` です。
 - 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・bench・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
@@ -1498,7 +1500,7 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 70 [--line 40] [--deep-plies N] [--opp-records] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv] [--bridge-enqueue-out bridge.jsonl]] \
+  --draw-value-black -70 --draw-value-white 70 [--switch-rule line [--line 40] [--deep-plies N] | --switch-rule propagated [--single-enqueue-out single.jsonl [--exclude-queue queue.jsonl]...]] [--opp-records] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv] [--bridge-enqueue-out bridge.jsonl]] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
@@ -1518,8 +1520,13 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--bad-eval <CP>` | `-150` | alt の降格に使う値の上限 (手番側からの整数値) |
 | `--since <TAG>` | `--apply` 時は必須 | 置換の note に付けるタグ。空白だけ・タブ・改行は不可 |
 | `--schema <DIR>` | なし | 語彙と読み条件の表。sources.tsv の replaceable=1 の source だけ置換できる。省略時は read・ext |
-| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す。`--deep-plies` を指定したときは線未満の局面も対象にする |
-| `--deep-plies <N>` | なし | 差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。N は 1 以上。直接のキーが無ければ反転キーでも続きを辿り、同じ局面に戻ったら止める |
+| `--switch-rule <line\|propagated>` | `line` | main を替える局面の決め方 (下の「main を替える規則」)。`line` は `--line`・`--deep-plies` で決め、`propagated` は値の出どころで決める |
+| `--line <CP>` | `40` | 点検の線。main が 1 位からこの値以上負ける局面を表に出す。`--deep-plies` を指定したときは線未満の局面も対象にする。`--switch-rule propagated` では要約の区切りと `--bridge-table` の線だけに使う |
+| `--single-enqueue-out <PATH>` | なし | `--switch-rule propagated` で、main か 1 位の値が 1 回の読みなので替えなかった局面ごとに、その手を伸ばす `tree enqueue --from` 用 JSON Lines |
+| `--single-depth <N>` / `--single-max <N>` / `--single-priority <N>` / `--single-tag <TAG>` | `6` / 制限なし / `100` / `single` | 木の段数 (1〜20)、行数上限、priority の基準 (並べた順位 (0 始まり、99 で頭打ち) を足す)、id `<tag>_<根の手数>_<局面の hash>_<b\|w>` の名前 |
+| `--single-opp-n <N>` / `--single-stop <CP>` / `--single-rounds <N>` / `--single-draw-black <CP>` / `--single-draw-white <CP>` | `3` / `300` / `3` / `-70` / `70` | 行の opts に書く応手数・打ち切り値・再読の回数・先手番と後手番の循環の値 |
+| `--exclude-queue <PATH>` | なし | 繰り返し可。既に積んだ木のキュー (`master walk --exclude-queue` と同じく id ごとに最初の行の根と own に固定して game を合わせ、最後の行の段数が 0 なら使わない)。1 回の読みの手を、その局面の手番の側で `game` の depth 手以内に指す木 (段数 depth の局面は伸ばさないため) か、その手を指した後の局面を根 (`roots` を含む) に同じ側で読む木があれば、その手を行に入れない。手が全部除かれた局面は行を出さない。局面を根にしただけの木 (`game` にその手が無い) では除かない |
+| `--deep-plies <N>` | なし | `--switch-rule line` だけ。差が正で `--line` 未満でも、main と 1 位の手を指した後から、元データの main が両方とも N 手以上続けば表・置換の対象にする。N は 1 以上。直接のキーが無ければ反転キーでも続きを辿り、同じ局面に戻ったら止める |
 | `--deep-opp-freq <PATH>` | なし | 相手のよくある応手も継続判定に含める頻度定跡 (YaneuraOu 形式 .db) |
 | `--deep-min-games <N>` | `3` | 継続判定で辿る相手の手の count (局数) の下限 |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
@@ -1540,7 +1547,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--refutation-depth <N>` | `2` | キューの行の `depth` (0〜20) |
 | `--refutation-max <N>` | なし | キューの行の数の上限 (表の順で先から) |
 | `--priority <N>` | `100` | キューの行の priority の基準 (`borrow cut` の `--priority` と同じ意味)。表の順位を足す |
-| `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁・bridge の出力の重み。`master rejoin` と同じ意味 (`--min-weight` は表・キューから落とす下限)。`--opp-freq` は反駁または bridge の出力と一緒に使う |
+| `--opp-freq <PATH>` / `--min-games <N>` / `--max-ply <N>` / `--weight-floor <W>` / `--min-weight <W>` | なし / `3` / `80` / `1e-5` / `0` | 反駁・bridge の出力の重み。`master rejoin` と同じ意味 (`--min-weight` は表・キューから落とす下限)。`--opp-freq` は反駁・bridge・`--single-enqueue-out` の出力と一緒に使う |
 | `--opp-book <PATH>` / `--opp-book-diff <CP>` / `--opp-book-best <P>` / `--opp-book-first` | なし / `30` / `0.9` / 無効 | 重みの辿りで、`--opp-freq` の局数が足りない局面 (と局数の少ない手に行く分) を大きい定跡の手で指す。`master rejoin` と同じ意味 |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
@@ -1592,9 +1599,15 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 - `--opp-records` を渡すと、先手用と後手用に分けて伝播します。先手用では後手番の record を相手の手として加え、先手番の record は除外します。後手用では先手番の record を加え、後手番の record は除外します。record は `evals` の読みの値 (複数あれば通常と同じ平均) がある手だけを使い、その先に子局面があれば値を伝播します。読みの値の無い record は、子局面があっても使いません。record だけの局面も相手の応手として使えます。点検・main の置換・alt の降格・bench の復帰・各出力の値には、局面の手番に合う伝播を使います。record 自体を main・alt に戻したり、`--out-db` に出したりはしません。`--bridge-replies`・`--deep-plies`・`--deep-opp-freq` などと併用でき、`--bridge-table` の比較元も同じ record の規則で伝播します。千日手の値は既存の規則に従います。`--opp-records` のときは反転した局面へ辺を張らないため、反転先の record や main・alt の値は使いません。要約には、合法かつ読みの値のある record を相手の手として使った手数と局面数を別に表示します (同じ局面の複数の record は一局面)。使った record は「bench・record (除外)」から差し引き、「非合法手」は main・alt の非合法手だけを数えます。循環の件数は先手用・後手用の伝播の合計です。省略時は従来どおり main・alt だけを使い、要約も変わりません。他のサブコマンドの伝播には影響しません。
 - `--bridge-table` は、補わないで伝播したときと補ったときの main の値を局面ごとに比べ、補ったときに `--line` 以上悪くなった局面を、`--opp-freq` があれば重みの大きい順 (同じなら悪化量の大きい順、次に key の順)、無ければ悪化量の大きい順 (同じなら key の順) に書きます。列は `key ply side main plain bridged drop best best_value plain_black bridged_black weight` で、`plain`・`bridged`・`best_value` は手番の側から、`plain_black`・`bridged_black` は先手から見た値、`best` は補ったときの 1 位の手です。補わない側の伝播も、補う側と同じく反転した局面へ辺を張らずに解くので、表の差は補ったことによる差だけです。
 
-点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。値は同値の -1 補正を戻した値で、同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
+点検の表は、main が 1 位から線以上負ける局面 (`--switch-rule propagated` では 1 以上負ける全局面) を差の大きい順 (同じ差は key 順) に並べます。値は同値の -1 補正を戻した値で、同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
 
 標準出力に要約を出します: 局面数 (手番ごと)、手の数・値の分かる手の数・非合法手・除いた bench・record、読みの値から伝播で変わった手の数と差の分布、読みの値が無く伝播で値が付いた手の数、main・alt が 2 手以上の局面数、main が 1 位から線未満・線以上負ける局面数、main の値が分からない局面数、補った相手の手番の局面の数、循環 (自明でない強連結成分) の数。
+
+### main を替える規則 (`--switch-rule`)
+
+`--switch-rule line` (既定) は、main が 1 位から `--line` 以上負ける局面 (`--deep-plies` では両方の先が続く線未満の局面も) を表に出し、1 位の値が子局面からの伝播 (`best_from=propagated`) なら main を替えます。
+
+`--switch-rule propagated` は線を使わず、値の出どころで決めます。main が 1 位から 1 でも負ける局面を全部表に出し、main と 1 位の値がどちらも手の先の局面の値から来ていれば main を 1 位に替えます (同じ値なら main を残すのは `line` と同じです)。どちらかの値が 1 回の読みなら替えません。木を根から読み直さないと 1 回の読みと深い伝播の値は比べられないので、`--single-enqueue-out` でその局面を根にして 1 回の読みの手 (両方なら両方) を `game` に入れ、局面の手番の側を `own` にした木の行を出します。`--bridge-replies` で補った相手の手番の局面と `--opp-records` の record だけの局面では、残した着く手の読みの値が最善なら手の値は読みそのものなので、表の `*_from` も `eval` にして 1 回の読みとして扱います (record の読みが最善なら先の局面の値です)。要約の置換の行は、1 位と main のどちらの値が 1 回の読みだったかで分けて数えます。並びは `--opp-freq` があれば重みの大きい順 (`--min-weight` 未満は除く)、無ければ差の大きい順です。`--deep-plies` とは併用できません。20 手目より前の局面の替わりは、続く `master hold-early` が元の main との比較で戻すので、audit では分けません。
 
 ### 反駁の点検
 

@@ -17,7 +17,9 @@ use std::fmt::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use super::audit::{reject_same_file, resolve, resolve_output};
 use super::schema::Schema;
+use super::switch::{self, SingleQueueArgs, SwitchRule};
 pub(super) use keep::Kept;
 
 #[derive(Args, Debug)]
@@ -52,13 +54,21 @@ pub(super) struct RegisterArgs {
     /// 元データを書き換える。省くと集計と食い違いの一覧だけを出す
     #[arg(long)]
     apply: bool,
+    /// main を木の 1 位に替えるかの決め方。line は --keep-line・--keep-min-depth で元の main を残し、propagated は
+    /// 登録後の元データを master audit と同じ伝播で解き、両方の値が手の先の局面から来て木の 1 位が上回る局面だけを
+    /// 替え、片方の値が 1 回の読みなら替えない (--single-enqueue-out でその手を伸ばす木を出す)
+    #[arg(long, value_enum, default_value_t = SwitchRule::Line)]
+    switch_rule: SwitchRule,
+    #[command(flatten)]
+    single: SingleQueueArgs,
     /// 登録後の元データを master audit と同じ伝播で解き、元の main が木の 1 位をこの値以上上回る局面は
-    /// main を替えずに食い違いの一覧に出す。0 で比べない
-    #[arg(long, default_value_t = 20)]
-    keep_line: i32,
+    /// main を替えずに食い違いの一覧に出す。0 で比べない (既定 20、--switch-rule line だけ)
+    #[arg(long)]
+    keep_line: Option<i32>,
     /// 元の main の値がこの数以上先の局面の読みから来たときだけ main を残す (0 なら元の main の 1 回の読みの値でも残す)
-    #[arg(long, default_value_t = 1)]
-    keep_min_depth: usize,
+    /// (既定 1、--switch-rule line だけ)
+    #[arg(long)]
+    keep_min_depth: Option<usize>,
     /// 比べる伝播で master audit --bridge-replies と同じく相手の手番の局面を補う
     #[arg(long)]
     bridge_replies: bool,
@@ -128,7 +138,40 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         ensure!(!text.contains(['\t', '\r', '\n']), "since・note にタブや改行は使えません");
     }
     ensure!(args.alt_gap >= 0, "--alt-gap は 0 以上にしてください");
-    ensure!(args.keep_line >= 0, "--keep-line は 0 以上にしてください");
+    let propagated = args.switch_rule == SwitchRule::Propagated;
+    ensure!(
+        !propagated || (args.keep_line.is_none() && args.keep_min_depth.is_none()),
+        "--keep-line・--keep-min-depth は --switch-rule line と一緒に使います"
+    );
+    ensure!(
+        propagated || args.single.single_enqueue_out.is_none(),
+        "--single-enqueue-out は --switch-rule propagated と一緒に使います"
+    );
+    let keep_line = args.keep_line.unwrap_or(20);
+    ensure!(keep_line >= 0, "--keep-line は 0 以上にしてください");
+    if let Some(out) = &args.single.single_enqueue_out {
+        args.single.check()?;
+        let mut inputs = vec![
+            ("--master", args.master.as_path()),
+            ("--conflicts", args.conflicts.as_path()),
+        ];
+        inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
+        inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
+        inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
+        let schema_paths = args.schema.as_deref().map(super::schema::paths);
+        inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
+        reject_same_file(out, &inputs).context("--single-enqueue-out の出力先")?;
+        // 木の出力先の中のファイル (node_moves.tsv など) を書き換えない。
+        let resolved = resolve_output(out)?;
+        for tree in &args.trees {
+            ensure!(
+                !resolved.starts_with(resolve(tree)),
+                "--single-enqueue-out の出力先 {} が木の出力先 {} の中です",
+                out.display(),
+                tree.display()
+            );
+        }
+    }
     // 木を読む前に止める。書き出しの最後でも create_new で同じことを確かめる。
     ensure!(
         std::fs::symlink_metadata(&args.conflicts).is_err(),
@@ -212,8 +255,9 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     // main と alt の入れ替えは伝播の値を変えないので、仮の登録の値で残す局面を決めて登録し直せばよい。
     let (tentative, _, _) = register(rows.clone(), &nodes, &options)?;
     let rule = keep::KeepRule {
-        line: args.keep_line,
-        min_depth: args.keep_min_depth,
+        rule: args.switch_rule,
+        line: keep_line,
+        min_depth: args.keep_min_depth.unwrap_or(1),
         draws: DrawValues {
             black: args.draw_value_black,
             white: args.draw_value_white,
@@ -224,8 +268,16 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             Fill::Off
         },
     };
-    let kept = keep::kept_mains(&rows, &tentative, &nodes, rule)?;
+    let (kept, mut singles) = keep::kept_mains(&rows, &tentative, &nodes, rule)?;
     drop(tentative);
+    let single = match &args.single.single_enqueue_out {
+        Some(_) => {
+            switch::rank(&mut singles, None, 0.0);
+            let (lines, excluded) = switch::queue(&singles, &args.single)?;
+            Some((super::refutation::format_queue(&lines)?, lines.len(), excluded))
+        }
+        None => None,
+    };
     let options = Options {
         kept: Some(&kept),
         ..options
@@ -261,6 +313,13 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         }
     }
     write_new(&args.conflicts, &table)?;
+    if let (Some(path), Some((text, queued, excluded))) = (&args.single.single_enqueue_out, single)
+    {
+        write_atomic(path, &text)?;
+        println!(
+            "1 回の読みの手を伸ばす木のキューの行: {queued} (既存の木で除いた局面 {excluded})"
+        );
+    }
     for side in ["b", "w"] {
         println!(
             "{side}: main を足した局面 {} / alt を足した手 {}",
@@ -1101,8 +1160,10 @@ mod tests {
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
             apply,
-            keep_line: 20,
-            keep_min_depth: 1,
+            switch_rule: SwitchRule::Line,
+            single: switch::test_args(),
+            keep_line: None,
+            keep_min_depth: None,
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
@@ -1162,6 +1223,7 @@ mod tests {
         ]);
         let tree = |moves: &[(&str, i32)]| BTreeMap::from([(R.to_owned(), node(moves, 1, 0))]);
         let rule = |line, min_depth| keep::KeepRule {
+            rule: SwitchRule::Line,
             line,
             min_depth,
             draws: DrawValues::both(0),
@@ -1169,7 +1231,7 @@ mod tests {
         };
         let judge = |nodes: &BTreeMap<String, Node>, rule| {
             let (after, _, _) = register(before.clone(), nodes, &options()).unwrap();
-            keep::kept_mains(&before, &after, nodes, rule).unwrap()
+            keep::kept_mains(&before, &after, nodes, rule).unwrap().0
         };
         // 木は 5i4i を 1 回の読みで 5 としたが、元データでは応手 5a4a の先から 50 が伝わる。
         let nodes = tree(&[("5i6i", 30), ("5i4i", 5)]);
@@ -1199,9 +1261,54 @@ mod tests {
         let single = master(&[row(R, "5i4i", "main", "read", "wide", "60")]);
         let nodes = tree(&[("5i6i", 30)]);
         let (after, _, _) = register(single.clone(), &nodes, &options()).unwrap();
-        assert!(keep::kept_mains(&single, &after, &nodes, rule(20, 1)).unwrap().is_empty());
-        let kept = keep::kept_mains(&single, &after, &nodes, rule(20, 0)).unwrap();
+        assert!(keep::kept_mains(&single, &after, &nodes, rule(20, 1)).unwrap().0.is_empty());
+        let kept = keep::kept_mains(&single, &after, &nodes, rule(20, 0)).unwrap().0;
         assert_eq!((kept[R].gap(), kept[R].old_depth), (30, 0));
+    }
+
+    #[test]
+    fn propagated_rule_switches_only_when_both_values_come_from_children() {
+        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let a = child(R, "5i4i").unwrap();
+        let b = child(R, "5i6i").unwrap();
+        let rule = keep::KeepRule {
+            rule: SwitchRule::Propagated,
+            line: 20,
+            min_depth: 1,
+            draws: DrawValues::both(0),
+            fill: Fill::Off,
+        };
+        let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30), ("5i4i", 5)], 1, 0))]);
+        let judge = |rows: &[String]| {
+            let before = master(rows);
+            let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
+            keep::kept_mains(&before, &after, &nodes, rule).unwrap()
+        };
+        let main = row(R, "5i4i", "main", "read", "wide", "10");
+        let old = row(&a, "5a4a", "main", "read", "wide", "-50");
+        // 木の 1 位 5i6i の先が元データにあり 51 なら替え、同点なら残す。
+        for (value, switched) in [("-51", true), ("-50", false)] {
+            let (kept, singles) = judge(&[
+                main.clone(),
+                old.clone(),
+                row(&b, "5a4a", "main", "read", "wide", value),
+            ]);
+            assert_eq!(kept.is_empty(), switched, "{value}");
+            assert!(singles.is_empty());
+        }
+        // 5i6i の値が木の 1 回の読みだけなら、替えずに 5i6i を伸ばす行を出す。
+        let (kept, singles) = judge(&[main.clone(), old.clone()]);
+        assert_eq!((kept[R].old_depth, kept[R].new_depth), (1, 0));
+        assert_eq!(singles.len(), 1);
+        assert_eq!(
+            (singles[0].moves.clone(), singles[0].ply.as_str()),
+            (vec!["5i6i".to_owned()], "12")
+        );
+        // 元の main の値が 1 回の読みでも替えない。
+        let (kept, singles) =
+            judge(&[main.clone(), row(&b, "5a4a", "main", "read", "wide", "-60")]);
+        assert!(kept.contains_key(R));
+        assert_eq!(singles[0].moves, vec!["5i4i".to_owned()]);
     }
 
     #[test]
@@ -1234,8 +1341,10 @@ mod tests {
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
             apply: true,
-            keep_line: 20,
-            keep_min_depth: 1,
+            switch_rule: SwitchRule::Line,
+            single: switch::test_args(),
+            keep_line: None,
+            keep_min_depth: None,
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
@@ -1249,6 +1358,75 @@ mod tests {
         let line = conflicts.lines().nth(1).unwrap();
         assert!(line.starts_with(&format!("{W}\t4\tw\t5a4a\tread\twide\t5\t5a6a\t30\t")));
         assert!(line.ends_with("\tkeep\t50\t1\t30\t0\t20\t-50\t-30"), "{line}");
+    }
+
+    #[test]
+    fn run_with_propagated_rule_writes_single_read_queue() {
+        const W: &str = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let a = child(W, "5a4a").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        std::fs::write(
+            &master_path,
+            format_master(&master(&[
+                row(W, "5a4a", "main", "read", "wide", "10"),
+                row(&a, "5i4i", "main", "read", "wide", "-50"),
+            ])),
+        )
+        .unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::write(
+            tree.join(NODE_MOVES),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{W}\t4\t0\t0\t1000000000\t5a6a\t60\t0\t1\n{W}\t4\t0\t0\t1000000000\t5a4a\t5\t0\t2\n"),
+        )
+        .unwrap();
+        let queue = dir.path().join("single.jsonl");
+        let args = |keep_line| RegisterArgs {
+            master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            replace_curated: false,
+            skip_keys: None,
+            conflicts: dir.path().join("conflicts.tsv"),
+            apply: true,
+            switch_rule: SwitchRule::Propagated,
+            single: SingleQueueArgs {
+                single_enqueue_out: Some(queue.clone()),
+                ..switch::test_args()
+            },
+            keep_line,
+            keep_min_depth: None,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            trees: vec![tree.clone()],
+        };
+        assert!(run(args(Some(20))).is_err());
+        let node_moves = std::fs::read(tree.join(NODE_MOVES)).unwrap();
+        let mut inside = args(None);
+        inside.single.single_enqueue_out = Some(tree.join(NODE_MOVES));
+        assert!(run(inside).is_err());
+        assert_eq!(std::fs::read(tree.join(NODE_MOVES)).unwrap(), node_moves);
+        run(args(None)).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert_eq!(find(&rows, W, "5a4a").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, W, "5a6a").unwrap().get("role"), "alt");
+        let conflicts = std::fs::read_to_string(dir.path().join("conflicts.tsv")).unwrap();
+        assert!(conflicts.lines().nth(1).unwrap().contains("\tkeep\t50\t1\t60\t0\t"));
+        let lines: Vec<crate::book_tree::targets::Line> = std::fs::read_to_string(&queue)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].root, format!("sfen {W} 4"));
+        assert_eq!(lines[0].own, "w");
+        assert_eq!(lines[0].game, vec![vec!["5a6a".to_owned()]]);
     }
 
     #[test]
