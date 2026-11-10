@@ -277,6 +277,7 @@ fn own_row(key: &str, ply: usize, weight: f64) -> Row {
         ply,
         weight,
         key: key.to_owned(),
+        tag: 0,
         moves: vec![format!("p{ply}")],
         games: None,
         book_moves: None,
@@ -784,7 +785,7 @@ fn table_entry_uses_first_eval_in_black_perspective_and_keeps_missing_empty() {
                 stop,
                 moves.len(),
                 1.0,
-                ROOT,
+                (ROOT, 0),
                 &moves.into_iter().map(str::to_owned).collect::<Vec<_>>(),
             )
             .unwrap(),

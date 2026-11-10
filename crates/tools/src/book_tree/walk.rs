@@ -128,7 +128,7 @@ impl WalkArgs {
 
 /// 止まり方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stop {
+pub(super) enum Stop {
     /// 自分の手番で元データに行が無い (自分が読み始める)。
     Own,
     /// 相手の手番で、局数が足りず大きい定跡にも無い (相手の手が分からない)。
@@ -142,9 +142,9 @@ enum Stop {
 }
 
 impl Stop {
-    const ALL: [Stop; 5] = [Stop::Own, Stop::Out, Stop::Rare, Stop::Tiny, Stop::Max];
+    pub(super) const ALL: [Stop; 5] = [Stop::Own, Stop::Out, Stop::Rare, Stop::Tiny, Stop::Max];
 
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Stop::Own => "own",
             Stop::Out => "out",
@@ -157,23 +157,25 @@ impl Stop {
 
 /// 一覧の 1 行。
 #[derive(Debug, Clone, PartialEq)]
-struct Row {
-    side: &'static str,
-    stop: Stop,
+pub(super) struct Row {
+    pub side: &'static str,
+    pub stop: Stop,
     /// 初期局面からの手数。
-    ply: usize,
-    weight: f64,
-    key: String,
+    pub ply: usize,
+    pub weight: f64,
+    pub key: String,
+    /// `walk_side_with` の `Tagger` の印 (印を付けない辿りでは 0)。
+    pub tag: u32,
     /// 初期局面からの手順 (同じ手数で同じ局面に来た手順のうち最初に辿ったもの)。
-    moves: Vec<String>,
+    pub moves: Vec<String>,
     /// `--opp-freq` のこの局面の局数。
-    games: Option<u64>,
+    pub games: Option<u64>,
     /// 大きい定跡のこの局面の手の数。
-    book_moves: Option<usize>,
+    pub book_moves: Option<usize>,
     /// 大きい定跡の最善を両者が指し続けた手順 (`Own` だけ)。
-    cont: Vec<String>,
+    pub cont: Vec<String>,
     /// その手順で最後に定跡を引けた局面の最善の値 (先手から見た値)。
-    cont_end_black: Option<i64>,
+    pub cont_end_black: Option<i64>,
 }
 
 /// ply 付き SFEN で定跡の手を引く関数。
@@ -186,7 +188,7 @@ pub(super) struct Probe<'a> {
 }
 
 impl<'a> Probe<'a> {
-    fn new(lookup: impl FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a) -> Self {
+    pub(super) fn new(lookup: impl FnMut(&str) -> Result<Vec<BookEntryMove>> + 'a) -> Self {
         Self {
             lookup: Box::new(lookup),
             cache: HashMap::new(),
@@ -221,9 +223,9 @@ impl<'a> Probe<'a> {
 
 /// 相手の手の出どころ。
 #[derive(Default)]
-struct Sources<'a> {
-    freq: Option<Probe<'a>>,
-    book: Option<Probe<'a>>,
+pub(super) struct Sources<'a> {
+    pub freq: Option<Probe<'a>>,
+    pub book: Option<Probe<'a>>,
 }
 
 /// 相手の手の決め方。
@@ -236,18 +238,18 @@ pub(super) struct OppOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct WalkOptions {
-    max_ply: usize,
-    floor: f64,
-    cont_max: usize,
-    opp: OppOptions,
+pub(super) struct WalkOptions {
+    pub max_ply: usize,
+    pub floor: f64,
+    pub cont_max: usize,
+    pub opp: OppOptions,
 }
 
-fn black_to_move(key: &str) -> bool {
+pub(super) fn black_to_move(key: &str) -> bool {
     key.split(' ').nth(1) != Some("w")
 }
 
-fn advance(key: &str, mv: &str) -> Result<String> {
+pub(super) fn advance(key: &str, mv: &str) -> Result<String> {
     let mut pos = position_from_sfen(&format!("{key} 1"))?;
     apply_usi_move(&mut pos, mv).with_context(|| format!("{key} で {mv} を指せません"))?;
     Ok(strip_ply(&pos.to_sfen()).to_owned())
@@ -257,7 +259,7 @@ fn advance(key: &str, mv: &str) -> Result<String> {
 /// 無く、手が分からなければ `None`。局数が `min_games` 以上の局面では、局数が `min_games` 以上の手を頻度で指す。
 /// 局数の少ない手に行った分と、局数の足りない局面は、大きい定跡があればその手で指す (同じ手は重みを足す)。
 /// `book_first` なら、大きい定跡に手のある局面はその手だけで指し、頻度は定跡に無い局面だけで使う。
-fn opponent_moves(
+pub(super) fn opponent_moves(
     key: &str,
     src: &mut Sources,
     opp: OppOptions,
@@ -344,14 +346,14 @@ fn continuation(key: &str, book: &mut Probe, max: usize) -> Result<(Vec<String>,
     Ok((moves, end))
 }
 
-/// 止まった局面の行。
+/// 止まった局面 `at` (局面と印) の行。
 fn stop_row(
     src: &mut Sources,
     side: &'static str,
     stop: Stop,
     ply: usize,
     weight: f64,
-    key: &str,
+    (key, tag): (&str, u32),
     path: &[String],
 ) -> Result<Row> {
     let games = src.freq.as_mut().map(|f| f.games(key)).transpose()?;
@@ -362,12 +364,33 @@ fn stop_row(
         ply,
         weight,
         key: key.to_owned(),
+        tag,
         moves: path.to_vec(),
         games,
         book_moves,
         cont: Vec::new(),
         cont_end_black: None,
     })
+}
+
+/// 辿りの重みを、通ってきた局面で分けて持つための印。印の違う重みは同じ局面・同じ手数でも足し合わせない。
+pub(super) trait Tagger {
+    /// 辿り始める局面の印。
+    fn start(&mut self, key: &str) -> Result<u32>;
+    /// 印 `tag` の重みが `parent` から `mv` を指して `child` に進んだ後の印。
+    fn step(&mut self, tag: u32, parent: &str, mv: &str, child: &str) -> Result<u32>;
+}
+
+/// 印を付けない (どの重みも印 0)。
+struct NoTag;
+
+impl Tagger for NoTag {
+    fn start(&mut self, _: &str) -> Result<u32> {
+        Ok(0)
+    }
+    fn step(&mut self, tag: u32, _: &str, _: &str, _: &str) -> Result<u32> {
+        Ok(tag)
+    }
 }
 
 /// `side` を自分として、初期局面から `start_moves` を指した局面 `start` から辿り、止まった局面を返す。
@@ -380,12 +403,41 @@ fn walk_side(
     start_moves: &[String],
     options: WalkOptions,
 ) -> Result<Vec<Row>> {
+    let from = WalkFrom {
+        start,
+        start_moves,
+        overrides: &HashMap::new(),
+    };
+    walk_side_with(positions, src, side, &from, &mut NoTag, options)
+}
+
+/// 辿り始める局面と、自分の手番で main の代わりに指す手。
+pub(super) struct WalkFrom<'a> {
+    pub start: &'a str,
+    pub start_moves: &'a [String],
+    /// 手数を除いた SFEN → 指す手 (合法であること)。元データに無い局面でも指して辿りを続ける。
+    pub overrides: &'a HashMap<String, String>,
+}
+
+/// `walk_side` と同じく辿り、自分の手番で `from.overrides` にある局面では main の代わりにその手を指す。
+/// 重みは (局面, `tagger` の印) ごとに足し合わせ、行に印を付ける。
+pub(super) fn walk_side_with(
+    positions: &BTreeMap<String, MasterPosition>,
+    src: &mut Sources,
+    side: &'static str,
+    from: &WalkFrom,
+    tagger: &mut dyn Tagger,
+    options: WalkOptions,
+) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
-    let mut layer: BTreeMap<String, (f64, Vec<String>)> =
-        BTreeMap::from([(start.to_owned(), (1.0, start_moves.to_vec()))]);
-    for ply in start_moves.len()..=options.max_ply {
-        let mut next: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
-        let mut put = |key: String, weight: f64, path: &[String], mv: &str| {
+    type Layer = BTreeMap<(String, u32), (f64, Vec<String>)>;
+    let mut layer: Layer = BTreeMap::from([(
+        (from.start.to_owned(), tagger.start(from.start)?),
+        (1.0, from.start_moves.to_vec()),
+    )]);
+    for ply in from.start_moves.len()..=options.max_ply {
+        let mut next: Layer = BTreeMap::new();
+        let mut put = |key: (String, u32), weight: f64, path: &[String], mv: &str| {
             let entry = next.entry(key).or_insert_with(|| {
                 let mut p = path.to_vec();
                 p.push(mv.to_owned());
@@ -393,48 +445,55 @@ fn walk_side(
             });
             entry.0 += weight;
         };
-        for (key, (weight, path)) in layer {
+        for ((key, tag), (weight, path)) in layer {
+            let stop = |src: &mut Sources, stop: Stop, weight: f64| {
+                stop_row(src, side, stop, ply, weight, (&key, tag), &path)
+            };
             if ply == options.max_ply {
-                rows.push(stop_row(src, side, Stop::Max, ply, weight, &key, &path)?);
+                rows.push(stop(src, Stop::Max, weight)?);
                 continue;
             }
             if weight < options.floor {
-                rows.push(stop_row(src, side, Stop::Tiny, ply, weight, &key, &path)?);
+                rows.push(stop(src, Stop::Tiny, weight)?);
                 continue;
             }
             let own = black_to_move(&key) == (side == "b");
             if own {
-                match positions.get(&key) {
-                    Some(position) => {
-                        let mv = &position.moves[0].mv;
-                        put(advance(&key, mv)?, weight, &path, mv);
-                    }
-                    None => {
-                        let mut row = stop_row(src, side, Stop::Own, ply, weight, &key, &path)?;
-                        if let Some(book) = src.book.as_mut() {
-                            (row.cont, row.cont_end_black) =
-                                continuation(&key, book, options.cont_max)?;
+                let mv = match from.overrides.get(&key) {
+                    Some(mv) => mv,
+                    None => match positions.get(&key) {
+                        Some(position) => &position.moves[0].mv,
+                        None => {
+                            let mut row = stop(src, Stop::Own, weight)?;
+                            if let Some(book) = src.book.as_mut() {
+                                (row.cont, row.cont_end_black) =
+                                    continuation(&key, book, options.cont_max)?;
+                            }
+                            rows.push(row);
+                            continue;
                         }
-                        rows.push(row);
-                    }
-                }
+                    },
+                };
+                let child = advance(&key, mv)?;
+                let child_tag = tagger.step(tag, &key, mv, &child)?;
+                put((child, child_tag), weight, &path, mv);
                 continue;
             }
             let Some(moves) = opponent_moves(&key, src, options.opp)? else {
-                rows.push(stop_row(src, side, Stop::Out, ply, weight, &key, &path)?);
+                rows.push(stop(src, Stop::Out, weight)?);
                 continue;
             };
             let mut used = 0.0;
             for (mv, share) in &moves {
                 // 頻度の定跡の手は合法性を確かめていないので、指せない手はその分を Rare に回す。
                 if let Ok(child) = advance(&key, mv) {
-                    put(child, weight * share, &path, mv);
+                    let child_tag = tagger.step(tag, &key, mv, &child)?;
+                    put((child, child_tag), weight * share, &path, mv);
                     used += share;
                 }
             }
             if used < 1.0 - 1e-9 {
-                let rare = weight * (1.0 - used);
-                rows.push(stop_row(src, side, Stop::Rare, ply, rare, &key, &path)?);
+                rows.push(stop(src, Stop::Rare, weight * (1.0 - used))?);
             }
         }
         layer = next;
@@ -488,6 +547,18 @@ pub(super) fn open_book(path: &Path) -> Result<Book> {
     Book::open_on_the_fly(path, true).with_context(|| format!("{} を開けません", path.display()))
 }
 
+/// `--opp-freq` の定跡を開く。
+pub(super) fn open_freq(path: &Path) -> Result<Book> {
+    let book = open_book(path)?;
+    // on the fly で局面数を返すのは .ybb だけ。.ybb は採択回数を持たないので局数にならない。
+    ensure!(
+        book.position_count().is_none(),
+        "--opp-freq は採択回数を持つテキストの .db にしてください: {}",
+        path.display()
+    );
+    Ok(book)
+}
+
 pub(super) fn book_probe(book: &Book) -> Probe<'_> {
     Probe::new(move |sfen: &str| Ok(book.entry_moves(sfen)?))
 }
@@ -514,15 +585,7 @@ fn run_from(args: WalkArgs, initial: &str) -> Result<()> {
         args.max_ply
     );
     let (positions, _) = read_master(&args.master)?;
-    let freq = args.opp_freq.as_deref().map(open_book).transpose()?;
-    if let (Some(book), Some(path)) = (&freq, &args.opp_freq) {
-        // on the fly で局面数を返すのは .ybb だけ。.ybb は採択回数を持たないので局数にならない。
-        ensure!(
-            book.position_count().is_none(),
-            "--opp-freq は採択回数を持つテキストの .db にしてください: {}",
-            path.display()
-        );
-    }
+    let freq = args.opp_freq.as_deref().map(open_freq).transpose()?;
     let book = args.opp_book.as_deref().map(open_book).transpose()?;
     let mut src = Sources {
         freq: freq.as_ref().map(book_probe),
@@ -844,7 +907,7 @@ fn format_summary(rows: &[Row], min_weight: f64, queued: Option<usize>) -> Strin
     text
 }
 
-mod records;
+pub(super) mod records;
 #[cfg(test)]
 mod tests;
 

@@ -1,6 +1,6 @@
 # book_mine
 
-`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、元データの手で辿れる出口を列挙する `master exits`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
+`book_mine` は YANEURAOU-DB2016 テキスト定跡 `.db` を自エンジンの探索で book 外へ展開するツールです。末端局面の列挙・探索による展開・値の逆伝播を繰り返す処理を `frontier`・`expand`・`run` の 3 つのサブコマンドで行います。このほか、台帳を共有する定跡の木 (`tree`)、定跡の元データの点検 (`master validate`・`master add`・`master add-reads`・`master hold-early`・`master export`・`master diff`・`master audit`・`master rejoin`・`master cycles`・`master check`)、相手の見立てで辿って読み始める局面を出す `master walk`、元データの手で辿れる出口を列挙する `master exits`、戦型の候補ごとに RAMU の手を替えて辿り比べる `master opening-report`、注目の線をビュアーで辿る定跡を作る `master line-db`、大きい定跡の木を借りた登録 (`borrow`) を後の節で説明します。
 
 | サブコマンド | 処理 |
 |---|---|
@@ -1950,6 +1950,72 @@ ply は walk の行・rejoin の行の ply、gap は局面の手番の手が何�
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move) です。
 報告は 1 (good)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
 標準出力には class ごとの行の数を出します。
+
+## `master opening-report`: 戦型の候補を比べる表
+
+戦型の候補ごとに、RAMU の手番の決めた局面では main の代わりに決めた手を指し、相手は `master walk` と同じ頻度で初期局面から辿って、
+出口の値・値の確度・強い対局の実績・危ない局面を通る重み・分岐の後の相手の手を比べる表と Markdown の報告を出します。辿りは `master walk` と同じ実装で、候補ごとに RAMU の側だけを辿ります。元データは書き換えません。
+
+```sh
+book_mine master opening-report --master moves.tsv --schema schema \
+  --candidates candidates.tsv --opp-freq strong_games.db --opp-book big.ybb \
+  --opp-records games.jsonl.gz --danger danger_positions.tsv \
+  [--exclude-queue targets.jsonl] --title v66 --table opening.tsv --markdown opening.md
+```
+
+| 引数 | 既定 | 内容 |
+| --- | --- | --- |
+| `--master <TSV>` | 必須 | 元データ。RAMU の手番で指す main と、出口の値・出所を引く |
+| `--schema <DIR>` | なし | 語彙の表 |
+| `--candidates <TSV>` | 必須 | 候補の表 (下記) |
+| `--opp-freq <PATH>` / `--opp-book <PATH>` | なし | 相手の手。`master walk` と同じ |
+| `--min-games` / `--max-ply` / `--weight-floor` / `--opp-book-diff` / `--opp-book-best` / `--opp-book-first` / `--cont-max` | `master walk` と同じ | 辿り方。`master walk` と同じ意味と既定 |
+| `--opp-records <PATH>` | なし | 強い対局の棋譜 (`master walk --opp-records` と同じ形)。局面ごとの局数と得点、危ない局面の判定に使う |
+| `--records-min-rate <R>` / `--records-max-ply <N>` | 3800 / 130 | 数える対局の両者のレートの下限と、1 局を見る手数 |
+| `--danger <TSV>` | なし | 危ない局面の表。列 `side`・`key` (手数を除いた SFEN) を名前で引き、ほかの列は読まない。`#` で始まる行は注 |
+| `--danger-games <N>` / `--danger-score <S>` | 10 / 0.2 | 強い対局で局数が N 以上、RAMU の側の得点が S 未満の局面を危ない局面とみなす |
+| `--black-score <S>` | 0.8 | 先手の候補で別に数える、出口かその 10・20 手前の局面 (局数 `--danger-games` 以上) の先手の得点の上限 |
+| `--exclude-queue <PATH>` | なし、繰り返し可 | 既に積んだ木のキュー。読みを足す候補に、同じ根・同じ側の木の id を書く (`master walk --exclude-queue` と同じ照合) |
+| `--top <N>` | 20 | 危ない局面の一覧に候補ごとに、読みを足す候補の一覧に側ごとに載せる数 |
+| `--list-min-weight <W>` | 0.001 | 危ない局面の一覧に載せる重みの下限 |
+| `--reply-min-share <P>` | 0.01 | 分岐の後の相手の手で、割合がこれ未満の手を「その他」にまとめる |
+| `--table <TSV>` / `--markdown <MD>` | どちらか必須 | 候補ごとの表と報告 |
+| `--title <NAME>` | 空 | 報告の見出しの版の名前 |
+
+候補の表は見出し `name side override` のタブ区切りです。`#` で始まる行と空行は読み飛ばします。
+`side` は RAMU の側 (`b` / `w`)、`override` は `<手順>:<手>` を `;` で区切った並びで、初期局面から手順 (USI を空白区切り、空なら初期局面) を指した局面 (RAMU の手番) では main の代わりにその手を指します。
+手順違いで同じ局面に来ても同じ手を指します。`override` が空なら今の main です。名前の重なり、RAMU の手番でない局面、指せない手、同じ局面の重なりはエラーで止まります。
+
+```text
+name	side	override
+今の main	b	
+初手 ▲７六歩	b	:7g7f
+▲２六歩 △８四歩 で ▲７六歩	b	2g2f 8c8d:7g7f
+▲２六歩 に △３二金	w	2g2f:4a3b
+```
+
+数え方 (重みは候補ごとの辿り全体を 1 とした割合):
+
+- 値は `master exit-report` と同じく、出口の局面までに RAMU が最後に指した元データの手の evals の平均 (先手から見た値) です。値の無い出口は平均・分位に入れず、`no_value` に数えます。
+- 値の出所は value_kind で、`tree:N` の N が 6 以上・3〜5・1〜2、`single` (1 回の読み)、`mean:N`、`unknown` (出所の記録なし)、値なしに分けます。止まりの種類は `master walk` と同じ own・out・rare・tiny・max です。
+- 千日手は、辿りで同じ局面に 2 回着いた重み (千日手の循環に入った重み) です。own の出口は、外部定跡の最善を両者が指し続けた手順 (`master walk` の `cont`) が同じ局面に戻るものも数えます。
+- 危ない局面を通る重みは、辿りの途中か出口で、強い対局の判定 (`--danger-games`・`--danger-score`) か `--danger` の表の局面を通った重みです。両方・片方ずつも出します。
+- 分岐は override の手の行き先の局面 (相手の手番) です。override が無ければ、main の辿りで最初に来る相手の手番の局面 (後手なら初期局面) です。分岐ごとに、来た重み、相手の手ごとの割合とその先の出口の値の中央値を出し、最も多い手以外に進む重みを「外す重み」にします。
+- 危ない局面・千日手・分岐の重みは、辿りの重みを通った局面ごとに分けて持って数えます (同じ手数で同じ局面に来た重みを足し合わせても混ざらない)。そのため辿りの行は `master walk` より多くなり、`tiny` の重みが少し増えます。
+- 出口の局数と得点は、同じ局面の出口を 1 回だけ数えた和です。`black_below` は行の手順 (同じ局面に来た手順のうち 1 つ) で 10・20 手前の局面を決めます。
+
+表は候補ごとに 1 行で、列は `name side override override_weight mean_black p10 p25 median p75 p90 ge50 ge100 le80 le0 draw tree6 tree3_5 tree1_2 single mean_kind unknown no_value own out rare tiny max own_lt20 own_lt30 exit_games exit_score branch_games branch_score danger_strong danger_listed danger_both danger_any black_below deviate deviate_median` です。
+値 (`mean_black`・分位・`deviate_median`) は先手から見た評価値、ほかの重みの列は割合 (0〜1)、`exit_score`・`branch_score` は RAMU の側の得点です。
+`ge50`・`ge100` (先手 +50 以上・+100 以上に着く重み) と `black_below` は先手の候補だけ、`le80`・`le0` (先手から見て +80 以下・0 以下に着く重み) は後手の候補だけに書き、他方は空です。
+`own_lt20`・`own_lt30` は手数 (出口の局面までに指した手の数) が 20・30 未満の own の重み、`override_weight` は override の分岐の局面を通る重み (override の無い候補は空) です。
+
+報告は日本語で、RAMU が先手・後手の候補ごとに出口の値・値の確度・強い対局の実績と危ない局面を通る重み・分岐の後の相手の手の表、
+候補ごとに最初に通る危ない局面の一覧 (何手目・通る重み・強い対局の局数と得点・判定 (両方・強い対局だけ・表だけ)・手順)、
+締めまでに読みを足すと効く own の出口の一覧 (候補をまたいで同じ局面をまとめ、手数・重み・候補・値・出所・受付・手順・SFEN) を書きます。手順は `master exit-report` と同じ漢字の棋譜です。
+標準出力には候補ごとの行の数・中央値・危ない局面を通る重みと、局面の数・時間を出します。
+
+計算量: 候補ごとに 2 回辿ります (1 回目で局面と手の行き来を集め、強い対局を数える局面と循環を決める)。強い対局の棋譜は 1 回だけ 1 行ずつ読み、辿った局面だけを数えます。
+約 22 万行の元データ、86 MB のテキスト `.db` の頻度の定跡、1,900 万局面の `.ybb`、両者 R3800 以上が約 3.9 万局の棋譜で、候補 10 本 (先手 4・後手 6) が 1 スレッド約 80 秒・ピーク約 600 MB でした。
 
 ## `borrow`: 大きい定跡の木を借りる
 
