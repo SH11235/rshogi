@@ -9,15 +9,15 @@
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
 | 探索定数を SPSA で調整する (複数の機械の worker に対局を任せる `--remote-worker`、run-dir の写しの照合 `--verify-resume` も) | [spsa](docs/spsa.md) / [運用手順](docs/spsa_runbook.md) |
 | 自己対局の定跡出口と、勝たなかった側が途中で有利になった局面 (`--chance-cp`) を件数と少数の ID 見本で集計し、木のキューの行と既存の木への不足手順の更新行を作る | [book_mine tree seeds](docs/book_mine.md#tree-seeds-自己対局から次に読む根を作る) |
-| 台帳を共有して木を並列に読む (`serve` / `import-journal` の `--accept-fingerprint <FP>` で参照ファイルの内容・エンジンの違いを明示的に受入可 (その他の条件は完全一致)・実行中の台帳の一括追記（検査のメモリ上限つき、新規局面の先読みの印も引き継ぐ）・計算量に上限のある任意の先読み・読みかけの局面の途中の上位の手で子を先に読む `--speculate-at`・その先読みを優先度の高い木で先に配る `--speculate-priority`・停止統計つき) | [book_mine tree serve](docs/book_mine.md#空いた-worker-での先読み) |
+| 台帳を共有して木を並列に読む (すべての読み条件を元の設定のまま共有し、木ごとに `opts.multipv` / `opts.nodes` と `require_condition` を指定可・実行中の台帳の一括追記（検査のメモリ上限つき、不正行と後続の値の衝突を集計して除外し、既存の同値行にも先読みの印を引き継ぐ）・計算量に上限のある任意の先読み・読みかけの局面の途中の上位の手で子を先に読む `--speculate-at`・その先読みを優先度の高い木で先に配る `--speculate-priority`・停止統計つき) | [book_mine tree serve](docs/book_mine.md#空いた-worker-での先読み) |
 | 複数台の残り・締めまでの読める量と未着手の木の価値・重複を点検し、未完了の木の再採点 (`--rerank-table` / `--rerank-out`、受付行の `group` の木を最小の priority にそろえる、`--add` の新しい木も同じ物差しで採点して `<prefix>_rerank-add.jsonl` に出す、対象の own ごとの walk 表が必須、元データは段ごとに最大 16 回逐次読み、更新行は hold・計画の出力と併用不可)・group ごとに締めまでに読み切る見込みの表 (`--group-table`)・hold 候補と移動・新規追加・手順足し込みの計画 (`<prefix>_plan.tsv` と台別 JSONL、台に入るかは priority の帯の量で判定、帯ごとの読み終わり時間 `<prefix>_bands.tsv`、急ぎの帯の偏りを均す `--balance-priority`/`--balance-hours`) を出す (移動元の台へ送った足し込みを木と一緒に移す。重みが確定する own の止まりだけを reach-low にする) | [book_mine tree queue-review](docs/book_mine.md#tree-queue-review-台ごとの残りと未着手の木を点検する) |
-| 外部の定跡の木を借りて自分の読みで値を付ける (main は元データ全体で伝播し直した値で選ぶ) | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
+| 外部の定跡の木を借りて自分の読みで値を付ける (main は元データ全体で伝播し直した値で選び、nodes も合流後の最善手に揃える) | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
 | 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可、局面を除外する `--skip-keys <FILE>`、curated の局面の main も替える `--replace-curated`) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手を検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
 | 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
 | 序盤の main の替わりを継続手数で hold / replace に分け、指定キーを優先して保留する (`--continuation`・`--hold-keys`・`--deep-opp-freq`・`--deep-min-games`) | [book_mine master hold-early](docs/book_mine.md#master-hold-early-序盤の-main-の替わりを保留に戻す) |
 | 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
-| 元データから定跡・プリセット・条件と探索深さの注釈を書き出す（tree 台帳以外は照合から除外し、失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
+| 元データから定跡・プリセット・条件と探索深さの注釈を書き出す（tree 台帳以外と不正な読み・後続の値の衝突は照合から除外し、失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
 | 注目の線から元データと DONE の木を合わせ、伝播値つきの定跡をビュアー用に作る | [book_mine master line-db](docs/book_mine.md#master-line-db-注目の線を辿る定跡) |
 | 2 つの定跡の局面と手の差分を表示する | [book_mine master diff](docs/book_mine.md#master-diff-2-つの定跡の差分) |
 | 書き出した定跡とプリセットを検査する | [book_mine master check](docs/book_mine.md#master-check-書き出した定跡とプリセットの検査) |

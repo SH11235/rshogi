@@ -226,7 +226,7 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
     let references: Vec<_> = (0..=3)
         .map(|rounds| {
             let dir = tempfile::tempdir().unwrap();
-            let mut tree = Tree::load(definition(dir.path(), rounds), &settings).unwrap();
+            let mut tree = Tree::load(definition(dir.path(), rounds), Some(&settings)).unwrap();
             bfs(&mut tree, &cache);
             tree.edge.retain(|_, v| !v.is_empty());
             tree.rule.retain(|_, v| !v.is_empty());
@@ -235,7 +235,7 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
         .collect();
     for permutation in 0..200 {
         let dir = tempfile::tempdir().unwrap();
-        let mut tree = Tree::load(definition(dir.path(), 0), &settings).unwrap();
+        let mut tree = Tree::load(definition(dir.path(), 0), Some(&settings)).unwrap();
         let mut arrived = BTreeMap::new();
         let mut random = 0x13b8_f712_u64 + permutation;
         let mut saw_deep_transposition = false;
@@ -293,10 +293,12 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
                 reference_negamax(reference, &rule_nodes)
             );
             let clean_dir = tempfile::tempdir().unwrap();
-            let mut clean = Tree::load(definition(clean_dir.path(), rounds), &settings).unwrap();
+            let mut clean =
+                Tree::load(definition(clean_dir.path(), rounds), Some(&settings)).unwrap();
             clean.advance(&tree.nodes).unwrap();
             let full_dir = tempfile::tempdir().unwrap();
-            let mut full = Tree::load(definition(full_dir.path(), rounds), &settings).unwrap();
+            let mut full =
+                Tree::load(definition(full_dir.path(), rounds), Some(&settings)).unwrap();
             full.advance(&cache).unwrap();
             assert!(cache.len() > tree.nodes.len());
             for other in [&clean, &full] {
@@ -338,7 +340,7 @@ fn roots_ignore_stop_extra_rules_and_depth_game_union() {
     let mut def = definition(dir.path(), 0);
     def.stop = 0;
     def.extra = vec!["5i6h".into()];
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&cache).unwrap();
     assert!(tree.rule[ROOT].contains("5i5h"));
     assert!(tree.rule[ROOT].contains("5i4i"));
@@ -348,7 +350,7 @@ fn roots_ignore_stop_extra_rules_and_depth_game_union() {
     let mut def = definition(dir2.path(), 0);
     def.own = "w".into();
     def.extra = vec!["5i6h".into()];
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&cache).unwrap();
     assert!(tree.rule[ROOT].contains("5i6h"));
 }
@@ -358,11 +360,11 @@ fn replay_missing_reading_and_not_ready_remove_registration_material() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
     let def = definition(dir.path(), 0);
-    let mut tree = Tree::load(def.clone(), &s).unwrap();
+    let mut tree = Tree::load(def.clone(), Some(&s)).unwrap();
     std::fs::create_dir_all(&def.out).unwrap();
     std::fs::write(def.out.join("own_nodes.tsv"), "stale").unwrap();
     // 木を作るだけでは出力に触れず、書き出しで登録材料を消す。
-    let tree2 = Tree::load(def, &s).unwrap();
+    let tree2 = Tree::load(def, Some(&s)).unwrap();
     assert!(tree2.def.out.join("own_nodes.tsv").exists());
     let cache = corpus(&s);
     tree.advance(&cache).unwrap();
@@ -402,7 +404,7 @@ fn stop_suppresses_game_but_force_is_added_afterwards_without_rule() {
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
     def.stop = 0;
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     let key = child(ROOT, "5i5h").unwrap();
     tree.force.insert(key.clone(), BTreeSet::from(["5a4a".into()]));
     tree.advance(&cache).unwrap();
@@ -417,7 +419,7 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
     def.draw = 17;
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     let mut key = ROOT.to_owned();
     for mv in ["5i4i", "5a4a", "4i5i", "4a5a"] {
         tree.nodes.insert(key.clone(), reading(&key, &[(mv, 0)], &s));
@@ -438,7 +440,7 @@ fn transpositions_into_a_cycle_match_the_reference_and_finish_past_the_exact_bud
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
     def.draw = 17;
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     // 根から 2 通りの手順で同じ局面 (玉 3i・相手玉 4a) に合流し、そこから 4 手の循環に入る。
     let put = |tree: &mut Tree, key: &str, moves: &[&str]| {
         let lines: Vec<_> = moves.iter().map(|m| (*m, 0)).collect();
@@ -476,7 +478,7 @@ fn cycle_values_use_the_draw_of_the_side_that_closes_the_cycle() {
         def.draw = 17;
         def.draw_black = black;
         def.draw_white = white;
-        let mut tree = Tree::load(def, &s).unwrap();
+        let mut tree = Tree::load(def, Some(&s)).unwrap();
         let mut key = ROOT.to_owned();
         for mv in ["5i4i", "5a4a", "4i5i", "4a5a"] {
             tree.nodes.insert(key.clone(), reading(&key, &[(mv, 0)], &s));
@@ -500,7 +502,7 @@ fn cycle_values_use_the_draw_of_the_side_that_closes_the_cycle() {
 fn declaration_win_leaf_value_comes_from_its_win_line() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
-    let mut tree = Tree::load(definition(dir.path(), 0), &s).unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 0), Some(&s)).unwrap();
     let win = child(ROOT, "5i4i").unwrap();
     tree.nodes.insert(ROOT.into(), reading(ROOT, &[("5i4i", 0)], &s));
     tree.edge.insert(ROOT.into(), BTreeSet::from(["5i4i".into()]));
@@ -616,10 +618,10 @@ fn explicit_model_is_required_and_invalid_paths_leave_outputs_untouched() {
     std::fs::create_dir(&def.out).unwrap();
     std::fs::write(def.out.join("own_nodes.tsv"), "stale").unwrap();
     def.paths_sha256 = Some("wrong".into());
-    assert!(Tree::load(def.clone(), &s).is_err());
+    assert!(Tree::load(def.clone(), Some(&s)).is_err());
     def.paths_sha256 = None;
     def.paths = dir.path().join("absent");
-    assert!(Tree::load(def.clone(), &s).is_err());
+    assert!(Tree::load(def.clone(), Some(&s)).is_err());
     assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "stale");
 }
 
@@ -659,7 +661,7 @@ fn empty_game_adds_second_candidate_and_status_failure_does_not_block_outputs() 
     def.depth = 0;
     def.stop = 0;
     def.extra.clear();
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     let cache = BTreeMap::from([(
         ROOT.into(),
         reading(ROOT, &[("5i4i", 500), ("5i6i", 400), ("5i5h", 300)], &s),
@@ -701,7 +703,7 @@ fn short_multipv_and_terminal_readings_are_leaves() {
         def.depth = 0;
         def.own = "w".into();
         def.extra.clear();
-        let mut tree = Tree::load(def, &s).unwrap();
+        let mut tree = Tree::load(def, Some(&s)).unwrap();
         tree.advance(&BTreeMap::from([(key.into(), r.clone())])).unwrap();
         assert!(tree.finished);
         assert!(tree.write_outputs().unwrap());
@@ -760,7 +762,7 @@ fn min_failure_is_reported_and_done_follows_all_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
     def.depth = 0;
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&corpus(&s)).unwrap();
     std::fs::create_dir_all(tree.def.out.join("tree_bp_min.db")).unwrap();
     assert!(tree.write_outputs().unwrap());
@@ -781,7 +783,7 @@ fn opponent_root_expands_opp_n_replies() {
     def.opp_n = 3;
     def.extra = Vec::new();
     def.own = "w".into();
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&corpus(&s)).unwrap();
     assert!(tree.candidates[ROOT].contains(&"5i6i".to_owned()));
     let mut def = definition(dir.path(), 0);
@@ -789,7 +791,7 @@ fn opponent_root_expands_opp_n_replies() {
     def.opp_n = 3;
     def.extra = Vec::new();
     def.out = dir.path().join("out-own");
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&corpus(&s)).unwrap();
     assert!(!tree.candidates[ROOT].contains(&"5i6i".to_owned()));
 }
@@ -801,7 +803,7 @@ fn report_includes_opponent_candidates_and_unexpanded_warning() {
     let mut def = definition(dir.path(), 0);
     def.depth = 0;
     def.own = "w".into();
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&corpus(&s)).unwrap();
     tree.write_outputs().unwrap();
     assert!(
@@ -1086,7 +1088,7 @@ fn single_pv_win_is_a_leaf_and_mixed_win_rows_are_rejected() {
     let mut def = definition(dir.path(), 0);
     std::fs::write(&def.paths, format!("{ROOT}\t1\t\n")).unwrap();
     def.extra.clear();
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     tree.advance(&BTreeMap::from([(ROOT.into(), r.clone())])).unwrap();
     assert!(tree.finished);
     assert!(tree.write_outputs().unwrap());
@@ -1117,6 +1119,8 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
         stop: 300,
         rounds: 3,
         draw: 0,
+        multipv: 3,
+        nodes: 100,
     };
     let lines = format!(
         "{}\n{}\n",
@@ -1138,7 +1142,7 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
 fn node_moves_lists_both_sides_with_propagated_values() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
-    let mut tree = Tree::load(definition(dir.path(), 3), &s).unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 3), Some(&s)).unwrap();
     let cache = corpus(&s);
     while !tree.finished {
         assert!(tree.advance(&cache).unwrap().is_empty() || tree.finished);
@@ -1194,7 +1198,10 @@ fn registration_fingerprint_requires_uniform_reading_provenance() {
         fn get(&self, key: &str) -> Option<&Reading> {
             self.rows.get(key)
         }
-        fn fingerprint(&self) -> Option<&str> {
+        fn get_preferred(&self, key: &str, _: Option<&str>) -> Option<&Reading> {
+            self.get(key)
+        }
+        fn condition(&self, _: &str, _: Option<&str>) -> Option<&str> {
             self.fingerprint
         }
     }
@@ -1202,7 +1209,7 @@ fn registration_fingerprint_requires_uniform_reading_provenance() {
     let settings = settings();
     let rows = corpus(&settings);
     for mixed in [false, true] {
-        let mut tree = Tree::load(definition(dir.path(), 2), &settings).unwrap();
+        let mut tree = Tree::load(definition(dir.path(), 2), Some(&settings)).unwrap();
         let partial = BTreeMap::from([(ROOT.to_owned(), rows[ROOT].clone())]);
         tree.advance(&Cache {
             rows: &partial,
@@ -1240,7 +1247,7 @@ fn simulation_serial_bound_and_completion_order_preserve_tree() {
     let settings = settings();
     let def = definition(dir.path(), 3);
     let cache = corpus(&settings);
-    let mut expected = Tree::load(def.clone(), &settings).unwrap();
+    let mut expected = Tree::load(def.clone(), Some(&settings)).unwrap();
     assert!(expected.advance(&cache).unwrap().is_empty());
     assert!(expected.finished && !expected.force.is_empty());
     let lines = std::fs::read_to_string(&def.paths)
@@ -1476,16 +1483,16 @@ fn speculation_follows_tops_and_readings_within_depth_and_skips_tree_positions()
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
     def.depth = 2;
-    let mut tree = Tree::load(def, &s).unwrap();
+    let mut tree = Tree::load(def, Some(&s)).unwrap();
     let mut cache = BTreeMap::new();
     tree.advance(&cache).unwrap();
     let a = child(ROOT, "5i4i").unwrap();
     let b = child(ROOT, "5i6h").unwrap();
     let c = child(ROOT, "5i5h").unwrap();
     let mut tops = BTreeMap::new();
-    tops.insert(ROOT.to_owned(), (vec!["5i6h".to_owned(), "5i4i".to_owned()], 10));
-    tops.insert(b.clone(), (vec!["5a5b".to_owned()], 400));
-    tops.insert(a.clone(), (vec!["5a5b".to_owned()], 0));
+    tops.insert(ROOT.to_owned(), (vec!["5i6h".to_owned(), "5i4i".to_owned()], 10, s.multipv));
+    tops.insert(b.clone(), (vec!["5a5b".to_owned()], 400, s.multipv));
+    tops.insert(a.clone(), (vec!["5a5b".to_owned()], 0, s.multipv));
     cache.insert(c.clone(), reading(&c, &[("5a4a", 0), ("5a5b", -10)], &s));
     let found: BTreeMap<_, _> = tree
         .speculate(&tops, &cache, 1000)
@@ -1499,6 +1506,11 @@ fn speculation_follows_tops_and_readings_within_depth_and_skips_tree_positions()
         expected.insert(child(parent, mv).unwrap(), (2, 3));
     }
     assert_eq!(found, expected);
+    let mismatched = tops
+        .iter()
+        .map(|(key, (moves, best, multipv))| (key.clone(), (moves.clone(), *best, multipv + 1)))
+        .collect();
+    assert!(tree.speculate(&mismatched, &cache, 1000).is_empty());
     let limited = tree.speculate(&tops, &cache, 1);
     assert!(limited.iter().all(|c| c.level == 1) && limited.len() == 2, "浅い段から打ち切る");
     // 根を読み終えたら根の子は木の局面なので挙げない。
@@ -1515,7 +1527,7 @@ fn speculation_follows_tops_and_readings_within_depth_and_skips_tree_positions()
 fn speculation_reaches_a_merged_position_at_its_shallowest_level() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
-    let mut tree = Tree::load(definition(dir.path(), 0), &s).unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 0), Some(&s)).unwrap();
     tree.advance(&BTreeMap::new()).unwrap();
     let path = |moves: &[&str]| moves.iter().fold(ROOT.to_owned(), |k, m| child(&k, m).unwrap());
     let shallow = path(&["5i4i"]);
@@ -1527,9 +1539,9 @@ fn speculation_reaches_a_merged_position_at_its_shallowest_level() {
     let merged = child(&shallow, "5a5b").unwrap();
     assert_eq!(merged, child(&deep, "4a5b").unwrap());
     let tops = BTreeMap::from([
-        (shallow.clone(), (vec!["5a5b".to_owned()], 0)),
-        (deep.clone(), (vec!["4a5b".to_owned()], 0)),
-        (merged.clone(), (vec!["4i3i".to_owned()], 0)),
+        (shallow.clone(), (vec!["5a5b".to_owned()], 0, s.multipv)),
+        (deep.clone(), (vec!["4a5b".to_owned()], 0, s.multipv)),
+        (merged.clone(), (vec!["4i3i".to_owned()], 0, s.multipv)),
     ]);
     let found: BTreeMap<_, _> = tree
         .speculate(&tops, &BTreeMap::new(), 1000)
@@ -1567,16 +1579,12 @@ fn import_file(path: &Path, settings: &Settings, readings: &[Reading]) {
     }
 }
 
-fn drain_import(
-    inbox: &mut super::live_import::Inbox,
-    journal: &mut Journal,
-    settings: &Settings,
-) -> Vec<String> {
+fn drain_import(inbox: &mut super::live_import::Inbox, journal: &mut Journal) -> Vec<String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut messages = Vec::new();
     loop {
         assert!(std::time::Instant::now() < deadline, "{}", inbox.status());
-        if let Some(message) = inbox.poll(journal, settings).unwrap() {
+        if let Some(message) = inbox.poll(journal).unwrap() {
             messages.push(message);
         }
         if matches!(inbox.status()["state"].as_str(), Some("done" | "failed")) {
@@ -1591,7 +1599,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
-    let mut inbox = super::live_import::Inbox::new(&state, Default::default()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
     let settings = settings();
     let existing = reading(ROOT, &[("5i5h", 10)], &settings);
     let other_key = child(ROOT, "5i5h").unwrap();
@@ -1608,7 +1616,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
     // 同じ値の重複と食い違いは別の受付ファイルで扱う。
     let first = state.join("import/01.jsonl");
     std::fs::copy(&same, &first).unwrap();
-    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
     assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
     let mut foreign = settings.clone();
     foreign.nodes += 1;
@@ -1631,16 +1639,17 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
     def.depth = 0;
     def.extra.clear();
     std::fs::write(&def.paths, format!("{other_key}\t2\t\n")).unwrap();
-    let mut tree = Tree::load(def, &settings).unwrap();
+    let mut tree = Tree::load(def, Some(&settings)).unwrap();
     let missing = tree.advance(&journal).unwrap();
     assert!(missing.iter().any(|(key, _)| key == &other_key));
-    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
-    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 2);
     assert_eq!(inbox.status()["counts"]["conflicts"], 2);
     assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
-    assert_eq!(inbox.status()["counts"]["skipped_condition"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_condition"], 0);
     assert!(state.join("import/done/02.jsonl").exists());
     assert_eq!(journal.get(ROOT), Some(&existing));
+    assert!(journal.get_exact(ROOT, &foreign.fingerprint).is_some());
     assert_eq!(journal.get(&other_key), Some(&added));
     assert!(journal.prefetched.contains(&other_key));
     assert!(!journal.prefetched.contains(ROOT));
@@ -1669,7 +1678,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
     assert_eq!(inbox.status()["discarded_worker"], 2);
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), size);
     std::fs::copy(state.join("import/done/02.jsonl"), state.join("import/03.jsonl")).unwrap();
-    drain_import(&mut inbox, &mut journal, &settings);
+    drain_import(&mut inbox, &mut journal);
     assert_eq!(inbox.status()["counts"]["appended"], 0);
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), size);
 }
@@ -1678,7 +1687,7 @@ fn live_import_appends_filters_duplicates_conflicts_and_satisfies_tree() {
 fn live_import_rejects_whole_invalid_file_and_ignores_unpublished_files() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
     let dst = dir.path().join("journal.jsonl");
     let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
     let good = dir.path().join("good.jsonl");
@@ -1687,14 +1696,14 @@ fn live_import_rejects_whole_invalid_file_and_ignores_unpublished_files() {
     bad.extend(b"not json\n");
     std::fs::write(dir.path().join("import/01.jsonl"), bad).unwrap();
     std::fs::write(dir.path().join("import/writing.tmp"), "not json").unwrap();
-    let messages = drain_import(&mut inbox, &mut journal, &settings);
+    let messages = drain_import(&mut inbox, &mut journal);
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("取り込み失敗"));
     assert!(dir.path().join("import/failed/01.jsonl").exists());
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
     std::fs::copy(&good, dir.path().join("import/02.jsonl")).unwrap();
-    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
-    inbox.poll(&mut journal, &settings).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    inbox.poll(&mut journal).unwrap();
     assert!(dir.path().join("import/writing.tmp").exists());
     assert!(!dir.path().join("import/failed/writing.tmp").exists());
 }
@@ -1704,7 +1713,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
     let source = dir.path().join("import/01.jsonl");
     let row = |col| match col {
         0 => "K8".to_owned(),
@@ -1724,7 +1733,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         assert!(std::time::Instant::now() < deadline);
-        inbox.poll_short(&mut journal, &settings).unwrap();
+        inbox.poll_short(&mut journal).unwrap();
         if inbox.status()["state"] == "appending" {
             break;
         }
@@ -1747,8 +1756,8 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
         file.sync_data().unwrap();
     }
     let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
-    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
-    drain_import(&mut inbox, &mut journal, &settings);
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    drain_import(&mut inbox, &mut journal);
     for reading in &readings {
         assert_eq!(journal.get(&reading.key), Some(reading));
     }
@@ -1756,7 +1765,7 @@ fn live_import_restarts_after_partial_append_without_duplicate_records() {
 }
 
 #[test]
-fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appending() {
+fn live_import_skips_source_conflicts_and_invalid_fingerprints() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
     let good = dir.path().join("good.jsonl");
@@ -1774,17 +1783,19 @@ fn live_import_rejects_source_conflicts_and_invalid_fingerprints_before_appendin
     forged.push(b'\n');
     for (i, bytes) in [conflict, forged].into_iter().enumerate() {
         let state = dir.path().join(i.to_string());
-        let mut inbox = super::live_import::Inbox::new(&state, Default::default()).unwrap();
+        let mut inbox = super::live_import::Inbox::new(&state).unwrap();
         let dst = state.join("journal.jsonl");
         let mut journal = Journal::open(&dst, &settings.fingerprint).unwrap();
         std::fs::write(state.join("import/01.jsonl"), bytes).unwrap();
-        assert_eq!(drain_import(&mut inbox, &mut journal, &settings).len(), 1);
-        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
+        assert!(drain_import(&mut inbox, &mut journal).is_empty());
+        assert_eq!(journal.get_exact(&original.key, &settings.fingerprint).is_some(), i == 0);
+        assert_eq!(inbox.status()["counts"]["skipped_conflicting"], usize::from(i == 0));
+        assert_eq!(inbox.status()["counts"]["skipped_invalid"], usize::from(i == 1));
     }
 }
 
 #[test]
-fn live_import_checks_other_binaries_by_source_version() {
+fn live_import_accepts_other_binaries_regardless_of_source_version() {
     let dir = tempfile::tempdir().unwrap();
     let mut dst = settings();
     dst.engine_version = Some("stable-source".into());
@@ -1793,17 +1804,17 @@ fn live_import_checks_other_binaries_by_source_version() {
     src.fingerprint = src.computed_fingerprint().unwrap();
     let path = dir.path().join("compatible.jsonl");
     import_file(&path, &src, &[reading(ROOT, &[], &src)]);
-    let staged = super::journal::stage_live_source(&path, &dst, &Default::default()).unwrap();
+    let staged = super::journal::stage_live_source(&path).unwrap();
     assert!(staged.file.metadata().unwrap().len() > 0);
     assert_eq!(staged.skipped_condition, 0);
     src.engine_version = Some("different-source".into());
     let path = dir.path().join("incompatible.jsonl");
     import_file(&path, &src, &[reading(ROOT, &[], &src)]);
-    assert!(super::journal::stage_live_source(&path, &dst, &Default::default()).is_err());
+    assert_eq!(super::journal::stage_live_source(&path).unwrap().skipped_condition, 0);
 }
 
 #[test]
-fn live_import_merges_known_version_before_checking_compatibility() {
+fn live_import_accepts_rows_with_known_and_unrecorded_versions() {
     let dir = tempfile::tempdir().unwrap();
     let mut dst = settings();
     dst.engine_version = Some("stable-source".into());
@@ -1818,7 +1829,7 @@ fn live_import_merges_known_version_before_checking_compatibility() {
     let old = format!("{old}\n");
     for bytes in [format!("{old}{known}"), format!("{known}{old}")] {
         std::fs::write(&path, bytes).unwrap();
-        let staged = super::journal::stage_live_source(&path, &dst, &Default::default()).unwrap();
+        let staged = super::journal::stage_live_source(&path).unwrap();
         assert_eq!(staged.skipped_condition, 0);
         assert_eq!(std::io::BufRead::lines(std::io::BufReader::new(staged.file)).count(), 2);
     }
@@ -1829,7 +1840,7 @@ fn live_import_batch_keeps_first_duplicate_metadata() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
     let first = reading(ROOT, &[], &settings);
     let source = dir.path().join("source.jsonl");
     import_file(&source, &settings, std::slice::from_ref(&first));
@@ -1842,7 +1853,7 @@ fn live_import_batch_keeps_first_duplicate_metadata() {
         .unwrap();
     let mut journal =
         Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
-    drain_import(&mut inbox, &mut journal, &settings);
+    drain_import(&mut inbox, &mut journal);
     assert_eq!(journal.get(ROOT), Some(&first));
     assert!(journal.prefetched.contains(ROOT));
     assert_eq!(inbox.status()["counts"]["appended"], 1);
@@ -1853,7 +1864,7 @@ fn live_import_batch_keeps_first_duplicate_metadata() {
 fn live_import_preserves_prefetch_from_duplicate_in_later_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings();
-    let mut inbox = super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
     let first = reading(ROOT, &[], &settings);
     let source = dir.path().join("source.jsonl");
     import_file(&source, &settings, std::slice::from_ref(&first));
@@ -1864,7 +1875,7 @@ fn live_import_preserves_prefetch_from_duplicate_in_later_chunk() {
     std::fs::write(dir.path().join("import/duplicates.jsonl"), incoming).unwrap();
     let path = dir.path().join("journal.jsonl");
     let mut journal = Journal::open(&path, &settings.fingerprint).unwrap();
-    assert!(drain_import(&mut inbox, &mut journal, &settings).is_empty());
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
     assert!(journal.prefetched.contains(ROOT));
     assert_eq!(inbox.status()["counts"]["appended"], 1);
     assert_eq!(inbox.status()["counts"]["skipped_same"], 1024);
@@ -1913,7 +1924,7 @@ fn accepted_fingerprints_are_repeatable_and_validated_on_both_commands() {
 }
 
 #[test]
-fn live_import_accepts_only_listed_foreign_net_and_keeps_destination_settings() {
+fn live_import_accepts_all_foreign_nets_and_keeps_source_settings() {
     use super::journal::Readings;
     let dir = tempfile::tempdir().unwrap();
     let dst = settings();
@@ -1927,40 +1938,33 @@ fn live_import_accepts_only_listed_foreign_net_and_keeps_destination_settings() 
     let other_key = child(ROOT, "5i5h").unwrap();
     for accept in [false, true] {
         let state = dir.path().join(accept.to_string());
-        let accepted = if accept {
-            BTreeSet::from([src.fingerprint.clone()])
-        } else {
-            BTreeSet::new()
-        };
-        let mut inbox = super::live_import::Inbox::new(&state, accepted).unwrap();
+        let mut inbox = super::live_import::Inbox::new(&state).unwrap();
         let path = state.join("journal.jsonl");
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
         let source = state.join("import/source.jsonl");
         import_file(&source, &src, &[reading(ROOT, &[], &src)]);
         import_file(&source, &unlisted, &[reading(&other_key, &[], &unlisted)]);
-        assert!(drain_import(&mut inbox, &mut journal, &dst).is_empty());
-        assert_eq!(inbox.status()["counts"]["appended"], usize::from(accept));
-        assert_eq!(inbox.status()["counts"]["skipped_condition"], if accept { 1 } else { 2 });
-        assert_eq!(journal.get(ROOT).is_some(), accept);
-        assert!(journal.get(&other_key).is_none());
-        let text = std::fs::read_to_string(&path).unwrap();
-        if accept {
-            let record: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-            assert_eq!(record["settings"]["fingerprint"], dst.fingerprint);
-            assert_eq!(record["settings"], serde_json::to_value(&dst).unwrap());
-            let provenance = record["provenance"].as_str().unwrap();
-            assert!(provenance.contains(&format!(
-                "fingerprint={}:force=false:accepted=true:path=",
-                src.fingerprint
-            )));
-        } else {
-            assert!(text.is_empty());
-        }
+        assert!(drain_import(&mut inbox, &mut journal).is_empty());
+        assert_eq!(inbox.status()["counts"]["appended"], 2);
+        assert_eq!(inbox.status()["counts"]["skipped_condition"], 0);
+        assert!(journal.get(ROOT).is_some());
+        assert!(journal.get(&other_key).is_some());
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["settings"], serde_json::to_value(&src).unwrap());
+        assert_eq!(records[1]["settings"], serde_json::to_value(&unlisted).unwrap());
+        let provenance = records[0]["provenance"].as_str().unwrap();
+        assert!(provenance.contains(&format!("fingerprint={}:force=false", src.fingerprint)));
+        assert!(!provenance.contains("accepted=true"));
     }
 }
 
 #[test]
-fn live_import_rejects_accepted_condition_mismatches_before_any_append_and_continues() {
+fn live_import_accepts_all_condition_changes_and_continues() {
     use super::journal::Readings;
     let dst = settings();
     for field in [
@@ -1991,29 +1995,192 @@ fn live_import_rejects_accepted_condition_mismatches_before_any_append_and_conti
             }
         }
         src.fingerprint = src.computed_fingerprint().unwrap();
-        let mut inbox =
-            super::live_import::Inbox::new(dir.path(), BTreeSet::from([src.fingerprint.clone()]))
-                .unwrap();
+        let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
         let path = dir.path().join("journal.jsonl");
         let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
         let existing = reading(ROOT, &[], &dst);
         journal.append(existing, &dst, "fixture".into()).unwrap();
-        let before = std::fs::read(&path).unwrap();
         let other_key = child(ROOT, "5i5h").unwrap();
         let source = dir.path().join("import/01.jsonl");
         import_file(&source, &dst, &[reading(&other_key, &[], &dst)]);
         let mut incoming = reading(ROOT, &[], &src);
         incoming.multipv.truncate(src.multipv);
         import_file(&source, &src, &[incoming]);
-        let messages = drain_import(&mut inbox, &mut journal, &dst);
-        assert_eq!(messages.len(), 1, "{field}");
-        assert!(messages[0].contains("取り込み失敗"), "{messages:?}");
-        assert!(messages[0].contains(field), "{messages:?}");
-        assert!(dir.path().join("import/failed/01.jsonl").exists());
-        assert_eq!(std::fs::read(&path).unwrap(), before, "{field}");
+        assert!(drain_import(&mut inbox, &mut journal).is_empty(), "{field}");
+        assert_eq!(inbox.status()["counts"]["appended"], 2, "{field}");
+        assert_eq!(inbox.status()["counts"]["skipped_condition"], 0, "{field}");
+        assert!(dir.path().join("import/done/01.jsonl").exists());
+        assert!(journal.get_exact(ROOT, &src.fingerprint).is_some(), "{field}");
+        assert!(journal.get_exact(ROOT, &dst.fingerprint).is_some(), "{field}");
         import_file(&dir.path().join("import/02.jsonl"), &dst, &[reading(&other_key, &[], &dst)]);
-        assert!(drain_import(&mut inbox, &mut journal, &dst).is_empty());
+        assert!(drain_import(&mut inbox, &mut journal).is_empty());
         assert!(dir.path().join("import/done/02.jsonl").exists());
         assert!(journal.get(&other_key).is_some());
     }
+}
+
+#[test]
+fn replay_mixed_conditions_prefers_cli_then_definition_else_ranked() {
+    let first = settings();
+    let second = first.with_overrides(first.multipv, first.nodes + 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("journal");
+    let mut journal = Journal::open(&journal_path, &first.fingerprint).unwrap();
+    for (cond, mv, cp) in [(&second, "5i5h", 200), (&first, "5i4i", 100)] {
+        journal
+            .append(reading(ROOT, &[(mv, cp)], cond), cond, "fixture".into())
+            .unwrap();
+    }
+    drop(journal);
+    std::fs::write(dir.path().join("paths.tsv"), format!("{ROOT}\t1\t\tfixture\n")).unwrap();
+    let definition_path = dir.path().join("tree.toml");
+    for (cli, definition_fp, expected) in [
+        (None, None, &second.fingerprint),
+        (Some(first.fingerprint.clone()), None, &first.fingerprint),
+        (None, Some(first.fingerprint.clone()), &first.fingerprint),
+        (
+            Some(second.fingerprint.clone()),
+            Some(first.fingerprint.clone()),
+            &second.fingerprint,
+        ),
+    ] {
+        let mut definition =
+            "paths='paths.tsv'\nout='out'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n"
+                .to_owned();
+        if let Some(fp) = definition_fp {
+            definition.push_str(&format!("fingerprint='{fp}'\n"));
+        }
+        std::fs::write(&definition_path, definition).unwrap();
+        let result = run(TreeArgs {
+            command: TreeCommand::Replay(ReplayArgs {
+                journal: journal_path.clone(),
+                tree: definition_path.clone(),
+                fingerprint: cli,
+            }),
+        });
+        assert!(result.is_ok() || result.unwrap_err().to_string().contains("登録禁止"));
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("out/registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["fingerprint"].as_str(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn live_import_preserves_prefetch_for_later_condition_of_same_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+    let a = settings();
+    let b = a.with_overrides(a.multipv, a.nodes + 1).unwrap();
+    let source = state.join("import/mixed.jsonl");
+    {
+        let mut journal = Journal::open(&source, &a.fingerprint).unwrap();
+        journal
+            .append_marked(reading(ROOT, &[], &a), &a, "fixture".into(), false)
+            .unwrap();
+        journal
+            .append_marked(reading(ROOT, &[], &b), &b, "fixture".into(), true)
+            .unwrap();
+    }
+    let read_source = journal::read_source(&source, None, |_| true).unwrap();
+    assert_eq!(read_source.prefetched, BTreeSet::from([(b.fingerprint.clone(), ROOT.into())]));
+    let imported_path = dir.path().join("imported.jsonl");
+    {
+        let mut imported = Journal::open(&imported_path, &a.fingerprint).unwrap();
+        imported
+            .merge_records(
+                read_source
+                    .readings
+                    .into_iter()
+                    .zip(read_source.reading_settings)
+                    .map(|(reading, settings)| (reading, settings, "fixture".into()))
+                    .collect(),
+                journal::OnConflict::Reject,
+                &mut journal::NoConflictList,
+                &read_source.prefetched,
+            )
+            .unwrap();
+    }
+    let imported: Vec<serde_json::Value> = std::fs::read_to_string(&imported_path)
+        .unwrap()
+        .lines()
+        .map(|row| serde_json::from_str(row).unwrap())
+        .collect();
+    assert!(!imported[0]["prefetch"].as_bool().unwrap_or(false));
+    assert_eq!(imported[1]["prefetch"], true);
+    let dst = dir.path().join("dst.jsonl");
+    let mut journal = Journal::open(&dst, &a.fingerprint).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 2);
+    assert!(journal.prefetched.contains(ROOT));
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&dst)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!records[0]["prefetch"].as_bool().unwrap_or(false));
+    assert_eq!(records[1]["prefetch"], true);
+    drop(journal);
+    assert!(Journal::open(&dst, &a.fingerprint).unwrap().prefetched.contains(ROOT));
+}
+
+#[test]
+fn live_import_two_conditions_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+    let a = settings();
+    let b = a.with_overrides(a.multipv, a.nodes + 1).unwrap();
+    let source = dir.path().join("source");
+    {
+        let mut journal = Journal::open(&source, &a.fingerprint).unwrap();
+        for key in [ROOT, &model::child(ROOT, "5i4i").unwrap()] {
+            for cond in [&a, &b] {
+                journal.append(reading(key, &[], cond), cond, "fixture".into()).unwrap();
+            }
+        }
+    }
+    let destination = dir.path().join("destination");
+    let mut journal = Journal::open(&destination, &a.fingerprint).unwrap();
+    std::fs::copy(&source, state.join("import/first.jsonl")).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 4);
+    let bytes = std::fs::read(&destination).unwrap();
+    std::fs::copy(&source, state.join("import/second.jsonl")).unwrap();
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 0);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 4);
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+}
+
+#[test]
+fn live_import_preserves_versions_and_adds_missing_prefetch_on_existing_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dst = settings();
+    dst.engine_version = Some("destination".into());
+    let mut src = dst.clone();
+    src.engine_version = Some("source".into());
+    let path = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&path, &dst.fingerprint).unwrap();
+    let existing = reading(ROOT, &[], &dst);
+    journal.append(existing.clone(), &dst, "fixture".into()).unwrap();
+    let added = reading(&child(ROOT, "5i5h").unwrap(), &[], &src);
+    let mut inbox = super::live_import::Inbox::new(dir.path()).unwrap();
+    let source_path = dir.path().join("import/01.jsonl");
+    let mut source = Journal::open(&source_path, &src.fingerprint).unwrap();
+    source.append_marked(existing.clone(), &src, "fixture".into(), true).unwrap();
+    source.append(added.clone(), &src, "fixture".into()).unwrap();
+    drop(source);
+    assert!(drain_import(&mut inbox, &mut journal).is_empty());
+    assert_eq!(inbox.status()["counts"]["appended"], 1);
+    assert_eq!(inbox.status()["counts"]["skipped_same"], 1);
+    assert!(journal.prefetched.contains(ROOT));
+    drop(journal);
+    let journal = Journal::open(&path, &dst.fingerprint).unwrap();
+    assert_eq!(journal.get_exact(ROOT, &dst.fingerprint), Some(&existing));
+    assert_eq!(journal.get_exact(&added.key, &src.fingerprint), Some(&added));
+    assert!(journal.prefetched.contains(ROOT));
+    assert!(journal.skipped_rows.is_empty());
 }

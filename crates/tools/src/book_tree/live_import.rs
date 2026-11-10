@@ -1,5 +1,5 @@
 use super::journal::{
-    ConflictSink, Journal, OnConflict, Reading, Readings, Settings, StagedSource, parse_record,
+    ConflictSink, Journal, OnConflict, Reading, Settings, StagedSource, parse_record,
 };
 use super::transfer::ConflictTsv;
 use anyhow::{Context, Result};
@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,8 @@ struct Counts {
     skipped_same: usize,
     conflicts: usize,
     skipped_condition: usize,
+    skipped_invalid: usize,
+    skipped_conflicting: usize,
 }
 
 struct Staged {
@@ -45,7 +48,6 @@ impl ConflictSink for CheckpointList<'_> {
 /// serve が lock を保持したまま、検査済みの読みを少量ずつ台帳へ取り込む受付。
 pub(super) struct Inbox {
     dir: PathBuf,
-    accept_fingerprint: BTreeSet<String>,
     path: Option<PathBuf>,
     preparing: Option<JoinHandle<Result<StagedSource>>>,
     staged: Option<Staged>,
@@ -56,7 +58,7 @@ pub(super) struct Inbox {
 
 impl Inbox {
     /// 受付と処理済み・失敗ファイルの置き場を作る。
-    pub fn new(state: &Path, accept_fingerprint: BTreeSet<String>) -> Result<Self> {
+    pub fn new(state: &Path) -> Result<Self> {
         let dir = state.join("import");
         for path in [&dir, &dir.join("done"), &dir.join("failed")] {
             super::paths::reject_symlink(path)?;
@@ -64,7 +66,6 @@ impl Inbox {
         }
         Ok(Self {
             dir,
-            accept_fingerprint,
             path: None,
             preparing: None,
             staged: None,
@@ -95,7 +96,7 @@ impl Inbox {
         prefetch: bool,
         mut alert: impl FnMut(&str),
     ) -> Result<bool> {
-        if let Some(old) = journal.get(&reading.key) {
+        if let Some(old) = journal.get_exact(&reading.key, &settings.fingerprint) {
             if !old.same_values(&reading) {
                 alert(&format!("worker の後着結果が台帳と食い違います: {}", reading.key));
             }
@@ -108,25 +109,16 @@ impl Inbox {
     }
 
     /// 一周回分を進める。入力の失敗は通知して次へ進み、台帳の書き込み失敗は呼び元に返す。
-    pub fn poll(&mut self, journal: &mut Journal, settings: &Settings) -> Result<Option<String>> {
-        self.poll_chunk(journal, settings, CHUNK)
+    pub fn poll(&mut self, journal: &mut Journal) -> Result<Option<String>> {
+        self.poll_chunk(journal, CHUNK)
     }
 
     #[cfg(test)]
-    pub fn poll_short(
-        &mut self,
-        journal: &mut Journal,
-        settings: &Settings,
-    ) -> Result<Option<String>> {
-        self.poll_chunk(journal, settings, 64)
+    pub fn poll_short(&mut self, journal: &mut Journal) -> Result<Option<String>> {
+        self.poll_chunk(journal, 64)
     }
 
-    fn poll_chunk(
-        &mut self,
-        journal: &mut Journal,
-        settings: &Settings,
-        limit: usize,
-    ) -> Result<Option<String>> {
+    fn poll_chunk(&mut self, journal: &mut Journal, limit: usize) -> Result<Option<String>> {
         self.appended.clear();
         if self.path.is_none() {
             let mut paths = std::fs::read_dir(&self.dir)?
@@ -136,13 +128,10 @@ impl Inbox {
             paths.sort();
             if let Some(path) = paths.into_iter().next() {
                 let source = path.clone();
-                let settings = settings.clone();
-                let accept_fingerprint = self.accept_fingerprint.clone();
                 self.status = serde_json::json!({"file":path.file_name(), "state":"validating"});
                 self.path = Some(path);
-                self.preparing = Some(thread::spawn(move || {
-                    super::journal::stage_live_source(&source, &settings, &accept_fingerprint)
-                }));
+                self.preparing =
+                    Some(thread::spawn(move || super::journal::stage_live_source(&source)));
             }
             return Ok(None);
         }
@@ -168,6 +157,7 @@ impl Inbox {
                         list,
                         counts: Counts {
                             skipped_condition: source.skipped_condition,
+                            skipped_invalid: source.skipped_invalid,
                             ..Counts::default()
                         },
                         eof: false,
@@ -206,37 +196,35 @@ impl Inbox {
             let rec = parse_record(&bytes)?;
             let mut marks = [0];
             staged.row_marks.read_exact(&mut marks)?;
-            let existing = journal.get(&rec.reading.key);
+            if marks[0] & 4 != 0 {
+                staged.counts.skipped_conflicting += 1;
+                continue;
+            }
+            let existing = journal.get_exact(&rec.reading.key, &rec.settings.fingerprint);
             // 食い違いは重複行も一覧に残す。未追記の重複は、この周回の最初の行で取り込む。
-            if existing.is_some_and(|old| old.same_values(&rec.reading))
+            if (existing.is_some_and(|old| old.same_values(&rec.reading)) && marks[0] & 1 == 0)
                 || (marks[0] & 2 != 0 && existing.is_none())
             {
                 staged.counts.skipped_same += 1;
                 continue;
             }
-            let acceptance = if self.accept_fingerprint.contains(&rec.settings.fingerprint) {
-                ":accepted=true"
-            } else {
-                ""
-            };
             let provenance = format!(
-                "journal:sha256={}:fingerprint={}:force=false{}:path={}",
+                "journal:sha256={}:fingerprint={}:force=false:path={}",
                 staged.sha256,
                 rec.settings.fingerprint,
-                acceptance,
                 path.display()
             );
-            let first = journal.get(&rec.reading.key).is_none()
-                && self.appended.insert(rec.reading.key.clone());
-            if first && marks[0] & 1 != 0 {
-                prefetched.insert(rec.reading.key.clone());
+            if marks[0] & 1 != 0 {
+                prefetched.insert((rec.settings.fingerprint.clone(), rec.reading.key.clone()));
             }
-            incoming.push((rec.reading, provenance));
+            if existing.is_none() {
+                self.appended.insert(rec.reading.key.clone());
+            }
+            incoming.push((rec.reading, Arc::new(rec.settings), provenance));
         }
         if !incoming.is_empty() {
-            let (appended, skipped, conflicts) = journal.merge_all(
+            let (appended, skipped, conflicts) = journal.merge_records(
                 incoming,
-                settings,
                 OnConflict::KeepExisting,
                 &mut CheckpointList(&mut staged.list),
                 &prefetched,

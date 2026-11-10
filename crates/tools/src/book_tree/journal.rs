@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const VERSION: &str = "book-tree-v1/newgame-ready/node-calib-last-multipv-v1";
 
@@ -115,6 +116,19 @@ impl Settings {
             hash: args.hash,
             engine_version: None,
         };
+        settings.fingerprint = settings.computed_fingerprint()?;
+        Ok(settings)
+    }
+
+    /// 木ごとの探索幅とノード数を指定した条件を返す。
+    pub fn with_overrides(&self, multipv: usize, nodes: u64) -> Result<Self> {
+        if multipv == 0 || nodes == 0 {
+            bail!("nodes / multipv は正数が必要です");
+        }
+        let mut settings = self.clone();
+        settings.multipv = multipv;
+        settings.nodes = nodes;
+        settings.options.insert("MultiPV".into(), multipv.to_string());
         settings.fingerprint = settings.computed_fingerprint()?;
         Ok(settings)
     }
@@ -277,8 +291,10 @@ impl Drop for UnlockOnDrop {
 
 pub(super) trait Readings {
     fn get(&self, key: &str) -> Option<&Reading>;
-    fn fingerprint(&self) -> Option<&str> {
-        None
+    fn get_preferred(&self, key: &str, preferred: Option<&str>) -> Option<&Reading>;
+    fn condition(&self, key: &str, preferred: Option<&str>) -> Option<&str>;
+    fn has_exact(&self, key: &str, fingerprint: &str) -> bool {
+        self.condition(key, Some(fingerprint)) == Some(fingerprint)
     }
 }
 
@@ -286,30 +302,91 @@ impl Readings for BTreeMap<String, Reading> {
     fn get(&self, key: &str) -> Option<&Reading> {
         self.get(key)
     }
+    fn get_preferred(&self, key: &str, _: Option<&str>) -> Option<&Reading> {
+        self.get(key)
+    }
+    fn condition(&self, _: &str, _: Option<&str>) -> Option<&str> {
+        None
+    }
 }
 
-// 1 件ごとには読みだけを持つ。条件の同一性は指紋で決まる (ファイル型 option はパスでなく
-// 内容の sha256 で指紋に入るので、同じモデルを別のパスで指定した読みも同じ条件として使い回す)。
+/// 自条件の読みが無い場合の優先順位。追記順に依存させない。
+pub(super) fn compare_readings(
+    a: &Reading,
+    a_fp: &str,
+    b: &Reading,
+    b_fp: &str,
+) -> std::cmp::Ordering {
+    a.nodes_limit
+        .cmp(&b.nodes_limit)
+        .then_with(|| a.multipv.len().cmp(&b.multipv.len()))
+        .then_with(|| b_fp.cmp(a_fp))
+}
+
+type CondId = usize;
+
+enum Rows {
+    One((CondId, Reading)),
+    Many(Vec<(CondId, Reading)>),
+}
+
+impl Rows {
+    fn as_slice(&self) -> &[(CondId, Reading)] {
+        match self {
+            Self::One(row) => std::slice::from_ref(row),
+            Self::Many(rows) => rows,
+        }
+    }
+
+    fn insert(&mut self, id: CondId, reading: Reading) {
+        *self = match std::mem::replace(self, Self::Many(Vec::new())) {
+            Self::One(old) if old.0 == id => Self::One(old),
+            Self::One(old) => Self::Many(vec![old, (id, reading)]),
+            Self::Many(mut rows) => {
+                if !rows.iter().any(|(old_id, _)| *old_id == id) {
+                    rows.push((id, reading));
+                }
+                Self::Many(rows)
+            }
+        };
+    }
+}
+
+#[derive(Default, serde::Serialize)]
+pub(super) struct SkippedRows {
+    invalid: usize,
+    conflicting: usize,
+}
+
 pub(super) struct Journal {
     lock: LockedFile,
     fingerprint: String,
-    records: BTreeMap<String, Reading>,
+    records: BTreeMap<String, Rows>,
+    conditions: Vec<Arc<Settings>>,
+    condition_ids: BTreeMap<String, CondId>,
+    prefetch_conditions: BTreeSet<(CondId, String)>,
+    pub skipped_rows: BTreeMap<String, SkippedRows>,
     pub prefetched: BTreeSet<String>,
+    /// エンジンで読んだ直近の行の、1 ノードあたりの秒数。
     pub durations: VecDeque<f64>,
 }
 
 impl Readings for Journal {
-    fn fingerprint(&self) -> Option<&str> {
-        Some(&self.fingerprint)
-    }
     fn get(&self, key: &str) -> Option<&Reading> {
-        self.records.get(key)
+        self.get_preferred(key, Some(&self.fingerprint))
+    }
+    fn get_preferred(&self, key: &str, preferred: Option<&str>) -> Option<&Reading> {
+        self.selected(key, preferred).map(|(_, reading)| reading)
+    }
+    fn condition(&self, key: &str, preferred: Option<&str>) -> Option<&str> {
+        self.selected(key, preferred)
+            .map(|(id, _)| self.conditions[*id].fingerprint.as_str())
     }
 }
 
-fn scan(lock: &mut LockedFile, mut visit: impl FnMut(Record) -> Result<()>) -> Result<()> {
-    lock.0.seek(SeekFrom::Start(0))?;
-    let mut reader = BufReader::new(lock.0.try_clone()?);
+fn scan(file: &mut File, mut visit: impl FnMut(Record) -> Result<()>) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file.try_clone()?);
     let mut offset = 0;
     let mut bytes = Vec::new();
     loop {
@@ -320,7 +397,7 @@ fn scan(lock: &mut LockedFile, mut visit: impl FnMut(Record) -> Result<()>) -> R
         }
         // 台帳は改行まで同期して保存する。末尾の未確定行だけを回復する。
         if !bytes.ends_with(b"\n") {
-            lock.0.set_len(offset)?;
+            file.set_len(offset)?;
             break;
         }
         offset += n as u64;
@@ -331,17 +408,8 @@ fn scan(lock: &mut LockedFile, mut visit: impl FnMut(Record) -> Result<()>) -> R
         }
         visit(rec)?;
     }
-    lock.0.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::End(0))?;
     Ok(())
-}
-
-fn conditions(lock: &mut LockedFile) -> Result<BTreeMap<String, Settings>> {
-    let mut conditions = BTreeMap::new();
-    scan(lock, |rec| {
-        conditions.insert(rec.settings.fingerprint.clone(), rec.settings);
-        Ok(())
-    })?;
-    Ok(conditions)
 }
 
 impl Journal {
@@ -350,53 +418,112 @@ impl Journal {
         Self::load(LockedFile::open(path)?, fingerprint)
     }
 
-    fn load(mut lock: LockedFile, fingerprint: &str) -> Result<Self> {
-        let mut records: BTreeMap<String, Reading> = BTreeMap::new();
-        let mut prefetched = BTreeSet::new();
-        let mut durations = VecDeque::new();
-        scan(&mut lock, |rec| {
-            if rec.settings.fingerprint != fingerprint {
-                return Ok(());
-            }
-            rec.reading.validate(&rec.settings)?;
-            if let Some(old) = records.get(&rec.reading.key)
-                && !old.same_values(&rec.reading)
-            {
-                bail!("台帳の重複が矛盾します");
-            }
-            if rec.prefetch {
-                prefetched.insert(rec.reading.key.clone());
-            }
-            if rec.provenance == "engine" {
-                durations.push_back(rec.reading.sec);
-                if durations.len() > 50 {
-                    durations.pop_front();
-                }
-            }
-            records.insert(rec.reading.key.clone(), rec.reading);
-            Ok(())
-        })?;
-        Ok(Self {
+    fn load(lock: LockedFile, fingerprint: &str) -> Result<Self> {
+        let mut journal = Self {
             lock,
             fingerprint: fingerprint.into(),
-            records,
-            prefetched,
-            durations,
+            records: BTreeMap::new(),
+            conditions: Vec::new(),
+            condition_ids: BTreeMap::new(),
+            prefetch_conditions: BTreeSet::new(),
+            skipped_rows: BTreeMap::new(),
+            prefetched: BTreeSet::new(),
+            durations: VecDeque::new(),
+        };
+        // scan の間だけファイルを分離し、行を複製せず索引へ移す。
+        let mut scan_file = journal.lock.0.try_clone()?;
+        let mut validity = Validity::default();
+        scan(&mut scan_file, |rec| {
+            if !validity.valid(&rec)? {
+                journal.skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
+                return Ok(());
+            }
+            if journal
+                .get_exact(&rec.reading.key, &rec.settings.fingerprint)
+                .is_some_and(|old| !old.same_values(&rec.reading))
+            {
+                journal.skipped_rows.entry(rec.settings.fingerprint).or_default().conflicting += 1;
+                return Ok(());
+            }
+            journal.remember(rec);
+            Ok(())
+        })?;
+        report_skipped(&journal.skipped_rows);
+        Ok(journal)
+    }
+
+    fn condition_id(&mut self, settings: &Settings) -> CondId {
+        *self.condition_ids.entry(settings.fingerprint.clone()).or_insert_with(|| {
+            let id = self.conditions.len();
+            self.conditions.push(Arc::new(settings.clone()));
+            id
         })
     }
 
-    pub fn select(mut lock: LockedFile, fingerprint: Option<&str>) -> Result<(Self, Settings)> {
-        let conditions = conditions(&mut lock)?;
-        let settings = if let Some(fp) = fingerprint {
-            conditions.get(fp).context("指紋が台帳にありません")?
-        } else {
-            if conditions.len() != 1 {
-                bail!("台帳の条件が一意でありません。--fingerprint を指定してください");
+    fn remember(&mut self, rec: Record) {
+        let id = self.condition_id(&rec.settings);
+        merge_engine_version(Arc::make_mut(&mut self.conditions[id]), &rec.settings);
+        let key = rec.reading.key.clone();
+        if rec.prefetch {
+            self.prefetched.insert(key.clone());
+            self.prefetch_conditions.insert((id, key.clone()));
+        }
+        if rec.provenance == "engine" && rec.reading.nodes_limit > 0 {
+            self.durations.push_back(rec.reading.sec / rec.reading.nodes_limit as f64);
+            if self.durations.len() > 50 {
+                self.durations.pop_front();
             }
-            conditions.values().next().context("空の台帳")?
+        }
+        match self.records.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Rows::One((id, rec.reading)));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().insert(id, rec.reading)
+            }
+        }
+    }
+
+    fn selected(&self, key: &str, preferred: Option<&str>) -> Option<&(CondId, Reading)> {
+        let rows = self.records.get(key)?.as_slice();
+        preferred
+            .and_then(|fp| self.condition_ids.get(fp))
+            .and_then(|id| rows.iter().find(|(s, _)| s == id))
+            .or_else(|| {
+                rows.iter().max_by(|a, b| {
+                    compare_readings(
+                        &a.1,
+                        &self.conditions[a.0].fingerprint,
+                        &b.1,
+                        &self.conditions[b.0].fingerprint,
+                    )
+                })
+            })
+    }
+
+    /// 指定した条件と完全に一致する読みだけを返す。
+    pub fn get_exact(&self, key: &str, fingerprint: &str) -> Option<&Reading> {
+        let id = self.condition_ids.get(fingerprint)?;
+        self.records
+            .get(key)?
+            .as_slice()
+            .iter()
+            .find(|(s, _)| s == id)
+            .map(|(_, reading)| reading)
+    }
+
+    pub fn select(lock: LockedFile, fingerprint: Option<&str>) -> Result<(Self, Option<Settings>)> {
+        let journal = Self::load(lock, fingerprint.unwrap_or(""))?;
+        let settings = if let Some(fp) = fingerprint {
+            let id = journal.condition_ids.get(fp).context("指紋が台帳にありません")?;
+            Some((*journal.conditions[*id]).clone())
+        } else {
+            if journal.lock.0.metadata()?.len() == 0 {
+                bail!("空の台帳");
+            }
+            None
         };
-        let journal = Self::load(lock, &settings.fingerprint)?;
-        Ok((journal, settings.clone()))
+        Ok((journal, settings))
     }
 
     #[cfg(test)]
@@ -428,19 +555,17 @@ impl Journal {
         provenance: String,
         prefetch: bool,
     ) -> Result<()> {
-        if settings.fingerprint != self.fingerprint {
-            bail!("台帳を開いた指紋と追記の条件が違います");
-        }
-        reading.validate(settings)?;
+        Validity::default().require(&reading, settings)?;
         let key = reading.key.clone();
-        let reading = if let Some(old) = self.records.get(&key) {
+        let reading = if let Some(old) = self.get_exact(&key, &settings.fingerprint) {
             if !old.same_values(&reading) {
                 bail!("値の違う重複: {}", reading.key);
             }
-            if !prefetch || self.prefetched.contains(&key) {
+            let id = self.condition_ids[&settings.fingerprint];
+            if !prefetch || self.prefetch_conditions.contains(&(id, key.clone())) {
                 return Ok(());
             }
-            // 取り込み元の印だけを足し、先に確定した手数と読みは保つ。
+            // 同値の再追記でも、先に確定した手数と読みは保つ。
             old.clone()
         } else {
             reading
@@ -455,16 +580,7 @@ impl Journal {
         let mut bytes = serde_json::to_vec(&rec)?;
         bytes.push(b'\n');
         self.lock.0.write_all(&bytes)?;
-        if prefetch {
-            self.prefetched.insert(key.clone());
-        }
-        if rec.provenance == "engine" {
-            self.durations.push_back(rec.reading.sec);
-            if self.durations.len() > 50 {
-                self.durations.pop_front();
-            }
-        }
-        self.records.insert(key, rec.reading);
+        self.remember(rec);
         Ok(())
     }
 
@@ -474,6 +590,7 @@ impl Journal {
     /// `sink.before_append` は検査の後・追記の前に呼び、失敗すれば何も追記しない。
     /// `prefetched` の局面は先読みの印を付けて追記する (取り込み元の印を引き継ぐ)。
     /// (追記した件数, 飛ばした件数, 食い違いの件数) を返す。飛ばした件数は食い違いを含む。
+    #[cfg(test)]
     pub fn merge_all(
         &mut self,
         incoming: Vec<(Reading, String)>,
@@ -482,18 +599,40 @@ impl Journal {
         sink: &mut dyn ConflictSink,
         prefetched: &BTreeSet<String>,
     ) -> Result<(usize, usize, usize)> {
-        if settings.fingerprint != self.fingerprint {
-            bail!("台帳を開いた指紋と取り込みの条件が違います");
-        }
+        let settings = Arc::new(settings.clone());
+        self.merge_records(
+            incoming.into_iter().map(|(r, p)| (r, Arc::clone(&settings), p)).collect(),
+            on_conflict,
+            sink,
+            &prefetched
+                .iter()
+                .map(|key| (settings.fingerprint.clone(), key.clone()))
+                .collect(),
+        )
+    }
+
+    /// 各行の読み条件と入力順を保って取り込む。食い違いは同じ条件・局面の間だけで判定する。
+    pub fn merge_records(
+        &mut self,
+        incoming: Vec<(Reading, Arc<Settings>, String)>,
+        on_conflict: OnConflict,
+        sink: &mut dyn ConflictSink,
+        prefetched: &BTreeSet<(String, String)>,
+    ) -> Result<(usize, usize, usize)> {
         let total = incoming.len();
-        let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
+        let mut pending = Vec::new();
+        let mut indices = BTreeMap::new();
         let mut conflicts = 0;
-        for (reading, provenance) in incoming {
-            reading.validate(settings)?;
-            let existing = self
-                .records
-                .get(&reading.key)
-                .or_else(|| pending.get(&reading.key).map(|(r, _)| r));
+        let mut validity = Validity::default();
+        for (reading, settings, provenance) in incoming {
+            validity.require(&reading, &settings)?;
+            let identity = (reading.key.clone(), settings.fingerprint.clone());
+            let existing = self.get_exact(&reading.key, &settings.fingerprint).or_else(|| {
+                indices.get(&identity).map(|&index: &usize| {
+                    let (old, _, _): &(Reading, Arc<Settings>, String) = &pending[index];
+                    old
+                })
+            });
             if let Some(old) = existing
                 && !old.same_values(&reading)
             {
@@ -506,20 +645,23 @@ impl Journal {
                     }
                 }
             }
-            pending.entry(reading.key.clone()).or_insert((reading, provenance));
+            if let std::collections::btree_map::Entry::Vacant(entry) = indices.entry(identity) {
+                entry.insert(pending.len());
+                pending.push((reading, settings, provenance));
+            }
         }
         sink.before_append()?;
         let mut appended = 0;
         let mut wrote = false;
-        for (reading, provenance) in pending.into_values() {
-            if !self.records.contains_key(&reading.key) {
+        for (reading, settings, provenance) in pending {
+            if self.get_exact(&reading.key, &settings.fingerprint).is_none() {
                 appended += 1;
             }
-            let prefetch = prefetched.contains(&reading.key);
-            self.append_unsynced(reading, settings, provenance, prefetch)?;
+            let prefetch =
+                prefetched.contains(&(settings.fingerprint.clone(), reading.key.clone()));
+            self.append_unsynced(reading, &settings, provenance, prefetch)?;
             wrote = true;
         }
-        // 新しい局面が 0 件でも、同じ値に先読みの印を足した行は書いているので、その行を失わないよう同期する。
         if wrote {
             self.lock.0.sync_data()?;
         }
@@ -557,15 +699,36 @@ impl ConflictSink for NoConflictList {
     }
 }
 
-/// 取り込み元の台帳から選んだ 1 条件の読み。
+/// 取り込み元の台帳から選んだ読み。
 pub(super) struct Source {
-    pub settings: Settings,
     pub readings: Vec<Reading>,
-    pub prefetched: BTreeSet<String>,
+    pub reading_settings: Vec<Arc<Settings>>,
+    pub prefetched: BTreeSet<(String, String)>,
     /// 読んだ完全な行 (末尾の未確定行を除く) の SHA-256。
     pub sha256: String,
     /// 改行で終わらない末尾の行を無視したか。
     pub ignored_tail: bool,
+}
+
+impl Source {
+    /// 局面ごとに、指定条件を優先し、無ければノード数・PV 行数・指紋で選ぶ。
+    pub fn selected(&self, preferred: Option<&str>) -> BTreeMap<&str, (&Reading, &Settings)> {
+        let mut selected: BTreeMap<&str, (&Reading, &Settings)> = BTreeMap::new();
+        for (reading, settings) in self.readings.iter().zip(&self.reading_settings) {
+            let entry = selected.entry(&reading.key).or_insert((reading, settings));
+            let rank = |s: &Settings| preferred == Some(s.fingerprint.as_str());
+            if rank(settings)
+                .cmp(&rank(entry.1))
+                .then_with(|| {
+                    compare_readings(reading, &settings.fingerprint, entry.0, &entry.1.fingerprint)
+                })
+                .is_gt()
+            {
+                *entry = (reading, settings);
+            }
+        }
+        selected
+    }
 }
 
 /// 取り込み元の台帳を読む。共有 lock を取って書き手 (serve 等の排他 lock) と並ばないようにし、
@@ -586,6 +749,7 @@ pub(super) fn read_source(
     let mut hash = Sha256::new();
     let mut complete = 0u64;
     let mut ignored_tail = false;
+    let mut found_fingerprint = fingerprint.is_none();
     let mut conditions: BTreeMap<String, Settings> = BTreeMap::new();
     for_each_complete_line(
         &mut reader,
@@ -594,62 +758,81 @@ pub(super) fn read_source(
             hash.update(bytes);
             complete += bytes.len() as u64;
             let rec = parse_record(bytes)?;
-            conditions.entry(rec.settings.fingerprint.clone()).or_insert(rec.settings);
+            found_fingerprint |= fingerprint == Some(rec.settings.fingerprint.as_str());
             Ok(())
         },
         &mut ignored_tail,
     )?;
-    if conditions.is_empty() {
+    if complete == 0 {
         bail!("取り込み元の台帳が空です: {}", path.display());
     }
-    let mut settings = match fingerprint {
-        Some(fp) => conditions.remove(fp).context("指紋が取り込み元の台帳にありません")?,
-        None => {
-            if conditions.len() != 1 {
-                bail!("取り込み元の条件が一意でありません。--fingerprint を指定してください");
-            }
-            conditions.into_values().next().context("取り込み元の台帳が空です")?
-        }
-    };
-    if settings.computed_fingerprint()? != settings.fingerprint {
-        bail!("取り込み元の条件が指紋と合いません: {}", settings.fingerprint);
+    if !found_fingerprint {
+        bail!("指紋が取り込み元の台帳にありません");
     }
     let mut file = reader.into_inner();
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
-    let mut records: BTreeMap<String, Reading> = BTreeMap::new();
-    // 残さない局面も重複の矛盾は確かめる。読みを持たずに、局面と値の SHA-256 の先頭 16 バイトだけを持つ。
+    let mut readings = Vec::new();
+    let mut reading_settings = Vec::new();
+    let mut shared: BTreeMap<String, (CondId, Arc<Settings>)> = BTreeMap::new();
+    let mut indices = BTreeMap::new();
     let mut prefetched = BTreeSet::new();
-    let mut skipped: HashMap<[u8; 16], [u8; 16]> = HashMap::new();
+    let mut seen = HashMap::new();
+    let mut skipped_rows = BTreeMap::<String, SkippedRows>::new();
+    let mut validity = Validity::default();
     for_each_complete_line(
         &mut reader,
         complete,
         |bytes| {
             let rec = parse_record(bytes)?;
-            if rec.settings.fingerprint != settings.fingerprint {
+            if fingerprint.is_some_and(|fp| rec.settings.fingerprint != fp) {
                 return Ok(());
             }
-            validate_source_record(&rec, &mut settings)?;
+            if !validity.valid(&rec)? {
+                skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
+                return Ok(());
+            }
+            if !remember_values(&mut seen, &rec.reading, &rec.settings.fingerprint)? {
+                skipped_rows.entry(rec.settings.fingerprint).or_default().conflicting += 1;
+                return Ok(());
+            }
             if !keep(&rec.reading.key) {
-                remember_values(&mut skipped, &rec.reading)?;
                 return Ok(());
             }
-            if let Some(old) = records.get(&rec.reading.key)
-                && !old.same_values(&rec.reading)
-            {
-                bail!("取り込み元の重複が矛盾します: {}", rec.reading.key);
-            }
+            let known = conditions
+                .entry(rec.settings.fingerprint.clone())
+                .or_insert_with(|| rec.settings.clone());
+            merge_engine_version(known, &rec.settings);
+            let next_id = shared.len();
+            let (id, condition) = shared
+                .entry(rec.settings.fingerprint.clone())
+                .or_insert_with(|| (next_id, Arc::new(known.clone())));
+            let identity = (rec.reading.key.clone(), *id);
             if rec.prefetch {
-                prefetched.insert(rec.reading.key.clone());
+                prefetched.insert((rec.settings.fingerprint.clone(), rec.reading.key.clone()));
             }
-            records.insert(rec.reading.key.clone(), rec.reading);
+            if let Some(&index) = indices.get(&identity) {
+                let old: &Reading = &readings[index];
+                debug_assert!(old.same_values(&rec.reading));
+            } else {
+                indices.insert(identity, readings.len());
+                reading_settings.push(Arc::clone(condition));
+                readings.push(rec.reading);
+            }
             Ok(())
         },
         &mut false,
     )?;
+    report_skipped(&skipped_rows);
+    for (fp, (_, settings)) in &mut shared {
+        *settings = Arc::new(conditions[fp].clone());
+    }
+    for settings in &mut reading_settings {
+        *settings = Arc::clone(&shared[&settings.fingerprint].1);
+    }
     Ok(Source {
-        settings,
-        readings: records.into_values().collect(),
+        readings,
+        reading_settings,
         prefetched,
         sha256: format!("{:x}", hash.finalize()),
         ignored_tail,
@@ -681,7 +864,7 @@ pub(super) fn simulation_readings(
             if !selected.same_condition(&rec.settings) {
                 bail!("同じ指紋の条件が一致しません");
             }
-            merge_engine_version(selected, &rec.settings)?;
+            merge_engine_version(selected, &rec.settings);
             rec.reading.validate(&rec.settings)?;
             if let Some(old) = records.get(&rec.reading.key)
                 && !old.same_values(&rec.reading)
@@ -772,32 +955,33 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<Record> {
 }
 
 /// 読みを保持せず、同じ局面に異なる値が混ざっていないか確かめる。
-fn remember_values(seen: &mut HashMap<[u8; 16], [u8; 16]>, reading: &Reading) -> Result<()> {
+fn remember_values(
+    seen: &mut HashMap<[u8; 16], [u8; 16]>,
+    reading: &Reading,
+    fingerprint: &str,
+) -> Result<bool> {
     let short = |bytes: &[u8]| -> [u8; 16] {
         Sha256::digest(bytes)[..16].try_into().expect("16 バイト")
     };
     let values = short(&serde_json::to_vec(&(&reading.multipv, &reading.bestmove))?);
-    if *seen.entry(short(reading.key.as_bytes())).or_insert(values) != values {
-        bail!("取り込み元の重複が矛盾します: {}", reading.key);
-    }
-    Ok(())
+    Ok(*seen
+        .entry(short(&serde_json::to_vec(&(fingerprint, &reading.key))?))
+        .or_insert(values)
+        == values)
 }
 
-/// 全体を検査した取り込み元の、同じ条件の完全な行。
+/// 全体を検査した取り込み元の、全条件の完全な行。
 pub(super) struct StagedSource {
     pub file: File,
     pub sha256: String,
     pub row_marks: File,
     pub skipped_condition: usize,
+    pub skipped_invalid: usize,
     pub ignored_tail: bool,
 }
 
-/// 全体を検査してから、互換性のある条件と明示的に受け入れた条件の行を一時ファイルに渡す。
-pub(super) fn stage_live_source(
-    path: &Path,
-    dst: &Settings,
-    accept_fingerprint: &BTreeSet<String>,
-) -> Result<StagedSource> {
+/// 全体を検査してから、全条件の行を入力順で一時ファイルに渡す。
+pub(super) fn stage_live_source(path: &Path) -> Result<StagedSource> {
     super::paths::reject_symlink(path)?;
     if !std::fs::metadata(path)?.is_file() {
         bail!("取り込み元は通常のファイルが必要です");
@@ -809,7 +993,6 @@ pub(super) fn stage_live_source(
     let mut staged =
         tempfile::tempfile_in(path.parent().context("取り込み元の親 dir がありません")?)?;
     let mut hash = Sha256::new();
-    let mut conditions: BTreeMap<String, Settings> = BTreeMap::new();
     let mut complete = 0u64;
     let mut ignored_tail = false;
     for_each_complete_line(
@@ -818,46 +1001,30 @@ pub(super) fn stage_live_source(
         |bytes| {
             hash.update(bytes);
             complete += bytes.len() as u64;
-            let rec = parse_record(bytes)?;
-            let known = conditions
-                .entry(rec.settings.fingerprint.clone())
-                .or_insert_with(|| rec.settings.clone());
-            merge_engine_version(known, &rec.settings)?;
+            let _ = parse_record(bytes)?;
             Ok(())
         },
         &mut ignored_tail,
     )?;
-    if conditions.is_empty() {
+    if complete == 0 {
         bail!("取り込み元の台帳が空です");
-    }
-    let mut compatible = BTreeSet::new();
-    for (fp, known) in &conditions {
-        if accept_fingerprint.contains(fp) {
-            super::transfer::check_accepted(known, dst)?;
-            compatible.insert(fp.clone());
-        } else if super::transfer::same_reading_condition(known, dst) || fp == &dst.fingerprint {
-            super::transfer::check_compatible(known, dst, false)?;
-            compatible.insert(fp.clone());
-        }
     }
     reader.seek(SeekFrom::Start(0))?;
     let dir = path.parent().context("取り込み元の親 dir がありません")?;
     let mut buckets = super::source_buckets::Buckets::new(dir, complete)?;
     let mut rows = 0;
-    let mut foreign = 0;
+    let mut validity = Validity::default();
+    let mut skipped_rows = BTreeMap::<String, SkippedRows>::new();
     for_each_complete_line(
         &mut reader,
         complete,
         |bytes| {
             let rec = parse_record(bytes)?;
-            if !compatible.contains(&rec.settings.fingerprint) {
-                foreign += 1;
+            if !validity.valid(&rec)? {
+                skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
                 return Ok(());
             }
-            let known =
-                conditions.get_mut(&rec.settings.fingerprint).context("条件がありません")?;
-            validate_source_record(&rec, known)?;
-            buckets.push(&rec.reading, rows, rec.prefetch)?;
+            buckets.push(&rec.reading, &rec.settings.fingerprint, rows, rec.prefetch)?;
             rows += 1;
             staged.write_all(bytes)?;
             Ok(())
@@ -865,34 +1032,59 @@ pub(super) fn stage_live_source(
         &mut false,
     )?;
     let row_marks = buckets.finish(dir, rows)?;
+    report_skipped(&skipped_rows);
     staged.seek(SeekFrom::Start(0))?;
     Ok(StagedSource {
         file: staged,
         sha256: format!("{:x}", hash.finalize()),
         row_marks,
-        skipped_condition: foreign,
+        skipped_condition: 0,
+        skipped_invalid: skipped_rows.values().map(|c| c.invalid).sum(),
         ignored_tail,
     })
 }
 
-fn validate_source_record(rec: &Record, settings: &mut Settings) -> Result<()> {
-    if rec.settings.computed_fingerprint()? != settings.fingerprint
-        || !rec.settings.same_condition(settings)
-    {
-        bail!("取り込み元に指紋と条件の合わない行があります: {}", rec.reading.key);
-    }
-    merge_engine_version(settings, &rec.settings)?;
-    rec.reading.validate(&rec.settings)
+#[derive(Default)]
+struct Validity {
+    fingerprints: BTreeMap<Vec<u8>, String>,
 }
 
-/// 版を記録する前の行と後の行が同じ指紋に混ざる。指紋はバイナリの内容を含むので、分かった版を採る。
-fn merge_engine_version(known: &mut Settings, other: &Settings) -> Result<()> {
-    match (&known.engine_version, &other.engine_version) {
-        (Some(a), Some(b)) if a != b => bail!("同じ指紋に違うエンジンの版があります: {a} / {b}"),
-        (None, Some(_)) => known.engine_version = other.engine_version.clone(),
-        _ => {}
+impl Validity {
+    fn settings_valid(&mut self, settings: &Settings) -> Result<bool> {
+        let normalized = serde_json::to_vec(&settings.normalized())?;
+        let computed = self
+            .fingerprints
+            .entry(normalized)
+            .or_insert_with_key(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        Ok(*computed == settings.fingerprint)
     }
-    Ok(())
+
+    fn valid(&mut self, rec: &Record) -> Result<bool> {
+        Ok(rec.reading.validate(&rec.settings).is_ok() && self.settings_valid(&rec.settings)?)
+    }
+
+    fn require(&mut self, reading: &Reading, settings: &Settings) -> Result<()> {
+        reading.validate(settings)?;
+        if !self.settings_valid(settings)? {
+            bail!("台帳の指紋と条件が合いません");
+        }
+        Ok(())
+    }
+}
+
+fn report_skipped(skipped: &BTreeMap<String, SkippedRows>) {
+    for (fp, counts) in skipped {
+        eprintln!(
+            "journal skipped fingerprint={fp} invalid={} conflicting={}",
+            counts.invalid, counts.conflicting
+        );
+    }
+}
+
+fn merge_engine_version(known: &mut Settings, other: &Settings) {
+    if known.engine_version.is_none() {
+        known.engine_version = other.engine_version.clone();
+    }
 }
 
 /// 木に残る全ての読みを台帳と照合する。複数条件に一致する読みも確定扱いにしない。
@@ -935,22 +1127,54 @@ pub(super) fn match_fingerprints(
             File::open(path).with_context(|| format!("台帳を読めません: {}", path.display()))?;
         // serve の追記を妨げず、読み始めの範囲だけで完結させる。
         let limit = file.metadata()?.len();
+        let mut validity = Validity::default();
+        let mut skipped = BTreeMap::<String, SkippedRows>::new();
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = tempfile::Builder::new().prefix(".journal-match-").tempdir_in(parent)?;
+        let mut buckets = super::source_buckets::Buckets::new(dir.path(), limit)?;
+        let mut reader = BufReader::new(file.take(limit));
+        let mut rows = 0;
         for_each_complete_line(
-            &mut BufReader::new(file.take(limit)),
+            &mut reader,
             limit,
             |bytes| {
                 let rec = parse_record(bytes)?;
-                if let Some(matches) = wanted.get_mut(&signature(&rec.reading)) {
-                    if rec.settings.computed_fingerprint()? != rec.settings.fingerprint {
-                        bail!("台帳の指紋と条件が合いません");
-                    }
-                    rec.reading.validate(&rec.settings)?;
+                if !validity.valid(&rec)? {
+                    skipped.entry(rec.settings.fingerprint).or_default().invalid += 1;
+                } else {
+                    buckets.push(&rec.reading, &rec.settings.fingerprint, rows, false)?;
+                    rows += 1;
+                }
+                Ok(())
+            },
+            &mut false,
+        )?;
+        let mut marks = BufReader::new(buckets.finish(dir.path(), rows)?);
+        let mut file = reader.into_inner().into_inner();
+        file.rewind()?;
+        let mut reader = BufReader::new(file.take(limit));
+        for_each_complete_line(
+            &mut reader,
+            limit,
+            |bytes| {
+                let rec = parse_record(bytes)?;
+                if !validity.valid(&rec)? {
+                    return Ok(());
+                }
+                let mut mark = [0];
+                marks.read_exact(&mut mark)?;
+                if mark[0] & 4 != 0 {
+                    skipped.entry(rec.settings.fingerprint).or_default().conflicting += 1;
+                } else if mark[0] & 2 == 0
+                    && let Some(matches) = wanted.get_mut(&signature(&rec.reading))
+                {
                     matches.insert(rec.settings.fingerprint);
                 }
                 Ok(())
             },
             &mut false,
         )?;
+        report_skipped(&skipped);
     }
     Ok(signatures
         .iter()
@@ -1038,6 +1262,7 @@ mod tests {
         duplicate.reading.ply = 99;
         let mut foreign = first.clone();
         foreign.settings.nodes += 1;
+        foreign.reading.nodes_limit += 1;
         foreign.settings.fingerprint = foreign.settings.computed_fingerprint().unwrap();
         let mut file = File::create(&path).unwrap();
         for rec in [&first, &second, &duplicate, &foreign] {
@@ -1046,19 +1271,19 @@ mod tests {
         file.write_all(b"unfinished").unwrap();
         drop(file);
         let mut expected = Vec::new();
-        for rec in [&first, &second, &duplicate] {
+        for rec in [&first, &second, &duplicate, &foreign] {
             serde_json::to_writer(&mut expected, rec).unwrap();
             expected.push(b'\n');
         }
         for _ in 0..2 {
-            let mut source = stage_live_source(&path, &first.settings, &BTreeSet::new()).unwrap();
+            let mut source = stage_live_source(&path).unwrap();
             let mut rows = Vec::new();
             source.file.read_to_end(&mut rows).unwrap();
             assert_eq!(rows, expected);
             let mut marks = Vec::new();
             source.row_marks.read_to_end(&mut marks).unwrap();
-            assert_eq!(marks, [1, 1, 2]);
-            assert_eq!(source.skipped_condition, 1);
+            assert_eq!(marks, [1, 1, 2, 0]);
+            assert_eq!(source.skipped_condition, 0);
             assert!(source.ignored_tail);
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
@@ -1083,7 +1308,12 @@ mod tests {
         drop(file);
         let journal = Journal::open(&path, &rec.settings.fingerprint).unwrap();
         assert_eq!(journal.prefetched, BTreeSet::from([rec.reading.key.clone()]));
-        assert_eq!(journal.durations, (11..=60).map(f64::from).collect::<VecDeque<_>>());
+        assert_eq!(
+            journal.durations,
+            (11..=60)
+                .map(|n| f64::from(n) / rec.reading.nodes_limit as f64)
+                .collect::<VecDeque<_>>()
+        );
         drop(journal);
         let source = read_source(&path, None, |_| true).unwrap();
         let dst = dir.path().join("import.jsonl");
@@ -1097,7 +1327,7 @@ mod tests {
                 &rec.settings,
                 OnConflict::Reject,
                 &mut NoConflictList,
-                &source.prefetched,
+                &source.prefetched.iter().map(|(_, key)| key.clone()).collect(),
             )
             .unwrap();
         drop(journal);
@@ -1279,40 +1509,229 @@ mod tests {
     }
 
     #[test]
-    fn journal_retains_only_selected_fingerprint() {
+    fn remember_does_not_time_zero_node_readings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rec = record("", 0);
+        rec.provenance = "engine".into();
+        rec.reading.nodes_limit = 0;
+        let mut journal = Journal::open(&dir.path().join("journal"), "").unwrap();
+        for sec in [0.0, 0.1] {
+            rec.reading.sec = sec;
+            journal.remember(rec.clone());
+        }
+        assert!(journal.durations.is_empty());
+        rec.reading.nodes_limit = 100;
+        journal.remember(rec);
+        assert_eq!(journal.durations, VecDeque::from([0.001]));
+    }
+
+    #[test]
+    fn load_skips_tampered_fingerprints_and_accepts_equivalent_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal");
-        let target = record("target", 0);
-        {
-            let mut file = File::create(&path).unwrap();
-            write_record(&mut file, &target);
-            for condition in 0..128 {
-                for column in 0..9 {
-                    write_record(&mut file, &record(&format!("past-{condition}"), column));
-                }
-            }
-            let mut conflict = record("past-0", 0);
-            conflict.reading.bestmove = "win".into();
-            write_record(&mut file, &conflict);
-            file.write_all(b"{partial").unwrap();
+        let mut original = record("", 0);
+        original.settings.options.insert("EvalFile".into(), "model-a".into());
+        original.settings.content_sha256.insert("EvalFile".into(), "model-hash".into());
+        original.settings.fingerprint = original.settings.computed_fingerprint().unwrap();
+        let mut versioned = original.clone();
+        versioned.reading = record("", 1).reading;
+        versioned.settings.engine_version = Some("v1".into());
+        let mut moved = versioned.clone();
+        moved.reading = record("", 2).reading;
+        moved.settings.options.insert("EvalFile".into(), "model-b".into());
+        let mut conflicting = versioned.clone();
+        conflicting.reading = record("", 3).reading;
+        conflicting.settings.engine_version = Some("v2".into());
+        let mut tampered = original.clone();
+        tampered.reading = record("", 4).reading;
+        tampered.settings.engine_sha256 = "tampered".into();
+        let mut file = File::create(&path).unwrap();
+        for rec in [
+            &original,
+            &versioned,
+            &moved,
+            &conflicting,
+            &tampered,
+            &moved,
+            &original,
+        ] {
+            write_record(&mut file, rec);
         }
-        let mut journal = Journal::open(&path, "target").unwrap();
-        assert_eq!(journal.records.len(), 1);
-        assert_eq!(journal.get(&target.reading.key), Some(&target.reading));
-        assert!(Journal::open(&path, "past-1").is_err());
-        let next = record("target", 1);
-        journal.append(next.reading.clone(), &next.settings, "fixture".into()).unwrap();
+        drop(file);
+        let journal = Journal::open(&path, &original.settings.fingerprint).unwrap();
+        for rec in [&original, &versioned, &moved, &conflicting] {
+            assert_eq!(journal.get(&rec.reading.key), Some(&rec.reading));
+        }
+        assert!(!journal.has_exact(&tampered.reading.key, &original.settings.fingerprint));
+        assert_eq!(journal.skipped_rows[&original.settings.fingerprint].invalid, 1);
+        assert_eq!(journal.records.len(), 4);
+    }
+
+    #[test]
+    fn load_accepts_engine_version_added_after_first_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut first = record("", 0);
+        first.settings.fingerprint = first.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        write_record(&mut file, &first);
+        for column in 1..4 {
+            let mut later = record(&first.settings.fingerprint, column);
+            later.settings.engine_version = Some("v1".into());
+            write_record(&mut file, &later);
+        }
+        drop(file);
+        let journal = Journal::open(&path, &first.settings.fingerprint).unwrap();
+        assert_eq!(journal.records.len(), 4);
+        assert!(journal.skipped_rows.is_empty());
+        assert_eq!(journal.conditions[0].engine_version.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn load_keeps_valid_rows_after_corrupt_first_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut valid = record("", 0);
+        valid.settings.fingerprint = valid.settings.computed_fingerprint().unwrap();
+        let mut corrupt = valid.clone();
+        corrupt.settings.engine_sha256 = "tampered".into();
+        let mut later = record(&valid.settings.fingerprint, 1);
+        later.settings.engine_version = Some("v1".into());
+        let mut file = File::create(&path).unwrap();
+        for rec in [&corrupt, &valid, &later] {
+            write_record(&mut file, rec);
+        }
+        drop(file);
+        let journal = Journal::open(&path, &valid.settings.fingerprint).unwrap();
         assert_eq!(journal.records.len(), 2);
-        assert_eq!(journal.get(&next.reading.key), Some(&next.reading));
-        let foreign = record("foreign", 2);
-        let size = std::fs::metadata(&path).unwrap().len();
-        assert!(journal.append(foreign.reading, &foreign.settings, "fixture".into()).is_err());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        assert_eq!(journal.get(&valid.reading.key), Some(&valid.reading));
+        assert_eq!(journal.get(&later.reading.key), Some(&later.reading));
+        assert_eq!(journal.skipped_rows[&valid.settings.fingerprint].invalid, 1);
+    }
+
+    #[test]
+    fn journal_retains_all_conditions_and_prefers_requested_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut a = record("first", 0);
+        a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+        let mut b = record("second", 0);
+        b.reading.bestmove = "win".into();
+        b.settings.engine_sha256 = "other".into();
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        let fallback = if a.settings.fingerprint < b.settings.fingerprint {
+            &a.reading
+        } else {
+            &b.reading
+        };
+        let mut journal = Journal::open(&path, &a.settings.fingerprint).unwrap();
+        journal.append(a.reading.clone(), &a.settings, "fixture".into()).unwrap();
+        journal.append(b.reading.clone(), &b.settings, "fixture".into()).unwrap();
+        assert_eq!(journal.get(&a.reading.key), Some(&a.reading));
+        assert_eq!(
+            journal.get_preferred(&a.reading.key, Some(&b.settings.fingerprint)),
+            Some(&b.reading)
+        );
+        assert_eq!(journal.get_preferred(&a.reading.key, Some("absent")), Some(fallback));
+        assert!(journal.has_exact(&a.reading.key, &a.settings.fingerprint));
+        assert!(!journal.has_exact(&a.reading.key, "absent"));
         drop(journal);
-        assert!(Journal::open(&path, "past-0").is_err());
-        assert_eq!(Journal::open(&path, "past-1").unwrap().records.len(), 9);
-        assert!(Journal::open(&path, "absent").unwrap().records.is_empty());
-        assert_eq!(Journal::open(&path, "target").unwrap().records.len(), 2);
+        let journal = Journal::open(&path, "absent").unwrap();
+        assert_eq!(journal.get(&a.reading.key), Some(fallback));
+        assert_eq!(journal.records[&a.reading.key].as_slice().len(), 2);
+        drop(journal);
+        let mut bad = a.clone();
+        bad.reading.bestmove = "win".into();
+        write_record(&mut OpenOptions::new().append(true).open(&path).unwrap(), &bad);
+        let mut invalid = record("old-condition", 0);
+        invalid.reading.threads = 2;
+        invalid.settings.fingerprint = invalid.settings.computed_fingerprint().unwrap();
+        write_record(&mut OpenOptions::new().append(true).open(&path).unwrap(), &invalid);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut journal = Journal::open(&path, &b.settings.fingerprint).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(journal.get(&b.reading.key), Some(&b.reading));
+        assert_eq!(journal.skipped_rows[&invalid.settings.fingerprint].invalid, 1);
+        assert_eq!(journal.skipped_rows[&a.settings.fingerprint].conflicting, 1);
+        assert_eq!(journal.get_exact(&a.reading.key, &a.settings.fingerprint), Some(&a.reading));
+        assert!(journal.append(bad.reading, &bad.settings, "engine".into()).is_err());
+    }
+
+    #[test]
+    fn duplicate_append_is_idempotent_and_keeps_inline_single_row() {
+        for mark in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal");
+            let mut a = record("a", 0);
+            a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+            let mut b = record("b", 0);
+            b.reading.bestmove = "win".into();
+            b.settings.engine_sha256 = "other".into();
+            b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+            let mut journal = Journal::open(&path, &a.settings.fingerprint).unwrap();
+            journal.append(a.reading.clone(), &a.settings, "fixture".into()).unwrap();
+            assert!(matches!(journal.records[&a.reading.key], Rows::One(_)));
+            journal.append(b.reading.clone(), &b.settings, "fixture".into()).unwrap();
+            let size = std::fs::metadata(&path).unwrap().len();
+            journal
+                .append_marked(a.reading.clone(), &a.settings, "fixture".into(), mark)
+                .unwrap();
+            let after = std::fs::metadata(&path).unwrap().len();
+            assert_eq!(after > size, mark);
+            journal
+                .append_marked(a.reading.clone(), &a.settings, "fixture".into(), mark)
+                .unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), after);
+            assert_eq!(journal.get(&a.reading.key), Some(&a.reading));
+            drop(journal);
+            let journal = Journal::open(&path, &a.settings.fingerprint).unwrap();
+            assert_eq!(journal.get(&a.reading.key), Some(&a.reading));
+            assert_eq!(journal.records[&a.reading.key].as_slice().len(), 2);
+        }
+    }
+
+    #[test]
+    fn fallback_is_independent_of_order_and_ranks_nodes_pvs_then_fingerprint() {
+        let mut a = record("a", 0);
+        a.settings.fingerprint = a.settings.computed_fingerprint().unwrap();
+        let mut b = record("b", 0);
+        b.reading.bestmove = "win".into();
+        b.settings.engine_sha256 = "other".into();
+        b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+        for (nodes, extra_pv) in [(100, false), (101, false), (100, true)] {
+            let mut b = b.clone();
+            b.settings.nodes = nodes;
+            b.reading.nodes_limit = nodes;
+            if extra_pv {
+                b.reading.bestmove = "9i8i".into();
+                b.reading.multipv.push(Pv {
+                    mv: "9i8i".into(),
+                    cp: 10,
+                    depth: 1,
+                });
+            }
+            b.settings.fingerprint = b.settings.computed_fingerprint().unwrap();
+            let expected = if nodes > 100 || extra_pv {
+                b.settings.fingerprint.as_str()
+            } else {
+                std::cmp::min(a.settings.fingerprint.as_str(), b.settings.fingerprint.as_str())
+            };
+            for reverse in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("journal");
+                let mut file = File::create(&path).unwrap();
+                for rec in if reverse { [&b, &a] } else { [&a, &b] } {
+                    write_record(&mut file, rec);
+                }
+                drop(file);
+                let journal = Journal::open(&path, "absent").unwrap();
+                assert_eq!(journal.condition(&a.reading.key, None), Some(expected));
+                assert_eq!(
+                    journal.condition(&a.reading.key, Some(&a.settings.fingerprint)),
+                    Some(a.settings.fingerprint.as_str())
+                );
+            }
+        }
     }
 
     #[test]
@@ -1352,32 +1771,35 @@ mod tests {
         drop(journal);
         let journal = Journal::open(&path, &second.fingerprint).unwrap();
         assert_eq!(journal.records.len(), 2);
+        assert!(journal.skipped_rows.is_empty());
     }
 
     #[test]
     fn streaming_select_lists_settings_and_preserves_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal");
-        let first = record("first", 0);
+        let mut first = record("first", 0);
+        first.settings.fingerprint = first.settings.computed_fingerprint().unwrap();
         let mut second = record("second", 1);
         second.settings.engine_sha256 = "other-engine".into();
+        second.settings.fingerprint = second.settings.computed_fingerprint().unwrap();
         {
             let mut file = File::create(&path).unwrap();
             for rec in [&first, &second, &first] {
                 write_record(&mut file, rec);
             }
         }
-        let mut lock = LockedFile::open(&path).unwrap();
-        let found = conditions(&mut lock).unwrap();
-        assert_eq!(found.len(), 2);
-        assert_eq!(found["first"], first.settings);
-        assert_eq!(found["second"], second.settings);
-        assert!(Journal::select(lock, None).is_err());
+        let lock = LockedFile::open(&path).unwrap();
+        let (all, _) = Journal::select(lock, None).unwrap();
+        assert_eq!(all.conditions.len(), 2);
+        assert_eq!(all.records.len(), 2);
+        drop(all);
         assert!(Journal::select(LockedFile::open(&path).unwrap(), Some("absent")).is_err());
         let (journal, settings) =
-            Journal::select(LockedFile::open(&path).unwrap(), Some("second")).unwrap();
-        assert_eq!(settings, second.settings);
-        assert_eq!(journal.records.len(), 1);
+            Journal::select(LockedFile::open(&path).unwrap(), Some(&second.settings.fingerprint))
+                .unwrap();
+        assert_eq!(settings, Some(second.settings.clone()));
+        assert_eq!(journal.records.len(), 2);
         assert_eq!(journal.get(&second.reading.key), Some(&second.reading));
         assert!(LockedFile::open(&path).is_err());
         drop(journal);
@@ -1388,7 +1810,7 @@ mod tests {
             file.write_all(b"{partial").unwrap();
         }
         let (journal, settings) = Journal::select(LockedFile::open(&path).unwrap(), None).unwrap();
-        assert_eq!(settings, first.settings);
+        assert_eq!(settings, None);
         assert_eq!(journal.records.len(), 1);
         drop(journal);
         File::create(&path).unwrap();
@@ -1396,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn unselected_rows_check_format_and_version_only() {
+    fn all_conditions_validate_readings_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal");
         let mut invalid_version = record("past", 0);
@@ -1409,14 +1831,93 @@ mod tests {
         assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_err());
         let mut invalid_reading = record("past", 0);
         invalid_reading.reading.threads = 2;
+        invalid_reading.settings.fingerprint =
+            invalid_reading.settings.computed_fingerprint().unwrap();
         {
             let mut file = File::create(&path).unwrap();
             write_record(&mut file, &invalid_reading);
         }
-        assert!(Journal::open(&path, "target").unwrap().records.is_empty());
-        assert!(Journal::open(&path, "past").is_err());
-        assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_err());
+        let journal = Journal::open(&path, "target").unwrap();
+        assert_eq!(journal.skipped_rows[&invalid_reading.settings.fingerprint].invalid, 1);
+        assert!(journal.get(&invalid_reading.reading.key).is_none());
+        drop(journal);
+        assert!(Journal::open(&path, "past").is_ok());
+        assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_ok());
         std::fs::write(&path, b"{invalid}\n").unwrap();
         assert!(Journal::open(&path, "target").is_err());
+    }
+    #[test]
+    fn skipped_rows_do_not_register_or_update_conditions_or_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut valid = record("", 0);
+        valid.settings.fingerprint = valid.settings.computed_fingerprint().unwrap();
+        valid.settings.engine_version = Some("kept".into());
+        let mut invalid = valid.clone();
+        invalid.settings.engine_version = Some("invalid".into());
+        invalid.reading.threads = 2;
+        invalid.prefetch = true;
+        let mut conflicting = valid.clone();
+        conflicting.reading.bestmove = "win".into();
+        conflicting.settings.engine_version = Some("conflicting".into());
+        conflicting.prefetch = true;
+        let mut file = File::create(&path).unwrap();
+        write_record(&mut file, &invalid);
+        drop(file);
+        let journal = Journal::open(&path, &valid.settings.fingerprint).unwrap();
+        assert!(journal.conditions.is_empty());
+        assert!(journal.prefetched.is_empty());
+        drop(journal);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        write_record(&mut file, &valid);
+        write_record(&mut file, &conflicting);
+        drop(file);
+        let journal = Journal::open(&path, &valid.settings.fingerprint).unwrap();
+        assert_eq!(journal.conditions.len(), 1);
+        assert_eq!(journal.conditions[0].engine_version.as_deref(), Some("kept"));
+        assert!(journal.prefetched.is_empty());
+        assert_eq!(journal.skipped_rows[&valid.settings.fingerprint].invalid, 1);
+        assert_eq!(journal.skipped_rows[&valid.settings.fingerprint].conflicting, 1);
+        drop(journal);
+        let source = read_source(&path, None, |_| true).unwrap();
+        assert_eq!(source.readings, [valid.reading.clone()]);
+        assert_eq!(source.reading_settings[0].engine_version.as_deref(), Some("kept"));
+        assert!(source.prefetched.is_empty());
+        assert_eq!(match_fingerprint(&path, &[conflicting.reading]).unwrap(), None);
+        assert_eq!(
+            match_fingerprint(&path, &[valid.reading]).unwrap(),
+            Some(valid.settings.fingerprint)
+        );
+    }
+
+    #[test]
+    fn load_caches_fingerprint_per_normalized_settings() {
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut validity = Validity::default();
+        assert!(validity.valid(&rec).unwrap());
+        rec.settings.engine_version = Some("other".into());
+        assert!(validity.valid(&rec).unwrap());
+        rec.settings.fingerprint = "forged".into();
+        assert!(!validity.valid(&rec).unwrap());
+        assert_eq!(validity.fingerprints.len(), 1);
+    }
+
+    #[test]
+    fn duration_samples_are_normalized_across_node_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut journal = Journal::open(&path, "").unwrap();
+        for (column, nodes, sec) in [(0, 100, 2.0), (1, 1000, 20.0)] {
+            let mut rec = record("", column);
+            rec.settings.nodes = nodes;
+            rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+            rec.reading.nodes_limit = nodes;
+            rec.reading.sec = sec;
+            journal.append(rec.reading, &rec.settings, "engine".into()).unwrap();
+        }
+        assert_eq!(journal.durations, [0.02, 0.02]);
+        drop(journal);
+        assert_eq!(Journal::open(&path, "").unwrap().durations, [0.02, 0.02]);
     }
 }

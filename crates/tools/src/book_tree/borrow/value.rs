@@ -15,7 +15,7 @@ use crate::book_tree::register::{self, Conflict, NodeMove, Options, merge};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -110,6 +110,7 @@ pub(super) struct MoveValue {
     pub expanded: bool,
     pub book_value: Option<i32>,
     pub destination_level: Option<usize>,
+    pub nodes: u64,
     pub cond: String,
 }
 
@@ -128,6 +129,7 @@ pub(super) struct Mark {
 #[derive(Debug, Default)]
 pub(super) struct RootValues {
     pub moves: BTreeMap<String, Vec<MoveValue>>,
+    pub nodes: BTreeMap<String, u64>,
     pub marks: Vec<Mark>,
 }
 
@@ -137,38 +139,40 @@ pub(super) type ReadingsOf = BTreeMap<String, Reading>;
 pub(super) struct ValueInput<'a> {
     pub readings: &'a ReadingsOf,
     pub master: &'a BTreeMap<String, MasterValue>,
-    pub master_known: &'a BTreeSet<String>,
-    pub cond: &'a str,
+    pub master_known: &'a BTreeMap<String, String>,
+    pub conditions: &'a BTreeMap<String, String>,
 }
 
-// 最善手の選択や同値補正も他の候補に依存するので、子の全候補の由来を確かめる。
-// 循環を含む依存関係は台帳の読みだけで値を証明できないため、未確定のまま残す。
-fn verified_nodes(graph: &Graph, leaves: &[Vec<bool>]) -> Vec<bool> {
+// 全候補が同じ条件に由来すると証明できた局面だけ、その条件を親へ渡す。
+fn verified_conditions<'a>(graph: &Graph, leaves: &[Vec<Option<&'a str>>]) -> Vec<Option<&'a str>> {
     let mut pending = vec![0; graph.len()];
-    let mut blocked = vec![false; graph.len()];
     let mut parents = vec![Vec::new(); graph.len()];
     let mut queue = VecDeque::new();
-    for node in 0..graph.len() {
-        let mut count = 0;
-        for (m, known) in graph.moves(node).zip(&leaves[node]) {
-            count += 1;
+    for (node, count) in pending.iter_mut().enumerate() {
+        for m in graph.moves(node) {
             if let Some(edge) = m.edge {
-                pending[node] += 1;
+                *count += 1;
                 parents[edge.to].push(node);
-            } else if !known {
-                blocked[node] = true;
             }
         }
-        if count > 0 && pending[node] == 0 && !blocked[node] {
+        if *count == 0 {
             queue.push_back(node);
         }
     }
-    let mut verified = vec![false; graph.len()];
+    let mut verified = vec![None; graph.len()];
     while let Some(node) = queue.pop_front() {
-        verified[node] = true;
+        let mut conditions = graph
+            .moves(node)
+            .zip(&leaves[node])
+            .map(|(m, leaf)| m.edge.map_or(*leaf, |edge| verified[edge.to]));
+        if let Some(Some(cond)) = conditions.next()
+            && conditions.all(|other| other == Some(cond))
+        {
+            verified[node] = Some(cond);
+        }
         for &parent in &parents[node] {
             pending[parent] -= 1;
-            if pending[parent] == 0 && !blocked[parent] {
+            if pending[parent] == 0 {
                 queue.push_back(parent);
             }
         }
@@ -176,19 +180,15 @@ fn verified_nodes(graph: &Graph, leaves: &[Vec<bool>]) -> Vec<bool> {
     verified
 }
 
-fn master_conditions(
+fn master_reading_conditions(
     rows: &[crate::book_tree::master_table::Row],
     positions: &BTreeMap<String, crate::book_tree::master_table::MasterPosition>,
     audited: &crate::book_tree::audit::AuditedBook,
-    cond: &str,
-) -> BTreeSet<String> {
-    if cond == "unknown" {
-        return BTreeSet::new();
-    }
+) -> BTreeMap<String, String> {
     let conditions: BTreeMap<_, _> =
         rows.iter().map(|r| ((r.get("key"), r.get("move")), r.get("cond"))).collect();
     let mut leaves = vec![Vec::new(); audited.graph.len()];
-    let mut same_condition = BTreeSet::new();
+    let mut same_condition = BTreeMap::new();
     for ((key, position), known) in positions.iter().zip(&audited.known) {
         let Some(node) = audited.graph.find(key) else {
             continue;
@@ -197,17 +197,42 @@ fn master_conditions(
             .moves
             .iter()
             .zip(known)
-            .filter(|(_, k)| **k)
-            .map(|(m, _)| conditions.get(&(key.as_str(), m.mv.as_str())) == Some(&cond))
+            .filter(|(_, known)| **known)
+            .map(|(m, _)| {
+                conditions
+                    .get(&(key.as_str(), m.mv.as_str()))
+                    .copied()
+                    .filter(|cond| *cond != "unknown")
+            })
             .collect();
-        if !matches.is_empty() && matches.iter().all(|&k| k) {
-            same_condition.insert(key.clone());
+        if let Some(Some(cond)) = matches.first()
+            && matches.iter().all(|other| *other == Some(*cond))
+        {
+            same_condition.insert(key.clone(), (*cond).to_owned());
         }
         leaves[node] = matches;
     }
-    let verified = verified_nodes(&audited.graph, &leaves);
-    same_condition.retain(|key| audited.graph.find(key).is_some_and(|node| verified[node]));
+    let verified = verified_conditions(&audited.graph, &leaves);
+    same_condition.retain(|key, cond| {
+        audited
+            .graph
+            .find(key)
+            .is_some_and(|node| verified[node] == Some(cond.as_str()))
+    });
     same_condition
+}
+
+#[cfg(test)]
+fn master_conditions(
+    rows: &[crate::book_tree::master_table::Row],
+    positions: &BTreeMap<String, crate::book_tree::master_table::MasterPosition>,
+    audited: &crate::book_tree::audit::AuditedBook,
+    cond: &str,
+) -> BTreeSet<String> {
+    master_reading_conditions(rows, positions, audited)
+        .into_iter()
+        .filter_map(|(key, found)| (found == cond).then_some(key))
+        .collect()
 }
 
 /// `.db` に書いた 1 行。
@@ -317,21 +342,75 @@ pub(super) fn value_root(
     ensure!(graph.illegal_moves == 0, "{}: 内部エラー: 非合法手があります", root.id);
     propagate_values(&mut graph, draws, MergeMode::Replace)?;
 
-    let leaves: Vec<Vec<bool>> = (0..graph.len())
+    let leaves: Vec<Vec<Option<&str>>> = (0..graph.len())
         .map(|node| {
             let key = graph.key(node);
             let n = &tree.nodes[key];
-            let known = if n.kind == Kind::Master && !n.read {
-                input.master_known.contains(key)
+            let cond = if n.kind == Kind::Master && !n.read {
+                input.master_known.get(key).map(String::as_str)
+            } else if n.kind != Kind::Inner {
+                input.conditions.get(key).map(String::as_str)
             } else {
-                n.kind != Kind::Inner && input.cond != "unknown"
+                None
             };
-            graph.moves(node).map(|_| known).collect()
+            let cond = cond.filter(|cond| *cond != "unknown");
+            graph.moves(node).map(|_| cond).collect()
         })
         .collect();
-    let verified = verified_nodes(&graph, &leaves);
+    let verified = verified_conditions(&graph, &leaves);
+    let mut condition_nodes = BTreeMap::new();
+    for key in tree.nodes.keys() {
+        if let Some(reading) = readings.get(key)
+            && let Some(cond) = input.conditions.get(key)
+        {
+            let count = condition_nodes.entry(cond).or_insert(0);
+            *count = (*count).max(reading.nodes_limit);
+        }
+    }
+    let mut parents = vec![Vec::new(); graph.len()];
+    let mut backing_nodes = vec![0; graph.len()];
+    let mut own_nodes = vec![0; graph.len()];
+    let mut selected_children = vec![None; graph.len()];
+    let mut queue = BinaryHeap::new();
+    for (node, count) in backing_nodes.iter_mut().enumerate() {
+        let key = graph.key(node);
+        let n = &tree.nodes[key];
+        own_nodes[node] = readings.get(key).map_or(0, |reading| reading.nodes_limit);
+        *count = if own_nodes[node] > 0 {
+            own_nodes[node]
+        } else if n.kind == Kind::Master && !n.read {
+            input
+                .master_known
+                .get(key)
+                .and_then(|cond| condition_nodes.get(cond))
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if *count > 0 {
+            queue.push((*count, node));
+        }
+        for m in graph.moves(node) {
+            if let Some(edge) = m.edge {
+                parents[edge.to].push(node);
+            }
+        }
+    }
+    // 大きい上限から親へ渡し、循環や合流でも各辺を繰り返し辿らない。
+    while let Some((count, node)) = queue.pop() {
+        if count != backing_nodes[node] {
+            continue;
+        }
+        for &parent in &parents[node] {
+            if backing_nodes[parent] < count {
+                backing_nodes[parent] = count;
+                queue.push((count, parent));
+            }
+        }
+    }
     let mut result = RootValues::default();
-    for (key, rows) in written {
+    for (&key, rows) in &written {
         let node = graph
             .find(key)
             .with_context(|| format!("内部エラー: 局面がありません: {key}"))?;
@@ -343,16 +422,16 @@ pub(super) fn value_root(
             .enumerate()
             .filter_map(|(i, (row, value))| {
                 Some(MoveValue {
-                    cond: if value.edge.map_or(leaves[node][i], |edge| verified[edge.to])
-                        && (!value.tie_lowered || verified[node])
-                    {
-                        input.cond.to_owned()
-                    } else {
-                        "unknown".into()
-                    },
+                    cond: value
+                        .edge
+                        .map_or(leaves[node][i], |edge| verified[edge.to])
+                        .filter(|cond| !value.tie_lowered || verified[node] == Some(*cond))
+                        .unwrap_or("unknown")
+                        .to_owned(),
                     mv: row.mv?.to_owned(),
                     value: value.new,
                     destination_level: value.edge.map(|edge| tree.nodes[graph.key(edge.to)].level),
+                    nodes: 0,
                     expanded: row.expanded,
                     book_value: row.book_value,
                 })
@@ -365,6 +444,13 @@ pub(super) fn value_root(
                 .then_with(|| b.book_value.cmp(&a.book_value))
                 .then_with(|| a.mv.cmp(&b.mv))
         });
+        if let Some(best) = moves.first() {
+            selected_children[node] = rows
+                .iter()
+                .zip(graph.moves(node))
+                .find(|(row, _)| row.mv == Some(best.mv.as_str()))
+                .and_then(|(_, value)| value.edge.map(|edge| edge.to));
+        }
         let n = &tree.nodes[key];
         if n.kind == Kind::Inner && n.read {
             let reading = readings
@@ -394,7 +480,53 @@ pub(super) fn value_root(
         }
         result.moves.insert(key.to_owned(), moves);
     }
+    let counts = selected_backing_nodes(&selected_children, &own_nodes, &backing_nodes);
+    for (node, &count) in counts.iter().enumerate() {
+        let key = graph.key(node);
+        for m in result.moves.get_mut(key).into_iter().flatten() {
+            m.nodes = written[key]
+                .iter()
+                .zip(graph.moves(node))
+                .find(|(row, _)| row.mv == Some(m.mv.as_str()))
+                .and_then(|(_, value)| value.edge.map(|edge| counts[edge.to]))
+                .filter(|count| *count > 0)
+                .unwrap_or(count);
+        }
+        result.nodes.insert(key.to_owned(), count);
+    }
     Ok(result)
+}
+
+fn selected_backing_nodes(selected: &[Option<usize>], own: &[u64], fallback: &[u64]) -> Vec<u64> {
+    let mut counts = own.to_vec();
+    let mut state = vec![0; selected.len()];
+    let mut path = Vec::new();
+    for start in 0..selected.len() {
+        let mut node = start;
+        while state[node] == 0 && own[node] == 0 {
+            state[node] = 1;
+            path.push(node);
+            if let Some(child) = selected[node] {
+                node = child;
+            } else {
+                break;
+            }
+        }
+        // 選択した手順が循環する場合も、そこから到達できる読みの上限を残す。
+        let mut count = if counts[node] > 0 {
+            counts[node]
+        } else {
+            fallback[node]
+        };
+        while let Some(parent) = path.pop() {
+            if count == 0 {
+                count = fallback[parent];
+            }
+            counts[parent] = count;
+            state[parent] = 2;
+        }
+    }
+    counts
 }
 
 /// `join_roots` で替わった数。
@@ -421,7 +553,6 @@ pub(super) fn join_roots(
     options: &Options,
     draws: DrawValues,
     line: i32,
-    cond: &str,
 ) -> Result<Joined> {
     let every_move = Options {
         alt_gap: i32::MAX,
@@ -432,7 +563,7 @@ pub(super) fn join_roots(
     let book =
         positions_from_rows(all_rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
     let (_, _, audited) = audit(&book, draws, line, Fill::Off, None)?;
-    let verified = master_conditions(&all_rows, &book.0, &audited, cond);
+    let verified = master_reading_conditions(&all_rows, &book.0, &audited);
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
     let mut joined = Joined { moves: 0, best: 0 };
@@ -454,11 +585,7 @@ pub(super) fn join_roots(
             {
                 m.value = v.value;
                 m.value_kind = "unknown".into();
-                m.cond = if verified.contains(key) {
-                    cond.to_owned()
-                } else {
-                    "unknown".into()
-                };
+                m.cond = verified.get(key).cloned().unwrap_or_else(|| "unknown".into());
                 joined.moves += 1;
             }
         }
@@ -471,6 +598,86 @@ pub(super) fn join_roots(
     Ok(joined)
 }
 
+/// 合流後の最善手に沿って、直接の読みが無い局面のノード上限を揃える。
+pub(super) fn joined_nodes(
+    nodes: &mut BTreeMap<String, register::Node>,
+    values: &[RootValues],
+    readings: &ReadingsOf,
+) -> Result<()> {
+    let keys: Vec<_> = values
+        .iter()
+        .enumerate()
+        .flat_map(|(tree, root)| {
+            root.moves.keys().chain(root.nodes.keys()).map(move |key| (tree, key.as_str()))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let index: BTreeMap<_, _> = keys.iter().copied().enumerate().map(|(i, key)| (key, i)).collect();
+    let reading_index: BTreeMap<_, _> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, key))| readings.contains_key(*key))
+        .map(|(i, &(_, key))| (key, i))
+        .collect();
+    let mut selected = vec![None; keys.len()];
+    let mut own = vec![0; keys.len()];
+    let mut fallback = vec![0; keys.len()];
+    let mut parents = vec![Vec::new(); keys.len()];
+    let mut queue = BinaryHeap::new();
+    for (i, &(tree, key)) in keys.iter().enumerate() {
+        own[i] = readings.get(key).map_or(0, |r| r.nodes_limit);
+        let root = &values[tree];
+        let moves = root.moves.get(key).map(Vec::as_slice).unwrap_or_default();
+        // 元データで止めた出口には台帳の読みが無くても既知の上限がある。
+        fallback[i] = if moves.is_empty() {
+            own[i].max(root.nodes.get(key).copied().unwrap_or(0))
+        } else {
+            own[i]
+        };
+        let children: Vec<_> = if let Some(node) = nodes.get(key) {
+            node.moves.iter().map(|m| (node.tree, m.mv.as_str())).collect()
+        } else {
+            moves.iter().map(|m| (tree, m.mv.as_str())).collect()
+        };
+        for (j, (child_tree, mv)) in children.into_iter().enumerate() {
+            let child = crate::book_tree::model::child(key, mv)?;
+            let child_tree = nodes.get(&child).map_or(child_tree, |node| node.tree);
+            if let Some(&child) = index
+                .get(&(child_tree, child.as_str()))
+                .or_else(|| reading_index.get(child.as_str()))
+            {
+                parents[child].push(i);
+                if j == 0 {
+                    selected[i] = Some(child);
+                }
+            }
+        }
+        if fallback[i] > 0 {
+            queue.push((fallback[i], i));
+        }
+    }
+    while let Some((count, node)) = queue.pop() {
+        if count != fallback[node] {
+            continue;
+        }
+        for &parent in &parents[node] {
+            if fallback[parent] < count {
+                fallback[parent] = count;
+                queue.push((count, parent));
+            }
+        }
+    }
+    let counts = selected_backing_nodes(&selected, &own, &fallback);
+    for (key, node) in nodes {
+        let i = index
+            .get(&(node.tree, key.as_str()))
+            .with_context(|| format!("内部エラー: 部分木に局面がありません: {key}"))?;
+        node.nodes = counts[*i];
+    }
+    Ok(())
+}
+
 /// 登録する局面: 部分木の局面のうち手番が `turn` (`own` / `opp`) のもので、元データで止めた出口と印の付いた
 /// 局面を除く。印はどの根で付いても除く (同じ局面が別の根で確認点にならない段に合流していても登録しない)。
 pub(super) fn register_nodes(
@@ -481,7 +688,7 @@ pub(super) fn register_nodes(
     values: &RootValues,
     marked: &BTreeSet<&str>,
     max_plies: usize,
-    nodes_limit: u64,
+    readings: &ReadingsOf,
 ) -> BTreeMap<String, register::Node> {
     let mut nodes = BTreeMap::new();
     for (key, node) in &tree.nodes {
@@ -501,7 +708,10 @@ pub(super) fn register_nodes(
             register::Node {
                 ply: node.ply.to_string(),
                 remaining: max_plies.saturating_sub(node.level),
-                nodes: nodes_limit,
+                nodes: readings.get(key).map_or_else(
+                    || values.nodes.get(key).copied().unwrap_or(0),
+                    |reading| reading.nodes_limit,
+                ),
                 moves: moves
                     .iter()
                     .map(|m| NodeMove {
@@ -534,14 +744,14 @@ pub(super) fn collect_nodes(
     values: &[RootValues],
     marked: &BTreeSet<&str>,
     max_plies: usize,
-    nodes_limit: u64,
+    readings: &ReadingsOf,
 ) -> (usize, BTreeMap<String, register::Node>) {
     let mut disagreements = 0;
     let mut opponent = BTreeMap::new();
     for (turn_of, into) in [("own", &mut *nodes), ("opp", &mut opponent)] {
         for (index, ((root, tree), values)) in roots.iter().zip(trees).zip(values).enumerate() {
             let found =
-                register_nodes(index, root, turn_of, tree, values, marked, max_plies, nodes_limit);
+                register_nodes(index, root, turn_of, tree, values, marked, max_plies, readings);
             disagreements += merge(into, found);
         }
     }
@@ -643,24 +853,17 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         .flat_map(|t| t.nodes.iter().filter(|(_, n)| n.read).map(|(k, _)| k.as_str()))
         .collect();
     let schema = crate::book_tree::schema::Schema::load(args.schema.as_deref())?;
-    let mut cond = "unknown".to_owned();
-    let mut nodes_limit = 0;
+    let mut conditions = BTreeMap::new();
     let mut readings = ReadingsOf::new();
     // 読みが不要な木に、無関係な台帳の条件を割り当てない。
     if !wanted.is_empty() {
         let source =
             read_source(&args.journal, args.fingerprint.as_deref(), |key| wanted.contains(key))?;
-        println!(
-            "台帳の条件 {} (nodes {} / MultiPV {} / 千日手 {:?}) の読み {} 局面",
-            source.settings.fingerprint,
-            source.settings.nodes,
-            source.settings.multipv,
-            source.settings.draw(),
-            source.readings.len()
-        );
-        cond = schema.condition(&source.settings.fingerprint)?;
-        nodes_limit = source.settings.nodes;
-        readings = source.readings.into_iter().map(|r| (r.key.clone(), r)).collect();
+        for (key, (reading, settings)) in source.selected(args.fingerprint.as_deref()) {
+            conditions.insert(key.to_owned(), schema.condition(&settings.fingerprint)?);
+            readings.insert(key.to_owned(), reading.clone());
+        }
+        println!("台帳の読み {} 局面", readings.len());
     }
     let missing: Vec<&str> =
         wanted.iter().copied().filter(|k| !readings.contains_key(*k)).collect();
@@ -686,13 +889,17 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     for row in &rows {
         schema.validate_row(row)?;
     }
-    let master_known = master_conditions(&rows, &master_rows.0, &audited, &cond);
+    let used_conditions: BTreeSet<_> = conditions.values().collect();
+    let master_known = master_reading_conditions(&rows, &master_rows.0, &audited)
+        .into_iter()
+        .filter(|(_, cond)| used_conditions.contains(cond))
+        .collect();
     drop(audited);
     let input = ValueInput {
         readings: &readings,
         master: &master,
         master_known: &master_known,
-        cond: &cond,
+        conditions: &conditions,
     };
 
     let mark_line = (!args.mark_all).then_some(args.line);
@@ -712,7 +919,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         &all,
         &marked,
         meta.params.max_plies,
-        nodes_limit,
+        &readings,
     );
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
@@ -732,7 +939,8 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let mut rows = rows;
     let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
-    let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, &cond)?;
+    let joined = join_roots(&rows, &mut nodes, &options, draws, args.line)?;
+    joined_nodes(&mut nodes, &all, &readings)?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
@@ -905,5 +1113,28 @@ mod tests {
             );
             assert!(master_conditions(&rows, &master.0, &book, "unknown").is_empty());
         }
+    }
+
+    #[test]
+    fn backing_nodes_follow_selected_line_and_preserve_own_readings() {
+        // 0 → 1 → 3 が最善手順。別の子 2 の大きい上限を選択した手順へ混ぜない。
+        let selected = [Some(1), Some(3), None, None, Some(0)];
+        let own = [0, 0, 900, 100, 2000];
+        let fallback = [900, 100, 900, 100, 2000];
+        assert_eq!(
+            super::selected_backing_nodes(&selected, &own, &fallback),
+            [100, 100, 900, 100, 2000]
+        );
+    }
+
+    #[test]
+    fn backing_nodes_fall_back_when_selected_subtree_has_no_reading() {
+        let selected = [Some(1), None, None, Some(4), Some(3)];
+        let own = [0, 0, 700, 0, 0];
+        let fallback = [700, 0, 700, 700, 700];
+        assert_eq!(
+            super::selected_backing_nodes(&selected, &own, &fallback),
+            [700, 0, 700, 700, 700]
+        );
     }
 }

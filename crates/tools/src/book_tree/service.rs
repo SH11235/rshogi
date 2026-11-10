@@ -172,12 +172,21 @@ fn urgent_ranks<'a>(
 struct Job {
     key: String,
     ply: u32,
+    cond: Arc<Settings>,
 }
 enum Event {
-    Done(usize, String, bool, Option<StopReason>, Result<Outcome>, Option<Box<Trace>>),
+    Done(
+        usize,
+        String,
+        Arc<Settings>,
+        bool,
+        Option<StopReason>,
+        Result<Outcome>,
+        Option<Box<Trace>>,
+    ),
     Info(usize, u64, u32),
     /// 読みが `--speculate-at` を越えた局面の、その時点の上位の手と 1 位の値。
-    Speculate(String, Vec<String>, i32),
+    Speculate(String, Vec<String>, i32, usize),
     Alert(String),
 }
 struct Worker {
@@ -185,6 +194,7 @@ struct Worker {
     handle: JoinHandle<()>,
     restart: Arc<Mutex<Restart>>,
     busy: Option<(String, Instant)>,
+    cond: Option<Arc<Settings>>,
     nodes: u64,
     depth: u32,
     prefetch: bool,
@@ -297,6 +307,8 @@ struct Request {
     own: String,
     generation: u32,
     predicted: bool,
+    fingerprint: Option<String>,
+    require_condition: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -397,8 +409,11 @@ struct Restart {
     go: Option<Instant>,
 }
 impl Restart {
-    fn progress(&self, expected: f64, nodes: u64, limit: u64) -> Option<f64> {
-        Some((self.go?.elapsed().as_secs_f64() / expected).max(nodes as f64 / limit as f64))
+    fn progress(&self, seconds_per_node: f64, nodes: u64, limit: u64) -> Option<f64> {
+        Some(
+            (self.go?.elapsed().as_secs_f64() / (seconds_per_node * limit as f64))
+                .max(nodes as f64 / limit as f64),
+        )
     }
     fn stop(&mut self, reason: StopReason) {
         if self.key.is_some() && self.stop.is_none() && !self.requested {
@@ -522,7 +537,7 @@ fn spawn_worker(
     let restart_worker = restart.clone();
     let tracing = args.trace_dir.is_some();
     let prefetch_enabled = args.prefetch;
-    let speculate_nodes = args.speculate_at.map(|at| (at * settings.nodes as f64).ceil() as u64);
+    let speculate_at = args.speculate_at;
     let handle = thread::spawn(move || {
         let cfg = EngineConfig {
             path: reading_args.engine.clone(),
@@ -537,8 +552,11 @@ fn spawn_worker(
             usi_options: settings.options.iter().map(|(k, v)| format!("{k}={v}")).collect(),
         };
         let mut engine = None;
+        let mut multipv = settings.multipv;
         while let Ok(Some(job)) = rx.recv() {
             let mut trace = None;
+            let cond = &job.cond;
+            let speculate_nodes = speculate_at.map(|at| (at * cond.nodes as f64).ceil() as u64);
             let result = (|| -> Result<Outcome> {
                 let starting = engine.is_none();
                 if starting {
@@ -553,8 +571,13 @@ fn spawn_worker(
                         }
                     }
                     engine = Some(process);
+                    multipv = settings.multipv;
                 }
                 let engine = engine.as_mut().context("engine がありません")?;
+                if multipv != cond.multipv {
+                    engine.write_line(&format!("setoption name MultiPV value {}", cond.multipv))?;
+                    multipv = cond.multipv;
+                }
                 // stop 後の遅れた行は new_game の readyok 同期で読み捨てる。
                 let initialized = engine.new_game();
                 if starting {
@@ -562,7 +585,7 @@ fn spawn_worker(
                 }
                 initialized?;
                 engine.write_line(&format!("position sfen {} {}", job.key, job.ply))?;
-                engine.write_line(&format!("go nodes {}", settings.nodes))?;
+                engine.write_line(&format!("go nodes {}", cond.nodes))?;
                 let started_at = chrono::Utc::now();
                 let mut buffer = tracing.then(|| TraceBuffer::new(TRACE_LIMIT_BYTES));
                 let started = Instant::now();
@@ -572,7 +595,7 @@ fn spawn_worker(
                 let mut high_depth = 0;
                 let mut alerted = false;
                 let mut collector = Collector::default();
-                let mut tops = TopGroup::new(settings.multipv);
+                let mut tops = TopGroup::new(cond.multipv);
                 let mut speculated = speculate_nodes.is_none();
                 let mut drained_before_stop = 0;
                 loop {
@@ -629,7 +652,7 @@ fn spawn_worker(
                         if let Some(reason) = control.completed(prefetch_enabled)? {
                             return Ok(Outcome::Stopped(
                                 reason,
-                                high_nodes as f64 / settings.nodes as f64,
+                                high_nodes as f64 / cond.nodes as f64,
                                 started.elapsed().as_secs_f64(),
                             ));
                         }
@@ -644,16 +667,16 @@ fn spawn_worker(
                             tag: "serve".into(),
                             ply: job.ply,
                             key: job.key.clone(),
-                            nodes_limit: settings.nodes,
+                            nodes_limit: cond.nodes,
                             nodes,
                             sec: started.elapsed().as_secs_f64(),
                             threads: 1,
-                            hash: settings.hash,
-                            draw: settings.draw(),
+                            hash: cond.hash,
+                            draw: cond.draw(),
                             multipv,
                             bestmove,
                         };
-                        reading.validate(&settings).map_err(InvalidReading)?;
+                        reading.validate(cond).map_err(InvalidReading)?;
                         if let Some(buffer) = buffer.take()
                             && !buffer.overflowed
                         {
@@ -716,6 +739,7 @@ fn spawn_worker(
                             job.key.clone(),
                             group.iter().map(|pv| pv.mv.clone()).collect(),
                             group[0].cp,
+                            cond.multipv,
                         ));
                     }
                 }
@@ -732,7 +756,10 @@ fn spawn_worker(
                 };
                 (control.finish(), reason)
             };
-            if events.send(Event::Done(id, job.key, explicit, reason, result, trace)).is_err() {
+            if events
+                .send(Event::Done(id, job.key, job.cond, explicit, reason, result, trace))
+                .is_err()
+            {
                 break;
             }
         }
@@ -742,6 +769,7 @@ fn spawn_worker(
         handle,
         restart,
         busy: None,
+        cond: None,
         nodes: 0,
         depth: 0,
         prefetch: false,
@@ -750,6 +778,30 @@ fn spawn_worker(
         demand: BTreeSet::new(),
         priority: 0,
     }
+}
+
+fn configure_tree(tree: &mut Tree, settings: &Settings) -> Result<()> {
+    let cond = settings.with_overrides(
+        tree.def.multipv.unwrap_or(settings.multipv),
+        tree.def.nodes.unwrap_or(settings.nodes),
+    )?;
+    tree.set_condition(&cond);
+    Ok(())
+}
+
+fn tree_has_reading(tree: &Tree, cache: &impl Readings, key: &str) -> bool {
+    if tree.def.require_condition {
+        tree.def
+            .preferred_fingerprint
+            .as_deref()
+            .is_some_and(|fp| cache.has_exact(key, fp))
+    } else {
+        cache.get(key).is_some()
+    }
+}
+
+fn failure_key(tree: &Tree, key: &str) -> (String, Option<String>) {
+    (key.to_owned(), tree.def.preferred_fingerprint.clone())
 }
 
 /// 受け付けた対象 1 本の実行時の状態。チェックポイントの `targets` と同じ順に並ぶ。
@@ -788,7 +840,7 @@ impl Live {
         &mut self,
         target: &Target,
         journal: &impl Readings,
-        failures: &BTreeMap<String, String>,
+        failures: &BTreeMap<(String, Option<String>), String>,
         requests: &mut BTreeMap<String, BTreeSet<Request>>,
     ) {
         let active = !target.hold && !self.tree.finished && !self.tree.failed && self.prepared;
@@ -806,12 +858,16 @@ impl Live {
                     .chain(self.shadow.iter().map(|c| (&c.key, true)))
                     .chain(self.speculative.iter().map(|c| (&c.key, true)))
                 {
-                    if journal.get(key).is_none() && !failures.contains_key(key) {
+                    if !tree_has_reading(&self.tree, journal, key)
+                        && !failures.contains_key(&failure_key(&self.tree, key))
+                    {
                         requests.entry(key.clone()).or_default().insert(Request {
                             id: target.id.clone(),
                             own: target.own.clone(),
                             generation: target.generation,
                             predicted,
+                            fingerprint: self.tree.def.preferred_fingerprint.clone(),
+                            require_condition: self.tree.def.require_condition,
                         });
                     }
                 }
@@ -1118,11 +1174,10 @@ fn invalidate_imported(lives: &mut [Live], appended: &BTreeSet<String>) -> bool 
 fn poll_imports(
     imports: &mut super::live_import::Inbox,
     journal: &mut Journal,
-    settings: &Settings,
     alerts: &mut Alerts,
     lives: &mut [Live],
 ) -> Result<bool> {
-    if let Some(message) = imports.poll(journal, settings)? {
+    if let Some(message) = imports.poll(journal)? {
         alerts.push(&message);
     }
     Ok(invalidate_imported(lives, imports.appended()))
@@ -1153,6 +1208,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         stop: args.stop,
         rounds: args.rounds,
         draw: args.draw,
+        multipv: args.reading.multipv,
+        nodes: args.reading.nodes,
     };
     defaults.check()?;
     let mut trace_log = args.trace_dir.as_ref().map(|dir| TraceLog {
@@ -1187,11 +1244,6 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     out_root.display()
                 );
             }
-            if checkpoint.fingerprint != settings.fingerprint {
-                bail!(
-                    "受付済みの対象と読み条件が違います。条件を変えるときは新しい state dir で起動してください"
-                );
-            }
             checkpoint
         }
         None => Checkpoint::new(out_root, settings.fingerprint.clone()),
@@ -1204,10 +1256,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     )
     .context("状態のファイルを書けません")?;
     let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
-    let mut imports = super::live_import::Inbox::new(
-        &args.state,
-        args.accept_fingerprint.iter().cloned().collect(),
-    )?;
+    println!("journal_skipped={}", serde_json::to_string(&journal.skipped_rows)?);
+    let mut imports = super::live_import::Inbox::new(&args.state)?;
     let stats_path = args.state.join("prefetch_stats.json");
     let mut stats = if args.prefetch {
         PrefetchStats::load(&stats_path)?
@@ -1217,16 +1267,20 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let mut stats_dirty = args.prefetch;
     let mut unused_counts = (0, 0);
     let mut unused_prefetch = 0;
-    let mut prefetch_failures: BTreeMap<String, usize> = BTreeMap::new();
+    let mut prefetch_failures: BTreeMap<(String, Option<String>), usize> = BTreeMap::new();
     let mut shadow_cursor = 0usize;
     // 読みかけの局面の途中の上位の手。読み終えたら台帳の読みに替わるので消す。
-    let mut tops: BTreeMap<String, (Vec<String>, i32)> = BTreeMap::new();
+    let mut tops: BTreeMap<String, (Vec<String>, i32, usize)> = BTreeMap::new();
     let mut speculate_dirty = false;
     let mut requests: BTreeMap<String, BTreeSet<Request>> = BTreeMap::new();
     let mut lives = checkpoint
         .targets
         .iter()
-        .map(|t| Ok(Live::new(t.definition.build(&t.own, &t.out)?)))
+        .map(|t| {
+            let mut tree = t.definition.build(&t.own, &t.out)?;
+            configure_tree(&mut tree, &settings)?;
+            Ok(Live::new(tree))
+        })
         .collect::<Result<Vec<_>>>()?;
     let workers_file = args.state.join("workers");
     if !workers_file.exists() {
@@ -1234,7 +1288,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     }
     let (events_tx, events_rx) = mpsc::channel();
     let mut workers: BTreeMap<usize, Worker> = BTreeMap::new();
-    let mut retries: BTreeMap<String, usize> = BTreeMap::new();
+    let mut retries: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut workers_error = None;
     let mut failures = BTreeMap::new();
     let mut alerts = Alerts {
@@ -1285,7 +1339,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 once.clear("queue");
                                 queue_error = None;
                                 built.sort_by_key(|(index, _)| *index);
-                                for (index, tree) in built {
+                                for (index, mut tree) in built {
+                                    configure_tree(&mut tree, &settings)?;
                                     if let Some(live) = lives.get_mut(index) {
                                         *live = Live::new(tree);
                                     } else {
@@ -1367,10 +1422,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             while let Ok(event) = events_rx.try_recv() {
                 match event {
                     Event::Alert(message) => alerts.push(&message),
-                    Event::Speculate(key, moves, best) => {
+                    Event::Speculate(key, moves, best, multipv) => {
                         // 読み直し (RESTART など) で同じ局面がまた出しても、最初の 1 回だけを使う。
                         if journal.get(&key).is_none() && !tops.contains_key(&key) {
-                            tops.insert(key, (moves, best));
+                            tops.insert(key, (moves, best, multipv));
                             stats.speculation_sources += 1;
                             stats_dirty = true;
                             speculate_dirty = true;
@@ -1382,7 +1437,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             worker.depth = depth;
                         }
                     }
-                    Event::Done(id, key, explicit, reason, result, trace) => {
+                    Event::Done(id, key, cond, explicit, reason, result, trace) => {
                         let prefetch = workers.get(&id).is_some_and(|w| w.prefetch);
                         let speculative = workers.get(&id).is_some_and(|w| w.speculative);
                         speculate_dirty = true;
@@ -1394,7 +1449,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             *stats.stopped.entry(reason).or_default() += 1;
                             stats.discarded += workers
                                 .get(&id)
-                                .map_or(0.0, |w| w.nodes as f64 / settings.nodes as f64);
+                                .map_or(0.0, |w| w.nodes as f64 / cond.nodes as f64);
                         }
                         if let Some(worker) = workers.get_mut(&id) {
                             worker.busy = None;
@@ -1413,8 +1468,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 stats_dirty = true;
                                 *stats.stopped.entry(reason).or_default() += 1;
                                 stats.discarded += amount.max(
-                                    median(&journal.durations)
-                                        .map_or(0.0, |expected| sec / expected),
+                                    median(&journal.durations).map_or(0.0, |expected| {
+                                        sec / (expected * cond.nodes as f64)
+                                    }),
                                 );
                             }
                             Ok(Outcome::Completed(reading)) => {
@@ -1425,11 +1481,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                     stats_dirty = true;
                                 }
                                 let record = trace.map(|t| {
-                                    json!({"key":reading.key,"ply":reading.ply,"fingerprint":settings.fingerprint,"worker":id,"started":t.started.to_rfc3339(),"finished":t.finished.to_rfc3339(),"bestmove":reading.bestmove,"lines":t.lines})
+                                    json!({"key":reading.key,"ply":reading.ply,"fingerprint":cond.fingerprint,"worker":id,"started":t.started.to_rfc3339(),"finished":t.finished.to_rfc3339(),"bestmove":reading.bestmove,"lines":t.lines})
                                 });
                                 if !imports.complete_worker(
                                     &mut journal,
-                                    &settings,
+                                    &cond,
                                     reading,
                                     prefetch,
                                     |message| alerts.push(message),
@@ -1465,7 +1521,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                     once.report_first(&mut alerts, "spawn", format!("{error:#}"));
                                 }
                                 FailureKind::Prefetch => {
-                                    *prefetch_failures.entry(key.clone()).or_default() += 1;
+                                    *prefetch_failures
+                                        .entry((key.clone(), Some(cond.fingerprint.clone())))
+                                        .or_default() += 1;
                                     once.report_first(
                                         &mut alerts,
                                         &format!("prefetch-{key}"),
@@ -1475,17 +1533,20 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 FailureKind::InvalidReading => {
                                     let message = format!("局面の検査失敗: {key}: {error:#}");
                                     alerts.push(&message);
-                                    failures.insert(key, message);
+                                    failures.insert((key, Some(cond.fingerprint.clone())), message);
                                 }
                                 FailureKind::Retry => {
-                                    let attempts = retries.entry(key.clone()).or_default();
+                                    let attempts = retries
+                                        .entry((key.clone(), cond.fingerprint.clone()))
+                                        .or_default();
                                     *attempts += 1;
                                     alerts.push(&format!("RESTART worker={id} attempt={attempts} key={key}: {error:#}"));
                                     if *attempts > args.max_restarts {
                                         let message =
                                             format!("局面の失敗 (再起動上限): {key}: {error:#}");
                                         alerts.push(&message);
-                                        failures.insert(key, message);
+                                        failures
+                                            .insert((key, Some(cond.fingerprint.clone())), message);
                                     }
                                 }
                             },
@@ -1495,7 +1556,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             }
             if !stopping {
                 speculate_dirty |=
-                    poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives)
+                    poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives)
                         .context("台帳の取り込みを継続できません")?;
             }
             for entry in std::fs::read_dir(args.state.join("restart"))? {
@@ -1558,8 +1619,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 }
                 match advanced {
                     Ok(missing) => {
-                        if let Some((key, _)) =
-                            missing.iter().find(|(key, _)| failures.contains_key(key))
+                        if let Some((key, _)) = missing
+                            .iter()
+                            .find(|(key, _)| failures.contains_key(&failure_key(tree, key)))
                         {
                             tree.failed = true;
                             remove_candidates(&tree.def.out)?;
@@ -1567,7 +1629,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             alerts.push(&format!(
                                 "木の失敗 {}: {}",
                                 tree.def.out.display(),
-                                failures[key]
+                                failures[&failure_key(tree, key)]
                             ));
                             continue;
                         }
@@ -1675,13 +1737,17 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     }
                     // 再構築待ちでも需要は保ち、古い候補の新規配布だけを止める。
                     for candidate in &live.shadow {
-                        if journal.get(&candidate.key).is_some()
-                            || failures.contains_key(&candidate.key)
+                        if tree_has_reading(&live.tree, &journal, &candidate.key)
+                            || failures.contains_key(&failure_key(&live.tree, &candidate.key))
                         {
                             continue;
                         }
                         if live.dirty
-                            || prefetch_failures.get(&candidate.key).copied().unwrap_or(0) >= 2
+                            || prefetch_failures
+                                .get(&failure_key(&live.tree, &candidate.key))
+                                .copied()
+                                .unwrap_or(0)
+                                >= 2
                         {
                             continue;
                         }
@@ -1696,9 +1762,13 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             .or_insert(rank);
                     }
                     for candidate in &live.speculative {
-                        if journal.get(&candidate.key).is_some()
-                            || failures.contains_key(&candidate.key)
-                            || prefetch_failures.get(&candidate.key).copied().unwrap_or(0) >= 2
+                        if tree_has_reading(&live.tree, &journal, &candidate.key)
+                            || failures.contains_key(&failure_key(&live.tree, &candidate.key))
+                            || prefetch_failures
+                                .get(&failure_key(&live.tree, &candidate.key))
+                                .copied()
+                                .unwrap_or(0)
+                                >= 2
                         {
                             continue;
                         }
@@ -1719,7 +1789,18 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     };
                     // 伸ばし直しの予測で始めた読みが後から子の候補になったときも、読み終える側に入れる。
                     worker.speculative |= worker.prefetch && speculative_keys.contains(key);
-                    worker.demand = requests.get(key).cloned().unwrap_or_default();
+                    worker.demand = requests
+                        .get(key)
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| {
+                            !r.require_condition
+                                || worker.cond.as_ref().is_some_and(|c| {
+                                    r.fingerprint.as_deref() == Some(&c.fingerprint)
+                                })
+                        })
+                        .cloned()
+                        .collect();
                     worker.urgent = urgent_ranks
                         .get(key)
                         .filter(|_| worker.prefetch && !worker.demand.iter().any(|r| !r.predicted))
@@ -1796,9 +1877,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         if control.stop.is_some() || control.requested || control.key.is_none() {
                             continue;
                         }
-                        let Some(progress) =
-                            control.progress(expected, worker.nodes, settings.nodes)
-                        else {
+                        let Some(progress) = control.progress(
+                            expected,
+                            worker.nodes,
+                            worker.cond.as_ref().map_or(settings.nodes, |c| c.nodes),
+                        ) else {
                             continue;
                         };
                         if progress < args.prefetch_preempt_below {
@@ -1876,6 +1959,40 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         None
                     };
                     if let Some((key, ply, prefetch, priority)) = job {
+                        let selected = checkpoint
+                            .targets
+                            .iter()
+                            .zip(&lives)
+                            .filter(|(target, live)| {
+                                !target.hold
+                                    && live.prepared
+                                    && !live.tree.finished
+                                    && !live.tree.failed
+                            })
+                            .filter(|(_, live)| {
+                                if prefetch {
+                                    ((!live.dirty && live.shadow.iter().any(|c| c.key == key))
+                                        || live.speculative.iter().any(|c| c.key == key))
+                                        && !failures.contains_key(&failure_key(&live.tree, &key))
+                                        && prefetch_failures
+                                            .get(&failure_key(&live.tree, &key))
+                                            .copied()
+                                            .unwrap_or(0)
+                                            < 2
+                                } else {
+                                    live.tree.waiting().iter().any(|(k, _)| k == &key)
+                                }
+                            })
+                            .filter(|(_, live)| !tree_has_reading(&live.tree, &journal, &key))
+                            .min_by_key(|(target, _)| (target.priority, target.order));
+                        let Some((_, live)) = selected else {
+                            continue;
+                        };
+                        let cond = Arc::new(settings.with_overrides(
+                            live.tree.def.multipv.unwrap_or(settings.multipv),
+                            live.tree.def.nodes.unwrap_or(settings.nodes),
+                        )?);
+                        worker.cond = Some(cond.clone());
                         *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
                             Restart {
                                 key: Some(key.clone()),
@@ -1889,10 +2006,19 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         worker.urgent =
                             urgent_ranks.get(&key).filter(|_| prefetch).map(|rank| rank.0);
                         worker.priority = priority;
-                        worker.demand = requests.get(&key).cloned().unwrap_or_default();
+                        worker.demand = requests
+                            .get(&key)
+                            .into_iter()
+                            .flatten()
+                            .filter(|r| {
+                                !r.require_condition
+                                    || r.fingerprint.as_deref() == Some(&cond.fingerprint)
+                            })
+                            .cloned()
+                            .collect();
                         worker
                             .tx
-                            .send(Some(Job { key, ply }))
+                            .send(Some(Job { key, ply, cond }))
                             .with_context(|| format!("worker {id} が終了しました"))?;
                     }
                 }
@@ -1932,7 +2058,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     let (read, requested) = counts(live);
                     let (queued, running) = if active_tree(live) && (!args.prefetch || !target.hold) {
                         (
-                            t.level.keys().filter(|k| journal.get(k).is_none() && !busy(k)).count(),
+                            t.level.keys().filter(|k| !tree_has_reading(t, &journal, k) && !busy(k)).count(),
                             busy_keys.iter().filter(|k| t.level.contains_key(**k)).count(),
                         )
                     } else {
@@ -2088,8 +2214,7 @@ mod tests {
     fn invalid_import_reports_alert_and_keeps_polling() {
         let dir = tempfile::tempdir().unwrap();
         let settings = super::super::tests::settings();
-        let mut imports =
-            super::super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
         let mut journal =
             super::Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
         let mut alerts = super::Alerts {
@@ -2100,8 +2225,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             assert!(std::time::Instant::now() < deadline);
-            super::poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut [])
-                .unwrap();
+            super::poll_imports(&mut imports, &mut journal, &mut alerts, &mut []).unwrap();
             alerts.flush();
             if imports.status()["state"] == "failed" {
                 break;
@@ -2113,7 +2237,7 @@ mod tests {
                 .unwrap()
                 .contains("取り込み失敗")
         );
-        super::poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut []).unwrap();
+        super::poll_imports(&mut imports, &mut journal, &mut alerts, &mut []).unwrap();
     }
 
     #[test]
@@ -2130,6 +2254,8 @@ mod tests {
             stop: 300,
             rounds: 0,
             draw: 0,
+            multipv: 1,
+            nodes: 100,
         };
         let (checkpoint, built) = Checkpoint::new(
             dir.path().join("trees"),
@@ -2154,8 +2280,7 @@ mod tests {
             live.dirty = false;
         }
         assert_eq!(requests.len(), 2);
-        let mut imports =
-            super::super::live_import::Inbox::new(dir.path(), Default::default()).unwrap();
+        let mut imports = super::super::live_import::Inbox::new(dir.path()).unwrap();
         let source = dir.path().join("import/source.jsonl");
         let answer = super::super::tests::reading(root, &[], &settings);
         Journal::open(&source, &settings.fingerprint)
@@ -2170,8 +2295,7 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline);
             let changed =
-                poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives)
-                    .unwrap();
+                poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives).unwrap();
             assert!(!lives[1].dirty);
             if changed {
                 assert!(lives[0].dirty && lives[0].requests_dirty);
@@ -2189,9 +2313,7 @@ mod tests {
         assert!(!requests.contains_key(root));
         assert!(requests.contains_key(&other));
         lives[0].dirty = false;
-        assert!(
-            !poll_imports(&mut imports, &mut journal, &settings, &mut alerts, &mut lives).unwrap()
-        );
+        assert!(!poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives).unwrap());
         assert!(lives.iter().all(|live| !live.dirty));
     }
 
@@ -2327,13 +2449,14 @@ mod tests {
     #[test]
     fn progress_uses_go_and_observed_nodes_to_protect_work() {
         let mut control = Restart::default();
-        assert!(control.progress(10.0, 0, 100).is_none());
+        assert!(control.progress(0.1, 0, 100).is_none());
         control.go = Some(Instant::now() - Duration::from_secs(2));
-        let progress = control.progress(10.0, 0, 100).unwrap();
+        let progress = control.progress(0.1, 0, 100).unwrap();
         assert!((0.2..0.21).contains(&progress));
-        assert_eq!(control.progress(10.0, 50, 100), Some(0.5));
+        assert!((0.1..0.11).contains(&control.progress(0.1, 0, 200).unwrap()));
+        assert_eq!(control.progress(0.1, 50, 100), Some(0.5));
         assert!(
-            select_victims(vec![(0, control.progress(10.0, 25, 100).unwrap(), 0)], 1, 0.25)
+            select_victims(vec![(0, control.progress(0.1, 25, 100).unwrap(), 0)], 1, 0.25)
                 .is_empty()
         );
     }
@@ -2356,6 +2479,8 @@ mod tests {
             stop: 300,
             rounds: 1,
             draw: 0,
+            multipv: 1,
+            nodes: 100,
         };
         let (checkpoint, built) = Checkpoint::new(dir.path().join("trees"), "fp".into()).apply(
             chunk.as_bytes(),
@@ -2471,6 +2596,10 @@ mod tests {
             draw: 0,
             draw_black: None,
             draw_white: None,
+            multipv: None,
+            nodes: None,
+            preferred_fingerprint: None,
+            require_condition: false,
         };
         let mut tree = Tree::build(def.clone(), &[(key.clone(), 1, vec![])]).unwrap();
         let prefetched = BTreeSet::from([key.clone(), "unused".into()]);
@@ -2498,6 +2627,8 @@ mod tests {
             stop: 300,
             rounds: 0,
             draw: 0,
+            multipv: 1,
+            nodes: 100,
         };
         let first = format!("{}\n", json!({"id":"t","root":root,"own":"b","depth":1}));
         let (checkpoint, built) = Checkpoint::new(dir.path().join("trees"), "fp".into()).apply(
@@ -2518,6 +2649,40 @@ mod tests {
     }
 
     #[test]
+    fn old_checkpoint_priority_only_change_keeps_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+            multipv: 3,
+            nodes: 100,
+        };
+        let line = json!({"id":"t","root":"startpos","own":"b","depth":1});
+        let (checkpoint, built) = Checkpoint::new(dir.path().join("trees"), "fp".into()).apply(
+            format!("{line}\n").as_bytes(),
+            &defaults,
+            &Sha256::new(),
+            &[],
+        );
+        assert_eq!(built.len(), 1);
+        let mut old = serde_json::to_value(checkpoint).unwrap();
+        for target in old["targets"].as_array_mut().unwrap() {
+            target["definition"].as_object_mut().unwrap().remove("multipv");
+            target["definition"].as_object_mut().unwrap().remove("nodes");
+        }
+        let checkpoint: Checkpoint = serde_json::from_value(old).unwrap();
+        let mut next = line;
+        next["priority"] = 5.into();
+        let (checkpoint, built) =
+            checkpoint.apply(format!("{next}\n").as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(built.is_empty());
+        assert!(checkpoint.rejected.is_empty());
+        assert_eq!((checkpoint.targets[0].generation, checkpoint.targets[0].priority), (1, 5));
+    }
+
+    #[test]
     fn fixed_readings_preserve_normal_dispatch_across_shared_trees() {
         let dir = tempfile::tempdir().unwrap();
         let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
@@ -2531,6 +2696,8 @@ mod tests {
             stop: 300,
             rounds: 0,
             draw: 0,
+            multipv: 1,
+            nodes: 100,
         };
         let (checkpoint, built) = Checkpoint::new(dir.path().join("trees"), "fp".into()).apply(
             chunk.as_bytes(),

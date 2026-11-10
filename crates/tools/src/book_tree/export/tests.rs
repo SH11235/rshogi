@@ -417,7 +417,7 @@ fn journal_depths_match_conditions_and_preserve_db() {
     run_to(a, &mut Vec::new()).unwrap();
     let after = annotation();
     let moves = &after["positions"][HIRATE_KEY]["moves"];
-    assert_eq!(moves["7g7f"]["depths"], serde_json::json!([20, 30]));
+    assert_eq!(moves["7g7f"]["depths"], serde_json::json!([30]));
     assert_eq!(moves["2g2f"]["depths"], serde_json::json!([]));
     assert!(moves["5g5f"].get("depths").is_none());
     assert_eq!(after["conditions"], before["conditions"]);
@@ -444,7 +444,7 @@ fn journal_depths_match_conditions_and_preserve_db() {
     run_to(a, &mut Vec::new()).unwrap();
     assert_eq!(
         annotation()["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
-        serde_json::json!([20, 30])
+        serde_json::json!([30])
     );
     assert_eq!(annotation()["conditions"], serde_json::json!({}));
 
@@ -461,7 +461,11 @@ fn journal_depths_match_conditions_and_preserve_db() {
     let mut a = args(d.path());
     a.journal = vec![logs];
     a.force = true;
-    assert!(run_to(a, &mut Vec::new()).is_err());
+    run_to(a, &mut Vec::new()).unwrap();
+    assert_eq!(
+        annotation()["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
+        serde_json::json!([30])
+    );
     assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
 }
 
@@ -489,22 +493,17 @@ fn journal_depths_skip_files_without_a_tree_first_record() {
 
 #[test]
 fn journal_depths_reject_invalid_tree_records() {
-    use crate::book_tree::reply_graph::{HIRATE_KEY, fixture::after};
+    use crate::book_tree::reply_graph::HIRATE_KEY;
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("input.jsonl");
     let keys = BTreeSet::from([HIRATE_KEY]);
-    for case in ["depth", "version", "fingerprint", "outside"] {
+    for case in ["depth", "version"] {
         let mut record = journal_record(30);
         match case {
             "depth" => {
                 record["reading"]["multipv"][0].as_object_mut().unwrap().remove("depth");
             }
             "version" => record["kind"] = serde_json::json!("book-tree-unsupported"),
-            "fingerprint" => record["settings"]["fingerprint"] = serde_json::json!("a".repeat(64)),
-            "outside" => {
-                record["reading"]["key"] = serde_json::json!(after(HIRATE_KEY, &["7g7f"]));
-                record["reading"]["nodes_limit"] = serde_json::json!(0);
-            }
             _ => unreachable!(),
         }
         std::fs::write(&path, format!("{record}\n")).unwrap();
@@ -514,7 +513,36 @@ fn journal_depths_reject_invalid_tree_records() {
 }
 
 #[test]
-fn journal_depths_include_all_multipv_and_distinct_scores() {
+fn journal_depths_skip_invalid_rows_and_keep_valid_rows_after_them() {
+    use crate::book_tree::reply_graph::{HIRATE_KEY, fixture::after};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.jsonl");
+    let first = journal_record(30);
+    let mut invalid = Vec::new();
+    let mut tampered = first.clone();
+    tampered["settings"]["fingerprint"] = serde_json::json!("a".repeat(64));
+    invalid.push(tampered);
+    let mut uncomputable = first.clone();
+    uncomputable["settings"]["options"]["EvalFile"] = serde_json::json!("missing-hash-model");
+    uncomputable["settings"]["content_sha256"] = serde_json::json!({});
+    invalid.push(uncomputable);
+    let mut inconsistent = first.clone();
+    inconsistent["reading"]["threads"] = serde_json::json!(2);
+    invalid.push(inconsistent);
+    let mut outside = first.clone();
+    outside["reading"]["key"] = serde_json::json!(after(HIRATE_KEY, &["7g7f"]));
+    outside["reading"]["nodes_limit"] = serde_json::json!(0);
+    invalid.push(outside);
+    invalid.push(first.clone());
+    std::fs::write(&path, invalid.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+    let depths = journal_depths::load(&[path], &BTreeSet::from([HIRATE_KEY])).unwrap();
+    let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+    r.set("cond", first["settings"]["fingerprint"].as_str().unwrap()[..8].into());
+    assert_eq!(depths.depths(&Schema::default(), &r).unwrap(), Some(vec![30]));
+}
+
+#[test]
+fn journal_depths_keep_first_values_and_all_multipv() {
     use crate::book_tree::reply_graph::HIRATE_KEY;
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("input.jsonl");
@@ -530,7 +558,7 @@ fn journal_depths_include_all_multipv_and_distinct_scores() {
     let schema = Schema::default();
     let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
     r.set("cond", first["settings"]["fingerprint"].as_str().unwrap()[..8].into());
-    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![30, 30]));
+    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![30]));
     r.set("move", "2g2f".into());
-    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![25, 25]));
+    assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![25]));
 }

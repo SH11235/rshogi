@@ -548,11 +548,7 @@ fn write_parts(args: &CutArgs, reads: &BTreeMap<String, u32>, first_seen: &[Stri
         Some(path) => {
             let source =
                 read_source(path, args.fingerprint.as_deref(), |key| reads.contains_key(key))?;
-            println!(
-                "台帳の条件 {} の読みがある局面 {} を分け先から除く",
-                source.settings.fingerprint,
-                source.readings.len()
-            );
+            println!("台帳の読みがある行 {} を分け先から除く", source.readings.len());
             source.readings.into_iter().map(|r| r.key).collect()
         }
         None => BTreeSet::new(),

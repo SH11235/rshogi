@@ -1,4 +1,4 @@
-//! 別の台帳 (別マシンの台帳の複製など) の読みを、取り込み先の条件で台帳に足す。
+//! 別の台帳の読みを、読みごとの条件を保って取り込む。
 
 use super::ReadingArgs;
 use super::journal::{
@@ -18,19 +18,19 @@ pub(super) struct ImportJournalArgs {
     /// 取り込み元の台帳。書き込み中の台帳は拒否する (複製してから渡す)
     #[arg(long)]
     from_journal: PathBuf,
-    /// 取り込み元の条件の指紋。省略時は取り込み元の唯一の条件
+    /// 取り込み元の条件の指紋。省略時は全条件
     #[arg(long)]
     fingerprint: Option<String>,
-    /// 条件の違いを承知で取り込む元の指紋 (複数指定可)
+    /// 互換性のために受理する旧フラグ (効果なし)
     #[arg(long, value_name = "FP", value_parser = super::parse_accepted_fingerprint)]
     accept_fingerprint: Vec<String>,
     /// 取り込み先の台帳
     #[arg(long)]
     journal: PathBuf,
-    /// 取り込み先の読み条件 (serve と同じ指定)
+    /// 表示用 fingerprint の算出条件 (取り込みの可否には使わない)
     #[command(flatten)]
     reading: ReadingArgs,
-    /// エンジンの版が違う・分からない読みも取り込む (探索の結果を変えない変更だけの版どうしで使う)
+    /// 互換性のために受理する旧フラグ (効果なし)
     #[arg(long)]
     force: bool,
     /// 取り込み先と値の違う重複の扱い。keep-existing は取り込み先の値を残す (取り込み元の中の食い違いは常に拒否)
@@ -92,13 +92,13 @@ pub(super) fn warn_unknown_version(engine: &Path, version: &Option<String>) {
 fn version_warning(version: Option<&str>) -> Option<&'static str> {
     match version {
         None => Some(
-            "エンジンが --source-version に答えないので版が分かりません。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+            "エンジンが --source-version に答えないので版が分かりません。読みには記録済みの条件を使います",
         ),
         Some(v) if v.starts_with("unknown") => Some(
-            "エンジンの版が unknown です (git の作業木の外でのビルド、または git が使えない)。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+            "エンジンの版が unknown です (git の作業木の外でのビルド、または git が使えない)。読みには記録済みの条件を使います",
         ),
         Some(v) if v.contains("-dirty") => Some(
-            "エンジンは commit されていない変更を含むビルド (-dirty) です。この条件の読みを別のバイナリとの間で取り込むには --force が要ります",
+            "エンジンは commit されていない変更を含むビルド (-dirty) です。読みには記録済みの条件を使います",
         ),
         Some(_) => None,
     }
@@ -110,98 +110,11 @@ fn parse_source_version(stdout: &str) -> Option<String> {
     (!version.is_empty() && !version.contains(char::is_whitespace)).then(|| version.to_owned())
 }
 
-/// commit が分かり、commit されていない変更を含まない版。
-fn known_version(settings: &Settings) -> Option<&str> {
-    settings
-        .engine_version
-        .as_deref()
-        .filter(|v| !v.starts_with("unknown") && !v.contains("-dirty"))
-}
-
-/// 取り込み元の読みを取り込み先の条件の読みとみなせるかを確かめる。版だけが違う・分からないときは
-/// `force` で許し、その理由を返す。
-pub(super) fn check_compatible(
-    src: &Settings,
-    dst: &Settings,
-    force: bool,
-) -> Result<Option<String>> {
-    let mut errors = Vec::new();
-    for (name, a, b) in [
-        ("nodes", src.nodes.to_string(), dst.nodes.to_string()),
-        ("multipv", src.multipv.to_string(), dst.multipv.to_string()),
-        ("hash", src.hash.to_string(), dst.hash.to_string()),
-    ] {
-        if a != b {
-            errors.push(format!("{name}: {a} / {b}"));
-        }
-    }
-    // ファイル型の option はマシンごとにパスが違うので内容の SHA-256 で比べる。
-    if src.content_sha256 != dst.content_sha256 {
-        errors.push(format!("ファイルの内容: {:?} / {:?}", src.content_sha256, dst.content_sha256));
-    }
-    let plain = |s: &Settings| {
-        s.options
-            .iter()
-            .filter(|(k, _)| !s.content_sha256.contains_key(*k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>()
-    };
-    let src_keys: Vec<_> = src.options.keys().collect();
-    let dst_keys: Vec<_> = dst.options.keys().collect();
-    if src_keys != dst_keys {
-        errors.push(format!("option keys: {src_keys:?} / {dst_keys:?}"));
-    }
-    if plain(src) != plain(dst) {
-        errors.push(format!("option: {:?} / {:?}", plain(src), plain(dst)));
-    }
-    if !errors.is_empty() {
-        bail!("取り込み元と取り込み先の条件が違います (元 / 先): {}", errors.join("; "));
-    }
-    check_engine_compatible(src, dst, force)
-}
-
-/// 明示的な受理でも、参照ファイルの内容とエンジン以外の条件は一致が必要。
-pub(super) fn check_accepted(src: &Settings, dst: &Settings) -> Result<()> {
-    let mut src = src.clone();
-    src.content_sha256 = dst.content_sha256.clone();
-    src.engine_sha256 = dst.engine_sha256.clone();
-    src.engine_version = dst.engine_version.clone();
-    check_compatible(&src, dst, false)?;
-    Ok(())
-}
-
-fn check_engine_compatible(src: &Settings, dst: &Settings, force: bool) -> Result<Option<String>> {
-    // 同じバイナリなら版を問わない。違うバイナリは同じソースの版のときだけ同じ条件とする。
-    if src.engine_sha256 == dst.engine_sha256 {
-        return Ok(None);
-    }
-    match (known_version(src), known_version(dst)) {
-        (Some(a), Some(b)) if a == b => Ok(None),
-        _ => {
-            let reason = format!(
-                "エンジンの版: {} / {}",
-                src.engine_version.as_deref().unwrap_or("不明"),
-                dst.engine_version.as_deref().unwrap_or("不明")
-            );
-            if force {
-                Ok(Some(reason))
-            } else {
-                bail!(
-                    "{reason} (同じ版と確かめられません。探索の結果を変えない違いなら --force で取り込めます)"
-                )
-            }
-        }
-    }
-}
-
-/// バイナリとソースの版を除く読み条件の一致。
-pub(super) fn same_reading_condition(src: &Settings, dst: &Settings) -> bool {
-    let mut src = src.clone();
-    src.engine_sha256 = dst.engine_sha256.clone();
-    check_compatible(&src, dst, false).is_ok()
-}
-
 pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
+    import(args).map(|_| ())
+}
+
+fn import(args: ImportJournalArgs) -> Result<(usize, usize, usize)> {
     match (args.on_conflict, &args.conflicts_out) {
         (OnConflict::KeepExisting, None) => {
             bail!("--on-conflict keep-existing には --conflicts-out が要ります")
@@ -232,25 +145,6 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
     if source.ignored_tail {
         eprintln!("取り込み元の末尾の改行で終わらない行は無視しました");
     }
-    let accepted = args.accept_fingerprint.contains(&source.settings.fingerprint);
-    let forced = if accepted {
-        check_accepted(&source.settings, &dst)?;
-        None
-    } else {
-        check_compatible(&source.settings, &dst, args.force)?
-    };
-    let acceptance = if accepted { ":accepted=true" } else { "" };
-    if let Some(reason) = &forced {
-        eprintln!("--force: {reason}");
-    }
-    let provenance = format!(
-        "journal:sha256={}:fingerprint={}:force={}{}:path={}",
-        source.sha256,
-        source.settings.fingerprint,
-        forced.is_some(),
-        acceptance,
-        args.from_journal.display()
-    );
     // 一覧の一時ファイルは台帳を開く前に作り、検査しながら書く。公開は読みを追記する前に行い、
     // 書けなければ読みを追記せずに失敗する (末尾の書きかけの行の切り詰めは、台帳を開くときに行う)。
     let mut list = match &args.conflicts_out {
@@ -261,17 +155,38 @@ pub(super) fn run(args: ImportJournalArgs) -> Result<()> {
         None => None,
     };
     let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
-    let incoming = source.readings.into_iter().map(|r| (r, provenance.clone())).collect();
+    let source_fingerprints = source
+        .reading_settings
+        .iter()
+        .map(|s| s.fingerprint.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    let incoming = source
+        .readings
+        .into_iter()
+        .zip(source.reading_settings)
+        .map(|(reading, settings)| {
+            let provenance = format!(
+                "journal:sha256={}:fingerprint={}:force=false:path={}",
+                source.sha256,
+                settings.fingerprint,
+                args.from_journal.display()
+            );
+            (reading, settings, provenance)
+        })
+        .collect();
     let sink: &mut dyn ConflictSink = match &mut list {
         Some(list) => list,
         None => &mut NoConflictList,
     };
     let (appended, skipped, conflicts) =
-        journal.merge_all(incoming, &dst, args.on_conflict, sink, &source.prefetched)?;
+        journal.merge_records(incoming, args.on_conflict, sink, &source.prefetched)?;
     println!("fingerprint={}", dst.fingerprint);
-    println!("source_fingerprint={}", source.settings.fingerprint);
+    println!("source_fingerprint={source_fingerprints}");
     println!("appended={appended} skipped={skipped} conflicts={conflicts}");
-    Ok(())
+    Ok((appended, skipped, conflicts))
 }
 
 const CONFLICT_HEADER: &str = "key\tply\texisting_bestmove\texisting_cp\tincoming_bestmove\tincoming_cp\tincoming_provenance\n";
@@ -494,119 +409,41 @@ mod tests {
     }
 
     #[test]
-    fn same_contents_settings_and_version_are_compatible_across_paths_and_builds() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = settings(&machine(dir.path(), "a", "build a", "model"), Some(VERSION_A));
-        let dst = settings(&machine(dir.path(), "b", "build b", "model"), Some(VERSION_A));
-        assert_ne!(src.fingerprint, dst.fingerprint);
-        assert_eq!(check_compatible(&src, &dst, false).unwrap(), None);
-    }
-
-    #[test]
-    fn different_unknown_or_dirty_version_needs_force() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = machine(dir.path(), "a", "build a", "model");
-        let b = machine(dir.path(), "b", "build b", "model");
-        let dirty = format!("{VERSION_A}-dirty");
-        for (src, dst) in [
-            (Some(VERSION_A), Some(VERSION_B)),
-            (None, Some(VERSION_A)),
-            (Some(VERSION_A), Some("unknown")),
-            (Some(dirty.as_str()), Some(dirty.as_str())),
-        ] {
-            let (src, dst) = (settings(&a, src), settings(&b, dst));
-            assert!(check_compatible(&src, &dst, false).is_err());
-            assert!(check_compatible(&src, &dst, true).unwrap().is_some());
-        }
-        // 同じバイナリなら版を記録する前の読みでも同じ条件。
-        let same = settings(&a, None);
-        assert_eq!(check_compatible(&same, &settings(&a, Some(VERSION_A)), false).unwrap(), None);
-    }
-
-    #[test]
-    fn other_differences_are_refused_even_with_force() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = machine(dir.path(), "a", "build a", "model");
-        let b = machine(dir.path(), "b", "build b", "other model");
-        let c = machine(dir.path(), "c", "build c", "model");
-        let src = settings(&a, Some(VERSION_A));
-        let with = |m: &Machine, nodes, extra: &[&str]| {
-            let mut s = Settings::new(&reading_args(m, nodes, extra)).unwrap();
-            s.engine_version = Some(VERSION_A.into());
-            s
-        };
-        for dst in [
-            settings(&b, Some(VERSION_A)),
-            with(&c, 200, &["DrawValueBlack=-50"]),
-            with(&c, 100, &["DrawValueBlack=0"]),
-            with(&c, 100, &["DrawValueBlack=-50", "SlowMover=50"]),
-        ] {
-            assert!(check_compatible(&src, &dst, true).is_err());
-        }
-        std::fs::write(c.engine.with_file_name("spsa.params"), "tuned").unwrap();
-        assert!(check_compatible(&src, &settings(&c, Some(VERSION_A)), true).is_err());
-    }
-
-    #[test]
-    fn accepted_only_relaxes_file_contents_and_engine() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut src = settings(&machine(dir.path(), "a", "engine a", "model a"), None);
-        let dst = settings(&machine(dir.path(), "b", "engine b", "model b"), Some(VERSION_B));
-        src.engine_version = Some(VERSION_A.into());
-        src.content_sha256.insert("implicit:SPSAParamsFile".into(), "a".repeat(64));
-        check_accepted(&src, &dst).unwrap();
-        for field in [
-            "nodes",
-            "multipv",
-            "hash",
-            "DrawValueBlack",
-            "DrawValueWhite",
-            "option",
-        ] {
-            let mut changed = src.clone();
-            match field {
-                "nodes" => changed.nodes += 1,
-                "multipv" => changed.multipv += 1,
-                "hash" => changed.hash += 1,
-                "option" => {
-                    changed.options.remove("EvalFile");
-                }
-                key => {
-                    changed.options.insert(key.into(), "0".into());
-                }
-            }
-            let err = check_accepted(&changed, &dst).unwrap_err().to_string();
-            assert!(err.contains(field), "{field}: {err}");
-        }
-        let mut larger = dst.clone();
-        larger.multipv += 1;
-        assert!(check_accepted(&src, &larger).unwrap_err().to_string().contains("multipv"));
-    }
-
-    #[test]
-    fn import_journal_rejects_accepted_nodes_mismatch_without_changing_destination() {
+    fn import_journal_keeps_all_source_conditions_without_admission_flags() {
         let dir = tempfile::tempdir().unwrap();
         let m = machine(dir.path(), "a", "engine", "model");
         let src = Settings::new(&reading_args(&m, 200, &[])).unwrap();
+        let other = src.with_overrides(3, 300).unwrap();
         let dst = Settings::new(&reading_args(&m, 100, &[])).unwrap();
         let source = dir.path().join("src.jsonl");
         let destination = dir.path().join("dst.jsonl");
-        write_journal(&source, &[(&src, reading(0, &src, "resign"))]);
-        write_journal(&destination, &[(&dst, reading(1, &dst, "resign"))]);
-        let before = std::fs::read(&destination).unwrap();
-        let err = run(ImportJournalArgs {
+        write_journal(
+            &source,
+            &[
+                (&src, reading(0, &src, "resign")),
+                (&other, reading(0, &other, "win")),
+            ],
+        );
+        write_journal(&destination, &[(&dst, reading(0, &dst, "resign"))]);
+        run(ImportJournalArgs {
             from_journal: source,
             fingerprint: None,
-            accept_fingerprint: vec![src.fingerprint.clone()],
+            accept_fingerprint: Vec::new(),
             journal: destination.clone(),
             reading: reading_args(&m, 100, &[]),
-            force: true,
+            force: false,
             on_conflict: OnConflict::Reject,
             conflicts_out: None,
         })
-        .unwrap_err();
-        assert!(err.to_string().contains("nodes"), "{err:#}");
-        assert_eq!(std::fs::read(destination).unwrap(), before);
+        .unwrap();
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&destination)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1]["settings"], serde_json::to_value(&src).unwrap());
+        assert_eq!(rows[2]["settings"], serde_json::to_value(&other).unwrap());
     }
 
     #[test]
@@ -631,11 +468,11 @@ mod tests {
         bytes.extend_from_slice(b"{partial");
         std::fs::write(&src_path, &bytes).unwrap();
 
-        assert!(read_source(&src_path, None, |_| true).is_err());
+        assert_eq!(read_source(&src_path, None, |_| true).unwrap().readings.len(), 3);
         let source = read_source(&src_path, Some(&src.fingerprint), |_| true).unwrap();
         assert!(source.ignored_tail);
         assert_eq!(source.readings.len(), 2);
-        assert_eq!(source.settings.engine_version.as_deref(), Some(VERSION_A));
+        assert_eq!(source.reading_settings[0].engine_version.as_deref(), Some(VERSION_A));
         assert_eq!(std::fs::read(&src_path).unwrap(), bytes);
         {
             let _writer = LockedFile::open(&src_path).unwrap();
@@ -863,6 +700,39 @@ mod tests {
     const RECORDED_SETTINGS: &str = r#"{"fingerprint":"74695922da474f8e2284c42755db2d93b0fb80815b63a253a1ae071c6ac8942a","version":"book-tree-v1/newgame-ready/node-calib-last-multipv-v1","engine_sha256":"8c32f9585e25eb773b008e05fcd03cd7c6e590660b5eda0a561e3746ce877984","options":{"DrawValueBlack":"-70","DrawValueWhite":"70","EvalFile":"/path/to/model.bin","FV_SCALE":"14","LS_BUCKET_MODE":"progresskpabs","LS_PROGRESS_BUCKETS":"8","LS_PROGRESS_COEFF":"/path/to/progress.bin","MultiPV":"3","Threads":"1","USI_Hash":"1024","UseEvalHash":"false"},"content_sha256":{"EvalFile":"7871f1c0b7af35d84e76a713b20e7b313f8294167d513761f0a69b4e24c4003d","LS_PROGRESS_COEFF":"8d0058b899768c00e71be5508c5c4544d8c8ce24b30c32024c2a0a4452dbdb53","implicit:SPSAParamsFile":"absent"},"nodes":1000000000,"multipv":3,"hash":1024}"#;
 
     #[test]
+    fn import_journal_two_conditions_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "a", "build", "model");
+        let a = settings(&m, None);
+        let b = a.with_overrides(a.multipv, a.nodes + 1).unwrap();
+        let source = dir.path().join("source.jsonl");
+        write_journal(
+            &source,
+            &[
+                (&a, reading(0, &a, "resign")),
+                (&b, reading(0, &b, "win")),
+                (&a, reading(1, &a, "resign")),
+                (&b, reading(1, &b, "win")),
+            ],
+        );
+        let destination = dir.path().join("destination.jsonl");
+        let args = || ImportJournalArgs {
+            from_journal: source.clone(),
+            fingerprint: None,
+            accept_fingerprint: Vec::new(),
+            journal: destination.clone(),
+            reading: reading_args(&m, 100, &[]),
+            force: false,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
+        };
+        assert_eq!(import(args()).unwrap(), (4, 0, 0));
+        let bytes = std::fs::read(&destination).unwrap();
+        assert_eq!(import(args()).unwrap(), (0, 4, 0));
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    }
+
+    #[test]
     fn recorded_settings_keep_their_fingerprint() {
         let mut settings: Settings = serde_json::from_str(RECORDED_SETTINGS).unwrap();
         assert_eq!(settings.engine_version, None);
@@ -892,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_out_positions_still_reject_conflicting_duplicates() {
+    fn filtered_out_positions_skip_conflicting_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
         let src = settings(&a, None);
@@ -910,11 +780,11 @@ mod tests {
         let source = read_source(&path, None, keep).unwrap();
         assert_eq!(source.readings, std::slice::from_ref(&kept));
         write_lines(&path, &lines("win"));
-        assert!(read_source(&path, None, keep).is_err());
+        assert_eq!(read_source(&path, None, keep).unwrap().readings, [kept]);
     }
 
     #[test]
-    fn every_selected_record_must_match_its_fingerprint() {
+    fn source_skips_invalid_rows_and_accepts_version_differences() {
         let dir = tempfile::tempdir().unwrap();
         let a = machine(dir.path(), "a", "build a", "model");
         let src = settings(&a, None);
@@ -925,9 +795,15 @@ mod tests {
         tampered.nodes = 200;
         let lying = record_json(&tampered, &reading(1, &tampered, "resign"));
         write_lines(&path, &[good.clone(), lying.clone()]);
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert_eq!(read_source(&path, None, |_| true).unwrap().readings.len(), 1);
         write_lines(&path, &[lying]);
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert!(read_source(&path, None, |_| true).unwrap().readings.is_empty());
+        assert!(
+            read_source(&path, Some(&src.fingerprint), |_| true)
+                .unwrap()
+                .readings
+                .is_empty()
+        );
 
         // モデルを別のパスへ移した後の行は同じ条件として受け入れる。
         let moved_dir = dir.path().join("moved");
@@ -960,9 +836,8 @@ mod tests {
                 record_json(&changed_draw, &reading(3, &src, "resign")),
             ],
         );
-        assert!(read_source(&path, None, |_| true).is_err());
+        assert_eq!(read_source(&path, None, |_| true).unwrap().readings.len(), 1);
 
-        // 選ばない条件の版の食い違いは問わない。
         let other = Settings::new(&reading_args(&a, 300, &[])).unwrap();
         let versioned = |v: &str| {
             let mut s = other.clone();
@@ -971,7 +846,10 @@ mod tests {
         };
         write_lines(&path, &[good.clone(), versioned(VERSION_A), versioned(VERSION_B)]);
         assert_eq!(read_source(&path, Some(&src.fingerprint), |_| true).unwrap().readings.len(), 1);
-        assert!(read_source(&path, Some(&other.fingerprint), |_| true).is_err());
+        assert_eq!(
+            read_source(&path, Some(&other.fingerprint), |_| true).unwrap().readings.len(),
+            1
+        );
 
         std::fs::write(&path, "").unwrap();
         let err = read_source(&path, None, |_| true).err().unwrap().to_string();
@@ -979,77 +857,6 @@ mod tests {
         let missing = dir.path().join("missing.jsonl");
         let err = format!("{:#}", read_source(&missing, None, |_| true).err().unwrap());
         assert!(err.contains("missing.jsonl"), "{err}");
-    }
-
-    #[test]
-    fn import_journal_accepts_listed_foreign_net_and_keeps_destination_settings() {
-        use clap::Parser;
-        #[derive(Parser)]
-        struct Cli {
-            #[command(flatten)]
-            args: ImportJournalArgs,
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let a = machine(dir.path(), "a", "engine", "source model");
-        let b = machine(dir.path(), "b", "other engine", "destination model");
-        let src = Settings::new(&reading_args(&a, 100, &[])).unwrap();
-        let dst_args = reading_args(&b, 100, &[]);
-        let dst = Settings::new(&dst_args).unwrap();
-        assert_ne!(src.content_sha256, dst.content_sha256);
-        assert_ne!(src.fingerprint, dst.fingerprint);
-        let source = dir.path().join("src.jsonl");
-        let destination = dir.path().join("dst.jsonl");
-        write_journal(&source, &[(&src, reading(0, &src, "resign"))]);
-        write_journal(&destination, &[(&dst, reading(1, &dst, "resign"))]);
-        let before = std::fs::read(&destination).unwrap();
-        let base = vec![
-            "test".to_owned(),
-            "--from-journal".into(),
-            source.display().to_string(),
-            "--journal".into(),
-            destination.display().to_string(),
-            "--engine".into(),
-            b.engine.display().to_string(),
-            "--engine-option".into(),
-            format!("EvalFile={}", b.model.display()),
-            "--nodes".into(),
-            "100".into(),
-            "--multipv".into(),
-            "1".into(),
-            "--hash".into(),
-            "16".into(),
-        ];
-        let rejected = Cli::try_parse_from(&base).unwrap();
-        let err = run(rejected.args).unwrap_err();
-        assert!(err.to_string().contains("条件が違います"), "{err:#}");
-        assert_eq!(std::fs::read(&destination).unwrap(), before);
-        let mut accepted = base;
-        accepted.extend([
-            "--accept-fingerprint".into(),
-            "f".repeat(64),
-            "--accept-fingerprint".into(),
-            src.fingerprint.clone(),
-        ]);
-        let other = Settings::new(&reading_args(&a, 200, &[])).unwrap();
-        write_journal(&source, &[(&other, reading(2, &other, "resign"))]);
-        let err = run(Cli::try_parse_from(&accepted).unwrap().args).unwrap_err();
-        assert!(err.to_string().contains("--fingerprint"), "{err:#}");
-        assert_eq!(std::fs::read(&destination).unwrap(), before);
-        accepted.extend(["--fingerprint".into(), src.fingerprint.clone()]);
-        run(Cli::try_parse_from(accepted).unwrap().args).unwrap();
-        let text = std::fs::read_to_string(&destination).unwrap();
-        assert_eq!(text.lines().count(), 2);
-        let record: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
-        assert_eq!(record["settings"], serde_json::to_value(&dst).unwrap());
-        let sha = super::super::journal::digest(&source).unwrap();
-        assert_eq!(
-            record["provenance"],
-            format!(
-                "journal:sha256={sha}:fingerprint={}:force=false:accepted=true:path={}",
-                src.fingerprint,
-                source.display()
-            )
-        );
     }
 
     #[cfg(unix)]
@@ -1068,7 +875,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn import_journal_records_provenance_and_requires_force_for_another_version() {
+    fn import_journal_records_source_provenance_across_versions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let engine_reporting = |name: &str, version: &str| {
@@ -1097,8 +904,7 @@ mod tests {
             on_conflict: OnConflict::Reject,
             conflicts_out: None,
         };
-        assert!(run(args(false)).is_err());
-        assert!(!dst_path.exists() || std::fs::metadata(&dst_path).unwrap().len() == 0);
+        run(args(false)).unwrap();
         run(args(true)).unwrap();
         let line = std::fs::read_to_string(&dst_path).unwrap();
         let record: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -1106,12 +912,12 @@ mod tests {
         assert_eq!(
             record["provenance"],
             format!(
-                "journal:sha256={sha}:fingerprint={}:force=true:path={}",
+                "journal:sha256={sha}:fingerprint={}:force=false:path={}",
                 src.fingerprint,
                 src_path.display()
             )
         );
-        assert_eq!(record["settings"]["engine_version"], VERSION_B);
+        assert_eq!(record["settings"]["engine_version"], VERSION_A);
         assert!(
             run(ImportJournalArgs {
                 journal: src_path.clone(),
@@ -1130,5 +936,36 @@ mod tests {
         .unwrap();
         assert!(err.to_string().contains("同じ台帳"), "{err}");
         assert_eq!(std::fs::read(&src_path).unwrap(), before);
+    }
+    #[test]
+    fn import_same_fingerprint_with_different_versions_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "engine", "build", "model");
+        let dst = settings(&m, Some(VERSION_A));
+        let src = settings(&m, Some(VERSION_B));
+        assert_eq!(dst.fingerprint, src.fingerprint);
+        let source = dir.path().join("source.jsonl");
+        let destination = dir.path().join("destination.jsonl");
+        let original = reading(0, &dst, "resign");
+        let added = [reading(1, &src, "resign"), reading(2, &src, "resign")];
+        write_journal(&destination, &[(&dst, original.clone())]);
+        write_journal(&source, &[(&src, added[0].clone()), (&src, added[1].clone())]);
+        let counts = import(ImportJournalArgs {
+            from_journal: source,
+            fingerprint: None,
+            accept_fingerprint: Vec::new(),
+            journal: destination.clone(),
+            reading: reading_args(&m, 100, &[]),
+            force: false,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
+        })
+        .unwrap();
+        assert_eq!(counts, (2, 0, 0));
+        let journal = Journal::open(&destination, &dst.fingerprint).unwrap();
+        for r in [&original, &added[0], &added[1]] {
+            assert_eq!(journal.get_exact(&r.key, &dst.fingerprint), Some(r));
+        }
+        assert!(journal.skipped_rows.is_empty());
     }
 }

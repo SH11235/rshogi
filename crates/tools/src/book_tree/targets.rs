@@ -30,6 +30,12 @@ pub(super) struct Opts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opp_n: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipv: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_condition: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rounds: Option<usize>,
@@ -48,6 +54,12 @@ impl Opts {
     /// キューで指定できる値の範囲を検査する。
     pub fn check(&self) -> Result<()> {
         let o = self;
+        if let Some(v) = o.multipv {
+            check_range("multipv", v, 1, usize::MAX)?;
+        }
+        if let Some(v) = o.nodes {
+            check_range("nodes", v, 1, u64::MAX)?;
+        }
         if let Some(v) = o.opp_n {
             check_range("opp_n", v, 1, 8)?;
         }
@@ -164,6 +176,8 @@ fn check_range<T: PartialOrd + std::fmt::Display>(name: &str, v: T, lo: T, hi: T
 /// serve の既定 (`--opp-n` など)。行の書かない項目をこれで解決する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Defaults {
+    pub multipv: usize,
+    pub nodes: u64,
     pub opp_n: usize,
     pub stop: i32,
     pub rounds: usize,
@@ -171,6 +185,8 @@ pub(super) struct Defaults {
 }
 impl Defaults {
     pub fn check(&self) -> Result<()> {
+        check_range("multipv", self.multipv, 1, usize::MAX)?;
+        check_range("nodes", self.nodes, 1, u64::MAX)?;
         check_range("opp_n", self.opp_n, 1, 8)?;
         check_range("stop", self.stop, 1, 30000)?;
         check_range("rounds", self.rounds, 0, 10)?;
@@ -236,6 +252,9 @@ impl Line {
                 .map(|r| parse_root(r).map(|r| (r.key, r.ply)))
                 .collect::<Result<_>>()?,
             depth: self.depth,
+            multipv: self.opts.multipv,
+            nodes: self.opts.nodes,
+            require_condition: self.opts.require_condition,
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),
@@ -252,6 +271,12 @@ impl Line {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Resolved {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipv: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_condition: bool,
     pub key: String,
     pub ply: u32,
     /// 追加の根 (局面 key と手数)。
@@ -273,6 +298,10 @@ impl Resolved {
     pub fn params(&self, own: &str, out: &Path) -> TreeParams {
         TreeParams {
             out: out.to_owned(),
+            multipv: self.multipv,
+            nodes: self.nodes,
+            require_condition: self.require_condition,
+            preferred_fingerprint: None,
             depth: self.depth,
             opp_n: self.opp_n,
             stop: self.stop,
@@ -351,6 +380,7 @@ pub(super) struct Rejected {
 pub(super) struct Checkpoint {
     pub version: String,
     pub out_root: PathBuf,
+    #[serde(default)]
     pub fingerprint: String,
     pub processed_bytes: u64,
     pub processed_sha256: String,
@@ -619,4 +649,54 @@ pub(super) struct Receipt {
     pub start: u64,
     pub end: u64,
     pub lines: usize,
+}
+
+#[cfg(test)]
+mod condition_tests {
+    use super::*;
+
+    #[test]
+    fn per_tree_condition_options_resolve_and_validate() {
+        let defaults = Defaults {
+            multipv: 3,
+            nodes: 100,
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+        };
+        let mut line: Line = serde_json::from_str(
+            r#"{"id":"tree","root":"startpos","own":"b","depth":0,"opts":{"multipv":2,"nodes":50,"require_condition":true}}"#,
+        ).unwrap();
+        let root = line.check().unwrap();
+        let resolved = line.resolve(&root, &defaults).unwrap();
+        assert_eq!(resolved.multipv, Some(2));
+        assert_eq!(resolved.nodes, Some(50));
+        assert!(resolved.require_condition);
+        line.opts = Opts::default();
+        let resolved = line.resolve(&root, &defaults).unwrap();
+        assert_eq!(resolved.multipv, None);
+        assert_eq!(resolved.nodes, None);
+        assert!(!resolved.require_condition);
+        line.opts.multipv = Some(0);
+        assert!(line.check().is_err());
+        line.opts.multipv = Some(1);
+        line.opts.nodes = Some(0);
+        assert!(line.check().is_err());
+    }
+
+    #[test]
+    fn checkpoints_accept_optional_informational_fingerprint_and_old_definitions() {
+        let checkpoint = Checkpoint::new(PathBuf::from("output"), "old".into());
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        value.as_object_mut().unwrap().remove("fingerprint");
+        let restored: Checkpoint = serde_json::from_value(value).unwrap();
+        assert!(restored.fingerprint.is_empty());
+        let definition: Resolved = serde_json::from_str(
+            r#"{"key":"root","ply":1,"depth":0,"opp_n":1,"stop":300,"rounds":0,"draw":0,"extra":[],"game":[]}"#,
+        ).unwrap();
+        assert_eq!(definition.multipv, None);
+        assert_eq!(definition.nodes, None);
+        assert!(!definition.require_condition);
+    }
 }

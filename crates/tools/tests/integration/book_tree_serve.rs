@@ -998,13 +998,18 @@ fn generations_follow_the_resolved_definition_and_reuse_the_journal() {
     let generation = |id: &str, own: &str| {
         targets_status(state)["targets"]
             .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["id"] == id && t["own"] == own)
-            .map(|t| t["generation"].as_u64().unwrap())
+            .and_then(|targets| targets.iter().find(|t| t["id"] == id && t["own"] == own))
+            .and_then(|t| t["generation"].as_u64())
     };
     let receipt = add_tree(state, "a");
-    assert!(wait_cmd(state, &receipt, None).output().unwrap().status.success());
+    wait_for(|| generation("a", "b") == Some(1));
+    let result = wait_cmd(state, &receipt, None).output().unwrap();
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
     let g1 = state.parent().unwrap().join("a/b/g1");
     let own = std::fs::read(g1.join("own_nodes.tsv")).unwrap();
     let mut line = tree_line("a");
@@ -2454,4 +2459,96 @@ fn live_import_satisfies_queued_requests_and_finishes_tree_without_workers() {
     assert_eq!(journal_rows(&state).len(), 4);
     assert!(alerts(&state).is_empty());
     stop(&state, &mut server);
+}
+
+#[test]
+fn mixed_conditions_share_default_reads_and_exact_trees_read_their_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let config = fast_fixture(state);
+    std::fs::write(state.join("workers"), "1").unwrap();
+    let line = |id: &str, priority, multipv, nodes, required| {
+        json!({"id":id,"root":format!("sfen {ROOT} 1"),"own":"b","depth":0,
+            "priority":priority,"opts":{"multipv":multipv,"nodes":nodes,
+                "require_condition":required}})
+    };
+    let result = try_enqueue(
+        state,
+        &[
+            line("first", 1, 1, 200, false),
+            line("shared", 2, 2, 300, false),
+        ],
+    );
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let mut server = start(state, &config);
+    wait_for(|| {
+        status(&out(state, "first", "b")) == "DONE\n"
+            && status(&out(state, "shared", "b")) == "DONE\n"
+    });
+    assert_eq!(searches(state), 1);
+    let first = journal_rows(state).remove(0);
+    assert_eq!(first["settings"]["multipv"], 1);
+    assert_eq!(first["settings"]["nodes"], 200);
+    assert_eq!(first["settings"]["options"]["MultiPV"], "1");
+    assert_eq!(first["reading"]["nodes_limit"], 200);
+    assert_eq!(first["reading"]["multipv"].as_array().unwrap().len(), 1);
+    enqueue(state, line("exact", 0, 2, 300, true));
+    wait_for(|| status(&out(state, "exact", "b")) == "DONE\n");
+    let rows = journal_rows(state);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(searches(state), 2);
+    assert_eq!(rows[1]["settings"]["multipv"], 2);
+    assert_eq!(rows[1]["settings"]["nodes"], 300);
+    assert_eq!(rows[1]["settings"]["options"]["MultiPV"], "2");
+    assert_eq!(rows[1]["reading"]["nodes_limit"], 300);
+    assert_eq!(rows[1]["reading"]["multipv"].as_array().unwrap().len(), 2);
+    assert_ne!(rows[0]["settings"]["fingerprint"], rows[1]["settings"]["fingerprint"]);
+    let log = protocol(state);
+    assert!(log.iter().any(|(_, line)| line == "setoption name MultiPV value 1"));
+    assert!(log.iter().any(|(_, line)| line == "setoption name MultiPV value 2"));
+    assert!(log.iter().any(|(_, line)| line == "go nodes 200"));
+    assert!(log.iter().any(|(_, line)| line == "go nodes 300"));
+    for (id, row) in [
+        ("first", &rows[0]),
+        ("shared", &rows[0]),
+        ("exact", &rows[1]),
+    ] {
+        let registration: Value = serde_json::from_slice(
+            &std::fs::read(out(state, id, "b").join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(registration["fingerprint"], row["settings"]["fingerprint"]);
+    }
+    stop(state, &mut server);
+}
+
+#[test]
+fn restart_with_a_different_default_condition_continues_accepted_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let config = fast_fixture(state);
+    enqueue(
+        state,
+        json!({"id":"retained","root":format!("sfen {ROOT} 1"),
+        "own":"b","depth":0,"opts":{"require_condition":true}}),
+    );
+    let mut server = start(state, &config);
+    wait_for(|| status(&out(state, "retained", "b")) == "DONE\n");
+    stop(state, &mut server);
+    let before = journal_rows(state).remove(0);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    data["identity"] = json!("different net contents");
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let mut server = start_with_multipv(state, &config, 3, 2);
+    wait_for(|| journal_rows(state).len() == 2 && status(&out(state, "retained", "b")) == "DONE\n");
+    let after = journal_rows(state);
+    assert_eq!(after[0], before);
+    assert_ne!(after[0]["settings"]["fingerprint"], after[1]["settings"]["fingerprint"]);
+    assert_eq!(after[1]["settings"]["multipv"], 2);
+    assert_eq!(targets_status(state)["targets"][0]["generation"], 1);
+    assert_eq!(searches(state), 2);
+    stop(state, &mut server);
 }

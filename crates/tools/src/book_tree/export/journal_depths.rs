@@ -1,6 +1,6 @@
 use super::{Schema, master_table::Row};
 use crate::book_db::{position_from_sfen, strip_ply};
-use crate::book_tree::{journal, schema::valid_fingerprint};
+use crate::book_tree::journal;
 use anyhow::{Result, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -10,7 +10,7 @@ use std::{
 #[derive(Default)]
 pub(super) struct Depths {
     fingerprints: BTreeSet<String>,
-    readings: BTreeMap<(String, String), Vec<journal::Reading>>,
+    readings: BTreeMap<(String, String), journal::Reading>,
 }
 
 impl Depths {
@@ -36,7 +36,6 @@ impl Depths {
             .readings
             .get(&(fingerprint.to_owned(), row.get("key").to_owned()))
             .into_iter()
-            .flatten()
             .filter_map(|reading| reading.multipv.iter().find(|pv| pv.mv == row.get("move")))
             .map(|pv| pv.depth)
             .collect();
@@ -51,6 +50,8 @@ pub(super) fn load(paths: &[PathBuf], keys: &BTreeSet<&str>) -> Result<Depths> {
     let mut other = 0;
     let mut duplicates = 0;
     let mut used = 0;
+    let mut invalid = 0;
+    let mut conflicting = 0;
     let mut tails = 0;
     let mut skipped = 0;
     let scan = (|| -> Result<()> {
@@ -61,29 +62,42 @@ pub(super) fn load(paths: &[PathBuf], keys: &BTreeSet<&str>) -> Result<Depths> {
                     return Ok(());
                 }
                 engine += 1;
-                ensure!(valid_fingerprint(&rec.settings.fingerprint), "台帳の指紋が不正です");
-                ensure!(
-                    rec.settings.computed_fingerprint()? == rec.settings.fingerprint,
-                    "台帳の指紋と条件が一致しません"
-                );
-                let fp = rec.settings.fingerprint.to_ascii_lowercase();
+                let validated = (|| -> Result<_> {
+                    ensure!(
+                        rec.settings.computed_fingerprint()? == rec.settings.fingerprint,
+                        "台帳の指紋と条件が一致しません"
+                    );
+                    let key = strip_ply(
+                        &position_from_sfen(&format!("{} 1", strip_ply(&rec.reading.key)))?
+                            .to_sfen(),
+                    )
+                    .to_owned();
+                    let mut reading = rec.reading;
+                    reading.key = key.clone();
+                    reading.validate(&rec.settings)?;
+                    Ok((key, reading))
+                })();
+                let Ok((key, reading)) = validated else {
+                    invalid += 1;
+                    return Ok(());
+                };
+                let fp = rec.settings.fingerprint;
                 result.fingerprints.insert(fp.clone());
-                let key = strip_ply(
-                    &position_from_sfen(&format!("{} 1", strip_ply(&rec.reading.key)))?.to_sfen(),
-                )
-                .to_owned();
-                let mut reading = rec.reading;
-                reading.key = key.clone();
-                reading.validate(&rec.settings)?;
                 if !keys.contains(key.as_str()) {
                     return Ok(());
                 }
-                let readings = result.readings.entry((fp, key)).or_default();
-                if readings.iter().any(|old| old.same_values(&reading)) {
-                    duplicates += 1;
-                } else {
-                    readings.push(reading);
-                    used += 1;
+                match result.readings.entry((fp, key)) {
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        if entry.get().same_values(&reading) {
+                            duplicates += 1;
+                        } else {
+                            conflicting += 1;
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(reading);
+                        used += 1;
+                    }
                 }
                 Ok(())
             })?;
@@ -97,7 +111,7 @@ pub(super) fn load(paths: &[PathBuf], keys: &BTreeSet<&str>) -> Result<Depths> {
         Ok(())
     })();
     eprintln!(
-        "journal: engine={engine}, non-engine={other}, used={used}, duplicates={duplicates}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
+        "journal: engine={engine}, non-engine={other}, used={used}, duplicates={duplicates}, invalid={invalid}, conflicting={conflicting}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
         usize::from(scan.is_err())
     );
     scan?;
