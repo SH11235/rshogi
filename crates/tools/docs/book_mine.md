@@ -1439,7 +1439,7 @@ book_mine master check book.db book.annot.json book.random.explore.txt --bad-eva
 
 ```bash
 book_mine master audit --master moves.tsv --table audit.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--deep-plies N] [--opp-records] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv] [--bridge-enqueue-out bridge.jsonl]] \
+  --draw-value-black -70 --draw-value-white 70 [--line 40] [--deep-plies N] [--opp-records] [--out-db audited.db] [--fill-replies | --bridge-replies [--bridge-table bridge.tsv] [--bridge-enqueue-out bridge.jsonl]] \
   [--refutation-table refutation.tsv] [--enqueue-out refutation.jsonl] \
   [--opp-freq strong_games.db --min-weight 0.001] [--schema schema] \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
@@ -1464,7 +1464,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 | `--deep-opp-freq <PATH>` | なし | 相手のよくある応手も継続判定に含める頻度定跡 (YaneuraOu 形式 .db) |
 | `--deep-min-games <N>` | `3` | 継続判定で辿る相手の手の count (局数) の下限 |
 | `--draw-value-black <CP>` | `-70` | 先手を自分として解くときの千日手の値。対局の `DrawValueBlack` に揃え、明示を勧める |
-| `--draw-value-white <CP>` | `0` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
+| `--draw-value-white <CP>` | `70` | 後手を自分として解くときの千日手の値。対局の `DrawValueWhite` に揃え、明示を勧める |
 | `--out-db <PATH>` | なし | 値の分かる手だけを載せた、伝播後の値つき `.db` |
 | `--fill-replies` | なし | 元データに無い相手の手番の局面を補って伝播する (下の「伝播の仕方」)。`--apply`・`--demote-alts`・`--revive-bench` とは併用不可 (確認だけの場合も含む) |
 | `--bridge-replies` | なし | `--fill-replies` と違い、読みの値のある手の行き先を補い、その手の読みの値を残して伝播する (下の「伝播の仕方」)。`--apply`・`--demote-alts`・`--revive-bench` と併用でき、点検・main の置換・降格・復帰を補った伝播の値で決める。読みの値の無い手の行き先は補わない。`--fill-replies` とは併用不可 |
@@ -1487,7 +1487,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 bridge の表とキューは、重みがあれば手番側を自分とした到達重みの大きい順、同じなら main の悪化量の大きい順、さらに同じなら key 順です。重みが無ければ悪化量、key の順です。表の末尾の `weight` 列は、重みを指定しない場合は空欄です。除外キューとの出力先の衝突も拒否します。キュー出力時は「補った切れ目のキューの行: N (除外 M)」を表示します。
 
-点検の表・`--out-db` と main の置換判定は、同値の -1 補正後の値を使います。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+`--out-db` は同値の -1 補正後の値を書きます。点検の表と main の置換判定は、補正を戻した値で main と 1 位を比べ、同じ値なら main を保ちます (補正は出口まで短い手を残すので、そのまま比べると同値の局面で main が替わり、木ごとに main が行き来します)。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
 
 頻度定跡を省略した場合の `--deep-plies` の継続手数には、最初の main・1 位の手を含めず、その先の元データで role が main の手だけを数えます。伝播後の最善手や `--fill-replies` で補った手は辿りません。指定時は、線未満でも対象にした局面数を先手番・後手番別に要約へ出します。
 `--deep-opp-freq` 指定時は、点検する局面の手番側を自分として、自分の手番では main だけ、
@@ -1507,7 +1507,7 @@ bridge の表とキューは、重みがあれば手番側を自分とした到�
 
 置換する局面の先手番・後手番別の数、うち元の main が curated の数、curated なので替えなかった局面、source が置換対象でない数、1 位が伸ばしていない手なので替えなかった数を出します。対象の手の行が無いか bench・record だった場合も、替えずに数を出します。`--apply` が無ければ「確認だけ (--apply なし)」として同じ判定の件数を出します。点検の表・`--out-db`・反駁の表・キューは、すべて書き換え前の状態に基づく出力です。
 
-main・alt の役割を交換しても、局面の値は変わらないため、main の置換は一度の伝播で判定できます。ただし `assign_outputs` の同値の手を -1 する補正は手の間を移ることがあり、`--line 1` で再点検すると差 1 が出る場合があります。この説明は役割の交換についてであり、alt を bench にして伝播対象から除く処理には当てはまりません。
+main・alt の役割を交換しても、局面の値は変わらないため、main の置換は一度の伝播で判定できます。この説明は役割の交換についてであり、alt を bench にして伝播対象から除く処理には当てはまりません。
 
 `--demote-alts` は main の置換判定後、全局面の alt を次の条件で bench (控え) にします。値は点検で求めた手ごとの伝播値を使い、同値の -1 補正を戻して比較するため、同値の手を差だけで降格しません。
 
@@ -1533,7 +1533,7 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 - `--opp-records` を渡すと、先手用と後手用に分けて伝播します。先手用では後手番の record を相手の手として加え、先手番の record は除外します。後手用では先手番の record を加え、後手番の record は除外します。record は `evals` の読みの値 (複数あれば通常と同じ平均) がある手だけを使い、その先に子局面があれば値を伝播します。読みの値の無い record は、子局面があっても使いません。record だけの局面も相手の応手として使えます。点検・main の置換・alt の降格・bench の復帰・各出力の値には、局面の手番に合う伝播を使います。record 自体を main・alt に戻したり、`--out-db` に出したりはしません。`--bridge-replies`・`--deep-plies`・`--deep-opp-freq` などと併用でき、`--bridge-table` の比較元も同じ record の規則で伝播します。千日手の値は既存の規則に従います。`--opp-records` のときは反転した局面へ辺を張らないため、反転先の record や main・alt の値は使いません。要約には、合法かつ読みの値のある record を相手の手として使った手数と局面数を別に表示します (同じ局面の複数の record は一局面)。使った record は「bench・record (除外)」から差し引き、「非合法手」は main・alt の非合法手だけを数えます。循環の件数は先手用・後手用の伝播の合計です。省略時は従来どおり main・alt だけを使い、要約も変わりません。他のサブコマンドの伝播には影響しません。
 - `--bridge-table` は、補わないで伝播したときと補ったときの main の値を局面ごとに比べ、補ったときに `--line` 以上悪くなった局面を、`--opp-freq` があれば重みの大きい順 (同じなら悪化量の大きい順、次に key の順)、無ければ悪化量の大きい順 (同じなら key の順) に書きます。列は `key ply side main plain bridged drop best best_value plain_black bridged_black weight` で、`plain`・`bridged`・`best_value` は手番の側から、`plain_black`・`bridged_black` は先手から見た値、`best` は補ったときの 1 位の手です。補わない側の伝播も、補う側と同じく反転した局面へ辺を張らずに解くので、表の差は補ったことによる差だけです。
 
-点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
+点検の表は、main が 1 位から線以上負ける局面を差の大きい順 (同じ差は key 順) に並べます。値は同値の -1 補正を戻した値で、同じ値なら main を 1 位とみなします。列は `key ply side source main main_value main_from main_eval best best_value best_from best_eval gap main_value_black best_value_black` です。`*_value` は手番の側から見た伝播後の値、`*_from` は値の出どころ (`eval` = 1 回の読みの値、`propagated` = 子局面からの伝播)、`*_eval` は元の読みの値 (無ければ空)、`source` は main の行の source、`*_value_black` は先手から見た値 (プラス = 先手良し) です。
 
 標準出力に要約を出します: 局面数 (手番ごと)、手の数・値の分かる手の数・非合法手・除いた bench・record、読みの値から伝播で変わった手の数と差の分布、読みの値が無く伝播で値が付いた手の数、main・alt が 2 手以上の局面数、main が 1 位から線未満・線以上負ける局面数、main の値が分からない局面数、補った相手の手番の局面の数、循環 (自明でない強連結成分) の数。
 
@@ -1542,7 +1542,7 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 読みの MultiPV の 2 位以下の値は 1 位より甘く出やすく、伝播で 1 位の手の先が掘られて値が下がると、先を伸ばしていない甘い手が伝播後の 1 位に繰り上がります。`--refutation-table` か `--enqueue-out` を渡すと、次の局面を出します。どちらも渡さなければ、上の表・要約・`--out-db` の出力は変わりません。
 
 - 伸ばした手 (`*_from` が `propagated`、book 内の子局面から値が来る手) と伸ばしていない手 (`eval`、1 回の読みの値) の両方に値の分かる手がある局面で、伸ばしていない手の最善 `best` が伸ばした手の最善 `expanded_best` を `--refutation-margin` 以上上回る局面 (同じ値なら元データの順で先の手を最善とします)。
-- 値は同値の -1 補正の前の値で比べます。伝播の書き出し (`--out-db` と `book_backprop`) は 1 位と同値で選ばなかった手を -1 するので、補正後の値で比べると同値の手が margin 1 で当たるためです。そのため反駁の表の値は、点検の表や `--out-db` の値と 1 違うことがあります。
+- 値は同値の -1 補正の前の値で比べます。伝播の書き出し (`--out-db` と `book_backprop`) は 1 位と同値で選ばなかった手を -1 するので、補正後の値で比べると同値の手が margin 1 で当たるためです。そのため反駁の表と点検の表の値は、`--out-db` の値と 1 違うことがあります。
 - 伝播前の順位は深さの違う読みが混ざるので条件にしません。伝播前の読みの値に `best` の読みの値より大きい手があれば `swapped` を 1 にします (同値なら入れ替わっていないとみなします)。`main_is_best` は main が `best` なら 1 です。
 
 反駁の表の列は `key ply side main main_value main_from best best_value best_eval expanded_best expanded_best_value expanded_best_eval margin swapped main_is_best weight best_value_black expanded_best_value_black source best_source` です。`margin = best_value - expanded_best_value`、値は手番の側から、`*_black` は先手から見た値 (プラス = 先手良し)、`source` は main の行の source、`best_source` は `best` の行の source です。main の値が分からなければ `main_value`・`main_from` だけ空にします (`main` には手を書きます)。重み `weight` は `--opp-freq` を渡したときだけ埋まり、局面の手番の側を自分として `master rejoin` と同じ規則で初期局面から辿った重みです (main だけで辿るので、alt からしか届かない局面は 0)。重みがあれば重みの大きい順、無ければ `margin` の大きい順 (同じなら key 順) に並べ、`--min-weight` 未満の局面を除きます。
@@ -1566,7 +1566,7 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 
 ```bash
 book_mine master rejoin --master moves.tsv --table rejoin.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--line 40] [--side both] [--preset random] \
+  --draw-value-black -70 --draw-value-white 70 [--line 40] [--side both] [--preset random] \
   [--opp-freq strong_games.db --min-weight 0.001]
 ```
 
@@ -1579,7 +1579,7 @@ book_mine master rejoin --master moves.tsv --table rejoin.tsv \
 | `--line <CP>` | `40` | 線。戻った先の値が手前で期待した値からこの値以上下がる所を出す |
 | `--side <b\|w\|both>` | `both` | 自分の側 |
 | `--preset <default\|random>` | `random` | 自分の手番で辿る手。`default` = main だけ、`random` = main と alt (書き出しのプリセットと同じ) |
-| `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `0` | 値の伝播に使う千日手の値 (`master audit` と同じ) |
+| `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `70` | 値の伝播に使う千日手の値 (`master audit` と同じ) |
 | `--opp-freq <PATH>` | なし | 相手の手の頻度の定跡。`book_from_csa --no-instant-filter --min-rating 3800 --max-ply 80` などで強い対局から作った `.db` (手の count を局数として使う)。渡すと重みを付ける |
 | `--min-games <N>` | `3` | 重み: 相手の局数がこれ未満の局面と手では頻度で指さない (`--opp-book` が無ければそこで止める) |
 | `--max-ply <N>` | `80` | 重み: 初期局面からこの手数まで辿る |
@@ -1612,7 +1612,7 @@ book_mine master rejoin --master moves.tsv --table rejoin.tsv \
 
 ```bash
 book_mine master cycles --master moves.tsv --table cycles.tsv \
-  --draw-value-black -70 --draw-value-white 0 [--side b] [--removable-since 20261028-x18] \
+  --draw-value-black -70 --draw-value-white 70 [--side b] [--removable-since 20261028-x18] \
   [--entry-depth 4] [--apply --note "計画の名前"]
 ```
 
@@ -1623,7 +1623,7 @@ book_mine master cycles --master moves.tsv --table cycles.tsv \
 | `--master <PATH>` | 必須 | 定跡の元データの表 |
 | `--table <PATH>` | 必須 | 外す手の一覧 (TSV) の出力先 |
 | `--side <b\|w\|both>` | `b` | 循環を塞ぐ側 |
-| `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `0` | 手の値の伝播に使う千日手の値 (`master audit` と同じ) |
+| `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `70` | 手の値の伝播に使う千日手の値 (`master audit` と同じ) |
 | `--removable-since <TAG>` | なし | 外してよい手を、元データの `since` がこの値の行に限る (複数回指定可)。新しく登録した木の手だけで塞ぎ、前からある手 (丁寧な定跡・上位 AI の手など) を残したいときに使う。省くと全部の手を外してよい |
 | `--entry-depth <N>` | `4` | `--removable-since` を渡したとき、外してよい手だけでは塞げない循環が残ると、その循環へ入る手を、外してよい手でなくても (curated の手を除く) 外してよくする範囲 (下の「循環へ入る手を外す」)。循環の局面から自分の手で数えて N 手前まで。0 なら外してよい手だけで塞ぐ |
 | `--apply` | なし | 元データを書き換える。外す手を `record` に、main を外した局面の替わりの手を `main` にし、どちらの行も note の末尾に `--note` を付ける。塞げない循環が残るときは書き換えずにエラーで止まる (一覧と要約は出す) |

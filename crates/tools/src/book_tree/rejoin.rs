@@ -40,7 +40,7 @@ pub(super) struct RejoinArgs {
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
     /// 後手を自分として解くときの千日手の値 (対局の DrawValueWhite に揃える)
-    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     #[command(flatten)]
     weight: WeightArgs,
