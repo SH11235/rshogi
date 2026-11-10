@@ -604,29 +604,76 @@ pub(super) fn joined_nodes(
     values: &[RootValues],
     readings: &ReadingsOf,
 ) -> Result<()> {
-    let index: BTreeMap<_, _> =
-        nodes.keys().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
-    let mut selected = vec![None; nodes.len()];
-    let mut own = vec![0; nodes.len()];
-    let mut fallback = vec![0; nodes.len()];
-    for (i, (key, node)) in nodes.iter().enumerate() {
+    let keys: Vec<_> = values
+        .iter()
+        .enumerate()
+        .flat_map(|(tree, root)| {
+            root.moves.keys().chain(root.nodes.keys()).map(move |key| (tree, key.as_str()))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let index: BTreeMap<_, _> = keys.iter().copied().enumerate().map(|(i, key)| (key, i)).collect();
+    let reading_index: BTreeMap<_, _> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, key))| readings.contains_key(*key))
+        .map(|(i, &(_, key))| (key, i))
+        .collect();
+    let mut selected = vec![None; keys.len()];
+    let mut own = vec![0; keys.len()];
+    let mut fallback = vec![0; keys.len()];
+    let mut parents = vec![Vec::new(); keys.len()];
+    let mut queue = BinaryHeap::new();
+    for (i, &(tree, key)) in keys.iter().enumerate() {
         own[i] = readings.get(key).map_or(0, |r| r.nodes_limit);
-        fallback[i] = node.nodes;
-        if let Some(best) = node.moves.first() {
-            let child = crate::book_tree::model::child(key, &best.mv)?;
-            selected[i] = index.get(child.as_str()).copied();
-            if let Some(m) = values
-                .get(node.tree)
-                .and_then(|root| root.moves.get(key))
-                .and_then(|moves| moves.iter().find(|m| m.mv == best.mv))
+        let root = &values[tree];
+        let moves = root.moves.get(key).map(Vec::as_slice).unwrap_or_default();
+        // 元データで止めた出口には台帳の読みが無くても既知の上限がある。
+        fallback[i] = if moves.is_empty() {
+            own[i].max(root.nodes.get(key).copied().unwrap_or(0))
+        } else {
+            own[i]
+        };
+        let children: Vec<_> = if let Some(node) = nodes.get(key) {
+            node.moves.iter().map(|m| (node.tree, m.mv.as_str())).collect()
+        } else {
+            moves.iter().map(|m| (tree, m.mv.as_str())).collect()
+        };
+        for (j, (child_tree, mv)) in children.into_iter().enumerate() {
+            let child = crate::book_tree::model::child(key, mv)?;
+            let child_tree = nodes.get(&child).map_or(child_tree, |node| node.tree);
+            if let Some(&child) = index
+                .get(&(child_tree, child.as_str()))
+                .or_else(|| reading_index.get(child.as_str()))
             {
-                fallback[i] = m.nodes;
+                parents[child].push(i);
+                if j == 0 {
+                    selected[i] = Some(child);
+                }
+            }
+        }
+        if fallback[i] > 0 {
+            queue.push((fallback[i], i));
+        }
+    }
+    while let Some((count, node)) = queue.pop() {
+        if count != fallback[node] {
+            continue;
+        }
+        for &parent in &parents[node] {
+            if fallback[parent] < count {
+                fallback[parent] = count;
+                queue.push((count, parent));
             }
         }
     }
     let counts = selected_backing_nodes(&selected, &own, &fallback);
-    for (node, count) in nodes.values_mut().zip(counts) {
-        node.nodes = count;
+    for (key, node) in nodes {
+        let i = index
+            .get(&(node.tree, key.as_str()))
+            .with_context(|| format!("内部エラー: 部分木に局面がありません: {key}"))?;
+        node.nodes = counts[*i];
     }
     Ok(())
 }

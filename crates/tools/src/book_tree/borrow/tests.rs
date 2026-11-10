@@ -1206,6 +1206,117 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
     joined_nodes(&mut nodes, &roots, &readings).unwrap();
     assert_eq!(nodes[&a].nodes, 900);
     assert_eq!(nodes[ROOT].nodes, 900);
+    let mut unread = nodes[&a].moves[0].clone();
+    unread.mv = "5a6a".into();
+    nodes.get_mut(&a).unwrap().moves.insert(0, unread);
+    nodes.get_mut(&a).unwrap().nodes = 100;
+    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    assert_eq!(nodes[&a].nodes, 900);
+    assert_eq!(nodes[ROOT].nodes, 900);
+}
+
+#[test]
+fn joined_nodes_cross_opponent_turn_and_apply_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let b = key(&["5i5h"]);
+    let c = key(&["5i5h", "5a5b"]);
+    let branch = key(&["5i5h", "5a5b", "5h6h"]);
+    let shallow = key(&["5i5h", "5a5b", "5h6h", "5b6b"]);
+    let deep = key(&["5i5h", "5a5b", "5h4h"]);
+    let joined = child(&shallow, "6h7h").unwrap();
+    let mut db = BookDb::default();
+    for (key, moves) in [
+        (ROOT, vec!["5i5h"]),
+        (b.as_str(), vec!["5a5b"]),
+        (c.as_str(), vec!["5h6h", "5h4h"]),
+        (branch.as_str(), vec!["5b6b"]),
+        (shallow.as_str(), vec!["6h7h"]),
+    ] {
+        db.entries.insert(
+            key.into(),
+            PositionEntry {
+                sfen: format!("{key} 1"),
+                moves: moves
+                    .into_iter()
+                    .map(|mv| BookMove {
+                        move_usi: Some(mv.into()),
+                        ponder_usi: None,
+                        value: 0,
+                        depth: 10,
+                        count: 1,
+                    })
+                    .collect(),
+            },
+        );
+    }
+    db.write(&d.join("big.db")).unwrap();
+    std::fs::write(d.join("roots.jsonl"), format!(
+        "{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\"}}\n{{\"id\":\"r2\",\"root\":\"sfen {branch} 4\",\"own\":\"w\"}}\n"
+    )).unwrap();
+    let mut args = cut_args(d, "cut", None);
+    args.set_check_every(0);
+    super::cut::run(args).unwrap();
+    let settings = settings();
+    let deeper = settings.with_overrides(settings.multipv, 900).unwrap();
+    let cache = BTreeMap::from([
+        (shallow.clone(), reading(&shallow, &[("6h7h", 10)], &settings)),
+        (deep.clone(), reading(&deep, &[("5b4b", 30)], &deeper)),
+        (joined.clone(), reading(&joined, &[("6b7b", 200)], &settings)),
+    ]);
+    let (meta, trees) = read_cut(&d.join("cut")).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let before = value_root(
+        &meta.roots[0],
+        &trees[0],
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert!(!trees[0].nodes[ROOT].read && !trees[0].nodes[&c].read);
+    assert_eq!(before.moves[&c][0].mv, "5h6h");
+    assert_eq!((before.nodes[ROOT], before.nodes[&c]), (100, 100));
+    let journal = d.join("journal");
+    {
+        let mut journal = Journal::open(&journal, &settings.fingerprint).unwrap();
+        for (key, reading) in cache {
+            let condition = if key == deep { &deeper } else { &settings };
+            journal.append(reading, condition, "fixture".into()).unwrap();
+        }
+    }
+    let master = d.join("moves.tsv");
+    std::fs::write(&master, crate::book_tree::master_table::format_master(&[])).unwrap();
+    super::value::run(ValueArgs::for_test(
+        d.join("cut"),
+        journal.clone(),
+        master.clone(),
+        d.join("out"),
+        true,
+    ))
+    .unwrap();
+    let first = std::fs::read_to_string(&master).unwrap();
+    let rows = parse_master(&first).unwrap();
+    for (key, mv) in [(ROOT, "5i5h"), (c.as_str(), "5h4h")] {
+        let row = rows.iter().find(|r| r.get("key") == key && r.get("role") == "main").unwrap();
+        assert_eq!(row.get("move"), mv);
+        assert_eq!(row.get("nodes"), "9e2");
+    }
+    super::value::run(ValueArgs::for_test(
+        d.join("cut"),
+        journal,
+        master.clone(),
+        d.join("out-again"),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&master).unwrap(), first);
 }
 
 #[test]
