@@ -1045,6 +1045,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         schema: &schema,
         replace_curated: false,
         revive_bench: false,
+        kept: None,
     };
     let draws = DrawValues {
         black: -70,
@@ -1173,6 +1174,7 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
         schema: &schema,
         replace_curated: false,
         revive_bench: false,
+        kept: None,
     };
     let draws = DrawValues {
         black: -70,
@@ -1350,6 +1352,7 @@ fn append_records_adds_new_moves_and_refreshes_only_own_source_records() {
         schema: &schema,
         replace_curated: false,
         revive_bench: false,
+        kept: None,
     };
     let node = |mv: &str, value: i32| NodeMove {
         cond: "test".into(),

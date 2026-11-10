@@ -933,6 +933,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         schema: &schema,
         replace_curated: args.replace_curated,
         revive_bench: false,
+        kept: None,
     };
     // record の行も register の並べ替えと schema の検査を通す。前の回に相手の手番として残した record の局面を、
     // 今回は自分の手番として登録するなら、その record は外す (record の手は main・alt の候補から除かれるため)。

@@ -1,9 +1,13 @@
 //! 木の出力 (node_moves.tsv) から定跡の元データの表に手を登録する。
 
+mod keep;
+
+use super::audit::Fill;
 use super::journal::LockedFile;
 use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
 use super::model::child;
 use super::output::NODE_MOVES;
+use crate::book_backprop::DrawValues;
 use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
@@ -14,6 +18,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use super::schema::Schema;
+pub(super) use keep::Kept;
 
 #[derive(Args, Debug)]
 pub(super) struct RegisterArgs {
@@ -47,6 +52,22 @@ pub(super) struct RegisterArgs {
     /// 元データを書き換える。省くと集計と食い違いの一覧だけを出す
     #[arg(long)]
     apply: bool,
+    /// 登録後の元データを master audit と同じ伝播で解き、元の main が木の 1 位をこの値以上上回る局面は
+    /// main を替えずに食い違いの一覧に出す。0 で比べない
+    #[arg(long, default_value_t = 20)]
+    keep_line: i32,
+    /// 元の main の値がこの数以上先の局面の読みから来たときだけ main を残す (0 なら元の main の 1 回の読みの値でも残す)
+    #[arg(long, default_value_t = 1)]
+    keep_min_depth: usize,
+    /// 比べる伝播で master audit --bridge-replies と同じく相手の手番の局面を補う
+    #[arg(long)]
+    bridge_replies: bool,
+    /// 比べる伝播で先手を自分として解くときの千日手の値 (master audit と揃える)
+    #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
+    draw_value_black: i32,
+    /// 比べる伝播で後手を自分として解くときの千日手の値 (master audit と揃える)
+    #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
+    draw_value_white: i32,
     /// ready の木の出力先。同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う
     #[arg(required = true)]
     trees: Vec<PathBuf>,
@@ -97,6 +118,8 @@ pub(super) struct Options<'a> {
     /// curated の局面でも main を木の 1 位に替える。
     pub replace_curated: bool,
     pub revive_bench: bool,
+    /// 替えずに main を残す局面。
+    pub kept: Option<&'a BTreeMap<String, Kept>>,
 }
 
 pub(super) fn run(args: RegisterArgs) -> Result<()> {
@@ -105,6 +128,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         ensure!(!text.contains(['\t', '\r', '\n']), "since・note にタブや改行は使えません");
     }
     ensure!(args.alt_gap >= 0, "--alt-gap は 0 以上にしてください");
+    ensure!(args.keep_line >= 0, "--keep-line は 0 以上にしてください");
     // 木を読む前に止める。書き出しの最後でも create_new で同じことを確かめる。
     ensure!(
         std::fs::symlink_metadata(&args.conflicts).is_err(),
@@ -180,15 +204,61 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         schema: &schema,
         replace_curated: args.replace_curated,
         revive_bench: true,
+        kept: None,
     };
     let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
     let skipped = skipped.len();
+    // 登録後の元データで比べるのは、続く master audit が見る値と揃え、木が元の main の先を読み直した分も入れるため。
+    // main と alt の入れ替えは伝播の値を変えないので、仮の登録の値で残す局面を決めて登録し直せばよい。
+    let (tentative, _, _) = register(rows.clone(), &nodes, &options)?;
+    let rule = keep::KeepRule {
+        line: args.keep_line,
+        min_depth: args.keep_min_depth,
+        draws: DrawValues {
+            black: args.draw_value_black,
+            white: args.draw_value_white,
+        },
+        fill: if args.bridge_replies {
+            Fill::Bridge
+        } else {
+            Fill::Off
+        },
+    };
+    let kept = keep::kept_mains(&rows, &tentative, &nodes, rule)?;
+    drop(tentative);
+    let options = Options {
+        kept: Some(&kept),
+        ..options
+    };
     let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
-        "key\tply\tside\tmain\tmain_source\tmain_tier\tmain_tree_value\ttree_best\ttree_value\ttree\n",
+        "key\tply\tside\tmain\tmain_source\tmain_tier\tmain_tree_value\ttree_best\ttree_value\ttree\treason\tmain_value\tmain_depth\tbest_value\tbest_depth\tgap\tmain_value_black\tbest_value_black\n",
     );
     for c in &conflicts {
-        writeln!(table, "{c}\t{}", args.trees[c.tree].display())?;
+        write!(table, "{c}\t{}\t", args.trees[c.tree].display())?;
+        match &c.kept {
+            Some(k) => {
+                let black = |v: i32| {
+                    if c.key.split(' ').nth(1) == Some("w") {
+                        -v
+                    } else {
+                        v
+                    }
+                };
+                writeln!(
+                    table,
+                    "keep\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    k.old_value,
+                    k.old_depth,
+                    k.new_value,
+                    k.new_depth,
+                    k.gap(),
+                    black(k.old_value),
+                    black(k.new_value)
+                )?;
+            }
+            None => writeln!(table, "protected\t-\t-\t-\t-\t-\t-\t-")?,
+        }
     }
     write_new(&args.conflicts, &table)?;
     for side in ["b", "w"] {
@@ -199,7 +269,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
     }
     println!(
-        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / 保護された控え {} / curated の main が無い控え {} / record なので足さなかった手 {} / 食い違い {} ({}) / 木どうしで 1 位が違った局面 {disagreements}",
+        "main を木の 1 位に替えた局面 {} (うち curated の main {}) / 評価値を伝播後の値にした行 {} / bench から戻した手 {} / 保護された控え {} / curated の main が無い控え {} / record なので足さなかった手 {} / 食い違い {} (うち元の main の値が上なので残した局面 {}) ({}) / 木どうしで 1 位が違った局面 {disagreements}",
         summary.replaced_main,
         summary.replaced_curated,
         summary.evals_updated,
@@ -208,6 +278,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         summary.bench_curated_without_main,
         summary.record_skipped,
         summary.conflicts,
+        kept.len(),
         args.conflicts.display()
     );
     println!("cond=unknown の木: {unknown}");
@@ -370,6 +441,8 @@ pub(super) struct Conflict {
     pub best: String,
     pub value: i32,
     pub tree: usize,
+    /// 元の main の伝播後の値が上なので残したときの値。`None` は source・curated で替えなかった局面。
+    pub kept: Option<Kept>,
 }
 impl std::fmt::Display for Conflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -492,7 +565,8 @@ pub(super) fn register(
             Some(m) if rows[m].get("move") == best.mv => {}
             Some(m)
                 if options.schema.replaceable(rows[m].get("source"))
-                    && (options.replace_curated || (rows[m].get("tier") == "wide" && !curated)) =>
+                    && (options.replace_curated || (rows[m].get("tier") == "wide" && !curated))
+                    && !options.kept.is_some_and(|kept| kept.contains_key(key)) =>
             {
                 // curated の main を替えるときは新しい main を curated にし、この局面の curated の main を 1 つに保つ。
                 let tier = rows[m].get("tier").to_owned();
@@ -542,6 +616,7 @@ pub(super) fn register(
                     best: best.mv.clone(),
                     value: best.value,
                     tree: node.tree,
+                    kept: options.kept.and_then(|kept| kept.get(key)).cloned(),
                 });
                 summary.conflicts += 1;
                 if find(&rows, &best.mv).is_none() {
@@ -735,6 +810,7 @@ mod tests {
             lineage: "",
             replace_curated: false,
             revive_bench: true,
+            kept: None,
         }
     }
     fn find<'a>(rows: &'a [Row], key: &str, mv: &str) -> Option<&'a Row> {
@@ -1025,19 +1101,21 @@ mod tests {
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
             apply,
+            keep_line: 20,
+            keep_min_depth: 1,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 0,
             trees,
         };
         run(args(vec![tree.clone()], false)).unwrap();
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         let conflicts = std::fs::read_to_string(dir.path().join("conflicts.tsv")).unwrap();
         assert_eq!(conflicts.lines().count(), 2);
-        assert!(
-            conflicts
-                .lines()
-                .nth(1)
-                .unwrap()
-                .starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\t5i4i\t40\t"))
-        );
+        let line = conflicts.lines().nth(1).unwrap();
+        assert!(line.starts_with(&format!("{B}\t3\tb\tpinned\tpin\twide\t-\t5i4i\t40\t")));
+        assert!(line.ends_with("\tprotected\t-\t-\t-\t-\t-\t-\t-"));
+        assert_eq!(conflicts.lines().next().unwrap().split('\t').count(), line.split('\t').count());
         assert!(run(args(vec![tree.clone()], true)).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         std::fs::remove_file(dir.path().join("conflicts.tsv")).unwrap();
@@ -1072,6 +1150,105 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::remove_file(tree.join(NODE_MOVES)).unwrap();
         assert!(run(args(vec![tree], false)).is_err());
+    }
+
+    #[test]
+    fn main_backed_by_a_deeper_reply_is_kept_when_the_tree_best_is_worse() {
+        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let a = child(R, "5i4i").unwrap();
+        let before = master(&[
+            row(R, "5i4i", "main", "read", "wide", "10"),
+            row(&a, "5a4a", "main", "read", "wide", "-50"),
+        ]);
+        let tree = |moves: &[(&str, i32)]| BTreeMap::from([(R.to_owned(), node(moves, 1, 0))]);
+        let rule = |line, min_depth| keep::KeepRule {
+            line,
+            min_depth,
+            draws: DrawValues::both(0),
+            fill: Fill::Off,
+        };
+        let judge = |nodes: &BTreeMap<String, Node>, rule| {
+            let (after, _, _) = register(before.clone(), nodes, &options()).unwrap();
+            keep::kept_mains(&before, &after, nodes, rule).unwrap()
+        };
+        // 木は 5i4i を 1 回の読みで 5 としたが、元データでは応手 5a4a の先から 50 が伝わる。
+        let nodes = tree(&[("5i6i", 30), ("5i4i", 5)]);
+        let kept = judge(&nodes, rule(20, 1));
+        let expected = Kept {
+            old_value: 50,
+            old_depth: 1,
+            new_value: 30,
+            new_depth: 0,
+        };
+        assert_eq!(kept, BTreeMap::from([(R.to_owned(), expected.clone())]));
+        assert!(judge(&nodes, rule(21, 1)).is_empty());
+        assert!(judge(&nodes, rule(20, 2)).is_empty());
+        assert!(judge(&nodes, rule(0, 0)).is_empty());
+
+        let keeping = Options {
+            kept: Some(&kept),
+            ..options()
+        };
+        let (rows, conflicts, summary) = register(before.clone(), &nodes, &keeping).unwrap();
+        assert_eq!(find(&rows, R, "5i4i").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, R, "5i6i").unwrap().get("role"), "alt");
+        assert_eq!((summary.replaced_main, summary.conflicts), (0, 1));
+        assert_eq!(conflicts[0].kept, Some(expected));
+
+        // 木の読みに無い元の main の値が 1 回の読みだけなら、--keep-min-depth 1 では残さない。
+        let single = master(&[row(R, "5i4i", "main", "read", "wide", "60")]);
+        let nodes = tree(&[("5i6i", 30)]);
+        let (after, _, _) = register(single.clone(), &nodes, &options()).unwrap();
+        assert!(keep::kept_mains(&single, &after, &nodes, rule(20, 1)).unwrap().is_empty());
+        let kept = keep::kept_mains(&single, &after, &nodes, rule(20, 0)).unwrap();
+        assert_eq!((kept[R].gap(), kept[R].old_depth), (30, 0));
+    }
+
+    #[test]
+    fn run_lists_kept_mains_with_values_from_both_sides() {
+        const W: &str = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let a = child(W, "5a4a").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        let original = format_master(&master(&[
+            row(W, "5a4a", "main", "read", "wide", "10"),
+            row(&a, "5i4i", "main", "read", "wide", "-50"),
+        ]));
+        std::fs::write(&master_path, &original).unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::write(
+            tree.join(NODE_MOVES),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{W}\t4\t0\t0\t1000000000\t5a6a\t30\t0\t1\n{W}\t4\t0\t0\t1000000000\t5a4a\t5\t0\t2\n"),
+        )
+        .unwrap();
+        run(RegisterArgs {
+            master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            replace_curated: false,
+            skip_keys: None,
+            conflicts: dir.path().join("conflicts.tsv"),
+            apply: true,
+            keep_line: 20,
+            keep_min_depth: 1,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            trees: vec![tree],
+        })
+        .unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert_eq!(find(&rows, W, "5a4a").unwrap().get("role"), "main");
+        assert_eq!(find(&rows, W, "5a6a").unwrap().get("role"), "alt");
+        let conflicts = std::fs::read_to_string(dir.path().join("conflicts.tsv")).unwrap();
+        let line = conflicts.lines().nth(1).unwrap();
+        assert!(line.starts_with(&format!("{W}\t4\tw\t5a4a\tread\twide\t5\t5a6a\t30\t")));
+        assert!(line.ends_with("\tkeep\t50\t1\t30\t0\t20\t-50\t-30"), "{line}");
     }
 
     #[test]
