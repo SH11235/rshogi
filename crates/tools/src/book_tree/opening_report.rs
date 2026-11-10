@@ -654,13 +654,14 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
     }
     // 強い対局で危ない局面かは局面ごとの局数で決まり、循環は辿りの行き来で決まるので、先に一度辿って集める。
     let mut cycles = Vec::with_capacity(candidates.len());
-    let mut visited = HashSet::new();
+    // 側 → 1 回目の辿りで来た局面 (表の局面がその側の辿りで来るかを数える)。
+    let mut visited: BTreeMap<&str, HashSet<u32>> = BTreeMap::new();
     for candidate in &candidates {
         let from = walk_from(&candidate.by_key);
         let mut collect = Collect {
             keys: &mut keys,
             edges: HashSet::new(),
-            visited: &mut visited,
+            visited: visited.entry(candidate.side).or_default(),
         };
         walk_side_with(&positions, &mut src, candidate.side, &from, &mut collect, options)?;
         let edges = collect.edges;
@@ -699,7 +700,11 @@ pub(super) fn run(args: OpeningReportArgs) -> Result<()> {
                 let reached = listed
                     .iter()
                     .filter(|(s, key)| {
-                        *s == side && keys.ids.get(key).is_some_and(|id| visited.contains(id))
+                        *s == side
+                            && keys
+                                .ids
+                                .get(key)
+                                .is_some_and(|id| visited.get(side).is_some_and(|v| v.contains(id)))
                     })
                     .count();
                 println!("危ない局面の表 ({side}): {total} 局面のうち辿りで来るもの {reached}");
@@ -855,7 +860,7 @@ struct Summary {
     danger_both: f64,
     danger_any: f64,
     black_below: Option<f64>,
-    /// 分岐の後に相手が最も多い手以外を指す重み (分岐ごとの和) と、その先の中央値。
+    /// どれかの分岐で相手が最も多い手以外を指した重み (1 本の重みにつき 1 回) と、その先の中央値。
     deviate: f64,
     deviate_median: Option<i64>,
 }
@@ -1025,7 +1030,7 @@ fn pct(w: f64) -> String {
 
 fn games_text(g: Games, side: &str) -> String {
     match g.score(side) {
-        Some(s) => format!("{} 局・{s:.2}", g.games),
+        Some(s) => format!("{} 局・{s:.3}", g.games),
         None => "0 局".to_owned(),
     }
 }
@@ -1048,7 +1053,7 @@ fn markdown(inputs: &Inputs, reports: &[Report], summaries: &[Summary]) -> Resul
     writeln!(out, "# {title}\n")?;
     writeln!(
         out,
-        "候補ごとに、RAMU の手番の決めた局面では main の代わりに決めた手を指し、相手は強い対局の頻度 (足りなければ外部定跡) で指すとして初期局面から辿った (`master walk` と同じ辿り)。重み = 辿り全体を 100% とした割合 (RAMU の側の辿りだけ)。値 = 出口の局面までに RAMU が最後に指した手の値 (元データの evals の平均、評価値、プラス = 先手良し。その手に元データの行が無ければ値なし)。値の無い出口は平均・分位に入れない。千日手 = 辿りの循環 (局面の行き来の輪) の中で max の手数に達した (循環を回り続けた) 重みと、own の出口で外部定跡の最善を両者が指し続けた手順が同じ局面に戻る重み。強い対局 = 両者 R{} 以上の対局の局数と RAMU の側の得点 (勝ち 1・引き分け 0.5)。\n",
+        "候補ごとに、RAMU の手番の決めた局面では main の代わりに決めた手を指し、相手は強い対局の頻度 (足りなければ外部定跡) で指すとして初期局面から辿った (`master walk` と同じ辿り)。重み = 辿り全体を 100% とした割合 (RAMU の側の辿りだけ)。値 = 出口の局面までに RAMU が最後に指した手の値 (元データの evals の平均、評価値、プラス = 先手良し。その手に元データの行が無ければ値なし)。値の無い出口は平均・分位に入れない。千日手 = 辿りの循環 (局面の行き来の輪) の中の局面で max の手数に達した重み (循環を回り続けた重みの目安で、ちょうど max で初めて循環に入った重みも入る) と、own の出口で外部定跡の最善を両者が指し続けた手順が同じ局面に戻る重み。強い対局 = 両者 R{} 以上の対局の局数と RAMU の側の得点 (勝ち 1・引き分け 0.5)。\n",
         args.records_min_rate
     )?;
     for side in ["b", "w"] {
