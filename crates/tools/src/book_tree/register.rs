@@ -66,7 +66,7 @@ pub(super) struct RegisterArgs {
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
     /// 比べる伝播で後手を自分として解くときの千日手の値 (master audit と揃える)
-    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     /// ready の木の出力先。同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う
     #[arg(required = true)]

@@ -1016,7 +1016,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 ```bash
 book_mine tree register --master moves.tsv --since 20261022-tag --note "計画の名前" \
   --conflicts conflicts.tsv [--schema schema] [--journal journal-copy.jsonl] [--alt-gap 40] [--replace-curated] [--skip-keys skip.txt] \
-  [--keep-line 20] [--keep-min-depth 1] [--bridge-replies] [--draw-value-black -70] [--draw-value-white 0] [--apply] <木の出力先>...
+  [--keep-line 20] [--keep-min-depth 1] [--bridge-replies] [--draw-value-black -70] [--draw-value-white 70] [--apply] <木の出力先>...
 ```
 
 ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元データの表 (TSV) に手を登録します。`--apply` を省くと元データは書き換えず、集計と食い違いの一覧だけを出します。`--conflicts` はまだ無いファイルにしてください (既にあれば何もせずに止まります。確認だけの実行でも書くので、元データや木の出力を上書きしないためです)。確認だけの実行と `--apply` の実行では、一覧を別のファイル名にします。`node_moves.tsv` の無い古い出力先は `tree replay` で作り直してから渡します。
