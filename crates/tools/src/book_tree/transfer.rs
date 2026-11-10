@@ -2,11 +2,15 @@
 
 use super::ReadingArgs;
 use super::journal::{
-    ConflictSink, Journal, NoConflictList, OnConflict, Reading, Settings, read_source,
+    ConflictSink, Journal, NoConflictList, OnConflict, Reading, Settings, offset_signature,
+    read_source_incremental, source_identity,
 };
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use std::io::Read;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -16,8 +20,14 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Args, Debug)]
 pub(super) struct ImportJournalArgs {
     /// 取り込み元の台帳。書き込み中の台帳は拒否する (複製してから渡す)
+    #[arg(long, required = true)]
+    from_journal: Vec<PathBuf>,
+    /// ソースごとの再開位置を保存する JSON
     #[arg(long)]
-    from_journal: PathBuf,
+    offsets: Option<PathBuf>,
+    /// 取り込まない読みの JSONL
+    #[arg(long)]
+    exclude_readings: Option<PathBuf>,
     /// 取り込み元の条件の指紋。省略時は全条件
     #[arg(long)]
     fingerprint: Option<String>,
@@ -33,7 +43,7 @@ pub(super) struct ImportJournalArgs {
     /// 互換性のために受理する旧フラグ (効果なし)
     #[arg(long)]
     force: bool,
-    /// 取り込み先と値の違う重複の扱い。keep-existing は取り込み先の値を残す (取り込み元の中の食い違いは常に拒否)
+    /// 取り込み先と値の違う重複の扱い。keep-existing は取り込み先の値を残す (取り込み元内の食い違いは飛ばす)
     #[arg(long, value_enum, default_value_t = OnConflict::Reject)]
     on_conflict: OnConflict,
     /// keep-existing で残さなかった読みの一覧 (TSV) の書き出し先。keep-existing でだけ使い、必須
@@ -124,69 +134,358 @@ fn import(args: ImportJournalArgs) -> Result<(usize, usize, usize)> {
         }
         _ => {}
     }
-    if let Some(out) = &args.conflicts_out {
-        for journal in [&args.journal, &args.from_journal] {
-            if same_path(out, journal)? {
-                bail!("--conflicts-out が台帳 ({}) と同じです", journal.display());
+    let mut paths = BTreeSet::new();
+    for source in &args.from_journal {
+        let canonical = std::fs::canonicalize(source)
+            .with_context(|| format!("取り込み元: {}", source.display()))?;
+        if !paths.insert(canonical) {
+            bail!("取り込み元のパスが重複しています: {}", source.display());
+        }
+        if same_path(&args.journal, source)? {
+            bail!("取り込み元と取り込み先が同じ台帳です");
+        }
+    }
+    // 状態や一覧の置換が、入力や台帳を上書きしないようにする。
+    let protected: Vec<_> = args
+        .from_journal
+        .iter()
+        .chain(std::iter::once(&args.journal))
+        .chain(args.exclude_readings.iter())
+        .collect();
+    for out in args.conflicts_out.iter().chain(args.offsets.iter()) {
+        for path in &protected {
+            if same_path(out, path)? {
+                bail!(
+                    "出力先 ({}) が台帳または除外リスト ({}) と同じです",
+                    out.display(),
+                    path.display()
+                );
             }
         }
     }
+    if let (Some(out), Some(offsets)) = (&args.conflicts_out, &args.offsets)
+        && same_path(out, offsets)?
+    {
+        bail!("--offsets と --conflicts-out が同じです");
+    }
+    let (excluded, excluded_sha256) = load_excluded(args.exclude_readings.as_deref())?;
+    let mut state = None;
     let mut dst = Settings::new(&args.reading)?;
     dst.engine_version = engine_source_version(&args.reading.engine);
     warn_unknown_version(&args.reading.engine, &dst.engine_version);
-    let source = read_source(&args.from_journal, args.fingerprint.as_deref(), |_| true)?;
-    // hard link はパスを正規化しても別に見えるので、ファイルの実体 (device と inode 等) でも比べる。
-    if args.journal.try_exists()?
-        && (std::fs::canonicalize(&args.journal)? == std::fs::canonicalize(&args.from_journal)?
-            || same_file::is_same_file(&args.journal, &args.from_journal)?)
-    {
-        bail!("取り込み元と取り込み先が同じ台帳です");
-    }
-    if source.ignored_tail {
-        eprintln!("取り込み元の末尾の改行で終わらない行は無視しました");
-    }
-    // 一覧の一時ファイルは台帳を開く前に作り、検査しながら書く。公開は読みを追記する前に行い、
-    // 書けなければ読みを追記せずに失敗する (末尾の書きかけの行の切り詰めは、台帳を開くときに行う)。
-    let mut list = match &args.conflicts_out {
-        Some(path) => Some(
+    let mut list = args
+        .conflicts_out
+        .as_ref()
+        .map(|path| {
             ConflictTsv::create(path)
-                .with_context(|| format!("食い違いの一覧を {} に作れません", path.display()))?,
-        ),
-        None => None,
-    };
-    let mut journal = Journal::open(&args.journal, &dst.fingerprint)?;
-    let source_fingerprints = source
-        .reading_settings
-        .iter()
-        .map(|s| s.fingerprint.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(",");
-    let incoming = source
-        .readings
-        .into_iter()
-        .zip(source.reading_settings)
-        .map(|(reading, settings)| {
-            let provenance = format!(
-                "journal:sha256={}:fingerprint={}:force=false:path={}",
-                source.sha256,
-                settings.fingerprint,
-                args.from_journal.display()
-            );
-            (reading, settings, provenance)
+                .with_context(|| format!("食い違いの一覧を {} に作れません", path.display()))
         })
-        .collect();
-    let sink: &mut dyn ConflictSink = match &mut list {
-        Some(list) => list,
-        None => &mut NoConflictList,
-    };
-    let (appended, skipped, conflicts) =
-        journal.merge_records(incoming, args.on_conflict, sink, &source.prefetched)?;
+        .transpose()?;
+    let mut journal = Journal::open_checked(&args.journal, &dst.fingerprint, |file| {
+        state = match &args.offsets {
+            Some(path) if path.try_exists()? => Some(
+                serde_json::from_reader::<_, OffsetState>(BufReader::new(std::fs::File::open(path)?))
+                    .with_context(|| format!("再開状態を読めません: {}。形式が異なる場合は新しい取り込み先を用意し、offsets ファイルを削除してください", path.display()))?,
+            ),
+            _ => None,
+        };
+        if state.as_ref().is_some_and(|s| s.excluded_sha256 != excluded_sha256) {
+            bail!(
+                "除外リストが再開状態と一致しません。新しい取り込み先を用意し、offsets ファイルを削除してください"
+            );
+        }
+        if let Some(saved) = &state
+            && (!args.journal.try_exists()?
+                || std::fs::canonicalize(&args.journal)? != saved.destination.path)
+        {
+            bail!(
+                "取り込み先が再開状態と一致しません。新しい取り込み先を用意し、offsets ファイルを削除してください"
+            );
+        }
+        if state.as_ref().is_some_and(|s| s.fingerprint != args.fingerprint) {
+            bail!(
+                "指紋フィルタが再開状態と一致しません。新しい取り込み先を用意し、offsets ファイルを削除してください"
+            );
+        }
+        if let Some(saved) = &state {
+            let identity = &saved.destination;
+            if file.metadata()?.len() < identity.offset
+                || offset_signature(file, identity.offset)? != identity.sig
+            {
+                bail!(
+                    "取り込み先の内容が再開状態と一致しません。新しい取り込み先を用意し、offsets ファイルを削除してください"
+                );
+            }
+        }
+        Ok(())
+    })?;
+    let destination_path = std::fs::canonicalize(&args.journal)?;
+    let state = state.get_or_insert_with(|| OffsetState {
+        destination: DestinationState {
+            path: destination_path.clone(),
+            offset: 0,
+            sig: String::new(),
+        },
+        excluded_sha256,
+        fingerprint: args.fingerprint.clone(),
+        sources: BTreeMap::new(),
+    });
+    let mut offsets_tmp = args
+        .offsets
+        .as_ref()
+        .map(|path| tempfile::NamedTempFile::new_in(output_dir(path)))
+        .transpose()?;
+    if args.from_journal.len() > 1 {
+        journal.stage_appends(output_dir(&args.journal))?;
+    }
+    let mut totals = (0, 0, 0);
+    let mut fingerprints = BTreeSet::new();
+    let mut reports = Vec::new();
+    for path in &args.from_journal {
+        let canonical = std::fs::canonicalize(path)?;
+        let resume = args
+            .offsets
+            .as_ref()
+            .and_then(|_| state.sources.get(&canonical))
+            .map(|entry| (entry.offset, entry.sig.as_str()));
+        let mut source = read_source_incremental(
+            path,
+            args.fingerprint.as_deref(),
+            |_| true,
+            resume,
+            |reading| excluded.binary_search(&ExcludedReading::identity(reading)).is_ok(),
+        )?;
+        let mut destination_conflicts = if source.start == 0 {
+            BTreeSet::new()
+        } else {
+            state.sources[&canonical].destination_conflicts.clone()
+        };
+        source.skip_prefix_conflicts(path, &journal, &destination_conflicts, |reading| {
+            excluded.binary_search(&ExcludedReading::identity(reading)).is_ok()
+        })?;
+        if source.ignored_tail {
+            eprintln!("取り込み元の末尾の改行で終わらない行は無視しました: {}", path.display());
+        }
+        fingerprints.extend(source.reading_settings.iter().map(|s| s.fingerprint.clone()));
+        if args.offsets.is_some() && args.on_conflict == OnConflict::KeepExisting {
+            for (reading, settings) in source.readings.iter().zip(&source.reading_settings) {
+                if journal
+                    .get_exact(&reading.key, &settings.fingerprint)
+                    .is_some_and(|old| !old.same_values(reading))
+                {
+                    destination_conflicts
+                        .insert(source_identity(&settings.fingerprint, &reading.key)?);
+                }
+            }
+        }
+        let incoming = source
+            .readings
+            .into_iter()
+            .zip(source.reading_settings)
+            .map(|(reading, settings)| {
+                let mut provenance = format!(
+                    "journal:sha256={}:fingerprint={}:force=false:path={}",
+                    source.sha256,
+                    settings.fingerprint,
+                    path.display()
+                );
+                if source.start > 0 {
+                    provenance.push_str(&format!(":offset={}", source.start));
+                }
+                (reading, settings, provenance)
+            })
+            .collect();
+        let mut deferred = DeferredConflict(list.as_mut(), args.from_journal.len() > 1);
+        let counts =
+            journal.merge_records(incoming, args.on_conflict, &mut deferred, &source.prefetched)?;
+        totals.0 += counts.0;
+        totals.1 += counts.1;
+        totals.2 += counts.2;
+        reports.push(source_report(
+            path,
+            source.start..source.end,
+            counts,
+            source.excluded,
+            source.rewritten,
+        ));
+        if args.offsets.is_some() {
+            state.sources.insert(
+                canonical,
+                SourceOffset {
+                    offset: source.end,
+                    sig: source.sig,
+                    destination_conflicts,
+                },
+            );
+        }
+    }
+    if args.from_journal.len() > 1
+        && let Some(list) = &mut list
+    {
+        list.before_append()?;
+    }
+    journal.commit_appends()?;
+    if let Some(path) = &args.offsets {
+        let (offset, sig) = journal.identity()?;
+        state.destination = DestinationState {
+            path: destination_path,
+            offset,
+            sig,
+        };
+        write_offsets(
+            path,
+            state,
+            offsets_tmp.take().context("再開状態の一時ファイルがありません")?,
+        )?;
+    }
+    for report in reports {
+        println!("{report}");
+    }
     println!("fingerprint={}", dst.fingerprint);
-    println!("source_fingerprint={source_fingerprints}");
-    println!("appended={appended} skipped={skipped} conflicts={conflicts}");
-    Ok((appended, skipped, conflicts))
+    println!("source_fingerprint={}", fingerprints.into_iter().collect::<Vec<_>>().join(","));
+    println!("appended={} skipped={} conflicts={}", totals.0, totals.1, totals.2);
+    Ok(totals)
+}
+
+fn source_report(
+    path: &Path,
+    range: std::ops::Range<u64>,
+    counts: (usize, usize, usize),
+    excluded: usize,
+    rewritten: bool,
+) -> String {
+    format!(
+        "source={} start={} end={} appended={} skipped={} conflicts={} excluded={}{}",
+        path.display(),
+        range.start,
+        range.end,
+        counts.0,
+        counts.1,
+        counts.2,
+        excluded,
+        if rewritten { " rewritten=1" } else { "" }
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceOffset {
+    offset: u64,
+    sig: String,
+    destination_conflicts: BTreeSet<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestinationState {
+    path: PathBuf,
+    offset: u64,
+    sig: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OffsetState {
+    /// null を許容しつつ、フィールドの省略は拒否する。
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    fingerprint: Option<String>,
+    destination: DestinationState,
+    excluded_sha256: Option<String>,
+    sources: BTreeMap<PathBuf, SourceOffset>,
+}
+
+#[derive(Deserialize)]
+struct ExcludedReading {
+    key: String,
+    ply: u32,
+    nodes: u64,
+    sec: f64,
+}
+
+type ExcludedIdentity = [u8; 16];
+
+impl ExcludedReading {
+    fn identity(reading: &Reading) -> ExcludedIdentity {
+        Self::digest(&reading.key, reading.ply, reading.nodes, reading.sec)
+    }
+
+    fn digest(key: &str, ply: u32, nodes: Option<u64>, sec: f64) -> ExcludedIdentity {
+        let mut hash = Sha256::new();
+        hash.update(key.as_bytes());
+        hash.update(ply.to_le_bytes());
+        hash.update([u8::from(nodes.is_some())]);
+        hash.update(nodes.unwrap_or_default().to_le_bytes());
+        hash.update(sec_bits(sec).to_le_bytes());
+        hash.finalize()[..16].try_into().expect("16 バイト")
+    }
+}
+
+fn sec_bits(sec: f64) -> u64 {
+    if sec == 0.0 { 0 } else { sec.to_bits() }
+}
+
+fn load_excluded(path: Option<&Path>) -> Result<(Vec<ExcludedIdentity>, Option<String>)> {
+    let Some(path) = path else {
+        return Ok((Vec::new(), None));
+    };
+    // 除外対象は既にメモリにある台帳索引の読みの部分集合なので、約 16 バイト × 件数を保持する。
+    let mut excluded = Vec::new();
+    let mut hash = Sha256::new();
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut bytes = Vec::new();
+    let mut line = 0;
+    loop {
+        bytes.clear();
+        if reader.read_until(b'\n', &mut bytes)? == 0 {
+            break;
+        }
+        line += 1;
+        hash.update(&bytes);
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let row: ExcludedReading = serde_json::from_slice(&bytes)
+            .with_context(|| format!("除外リスト {} の {line} 行目が不正です", path.display()))?;
+        excluded.push(ExcludedReading::digest(&row.key, row.ply, Some(row.nodes), row.sec));
+    }
+    excluded.sort_unstable();
+    excluded.dedup();
+    Ok((excluded, Some(format!("{:x}", hash.finalize()))))
+}
+
+fn output_dir(path: &Path) -> &Path {
+    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
+fn write_offsets(path: &Path, state: &OffsetState, mut tmp: tempfile::NamedTempFile) -> Result<()> {
+    {
+        let mut writer = BufWriter::new(&mut tmp);
+        serde_json::to_writer(&mut writer, state)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    crate::common::io::sync_directory(output_dir(path))
+}
+
+struct DeferredConflict<'a>(Option<&'a mut ConflictTsv>, bool);
+
+impl ConflictSink for DeferredConflict<'_> {
+    fn conflict(&mut self, existing: &Reading, incoming: &Reading, provenance: &str) -> Result<()> {
+        match &mut self.0 {
+            Some(list) => list.conflict(existing, incoming, provenance),
+            None => NoConflictList.conflict(existing, incoming, provenance),
+        }
+    }
+
+    fn before_append(&mut self) -> Result<()> {
+        match &mut self.0 {
+            Some(list) if self.1 => list.checkpoint(),
+            Some(list) => list.before_append(),
+            None => Ok(()),
+        }
+    }
 }
 
 const CONFLICT_HEADER: &str = "key\tply\texisting_bestmove\texisting_cp\tincoming_bestmove\tincoming_cp\tincoming_provenance\n";
@@ -293,7 +592,7 @@ impl ConflictSink for ConflictTsv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::book_tree::journal::{LockedFile, Reading};
+    use crate::book_tree::journal::{LockedFile, Reading, read_source, read_source_incremental};
     use std::collections::{BTreeMap, BTreeSet};
 
     const VERSION_A: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -426,7 +725,9 @@ mod tests {
         );
         write_journal(&destination, &[(&dst, reading(0, &dst, "resign"))]);
         run(ImportJournalArgs {
-            from_journal: source,
+            from_journal: vec![source],
+            offsets: None,
+            exclude_readings: None,
             fingerprint: None,
             accept_fingerprint: Vec::new(),
             journal: destination.clone(),
@@ -646,7 +947,9 @@ mod tests {
         write_journal(&dst_path, &[(&cond, reading(0, &cond, "resign"))]);
         let before = std::fs::read(&dst_path).unwrap();
         let args = |on_conflict, conflicts_out: Option<PathBuf>| ImportJournalArgs {
-            from_journal: src_path.clone(),
+            from_journal: vec![src_path.clone()],
+            offsets: None,
+            exclude_readings: None,
             fingerprint: None,
             accept_fingerprint: Vec::new(),
             journal: dst_path.clone(),
@@ -717,7 +1020,9 @@ mod tests {
         );
         let destination = dir.path().join("destination.jsonl");
         let args = || ImportJournalArgs {
-            from_journal: source.clone(),
+            from_journal: vec![source.clone()],
+            offsets: None,
+            exclude_readings: None,
             fingerprint: None,
             accept_fingerprint: Vec::new(),
             journal: destination.clone(),
@@ -730,6 +1035,731 @@ mod tests {
         let bytes = std::fs::read(&destination).unwrap();
         assert_eq!(import(args()).unwrap(), (0, 4, 0));
         assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    }
+
+    fn import_args(m: &Machine, sources: &[&Path], destination: &Path) -> ImportJournalArgs {
+        ImportJournalArgs {
+            from_journal: sources.iter().map(|p| p.to_path_buf()).collect(),
+            offsets: None,
+            exclude_readings: None,
+            fingerprint: None,
+            accept_fingerprint: Vec::new(),
+            journal: destination.to_path_buf(),
+            reading: reading_args(m, 100, &[]),
+            force: false,
+            on_conflict: OnConflict::Reject,
+            conflicts_out: None,
+        }
+    }
+
+    fn offsets(path: &Path) -> OffsetState {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn offsets_reject_missing_fingerprint_and_unknown_fields_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args
+        };
+        import(args()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert!(saved["fingerprint"].is_null());
+        let before = std::fs::read(&dst).unwrap();
+        for target in [
+            "fingerprint",
+            "destination_conflicts",
+            "root",
+            "destination",
+            "source",
+        ] {
+            let mut invalid = saved.clone();
+            let expected = if target == "fingerprint" {
+                invalid.as_object_mut().unwrap().remove("fingerprint");
+                "missing field `fingerprint`"
+            } else if target == "destination_conflicts" {
+                invalid["sources"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("destination_conflicts");
+                "missing field `destination_conflicts`"
+            } else {
+                let object = match target {
+                    "destination" => invalid["destination"].as_object_mut().unwrap(),
+                    "source" => invalid["sources"]
+                        .as_object_mut()
+                        .unwrap()
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap(),
+                    _ => invalid.as_object_mut().unwrap(),
+                };
+                object.insert("wip_field".into(), true.into());
+                "unknown field `wip_field`"
+            };
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            std::fs::write(&state, &bytes).unwrap();
+            let err = format!("{:#}", import(args()).unwrap_err());
+            assert!(err.contains(expected), "{err}");
+            assert!(err.contains("再開状態を読めません"), "{err}");
+            assert!(err.contains("offsets ファイルを削除"), "{err}");
+            assert_eq!(std::fs::read(&dst).unwrap(), before);
+            assert_eq!(std::fs::read(&state).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn fingerprint_filter_changes_reject_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let mut other = cond.clone();
+        other.nodes += 1;
+        other.fingerprint = other.computed_fingerprint().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        write_journal(
+            &src,
+            &[
+                (&cond, reading(0, &cond, "resign")),
+                (&other, reading(1, &other, "resign")),
+            ],
+        );
+        let args = |fp: Option<String>| {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args.fingerprint = fp;
+            args
+        };
+        assert_eq!(import(args(Some(cond.fingerprint.clone()))).unwrap(), (1, 0, 0));
+        let before = std::fs::read(&dst).unwrap();
+        let saved = std::fs::read(&state).unwrap();
+        for fp in [None, Some(other.fingerprint)] {
+            let err = import(args(fp)).unwrap_err().to_string();
+            assert!(
+                err.contains("指紋フィルタ") && err.contains("offsets ファイルを削除"),
+                "{err}"
+            );
+            assert_eq!(std::fs::read(&dst).unwrap(), before);
+            assert_eq!(std::fs::read(&state).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn source_internal_conflict_across_slices_advances_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args
+        };
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        assert_eq!(import(args()).unwrap(), (1, 0, 0));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        let entry = saved["sources"].as_object().unwrap().values().next().unwrap();
+        assert_eq!(entry.as_object().unwrap().len(), 3);
+        assert_eq!(entry["destination_conflicts"], serde_json::json!([]));
+        assert!(entry.get("offset").is_some());
+        assert!(entry.get("sig").is_some());
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        writeln!(file, "{}", record_json(&cond, &reading(0, &cond, "win"))).unwrap();
+        let old = std::fs::read(&dst).unwrap();
+        assert_eq!(import(args()).unwrap(), (0, 0, 0));
+        assert_eq!(std::fs::read(&dst).unwrap(), old);
+        assert_eq!(
+            offsets(&state).sources[&std::fs::canonicalize(&src).unwrap()].offset,
+            std::fs::metadata(&src).unwrap().len()
+        );
+        assert_eq!(import(args()).unwrap(), (0, 0, 0));
+        let mut keep = args();
+        keep.on_conflict = OnConflict::KeepExisting;
+        let list = dir.path().join("conflicts.tsv");
+        keep.conflicts_out = Some(list.clone());
+        writeln!(file, "{}", record_json(&cond, &reading(0, &cond, "win"))).unwrap();
+        assert_eq!(import(keep).unwrap(), (0, 0, 0));
+        assert_eq!(std::fs::read_to_string(list).unwrap(), CONFLICT_HEADER);
+        assert_eq!(read_source(&src, None, |_| true).unwrap().readings.len(), 1);
+    }
+
+    #[test]
+    fn slice_matching_source_first_value_remains_destination_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        let list = dir.path().join("conflicts.tsv");
+        let args = |keep| {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            if keep {
+                args.on_conflict = OnConflict::KeepExisting;
+                args.conflicts_out = Some(list.clone());
+            }
+            args
+        };
+        write_journal(&dst, &[(&cond, reading(0, &cond, "resign"))]);
+        write_journal(&src, &[(&cond, reading(0, &cond, "win"))]);
+        assert_eq!(import(args(true)).unwrap(), (0, 1, 1));
+        let saved = std::fs::read(&state).unwrap();
+        let old = std::fs::read(&dst).unwrap();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        writeln!(file, "{}", record_json(&cond, &reading(0, &cond, "resign"))).unwrap();
+        writeln!(file, "{}", record_json(&cond, &reading(0, &cond, "win"))).unwrap();
+        assert!(import(args(false)).unwrap_err().to_string().contains("値の違う重複"));
+        assert_eq!(std::fs::read(&state).unwrap(), saved);
+        assert_eq!(std::fs::read(&dst).unwrap(), old);
+        assert_eq!(import(args(true)).unwrap(), (0, 1, 1));
+        let conflicts = std::fs::read_to_string(&list).unwrap();
+        assert_eq!(conflicts.lines().count(), 2);
+        let fields: Vec<_> = conflicts.lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(fields[2], "resign");
+        assert_eq!(fields[4], "win");
+        assert_eq!(
+            offsets(&state).sources[&std::fs::canonicalize(&src).unwrap()].offset,
+            std::fs::metadata(&src).unwrap().len()
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), old);
+    }
+
+    #[test]
+    fn rejected_source_first_value_blocks_destination_equal_slice_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let full_dst = dir.path().join("full.jsonl");
+        let state = dir.path().join("offsets.json");
+        let list = dir.path().join("conflicts.tsv");
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args.on_conflict = OnConflict::KeepExisting;
+            args.conflicts_out = Some(list.clone());
+            args
+        };
+        let a = reading(0, &cond, "resign");
+        let b = reading(0, &cond, "win");
+        write_journal(&dst, &[(&cond, a.clone())]);
+        write_journal(&src, &[(&cond, b)]);
+        let before = std::fs::read(&dst).unwrap();
+        std::fs::write(&full_dst, &before).unwrap();
+        assert_eq!(import(args()).unwrap(), (0, 1, 1));
+        let canonical = std::fs::canonicalize(&src).unwrap();
+        let identity = source_identity(&cond.fingerprint, &a.key).unwrap();
+        assert_eq!(identity.len(), 32);
+        assert!(identity.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            offsets(&state).sources[&canonical].destination_conflicts,
+            BTreeSet::from([identity])
+        );
+        let mut rec = record_json(&cond, &a);
+        rec["prefetch"] = true.into();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        writeln!(file, "{rec}").unwrap();
+        drop(file);
+        assert_eq!(import(args()).unwrap(), (0, 0, 0));
+        assert_eq!(std::fs::read(&dst).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&list).unwrap(), CONFLICT_HEADER);
+        let mut full = args();
+        full.offsets = None;
+        full.journal = full_dst.clone();
+        assert_eq!(import(full).unwrap(), (0, 1, 1));
+        assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&full_dst).unwrap());
+        assert!(read_source(&src, None, |_| true).unwrap().prefetched.is_empty());
+
+        write_lines(&src, &[record_json(&cond, &a)]);
+        assert_eq!(import(args()).unwrap(), (0, 1, 0));
+        assert!(offsets(&state).sources[&canonical].destination_conflicts.is_empty());
+    }
+
+    #[test]
+    fn slice_without_candidates_does_not_reopen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let row = reading(0, &cond, "resign");
+        write_journal(&src, &[(&cond, row.clone())]);
+        write_journal(&dst, &[(&cond, row)]);
+        let prefix = read_source(&src, None, |_| true).unwrap();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        for _ in 0..2 {
+            writeln!(file, "{}", record_json(&cond, &reading(0, &cond, "resign"))).unwrap();
+        }
+        drop(file);
+        let mut slice = read_source_incremental(
+            &src,
+            None,
+            |_| true,
+            Some((prefix.end, &prefix.sig)),
+            |_| false,
+        )
+        .unwrap();
+        std::fs::remove_file(&src).unwrap();
+        let journal = Journal::open(&dst, &cond.fingerprint).unwrap();
+        slice
+            .skip_prefix_conflicts(&src, &journal, &BTreeSet::new(), |_| false)
+            .unwrap();
+        assert_eq!(slice.readings.len(), 1);
+    }
+
+    #[test]
+    fn offsets_are_read_only_after_destination_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        std::fs::write(&state, b"invalid state").unwrap();
+        let lock = LockedFile::open(&dst).unwrap();
+        let mut args = import_args(&m, &[&src], &dst);
+        args.offsets = Some(state);
+        let err = import(args).unwrap_err().to_string();
+        assert!(err.contains("lock 取得失敗"), "{err}");
+        drop(lock);
+    }
+
+    #[test]
+    fn rewritten_source_uses_first_value_from_new_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args
+        };
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        import(args()).unwrap();
+        write_lines(&src, &[record_json(&cond, &reading(0, &cond, "win"))]);
+        let old_state = std::fs::read(&state).unwrap();
+        let old_dst = std::fs::read(&dst).unwrap();
+        assert!(import(args()).unwrap_err().to_string().contains("値の違う重複"));
+        assert_eq!(std::fs::read(&state).unwrap(), old_state);
+        assert_eq!(std::fs::read(&dst).unwrap(), old_dst);
+    }
+
+    #[test]
+    fn missing_offsets_directory_fails_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        write_journal(&src, &[(&cond, reading(1, &cond, "resign"))]);
+        write_journal(&dst, &[(&cond, reading(0, &cond, "resign"))]);
+        let old = std::fs::read(&dst).unwrap();
+        let mut args = import_args(&m, &[&src], &dst);
+        args.offsets = Some(dir.path().join("missing/offsets.json"));
+        assert!(import(args).is_err());
+        assert_eq!(std::fs::read(&dst).unwrap(), old);
+    }
+
+    #[test]
+    fn torn_only_source_is_empty_for_full_reads_but_not_a_saved_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        std::fs::write(&src, b"torn").unwrap();
+        assert!(
+            read_source(&src, None, |_| true)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("取り込み元の台帳が空です")
+        );
+        assert!(read_source_incremental(&src, None, |_| true, None, |_| false).is_err());
+        let sig = offset_signature(&mut std::fs::File::open(&src).unwrap(), 0).unwrap();
+        assert!(
+            read_source_incremental(&src, None, |_| true, Some((0, &sig)), |_| false)
+                .unwrap()
+                .readings
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tail_window_change_outside_head_resets_offset_and_reports_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let mut rows = Vec::new();
+        for _ in 0..20 {
+            rows.push(record_json(&cond, &reading(0, &cond, "resign")));
+        }
+        write_lines(&src, &rows);
+        let mut bytes = std::fs::read(&src).unwrap();
+        assert!(bytes.len() > 8192);
+        let source = read_source_incremental(&src, None, |_| true, None, |_| false).unwrap();
+        let needle = b"fixture";
+        let index = bytes
+            .windows(needle.len())
+            .enumerate()
+            .find_map(|(i, b)| (i > 4096 && i >= bytes.len() - 4096 && b == needle).then_some(i))
+            .unwrap();
+        bytes[index] = b'F';
+        std::fs::write(&src, bytes).unwrap();
+        let reread = read_source_incremental(
+            &src,
+            None,
+            |_| true,
+            Some((source.end, &source.sig)),
+            |_| false,
+        )
+        .unwrap();
+        assert!(reread.rewritten);
+        assert_eq!(reread.start, 0);
+        assert_eq!(
+            source_report(
+                Path::new("source.jsonl"),
+                reread.start..reread.end,
+                (0, 1, 0),
+                2,
+                reread.rewritten
+            ),
+            format!(
+                "source=source.jsonl start=0 end={} appended=0 skipped=1 conflicts=0 excluded=2 rewritten=1",
+                source.end
+            )
+        );
+        assert_eq!(
+            source_report(Path::new("source.jsonl"), 10..20, (1, 2, 3), 4, false),
+            "source=source.jsonl start=10 end=20 appended=1 skipped=2 conflicts=3 excluded=4"
+        );
+    }
+
+    #[test]
+    fn multiple_sources_equal_sequential_imports_with_conflicts_and_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let a = dir.path().join("a.jsonl");
+        let b = dir.path().join("b.jsonl");
+        let together = dir.path().join("together.jsonl");
+        let sequential = dir.path().join("sequential.jsonl");
+        write_journal(
+            &a,
+            &[
+                (&cond, reading(0, &cond, "resign")),
+                (&cond, reading(1, &cond, "resign")),
+            ],
+        );
+        let mut marked = record_json(&cond, &reading(1, &cond, "resign"));
+        marked["prefetch"] = true.into();
+        write_lines(
+            &b,
+            &[
+                record_json(&cond, &reading(0, &cond, "win")),
+                marked,
+                record_json(&cond, &reading(2, &cond, "resign")),
+            ],
+        );
+        let mut combined = import_args(&m, &[&a, &b], &together);
+        combined.on_conflict = OnConflict::KeepExisting;
+        combined.conflicts_out = Some(dir.path().join("combined.tsv"));
+        let counts = import(combined).unwrap();
+        let mut sums = (0, 0, 0);
+        for (i, source) in [&a, &b].iter().enumerate() {
+            let mut args = import_args(&m, &[source], &sequential);
+            args.on_conflict = OnConflict::KeepExisting;
+            args.conflicts_out = Some(dir.path().join(format!("{i}.tsv")));
+            let result = import(args).unwrap();
+            sums.0 += result.0;
+            sums.1 += result.1;
+            sums.2 += result.2;
+        }
+        assert_eq!(counts, (3, 2, 1));
+        assert_eq!(counts, sums);
+        assert_eq!(std::fs::read(&together).unwrap(), std::fs::read(&sequential).unwrap());
+        let list = std::fs::read_to_string(dir.path().join("combined.tsv")).unwrap();
+        assert_eq!(list.lines().count(), 2);
+        assert!(list.contains(&format!("path={}", b.display())));
+        let journal = Journal::open(&together, &cond.fingerprint).unwrap();
+        assert!(journal.prefetched.contains(&reading(1, &cond, "resign").key));
+    }
+
+    #[test]
+    fn offsets_import_only_new_complete_lines_and_preserve_other_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let a = dir.path().join("a.jsonl");
+        let b = dir.path().join("b.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        write_journal(&a, &[(&cond, reading(0, &cond, "resign"))]);
+        write_journal(&b, &[(&cond, reading(3, &cond, "resign"))]);
+        let args = |sources: &[&Path]| {
+            let mut args = import_args(&m, sources, &dst);
+            args.offsets = Some(state.clone());
+            args
+        };
+        assert_eq!(import(args(&[&a, &b])).unwrap(), (2, 0, 0));
+        let start = std::fs::metadata(&a).unwrap().len();
+        let next = format!("{}\n", record_json(&cond, &reading(1, &cond, "resign")));
+        let torn = format!("{}", record_json(&cond, &reading(2, &cond, "resign")));
+        let mut file = std::fs::OpenOptions::new().append(true).open(&a).unwrap();
+        write!(file, "{next}{torn}").unwrap();
+        assert_eq!(import(args(&[&a])).unwrap(), (1, 0, 0));
+        let saved = offsets(&state);
+        let entry = &saved.sources[&std::fs::canonicalize(&a).unwrap()];
+        assert_eq!(entry.offset, start + next.len() as u64);
+        assert_eq!(saved.sources.len(), 2);
+        let last: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&dst).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert!(last["provenance"].as_str().unwrap().ends_with(&format!(":offset={start}")));
+        assert!(
+            last["provenance"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("sha256={:x}", Sha256::digest(next.as_bytes())))
+        );
+        assert_eq!(import(args(&[&a])).unwrap(), (0, 0, 0));
+        writeln!(file).unwrap();
+        assert_eq!(import(args(&[&a])).unwrap(), (1, 0, 0));
+        assert_eq!(import(args(&[&a])).unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn unchanged_slice_never_parses_old_rows_and_rewrites_reset_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.jsonl");
+        // 解析できない既存行でも、有効な保存位置より前なら読まない。
+        std::fs::write(&path, b"not json\nsecond invalid row\n").unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+        let sig = offset_signature(&mut std::fs::File::open(&path).unwrap(), len).unwrap();
+        let source = read_source_incremental(
+            &path,
+            None,
+            |_| true,
+            Some((len, &sig)),
+            |_| panic!("解析不要"),
+        )
+        .unwrap();
+        assert!(source.readings.is_empty());
+        assert_eq!((source.start, source.end, source.rewritten), (len, len, false));
+
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        write_lines(
+            &path,
+            &[
+                record_json(&cond, &reading(0, &cond, "resign")),
+                record_json(&cond, &reading(1, &cond, "resign")),
+            ],
+        );
+        let original = std::fs::read(&path).unwrap();
+        let source = read_source_incremental(&path, None, |_| true, None, |_| false).unwrap();
+        let starts: Vec<_> = original
+            .windows(b"\"provenance\":\"fixture".len())
+            .enumerate()
+            .filter_map(|(i, bytes)| {
+                (bytes == b"\"provenance\":\"fixture").then_some(i + b"\"provenance\":\"".len())
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        for index in starts {
+            let mut bytes = original.clone();
+            bytes[index] = b'F';
+            std::fs::write(&path, bytes).unwrap();
+            let reread = read_source_incremental(
+                &path,
+                None,
+                |_| true,
+                Some((source.end, &source.sig)),
+                |_| false,
+            )
+            .unwrap();
+            assert!(reread.rewritten);
+            assert_eq!(reread.start, 0);
+            assert_eq!(reread.readings.len(), 2);
+        }
+        write_lines(&path, &[record_json(&cond, &reading(0, &cond, "resign"))]);
+        assert!(
+            read_source_incremental(
+                &path,
+                None,
+                |_| true,
+                Some((source.end, &source.sig)),
+                |_| false
+            )
+            .unwrap()
+            .rewritten
+        );
+    }
+
+    #[test]
+    fn excluded_digests_distinguish_seconds_and_normalize_signed_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exclude.jsonl");
+        std::fs::write(
+            &path,
+            "{\"key\":\"same\",\"ply\":1,\"nodes\":100,\"sec\":0.125}\n\
+             {\"key\":\"same\",\"ply\":1,\"nodes\":100,\"sec\":0.25}\n",
+        )
+        .unwrap();
+        let (digests, _) = load_excluded(Some(&path)).unwrap();
+        assert_eq!(digests.len(), 2);
+        for sec in [0.125, 0.25] {
+            assert!(
+                digests
+                    .binary_search(&ExcludedReading::digest("same", 1, Some(100), sec))
+                    .is_ok()
+            );
+        }
+        assert!(
+            digests
+                .binary_search(&ExcludedReading::digest("same", 1, Some(100), 0.5))
+                .is_err()
+        );
+        assert_eq!(
+            ExcludedReading::digest("same", 1, Some(100), -0.0),
+            ExcludedReading::digest("same", 1, Some(100), 0.0)
+        );
+    }
+
+    #[test]
+    fn excluded_readings_match_exact_identity_before_deduplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let list = dir.path().join("exclude.jsonl");
+        let excluded = reading(0, &cond, "resign");
+        let mut kept = excluded.clone();
+        kept.sec += 0.001;
+        kept.bestmove = "win".into();
+        write_lines(&src, &[record_json(&cond, &excluded), record_json(&cond, &kept)]);
+        std::fs::write(&list, format!("\n{}\n", serde_json::json!({"key":excluded.key,"ply":excluded.ply,"nodes":excluded.nodes,"sec":excluded.sec}))).unwrap();
+        let (set, _) = load_excluded(Some(&list)).unwrap();
+        let source = read_source_incremental(
+            &src,
+            None,
+            |_| true,
+            None,
+            |r| set.binary_search(&ExcludedReading::identity(r)).is_ok(),
+        )
+        .unwrap();
+        assert_eq!(source.excluded, 1);
+        assert_eq!(source.readings, [kept]);
+        let mut args = import_args(&m, &[&src], &dst);
+        args.exclude_readings = Some(list.clone());
+        assert_eq!(import(args).unwrap(), (1, 0, 0));
+        std::fs::write(&list, "{}\n").unwrap();
+        assert!(load_excluded(Some(&list)).is_err());
+    }
+
+    #[test]
+    fn destination_and_exclusion_mismatch_leave_journal_and_offsets_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        let excluded = dir.path().join("excluded.jsonl");
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        std::fs::write(&excluded, "\n").unwrap();
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args.exclude_readings = Some(excluded.clone());
+            args
+        };
+        import(args()).unwrap();
+        let saved = std::fs::read(&state).unwrap();
+        let original = std::fs::read(&dst).unwrap();
+        std::fs::write(&excluded, "\n\n").unwrap();
+        let err = import(args()).unwrap_err().to_string();
+        assert!(err.contains("offsets ファイルを削除"), "{err}");
+        assert_eq!(std::fs::read(&dst).unwrap(), original);
+        std::fs::write(&excluded, "\n").unwrap();
+        let other = dir.path().join("other.jsonl");
+        std::fs::write(&other, &original).unwrap();
+        let mut changed = args();
+        changed.journal = other.clone();
+        assert!(import(changed).is_err());
+        assert_eq!(std::fs::read(&other).unwrap(), original);
+        for bytes in [Vec::new(), [b" ".as_slice(), original.as_slice()].concat()] {
+            std::fs::write(&dst, &bytes).unwrap();
+            let err = import(args()).unwrap_err().to_string();
+            assert!(err.contains("offsets ファイルを削除"), "{err}");
+            assert_eq!(std::fs::read(&dst).unwrap(), bytes);
+            assert_eq!(std::fs::read(&state).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn second_source_conflict_rejects_every_append_and_preserves_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let a = dir.path().join("a.jsonl");
+        let b = dir.path().join("b.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let state = dir.path().join("offsets.json");
+        write_journal(&a, &[(&cond, reading(0, &cond, "resign"))]);
+        let args = |sources: &[&Path]| {
+            let mut args = import_args(&m, sources, &dst);
+            args.offsets = Some(state.clone());
+            args
+        };
+        import(args(&[&a])).unwrap();
+        let saved = std::fs::read(&state).unwrap();
+        let original = std::fs::read(&dst).unwrap();
+        write_journal(&a, &[(&cond, reading(1, &cond, "resign"))]);
+        write_journal(&b, &[(&cond, reading(1, &cond, "win"))]);
+        assert!(import(args(&[&a, &b])).is_err());
+        assert_eq!(std::fs::read(&state).unwrap(), saved);
+        assert_eq!(std::fs::read(&dst).unwrap(), original);
+    }
+
+    #[test]
+    fn duplicate_canonical_source_paths_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        write_journal(&src, &[(&cond, reading(0, &cond, "resign"))]);
+        let alias = dir.path().join(".").join("src.jsonl");
+        let err = import(import_args(&m, &[&src, &alias], &dst)).unwrap_err();
+        assert!(err.to_string().contains("重複"));
+        assert!(!dst.exists());
     }
 
     #[test]
@@ -895,7 +1925,9 @@ mod tests {
         write_journal(&src_path, &[(&src, reading(0, &src, "resign"))]);
         let dst_path = dir.path().join("dst.jsonl");
         let args = |force| ImportJournalArgs {
-            from_journal: src_path.clone(),
+            from_journal: vec![src_path.clone()],
+            offsets: None,
+            exclude_readings: None,
             fingerprint: None,
             accept_fingerprint: Vec::new(),
             journal: dst_path.clone(),
@@ -951,7 +1983,9 @@ mod tests {
         write_journal(&destination, &[(&dst, original.clone())]);
         write_journal(&source, &[(&src, added[0].clone()), (&src, added[1].clone())]);
         let counts = import(ImportJournalArgs {
-            from_journal: source,
+            from_journal: vec![source],
+            offsets: None,
+            exclude_readings: None,
             fingerprint: None,
             accept_fingerprint: Vec::new(),
             journal: destination.clone(),

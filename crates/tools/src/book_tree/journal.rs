@@ -360,6 +360,7 @@ pub(super) struct SkippedRows {
 
 pub(super) struct Journal {
     lock: LockedFile,
+    staged_append: Option<File>,
     fingerprint: String,
     records: BTreeMap<String, Rows>,
     conditions: Vec<Arc<Settings>>,
@@ -414,13 +415,48 @@ fn scan(file: &mut File, mut visit: impl FnMut(Record) -> Result<()>) -> Result<
 
 impl Journal {
     pub fn open(path: &Path, fingerprint: &str) -> Result<Self> {
+        Self::open_checked(path, fingerprint, |_| Ok(()))
+    }
+
+    /// 排他 lock の下で、読み込み・末尾回復の前に宛先を検査する。
+    pub fn open_checked(
+        path: &Path,
+        fingerprint: &str,
+        check: impl FnOnce(&mut File) -> Result<()>,
+    ) -> Result<Self> {
         super::paths::reject_symlink(path)?;
-        Self::load(LockedFile::open(path)?, fingerprint)
+        let mut lock = LockedFile::open(path)?;
+        check(&mut lock.0)?;
+        Self::load(lock, fingerprint)
+    }
+
+    /// 全ソースの検査が終わるまで追記を一時ファイルに保持する。
+    pub fn stage_appends(&mut self, dir: &Path) -> Result<()> {
+        self.staged_append = Some(tempfile::tempfile_in(dir)?);
+        Ok(())
+    }
+
+    /// 検査済みの追記を宛先へ書き込み、同期する。
+    pub fn commit_appends(&mut self) -> Result<()> {
+        let Some(mut staged) = self.staged_append.take() else {
+            return Ok(());
+        };
+        staged.rewind()?;
+        std::io::copy(&mut staged, &mut self.lock.0)?;
+        self.lock.0.sync_data()?;
+        Ok(())
+    }
+
+    /// 排他 lock を保持したまま、現在の宛先の長さと署名を得る。
+    pub fn identity(&mut self) -> Result<(u64, String)> {
+        let len = self.lock.0.metadata()?.len();
+        Ok((len, offset_signature(&mut self.lock.0, len)?))
     }
 
     fn load(lock: LockedFile, fingerprint: &str) -> Result<Self> {
         let mut journal = Self {
             lock,
+            staged_append: None,
             fingerprint: fingerprint.into(),
             records: BTreeMap::new(),
             conditions: Vec::new(),
@@ -579,7 +615,7 @@ impl Journal {
         };
         let mut bytes = serde_json::to_vec(&rec)?;
         bytes.push(b'\n');
-        self.lock.0.write_all(&bytes)?;
+        self.staged_append.as_mut().unwrap_or(&mut self.lock.0).write_all(&bytes)?;
         self.remember(rec);
         Ok(())
     }
@@ -708,9 +744,115 @@ pub(super) struct Source {
     pub sha256: String,
     /// 改行で終わらない末尾の行を無視したか。
     pub ignored_tail: bool,
+    pub start: u64,
+    pub end: u64,
+    pub rewritten: bool,
+    pub excluded: usize,
+    pub sig: String,
+    slice_prefetched: Vec<bool>,
 }
 
 impl Source {
+    /// 差分の重複は、先行範囲にあればその最初の有効な値を基準に判定する。
+    pub fn skip_prefix_conflicts(
+        &mut self,
+        path: &Path,
+        destination: &Journal,
+        destination_conflicts: &BTreeSet<String>,
+        exclude: impl Fn(&Reading) -> bool,
+    ) -> Result<()> {
+        if self.start == 0 {
+            return Ok(());
+        }
+        let mut first = BTreeMap::new();
+        let mut candidates = BTreeSet::new();
+        for (index, (reading, settings)) in
+            self.readings.iter().zip(&self.reading_settings).enumerate()
+        {
+            let identity = (settings.fingerprint.clone(), reading.key.clone());
+            let first_index = *first.entry(identity.clone()).or_insert(index);
+            if destination_conflicts
+                .contains(&source_identity(&settings.fingerprint, &reading.key)?)
+                || !self.readings[first_index].same_values(reading)
+                || destination
+                    .get_exact(&reading.key, &settings.fingerprint)
+                    .is_some_and(|old| !old.same_values(reading))
+            {
+                candidates.insert(identity);
+            }
+        }
+        let mut prefix_first = BTreeMap::new();
+        if !candidates.is_empty() {
+            let mut file = File::open(path)
+                .with_context(|| format!("照合用の取り込み元を開けません: {}", path.display()))?;
+            file_lock::try_lock_shared(&file)
+                .with_context(|| format!("取り込み元の台帳が使用中です: {}", path.display()))?;
+            let _unlock = UnlockOnDrop(file.try_clone()?);
+            if file.metadata()?.len() < self.end
+                || offset_signature(&mut file, self.end)? != self.sig
+            {
+                bail!("取り込み元の台帳が照合前に変更されました");
+            }
+            file.rewind()?;
+            let mut reader = BufReader::new(file.take(self.start));
+            let mut validity = Validity::default();
+            for_each_complete_line(
+                &mut reader,
+                self.start,
+                |bytes| {
+                    let rec = parse_record(bytes)?;
+                    let identity = (rec.settings.fingerprint.clone(), rec.reading.key.clone());
+                    if candidates.contains(&identity)
+                        && validity.valid(&rec)?
+                        && !exclude(&rec.reading)
+                    {
+                        candidates.remove(&identity);
+                        prefix_first.insert(identity, rec.reading);
+                    }
+                    Ok(())
+                },
+                &mut false,
+            )?;
+        }
+        let mut kept = BTreeSet::new();
+        let mut rejected = BTreeSet::new();
+        let mut skipped = BTreeMap::<String, SkippedRows>::new();
+        self.prefetched.clear();
+        for (index, (reading, settings)) in
+            self.readings.iter().zip(&self.reading_settings).enumerate()
+        {
+            let identity = (settings.fingerprint.clone(), reading.key.clone());
+            let source_first =
+                prefix_first.get(&identity).unwrap_or(&self.readings[first[&identity]]);
+            if !source_first.same_values(reading) {
+                skipped.entry(settings.fingerprint.clone()).or_default().conflicting += 1;
+                rejected.insert(index);
+                continue;
+            }
+            if self.slice_prefetched[index] {
+                self.prefetched.insert(identity.clone());
+            }
+            if !kept.insert(identity) {
+                rejected.insert(index);
+            }
+        }
+        report_skipped(&skipped);
+        let mut index = 0;
+        self.readings.retain(|_| {
+            let keep = !rejected.contains(&index);
+            index += 1;
+            keep
+        });
+        let mut index = 0;
+        self.reading_settings.retain(|_| {
+            let keep = !rejected.contains(&index);
+            index += 1;
+            keep
+        });
+        self.slice_prefetched.clear();
+        Ok(())
+    }
+
     /// 局面ごとに、指定条件を優先し、無ければノード数・PV 行数・指紋で選ぶ。
     pub fn selected(&self, preferred: Option<&str>) -> BTreeMap<&str, (&Reading, &Settings)> {
         let mut selected: BTreeMap<&str, (&Reading, &Settings)> = BTreeMap::new();
@@ -731,6 +873,37 @@ impl Source {
     }
 }
 
+/// 保存位置の先頭と直前の最大 4096 バイトずつを SHA-256 にする。
+pub(super) fn offset_signature(file: &mut File, offset: u64) -> Result<String> {
+    let mut hash = Sha256::new();
+    let size = offset.min(4096) as usize;
+    let mut bytes = vec![0; size];
+    file.rewind()?;
+    file.read_exact(&mut bytes)?;
+    hash.update(&bytes);
+    hash.update(b"|");
+    file.seek(SeekFrom::Start(offset - size as u64))?;
+    file.read_exact(&mut bytes)?;
+    hash.update(&bytes);
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn complete_end(file: &mut File, len: u64) -> Result<u64> {
+    let mut end = len;
+    let mut bytes = [0; 65536];
+    while end > 0 {
+        let start = end.saturating_sub(bytes.len() as u64);
+        let size = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut bytes[..size])?;
+        if let Some(index) = bytes[..size].iter().rposition(|&b| b == b'\n') {
+            return Ok(start + index as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
+}
+
 /// 取り込み元の台帳を読む。共有 lock を取って書き手 (serve 等の排他 lock) と並ばないようにし、
 /// ファイルは変更しない。条件の一覧を作ってから選んだ条件の読みのうち、`keep` が真の局面だけを保持する
 /// (全行の検査はする)。
@@ -739,21 +912,50 @@ pub(super) fn read_source(
     fingerprint: Option<&str>,
     keep: impl Fn(&str) -> bool,
 ) -> Result<Source> {
+    read_source_incremental(path, fingerprint, keep, None, |_| false)
+}
+
+/// 保存位置を検証し、そこから後の完全な行だけを読む。
+/// 戻り値は使用前に `Source::skip_prefix_conflicts` で先行範囲との照合を済ませること。
+pub(super) fn read_source_incremental(
+    path: &Path,
+    fingerprint: Option<&str>,
+    keep: impl Fn(&str) -> bool,
+    resume: Option<(u64, &str)>,
+    exclude: impl Fn(&Reading) -> bool,
+) -> Result<Source> {
     let file =
         File::open(path).with_context(|| format!("取り込み元を開けません: {}", path.display()))?;
     file_lock::try_lock_shared(&file).with_context(|| {
         format!("取り込み元の台帳を書き込み中のプロセスがあります: {}", path.display())
     })?;
     let _unlock = UnlockOnDrop(file.try_clone()?);
+    let mut file = file;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        bail!("取り込み元の台帳が空です: {}", path.display());
+    }
+    let end = complete_end(&mut file, len)?;
+    let valid_resume = match resume {
+        Some((offset, sig)) => offset <= end && offset_signature(&mut file, offset)? == sig,
+        None => false,
+    };
+    let start = resume.filter(|_| valid_resume).map_or(0, |(offset, _)| offset);
+    let rewritten = resume.is_some() && !valid_resume;
+    if end == 0 && !valid_resume {
+        bail!("取り込み元の台帳が空です: {}", path.display());
+    }
+    let sig = offset_signature(&mut file, end)?;
+    file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file);
     let mut hash = Sha256::new();
     let mut complete = 0u64;
-    let mut ignored_tail = false;
+    let mut ignored_tail = end != len;
     let mut found_fingerprint = fingerprint.is_none();
     let mut conditions: BTreeMap<String, Settings> = BTreeMap::new();
     for_each_complete_line(
         &mut reader,
-        u64::MAX,
+        end - start,
         |bytes| {
             hash.update(bytes);
             complete += bytes.len() as u64;
@@ -763,20 +965,20 @@ pub(super) fn read_source(
         },
         &mut ignored_tail,
     )?;
-    if complete == 0 {
-        bail!("取り込み元の台帳が空です: {}", path.display());
-    }
-    if !found_fingerprint {
+    if start == 0 && complete > 0 && !found_fingerprint {
         bail!("指紋が取り込み元の台帳にありません");
     }
     let mut file = reader.into_inner();
-    file.seek(SeekFrom::Start(0))?;
+    file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file);
+    let mut excluded = 0;
     let mut readings = Vec::new();
     let mut reading_settings = Vec::new();
     let mut shared: BTreeMap<String, (CondId, Arc<Settings>)> = BTreeMap::new();
     let mut indices = BTreeMap::new();
+    let mut slice_indices = BTreeMap::new();
     let mut prefetched = BTreeSet::new();
+    let mut slice_prefetched = Vec::new();
     let mut seen = HashMap::new();
     let mut skipped_rows = BTreeMap::<String, SkippedRows>::new();
     let mut validity = Validity::default();
@@ -792,7 +994,11 @@ pub(super) fn read_source(
                 skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
                 return Ok(());
             }
-            if !remember_values(&mut seen, &rec.reading, &rec.settings.fingerprint)? {
+            if exclude(&rec.reading) {
+                excluded += 1;
+                return Ok(());
+            }
+            if start == 0 && !remember_values(&mut seen, &rec.reading, &rec.settings.fingerprint)? {
                 skipped_rows.entry(rec.settings.fingerprint).or_default().conflicting += 1;
                 return Ok(());
             }
@@ -811,7 +1017,17 @@ pub(super) fn read_source(
             if rec.prefetch {
                 prefetched.insert((rec.settings.fingerprint.clone(), rec.reading.key.clone()));
             }
-            if let Some(&index) = indices.get(&identity) {
+            if start > 0 {
+                let values = serde_json::to_vec(&(&rec.reading.multipv, &rec.reading.bestmove))?;
+                let index = *slice_indices.entry((identity, values)).or_insert(readings.len());
+                if index < readings.len() {
+                    slice_prefetched[index] |= rec.prefetch;
+                } else {
+                    slice_prefetched.push(rec.prefetch);
+                    reading_settings.push(Arc::clone(condition));
+                    readings.push(rec.reading);
+                }
+            } else if let Some(&index) = indices.get(&identity) {
                 let old: &Reading = &readings[index];
                 debug_assert!(old.same_values(&rec.reading));
             } else {
@@ -836,6 +1052,12 @@ pub(super) fn read_source(
         prefetched,
         sha256: format!("{:x}", hash.finalize()),
         ignored_tail,
+        start,
+        end,
+        rewritten,
+        excluded,
+        sig,
+        slice_prefetched,
     })
 }
 
@@ -952,6 +1174,12 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<Record> {
         bail!("台帳の版が違います");
     }
     Ok(rec)
+}
+
+/// 条件・局面の識別子を 16 バイトのダイジェストの hex 表記にする。
+pub(super) fn source_identity(fingerprint: &str, key: &str) -> Result<String> {
+    let hash = Sha256::digest(serde_json::to_vec(&(fingerprint, key))?);
+    Ok(format!("{hash:x}")[..32].to_owned())
 }
 
 /// 読みを保持せず、同じ局面に異なる値が混ざっていないか確かめる。
@@ -1247,6 +1475,42 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn incremental_slice_collapses_identical_values_and_preserves_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.jsonl");
+        let mut rec = record("", 0);
+        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        let mut file = File::create(&path).unwrap();
+        write_record(&mut file, &rec);
+        let prefix = read_source(&path, None, |_| true).unwrap();
+        for index in 0..1000 {
+            rec.prefetch = index == 500;
+            write_record(&mut file, &rec);
+        }
+        drop(file);
+        let mut slice = read_source_incremental(
+            &path,
+            None,
+            |_| true,
+            Some((prefix.end, &prefix.sig)),
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(slice.start, prefix.end);
+        assert_eq!(slice.readings, vec![rec.reading.clone()]);
+        assert_eq!(slice.reading_settings.len(), 1);
+        assert_eq!(slice.slice_prefetched, vec![true]);
+        let destination = Journal::open(&dir.path().join("destination.jsonl"), "").unwrap();
+        slice
+            .skip_prefix_conflicts(&path, &destination, &BTreeSet::new(), |_| false)
+            .unwrap();
+        let full = read_source(&path, None, |_| true).unwrap();
+        assert_eq!(slice.readings, full.readings);
+        assert_eq!(slice.prefetched, full.prefetched);
+        assert!(slice.prefetched.contains(&(rec.settings.fingerprint, rec.reading.key)));
     }
 
     #[test]
