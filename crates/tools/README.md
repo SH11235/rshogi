@@ -15,7 +15,7 @@
 | 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可、局面を除外する `--skip-keys <FILE>`、curated の局面の main も替える `--replace-curated`) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手を検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
 | 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
-| 序盤の main の替わりを継続手数で hold / replace に分け、指定キーを優先して保留する (`--continuation`・`--hold-keys`・`--deep-opp-freq`・`--deep-min-games`) | [book_mine master hold-early](docs/book_mine.md#master-hold-early-序盤の-main-の替わりを保留に戻す) |
+| 序盤の main の替わりを継続手数で hold / replace に分け、指定キーを優先して保留する (`--continuation`・`--hold-keys`・`--deep-opp-freq`・`--deep-min-games`)。hold の継続が足りない枝の途切れた局面の一覧 (`--cuts-out`) と、そこを根にした木のキューの行 (`--cuts-enqueue-out`、既存キューによる除外 `--cuts-exclude-queue`) | [book_mine master hold-early](docs/book_mine.md#master-hold-early-序盤の-main-の替わりを保留に戻す) |
 | 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
 | 元データから定跡・プリセット・条件と探索深さの注釈を書き出す（tree 台帳以外と不正な読み・後続の値の衝突は照合から除外し、失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
 | 注目の線から元データと DONE の木を合わせ、伝播値つきの定跡をビュアー用に作る | [book_mine master line-db](docs/book_mine.md#master-line-db-注目の線を辿る定跡) |
