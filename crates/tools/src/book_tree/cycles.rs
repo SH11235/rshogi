@@ -51,7 +51,8 @@ pub(super) struct CyclesArgs {
     note: String,
     /// 外してよい手だけでは根から届く循環を塞げないとき、その循環へ入る手を、外してよい手でなくても
     /// (curated の手を除く) record にしてよくする範囲。循環の局面から自分の手で数えて何手前までか
-    /// (相手の手は数えない)。0 なら外してよい手だけで塞ぐ
+    /// (相手の手は数えない)。0 なら外してよい手だけで塞ぐ。`--removable-since` を省くと全部の手を外してよいので
+    /// 効かない
     #[arg(long, value_name = "N", default_value_t = 4)]
     entry_depth: usize,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -451,7 +452,7 @@ fn rank_removals(
     original: &HashMap<usize, usize>,
     allowed: &[bool],
 ) -> Vec<(usize, usize)> {
-    let rank = attractor(graph, allowed, &vec![false; graph.len()]);
+    let rank = attractor(graph, &Predecessors::new(graph), allowed);
     let mut removed = Vec::new();
     for v in (0..graph.len()).filter(|&v| graph.own[v]) {
         let Some(own_rank) = rank[v] else {
@@ -588,41 +589,56 @@ pub(super) fn new_mains(
     Ok(result)
 }
 
+/// 逆向きの辺。頂点 `w` へ来る辺は `entries[start[w]..start[w + 1]]` の (前の局面, その局面での辺の番号)。
+struct Predecessors {
+    start: Vec<usize>,
+    entries: Vec<(u32, u32)>,
+}
+
+impl Predecessors {
+    fn new(graph: &ReplyGraph) -> Self {
+        let mut start = vec![0usize; graph.len() + 1];
+        for v in 0..graph.len() {
+            for e in graph.edges(v) {
+                start[e.to() + 1] += 1;
+            }
+        }
+        for w in 0..graph.len() {
+            start[w + 1] += start[w];
+        }
+        let mut fill = start.clone();
+        let mut entries = vec![(0u32, 0u32); graph.edge_count()];
+        for v in 0..graph.len() {
+            for (i, e) in graph.edges(v).iter().enumerate() {
+                entries[fill[e.to()]] = (v as u32, i as u32);
+                fill[e.to()] += 1;
+            }
+        }
+        Self { start, entries }
+    }
+
+    fn of(&self, w: usize) -> &[(u32, u32)] {
+        &self.entries[self.start[w]..self.start[w + 1]]
+    }
+}
+
 /// 定跡を抜けるまでの段数 (抜けられない局面は `None`)。辺の無い局面が 0。自分の手番の局面は行き先の
 /// 段数の最小 + 1、相手の手番の局面は全部の行き先が抜けられるとき最大 + 1。外せない自分の手
 /// (`allowed` が偽) のある局面は、その手が必ず残るので、相手の手番と同じく外せない手の行き先が全部
 /// 抜けられるとき最大 + 1 (外せない手の行き先は段数が小さいので、残しても循環にならない)。
-/// `exits[頂点]` が真の局面は、定跡から外した局面として辺が無いものと扱う (段数 0)。
-fn attractor(graph: &ReplyGraph, allowed: &[bool], exits: &[bool]) -> Vec<Option<u32>> {
-    // 前の局面の番号の最上位ビットに、その辺が外せない自分の手かを入れる。
-    const FORCED: u32 = 1 << 31;
-    // 逆向きの辺を 1 本の配列に詰める (頂点 `w` の前の局面は `predecessors[start[w]..start[w + 1]]`)。
-    let mut start = vec![0usize; graph.len() + 1];
-    for v in 0..graph.len() {
-        for e in graph.edges(v) {
-            start[e.to() + 1] += 1;
-        }
-    }
-    for w in 0..graph.len() {
-        start[w + 1] += start[w];
-    }
-    let mut fill = start.clone();
-    let mut predecessors = vec![0u32; graph.edge_count()];
+fn attractor(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    allowed: &[bool],
+) -> Vec<Option<u32>> {
+    let is_forced = |v: usize, i: usize| graph.own[v] && !allowed[graph.edge_id(v, i)];
     // 外せない自分の手の数 (自分の手番の局面だけ。0 なら行き先の 1 つが抜けられれば抜けられる)。
-    let mut forced = vec![0usize; graph.len()];
-    for v in 0..graph.len() {
-        for (i, e) in graph.edges(v).iter().enumerate() {
-            let is_forced = graph.own[v] && !allowed[graph.edge_id(v, i)];
-            forced[v] += usize::from(is_forced);
-            predecessors[fill[e.to()]] = v as u32 | if is_forced { FORCED } else { 0 };
-            fill[e.to()] += 1;
-        }
-    }
+    let forced: Vec<usize> = (0..graph.len())
+        .map(|v| (0..graph.edges(v).len()).filter(|&i| is_forced(v, i)).count())
+        .collect();
     let mut remaining: Vec<usize> = (0..graph.len())
         .map(|v| {
-            if exits[v] {
-                0
-            } else if forced[v] > 0 {
+            if forced[v] > 0 {
                 forced[v]
             } else {
                 graph.edges(v).len()
@@ -637,9 +653,9 @@ fn attractor(graph: &ReplyGraph, allowed: &[bool], exits: &[bool]) -> Vec<Option
     // 段数の小さい順に取り出すので、自分の手番は最初の行き先で最小、相手の手番は最後の行き先で最大になる。
     while let Some(v) = queue.pop_front() {
         let next = rank[v].expect("取り出す局面は段数がある") + 1;
-        for &entry in &predecessors[start[v]..start[v + 1]] {
-            let p = (entry & !FORCED) as usize;
-            if rank[p].is_some() || (forced[p] > 0 && entry & FORCED == 0) {
+        for &(p, i) in predecessors.of(v) {
+            let (p, i) = (p as usize, i as usize);
+            if rank[p].is_some() || (forced[p] > 0 && !is_forced(p, i)) {
                 continue;
             }
             remaining[p] -= 1;
@@ -808,11 +824,12 @@ type EntryMove = (usize, usize, usize);
 ///
 /// 段数は、手の行き先から抜けられない循環の局面まで自分の手を何手指して着くか + 1 (相手の手は数えない)。
 /// 循環の局面へ相手の手で入る局面の手と循環の中の手が 1 段、その手前の局面の手が 2 段になる。
-/// 候補は、抜けられない自分の手番の局面の、外してよい手でも curated の手でもない手のうち、抜けられない局面へ
-/// 行く手。外してよい手が増えるほど抜けられる局面は増える (単調) ので、段数 1 から `max_depth` まで、その段数
+/// 候補は、抜けられない自分の手番の局面 (手が 2 つ以上) の、外してよい手でも curated の手でもない手のうち、
+/// 抜けられない局面へ行く手。外してよい手が増えるほど抜けられる局面は増える (単調) ので、段数 1 から `max_depth` まで、その段数
 /// までの候補を全部外してよくして根が抜けられる最初の段数を探す。その段数で、残したい順 (段数の深い順、main、
 /// 値の高い順 (値の分からない手は後)、元データの順、手の順) に 1 つずつ外してよい手から戻し、戻すと根が
-/// 抜けられなくなる手だけを外してよいままにする。どの 1 つを戻しても抜けられない組になる (最小とは限らない)。
+/// 抜けられなくなる手だけを外してよいままにする ([`keep_needed`])。どの 1 つを戻しても抜けられない組になる
+/// (最小とは限らない)。
 /// `max_depth` まで外してよくしても抜けられなければ `None`。
 ///
 /// 手が 1 つしか無い局面は、その手を外せないので抜けられないままで、そこへ入る手が次の段の候補になる
@@ -824,14 +841,17 @@ fn entry_moves(
     curated: &impl Fn(usize, usize) -> bool,
     value: &impl Fn(usize, usize) -> Option<i32>,
 ) -> Option<(usize, Vec<EntryMove>)> {
-    let none = vec![false; graph.len()];
-    let rank = attractor(graph, allowed, &none);
+    let predecessors = Predecessors::new(graph);
+    let rank = attractor(graph, &predecessors, allowed);
     if rank[0].is_some() {
         return Some((0, Vec::new()));
     }
-    let dist = own_move_distance(graph, &rank);
+    let dist = own_move_distance(graph, &predecessors, &rank);
     let mut candidates: Vec<EntryMove> = Vec::new();
-    for v in (0..graph.len()).filter(|&v| graph.own[v] && rank[v].is_none()) {
+    // 手が 1 つの局面は、その手を外してよくしても抜けられるかが変わらない (行き先だけで決まる) ので候補にしない。
+    for v in
+        (0..graph.len()).filter(|&v| graph.own[v] && rank[v].is_none() && graph.edges(v).len() >= 2)
+    {
         for (i, e) in graph.edges(v).iter().enumerate() {
             let depth = dist[e.to()].saturating_add(1);
             if e.book_move().is_some()
@@ -845,13 +865,20 @@ fn entry_moves(
         }
     }
     let mut extra = allowed.to_vec();
+    let mut full_rank = Vec::new();
     let depth = (1..=max_depth).find(|&d| {
         for &(v, i, _) in candidates.iter().filter(|c| c.2 == d) {
             extra[graph.edge_id(v, i)] = true;
         }
-        attractor(graph, &extra, &none)[0].is_some()
+        full_rank = attractor(graph, &predecessors, &extra);
+        full_rank[0].is_some()
     })?;
-    candidates.retain(|c| c.2 <= depth);
+    // 全部外してよくしても抜けられない局面の手は、外してよくするかどうかで段数がどこも変わらないので戻す。
+    candidates.retain(|&(v, i, d)| {
+        let keep = d <= depth && full_rank[v].is_some();
+        extra[graph.edge_id(v, i)] = keep;
+        keep
+    });
     let is_main = |v: usize, i: usize| graph.edges(v)[i].book_move() == Some(0);
     candidates.sort_by_cached_key(|&(v, i, d)| {
         (
@@ -863,36 +890,50 @@ fn entry_moves(
             graph.move_text(v, i).into_owned(),
         )
     });
-    candidates.retain(|&(v, i, _)| {
-        extra[graph.edge_id(v, i)] = false;
-        let needed = attractor(graph, &extra, &none)[0].is_none();
-        extra[graph.edge_id(v, i)] = needed;
-        needed
-    });
-    Some((depth, candidates))
+    let mut needed = vec![false; candidates.len()];
+    keep_needed(graph, &predecessors, &mut extra, &candidates, 0..candidates.len(), &mut needed);
+    let kept = candidates.into_iter().zip(needed).filter_map(|(c, n)| n.then_some(c)).collect();
+    Some((depth, kept))
+}
+
+/// `candidates[range]` を前から 1 つずつ外してよい手から戻し、戻すと根が抜けられなくなる手だけを外してよい
+/// ままにする (`needed` に印を付ける)。抜けられる局面は外してよい手が増えるほど増える (単調) ので、まとめて
+/// 戻しても根が抜けられれば 1 つずつ戻しても全部戻せる。まとめて戻せない範囲だけを半分に分けて調べ、要らない
+/// 手が多いときの判定の回数を減らす (結果は 1 つずつ戻すのと同じ)。
+fn keep_needed(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    extra: &mut [bool],
+    candidates: &[EntryMove],
+    range: std::ops::Range<usize>,
+    needed: &mut [bool],
+) {
+    let set = |extra: &mut [bool], on: bool| {
+        for &(v, i, _) in &candidates[range.clone()] {
+            extra[graph.edge_id(v, i)] = on;
+        }
+    };
+    set(extra, false);
+    if range.is_empty() || attractor(graph, predecessors, extra)[0].is_some() {
+        return;
+    }
+    set(extra, true);
+    if range.len() == 1 {
+        needed[range.start] = true;
+        return;
+    }
+    let mid = range.start + range.len() / 2;
+    keep_needed(graph, predecessors, extra, candidates, range.start..mid, needed);
+    keep_needed(graph, predecessors, extra, candidates, mid..range.end, needed);
 }
 
 /// 局面から、抜けられない (`rank` が `None`) 循環の局面まで、自分の手を何手指して着くか (相手の手は数えない)。
 /// 着かない局面は `usize::MAX`。
-fn own_move_distance(graph: &ReplyGraph, rank: &[Option<u32>]) -> Vec<usize> {
-    // 逆向きの辺を 1 本の配列に詰める (頂点 `w` の前の局面は `predecessors[start[w]..start[w + 1]]`)。
-    let mut start = vec![0usize; graph.len() + 1];
-    for v in 0..graph.len() {
-        for e in graph.edges(v) {
-            start[e.to() + 1] += 1;
-        }
-    }
-    for w in 0..graph.len() {
-        start[w + 1] += start[w];
-    }
-    let mut fill = start.clone();
-    let mut predecessors = vec![0u32; graph.edge_count()];
-    for v in 0..graph.len() {
-        for e in graph.edges(v) {
-            predecessors[fill[e.to()]] = v as u32;
-            fill[e.to()] += 1;
-        }
-    }
+fn own_move_distance(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    rank: &[Option<u32>],
+) -> Vec<usize> {
     let mut dist = vec![usize::MAX; graph.len()];
     let mut queue = VecDeque::new();
     for v in graph.cycles(|_, _| true).into_iter().flatten().filter(|&v| rank[v].is_none()) {
@@ -901,7 +942,7 @@ fn own_move_distance(graph: &ReplyGraph, rank: &[Option<u32>]) -> Vec<usize> {
     }
     // 相手の手は 0、自分の手は 1 の重みの最短路 (0-1 BFS)。
     while let Some(v) = queue.pop_front() {
-        for &p in &predecessors[start[v]..start[v + 1]] {
+        for &(p, _) in predecessors.of(v) {
             let p = p as usize;
             let cost = usize::from(graph.own[p]);
             if dist[v] + cost < dist[p] {
@@ -1617,6 +1658,101 @@ mod tests {
             0,
         );
         assert!(!ok);
+    }
+
+    #[test]
+    fn apply_stops_on_unbreakable_cycle_without_removable_since() {
+        let c = c();
+        let rows = [
+            (ROOT, "5i4h", "main", "10"),
+            (c.as_str(), "4h5i", "main", "30"),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("moves.tsv");
+        std::fs::write(&master, master_text(&rows)).unwrap();
+        let args = CyclesArgs {
+            master: master.clone(),
+            table: dir.path().join("cycles.tsv"),
+            side: SideArg::B,
+            draw_value_black: 0,
+            draw_value_white: 0,
+            apply: true,
+            note: "塞いだ".into(),
+            removable_since: Vec::new(),
+            entry_depth: 4,
+            threads: 0,
+        };
+        assert!(run_from(args, ROOT).is_err());
+        assert_eq!(std::fs::read_to_string(&master).unwrap(), master_text(&rows));
+        assert!(dir.path().join("cycles.tsv").exists());
+    }
+
+    /// 乱数の元データと乱数の外してよい手・curated の手で、入る手を外してよくしたとき、塞げるなら塞げて
+    /// 各局面に手が残り、外してよくした手はどれを戻しても根が抜けられないこと、塞げないなら curated 以外を
+    /// 全部外してよくしても根が抜けられないことを確かめる。
+    #[test]
+    fn entry_moves_agree_with_full_permission() {
+        let (mut fixed, mut failed) = (0, 0);
+        for seed in 0..400u64 {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let (p, root) = random_king_book(&mut rng);
+            let values = evaluate(&p, DrawValues::default()).unwrap();
+            let index = BookIndex::new(&p).unwrap();
+            let graph = graph_of(&index, &root);
+            let own_edge = |e: usize| {
+                let v = (0..graph.len()).rfind(|&v| graph.edge_id(v, 0) <= e).unwrap();
+                graph.own[v]
+            };
+            let allowed: Vec<bool> = (0..graph.edge_count())
+                .map(|e| own_edge(e) && rng.random_range(0..3) == 0)
+                .collect();
+            let curated_edges: Vec<bool> =
+                (0..graph.edge_count()).map(|_| rng.random_range(0..5) == 0).collect();
+            let curated = |v: usize, i: usize| curated_edges[graph.edge_id(v, i)];
+            let value =
+                |v: usize, i: usize| values[graph.master(v)?][graph.edges(v)[i].book_move()?];
+            let plan = plan_side(&graph, &values, &allowed).unwrap();
+            if plan.unbreakable.is_empty() {
+                continue;
+            }
+            let predecessors = Predecessors::new(&graph);
+            match entry_moves(&graph, &allowed, graph.len(), &curated, &value) {
+                Some((_, extra)) => {
+                    let mut expanded = allowed.clone();
+                    for &(v, i, _) in &extra {
+                        assert!(!curated(v, i) && !allowed[graph.edge_id(v, i)], "seed {seed}");
+                        expanded[graph.edge_id(v, i)] = true;
+                    }
+                    for &(v, i, _) in &extra {
+                        expanded[graph.edge_id(v, i)] = false;
+                        assert!(
+                            attractor(&graph, &predecessors, &expanded)[0].is_none(),
+                            "seed {seed}"
+                        );
+                        expanded[graph.edge_id(v, i)] = true;
+                    }
+                    let mut plan = plan_side(&graph, &values, &expanded).unwrap();
+                    assert!(plan.unbreakable.is_empty(), "seed {seed}");
+                    plan.new_main =
+                        new_mains(&graph, &index, &values, &plan.removed, &HashSet::new()).unwrap();
+                    let after_positions = apply_plans(&p, [&plan].into_iter());
+                    assert!(after_positions.values().all(|m| !m.moves.is_empty()), "seed {seed}");
+                    assert_eq!(cycles_of(&after_positions, &root)[1].components, 0, "seed {seed}");
+                    fixed += 1;
+                }
+                None => {
+                    let all: Vec<bool> = (0..graph.len())
+                        .flat_map(|v| (0..graph.edges(v).len()).map(move |i| (v, i)))
+                        .map(|(v, i)| {
+                            graph.own[v] && !curated(v, i) || allowed[graph.edge_id(v, i)]
+                        })
+                        .collect();
+                    assert!(attractor(&graph, &predecessors, &all)[0].is_none(), "seed {seed}");
+                    failed += 1;
+                }
+            }
+        }
+        assert!(fixed > 10 && failed > 0, "{fixed} {failed}");
     }
 
     #[test]
