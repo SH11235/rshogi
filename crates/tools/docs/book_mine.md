@@ -1061,6 +1061,11 @@ book_mine master hold-early --before before/moves.tsv --master moves.tsv \
 book_mine master hold-early --before before/moves.tsv --master moves.tsv \
   --since release-tag --out release.main_changes_held.tsv --schema schema \
   --continuation 6 --hold-keys hold.keys --apply
+book_mine master hold-early --before before/moves.tsv --master moves.tsv \
+  --since release-tag --out release.main_changes_held.tsv --schema schema \
+  --continuation 6 --deep-opp-freq strong.db --hold-keys hold.keys \
+  --cuts-out release.held_cuts.tsv --cuts-enqueue-out release.held_cuts.jsonl \
+  --cuts-exclude-queue targets.jsonl --apply
 ```
 
 `tree register`・`master audit` の後で、版を作る前からある序盤の局面の main を戻し、
@@ -1081,6 +1086,13 @@ cycles が循環を塞ぐために外した手を main に戻すことがあり�
 | `--since <TAG>` | 必須 | 書き戻す 2 行の note に付けるタグ |
 | `--out <PATH>` | 必須 | 対象の変更と分類の一覧 TSV (既存なら置換) |
 | `--apply` | 無効 | 検査後、hold の局面だけ master に書き戻す |
+| `--cuts-out <PATH>` | なし | hold の局面の、継続が N 手に届かない枝の途切れた局面の一覧 TSV。`--continuation` が要る |
+| `--cuts-enqueue-out <JSONL>` | なし | 途切れた局面を根にした `tree enqueue --from` の行。`--continuation` が要る |
+| `--cuts-depth <N>` | `6` | キューの行の段数 (0〜20) |
+| `--cuts-priority <N>` | `100` | キューの行の priority の基準。順位 (0 始まり、99 で頭打ち) を足す |
+| `--cuts-opp-n` / `--cuts-stop` / `--cuts-rounds` / `--cuts-draw-black` / `--cuts-draw-white` | なし | キューの行の `opts` の `opp_n`・`stop`・`rounds`・`draw_black`・`draw_white`。指定した項目だけを書く |
+| `--cuts-tag <TAG>` | `held` | キューの行の id `<tag>_<根の手数>_<局面の hash>_<b\|w>` に入れる名前 ([A-Za-z0-9_-] の 1〜40 文字) |
+| `--cuts-exclude-queue <PATH>` | なし、繰り返し可 | 既存のキュー (JSON Lines)。`master walk --exclude-queue` と同じ除外で、同じ局面・同じ自分の側の木がある途切れはキューの行にしない |
 
 両方の表に main があり、その手が異なる局面だけを対象にします。before にない局面、
 before の main の ply が空の局面は対象外です。既定では 19 手目までが対象で、20 手目は含みません。
@@ -1109,6 +1121,31 @@ before の main が curated なら tier を wide にします。両行の note �
 `<TAG>: 20 手目より前、読みが浅いので保留 (今の main)` を追記します
 (既存 note との区切りは `; `、手数は `--below-ply` に従います)。since 列は変更しません。
 replace の局面の行は変更しません。他の候補手の行も保持します。
+
+### 継続が足りない枝の途切れ (`--cuts-out`・`--cuts-enqueue-out`)
+
+hold を解くには、継続が足りない枝の先を木で読む必要があります。`--cuts-out` は、hold の局面ごとに、
+旧手・新手のうち継続手数が N 未満の側について、最短の枝が途切れた局面を 1 行ずつ出します。
+継続手数は上の分類と同じ計数で求めるので、`depth` は一覧の `old_depth`・`new_depth` と一致します。
+最短の枝が複数あるときは、その局面で辿る手 (main と相手の応手) の USI の文字列の順で先の枝を選びます。
+`--deep-opp-freq` なしでは計数が 60 手で止まり途切れを持たないので、`--continuation` は 60 以下にしてください (超えるとエラー)。
+`--hold-keys` で hold にした局面でも、両方が N 手以上なら行を出しません。
+
+| 列 | 意味 |
+|---|---|
+| `ply`・`side`・`key` | hold の局面の手数・手番・局面キー |
+| `which`・`move` | 旧手 (`old`) か新手 (`new`) か、その手 |
+| `depth` | その手の後に続いた手数 |
+| `cut_ply`・`cut_key` | 途切れた局面の手数 (`ply` + 1 + 根の手の後の手の数) と局面キー |
+| `stop` | 途切れた理由。`own` (自分の手番で main がない)、`opp` (相手の手番で main も辿る応手もない)、`cycle` (経路上の局面に戻った。`cut_key` は戻った先)、`illegal` (main が指せない)、`no_legal` (main がなく、辿る応手がどれも指せない) |
+| `moves` | hold の局面から途切れた局面までの手順 (USI。旧手・新手を含む) |
+
+`--cuts-enqueue-out` は、途切れた局面を根にした `tree enqueue --from` の行を書きます。`own` は hold の局面の手番の側で、
+同じ (途切れた局面, `own`) は 1 行にまとめ、根の手数はそのうち最も小さい手数にします。`memo` に
+`hold-early hold_ply=<最も小さい hold の局面の手数>` と、まとめた枝ごとの
+`ply=<hold の局面の手数> key=<hold の局面キー> <old|new>=<手> depth=<続いた手数>` を `; ` 区切りで入れます。
+行は hold の局面の手数・根の手数・局面キーの順に並べ、その順位を priority に足します。重みでの絞り込みはしません。
+`--cuts-exclude-queue` で除いた組の数は標準出力に出します。`--apply` の有無によらず、どちらの出力も書き戻す前の元データで数えます。
 
 一覧の列は `ply side key old_main old_source old_tier old_value_black new_main new_value_black old_depth new_depth class`
 です (区切りはタブ、side は `b` / `w`)。既存の列順を保ち、末尾の 3 列に継続手数と分類を出します。
