@@ -49,10 +49,12 @@ pub(super) struct CyclesArgs {
     /// 書き換えるとき、外す手と替わりの main の行の note の末尾に付ける文
     #[arg(long, default_value = "千日手の循環を塞ぐため指さない手にした")]
     note: String,
-    /// 外す手だけでは根から届く循環を塞げないとき、行が全部 `--removable-since` の tag の自分の手番の局面を
-    /// 局面ごと元データから外して塞ぎ、外した局面の key をこのファイルに書く (1 行 1 key)
-    #[arg(long, value_name = "FILE", requires = "removable_since")]
-    drop_new_positions: Option<PathBuf>,
+    /// 外してよい手だけでは根から届く循環を塞げないとき、その循環へ入る手を、外してよい手でなくても
+    /// (curated の手を除く) record にしてよくする範囲。循環の局面から自分の手で数えて何手前までか
+    /// (相手の手は数えない)。0 なら外してよい手だけで塞ぐ。`--removable-since` を省くと全部の手を外してよいので
+    /// 効かない
+    #[arg(long, value_name = "N", default_value_t = 4)]
+    entry_depth: usize,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -96,8 +98,18 @@ struct SideResult {
     before: [CycleCount; 2],
     plan: SidePlan,
     after: [CycleCount; 2],
-    /// 局面ごと外す局面の (key, 手数) (key 順)。
-    dropped: Vec<(String, String)>,
+    entry: EntryOutcome,
+}
+
+/// 外してよい手だけでは塞げないときに、循環へ入る手を外してよくした結果。
+#[derive(Debug, Default)]
+struct EntryOutcome {
+    /// 外してよくした手 (key, 手の番号) と、循環の局面から自分の手で数えた段数。
+    allowed: BTreeMap<(String, usize), usize>,
+    /// 外してよくした段数の上限 (外してよい手だけで塞げたときは `None`)。
+    depth: Option<usize>,
+    /// `--entry-depth` の段数まで外してよくしても根から相手が循環に持ち込めたか。
+    failed: bool,
 }
 
 pub(super) fn run(args: CyclesArgs) -> Result<()> {
@@ -107,41 +119,17 @@ pub(super) fn run(args: CyclesArgs) -> Result<()> {
 fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     ensure!(!args.note.contains(['\t', '\r', '\n']), "--note にタブや改行は使えません");
     reject_same_file(&args.table, &[("--master", &args.master)])?;
-    if let Some(path) = &args.drop_new_positions {
-        reject_same_file(path, &[("--master", &args.master), ("--table", &args.table)])?;
-    }
-    let mut positions = read_master(&args.master)?.0;
+    let positions = read_master(&args.master)?.0;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (mut results, mut values) =
-        solve_all(&positions, &args, draws, start, args.drop_new_positions.is_some())?;
-    let mut dropped: Vec<String> =
-        results.iter().flat_map(|r| r.dropped.iter().map(|(k, _)| k.clone())).collect();
-    dropped.sort();
-    if !dropped.is_empty() {
-        // 外した局面を除いた元データで解き直す。外した局面は辺の無い局面になるので、外す局面を選んだときの
-        // 判定のとおり根から届く循環は外す手だけで塞げる。
-        for key in &dropped {
-            positions.remove(key);
-        }
-        let first = results;
-        (results, values) = solve_all(&positions, &args, draws, start, false)?;
-        for (r, f) in results.iter_mut().zip(first) {
-            ensure!(
-                f.dropped.is_empty() || r.plan.unbreakable.is_empty(),
-                "内部エラー: 局面を外した後も {} の塞げない循環が残りました",
-                r.side
-            );
-            r.before = f.before;
-            r.dropped = f.dropped;
-        }
-    }
+    let (results, values) = solve_all(&positions, &args, draws, start)?;
     let index = BookIndex::new(&positions)?;
 
-    let mut table =
-        String::from("side\tkey\tply\tmove\trole\tvalue\teval\tnew_main\tnew_main_value\n");
+    let mut table = String::from(
+        "side\tkey\tply\tmove\trole\tvalue\teval\tnew_main\tnew_main_value\tentry_depth\n",
+    );
     for r in &results {
         let plan = &r.plan;
         for (key, i) in &plan.removed {
@@ -155,9 +143,14 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
                 _ => (String::new(), String::new()),
             };
             let eval = m.eval.map_or_else(String::new, |v| v.to_string());
+            let entry_depth = r
+                .entry
+                .allowed
+                .get(&(key.clone(), *i))
+                .map_or_else(String::new, usize::to_string);
             writeln!(
                 table,
-                "{}\t{key}\t{}\t{}\t{role}\t{}\t{eval}\t{new_main}\t{new_main_value}",
+                "{}\t{key}\t{}\t{}\t{role}\t{}\t{eval}\t{new_main}\t{new_main_value}\t{entry_depth}",
                 r.side,
                 position.ply,
                 m.mv,
@@ -167,26 +160,26 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
         print!("{}", format_summary(r));
     }
     write_atomic(&args.table, &table)?;
-    if let Some(path) = &args.drop_new_positions {
-        let text: String = dropped.iter().map(|k| format!("{k}\n")).collect();
-        write_atomic(path, &text)?;
-    }
     if args.apply {
+        let stuck: Vec<&str> = results
+            .iter()
+            .filter(|r| !r.plan.unbreakable.is_empty())
+            .map(|r| r.side)
+            .collect();
+        ensure!(
+            stuck.is_empty(),
+            "{} の塞げない循環が残るので元データを書き換えません (一覧は書きました)",
+            stuck.join("・")
+        );
         // 行は書き換えるときだけ読む (元データを丸ごと 2 つ持たないため)。
         let text = std::fs::read_to_string(&args.master)
             .with_context(|| format!("{} を読めません", args.master.display()))?;
         let mut rows = parse_master(&text)?;
-        let before = rows.len();
-        if !dropped.is_empty() {
-            let gone: HashSet<&str> = dropped.iter().map(String::as_str).collect();
-            rows.retain(|row| !gone.contains(row.get("key")));
-        }
-        let deleted = before - rows.len();
         let changed =
             rewrite_rows(&mut rows, &positions, results.iter().map(|r| &r.plan), &args.note)?;
         validate(&rows)?;
         write_atomic(&args.master, &format_master(&rows))?;
-        println!("書き換えました: 行 {changed}、消した行 {deleted}");
+        println!("書き換えました: 行 {changed}");
     } else {
         println!("確認だけ (--apply なし)");
     }
@@ -196,14 +189,12 @@ fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
 /// 元データの局面の番号・手の番号ごとの伝播の値。
 type Values = Vec<Vec<Option<i32>>>;
 
-/// 指定の側を全部解き、側ごとの結果と伝播の値を返す。`drop` が真なら、外す手だけでは塞げない側で局面ごと
-/// 外す局面も選ぶ。
+/// 指定の側を全部解き、側ごとの結果と伝播の値を返す。
 fn solve_all(
     positions: &BTreeMap<String, MasterPosition>,
     args: &CyclesArgs,
     draws: DrawValues,
     start: &str,
-    drop: bool,
 ) -> Result<(Vec<SideResult>, Values)> {
     let values = evaluate(positions, draws)?;
     let index = BookIndex::new(positions)?;
@@ -213,7 +204,7 @@ fn solve_all(
         .side
         .sides()
         .par_iter()
-        .map(|&side| solve_side(&index, &values, &tags, (side, start), drop))
+        .map(|&side| solve_side(&index, &values, &tags, (side, start), args.entry_depth))
         .collect::<Result<_>>()?;
     Ok((results, values))
 }
@@ -224,20 +215,38 @@ fn solve_side(
     values: &[Vec<Option<i32>>],
     tags: &MoveTags,
     (side, start): (&'static str, &str),
-    drop: bool,
+    entry_depth: usize,
 ) -> Result<SideResult> {
     let graph = build(index, side, start, |_, p| selected_moves(p, Preset::Random, None))?;
     let before = count_on(&graph, |_| 0, |_, _| false);
-    let allowed = allowed_edges(&graph, tags.removable.as_ref());
+    let mut allowed = allowed_edges(&graph, tags.removable.as_ref());
     let mut plan = plan_side(&graph, values, &allowed)?;
-    let dropped = match &tags.fresh {
-        Some(fresh) if drop && !plan.unbreakable.is_empty() => {
-            let mut keys = drop_positions(&graph, index, &allowed, fresh);
-            keys.sort();
-            keys
+    let mut entry = EntryOutcome::default();
+    if !plan.unbreakable.is_empty() && tags.removable.is_some() {
+        let curated = |v: usize, i: usize| {
+            graph.master(v).zip(graph.edges(v)[i].book_move()).is_some_and(|(m, j)| {
+                tags.curated
+                    .contains(&(index.key(m).to_owned(), index.position(m).moves[j].mv.clone()))
+            })
+        };
+        let value = |v: usize, i: usize| values[graph.master(v)?][graph.edges(v)[i].book_move()?];
+        match entry_moves(&graph, &allowed, entry_depth, &curated, &value) {
+            Some((depth, extra)) => {
+                for &(v, i, d) in &extra {
+                    allowed[graph.edge_id(v, i)] = true;
+                    let j = graph.edges(v)[i].book_move().context("内部エラー: 相手の手です")?;
+                    entry.allowed.insert((graph.key(v)?, j), d);
+                }
+                entry.depth = Some(depth);
+                plan = plan_side(&graph, values, &allowed)?;
+                ensure!(
+                    plan.unbreakable.is_empty(),
+                    "内部エラー: 入る手を外してよくした後も {side} の塞げない循環が残りました"
+                );
+            }
+            None => entry.failed = true,
         }
-        _ => Vec::new(),
-    };
+    }
     plan.new_main = new_mains(&graph, index, values, &plan.removed, &tags.curated)?;
     // 同じグラフで、外した手を除き main を替えて数え直す。自分の手番の辺を減らすだけで相手の手番の辺は
     // 変わらないので、外した後の元データでグラフを作り直して数えるのと同じになる。
@@ -252,7 +261,7 @@ fn solve_side(
         before,
         plan,
         after,
-        dropped,
+        entry,
     })
 }
 
@@ -443,7 +452,7 @@ fn rank_removals(
     original: &HashMap<usize, usize>,
     allowed: &[bool],
 ) -> Vec<(usize, usize)> {
-    let rank = attractor(graph, allowed, &vec![false; graph.len()]);
+    let rank = attractor(graph, &Predecessors::new(graph), allowed);
     let mut removed = Vec::new();
     for v in (0..graph.len()).filter(|&v| graph.own[v]) {
         let Some(own_rank) = rank[v] else {
@@ -580,41 +589,56 @@ pub(super) fn new_mains(
     Ok(result)
 }
 
+/// 逆向きの辺。頂点 `w` へ来る辺は `entries[start[w]..start[w + 1]]` の (前の局面, その局面での辺の番号)。
+struct Predecessors {
+    start: Vec<usize>,
+    entries: Vec<(u32, u32)>,
+}
+
+impl Predecessors {
+    fn new(graph: &ReplyGraph) -> Self {
+        let mut start = vec![0usize; graph.len() + 1];
+        for v in 0..graph.len() {
+            for e in graph.edges(v) {
+                start[e.to() + 1] += 1;
+            }
+        }
+        for w in 0..graph.len() {
+            start[w + 1] += start[w];
+        }
+        let mut fill = start.clone();
+        let mut entries = vec![(0u32, 0u32); graph.edge_count()];
+        for v in 0..graph.len() {
+            for (i, e) in graph.edges(v).iter().enumerate() {
+                entries[fill[e.to()]] = (v as u32, i as u32);
+                fill[e.to()] += 1;
+            }
+        }
+        Self { start, entries }
+    }
+
+    fn of(&self, w: usize) -> &[(u32, u32)] {
+        &self.entries[self.start[w]..self.start[w + 1]]
+    }
+}
+
 /// 定跡を抜けるまでの段数 (抜けられない局面は `None`)。辺の無い局面が 0。自分の手番の局面は行き先の
 /// 段数の最小 + 1、相手の手番の局面は全部の行き先が抜けられるとき最大 + 1。外せない自分の手
 /// (`allowed` が偽) のある局面は、その手が必ず残るので、相手の手番と同じく外せない手の行き先が全部
 /// 抜けられるとき最大 + 1 (外せない手の行き先は段数が小さいので、残しても循環にならない)。
-/// `exits[頂点]` が真の局面は、定跡から外した局面として辺が無いものと扱う (段数 0)。
-fn attractor(graph: &ReplyGraph, allowed: &[bool], exits: &[bool]) -> Vec<Option<u32>> {
-    // 前の局面の番号の最上位ビットに、その辺が外せない自分の手かを入れる。
-    const FORCED: u32 = 1 << 31;
-    // 逆向きの辺を 1 本の配列に詰める (頂点 `w` の前の局面は `predecessors[start[w]..start[w + 1]]`)。
-    let mut start = vec![0usize; graph.len() + 1];
-    for v in 0..graph.len() {
-        for e in graph.edges(v) {
-            start[e.to() + 1] += 1;
-        }
-    }
-    for w in 0..graph.len() {
-        start[w + 1] += start[w];
-    }
-    let mut fill = start.clone();
-    let mut predecessors = vec![0u32; graph.edge_count()];
+fn attractor(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    allowed: &[bool],
+) -> Vec<Option<u32>> {
+    let is_forced = |v: usize, i: usize| graph.own[v] && !allowed[graph.edge_id(v, i)];
     // 外せない自分の手の数 (自分の手番の局面だけ。0 なら行き先の 1 つが抜けられれば抜けられる)。
-    let mut forced = vec![0usize; graph.len()];
-    for v in 0..graph.len() {
-        for (i, e) in graph.edges(v).iter().enumerate() {
-            let is_forced = graph.own[v] && !allowed[graph.edge_id(v, i)];
-            forced[v] += usize::from(is_forced);
-            predecessors[fill[e.to()]] = v as u32 | if is_forced { FORCED } else { 0 };
-            fill[e.to()] += 1;
-        }
-    }
+    let forced: Vec<usize> = (0..graph.len())
+        .map(|v| (0..graph.edges(v).len()).filter(|&i| is_forced(v, i)).count())
+        .collect();
     let mut remaining: Vec<usize> = (0..graph.len())
         .map(|v| {
-            if exits[v] {
-                0
-            } else if forced[v] > 0 {
+            if forced[v] > 0 {
                 forced[v]
             } else {
                 graph.edges(v).len()
@@ -629,9 +653,9 @@ fn attractor(graph: &ReplyGraph, allowed: &[bool], exits: &[bool]) -> Vec<Option
     // 段数の小さい順に取り出すので、自分の手番は最初の行き先で最小、相手の手番は最後の行き先で最大になる。
     while let Some(v) = queue.pop_front() {
         let next = rank[v].expect("取り出す局面は段数がある") + 1;
-        for &entry in &predecessors[start[v]..start[v + 1]] {
-            let p = (entry & !FORCED) as usize;
-            if rank[p].is_some() || (forced[p] > 0 && entry & FORCED == 0) {
+        for &(p, i) in predecessors.of(v) {
+            let (p, i) = (p as usize, i as usize);
+            if rank[p].is_some() || (forced[p] > 0 && !is_forced(p, i)) {
                 continue;
             }
             remaining[p] -= 1;
@@ -792,61 +816,146 @@ fn dfs_removals<K: Ord>(
 /// 深さ優先探索の 1 段: (局面, 辿る辺の順, 次の位置, その局面に来た辺)。
 type Frame = (usize, Vec<usize>, usize, Option<(usize, usize)>);
 
-/// 外す手だけでは根が抜けられないとき、局面ごと外して根を抜けられるようにする自分の手番の局面の key。
+/// 循環へ入る手: (頂点, 辺の番号, 段数)。
+type EntryMove = (usize, usize, usize);
+
+/// 外してよい手だけでは根が抜けられないとき、根を抜けられるようにするために外してよくする、循環へ入る手。
+/// (段数の上限, 入る手) を返す。
 ///
-/// 候補は根から届き、抜けられない自分の手番の局面のうち `fresh` (行が全部外してよい tag で curated の行が
-/// 無い) の局面 (根を除く)。先後を反転した局面が元データにある局面は除く (定跡を反転して引くエンジンでは、
-/// 消しても反転した局面の手を指し、出口にならない)。
-/// 局面を外すと辺の無い局面 (段数 0) になり、外す局面が増えるほど抜けられる局面は増える (単調) ので、候補を
-/// 全部外して根が抜けられることを確かめてから、残したい順 (手数の浅い順、同じなら key 順) に 1 つずつ戻し、
-/// 戻すと根が抜けられなくなる局面だけを外したままにする。結果はどの 1 つを戻しても根が抜けられない組になる。
-/// 候補を全部外しても抜けられなければ (古い行だけで相手が持ち込める) 何も外さない。
+/// 段数は、手の行き先から抜けられない循環の局面まで自分の手を何手指して着くか + 1 (相手の手は数えない)。
+/// 循環の局面へ相手の手で入る局面の手と循環の中の手が 1 段、その手前の局面の手が 2 段になる。
+/// 候補は、抜けられない自分の手番の局面 (手が 2 つ以上) の、外してよい手でも curated の手でもない手のうち、
+/// 抜けられない局面へ行く手。外してよい手が増えるほど抜けられる局面は増える (単調) ので、段数 1 から `max_depth` まで、その段数
+/// までの候補を全部外してよくして根が抜けられる最初の段数を探す。その段数で、残したい順 (段数の深い順、main、
+/// 値の高い順 (値の分からない手は後)、元データの順、手の順) に 1 つずつ外してよい手から戻し、戻すと根が
+/// 抜けられなくなる手だけを外してよいままにする ([`keep_needed`])。どの 1 つを戻しても抜けられない組になる
+/// (最小とは限らない)。
+/// `max_depth` まで外してよくしても抜けられなければ `None`。
 ///
-/// 自分の手番の局面を元データから消すと、そこへ戻る相手の手の辺が無くなる。相手の手番の局面は全部の辺が
-/// 抜けられる局面へ行くとき抜けられるので、辺が無いのと段数 0 の局面へ行くのとは同じに効き、消した元データで
-/// 解き直しても根は抜けられる。
-fn drop_positions(
+/// 手が 1 つしか無い局面は、その手を外せないので抜けられないままで、そこへ入る手が次の段の候補になる
+/// (上へたどる)。外してよくした手を実際に外すかは、その後の [`plan_side`] が決める。
+fn entry_moves(
     graph: &ReplyGraph,
-    index: &BookIndex,
     allowed: &[bool],
-    fresh: &[bool],
-) -> Vec<(String, String)> {
-    let rank = attractor(graph, allowed, &vec![false; graph.len()]);
+    max_depth: usize,
+    curated: &impl Fn(usize, usize) -> bool,
+    value: &impl Fn(usize, usize) -> Option<i32>,
+) -> Option<(usize, Vec<EntryMove>)> {
+    let predecessors = Predecessors::new(graph);
+    let rank = attractor(graph, &predecessors, allowed);
     if rank[0].is_some() {
-        return Vec::new();
+        return Some((0, Vec::new()));
     }
-    let reached = reachable(graph, &vec![true; graph.edge_count()]);
-    let mut candidates: Vec<(u32, &str, usize, &str)> = (1..graph.len())
-        .filter(|&v| graph.own[v] && reached[v] && rank[v].is_none())
-        .filter_map(|v| {
-            let m = graph.master(v)?;
-            let key = index.key(m);
-            let flipped = rshogi_book::flipped_key(&format!("{key} 1"))
-                .and_then(|f| f.rsplit_once(' ').map(|(k, _)| k.to_owned()));
-            if !fresh[m] || flipped.is_some_and(|f| index.find(&f).is_some()) {
-                return None;
+    let dist = own_move_distance(graph, &predecessors, &rank);
+    let mut candidates: Vec<EntryMove> = Vec::new();
+    // 手が 1 つの局面は、その手を外してよくしても抜けられるかが変わらない (行き先だけで決まる) ので候補にしない。
+    for v in
+        (0..graph.len()).filter(|&v| graph.own[v] && rank[v].is_none() && graph.edges(v).len() >= 2)
+    {
+        for (i, e) in graph.edges(v).iter().enumerate() {
+            let depth = dist[e.to()].saturating_add(1);
+            if e.book_move().is_some()
+                && !allowed[graph.edge_id(v, i)]
+                && rank[e.to()].is_none()
+                && depth <= max_depth
+                && !curated(v, i)
+            {
+                candidates.push((v, i, depth));
             }
-            let ply = &index.position(m).ply;
-            Some((ply.parse().unwrap_or(u32::MAX), key, v, ply.as_str()))
-        })
-        .collect();
-    candidates.sort_unstable();
-    let mut exits = vec![false; graph.len()];
-    for &(_, _, v, _) in &candidates {
-        exits[v] = true;
-    }
-    if attractor(graph, allowed, &exits)[0].is_none() {
-        return Vec::new();
-    }
-    let mut kept = Vec::new();
-    for &(_, key, v, ply) in &candidates {
-        exits[v] = false;
-        if attractor(graph, allowed, &exits)[0].is_none() {
-            exits[v] = true;
-            kept.push((key.to_owned(), ply.to_owned()));
         }
     }
-    kept
+    let mut extra = allowed.to_vec();
+    let mut full_rank = Vec::new();
+    let depth = (1..=max_depth).find(|&d| {
+        for &(v, i, _) in candidates.iter().filter(|c| c.2 == d) {
+            extra[graph.edge_id(v, i)] = true;
+        }
+        full_rank = attractor(graph, &predecessors, &extra);
+        full_rank[0].is_some()
+    })?;
+    // 全部外してよくしても抜けられない局面の手は、外してよくするかどうかで段数がどこも変わらないので戻す。
+    candidates.retain(|&(v, i, d)| {
+        let keep = d <= depth && full_rank[v].is_some();
+        extra[graph.edge_id(v, i)] = keep;
+        keep
+    });
+    let is_main = |v: usize, i: usize| graph.edges(v)[i].book_move() == Some(0);
+    candidates.sort_by_cached_key(|&(v, i, d)| {
+        (
+            std::cmp::Reverse(d),
+            !is_main(v, i),
+            value(v, i).is_none(),
+            std::cmp::Reverse(value(v, i)),
+            graph.master(v),
+            graph.move_text(v, i).into_owned(),
+        )
+    });
+    let mut needed = vec![false; candidates.len()];
+    keep_needed(graph, &predecessors, &mut extra, &candidates, 0..candidates.len(), &mut needed);
+    let kept = candidates.into_iter().zip(needed).filter_map(|(c, n)| n.then_some(c)).collect();
+    Some((depth, kept))
+}
+
+/// `candidates[range]` を前から 1 つずつ外してよい手から戻し、戻すと根が抜けられなくなる手だけを外してよい
+/// ままにする (`needed` に印を付ける)。抜けられる局面は外してよい手が増えるほど増える (単調) ので、まとめて
+/// 戻しても根が抜けられれば 1 つずつ戻しても全部戻せる。まとめて戻せない範囲だけを半分に分けて調べ、要らない
+/// 手が多いときの判定の回数を減らす (結果は 1 つずつ戻すのと同じ)。
+fn keep_needed(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    extra: &mut [bool],
+    candidates: &[EntryMove],
+    range: std::ops::Range<usize>,
+    needed: &mut [bool],
+) {
+    let set = |extra: &mut [bool], on: bool| {
+        for &(v, i, _) in &candidates[range.clone()] {
+            extra[graph.edge_id(v, i)] = on;
+        }
+    };
+    set(extra, false);
+    if range.is_empty() || attractor(graph, predecessors, extra)[0].is_some() {
+        return;
+    }
+    set(extra, true);
+    if range.len() == 1 {
+        needed[range.start] = true;
+        return;
+    }
+    let mid = range.start + range.len() / 2;
+    keep_needed(graph, predecessors, extra, candidates, range.start..mid, needed);
+    keep_needed(graph, predecessors, extra, candidates, mid..range.end, needed);
+}
+
+/// 局面から、抜けられない (`rank` が `None`) 循環の局面まで、自分の手を何手指して着くか (相手の手は数えない)。
+/// 着かない局面は `usize::MAX`。
+fn own_move_distance(
+    graph: &ReplyGraph,
+    predecessors: &Predecessors,
+    rank: &[Option<u32>],
+) -> Vec<usize> {
+    let mut dist = vec![usize::MAX; graph.len()];
+    let mut queue = VecDeque::new();
+    for v in graph.cycles(|_, _| true).into_iter().flatten().filter(|&v| rank[v].is_none()) {
+        dist[v] = 0;
+        queue.push_back(v);
+    }
+    // 相手の手は 0、自分の手は 1 の重みの最短路 (0-1 BFS)。
+    while let Some(v) = queue.pop_front() {
+        for &(p, _) in predecessors.of(v) {
+            let p = p as usize;
+            let cost = usize::from(graph.own[p]);
+            if dist[v] + cost < dist[p] {
+                dist[p] = dist[v] + cost;
+                if cost == 0 {
+                    queue.push_front(p);
+                } else {
+                    queue.push_back(p);
+                }
+            }
+        }
+    }
+    dist
 }
 
 /// 根から今の辺で届く局面。
@@ -937,9 +1046,6 @@ struct MoveTags {
     curated: HashSet<(String, String)>,
     /// 外してよい手。`--removable-since` を省くと `None` (全部の手)。
     removable: Option<MoveBits>,
-    /// 局面の番号ごとに、record を含む行が全部 `--removable-since` の tag で curated の行が無い局面か。
-    /// 省くと `None`。
-    fresh: Option<Vec<bool>>,
 }
 
 /// 元データの手ごとの印 (局面の番号と手の番号で引く)。文字列を持たないので、印の付く行が多くても局面数と
@@ -990,9 +1096,7 @@ fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Res
         } else {
             Some(MoveBits::new(index)?)
         },
-        fresh: None,
     };
-    let mut stale = vec![false; index.len()];
     for line in std::io::BufReader::new(file).lines().skip(1) {
         let row = Row::split_line(&line?);
         let curated = row.get_optional("tier") == Some("curated");
@@ -1000,11 +1104,6 @@ fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Res
             tags.curated.insert((row.get("key").to_owned(), row.get("move").to_owned()));
         }
         let new_row = row.get_optional("since").is_some_and(|s| since.iter().any(|t| t == s));
-        if (!new_row || curated)
-            && let Some(m) = index.find(row.get("key"))
-        {
-            stale[m] = true;
-        }
         if let Some(bits) = tags.removable.as_mut()
             && new_row
             // record の行は局面の手に無い (辺にもならない) ので印を付けない。
@@ -1013,9 +1112,6 @@ fn move_tags(path: &std::path::Path, since: &[String], index: &BookIndex) -> Res
         {
             bits.set(m, j);
         }
-    }
-    if !since.is_empty() {
-        tags.fresh = Some(stale.into_iter().map(|s| !s).collect());
     }
     Ok(tags)
 }
@@ -1109,8 +1205,22 @@ fn format_summary(r: &SideResult) -> String {
         "{side}: 最小 (C) の循環ごとの結果: 解けた {} / 循環の中では塞げない {} / 上限 {}",
         plan.exact.solved, plan.exact.infeasible, plan.exact.limit
     ));
-    for (key, ply) in &r.dropped {
-        out(format!("{side}: 局面ごと外した ({ply} 手目): {key}"));
+    let entry = &r.entry;
+    if let Some(depth) = entry.depth {
+        let removed: Vec<&(String, usize)> =
+            plan.removed.iter().filter(|m| entry.allowed.contains_key(m)).collect();
+        out(format!(
+            "{side}: 外してよい手だけでは塞げないので、循環へ入る手を {depth} 段まで外してよくした: \
+             外してよくした手 {}、そのうち外す手 {} (main {})",
+            entry.allowed.len(),
+            removed.len(),
+            removed.iter().filter(|(_, i)| *i == 0).count()
+        ));
+    }
+    if entry.failed {
+        out(format!(
+            "{side}: 循環へ入る手を --entry-depth の段数まで外してよくしても塞げない"
+        ));
     }
     for cycle in &plan.unbreakable {
         out(format!("{side}: 塞げない循環 (根から相手が持ち込める): {}", cycle.join(" | ")));
@@ -1124,7 +1234,6 @@ mod tests {
     use super::super::reply_graph::fixture::{ROOT, after, master_text, positions};
     use super::*;
     use rand::{Rng, SeedableRng};
-    use std::collections::BTreeSet;
 
     /// 外す手を除き、main を替えた元データ (局面の手の並びだけ)。
     fn apply_plans<'a>(
@@ -1323,7 +1432,7 @@ mod tests {
             apply: true,
             note: "塞いだ".into(),
             removable_since: Vec::new(),
-            drop_new_positions: None,
+            entry_depth: 4,
             threads: 0,
         };
         run_from(args, ROOT).unwrap();
@@ -1361,7 +1470,7 @@ mod tests {
             apply: true,
             note: "塞いだ".into(),
             removable_since: Vec::new(),
-            drop_new_positions: None,
+            entry_depth: 4,
             threads: 0,
         };
         // 一覧の出力先が元データと同じなら書かずに止める。
@@ -1386,7 +1495,7 @@ mod tests {
         let table = std::fs::read_to_string(dir.path().join("cycles.tsv")).unwrap();
         assert_eq!(
             table.lines().nth(1).unwrap(),
-            format!("b\t{c}\t1\t4h5i\tmain\t30\t30\t4h3h\t20")
+            format!("b\t{c}\t1\t4h5i\tmain\t30\t30\t4h3h\t20\t")
         );
     }
 
@@ -1422,109 +1531,228 @@ mod tests {
         master
     }
 
-    /// `--removable-since new --drop-new-positions --apply` で解き、外した局面の key と書き換え後の key の一覧を返す。
-    fn drop_run(
+    /// `--removable-since new --apply` で解き、成否、書き換え後の (key, 手, role) の一覧、一覧の行を返す。
+    fn entry_run(
         rows: &[(&str, &str, &str, &str, &str, &str)],
-        plies: &[(&str, u32)],
-    ) -> (Vec<String>, BTreeSet<String>) {
+        entry_depth: usize,
+    ) -> (bool, Vec<(String, String, String)>, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
-        let master = write_master(dir.path(), rows, plies);
-        let dropped = dir.path().join("dropped.txt");
-        run_from(
+        let master = write_master(dir.path(), rows, &[]);
+        let table = dir.path().join("table.tsv");
+        let ok = run_from(
             CyclesArgs {
                 master: master.clone(),
-                table: dir.path().join("table.tsv"),
+                table: table.clone(),
                 side: SideArg::B,
                 draw_value_black: 0,
                 draw_value_white: 0,
                 apply: true,
                 note: "塞いだ".into(),
                 removable_since: vec!["new".into()],
-                drop_new_positions: Some(dropped.clone()),
+                entry_depth,
                 threads: 0,
             },
             ROOT,
         )
-        .unwrap();
+        .is_ok();
         let text = std::fs::read_to_string(&master).unwrap();
-        let keys = parse_master(&text).unwrap().iter().map(|r| r.get("key").to_owned()).collect();
-        let dropped =
-            std::fs::read_to_string(dropped).unwrap().lines().map(str::to_owned).collect();
-        (dropped, keys)
+        let after = parse_master(&text)
+            .unwrap()
+            .iter()
+            .map(|r| (r.get("key").to_owned(), r.get("move").to_owned(), r.get("role").to_owned()))
+            .collect();
+        let table = std::fs::read_to_string(table)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+        (ok, after, table)
+    }
+
+    fn row(key: &str, mv: &str, role: &str) -> (String, String, String) {
+        (key.to_owned(), mv.to_owned(), role.to_owned())
     }
 
     #[test]
-    fn drops_new_single_move_position_of_forced_cycle() {
-        // 根 5i4h (old) → C 4h5i (new) → 根の循環は手が 1 手ずつで、外す手だけでは塞げない。C を局面ごと外す。
+    fn records_old_entry_move_and_keeps_new_single_move_position() {
+        // 根 (old の 2 手) の 5i4h → C (new の 1 手) 4h5i → 根の循環は、外してよい手 (C の 1 手) だけでは
+        // 塞げない。C へ入る根の 5i4h を record にし、5i6h を main にする。C の行は残す。
         let c = c();
-        let (dropped, keys) = drop_run(
+        let (ok, after, table) = entry_run(
             &[
                 (ROOT, "5i4h", "main", "10", "old", "wide"),
+                (ROOT, "5i6h", "alt", "0", "old", "wide"),
                 (c.as_str(), "4h5i", "main", "30", "new", "wide"),
             ],
-            &[],
+            4,
         );
-        assert_eq!(dropped, std::slice::from_ref(&c));
-        assert!(!keys.contains(&c));
-        assert!(keys.contains(ROOT));
+        assert!(ok);
+        assert_eq!(
+            after,
+            [
+                row(ROOT, "5i4h", "record"),
+                row(ROOT, "5i6h", "main"),
+                row(&c, "4h5i", "main")
+            ]
+        );
+        assert_eq!(table, [format!("b\t{ROOT}\t1\t5i4h\tmain\t10\t10\t5i6h\t0\t1")]);
     }
 
     #[test]
-    fn keeps_positions_with_old_or_curated_rows() {
-        // C に old の record の行がある、または curated の行がある局面は外さず、塞げない循環のまま残す。
-        let c = c();
-        for extra in [
-            (c.as_str(), "4h3h", "record", "-30000", "old", "wide"),
-            (c.as_str(), "4h5i", "main", "30", "new", "curated"),
-        ] {
-            let mut rows = vec![(ROOT, "5i4h", "main", "10", "old", "wide")];
-            if extra.2 == "record" {
-                rows.push((c.as_str(), "4h5i", "main", "30", "new", "wide"));
-            }
-            rows.push(extra);
-            let (dropped, keys) = drop_run(&rows, &[]);
-            assert!(dropped.is_empty(), "{extra:?}");
-            assert!(keys.contains(&c));
-        }
-    }
-
-    #[test]
-    fn drops_one_position_of_new_single_move_cycle() {
-        // E2 → X → Z → E2 の循環の自分の手番の局面 (E・X・Z) が全部 new で 1 手ずつ。1 つ外せば足りるので、
-        // 浅い局面から戻して、一番深い局面だけを外す。
+    fn climbs_past_single_move_position_up_to_entry_depth() {
+        // E2 → X → Z → E2 の循環の手 (X・Z、new) は 1 手ずつ。手前の E も old の 1 手 (5h4h) だけなので、
+        // さらに手前の根の 5i5h (2 段) を record にする。1 段までなら塞げずに止まり、元データを書き換えない。
         let e = after(ROOT, &["5i5h", "5a4a"]);
         let e2 = after(&e, &["5h4h"]);
         let x = after(&e2, &["4a5a"]);
         let z = after(&x, &["4h5i", "5a4a"]);
         let rows = [
             (ROOT, "5i5h", "main", "0", "old", "wide"),
-            (e.as_str(), "5h4h", "main", "30", "new", "wide"),
+            (ROOT, "5i6h", "alt", "0", "old", "wide"),
+            (e.as_str(), "5h4h", "main", "30", "old", "wide"),
             (x.as_str(), "4h5i", "main", "0", "new", "wide"),
             (z.as_str(), "5i4h", "main", "0", "new", "wide"),
         ];
-        let (dropped, _) = drop_run(&rows, &[(e.as_str(), 3), (x.as_str(), 5), (z.as_str(), 7)]);
-        assert_eq!(dropped, std::slice::from_ref(&z));
-        // 手数を逆にすると一番深い E を外す。
-        let (dropped, _) = drop_run(&rows, &[(e.as_str(), 7), (x.as_str(), 5), (z.as_str(), 3)]);
-        assert_eq!(dropped, std::slice::from_ref(&e));
+        let (ok, after, table) = entry_run(&rows, 2);
+        assert!(ok);
+        assert_eq!(after[..2], [row(ROOT, "5i5h", "record"), row(ROOT, "5i6h", "main")]);
+        assert!(after[2..].iter().all(|(_, _, role)| role == "main"));
+        assert_eq!(table.len(), 1);
+        assert!(table[0].ends_with("\t2"), "{table:?}");
+        let (ok, after, table) = entry_run(&rows, 1);
+        assert!(!ok);
+        assert!(
+            after
+                .iter()
+                .all(|(_, mv, role)| role == if mv == "5i6h" { "alt" } else { "main" })
+        );
+        assert!(table.is_empty());
     }
 
     #[test]
-    fn keeps_position_whose_flipped_position_is_in_the_book() {
-        // C を先後反転した局面に行があると、反転して引くエンジンでは C を消しても出口にならないので外さない。
+    fn stops_when_entry_moves_cannot_break_the_cycle() {
+        // 根の 5i4h が 1 手だけ、または curated なら、入る手を外せないので止まり、元データを書き換えない。
         let c = c();
-        let flipped = rshogi_book::flipped_key(&format!("{c} 1")).unwrap();
-        let flipped = flipped.rsplit_once(' ').unwrap().0.to_owned();
-        let (dropped, keys) = drop_run(
+        for root_rows in [
+            vec![(ROOT, "5i4h", "main", "10", "old", "wide")],
+            vec![
+                (ROOT, "5i4h", "main", "10", "old", "curated"),
+                (ROOT, "5i6h", "alt", "0", "old", "wide"),
+            ],
+        ] {
+            let mut rows = root_rows.clone();
+            rows.push((c.as_str(), "4h5i", "main", "30", "new", "wide"));
+            let (ok, after, _) = entry_run(&rows, 4);
+            assert!(!ok, "{root_rows:?}");
+            assert!(after.iter().all(|(_, _, role)| role != "record"));
+            assert_eq!(after.len(), rows.len());
+        }
+        // 0 段なら外してよい手だけで塞ぐので、塞げる元データでも止まる。
+        let (ok, _, _) = entry_run(
             &[
                 (ROOT, "5i4h", "main", "10", "old", "wide"),
+                (ROOT, "5i6h", "alt", "0", "old", "wide"),
                 (c.as_str(), "4h5i", "main", "30", "new", "wide"),
-                (flipped.as_str(), "6b5a", "main", "0", "old", "wide"),
             ],
-            &[],
+            0,
         );
-        assert!(dropped.is_empty());
-        assert!(keys.contains(&c));
+        assert!(!ok);
+    }
+
+    #[test]
+    fn apply_stops_on_unbreakable_cycle_without_removable_since() {
+        let c = c();
+        let rows = [
+            (ROOT, "5i4h", "main", "10"),
+            (c.as_str(), "4h5i", "main", "30"),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("moves.tsv");
+        std::fs::write(&master, master_text(&rows)).unwrap();
+        let args = CyclesArgs {
+            master: master.clone(),
+            table: dir.path().join("cycles.tsv"),
+            side: SideArg::B,
+            draw_value_black: 0,
+            draw_value_white: 0,
+            apply: true,
+            note: "塞いだ".into(),
+            removable_since: Vec::new(),
+            entry_depth: 4,
+            threads: 0,
+        };
+        assert!(run_from(args, ROOT).is_err());
+        assert_eq!(std::fs::read_to_string(&master).unwrap(), master_text(&rows));
+        assert!(dir.path().join("cycles.tsv").exists());
+    }
+
+    /// 乱数の元データと乱数の外してよい手・curated の手で、入る手を外してよくしたとき、塞げるなら塞げて
+    /// 各局面に手が残り、外してよくした手はどれを戻しても根が抜けられないこと、塞げないなら curated 以外を
+    /// 全部外してよくしても根が抜けられないことを確かめる。
+    #[test]
+    fn entry_moves_agree_with_full_permission() {
+        let (mut fixed, mut failed) = (0, 0);
+        for seed in 0..400u64 {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let (p, root) = random_king_book(&mut rng);
+            let values = evaluate(&p, DrawValues::default()).unwrap();
+            let index = BookIndex::new(&p).unwrap();
+            let graph = graph_of(&index, &root);
+            let own_edge = |e: usize| {
+                let v = (0..graph.len()).rfind(|&v| graph.edge_id(v, 0) <= e).unwrap();
+                graph.own[v]
+            };
+            let allowed: Vec<bool> = (0..graph.edge_count())
+                .map(|e| own_edge(e) && rng.random_range(0..3) == 0)
+                .collect();
+            let curated_edges: Vec<bool> =
+                (0..graph.edge_count()).map(|_| rng.random_range(0..5) == 0).collect();
+            let curated = |v: usize, i: usize| curated_edges[graph.edge_id(v, i)];
+            let value =
+                |v: usize, i: usize| values[graph.master(v)?][graph.edges(v)[i].book_move()?];
+            let plan = plan_side(&graph, &values, &allowed).unwrap();
+            if plan.unbreakable.is_empty() {
+                continue;
+            }
+            let predecessors = Predecessors::new(&graph);
+            match entry_moves(&graph, &allowed, graph.len(), &curated, &value) {
+                Some((_, extra)) => {
+                    let mut expanded = allowed.clone();
+                    for &(v, i, _) in &extra {
+                        assert!(!curated(v, i) && !allowed[graph.edge_id(v, i)], "seed {seed}");
+                        expanded[graph.edge_id(v, i)] = true;
+                    }
+                    for &(v, i, _) in &extra {
+                        expanded[graph.edge_id(v, i)] = false;
+                        assert!(
+                            attractor(&graph, &predecessors, &expanded)[0].is_none(),
+                            "seed {seed}"
+                        );
+                        expanded[graph.edge_id(v, i)] = true;
+                    }
+                    let mut plan = plan_side(&graph, &values, &expanded).unwrap();
+                    assert!(plan.unbreakable.is_empty(), "seed {seed}");
+                    plan.new_main =
+                        new_mains(&graph, &index, &values, &plan.removed, &HashSet::new()).unwrap();
+                    let after_positions = apply_plans(&p, [&plan].into_iter());
+                    assert!(after_positions.values().all(|m| !m.moves.is_empty()), "seed {seed}");
+                    assert_eq!(cycles_of(&after_positions, &root)[1].components, 0, "seed {seed}");
+                    fixed += 1;
+                }
+                None => {
+                    let all: Vec<bool> = (0..graph.len())
+                        .flat_map(|v| (0..graph.edges(v).len()).map(move |i| (v, i)))
+                        .map(|(v, i)| {
+                            graph.own[v] && !curated(v, i) || allowed[graph.edge_id(v, i)]
+                        })
+                        .collect();
+                    assert!(attractor(&graph, &predecessors, &all)[0].is_none(), "seed {seed}");
+                    failed += 1;
+                }
+            }
+        }
+        assert!(fixed > 10 && failed > 0, "{fixed} {failed}");
     }
 
     #[test]
@@ -1570,7 +1798,7 @@ mod tests {
             apply: false,
             note: "塞いだ".into(),
             removable_since,
-            drop_new_positions: None,
+            entry_depth: 0,
             threads: 0,
         };
         let removed = |table: &str| -> Vec<String> {
@@ -1586,7 +1814,7 @@ mod tests {
         // old の手だけを外してよいなら C の 4h5i (alt を先に外す規則でも、根の main 5i6h は循環の外)。
         run_from(args(vec!["old".into()], "old.tsv"), ROOT).unwrap();
         assert_eq!(removed("old.tsv"), ["4h5i"]);
-        // どちらでもない tag なら外せる手が無く、塞げない循環として残す。
+        // どちらでもない tag なら外せる手が無く、(入る手も外さなければ) 塞げない循環として残す。
         run_from(args(vec!["none".into()], "none.tsv"), ROOT).unwrap();
         assert!(removed("none.tsv").is_empty());
     }
