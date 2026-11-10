@@ -209,6 +209,8 @@ enum MasterCommand {
     ExitReport(exit_report::ExitReportArgs),
     /// 戦型の候補ごとに RAMU の手を替えて辿り、出口の値・確度・強い対局の実績・危ない局面を比べる
     OpeningReport(Box<opening_report::OpeningReportArgs>),
+    /// walk と同じ辿りで RAMU の手番の局面の main の伝播の値と外部定跡の値を比べ、食い違う局面を出す
+    OppBookDiff(Box<walk::opp_book_diff::OppBookDiffArgs>),
 }
 
 /// CLI の指定に従い元データを処理する。
@@ -230,6 +232,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::MainLine(args) => main_line::run(args),
         MasterCommand::ExitReport(args) => exit_report::run(args),
         MasterCommand::OpeningReport(args) => opening_report::run(*args),
+        MasterCommand::OppBookDiff(args) => walk::opp_book_diff::run(*args),
     }
 }
 
