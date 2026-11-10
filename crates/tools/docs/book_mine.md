@@ -422,6 +422,39 @@ book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 
 `wait` は次を同じ 1 回の読み取りで満たしたときに、対象ごとの `id`・`own`・`generation`・`state`・`ready`・`out` を JSON で出して 0 で終わります: `processed_bytes` が受領の `end` 以上、受領の範囲 `[start, end)` に拒否が無い、`all_ended` が真 (`--ids` を付けたらその対象と受領の範囲で足した `id` が終わった状態)、状態のファイルを書いた serve 自身が生きている (状態の `run_id` の起動ごとの lock が取られている)。受領の範囲に拒否があればその理由を出して非 0、serve が落ちていれば非 0 で終わります。範囲の外の拒否 (他の書き手の行や同じ `id` の過去の拒否) は見ません。受領の範囲が未処理のまま `queue_error` が 2 秒続けば、その理由を出して非 0 で終わります (チェックポイントを一時的に書けない場合も含みます。直した後に待ち直してください)。`--ids` に状態に無い id を渡すと (打ち間違いや、別の受領で足してまだ処理されていない id)、待たずに非 0 で終わります。状態のファイルが前の起動のもの (その `run_id` の lock が取られていない) なら、state の lock で新しい serve が動いているかを確かめ、動いていれば新しい状態が出るまで待ち、動いていなければ非 0 で終わります。lock は共有 lock で一瞬試すだけです (serve は起動時に state の lock を 1 秒ほど待ち直すので、待機と起動が重なっても起動は失敗しません)。
 
+### `tree status`: 複数の台の進みと idle までの時間
+
+```bash
+book_mine tree status --state state-a --state state-b \
+  --journal ledger-a.jsonl --journal ledger-b.jsonl
+book_mine tree status --state state-a --state state-b --json --stale-hours 2
+```
+
+`--state` の順に1行ずつ、最後に合計を出します。既定は Markdown の表、`--json` は1行1オブジェクトの JSONL です。
+`--journal` は全体を省略するか、`--state` と同数を同じ順序で指定します。省略時は速さ・時間が `-` (JSON では `null`) になります。
+
+- engine 稼働/全: `progress.json` の `key` がある worker 数 / 全 worker 数。
+- 木: 読み中 (RUNNING) / 待ち (QUEUED) / 終わった (DONE + NOT_READY、括弧内はうち読めずに終わった NOT_READY) / 保留 (HELD)。NOT_READY は ready にならず終了した木で、待機・局面・残り・depth・idleまでの時間の計算には含めません。
+- 局面: active な木 (RUNNING、QUEUED) の `read` / `required` の合計。可視の残りは各木の `max(required - read, 0)` の合計。
+- 増加を含む残り: 指定した全stateの DONE の `read` を実績として共有します。同じ `(id, own)` は1件とし (`own=bw` の先後は別の木)、最大の `read` を持つ実績のdepth・世代を使います (同値なら指定順で最初の実績)。対象の木と `(depth, generation >= 2)` が同じで、`read >= 対象の required` の実績が10件以上あれば、その平均と80パーセンタイル (`sorted[int(0.8 * n)]`) を終了時の局面数とします。10件未満なら同じdepthの全世代でやり直し、それも不足なら `required` を使います。各木の `max(予測局面数, required) - read` を0以上として合計します。
+- 局面/時: 台帳の末尾から `provenance = "engine"` の有効な最新400件 (不足時はある分) の `reading.sec` の平均で、`worker総数 × 3600 / 平均秒` を計算します。prefetch・speculative の読みも含むので、実際に木が進む速さとしてはやや楽観的です。不正なJSON・形式不正・負のsecの行は飛ばします。サンプルなし・平均秒が0なら速さは不明です。
+- idleまでの時間: 増加を含む残り (平均 / p80) を局面/時で割った時間です。合計は各台の残りの和 / 速さの和です。台ごとの終了時間の最大値ではなく、仕事を均等に配れる場合の目安です。合計対象に速さ不明の台があれば合計の速さ・時間も不明です。
+- 深さ×木の数: `accepted.json` の受付済み定義を `(id, own, generation)` で照合し、active な木の深さごとの数を表示します。DONE の実績の深さにも同じ定義を使います。世代が一致しない木は深さ不明です。`accepted.json` が欠損・読めない場合は `targets.jsonl` の同じ id の最初の有効行を近似値として使い、状態欄と JSON の `reason` にその旨を出します。この近似では世代ごとの深さ変更は反映できません。キューの不正行・8 MiB を超える行・改行のない末尾は飛ばし、取得できない木は `不明` に入れます。
+
+表では伸びを見込む残り局面数を整数に丸め、時間は小数第1位まで表示します。JSON の数値の精度は変えません。
+
+小さい木が先に完了するため、DONEに基づく増加推定は低めに偏ります。p80も終了時刻を80%の確率で保証する値ではありません。
+読み取りはserveとロックを共有しないため、各ファイルの更新の間には短いずれがあり得ます。
+台帳は64 KiBずつ末尾から読み、全体をメモリに載せません (1行は最大8 MiB)。末尾に改行がない行は完全なJSONとして読める場合だけ対象にします。
+
+`targets.status.json`・`progress.json` や指定した台帳の欠損・読み取りエラーは `unreadable` と理由をその台の行に出し、他の台の処理を続けて終了コード0で終わります。
+`progress.json` の更新から `--stale-hours` (既定2時間、非負数) を超えた台は `stale` と表示します。
+`stale`・`unreadable` は合計から除外します。合計対象が0台なら合計行のstatusは `empty` で、速さ・時間は不明です。読み取れたstaleな台のDONEも推定の実績には含めます。
+
+JSONLのキーは全行共通です。`kind` は `state` / `total`、`state` は指定パス (合計は `null`)、`status` は `ok` / `stale` / `unreadable` / `empty` (合計のみ)、`reason` はエラー理由または深さの近似値を使った通知 (通常は `null`) です。
+数値は `workers_busy`, `workers_total`, `trees_running`, `trees_waiting`, `trees_done`, `not_ready`, `trees_held`, `positions_read`, `positions_required`, `remaining_visible`, `remaining_mean`, `remaining_p80`, `positions_per_hour`, `hours_until_idle_mean`, `hours_until_idle_p80`。
+`depth_histogram` はdepth文字列 (`不明` を含む) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
+
 ### `tree queue-review`: 台ごとの残りと未着手の木を点検する
 
 複数の台の受付と進みの写しを読み、締めまでに読める量、未着手の木の到達の重みと重複、
