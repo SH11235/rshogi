@@ -442,6 +442,9 @@ book_mine tree queue-review \
 受領のない JSONL は読みません。受領の `start` が小さい順に読み、同じ id は最後の行を使います。
 受領の範囲の重なり・行数違い、受付と progress の対象・own・priority・hold の不一致はエラーです。
 受付と progress は同じ時点の写しを用意してください。
+`fetch/progress.json` が無い台 (立てた直後で最初の回収がまだの台) は、読んでいる木が 0 本の空の台として扱い、
+受付の木をすべて未着手 (read 0) として数えます。その旨を標準エラーに 1 行出します。worker 数が分からないので、
+`--box-rate` を渡さない限り速さは 0 で、`--plan-out` では `--box-rate` が無いとエラーにします。progress がある台の受付と progress の不一致は、上のとおりエラーのままです。
 受付の受領の範囲に serve が拒否した行がないことが前提です。`tree wait` などで確かめてください。
 
 | 引数 | 既定 | 内容 |
@@ -475,9 +478,11 @@ book_mine tree queue-review \
 | `--update <JSONL>` | なし、繰り返し可 | 既存の木への足し込み行。`tree seeds --update-out` の出力など |
 | `--bands <P,...>` | 9,26,60,120 | 計画の帯の上端の priority (小さい順)。`<prefix>_bands.tsv` の区切り |
 | `--balance-priority <P>` / `--balance-hours <H>` | なし | 両方で指定。P 以下の帯の読み終わり時間が H 時間を超える台から木を移す |
+| `--move-max-ratio <F>` | 1.0 | move・balance の移し先の、移した後の台全体の残り/読める量の上限。`inf` で外す |
+| `--move-band-factor <F>` | 1.0 | move・balance の移し先の帯の読み終わり時間の上限を、移す前の全台の同じ帯の読み終わり時間の最大の F 倍にする。`inf` で外す |
 | `--update-size <N>` | 30 | hold false の台へ足し込みを送る id あたりの追加局面数の仮定 |
 
-`--update`・`--condition`・`--balance-priority` と、明示指定する `--max-ratio`・`--update-size`・`--bands` には `--plan-out` が必要です。
+`--update`・`--condition`・`--balance-priority` と、明示指定する `--max-ratio`・`--update-size`・`--bands`・`--move-max-ratio`・`--move-band-factor` には `--plan-out` が必要です。
 `--box-deadlines` は計画を出さない場合にも `--boxes` の hours・capacity・ratio に反映します。
 計画の例 (通常の点検引数に追加):
 
@@ -571,6 +576,7 @@ serve は priority の小さい順に読むので、木が締めまでに読め�
    同じ id を受付または計画に既に持つ台は、既存の木を置き換えてしまうため移動先から除きます (hold を含む)。
    元の行は hold true、移し先は hold false にし、定義を変えず世代を増やしません。
    移し先には、移動元の台へ実際に送った最後の足し込みの game・memo も反映します。
+   移し先は、後述の移し先の上限も満たす台に限ります。
    移せなければ priority 100 以上は hold、100 未満は動かさず `keep-over` にします。
    元の台が上限以内になったら止めます。hold・移動では、初期の remaining と同じく木ごとの
    `max(tree-size, requested) - read` (下限 0) と、移動元の台に足し込み済みの update-size 分の見込み量を引き、移し先に同量を足します。
@@ -578,7 +584,7 @@ serve は priority の小さい順に読むので、木が締めまでに読め�
 3. `--balance-priority P --balance-hours H` があれば、P 以下の帯の読み終わり時間 (P 以下の見込み量 / 台の速さ) が H を超える台を
    名前順に見て、P 以下の未着手の木 (reach-low を除く) を priority の大きい順 (同点は id の逆順) に、読み終わり時間が H 以下に収まる他の台へ移します
    (`balance`、理由 `band-hours`)。移し先はその木の帯の量でも上限以内で、移した後の読み終わり時間が最小の台です (同点は名前順)。
-   移し先の条件 (同じ id、条件ラベル、同じ根) と見込み量の扱いは 2 と同じです。元の台の読み終わり時間が H 以下になったら止めます。
+   移し先の条件 (同じ id、条件ラベル、同じ根、移し先の上限) と見込み量の扱いは 2 と同じです。元の台の読み終わり時間が H 以下になったら止めます。
 4. 新規行を priority の小さい順 (同点はファイルの指定順・行順) に割り振ります。
    追加後に帯の量 + 木の量が上限以内となる台のうち、その比が最小の台、同点は名前順です。
    入る台がなければ、条件を満たす台のうち現在の ratio 最小の台へ hold true で置き (`add-hold`)、
@@ -587,6 +593,16 @@ serve は priority の小さい順に読むので、木が締めまでに読め�
    (受付の木・移し込んだ木・新規行。`keep-over` を記録した木を除く) を `over` (理由 `band-over`) として記録します。
    priority 100 以上でも hold にはしません (serve は priority の小さい順に読むので、急ぎの木の妨げにならない)。
    これらは締めまでに読み切れない見込みなので、次の点検で priority・置き場を見直してください。
+
+move・balance の移し先の上限は次の 2 つです。帯の量の判定は移した木の priority 以下しか見ないため、
+priority の大きい木から順に移すと、移し先の台全体があふれたり、同じ priority の木が 1 台に集まったりすることを防ぎます。
+
+- 移した後の移し先の台全体の残り/読める量が `--move-max-ratio` 以下。判定は移す時点の量で行います。
+  移せずに `keep-over` になりかけた木は、全台を一巡して各台が自分の木を外した後に、もう一度だけ移し先を探します。
+  `hold-over` にした木もその後で同じ条件の移し先を探し、見つかれば `move` を記録して移します (元の台では hold のまま)。
+- 移した木の priority を含む帯とそれより上の帯 (`--bands` の区切り) のそれぞれで、移した後の移し先の読み終わり時間
+  (`<prefix>_bands.tsv` の after_hours と同じく、帯の上端以下の見込み量 / 台の速さ) が、移す前の全台の同じ帯の
+  読み終わり時間 (before_hours) の最大 × `--move-band-factor` 以下。速さ 0 の台は最大に含めません。
 
 帯の量が収まる木は動かさないので、計画の後も台全体の ratio (標準出力の「計画 残り/読める量」) が max-ratio を超えることがあります。
 締めまでに読めるかは `<prefix>_bands.tsv` の after_hours と cutoff_hours、`over` の行で確かめます。

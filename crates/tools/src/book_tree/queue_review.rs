@@ -109,6 +109,13 @@ pub(super) struct QueueReviewArgs {
     /// 帯の読み終わりの目標時間 (balance-priority 以下の量 / 台の速さ)
     #[arg(long, requires = "balance_priority")]
     balance_hours: Option<f64>,
+    /// move・balance の移す先の、移した後の残り/読める量 (全 priority) の上限。inf で外す
+    #[arg(long, default_value_t = 1.0, requires = "plan_out")]
+    move_max_ratio: f64,
+    /// move・balance の移す先の帯の読み終わり時間 (bands.tsv の after_hours) の上限を、
+    /// 移す前の全台の同じ帯の before_hours の最大の何倍にするか。inf で外す
+    #[arg(long, default_value_t = 1.0, requires = "plan_out")]
+    move_band_factor: f64,
     /// 足し込みのある id あたりの追加局面数の仮定
     #[arg(long, default_value_t = 30, requires = "plan_out")]
     update_size: u64,
@@ -177,6 +184,8 @@ struct BoxData {
     dir: PathBuf,
     queue: BTreeMap<String, Queued>,
     progress: Progress,
+    /// `fetch/progress.json` が無く、受付の木をすべて未着手として補った台。
+    progress_missing: bool,
 }
 #[derive(Default)]
 struct Walk {
@@ -248,6 +257,7 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         );
     }
     let mut queue = BTreeMap::new();
+    let mut arrival = Vec::new();
     for (_, path, receipt) in accepted {
         let mut count = 0;
         for text in BufReader::new(File::open(&path)?).lines() {
@@ -263,6 +273,9 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
                 .map(|r| parse_root(r).map(|r| r.key))
                 .collect::<Result<_>>()?;
             let primary_root = parse_root(&line.root)?.key;
+            if !queue.contains_key(&line.id) {
+                arrival.push(line.id.clone());
+            }
             queue.insert(
                 line.id.clone(),
                 Queued {
@@ -277,9 +290,36 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         ensure!(count == receipt.lines, "受領の行数と一致しません: {}", path.display());
     }
     let progress_path = dir.join("fetch/progress.json");
-    let progress: Progress = serde_json::from_reader(File::open(&progress_path)?)
-        .with_context(|| format!("進みのファイルが不正です: {}", progress_path.display()))?;
-    inputs.push(progress_path);
+    let progress_missing = !progress_path.try_exists()?;
+    let progress = if progress_missing {
+        // 立てた直後の台は最初の回収より前に計画することがある。受付の木はまだどれも読んでいない。
+        // serve は同じ priority を受付の初出順に読み、group の見込みもこの順に頼るので、id 順にしない。
+        let trees: Vec<_> = arrival
+            .iter()
+            .map(|id| &queue[id])
+            .flat_map(|q| {
+                q.line.sides().into_iter().map(|own| TreeProgress {
+                    id: q.line.id.clone(),
+                    own,
+                    priority: q.line.priority,
+                    hold: q.line.hold,
+                    finished: false,
+                    failed: false,
+                    read: 0,
+                    requested: 0,
+                })
+            })
+            .collect();
+        Progress {
+            trees,
+            workers: Vec::new(),
+        }
+    } else {
+        let progress: Progress = serde_json::from_reader(File::open(&progress_path)?)
+            .with_context(|| format!("進みのファイルが不正です: {}", progress_path.display()))?;
+        inputs.push(progress_path);
+        progress
+    };
     let mut ids = BTreeSet::new();
     for tree in &progress.trees {
         ensure!(
@@ -308,7 +348,17 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         dir,
         queue,
         progress,
+        progress_missing,
     })
+}
+
+fn note_missing_progress(b: &BoxData, suffix: &str) {
+    eprintln!(
+        "{}: 進みの記録 {} が無いので、読んでいる木が 0 本の空の台として扱います (受付の木 {} 本を未着手として数えます){suffix}",
+        b.name,
+        b.dir.join("fetch/progress.json").display(),
+        b.progress.trees.len()
+    );
 }
 
 fn path_keys(moves: &[&str]) -> Result<Vec<String>> {
@@ -780,6 +830,23 @@ fn box_metrics(
     let speed = box_rate.get(&b.name).copied().unwrap_or_else(|| {
         rate.get(&b.name).copied().unwrap_or(args.default_rate) * b.progress.workers.len() as f64
     });
+    if b.progress_missing {
+        // 速さ 0 の台は計画で受付の木を全部外してしまうので、立てた直後の台の受付を止めないように速さを求める。
+        ensure!(
+            args.plan_out.is_none() || box_rate.contains_key(&b.name),
+            "{}: 進みの記録が無く worker 数が分からないので、計画には --box-rate {}=<局面/時> が必要です",
+            b.name,
+            b.name
+        );
+        note_missing_progress(
+            b,
+            if box_rate.contains_key(&b.name) {
+                ""
+            } else {
+                "。worker 数が分からないので、--box-rate が無い間は速さ 0 です"
+            },
+        );
+    }
     let capacity = speed * hours;
     ensure!(speed.is_finite() && capacity.is_finite(), "速さ・読める量が大きすぎます");
     let remaining = b
@@ -830,6 +897,9 @@ pub(super) fn tree_states(specs: &[String]) -> Result<(Vec<TreeState>, Vec<PathB
             "台の名前は重複のない英数字・_・- にしてください: {name}"
         );
         let b = load_box(name, PathBuf::from(dir), &mut inputs)?;
+        if b.progress_missing {
+            note_missing_progress(&b, "");
+        }
         for tree in &b.progress.trees {
             let queued = &b.queue[&tree.id];
             let state = if tree.finished {
