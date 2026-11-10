@@ -758,6 +758,7 @@ impl Source {
         &mut self,
         path: &Path,
         destination: &Journal,
+        destination_conflicts: &BTreeSet<String>,
         exclude: impl Fn(&Reading) -> bool,
     ) -> Result<()> {
         if self.start == 0 {
@@ -770,7 +771,9 @@ impl Source {
         {
             let identity = (settings.fingerprint.clone(), reading.key.clone());
             let first_index = *first.entry(identity.clone()).or_insert(index);
-            if !self.readings[first_index].same_values(reading)
+            if destination_conflicts
+                .contains(&source_identity(&settings.fingerprint, &reading.key)?)
+                || !self.readings[first_index].same_values(reading)
                 || destination
                     .get_exact(&reading.key, &settings.fingerprint)
                     .is_some_and(|old| !old.same_values(reading))
@@ -1173,6 +1176,12 @@ pub(super) fn parse_record(bytes: &[u8]) -> Result<Record> {
     Ok(rec)
 }
 
+/// 条件・局面の識別子を 16 バイトのダイジェストの hex 表記にする。
+pub(super) fn source_identity(fingerprint: &str, key: &str) -> Result<String> {
+    let hash = Sha256::digest(serde_json::to_vec(&(fingerprint, key))?);
+    Ok(format!("{hash:x}")[..32].to_owned())
+}
+
 /// 読みを保持せず、同じ局面に異なる値が混ざっていないか確かめる。
 fn remember_values(
     seen: &mut HashMap<[u8; 16], [u8; 16]>,
@@ -1495,7 +1504,9 @@ mod tests {
         assert_eq!(slice.reading_settings.len(), 1);
         assert_eq!(slice.slice_prefetched, vec![true]);
         let destination = Journal::open(&dir.path().join("destination.jsonl"), "").unwrap();
-        slice.skip_prefix_conflicts(&path, &destination, |_| false).unwrap();
+        slice
+            .skip_prefix_conflicts(&path, &destination, &BTreeSet::new(), |_| false)
+            .unwrap();
         let full = read_source(&path, None, |_| true).unwrap();
         assert_eq!(slice.readings, full.readings);
         assert_eq!(slice.prefetched, full.prefetched);

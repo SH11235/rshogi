@@ -3,7 +3,7 @@
 use super::ReadingArgs;
 use super::journal::{
     ConflictSink, Journal, NoConflictList, OnConflict, Reading, Settings, offset_signature,
-    read_source_incremental,
+    read_source_incremental, source_identity,
 };
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -253,15 +253,31 @@ fn import(args: ImportJournalArgs) -> Result<(usize, usize, usize)> {
             args.fingerprint.as_deref(),
             |_| true,
             resume,
-            |reading| excluded.contains(&ExcludedReading::identity(reading)),
+            |reading| excluded.binary_search(&ExcludedReading::identity(reading)).is_ok(),
         )?;
-        source.skip_prefix_conflicts(path, &journal, |reading| {
-            excluded.contains(&ExcludedReading::identity(reading))
+        let mut destination_conflicts = if source.start == 0 {
+            BTreeSet::new()
+        } else {
+            state.sources[&canonical].destination_conflicts.clone()
+        };
+        source.skip_prefix_conflicts(path, &journal, &destination_conflicts, |reading| {
+            excluded.binary_search(&ExcludedReading::identity(reading)).is_ok()
         })?;
         if source.ignored_tail {
             eprintln!("取り込み元の末尾の改行で終わらない行は無視しました: {}", path.display());
         }
         fingerprints.extend(source.reading_settings.iter().map(|s| s.fingerprint.clone()));
+        if args.offsets.is_some() && args.on_conflict == OnConflict::KeepExisting {
+            for (reading, settings) in source.readings.iter().zip(&source.reading_settings) {
+                if journal
+                    .get_exact(&reading.key, &settings.fingerprint)
+                    .is_some_and(|old| !old.same_values(reading))
+                {
+                    destination_conflicts
+                        .insert(source_identity(&settings.fingerprint, &reading.key)?);
+                }
+            }
+        }
         let incoming = source
             .readings
             .into_iter()
@@ -298,6 +314,7 @@ fn import(args: ImportJournalArgs) -> Result<(usize, usize, usize)> {
                 SourceOffset {
                     offset: source.end,
                     sig: source.sig,
+                    destination_conflicts,
                 },
             );
         }
@@ -355,6 +372,7 @@ fn source_report(
 struct SourceOffset {
     offset: u64,
     sig: String,
+    destination_conflicts: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -384,11 +402,21 @@ struct ExcludedReading {
     sec: f64,
 }
 
-type ExcludedIdentity = (String, u32, Option<u64>, u64);
+type ExcludedIdentity = [u8; 16];
 
 impl ExcludedReading {
     fn identity(reading: &Reading) -> ExcludedIdentity {
-        (reading.key.clone(), reading.ply, reading.nodes, sec_bits(reading.sec))
+        Self::digest(&reading.key, reading.ply, reading.nodes, reading.sec)
+    }
+
+    fn digest(key: &str, ply: u32, nodes: Option<u64>, sec: f64) -> ExcludedIdentity {
+        let mut hash = Sha256::new();
+        hash.update(key.as_bytes());
+        hash.update(ply.to_le_bytes());
+        hash.update([u8::from(nodes.is_some())]);
+        hash.update(nodes.unwrap_or_default().to_le_bytes());
+        hash.update(sec_bits(sec).to_le_bytes());
+        hash.finalize()[..16].try_into().expect("16 バイト")
     }
 }
 
@@ -396,11 +424,12 @@ fn sec_bits(sec: f64) -> u64 {
     if sec == 0.0 { 0 } else { sec.to_bits() }
 }
 
-fn load_excluded(path: Option<&Path>) -> Result<(BTreeSet<ExcludedIdentity>, Option<String>)> {
+fn load_excluded(path: Option<&Path>) -> Result<(Vec<ExcludedIdentity>, Option<String>)> {
     let Some(path) = path else {
-        return Ok((BTreeSet::new(), None));
+        return Ok((Vec::new(), None));
     };
-    let mut excluded = BTreeSet::new();
+    // 除外対象は既にメモリにある台帳索引の読みの部分集合なので、約 16 バイト × 件数を保持する。
+    let mut excluded = Vec::new();
     let mut hash = Sha256::new();
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let mut bytes = Vec::new();
@@ -417,8 +446,10 @@ fn load_excluded(path: Option<&Path>) -> Result<(BTreeSet<ExcludedIdentity>, Opt
         }
         let row: ExcludedReading = serde_json::from_slice(&bytes)
             .with_context(|| format!("除外リスト {} の {line} 行目が不正です", path.display()))?;
-        excluded.insert((row.key, row.ply, Some(row.nodes), sec_bits(row.sec)));
+        excluded.push(ExcludedReading::digest(&row.key, row.ply, Some(row.nodes), row.sec));
     }
+    excluded.sort_unstable();
+    excluded.dedup();
     Ok((excluded, Some(format!("{:x}", hash.finalize()))))
 }
 
@@ -1044,11 +1075,28 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
         assert!(saved["fingerprint"].is_null());
         let before = std::fs::read(&dst).unwrap();
-        for target in ["fingerprint", "root", "destination", "source"] {
+        for target in [
+            "fingerprint",
+            "destination_conflicts",
+            "root",
+            "destination",
+            "source",
+        ] {
             let mut invalid = saved.clone();
             let expected = if target == "fingerprint" {
                 invalid.as_object_mut().unwrap().remove("fingerprint");
                 "missing field `fingerprint`"
+            } else if target == "destination_conflicts" {
+                invalid["sources"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("destination_conflicts");
+                "missing field `destination_conflicts`"
             } else {
                 let object = match target {
                     "destination" => invalid["destination"].as_object_mut().unwrap(),
@@ -1132,7 +1180,8 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
         let entry = saved["sources"].as_object().unwrap().values().next().unwrap();
-        assert_eq!(entry.as_object().unwrap().len(), 2);
+        assert_eq!(entry.as_object().unwrap().len(), 3);
+        assert_eq!(entry["destination_conflicts"], serde_json::json!([]));
         assert!(entry.get("offset").is_some());
         assert!(entry.get("sig").is_some());
         let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
@@ -1198,6 +1247,58 @@ mod tests {
     }
 
     #[test]
+    fn rejected_source_first_value_blocks_destination_equal_slice_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine(dir.path(), "m", "engine", "model");
+        let cond = settings(&m, None);
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let full_dst = dir.path().join("full.jsonl");
+        let state = dir.path().join("offsets.json");
+        let list = dir.path().join("conflicts.tsv");
+        let args = || {
+            let mut args = import_args(&m, &[&src], &dst);
+            args.offsets = Some(state.clone());
+            args.on_conflict = OnConflict::KeepExisting;
+            args.conflicts_out = Some(list.clone());
+            args
+        };
+        let a = reading(0, &cond, "resign");
+        let b = reading(0, &cond, "win");
+        write_journal(&dst, &[(&cond, a.clone())]);
+        write_journal(&src, &[(&cond, b)]);
+        let before = std::fs::read(&dst).unwrap();
+        std::fs::write(&full_dst, &before).unwrap();
+        assert_eq!(import(args()).unwrap(), (0, 1, 1));
+        let canonical = std::fs::canonicalize(&src).unwrap();
+        let identity = source_identity(&cond.fingerprint, &a.key).unwrap();
+        assert_eq!(identity.len(), 32);
+        assert!(identity.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            offsets(&state).sources[&canonical].destination_conflicts,
+            BTreeSet::from([identity])
+        );
+        let mut rec = record_json(&cond, &a);
+        rec["prefetch"] = true.into();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        writeln!(file, "{rec}").unwrap();
+        drop(file);
+        assert_eq!(import(args()).unwrap(), (0, 0, 0));
+        assert_eq!(std::fs::read(&dst).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&list).unwrap(), CONFLICT_HEADER);
+        let mut full = args();
+        full.offsets = None;
+        full.journal = full_dst.clone();
+        assert_eq!(import(full).unwrap(), (0, 1, 1));
+        assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&full_dst).unwrap());
+        assert!(read_source(&src, None, |_| true).unwrap().prefetched.is_empty());
+
+        write_lines(&src, &[record_json(&cond, &a)]);
+        assert_eq!(import(args()).unwrap(), (0, 1, 0));
+        assert!(offsets(&state).sources[&canonical].destination_conflicts.is_empty());
+    }
+
+    #[test]
     fn slice_without_candidates_does_not_reopen_source() {
         let dir = tempfile::tempdir().unwrap();
         let m = machine(dir.path(), "m", "engine", "model");
@@ -1223,7 +1324,9 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&src).unwrap();
         let journal = Journal::open(&dst, &cond.fingerprint).unwrap();
-        slice.skip_prefix_conflicts(&src, &journal, |_| false).unwrap();
+        slice
+            .skip_prefix_conflicts(&src, &journal, &BTreeSet::new(), |_| false)
+            .unwrap();
         assert_eq!(slice.readings.len(), 1);
     }
 
@@ -1519,6 +1622,36 @@ mod tests {
     }
 
     #[test]
+    fn excluded_digests_distinguish_seconds_and_normalize_signed_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exclude.jsonl");
+        std::fs::write(
+            &path,
+            "{\"key\":\"same\",\"ply\":1,\"nodes\":100,\"sec\":0.125}\n\
+             {\"key\":\"same\",\"ply\":1,\"nodes\":100,\"sec\":0.25}\n",
+        )
+        .unwrap();
+        let (digests, _) = load_excluded(Some(&path)).unwrap();
+        assert_eq!(digests.len(), 2);
+        for sec in [0.125, 0.25] {
+            assert!(
+                digests
+                    .binary_search(&ExcludedReading::digest("same", 1, Some(100), sec))
+                    .is_ok()
+            );
+        }
+        assert!(
+            digests
+                .binary_search(&ExcludedReading::digest("same", 1, Some(100), 0.5))
+                .is_err()
+        );
+        assert_eq!(
+            ExcludedReading::digest("same", 1, Some(100), -0.0),
+            ExcludedReading::digest("same", 1, Some(100), 0.0)
+        );
+    }
+
+    #[test]
     fn excluded_readings_match_exact_identity_before_deduplication() {
         let dir = tempfile::tempdir().unwrap();
         let m = machine(dir.path(), "m", "engine", "model");
@@ -1538,7 +1671,7 @@ mod tests {
             None,
             |_| true,
             None,
-            |r| set.contains(&ExcludedReading::identity(r)),
+            |r| set.binary_search(&ExcludedReading::identity(r)).is_ok(),
         )
         .unwrap();
         assert_eq!(source.excluded, 1);
