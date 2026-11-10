@@ -36,6 +36,7 @@ fn args(dir: &Path) -> QueueReviewArgs {
         rerank_table: None,
         rerank_out: None,
         rerank_keep_below: 10,
+        rerank_tiers: None,
         group_table: None,
         boost_queue: vec![],
         target_black: 50,
@@ -1259,7 +1260,8 @@ fn rerank_classes_and_priority_protection() {
         assert_eq!(rerank::class(reach, failing, boost, floor), expected);
     }
     let d = TempDir::new().unwrap();
-    let mut urgent = row("urgent", "7g7f");
+    // 同じ根の別の id があると hold を外さないので、根を分ける。
+    let mut urgent = row("urgent", "7g7f 3c3d");
     urgent["priority"] = json!(9);
     urgent["hold"] = json!(true);
     let mut boundary = row("boundary", "7g7f");
@@ -1287,7 +1289,7 @@ fn rerank_classes_and_priority_protection() {
     a.rerank_out = Some(d.path().join("rerank"));
     a.walk_table = vec![format!(
         "b={}",
-        walk(d.path(), "b\town\t0.005\t7g7f\n").display()
+        walk(d.path(), "b\town\t0.005\t7g7f\nb\town\t0.005\t7g7f 3c3d\n").display()
     )];
     let mut stdout = Vec::new();
     run_at(a, now(), &mut stdout).unwrap();
@@ -1814,7 +1816,7 @@ fn rerank_aligns_group_to_its_smallest_live_priority_and_group_table_compares() 
     assert!(
         rerank.lines().any(|l| l.starts_with("A\tg2\t")
             && l.contains("\tD\t120\t40\t")
-            && l.ends_with("\tx")),
+            && l.ends_with("\tx\t\t40\t")),
         "{rerank}"
     );
     assert!(
@@ -2398,4 +2400,176 @@ fn plan_needs_box_rate_for_a_box_without_progress() {
     a.box_rate.clear();
     let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
     assert!(error.contains("--box-rate A="), "{error}");
+}
+
+fn rerank_only(a: &mut QueueReviewArgs, d: &Path, walk_rows: &str) {
+    a.plan_out = None;
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.rerank_table = Some(d.join("rerank.tsv"));
+    a.rerank_out = Some(d.join("rerank"));
+    a.walk_table = vec![format!("b={}", walk(d, walk_rows).display())];
+}
+fn rerank_rows(d: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(d.join(format!("rerank/qrhold_rerank_{name}.jsonl")))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn rerank_keeps_hold_when_renamed_copy_shares_root_and_side() {
+    let d = TempDir::new().unwrap();
+    let mut orig = row("orig", "7g7f");
+    orig["hold"] = json!(true);
+    let mut renamed = row("renamed", "7g7f");
+    renamed["own"] = json!("bw");
+    let mut lone = row("lone", "2g2f");
+    lone["hold"] = json!(true);
+    let mut white = row("white", "2g2f");
+    white["own"] = json!("w");
+    let mut a = plan_args(d.path(), &[("Z", vec![orig, lone]), ("A", vec![renamed, white])]);
+    rerank_only(
+        &mut a,
+        d.path(),
+        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nw\town\t0.0\t7g7f\n",
+    );
+    let white_dir = d.path().join("white");
+    std::fs::create_dir_all(&white_dir).unwrap();
+    a.walk_table
+        .push(format!("w={}", walk(&white_dir, "w\town\t0.0\t9g9f\n").display()));
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    assert!(
+        table.lines().any(|l| l.starts_with("Z\torig\tb\theld\t")
+            && l.contains("\ttrue\ttrue\ttrue\t")
+            && l.ends_with("\tA:renamed")),
+        "{table}"
+    );
+    assert!(
+        table.lines().any(|l| l.starts_with("Z\tlone\tb\theld\t") && l.ends_with("\t")),
+        "{table}"
+    );
+    let rows = rerank_rows(d.path(), "Z");
+    let holds: Vec<_> = rows
+        .iter()
+        .map(|r| (r["id"].as_str().unwrap(), r["hold"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(holds, vec![("lone", false), ("orig", true)]);
+    assert!(
+        String::from_utf8(stdout)
+            .unwrap()
+            .contains("名前を変えた写しがあるので hold を外さない=1")
+    );
+}
+
+#[test]
+fn rerank_tiers_apply_first_matching_row_to_live_lines_only() {
+    let d = TempDir::new().unwrap();
+    let with = |id: &str, moves: &str, priority: u32, hold: bool| {
+        let mut r = row(id, moves);
+        r["priority"] = json!(priority);
+        r["hold"] = json!(hold);
+        r
+    };
+    let mut a = plan_args(
+        d.path(),
+        &[(
+            "A",
+            vec![
+                with("x49br_1", "7g7f", 8, false),
+                with("x49br_2", "2g2f", 30, false),
+                with("x58i8_1", "6g6f", 50, false),
+                with("x58i8_2", "5g5f", 4, false),
+                with("x58i8_3", "1g1f", 4, true),
+                with("other", "9g9f", 120, false),
+            ],
+        )],
+    );
+    rerank_only(
+        &mut a,
+        d.path(),
+        "b\town\t0.005\t7g7f\nb\town\t0.005\t2g2f\nb\town\t0.005\t6g6f\n",
+    );
+    let tiers = d.path().join("tiers.tsv");
+    std::fs::write(
+        &tiers,
+        "name\tmatch\tclass\told_priority\tpriority\tgroup\n\
+         prop\tx49br*\t*\t..8\t=2\tprop\n\
+         seed\tx58i8*\tABC\t*\t=3\t\n\
+         seed-d\tx58i8*\tD\t..4\t=13\t\n\
+         rest\t*\t*\t*\tkeep\t\n",
+    )
+    .unwrap();
+    a.rerank_tiers = Some(tiers);
+    let mut stdout = Vec::new();
+    run_at(a, now(), &mut stdout).unwrap();
+    let table = std::fs::read_to_string(d.path().join("rerank.tsv")).unwrap();
+    let line = |id: &str| {
+        table
+            .lines()
+            .find(|l| l.split('\t').nth(1) == Some(id))
+            .unwrap_or_else(|| panic!("{id}: {table}"))
+            .split('\t')
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    let cols = |id: &str| {
+        let l = line(id);
+        (
+            l[10].clone(),
+            l[11].clone(),
+            l[12].clone(),
+            l[18].clone(),
+            l[19].clone(),
+            l[20].clone(),
+        )
+    };
+    let s = |v: &str| v.to_owned();
+    assert_eq!(cols("x49br_1"), (s("B"), s("8"), s("2"), s("prop"), s("prop"), s("8")));
+    assert_eq!(cols("x49br_2"), (s("B"), s("30"), s("30"), s(""), s("rest"), s("30")));
+    assert_eq!(cols("x58i8_1"), (s("B"), s("50"), s("3"), s(""), s("seed"), s("40")));
+    assert_eq!(cols("x58i8_2"), (s("D"), s("4"), s("13"), s(""), s("seed-d"), s("4")));
+    assert_eq!(cols("x58i8_3"), (s("D"), s("4"), s("4"), s(""), s(""), s("4")));
+    // 再採点で hold を付けた行は段を当てず、受付の priority のまま。
+    assert_eq!(cols("other"), (s("D"), s("120"), s("120"), s(""), s(""), s("120")));
+    let rows = rerank_rows(d.path(), "A");
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap(),
+                r["priority"].as_u64().unwrap(),
+                r["hold"].as_bool().unwrap(),
+                r["group"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("other", 120, true, None),
+            ("x49br_1", 2, false, Some("prop")),
+            ("x58i8_1", 3, false, None),
+            ("x58i8_2", 13, false, None),
+        ]
+    );
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(
+        stdout.contains("段 (受付行): prop=1 rest=1 seed=1 seed-d=1、当たらない=0"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn rerank_tiers_require_rerank_output() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![row("a", "7g7f")])]);
+    a.walk_table = vec![format!("b={}", walk(d.path(), "").display())];
+    a.rerank_tiers = Some(d.path().join("tiers.tsv"));
+    let error = run_at(a, now(), &mut vec![]).err().unwrap();
+    assert!(error.to_string().contains("--rerank-tiers"), "{error}");
 }

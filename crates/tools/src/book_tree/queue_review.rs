@@ -70,6 +70,9 @@ pub(super) struct QueueReviewArgs {
     rerank_out: Option<PathBuf>,
     #[arg(long, default_value_t = 10, requires_all = ["walk_table", "master"])]
     rerank_keep_below: u32,
+    /// 再採点の後に当てる段の表 (TSV)。--rerank-table・--rerank-out のどちらかと使う
+    #[arg(long, requires_all = ["walk_table", "master"])]
+    rerank_tiers: Option<PathBuf>,
     /// 受付行の group ごとの、締めまでに読み切る見込みの表
     #[arg(long)]
     group_table: Option<PathBuf>,
@@ -570,6 +573,10 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         "再採点には walk-table が必要です"
     );
     ensure!(!args.reranking() || args.master.is_some(), "再採点には master が必要です");
+    ensure!(
+        args.rerank_tiers.is_none() || args.reranking(),
+        "--rerank-tiers には --rerank-table か --rerank-out が必要です"
+    );
     nonnegative(args.default_rate)?;
     nonnegative(args.value_floor)?;
     ensure!(args.tree_size > 0, "tree-size は正数が必要です");
@@ -617,7 +624,7 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     let groups = args
         .group_table
         .as_ref()
-        .map(|_| group::table(&boxes, &metrics, args.tree_size, rerank.as_ref().map(|r| &r.lines)))
+        .map(|_| group::table(&boxes, &metrics, args.tree_size, rerank.as_ref()))
         .transpose()?;
     let mut outputs = Vec::new();
     if let (Some(table), Some(summary), Some(hold)) = (&args.table, &args.boxes, &args.hold_out) {
@@ -873,6 +880,7 @@ impl QueueReviewArgs {
 }
 mod group;
 mod rerank;
+mod tiers;
 
 /// 台の受付の木 1 本 (側ごと) と進みの状態。
 pub(super) struct TreeState {
