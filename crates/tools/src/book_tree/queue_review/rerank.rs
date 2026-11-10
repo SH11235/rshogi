@@ -11,6 +11,8 @@ pub(super) struct Rerank {
     pub summary: String,
     /// 台と id ごとの更新後の受付行の priority・hold (変わらない行を含む)。
     pub lines: LineStates,
+    /// 段の表で group を書き換えた受付行の、新しい group。
+    pub groups: BTreeMap<(usize, String), String>,
 }
 
 struct Row<'a> {
@@ -28,6 +30,12 @@ struct Row<'a> {
     hold: bool,
     shelved: bool,
     running: bool,
+    /// 段の表を当てる前の priority (再採点と group 揃えの後)。
+    rerank_priority: u32,
+    /// 写しの照合の前に hold を外す提案だったか。
+    released: bool,
+    /// 同じ根・同じ own の別の id の行 (`<台>:<id>`)。あれば hold を外さない。
+    copy_of: Option<String>,
 }
 
 type Frontier = BTreeMap<String, BTreeMap<usize, u32>>;
@@ -138,6 +146,8 @@ pub(super) fn build(
 ) -> Result<Rerank> {
     let master = args.master.as_ref().context("再採点には master が必要です")?;
     inputs.push(master.clone());
+    let tiers = args.rerank_tiers.as_ref().map(|path| tiers::Tiers::load(path)).transpose()?;
+    inputs.extend(args.rerank_tiers.iter().cloned());
     let mut boosted = BTreeSet::new();
     for path in &args.boost_queue {
         inputs.push(path.clone());
@@ -197,6 +207,47 @@ pub(super) fn build(
         } else {
             &boxes[i].queue[id]
         }
+    };
+    // 名前を変えて移した木は id が違うので、居場所を id でまとめる棚上げの判定では見つからない。
+    // 根の局面と own の側で照合し、別の id の写しが動いているか終わっていれば hold を外さない。
+    // 写しがどれも hold なら、並びの最初 (--box の順、同じ台なら progress の順、--add は最後) の id だけを外す候補にする。
+    struct Copy<'a> {
+        index: usize,
+        id: &'a str,
+        held: bool,
+    }
+    let mut copies: BTreeMap<(&str, &str), Vec<Copy>> = BTreeMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        for tree in &b.progress.trees {
+            let q = &b.queue[&tree.id];
+            copies
+                .entry((q.primary_root.as_str(), tree.own.as_str()))
+                .or_default()
+                .push(Copy {
+                    index: i,
+                    id: &tree.id,
+                    held: tree.hold && !tree.finished && !tree.failed,
+                });
+        }
+    }
+    for tree in &new_trees {
+        copies
+            .entry((new_queue[&tree.id].primary_root.as_str(), tree.own.as_str()))
+            .or_default()
+            .push(Copy {
+                index: new_index,
+                id: &tree.id,
+                held: tree.hold,
+            });
+    }
+    let box_name = |i: usize| boxes.get(i).map_or("add", |b| b.name.as_str());
+    let copy_of = |root: &str, own: &str, id: &str| -> Option<String> {
+        let all = &copies[&(root, own)];
+        let blocking = all
+            .iter()
+            .find(|c| c.id != id && !c.held)
+            .or_else(|| all.first().filter(|first| first.id != id))?;
+        Some(format!("{}:{}", box_name(blocking.index), blocking.id))
     };
     let walk_sides: BTreeSet<_> = args
         .walk_table
@@ -281,6 +332,12 @@ pub(super) fn build(
         } else {
             tree.hold
         };
+        // own=bw の行は片側の hold を外さなくても受付行の hold が外れ得るので、
+        // 区分によらず hold の側はすべて照合し、受付行に反映するときに使う。
+        let copy_of =
+            tree.hold.then(|| copy_of(&queued.primary_root, &tree.own, &tree.id)).flatten();
+        let released = tree.hold && !hold;
+        let hold = hold || copy_of.is_some();
         rows.push(Row {
             box_index: i,
             tree,
@@ -296,8 +353,16 @@ pub(super) fn build(
             hold,
             shelved,
             running,
+            rerank_priority: priority,
+            released,
+            copy_of,
         });
     }
+    let rows_with_copy: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| row.copy_of.is_some())
+        .map(|row| (row.box_index, row.tree.id.clone()))
+        .collect();
     let mut lines = LineStates::new();
     for row in &rows {
         let desired = (row.priority, row.hold);
@@ -309,6 +374,24 @@ pub(super) fn build(
             })
             .or_insert(desired);
     }
+    // own=bw の片側だけに写しがあっても、受付行の hold は共通なので行ごと残す。
+    for row in rows.iter_mut().filter(|row| row.tree.hold) {
+        if rows_with_copy.contains(&(row.box_index, row.tree.id.clone())) {
+            row.hold = true;
+        }
+    }
+    for key in &rows_with_copy {
+        if let Some(line) = lines.get_mut(key) {
+            line.1 = true;
+        }
+    }
+    let kept_copies = rows_with_copy
+        .iter()
+        .filter(|key| {
+            rows.iter()
+                .any(|row| row.released && (row.box_index, &row.tree.id) == (key.0, &key.1))
+        })
+        .count();
     for ((i, id), (_, hold)) in &mut lines {
         if started.contains(&(*i, id.as_str())) {
             *hold = queued_at(*i, id).line.hold;
@@ -342,6 +425,39 @@ pub(super) fn build(
             aligned += 1;
         }
     }
+    // 段の表は再採点と group 揃えの後に当て、その値で確定する (段の後には group をそろえ直さない)。
+    // hold のまま残る行は受付の priority に戻し、動いている木だけを段で並べ直す。
+    let mut tier_of: BTreeMap<(usize, String), &str> = BTreeMap::new();
+    let mut groups = BTreeMap::new();
+    if let Some(tiers) = &tiers {
+        let mut classes: BTreeMap<(usize, String), char> = BTreeMap::new();
+        for row in &rows {
+            let class = classes.entry((row.box_index, row.tree.id.clone())).or_insert(row.class);
+            *class = (*class).min(row.class);
+        }
+        for (key, (priority, hold)) in &mut lines {
+            let line = &queued_at(key.0, &key.1).line;
+            if *hold {
+                *priority = line.priority;
+                continue;
+            }
+            if let Some((name, tiered, group)) =
+                tiers.apply(&key.1, classes[key], line.priority, *priority)
+            {
+                *priority = tiered;
+                tier_of.insert(key.clone(), name);
+                if let Some(group) = group.filter(|g| line.group.as_deref() != Some(*g)) {
+                    groups.insert(key.clone(), group.to_owned());
+                }
+            }
+        }
+    }
+    for row in &mut rows {
+        row.rerank_priority = row.priority;
+        if tiers.is_some() {
+            row.priority = lines[&(row.box_index, row.tree.id.clone())].0;
+        }
+    }
     rows.sort_by(|a, b| {
         a.priority
             .cmp(&b.priority)
@@ -355,11 +471,13 @@ pub(super) fn build(
         payloads: Vec::new(),
         summary: String::new(),
         lines,
+        groups,
     };
     let mut counts = BTreeMap::from([('A', 0), ('B', 0), ('C', 0), ('D', 0)]);
     let (mut raised, mut lowered, mut released, mut held) = (0, 0, 0, 0);
-    let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\n".to_vec();
+    let mut table = b"box\tid\town\tstate\tply\treach\tbranch\tbranch_ply\tfailing\tboost\tclass\told_priority\tnew_priority\told_hold\tnew_hold\tshelved\tread\troot\tgroup\ttier\trerank_priority\tcopy_of\n".to_vec();
     for row in &rows {
+        let key = (row.box_index, row.tree.id.clone());
         let tree = row.tree;
         *counts.entry(row.class).or_default() += 1;
         raised += usize::from(row.priority < tree.priority);
@@ -377,7 +495,7 @@ pub(super) fn build(
         };
         writeln!(
             table,
-            "{}\t{}\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             boxes.get(row.box_index).map_or("", |b| b.name.as_str()),
             tree.id,
             tree.own,
@@ -395,7 +513,15 @@ pub(super) fn build(
             row.shelved,
             tree.read,
             row.queued.line.root,
-            row.queued.line.group.as_deref().unwrap_or_default()
+            result
+                .groups
+                .get(&key)
+                .map(String::as_str)
+                .or(row.queued.line.group.as_deref())
+                .unwrap_or_default(),
+            tier_of.get(&key).copied().unwrap_or_default(),
+            row.rerank_priority,
+            row.copy_of.as_deref().unwrap_or_default()
         )?;
     }
     if let Some(path) = &args.rerank_table {
@@ -409,12 +535,16 @@ pub(super) fn build(
                 result.lines.iter().filter(|((index, _), _)| *index == i)
             {
                 let queued = &b.queue[id];
-                if priority == queued.line.priority && hold == queued.line.hold {
+                let group = result.groups.get(&(i, id.clone()));
+                if priority == queued.line.priority && hold == queued.line.hold && group.is_none() {
                     continue;
                 }
                 let mut raw = queued.raw.clone();
                 raw["priority"] = priority.into();
                 raw["hold"] = hold.into();
+                if let Some(group) = group {
+                    raw["group"] = group.as_str().into();
+                }
                 serde_json::to_writer(&mut bytes, &raw)?;
                 writeln!(bytes)?;
             }
@@ -431,6 +561,9 @@ pub(super) fn build(
                 let mut raw = q.raw.clone();
                 raw["priority"] = priority.into();
                 raw["hold"] = hold.into();
+                if let Some(group) = result.groups.get(&(new_index, id.clone())) {
+                    raw["group"] = group.as_str().into();
+                }
                 serde_json::to_writer(&mut bytes, &raw)?;
                 writeln!(bytes)?;
             }
@@ -442,6 +575,23 @@ pub(super) fn build(
         "再採点: A={} B={} C={} D={}\npriority: 上げる={raised} 下げる={lowered} (うち group 揃え={aligned})、hold: 外す={released} 付ける={held}",
         counts[&'A'], counts[&'B'], counts[&'C'], counts[&'D']
     );
+    if kept_copies > 0 {
+        result
+            .summary
+            .push_str(&format!("\n名前を変えた写しがあるので hold を外さない={kept_copies}"));
+    }
+    if tiers.is_some() {
+        let mut per_tier: BTreeMap<&str, usize> = BTreeMap::new();
+        for name in tier_of.values() {
+            *per_tier.entry(name).or_default() += 1;
+        }
+        let listed: Vec<_> = per_tier.iter().map(|(name, n)| format!("{name}={n}")).collect();
+        result.summary.push_str(&format!(
+            "\n段 (受付行): {}、当たらない={}",
+            listed.join(" "),
+            result.lines.values().filter(|(_, hold)| !hold).count() - tier_of.len()
+        ));
+    }
     Ok(result)
 }
 

@@ -1,4 +1,4 @@
-use super::rerank::LineStates;
+use super::rerank::Rerank;
 use super::*;
 
 #[derive(Default)]
@@ -26,16 +26,21 @@ fn simulate<'a>(
     boxes: &'a [BoxData],
     metrics: &[BoxMetrics],
     tree_size: u64,
-    lines: Option<&LineStates>,
+    rerank: Option<&Rerank>,
 ) -> Result<BTreeMap<String, Stats<'a>>> {
     let mut groups: BTreeMap<String, Stats> = BTreeMap::new();
     for (i, b) in boxes.iter().enumerate() {
         let mut active = Vec::new();
         for tree in b.progress.trees.iter().filter(|t| !t.finished && !t.failed) {
-            let (priority, hold) = lines
-                .and_then(|lines| lines.get(&(i, tree.id.clone())).copied())
+            let key = (i, tree.id.clone());
+            let (priority, hold) = rerank
+                .and_then(|r| r.lines.get(&key).copied())
                 .unwrap_or((tree.priority, tree.hold));
-            let group = b.queue[&tree.id].line.group.as_deref();
+            let group = rerank.and_then(|r| r.groups.get(&key)).map(String::as_str).or(b.queue
+                [&tree.id]
+                .line
+                .group
+                .as_deref());
             if hold {
                 if let Some(group) = group {
                     groups.entry(group.into()).or_default().held += 1;
@@ -81,21 +86,21 @@ fn simulate<'a>(
     Ok(groups)
 }
 
-/// group ごとの表の中身と標準出力の要約を作る。`lines` は再採点後の priority・hold。
+/// group ごとの表の中身と標準出力の要約を作る。`rerank` は再採点 (と段) の後の priority・hold・group。
 pub(super) fn table(
     boxes: &[BoxData],
     metrics: &[BoxMetrics],
     tree_size: u64,
-    lines: Option<&LineStates>,
+    rerank: Option<&Rerank>,
 ) -> Result<(Vec<u8>, String)> {
     let mut bytes =
         b"group\tbasis\ttrees\theld\tboxes\tpriority_min\tpriority_max\tfull\tpart\tnone\tremaining\n"
             .to_vec();
     let mut summary = Vec::new();
-    let bases = std::iter::once(("current", None)).chain(lines.map(|l| ("rerank", Some(l))));
+    let bases = std::iter::once(("current", None)).chain(rerank.map(|r| ("rerank", Some(r))));
     let mut tables = Vec::new();
-    for (basis, lines) in bases {
-        let groups = simulate(boxes, metrics, tree_size, lines)?;
+    for (basis, rerank) in bases {
+        let groups = simulate(boxes, metrics, tree_size, rerank)?;
         let (mut full, mut none, mut mixed, mut shelved) = (0, 0, 0, 0);
         for stats in groups.values() {
             if stats.trees == 0 {

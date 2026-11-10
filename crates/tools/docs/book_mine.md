@@ -466,8 +466,9 @@ book_mine tree queue-review \
 | `--plan-out <DIR>` | なし | 指定時だけ、台ごとの積み荷 `<prefix>_<box>.jsonl` と `<prefix>_plan.tsv` を作る。hold 候補とは別の出力先を使う |
 | `--master <TSV>` | なし | 再採点に必須の元データ (`moves.tsv`) |
 | `--rerank-table <TSV>` | なし | 全台の未完了・未失敗の木を再採点した表 |
-| `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority または hold が変わる行だけを出力。`--add` があれば `<prefix>_rerank-add.jsonl` も出す。`--hold-out`・`--plan-out` と併用不可 |
+| `--rerank-out <DIR>` | なし | 台ごとの更新行 `<prefix>_rerank_<box>.jsonl`。priority・hold・group のどれかが変わる行だけを出力。`--add` があれば `<prefix>_rerank-add.jsonl` も出す。`--hold-out`・`--plan-out` と併用不可 |
 | `--rerank-keep-below <N>` | 10 | 現在の priority が N 未満なら保持し、新たな hold を付けない。hold 解除の候補には含める |
+| `--rerank-tiers <TSV>` | なし | 再採点の後に当てる段の表 ([段の表](#段の表---rerank-tiers))。`--rerank-table`・`--rerank-out` のどちらかが必要 |
 | `--boost-queue <JSONL>` | なし、繰り返し可 | `tree seeds` などの行の root・roots を重要度が上がった局面として扱う |
 | `--group-table <TSV>` | なし | 受付行の `group` ごとの、締めまでに読み切る見込みの表。再採点と一緒なら再採点後の見込みも出す |
 | `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | walk の出口の目標。先手は先手評価が black 以上、後手は white 未満なら未達扱いにしない |
@@ -528,7 +529,12 @@ D の priority は保持します。
 居場所と棚上げは finished・failed を含む全台の行から判定します。同じ id・own がどこかの台で finished または failed なら、その側は表にも更新行にも出しません。
 同じ id・own が複数台にある場合、hold でない台を居場所とし、他の台の hold 行は表にも出しません。
 全台で hold なら棚上げとし、`--box` の指定順で最初の台だけを対象にします。
-棚上げの未着手の A〜C は hold を外します。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
+棚上げの未着手の A〜C は hold を外します。ただし、別の id で根の局面 (盤・手番・持ち駒、`root` の局面だけで `roots` は見ない) と own の側が同じ木 (名前を変えて移した写し、同じ台のものも含む) が
+`--box` のどれかの受付か `--add` にあり、その写しが hold でない (読んでいる・読み待ち) か finished・failed なら hold を外しません。
+写しがどれも hold なら、`--box` の順 (同じ台の中は progress の順、`--add` は最後) で最初の木だけを外す候補にし、ほかは hold のまま残します。
+その最初の木が読み途中で hold を保持する場合や D の場合は、どの写しの hold も外れません。
+`own=bw` の行は先後それぞれの側で照合し、片側にでも写しがあれば (その側の区分によらず) 受付行ごと hold を残します。
+照合は `--box` に渡した台だけで行うので、写しが渡していない台にあると見つかりません。D に新たな hold を付けるのは、read=0・hold=false・effective=0 で、
 現在の priority が `--rerank-keep-below` 以上の場合だけです。
 read > 0、または worker の key がその木の roots の局面に一致する木は読み途中とみなし、hold を保持します。更新行は最新の受付行の priority・hold だけを変えた写しです。
 `--add` の木も再採点の対象にし、既存の木と同じ区分・priority の規則で採点します。新しい木は居場所が 1 つの未着手の木として扱い、
@@ -545,9 +551,50 @@ hold の行は最小の計算に入れず、priority も変えません。そろ
 hold は両側とも停止可能な場合だけ付けます。片側でも読み途中なら元の hold を保持します。
 表と集計は側ごとの提案を示します。
 
-再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root group`
-の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は new (`--add` の木)、held、running (読み途中)、queued です。group は受付行の `group` (無ければ空) です。
+再採点表は `box id own state ply reach branch branch_ply failing boost class old_priority new_priority old_hold new_hold shelved read root group tier rerank_priority copy_of`
+の列をタブ区切りで持ち、new_priority・ply・id の昇順です。state は new (`--add` の木)、held、running (読み途中)、queued です。group は更新後の受付行の `group` (無ければ空) です。
+tier は当たった段の行の name (段の表が無いか当たらなければ空)、rerank_priority は段を当てる前の priority (再採点と group 揃えの後)、new_priority は段を当てた後の priority です。
+copy_of は hold の行で、hold を外さない理由になる写しの `<台>:<id>` です (`--add` の木は台を `add` と書きます)。
 標準出力には区分ごとの木の数、priority を上げる (数値を小さくする) / 下げる数とそのうち group でそろえた数、hold を外す / 付ける数を出します。
+写しが無ければ hold を外していた受付行があればその数を、段の表があれば段ごとの受付行の数と、hold でないのにどの段にも当たらなかった受付行の数を出します。
+
+#### 段の表 (`--rerank-tiers`)
+
+再採点の結果に、id と区分で決める priority の規則 (段) を当てます。表はタブ区切りで、`#` で始まる行と空行は読み飛ばします。
+最初の行は見出し `name match class old_priority priority group` です。
+
+| 列 | 形 | 意味 |
+| --- | --- | --- |
+| `name` | 空でない文字列 (表の中で重複不可) | 段の名前。再採点表の tier 列に出す |
+| `match` | カンマ区切りの id の型 | `*` は任意の文字列で、型は id 全体と照合する。`x58i8*` は接頭辞、`*bridge*` は部分一致、`*` の無い型は id の完全一致 |
+| `class` | `A`〜`D` の並び、または `*` | 区分の集合 (`ABC` など)。`own=bw` の行は先後のうち良い方 (A に近い方) の区分で照合する |
+| `old_priority` | `lo..hi`・`..hi`・`lo..`、または `*` | 受付の今の priority の範囲 (両端を含む) |
+| `priority` | `=N`・`lo..hi`・`..hi`・`lo..`・`keep`・`rerank` | `=N` は N に固定、範囲は再採点の priority をその範囲に収める、`keep` は受付の今の priority のまま、`rerank` は再採点の priority のまま |
+| `group` | 空、または group の名前 | 空でなければ受付行の `group` をこの名前に書き換える |
+
+表は上から順に照合し、最初に当たった行だけを使います。どの行にも当たらない受付行は再採点の priority のままです。
+段は受付行ごと (台と id ごと) に、hold・group 揃え・読み途中の規則をすべて当てた後に当て、その値で確定します (段の後に group をそろえ直しません)。
+hold のまま残る受付行は段を当てず、priority も受付の今の値に戻します。新たに hold を付ける行は hold だけを変えた行になります。`--add` の行にも同じく当てます。
+変わらない行を出さない規則は段を当てた後の値で判定します。
+
+まとまりごとに読み切る順に並べ直す例:
+
+```tsv
+# 種の id の接頭辞は seed1*,seed2* のように並べる
+name	match	class	old_priority	priority	group
+as-is	x25k32*,x23top*	*	*	keep	
+propagation	*bridge*,*refut*,x49br*	*	..8	=2	
+seed	seed1*,seed2*	ABC	*	=3	
+seed-d-low	seed1*,seed2*	D	..4	=13	
+seed-d	seed1*,seed2*	D	*	keep	
+prepared-line	x57kf*	*	*	=6	
+small	*	*	..4	=7	
+small-8	*	*	..8	=9	
+rest	*	*	*	keep	
+```
+
+最後の `rest` のように `keep` の行で受け止めると、段に当たらない木は再採点の priority を使わず受付の値のままになります。
+再採点で priority を動かさずに段だけを当てたいときは、`--rerank-keep-below` を priority の上限 (1000000) より大きくします。この場合は新たな hold も付きません。
 
 `--group-table` は台ごとに、finished・failed・hold でない木を priority の小さい順 (同点は progress の順) に並べ、
 木ごとの残り `max(tree-size, requested) - read` (下限 0) を積み上げて、その台の読める量 (`--boxes` の capacity と同じ) と比べます。

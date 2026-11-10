@@ -21,7 +21,7 @@ pub(super) const DEFAULT_PRIORITY: u32 = 100;
 pub(super) const MAX_PRIORITY: u32 = 1_000_000;
 pub(super) const MAX_DEPTH: usize = 20;
 const MAX_EXTRA: usize = 8;
-const MAX_GROUP: usize = 128;
+pub(super) const MAX_GROUP: usize = 128;
 
 /// 伸ばし方の値。書かない項目は serve の既定で解決する。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
