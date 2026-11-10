@@ -351,7 +351,8 @@ pub(super) fn build<'a>(
     let overflow = |plan: &mut Plan,
                     removed: &mut BTreeSet<(usize, &'a str)>,
                     kept: &mut BTreeSet<(usize, &'a str)>,
-                    moved_in: &mut Vec<(usize, &'a Queued)>|
+                    moved_in: &mut Vec<(usize, &'a Queued)>,
+                    last: bool|
      -> Result<()> {
         for &i in &order {
             let b = &boxes[i];
@@ -400,14 +401,17 @@ pub(super) fn build<'a>(
                             if low { "reach-low" } else { "no-capacity" },
                         )?;
                     }
-                } else if kept.insert((i, q.line.id.as_str())) {
+                } else if last && kept.insert((i, q.line.id.as_str())) {
                     plan.record("keep-over", q, &b.name, &b.name, "priority-below-100")?;
                 }
             }
         }
         Ok(())
     };
-    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in)?;
+    // 移し先の上限は台全体の量で見るので、名前順で後の台が自分の木を外した後なら入る木がある。
+    // 移せなかった priority 100 未満の木は、全台を一巡した後にもう一度だけ移し先を探す。
+    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, false)?;
+    overflow(&mut plan, &mut removed, &mut kept, &mut moved_in, true)?;
     if let (Some(limit), Some(limit_hours)) = (args.balance_priority, args.balance_hours) {
         let finish = |plan: &Plan, j: usize, extra: f64| {
             hours(plan.ahead(j, limit) + extra, metrics[j].speed)

@@ -2344,3 +2344,53 @@ fn balance_does_not_stretch_a_band_beyond_the_slowest_box_before() {
         assert_eq!(moved, factor.is_infinite(), "{}", plan_table(d.path()));
     }
 }
+
+#[test]
+fn box_without_progress_keeps_the_receipt_arrival_order() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("A");
+    std::fs::create_dir_all(b.join("enqueue")).unwrap();
+    let end = enqueue(&b, "first", 0, &[row("z", "7g7f"), row("a", "2g2f")]);
+    let mut again = row("z", "7g7f");
+    again["priority"] = json!(7);
+    enqueue(&b, "second", end, &[row("m", "5g5f"), again]);
+    let loaded = load_box("A", b, &mut vec![]).unwrap();
+    let order: Vec<_> = loaded.progress.trees.iter().map(|t| (t.id.as_str(), t.priority)).collect();
+    assert_eq!(order, [("z", 7), ("a", 42), ("m", 42)]);
+}
+
+#[test]
+fn move_retries_after_the_destination_sheds_its_own_trees_regardless_of_names() {
+    for (source, destination) in [("A", "B"), ("Y", "B")] {
+        let d = TempDir::new().unwrap();
+        let with = |id: &str, moves: &str, priority: u32| {
+            let mut r = row(id, moves);
+            r["priority"] = json!(priority);
+            r
+        };
+        let a = plan_args(
+            d.path(),
+            &[
+                (source, vec![with("first", "7g7f", 10), with("second", "2g2f", 50)]),
+                (destination, vec![with("b1", "5g5f", 1000), with("b2", "6g6f", 1000)]),
+            ],
+        );
+        run_at(a, now(), &mut vec![]).unwrap();
+        let table = plan_table(d.path());
+        assert!(
+            table.contains(&format!("move\tsecond\tb\t50\t{source}\t{destination}\t")),
+            "{table}"
+        );
+        assert!(!table.contains("keep-over"), "{table}");
+    }
+}
+
+#[test]
+fn plan_needs_box_rate_for_a_box_without_progress() {
+    let d = TempDir::new().unwrap();
+    let mut a = plan_args(d.path(), &[("A", vec![row("one", "7g7f")])]);
+    std::fs::remove_file(d.path().join("A/fetch/progress.json")).unwrap();
+    a.box_rate.clear();
+    let error = run_at(a, now(), &mut vec![]).unwrap_err().to_string();
+    assert!(error.contains("--box-rate A="), "{error}");
+}
