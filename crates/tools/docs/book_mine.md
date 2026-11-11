@@ -1084,6 +1084,50 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 - 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・bench・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
+### `tree inventory`: 登録していない読み終わった木の一覧
+
+```bash
+book_mine tree inventory --root <木の出力の根>... --out candidates.txt --table inventory.tsv \
+  [--registered registered.txt] [--excluded-readings excluded.jsonl] [--exclude-prefix <id の接頭辞>]... [--keep-depth0]
+book_mine tree register ... $(cat candidates.txt)
+```
+
+`--root` (繰り返し指定) の下を辿り、`registration_status.json` を持つディレクトリを木の出力先 (`tree register` に渡す単位) として数えます。出力先そのものを `--root` に渡しても構いません。出力先の中は辿らず、シンボリックリンクも辿りません。同じ実体の出力先が複数の根から見つかったら 1 回だけ数えます。同じ木を別の場所に写したもの (回収の写しと保管用の写しなど) は実体が別なので別の出力先として数えますが、下の `registered-copy`・`duplicate` の判定で候補から外します。出力先のファイルは読むだけで、lock も取りません (読んでいる途中に `tree replay` が書き換えた出力先は、`tree register` が lock を取って確かめ直します)。
+
+出力先ごとに次の順で確かめ、最初に当たった判定を付けます (`registered-copy`・`compare-failed`・`duplicate` は、他の判定で候補に残った出力先だけを最後に確かめます)。
+
+| 判定 | 条件 | 表の `detail` |
+|---|---|---|
+| `registered` | `--registered` の一覧にある | |
+| `bad-status-json` | `registration_status.json` を JSON として読めない | エラー |
+| `not-ready` | `registration_status.json` の `ready` が true でない | |
+| `status:<語>` | `STATUS` が `DONE` (`tree register` が受け付ける内容) でない。`<語>` は `STATUS` の先頭の語で、ファイルが無ければ空 | `STATUS` の内容 |
+| `no-node-moves` | `node_moves.tsv` が無い | |
+| `prefix` | 木の id が `--exclude-prefix` のどれかで始まる | 当たった接頭辞 |
+| `depth0` | `d1.jsonl` が無い (根の局面しか読んでいない)。`--keep-depth0` を付けるとこの判定をせず候補に残す | |
+| `bad-readings` | `--excluded-readings` の照合で `d<段>.jsonl` に読めない行がある (読めない行を飛ばすと外した読みを見落とすので候補にしない) | ファイル・行番号とエラー |
+| `excluded-reading` | `--excluded-readings` の読みそのものを含む | `matched=<一致した行数> readings=<木の読みの行数>` |
+| `registered-copy` | id・own・世代が同じ `registered` の出力先と内容が同じ | その登録済みの出力先 |
+| `compare-failed` | id・own・世代が同じ登録済みの出力先と内容を比べられなかった (どちらかの `d<段>.jsonl`・`node_moves.tsv` が無い・読めない) | 相手の出力先とエラー |
+| `duplicate` | id・own・世代が同じで、パスの順で先の候補と内容が同じ | 候補に残した出力先 |
+| `candidate` | 上のどれでもない | `--excluded-readings` があれば `matched=0 readings=<行数>`。id・own・世代が同じで内容の違う登録済みの出力先か候補があれば `differs-from=<その出力先>` |
+
+`--registered` は登録済みの出力先を 1 行に 1 つ書いたテキストです (空行は無視)。一覧の行も見つけた出力先も、シンボリックリンクや別名を解決した実体のパスにしてから比べるので、同じ場所を別の書き方で指していても一致します。stdout の「登録済みの一覧のうち根の下に無かったパス」は、もう無いパスと、どの根の下でも見つからなかったパスの数です (一覧の書き間違いや、渡し忘れた根の目安)。
+
+`--excluded-readings` は外した読みの一覧 (JSON Lines) で、各行の `key` (SFEN の盤・手番・持ち駒。木の読みと同じ表記の文字列で比べる)・`nodes`・`sec` を使います (`ply` など他の欄は無視、空行は無視、3 つの欄が欠けた行はエラー)。木の `d<段>.jsonl` に **key・nodes・sec が全部一致する行** が 1 つでもある木だけを外します。同じ局面を後で読み直した行は nodes・sec が違うので一致せず、その値で作った木は候補に残ります。`sec` は両方を JSON の数値 (倍精度) として読んだ値が等しいかで比べるので、`2320.998829311` と `2.320998829311e3` のような表記の違いは一致し、表示の桁を丸めた値は一致しません。`0.0` と `-0.0` は等しいものとして扱います。実際に探索した `nodes` が記録されていない読み (`nodes` が null) は一致しません。
+
+照合では、候補の木の読みと一覧の行をそれぞれ key・nodes・sec の SHA-256 の先頭 16 バイトにし、この 128 bit の一致で判定します (元の値の比べ直しはしません)。木の読みの側は 1 行 20 バイトの一時ファイル (`--table` と同じディレクトリに作り、終わると消える) に並べ、一覧は 262,144 行 (約 4 MiB) ずつ表に載せて一時ファイルを 1 回ずつ走査します。メモリは一覧の行数にも木の読みの行数にも比例せず、出力先の数 (パスと判定の 1 行ぶん) にだけ比例します。一覧が 262,144 行以下なら走査は 1 回です。
+
+写しの判定 (`registered-copy`・`duplicate`) は、id・own・世代が同じ出力先が複数あり、その中に候補があるときだけ、候補と登録済みの出力先の `d<段>.jsonl` と `node_moves.tsv` (ファイル名と内容) の SHA-256 を比べます。id・own・世代だけでは同じ木とみなしません。同じ名前で読み直した木は内容が違うので、それぞれそのまま判定し、候補に残るときは `detail` に `differs-from=` で相手の出力先を書きます。比べる側のどちらかで `node_moves.tsv` か全部の `d<段>.jsonl` が無い・読めないときは、内容が違うとは決めず、候補を `compare-failed` にして登録に渡しません (同じ内容の登録済みの出力先が他にあれば `registered-copy`)。id・own・世代を取れない出力先 (下の `-`) は写しの判定をしません。
+
+木の id・own・世代は、出力先の実体のパスの末尾 `<id>/<own>/g<世代>` から取ります。末尾が `g<数字>` でない出力先は 3 つとも `-` で、`--exclude-prefix` には当たりません。
+
+出力:
+
+- `--out`: `candidate` の出力先を 1 行に 1 つ、パスの順で書きます。出力 (`--out`・`--table`) は `--root` の外に置きます。`--root` の下を指すとき (リンク越しの別名を含む。木の読みや `node_moves.tsv` を上書きしないため)、`--out` と `--table` が同じファイルを指すとき (相対パスと絶対パス、リンク越しの別名を含む)、`--registered`・`--excluded-readings` のファイルを指すときは、何も書かずに止まります。`--root` に渡した書き方に続くパスなので、そのまま `tree register` の引数にできます。
+- `--table`: 全部の出力先を 1 行ずつ、パスの順に並べた TSV (見出し行つき) です。列は `tree` (出力先)・`id`・`own`・`generation`・`place`・`verdict`・`detail`。`place` は根から `<id>/<own>/g<世代>` の手前までの相対パス (無ければ `-`) で、複数の台の写しを 1 つの根の下に並べたときに台を見分けられます。候補から外れた出力先とその理由は必ずこの表に残ります。
+- stdout: 出力先の総数と、判定ごとの件数。
+
 ## `master validate`: 元データの全件検査
 
 ```bash

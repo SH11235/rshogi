@@ -196,7 +196,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let status = std::fs::read_to_string(dir.join("STATUS"))
             .with_context(|| format!("{}: STATUS を読めません", dir.display()))?;
         ensure!(
-            status == "DONE\n",
+            is_done(&status),
             "{}: 終わった ready の木ではありません ({})",
             dir.display(),
             status.trim()
@@ -929,8 +929,13 @@ fn tree_fingerprint(dir: &Path) -> Result<Option<String>> {
     }
 }
 
-fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
-    use std::io::BufRead;
+/// 登録が受け付ける `STATUS` の内容。
+pub(super) fn is_done(status: &str) -> bool {
+    status == "DONE\n"
+}
+
+/// 木の出力先の読みのファイル (`d<段>.jsonl`)。
+pub(super) fn reading_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -944,8 +949,13 @@ fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
         }
     }
     paths.sort();
+    Ok(paths)
+}
+
+fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
+    use std::io::BufRead;
     let mut readings = Vec::new();
-    for path in paths {
+    for path in reading_files(dir)? {
         for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
             readings.push(serde_json::from_str(&line?)?);
         }

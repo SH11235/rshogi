@@ -13,6 +13,7 @@ mod exits;
 mod export;
 mod file_lock;
 mod hold_early;
+mod inventory;
 mod journal;
 mod line_db;
 mod live_import;
@@ -79,6 +80,8 @@ enum TreeCommand {
     Replay(ReplayArgs),
     /// ready の木の手を定跡の元データの表に登録する
     Register(register::RegisterArgs),
+    /// 読み終わった木のうち、登録していない出力先を一覧にする
+    Inventory(inventory::InventoryArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -247,6 +250,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Wait(args) => queue::wait(args),
         TreeCommand::QueueReview(args) => queue_review::run(*args),
         TreeCommand::Register(args) => register::run(args),
+        TreeCommand::Inventory(args) => inventory::run(args),
         TreeCommand::ImportJournal(args) => transfer::run(args),
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
