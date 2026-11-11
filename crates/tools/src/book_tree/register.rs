@@ -1,13 +1,16 @@
 //! 木の出力 (node_moves.tsv) から定跡の元データの表に手を登録する。
 
+mod flip_skip;
 mod keep;
 
 use super::audit::Fill;
 use super::journal::LockedFile;
-use super::master_table::{ROLES, Row, format_master, format_nodes, parse_master, validate};
+use super::master_table::{
+    ROLES, Row, format_master, format_nodes, parse_master, positions_from_rows, validate,
+};
 use super::model::child;
 use super::output::NODE_MOVES;
-use crate::book_backprop::DrawValues;
+use crate::book_backprop::{DrawValues, FlipFailure};
 use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
@@ -78,6 +81,19 @@ pub(super) struct RegisterArgs {
     /// 比べる伝播で後手を自分として解くときの千日手の値 (master audit と揃える)
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
+    /// 登録した元データを master cycles と同じ伝播で解き、反転キーで合流した局面で止まる (その向きの値を保てない、
+    /// 保証検査でその向きに破れる) なら、原因の木とその木の局面を絞って取り込まない局面に足し、通るまで繰り返す。
+    /// 足した局面の SFEN キーをこのファイルに書く (--skip-keys の形)。省くと検査しない
+    #[arg(long, value_name = "OUT")]
+    auto_skip_flip: Option<PathBuf>,
+    /// --auto-skip-flip で取り込まない局面を足し直す回数の上限
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 10,
+        requires = "auto_skip_flip"
+    )]
+    auto_skip_flip_rounds: usize,
     /// ready の木の出力先。同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う
     #[arg(required = true)]
     trees: Vec<PathBuf>,
@@ -151,26 +167,11 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     ensure!(keep_line >= 0, "--keep-line は 0 以上にしてください");
     if let Some(out) = &args.single.single_enqueue_out {
         args.single.check()?;
-        let mut inputs = vec![
-            ("--master", args.master.as_path()),
-            ("--conflicts", args.conflicts.as_path()),
-        ];
-        inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
-        inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
-        inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
-        let schema_paths = args.schema.as_deref().map(super::schema::paths);
-        inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
-        reject_same_file(out, &inputs).context("--single-enqueue-out の出力先")?;
-        // 木の出力先の中のファイル (node_moves.tsv など) を書き換えない。
-        let resolved = resolve_output(out)?;
-        for tree in &args.trees {
-            ensure!(
-                !resolved.starts_with(resolve(tree)),
-                "--single-enqueue-out の出力先 {} が木の出力先 {} の中です",
-                out.display(),
-                tree.display()
-            );
-        }
+        check_output(&args, out, "--single-enqueue-out", None)?;
+    }
+    if let Some(out) = &args.auto_skip_flip {
+        let other = args.single.single_enqueue_out.as_deref().map(|p| ("--single-enqueue-out", p));
+        check_output(&args, out, "--auto-skip-flip", other)?;
     }
     // 木を読む前に止める。書き出しの最後でも create_new で同じことを確かめる。
     ensure!(
@@ -181,9 +182,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let schema = Schema::load(args.schema.as_deref())?;
     let skip_keys = args.skip_keys.as_deref().map(read_skip_keys).transpose()?.unwrap_or_default();
     let mut unknown = 0;
-    let mut nodes = BTreeMap::new();
-    let mut disagreements = 0;
-    let mut skipped = BTreeSet::new();
+    let mut trees = Vec::new();
     let mut fingerprints = Vec::new();
     let mut readings = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
@@ -206,29 +205,26 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let fingerprint = tree_fingerprint(dir)?;
         let tree_readings = tree_readings(dir)?;
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
-        let mut parsed =
-            parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
+        trees.push(parse_node_moves(
+            &text,
+            tree,
+            (!tree_readings.is_empty()).then_some(&known_nodes),
+        )?);
         readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
             tree_readings
         } else {
             Vec::new()
         });
         fingerprints.push(fingerprint);
-        skipped.extend(skip_nodes(&mut parsed, &skip_keys));
-        disagreements += merge(&mut nodes, parsed);
     }
     let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
-    let mut conditions = Vec::new();
-    for (fingerprint, matched) in fingerprints.into_iter().zip(matched) {
+    for ((fingerprint, matched), nodes) in fingerprints.into_iter().zip(matched).zip(&mut trees) {
         let cond = fingerprint
             .or(matched)
             .map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))?;
         unknown += usize::from(cond == "unknown");
-        conditions.push(cond);
-    }
-    for node in nodes.values_mut() {
-        for mv in &mut node.moves {
-            mv.cond = conditions[node.tree].clone();
+        for mv in nodes.values_mut().flat_map(|node| &mut node.moves) {
+            mv.cond = cond.clone();
         }
     }
     let text = std::fs::read_to_string(&args.master)
@@ -240,8 +236,6 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let before = rows.len();
     let unpromoted = super::unpromotion::demote_rows(&mut rows, &args.since)?;
     validate(&rows)?;
-    let unpromoted_moves = super::unpromotion::drop_node_moves(&mut nodes)?;
-    eprintln!("{} / 木の手から外した不成 {unpromoted_moves}", unpromoted.format());
     let options = Options {
         since: &args.since,
         note: &args.note,
@@ -253,27 +247,55 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         revive_bench: true,
         kept: None,
     };
-    let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
-    let skipped = skipped.len();
-    // 登録後の元データで比べるのは、続く master audit が見る値と揃え、木が元の main の先を読み直した分も入れるため。
-    // main と alt の入れ替えは伝播の値を変えないので、仮の登録の値で残す局面を決めて登録し直せばよい。
-    let (tentative, _, _) = register(rows.clone(), &nodes, &options)?;
+    let draws = DrawValues {
+        black: args.draw_value_black,
+        white: args.draw_value_white,
+    };
     let rule = keep::KeepRule {
         rule: args.switch_rule,
         line: keep_line,
         min_depth: args.keep_min_depth.unwrap_or(1),
-        draws: DrawValues {
-            black: args.draw_value_black,
-            white: args.draw_value_white,
-        },
+        draws,
         fill: if args.bridge_replies {
             Fill::Bridge
         } else {
             Fill::Off
         },
     };
-    let (kept, mut singles) = keep::kept_mains(&rows, &tentative, &nodes, rule)?;
-    drop(tentative);
+    let mut builder = Builder {
+        trees: &trees,
+        rows: &rows,
+        options: &options,
+        rule,
+    };
+    let mut skip_keys = skip_keys;
+    if let Some(out) = &args.auto_skip_flip {
+        let found =
+            flip_skip::search(&mut builder, &args.trees, &skip_keys, args.auto_skip_flip_rounds)?;
+        write_atomic(out, &found.keys.iter().map(|k| format!("{k}\n")).collect::<String>())?;
+        ensure!(
+            found.passed,
+            "--auto-skip-flip-rounds {} 回で反転キーの検査を通りませんでした。元データは書き換えません (足した局面 {} を {} に書きました)",
+            args.auto_skip_flip_rounds,
+            found.keys.len(),
+            out.display()
+        );
+        skip_keys.extend(found.keys);
+    }
+    let all: Vec<usize> = (0..trees.len()).collect();
+    let Built {
+        rows,
+        conflicts,
+        summary,
+        kept,
+        mut singles,
+        disagreements,
+        skipped,
+        unpromoted_moves,
+    } = builder.build(&all, &skip_keys)?;
+    eprintln!("{} / 木の手から外した不成 {unpromoted_moves}", unpromoted.format());
+    let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
+    let skipped = skipped.len();
     let single = match &args.single.single_enqueue_out {
         Some(_) => {
             switch::rank(&mut singles, None, 0.0);
@@ -282,11 +304,6 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         }
         None => None,
     };
-    let options = Options {
-        kept: Some(&kept),
-        ..options
-    };
-    let (rows, conflicts, summary) = register(rows, &nodes, &options)?;
     let mut table = String::from(
         "key\tply\tside\tmain\tmain_source\tmain_tier\tmain_tree_value\ttree_best\ttree_value\ttree\treason\tmain_value\tmain_depth\tbest_value\tbest_depth\tgap\tmain_value_black\tbest_value_black\n",
     );
@@ -341,7 +358,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         summary.bench_curated_without_main,
         summary.record_skipped,
         summary.conflicts,
-        kept.len(),
+        kept,
         args.conflicts.display()
     );
     println!("cond=unknown の木: {unknown}");
@@ -353,6 +370,121 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         println!("確認だけ (--apply なし): 行 {before} -> {}", rows.len());
     }
     Ok(())
+}
+
+/// 書き出し先が入力と同じファイルでなく、木の出力先の中でもないことを確かめる。
+fn check_output(
+    args: &RegisterArgs,
+    out: &Path,
+    flag: &str,
+    other: Option<(&str, &Path)>,
+) -> Result<()> {
+    let mut inputs = vec![
+        ("--master", args.master.as_path()),
+        ("--conflicts", args.conflicts.as_path()),
+    ];
+    inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
+    inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
+    inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
+    inputs.extend(other);
+    let schema_paths = args.schema.as_deref().map(super::schema::paths);
+    inputs.extend(schema_paths.iter().flatten().map(|p| ("--schema", p.as_path())));
+    reject_same_file(out, &inputs).with_context(|| format!("{flag} の出力先"))?;
+    // 木の出力先の中のファイル (node_moves.tsv など) を書き換えない。
+    let resolved = resolve_output(out)?;
+    for tree in &args.trees {
+        ensure!(
+            !resolved.starts_with(resolve(tree)),
+            "{flag} の出力先 {} が木の出力先 {} の中です",
+            out.display(),
+            tree.display()
+        );
+    }
+    Ok(())
+}
+
+/// 読み込んだ木と元データから、木の組と取り込まない局面を替えて登録し直す。
+struct Builder<'a> {
+    /// 木ごとの局面 (`--trees` の順)。
+    trees: &'a [BTreeMap<String, Node>],
+    /// 不成を控えにした後の、登録前の元データ。
+    rows: &'a [Row],
+    options: &'a Options<'a>,
+    rule: keep::KeepRule,
+}
+
+/// 登録した結果。
+struct Built {
+    rows: Vec<Row>,
+    conflicts: Vec<Conflict>,
+    summary: Summary,
+    /// 元の main の値が上なので残した局面の数。
+    kept: usize,
+    singles: Vec<switch::SingleRead>,
+    disagreements: usize,
+    skipped: BTreeSet<String>,
+    unpromoted_moves: usize,
+}
+
+impl Builder<'_> {
+    fn build(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Built> {
+        let mut nodes = BTreeMap::new();
+        let mut disagreements = 0;
+        let mut skipped = BTreeSet::new();
+        for &tree in trees {
+            let mut parsed = self.trees[tree].clone();
+            skipped.extend(skip_nodes(&mut parsed, skip));
+            disagreements += merge(&mut nodes, parsed);
+        }
+        let unpromoted_moves = super::unpromotion::drop_node_moves(&mut nodes)?;
+        // 登録後の元データで比べるのは、続く master audit が見る値と揃え、木が元の main の先を読み直した分も入れるため。
+        // main と alt の入れ替えは伝播の値を変えないので、仮の登録の値で残す局面を決めて登録し直せばよい。
+        let (tentative, _, _) = register(self.rows.to_vec(), &nodes, self.options)?;
+        let (kept, singles) = keep::kept_mains(self.rows, &tentative, &nodes, self.rule)?;
+        drop(tentative);
+        let options = Options {
+            kept: Some(&kept),
+            ..*self.options
+        };
+        let (rows, conflicts, summary) = register(self.rows.to_vec(), &nodes, &options)?;
+        Ok(Built {
+            rows,
+            conflicts,
+            summary,
+            kept: kept.len(),
+            singles,
+            disagreements,
+            skipped,
+            unpromoted_moves,
+        })
+    }
+}
+
+impl flip_skip::Trial for Builder<'_> {
+    /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。
+    fn failure(&mut self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+        let rows = self.build(trees, skip)?.rows;
+        let (positions, _) =
+            positions_from_rows(rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
+        match super::audit::evaluate(&positions, self.rule.draws) {
+            Ok(_) => Ok(None),
+            Err(error) => match error.downcast_ref::<FlipFailure>() {
+                Some(failure) => Ok(Some(failure.to_string())),
+                None => {
+                    Err(error.context("反転キーの検査の伝播が反転キー以外の理由で止まりました"))
+                }
+            },
+        }
+    }
+
+    fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String> {
+        trees
+            .iter()
+            .flat_map(|&t| self.trees[t].keys())
+            .filter(|key| !contains_orientation(skip, key))
+            .cloned()
+            .collect()
+    }
 }
 
 fn read_skip_keys(path: &Path) -> Result<BTreeSet<String>> {
@@ -1171,6 +1303,8 @@ mod tests {
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
+            auto_skip_flip: None,
+            auto_skip_flip_rounds: 10,
             trees,
         };
         run(args(vec![tree.clone()], false)).unwrap();
@@ -1218,6 +1352,97 @@ mod tests {
     }
 
     #[test]
+    fn auto_skip_flip_skips_the_tree_position_that_breaks_the_flipped_orientation() {
+        // S から玉だけの 4 手で S に戻る循環。T から指すと S の後手番 (元データに無い) に着き、盤が点対称なので
+        // 反転キーで S に合流する。木が S に -30 の手を足すと、千日手を -70 とみる先手はその手、+70 とみる後手は
+        // 循環を選ぶので、S の 1 行では両方の向きを表せない。
+        const S: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        const U: &str = "4k4/9/9/9/9/9/9/9/4K4 b G";
+        let c1 = child(S, "5i4i").unwrap();
+        let c2 = child(&c1, "5a4a").unwrap();
+        let c3 = child(&c2, "4i5i").unwrap();
+        assert_eq!(child(&c3, "4a5a").unwrap(), S);
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        let original = format_master(&master(&[
+            row(S, "5i4i", "main", "read", "wide", "0"),
+            row(&c1, "5a4a", "main", "read", "wide", "0"),
+            row(&c2, "4i5i", "main", "read", "wide", "0"),
+            row(&c3, "4a5a", "main", "read", "wide", "0"),
+            row(T, "5h5i", "main", "read", "wide", "0"),
+        ]));
+        let header = "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n";
+        let tree = |name: &str, lines: &str| {
+            let tree = dir.path().join(name);
+            std::fs::create_dir(&tree).unwrap();
+            std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+            std::fs::write(tree.join(NODE_MOVES), format!("{header}{lines}")).unwrap();
+            tree
+        };
+        let clean = tree("clean", &format!("{U}\t1\t0\t0\t1000000000\t5i4h\t10\t0\t1\n"));
+        let bad = tree(
+            "bad",
+            &format!(
+                "{S}\t1\t0\t0\t1000000000\t5i4i\t0\t0\t1\n{S}\t1\t0\t0\t1000000000\t5i6i\t-30\t0\t2\n"
+            ),
+        );
+        let out = dir.path().join("found.txt");
+        let args = |name: &str, auto: Option<PathBuf>, rounds| RegisterArgs {
+            master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            replace_curated: false,
+            skip_keys: None,
+            conflicts: dir.path().join(name),
+            apply: true,
+            switch_rule: SwitchRule::Propagated,
+            single: switch::test_args(),
+            keep_line: None,
+            keep_min_depth: None,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 70,
+            auto_skip_flip: auto,
+            auto_skip_flip_rounds: rounds,
+            trees: vec![clean.clone(), bad.clone()],
+        };
+        let draws = DrawValues {
+            black: -70,
+            white: 70,
+        };
+        let flip_failure = |path: &Path| {
+            let positions = super::super::master_table::read_master(path).unwrap().0;
+            let error = super::super::audit::evaluate(&positions, draws).unwrap_err();
+            assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error}");
+        };
+
+        // 付けないと今のまま登録し、反転キーの合流は後の master cycles で止まる。
+        std::fs::write(&master_path, &original).unwrap();
+        run(args("c1.tsv", None, 10)).unwrap();
+        flip_failure(&master_path);
+        assert!(!out.exists());
+
+        std::fs::write(&master_path, &original).unwrap();
+        run(args("c2.tsv", Some(out.clone()), 10)).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), format!("{S}\n"));
+        let positions = super::super::master_table::read_master(&master_path).unwrap().0;
+        super::super::audit::evaluate(&positions, draws).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        assert!(find(&rows, U, "5i4h").is_some());
+        assert!(find(&rows, S, "5i6i").is_none());
+
+        // 上限の回数で通らなければ、見つけた局面だけ書いて元データは書き換えない。
+        std::fs::write(&master_path, &original).unwrap();
+        assert!(run(args("c3.tsv", Some(out.clone()), 0)).is_err());
+        assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "");
+    }
+
+    #[test]
     fn run_demotes_needless_unpromotions_and_does_not_register_them_from_trees() {
         const W: &str = "4k4/7b1/9/9/9/9/9/9/4K4 w -";
         let dir = tempfile::tempdir().unwrap();
@@ -1257,6 +1482,8 @@ mod tests {
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
+            auto_skip_flip: None,
+            auto_skip_flip_rounds: 10,
             trees: vec![tree],
         })
         .unwrap();
@@ -1404,6 +1631,8 @@ mod tests {
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
+            auto_skip_flip: None,
+            auto_skip_flip_rounds: 10,
             trees: vec![tree],
         })
         .unwrap();
@@ -1460,6 +1689,8 @@ mod tests {
             bridge_replies: false,
             draw_value_black: -70,
             draw_value_white: 0,
+            auto_skip_flip: None,
+            auto_skip_flip_rounds: 10,
             trees: vec![tree.clone()],
         };
         assert!(run(args(Some(20))).is_err());

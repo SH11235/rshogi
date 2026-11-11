@@ -1549,6 +1549,19 @@ struct NodeResult {
 /// 局面ごとの [`NodeResult`] を作る関数。
 type ResultsOf<'a> = dyn Fn(&Graph, usize) -> Option<NodeResult> + 'a;
 
+/// 反転キーで合流した局面が原因で伝播を止めたときのエラー。反転キーで合流した向きに値を保てない局面と、保証検査で
+/// 反転キーで合流した向きに破れる局面を含む失敗。`anyhow::Error::downcast_ref` で他の失敗と見分ける。
+#[derive(Debug)]
+pub struct FlipFailure(String);
+
+impl std::fmt::Display for FlipFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FlipFailure {}
+
 /// 解いた値を書き出し値にし、保証検査を通るまで危ない同値手を保証手だけに絞る。絞った局面数を返す。
 fn write_certified(
     graph: &mut Graph,
@@ -1573,11 +1586,12 @@ fn write_certified(
                 })
                 .collect::<Vec<_>>()
                 .join(" / ");
-            bail!(
+            return Err(FlipFailure(format!(
                 "反転キーで合流した {} 局面 [{}] で、保存されている向きの行が反対の向きの値を保ちません。1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください",
                 conflicts.len(),
                 sample
-            );
+            ))
+            .into());
         }
         let violations = certify(graph, params, &mirrored_values);
         if violations.stored.is_empty() && violations.flipped.is_empty() {
@@ -1591,7 +1605,11 @@ fn write_certified(
             progressed |= !std::mem::replace(&mut restricted[v].flipped, true);
         }
         if !progressed {
-            bail!("{}", violations.message(graph));
+            let message = violations.message(graph);
+            if violations.flipped.is_empty() {
+                bail!("{message}");
+            }
+            return Err(FlipFailure(message).into());
         }
     }
     let count = restricted.iter().filter(|r| r.any()).count();
@@ -3065,7 +3083,8 @@ mod tests {
         let mut broken = results.clone();
         broken[0].as_mut().unwrap().guaranteed = Some(1);
         broken[0].as_mut().unwrap().preferred = Some(1);
-        assert!(write_certified(&mut graph, params, &results_of(&broken), &none).is_err());
+        let error = write_certified(&mut graph, params, &results_of(&broken), &none).unwrap_err();
+        assert!(error.downcast_ref::<FlipFailure>().is_none(), "{error}");
     }
 
     #[test]
@@ -3090,6 +3109,7 @@ mod tests {
         let error = write_certified(&mut graph, params, &stored, &flipped).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("反転キーで合流した 7 局面 ["), "{error}");
+        assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error}");
         for v in 0..5 {
             assert!(message.contains(&format!("{} (保存 50・反対 100)", graph.key(v))), "{error}");
         }
