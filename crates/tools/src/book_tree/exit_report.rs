@@ -86,14 +86,17 @@ impl Class {
 
 struct Item {
     class: Class,
+    /// RAMU の側。局面の手番は `key` から取る (out・rare の止まりは相手の手番)。
     side: String,
-    /// 出口は出口の局面までに指した手数、切れ目は局面の手番の手が何手目か、rejoin は表の ply。
-    ply: String,
+    /// `key` の局面で次に指す手が何手目か (初期局面の手が 1)。先手番は奇数、後手番は偶数。
+    /// 手順も入力の表の ply も無い行は `None`。
+    move_number: Option<usize>,
     weight: f64,
     value_black: Option<i64>,
     kind: String,
     key: String,
-    moves: Vec<String>,
+    /// 初期局面から `key` の局面までの手順。入力から復元できなければ `None`。
+    moves: Option<Vec<String>>,
     /// 分類ごとの追加の欄 (名前, 値)。
     extra: Vec<(&'static str, String)>,
 }
@@ -207,6 +210,106 @@ fn last_own_value(
     Ok(last)
 }
 
+/// 何手目が 1 以上で、局面の手番と偶奇が合う (先手番は奇数、後手番は偶数) ことを確かめる。
+fn check_parity(key: &str, number: usize) -> Result<()> {
+    let turn = side(key);
+    ensure!(matches!(turn, "b" | "w"), "局面の手番が b / w ではありません: {key}");
+    ensure!(
+        number >= 1 && (number % 2 == 1) == (turn == "b"),
+        "{}番の局面なのに {number} 手目です (1 以上で、先手番は奇数、後手番は偶数): {key}",
+        side_name(turn)
+    );
+    Ok(())
+}
+
+/// 局面の手番と何手目の偶奇と、手順の長さとの一致を確かめる。
+/// 数え方の違う列が混ざった表は読む人が手番を取り違えるので、合わない行は出力せずに止める。
+fn check_move_number(item: &Item) -> Result<()> {
+    let class = item.class.name();
+    let expected = item.moves.as_ref().map(|moves| moves.len() + 1);
+    if let Some(number) = item.move_number {
+        check_parity(&item.key, number).with_context(|| format!("{class} の行"))?;
+    }
+    ensure!(
+        expected.is_none() || expected == item.move_number,
+        "{class} の行: 手順からは {expected:?} 手目なのに {:?} 手目です: {}",
+        item.move_number,
+        item.key
+    );
+    Ok(())
+}
+
+/// 表の ply (その局面で次に指す手の番号) を読み、局面の手番と偶奇が合うことを確かめる。
+/// 元データの ply は空欄を許し、rejoin・bridge の表はそれをそのまま持つので、空は `None`。
+fn table_move_number(row: &BTreeMap<&str, &str>, key: &str) -> Result<Option<usize>> {
+    let text = column(row, "ply")?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let ply: usize = text.parse().context("ply が不正です")?;
+    check_parity(key, ply).context("ply")?;
+    Ok(Some(ply))
+}
+
+struct RejoinRow {
+    item: Item,
+    /// 表の ply (空欄なら `None`)。手順を復元できないときの何手目に使う。
+    table_number: Option<usize>,
+}
+
+/// rejoin の表から、戻った先の値が目標を割り、来る割合が下限以上の行を取る。
+fn rejoin_rows(args: &ExitReportArgs, path: &Path) -> Result<Vec<RejoinRow>> {
+    let mut rows = Vec::new();
+    read_tsv(path, |row| {
+        let own = column(row, "side")?;
+        ensure!(matches!(own, "b" | "w"), "side は b / w です: {own}");
+        let value: i64 = column(row, "rejoin_value_black")?
+            .parse()
+            .context("rejoin_value_black が不正です")?;
+        if args.meets(Some(value), own) != Some(false) {
+            return Ok(());
+        }
+        // 重みの欄は --opp-freq なしの rejoin では空になる。0 とみなすと行が黙って消える。
+        let number = |name: &str| -> Result<f64> {
+            column(row, name)?.parse().with_context(|| {
+                format!("{name} が数ではありません (rejoin は --opp-freq を付けた表が必要です)")
+            })
+        };
+        let (weight, games, dig) =
+            (number("weight")?, number("rejoin_games")?, number("dig_games")?);
+        // 表の weight は局面の重みなので、その手で戻る割合に直す。
+        let effective = weight * games / dig.max(1.0);
+        if effective < args.gap_min_weight {
+            return Ok(());
+        }
+        let key = column(row, "key")?;
+        ensure!(side(key) == own, "rejoin の局面は side の手番のはずです: side={own} {key}");
+        let table_number = table_move_number(row, key)?;
+        rows.push(RejoinRow {
+            item: Item {
+                class: Class::Rejoin,
+                side: own.to_owned(),
+                move_number: table_number,
+                weight: effective,
+                value_black: Some(value),
+                kind: String::new(),
+                key: key.to_owned(),
+                moves: None,
+                extra: vec![
+                    ("move", column(row, "move")?.to_owned()),
+                    ("expected_black", column(row, "expected_black")?.to_owned()),
+                    ("rejoin_move", column(row, "rejoin_move")?.to_owned()),
+                    ("rejoin_main", column(row, "rejoin_main")?.to_owned()),
+                    ("rejoin", column(row, "rejoin")?.to_owned()),
+                ],
+            },
+            table_number,
+        });
+        Ok(())
+    })?;
+    Ok(rows)
+}
+
 pub(super) fn run(args: ExitReportArgs) -> Result<()> {
     run_to(args, &mut std::io::stdout().lock())
 }
@@ -230,6 +333,14 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         })?;
     }
     let mut through: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
+    let rejoins = match &args.rejoin {
+        Some(path) => rejoin_rows(&args, path)?,
+        None => Vec::new(),
+    };
+    // rejoin の表は手順を持たないので、walk がその局面を通った手順を借りる。
+    // 値は (RAMU の側の walk の行か, 手順)。相手の側の行は RAMU の定跡の手順ではないので、RAMU の側の行を優先する。
+    let mut rejoin_paths: BTreeMap<String, Option<(bool, Vec<String>)>> =
+        rejoins.iter().map(|r| (r.item.key.clone(), None)).collect();
     let mut walk_rows = Vec::new();
     read_tsv(&args.walk, |row| {
         let side = column(row, "side")?;
@@ -238,8 +349,19 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         ensure!(weight.is_finite() && weight >= 0.0, "weight が不正です: {weight}");
         let moves: Vec<String> =
             column(row, "moves")?.split_whitespace().map(str::to_owned).collect();
+        let ply: usize = column(row, "ply")?.parse().context("ply が不正です")?;
+        ensure!(ply == moves.len(), "ply {ply} が手順の手数 {} と合いません", moves.len());
         let keys = keys_before(&moves)?;
         let last = column(row, "key")?.to_owned();
+        for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
+            let Some(found) = rejoin_paths.get_mut(key) else {
+                continue;
+            };
+            let own_row = super::model::side(key) == side;
+            if found.as_ref().is_none_or(|(own, _)| !own && own_row) {
+                *found = Some((own_row, moves[..i].to_vec()));
+            }
+        }
         let mut seen = BTreeSet::new();
         // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
@@ -254,7 +376,6 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             walk_rows.push((
                 side.to_owned(),
                 stop.to_owned(),
-                column(row, "ply")?.to_owned(),
                 weight,
                 column(row, "key")?.to_owned(),
                 moves,
@@ -263,7 +384,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         }
         Ok(())
     })?;
-    for (side, stop, ply, weight, key, moves, keys) in walk_rows {
+    for (side, stop, weight, key, moves, keys) in walk_rows {
         let (value, kind) = last_own_value(&mut index, &moves, &keys, &side)?;
         let class = if stop == "own" {
             Class::Shallow
@@ -279,12 +400,12 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         items.push(Item {
             class,
             side,
-            ply,
+            move_number: Some(moves.len() + 1),
             weight,
             value_black: value,
             kind,
             key,
-            moves,
+            moves: Some(moves),
             extra: vec![("stop", stop)],
         });
     }
@@ -319,6 +440,11 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             }
             let side = column(row, "side")?;
             ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
+            ensure!(
+                super::model::side(key) == side,
+                "bridge の局面は side の手番のはずです: side={side} {key}"
+            );
+            table_move_number(row, key)?;
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
             let replaced = gaps.get(key);
@@ -336,61 +462,40 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             items.push(Item {
                 class: Class::Gap,
                 side: side.to_owned(),
-                ply: (path.len() + 1).to_string(),
+                move_number: Some(path.len() + 1),
                 weight: *weight,
                 value_black: Some(bridged),
                 kind: String::new(),
                 key: key.to_owned(),
-                moves: path.clone(),
+                moves: Some(path.clone()),
                 extra,
             });
             Ok(())
         })?;
     }
-    if let Some(rejoin) = &args.rejoin {
-        read_tsv(rejoin, |row| {
-            let side = column(row, "side")?;
-            ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
-            let value: i64 = column(row, "rejoin_value_black")?
-                .parse()
-                .context("rejoin_value_black が不正です")?;
-            if args.meets(Some(value), side) != Some(false) {
-                return Ok(());
-            }
-            // 重みの欄は --opp-freq なしの rejoin では空になる。0 とみなすと行が黙って消える。
-            let number = |name: &str| -> Result<f64> {
-                column(row, name)?.parse().with_context(|| {
-                    format!("{name} が数ではありません (rejoin は --opp-freq を付けた表が必要です)")
-                })
-            };
-            let (weight, games, dig) =
-                (number("weight")?, number("rejoin_games")?, number("dig_games")?);
-            // 表の weight は局面の重みなので、その手で戻る割合に直す。
-            let effective = weight * games / dig.max(1.0);
-            if effective < args.gap_min_weight {
-                return Ok(());
-            }
-            items.push(Item {
-                class: Class::Rejoin,
-                side: side.to_owned(),
-                ply: column(row, "ply")?.to_owned(),
-                weight: effective,
-                value_black: Some(value),
-                kind: String::new(),
-                key: column(row, "key")?.to_owned(),
-                moves: Vec::new(),
-                extra: vec![
-                    ("move", column(row, "move")?.to_owned()),
-                    ("expected_black", column(row, "expected_black")?.to_owned()),
-                    ("rejoin_move", column(row, "rejoin_move")?.to_owned()),
-                ],
-            });
-            Ok(())
-        })?;
+    for RejoinRow {
+        mut item,
+        table_number,
+    } in rejoins
+    {
+        // 同じ局面に別の手数で着く手順もあるので、手順があればその長さで数える (偶奇は表の ply と同じ)。
+        item.moves = rejoin_paths.get(&item.key).cloned().flatten().map(|(_, moves)| moves);
+        item.move_number = item.moves.as_ref().map(|moves| moves.len() + 1).or(table_number);
+        items.push(item);
+    }
+    for item in &items {
+        check_move_number(item)?;
     }
     // 同じ重みは入力の表の順のまま (安定な並べ替え)。
     items.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
-    let queued = |item: &Item| queued_text(&states, &item.key, &item.side);
+    let queued = |item: &Item| {
+        // rejoin は戻った先の局面 (RAMU の手番) を根にした木でも塞げるので、両方の根を見る。
+        let rejoin = item.extra.iter().find(|(k, v)| *k == "rejoin" && !v.is_empty());
+        let roots: Vec<&str> = std::iter::once(item.key.as_str())
+            .chain(rejoin.map(|(_, v)| v.as_str()))
+            .collect();
+        queued_text(&states, &roots, &item.side)
+    };
     let mut counts = BTreeMap::new();
     for item in &items {
         *counts.entry(item.class).or_insert(0usize) += 1;
@@ -413,22 +518,23 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     )?;
     if let Some(path) = &args.table {
         let mut bytes =
-            b"class\tside\tply\tweight\tvalue_black\tkind\ttarget\tqueued\tkey\tmoves\textra\n"
+            b"class\tside\tturn\tmove_number\tweight\tvalue_black\tkind\ttarget\tqueued\tkey\tmoves\textra\n"
                 .to_vec();
         for item in &items {
             writeln!(
                 bytes,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 item.class.name(),
                 item.side,
-                item.ply,
+                side(&item.key),
+                item.move_number.map_or_else(|| UNKNOWN.to_owned(), |n| n.to_string()),
                 item.weight,
                 fmt_value(item.value_black),
                 item.kind,
                 target_text(args.meets(item.value_black, &item.side)),
                 queued(item),
                 item.key,
-                item.moves.join(" "),
+                item.moves.as_ref().map_or_else(|| UNKNOWN.to_owned(), |m| m.join(" ")),
                 item.extra.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
             )?;
         }
@@ -457,11 +563,32 @@ fn target_text(meets: Option<bool>) -> &'static str {
     }
 }
 
+/// 表の move_number・moves の欄で、入力から分からなかった行の印 (moves の空は初期局面)。
+const UNKNOWN: &str = "-";
+
+/// 報告で、手順を復元できなかった行の手順の欄に書く文言。
+const NO_MOVES_TEXT: &str = "手順なし";
+
+/// 手順の欄。初期局面は手順が空なので、復元できなかった行と区別して書く。
+fn moves_text(item: &Item) -> Result<String> {
+    match &item.moves {
+        Some(moves) if moves.is_empty() => Ok("初期局面".to_owned()),
+        Some(moves) => kif(moves),
+        None => Ok(NO_MOVES_TEXT.to_owned()),
+    }
+}
+
+/// 局面の手番と何手目 (`後手 14 手目`)。何手目が分からない行は `後手 ? 手目`。
+fn position_text(item: &Item) -> String {
+    let number = item.move_number.map_or_else(|| "?".to_owned(), |n| n.to_string());
+    format!("{} {number} 手目", side_name(side(&item.key)))
+}
+
 /// 同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`)。bw の木は両方の側に数える。
-fn queued_text(states: &[TreeState], key: &str, own: &str) -> String {
+fn queued_text(states: &[TreeState], roots: &[&str], own: &str) -> String {
     let found: BTreeSet<_> = states
         .iter()
-        .filter(|t| t.own == own && t.depth >= 1 && t.roots.contains(key))
+        .filter(|t| t.own == own && t.depth >= 1 && roots.iter().any(|key| t.roots.contains(*key)))
         .map(|t| format!("{} ({}, {})", t.id, t.box_name, t.state))
         .collect();
     if found.is_empty() {
@@ -500,7 +627,7 @@ fn markdown(
     writeln!(out, "# {title}\n")?;
     writeln!(
         out,
-        "重み = その出口に来る割合、手数 = 出口の局面までに指した手の数、値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。\n",
+        "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。\n",
         args.target_black, args.target_white
     )?;
     let exits = |out: &mut Vec<u8>, title: &str, note: &str, class: Class| -> Result<()> {
@@ -517,19 +644,24 @@ fn markdown(
             writeln!(out, "### RAMU が{}\n", side_name(side))?;
             writeln!(
                 out,
-                "| 手数 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |\n|---:|---:|---:|---|---|---|---|"
+                "| 出口の局面 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |\n|---|---:|---:|---|---|---|---|"
             )?;
             for r in rows {
                 writeln!(
                     out,
-                    "| {} | {:.3} | {} | {} | {} | {} | {} |",
-                    r.ply,
+                    "| {} ({}) | {:.3} | {} | {} | {} | {} | {} |",
+                    position_text(r),
+                    if super::model::side(&r.key) == side {
+                        "RAMU"
+                    } else {
+                        "相手"
+                    },
                     r.weight,
                     fmt_value(r.value_black),
                     r.kind,
                     target_text(args.meets(r.value_black, side)),
                     queued(r),
-                    kif(&r.moves)?
+                    moves_text(r)?
                 )?;
             }
             writeln!(out)?;
@@ -550,33 +682,33 @@ fn markdown(
         writeln!(out, "## 2b. 塞ぎたい出口: 伝播の切れ目 (`master audit --bridge-replies`)\n")?;
         writeln!(
             out,
-            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。値は main の値 (補わない → 補う)。\n",
+            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。局面は RAMU の手番で、main はそこで指す手。値は main の値 (補わない → 補う)。\n",
             args.gap_line, args.gap_min_weight
         )?;
         writeln!(
             out,
-            "| 側 | 何手目 | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---:|---|---|---|---|---|"
+            "| 局面 (RAMU の手番) | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
         )?;
         for r in items.iter().filter(|i| i.class == Class::Gap) {
             let get =
                 |name: &str| r.extra.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str());
+            let path = r.moves.as_deref().unwrap_or_default();
             let best = match (get("best"), get("best_value_black")) {
                 (Some(best), Some(value)) => {
-                    format!("{} {}", kif_last(&r.moves, best)?, fmt_value(value.parse().ok()))
+                    format!("{} {}", kif_last(path, best)?, fmt_value(value.parse().ok()))
                 }
                 _ => String::new(),
             };
             writeln!(
                 out,
-                "| {} | {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
-                side_name(&r.side),
-                r.ply,
+                "| {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
+                position_text(r),
                 r.weight,
-                kif_last(&r.moves, get("main").unwrap_or_default())?,
+                kif_last(path, get("main").unwrap_or_default())?,
                 fmt_value(get("plain_black").and_then(|v| v.parse().ok())),
                 fmt_value(r.value_black),
                 queued(r),
-                kif(&r.moves)?
+                moves_text(r)?
             )?;
         }
         writeln!(out)?;
@@ -588,12 +720,12 @@ fn markdown(
         )?;
         writeln!(
             out,
-            "戻った先の main の値が目標を割る所。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。\n",
+            "戻った先の main の値が目標を割る所。局面は RAMU の手番で、RAMU の手 (期待の値) の後に相手が定跡に無い手を指し、戻った先で RAMU が main を指す。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。手順は walk の表でその局面を通る行から取り、通る行が無ければ「{NO_MOVES_TEXT}」と書いて手を USI のまま載せる (何手目は rejoin の表の ply、それも空なら「?」)。受付は局面か戻った先を根にした木。\n",
             args.gap_min_weight
         )?;
         writeln!(
             out,
-            "| 側 | 何手目 | 来る割合 | RAMU の手 (期待) | 相手の手 → 戻った先 |\n|---|---:|---:|---|---|"
+            "| 局面 (RAMU の手番) | 来る割合 | RAMU の手 (期待) | 相手の手 → 戻った先の main (値) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|"
         )?;
         for r in items.iter().filter(|i| i.class == Class::Rejoin) {
             let get = |name: &str| {
@@ -603,16 +735,32 @@ fn markdown(
                     .map(|(_, v)| v.as_str())
                     .unwrap_or_default()
             };
+            let usi: Vec<&str> = [get("move"), get("rejoin_move"), get("rejoin_main")]
+                .into_iter()
+                .filter(|mv| !mv.is_empty())
+                .collect();
+            let shown: Vec<String> = match &r.moves {
+                Some(path) => {
+                    let mut all = path.clone();
+                    all.extend(usi.iter().map(|mv| (*mv).to_owned()));
+                    let text = kif(&all)?;
+                    text.split(' ').skip(path.len()).map(str::to_owned).collect()
+                }
+                None => usi.iter().map(|mv| format!("`{mv}`")).collect(),
+            };
+            let at = |i: usize| shown.get(i).map(String::as_str).unwrap_or_default();
             writeln!(
                 out,
-                "| {} | {} | {:.4} | {} ({}) | {} → {} |",
-                side_name(&r.side),
-                r.ply,
+                "| {} | {:.4} | {} ({}) | {} → {} ({}) | {} | {} |",
+                position_text(r),
                 r.weight,
-                get("move"),
+                at(0),
                 fmt_value(get("expected_black").parse().ok()),
-                get("rejoin_move"),
-                fmt_value(r.value_black)
+                at(1),
+                at(2),
+                fmt_value(r.value_black),
+                queued(r),
+                moves_text(r)?
             )?;
         }
         writeln!(out)?;

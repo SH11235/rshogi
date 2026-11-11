@@ -1105,7 +1105,7 @@ fn markdown(inputs: &Inputs, reports: &[Report], summaries: &[Summary]) -> Resul
         )?;
         writeln!(
             out,
-            "| 候補 | 6 段以上の木 | 3〜5 段の木 | 1〜2 段の木 | 1 回の読み | 複数回の読みの平均 | 出所の記録なし | 値なし | own | out | max | rare | tiny | own (20 手目未満) | own (30 手目未満) |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            "| 候補 | 6 段以上の木 | 3〜5 段の木 | 1〜2 段の木 | 1 回の読み | 複数回の読みの平均 | 出所の記録なし | 値なし | own | out | max | rare | tiny | own (20 手目まで) | own (30 手目まで) |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
         )?;
         for (r, s) in &rows {
             let stop = |stop: Stop| {
@@ -1262,7 +1262,7 @@ fn danger_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Resu
     writeln!(out, "## 危ない局面 (候補ごとに最初に通る局面)\n")?;
     writeln!(
         out,
-        "通る重み {} 以上を、候補ごとに重みの大きい順に {} 個まで。何手目 = その局面で次に指す手が何手目か。判定: 両方 = 強い対局 ({} 局以上・RAMU の側の得点 {} 未満) でも表でも危ない、強い対局だけ・表だけ = 片方だけで危ない。\n",
+        "通る重み {} 以上を、候補ごとに重みの大きい順に {} 個まで。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。判定: 両方 = 強い対局 ({} 局以上・RAMU の側の得点 {} 未満) でも表でも危ない、強い対局だけ・表だけ = 片方だけで危ない。\n",
         pct(args.list_min_weight),
         args.top,
         args.danger_games,
@@ -1305,7 +1305,10 @@ fn danger_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Resu
                 _ => "表だけ",
             };
             let (ply, moves) = match moves {
-                Some((i, e)) => ((i + 1).to_string(), kif(&e.move_list()[..i])?),
+                Some((i, e)) => {
+                    ensure_move_number(key, i + 1)?;
+                    ((i + 1).to_string(), kif(&e.move_list()[..i])?)
+                }
                 None => ("—".to_owned(), format!("`{key}`")),
             };
             writeln!(
@@ -1321,13 +1324,24 @@ fn danger_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Resu
     Ok(())
 }
 
+/// 何手目 (その局面で次に指す手の番号) が局面の手番と合うこと (先手番は奇数、後手番は偶数) を確かめる。
+/// 手番と番号の合わない表は読む人が手番を取り違えるので、出力せずに止める。
+fn ensure_move_number(key: &str, number: usize) -> Result<()> {
+    let turn = side(key);
+    ensure!(
+        matches!(turn, "b" | "w") && number >= 1 && (number % 2 == 1) == (turn == "b"),
+        "局面の手番と {number} 手目が合いません (1 以上で、先手番は奇数、後手番は偶数): {key}"
+    );
+    Ok(())
+}
+
 /// 側ごとに、own で止まる出口を候補をまたいでまとめ、重み (候補の中の最大) の大きい順に `--top` 個。
 fn reading_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Result<()> {
     let args = inputs.args;
     writeln!(out, "## 締めまでに読みを足すと効く所 (own の出口)\n")?;
     writeln!(
         out,
-        "RAMU の定跡が切れる局面。重み = その局面に来る重み (同じ局面に別の手数で来た分は足す、候補の中で最大のもの)。値 = 直前に RAMU が指した手の値 (評価値、プラス = 先手良し)。受付 = `--exclude-queue` のキューに同じ根・同じ側の木 (段 1 以上) があればその id。\n"
+        "RAMU の定跡が切れる局面 (RAMU の手番)。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。重み = その局面に来る重み (同じ局面に別の手数で来た分は足す、候補の中で最大のもの)。値 = 直前に RAMU が指した手の値 (評価値、プラス = 先手良し)。受付 = `--exclude-queue` のキューに同じ根・同じ側の木 (段 1 以上) があればその id。\n"
     )?;
     for side in ["b", "w"] {
         // 局面 → (候補の中の最大の重み, 候補の名前, 代表の出口)。
@@ -1359,7 +1373,7 @@ fn reading_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Res
         writeln!(out, "### RAMU が{}\n", side_name(side))?;
         writeln!(
             out,
-            "| 手数 | 重み | 候補 | 値 | 出所 | 受付 | 手順 | 局面 (SFEN) |\n|---:|---:|---|---:|---|---|---|---|"
+            "| 何手目 | 重み | 候補 | 値 | 出所 | 受付 | 手順 | 局面 (SFEN) |\n|---:|---:|---|---:|---|---|---|---|"
         )?;
         for (id, (weight, names, e)) in items.into_iter().take(args.top) {
             let key = &inputs.keys.names[id as usize];
@@ -1368,10 +1382,11 @@ fn reading_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Res
                 .get(&(key.clone(), side.to_owned()))
                 .map(|ids| ids.iter().cloned().collect::<Vec<_>>().join(", "))
                 .unwrap_or_else(|| "なし".to_owned());
+            let number = e.row.ply + 1;
+            ensure_move_number(key, number)?;
             writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {queued} | {} | `{key}` |",
-                e.row.ply,
+                "| {number} | {} | {} | {} | {} | {queued} | {} | `{key}` |",
                 pct(weight),
                 names.join("・"),
                 value_text(e.value),
