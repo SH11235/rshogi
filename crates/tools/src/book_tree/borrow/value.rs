@@ -921,6 +921,9 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         meta.params.max_plies,
         &readings,
     );
+    // 外部定跡の手は読みで確かめた手ではないので、成れる角・飛・歩の不成も含みうる。
+    let unpromoted = crate::book_tree::unpromotion::drop_node_moves(&mut nodes)?;
+    eprintln!("外部定跡の手から外した成れる角・飛・歩の不成: {unpromoted}");
     let before_rows = rows.len();
     // ファイル名だけでは版が分からないので、内容の sha256 の先頭も付ける。
     let lineage = format!("book:{}@{}", meta.book.name, &meta.book.sha256[..8]);
