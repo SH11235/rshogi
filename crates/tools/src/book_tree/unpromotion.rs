@@ -7,7 +7,7 @@ use super::master_table::{Row, mean_eval};
 use super::register::Node;
 use crate::book_db::position_from_sfen;
 use anyhow::{Context, Result};
-use rshogi_core::movegen::{MoveList, generate_legal_all};
+use rshogi_core::movegen::{MoveList, generate_legal_allowing_missing_kings};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Move, PieceType};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,9 +47,18 @@ fn may_promote(key: &str, usi: &str) -> bool {
 fn key_needless(key: &str) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
     let pos = position_from_sfen(&format!("{key} 1"))?;
     let mut legal = MoveList::new();
-    generate_legal_all(&pos, &mut legal);
+    generate_legal_allowing_missing_kings(&pos, &mut legal);
     let needless = needless_unpromotions(&pos, &legal);
     Ok((legal.iter().map(|mv| mv.to_usi()).collect(), needless))
+}
+
+/// `key` の局面で `usi` が成れる角・飛・歩の不成か。
+pub(super) fn is_needless(key: &str, usi: &str) -> Result<bool> {
+    if !may_promote(key, usi) {
+        return Ok(false);
+    }
+    let (_, needless) = key_needless(key).with_context(|| format!("不成の判定: {key}"))?;
+    Ok(needless.contains(usi))
 }
 
 /// 元データの main・alt から不成を record にした数。
@@ -63,6 +72,8 @@ pub(super) struct Demoted {
     pub new_mains: usize,
     /// 指す手が残らず、record だけになった局面。
     pub emptied: usize,
+    /// 行を書き換えた局面。
+    pub keys: BTreeSet<String>,
 }
 
 impl Demoted {
@@ -85,9 +96,9 @@ fn append_note(row: &mut Row, text: String) {
 }
 
 /// main・alt のうち成れる角・飛・歩の不成を record にする (行は消さない)。main を record にした局面は、残る
-/// main・alt のうち curated の手があればその中から、合法な手、値 (evals の平均) の分かる手、値の高い手、
-/// 元データの順の先を main にする (`master cycles` の替わりの main と同じ順)。手が残らなければその局面は
-/// record だけになる。
+/// main・alt のうち curated の手があればその中から、合法な手、値の分かる手、値の高い手、元データの順の先を
+/// main にする。並べ方は `master cycles` の替わりの main と同じだが、値は伝播前の evals の平均を使う。
+/// 手が残らなければその局面は指さない手だけになる。
 pub(super) fn demote_rows(rows: &mut [Row], since: &str) -> Result<Demoted> {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
@@ -110,6 +121,7 @@ pub(super) fn demote_rows(rows: &mut [Row], since: &str) -> Result<Demoted> {
             continue;
         }
         let side = usize::from(key.split_whitespace().nth(1) == Some("w"));
+        summary.keys.insert(key.clone());
         let mut main_demoted = false;
         for &i in &demoted {
             let row = &mut rows[i];
@@ -209,6 +221,41 @@ mod tests {
         assert!(needless("4k4/8P/9/3N1S2L/4+B4/9/9/9/4K4 b -").is_empty());
     }
 
+    #[test]
+    fn positions_without_a_king_are_judged_by_the_rules() {
+        let found = needless("4k4/9/9/P8/8r/9/9/9/9 b -");
+        assert!(found.contains("9d9c"), "{found:?}");
+    }
+
+    #[test]
+    fn node_moves_drop_needless_unpromotions_and_empty_nodes() {
+        use super::super::register::NodeMove;
+        let node = |moves: &[&str]| Node {
+            ply: "2".into(),
+            remaining: 0,
+            nodes: 1,
+            moves: moves
+                .iter()
+                .map(|mv| NodeMove {
+                    mv: (*mv).into(),
+                    value: 0,
+                    value_kind: "single".into(),
+                    cond: "unknown".into(),
+                })
+                .collect(),
+            tree: 0,
+        };
+        let only = "4k4/9/9/9/9/9/9/9/4K4 w -".replace("4k4/9", "4k4/7b1");
+        let mut nodes = BTreeMap::from([
+            (WHITE.to_owned(), node(&["2b7g", "2b3c", "1e1h", "2b7g+"])),
+            (only.clone(), node(&["2b7g"])),
+        ]);
+        assert_eq!(drop_node_moves(&mut nodes).unwrap(), 3);
+        let moves: Vec<_> = nodes[WHITE].moves.iter().map(|m| m.mv.as_str()).collect();
+        assert_eq!(moves, ["2b3c", "2b7g+"]);
+        assert!(!nodes.contains_key(&only));
+    }
+
     fn row(key: &str, mv: &str, role: &str, tier: &str, evals: &str) -> Row {
         test_row(&[
             ("key", key.into()),
@@ -239,7 +286,8 @@ mod tests {
                 rows: [0, 2],
                 mains: 1,
                 new_mains: 1,
-                emptied: 0
+                emptied: 0,
+                keys: BTreeSet::from([WHITE.to_owned()]),
             }
         );
         let roles: Vec<_> = rows.iter().map(|r| r.get("role")).collect();

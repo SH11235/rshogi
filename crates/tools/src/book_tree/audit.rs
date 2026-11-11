@@ -410,9 +410,18 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     let unpromoted = unpromotion::demote_rows(&mut rows, args.since.as_deref().unwrap_or("確認"))?;
     let positions = if unpromoted.total() > 0 {
         master_table::validate(&rows)?;
-        let rebuilt =
-            positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
-        (rebuilt.0, positions.1 + unpromoted.total())
+        let (mut changed, records) = positions;
+        for key in &unpromoted.keys {
+            changed.remove(key);
+        }
+        let rebuilt = positions_from_rows(
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| unpromoted.keys.contains(row.get("key")))
+                .map(|(i, row)| Ok((i + 2, row.clone()))),
+        )?;
+        changed.extend(rebuilt.0);
+        (changed, records + unpromoted.total())
     } else {
         positions
     };
@@ -930,6 +939,9 @@ fn revive_bench(
             continue;
         };
         if value <= i64::from(args.bad_eval) || best - value >= i64::from(args.demote_line) {
+            continue;
+        }
+        if unpromotion::is_needless(row.get("key"), row.get("move"))? {
             continue;
         }
         row.set("role", "alt".into());
@@ -5066,6 +5078,27 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let updated = std::fs::read_to_string(&master_path).unwrap();
         assert_ne!(updated, text);
         assert_eq!(master_table::read_master(&master_path).unwrap().0[ROOT].moves[0].mv, "5i4h");
+    }
+
+    #[test]
+    fn revive_bench_does_not_return_needless_unpromotions() {
+        const W: &str = "4k4/7b1/9/9/9/9/9/9/4K4 w -";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        let text = master(&[
+            (W, "2b3c", "main", "45"),
+            (W, "2b7g", "bench", "40"),
+            (W, "2b6f", "bench", "40"),
+        ]);
+        std::fs::write(&path, &text).unwrap();
+        let mut args = test_args(dir.path());
+        args.revive_bench = true;
+        args.apply = true;
+        args.since = Some("T".into());
+        run(args).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let roles: Vec<_> = rows.iter().map(|r| (r.get("move"), r.get("role"))).collect();
+        assert_eq!(roles, [("2b3c", "main"), ("2b7g", "bench"), ("2b6f", "alt")]);
     }
 
     #[test]

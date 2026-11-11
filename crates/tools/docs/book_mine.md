@@ -1101,7 +1101,7 @@ key ply move role source evals nodes cond value_kind lineage tier since note
 
 角・飛・歩 (先手・後手とも) の不成のうち、同じ移動の成る手も合法な手は、元データの `main`・`alt` にしません (`record` なら置けます)。探索の手の生成はこの不成を作らないので読みからは出ず、成った場合と比べて得になる局面もほぼありません。歩の一段目 (後手は九段目) のように不成が反則の所は合法手でないので対象外、桂・銀・香の不成と、成った駒の手も対象外です。
 
-`master audit` (元データを読むどの実行でも) と `tree register` は、この手の行を `record` にして (行は消さず、note に `<since>: 成れる角・飛・歩の不成なので main から record` などを足す) から処理します。`--apply` が無ければ元データは書き換えません。`main` を `record` にした局面は、残る `main`・`alt` のうち、curated の手が残っていればその中から、合法な手、`evals` の平均の分かる手、その値の高い手、元データの順の先を `main` にします (`master cycles` の替わりの main と同じ順。値は伝播前の値なので、`master audit` はこの後の点検で main をさらに替えることがあります)。手が残らなければ、その局面は指さない手だけの局面になります。record にした行の数 (先手番・後手番)、うち main の数、main を選び直した局面、手が残らない局面を stderr に出します。`borrow value` は、大きい定跡から登録する自分の手番の手からこの手を外し、外した数を stderr に出します。
+`master audit` (元データを読むどの実行でも) と `tree register` は、この手の行を `record` にして (行は消さず、note に `<since>: 成れる角・飛・歩の不成なので main から record` などを足す) から処理します。`--apply` が無ければ元データは書き換えません。`main` を `record` にした局面は、残る `main`・`alt` のうち、curated の手が残っていればその中から、合法な手、`evals` の平均の分かる手、その値の高い手、元データの順の先を `main` にします (`master cycles` の替わりの main と同じ順。値は伝播前の値なので、`master audit` はこの後の点検で main をさらに替えることがあります)。手が残らなければ、その局面は指さない手だけの局面になります。`master audit --revive-bench` は、この手の `bench` を alt に戻しません。record にした行の数 (先手番・後手番)、うち main の数、main を選び直した局面、手が残らない局面を stderr に出します。`borrow value` は、大きい定跡から登録する自分の手番の手からこの手を外し、外した数を stderr に出します。
 
 ### 元データの schema
 
