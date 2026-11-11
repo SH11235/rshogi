@@ -1965,10 +1965,21 @@ walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以�
 | `rejoin` | rejoin の表の行のうち、戻った先の値が目標に届かず、来る割合 (weight × rejoin_games / dig_games) が `--gap-min-weight` 以上 |
 
 gap の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (1 行で同じ局面は 1 回) で、手順はその局面を最初に通った行の手順です。audit の表は、重みの下限以上で gap が `--gap-line` 以上の局面の行だけを持ちます。
-表は `class side ply weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
-ply は walk の行・rejoin の行の ply、gap は局面の手番の手が何手目か。queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。
-extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move) です。
+rejoin の表は手順を持たないので、手順は walk の表でその局面を通る行 (RAMU の側の行を優先、同じ側の中では最初の行) から取ります。walk が通らない局面は手順なしです。
+
+局面の番号は、表でも報告でも全部の class で同じ数え方です: 何手目 (`move_number`) = その局面で次に指す手の番号 (初期局面の手が 1)。先手番の局面は奇数、後手番の局面は偶数です。
+局面は、walk の止まりでは止まった局面、gap と rejoin では RAMU が指す局面です。止まった局面の手番は、own が RAMU、out・rare が相手で、max は `master walk --max-ply` の偶奇によります。
+手順のある行は「手順の手数 + 1」を何手目にします (同じ局面に別の手数で着く手順があるので、rejoin の表の ply とは同じ偶奇で違う数になりえます)。手順のない rejoin の行は表の ply です。
+bridge・rejoin の表の ply は空でもよく (元データの ply が空の局面)、手順があれば手順から数えます。手順も ply も無い rejoin の行は何手目が不明で、表の `move_number` は `-`、報告は `後手 ? 手目` と手番だけ書きます。
+手番と何手目の偶奇が合わない行、何手目が 0 の行、手順の手数と合わない行、walk の ply が手順の手数と違う行、bridge・rejoin の空でない ply が 0 か、偶奇が局面の手番と合わない行があれば、何も書かずにエラーで止まります。
+
+表は `class side turn move_number weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
+side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
+queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。rejoin の行は、局面か戻った先の局面を根にした木です。
+extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
 報告は 1 (good)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
+walk の止まりの節は「出口の局面」の列に手番と何手目と手番の側を (`後手 14 手目 (RAMU)`、`先手 15 手目 (相手)`)、2b・2c は「局面 (RAMU の手番)」の列に手番と何手目を書きます。
+2c は RAMU の手・相手の手・戻った先の main も漢字の棋譜で書き、手順なしの行は手順の欄に「手順なし」と書いて手を USI のまま載せます。
 標準出力には class ごとの行の数を出します。
 
 ## `master opening-report`: 戦型の候補を比べる表
@@ -2027,11 +2038,12 @@ name	side	override
 表は候補ごとに 1 行で、列は `name side override override_weight mean_black p10 p25 median p75 p90 ge50 ge100 le80 le0 draw tree6 tree3_5 tree1_2 single mean_kind unknown no_value own out rare tiny max own_lt20 own_lt30 exit_games exit_score branch_games branch_score danger_strong danger_listed danger_both danger_any black_below deviate deviate_median` です。
 値 (`mean_black`・分位・`deviate_median`) は先手から見た評価値、ほかの重みの列は割合 (0〜1)、`exit_score`・`branch_score` は RAMU の側の得点です。
 `ge50`・`ge100` (先手 +50 以上・+100 以上に着く重み) と `black_below` は先手の候補だけ、`le80`・`le0` (先手から見て +80 以下・0 以下に着く重み) は後手の候補だけに書き、他方は空です。
-`own_lt20`・`own_lt30` は手数 (出口の局面までに指した手の数) が 20・30 未満の own の重み、`override_weight` は override の分岐の局面を通る重み (override の無い候補は空、報告では main の分岐に来る重み) です。
+`own_lt20`・`own_lt30` は出口の局面までに指した手の数が 20・30 未満 (出口の局面で次に指す手が 20 手目・30 手目まで) の own の重み、`override_weight` は override の分岐の局面を通る重み (override の無い候補は空、報告では main の分岐に来る重み) です。
 
+報告の局面の番号は全部の表で同じ数え方です: 何手目 = その局面で次に指す手の番号 (初期局面の手が 1)。先手番の局面は奇数、後手番の局面は偶数で、合わない行があればエラーで止まります。
 報告は日本語で、RAMU が先手・後手の候補ごとに出口の値・値の確度・強い対局の実績と危ない局面を通る重み・分岐の後の相手の手の表、
 候補ごとに最初に通る危ない局面の一覧 (何手目・通る重み・強い対局の局数と得点・判定 (両方・強い対局だけ・表だけ)・手順)、
-締めまでに読みを足すと効く own の出口の一覧 (候補をまたいで同じ局面をまとめ、手数・重み・候補・値・出所・受付・手順・SFEN) を書きます。手順は `master exit-report` と同じ漢字の棋譜です。
+締めまでに読みを足すと効く own の出口の一覧 (候補をまたいで同じ局面をまとめ、何手目・重み・候補・値・出所・受付・手順・SFEN) を書きます。手順は `master exit-report` と同じ漢字の棋譜です。
 標準出力には候補ごとの行の数・中央値・危ない局面を通る重みと、局面の数・時間を出します。
 
 計算量: 候補ごとに 2 回辿ります (1 回目で局面と手の行き来を集め、強い対局を数える局面と循環を決める)。2 回目の辿りの行は、分けた重みの数だけ増えます。強い対局の棋譜は 1 回だけ 1 行ずつ読み、辿った局面だけを数えます。

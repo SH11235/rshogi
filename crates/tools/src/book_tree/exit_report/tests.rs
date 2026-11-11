@@ -83,7 +83,7 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
         // 先手の最後の手は 2g2f (tree:2, +40)。目標 50 に届かない。
         walk_line("b", "out", 0.02, &["7g7f", "3c3d", "2g2f", "8c8d"]),
         // 先手の最後の手は 7g7f (tree:3, +60)。届く。
-        walk_line("b", "rare", 0.03, &["7g7f", "4c4d"]),
+        walk_line("b", "rare", 0.03, &["7g7f"]),
         walk_line("b", "own", 0.05, &["7g7f", "8c8d"]),
         // 後手の最後の手は 8c8d (single、後手から +10 は先手から -10)。値の出所が弱い。
         walk_line("w", "max", 0.01, &["2g2f", "8c8d", "7g7f"]),
@@ -93,7 +93,7 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
     let (stdout, table, md) = run_report(&d, &walk, &[]);
     assert_eq!(stdout.trim(), "good=1 bad=1 gap=0 rejoin=0 shallow=1 weak=1");
     let rows: Vec<Vec<_>> = table.lines().skip(1).map(|l| l.split('\t').collect()).collect();
-    let summary: Vec<_> = rows.iter().map(|r| (r[0], r[1], r[3], r[4], r[5], r[6])).collect();
+    let summary: Vec<_> = rows.iter().map(|r| (r[0], r[1], r[4], r[5], r[6], r[7])).collect();
     assert_eq!(
         summary,
         [
@@ -103,12 +103,264 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
             ("weak", "w", "0.01", "-10", "single", "届く"),
         ]
     );
+    // turn は出口の局面の手番、move_number はそこで次に指す手の番号 (手順の手数 + 1)。
+    let numbers: Vec<_> = rows.iter().map(|r| (r[1], r[2], r[3])).collect();
+    assert_eq!(
+        numbers,
+        [
+            ("b", "w", "2"),
+            ("b", "b", "5"),
+            ("b", "b", "3"),
+            ("w", "w", "4")
+        ]
+    );
+    for line in [
+        "| 先手 5 手目 (RAMU) | 0.020 | +40 | tree:2 | 届かない | なし | ▲７六歩 △３四歩 ▲２六歩 △８四歩 |",
+        "| 後手 2 手目 (相手) | 0.030 | +60 | tree:3 | 届く | なし | ▲７六歩 |",
+        "| 後手 4 手目 (RAMU) | 0.010 | -10 | single | 届く | なし | ▲２六歩 △８四歩 ▲７六歩 |",
+    ] {
+        assert!(md.contains(line), "{line}\n{md}");
+    }
+}
+
+#[test]
+fn turn_and_move_number_parity_is_enforced() {
+    let item = |key: String, move_number: usize, moves: Option<Vec<String>>| Item {
+        class: Class::Rejoin,
+        side: "b".into(),
+        move_number: Some(move_number),
+        weight: 0.1,
+        value_black: None,
+        kind: String::new(),
+        key,
+        moves,
+        extra: Vec::new(),
+    };
+    let black = key_after(&["7g7f", "3c3d"]);
+    let white = key_after(&["7g7f"]);
+    let path = |moves: &[&str]| Some(moves.iter().map(|m| (*m).to_owned()).collect());
+    assert!(check_move_number(&item(black.clone(), 3, path(&["7g7f", "3c3d"]))).is_ok());
+    assert!(check_move_number(&item(white.clone(), 2, None)).is_ok());
+    // 先手番で偶数、後手番で奇数、手順の長さと合わない番号はどれもエラー。
+    assert!(check_move_number(&item(black.clone(), 2, None)).is_err());
+    assert!(check_move_number(&item(white.clone(), 3, None)).is_err());
+    assert!(check_move_number(&item(black.clone(), 5, path(&["7g7f", "3c3d"]))).is_err());
+    // 0 は偶数でも何手目ではない。
+    assert!(check_move_number(&item(white.clone(), 0, None)).is_err());
+    // 番号が分からない行は、手順も無いときだけ通す。
+    let mut unknown = item(white, 2, None);
+    unknown.move_number = None;
+    assert!(check_move_number(&unknown).is_ok());
+    unknown.moves = path(&["7g7f"]);
+    assert!(check_move_number(&unknown).is_err());
+}
+
+fn rejoin_error(row: &str) -> String {
+    let d = TempDir::new().unwrap();
+    let rejoin = d.path().join("rejoin.tsv");
+    std::fs::write(&rejoin, format!("{REJOIN_HEADER}\n{row}\n")).unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[master_row(&[], "7g7f", "", "")])).unwrap();
+    let walk = d.path().join("walk.tsv");
+    std::fs::write(&walk, format!("{WALK_HEADER}\n")).unwrap();
+    let out = d.path().join("out.tsv");
+    let argv = [
+        "test",
+        "--master",
+        master.to_str().unwrap(),
+        "--walk",
+        walk.to_str().unwrap(),
+        "--rejoin",
+        rejoin.to_str().unwrap(),
+        "--table",
+        out.to_str().unwrap(),
+    ];
+    let error = run_to(Cli::try_parse_from(argv).unwrap().args, &mut Vec::new()).unwrap_err();
+    assert!(!out.exists());
+    format!("{error:#}")
+}
+
+#[test]
+fn rejoin_ply_zero_is_an_error() {
+    let key = key_after(&["2g2f"]);
+    let error = rejoin_error(&format!(
+        "w\t{key}\t0\t8c8d\tmain\t0\t\t7g7f\t\t3c3d\t\t\t0\t120\t0.1\t10\t2"
+    ));
+    assert!(error.contains("0 手目"), "{error}");
+}
+
+#[test]
+fn empty_ply_in_rejoin_and_bridge_tables_is_accepted() {
+    let d = TempDir::new().unwrap();
+    let walk = [walk_line(
+        "b",
+        "out",
+        0.02,
+        &["7g7f", "3c3d", "2g2f", "8c8d"],
+    )];
+    let on_walk = key_after(&["7g7f", "3c3d"]);
+    let off_walk = key_after(&["5g5f"]);
+    let bridge = d.path().join("bridge.tsv");
+    std::fs::write(
+        &bridge,
+        format!(
+            "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\tweight\n\
+             {on_walk}\t\tb\t2g2f\t40\t10\t30\t\t\t40\t10\t\n"
+        ),
+    )
+    .unwrap();
+    let audit = d.path().join("audit.tsv");
+    std::fs::write(
+        &audit,
+        "key\tply\tside\tsource\tmain\tmain_value\tmain_from\tmain_eval\tbest\tbest_value\tbest_from\tbest_eval\tgap\tmain_value_black\tbest_value_black\n",
+    )
+    .unwrap();
+    let rejoin = d.path().join("rejoin.tsv");
+    std::fs::write(
+        &rejoin,
+        format!(
+            "{REJOIN_HEADER}\n\
+             b\t{on_walk}\t\t2g2f\tmain\t0\t\t8c8d\t\t2f2e\t\t\t0\t10\t0.1\t10\t2\n\
+             w\t{off_walk}\t\t8c8d\tmain\t0\t\t2g2f\t\t3c3d\t\t\t0\t150\t0.1\t10\t1\n"
+        ),
+    )
+    .unwrap();
+    let (stdout, table, md) = run_report(
+        &d,
+        &walk,
+        &[
+            "--bridge",
+            bridge.to_str().unwrap(),
+            "--bridge-audit",
+            audit.to_str().unwrap(),
+            "--rejoin",
+            rejoin.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("gap=1 rejoin=2"), "{stdout}");
+    // 手順のある行は手順から番号を求め、手順も ply も無い行は番号を不明と書く。
+    assert!(table.contains("gap\tb\tb\t3\t0.02\t"), "{table}");
+    assert!(table.contains("rejoin\tb\tb\t3\t0.02\t"), "{table}");
+    assert!(table.contains("rejoin\tw\tw\t-\t0.01\t"), "{table}");
+    assert!(
+        md.contains("| 先手 3 手目 | 0.0200 | ▲２六歩 (0) | △８四歩 → ▲２五歩 (+10) |"),
+        "{md}"
+    );
     assert!(
         md.contains(
-            "| 4 | 0.020 | +40 | tree:2 | 届かない | なし | ▲７六歩 △３四歩 ▲２六歩 △８四歩 |"
+            "| 後手 ? 手目 | 0.0100 | `8c8d` (0) | `2g2f` → `3c3d` (+150) | なし | 手順なし |"
         ),
         "{md}"
     );
+}
+
+#[test]
+fn rejoin_number_follows_a_longer_path_to_the_same_position() {
+    let d = TempDir::new().unwrap();
+    // 玉の往復で 4 手余計に指しても同じ局面に着く。表の ply (2) と偶奇が同じなら、手順の長さで数える。
+    let long = ["5i5h", "5a5b", "5h5i", "5b5a", "7g7f"];
+    let key = key_after(&long);
+    assert_eq!(key, key_after(&["7g7f"]));
+    let walk = [walk_line("w", "own", 0.02, &long)];
+    let rejoin = d.path().join("rejoin.tsv");
+    std::fs::write(
+        &rejoin,
+        format!(
+            "{REJOIN_HEADER}\n\
+             w\t{key}\t2\t3c3d\tmain\t0\t\t2g2f\t\t8c8d\t\t\t0\t120\t0.1\t10\t2\n"
+        ),
+    )
+    .unwrap();
+    let (_, table, md) = run_report(&d, &walk, &["--rejoin", rejoin.to_str().unwrap()]);
+    assert!(table.contains("rejoin\tw\tw\t6\t0.02\t"), "{table}");
+    assert!(
+        md.contains(
+            "| 後手 6 手目 | 0.0200 | △３四歩 (0) | ▲２六歩 → △８四歩 (+120) | なし | ▲５八玉 △５二玉 ▲５九玉 △５一玉 ▲７六歩 |"
+        ),
+        "{md}"
+    );
+}
+
+#[test]
+fn walk_ply_must_equal_the_number_of_moves() {
+    let d = TempDir::new().unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[master_row(&[], "7g7f", "", "")])).unwrap();
+    let walk = d.path().join("walk.tsv");
+    let key = key_after(&["7g7f", "3c3d"]);
+    std::fs::write(
+        &walk,
+        format!("{WALK_HEADER}\nb\town\t3\t0.5\t\t\t\t\t{key}\t7g7f 3c3d\t\t\t\t\t\n"),
+    )
+    .unwrap();
+    let out = d.path().join("out.tsv");
+    let argv = [
+        "test",
+        "--master",
+        master.to_str().unwrap(),
+        "--walk",
+        walk.to_str().unwrap(),
+        "--table",
+        out.to_str().unwrap(),
+    ];
+    let error = format!(
+        "{:#}",
+        run_to(Cli::try_parse_from(argv).unwrap().args, &mut Vec::new()).unwrap_err()
+    );
+    assert!(error.contains("ply 3"), "{error}");
+}
+
+const REJOIN_HEADER: &str = "side\tkey\tply\tmove\trole\texpected\tdig\trejoin_move\trejoin\trejoin_main\trejoin_value\tdrop\texpected_black\trejoin_value_black\tweight\tdig_games\trejoin_games";
+
+#[test]
+fn rejoin_takes_the_path_from_own_side_walk_rows_and_marks_missing_paths() {
+    let d = TempDir::new().unwrap();
+    // 同じ局面に相手の側の行と RAMU の側の行が着く。先に読んだ相手の側の行でなく RAMU の側の行の手順を使う。
+    let via_other = ["2g2f", "3c3d", "7g7f"];
+    let via_own = ["7g7f", "3c3d", "2g2f"];
+    let shared = key_after(&via_own);
+    assert_eq!(shared, key_after(&via_other));
+    let walk = [
+        walk_line("b", "out", 0.02, &via_other),
+        walk_line("w", "own", 0.02, &via_own),
+    ];
+    let no_path = key_after(&["5g5f"]);
+    let rejoin_key = key_after(&["7g7f", "3c3d", "2g2f", "8c8d", "2f2e"]);
+    let rejoin = d.path().join("rejoin.tsv");
+    std::fs::write(
+        &rejoin,
+        format!(
+            "{REJOIN_HEADER}\n\
+             w\t{shared}\t4\t8c8d\tmain\t0\t\t2f2e\t{rejoin_key}\t8d8e\t\t\t0\t120\t0.1\t10\t2\n\
+             w\t{no_path}\t2\t8c8d\tmain\t0\t\t2g2f\t\t3c3d\t\t\t0\t150\t0.1\t10\t1\n"
+        ),
+    )
+    .unwrap();
+    let (_, table, md) = run_report(&d, &walk, &["--rejoin", rejoin.to_str().unwrap()]);
+    assert!(
+        md.contains(
+            "| 後手 4 手目 | 0.0200 | △８四歩 (0) | ▲２五歩 → △８五歩 (+120) | なし | ▲７六歩 △３四歩 ▲２六歩 |"
+        ),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "| 後手 2 手目 | 0.0100 | `8c8d` (0) | `2g2f` → `3c3d` (+150) | なし | 手順なし |"
+        ),
+        "{md}"
+    );
+    let rows: Vec<Vec<_>> = table.lines().skip(1).map(|l| l.split('\t').collect()).collect();
+    assert_eq!((rows[0][2], rows[0][3], rows[0][10]), ("w", "4", "7g7f 3c3d 2g2f"));
+    assert_eq!((rows[1][2], rows[1][3], rows[1][10]), ("w", "2", "-"));
+}
+
+#[test]
+fn table_ply_with_the_wrong_parity_is_an_error() {
+    let key = key_after(&["2g2f"]);
+    let error = rejoin_error(&format!(
+        "w\t{key}\t3\t8c8d\tmain\t0\t\t7g7f\t\t3c3d\t\t\t0\t120\t0.1\t10\t2"
+    ));
+    assert!(error.contains("先手番は奇数、後手番は偶数"), "{error}");
 }
 
 #[test]
@@ -144,8 +396,8 @@ fn bridge_gaps_and_rejoins_use_walk_weight_and_targets() {
         &rejoin,
         format!(
             "side\tkey\tply\tmove\trole\texpected\tdig\trejoin_move\trejoin\trejoin_main\trejoin_value\tdrop\texpected_black\trejoin_value_black\tweight\tdig_games\trejoin_games\n\
-             w\t{light_key}\t2\t8c8d\tmain\t0\t\t3c3d\t\t\t\t\t0\t120\t0.1\t10\t2\n\
-             w\t{light_key}\t2\t8c8d\tmain\t0\t\t4c4d\t\t\t\t\t0\t30\t0.1\t10\t2\n\
+             w\t{light_key}\t2\t8c8d\tmain\t0\t\t7g7f\t\t3c3d\t\t\t0\t120\t0.1\t10\t2\n\
+             w\t{light_key}\t2\t8c8d\tmain\t0\t\t2f2e\t\t\t\t\t0\t30\t0.1\t10\t2\n\
              b\t{gap_key}\t3\t2g2f\tmain\t0\t\t9c9d\t\t\t\t\t0\t10\t0.004\t10\t1\n"
         ),
     )
@@ -161,19 +413,24 @@ fn bridge_gaps_and_rejoins_use_walk_weight_and_targets() {
     let (stdout, table, md) = run_report(&d, &walk, &args);
     // 軽い局面 (重み 0.0005) の切れ目は落とし、rejoin は来る割合 0.02 の目標割れだけ残す。
     assert!(stdout.contains("gap=1 rejoin=1"), "{stdout}");
-    assert!(table.contains("gap\tb\t3\t0.02\t+10\t\t届かない\tなし\t"), "{table}");
+    assert!(table.contains("gap\tb\tb\t3\t0.02\t+10\t\t届かない\tなし\t"), "{table}");
     assert!(
         table.contains("main=2g2f;plain_black=40;best=6g6f;best_value_black=60"),
         "{table}"
     );
-    assert!(table.contains("rejoin\tw\t2\t0.02\t+120\t\t届かない"), "{table}");
+    assert!(table.contains("rejoin\tw\tw\t2\t0.02\t+120\t\t届かない"), "{table}");
     assert!(
         md.contains(
-            "| 先手 | 3 | 0.020 | ▲２六歩 | +40 → +10 | ▲６六歩 +60 | なし | ▲７六歩 △３四歩 |"
+            "| 先手 3 手目 | 0.020 | ▲２六歩 | +40 → +10 | ▲６六歩 +60 | なし | ▲７六歩 △３四歩 |"
         ),
         "{md}"
     );
-    assert!(md.contains("| 後手 | 2 | 0.0200 | 8c8d (0) | 3c3d → +120 |"), "{md}");
+    assert!(
+        md.contains(
+            "| 後手 2 手目 | 0.0200 | △８四歩 (0) | ▲７六歩 → △３四歩 (+120) | なし | ▲２六歩 |"
+        ),
+        "{md}"
+    );
 }
 
 #[test]
@@ -240,8 +497,35 @@ fn queued_trees_list_every_box_both_sides_and_skip_depth_zero() {
     );
     let b = make_box("B", &[held.to_string()], &[("same", "b", false, true, 0)]);
     let walk = [walk_line("b", "out", 0.02, &exit)];
-    let (_, table, _) = run_report(&d, &walk, &["--box", &a, "--box", &b]);
-    assert!(table.contains("\tboth (A, 40/92); same (A, DONE); same (B, hold)\t"), "{table}");
+    // rejoin の行は、戻った先の局面を根にした木も受付に数える。
+    let rejoin = d.path().join("rejoin.tsv");
+    std::fs::write(
+        &rejoin,
+        format!(
+            "{REJOIN_HEADER}\n\
+             b\t{}\t3\t2g2f\tmain\t0\t\t8c8d\t{}\t2f2e\t\t\t0\t10\t0.1\t10\t2\n",
+            key_after(&exit[..2]),
+            key_after(&exit)
+        ),
+    )
+    .unwrap();
+    let (_, table, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--box",
+            &a,
+            "--box",
+            &b,
+            "--rejoin",
+            rejoin.to_str().unwrap(),
+        ],
+    );
+    let queued = "\tboth (A, 40/92); same (A, DONE); same (B, hold)\t";
+    for class in ["bad", "rejoin"] {
+        let line = table.lines().find(|l| l.starts_with(&format!("{class}\t"))).unwrap();
+        assert!(line.contains(queued), "{line}");
+    }
     let progress_path = d.path().join("A/fetch/progress.json");
     let master = d.path().join("moves.tsv");
     let walk_path = d.path().join("walk.tsv");
@@ -338,5 +622,5 @@ fn gap_at_walk_stop_position_uses_the_row_weight() {
         ],
     );
     assert!(stdout.contains("gap=1"), "{stdout}");
-    assert!(table.contains("gap\tw\t4\t0.02\t+100\t\t届かない"), "{table}");
+    assert!(table.contains("gap\tw\tw\t4\t0.02\t+100\t\t届かない"), "{table}");
 }
