@@ -89,7 +89,8 @@ struct Item {
     /// RAMU の側。局面の手番は `key` から取る (out・rare の止まりは相手の手番)。
     side: String,
     /// `key` の局面で次に指す手が何手目か (初期局面の手が 1)。先手番は奇数、後手番は偶数。
-    move_number: usize,
+    /// 手順も入力の表の ply も無い行は `None`。
+    move_number: Option<usize>,
     weight: f64,
     value_black: Option<i64>,
     kind: String,
@@ -209,46 +210,51 @@ fn last_own_value(
     Ok(last)
 }
 
-/// 局面の手番と何手目の偶奇 (先手番は奇数、後手番は偶数) と、手順の長さとの一致を確かめる。
+/// 何手目が 1 以上で、局面の手番と偶奇が合う (先手番は奇数、後手番は偶数) ことを確かめる。
+fn check_parity(key: &str, number: usize) -> Result<()> {
+    let turn = side(key);
+    ensure!(matches!(turn, "b" | "w"), "局面の手番が b / w ではありません: {key}");
+    ensure!(
+        number >= 1 && (number % 2 == 1) == (turn == "b"),
+        "{}番の局面なのに {number} 手目です (1 以上で、先手番は奇数、後手番は偶数): {key}",
+        side_name(turn)
+    );
+    Ok(())
+}
+
+/// 局面の手番と何手目の偶奇と、手順の長さとの一致を確かめる。
 /// 数え方の違う列が混ざった表は読む人が手番を取り違えるので、合わない行は出力せずに止める。
 fn check_move_number(item: &Item) -> Result<()> {
-    let turn = side(&item.key);
-    ensure!(matches!(turn, "b" | "w"), "局面の手番が b / w ではありません: {}", item.key);
+    let class = item.class.name();
+    let expected = item.moves.as_ref().map(|moves| moves.len() + 1);
+    if let Some(number) = item.move_number {
+        check_parity(&item.key, number).with_context(|| format!("{class} の行"))?;
+    }
     ensure!(
-        (item.move_number % 2 == 1) == (turn == "b"),
-        "{} の行: {}番の局面なのに {} 手目です (先手番は奇数、後手番は偶数): {}",
-        item.class.name(),
-        side_name(turn),
+        expected.is_none() || expected == item.move_number,
+        "{class} の行: 手順からは {expected:?} 手目なのに {:?} 手目です: {}",
         item.move_number,
         item.key
     );
-    if let Some(moves) = &item.moves {
-        ensure!(
-            moves.len() + 1 == item.move_number,
-            "{} の行: 手順が {} 手なのに {} 手目です: {}",
-            item.class.name(),
-            moves.len(),
-            item.move_number,
-            item.key
-        );
-    }
     Ok(())
 }
 
 /// 表の ply (その局面で次に指す手の番号) を読み、局面の手番と偶奇が合うことを確かめる。
-fn table_move_number(row: &BTreeMap<&str, &str>, key: &str) -> Result<usize> {
-    let ply: usize = column(row, "ply")?.parse().context("ply が不正です")?;
-    ensure!(
-        (ply % 2 == 1) == (side(key) == "b"),
-        "ply {ply} と局面の手番が合いません (先手番は奇数、後手番は偶数): {key}"
-    );
-    Ok(ply)
+/// 元データの ply は空欄を許し、rejoin・bridge の表はそれをそのまま持つので、空は `None`。
+fn table_move_number(row: &BTreeMap<&str, &str>, key: &str) -> Result<Option<usize>> {
+    let text = column(row, "ply")?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let ply: usize = text.parse().context("ply が不正です")?;
+    check_parity(key, ply).context("ply")?;
+    Ok(Some(ply))
 }
 
 struct RejoinRow {
     item: Item,
-    /// 表の ply。手順を復元できないときの何手目に使う。
-    table_number: usize,
+    /// 表の ply (空欄なら `None`)。手順を復元できないときの何手目に使う。
+    table_number: Option<usize>,
 }
 
 /// rejoin の表から、戻った先の値が目標を割り、来る割合が下限以上の行を取る。
@@ -394,7 +400,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         items.push(Item {
             class,
             side,
-            move_number: moves.len() + 1,
+            move_number: Some(moves.len() + 1),
             weight,
             value_black: value,
             kind,
@@ -456,7 +462,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             items.push(Item {
                 class: Class::Gap,
                 side: side.to_owned(),
-                move_number: path.len() + 1,
+                move_number: Some(path.len() + 1),
                 weight: *weight,
                 value_black: Some(bridged),
                 kind: String::new(),
@@ -474,7 +480,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     {
         // 同じ局面に別の手数で着く手順もあるので、手順があればその長さで数える (偶奇は表の ply と同じ)。
         item.moves = rejoin_paths.get(&item.key).cloned().flatten().map(|(_, moves)| moves);
-        item.move_number = item.moves.as_ref().map_or(table_number, |moves| moves.len() + 1);
+        item.move_number = item.moves.as_ref().map(|moves| moves.len() + 1).or(table_number);
         items.push(item);
     }
     for item in &items {
@@ -521,14 +527,14 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 item.class.name(),
                 item.side,
                 side(&item.key),
-                item.move_number,
+                item.move_number.map_or_else(|| UNKNOWN.to_owned(), |n| n.to_string()),
                 item.weight,
                 fmt_value(item.value_black),
                 item.kind,
                 target_text(args.meets(item.value_black, &item.side)),
                 queued(item),
                 item.key,
-                item.moves.as_ref().map_or_else(|| NO_MOVES.to_owned(), |m| m.join(" ")),
+                item.moves.as_ref().map_or_else(|| UNKNOWN.to_owned(), |m| m.join(" ")),
                 item.extra.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
             )?;
         }
@@ -557,8 +563,8 @@ fn target_text(meets: Option<bool>) -> &'static str {
     }
 }
 
-/// 表の moves の欄で、手順を復元できなかった行の印 (空は初期局面)。
-const NO_MOVES: &str = "-";
+/// 表の move_number・moves の欄で、入力から分からなかった行の印 (moves の空は初期局面)。
+const UNKNOWN: &str = "-";
 
 /// 報告で、手順を復元できなかった行の手順の欄に書く文言。
 const NO_MOVES_TEXT: &str = "手順なし";
@@ -572,9 +578,10 @@ fn moves_text(item: &Item) -> Result<String> {
     }
 }
 
-/// 局面の手番と何手目 (`後手 14 手目`)。
+/// 局面の手番と何手目 (`後手 14 手目`)。何手目が分からない行は `後手 ? 手目`。
 fn position_text(item: &Item) -> String {
-    format!("{} {} 手目", side_name(side(&item.key)), item.move_number)
+    let number = item.move_number.map_or_else(|| "?".to_owned(), |n| n.to_string());
+    format!("{} {number} 手目", side_name(side(&item.key)))
 }
 
 /// 同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`)。bw の木は両方の側に数える。
@@ -713,7 +720,7 @@ fn markdown(
         )?;
         writeln!(
             out,
-            "戻った先の main の値が目標を割る所。局面は RAMU の手番で、RAMU の手 (期待の値) の後に相手が定跡に無い手を指し、戻った先で RAMU が main を指す。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。手順は walk の表でその局面を通る行から取り、通る行が無ければ「{NO_MOVES_TEXT}」と書いて手を USI のまま載せる (何手目は rejoin の表の ply)。受付は局面か戻った先を根にした木。\n",
+            "戻った先の main の値が目標を割る所。局面は RAMU の手番で、RAMU の手 (期待の値) の後に相手が定跡に無い手を指し、戻った先で RAMU が main を指す。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。手順は walk の表でその局面を通る行から取り、通る行が無ければ「{NO_MOVES_TEXT}」と書いて手を USI のまま載せる (何手目は rejoin の表の ply、それも空なら「?」)。受付は局面か戻った先を根にした木。\n",
             args.gap_min_weight
         )?;
         writeln!(

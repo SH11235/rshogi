@@ -364,4 +364,5 @@ fn move_number_must_match_the_side_to_move() {
     assert!(ensure_move_number(&white, 2).is_ok());
     assert!(ensure_move_number(HIRATE_KEY, 2).is_err());
     assert!(ensure_move_number(&white, 3).is_err());
+    assert!(ensure_move_number(&white, 0).is_err());
 }

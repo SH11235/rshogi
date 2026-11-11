@@ -1329,8 +1329,8 @@ fn danger_section(out: &mut String, inputs: &Inputs, reports: &[Report]) -> Resu
 fn ensure_move_number(key: &str, number: usize) -> Result<()> {
     let turn = side(key);
     ensure!(
-        matches!(turn, "b" | "w") && (number % 2 == 1) == (turn == "b"),
-        "局面の手番と {number} 手目が合いません (先手番は奇数、後手番は偶数): {key}"
+        matches!(turn, "b" | "w") && number >= 1 && (number % 2 == 1) == (turn == "b"),
+        "局面の手番と {number} 手目が合いません (1 以上で、先手番は奇数、後手番は偶数): {key}"
     );
     Ok(())
 }

@@ -1970,10 +1970,11 @@ rejoin の表は手順を持たないので、手順は walk の表でその局�
 局面の番号は、表でも報告でも全部の class で同じ数え方です: 何手目 (`move_number`) = その局面で次に指す手の番号 (初期局面の手が 1)。先手番の局面は奇数、後手番の局面は偶数です。
 局面は、walk の止まりでは止まった局面、gap と rejoin では RAMU が指す局面です。止まった局面の手番は、own が RAMU、out・rare が相手で、max は `master walk --max-ply` の偶奇によります。
 手順のある行は「手順の手数 + 1」を何手目にします (同じ局面に別の手数で着く手順があるので、rejoin の表の ply とは同じ偶奇で違う数になりえます)。手順のない rejoin の行は表の ply です。
-手番と何手目の偶奇が合わない行、手順の手数と合わない行、walk の ply が手順の手数と違う行、bridge・rejoin の ply の偶奇が局面の手番と合わない行があれば、何も書かずにエラーで止まります。
+bridge・rejoin の表の ply は空でもよく (元データの ply が空の局面)、手順があれば手順から数えます。手順も ply も無い rejoin の行は何手目が不明で、表の `move_number` は `-`、報告は `後手 ? 手目` と手番だけ書きます。
+手番と何手目の偶奇が合わない行、何手目が 0 の行、手順の手数と合わない行、walk の ply が手順の手数と違う行、bridge・rejoin の空でない ply が 0 か、偶奇が局面の手番と合わない行があれば、何も書かずにエラーで止まります。
 
 表は `class side turn move_number weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
-side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
+side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
 queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。rejoin の行は、局面か戻った先の局面を根にした木です。
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
 報告は 1 (good)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
