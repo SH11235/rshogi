@@ -41,6 +41,7 @@ mod targets;
 #[cfg(test)]
 mod tests;
 mod transfer;
+mod unpromotion;
 mod walk;
 
 pub use borrow::{BorrowArgs, run as run_borrow};

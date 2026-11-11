@@ -338,6 +338,8 @@ pub(super) struct ValidationReport {
 #[derive(Default)]
 struct PositionRows {
     moves: BTreeMap<String, Vec<usize>>,
+    /// main・alt の行の番号。
+    played: BTreeSet<usize>,
     first: usize,
     playable: [usize; 2],
     mains: [usize; 2],
@@ -439,6 +441,9 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
             error(&format!("同じ局面と手が {first} 行目と重なっています"));
         }
         occurrences.push(at);
+        if matches!(role, "main" | "alt") {
+            group.played.insert(at);
+        }
         for scope in 0..2 {
             if scope == 1 && tier != "curated" {
                 continue;
@@ -491,6 +496,7 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
         }
         let mut legal = MoveList::new();
         generate_legal_all(&pos, &mut legal);
+        let needless = super::unpromotion::needless_unpromotions(&pos, &legal);
         let legal: BTreeSet<_> = legal.iter().map(|mv| mv.to_usi()).collect();
         for (mv, lines) in &group.moves {
             if !legal.contains(mv) {
@@ -498,6 +504,15 @@ pub(super) fn validate_table(mut reader: impl BufRead) -> Result<ValidationRepor
                     errors.push((
                         *at,
                         format!("元データの {at} 行目: 合法手ではありません: {mv} ({key})"),
+                    ));
+                }
+            } else if needless.contains(mv) {
+                for at in lines.iter().filter(|at| group.played.contains(at)) {
+                    errors.push((
+                        *at,
+                        format!(
+                            "元データの {at} 行目: 成れる角・飛・歩の不成は main・alt にできません (master audit --apply で record にする): {mv} ({key})"
+                        ),
                     ));
                 }
             }
@@ -544,6 +559,25 @@ mod tests {
             .into_iter()
             .map(|(_, message)| message)
             .collect()
+    }
+
+    #[test]
+    fn needless_unpromotion_is_an_error_only_as_main_or_alt() {
+        let line = |mv: &str, role: &str| {
+            test_row(&[
+                ("key", "4k4/7b1/9/9/9/9/9/9/4K4 w -".into()),
+                ("ply", "2".into()),
+                ("move", mv.into()),
+                ("role", role.into()),
+                ("source", "ext".into()),
+                ("tier", "wide".into()),
+                ("since", "test".into()),
+            ])
+        };
+        let found = errors(&[line("2b7g+", "main"), line("2b7g", "alt")]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("不成") && found[0].contains("2b7g"), "{found:?}");
+        assert!(errors(&[line("2b7g+", "main"), line("2b7g", "record")]).is_empty());
     }
 
     #[test]
@@ -697,7 +731,7 @@ mod tests {
     #[test]
     fn line_endings_and_optional_promotion_are_validated() {
         let mut r = row("5d5c", "main", "wide");
-        r.set("key", "4k4/9/9/4P4/9/9/9/9/4K4 b -".into());
+        r.set("key", "4k4/9/9/4S4/9/9/9/9/4K4 b -".into());
         assert!(errors(&[r]).is_empty());
         let text = format_master(&[row("7g7f", "main", "wide")]);
         for text in [

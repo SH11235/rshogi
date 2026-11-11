@@ -233,11 +233,15 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     }
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
-    let rows = parse_master(&text)?;
+    let mut rows = parse_master(&text)?;
     for row in &rows {
         schema.validate_row(row)?;
     }
     let before = rows.len();
+    let unpromoted = super::unpromotion::demote_rows(&mut rows, &args.since)?;
+    validate(&rows)?;
+    let unpromoted_moves = super::unpromotion::drop_node_moves(&mut nodes)?;
+    eprintln!("{} / 木の手から外した不成 {unpromoted_moves}", unpromoted.format());
     let options = Options {
         since: &args.since,
         note: &args.note,
@@ -1211,6 +1215,58 @@ mod tests {
         std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
         std::fs::remove_file(tree.join(NODE_MOVES)).unwrap();
         assert!(run(args(vec![tree], false)).is_err());
+    }
+
+    #[test]
+    fn run_demotes_needless_unpromotions_and_does_not_register_them_from_trees() {
+        const W: &str = "4k4/7b1/9/9/9/9/9/9/4K4 w -";
+        let dir = tempfile::tempdir().unwrap();
+        let master_path = dir.path().join("moves.tsv");
+        std::fs::write(
+            &master_path,
+            format_master(&master(&[
+                row(W, "2b7g", "main", "ext", "wide", "50"),
+                row(W, "2b3c", "alt", "ext", "wide", "45"),
+                row(W, "2b6f", "alt", "ext", "wide", "20"),
+            ])),
+        )
+        .unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("STATUS"), "DONE\n").unwrap();
+        std::fs::write(
+            tree.join(NODE_MOVES),
+            format!("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n{W}\t2\t0\t0\t1000000000\t2b8h\t90\t0\t1\n{W}\t2\t0\t0\t1000000000\t2b6f\t35\t0\t2\n"),
+        )
+        .unwrap();
+        run(RegisterArgs {
+            master: master_path.clone(),
+            schema: None,
+            journal: Vec::new(),
+            since: "tag".into(),
+            note: String::new(),
+            alt_gap: 40,
+            replace_curated: false,
+            skip_keys: None,
+            conflicts: dir.path().join("conflicts.tsv"),
+            apply: true,
+            switch_rule: SwitchRule::Line,
+            single: switch::test_args(),
+            keep_line: None,
+            keep_min_depth: None,
+            bridge_replies: false,
+            draw_value_black: -70,
+            draw_value_white: 0,
+            trees: vec![tree],
+        })
+        .unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+        validate(&rows).unwrap();
+        assert_eq!(find(&rows, W, "2b7g").unwrap().get("role"), "record");
+        assert!(find(&rows, W, "2b8h").is_none());
+        let main: Vec<_> =
+            rows.iter().filter(|r| r.get("role") == "main").map(|r| r.get("move")).collect();
+        assert_eq!(main, ["2b6f"]);
     }
 
     #[test]

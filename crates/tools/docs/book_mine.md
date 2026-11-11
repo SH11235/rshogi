@@ -1063,6 +1063,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 - 局面の値によらず登録します。各局面の main は伝播後の値の 1 位 (伸ばしていない手は 1 回の読みの値で比べる)、alt は main との差が `--alt-gap` 未満の手です。`record` の手は足さず、次の手を使います。`bench` (控え) 自身の source が schema で置換可能で、木の 1 位か、1 位との差が `--alt-gap` 未満なら alt に戻します。1 位なら既存の alt と同じ条件で main にでき、置換可能な source の評価値も更新します。main が無い局面でも、復帰した 1 位の控えを main にし、note に main への復帰と記します。この手は main の追加数には含めず、復帰数に数えます。curated の main がない局面の curated の控えは、`--replace-curated` の有無によらず復帰・昇格の候補から除き、「curated の main が無い控え」として別集計します。source が置換不可の控えは候補から除外して変更せず、「保護された控え」として別集計します。集計に「bench から戻した手」も出します。`borrow value` は控えを復帰・main 昇格させず、控えの行を変更しません。控えの復帰は `tree register` と `master audit --revive-bench` で行います。
 - 元データに main の無い局面には、`source=read`・`tier=wide` の行で main と alt を足します。
+- 登録の前に、元データの main・alt のうち成れる角・飛・歩の不成を `record` にし (下の「成れる角・飛・歩の不成」)、木の手からも外します。木の手から外した数と合わせて stderr に出します。
 - 元データの main が木の 1 位と違うとき、その main が読みから作った行 (schema の replaceable=1、schema 省略時は `read`・`ext`) で、局面に `curated` の行が無ければ、木の 1 位を main にし、元の main を alt に残します。それ以外 (`replaceable=0` の source (schema 省略時は `read`・`ext` 以外) の main、`curated` の局面) は main を残し、木の 1 位を alt で足して `--conflicts` の一覧に出します。`--replace-curated` を付けると、`curated` の局面でも main の source が置き換えてよいものなら木の 1 位を main にします。元の main は alt にして `tier=wide` に移し、新しい main は元の main の `tier` を引き継ぎ、局面の `curated` の main を 1 つに保ちます (新しい main の行き先に `curated` の行が無ければ、丁寧な定跡の書き出しはそこで終わります)。元の main の note に `(curated から wide)` を足し、集計に curated の main を替えた局面の数を出します。`record` の行と、置き換えない source の main はこの指定でも替えません。
 - main を替える前に、仮に登録した元データを `master audit` と同じ伝播 (`--bridge-replies`・`--draw-value-black`・`--draw-value-white` は `master audit` の同じ名前の指定と同じ意味) で解き、元の main と木の 1 位の伝播後の値を比べます。元の main が `--keep-line` (既定 20、0 で比べない) 以上上回り、元の main の値が `--keep-min-depth` (既定 1) 局面以上先の読みから来ていれば、main を替えずに木の 1 位を alt で足し、`--conflicts` の一覧に出します。木は根の局面から読むので、元の main の先にある元データの深い読みが入らず、木の値だけで比べると深い値を浅い値で替えることがあるためです。登録後の元データで比べるので、木が元の main の先を読み直した分は値に入り、続く `master audit` が見る値とも揃います (版の手順の `master audit` と同じ `--bridge-replies`・千日手の値を渡してください)。`--keep-line` を `master audit --line` より小さくするのは、`audit` が戻さない差の局面を拾うためです。`--keep-min-depth 1` は、元の main の値が、その手の 1 回の読みの値のまま (元データに先の局面が無いか、補った局面で定跡に無い応手が最善) のときは残しません。段数は、手の行き先から最善の手を辿り、読みの値で止まるまでの局面の数です (循環に入ったらそこまで)。元の main か木の 1 位の値が分からない (読みの値も先の局面の値も無い) 局面は比べずに替えます。比べる伝播は `master audit --opp-records` のように相手の record を使うことはしません。元の main が木の読み (MultiPV) に入っていないかどうかでは比べ方を変えません (一覧の `main_tree_value` が `-` の局面がそれです)。集計の「食い違い」に、元の main の値が上なので残した局面 (`--switch-rule propagated` では残した全局面) の数を添えます。
 - `--switch-rule propagated` では `--keep-line`・`--keep-min-depth` を使わず (指定すると止まります)、同じ伝播の値で `master audit --switch-rule propagated` と同じ規則で決めます。元の main と木の 1 位の値がどちらも手の先の局面の値から来ていれば、木の 1 位が 1 でも上回るときだけ替え、同じ値か元の main が上なら残します。どちらかの値が 1 回の読み (元データに手の先の局面が無いか、補った局面で定跡に無い応手が最善) なら替えず、どちらも `--conflicts` の一覧に `reason=keep` で出します (段数 0 の側が 1 回の読み)。`--single-enqueue-out` を渡すと、1 回の読みの手を伸ばす木の行を書きます (形と `--exclude-queue` の除外は `master audit --single-enqueue-out` と同じで、木の 1 位が元の main を上回る差の大きい順に並べます)。値の分からない手の局面は今までどおり替えます。
@@ -1090,10 +1091,17 @@ key ply move role source evals nodes cond value_kind lineage tier since note
 - 局面に `main` / `alt` がある場合、`main` がちょうど 1 行あること。全行と `curated` の行だけでそれぞれ検査します。指さない手 (`bench`・`record`) だけの局面も受け付けます。
 - `key` は両玉を 1 枚ずつ含む SFEN の盤面・手番・持ち駒の 3 フィールドで、読み込んだ局面を書き出した正規形と一致すること。
 - `move` はその局面の合法手を表す USI 文字列であること (`bench`・`record` も検査します)。
+- `main`・`alt` の `move` が成れる角・飛・歩の不成でないこと (下の「成れる角・飛・歩の不成」)。誤りとして報告するので、残っていれば `master audit --apply` で `record` にしてから検査し直します。
 
 `--schema` を省いた場合は語彙を検査しません。誤りがあれば、検出した誤りをすべて行番号順に stderr に出し、終了コードは非 0 になります。局面単位の誤りには、その局面が最初に現れた行番号を付けます。UTF-8 ではない行は行番号つきで報告し、次の行の検査を続けます。列数が不正な行は、セルを確定できないため行の内容の検査を省きます。局面を読み込めない場合は、その局面の合法手検査を省きます。
 
 誤りが無ければ、局面数・手の数、tier ごとの局面数と手の数、role ごとの行数、入力に現れた source ごとの行数を stdout に出し、終了コード 0 で終わります。同じ局面が両方の tier にあれば、それぞれの局面数に数えます。評価値の検査は `master audit` などの読み込み側と同じ規則です。
+
+### 成れる角・飛・歩の不成
+
+角・飛・歩 (先手・後手とも) の不成のうち、同じ移動の成る手も合法な手は、元データの `main`・`alt` にしません (`record` なら置けます)。探索の手の生成はこの不成を作らないので読みからは出ず、成った場合と比べて得になる局面もほぼありません。歩の一段目 (後手は九段目) のように不成が反則の所は合法手でないので対象外、桂・銀・香の不成と、成った駒の手も対象外です。
+
+`master audit` (元データを読むどの実行でも) と `tree register` は、この手の行を `record` にして (行は消さず、note に `<since>: 成れる角・飛・歩の不成なので main から record` などを足す) から処理します。`--apply` が無ければ元データは書き換えません。`main` を `record` にした局面は、残る `main`・`alt` のうち、curated の手が残っていればその中から、合法な手、`evals` の平均の分かる手、その値の高い手、元データの順の先を `main` にします (`master cycles` の替わりの main と同じ順。値は伝播前の値なので、`master audit` はこの後の点検で main をさらに替えることがあります)。手が残らなければ、その局面は指さない手だけの局面になります。record にした行の数 (先手番・後手番)、うち main の数、main を選び直した局面、手が残らない局面を stderr に出します。`borrow value` は、大きい定跡から登録する自分の手番の手からこの手を外し、外した数を stderr に出します。
 
 ### 元データの schema
 
@@ -1506,7 +1514,7 @@ book_mine master audit --master moves.tsv --table audit.tsv \
   [--apply --since TAG] [--replace-curated] [--demote-alts] [--revive-bench] [--demote-line 100] [--bad-eval -150]
 ```
 
-定跡の元データの表 (上の 13 列) の読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。`--apply` を省くと元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データ・頻度の定跡・schema の表と同じファイル、または出力先どうしが同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
+定跡の元データの表 (上の 13 列) の main・alt の成れる角・飛・歩の不成を `record` にしてから (上の「成れる角・飛・歩の不成」、`--apply` のときだけ保存)、読みの値を `book_backprop` と同じ後退解析で伝播し、main が伝播後の 1 位から `--line` 以上負ける局面を点検の表に書きます。`--apply` を省くと元データは書き換えません。出力先の親ディレクトリが無ければ作ります。出力先が元データ・頻度の定跡・schema の表と同じファイル、または出力先どうしが同じファイルなら止まります。`key` が正規の SFEN の表記 (持ち駒の並びなど) でなければ止まります (`book_backprop` は正規でない key の局面に子局面の辺を張らないため)。
 
 | オプション | 既定値 | 説明 |
 |---|---:|---|

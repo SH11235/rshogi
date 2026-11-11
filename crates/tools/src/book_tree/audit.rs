@@ -13,6 +13,7 @@ use super::switch::{self, SingleQueueArgs, SingleRead, SwitchRule, from_child};
 use super::targets::{
     DEFAULT_PRIORITY, Line, MAX_DEPTH, MAX_PRIORITY, Opts, parse_root, read_checked_lines,
 };
+use super::unpromotion;
 use crate::book_backprop::{
     BackpropOptions, DrawValues, Graph, MergeMode, MoveValue, PropagationStats, delta_buckets,
     evaluate_edges, graph_from_entries, parse_row, percentile, propagate_values, retain_known,
@@ -406,6 +407,16 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         master_table::validate(&rows)?;
         (Vec::new(), rows, positions, curated_records)
     };
+    let unpromoted = unpromotion::demote_rows(&mut rows, args.since.as_deref().unwrap_or("確認"))?;
+    let positions = if unpromoted.total() > 0 {
+        master_table::validate(&rows)?;
+        let rebuilt =
+            positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
+        (rebuilt.0, positions.1 + unpromoted.total())
+    } else {
+        positions
+    };
+    eprintln!("{}", unpromoted.format());
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -510,6 +521,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     master_table::validate(&rows)?;
     if args.apply
         && (!changes.is_empty()
+            || unpromoted.total() > 0
             || demotions.as_ref().is_some_and(|d| d.total() > 0)
             || revivals.revived.iter().sum::<usize>() > 0)
     {
@@ -5054,5 +5066,43 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let updated = std::fs::read_to_string(&master_path).unwrap();
         assert_ne!(updated, text);
         assert_eq!(master_table::read_master(&master_path).unwrap().0[ROOT].moves[0].mv, "5i4h");
+    }
+
+    #[test]
+    fn apply_demotes_needless_unpromotions_and_reselects_the_main() {
+        const W: &str = "4k4/7b1/9/9/8r/p8/9/9/4K4 w -";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.tsv");
+        let text = master(&[
+            (W, "2b7g", "main", "50"),
+            (W, "2b3c", "alt", "45"),
+            (W, "2b7g+", "alt", "40"),
+            (W, "1e1h", "alt", "60"),
+        ]);
+        std::fs::write(&path, &text).unwrap();
+        let mut args = test_args(dir.path());
+        args.switch_rule = SwitchRule::Propagated;
+        run(args).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let mut args = test_args(dir.path());
+        args.switch_rule = SwitchRule::Propagated;
+        args.apply = true;
+        args.since = Some("T".into());
+        run(args).unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let roles: Vec<_> = rows.iter().map(|r| (r.get("move"), r.get("role"))).collect();
+        assert_eq!(
+            roles,
+            [
+                ("2b7g", "record"),
+                ("2b3c", "main"),
+                ("2b7g+", "alt"),
+                ("1e1h", "record")
+            ]
+        );
+        master_table::validate(&rows).unwrap();
+        let report =
+            master_table::validate_table(std::fs::read(&path).unwrap().as_slice()).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 }
