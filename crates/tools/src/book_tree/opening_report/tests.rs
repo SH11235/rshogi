@@ -286,7 +286,7 @@ fn report_compares_candidates_by_exit_values_and_danger() {
         "| △３四歩 | 40.0% | +50 |",
         "| main | 5 | 60.0% | 10 局・0.000 | 強い対局だけ | ▲２六歩 △８四歩 ▲２五歩 △８五歩 |",
         "| main | 3 | 40.0% | 10 局・1.000 | 表だけ | ▲２六歩 △３四歩 |",
-        "| 4 | 60.0% | main | +60 | unknown | なし | ▲２六歩 △８四歩 ▲２五歩 △８五歩 |",
+        "| 5 | 60.0% | main | +60 | unknown | なし | ▲２六歩 △８四歩 ▲２五歩 △８五歩 |",
     ] {
         assert!(md.contains(needle), "{needle}\n{md}");
     }
@@ -355,4 +355,13 @@ fn danger_keys_accept_a_trailing_ply() {
     let key = hirate(&["7g7f"]);
     let danger = parse_danger(&format!("side\tkey\nw\t{key} 2\n")).unwrap();
     assert!(danger.contains(&("w", key)));
+}
+
+#[test]
+fn move_number_must_match_the_side_to_move() {
+    let white = hirate(&["7g7f"]);
+    assert!(ensure_move_number(HIRATE_KEY, 1).is_ok());
+    assert!(ensure_move_number(&white, 2).is_ok());
+    assert!(ensure_move_number(HIRATE_KEY, 2).is_err());
+    assert!(ensure_move_number(&white, 3).is_err());
 }
