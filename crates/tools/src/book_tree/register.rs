@@ -182,7 +182,10 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let schema = Schema::load(args.schema.as_deref())?;
     let skip_keys = args.skip_keys.as_deref().map(read_skip_keys).transpose()?.unwrap_or_default();
     let mut unknown = 0;
+    // 自動で探すときは木の組を替えて登録し直すので木ごとに持ち、そうでなければ読むたびにまとめて重なる局面を捨てる。
+    let auto = args.auto_skip_flip.is_some();
     let mut trees = Vec::new();
+    let mut merged = Merged::default();
     let mut fingerprints = Vec::new();
     let mut readings = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
@@ -205,11 +208,13 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let fingerprint = tree_fingerprint(dir)?;
         let tree_readings = tree_readings(dir)?;
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
-        trees.push(parse_node_moves(
-            &text,
-            tree,
-            (!tree_readings.is_empty()).then_some(&known_nodes),
-        )?);
+        let parsed =
+            parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
+        if auto {
+            trees.push(parsed);
+        } else {
+            merged.add(parsed, &skip_keys);
+        }
         readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
             tree_readings
         } else {
@@ -218,13 +223,17 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         fingerprints.push(fingerprint);
     }
     let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
-    for ((fingerprint, matched), nodes) in fingerprints.into_iter().zip(matched).zip(&mut trees) {
+    let mut conditions = Vec::new();
+    for (fingerprint, matched) in fingerprints.into_iter().zip(matched) {
         let cond = fingerprint
             .or(matched)
             .map_or_else(|| Ok("unknown".into()), |fp| schema.condition(&fp))?;
         unknown += usize::from(cond == "unknown");
-        for mv in nodes.values_mut().flat_map(|node| &mut node.moves) {
-            mv.cond = cond.clone();
+        conditions.push(cond);
+    }
+    for node in trees.iter_mut().flat_map(|t| t.values_mut()).chain(merged.nodes.values_mut()) {
+        for mv in &mut node.moves {
+            mv.cond = conditions[node.tree].clone();
         }
     }
     let text = std::fs::read_to_string(&args.master)
@@ -263,7 +272,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         },
     };
     let mut builder = Builder {
-        trees: &trees,
+        trees,
         rows: &rows,
         options: &options,
         rule,
@@ -282,7 +291,9 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         );
         skip_keys.extend(found.keys);
     }
-    let all: Vec<usize> = (0..trees.len()).collect();
+    for parsed in std::mem::take(&mut builder.trees) {
+        merged.add(parsed, &skip_keys);
+    }
     let Built {
         rows,
         conflicts,
@@ -292,7 +303,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         disagreements,
         skipped,
         unpromoted_moves,
-    } = builder.build(&all, &skip_keys)?;
+    } = builder.register_merged(merged)?;
     eprintln!("{} / 木の手から外した不成 {unpromoted_moves}", unpromoted.format());
     let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
     let skipped = skipped.len();
@@ -405,8 +416,8 @@ fn check_output(
 
 /// 読み込んだ木と元データから、木の組と取り込まない局面を替えて登録し直す。
 struct Builder<'a> {
-    /// 木ごとの局面 (`--trees` の順)。
-    trees: &'a [BTreeMap<String, Node>],
+    /// 木ごとの局面 (`--trees` の順)。`--auto-skip-flip` のときだけ持つ。
+    trees: Vec<BTreeMap<String, Node>>,
     /// 不成を控えにした後の、登録前の元データ。
     rows: &'a [Row],
     options: &'a Options<'a>,
@@ -426,16 +437,38 @@ struct Built {
     unpromoted_moves: usize,
 }
 
+/// 取り込まない局面を除いてまとめた木の局面。
+#[derive(Default)]
+struct Merged {
+    nodes: BTreeMap<String, Node>,
+    /// 木どうしで 1 位が違った局面の数。
+    disagreements: usize,
+    skipped: BTreeSet<String>,
+}
+
+impl Merged {
+    fn add(&mut self, mut parsed: BTreeMap<String, Node>, skip: &BTreeSet<String>) {
+        self.skipped.extend(skip_nodes(&mut parsed, skip));
+        self.disagreements += merge(&mut self.nodes, parsed);
+    }
+}
+
 impl Builder<'_> {
+    /// `trees` の番号の木だけを取り込んで登録し直す。
     fn build(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Built> {
-        let mut nodes = BTreeMap::new();
-        let mut disagreements = 0;
-        let mut skipped = BTreeSet::new();
+        let mut merged = Merged::default();
         for &tree in trees {
-            let mut parsed = self.trees[tree].clone();
-            skipped.extend(skip_nodes(&mut parsed, skip));
-            disagreements += merge(&mut nodes, parsed);
+            merged.add(self.trees[tree].clone(), skip);
         }
+        self.register_merged(merged)
+    }
+
+    fn register_merged(&self, merged: Merged) -> Result<Built> {
+        let Merged {
+            mut nodes,
+            disagreements,
+            skipped,
+        } = merged;
         let unpromoted_moves = super::unpromotion::drop_node_moves(&mut nodes)?;
         // 登録後の元データで比べるのは、続く master audit が見る値と揃え、木が元の main の先を読み直した分も入れるため。
         // main と alt の入れ替えは伝播の値を変えないので、仮の登録の値で残す局面を決めて登録し直せばよい。
