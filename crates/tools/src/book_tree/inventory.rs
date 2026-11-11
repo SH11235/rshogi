@@ -84,6 +84,7 @@ struct Entry {
 }
 
 pub(super) fn run(args: InventoryArgs) -> Result<()> {
+    reject_under_roots(&args.roots, &[("--out", &args.out), ("--table", &args.table)])?;
     let mut inputs = Vec::new();
     inputs.extend(args.registered.as_deref().map(|p| ("--registered", p)));
     inputs.extend(args.excluded_readings.as_deref().map(|p| ("--excluded-readings", p)));
@@ -142,6 +143,44 @@ pub(super) fn run(args: InventoryArgs) -> Result<()> {
         println!("登録済みの一覧のうち根の下に無かったパス {}", unmatched + missing);
     }
     Ok(())
+}
+
+/// 出力が探索の根の下を指すなら止める。木の読みや `node_moves.tsv` を出力で上書きしない。
+///
+/// 一時ファイルは `--table` と同じディレクトリに作るので、同じ検査で根の外になる。
+fn reject_under_roots(roots: &[PathBuf], outputs: &[(&str, &Path)]) -> Result<()> {
+    for root in roots {
+        let real = root
+            .canonicalize()
+            .with_context(|| format!("木の出力先を探す根を解決できません: {}", root.display()))?;
+        for (name, output) in outputs {
+            ensure!(
+                !resolve_missing(output)?.starts_with(&real),
+                "{name} {} が --root {} の下にあります (出力は --root の外に置いてください)",
+                output.display(),
+                root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// まだ無いディレクトリを作らずに、実在する一番深い祖先を解決して残りの名前を付けたパス。
+fn resolve_missing(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    for ancestor in absolute.ancestors() {
+        if let Ok(real) = ancestor.canonicalize() {
+            let rest = absolute.strip_prefix(ancestor)?;
+            // 実在しない名前を `..` で戻る書き方は、祖先を作った後に別の場所を指しうる。
+            ensure!(
+                rest.components().all(|c| matches!(c, std::path::Component::Normal(_))),
+                "{} を解決できません (実在しないディレクトリを .. で戻っています)",
+                path.display()
+            );
+            return Ok(real.join(rest));
+        }
+    }
+    Ok(absolute)
 }
 
 /// 実体のパスの集合と、解決できなかった行の数。
@@ -386,23 +425,34 @@ fn mark_copies(entries: &mut [Entry]) {
         if members.len() < 2 || members.iter().all(|&i| entries[i].verdict != CANDIDATE) {
             continue;
         }
-        // 読めない出力先はどれとも同じ内容とみなさない。
         let hashes: Vec<_> = members
             .iter()
-            .map(|&i| content_hash(Path::new(&entries[i].path)).ok())
+            .map(|&i| content_hash(Path::new(&entries[i].path)).map_err(|e| format!("{e:#}")))
             .collect();
-        let same = |a: usize, b: usize| hashes[a].is_some() && hashes[a] == hashes[b];
+        let same = |a: usize, b: usize| hashes[a].is_ok() && hashes[a] == hashes[b];
         let mut kept = Vec::new();
         for (m, &index) in members.iter().enumerate() {
             if entries[index].verdict != CANDIDATE {
                 continue;
             }
-            let registered = (0..members.len())
-                .find(|&o| entries[members[o]].verdict == REGISTERED && same(m, o));
-            let (verdict, other) = match (registered, kept.iter().find(|&&o| same(m, o))) {
-                (Some(o), _) => ("registered-copy", o),
-                (None, Some(&o)) => ("duplicate", o),
-                (None, None) => {
+            let registered = |o: &usize| entries[members[*o]].verdict == REGISTERED;
+            // 比べられなかった相手を「内容が違う」とみなすと、登録済みの木の写しを候補に残しうる。
+            let failed = match &hashes[m] {
+                Err(e) => (0..members.len()).find(|&o| o != m).map(|o| (o, e)),
+                Ok(_) => (0..members.len())
+                    .filter(registered)
+                    .find_map(|o| hashes[o].as_ref().err().map(|e| (o, e))),
+            };
+            let copy = (0..members.len()).filter(registered).find(|&o| same(m, o));
+            let (verdict, other) = match (copy, failed, kept.iter().find(|&&o| same(m, o))) {
+                (Some(o), _, _) => ("registered-copy", o),
+                (None, Some((o, error)), _) => {
+                    entries[index].detail = format!("{} {error}", entries[members[o]].path);
+                    entries[index].verdict = "compare-failed".into();
+                    continue;
+                }
+                (None, None, Some(&o)) => ("duplicate", o),
+                (None, None, None) => {
                     kept.push(m);
                     continue;
                 }
@@ -430,9 +480,15 @@ fn mark_copies(entries: &mut [Entry]) {
 fn content_hash(dir: &Path) -> Result<[u8; 32]> {
     let mut hash = Sha256::new();
     let mut paths = reading_files(dir)?;
+    ensure!(
+        !paths.is_empty(),
+        "{}: 読みのファイル (d<段>.jsonl) がありません",
+        dir.display()
+    );
     paths.push(dir.join(NODE_MOVES));
     for path in paths {
-        let mut file = File::open(&path)?;
+        let mut file =
+            File::open(&path).with_context(|| format!("{} を読めません", path.display()))?;
         hash.update(path.file_name().context("ファイル名がありません")?.as_encoded_bytes());
         hash.update(file.metadata()?.len().to_le_bytes());
         std::io::copy(&mut file, &mut hash)?;
@@ -694,6 +750,61 @@ mod tests {
                 (p(&c, "t/w/g2"), "candidate".to_owned(), String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn uncomparable_copy_is_not_reported_as_different_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        let line = reading(KEY, 1000, "2.5");
+        let no_moves = tree(&a, "t/w/g1", &line);
+        std::fs::remove_file(no_moves.join(NODE_MOVES)).unwrap();
+        let no_readings = tree(&a, "u/w/g1", &line);
+        std::fs::remove_file(no_readings.join("d0.jsonl")).unwrap();
+        std::fs::remove_file(no_readings.join("d1.jsonl")).unwrap();
+        tree(&b, "t/w/g1", &line);
+        tree(&b, "u/w/g1", &line);
+        let list = tmp.path().join("registered.txt");
+        std::fs::write(&list, format!("{}\n{}\n", no_moves.display(), no_readings.display()))
+            .unwrap();
+        let mut args = args(tmp.path(), &[&a, &b]);
+        args.registered = Some(list);
+        let out = args.out.clone();
+        let rows = run_table(args);
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "");
+        let p = |root: &Path, rel: &str| root.join(rel).display().to_string();
+        for (row, rel) in [(2, "t/w/g1"), (3, "u/w/g1")] {
+            assert_eq!(
+                (rows[row].0.as_str(), rows[row].1.as_str()),
+                (p(&b, rel).as_str(), "compare-failed")
+            );
+            assert!(rows[row].2.starts_with(&format!("{} ", p(&a, rel))), "{}", rows[row].2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_outputs_under_a_search_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("out");
+        let dir = tree(&root, "t/w/g1", &reading(KEY, 1000, "2.5"));
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let d0 = std::fs::read_to_string(dir.join("d0.jsonl")).unwrap();
+        for (out, table) in [
+            (dir.join("d0.jsonl"), tmp.path().join("table.tsv")),
+            (tmp.path().join("cand.txt"), alias.join("t/w/g1").join(NODE_MOVES)),
+            (root.join("new/sub/cand.txt"), tmp.path().join("table.tsv")),
+            (tmp.path().join("missing/../out/cand.txt"), tmp.path().join("table.tsv")),
+        ] {
+            let mut a = args(tmp.path(), &[&root]);
+            (a.out, a.table) = (out, table);
+            assert!(run(a).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("d0.jsonl")).unwrap(), d0);
+        assert_eq!(std::fs::read_to_string(dir.join(NODE_MOVES)).unwrap(), "");
+        assert!(!root.join("new").exists());
+        assert!(!tmp.path().join("missing").exists());
     }
 
     #[cfg(unix)]
