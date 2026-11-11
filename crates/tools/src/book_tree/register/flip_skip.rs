@@ -84,21 +84,27 @@ pub(super) fn search<T: Trial>(
             );
         }
         round += 1;
-        let bad = ddmin(&all, |trees| Ok(matches!(check(trial, trees, &skip), Outcome::Flip(_))))?;
+        let bad = ddmin(&all, |trees| matches!(check(trial, trees, &skip), Outcome::Flip(_)));
         let bad_names: Vec<_> = bad.iter().map(|&t| names[t].display().to_string()).collect();
         eprintln!("  原因の木: {}", bad_names.join(" "));
         let candidates: Vec<String> = trial.keys(&bad, &skip).into_iter().collect();
         let with = |extra: &[String]| -> BTreeSet<String> {
             skip.iter().cloned().chain(extra.iter().cloned()).collect()
         };
+        // 全部除いた組が反転キー以外の理由で止まっても、一部だけ除いた組では通ることがあるので探す。
+        // 見つけた組は最後に通ることを確かめる。
         ensure!(
-            matches!(check(trial, &bad, &with(&candidates)), Outcome::Pass),
-            "原因の木 {} の局面を全部取り込まなくても通りません",
+            !matches!(check(trial, &bad, &with(&candidates)), Outcome::Flip(_)),
+            "原因の木 {} の局面を全部取り込まなくても反転キーの検査で止まります",
             bad_names.join(" ")
         );
-        let found = ddmin(&candidates, |extra| {
-            Ok(matches!(check(trial, &bad, &with(extra)), Outcome::Pass))
-        })?;
+        let found =
+            ddmin(&candidates, |extra| matches!(check(trial, &bad, &with(extra)), Outcome::Pass));
+        ensure!(
+            matches!(check(trial, &bad, &with(&found)), Outcome::Pass),
+            "原因の木 {} で、取り込まなければ通る局面の組が見つかりません",
+            bad_names.join(" ")
+        );
         eprintln!(
             "  候補の局面 {} から取り込まない局面 {} を足します",
             candidates.len(),
@@ -128,7 +134,7 @@ pub(super) fn search<T: Trial>(
 }
 
 /// `ok(items)` が真のとき、`ok` が真のままの小さい部分 (1 つ除くと偽になる組) を delta debugging で探す。
-fn ddmin<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> Result<bool>) -> Result<Vec<T>> {
+fn ddmin<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> bool) -> Vec<T> {
     let mut current = items.to_vec();
     let mut n = 2;
     while current.len() >= 2 {
@@ -136,7 +142,7 @@ fn ddmin<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> Result<bool>) -> Res
         let parts: Vec<&[T]> = (0..n).map(|i| &current[i * len / n..(i + 1) * len / n]).collect();
         let mut next = None;
         for part in &parts {
-            if ok(part)? {
+            if ok(part) {
                 next = Some((part.to_vec(), 2));
                 break;
             }
@@ -150,7 +156,7 @@ fn ddmin<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> Result<bool>) -> Res
                     .filter(|&(j, _)| j != i)
                     .flat_map(|(_, part)| part.iter().cloned())
                     .collect();
-                if ok(&rest)? {
+                if ok(&rest) {
                     next = Some((rest, (n - 1).max(2)));
                     break;
                 }
@@ -165,7 +171,7 @@ fn ddmin<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> Result<bool>) -> Res
             None => n = (2 * n).min(len),
         }
     }
-    Ok(current)
+    current
 }
 
 #[cfg(test)]
@@ -175,9 +181,8 @@ mod tests {
     #[test]
     fn ddmin_finds_a_minimal_failing_pair() {
         let items: Vec<usize> = (0..20).collect();
-        let found = ddmin(&items, |s| Ok(s.contains(&3) && s.contains(&17))).unwrap();
-        assert_eq!(found, [3, 17]);
-        assert_eq!(ddmin(&items, |s| Ok(s.contains(&9))).unwrap(), [9]);
+        assert_eq!(ddmin(&items, |s| s.contains(&3) && s.contains(&17)), [3, 17]);
+        assert_eq!(ddmin(&items, |s| s.contains(&9)), [9]);
     }
 
     /// 木 1 の局面 "a" と木 2 の局面 "c" が、取り込むと止まる局面。
@@ -244,5 +249,25 @@ mod tests {
         let found = search(&mut Fragile(Fake { calls: 0 }), &names, &BTreeSet::new(), 10).unwrap();
         assert!(found.passed);
         assert_eq!(found.keys, ["a", "c"]);
+
+        // 元データは "b" が無いと反転キー以外の理由で止まる。"a" と "b" を両方除くと止まるが、"a" だけ除けば通る。
+        struct NeedsB(Fake);
+        impl Trial for NeedsB {
+            fn failure(
+                &mut self,
+                trees: &[usize],
+                skip: &BTreeSet<String>,
+            ) -> Result<Option<String>> {
+                let keys = self.0.keys(trees, skip);
+                anyhow::ensure!(keys.contains("b"), "b が無い");
+                Ok(keys.contains("a").then(|| "止まる".into()))
+            }
+            fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String> {
+                self.0.keys(trees, skip)
+            }
+        }
+        let found = search(&mut NeedsB(Fake { calls: 0 }), &names, &BTreeSet::new(), 10).unwrap();
+        assert!(found.passed);
+        assert_eq!(found.keys, ["a"]);
     }
 }
