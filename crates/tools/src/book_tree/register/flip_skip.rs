@@ -24,8 +24,18 @@ pub(super) trait Trial {
     fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String>;
 }
 
-/// 全部の木で検査し、止まるなら原因の木の最小の組を、次にその組だけで通るようになる局面の最小の組を探して
-/// `skip` に足す。足した後の全部の木でもう一度検査し、`rounds` 回まで繰り返す。
+/// 1 回の試行の結果。
+enum Outcome {
+    Pass,
+    Flip(String),
+    /// 反転キー以外の理由で止まった。
+    Other(anyhow::Error),
+}
+
+/// 全部の木で検査し、止まるなら原因の木の組 (1 本除くと止まらなくなる組) を、次にその組だけで通るようになる
+/// 局面の組 (1 つ除くと止まる組) を探して `skip` に足す。足した後の全部の木でもう一度検査し、`rounds` 回まで
+/// 繰り返す。木や局面を減らした途中の組が反転キー以外の理由で止まったときは、その組は反転キーで止まらない、
+/// 通らない組として探し続ける。
 pub(super) fn search<T: Trial>(
     trial: &mut T,
     names: &[PathBuf],
@@ -37,21 +47,44 @@ pub(super) fn search<T: Trial>(
     let mut skip = skip.clone();
     let mut keys = Vec::new();
     let mut trials = 0;
+    let mut others = 0;
     let mut check = |trial: &mut T, trees: &[usize], skip: &BTreeSet<String>| {
         trials += 1;
-        trial.failure(trees, skip)
+        match trial.failure(trees, skip) {
+            Ok(None) => Outcome::Pass,
+            Ok(Some(message)) => Outcome::Flip(message),
+            Err(error) => {
+                if others == 0 {
+                    eprintln!(
+                        "  途中の組が反転キー以外の理由で止まりました (その組は通らない組とみます): {error:#}"
+                    );
+                }
+                others += 1;
+                Outcome::Other(error)
+            }
+        }
     };
     let mut round = 0;
     let passed = loop {
-        let Some(message) = check(trial, &all, &skip)? else {
-            break true;
+        let message = match check(trial, &all, &skip) {
+            Outcome::Pass => break true,
+            Outcome::Flip(message) => message,
+            Outcome::Other(error) => {
+                return Err(error.context("全部の木の登録が反転キー以外の理由で止まりました"));
+            }
         };
         eprintln!("反転キーの検査 {round}: 止まります: {message}");
         if round == rounds {
             break false;
         }
+        if round == 0 {
+            ensure!(
+                !matches!(check(trial, &[], &skip), Outcome::Flip(_)),
+                "木を取り込まない元データだけで反転キーの検査で止まります"
+            );
+        }
         round += 1;
-        let bad = ddmin(&all, |trees| Ok(check(trial, trees, &skip)?.is_some()))?;
+        let bad = ddmin(&all, |trees| Ok(matches!(check(trial, trees, &skip), Outcome::Flip(_))))?;
         let bad_names: Vec<_> = bad.iter().map(|&t| names[t].display().to_string()).collect();
         eprintln!("  原因の木: {}", bad_names.join(" "));
         let candidates: Vec<String> = trial.keys(&bad, &skip).into_iter().collect();
@@ -59,11 +92,13 @@ pub(super) fn search<T: Trial>(
             skip.iter().cloned().chain(extra.iter().cloned()).collect()
         };
         ensure!(
-            check(trial, &bad, &with(&candidates))?.is_none(),
-            "原因の木 {} の局面を全部取り込まなくても反転キーの検査で止まります",
+            matches!(check(trial, &bad, &with(&candidates)), Outcome::Pass),
+            "原因の木 {} の局面を全部取り込まなくても通りません",
             bad_names.join(" ")
         );
-        let found = ddmin(&candidates, |extra| Ok(check(trial, &bad, &with(extra))?.is_none()))?;
+        let found = ddmin(&candidates, |extra| {
+            Ok(matches!(check(trial, &bad, &with(extra)), Outcome::Pass))
+        })?;
         eprintln!(
             "  候補の局面 {} から取り込まない局面 {} を足します",
             candidates.len(),
@@ -76,7 +111,7 @@ pub(super) fn search<T: Trial>(
         keys.extend(found);
     };
     eprintln!(
-        "反転キーの検査: {} / 足した局面 {} / 試行 {trials} / {:.1} 秒",
+        "反転キーの検査: {} / 足した局面 {} / 試行 {trials} (うち反転キー以外の理由で止まった組 {others}) / {:.1} 秒",
         if passed {
             "通りました"
         } else {
@@ -190,5 +225,24 @@ mod tests {
         let skip = BTreeSet::from(["a".to_owned(), "c".to_owned()]);
         let found = search(&mut Fake { calls: 0 }, &names, &skip, 10).unwrap();
         assert_eq!((found.keys.len(), found.passed, found.trials), (0, true, 1));
+
+        // 木 1 を除くと反転キー以外の理由で止まる元データでも、木 2 を原因の木とみて探し続ける。
+        struct Fragile(Fake);
+        impl Trial for Fragile {
+            fn failure(
+                &mut self,
+                trees: &[usize],
+                skip: &BTreeSet<String>,
+            ) -> Result<Option<String>> {
+                anyhow::ensure!(trees.contains(&1), "木 1 が無い");
+                self.0.failure(trees, skip)
+            }
+            fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String> {
+                self.0.keys(trees, skip)
+            }
+        }
+        let found = search(&mut Fragile(Fake { calls: 0 }), &names, &BTreeSet::new(), 10).unwrap();
+        assert!(found.passed);
+        assert_eq!(found.keys, ["a", "c"]);
     }
 }

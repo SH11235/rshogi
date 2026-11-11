@@ -461,18 +461,18 @@ impl Builder<'_> {
 }
 
 impl flip_skip::Trial for Builder<'_> {
-    /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。
+    /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。main を替えるかを決める
+    /// 仮の登録の伝播で止まったときも同じく見分ける。
     fn failure(&mut self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
-        let rows = self.build(trees, skip)?.rows;
-        let (positions, _) =
-            positions_from_rows(rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
-        match super::audit::evaluate(&positions, self.rule.draws) {
+        let checked = self.build(trees, skip).and_then(|built| {
+            let rows = built.rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r)));
+            super::audit::evaluate(&positions_from_rows(rows)?.0, self.rule.draws)
+        });
+        match checked {
             Ok(_) => Ok(None),
             Err(error) => match error.downcast_ref::<FlipFailure>() {
                 Some(failure) => Ok(Some(failure.to_string())),
-                None => {
-                    Err(error.context("反転キーの検査の伝播が反転キー以外の理由で止まりました"))
-                }
+                None => Err(error),
             },
         }
     }
@@ -1351,10 +1351,10 @@ mod tests {
         assert!(run(args(vec![tree], false)).is_err());
     }
 
-    #[test]
-    fn auto_skip_flip_skips_the_tree_position_that_breaks_the_flipped_orientation() {
+    /// 木 `bad` が S に `leaf` の値の 5i6i を足し、`main_changes` なら 5i6i を木の 1 位にする。
+    fn auto_skip_flip_scenario(leaf: i32, main_changes: bool) {
         // S から玉だけの 4 手で S に戻る循環。T から指すと S の後手番 (元データに無い) に着き、盤が点対称なので
-        // 反転キーで S に合流する。木が S に -30 の手を足すと、千日手を -70 とみる先手はその手、+70 とみる後手は
+        // 反転キーで S に合流する。木が S に千日手の値の間 (-70 と 70 の間) の値の手を足すと、千日手を -70 とみる先手はその手、+70 とみる後手は
         // 循環を選ぶので、S の 1 行では両方の向きを表せない。
         const S: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
@@ -1381,10 +1381,16 @@ mod tests {
             tree
         };
         let clean = tree("clean", &format!("{U}\t1\t0\t0\t1000000000\t5i4h\t10\t0\t1\n"));
+        let (first, second) = if main_changes {
+            (("5i6i", leaf), ("5i4i", 0))
+        } else {
+            (("5i4i", 0), ("5i6i", leaf))
+        };
         let bad = tree(
             "bad",
             &format!(
-                "{S}\t1\t0\t0\t1000000000\t5i4i\t0\t0\t1\n{S}\t1\t0\t0\t1000000000\t5i6i\t-30\t0\t2\n"
+                "{S}\t1\t0\t0\t1000000000\t{}\t{}\t0\t1\n{S}\t1\t0\t0\t1000000000\t{}\t{}\t0\t2\n",
+                first.0, first.1, second.0, second.1
             ),
         );
         let out = dir.path().join("found.txt");
@@ -1420,10 +1426,17 @@ mod tests {
             assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error}");
         };
 
-        // 付けないと今のまま登録し、反転キーの合流は後の master cycles で止まる。
+        // 付けないと今のまま登録し、反転キーの合流は後の master cycles で止まる。main を替えるときは、替えるかを
+        // 決める伝播で登録が止まる。
         std::fs::write(&master_path, &original).unwrap();
-        run(args("c1.tsv", None, 10)).unwrap();
-        flip_failure(&master_path);
+        if main_changes {
+            let error = run(args("c1.tsv", None, 10)).unwrap_err();
+            assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
+        } else {
+            run(args("c1.tsv", None, 10)).unwrap();
+            flip_failure(&master_path);
+        }
         assert!(!out.exists());
 
         std::fs::write(&master_path, &original).unwrap();
@@ -1440,6 +1453,12 @@ mod tests {
         assert!(run(args("c3.tsv", Some(out.clone()), 0)).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "");
+    }
+
+    #[test]
+    fn auto_skip_flip_skips_the_tree_position_that_breaks_the_flipped_orientation() {
+        auto_skip_flip_scenario(-30, false);
+        auto_skip_flip_scenario(10, true);
     }
 
     #[test]
