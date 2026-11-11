@@ -420,7 +420,8 @@ impl ExcludedReading {
     }
 }
 
-fn sec_bits(sec: f64) -> u64 {
+/// 読みの `sec` を照合する値。`0.0` と `-0.0` は JSON の数値として等しいので同じにする。
+pub(super) fn sec_bits(sec: f64) -> u64 {
     if sec == 0.0 { 0 } else { sec.to_bits() }
 }
 
