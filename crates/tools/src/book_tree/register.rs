@@ -1757,29 +1757,66 @@ mod tests {
 
     #[test]
     fn opponent_bench_lowers_the_kept_main_in_the_compared_propagation() {
-        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
-        let a = child(R, "5i4i").unwrap();
-        let before = master(&[
-            row(R, "5i4i", "main", "read", "wide", "10"),
-            row(&a, "5a4a", "main", "read", "wide", "-50"),
-            row(&a, "5a6a", "bench", "read", "wide", "20"),
-        ]);
-        let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30), ("5i4i", 5)], 1, 0))]);
-        let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
-        let kept = |opp_bench| {
-            let rule = keep::KeepRule {
-                rule: SwitchRule::Line,
-                line: 20,
-                min_depth: 1,
-                draws: DrawValues::both(0),
-                fill: Fill::Off,
-                opp_bench,
+        // 先手番の局面と、同じ形の後手番の局面。応手の側の控え (応手の側から 20) を使うと、元の main は
+        // 手番の側から 50 が -20 に下がり、木の 1 位 30 に替わる。
+        for (root, main, best, reply, bench) in [
+            ("4k4/9/9/9/9/9/9/9/4K4 b -", "5i4i", "5i6i", "5a4a", "5a6a"),
+            ("4k4/9/9/9/9/9/9/9/4K4 w -", "5a4a", "5a6a", "5i4i", "5i6i"),
+        ] {
+            let a = child(root, main).unwrap();
+            let before = master(&[
+                row(root, main, "main", "read", "wide", "10"),
+                row(&a, reply, "main", "read", "wide", "-50"),
+                row(&a, bench, "bench", "read", "wide", "20"),
+            ]);
+            let nodes = BTreeMap::from([(root.to_owned(), node(&[(best, 30), (main, 5)], 1, 0))]);
+            let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
+            let kept = |opp_bench| {
+                let rule = keep::KeepRule {
+                    rule: SwitchRule::Line,
+                    line: 20,
+                    min_depth: 1,
+                    draws: DrawValues::both(0),
+                    fill: Fill::Off,
+                    opp_bench,
+                };
+                keep::kept_mains(&before, &after, &nodes, rule).unwrap().0
             };
-            keep::kept_mains(&before, &after, &nodes, rule).unwrap().0
+            assert_eq!(kept(false)[root].old_value, 50);
+            assert!(kept(true).is_empty());
+        }
+    }
+
+    #[test]
+    fn expanded_bench_respects_curated_protected_and_skipped_positions() {
+        const SKIP: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let original = master(&[
+            row(B, "a", "main", "read", "curated", "50"),
+            row(W, "x", "main", "read", "wide", "50"),
+            row(W, "y", "bench", "book", "wide", "0"),
+            row(SKIP, "5i4i", "main", "read", "wide", "50"),
+        ]);
+        let mut nodes = BTreeMap::from([
+            (B.to_owned(), node(&[("a", 50), ("b", 0)], 2, 0)),
+            (W.to_owned(), node(&[("x", 50), ("y", 5), ("z", 0)], 2, 0)),
+            (SKIP.to_owned(), node(&[("5i4i", 50), ("5i6i", 0)], 2, 0)),
+        ]);
+        let skipped = skip_nodes(&mut nodes, &BTreeSet::from([SKIP.to_owned()]));
+        assert_eq!(skipped.len(), 1);
+        let options = Options {
+            bench_expanded: true,
+            ..options()
         };
-        // 後手の控え 5a6a (後手から 20) を使うと、元の main 5i4i は 50 から -20 に下がり、木の 1 位 30 に替わる。
-        assert_eq!(kept(false)[R].old_value, 50);
-        assert!(kept(true).is_empty());
+        let (rows, _, summary) = register(original.clone(), &nodes, &options).unwrap();
+        let b = find(&rows, B, "b").unwrap();
+        assert_eq!((b.get("role"), b.get("tier")), ("bench", "wide"));
+        assert_eq!(find(&rows, B, "a").unwrap().get("tier"), "curated");
+        // 置き換えない source の控えは値も役割もそのまま。
+        assert_eq!(find(&rows, W, "y"), find(&original, W, "y"));
+        assert_eq!(find(&rows, W, "z").unwrap().get("role"), "bench");
+        assert!(find(&rows, SKIP, "5i6i").is_none());
+        assert_eq!(summary.added_bench, BTreeMap::from([("b".into(), 1), ("w".into(), 1)]));
+        assert_eq!(summary.bench_protected, 1);
     }
 
     #[test]
@@ -2099,7 +2136,6 @@ mod tests {
             &nodes,
             &Options {
                 alt_gap: 0,
-                bench_expanded: false,
                 ..options()
             },
         )

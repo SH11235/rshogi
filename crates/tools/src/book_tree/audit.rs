@@ -2438,6 +2438,130 @@ mod tests {
     }
 
     #[test]
+    fn opponent_records_and_bench_are_used_together() {
+        let text = master(&[
+            (A, "5a5b", "main", "200"),
+            (A, "5a4a", "alt", "-100"),
+            (B, "4h5h", "main", "-200"),
+            (B, "4h3g", "record", "400"),
+            (B, "4h4g", "bench", "300"),
+            ("9/4k4/9/9/9/9/6K2/9/9 w -", "5b6b", "main", "-900"),
+        ]);
+        let rows = parse_master(&text).unwrap();
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let index = positions.0.keys().position(|k| k == A).unwrap();
+        // record 4h3g は先の局面から先手 900、bench 4h4g は読みの値の先手 300。
+        let cases: [(&[&str], i32, usize); 3] = [
+            (&["bench"], -300, 1),
+            (&["record"], -900, 1),
+            (&["record", "bench"], -900, 2),
+        ];
+        for (roles, value, used) in cases {
+            let replies = opponent_replies(&rows, roles).unwrap();
+            let (_, summary, book) = audit_with_records(
+                &positions,
+                DrawValues::both(0),
+                1,
+                Fill::Off,
+                None,
+                None,
+                Some(&replies),
+            )
+            .unwrap();
+            let moves =
+                audited_moves(book.graph_for(A), A, &positions.0[A], &book.known[index]).unwrap();
+            assert_eq!(moves[0].as_ref().unwrap().value, value, "{roles:?}");
+            assert_eq!(
+                (summary.opponent_record_moves, summary.opponent_record_positions),
+                (used, Some(1)),
+                "{roles:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(&args.master, &text).unwrap();
+        (args.opp_records, args.opp_bench) = (true, true);
+        let table_path = args.table.clone();
+        run(args).unwrap();
+        let table = std::fs::read_to_string(table_path).unwrap();
+        assert!(table.contains("5a4a") && table.contains("-900"));
+    }
+
+    #[test]
+    fn expanded_bench_from_register_is_revived_below_the_demote_line_and_used_as_opponent_reply() {
+        use crate::book_tree::register::{Node, NodeMove, Options, register};
+        const P: &str = "4k4/9/9/9/9/9/9/9/4K4 w -";
+        let node = Node {
+            ply: "2".into(),
+            remaining: 1,
+            nodes: 1_000_000_000,
+            moves: [("5a4a", -10), ("5a6a", -60), ("5a5b", -130)]
+                .into_iter()
+                .map(|(mv, value)| NodeMove {
+                    mv: mv.into(),
+                    value,
+                    value_kind: "tree:1".into(),
+                    cond: "unknown".into(),
+                })
+                .collect(),
+            tree: 0,
+        };
+        let schema = Schema::default();
+        let options = Options {
+            since: "tag",
+            note: "",
+            alt_gap: 40,
+            bench_expanded: true,
+            source: "read",
+            lineage: "",
+            schema: &schema,
+            replace_curated: false,
+            revive_bench: true,
+            kept: None,
+        };
+        let (rows, _, _) =
+            register(Vec::new(), &BTreeMap::from([(P.to_owned(), node)]), &options).unwrap();
+        let roles = |rows: &[Row]| -> BTreeMap<String, String> {
+            rows.iter()
+                .map(|r| (r.get("move").to_owned(), r.get("role").to_owned()))
+                .collect()
+        };
+        let pairs = |list: &[(&str, &str)]| -> BTreeMap<String, String> {
+            list.iter().map(|(m, r)| ((*m).to_owned(), (*r).to_owned())).collect()
+        };
+        assert_eq!(roles(&rows), pairs(&[("5a4a", "main"), ("5a5b", "bench"), ("5a6a", "bench")]));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = test_args(dir.path());
+        std::fs::write(&args.master, master_table::format_master(&rows)).unwrap();
+        (args.demote_alts, args.revive_bench, args.opp_bench, args.apply) =
+            (true, true, true, true);
+        args.since = Some("確認".into());
+        let path = args.master.clone();
+        run(args).unwrap();
+        // 差 50 の 5a6a は alt に戻り、差 120 の 5a5b は控えのまま相手 (先手) の伝播で後手の応手に使われる。
+        let text = std::fs::read_to_string(path).unwrap();
+        let rows = parse_master(&text).unwrap();
+        assert_eq!(roles(&rows), pairs(&[("5a4a", "main"), ("5a6a", "alt"), ("5a5b", "bench")]));
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let replies = opponent_replies(&rows, &["bench"]).unwrap();
+        let (_, summary, _) = audit_with_records(
+            &positions,
+            DrawValues::both(0),
+            1,
+            Fill::Off,
+            None,
+            None,
+            Some(&replies),
+        )
+        .unwrap();
+        assert_eq!(
+            (summary.opponent_record_moves, summary.opponent_record_positions),
+            (1, Some(1))
+        );
+    }
+
+    #[test]
     fn summary_names_the_roles_used_as_opponent_replies() {
         let summary = AuditSummary {
             opponent_record_positions: Some(1),
@@ -2451,11 +2575,16 @@ mod tests {
 
     #[test]
     fn opponent_records_do_not_use_own_records_or_unread_records() {
-        for eval in ["400", ""] {
-            let text = opponent_record_fixture(eval);
+        for (role, eval) in [
+            ("record", "400"),
+            ("record", ""),
+            ("bench", "400"),
+            ("bench", ""),
+        ] {
+            let text = opponent_record_fixture(eval).replace("\trecord\t", &format!("\t{role}\t"));
             let rows = parse_master(&text).unwrap();
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let records = opponent_replies(&rows, &["record"]).unwrap();
+            let records = opponent_replies(&rows, &[role]).unwrap();
             let (findings, summary, book) = audit_with_records(
                 &positions,
                 DrawValues::both(0),
