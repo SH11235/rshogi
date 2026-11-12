@@ -41,12 +41,12 @@ fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
         .collect()
 }
 
-/// 手の値がいくつ先の局面の読みから来たか。最善の手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
-/// 局面で、着いた手の読みの値 (定跡に無い応手) が最善なら、その局面は数えない (値は手の読みそのもの)。循環に
+/// 手の値がいくつ先の局面の読みから来たか。最善の手を辿り、読みの値で止まるまでの局面の数。着いた手の読みの
+/// 値を最後の手として残した局面 (`capped`) で、その値が最善なら、その局面は数えない (値は手の読みそのもの)。循環に
 /// 入ったら循環の局面までを数える。局面ごとの数は辿り始めによらないので、辿った局面の数を覚えて使い回す。
 struct Depths<'a> {
     graph: &'a Graph,
-    master: &'a BTreeSet<&'a str>,
+    capped: &'a BTreeSet<String>,
     memo: BTreeMap<usize, usize>,
 }
 
@@ -71,12 +71,15 @@ impl Depths<'_> {
                 path.truncate(at);
                 break cycle;
             }
-            let Some(best) = self.graph.moves(node).max_by_key(|m| m.new) else {
+            let count = self.graph.moves(node).count();
+            let Some((i, best)) = self.graph.moves(node).enumerate().max_by_key(|(_, m)| m.new)
+            else {
                 self.memo.insert(node, 0);
                 break 0;
             };
             let Some(edge) = best.edge else {
-                let own = usize::from(self.master.contains(self.graph.key(node)));
+                let kept_read = self.capped.contains(self.graph.key(node)) && i + 1 == count;
+                let own = usize::from(!kept_read);
                 self.memo.insert(node, own);
                 break own;
             };
@@ -127,11 +130,10 @@ pub(in crate::book_tree) fn kept_mains(
             .context("main を替える前の伝播")?;
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
-    let master: BTreeSet<&str> = book.0.keys().map(String::as_str).collect();
     // 相手の bench を使う伝播では、局面の手番ごとにグラフが分かれる。
     let mut depths = audited.graphs().map(|graph| Depths {
         graph,
-        master: &master,
+        capped: &audited.capped,
         memo: BTreeMap::new(),
     });
     for (key, old_move, new_move) in changed {

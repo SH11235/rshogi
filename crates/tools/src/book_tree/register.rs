@@ -329,7 +329,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let skipped = skipped.len();
     let single = match &args.single.single_enqueue_out {
         Some(_) => {
-            switch::rank(&mut singles, None, 0.0);
+            args.single.rank(&mut singles, None, 0.0)?;
             let (lines, excluded) = switch::queue(&singles, &args.single)?;
             Some((super::refutation::format_queue(&lines)?, lines.len(), excluded))
         }
@@ -422,6 +422,7 @@ fn check_output(
         ("--conflicts", args.conflicts.as_path()),
     ];
     inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
+    inputs.extend(args.single.walk_table.iter().map(|p| ("--walk-table", p.as_path())));
     inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
     inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
     inputs.extend(other);
@@ -1785,6 +1786,29 @@ mod tests {
             assert_eq!(kept(false)[root].old_value, 50);
             assert!(kept(true).is_empty());
         }
+    }
+
+    #[test]
+    fn main_backed_by_a_bench_only_reply_counts_the_reply_position() {
+        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let a = child(R, "5i4i").unwrap();
+        // 元の main の読みは 100、行き先は控えだけの局面で、控えの読みは先手から 50。
+        let before = master(&[
+            row(R, "5i4i", "main", "read", "wide", "100"),
+            row(&a, "5a4a", "bench", "read", "wide", "-50"),
+        ]);
+        let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30)], 1, 0))]);
+        let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
+        let rule = keep::KeepRule {
+            rule: SwitchRule::Line,
+            line: 20,
+            min_depth: 1,
+            draws: DrawValues::both(0),
+            fill: Fill::Off,
+            opp_bench: true,
+        };
+        let kept = keep::kept_mains(&before, &after, &nodes, rule).unwrap().0;
+        assert_eq!((kept[R].old_value, kept[R].old_depth), (50, 1));
     }
 
     #[test]
