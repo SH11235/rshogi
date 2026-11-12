@@ -1661,11 +1661,29 @@ type ResultsOf<'a> = dyn Fn(&Graph, usize) -> Option<NodeResult> + 'a;
 /// 反転キーで合流した局面が原因で伝播を止めたときのエラー。反転キーで合流した向きに値を保てない局面と、保証検査で
 /// 反転キーで合流した向きに破れる局面を含む失敗。`anyhow::Error::downcast_ref` で他の失敗と見分ける。
 #[derive(Debug)]
-pub struct FlipFailure(String);
+pub struct FlipFailure {
+    message: String,
+    /// 反転キーで合流した向きに値を保てない、または保証が破れる局面の key。
+    positions: Vec<String>,
+}
+
+impl FlipFailure {
+    fn new(graph: &Graph, message: String, nodes: impl Iterator<Item = usize>) -> Self {
+        Self {
+            message,
+            positions: nodes.map(|v| graph.key(v).to_owned()).collect(),
+        }
+    }
+
+    /// 反転キーで合流した向きに値を保てない、または保証が破れる局面の key (全部)。
+    pub(crate) fn positions(&self) -> &[String] {
+        &self.positions
+    }
+}
 
 impl std::fmt::Display for FlipFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -1695,12 +1713,13 @@ fn write_certified(
                 })
                 .collect::<Vec<_>>()
                 .join(" / ");
-            return Err(FlipFailure(format!(
+            let message = format!(
                 "反転キーで合流した {} 局面 [{}] で、保存されている向きの行が反対の向きの値を保ちません。1 行では両方の向きを表せないので book は出力しません。千日手の値を先後で揃えてください",
                 conflicts.len(),
                 sample
-            ))
-            .into());
+            );
+            let nodes = conflicts.iter().map(|&(v, _, _)| v);
+            return Err(FlipFailure::new(graph, message, nodes).into());
         }
         let violations = certify(graph, params, &mirrored_values);
         if violations.stored.is_empty() && violations.flipped.is_empty() {
@@ -1718,7 +1737,8 @@ fn write_certified(
             if violations.flipped.is_empty() {
                 bail!("{message}");
             }
-            return Err(FlipFailure(message).into());
+            let nodes = violations.flipped.iter().copied();
+            return Err(FlipFailure::new(graph, message, nodes).into());
         }
     }
     let count = restricted.iter().filter(|r| r.any()).count();

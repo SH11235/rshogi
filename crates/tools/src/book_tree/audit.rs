@@ -15,9 +15,9 @@ use super::targets::{
 };
 use super::unpromotion;
 use crate::book_backprop::{
-    BackpropOptions, DrawValues, Graph, MergeMode, MoveCache, MoveValue, PropagationStats,
-    delta_buckets, evaluate_edges, graph_from_entries, parse_row, percentile, propagate_values,
-    retain_known, write_book_atomic,
+    BackpropOptions, DrawValues, FlipFailure, Graph, MergeMode, MoveCache, MoveValue,
+    PropagationStats, delta_buckets, evaluate_edges, graph_from_entries, parse_row, percentile,
+    propagate_values, retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
@@ -49,6 +49,10 @@ pub(super) struct AuditArgs {
     /// 値が戻った bench (控え) を alt に戻す (--apply なしでは件数だけ確認)
     #[arg(long, conflicts_with = "fill_replies")]
     revive_bench: bool,
+    /// --revive-bench で alt に戻した後の元データを master cycles と同じ伝播で解き、反転キーで合流した局面で止まる
+    /// なら、止まった局面から手を辿って着く局面の戻した手を bench のまま残す (通るまで繰り返す)
+    #[arg(long, requires = "revive_bench")]
+    revive_flip_safe: bool,
     /// alt を降格する値の上限 (手番側からの値)
     #[arg(long, default_value_t = -150, allow_hyphen_values = true)]
     bad_eval: i32,
@@ -540,11 +544,14 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     } else {
         None
     };
-    let revivals = if args.revive_bench {
+    let mut revivals = if args.revive_bench {
         revive_bench(&mut rows, &positions.0, &book, &schema, &args)?
     } else {
         Revivals::default()
     };
+    if args.revive_flip_safe {
+        keep_flip_safe(&mut rows, &mut revivals, draws)?;
+    }
     master_table::validate(&rows)?;
     if args.apply
         && (!changes.is_empty()
@@ -561,6 +568,12 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         println!(
             "bench から alt に戻す手: 先手番 {}・後手番 {} / curated の main が無い控え {}",
             revivals.revived[0], revivals.revived[1], revivals.curated_without_main
+        );
+    }
+    if args.revive_flip_safe {
+        println!(
+            "反転キーの合流で止まるので bench のまま残した手: 先手番 {}・後手番 {}",
+            revivals.kept_for_flip[0], revivals.kept_for_flip[1]
         );
     }
     if let Some(demotions) = demotions {
@@ -875,6 +888,100 @@ fn reference_best(moves: &[Option<AuditedMove>], position: &MasterPosition) -> O
 struct Revivals {
     revived: BySide,
     curated_without_main: usize,
+    /// alt に戻した行の番号と、戻す前の行。
+    rows: Vec<(usize, Row)>,
+    /// 戻すと反転キーの合流で止まるので bench のまま残した手。
+    kept_for_flip: BySide,
+}
+
+/// alt に戻した後の元データを `master cycles` と同じ伝播 ([`evaluate`]) で解き、反転キーで合流した局面で止まるなら、
+/// 原因になり得る戻した手 ([`flip_suspects`]) を bench に戻す。戻した手が原因でない合流は残る (続く
+/// `master cycles` が止まる)。
+fn keep_flip_safe(rows: &mut [Row], revivals: &mut Revivals, draws: DrawValues) -> Result<()> {
+    while !revivals.rows.is_empty() {
+        let (positions, _) =
+            positions_from_rows(rows.iter().enumerate().map(|(i, row)| Ok((i + 2, row.clone()))))?;
+        let Some(suspects) = flip_suspects(&positions, draws)? else {
+            break;
+        };
+        let (cancel, keep): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut revivals.rows).into_iter().partition(|(i, _)| {
+                suspects
+                    .contains(&(rows[*i].get("key").to_owned(), rows[*i].get("move").to_owned()))
+            });
+        revivals.rows = keep;
+        if cancel.is_empty() {
+            break;
+        }
+        for (i, original) in cancel {
+            let side = usize::from(original.get("key").split_whitespace().nth(1) == Some("w"));
+            revivals.revived[side] -= 1;
+            revivals.kept_for_flip[side] += 1;
+            rows[i] = original;
+        }
+    }
+    Ok(())
+}
+
+/// 元データを [`evaluate`] と同じ伝播で解き、反転キーで合流した局面で止まるなら、止まる原因になり得る手
+/// (局面の key と手) を返す。通れば `None`。
+///
+/// 止まった局面の値は、その局面から手を辿って着く局面の手だけで決まる。反転キーで合流した向きが実在するかは、
+/// その局面へ着く手で決まる。それで、止まった局面から着く局面の全部の手と、行き先から止まった局面へ着ける手を返す。
+fn flip_suspects(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+) -> Result<Option<BTreeSet<(String, String)>>> {
+    let error = match evaluate(positions, draws) {
+        Ok(_) => return Ok(None),
+        Err(error) => error,
+    };
+    let Some(failure) = error.downcast_ref::<FlipFailure>() else {
+        return Err(error);
+    };
+    let graph = graph_from_entries(
+        positions.iter().map(|(key, p)| {
+            (key.as_str(), p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
+        }),
+        BackpropOptions::default(),
+        None,
+    )?;
+    let stopped: Vec<usize> = failure.positions().iter().filter_map(|k| graph.find(k)).collect();
+    let mut parents = vec![Vec::new(); graph.len()];
+    for node in 0..graph.len() {
+        for edge in graph.moves(node).filter_map(|m| m.edge) {
+            parents[edge.to].push(node);
+        }
+    }
+    let reach = |next: &dyn Fn(usize) -> Vec<usize>| {
+        let mut seen = vec![false; graph.len()];
+        let mut stack = stopped.clone();
+        for &node in &stopped {
+            seen[node] = true;
+        }
+        while let Some(node) = stack.pop() {
+            for to in next(node) {
+                if !std::mem::replace(&mut seen[to], true) {
+                    stack.push(to);
+                }
+            }
+        }
+        seen
+    };
+    let below = reach(&|node| graph.moves(node).filter_map(|m| m.edge.map(|e| e.to)).collect());
+    let above = reach(&|node| parents[node].clone());
+    let mut suspects = BTreeSet::new();
+    for (key, position) in positions {
+        let Some(node) = graph.find(key) else {
+            continue;
+        };
+        for (m, value) in position.moves.iter().zip(graph.moves(node)) {
+            if below[node] || value.edge.is_some_and(|e| above[e.to]) {
+                suspects.insert((key.clone(), m.mv.clone()));
+            }
+        }
+    }
+    Ok(Some(suspects))
 }
 
 fn revive_bench(
@@ -929,7 +1036,7 @@ fn revive_bench(
         }
     }
     let mut summary = Revivals::default();
-    for (row, propagated) in rows.iter_mut().zip(values) {
+    for (i, (row, propagated)) in rows.iter_mut().zip(values).enumerate() {
         if row.get("role") != "bench"
             || !schema.replaceable(row.get("source"))
             || (!args.replace_curated && curated.contains(row.get("key")))
@@ -962,6 +1069,7 @@ fn revive_bench(
         if unpromotion::is_needless(row.get("key"), row.get("move"))? {
             continue;
         }
+        let original = row.clone();
         row.set("role", "alt".into());
         let note = row.get("note");
         let since = args.since.as_deref().unwrap_or("確認");
@@ -974,6 +1082,7 @@ fn revive_bench(
         );
         schema.validate_row(row)?;
         summary.revived[usize::from(row.get("key").split_whitespace().nth(1) == Some("w"))] += 1;
+        summary.rows.push((i, original));
     }
     Ok(summary)
 }
@@ -2583,6 +2692,81 @@ mod tests {
             (summary.opponent_record_moves, summary.opponent_record_positions),
             (1, Some(1))
         );
+    }
+
+    #[test]
+    fn revive_flip_safe_keeps_the_bench_that_breaks_the_flipped_orientation() {
+        // S から玉だけの 4 手で S に戻る循環。T から 5h5i を指すと S の後手番に着き、反転キーで S に合流する。S に
+        // -30 の 5i6i があると、千日手を -70 とみる先手はその手、+70 とみる後手は循環を選ぶので 1 行で表せない。
+        const S: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        // 合流に関わらない局面の控え。
+        const U: &str = "4k4/9/9/9/9/9/9/9/4K4 b G";
+        let draws = DrawValues {
+            black: -70,
+            white: 70,
+        };
+        // 止まる局面 S の控えを戻す場合と、S へ反転キーで着く手 (T の控え) を戻す場合。
+        let below = ((S, "5i6i", "bench"), (T, "5h5i", "main"), None);
+        let above = ((S, "5i6i", "alt"), (T, "5h4h", "main"), Some((T, "5h5i", "bench", "0")));
+        for (s_move, t_main, t_bench) in [below, above] {
+            let mut list = vec![
+                (S, "5i4i", "main", "0"),
+                (s_move.0, s_move.1, s_move.2, "-30"),
+                ("4k4/9/9/9/9/9/9/9/5K3 w -", "5a4a", "main", "0"),
+                ("5k3/9/9/9/9/9/9/9/5K3 b -", "4i5i", "main", "0"),
+                ("5k3/9/9/9/9/9/9/9/4K4 w -", "4a5a", "main", "0"),
+                (t_main.0, t_main.1, t_main.2, "0"),
+                (U, "5i4h", "main", "10"),
+                (U, "5i6h", "bench", "5"),
+            ];
+            list.extend(t_bench);
+            let text = master(&list);
+            let bench = match t_bench {
+                Some((key, mv, _, _)) => (key, mv),
+                None => (s_move.0, s_move.1),
+            };
+            for safe in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut args = test_args(dir.path());
+                std::fs::write(&args.master, &text).unwrap();
+                (args.revive_bench, args.revive_flip_safe, args.apply) = (true, safe, true);
+                (args.draw_value_black, args.draw_value_white) = (draws.black, draws.white);
+                args.line = 10000;
+                args.since = Some("確認".into());
+                let path = args.master.clone();
+                let revivals = run_with_revivals(args).unwrap();
+                let text = std::fs::read_to_string(path).unwrap();
+                let rows = parse_master(&text).unwrap();
+                let row = |key: &str, mv: &str| {
+                    rows.iter()
+                        .find(|r| r.get("key") == key && r.get("move") == mv)
+                        .unwrap()
+                        .clone()
+                };
+                assert_eq!(row(U, "5i6h").get("role"), "alt");
+                let kept = row(bench.0, bench.1);
+                assert_eq!(kept.get("role"), if safe { "bench" } else { "alt" }, "{bench:?}");
+                assert_eq!(kept.get("note").is_empty(), safe);
+                assert_eq!(
+                    (revivals.revived, revivals.kept_for_flip),
+                    if safe {
+                        ([1, 0], [1, 0])
+                    } else {
+                        ([2, 0], [0, 0])
+                    }
+                );
+                let positions = parse_master_rows(text.as_bytes()).unwrap().0;
+                let result = evaluate(&positions, draws);
+                if safe {
+                    result.unwrap();
+                } else {
+                    let error = result.unwrap_err();
+                    let failure = error.downcast_ref::<FlipFailure>().unwrap();
+                    assert_eq!(failure.positions(), [S.to_owned()]);
+                }
+            }
+        }
     }
 
     #[test]
@@ -4319,6 +4503,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             replace_curated: true,
             demote_alts: false,
             revive_bench: false,
+            revive_flip_safe: false,
             bad_eval: -150,
             since: None,
             schema: None,

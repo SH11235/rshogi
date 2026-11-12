@@ -39,7 +39,7 @@
 `master audit` と `master rejoin` の重み (`--opp-freq`) は `--opp-book <PATH>` で、局数が足りない局面と局数の少ない手に行く分を大きい定跡の手で辿ります (`master walk --opp-book` と同じ割り振り)。
 `master audit` と `master hold-early` は `--deep-opp-freq <PATH>` で頻度定跡を渡すと、相手の main に加えて `--deep-min-games <N>` (既定 3) 局以上の応手をすべて辿り、最短の継続手数で判定します。頻度定跡は読み込み時に下限未満の手を除外します。audit では `--deep-plies` が必要で、`--deep-min-games` の明示指定には頻度定跡が必要です。
 
-控え（bench）の復帰は `tree register`（控え自身の source 保護を適用）と `master audit --revive-bench` で行い、`borrow value` では復帰させません。書き出しでは record と同じく DB に -30000 で残し、プリセットから除きます。
+控え（bench）の復帰は `tree register`（控え自身の source 保護を適用）と `master audit --revive-bench` で行い、`borrow value` では復帰させません。`master audit --revive-flip-safe` は、alt に戻すと反転キーの合流で `master cycles` が止まる手を bench のまま残します。書き出しでは record と同じく DB に -30000 で残し、プリセットから除きます。
 
 ## ビルドと実行
 
