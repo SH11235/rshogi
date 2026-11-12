@@ -2,7 +2,7 @@
 
 use super::Node;
 use crate::book_backprop::{DrawValues, Graph, MoveValue};
-use crate::book_tree::audit::{Fill, audit, audited_moves};
+use crate::book_tree::audit::{Fill, audit_with_replies, audited_moves, opponent_replies};
 use crate::book_tree::master_table::{Row, positions_from_rows};
 use crate::book_tree::switch::{SingleRead, SwitchRule, from_child};
 use anyhow::{Context, Result};
@@ -30,6 +30,8 @@ pub(in crate::book_tree) struct KeepRule {
     pub min_depth: usize,
     pub draws: DrawValues,
     pub fill: Fill,
+    /// 相手の手番の局面で、読みの値のある bench も伝播に使う (`master audit --opp-bench`)。
+    pub opp_bench: bool,
 }
 
 fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
@@ -119,23 +121,27 @@ pub(in crate::book_tree) fn kept_mains(
     }
     let book = positions_from_rows(after.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
     // 点検の表は使わないので、線を最大にして表を作らせない。
+    let replies = rule.opp_bench.then(|| opponent_replies(after, &["bench"])).transpose()?;
     let (_, _, audited) =
-        audit(&book, rule.draws, i32::MAX, rule.fill, None).context("main を替える前の伝播")?;
+        audit_with_replies(&book, rule.draws, i32::MAX, rule.fill, replies.as_ref())
+            .context("main を替える前の伝播")?;
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
     let master: BTreeSet<&str> = book.0.keys().map(String::as_str).collect();
-    // 相手の record を使わない伝播なので、手番によらず同じグラフになる。
-    let mut depths = Depths {
-        graph: &audited.graph,
+    // 相手の bench を使う伝播では、局面の手番ごとにグラフが分かれる。
+    let mut depths = audited.graphs().map(|graph| Depths {
+        graph,
         master: &master,
         memo: BTreeMap::new(),
-    };
+    });
     for (key, old_move, new_move) in changed {
         let (Some(&i), Some(position)) = (index.get(key), book.0.get(key)) else {
             continue;
         };
         let known = &audited.known[i];
-        let graph = &audited.graph;
+        let white = usize::from(key.split(' ').nth(1) == Some("w"));
+        let graph = audited.graphs()[white];
+        let depths = &mut depths[white];
         let Some(node) = graph.find(key) else {
             continue;
         };

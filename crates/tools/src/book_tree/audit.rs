@@ -127,6 +127,9 @@ pub(super) struct AuditArgs {
     /// --bridge-replies と同じ形で残すので、手の値は読みの値と record の先の値の悪い方になる
     #[arg(long)]
     opp_records: bool,
+    /// 相手の手番では、読みの値のある bench (控え) も伝播に使う。規則は --opp-records の record と同じ
+    #[arg(long)]
+    opp_bench: bool,
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
     #[arg(long, requires = "bridge_replies")]
     bridge_table: Option<PathBuf>,
@@ -230,6 +233,8 @@ pub(super) struct AuditSummary {
     pub records: usize,
     pub opponent_record_positions: Option<usize>,
     pub opponent_record_moves: usize,
+    /// 相手の手として使った行の役割 (要約の見出し)。空なら record。
+    pub opponent_roles: String,
     /// 値の分かる手の数。
     pub known_moves: usize,
     pub illegal_moves: usize,
@@ -367,6 +372,10 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         others.extend(outputs[..i].iter().copied());
         reject_same_file(path, &others).with_context(|| format!("{name} の出力先"))?;
     }
+    let opponent_roles: Vec<&str> = [(args.opp_records, "record"), (args.opp_bench, "bench")]
+        .into_iter()
+        .filter_map(|(on, role)| on.then_some(role))
+        .collect();
     let full_rows = args.apply || args.demote_alts || args.revive_bench;
     let (original, mut rows, positions, curated_records) = if full_rows {
         let original = std::fs::read(&args.master)?;
@@ -393,7 +402,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
                 row.get("move")
             );
             if !master_table::is_unplayed(row.get("role"))
-                || (args.opp_records && row.get("role") == "record")
+                || opponent_roles.contains(&row.get("role"))
             {
                 rows.push(row.clone());
             } else if row.get("tier") == "curated" {
@@ -430,8 +439,10 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let records = args.opp_records.then(|| record_positions(&rows)).transpose()?;
-    let (findings, summary, book) = audit_select(
+    let records = (!opponent_roles.is_empty())
+        .then(|| opponent_replies(&rows, &opponent_roles))
+        .transpose()?;
+    let (findings, mut summary, book) = audit_select(
         &positions,
         draws,
         Select {
@@ -443,6 +454,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         fill,
         records.as_ref(),
     )?;
+    summary.opponent_roles = opponent_roles.join("・");
     let (changes, replacements) = plan_replacements_with(
         &rows,
         &curated_records,
@@ -1028,6 +1040,14 @@ impl AuditedBook {
             &self.graph
         }
     }
+
+    /// 先手番・後手番の局面の値を持つグラフ。
+    pub(super) fn graphs(&self) -> [&Graph; 2] {
+        [
+            &self.graph,
+            self.white_graph.as_ref().unwrap_or(&self.graph),
+        ]
+    }
 }
 
 fn write_audited_db(
@@ -1425,9 +1445,13 @@ fn record_caps(
     Ok(caps)
 }
 
-fn record_positions(rows: &[Row]) -> Result<BTreeMap<String, MasterPosition>> {
+/// 相手の手として伝播に足す、`roles` の役割 (record・bench) の読みの値のある手。
+pub(super) fn opponent_replies(
+    rows: &[Row],
+    roles: &[&str],
+) -> Result<BTreeMap<String, MasterPosition>> {
     let mut records = BTreeMap::<String, MasterPosition>::new();
-    for row in rows.iter().filter(|r| r.get("role") == "record") {
+    for row in rows.iter().filter(|r| roles.contains(&r.get("role"))) {
         let Some(eval) = master_table::mean_eval(row.get("evals"))? else {
             continue;
         };
@@ -1973,6 +1997,17 @@ pub(super) fn audit(
     audit_with_deep(book, draws, line, fill, deep_plies, None)
 }
 
+/// [`audit`] に加えて、相手の手番の局面で `replies` ([`opponent_replies`]) の手も伝播に使う。
+pub(super) fn audit_with_replies(
+    book: &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    fill: Fill,
+    replies: Option<&BTreeMap<String, MasterPosition>>,
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
+    audit_with_records(book, draws, line, fill, None, None, replies)
+}
+
 fn audit_with_deep(
     book: &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
@@ -2222,8 +2257,13 @@ pub(super) fn format_summary(
         summary.moves, summary.known_moves, summary.illegal_moves, summary.records
     ));
     if let Some(count) = summary.opponent_record_positions {
+        let roles = if summary.opponent_roles.is_empty() {
+            "record"
+        } else {
+            &summary.opponent_roles
+        };
         out(format!(
-            "相手の手として使った record {} / 局面 {count}",
+            "相手の手として使った {roles} {} / 局面 {count}",
             summary.opponent_record_moves
         ));
     }
@@ -2371,12 +2411,51 @@ mod tests {
     }
 
     #[test]
+    fn opponent_bench_is_propagated_only_with_the_option() {
+        for (opp_bench, full) in [(false, true), (true, false), (true, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            let text = opponent_record_fixture("400").replace("\trecord\t", "\tbench\t");
+            std::fs::write(&args.master, &text).unwrap();
+            args.opp_bench = opp_bench;
+            args.apply = full;
+            args.since = Some("確認".into());
+            let master_path = args.master.clone();
+            let table_path = args.table.clone();
+            run(args).unwrap();
+            let table = std::fs::read_to_string(table_path).unwrap();
+            assert_eq!(table.contains("5a4a"), opp_bench);
+            let rows = parse_master(&std::fs::read_to_string(master_path).unwrap()).unwrap();
+            let bench: Vec<_> = rows
+                .iter()
+                .filter(|r| r.get("role") == "bench")
+                .map(|r| r.get("move"))
+                .collect();
+            assert_eq!(bench, ["4h3g"]);
+            let main = rows.iter().find(|r| r.get("key") == A && r.get("role") == "main").unwrap();
+            assert_eq!(main.get("move"), if opp_bench && full { "5a4a" } else { "5a5b" });
+        }
+    }
+
+    #[test]
+    fn summary_names_the_roles_used_as_opponent_replies() {
+        let summary = AuditSummary {
+            opponent_record_positions: Some(1),
+            opponent_record_moves: 2,
+            opponent_roles: "record・bench".into(),
+            ..AuditSummary::default()
+        };
+        let text = format_summary(&summary, 40, DrawValues::both(0), None);
+        assert!(text.contains("相手の手として使った record・bench 2 / 局面 1"));
+    }
+
+    #[test]
     fn opponent_records_do_not_use_own_records_or_unread_records() {
         for eval in ["400", ""] {
             let text = opponent_record_fixture(eval);
             let rows = parse_master(&text).unwrap();
             let positions = parse_master_rows(text.as_bytes()).unwrap();
-            let records = record_positions(&rows).unwrap();
+            let records = opponent_replies(&rows, &["record"]).unwrap();
             let (findings, summary, book) = audit_with_records(
                 &positions,
                 DrawValues::both(0),
@@ -2436,7 +2515,7 @@ mod tests {
             (B, "4h3g", "main", "-400"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
         let (findings, summary, book) = audit_with_records(
             &positions,
             DrawValues::both(0),
@@ -2476,7 +2555,7 @@ mod tests {
                 }
                 let key = rows[0].get("key");
                 let positions = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
-                let records = record_positions(&rows).unwrap();
+                let records = opponent_replies(&rows, &["record"]).unwrap();
                 let (_, _, book) = audit_with_records(
                     &positions,
                     DrawValues::both(0),
@@ -2517,7 +2596,7 @@ mod tests {
             (A, "1a1b", "record", "30"),
         ]);
         let positions = parse_master_rows(text.as_bytes()).unwrap();
-        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
         let (_, summary, _) = audit_with_records(
             &positions,
             DrawValues::both(0),
@@ -3149,7 +3228,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         ]);
         let rows = parse_master(&text).unwrap();
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
-        let records = record_positions(&rows).unwrap();
+        let records = opponent_replies(&rows, &["record"]).unwrap();
         let main = |fill| {
             let (_, _, book) = audit_with_records(
                 &parsed,
@@ -3176,7 +3255,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         ]);
         let rows = parse_master(&text).unwrap();
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
-        let records = record_positions(&rows).unwrap();
+        let records = opponent_replies(&rows, &["record"]).unwrap();
         let (_, _, book) = audit_with_records(
             &parsed,
             DrawValues::both(0),
@@ -3215,7 +3294,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             (&p, "5a5b", "main", "-500"),
         ]);
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
-        let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+        let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
         let caps = record_caps(&parsed.0, &records, "w").unwrap();
         let cap = caps[A].as_ref().unwrap();
         assert_ne!(cap.mv, x);
@@ -3252,7 +3331,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             }
             let text = master(&rows);
             let parsed = parse_master_rows(text.as_bytes()).unwrap();
-            let records = record_positions(&parse_master(&text).unwrap()).unwrap();
+            let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
             let caps = record_caps(&parsed.0, &records, "w").unwrap();
             match &caps[A] {
                 Some(cap) => {
@@ -4074,6 +4153,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             fill_replies: false,
             bridge_replies: false,
             opp_records: false,
+            opp_bench: false,
             bridge_table: None,
             bridge_enqueue_out: None,
             bridge_depth: 6,

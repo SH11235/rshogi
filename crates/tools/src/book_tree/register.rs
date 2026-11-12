@@ -45,6 +45,9 @@ pub(super) struct RegisterArgs {
     /// main からこの値未満の差の手を alt にする
     #[arg(long, default_value_t = 40)]
     alt_gap: i32,
+    /// 木の中で先の局面を読んだ手 (value_kind が tree:K) は、main との差が --alt-gap 以上でも bench (控え) の行で残す
+    #[arg(long)]
+    bench_expanded: bool,
     /// curated の行がある局面でも、main の source が置き換えてよいものなら main を木の 1 位に替える
     #[arg(long)]
     replace_curated: bool,
@@ -75,6 +78,9 @@ pub(super) struct RegisterArgs {
     /// 比べる伝播で master audit --bridge-replies と同じく相手の手番の局面を補う
     #[arg(long)]
     bridge_replies: bool,
+    /// 比べる伝播で master audit --opp-bench と同じく、相手の手番の局面で読みの値のある bench (控え) も使う
+    #[arg(long)]
+    opp_bench: bool,
     /// 比べる伝播で先手を自分として解くときの千日手の値 (master audit と揃える)
     #[arg(long, default_value_t = -70, allow_hyphen_values = true)]
     draw_value_black: i32,
@@ -125,6 +131,7 @@ pub(super) struct Node {
 pub(super) struct Summary {
     pub added_main: BTreeMap<String, usize>,
     pub added_alt: BTreeMap<String, usize>,
+    pub added_bench: BTreeMap<String, usize>,
     pub replaced_main: usize,
     /// `replaced_main` のうち、curated の main を替えた局面。
     pub replaced_curated: usize,
@@ -140,6 +147,8 @@ pub(super) struct Options<'a> {
     pub since: &'a str,
     pub note: &'a str,
     pub alt_gap: i32,
+    /// 木の中で先の局面を読んだ手は、差が `alt_gap` 以上でも bench の行で残す。
+    pub bench_expanded: bool,
     /// 足す行の source 列。
     pub source: &'a str,
     /// 足す行の lineage 列。
@@ -253,6 +262,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         since: &args.since,
         note: &args.note,
         alt_gap: args.alt_gap,
+        bench_expanded: args.bench_expanded,
         source: "read",
         lineage: "",
         schema: &schema,
@@ -274,6 +284,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         } else {
             Fill::Off
         },
+        opp_bench: args.opp_bench,
     };
     let mut builder = Builder {
         trees,
@@ -381,6 +392,13 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         kept,
         args.conflicts.display()
     );
+    if args.bench_expanded {
+        println!(
+            "先を読んだ手を bench で足した手: 先手番 {} / 後手番 {}",
+            summary.added_bench.get("b").unwrap_or(&0),
+            summary.added_bench.get("w").unwrap_or(&0)
+        );
+    }
     println!("cond=unknown の木: {unknown}");
     println!("指定で取り込まなかった局面 {skipped} / 指定したが木に無かった局面 {missing}");
     if args.apply {
@@ -746,6 +764,17 @@ pub(super) fn register(
             .copied()
             .filter(|m| best.value - m.value < options.alt_gap)
             .collect();
+        // 行の無い手だけを控えで足す。既にある行 (record・保護された控えを含む) の役割は変えない。
+        let benches: Vec<&NodeMove> = playable[1..]
+            .iter()
+            .copied()
+            .filter(|m| {
+                options.bench_expanded
+                    && best.value - m.value >= options.alt_gap
+                    && m.value_kind.starts_with("tree:")
+                    && find(&rows, &m.mv).is_none()
+            })
+            .collect();
         let best_was_bench = find(&rows, &best.mv).is_some_and(|i| rows[i].get("role") == "bench");
         for candidate in std::iter::once(best).chain(alts.iter().copied()) {
             if let Some(i) = find(&rows, &candidate.mv)
@@ -873,6 +902,14 @@ pub(super) fn register(
                 ));
                 *summary.added_alt.entry(side.clone()).or_default() += 1;
             }
+        }
+        for bench in benches {
+            rows.push(new_row(
+                bench,
+                "bench",
+                format!("木で先を読んだ手。伝播後で 1 位との差 {}", best.value - bench.value),
+            ));
+            *summary.added_bench.entry(side.clone()).or_default() += 1;
         }
         for &i in &existing {
             let row = &rows[i];
@@ -1092,6 +1129,7 @@ mod tests {
             since: "tag",
             note: "plan",
             alt_gap: 40,
+            bench_expanded: false,
             source: "read",
             lineage: "",
             replace_curated: false,
@@ -1383,6 +1421,7 @@ mod tests {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            bench_expanded: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -1392,6 +1431,7 @@ mod tests {
             keep_line: None,
             keep_min_depth: None,
             bridge_replies: false,
+            opp_bench: false,
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
@@ -1493,6 +1533,7 @@ mod tests {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            bench_expanded: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join(name),
@@ -1502,6 +1543,7 @@ mod tests {
             keep_line: None,
             keep_min_depth: None,
             bridge_replies: false,
+            opp_bench: false,
             draw_value_black: -70,
             draw_value_white: 70,
             auto_skip_flip: auto,
@@ -1583,6 +1625,7 @@ mod tests {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            bench_expanded: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -1592,6 +1635,7 @@ mod tests {
             keep_line: None,
             keep_min_depth: None,
             bridge_replies: false,
+            opp_bench: false,
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
@@ -1624,6 +1668,7 @@ mod tests {
             min_depth,
             draws: DrawValues::both(0),
             fill: Fill::Off,
+            opp_bench: false,
         };
         let judge = |nodes: &BTreeMap<String, Node>, rule| {
             let (after, _, _) = register(before.clone(), nodes, &options()).unwrap();
@@ -1663,6 +1708,81 @@ mod tests {
     }
 
     #[test]
+    fn expanded_moves_beyond_the_alt_gap_are_kept_as_bench() {
+        let mut position = node(&[("a", 50), ("b", 10), ("c", 9), ("d", 8), ("e", 7)], 2, 0);
+        position.moves[2].value_kind = "single".into();
+        position.moves[3].value_kind = "unknown".into();
+        let nodes = BTreeMap::from([(W.to_owned(), position)]);
+        let original = master(&[
+            row(W, "a", "alt", "read", "wide", "0"),
+            row(W, "e", "record", "read", "wide", "0"),
+            row(W, "m", "main", "book", "wide", "0"),
+        ]);
+        let (rows, _, summary) = register(original.clone(), &nodes, &options()).unwrap();
+        assert!(rows.iter().all(|r| r.get("role") != "bench"));
+        assert!(summary.added_bench.is_empty());
+
+        let options = Options {
+            bench_expanded: true,
+            ..options()
+        };
+        let (rows, _, summary) = register(original, &nodes, &options).unwrap();
+        let b = find(&rows, W, "b").unwrap();
+        assert_eq!(
+            (
+                b.get("role"),
+                b.get("evals"),
+                b.get("value_kind"),
+                b.get("source"),
+                b.get("tier")
+            ),
+            ("bench", "10", "tree:2", "read", "wide")
+        );
+        assert_eq!(b.get("note"), "木で先を読んだ手。伝播後で 1 位との差 40。plan");
+        assert!(find(&rows, W, "c").is_none());
+        assert!(find(&rows, W, "d").is_none());
+        assert_eq!(find(&rows, W, "e").unwrap().get("role"), "record");
+        assert_eq!(find(&rows, W, "m").unwrap().get("role"), "main");
+        assert_eq!(summary.added_bench, BTreeMap::from([("w".into(), 1)]));
+
+        // 足した控えは、次の登録で差が --alt-gap 未満になれば alt に戻り、開いたままなら値だけ替わる。
+        for (value, role) in [(12, "alt"), (-5, "bench")] {
+            let again = BTreeMap::from([(W.to_owned(), node(&[("a", 50), ("b", value)], 2, 0))]);
+            let (rows, _, summary) = register(rows.clone(), &again, &options).unwrap();
+            let b = find(&rows, W, "b").unwrap();
+            assert_eq!((b.get("role"), b.get("evals")), (role, value.to_string().as_str()));
+            assert!(summary.added_bench.is_empty());
+        }
+    }
+
+    #[test]
+    fn opponent_bench_lowers_the_kept_main_in_the_compared_propagation() {
+        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let a = child(R, "5i4i").unwrap();
+        let before = master(&[
+            row(R, "5i4i", "main", "read", "wide", "10"),
+            row(&a, "5a4a", "main", "read", "wide", "-50"),
+            row(&a, "5a6a", "bench", "read", "wide", "20"),
+        ]);
+        let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30), ("5i4i", 5)], 1, 0))]);
+        let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
+        let kept = |opp_bench| {
+            let rule = keep::KeepRule {
+                rule: SwitchRule::Line,
+                line: 20,
+                min_depth: 1,
+                draws: DrawValues::both(0),
+                fill: Fill::Off,
+                opp_bench,
+            };
+            keep::kept_mains(&before, &after, &nodes, rule).unwrap().0
+        };
+        // 後手の控え 5a6a (後手から 20) を使うと、元の main 5i4i は 50 から -20 に下がり、木の 1 位 30 に替わる。
+        assert_eq!(kept(false)[R].old_value, 50);
+        assert!(kept(true).is_empty());
+    }
+
+    #[test]
     fn propagated_rule_switches_only_when_both_values_come_from_children() {
         const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let a = child(R, "5i4i").unwrap();
@@ -1673,6 +1793,7 @@ mod tests {
             min_depth: 1,
             draws: DrawValues::both(0),
             fill: Fill::Off,
+            opp_bench: false,
         };
         let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30), ("5i4i", 5)], 1, 0))]);
         let judge = |rows: &[String]| {
@@ -1733,6 +1854,7 @@ mod tests {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            bench_expanded: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -1742,6 +1864,7 @@ mod tests {
             keep_line: None,
             keep_min_depth: None,
             bridge_replies: false,
+            opp_bench: false,
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
@@ -1789,6 +1912,7 @@ mod tests {
             since: "tag".into(),
             note: String::new(),
             alt_gap: 40,
+            bench_expanded: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -1801,6 +1925,7 @@ mod tests {
             keep_line,
             keep_min_depth: None,
             bridge_replies: false,
+            opp_bench: false,
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
@@ -1974,6 +2099,7 @@ mod tests {
             &nodes,
             &Options {
                 alt_gap: 0,
+                bench_expanded: false,
                 ..options()
             },
         )
