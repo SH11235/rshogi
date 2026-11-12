@@ -49,6 +49,10 @@ pub(super) struct RegisterArgs {
     /// 木の中で先の局面を読んだ手 (value_kind が tree:K) は、main との差が --alt-gap 以上でも bench (控え) の行で残す
     #[arg(long)]
     bench_expanded: bool,
+    /// 1 回の読みの手 (value_kind が single) と、木の中で先を確かめられない手 (unknown) は、main との差が
+    /// --alt-gap 以上でも bench (控え) の行で残す
+    #[arg(long)]
+    bench_single: bool,
     /// curated の行がある局面でも、main の source が置き換えてよいものなら main を木の 1 位に替える
     #[arg(long)]
     replace_curated: bool,
@@ -132,7 +136,10 @@ pub(super) struct Node {
 pub(super) struct Summary {
     pub added_main: BTreeMap<String, usize>,
     pub added_alt: BTreeMap<String, usize>,
+    /// 差が `alt_gap` 以上なので bench で足した、木の中で先の局面を読んだ手。
     pub added_bench: BTreeMap<String, usize>,
+    /// 差が `alt_gap` 以上なので bench で足した、1 回の読みの手と、木の中で先を確かめられない手。
+    pub added_bench_single: BTreeMap<String, usize>,
     pub replaced_main: usize,
     /// `replaced_main` のうち、curated の main を替えた局面。
     pub replaced_curated: usize,
@@ -150,6 +157,8 @@ pub(super) struct Options<'a> {
     pub alt_gap: i32,
     /// 木の中で先の局面を読んだ手は、差が `alt_gap` 以上でも bench の行で残す。
     pub bench_expanded: bool,
+    /// 1 回の読みの手と、木の中で先を確かめられない手は、差が `alt_gap` 以上でも bench の行で残す。
+    pub bench_single: bool,
     /// 足す行の source 列。
     pub source: &'a str,
     /// 足す行の lineage 列。
@@ -264,6 +273,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         note: &args.note,
         alt_gap: args.alt_gap,
         bench_expanded: args.bench_expanded,
+        bench_single: args.bench_single,
         source: "read",
         lineage: "",
         schema: &schema,
@@ -407,12 +417,21 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         kept,
         args.conflicts.display()
     );
-    if args.bench_expanded {
-        println!(
-            "先を読んだ手を bench で足した手: 先手番 {} / 後手番 {}",
-            summary.added_bench.get("b").unwrap_or(&0),
-            summary.added_bench.get("w").unwrap_or(&0)
-        );
+    for (on, what, added) in [
+        (args.bench_expanded, "先を読んだ手", &summary.added_bench),
+        (
+            args.bench_single,
+            "1 回の読みの手・先を確かめられない手",
+            &summary.added_bench_single,
+        ),
+    ] {
+        if on {
+            println!(
+                "{what}を bench で足した手: 先手番 {} / 後手番 {}",
+                added.get("b").unwrap_or(&0),
+                added.get("w").unwrap_or(&0)
+            );
+        }
     }
     println!("cond=unknown の木: {unknown}");
     println!("指定で取り込まなかった局面 {skipped} / 指定したが木に無かった局面 {missing}");
@@ -862,6 +881,11 @@ impl std::fmt::Display for Conflict {
     }
 }
 
+/// 木の中で先の局面を読んだ手か (行き先が同じ木の局面)。
+fn expanded(mv: &NodeMove) -> bool {
+    mv.value_kind.starts_with("tree:")
+}
+
 /// 元データの行に木の結果を当てる。評価値は手番の側から。
 pub(super) fn register(
     mut rows: Vec<Row>,
@@ -920,10 +944,12 @@ pub(super) fn register(
             .iter()
             .copied()
             .filter(|m| {
-                options.bench_expanded
-                    && best.value - m.value >= options.alt_gap
-                    && m.value_kind.starts_with("tree:")
-                    && find(&rows, &m.mv).is_none()
+                let wanted = if expanded(m) {
+                    options.bench_expanded
+                } else {
+                    options.bench_single
+                };
+                wanted && best.value - m.value >= options.alt_gap && find(&rows, &m.mv).is_none()
             })
             .collect();
         let best_was_bench = find(&rows, &best.mv).is_some_and(|i| rows[i].get("role") == "bench");
@@ -1055,12 +1081,16 @@ pub(super) fn register(
             }
         }
         for bench in benches {
-            rows.push(new_row(
-                bench,
-                "bench",
-                format!("木で先を読んだ手。伝播後で 1 位との差 {}", best.value - bench.value),
-            ));
-            *summary.added_bench.entry(side.clone()).or_default() += 1;
+            let (what, count) = if expanded(bench) {
+                ("木で先を読んだ手", &mut summary.added_bench)
+            } else if bench.value_kind == "single" {
+                ("木の 1 回の読みの手", &mut summary.added_bench_single)
+            } else {
+                ("木の中で先を確かめられない手", &mut summary.added_bench_single)
+            };
+            let why = format!("{what}。伝播後で 1 位との差 {}", best.value - bench.value);
+            rows.push(new_row(bench, "bench", why));
+            *count.entry(side.clone()).or_default() += 1;
         }
         for &i in &existing {
             let row = &rows[i];
@@ -1286,6 +1316,7 @@ mod tests {
             note: "plan",
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             source: "read",
             lineage: "",
             replace_curated: false,
@@ -1578,6 +1609,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -1690,6 +1722,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join(name),
@@ -1848,6 +1881,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -2033,6 +2067,60 @@ mod tests {
     }
 
     #[test]
+    fn unexpanded_moves_beyond_the_alt_gap_are_kept_as_bench_with_their_kind() {
+        let mut position = node(&[("a", 50), ("b", 10), ("c", 9), ("d", 8), ("e", 7)], 2, 0);
+        position.moves[2].value_kind = "single".into();
+        position.moves[3].value_kind = "unknown".into();
+        position.moves[4].value_kind = "single".into();
+        let nodes = BTreeMap::from([(B.to_owned(), position)]);
+        let original = master(&[row(B, "e", "record", "read", "wide", "0")]);
+        let roles = |expanded, single| {
+            let options = Options {
+                bench_expanded: expanded,
+                bench_single: single,
+                ..options()
+            };
+            let (rows, _, summary) = register(original.clone(), &nodes, &options).unwrap();
+            let roles: Vec<String> = ["b", "c", "d", "e"]
+                .iter()
+                .map(|mv| find(&rows, B, mv).map_or("-", |r| r.get("role")).to_owned())
+                .collect();
+            (rows, summary, roles.join(" "))
+        };
+        let (rows, summary, single) = roles(false, true);
+        assert_eq!(single, "- bench bench record");
+        let c = find(&rows, B, "c").unwrap();
+        assert_eq!((c.get("evals"), c.get("value_kind")), ("9", "single"));
+        assert_eq!(c.get("note"), "木の 1 回の読みの手。伝播後で 1 位との差 41。plan");
+        let d = find(&rows, B, "d").unwrap();
+        assert_eq!(d.get("value_kind"), "unknown");
+        assert_eq!(d.get("note"), "木の中で先を確かめられない手。伝播後で 1 位との差 42。plan");
+        assert!(summary.added_bench.is_empty());
+        assert_eq!(summary.added_bench_single, BTreeMap::from([("b".into(), 2)]));
+
+        let (_, summary, both) = roles(true, true);
+        assert_eq!(both, "bench bench bench record");
+        assert_eq!((summary.added_bench["b"], summary.added_bench_single["b"]), (1, 2));
+        assert_eq!(roles(false, false).2, "- - - record");
+    }
+
+    #[test]
+    fn single_read_at_the_alt_gap_is_bench_and_one_below_is_alt() {
+        let mut position = node(&[("a", 50), ("b", 11), ("c", 10)], 2, 0);
+        position.moves[1].value_kind = "single".into();
+        position.moves[2].value_kind = "single".into();
+        let options = Options {
+            bench_single: true,
+            ..options()
+        };
+        let nodes = BTreeMap::from([(B.to_owned(), position)]);
+        let (rows, _, summary) = register(master(&[]), &nodes, &options).unwrap();
+        assert_eq!(find(&rows, B, "b").unwrap().get("role"), "alt");
+        assert_eq!(find(&rows, B, "c").unwrap().get("role"), "bench");
+        assert_eq!(summary.added_bench_single, BTreeMap::from([("b".into(), 1)]));
+    }
+
+    #[test]
     fn expanded_bench_respects_curated_protected_and_skipped_positions() {
         const SKIP: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let original = master(&[
@@ -2137,6 +2225,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),
@@ -2195,6 +2284,7 @@ mod tests {
             note: String::new(),
             alt_gap: 40,
             bench_expanded: false,
+            bench_single: false,
             replace_curated: false,
             skip_keys: None,
             conflicts: dir.path().join("conflicts.tsv"),

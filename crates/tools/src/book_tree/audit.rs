@@ -2535,6 +2535,7 @@ mod tests {
             note: "",
             alt_gap: 40,
             bench_expanded: true,
+            bench_single: false,
             source: "read",
             lineage: "",
             schema: &schema,
