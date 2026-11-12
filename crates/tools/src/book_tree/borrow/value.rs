@@ -557,6 +557,7 @@ pub(super) fn join_roots(
     let every_move = Options {
         alt_gap: i32::MAX,
         bench_expanded: false,
+        bench_single: false,
         ..*options
     };
     let (all_rows, _, _) = register::register(rows.to_vec(), nodes, &every_move)?;
@@ -933,6 +934,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
         note: &args.note,
         alt_gap: args.alt_gap,
         bench_expanded: false,
+        bench_single: false,
         source: "ext",
         lineage: &lineage,
         schema: &schema,
