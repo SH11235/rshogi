@@ -364,7 +364,8 @@ fn note_missing_progress(b: &BoxData, suffix: &str) {
     );
 }
 
-fn path_keys(moves: &[&str]) -> Result<Vec<String>> {
+/// 初期局面と、初期局面から `moves` を 1 手ずつ指した局面 (手数を除いた SFEN)。
+pub(super) fn path_keys(moves: &[&str]) -> Result<Vec<String>> {
     let mut position = position_from_sfen(&format!("{HIRATE_KEY} 1"))?;
     let mut keys = vec![HIRATE_KEY.to_owned()];
     for mv in moves {

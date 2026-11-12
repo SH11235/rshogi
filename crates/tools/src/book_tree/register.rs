@@ -318,7 +318,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     let skipped = skipped.len();
     let single = match &args.single.single_enqueue_out {
         Some(_) => {
-            switch::rank(&mut singles, None, 0.0);
+            args.single.rank(&mut singles, None, 0.0)?;
             let (lines, excluded) = switch::queue(&singles, &args.single)?;
             Some((super::refutation::format_queue(&lines)?, lines.len(), excluded))
         }
@@ -404,6 +404,7 @@ fn check_output(
         ("--conflicts", args.conflicts.as_path()),
     ];
     inputs.extend(args.single.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
+    inputs.extend(args.single.walk_table.iter().map(|p| ("--walk-table", p.as_path())));
     inputs.extend(args.journal.iter().map(|p| ("--journal", p.as_path())));
     inputs.extend(args.skip_keys.iter().map(|p| ("--skip-keys", p.as_path())));
     inputs.extend(other);
