@@ -6,11 +6,12 @@ mod keep;
 use super::audit::Fill;
 use super::journal::LockedFile;
 use super::master_table::{
-    ROLES, Row, format_master, format_nodes, parse_master, positions_from_rows, validate,
+    MasterPosition, ROLES, Row, format_master, format_nodes, parse_master, positions_from_rows,
+    validate,
 };
 use super::model::child;
 use super::output::NODE_MOVES;
-use crate::book_backprop::{DrawValues, FlipFailure};
+use crate::book_backprop::{DrawValues, FlipFailure, MoveCache};
 use crate::book_db::{position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
@@ -82,11 +83,11 @@ pub(super) struct RegisterArgs {
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     /// 登録した元データを master cycles と同じ伝播で解き、反転キーで合流した局面で止まる (その向きの値を保てない、
-    /// 保証検査でその向きに破れる) なら、まず木ごとに独立に除く局面を探す。その後は原因の木の組と局面を絞り、通るまで足す。
+    /// 保証検査でその向きに破れる) なら、まず木ごとに独立に除く局面を探す。その後は全部の木の局面から絞り、通るまで足す。
     /// 足した局面の SFEN キーをこのファイルに書く (--skip-keys の形)。省くと検査しない
     #[arg(long, value_name = "OUT")]
     auto_skip_flip: Option<PathBuf>,
-    /// --auto-skip-flip で木ごとに並列に調べる数。1 なら逐次
+    /// --auto-skip-flip で並列に回す試行の数。1 なら逐次
     #[arg(long, value_name = "N", default_value_t = 4, requires = "auto_skip_flip",
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     auto_skip_flip_jobs: usize,
@@ -282,9 +283,14 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         rule,
     };
     let mut skip_keys = skip_keys;
+    let mut searched = false;
     if let Some(out) = &args.auto_skip_flip {
+        let trials = Trials {
+            prepared: Prepared::new(&rows, &builder.trees)?,
+            builder: &builder,
+        };
         let found = flip_skip::search(
-            &builder,
+            &trials,
             &args.trees,
             &skip_keys,
             args.auto_skip_flip_rounds,
@@ -299,6 +305,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             out.display()
         );
         skip_keys.extend(found.keys);
+        searched = true;
     }
     for parsed in std::mem::take(&mut builder.trees) {
         merged.add(parsed, &skip_keys);
@@ -313,6 +320,14 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         skipped,
         unpromoted_moves,
     } = builder.register_merged(merged)?;
+    if searched {
+        // 試行は木にある局面の行だけを登録し直し、手の行き先の表を使い回して確かめた。書き出す前の確認は表を使わず
+        // 全行から作り直した伝播で行い、試行の近道に誤りがあっても通らない元データを書かないようにする。
+        let positions = positions_from_rows(numbered(rows.clone()))?.0;
+        super::audit::evaluate(&positions, draws).context(
+            "--auto-skip-flip で通ると確かめた登録が、全行を登録した元データでは止まりました",
+        )?;
+    }
     eprintln!("{} / 木の手から外した不成 {unpromoted_moves}", unpromoted.format());
     let missing = skip_keys.iter().filter(|key| !contains_orientation(&skipped, key)).count();
     let skipped = skipped.len();
@@ -463,15 +478,6 @@ impl Merged {
 }
 
 impl Builder<'_> {
-    /// `trees` の番号の木だけを取り込んで登録し直す。
-    fn build(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Built> {
-        let mut merged = Merged::default();
-        for &tree in trees {
-            merged.add(self.trees[tree].clone(), skip);
-        }
-        self.register_merged(merged)
-    }
-
     fn register_merged(&self, merged: Merged) -> Result<Built> {
         let Merged {
             mut nodes,
@@ -502,13 +508,130 @@ impl Builder<'_> {
     }
 }
 
-impl flip_skip::Trial for Builder<'_> {
-    /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。main を替えるかを決める
-    /// 仮の登録の伝播で止まったときも同じく見分ける。
-    fn failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
-        let checked = self.build(trees, skip).and_then(|built| {
-            let rows = built.rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r)));
-            super::audit::evaluate(&positions_from_rows(rows)?.0, self.rule.draws)
+/// `--auto-skip-flip` の試行ごとに変わらない分。登録が書き換えるのは木にある局面の行だけなので、ほかの局面は
+/// 一度だけ伝播用の形にし、局面と手を指した後の局面も一度だけ求めて、試行で使い回す。
+struct Prepared {
+    /// 木のどれかにある局面の行 (元データの順)。
+    touched: Vec<Row>,
+    /// それ以外の局面。登録後の行の並びで集めたもの。
+    rest: BTreeMap<String, MasterPosition>,
+    cache: MoveCache,
+    /// 木の局面の key ごとの、反転した局面の key。
+    flipped: BTreeMap<String, Option<String>>,
+}
+
+fn numbered(rows: Vec<Row>) -> impl Iterator<Item = Result<(usize, Row)>> {
+    rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r)))
+}
+
+impl Prepared {
+    fn new(rows: &[Row], trees: &[BTreeMap<String, Node>]) -> Result<Self> {
+        let keys: BTreeSet<&str> =
+            trees.iter().flat_map(|tree| tree.keys().map(String::as_str)).collect();
+        let (touched, mut rest): (Vec<Row>, Vec<Row>) =
+            rows.iter().cloned().partition(|row| keys.contains(row.get("key")));
+        sort_rows(&mut rest);
+        let rest = positions_from_rows(numbered(rest))?.0;
+        let mut moves: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for row in rows {
+            moves.entry(row.get("key")).or_default().insert(row.get("move"));
+        }
+        for (key, node) in trees.iter().flatten() {
+            let entry = moves.entry(key).or_default();
+            entry.extend(node.moves.iter().map(|m| m.mv.as_str()));
+        }
+        let entries: Vec<(&str, Vec<&str>)> = moves
+            .into_iter()
+            .map(|(key, moves)| (key, moves.into_iter().collect()))
+            .collect();
+        let flipped = keys
+            .iter()
+            .map(|&key| {
+                let flipped = rshogi_book::flipped_key(&format!("{key} 1"));
+                (key.to_owned(), flipped.map(|flipped| strip_ply(&flipped).to_owned()))
+            })
+            .collect();
+        Ok(Self {
+            touched,
+            rest,
+            cache: MoveCache::build(&entries),
+            flipped,
+        })
+    }
+
+    /// 木にある局面の登録後の行 `rows` を足した、登録後の元データの全局面。
+    fn book(&self, rows: Vec<Row>) -> Result<BTreeMap<String, MasterPosition>> {
+        let mut positions = self.rest.clone();
+        positions.extend(positions_from_rows(numbered(rows))?.0);
+        Ok(positions)
+    }
+}
+
+/// `--auto-skip-flip` の試行。[`Builder::register_merged`] で全行を登録し直した元データと同じ局面を、木にある
+/// 局面の行だけ登録し直して作る。
+struct Trials<'a> {
+    builder: &'a Builder<'a>,
+    prepared: Prepared,
+}
+
+impl Trials<'_> {
+    /// `trees` の木を取り込んだ登録後の全局面。`keep` が偽なら main を残すかの判定を省く (判定は main と alt を
+    /// 入れ替えるだけで、手とその値は変えない)。
+    fn positions(
+        &self,
+        trees: &[usize],
+        skip: &BTreeSet<String>,
+        keep: bool,
+    ) -> Result<BTreeMap<String, MasterPosition>> {
+        let Builder {
+            options,
+            rule,
+            trees: all,
+            ..
+        } = self.builder;
+        // 取り込まない局面とその反転を、木ごとにでなく 1 回だけ求める ([`skip_nodes`] と同じ局面を除く)。
+        let mut extra = Vec::new();
+        let mut removed = BTreeSet::new();
+        for key in skip {
+            removed.insert(key.as_str());
+            if let Some(flipped) = self.prepared.flipped.get(key.as_str()) {
+                removed.extend(flipped.as_deref());
+            } else if let Some(flipped) = rshogi_book::flipped_key(&format!("{key} 1")) {
+                extra.push(strip_ply(&flipped).to_owned());
+            }
+        }
+        removed.extend(extra.iter().map(String::as_str));
+        let mut nodes = BTreeMap::new();
+        for &tree in trees {
+            let kept = all[tree].iter().filter(|(key, _)| !removed.contains(key.as_str()));
+            merge(&mut nodes, kept.map(|(key, node)| (key.clone(), node.clone())).collect());
+        }
+        super::unpromotion::drop_node_moves(&mut nodes)?;
+        let touched = &self.prepared.touched;
+        let (tentative, _, _) = register(touched.clone(), &nodes, options)?;
+        if !keep {
+            return self.prepared.book(tentative);
+        }
+        let (kept, _) = keep::kept_mains_in(touched, &tentative, &nodes, *rule, || {
+            self.prepared.book(tentative.clone())
+        })?;
+        drop(tentative);
+        let options = Options {
+            kept: Some(&kept),
+            ..**options
+        };
+        self.prepared.book(register(touched.clone(), &nodes, &options)?.0)
+    }
+
+    fn check(
+        &self,
+        trees: &[usize],
+        skip: &BTreeSet<String>,
+        keep: bool,
+    ) -> Result<Option<String>> {
+        let checked = self.positions(trees, skip, keep).and_then(|positions| {
+            let cache = Some(&self.prepared.cache);
+            super::audit::evaluate_with(&positions, self.builder.rule.draws, cache)
         });
         match checked {
             Ok(_) => Ok(None),
@@ -518,11 +641,23 @@ impl flip_skip::Trial for Builder<'_> {
             },
         }
     }
+}
+
+impl flip_skip::Trial for Trials<'_> {
+    /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。main を替えるかを決める
+    /// 仮の登録の伝播で止まったときも同じく見分ける。
+    fn failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+        self.check(trees, skip, true)
+    }
+
+    fn rough_failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+        self.check(trees, skip, false)
+    }
 
     fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String> {
         trees
             .iter()
-            .flat_map(|&t| self.trees[t].keys())
+            .flat_map(|&t| self.builder.trees[t].keys())
             .filter(|key| !contains_orientation(skip, key))
             .cloned()
             .collect()
@@ -910,15 +1045,20 @@ pub(super) fn register(
             }
         }
     }
-    rows.sort_by(|a, b| {
-        let role = |r: &Row| ROLES.iter().position(|x| *x == r.get("role"));
-        (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
-    });
+    sort_rows(&mut rows);
     validate(&rows)?;
     for row in &rows {
         options.schema.validate_row(row)?;
     }
     Ok((rows, conflicts, summary))
+}
+
+/// 登録後の行の並び (key・role・手の順)。
+fn sort_rows(rows: &mut [Row]) {
+    rows.sort_by(|a, b| {
+        let role = |r: &Row| ROLES.iter().position(|x| *x == r.get("role"));
+        (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
+    });
 }
 
 fn tree_fingerprint(dir: &Path) -> Result<Option<String>> {
@@ -1546,6 +1686,71 @@ mod tests {
         assert!(run(args("c3.tsv", Some(out.clone()), 0)).is_err());
         assert_eq!(std::fs::read_to_string(&master_path).unwrap(), original);
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "");
+    }
+
+    #[test]
+    fn trials_register_the_same_positions_as_registering_every_row() {
+        const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        // 木に無い局面。alt が手の順に並んでいない。
+        const X: &str = "4k4/9/9/9/9/9/9/9/4K4 b G";
+        let a = child(R, "5i4i").unwrap();
+        let b = child(R, "5i6i").unwrap();
+        let rows = master(&[
+            row(X, "5i6h", "alt", "read", "wide", "3"),
+            row(X, "5i4h", "alt", "read", "wide", "4"),
+            row(X, "5i5h", "main", "read", "wide", "5"),
+            row(X, "G*5h", "bench", "read", "wide", "1"),
+            row(R, "5i4i", "main", "read", "wide", "10"),
+            row(&a, "5a4a", "main", "read", "wide", "-50"),
+            row(&b, "5a6a", "main", "read", "wide", "-50"),
+        ]);
+        let options = options();
+        let builder = Builder {
+            trees: vec![
+                BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30), ("5i4i", 5)], 1, 0))]),
+                BTreeMap::from([(a.clone(), node(&[("5a6a", 20), ("5a4a", -5)], 0, 1))]),
+            ],
+            rows: &rows,
+            options: &options,
+            rule: keep::KeepRule {
+                rule: SwitchRule::Propagated,
+                line: 20,
+                min_depth: 1,
+                draws: DrawValues::both(0),
+                fill: Fill::Off,
+            },
+        };
+        let trials = Trials {
+            prepared: Prepared::new(&rows, &builder.trees).unwrap(),
+            builder: &builder,
+        };
+        let every_row = |trees: &[usize], skip: &BTreeSet<String>, keep: bool| {
+            let mut merged = Merged::default();
+            for &tree in trees {
+                merged.add(builder.trees[tree].clone(), skip);
+            }
+            let rows = if keep {
+                builder.register_merged(merged).unwrap().rows
+            } else {
+                register(rows.clone(), &merged.nodes, &options).unwrap().0
+            };
+            positions_from_rows(numbered(rows)).unwrap().0
+        };
+        let skips = [BTreeSet::new(), BTreeSet::from([R.to_owned()])];
+        for trees in [&[][..], &[0], &[1], &[0, 1]] {
+            for skip in &skips {
+                for keep in [true, false] {
+                    assert_eq!(
+                        trials.positions(trees, skip, keep).unwrap(),
+                        every_row(trees, skip, keep),
+                        "{trees:?} {skip:?} {keep}"
+                    );
+                }
+            }
+        }
+        // 同点なので元の main を残す。判定を省いた登録とは main と alt の順だけが違う。
+        let main = |keep| trials.positions(&[0], &skips[0], keep).unwrap()[R].moves[0].mv.clone();
+        assert_eq!((main(true).as_str(), main(false).as_str()), ("5i4i", "5i6i"));
     }
 
     #[test]

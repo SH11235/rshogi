@@ -1,5 +1,5 @@
-//! 登録した元データが反転キーで合流した局面で伝播を止めるとき、原因の木とその木の局面を絞り、取り込まない局面を
-//! 足して通るまで繰り返す。最初に木ごとに独立に調べ、残った問題を木の組から探す。
+//! 登録した元データが反転キーで合流した局面で伝播を止めるとき、取り込まない局面を探して足し、通るまで繰り返す。
+//! 最初に木ごとに独立に調べ、残った問題 (木の組み合わせで止まる分) は全部の木の局面から絞る。
 
 use anyhow::{Result, ensure};
 use std::collections::BTreeSet;
@@ -21,9 +21,17 @@ pub(super) struct Found {
 /// 木の番号の組と取り込まない局面で登録した元データを検査し、反転キーで止まるならその理由を返す。
 pub(super) trait Trial: Sync {
     fn failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>>;
+    /// `failure` より軽い検査。まれに `failure` と結果が違ってよい。探す途中の組だけに使い、原因の木と見つけた
+    /// 局面は `failure` で確かめる。
+    fn rough_failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+        self.failure(trees, skip)
+    }
     /// その木が取り込む局面のうち、`skip` で除かれていないもの。
     fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String>;
 }
+
+/// 全部の木の局面から絞るとき、候補を一度に分ける数。
+const ALL_TREES_WIDTH: usize = 6;
 
 /// 1 回の試行の結果。
 enum Outcome {
@@ -33,10 +41,10 @@ enum Outcome {
     Other(anyhow::Error),
 }
 
-/// 木ごとに独立に除く局面を一度探した後、全部の木で止まるなら原因の木の組 (1 本除くと止まらなくなる組) を、次にその組だけで通るようになる
-/// 局面の組 (1 つ除くと止まる組) を探して `skip` に足す。足した後の全部の木でもう一度検査し、`rounds` 回まで
-/// 繰り返す。木や局面を減らした途中の組が反転キー以外の理由で止まったときは、その組は反転キーで止まらない、
-/// 通らない組として探し続ける。
+/// 木ごとに独立に除く局面を一度探した後、全部の木で止まるなら、全部の木の局面から、取り込まなければ全部の木で通る
+/// 局面の組を探して `skip` に足す。足した後の全部の木でもう一度検査し、`rounds` 回まで繰り返す。局面を減らした
+/// 途中の組が反転キー以外の理由で止まったときは、その組は通らない組として探し続ける。探す途中の組は軽い検査で
+/// 調べ、全部の木・止まる木・見つけた局面は元の検査で確かめる。
 pub(super) fn search<T: Trial>(
     trial: &T,
     names: &[PathBuf],
@@ -49,16 +57,19 @@ pub(super) fn search<T: Trial>(
     let all: Vec<usize> = (0..names.len()).collect();
     let mut skip = skip.clone();
     let mut keys = Vec::new();
-    let mut stats = Stats {
-        trials: 0,
-        others: 0,
-        first_other: None,
-        report_on_drop: true,
-    };
+    let mut stats = Stats::reporting();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon::current_num_threads().max(jobs))
+        .build()?;
     let mut independent_keys = 0;
     let mut independent_done = false;
     let mut round = 0;
+    // 見つけた局面を足した全部の木が通ると確かめてある。
+    let mut verified = false;
     let passed = loop {
+        if verified {
+            break true;
+        }
         let message = match stats.check(trial, &all, &skip) {
             Outcome::Pass => break true,
             Outcome::Flip(message) => message,
@@ -77,12 +88,10 @@ pub(super) fn search<T: Trial>(
             );
             independent_done = true;
             let tree_started = Instant::now();
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(rayon::current_num_threads().max(jobs))
-                .build()?;
             let checks = parallel(&pool, jobs, &all, |&t| {
                 let mut stats = Stats::default();
-                let bad = matches!(stats.check(trial, &[t], &skip), Outcome::Flip(_));
+                let bad = matches!(stats.probe(trial, &[t], &skip), Outcome::Flip(_))
+                    && matches!(stats.check(trial, &[t], &skip), Outcome::Flip(_));
                 (t, bad, stats)
             });
             eprintln!(
@@ -102,11 +111,13 @@ pub(super) fn search<T: Trial>(
                     skip.iter().cloned().chain(extra.iter().cloned()).collect()
                 };
                 let found =
-                    if matches!(stats.check(trial, &[*t], &with(&candidates)), Outcome::Flip(_)) {
+                    if matches!(stats.probe(trial, &[*t], &with(&candidates)), Outcome::Flip(_)) {
                         None
                     } else {
-                        let found = narrow(&candidates, |extra| {
-                            matches!(stats.check(trial, &[*t], &with(extra)), Outcome::Pass)
+                        let found = narrow(&candidates, 2, |sets| {
+                            sets.iter().position(|extra| {
+                                matches!(stats.probe(trial, &[*t], &with(extra)), Outcome::Pass)
+                            })
                         });
                         matches!(stats.check(trial, &[*t], &with(&found)), Outcome::Pass)
                             .then_some(found)
@@ -138,35 +149,58 @@ pub(super) fn search<T: Trial>(
             }
         }
         round += 1;
-        let bad = ddmin(&all, |trees| matches!(stats.check(trial, trees, &skip), Outcome::Flip(_)));
-        let bad_names: Vec<_> = bad.iter().map(|&t| names[t].display().to_string()).collect();
-        eprintln!("  原因の木: {}", bad_names.join(" "));
-        let candidates: Vec<String> = trial.keys(&bad, &skip).into_iter().collect();
+        let round_started = Instant::now();
+        let candidates: Vec<String> = trial.keys(&all, &skip).into_iter().collect();
         let with = |extra: &[String]| -> BTreeSet<String> {
             skip.iter().cloned().chain(extra.iter().cloned()).collect()
         };
-        // 全部除いた組が反転キー以外の理由で止まっても、一部だけ除いた組では通ることがあるので探す。
-        // 見つけた組は最後に通ることを確かめる。
-        ensure!(
-            !matches!(stats.check(trial, &bad, &with(&candidates)), Outcome::Flip(_)),
-            "原因の木 {} の局面を全部取り込まなくても反転キーの検査で止まります",
-            bad_names.join(" ")
+        let before = stats.trials;
+        let narrowed = if matches!(stats.probe(trial, &all, &with(&candidates)), Outcome::Flip(_)) {
+            None
+        } else {
+            // 分けた部分を並列に確かめる。どれが通ったかは分けた順で決めるので、結果は実行順にも jobs にもよらない。
+            let found = narrow(&candidates, ALL_TREES_WIDTH, |sets| {
+                if jobs == 1 {
+                    return sets.iter().position(|extra| {
+                        matches!(stats.probe(trial, &all, &with(extra)), Outcome::Pass)
+                    });
+                }
+                let results = parallel(&pool, jobs, sets, |extra| {
+                    let mut stats = Stats::default();
+                    let passed = matches!(stats.probe(trial, &all, &with(extra)), Outcome::Pass);
+                    (passed, stats)
+                });
+                let mut first = None;
+                for (i, (passed, local)) in results.into_iter().enumerate() {
+                    stats.merge(local);
+                    if passed && first.is_none() {
+                        first = Some(i);
+                    }
+                }
+                first
+            });
+            matches!(stats.check(trial, &all, &with(&found)), Outcome::Pass).then_some(found)
+        };
+        eprintln!(
+            "  全部の木の絞り込み: 試行 {} / {:.1} 秒",
+            stats.trials - before,
+            round_started.elapsed().as_secs_f64()
         );
-        let found = ddmin(&candidates, |extra| {
-            matches!(stats.check(trial, &bad, &with(extra)), Outcome::Pass)
-        });
-        ensure!(
-            matches!(stats.check(trial, &bad, &with(&found)), Outcome::Pass),
-            "原因の木 {} で、取り込まなければ通る局面の組が見つかりません",
-            bad_names.join(" ")
-        );
-        log_keys(candidates.len(), &found);
+        let found = match narrowed {
+            Some(found) => {
+                verified = true;
+                log_keys(candidates.len(), &found);
+                found
+            }
+            // 半分ずつの絞り込みで通る組が見つからなければ、原因の木の組から元の検査で探す。
+            None => combination(trial, names, &all, &skip, &mut stats)?,
+        };
         skip.extend(found.iter().cloned());
         keys.extend(found);
     };
     stats.report();
     eprintln!(
-        "反転キーの検査: {} / 足した局面 {} (木ごと {independent_keys} / その後の巡 {}) / 試行 {} (うち反転キー以外の理由で止まった組 {}) / {:.1} 秒",
+        "反転キーの検査: {} / 足した局面 {} (木ごと {independent_keys} / その後の巡 {}) / 試行 {} (うち軽い検査 {}・反転キー以外の理由で止まった組 {}) / {:.1} 秒",
         if passed {
             "通りました"
         } else {
@@ -175,6 +209,7 @@ pub(super) fn search<T: Trial>(
         keys.len(),
         keys.len() - independent_keys,
         stats.trials,
+        stats.rough,
         stats.others,
         started.elapsed().as_secs_f64()
     );
@@ -183,6 +218,41 @@ pub(super) fn search<T: Trial>(
         passed,
         trials: stats.trials,
     })
+}
+
+/// 全部の木で止まるときの原因の木の組 (1 本除くと止まらなくなる組) を絞り、その組だけで通るようになる局面の組
+/// (1 つ除くと止まる組) を返す。
+fn combination<T: Trial>(
+    trial: &T,
+    names: &[PathBuf],
+    all: &[usize],
+    skip: &BTreeSet<String>,
+    stats: &mut Stats,
+) -> Result<Vec<String>> {
+    let bad = ddmin(all, |trees| matches!(stats.check(trial, trees, skip), Outcome::Flip(_)));
+    let bad_names: Vec<_> = bad.iter().map(|&t| names[t].display().to_string()).collect();
+    eprintln!("  原因の木: {}", bad_names.join(" "));
+    let candidates: Vec<String> = trial.keys(&bad, skip).into_iter().collect();
+    let with = |extra: &[String]| -> BTreeSet<String> {
+        skip.iter().cloned().chain(extra.iter().cloned()).collect()
+    };
+    // 全部除いた組が反転キー以外の理由で止まっても、一部だけ除いた組では通ることがあるので探す。
+    // 見つけた組は最後に通ることを確かめる。
+    ensure!(
+        !matches!(stats.check(trial, &bad, &with(&candidates)), Outcome::Flip(_)),
+        "原因の木 {} の局面を全部取り込まなくても反転キーの検査で止まります",
+        bad_names.join(" ")
+    );
+    let found = ddmin(&candidates, |extra| {
+        matches!(stats.check(trial, &bad, &with(extra)), Outcome::Pass)
+    });
+    ensure!(
+        matches!(stats.check(trial, &bad, &with(&found)), Outcome::Pass),
+        "原因の木 {} で、取り込まなければ通る局面の組が見つかりません",
+        bad_names.join(" ")
+    );
+    log_keys(candidates.len(), &found);
+    Ok(found)
 }
 
 // 入れ子の rayon 処理が待つ間も、木の試行の状態を持つワーカーは jobs 本までに抑える。
@@ -220,6 +290,8 @@ fn log_keys(candidates: usize, found: &[String]) {
 #[derive(Default)]
 struct Stats {
     trials: usize,
+    /// `trials` のうち軽い検査。
+    rough: usize,
     others: usize,
     first_other: Option<String>,
     report_on_drop: bool,
@@ -234,9 +306,30 @@ impl Drop for Stats {
 }
 
 impl Stats {
+    /// 捨てるときに、途中の組が反転キー以外の理由で止まったことを報告する集計。
+    fn reporting() -> Self {
+        Self {
+            report_on_drop: true,
+            trials: 0,
+            rough: 0,
+            others: 0,
+            first_other: None,
+        }
+    }
+
     fn check<T: Trial>(&mut self, trial: &T, trees: &[usize], skip: &BTreeSet<String>) -> Outcome {
+        self.record(trial.failure(trees, skip))
+    }
+
+    /// 軽い検査。
+    fn probe<T: Trial>(&mut self, trial: &T, trees: &[usize], skip: &BTreeSet<String>) -> Outcome {
+        self.rough += 1;
+        self.record(trial.rough_failure(trees, skip))
+    }
+
+    fn record(&mut self, result: Result<Option<String>>) -> Outcome {
         self.trials += 1;
-        match trial.failure(trees, skip) {
+        match result {
             Ok(None) => Outcome::Pass,
             Ok(Some(message)) => Outcome::Flip(message),
             Err(error) => {
@@ -259,6 +352,7 @@ impl Stats {
 
     fn merge(&mut self, mut other: Self) {
         self.trials += other.trials;
+        self.rough += other.rough;
         self.others += other.others;
         if self.first_other.is_none() {
             self.first_other = other.first_other.take();
@@ -266,35 +360,46 @@ impl Stats {
     }
 }
 
-/// `ok(items)` が真で `ok(&[])` が偽のとき、`ok` が真になる小さい部分を半分ずつ確かめて探す。要素を足しても真が
-/// 偽に戻らない (単調な) 条件なら 1 つ除くと偽になる組が返り、試行は「返る要素の数 × 要素数の対数」程度で済む。
-/// 単調でない条件では真にならない組を返し得るので、呼ぶ側が結果を確かめる。
-fn narrow<T: Clone>(items: &[T], mut ok: impl FnMut(&[T]) -> bool) -> Vec<T> {
-    fn go<T: Clone>(base: &mut Vec<T>, items: &[T], ok: &mut impl FnMut(&[T]) -> bool) -> Vec<T> {
+/// 全部足せば通り、何も足さなければ通らない `items` から、足せば通る小さい部分を `width` 個ずつに分けて探す。
+/// `first` は渡した組のうち通る最初の組の番号を返す (1 つも通らなければ `None`)。要素を足しても通らなくならない
+/// (単調な) 条件なら 1 つ除くと通らなくなる組が返り、`first` の呼び出しは「返る要素の数 × 要素数の対数」程度で済む。
+/// 単調でない条件では通らない組を返し得るので、呼ぶ側が結果を確かめる。
+fn narrow<T: Clone>(
+    items: &[T],
+    width: usize,
+    mut first: impl FnMut(&[Vec<T>]) -> Option<usize>,
+) -> Vec<T> {
+    fn go<T: Clone>(
+        base: &[T],
+        items: &[T],
+        width: usize,
+        first: &mut impl FnMut(&[Vec<T>]) -> Option<usize>,
+    ) -> Vec<T> {
         if items.len() <= 1 {
             return items.to_vec();
         }
-        let kept = base.len();
-        let (left, right) = items.split_at(items.len() / 2);
-        for half in [left, right] {
-            base.extend_from_slice(half);
-            let passed = ok(base);
-            base.truncate(kept);
-            if passed {
-                return go(base, half, ok);
-            }
+        let (len, count) = (items.len(), width.min(items.len()));
+        let parts: Vec<&[T]> =
+            (0..count).map(|i| &items[i * len / count..(i + 1) * len / count]).collect();
+        let alone: Vec<Vec<T>> = parts.iter().map(|part| [base, part].concat()).collect();
+        if let Some(i) = first(&alone) {
+            return go(base, parts[i], width, first);
         }
-        // どちらの半分だけでも足りないので、両方から要る要素を拾う。
-        base.extend_from_slice(left);
-        let mut found = go(base, right, ok);
-        base.truncate(kept);
-        base.extend_from_slice(&found);
-        let mut from_left = go(base, left, ok);
-        base.truncate(kept);
-        from_left.append(&mut found);
-        from_left
+        // どの部分だけでも足りないので、複数の部分から要る要素を拾う。後ろの部分から順に、前の部分の全部と、
+        // 後ろの部分から拾った要素を足した上で絞る。
+        let mut found = vec![Vec::new(); count];
+        for i in (0..count).rev() {
+            let mut others = [base, &parts[..i].concat()].concat();
+            others.extend(found[i + 1..].iter().flatten().cloned());
+            // 2 つに分けたときは、もう片方だけでは足りないと分かっている。
+            if count > 2 && first(std::slice::from_ref(&others)).is_some() {
+                continue;
+            }
+            found[i] = go(&others, parts[i], width, first);
+        }
+        found.concat()
     }
-    go(&mut Vec::new(), items, &mut ok)
+    go(&[], items, width, &mut first)
 }
 
 /// `ok(items)` が真のとき、`ok` が真のままの小さい部分 (1 つ除くと偽になる組) を delta debugging で探す。
@@ -353,13 +458,21 @@ mod tests {
     fn narrow_finds_scattered_elements_with_few_trials() {
         let items: Vec<usize> = (0..300).collect();
         for needed in [vec![9], vec![3, 170], vec![0, 1, 150, 299]] {
-            let mut calls = 0;
-            let found = narrow(&items, |s| {
-                calls += 1;
-                needed.iter().all(|n| s.contains(n))
-            });
-            assert_eq!(found, needed);
-            assert!(calls <= needed.len() * 20, "試行 {calls}");
+            for width in [2, 3, 6] {
+                let (mut calls, mut batches) = (0, 0);
+                let found = narrow(&items, width, |sets| {
+                    batches += 1;
+                    sets.iter().position(|s| {
+                        calls += 1;
+                        needed.iter().all(|n| s.contains(n))
+                    })
+                });
+                assert_eq!(found, needed, "幅 {width}");
+                assert!(calls <= needed.len() * 20 * width / 2, "幅 {width} 試行 {calls}");
+                if width == 6 {
+                    assert!(batches <= needed.len() * 10, "幅 {width} 組 {batches}");
+                }
+            }
         }
     }
 
@@ -452,13 +565,48 @@ mod tests {
                 let error = search(&trial, &[PathBuf::from("t0")], &BTreeSet::new(), 1, jobs)
                     .unwrap_err()
                     .to_string();
+                // 木ごとの段・全部の木の絞り込み・原因の木の組からの探索が、それぞれ局面を除いて確かめる。
                 if flip_when_removed {
                     assert!(error.contains("局面を全部取り込まなくても"), "{error}");
-                    assert_eq!(trial.removed.load(Ordering::Relaxed), 2);
+                    assert_eq!(trial.removed.load(Ordering::Relaxed), 3);
                 } else {
                     assert!(error.contains("通る局面の組が見つかりません"), "{error}");
-                    assert_eq!(trial.removed.load(Ordering::Relaxed), 4);
+                    assert_eq!(trial.removed.load(Ordering::Relaxed), 6);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn search_confirms_rough_results_with_the_exact_check() {
+        /// 軽い検査だけが `rough` の答えを返す。
+        struct Rough {
+            fake: Fake,
+            rough: Option<&'static str>,
+        }
+        impl Trial for Rough {
+            fn failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+                self.fake.failure(trees, skip)
+            }
+            fn rough_failure(&self, _: &[usize], _: &BTreeSet<String>) -> Result<Option<String>> {
+                Ok(self.rough.map(str::to_owned))
+            }
+            fn keys(&self, trees: &[usize], skip: &BTreeSet<String>) -> BTreeSet<String> {
+                self.fake.keys(trees, skip)
+            }
+        }
+        let names = ["t0", "t1", "t2", "t3"].map(PathBuf::from);
+        for jobs in [1, 4] {
+            // 軽い検査が止まらないと答えても、元の検査で止まる限り原因の木の組から探す。
+            // 軽い検査が止まると答えても、元の検査で止まらない木の局面は除かない。
+            for rough in [None, Some("止まる")] {
+                let trial = Rough {
+                    fake: Fake::default(),
+                    rough,
+                };
+                let found = search(&trial, &names, &BTreeSet::new(), 10, jobs).unwrap();
+                assert!(found.passed);
+                assert_eq!(found.keys, ["a", "c"], "{rough:?}");
             }
         }
     }
