@@ -82,11 +82,15 @@ pub(super) struct RegisterArgs {
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
     /// 登録した元データを master cycles と同じ伝播で解き、反転キーで合流した局面で止まる (その向きの値を保てない、
-    /// 保証検査でその向きに破れる) なら、原因の木とその木の局面を絞って取り込まない局面に足し、通るまで繰り返す。
+    /// 保証検査でその向きに破れる) なら、まず木ごとに独立に除く局面を探す。その後は原因の木の組と局面を絞り、通るまで足す。
     /// 足した局面の SFEN キーをこのファイルに書く (--skip-keys の形)。省くと検査しない
     #[arg(long, value_name = "OUT")]
     auto_skip_flip: Option<PathBuf>,
-    /// --auto-skip-flip で取り込まない局面を足し直す回数の上限
+    /// --auto-skip-flip で木ごとに並列に調べる数。1 なら逐次
+    #[arg(long, value_name = "N", default_value_t = 4, requires = "auto_skip_flip",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    auto_skip_flip_jobs: usize,
+    /// --auto-skip-flip で木ごとの探索の後に取り込まない局面を足し直す回数の上限
     #[arg(
         long,
         value_name = "N",
@@ -279,8 +283,13 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     };
     let mut skip_keys = skip_keys;
     if let Some(out) = &args.auto_skip_flip {
-        let found =
-            flip_skip::search(&mut builder, &args.trees, &skip_keys, args.auto_skip_flip_rounds)?;
+        let found = flip_skip::search(
+            &builder,
+            &args.trees,
+            &skip_keys,
+            args.auto_skip_flip_rounds,
+            args.auto_skip_flip_jobs,
+        )?;
         write_atomic(out, &found.keys.iter().map(|k| format!("{k}\n")).collect::<String>())?;
         ensure!(
             found.passed,
@@ -496,7 +505,7 @@ impl Builder<'_> {
 impl flip_skip::Trial for Builder<'_> {
     /// master cycles と同じく、千日手の値を先後で分けて値の分かる手だけを伝播する。main を替えるかを決める
     /// 仮の登録の伝播で止まったときも同じく見分ける。
-    fn failure(&mut self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
+    fn failure(&self, trees: &[usize], skip: &BTreeSet<String>) -> Result<Option<String>> {
         let checked = self.build(trees, skip).and_then(|built| {
             let rows = built.rows.into_iter().enumerate().map(|(i, r)| Ok((i + 2, r)));
             super::audit::evaluate(&positions_from_rows(rows)?.0, self.rule.draws)
@@ -991,6 +1000,45 @@ mod tests {
     use super::super::master_table::COLUMNS;
     use super::*;
 
+    #[test]
+    fn auto_skip_flip_jobs_cli_requires_positive_count_and_auto_skip() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            register: RegisterArgs,
+        }
+        let parse = |extra: &[&str]| {
+            Cli::try_parse_from(
+                [
+                    "register",
+                    "--master",
+                    "moves.tsv",
+                    "--since",
+                    "T",
+                    "--conflicts",
+                    "c.tsv",
+                    "tree",
+                ]
+                .into_iter()
+                .chain(extra.iter().copied()),
+            )
+        };
+        assert_eq!(parse(&[]).unwrap().register.auto_skip_flip_jobs, 4);
+        assert!(parse(&["--auto-skip-flip-jobs", "1"]).is_err());
+        assert!(parse(&["--auto-skip-flip", "auto.txt", "--auto-skip-flip-jobs", "0"]).is_err());
+        for jobs in ["1", "4"] {
+            let cli = parse(&[
+                "--auto-skip-flip",
+                "auto.txt",
+                "--auto-skip-flip-jobs",
+                jobs,
+            ])
+            .unwrap();
+            assert_eq!(cli.register.auto_skip_flip_jobs.to_string(), jobs);
+        }
+    }
+
     const B: &str = "pos1 b -";
     const W: &str = "pos2 w -";
 
@@ -1347,6 +1395,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
+            auto_skip_flip_jobs: 4,
             auto_skip_flip_rounds: 10,
             trees,
         };
@@ -1456,6 +1505,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 70,
             auto_skip_flip: auto,
+            auto_skip_flip_jobs: 4,
             auto_skip_flip_rounds: rounds,
             trees: vec![clean.clone(), bad.clone()],
         };
@@ -1545,6 +1595,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
+            auto_skip_flip_jobs: 4,
             auto_skip_flip_rounds: 10,
             trees: vec![tree],
         })
@@ -1694,6 +1745,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
+            auto_skip_flip_jobs: 4,
             auto_skip_flip_rounds: 10,
             trees: vec![tree],
         })
@@ -1752,6 +1804,7 @@ mod tests {
             draw_value_black: -70,
             draw_value_white: 0,
             auto_skip_flip: None,
+            auto_skip_flip_jobs: 4,
             auto_skip_flip_rounds: 10,
             trees: vec![tree.clone()],
         };
