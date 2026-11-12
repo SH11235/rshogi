@@ -5,7 +5,7 @@
 //! 数千万手の定跡を読めるよう、入力の文字列は局面の代表 SFEN だけを持つ。手は値と行き先の番号の配列で持ち、
 //! 書き出しでは入力を読み直して、指し手欄などは入力の文字列をそのまま使う。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::ValueEnum;
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use rshogi_core::position::{Position, StaticPosition};
+use rshogi_core::position::{MAX_GAME_PLY, Position, StaticPosition};
 use rshogi_core::types::{Color, Hand, Move, Piece, PieceType, Square, Value};
 
 use crate::book_db::ply_of;
@@ -511,6 +511,85 @@ impl PositionIndex {
     }
 }
 
+/// 局面の key ごとに、局面の印と、合法手を指した後の局面を覚えた表。同じ局面を多く含む入力を繰り返しグラフに
+/// するとき、SFEN の解釈と手の適用を省く。表に無い局面と手は、表を使わないときと同じく局面から求める。
+#[derive(Default)]
+pub(crate) struct MoveCache {
+    nodes: HashMap<Box<str>, CachedNode>,
+}
+
+struct CachedNode {
+    /// key が正規の SFEN のとき、索引に入れる値。
+    indexed: Option<PositionKey>,
+    checked: bool,
+    /// 合法手 (`Move` の下位 16 bit) の昇順と、指した後の局面とその反転の値。
+    moves: Vec<(u16, [PositionKey; 2])>,
+}
+
+impl MoveCache {
+    /// `entries` は ply 抜き key と、その局面の指し手の USI 表記。局面として読めない key と、合法でない手は覚えない。
+    pub(crate) fn build<'a, M>(entries: &[(&'a str, M)]) -> Self
+    where
+        M: AsRef<[&'a str]> + Sync,
+    {
+        let nodes = entries
+            .par_iter()
+            .filter_map(|(key, moves)| {
+                let sfen = format!("{key} 1");
+                let position = StaticPosition::from_sfen(&sfen).ok()?;
+                let indexed = (strip_ply(&position.to_sfen()) == *key)
+                    .then(|| PositionKey::pair_static(&position)[0]);
+                let mut position = Position::new();
+                position.set_sfen(&sfen).ok()?;
+                let mut children = Vec::new();
+                for text in moves.as_ref() {
+                    // グラフを作るときに引く値 (局面に当てる前の指し手) で覚える。
+                    let Some(decoded) = canonical_move(text).or_else(|| Move::from_usi(text))
+                    else {
+                        continue;
+                    };
+                    let Ok(mv) = legal_move(&position, Some(decoded)) else {
+                        continue;
+                    };
+                    let gives_check = position.gives_check(mv);
+                    position.do_move(mv, gives_check);
+                    children.push((decoded.raw(), PositionKey::pair(&position)));
+                    position.undo_move(mv);
+                }
+                children.sort_unstable_by_key(|&(mv, _)| mv);
+                children.dedup_by_key(|&mut (mv, _)| mv);
+                let node = CachedNode {
+                    indexed,
+                    checked: position.in_check(),
+                    moves: children,
+                };
+                Some((Box::from(*key), node))
+            })
+            .collect();
+        Self { nodes }
+    }
+
+    /// 手数が正しく付いた SFEN の局面。手数だけが違う SFEN は同じ局面として読めるので、key で引く。
+    fn node(&self, sfen: &str) -> Option<&CachedNode> {
+        let key = strip_ply(sfen);
+        (key.len() != sfen.len() && ply_of(sfen) <= MAX_GAME_PLY as u32)
+            .then(|| self.nodes.get(key))
+            .flatten()
+    }
+
+    /// key が正規の SFEN と分かっているか。
+    pub(crate) fn is_canonical(&self, key: &str) -> bool {
+        self.nodes.get(key).is_some_and(|node| node.indexed.is_some())
+    }
+}
+
+impl CachedNode {
+    fn child(&self, mv: u16) -> Option<[PositionKey; 2]> {
+        let at = self.moves.binary_search_by_key(&mv, |&(mv, _)| mv).ok()?;
+        Some(self.moves[at].1)
+    }
+}
+
 /// 逆伝播の集計。
 #[derive(Debug, Default, Clone)]
 pub struct PropagationStats {
@@ -998,13 +1077,14 @@ pub fn read_graph(path: &Path, options: BackpropOptions) -> Result<Graph> {
     let scan = scan(path)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", path.display()))?;
     let input = read_rows(path, &scan)?;
-    build_graph(Some(path), options, scan, input)
+    build_graph(Some(path), options, scan, input, None)
 }
 
 /// key 順の元データから、一時ファイルを経ずに伝播用グラフを作る。
 pub(crate) fn graph_from_entries<'a, M>(
     entries: impl IntoIterator<Item = (&'a str, &'a str, M)>,
     options: BackpropOptions,
+    cache: Option<&MoveCache>,
 ) -> Result<Graph>
 where
     M: IntoIterator<Item = (&'a str, Option<i32>)>,
@@ -1060,7 +1140,7 @@ where
         input.all_depth0.push(depth0);
         input.unexplored.push(unexplored);
     }
-    build_graph(None, options, scan, input)
+    build_graph(None, options, scan, input, cache)
 }
 
 /// 値の分かる手だけを残し、消えた直接の子局面は残る反転局面への辺に張り替える
@@ -1201,6 +1281,7 @@ fn build_graph(
     options: BackpropOptions,
     scan: Scan,
     input: InputRows,
+    cache: Option<&MoveCache>,
 ) -> Result<Graph> {
     let Scan {
         sfens,
@@ -1226,18 +1307,24 @@ fn build_graph(
             .clone()
             .map(|v| {
                 let sfen = sfens.get(v);
-                let position = StaticPosition::from_sfen(sfen)
-                    .map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
                 let key = strip_ply(sfen);
                 // 子局面は正規の SFEN (`to_sfen`) で表した key の局面にだけ合流する。持ち駒の並びなどが違う同じ
                 // 局面の行は別の局面として残し、索引には入れない。
-                let indexed = (strip_ply(&position.to_sfen()) == key)
-                    .then(|| PositionKey::pair_static(&position)[0]);
+                let (indexed, checked) = match cache.and_then(|cache| cache.node(sfen)) {
+                    Some(node) => (node.indexed, node.checked),
+                    None => {
+                        let position = StaticPosition::from_sfen(sfen)
+                            .map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+                        let indexed = (strip_ply(&position.to_sfen()) == key)
+                            .then(|| PositionKey::pair_static(&position)[0]);
+                        (indexed, position.in_check())
+                    }
+                };
                 let mut flags = 0;
                 if key.split_whitespace().nth(1) != Some("w") {
                     flags |= NODE_BLACK;
                 }
-                if position.in_check() {
+                if checked {
                     flags |= NODE_CHECKED;
                 }
                 if options.skip_unsearched_children && input.unexplored[v] {
@@ -1278,26 +1365,47 @@ fn build_graph(
         let mut next_row = *first;
         for v in range.clone() {
             let sfen = sfens.get(v);
-            position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+            let cached = cache.and_then(|cache| cache.node(sfen));
+            // 表にある局面は、表に無い手が出るまで局面を作らない。
+            let mut loaded = false;
+            let mut load = |position: &mut Position| -> Result<()> {
+                if !loaded {
+                    position.set_sfen(sfen).map_err(|e| anyhow!("不正な SFEN: {sfen}: {e}"))?;
+                    loaded = true;
+                }
+                Ok(())
+            };
+            if cached.is_none() {
+                load(&mut position)?;
+            }
+            let child_edge = |[direct, flipped]: [PositionKey; 2]| {
+                index.get(&direct).map(|to| (to, false)).or_else(|| {
+                    (!options.skip_flipped_children)
+                        .then(|| index.get(&flipped).map(|to| (to, true)))
+                        .flatten()
+                })
+            };
             let input_rows = next_row..next_row + rows[v] as usize;
             next_row = input_rows.end;
             for row in input_rows.clone() {
                 let mv = input.moves[row];
                 let mut flags = 0;
                 let mut edge = None;
-                if mv != MOVE_NONE {
+                let known = cached
+                    .filter(|_| mv & MOVE_INVALID == 0)
+                    .and_then(|node| node.child(mv as u16));
+                if let Some(child) = known {
+                    flags |= ROW_USABLE;
+                    edge = child_edge(child);
+                } else if mv != MOVE_NONE {
+                    load(&mut position)?;
                     let decoded = (mv & MOVE_INVALID == 0).then(|| Move::from_u16(mv as u16));
                     match legal_move(&position, decoded) {
                         Ok(mv) => {
                             flags |= ROW_USABLE;
                             let gives_check = position.gives_check(mv);
                             position.do_move(mv, gives_check);
-                            let [direct, flipped] = PositionKey::pair(&position);
-                            edge = index.get(&direct).map(|to| (to, false)).or_else(|| {
-                                (!options.skip_flipped_children)
-                                    .then(|| index.get(&flipped).map(|to| (to, true)))
-                                    .flatten()
-                            });
+                            edge = child_edge(PositionKey::pair(&position));
                             position.undo_move(mv);
                         }
                         Err(reason) => {
@@ -1329,6 +1437,7 @@ fn build_graph(
                 part.row_flags.push(flags);
             }
             if options.add_transposition_moves && node_flags[v] & NODE_PRESERVED == 0 {
+                load(&mut position)?;
                 let listed: BTreeSet<String> = input_rows
                     .filter(|&row| input.moves[row] != MOVE_NONE)
                     .map(|row| input.text(row))
@@ -3223,6 +3332,75 @@ mod tests {
             let mut same = Position::new();
             same.set_sfen(&format!("{} 99", strip_ply(sfen))).unwrap();
             assert!(direct == PositionKey::pair(&same)[0], "{sfen}");
+        }
+    }
+
+    #[test]
+    fn move_cache_builds_the_same_graph_as_reading_every_position() {
+        let parent = "4k4/9/9/9/9/9/9/9/4K4 b GP";
+        let after = |mv: &str| child_position_after_move(&format!("{parent} 1"), mv).unwrap();
+        let direct = strip_ply(&after("5i5h").to_sfen()).to_owned();
+        let flipped = rshogi_book::flipped_key(&after("5i4i").to_sfen()).unwrap();
+        let flipped = strip_ply(&flipped).to_owned();
+        // 持ち駒の並びが正規でない key と、王手のかかった局面。
+        let odd = "4k4/9/9/9/9/9/9/9/4K4 b PG";
+        let checked = "4k4/4G4/9/9/9/9/9/9/4K4 w -";
+        type Moves<'a> = Vec<(&'a str, Option<i32>)>;
+        let mut entries: Vec<(&str, &str, Moves)> = vec![
+            (
+                parent,
+                "3",
+                vec![
+                    ("5i5h", Some(7)),
+                    ("5i4i", None),
+                    ("5i5a", Some(1)),
+                    ("G*5b", Some(2)),
+                    ("bad", Some(3)),
+                ],
+            ),
+            (&direct, "4", vec![("5a4a", Some(30))]),
+            (&flipped, "4", vec![("5i5h", Some(300))]),
+            (odd, "3", vec![("5i5h", Some(9))]),
+            // 手数の無い局面は表を使わずに読む。
+            (checked, "", vec![("5a5b", Some(0)), ("5a4a", Some(-9))]),
+        ];
+        entries.sort();
+        let moves = |pick: &dyn Fn(&str, &str) -> bool| -> Vec<(&str, Vec<&str>)> {
+            entries
+                .iter()
+                .map(|(key, _, moves)| {
+                    (*key, moves.iter().map(|m| m.0).filter(|mv| pick(key, mv)).collect())
+                })
+                .collect()
+        };
+        let full = MoveCache::build(&moves(&|_, _| true));
+        assert!(full.is_canonical(parent) && !full.is_canonical(odd));
+        assert_eq!(full.nodes[parent].moves.len(), 3);
+        let partial = MoveCache::build(&moves(&|key, mv| key == parent && mv == "5i5h")[..2]);
+        for skip_flipped_children in [false, true] {
+            let options = BackpropOptions {
+                skip_flipped_children,
+                ..BackpropOptions::default()
+            };
+            let snapshot = |cache: Option<&MoveCache>| {
+                let graph = graph_from_entries(
+                    entries.iter().map(|(key, ply, moves)| (*key, *ply, moves.iter().copied())),
+                    options,
+                    cache,
+                )
+                .unwrap();
+                let nodes: Vec<_> = (0..graph.len())
+                    .map(|v| {
+                        let moves: Vec<_> = graph.moves(v).collect();
+                        (graph.sfen(v).to_owned(), graph.node_flags[v], moves)
+                    })
+                    .collect();
+                (nodes, graph.flip_edges, graph.illegal_moves)
+            };
+            let plain = snapshot(None);
+            assert_eq!((plain.1, plain.2), (usize::from(!skip_flipped_children), 3));
+            assert_eq!(snapshot(Some(&full)), plain);
+            assert_eq!(snapshot(Some(&partial)), plain);
         }
     }
 
