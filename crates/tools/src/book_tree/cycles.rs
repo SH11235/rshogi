@@ -3,7 +3,7 @@
 
 mod exact;
 
-use super::audit::{evaluate, reject_same_file};
+use super::audit::{Flips, evaluate_with, reject_same_file, report_direct_lookup};
 use super::master_table::{
     MasterPosition, Row, format_master, parse_master, read_master, validate,
 };
@@ -39,6 +39,14 @@ pub(super) struct CyclesArgs {
     /// 手の値の伝播に使う、後手を自分として解くときの千日手の値
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
+    /// 定跡を直接の key だけで引く (対局で先後反転した局面の定跡を引かない) 前提で手の値を伝播する。反転した局面への
+    /// 辺の値は使うが、局面の行が反転した向きの値も保つことは確かめず、反転キーで合流した局面では止めない
+    #[arg(long)]
+    direct_lookup: bool,
+    /// --direct-lookup で確かめなかった局面 (値の一番高い手が反転した向きの値を保たない局面と、反転した向きの保証が
+    /// 破れる局面) の一覧 (TSV: kind・key・保存されている向きの値・反転した向きの値) の出力先
+    #[arg(long, value_name = "PATH", requires = "direct_lookup")]
+    direct_lookup_table: Option<PathBuf>,
     /// 元データを書き換える (外す手を record に、main を替える局面の替わりの手を main にする)。
     /// 省くと一覧と要約だけを出す
     #[arg(long)]
@@ -119,6 +127,9 @@ pub(super) fn run(args: CyclesArgs) -> Result<()> {
 fn run_from(args: CyclesArgs, start: &str) -> Result<()> {
     ensure!(!args.note.contains(['\t', '\r', '\n']), "--note にタブや改行は使えません");
     reject_same_file(&args.table, &[("--master", &args.master)])?;
+    if let Some(table) = &args.direct_lookup_table {
+        reject_same_file(table, &[("--master", &args.master), ("--table", &args.table)])?;
+    }
     let positions = read_master(&args.master)?.0;
     let draws = DrawValues {
         black: args.draw_value_black,
@@ -196,7 +207,8 @@ fn solve_all(
     draws: DrawValues,
     start: &str,
 ) -> Result<(Vec<SideResult>, Values)> {
-    let values = evaluate(positions, draws)?;
+    let (values, stats) = evaluate_with(positions, draws, Flips::joined(args.direct_lookup), None)?;
+    report_direct_lookup(&stats, args.direct_lookup_table.as_deref())?;
     let index = BookIndex::new(positions)?;
     let tags = move_tags(&args.master, &args.removable_since, &index)?;
     // 先手と後手のグラフは互いの手に左右されない (相手の手番では合法手を全部見る) ので並べて解く。
@@ -1230,6 +1242,7 @@ fn format_summary(r: &SideResult) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::audit::evaluate;
     use super::super::master_table::parse_master_rows;
     use super::super::reply_graph::fixture::{ROOT, after, master_text, positions};
     use super::*;
@@ -1429,6 +1442,8 @@ mod tests {
             side: SideArg::B,
             draw_value_black: 0,
             draw_value_white: 0,
+            direct_lookup: false,
+            direct_lookup_table: None,
             apply: true,
             note: "塞いだ".into(),
             removable_since: Vec::new(),
@@ -1451,6 +1466,116 @@ mod tests {
     }
 
     #[test]
+    fn direct_lookup_solves_a_master_that_stops_at_a_flipped_position() {
+        use crate::book_backprop::FlipFailure;
+        use crate::book_tree::model::child;
+        // S から玉だけの 4 手で S に戻る循環。T から指すと S の反転した局面に着く。S の -30 の手は、千日手を -70 と
+        // みる先手は指し、+70 とみる後手は指さずに循環を選ぶので、S の 1 行では両方の向きを表せない。
+        const S: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        let c1 = child(S, "5i4i").unwrap();
+        let c2 = child(&c1, "5a4a").unwrap();
+        let c3 = child(&c2, "4i5i").unwrap();
+        let rows = [
+            (S, "5i4i", "main", "0"),
+            (S, "5i6i", "alt", "-30"),
+            (c1.as_str(), "5a4a", "main", "0"),
+            (c2.as_str(), "4i5i", "main", "0"),
+            (c3.as_str(), "4a5a", "main", "0"),
+            (T, "5h5i", "main", "0"),
+        ];
+        let mut text = super::super::master_table::COLUMNS.join("\t");
+        text.push('\n');
+        for (key, mv, role, evals) in rows {
+            let line = crate::book_tree::master_table::test_line(&[
+                ("key", key.to_string()),
+                ("ply", "1".into()),
+                ("move", mv.to_string()),
+                ("role", role.to_string()),
+                ("source", "read".into()),
+                ("evals", evals.to_string()),
+                ("tier", "wide".into()),
+                ("since", "t".into()),
+                ("note", "n".into()),
+            ]);
+            writeln!(text, "{line}").unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("moves.tsv");
+        std::fs::write(&master, &text).unwrap();
+        let args = |direct_lookup, apply| CyclesArgs {
+            master: master.clone(),
+            table: dir.path().join("cycles.tsv"),
+            side: SideArg::B,
+            draw_value_black: -70,
+            draw_value_white: 70,
+            direct_lookup,
+            direct_lookup_table: direct_lookup.then(|| dir.path().join("flip.tsv")),
+            apply,
+            note: "塞いだ".into(),
+            removable_since: Vec::new(),
+            entry_depth: 4,
+            threads: 0,
+        };
+        let error = run_from(args(false, true), S).unwrap_err();
+        assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error:#}");
+        assert!(!dir.path().join("cycles.tsv").exists());
+        assert_eq!(std::fs::read_to_string(&master).unwrap(), text);
+
+        // S の手の値は保存されている向き (先手) の値で、循環は次に S で -30 の手を指せるので同値 (選ばれない方を -1)。
+        // T の手は S の反転した向き (後手が循環を選ぶ) の値を使う。
+        let positions = parse_master_rows(text.as_bytes()).unwrap().0;
+        let draws = DrawValues {
+            black: -70,
+            white: 70,
+        };
+        let (values, stats) = evaluate_with(&positions, draws, Flips::DirectLookup, None).unwrap();
+        let of = |key: &str| values[positions.keys().position(|k| k == key).unwrap()].clone();
+        assert_eq!(of(S), [Some(-31), Some(-30)]);
+        assert_eq!(of(T), [Some(-70)]);
+        let report = stats.direct_lookup.unwrap();
+        assert_eq!(
+            (report.flip_moves, report.flip_positions, report.flip_best_positions),
+            (1, 1, 1)
+        );
+
+        // 直接のキーだけの循環 (S から 4 手で S に戻る) を見つけ、S の main を外して -30 の手を main にする。
+        let dry = args(true, false);
+        let (results, _) = solve_all(&positions, &dry, draws, S).unwrap();
+        let cycle = CycleCount {
+            components: 1,
+            positions: 4,
+        };
+        assert_eq!(results[0].before, [cycle; 2]);
+        assert_eq!(results[0].plan.removed, [(S.to_owned(), 0)]);
+        assert_eq!(results[0].plan.new_main, BTreeMap::from([(S.to_owned(), 1)]));
+        assert_eq!(results[0].after, [CycleCount::default(); 2]);
+        run_from(args(true, true), S).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cycles.tsv")).unwrap(),
+            format!(
+                "side\tkey\tply\tmove\trole\tvalue\teval\tnew_main\tnew_main_value\tentry_depth\nb\t{S}\t1\t5i4i\tmain\t-31\t0\t5i6i\t-30\t\n"
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("flip.tsv")).unwrap(),
+            format!("kind\tkey\tstored\tflipped\nvalue\t{S}\t-30\t70\n")
+        );
+        let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+        let roles: Vec<(&str, &str)> = rows
+            .iter()
+            .filter(|r| r.get("key") == S)
+            .map(|r| (r.get("move"), r.get("role")))
+            .collect();
+        assert_eq!(roles, [("5i4i", "record"), ("5i6i", "main")]);
+        // 塞いだ後の元データに循環は残らない。
+        let positions = read_master(&master).unwrap().0;
+        let (results, _) = solve_all(&positions, &dry, draws, S).unwrap();
+        assert_eq!(results[0].before, [CycleCount::default(); 2]);
+        assert!(results[0].plan.removed.is_empty());
+    }
+
+    #[test]
     fn apply_rewrites_roles_and_notes() {
         let c = c();
         let rows = [
@@ -1467,6 +1592,8 @@ mod tests {
             side: SideArg::B,
             draw_value_black: 0,
             draw_value_white: 0,
+            direct_lookup: false,
+            direct_lookup_table: None,
             apply: true,
             note: "塞いだ".into(),
             removable_since: Vec::new(),
@@ -1546,6 +1673,8 @@ mod tests {
                 side: SideArg::B,
                 draw_value_black: 0,
                 draw_value_white: 0,
+                direct_lookup: false,
+                direct_lookup_table: None,
                 apply: true,
                 note: "塞いだ".into(),
                 removable_since: vec!["new".into()],
@@ -1676,6 +1805,8 @@ mod tests {
             side: SideArg::B,
             draw_value_black: 0,
             draw_value_white: 0,
+            direct_lookup: false,
+            direct_lookup_table: None,
             apply: true,
             note: "塞いだ".into(),
             removable_since: Vec::new(),
@@ -1795,6 +1926,8 @@ mod tests {
             side: SideArg::B,
             draw_value_black: 0,
             draw_value_white: 0,
+            direct_lookup: false,
+            direct_lookup_table: None,
             apply: false,
             note: "塞いだ".into(),
             removable_since,

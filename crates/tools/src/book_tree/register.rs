@@ -4,7 +4,7 @@ mod flip_skip;
 mod keep;
 mod move_cond;
 
-use super::audit::Fill;
+use super::audit::{Fill, Flips};
 use super::journal::LockedFile;
 use super::master_table::{
     MasterPosition, ROLES, Row, format_master, format_nodes, parse_master, positions_from_rows,
@@ -740,7 +740,8 @@ impl Trials<'_> {
     ) -> Result<Option<String>> {
         let checked = self.positions(trees, skip, keep).and_then(|positions| {
             let cache = Some(&self.prepared.cache);
-            super::audit::evaluate_with(&positions, self.builder.rule.draws, cache)
+            super::audit::evaluate_with(&positions, self.builder.rule.draws, Flips::Shared, cache)
+                .map(|_| ())
         });
         match checked {
             Ok(_) => Ok(None),
@@ -1818,6 +1819,10 @@ mod tests {
         } else {
             run(args("c1.tsv", None, 10)).unwrap();
             flip_failure(&master_path);
+            // 定跡を直接の key だけで引く前提の伝播は、同じ元データで止まらない。
+            let positions = super::super::master_table::read_master(&master_path).unwrap().0;
+            super::super::audit::evaluate_with(&positions, draws, Flips::DirectLookup, None)
+                .unwrap();
         }
         assert!(!out.exists());
 

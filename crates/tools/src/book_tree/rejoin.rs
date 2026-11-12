@@ -4,7 +4,7 @@
 //! 定跡の値は相手の手も定跡の手だけで伝播しているので、相手が定跡に無い手で別の定跡の局面へ合流すると、
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
-use super::audit::{evaluate, reject_same_file};
+use super::audit::{Flips, evaluate_with, reject_same_file, report_direct_lookup};
 use super::master_table::{MasterPosition, read_master};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, SideArg, build_filtered, selected_moves, thread_pool,
@@ -42,6 +42,14 @@ pub(super) struct RejoinArgs {
     /// 後手を自分として解くときの千日手の値 (対局の DrawValueWhite に揃える)
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
+    /// 定跡を直接の key だけで引く (対局で先後反転した局面の定跡を引かない) 前提で手の値を伝播する。反転した局面への
+    /// 辺の値は使うが、局面の行が反転した向きの値も保つことは確かめず、反転キーで合流した局面では止めない
+    #[arg(long)]
+    direct_lookup: bool,
+    /// --direct-lookup で確かめなかった局面 (値の一番高い手が反転した向きの値を保たない局面と、反転した向きの保証が
+    /// 破れる局面) の一覧 (TSV: kind・key・保存されている向きの値・反転した向きの値) の出力先
+    #[arg(long, value_name = "PATH", requires = "direct_lookup")]
+    direct_lookup_table: Option<PathBuf>,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -192,12 +200,18 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
     let mut inputs = vec![("--master", args.master.as_path())];
     inputs.extend(args.weight.inputs());
     reject_same_file(&args.table, &inputs)?;
+    if let Some(table) = &args.direct_lookup_table {
+        inputs.push(("--table", args.table.as_path()));
+        reject_same_file(table, &inputs)?;
+    }
     let (positions, _) = read_master(&args.master)?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let values = evaluate(&positions, draws)?;
+    let (values, stats) =
+        evaluate_with(&positions, draws, Flips::joined(args.direct_lookup), None)?;
+    report_direct_lookup(&stats, args.direct_lookup_table.as_deref())?;
     let freq = args.weight.opp_freq.as_deref().map(BookDb::read).transpose()?;
     let index = BookIndex::new(&positions)?;
     let weight_options = args.weight.options();
@@ -556,6 +570,8 @@ mod tests {
             preset: Preset::Random,
             draw_value_black: 0,
             draw_value_white: 0,
+            direct_lookup: false,
+            direct_lookup_table: None,
             weight: WeightArgs {
                 opp_freq,
                 min_games: 3,
@@ -687,6 +703,70 @@ mod tests {
         bad.weight.opp_book_best = 0.9;
         bad.weight.opp_book_diff = -1;
         assert!(bad.weight.check().is_err());
+    }
+
+    #[test]
+    fn direct_lookup_reaches_the_propagation() {
+        use crate::book_backprop::FlipFailure;
+        use crate::book_tree::model::child;
+        // S から玉だけの 4 手で S に戻る循環。T から指すと S の反転した局面に着き、S の -30 の手は先手なら指し、
+        // 後手なら循環を選ぶので、S の 1 行では両方の向きを表せない。
+        const S: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        let c1 = child(S, "5i4i").unwrap();
+        let c2 = child(&c1, "5a4a").unwrap();
+        let c3 = child(&c2, "4i5i").unwrap();
+        let rows = [
+            (S, "5i4i", "main", "0"),
+            (S, "5i6i", "alt", "-30"),
+            (c1.as_str(), "5a4a", "main", "0"),
+            (c2.as_str(), "4i5i", "main", "0"),
+            (c3.as_str(), "4a5a", "main", "0"),
+            (T, "5h5i", "main", "0"),
+        ];
+        let mut text = crate::book_tree::master_table::COLUMNS.join("\t");
+        text.push('\n');
+        for (key, mv, role, evals) in rows {
+            let line = crate::book_tree::master_table::test_line(&[
+                ("key", key.to_string()),
+                ("ply", "1".into()),
+                ("move", mv.to_string()),
+                ("role", role.to_string()),
+                ("source", "read".into()),
+                ("evals", evals.to_string()),
+                ("tier", "wide".into()),
+                ("since", "t".into()),
+                ("note", "n".into()),
+            ]);
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let master = dir.path().join("flip.tsv");
+        std::fs::write(&master, &text).unwrap();
+        let flips = dir.path().join("unchecked.tsv");
+        let run = |direct_lookup: bool| {
+            run_from(
+                RejoinArgs {
+                    master: master.clone(),
+                    draw_value_black: -70,
+                    draw_value_white: 70,
+                    direct_lookup,
+                    direct_lookup_table: direct_lookup.then(|| flips.clone()),
+                    ..args(dir.path(), 40, None)
+                },
+                S,
+            )
+        };
+        let error = run(false).unwrap_err();
+        assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error:#}");
+        assert!(!dir.path().join("rejoin.tsv").exists());
+        run(true).unwrap();
+        assert!(dir.path().join("rejoin.tsv").exists());
+        assert_eq!(
+            std::fs::read_to_string(&flips).unwrap(),
+            format!("kind\tkey\tstored\tflipped\nvalue\t{S}\t-30\t70\n")
+        );
     }
 
     #[test]

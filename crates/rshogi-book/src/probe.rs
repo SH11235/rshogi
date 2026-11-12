@@ -1037,6 +1037,31 @@ mod tests {
     }
 
     #[test]
+    fn db_with_both_orientations_answers_each_position_with_its_own_entry() {
+        // 同じ局面の両方の向きに違う手を登録した定跡。直接の局面が先に当たるので、FlippedBook によらず
+        // それぞれの向きの手が出る。
+        let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let flipped_sfen = flip::flipped_key(after_76).unwrap();
+        let data = format!(
+            "{HEADER}\nsfen {after_76}\n8c8d none 0 0 2\nsfen {flipped_sfen}\n7g7f none 0 0 2\n"
+        );
+        let book = Book::from_reader(data.as_bytes(), false).unwrap();
+        for flipped_book in [true, false] {
+            let opts = BookOptions {
+                flipped_book,
+                ..Default::default()
+            };
+            for (sfen, expected) in [(after_76, "8c8d"), (flipped_sfen.as_str(), "7g7f")] {
+                let mut rng = SeqRng::new(vec![0]);
+                let result =
+                    probe(std::slice::from_ref(&book), &pos(sfen), &opts, &mut rng, no_info)
+                        .unwrap();
+                assert_eq!(result.best_move.to_usi(), expected, "{sfen} flipped={flipped_book}");
+            }
+        }
+    }
+
+    #[test]
     fn depth_limit_rejects_whole_node() {
         let data = format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 30 5 100\n2g2f 8c8d 25 20 40\n");
         let book = Book::from_reader(data.as_bytes(), false).unwrap();
