@@ -2,7 +2,7 @@
 
 use super::Node;
 use crate::book_backprop::{DrawValues, Graph, MoveValue};
-use crate::book_tree::audit::{Fill, audit, audited_moves};
+use crate::book_tree::audit::{Fill, audit_with_replies, audited_moves, opponent_replies};
 use crate::book_tree::master_table::{Row, positions_from_rows};
 use crate::book_tree::switch::{SingleRead, SwitchRule, from_child};
 use anyhow::{Context, Result};
@@ -30,6 +30,8 @@ pub(in crate::book_tree) struct KeepRule {
     pub min_depth: usize,
     pub draws: DrawValues,
     pub fill: Fill,
+    /// 相手の手番の局面で、読みの値のある bench も伝播に使う (`master audit --opp-bench`)。
+    pub opp_bench: bool,
 }
 
 fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
@@ -39,12 +41,12 @@ fn mains(rows: &[Row]) -> BTreeMap<&str, &str> {
         .collect()
 }
 
-/// 手の値がいくつ先の局面の読みから来たか。最善の手を辿り、読みの値で止まるまでの局面の数。補った相手の手番の
-/// 局面で、着いた手の読みの値 (定跡に無い応手) が最善なら、その局面は数えない (値は手の読みそのもの)。循環に
+/// 手の値がいくつ先の局面の読みから来たか。最善の手を辿り、読みの値で止まるまでの局面の数。着いた手の読みの
+/// 値を最後の手として残した局面 (`capped`) で、その値が最善なら、その局面は数えない (値は手の読みそのもの)。循環に
 /// 入ったら循環の局面までを数える。局面ごとの数は辿り始めによらないので、辿った局面の数を覚えて使い回す。
 struct Depths<'a> {
     graph: &'a Graph,
-    master: &'a BTreeSet<&'a str>,
+    capped: &'a BTreeSet<String>,
     memo: BTreeMap<usize, usize>,
 }
 
@@ -69,12 +71,15 @@ impl Depths<'_> {
                 path.truncate(at);
                 break cycle;
             }
-            let Some(best) = self.graph.moves(node).max_by_key(|m| m.new) else {
+            let count = self.graph.moves(node).count();
+            let Some((i, best)) = self.graph.moves(node).enumerate().max_by_key(|(_, m)| m.new)
+            else {
                 self.memo.insert(node, 0);
                 break 0;
             };
             let Some(edge) = best.edge else {
-                let own = usize::from(self.master.contains(self.graph.key(node)));
+                let kept_read = self.capped.contains(self.graph.key(node)) && i + 1 == count;
+                let own = usize::from(!kept_read);
                 self.memo.insert(node, own);
                 break own;
             };
@@ -119,23 +124,26 @@ pub(in crate::book_tree) fn kept_mains(
     }
     let book = positions_from_rows(after.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
     // 点検の表は使わないので、線を最大にして表を作らせない。
+    let replies = rule.opp_bench.then(|| opponent_replies(after, &["bench"])).transpose()?;
     let (_, _, audited) =
-        audit(&book, rule.draws, i32::MAX, rule.fill, None).context("main を替える前の伝播")?;
+        audit_with_replies(&book, rule.draws, i32::MAX, rule.fill, replies.as_ref())
+            .context("main を替える前の伝播")?;
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
-    let master: BTreeSet<&str> = book.0.keys().map(String::as_str).collect();
-    // 相手の record を使わない伝播なので、手番によらず同じグラフになる。
-    let mut depths = Depths {
-        graph: &audited.graph,
-        master: &master,
+    // 相手の bench を使う伝播では、局面の手番ごとにグラフが分かれる。
+    let mut depths = audited.graphs().map(|graph| Depths {
+        graph,
+        capped: &audited.capped,
         memo: BTreeMap::new(),
-    };
+    });
     for (key, old_move, new_move) in changed {
         let (Some(&i), Some(position)) = (index.get(key), book.0.get(key)) else {
             continue;
         };
         let known = &audited.known[i];
-        let graph = &audited.graph;
+        let white = usize::from(key.split(' ').nth(1) == Some("w"));
+        let graph = audited.graphs()[white];
+        let depths = &mut depths[white];
         let Some(node) = graph.find(key) else {
             continue;
         };
