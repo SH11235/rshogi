@@ -48,7 +48,7 @@ pub(super) struct RegisterArgs {
     /// 木の中で先の局面を読んだ手 (value_kind が tree:K) は、main との差が --alt-gap 以上でも bench (控え) の行で残す
     #[arg(long)]
     bench_expanded: bool,
-    /// 木の中で先の局面を読んでいない手 (value_kind が tree:K 以外。1 回の読みの MultiPV の手など) は、main との差が
+    /// 1 回の読みの手 (value_kind が single) と、木の中で先を確かめられない手 (unknown) は、main との差が
     /// --alt-gap 以上でも bench (控え) の行で残す
     #[arg(long)]
     bench_single: bool,
@@ -137,7 +137,7 @@ pub(super) struct Summary {
     pub added_alt: BTreeMap<String, usize>,
     /// 差が `alt_gap` 以上なので bench で足した、木の中で先の局面を読んだ手。
     pub added_bench: BTreeMap<String, usize>,
-    /// 差が `alt_gap` 以上なので bench で足した、先の局面を読んでいない手。
+    /// 差が `alt_gap` 以上なので bench で足した、1 回の読みの手と、木の中で先を確かめられない手。
     pub added_bench_single: BTreeMap<String, usize>,
     pub replaced_main: usize,
     /// `replaced_main` のうち、curated の main を替えた局面。
@@ -156,7 +156,7 @@ pub(super) struct Options<'a> {
     pub alt_gap: i32,
     /// 木の中で先の局面を読んだ手は、差が `alt_gap` 以上でも bench の行で残す。
     pub bench_expanded: bool,
-    /// 木の中で先の局面を読んでいない手は、差が `alt_gap` 以上でも bench の行で残す。
+    /// 1 回の読みの手と、木の中で先を確かめられない手は、差が `alt_gap` 以上でも bench の行で残す。
     pub bench_single: bool,
     /// 足す行の source 列。
     pub source: &'a str,
@@ -404,7 +404,11 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     );
     for (on, what, added) in [
         (args.bench_expanded, "先を読んだ手", &summary.added_bench),
-        (args.bench_single, "先を読んでいない手", &summary.added_bench_single),
+        (
+            args.bench_single,
+            "1 回の読みの手・先を確かめられない手",
+            &summary.added_bench_single,
+        ),
     ] {
         if on {
             println!(
@@ -929,8 +933,10 @@ pub(super) fn register(
         for bench in benches {
             let (what, count) = if expanded(bench) {
                 ("木で先を読んだ手", &mut summary.added_bench)
+            } else if bench.value_kind == "single" {
+                ("木の 1 回の読みの手", &mut summary.added_bench_single)
             } else {
-                ("木で先を読んでいない手", &mut summary.added_bench_single)
+                ("木の中で先を確かめられない手", &mut summary.added_bench_single)
             };
             let why = format!("{what}。伝播後で 1 位との差 {}", best.value - bench.value);
             rows.push(new_row(bench, "bench", why));
@@ -1864,8 +1870,10 @@ mod tests {
         assert_eq!(single, "- bench bench record");
         let c = find(&rows, B, "c").unwrap();
         assert_eq!((c.get("evals"), c.get("value_kind")), ("9", "single"));
-        assert_eq!(c.get("note"), "木で先を読んでいない手。伝播後で 1 位との差 41。plan");
-        assert_eq!(find(&rows, B, "d").unwrap().get("value_kind"), "unknown");
+        assert_eq!(c.get("note"), "木の 1 回の読みの手。伝播後で 1 位との差 41。plan");
+        let d = find(&rows, B, "d").unwrap();
+        assert_eq!(d.get("value_kind"), "unknown");
+        assert_eq!(d.get("note"), "木の中で先を確かめられない手。伝播後で 1 位との差 42。plan");
         assert!(summary.added_bench.is_empty());
         assert_eq!(summary.added_bench_single, BTreeMap::from([("b".into(), 2)]));
 
@@ -1873,6 +1881,22 @@ mod tests {
         assert_eq!(both, "bench bench bench record");
         assert_eq!((summary.added_bench["b"], summary.added_bench_single["b"]), (1, 2));
         assert_eq!(roles(false, false).2, "- - - record");
+    }
+
+    #[test]
+    fn single_read_at_the_alt_gap_is_bench_and_one_below_is_alt() {
+        let mut position = node(&[("a", 50), ("b", 11), ("c", 10)], 2, 0);
+        position.moves[1].value_kind = "single".into();
+        position.moves[2].value_kind = "single".into();
+        let options = Options {
+            bench_single: true,
+            ..options()
+        };
+        let nodes = BTreeMap::from([(B.to_owned(), position)]);
+        let (rows, _, summary) = register(master(&[]), &nodes, &options).unwrap();
+        assert_eq!(find(&rows, B, "b").unwrap().get("role"), "alt");
+        assert_eq!(find(&rows, B, "c").unwrap().get("role"), "bench");
+        assert_eq!(summary.added_bench_single, BTreeMap::from([("b".into(), 1)]));
     }
 
     #[test]
