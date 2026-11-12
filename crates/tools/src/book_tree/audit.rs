@@ -1276,6 +1276,37 @@ fn flipped_node(graph: &Graph, node: usize) -> Option<usize> {
     graph.find(strip_ply(&flipped)).filter(|&v| v != node)
 }
 
+/// 伝播での、先後反転した局面の扱い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Flips {
+    /// 直接の子局面が無ければ反転した局面へ辺を張り、局面の行が反転した向きの値も保つことを確かめる。
+    Shared,
+    /// 辺は張るが、定跡を直接の key だけで引く前提で、反転した向きの値の食い違いや保証の破れでは止めない。
+    DirectLookup,
+    /// 辺を張らない。
+    Skip,
+}
+
+impl Flips {
+    /// `--direct-lookup` の指定から。
+    pub(super) fn joined(direct_lookup: bool) -> Self {
+        if direct_lookup {
+            Self::DirectLookup
+        } else {
+            Self::Shared
+        }
+    }
+
+    /// 補う伝播では辺を張らない ([`propagate_with`])。
+    fn for_fill(fill: Fill) -> Self {
+        if fill == Fill::Bridge {
+            Self::Skip
+        } else {
+            Self::Shared
+        }
+    }
+}
+
 /// 元データに無い相手の手番の局面を補うか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Fill {
@@ -1597,11 +1628,11 @@ fn propagate_for_sides(
     records: Option<&BTreeMap<String, MasterPosition>>,
     draws: DrawValues,
     fill: Fill,
-    skip_flipped: bool,
+    flips: Flips,
 ) -> Result<(Propagated, Option<Graph>, RecordUsage)> {
     let Some(records) = records else {
         return Ok((
-            propagate_with(positions, draws, fill, skip_flipped, None)?,
+            propagate_with(positions, draws, fill, flips, None)?,
             None,
             RecordUsage::default(),
         ));
@@ -1631,7 +1662,7 @@ fn propagate_for_sides(
             expanded.insert(key.clone(), position);
         }
         // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
-        let mut result = propagate_with(&expanded, draws, fill, true, None)?;
+        let mut result = propagate_with(&expanded, draws, fill, Flips::Skip, None)?;
         result.capped.extend(capped);
         // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
         let mut usage = RecordUsage::default();
@@ -1699,11 +1730,12 @@ fn propagate_for_sides(
 fn propagate_entries(
     all: &[(&str, &MasterPosition)],
     draws: DrawValues,
-    skip_flipped: bool,
+    flips: Flips,
     cache: Option<&MoveCache>,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     let options = BackpropOptions {
-        skip_flipped_children: skip_flipped,
+        skip_flipped_children: flips == Flips::Skip,
+        direct_lookup_only: flips == Flips::DirectLookup,
         ..BackpropOptions::default()
     };
     let mut graph = graph_from_entries(
@@ -1727,16 +1759,16 @@ fn propagate(
     draws: DrawValues,
     fill: Fill,
 ) -> Result<Propagated> {
-    propagate_with(positions, draws, fill, fill == Fill::Bridge, None)
+    propagate_with(positions, draws, fill, Flips::for_fill(fill), None)
 }
 
-/// [`propagate`] の本体。`skip_flipped` なら反転した局面へ辺を張らない。`Fill::Bridge` は補った辺が反転で合流する
+/// [`propagate`] の本体。`Flips::Skip` なら反転した局面へ辺を張らない。`Fill::Bridge` は補った辺が反転で合流する
 /// 局面を千日手の値の違う循環に入れると止まる (1 行で両方の向きの値を表せない) ので、反転の辺を張らずに解く。
 fn propagate_with(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
     fill: Fill,
-    skip_flipped: bool,
+    flips: Flips,
     cache: Option<&MoveCache>,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
@@ -1774,8 +1806,7 @@ fn propagate_with(
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
     all.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let (graph, known_all, illegal_moves, stats) =
-        propagate_entries(&all, draws, skip_flipped, cache)?;
+    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws, flips, cache)?;
     let known = all
         .iter()
         .zip(known_all)
@@ -1878,18 +1909,23 @@ pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
 ) -> Result<Vec<Vec<Option<i32>>>> {
-    evaluate_with(positions, draws, None)
+    Ok(evaluate_with(positions, draws, Flips::Shared, None)?.0)
 }
 
-/// [`evaluate`] と同じ値を返す。`cache` にある局面と手は、局面を作り直さずにグラフにする。
+/// [`evaluate`] と同じ値と、伝播の集計を返す。`cache` にある局面と手は、局面を作り直さずにグラフにする。
 pub(super) fn evaluate_with(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
+    flips: Flips,
     cache: Option<&MoveCache>,
-) -> Result<Vec<Vec<Option<i32>>>> {
-    let Propagated { graph, known, .. } =
-        propagate_with(positions, draws, Fill::Off, false, cache)?;
-    positions
+) -> Result<(Vec<Vec<Option<i32>>>, PropagationStats)> {
+    let Propagated {
+        graph,
+        known,
+        stats,
+        ..
+    } = propagate_with(positions, draws, Fill::Off, flips, cache)?;
+    let values = positions
         .iter()
         .zip(&known)
         .map(|((key, position), known)| {
@@ -1909,7 +1945,35 @@ pub(super) fn evaluate_with(
                 })
                 .collect()
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    Ok((values, stats))
+}
+
+/// `--direct-lookup` で解いたときの集計を標準エラーに出し、`table` があれば確かめなかった局面の一覧 (TSV) を
+/// 書く。`--direct-lookup` を付けない伝播では何もしない。
+pub(super) fn report_direct_lookup(stats: &PropagationStats, table: Option<&Path>) -> Result<()> {
+    let Some(report) = &stats.direct_lookup else {
+        return Ok(());
+    };
+    eprintln!(
+        "反転した局面へ着く手 {} (その手を持つ局面 {} / 値の一番高い手がどれも反転した局面へ着く局面 {}) / 確かめずに保存されている向きの値を使った局面: 値の一番高い手が反転した向きの値を保たない {} / 反転した向きの保証が破れる {}",
+        report.flip_moves,
+        report.flip_positions,
+        report.flip_best_positions,
+        report.disagreements.len(),
+        report.broken_guarantees.len()
+    );
+    if let Some(path) = table {
+        let mut text = String::from("kind\tkey\tstored\tflipped\n");
+        for d in &report.disagreements {
+            writeln!(text, "value\t{}\t{}\t{}", d.key, d.stored, d.flipped)?;
+        }
+        for key in &report.broken_guarantees {
+            writeln!(text, "guarantee\t{key}\t\t")?;
+        }
+        write_atomic(path, &text)?;
+    }
+    Ok(())
 }
 
 fn main_continues_after(
@@ -1973,7 +2037,8 @@ fn bridge_findings(
     records: Option<&BTreeMap<String, MasterPosition>>,
 ) -> Result<Vec<BridgeFinding>> {
     // 補った伝播と同じく反転の辺を張らずに比べ、補ったことによる差だけを出す。
-    let (plain, white_graph, _) = propagate_for_sides(positions, records, draws, Fill::Off, true)?;
+    let (plain, white_graph, _) =
+        propagate_for_sides(positions, records, draws, Fill::Off, Flips::Skip)?;
     let plain = AuditedBook {
         graph: plain.graph,
         known: plain.known,
@@ -2195,7 +2260,7 @@ fn audit_select(
         ..AuditSummary::default()
     };
     let (propagated, white_graph, record_usage) =
-        propagate_for_sides(positions, opponent_records, draws, fill, fill == Fill::Bridge)?;
+        propagate_for_sides(positions, opponent_records, draws, fill, Flips::for_fill(fill))?;
     summary.opponent_record_positions = opponent_records.map(|_| record_usage.positions);
     summary.opponent_record_moves = record_usage.moves;
     summary.records -= record_usage.moves;
@@ -3482,7 +3547,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
             let (memory, actual_known, illegal, _) =
-                propagate_entries(&entries, draws, false, None).unwrap();
+                propagate_entries(&entries, draws, Flips::Shared, None).unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");

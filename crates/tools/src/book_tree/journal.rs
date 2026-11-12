@@ -1315,11 +1315,12 @@ fn merge_engine_version(known: &mut Settings, other: &Settings) {
     }
 }
 
-/// 木に残る全ての読みを台帳と照合する。複数条件に一致する読みも確定扱いにしない。
+/// 木に残る全ての読みを台帳と照合し、読みごとに条件の指紋を返す (木ごと、渡した読みの順)。
+/// 台帳に無い読みと、複数の条件に一致する読みは `None`。
 pub(super) fn match_fingerprints(
     paths: &[PathBuf],
     trees: &[Vec<Reading>],
-) -> Result<Vec<Option<String>>> {
+) -> Result<Vec<Vec<Option<String>>>> {
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct Signature {
         key: String,
@@ -1348,7 +1349,7 @@ pub(super) fn match_fingerprints(
     let mut wanted: BTreeMap<Signature, BTreeSet<String>> =
         signatures.iter().flatten().cloned().map(|s| (s, BTreeSet::new())).collect();
     if wanted.is_empty() {
-        return Ok(vec![None; trees.len()]);
+        return Ok(vec![Vec::new(); trees.len()]);
     }
     for path in paths.iter().collect::<BTreeSet<_>>() {
         let file =
@@ -1407,26 +1408,27 @@ pub(super) fn match_fingerprints(
     Ok(signatures
         .iter()
         .map(|readings| {
-            let mut fingerprint = None;
-            for sig in readings {
-                let matches = &wanted[sig];
-                if matches.len() != 1 {
-                    return None;
-                }
-                let found = matches.first().expect("1 件の指紋");
-                if fingerprint.as_ref().is_some_and(|old| old != found) {
-                    return None;
-                }
-                fingerprint = Some(found.clone());
-            }
-            fingerprint
+            readings
+                .iter()
+                .map(|sig| {
+                    let matches = &wanted[sig];
+                    matches.first().filter(|_| matches.len() == 1).cloned()
+                })
+                .collect()
         })
         .collect())
 }
 
+/// 全ての読みが同じ 1 つの指紋に決まったときだけ、その指紋を返す。
+pub(super) fn single_fingerprint(matched: &[Option<String>]) -> Option<&str> {
+    let first = matched.first()?.as_deref()?;
+    matched.iter().all(|fp| fp.as_deref() == Some(first)).then_some(first)
+}
+
 #[cfg(test)]
 fn match_fingerprint(path: &Path, readings: &[Reading]) -> Result<Option<String>> {
-    Ok(match_fingerprints(&[path.to_owned()], &[readings.to_vec()])?.remove(0))
+    let matched = match_fingerprints(&[path.to_owned()], &[readings.to_vec()])?.remove(0);
+    Ok(single_fingerprint(&matched).map(str::to_owned))
 }
 
 #[cfg(test)]
@@ -1762,13 +1764,14 @@ mod tests {
             vec![a.reading.clone(), b.reading.clone()],
             vec![],
         ];
+        let (a, b) = (Some(a.settings.fingerprint), Some(b.settings.fingerprint));
         assert_eq!(
             match_fingerprints(&paths[..1], &trees).unwrap(),
-            [Some(a.settings.fingerprint), None, None, None]
+            [vec![a.clone()], vec![None], vec![a, None], vec![]]
         );
         assert_eq!(
             match_fingerprints(&paths, &trees).unwrap(),
-            [None, Some(b.settings.fingerprint), None, None]
+            [vec![None], vec![b.clone()], vec![None, b], vec![]]
         );
     }
 

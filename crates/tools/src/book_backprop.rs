@@ -97,6 +97,11 @@ pub struct BackpropOptions {
     pub add_transposition_moves: bool,
     /// 直接の子局面が無いとき、先後反転した局面へ辺を張らない (book 外の手として既存 `value` を使う)。
     pub skip_flipped_children: bool,
+    /// 定跡を直接の key だけで引く (反転した局面では引かない) 前提で解く。反転した局面への辺の値には反転した向きで
+    /// 解いた値を使うが、その向きでは書き出す行を使わないので、辺の先は定跡の外とみる。書き出し値は保存されている
+    /// 向きの結果だけで決め (同値手のどれを残すかに反転した向きを考えない)、行が反転した向きの値を保つことと、
+    /// 反転した向きの保証は、止めずに数えるだけにする ([`DirectLookupReport`])。
+    pub direct_lookup_only: bool,
 }
 
 /// 千日手の値。それぞれ手番の側から見た値で、先手を自分として解くときは `black`、後手なら `white` を使う。
@@ -246,6 +251,12 @@ impl Graph {
 
     fn preserve(&self, row: usize) -> bool {
         self.row_flags[row] & ROW_PRESERVE != 0
+    }
+
+    /// 局面 `node` から `to` への辺が、反転した局面に着く辺か。直接の子局面は手番が入れ替わり、反転した局面は同じ
+    /// 手番で保存されている (後退解析と保証検査は、辺の印でなく局面の手番で向きを決める)。
+    fn joins_flipped(&self, node: usize, to: usize) -> bool {
+        self.color(node) == self.color(to)
     }
 
     fn added(&self, row: usize) -> bool {
@@ -607,6 +618,32 @@ pub struct PropagationStats {
     pub check_core_states: usize,
     /// 同値手を選ぶと保証が破れるため、保証手だけを残した局面数。
     pub restricted_ties: usize,
+    /// 定跡を直接の key だけで引く前提で解いたときの集計 ([`BackpropOptions::direct_lookup_only`])。
+    pub direct_lookup: Option<DirectLookupReport>,
+}
+
+/// 定跡を直接の key だけで引く前提で解いたときの、反転した局面への手と、確かめなかった局面の集計。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DirectLookupReport {
+    /// 書き出し値の一番高い行のどれかが、反転した向きではその向きの値を保たない局面 (key 順)。反転した局面でも
+    /// 行を引く定跡では値が保たれない局面で、この前提では保存されている向きの値だけを使う。
+    pub disagreements: Vec<FlipDisagreement>,
+    /// 書き出し値の一番高い行を反転した向きで指すと、千日手・連続王手の循環で値の約束が破れる局面の key (key 順)。
+    pub broken_guarantees: Vec<String>,
+    /// 反転した局面へ着く手の数。
+    pub flip_moves: usize,
+    /// 反転した局面へ着く手を持つ局面の数。
+    pub flip_positions: usize,
+    /// 値の一番高い手がどれも反転した局面へ着く局面の数。
+    pub flip_best_positions: usize,
+}
+
+/// 行が反転した向きの値を保たない局面。値はそれぞれの向きの手番の側から見た値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlipDisagreement {
+    pub key: String,
+    pub stored: i32,
+    pub flipped: i32,
 }
 
 /// report に載せる、best 値が変化した局面の数。
@@ -1555,8 +1592,30 @@ pub fn propagate_values(
     }
     // 局面の手番の側を自分として解いた結果は保存されている向き、反対の側の結果は反転キーで合流した向き。
     let results = |graph: &Graph, v: usize| sides[graph.color(v)].result(graph, params, v);
-    let mirrored = |graph: &Graph, v: usize| sides[1 - graph.color(v)].result(graph, params, v);
-    stats.restricted_ties = write_certified(graph, params, &results, &mirrored)?;
+    let flipped = |graph: &Graph, v: usize| sides[1 - graph.color(v)].result(graph, params, v);
+    if graph.options.direct_lookup_only {
+        // 反転した向きでは行を使わないので、その向きの結果を書き出し値の決め方と保証検査に渡さない。
+        stats.restricted_ties = write_certified(graph, params, &results, &|_, _| None)?;
+        let disagreements = flip_conflicts(graph, params, &flipped)
+            .into_iter()
+            .map(|(v, stored, flipped)| FlipDisagreement {
+                key: graph.key(v).to_owned(),
+                stored,
+                flipped,
+            })
+            .collect();
+        let flipped_values: Vec<Option<i32>> =
+            (0..graph.len()).map(|v| flipped(graph, v).map(|m| m.value)).collect();
+        let broken_guarantees = certify(graph, params, &flipped_values, true)
+            .flipped
+            .into_iter()
+            .map(|v| graph.key(v).to_owned())
+            .collect();
+        stats.direct_lookup =
+            Some(direct_lookup_report(graph, params, disagreements, broken_guarantees));
+    } else {
+        stats.restricted_ties = write_certified(graph, params, &results, &flipped)?;
+    }
     drop(sides);
 
     let scc = Components::of(graph);
@@ -1721,7 +1780,8 @@ fn write_certified(
             let nodes = conflicts.iter().map(|&(v, _, _)| v);
             return Err(FlipFailure::new(graph, message, nodes).into());
         }
-        let violations = certify(graph, params, &mirrored_values);
+        let violations =
+            certify(graph, params, &mirrored_values, !graph.options.direct_lookup_only);
         if violations.stored.is_empty() && violations.flipped.is_empty() {
             break;
         }
@@ -1746,6 +1806,33 @@ fn write_certified(
         eprintln!("同値手を選ぶと保証が破れる {} 局面で、保証手以外の同値手を -1 しました", count);
     }
     Ok(count)
+}
+
+/// 書き出し値を決めた後のグラフから、反転した局面へ着く手を数える。
+fn direct_lookup_report(
+    graph: &Graph,
+    params: BestParams,
+    disagreements: Vec<FlipDisagreement>,
+    broken_guarantees: Vec<String>,
+) -> DirectLookupReport {
+    let mut report = DirectLookupReport {
+        disagreements,
+        broken_guarantees,
+        ..DirectLookupReport::default()
+    };
+    for v in 0..graph.len() {
+        let rows = || graph.rows(v).filter(|&row| params.counts(graph, row));
+        let leaves = |row: usize| graph.edge_to(row).is_some_and(|to| graph.joins_flipped(v, to));
+        let flips = rows().filter(|&row| leaves(row)).count();
+        report.flip_moves += flips;
+        report.flip_positions += usize::from(flips > 0);
+        if let Some(best) = rows().map(|row| graph.new[row]).max()
+            && rows().filter(|&row| graph.new[row] == best).all(leaves)
+        {
+            report.flip_best_positions += 1;
+        }
+    }
+    report
 }
 
 /// 反転キーで合流した向きで、書き出し値が最大の行のどれを指しても、その向きで解いた値を保つか。
@@ -2266,7 +2353,12 @@ impl Violations {
 /// - 自分の千日手の値より良い値なのに、相手が王手をやめながら続けられる循環 (千日手) へ持ち込める。
 ///
 /// 値の整合は前提にせず、約束した局面から悪い循環へ届くかを到達可能性で調べる。
-fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<i32>]) -> Violations {
+fn certify(
+    graph: &Graph,
+    params: BestParams,
+    mirrored: &[Option<i32>],
+    follow_flips: bool,
+) -> Violations {
     let mut violations = Violations {
         stored: BTreeSet::new(),
         flipped: BTreeSet::new(),
@@ -2275,7 +2367,7 @@ fn certify(graph: &Graph, params: BestParams, mirrored: &[Option<i32>]) -> Viola
     };
     let mate = Value::MATE.raw();
     for black in [true, false] {
-        let states = CertifyStates::new(graph, params, mirrored, black);
+        let states = CertifyStates::new(graph, params, mirrored, black, follow_flips);
         let draw = params.draws.of(black);
         let follows = |s: usize, idx: usize, _t: usize| states.follows(s, idx);
 
@@ -2330,10 +2422,18 @@ struct CertifyStates<'a> {
     real: Vec<bool>,
     /// 反転キーで合流した向きで解いた値 (手番の側から見た値)。
     mirrored: &'a [Option<i32>],
+    /// 反転した局面への辺を辿るか。辿らなければ、その辺の先は定跡の外とみる。
+    follow_flips: bool,
 }
 
 impl<'a> CertifyStates<'a> {
-    fn new(graph: &'a Graph, params: BestParams, mirrored: &'a [Option<i32>], black: bool) -> Self {
+    fn new(
+        graph: &'a Graph,
+        params: BestParams,
+        mirrored: &'a [Option<i32>],
+        black: bool,
+        follow_flips: bool,
+    ) -> Self {
         let n = graph.len();
         let values = (0..n)
             .map(|v| {
@@ -2350,7 +2450,10 @@ impl<'a> CertifyStates<'a> {
                 graph.rows(node).enumerate().filter_map(move |(idx, row)| {
                     graph
                         .edge_to(row)
-                        .filter(|_| params.counts(graph, row))
+                        .filter(|&to| {
+                            params.counts(graph, row)
+                                && (follow_flips || !graph.joins_flipped(node, to))
+                        })
                         .map(|to| (node, idx, to))
                 })
             })
@@ -2378,6 +2481,7 @@ impl<'a> CertifyStates<'a> {
             reverse,
             real: vec![false; 2 * n],
             mirrored,
+            follow_flips,
         };
         let mut stack: Vec<usize> = (0..n).map(|v| 2 * v + graph.color(v)).collect();
         for &s in &stack {
@@ -2431,7 +2535,10 @@ impl<'a> CertifyStates<'a> {
         graph.rows(s / 2).enumerate().filter_map(move |(idx, row)| {
             graph
                 .edge_to(row)
-                .filter(|_| self.params.counts(graph, row))
+                .filter(|&to| {
+                    self.params.counts(graph, row)
+                        && (self.follow_flips || !graph.joins_flipped(s / 2, to))
+                })
                 .map(|to| (idx, to * 2 + flip))
         })
     }
@@ -3071,6 +3178,7 @@ mod tests {
                 skip_unusable_moves: false,
             },
             &vec![None; rows.len()],
+            true,
         );
         if violations.stored.is_empty() && violations.flipped.is_empty() {
             Ok(())
@@ -3214,6 +3322,11 @@ mod tests {
         broken[0].as_mut().unwrap().preferred = Some(1);
         let error = write_certified(&mut graph, params, &results_of(&broken), &none).unwrap_err();
         assert!(error.downcast_ref::<FlipFailure>().is_none(), "{error}");
+        // 定跡を直接の key だけで引く前提でも、保存されている向きで破られる値は止める。
+        graph.options.direct_lookup_only = true;
+        let error = write_certified(&mut graph, params, &results_of(&broken), &none).unwrap_err();
+        assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
+        assert!(error.downcast_ref::<FlipFailure>().is_none(), "{error}");
     }
 
     #[test]
@@ -3282,6 +3395,54 @@ mod tests {
         // 千日手の値が先後で同じなら、両方の向きは同じ問題なので通る。
         let mut graph = rows_graph(&rows, &[false; 6], &black);
         propagate_values(&mut graph, DrawValues::both(-70), MergeMode::Replace).unwrap();
+        // 定跡を直接の key だけで引く前提なら止めない。C の行は保存されている向き (先手) の値、A の手は反転した
+        // 向き (後手が循環を選ぶ) の値になる。
+        let mut graph = rows_graph(&rows, &[false; 6], &black);
+        graph.options.direct_lookup_only = true;
+        let stats = propagate_values(&mut graph, draws, MergeMode::Replace).unwrap();
+        let new = |v: usize| graph.moves(v).map(|m| m.new).collect::<Vec<_>>();
+        assert_eq!(new(2), [-50, -51]);
+        assert_eq!(new(0), [0]);
+        let report = stats.direct_lookup.unwrap();
+        assert_eq!(
+            report.disagreements,
+            [FlipDisagreement {
+                key: graph.key(2).to_owned(),
+                stored: -50,
+                flipped: 0,
+            }]
+        );
+        assert_eq!(
+            (report.flip_moves, report.flip_positions, report.flip_best_positions),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn direct_lookup_only_skips_the_flipped_orientation_but_not_the_stored_one() {
+        let params = BestParams {
+            draws: DrawValues::default(),
+            merge: MergeMode::Replace,
+            skip_unusable_moves: false,
+        };
+        // 局面 0 から反転した局面 1 に着く。1 と 2 の循環は、保存されている向きでは 0 を約束するだけだが、
+        // 反転した向きでは局面 2 が +50 を約束していて、相手に千日手へ逃げられる。
+        let rows: [&[_]; 3] = [&[(0, Some(1))], &[(0, Some(2))], &[(0, Some(1))]];
+        let graph = rows_graph(&rows, &[false; 3], &[true, true, false]);
+        let flipped = [None, Some(-50), Some(50)];
+        let followed = certify(&graph, params, &flipped, true);
+        assert!(followed.stored.is_empty());
+        assert_eq!(followed.flipped, BTreeSet::from([2]));
+        let cut = certify(&graph, params, &flipped, false);
+        assert!(cut.stored.is_empty() && cut.flipped.is_empty());
+        // 直接の子局面だけの循環で約束が破れるなら、反転した局面への辺を辿らなくても見つける。
+        let rows: [&[_]; 2] = [&[(50, Some(1))], &[(-50, Some(0))]];
+        let graph = rows_graph(&rows, &[false; 2], &[true, false]);
+        for follow_flips in [true, false] {
+            let violations = certify(&graph, params, &[None; 2], follow_flips);
+            assert_eq!(violations.stored, BTreeSet::from([0]), "{follow_flips}");
+            assert!(violations.flipped.is_empty());
+        }
     }
 
     #[test]
