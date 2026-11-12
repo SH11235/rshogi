@@ -15,9 +15,9 @@ use super::targets::{
 };
 use super::unpromotion;
 use crate::book_backprop::{
-    BackpropOptions, DrawValues, Graph, MergeMode, MoveValue, PropagationStats, delta_buckets,
-    evaluate_edges, graph_from_entries, parse_row, percentile, propagate_values, retain_known,
-    write_book_atomic,
+    BackpropOptions, DrawValues, Graph, MergeMode, MoveCache, MoveValue, PropagationStats,
+    delta_buckets, evaluate_edges, graph_from_entries, parse_row, percentile, propagate_values,
+    retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
@@ -1492,7 +1492,7 @@ fn propagate_for_sides(
 ) -> Result<(Propagated, Option<Graph>, RecordUsage)> {
     let Some(records) = records else {
         return Ok((
-            propagate_with(positions, draws, fill, skip_flipped)?,
+            propagate_with(positions, draws, fill, skip_flipped, None)?,
             None,
             RecordUsage::default(),
         ));
@@ -1522,7 +1522,7 @@ fn propagate_for_sides(
             expanded.insert(key.clone(), position);
         }
         // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
-        let mut result = propagate_with(&expanded, draws, fill, true)?;
+        let mut result = propagate_with(&expanded, draws, fill, true, None)?;
         result.capped.extend(capped);
         // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
         let mut usage = RecordUsage::default();
@@ -1591,6 +1591,7 @@ fn propagate_entries(
     all: &[(&str, &MasterPosition)],
     draws: DrawValues,
     skip_flipped: bool,
+    cache: Option<&MoveCache>,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     let options = BackpropOptions {
         skip_flipped_children: skip_flipped,
@@ -1601,6 +1602,7 @@ fn propagate_entries(
             (key, p.ply.as_str(), p.moves.iter().map(|m| (m.mv.as_str(), m.eval)))
         }),
         options,
+        cache,
     )?;
     let illegal_moves = graph.illegal_moves;
     let known = known_moves(all, &graph)?;
@@ -1616,7 +1618,7 @@ fn propagate(
     draws: DrawValues,
     fill: Fill,
 ) -> Result<Propagated> {
-    propagate_with(positions, draws, fill, fill == Fill::Bridge)
+    propagate_with(positions, draws, fill, fill == Fill::Bridge, None)
 }
 
 /// [`propagate`] の本体。`skip_flipped` なら反転した局面へ辺を張らない。`Fill::Bridge` は補った辺が反転で合流する
@@ -1626,12 +1628,16 @@ fn propagate_with(
     draws: DrawValues,
     fill: Fill,
     skip_flipped: bool,
+    cache: Option<&MoveCache>,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
     let checks: Vec<Result<()>> = keys
         .par_iter()
         .map(|key| -> Result<()> {
+            if cache.is_some_and(|cache| cache.is_canonical(key)) {
+                return Ok(());
+            }
             let position = static_position_from_sfen(&format!("{key} 1"))
                 .with_context(|| format!("key を局面として読めません: {key}"))?;
             // 正規の表記でない key の局面には book_backprop が子局面の辺を張らず、値が黙って途切れる。
@@ -1659,7 +1665,8 @@ fn propagate_with(
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
     all.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws, skip_flipped)?;
+    let (graph, known_all, illegal_moves, stats) =
+        propagate_entries(&all, draws, skip_flipped, cache)?;
     let known = all
         .iter()
         .zip(known_all)
@@ -1762,7 +1769,17 @@ pub(super) fn evaluate(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
 ) -> Result<Vec<Vec<Option<i32>>>> {
-    let Propagated { graph, known, .. } = propagate(positions, draws, Fill::Off)?;
+    evaluate_with(positions, draws, None)
+}
+
+/// [`evaluate`] と同じ値を返す。`cache` にある局面と手は、局面を作り直さずにグラフにする。
+pub(super) fn evaluate_with(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    cache: Option<&MoveCache>,
+) -> Result<Vec<Vec<Option<i32>>>> {
+    let Propagated { graph, known, .. } =
+        propagate_with(positions, draws, Fill::Off, false, cache)?;
     positions
         .iter()
         .zip(&known)
@@ -3281,7 +3298,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
             let (memory, actual_known, illegal, _) =
-                propagate_entries(&entries, draws, false).unwrap();
+                propagate_entries(&entries, draws, false, None).unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
