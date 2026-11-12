@@ -335,6 +335,12 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         }
         inputs.push(("--exclude-queue", path.as_path()));
     }
+    for path in &args.single.walk_table {
+        if args.apply {
+            reject_same_file(&args.master, &[("--walk-table", path.as_path())])?;
+        }
+        inputs.push(("--walk-table", path.as_path()));
+    }
     inputs.extend(args.weight.inputs());
     if let Some(freq) = &args.deep.deep_opp_freq {
         inputs.push(("--deep-opp-freq", freq.as_path()));
@@ -455,7 +461,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     let weights = refutation::side_weights(&positions.0, &args.weight)?;
     let single = if single_output {
         let mut reads = single_reads(&findings);
-        switch::rank(&mut reads, weights.as_ref(), args.weight.min_weight);
+        args.single.rank(&mut reads, weights.as_ref(), args.weight.min_weight)?;
         let (lines, excluded) = switch::queue(&reads, &args.single)?;
         Some((refutation::format_queue(&lines)?, lines.len(), excluded))
     } else {
