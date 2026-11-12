@@ -11,6 +11,8 @@ use crate::book_backprop::{Graph, MoveValue};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, ValueEnum};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -146,7 +148,12 @@ impl SingleQueueArgs {
             rank(reads, fallback, fallback_min);
         } else {
             let weights = walk_weights(&self.walk_table, reads)?;
-            rank(reads, Some(&weights), self.single_min_weight);
+            let dropped = rank(reads, Some(&weights), self.single_min_weight);
+            println!(
+                "1 回の読みの手の局面: 辿りの重みが --single-min-weight {} 未満で除いた局面 {dropped} / 残り {}",
+                self.single_min_weight,
+                reads.len()
+            );
         }
         Ok(())
     }
@@ -177,13 +184,15 @@ pub(super) struct SingleRead {
     pub weight: Option<f64>,
 }
 
-/// 重みがあれば重みの大きい順 (下限未満は除く)、無ければ 1 位と main の差の大きい順に並べる。
-fn rank(reads: &mut Vec<SingleRead>, weights: Option<&SideWeights>, min_weight: f64) {
+/// 重みがあれば重みの大きい順 (下限未満は除く)、無ければ 1 位と main の差の大きい順に並べる。返す数は下限で除いた局面の数。
+fn rank(reads: &mut Vec<SingleRead>, weights: Option<&SideWeights>, min_weight: f64) -> usize {
     for r in reads.iter_mut() {
         let s = usize::from(side(&r.key) == "w");
         r.weight = weights.map(|w| w[s].get(&r.key).copied().unwrap_or(0.0));
     }
+    let before = reads.len();
     reads.retain(|r| r.weight.is_none_or(|w| w >= min_weight));
+    let dropped = before - reads.len();
     reads.sort_by(|a, b| {
         b.weight
             .unwrap_or(0.0)
@@ -191,6 +200,7 @@ fn rank(reads: &mut Vec<SingleRead>, weights: Option<&SideWeights>, min_weight: 
             .then_with(|| (b.best_value - b.main_value).cmp(&(a.best_value - a.main_value)))
             .then_with(|| a.key.cmp(&b.key))
     });
+    dropped
 }
 
 /// walk の表から `reads` の局面の重みを求める。局面の手番の側を自分とした辿り (side が手番の側と同じ行) だけを
@@ -199,6 +209,20 @@ fn walk_weights(paths: &[PathBuf], reads: &[SingleRead]) -> Result<SideWeights> 
     let wanted: HashSet<&str> = reads.iter().map(|r| r.key.as_str()).collect();
     let mut weights: SideWeights = [HashMap::new(), HashMap::new()];
     for path in paths {
+        // 行ごとの検査だけでは、行の無い表が列を欠いていても通ってしまう。
+        let header = BufReader::new(
+            File::open(path).with_context(|| format!("開けません: {}", path.display()))?,
+        )
+        .lines()
+        .next()
+        .with_context(|| format!("表が空です: {}", path.display()))??;
+        for name in ["side", "weight", "moves"] {
+            ensure!(
+                header.split('\t').any(|c| c == name),
+                "walk の表に列がありません: {name} ({})",
+                path.display()
+            );
+        }
         read_tsv(path, |row| {
             let own = column(row, "side")?;
             ensure!(matches!(own, "b" | "w"), "side は b / w です: {own}");
@@ -388,10 +412,10 @@ mod tests {
                     ("b", "0.5", "2g2f 8c8d 2f2e"),
                     ("b", "0.25", "2g2f 8c8d 7g7f"),
                     ("w", "0.125", "2g2f 8c8d"),
-                    // 初期局面を 2 回通ってから 2g2f の局面で止まる。
                     ("w", "0.0625", "5i5h 5a5b 5h5i 5b5a 2g2f"),
                 ],
             ),
+            // 初期局面を 3 回通る (最初・途中・止まり)。初期局面の重みには 1 回だけ足す。
             walk_table(dir.path(), "b.tsv", &[("b", "1", "5i5h 5a5b 5h5i 5b5a")]),
         ];
         let mut reads = vec![
@@ -418,8 +442,10 @@ mod tests {
         assert_eq!(reads[0].key, HIRATE_KEY);
         assert_eq!(reads[3].best_value, 30);
 
+        // 下限ちょうどの重みは残す。
         args.single_min_weight = 0.1875;
-        args.rank(&mut reads, None, 0.0).unwrap();
+        let weights = walk_weights(&args.walk_table, &reads).unwrap();
+        assert_eq!(rank(&mut reads, Some(&weights), args.single_min_weight), 2);
         assert_eq!(reads.len(), 3);
     }
 
@@ -427,20 +453,21 @@ mod tests {
     fn priority_bands_use_the_highest_matching_floor_and_else_the_rank() {
         let dir = tempfile::tempdir().unwrap();
         let mut args = test_args();
+        // 重みは 2 のべきにして、帯の下限ちょうどの値を誤差なしで作る。
         args.walk_table = vec![walk_table(
             dir.path(),
             "walk.tsv",
             &[
-                ("b", "0.05", ""),
-                ("w", "0.04", "2g2f"),
-                ("b", "0.01", "2g2f 8c8d"),
+                ("b", "0.125", ""),
+                ("w", "0.0625", "2g2f"),
+                ("b", "0.125", "2g2f 8c8d"),
             ],
         )];
-        args.single_priority_band = vec![(0.02, 7), (0.05, 1)];
+        args.single_priority_band = vec![(0.125, 7), (0.25, 1)];
         args.single_priority = 200;
         let mut reads = vec![
-            read(&["2g2f", "8c8d"], 10),
             read(&["2g2f"], 10),
+            read(&["2g2f", "8c8d"], 10),
             read(&[], 10),
         ];
         args.rank(&mut reads, None, 0.0).unwrap();
@@ -451,12 +478,12 @@ mod tests {
             got,
             [
                 (format!("sfen {HIRATE_KEY} 1").as_str(), 1),
-                (format!("sfen {} 2", reads[1].key).as_str(), 7),
-                (format!("sfen {} 3", reads[2].key).as_str(), 202),
+                (format!("sfen {} 3", reads[1].key).as_str(), 7),
+                (format!("sfen {} 2", reads[2].key).as_str(), 202),
             ]
         );
-        assert!(lines[0].memo.as_deref().unwrap().ends_with(" weight=0.06000"));
-        assert!(lines[2].memo.as_deref().unwrap().ends_with(" weight=0.01000"));
+        assert!(lines[0].memo.as_deref().unwrap().ends_with(" weight=0.25000"));
+        assert!(lines[2].memo.as_deref().unwrap().ends_with(" weight=0.06250"));
     }
 
     #[test]
@@ -510,6 +537,7 @@ mod tests {
         for (name, text) in [
             ("empty.tsv", ""),
             ("column.tsv", "side\tweight\nb\t1\n"),
+            ("header_only.tsv", "side\tweight\n"),
             ("side.tsv", "side\tweight\tmoves\nx\t1\t\n"),
             ("weight.tsv", "side\tweight\tmoves\nb\t-1\t\n"),
             ("move.tsv", "side\tweight\tmoves\nb\t1\t2g2e\n"),
@@ -520,5 +548,41 @@ mod tests {
             args.walk_table = vec![path];
             assert!(args.rank(&mut vec![read(&[], 10)], None, 0.0).is_err(), "{name}");
         }
+        // 列のそろった行の無い表は、どの局面も重み 0。
+        let path = dir.path().join("no_rows.tsv");
+        std::fs::write(&path, "side\tweight\tmoves\n").unwrap();
+        let mut args = test_args();
+        args.walk_table = vec![path];
+        let mut reads = vec![read(&[], 10)];
+        args.rank(&mut reads, None, 0.0).unwrap();
+        assert_eq!(reads[0].weight, Some(0.0));
+    }
+
+    #[test]
+    fn lines_without_a_walk_table_keep_their_text() {
+        let args = test_args();
+        let mut reads = vec![read(&["2g2f"], 10), read(&[], 30)];
+        args.rank(&mut reads, None, 0.0).unwrap();
+        let (lines, _) = queue(&reads, &args).unwrap();
+        assert_eq!(
+            crate::book_tree::refutation::format_queue(&lines).unwrap(),
+            concat!(
+                r#"{"id":"single_1_eb5bc2ef917ec96f_b","root":"sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","own":"b","depth":6,"priority":100,"hold":false,"game":[["7g7f"]],"opts":{"opp_n":3,"stop":300,"rounds":3,"draw_black":-70,"draw_white":70},"memo":"single main=main main_value=0 best=7g7f best_value=30 single=7g7f"}"#,
+                "\n",
+                r#"{"id":"single_2_0b6a278c81189e04_w","root":"sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL w - 2","own":"w","depth":6,"priority":101,"hold":false,"game":[["3c3d"]],"opts":{"opp_n":3,"stop":300,"rounds":3,"draw_black":-70,"draw_white":70},"memo":"single main=main main_value=0 best=3c3d best_value=10 single=3c3d"}"#,
+                "\n",
+            )
+        );
+        // 重みを渡した並べ方 (`master audit --opp-freq`) の memo。
+        let weights: SideWeights = [HashMap::from([(reads[0].key.clone(), 0.5)]), HashMap::new()];
+        assert_eq!(rank(&mut reads, Some(&weights), 0.25), 1);
+        let (lines, _) = queue(&reads, &args).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].memo.as_deref(),
+            Some(
+                "single main=main main_value=0 best=7g7f best_value=30 single=7g7f weight=0.50000"
+            )
+        );
     }
 }

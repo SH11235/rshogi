@@ -3468,6 +3468,44 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
     }
 
     #[test]
+    fn single_queue_uses_walk_weights_instead_of_frequency_weights() {
+        use crate::book_tree::reply_graph::HIRATE_KEY;
+        let after = crate::book_tree::model::child(HIRATE_KEY, "2g2f").unwrap();
+        let run_with = |min_weight: f64| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            // main 2g2f は先の局面から、1 位 7g7f は 1 回の読み。
+            std::fs::write(
+                &args.master,
+                master(&[
+                    (HIRATE_KEY, "2g2f", "main", "10"),
+                    (HIRATE_KEY, "7g7f", "alt", "30"),
+                    (&after, "8c8d", "main", "-10"),
+                ]),
+            )
+            .unwrap();
+            let freq = dir.path().join("freq.db");
+            std::fs::write(&freq, "#YANEURAOU-DB2016 1.00\n").unwrap();
+            let walk = dir.path().join("walk.tsv");
+            std::fs::write(&walk, "side\tweight\tmoves\nb\t0.25\t\nw\t0.5\t\n").unwrap();
+            let queue = dir.path().join("single.jsonl");
+            args.switch_rule = SwitchRule::Propagated;
+            args.single.single_enqueue_out = Some(queue.clone());
+            // 頻度の重みは 1 以下なので、--min-weight 2 が効けば行が落ちる。
+            args.weight.opp_freq = Some(freq);
+            args.weight.min_weight = 2.0;
+            args.single.walk_table = vec![walk];
+            args.single.single_min_weight = min_weight;
+            run_in_pool(args).unwrap();
+            std::fs::read_to_string(queue).unwrap()
+        };
+        let text = run_with(0.25);
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("single=7g7f weight=0.25000\""), "{text}");
+        assert_eq!(run_with(0.375), "");
+    }
+
+    #[test]
     fn switch_rule_rejects_options_of_the_other_rule() {
         let dir = tempfile::tempdir().unwrap();
         let mut args = test_args(dir.path());
