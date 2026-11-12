@@ -242,6 +242,49 @@ mod tests {
     }
 
     #[test]
+    fn a_position_reached_by_two_lines_counts_for_both() {
+        let w1 = child(R, "5i4i").unwrap();
+        let w2 = child(R, "5i6i").unwrap();
+        let x1 = child(&w1, "5a5b").unwrap();
+        let x2 = child(&w2, "5a5b").unwrap();
+        let y = child(&x1, "4i5i").unwrap();
+        assert_eq!(child(&x2, "6i5i").unwrap(), y);
+        let line = |key: &str, mv: &str, expanded: u8| {
+            format!("{key}\t1\t0\t2\t100\t{mv}\t0\t{expanded}\t1\n")
+        };
+        let table = [
+            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n".to_owned(),
+            line(R, "5i4i", 1),
+            line(R, "5i6i", 1),
+            line(&w1, "5a5b", 1),
+            line(&w2, "5a5b", 1),
+            line(&x1, "4i5i", 1),
+            line(&x2, "6i5i", 1),
+            line(&y, "5b4b", 0),
+        ]
+        .concat();
+        let mut nodes = parse_node_moves(&table, 0, Some(&BTreeSet::new())).unwrap();
+        assign(
+            &mut nodes,
+            &conds(&[
+                (R, "a"),
+                (&w1, "a"),
+                (&w2, "b"),
+                (&x1, "a"),
+                (&x2, "b"),
+                (&y, "a"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(cond(&nodes, &y, "5b4b"), "a");
+        assert_eq!(cond(&nodes, &x1, "4i5i"), "a");
+        assert_eq!(cond(&nodes, &x2, "6i5i"), "a");
+        assert_eq!(cond(&nodes, R, "5i4i"), "a");
+        assert_eq!(cond(&nodes, &w2, "5a5b"), "mixed");
+        assert_eq!(cond(&nodes, R, "5i6i"), "mixed");
+    }
+
+    #[test]
     fn moves_into_a_cycle_are_unknown_unless_two_conditions_are_seen() {
         let w = child(R, "5i4i").unwrap();
         let x = child(&w, "5a4a").unwrap();

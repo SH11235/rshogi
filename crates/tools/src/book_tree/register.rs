@@ -205,11 +205,16 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
     );
     let schema = Schema::load(args.schema.as_deref())?;
     let skip_keys = args.skip_keys.as_deref().map(read_skip_keys).transpose()?.unwrap_or_default();
+    // 自動で探すときは木の組を替えて登録し直すので木ごとに持ち、そうでなければ読むたびにまとめて重なる局面を捨てる。
     let auto = args.auto_skip_flip.is_some();
-    // 手ごとの cond は木 1 本の中の行き先を辿って決めるので、台帳との照合が済むまで木ごとに持つ。
     let mut trees = Vec::new();
-    let mut fingerprints = Vec::new();
+    let mut merged = Merged::default();
+    // 台帳と照合する木 (指紋が無い木) は、手ごとの cond を木 1 本の中の行き先を辿って決めるので、照合が済むまで
+    // 木ごとに持つ。まとめる順を変えないよう、まとめた局面には後から cond だけを写す。
+    let mut held: BTreeMap<usize, BTreeMap<String, Node>> = BTreeMap::new();
     let mut readings = Vec::new();
+    // 木ごとに、読みが 1 つの条件に決まらなかったか。
+    let mut undetermined = Vec::new();
     for (tree, dir) in args.trees.iter().enumerate() {
         // 打ち間違えた出力先に lock のために dir を作らない。
         ensure!(dir.is_dir(), "{}: 木の出力先がありません", dir.display());
@@ -230,50 +235,69 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let fingerprint = tree_fingerprint(dir)?;
         let tree_readings = tree_readings(dir)?;
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
-        trees.push(parse_node_moves(
-            &text,
-            tree,
-            (!tree_readings.is_empty()).then_some(&known_nodes),
-        )?);
-        readings.push(if fingerprint.is_none() && !args.journal.is_empty() {
-            tree_readings
+        let mut parsed =
+            parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
+        let matching =
+            fingerprint.is_none() && !args.journal.is_empty() && !tree_readings.is_empty();
+        if let Some(fp) = &fingerprint {
+            let cond = schema.condition(fp)?;
+            for mv in parsed.values_mut().flat_map(|node| &mut node.moves) {
+                mv.cond = cond.clone();
+            }
+        }
+        undetermined.push(fingerprint.is_none());
+        if auto {
+            trees.push(parsed);
         } else {
-            Vec::new()
-        });
-        fingerprints.push(fingerprint);
+            if matching {
+                held.insert(tree, parsed.clone());
+            }
+            merged.add(parsed, &skip_keys);
+        }
+        readings.push(if matching { tree_readings } else { Vec::new() });
     }
     let matched = super::journal::match_fingerprints(&args.journal, &readings)?;
-    // 木ごとに、読みが 1 つの条件に決まらなかったか。
-    let mut undetermined = Vec::new();
-    for (((nodes, fingerprint), readings), matched) in
-        trees.iter_mut().zip(fingerprints).zip(&readings).zip(matched)
-    {
-        let single =
-            fingerprint.as_deref().or_else(|| super::journal::single_fingerprint(&matched));
-        let cond = single.map_or_else(|| Ok("unknown".into()), |fp| schema.condition(fp))?;
-        for mv in nodes.values_mut().flat_map(|node| &mut node.moves) {
-            mv.cond = cond.clone();
+    for (tree, (readings, matched)) in readings.iter().zip(matched).enumerate() {
+        if readings.is_empty() {
+            continue;
         }
-        if single.is_none() {
+        let nodes = if auto {
+            &mut trees[tree]
+        } else {
+            held.get_mut(&tree).context("照合する木の局面がありません")?
+        };
+        let name = |fp: &str| {
+            schema.condition(fp).with_context(|| {
+                format!("{}: 木の読みの条件に名前がありません", args.trees[tree].display())
+            })
+        };
+        if let Some(fp) = super::journal::single_fingerprint(&matched) {
+            let cond = name(fp)?;
+            for mv in nodes.values_mut().flat_map(|node| &mut node.moves) {
+                mv.cond = cond.clone();
+            }
+            undetermined[tree] = false;
+        } else {
             let mut conds = BTreeMap::new();
             for (reading, fp) in readings.iter().zip(&matched) {
                 if let Some(fp) = fp {
-                    conds.insert(reading.key.clone(), schema.condition(fp)?);
+                    conds.insert(reading.key.clone(), name(fp)?);
                 }
             }
             if !conds.is_empty() {
                 move_cond::assign(nodes, &conds)?;
             }
         }
-        undetermined.push(single.is_none());
     }
-    // 自動で探すときは木の組を替えて登録し直すので木ごとに持ち続け、そうでなければまとめて重なる局面を捨てる。
-    let mut merged = Merged::default();
-    if !auto {
-        for parsed in std::mem::take(&mut trees) {
-            merged.add(parsed, &skip_keys);
+    drop(readings);
+    for (key, node) in &mut merged.nodes {
+        if let Some(source) = held.get(&node.tree).and_then(|nodes| nodes.get(key)) {
+            for (mv, from) in node.moves.iter_mut().zip(&source.moves) {
+                mv.cond.clone_from(&from.cond);
+            }
         }
     }
+    drop(held);
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let mut rows = parse_master(&text)?;
@@ -2607,6 +2631,7 @@ mod tests {
             ("known", "unknown", "known", "tree:2", 0),
             ("unknown", "unknown", "known", "tree:2", 0),
             ("other", "unknown", "other", "tree:2", 1),
+            ("mixed", "unknown", "mixed", "tree:2", 1),
             ("unknown", "single", "known", "single", 1),
         ] {
             let mv = &mut nodes.get_mut(B).unwrap().moves[0];
@@ -2743,19 +2768,22 @@ mod tests {
             )
             .unwrap();
         }
-        let conds = |name: &str, reply_settings: Option<&Settings>| {
+        let run_with = |name: &str,
+                        journal_rows: &[(&Reading, &Settings)],
+                        schema: Option<PathBuf>| {
             let master_path = dir.path().join(format!("{name}.tsv"));
             std::fs::write(&master_path, format_master(&[])).unwrap();
             let journal = dir.path().join(format!("{name}.jsonl"));
-            if let Some(reply_settings) = reply_settings {
+            if !journal_rows.is_empty() {
                 let mut file = Journal::open(&journal, &first.fingerprint).unwrap();
-                file.append(root.clone(), &first, "test".into()).unwrap();
-                file.append(reply.clone(), reply_settings, "test".into()).unwrap();
+                for (reading, settings) in journal_rows {
+                    file.append((*reading).clone(), settings, "test".into()).unwrap();
+                }
             }
             run(RegisterArgs {
                 master: master_path.clone(),
-                schema: None,
-                journal: reply_settings.map(|_| journal).into_iter().collect(),
+                schema,
+                journal: (!journal_rows.is_empty()).then_some(journal).into_iter().collect(),
                 since: "tag".into(),
                 note: String::new(),
                 alt_gap: 40,
@@ -2778,16 +2806,49 @@ mod tests {
                 auto_skip_flip_rounds: 10,
                 trees: vec![tree.clone()],
             })
-            .unwrap();
-            let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
-            [(B, "5i4i"), (B, "5i6i"), (w, "5a4a")]
-                .map(|(key, mv)| find(&rows, key, mv).unwrap().get("cond").to_owned())
+            .map(|()| {
+                let rows = parse_master(&std::fs::read_to_string(&master_path).unwrap()).unwrap();
+                [(B, "5i4i"), (B, "5i6i"), (w, "5a4a")]
+                    .map(|(key, mv)| find(&rows, key, mv).unwrap().get("cond").to_owned())
+            })
+        };
+        let conds = |name: &str, journal_rows: &[(&Reading, &Settings)]| {
+            run_with(name, journal_rows, None).unwrap()
         };
         let (a, b) = (&first.fingerprint[..8], &second.fingerprint[..8]);
-        assert_eq!(conds("none", None), ["unknown", "unknown", "unknown"]);
-        assert_eq!(conds("same", Some(&first)), [a, a, a]);
+        assert_eq!(conds("none", &[]), ["unknown", "unknown", "unknown"]);
+        assert_eq!(conds("same", &[(&root, &first), (&reply, &first)]), [a, a, a]);
         // 先を読んだ手の値は行き先の読みから来るので、行き先の読みの条件になる。
-        assert_eq!(conds("mixed", Some(&second)), [b, a, b]);
+        assert_eq!(conds("mixed", &[(&root, &first), (&reply, &second)]), [b, a, b]);
+        // 同じ値の読みが 2 つの指紋で台帳にある局面は、どちらの条件か決まらない。
+        assert_eq!(
+            conds("twice", &[(&root, &first), (&reply, &first), (&reply, &second)]),
+            ["unknown", a, "unknown"]
+        );
+
+        let schema_dir = dir.path().join("schema");
+        std::fs::create_dir(&schema_dir).unwrap();
+        crate::book_tree::schema::test_schema(&schema_dir);
+        std::fs::write(
+            schema_dir.join("sources.tsv"),
+            "source\tdescription\treplaceable\nread\t読み\t1\n",
+        )
+        .unwrap();
+        let conditions = schema_dir.join("conditions.tsv");
+        let mut text = std::fs::read_to_string(&conditions).unwrap();
+        text.push_str(&format!("first\t{}{}\n", first.fingerprint, "\t".repeat(11)));
+        std::fs::write(&conditions, &text).unwrap();
+        let rows = [(&root, &first), (&reply, &second)];
+        let error = run_with("unnamed", &rows, Some(schema_dir.clone())).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&tree.display().to_string()), "{message}");
+        assert!(message.contains(&second.fingerprint), "{message}");
+        text.push_str(&format!("second\t{}{}\n", second.fingerprint, "\t".repeat(11)));
+        std::fs::write(&conditions, text).unwrap();
+        assert_eq!(
+            run_with("named", &rows, Some(schema_dir)).unwrap(),
+            ["second", "first", "second"]
+        );
     }
 
     #[test]
