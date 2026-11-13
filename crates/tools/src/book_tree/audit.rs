@@ -1488,24 +1488,37 @@ pub(super) fn opponent_replies(
     roles: &[&str],
 ) -> Result<BTreeMap<String, MasterPosition>> {
     let mut records = BTreeMap::<String, MasterPosition>::new();
-    for row in rows.iter().filter(|r| roles.contains(&r.get("role"))) {
-        let Some(eval) = master_table::mean_eval(row.get("evals"))? else {
-            continue;
-        };
-        records
-            .entry(row.get("key").to_owned())
-            .or_insert_with(|| MasterPosition {
-                ply: row.get("ply").to_owned(),
-                source: String::new(),
-                moves: Vec::new(),
-            })
-            .moves
-            .push(BookMove {
-                mv: row.get("move").to_owned(),
-                eval: Some(eval),
-            });
+    for row in rows {
+        add_opponent_reply(&mut records, row, roles)?;
     }
     Ok(records)
+}
+
+/// 読みの値のある対象役割の行だけを、伝播に必要な列に集約する。
+pub(super) fn add_opponent_reply(
+    records: &mut BTreeMap<String, MasterPosition>,
+    row: &Row,
+    roles: &[&str],
+) -> Result<()> {
+    if !roles.contains(&row.get("role")) {
+        return Ok(());
+    }
+    let Some(eval) = master_table::mean_eval(row.get("evals"))? else {
+        return Ok(());
+    };
+    records
+        .entry(row.get("key").to_owned())
+        .or_insert_with(|| MasterPosition {
+            ply: row.get("ply").to_owned(),
+            source: String::new(),
+            moves: Vec::new(),
+        })
+        .moves
+        .push(BookMove {
+            mv: row.get("move").to_owned(),
+            eval: Some(eval),
+        });
+    Ok(())
 }
 
 #[derive(Default)]

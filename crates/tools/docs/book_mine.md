@@ -1737,6 +1737,8 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 
 ## `master rejoin`: 相手の手で定跡に戻ると値が下がる局面
 
+元データは逐次読み込み、`--opp-records`・`--opp-bench` の対象行も全列を保持せず、読みの値がある手の key・ply・move・平均評価値だけを伝播用に集約します。
+
 ```bash
 book_mine master rejoin --master moves.tsv --table rejoin.tsv \
   --draw-value-black -70 --draw-value-white 70 [--direct-lookup [--direct-lookup-table flip.tsv]] [--line 40] [--side both] [--preset random] \

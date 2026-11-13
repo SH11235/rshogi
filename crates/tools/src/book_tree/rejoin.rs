@@ -5,10 +5,10 @@
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
 use super::audit::{
-    Fill, Flips, evaluate_for_side, evaluate_with, opponent_replies, reject_same_file,
+    Fill, Flips, add_opponent_reply, evaluate_for_side, evaluate_with, reject_same_file,
     report_direct_lookup,
 };
-use super::master_table::{MasterPosition, read_master, read_rows};
+use super::master_table::{MasterPosition, positions_from_rows, read_rows};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, SideArg, build_filtered, selected_moves, thread_pool,
 };
@@ -216,7 +216,6 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         inputs.push(("--table", args.table.as_path()));
         reject_same_file(table, &inputs)?;
     }
-    let (positions, _) = read_master(&args.master)?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
@@ -226,18 +225,13 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         .filter_map(|(on, role)| on.then_some(role))
         .collect();
     let enhanced = args.bridge_replies || !roles.is_empty();
-    let records = if roles.is_empty() {
-        BTreeMap::new()
-    } else {
-        let mut rows = Vec::new();
-        for row in read_rows(std::io::BufReader::new(std::fs::File::open(&args.master)?))? {
-            let (_, row) = row?;
-            if roles.contains(&row.get("role")) {
-                rows.push(row);
-            }
-        }
-        opponent_replies(&rows, &roles)?
-    };
+    let mut records = BTreeMap::new();
+    let reader = std::io::BufReader::new(std::fs::File::open(&args.master)?);
+    let (positions, _) = positions_from_rows(read_rows(reader)?.map(|entry| {
+        let (at, row) = entry?;
+        add_opponent_reply(&mut records, &row, &roles)?;
+        Ok((at, row))
+    }))?;
     ensure!(
         !enhanced || args.direct_lookup_table.is_none(),
         "--opp-records・--opp-bench・--bridge-replies は反転した局面へ辺を張らないので --direct-lookup-table は使いません"
@@ -594,6 +588,7 @@ fn format_summary(side: &str, summary: &RejoinSummary, line: i32, rejoins: &[Rej
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_table::read_master;
     use super::super::reply_graph::fixture::{ROOT, after, master_text};
     use super::*;
 

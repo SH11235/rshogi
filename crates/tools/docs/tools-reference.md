@@ -3,6 +3,7 @@
 [クイックスタート](../README.md)から始め、用途に合うツールの詳細を開いてください。
 一覧は `src/bin/` の全バイナリを含みます。個別 doc がない補助ツールはソースへリンクしています。
 全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
+`book_mine master rejoin` の応手集約とメモリの扱いは[詳細](book_mine.md#master-rejoin-相手の手で定跡に戻ると値が下がる局面)を参照してください。
 
 ## 教師データの生成・変換・加工
 
