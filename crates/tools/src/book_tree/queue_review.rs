@@ -662,6 +662,7 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
                 statuses.as_ref().unwrap(),
                 plan.as_ref(),
                 rerank.as_ref(),
+                continuations.as_ref(),
             )
         })
         .transpose()?;

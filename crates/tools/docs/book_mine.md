@@ -540,11 +540,16 @@ book_mine tree queue-review \
 ```
 
 続きの候補は hold でない NOT_READY の木です。受付の最後の JSON 行を写し、`opts.rounds` だけを 6 にします。
-同じ根・同じ own の DONE、または稼働中の台で hold でない RUNNING・QUEUED の写しがあれば「手当て済み」です。
-台の dir に `END` があれば稼働中には数えません。照合対象は `--box` で渡した台です。
+同じ主根 (`root`)・同じ own の DONE、または稼働中の台で hold でない RUNNING・QUEUED の写しがあれば「手当て済み」です。
+追加の根 (`roots`) だけの一致では手当て済みにしません。
+台の dir に `END` があれば稼働中には数えません。照合対象は `--box` で渡した台です。判定する木の台が終わっていたら「終わった台」として送りません。
+終わった台で DONE になった写しを手当て済みに数えるには、終わった台も `--box` に渡します
+(その台の `fetch/targets.status.json` と受付が揃っている必要があります)。
 `startpos moves ...` の根は手順を指して局面に直し、通常の queue-review と同じ局面キーで照合します。
 受付の `opts` が無い木、既に rounds が 6 以上の木、`--not-ready-sent` の id も候補から外します。
 その木の priority 以下の受付の帯に `tree-size` を足した時間が cutoff を越える木は「帯で回らない」です。
+own が `bw` の受付行は両側を判定し、両方とも「送る」のときだけ 1 行出します。
+片側だけが候補なら表に「片側だけ候補」と記し、JSONL には出しません。
 NOT_READY ごとに独立に判定し、同時に選ばれた別の続きの候補の量は足しません。
 表には hold の木も含め、判定・理由・台・id・own・priority・read・required・rounds・帯の量と時間・締めまでの時間・手当て済みの写しを出します。
 
@@ -557,10 +562,11 @@ hold でない RUNNING・QUEUED の各木を受付の priority 順に並べ、
 同じ priority の木は status の並び順を保ちます。その priority 以下の全量は、同じ priority の最後の行で読めます。
 列は `phase`・`box`・`id`・`own`・`priority`・`source`・`remaining`・`cumulative`・`rate`・`hours`・`cutoff_hours`・`over` です。
 `source=accepted` は受付の木、`source=send` は送る予定の行、`over` は締めを越えるかの真偽です。
-`phase=before` が受付の帯です。`--plan-out` または `--rerank-out` と併用すると、送る予定の hold でない行の量を
-受付の帯に足した `phase=after-send` も出します。送る行は own ごとに 1 本 `tree-size`、
-同じ id・own が RUNNING・QUEUED で read が 1 以上なら `max(tree-size, required) - read` です。
-これは送る分を追加した量の見込みなので、既存行の priority 更新でも受付分と送る分の両方を数えます。
+`phase=before` が受付の帯です。`--plan-out`、`--rerank-out` または `--not-ready-out` と併用すると、
+送る行を反映した `phase=after-send` も出します。同じ id・own の受付分は送る行で置き換え、
+hold を付ける行なら受付分を外します。同じ id・own を複数回送る場合は最後の行を使います。
+送る行は own ごとに 1 本 `tree-size` です。ただし同じ id・own の status がある行は、
+read の値によらず `max(tree-size, required) - read` (負なら 0) を使います。
 宛先が未定の `<prefix>_rerank-add.jsonl` は、台別の帯には加算しません。
 通常の `--bands` による帯の区切りと、その計画判定は変わりません。
 

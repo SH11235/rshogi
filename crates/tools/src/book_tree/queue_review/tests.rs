@@ -2881,12 +2881,143 @@ fn per_tree_rerank_payload_adds_partial_remaining_to_exact_priority() {
     a.tree_size = 150;
     a.rerank_out = Some(d.path().join("rerank"));
     let text = String::from_utf8(
-        per_tree::table(&a, &boxes, &metrics, &statuses, None, Some(&rerank)).unwrap(),
+        per_tree::table(&a, &boxes, &metrics, &statuses, None, Some(&rerank), None).unwrap(),
     )
     .unwrap();
     let lines: Vec<_> = text.lines().collect();
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 3);
     assert!(lines[2].contains("partial\tb\t13\tsend\t140\t140\t100\t1.4\t2\tfalse"));
-    assert!(lines[3].contains("partial\tb\t20\taccepted\t140\t280\t100\t2.8\t2\ttrue"));
+    assert_eq!(text.matches("after-send\t").count(), 1);
     assert!(!text.contains("unassigned"));
+}
+
+#[test]
+fn not_ready_copy_matching_uses_both_primary_roots() {
+    for (source_primary, copy_primary, blocks) in [
+        ("7g7f", "2g2f", false),
+        ("2g2f", "7g7f", false),
+        ("7g7f", "7g7f", true),
+    ] {
+        let d = TempDir::new().unwrap();
+        let mut source = row("source", source_primary);
+        source["roots"] = json!([root("2g2f")]);
+        let mut copy = row("copy", copy_primary);
+        copy["roots"] = json!([root("2g2f")]);
+        let mut a = plan_args(d.path(), &[("a", vec![source.clone(), copy.clone()])]);
+        a.plan_out = None;
+        a.not_ready_out = Some(d.path().join("nr"));
+        a.not_ready_table = Some(d.path().join("nr.tsv"));
+        status_file(
+            &d.path().join("a"),
+            &[
+                status(&source, "NOT_READY", 0, 0),
+                status(&copy, "DONE", 10, 10),
+            ],
+        );
+        run_at(a, now(), &mut Vec::new()).unwrap();
+        let text = std::fs::read_to_string(d.path().join("nr/qrhold_not_ready_a.jsonl")).unwrap();
+        assert_eq!(text.is_empty(), blocks, "{source_primary} / {copy_primary}");
+    }
+}
+
+#[test]
+fn per_tree_not_ready_continuations_alone_and_with_plan() {
+    for with_plan in [false, true] {
+        let d = TempDir::new().unwrap();
+        let source = row("source", "7g7f");
+        let second = row("second", "2g2f");
+        let mut a = plan_args(d.path(), &[("a", vec![source.clone(), second.clone()])]);
+        a.tree_size = 150;
+        a.box_rate = vec!["a=1000".into()];
+        a.not_ready_out = Some(d.path().join("nr"));
+        a.not_ready_table = Some(d.path().join("nr.tsv"));
+        a.band_per_tree = true;
+        status_file(
+            &d.path().join("a"),
+            &[
+                status(&source, "NOT_READY", 40, 180),
+                status(&second, "NOT_READY", 0, 200),
+            ],
+        );
+        if with_plan {
+            let add = d.path().join("add.jsonl");
+            std::fs::write(&add, format!("{}\n", row("new", "9g9f"))).unwrap();
+            a.add = vec![add];
+        } else {
+            a.plan_out = None;
+        }
+        run_at(a, now(), &mut Vec::new()).unwrap();
+        let dir = if with_plan { "plan" } else { "nr" };
+        let text =
+            std::fs::read_to_string(d.path().join(dir).join("qrhold_band_per_tree.tsv")).unwrap();
+        let rows: Vec<_> =
+            text.lines().skip(1).map(|r| r.split('\t').collect::<Vec<_>>()).collect();
+        assert_eq!(rows.len(), if with_plan { 3 } else { 2 }, "{text}");
+        assert!(rows.iter().all(|r| r[0] == "after-send" && r[5] == "send"));
+        for (id, remaining) in [("source", "140"), ("second", "200")] {
+            let row = rows.iter().find(|r| r[2] == id).unwrap();
+            assert_eq!(row[6], remaining, "{text}");
+        }
+        assert_eq!(rows.last().unwrap()[7], if with_plan { "490" } else { "340" }, "{text}");
+        if with_plan {
+            assert_eq!(rows.iter().find(|r| r[2] == "new").unwrap()[6], "150");
+        }
+    }
+}
+
+#[test]
+fn not_ready_on_ended_box_is_not_sent() {
+    let d = TempDir::new().unwrap();
+    let r = row("ended", "7g7f");
+    let mut a = plan_args(d.path(), &[("a", vec![r.clone()])]);
+    a.plan_out = None;
+    a.not_ready_out = Some(d.path().join("nr"));
+    a.not_ready_table = Some(d.path().join("nr.tsv"));
+    status_file(&d.path().join("a"), &[status(&r, "NOT_READY", 0, 0)]);
+    std::fs::write(d.path().join("a/END"), "done").unwrap();
+    run_at(a, now(), &mut Vec::new()).unwrap();
+    assert!(std::fs::read(d.path().join("nr/qrhold_not_ready_a.jsonl")).unwrap().is_empty());
+    assert!(
+        std::fs::read_to_string(d.path().join("nr.tsv"))
+            .unwrap()
+            .contains("終わった台\t")
+    );
+}
+
+#[test]
+fn not_ready_bw_requires_both_sides_to_be_candidates() {
+    for peer_state in ["DONE", "RUNNING", "QUEUED", "NOT_READY"] {
+        let d = TempDir::new().unwrap();
+        let mut r = row("both", "7g7f");
+        r["own"] = json!("bw");
+        let mut copy = row("copy", "7g7f");
+        copy["own"] = json!("w");
+        let mut a = plan_args(d.path(), &[("a", vec![r.clone()]), ("b", vec![copy.clone()])]);
+        a.plan_out = None;
+        a.not_ready_out = Some(d.path().join("nr"));
+        a.not_ready_table = Some(d.path().join("nr.tsv"));
+        let statuses: Vec<_> = ["b", "w"]
+            .iter()
+            .map(|own| {
+                let mut s = status(&r, "NOT_READY", 0, 0);
+                s["own"] = json!(own);
+                s
+            })
+            .collect();
+        status_file(&d.path().join("a"), &statuses);
+        status_file(&d.path().join("b"), &[status(&copy, peer_state, 0, 0)]);
+        run_at(a, now(), &mut Vec::new()).unwrap();
+        let text = std::fs::read_to_string(d.path().join("nr/qrhold_not_ready_a.jsonl")).unwrap();
+        if peer_state == "NOT_READY" {
+            let emitted: Vec<Value> =
+                text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+            r["opts"]["rounds"] = json!(6);
+            assert_eq!(emitted, [r]);
+        } else {
+            assert!(text.is_empty());
+            let table = std::fs::read_to_string(d.path().join("nr.tsv")).unwrap();
+            assert!(table.contains("片側だけ候補\t"), "{table}");
+            assert!(table.contains("手当て済み\t"), "{table}");
+        }
+    }
 }

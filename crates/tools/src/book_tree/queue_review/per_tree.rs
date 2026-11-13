@@ -112,7 +112,7 @@ fn sent(rows: &[Value], statuses: &[Status], tree_size: u64) -> Result<Vec<Entry
         for own in line.sides() {
             let remaining = statuses
                 .iter()
-                .find(|s| s.id == line.id && s.own == own && s.active() && s.read > 0)
+                .find(|s| s.id == line.id && s.own == own)
                 .map_or(tree_size, |s| s.remaining(tree_size));
             result.push(Entry {
                 id: line.id.clone(),
@@ -124,6 +124,17 @@ fn sent(rows: &[Value], statuses: &[Status], tree_size: u64) -> Result<Vec<Entry
         }
     }
     Ok(result)
+}
+
+fn after(b: &BoxData, statuses: &[Status], tree_size: u64, rows: &[Value]) -> Result<Vec<Entry>> {
+    let mut entries = before(b, statuses, tree_size);
+    for raw in rows {
+        let line: Line = serde_json::from_value(raw.clone())?;
+        let sides = line.sides();
+        entries.retain(|e| e.id != line.id || !sides.contains(&e.own));
+        entries.extend(sent(std::slice::from_ref(raw), statuses, tree_size)?);
+    }
+    Ok(entries)
 }
 
 fn append(
@@ -168,27 +179,34 @@ pub(super) fn table(
     statuses: &[Vec<Status>],
     plan: Option<&plan::Plan>,
     rerank: Option<&rerank::Rerank>,
+    continuations: Option<&not_ready::Continuations>,
 ) -> Result<Vec<u8>> {
     let mut bytes = b"phase\tbox\tid\town\tpriority\tsource\tremaining\tcumulative\trate\thours\tcutoff_hours\tover\n".to_vec();
     for ((b, metric), status) in boxes.iter().zip(metrics).zip(statuses) {
         append(&mut bytes, "before", b, metric, before(b, status, args.tree_size))?;
         let named = format!("{}_{}.jsonl", args.prefix, b.name);
         let reranked = format!("{}_rerank_{}.jsonl", args.prefix, b.name);
+        let continued = format!("{}_not_ready_{}.jsonl", args.prefix, b.name);
         let payloads = plan
             .into_iter()
             .flat_map(|p| p.outputs.iter().zip(&p.payloads))
-            .chain(rerank.into_iter().flat_map(|r| r.outputs.iter().zip(&r.payloads)));
+            .chain(rerank.into_iter().flat_map(|r| r.outputs.iter().zip(&r.payloads)))
+            .chain(continuations.into_iter().flat_map(|c| c.outputs.iter().zip(&c.payloads)));
         let mut additions = Vec::new();
         for (path, payload) in payloads {
-            if path.file_name().is_some_and(|n| n == named.as_str() || n == reranked.as_str()) {
+            if path.file_name().is_some_and(|n| {
+                n == named.as_str() || n == reranked.as_str() || n == continued.as_str()
+            }) {
                 for line in payload.split(|&c| c == b'\n').filter(|line| !line.is_empty()) {
                     additions.push(serde_json::from_slice(line)?);
                 }
             }
         }
-        if plan.is_some() || (rerank.is_some() && args.rerank_out.is_some()) {
-            let mut entries = before(b, status, args.tree_size);
-            entries.extend(sent(&additions, status, args.tree_size)?);
+        if plan.is_some()
+            || (rerank.is_some() && args.rerank_out.is_some())
+            || continuations.is_some()
+        {
+            let entries = after(b, status, args.tree_size, &additions)?;
             append(&mut bytes, "after-send", b, metric, entries)?;
         }
     }
@@ -304,5 +322,26 @@ mod tests {
         assert_eq!(entries[2].remaining, 150);
         assert_eq!(entries[1].own, "b");
         assert_eq!(entries[2].own, "w");
+    }
+    #[test]
+    fn after_send_replaces_each_side_and_removes_held_rows() {
+        let (b, mut statuses) = fixture();
+        statuses[0].required = 300;
+        for hold in [false, true] {
+            let rows = [
+                json!({"id":"later","root":"startpos","own":"b","depth":0,"priority":10,"hold":hold}),
+            ];
+            let entries = after(&b, &statuses, 150, &rows).unwrap();
+            let matching: Vec<_> = entries.iter().filter(|e| e.id == "later").collect();
+            if hold {
+                assert!(matching.is_empty());
+            } else {
+                assert_eq!(matching.len(), 1);
+                assert_eq!(matching[0].priority, 10);
+                assert_eq!(matching[0].remaining, 300);
+                assert_eq!(matching[0].source, "send");
+            }
+            assert_eq!(entries.iter().filter(|e| e.id != "later").count(), 2);
+        }
     }
 }

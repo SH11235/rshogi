@@ -33,14 +33,13 @@ pub(super) fn build(
     for (i, b) in boxes.iter().enumerate() {
         for status in &statuses[i] {
             let q = &b.queue[&status.id];
-            for root in &q.roots {
-                copies.entry((root, &status.own)).or_default().push((i, status));
-            }
+            copies.entry((&q.primary_root, &status.own)).or_default().push((i, status));
         }
     }
     let mut table = b"verdict\twhy\tbox\tid\town\tpriority\tread\trequired\trounds\tband_remaining\tband_hours\tcutoff_hours\tcopies\n".to_vec();
     let mut rows = vec![Vec::new(); boxes.len()];
     for (i, b) in boxes.iter().enumerate() {
+        let mut decisions = Vec::new();
         for status in &statuses[i] {
             if status.state != "NOT_READY" {
                 continue;
@@ -49,21 +48,18 @@ pub(super) fn build(
             let opts = q.raw.get("opts").and_then(Value::as_object);
             let rounds = opts.and_then(|v| v.get("rounds")).and_then(Value::as_u64);
             let mut blocked = BTreeSet::new();
-            for root in &q.roots {
-                if let Some(others) = copies.get(&(root.as_str(), status.own.as_str())) {
-                    for &(j, other) in others {
-                        if j == i && other.id == status.id {
-                            continue;
-                        }
-                        let other_q = &boxes[j].queue[&other.id];
-                        if other.state == "DONE"
-                            || (live[j]
-                                && !other_q.line.hold
-                                && matches!(other.state.as_str(), "RUNNING" | "QUEUED"))
-                        {
-                            blocked
-                                .insert(format!("{}:{}:{}", boxes[j].name, other.id, other.state));
-                        }
+            if let Some(others) = copies.get(&(q.primary_root.as_str(), status.own.as_str())) {
+                for &(j, other) in others {
+                    if j == i && other.id == status.id {
+                        continue;
+                    }
+                    let other_q = &boxes[j].queue[&other.id];
+                    if other.state == "DONE"
+                        || (live[j]
+                            && !other_q.line.hold
+                            && matches!(other.state.as_str(), "RUNNING" | "QUEUED"))
+                    {
+                        blocked.insert(format!("{}:{}:{}", boxes[j].name, other.id, other.state));
                     }
                 }
             }
@@ -75,7 +71,9 @@ pub(super) fn build(
             } else {
                 amount as f64 / metrics[i].speed
             };
-            let (verdict, why) = if q.line.hold {
+            let (verdict, why) = if !live[i] {
+                ("終わった台", "台の dir に END がある")
+            } else if q.line.hold {
                 ("hold", "保留の木")
             } else if opts.is_none() {
                 ("opts なし", "受付の最後の行に opts が無い")
@@ -84,18 +82,38 @@ pub(super) fn build(
             } else if sent.contains(&status.id) {
                 ("直前に送った", "指定された送信済み JSONL に id がある")
             } else if !blocked.is_empty() {
-                ("手当て済み", "同じ根・同じ own の DONE または稼働中の写しがある")
+                ("手当て済み", "同じ主根・同じ own の DONE または稼働中の写しがある")
             } else if hours > metrics[i].hours {
                 ("帯で回らない", "この木の続きの分を足すと締めを越える")
             } else {
-                let mut raw = q.raw.clone();
-                raw["opts"]["rounds"] = Value::from(6);
-                // bw の片側だけの再送でも受付行全体を更新するため、id ごとに 1 行だけ出す。
-                if !rows[i].iter().any(|r: &Value| r["id"] == raw["id"]) {
-                    rows[i].push(raw);
-                }
                 ("送る", "rounds を 6 にする")
             };
+            decisions.push((status, rounds, blocked, amount, hours, verdict, why));
+        }
+        let eligible: BTreeSet<_> = decisions
+            .iter()
+            .filter(|d| d.5 == "送る")
+            .map(|d| (d.0.id.as_str(), d.0.own.as_str()))
+            .collect();
+        for (status, rounds, blocked, amount, hours, verdict, why) in &decisions {
+            let (mut verdict, mut why) = (*verdict, *why);
+            let q = &b.queue[&status.id];
+            if verdict == "送る" {
+                if q.line
+                    .sides()
+                    .iter()
+                    .all(|own| eligible.contains(&(status.id.as_str(), own.as_str())))
+                {
+                    let mut raw = q.raw.clone();
+                    raw["opts"]["rounds"] = Value::from(6);
+                    if !rows[i].iter().any(|r: &Value| r["id"] == raw["id"]) {
+                        rows[i].push(raw);
+                    }
+                } else {
+                    verdict = "片側だけ候補";
+                    why = "bw の両側が送る判定でないため受付行を出さない";
+                }
+            }
             writeln!(
                 table,
                 "{verdict}\t{why}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{amount}\t{hours}\t{}\t{}",
@@ -107,7 +125,7 @@ pub(super) fn build(
                 status.required,
                 rounds.map(|v| v.to_string()).unwrap_or_default(),
                 metrics[i].hours,
-                blocked.into_iter().collect::<Vec<_>>().join(" | ")
+                blocked.iter().cloned().collect::<Vec<_>>().join(" | ")
             )?;
         }
     }
