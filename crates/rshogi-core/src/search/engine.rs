@@ -1330,6 +1330,16 @@ impl Search {
         time_manager.set_previous_time_reduction(self.previous_time_reduction);
         // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
+        log::trace!(
+            target: "rshogi_core::search::time",
+            "event=init ply={} side={:?} remaining_ms={} increment_ms={} byoyomi_ms={} optimum_ms={} maximum_ms={} minimum_ms={} network_delay_ms={} network_delay2_ms={} slow_mover={} round_up={} ponder={} usi_ponder={} stochastic_ponder={}",
+            ply, pos.side_to_move(), limits.time_left(pos.side_to_move()),
+            limits.increment(pos.side_to_move()), limits.byoyomi_time(pos.side_to_move()),
+            time_manager.optimum(), time_manager.maximum(), time_manager.minimum(),
+            self.time_options.network_delay, self.time_options.network_delay2,
+            self.time_options.slow_mover, self.time_options.round_up_to_full_second,
+            limits.ponder, self.time_options.usi_ponder, self.time_options.stochastic_ponder,
+        );
 
         // NUMA が有効なら main スレッド (go を呼んだスレッド) も thread 0 の node に固定し、
         // go を抜けるときに元の CPU 集合へ戻す。写しの用意は固定より前に済ませ、失敗しても
@@ -1916,6 +1926,18 @@ where
 
         // メインのみ: if (!mainThread) continue; に対応する部分はループ末尾で処理
 
+        let iteration_start = (is_main
+            && log::log_enabled!(target: "rshogi_core::search::time", log::Level::Trace))
+        .then(|| time_manager.elapsed());
+        if let Some(elapsed) = iteration_start {
+            log::trace!(
+                target: "rshogi_core::search::time",
+                "event=iteration_start depth={} elapsed_ms={} effective_elapsed_ms={} increase_depth={} deadline_ms={}",
+                depth, elapsed, time_manager.elapsed_from_ponderhit(), inc_depth,
+                time_manager.search_end(),
+            );
+        }
+
         let search_depth = depth;
         worker.state.root_depth = search_depth;
         worker.state.sel_depth = 0;
@@ -2025,6 +2047,17 @@ where
         // MultiPVループ完了後の最終ソート
         if !worker.state.abort && effective_multi_pv > 1 {
             worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
+        }
+
+        if let Some(start) = iteration_start {
+            let elapsed = time_manager.elapsed();
+            log::trace!(
+                target: "rshogi_core::search::time",
+                "event=iteration_end depth={} elapsed_ms={} effective_elapsed_ms={} iteration_ms={} aborted={} main_nodes={} best_move={} score_raw={}",
+                depth, elapsed, time_manager.elapsed_from_ponderhit(),
+                elapsed.saturating_sub(start), worker.state.abort, worker.state.nodes,
+                worker.state.root_moves[0].mv().to_usi(), worker.state.root_moves[0].score.raw(),
+            );
         }
 
         // メインのみ: info出力（GUI詰まり防止）
