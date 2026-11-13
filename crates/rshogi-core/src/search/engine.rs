@@ -1880,6 +1880,9 @@ where
     for depth in (worker.state.completed_depth + 1)..=max_depth {
         time_manager.publish_nodes(worker.state.nodes);
         if worker.state.abort || time_manager.stop_requested() {
+            if is_main {
+                time_manager.trace_external_stop();
+            }
             worker.state.abort = true;
             break;
         }
@@ -1999,6 +2002,9 @@ where
                     || time_manager.node_limit_reached(limits, worker.state.nodes)
                     || time_manager.stop_requested()
                 {
+                    if is_main {
+                        time_manager.trace_external_stop();
+                    }
                     worker.state.abort = true;
                     pv_aborted = true;
                     depth_aborted = true;
@@ -2281,6 +2287,7 @@ fn wait_for_search_release(
             }
             thread::sleep(Duration::from_millis(1));
         }
+        time_manager.trace_external_stop();
     }
 }
 /// 公開用 PV の合法な接頭列の長さ。元の局面と探索用 PV は変更しない。

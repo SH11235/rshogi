@@ -901,6 +901,14 @@ impl TimeManagement {
         );
     }
 
+    pub(crate) fn trace_external_stop(&self) {
+        if log::log_enabled!(target: "rshogi_core::search::time", log::Level::Trace)
+            && self.stop_requested()
+        {
+            self.trace_timing("stop", "external", self.elapsed());
+        }
+    }
+
     /// 外部から停止を要求
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);

@@ -62,6 +62,9 @@ fn check_abort_slow(
     time_manager.publish_nodes(st.nodes);
     // 外部からの停止要求
     if time_manager.stop_requested() {
+        if ctx.thread_id == 0 {
+            time_manager.trace_external_stop();
+        }
         #[cfg(debug_assertions)]
         eprintln!("check_abort: stop requested");
         st.abort = true;

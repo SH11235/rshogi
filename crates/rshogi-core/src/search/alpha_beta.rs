@@ -1109,6 +1109,9 @@ impl SearchWorker {
         time_manager.publish_nodes(self.state.nodes);
         // 外部からの停止要求
         if time_manager.stop_requested() {
+            if self.thread_id == 0 {
+                time_manager.trace_external_stop();
+            }
             #[cfg(debug_assertions)]
             eprintln!("check_abort: stop requested");
             self.state.abort = true;
