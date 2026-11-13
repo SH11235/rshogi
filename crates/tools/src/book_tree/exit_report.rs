@@ -323,7 +323,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
-    // 伝播の切れ目の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (同じ行で同じ局面は 1 回)。
+    // bridge の値は局面の手番側を RAMU としたグラフの値なので、同じ側の walk の重みと手順だけを使う。
     // 手順は bridge の表の局面の分だけ持つ (walk の全局面の手順は持たない)。
     let mut bridge_keys = BTreeSet::new();
     if let Some(bridge) = &args.bridge {
@@ -365,7 +365,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let mut seen = BTreeSet::new();
         // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
-            if bridge_keys.contains(key) && seen.insert(key) {
+            if super::model::side(key) == side && bridge_keys.contains(key) && seen.insert(key) {
                 let entry = through
                     .entry((key.clone(), side.to_owned()))
                     .or_insert_with(|| (0.0, moves[..i].to_vec()));
@@ -417,11 +417,9 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             let gap: i32 = column(row, "gap")?.parse().context("gap が不正です")?;
             let key = column(row, "key")?;
             if gap < args.gap_line
-                || ["b", "w"].iter().all(|s| {
-                    through
-                        .get(&(key.to_owned(), (*s).to_owned()))
-                        .is_none_or(|(weight, _)| *weight < args.gap_min_weight)
-                })
+                || through
+                    .get(&(key.to_owned(), side(key).to_owned()))
+                    .is_none_or(|(weight, _)| *weight < args.gap_min_weight)
             {
                 return Ok(());
             }
@@ -446,37 +444,35 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             table_move_number(row, key)?;
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
-            for own in ["b", "w"] {
-                let Some((weight, path)) = through.get(&(key.to_owned(), own.to_owned())) else {
-                    continue;
-                };
-                if *weight < args.gap_min_weight {
-                    continue;
-                }
-                let replaced = (own == side).then(|| gaps.get(key)).flatten();
-                if replaced.is_none() && args.meets(Some(bridged), own) != Some(false) {
-                    continue;
-                }
-                let mut extra = vec![
-                    ("main", column(row, "main")?.to_owned()),
-                    ("plain_black", column(row, "plain_black")?.to_owned()),
-                ];
-                if let Some((_, best, best_value)) = replaced {
-                    extra.push(("best", best.clone()));
-                    extra.push(("best_value_black", best_value.clone()));
-                }
-                items.push(Item {
-                    class: Class::Gap,
-                    side: own.to_owned(),
-                    move_number: Some(path.len() + 1),
-                    weight: *weight,
-                    value_black: Some(bridged),
-                    kind: String::new(),
-                    key: key.to_owned(),
-                    moves: Some(path.clone()),
-                    extra,
-                });
+            let Some((weight, path)) = through.get(&(key.to_owned(), side.to_owned())) else {
+                return Ok(());
+            };
+            if *weight < args.gap_min_weight {
+                return Ok(());
             }
+            let replaced = gaps.get(key);
+            if replaced.is_none() && args.meets(Some(bridged), side) != Some(false) {
+                return Ok(());
+            }
+            let mut extra = vec![
+                ("main", column(row, "main")?.to_owned()),
+                ("plain_black", column(row, "plain_black")?.to_owned()),
+            ];
+            if let Some((_, best, best_value)) = replaced {
+                extra.push(("best", best.clone()));
+                extra.push(("best_value_black", best_value.clone()));
+            }
+            items.push(Item {
+                class: Class::Gap,
+                side: side.to_owned(),
+                move_number: Some(path.len() + 1),
+                weight: *weight,
+                value_black: Some(bridged),
+                kind: String::new(),
+                key: key.to_owned(),
+                moves: Some(path.clone()),
+                extra,
+            });
             Ok(())
         })?;
     }

@@ -40,14 +40,23 @@ fn walk_line(side: &str, stop: &str, weight: f64, moves: &[&str]) -> String {
 }
 
 fn run_report(d: &TempDir, walk: &[String], extra: &[&str]) -> (String, String, String) {
-    let master = d.path().join("moves.tsv");
     let rows = [
         master_row(&[], "7g7f", "60", "tree:3"),
         master_row(&["7g7f", "3c3d"], "2g2f", "40", "tree:2"),
         master_row(&["7g7f", "3c3d", "2g2f"], "8c8d", "-90", "single"),
         master_row(&["2g2f"], "8c8d", "10", "single"),
     ];
-    std::fs::write(&master, format_master(&rows)).unwrap();
+    run_report_with_rows(d, walk, extra, &rows)
+}
+
+fn run_report_with_rows(
+    d: &TempDir,
+    walk: &[String],
+    extra: &[&str],
+    rows: &[super::super::master_table::Row],
+) -> (String, String, String) {
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(rows)).unwrap();
     let walk_path = d.path().join("walk.tsv");
     std::fs::write(&walk_path, format!("{WALK_HEADER}\n{}\n", walk.join("\n"))).unwrap();
     let table = d.path().join("report.tsv");
@@ -593,7 +602,7 @@ fn short_kif_writes_same_square_promotion_drop_and_promoted_pieces() {
 #[test]
 fn gap_at_walk_stop_position_uses_the_row_weight() {
     let d = TempDir::new().unwrap();
-    let exit = ["7g7f", "3c3d", "2g2f"];
+    let exit = ["7g7f", "3c3d"];
     let walk = [walk_line("b", "max", 0.02, &exit)];
     let key = key_after(&exit);
     let bridge = d.path().join("bridge.tsv");
@@ -601,7 +610,7 @@ fn gap_at_walk_stop_position_uses_the_row_weight() {
         &bridge,
         format!(
             "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\tweight\n\
-             {key}\t4\tw\t8c8d\t0\t-10\t10\t\t\t0\t10\t\n"
+             {key}\t3\tb\t2g2f\t60\t10\t50\t\t\t60\t10\t\n"
         ),
     )
     .unwrap();
@@ -622,27 +631,29 @@ fn gap_at_walk_stop_position_uses_the_row_weight() {
         ],
     );
     assert!(stdout.contains("gap=1"), "{stdout}");
-    assert!(table.contains("gap\tb\tw\t4\t0.02\t+10\t\t届かない"), "{table}");
+    assert!(table.contains("gap\tb\tb\t3\t0.02\t+10\t\t届かない"), "{table}");
 }
 
 #[test]
-fn bridge_targets_and_weights_follow_each_walk_side() {
+fn bridge_gaps_use_only_the_walk_side_matching_the_turn() {
     let d = TempDir::new().unwrap();
-    let path = ["2g2f"];
+    let path = ["7g7f", "3c3d", "2g2f"];
+    let opposite_path = ["2g2f", "3c3d", "7g7f"];
+    assert_eq!(key_after(&path), key_after(&opposite_path));
     let key = key_after(&path);
     let bridge = d.path().join("bridge.tsv");
     let audit = d.path().join("audit.tsv");
     std::fs::write(&audit, "key\tgap\n").unwrap();
-    for (value, expected_side, weight) in [(82, "w", "0.003"), (41, "b", "0.0095")] {
+    for (value, expected_count) in [(82, 1), (80, 1), (79, 0), (41, 0)] {
         std::fs::write(
             &bridge,
             format!(
-                "key\tply\tside\tmain\tplain_black\tbridged_black\n{key}\t2\tw\t8c8d\t0\t{value}\n"
+                "key\tply\tside\tmain\tplain_black\tbridged_black\n{key}\t4\tw\t8c8d\t0\t{value}\n"
             ),
         )
         .unwrap();
         let walk = [
-            walk_line("b", "out", 0.0095, &path),
+            walk_line("b", "out", 0.0095, &opposite_path),
             walk_line("w", "own", 0.003, &path),
         ];
         let (_, table, md) = run_report(
@@ -660,19 +671,17 @@ fn bridge_targets_and_weights_follow_each_walk_side() {
             .filter(|l| l.starts_with("gap\t"))
             .map(|l| l.split('\t').collect())
             .collect();
-        assert_eq!(gaps.len(), 1, "{table}");
-        assert_eq!((gaps[0][1], gaps[0][2], gaps[0][4]), (expected_side, "w", weight));
-        assert!(
-            md.contains(if expected_side == "b" {
-                "RAMU が先手 / 後手 2 手目"
-            } else {
-                "RAMU が後手 / 後手 2 手目"
-            }),
-            "{md}"
-        );
+        assert_eq!(gaps.len(), expected_count, "{table}");
+        if expected_count == 1 {
+            assert_eq!((gaps[0][1], gaps[0][2], gaps[0][4]), ("w", "w", "0.003"));
+            assert_eq!(gaps[0][10], path.join(" "));
+            assert!(md.contains("RAMU が後手 / 後手 4 手目"), "{md}");
+        }
     }
+    std::fs::write(&audit, format!("key\tgap\tbest\tbest_value_black\n{key}\t50\t3c3d\t10\n"))
+        .unwrap();
     let walk = [
-        walk_line("b", "out", 0.0006, &path),
+        walk_line("b", "out", 0.02, &path),
         walk_line("w", "own", 0.0006, &path),
     ];
     let (_, table, _) = run_report(
@@ -686,4 +695,87 @@ fn bridge_targets_and_weights_follow_each_walk_side() {
         ],
     );
     assert!(!table.lines().any(|l| l.starts_with("gap\t")), "{table}");
+}
+
+#[test]
+fn bridge_from_audit_uses_the_turn_side_graph_with_opponent_records() {
+    use super::super::audit::{AuditArgs, Fill, evaluate_for_side, opponent_replies, run};
+    use super::super::master_table::parse_master_rows;
+    use crate::book_backprop::DrawValues;
+
+    #[derive(Parser)]
+    struct AuditCli {
+        #[command(flatten)]
+        args: AuditArgs,
+    }
+
+    let d = TempDir::new().unwrap();
+    let path = ["7g7f"];
+    let key = key_after(&path);
+    let mut record = master_row(&["7g7f", "3c3d", "2g2f"], "3a4b", "200", "single");
+    record.set("role", "record".into());
+    let rows = [
+        master_row(&path, "3c3d", "50", "single"),
+        master_row(&["7g7f", "3c3d", "2g2f"], "8c8d", "-100", "single"),
+        record,
+    ];
+    let (positions, _) = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+    let records = opponent_replies(&rows, &["record"]).unwrap();
+    let draws = DrawValues {
+        black: -70,
+        white: 70,
+    };
+    let position = positions.keys().position(|k| k == &key).unwrap();
+    let black = evaluate_for_side(&positions, &records, draws, Fill::Bridge, "b").unwrap();
+    let white = evaluate_for_side(&positions, &records, draws, Fill::Bridge, "w").unwrap();
+    assert_eq!(black.values[position][0], Some(50));
+    assert_eq!(white.values[position][0], Some(-100));
+    let master = d.path().join("moves.tsv");
+    let audit = d.path().join("audit.tsv");
+    let bridge = d.path().join("bridge.tsv");
+    std::fs::write(&master, format_master(&rows)).unwrap();
+    let args = AuditCli::try_parse_from([
+        "test",
+        "--master",
+        master.to_str().unwrap(),
+        "--table",
+        audit.to_str().unwrap(),
+        "--bridge-table",
+        bridge.to_str().unwrap(),
+        "--bridge-replies",
+        "--opp-records",
+        "--threads",
+        "2",
+    ])
+    .unwrap()
+    .args;
+    run(args).unwrap();
+    let text = std::fs::read_to_string(&bridge).unwrap();
+    assert!(text.contains(&format!("{key}\t\tw\t3c3d\t50\t-100\t150")), "{text}");
+    let walk = [
+        walk_line("b", "stop", 0.02, &path),
+        walk_line("w", "stop", 0.003, &path),
+    ];
+    for (target, expected_count) in [("80", 1), ("101", 0)] {
+        let (_, table, _) = run_report_with_rows(
+            &d,
+            &walk,
+            &[
+                "--bridge",
+                bridge.to_str().unwrap(),
+                "--bridge-audit",
+                audit.to_str().unwrap(),
+                "--target-black",
+                "150",
+                "--target-white",
+                target,
+            ],
+            &rows,
+        );
+        let gaps: Vec<_> = table.lines().filter(|l| l.starts_with("gap\t")).collect();
+        assert_eq!(gaps.len(), expected_count, "{table}");
+        if expected_count == 1 {
+            assert!(gaps[0].starts_with("gap\tw\tw\t2\t0.003\t+100\t\t届かない"), "{table}");
+        }
+    }
 }
