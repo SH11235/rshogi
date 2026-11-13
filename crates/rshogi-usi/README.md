@@ -70,7 +70,8 @@ RUST_LOG=rshogi_core::search::time=trace rshogi-usi 2> time-trace.log
 `deadline_request` は終了予約の要求で、`reason` は目標超過 (`target`)・上限超過 (`maximum`)・
 ノード集中 (`nodes_effort`)・ponderhit 後の終了要求 (`ponderhit`) の区別です。
 `deadline` の `deadline_ms` は丸め後の終了予定で、`stop` はその期限や反復境界の閾値等による停止判定です。
-外部の stop 要求は `reason=external` として記録します。同じ要求が複数の判定箇所で記録されることもあります。
+stop 要求は `reason=external` として記録します。組み込みの解析セッションでは解析予算の終了もこの理由に含みます。
+同じ要求が複数の判定箇所で記録されることもあります。
 要求が ponder 中なら直ちに期限を作らず、hit 後に予約します。目標と上限を超えたことが、
 同じ時刻の即停止を意味するわけではありません。
 
