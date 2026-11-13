@@ -4,8 +4,11 @@
 //! 定跡の値は相手の手も定跡の手だけで伝播しているので、相手が定跡に無い手で別の定跡の局面へ合流すると、
 //! 手前の値が実際より高く見えていることがある。その相手の手を読み足す局面 (掘る局面) を出す。
 
-use super::audit::{Flips, evaluate_with, reject_same_file, report_direct_lookup};
-use super::master_table::{MasterPosition, read_master};
+use super::audit::{
+    Fill, Flips, add_opponent_reply, evaluate_for_side, evaluate_with, reject_same_file,
+    report_direct_lookup,
+};
+use super::master_table::{MasterPosition, positions_from_rows, read_rows};
 use super::reply_graph::{
     BookIndex, HIRATE_KEY, Preset, SideArg, build_filtered, selected_moves, thread_pool,
 };
@@ -15,7 +18,7 @@ use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -50,6 +53,15 @@ pub(super) struct RejoinArgs {
     /// 破れる局面) の一覧 (TSV: kind・key・保存されている向きの値・反転した向きの値) の出力先
     #[arg(long, value_name = "PATH", requires = "direct_lookup")]
     direct_lookup_table: Option<PathBuf>,
+    /// 相手の手番では、読みの値のある record も点検と同じ規則で伝播に使う
+    #[arg(long)]
+    opp_records: bool,
+    /// 相手の手番では、読みの値のある bench も点検と同じ規則で伝播に使う
+    #[arg(long)]
+    opp_bench: bool,
+    /// 元データに無い相手の局面を点検と同じ規則で補う (反転した局面へ辺を張らない)
+    #[arg(long)]
+    bridge_replies: bool,
     #[command(flatten)]
     weight: WeightArgs,
     /// スレッド数 (0 = 全コア)。結果はスレッド数によらない
@@ -204,14 +216,34 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
         inputs.push(("--table", args.table.as_path()));
         reject_same_file(table, &inputs)?;
     }
-    let (positions, _) = read_master(&args.master)?;
     let draws = DrawValues {
         black: args.draw_value_black,
         white: args.draw_value_white,
     };
-    let (values, stats) =
-        evaluate_with(&positions, draws, Flips::joined(args.direct_lookup), None)?;
-    report_direct_lookup(&stats, args.direct_lookup_table.as_deref())?;
+    let roles: Vec<_> = [(args.opp_records, "record"), (args.opp_bench, "bench")]
+        .into_iter()
+        .filter_map(|(on, role)| on.then_some(role))
+        .collect();
+    let enhanced = args.bridge_replies || !roles.is_empty();
+    let mut records = BTreeMap::new();
+    let reader = std::io::BufReader::new(std::fs::File::open(&args.master)?);
+    let (positions, _) = positions_from_rows(read_rows(reader)?.map(|entry| {
+        let (at, row) = entry?;
+        add_opponent_reply(&mut records, &row, &roles)?;
+        Ok((at, row))
+    }))?;
+    ensure!(
+        !enhanced || args.direct_lookup_table.is_none(),
+        "--opp-records・--opp-bench・--bridge-replies は反転した局面へ辺を張らないので --direct-lookup-table は使いません"
+    );
+    let values = if enhanced {
+        None
+    } else {
+        let (values, stats) =
+            evaluate_with(&positions, draws, Flips::joined(args.direct_lookup), None)?;
+        report_direct_lookup(&stats, args.direct_lookup_table.as_deref())?;
+        Some(values)
+    };
     let freq = args.weight.opp_freq.as_deref().map(BookDb::read).transpose()?;
     let index = BookIndex::new(&positions)?;
     let weight_options = args.weight.options();
@@ -236,8 +268,34 @@ fn run_from(args: RejoinArgs, start: &str) -> Result<()> {
                 line: args.line,
                 min_weight: args.weight.min_weight,
             };
-            let (mut rejoins, mut summary) =
-                find_rejoins(&index, &values, query, weights.as_ref(), freq.as_ref())?;
+            let evaluated = if enhanced {
+                Some(evaluate_for_side(
+                    &positions,
+                    &records,
+                    draws,
+                    if args.bridge_replies {
+                        Fill::Bridge
+                    } else {
+                        Fill::Off
+                    },
+                    side,
+                )?)
+            } else {
+                None
+            };
+            let values = evaluated
+                .as_ref()
+                .map(|v| &v.values)
+                .or(values.as_ref())
+                .context("内部エラー: 伝播値がありません")?;
+            let (mut rejoins, mut summary) = find_rejoins(
+                &index,
+                values,
+                query,
+                weights.as_ref(),
+                freq.as_ref(),
+                evaluated.as_ref().map(|v| &v.replies),
+            )?;
             if weights.is_some() {
                 let before = rejoins.len();
                 rejoins.retain(|r| r.weight.unwrap_or(0.0) >= args.weight.min_weight);
@@ -296,6 +354,7 @@ pub(super) fn find_rejoins(
     query: Query<'_>,
     weights: Option<&HashMap<String, f64>>,
     freq: Option<&BookDb>,
+    replies: Option<&BTreeMap<String, BTreeSet<String>>>,
 ) -> Result<(Vec<Rejoin>, RejoinSummary)> {
     let Query {
         side,
@@ -356,7 +415,9 @@ pub(super) fn find_rejoins(
             let counts = freq.and_then(|f| f.entries.get(&dig));
             for reply in graph.edges(p) {
                 let rejoin_move = reply.mv.to_usi();
-                if in_book.contains(rejoin_move.as_str()) {
+                if in_book.contains(rejoin_move.as_str())
+                    || replies.and_then(|r| r.get(&dig)).is_some_and(|r| r.contains(&rejoin_move))
+                {
                     continue;
                 }
                 summary.rejoin_moves += 1;
@@ -527,6 +588,7 @@ fn format_summary(side: &str, summary: &RejoinSummary, line: i32, rejoins: &[Rej
 
 #[cfg(test)]
 mod tests {
+    use super::super::master_table::read_master;
     use super::super::reply_graph::fixture::{ROOT, after, master_text};
     use super::*;
 
@@ -572,6 +634,9 @@ mod tests {
             draw_value_white: 0,
             direct_lookup: false,
             direct_lookup_table: None,
+            opp_records: false,
+            opp_bench: false,
+            bridge_replies: false,
             weight: WeightArgs {
                 opp_freq,
                 min_games: 3,
@@ -803,24 +868,24 @@ mod tests {
             min_weight,
         };
         let (boundary, summary) =
-            find_rejoins(&index, &values, query(1.0), Some(&weights), None).unwrap();
+            find_rejoins(&index, &values, query(1.0), Some(&weights), None, None).unwrap();
         assert_eq!(boundary.len(), 1);
         assert_eq!(summary.pruned_positions, 0);
         weights.insert(a.clone(), 0.0);
         let (opponent_low, summary) =
-            find_rejoins(&index, &values, query(0.5), Some(&weights), None).unwrap();
+            find_rejoins(&index, &values, query(0.5), Some(&weights), None, None).unwrap();
         assert_eq!(opponent_low.len(), 1);
         assert_eq!(opponent_low[0].rejoin, q);
         assert_eq!(summary.pruned_positions, 0);
         weights.insert(q.clone(), 0.1);
         let (rejoin_low, summary) =
-            find_rejoins(&index, &values, query(0.5), Some(&weights), None).unwrap();
+            find_rejoins(&index, &values, query(0.5), Some(&weights), None, None).unwrap();
         assert_eq!(rejoin_low, opponent_low);
         assert_eq!(summary.pruned_positions, 1);
-        let no_freq = find_rejoins(&index, &values, query(2.0), None, None).unwrap();
-        assert_eq!(no_freq, find_rejoins(&index, &values, query(0.0), None, None).unwrap());
+        let no_freq = find_rejoins(&index, &values, query(2.0), None, None, None).unwrap();
+        assert_eq!(no_freq, find_rejoins(&index, &values, query(0.0), None, None, None).unwrap());
         let (pruned_root, summary) =
-            find_rejoins(&index, &values, query(2.0), Some(&weights), None).unwrap();
+            find_rejoins(&index, &values, query(2.0), Some(&weights), None, None).unwrap();
         assert!(pruned_root.is_empty());
         assert_eq!(summary.pruned_positions, 1);
         assert_eq!(summary.own_positions, 1);
@@ -845,7 +910,7 @@ mod tests {
             line: 1,
             min_weight: 0.0,
         };
-        let (found, summary) = find_rejoins(&index, &values, query, None, None).unwrap();
+        let (found, summary) = find_rejoins(&index, &values, query, None, None, None).unwrap();
         assert!(found.is_empty());
         // 値の無い自分の手は根の 5i4h と、戻った先の 2 局面の main。5i4h の先は値が無いので相手の手を見ず、
         // 5i6h の後の相手の 5a4b で戻る局面は main の値が無い。
@@ -873,10 +938,53 @@ mod tests {
             line: 40,
             min_weight: 0.0,
         };
-        let (found, _) = find_rejoins(&index, &values, query(Preset::Random), None, None).unwrap();
+        let (found, _) =
+            find_rejoins(&index, &values, query(Preset::Random), None, None, None).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].mv.as_str(), found[0].role, found[0].drop()), ("5i6h", "alt", 100));
-        let (found, _) = find_rejoins(&index, &values, query(Preset::Default), None, None).unwrap();
+        let (found, _) =
+            find_rejoins(&index, &values, query(Preset::Default), None, None, None).unwrap();
         assert!(found.is_empty());
+    }
+    #[test]
+    fn opponent_read_replies_share_audit_values_and_leave_other_holes_visible() {
+        for role in ["record", "bench"] {
+            for (enabled, bridge, main) in [
+                (false, false, true),
+                (true, false, true),
+                (true, true, true),
+                (true, false, false),
+                (true, true, false),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut args = args(dir.path(), 40, None);
+                let dig = after(ROOT, &["5i4h"]);
+                let known = after(&dig, &["5a4b"]);
+                let outside = after(&dig, &["5a6b"]);
+                let mut rows = vec![
+                    (ROOT, "5i4h", "main", "100"),
+                    (&dig, "5a4b", role, "20"),
+                    (&dig, "5a6b", role, ""),
+                    (&known, "4h3h", "main", "0"),
+                    (&outside, "4h3h", "main", "-200"),
+                ];
+                if main {
+                    rows.push((&dig, "5a5b", "main", "-100"));
+                }
+                std::fs::write(&args.master, master_text(&rows)).unwrap();
+                args.opp_records = enabled && role == "record";
+                args.opp_bench = enabled && role == "bench";
+                args.bridge_replies = bridge;
+                let table = args.table.clone();
+                run_from(args, ROOT).unwrap();
+                let table = std::fs::read_to_string(table).unwrap();
+                let rows: Vec<Vec<_>> =
+                    table.lines().skip(1).map(|l| l.split('\t').collect()).collect();
+                assert_eq!(rows.iter().any(|r| r[7] == "5a4b"), !enabled, "{table}");
+                let remaining = rows.iter().find(|r| r[7] == "5a6b").unwrap();
+                assert_eq!(remaining[5], if enabled { "0" } else { "100" }, "{table}");
+                assert_eq!(remaining[10], "-200", "{table}");
+            }
+        }
     }
 }

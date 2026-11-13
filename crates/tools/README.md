@@ -139,3 +139,5 @@ NNUE を使った性能比較では `--nnue-file` と必要な routing を明示
   暗号 provider は `ring` で、ビルドには C コンパイラが必要です（CMake / NASM は不要）。
 - [コマンド例集](examples/README.md)、[教師データの追加パイプライン](docs/training_data_pipeline.md)。
 - CSA 接続クライアントは別 crate です。[csa_client の手順](../rshogi-csa-client/examples/README.md)を参照してください。
+
+`master rejoin` は `--opp-records --opp-bench --bridge-replies` で点検と同じ相手の手と伝播を使えます。`master exit-report` の切れ目は、walk の RAMU の側が局面の手番と一致する組だけで重みと目標を判定します。

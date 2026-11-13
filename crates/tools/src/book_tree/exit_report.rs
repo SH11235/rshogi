@@ -323,7 +323,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
-    // 伝播の切れ目の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (同じ行で同じ局面は 1 回)。
+    // bridge の値は局面の手番側を RAMU としたグラフの値なので、同じ側の walk の重みと手順だけを使う。
     // 手順は bridge の表の局面の分だけ持つ (walk の全局面の手順は持たない)。
     let mut bridge_keys = BTreeSet::new();
     if let Some(bridge) = &args.bridge {
@@ -332,7 +332,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             Ok(())
         })?;
     }
-    let mut through: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
+    let mut through: BTreeMap<(String, String), (f64, Vec<String>)> = BTreeMap::new();
     let rejoins = match &args.rejoin {
         Some(path) => rejoin_rows(&args, path)?,
         None => Vec::new(),
@@ -365,9 +365,10 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let mut seen = BTreeSet::new();
         // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
-            if bridge_keys.contains(key) && seen.insert(key) {
-                let entry =
-                    through.entry(key.clone()).or_insert_with(|| (0.0, moves[..i].to_vec()));
+            if super::model::side(key) == side && bridge_keys.contains(key) && seen.insert(key) {
+                let entry = through
+                    .entry((key.clone(), side.to_owned()))
+                    .or_insert_with(|| (0.0, moves[..i].to_vec()));
                 entry.0 += weight;
             }
         }
@@ -416,7 +417,9 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             let gap: i32 = column(row, "gap")?.parse().context("gap が不正です")?;
             let key = column(row, "key")?;
             if gap < args.gap_line
-                || through.get(key).is_none_or(|(weight, _)| *weight < args.gap_min_weight)
+                || through
+                    .get(&(key.to_owned(), side(key).to_owned()))
+                    .is_none_or(|(weight, _)| *weight < args.gap_min_weight)
             {
                 return Ok(());
             }
@@ -432,12 +435,6 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         })?;
         read_tsv(bridge, |row| {
             let key = column(row, "key")?;
-            let Some((weight, path)) = through.get(key) else {
-                return Ok(());
-            };
-            if *weight < args.gap_min_weight {
-                return Ok(());
-            }
             let side = column(row, "side")?;
             ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
             ensure!(
@@ -447,6 +444,12 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             table_move_number(row, key)?;
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
+            let Some((weight, path)) = through.get(&(key.to_owned(), side.to_owned())) else {
+                return Ok(());
+            };
+            if *weight < args.gap_min_weight {
+                return Ok(());
+            }
             let replaced = gaps.get(key);
             if replaced.is_none() && args.meets(Some(bridged), side) != Some(false) {
                 return Ok(());
@@ -682,12 +685,12 @@ fn markdown(
         writeln!(out, "## 2b. 塞ぎたい出口: 伝播の切れ目 (`master audit --bridge-replies`)\n")?;
         writeln!(
             out,
-            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。局面は RAMU の手番で、main はそこで指す手。値は main の値 (補わない → 補う)。\n",
+            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。目標と重みは RAMU の側ごとに判定し、main はその局面で手番の側が指す手。値は main の値 (補わない → 補う)。\n",
             args.gap_line, args.gap_min_weight
         )?;
         writeln!(
             out,
-            "| 局面 (RAMU の手番) | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
+            "| RAMU の側 / 局面 | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
         )?;
         for r in items.iter().filter(|i| i.class == Class::Gap) {
             let get =
@@ -701,7 +704,8 @@ fn markdown(
             };
             writeln!(
                 out,
-                "| {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
+                "| RAMU が{} / {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
+                side_name(&r.side),
                 position_text(r),
                 r.weight,
                 kif_last(path, get("main").unwrap_or_default())?,
