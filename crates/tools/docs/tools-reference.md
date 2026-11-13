@@ -5,6 +5,8 @@
 全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
 `book_mine master rejoin` の応手集約とメモリの扱いは[詳細](book_mine.md#master-rejoin-相手の手で定跡に戻ると値が下がる局面)を参照してください。
 
+自前の定跡と外部定跡の最善・指定点差以内の手の突き合わせは [`book_mine master compare`](book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) を使います。
+
 ## 教師データの生成・変換・加工
 
 | ツール | 用途 |

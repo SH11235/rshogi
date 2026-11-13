@@ -434,6 +434,24 @@ pub(super) fn walk_side_with(
     tagger: &mut dyn Tagger,
     options: WalkOptions,
 ) -> Result<Vec<Row>> {
+    walk_using(
+        &mut |key| Ok(positions.get(key).map(|position| position.moves[0].mv.clone())),
+        src,
+        side,
+        from,
+        tagger,
+        options,
+    )
+}
+
+fn walk_using(
+    own_move: &mut dyn FnMut(&str) -> Result<Option<String>>,
+    src: &mut Sources,
+    side: &'static str,
+    from: &WalkFrom,
+    tagger: &mut dyn Tagger,
+    options: WalkOptions,
+) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     type Layer = BTreeMap<(String, u32), (f64, Vec<String>)>;
     let mut layer: Layer = BTreeMap::from([(
@@ -483,9 +501,9 @@ pub(super) fn walk_side_with(
             let own = black_to_move(&key) == (side == "b");
             if own {
                 let mv = match from.overrides.get(&key) {
-                    Some(mv) => mv,
-                    None => match positions.get(&key) {
-                        Some(position) => &position.moves[0].mv,
+                    Some(mv) => mv.clone(),
+                    None => match own_move(&key)? {
+                        Some(mv) => mv,
                         None => {
                             let mut row = stop(src, Stop::Own, weight)?;
                             if let Some(book) = src.book.as_mut() {
@@ -497,9 +515,9 @@ pub(super) fn walk_side_with(
                         }
                     },
                 };
-                let child = advance(&key, mv)?;
-                let child_tag = tagger.step(tag, &key, mv, &child)?;
-                put((child, child_tag), weight, &path, mv);
+                let child = advance(&key, &mv)?;
+                let child_tag = tagger.step(tag, &key, &mv, &child)?;
+                put((child, child_tag), weight, &path, &mv);
                 continue;
             }
             let Some(moves) = opponent_moves(&key, src, options.opp)? else {
@@ -951,3 +969,5 @@ pub(super) fn queue_id(tag: &str, ply: usize, key: &str, own: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(key));
     format!("{tag}_{ply}_{}_{own}", &digest[..16])
 }
+
+pub(super) mod compare;
