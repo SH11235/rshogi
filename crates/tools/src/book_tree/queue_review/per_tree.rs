@@ -182,21 +182,16 @@ pub(super) fn table(
     continuations: Option<&not_ready::Continuations>,
 ) -> Result<Vec<u8>> {
     let mut bytes = b"phase\tbox\tid\town\tpriority\tsource\tremaining\tcumulative\trate\thours\tcutoff_hours\tover\n".to_vec();
-    for ((b, metric), status) in boxes.iter().zip(metrics).zip(statuses) {
+    for (i, ((b, metric), status)) in boxes.iter().zip(metrics).zip(statuses).enumerate() {
         append(&mut bytes, "before", b, metric, before(b, status, args.tree_size))?;
-        let named = format!("{}_{}.jsonl", args.prefix, b.name);
-        let reranked = format!("{}_rerank_{}.jsonl", args.prefix, b.name);
-        let continued = format!("{}_not_ready_{}.jsonl", args.prefix, b.name);
         let payloads = plan
             .into_iter()
-            .flat_map(|p| p.outputs.iter().zip(&p.payloads))
-            .chain(rerank.into_iter().flat_map(|r| r.outputs.iter().zip(&r.payloads)))
-            .chain(continuations.into_iter().flat_map(|c| c.outputs.iter().zip(&c.payloads)));
+            .flat_map(|p| p.destinations.iter().zip(&p.payloads))
+            .chain(rerank.into_iter().flat_map(|r| r.destinations.iter().zip(&r.payloads)))
+            .chain(continuations.into_iter().flat_map(|c| c.destinations.iter().zip(&c.payloads)));
         let mut additions = Vec::new();
-        for (path, payload) in payloads {
-            if path.file_name().is_some_and(|n| {
-                n == named.as_str() || n == reranked.as_str() || n == continued.as_str()
-            }) {
+        for (destination, payload) in payloads {
+            if *destination == Some(i) {
                 for line in payload.split(|&c| c == b'\n').filter(|line| !line.is_empty()) {
                     additions.push(serde_json::from_slice(line)?);
                 }

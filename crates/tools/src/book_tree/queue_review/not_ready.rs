@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct Continuations {
     pub outputs: Vec<PathBuf>,
     pub payloads: Vec<Vec<u8>>,
+    pub destinations: Vec<Option<usize>>,
 }
 
 pub(super) fn build(
@@ -11,6 +12,7 @@ pub(super) fn build(
     metrics: &[BoxMetrics],
     statuses: &[Vec<per_tree::Status>],
     inputs: &mut Vec<PathBuf>,
+    plan: Option<&plan::Plan>,
 ) -> Result<Continuations> {
     let mut sent = BTreeSet::new();
     for path in &args.not_ready_sent {
@@ -104,6 +106,11 @@ pub(super) fn build(
                     .iter()
                     .all(|own| eligible.contains(&(status.id.as_str(), own.as_str())))
                 {
+                    ensure!(
+                        !plan.is_some_and(|p| p.contains_id(&status.id)),
+                        "id={} が --plan-out と --not-ready-out の両方に出ます。計画を送信して受付の写しを更新してから続きの候補を作ってください",
+                        status.id
+                    );
                     let mut raw = q.raw.clone();
                     raw["opts"]["rounds"] = Value::from(6);
                     if !rows[i].iter().any(|r: &Value| r["id"] == raw["id"]) {
@@ -132,7 +139,8 @@ pub(super) fn build(
     let mut outputs = vec![args.not_ready_table.clone().context("not-ready-table が必要です")?];
     let mut payloads = vec![table];
     let dir = args.not_ready_out.as_ref().context("not-ready-out が必要です")?;
-    for (b, rows) in boxes.iter().zip(rows) {
+    let mut destinations = vec![None];
+    for (i, (b, rows)) in boxes.iter().zip(rows).enumerate() {
         outputs.push(dir.join(format!("{}_not_ready_{}.jsonl", args.prefix, b.name)));
         let mut bytes = Vec::new();
         for row in rows {
@@ -140,6 +148,11 @@ pub(super) fn build(
             writeln!(bytes)?;
         }
         payloads.push(bytes);
+        destinations.push(Some(i));
     }
-    Ok(Continuations { outputs, payloads })
+    Ok(Continuations {
+        outputs,
+        payloads,
+        destinations,
+    })
 }

@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct Plan {
     pub outputs: Vec<PathBuf>,
     pub payloads: Vec<Vec<u8>>,
+    pub destinations: Vec<Option<usize>>,
     pub remaining: Vec<f64>,
     /// 台ごとの priority ごとの見込み量。serve は priority の小さい順に読むので、
     /// 木が締めまでに読めるかは自分の priority 以下の量で決まる。
@@ -11,6 +12,10 @@ pub(super) struct Plan {
     table: Vec<u8>,
 }
 impl Plan {
+    pub(super) fn contains_id(&self, id: &str) -> bool {
+        self.rows.iter().flatten().any(|row| row["id"].as_str() == Some(id))
+    }
+
     fn put(&mut self, i: usize, priority: u32, amount: f64) {
         self.remaining[i] += amount;
         *self.load[i].entry(priority).or_default() += amount;
@@ -170,6 +175,7 @@ pub(super) fn build<'a>(
     let mut plan = Plan {
         outputs: Vec::new(),
         payloads: Vec::new(),
+        destinations: Vec::new(),
         remaining: metrics.iter().map(|m| m.remaining).collect(),
         load: boxes
             .iter()
@@ -607,8 +613,10 @@ pub(super) fn build<'a>(
     }
     plan.outputs.push(dir.join(format!("{}_plan.tsv", args.prefix)));
     plan.payloads.push(std::mem::take(&mut plan.table));
+    plan.destinations.push(None);
     plan.outputs.push(dir.join(format!("{}_bands.tsv", args.prefix)));
     plan.payloads.push(bands);
+    plan.destinations.push(None);
     for &i in &order {
         if plan.rows[i].is_empty() {
             continue;
@@ -620,6 +628,7 @@ pub(super) fn build<'a>(
         }
         plan.outputs.push(dir.join(format!("{}_{}.jsonl", args.prefix, boxes[i].name)));
         plan.payloads.push(bytes);
+        plan.destinations.push(Some(i));
     }
     files::guard(&plan.outputs, inputs, true)?;
     Ok(plan)

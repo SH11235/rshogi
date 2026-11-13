@@ -650,7 +650,16 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     let continuations = args
         .not_ready_out
         .as_ref()
-        .map(|_| not_ready::build(&args, &boxes, &metrics, statuses.as_ref().unwrap(), &mut inputs))
+        .map(|_| {
+            not_ready::build(
+                &args,
+                &boxes,
+                &metrics,
+                statuses.as_ref().unwrap(),
+                &mut inputs,
+                plan.as_ref(),
+            )
+        })
         .transpose()?;
     let tree_band = args
         .band_per_tree

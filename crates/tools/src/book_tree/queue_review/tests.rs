@@ -2865,6 +2865,7 @@ fn per_tree_rerank_payload_adds_partial_remaining_to_exact_priority() {
     let mut promoted = r;
     promoted["priority"] = json!(13);
     let rerank = rerank::Rerank {
+        destinations: vec![Some(0), None],
         outputs: vec![
             d.path().join("qrhold_rerank_a.jsonl"),
             d.path().join("qrhold_rerank-add.jsonl"),
@@ -3020,4 +3021,51 @@ fn not_ready_bw_requires_both_sides_to_be_candidates() {
             assert!(table.contains("手当て済み\t"), "{table}");
         }
     }
+}
+
+#[test]
+fn not_ready_rejects_plan_update_with_same_id_before_writing_outputs() {
+    let d = TempDir::new().unwrap();
+    let source = row("source", "7g7f");
+    let mut a = plan_args(d.path(), &[("a", vec![source.clone()])]);
+    a.not_ready_out = Some(d.path().join("nr"));
+    a.not_ready_table = Some(d.path().join("nr.tsv"));
+    status_file(&d.path().join("a"), &[status(&source, "NOT_READY", 0, 0)]);
+    let mut update = source;
+    update["game"] = json!([["8c8d", "2g2f"]]);
+    a.update = vec![input_rows(d.path(), "updates", &[update])];
+    let error = run_at(a, now(), &mut Vec::new()).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("id=source"), "{message}");
+    assert!(message.contains("--plan-out と --not-ready-out の両方"), "{message}");
+    for path in ["plan", "nr", "nr.tsv", "review.tsv", "boxes.tsv", "hold"] {
+        assert!(!d.path().join(path).exists(), "{path}");
+    }
+}
+
+#[test]
+fn per_tree_plan_and_continuations_keep_destinations_for_overlapping_box_names() {
+    let d = TempDir::new().unwrap();
+    let source = row("source", "7g7f");
+    let mut a = plan_args(d.path(), &[("a", vec![source.clone()]), ("not_ready_a", vec![])]);
+    a.box_rate = vec!["a=10".into(), "not_ready_a=1000".into()];
+    a.not_ready_out = Some(d.path().join("nr"));
+    a.not_ready_table = Some(d.path().join("nr.tsv"));
+    a.band_per_tree = true;
+    status_file(&d.path().join("a"), &[status(&source, "NOT_READY", 0, 0)]);
+    status_file(&d.path().join("not_ready_a"), &[]);
+    a.add = vec![input_rows(d.path(), "adds", &[row("new", "9g9f")])];
+    run_at(a, now(), &mut Vec::new()).unwrap();
+    assert_eq!(cargo_rows(d.path(), "not_ready_a")[0]["id"], "new");
+    let text = std::fs::read_to_string(d.path().join("plan/qrhold_band_per_tree.tsv")).unwrap();
+    let rows: Vec<_> = text.lines().skip(1).map(|r| r.split('\t').collect::<Vec<_>>()).collect();
+    assert_eq!(rows.len(), 2, "{text}");
+    assert_eq!(
+        (rows[0][0], rows[0][1], rows[0][2], rows[0][7]),
+        ("after-send", "a", "source", "10")
+    );
+    assert_eq!(
+        (rows[1][0], rows[1][1], rows[1][2], rows[1][7]),
+        ("after-send", "not_ready_a", "new", "10")
+    );
 }
