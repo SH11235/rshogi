@@ -64,6 +64,8 @@ RUST_LOG=rshogi_core::search::time=trace rshogi-usi 2> time-trace.log
 
 `factors` は評価下落 (`falling_eval`)・最善手の安定性 (`stability`)・前の安定性
 (`previous_stability`)・短縮率 (`reduction`)・変更回数からの延長率 (`instability`) を示します。
+`evaluation_reference` にはその反復の最善値と、評価下落に使う前の手の平均値・過去反復値を内部単位で出します。
+最初の探索では前の手の平均値が未設定の番兵値で、評価下落の係数が上限になる場合があります。
 `iteration_budget` の `target_ms` は補正後の目標時間、`nodes_effort` は最善手の累積ノード比率の
 100000 倍です。秒読みの使い切りでは補正係数を使わないため `factors` は出しません。
 

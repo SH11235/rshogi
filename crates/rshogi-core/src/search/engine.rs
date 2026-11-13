@@ -1769,6 +1769,11 @@ impl MainThreadState<'_> {
     ) -> (f64, f64, f64, usize) {
         let prev_avg_raw = self.best_previous_average_score.unwrap_or(Value::INFINITE).raw();
         let iter_val = self.iter_value[self.iter_idx];
+        log::trace!(
+            target: "rshogi_core::search::time",
+            "event=evaluation_reference depth={} previous_average_raw={} iteration_reference_raw={} best_raw={} last_best_depth={}",
+            completed_depth, prev_avg_raw, iter_val.raw(), best_value.raw(), self.last_best_move_depth,
+        );
         let falling_eval = calculate_falling_eval(prev_avg_raw, iter_val.raw(), best_value.raw());
         let time_reduction = calculate_time_reduction(completed_depth, self.last_best_move_depth);
         (falling_eval, time_reduction, tot_best_move_changes, thread_count)
