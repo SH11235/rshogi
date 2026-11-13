@@ -421,7 +421,7 @@ fn bridge_gaps_and_rejoins_use_walk_weight_and_targets() {
     assert!(table.contains("rejoin\tw\tw\t2\t0.02\t+120\t\t届かない"), "{table}");
     assert!(
         md.contains(
-            "| 先手 3 手目 | 0.020 | ▲２六歩 | +40 → +10 | ▲６六歩 +60 | なし | ▲７六歩 △３四歩 |"
+            "| RAMU が先手 / 先手 3 手目 | 0.020 | ▲２六歩 | +40 → +10 | ▲６六歩 +60 | なし | ▲７六歩 △３四歩 |"
         ),
         "{md}"
     );
@@ -601,7 +601,7 @@ fn gap_at_walk_stop_position_uses_the_row_weight() {
         &bridge,
         format!(
             "key\tply\tside\tmain\tplain\tbridged\tdrop\tbest\tbest_value\tplain_black\tbridged_black\tweight\n\
-             {key}\t4\tw\t8c8d\t0\t-100\t100\t\t\t0\t100\t\n"
+             {key}\t4\tw\t8c8d\t0\t-10\t10\t\t\t0\t10\t\n"
         ),
     )
     .unwrap();
@@ -622,5 +622,68 @@ fn gap_at_walk_stop_position_uses_the_row_weight() {
         ],
     );
     assert!(stdout.contains("gap=1"), "{stdout}");
-    assert!(table.contains("gap\tw\tw\t4\t0.02\t+100\t\t届かない"), "{table}");
+    assert!(table.contains("gap\tb\tw\t4\t0.02\t+10\t\t届かない"), "{table}");
+}
+
+#[test]
+fn bridge_targets_and_weights_follow_each_walk_side() {
+    let d = TempDir::new().unwrap();
+    let path = ["2g2f"];
+    let key = key_after(&path);
+    let bridge = d.path().join("bridge.tsv");
+    let audit = d.path().join("audit.tsv");
+    std::fs::write(&audit, "key\tgap\n").unwrap();
+    for (value, expected_side, weight) in [(82, "w", "0.003"), (41, "b", "0.0095")] {
+        std::fs::write(
+            &bridge,
+            format!(
+                "key\tply\tside\tmain\tplain_black\tbridged_black\n{key}\t2\tw\t8c8d\t0\t{value}\n"
+            ),
+        )
+        .unwrap();
+        let walk = [
+            walk_line("b", "out", 0.0095, &path),
+            walk_line("w", "own", 0.003, &path),
+        ];
+        let (_, table, md) = run_report(
+            &d,
+            &walk,
+            &[
+                "--bridge",
+                bridge.to_str().unwrap(),
+                "--bridge-audit",
+                audit.to_str().unwrap(),
+            ],
+        );
+        let gaps: Vec<Vec<_>> = table
+            .lines()
+            .filter(|l| l.starts_with("gap\t"))
+            .map(|l| l.split('\t').collect())
+            .collect();
+        assert_eq!(gaps.len(), 1, "{table}");
+        assert_eq!((gaps[0][1], gaps[0][2], gaps[0][4]), (expected_side, "w", weight));
+        assert!(
+            md.contains(if expected_side == "b" {
+                "RAMU が先手 / 後手 2 手目"
+            } else {
+                "RAMU が後手 / 後手 2 手目"
+            }),
+            "{md}"
+        );
+    }
+    let walk = [
+        walk_line("b", "out", 0.0006, &path),
+        walk_line("w", "own", 0.0006, &path),
+    ];
+    let (_, table, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--bridge",
+            bridge.to_str().unwrap(),
+            "--bridge-audit",
+            audit.to_str().unwrap(),
+        ],
+    );
+    assert!(!table.lines().any(|l| l.starts_with("gap\t")), "{table}");
 }

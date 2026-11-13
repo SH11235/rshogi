@@ -1649,7 +1649,9 @@ book_mine master audit --master moves.tsv --table audit.tsv \
 
 bridge の表とキューは、重みがあれば手番側を自分とした到達重みの大きい順、同じなら main の悪化量の大きい順、さらに同じなら key 順です。重みが無ければ悪化量、key の順です。表の末尾の `weight` 列は、重みを指定しない場合は空欄です。除外キューとの出力先の衝突も拒否します。キュー出力時は「補った切れ目のキューの行: N (除外 M)」を表示します。
 
-`--out-db` は同値の -1 補正後の値を書きます。点検の表と main の置換判定は、補正を戻した値で main と 1 位を比べ、同じ値なら main を保ちます (補正は出口まで短い手を残すので、そのまま比べると同値の局面で main が替わり、木ごとに main が行き来します)。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+`--out-db` は同値の -1 補正後の値を書きます。手番側の値を下げるので、先手から見た値では後手の手が 1 高くなることがあります。点検の表と main の置換判定は、補正を戻した値で main と 1 位を比べ、同じ値なら main を保ちます (補正は出口まで短い手を残すので、そのまま比べると同値の局面で main が替わり、木ごとに main が行き来します)。`--apply` は、点検の表に入った局面のうち、現在の main の source が置換可能、かつ 1 位の値の由来が `propagated` の局面だけを替えます。1 回の読みだけの `eval` は替えません。curated の行が 1 行でもある局面は、bench・record も含めて、`--replace-curated` が無ければ替えません。既存の alt を main にして元の main の tier を引き継ぎ、元の main は alt・wide にします。両方の note にタグと変更理由を追記し、curated を外した場合も記します。`evals` とその他の列は変更しません。`--schema` による各行の語彙と読み条件の検査は、`--apply` の有無によらず行います。
+
+`--opp-records` / `--opp-bench` は RAMU の側を固定した別々のグラフで解きます。自分の指す手は main・alt、相手の手は指定した record・bench も含みます。`--out-db` には各局面で手番側を RAMU とした結果だけを載せるため、親の手と、子の局面の DB の最善手は異なる側のグラフの値です。相手の record・bench の値や、その先で効く自分側の指さない手が異なるので、一致するとは限りません。同じ側のグラフ内では、同値補正前の親の手の値は、相手の record・bench を含む子の最善値を符号反転したものです。循環の成分全体を一律の値にはせず、出口と千日手の選択を後退解析で解きます。千日手 -70 / +70 は各自の側から見た値で、どちらも先手からは -70 です。
 
 頻度定跡を省略した場合の `--deep-plies` の継続手数には、最初の main・1 位の手を含めず、その先の元データで role が main の手だけを数えます。伝播後の最善手や `--fill-replies` で補った手は辿りません。指定時は、線未満でも対象にした局面数を先手番・後手番別に要約へ出します。
 `--deep-opp-freq` 指定時は、点検する局面の手番側を自分として、自分の手番では main だけ、
@@ -1738,6 +1740,7 @@ main・alt の役割を交換しても、局面の値は変わらないため、
 ```bash
 book_mine master rejoin --master moves.tsv --table rejoin.tsv \
   --draw-value-black -70 --draw-value-white 70 [--direct-lookup [--direct-lookup-table flip.tsv]] [--line 40] [--side both] [--preset random] \
+  [--opp-records] [--opp-bench] [--bridge-replies] \
   [--opp-freq strong_games.db --min-weight 0.001]
 ```
 
@@ -1753,6 +1756,8 @@ book_mine master rejoin --master moves.tsv --table rejoin.tsv \
 | `--draw-value-black <CP>` / `--draw-value-white <CP>` | `-70` / `70` | 値の伝播に使う千日手の値 (`master audit` と同じ) |
 | `--direct-lookup` | なし | 対局で定跡を直接のキーだけで引く前提で値を伝播し、反転キーで合流した局面で止めない (`master cycles` の「反転キーで合流した局面で止めない」) |
 | `--direct-lookup-table <PATH>` | なし | `--direct-lookup` で確かめなかった局面 (反転した向きの値を保たない・保証が破れる) の一覧 (TSV) の出力先 |
+| `--opp-records` / `--opp-bench` | なし | 相手の手番の読みの値のある record / bench を audit と同じ規則で伝播に含め、定跡に無い手として数えない。自分の手番の指す手は増やさない |
+| `--bridge-replies` | なし | 元データに無い相手局面を audit と同じ規則で補い、着く手の読みの値を上限として残す |
 | `--opp-freq <PATH>` | なし | 相手の手の頻度の定跡。`book_from_csa --no-instant-filter --min-rating 3800 --max-ply 80` などで強い対局から作った `.db` (手の count を局数として使う)。渡すと重みを付ける |
 | `--min-games <N>` | `3` | 重み: 相手の局数がこれ未満の局面と手では頻度で指さない (`--opp-book` が無ければそこで止める) |
 | `--max-ply <N>` | `80` | 重み: 初期局面からこの手数まで辿る |
@@ -1763,9 +1768,11 @@ book_mine master rejoin --master moves.tsv --table rejoin.tsv \
 | `--opp-book-first` | 無効 | 重み: 相手の手番では大きい定跡を先に引き、局面があればその手だけで指す |
 | `--threads <N>` | `0` | スレッド数 (0 = 全コア)。結果はスレッド数によらない |
 
+点検で `--opp-records --opp-bench --bridge-replies` を使う版は、rejoin にも同じ 3 つを渡してください。千日手の値も揃えます。これらを省略した既定の動作は main・alt だけの伝播です。いずれかを指定すると先後反転への辺を張らず、RAMU の側を固定して期待値と戻った先の値を同じグラフで求めます (`--direct-lookup` は併用できますが効果はなく、`--direct-lookup-table` は併用不可)。record だけの相手局面の上限も audit と共通です。相手の未収録の合法手で戻る組は引き続き全て調べます。`--bridge-replies` で補っただけの応手は元データの手にはならず、その組の値も比較します。
+
 調べ方:
 
-- 初期局面から、自分の手番では `--preset` の手、相手の手番では合法手 (不成を含む) のうち元データの局面に戻る手を辿ります (先後反転した局面は引きません。対局の `FlippedBook=false` と同じ)。辿れた自分の手番の局面 `key` で手 `move` を指した後の、相手の手番の局面を `dig` とします。`dig` で相手が伝播に入っている手 (値の分かる main・alt) 以外の合法手 `rejoin_move` を指して元データの局面 `rejoin` に戻る組を見ます。
+- 初期局面から、自分の手番では `--preset` の手、相手の手番では合法手 (不成を含む) のうち元データの局面に戻る手を辿ります (先後反転した局面は引きません。対局の `FlippedBook=false` と同じ)。辿れた自分の手番の局面 `key` で手 `move` を指した後の、相手の手番の局面を `dig` とします。`dig` で相手が伝播に入っている手 (値の分かる main・alt、指定時は record・bench も) 以外の合法手 `rejoin_move` を指して元データの局面 `rejoin` に戻る組を見ます。
 - 手前で期待した値 `expected` は `move` の伝播後の値、戻った先の値 `rejoin_value` は `rejoin` の main の伝播後の値です。どちらも自分の側から見た値で、伝播は `master audit` と同じです。`expected - rejoin_value` (`drop`) が `--line` 以上の組を出します。値の分からない手は数だけ要約に出します。
 - 重み `weight` は `key` に来る重みです。自分は main を指し、相手は `--opp-freq` の局面ごとの手の頻度で指すとして、初期局面から辿ります。
   `--opp-book` があれば、局数が `--min-games` 未満の局面は全部を、局数が足りる局面でも局数の少ない手に行く分を、大きい定跡の手 (`--opp-book-diff`・`--opp-book-best` の割り振り) で指します。
@@ -2061,11 +2068,11 @@ walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以�
 | `gap` | bridge の表の局面のうち、walk の重みが `--gap-min-weight` 以上で、補った値 (bridged_black) が目標に届かないか、audit の gap が `--gap-line` 以上 |
 | `rejoin` | rejoin の表の行のうち、戻った先の値が目標に届かず、来る割合 (weight × rejoin_games / dig_games) が `--gap-min-weight` 以上 |
 
-gap の重みは、その局面を通るか止まりの局面とする walk の行の重みの和 (1 行で同じ局面は 1 回) で、手順はその局面を最初に通った行の手順です。audit の表は、重みの下限以上で gap が `--gap-line` 以上の局面の行だけを持ちます。
+gap は walk の side (RAMU の側) ごとに分けて目標を判定します。重みは、その側の行のうち、その局面を通るか止まりの局面とする行の重みの和 (1 行で同じ局面は 1 回) で、手順もその側の最初の行から取ります。相手の手番の局面もその RAMU 側の目標で判定し、audit の main と 1 位の差だけによる追加は RAMU の手番に限ります。audit の表は、重みの下限以上で gap が `--gap-line` 以上の局面の行だけを持ちます。
 rejoin の表は手順を持たないので、手順は walk の表でその局面を通る行 (RAMU の側の行を優先、同じ側の中では最初の行) から取ります。walk が通らない局面は手順なしです。
 
 局面の番号は、表でも報告でも全部の class で同じ数え方です: 何手目 (`move_number`) = その局面で次に指す手の番号 (初期局面の手が 1)。先手番の局面は奇数、後手番の局面は偶数です。
-局面は、walk の止まりでは止まった局面、gap と rejoin では RAMU が指す局面です。止まった局面の手番は、own が RAMU、out・rare が相手で、max は `master walk --max-ply` の偶奇によります。
+局面は、walk の止まりでは止まった局面、rejoin では RAMU が指す局面、gap では bridge の局面 (RAMU または相手の手番) です。止まった局面の手番は、own が RAMU、out・rare が相手で、max は `master walk --max-ply` の偶奇によります。
 手順のある行は「手順の手数 + 1」を何手目にします (同じ局面に別の手数で着く手順があるので、rejoin の表の ply とは同じ偶奇で違う数になりえます)。手順のない rejoin の行は表の ply です。
 bridge・rejoin の表の ply は空でもよく (元データの ply が空の局面)、手順があれば手順から数えます。手順も ply も無い rejoin の行は何手目が不明で、表の `move_number` は `-`、報告は `後手 ? 手目` と手番だけ書きます。
 手番と何手目の偶奇が合わない行、何手目が 0 の行、手順の手数と合わない行、walk の ply が手順の手数と違う行、bridge・rejoin の空でない ply が 0 か、偶奇が局面の手番と合わない行があれば、何も書かずにエラーで止まります。

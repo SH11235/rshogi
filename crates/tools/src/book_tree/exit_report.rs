@@ -332,7 +332,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             Ok(())
         })?;
     }
-    let mut through: BTreeMap<String, (f64, Vec<String>)> = BTreeMap::new();
+    let mut through: BTreeMap<(String, String), (f64, Vec<String>)> = BTreeMap::new();
     let rejoins = match &args.rejoin {
         Some(path) => rejoin_rows(&args, path)?,
         None => Vec::new(),
@@ -366,8 +366,9 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         // 止まりの局面にも行の重みで着くので、手順の途中の局面と同じく数える。
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
             if bridge_keys.contains(key) && seen.insert(key) {
-                let entry =
-                    through.entry(key.clone()).or_insert_with(|| (0.0, moves[..i].to_vec()));
+                let entry = through
+                    .entry((key.clone(), side.to_owned()))
+                    .or_insert_with(|| (0.0, moves[..i].to_vec()));
                 entry.0 += weight;
             }
         }
@@ -416,7 +417,11 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             let gap: i32 = column(row, "gap")?.parse().context("gap が不正です")?;
             let key = column(row, "key")?;
             if gap < args.gap_line
-                || through.get(key).is_none_or(|(weight, _)| *weight < args.gap_min_weight)
+                || ["b", "w"].iter().all(|s| {
+                    through
+                        .get(&(key.to_owned(), (*s).to_owned()))
+                        .is_none_or(|(weight, _)| *weight < args.gap_min_weight)
+                })
             {
                 return Ok(());
             }
@@ -432,12 +437,6 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         })?;
         read_tsv(bridge, |row| {
             let key = column(row, "key")?;
-            let Some((weight, path)) = through.get(key) else {
-                return Ok(());
-            };
-            if *weight < args.gap_min_weight {
-                return Ok(());
-            }
             let side = column(row, "side")?;
             ensure!(matches!(side, "b" | "w"), "side は b / w です: {side}");
             ensure!(
@@ -447,29 +446,37 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             table_move_number(row, key)?;
             let bridged: i64 =
                 column(row, "bridged_black")?.parse().context("bridged_black が不正です")?;
-            let replaced = gaps.get(key);
-            if replaced.is_none() && args.meets(Some(bridged), side) != Some(false) {
-                return Ok(());
+            for own in ["b", "w"] {
+                let Some((weight, path)) = through.get(&(key.to_owned(), own.to_owned())) else {
+                    continue;
+                };
+                if *weight < args.gap_min_weight {
+                    continue;
+                }
+                let replaced = (own == side).then(|| gaps.get(key)).flatten();
+                if replaced.is_none() && args.meets(Some(bridged), own) != Some(false) {
+                    continue;
+                }
+                let mut extra = vec![
+                    ("main", column(row, "main")?.to_owned()),
+                    ("plain_black", column(row, "plain_black")?.to_owned()),
+                ];
+                if let Some((_, best, best_value)) = replaced {
+                    extra.push(("best", best.clone()));
+                    extra.push(("best_value_black", best_value.clone()));
+                }
+                items.push(Item {
+                    class: Class::Gap,
+                    side: own.to_owned(),
+                    move_number: Some(path.len() + 1),
+                    weight: *weight,
+                    value_black: Some(bridged),
+                    kind: String::new(),
+                    key: key.to_owned(),
+                    moves: Some(path.clone()),
+                    extra,
+                });
             }
-            let mut extra = vec![
-                ("main", column(row, "main")?.to_owned()),
-                ("plain_black", column(row, "plain_black")?.to_owned()),
-            ];
-            if let Some((_, best, best_value)) = replaced {
-                extra.push(("best", best.clone()));
-                extra.push(("best_value_black", best_value.clone()));
-            }
-            items.push(Item {
-                class: Class::Gap,
-                side: side.to_owned(),
-                move_number: Some(path.len() + 1),
-                weight: *weight,
-                value_black: Some(bridged),
-                kind: String::new(),
-                key: key.to_owned(),
-                moves: Some(path.clone()),
-                extra,
-            });
             Ok(())
         })?;
     }
@@ -682,12 +689,12 @@ fn markdown(
         writeln!(out, "## 2b. 塞ぎたい出口: 伝播の切れ目 (`master audit --bridge-replies`)\n")?;
         writeln!(
             out,
-            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。局面は RAMU の手番で、main はそこで指す手。値は main の値 (補わない → 補う)。\n",
+            "補って伝播すると目標を割るか、main が 1 位から {} 以上負ける局面 (辿りの重み {} 以上)。目標と重みは RAMU の側ごとに判定し、main はその局面で手番の側が指す手。値は main の値 (補わない → 補う)。\n",
             args.gap_line, args.gap_min_weight
         )?;
         writeln!(
             out,
-            "| 局面 (RAMU の手番) | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
+            "| RAMU の側 / 局面 | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
         )?;
         for r in items.iter().filter(|i| i.class == Class::Gap) {
             let get =
@@ -701,7 +708,8 @@ fn markdown(
             };
             writeln!(
                 out,
-                "| {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
+                "| RAMU が{} / {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
+                side_name(&r.side),
                 position_text(r),
                 r.weight,
                 kif_last(path, get("main").unwrap_or_default())?,

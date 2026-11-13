@@ -1514,6 +1514,66 @@ struct RecordUsage {
     moves: usize,
 }
 
+fn propagate_opponent(
+    positions: &BTreeMap<String, MasterPosition>,
+    records: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    fill: Fill,
+    opponent: &str,
+    mut visit: impl FnMut(&str, &MasterPosition, &[bool]),
+) -> Result<(Propagated, RecordUsage)> {
+    let mut expanded = positions.clone();
+    let caps = record_caps(positions, records, opponent)?;
+    let mut capped = BTreeSet::new();
+    for (key, record) in records {
+        if key.split_whitespace().nth(1) != Some(opponent) {
+            continue;
+        }
+        if let Some(position) = expanded.get_mut(key) {
+            position.moves.extend(record.moves.clone());
+            continue;
+        }
+        let mut position = record.clone();
+        match caps.get(key) {
+            None => {}
+            Some(Some(cap)) => {
+                capped.insert(key.clone());
+                position.moves.push(cap.clone());
+            }
+            // 上限を置ける手が無ければ、record で伝播せず、着く手の読みの値をそのまま使わせる。
+            Some(None) => continue,
+        }
+        expanded.insert(key.clone(), position);
+    }
+    // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
+    let mut result = propagate_with(&expanded, draws, fill, Flips::Skip, None)?;
+    result.capped.extend(capped);
+    // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
+    let mut usage = RecordUsage::default();
+    let mut illegal_records = 0;
+    let mut known = Vec::with_capacity(positions.len());
+    for ((key, position), mask) in expanded.iter().zip(&result.known) {
+        visit(key, position, mask);
+        let playable = positions.get(key).map_or(0, |p| p.moves.len());
+        // 足した上限の手は record ではないので、record の手の分だけを数える。
+        let added = match records.get(key) {
+            Some(r) if key.split_whitespace().nth(1) == Some(opponent) => r.moves.len(),
+            _ => 0,
+        };
+        let record_mask = || mask.iter().skip(playable).take(added);
+        illegal_records += record_mask().filter(|&&k| !k).count();
+        let used = record_mask().filter(|&&k| k).count();
+        usage.moves += used;
+        usage.positions += usize::from(used > 0);
+        if positions.contains_key(key) {
+            known.push(mask[..playable].to_vec());
+        }
+    }
+    result.known = known;
+    result.illegal_moves -= illegal_records;
+    Ok((result, usage))
+}
+
 fn propagate_for_sides(
     positions: &BTreeMap<String, MasterPosition>,
     records: Option<&BTreeMap<String, MasterPosition>>,
@@ -1528,59 +1588,10 @@ fn propagate_for_sides(
             RecordUsage::default(),
         ));
     };
-    let solve = |opponent: &str| -> Result<(Propagated, RecordUsage)> {
-        let mut expanded = positions.clone();
-        let caps = record_caps(positions, records, opponent)?;
-        let mut capped = BTreeSet::new();
-        for (key, record) in records {
-            if key.split_whitespace().nth(1) != Some(opponent) {
-                continue;
-            }
-            if let Some(position) = expanded.get_mut(key) {
-                position.moves.extend(record.moves.clone());
-                continue;
-            }
-            let mut position = record.clone();
-            match caps.get(key) {
-                None => {}
-                Some(Some(cap)) => {
-                    capped.insert(key.clone());
-                    position.moves.push(cap.clone());
-                }
-                // 上限を置ける手が無ければ、record で伝播せず、着く手の読みの値をそのまま使わせる。
-                Some(None) => continue,
-            }
-            expanded.insert(key.clone(), position);
-        }
-        // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
-        let mut result = propagate_with(&expanded, draws, fill, Flips::Skip, None)?;
-        result.capped.extend(capped);
-        // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
-        let mut usage = RecordUsage::default();
-        let mut illegal_records = 0;
-        let mut known = Vec::with_capacity(positions.len());
-        for ((key, _), mask) in expanded.iter().zip(&result.known) {
-            let playable = positions.get(key).map_or(0, |p| p.moves.len());
-            // 足した上限の手は record ではないので、record の手の分だけを数える。
-            let added = match records.get(key) {
-                Some(r) if key.split_whitespace().nth(1) == Some(opponent) => r.moves.len(),
-                _ => 0,
-            };
-            let record_mask = || mask.iter().skip(playable).take(added);
-            illegal_records += record_mask().filter(|&&k| !k).count();
-            let used = record_mask().filter(|&&k| k).count();
-            usage.moves += used;
-            usage.positions += usize::from(used > 0);
-            if positions.contains_key(key) {
-                known.push(mask[..playable].to_vec());
-            }
-        }
-        result.known = known;
-        result.illegal_moves -= illegal_records;
-        Ok((result, usage))
-    };
-    let (mut black, black_usage) = solve("w")?;
-    let (white, white_usage) = solve("b")?;
+    let (mut black, black_usage) =
+        propagate_opponent(positions, records, draws, fill, "w", |_, _, _| {})?;
+    let (white, white_usage) =
+        propagate_opponent(positions, records, draws, fill, "b", |_, _, _| {})?;
     for ((key, _), (b, w)) in positions.iter().zip(black.known.iter_mut().zip(white.known)) {
         if key.split_whitespace().nth(1) == Some("w") {
             *b = w;
@@ -1816,9 +1827,17 @@ pub(super) fn evaluate_with(
         stats,
         ..
     } = propagate_with(positions, draws, Fill::Off, flips, cache)?;
+    Ok((evaluated_values(positions, &graph, &known)?, stats))
+}
+
+fn evaluated_values(
+    positions: &BTreeMap<String, MasterPosition>,
+    graph: &Graph,
+    known: &[Vec<bool>],
+) -> Result<Vec<Vec<Option<i32>>>> {
     let values = positions
         .iter()
-        .zip(&known)
+        .zip(known)
         .map(|((key, position), known)| {
             let Some(node) = graph.find(key) else {
                 return Ok(vec![None; position.moves.len()]);
@@ -1837,7 +1856,43 @@ pub(super) fn evaluate_with(
                 .collect()
         })
         .collect::<Result<_>>()?;
-    Ok((values, stats))
+    Ok(values)
+}
+
+pub(super) struct ReplyEvaluation {
+    pub values: Vec<Vec<Option<i32>>>,
+    pub replies: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// 相手の record・bench と補完を含め、自分の側を固定して点検と同じ値を求める。
+pub(super) fn evaluate_for_side(
+    positions: &BTreeMap<String, MasterPosition>,
+    records: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    fill: Fill,
+    own: &str,
+) -> Result<ReplyEvaluation> {
+    let opponent = if own == "b" { "w" } else { "b" };
+    let mut replies = BTreeMap::new();
+    let (propagated, _) =
+        propagate_opponent(positions, records, draws, fill, opponent, |key, position, known| {
+            if super::model::side(key) == opponent {
+                replies.insert(
+                    key.to_owned(),
+                    position
+                        .moves
+                        .iter()
+                        .zip(known)
+                        .filter(|(_, k)| **k)
+                        .map(|(m, _)| m.mv.clone())
+                        .collect(),
+                );
+            }
+        })?;
+    Ok(ReplyEvaluation {
+        values: evaluated_values(positions, &propagated.graph, &propagated.known)?,
+        replies,
+    })
 }
 
 /// `--direct-lookup` で解いたときの集計を標準エラーに出し、`table` があれば確かめなかった局面の一覧 (TSV) を
@@ -2996,6 +3051,100 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         assert_eq!(findings.len(), 1);
         assert_eq!((findings[0].main.value, findings[0].best.mv.as_str()), (10, "5i6h"));
         assert_eq!(findings[0].gap(), 1);
+    }
+
+    #[test]
+    fn propagated_switch_ignores_output_tie_penalties_in_a_cycle() {
+        let c = "9/4k4/9/9/9/9/9/9/4K4 w -";
+        let text = master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", "10"),
+            (A, "5a5b", "main", ""),
+            (B, "4h5i", "main", ""),
+            (c, "5b5a", "main", ""),
+        ]);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let (findings, _, book) = audit_select(
+            &parsed,
+            DrawValues {
+                black: -70,
+                white: 70,
+            },
+            Select {
+                line: 40,
+                rule: SwitchRule::Propagated,
+                deep_plies: None,
+                deep_freq: None,
+            },
+            Fill::Off,
+            None,
+        )
+        .unwrap();
+        assert!(findings.is_empty());
+        let graph = &book.graph;
+        let root = graph.find(ROOT).unwrap();
+        let moves: Vec<_> = graph.moves(root).collect();
+        assert_eq!((moves[0].new, moves[0].tie_lowered, moves[1].new), (9, true, 10));
+        for node in 0..graph.len() {
+            for mv in graph.moves(node) {
+                if let Some(edge) = mv.edge {
+                    let child = graph
+                        .moves(edge.to)
+                        .map(|m| m.new + i32::from(m.tie_lowered))
+                        .max()
+                        .unwrap();
+                    assert_eq!(mv.new + i32::from(mv.tie_lowered), -child);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opponent_replies_require_the_same_own_side_for_parent_and_child() {
+        let text = opponent_record_fixture("400");
+        let rows = parse_master(&text).unwrap();
+        let positions = parse_master_rows(text.as_bytes()).unwrap();
+        let replies = opponent_replies(&rows, &["record"]).unwrap();
+        let (_, _, book) = audit_with_records(
+            &positions,
+            DrawValues {
+                black: -70,
+                white: 70,
+            },
+            1,
+            Fill::Off,
+            None,
+            None,
+            Some(&replies),
+        )
+        .unwrap();
+        let value = |key: &str| {
+            let node = book.graph_for(key).find(key).unwrap();
+            book.graph_for(key).moves(node).next().unwrap().new
+        };
+        let a = value(A);
+        let b = value(B);
+        assert_ne!(a, -b);
+        let graph = book.graph_for(A);
+        let edge = graph.moves(graph.find(A).unwrap()).next().unwrap().edge.unwrap();
+        assert_eq!(
+            a,
+            -graph.moves(edge.to).map(|m| m.new + i32::from(m.tie_lowered)).max().unwrap()
+        );
+        let evaluated = evaluate_for_side(
+            &positions.0,
+            &replies,
+            DrawValues {
+                black: -70,
+                white: 70,
+            },
+            Fill::Off,
+            "w",
+        )
+        .unwrap();
+        let ai = positions.0.keys().position(|k| k == A).unwrap();
+        assert_eq!(evaluated.values[ai][0], Some(a));
+        assert!(evaluated.replies[B].contains("4h3g"));
     }
 
     fn deep_fixture() -> String {
