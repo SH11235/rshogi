@@ -497,7 +497,7 @@ book_mine tree queue-review \
 | `--table <TSV>` | 通常の点検では必須 | 未着手の根ごとの分類表 |
 | `--boxes <TSV>` | 通常の点検では必須 | 台ごとの残りと読める量の表 |
 | `--hold-out <DIR>` | 通常の点検では必須 | 台ごとの hold 候補の JSON Lines を出す dir |
-| `--prefix <NAME>` | qrhold | hold・計画・再採点の JSONL 名の先頭。英数字・`_`・`-` |
+| `--prefix <NAME>` | qrhold | hold・計画・再採点・続きの JSONL と帯の表の名前の先頭。英数字・`_`・`-` |
 | `--hold-class <CLASS>` | 追加なし、繰り返し可 | reach-low に加えて保留候補にする class |
 | `--plan-out <DIR>` | なし | 指定時だけ、台ごとの積み荷 `<prefix>_<box>.jsonl` と `<prefix>_plan.tsv` を作る。hold 候補とは別の出力先を使う |
 | `--master <TSV>` | なし | 再採点に必須の元データ (`moves.tsv`) |
@@ -507,6 +507,10 @@ book_mine tree queue-review \
 | `--rerank-tiers <TSV>` | なし | 再採点の後に当てる段の表 ([段の表](#段の表---rerank-tiers))。`--rerank-table`・`--rerank-out` のどちらかが必要 |
 | `--boost-queue <JSONL>` | なし、繰り返し可 | `tree seeds` などの行の root・roots を重要度が上がった局面として扱う |
 | `--group-table <TSV>` | なし | 受付行の `group` ごとの、締めまでに読み切る見込みの表。再採点と一緒なら再採点後の見込みも出す |
+| `--not-ready-out <DIR>` | なし | NOT_READY の続きの候補を台ごとの `<prefix>_not_ready_<box>.jsonl` に出す。`--not-ready-table` と一緒に指定 |
+| `--not-ready-table <TSV>` | なし | 全 NOT_READY の木の判定表。`--not-ready-out` と一緒に指定 |
+| `--not-ready-sent <JSONL>` | なし、繰り返し可 | 直前に送った続きの行。このファイル内の id は再送候補から外す。`--not-ready-out` が必要 |
+| `--band-per-tree` | 無効 | 受付の RUNNING・QUEUED の木を priority 順に 1 本ずつ数えた累積の帯。出力先と列は下記参照 |
 | `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | walk の出口の目標。先手は先手評価が black 以上、後手は white 未満なら未達扱いにしない |
 | `--max-ratio <F>` | 0.95 | 計画の残り/読める量の上限。有限の非負数 |
 | `--box-deadlines` | 無効 | 台の dir の `deadline` (Unix 秒の整数 1 行) と cutoff の早い方を締めにする。無い台は cutoff |
@@ -521,6 +525,45 @@ book_mine tree queue-review \
 
 `--update`・`--condition`・`--balance-priority` と、明示指定する `--max-ratio`・`--update-size`・`--bands`・`--move-max-ratio`・`--move-band-factor` には `--plan-out` が必要です。
 `--box-deadlines` は計画を出さない場合にも `--boxes` の hours・capacity・ratio に反映します。
+
+`--not-ready-out` と `--band-per-tree` は、それぞれ通常の点検引数を省略して単独で使えます。
+この 2 つを指定すると、各台の `fetch/targets.status.json` も読みます。受付と status の id・own を照合し、
+priority と hold は受付の最後の行を使います。速さは通常の点検と同じ `--box-rate`、または
+`--rate` / `--default-rate` と worker 数から求めます。実測値を使う場合は `--box-rate <NAME>=<局面/時>` で渡してください。
+
+```sh
+book_mine tree queue-review \
+  --box box-a=/path/to/box-a --box-rate box-a=20 \
+  --cutoff 2026-12-01T09:00:00+09:00 --tree-size 150 \
+  --not-ready-out continuations --not-ready-table not-ready.tsv \
+  --not-ready-sent previous-continuations.jsonl --band-per-tree --prefix next
+```
+
+続きの候補は hold でない NOT_READY の木です。受付の最後の JSON 行を写し、`opts.rounds` だけを 6 にします。
+同じ根・同じ own の DONE、または稼働中の台で hold でない RUNNING・QUEUED の写しがあれば「手当て済み」です。
+台の dir に `END` があれば稼働中には数えません。照合対象は `--box` で渡した台です。
+`startpos moves ...` の根は手順を指して局面に直し、通常の queue-review と同じ局面キーで照合します。
+受付の `opts` が無い木、既に rounds が 6 以上の木、`--not-ready-sent` の id も候補から外します。
+その木の priority 以下の受付の帯に `tree-size` を足した時間が cutoff を越える木は「帯で回らない」です。
+NOT_READY ごとに独立に判定し、同時に選ばれた別の続きの候補の量は足しません。
+表には hold の木も含め、判定・理由・台・id・own・priority・read・required・rounds・帯の量と時間・締めまでの時間・手当て済みの写しを出します。
+
+`--band-per-tree` の表は `<prefix>_band_per_tree.tsv` です。出力先は `--plan-out`、`--rerank-out`、
+`--not-ready-out`、`--hold-out` の順で最初に指定された dir です。それらが無ければ
+`--group-table`、`--rerank-table` の順で最初に指定された表と同じ dir に出します。
+単独で帯だけを出す場合は標準出力が TSV になります。
+hold でない RUNNING・QUEUED の各木を受付の priority 順に並べ、
+`max(tree-size, required) - read` (負になる場合は 0) の累積を速さで割ります。
+同じ priority の木は status の並び順を保ちます。その priority 以下の全量は、同じ priority の最後の行で読めます。
+列は `phase`・`box`・`id`・`own`・`priority`・`source`・`remaining`・`cumulative`・`rate`・`hours`・`cutoff_hours`・`over` です。
+`source=accepted` は受付の木、`source=send` は送る予定の行、`over` は締めを越えるかの真偽です。
+`phase=before` が受付の帯です。`--plan-out` または `--rerank-out` と併用すると、送る予定の hold でない行の量を
+受付の帯に足した `phase=after-send` も出します。送る行は own ごとに 1 本 `tree-size`、
+同じ id・own が RUNNING・QUEUED で read が 1 以上なら `max(tree-size, required) - read` です。
+これは送る分を追加した量の見込みなので、既存行の priority 更新でも受付分と送る分の両方を数えます。
+宛先が未定の `<prefix>_rerank-add.jsonl` は、台別の帯には加算しません。
+通常の `--bands` による帯の区切りと、その計画判定は変わりません。
+
 計画の例 (通常の点検引数に追加):
 
 ```sh

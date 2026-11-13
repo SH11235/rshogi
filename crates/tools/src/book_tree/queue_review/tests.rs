@@ -6,6 +6,10 @@ fn args(dir: &Path) -> QueueReviewArgs {
     let master = dir.join("master.tsv");
     std::fs::write(&master, super::super::master_table::COLUMNS.join("\t") + "\n").unwrap();
     QueueReviewArgs {
+        not_ready_out: None,
+        not_ready_table: None,
+        not_ready_sent: vec![],
+        band_per_tree: false,
         box_specs: vec![],
         rate: vec![],
         default_rate: 1.44,
@@ -2645,4 +2649,244 @@ fn rerank_tiers_require_rerank_output() {
     a.rerank_tiers = Some(d.path().join("tiers.tsv"));
     let error = run_at(a, now(), &mut vec![]).err().unwrap();
     assert!(error.to_string().contains("--rerank-tiers"), "{error}");
+}
+
+fn status_file(dir: &Path, statuses: &[Value]) {
+    std::fs::write(dir.join("fetch/targets.status.json"), json!({"targets":statuses}).to_string())
+        .unwrap();
+}
+fn status(r: &Value, state: &str, read: u64, required: u64) -> Value {
+    json!({"id":r["id"],"own":r["own"],"state":state,"read":read,"required":required})
+}
+
+#[test]
+fn not_ready_last_receipt_root_matching_sent_and_cutoff() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("box");
+    let mut send = row("send", "7g7f");
+    send["opts"]["rounds"] = json!(3);
+    let mut updated = send.clone();
+    updated["game"] = json!([["3c3d"]]);
+    updated["memo"] = json!("latest");
+    let mut no_opts = row("old", "2g2f");
+    no_opts.as_object_mut().unwrap().remove("opts");
+    let sent = row("sent", "9g9f");
+    let mut covered = row("covered", "1g1f");
+    covered["root"] = json!("startpos moves 1g1f");
+    let copy = row("copy", "1g1f");
+    let mut late = row("late", "8g8f");
+    late["priority"] = json!(100);
+    let mut busy = row("busy", "6g6f");
+    busy["priority"] = json!(90);
+    let mut continued = row("continued", "5g5f");
+    continued["opts"]["rounds"] = json!(6);
+    let rows = vec![
+        send.clone(),
+        no_opts.clone(),
+        sent.clone(),
+        covered.clone(),
+        copy.clone(),
+        late.clone(),
+        busy.clone(),
+        continued.clone(),
+    ];
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    let end = enqueue(&b, "a", 0, &rows);
+    enqueue(&b, "b", end, &[updated.clone()]);
+    status_file(
+        &b,
+        &[
+            status(&send, "NOT_READY", 10, 20),
+            status(&no_opts, "NOT_READY", 0, 0),
+            status(&sent, "NOT_READY", 0, 0),
+            status(&covered, "NOT_READY", 0, 0),
+            status(&copy, "DONE", 92, 92),
+            status(&late, "NOT_READY", 0, 0),
+            status(&busy, "QUEUED", 0, 1000),
+            status(&continued, "NOT_READY", 0, 0),
+        ],
+    );
+    let sent_path = d.path().join("sent.jsonl");
+    std::fs::write(&sent_path, "{\"id\":\"sent\"}\n").unwrap();
+    let mut a = args(d.path());
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.not_ready_out = Some(d.path().join("nr"));
+    a.not_ready_table = Some(d.path().join("nr.tsv"));
+    a.not_ready_sent = vec![sent_path];
+    a.box_specs = vec![format!("a={}", b.display())];
+    a.box_rate = vec!["a=100".into()];
+    a.band_per_tree = true;
+    run_at(a, now(), &mut Vec::new()).unwrap();
+    let output = std::fs::read_to_string(d.path().join("nr/qrhold_not_ready_a.jsonl")).unwrap();
+    let result: Vec<Value> = output.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+    updated["opts"]["rounds"] = json!(6);
+    assert_eq!(result, vec![updated]);
+    let table = std::fs::read_to_string(d.path().join("nr.tsv")).unwrap();
+    for label in [
+        "送る\t",
+        "opts なし\t",
+        "直前に送った\t",
+        "手当て済み\t",
+        "帯で回らない\t",
+        "続きを積んだ後も NOT_READY\t",
+    ] {
+        assert!(table.contains(label), "{label}: {table}");
+    }
+    assert!(d.path().join("nr/qrhold_band_per_tree.tsv").exists());
+}
+
+#[test]
+fn per_tree_bands_exact_priority_and_opt_in_status() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("box");
+    let mut first = row("first", "7g7f");
+    first["priority"] = json!(12);
+    let mut second = row("second", "2g2f");
+    second["priority"] = json!(14);
+    let mut held = row("held", "1g1f");
+    held["hold"] = json!(true);
+    let rows = vec![first.clone(), second.clone(), held.clone()];
+    fixture_box(&b, rows.iter().map(|r| progress(r, 0, 0)).collect(), vec![]);
+    enqueue(&b, "a", 0, &rows);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("a={}", b.display())];
+    run_at(a, now(), &mut Vec::new()).unwrap();
+    status_file(
+        &b,
+        &[
+            status(&second, "QUEUED", 10, 200),
+            status(&first, "RUNNING", 20, 40),
+            status(&held, "QUEUED", 0, 500),
+        ],
+    );
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("a={}", b.display())];
+    a.table = None;
+    a.boxes = None;
+    a.hold_out = None;
+    a.band_per_tree = true;
+    a.box_rate = vec!["a=100".into()];
+    let mut output = Vec::new();
+    run_at(a, now(), &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[1].contains("first\tb\t12\taccepted\t72\t72\t100\t0.72\t2\tfalse"));
+    assert!(lines[2].contains("second\tb\t14\taccepted\t190\t262\t100\t2.62\t2\ttrue"));
+}
+
+#[test]
+fn not_ready_copies_require_done_or_live_nonheld_active_same_own() {
+    for (state, hold, ended, own, blocks) in [
+        ("DONE", true, true, "b", true),
+        ("RUNNING", false, false, "b", true),
+        ("QUEUED", false, false, "b", true),
+        ("RUNNING", true, false, "b", false),
+        ("QUEUED", false, true, "b", false),
+        ("NOT_READY", false, false, "b", false),
+        ("DONE", false, false, "w", false),
+    ] {
+        let d = TempDir::new().unwrap();
+        let a_dir = d.path().join("a");
+        let b_dir = d.path().join("b");
+        let source = row("source", "7g7f");
+        let mut copy = row("nr_copy", "7g7f");
+        copy["hold"] = json!(hold);
+        copy["own"] = json!(own);
+        for (dir, r, state) in [(&a_dir, &source, "NOT_READY"), (&b_dir, &copy, state)] {
+            fixture_box(dir, vec![progress(r, 0, 0)], vec![]);
+            enqueue(dir, "a", 0, std::slice::from_ref(r));
+            status_file(dir, &[status(r, state, 0, 0)]);
+        }
+        if ended {
+            std::fs::write(b_dir.join("END"), "done").unwrap();
+        }
+        let mut a = args(d.path());
+        a.table = None;
+        a.boxes = None;
+        a.hold_out = None;
+        a.box_specs = vec![
+            format!("a={}", a_dir.display()),
+            format!("b={}", b_dir.display()),
+        ];
+        a.box_rate = vec!["a=100".into(), "b=100".into()];
+        a.not_ready_out = Some(d.path().join("nr"));
+        a.not_ready_table = Some(d.path().join("nr.tsv"));
+        run_at(a, now(), &mut Vec::new()).unwrap();
+        let text = std::fs::read_to_string(d.path().join("nr/qrhold_not_ready_a.jsonl")).unwrap();
+        assert_eq!(text.is_empty(), blocks, "{state} hold={hold} ended={ended} own={own}");
+    }
+}
+
+#[test]
+fn per_tree_review_writes_tsv_separately_and_rejects_incomplete_status() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("box");
+    let r = row("tree", "7g7f");
+    fixture_box(&b, vec![progress(&r, 0, 0)], vec![]);
+    enqueue(&b, "a", 0, std::slice::from_ref(&r));
+    status_file(&b, &[status(&r, "QUEUED", 0, 0)]);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("a={}", b.display())];
+    a.band_per_tree = true;
+    let mut output = Vec::new();
+    run_at(a, now(), &mut output).unwrap();
+    let text = std::fs::read_to_string(d.path().join("hold/qrhold_band_per_tree.tsv")).unwrap();
+    assert!(text.starts_with("phase\tbox\t"));
+    assert!(!String::from_utf8(output).unwrap().contains("phase\tbox\t"));
+    status_file(&b, &[]);
+    let mut a = args(d.path());
+    a.box_specs = vec![format!("a={}", b.display())];
+    a.band_per_tree = true;
+    let error = run_at(a, now(), &mut Vec::new()).unwrap_err();
+    assert!(error.to_string().contains("status に無い受付"), "{error:#}");
+}
+
+#[test]
+fn per_tree_rerank_payload_adds_partial_remaining_to_exact_priority() {
+    let d = TempDir::new().unwrap();
+    let b = d.path().join("box");
+    let mut r = row("partial", "7g7f");
+    r["priority"] = json!(20);
+    fixture_box(&b, vec![progress(&r, 40, 180)], vec![]);
+    enqueue(&b, "a", 0, std::slice::from_ref(&r));
+    status_file(&b, &[status(&r, "RUNNING", 40, 180)]);
+    let mut inputs = Vec::new();
+    let boxes = vec![load_box("a", b, &mut inputs).unwrap()];
+    let statuses = per_tree::load(&boxes, &mut inputs).unwrap();
+    let metrics = vec![BoxMetrics {
+        speed: 100.0,
+        hours: 2.0,
+        capacity: 200.0,
+        remaining: 140.0,
+    }];
+    let mut promoted = r;
+    promoted["priority"] = json!(13);
+    let rerank = rerank::Rerank {
+        outputs: vec![
+            d.path().join("qrhold_rerank_a.jsonl"),
+            d.path().join("qrhold_rerank-add.jsonl"),
+        ],
+        payloads: vec![
+            format!("{promoted}\n").into_bytes(),
+            format!("{}\n", row("unassigned", "2g2f")).into_bytes(),
+        ],
+        summary: String::new(),
+        lines: BTreeMap::new(),
+        groups: BTreeMap::new(),
+    };
+    let mut a = args(d.path());
+    a.tree_size = 150;
+    a.rerank_out = Some(d.path().join("rerank"));
+    let text = String::from_utf8(
+        per_tree::table(&a, &boxes, &metrics, &statuses, None, Some(&rerank)).unwrap(),
+    )
+    .unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines[2].contains("partial\tb\t13\tsend\t140\t140\t100\t1.4\t2\tfalse"));
+    assert!(lines[3].contains("partial\tb\t20\taccepted\t140\t280\t100\t2.8\t2\ttrue"));
+    assert!(!text.contains("unassigned"));
 }
