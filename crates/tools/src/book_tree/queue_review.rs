@@ -98,6 +98,18 @@ pub(super) struct QueueReviewArgs {
     /// 既存の木への足し込み JSON Lines (繰り返し可)
     #[arg(long, requires = "plan_out")]
     update: Vec<PathBuf>,
+    /// NOT_READY の続き (opts.rounds=6) の台別 JSONL の出力先
+    #[arg(long, requires = "not_ready_table")]
+    not_ready_out: Option<PathBuf>,
+    /// 全 NOT_READY の木と、続きの送信可否の表
+    #[arg(long, requires = "not_ready_out")]
+    not_ready_table: Option<PathBuf>,
+    /// 直前に続きの行を送った JSONL (id で除外、繰り返し可)
+    #[arg(long, requires = "not_ready_out")]
+    not_ready_sent: Vec<PathBuf>,
+    /// 受付の木を 1 本ずつ数えた帯。出力 dir が無ければ標準出力の TSV
+    #[arg(long)]
+    band_per_tree: bool,
     /// 計画の帯の上端の priority (カンマ区切り、小さい順)。最後の帯は上端なし
     #[arg(
         long,
@@ -562,7 +574,12 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     );
     let review = args.table.is_some() || args.boxes.is_some() || args.hold_out.is_some();
     ensure!(
-        review || args.reranking() || args.plan_out.is_some() || args.group_table.is_some(),
+        review
+            || args.reranking()
+            || args.plan_out.is_some()
+            || args.group_table.is_some()
+            || args.not_ready_out.is_some()
+            || args.band_per_tree,
         "点検・計画・再採点・group 表の出力先が必要です"
     );
     ensure!(
@@ -627,6 +644,50 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         .as_ref()
         .map(|_| group::table(&boxes, &metrics, args.tree_size, rerank.as_ref()))
         .transpose()?;
+    let statuses = (args.not_ready_out.is_some() || args.band_per_tree)
+        .then(|| per_tree::load(&boxes, &mut inputs))
+        .transpose()?;
+    let continuations = args
+        .not_ready_out
+        .as_ref()
+        .map(|_| {
+            not_ready::build(
+                &args,
+                &boxes,
+                &metrics,
+                statuses.as_ref().unwrap(),
+                &mut inputs,
+                plan.as_ref(),
+            )
+        })
+        .transpose()?;
+    let tree_band = args
+        .band_per_tree
+        .then(|| {
+            per_tree::table(
+                &args,
+                &boxes,
+                &metrics,
+                statuses.as_ref().unwrap(),
+                plan.as_ref(),
+                rerank.as_ref(),
+                continuations.as_ref(),
+            )
+        })
+        .transpose()?;
+    let tree_band_path = args
+        .plan_out
+        .as_ref()
+        .or(args.rerank_out.as_ref())
+        .or(args.not_ready_out.as_ref())
+        .or(args.hold_out.as_ref())
+        .map(|dir| dir.join(format!("{}_band_per_tree.tsv", args.prefix)))
+        .or_else(|| {
+            args.group_table
+                .as_ref()
+                .or(args.rerank_table.as_ref())
+                .map(|path| path.with_file_name(format!("{}_band_per_tree.tsv", args.prefix)))
+        });
     let mut outputs = Vec::new();
     if let (Some(table), Some(summary), Some(hold)) = (&args.table, &args.boxes, &args.hold_out) {
         outputs.extend([table.clone(), summary.clone()]);
@@ -641,6 +702,14 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
         outputs.extend(rerank.outputs.iter().cloned());
     }
     if let Some(path) = &args.group_table {
+        outputs.push(path.clone());
+    }
+    if let Some(c) = &continuations {
+        outputs.extend(c.outputs.iter().cloned());
+    }
+    if tree_band.is_some()
+        && let Some(path) = &tree_band_path
+    {
         outputs.push(path.clone());
     }
     let resolved: Vec<_> = outputs
@@ -660,7 +729,22 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
     files::write_generated(&outputs, &inputs, true, |temporary| {
         let (temporary, rest) = temporary.split_at_mut(review_outputs);
         let (planned, rest) = rest.split_at_mut(plan.as_ref().map_or(0, |p| p.outputs.len()));
-        let (reranked, grouped) = rest.split_at_mut(rerank.as_ref().map_or(0, |r| r.outputs.len()));
+        let (reranked, rest) = rest.split_at_mut(rerank.as_ref().map_or(0, |r| r.outputs.len()));
+        let (grouped, rest) = rest.split_at_mut(usize::from(groups.is_some()));
+        let (continued, banded) =
+            rest.split_at_mut(continuations.as_ref().map_or(0, |c| c.outputs.len()));
+        if let Some(c) = &continuations {
+            for (file, bytes) in continued.iter_mut().zip(&c.payloads) {
+                file.write_all(bytes)?;
+            }
+        }
+        if let Some(bytes) = &tree_band {
+            if tree_band_path.is_some() {
+                banded[0].write_all(bytes)?;
+            } else {
+                stdout.write_all(bytes)?;
+            }
+        }
         if let Some((bytes, summary)) = &groups {
             grouped[0].write_all(bytes)?;
             writeln!(stdout, "{summary}")?;
@@ -932,3 +1016,6 @@ pub(super) fn tree_states(specs: &[String]) -> Result<(Vec<TreeState>, Vec<PathB
     }
     Ok((states, inputs))
 }
+
+mod not_ready;
+mod per_tree;

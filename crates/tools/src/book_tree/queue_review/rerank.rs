@@ -8,6 +8,7 @@ pub(super) type LineStates = BTreeMap<(usize, String), (u32, bool)>;
 pub(super) struct Rerank {
     pub outputs: Vec<PathBuf>,
     pub payloads: Vec<Vec<u8>>,
+    pub destinations: Vec<Option<usize>>,
     pub summary: String,
     /// 台と id ごとの更新後の受付行の priority・hold (変わらない行を含む)。
     pub lines: LineStates,
@@ -469,6 +470,7 @@ pub(super) fn build(
     let mut result = Rerank {
         outputs: Vec::new(),
         payloads: Vec::new(),
+        destinations: Vec::new(),
         summary: String::new(),
         lines,
         groups,
@@ -527,6 +529,7 @@ pub(super) fn build(
     if let Some(path) = &args.rerank_table {
         result.outputs.push(path.clone());
         result.payloads.push(table);
+        result.destinations.push(None);
     }
     if let Some(dir) = &args.rerank_out {
         for (i, b) in boxes.iter().enumerate() {
@@ -552,6 +555,7 @@ pub(super) fn build(
                 .outputs
                 .push(dir.join(format!("{}_rerank_{}.jsonl", args.prefix, b.name)));
             result.payloads.push(bytes);
+            result.destinations.push(Some(i));
         }
         if !new_queue.is_empty() {
             // 台ごとの出力名は `_rerank_` で続くので、`_rerank-add` とは重ならない。
@@ -569,6 +573,7 @@ pub(super) fn build(
             }
             result.outputs.push(dir.join(format!("{}_rerank-add.jsonl", args.prefix)));
             result.payloads.push(bytes);
+            result.destinations.push(None);
         }
     }
     result.summary = format!(
