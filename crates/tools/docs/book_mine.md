@@ -315,6 +315,7 @@ chance の根には `--min-games-offset` を適用せず、1 局から作りま�
 | 指定 | 既定 | 意味 |
 | --- | --- | --- |
 | `--games <JSONL>` | 必須、繰り返し可 | tournament の棋譜。正準パス (canonicalize) が同じ入力の重複は除く |
+| `--unpaired` | off | 先後交換ペアを要求せず、csa_client などの完了局 (`black_win` / `white_win` / `draw`) を 1 局ずつ採用する。sweep・chance・early/late と offset の最低局数は同じ規則 |
 | `--out <JSONL>` / `--table <TSV>` | 必須 | キューの行と判断用一覧 |
 | `--tag <NAME>` | 必須 | id の先頭。[A-Za-z0-9_-] の 1〜40 文字 |
 | `--depth` | 6 | 木の段数 (0〜20)。`game` は根から最大 depth+1 手 |
@@ -357,7 +358,7 @@ book_mine tree seeds --games matches/games.jsonl --out seeds.jsonl --table seeds
   --update-out updates.jsonl --update-sources update-sources.tsv
 ```
 
-結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
+`--unpaired` を省略した場合、結果の有効性は `analyze_selfplay` と同じペア受領処理を使います。ファイルごとに `(pair_index, attempt)` の
 両スロットが揃い、どちらにも `error=true` がない組だけを使い、重複スロットは最初の結果を保持します。
 `outcome=in_progress` の局は種から除外し、その件数を標準出力に警告として出します。同じペアの完了局は使います。
 片スロットだけの組や失敗した attempt のもう一方の局も使いません。pair の情報がない旧形式では result の

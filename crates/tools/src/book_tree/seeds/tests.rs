@@ -11,6 +11,7 @@ const PATH: &[&str] = &[
 fn args(dir: &Path) -> SeedsArgs {
     SeedsArgs {
         games: vec![dir.join("games.jsonl")],
+        unpaired: false,
         out: dir.join("queue.jsonl"),
         table: dir.join("table.tsv"),
         tag: "test".into(),
@@ -213,7 +214,7 @@ fn failed_duplicate_and_incomplete_attempts_are_excluded() {
     rows.extend(game(4, &initial(), PATH, 0, "white_win"));
     rows.push(json!({"type":"result","game_id":99,"pair_index":0,"pair_slot":0,"attempt":1,"outcome":"white_win","plies":10}));
     write_games(dir.path(), &rows);
-    let valid = valid_game_ids(&dir.path().join("games.jsonl")).unwrap();
+    let valid = valid_game_ids(&dir.path().join("games.jsonl"), false).unwrap();
     assert_eq!(valid.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
     run(args(dir.path())).unwrap();
     assert!(lines(dir.path()).is_empty());
@@ -302,7 +303,7 @@ fn missing_evals_and_legacy_pair_metadata() {
         }
     }
     write_games(dir.path(), &rows);
-    assert_eq!(valid_game_ids(&dir.path().join("games.jsonl")).unwrap().len(), 2);
+    assert_eq!(valid_game_ids(&dir.path().join("games.jsonl"), false).unwrap().len(), 2);
     run(args(dir.path())).unwrap();
     assert!(lines(dir.path()).is_empty());
 }
@@ -376,7 +377,7 @@ fn in_progress_game_is_excluded_but_completed_partner_is_used() {
     rows.last_mut().unwrap()["error"] = json!(false);
     rows.extend(game(1, &initial(), PATH, 0, "draw"));
     write_games(dir.path(), &rows);
-    let valid = valid_game_ids(&dir.path().join("games.jsonl")).unwrap();
+    let valid = valid_game_ids(&dir.path().join("games.jsonl"), false).unwrap();
     assert_eq!(valid.keys().copied().collect::<Vec<_>>(), vec![1]);
     run(args(dir.path())).unwrap();
     let out = lines(dir.path());
@@ -502,7 +503,7 @@ fn selected_result_is_used_even_when_an_excluded_result_with_same_id_comes_first
     let path = dir.path().join("games.jsonl");
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, format!("\r\n{}", text.replace('\n', "\r\n"))).unwrap();
-    let selected = valid_game_ids(&path).unwrap();
+    let selected = valid_game_ids(&path, false).unwrap();
     let mut seen = vec![];
     visit_games(&path, &selected, |result, moves| {
         seen.push((result.game_id, result.outcome.clone(), moves.len()));
@@ -1125,4 +1126,87 @@ fn chance_shares_weights_exclusion_and_update_depth() {
     assert_eq!(updated.priority, 321);
     assert_eq!(updated.depth, 1);
     assert_eq!(updated.game, vec![existing.game[0].clone(), vec!["6g6f".into(), "4a3b".into()]]);
+}
+
+#[test]
+fn unpaired_single_game_sweep_loser() {
+    let dir = TempDir::new().unwrap();
+    let mut rows = game(1, &initial(), PATH, 2, "black_win");
+    let result = rows.last_mut().unwrap().as_object_mut().unwrap();
+    result.remove("pair_index");
+    result.remove("pair_slot");
+    write_games(dir.path(), &rows);
+    let mut opts = args(dir.path());
+    opts.sweep_loser = true;
+    run(opts).unwrap();
+    assert!(lines(dir.path()).is_empty());
+    let mut opts = args(dir.path());
+    opts.unpaired = true;
+    opts.sweep_loser = true;
+    run(opts).unwrap();
+    let out = lines(dir.path());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].own, "w");
+    assert_eq!(out[0].priority, 2);
+    assert_eq!(
+        parse_root(&out[0].root).unwrap().key,
+        parse_root(&format!("sfen {}", after(&PATH[..2]))).unwrap().key
+    );
+    let first = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let mut opts = args(dir.path());
+    opts.unpaired = true;
+    opts.sweep_loser = true;
+    run(opts).unwrap();
+    assert_eq!(first, std::fs::read(dir.path().join("queue.jsonl")).unwrap());
+}
+
+#[test]
+fn unpaired_results_validate_outcomes_and_duplicate_ids() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("games.jsonl");
+    let mut rows = vec![
+        json!({"type":"result","game_id":0,"outcome":"black_win"}),
+        json!({"type":"result","game_id":1,"outcome":"white_win"}),
+        json!({"type":"result","game_id":2,"outcome":"draw"}),
+        json!({"type":"result","game_id":3,"outcome":"in_progress"}),
+        json!({"type":"result","game_id":4,"outcome":"black_win","error":true}),
+    ];
+    write_games(dir.path(), &rows);
+    assert_eq!(
+        valid_game_ids(&path, true).unwrap().keys().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    rows.push(json!({"type":"result","game_id":0,"outcome":"draw"}));
+    write_games(dir.path(), &rows);
+    assert!(format!("{:#}", valid_game_ids(&path, true).unwrap_err()).contains("game_id が重複"));
+    *rows.last_mut().unwrap() = json!({"type":"result","game_id":5,"outcome":"invalid"});
+    write_games(dir.path(), &rows);
+    assert!(format!("{:#}", valid_game_ids(&path, true).unwrap_err()).contains("不正な outcome"));
+}
+
+#[test]
+fn unpaired_single_game_uses_chance_and_early_late_rules() {
+    for (collapse_plies, class, priority) in [(30, "early", 2), (0, "late", 100)] {
+        let dir = TempDir::new().unwrap();
+        let mut rows = game(1, &initial(), PATH, 1, "white_win");
+        rows.last_mut().unwrap().as_object_mut().unwrap().remove("pair_index");
+        rows.last_mut().unwrap().as_object_mut().unwrap().remove("pair_slot");
+        set_score(&mut rows, 8, json!({"cp": 500}));
+        write_games(dir.path(), &rows);
+        let mut opts = args(dir.path());
+        opts.unpaired = true;
+        opts.chance_cp = Some(500);
+        opts.collapse_plies = collapse_plies;
+        run(opts).unwrap();
+        let out = lines(dir.path());
+        assert_eq!(out.len(), 3);
+        for own in ["b", "w"] {
+            assert!(
+                table(dir.path())
+                    .lines()
+                    .any(|l| l.starts_with(&format!("{own}\t2\t{priority}\t{class}\t1\t")))
+            );
+        }
+        assert!(table(dir.path()).lines().any(|l| l.starts_with("b\t3\t2\tchance\t1\t")));
+    }
 }
