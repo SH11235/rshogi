@@ -12,6 +12,7 @@ mod exit_report;
 mod exits;
 mod export;
 mod file_lock;
+mod game_gaps;
 mod hold_early;
 mod inventory;
 mod journal;
@@ -207,6 +208,8 @@ enum MasterCommand {
     Compare(walk::compare::CompareArgs),
     /// 自分は main、相手は main・alt を指して到達する出口を一覧にする
     Exits(exits::ExitsArgs),
+    /// 対局の手順と元データの抜けを一覧にする
+    GameGaps(Box<game_gaps::GameGapsArgs>),
     /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
     LineDb(line_db::LineDbArgs),
     /// 初期局面から先手と後手の main を交互に指し、定跡が切れる所と、そこを根にした木の行を出す
@@ -235,6 +238,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Walk(args) => walk::run(args),
         MasterCommand::Compare(args) => walk::compare::run(args),
         MasterCommand::Exits(args) => exits::run(args),
+        MasterCommand::GameGaps(args) => game_gaps::run(*args),
         MasterCommand::LineDb(args) => line_db::run(args),
         MasterCommand::MainLine(args) => main_line::run(args),
         MasterCommand::ExitReport(args) => exit_report::run(args),

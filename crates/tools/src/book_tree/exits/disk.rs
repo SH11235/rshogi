@@ -95,12 +95,12 @@ impl Seen {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct Record {
-    pub(super) key: Vec<String>,
-    pub(super) value: String,
+pub(in crate::book_tree) struct Record {
+    pub(in crate::book_tree) key: Vec<String>,
+    pub(in crate::book_tree) value: String,
 }
 
-pub(super) fn read_record(reader: &mut impl BufRead) -> Result<Option<Record>> {
+pub(in crate::book_tree) fn read_record(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);
@@ -114,7 +114,7 @@ fn write_record(writer: &mut impl Write, record: &Record) -> Result<()> {
     Ok(())
 }
 
-pub(super) struct Sorter {
+pub(in crate::book_tree) struct Sorter {
     chunk: Vec<Record>,
     bytes: usize,
     // マージを二進桁ごとに繰り上げ、塊の数に比例する管理表を持たない。
@@ -122,7 +122,7 @@ pub(super) struct Sorter {
 }
 
 impl Sorter {
-    pub(super) fn new() -> Self {
+    pub(in crate::book_tree) fn new() -> Self {
         Self {
             chunk: Vec::new(),
             bytes: 0,
@@ -130,7 +130,7 @@ impl Sorter {
         }
     }
 
-    pub(super) fn push(&mut self, key: Vec<String>, value: String) -> Result<()> {
+    pub(in crate::book_tree) fn push(&mut self, key: Vec<String>, value: String) -> Result<()> {
         self.bytes += value.len() + key.iter().map(String::len).sum::<usize>();
         self.chunk.push(Record { key, value });
         if self.bytes >= SORT_BYTES || self.chunk.len() >= SORT_ROWS {
@@ -161,7 +161,7 @@ impl Sorter {
         anyhow::bail!("外部ソートの行数が大きすぎます")
     }
 
-    pub(super) fn finish(mut self) -> Result<BufReader<File>> {
+    pub(in crate::book_tree) fn finish(mut self) -> Result<BufReader<File>> {
         self.flush()?;
         let mut result = None;
         for run in self.runs.into_iter().flatten() {
