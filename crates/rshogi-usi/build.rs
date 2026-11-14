@@ -41,8 +41,37 @@ fn main() {
     println!("cargo:rustc-env=RSHOGI_SOURCE_ID={id}");
     let manifest = std::fs::read_to_string(manifest_dir.join("Cargo.toml"))
         .expect("rshogi-usi の Cargo.toml を読めません");
-    println!(
-        "cargo:rustc-env=RSHOGI_USI_RESULT_FEATURES={}",
-        usi_result_features(&manifest, &has_feature).join(",")
-    );
+    let mut result_features = usi_result_features(&manifest, &has_feature);
+    if let Some(id) = embed_spsa_params() {
+        result_features.push(id);
+    }
+    println!("cargo:rustc-env=RSHOGI_USI_RESULT_FEATURES={}", result_features.join(","));
+}
+
+/// `RSHOGI_EMBED_SPSA_PARAMS` (`.params` の絶対パス) の中身を `OUT_DIR/embedded_spsa.params` に書く。
+/// 指定が無ければ空のファイルを書く。焼き込んだ値は結果を変えるので、中身の hash を版の材料として返す。
+fn embed_spsa_params() -> Option<String> {
+    const VAR: &str = "RSHOGI_EMBED_SPSA_PARAMS";
+    println!("cargo:rerun-if-env-changed={VAR}");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_spsa.params");
+    let content = match env::var_os(VAR).filter(|v| !v.is_empty()) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            // build script の作業ディレクトリは crate の dir なので、相対パスは呼び出し側の意図とずれる
+            assert!(path.is_absolute(), "{VAR} は絶対パスで指定してください: {}", path.display());
+            println!("cargo:rerun-if-changed={}", path.display());
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{VAR} を読めません ({}): {e}", path.display()));
+            text.replace("\r\n", "\n")
+        }
+        None => String::new(),
+    };
+    std::fs::write(&out, &content).expect("embedded_spsa.params を書けません");
+    (!content.is_empty()).then(|| format!("embedded-spsa-{:016x}", fnv1a64(content.as_bytes())))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }

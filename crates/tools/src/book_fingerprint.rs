@@ -334,6 +334,18 @@ fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resou
             None => resources.reusable = false,
         }
     }
+    // engine_options.txt は setoption より優先して固定されるので、置いてあれば条件に含める
+    if let Some(path) = engine
+        .canonicalize()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("engine_options.txt")))
+    {
+        match path.try_exists() {
+            Ok(true) => resources.paths.push(path),
+            Ok(false) => {}
+            Err(_) => resources.reusable = false,
+        }
+    }
     resources.paths.sort();
     resources.paths.dedup();
     resources
@@ -442,7 +454,10 @@ mod tests {
         let model_changed = engine_fingerprint(&engine, &opts).unwrap();
         assert_ne!(binary_changed, model_changed);
         std::fs::write(dir.path().join("spsa.params"), b"params").unwrap();
-        assert_ne!(model_changed, engine_fingerprint(&engine, &opts).unwrap());
+        let params_added = engine_fingerprint(&engine, &opts).unwrap();
+        assert_ne!(model_changed, params_added);
+        std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
+        assert_ne!(params_added, engine_fingerprint(&engine, &opts).unwrap());
     }
 
     #[test]

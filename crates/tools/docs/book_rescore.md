@@ -89,7 +89,7 @@ ONNX 静的評価モードの正常終了は、出力 `.db` / report / journal �
 
 journal は JSON Lines 形式です。各行には `kind`, `sfen`, `go`, `engine_fingerprint` と、子局面なら `value`/`depth`、親局面なら `bestmove` を記録します。
 
-USI モードの指紋にはエンジン本体と、明示した `EvalFile` / `EvalDir` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookExploreFile` の内容を含めます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、`no_book` または空文字なら無効です。`BookExploreFile` の空文字・`<empty>` は無効値です。`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の `spsa.params` を識別します。重複した option 名は拒否します。
+USI モードの指紋にはエンジン本体と、明示した `EvalFile` / `EvalDir` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookExploreFile` の内容を含めます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、`no_book` または空文字なら無効です。`BookExploreFile` の空文字・`<empty>` は無効値です。`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の `spsa.params` を識別します。エンジン隣に `engine_options.txt` があれば、その内容も含めます。重複した option 名は拒否します。
 
 絶対パスでモデルと資源を特定できる設定では、内容が同じときだけ再利用します。相対モデルパスや任意のファイル型 option など、エンジン固有の解決を保証できない設定は受理して実行し、警告して過去 journal の再利用だけを無効化します。再利用が必要なら対応する資源の絶対パスを明示してください。
 

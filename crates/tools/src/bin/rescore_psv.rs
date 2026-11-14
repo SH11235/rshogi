@@ -608,6 +608,14 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
                 inputs.push(automatic);
             }
         }
+        let engine_options = engine
+            .canonicalize()?
+            .parent()
+            .context("Engine has no parent")?
+            .join("engine_options.txt");
+        if engine_options.try_exists()? {
+            inputs.push(engine_options);
+        }
     }
     let expand_dir = cli.expand_output_dir.as_ref().map(|dir| dir.canonicalize()).transpose()?;
     let replacement_dir = cli
@@ -6599,6 +6607,30 @@ mod marker_tests {
                 std::fs::remove_file(&output).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn engine_options_next_to_engine_is_protected() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let input = dir.path().join("input.psv");
+        let engine_options = dir.path().join("engine_options.txt");
+        let output_dir = dir.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        for path in [&engine, &input, &engine_options] {
+            std::fs::write(path, [7; 40]).unwrap();
+        }
+        let cli = Cli::parse_from([
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--engine",
+            engine.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+        ]);
+        let protection = output_protection(&cli, std::slice::from_ref(&input)).unwrap();
+        assert!(protection.inputs.iter().any(|path| paths_match(path, &engine_options).unwrap()));
     }
 
     #[test]

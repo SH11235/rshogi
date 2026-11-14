@@ -16,6 +16,12 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン
 
+- `id name` を `RAMU` にした (以前は `Shogi Engine 0.1.0`)。
+- 実行ファイルと同じフォルダの `engine_options.txt` を `isready` のたびに読み、書かれたオプションを適用して固定するようにした。
+  固定したオプションは `setoption` では変わらない。書き方と相対パスの扱いは `crates/rshogi-usi/README.md`。
+  `book_mine` / `book_extend` / `book_rescore` と `rescore_psv` は、エンジンの隣にこのファイルがあれば条件の指紋に含める。
+- build 時に `RSHOGI_EMBED_SPSA_PARAMS` で `.params` を渡すと、その値を探索の既定値として焼き込めるようにした
+  (`docs/build.md`)。`--source-version` に `+embedded-spsa-<hash>` が付く。
 - `IgnoreBookPly` の既定値を `true` にした。定跡の局面を手数を無視して引くので、対局の開始前に決まった手が入る大会や途中局面からの対局でも、手数がずれた局面に当たる。手数ごとに別の手を選ぶ定跡を使う場合は `setoption name IgnoreBookPly value false` を指定する。
 
 ### 教師データ / 評価・計測ツール
