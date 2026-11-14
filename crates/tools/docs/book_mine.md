@@ -2322,7 +2322,7 @@ book_mine master opp-book-diff --master moves.tsv --schema schema \
 ```bash
 book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
   [--own-diff 30] [--opp-diff 100] [--opp-top 2] [--max-plies 20] [--max-positions 20000] \
-  [--check-every 2] [--master moves.tsv [--master-exit use|read]] [--extra marks.tsv] [--tag ext] [--priority 100] \
+  [--cap-exit read|skip] [--shared] [--check-every 2] [--master moves.tsv [--master-exit use|read|follow]] [--extra marks.tsv] [--tag ext] [--priority 100] \
   [--parts 55,65,78 [--skip-journal journal-copy.jsonl [--fingerprint <指紋>]]]
 ```
 
@@ -2331,13 +2331,15 @@ book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
 | `--book` | 必須 | 大きい定跡。テキスト `.db` か YaneuraOu のバイナリ定跡 `.ybb` (ファイル先頭で見分ける)。丸読みせず、ファイル上で二分探索して引く (`rshogi-book` の BookOnTheFly)。`.db` は `sfen` 行が手数を除いた SFEN のバイト順に並んでいる必要があり、並んでいなければ開くときに止まる (並べ替えた写しを渡す)。`.ybb` は並べ替え不要。count を持たず、depth は持つ版 (flags の bit0) と持たない版があるが、切り出しは値しか使わないので結果は `.db` と同じ。ファイルは読むだけ |
 | `--roots` | 必須 | 根の一覧 (JSON Lines)。1 行に `id` (`[A-Za-z0-9_-]`)・`root` (`sfen ...` か `startpos moves ...`)・`own` (`b` / `w`、根の手番と同じ)。他の項目は読まないので、`tree` のキューの行もそのまま渡せる |
 | `--out` | 必須 | 出力先。まだ無い dir |
-| `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす |
+| `--own-diff` | 30 | 自分の手番: 大きい定跡の最善の値からこの差以内の手を伸ばす。`--master-exit follow` で元データにある局面は main を使うので、この差では選ばない |
 | `--opp-diff` / `--opp-top` | 100 / 2 | 相手の手番: 値の上位 `--opp-top` 手と、最善からの差が `--opp-diff` 以内の手の和を伸ばす |
 | `--max-plies` | 20 | 根からの手数の上限。この手数の局面は出口 |
-| `--max-positions` | 20000 | 根ごとの局面数の上限。伸ばすとこれを超える局面は出口 |
+| `--max-positions` | 20000 | 根ごとの局面数の上限。伸ばすとこれを超える局面は出口。`--shared` では、その根に割り当てた局面数の上限 (他の根に割り当てた共有局面は数えない) |
+| `--cap-exit` | `read` | 局面数の上限で止めた局面を `read` は読む。`skip` は `exit_cap` のまま残し、`reads.tsv`・キュー・分け先から除く。`summary.tsv` と `cut.json` の `skipped_caps` に未完了件数を出す。手数の上限 (`exit_depth`) には影響しない |
+| `--shared` | 無効 | 同じ `own` の根をまとめて幅優先で辿り、局面ごとに 1 回だけ展開する。最短距離、同距離なら根 id の辞書順で局面とその出辺の担当を決める。手数・段数・確認点は担当の根から計算。根の入力順やスレッド数によらず出力は同じ。`own=b` と `own=w` は選ぶ手が異なるので別々に共有する |
 | `--check-every` | 2 | 確認点の間隔。自分の手番の途中の局面を、自分の手のこの数おき (根を含む) に読む。0 で読まない |
-| `--master` | なし | 定跡の元データの表。ここにある局面 (根を除く) を出口にする |
-| `--master-exit` | `use` | `use`: 元データの値を使い、読まない (自分の手番は main、相手の手番は値の分かる手の 1 位。値は `master audit` と同じ伝播の値)。値が分からない局面は読む。`read`: 止めて読む |
+| `--master` | なし | 定跡の元データの表。既定ではここにある局面 (根を除く) を出口にする。`--master-exit follow` では辿る手にも使う |
+| `--master-exit` | `use` | `use`: 元データの値を使い、読まない (自分の手番は main、相手の手番は値の分かる手の 1 位。値は `master audit` と同じ伝播の値)。値が分からない局面は読む。`read`: 止めて読む。`follow`: 元データでも止めず、自分の手番は main、相手の手番は外部定跡の差・上位の規則で辿り、外部定跡に合法手が無ければ元データの main・alt を辿る (bench・record は使わない)。根にも適用する。自分の main の伝播の値が不明なら `use` と同じく `exit_master` で止めて読む。元データの手が外部定跡に無くても辿る |
 | `--extra` | なし | 足す手 (TSV、見出しに `key`・`move`。他の列は読まない)。`borrow value` の `marks.tsv` をそのまま渡せる。どの根でも、部分木の途中の自分の手番の局面に着いたら足す |
 | `--tag` / `--priority` | `ext` / 100 | キューの行の id (`<根の id>_<tag>_<b\|w>`) と priority |
 | `--parts` | なし | 読む局面を複数の台に分けるときの、台ごとの速さの比 (カンマ区切り)。局面ごとにどれか 1 つの分け先に入れて `parts/part-<i>.jsonl` に書く (下の出力) |
@@ -2349,19 +2351,22 @@ book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
 - 根から幅優先で伸ばし、同じ局面 (手数を除く key) は 1 つにまとめます (合流。先後反転の局面は別の局面)。局面の手数は最初に着いた (根から最短の) 手数です。
 - 大きい定跡に合法な手が無い局面、手数の上限の局面、局面数の上限で伸ばせない局面、元データにある局面が出口です。非合法手は伸ばしません。
 - 確認点は、伸ばした自分の手番の局面のうち、根からの自分の手の数が `--check-every` の倍数の局面です。
-- メモリは根 1 本の部分木の局面数と、読む局面の一覧に比例します。
+- `follow` の leaf (`exit_nobook`) は、選択規則で辿れる合法手が外部定跡にも元データにも無い局面です。途中の確認点を読まないときは `--check-every 0` を指定します。leaf だけが必要なら `--cap-exit skip` と併用し、`exit_depth` は引き続き読むため `--max-plies` も十分大きくしてください。
+- メモリは根 1 本の部分木の局面数と、読む局面の一覧に比例します。`--shared` では全根の局面・辺の和集合を保持します。重なる区間を根ごとに複製しませんが、大きな和集合を扱うときは局面数の上限を設けてください。
 
 出力 (`--out`):
 
 | ファイル | 内容 |
 |---|---|
-| `summary.tsv` | 根ごとの局面数・途中の局面・出口の種類ごとの数・確認点・読む局面の数。読む前の見積もりに使う (標準出力にも出す) |
+| `summary.tsv` | 根ごとの局面数・途中の局面・出口の種類ごとの数・確認点・読む局面の数。`skipped_caps` は上限で止めて読まない未完了の局面数。`--shared` では担当する局面のみ集計。読む前の見積もりに使う (標準出力にも出す) |
 | `nodes.tsv` | `id key ply level side turn kind read`。`turn` は `own` / `opp`、`kind` は `inner` / `exit_nobook` / `exit_depth` / `exit_cap` / `exit_master`、`read` は読む局面なら 1 |
-| `edges.tsv` | `id key move child book_value origin`。`book_value` は大きい定跡の値 (手番の側から)、`origin` は `book` / `extra` |
+| `edges.tsv` | `id key move child book_value origin`。`book_value` は大きい定跡の値 (手番の側から)、`origin` は `book` / `extra` / `master`。`master` の `book_value` は空。`--shared` では子局面が同じ `own` の別 id に属することがある |
 | `reads.tsv` | 読む局面 (根をまたいで重複を除く) の `key ply` |
 | `targets.jsonl` | `tree enqueue --from` に渡すキューの行。根ごと・手番ごとに 1 行で、段 0 (`depth: 0`) と `roots` に読む局面すべてを持つ |
 | `parts/part-<i>.jsonl` | `--parts` のときだけ。`i` 番目の台に `tree enqueue --from` で渡すキューの行 (段 0、手番ごとに 1 行、id `<tag>_p<i>_<b\|w>`)。根をまたいで重複を除いた読む局面を、根の順 (根の中は局面の文字列順) に初めて出た順で、(割り当て済みの数 + 1) / 速さ が一番小さい分け先 (同じなら番号の小さい方) に入れる。どの局面も 1 つの分け先だけに入るので、別々の台帳を持つ台で同じ局面を 2 回読まない。行の `own` は局面の手番 (段 0 なので読みには影響しない)。`targets.jsonl` とは id が違うので、どちらか一方だけを積む。速さの比や `--skip-journal` の台帳を変えると分け先の 1 局面目が変わり得るので、切り直すときは `--tag` を変える |
-| `cut.json` | 大きい定跡の名前・大きさ・SHA-256、条件、根の一覧 (`borrow value` が読む) |
+| `cut.json` | 大きい定跡の名前・大きさ・SHA-256、条件、根の一覧、上限で止めて読まない未完了件数 `skipped_caps` (`borrow value` が読む) |
+
+`--shared` の `targets.jsonl` は局面の担当 id ごとの行です。同じ局面を根にした id が複数ある場合、辞書順で後の id は担当局面を持たず、キューの行が無いことがあります。`borrow value` は共有辺を同じ `own` のグラフとしてまとめて 1 回伝播し、各根の結果を報告します。
 
 同じ入力なら同じ出力になります。読む局面の組を変えて (条件や `--extra` を変えて) 切り直したときは `--tag` を変えてください。キューは id ごとに `root` を固定するので、同じ id で組が変わると拒否されることがあります。
 
@@ -2389,6 +2394,7 @@ book_mine borrow value --cut cut1 --journal journal-copy.jsonl --master moves.ts
 伝播:
 
 - 部分木を `.db` にして `book_backprop --merge replace` と同じ後退解析で解きます。切り出しと同じく、先後反転した局面へは辺を張りません。先手を自分として解く回は `--draw-value-black`、後手は `--draw-value-white` を千日手の値にします (部分木の中の循環)。
+- `--cap-exit skip` の未完了局面と、部分木の辺でそこへ至る全局面は、値を確定せず登録を保留します (`values.tsv` には手の行が無く、該当する根の最善手・値は空)。未展開の応手を無視して良い値を登録することを避けるためです。未完了局面に至らない枝は通常どおり伝播・登録できます。全根の値が必要なら上限を増やして切り直してください。
 - 出口の手は読みの MultiPV の手と値です。0 行の読みは `bestmove resign` なら −30000、宣言勝ちなら勝ちの値です。`tree` の値 (model の伝播) は resign の葉を 0 にするので、詰みの絡む根では `borrow` と `tree` の 1 位が食い違うことがあります。読みの手が部分木の局面に着けば、その局面の値が伝わります。元データの値を使う出口は、その値だけを持ちます。
 - 途中の局面の手は部分木の手だけです。確認点の読みは値に混ぜません。
 - 同じ値の手は、`book_backprop` の同値手の補正 (勝ちは出口へ短く届く手を残し、遠回りの手を 1 下げる) を受けます。
