@@ -787,6 +787,7 @@ impl SearchSettings {
 }
 
 fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<String> {
+    tools::book_fingerprint::ensure_no_engine_options(engine_path)?;
     let engine_name =
         engine_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     let engine_bytes = std::fs::read(engine_path)
@@ -3612,6 +3613,18 @@ done
             std::fs::write(&model, "other").unwrap();
             assert_ne!(before, engine_fingerprint(&engine.path, &options).unwrap());
             std::fs::remove_file(&model).unwrap();
+            assert!(engine_fingerprint(&engine.path, &options).is_err());
+        }
+
+        #[test]
+        fn engine_options_next_to_engine_is_rejected() {
+            let engine = MockEngine::new(&[]);
+            let model = engine.path.with_file_name("model");
+            std::fs::write(&model, "model").unwrap();
+            let options = vec![format!("EvalFile={}", model.display())];
+            assert!(engine_fingerprint(&engine.path, &options).is_ok());
+            std::fs::write(engine.path.with_file_name("engine_options.txt"), "USI_Hash 16")
+                .unwrap();
             assert!(engine_fingerprint(&engine.path, &options).is_err());
         }
 

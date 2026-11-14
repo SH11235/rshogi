@@ -2496,7 +2496,8 @@ fn validate_option_value(declaration: &str, value: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        Some("check") if matches!(value, "true" | "false" | "1" | "0") => Ok(()),
+        // 適用側は true/false だけを確実に読む (parse::<bool> の項目がある)
+        Some("check") if matches!(value, "true" | "false") => Ok(()),
         Some("check") => Err(format!("'{value}' is not true or false")),
         Some("combo") => {
             let allowed = tokens.windows(2).any(|w| w[0] == "var" && w[1] == value);
