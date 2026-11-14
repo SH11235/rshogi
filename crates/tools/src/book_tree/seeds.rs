@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 pub(super) struct SeedsArgs {
     #[arg(long, required = true)]
     games: Vec<PathBuf>,
+    /// 先後交換ペアを要求せず、完了した局を 1 局ずつ採用する
+    #[arg(long)]
+    unpaired: bool,
     #[arg(long)]
     out: PathBuf,
     #[arg(long)]
@@ -152,16 +155,40 @@ fn visit_json(
     Ok(())
 }
 
-fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
+fn valid_game_ids(path: &Path, unpaired: bool) -> Result<BTreeMap<u32, u64>> {
     let mut pairs = ResultPairs::default();
     let mut valid = BTreeMap::new();
     let mut seq = 0;
     let mut in_progress = 0;
+    let mut accept = |result: GameResult, offset| -> Result<()> {
+        if result.outcome == "in_progress" {
+            in_progress += 1;
+            return Ok(());
+        }
+        ensure!(
+            matches!(result.outcome.as_str(), "black_win" | "white_win" | "draw"),
+            "不正な outcome: {}",
+            result.outcome
+        );
+        ensure!(
+            !valid.contains_key(&result.game_id),
+            "game_id が重複しています: {}",
+            result.game_id
+        );
+        valid.insert(result.game_id, offset);
+        Ok(())
+    };
     visit_json(path, |offset, value| {
         if value["type"] != "result" {
             return Ok(());
         }
         let result: GameResult = serde_json::from_value(value)?;
+        if unpaired {
+            if !result.error.unwrap_or(false) {
+                accept(result, offset)?;
+            }
+            return Ok(());
+        }
         let key = (result.pair_index.unwrap_or(seq / 2), result.attempt);
         let slot = result.pair_slot.unwrap_or(seq % 2).min(1) as usize;
         seq += 1;
@@ -169,21 +196,7 @@ fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
             && pair.iter().all(|(r, _)| !r.error.unwrap_or(false))
         {
             for (result, offset) in pair {
-                if result.outcome == "in_progress" {
-                    in_progress += 1;
-                    continue;
-                }
-                ensure!(
-                    matches!(result.outcome.as_str(), "black_win" | "white_win" | "draw"),
-                    "不正な outcome: {}",
-                    result.outcome
-                );
-                ensure!(
-                    !valid.contains_key(&result.game_id),
-                    "game_id が重複しています: {}",
-                    result.game_id
-                );
-                valid.insert(result.game_id, offset);
+                accept(result, offset)?;
             }
         }
         Ok(())
@@ -521,7 +534,11 @@ pub(super) fn run(mut args: SeedsArgs) -> Result<()> {
             .or_default()
             .insert(row.line.depth);
     }
-    let valid: Vec<_> = args.games.iter().map(|p| valid_game_ids(p)).collect::<Result<_>>()?;
+    let valid: Vec<_> = args
+        .games
+        .iter()
+        .map(|p| valid_game_ids(p, args.unpaired))
+        .collect::<Result<_>>()?;
     let mut non_sweep = BTreeSet::new();
     let mut non_sweep_roots = BTreeSet::new();
     // 合流前の接頭手順ごとに採否を決めてから、各局内で根と手順を重複排除する。
