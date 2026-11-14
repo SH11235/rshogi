@@ -200,6 +200,7 @@ CLOCK_PRESETS = '''[
   {"game_name":"byoyomi-msec-10-100","kind":"countdown_msec","total_time_ms":10000,"byoyomi_ms":100},
   {"game_name":"byoyomi-120-5","kind":"countdown","total_time_sec":120,"byoyomi_sec":5},
   {"game_name":"fischer-60-5F","kind":"fischer","total_time_sec":60,"increment_sec":5},
+  {"game_name":"fischer-180-2F","kind":"fischer","total_time_sec":180,"increment_sec":2},
   {"game_name":"floodgate-600-10","kind":"countdown","total_time_sec":600,"byoyomi_sec":10},
   {"game_name":"floodgate-600-10-moves256","kind":"countdown","total_time_sec":600,"byoyomi_sec":10,"max_moves":256},
   {"game_name":"floodgate-600-10-moves512","kind":"countdown","total_time_sec":600,"byoyomi_sec":10,"max_moves":512}
