@@ -1475,7 +1475,7 @@ book_mine master export --master moves.tsv --out out/book --schema schema \
 
 出力先の親ディレクトリは、書き出すときに必要なら作成します。元データ全体に `master validate` と同じ検査を行い、
 誤りがあれば全件報告して書き出しません。検査後に tier で絞り、局面の key、role (main、alt、bench、record)、
-USI の手の順に並べます。入力は変更しません。
+USI の手の順に並べます。入力は変更しません。段別の所要時間を標準エラーへ出します。
 
 bench は record と同じく `.db` に value=-30000/count=0 で残し、どのプリセットでも選びません。
 
@@ -1483,6 +1483,7 @@ bench は record と同じく `.db` に value=-30000/count=0 で残し、どの�
 |---|---|---|
 | `--master <tsv>` | 必須 | 13 列の元データ |
 | `--out <prefix>` | 必須 | 下記 4 ファイルの接頭辞 |
+| `--threads <N>` | `0` | 台帳読み込み・応手グラフ構築のスレッド数 (0 = 全コア)。出力はスレッド数によらない |
 | `--tier wide\|curated` | `wide` | wide は全行、curated は curated の行だけ |
 | `--schema <dir>` | なし | 3 表による source・cond・lineage の語彙検査 |
 | `--reads <path>...` | なし | JSONL ファイル、または再帰的に `*.jsonl` を探すディレクトリ。複数指定可 |

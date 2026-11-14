@@ -1,6 +1,7 @@
 use super::super::{master_table::Row, reply_graph};
 use crate::book_db::{position_from_sfen, strip_ply};
 use anyhow::Result;
+use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -9,22 +10,32 @@ pub(super) type Edges = BTreeMap<Pair, BTreeMap<String, String>>;
 pub(super) fn continuations(rows: &[Row]) -> Result<Edges> {
     let keys: BTreeSet<_> = rows.iter().map(|r| r.get("key")).collect();
     let mut edges = Edges::new();
-    for row in rows {
-        let mut pos = position_from_sfen(&format!("{} 1", row.get("key")))?;
-        reply_graph::apply_usi(&mut pos, row.get("move"))?;
-        let mut legal = MoveList::new();
-        generate_legal_all(&pos, &mut legal);
-        let mut replies = BTreeMap::new();
-        for &mv in legal.iter() {
-            pos.do_move(mv, pos.gives_check(mv));
-            let sfen = pos.to_sfen();
-            let child = strip_ply(&sfen);
-            if keys.contains(child) {
-                replies.insert(mv.to_usi(), child.to_owned());
-            }
-            pos.undo_move(mv);
+    // 入力順に回収して、複数の行が失敗しても最初のエラーを一定にする。
+    for chunk in rows.chunks(4096) {
+        let expanded: Vec<Result<_>> = chunk
+            .par_iter()
+            .map(|row| {
+                let mut pos = position_from_sfen(&format!("{} 1", row.get("key")))?;
+                reply_graph::apply_usi(&mut pos, row.get("move"))?;
+                let mut legal = MoveList::new();
+                generate_legal_all(&pos, &mut legal);
+                let mut replies = BTreeMap::new();
+                for &mv in legal.iter() {
+                    pos.do_move(mv, pos.gives_check(mv));
+                    let sfen = pos.to_sfen();
+                    let child = strip_ply(&sfen);
+                    if keys.contains(child) {
+                        replies.insert(mv.to_usi(), child.to_owned());
+                    }
+                    pos.undo_move(mv);
+                }
+                Ok(((row.get("key").into(), row.get("move").into()), replies))
+            })
+            .collect();
+        for result in expanded {
+            let (pair, replies) = result?;
+            edges.insert(pair, replies);
         }
-        edges.insert((row.get("key").into(), row.get("move").into()), replies);
     }
     Ok(edges)
 }

@@ -57,6 +57,9 @@ pub(super) struct ExportArgs {
     /// 局面と手の差分を報告する比較元の定跡 (.db)
     #[arg(long)]
     base: Option<PathBuf>,
+    /// スレッド数 (0 = 全コア)
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
     /// 既存の出力ファイルを置き換える
     #[arg(long)]
     force: bool,
@@ -74,7 +77,13 @@ pub(super) fn run(args: ExportArgs) -> Result<()> {
     run_to(args, &mut std::io::BufWriter::new(std::io::stdout().lock()))
 }
 fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
+    let pool = super::reply_graph::thread_pool(args.threads)?;
     ensure!(args.bad_eval.is_finite(), "bad-eval must be finite");
+    let mut stage = std::time::Instant::now();
+    let mut timing = |name: &str| {
+        eprintln!("export timing: {name}={:.3}s", stage.elapsed().as_secs_f64());
+        stage = std::time::Instant::now();
+    };
     let schema = Schema::load(args.schema.as_deref())?;
     let logs = if args.reads.is_empty() {
         vec![]
@@ -99,8 +108,10 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
     files::guard(&outputs, &inputs, args.force)?;
     let text = std::fs::read(&args.master)
         .with_context(|| format!("読めません: {}", args.master.display()))?;
+    timing("input");
     let errors = schema.validate(&text)?;
     ensure!(errors.is_empty(), "{}", errors.join("\n"));
+    timing("validation");
     let mut rows = master_table::parse_master(std::str::from_utf8(&text)?)?;
     drop(text);
     rows.retain(|r| args.tier == "wide" || r.get("tier") == "curated");
@@ -108,19 +119,24 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         (a.get("key"), role(a), a.get("move")).cmp(&(b.get("key"), role(b), b.get("move")))
     });
     let retained_keys = rows.iter().map(|row| row.get("key")).collect();
+    timing("parse-sort");
     let (read_groups, _) = reads::load(&logs, args.min_nodes, args.draw_pin, Some(&retained_keys))?;
+    timing("reads");
     let journal_depths = if args.journal.is_empty() {
         journal_depths::Depths::default()
     } else {
-        journal_depths::load(&journals, &retained_keys)?
+        journal_depths::load(&journals, &retained_keys, &pool)?
     };
-    let edges = graph::continuations(&rows)?;
+    timing("journals");
+    let edges = pool.install(|| graph::continuations(&rows))?;
+    timing("continuations");
     let active = rows
         .iter()
         .filter(|r| !super::master_table::is_unplayed(r.get("role")))
         .map(|r| (r.get("key").into(), r.get("move").into()))
         .collect();
     let depths = graph::depths(&edges, &active);
+    timing("depths");
     let mut groups = BTreeMap::<&str, Vec<&Row>>::new();
     for row in &rows {
         groups.entry(row.get("key")).or_default().push(row);
@@ -144,6 +160,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         .context("book filename must be UTF-8")?;
     let mut presets = ["default", "random"]
         .map(|name| format!("# preset: {name}\n# book: {filename} sha256 {digest}\n"));
+    timing("db-presets-header");
     let mut positions = Vec::new();
     let mut checked_positions = BTreeMap::new();
     let mut preset_count = 0;
@@ -280,6 +297,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
             )?;
         }
     }
+    timing("presets-annotations");
     let annotation = Json::object([
         ("format", Json::string("rshogi-book-annotations")),
         ("version", Json::integer(2)),
@@ -303,6 +321,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         ("positions", Json::object(positions)),
     ])
     .render();
+    timing("annotation-render");
     let bad = check::export_bad_progressions(
         check::Annotation {
             version: 2,
@@ -319,6 +338,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         !args.strict_bad_eval || bad == 0,
         "strict-bad-eval: bad positions reachable; no files written"
     );
+    timing("bad-progressions");
     if let Some(base) = &args.base {
         let previous = book_diff::read(base, true)?;
         let added = groups.keys().filter(|k| !previous.contains_key(**k)).count();
@@ -342,6 +362,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
             writeln!(out, "  removed: {key}")?;
         }
     }
+    timing("base-diff");
     let [default, random] = presets;
     files::write(
         &outputs,
@@ -354,6 +375,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
             annotation.into_bytes(),
         ],
     )?;
+    timing("write");
     print_counts(&rows, &schema, out)?;
     writeln!(
         out,
@@ -362,6 +384,7 @@ fn run_to(args: ExportArgs, out: &mut impl Write) -> Result<()> {
         depths.values().max().unwrap_or(&0)
     )?;
     writeln!(out, "book: {filename}; sha256: {digest}")?;
+    timing("counts");
     out.flush()?;
     Ok(())
 }
