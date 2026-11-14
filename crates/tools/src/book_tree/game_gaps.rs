@@ -151,6 +151,7 @@ fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
     let mut ended = false;
     for (n, line) in text.lines().enumerate() {
         let s = line.trim();
+        let mut pv_comment = s.strip_prefix("'**");
         if s.starts_with('%') {
             let (_, parsed, _) = rshogi_csa::parse_csa_full(s)?;
             ensure!(
@@ -174,14 +175,7 @@ fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
                 n + 1
             );
             pvs.push(None);
-        } else if !ended && let Some(rest) = s.strip_prefix("'**") {
-            let mut fields = rest.split_whitespace();
-            if fields.next().is_some_and(|value| value.parse::<i32>().is_ok())
-                && let Some(first) = fields.next()
-                && let Some(pv) = pvs.last_mut()
-            {
-                *pv = Some(first.into());
-            }
+            pv_comment = rest.split(',').find_map(|part| part.trim().strip_prefix("'**"));
         } else {
             ensure!(
                 s.is_empty()
@@ -191,6 +185,15 @@ fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
                 "読めない CSA 行: {} 行目 {s}",
                 n + 1
             );
+        }
+        if !ended && let Some(rest) = pv_comment {
+            let mut fields = rest.split_whitespace();
+            if fields.next().is_some_and(|value| value.parse::<i32>().is_ok())
+                && let Some(first) = fields.next()
+                && let Some(pv) = pvs.last_mut()
+            {
+                *pv = Some(first.into());
+            }
         }
     }
     Ok(pvs)
@@ -405,13 +408,15 @@ fn read_excluded(paths: &[PathBuf]) -> Result<Excluded> {
     }
     let mut out: Excluded = BTreeMap::new();
     for (id, (line, root)) in ids {
-        let mut roots = vec![root];
-        roots.extend(line.roots.iter().map(|s| parse_root(s)).collect::<Result<Vec<_>>>()?);
-        for root in roots {
+        let mut roots = vec![(root, line.game)];
+        for additional in &line.roots {
+            roots.push((parse_root(additional)?, Vec::new()));
+        }
+        for (root, game) in roots {
             out.entry(root.key).or_default().push(Coverage {
                 id: id.clone(),
                 depth: line.depth,
-                game: line.game.clone(),
+                game,
             });
         }
     }

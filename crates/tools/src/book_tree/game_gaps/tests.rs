@@ -548,7 +548,7 @@ fn queue_identity_is_fixed_and_latest_accepted_fields_replace_earlier_fields() {
 }
 
 #[test]
-fn additional_roots_participate_in_coverage() {
+fn additional_roots_without_game_do_not_cover_root_move_or_continuations() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = args(dir.path());
     let ms = moves();
@@ -566,7 +566,10 @@ fn additional_roots_participate_in_coverage() {
     a.exclude_queue.push(exclude);
     run(a).unwrap();
     let text = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
-    assert_eq!(text.matches("\textra\t").count(), 2);
+    assert_eq!(text.matches("\textra\t").count(), 0);
+    let rows: Vec<_> = text.lines().skip(1).map(|s| s.split('\t').nth(5).unwrap()).collect();
+    assert_eq!(&rows[..2], ["", ""]);
+    assert!(queue(&dir.path().join("queue.jsonl"))[0].id.contains("_1_"));
 }
 
 #[test]
@@ -616,4 +619,28 @@ fn csa_early_exit_excludes_the_first_searched_move() {
         1
     );
     assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+}
+
+#[test]
+fn csa_inline_comments_use_the_same_exit_detection_as_separate_lines() {
+    for separator in [",", "\n"] {
+        for (pv, expected_rows) in [("+7776FU", 1), ("+2726FU", 2)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut a = args(dir.path());
+            a.games = vec![dir.path().join("inline.csa")];
+            a.until = Until::Exit;
+            let time = if pv == "+7776FU" { 0 } else { 2 };
+            std::fs::write(
+                &a.games[0],
+                format!(
+                    "N+mine\nN-other\nPI\n+\n+7776FU{separator}T{time}{separator}'** 10 {pv}\n%TORYO\n"
+                ),
+            )
+            .unwrap();
+            master(&a.master, &[], &[], &[]);
+            run(a).unwrap();
+            let table = std::fs::read_to_string(dir.path().join("table.tsv")).unwrap();
+            assert_eq!(table.lines().count(), expected_rows, "{separator:?} {pv}");
+        }
+    }
 }
