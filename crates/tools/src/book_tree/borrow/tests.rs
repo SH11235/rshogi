@@ -58,6 +58,8 @@ fn params(max_plies: usize, max_positions: usize) -> CutParams {
         max_positions,
         check_every: 1,
         master_exit: None,
+        cap_exit: cut::CapExit::Read,
+        shared: false,
     }
 }
 
@@ -154,6 +156,7 @@ fn master_positions_stop_and_use_or_read_master_values() {
     ]);
     let stop = MasterStop {
         values: &values,
+        moves: &BTreeMap::new(),
         mode: MasterExit::Use,
     };
     let tree = cut_root(&root(), &params(4, 100), &mut lookup, Some(&stop), &empty).unwrap();
@@ -164,6 +167,7 @@ fn master_positions_stop_and_use_or_read_master_values() {
 
     let read = MasterStop {
         values: &values,
+        moves: &BTreeMap::new(),
         mode: MasterExit::Read,
     };
     let tree = cut_root(&root(), &params(4, 100), &mut lookup, Some(&read), &empty).unwrap();
@@ -179,6 +183,7 @@ fn master_positions_stop_and_use_or_read_master_values() {
     )]);
     let stop = MasterStop {
         values: &unknown,
+        moves: &BTreeMap::new(),
         mode: MasterExit::Use,
     };
     let tree = cut_root(&root(), &params(4, 100), &mut lookup, Some(&stop), &empty).unwrap();
@@ -404,6 +409,177 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
 }
 
 #[test]
+fn cap_skip_blocks_exit_readings_that_rejoin_unfinished_positions() {
+    let s = settings();
+    let p = CutParams {
+        own_diff: 100,
+        ..params(4, 100)
+    };
+    let mut tree = cut_root(&root(), &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    let exit = key(&["5i5h", "5a4a"]);
+    let destination = key(&["5i4i", "5a4a", "4i5i"]);
+    assert_eq!(child(&exit, "5h5i").unwrap(), destination);
+    let unfinished = tree.nodes.get_mut(&destination).unwrap();
+    unfinished.kind = Kind::Cap;
+    unfinished.read = false;
+    let mut cache = readings(&s, &[("5i6i", 0)]);
+    cache.remove(&destination);
+    cache.insert(exit.clone(), reading(&exit, &[("5h5i", 100), ("5h6h", 10)], &s));
+    let independent = key(&["5i6i"]);
+    cache.insert(independent.clone(), reading(&independent, &[("5a6a", -30)], &s));
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    for blocked in [ROOT, &key(&["5i5h"]), &exit, &destination] {
+        assert!(values.moves[blocked].is_empty(), "{blocked}");
+        assert_eq!(values.nodes[blocked], 0);
+    }
+    assert_eq!(values.moves[&independent][0].value, -30);
+    let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, &cache);
+    assert!(!nodes.contains_key(ROOT));
+    assert!(!nodes.contains_key(&exit));
+    let opponent = register_nodes(0, &root(), "opp", &tree, &values, &BTreeSet::new(), 4, &cache);
+    assert_eq!(opponent[&independent].moves[0].value, -30);
+}
+
+#[test]
+fn master_follow_cycles_return_to_master_positions_and_use_draw_values() {
+    let keys = [
+        key(&[]),
+        key(&["5i5h"]),
+        key(&["5i5h", "5a5b"]),
+        key(&["5i5h", "5a5b", "5h5i"]),
+    ];
+    let moves: BTreeMap<_, _> = keys
+        .iter()
+        .zip(["5i5h", "5a5b", "5h5i", "5b5a"])
+        .map(|(key, mv)| (key.clone(), vec![mv.to_owned()]))
+        .collect();
+    assert_eq!(child(&keys[3], "5b5a").unwrap(), ROOT);
+    let master = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                MasterValue {
+                    main: Some(999),
+                    best: Some(999),
+                },
+            )
+        })
+        .collect();
+    let stop = MasterStop {
+        values: &master,
+        moves: &moves,
+        mode: MasterExit::Follow,
+    };
+    let p = CutParams {
+        check_every: 0,
+        ..params(10, 100)
+    };
+    let tree =
+        cut_root(&root(), &p, &mut |_| Ok(Vec::new()), Some(&stop), &BTreeMap::new()).unwrap();
+    assert_eq!(tree.nodes.len(), 4);
+    assert_eq!(tree.edges.len(), 4);
+    assert!(tree.nodes.values().all(|n| n.kind == Kind::Inner && !n.read));
+    assert!(tree.edges.iter().all(|e| e.master));
+    assert!(tree.edges.iter().any(|e| e.key == keys[3] && e.child == ROOT));
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &BTreeMap::new(),
+            master: &master,
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues {
+            black: -70,
+            white: 70,
+        },
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    for key in &keys {
+        assert_eq!(values.moves[key][0].value, if side(key) == "b" { -70 } else { 70 });
+        assert_eq!(values.moves[key][0].cond, "unknown");
+    }
+}
+
+#[test]
+fn white_own_values_and_registration_use_side_to_move_scores() {
+    let white = RootInfo {
+        id: "white".into(),
+        own: "w".into(),
+        key: key(&["5i5h"]),
+        ply: 2,
+    };
+    let middle = child(&white.key, "5a4a").unwrap();
+    let leaf = child(&middle, "5h6h").unwrap();
+    let mut lookup = |sfen: &str| {
+        let k = crate::book_db::strip_ply(sfen);
+        let mv = if k == white.key {
+            "5a4a"
+        } else if k == middle {
+            "5h6h"
+        } else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![BookEntryMove {
+            move_usi: mv.into(),
+            value: 0,
+            depth: 1,
+            move_count: 1,
+        }])
+    };
+    let p = CutParams {
+        check_every: 0,
+        ..params(2, 100)
+    };
+    let tree = cut_root(&white, &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    let s = settings();
+    let cache = BTreeMap::from([(leaf.clone(), reading(&leaf, &[("4a3a", 123)], &s))]);
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &white,
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert_eq!(values.moves[&leaf][0].value, 123);
+    assert_eq!(values.moves[&middle][0].value, -123);
+    assert_eq!(values.moves[&white.key][0].value, 123);
+    let own = register_nodes(0, &white, "own", &tree, &values, &BTreeSet::new(), 2, &cache);
+    assert_eq!(own[&white.key].moves[0].value, 123);
+    assert_eq!(own[&leaf].moves[0].value, 123);
+    assert!(!own.contains_key(&middle));
+    let opp = register_nodes(0, &white, "opp", &tree, &values, &BTreeSet::new(), 2, &cache);
+    assert_eq!(opp[&middle].moves[0].value, -123);
+}
+
+#[test]
 fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
     let s = settings();
     let e = key(&["5i4i", "5a4a"]);
@@ -417,6 +593,7 @@ fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
     )]);
     let stop = MasterStop {
         values: &master,
+        moves: &BTreeMap::new(),
         mode: MasterExit::Use,
     };
     let tree = cut_root(&root(), &params(4, 100), &mut lookup, Some(&stop), &empty).unwrap();
@@ -509,6 +686,7 @@ fn master_exit_conditions_follow_each_move_without_tainting_independent_branches
     )]);
     let stop = MasterStop {
         values: &master,
+        moves: &BTreeMap::new(),
         mode: MasterExit::Use,
     };
     let mut lookup = |sfen: &str| -> Result<Vec<BookEntryMove>> {
@@ -600,6 +778,15 @@ fn read_cut_rejects_malformed_book_sha256() {
     super::cut::run(cut_args(d, "cut", None)).unwrap();
     assert!(read_cut(&d.join("cut")).is_ok());
     let meta = d.join("cut").join(META);
+    let mut old: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("skipped_caps");
+    old["params"].as_object_mut().unwrap().remove("cap_exit");
+    old["params"].as_object_mut().unwrap().remove("shared");
+    std::fs::write(&meta, serde_json::to_string(&old).unwrap()).unwrap();
+    let (old_meta, _) = read_cut(&d.join("cut")).unwrap();
+    assert_eq!(old_meta.params.cap_exit, cut::CapExit::Read);
+    assert!(!old_meta.params.shared);
     let text = std::fs::read_to_string(&meta).unwrap();
     let sha = serde_json::from_str::<serde_json::Value>(&text).unwrap()["book"]["sha256"]
         .as_str()
@@ -1188,7 +1375,7 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
     assert_eq!(nodes[&a].nodes, 100);
     let original = nodes.clone();
     join_roots(&[], &mut nodes, &options, draws, 40).unwrap();
-    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     assert_eq!(nodes[&a].moves[0].mv, "5a4a");
     assert_eq!(nodes[&a].nodes, 900);
     assert_eq!(nodes[ROOT].nodes, 900);
@@ -1201,7 +1388,7 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
     }
     nodes = original;
     join_roots(&rows, &mut nodes, &options, draws, 40).unwrap();
-    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     let (again, _, _) = register::register(rows.clone(), &nodes, &options).unwrap();
     assert_eq!(
         crate::book_tree::master_table::format_master(&rows),
@@ -1209,14 +1396,14 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
     );
     nodes.remove(&ac);
     nodes.get_mut(&a).unwrap().nodes = 100;
-    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     assert_eq!(nodes[&a].nodes, 900);
     assert_eq!(nodes[ROOT].nodes, 900);
     let mut unread = nodes[&a].moves[0].clone();
     unread.mv = "5a6a".into();
     nodes.get_mut(&a).unwrap().moves.insert(0, unread);
     nodes.get_mut(&a).unwrap().nodes = 100;
-    joined_nodes(&mut nodes, &roots, &readings).unwrap();
+    joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     assert_eq!(nodes[&a].nodes, 900);
     assert_eq!(nodes[ROOT].nodes, 900);
 }
@@ -1529,4 +1716,409 @@ fn value_root_preserves_own_nodes_and_selected_descendants_nodes() {
     assert_eq!(values.moves[&branch].iter().find(|m| m.mv == "5a4a").unwrap().nodes, 900);
     let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, &cache);
     assert_eq!(nodes[ROOT].nodes, 2000);
+}
+
+#[test]
+fn cap_skip_keeps_unfinished_nodes_out_of_reads_and_queue() {
+    let mut p = params(4, 3);
+    p.cap_exit = cut::CapExit::Skip;
+    let tree = cut_root(&root(), &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    let caps: Vec<_> = tree.nodes.values().filter(|n| n.kind == Kind::Cap).collect();
+    assert_eq!(caps.len(), 2);
+    assert!(caps.iter().all(|n| !n.read));
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write_book(&d.join("big.db"));
+    std::fs::write(
+        d.join("roots.jsonl"),
+        format!("{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\"}}\n"),
+    )
+    .unwrap();
+    let mut args = cut_args(d, "cut", None);
+    args.cap_exit = cut::CapExit::Skip;
+    args.max_positions = 3;
+    args.set_check_every(0);
+    cut::run(args).unwrap();
+    let (meta, trees) = read_cut(&d.join("cut")).unwrap();
+    assert_eq!(meta.skipped_caps, 2);
+    assert!(trees[0].nodes.values().all(|n| !n.read));
+    assert_eq!(std::fs::read_to_string(d.join("cut/reads.tsv")).unwrap(), "key\tply\n");
+    assert_eq!(std::fs::read_to_string(d.join("cut/targets.jsonl")).unwrap(), "");
+    let summary = std::fs::read_to_string(d.join("cut/summary.tsv")).unwrap();
+    assert!(summary.lines().next().unwrap().ends_with("\tskipped_caps"));
+    assert!(summary.lines().nth(1).unwrap().ends_with("\t2"));
+    let work = tempfile::tempdir().unwrap();
+    let result = value_root(
+        &root(),
+        &trees[0],
+        &ValueInput {
+            readings: &BTreeMap::new(),
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert!(result.moves.values().all(Vec::is_empty));
+}
+
+#[test]
+fn master_follow_crosses_master_and_book_and_reads_unknown_main() {
+    let e = key(&["5i4i", "5a4a"]);
+    let next = child(&e, "4i4h").unwrap();
+    let leaf = child(&next, "4a3a").unwrap();
+    let values = BTreeMap::from([
+        (
+            ROOT.to_owned(),
+            MasterValue {
+                main: Some(1),
+                best: Some(99),
+            },
+        ),
+        (
+            e.clone(),
+            MasterValue {
+                main: Some(2),
+                best: Some(90),
+            },
+        ),
+    ]);
+    let moves = BTreeMap::from([
+        (ROOT.to_owned(), vec!["5i4i".into(), "5i5h".into()]),
+        (key(&["5i4i"]), vec!["5a5b".into()]),
+        (e.clone(), vec!["4i4h".into(), "4i5i".into()]),
+    ]);
+    let stop = MasterStop {
+        values: &values,
+        mode: MasterExit::Follow,
+        moves: &moves,
+    };
+    let mut book_lookup = |sfen: &str| {
+        if crate::book_db::strip_ply(sfen) == next {
+            Ok(vec![BookEntryMove {
+                move_usi: "4a3a".into(),
+                value: 10,
+                depth: 1,
+                move_count: 1,
+            }])
+        } else {
+            lookup(sfen)
+        }
+    };
+    let tree = cut_root(&root(), &params(10, 100), &mut book_lookup, Some(&stop), &BTreeMap::new())
+        .unwrap();
+    assert_eq!(tree.edges.iter().filter(|e| e.key == ROOT).count(), 1);
+    assert!(!tree.nodes.contains_key(&key(&["5i5h"])));
+    assert!(!tree.nodes.contains_key(&key(&["5i4i", "5a5b"])));
+    assert!(
+        tree.edges
+            .iter()
+            .any(|x| x.key == e && x.mv == "4i4h" && x.master && x.book_value.is_none())
+    );
+    assert_eq!(tree.nodes[&leaf].kind, Kind::Nobook);
+    assert!(tree.nodes[&leaf].read);
+
+    let mut unknown = values.clone();
+    unknown.get_mut(&e).unwrap().main = None;
+    let stop = MasterStop {
+        values: &unknown,
+        ..stop
+    };
+    let tree =
+        cut_root(&root(), &params(10, 100), &mut lookup, Some(&stop), &BTreeMap::new()).unwrap();
+    assert_eq!((tree.nodes[&e].kind, tree.nodes[&e].read), (Kind::Master, true));
+    assert!(!tree.nodes.contains_key(&next));
+}
+
+#[test]
+fn master_follow_uses_main_and_alt_when_opponent_book_has_no_legal_moves() {
+    let a = key(&["5i4i"]);
+    let moves = BTreeMap::from([
+        (ROOT.to_owned(), vec!["5i4i".into()]),
+        (a.clone(), vec!["5a5b".into(), "5a6a".into(), "9a9b".into()]),
+    ]);
+    let values = BTreeMap::from([(
+        ROOT.to_owned(),
+        MasterValue {
+            main: Some(1),
+            best: Some(1),
+        },
+    )]);
+    let stop = MasterStop {
+        values: &values,
+        mode: MasterExit::Follow,
+        moves: &moves,
+    };
+    let tree = cut_root(
+        &root(),
+        &params(10, 100),
+        &mut |_| Ok(Vec::new()),
+        Some(&stop),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(tree.edges.iter().filter(|e| e.key == a).count(), 2);
+    for mv in ["5a5b", "5a6a"] {
+        let k = child(&a, mv).unwrap();
+        assert_eq!((tree.nodes[&k].kind, tree.nodes[&k].read), (Kind::Nobook, true));
+    }
+}
+
+#[test]
+fn shared_cut_expands_once_assigns_shortest_root_and_breaks_ties_by_id() {
+    let e = key(&["5i4i", "5a4a"]);
+    let roots = vec![
+        root(),
+        RootInfo {
+            id: "z".into(),
+            key: e.clone(),
+            ply: 5,
+            ..root()
+        },
+        RootInfo {
+            id: "a".into(),
+            key: e.clone(),
+            ply: 7,
+            ..root()
+        },
+    ];
+    let mut calls = BTreeMap::new();
+    let mut counted = |sfen: &str| {
+        *calls.entry(crate::book_db::strip_ply(sfen).to_owned()).or_insert(0) += 1;
+        lookup(sfen)
+    };
+    let p = params(10, 100);
+    let trees = cut::cut_shared(&roots, &p, &mut counted, None, &BTreeMap::new()).unwrap();
+    assert!(calls.values().all(|&n| n == 1));
+    assert!(trees[1].nodes.is_empty());
+    assert_eq!(trees[2].nodes[&e].level, 0);
+    assert_eq!(trees[2].nodes[&e].ply, 7);
+    assert!(!trees[0].nodes.contains_key(&e));
+    assert!(trees[0].edges.iter().any(|edge| edge.child == e));
+    let mut reversed = roots.clone();
+    reversed.reverse();
+    let mut other = cut::cut_shared(&reversed, &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    other.reverse();
+    assert_eq!(trees, other);
+}
+
+#[test]
+fn shared_cut_files_are_deterministic_and_value_crosses_owner_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write_book(&d.join("big.db"));
+    let e = key(&["5i4i", "5a4a"]);
+    let roots = [
+        format!("{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\"}}"),
+        format!("{{\"id\":\"r2\",\"root\":\"sfen {e} 3\",\"own\":\"b\"}}"),
+    ];
+    for (out, threads, reverse) in [("cut1", 1, false), ("cut2", 4, true)] {
+        let mut lines = roots.clone();
+        if reverse {
+            lines.reverse();
+        }
+        std::fs::write(d.join("roots.jsonl"), lines.join("\n")).unwrap();
+        let mut args = cut_args(d, out, None);
+        args.shared = true;
+        args.set_check_every(0);
+        args.set_parts(vec![2, 1], None, None);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| cut::run(args))
+            .unwrap();
+    }
+    for file in [
+        META,
+        NODES,
+        EDGES,
+        "reads.tsv",
+        "targets.jsonl",
+        "summary.tsv",
+        "parts/part-0.jsonl",
+        "parts/part-1.jsonl",
+    ] {
+        assert_eq!(
+            std::fs::read(d.join("cut1").join(file)).unwrap(),
+            std::fs::read(d.join("cut2").join(file)).unwrap(),
+            "{file}"
+        );
+    }
+    let (meta, trees) = read_cut(&d.join("cut1")).unwrap();
+    let s = settings();
+    let cache = readings(&s, &[]);
+    let input = ValueInput {
+        readings: &cache,
+        master: &BTreeMap::new(),
+        master_known: &BTreeMap::new(),
+        conditions: &BTreeMap::new(),
+    };
+    let work = tempfile::tempdir().unwrap();
+    let values = value::value_shared(
+        &meta.roots,
+        &trees,
+        &input,
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    let merged = Subtree {
+        nodes: trees.iter().flat_map(|t| t.nodes.clone()).collect(),
+        edges: trees.iter().flat_map(|t| t.edges.clone()).collect(),
+    };
+    let expected =
+        value_root(&root(), &merged, &input, DrawValues::default(), Some(40), work.path()).unwrap();
+    assert_eq!(values[0].moves[ROOT], expected.moves[ROOT]);
+    assert_eq!(values[1].moves[&e], expected.moves[&e]);
+    let journal = d.join("journal.jsonl");
+    let mut j = Journal::open(&journal, &s.fingerprint).unwrap();
+    for reading in cache.values() {
+        j.append(reading.clone(), &s, "test".into()).unwrap();
+    }
+    drop(j);
+    let master = d.join("moves.tsv");
+    std::fs::write(&master, crate::book_tree::master_table::format_master(&[])).unwrap();
+    value::run(ValueArgs::for_test(d.join("cut1"), journal, master, d.join("value"), false))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("value/roots.tsv")).unwrap().lines().count(), 3);
+}
+
+#[test]
+fn cap_skip_values_complete_branch_without_registering_incomplete_ancestors() {
+    let mut p = params(10, 3);
+    p.cap_exit = cut::CapExit::Skip;
+    p.check_every = 0;
+    let a = key(&["5i5h"]);
+    let mut partial_book = |sfen: &str| {
+        if crate::book_db::strip_ply(sfen) == a {
+            Ok(Vec::new())
+        } else {
+            lookup(sfen)
+        }
+    };
+    let tree = cut_root(&root(), &p, &mut partial_book, None, &BTreeMap::new()).unwrap();
+    let s = settings();
+    let cache = BTreeMap::from([(a.clone(), reading(&a, &[("5a4a", -25)], &s))]);
+    let work = tempfile::tempdir().unwrap();
+    let result = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert!(result.moves[ROOT].is_empty());
+    assert_eq!(result.moves[&a][0].value, -25);
+    for (key, node) in &tree.nodes {
+        if node.kind == Kind::Cap {
+            assert!(result.moves[key].is_empty());
+        }
+    }
+    let registered =
+        register_nodes(0, &root(), "opp", &tree, &result, &BTreeSet::new(), p.max_plies, &cache);
+    assert_eq!(registered.len(), 1);
+    assert!(registered.contains_key(&a));
+}
+
+#[test]
+fn follow_shared_cut_roundtrips_master_edges_and_propagates_leaf_values() {
+    use crate::book_tree::master_table::{format_master, test_row};
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write_book(&d.join("big.db"));
+    let e = key(&["5i4i", "5a4a"]);
+    let leaf = child(&e, "4i4h").unwrap();
+    let master = d.join("moves.tsv");
+    let rows = [(ROOT, "5i4i"), (e.as_str(), "4i4h")].map(|(key, mv)| {
+        test_row(&[
+            ("key", key.into()),
+            ("move", mv.into()),
+            ("ply", "1".into()),
+            ("role", "main".into()),
+            ("evals", "10".into()),
+            ("source", "read".into()),
+            ("nodes", "100".into()),
+            ("tier", "wide".into()),
+            ("since", "tag".into()),
+        ])
+    });
+    std::fs::write(&master, format_master(&rows)).unwrap();
+    std::fs::write(d.join("roots.jsonl"), format!(
+        "{{\"id\":\"r1\",\"root\":\"sfen {ROOT} 1\",\"own\":\"b\"}}\n{{\"id\":\"r2\",\"root\":\"sfen {e} 3\",\"own\":\"b\"}}\n"
+    )).unwrap();
+    let mut args = cut_args(d, "cut", Some(master.clone()));
+    args.master_exit = MasterExit::Follow;
+    args.shared = true;
+    args.set_check_every(0);
+    cut::run(args).unwrap();
+    let (meta, trees) = read_cut(&d.join("cut")).unwrap();
+    assert!(trees[0].edges.iter().any(|e| e.key == ROOT && e.master));
+    assert!(
+        trees[1]
+            .edges
+            .iter()
+            .any(|edge| edge.key == e && edge.master && edge.book_value.is_none())
+    );
+    assert_eq!(trees[1].nodes[&leaf].kind, Kind::Nobook);
+    let s = settings();
+    let cache = BTreeMap::from([(leaf.clone(), reading(&leaf, &[("4a3a", 25)], &s))]);
+    let work = tempfile::tempdir().unwrap();
+    let all = value::value_shared(
+        &meta.roots,
+        &trees,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert_eq!(all[0].moves[ROOT][0].value, -25);
+    assert_eq!(all[1].moves[&e][0].value, -25);
+    let journal = d.join("journal.jsonl");
+    let mut j = Journal::open(&journal, &s.fingerprint).unwrap();
+    j.append(cache[&leaf].clone(), &s, "test".into()).unwrap();
+    drop(j);
+    value::run(ValueArgs::for_test(
+        d.join("cut"),
+        journal,
+        master.clone(),
+        d.join("value"),
+        true,
+    ))
+    .unwrap();
+    let updated = parse_master(&std::fs::read_to_string(master).unwrap()).unwrap();
+    assert!(updated.iter().any(|r| r.get("key") == ROOT && r.get("move") == "5i4i"));
+}
+
+#[test]
+fn shared_cut_keeps_opposite_own_policies_separate() {
+    let white = RootInfo {
+        id: "white".into(),
+        own: "w".into(),
+        key: key(&["5i5h"]),
+        ply: 2,
+    };
+    let roots = [root(), white];
+    let p = params(4, 100);
+    let shared = cut::cut_shared(&roots, &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    for (i, root) in roots.iter().enumerate() {
+        assert_eq!(shared[i], cut_root(root, &p, &mut lookup, None, &BTreeMap::new()).unwrap());
+    }
 }

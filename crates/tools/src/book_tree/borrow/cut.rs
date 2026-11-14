@@ -14,7 +14,7 @@ use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
 use clap::{Args, ValueEnum};
 use rshogi_book::{Book, BookEntryMove};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
@@ -45,16 +45,22 @@ pub(super) struct CutArgs {
     max_plies: usize,
     /// 根ごとの局面数の上限。伸ばすと超える局面は出口にする
     #[arg(long, default_value_t = 20000)]
-    max_positions: usize,
+    pub(super) max_positions: usize,
     /// 自分の手番の途中の局面を、自分の手のこの数おきに読む (根を含む)。0 で読まない
     #[arg(long, default_value_t = 2)]
     check_every: usize,
-    /// 定跡の元データの表。ここにある局面 (根を除く) を出口にする
+    /// 定跡の元データの表。既定ではここにある局面 (根を除く) を出口にする
     #[arg(long)]
     master: Option<PathBuf>,
-    /// 元データの局面の出口で、元データの値を使う (use) か、自分のエンジンで読む (read)
+    /// 元データの値を使って止める (use)、止めて読む (read)、元データの先も辿る (follow)
     #[arg(long, value_enum, default_value_t = MasterExit::Use, requires = "master")]
-    master_exit: MasterExit,
+    pub(super) master_exit: MasterExit,
+    /// 局面数の上限で止めた局面を読む (read) か、読まずに残す (skip)
+    #[arg(long, value_enum, default_value_t = CapExit::Read)]
+    pub(super) cap_exit: CapExit,
+    /// 同じ own の根をまたいで局面の展開を共有する
+    #[arg(long)]
+    pub(super) shared: bool,
     /// 足す手 (TSV、見出しに key・move。`borrow value` の marks.tsv をそのまま渡せる)。どの根でも同じ局面に足す
     #[arg(long)]
     extra: Option<PathBuf>,
@@ -97,6 +103,8 @@ impl CutArgs {
             check_every: 1,
             master,
             master_exit: MasterExit::Use,
+            cap_exit: CapExit::Read,
+            shared: false,
             extra: None,
             tag: "ext".into(),
             priority: DEFAULT_PRIORITY,
@@ -126,6 +134,7 @@ impl CutArgs {
 pub(super) enum MasterExit {
     Use,
     Read,
+    Follow,
 }
 
 impl MasterExit {
@@ -133,8 +142,17 @@ impl MasterExit {
         match self {
             MasterExit::Use => "use",
             MasterExit::Read => "read",
+            MasterExit::Follow => "follow",
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum CapExit {
+    #[default]
+    Read,
+    Skip,
 }
 
 /// `tree` のキューの行もそのまま読めるよう、`id`・`root`・`own` 以外の項目は無視する。
@@ -149,6 +167,7 @@ struct RootLine {
 pub(super) struct MasterStop<'a> {
     pub values: &'a BTreeMap<String, MasterValue>,
     pub mode: MasterExit,
+    pub moves: &'a BTreeMap<String, Vec<String>>,
 }
 
 /// 元データの局面を出口にするとき、元データの値を使えるか。自分の手番は main、相手の手番は 1 位の値を使う。
@@ -164,6 +183,8 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
         max_plies: args.max_plies,
         max_positions: args.max_positions,
         check_every: args.check_every,
+        cap_exit: args.cap_exit,
+        shared: args.shared,
         master_exit: args.master.as_ref().map(|_| args.master_exit.as_str().to_owned()),
     };
     ensure!(params.own_diff >= 0 && params.opp_diff >= 0, "差は 0 以上にしてください");
@@ -177,16 +198,30 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
         !args.tag.is_empty() && args.tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
         "--tag は [A-Za-z0-9-] にしてください"
     );
-    let roots = read_roots(&args.roots)?;
+    let mut roots = read_roots(&args.roots)?;
+    if args.shared {
+        roots.sort_by(|a, b| a.id.cmp(&b.id));
+    }
     let extras = match &args.extra {
         Some(path) => read_extras(path)?,
         None => BTreeMap::new(),
     };
-    let master = match &args.master {
-        // 止めるかどうかは値が分かるかだけで決まり、千日手の値には依らない。
-        Some(path) => Some(master_values(&read_master(path)?, DrawValues::default())?),
-        None => None,
-    };
+    let master_rows = args.master.as_ref().map(|path| read_master(path)).transpose()?;
+    let master = master_rows
+        .as_ref()
+        .map(|rows| master_values(rows, DrawValues::default()))
+        .transpose()?;
+    let master_moves: BTreeMap<String, Vec<String>> = master_rows
+        .as_ref()
+        .filter(|_| args.master_exit == MasterExit::Follow)
+        .map(|rows| {
+            rows.0
+                .iter()
+                .map(|(key, pos)| (key.clone(), pos.moves.iter().map(|m| m.mv.clone()).collect()))
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(master_rows);
     let book = Book::open_on_the_fly(&args.book, true).with_context(|| {
         format!(
             "{} を開けません (.db は sfen 行が手数を除いた SFEN のバイト順に並んでいる必要があります。並んでいなければ並べ替えた写しを渡す)",
@@ -222,19 +257,45 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     writeln!(nodes_out, "{NODES_HEADER}")?;
     writeln!(edges_out, "{EDGES_HEADER}")?;
     let mut summary = String::from(
-        "id\town\tin_book\tpositions\tinner\texit_nobook\texit_depth\texit_cap\texit_master\tchecks\treads\textra_used\n",
+        "id\town\tin_book\tpositions\tinner\texit_nobook\texit_depth\texit_cap\texit_master\tchecks\treads\textra_used\tskipped_caps\n",
     );
     let mut reads: BTreeMap<String, u32> = BTreeMap::new();
     let mut first_seen: Vec<String> = Vec::new();
     let mut queue = String::new();
     let mut extras_used: BTreeSet<(String, String)> = BTreeSet::new();
     let mut lookup = |sfen: &str| book.entry_moves(sfen).map_err(anyhow::Error::from);
-    for root in &roots {
-        let stop = master.as_ref().map(|values| MasterStop {
-            values,
-            mode: args.master_exit,
-        });
-        let tree = cut_root(root, &params, &mut lookup, stop.as_ref(), &extras)?;
+    let stop = master.as_ref().map(|values| MasterStop {
+        values,
+        mode: args.master_exit,
+        moves: &master_moves,
+    });
+    let shared = if args.shared {
+        Some(cut_shared(&roots, &params, &mut lookup, stop.as_ref(), &extras)?)
+    } else {
+        None
+    };
+    let shared_kinds: BTreeMap<_, _> = shared
+        .as_ref()
+        .map(|trees| {
+            roots
+                .iter()
+                .zip(trees)
+                .flat_map(|(r, t)| {
+                    t.nodes.iter().map(move |(key, n)| ((r.own.as_str(), key.as_str()), n.kind))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut skipped_caps = 0;
+    for (index, root) in roots.iter().enumerate() {
+        let local;
+        let tree = if let Some(trees) = &shared {
+            &trees[index]
+        } else {
+            local = cut_root(root, &params, &mut lookup, stop.as_ref(), &extras)?;
+            &local
+        };
+        skipped_caps += tree.nodes.values().filter(|n| n.kind == Kind::Cap && !n.read).count();
         let used: BTreeSet<(&str, &str)> = tree
             .edges
             .iter()
@@ -271,16 +332,27 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
                 e.mv,
                 e.child,
                 e.book_value.map_or_else(String::new, |v| v.to_string()),
-                if e.extra { "extra" } else { "book" }
+                if e.extra {
+                    "extra"
+                } else if e.master {
+                    "master"
+                } else {
+                    "book"
+                }
             )?;
         }
         let count = |kind: Kind| tree.nodes.values().filter(|n| n.kind == kind).count();
-        let root_in_book = tree.nodes[&root.key].kind == Kind::Inner;
+        let root_in_book = tree
+            .nodes
+            .get(&root.key)
+            .map(|n| n.kind)
+            .or_else(|| shared_kinds.get(&(root.own.as_str(), root.key.as_str())).copied())
+            == Some(Kind::Inner);
         let checks = tree.nodes.values().filter(|n| n.kind == Kind::Inner && n.read).count();
         let row_reads = tree.nodes.values().filter(|n| n.read).count();
         writeln!(
             summary,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{checks}\t{row_reads}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{checks}\t{row_reads}\t{}\t{}",
             root.id,
             root.own,
             u8::from(root_in_book),
@@ -290,9 +362,10 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
             count(Kind::Depth),
             count(Kind::Cap),
             count(Kind::Master),
-            used.len()
+            used.len(),
+            tree.nodes.values().filter(|n| n.kind == Kind::Cap && !n.read).count()
         )?;
-        for line in queue_lines(root, &tree, &args.tag, args.priority)? {
+        for line in queue_lines(root, tree, &args.tag, args.priority)? {
             queue.push_str(&serde_json::to_string(&line)?);
             queue.push('\n');
         }
@@ -314,10 +387,14 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
         book: info,
         params,
         roots,
+        skipped_caps,
     };
     write_atomic(&args.out.join(META), &serde_json::to_string_pretty(&meta)?)?;
     print!("{summary}");
     println!("読む局面 (根をまたいで重複を除く) {}", reads.len());
+    if skipped_caps > 0 {
+        println!("上限で止めて読まない局面 {skipped_caps} (この先は未完了)");
+    }
     let unused_extras = extras
         .iter()
         .flat_map(|(k, moves)| moves.iter().map(move |m| (k.clone(), m.clone())))
@@ -436,23 +513,67 @@ pub(super) fn cut_root(
     master: Option<&MasterStop>,
     extras: &BTreeMap<String, Vec<String>>,
 ) -> Result<Subtree> {
+    Ok(cut_forest(std::slice::from_ref(root), params, lookup, master, extras)?.remove(0))
+}
+
+pub(super) fn cut_shared(
+    roots: &[RootInfo],
+    params: &CutParams,
+    lookup: &mut impl FnMut(&str) -> Result<Vec<BookEntryMove>>,
+    master: Option<&MasterStop>,
+    extras: &Extras,
+) -> Result<Vec<Subtree>> {
+    let mut result = vec![Subtree::default(); roots.len()];
+    for own in ["b", "w"] {
+        let mut indices: Vec<_> = (0..roots.len()).filter(|&i| roots[i].own == own).collect();
+        indices.sort_by(|&a, &b| roots[a].id.cmp(&roots[b].id));
+        let group: Vec<_> = indices.iter().map(|&i| roots[i].clone()).collect();
+        let trees = cut_forest(&group, params, lookup, master, extras)?;
+        for (i, tree) in indices.into_iter().zip(trees) {
+            result[i] = tree;
+        }
+    }
+    Ok(result)
+}
+
+fn cut_forest(
+    roots: &[RootInfo],
+    params: &CutParams,
+    lookup: &mut impl FnMut(&str) -> Result<Vec<BookEntryMove>>,
+    master: Option<&MasterStop>,
+    extras: &Extras,
+) -> Result<Vec<Subtree>> {
     let mut tree = Subtree::default();
-    tree.nodes.insert(
-        root.key.clone(),
-        Node {
-            ply: root.ply,
-            level: 0,
-            kind: Kind::Inner,
-            read: false,
-        },
-    );
-    let mut queue = VecDeque::from([root.key.clone()]);
+    let mut owners = BTreeMap::new();
+    let mut counts = vec![0_usize; roots.len()];
+    let mut queue = VecDeque::new();
+    // 根を先にすべて積むことで、遠い根からの到達が近い根を奪わない。
+    for (index, root) in roots.iter().enumerate() {
+        if tree.nodes.contains_key(&root.key) {
+            continue;
+        }
+        tree.nodes.insert(
+            root.key.clone(),
+            Node {
+                ply: root.ply,
+                level: 0,
+                kind: Kind::Inner,
+                read: false,
+            },
+        );
+        owners.insert(root.key.clone(), index);
+        counts[index] += 1;
+        queue.push_back(root.key.clone());
+    }
     while let Some(key) = queue.pop_front() {
         let (ply, level) = (tree.nodes[&key].ply, tree.nodes[&key].level);
+        let owner = owners[&key];
+        let root = &roots[owner];
         let own_turn = side(&key) == root.own;
         let kind = 'kind: {
             if level > 0
                 && let Some(stop) = master
+                && stop.mode != MasterExit::Follow
                 && let Some(value) = stop.values.get(&key)
             {
                 tree.nodes.get_mut(&key).expect("局面がある").read =
@@ -471,17 +592,36 @@ pub(super) fn cut_root(
                     children.push(c);
                 }
             }
-            if moves.is_empty() {
+            let follow = master.filter(|stop| stop.mode == MasterExit::Follow);
+            let from_master = follow
+                .and_then(|stop| stop.moves.get(&key))
+                .filter(|_| own_turn || moves.is_empty());
+            if own_turn
+                && let Some(stop) = follow
+                && let Some(value) = stop.values.get(&key)
+                && value.main.is_none()
+            {
+                tree.nodes.get_mut(&key).expect("局面がある").read = true;
+                break 'kind Kind::Master;
+            }
+            let mut picked: Vec<(String, Option<i32>, String, bool)> = if let Some(ms) = from_master
+            {
+                ms.iter()
+                    .take(if own_turn { 1 } else { ms.len() })
+                    .filter_map(|mv| child(&key, mv).ok().map(|c| (mv.clone(), None, c, false)))
+                    .collect()
+            } else {
+                select(&moves, own_turn, params)
+                    .into_iter()
+                    .map(|i| (moves[i].0.clone(), Some(moves[i].1), children[i].clone(), false))
+                    .collect()
+            };
+            if picked.is_empty() {
                 break 'kind Kind::Nobook;
             }
             if level >= params.max_plies {
                 break 'kind Kind::Depth;
             }
-            let mut picked: Vec<(String, Option<i32>, String, bool)> =
-                select(&moves, own_turn, params)
-                    .into_iter()
-                    .map(|i| (moves[i].0.clone(), Some(moves[i].1), children[i].clone(), false))
-                    .collect();
             if own_turn {
                 for mv in extras.get(&key).into_iter().flatten() {
                     if picked.iter().any(|(m, ..)| m == mv) {
@@ -498,7 +638,7 @@ pub(super) fn cut_root(
                 .map(|(.., c, _)| c)
                 .filter(|c| !tree.nodes.contains_key(*c))
                 .collect();
-            if tree.nodes.len() + new.len() > params.max_positions {
+            if counts[owner] + new.len() > params.max_positions {
                 break 'kind Kind::Cap;
             }
             picked.sort_by(|a, b| a.0.cmp(&b.0));
@@ -513,6 +653,8 @@ pub(super) fn cut_root(
                             read: false,
                         },
                     );
+                    owners.insert(c.clone(), owner);
+                    counts[owner] += 1;
                     queue.push_back(c.clone());
                 }
                 tree.edges.push(Edge {
@@ -521,6 +663,7 @@ pub(super) fn cut_root(
                     child: c,
                     book_value,
                     extra,
+                    master: from_master.is_some() && !extra,
                 });
             }
             Kind::Inner
@@ -534,11 +677,19 @@ pub(super) fn cut_root(
                     && (level / 2).is_multiple_of(params.check_every);
             }
             Kind::Master => {}
+            Kind::Cap if params.cap_exit == CapExit::Skip => node.read = false,
             _ => node.read = true,
         }
     }
     tree.edges.sort_by(|a, b| (&a.key, &a.mv).cmp(&(&b.key, &b.mv)));
-    Ok(tree)
+    let mut result = vec![Subtree::default(); roots.len()];
+    for (key, node) in tree.nodes {
+        result[owners[&key]].nodes.insert(key, node);
+    }
+    for edge in tree.edges {
+        result[owners[&edge.key]].edges.push(edge);
+    }
+    Ok(result)
 }
 
 /// 読む局面を `--parts` 個に分けて `parts/part-<i>.jsonl` に書く。同じ局面を 2 つの分け先で読まない

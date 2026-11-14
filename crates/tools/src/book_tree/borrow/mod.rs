@@ -98,9 +98,10 @@ struct Edge {
     key: String,
     mv: String,
     child: String,
-    /// 大きい定跡の値 (手番の側から)。`--extra` で足した手で大きい定跡に無ければ `None`。
+    /// 大きい定跡の値 (手番の側から)。元データの手や、定跡に無い `--extra` の手は `None`。
     book_value: Option<i32>,
     extra: bool,
+    master: bool,
 }
 
 /// 根 1 本の部分木。
@@ -132,8 +133,12 @@ struct CutParams {
     max_plies: usize,
     max_positions: usize,
     check_every: usize,
-    /// 元データの局面で止めたか、止めた局面を読むか (`use` / `read`)。元データを渡さなければ `None`。
+    /// 元データの扱い (`use` / `read` / `follow`)。元データを渡さなければ `None`。
     master_exit: Option<String>,
+    #[serde(default)]
+    cap_exit: cut::CapExit,
+    #[serde(default)]
+    shared: bool,
 }
 
 /// 大きい定跡の出所。
@@ -153,6 +158,8 @@ struct Meta {
     book: BookInfo,
     params: CutParams,
     roots: Vec<RootInfo>,
+    #[serde(default)]
+    skipped_caps: usize,
 }
 
 fn side(key: &str) -> &str {
@@ -232,14 +239,33 @@ fn read_cut(dir: &Path) -> Result<(Meta, Vec<Subtree>)> {
                 Some(c[4].parse()?)
             },
             extra: c[5] == "extra",
+            master: c[5] == "master",
         });
     }
+    let mut shared_nodes = BTreeMap::new();
+    if meta.params.shared {
+        for (root, tree) in meta.roots.iter().zip(&trees) {
+            for (key, node) in &tree.nodes {
+                ensure!(
+                    shared_nodes.insert((root.own.as_str(), key.as_str()), node).is_none(),
+                    "共有局面が重複しています: {key}"
+                );
+            }
+        }
+    }
     for (root, tree) in meta.roots.iter().zip(&trees) {
-        ensure!(tree.nodes.contains_key(&root.key), "{}: 根の局面がありません", root.id);
+        let node_at = |key: &str| {
+            if meta.params.shared {
+                shared_nodes.get(&(root.own.as_str(), key)).copied()
+            } else {
+                tree.nodes.get(key)
+            }
+        };
+        ensure!(node_at(&root.key).is_some(), "{}: 根の局面がありません", root.id);
         for edge in &tree.edges {
             ensure!(
                 tree.nodes.get(&edge.key).is_some_and(|n| n.kind == Kind::Inner)
-                    && tree.nodes.contains_key(&edge.child),
+                    && node_at(&edge.child).is_some(),
                 "{}: 辺の局面が部分木にありません: {} {}",
                 root.id,
                 edge.key,

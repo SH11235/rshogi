@@ -291,6 +291,10 @@ pub(super) fn value_root(
                     });
                 }
             }
+            Kind::Cap if !node.read => {
+                // 保留判定まで局面を残し、出口の読みから戻る辺もグラフに含める。
+                writeln!(out, "none none 0 1 1")?;
+            }
             Kind::Master if !node.read => {
                 let value = master
                     .get(key)
@@ -340,6 +344,50 @@ pub(super) fn value_root(
     };
     let mut graph = read_graph(&db, options)?;
     ensure!(graph.illegal_moves == 0, "{}: 内部エラー: 非合法手があります", root.id);
+    let mut blocked: BTreeSet<String> = tree
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.kind == Kind::Cap && !n.read)
+        .map(|(key, _)| key.clone())
+        .collect();
+    if !blocked.is_empty() {
+        let mut parents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for node in 0..graph.len() {
+            for m in graph.moves(node) {
+                if let Some(edge) = m.edge {
+                    parents.entry(graph.key(edge.to)).or_default().push(graph.key(node));
+                }
+            }
+        }
+        let mut pending: VecDeque<_> = blocked.iter().cloned().collect();
+        while let Some(key) = pending.pop_front() {
+            for &parent in parents.get(key.as_str()).into_iter().flatten() {
+                if blocked.insert(parent.to_owned()) {
+                    pending.push_back(parent.to_owned());
+                }
+            }
+        }
+        // 未展開の応手を落として最善値を選ぶと、根に都合のよい値を登録してしまう。
+        let complete = Subtree {
+            nodes: tree
+                .nodes
+                .iter()
+                .filter(|(k, _)| !blocked.contains(*k))
+                .map(|(k, n)| (k.clone(), n.clone()))
+                .collect(),
+            edges: tree.edges.iter().filter(|e| !blocked.contains(&e.key)).cloned().collect(),
+        };
+        let mut result = if complete.nodes.is_empty() {
+            RootValues::default()
+        } else {
+            value_root(root, &complete, input, draws, mark_line, work)?
+        };
+        for key in blocked {
+            result.moves.insert(key.clone(), Vec::new());
+            result.nodes.insert(key, 0);
+        }
+        return Ok(result);
+    }
     propagate_values(&mut graph, draws, MergeMode::Replace)?;
 
     let leaves: Vec<Vec<Option<&str>>> = (0..graph.len())
@@ -497,6 +545,49 @@ pub(super) fn value_root(
     Ok(result)
 }
 
+pub(super) fn value_shared(
+    roots: &[RootInfo],
+    trees: &[Subtree],
+    input: &ValueInput,
+    draws: DrawValues,
+    mark_line: Option<i32>,
+    work: &Path,
+) -> Result<Vec<RootValues>> {
+    let mut results: Vec<_> = roots.iter().map(|_| RootValues::default()).collect();
+    for own in ["b", "w"] {
+        let indices: Vec<_> = (0..roots.len()).filter(|&i| roots[i].own == own).collect();
+        let Some(&first) = indices.first() else {
+            continue;
+        };
+        let mut forest = Subtree::default();
+        let mut owners = BTreeMap::new();
+        for &i in &indices {
+            for (key, node) in &trees[i].nodes {
+                forest.nodes.insert(key.clone(), node.clone());
+                owners.insert(key.clone(), i);
+            }
+            forest.edges.extend(trees[i].edges.iter().cloned());
+        }
+        let mut result = value_root(&roots[first], &forest, input, draws, mark_line, work)?;
+        // 同じ局面を根にした行も、根の報告には共有した結果が必要。
+        for &i in &indices {
+            results[i]
+                .moves
+                .insert(roots[i].key.clone(), result.moves[&roots[i].key].clone());
+        }
+        for (key, moves) in std::mem::take(&mut result.moves) {
+            results[owners[&key]].moves.insert(key, moves);
+        }
+        for (key, count) in result.nodes {
+            results[owners[&key]].nodes.insert(key, count);
+        }
+        for mark in result.marks {
+            results[owners[&mark.key]].marks.push(mark);
+        }
+    }
+    Ok(results)
+}
+
 fn selected_backing_nodes(selected: &[Option<usize>], own: &[u64], fallback: &[u64]) -> Vec<u64> {
     let mut counts = own.to_vec();
     let mut state = vec![0; selected.len()];
@@ -605,6 +696,7 @@ pub(super) fn joined_nodes(
     nodes: &mut BTreeMap<String, register::Node>,
     values: &[RootValues],
     readings: &ReadingsOf,
+    shared_roots: Option<&[RootInfo]>,
 ) -> Result<()> {
     let keys: Vec<_> = values
         .iter()
@@ -622,6 +714,14 @@ pub(super) fn joined_nodes(
         .filter(|(_, (_, key))| readings.contains_key(*key))
         .map(|(i, &(_, key))| (key, i))
         .collect();
+    let shared_index: BTreeMap<_, _> = shared_roots
+        .map(|roots| {
+            keys.iter()
+                .enumerate()
+                .map(|(i, &(tree, key))| ((roots[tree].own.as_str(), key), i))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut selected = vec![None; keys.len()];
     let mut own = vec![0; keys.len()];
     let mut fallback = vec![0; keys.len()];
@@ -647,6 +747,11 @@ pub(super) fn joined_nodes(
             let child_tree = nodes.get(&child).map_or(child_tree, |node| node.tree);
             if let Some(&child) = index
                 .get(&(child_tree, child.as_str()))
+                .or_else(|| {
+                    shared_roots.and_then(|roots| {
+                        shared_index.get(&(roots[tree].own.as_str(), child.as_str()))
+                    })
+                })
                 .or_else(|| reading_index.get(child.as_str()))
             {
                 parents[child].push(i);
@@ -905,12 +1010,18 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     };
 
     let mark_line = (!args.mark_all).then_some(args.line);
-    let all = meta
-        .roots
-        .iter()
-        .zip(&trees)
-        .map(|(root, tree)| value_root(root, tree, &input, draws, mark_line, work.path()))
-        .collect::<Result<Vec<_>>>()?;
+    let all = if meta.params.shared {
+        value_shared(&meta.roots, &trees, &input, draws, mark_line, work.path())?
+    } else {
+        meta.roots
+            .iter()
+            .zip(&trees)
+            .map(|(root, tree)| value_root(root, tree, &input, draws, mark_line, work.path()))
+            .collect::<Result<Vec<_>>>()?
+    };
+    if meta.skipped_caps > 0 {
+        println!("上限で未完了の局面 {} と、そこへ至る局面の登録を保留", meta.skipped_caps);
+    }
     let marked: BTreeSet<&str> =
         all.iter().flat_map(|v| v.marks.iter().map(|m| m.key.as_str())).collect();
     let mut nodes = BTreeMap::new();
@@ -948,7 +1059,7 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
     let joined = join_roots(&rows, &mut nodes, &options, draws, args.line)?;
-    joined_nodes(&mut nodes, &all, &readings)?;
+    joined_nodes(&mut nodes, &all, &readings, meta.params.shared.then_some(meta.roots.as_slice()))?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
@@ -1012,6 +1123,12 @@ fn write_outputs(
         "id\town\tkey\tply\tkind\tbest\tbest_value\tbest_value_black\tsecond\tsecond_value\tmarks\n",
     );
     let mut marks = String::from("id\tkey\tply\tside\tmove\tcp\tbest\tbest_value\tgap\n");
+    let kinds: BTreeMap<_, _> = meta
+        .roots
+        .iter()
+        .zip(trees)
+        .flat_map(|(r, t)| t.nodes.iter().map(move |(k, n)| ((r.own.as_str(), k.as_str()), n.kind)))
+        .collect();
     for ((root, tree), result) in meta.roots.iter().zip(trees).zip(all) {
         for (key, node) in &tree.nodes {
             for m in &result.moves[key] {
@@ -1050,7 +1167,10 @@ fn write_outputs(
             root.own,
             root.key,
             root.ply,
-            tree.nodes[&root.key].kind.as_str(),
+            tree.nodes
+                .get(&root.key)
+                .map_or(kinds[&(root.own.as_str(), root.key.as_str())], |n| n.kind)
+                .as_str(),
             result.marks.len()
         )?;
         for m in &result.marks {
