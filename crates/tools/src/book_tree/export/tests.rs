@@ -48,6 +48,7 @@ fn args(dir: &Path) -> ExportArgs {
         strict_bad_eval: false,
         base: None,
         force: false,
+        threads: 1,
     }
 }
 #[test]
@@ -507,7 +508,13 @@ fn journal_depths_reject_invalid_tree_records() {
             _ => unreachable!(),
         }
         std::fs::write(&path, format!("{record}\n")).unwrap();
-        let error = journal_depths::load(std::slice::from_ref(&path), &keys).err().unwrap();
+        let error = journal_depths::load(
+            std::slice::from_ref(&path),
+            &keys,
+            &super::super::reply_graph::thread_pool(2).unwrap(),
+        )
+        .err()
+        .unwrap();
         assert!(format!("{error:#}").contains(path.to_str().unwrap()), "{case}: {error:#}");
     }
 }
@@ -535,7 +542,12 @@ fn journal_depths_skip_invalid_rows_and_keep_valid_rows_after_them() {
     invalid.push(outside);
     invalid.push(first.clone());
     std::fs::write(&path, invalid.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
-    let depths = journal_depths::load(&[path], &BTreeSet::from([HIRATE_KEY])).unwrap();
+    let depths = journal_depths::load(
+        &[path],
+        &BTreeSet::from([HIRATE_KEY]),
+        &super::super::reply_graph::thread_pool(2).unwrap(),
+    )
+    .unwrap();
     let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
     r.set("cond", first["settings"]["fingerprint"].as_str().unwrap()[..8].into());
     assert_eq!(depths.depths(&Schema::default(), &r).unwrap(), Some(vec![30]));
@@ -554,11 +566,102 @@ fn journal_depths_keep_first_values_and_all_multipv() {
     let mut second = first.clone();
     second["reading"]["multipv"][0]["cp"] = serde_json::json!(20);
     std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
-    let depths = journal_depths::load(&[path], &BTreeSet::from([HIRATE_KEY])).unwrap();
+    let depths = journal_depths::load(
+        &[path],
+        &BTreeSet::from([HIRATE_KEY]),
+        &super::super::reply_graph::thread_pool(2).unwrap(),
+    )
+    .unwrap();
     let schema = Schema::default();
     let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
     r.set("cond", first["settings"]["fingerprint"].as_str().unwrap()[..8].into());
     assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![30]));
     r.set("move", "2g2f".into());
     assert_eq!(depths.depths(&schema, &r).unwrap(), Some(vec![25]));
+}
+
+#[test]
+fn export_threads_preserve_all_files_and_reports() {
+    use crate::book_tree::reply_graph::{HIRATE_KEY, fixture::after};
+    let dir = tempfile::tempdir().unwrap();
+    let child = after(HIRATE_KEY, &["7g7f", "3c3d"]);
+    let mut main = row(HIRATE_KEY, "7g7f", "main", "curated", "-200,-201");
+    let first = journal_record(30);
+    let fp = first["settings"]["fingerprint"].as_str().unwrap();
+    main.set("cond", fp[..8].into());
+    let rows = [
+        row(&child, "2g2f", "main", "wide", "12"),
+        row(HIRATE_KEY, "5g5f", "bench", "wide", ""),
+        row(HIRATE_KEY, "2g2f", "alt", "wide", ""),
+        main,
+    ];
+    let mut a = args(dir.path());
+    std::fs::write(&a.master, master_table::format_master(&rows)).unwrap();
+    let journals = dir.path().join("journals");
+    std::fs::create_dir(&journals).unwrap();
+    std::fs::write(journals.join("a.jsonl"), format!("{first}\n{}\n", journal_record(20))).unwrap();
+    std::fs::write(
+        journals.join("b.jsonl"),
+        format!("{}\n{first}\n{{unfinished", journal_record(40)),
+    )
+    .unwrap();
+    std::fs::write(journals.join("c.jsonl"), "{\"kind\":\"parent\"}\n").unwrap();
+    a.journal.push(journals.clone());
+    let mut expected_report = Vec::new();
+    run_to(a, &mut expected_report).unwrap();
+    let paths = files::outputs(&dir.path().join("book"));
+    let expected: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let annotation: serde_json::Value = serde_json::from_slice(&expected[3]).unwrap();
+    assert_eq!(
+        annotation["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
+        serde_json::json!([30])
+    );
+    for threads in [2, 4, 0] {
+        let mut a = args(dir.path());
+        a.threads = threads;
+        a.force = true;
+        a.journal.push(journals.clone());
+        let mut report = Vec::new();
+        run_to(a, &mut report).unwrap();
+        assert_eq!(report, expected_report, "threads={threads}");
+        for (path, bytes) in paths.iter().zip(&expected) {
+            assert_eq!(
+                &std::fs::read(path).unwrap(),
+                bytes,
+                "{}: threads={threads}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn export_parallel_journal_failure_keeps_outputs() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let a = args(dir.path());
+    std::fs::write(
+        &a.master,
+        master_table::format_master(&[row(HIRATE_KEY, "7g7f", "main", "wide", "10")]),
+    )
+    .unwrap();
+    run_to(a, &mut Vec::new()).unwrap();
+    let paths = files::outputs(&dir.path().join("book"));
+    let expected: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    let first = dir.path().join("a.jsonl");
+    let second = dir.path().join("b.jsonl");
+    let record = journal_record(30);
+    std::fs::write(&first, format!("{record}\n{{invalid}}\n")).unwrap();
+    std::fs::write(&second, format!("{record}\n").repeat(1000)).unwrap();
+    for threads in [1, 2, 0] {
+        let mut a = args(dir.path());
+        a.force = true;
+        a.threads = threads;
+        a.journal = vec![first.clone(), second.clone()];
+        let error = run_to(a, &mut Vec::new()).unwrap_err();
+        assert!(format!("{error:#}").contains(first.to_str().unwrap()));
+        for (path, bytes) in paths.iter().zip(&expected) {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+    }
 }
