@@ -358,28 +358,62 @@ pub fn ensure_no_engine_options(engine: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `Command::new` が起動する実体を探す。Windows で拡張子を省いたパスは `.exe` を補い、
-/// ディレクトリを含まない名前は PATH から探す。見つからなければ None。
+/// `Command::new` が起動する実体を探す。見つからなければ None。
+///
+/// Windows では `.exe` で終わらない名前に `.exe` を足した候補も見る。ディレクトリを含まない名前は
+/// `Command::new` と同じ順で探す (Windows: 親の実行ファイルのフォルダ → システムフォルダ → PATH、
+/// Unix: PATH の実行可能なファイル)。カレントフォルダは探さない。
 fn resolve_executable(engine: &Path) -> Option<PathBuf> {
-    let candidates = |path: &Path| {
-        let mut list = vec![path.to_path_buf()];
-        if cfg!(windows) && path.extension().is_none() {
-            list.push(path.with_extension("exe"));
+    // 実行権限は PATH から探すときだけ見る (明示したパスは権限によらずそのパスが起動対象)
+    let found = |path: &Path, from_path_search: bool| {
+        let mut candidates = vec![path.to_path_buf()];
+        let ends_with_exe = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+        if cfg!(windows) && !ends_with_exe {
+            let mut with_exe = path.as_os_str().to_os_string();
+            with_exe.push(".exe");
+            candidates.push(PathBuf::from(with_exe));
         }
-        list
-    };
-    let found = |path: &Path| {
-        candidates(path)
-            .into_iter()
-            .find_map(|c| c.canonicalize().ok().filter(|p| p.is_file()))
+        candidates.into_iter().find_map(|c| {
+            c.canonicalize().ok().filter(|p| {
+                if from_path_search {
+                    is_executable_file(p)
+                } else {
+                    p.is_file()
+                }
+            })
+        })
     };
     if engine.components().count() > 1 {
-        return found(engine);
+        return found(engine, false);
     }
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .find_map(|dir| found(&dir.join(engine)))
-        .or_else(|| found(engine))
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        if let Some(dir) =
+            std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+        {
+            dirs.push(dir);
+        }
+        if let Some(root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+            dirs.push(root.join("System32"));
+            dirs.push(root);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&paths));
+    }
+    dirs.iter().find_map(|dir| found(&dir.join(engine), true))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// 解決できた読込資源を返す。不確実な option の実在を fresh 起動の条件にしない。
