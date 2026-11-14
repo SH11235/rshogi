@@ -4735,6 +4735,10 @@ fn main() -> Result<()> {
         .transpose()?
         .map(|path| sha256_file(&path))
         .transpose()?;
+    if !native_mode {
+        tools::book_fingerprint::ensure_no_engine_options(&engine_paths.black.path)?;
+        tools::book_fingerprint::ensure_no_engine_options(&engine_paths.white.path)?;
+    }
     let engine_black_sha256 = if native_mode {
         native_executable_sha256.clone()
     } else {

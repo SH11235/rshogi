@@ -80,7 +80,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `NetworkDelay` | Network delay compensation (ms) | 0 |
 | `NetworkDelay2` | Additional delay for uncertain situations | 0 |
 | `EvalFile` | NNUE model path | `eval/nn.bin` |
-| `SPSAParamsFile` | Search/net SPSA parameter file | `<auto>` |
+| `SPSAParamsFile` | 探索・net の SPSA の値のファイル (`.params`)。`<auto>` なら実行ファイルと同じフォルダの `spsa.params` を読む。build に焼き込んだ値 ([ビルドガイド](../../docs/build.md#spsa-の値を焼き込む)) より優先する | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
 | `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
 | `MateThreads` | `go mate` で 1 局面を解くスレッド数。置換表を全スレッドで共有する。最初の 1 万ノードは 1 スレッドで解き、決まらなければ並列に切り替える (易しい局面は変わらない)。2 以上では難しい問題が速くなる (8 スレッドで 2〜3 倍程度) が、読むノード数は決定的でなくなる | 1 |
@@ -96,6 +96,32 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
+
+### オプションを固定するファイル (`engine_options.txt`)
+
+実行ファイルと同じフォルダに `engine_options.txt` を置くと、`isready` のたびに読み、書かれたオプションを適用して固定します。
+評価関数とその設定を一緒に配るときに、GUI で設定しなくても正しく読めるようにするためのものです。
+
+```text
+# 「名前 値」「名前=値」、または usi の応答と同じ「option name 名前 type 型 default 値」で書く
+EvalFile eval/nn.bin
+FV_SCALE=14
+LS_BUCKET_MODE progresskpabsq16
+```
+
+- 固定したオプションは、その後の `setoption` では変わりません (`info string ... setoption ignored` を出す)。
+  GUI の設定より常にファイルが優先されます。`SPSA_*` を固定した場合は、`SPSAParamsFile` や `spsa.params` でも変わりません。
+- ファイルの値を書き換えると、次の `isready` で反映します。行やファイルを消しても、固定はエンジンを起動し直すまで残ります。
+- 同じ名前が複数行にあれば最後の行を使います。値が `usi` で示す型・範囲に合わない行は警告して飛ばします (固定もしない)。
+- `EvalFile` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookDir` / `BookExploreFile` の相対パスは、
+  `engine_options.txt` のあるフォルダからのパスとして読みます (`BookFile` は今までどおり `BookDir` からのパス)。
+- 名前の大文字・小文字は区別しません。知らない名前や読めない行も `info string Warning` を出して飛ばします。
+  `=` を使うと `Skill Level=10` のように空白を含む名前も書けます。空行と `#`・`//` で始まる行は読みません。
+- やねうら王の `engine_options.txt` と同じ書き方ですが、やねうら王はカレントフォルダから読むのに対し、
+  rshogi は実行ファイルと同じフォルダだけを見ます (GUI ごとに違うカレントフォルダに左右されないため)。
+- 対局・SPRT のツールで動かすときも読まれ、ツールが送る `setoption` より優先します。
+  `book_mine` / `book_extend` / `book_rescore` / `rescore_psv` / `spsa` と `gensfen` (外部エンジン) は、条件の指紋や入力の保護が
+  実際の設定を表さなくなるので、エンジンの隣にこのファイルがあるとエラーで止まります。
 
 ## 詰み探索 (`go mate`)
 

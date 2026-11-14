@@ -1303,6 +1303,7 @@ struct NpsScalingSpec {
 
 impl RunFingerprint {
     fn new(cli: &Cli, engine: &EngineConfig) -> Result<Self> {
+        tools::book_fingerprint::ensure_no_engine_options(&engine.path)?;
         let mut usi_option_files = Vec::new();
         for option in &engine.usi_options {
             // engine の初期化と同じく前後の空白を除いた値で判定する。

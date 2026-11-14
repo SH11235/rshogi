@@ -648,6 +648,11 @@ fn model_and_implicit_parameters_are_content_fingerprints() {
     assert_ne!(second.fingerprint, Settings::new(&args).unwrap().fingerprint);
     std::fs::remove_file(params).unwrap();
     assert_eq!(first.fingerprint, Settings::new(&args).unwrap().fingerprint);
+    let engine_options = dir.path().join("engine_options.txt");
+    std::fs::write(&engine_options, "USI_Hash 16").unwrap();
+    assert!(Settings::new(&args).is_err());
+    std::fs::remove_file(engine_options).unwrap();
+    assert_eq!(first.fingerprint, Settings::new(&args).unwrap().fingerprint);
     std::fs::write(model, "different model").unwrap();
     assert_ne!(first.fingerprint, Settings::new(&args).unwrap().fingerprint);
 }

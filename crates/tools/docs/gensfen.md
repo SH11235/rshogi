@@ -463,6 +463,9 @@ gensfen が書く eval は rshogi の cp スケールである。一方、dlshog
 
 長時間実行を中断して後で再開できる。
 
+外部エンジン (USI backend) の隣に `engine_options.txt` (rshogi が option を固定するファイル) があると、
+生成条件の指紋が実際の設定を表さないので、開始時にエラーで止まる。
+
 ### 仕組み
 
 1. 各 worker は `.wN.jsonl` と `.wN.psv` / `.wN.pack` / `.wN.hcpe3`、必要なら

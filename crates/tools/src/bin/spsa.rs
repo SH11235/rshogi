@@ -3570,6 +3570,8 @@ fn main() -> Result<()> {
     }
 
     let engine_path = resolve_engine_path(&cli)?;
+    // engine_options.txt で SPSA_* を固定されると、送った値が無視されて調整が進まない
+    tools::book_fingerprint::ensure_no_engine_options(&engine_path)?;
     // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
     std::fs::create_dir_all(cli.run_dir())
         .with_context(|| format!("failed to create run-dir {}", cli.run_dir().display()))?;

@@ -46,16 +46,27 @@ compile_error!(
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// エンジン名
-const ENGINE_NAME: &str = "Shogi Engine";
-/// エンジンバージョン
-const ENGINE_VERSION: &str = "0.1.0";
+/// エンジン名 (`id name`)
+const ENGINE_NAME: &str = "RAMU";
 /// エンジン作者
 const ENGINE_AUTHOR: &str = "sh11235";
 /// ビルド時に埋め込んだエンジンのソースの id (build.rs)。
 const SOURCE_ID: &str = env!("RSHOGI_SOURCE_ID");
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
+/// build 時に `RSHOGI_EMBED_SPSA_PARAMS` で指定した `.params` の中身 (未指定なら空)。
+const EMBEDDED_SPSA_PARAMS: &str = include_str!(concat!(env!("OUT_DIR"), "/embedded_spsa.params"));
+/// isready で読む、オプションを固定するファイルの名前 (やねうら王と同じ)。
+const ENGINE_OPTIONS_FILE: &str = "engine_options.txt";
+/// engine_options.txt に相対パスで書いたとき、ファイルのあるフォルダを基準にするオプション。
+/// BookFile は BookDir からの相対なので含めない。
+const PATH_OPTIONS: &[&str] = &[
+    "EvalFile",
+    "LS_PROGRESS_COEFF",
+    "SPSAParamsFile",
+    "BookDir",
+    "BookExploreFile",
+];
 /// `go mate` の置換表サイズの既定値 (MB)
 const DEFAULT_MATE_HASH_MB: usize = 64;
 
@@ -146,6 +157,10 @@ struct UsiEngine {
     spsa_params_file: Option<String>,
     /// SPSA params ファイルの読み込み済みフラグ
     spsa_params_loaded: bool,
+    /// build に焼き込んだ SPSA の値 (適用後の値)。`usi` の既定値として返す。
+    spsa_defaults: BTreeMap<String, i32>,
+    /// engine_options.txt で固定したオプション (小文字の名前 → 適用した値)。setoption では変えられない。
+    fixed_options: BTreeMap<String, String>,
     /// 起動時 spec から広告する net delta option 名。
     spsa_net_spec_names: Vec<String>,
     /// 現在設定されている net delta。
@@ -219,7 +234,7 @@ impl UsiEngine {
         set_eval_hash_enabled(use_eval_hash);
         reset_layer_stack_progress_buckets();
 
-        Self {
+        let mut engine = Self {
             // EvalHash は isready (無ければ最初の `go` 直前) まで遅延確保する。
             // selfplay のように起動直後に setoption でサイズを下げるケースで、
             // 先に既定 256MB を確保してしまう無駄を避ける。
@@ -246,6 +261,8 @@ impl UsiEngine {
             ls_progress_coeff_loaded: false,
             spsa_params_file: None,
             spsa_params_loaded: false,
+            spsa_defaults: BTreeMap::new(),
+            fixed_options: BTreeMap::new(),
             spsa_net_spec_names,
             net_deltas: BTreeMap::new(),
             net_deltas_dirty: false,
@@ -273,7 +290,9 @@ impl UsiEngine {
             mate_solver: None,
             mate_thread: None,
             mate_stop: Arc::new(AtomicBool::new(false)),
-        }
+        };
+        engine.apply_embedded_spsa_params(EMBEDDED_SPSA_PARAMS);
+        engine
     }
 
     /// USIコマンドを処理
@@ -337,106 +356,121 @@ impl UsiEngine {
 
     /// usiコマンド: エンジン情報を出力
     fn cmd_usi(&self) {
-        println!("id name {ENGINE_NAME} {ENGINE_VERSION}");
+        println!("id name {ENGINE_NAME}");
         println!("id author {ENGINE_AUTHOR}");
         println!();
-        // オプション（将来的に追加）
-        println!("option name USI_Hash type spin default 256 min 1 max 4096");
-        println!("option name Threads type spin default 1 min 1 max 512");
-        println!("option name NumaPolicy type combo default none var none var auto");
-        println!("option name USI_Ponder type check default false");
-        println!("option name Stochastic_Ponder type check default false");
-        println!("option name MultiPV type spin default 1 min 1 max 500");
-        println!("option name NetworkDelay type spin default 120 min 0 max 10000");
-        println!("option name NetworkDelay2 type spin default 1120 min 0 max 10000");
-        // RoundUpToFullSecond=true のときはエンジン側で 1000 未満を 1000 に上げる
-        println!("option name MinimumThinkingTime type spin default 2000 min 0 max 100000");
-        println!("option name RoundUpToFullSecond type check default true");
-        println!("option name SlowMover type spin default 100 min 1 max 1000");
-        println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
-        println!(
-            "option name DrawValueBlack type spin default {DEFAULT_DRAW_VALUE_BLACK} min -30000 max 30000"
-        );
-        println!(
-            "option name DrawValueWhite type spin default {DEFAULT_DRAW_VALUE_WHITE} min -30000 max 30000"
-        );
-        println!("option name EvalHash type spin default 256 min 0 max 4096");
-        println!("option name MateHashMB type spin default {DEFAULT_MATE_HASH_MB} min 1 max 4096");
-        println!(
-            "option name MateMode type combo default {} var Speed var Power",
-            MateMode::default().name()
-        );
-        println!("option name MateThreads type spin default 1 min 1 max 512");
-        println!(
-            "option name MateShortest type combo default Off var Off var Tsume var All var Estimate"
-        );
-        println!("option name UseEvalHash type check default true");
-        println!("option name EvalHashLargePages type check default true");
-        println!("option name Skill Level type spin default 20 min 0 max 20");
-        println!("option name UCI_LimitStrength type check default false");
-        println!("option name UCI_Elo type spin default 0 min 0 max 4000");
-        println!(
-            "option name MaterialLevel type combo default none var none var 1 var 2 var 3 var 4 var 7 var 8 var 9"
-        );
-        println!("option name EvalFile type string default eval/nn.bin");
-        println!(
-            "option name EnteringKingRule type combo default CSARule27 var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule"
-        );
-        // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
-        // 水匠5等は24を使用する
-        println!("option name FV_SCALE type spin default 0 min 0 max 100");
-        println!(
-            "option name LS_BUCKET_MODE type combo default unset var unset var progresskpabs var progresskpabsq16 var kingrank9"
-        );
-        println!(
-            "option name LS_PROGRESS_BUCKETS type spin default 0 min 0 max {MAX_LAYER_STACK_BUCKETS}"
-        );
-        println!("option name LS_PROGRESS_COEFF type string default <empty>");
-        println!(
-            "option name NNUE_ARCHITECTURE type combo default auto var auto var halfkp var halfka_hm var halfka var layerstacks var layerstacks-psqt"
-        );
-        // 有限パス権（Finite Pass Rights）オプション
-        println!("option name PassRights type check default false");
-        println!("option name InitialPassCount type spin default 2 min 0 max 10");
-        println!("option name PassMoveBonus type spin default 0 min -1000 max 1000");
-        println!(
-            "option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500"
-        );
-        println!(
-            "option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500"
-        );
-        println!("option name SPSAParamsFile type string default <auto>");
-        // 定跡（opening book）オプション。既定は BookFile=no_book(オフ)、
-        // BookDepthLimit=0(無効)。
-        println!("option name USI_OwnBook type check default true");
-        println!("option name BookFile type string default no_book");
-        println!("option name BookExploreFile type string default <empty>");
-        println!("option name BookDir type string default book");
-        println!("option name BookMoves type spin default 16 min 0 max 10000");
-        println!("option name BookEvalDiff type spin default 30 min 0 max 30000");
-        println!("option name BookEvalBlackLimit type spin default 0 min -30000 max 30000");
-        println!("option name BookEvalWhiteLimit type spin default -140 min -30000 max 30000");
-        println!("option name BookDepthLimit type spin default 0 min 0 max 256");
-        // 先後別の値。-1 なら BookEvalDiff / BookDepthLimit を使う。
-        for name in BOOK_PER_SIDE_OPTIONS {
-            println!("option name {name} type spin default -1 min -1 max 99999");
-        }
-        println!("option name NarrowBook type check default false");
-        println!("option name BookSelectValue type check default false");
-        println!("option name ConsiderBookMoveCount type check default false");
-        println!("option name IgnoreBookPly type check default true");
-        println!("option name FlippedBook type check default true");
-        println!("option name BookOnTheFly type check default false");
-        for spec in SearchTuneParams::option_specs() {
-            println!(
-                "option name {} type spin default {} min {} max {}",
-                spec.usi_name, spec.default, spec.min, spec.max
-            );
-        }
-        for name in &self.spsa_net_spec_names {
-            println!("option name {name} type spin default 0 min -32768 max 32767");
+        for line in self.usi_option_lines() {
+            println!("{line}");
         }
         println!("usiok");
+    }
+
+    /// `usi` に返す `option name ...` の行。engine_options.txt の名前の照合にも使う。
+    fn usi_option_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push("option name USI_Hash type spin default 256 min 1 max 4096".to_string());
+        lines.push("option name Threads type spin default 1 min 1 max 512".to_string());
+        lines.push("option name NumaPolicy type combo default none var none var auto".to_string());
+        lines.push("option name USI_Ponder type check default false".to_string());
+        lines.push("option name Stochastic_Ponder type check default false".to_string());
+        lines.push("option name MultiPV type spin default 1 min 1 max 500".to_string());
+        lines.push("option name NetworkDelay type spin default 120 min 0 max 10000".to_string());
+        lines.push("option name NetworkDelay2 type spin default 1120 min 0 max 10000".to_string());
+        // RoundUpToFullSecond=true のときはエンジン側で 1000 未満を 1000 に上げる
+        lines.push(
+            "option name MinimumThinkingTime type spin default 2000 min 0 max 100000".to_string(),
+        );
+        lines.push("option name RoundUpToFullSecond type check default true".to_string());
+        lines.push("option name SlowMover type spin default 100 min 1 max 1000".to_string());
+        lines.push(
+            "option name MaxMovesToDraw type spin default 100000 min 0 max 100000".to_string(),
+        );
+        lines.push(format!(
+            "option name DrawValueBlack type spin default {DEFAULT_DRAW_VALUE_BLACK} min -30000 max 30000"
+        ));
+        lines.push(format!(
+            "option name DrawValueWhite type spin default {DEFAULT_DRAW_VALUE_WHITE} min -30000 max 30000"
+        ));
+        lines.push("option name EvalHash type spin default 256 min 0 max 4096".to_string());
+        lines.push(format!(
+            "option name MateHashMB type spin default {DEFAULT_MATE_HASH_MB} min 1 max 4096"
+        ));
+        lines.push(format!(
+            "option name MateMode type combo default {} var Speed var Power",
+            MateMode::default().name()
+        ));
+        lines.push("option name MateThreads type spin default 1 min 1 max 512".to_string());
+        lines.push("option name MateShortest type combo default Off var Off var Tsume var All var Estimate".to_string());
+        lines.push("option name UseEvalHash type check default true".to_string());
+        lines.push("option name EvalHashLargePages type check default true".to_string());
+        lines.push("option name Skill Level type spin default 20 min 0 max 20".to_string());
+        lines.push("option name UCI_LimitStrength type check default false".to_string());
+        lines.push("option name UCI_Elo type spin default 0 min 0 max 4000".to_string());
+        lines.push("option name MaterialLevel type combo default none var none var 1 var 2 var 3 var 4 var 7 var 8 var 9".to_string());
+        lines.push("option name EvalFile type string default eval/nn.bin".to_string());
+        lines.push("option name EnteringKingRule type combo default CSARule27 var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule".to_string());
+        // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
+        // 水匠5等は24を使用する
+        lines.push("option name FV_SCALE type spin default 0 min 0 max 100".to_string());
+        lines.push("option name LS_BUCKET_MODE type combo default unset var unset var progresskpabs var progresskpabsq16 var kingrank9".to_string());
+        lines.push(format!(
+            "option name LS_PROGRESS_BUCKETS type spin default 0 min 0 max {MAX_LAYER_STACK_BUCKETS}"
+        ));
+        lines.push("option name LS_PROGRESS_COEFF type string default <empty>".to_string());
+        lines.push("option name NNUE_ARCHITECTURE type combo default auto var auto var halfkp var halfka_hm var halfka var layerstacks var layerstacks-psqt".to_string());
+        // 有限パス権（Finite Pass Rights）オプション
+        lines.push("option name PassRights type check default false".to_string());
+        lines.push("option name InitialPassCount type spin default 2 min 0 max 10".to_string());
+        lines.push("option name PassMoveBonus type spin default 0 min -1000 max 1000".to_string());
+        lines.push(format!(
+            "option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500"
+        ));
+        lines.push(format!(
+            "option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500"
+        ));
+        lines.push("option name SPSAParamsFile type string default <auto>".to_string());
+        // 定跡（opening book）オプション。既定は BookFile=no_book(オフ)、
+        // BookDepthLimit=0(無効)。
+        lines.push("option name USI_OwnBook type check default true".to_string());
+        lines.push("option name BookFile type string default no_book".to_string());
+        lines.push("option name BookExploreFile type string default <empty>".to_string());
+        lines.push("option name BookDir type string default book".to_string());
+        lines.push("option name BookMoves type spin default 16 min 0 max 10000".to_string());
+        lines.push("option name BookEvalDiff type spin default 30 min 0 max 30000".to_string());
+        lines.push(
+            "option name BookEvalBlackLimit type spin default 0 min -30000 max 30000".to_string(),
+        );
+        lines.push(
+            "option name BookEvalWhiteLimit type spin default -140 min -30000 max 30000"
+                .to_string(),
+        );
+        lines.push("option name BookDepthLimit type spin default 0 min 0 max 256".to_string());
+        // 先後別の値。-1 なら BookEvalDiff / BookDepthLimit を使う。
+        for name in BOOK_PER_SIDE_OPTIONS {
+            lines.push(format!("option name {name} type spin default -1 min -1 max 99999"));
+        }
+        lines.push("option name NarrowBook type check default false".to_string());
+        lines.push("option name BookSelectValue type check default false".to_string());
+        lines.push("option name ConsiderBookMoveCount type check default false".to_string());
+        lines.push("option name IgnoreBookPly type check default true".to_string());
+        lines.push("option name FlippedBook type check default true".to_string());
+        lines.push("option name BookOnTheFly type check default false".to_string());
+        for spec in SearchTuneParams::option_specs() {
+            lines.push(format!(
+                "option name {} type spin default {} min {} max {}",
+                spec.usi_name,
+                self.spsa_defaults.get(spec.usi_name).copied().unwrap_or(spec.default),
+                spec.min,
+                spec.max
+            ));
+        }
+        for name in &self.spsa_net_spec_names {
+            let default = self.spsa_defaults.get(name).copied().unwrap_or(0);
+            lines.push(format!(
+                "option name {name} type spin default {default} min -32768 max 32767"
+            ));
+        }
+        lines
     }
 
     /// isreadyコマンド: 準備完了を通知
@@ -452,6 +486,7 @@ impl UsiEngine {
             search.clear_tt();
             search.clear_eval_hash();
         }
+        self.apply_engine_options_file();
         self.maybe_load_spsa_params();
         // EvalFile の状態を確認し、必要なら NNUE をロード
         match self.eval_file_explicit {
@@ -681,58 +716,67 @@ impl UsiEngine {
             }
         };
 
-        let mut applied = 0usize;
-        let mut clamped = 0usize;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            // .params format: name,type,value,min,max,c_end,r_end [// comment] [[[NOT USED]]]
-            let val_part = trimmed.split("//").next().unwrap_or(trimmed);
-            let val_part = val_part.replace("[[NOT USED]]", "");
-            let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
-            if cols.len() < 3 {
-                continue;
-            }
-            let name = cols[0];
-            let type_name = cols[1];
-            let value_str = cols[2];
-
-            let parsed = if type_name.eq_ignore_ascii_case("int") {
-                match value_str.parse::<f64>() {
-                    Ok(v) => v.round() as i32,
-                    Err(_) => continue,
-                }
-            } else {
-                match value_str.parse::<i32>() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                }
-            };
-
-            if name.starts_with(NET_DELTA_OPTION_PREFIX) {
-                if self.set_net_delta_value(name, parsed) {
-                    applied += 1;
-                }
-            } else if let Some(search) = self.search.as_mut()
-                && let Some(result) = search.set_search_tune_option(name, parsed)
-            {
-                applied += 1;
-                if result.clamped {
-                    clamped += 1;
-                }
-            }
-        }
-
-        if applied > 0 {
+        let report = self.apply_spsa_params(&parse_spsa_params(&content));
+        if report.applied > 0 {
             eprintln!(
                 "info string SPSA params loaded: {} parameters from {} (clamped: {})",
-                applied,
+                report.applied,
                 path.display(),
-                clamped
+                report.clamped
             );
         }
+        report.warn_unknown(&path.display().to_string());
+    }
+
+    /// build に焼き込んだ SPSA の値を適用し、`usi` の既定値にする。
+    /// GUI は `usi` の既定値を setoption で送り返すので、既定値を替えないと焼き込んだ値が上書きされる。
+    fn apply_embedded_spsa_params(&mut self, content: &str) {
+        let entries = parse_spsa_params(content);
+        if entries.is_empty() {
+            return;
+        }
+        let report = self.apply_spsa_params(&entries);
+        self.spsa_defaults = report.applied_values.iter().cloned().collect();
+        eprintln!(
+            "info string SPSA params embedded: {} parameters (clamped: {})",
+            report.applied, report.clamped
+        );
+        report.warn_unknown("embedded SPSA params");
+    }
+
+    fn apply_spsa_params(&mut self, entries: &[(String, i32)]) -> SpsaApplyReport {
+        let mut report = SpsaApplyReport::default();
+        for (name, value) in entries {
+            // engine_options.txt で固定した値は .params でも変えない
+            if self.fixed_options.contains_key(&name.to_ascii_lowercase()) {
+                continue;
+            }
+            let applied = if name.starts_with(NET_DELTA_OPTION_PREFIX) {
+                // usi で広告する範囲 (i16) に収める
+                let clamped = (*value).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                if clamped != *value {
+                    report.clamped += 1;
+                }
+                self.set_net_delta_value(name, clamped).then_some(clamped)
+            } else if let Some(search) = self.search.as_mut()
+                && let Some(result) = search.set_search_tune_option(name, *value)
+            {
+                if result.clamped {
+                    report.clamped += 1;
+                }
+                Some(result.applied)
+            } else {
+                None
+            };
+            match applied {
+                Some(v) => {
+                    report.applied += 1;
+                    report.applied_values.push((name.clone(), v));
+                }
+                None => report.unknown.push(name.clone()),
+            }
+        }
+        report
     }
 
     fn set_net_delta_value(&mut self, name: &str, value: i32) -> bool {
@@ -866,11 +910,7 @@ impl UsiEngine {
 
     /// setoptionコマンド: オプション設定
     fn cmd_setoption(&mut self, tokens: &[&str]) {
-        // 探索中の設定変更は避ける
-        self.wait_for_search();
-        // 未解決の go mate infinite は終わらないので、待つ前に止める (checkmate timeout を出す)
-        self.mate_stop.store(true, Ordering::SeqCst);
-        self.wait_for_mate();
+        self.stop_for_option_change();
 
         // setoption name <name> value <value>
         let mut name = String::new();
@@ -904,7 +944,17 @@ impl UsiEngine {
             }
         }
 
-        // オプションを適用
+        if let Some(fixed) = self.fixed_options.get(&name.to_ascii_lowercase()) {
+            println!(
+                "info string {name} is fixed to '{fixed}' by {ENGINE_OPTIONS_FILE}; setoption ignored"
+            );
+            return;
+        }
+        self.set_option(name, value);
+    }
+
+    /// オプションを 1 つ適用する。setoption と engine_options.txt の両方から呼ぶ。
+    fn set_option(&mut self, name: String, value: String) {
         if name.starts_with(NET_DELTA_OPTION_PREFIX) {
             let parsed = match value.parse::<i32>() {
                 Ok(v) => v,
@@ -1513,6 +1563,90 @@ impl UsiEngine {
             _ => {
                 // 未知のオプションは無視
             }
+        }
+    }
+
+    /// オプションを変える前に探索と詰み探索を止める。
+    fn stop_for_option_change(&mut self) {
+        // 探索中の設定変更は避ける
+        self.wait_for_search();
+        // 未解決の go mate infinite は終わらないので、待つ前に止める (checkmate timeout を出す)
+        self.mate_stop.store(true, Ordering::SeqCst);
+        self.wait_for_mate();
+    }
+
+    /// 実行ファイルと同じフォルダの engine_options.txt を読み、書かれたオプションを適用して固定する。
+    /// isready のたびに読み、前回と値が同じ行は適用し直さない。やねうら王はカレントフォルダから読むが、
+    /// GUI ごとに違うカレントフォルダに左右されないよう、実行ファイルの隣だけを見る。
+    fn apply_engine_options_file(&mut self) {
+        let Some(path) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(ENGINE_OPTIONS_FILE)))
+            .filter(|path| path.is_file())
+        else {
+            return;
+        };
+        self.apply_engine_options_from(&path);
+    }
+
+    fn apply_engine_options_from(&mut self, path: &Path) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                println!("info string Warning: failed to read {}: {e}", path.display());
+                return;
+            }
+        };
+        let base_dir = path.parent().unwrap_or(Path::new(""));
+        let known: Vec<(String, String)> = self
+            .usi_option_lines()
+            .into_iter()
+            .filter_map(|line| usi_option_line_name(&line).map(|name| (name, line)))
+            .collect();
+        // 同じ名前が複数行にあれば最後の行を使う
+        let mut latest: Vec<(String, String)> = Vec::new();
+        for (line_no, entry) in parse_engine_options(&text) {
+            let (name, value) = match entry {
+                Ok(entry) => entry,
+                Err(message) => {
+                    println!("info string Warning: {} line {line_no}: {message}", path.display());
+                    continue;
+                }
+            };
+            let Some((canonical, declaration)) =
+                known.iter().find(|(known, _)| known.eq_ignore_ascii_case(&name))
+            else {
+                println!(
+                    "info string Warning: {} line {line_no}: unknown option '{name}'",
+                    path.display()
+                );
+                continue;
+            };
+            if let Err(message) = validate_option_value(declaration, &value) {
+                println!("info string Warning: {} line {line_no}: {message}", path.display());
+                continue;
+            }
+            let value = resolve_option_path(canonical, &value, base_dir);
+            latest.retain(|(known, _)| known != canonical);
+            latest.push((canonical.clone(), value));
+        }
+        let changes: Vec<(String, String, String)> = latest
+            .into_iter()
+            .map(|(name, value)| {
+                let key = name.to_ascii_lowercase();
+                (name, key, value)
+            })
+            .filter(|(_, key, value)| self.fixed_options.get(key) != Some(value))
+            .collect();
+        if changes.is_empty() {
+            return;
+        }
+        println!("info string read engine options: {}", path.display());
+        self.stop_for_option_change();
+        for (name, key, value) in changes {
+            println!("info string engine option {name} = {value}");
+            self.set_option(name, value.clone());
+            self.fixed_options.insert(key, value);
         }
     }
 
@@ -2240,6 +2374,160 @@ fn parse_spsa_net_spec(content: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// SPSA の値を適用した結果。
+#[derive(Default)]
+struct SpsaApplyReport {
+    applied: usize,
+    clamped: usize,
+    applied_values: Vec<(String, i32)>,
+    unknown: Vec<String>,
+}
+
+impl SpsaApplyReport {
+    fn warn_unknown(&self, source: &str) {
+        if !self.unknown.is_empty() {
+            eprintln!(
+                "info string Warning: {} unknown SPSA parameters in {source}: {}",
+                self.unknown.len(),
+                self.unknown.join(", ")
+            );
+        }
+    }
+}
+
+/// `.params` (name,type,value,min,max,c_end,r_end [// comment] [[[NOT USED]]]) から名前と値を取り出す。
+fn parse_spsa_params(content: &str) -> Vec<(String, i32)> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let val_part = trimmed.split("//").next().unwrap_or(trimmed);
+        let val_part = val_part.replace("[[NOT USED]]", "");
+        let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        let parsed = if cols[1].eq_ignore_ascii_case("int") {
+            match cols[2].parse::<f64>() {
+                Ok(v) => v.round() as i32,
+                Err(_) => continue,
+            }
+        } else {
+            match cols[2].parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+        };
+        entries.push((cols[0].to_string(), parsed));
+    }
+    entries
+}
+
+/// engine_options.txt の 1 行: 名前と値、または読めなかった理由。
+type EngineOptionEntry = Result<(String, String), String>;
+
+/// engine_options.txt の各行を (行番号, 名前と値) にする。空行と `#`・`//` で始まる行は飛ばす。
+/// 書き方は `名前 値`、`名前=値`、`usi` の応答と同じ `option name 名前 type 型 default 値 ...` の 3 つ。
+/// `=` があれば最初の `=` で分けるので、`Skill Level=10` のように名前に空白を含められる。
+fn parse_engine_options(text: &str) -> Vec<(usize, EngineOptionEntry)> {
+    let mut entries = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        let entry = if line.starts_with("option ") {
+            parse_option_declaration(line)
+        } else if let Some((name, value)) = line.split_once('=') {
+            Ok((name.trim().to_string(), value.trim().to_string()))
+        } else {
+            match line.split_once(char::is_whitespace) {
+                Some((name, value)) => Ok((name.to_string(), value.trim().to_string())),
+                None => Ok((line.to_string(), String::new())),
+            }
+        };
+        let entry = entry.and_then(|(name, value)| {
+            if name.is_empty() {
+                Err(format!("missing option name: '{line}'"))
+            } else {
+                Ok((name, value))
+            }
+        });
+        entries.push((index + 1, entry));
+    }
+    entries
+}
+
+/// `option name 名前 type 型 default 値 [min ..] [max ..] [var ..]` から名前と default の値を取り出す。
+fn parse_option_declaration(line: &str) -> Result<(String, String), String> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.get(1) != Some(&"name") {
+        return Err(format!("invalid option declaration: '{line}'"));
+    }
+    let type_at = tokens
+        .iter()
+        .position(|t| *t == "type")
+        .ok_or_else(|| format!("invalid option declaration: '{line}'"))?;
+    let name = tokens[2..type_at].join(" ");
+    let default_at = tokens
+        .iter()
+        .position(|t| *t == "default")
+        .ok_or_else(|| format!("option declaration without default: '{line}'"))?;
+    let value: Vec<&str> = tokens[default_at + 1..]
+        .iter()
+        .take_while(|t| !matches!(**t, "min" | "max" | "var"))
+        .copied()
+        .collect();
+    Ok((name, value.join(" ")))
+}
+
+/// engine_options.txt の値が、`usi` で広告したオプションの型と範囲に合うかを確かめる。
+fn validate_option_value(declaration: &str, value: &str) -> Result<(), String> {
+    let tokens: Vec<&str> = declaration.split_whitespace().collect();
+    let after = |key: &str| tokens.iter().position(|t| *t == key).and_then(|i| tokens.get(i + 1));
+    match after("type").copied() {
+        Some("spin") => {
+            let v: i64 = value.parse().map_err(|_| format!("'{value}' is not an integer"))?;
+            let bound = |key| after(key).and_then(|t| t.parse::<i64>().ok());
+            if bound("min").is_some_and(|min| v < min) || bound("max").is_some_and(|max| v > max) {
+                return Err(format!("{value} is out of range: {declaration}"));
+            }
+            Ok(())
+        }
+        // 適用側は true/false だけを確実に読む (parse::<bool> の項目がある)
+        Some("check") if matches!(value, "true" | "false") => Ok(()),
+        Some("check") => Err(format!("'{value}' is not true or false")),
+        Some("combo") => {
+            let allowed = tokens.windows(2).any(|w| w[0] == "var" && w[1] == value);
+            if allowed {
+                Ok(())
+            } else {
+                Err(format!("'{value}' is not one of: {declaration}"))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `option name 名前 type ...` の行から名前を取り出す。
+fn usi_option_line_name(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("option name ")?;
+    let end = rest.find(" type ")?;
+    Some(rest[..end].to_string())
+}
+
+/// パスのオプションの相対パスを、engine_options.txt のあるフォルダからのパスにする。
+/// `<empty>` などの空を表す値はそのまま返す。
+fn resolve_option_path(name: &str, value: &str, base_dir: &Path) -> String {
+    let is_sentinel = value.is_empty() || value.starts_with('<');
+    if !PATH_OPTIONS.contains(&name) || is_sentinel || Path::new(value).is_absolute() {
+        return value.to_string();
+    }
+    base_dir.join(value).to_string_lossy().into_owned()
+}
+
 /// ソースの id に、結果を変えうる feature を `+` 以降に名前順で付ける。id が分からなければ `unknown`。
 fn source_version(id: &str, core_features: &str, usi_features: &str) -> String {
     if id == "unknown" {
@@ -2670,6 +2958,143 @@ mod tests {
                         spec.usi_name
                     );
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn embedded_spsa_params_become_usi_defaults() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let spec = &SearchTuneParams::option_specs()[0];
+                let baked = if spec.default < spec.max { spec.default + 1 } else { spec.default - 1 };
+                let mut engine = UsiEngine::new();
+                engine.apply_embedded_spsa_params(&format!(
+                    "# comment\n{},int,{baked},{},{},1,0.002\nSPSA_NoSuchParam,int,5,0,10,1,0.002\n",
+                    spec.usi_name, spec.min, spec.max
+                ));
+                let line = format!(
+                    "option name {} type spin default {baked} min {} max {}",
+                    spec.usi_name, spec.min, spec.max
+                );
+                assert!(engine.usi_option_lines().contains(&line), "{line}");
+                assert_eq!(engine.spsa_defaults.len(), 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn fixed_spsa_values_are_not_overwritten_by_params_and_net_deltas_are_clamped() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let spec = &SearchTuneParams::option_specs()[0];
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(ENGINE_OPTIONS_FILE);
+                std::fs::write(&path, format!("{} {}\n", spec.usi_name, spec.min)).unwrap();
+                let mut engine = UsiEngine::new();
+                engine.apply_engine_options_from(&path);
+                let report = engine.apply_spsa_params(&[(spec.usi_name.to_string(), spec.max)]);
+                assert_eq!(report.applied, 0);
+
+                let net = format!("{NET_DELTA_OPTION_PREFIX}out_w_b0_0");
+                let report = engine.apply_spsa_params(&[(net.clone(), 40000)]);
+                assert_eq!(report.applied_values, vec![(net, i32::from(i16::MAX))]);
+                assert_eq!(report.clamped, 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_option_value_checks_type_and_range() {
+        let spin = "option name USI_Hash type spin default 256 min 1 max 4096";
+        assert!(validate_option_value(spin, "64").is_ok());
+        assert!(validate_option_value(spin, "0").is_err());
+        assert!(validate_option_value(spin, "abc").is_err());
+        let check = "option name UseEvalHash type check default true";
+        assert!(validate_option_value(check, "false").is_ok());
+        assert!(validate_option_value(check, "yes").is_err());
+        let combo = "option name MateMode type combo default Power var Speed var Power";
+        assert!(validate_option_value(combo, "Speed").is_ok());
+        assert!(validate_option_value(combo, "Fast").is_err());
+        let string = "option name EvalFile type string default eval/nn.bin";
+        assert!(validate_option_value(string, "any path").is_ok());
+    }
+
+    #[test]
+    fn parse_engine_options_accepts_three_forms() {
+        let text = "\u{feff}# comment\n// comment\n\nUSI_Hash 64\nSkill Level = 10\n\
+                    option name BookFile type string default user book.db\n\
+                    option name Threads type spin default 4 min 1 max 512\n\
+                    option name\n";
+        let entries = parse_engine_options(text);
+        let ok: Vec<_> = entries
+            .iter()
+            .filter_map(|(n, e)| e.as_ref().ok().map(|kv| (*n, kv.clone())))
+            .collect();
+        assert_eq!(
+            ok,
+            vec![
+                (4, ("USI_Hash".to_string(), "64".to_string())),
+                (5, ("Skill Level".to_string(), "10".to_string())),
+                (6, ("BookFile".to_string(), "user book.db".to_string())),
+                (7, ("Threads".to_string(), "4".to_string())),
+            ]
+        );
+        assert!(matches!(entries.last(), Some((8, Err(_)))));
+    }
+
+    #[test]
+    fn resolve_option_path_uses_file_dir_for_relative_paths_only() {
+        let base = Path::new("base");
+        assert_eq!(
+            resolve_option_path("EvalFile", "eval/nn.bin", base),
+            base.join("eval/nn.bin").to_string_lossy()
+        );
+        assert_eq!(resolve_option_path("BookFile", "user_book1.db", base), "user_book1.db");
+        assert_eq!(resolve_option_path("LS_PROGRESS_COEFF", "<empty>", base), "<empty>");
+        let absolute = std::env::current_dir().unwrap().join("nn.bin");
+        let absolute = absolute.to_string_lossy();
+        assert_eq!(resolve_option_path("EvalFile", &absolute, base), absolute);
+    }
+
+    #[test]
+    #[serial]
+    fn engine_options_file_fixes_options_against_setoption() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(ENGINE_OPTIONS_FILE);
+                std::fs::write(&path, "usi_hash 64\nBookDir=mybook\nNoSuchOption 1\n").unwrap();
+                let mut engine = UsiEngine::new();
+                engine.apply_engine_options_from(&path);
+                assert_eq!(engine.tt_size_mb, 64);
+                assert_eq!(Path::new(&engine.book_dir), dir.path().join("mybook"));
+
+                engine.cmd_setoption(&["setoption", "name", "USI_Hash", "value", "128"]);
+                assert_eq!(engine.tt_size_mb, 64);
+                engine.cmd_setoption(&["setoption", "name", "BookFile", "value", "a.db"]);
+                assert_eq!(engine.book_file, "a.db");
+
+                // 同じ名前は最後の行、不正な値は適用も固定もしない
+                std::fs::write(&path, "USI_Hash 32\nUSI_Hash 64\nThreads abc\nBookDir=mybook\n")
+                    .unwrap();
+                engine.apply_engine_options_from(&path);
+                assert_eq!(engine.tt_size_mb, 64);
+                assert!(!engine.fixed_options.contains_key("threads"));
+                std::fs::write(&path, "USI_Hash 32\nBookDir=mybook\n").unwrap();
+                engine.apply_engine_options_from(&path);
+                assert_eq!(engine.tt_size_mb, 32);
             })
             .unwrap()
             .join()

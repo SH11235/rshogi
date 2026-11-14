@@ -938,6 +938,7 @@ extra = ["6b5a"]
 
 paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key は手数を除く SFEN の3フィールドで、同じ根をまとめ、根の手番をそろえます。GAME は各手順の最初の `depth+1` 手を局面別に合わせます。`own` は `b` / `w`。こちらの根の EXTRA は MultiPV 内だけ、相手の根の EXTRA は合法なら採用します。
 
+バイナリの隣に `engine_options.txt` (エンジンが option を固定するファイル) があると、指紋が実際の設定を表さないので開始時にエラーで止まります。
 条件の指紋は、engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版から作ります。
 
 同じ指紋・局面で値が同じ読みは、再取り込みでも追記しません。複数条件を含む同じ台帳を再取り込みしても `appended=0` でサイズは変わりません。ただし、未記録の先読みの印を補う行だけは追記します。

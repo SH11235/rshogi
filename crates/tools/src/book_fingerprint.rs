@@ -339,13 +339,92 @@ fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resou
     resources
 }
 
+/// エンジンの隣に engine_options.txt があれば拒む。
+///
+/// rshogi はこのファイルのオプションを setoption より優先して固定するので、ツールが渡した option と
+/// 実際に使われる設定・資源が食い違い、指紋や入力の保護が実際の読みを表さなくなる。
+pub fn ensure_no_engine_options(engine: &Path) -> Result<()> {
+    if let Some(dir) =
+        resolve_executable(engine).and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        let path = dir.join("engine_options.txt");
+        if path.try_exists()? {
+            bail!(
+                "エンジンの隣に {} があります。ツールの option を上書きするので、外してから実行してください",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `Command::new` が起動する実体を探す。見つからなければ None。
+///
+/// Windows では `.exe` で終わらない名前に `.exe` を足した候補も見る。ディレクトリを含まない名前は
+/// `Command::new` と同じ順で探す (Windows: 親の実行ファイルのフォルダ → システムフォルダ → PATH、
+/// Unix: PATH の実行可能なファイル)。カレントフォルダは探さない。
+fn resolve_executable(engine: &Path) -> Option<PathBuf> {
+    // 実行権限は PATH から探すときだけ見る (明示したパスは権限によらずそのパスが起動対象)
+    let found = |path: &Path, from_path_search: bool| {
+        let mut candidates = vec![path.to_path_buf()];
+        let ends_with_exe = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+        if cfg!(windows) && !ends_with_exe {
+            let mut with_exe = path.as_os_str().to_os_string();
+            with_exe.push(".exe");
+            candidates.push(PathBuf::from(with_exe));
+        }
+        candidates.into_iter().find_map(|c| {
+            c.canonicalize().ok().filter(|p| {
+                if from_path_search {
+                    is_executable_file(p)
+                } else {
+                    p.is_file()
+                }
+            })
+        })
+    };
+    if engine.components().count() > 1 {
+        return found(engine, false);
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        if let Some(dir) =
+            std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+        {
+            dirs.push(dir);
+        }
+        if let Some(root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+            dirs.push(root.join("System32"));
+            dirs.push(root);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&paths));
+    }
+    dirs.iter().find_map(|dir| found(&dir.join(engine), true))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// 解決できた読込資源を返す。不確実な option の実在を fresh 起動の条件にしない。
 pub fn readonly_resources(engine: &Path, values: &[String]) -> Result<Vec<PathBuf>> {
+    ensure_no_engine_options(engine)?;
     Ok(resolved_resources(engine, &options(values)?).paths)
 }
 
 /// 読込資源の内容を識別する。解決を保証できない設定には実行固有の値を含める。
 pub fn engine_fingerprint(engine: &Path, values: &[String]) -> Result<String> {
+    ensure_no_engine_options(engine)?;
     let parsed = options(values)?;
     let mut resources = resolved_resources(engine, &parsed);
     let mut hashes = Vec::new();
@@ -443,6 +522,18 @@ mod tests {
         assert_ne!(binary_changed, model_changed);
         std::fs::write(dir.path().join("spsa.params"), b"params").unwrap();
         assert_ne!(model_changed, engine_fingerprint(&engine, &opts).unwrap());
+        std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
+        assert!(engine_fingerprint(&engine, &opts).is_err());
+        assert!(readonly_resources(&engine, &opts).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn engine_options_check_completes_the_exe_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("engine.exe"), b"binary").unwrap();
+        std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
+        assert!(ensure_no_engine_options(&dir.path().join("engine")).is_err());
     }
 
     #[test]

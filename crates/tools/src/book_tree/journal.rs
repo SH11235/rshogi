@@ -105,6 +105,7 @@ impl Settings {
             };
             content_sha256.insert("implicit:SPSAParamsFile".into(), hash);
         }
+        crate::book_fingerprint::ensure_no_engine_options(&args.engine)?;
         let mut settings = Self {
             fingerprint: String::new(),
             version: VERSION.into(),

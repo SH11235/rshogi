@@ -520,6 +520,7 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
         inputs.push(resource.clone());
     }
     if let Some(engine) = &cli.engine {
+        tools::book_fingerprint::ensure_no_engine_options(engine)?;
         let cwd = engine.parent().unwrap_or(std::path::Path::new("."));
         for (name, value) in cli.usi_options.iter().filter_map(|option| parsed_usi_option(option)) {
             anyhow::ensure!(
@@ -6599,6 +6600,29 @@ mod marker_tests {
                 std::fs::remove_file(&output).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn engine_options_next_to_engine_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let input = dir.path().join("input.psv");
+        let engine_options = dir.path().join("engine_options.txt");
+        let output_dir = dir.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        for path in [&engine, &input, &engine_options] {
+            std::fs::write(path, [7; 40]).unwrap();
+        }
+        let cli = Cli::parse_from([
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--engine",
+            engine.to_str().unwrap(),
+            "--output-dir",
+            output_dir.to_str().unwrap(),
+        ]);
+        assert!(output_protection(&cli, std::slice::from_ref(&input)).is_err());
     }
 
     #[test]
