@@ -606,6 +606,15 @@ fn export_threads_preserve_all_files_and_reports() {
     )
     .unwrap();
     std::fs::write(journals.join("c.jsonl"), "{\"kind\":\"parent\"}\n").unwrap();
+    let mut invalid = journal_record(50);
+    invalid["settings"]["fingerprint"] = serde_json::json!("invalid");
+    for name in ["d", "e", "f", "g", "h", "i", "j"] {
+        std::fs::write(
+            journals.join(format!("{name}.jsonl")),
+            format!("{invalid}\n{first}\n{}\n", journal_record(60)).repeat(193),
+        )
+        .unwrap();
+    }
     a.journal.push(journals.clone());
     let mut expected_report = Vec::new();
     run_to(a, &mut expected_report).unwrap();
