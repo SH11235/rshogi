@@ -345,7 +345,7 @@ fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resou
 /// 実際に使われる設定・資源が食い違い、指紋や入力の保護が実際の読みを表さなくなる。
 pub fn ensure_no_engine_options(engine: &Path) -> Result<()> {
     if let Some(dir) =
-        engine.canonicalize().ok().and_then(|path| path.parent().map(Path::to_path_buf))
+        resolve_executable(engine).and_then(|path| path.parent().map(Path::to_path_buf))
     {
         let path = dir.join("engine_options.txt");
         if path.try_exists()? {
@@ -356,6 +356,30 @@ pub fn ensure_no_engine_options(engine: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `Command::new` が起動する実体を探す。Windows で拡張子を省いたパスは `.exe` を補い、
+/// ディレクトリを含まない名前は PATH から探す。見つからなければ None。
+fn resolve_executable(engine: &Path) -> Option<PathBuf> {
+    let candidates = |path: &Path| {
+        let mut list = vec![path.to_path_buf()];
+        if cfg!(windows) && path.extension().is_none() {
+            list.push(path.with_extension("exe"));
+        }
+        list
+    };
+    let found = |path: &Path| {
+        candidates(path)
+            .into_iter()
+            .find_map(|c| c.canonicalize().ok().filter(|p| p.is_file()))
+    };
+    if engine.components().count() > 1 {
+        return found(engine);
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .find_map(|dir| found(&dir.join(engine)))
+        .or_else(|| found(engine))
 }
 
 /// 解決できた読込資源を返す。不確実な option の実在を fresh 起動の条件にしない。
@@ -467,6 +491,15 @@ mod tests {
         std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
         assert!(engine_fingerprint(&engine, &opts).is_err());
         assert!(readonly_resources(&engine, &opts).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn engine_options_check_completes_the_exe_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("engine.exe"), b"binary").unwrap();
+        std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
+        assert!(ensure_no_engine_options(&dir.path().join("engine")).is_err());
     }
 
     #[test]
