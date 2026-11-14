@@ -545,6 +545,12 @@ impl TimeManagement {
         let instability = calculate_best_move_instability(tot_best_move_changes, thread_count);
         let reduction =
             (1.4540 + self.previous_time_reduction) / (2.1593 * time_reduction.max(0.0001));
+        log::trace!(
+            target: "rshogi_core::search::time",
+            "event=factors falling_eval={:.6} stability={:.6} previous_stability={:.6} reduction={:.6} instability={:.6} changes={:.6} threads={}",
+            falling_eval, time_reduction, self.previous_time_reduction, reduction,
+            instability, tot_best_move_changes, thread_count,
+        );
         self.previous_time_reduction = time_reduction;
 
         falling_eval * reduction * instability
@@ -584,6 +590,7 @@ impl TimeManagement {
             && (effective_elapsed as f64) > total_time * 0.6540
             && !is_pondering
         {
+            self.trace_timing("deadline_request", "nodes_effort", elapsed);
             self.set_search_end(elapsed);
         }
 
@@ -597,6 +604,15 @@ impl TimeManagement {
 
         // total_time超過時の処理
         if (effective_elapsed as f64) > total_time.min(self.maximum_time as f64) {
+            self.trace_timing(
+                "deadline_request",
+                if total_time <= self.maximum_time as f64 {
+                    "target"
+                } else {
+                    "maximum"
+                },
+                elapsed,
+            );
             if is_pondering {
                 // ponder中は stop_on_ponderhit を立て、次のチェックで秒切り上げ終了時刻を設定
                 self.stop_on_ponderhit = true;
@@ -604,6 +620,15 @@ impl TimeManagement {
                 self.set_search_end(elapsed);
             }
         }
+
+        log::trace!(
+            target: "rshogi_core::search::time",
+            "event=iteration_budget depth={} elapsed_ms={} effective_elapsed_ms={} target_ms={:.3} optimum_ms={} maximum_ms={} minimum_ms={} threshold_ms={} deadline_ms={} nodes_effort={:.3} ponder={} final_push={} single_move={} stop_on_hit={}",
+            completed_depth, elapsed, effective_elapsed, total_time, self.optimum_time,
+            self.maximum_time, self.minimum_time, stop_threshold, self.search_end,
+            nodes_effort, is_pondering, self.is_final_push, self.single_move_limit,
+            self.stop_on_ponderhit,
+        );
 
         debug!(
             target: "rshogi_core::search",
@@ -716,6 +741,7 @@ impl TimeManagement {
 
         // 外部からの停止要求
         if self.stop.load(Ordering::Relaxed) {
+            self.trace_timing("stop", "external", elapsed);
             debug!(
                 target: "rshogi_core::search",
                 "stop check: external stop elapsed={} effective_elapsed={} search_end={} last_stop_threshold={:?} max_time={}",
@@ -735,12 +761,14 @@ impl TimeManagement {
 
         // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する
         if self.search_end == 0 && self.stop_on_ponderhit {
+            self.trace_timing("deadline_request", "ponderhit", elapsed);
             self.set_search_end(elapsed);
         }
 
         // search_end が設定されている場合は、それを最優先に使う
         if self.search_end > 0 {
             if elapsed >= self.search_end {
+                self.trace_timing("stop", "deadline", elapsed);
                 debug!(
                     target: "rshogi_core::search",
                     "stop check: search_end reached elapsed={} search_end={}",
@@ -756,6 +784,7 @@ impl TimeManagement {
         if let Some(threshold) = self.last_stop_threshold
             && effective_elapsed >= threshold
         {
+            self.trace_timing("stop", "iteration_threshold", elapsed);
             debug!(
                 target: "rshogi_core::search",
                 "stop check: last_stop_threshold reached effective_elapsed={} threshold={}",
@@ -767,6 +796,7 @@ impl TimeManagement {
 
         // 最大時間を超えた（セーフティ）
         if effective_elapsed >= self.maximum_time {
+            self.trace_timing("stop", "maximum", elapsed);
             debug!(
                 target: "rshogi_core::search",
                 "stop check: maximum_time reached effective_elapsed={} max_time={}",
@@ -818,10 +848,14 @@ impl TimeManagement {
         }
         self.is_pondering = false;
         self.last_stop_threshold = None;
+        if log::log_enabled!(target: "rshogi_core::search::time", log::Level::Trace) {
+            self.trace_timing("ponderhit", "notification", self.elapsed());
+        }
 
         // ponder中に時間を使い切っていた場合のみ、終了時刻を確定させる
         if self.search_end == 0 && self.stop_on_ponderhit {
             let elapsed = self.elapsed();
+            self.trace_timing("deadline_request", "ponderhit", elapsed);
             self.set_search_end(elapsed);
         }
         self.ponderhit.store(false, Ordering::Relaxed);
@@ -854,6 +888,25 @@ impl TimeManagement {
         let rounded = self.round_up(max_time);
 
         self.search_end = rounded.saturating_add(duration_start_to_ponderhit);
+        self.trace_timing("deadline", "rounded", elapsed_ms);
+    }
+
+    pub(crate) fn trace_timing(&self, event: &str, reason: &str, elapsed: TimePoint) {
+        log::trace!(
+            target: "rshogi_core::search::time",
+            "event={} reason={} elapsed_ms={} effective_elapsed_ms={} optimum_ms={} maximum_ms={} minimum_ms={} available_ms={} threshold_ms={:?} deadline_ms={} ponder={} stop_on_hit={}",
+            event, reason, elapsed, self.effective_elapsed(elapsed), self.optimum_time,
+            self.maximum_time, self.minimum_time, self.remain_time, self.last_stop_threshold,
+            self.search_end, self.is_pondering, self.stop_on_ponderhit,
+        );
+    }
+
+    pub(crate) fn trace_external_stop(&self) {
+        if log::log_enabled!(target: "rshogi_core::search::time", log::Level::Trace)
+            && self.stop_requested()
+        {
+            self.trace_timing("stop", "external", self.elapsed());
+        }
     }
 
     /// 外部から停止を要求
