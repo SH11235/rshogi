@@ -1209,7 +1209,7 @@ pub(super) enum Fill {
     Bridge,
 }
 
-/// [`propagate`] の結果。
+/// [`propagate_with`] の結果。
 struct Propagated {
     graph: Graph,
     /// 元データの局面ごと (key 順)・手ごとの値の分かる手。補った局面は含まない。
@@ -1667,18 +1667,8 @@ fn propagate_entries(
     Ok((graph, known, illegal_moves, stats))
 }
 
-/// 元データの値の分かる手だけを伝播する。`fill` に応じて元データに無い相手の手番の局面を補う
-/// ([`reply_positions`])。key が正規の SFEN でなければ止まる。
-fn propagate(
-    positions: &BTreeMap<String, MasterPosition>,
-    draws: DrawValues,
-    fill: Fill,
-) -> Result<Propagated> {
-    propagate_with(positions, draws, fill, Flips::for_fill(fill), None)
-}
-
-/// [`propagate`] の本体。`Flips::Skip` なら反転した局面へ辺を張らない。`Fill::Bridge` は補った辺が反転で合流する
-/// 局面を千日手の値の違う循環に入れると止まる (1 行で両方の向きの値を表せない) ので、反転の辺を張らずに解く。
+/// 元データの値の分かる手だけを伝播する。`Flips::Skip` なら反転した局面へ辺を張らない。
+/// `Fill::Bridge` は補った辺が反転で合流する局面を千日手の値の違う循環に入れると止まるので、反転の辺を張らずに解く。
 fn propagate_with(
     positions: &BTreeMap<String, MasterPosition>,
     draws: DrawValues,
@@ -1751,10 +1741,19 @@ pub(super) struct MasterValue {
 
 /// 元データを `audit` と同じ規則で伝播し、局面ごとの main と 1 位の値を返す。
 pub(super) fn master_values(
-    (positions, _): &(BTreeMap<String, MasterPosition>, usize),
+    book: &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
 ) -> Result<BTreeMap<String, MasterValue>> {
-    let Propagated { graph, known, .. } = propagate(positions, draws, Fill::Off)?;
+    master_values_with_flips(book, draws, Flips::Shared)
+}
+
+/// [`master_values`] の反転した局面の扱いを指定する。
+pub(super) fn master_values_with_flips(
+    (positions, _): &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    flips: Flips,
+) -> Result<BTreeMap<String, MasterValue>> {
+    let Propagated { graph, known, .. } = propagate_with(positions, draws, Fill::Off, flips, None)?;
     let mut values = BTreeMap::new();
     for ((key, _), known) in positions.iter().zip(&known) {
         let Some(node) = graph.find(key) else {
@@ -2202,7 +2201,39 @@ struct Select<'a> {
     deep_freq: Option<&'a ReplyFrequency>,
 }
 
+/// [`audit`] と同じ点検を、指定した反転局面の扱いで行う。
+pub(super) fn audit_with_flips(
+    book: &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    line: i32,
+    flips: Flips,
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
+    audit_select_with_flips(
+        book,
+        draws,
+        Select {
+            line,
+            rule: SwitchRule::Line,
+            deep_plies: None,
+            deep_freq: None,
+        },
+        Fill::Off,
+        None,
+        flips,
+    )
+}
+
 fn audit_select(
+    book: &(BTreeMap<String, MasterPosition>, usize),
+    draws: DrawValues,
+    select: Select,
+    fill: Fill,
+    opponent_records: Option<&BTreeMap<String, MasterPosition>>,
+) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
+    audit_select_with_flips(book, draws, select, fill, opponent_records, Flips::for_fill(fill))
+}
+
+fn audit_select_with_flips(
     (positions, records): &(BTreeMap<String, MasterPosition>, usize),
     draws: DrawValues,
     Select {
@@ -2213,13 +2244,15 @@ fn audit_select(
     }: Select,
     fill: Fill,
     opponent_records: Option<&BTreeMap<String, MasterPosition>>,
+    flips: Flips,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
         ..AuditSummary::default()
     };
     let (propagated, white_graph, record_usage) =
-        propagate_for_sides(positions, opponent_records, draws, fill, Flips::for_fill(fill))?;
+        propagate_for_sides(positions, opponent_records, draws, fill, flips)?;
+    report_direct_lookup(&propagated.stats, None)?;
     summary.opponent_record_positions = opponent_records.map(|_| record_usage.positions);
     summary.opponent_record_moves = record_usage.moves;
     summary.records -= record_usage.moves;
