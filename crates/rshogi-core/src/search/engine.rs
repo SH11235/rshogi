@@ -327,8 +327,8 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
 pub(crate) struct SearchProgress {
     nodes: AtomicU64,
     _pad1: [u8; 56], // 64バイト境界までパディング
-    best_move_changes_bits: AtomicU64,
-    _pad2: [u8; 56], // 64バイト境界までパディング
+    best_move_changes: super::progress::BestMoveChanges,
+    _pad2: [u8; 48], // 64バイト境界までパディング
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -337,20 +337,19 @@ impl SearchProgress {
         Self {
             nodes: AtomicU64::new(0),
             _pad1: [0; 56],
-            best_move_changes_bits: AtomicU64::new(0.0f64.to_bits()),
-            _pad2: [0; 56],
+            best_move_changes: super::progress::BestMoveChanges::new(),
+            _pad2: [0; 48],
         }
     }
 
     pub(crate) fn reset(&self) {
         self.nodes.store(0, Ordering::Relaxed);
-        self.best_move_changes_bits.store(0.0f64.to_bits(), Ordering::Relaxed);
+        self.best_move_changes.reset();
     }
 
     pub(crate) fn update(&self, nodes: u64, best_move_changes: f64) {
         self.nodes.store(nodes, Ordering::Relaxed);
-        self.best_move_changes_bits
-            .store(best_move_changes.to_bits(), Ordering::Relaxed);
+        self.best_move_changes.publish(best_move_changes);
     }
 
     pub(crate) fn nodes(&self) -> u64 {
@@ -358,7 +357,11 @@ impl SearchProgress {
     }
 
     pub(crate) fn best_move_changes(&self) -> f64 {
-        f64::from_bits(self.best_move_changes_bits.load(Ordering::Relaxed))
+        self.best_move_changes.cumulative()
+    }
+
+    pub(crate) fn take_best_move_changes(&self) -> f64 {
+        self.best_move_changes.take_delta()
     }
 }
 
@@ -2120,7 +2123,7 @@ where
                     let mut changes = Vec::with_capacity(helper_threads.len() + 1);
                     changes.push(best_move_changes);
                     for thread in helper_threads {
-                        changes.push(thread.best_move_changes());
+                        changes.push(thread.take_best_move_changes());
                     }
                     aggregate_best_move_changes(&changes)
                 };
@@ -2128,7 +2131,7 @@ where
                 // Wasm with wasm-threads: Use helper_best_move_changes() for realtime values
                 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
                 let (changes_sum, thread_count) = {
-                    let helper_changes = ms.thread_pool.helper_best_move_changes();
+                    let helper_changes = ms.thread_pool.take_helper_best_move_changes();
                     let mut changes = Vec::with_capacity(helper_changes.len() + 1);
                     changes.push(best_move_changes);
                     changes.extend(helper_changes);
@@ -2282,7 +2285,7 @@ fn root_score_is_initialized(score: Value) -> bool {
 // search_helper_impl is a thin wrapper that calls iterative_deepening with main_state=None.
 // Only compiled for Native and Wasm with wasm-threads (single-threaded Wasm doesn't use helper threads).
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-fn search_helper_impl<F1, F2>(
+fn search_helper_impl<F>(
     worker: &mut SearchWorker,
     pos: &mut Position,
     limits: &LimitsType,
@@ -2290,20 +2293,17 @@ fn search_helper_impl<F1, F2>(
     max_depth: Depth,
     skill_enabled: bool,
     increase_depth_shared: &AtomicBool,
-    on_start: F1,
-    mut on_depth_complete: F2,
+    mut on_depth_complete: F,
 ) -> usize
 where
-    F1: FnOnce(),
-    F2: FnMut(u64, f64),
+    F: FnMut(u64, f64),
 {
     // 恒久修正評価のため、go depth を含め helper からのTT書き込みを有効にする。
     worker.allow_tt_write = true;
 
-    on_start();
-
+    let mut cumulative_changes = 0.0;
     let mut noop_info = |_info: &SearchInfo| {};
-    iterative_deepening(
+    let completed = iterative_deepening(
         worker,
         pos,
         limits,
@@ -2313,8 +2313,13 @@ where
         increase_depth_shared,
         None,
         &mut noop_info,
-        &mut on_depth_complete,
-    )
+        &mut |nodes, changes| {
+            cumulative_changes += changes;
+            on_depth_complete(nodes, cumulative_changes);
+        },
+    );
+    on_depth_complete(worker.state.nodes, cumulative_changes + worker.state.best_move_changes);
+    completed
 }
 
 // Native version: takes progress parameter for tracking helper thread statistics.
@@ -2337,11 +2342,6 @@ pub(crate) fn search_helper(
         max_depth,
         skill_enabled,
         increase_depth_shared,
-        || {
-            if let Some(p) = progress {
-                p.reset();
-            }
-        },
         |nodes, bmc| {
             if let Some(p) = progress {
                 p.update(nodes, bmc);
@@ -2370,11 +2370,6 @@ pub(crate) fn search_helper(
         max_depth,
         skill_enabled,
         increase_depth_shared,
-        || {
-            if let Some(p) = progress {
-                p.reset();
-            }
-        },
         |nodes, bmc| {
             if let Some(p) = progress {
                 p.update(nodes, bmc);
@@ -2764,6 +2759,95 @@ mod tests {
             }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn helper_publishes_cumulative_changes_through_search_end() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                for stop_after_first in [false, true] {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let hit = Arc::new(AtomicBool::new(false));
+                    let mut tm = TimeManagement::new(Arc::clone(&stop), hit);
+                    let mut pos = Position::new();
+                    pos.set_hirate();
+                    let limits = LimitsType {
+                        depth: 3,
+                        ..Default::default()
+                    };
+                    tm.init(&limits, pos.side_to_move(), pos.game_ply(), 100000);
+                    let mut worker = SearchWorker::new(
+                        Arc::new(TranspositionTable::new(1)),
+                        Arc::new(EvalHash::new(1)),
+                        100000,
+                        1,
+                        SearchTuneParams::default(),
+                    );
+                    worker.prepare_search(&limits);
+                    worker.state.best_move_changes = 3.0;
+                    let mut publications = Vec::new();
+                    let completed = search_helper_impl(
+                        &mut worker,
+                        &mut pos,
+                        &limits,
+                        &mut tm,
+                        3,
+                        false,
+                        &AtomicBool::new(true),
+                        |nodes, changes| {
+                            publications.push((nodes, changes));
+                            if stop_after_first {
+                                stop.store(true, Ordering::Relaxed);
+                            }
+                        },
+                    );
+                    assert_eq!(publications.len(), worker.state.completed_depth as usize + 1);
+                    assert_eq!(completed, 1);
+                    assert!(publications[0].1 >= 3.0);
+                    assert!(publications.windows(2).all(|p| p[0].1 <= p[1].1));
+                    assert_eq!(publications.last().unwrap().0, worker.state.nodes);
+                    let progress = SearchProgress::new();
+                    for (nodes, cumulative) in &publications {
+                        progress.update(*nodes, *cumulative);
+                    }
+                    assert_eq!(progress.best_move_changes(), publications.last().unwrap().1);
+                    assert_eq!(progress.best_move_changes(), publications.last().unwrap().1);
+                    assert_eq!(progress.take_best_move_changes(), publications.last().unwrap().1);
+                    assert_eq!(progress.take_best_move_changes(), 0.0);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clearing_helper_results_resets_unconsumed_progress() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new_with_eval_hash(1, 1);
+                search.set_num_threads(2);
+                let helper = &search.thread_pool.helper_threads()[0];
+                let progress = helper.progress_for_test();
+                progress.update(10, 4.0);
+                assert_eq!(helper.take_best_move_changes(), 4.0);
+                progress.update(20, 8.0);
+                search.thread_pool.clear_helper_results();
+                assert_eq!(helper.nodes(), 0);
+                assert_eq!(helper.take_best_move_changes(), 0.0);
+                progress.update(30, 2.0);
+                assert_eq!(helper.take_best_move_changes(), 2.0);
+                assert_eq!(helper.take_best_move_changes(), 0.0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn test_aggregate_best_move_changes_empty() {
         let (sum, threads) = aggregate_best_move_changes(&[]);
