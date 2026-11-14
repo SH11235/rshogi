@@ -2552,3 +2552,34 @@ fn restart_with_a_different_default_condition_continues_accepted_trees() {
     assert_eq!(searches(state), 2);
     stop(state, &mut server);
 }
+
+#[test]
+fn seeds_single_game_warns_without_unpaired() {
+    let dir = tempfile::tempdir().unwrap();
+    let games = dir.path().join("games.jsonl");
+    let queue = dir.path().join("queue.jsonl");
+    let table = dir.path().join("table.tsv");
+    std::fs::write(&games, "{\"type\":\"result\",\"game_id\":1,\"outcome\":\"black_win\"}\n")
+        .unwrap();
+    for unpaired in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_book_mine"));
+        command
+            .args(["tree", "seeds", "--games"])
+            .arg(&games)
+            .arg("--out")
+            .arg(&queue)
+            .arg("--table")
+            .arg(&table)
+            .args(["--tag", "single", "--sweep-loser"]);
+        if unpaired {
+            command.arg("--unpaired");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains("未完了の 1 ペアを除外"),
+            !unpaired
+        );
+        assert!(std::fs::read_to_string(&queue).unwrap().is_empty());
+    }
+}

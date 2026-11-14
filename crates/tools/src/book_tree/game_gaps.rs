@@ -298,7 +298,7 @@ fn visit_input(
     })?;
     ensure!(results > 0, "result がありません");
     if pair || results > 1 || labels.is_none() {
-        let valid = seeds::valid_game_ids(path)?;
+        let valid = seeds::valid_game_ids(path, false)?;
         let mut ended = BTreeSet::new();
         seeds::visit_json(path, |_, v| {
             if matches!(v["type"].as_str(), Some("move" | "result")) {
