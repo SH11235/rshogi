@@ -119,12 +119,10 @@ pub(super) struct AuditArgs {
     /// (補った局面の値は定跡に無い応手を見ない分だけ甘い)
     #[arg(long, conflicts_with = "apply")]
     fill_replies: bool,
-    /// 読みの値のある手を指した後の、元データに無い相手の手番の局面を補う (--fill-replies とは同時に指定しない)。補った局面には、
-    /// その手の読みの値を「定跡に無い応手」の値として残すので、手の値は読みの値と定跡の応手の先の値の悪い方になる
+    /// 保存値のある手の先の相手局面を補う。value_kind=single の直接の読みだけを、未登録の応手の上限として残す
     #[arg(long, conflicts_with = "fill_replies")]
     bridge_replies: bool,
-    /// 相手の手番では、読みの値のある record も伝播に使う。record だけの相手の手番の局面には、着く手の読みの値を
-    /// --bridge-replies と同じ形で残すので、手の値は読みの値と record の先の値の悪い方になる
+    /// 相手の手番では保存値のある record も伝播に使う。record だけの局面の上限は、着く手の value_kind=single の読みだけから作る
     #[arg(long)]
     opp_records: bool,
     /// 相手の手番では、読みの値のある bench (控え) も伝播に使う。規則は --opp-records の record と同じ
@@ -1205,7 +1203,7 @@ pub(super) enum Fill {
     Off,
     /// 読みの値の無い手の行き先だけを補う (`--fill-replies`)。
     Unread,
-    /// 読みの値のある手の行き先も補う (`--bridge-replies`)。
+    /// 保存値のある手の行き先も補う (`--bridge-replies`)。
     Bridge,
 }
 
@@ -1258,9 +1256,9 @@ fn visit_leaves(
             }
             match (m.eval, fill) {
                 (Some(_), Fill::Unread) => visit(Leaf::Blocked(child_key)),
-                // 読みの値の無い手の行き先は上限を付けられず甘くなるので、Bridge では補わない。
+                // 保存値の無い手だけの行き先は、Bridge では補わない。
                 (None, Fill::Bridge) => {}
-                (eval, _) => visit(Leaf::Candidate(child_key, eval)),
+                (_, _) => visit(Leaf::Candidate(child_key, m.eval.filter(|_| m.direct_read))),
             }
         }
         pos.undo_move(mv);
@@ -1268,17 +1266,9 @@ fn visit_leaves(
     Ok(())
 }
 
-/// 手を指した後の、元データに無い局面 (反転した局面も無いもの) を、相手の合法手のうち元データの局面に着く手だけを
-/// 持つ局面として補う。元データは自分の手番の局面にしか行を持たないことが多く、補わないと先の読みの値が相手の手番の
-/// 局面で途切れる。反転した局面が元データにある局面へは応手を張らない (千日手の値が先後で違うと、反転で合流した循環を
-/// 解けない)。
-///
-/// 補った値は定跡に無い応手を見ない分だけ甘い。`Fill::Unread` では読みの値のある手が着く局面は補わない。
-/// `Fill::Bridge` では補い、着く手の読みの値 (相手の全部の応手を見た値) を、元データの局面に着かない合法手 1 つの
-/// 値として残す。相手は手を指した側に悪い方を選ぶので、手の値は読みの値と定跡の応手の先の値の悪い方になり、
-/// 読みの値より甘くならない。読みの値のある手が複数の局面から着くときは、手を指した側に一番悪い読みの値を残す
-/// (同じ局面に読みの値の無い手からも着けば、その手にも効く。読みの値の無い手だけが着く局面は補わない)。残す先の合法手が無い局面 (全部の応手が元データの
-/// 局面か、反転した局面か、補う候補の局面に着く) は補わない。
+/// 元データに無い相手局面を補い、途切れていた伝播をつなぐ。
+/// `Fill::Bridge` の上限には直接の読みだけを使う。部分木の値は未登録の応手を保証しない。
+/// 上限の手の行き先は伝播先から外し、残した読みの値が子局面の値で置き換わるのを防ぐ。
 fn reply_positions(
     positions: &BTreeMap<String, MasterPosition>,
     fill: Fill,
@@ -1368,6 +1358,7 @@ fn reply_positions(
                         moves.push(BookMove {
                             mv: reply.to_usi(),
                             eval: None,
+                            direct_read: false,
                         });
                     }
                 } else if cap.is_some()
@@ -1389,6 +1380,7 @@ fn reply_positions(
                 moves.push(BookMove {
                     mv,
                     eval: Some(-eval),
+                    direct_read: false,
                 });
             }
             Ok((!moves.is_empty()).then(|| {
@@ -1407,7 +1399,7 @@ fn reply_positions(
 /// record だけで足す相手の手番の局面ごとの、読みの値の上限の手。
 ///
 /// record だけの局面は record の手しか応手を持たないので、値が手を指した側に甘くなる。--bridge-replies と同じく、
-/// 着く手の読みの値 (相手の全部の応手を見た値) のうち手を指した側に一番悪い値を、record に無く、行き先が伝播の
+/// 着く手の直接の読み (`value_kind=single`) のうち手を指した側に一番悪い値を、record に無く、行き先が伝播の
 /// 局面に無く、行き先からどの応手も伝播の局面に着かない (--bridge-replies に補われない) 合法手 1 つ (生成順の最初)
 /// の値として置き、手の値を読みの値と record の先の値の悪い方にする。
 /// 読みの値のある手が着かない局面は返さない。置ける手が無い局面は `None` を返す。
@@ -1428,7 +1420,7 @@ fn record_caps(
         }
         let mut pos = position_from_sfen(&format!("{key} 1"))?;
         for m in &position.moves {
-            let Some(eval) = m.eval else {
+            let Some(eval) = m.eval.filter(|_| m.direct_read) else {
                 continue;
             };
             let Ok(mv) = apply_usi(&mut pos, &m.mv) else {
@@ -1473,6 +1465,7 @@ fn record_caps(
                 cap = Some(BookMove {
                     mv: usi,
                     eval: Some(-eval),
+                    direct_read: false,
                 });
                 break;
             }
@@ -1517,6 +1510,7 @@ pub(super) fn add_opponent_reply(
         .push(BookMove {
             mv: row.get("move").to_owned(),
             eval: Some(eval),
+            direct_read: row.get("value_kind") == "single",
         });
     Ok(())
 }
@@ -2529,6 +2523,16 @@ mod tests {
                     ("role", role.to_string()),
                     ("source", "read".into()),
                     ("evals", evals.to_string()),
+                    (
+                        "value_kind",
+                        if evals.is_empty() {
+                            "".into()
+                        } else if evals.contains(',') {
+                            format!("mean:{}", evals.split(',').count())
+                        } else {
+                            "single".into()
+                        }
+                    ),
                     ("tier", "wide".into()),
                     ("since", "t".into())
                 ])
@@ -3685,6 +3689,101 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         .as_ref()
         .map(|m| m.value);
         assert_eq!(value, Some(-100));
+    }
+
+    #[test]
+    fn completion_caps_only_use_single_readings() {
+        for (kind, evals, expected) in [
+            ("single", "50", 50),
+            ("tree:2", "50", 200),
+            ("mean:2", "40,60", 200),
+            ("unknown", "50", 200),
+        ] {
+            for source in ["read", "ext"] {
+                for with_records in [false, true] {
+                    for fill in [Fill::Off, Fill::Bridge] {
+                        if !with_records && fill == Fill::Off {
+                            continue;
+                        }
+                        let mut rows = parse_master(&master(&[
+                            (ROOT, "5i4h", "main", "50"),
+                            (B, "4h3h", "main", "200"),
+                        ]))
+                        .unwrap();
+                        rows[0].set("source", source.into());
+                        rows[0].set("evals", evals.into());
+                        rows[0].set("cond", "reading-condition".into());
+                        rows[0].set("value_kind", kind.into());
+                        if with_records {
+                            rows.extend(
+                                parse_master(&master(&[(A, "5a5b", "record", "-200")])).unwrap(),
+                            );
+                        }
+                        let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+                        let records = opponent_replies(&rows, &["record"]).unwrap();
+                        let (_, _, book) = audit_with_records(
+                            &parsed,
+                            DrawValues::both(0),
+                            1,
+                            fill,
+                            None,
+                            None,
+                            with_records.then_some(&records),
+                        )
+                        .unwrap();
+                        let index = parsed.0.keys().position(|k| k == ROOT).unwrap();
+                        let value =
+                            audited_moves(&book.graph, ROOT, &parsed.0[ROOT], &book.known[index])
+                                .unwrap()[0]
+                                .as_ref()
+                                .map(|m| m.value);
+                        assert_eq!(
+                            value,
+                            Some(expected),
+                            "{kind} {source} {with_records} {fill:?}"
+                        );
+                        assert_eq!(book.capped.contains(A), kind == "single");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn completion_caps_ignore_propagated_values_of_other_parents() {
+        let c = "4k4/9/9/9/9/9/9/4K4/9 b -";
+        for with_records in [false, true] {
+            let mut rows = parse_master(&master(&[
+                (ROOT, "5i4h", "main", "50"),
+                (c, "5h4h", "main", "-173"),
+                (B, "4h3h", "main", "200"),
+            ]))
+            .unwrap();
+            rows[1].set("value_kind", "tree:3".into());
+            if with_records {
+                rows.extend(parse_master(&master(&[(A, "5a5b", "record", "-200")])).unwrap());
+            }
+            let parsed = parse_master_rows(format_master(&rows).as_bytes()).unwrap();
+            let records = opponent_replies(&rows, &["record"]).unwrap();
+            let (_, _, book) = audit_with_records(
+                &parsed,
+                DrawValues::both(0),
+                1,
+                Fill::Bridge,
+                None,
+                None,
+                with_records.then_some(&records),
+            )
+            .unwrap();
+            for key in [ROOT, c] {
+                let index = parsed.0.keys().position(|k| k == key).unwrap();
+                let value = audited_moves(&book.graph, key, &parsed.0[key], &book.known[index])
+                    .unwrap()[0]
+                    .as_ref()
+                    .map(|m| m.value);
+                assert_eq!(value, Some(50), "{with_records} {key}");
+            }
+        }
     }
 
     #[test]

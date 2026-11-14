@@ -137,8 +137,10 @@ pub(super) fn test_line(fields: &[(&str, String)]) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BookMove {
     pub mv: String,
-    /// 読みの値の平均を丸めた値 (手番の側から)。読みが無ければ `None`。
+    /// 保存値の平均を丸めた値 (手番の側から)。値が無ければ `None`。
     pub eval: Option<i32>,
+    /// 相手の未登録の応手に残す上限は、部分木の伝播値からは作れない。
+    pub direct_read: bool,
 }
 
 /// 元データの局面。`moves[0]` が main。
@@ -219,6 +221,7 @@ pub(super) fn positions_from_rows(
         let book_move = BookMove {
             mv: row.get("move").to_owned(),
             eval,
+            direct_read: row.get("value_kind") == "single",
         };
         if role == "main" {
             ensure!(
