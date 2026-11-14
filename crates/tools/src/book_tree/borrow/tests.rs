@@ -7,7 +7,7 @@ use super::*;
 use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, BookMove, PositionEntry};
 use crate::book_tree::ReadingArgs;
-use crate::book_tree::audit::MasterValue;
+use crate::book_tree::audit::{Flips, MasterValue};
 use crate::book_tree::journal::{Journal, Pv, Reading, Settings};
 use crate::book_tree::master_table::{COLUMNS, parse_master};
 use crate::book_tree::model::child;
@@ -1240,7 +1240,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         black: -70,
         white: 70,
     };
-    let joined = join_roots(&[], &mut nodes, &options, draws, 40).unwrap();
+    let joined = join_roots(&[], &mut nodes, &options, draws, 40, Flips::Shared).unwrap();
     assert_eq!((joined.moves, joined.best), (1, 1));
     let moves: Vec<(&str, i32, &str, &str)> = nodes[&a]
         .moves
@@ -1281,7 +1281,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
     ]);
     let (master_rows, _, _) = register::register(Vec::new(), &reassigned, &options).unwrap();
     reassigned.get_mut(&a).unwrap().moves[0].cond = "unknown".into();
-    join_roots(&master_rows, &mut reassigned, &options, draws, 40).unwrap();
+    join_roots(&master_rows, &mut reassigned, &options, draws, 40, Flips::Shared).unwrap();
     let moved = reassigned[&a].moves.iter().find(|m| m.mv == "5a5b").unwrap();
     assert_eq!((moved.value, moved.cond.as_str()), (-200, "test"));
 
@@ -1291,7 +1291,7 @@ fn values_are_joined_across_roots_before_choosing_the_main() {
         (ab.clone(), node("3", 0, &[("5h6h", 200), ("5h4i", 10)])),
     ]);
     other.get_mut(&ab).unwrap().moves[1].cond = "other".into();
-    join_roots(&[], &mut other, &options, draws, 40).unwrap();
+    join_roots(&[], &mut other, &options, draws, 40, Flips::Shared).unwrap();
     let moved = other[&a].moves.iter().find(|m| m.mv == "5a5b").unwrap();
     assert_eq!((moved.value, moved.cond.as_str()), (-200, "unknown"));
 }
@@ -1374,7 +1374,7 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
     assert_eq!(nodes[&a].moves[0].mv, "5a5b");
     assert_eq!(nodes[&a].nodes, 100);
     let original = nodes.clone();
-    join_roots(&[], &mut nodes, &options, draws, 40).unwrap();
+    join_roots(&[], &mut nodes, &options, draws, 40, Flips::Shared).unwrap();
     joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     assert_eq!(nodes[&a].moves[0].mv, "5a4a");
     assert_eq!(nodes[&a].nodes, 900);
@@ -1387,7 +1387,7 @@ fn joined_best_move_uses_backing_nodes_across_roots_and_is_idempotent() {
         assert_eq!(main.get("nodes"), "9e2");
     }
     nodes = original;
-    join_roots(&rows, &mut nodes, &options, draws, 40).unwrap();
+    join_roots(&rows, &mut nodes, &options, draws, 40, Flips::Shared).unwrap();
     joined_nodes(&mut nodes, &roots, &readings, None).unwrap();
     let (again, _, _) = register::register(rows.clone(), &nodes, &options).unwrap();
     assert_eq!(
@@ -2120,5 +2120,99 @@ fn shared_cut_keeps_opposite_own_policies_separate() {
     let shared = cut::cut_shared(&roots, &p, &mut lookup, None, &BTreeMap::new()).unwrap();
     for (i, root) in roots.iter().enumerate() {
         assert_eq!(shared[i], cut_root(root, &p, &mut lookup, None, &BTreeMap::new()).unwrap());
+    }
+}
+
+#[test]
+fn borrow_value_direct_lookup_registers_with_flipped_joins() {
+    use crate::book_backprop::FlipFailure;
+    use crate::book_tree::master_table::{format_master, test_row};
+
+    const T: &str = "4k4/9/9/9/9/9/9/4K4/9 b -";
+    let c1 = child(ROOT, "5i4i").unwrap();
+    let c2 = child(&c1, "5a4a").unwrap();
+    let c3 = child(&c2, "4i5i").unwrap();
+    // 千日手と出口の優劣が先後で逆になる循環へ、T の手が反転して合流する。
+    for existing_join in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write_book(&d.join("big.db"));
+        std::fs::write(
+            d.join("roots.jsonl"),
+            format!("{{\"id\":\"r1\",\"root\":\"sfen {T} 1\",\"own\":\"b\"}}\n"),
+        )
+        .unwrap();
+        cut::run(cut_args(d, "cut", None)).unwrap();
+        let settings = settings();
+        let journal = d.join("journal.jsonl");
+        {
+            let mut j = Journal::open(&journal, &settings.fingerprint).unwrap();
+            j.append(
+                reading(T, &[("5h5i", 0), ("5h4h", -100)], &settings),
+                &settings,
+                "test".into(),
+            )
+            .unwrap();
+        }
+        let mut entries = vec![
+            (ROOT, "5i4i", "main", "0"),
+            (ROOT, "5i6i", "alt", "-30"),
+            (c1.as_str(), "5a4a", "main", "0"),
+            (c2.as_str(), "4i5i", "main", "0"),
+            (c3.as_str(), "4a5a", "main", "0"),
+        ];
+        if existing_join {
+            entries.push((T, "5h5i", "main", "0"));
+        }
+        let rows: Vec<_> = entries
+            .into_iter()
+            .map(|(key, mv, role, eval)| {
+                test_row(&[
+                    ("key", key.into()),
+                    ("ply", "1".into()),
+                    ("move", mv.into()),
+                    ("role", role.into()),
+                    ("source", "read".into()),
+                    ("evals", eval.into()),
+                    ("tier", "wide".into()),
+                    ("since", "old".into()),
+                ])
+            })
+            .collect();
+        let master = d.join("moves.tsv");
+        let original = format_master(&rows);
+        std::fs::write(&master, &original).unwrap();
+        let args = || {
+            ValueArgs::for_test(
+                d.join("cut"),
+                journal.clone(),
+                master.clone(),
+                d.join("value"),
+                true,
+            )
+        };
+        let error = value::run(args()).unwrap_err();
+        assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&master).unwrap(), original);
+        assert!(!d.join("value").exists());
+
+        let mut direct = args();
+        direct.direct_lookup = true;
+        value::run(direct).unwrap();
+        let registered = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+        let main = registered
+            .iter()
+            .find(|r| r.get("key") == T && r.get("role") == "main")
+            .unwrap();
+        assert_eq!((main.get("move"), main.get("evals")), ("5h5i", "-70"));
+        let added = registered
+            .iter()
+            .find(|r| r.get("key") == T && r.get("move") == "5h4h")
+            .unwrap();
+        assert_eq!(
+            (added.get("source"), added.get("role"), added.get("evals")),
+            ("ext", "alt", "-100")
+        );
+        assert!(d.join("value/roots.tsv").exists());
     }
 }

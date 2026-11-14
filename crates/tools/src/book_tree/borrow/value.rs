@@ -6,7 +6,9 @@ use super::{Kind, Meta, RootInfo, Subtree, read_cut, side, turn};
 use crate::book_backprop::{
     BOOK_HEADER, BackpropOptions, DrawValues, Graph, MergeMode, propagate_values, read_graph,
 };
-use crate::book_tree::audit::{Fill, MasterValue, audit, audited_moves, master_values};
+use crate::book_tree::audit::{
+    Flips, MasterValue, audit_with_flips, audited_moves, master_values_with_flips,
+};
 use crate::book_tree::journal::{Reading, read_source};
 use crate::book_tree::master_table::{
     Row, format_master, parse_master, parse_master_rows, positions_from_rows, read_master,
@@ -67,6 +69,9 @@ pub(super) struct ValueArgs {
     /// 後手を自分として解くときの千日手の値 (対局の DrawValueWhite に揃える)
     #[arg(long, default_value_t = 70, allow_hyphen_values = true)]
     draw_value_white: i32,
+    /// FlippedBook=false の定跡として、反転した向きの値の食い違いでは止めない
+    #[arg(long)]
+    pub(super) direct_lookup: bool,
     /// 元データを書き換える。省くと出力先に結果を書くだけ
     #[arg(long)]
     apply: bool,
@@ -96,6 +101,7 @@ impl ValueArgs {
             mark_all: false,
             draw_value_black: -70,
             draw_value_white: 70,
+            direct_lookup: false,
             apply,
         }
     }
@@ -644,6 +650,7 @@ pub(super) fn join_roots(
     options: &Options,
     draws: DrawValues,
     line: i32,
+    flips: Flips,
 ) -> Result<Joined> {
     let every_move = Options {
         alt_gap: i32::MAX,
@@ -655,7 +662,7 @@ pub(super) fn join_roots(
     // 行番号はファイルの行と同じ数え方 (見出しの次が 2)。
     let book =
         positions_from_rows(all_rows.iter().cloned().enumerate().map(|(i, r)| Ok((i + 2, r))))?;
-    let (_, _, audited) = audit(&book, draws, line, Fill::Off, None)?;
+    let (_, _, audited) = audit_with_flips(&book, draws, line, flips)?;
     let verified = master_reading_conditions(&all_rows, &book.0, &audited);
     let index: BTreeMap<&str, usize> =
         book.0.keys().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
@@ -988,8 +995,9 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     };
     let work = tempfile::tempdir().context("一時ディレクトリを作れません")?;
     let master_rows = read_master(&args.master)?;
-    let master = master_values(&master_rows, draws)?;
-    let (_, before, audited) = audit(&master_rows, draws, args.line, Fill::Off, None)?;
+    let flips = Flips::joined(args.direct_lookup);
+    let master = master_values_with_flips(&master_rows, draws, flips)?;
+    let (_, before, audited) = audit_with_flips(&master_rows, draws, args.line, flips)?;
     let text = std::fs::read_to_string(&args.master)
         .with_context(|| format!("{} を読めません", args.master.display()))?;
     let rows = parse_master(&text)?;
@@ -1058,13 +1066,13 @@ pub(super) fn run(args: ValueArgs) -> Result<()> {
     let mut rows = rows;
     let records_dropped = drop_own_records(&mut rows, &nodes, options.source);
     let (records_added, records_updated) = append_records(&mut rows, &opponent, &options);
-    let joined = join_roots(&rows, &mut nodes, &options, draws, args.line)?;
+    let joined = join_roots(&rows, &mut nodes, &options, draws, args.line, flips)?;
     joined_nodes(&mut nodes, &all, &readings, meta.params.shared.then_some(meta.roots.as_slice()))?;
     let (rows, conflicts, summary) = register::register(rows, &nodes, &options)?;
     let registered = format_master(&rows);
     // 登録後の元データが点検を通ることを、書き換える前に確かめる。
     let (_, after, _) =
-        audit(&parse_master_rows(registered.as_bytes())?, draws, args.line, Fill::Off, None)?;
+        audit_with_flips(&parse_master_rows(registered.as_bytes())?, draws, args.line, flips)?;
 
     std::fs::create_dir_all(&args.out)?;
     write_outputs(&args.out, &meta, &trees, &all, &conflicts)?;
@@ -1205,6 +1213,7 @@ fn write_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book_tree::audit::{Fill, audit};
     use crate::book_tree::master_table::{positions_from_rows, test_row};
 
     #[test]
