@@ -119,8 +119,8 @@ LS_BUCKET_MODE progresskpabsq16
   `=` を使うと `Skill Level=10` のように空白を含む名前も書けます。空行と `#`・`//` で始まる行は読みません。
 - やねうら王の `engine_options.txt` と同じ書き方ですが、やねうら王はカレントフォルダから読むのに対し、
   rshogi は実行ファイルと同じフォルダだけを見ます (GUI ごとに違うカレントフォルダに左右されないため)。
-- 対局・SPRT・SPSA のツールで動かすときも読まれ、ツールが送る `setoption` より優先します。
-  `book_mine` / `book_extend` / `book_rescore` と `rescore_psv` は、条件の指紋や入力の保護が
+- 対局・SPRT のツールで動かすときも読まれ、ツールが送る `setoption` より優先します。
+  `book_mine` / `book_extend` / `book_rescore` / `rescore_psv` / `spsa` と `gensfen` (外部エンジン) は、条件の指紋や入力の保護が
   実際の設定を表さなくなるので、エンジンの隣にこのファイルがあるとエラーで止まります。
 
 ## 詰み探索 (`go mate`)
