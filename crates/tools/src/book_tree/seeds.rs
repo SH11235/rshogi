@@ -88,8 +88,8 @@ impl SeedsArgs {
 }
 
 #[derive(Clone, Deserialize)]
-struct GameResult {
-    game_id: u32,
+pub(super) struct GameResult {
+    pub(super) game_id: u32,
     outcome: String,
     #[serde(default)]
     pair_index: Option<u32>,
@@ -104,28 +104,34 @@ struct GameResult {
 }
 
 #[derive(Deserialize)]
-struct Move {
-    game_id: u32,
-    ply: u32,
-    side_to_move: String,
-    sfen_before: String,
-    move_usi: String,
-    eval: Option<Eval>,
+pub(super) struct Move {
     #[serde(default)]
-    timed_out: bool,
+    pub(super) engine: String,
+    pub(super) game_id: u32,
+    pub(super) ply: u32,
+    pub(super) side_to_move: String,
+    pub(super) sfen_before: String,
+    pub(super) move_usi: String,
+    pub(super) eval: Option<Eval>,
+    #[serde(default)]
+    pub(super) timed_out: bool,
 }
 
 #[derive(Deserialize)]
-struct Eval {
-    last_exact_primary: Option<Primary>,
+pub(super) struct Eval {
+    #[serde(default)]
+    pub(super) pv: Option<Vec<String>>,
+    pub(super) last_exact_primary: Option<Primary>,
 }
 
 #[derive(Deserialize)]
-struct Primary {
+pub(super) struct Primary {
     score: PrimaryScore,
+    #[serde(default)]
+    pub(super) pv: Vec<String>,
 }
 
-fn visit_json(
+pub(super) fn visit_json(
     path: &Path,
     mut visit: impl FnMut(u64, serde_json::Value) -> Result<()>,
 ) -> Result<()> {
@@ -152,7 +158,7 @@ fn visit_json(
     Ok(())
 }
 
-fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
+pub(super) fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
     let mut pairs = ResultPairs::default();
     let mut valid = BTreeMap::new();
     let mut seq = 0;
@@ -199,7 +205,7 @@ fn valid_game_ids(path: &Path) -> Result<BTreeMap<u32, u64>> {
 
 // 有効なスロットは ID と結果行の位置だけ残す。同じ ID の除外結果が先行しても、
 // 最初の手順と採用された結果を組み合わせるため、結果本体は必要時に読み直す。
-fn visit_games(
+pub(super) fn visit_games(
     path: &Path,
     valid: &BTreeMap<u32, u64>,
     mut visit: impl FnMut(&GameResult, &[Move]) -> Result<()>,

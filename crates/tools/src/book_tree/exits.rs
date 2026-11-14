@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
-mod disk;
+pub(super) mod disk;
 use disk::{Record, Seen, Sorter, read_record};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
