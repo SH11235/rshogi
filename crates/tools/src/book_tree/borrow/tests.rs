@@ -409,6 +409,177 @@ fn exit_readings_that_rejoin_the_graph_are_registered_as_propagated() {
 }
 
 #[test]
+fn cap_skip_blocks_exit_readings_that_rejoin_unfinished_positions() {
+    let s = settings();
+    let p = CutParams {
+        own_diff: 100,
+        ..params(4, 100)
+    };
+    let mut tree = cut_root(&root(), &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    let exit = key(&["5i5h", "5a4a"]);
+    let destination = key(&["5i4i", "5a4a", "4i5i"]);
+    assert_eq!(child(&exit, "5h5i").unwrap(), destination);
+    let unfinished = tree.nodes.get_mut(&destination).unwrap();
+    unfinished.kind = Kind::Cap;
+    unfinished.read = false;
+    let mut cache = readings(&s, &[("5i6i", 0)]);
+    cache.remove(&destination);
+    cache.insert(exit.clone(), reading(&exit, &[("5h5i", 100), ("5h6h", 10)], &s));
+    let independent = key(&["5i6i"]);
+    cache.insert(independent.clone(), reading(&independent, &[("5a6a", -30)], &s));
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    for blocked in [ROOT, &key(&["5i5h"]), &exit, &destination] {
+        assert!(values.moves[blocked].is_empty(), "{blocked}");
+        assert_eq!(values.nodes[blocked], 0);
+    }
+    assert_eq!(values.moves[&independent][0].value, -30);
+    let nodes = register_nodes(0, &root(), "own", &tree, &values, &BTreeSet::new(), 4, &cache);
+    assert!(!nodes.contains_key(ROOT));
+    assert!(!nodes.contains_key(&exit));
+    let opponent = register_nodes(0, &root(), "opp", &tree, &values, &BTreeSet::new(), 4, &cache);
+    assert_eq!(opponent[&independent].moves[0].value, -30);
+}
+
+#[test]
+fn master_follow_cycles_return_to_master_positions_and_use_draw_values() {
+    let keys = [
+        key(&[]),
+        key(&["5i5h"]),
+        key(&["5i5h", "5a5b"]),
+        key(&["5i5h", "5a5b", "5h5i"]),
+    ];
+    let moves: BTreeMap<_, _> = keys
+        .iter()
+        .zip(["5i5h", "5a5b", "5h5i", "5b5a"])
+        .map(|(key, mv)| (key.clone(), vec![mv.to_owned()]))
+        .collect();
+    assert_eq!(child(&keys[3], "5b5a").unwrap(), ROOT);
+    let master = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                MasterValue {
+                    main: Some(999),
+                    best: Some(999),
+                },
+            )
+        })
+        .collect();
+    let stop = MasterStop {
+        values: &master,
+        moves: &moves,
+        mode: MasterExit::Follow,
+    };
+    let p = CutParams {
+        check_every: 0,
+        ..params(10, 100)
+    };
+    let tree =
+        cut_root(&root(), &p, &mut |_| Ok(Vec::new()), Some(&stop), &BTreeMap::new()).unwrap();
+    assert_eq!(tree.nodes.len(), 4);
+    assert_eq!(tree.edges.len(), 4);
+    assert!(tree.nodes.values().all(|n| n.kind == Kind::Inner && !n.read));
+    assert!(tree.edges.iter().all(|e| e.master));
+    assert!(tree.edges.iter().any(|e| e.key == keys[3] && e.child == ROOT));
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root(),
+        &tree,
+        &ValueInput {
+            readings: &BTreeMap::new(),
+            master: &master,
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues {
+            black: -70,
+            white: 70,
+        },
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    for key in &keys {
+        assert_eq!(values.moves[key][0].value, if side(key) == "b" { -70 } else { 70 });
+        assert_eq!(values.moves[key][0].cond, "unknown");
+    }
+}
+
+#[test]
+fn white_own_values_and_registration_use_side_to_move_scores() {
+    let white = RootInfo {
+        id: "white".into(),
+        own: "w".into(),
+        key: key(&["5i5h"]),
+        ply: 2,
+    };
+    let middle = child(&white.key, "5a4a").unwrap();
+    let leaf = child(&middle, "5h6h").unwrap();
+    let mut lookup = |sfen: &str| {
+        let k = crate::book_db::strip_ply(sfen);
+        let mv = if k == white.key {
+            "5a4a"
+        } else if k == middle {
+            "5h6h"
+        } else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![BookEntryMove {
+            move_usi: mv.into(),
+            value: 0,
+            depth: 1,
+            move_count: 1,
+        }])
+    };
+    let p = CutParams {
+        check_every: 0,
+        ..params(2, 100)
+    };
+    let tree = cut_root(&white, &p, &mut lookup, None, &BTreeMap::new()).unwrap();
+    let s = settings();
+    let cache = BTreeMap::from([(leaf.clone(), reading(&leaf, &[("4a3a", 123)], &s))]);
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &white,
+        &tree,
+        &ValueInput {
+            readings: &cache,
+            master: &BTreeMap::new(),
+            master_known: &BTreeMap::new(),
+            conditions: &BTreeMap::new(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert_eq!(values.moves[&leaf][0].value, 123);
+    assert_eq!(values.moves[&middle][0].value, -123);
+    assert_eq!(values.moves[&white.key][0].value, 123);
+    let own = register_nodes(0, &white, "own", &tree, &values, &BTreeSet::new(), 2, &cache);
+    assert_eq!(own[&white.key].moves[0].value, 123);
+    assert_eq!(own[&leaf].moves[0].value, 123);
+    assert!(!own.contains_key(&middle));
+    let opp = register_nodes(0, &white, "opp", &tree, &values, &BTreeSet::new(), 2, &cache);
+    assert_eq!(opp[&middle].moves[0].value, -123);
+}
+
+#[test]
 fn value_root_uses_master_values_at_master_exits_and_draws_in_cycles() {
     let s = settings();
     let e = key(&["5i4i", "5a4a"]);

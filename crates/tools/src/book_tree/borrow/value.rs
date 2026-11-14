@@ -264,46 +264,6 @@ pub(super) fn value_root(
     mark_line: Option<i32>,
     work: &Path,
 ) -> Result<RootValues> {
-    let mut blocked: BTreeSet<String> = tree
-        .nodes
-        .iter()
-        .filter(|(_, n)| n.kind == Kind::Cap && !n.read)
-        .map(|(key, _)| key.clone())
-        .collect();
-    if !blocked.is_empty() {
-        let mut parents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for edge in &tree.edges {
-            parents.entry(&edge.child).or_default().push(&edge.key);
-        }
-        let mut pending: VecDeque<_> = blocked.iter().cloned().collect();
-        while let Some(key) = pending.pop_front() {
-            for &parent in parents.get(key.as_str()).into_iter().flatten() {
-                if blocked.insert(parent.to_owned()) {
-                    pending.push_back(parent.to_owned());
-                }
-            }
-        }
-        // 未展開の応手を落として最善値を選ぶと、根に都合のよい値を登録してしまう。
-        let complete = Subtree {
-            nodes: tree
-                .nodes
-                .iter()
-                .filter(|(k, _)| !blocked.contains(*k))
-                .map(|(k, n)| (k.clone(), n.clone()))
-                .collect(),
-            edges: tree.edges.iter().filter(|e| !blocked.contains(&e.key)).cloned().collect(),
-        };
-        let mut result = if complete.nodes.is_empty() {
-            RootValues::default()
-        } else {
-            value_root(root, &complete, input, draws, mark_line, work)?
-        };
-        for key in blocked {
-            result.moves.insert(key.clone(), Vec::new());
-            result.nodes.insert(key, 0);
-        }
-        return Ok(result);
-    }
     let ValueInput {
         readings, master, ..
     } = input;
@@ -330,6 +290,10 @@ pub(super) fn value_root(
                         book_value: e.book_value,
                     });
                 }
+            }
+            Kind::Cap if !node.read => {
+                // 保留判定まで局面を残し、出口の読みから戻る辺もグラフに含める。
+                writeln!(out, "none none 0 1 1")?;
             }
             Kind::Master if !node.read => {
                 let value = master
@@ -380,6 +344,50 @@ pub(super) fn value_root(
     };
     let mut graph = read_graph(&db, options)?;
     ensure!(graph.illegal_moves == 0, "{}: 内部エラー: 非合法手があります", root.id);
+    let mut blocked: BTreeSet<String> = tree
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.kind == Kind::Cap && !n.read)
+        .map(|(key, _)| key.clone())
+        .collect();
+    if !blocked.is_empty() {
+        let mut parents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for node in 0..graph.len() {
+            for m in graph.moves(node) {
+                if let Some(edge) = m.edge {
+                    parents.entry(graph.key(edge.to)).or_default().push(graph.key(node));
+                }
+            }
+        }
+        let mut pending: VecDeque<_> = blocked.iter().cloned().collect();
+        while let Some(key) = pending.pop_front() {
+            for &parent in parents.get(key.as_str()).into_iter().flatten() {
+                if blocked.insert(parent.to_owned()) {
+                    pending.push_back(parent.to_owned());
+                }
+            }
+        }
+        // 未展開の応手を落として最善値を選ぶと、根に都合のよい値を登録してしまう。
+        let complete = Subtree {
+            nodes: tree
+                .nodes
+                .iter()
+                .filter(|(k, _)| !blocked.contains(*k))
+                .map(|(k, n)| (k.clone(), n.clone()))
+                .collect(),
+            edges: tree.edges.iter().filter(|e| !blocked.contains(&e.key)).cloned().collect(),
+        };
+        let mut result = if complete.nodes.is_empty() {
+            RootValues::default()
+        } else {
+            value_root(root, &complete, input, draws, mark_line, work)?
+        };
+        for key in blocked {
+            result.moves.insert(key.clone(), Vec::new());
+            result.nodes.insert(key, 0);
+        }
+        return Ok(result);
+    }
     propagate_values(&mut graph, draws, MergeMode::Replace)?;
 
     let leaves: Vec<Vec<Option<&str>>> = (0..graph.len())
