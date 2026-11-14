@@ -565,7 +565,7 @@ option 名の大小文字を区別する engine と区別しない engine の双
 SPSAParamsFile も各表記の明示ファイルを保持し、完全一致の非自動指定がない場合、
 または大小文字違いを含む候補に自動・空指定がある場合は、隣接する spsa.params も保護します。
 複数候補を保守的に保護するため、実際に engine が採用しない候補との衝突も拒否する場合があります。
-SPSAParamsFile が未指定・空・`<auto>`・`<empty>` で engine 実体の隣に spsa.params が存在する場合も保護します。 engine 実体の隣に `engine_options.txt` があれば、それも保護します。
+SPSAParamsFile が未指定・空・`<auto>`・`<empty>` で engine 実体の隣に spsa.params が存在する場合も保護します。 engine 実体の隣に `engine_options.txt` (エンジンが option を固定するファイル) があると、保護が実際の設定を表さないのでエラーで止まります。
 これ以外の vendor 固有 option や engine 内部の既定モデルは推測しません。
 
 書込み用 file は切り詰めずに開き、資源・他出力との handle 同一性を再確認してから、従来の truncate / append / resume 判断に従います。

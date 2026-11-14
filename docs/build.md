@@ -246,7 +246,8 @@ RSHOGI_EMBED_SPSA_PARAMS=/path/to/tuned.params cargo xtask build --edition <pres
 - 起動時に適用し、`usi` の応答の `SPSA_*` の既定値も焼き込んだ値になります (GUI が既定値を `setoption` で
   送り返しても焼き込んだ値のまま)。`SPSAParamsFile` で指定したファイルや隣の `spsa.params` は、その上に重ねて読みます。
 - 起動時に `info string SPSA params embedded: N parameters` を標準エラーに出します。知らない名前の行は警告します。
-- 焼き込んだ値は結果を変えるので、`rshogi-usi --source-version` の末尾に `+embedded-spsa-<内容の hash>` が付きます。
+- 焼き込んだ値は結果を変えるので、`rshogi-usi --source-version` の末尾に `+embedded-spsa-<内容の hash>` が付きます
+  (git の作業木で build してソースの id が分かるときだけ。分からなければ他の feature と同じく `unknown` になります)。
 - 相対パスは build script の作業ディレクトリ (crate の dir) からになり意図とずれるので、絶対パスだけを受け付けます。
 
 #### 命名規則

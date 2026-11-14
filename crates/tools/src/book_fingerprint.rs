@@ -334,30 +334,39 @@ fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resou
             None => resources.reusable = false,
         }
     }
-    // engine_options.txt は setoption より優先して固定されるので、置いてあれば条件に含める
-    if let Some(path) = engine
-        .canonicalize()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("engine_options.txt")))
-    {
-        match path.try_exists() {
-            Ok(true) => resources.paths.push(path),
-            Ok(false) => {}
-            Err(_) => resources.reusable = false,
-        }
-    }
     resources.paths.sort();
     resources.paths.dedup();
     resources
 }
 
+/// エンジンの隣に engine_options.txt があれば拒む。
+///
+/// rshogi はこのファイルのオプションを setoption より優先して固定するので、ツールが渡した option と
+/// 実際に使われる設定・資源が食い違い、指紋や入力の保護が実際の読みを表さなくなる。
+pub fn ensure_no_engine_options(engine: &Path) -> Result<()> {
+    if let Some(dir) =
+        engine.canonicalize().ok().and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        let path = dir.join("engine_options.txt");
+        if path.try_exists()? {
+            bail!(
+                "エンジンの隣に {} があります。ツールの option を上書きするので、外してから実行してください",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 解決できた読込資源を返す。不確実な option の実在を fresh 起動の条件にしない。
 pub fn readonly_resources(engine: &Path, values: &[String]) -> Result<Vec<PathBuf>> {
+    ensure_no_engine_options(engine)?;
     Ok(resolved_resources(engine, &options(values)?).paths)
 }
 
 /// 読込資源の内容を識別する。解決を保証できない設定には実行固有の値を含める。
 pub fn engine_fingerprint(engine: &Path, values: &[String]) -> Result<String> {
+    ensure_no_engine_options(engine)?;
     let parsed = options(values)?;
     let mut resources = resolved_resources(engine, &parsed);
     let mut hashes = Vec::new();
@@ -454,10 +463,10 @@ mod tests {
         let model_changed = engine_fingerprint(&engine, &opts).unwrap();
         assert_ne!(binary_changed, model_changed);
         std::fs::write(dir.path().join("spsa.params"), b"params").unwrap();
-        let params_added = engine_fingerprint(&engine, &opts).unwrap();
-        assert_ne!(model_changed, params_added);
+        assert_ne!(model_changed, engine_fingerprint(&engine, &opts).unwrap());
         std::fs::write(dir.path().join("engine_options.txt"), b"USI_Hash 16").unwrap();
-        assert_ne!(params_added, engine_fingerprint(&engine, &opts).unwrap());
+        assert!(engine_fingerprint(&engine, &opts).is_err());
+        assert!(readonly_resources(&engine, &opts).is_err());
     }
 
     #[test]

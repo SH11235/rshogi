@@ -105,15 +105,7 @@ impl Settings {
             };
             content_sha256.insert("implicit:SPSAParamsFile".into(), hash);
         }
-        // engine_options.txt は setoption より優先して固定される。無いときは今までの指紋と同じにする
-        let engine = std::fs::canonicalize(&args.engine)?;
-        let engine_options = engine
-            .parent()
-            .context("engine の親 dir がありません")?
-            .join("engine_options.txt");
-        if engine_options.try_exists()? {
-            content_sha256.insert("implicit:engine_options.txt".into(), digest(&engine_options)?);
-        }
+        crate::book_fingerprint::ensure_no_engine_options(&args.engine)?;
         let mut settings = Self {
             fingerprint: String::new(),
             version: VERSION.into(),

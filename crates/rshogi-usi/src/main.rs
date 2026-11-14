@@ -747,8 +747,17 @@ impl UsiEngine {
     fn apply_spsa_params(&mut self, entries: &[(String, i32)]) -> SpsaApplyReport {
         let mut report = SpsaApplyReport::default();
         for (name, value) in entries {
+            // engine_options.txt で固定した値は .params でも変えない
+            if self.fixed_options.contains_key(&name.to_ascii_lowercase()) {
+                continue;
+            }
             let applied = if name.starts_with(NET_DELTA_OPTION_PREFIX) {
-                self.set_net_delta_value(name, *value).then_some(*value)
+                // usi で広告する範囲 (i16) に収める
+                let clamped = (*value).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                if clamped != *value {
+                    report.clamped += 1;
+                }
+                self.set_net_delta_value(name, clamped).then_some(clamped)
             } else if let Some(search) = self.search.as_mut()
                 && let Some(result) = search.set_search_tune_option(name, *value)
             {
@@ -1589,12 +1598,13 @@ impl UsiEngine {
             }
         };
         let base_dir = path.parent().unwrap_or(Path::new(""));
-        let known: Vec<String> = self
+        let known: Vec<(String, String)> = self
             .usi_option_lines()
-            .iter()
-            .filter_map(|line| usi_option_line_name(line))
+            .into_iter()
+            .filter_map(|line| usi_option_line_name(&line).map(|name| (name, line)))
             .collect();
-        let mut changes = Vec::new();
+        // 同じ名前が複数行にあれば最後の行を使う
+        let mut latest: Vec<(String, String)> = Vec::new();
         for (line_no, entry) in parse_engine_options(&text) {
             let (name, value) = match entry {
                 Ok(entry) => entry,
@@ -1603,19 +1613,31 @@ impl UsiEngine {
                     continue;
                 }
             };
-            let Some(canonical) = known.iter().find(|k| k.eq_ignore_ascii_case(&name)) else {
+            let Some((canonical, declaration)) =
+                known.iter().find(|(known, _)| known.eq_ignore_ascii_case(&name))
+            else {
                 println!(
                     "info string Warning: {} line {line_no}: unknown option '{name}'",
                     path.display()
                 );
                 continue;
             };
-            let value = resolve_option_path(canonical, &value, base_dir);
-            let key = canonical.to_ascii_lowercase();
-            if self.fixed_options.get(&key) != Some(&value) {
-                changes.push((canonical.clone(), key, value));
+            if let Err(message) = validate_option_value(declaration, &value) {
+                println!("info string Warning: {} line {line_no}: {message}", path.display());
+                continue;
             }
+            let value = resolve_option_path(canonical, &value, base_dir);
+            latest.retain(|(known, _)| known != canonical);
+            latest.push((canonical.clone(), value));
         }
+        let changes: Vec<(String, String, String)> = latest
+            .into_iter()
+            .map(|(name, value)| {
+                let key = name.to_ascii_lowercase();
+                (name, key, value)
+            })
+            .filter(|(_, key, value)| self.fixed_options.get(key) != Some(value))
+            .collect();
         if changes.is_empty() {
             return;
         }
@@ -2461,6 +2483,33 @@ fn parse_option_declaration(line: &str) -> Result<(String, String), String> {
     Ok((name, value.join(" ")))
 }
 
+/// engine_options.txt の値が、`usi` で広告したオプションの型と範囲に合うかを確かめる。
+fn validate_option_value(declaration: &str, value: &str) -> Result<(), String> {
+    let tokens: Vec<&str> = declaration.split_whitespace().collect();
+    let after = |key: &str| tokens.iter().position(|t| *t == key).and_then(|i| tokens.get(i + 1));
+    match after("type").copied() {
+        Some("spin") => {
+            let v: i64 = value.parse().map_err(|_| format!("'{value}' is not an integer"))?;
+            let bound = |key| after(key).and_then(|t| t.parse::<i64>().ok());
+            if bound("min").is_some_and(|min| v < min) || bound("max").is_some_and(|max| v > max) {
+                return Err(format!("{value} is out of range: {declaration}"));
+            }
+            Ok(())
+        }
+        Some("check") if matches!(value, "true" | "false" | "1" | "0") => Ok(()),
+        Some("check") => Err(format!("'{value}' is not true or false")),
+        Some("combo") => {
+            let allowed = tokens.windows(2).any(|w| w[0] == "var" && w[1] == value);
+            if allowed {
+                Ok(())
+            } else {
+                Err(format!("'{value}' is not one of: {declaration}"))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `option name 名前 type ...` の行から名前を取り出す。
 fn usi_option_line_name(line: &str) -> Option<String> {
     let rest = line.strip_prefix("option name ")?;
@@ -2940,6 +2989,47 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn fixed_spsa_values_are_not_overwritten_by_params_and_net_deltas_are_clamped() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let spec = &SearchTuneParams::option_specs()[0];
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(ENGINE_OPTIONS_FILE);
+                std::fs::write(&path, format!("{} {}\n", spec.usi_name, spec.min)).unwrap();
+                let mut engine = UsiEngine::new();
+                engine.apply_engine_options_from(&path);
+                let report = engine.apply_spsa_params(&[(spec.usi_name.to_string(), spec.max)]);
+                assert_eq!(report.applied, 0);
+
+                let net = format!("{NET_DELTA_OPTION_PREFIX}out_w_b0_0");
+                let report = engine.apply_spsa_params(&[(net.clone(), 40000)]);
+                assert_eq!(report.applied_values, vec![(net, i32::from(i16::MAX))]);
+                assert_eq!(report.clamped, 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_option_value_checks_type_and_range() {
+        let spin = "option name USI_Hash type spin default 256 min 1 max 4096";
+        assert!(validate_option_value(spin, "64").is_ok());
+        assert!(validate_option_value(spin, "0").is_err());
+        assert!(validate_option_value(spin, "abc").is_err());
+        let check = "option name UseEvalHash type check default true";
+        assert!(validate_option_value(check, "false").is_ok());
+        assert!(validate_option_value(check, "yes").is_err());
+        let combo = "option name MateMode type combo default Power var Speed var Power";
+        assert!(validate_option_value(combo, "Speed").is_ok());
+        assert!(validate_option_value(combo, "Fast").is_err());
+        let string = "option name EvalFile type string default eval/nn.bin";
+        assert!(validate_option_value(string, "any path").is_ok());
+    }
+
+    #[test]
     fn parse_engine_options_accepts_three_forms() {
         let text = "\u{feff}# comment\n// comment\n\nUSI_Hash 64\nSkill Level = 10\n\
                     option name BookFile type string default user book.db\n\
@@ -2995,6 +3085,12 @@ mod tests {
                 engine.cmd_setoption(&["setoption", "name", "BookFile", "value", "a.db"]);
                 assert_eq!(engine.book_file, "a.db");
 
+                // 同じ名前は最後の行、不正な値は適用も固定もしない
+                std::fs::write(&path, "USI_Hash 32\nUSI_Hash 64\nThreads abc\nBookDir=mybook\n")
+                    .unwrap();
+                engine.apply_engine_options_from(&path);
+                assert_eq!(engine.tt_size_mb, 64);
+                assert!(!engine.fixed_options.contains_key("threads"));
                 std::fs::write(&path, "USI_Hash 32\nBookDir=mybook\n").unwrap();
                 engine.apply_engine_options_from(&path);
                 assert_eq!(engine.tt_size_mb, 32);

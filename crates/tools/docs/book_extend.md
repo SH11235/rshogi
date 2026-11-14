@@ -59,7 +59,7 @@ cargo run -p tools --release --bin book_extend -- \
 
 ## journal と決定性
 
-`--journal` は JSON Lines 形式です。親探索は `kind:"parent"`、子局面探索は `kind:"child"` として追記し、`go` と `engine_fingerprint` を記録します。指紋はエンジン本体と、明示したモデル・進行度係数・params・定跡の内容を含みます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、空文字・`no_book` なら無効です。`BookExploreFile` の空文字・`<empty>` は無効、`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の自動読み込みです。エンジン隣に `engine_options.txt` があれば、その内容も指紋に含めます。
+`--journal` は JSON Lines 形式です。親探索は `kind:"parent"`、子局面探索は `kind:"child"` として追記し、`go` と `engine_fingerprint` を記録します。指紋はエンジン本体と、明示したモデル・進行度係数・params・定跡の内容を含みます。`BookFile` は `BookDir` 配下（省略時 `book`）に解決し、空文字・`no_book` なら無効です。`BookExploreFile` の空文字・`<empty>` は無効、`SPSAParamsFile` の空文字・`<auto>`・`<empty>` はエンジン隣の自動読み込みです。エンジン隣に `engine_options.txt` (エンジンが option を固定するファイル) があるとエラーで止まります。
 
 相対モデルパスや任意のファイル型 option など、資源の解決を保証できない設定は受理して実行し、警告して過去 journal の再利用だけを無効化します。再利用が必要なら対応する資源の絶対パスを明示してください。モデルが未指定の場合も再利用しません。重複した option 名は拒否します。実行中は参照資源を変更しないでください。
 

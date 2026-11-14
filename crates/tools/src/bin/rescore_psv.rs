@@ -520,6 +520,7 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
         inputs.push(resource.clone());
     }
     if let Some(engine) = &cli.engine {
+        tools::book_fingerprint::ensure_no_engine_options(engine)?;
         let cwd = engine.parent().unwrap_or(std::path::Path::new("."));
         for (name, value) in cli.usi_options.iter().filter_map(|option| parsed_usi_option(option)) {
             anyhow::ensure!(
@@ -607,14 +608,6 @@ fn output_protection(cli: &Cli, input_files: &[PathBuf]) -> Result<OutputProtect
             if automatic.try_exists()? {
                 inputs.push(automatic);
             }
-        }
-        let engine_options = engine
-            .canonicalize()?
-            .parent()
-            .context("Engine has no parent")?
-            .join("engine_options.txt");
-        if engine_options.try_exists()? {
-            inputs.push(engine_options);
         }
     }
     let expand_dir = cli.expand_output_dir.as_ref().map(|dir| dir.canonicalize()).transpose()?;
@@ -6610,7 +6603,7 @@ mod marker_tests {
     }
 
     #[test]
-    fn engine_options_next_to_engine_is_protected() {
+    fn engine_options_next_to_engine_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let engine = dir.path().join("engine");
         let input = dir.path().join("input.psv");
@@ -6629,8 +6622,7 @@ mod marker_tests {
             "--output-dir",
             output_dir.to_str().unwrap(),
         ]);
-        let protection = output_protection(&cli, std::slice::from_ref(&input)).unwrap();
-        assert!(protection.inputs.iter().any(|path| paths_match(path, &engine_options).unwrap()));
+        assert!(output_protection(&cli, std::slice::from_ref(&input)).is_err());
     }
 
     #[test]

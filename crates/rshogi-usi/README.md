@@ -110,16 +110,18 @@ LS_BUCKET_MODE progresskpabsq16
 ```
 
 - 固定したオプションは、その後の `setoption` では変わりません (`info string ... setoption ignored` を出す)。
-  GUI の設定より常にファイルが優先されます。ファイルの値を書き換えると、次の `isready` で反映します。
+  GUI の設定より常にファイルが優先されます。`SPSA_*` を固定した場合は、`SPSAParamsFile` や `spsa.params` でも変わりません。
+- ファイルの値を書き換えると、次の `isready` で反映します。行やファイルを消しても、固定はエンジンを起動し直すまで残ります。
+- 同じ名前が複数行にあれば最後の行を使います。値が `usi` で示す型・範囲に合わない行は警告して飛ばします (固定もしない)。
 - `EvalFile` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookDir` / `BookExploreFile` の相対パスは、
   `engine_options.txt` のあるフォルダからのパスとして読みます (`BookFile` は今までどおり `BookDir` からのパス)。
-- 名前の大文字・小文字は区別しません。知らない名前や読めない行は `info string Warning` を出して飛ばします。
+- 名前の大文字・小文字は区別しません。知らない名前や読めない行も `info string Warning` を出して飛ばします。
   `=` を使うと `Skill Level=10` のように空白を含む名前も書けます。空行と `#`・`//` で始まる行は読みません。
 - やねうら王の `engine_options.txt` と同じ書き方ですが、やねうら王はカレントフォルダから読むのに対し、
   rshogi は実行ファイルと同じフォルダだけを見ます (GUI ごとに違うカレントフォルダに左右されないため)。
-- 対局・SPRT・SPSA・定跡のツールで動かすときも読まれ、ツールが送る `setoption` より優先します。
-  `book_mine` / `book_extend` / `book_rescore` と `rescore_psv` は、エンジンの隣にこのファイルがあれば
-  条件の指紋 (と入力の一覧) に含めます。
+- 対局・SPRT・SPSA のツールで動かすときも読まれ、ツールが送る `setoption` より優先します。
+  `book_mine` / `book_extend` / `book_rescore` と `rescore_psv` は、条件の指紋や入力の保護が
+  実際の設定を表さなくなるので、エンジンの隣にこのファイルがあるとエラーで止まります。
 
 ## 詰み探索 (`go mate`)
 
