@@ -1745,12 +1745,19 @@ fn serve_startup_rejects_imported_journal_on_journal_state_or_out_root() {
     let error = service::serve(args).unwrap_err();
     assert!(error.to_string().contains("親 dir がありません"), "{error:#}");
     assert!(!dir.path().join("missing").exists());
-    let mut args =
-        serve_args(&state, &dir.path().join("missing/journal.jsonl"), &out_root, &def.paths);
-    args.imported_journal = Some(dir.path().join("missing/imported.jsonl"));
-    let error = service::serve(args).unwrap_err();
-    assert!(error.to_string().contains("親 dir がありません"), "{error:#}");
-    assert!(!dir.path().join("missing").exists());
+    // serve が作る dir (台帳の dir・出力の根・state) を親にはできない。
+    let missing = dir.path().join("missing");
+    for (state, journal, out_root) in [
+        (state.clone(), missing.join("journal.jsonl"), out_root.clone()),
+        (state.clone(), journal.clone(), missing.clone()),
+        (missing.clone(), journal.clone(), out_root.clone()),
+    ] {
+        let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+        args.imported_journal = Some(missing.join("imported.jsonl"));
+        let error = service::serve(args).unwrap_err();
+        assert!(error.to_string().contains("親 dir がありません"), "{error:#}");
+        assert!(!missing.exists());
+    }
     let imported = dir.path().join("imported.jsonl");
     let mut args = serve_args(&state, &journal, &out_root, &def.paths);
     args.imported_journal = Some(imported.clone());

@@ -1026,11 +1026,11 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
-    super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     if let Some(imported) = &args.imported_journal {
-        super::paths::reject_collisions(imported, Some(&args.state), &[])?;
         super::paths::reject_same_journal(&journal_path, imported)?;
+        super::paths::reject_collisions(imported, Some(&args.state), &[])?;
     }
+    super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("restart"))?;
     // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
     let mut attempt = 0;
@@ -2382,6 +2382,7 @@ mod tests {
         assert!(checkpoint.rejected.is_empty());
         std::fs::write(state.join(CHECKPOINT), serde_json::to_string(&checkpoint).unwrap())
             .unwrap();
+        std::fs::create_dir_all(&checkpoint.targets[0].out).unwrap();
         let inside = checkpoint.targets[0].out.join("d999.jsonl");
         let outside = dir.path().join("journal.jsonl");
         for (journal, imported) in [
