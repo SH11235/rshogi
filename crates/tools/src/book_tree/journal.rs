@@ -439,7 +439,9 @@ impl Journal {
     /// 取り込んだ行を `imported` に分けて持つ台帳を開く。読み込みは `path`、`imported` の順。
     pub fn open_split(path: &Path, imported: Option<&Path>, fingerprint: &str) -> Result<Self> {
         super::paths::reject_symlink(path)?;
-        let lock = LockedFile::open(path)?;
+        // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、取り込みの
+        // 追記先も dir の項目まで確定させる。親 dir は作らない (作った dir 自体の項目まで
+        // 確定させる処理を持たない) ので、`path` の親を作る前に有無を確かめる。
         let imported = imported
             .map(|path| {
                 super::paths::reject_symlink(path)?;
@@ -447,12 +449,15 @@ impl Journal {
                     Some(parent) if !parent.as_os_str().is_empty() => parent,
                     _ => Path::new("."),
                 };
-                // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
-                // 新しく作った追記先の dir の項目も先に確定しておく。親 dir を作らないのは、
-                // 作った dir 自体の項目まで確定させる処理を持たないため。
                 if !parent.is_dir() {
                     bail!("--imported-journal の親 dir がありません: {}", parent.display());
                 }
+                Ok::<_, anyhow::Error>((path, parent))
+            })
+            .transpose()?;
+        let lock = LockedFile::open(path)?;
+        let imported = imported
+            .map(|(path, parent)| {
                 let created = !path.try_exists()?;
                 let lock = LockedFile::open(path)?;
                 if created {

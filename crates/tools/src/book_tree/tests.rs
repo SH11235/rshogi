@@ -1745,6 +1745,12 @@ fn serve_startup_rejects_imported_journal_on_journal_state_or_out_root() {
     let error = service::serve(args).unwrap_err();
     assert!(error.to_string().contains("親 dir がありません"), "{error:#}");
     assert!(!dir.path().join("missing").exists());
+    let mut args =
+        serve_args(&state, &dir.path().join("missing/journal.jsonl"), &out_root, &def.paths);
+    args.imported_journal = Some(dir.path().join("missing/imported.jsonl"));
+    let error = service::serve(args).unwrap_err();
+    assert!(error.to_string().contains("親 dir がありません"), "{error:#}");
+    assert!(!dir.path().join("missing").exists());
     let imported = dir.path().join("imported.jsonl");
     let mut args = serve_args(&state, &journal, &out_root, &def.paths);
     args.imported_journal = Some(imported.clone());
