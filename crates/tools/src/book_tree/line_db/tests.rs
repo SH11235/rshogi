@@ -82,6 +82,8 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
         ],
     );
     tree(&second, &next_root, &[(&next_root, "8c8d none -123 12 1")]);
+    // 見つけた木の dir は正規化したパスで扱われる (Windows では `\\?\` の接頭辞が付く)。
+    let (first, second) = (first.canonicalize().unwrap(), second.canonicalize().unwrap());
     let unused = a.tree_out[0].join("unused");
     tree(&unused, SFEN_HIRATE, &[(SFEN_HIRATE, "5g5f none 42 1 1")]);
     let unfinished = a.tree_out[0].join("unfinished");
@@ -91,14 +93,7 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
     let trees = discover(&a.tree_out, &mut inputs).unwrap();
     let mut index = MasterIndex::open(&a.master, &Schema::load(None).unwrap()).unwrap();
     let (selected, _, used) = assemble(&a, &mut index, trees).unwrap();
-    // 見つけた木の dir は正規化したパスで返る (Windows では `\\?\` の接頭辞が付く)。
-    assert_eq!(
-        used,
-        [
-            first.canonicalize().unwrap(),
-            second.canonicalize().unwrap()
-        ]
-    );
+    assert_eq!(used, [first.clone(), second.clone()]);
     assert_eq!(selected[strip_ply(&root)].moves["2g2f"].mv.value, 100);
     assert_eq!(selected[strip_ply(&root)].moves["2g2f"].mv.count, 2);
     assert_eq!(selected[strip_ply(&root)].moves["6g6f"].mv.count, 1);
