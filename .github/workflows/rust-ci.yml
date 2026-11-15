@@ -158,6 +158,31 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --release --workspace --doc
 
+  book-tree-windows:
+    # 定跡の木の道具 (book_mine tree / master) は Windows でも動かす。パスの区切り・
+    # ファイルの lock・rename の違いは Linux のテストでは出ないので、この範囲だけ Windows で回す。
+    name: Book tree tests (Windows)
+    runs-on: windows-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run book tree tests
+        run: cargo test --release -p tools --lib book_tree
+
   feature-builds:
     # workspace の clippy / test は既定 feature (edition-universal) しかコンパイルしない。
     # 配布に使う固定 edition と opt-in feature でだけ生きる cfg 経路の破損を検出するため、
