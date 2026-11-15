@@ -845,7 +845,7 @@ journal、state dir とその管理ファイル (キュー・lock・チェック
 | `id`・`own`・`generation`・`priority` | 局面を要求している木。複数の木が同じ局面を要求していれば、木ごとに 1 行ずつ出す |
 | `level` | その木での段 |
 | `root` | 局面。`tree enqueue` の `root`・`roots` にそのまま渡せる形 (`sfen <盤> <手番> <持駒> <手数>`) |
-| `running` | この serve の worker がその局面を今読んでいれば真。読みの条件は見ないので、`require_condition` の木の行では、別の条件の読みでも真になる |
+| `running` | この serve の worker がその局面を今読んでいれば真。読みの条件と種類は見ないので、先読みの worker が読んでいる局面や、`require_condition` の木の行で別の条件の読みが走っている局面でも真になる |
 
 行は受付順の木ごとに、その木が読む順 (段、局面キー) で並びます。保留の木、終わった木、台帳に読みがある局面、失敗として確定した局面は出しません。先読み (`--prefetch`・`--speculate-at`) の対象は含みません。
 

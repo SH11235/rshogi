@@ -2198,13 +2198,16 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     .zip(&lives)
                     .filter(|(target, live)| !target.hold && live.prepared && active_tree(live))
                     .map(|(target, live)| (target, &live.tree));
+                // 先読みだけの読みや条件の違う読みでも、その局面を読んでいる worker があれば真にする。
+                let reading: BTreeSet<&String> =
+                    workers.values().filter_map(|w| w.busy.as_ref().map(|(k, _)| k)).collect();
                 // 外の道具のための写しなので、書けなくても読みは止めない。
                 if let Err(error) = write_pending(
                     &args.state,
                     trees,
                     &journal,
                     &failures,
-                    &busy,
+                    &|key: &String| reading.contains(key),
                     &mut pending_digest,
                 ) {
                     eprintln!("監視ファイル書き込み失敗 {PENDING_FILE}: {error:#}");
