@@ -146,6 +146,24 @@ pub fn is_external_source(source: &str) -> bool {
 /// (serde の `skip_serializing_if`)。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ClockSpec<'a> {
+    /// 先手の総持ち時間（sec）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub black_total_sec: Option<u32>,
+    /// 後手の総持ち時間（sec）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub white_total_sec: Option<u32>,
+    /// 先手の総持ち時間（ms）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub black_total_ms: Option<u32>,
+    /// 後手の総持ち時間（ms）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub white_total_ms: Option<u32>,
+    /// 先手の総持ち時間（min）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub black_total_min: Option<u32>,
+    /// 後手の総持ち時間（min）。省略時は共通値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub white_total_min: Option<u32>,
     pub kind: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_sec: Option<u32>,
@@ -171,7 +189,16 @@ impl<'a> ClockSpec<'a> {
             rshogi_csa_server::ClockSpec::Countdown {
                 total_time_sec,
                 byoyomi_sec,
+                black_total_time_sec,
+                white_total_time_sec,
             } => Self {
+                black_total_sec: *black_total_time_sec,
+                white_total_sec: *white_total_time_sec,
+                black_total_ms: None,
+                white_total_ms: None,
+                black_total_min: None,
+                white_total_min: None,
+
                 kind: "countdown",
                 total_sec: Some(*total_time_sec),
                 byoyomi_sec: Some(*byoyomi_sec),
@@ -184,7 +211,16 @@ impl<'a> ClockSpec<'a> {
             rshogi_csa_server::ClockSpec::CountdownMsec {
                 total_time_ms,
                 byoyomi_ms,
+                black_total_time_ms,
+                white_total_time_ms,
             } => Self {
+                black_total_sec: None,
+                white_total_sec: None,
+                black_total_ms: *black_total_time_ms,
+                white_total_ms: *white_total_time_ms,
+                black_total_min: None,
+                white_total_min: None,
+
                 kind: "countdown_msec",
                 total_sec: None,
                 byoyomi_sec: None,
@@ -197,7 +233,16 @@ impl<'a> ClockSpec<'a> {
             rshogi_csa_server::ClockSpec::Fischer {
                 total_time_sec,
                 increment_sec,
+                black_total_time_sec,
+                white_total_time_sec,
             } => Self {
+                black_total_sec: *black_total_time_sec,
+                white_total_sec: *white_total_time_sec,
+                black_total_ms: None,
+                white_total_ms: None,
+                black_total_min: None,
+                white_total_min: None,
+
                 kind: "fischer",
                 total_sec: Some(*total_time_sec),
                 byoyomi_sec: None,
@@ -210,7 +255,16 @@ impl<'a> ClockSpec<'a> {
             rshogi_csa_server::ClockSpec::StopWatch {
                 total_time_min,
                 byoyomi_min,
+                black_total_time_min,
+                white_total_time_min,
             } => Self {
+                black_total_sec: None,
+                white_total_sec: None,
+                black_total_ms: None,
+                white_total_ms: None,
+                black_total_min: *black_total_time_min,
+                white_total_min: *white_total_time_min,
+
                 kind: "stopwatch",
                 total_sec: None,
                 byoyomi_sec: None,
@@ -460,6 +514,8 @@ mod tests {
         let spec = rshogi_csa_server::ClockSpec::Countdown {
             total_time_sec: 600,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         let wire = ClockSpec::from_server(&spec);
         assert_eq!(wire.kind, "countdown");
@@ -474,6 +530,8 @@ mod tests {
         let spec = rshogi_csa_server::ClockSpec::Fischer {
             total_time_sec: 300,
             increment_sec: 5,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         let wire = ClockSpec::from_server(&spec);
         assert_eq!(wire.kind, "fischer");
@@ -487,6 +545,8 @@ mod tests {
         let spec = rshogi_csa_server::ClockSpec::CountdownMsec {
             total_time_ms: 60_000,
             byoyomi_ms: 100,
+            black_total_time_ms: None,
+            white_total_time_ms: None,
         };
         let wire = ClockSpec::from_server(&spec);
         assert_eq!(wire.kind, "countdown_msec");
@@ -501,6 +561,8 @@ mod tests {
         let spec = rshogi_csa_server::ClockSpec::StopWatch {
             total_time_min: 15,
             byoyomi_min: 2,
+            black_total_time_min: None,
+            white_total_time_min: None,
         };
         let wire = ClockSpec::from_server(&spec);
         assert_eq!(wire.kind, "stopwatch");
@@ -554,6 +616,12 @@ mod tests {
             end_reason: "RESIGN",
             moves_count: 142,
             clock: Some(ClockSpec {
+                black_total_sec: None,
+                white_total_sec: None,
+                black_total_ms: None,
+                white_total_ms: None,
+                black_total_min: None,
+                white_total_min: None,
                 kind: "fischer",
                 total_sec: Some(300),
                 byoyomi_sec: None,
@@ -658,6 +726,22 @@ mod tests {
     fn index_key_rejects_invalid_game_id() {
         for id in ["", "g1/evil", "gあ"] {
             assert!(matches!(games_index_key(1000, id), Err(StorageError::Malformed(_))));
+        }
+    }
+
+    #[test]
+    fn color_totals_are_recorded_in_index() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+        ] {
+            let input = serde_json::json!({"kind": kind, format!("total_time_{unit}"): 10, format!("black_total_time_{unit}"): 3, format!("white_total_time_{unit}"): 8, extra: 2});
+            let clock: rshogi_csa_server::ClockSpec = serde_json::from_value(input).unwrap();
+            let wire = serde_json::to_value(ClockSpec::from_server(&clock)).unwrap();
+            assert_eq!(wire[format!("black_total_{unit}")], 3);
+            assert_eq!(wire[format!("white_total_{unit}")], 8);
         }
     }
 }

@@ -713,6 +713,8 @@ fn built_in_server_nonsecond_clocks_match_client_budgets() {
             ClockSpec::CountdownMsec {
                 total_time_ms: 10000,
                 byoyomi_ms: 0,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             },
             1250,
             10000,
@@ -723,6 +725,8 @@ fn built_in_server_nonsecond_clocks_match_client_budgets() {
             ClockSpec::StopWatch {
                 total_time_min: 3,
                 byoyomi_min: 0,
+                black_total_time_min: None,
+                white_total_time_min: None,
             },
             125000,
             180000,
@@ -916,6 +920,46 @@ fn resumed_move_echo_settles_clock_before_ponder_hit() {
                 "go ponder btime 1000 wtime 60000".to_owned()
             } else {
                 "go ponder btime 1000 wtime 58000 binc 2000 winc 2000".to_owned()
+            }]
+        );
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn initial_color_totals_reach_engine_for_both_colors() {
+    for color in ["+", "-"] {
+        let (port, handle) = server(move |reader, writer| {
+            summary(writer, color, "1sec", "3", "8", "2", &[]);
+            assert_eq!(read(reader), "AGREE g");
+            send(writer, &["START:g"]);
+            if color == "-" {
+                send(writer, &["+7776FU,T1"]);
+            }
+            assert_eq!(read(reader), "%TORYO");
+            send(writer, &["#RESIGN", "#LOSE"]);
+            assert_eq!(read(reader), "LOGOUT");
+        });
+        let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+        let mut config = CsaClientConfig::default();
+        config.game.ponder = false;
+        config.time.margin_msec = 0;
+        config.record.enabled = false;
+        let mut engine = Engine::default();
+        run_game_session_with_events(
+            &config,
+            &mut conn,
+            &mut engine,
+            Arc::new(AtomicBool::new(false)),
+            &mut CandidateSink::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            engine.go,
+            [if color == "+" {
+                "go btime 3000 wtime 8000 binc 2000 winc 2000"
+            } else {
+                "go btime 4000 wtime 8000 binc 2000 winc 2000"
             }]
         );
         handle.join().unwrap();

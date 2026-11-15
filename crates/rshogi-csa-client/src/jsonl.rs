@@ -334,6 +334,9 @@ struct MetaSettings {
     byoyomi: u64,
     /// 先手視点の持ち時間 (ms)
     btime: u64,
+    /// 先後の総持ち時間が異なる場合の後手持ち時間 (ms)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wtime: Option<u64>,
     /// 先手視点の increment (ms)
     binc: u64,
     /// クライアント側の秒読みマージン (ms)
@@ -411,6 +414,8 @@ fn write_meta<W: Write>(
             max_moves: 0,
             byoyomi: u64_or_zero(record.black_time.byoyomi_ms),
             btime: u64_or_zero(record.black_time.total_time_ms),
+            wtime: (record.black_time.total_time_ms != record.white_time.total_time_ms)
+                .then(|| u64_or_zero(record.white_time.total_time_ms)),
             binc: u64_or_zero(record.black_time.increment_ms),
             timeout_margin_ms: config.time.margin_msec,
             threads: 1,

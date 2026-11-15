@@ -574,6 +574,8 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 1,
                 byoyomi_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             500,
             10_000,
@@ -627,6 +629,8 @@ mod tests {
                 ClockSpec::Countdown {
                     total_time_sec: 2,
                     byoyomi_sec: 3,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 8_249,
             ),
@@ -634,6 +638,8 @@ mod tests {
                 ClockSpec::Fischer {
                     total_time_sec: 3,
                     increment_sec: 3,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 12_249,
             ),
@@ -690,6 +696,8 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 1,
                 byoyomi_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             500,
             10_000,
@@ -726,6 +734,8 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 1,
                 byoyomi_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             0,
             0,
@@ -776,5 +786,52 @@ mod tests {
             (Duration::from_millis(2_249)..=Duration::from_millis(2_250))
                 .contains(&start.elapsed())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn color_totals_expire_on_each_players_deadline() {
+        for loser in [Color::Black, Color::White] {
+            let mut room = ready_room(
+                ClockSpec::CountdownMsec {
+                    total_time_ms: 8_000,
+                    black_total_time_ms: Some(3_000),
+                    white_total_time_ms: None,
+                    byoyomi_ms: 0,
+                },
+                0,
+                0,
+            );
+            let base = if loser == Color::White {
+                room.handle_line(Color::Black, &line("+7776FU"), 1_000).unwrap();
+                assert_eq!(room.clock_remaining_main_ms(Color::Black), 2_000);
+                1_000
+            } else {
+                0
+            };
+            let mut sente = MockHandles::build("sente");
+            let mut gote = MockHandles::build("gote");
+            let bcast = MockBroadcaster {
+                sent: Rc::new(RefCell::new(Vec::new())),
+            };
+            let start = Instant::now();
+            let result = run_room(
+                &mut room,
+                &mut sente.transport,
+                &mut gote.transport,
+                &bcast,
+                &RoomId::new("g1"),
+                || base + start.elapsed().as_millis() as u64,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, GameResult::TimeUp { loser: actual } if actual == loser));
+            let expected = if loser == Color::Black { 3_000 } else { 8_000 } + TIMEUP_GRACE_MS;
+            assert!(
+                (Duration::from_millis(expected)..=Duration::from_millis(expected + 2))
+                    .contains(&start.elapsed())
+            );
+            assert!(sente.outbox.borrow().iter().any(|entry| entry.as_str() == "#TIME_UP"));
+            assert!(gote.outbox.borrow().iter().any(|entry| entry.as_str() == "#TIME_UP"));
+        }
     }
 }

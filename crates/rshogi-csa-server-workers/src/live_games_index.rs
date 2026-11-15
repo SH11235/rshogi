@@ -137,6 +137,12 @@ mod tests {
             black_handle: "alice",
             white_handle: "bob",
             clock: ClockSpec {
+                black_total_sec: None,
+                white_total_sec: None,
+                black_total_ms: None,
+                white_total_ms: None,
+                black_total_min: None,
+                white_total_min: None,
                 kind: "fischer",
                 total_sec: Some(300),
                 byoyomi_sec: None,

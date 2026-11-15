@@ -49,7 +49,7 @@ pub struct KifuRecord {
     pub end_time: String,
     /// イベント名（任意）。`$EVENT:` 行に出力。空文字なら省略。
     pub event: String,
-    /// 持ち時間セクション（`BEGIN Time` から `END Time` まで、末尾改行込み）。
+    /// 持ち時間セクション（`Time` または `Time+` / `Time-`、末尾改行込み）。
     /// 通常は [`crate::game::clock::TimeClock::format_summary`] の戻り値を渡す。
     pub time_section: String,
     /// 初期局面ブロック（`PI` または `P1`–`P9`+持ち駒+手番）。空なら省略可。
@@ -543,5 +543,14 @@ PI
         assert_eq!(winner_of(&GameResult::Sennichite), None);
         assert_eq!(winner_of(&GameResult::MaxMoves), None);
         assert_eq!(winner_of(&GameResult::Abnormal { winner: None }), None);
+    }
+
+    #[test]
+    fn color_totals_are_recorded_in_csa() {
+        let spec: crate::ClockSpec = serde_json::from_str(r#"{"kind":"fischer","total_time_sec":10,"black_total_time_sec":3,"white_total_time_sec":8,"increment_sec":2}"#).unwrap();
+        let mut record = rec_skeleton();
+        record.time_section = spec.format_time_section();
+        let text = record.build_v2();
+        assert!(text.contains("BEGIN Time+\nTime_Unit:1sec\nTotal_Time:3\nIncrement:2\nLeast_Time_Per_Move:0\nEND Time+\nBEGIN Time-\nTime_Unit:1sec\nTotal_Time:8\n"));
     }
 }

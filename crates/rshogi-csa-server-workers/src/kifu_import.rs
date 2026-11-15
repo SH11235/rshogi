@@ -228,6 +228,12 @@ impl ImportedClock {
             } => ("fischer", total_sec, None, Some(increment_sec)),
         };
         ClockSpec {
+            black_total_sec: None,
+            white_total_sec: None,
+            black_total_ms: None,
+            white_total_ms: None,
+            black_total_min: None,
+            white_total_min: None,
             kind,
             total_sec: Some(total_sec),
             byoyomi_sec,
@@ -1022,6 +1028,8 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
             serde_json::to_value(ClockSpec::from_server(&rshogi_csa_server::ClockSpec::Fischer {
                 total_time_sec: 300,
                 increment_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }))
             .unwrap()
         );
@@ -1039,6 +1047,8 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
                 &rshogi_csa_server::ClockSpec::Countdown {
                     total_time_sec: 600,
                     byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 }
             ))
             .unwrap()

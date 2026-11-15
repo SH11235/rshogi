@@ -406,3 +406,28 @@ fn identities_match_across_live_final_meta_moves_and_results() {
         }
     }
 }
+
+#[test]
+fn color_totals_are_recorded_in_jsonl_and_csa() {
+    for asymmetric in [false, true] {
+        let mut record = build_record(Color::Black);
+        if asymmetric {
+            record.white_time.total_time_ms = 90_000;
+        }
+        let tmp = tempdir();
+        let path = write_game_jsonl(&tmp, &record, &build_config(), &GameResult::Win).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let meta: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(meta["settings"]["btime"], 60_000);
+        let csa = record.to_csa();
+        if asymmetric {
+            assert_eq!(meta["settings"]["wtime"], 90_000);
+            assert!(csa.contains("'Time+:Total_Time_Ms:60000,Byoyomi_Ms:5000,Increment_Ms:0\n"));
+            assert!(csa.contains("'Time-:Total_Time_Ms:90000,Byoyomi_Ms:5000,Increment_Ms:0\n"));
+        } else {
+            assert!(meta["settings"].get("wtime").is_none());
+            assert!(!csa.contains("'Time+"));
+        }
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+}
