@@ -163,6 +163,9 @@ struct ServeArgs {
     /// state に固定されず、起動ごとに付け外しできる
     #[arg(long)]
     trace_dir: Option<PathBuf>,
+    /// 木ごとの「要るのにまだ読みが無い局面」を、この秒数ごとに `<state>/pending.jsonl` に書き出す
+    #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+    pending_secs: Option<u64>,
 }
 
 #[derive(Args, Debug)]

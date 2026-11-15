@@ -941,6 +941,7 @@ pub(super) fn serve_args(
         rounds: 3,
         draw: 0,
         trace_dir: None,
+        pending_secs: None,
     }
 }
 
