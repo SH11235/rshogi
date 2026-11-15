@@ -51,7 +51,7 @@
 //!
 //! ## SearchInfoSnapshot の semantics
 //!
-//! [`SearchInfoSnapshot`] は対局ループが USI `info` 行を観測する都度 **累積
+//! [`SessionProgress::SearchInfo`] の [`SearchInfoSnapshot`] は USI `info` 行を観測する都度 **累積
 //! snapshot** として更新する値である (depth / score / pv 等は最後に観測した
 //! 値で上書き)。`emit_on_depth_change` や `emit_final` のフラグはこの累積値を
 //! いつ [`SessionProgress::SearchInfo`] として発火するかを制御するだけで、
@@ -205,7 +205,7 @@ pub enum DisconnectReason {
 
 /// 探索途中の最終観測値、または指し手に採用した主の info 行の探索情報。
 /// [`SessionProgress::SearchInfo`] は項目ごとの累積値、[`BestMoveEvent::search`] と
-/// [`MoveEvent::search`] は score・PV が同じ行にあり合法性を確認できたものだけを持つ。
+/// [`MoveEvent::search`] は指し手に対応すると確かめられた主の info 行だけを持つ。
 #[derive(Debug, Clone, Default)]
 pub struct SearchInfoSnapshot {
     /// `depth N`
@@ -278,8 +278,8 @@ pub struct BestMoveEvent {
     pub ply: u32,
     /// この bestmove を生み出した探索の種別。
     pub search_origin: SearchOrigin,
-    /// この bestmove を出した時点の累積 [`SearchInfoSnapshot`]。
-    /// 読み筋の先頭がこの指し手と一致しない場合（読み筋が無い場合を含む）は `None`。
+    /// score と読み筋から、この指し手に対応すると確かめられた主の info 行。
+    /// 対応を確認できなければ `None`。
     pub search: Option<SearchInfoSnapshot>,
 }
 
@@ -312,7 +312,7 @@ pub struct MoveEvent {
     pub sfen_after: String,
     /// 自エンジンが指した手の場合のみ `Some`。相手の手は `None`。
     pub search_origin: Option<SearchOrigin>,
-    /// 自エンジンの手で、読み筋の先頭が指し手と一致する場合のみ `Some`。
+    /// 自エンジンの手に対応すると確かめられた主の info 行。確認できなければ `None`。
     pub search: Option<SearchInfoSnapshot>,
 }
 

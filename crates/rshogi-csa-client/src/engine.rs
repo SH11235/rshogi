@@ -965,12 +965,14 @@ fn parse_option_name(rest: &str) -> Option<String> {
 }
 
 fn update_move_info(info: &mut SearchInfo, line: &str) {
+    // string 以降は自由文なので、評価値や multipv に見える語句も制御項目として読まない。
     if line.split_whitespace().take_while(|t| *t != "pv").any(|t| t == "string") {
         return;
     }
     let has_pv = line.split_whitespace().take_while(|t| *t != "string").any(|t| t == "pv");
     let fields: Vec<_> =
         line.split_whitespace().take_while(|t| *t != "pv" && *t != "string").collect();
+    // 副候補の評価値は bestmove 用の主候補を更新・破棄する根拠にならない。
     if fields.windows(2).any(|pair| pair[0] == "multipv" && pair[1] != "1") {
         return;
     }
