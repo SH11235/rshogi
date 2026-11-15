@@ -203,14 +203,9 @@ pub enum DisconnectReason {
 // SearchInfo / Move / BestMove payload
 // ────────────────────────────────────────────
 
-/// USI `info` 行から抽出した探索情報の累積 snapshot。
-///
-/// 対局ループが USI `info` 行を観測する都度、最後に観測した値で各 field を
-/// 上書きする (= 累積 snapshot)。各 field は USI engine が送ってこない場合
-/// `None` のまま。`pv` は最後に観測した PV 一式。
-///
-/// この snapshot は [`SessionProgress::SearchInfo`] / [`BestMoveEvent::search`]
-/// / [`MoveEvent::search`] で同型として使われる。
+/// 探索途中の最終観測値、または指し手に採用した主の info 行の探索情報。
+/// [`SessionProgress::SearchInfo`] は項目ごとの累積値、[`BestMoveEvent::search`] と
+/// [`MoveEvent::search`] は score・PV が同じ行にあり合法性を確認できたものだけを持つ。
 #[derive(Debug, Clone, Default)]
 pub struct SearchInfoSnapshot {
     /// `depth N`

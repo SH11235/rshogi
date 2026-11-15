@@ -70,7 +70,8 @@ done
     match outcome {
         SearchOutcome::BestMove(result, info) => {
             assert_eq!(result.bestmove, "7g7f");
-            assert!(!info.has_observation());
+            assert!(!info.has_score());
+            assert!(info.pv.is_empty());
         }
         SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
     }
@@ -157,7 +158,8 @@ done
     match first {
         SearchOutcome::BestMove(result, info) => {
             assert_eq!(result.bestmove, "7g7f");
-            assert!(!info.has_observation());
+            assert!(!info.has_score());
+            assert!(info.pv.is_empty());
         }
         SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
     }
@@ -171,7 +173,8 @@ done
     match second {
         SearchOutcome::BestMove(result, info) => {
             assert_eq!(result.bestmove, "2g2f");
-            assert!(!info.has_observation());
+            assert!(!info.has_score());
+            assert!(info.pv.is_empty());
         }
         SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
     }
@@ -224,7 +227,9 @@ fn ponderhit_info_without_matching_pv_is_not_move_evaluation() {
         (":", "echo 'info score cp 81'"),
     ] {
         let info = ponder_info_for_bestmove(before, after);
-        assert_eq!(info.score_cp, Some(81));
+        if !info.pv.is_empty() {
+            assert_eq!(info.score_cp, Some(81));
+        }
         assert!(!info.matches_bestmove("2g2f"));
     }
 }
@@ -294,4 +299,24 @@ done
             SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
         }
     }
+}
+
+#[test]
+fn split_score_and_matching_pv_are_not_move_evaluation() {
+    for after in ["echo 'info pv 2g2f'", "echo 'info pv 2g2f score cp 93'"] {
+        let info = ponder_info_for_bestmove("echo 'info score cp 81 pv 8c8d'", after);
+        assert!(!info.has_score());
+        assert!(info.pv.is_empty());
+    }
+}
+
+#[test]
+fn final_multipv_two_keeps_primary_evaluation() {
+    let info = ponder_info_for_bestmove(
+        "echo 'info multipv 1 depth 4 score cp 93 pv 2g2f 8c8d'",
+        "echo 'info multipv 2 depth 5 score cp 81 pv 7g7f 3c3d'",
+    );
+    assert_eq!(info.score_cp, Some(93));
+    assert_eq!(info.depth, Some(4));
+    assert_eq!(info.pv, ["2g2f", "8c8d"]);
 }

@@ -862,7 +862,8 @@ where
         Err(err) => return MoveAction::sink_or_error(err),
     };
 
-    let observed_info = info.matches_bestmove(&result.bestmove).then_some(info);
+    let pv_csa = validated_move_pv(info, &s.pos, &result.bestmove);
+    let observed_info = pv_csa.as_ref().map(|_| info);
 
     // BestMoveSelected 発火 (CSA サーバ送信前)
     let snapshot = observed_info.map(search_info_to_snapshot);
@@ -881,8 +882,8 @@ where
         return action;
     }
 
-    let comment = if s.config.server.floodgate && info.has_score() {
-        build_floodgate_comment(info, s.my_color, &s.pos, &result.bestmove)
+    let comment = if s.config.server.floodgate {
+        observed_info.and_then(|info| build_floodgate_comment(info, s.my_color, pv_csa.as_ref()?))
     } else {
         None
     };
@@ -2029,15 +2030,36 @@ fn build_position_cmd_with_ponder(
     cmd
 }
 
+fn validated_move_pv(info: &SearchInfo, pos: &Position, bestmove: &str) -> Option<Vec<String>> {
+    if !info.has_score()
+        || !info.matches_bestmove(bestmove)
+        || (bestmove.contains('*') && info.pv.len() < 2)
+    {
+        return None;
+    }
+    let mut legal_pos = rshogi_core::position::Position::new();
+    legal_pos.set_sfen(&pos.to_sfen()).ok()?;
+    let mut pv_pos = pos.clone();
+    let mut pv_csa = Vec::with_capacity(info.pv.len());
+    for usi_mv in &info.pv {
+        let mv = rshogi_core::types::Move::from_usi_strict(usi_mv)?;
+        if !legal_pos.pseudo_legal(mv) || !legal_pos.is_legal(mv) {
+            return None;
+        }
+        let csa = usi_move_to_csa(usi_mv, &pv_pos).ok()?;
+        pv_pos.apply_csa_move(&csa).ok()?;
+        let gives_check = legal_pos.gives_check(mv);
+        legal_pos.do_move(mv, gives_check);
+        pv_csa.push(csa);
+    }
+    Some(pv_csa)
+}
+
 fn build_floodgate_comment(
     info: &SearchInfo,
     my_color: Color,
-    pos: &Position,
-    last_bestmove: &str,
+    pv_csa: &[String],
 ) -> Option<String> {
-    if !info.matches_bestmove(last_bestmove) {
-        return None;
-    }
     let score = if let Some(cp) = info.score_cp {
         match my_color {
             Color::Black => cp,
@@ -2052,16 +2074,8 @@ fn build_floodgate_comment(
         }
     };
     let mut comment = format!("* {score}");
-    let mut pv_pos = pos.clone();
-    for usi_mv in &info.pv {
-        if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
-            write!(comment, " {csa}").unwrap();
-            if pv_pos.apply_csa_move(&csa).is_err() {
-                break;
-            }
-        } else {
-            break;
-        }
+    for csa in pv_csa {
+        write!(comment, " {csa}").unwrap();
     }
     Some(comment)
 }
@@ -2242,6 +2256,16 @@ mod tests {
         assert_eq!(end_reason_from_line(&Interrupted, Some("#UNKNOWN_FUTURE")), None);
     }
 
+    fn build_floodgate_comment(
+        info: &SearchInfo,
+        color: Color,
+        pos: &Position,
+        bestmove: &str,
+    ) -> Option<String> {
+        let pv = validated_move_pv(info, pos, bestmove)?;
+        super::build_floodgate_comment(info, color, &pv)
+    }
+
     fn floodgate_info(pv: &[&str]) -> SearchInfo {
         SearchInfo {
             score_cp: Some(123),
@@ -2258,6 +2282,30 @@ mod tests {
         let comment = build_floodgate_comment(&info, Color::Black, &pos, "7g7f");
 
         assert_eq!(comment.as_deref(), Some("* 123 +7776FU -3334FU +2726FU -8384FU"));
+    }
+
+    #[test]
+    fn drop_pv_requires_legal_reply_and_legal_continuation() {
+        let mut pos = rshogi_csa::initial_position();
+        for mv in ["+7776FU", "-3334FU", "+8822UM", "-3122GI"] {
+            pos.apply_csa_move(mv).unwrap();
+        }
+        for pv in [
+            vec!["B*5e"],
+            vec!["B*5e", "2g2f"],
+            vec!["B*5e", "8c8e"],
+            vec!["B*5e", "8c8d", "2g2e"],
+        ] {
+            assert_eq!(
+                build_floodgate_comment(&floodgate_info(&pv), Color::Black, &pos, "B*5e"),
+                None
+            );
+        }
+        assert_eq!(
+            build_floodgate_comment(&floodgate_info(&["B*5e", "8c8d"]), Color::Black, &pos, "B*5e")
+                .as_deref(),
+            Some("* 123 +0055KA -8384FU")
+        );
     }
 
     #[test]
@@ -2302,13 +2350,13 @@ mod tests {
     }
 
     #[test]
-    fn floodgate_comment_stops_at_unconvertible_pv_move() {
+    fn floodgate_comment_omits_unconvertible_pv_move() {
         let pos = rshogi_csa::initial_position();
         let info = floodgate_info(&["7g7f", "3c3d", "5e5f", "2g2f"]);
 
         let comment = build_floodgate_comment(&info, Color::Black, &pos, "7g7f");
 
-        assert_eq!(comment.as_deref(), Some("* 123 +7776FU -3334FU"));
+        assert_eq!(comment, None);
     }
 
     #[test]

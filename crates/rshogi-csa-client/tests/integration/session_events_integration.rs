@@ -1498,3 +1498,128 @@ fn live_jsonl_grows_during_game() {
     assert!(text.lines().last().unwrap().contains("\"type\":\"result\""));
     let _ = std::fs::remove_dir_all(&record_root);
 }
+
+fn check_white_rejected_evaluation(name: &str, info_lines: &str) {
+    let port = spawn_mock_tcp_server(|reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let mut pos = initial_position();
+        pos.apply_csa_move("+7776FU").unwrap();
+        let lines = game_summary_lines_for_position("g-white-rejected", &pos);
+        let lines: Vec<_> =
+            lines.iter().map(|line| line.replace("Your_Turn:+", "Your_Turn:-")).collect();
+        let refs: Vec<_> = lines.iter().map(String::as_str).collect();
+        write_lines(writer, &refs);
+        assert!(read_line(reader).starts_with("AGREE"));
+        write_lines(writer, &["START:g-white-rejected"]);
+        assert_eq!(read_line(reader), "-3334FU");
+        write_lines(writer, &["-3334FU,T1", "#WIN"]);
+        let _ = read_line(reader);
+    });
+    let script = format!(
+        r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready) echo readyok ;;
+        go*)
+            {info_lines}
+            echo 'bestmove 3c3d'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#
+    );
+    let root = tempfile_root().join(format!("csa_white_rejected_{}_{name}", std::process::id()));
+    let mut config =
+        mock_config(common::write_mock_script(name, &script), SearchInfoEmitPolicy::EveryLine);
+    config.server.floodgate = true;
+    config.record.enabled = true;
+    config.record.save_csa = true;
+    config.record.save_jsonl = true;
+    config.record.live_jsonl = true;
+    config.record.dir = root.clone();
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    conn.login("alice", "pw").unwrap();
+    let mut engine = common::spawn_engine(
+        &config.engine.path,
+        &config.engine.options,
+        SpawnOptions {
+            ponder: false,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    let mut sink = |event| -> Result<(), SinkError> {
+        events.push(event);
+        Ok(())
+    };
+    let record = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::new(AtomicBool::new(false)),
+        &mut sink,
+    )
+    .unwrap()
+    .record;
+    engine.quit();
+    assert_eq!(record.moves.last().unwrap().eval_cp, None);
+    assert_eq!(record.moves.last().unwrap().eval_mate, None);
+    for event in events {
+        match event {
+            SessionProgress::BestMoveSelected(e) => assert!(e.search.is_none()),
+            SessionProgress::MoveSent(e) | SessionProgress::MoveConfirmed(e) => {
+                assert!(e.search.is_none())
+            }
+            _ => {}
+        }
+    }
+    rshogi_csa_client::record::save_record(&record, &config.record).unwrap();
+    let csa = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "csa"))
+        .unwrap();
+    let saved = std::fs::read_to_string(csa).unwrap();
+    assert!(saved.contains("-3334FU"));
+    assert!(!saved.contains("'**"));
+    let live = std::fs::read_dir(config.record.jsonl_dir().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "jsonl"))
+        .unwrap();
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(live)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let moves: Vec<_> = rows.iter().filter(|r| r["type"] == "move").collect();
+    assert!(!moves.is_empty());
+    assert!(moves.iter().all(|r| r["eval"].is_null()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn white_split_score_pv_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation(
+        "white_split",
+        "echo 'info score cp 81 pv 7g7f'; echo 'info pv 3c3d'",
+    );
+}
+
+#[test]
+fn white_mate_split_score_pv_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation(
+        "white_mate_split",
+        "echo 'info score mate -3 pv 7g7f'; echo 'info pv 3c3d'",
+    );
+}
+
+#[test]
+fn white_mate_illegal_reply_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation("white_mate_illegal", "echo 'info score mate 3 pv 3c3d 8c8d'");
+}
