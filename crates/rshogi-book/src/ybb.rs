@@ -474,7 +474,9 @@ fn decode_move16(m: u16) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Book, BookEntryMove, BookOptions, DefaultBookRng, flipped_key, probe};
+    use crate::{
+        Book, BookEntryMove, BookOptions, BookValueTieBreak, DefaultBookRng, flipped_key, probe,
+    };
     use rshogi_core::position::Position;
 
     // testdata の .ybb は small.db を YaneuraOu-ScriptCollection の変換器で変換したもの:
@@ -577,6 +579,44 @@ mod tests {
                 let otf = Book::open_on_the_fly(&path, ignore_ply).unwrap();
                 assert_eq!(otf.on_the_fly_file_len(), Some(bytes.len() as u64));
                 assert_matches_db(&otf, &db, with_depth);
+            }
+        }
+    }
+
+    #[test]
+    fn value_tie_break_works_with_ybb_without_counts() {
+        let mut position = Position::new();
+        position.set_sfen(&db_sfens()[0]).unwrap();
+        for (name, has_depth) in [("small.ybb", false), ("small_depth.ybb", true)] {
+            for book in [
+                Book::from_path(testdata(name), true).unwrap(),
+                Book::open_on_the_fly(testdata(name), true).unwrap(),
+            ] {
+                for mode in [
+                    BookValueTieBreak::Count,
+                    BookValueTieBreak::Depth,
+                    BookValueTieBreak::Random,
+                ] {
+                    let options = BookOptions {
+                        select_value: true,
+                        value_tie_break: mode,
+                        ..Default::default()
+                    };
+                    let result = probe(
+                        std::slice::from_ref(&book),
+                        &position,
+                        &options,
+                        &mut DefaultBookRng::from_seed(42),
+                        |_| {},
+                    )
+                    .unwrap();
+                    let mv = result.best_move.to_usi();
+                    match mode {
+                        BookValueTieBreak::Random => assert!(mv == "2g2f" || mv == "7g7f"),
+                        BookValueTieBreak::Depth if has_depth => assert_eq!(mv, "7g7f"),
+                        _ => assert_eq!(mv, "2g2f"),
+                    }
+                }
             }
         }
     }

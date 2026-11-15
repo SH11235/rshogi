@@ -25,7 +25,10 @@ mod reader;
 mod ybb;
 
 pub use explore::BookExploreList;
-pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe, probe_with_explore};
+pub use probe::{
+    BookOptions, BookProbeResult, BookRng, BookValueTieBreak, DefaultBookRng, probe,
+    probe_with_explore,
+};
 pub use reader::{Book, BookEntryMove, priority_book_paths, resolve_book_path};
 
 pub use flip::{flip_usi_move, flipped_key};

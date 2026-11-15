@@ -433,7 +433,7 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
     let stdout = run_engine(&input);
 
     let first = stdout.lines().position(|l| l.starts_with("option name USI_OwnBook ")).unwrap();
-    let book_options: Vec<&str> = stdout.lines().skip(first).take(19).collect();
+    let book_options: Vec<&str> = stdout.lines().skip(first).take(20).collect();
     assert_eq!(
         book_options,
         [
@@ -452,6 +452,7 @@ fn per_side_book_options_are_declared_and_used_for_side_to_move() {
             "option name BookDepthWhiteLimit type spin default -1 min -1 max 99999",
             "option name NarrowBook type check default false",
             "option name BookSelectValue type check default false",
+            "option name BookValueTieBreak type combo default count var count var depth var random",
             "option name ConsiderBookMoveCount type check default false",
             "option name IgnoreBookPly type check default true",
             "option name FlippedBook type check default true",
@@ -492,4 +493,39 @@ fn per_side_book_option_invalid_value_warns_on_stderr() {
         assert!(stderr.lines().any(|line| line == warning), "{stderr}");
         assert!(!stdout.contains("invalid value"), "{stdout}");
     }
+}
+
+#[test]
+fn book_value_tie_break_is_applied_through_usi() {
+    let path = write_temp_db(
+        "value_tie_break",
+        "#YANEURAOU-DB2016 1.00\nsfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n7g7f 3c3d 80 24 0\n2g2f 8c8d 80 16 0\n1g1f 9c9d 70 32 0\n",
+    );
+    let _remove = RemoveOnDrop(path.clone());
+    for (setting, expected) in [
+        ("", "bestmove 2g2f ponder 8c8d"),
+        ("setoption name BookValueTieBreak value count\n", "bestmove 2g2f ponder 8c8d"),
+        ("setoption name BookValueTieBreak value depth\n", "bestmove 7g7f ponder 3c3d"),
+        (
+            "setoption name BookValueTieBreak value depth\nsetoption name BookValueTieBreak value invalid\n",
+            "bestmove 7g7f ponder 3c3d",
+        ),
+    ] {
+        let stdout = run_engine(&format!(
+            "{MATERIAL_INIT}setoption name BookFile value {}\nsetoption name BookSelectValue value true\n{setting}isready\nposition startpos\ngo depth 1\n",
+            path.display(),
+        ));
+        assert_eq!(first_bestmove(&stdout), Some(expected), "{stdout}");
+    }
+    let stdout = run_engine(&format!(
+        "{MATERIAL_INIT}setoption name BookFile value {}\nsetoption name BookSelectValue value true\nsetoption name BookValueTieBreak value random\nisready\nposition startpos\ngo depth 1\n",
+        path.display(),
+    ));
+    assert!(
+        matches!(
+            first_bestmove(&stdout),
+            Some("bestmove 7g7f ponder 3c3d" | "bestmove 2g2f ponder 8c8d")
+        ),
+        "{stdout}"
+    );
 }

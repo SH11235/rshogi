@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use rshogi_book::BookValueTieBreak;
 use rshogi_core::eval::{
     DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel, disable_material,
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
@@ -451,6 +452,10 @@ impl UsiEngine {
         }
         lines.push("option name NarrowBook type check default false".to_string());
         lines.push("option name BookSelectValue type check default false".to_string());
+        lines.push(
+            "option name BookValueTieBreak type combo default count var count var depth var random"
+                .to_string(),
+        );
         lines.push("option name ConsiderBookMoveCount type check default false".to_string());
         lines.push("option name IgnoreBookPly type check default true".to_string());
         lines.push("option name FlippedBook type check default true".to_string());
@@ -1547,6 +1552,21 @@ impl UsiEngine {
             }
             "BookSelectValue" => {
                 self.book_options.select_value = value == "true" || value == "1";
+            }
+            "BookValueTieBreak" => {
+                let tie_break = match value.as_str() {
+                    "count" => Some(BookValueTieBreak::Count),
+                    "depth" => Some(BookValueTieBreak::Depth),
+                    "random" => Some(BookValueTieBreak::Random),
+                    _ => None,
+                };
+                if let Some(tie_break) = tie_break {
+                    self.book_options.value_tie_break = tie_break;
+                } else {
+                    eprintln!(
+                        "info string Warning: BookValueTieBreak: invalid value '{value}' (expected count, depth or random); unchanged"
+                    );
+                }
             }
             "ConsiderBookMoveCount" => {
                 self.book_options.consider_move_count = value == "true" || value == "1";
