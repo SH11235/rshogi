@@ -187,7 +187,9 @@ live JSONL の再開・確定では、対局 ID と開始時刻、未完であ�
 
 `Game_Summary` の `Time+` / `Time-` を先後別に読み、エンジンの `go btime ... wtime ...`
 にもそれぞれの残時間を渡す。JSONL の `meta.settings.btime` は先手の初期持ち時間（ms）、
-先後が異なる場合に追加する `wtime` は後手の値。`wtime` がなければ先後共通。
+総持ち時間・秒読み・加算などの時計設定が先後で異なる場合に追加する `wtime` は後手の初期持ち時間（ms）。
+秒読み・加算だけが異なる場合も `wtime` を追加するが、後手の秒読み・加算を表す項目ではない。
+`byoyomi` / `binc` は従来どおり先手の値を使う。`wtime` がなければ先後共通。
 CSA の `$TIME_LIMIT` は先手の時計を表し、時計が異なる場合には
 `'Time+:Total_Time_Ms:...,Byoyomi_Ms:...,Increment_Ms:...` と
 `'Time-:Total_Time_Ms:...,Byoyomi_Ms:...,Increment_Ms:...` のコメントに両者の値をミリ秒で残す。

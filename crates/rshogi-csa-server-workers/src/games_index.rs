@@ -144,24 +144,19 @@ pub fn is_external_source(source: &str) -> bool {
 ///
 /// 各時計方式で意味のある field は限定されるため、未使用 field は `None` で省略する
 /// (serde の `skip_serializing_if`)。
+/// `black_total_*` / `white_total_*` は先後別の上書きで、省略時は対応する `total_*` を使う。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ClockSpec<'a> {
-    /// 先手の総持ち時間（sec）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub black_total_sec: Option<u32>,
-    /// 後手の総持ち時間（sec）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub white_total_sec: Option<u32>,
-    /// 先手の総持ち時間（ms）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub black_total_ms: Option<u32>,
-    /// 後手の総持ち時間（ms）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub white_total_ms: Option<u32>,
-    /// 先手の総持ち時間（min）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub black_total_min: Option<u32>,
-    /// 後手の総持ち時間（min）。省略時は共通値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub white_total_min: Option<u32>,
     pub kind: &'a str,
@@ -198,7 +193,6 @@ impl<'a> ClockSpec<'a> {
                 white_total_ms: None,
                 black_total_min: None,
                 white_total_min: None,
-
                 kind: "countdown",
                 total_sec: Some(*total_time_sec),
                 byoyomi_sec: Some(*byoyomi_sec),
@@ -220,7 +214,6 @@ impl<'a> ClockSpec<'a> {
                 white_total_ms: *white_total_time_ms,
                 black_total_min: None,
                 white_total_min: None,
-
                 kind: "countdown_msec",
                 total_sec: None,
                 byoyomi_sec: None,
@@ -242,7 +235,6 @@ impl<'a> ClockSpec<'a> {
                 white_total_ms: None,
                 black_total_min: None,
                 white_total_min: None,
-
                 kind: "fischer",
                 total_sec: Some(*total_time_sec),
                 byoyomi_sec: None,
@@ -264,7 +256,6 @@ impl<'a> ClockSpec<'a> {
                 white_total_ms: None,
                 black_total_min: *black_total_time_min,
                 white_total_min: *white_total_time_min,
-
                 kind: "stopwatch",
                 total_sec: None,
                 byoyomi_sec: None,

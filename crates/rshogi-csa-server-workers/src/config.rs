@@ -589,11 +589,22 @@ pub fn parse_clock_presets(
         #[serde(flatten)]
         spec: ClockSpec,
     }
-    let entries: Vec<Entry> =
+    let entries: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(trimmed).map_err(|e| format!("CLOCK_PRESETS: invalid JSON: {e}"))?;
     let mut out: std::collections::HashMap<String, GamePreset> =
         std::collections::HashMap::with_capacity(entries.len());
-    for entry in entries {
+    for fields in entries {
+        let entry: Entry = serde_json::from_value(serde_json::Value::Object(fields.clone()))
+            .map_err(|e| format!("CLOCK_PRESETS: invalid JSON: {e}"))?;
+        entry
+            .spec
+            .validate_color_total_fields(fields.keys().map(String::as_str))
+            .map_err(|field| {
+                format!(
+                    "CLOCK_PRESETS: clock preset {:?}: {field} is not supported by this clock kind",
+                    entry.game_name
+                )
+            })?;
         entry.spec.validate_total_time_nonzero().map_err(|field| {
             format!("CLOCK_PRESETS: clock preset {:?}: {field} must be > 0", entry.game_name)
         })?;
@@ -880,6 +891,40 @@ mod tests {
         let err = resolve_entering_king_rule_from_string(Some("Bogus"), EnteringKingRule::Point27)
             .unwrap_err();
         assert_eq!(err, "Bogus");
+    }
+
+    #[test]
+    fn presets_reject_incompatible_color_fields_only() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+            ("stop_watch", "min", "byoyomi_min"),
+        ] {
+            let base = serde_json::json!({"game_name": "test", "kind": kind, format!("total_time_{unit}"): 10, extra: 2, "unknown_option": 42});
+            assert!(
+                parse_clock_presets(Some(&serde_json::json!([base.clone()]).to_string())).is_ok()
+            );
+            for side in ["black", "white"] {
+                for other_unit in ["sec", "ms", "min", "minutes"] {
+                    let field = format!("{side}_total_time_{other_unit}");
+                    for value in [serde_json::json!(3), serde_json::Value::Null] {
+                        let mut input = base.clone();
+                        input[&field] = value;
+                        let result =
+                            parse_clock_presets(Some(&serde_json::json!([input]).to_string()));
+                        if other_unit == unit {
+                            assert!(result.is_ok());
+                        } else {
+                            let error = result.unwrap_err();
+                            assert!(error.contains(&field), "{error}");
+                            assert!(error.contains("test"), "{error}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

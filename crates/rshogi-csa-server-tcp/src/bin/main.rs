@@ -203,6 +203,21 @@ impl EnteringKingRuleArg {
     }
 }
 
+fn validate_color_time_cli(cli: &Cli) -> anyhow::Result<()> {
+    if matches!(cli.clock_kind, ClockKindArg::Stopwatch) {
+        anyhow::ensure!(
+            cli.black_total_time_sec.is_none() && cli.white_total_time_sec.is_none(),
+            "stopwatch does not support --black-total-time-sec / --white-total-time-sec"
+        );
+    } else {
+        anyhow::ensure!(
+            cli.black_total_time_min.is_none() && cli.white_total_time_min.is_none(),
+            "countdown/fischer do not support --black-total-time-min / --white-total-time-min"
+        );
+    }
+    Ok(())
+}
+
 impl ClockKindArg {
     fn to_clock_spec(self, cli: &Cli) -> ClockSpec {
         match self {
@@ -296,17 +311,7 @@ fn main() -> anyhow::Result<()> {
             HashMap::new()
         };
 
-    if matches!(cli.clock_kind, ClockKindArg::Stopwatch) {
-        anyhow::ensure!(
-            cli.black_total_time_sec.is_none() && cli.white_total_time_sec.is_none(),
-            "stopwatch requires --black-total-time-min / --white-total-time-min"
-        );
-    } else {
-        anyhow::ensure!(
-            cli.black_total_time_min.is_none() && cli.white_total_time_min.is_none(),
-            "countdown/fischer require --black-total-time-sec / --white-total-time-sec"
-        );
-    }
+    validate_color_time_cli(&cli)?;
     let global_clock = cli.clock_kind.to_clock_spec(&cli);
 
     // 2. ServerConfig を構築。
@@ -715,12 +720,22 @@ fn parse_clock_presets_toml_str(
     #[derive(Debug, Deserialize)]
     struct Root {
         #[serde(default)]
-        preset: Vec<Entry>,
+        preset: Vec<toml::Table>,
     }
     let root: Root = toml::from_str(raw)?;
     let mut out: HashMap<rshogi_csa_server::types::GameName, ClockSpec> =
         HashMap::with_capacity(root.preset.len());
-    for entry in root.preset {
+    for table in root.preset {
+        let entry: Entry = toml::Value::Table(table.clone()).try_into()?;
+        entry
+            .spec
+            .validate_color_total_fields(table.keys().map(String::as_str))
+            .map_err(|field| {
+                anyhow::anyhow!(
+                    "clock preset {:?}: {field} is not supported by this clock kind",
+                    entry.game_name
+                )
+            })?;
         entry.spec.validate_total_time_nonzero().map_err(|field| {
             anyhow::anyhow!("clock preset {:?}: {field} must be > 0", entry.game_name)
         })?;
@@ -1025,6 +1040,61 @@ byoyomi_sec = 0
     }
 
     #[test]
+    fn color_time_cli_rejects_incompatible_units() {
+        for (kind, forbidden_unit) in [
+            ("countdown", "min"),
+            ("fischer", "min"),
+            ("stopwatch", "sec"),
+        ] {
+            for side in ["black", "white"] {
+                let flag = format!("--{side}-total-time-{forbidden_unit}");
+                let cli = Cli::try_parse_from([
+                    "server",
+                    "--players",
+                    "players.toml",
+                    "--clock-kind",
+                    kind,
+                    &flag,
+                    "3",
+                ])
+                .unwrap();
+                let error = validate_color_time_cli(&cli).unwrap_err().to_string();
+                assert!(error.contains(&flag), "{error}");
+                assert!(error.contains("support"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn presets_reject_incompatible_color_fields_only() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+            ("stop_watch", "min", "byoyomi_min"),
+        ] {
+            let base = format!(
+                "[[preset]]\ngame_name='test'\nkind='{kind}'\ntotal_time_{unit}=10\n{extra}=2\nunknown_option=42\n"
+            );
+            assert!(parse_clock_presets_toml_str(&base).is_ok());
+            for side in ["black", "white"] {
+                for other_unit in ["sec", "ms", "min", "minutes"] {
+                    let field = format!("{side}_total_time_{other_unit}");
+                    let result = parse_clock_presets_toml_str(&format!("{base}{field}=3\n"));
+                    if other_unit == unit {
+                        assert!(result.is_ok());
+                    } else {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains(&field), "{error}");
+                        assert!(error.contains("test"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn color_totals_cli_and_presets() {
         for (kind, unit) in [
             ("countdown", "sec"),
@@ -1042,6 +1112,7 @@ byoyomi_sec = 0
                 let mut args = vec!["server", "--players", "players.toml", "--clock-kind", kind];
                 args.extend(sides);
                 let cli = Cli::try_parse_from(args).unwrap();
+                validate_color_time_cli(&cli).unwrap();
                 let spec = cli.clock_kind.to_clock_spec(&cli);
                 let value = toml::Value::try_from(spec).unwrap();
                 assert_eq!(

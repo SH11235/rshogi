@@ -1243,6 +1243,16 @@ mod tests {
     }
 
     #[test]
+    fn persisted_config_ignores_incompatible_color_fields() {
+        let original = baseline_config();
+        let mut value = serde_json::to_value(&original).unwrap();
+        value["clock"]["black_total_time_min"] = 3.into();
+        value["clock"]["white_total_time_ms"] = 8.into();
+        let restored: PersistedConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.clock, original.clock);
+    }
+
+    #[test]
     fn color_totals_survive_persistence_and_replay() {
         for kind in ["countdown", "fischer", "countdown_msec", "stopwatch"] {
             let (unit, extra, factor) = match kind {
