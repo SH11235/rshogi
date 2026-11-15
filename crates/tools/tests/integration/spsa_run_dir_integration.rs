@@ -1147,7 +1147,16 @@ fn regex_excluded_baseline_is_applied_to_both_engines_without_updates() {
 #[test]
 fn persistent_pool_spawns_four_engines_across_three_batches() {
     let test = PoolTest::new();
-    assert_success(&test.run("resign", 3, 1, 2, &[], &[]));
+    // 即投了する worker だけで全 batch が終わると、他 worker の起動が cancel され得る。
+    // 全 engine の起動を待ってから対局を完了させ、batch 間の再利用を検査する。
+    assert_success(&test.run(
+        "resign",
+        3,
+        1,
+        2,
+        &[],
+        &[("SPSA_TEST_ENGINE_WAIT_SPAWNS", Path::new("4"))],
+    ));
     assert_eq!(count_lines(&test.path("spawns")), 4);
     assert!(!test.path("run/.lock").exists());
 }
