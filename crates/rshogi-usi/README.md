@@ -47,6 +47,41 @@ The engine will start in USI mode, waiting for commands from stdin.
 クリアやモデル・定跡の準備は待機中の `isready` で行います。`setoption` は USI
 仕様に従って探索の停止後に送り、続けて `isready` で設定を反映してください。
 
+### 時間配分の診断ログ
+
+`RUST_LOG=rshogi_core::search::time=trace` を環境変数に指定すると、時間配分と
+反復深化の診断情報を stderr に出します。既定では無効で、USI の stdout には出しません。
+
+```bash
+RUST_LOG=rshogi_core::search::time=trace rshogi-usi 2> time-trace.log
+```
+
+`event=init` は入力時計・option と最初の目安 (`optimum_ms`)・上限 (`maximum_ms`) を示します。
+`iteration_start` / `iteration_end` は main thread の反復の開始・終了で、
+`iteration_ms` は反復にかかった時間、`aborted` は中断、`main_nodes` は main thread の累積ノード数です。
+`score_raw` は内部評価単位で、USI の score cp と同じ尺度とは限りません。
+中断した反復の `best_move` / `score_raw` は未確定の値を含み、最終的な `bestmove` と一致するとは限りません。
+
+`factors` は評価下落 (`falling_eval`)・最善手の安定性 (`stability`)・前の安定性
+(`previous_stability`)・短縮率 (`reduction`)・変更回数からの延長率 (`instability`) を示します。
+`evaluation_reference` にはその反復の最善値と、評価下落に使う前の手の平均値・過去反復値を内部単位で出します。
+最初の探索では前の手の平均値が未設定の番兵値で、評価下落の係数が上限になる場合があります。
+`iteration_budget` の `target_ms` は補正後の目標時間、`nodes_effort` は最善手の累積ノード比率の
+100000 倍です。秒読みの使い切りでは補正係数を使わないため `factors` は出しません。
+
+`deadline_request` は終了予約の要求で、`reason` は目標超過 (`target`)・上限超過 (`maximum`)・
+ノード集中 (`nodes_effort`)・ponderhit 後の終了要求 (`ponderhit`) の区別です。
+`deadline` の `deadline_ms` は丸め後の終了予定で、`stop` はその期限や反復境界の閾値等による停止判定です。
+stop 要求は `reason=external` として記録します。組み込みの解析セッションでは解析予算の終了もこの理由に含みます。
+同じ要求が複数の判定箇所で記録されることもあります。
+要求が ponder 中なら直ちに期限を作らず、hit 後に予約します。目標と上限を超えたことが、
+同じ時刻の即停止を意味するわけではありません。
+
+`elapsed_ms` と `deadline_ms` は go 開始から、`effective_elapsed_ms` は ponderhit 後 (hit 前は go 開始) からの経過です。
+通常 go では同じ基準になります。ログには時間管理の判定を記録し、詰み発見などによる
+すべての探索終了を分類するものではありません。ログの出力時間も探索時間に含まれるため、
+診断を有効にした実行を速度比較の根拠には使わないでください。
+
 ### 局面の設定 (`position`)
 
 `position startpos [moves ...]` または `position sfen <SFEN> [moves ...]` で局面を設定します。

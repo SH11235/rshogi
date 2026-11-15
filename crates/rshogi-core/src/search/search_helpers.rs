@@ -62,6 +62,9 @@ fn check_abort_slow(
     time_manager.publish_nodes(st.nodes);
     // 外部からの停止要求
     if time_manager.stop_requested() {
+        if ctx.thread_id == 0 {
+            time_manager.trace_external_stop();
+        }
         #[cfg(debug_assertions)]
         eprintln!("check_abort: stop requested");
         st.abort = true;
@@ -95,6 +98,7 @@ fn check_abort_slow(
             && time_manager.search_end() > 0
             && elapsed >= time_manager.search_end()
         {
+            time_manager.trace_timing("stop", "deadline", elapsed);
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: search_end reached elapsed={} search_end={}",
@@ -112,6 +116,15 @@ fn check_abort_slow(
             && limits.use_time_management()
             && (elapsed_effective > time_manager.maximum() || time_manager.stop_on_ponderhit())
         {
+            time_manager.trace_timing(
+                "deadline_request",
+                if time_manager.stop_on_ponderhit() {
+                    "ponderhit"
+                } else {
+                    "maximum"
+                },
+                elapsed,
+            );
             time_manager.set_search_end(elapsed);
             // 注: ここでは停止せず、次のチェックで秒境界で停止
         }
