@@ -900,7 +900,8 @@ fn spawn_engine(
     label: String,
     cpus: Option<&[usize]>,
 ) -> Result<EngineProcess> {
-    let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(cfg, label, cpus)?;
+    let mut engine =
+        EngineProcess::spawn_uninitialized_for_tournament(cfg, label, cpus, cfg.ponder)?;
     engine.initialize(cfg)?;
     Ok(engine)
 }
@@ -1007,7 +1008,10 @@ fn worker_main(
         let label = engine_labels[i].clone();
         let mut cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
         cfg.ponder = engine_ponder[i];
-        match spawn_engine(&cfg, label, cpu_affinity) {
+        match spawn_engine(&cfg, label, cpu_affinity).and_then(|mut engine| {
+            engine.enable_tournament_ponder(engine_ponder[i])?;
+            Ok(engine)
+        }) {
             Ok(ep) => {
                 engines.push(ep);
             }
@@ -1101,6 +1105,7 @@ fn worker_main(
         }));
         match run_result {
             Ok(Ok(result)) => {
+                let worker_retired = !black.is_reusable() || !white.is_reusable();
                 let _ = tx.send(MatchResult {
                     ticket,
                     outcome: result.outcome,
@@ -1109,8 +1114,11 @@ fn worker_main(
                     move_logs,
                     ponder: result.ponder,
                     error: false,
-                    worker_retired: false,
+                    worker_retired,
                 });
+                if worker_retired {
+                    return;
+                }
             }
             Ok(Err(e)) => {
                 eprintln!("worker: game error: {e}; retiring worker");
@@ -1451,6 +1459,19 @@ fn main() -> Result<()> {
             opts
         })
         .collect();
+    for (index, options) in engine_usi_options.iter().enumerate() {
+        for option in options {
+            if let Some((name, value)) = option.split_once('=')
+                && matches!(name.trim(), "USI_Ponder" | "Ponder")
+                && value.trim() != engine_ponder[index].to_string()
+            {
+                bail!(
+                    "engine {index}: {option} conflicts with --ponder {index}:{}",
+                    engine_ponder[index]
+                );
+            }
+        }
+    }
     let bench_idx = if cli.nps_scaling {
         let idx = nps_bench_engine_index(&cli, &engine_labels)?;
         if nps_bench::sets_threads_option(&engine_usi_options[idx]) {
@@ -1942,7 +1963,10 @@ fn main() -> Result<()> {
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
     print_final_table(&pair_stats, &engine_labels);
     if let Some(stats) = &tournament_meta.ponder {
-        for (label, stats) in engine_labels.iter().zip(stats) {
+        for ((label, stats), enabled) in engine_labels.iter().zip(stats).zip(&engine_ponder) {
+            if !enabled {
+                continue;
+            }
             println!(
                 "Ponder {label}: {}/{} ({:.1}%)",
                 stats.hits,

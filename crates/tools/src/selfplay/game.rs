@@ -99,8 +99,20 @@ pub fn run_game(
     let white_cleanup = white.stop_ponder();
     black.turn_start = None;
     white.turn_start = None;
-    black_cleanup.context(EngineFailure)?;
-    white_cleanup.context(EngineFailure)?;
+    let mut result = result;
+    for cleanup in [black_cleanup, white_cleanup] {
+        if let Err(cleanup) = cleanup {
+            result = match result {
+                Err(original) => {
+                    Err(original.context(format!("ponder cleanup failed: {cleanup:#}")))
+                }
+                Ok(result) => {
+                    eprintln!("ponder cleanup failed: {cleanup:#}");
+                    Ok(result)
+                }
+            };
+        }
+    }
     result.map(|mut result| {
         if black.ponder_enabled || white.ponder_enabled {
             result.ponder = Some([black.ponder_stats, white.ponder_stats]);
@@ -324,7 +336,7 @@ fn run_game_inner(
         if terminal || outcome != GameOutcome::InProgress {
             break;
         }
-        if ply_idx + 1 < game_moves_limit {
+        if ply_idx + 2 < game_moves_limit {
             let ponder_req = SearchRequest {
                 sfen: &initial_sfen,
                 moves: &moves,

@@ -576,9 +576,11 @@ meta の `settings.startpos_order` は既定も含めて常に記録する。
 ```
 
 通常は `bestmove ... ponder ...` の合法な予想手を着手後の手順に足して `go ponder` を送る。
-予想手がなければ開始しない。一致時は `ponderhit`、不一致時は `stop` の bestmove を
+予想手がない場合や、最大手数までに自分の次の手番が来ない場合は開始しない。一致時は `ponderhit`、不一致時は `stop` の bestmove を
 読み捨て、実際の手順で `position` と `go` を送る。有効な engine の `USI_Ponder`
-（または `Ponder`）は true に設定する。
+（または `Ponder`）は true に設定する。`--usi-option` / `--engine-usi-option` で
+`USI_Ponder` / `Ponder` を明示する場合は `--ponder`（無指定は false）と一致させる。
+矛盾する値は起動時にエラーにする。
 
 `Stochastic_Ponder=true` は `--usi-option` / `--engine-usi-option` で engine に渡す。
 tournament の送信列は通常の ponder と同じで、合法な予想手を末尾に足した `position` と
@@ -591,12 +593,18 @@ rshogi は内部で予想手を 1 手戻した相手手番の局面から先読�
 消費時間は相手の bestmove を受信した時点から計測する。予想が外れた場合の stop・回収と
 読み直しにかかった時間は消費に含み、相手手番中の ponder 時間は含めない。
 終局時は残っている ponder を停止して bestmove を回収する。5 秒以内に回収できない場合は
-通信エラーとして worker を退役させ、既存のエラーペア再試行規則に従う。
+確定した対局結果を保持して worker を退役させ、次の対局には新しいプロセスを使う。
+時間切れ後の回収が失敗しても時間切れ負けのまま記録する。対局途中の通信エラーには
+既存のエラーペア再試行規則を適用する。
+的中時の評価値は `ponderhit` 送信後に受信した score 付き info を優先する。
+それがない場合、先読み中の info は PV の先頭が bestmove と一致する行だけを採用する。
+不一致の評価値・PV は JSONL、評価値による裁定、MultiPV 候補、info コールバックに渡さない。
+
 `--max-moves` は従来どおり開始局面までを含む総手数である。
 
 ponder 有効時のみ、JSONL の result に `ponder` を追加する。先手、後手の順の 2 要素で、
 各要素は `sent`（`go ponder` の送信回数）、`hits`（`ponderhit` の送信回数）、
-`hit_rate`（`hits / sent`、未送信なら null）を持つ。終局時に中断した ponder も sent に含む。
+`hit_rate`（`hits / sent`、未送信なら null）を持つ。終局時に中断した ponder も sent に含む。最大手数で開始しなかった先読みは sent に含めない。
 `Stochastic_Ponder=true` でも同じ規則で集計する。`meta.json` の engines には有効な engine の `ponder: true`、
 トップレベルの `ponder` には engine index 順の集計を保存し、完了時の標準出力にも割合を表示する。
 集計は正常に結果を回収できた対局（再試行分を含む）の合計で、棋力集計の有効ペア数とは別である。

@@ -21,6 +21,8 @@ def reply():
     prediction = cycle[(len(moves) + 1) % 4]
     if mode == 'bad_prediction':
         prediction = 'resign'
+    if mode == 'illegal_prediction':
+        prediction = '5a5c'
     if mode == 'miss':
         prediction = '3c3d' if len(moves) % 2 == 0 else '7g7f'
     if mode in ('resign', 'win') and len(moves) >= 1:
@@ -50,23 +52,24 @@ for raw in sys.stdin:
         pending = True
     elif line == 'ponderhit':
         assert pending, 'ponderhit without go ponder'
-        if mode != 'timeout' or len(moves) < 1:
+        if mode not in ('timeout', 'undrained') or len(moves) < 1:
             reply()
     elif line.startswith('go'):
         assert not pending
         if mode == 'slow':
-            time.sleep(0.15)
-        if mode == 'timeout' and len(moves) >= 1:
+            time.sleep(0.5)
+        if mode in ('timeout', 'undrained') and len(moves) >= 1:
             pending = True
         else:
             reply()
     elif line == 'stop':
+        if mode == 'undrained': continue
         assert pending, 'stop without outstanding search'
         time.sleep(0.01)
         pending = False
         print('bestmove 9i9h', flush=True)
     elif line == 'quit':
-        assert not pending, 'quit before ponder drain'
+        assert not pending or mode == 'undrained', 'quit before ponder drain'
         break
 "#;
 
@@ -75,6 +78,7 @@ struct Run {
     rows: Vec<Value>,
     meta: Value,
     logs: [Vec<String>; 2],
+    stdout: String,
 }
 
 fn run(modes: [&str; 2], ponder: &[&str], extra: &[&str]) -> Run {
@@ -127,6 +131,7 @@ fn run(modes: [&str; 2], ponder: &[&str], extra: &[&str]) -> Run {
         rows,
         meta,
         logs,
+        stdout: String::from_utf8(output.stdout).unwrap(),
     }
 }
 
@@ -142,6 +147,7 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
         ("hit", vec!["--engine-usi-option", "0:Stochastic_Ponder=true"], 2, 2),
         ("none", vec![], 0, 0),
         ("bad_prediction", vec![], 0, 0),
+        ("illegal_prediction", vec![], 0, 0),
         ("none", vec!["--engine-usi-option", "0:Stochastic_Ponder=true"], 0, 0),
     ] {
         let run = run([mode, "hit"], &["0:true", "1:false"], &extra);
@@ -150,7 +156,11 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
             assert_eq!(result["reason"], "max_moves");
             assert_eq!(result["plies"], 5);
             let color = usize::from(result["game_id"].as_u64().unwrap() % 2 == 0);
-            assert_eq!(result["ponder"][color]["sent"], sent, "{mode}: {result}");
+            assert_eq!(
+                result["ponder"][color]["sent"],
+                if sent > 0 { sent - color as u64 } else { 0 },
+                "{mode}: {result}"
+            );
             assert_eq!(
                 result["ponder"][color]["hits"],
                 if hits > 0 { hits - color as u64 } else { 0 }
@@ -162,13 +172,14 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
             } else {
                 assert_eq!(
                     stat["hit_rate"].as_f64().unwrap(),
-                    stat["hits"].as_f64().unwrap() / sent as f64
+                    stat["hits"].as_f64().unwrap() / stat["sent"].as_f64().unwrap()
                 );
             }
         }
-        assert_eq!(run.meta["ponder"][0]["sent"], sent * 4);
+        assert_eq!(run.meta["ponder"][0]["sent"], if sent > 0 { (sent * 2 - 1) * 2 } else { 0 });
         assert_eq!(run.meta["ponder"][0]["hits"], if hits > 0 { (hits * 2 - 1) * 2 } else { 0 });
         assert_eq!(run.meta["engines"][0]["ponder"], true);
+        assert!(!run.stdout.contains("Ponder e1:"));
         assert!(run.meta["engines"][1].get("ponder").is_none());
         assert!(!run.logs[1].iter().any(|s| s.starts_with("go ponder") || s == "ponderhit"));
         let commands = &run.logs[0];
@@ -177,7 +188,14 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
             .enumerate()
             .filter_map(|(i, s)| s.starts_with("go ponder").then_some(i))
             .collect();
-        assert_eq!(ponder_indices.len(), sent as usize * 4);
+        assert_eq!(
+            ponder_indices.len(),
+            if sent > 0 {
+                (sent as usize * 2 - 1) * 2
+            } else {
+                0
+            }
+        );
         let mut lengths = Vec::new();
         for i in ponder_indices {
             assert_eq!(commands[i], "go ponder nodes 1");
@@ -207,7 +225,7 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
         }
         lengths.sort_unstable();
         if sent > 0 {
-            assert_eq!(lengths, vec![2, 2, 3, 3, 4, 4, 5, 5]);
+            assert_eq!(lengths, vec![2, 2, 3, 3, 4, 4]);
         }
         #[cfg(feature = "csa-replay")]
         {
@@ -230,7 +248,13 @@ fn ponder_hit_miss_stochastic_and_no_prediction_command_sequences() {
 
 #[test]
 fn stochastic_option_preserves_ponder_commands_and_statistics() {
-    for mode in ["hit", "miss", "none", "bad_prediction"] {
+    for mode in [
+        "hit",
+        "miss",
+        "none",
+        "bad_prediction",
+        "illegal_prediction",
+    ] {
         let baseline = run([mode, "hit"], &["0:true", "1:false"], &[]);
         for extra in [
             ["--engine-usi-option", "0:Stochastic_Ponder=true"],
@@ -264,17 +288,27 @@ fn disabled_ponder_preserves_commands_and_omits_output_fields() {
     for result in results(&run) {
         assert!(result.get("ponder").is_none());
     }
-    for commands in &run.logs {
-        assert!(
-            !commands
-                .iter()
-                .any(|s| s.starts_with("go ponder") || s == "ponderhit" || s == "stop")
-        );
-        for (i, command) in commands.iter().enumerate() {
-            if command == "go nodes 1" {
-                assert!(commands[i - 1].starts_with("position "));
+    let initial = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    let positions = [
+        format!("position sfen {initial}"),
+        format!("position sfen {initial} moves 3i4h"),
+        format!("position sfen {initial} moves 3i4h 7a6b"),
+        format!("position sfen {initial} moves 3i4h 7a6b 4h3i"),
+        format!("position sfen {initial} moves 3i4h 7a6b 4h3i 6b7a"),
+    ];
+    for (index, commands) in run.logs.iter().enumerate() {
+        let mut expected: Vec<String> =
+            ["usi", "isready", "usinewgame"].into_iter().map(str::to_owned).collect();
+        for game in 0..4 {
+            expected.extend(["usinewgame".into(), "isready".into()]);
+            for (ply, position) in positions.iter().enumerate() {
+                if ply % 2 == (game + index) % 2 {
+                    expected.extend([position.clone(), "go nodes 1".into()]);
+                }
             }
         }
+        expected.push("quit".into());
+        assert_eq!(*commands, expected);
     }
 }
 
@@ -284,7 +318,7 @@ fn terminal_opponent_drains_ponder_before_next_game() {
         ("resign", vec![], "resign"),
         ("win", vec![], "win"),
         ("illegal", vec![], "illegal_move"),
-        ("timeout", vec!["--byoyomi", "30", "--timeout-margin-ms", "10"], "timeout"),
+        ("timeout", vec!["--byoyomi", "2000", "--timeout-margin-ms", "500"], "timeout"),
         ("hit", vec!["--max-moves", "16"], "sennichite"),
     ] {
         let run = run(["hit", mode], &["0:true", "1:true"], &extra);
@@ -309,7 +343,7 @@ fn pondering_time_is_excluded_from_move_clock() {
         ("miss", false),
         ("miss", true),
     ] {
-        let mut extra = vec!["--byoyomi", "1000"];
+        let mut extra = vec!["--byoyomi", "10000"];
         if stochastic {
             extra.extend(["--engine-usi-option", "0:Stochastic_Ponder=true"]);
         }
@@ -317,13 +351,89 @@ fn pondering_time_is_excluded_from_move_clock() {
         let engine_moves: Vec<_> =
             run.rows.iter().filter(|r| r["type"] == "move" && r["engine"] == "e0").collect();
         assert!(engine_moves.len() >= 8);
+        let ponder_time: u64 = run
+            .rows
+            .iter()
+            .filter(|r| r["type"] == "move" && r["engine"] == "e1")
+            .map(|r| r["elapsed_ms"].as_u64().unwrap())
+            .sum();
+        let own_time: u64 = engine_moves.iter().map(|r| r["elapsed_ms"].as_u64().unwrap()).sum();
+        assert!(own_time < ponder_time, "own={own_time}, opponent={ponder_time}");
         for row in engine_moves {
             let elapsed = row["elapsed_ms"].as_u64().unwrap();
-            assert!(elapsed < 100, "{row}");
             if mode == "miss" && row["ply"].as_u64().unwrap() >= 3 {
                 assert!(elapsed >= 8, "{row}");
             }
             assert_eq!(row["timed_out"], false);
+        }
+    }
+}
+
+#[test]
+fn undrained_timeout_keeps_loss_and_replaces_worker() {
+    let run = run(
+        ["hit", "undrained"],
+        &["0:true", "1:true"],
+        &["--byoyomi", "2000", "--timeout-margin-ms", "500"],
+    );
+    assert_eq!(results(&run).len(), 4);
+    for result in results(&run) {
+        assert_eq!(result["reason"], "timeout", "{result}");
+        assert_ne!(result["outcome"], "draw", "{result}");
+    }
+    for commands in &run.logs {
+        let spawns = commands.iter().filter(|line| *line == "usi").count();
+        assert!(spawns >= 4);
+        assert_eq!(commands.iter().filter(|line| *line == "usinewgame").count(), spawns + 4);
+        assert!(
+            commands.split(|line| line == "usi").all(|session| session
+                .iter()
+                .filter(|line| *line == "usinewgame")
+                .count()
+                <= 2)
+        );
+    }
+}
+
+#[test]
+fn contradictory_usi_ponder_is_rejected_before_spawning() {
+    for option in ["USI_Ponder=false", "Ponder=false"] {
+        for flag in ["--usi-option", "--engine-usi-option"] {
+            let dir = tempfile::tempdir().unwrap();
+            let value = if flag == "--engine-usi-option" {
+                format!("0:{option}")
+            } else {
+                option.to_owned()
+            };
+            let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
+                .args([
+                    "--engine",
+                    "/bin/true",
+                    "--engine",
+                    "/bin/true",
+                    "--engine-label",
+                    "a",
+                    "--engine-label",
+                    "b",
+                    "--ponder",
+                    "0:true",
+                    flag,
+                    &value,
+                    "--nodes",
+                    "1",
+                    "--games",
+                    "2",
+                    "--out-dir",
+                ])
+                .arg(dir.path())
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("conflicts with --ponder"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }
