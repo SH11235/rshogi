@@ -862,7 +862,7 @@ where
         Err(err) => return MoveAction::sink_or_error(err),
     };
 
-    let observed_info = info.has_observation().then_some(info);
+    let observed_info = info.matches_bestmove(&result.bestmove).then_some(info);
 
     // BestMoveSelected 発火 (CSA サーバ送信前)
     let snapshot = observed_info.map(search_info_to_snapshot);
@@ -2035,6 +2035,9 @@ fn build_floodgate_comment(
     pos: &Position,
     last_bestmove: &str,
 ) -> Option<String> {
+    if !info.matches_bestmove(last_bestmove) {
+        return None;
+    }
     let score = if let Some(cp) = info.score_cp {
         match my_color {
             Color::Black => cp,
@@ -2049,20 +2052,15 @@ fn build_floodgate_comment(
         }
     };
     let mut comment = format!("* {score}");
-    if !info.pv.is_empty() {
-        let mut pv_pos = pos.clone();
-        if info.pv.first().map(|s| s.as_str()) != Some(last_bestmove) {
-            return Some(comment);
-        }
-        for usi_mv in &info.pv {
-            if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
-                write!(comment, " {csa}").unwrap();
-                if pv_pos.apply_csa_move(&csa).is_err() {
-                    break;
-                }
-            } else {
+    let mut pv_pos = pos.clone();
+    for usi_mv in &info.pv {
+        if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
+            write!(comment, " {csa}").unwrap();
+            if pv_pos.apply_csa_move(&csa).is_err() {
                 break;
             }
+        } else {
+            break;
         }
     }
     Some(comment)
@@ -2263,13 +2261,44 @@ mod tests {
     }
 
     #[test]
-    fn floodgate_comment_omits_pv_when_root_move_differs_from_bestmove() {
+    fn floodgate_comment_omitted_when_root_move_differs_from_bestmove() {
         let pos = rshogi_csa::initial_position();
         let info = floodgate_info(&["2g2f", "8c8d"]);
 
         let comment = build_floodgate_comment(&info, Color::Black, &pos, "7g7f");
 
-        assert_eq!(comment.as_deref(), Some("* 123"));
+        assert_eq!(comment, None);
+    }
+
+    #[test]
+    fn floodgate_comment_omitted_without_pv() {
+        let pos = rshogi_csa::initial_position();
+        for info in [
+            floodgate_info(&[]),
+            SearchInfo {
+                score_mate: Some(3),
+                ..SearchInfo::default()
+            },
+        ] {
+            assert_eq!(build_floodgate_comment(&info, Color::Black, &pos, "7g7f"), None);
+        }
+    }
+
+    #[test]
+    fn floodgate_matching_pv_preserves_white_and_mate_scores() {
+        let mut pos = rshogi_csa::initial_position();
+        pos.apply_csa_move("+7776FU").unwrap();
+        let mut info = floodgate_info(&["3c3d", "2g2f"]);
+        assert_eq!(
+            build_floodgate_comment(&info, Color::White, &pos, "3c3d").as_deref(),
+            Some("* -123 -3334FU +2726FU")
+        );
+        info.score_cp = None;
+        info.score_mate = Some(-3);
+        assert_eq!(
+            build_floodgate_comment(&info, Color::White, &pos, "3c3d").as_deref(),
+            Some("* 100000 -3334FU +2726FU")
+        );
     }
 
     #[test]
@@ -2287,6 +2316,7 @@ mod tests {
         let pos = rshogi_csa::initial_position();
         let info = SearchInfo {
             score_cp: Some(i32::MIN),
+            pv: vec!["7g7f".to_owned()],
             ..SearchInfo::default()
         };
         assert_eq!(build_floodgate_comment(&info, Color::White, &pos, "7g7f"), None);

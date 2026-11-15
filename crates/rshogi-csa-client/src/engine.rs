@@ -294,6 +294,11 @@ impl SearchInfo {
             || !self.pv.is_empty()
     }
 
+    /// 読み筋の先頭が確定した指し手と一致するなら `true`。
+    pub fn matches_bestmove(&self, bestmove: &str) -> bool {
+        self.pv.first().is_some_and(|mv| mv == bestmove)
+    }
+
     /// floodgate の評価値コメントとして送れる score を持つなら `true`。
     pub fn has_score(&self) -> bool {
         self.score_cp.is_some() || self.score_mate.is_some()

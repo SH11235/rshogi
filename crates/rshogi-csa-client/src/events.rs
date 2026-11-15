@@ -56,7 +56,7 @@
 //! 値で上書き)。`emit_on_depth_change` や `emit_final` のフラグはこの累積値を
 //! いつ [`SessionProgress::SearchInfo`] として発火するかを制御するだけで、
 //! snapshot の中身そのものは差分ではなく常に「現時点までで最も新しい値の集合」
-//! を表す。
+//! を表す。bestmove 確定前の観測値なので、指された手の評価値とは限らない。
 //!
 //! ## rustls CryptoProvider に関する注意
 //!
@@ -284,7 +284,7 @@ pub struct BestMoveEvent {
     /// この bestmove を生み出した探索の種別。
     pub search_origin: SearchOrigin,
     /// この bestmove を出した時点の累積 [`SearchInfoSnapshot`]。
-    /// USI engine から `info` 行が 1 度も来なかった場合は `None`。
+    /// 読み筋の先頭がこの指し手と一致しない場合（読み筋が無い場合を含む）は `None`。
     pub search: Option<SearchInfoSnapshot>,
 }
 
@@ -317,7 +317,7 @@ pub struct MoveEvent {
     pub sfen_after: String,
     /// 自エンジンが指した手の場合のみ `Some`。相手の手は `None`。
     pub search_origin: Option<SearchOrigin>,
-    /// 自エンジンが指した手の場合のみ `Some` (探索情報 snapshot)。相手の手は `None`。
+    /// 自エンジンの手で、読み筋の先頭が指し手と一致する場合のみ `Some`。
     pub search: Option<SearchInfoSnapshot>,
 }
 

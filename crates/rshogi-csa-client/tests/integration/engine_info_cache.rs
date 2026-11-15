@@ -177,3 +177,121 @@ done
     }
     assert_eq!(callback_count, 0);
 }
+
+fn ponder_info_for_bestmove(before_hit: &str, after_hit: &str) -> rshogi_csa_client::SearchInfo {
+    let script = format!(
+        r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready) echo readyok ;;
+        'go ponder'*)
+            {before_hit}
+            ;;
+        ponderhit)
+            {after_hit}
+            echo 'bestmove 2g2f'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#
+    );
+    let path = write_mock_engine(&script, "ponder_info_root");
+    let mut engine = spawn_engine(&path);
+    let shutdown = AtomicBool::new(false);
+    let (_tx, rx) = mpsc::channel();
+    engine
+        .go_ponder("position startpos moves 7g7f 3c3d", "go ponder depth 1")
+        .expect("go ponder");
+    let mut callback = |_: &rshogi_csa_client::SearchInfo, _: &str| {};
+    let outcome = engine.ponderhit_with_info(&shutdown, &rx, &mut callback).expect("ponderhit");
+    engine.quit();
+    match outcome {
+        SearchOutcome::BestMove(result, info) => {
+            assert_eq!(result.bestmove, "2g2f");
+            info
+        }
+        SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
+    }
+}
+
+#[test]
+fn ponderhit_info_without_matching_pv_is_not_move_evaluation() {
+    for (before, after) in [
+        ("echo 'info score cp 81 pv 8c8d'", ":"),
+        (":", "echo 'info score cp 81 pv 8c8d'"),
+        (":", "echo 'info score cp 81'"),
+    ] {
+        let info = ponder_info_for_bestmove(before, after);
+        assert_eq!(info.score_cp, Some(81));
+        assert!(!info.matches_bestmove("2g2f"));
+    }
+}
+
+#[test]
+fn ponderhit_fresh_info_and_normal_ponder_keep_move_evaluation() {
+    for (before, after) in [
+        ("echo 'info score cp 81 pv 8c8d'", "echo 'info score cp 93 pv 2g2f 8c8d'"),
+        ("echo 'info score cp 93 pv 2g2f 8c8d'", ":"),
+    ] {
+        let info = ponder_info_for_bestmove(before, after);
+        assert!(info.matches_bestmove("2g2f"));
+        assert_eq!(info.score_cp, Some(93));
+        assert_eq!(info.pv, ["2g2f", "8c8d"]);
+    }
+}
+
+#[test]
+fn normal_go_and_ponder_miss_keep_matching_move_evaluation() {
+    let path = write_mock_engine(
+        r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready) echo readyok ;;
+        'go ponder'*) echo 'info score cp 81 pv 8c8d' ;;
+        stop) echo 'bestmove 2g2f' ;;
+        go*)
+            echo 'info depth 4 score cp 93 pv 2g2f 8c8d'
+            echo 'bestmove 2g2f'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#,
+        "normal_go_matching_pv",
+    );
+    for ponder_miss in [false, true] {
+        let mut engine = spawn_engine(&path);
+        let shutdown = AtomicBool::new(false);
+        let (_tx, rx) = mpsc::channel();
+        if ponder_miss {
+            engine
+                .go_ponder("position startpos moves 7g7f 3c3d", "go ponder depth 1")
+                .expect("go ponder");
+            engine.stop_and_wait().expect("stop ponder");
+        }
+        let mut callback = |_: &rshogi_csa_client::SearchInfo, _: &str| {};
+        let outcome = engine
+            .go_with_info(
+                "position startpos moves 7g7f 4c4d",
+                "go depth 1",
+                &shutdown,
+                &rx,
+                &mut callback,
+            )
+            .expect("go");
+        engine.quit();
+        match outcome {
+            SearchOutcome::BestMove(result, info) => {
+                assert_eq!(result.bestmove, "2g2f");
+                assert!(info.matches_bestmove(&result.bestmove));
+                assert_eq!(info.score_cp, Some(93));
+                assert_eq!(info.depth, Some(4));
+                assert_eq!(info.pv, ["2g2f", "8c8d"]);
+            }
+            SearchOutcome::ServerInterrupt(_) => panic!("unexpected server interrupt"),
+        }
+    }
+}
