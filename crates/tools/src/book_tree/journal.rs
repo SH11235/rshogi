@@ -447,8 +447,12 @@ impl Journal {
                 let lock = LockedFile::open(path)?;
                 // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
                 // 新しく作った追記先の dir の項目も先に確定しておく。
-                if created && let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
-                {
+                if created && let Some(parent) = path.parent() {
+                    let parent = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
                     crate::common::io::sync_directory(parent)?;
                 }
                 Ok::<_, anyhow::Error>(lock)
