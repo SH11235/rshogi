@@ -90,8 +90,8 @@ pub struct BestMoveResult {
 
 /// 探索の終了理由
 pub enum SearchOutcome {
-    /// エンジンが bestmove を返した。第 2 引数は終了時点の累積 [`SearchInfo`]
-    /// (final score, final pv, final depth 等)。
+    /// エンジンが bestmove を返した。第 2 引数は同じ主の info 行の score・PV と付随情報。
+    /// 採用できる行がなければ空の [`SearchInfo`]。
     BestMove(BestMoveResult, SearchInfo),
 
     /// 探索中に server から終局通知 (or disconnect) を受信して中断した。
@@ -173,6 +173,7 @@ pub trait UsiEngineDriver {
     ///    行を検出した場合は engine に `stop` を送り、bestmove を drain してから
     ///    `Ok(SearchOutcome::ServerInterrupt(server_lines))` を返す
     /// 6. [`Event::ServerDisconnected`] を受信した場合も同様に終局として扱う
+    /// 7. 戻り値の評価情報は score・PV がそろった主の info 行に限定し、不完全な後続行で破棄する
     ///
     /// 実装は探索中、`shutdown` を `try_recv` / timeout poll 等で blocking しない形で観測
     /// すること (例: 200ms 以下の poll interval、または engine 応答ストリームと multiplex)。
@@ -264,11 +265,7 @@ impl UsiEngineDriver for UsiEngine {
     }
 }
 
-/// info 行から抽出した探索情報
-///
-/// `depth` / `score_cp` / `score_mate` / `pv` は CSA Floodgate 拡張コメント生成に使われる。
-/// `seldepth` / `nodes` / `time_ms` / `nps` は JSONL 出力モード（analyze_selfplay 互換）の
-/// `move.eval` フィールドへの転写用。`info` 行から最後に観測した値を保持する。
+/// 探索途中は各項目の最終観測値、bestmove の戻り値は同じ主の info 行の評価情報。
 #[derive(Clone, Debug, Default)]
 pub struct SearchInfo {
     pub depth: Option<u32>,
@@ -282,19 +279,12 @@ pub struct SearchInfo {
 }
 
 impl SearchInfo {
-    /// その `go` / `ponderhit` で記録対象になる info を観測済みなら `true`。
-    pub fn has_observation(&self) -> bool {
-        self.depth.is_some()
-            || self.seldepth.is_some()
-            || self.score_cp.is_some()
-            || self.score_mate.is_some()
-            || self.nodes.is_some()
-            || self.time_ms.is_some()
-            || self.nps.is_some()
-            || !self.pv.is_empty()
+    /// 読み筋の先頭が確定した指し手と一致するなら `true`。
+    pub fn matches_bestmove(&self, bestmove: &str) -> bool {
+        self.pv.first().is_some_and(|mv| mv == bestmove)
     }
 
-    /// floodgate の評価値コメントとして送れる score を持つなら `true`。
+    /// cp または mate の値を持つなら `true`。
     pub fn has_score(&self) -> bool {
         self.score_cp.is_some() || self.score_mate.is_some()
     }
@@ -700,6 +690,7 @@ impl UsiEngine {
         const POST_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
         let mut info = SearchInfo::default();
+        let mut move_info = SearchInfo::default();
         let mut stop_sent = false;
         let start = Instant::now();
         let mut stop_sent_at: Option<Instant> = None;
@@ -755,6 +746,7 @@ impl UsiEngine {
                     log::trace!("[USI] < {line}");
                     if line.starts_with("info") {
                         update_search_info(&mut info, &line);
+                        update_move_info(&mut move_info, &line);
                         if let Some(cb) = info_callback.as_deref_mut() {
                             cb(&info, &line);
                         }
@@ -778,7 +770,7 @@ impl UsiEngine {
                                 bestmove,
                                 ponder_move,
                             },
-                            info,
+                            move_info,
                         ));
                     }
                 }
@@ -972,6 +964,28 @@ fn parse_option_name(rest: &str) -> Option<String> {
     }
 }
 
+fn update_move_info(info: &mut SearchInfo, line: &str) {
+    // string 以降は自由文なので、評価値や multipv に見える語句も制御項目として読まない。
+    if line.split_whitespace().take_while(|t| *t != "pv").any(|t| t == "string") {
+        return;
+    }
+    let has_pv = line.split_whitespace().take_while(|t| *t != "string").any(|t| t == "pv");
+    let fields: Vec<_> =
+        line.split_whitespace().take_while(|t| *t != "pv" && *t != "string").collect();
+    // 副候補の評価値は bestmove 用の主候補を更新・破棄する根拠にならない。
+    if fields.windows(2).any(|pair| pair[0] == "multipv" && pair[1] != "1") {
+        return;
+    }
+    let mut row = SearchInfo::default();
+    update_search_info(&mut row, line);
+    if row.has_score() && !row.pv.is_empty() {
+        *info = row;
+    } else if row.has_score() || !row.pv.is_empty() || fields.contains(&"score") || has_pv {
+        // 不完全な主の行が来たら、別の行の値と読み筋を対応付けない。
+        *info = SearchInfo::default();
+    }
+}
+
 fn update_search_info(info: &mut SearchInfo, line: &str) {
     let mut tokens = line.split_whitespace().peekable();
     let mut in_pv = false;
@@ -1117,4 +1131,44 @@ fn join_handle_bounded(
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(handle)
+}
+
+#[cfg(test)]
+mod move_info_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_primary_rows_never_mix_score_and_pv() {
+        for partial in [
+            "info pv 2g2f",
+            "info pv 2g2f score cp 93",
+            "info score cp 93",
+            "info pv",
+        ] {
+            let mut info = SearchInfo::default();
+            update_move_info(&mut info, "info depth 8 nodes 100 score cp 81 pv 8c8d");
+            update_move_info(&mut info, partial);
+            assert!(!info.has_score(), "{partial}");
+            assert!(info.pv.is_empty(), "{partial}");
+        }
+    }
+
+    #[test]
+    fn secondary_rows_do_not_replace_primary_and_metadata_stays_in_row() {
+        for primary in [
+            "info depth 8 score cp 93 pv 2g2f 8c8d",
+            "info multipv 1 depth 8 score cp 93 pv 2g2f 8c8d",
+        ] {
+            let mut info = SearchInfo::default();
+            update_move_info(&mut info, "info nodes 999 time 50 score cp 81 pv 8c8d");
+            update_move_info(&mut info, primary);
+            update_move_info(&mut info, "info multipv 2 depth 9 score cp 10 pv 7g7f");
+            update_move_info(&mut info, "info depth 10 nodes 2000");
+            assert_eq!(info.score_cp, Some(93));
+            assert_eq!(info.pv, ["2g2f", "8c8d"]);
+            assert_eq!(info.depth, Some(8));
+            assert_eq!(info.nodes, None);
+            assert_eq!(info.time_ms, None);
+        }
+    }
 }

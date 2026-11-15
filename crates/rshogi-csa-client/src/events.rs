@@ -51,12 +51,12 @@
 //!
 //! ## SearchInfoSnapshot の semantics
 //!
-//! [`SearchInfoSnapshot`] は対局ループが USI `info` 行を観測する都度 **累積
+//! [`SessionProgress::SearchInfo`] の [`SearchInfoSnapshot`] は USI `info` 行を観測する都度 **累積
 //! snapshot** として更新する値である (depth / score / pv 等は最後に観測した
 //! 値で上書き)。`emit_on_depth_change` や `emit_final` のフラグはこの累積値を
 //! いつ [`SessionProgress::SearchInfo`] として発火するかを制御するだけで、
 //! snapshot の中身そのものは差分ではなく常に「現時点までで最も新しい値の集合」
-//! を表す。
+//! を表す。bestmove 確定前の観測値なので、指された手の評価値とは限らない。
 //!
 //! ## rustls CryptoProvider に関する注意
 //!
@@ -203,14 +203,9 @@ pub enum DisconnectReason {
 // SearchInfo / Move / BestMove payload
 // ────────────────────────────────────────────
 
-/// USI `info` 行から抽出した探索情報の累積 snapshot。
-///
-/// 対局ループが USI `info` 行を観測する都度、最後に観測した値で各 field を
-/// 上書きする (= 累積 snapshot)。各 field は USI engine が送ってこない場合
-/// `None` のまま。`pv` は最後に観測した PV 一式。
-///
-/// この snapshot は [`SessionProgress::SearchInfo`] / [`BestMoveEvent::search`]
-/// / [`MoveEvent::search`] で同型として使われる。
+/// 探索途中の最終観測値、または指し手に採用した主の info 行の探索情報。
+/// [`SessionProgress::SearchInfo`] は項目ごとの累積値、[`BestMoveEvent::search`] と
+/// [`MoveEvent::search`] は指し手に対応すると確かめられた主の info 行だけを持つ。
 #[derive(Debug, Clone, Default)]
 pub struct SearchInfoSnapshot {
     /// `depth N`
@@ -283,8 +278,8 @@ pub struct BestMoveEvent {
     pub ply: u32,
     /// この bestmove を生み出した探索の種別。
     pub search_origin: SearchOrigin,
-    /// この bestmove を出した時点の累積 [`SearchInfoSnapshot`]。
-    /// USI engine から `info` 行が 1 度も来なかった場合は `None`。
+    /// score と読み筋から、この指し手に対応すると確かめられた主の info 行。
+    /// 対応を確認できなければ `None`。
     pub search: Option<SearchInfoSnapshot>,
 }
 
@@ -317,7 +312,7 @@ pub struct MoveEvent {
     pub sfen_after: String,
     /// 自エンジンが指した手の場合のみ `Some`。相手の手は `None`。
     pub search_origin: Option<SearchOrigin>,
-    /// 自エンジンが指した手の場合のみ `Some` (探索情報 snapshot)。相手の手は `None`。
+    /// 自エンジンの手に対応すると確かめられた主の info 行。確認できなければ `None`。
     pub search: Option<SearchInfoSnapshot>,
 }
 

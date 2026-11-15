@@ -575,6 +575,210 @@ fn ponder_miss_stale_info_does_not_attach_to_next_instant_bestmove() {
     assert!(!second_move_line.lock().unwrap().contains(",'"));
 }
 
+fn check_ponder_move_evaluation(
+    name: &str,
+    before_hit: &str,
+    after_hit: &str,
+    expected: Option<i32>,
+    opponent_move: &'static str,
+) {
+    let port = spawn_mock_tcp_server(move |reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let lines = game_summary_lines("g-ponder-info");
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_lines(writer, &refs);
+        assert!(read_line(reader).starts_with("AGREE"));
+        write_lines(writer, &["START:g-ponder-info"]);
+        assert_eq!(read_line(reader), "+7776FU,'* 41 +7776FU -3334FU");
+        write_lines(writer, &["+7776FU,T1", opponent_move]);
+        let second = read_line(reader);
+        let expected_line = match expected {
+            Some(score) => format!("+2726FU,'* {score} +2726FU -8384FU"),
+            None => "+2726FU".to_owned(),
+        };
+        assert_eq!(second, expected_line);
+        write_lines(writer, &["+2726FU,T1", "#WIN"]);
+        let _ = read_line(reader);
+    });
+    let script = format!(
+        r#"#!/usr/bin/env bash
+go_count=0
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready) echo readyok ;;
+        'go ponder'*)
+            {before_hit}
+            ;;
+        go*)
+            go_count=$((go_count + 1))
+            if [ "$go_count" -eq 1 ]; then
+                echo 'info depth 4 score cp 41 pv 7g7f 3c3d'
+                echo 'bestmove 7g7f ponder 3c3d'
+            else
+                echo 'info depth 4 score cp 93 pv 2g2f 8c8d'
+                echo 'bestmove 2g2f'
+            fi
+            ;;
+        stop) echo 'bestmove 2g2f' ;;
+        ponderhit)
+            {after_hit}
+            echo 'bestmove 2g2f'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#
+    );
+    let path = common::write_mock_script(name, &script);
+    let mut config = mock_config(path, SearchInfoEmitPolicy::EveryLine);
+    config.game.ponder = true;
+    config.server.floodgate = true;
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
+    conn.login("alice", "pw").expect("login");
+    let mut engine = common::spawn_engine(
+        &config.engine.path,
+        &config.engine.options,
+        SpawnOptions {
+            ponder: true,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
+    )
+    .expect("spawn engine");
+    let mut events = Vec::new();
+    let mut sink = |event| -> Result<(), SinkError> {
+        events.push(event);
+        Ok(())
+    };
+    let outcome = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::new(AtomicBool::new(false)),
+        &mut sink,
+    );
+    engine.quit();
+    let record = outcome.expect("session ok").record;
+    assert_eq!(record.moves.len(), 3);
+    assert_eq!(record.moves[0].eval_cp, Some(41));
+    assert_eq!(record.moves[0].effective_score(), Some(41));
+    assert_eq!(record.moves[2].eval_cp, expected);
+    assert_eq!(record.moves[2].eval_mate, None);
+    assert_eq!(record.moves[2].effective_score(), expected);
+    if expected.is_none() {
+        assert!(record.moves[2].pv.is_empty());
+        assert_eq!(record.moves[2].depth, None);
+    }
+    let mut selected = 0;
+    let mut sent = 0;
+    let mut confirmed = 0;
+    for event in &events {
+        let search = match event {
+            SessionProgress::BestMoveSelected(e) if e.usi_move == "2g2f" => {
+                selected += 1;
+                &e.search
+            }
+            SessionProgress::MoveSent(e) if e.usi_move == "2g2f" => {
+                sent += 1;
+                &e.search
+            }
+            SessionProgress::MoveConfirmed(e) if e.usi_move == "2g2f" => {
+                confirmed += 1;
+                &e.search
+            }
+            _ => continue,
+        };
+        assert_eq!(search.as_ref().and_then(|s| s.score_cp), expected);
+        if expected.is_none() {
+            assert!(search.is_none());
+        } else {
+            assert_eq!(search.as_ref().unwrap().pv, ["2g2f", "8c8d"]);
+        }
+    }
+    assert_eq!((selected, sent, confirmed), (1, 1, 1));
+    let out_dir = tempfile_root().join(format!("csa_pv_match_{}_{name}", std::process::id()));
+    let path = rshogi_csa_client::jsonl::write_game_jsonl(
+        &out_dir,
+        &record,
+        &config,
+        &rshogi_csa_client::GameResult::Win,
+    )
+    .expect("write JSONL");
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let row = rows.iter().find(|r| r["type"] == "move" && r["ply"] == 3).unwrap();
+    match expected {
+        Some(score) => assert_eq!(row["eval"]["score_cp"], score),
+        None => assert!(row["eval"].is_null()),
+    }
+    std::fs::remove_dir_all(out_dir).unwrap();
+}
+
+#[test]
+fn ponderhit_stale_info_has_no_comment_record_or_move_event_evaluation() {
+    check_ponder_move_evaluation(
+        "stale_before_hit",
+        "echo 'info score cp 81 pv 8c8d'",
+        ":",
+        None,
+        "-3334FU,T1",
+    );
+}
+
+#[test]
+fn ponderhit_late_stale_info_has_no_comment_record_or_move_event_evaluation() {
+    check_ponder_move_evaluation(
+        "stale_after_hit",
+        ":",
+        "echo 'info score cp 81 pv 8c8d'",
+        None,
+        "-3334FU,T1",
+    );
+}
+
+#[test]
+fn ponderhit_fresh_info_keeps_comment_record_and_move_event_evaluation() {
+    check_ponder_move_evaluation(
+        "fresh_after_hit",
+        "echo 'info score cp 81 pv 8c8d'",
+        "echo 'info score cp 93 pv 2g2f 8c8d'",
+        Some(93),
+        "-3334FU,T1",
+    );
+}
+
+#[test]
+fn normal_ponderhit_keeps_comment_record_and_move_event_evaluation() {
+    check_ponder_move_evaluation(
+        "normal_hit",
+        "echo 'info score cp 93 pv 2g2f 8c8d'",
+        ":",
+        Some(93),
+        "-3334FU,T1",
+    );
+}
+
+#[test]
+fn ponderhit_score_without_pv_has_no_comment_record_or_move_event_evaluation() {
+    check_ponder_move_evaluation("no_pv", ":", "echo 'info score cp 81'", None, "-3334FU,T1");
+}
+
+#[test]
+fn normal_ponder_miss_keeps_comment_record_and_move_event_evaluation() {
+    check_ponder_move_evaluation(
+        "normal_miss",
+        "echo 'info score cp 81 pv 8c8d'",
+        ":",
+        Some(93),
+        "-4344FU,T1",
+    );
+}
+
 // ────────────────────────────────────────────
 // resume 経路で history replay が出ないことを確認
 // ────────────────────────────────────────────
@@ -1293,4 +1497,129 @@ fn live_jsonl_grows_during_game() {
     assert_eq!(text.lines().count(), 4);
     assert!(text.lines().last().unwrap().contains("\"type\":\"result\""));
     let _ = std::fs::remove_dir_all(&record_root);
+}
+
+fn check_white_rejected_evaluation(name: &str, info_lines: &str) {
+    let port = spawn_mock_tcp_server(|reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let mut pos = initial_position();
+        pos.apply_csa_move("+7776FU").unwrap();
+        let lines = game_summary_lines_for_position("g-white-rejected", &pos);
+        let lines: Vec<_> =
+            lines.iter().map(|line| line.replace("Your_Turn:+", "Your_Turn:-")).collect();
+        let refs: Vec<_> = lines.iter().map(String::as_str).collect();
+        write_lines(writer, &refs);
+        assert!(read_line(reader).starts_with("AGREE"));
+        write_lines(writer, &["START:g-white-rejected"]);
+        assert_eq!(read_line(reader), "-3334FU");
+        write_lines(writer, &["-3334FU,T1", "#WIN"]);
+        let _ = read_line(reader);
+    });
+    let script = format!(
+        r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready) echo readyok ;;
+        go*)
+            {info_lines}
+            echo 'bestmove 3c3d'
+            ;;
+        quit) exit 0 ;;
+    esac
+done
+"#
+    );
+    let root = tempfile_root().join(format!("csa_white_rejected_{}_{name}", std::process::id()));
+    let mut config =
+        mock_config(common::write_mock_script(name, &script), SearchInfoEmitPolicy::EveryLine);
+    config.server.floodgate = true;
+    config.record.enabled = true;
+    config.record.save_csa = true;
+    config.record.save_jsonl = true;
+    config.record.live_jsonl = true;
+    config.record.dir = root.clone();
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    conn.login("alice", "pw").unwrap();
+    let mut engine = common::spawn_engine(
+        &config.engine.path,
+        &config.engine.options,
+        SpawnOptions {
+            ponder: false,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    let mut sink = |event| -> Result<(), SinkError> {
+        events.push(event);
+        Ok(())
+    };
+    let record = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::new(AtomicBool::new(false)),
+        &mut sink,
+    )
+    .unwrap()
+    .record;
+    engine.quit();
+    assert_eq!(record.moves.last().unwrap().eval_cp, None);
+    assert_eq!(record.moves.last().unwrap().eval_mate, None);
+    for event in events {
+        match event {
+            SessionProgress::BestMoveSelected(e) => assert!(e.search.is_none()),
+            SessionProgress::MoveSent(e) | SessionProgress::MoveConfirmed(e) => {
+                assert!(e.search.is_none())
+            }
+            _ => {}
+        }
+    }
+    rshogi_csa_client::record::save_record(&record, &config.record).unwrap();
+    let csa = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "csa"))
+        .unwrap();
+    let saved = std::fs::read_to_string(csa).unwrap();
+    assert!(saved.contains("-3334FU"));
+    assert!(!saved.contains("'**"));
+    let live = std::fs::read_dir(config.record.jsonl_dir().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "jsonl"))
+        .unwrap();
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(live)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let moves: Vec<_> = rows.iter().filter(|r| r["type"] == "move").collect();
+    assert!(!moves.is_empty());
+    assert!(moves.iter().all(|r| r["eval"].is_null()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn white_split_score_pv_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation(
+        "white_split",
+        "echo 'info score cp 81 pv 7g7f'; echo 'info pv 3c3d'",
+    );
+}
+
+#[test]
+fn white_mate_split_score_pv_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation(
+        "white_mate_split",
+        "echo 'info score mate -3 pv 7g7f'; echo 'info pv 3c3d'",
+    );
+}
+
+#[test]
+fn white_mate_illegal_reply_has_no_saved_csa_or_live_evaluation() {
+    check_white_rejected_evaluation("white_mate_illegal", "echo 'info score mate 3 pv 3c3d 8c8d'");
 }

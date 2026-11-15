@@ -389,6 +389,7 @@ struct SessionState<'a, E: ?Sized + 'a, S: ?Sized + 'a> {
     ponder_state: Option<PonderState>,
     my_color: Color,
     initial_sfen: String,
+    initial_position_is_game_start: bool,
     sink: &'a mut S,
     info_throttle: SearchInfoThrottle,
     /// 直前に ponder miss が発生したか。次の自手番の fresh search に
@@ -526,6 +527,7 @@ where
     let mut s = SessionState {
         pos,
         initial_sfen,
+        initial_position_is_game_start: resume_state.is_none(),
         usi_moves,
         clock,
         record,
@@ -862,7 +864,14 @@ where
         Err(err) => return MoveAction::sink_or_error(err),
     };
 
-    let observed_info = info.has_observation().then_some(info);
+    let previous_sfen = previous_move_sfen(&s.record, s.initial_position_is_game_start);
+    let pv_csa = validated_move_pv(info, &s.pos, &result.bestmove, previous_sfen);
+    let validated_info = pv_csa.as_ref().map(|pv| {
+        let mut info = info.clone();
+        info.pv.truncate(pv.len());
+        info
+    });
+    let observed_info = validated_info.as_ref();
 
     // BestMoveSelected 発火 (CSA サーバ送信前)
     let snapshot = observed_info.map(search_info_to_snapshot);
@@ -881,8 +890,8 @@ where
         return action;
     }
 
-    let comment = if s.config.server.floodgate && info.has_score() {
-        build_floodgate_comment(info, s.my_color, &s.pos, &result.bestmove)
+    let comment = if s.config.server.floodgate {
+        observed_info.and_then(|info| build_floodgate_comment(info, s.my_color, pv_csa.as_ref()?))
     } else {
         None
     };
@@ -2029,11 +2038,77 @@ fn build_position_cmd_with_ponder(
     cmd
 }
 
+fn previous_move_sfen(
+    record: &GameRecord,
+    initial_position_is_game_start: bool,
+) -> Result<Option<&str>, ()> {
+    if record.moves.is_empty() {
+        return if initial_position_is_game_start {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    }
+    if record.jsonl_moves.len() != record.moves.len() {
+        return Err(());
+    }
+    record.jsonl_moves.last().map(|mv| Some(mv.sfen_before.as_str())).ok_or(())
+}
+
+fn validated_move_pv(
+    info: &SearchInfo,
+    pos: &Position,
+    bestmove: &str,
+    previous_sfen: Result<Option<&str>, ()>,
+) -> Option<Vec<String>> {
+    if !info.has_score() || !info.matches_bestmove(bestmove) {
+        return None;
+    }
+    let moves: Vec<_> = info
+        .pv
+        .iter()
+        .map_while(|token| rshogi_core::types::Move::from_usi_strict(token))
+        .collect();
+    let first = moves.first()?;
+    let mut legal_pos = rshogi_core::position::Position::new();
+    legal_pos.set_sfen(&pos.to_sfen()).ok()?;
+    let mut pv_pos = pos.clone();
+    let mut pv_csa = Vec::with_capacity(moves.len());
+    for (usi_mv, &mv) in info.pv.iter().zip(&moves) {
+        if !legal_pos.pseudo_legal(mv) || !legal_pos.is_legal(mv) {
+            return None;
+        }
+        let csa = usi_move_to_csa(usi_mv, &pv_pos).ok()?;
+        pv_pos.apply_csa_move(&csa).ok()?;
+        let gives_check = legal_pos.gives_check(mv);
+        legal_pos.do_move(mv, gives_check);
+        pv_csa.push(csa);
+    }
+    // 盤上の駒を動かす手は、相手の手番では移動元の駒の所有者が合わず非合法になる。
+    if first.is_drop()
+        && let Some(sfen) = previous_sfen.ok()?
+    {
+        let mut previous_pos = rshogi_core::position::Position::new();
+        previous_pos.set_sfen(sfen).ok()?;
+        let all_legal = moves.iter().all(|&mv| {
+            if !previous_pos.pseudo_legal(mv) || !previous_pos.is_legal(mv) {
+                return false;
+            }
+            let gives_check = previous_pos.gives_check(mv);
+            previous_pos.do_move(mv, gives_check);
+            true
+        });
+        if all_legal {
+            return None;
+        }
+    }
+    Some(pv_csa)
+}
+
 fn build_floodgate_comment(
     info: &SearchInfo,
     my_color: Color,
-    pos: &Position,
-    last_bestmove: &str,
+    pv_csa: &[String],
 ) -> Option<String> {
     let score = if let Some(cp) = info.score_cp {
         match my_color {
@@ -2049,21 +2124,8 @@ fn build_floodgate_comment(
         }
     };
     let mut comment = format!("* {score}");
-    if !info.pv.is_empty() {
-        let mut pv_pos = pos.clone();
-        if info.pv.first().map(|s| s.as_str()) != Some(last_bestmove) {
-            return Some(comment);
-        }
-        for usi_mv in &info.pv {
-            if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
-                write!(comment, " {csa}").unwrap();
-                if pv_pos.apply_csa_move(&csa).is_err() {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
+    for csa in pv_csa {
+        write!(comment, " {csa}").unwrap();
     }
     Some(comment)
 }
@@ -2244,6 +2306,16 @@ mod tests {
         assert_eq!(end_reason_from_line(&Interrupted, Some("#UNKNOWN_FUTURE")), None);
     }
 
+    fn build_floodgate_comment(
+        info: &SearchInfo,
+        color: Color,
+        pos: &Position,
+        bestmove: &str,
+    ) -> Option<String> {
+        let pv = validated_move_pv(info, pos, bestmove, Ok(None))?;
+        super::build_floodgate_comment(info, color, &pv)
+    }
+
     fn floodgate_info(pv: &[&str]) -> SearchInfo {
         SearchInfo {
             score_cp: Some(123),
@@ -2263,23 +2335,190 @@ mod tests {
     }
 
     #[test]
-    fn floodgate_comment_omits_pv_when_root_move_differs_from_bestmove() {
+    fn drop_pv_requires_legal_continuation() {
+        let mut pos = rshogi_csa::initial_position();
+        for mv in ["+7776FU", "-3334FU", "+8822UM", "-3122GI"] {
+            pos.apply_csa_move(mv).unwrap();
+        }
+        for pv in [
+            vec!["B*5e", "2g2f"],
+            vec!["B*5e", "8c8e"],
+            vec!["B*5e", "8c8d", "2g2e"],
+        ] {
+            assert_eq!(
+                build_floodgate_comment(&floodgate_info(&pv), Color::Black, &pos, "B*5e"),
+                None
+            );
+        }
+        assert_eq!(
+            build_floodgate_comment(&floodgate_info(&["B*5e", "8c8d"]), Color::Black, &pos, "B*5e")
+                .as_deref(),
+            Some("* 123 +0055KA -8384FU")
+        );
+    }
+
+    #[test]
+    fn previous_position_uses_retained_history_and_handles_missing_history() {
+        let before = "k8/9/9/9/9/9/9/9/7K1 w BPbp 42";
+        let mut summary = GameSummary {
+            game_id: "g".to_owned(),
+            my_color: Color::Black,
+            sente_name: "b".to_owned(),
+            gote_name: "w".to_owned(),
+            position: Position::from_sfen(before).unwrap(),
+            initial_moves: Vec::new(),
+            black_time: crate::protocol::TimeConfig::default(),
+            white_time: crate::protocol::TimeConfig::default(),
+            reconnect_token: None,
+            entering_king_rule: None,
+        };
+        let mut record = GameRecord::new(&summary);
+        assert_eq!(previous_move_sfen(&record, true), Ok(None));
+        assert_eq!(previous_move_sfen(&record, false), Err(()));
+        record.add_move("-9192OU", 0, None, Color::White);
+        assert_eq!(previous_move_sfen(&record, false), Err(()));
+        push_opponent_jsonl(&mut record, before.to_owned(), "9a9b".to_owned(), Color::White, 0);
+        summary.position.apply_csa_move("-9192OU").unwrap();
+        let ResumeRecordDecision::Continued {
+            record, position, ..
+        } = record.continue_for_resume(&summary, Some(Color::Black))
+        else {
+            panic!("保持棋譜と再接続局面が一致するはず");
+        };
+        assert_eq!(previous_move_sfen(&record, false), Ok(Some(before)));
+        assert_eq!(
+            validated_move_pv(
+                &floodgate_info(&["B*5e", "P*5d"]),
+                &position,
+                "B*5e",
+                previous_move_sfen(&record, false),
+            ),
+            None
+        );
+        let fragment = GameRecord::new(&summary);
+        assert_eq!(previous_move_sfen(&fragment, false), Err(()));
+    }
+
+    #[test]
+    fn drop_pv_legal_in_both_positions_is_omitted() {
+        let before = "k8/9/9/9/9/9/9/9/7K1 w BPbp 1";
+        let mut pos = Position::from_sfen(before).unwrap();
+        pos.apply_csa_move("-9192OU").unwrap();
+        let info = floodgate_info(&["B*5e", "P*5d"]);
+        assert_eq!(validated_move_pv(&info, &pos, "B*5e", Ok(Some(before))), None);
+    }
+
+    #[test]
+    fn mating_drop_pv_needs_no_reply() {
+        let before = "3l1l3/4k4/4G4/9/9/9/9/9/K8 w G 1";
+        let mut pos = Position::from_sfen(before).unwrap();
+        pos.apply_csa_move("-5251OU").unwrap();
+        let info = SearchInfo {
+            score_mate: Some(1),
+            pv: vec!["G*5b".to_owned()],
+            ..SearchInfo::default()
+        };
+        assert_eq!(
+            validated_move_pv(&info, &pos, "G*5b", Ok(Some(before))),
+            Some(vec!["+0052KI".to_owned()])
+        );
+        let mut mate_pos = rshogi_core::position::Position::new();
+        mate_pos.set_sfen(&pos.to_sfen()).unwrap();
+        let mv = rshogi_core::types::Move::from_usi_strict("G*5b").unwrap();
+        assert!(mate_pos.gives_check(mv));
+        mate_pos.do_move(mv, true);
+        let mut replies = rshogi_core::movegen::MoveList::new();
+        rshogi_core::movegen::generate_legal_all(&mate_pos, &mut replies);
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn drop_pv_distinguished_by_later_move_is_accepted() {
+        let before = "k8/9/9/9/9/9/9/9/7K1 w Bb 1";
+        let mut pos = Position::from_sfen(before).unwrap();
+        pos.apply_csa_move("-9192OU").unwrap();
+        let info = floodgate_info(&["B*5e", "9b9c"]);
+        assert_eq!(
+            validated_move_pv(&info, &pos, "B*5e", Ok(Some(before))),
+            Some(vec!["+0055KA".to_owned(), "-9293OU".to_owned()])
+        );
+    }
+
+    #[test]
+    fn drop_pv_at_game_start_is_accepted_but_missing_history_is_omitted() {
+        let pos = Position::from_sfen("k8/9/9/9/9/9/9/9/7K1 b B 42").unwrap();
+        let info = floodgate_info(&["B*5e"]);
+        assert!(validated_move_pv(&info, &pos, "B*5e", Ok(None)).is_some());
+        assert_eq!(validated_move_pv(&info, &pos, "B*5e", Err(())), None);
+        let info = floodgate_info(&["2i2h"]);
+        assert!(validated_move_pv(&info, &pos, "2i2h", Err(())).is_some());
+    }
+
+    #[test]
+    fn pv_stops_at_non_move_token_but_rejects_illegal_moves() {
+        let pos = rshogi_csa::initial_position();
+        for end in ["win", "resign", "rep_draw", "unknown"] {
+            let info = floodgate_info(&["7g7f", "3c3d", end, "5e5f"]);
+            assert_eq!(
+                validated_move_pv(&info, &pos, "7g7f", Ok(None)),
+                Some(vec!["+7776FU".to_owned(), "-3334FU".to_owned()])
+            );
+            let info = floodgate_info(&[end]);
+            assert_eq!(validated_move_pv(&info, &pos, end, Ok(None)), None);
+            let info = floodgate_info(&["7g7f", "5e5f", end]);
+            assert_eq!(validated_move_pv(&info, &pos, "7g7f", Ok(None)), None);
+        }
+    }
+
+    #[test]
+    fn floodgate_comment_omitted_when_root_move_differs_from_bestmove() {
         let pos = rshogi_csa::initial_position();
         let info = floodgate_info(&["2g2f", "8c8d"]);
 
         let comment = build_floodgate_comment(&info, Color::Black, &pos, "7g7f");
 
-        assert_eq!(comment.as_deref(), Some("* 123"));
+        assert_eq!(comment, None);
     }
 
     #[test]
-    fn floodgate_comment_stops_at_unconvertible_pv_move() {
+    fn floodgate_comment_omitted_without_pv() {
+        let pos = rshogi_csa::initial_position();
+        for info in [
+            floodgate_info(&[]),
+            SearchInfo {
+                score_mate: Some(3),
+                ..SearchInfo::default()
+            },
+        ] {
+            assert_eq!(build_floodgate_comment(&info, Color::Black, &pos, "7g7f"), None);
+        }
+    }
+
+    #[test]
+    fn floodgate_matching_pv_preserves_white_and_mate_scores() {
+        let mut pos = rshogi_csa::initial_position();
+        pos.apply_csa_move("+7776FU").unwrap();
+        let mut info = floodgate_info(&["3c3d", "2g2f"]);
+        assert_eq!(
+            build_floodgate_comment(&info, Color::White, &pos, "3c3d").as_deref(),
+            Some("* -123 -3334FU +2726FU")
+        );
+        info.score_cp = None;
+        info.score_mate = Some(-3);
+        assert_eq!(
+            build_floodgate_comment(&info, Color::White, &pos, "3c3d").as_deref(),
+            Some("* 100000 -3334FU +2726FU")
+        );
+    }
+
+    #[test]
+    fn floodgate_comment_omits_unconvertible_pv_move() {
         let pos = rshogi_csa::initial_position();
         let info = floodgate_info(&["7g7f", "3c3d", "5e5f", "2g2f"]);
 
         let comment = build_floodgate_comment(&info, Color::Black, &pos, "7g7f");
 
-        assert_eq!(comment.as_deref(), Some("* 123 +7776FU -3334FU"));
+        assert_eq!(comment, None);
     }
 
     #[test]
@@ -2287,6 +2526,7 @@ mod tests {
         let pos = rshogi_csa::initial_position();
         let info = SearchInfo {
             score_cp: Some(i32::MIN),
+            pv: vec!["7g7f".to_owned()],
             ..SearchInfo::default()
         };
         assert_eq!(build_floodgate_comment(&info, Color::White, &pos, "7g7f"), None);
