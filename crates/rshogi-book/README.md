@@ -20,14 +20,20 @@
 | `BookEvalBlackDiff` / `BookEvalWhiteDiff` | `-1` | root 局面が先手番 / 後手番のときの `BookEvalDiff`。`-1` なら `BookEvalDiff` を使う。範囲は `-1`〜`99999`。[下記](#先後別の評価値差と-depth-下限)参照。 |
 | `BookDepthBlackLimit` / `BookDepthWhiteLimit` | `-1` | root 局面が先手番 / 後手番のときの `BookDepthLimit`。`-1` なら `BookDepthLimit` を使う。`0` は無効。範囲は `-1`〜`99999`。 |
 | `NarrowBook` | `false` | count 情報がある場合、出現率 10% 未満の手を除外する。 |
-| `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。同値は count 大、さらに同値なら USI 昇順。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
+| `BookSelectValue` | `false` | 評価値フィルタ後の生存候補から value 最大手を選ぶ。同値の選択方法は `BookValueTieBreak` に従う。`true` のとき `NarrowBook` / `ConsiderBookMoveCount` / 等確率抽選より優先する。 |
+| `BookValueTieBreak` | `count` | `BookSelectValue=true` の同値手の選択方法。`count`: count 降順 → USI 昇順（従来どおり）。`depth`: depth 降順 → count 降順 → USI 昇順。`random`: 最大値の手から等確率で選ぶ。 |
 | `ConsiderBookMoveCount` | `false` | `true` なら count 比例抽選する。全 count が 0 の場合は等確率。 |
 | `IgnoreBookPly` | `true` | SFEN の手数を無視して局面を引く。既定では手数違いの同じ局面の候補を 1 つにまとめて引く。手数ごとに別の手を選ぶ定跡では `false` を指定する (手数も一致したときだけ当たる。対局の開始前に決まった手が入る大会や、途中局面からの対局では手数がずれて当たらなくなる)。 |
 | `FlippedBook` | `true` | miss 時に先後反転局面で再検索する。 |
 | `BookOnTheFly` | `false` | `true` なら定跡を丸読みせず、probe のたびにファイルから引く。大きい定跡向け。[下記](#大きい定跡を丸読みせずに使う-bookonthefly)参照。 |
 
 選択順序は、合法性検証、`BookDepthLimit`、`BookEvalDiff` / value 下限フィルタの後に
-`BookSelectValue` を評価します。`BookSelectValue=false` の場合は従来どおり
+`BookSelectValue` を評価します。`BookValueTieBreak` は、評価値フィルタを通過した
+最大値の手だけに適用し、`NarrowBook` / `ConsiderBookMoveCount` より優先します。
+採択回数を持たない `.ybb` でも `depth` / `random` を使えます。深さを持たない定跡では
+全手の depth が 0 のため、`depth` は `count` と同じ選び方になります。優先定跡は従来どおり
+最初に局面が見つかったファイルだけを使い、下位ファイルの手とは比較・混合しません。
+explore 登録局面の選択も従来どおり優先します。`BookSelectValue=false` の場合は従来どおり
 `NarrowBook` を適用し、その後 `ConsiderBookMoveCount` または等確率抽選で選びます。
 
 合法性検証では、指すと直近 16 手以内の局面へ戻る手も除きます。ただし値が手番の側の千日手の値

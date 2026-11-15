@@ -15,7 +15,7 @@
 //! 6. `BookEvalDiff` / `BookEvalBlackLimit` / `BookEvalWhiteLimit`: 下限未満を除去
 //!    (5・6 の depth 下限と評価値差は、root 局面の手番側の `BookDepthBlackLimit` / `BookEvalBlackDiff`
 //!    等があればそちらを使う)
-//! 7. `BookSelectValue`: true なら value 最大手を決定的に選ぶ(同値は count 降順 → USI 昇順)
+//! 7. `BookSelectValue`: true なら value 最大手を選ぶ(同値は `BookValueTieBreak` で選ぶ)
 //! 8. `NarrowBook`: count 情報がある場合のみ出現率 10% 未満を除去
 //! 9. 選択: `ConsiderBookMoveCount` なら count 比例抽選(全 0 は等確率)、false は等確率
 //! 10. ponder 補完: book の ponder が none なら 1 手進めて再 find し筆頭候補を採用
@@ -84,6 +84,18 @@ impl BookRng for DefaultBookRng {
     }
 }
 
+/// `BookSelectValue=true` のとき、最大評価値が同じ手の選択方法。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BookValueTieBreak {
+    /// 採択回数の降順、USI 文字列の昇順。
+    #[default]
+    Count,
+    /// 深さの降順、採択回数の降順、USI 文字列の昇順。
+    Depth,
+    /// 採択回数や深さによらず等確率で選ぶ。
+    Random,
+}
+
 /// 定跡 probe のオプション群(USI オプションのミラー)。
 ///
 /// 既定値はモジュール doc の選択パイプラインが前提とする値に揃えている。
@@ -103,8 +115,10 @@ pub struct BookOptions {
     pub depth_limit: i32,
     /// `NarrowBook`: 出現率 10% 未満の手を除外するか。
     pub narrow_book: bool,
-    /// `BookSelectValue`: value 最大手を決定的に選ぶか。
+    /// `BookSelectValue`: value 最大手を選ぶか。
     pub select_value: bool,
+    /// `BookValueTieBreak`: value 最大手が複数ある場合の選択方法。
+    pub value_tie_break: BookValueTieBreak,
     /// `ConsiderBookMoveCount`: 採択回数比例で抽選するか。
     pub consider_move_count: bool,
     /// `FlippedBook`: miss 時に先後反転局面で再検索するか。
@@ -172,6 +186,7 @@ impl Default for BookOptions {
             depth_limit: 0,
             narrow_book: false,
             select_value: false,
+            value_tie_break: BookValueTieBreak::default(),
             consider_move_count: false,
             flipped_book: true,
             eval_black_diff: None,
@@ -339,19 +354,42 @@ fn select_index(
     idx
 }
 
-/// value 最大手を決定的に選ぶ。同値は count 降順 → USI 昇順。
-fn select_value_index(candidates: &[Candidate]) -> usize {
-    candidates
+fn select_value_index(
+    candidates: &[Candidate],
+    tie_break: BookValueTieBreak,
+    rng: &mut dyn BookRng,
+) -> usize {
+    let best = candidates
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
             a.value
                 .cmp(&b.value)
+                .then_with(|| match tie_break {
+                    BookValueTieBreak::Depth => a.depth.cmp(&b.depth),
+                    _ => std::cmp::Ordering::Equal,
+                })
                 .then_with(|| a.move_count.cmp(&b.move_count))
                 .then_with(|| b.move_usi.cmp(&a.move_usi))
         })
         .map(|(i, _)| i)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    if tie_break != BookValueTieBreak::Random {
+        return best;
+    }
+    let value = candidates[best].value;
+    let count = candidates.iter().filter(|c| c.value == value).count();
+    if count == 1 {
+        return best;
+    }
+    let selected = rng.rand_below(count as u64) as usize;
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.value == value)
+        .nth(selected)
+        .map(|(i, _)| i)
+        .unwrap_or(best)
 }
 
 /// ponder を解決する。book に ponder があれば検証して採用、無ければ 1 手進めて筆頭手を拾う。
@@ -497,9 +535,9 @@ pub fn probe_with_explore(
         }
     }
 
-    // 7. BookSelectValue: 評価値フィルタ後の生存候補から value 最大手を決定的に選ぶ。
+    // 7. BookSelectValue: 評価値フィルタ後の生存候補から value 最大手を選ぶ。
     if options.select_value {
-        let idx = select_value_index(&candidates);
+        let idx = select_value_index(&candidates, options.value_tie_break, rng);
         let chosen = &candidates[idx];
         let best_move = chosen.mv;
         let book_ponder = chosen.ponder_usi.clone();
@@ -1407,6 +1445,91 @@ mod tests {
     }
 
     #[test]
+    fn book_value_tie_break_modes_use_only_highest_value_moves() {
+        for (count7, count2) in [(0, 0), (1, 50), (50, 1)] {
+            let data = format!(
+                "{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 80 24 {count7}\n2g2f 8c8d 80 16 {count2}\n1g1f 9c9d 70 32 100\n"
+            );
+            let book = Book::from_reader(data.as_bytes(), false).unwrap();
+            let by_count = if count7 > count2 { "7g7f" } else { "2g2f" };
+            let (first, second) = if count2 > count7 {
+                ("2g2f", "7g7f")
+            } else {
+                ("7g7f", "2g2f")
+            };
+            for (mode, draw, expected) in [
+                (BookValueTieBreak::Count, 0, by_count),
+                (BookValueTieBreak::Depth, 0, "7g7f"),
+                (BookValueTieBreak::Random, 0, first),
+                (BookValueTieBreak::Random, 1, second),
+            ] {
+                let options = BookOptions {
+                    select_value: true,
+                    value_tie_break: mode,
+                    eval_diff: 30000,
+                    narrow_book: true,
+                    consider_move_count: true,
+                    ..Default::default()
+                };
+                let result = probe(
+                    std::slice::from_ref(&book),
+                    &pos(HIRATE),
+                    &options,
+                    &mut SeqRng::new(vec![draw]),
+                    no_info,
+                )
+                .unwrap();
+                assert_eq!(
+                    result.best_move.to_usi(),
+                    expected,
+                    "{mode:?}, counts={count7},{count2}"
+                );
+                assert!(result.ponder_move.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn depth_tie_break_falls_back_to_count_then_usi() {
+        let data = format!(
+            "{HEADER}\nsfen {HIRATE}\n7g7f none 80 24 40\n2g2f none 80 24 50\n1g1f none 80 24 50\n"
+        );
+        let book = Book::from_reader(data.as_bytes(), false).unwrap();
+        let options = BookOptions {
+            select_value: true,
+            value_tie_break: BookValueTieBreak::Depth,
+            ..Default::default()
+        };
+        let result =
+            probe(&[book], &pos(HIRATE), &options, &mut SeqRng::new(vec![]), no_info).unwrap();
+        assert_eq!(result.best_move.to_usi(), "1g1f");
+    }
+
+    #[test]
+    fn random_tie_break_respects_filters_and_priority_book() {
+        let priority = Book::from_reader(
+            format!("{HEADER}\nsfen {HIRATE}\n7g7f none 80 24 0\n2g2f none -10 24 0\n").as_bytes(),
+            false,
+        )
+        .unwrap();
+        let base = Book::from_reader(
+            format!("{HEADER}\nsfen {HIRATE}\n1g1f none 100 32 0\n").as_bytes(),
+            false,
+        )
+        .unwrap();
+        let options = BookOptions {
+            select_value: true,
+            value_tie_break: BookValueTieBreak::Random,
+            eval_diff: 30000,
+            ..Default::default()
+        };
+        let mut rng = SeqRng::new(vec![1]);
+        let result = probe(&[priority, base], &pos(HIRATE), &options, &mut rng, no_info).unwrap();
+        assert_eq!(result.best_move.to_usi(), "7g7f");
+        assert_eq!(rng.idx, 0);
+    }
+
+    #[test]
     fn book_select_value_false_keeps_existing_selection_pipeline() {
         // BookSelectValue=false では value 最大の 2g2f を貪欲選択せず、
         // 既存どおり NarrowBook 後に count 比例抽選する。
@@ -1426,10 +1549,20 @@ mod tests {
         // i=0: 0<100 で idx=0、i=1: 149<50? false なので 7g7f のまま。
         let mut rng = SeqRng::new(vec![0, 149]);
 
-        let result =
-            probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
-
-        assert_eq!(result.best_move.to_usi(), "7g7f");
+        for mode in [
+            BookValueTieBreak::Count,
+            BookValueTieBreak::Depth,
+            BookValueTieBreak::Random,
+        ] {
+            let opts = BookOptions {
+                value_tie_break: mode,
+                ..opts.clone()
+            };
+            rng.idx = 0;
+            let result =
+                probe(std::slice::from_ref(&book), &pos(HIRATE), &opts, &mut rng, no_info).unwrap();
+            assert_eq!(result.best_move.to_usi(), "7g7f");
+        }
     }
 
     #[test]

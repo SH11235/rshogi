@@ -16,6 +16,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン
 
+- `BookValueTieBreak` で `BookSelectValue=true` の同値手を `count` / `depth` / `random` から選べるようにした。既定の `count` は従来どおり採択回数降順、USI 昇順で選ぶ。
 - `id name` を `RAMU` にした (以前は `Shogi Engine 0.1.0`)。
 - 実行ファイルと同じフォルダの `engine_options.txt` を `isready` のたびに読み、書かれたオプションを適用して固定するようにした。
   固定したオプションは `setoption` では変わらない。書き方と相対パスの扱いは `crates/rshogi-usi/README.md`。
