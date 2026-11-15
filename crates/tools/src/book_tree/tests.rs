@@ -913,6 +913,7 @@ fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> S
         accept_fingerprint: Vec::new(),
         state: state.to_owned(),
         journal: Some(journal.to_owned()),
+        imported_journal: None,
         reading: ReadingArgs {
             engine: engine.to_owned(),
             engine_options: vec![format!("EvalFile={}", engine.display())],
@@ -1596,6 +1597,120 @@ fn drain_import(inbox: &mut super::live_import::Inbox, journal: &mut Journal) ->
             return messages;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn split_journal_keeps_engine_rows_apart_from_imported_rows_and_reloads_both() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+    let settings = settings();
+    let own = reading(ROOT, &[("5i5h", 10)], &settings);
+    let other_key = child(ROOT, "5i5h").unwrap();
+    let imported = reading(&other_key, &[], &settings);
+    let late_key = child(ROOT, "5i4h").unwrap();
+    let late = reading(&late_key, &[], &settings);
+    let engine_path = dir.path().join("engine.jsonl");
+    let imported_path = dir.path().join("imported.jsonl");
+    let lines = |path: &Path| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    {
+        let mut journal =
+            Journal::open_split(&engine_path, Some(&imported_path), &settings.fingerprint).unwrap();
+        journal.append(own.clone(), &settings, "engine".into()).unwrap();
+        let source = dir.path().join("source.jsonl");
+        import_file(&source, &settings, &[own.clone(), imported.clone()]);
+        std::fs::copy(&source, state.join("import/01.jsonl")).unwrap();
+        assert!(drain_import(&mut inbox, &mut journal).is_empty());
+        assert_eq!(inbox.status()["counts"]["appended"], 1);
+        assert!(
+            inbox
+                .complete_worker(&mut journal, &settings, late.clone(), false, |_| ())
+                .unwrap()
+        );
+        // 取り込み済みの局面の後着結果は、どちらのファイルにも足さない。
+        assert!(
+            !inbox
+                .complete_worker(&mut journal, &settings, imported.clone(), false, |_| ())
+                .unwrap()
+        );
+    }
+    let engine_rows = lines(&engine_path);
+    assert_eq!(
+        engine_rows
+            .iter()
+            .map(|r| r["reading"]["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [ROOT, late_key.as_str()]
+    );
+    assert!(engine_rows.iter().all(|r| r["provenance"] == "engine"));
+    let imported_rows = lines(&imported_path);
+    assert_eq!(imported_rows.len(), 1);
+    assert_eq!(imported_rows[0]["reading"]["key"], other_key.as_str());
+    assert!(imported_rows[0]["provenance"].as_str().unwrap().starts_with("journal:"));
+
+    // 末尾の書きかけは、どちらのファイルでも切り詰める。
+    for path in [&engine_path, &imported_path] {
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes.extend(b"{\"kind\"");
+        std::fs::write(path, bytes).unwrap();
+    }
+    let journal =
+        Journal::open_split(&engine_path, Some(&imported_path), &settings.fingerprint).unwrap();
+    for key in [ROOT, other_key.as_str(), late_key.as_str()] {
+        assert!(journal.get(key).is_some(), "{key}");
+    }
+    assert_eq!(lines(&engine_path).len(), 2);
+    assert_eq!(lines(&imported_path).len(), 1);
+    drop(journal);
+
+    // 両方のファイルにある同じ条件・同じ局面は、エンジンで読んだ行を残す。
+    let mut conflict = own.clone();
+    conflict.multipv[0].cp += 1;
+    let conflict_path = dir.path().join("conflict.jsonl");
+    import_file(&conflict_path, &settings, &[conflict]);
+    let mut bytes = std::fs::read(&imported_path).unwrap();
+    bytes.extend(std::fs::read(&conflict_path).unwrap());
+    std::fs::write(&imported_path, bytes).unwrap();
+    let journal =
+        Journal::open_split(&engine_path, Some(&imported_path), &settings.fingerprint).unwrap();
+    assert_eq!(journal.get(ROOT).unwrap().multipv[0].cp, 10);
+    assert_eq!(
+        serde_json::to_value(&journal.skipped_rows).unwrap()[&settings.fingerprint]["conflicting"],
+        1
+    );
+}
+
+#[test]
+fn serve_startup_rejects_imported_journal_on_journal_state_or_out_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let def = definition(dir.path(), 0);
+    let out_root = dir.path().join("trees");
+    let journal = dir.path().join("journal.jsonl");
+    for imported in [
+        journal.clone(),
+        state.join("stop"),
+        state.join("import"),
+        out_root.clone(),
+    ] {
+        let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+        args.imported_journal = Some(imported.clone());
+        let error = service::serve(args).unwrap_err();
+        assert!(
+            error.to_string().contains("衝突") || error.to_string().contains("別のファイル"),
+            "{}: {error:#}",
+            imported.display()
+        );
+        assert!(!state.join("targets.status.json").exists());
     }
 }
 

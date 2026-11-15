@@ -30,6 +30,17 @@ fn overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// 取り込んだ行の台帳が、エンジンで読んだ行の台帳と別のファイルであることを確かめる。
+pub(super) fn reject_same_journal(journal: &Path, imported: &Path) -> Result<()> {
+    if overlap(&managed(journal)?, &managed(imported)?) {
+        bail!(
+            "--imported-journal は --journal と別のファイルにしてください: {}",
+            imported.display()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn reject_collisions(
     journal: &Path,
     state: Option<&Path>,

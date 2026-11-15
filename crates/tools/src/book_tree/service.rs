@@ -1027,6 +1027,10 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
+    if let Some(imported) = &args.imported_journal {
+        super::paths::reject_collisions(imported, Some(&args.state), &[])?;
+        super::paths::reject_same_journal(&journal_path, imported)?;
+    }
     std::fs::create_dir_all(args.state.join("restart"))?;
     // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
     let mut attempt = 0;
@@ -1223,10 +1227,18 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     super::transfer::warn_unknown_version(&args.reading.engine, &settings.engine_version);
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
-    let (out_root, protected) =
+    let (out_root, mut protected) =
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    if let Some(imported) = &args.imported_journal {
+        // 木の出力先が取り込みの台帳と重なる行も、受付で拒否する。
+        let (_, checked) = super::paths::reject_out_root(imported, &args.state, &args.out_root)?;
+        protected.extend(checked.into_iter().take(1));
+    }
     if let Some(dir) = &args.trace_dir {
         super::paths::reject_trace_dir(dir, &journal_path, &args.state, &out_root)?;
+        if let Some(imported) = &args.imported_journal {
+            super::paths::reject_trace_dir(dir, imported, &args.state, &out_root)?;
+        }
     }
     std::fs::create_dir_all(&out_root)?;
     // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
@@ -1255,7 +1267,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         &serde_json::to_string_pretty(&StatusFile::resuming(run_id, &checkpoint))?,
     )
     .context("状態のファイルを書けません")?;
-    let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
+    let mut journal = Journal::open_split(
+        &journal_path,
+        args.imported_journal.as_deref(),
+        &settings.fingerprint,
+    )?;
     println!("journal_skipped={}", serde_json::to_string(&journal.skipped_rows)?);
     let mut imports = super::live_import::Inbox::new(&args.state)?;
     let stats_path = args.state.join("prefetch_stats.json");
