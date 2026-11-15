@@ -44,10 +44,10 @@ fn build_time_command(time_args: &TimeArgs) -> String {
 }
 
 /// queue に行が残っていても、期限到達後は読み続けない。
-pub(crate) fn receive_before_deadline(
-    receiver: &Receiver<String>,
+pub(crate) fn receive_before_deadline<T>(
+    receiver: &Receiver<T>,
     deadline: Instant,
-) -> std::result::Result<String, RecvTimeoutError> {
+) -> std::result::Result<T, RecvTimeoutError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(RecvTimeoutError::Timeout);
@@ -98,6 +98,41 @@ pub struct EngineConfig {
     pub usi_options: Vec<String>,
 }
 
+fn discard_ponder_eval(snapshot: &mut InfoSnapshot) {
+    *snapshot = InfoSnapshot {
+        nodes: snapshot.nodes,
+        time_ms: snapshot.time_ms,
+        nps: snapshot.nps,
+        ..InfoSnapshot::default()
+    };
+}
+
+fn parse_scored_primary_pv(line: &str) -> Option<Option<String>> {
+    let mut info = InfoSnapshot::default();
+    info.update_from_line(line);
+    (info.score_cp.is_some() || info.score_mate.is_some() || info.score_mate_sign.is_some())
+        .then(|| info.pv.into_iter().next())
+}
+
+fn retain_matching_ponder_eval(
+    snapshot: &mut InfoSnapshot,
+    scored_pv: Option<&str>,
+    bestmove: &str,
+) {
+    if matches!(bestmove, "resign" | "win")
+        || scored_pv != Some(bestmove)
+        || snapshot.pv.first().map(String::as_str) != Some(bestmove)
+    {
+        discard_ponder_eval(snapshot);
+    } else if snapshot
+        .last_exact_primary
+        .as_ref()
+        .is_some_and(|primary| primary.pv.first().map(String::as_str) != Some(bestmove))
+    {
+        snapshot.last_exact_primary = None;
+    }
+}
+
 /// 1本のエンジンに対する入出力をカプセル化する。
 pub struct EngineProcess {
     child: Child,
@@ -107,9 +142,135 @@ pub struct EngineProcess {
     opt_names: HashSet<String>,
     read_timeout_hint_printed: Cell<bool>,
     pub label: String,
+    pub(crate) ponder_enabled: bool,
+    pondering: Option<String>,
+    predicted_move: Option<String>,
+    search_pending: bool,
+    reusable: bool,
+    stop_requested: bool,
+    pub(crate) ponder_stats: PonderStats,
+    pub(crate) turn_start: Option<Instant>,
+}
+
+/// ponder の送信回数と的中回数。
+#[derive(Clone, Copy, Default)]
+pub struct PonderStats {
+    pub sent: u64,
+    pub hits: u64,
+}
+
+impl serde::Serialize for PonderStats {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PonderStats", 3)?;
+        state.serialize_field("sent", &self.sent)?;
+        state.serialize_field("hits", &self.hits)?;
+        let rate = (self.sent > 0).then(|| self.hits as f64 / self.sent as f64);
+        state.serialize_field("hit_rate", &rate)?;
+        state.end()
+    }
 }
 
 impl EngineProcess {
+    fn search_commands(req: &SearchRequest<'_>) -> (String, String) {
+        // パス権がある場合は passrights を付加
+        let mut position_cmd = if let Some((b, w)) = req.pass_rights {
+            format!("position sfen {} passrights {} {}", req.sfen, b, w)
+        } else {
+            format!("position sfen {}", req.sfen)
+        };
+        if !req.moves.is_empty() {
+            position_cmd.push_str(" moves ");
+            position_cmd.push_str(req.moves);
+        }
+        let mut go = build_time_command(&req.time_args);
+        if let Some(depth) = req.go_depth {
+            go.push_str(&format!(" depth {depth}"));
+        }
+        if let Some(nodes) = req.go_nodes {
+            go.push_str(&format!(" nodes {nodes}"));
+        }
+        (position_cmd, go)
+    }
+
+    /// 合法な予想手がある場合だけ、相手手番の探索を開始する。
+    pub(crate) fn start_ponder(
+        &mut self,
+        req: &SearchRequest<'_>,
+        position: &rshogi_core::position::Position,
+    ) -> Result<()> {
+        if !self.ponder_enabled {
+            return Ok(());
+        }
+        let Some(prediction) = self.predicted_move.take() else {
+            return Ok(());
+        };
+        let Some(mv) = rshogi_core::types::Move::from_usi(&prediction) else {
+            return Ok(());
+        };
+        if !super::position::is_legal_game_move(position, mv) {
+            return Ok(());
+        }
+        let expected = mv.to_usi();
+        let (mut position_cmd, go) = Self::search_commands(req);
+        position_cmd.push_str(if req.moves.is_empty() { " moves " } else { " " });
+        position_cmd.push_str(&expected);
+        self.write_line(&position_cmd)?;
+        self.pondering = Some(expected);
+        self.search_pending = true;
+        self.stop_requested = false;
+        self.write_line(&go.replacen("go", "go ponder", 1))?;
+        self.ponder_stats.sent += 1;
+        Ok(())
+    }
+
+    /// tournament の相手手番思考を有効にする。USI の設定値とは独立に制御する。
+    pub fn enable_tournament_ponder(&mut self, enabled: bool) -> Result<()> {
+        self.ponder_enabled = enabled;
+        if enabled && self.opt_names.is_empty() {
+            self.write_line("setoption name USI_Ponder value true")?;
+            self.sync_ready()?;
+        }
+        Ok(())
+    }
+
+    /// 未回収の探索がなく、次の対局に利用できるか。
+    pub fn is_reusable(&self) -> bool {
+        self.reusable
+    }
+
+    /// ponder の bestmove を回収する。回収不能ならプロセスを再利用しない。
+    pub(crate) fn stop_ponder(&mut self) -> Result<()> {
+        let result = self.drain_ponder();
+        if result.is_err() {
+            self.reusable = false;
+        }
+        result
+    }
+
+    fn drain_ponder(&mut self) -> Result<()> {
+        if self.pondering.is_none() && !self.search_pending {
+            return Ok(());
+        }
+        if !self.stop_requested {
+            self.write_line("stop")?;
+            self.stop_requested = true;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.recv_line_until(deadline)?.starts_with("bestmove ") {
+                break;
+            }
+        }
+        self.pondering = None;
+        self.search_pending = false;
+        self.stop_requested = false;
+        Ok(())
+    }
+
     /// プロセスを起動し、USI 初期化を完了する。
     pub fn spawn(cfg: &EngineConfig, label: String) -> Result<Self> {
         let mut proc = Self::spawn_uninitialized(cfg, label)?;
@@ -205,17 +366,16 @@ impl EngineProcess {
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-        let (tx, rx) = mpsc::channel::<String>();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
+            for line in BufReader::new(stdout).lines() {
                 match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
+                    Ok(line) => {
+                        if tx.send(line).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    _ => break,
                 }
             }
         });
@@ -243,6 +403,14 @@ impl EngineProcess {
             opt_names: HashSet::new(),
             read_timeout_hint_printed: Cell::new(false),
             label,
+            ponder_enabled: false,
+            pondering: None,
+            predicted_move: None,
+            search_pending: false,
+            reusable: true,
+            stop_requested: false,
+            ponder_stats: PonderStats::default(),
+            turn_start: None,
         })
     }
 
@@ -320,6 +488,12 @@ impl EngineProcess {
     }
 
     pub fn new_game(&mut self) -> Result<()> {
+        if !self.reusable {
+            bail!("{}: engine has an undrained search", self.label);
+        }
+        self.stop_ponder()?;
+        self.turn_start = None;
+        self.predicted_move = None;
         self.write_line("usinewgame")?;
         self.sync_ready()
     }
@@ -337,53 +511,36 @@ impl EngineProcess {
         if req.limit_only_timeout_ms == Some(0) {
             bail!("limit_only_timeout_ms must be positive");
         }
-        // パス権がある場合は passrights を付加
-        let mut position_cmd = if let Some((b, w)) = req.pass_rights {
-            format!("position sfen {} passrights {} {}", req.sfen, b, w)
+        let turn_start = self.turn_start.take();
+        self.predicted_move = None;
+        let hit = self
+            .pondering
+            .as_deref()
+            .is_some_and(|mv| req.moves.split_whitespace().last() == Some(mv));
+        if hit {
+            self.write_line("ponderhit")?;
+            self.pondering = None;
+            self.ponder_stats.hits += 1;
         } else {
-            format!("position sfen {}", req.sfen)
-        };
-        if !req.moves.is_empty() {
-            position_cmd.push_str(" moves ");
-            position_cmd.push_str(req.moves);
+            self.stop_ponder()?;
+            let (position, go) = Self::search_commands(req);
+            self.write_line(&position)?;
+            self.search_pending = self.ponder_enabled;
+            self.stop_requested = false;
+            self.write_line(&go)?;
         }
-        self.write_line(&position_cmd)?;
-        let time_args = &req.time_args;
-        // depth/nodes 制限の有無
+        let start = if self.ponder_enabled {
+            turn_start.unwrap_or_else(Instant::now)
+        } else {
+            Instant::now()
+        };
         let has_limit = req.go_depth.is_some() || req.go_nodes.is_some();
+        let time_args = &req.time_args;
         let has_time = time_args.byoyomi > 0
             || time_args.btime > 0
             || time_args.wtime > 0
             || time_args.binc > 0
             || time_args.winc > 0;
-
-        let time_cmd = build_time_command(time_args);
-
-        if has_limit && has_time {
-            // 組み合わせモード: 時間制御 + depth/nodes 目標
-            let mut cmd = time_cmd;
-            if let Some(depth) = req.go_depth {
-                cmd.push_str(&format!(" depth {depth}"));
-            }
-            if let Some(nodes) = req.go_nodes {
-                cmd.push_str(&format!(" nodes {nodes}"));
-            }
-            self.write_line(&cmd)?;
-        } else if has_limit {
-            // depth/nodes のみモード。期限は下の watchdog 設定で決める。
-            let mut cmd = String::from("go");
-            if let Some(depth) = req.go_depth {
-                cmd.push_str(&format!(" depth {depth}"));
-            }
-            if let Some(nodes) = req.go_nodes {
-                cmd.push_str(&format!(" nodes {nodes}"));
-            }
-            self.write_line(&cmd)?;
-        } else {
-            self.write_line(&time_cmd)?;
-        }
-
-        let start = Instant::now();
         // watchdog 未指定の depth/nodes のみモードは従来の24時間を維持する。
         // Duration::MAX は recv_timeout に渡すと timespec オーバーフローが起きるため、
         // 十分大きな有限値（24 時間）を使う。
@@ -405,6 +562,7 @@ impl EngineProcess {
         let mut stop_sent = false;
         let mut snapshot = InfoSnapshot::default();
         let mut info_callback = info_callback;
+        let mut scored_primary_pv = None;
 
         loop {
             let elapsed = start.elapsed();
@@ -412,8 +570,12 @@ impl EngineProcess {
             if elapsed >= deadline {
                 if !stop_sent {
                     self.write_line("stop")?;
+                    self.stop_requested = self.ponder_enabled;
                     stop_sent = true;
                     continue;
+                }
+                if hit {
+                    discard_ponder_eval(&mut snapshot);
                 }
                 return Ok(SearchOutcome {
                     bestmove: None,
@@ -428,8 +590,11 @@ impl EngineProcess {
             match self.rx.recv_timeout(remaining) {
                 Ok(line) => {
                     if line.starts_with("info") {
+                        if hit && let Some(pv) = parse_scored_primary_pv(&line) {
+                            scored_primary_pv = pv;
+                        }
                         snapshot.update_from_line(&line);
-                        if let Some(ref mut cb) = info_callback {
+                        if !hit && let Some(ref mut cb) = info_callback {
                             cb(&line, req);
                         }
                         continue;
@@ -437,6 +602,20 @@ impl EngineProcess {
                     if let Some(rest) = line.strip_prefix("bestmove ") {
                         let mut parts = rest.split_whitespace();
                         let mv = parts.next().unwrap_or_default().to_string();
+                        self.search_pending = false;
+                        self.predicted_move =
+                            if self.ponder_enabled && parts.next() == Some("ponder") {
+                                parts.next().map(str::to_owned)
+                            } else {
+                                None
+                            };
+                        if hit {
+                            retain_matching_ponder_eval(
+                                &mut snapshot,
+                                scored_primary_pv.as_deref(),
+                                &mv,
+                            );
+                        }
                         let elapsed_ms = duration_to_millis(start.elapsed());
                         // stop 後の回収結果も、受信時点で期限を超えた結果も勝敗に使わない。
                         let watchdog_fired =
@@ -458,9 +637,13 @@ impl EngineProcess {
                 Err(RecvTimeoutError::Timeout) => {
                     if !stop_sent {
                         self.write_line("stop")?;
+                        self.stop_requested = self.ponder_enabled;
                         stop_sent = true;
                     } else {
                         let elapsed_ms = duration_to_millis(start.elapsed());
+                        if hit {
+                            discard_ponder_eval(&mut snapshot);
+                        }
                         return Ok(SearchOutcome {
                             bestmove: None,
                             elapsed_ms,
@@ -873,6 +1056,10 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
 }
 
+// 短い期限を検証する mock と Python mock の起動を重ねない。
+#[cfg(all(test, unix))]
+static ENGINE_MOCK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(all(test, unix))]
 mod deadline_tests {
     use super::*;
@@ -880,7 +1067,7 @@ mod deadline_tests {
 
     #[test]
     fn expired_deadline_does_not_consume_queued_info() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<String>();
         tx.send("info depth 1".into()).unwrap();
         assert!(matches!(
             receive_before_deadline(&rx, Instant::now()),
@@ -891,6 +1078,7 @@ mod deadline_tests {
 
     #[test]
     fn raw_go_bounds_both_phases_with_chatty_engine_and_handles_exit() {
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mock.sh");
         std::fs::write(
@@ -967,6 +1155,7 @@ done
                 usize::from(matches!(mode, "stop" | "flood"))
             );
         }
+        drop(guard);
     }
 
     #[cfg(target_os = "linux")]
@@ -1056,5 +1245,434 @@ mod time_command_tests {
             };
             assert_eq!(build_time_command(&args), expected);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ponder_info_tests {
+    use super::*;
+
+    #[test]
+    fn game_error_retains_both_cleanup_failures() {
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        use crate::selfplay::{
+            game::{GameConfig, run_game},
+            position::ParsedPosition,
+            time_control::TimeControl,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("cleanup.py");
+        std::fs::write(
+            &script,
+            r#"
+import sys
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == 'usi': print('usiok', flush=True)
+    elif line == 'isready': print('readyok', flush=True)
+    elif line in ('stop', 'quit'): break
+"#,
+        )
+        .unwrap();
+        let cfg = EngineConfig {
+            path: "python3".into(),
+            args: vec![script.display().to_string()],
+            threads: 1,
+            hash_mb: 1,
+            network_delay: None,
+            network_delay2: None,
+            minimum_thinking_time: None,
+            slowmover: None,
+            ponder: false,
+            usi_options: vec![],
+        };
+        let mut black = EngineProcess::spawn(&cfg, "black".into()).unwrap();
+        let mut white = EngineProcess::spawn(&cfg, "white".into()).unwrap();
+        black.search_pending = true;
+        white.search_pending = true;
+        let config = GameConfig {
+            resign_rule: None,
+            win_rule: None,
+            draw_rule: None,
+            agreement_rule: None,
+            max_moves: 5,
+            timeout_margin_ms: 1000,
+            limit_only_timeout_ms: Some(0),
+            game_time_limit_ms: None,
+            cancel: None,
+            pass_rights: None,
+            go_depth: None,
+            go_nodes_black: None,
+            go_nodes_white: None,
+        };
+        let start = ParsedPosition {
+            startpos: true,
+            sfen: None,
+            moves: vec![],
+            source_line: None,
+        };
+        let result = run_game(
+            &mut black,
+            &mut white,
+            &start,
+            TimeControl::new(0, 0, 0, 0, 10000),
+            &config,
+            1,
+            &mut |_| {},
+            None,
+        );
+        let error = result.err().unwrap();
+        assert_eq!(error.root_cause().to_string(), "limit_only_timeout_ms must be positive");
+        let detail = format!("{error:#}");
+        assert!(detail.contains("black: engine exited"), "{detail}");
+        assert!(detail.contains("white: engine exited"), "{detail}");
+        assert!(!black.is_reusable());
+        assert!(!white.is_reusable());
+        drop(guard);
+    }
+
+    #[test]
+    fn legacy_ponder_config_preserves_options_and_timeout_cleanup() {
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for advertised in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("legacy.py");
+            let log = dir.path().join("commands");
+            std::fs::write(
+                &script,
+                format!(
+                    r#"
+import sys
+with open(sys.argv[1], 'w', buffering=1) as log:
+    for raw in sys.stdin:
+        line = raw.strip()
+        log.write(line + '\n')
+        if line == 'usi':
+            if {advertised}: print('option name USI_Ponder type check default false', flush=True)
+            print('usiok', flush=True)
+        elif line == 'isready': print('readyok', flush=True)
+        elif line == 'quit': break
+"#,
+                    advertised = if advertised { "True" } else { "False" }
+                ),
+            )
+            .unwrap();
+            let cfg = EngineConfig {
+                path: "python3".into(),
+                args: vec![script.display().to_string(), log.display().to_string()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: true,
+                usi_options: vec!["USI_Ponder=false".into()],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, "legacy".into()).unwrap();
+            let req = SearchRequest {
+                sfen: "fixture",
+                moves: "",
+                time_args: TimeArgs {
+                    btime: 0,
+                    wtime: 0,
+                    binc: 0,
+                    winc: 0,
+                    byoyomi: 0,
+                },
+                think_limit_ms: 10000,
+                timeout_margin_ms: 10,
+                limit_only_timeout_ms: Some(10),
+                game_id: 1,
+                ply: 1,
+                side: rshogi_core::types::Color::Black,
+                engine_label: "legacy".into(),
+                pass_rights: None,
+                go_depth: None,
+                go_nodes: Some(1),
+            };
+            assert!(engine.search(&req, None).unwrap().timed_out);
+            assert!(!engine.search_pending);
+            engine.stop_ponder().unwrap();
+            engine.sync_ready().unwrap();
+            let commands = std::fs::read_to_string(&log).unwrap();
+            let mut expected = vec!["usi"];
+            if advertised {
+                expected.push("setoption name USI_Ponder value true");
+            } else {
+                expected.extend([
+                    "setoption name Threads value 1",
+                    "setoption name USI_Hash value 1",
+                    "setoption name Hash value 1",
+                ]);
+            }
+            expected.extend([
+                "setoption name USI_Ponder value false",
+                "isready",
+                "usinewgame",
+                "position sfen fixture",
+                "go nodes 1",
+                "stop",
+                "isready",
+            ]);
+            assert_eq!(commands.lines().collect::<Vec<_>>(), expected);
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn hit_drops_mixed_primary_records() {
+        for lines in [
+            vec![
+                "info depth 10 score cp 42 pv 7g7f",
+                "info depth 11 score cp 99 lowerbound pv 3c3d",
+            ],
+            vec!["info depth 10 score cp 42 pv 7g7f", "info score cp 99"],
+            vec!["info depth 10 score cp 42 pv 7g7f", "info pv 3c3d"],
+        ] {
+            let mut snapshot = InfoSnapshot::default();
+            let mut scored_pv = None;
+            for line in lines {
+                if let Some(pv) = parse_scored_primary_pv(line) {
+                    scored_pv = pv;
+                }
+                snapshot.update_from_line(line);
+            }
+            snapshot.update_from_line("info depth 11 multipv 2 score cp 20 pv 8c8d");
+            snapshot.update_from_line("info nodes 123");
+            retain_matching_ponder_eval(&mut snapshot, scored_pv.as_deref(), "7g7f");
+            assert!(snapshot.score_cp.is_none());
+            assert!(snapshot.last_exact_primary.is_none());
+            assert!(snapshot.pv.is_empty());
+            assert_eq!(snapshot.nodes, Some(123));
+        }
+    }
+
+    #[test]
+    fn hit_checks_bound_mate_and_missing_bestmove() {
+        use super::super::types::{PrimaryScore, ScoreBound};
+
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for (info, bestmove, expected_cp, expected_mate, expected_exact) in [
+            (
+                "info depth 10 score cp 42 pv 3c3d\ninfo depth 11 score cp 99 lowerbound pv 7g7f",
+                Some("7g7f"),
+                Some(99),
+                None,
+                false,
+            ),
+            (
+                "info depth 10 score cp 42 pv 7g7f\ninfo depth 11 score cp 99 lowerbound pv 3c3d",
+                Some("7g7f"),
+                None,
+                None,
+                false,
+            ),
+            ("info depth 10 score mate 3 pv 7g7f", Some("7g7f"), None, Some(3), true),
+            ("info depth 10 score mate 3 pv 3c3d", Some("7g7f"), None, None, false),
+            ("info depth 10 score mate + pv 7g7f", Some("7g7f"), None, None, true),
+            ("info depth 10 score mate + pv 3c3d", Some("7g7f"), None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", None, None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", Some("resign"), None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", Some("win"), None, None, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("engine.py");
+            std::fs::write(
+                &script,
+                format!(
+                    r#"
+import sys
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == 'usi': print('usiok', flush=True)
+    elif line == 'isready': print('readyok', flush=True)
+    elif line == 'go ponder':
+        print({info:?}, flush=True)
+        print('info nodes 123 nps 456 time 78', flush=True)
+    elif line == 'ponderhit':
+        if {reply:?}: print({reply:?}, flush=True)
+    elif line == 'quit': break
+"#,
+                    reply = bestmove.map(|mv| format!("bestmove {mv}")).unwrap_or_default(),
+                ),
+            )
+            .unwrap();
+            let cfg = EngineConfig {
+                path: "python3".into(),
+                args: vec![script.display().to_string()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, "fake".into()).unwrap();
+            engine.enable_tournament_ponder(true).unwrap();
+            engine.pondering = Some("3c3d".into());
+            engine.search_pending = true;
+            engine.write_line("go ponder").unwrap();
+            let req = SearchRequest {
+                sfen: "startpos",
+                moves: "3c3d",
+                time_args: TimeArgs {
+                    btime: 0,
+                    wtime: 0,
+                    binc: 0,
+                    winc: 0,
+                    byoyomi: 0,
+                },
+                think_limit_ms: 10000,
+                timeout_margin_ms: 20,
+                limit_only_timeout_ms: Some(100),
+                game_id: 1,
+                ply: 3,
+                side: rshogi_core::types::Color::Black,
+                engine_label: "fake".into(),
+                pass_rights: None,
+                go_depth: None,
+                go_nodes: Some(1),
+            };
+            let mut lines = Vec::new();
+            let mut callback = |line: &str, _: &SearchRequest<'_>| lines.push(line.to_owned());
+            let outcome = engine.search(&req, Some(&mut callback)).unwrap();
+            assert_eq!(outcome.bestmove.as_deref(), bestmove);
+            assert_eq!(outcome.timed_out, bestmove.is_none());
+            assert_eq!(outcome.watchdog_fired, bestmove.is_none());
+            assert!(lines.is_empty());
+            let eval = outcome.eval.unwrap();
+            assert_eq!(eval.nodes, Some(123));
+            assert_eq!(eval.nps, Some(456));
+            assert_eq!(eval.time_ms, Some(78));
+            assert_eq!(eval.score_cp, expected_cp);
+            assert_eq!(eval.score_mate, expected_mate);
+            assert_eq!(eval.last_exact_primary.is_some(), expected_exact);
+            let retained = expected_cp.is_some() || expected_exact;
+            assert_eq!(eval.pv.as_deref(), retained.then_some(["7g7f".to_owned()].as_slice()));
+            assert_eq!(eval.score_bound, expected_cp.map(|_| ScoreBound::Lowerbound));
+            assert_eq!(
+                eval.score_mate_sign,
+                (expected_exact && info.contains("mate +")).then_some(1)
+            );
+            if expected_mate.is_some() {
+                assert_eq!(eval.last_exact_primary.unwrap().score, PrimaryScore::Mate(3));
+            }
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn hit_validates_primary_pv_and_preserves_counters() {
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for (pv, post, delayed, early, expected) in [
+            ("7g7f", false, false, false, Some(42)),
+            ("3c3d", false, false, false, None),
+            ("3c3d", true, false, false, Some(99)),
+            ("7g7f", true, false, false, Some(99)),
+            ("3c3d", false, true, false, None),
+            ("", false, false, false, None),
+            ("3c3d", false, false, true, None),
+            ("7g7f", false, false, true, Some(42)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("engine.py");
+            std::fs::write(
+                &script,
+                format!(
+                    r#"
+import sys
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == 'usi': print('usiok', flush=True)
+    elif line == 'isready': print('readyok', flush=True)
+    elif line == 'go ponder':
+        if not {delayed}:
+            print('info depth 10 score cp 42 pv {pv}', flush=True)
+            print('info multipv 2 depth 10 score cp -200 pv 8c8d', flush=True)
+            print('info nodes 123 nps 456 time 78', flush=True)
+        if {early}:
+            print('bestmove 7g7f', flush=True)
+    elif line == 'ponderhit':
+        if {delayed}:
+            print('info depth 10 score cp 42 pv {pv}', flush=True)
+            print('info nodes 123 nps 456 time 78', flush=True)
+        if {post}:
+            print('info depth 2 score cp 99 pv 7g7f', flush=True)
+        if not {early}:
+            print('bestmove 7g7f', flush=True)
+    elif line == 'quit': break
+"#,
+                    post = if post { "True" } else { "False" },
+                    delayed = if delayed { "True" } else { "False" },
+                    early = if early { "True" } else { "False" }
+                ),
+            )
+            .unwrap();
+            let cfg = EngineConfig {
+                path: "python3".into(),
+                args: vec![script.display().to_string()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, "fake".into()).unwrap();
+            engine.enable_tournament_ponder(true).unwrap();
+            engine.pondering = Some("3c3d".into());
+            engine.search_pending = true;
+            engine.write_line("go ponder").unwrap();
+            let req = SearchRequest {
+                sfen: "startpos",
+                moves: "3c3d",
+                time_args: TimeArgs {
+                    btime: 0,
+                    wtime: 0,
+                    binc: 0,
+                    winc: 0,
+                    byoyomi: 0,
+                },
+                think_limit_ms: 10000,
+                timeout_margin_ms: 1000,
+                limit_only_timeout_ms: None,
+                game_id: 1,
+                ply: 3,
+                side: rshogi_core::types::Color::Black,
+                engine_label: "fake".into(),
+                pass_rights: None,
+                go_depth: None,
+                go_nodes: Some(1),
+            };
+            let mut lines = Vec::new();
+            let mut callback = |line: &str, _: &SearchRequest<'_>| lines.push(line.to_owned());
+            let result = engine.search(&req, Some(&mut callback)).unwrap();
+            assert_eq!(result.eval.as_ref().and_then(|e| e.score_cp), expected);
+            assert!(lines.is_empty());
+            assert!(!engine.search_pending);
+            let eval = result.eval.unwrap();
+            assert_eq!(eval.nodes, Some(123));
+            assert_eq!(eval.nps, Some(456));
+            assert_eq!(eval.time_ms, Some(78));
+            if let Some(expected) = expected {
+                assert_eq!(eval.pv.unwrap(), ["7g7f"]);
+                assert_eq!(
+                    eval.last_exact_primary.unwrap().score,
+                    super::super::types::PrimaryScore::Cp(expected)
+                );
+            } else {
+                assert!(eval.pv.is_none());
+                assert!(eval.last_exact_primary.is_none());
+                assert!(eval.score_mate.is_none());
+                assert!(eval.score_mate_sign.is_none());
+            }
+            engine.new_game().unwrap();
+        }
+        drop(guard);
     }
 }

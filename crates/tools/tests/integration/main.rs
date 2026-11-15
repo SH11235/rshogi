@@ -40,6 +40,7 @@ mod teacher_resource_output_safety;
 mod tournament_adjudication_integration;
 mod tournament_error_retry_integration;
 mod tournament_output_identity;
+mod tournament_ponder;
 mod tournament_shutdown_integration;
 
 mod csa_terminal_outcomes;
