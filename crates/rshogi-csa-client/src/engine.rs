@@ -445,7 +445,34 @@ impl UsiEngine {
             }
         }
 
-        // USI オプション設定
+        self.update_options(options, ponder)?;
+
+        // isready → readyok
+        self.send("isready")?;
+        loop {
+            let line = self.recv(timeout)?;
+            if line == "readyok" {
+                break;
+            }
+        }
+        log::info!(
+            "[USI] エンジン準備完了: {}",
+            if self.engine_name.is_empty() {
+                "(unknown)"
+            } else {
+                &self.engine_name
+            }
+        );
+        Ok(())
+    }
+
+    /// 対局の合間に指定したオプションを送る。同期は次の `new_game` の `isready` で行う。
+    /// `ponder` が有効なら、起動時と同じく対応する Ponder オプションを優先する。
+    pub fn update_options(
+        &mut self,
+        options: &HashMap<String, toml::Value>,
+        ponder: bool,
+    ) -> Result<()> {
         for (key, value) in options {
             let val_str = match value {
                 toml::Value::Integer(n) => n.to_string(),
@@ -466,22 +493,6 @@ impl UsiEngine {
             }
         }
 
-        // isready → readyok
-        self.send("isready")?;
-        loop {
-            let line = self.recv(timeout)?;
-            if line == "readyok" {
-                break;
-            }
-        }
-        log::info!(
-            "[USI] エンジン準備完了: {}",
-            if self.engine_name.is_empty() {
-                "(unknown)"
-            } else {
-                &self.engine_name
-            }
-        );
         Ok(())
     }
 

@@ -12,6 +12,7 @@ mod csa_reconnect_protocol;
 mod csa_tcp_transport;
 mod csa_ws_transport;
 mod engine_info_cache;
+mod engine_options_reload;
 mod engine_stderr_diagnostic;
 mod jsonl_output;
 mod lib_consumer;
