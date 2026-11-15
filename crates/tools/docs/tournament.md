@@ -101,7 +101,8 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 | `--adjudicate-win "movecount=3,score=600"` | off | 同一側の優勢評価の連続による勝ち裁定 |
 | `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は開始局面からの対局内 ply（`--max-moves` と異なり開始局面までの手数は含まない） |
 | `--adjudicate-agreement "movecount=3,score=800"` | off | 両側の自己視点の評価が勝ち側 +score 以上・負け側 -score 以下で一致した状態の連続による勝敗の裁定 |
-| `--concurrency N` | 1 | 並列対局数。1 対局は手番制で約 1 CPU スレッド消費 |
+| `--concurrency N` | 1 | 並列対局数。1 局あたり通常は約 Threads スレッド、ponder 時は最大 2×Threads スレッドが同時に探索する |
+| `--ponder INDEX:true/false` | 全 engine false | engine index（0 始まり）ごとの相手手番思考。複数指定可 |
 | `--report-interval N` | 10 | N 局ごとに進捗を表示 |
 
 ### エンジンに渡す対局履歴
@@ -560,3 +561,55 @@ position startpos moves 2g2f
 局面の割り当てはペアごとに循環する。並列実行時の開始・完了時刻の順序は保証しない。
 meta の `settings.startpos_order` は既定も含めて常に記録する。
 集計の詳細は [analyze_selfplay](analyze_selfplay.md#開始局面別の集計) を参照。
+
+## 相手手番の思考（ponder）
+
+`--ponder INDEX:true` で engine ごとに有効にする。index は `--engine-usi-option`
+と同じ 0 始まりで、複数指定できる。全 engine の既定は無効。例えば片側だけ有効にする場合:
+
+```bash
+./target/release/tournament \
+  --engine /path/to/engine-a --engine-label a \
+  --engine /path/to/engine-b --engine-label b \
+  --ponder 0:true 1:false --games 10 --byoyomi 1000 \
+  --out-dir runs/selfplay/ponder-comparison
+```
+
+通常は `bestmove ... ponder ...` の合法な予想手を着手後の手順に足して `go ponder` を送る。
+予想手がなければ開始しない。一致時は `ponderhit`、不一致時は `stop` の bestmove を
+読み捨て、実際の手順で `position` と `go` を送る。有効な engine の `USI_Ponder`
+（または `Ponder`）は true に設定する。
+
+`Stochastic_Ponder=true` は `--usi-option` / `--engine-usi-option` で engine に渡す。
+tournament の送信列は通常の ponder と同じで、合法な予想手を末尾に足した `position` と
+`go ponder` を送り、一致時は `ponderhit`、不一致時は `stop` の bestmove を回収して
+実際の手順で `position` と `go` を送る。予想手がなければ開始しない。
+rshogi は内部で予想手を 1 手戻した相手手番の局面から先読みし、`ponderhit` で先読みを止め、
+直近の position と ponder を除いた go で通常探索をやり直す。
+`Stochastic_Ponder` だけでは tournament の ponder を有効にしない。
+
+消費時間は相手の bestmove を受信した時点から計測する。予想が外れた場合の stop・回収と
+読み直しにかかった時間は消費に含み、相手手番中の ponder 時間は含めない。
+終局時は残っている ponder を停止して bestmove を回収する。5 秒以内に回収できない場合は
+通信エラーとして worker を退役させ、既存のエラーペア再試行規則に従う。
+`--max-moves` は従来どおり開始局面までを含む総手数である。
+
+ponder 有効時のみ、JSONL の result に `ponder` を追加する。先手、後手の順の 2 要素で、
+各要素は `sent`（`go ponder` の送信回数）、`hits`（`ponderhit` の送信回数）、
+`hit_rate`（`hits / sent`、未送信なら null）を持つ。終局時に中断した ponder も sent に含む。
+`Stochastic_Ponder=true` でも同じ規則で集計する。`meta.json` の engines には有効な engine の `ponder: true`、
+トップレベルの `ponder` には engine index 順の集計を保存し、完了時の標準出力にも割合を表示する。
+集計は正常に結果を回収できた対局（再試行分を含む）の合計で、棋力集計の有効ペア数とは別である。
+通信エラーになった対局の途中統計は含めない。
+既存の analyze_selfplay は追加フィールドを無視して読み込める。
+ponder 無指定時の出力形式は変わらない。
+
+### CPU の割り当てと時計補正
+
+ponder 中は対局中の 2 engine が同時に CPU を使う。必要な探索スレッド数の上限は
+`2 × --threads × --concurrency`。`--cpu-affinity numa` は従来どおり worker あたり
+`--threads` 個の論理 CPU を確保し、worker 内の全 engine が同じ CPU 群を共有する。
+ponder を使うとこの群で CPU 競合が起き得るため、専用 CPU を分けたい場合は affinity を off にし、
+engine の wrapper などで割り当てる。off の場合も同時使用を考慮して concurrency を選ぶ。
+`--nps-scaling` の事前測定は worker あたり 1 engine の通常探索であり、ponder による CPU
+競合を再現しない。補正値で ponder 有無の計算資源が等しくなるとは限らない。

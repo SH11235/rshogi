@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rshogi_core::types::{Color, Move};
 
 use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
-use super::engine::EngineProcess;
+use super::engine::{EngineProcess, PonderStats};
 use super::position::{ParsedPosition, build_position, is_legal_game_move, plies_before_start};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
@@ -69,6 +69,8 @@ pub struct GameResult {
     pub outcome: GameOutcome,
     pub reason: String,
     pub plies: u32,
+    /// 先手・後手の ponder 統計。両者無効なら None。
+    pub ponder: Option<[PonderStats; 2]>,
 }
 
 /// 1局を実行する。
@@ -81,6 +83,33 @@ pub struct GameResult {
 /// - `on_move`: 1手ごとに呼ばれるコールバック
 /// - `info_cb`: info行受信時のコールバック（None ならスキップ）
 pub fn run_game(
+    black: &mut EngineProcess,
+    white: &mut EngineProcess,
+    start_pos: &ParsedPosition,
+    tc: TimeControl,
+    config: &GameConfig,
+    game_id: u32,
+    on_move: &mut dyn FnMut(&MoveEvent),
+    info_cb: Option<Box<InfoCallback<'_>>>,
+) -> Result<GameResult> {
+    black.ponder_stats = PonderStats::default();
+    white.ponder_stats = PonderStats::default();
+    let result = run_game_inner(black, white, start_pos, tc, config, game_id, on_move, info_cb);
+    let black_cleanup = black.stop_ponder();
+    let white_cleanup = white.stop_ponder();
+    black.turn_start = None;
+    white.turn_start = None;
+    black_cleanup.context(EngineFailure)?;
+    white_cleanup.context(EngineFailure)?;
+    result.map(|mut result| {
+        if black.ponder_enabled || white.ponder_enabled {
+            result.ponder = Some([black.ponder_stats, white.ponder_stats]);
+        }
+        result
+    })
+}
+
+fn run_game_inner(
     black: &mut EngineProcess,
     white: &mut EngineProcess,
     start_pos: &ParsedPosition,
@@ -129,6 +158,7 @@ pub fn run_game(
                 outcome: GameOutcome::InProgress,
                 reason: "cancelled".into(),
                 plies: plies_played,
+                ponder: None,
             });
         }
         if over_game_time_limit() {
@@ -136,6 +166,7 @@ pub fn run_game(
                 outcome: GameOutcome::InProgress,
                 reason: "game_time_limit".into(),
                 plies: plies_played,
+                ponder: None,
             });
         }
         plies_played = ply_idx + 1;
@@ -169,12 +200,14 @@ pub fn run_game(
         };
         let cb = info_cb.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>));
         let search = engine.search(&req, cb).context(EngineFailure)?;
+        let opponent_turn_start = std::time::Instant::now();
 
         if search.watchdog_fired {
             return Ok(GameResult {
                 outcome: GameOutcome::InProgress,
                 reason: "watchdog".into(),
                 plies: plies_played,
+                ponder: None,
             });
         }
         // 上限を越えた探索の結果 (終局手を含む) は勝敗に使わない。
@@ -183,6 +216,7 @@ pub fn run_game(
                 outcome: GameOutcome::InProgress,
                 reason: "game_time_limit".into(),
                 plies: plies_played,
+                ponder: None,
             });
         }
         let timed_out = search.timed_out;
@@ -283,12 +317,42 @@ pub fn run_game(
             think_limit_ms,
             timed_out,
             eval: eval_log,
-            engine_label,
+            engine_label: engine_label.clone(),
         };
         on_move(&event);
 
         if terminal || outcome != GameOutcome::InProgress {
             break;
+        }
+        if ply_idx + 1 < game_moves_limit {
+            let ponder_req = SearchRequest {
+                sfen: &initial_sfen,
+                moves: &moves,
+                time_args: tc.time_args(),
+                think_limit_ms: tc.think_limit_ms(side),
+                timeout_margin_ms: config.timeout_margin_ms,
+                limit_only_timeout_ms: config.limit_only_timeout_ms,
+                game_id,
+                ply: plies_played + 2,
+                side,
+                engine_label,
+                pass_rights: initial_pass_rights,
+                go_depth: config.go_depth,
+                go_nodes: if side == Color::Black {
+                    config.go_nodes_black
+                } else {
+                    config.go_nodes_white
+                },
+            };
+            engine.start_ponder(&ponder_req, &pos).context(EngineFailure)?;
+        }
+        let opponent = if side == Color::Black {
+            &mut *white
+        } else {
+            &mut *black
+        };
+        if opponent.ponder_enabled {
+            opponent.turn_start = Some(opponent_turn_start);
         }
     }
 
@@ -301,5 +365,6 @@ pub fn run_game(
         outcome,
         reason: outcome_reason,
         plies: plies_played,
+        ponder: None,
     })
 }

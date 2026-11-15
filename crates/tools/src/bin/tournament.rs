@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use tools::selfplay::adjudication::parse_agreement_rule;
 use tools::selfplay::cpu_affinity::{CpuAffinityMode, discover_numa_cpu_affinities};
+use tools::selfplay::engine::PonderStats;
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::nps_bench;
 use tools::selfplay::time_control::TimeControl;
@@ -160,6 +161,10 @@ struct Cli {
     /// Merged on top of --usi-option by default; per-engine values win.
     #[arg(long = "engine-usi-option", num_args = 1..)]
     engine_usi_options: Option<Vec<String>>,
+
+    /// engine ごとの ponder (INDEX:true / INDEX:false、複数指定可)。既定は全 engine 無効。
+    #[arg(long, num_args = 1..)]
+    ponder: Vec<String>,
 
     /// Make --engine-usi-option replace common --usi-option for that engine.
     #[arg(long = "strict-engine-usi-option")]
@@ -294,6 +299,7 @@ struct MatchResult {
     reason: String,
     plies: u32,
     move_logs: Vec<MoveLogEntry>,
+    ponder: Option<[PonderStats; 2]>,
     /// エンジン起動失敗・通信エラー等で対局が成立しなかった場合 true。
     /// SPRT 集計からは除外される。
     error: bool,
@@ -322,6 +328,8 @@ struct MoveLogEntry {
 
 #[derive(Serialize)]
 struct ResultLogEntry<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ponder: Option<[PonderStats; 2]>,
     #[serde(rename = "type")]
     kind: &'static str,
     game_id: u32,
@@ -488,6 +496,8 @@ struct EngineCommandMeta {
 
 #[derive(Serialize)]
 struct TournamentMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ponder: Option<Vec<PonderStats>>,
     timestamp: String,
     settings: MetaSettings,
     engines: Vec<EngineMetaEntry>,
@@ -526,6 +536,8 @@ struct RetrySummary {
 
 #[derive(Serialize)]
 struct EngineMetaEntry {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    ponder: bool,
     index: usize,
     label: String,
     path: String,
@@ -834,6 +846,7 @@ struct WorkerConfig {
     engine_paths: Vec<PathBuf>,
     engine_labels: Vec<String>,
     engine_usi_options: Vec<Vec<String>>,
+    engine_ponder: Vec<bool>,
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
@@ -848,6 +861,18 @@ struct WorkerConfig {
     go_nodes: Vec<Option<u64>>,
     start_positions: Vec<ParsedPosition>,
     cpu_slots: Option<Arc<CpuSlots>>,
+}
+
+fn parse_ponder(values: &[String], engines: usize) -> Result<Vec<bool>> {
+    let mut enabled = vec![false; engines];
+    for value in values {
+        let (index, flag) =
+            value.split_once(':').context("--ponder requires INDEX:true or INDEX:false")?;
+        let index: usize = index.parse().context("invalid --ponder engine index")?;
+        let slot = enabled.get_mut(index).context("--ponder engine index out of range")?;
+        *slot = flag.parse().context("--ponder value must be true or false")?;
+    }
+    Ok(enabled)
 }
 
 fn engine_config(
@@ -952,6 +977,7 @@ fn worker_main(
         engine_paths,
         engine_labels,
         engine_usi_options,
+        engine_ponder,
         threads,
         hash_mb,
         max_moves,
@@ -979,7 +1005,8 @@ fn worker_main(
     let mut engines: Vec<EngineProcess> = Vec::new();
     for (i, path) in engine_paths.iter().enumerate() {
         let label = engine_labels[i].clone();
-        let cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
+        let mut cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
+        cfg.ponder = engine_ponder[i];
         match spawn_engine(&cfg, label, cpu_affinity) {
             Ok(ep) => {
                 engines.push(ep);
@@ -1017,6 +1044,7 @@ fn worker_main(
                 reason: format!("error: new game: {e}"),
                 plies: 0,
                 move_logs: Vec::new(),
+                ponder: None,
                 error: true,
                 worker_retired: true,
             });
@@ -1079,6 +1107,7 @@ fn worker_main(
                     reason: result.reason,
                     plies: result.plies,
                     move_logs,
+                    ponder: result.ponder,
                     error: false,
                     worker_retired: false,
                 });
@@ -1091,6 +1120,7 @@ fn worker_main(
                     reason: format!("error: {e}"),
                     plies: 0,
                     move_logs,
+                    ponder: None,
                     error: true,
                     worker_retired: true,
                 });
@@ -1104,6 +1134,7 @@ fn worker_main(
                     reason: "error: worker panic".to_string(),
                     plies: 0,
                     move_logs,
+                    ponder: None,
                     error: true,
                     worker_retired: true,
                 });
@@ -1121,6 +1152,7 @@ struct SpawnCtx<'a> {
     engine_paths: &'a [PathBuf],
     engine_labels: &'a [String],
     engine_usi_options: &'a [Vec<String>],
+    engine_ponder: &'a [bool],
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
@@ -1150,6 +1182,7 @@ fn spawn_worker(
         engine_paths: ctx.engine_paths.to_vec(),
         engine_labels: ctx.engine_labels.to_vec(),
         engine_usi_options: ctx.engine_usi_options.to_vec(),
+        engine_ponder: ctx.engine_ponder.to_vec(),
         threads: ctx.threads,
         hash_mb: ctx.hash_mb,
         max_moves: ctx.max_moves,
@@ -1320,6 +1353,7 @@ fn main() -> Result<()> {
     };
     ensure_start_positions_within_max_moves(&start_defs, cli.max_moves)?;
 
+    let engine_ponder = parse_ponder(&cli.ponder, cli.engines.len())?;
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
 
     // per-engine オプションを解析: HashMap<usize, Vec<String>>
@@ -1471,10 +1505,12 @@ fn main() -> Result<()> {
     }
 
     let mut tournament_meta = TournamentMeta {
+        ponder: engine_ponder.iter().any(|&p| p).then(|| vec![PonderStats::default(); n]),
         timestamp: timestamp.to_rfc3339(),
         settings: MetaSettings::new(&cli, time_control, seed),
         engines: (0..n)
             .map(|i| EngineMetaEntry {
+                ponder: engine_ponder[i],
                 index: i,
                 label: engine_labels[i].clone(),
                 path: cli.engines[i].display().to_string(),
@@ -1644,6 +1680,7 @@ fn main() -> Result<()> {
         engine_paths: &cli.engines,
         engine_labels: &engine_labels,
         engine_usi_options: &engine_usi_options,
+        engine_ponder: &engine_ponder,
         threads: cli.threads,
         hash_mb: cli.hash_mb,
         max_moves: cli.max_moves,
@@ -1672,6 +1709,7 @@ fn main() -> Result<()> {
     }
     let start_time = Instant::now();
     let mut agg = Aggregator {
+        ponder: tournament_meta.ponder.clone(),
         engine_labels: &engine_labels,
         pair_writers,
         pair_stats,
@@ -1845,6 +1883,7 @@ fn main() -> Result<()> {
 
     // 集計器を分解して以降の表示に使う。
     let Aggregator {
+        ponder,
         mut pair_writers,
         pair_stats,
         sprt_state,
@@ -1881,6 +1920,7 @@ fn main() -> Result<()> {
     // analyze_selfplay の `run_meta_issue` と同じ条件で invalid にする。
     retry_summary.invalid |=
         run_status != RunStatus::Completed || incomplete_pairs > 0 || unreturned_games > 0;
+    tournament_meta.ponder = ponder;
     tournament_meta.retry = retry_summary;
     tournament_meta.run_status = run_status;
     tournament_meta.incomplete_pairs = incomplete_pairs;
@@ -1901,6 +1941,20 @@ fn main() -> Result<()> {
     );
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
     print_final_table(&pair_stats, &engine_labels);
+    if let Some(stats) = &tournament_meta.ponder {
+        for (label, stats) in engine_labels.iter().zip(stats) {
+            println!(
+                "Ponder {label}: {}/{} ({:.1}%)",
+                stats.hits,
+                stats.sent,
+                if stats.sent == 0 {
+                    0.0
+                } else {
+                    100.0 * stats.hits as f64 / stats.sent as f64
+                }
+            );
+        }
+    }
     println!(
         "Error pairs: {}  Retried pairs: {}  Exhausted pairs: {}  Invalid: {}",
         retry_summary.error_pairs,
@@ -2379,6 +2433,7 @@ fn splitmix64(mut value: u64) -> u64 {
 
 /// 対局結果の集計とファイル出力をまとめる。メインループの各 recv 地点から共通で呼ぶ。
 struct Aggregator<'a> {
+    ponder: Option<Vec<PonderStats>>,
     engine_labels: &'a [String],
     pair_writers: HashMap<(usize, usize), PairWriter>,
     pair_stats: HashMap<(usize, usize), (u32, u32, u32)>,
@@ -2418,6 +2473,14 @@ impl Aggregator<'_> {
         )?;
         if self.observe_direct_result(result) {
             self.valid_completed += 2;
+        }
+        if let (Some(total), Some(stats)) = (&mut self.ponder, result.ponder) {
+            for (index, stat) in
+                [result.ticket.black_idx, result.ticket.white_idx].into_iter().zip(stats)
+            {
+                total[index].sent += stat.sent;
+                total[index].hits += stat.hits;
+            }
         }
         self.completed += 1;
         handle_sprt_observation(
@@ -2540,6 +2603,7 @@ fn process_result(
         };
         let result_entry = ResultLogEntry {
             kind: "result",
+            ponder: result.ponder,
             game_id,
             outcome: result.outcome.label(),
             reason: &result.reason,
@@ -3221,6 +3285,7 @@ mod tests {
             reason: String::new(),
             plies: 0,
             move_logs: Vec::new(),
+            ponder: None,
             error,
             worker_retired: false,
         }
@@ -3293,6 +3358,7 @@ mod tests {
             engine_paths: &[],
             engine_labels: &[],
             engine_usi_options: &[],
+            engine_ponder: &[],
             threads: 1,
             hash_mb: 1,
             max_moves: 1,
@@ -3396,6 +3462,7 @@ mod tests {
 
         let labels = strings(&["base", "other", "test"]);
         let mut aggregate = super::Aggregator {
+            ponder: None,
             engine_labels: &labels,
             pair_writers: Default::default(),
             pair_stats: [((0, 1), (0, 0, 0)), ((0, 2), (0, 0, 0))].into(),
@@ -4162,5 +4229,34 @@ mod tests {
         let actual: Vec<_> =
             (0..8).map(|i| deterministic_startpos_index(42, (0, 1), i, 65521)).collect();
         assert_eq!(actual, vec![28243, 37729, 28526, 3240, 12894, 28843, 53384, 8534]);
+    }
+}
+
+#[cfg(test)]
+mod ponder_cli_tests {
+    use super::*;
+
+    #[test]
+    fn engine_ponder_indices_and_overrides() {
+        assert_eq!(parse_ponder(&[], 2).unwrap(), [false, false]);
+        let values = ["0:true", "1:true", "1:false"].map(str::to_owned);
+        assert_eq!(parse_ponder(&values, 2).unwrap(), [true, false]);
+        for invalid in ["true", "2:true", "-1:true", "0:yes", "x:false"] {
+            assert!(parse_ponder(&[invalid.into()], 2).is_err(), "{invalid}");
+        }
+        let cli = Cli::try_parse_from([
+            "tournament",
+            "--engine",
+            "a",
+            "--engine",
+            "b",
+            "--out-dir",
+            "out",
+            "--ponder",
+            "0:true",
+            "1:false",
+        ])
+        .unwrap();
+        assert_eq!(parse_ponder(&cli.ponder, 2).unwrap(), [true, false]);
     }
 }

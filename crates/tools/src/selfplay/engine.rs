@@ -107,9 +107,111 @@ pub struct EngineProcess {
     opt_names: HashSet<String>,
     read_timeout_hint_printed: Cell<bool>,
     pub label: String,
+    pub(crate) ponder_enabled: bool,
+    pondering: Option<String>,
+    predicted_move: Option<String>,
+    search_pending: bool,
+    stop_requested: bool,
+    pub(crate) ponder_stats: PonderStats,
+    pub(crate) turn_start: Option<Instant>,
+}
+
+/// ponder の送信回数と的中回数。
+#[derive(Clone, Copy, Default)]
+pub struct PonderStats {
+    pub sent: u64,
+    pub hits: u64,
+}
+
+impl serde::Serialize for PonderStats {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PonderStats", 3)?;
+        state.serialize_field("sent", &self.sent)?;
+        state.serialize_field("hits", &self.hits)?;
+        let rate = (self.sent > 0).then(|| self.hits as f64 / self.sent as f64);
+        state.serialize_field("hit_rate", &rate)?;
+        state.end()
+    }
 }
 
 impl EngineProcess {
+    fn search_commands(req: &SearchRequest<'_>) -> (String, String) {
+        // パス権がある場合は passrights を付加
+        let mut position_cmd = if let Some((b, w)) = req.pass_rights {
+            format!("position sfen {} passrights {} {}", req.sfen, b, w)
+        } else {
+            format!("position sfen {}", req.sfen)
+        };
+        if !req.moves.is_empty() {
+            position_cmd.push_str(" moves ");
+            position_cmd.push_str(req.moves);
+        }
+        let mut go = build_time_command(&req.time_args);
+        if let Some(depth) = req.go_depth {
+            go.push_str(&format!(" depth {depth}"));
+        }
+        if let Some(nodes) = req.go_nodes {
+            go.push_str(&format!(" nodes {nodes}"));
+        }
+        (position_cmd, go)
+    }
+
+    /// 合法な予想手がある場合だけ、相手手番の探索を開始する。
+    pub(crate) fn start_ponder(
+        &mut self,
+        req: &SearchRequest<'_>,
+        position: &rshogi_core::position::Position,
+    ) -> Result<()> {
+        if !self.ponder_enabled {
+            return Ok(());
+        }
+        let Some(prediction) = self.predicted_move.take() else {
+            return Ok(());
+        };
+        let Some(mv) = rshogi_core::types::Move::from_usi(&prediction) else {
+            return Ok(());
+        };
+        if !super::position::is_legal_game_move(position, mv) {
+            return Ok(());
+        }
+        let expected = mv.to_usi();
+        let (mut position_cmd, go) = Self::search_commands(req);
+        position_cmd.push_str(if req.moves.is_empty() { " moves " } else { " " });
+        position_cmd.push_str(&expected);
+        self.write_line(&position_cmd)?;
+        self.pondering = Some(expected);
+        self.search_pending = true;
+        self.stop_requested = false;
+        self.write_line(&go.replacen("go", "go ponder", 1))?;
+        self.ponder_stats.sent += 1;
+        Ok(())
+    }
+
+    /// ponder の bestmove を回収する。回収不能ならプロセスを再利用しない。
+    pub(crate) fn stop_ponder(&mut self) -> Result<()> {
+        if self.pondering.is_none() && !self.search_pending {
+            return Ok(());
+        }
+        if !self.stop_requested {
+            self.write_line("stop")?;
+            self.stop_requested = true;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.recv_line_until(deadline)?.starts_with("bestmove ") {
+                break;
+            }
+        }
+        self.pondering = None;
+        self.search_pending = false;
+        self.stop_requested = false;
+        Ok(())
+    }
+
     /// プロセスを起動し、USI 初期化を完了する。
     pub fn spawn(cfg: &EngineConfig, label: String) -> Result<Self> {
         let mut proc = Self::spawn_uninitialized(cfg, label)?;
@@ -243,6 +345,13 @@ impl EngineProcess {
             opt_names: HashSet::new(),
             read_timeout_hint_printed: Cell::new(false),
             label,
+            ponder_enabled: cfg.ponder,
+            pondering: None,
+            predicted_move: None,
+            search_pending: false,
+            stop_requested: false,
+            ponder_stats: PonderStats::default(),
+            turn_start: None,
         })
     }
 
@@ -304,6 +413,14 @@ impl EngineProcess {
                 self.write_line(&format!("setoption name {}", opt.trim()))?;
             }
         }
+        if cfg.ponder {
+            let name = if self.opt_names.contains("USI_Ponder") {
+                "USI_Ponder"
+            } else {
+                "Ponder"
+            };
+            self.set_option_if_available(name, "true")?;
+        }
         self.write_line("isready")?;
         let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
         loop {
@@ -320,6 +437,9 @@ impl EngineProcess {
     }
 
     pub fn new_game(&mut self) -> Result<()> {
+        self.stop_ponder()?;
+        self.turn_start = None;
+        self.predicted_move = None;
         self.write_line("usinewgame")?;
         self.sync_ready()
     }
@@ -337,53 +457,36 @@ impl EngineProcess {
         if req.limit_only_timeout_ms == Some(0) {
             bail!("limit_only_timeout_ms must be positive");
         }
-        // パス権がある場合は passrights を付加
-        let mut position_cmd = if let Some((b, w)) = req.pass_rights {
-            format!("position sfen {} passrights {} {}", req.sfen, b, w)
+        let turn_start = self.turn_start.take();
+        self.predicted_move = None;
+        let hit = self
+            .pondering
+            .as_deref()
+            .is_some_and(|mv| req.moves.split_whitespace().last() == Some(mv));
+        if hit {
+            self.write_line("ponderhit")?;
+            self.pondering = None;
+            self.ponder_stats.hits += 1;
         } else {
-            format!("position sfen {}", req.sfen)
-        };
-        if !req.moves.is_empty() {
-            position_cmd.push_str(" moves ");
-            position_cmd.push_str(req.moves);
+            self.stop_ponder()?;
+            let (position, go) = Self::search_commands(req);
+            self.write_line(&position)?;
+            self.search_pending = self.ponder_enabled;
+            self.stop_requested = false;
+            self.write_line(&go)?;
         }
-        self.write_line(&position_cmd)?;
-        let time_args = &req.time_args;
-        // depth/nodes 制限の有無
+        let start = if self.ponder_enabled {
+            turn_start.unwrap_or_else(Instant::now)
+        } else {
+            Instant::now()
+        };
         let has_limit = req.go_depth.is_some() || req.go_nodes.is_some();
+        let time_args = &req.time_args;
         let has_time = time_args.byoyomi > 0
             || time_args.btime > 0
             || time_args.wtime > 0
             || time_args.binc > 0
             || time_args.winc > 0;
-
-        let time_cmd = build_time_command(time_args);
-
-        if has_limit && has_time {
-            // 組み合わせモード: 時間制御 + depth/nodes 目標
-            let mut cmd = time_cmd;
-            if let Some(depth) = req.go_depth {
-                cmd.push_str(&format!(" depth {depth}"));
-            }
-            if let Some(nodes) = req.go_nodes {
-                cmd.push_str(&format!(" nodes {nodes}"));
-            }
-            self.write_line(&cmd)?;
-        } else if has_limit {
-            // depth/nodes のみモード。期限は下の watchdog 設定で決める。
-            let mut cmd = String::from("go");
-            if let Some(depth) = req.go_depth {
-                cmd.push_str(&format!(" depth {depth}"));
-            }
-            if let Some(nodes) = req.go_nodes {
-                cmd.push_str(&format!(" nodes {nodes}"));
-            }
-            self.write_line(&cmd)?;
-        } else {
-            self.write_line(&time_cmd)?;
-        }
-
-        let start = Instant::now();
         // watchdog 未指定の depth/nodes のみモードは従来の24時間を維持する。
         // Duration::MAX は recv_timeout に渡すと timespec オーバーフローが起きるため、
         // 十分大きな有限値（24 時間）を使う。
@@ -412,6 +515,7 @@ impl EngineProcess {
             if elapsed >= deadline {
                 if !stop_sent {
                     self.write_line("stop")?;
+                    self.stop_requested = self.ponder_enabled;
                     stop_sent = true;
                     continue;
                 }
@@ -437,6 +541,12 @@ impl EngineProcess {
                     if let Some(rest) = line.strip_prefix("bestmove ") {
                         let mut parts = rest.split_whitespace();
                         let mv = parts.next().unwrap_or_default().to_string();
+                        self.search_pending = false;
+                        self.predicted_move = if parts.next() == Some("ponder") {
+                            parts.next().map(str::to_owned)
+                        } else {
+                            None
+                        };
                         let elapsed_ms = duration_to_millis(start.elapsed());
                         // stop 後の回収結果も、受信時点で期限を超えた結果も勝敗に使わない。
                         let watchdog_fired =
@@ -458,6 +568,7 @@ impl EngineProcess {
                 Err(RecvTimeoutError::Timeout) => {
                     if !stop_sent {
                         self.write_line("stop")?;
+                        self.stop_requested = self.ponder_enabled;
                         stop_sent = true;
                     } else {
                         let elapsed_ms = duration_to_millis(start.elapsed());

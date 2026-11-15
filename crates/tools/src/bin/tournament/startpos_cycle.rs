@@ -287,6 +287,7 @@ mod tests {
         for ticket in [first.clone(), second] {
             let error = ticket.pair_slot == 0;
             source.observe_result(&MatchResult {
+                ponder: None,
                 ticket,
                 outcome: GameOutcome::Draw,
                 reason: "error".into(),
@@ -374,6 +375,7 @@ mod tests {
             let mut writers = HashMap::from([((0, 1), writer)]);
             crate::process_result(
                 &MatchResult {
+                    ponder: None,
                     ticket,
                     outcome: GameOutcome::Draw,
                     reason: "max_moves".into(),
