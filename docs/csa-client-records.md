@@ -70,6 +70,9 @@ cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.js
 スキーマは selfplay と同じ `meta` / `move` / `result` の 3 種類。`meta.game_id` は対局 ID を保持する。
 `move.eval` は `score_cp` / `score_mate` / `depth` / `seldepth` / `nodes` / `time_ms` / `nps` / `pv` を含む。
 相手手番の `eval` は取得できず、時間情報の `engine_timing` は自エンジン側の値を対象にする。
+対局間に設定ファイルから読み直したオプションは、反映後に始まる対局の meta に記録する。
+変更前の対局や過去の JSONL は書き換えない。
+
 相手のバイナリパス・USI オプションは CSA から取得できないため、`path_black` / `path_white` の
 相手側は `remote:<player_name>` とする。集計用の `label_*` と `winner` は上記のラベル規則に従う。
 

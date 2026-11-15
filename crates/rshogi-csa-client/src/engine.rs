@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -445,7 +445,48 @@ impl UsiEngine {
             }
         }
 
-        // USI オプション設定
+        self.send_options(options, ponder)?;
+        self.send("isready")?;
+        loop {
+            if self.recv(timeout)? == "readyok" {
+                break;
+            }
+        }
+
+        log::info!(
+            "[USI] エンジン準備完了: {}",
+            if self.engine_name.is_empty() {
+                "(unknown)"
+            } else {
+                &self.engine_name
+            }
+        );
+        Ok(())
+    }
+
+    /// 対局の合間に指定したオプションを送り、`isready` / `readyok` で準備完了を待つ。
+    /// `ponder` が有効なら、起動時と同じく対応する Ponder オプションを優先する。
+    pub fn update_options(
+        &mut self,
+        options: &HashMap<String, toml::Value>,
+        ponder: bool,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.send_options(options, ponder)?;
+        self.send("isready")?;
+        let started = Instant::now();
+        loop {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .context("エンジン準備完了の待機がタイムアウトしました")?;
+            if self.recv(remaining)? == "readyok" {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn send_options(&mut self, options: &HashMap<String, toml::Value>, ponder: bool) -> Result<()> {
         for (key, value) in options {
             let val_str = match value {
                 toml::Value::Integer(n) => n.to_string(),
@@ -466,22 +507,6 @@ impl UsiEngine {
             }
         }
 
-        // isready → readyok
-        self.send("isready")?;
-        loop {
-            let line = self.recv(timeout)?;
-            if line == "readyok" {
-                break;
-            }
-        }
-        log::info!(
-            "[USI] エンジン準備完了: {}",
-            if self.engine_name.is_empty() {
-                "(unknown)"
-            } else {
-                &self.engine_name
-            }
-        );
         Ok(())
     }
 

@@ -13,6 +13,10 @@
 //! cargo run -p rshogi-csa-client -- config.toml --id my_engine --ponder
 //! ```
 
+mod options_reload;
+
+use options_reload::OptionsReloader;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -269,6 +273,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let mut options_reloader = cli.config.as_deref().map(OptionsReloader::new).transpose()?;
+
     // 設定ファイル読み込み
     let mut config = if let Some(ref path) = cli.config {
         CsaClientConfig::from_file(path)
@@ -327,6 +333,39 @@ fn main() -> Result<()> {
         if config.game.max_games > 0 && games_played >= config.game.max_games {
             log::info!("最大対局数 ({}) に達しました", config.game.max_games);
             break;
+        }
+
+        if let Some(reloader) = options_reloader.as_mut() {
+            match reloader.prepare(&config.engine.options, &cli) {
+                Ok(Some(update)) => {
+                    if !update.changed.is_empty()
+                        && let Err(error) = engine.update_options(
+                            &update.changed,
+                            config.game.ponder,
+                            Duration::from_secs(config.engine.startup_timeout_sec),
+                        )
+                    {
+                        log::warn!(
+                            "[USI] オプション更新・準備完了待ちの失敗。旧設定で再起動: {error:#}"
+                        );
+                        engine.quit();
+                        engine = spawn_engine(&config)?;
+                    } else {
+                        if !update.changed.is_empty() {
+                            log::info!(
+                                "[USI] 設定ファイルから {} 個のオプションを更新",
+                                update.changed.len()
+                            );
+                        }
+                        config.engine.options = update.options.clone();
+                        reloader.accept(update);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("[USI] 設定ファイルの再読込を見送り、旧設定を維持: {error:#}")
+                }
+            }
         }
 
         // `--lobby` モードは対局直前に LobbyDO へ問い合わせて room_id を取得する。
