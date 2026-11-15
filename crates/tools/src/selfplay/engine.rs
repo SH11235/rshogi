@@ -98,26 +98,38 @@ pub struct EngineConfig {
     pub usi_options: Vec<String>,
 }
 
+fn discard_ponder_eval(snapshot: &mut InfoSnapshot) {
+    *snapshot = InfoSnapshot {
+        nodes: snapshot.nodes,
+        time_ms: snapshot.time_ms,
+        nps: snapshot.nps,
+        ..InfoSnapshot::default()
+    };
+}
+
+fn parse_scored_primary_pv(line: &str) -> Option<Option<String>> {
+    let mut info = InfoSnapshot::default();
+    info.update_from_line(line);
+    (info.score_cp.is_some() || info.score_mate.is_some() || info.score_mate_sign.is_some())
+        .then(|| info.pv.into_iter().next())
+}
+
 fn retain_matching_ponder_eval(
     snapshot: &mut InfoSnapshot,
     scored_pv: Option<&str>,
     bestmove: &str,
 ) {
-    // 同じ depth でも異なる局面の候補が混在し得るため、的中時の候補は渡さない。
-    snapshot.multipv_candidates.clear();
-    if scored_pv != Some(bestmove)
+    if matches!(bestmove, "resign" | "win")
+        || scored_pv != Some(bestmove)
         || snapshot.pv.first().map(String::as_str) != Some(bestmove)
-        || snapshot
-            .last_exact_primary
-            .as_ref()
-            .is_some_and(|primary| primary.pv.first().map(String::as_str) != Some(bestmove))
     {
-        *snapshot = InfoSnapshot {
-            nodes: snapshot.nodes,
-            time_ms: snapshot.time_ms,
-            nps: snapshot.nps,
-            ..InfoSnapshot::default()
-        };
+        discard_ponder_eval(snapshot);
+    } else if snapshot
+        .last_exact_primary
+        .as_ref()
+        .is_some_and(|primary| primary.pv.first().map(String::as_str) != Some(bestmove))
+    {
+        snapshot.last_exact_primary = None;
     }
 }
 
@@ -562,6 +574,9 @@ impl EngineProcess {
                     stop_sent = true;
                     continue;
                 }
+                if hit {
+                    discard_ponder_eval(&mut snapshot);
+                }
                 return Ok(SearchOutcome {
                     bestmove: None,
                     elapsed_ms: duration_to_millis(elapsed),
@@ -575,15 +590,8 @@ impl EngineProcess {
             match self.rx.recv_timeout(remaining) {
                 Ok(line) => {
                     if line.starts_with("info") {
-                        if hit {
-                            let mut info = InfoSnapshot::default();
-                            info.update_from_line(&line);
-                            if info.score_cp.is_some()
-                                || info.score_mate.is_some()
-                                || info.score_mate_sign.is_some()
-                            {
-                                scored_primary_pv = info.pv.into_iter().next();
-                            }
+                        if hit && let Some(pv) = parse_scored_primary_pv(&line) {
+                            scored_primary_pv = pv;
                         }
                         snapshot.update_from_line(&line);
                         if !hit && let Some(ref mut cb) = info_callback {
@@ -633,6 +641,9 @@ impl EngineProcess {
                         stop_sent = true;
                     } else {
                         let elapsed_ms = duration_to_millis(start.elapsed());
+                        if hit {
+                            discard_ponder_eval(&mut snapshot);
+                        }
                         return Ok(SearchOutcome {
                             bestmove: None,
                             elapsed_ms,
@@ -1410,11 +1421,11 @@ with open(sys.argv[1], 'w', buffering=1) as log:
     }
 
     #[test]
-    fn hit_drops_mixed_primary_records_and_candidates() {
+    fn hit_drops_mixed_primary_records() {
         for lines in [
             vec![
-                "info depth 10 score cp 42 pv 3c3d",
-                "info depth 11 score cp 99 lowerbound pv 7g7f",
+                "info depth 10 score cp 42 pv 7g7f",
+                "info depth 11 score cp 99 lowerbound pv 3c3d",
             ],
             vec!["info depth 10 score cp 42 pv 7g7f", "info score cp 99"],
             vec!["info depth 10 score cp 42 pv 7g7f", "info pv 3c3d"],
@@ -1422,10 +1433,8 @@ with open(sys.argv[1], 'w', buffering=1) as log:
             let mut snapshot = InfoSnapshot::default();
             let mut scored_pv = None;
             for line in lines {
-                let mut info = InfoSnapshot::default();
-                info.update_from_line(line);
-                if info.score_cp.is_some() {
-                    scored_pv = info.pv.into_iter().next();
+                if let Some(pv) = parse_scored_primary_pv(line) {
+                    scored_pv = pv;
                 }
                 snapshot.update_from_line(line);
             }
@@ -1435,9 +1444,124 @@ with open(sys.argv[1], 'w', buffering=1) as log:
             assert!(snapshot.score_cp.is_none());
             assert!(snapshot.last_exact_primary.is_none());
             assert!(snapshot.pv.is_empty());
-            assert!(snapshot.multipv_candidates.is_empty());
             assert_eq!(snapshot.nodes, Some(123));
         }
+    }
+
+    #[test]
+    fn hit_checks_bound_mate_and_missing_bestmove() {
+        use super::super::types::{PrimaryScore, ScoreBound};
+
+        let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for (info, bestmove, expected_cp, expected_mate, expected_exact) in [
+            (
+                "info depth 10 score cp 42 pv 3c3d\ninfo depth 11 score cp 99 lowerbound pv 7g7f",
+                Some("7g7f"),
+                Some(99),
+                None,
+                false,
+            ),
+            (
+                "info depth 10 score cp 42 pv 7g7f\ninfo depth 11 score cp 99 lowerbound pv 3c3d",
+                Some("7g7f"),
+                None,
+                None,
+                false,
+            ),
+            ("info depth 10 score mate 3 pv 7g7f", Some("7g7f"), None, Some(3), true),
+            ("info depth 10 score mate 3 pv 3c3d", Some("7g7f"), None, None, false),
+            ("info depth 10 score mate + pv 7g7f", Some("7g7f"), None, None, true),
+            ("info depth 10 score mate + pv 3c3d", Some("7g7f"), None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", None, None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", Some("resign"), None, None, false),
+            ("info depth 10 score cp 42 pv 7g7f", Some("win"), None, None, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("engine.py");
+            std::fs::write(
+                &script,
+                format!(
+                    r#"
+import sys
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == 'usi': print('usiok', flush=True)
+    elif line == 'isready': print('readyok', flush=True)
+    elif line == 'go ponder':
+        print({info:?}, flush=True)
+        print('info nodes 123 nps 456 time 78', flush=True)
+    elif line == 'ponderhit':
+        if {reply:?}: print({reply:?}, flush=True)
+    elif line == 'quit': break
+"#,
+                    reply = bestmove.map(|mv| format!("bestmove {mv}")).unwrap_or_default(),
+                ),
+            )
+            .unwrap();
+            let cfg = EngineConfig {
+                path: "python3".into(),
+                args: vec![script.display().to_string()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, "fake".into()).unwrap();
+            engine.enable_tournament_ponder(true).unwrap();
+            engine.pondering = Some("3c3d".into());
+            engine.search_pending = true;
+            engine.write_line("go ponder").unwrap();
+            let req = SearchRequest {
+                sfen: "startpos",
+                moves: "3c3d",
+                time_args: TimeArgs {
+                    btime: 0,
+                    wtime: 0,
+                    binc: 0,
+                    winc: 0,
+                    byoyomi: 0,
+                },
+                think_limit_ms: 10000,
+                timeout_margin_ms: 20,
+                limit_only_timeout_ms: Some(100),
+                game_id: 1,
+                ply: 3,
+                side: rshogi_core::types::Color::Black,
+                engine_label: "fake".into(),
+                pass_rights: None,
+                go_depth: None,
+                go_nodes: Some(1),
+            };
+            let mut lines = Vec::new();
+            let mut callback = |line: &str, _: &SearchRequest<'_>| lines.push(line.to_owned());
+            let outcome = engine.search(&req, Some(&mut callback)).unwrap();
+            assert_eq!(outcome.bestmove.as_deref(), bestmove);
+            assert_eq!(outcome.timed_out, bestmove.is_none());
+            assert_eq!(outcome.watchdog_fired, bestmove.is_none());
+            assert!(lines.is_empty());
+            let eval = outcome.eval.unwrap();
+            assert_eq!(eval.nodes, Some(123));
+            assert_eq!(eval.nps, Some(456));
+            assert_eq!(eval.time_ms, Some(78));
+            assert_eq!(eval.score_cp, expected_cp);
+            assert_eq!(eval.score_mate, expected_mate);
+            assert_eq!(eval.last_exact_primary.is_some(), expected_exact);
+            let retained = expected_cp.is_some() || expected_exact;
+            assert_eq!(eval.pv.as_deref(), retained.then_some(["7g7f".to_owned()].as_slice()));
+            assert_eq!(eval.score_bound, expected_cp.map(|_| ScoreBound::Lowerbound));
+            assert_eq!(
+                eval.score_mate_sign,
+                (expected_exact && info.contains("mate +")).then_some(1)
+            );
+            if expected_mate.is_some() {
+                assert_eq!(eval.last_exact_primary.unwrap().score, PrimaryScore::Mate(3));
+            }
+        }
+        drop(guard);
     }
 
     #[test]
