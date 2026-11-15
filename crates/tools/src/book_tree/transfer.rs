@@ -1506,7 +1506,8 @@ mod tests {
         assert_eq!(std::fs::read(&together).unwrap(), std::fs::read(&sequential).unwrap());
         let list = std::fs::read_to_string(dir.path().join("combined.tsv")).unwrap();
         assert_eq!(list.lines().count(), 2);
-        assert!(list.contains(&format!("path={}", b.display())));
+        // 一覧は `\` を `\\` と書く (Windows のパスの区切り)。
+        assert!(list.contains(&format!("path={}", b.display().to_string().replace('\\', "\\\\"))));
         let journal = Journal::open(&together, &cond.fingerprint).unwrap();
         assert!(journal.prefetched.contains(&reading(1, &cond, "resign").key));
     }

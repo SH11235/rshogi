@@ -82,8 +82,11 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
         ],
     );
     tree(&second, &next_root, &[(&next_root, "8c8d none -123 12 1")]);
+    // 見つけた木の dir は正規化したパスで扱われる (Windows では `\\?\` の接頭辞が付く)。
+    let (first, second) = (first.canonicalize().unwrap(), second.canonicalize().unwrap());
     let unused = a.tree_out[0].join("unused");
     tree(&unused, SFEN_HIRATE, &[(SFEN_HIRATE, "5g5f none 42 1 1")]);
+    let unused = unused.canonicalize().unwrap();
     let unfinished = a.tree_out[0].join("unfinished");
     std::fs::create_dir_all(&unfinished).unwrap();
     std::fs::write(unfinished.join("STATUS"), "RUNNING\n").unwrap();
