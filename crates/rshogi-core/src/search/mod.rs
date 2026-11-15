@@ -18,6 +18,8 @@ mod history;
 mod limits;
 mod movepicker;
 mod numa;
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+mod progress;
 mod pruning;
 mod qsearch;
 mod search_helpers;

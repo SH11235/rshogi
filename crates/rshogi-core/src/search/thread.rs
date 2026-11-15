@@ -239,10 +239,12 @@ mod imp {
             &self.threads
         }
 
-        /// Clear helper thread results.
-        /// Native builds don't use helper_results, so this is a no-op.
+        /// helper が終了してから、次の探索用に進捗をリセットする。
         pub fn clear_helper_results(&self) {
-            // No-op: Native builds access workers directly via helper_threads()
+            self.wait_for_search_finished();
+            for thread in &self.threads {
+                thread.inner.progress.reset();
+            }
         }
     }
 
@@ -410,6 +412,8 @@ mod imp {
         }
 
         fn start_searching(&self, task: SearchTask) {
+            self.wait_for_search_finished();
+            self.inner.progress.reset();
             self.schedule_task(ThreadTask::Search(Box::new(task)));
         }
 
@@ -453,8 +457,14 @@ mod imp {
             self.inner.progress.nodes()
         }
 
+        /// 探索開始からの最善手変更回数の累計を取得する。
         pub fn best_move_changes(&self) -> f64 {
             self.inner.progress.best_move_changes()
+        }
+
+        /// main が前回の回収以降の変更回数を取得する。
+        pub(crate) fn take_best_move_changes(&self) -> f64 {
+            self.inner.progress.take_best_move_changes()
         }
 
         #[cfg(test)]
@@ -498,7 +508,6 @@ mod imp {
             match task {
                 Some(ThreadTask::Search(task)) => {
                     let task = *task;
-                    inner.progress.reset();
                     let mut worker = inner.worker.lock().unwrap();
                     worker.max_moves_to_draw = task.max_moves_to_draw;
                     worker.search_tune_params = task.search_tune_params;
@@ -775,7 +784,7 @@ mod imp {
     /// 各イテレーション完了時に更新され、info出力や時間管理で参照される。
     pub struct HelperProgress {
         nodes: AtomicU64,
-        best_move_changes_bits: AtomicU64,
+        best_move_changes: crate::search::progress::BestMoveChanges,
     }
 
     impl Default for HelperProgress {
@@ -788,27 +797,31 @@ mod imp {
         pub fn new() -> Self {
             Self {
                 nodes: AtomicU64::new(0),
-                best_move_changes_bits: AtomicU64::new(0.0f64.to_bits()),
+                best_move_changes: crate::search::progress::BestMoveChanges::new(),
             }
         }
 
         pub fn reset(&self) {
             self.nodes.store(0, Ordering::Relaxed);
-            self.best_move_changes_bits.store(0.0f64.to_bits(), Ordering::Relaxed);
+            self.best_move_changes.reset();
         }
 
         pub fn update(&self, nodes: u64, best_move_changes: f64) {
             self.nodes.store(nodes, Ordering::Relaxed);
-            self.best_move_changes_bits
-                .store(best_move_changes.to_bits(), Ordering::Relaxed);
+            self.best_move_changes.publish(best_move_changes);
         }
 
         pub fn nodes(&self) -> u64 {
             self.nodes.load(Ordering::Relaxed)
         }
 
+        /// 探索開始からの最善手変更回数の累計を取得する。
         pub fn best_move_changes(&self) -> f64 {
-            f64::from_bits(self.best_move_changes_bits.load(Ordering::Relaxed))
+            self.best_move_changes.cumulative()
+        }
+
+        fn take_best_move_changes(&self) -> f64 {
+            self.best_move_changes.take_delta()
         }
     }
 
@@ -1030,10 +1043,6 @@ mod imp {
                         &increase_depth,
                     );
 
-                    // 中断反復の末尾も終了時の総ノード数へ含める。
-                    // 探索中の進捗は反復境界だが、停止完了後は最終値でなければならない。
-                    progress.update(worker.state.nodes, worker.state.best_move_changes);
-
                     // Collect result after search completes
                     // Extract top N moves for skill-based selection (typically 4 when skill enabled)
                     let top_moves: Vec<(Move, Value)> = worker
@@ -1156,6 +1165,10 @@ mod imp {
         /// This should be called at the start of each search to prevent stale results
         /// from being used when switching from multi-threaded to single-threaded mode.
         pub fn clear_helper_results(&self) {
+            self.wait_for_search_finished();
+            for progress in &self.helper_progress {
+                progress.reset();
+            }
             match self.helper_results.lock() {
                 Ok(mut results) => results.clear(),
                 Err(e) => {
@@ -1171,10 +1184,14 @@ mod imp {
             self.helper_progress.iter().fold(0u64, |acc, p| acc.saturating_add(p.nodes()))
         }
 
-        /// Get best_move_changes values from all helper threads (realtime).
-        /// Returns a vector of (nodes, best_move_changes) for each helper.
+        /// 各 helper の探索開始からの最善手変更回数の累計を取得する。
         pub fn helper_best_move_changes(&self) -> Vec<f64> {
             self.helper_progress.iter().map(|p| p.best_move_changes()).collect()
+        }
+
+        /// main が各 helper の前回の回収以降の変更回数を取得する。
+        pub(crate) fn take_helper_best_move_changes(&self) -> Vec<f64> {
+            self.helper_progress.iter().map(|p| p.take_best_move_changes()).collect()
         }
     }
 
