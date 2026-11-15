@@ -806,7 +806,7 @@ fn failure_key(tree: &Tree, key: &str) -> (String, Option<String>) {
 
 const PENDING_FILE: &str = "pending.jsonl";
 
-/// 木が要求していて読みがまだ無い局面を、その木が読む順 (段、局面キー) に 1 行ずつ足す。
+/// 木が要求していて読みがまだ無い局面を、その木が読む順 (段、局面キー) に 1 行ずつ書く。
 /// `root` は `tree enqueue` の `root`・`roots` にそのまま渡せる。
 fn pending_lines(
     target: &Target,
@@ -814,9 +814,9 @@ fn pending_lines(
     journal: &impl Readings,
     failures: &BTreeMap<(String, Option<String>), String>,
     busy: &impl Fn(&String) -> bool,
-    out: &mut String,
+    out: &mut impl std::io::Write,
 ) -> Result<()> {
-    use std::fmt::Write as _;
+    // 並べ替えに持つのは木の列への参照だけで、局面の文字列は複製しない。
     let mut waiting: Vec<_> = tree
         .waiting()
         .iter()
@@ -827,12 +827,56 @@ fn pending_lines(
     waiting.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
     for (key, level) in waiting {
         let ply = tree.ply.get(key).with_context(|| format!("手数がありません: {key}"))?;
-        writeln!(
-            out,
-            "{}",
-            json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"level":level,"root":format!("sfen {key} {ply}"),"running":busy(key)})
+        serde_json::to_writer(
+            &mut *out,
+            &json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"level":level,"root":format!("sfen {key} {ply}"),"running":busy(key)}),
         )?;
+        out.write_all(b"\n")?;
     }
+    Ok(())
+}
+
+/// 書いた内容の SHA-256 を取りながら下へ流す。
+struct Hashing<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: std::io::Write> std::io::Write for Hashing<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// 全部の木の行を一時ファイルへ流し、前回と内容が違うときだけ原子的に置き換える。
+/// 段 0 の木は数十万行になるので、全文をメモリに持たない。
+fn write_pending<'a>(
+    state: &Path,
+    trees: impl Iterator<Item = (&'a Target, &'a Tree)>,
+    journal: &impl Readings,
+    failures: &BTreeMap<(String, Option<String>), String>,
+    busy: &impl Fn(&String) -> bool,
+    last: &mut Option<Vec<u8>>,
+) -> Result<()> {
+    let mut out = Hashing {
+        inner: std::io::BufWriter::new(tempfile::NamedTempFile::new_in(state)?),
+        hasher: Sha256::new(),
+    };
+    for (target, tree) in trees {
+        pending_lines(target, tree, journal, failures, busy, &mut out)?;
+    }
+    let digest = out.hasher.finalize().to_vec();
+    if last.as_ref() == Some(&digest) {
+        return Ok(());
+    }
+    let file = out.inner.into_inner().map_err(|e| e.into_error())?;
+    file.persist(state.join(PENDING_FILE)).map_err(|e| e.error)?;
+    *last = Some(digest);
     Ok(())
 }
 
@@ -1311,6 +1355,13 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     )?;
     println!("journal_skipped={}", serde_json::to_string(&journal.skipped_rows)?);
     let mut imports = super::live_import::Inbox::new(&args.state)?;
+    if args.pending_secs.is_none() {
+        // 前の起動の写しを、今の列と取り違えさせない。
+        match std::fs::remove_file(args.state.join(PENDING_FILE)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
     let stats_path = args.state.join("prefetch_stats.json");
     let mut stats = if args.prefetch {
         PrefetchStats::load(&stats_path)?
@@ -1354,6 +1405,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let mut queue_error = None;
     let mut progress_written: Option<(String, Instant)> = None;
     let mut pending_written: Option<Instant> = None;
+    let mut pending_digest = None;
     let result = (|| -> Result<()> {
         loop {
             let stopping = args.state.join("stop").exists();
@@ -2140,14 +2192,23 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             if let Some(secs) = args.pending_secs
                 && pending_written.is_none_or(|at| at.elapsed() >= Duration::from_secs(secs))
             {
-                let mut pending = String::new();
-                for (target, live) in checkpoint.targets.iter().zip(&lives) {
-                    if target.hold || !live.prepared || !active_tree(live) {
-                        continue;
-                    }
-                    pending_lines(target, &live.tree, &journal, &failures, &busy, &mut pending)?;
+                let trees = checkpoint
+                    .targets
+                    .iter()
+                    .zip(&lives)
+                    .filter(|(target, live)| !target.hold && live.prepared && active_tree(live))
+                    .map(|(target, live)| (target, &live.tree));
+                // 外の道具のための写しなので、書けなくても読みは止めない。
+                if let Err(error) = write_pending(
+                    &args.state,
+                    trees,
+                    &journal,
+                    &failures,
+                    &busy,
+                    &mut pending_digest,
+                ) {
+                    eprintln!("監視ファイル書き込み失敗 {PENDING_FILE}: {error:#}");
                 }
-                monitor_changed(&args.state.join(PENDING_FILE), &pending);
                 pending_written = Some(Instant::now());
             }
             let mut statuses = Vec::new();
@@ -2392,7 +2453,7 @@ mod tests {
         let other = "4k4/9/9/9/9/9/9/9/5K3 b -";
         let line = format!(
             "{}\n",
-            json!({"id":"tree","root":format!("sfen {root} 7"),"roots":[format!("sfen {other} 9")],"own":"b","depth":0,"priority":3})
+            json!({"id":"tree","root":format!("sfen {root} 7"),"roots":[format!("sfen {other} 9")],"own":"b","depth":1,"priority":3})
         );
         let defaults = Defaults {
             opp_n: 1,
@@ -2414,10 +2475,12 @@ mod tests {
             Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
         tree.advance(&journal).unwrap();
         let lines = |tree: &Tree, journal: &Journal, failures: &BTreeMap<_, _>| {
-            let mut out = String::new();
+            let mut out = Vec::new();
             pending_lines(target, tree, journal, failures, &|key: &String| key == root, &mut out)
                 .unwrap();
-            out.lines()
+            String::from_utf8(out)
+                .unwrap()
+                .lines()
                 .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
                 .collect::<Vec<_>>()
         };
@@ -2434,12 +2497,52 @@ mod tests {
         // 失敗した局面と読みのある局面は出さない。
         let failed = BTreeMap::from([(failure_key(&tree, other), "x".to_owned())]);
         assert_eq!(lines(&tree, &journal, &failed).len(), 1);
+        // 段が先、局面キーが後。子の局面キーは `other` より前に並ぶが、段 1 なので後に出る。
         journal
-            .append(super::super::tests::reading(root, &[], &settings), &settings, "engine".into())
+            .append(
+                super::super::tests::reading(root, &[("5i5h", 10)], &settings),
+                &settings,
+                "engine".into(),
+            )
             .unwrap();
+        tree.advance(&journal).unwrap();
+        let child = super::super::model::child(root, "5i5h").unwrap();
+        assert!(child.as_str() < other);
         let rest = lines(&tree, &journal, &BTreeMap::new());
-        assert_eq!(rest.len(), 1);
+        assert_eq!(
+            rest.iter().map(|row| row["level"].as_u64().unwrap()).collect::<Vec<_>>(),
+            [0, 1, 1]
+        );
         assert_eq!(rest[0]["root"], format!("sfen {other} 9"));
+        assert_eq!(rest[1]["root"], format!("sfen {child} 8"));
+        assert!(rest[1]["root"].as_str() < rest[2]["root"].as_str());
+
+        // 内容が同じ間は置き換えず、変わったら置き換える。一時ファイルは残さない。
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join(PENDING_FILE);
+        let mut digest = None;
+        let write = |journal: &Journal, digest: &mut Option<Vec<u8>>| {
+            write_pending(
+                &state,
+                std::iter::once((target, &tree)),
+                journal,
+                &BTreeMap::new(),
+                &|_: &String| false,
+                digest,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
+            std::fs::read_to_string(&path).unwrap()
+        };
+        let first = write(&journal, &mut digest);
+        assert_eq!(first.lines().count(), 3);
+        std::fs::write(&path, "kept").unwrap();
+        assert_eq!(write(&journal, &mut digest), "kept");
+        journal
+            .append(super::super::tests::reading(other, &[], &settings), &settings, "engine".into())
+            .unwrap();
+        assert_eq!(write(&journal, &mut digest).lines().count(), 2);
     }
 
     #[test]
