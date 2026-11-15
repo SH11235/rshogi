@@ -86,6 +86,7 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
     let (first, second) = (first.canonicalize().unwrap(), second.canonicalize().unwrap());
     let unused = a.tree_out[0].join("unused");
     tree(&unused, SFEN_HIRATE, &[(SFEN_HIRATE, "5g5f none 42 1 1")]);
+    let unused = unused.canonicalize().unwrap();
     let unfinished = a.tree_out[0].join("unfinished");
     std::fs::create_dir_all(&unfinished).unwrap();
     std::fs::write(unfinished.join("STATUS"), "RUNNING\n").unwrap();

@@ -668,7 +668,9 @@ fn export_parallel_journal_failure_keeps_outputs() {
         a.threads = threads;
         a.journal = vec![first.clone(), second.clone()];
         let error = run_to(a, &mut Vec::new()).unwrap_err();
-        assert!(format!("{error:#}").contains(first.to_str().unwrap()));
+        // エラーには正規化した台帳のパスが出る (Windows では短い名前の dir が長い名前に変わる)。
+        let shown = first.canonicalize().unwrap();
+        assert!(format!("{error:#}").contains(shown.to_str().unwrap()));
         for (path, bytes) in paths.iter().zip(&expected) {
             assert_eq!(&std::fs::read(path).unwrap(), bytes);
         }
