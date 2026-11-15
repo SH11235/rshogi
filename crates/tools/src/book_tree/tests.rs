@@ -908,7 +908,12 @@ fn replay_rejects_journal_and_paths_collisions_before_changing_outputs() {
     }
 }
 
-fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> ServeArgs {
+pub(super) fn serve_args(
+    state: &Path,
+    journal: &Path,
+    out_root: &Path,
+    engine: &Path,
+) -> ServeArgs {
     ServeArgs {
         accept_fingerprint: Vec::new(),
         state: state.to_owned(),
@@ -1627,7 +1632,20 @@ fn split_journal_keeps_engine_rows_apart_from_imported_rows_and_reloads_both() {
         journal.append(own.clone(), &settings, "engine".into()).unwrap();
         let source = dir.path().join("source.jsonl");
         import_file(&source, &settings, &[own.clone(), imported.clone()]);
-        std::fs::copy(&source, state.join("import/01.jsonl")).unwrap();
+        // エンジンで読んだ局面の先読みの印も、取り込みの側に書く。
+        let marked: String = std::fs::read_to_string(&source)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                if record["reading"]["key"] == ROOT {
+                    record["prefetch"] = true.into();
+                }
+                format!("{record}\n")
+            })
+            .collect();
+        std::fs::write(state.join("import/01.tmp"), marked).unwrap();
+        std::fs::rename(state.join("import/01.tmp"), state.join("import/01.jsonl")).unwrap();
         assert!(drain_import(&mut inbox, &mut journal).is_empty());
         assert_eq!(inbox.status()["counts"]["appended"], 1);
         assert!(
@@ -1652,9 +1670,18 @@ fn split_journal_keeps_engine_rows_apart_from_imported_rows_and_reloads_both() {
     );
     assert!(engine_rows.iter().all(|r| r["provenance"] == "engine"));
     let imported_rows = lines(&imported_path);
-    assert_eq!(imported_rows.len(), 1);
-    assert_eq!(imported_rows[0]["reading"]["key"], other_key.as_str());
-    assert!(imported_rows[0]["provenance"].as_str().unwrap().starts_with("journal:"));
+    assert_eq!(
+        imported_rows
+            .iter()
+            .map(|r| (r["reading"]["key"].as_str().unwrap(), r["prefetch"] == true))
+            .collect::<Vec<_>>(),
+        [(ROOT, true), (other_key.as_str(), false)]
+    );
+    assert!(
+        imported_rows
+            .iter()
+            .all(|r| r["provenance"].as_str().unwrap().starts_with("journal:"))
+    );
 
     // 末尾の書きかけは、どちらのファイルでも切り詰める。
     for path in [&engine_path, &imported_path] {
@@ -1667,8 +1694,9 @@ fn split_journal_keeps_engine_rows_apart_from_imported_rows_and_reloads_both() {
     for key in [ROOT, other_key.as_str(), late_key.as_str()] {
         assert!(journal.get(key).is_some(), "{key}");
     }
+    assert_eq!(journal.prefetched.iter().collect::<Vec<_>>(), [ROOT]);
     assert_eq!(lines(&engine_path).len(), 2);
-    assert_eq!(lines(&imported_path).len(), 1);
+    assert_eq!(lines(&imported_path).len(), 2);
     drop(journal);
 
     // 両方のファイルにある同じ条件・同じ局面は、エンジンで読んだ行を残す。
@@ -1712,6 +1740,13 @@ fn serve_startup_rejects_imported_journal_on_journal_state_or_out_root() {
         );
         assert!(!state.join("targets.status.json").exists());
     }
+    let imported = dir.path().join("imported.jsonl");
+    let mut args = serve_args(&state, &journal, &out_root, &def.paths);
+    args.imported_journal = Some(imported.clone());
+    args.trace_dir = Some(imported.clone());
+    let error = service::serve(args).unwrap_err();
+    assert!(error.to_string().contains("trace-dir と保護パスが衝突"), "{error:#}");
+    assert!(!imported.exists());
 }
 
 #[test]

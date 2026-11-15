@@ -363,7 +363,8 @@ pub(super) struct Journal {
     lock: LockedFile,
     /// 指定があれば、エンジンで読んだ行以外をこのファイルへ追記する。
     imported: Option<LockedFile>,
-    unsynced: [bool; 2],
+    unsynced_journal: bool,
+    unsynced_imported: bool,
     staged_append: Option<File>,
     fingerprint: String,
     records: BTreeMap<String, Rows>,
@@ -442,7 +443,15 @@ impl Journal {
         let imported = imported
             .map(|path| {
                 super::paths::reject_symlink(path)?;
-                LockedFile::open(path)
+                let created = !path.try_exists()?;
+                let lock = LockedFile::open(path)?;
+                // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
+                // 新しく作った追記先の dir の項目も先に確定しておく。
+                if created && let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                {
+                    crate::common::io::sync_directory(parent)?;
+                }
+                Ok::<_, anyhow::Error>(lock)
             })
             .transpose()?;
         Self::load(lock, imported, fingerprint)
@@ -475,7 +484,8 @@ impl Journal {
         let mut journal = Self {
             lock,
             imported,
-            unsynced: [false; 2],
+            unsynced_journal: false,
+            unsynced_imported: false,
             staged_append: None,
             fingerprint: fingerprint.into(),
             records: BTreeMap::new(),
@@ -613,10 +623,10 @@ impl Journal {
     }
 
     fn sync(&mut self) -> Result<()> {
-        if std::mem::take(&mut self.unsynced[0]) {
+        if std::mem::take(&mut self.unsynced_journal) {
             self.lock.0.sync_data()?;
         }
-        if std::mem::take(&mut self.unsynced[1])
+        if std::mem::take(&mut self.unsynced_imported)
             && let Some(imported) = &self.imported
         {
             imported.0.sync_data()?;
@@ -660,10 +670,10 @@ impl Journal {
         } else if let Some(imported) = self.imported.as_mut().filter(|_| rec.provenance != "engine")
         {
             imported.0.write_all(&bytes)?;
-            self.unsynced[1] = true;
+            self.unsynced_imported = true;
         } else {
             self.lock.0.write_all(&bytes)?;
-            self.unsynced[0] = true;
+            self.unsynced_journal = true;
         }
         self.remember(rec);
         Ok(())

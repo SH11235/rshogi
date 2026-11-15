@@ -1260,6 +1260,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         }
         None => Checkpoint::new(out_root, settings.fingerprint.clone()),
     };
+    // 受付の後で台帳の場所を変えた再開でも、受け付け済みの木の出力先に台帳を置かせない
+    // (木の出力は自分の dir の `d*.jsonl` などを消して書き直す)。
+    for target in &checkpoint.targets {
+        super::paths::reject_protected(&target.out, &protected)?;
+    }
     let status_path = args.state.join(STATUS_FILE);
     // 出力に触れる前に、前回の ready を無効にする。
     write_atomic(
@@ -2331,6 +2336,63 @@ mod tests {
         lives[0].dirty = false;
         assert!(!poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives).unwrap());
         assert!(lives.iter().all(|live| !live.dirty));
+    }
+
+    #[test]
+    fn restart_rejects_journals_placed_inside_an_accepted_tree_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let engine = dir.path().join("engine");
+        std::fs::write(&engine, "").unwrap();
+        let args = |journal: &Path, imported: Option<PathBuf>| {
+            let mut args = super::super::tests::serve_args(
+                &state,
+                journal,
+                &dir.path().join("trees"),
+                &engine,
+            );
+            args.imported_journal = imported;
+            args
+        };
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+            multipv: 1,
+            nodes: 100,
+        };
+        let line = format!(
+            "{}\n",
+            json!({"id":"tree","root":"sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1","own":"b","depth":0})
+        );
+        let settings = Settings::new(&args(&dir.path().join("j"), None).reading).unwrap();
+        let (checkpoint, _) = Checkpoint::new(
+            super::super::paths::reject_out_root(
+                &dir.path().join("j"),
+                &state,
+                &dir.path().join("trees"),
+            )
+            .unwrap()
+            .0,
+            settings.fingerprint,
+        )
+        .apply(line.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty());
+        std::fs::write(state.join(CHECKPOINT), serde_json::to_string(&checkpoint).unwrap())
+            .unwrap();
+        let inside = checkpoint.targets[0].out.join("d999.jsonl");
+        let outside = dir.path().join("journal.jsonl");
+        for (journal, imported) in [
+            (outside.clone(), Some(inside.clone())),
+            (inside.clone(), None),
+        ] {
+            let error = serve(args(&journal, imported)).unwrap_err();
+            assert!(error.to_string().contains("対象の出力先と保護パスが衝突"), "{error:#}");
+            assert!(!inside.exists() && !outside.exists());
+            assert!(!state.join(STATUS_FILE).exists());
+        }
     }
 
     use super::*;
