@@ -443,16 +443,19 @@ impl Journal {
         let imported = imported
             .map(|path| {
                 super::paths::reject_symlink(path)?;
+                let parent = match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => parent,
+                    _ => Path::new("."),
+                };
+                // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
+                // 新しく作った追記先の dir の項目も先に確定しておく。親 dir を作らないのは、
+                // 作った dir 自体の項目まで確定させる処理を持たないため。
+                if !parent.is_dir() {
+                    bail!("--imported-journal の親 dir がありません: {}", parent.display());
+                }
                 let created = !path.try_exists()?;
                 let lock = LockedFile::open(path)?;
-                // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
-                // 新しく作った追記先の dir の項目も先に確定しておく。
-                if created && let Some(parent) = path.parent() {
-                    let parent = if parent.as_os_str().is_empty() {
-                        Path::new(".")
-                    } else {
-                        parent
-                    };
+                if created {
                     crate::common::io::sync_directory(parent)?;
                 }
                 Ok::<_, anyhow::Error>(lock)
