@@ -705,7 +705,10 @@ mod tests {
         let mut args = args(tmp.path(), &[&a, &b, &c]);
         args.registered = Some(list);
         let out = args.out.clone();
-        let p = |root: &Path, rel: &str| root.join(rel).display().to_string();
+        // 期待値も OS の区切りで組む (`join("t/w/g1")` は Windows で `/` が残る)。
+        let p = |root: &Path, rel: &str| {
+            root.join(rel).components().collect::<PathBuf>().display().to_string()
+        };
         assert_eq!(
             run_table(args),
             [
@@ -732,7 +735,10 @@ mod tests {
         std::fs::write(&list, format!("{}\n", registered.display())).unwrap();
         let mut args = args(tmp.path(), &[&a, &b, &c]);
         args.registered = Some(list);
-        let p = |root: &Path, rel: &str| root.join(rel).display().to_string();
+        // 期待値も OS の区切りで組む (`join("t/w/g1")` は Windows で `/` が残る)。
+        let p = |root: &Path, rel: &str| {
+            root.join(rel).components().collect::<PathBuf>().display().to_string()
+        };
         assert_eq!(
             run_table(args),
             [
@@ -772,7 +778,10 @@ mod tests {
         let out = args.out.clone();
         let rows = run_table(args);
         assert_eq!(std::fs::read_to_string(out).unwrap(), "");
-        let p = |root: &Path, rel: &str| root.join(rel).display().to_string();
+        // 期待値も OS の区切りで組む (`join("t/w/g1")` は Windows で `/` が残る)。
+        let p = |root: &Path, rel: &str| {
+            root.join(rel).components().collect::<PathBuf>().display().to_string()
+        };
         for (row, rel) in [(2, "t/w/g1"), (3, "u/w/g1")] {
             assert_eq!(
                 (rows[row].0.as_str(), rows[row].1.as_str()),

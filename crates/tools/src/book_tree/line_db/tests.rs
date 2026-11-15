@@ -91,7 +91,14 @@ fn combines_master_trees_and_successor_roots_then_uses_replace() {
     let trees = discover(&a.tree_out, &mut inputs).unwrap();
     let mut index = MasterIndex::open(&a.master, &Schema::load(None).unwrap()).unwrap();
     let (selected, _, used) = assemble(&a, &mut index, trees).unwrap();
-    assert_eq!(used, [first.clone(), second.clone()]);
+    // 見つけた木の dir は正規化したパスで返る (Windows では `\\?\` の接頭辞が付く)。
+    assert_eq!(
+        used,
+        [
+            first.canonicalize().unwrap(),
+            second.canonicalize().unwrap()
+        ]
+    );
     assert_eq!(selected[strip_ply(&root)].moves["2g2f"].mv.value, 100);
     assert_eq!(selected[strip_ply(&root)].moves["2g2f"].mv.count, 2);
     assert_eq!(selected[strip_ply(&root)].moves["6g6f"].mv.count, 1);

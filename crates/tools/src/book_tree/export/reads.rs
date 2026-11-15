@@ -417,7 +417,9 @@ mod tests {
         let b = dir.path().join("sub/b.jsonl");
         std::fs::write(&a, "").unwrap();
         std::fs::write(&b, "").unwrap();
-        assert_eq!(expand(&[dir.path().into(), a.clone()]).unwrap(), [a, b]);
+        // expand は正規化したパスを返す (Windows では `\\?\` の接頭辞が付く)。
+        let expected = [a.canonicalize().unwrap(), b.canonicalize().unwrap()];
+        assert_eq!(expand(&[dir.path().into(), a]).unwrap(), expected);
         assert!(expand(&[dir.path().join("missing")]).is_err());
         assert!(expand(&[]).is_err());
     }
