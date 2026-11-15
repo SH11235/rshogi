@@ -117,6 +117,9 @@ struct ServeArgs {
     state: PathBuf,
     #[arg(long)]
     journal: Option<PathBuf>,
+    /// `<state>/import/` から取り込んだ行の追記先。省略時は `--journal` に追記する
+    #[arg(long)]
+    imported_journal: Option<PathBuf>,
     #[command(flatten)]
     reading: ReadingArgs,
     #[arg(long, default_value_t = 16)]

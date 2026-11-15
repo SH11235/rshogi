@@ -361,6 +361,10 @@ pub(super) struct SkippedRows {
 
 pub(super) struct Journal {
     lock: LockedFile,
+    /// 指定があれば、エンジンで読んだ行以外をこのファイルへ追記する。
+    imported: Option<LockedFile>,
+    unsynced_journal: bool,
+    unsynced_imported: bool,
     staged_append: Option<File>,
     fingerprint: String,
     records: BTreeMap<String, Rows>,
@@ -415,6 +419,7 @@ fn scan(file: &mut File, mut visit: impl FnMut(Record) -> Result<()>) -> Result<
 }
 
 impl Journal {
+    #[cfg(test)]
     pub fn open(path: &Path, fingerprint: &str) -> Result<Self> {
         Self::open_checked(path, fingerprint, |_| Ok(()))
     }
@@ -428,7 +433,27 @@ impl Journal {
         super::paths::reject_symlink(path)?;
         let mut lock = LockedFile::open(path)?;
         check(&mut lock.0)?;
-        Self::load(lock, fingerprint)
+        Self::load(lock, None, fingerprint)
+    }
+
+    /// 取り込んだ行を `imported` に分けて持つ台帳を開く。読み込みは `path`、`imported` の順。
+    pub fn open_split(path: &Path, imported: Option<&Path>, fingerprint: &str) -> Result<Self> {
+        super::paths::reject_symlink(path)?;
+        let lock = LockedFile::open(path)?;
+        let imported = imported
+            .map(|path| {
+                super::paths::reject_symlink(path)?;
+                let created = !path.try_exists()?;
+                let lock = LockedFile::open(path)?;
+                // 受付の処理済みの印 (`import/done/` への移動) は dir まで同期するので、
+                // 新しく作った追記先の dir の項目も先に確定しておく。
+                if created {
+                    crate::common::io::sync_directory(super::paths::parent_dir(path))?;
+                }
+                Ok::<_, anyhow::Error>(lock)
+            })
+            .transpose()?;
+        Self::load(lock, imported, fingerprint)
     }
 
     /// 全ソースの検査が終わるまで追記を一時ファイルに保持する。
@@ -454,9 +479,12 @@ impl Journal {
         Ok((len, offset_signature(&mut self.lock.0, len)?))
     }
 
-    fn load(lock: LockedFile, fingerprint: &str) -> Result<Self> {
+    fn load(lock: LockedFile, imported: Option<LockedFile>, fingerprint: &str) -> Result<Self> {
         let mut journal = Self {
             lock,
+            imported,
+            unsynced_journal: false,
+            unsynced_imported: false,
             staged_append: None,
             fingerprint: fingerprint.into(),
             records: BTreeMap::new(),
@@ -468,23 +496,32 @@ impl Journal {
             durations: VecDeque::new(),
         };
         // scan の間だけファイルを分離し、行を複製せず索引へ移す。
-        let mut scan_file = journal.lock.0.try_clone()?;
+        let mut scan_files = vec![journal.lock.0.try_clone()?];
+        if let Some(imported) = &journal.imported {
+            scan_files.push(imported.0.try_clone()?);
+        }
         let mut validity = Validity::default();
-        scan(&mut scan_file, |rec| {
-            if !validity.valid(&rec)? {
-                journal.skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
-                return Ok(());
-            }
-            if journal
-                .get_exact(&rec.reading.key, &rec.settings.fingerprint)
-                .is_some_and(|old| !old.same_values(&rec.reading))
-            {
-                journal.skipped_rows.entry(rec.settings.fingerprint).or_default().conflicting += 1;
-                return Ok(());
-            }
-            journal.remember(rec);
-            Ok(())
-        })?;
+        for mut scan_file in scan_files {
+            scan(&mut scan_file, |rec| {
+                if !validity.valid(&rec)? {
+                    journal.skipped_rows.entry(rec.settings.fingerprint).or_default().invalid += 1;
+                    return Ok(());
+                }
+                if journal
+                    .get_exact(&rec.reading.key, &rec.settings.fingerprint)
+                    .is_some_and(|old| !old.same_values(&rec.reading))
+                {
+                    journal
+                        .skipped_rows
+                        .entry(rec.settings.fingerprint)
+                        .or_default()
+                        .conflicting += 1;
+                    return Ok(());
+                }
+                journal.remember(rec);
+                Ok(())
+            })?;
+        }
         report_skipped(&journal.skipped_rows);
         Ok(journal)
     }
@@ -550,7 +587,7 @@ impl Journal {
     }
 
     pub fn select(lock: LockedFile, fingerprint: Option<&str>) -> Result<(Self, Option<Settings>)> {
-        let journal = Self::load(lock, fingerprint.unwrap_or(""))?;
+        let journal = Self::load(lock, None, fingerprint.unwrap_or(""))?;
         let settings = if let Some(fp) = fingerprint {
             let id = journal.condition_ids.get(fp).context("指紋が台帳にありません")?;
             Some((*journal.conditions[*id]).clone())
@@ -581,7 +618,18 @@ impl Journal {
         prefetch: bool,
     ) -> Result<()> {
         self.append_unsynced(reading, settings, provenance, prefetch)?;
-        self.lock.0.sync_data()?;
+        self.sync()
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        if std::mem::take(&mut self.unsynced_journal) {
+            self.lock.0.sync_data()?;
+        }
+        if std::mem::take(&mut self.unsynced_imported)
+            && let Some(imported) = &self.imported
+        {
+            imported.0.sync_data()?;
+        }
         Ok(())
     }
 
@@ -616,7 +664,16 @@ impl Journal {
         };
         let mut bytes = serde_json::to_vec(&rec)?;
         bytes.push(b'\n');
-        self.staged_append.as_mut().unwrap_or(&mut self.lock.0).write_all(&bytes)?;
+        if let Some(staged) = self.staged_append.as_mut() {
+            staged.write_all(&bytes)?;
+        } else if let Some(imported) = self.imported.as_mut().filter(|_| rec.provenance != "engine")
+        {
+            imported.0.write_all(&bytes)?;
+            self.unsynced_imported = true;
+        } else {
+            self.lock.0.write_all(&bytes)?;
+            self.unsynced_journal = true;
+        }
         self.remember(rec);
         Ok(())
     }
@@ -689,7 +746,6 @@ impl Journal {
         }
         sink.before_append()?;
         let mut appended = 0;
-        let mut wrote = false;
         for (reading, settings, provenance) in pending {
             if self.get_exact(&reading.key, &settings.fingerprint).is_none() {
                 appended += 1;
@@ -697,11 +753,8 @@ impl Journal {
             let prefetch =
                 prefetched.contains(&(settings.fingerprint.clone(), reading.key.clone()));
             self.append_unsynced(reading, &settings, provenance, prefetch)?;
-            wrote = true;
         }
-        if wrote {
-            self.lock.0.sync_data()?;
-        }
+        self.sync()?;
         Ok((appended, total - appended, conflicts))
     }
 }

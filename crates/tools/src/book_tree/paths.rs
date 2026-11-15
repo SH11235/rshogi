@@ -30,6 +30,31 @@ fn overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// ファイルを置く dir。ファイル名だけのパスは現在の dir。
+pub(super) fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// 取り込んだ行の台帳が、エンジンで読んだ行の台帳と別のファイルで、親 dir が既にあることを確かめる。
+/// serve が state・出力の根・台帳の dir を作る前に呼ぶ。serve が作った dir は、その dir 自体の
+/// 項目を確定させないので、取り込みの追記先には使わせない。
+pub(super) fn reject_same_journal(journal: &Path, imported: &Path) -> Result<()> {
+    let parent = parent_dir(imported);
+    if !parent.is_dir() {
+        bail!("--imported-journal の親 dir がありません: {}", parent.display());
+    }
+    if overlap(&managed(journal)?, &managed(imported)?) {
+        bail!(
+            "--imported-journal は --journal と別のファイルにしてください: {}",
+            imported.display()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn reject_collisions(
     journal: &Path,
     state: Option<&Path>,

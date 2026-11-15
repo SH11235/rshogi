@@ -1026,6 +1026,10 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
+    if let Some(imported) = &args.imported_journal {
+        super::paths::reject_same_journal(&journal_path, imported)?;
+        super::paths::reject_collisions(imported, Some(&args.state), &[])?;
+    }
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("restart"))?;
     // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
@@ -1223,10 +1227,18 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     super::transfer::warn_unknown_version(&args.reading.engine, &settings.engine_version);
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
-    let (out_root, protected) =
+    let (out_root, mut protected) =
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    if let Some(imported) = &args.imported_journal {
+        // 木の出力先が取り込みの台帳と重なる行も、受付で拒否する。
+        let (_, checked) = super::paths::reject_out_root(imported, &args.state, &args.out_root)?;
+        protected.extend(checked.into_iter().take(1));
+    }
     if let Some(dir) = &args.trace_dir {
         super::paths::reject_trace_dir(dir, &journal_path, &args.state, &out_root)?;
+        if let Some(imported) = &args.imported_journal {
+            super::paths::reject_trace_dir(dir, imported, &args.state, &out_root)?;
+        }
     }
     std::fs::create_dir_all(&out_root)?;
     // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
@@ -1248,6 +1260,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         }
         None => Checkpoint::new(out_root, settings.fingerprint.clone()),
     };
+    // 受付の後で台帳の場所を変えた再開でも、受け付け済みの木の出力先に台帳を置かせない
+    // (木の出力は自分の dir の `d*.jsonl` などを消して書き直す)。
+    for target in &checkpoint.targets {
+        super::paths::reject_protected(&target.out, &protected)?;
+    }
     let status_path = args.state.join(STATUS_FILE);
     // 出力に触れる前に、前回の ready を無効にする。
     write_atomic(
@@ -1255,7 +1272,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         &serde_json::to_string_pretty(&StatusFile::resuming(run_id, &checkpoint))?,
     )
     .context("状態のファイルを書けません")?;
-    let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
+    let mut journal = Journal::open_split(
+        &journal_path,
+        args.imported_journal.as_deref(),
+        &settings.fingerprint,
+    )?;
     println!("journal_skipped={}", serde_json::to_string(&journal.skipped_rows)?);
     let mut imports = super::live_import::Inbox::new(&args.state)?;
     let stats_path = args.state.join("prefetch_stats.json");
@@ -2315,6 +2336,64 @@ mod tests {
         lives[0].dirty = false;
         assert!(!poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives).unwrap());
         assert!(lives.iter().all(|live| !live.dirty));
+    }
+
+    #[test]
+    fn restart_rejects_journals_placed_inside_an_accepted_tree_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let engine = dir.path().join("engine");
+        std::fs::write(&engine, "").unwrap();
+        let args = |journal: &Path, imported: Option<PathBuf>| {
+            let mut args = super::super::tests::serve_args(
+                &state,
+                journal,
+                &dir.path().join("trees"),
+                &engine,
+            );
+            args.imported_journal = imported;
+            args
+        };
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+            multipv: 1,
+            nodes: 100,
+        };
+        let line = format!(
+            "{}\n",
+            json!({"id":"tree","root":"sfen 4k4/9/9/9/9/9/9/9/4K4 b - 1","own":"b","depth":0})
+        );
+        let settings = Settings::new(&args(&dir.path().join("j"), None).reading).unwrap();
+        let (checkpoint, _) = Checkpoint::new(
+            super::super::paths::reject_out_root(
+                &dir.path().join("j"),
+                &state,
+                &dir.path().join("trees"),
+            )
+            .unwrap()
+            .0,
+            settings.fingerprint,
+        )
+        .apply(line.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty());
+        std::fs::write(state.join(CHECKPOINT), serde_json::to_string(&checkpoint).unwrap())
+            .unwrap();
+        std::fs::create_dir_all(&checkpoint.targets[0].out).unwrap();
+        let inside = checkpoint.targets[0].out.join("d999.jsonl");
+        let outside = dir.path().join("journal.jsonl");
+        for (journal, imported) in [
+            (outside.clone(), Some(inside.clone())),
+            (inside.clone(), None),
+        ] {
+            let error = serve(args(&journal, imported)).unwrap_err();
+            assert!(error.to_string().contains("対象の出力先と保護パスが衝突"), "{error:#}");
+            assert!(!inside.exists() && !outside.exists());
+            assert!(!state.join(STATUS_FILE).exists());
+        }
     }
 
     use super::*;
