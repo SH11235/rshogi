@@ -578,9 +578,9 @@ meta の `settings.startpos_order` は既定も含めて常に記録する。
 通常は `bestmove ... ponder ...` の合法な予想手を着手後の手順に足して `go ponder` を送る。
 予想手がない場合や、最大手数までに自分の次の手番が来ない場合は開始しない。一致時は `ponderhit`、不一致時は `stop` の bestmove を
 読み捨て、実際の手順で `position` と `go` を送る。有効な engine の `USI_Ponder`
-（または `Ponder`）は true に設定する。`--usi-option` / `--engine-usi-option` で
-`USI_Ponder` / `Ponder` を明示する場合は `--ponder`（無指定は false）と一致させる。
-矛盾する値は起動時にエラーにする。
+（または `Ponder`）は true に設定する。ただし option を広告する engine にその名前がない場合は送らない。`--usi-option` / `--engine-usi-option` で
+`USI_Ponder` / `Ponder` を明示する場合、同じ engine に `--ponder INDEX:true/false` も明示していれば、
+値を大文字小文字を区別せず比較し、矛盾を起動時エラーにする。`--ponder` 無指定の engine は検査せず従来どおり渡す。
 
 `Stochastic_Ponder=true` は `--usi-option` / `--engine-usi-option` で engine に渡す。
 tournament の送信列は通常の ponder と同じで、合法な予想手を末尾に足した `position` と
@@ -590,15 +590,20 @@ rshogi は内部で予想手を 1 手戻した相手手番の局面から先読�
 直近の position と ponder を除いた go で通常探索をやり直す。
 `Stochastic_Ponder` だけでは tournament の ponder を有効にしない。
 
-消費時間は相手の bestmove を受信した時点から計測する。予想が外れた場合の stop・回収と
+ponder 有効の engine の消費時間は相手の bestmove を受信した時点から計測する。
+ponder 無効の engine は従来どおり go の送信後から計測する。予想が外れた場合の stop・回収と
 読み直しにかかった時間は消費に含み、相手手番中の ponder 時間は含めない。
 終局時は残っている ponder を停止して bestmove を回収する。5 秒以内に回収できない場合は
 確定した対局結果を保持して worker を退役させ、次の対局には新しいプロセスを使う。
 時間切れ後の回収が失敗しても時間切れ負けのまま記録する。対局途中の通信エラーには
 既存のエラーペア再試行規則を適用する。
-的中時の評価値は `ponderhit` 送信後に受信した score 付き info を優先する。
-それがない場合、先読み中の info は PV の先頭が bestmove と一致する行だけを採用する。
-不一致の評価値・PV は JSONL、評価値による裁定、MultiPV 候補、info コールバックに渡さない。
+的中時は先読み中の行も含めて info を受信順に取り込み、途中経過を info コールバックには渡さない。
+bestmove の受信時に、最後の score 付き主 PV と、保持した厳密な主 PV の先頭手を検査する。
+PV がない場合や bestmove と一致しない場合は評価値・PV を採用せず、JSONL や評価値による裁定に渡さない。
+nodes・nps・time は保持する。的中時の MultiPV 候補は異なる局面の混在を避けるため渡さない。
+先読みの PV の先頭手が駒打ちなどで bestmove と文字列だけ一致する場合は区別できない。
+USI に反して ponderhit より前に bestmove を返す engine では、的中時はその手を採用して探索中の状態を解除し、
+同じ PV 検査を行う。不一致時は stop の回収で読み捨て、次の探索・対局に持ち越さない。
 
 `--max-moves` は従来どおり開始局面までを含む総手数である。
 

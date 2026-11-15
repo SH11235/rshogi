@@ -98,30 +98,26 @@ pub struct EngineConfig {
     pub usi_options: Vec<String>,
 }
 
-enum EngineOutput {
-    Plain(Receiver<String>),
-    Ponder(Receiver<(Instant, String)>),
-}
-
-impl EngineOutput {
-    fn recv_timeout(
-        &self,
-        timeout: Duration,
-    ) -> std::result::Result<(Option<Instant>, String), RecvTimeoutError> {
-        match self {
-            Self::Plain(rx) => rx.recv_timeout(timeout).map(|line| (None, line)),
-            Self::Ponder(rx) => rx.recv_timeout(timeout).map(|(time, line)| (Some(time), line)),
-        }
-    }
-
-    fn receive_before_deadline(
-        &self,
-        deadline: Instant,
-    ) -> std::result::Result<String, RecvTimeoutError> {
-        match self {
-            Self::Plain(rx) => receive_before_deadline(rx, deadline),
-            Self::Ponder(rx) => receive_before_deadline(rx, deadline).map(|(_, line)| line),
-        }
+fn retain_matching_ponder_eval(
+    snapshot: &mut InfoSnapshot,
+    scored_pv: Option<&str>,
+    bestmove: &str,
+) {
+    // 同じ depth でも異なる局面の候補が混在し得るため、的中時の候補は渡さない。
+    snapshot.multipv_candidates.clear();
+    if scored_pv != Some(bestmove)
+        || snapshot.pv.first().map(String::as_str) != Some(bestmove)
+        || snapshot
+            .last_exact_primary
+            .as_ref()
+            .is_some_and(|primary| primary.pv.first().map(String::as_str) != Some(bestmove))
+    {
+        *snapshot = InfoSnapshot {
+            nodes: snapshot.nodes,
+            time_ms: snapshot.time_ms,
+            nps: snapshot.nps,
+            ..InfoSnapshot::default()
+        };
     }
 }
 
@@ -129,7 +125,7 @@ impl EngineOutput {
 pub struct EngineProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
-    rx: EngineOutput,
+    rx: Receiver<String>,
     recent_stderr: Arc<Mutex<VecDeque<String>>>,
     opt_names: HashSet<String>,
     read_timeout_hint_printed: Cell<bool>,
@@ -221,9 +217,6 @@ impl EngineProcess {
 
     /// tournament の相手手番思考を有効にする。USI の設定値とは独立に制御する。
     pub fn enable_tournament_ponder(&mut self, enabled: bool) -> Result<()> {
-        if enabled && !matches!(self.rx, EngineOutput::Ponder(_)) {
-            bail!("tournament ponder requires a ponder stdout reader");
-        }
         self.ponder_enabled = enabled;
         if enabled && self.opt_names.is_empty() {
             self.write_line("setoption name USI_Ponder value true")?;
@@ -302,26 +295,6 @@ impl EngineProcess {
         label: String,
         cpu_affinity: Option<&[usize]>,
     ) -> Result<Self> {
-        Self::spawn_with_output_mode(cfg, label, cpu_affinity, false)
-    }
-
-    /// tournament 用に、先読みの有無に合う stdout reader で起動する。
-    /// 利用前に `initialize` と `enable_tournament_ponder` を呼ぶこと。
-    pub fn spawn_uninitialized_for_tournament(
-        cfg: &EngineConfig,
-        label: String,
-        cpu_affinity: Option<&[usize]>,
-        ponder: bool,
-    ) -> Result<Self> {
-        Self::spawn_with_output_mode(cfg, label, cpu_affinity, ponder)
-    }
-
-    fn spawn_with_output_mode(
-        cfg: &EngineConfig,
-        label: String,
-        cpu_affinity: Option<&[usize]>,
-        ponder: bool,
-    ) -> Result<Self> {
         if cpu_affinity.is_some_and(<[usize]>::is_empty) {
             bail!("CPU affinity must contain at least one CPU");
         }
@@ -381,38 +354,19 @@ impl EngineProcess {
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-        // 通常探索では時刻取得も channel の要素サイズ増加も避ける。
-        let rx = if ponder {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(line) => {
-                            if tx.send((Instant::now(), line)).is_err() {
-                                break;
-                            }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if tx.send(line).is_err() {
+                            break;
                         }
-                        _ => break,
                     }
+                    _ => break,
                 }
-            });
-            EngineOutput::Ponder(rx)
-        } else {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(line) => {
-                            if tx.send(line).is_err() {
-                                break;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-            });
-            EngineOutput::Plain(rx)
-        };
+            }
+        });
         let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_LINES)));
         let stderr_buffer = recent_stderr.clone();
         std::thread::spawn(move || {
@@ -551,7 +505,6 @@ impl EngineProcess {
             .pondering
             .as_deref()
             .is_some_and(|mv| req.moves.split_whitespace().last() == Some(mv));
-        let hit_boundary = hit.then(Instant::now);
         if hit {
             self.write_line("ponderhit")?;
             self.pondering = None;
@@ -597,8 +550,7 @@ impl EngineProcess {
         let mut stop_sent = false;
         let mut snapshot = InfoSnapshot::default();
         let mut info_callback = info_callback;
-        let mut ponder_info = Vec::new();
-        let mut post_hit_score = false;
+        let mut scored_primary_pv = None;
 
         loop {
             let elapsed = start.elapsed();
@@ -621,25 +573,20 @@ impl EngineProcess {
 
             let remaining = deadline.saturating_sub(elapsed);
             match self.rx.recv_timeout(remaining) {
-                Ok((received, line)) => {
+                Ok(line) => {
                     if line.starts_with("info") {
-                        if hit_boundary
-                            .zip(received)
-                            .is_some_and(|(boundary, received)| received < boundary)
-                        {
-                            ponder_info.push(line);
-                            continue;
-                        }
                         if hit {
                             let mut info = InfoSnapshot::default();
                             info.update_from_line(&line);
-                            post_hit_score |= info.score_cp.is_some()
+                            if info.score_cp.is_some()
                                 || info.score_mate.is_some()
                                 || info.score_mate_sign.is_some()
-                                || !info.multipv_candidates.is_empty();
+                            {
+                                scored_primary_pv = info.pv.into_iter().next();
+                            }
                         }
                         snapshot.update_from_line(&line);
-                        if let Some(ref mut cb) = info_callback {
+                        if !hit && let Some(ref mut cb) = info_callback {
                             cb(&line, req);
                         }
                         continue;
@@ -648,23 +595,18 @@ impl EngineProcess {
                         let mut parts = rest.split_whitespace();
                         let mv = parts.next().unwrap_or_default().to_string();
                         self.search_pending = false;
-                        self.predicted_move = if parts.next() == Some("ponder") {
-                            parts.next().map(str::to_owned)
-                        } else {
-                            None
-                        };
-                        if hit && !post_hit_score {
-                            // 先読みの局面は異なる場合があるため、着手と一致する PV だけを引き継ぐ。
-                            for line in &ponder_info {
-                                let mut info = InfoSnapshot::default();
-                                info.update_from_line(line);
-                                if info.pv.first() == Some(&mv) {
-                                    snapshot.update_from_line(line);
-                                    if let Some(cb) = info_callback.as_mut() {
-                                        cb(line, req);
-                                    }
-                                }
-                            }
+                        self.predicted_move =
+                            if self.ponder_enabled && parts.next() == Some("ponder") {
+                                parts.next().map(str::to_owned)
+                            } else {
+                                None
+                            };
+                        if hit {
+                            retain_matching_ponder_eval(
+                                &mut snapshot,
+                                scored_primary_pv.as_deref(),
+                                &mv,
+                            );
                         }
                         let elapsed_ms = duration_to_millis(start.elapsed());
                         // stop 後の回収結果も、受信時点で期限を超えた結果も勝敗に使わない。
@@ -750,7 +692,7 @@ impl EngineProcess {
             start.checked_add(timeout).ok_or_else(|| anyhow!("search deadline overflow"))?;
         let mut snapshot = InfoSnapshot::default();
         loop {
-            match self.rx.receive_before_deadline(deadline) {
+            match receive_before_deadline(&self.rx, deadline) {
                 Ok(line) => {
                     if line.starts_with("info") {
                         snapshot.update_from_line(&line);
@@ -777,7 +719,7 @@ impl EngineProcess {
                         .checked_add(stop_grace)
                         .ok_or_else(|| anyhow!("stop deadline overflow"))?;
                     loop {
-                        match self.rx.receive_before_deadline(stop_deadline) {
+                        match receive_before_deadline(&self.rx, stop_deadline) {
                             Ok(line) if line.starts_with("info") => {
                                 snapshot.update_from_line(&line);
                             }
@@ -831,7 +773,7 @@ impl EngineProcess {
     /// 待ち時間内の行を返す。無通信は None、切断はエラーに分ける。
     pub fn poll_line(&self, timeout: Duration) -> Result<Option<String>> {
         match self.rx.recv_timeout(timeout) {
-            Ok((_, line)) => Ok(Some(line)),
+            Ok(line) => Ok(Some(line)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => bail!("{}", self.engine_exited_message()),
         }
@@ -847,7 +789,7 @@ impl EngineProcess {
 
     pub fn recv_line(&self, timeout: Duration) -> Result<String> {
         match self.rx.recv_timeout(timeout) {
-            Ok((_, line)) => Ok(line),
+            Ok(line) => Ok(line),
             Err(RecvTimeoutError::Timeout) => {
                 let message = self.engine_read_timeout_message(timeout);
                 if !self.read_timeout_hint_printed.replace(true) {
@@ -1174,7 +1116,6 @@ done
                 usi_options: vec![],
             };
             let mut engine = EngineProcess::spawn(&cfg, mode.into()).unwrap();
-            assert!(matches!(engine.rx, EngineOutput::Plain(_)));
             let start = Instant::now();
             let result = engine.search_raw_go_with_stop_grace(
                 "fixture b - 1",
@@ -1418,7 +1359,6 @@ with open(sys.argv[1], 'w', buffering=1) as log:
                 usi_options: vec!["USI_Ponder=false".into()],
             };
             let mut engine = EngineProcess::spawn(&cfg, "legacy".into()).unwrap();
-            assert!(matches!(engine.rx, EngineOutput::Plain(_)));
             let req = SearchRequest {
                 sfen: "fixture",
                 moves: "",
@@ -1470,13 +1410,48 @@ with open(sys.argv[1], 'w', buffering=1) as log:
     }
 
     #[test]
-    fn hit_filters_buffered_info_and_prefers_new_scores() {
+    fn hit_drops_mixed_primary_records_and_candidates() {
+        for lines in [
+            vec![
+                "info depth 10 score cp 42 pv 3c3d",
+                "info depth 11 score cp 99 lowerbound pv 7g7f",
+            ],
+            vec!["info depth 10 score cp 42 pv 7g7f", "info score cp 99"],
+            vec!["info depth 10 score cp 42 pv 7g7f", "info pv 3c3d"],
+        ] {
+            let mut snapshot = InfoSnapshot::default();
+            let mut scored_pv = None;
+            for line in lines {
+                let mut info = InfoSnapshot::default();
+                info.update_from_line(line);
+                if info.score_cp.is_some() {
+                    scored_pv = info.pv.into_iter().next();
+                }
+                snapshot.update_from_line(line);
+            }
+            snapshot.update_from_line("info depth 11 multipv 2 score cp 20 pv 8c8d");
+            snapshot.update_from_line("info nodes 123");
+            retain_matching_ponder_eval(&mut snapshot, scored_pv.as_deref(), "7g7f");
+            assert!(snapshot.score_cp.is_none());
+            assert!(snapshot.last_exact_primary.is_none());
+            assert!(snapshot.pv.is_empty());
+            assert!(snapshot.multipv_candidates.is_empty());
+            assert_eq!(snapshot.nodes, Some(123));
+        }
+    }
+
+    #[test]
+    fn hit_validates_primary_pv_and_preserves_counters() {
         let guard = ENGINE_MOCK_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        for (pv, post, expected) in [
-            ("7g7f", false, Some(42)),
-            ("3c3d", false, None),
-            ("3c3d", true, Some(99)),
-            ("7g7f", true, Some(99)),
+        for (pv, post, delayed, early, expected) in [
+            ("7g7f", false, false, false, Some(42)),
+            ("3c3d", false, false, false, None),
+            ("3c3d", true, false, false, Some(99)),
+            ("7g7f", true, false, false, Some(99)),
+            ("3c3d", false, true, false, None),
+            ("", false, false, false, None),
+            ("3c3d", false, false, true, None),
+            ("7g7f", false, false, true, Some(42)),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let script = dir.path().join("engine.py");
@@ -1490,15 +1465,25 @@ for raw in sys.stdin:
     if line == 'usi': print('usiok', flush=True)
     elif line == 'isready': print('readyok', flush=True)
     elif line == 'go ponder':
-        print('info depth 10 score cp 42 pv {pv}', flush=True)
-        print('info multipv 2 depth 10 score cp -200 pv 8c8d', flush=True)
+        if not {delayed}:
+            print('info depth 10 score cp 42 pv {pv}', flush=True)
+            print('info multipv 2 depth 10 score cp -200 pv 8c8d', flush=True)
+            print('info nodes 123 nps 456 time 78', flush=True)
+        if {early}:
+            print('bestmove 7g7f', flush=True)
     elif line == 'ponderhit':
+        if {delayed}:
+            print('info depth 10 score cp 42 pv {pv}', flush=True)
+            print('info nodes 123 nps 456 time 78', flush=True)
         if {post}:
             print('info depth 2 score cp 99 pv 7g7f', flush=True)
-        print('bestmove 7g7f', flush=True)
+        if not {early}:
+            print('bestmove 7g7f', flush=True)
     elif line == 'quit': break
 "#,
-                    post = if post { "True" } else { "False" }
+                    post = if post { "True" } else { "False" },
+                    delayed = if delayed { "True" } else { "False" },
+                    early = if early { "True" } else { "False" }
                 ),
             )
             .unwrap();
@@ -1514,33 +1499,11 @@ for raw in sys.stdin:
                 ponder: false,
                 usi_options: vec![],
             };
-            let mut engine =
-                EngineProcess::spawn_uninitialized_for_tournament(&cfg, "fake".into(), None, true)
-                    .unwrap();
-            engine.initialize(&cfg).unwrap();
+            let mut engine = EngineProcess::spawn(&cfg, "fake".into()).unwrap();
             engine.enable_tournament_ponder(true).unwrap();
             engine.pondering = Some("3c3d".into());
             engine.search_pending = true;
             engine.write_line("go ponder").unwrap();
-            let buffered: Vec<_> = (0..2)
-                .map(|_| engine.rx.recv_timeout(Duration::from_secs(10)).unwrap())
-                .collect();
-            let (tx, rx) = mpsc::channel();
-            let EngineOutput::Ponder(live_rx) =
-                std::mem::replace(&mut engine.rx, EngineOutput::Ponder(rx))
-            else {
-                panic!("ponder reader required");
-            };
-            for line in buffered {
-                tx.send((line.0.unwrap(), line.1)).unwrap();
-            }
-            std::thread::spawn(move || {
-                for line in live_rx {
-                    if tx.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
             let req = SearchRequest {
                 sfen: "startpos",
                 moves: "3c3d",
@@ -1566,15 +1529,25 @@ for raw in sys.stdin:
             let mut callback = |line: &str, _: &SearchRequest<'_>| lines.push(line.to_owned());
             let result = engine.search(&req, Some(&mut callback)).unwrap();
             assert_eq!(result.eval.as_ref().and_then(|e| e.score_cp), expected);
-            assert_eq!(lines.len(), usize::from(expected.is_some()));
-            if let Some(eval) = result.eval {
+            assert!(lines.is_empty());
+            assert!(!engine.search_pending);
+            let eval = result.eval.unwrap();
+            assert_eq!(eval.nodes, Some(123));
+            assert_eq!(eval.nps, Some(456));
+            assert_eq!(eval.time_ms, Some(78));
+            if let Some(expected) = expected {
                 assert_eq!(eval.pv.unwrap(), ["7g7f"]);
                 assert_eq!(
                     eval.last_exact_primary.unwrap().score,
-                    super::super::types::PrimaryScore::Cp(expected.unwrap())
+                    super::super::types::PrimaryScore::Cp(expected)
                 );
+            } else {
+                assert!(eval.pv.is_none());
+                assert!(eval.last_exact_primary.is_none());
+                assert!(eval.score_mate.is_none());
+                assert!(eval.score_mate_sign.is_none());
             }
-            assert!(lines.iter().all(|line| !line.contains("multipv 2")));
+            engine.new_game().unwrap();
         }
         drop(guard);
     }

@@ -900,8 +900,7 @@ fn spawn_engine(
     label: String,
     cpus: Option<&[usize]>,
 ) -> Result<EngineProcess> {
-    let mut engine =
-        EngineProcess::spawn_uninitialized_for_tournament(cfg, label, cpus, cfg.ponder)?;
+    let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(cfg, label, cpus)?;
     engine.initialize(cfg)?;
     Ok(engine)
 }
@@ -1460,10 +1459,18 @@ fn main() -> Result<()> {
         })
         .collect();
     for (index, options) in engine_usi_options.iter().enumerate() {
+        let explicit = cli.ponder.iter().any(|entry| {
+            entry.split_once(':').is_some_and(|(i, _)| i.parse::<usize>() == Ok(index))
+        });
         for option in options {
-            if let Some((name, value)) = option.split_once('=')
+            if explicit
+                && let Some((name, value)) = option.split_once('=')
                 && matches!(name.trim(), "USI_Ponder" | "Ponder")
-                && value.trim() != engine_ponder[index].to_string()
+                && !value.trim().eq_ignore_ascii_case(if engine_ponder[index] {
+                    "true"
+                } else {
+                    "false"
+                })
             {
                 bail!(
                     "engine {index}: {option} conflicts with --ponder {index}:{}",

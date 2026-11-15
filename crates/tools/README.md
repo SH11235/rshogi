@@ -114,6 +114,7 @@ cargo run --release -p tools --bin analyze_selfplay -- "$RUN"
 Fischer 時計の NPS による補正（`--nps-scaling`）と Linux の NUMA 固定（`--cpu-affinity numa`）は
 [tournament の時計補正と CPU 割り当て](docs/tournament.md#機械の速さによる時計の補正---nps-scaling)を参照してください。
 engine ごとの相手手番思考は `--ponder 0:true 1:false` で指定できます。
+的中時は PV の先頭と bestmove の一致を確認して評価値を採用します。
 詳しくは [ponder の設定と CPU 割り当て](docs/tournament.md#相手手番の思考ponder)を参照してください。
 中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
 不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。

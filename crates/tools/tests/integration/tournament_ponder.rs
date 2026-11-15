@@ -23,7 +23,7 @@ def reply():
         prediction = 'resign'
     if mode == 'illegal_prediction':
         prediction = '5a5c'
-    if mode == 'miss':
+    if mode in ('miss', 'early_miss'):
         prediction = '3c3d' if len(moves) % 2 == 0 else '7g7f'
     if mode in ('resign', 'win') and len(moves) >= 1:
         move = mode
@@ -37,6 +37,9 @@ for raw in sys.stdin:
     log.write(line + '\n')
     if line == 'usi':
         print('option name Stochastic_Ponder type check default false', flush=True)
+        if mode == 'advertised':
+            print('option name USI_Ponder type check default false', flush=True)
+            print('option name Ponder type check default false', flush=True)
         print('usiok', flush=True)
     elif line == 'isready':
         print('readyok', flush=True)
@@ -50,7 +53,12 @@ for raw in sys.stdin:
     elif line.startswith('go ponder'):
         assert not pending
         pending = True
+        if mode in ('early_hit', 'early_miss'):
+            reply()
     elif line == 'ponderhit':
+        if mode in ('early_hit', 'early_miss'):
+            assert not pending
+            continue
         assert pending, 'ponderhit without go ponder'
         if mode not in ('timeout', 'undrained') or len(moves) < 1:
             reply()
@@ -64,6 +72,7 @@ for raw in sys.stdin:
             reply()
     elif line == 'stop':
         if mode == 'undrained': continue
+        if mode in ('early_hit', 'early_miss') and not pending: continue
         assert pending, 'stop without outstanding search'
         time.sleep(0.01)
         pending = False
@@ -397,7 +406,12 @@ fn undrained_timeout_keeps_loss_and_replaces_worker() {
 
 #[test]
 fn contradictory_usi_ponder_is_rejected_before_spawning() {
-    for option in ["USI_Ponder=false", "Ponder=false"] {
+    for (ponder, option) in [
+        ("0:true", "USI_Ponder=FaLsE"),
+        ("0:true", "Ponder=false"),
+        ("0:false", "USI_Ponder=TrUe"),
+        ("0:false", "Ponder=true"),
+    ] {
         for flag in ["--usi-option", "--engine-usi-option"] {
             let dir = tempfile::tempdir().unwrap();
             let value = if flag == "--engine-usi-option" {
@@ -416,7 +430,7 @@ fn contradictory_usi_ponder_is_rejected_before_spawning() {
                     "--engine-label",
                     "b",
                     "--ponder",
-                    "0:true",
+                    ponder,
                     flag,
                     &value,
                     "--nodes",
@@ -434,6 +448,53 @@ fn contradictory_usi_ponder_is_rejected_before_spawning() {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+    }
+}
+
+#[test]
+fn early_bestmove_is_drained_on_hits_and_misses_across_games() {
+    for mode in ["early_hit", "early_miss"] {
+        let run = run([mode, "hit"], &["0:true"], &[]);
+        assert_eq!(results(&run).len(), 4);
+        for result in results(&run) {
+            assert_eq!(result["reason"], "max_moves", "{result}");
+        }
+        for row in run.rows.iter().filter(|row| row["type"] == "move") {
+            assert_eq!(row["timed_out"], false, "{row}");
+        }
+        assert!(run.logs[0].iter().any(|line| line.starts_with("go ponder")));
+        let expected = if mode == "early_hit" {
+            "ponderhit"
+        } else {
+            "stop"
+        };
+        assert!(run.logs[0].iter().any(|line| line == expected));
+    }
+}
+
+#[test]
+fn usi_ponder_without_explicit_flag_and_case_insensitive_values_are_accepted() {
+    for (ponder, value) in [
+        (vec![], "true"),
+        (vec!["0:true"], "TrUe"),
+        (vec!["0:false"], "FaLsE"),
+    ] {
+        for name in ["USI_Ponder", "Ponder"] {
+            let option = format!("{name}={value}");
+            let indexed = format!("0:{option}");
+            for extra in [
+                ["--usi-option", option.as_str()],
+                ["--engine-usi-option", indexed.as_str()],
+            ] {
+                let run = run(["advertised", "hit"], &ponder, &extra);
+                assert!(
+                    run.logs[0]
+                        .iter()
+                        .any(|line| line == &format!("setoption name {name} value {value}"))
+                );
+                assert_eq!(results(&run).len(), 4);
+            }
         }
     }
 }
