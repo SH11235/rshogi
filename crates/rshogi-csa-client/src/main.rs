@@ -339,10 +339,15 @@ fn main() -> Result<()> {
             match reloader.prepare(&config.engine.options, &cli) {
                 Ok(Some(update)) => {
                     if !update.changed.is_empty()
-                        && let Err(error) =
-                            engine.update_options(&update.changed, config.game.ponder)
+                        && let Err(error) = engine.update_options(
+                            &update.changed,
+                            config.game.ponder,
+                            Duration::from_secs(config.engine.startup_timeout_sec),
+                        )
                     {
-                        log::warn!("[USI] オプション更新の送信失敗。旧設定で再起動: {error:#}");
+                        log::warn!(
+                            "[USI] オプション更新・準備完了待ちの失敗。旧設定で再起動: {error:#}"
+                        );
                         engine.quit();
                         engine = spawn_engine(&config)?;
                     } else {

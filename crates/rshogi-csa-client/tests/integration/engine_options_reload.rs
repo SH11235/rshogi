@@ -21,12 +21,12 @@ impl Drop for Fixture {
     }
 }
 
-fn config(root: &Path, script: &Path, port: u16, book: &str) -> String {
+fn config(root: &Path, script: &Path, port: u16, book: &str, games: usize) -> String {
     format!(
         "[server]\nhost='127.0.0.1'\nport={port}\nid='alice'\npassword='pw'\nfloodgate=false\n\
          [server.keepalive]\nping_interval_sec=0\n\
          [engine]\npath='{}'\n[engine.options]\nBookFile='{}'\nNetworkDelay=0\nThreads=1\n\
-         [game]\nponder=false\nmax_games=2\n\
+         [game]\nponder=false\nmax_games={games}\n\
          [record]\ndir='{}'\nsave_csa=false\nsave_sfen=false\n\
          [log]\ndir=''\n",
         script.display(),
@@ -42,7 +42,22 @@ fn read_line(reader: &mut BufReader<TcpStream>) -> String {
 }
 
 #[test]
-fn book_changes_next_game_without_an_extra_login_or_engine_restart() {
+fn slow_book_reload_finishes_before_next_login_without_restarting_engine() {
+    run_reload_scenario(false);
+}
+
+#[test]
+fn failed_ready_restarts_old_engine_and_retries_unacknowledged_options_next_game() {
+    run_reload_scenario(true);
+}
+
+fn run_reload_scenario(fail_first_ready: bool) {
+    let expected_moves = if fail_first_ready {
+        vec!["+7776FU", "+7776FU", "+2726FU"]
+    } else {
+        vec!["+7776FU", "+2726FU"]
+    };
+    let games = expected_moves.len();
     let root = std::env::temp_dir().join(format!(
         "csa-options-e2e-{}-{}",
         std::process::id(),
@@ -60,13 +75,29 @@ while IFS= read -r line; do
     case "$line" in
         usi) printf 'id name reload-mock\noption name BookFile type string default none\nusiok\n' ;;
         'setoption name BookFile value '*) book="${{line#* value }}" ;;
-        isready) echo readyok ;;
+        isready)
+            case "$book" in
+                */new.book)
+                    if [ "{fail_first_ready}" = true ] && [ ! -e '{failed}' ]; then
+                        touch '{failed}'
+                        exit 1
+                    fi
+                    if [ ! -e '{prepared}' ]; then
+                        sleep 0.2
+                        printf 'reload-ready\n' >> '{trace}'
+                        touch '{prepared}'
+                    fi ;;
+            esac
+            echo readyok ;;
         'go '*) read -r chosen < "$book"; echo "bestmove $chosen" ;;
         quit) exit 0 ;;
     esac
 done
 "#,
-            trace.display()
+            trace.display(),
+            trace = trace.display(),
+            failed = root.join("failed-ready").display(),
+            prepared = root.join("prepared-book").display(),
         ),
     );
     let fixture = Fixture { root, script };
@@ -76,12 +107,13 @@ done
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let config_path = fixture.root.join("client.toml");
-    std::fs::write(&config_path, config(&fixture.root, &fixture.script, port, "old.book")).unwrap();
+    std::fs::write(&config_path, config(&fixture.root, &fixture.script, port, "old.book", games))
+        .unwrap();
     let server_root = fixture.root.clone();
     let server_script = fixture.script.clone();
     let server_config = config_path.clone();
     let server = thread::spawn(move || {
-        for (game, expected) in ["+7776FU", "+2726FU"].iter().enumerate() {
+        for (game, expected) in expected_moves.iter().enumerate() {
             let deadline = Instant::now() + Duration::from_secs(15);
             let mut stream = loop {
                 match listener.accept() {
@@ -97,12 +129,21 @@ done
             stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             assert_eq!(read_line(&mut reader), "LOGIN alice pw");
+            if *expected == "+2726FU" {
+                let trace = server_root.join("usi.log");
+                assert!(std::fs::read_to_string(&trace).unwrap().contains("reload-ready\n"));
+                writeln!(
+                    std::fs::OpenOptions::new().append(true).open(trace).unwrap(),
+                    "server-login-ready"
+                )
+                .unwrap();
+            }
             write!(stream, "LOGIN:alice OK\nBEGIN Game_Summary\nProtocol_Version:1.2\nGame_ID:reload-{game}\nName+:alice\nName-:bob\nYour_Turn:+\nTo_Move:+\nTime_Unit:1sec\nTotal_Time:600\nByoyomi:10\nBEGIN Position\nPI\n+\nEND Position\nEND Game_Summary\n").unwrap();
             assert_eq!(read_line(&mut reader), format!("AGREE reload-{game}"));
             writeln!(stream, "START:reload-{game}").unwrap();
             assert_eq!(read_line(&mut reader), *expected);
             if game == 0 {
-                let mut next = config(&server_root, &server_script, port, "new.book");
+                let mut next = config(&server_root, &server_script, port, "new.book", games);
                 next = next.replace("NetworkDelay=0", "NetworkDelay=123");
                 let temporary = server_config.with_extension("tmp");
                 std::fs::write(&temporary, next).unwrap();
@@ -139,31 +180,56 @@ done
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     server.join().unwrap();
     let commands = std::fs::read_to_string(trace).unwrap();
-    assert_eq!(commands.lines().filter(|line| *line == "usi").count(), 1, "{commands}");
-    assert_eq!(commands.lines().filter(|line| *line == "usinewgame").count(), 2, "{commands}");
-    assert_eq!(commands.lines().filter(|line| *line == "isready").count(), 3, "{commands}");
+    assert_eq!(
+        commands.lines().filter(|line| *line == "usi").count(),
+        if fail_first_ready { 2 } else { 1 },
+        "{commands}"
+    );
+    assert_eq!(
+        commands.lines().filter(|line| *line == "usinewgame").count(),
+        games,
+        "{commands}"
+    );
+    assert_eq!(
+        commands.lines().filter(|line| *line == "isready").count(),
+        if fail_first_ready { 7 } else { 4 },
+        "{commands}"
+    );
     assert_eq!(
         commands
             .lines()
             .filter(|line| *line == "setoption name Threads value 1")
             .count(),
-        1,
+        if fail_first_ready { 2 } else { 1 },
         "{commands}"
     );
     let book_update =
         format!("setoption name BookFile value {}", fixture.root.join("new.book").display());
-    let update_index = commands.find(&book_update).unwrap();
+    let update_index = commands.rfind(&book_update).unwrap();
     let first_go = commands.find("go ").unwrap();
     let next_ready = commands.rfind("isready").unwrap();
-    assert!(first_go < update_index && update_index < next_ready, "{commands}");
+    let prepared_index = commands.find("reload-ready\n").unwrap();
+    let login_index = commands.find("server-login-ready\n").unwrap();
+    let next_game = commands.rfind("usinewgame").unwrap();
+    assert!(first_go < update_index && update_index < prepared_index, "{commands}");
+    assert!(
+        prepared_index < login_index && login_index < next_game && next_game < next_ready,
+        "{commands}"
+    );
     assert!(commands.contains("setoption name NetworkDelay value 123"), "{commands}");
     let jsonl: Vec<_> = std::fs::read_dir(fixture.root.join("records/jsonl"))
         .unwrap()
         .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .collect();
-    assert_eq!(jsonl.len(), 2);
-    for (game, book) in [("reload-0", "old.book"), ("reload-1", "new.book")] {
-        let record = jsonl.iter().find(|text| text.contains(game)).unwrap();
+    assert_eq!(jsonl.len(), games);
+    for game in 0..games {
+        let book = if game == games - 1 {
+            "new.book"
+        } else {
+            "old.book"
+        };
+        let id = format!("reload-{game}");
+        let record = jsonl.iter().find(|text| text.contains(&id)).unwrap();
         assert!(record.contains(book), "{record}");
     }
 }
@@ -203,9 +269,55 @@ done
             },
         )
         .unwrap();
-        engine.update_options(&options, true).unwrap();
+        engine.update_options(&options, true, Duration::from_secs(5)).unwrap();
         engine.new_game().unwrap();
         engine.quit();
         std::fs::remove_file(path).unwrap();
     }
+}
+
+#[test]
+fn startup_keeps_per_line_timeout_while_reload_bounds_total_ready_wait() {
+    use super::common::spawn_engine;
+    use rshogi_csa_client::engine::SpawnOptions;
+    use std::collections::HashMap;
+
+    let path = write_mock_script(
+        "reload_ready_timeout",
+        r#"#!/usr/bin/env bash
+set -eu
+while IFS= read -r line; do
+    case "$line" in
+        usi) echo usiok ;;
+        isready)
+            for chunk in 1 2 3 4 5 6; do
+                echo 'info string loading book'
+                sleep 0.3
+            done
+            echo readyok ;;
+        quit) exit 0 ;;
+    esac
+done
+"#,
+    );
+    let startup = Instant::now();
+    let mut engine = spawn_engine(
+        &path,
+        &HashMap::new(),
+        SpawnOptions {
+            ponder: false,
+            startup_timeout: Duration::from_secs(1),
+            stderr_passthrough: false,
+        },
+    )
+    .unwrap();
+    assert!(startup.elapsed() > Duration::from_secs(1));
+    let start = Instant::now();
+    let error = engine
+        .update_options(&HashMap::new(), false, Duration::from_secs(1))
+        .unwrap_err();
+    assert!(error.to_string().contains("タイムアウト"), "{error:#}");
+    assert!(start.elapsed() < Duration::from_secs(5), "{error:#}");
+    drop(engine);
+    std::fs::remove_file(path).unwrap();
 }
