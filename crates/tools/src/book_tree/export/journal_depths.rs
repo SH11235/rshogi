@@ -1,12 +1,13 @@
 use super::{Schema, master_table::Row};
 use crate::book_db::{position_from_sfen, strip_ply};
 use crate::book_tree::journal;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{SyncSender, sync_channel},
     },
 };
@@ -48,15 +49,67 @@ impl Depths {
     }
 }
 
+struct ValidatedReading {
+    fingerprint: String,
+    reading: journal::Reading,
+}
+
+fn validate_record(rec: journal::Record) -> Result<ValidatedReading> {
+    ensure!(
+        rec.settings.computed_fingerprint()? == rec.settings.fingerprint,
+        "台帳の指紋と条件が一致しません"
+    );
+    let mut reading = rec.reading;
+    reading.key =
+        strip_ply(&position_from_sfen(&format!("{} 1", strip_ply(&reading.key)))?.to_sfen())
+            .to_owned();
+    reading.validate(&rec.settings)?;
+    Ok(ValidatedReading {
+        fingerprint: rec.settings.fingerprint,
+        reading,
+    })
+}
+
 enum Batch {
     Records {
-        records: Vec<journal::Record>,
+        records: Vec<ValidatedReading>,
         non_engine: usize,
+        invalid: usize,
     },
     Finished(Result<Option<bool>>),
 }
 
-fn read_batches(path: &Path, sender: SyncSender<Batch>, cancelled: &AtomicBool) {
+fn send_records(
+    records: Vec<journal::Record>,
+    non_engine: usize,
+    sender: &SyncSender<Batch>,
+    pool: &rayon::ThreadPool,
+) -> Result<()> {
+    let engine = records.len();
+    // 後続ファイルが送信待ちでも、先頭ファイルの検証を複数スレッドで進める。
+    let records: Vec<_> = pool.install(|| {
+        records
+            .into_par_iter()
+            .with_min_len(8)
+            .filter_map(|rec| validate_record(rec).ok())
+            .collect()
+    });
+    let invalid = engine - records.len();
+    sender
+        .send(Batch::Records {
+            records,
+            non_engine,
+            invalid,
+        })
+        .map_err(|_| anyhow::anyhow!("台帳の読み込みを中断しました"))
+}
+
+fn read_batches(
+    path: &Path,
+    sender: &SyncSender<Batch>,
+    cancelled: &AtomicBool,
+    pool: &rayon::ThreadPool,
+) {
     let mut records = Vec::new();
     let mut non_engine = 0;
     let scanned = journal::visit_records(path, |record| {
@@ -66,24 +119,18 @@ fn read_batches(path: &Path, sender: SyncSender<Batch>, cancelled: &AtomicBool) 
         } else {
             non_engine += 1;
         }
-        // 注釈に使わない行で待ち合わせると、後続ファイルの解析が先頭の読み込みを待ってしまう。
         if records.len() == 64 {
-            sender
-                .send(Batch::Records {
-                    records: std::mem::take(&mut records),
-                    non_engine: std::mem::take(&mut non_engine),
-                })
-                .map_err(|_| anyhow::anyhow!("台帳の読み込みを中断しました"))?;
+            send_records(
+                std::mem::take(&mut records),
+                std::mem::take(&mut non_engine),
+                sender,
+                pool,
+            )?;
         }
         Ok(())
     });
     if (!records.is_empty() || non_engine > 0)
-        && sender
-            .send(Batch::Records {
-                records,
-                non_engine,
-            })
-            .is_err()
+        && send_records(records, non_engine, sender, pool).is_err()
     {
         return;
     }
@@ -93,50 +140,74 @@ fn read_batches(path: &Path, sender: SyncSender<Batch>, cancelled: &AtomicBool) 
 fn visit_files(
     paths: &[PathBuf],
     pool: &rayon::ThreadPool,
-    mut visit: impl FnMut(Vec<journal::Record>, usize) -> Result<()>,
+    mut visit: impl FnMut(Vec<ValidatedReading>, usize, usize),
     mut finished: impl FnMut(&Path, Option<bool>),
 ) -> Result<()> {
-    // 待ち合わせるファイルをワーカー数以下にし、後続の送信待ちで先頭が起動できなくなるのを防ぐ。
-    for paths in paths.chunks(pool.current_num_threads()) {
-        let (senders, receivers): (Vec<_>, Vec<_>) = paths.iter().map(|_| sync_channel(2)).unzip();
-        let cancelled = AtomicBool::new(false);
-        std::thread::scope(|scope| -> Result<()> {
+    let workers = pool.current_num_threads().min(paths.len());
+    let cancelled = AtomicBool::new(false);
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| -> Result<()> {
+        let (announcements, assignments) = sync_channel(workers);
+        let mut receivers = Vec::new();
+        let mut readers = Vec::new();
+        // 先行ファイルの数によらず、検証済みの束はワーカーごとの送信枠だけに保持する。
+        for worker in 0..workers {
+            let (sender, receiver) = sync_channel(2);
+            receivers.push(receiver);
+            let announcements = announcements.clone();
             let cancelled = &cancelled;
-            let readers = scope.spawn(move || {
-                pool.scope(|scope| {
-                    for (path, sender) in paths.iter().zip(senders) {
-                        scope.spawn(move |_| read_batches(path, sender, cancelled));
+            let next = &next;
+            readers.push(scope.spawn(move || {
+                while !cancelled.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = paths.get(index) else {
+                        break;
+                    };
+                    if announcements.send((index, worker)).is_err() {
+                        break;
                     }
-                });
-            });
-            // 消費側は rayon の外で動かし、1 スレッド指定でも送信側が動けるようにする。
-            let result = (|| {
-                for (path, receiver) in paths.iter().zip(receivers) {
-                    for batch in receiver {
-                        match batch {
-                            Batch::Records {
-                                records,
-                                non_engine,
-                            } => {
-                                visit(records, non_engine)
-                                    .with_context(|| format!("台帳: {}", path.display()))?;
-                            }
-                            Batch::Finished(scanned) => finished(path, scanned?),
+                    read_batches(path, &sender, cancelled, pool);
+                }
+            }));
+        }
+        drop(announcements);
+        let stopped = || anyhow::anyhow!("台帳の読み込みワーカーが停止しました");
+        let result = (|| {
+            let mut assigned = BTreeMap::new();
+            for (index, path) in paths.iter().enumerate() {
+                while !assigned.contains_key(&index) {
+                    let (file, worker) = assignments.recv().map_err(|_| stopped())?;
+                    assigned.insert(file, worker);
+                }
+                let worker = assigned.remove(&index).ok_or_else(stopped)?;
+                loop {
+                    match receivers[worker].recv().map_err(|_| stopped())? {
+                        Batch::Records {
+                            records,
+                            non_engine,
+                            invalid,
+                        } => {
+                            visit(records, non_engine, invalid);
+                        }
+                        Batch::Finished(scanned) => {
+                            finished(path, scanned?);
+                            break;
                         }
                     }
                 }
-                Ok(())
-            })();
-            if result.is_err() {
-                cancelled.store(true, Ordering::Relaxed);
             }
-            readers
-                .join()
-                .map_err(|_| anyhow::anyhow!("台帳の読み込みワーカーが停止しました"))?;
-            result
-        })?;
-    }
-    Ok(())
+            Ok(())
+        })();
+        if result.is_err() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        drop(receivers);
+        drop(assignments);
+        for reader in readers {
+            reader.join().map_err(|_| stopped())?;
+        }
+        result
+    })
 }
 
 pub(super) fn load(
@@ -153,30 +224,13 @@ pub(super) fn load(
     let mut conflicting = 0;
     let mut tails = 0;
     let mut skipped = 0;
-    let mut visit_record = |rec: journal::Record| -> Result<()> {
-        engine += 1;
-        let validated = (|| -> Result<_> {
-            ensure!(
-                rec.settings.computed_fingerprint()? == rec.settings.fingerprint,
-                "台帳の指紋と条件が一致しません"
-            );
-            let key = strip_ply(
-                &position_from_sfen(&format!("{} 1", strip_ply(&rec.reading.key)))?.to_sfen(),
-            )
-            .to_owned();
-            let mut reading = rec.reading;
-            reading.key = key.clone();
-            reading.validate(&rec.settings)?;
-            Ok((key, reading))
-        })();
-        let Ok((key, reading)) = validated else {
-            invalid += 1;
-            return Ok(());
-        };
-        let fp = rec.settings.fingerprint;
+    let mut visit_record = |rec: ValidatedReading| {
+        let fp = rec.fingerprint;
+        let reading = rec.reading;
+        let key = reading.key.clone();
         result.fingerprints.insert(fp.clone());
         if !keys.contains(key.as_str()) {
-            return Ok(());
+            return;
         }
         match result.readings.entry((fp, key)) {
             std::collections::btree_map::Entry::Occupied(entry) => {
@@ -191,17 +245,17 @@ pub(super) fn load(
                 used += 1;
             }
         }
-        Ok(())
     };
     let scan = visit_files(
         paths,
         pool,
-        |records, non_engine| {
+        |records, non_engine, invalid_rows| {
+            engine += records.len() + invalid_rows;
             other += non_engine;
+            invalid += invalid_rows;
             for record in records {
-                visit_record(record)?;
+                visit_record(record);
             }
-            Ok(())
         },
         |path, scanned| {
             if let Some(ignored_tail) = scanned {

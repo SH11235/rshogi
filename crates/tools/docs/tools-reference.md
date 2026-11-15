@@ -9,7 +9,7 @@
 
 自前の定跡と外部定跡の最善・指定点差以内の手の突き合わせは [`book_mine master compare`](book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) を使います。
 
-定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳読み込みと応手グラフ構築を並列化できます。
+定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳の読み込み・検証と応手グラフ構築を並列化できます (台帳の採用順とバッファ上限を維持)。
 
 ## 教師データの生成・変換・加工
 
