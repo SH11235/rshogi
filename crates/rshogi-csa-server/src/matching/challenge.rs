@@ -329,6 +329,8 @@ mod tests {
         ClockSpec::Countdown {
             total_time_sec: 600,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         }
     }
 

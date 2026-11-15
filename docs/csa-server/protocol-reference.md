@@ -460,3 +460,11 @@ production は本家 Floodgate 互換の `countdown` (`Time_Unit:1sec`) を既�
 Workers のミリ秒時計では、保存棋譜の各手に `'RSHOGI_TIME_MS:<ms>` コメントを付けて
 再接続補償後の消費時間を保持する。終局後の観戦 snapshot はこの値からミリ秒精度を
 復元する。標準の `T` 行は秒のままで、コメントのない既存棋譜は秒精度で復元する。
+
+### 先後別の時計
+
+実効の総持ち時間が異なる対局では、共通の `BEGIN Time` の代わりに
+`BEGIN Time+` / `END Time+` と `BEGIN Time-` / `END Time-` を送る。
+各ブロックには `Time_Unit`、`Total_Time`、`Byoyomi` または `Increment`、
+`Least_Time_Per_Move` を同じ順序で含める。同じ時計なら従来の共通ブロックを使う。
+指定方法は [時計設定](clock_defaults.md#先後別の総持ち時間) を参照。

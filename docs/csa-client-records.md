@@ -182,3 +182,15 @@ JSONL の未決結果は `outcome: "interrupted"`（中断）/ `"censored"`（�
 live JSONL の再開・確定では、対局 ID と開始時刻、未完であること、既存内容との一致を確認する。
 同名の `.jsonl.tmp` がある場合も上書きしない。別の保存処理が動いていないことを確認してから
 残った一時ファイルを退避し、保存済みの棋譜を確認する。
+
+### 先後別の総持ち時間
+
+`Game_Summary` の `Time+` / `Time-` を先後別に読み、エンジンの `go btime ... wtime ...`
+にもそれぞれの残時間を渡す。JSONL の `meta.settings.btime` は先手の初期持ち時間（ms）、
+総持ち時間・秒読み・加算などの時計設定が先後で異なる場合に追加する `wtime` は後手の初期持ち時間（ms）。
+秒読み・加算だけが異なる場合も `wtime` を追加するが、後手の秒読み・加算を表す項目ではない。
+`byoyomi` / `binc` は従来どおり先手の値を使う。`wtime` がなければ先後共通。
+CSA の `$TIME_LIMIT` は先手の時計を表し、時計が異なる場合には
+`'Time+:Total_Time_Ms:...,Byoyomi_Ms:...,Increment_Ms:...` と
+`'Time-:Total_Time_Ms:...,Byoyomi_Ms:...,Increment_Ms:...` のコメントに両者の値をミリ秒で残す。
+先後が同じ場合の記録形式は変わらない。

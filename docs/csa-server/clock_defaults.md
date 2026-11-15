@@ -41,6 +41,36 @@ BYOYOMI_SEC = "10"
 CLOCK_PRESETS = "[]"
 ```
 
+## 先後別の総持ち時間
+
+TCP の `[[preset]]` と Workers の `CLOCK_PRESETS` は、共通の総持ち時間に対する
+先後別の上書きを受け付ける。
+
+| 方式 | 共通値（必須） | 先手の上書き | 後手の上書き |
+|---|---|---|---|
+| `countdown` / `fischer` | `total_time_sec` | `black_total_time_sec` | `white_total_time_sec` |
+| `countdown_msec` | `total_time_ms` | `black_total_time_ms` | `white_total_time_ms` |
+| `stopwatch` | `total_time_min` | `black_total_time_min` | `white_total_time_min` |
+
+`stopwatch` は `stop_watch` の別名としても読み込める。保存形式の kind は従来の `stop_watch`。
+
+省略した側は共通値を使う。両方を省略すれば従来どおり。共通値・指定した上書き値は
+すべて正の整数とする。秒読みと加算は先後共通で、時間切れの判定と `T` の単位・切り捨ては
+各時計方式のまま変わらない。
+
+```json
+[{"game_name":"unequal-fischer","kind":"fischer","total_time_sec":30,"black_total_time_sec":15,"increment_sec":2}]
+```
+
+この例では先手が15秒、後手が30秒、どちらも毎手2秒加算になる。
+実効値が異なる場合は `Game_Summary` とサーバーの CSA 棋譜に `BEGIN Time+` / `BEGIN Time-`
+を出力する。各ブロックは単位・総持ち時間・秒読みまたは加算を含む。
+同じ時計なら、明示的な上書きがあっても従来の `BEGIN Time` と同一の出力になる。
+Workers の保存済み対局設定は旧形式も読み込める。棋譜・live index の時計には指定した
+`black_total_sec` / `white_total_sec`（ミリ秒方式では `_ms`、分方式では `_min`）を追加し、
+省略した側には従来の `total_sec` / `total_ms` / `total_min` を使う。
+Workers の global 環境変数は従来の共通時計を使い、先後指定には `CLOCK_PRESETS` を使う。
+
 ## 複数 clock 併用 (`CLOCK_PRESETS`)
 
 1 つの worker で「短時間対局」「中時間対局」「Floodgate 互換 1sec」のように

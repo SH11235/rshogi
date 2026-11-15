@@ -1311,7 +1311,8 @@ drain 対象外。
   2026-05-10 時点で **不採用** と判定 ([Issue #634](https://github.com/SH11235/rshogi/issues/634))。詳細・将来 trigger は §12.1.1 / §12.1.2 を参照。
 - 最低 drain 検出時間 = `poll_interval_sec × require_stable_zero` (default 設定
   では `30s × 3 = 90s`)。R2 list の eventual consistency を緩和するためのバッファ。
-- worst case 待機: `total_time_sec × 2 + byoyomi_sec × max_moves`
+- worst case 待機: `先手の総持ち時間秒 + 後手の総持ち時間秒 + byoyomi_sec × max_moves`
+  （先後指定を省略した場合は `total_time_sec × 2 + byoyomi_sec × max_moves`）
   (production CLOCK 設定で `600 × 2 + 10 × 256 = 3760s ≈ 63 分`) + 余裕で 3900s
   を default に設定。
 

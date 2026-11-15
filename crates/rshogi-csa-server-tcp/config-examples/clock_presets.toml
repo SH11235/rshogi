@@ -29,3 +29,10 @@ game_name = "fischer-300-10F"
 kind = "fischer"
 total_time_sec = 300
 increment_sec = 10
+
+[[preset]]
+game_name = "unequal-fischer"
+kind = "fischer"
+total_time_sec = 30
+black_total_time_sec = 15
+increment_sec = 2

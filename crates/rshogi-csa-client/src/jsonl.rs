@@ -334,6 +334,9 @@ struct MetaSettings {
     byoyomi: u64,
     /// 先手視点の持ち時間 (ms)
     btime: u64,
+    /// 先後の時計設定が異なる場合の後手持ち時間 (ms)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wtime: Option<u64>,
     /// 先手視点の increment (ms)
     binc: u64,
     /// クライアント側の秒読みマージン (ms)
@@ -411,6 +414,8 @@ fn write_meta<W: Write>(
             max_moves: 0,
             byoyomi: u64_or_zero(record.black_time.byoyomi_ms),
             btime: u64_or_zero(record.black_time.total_time_ms),
+            wtime: (record.black_time != record.white_time)
+                .then(|| u64_or_zero(record.white_time.total_time_ms)),
             binc: u64_or_zero(record.black_time.increment_ms),
             timeout_margin_ms: config.time.margin_msec,
             threads: 1,
@@ -694,6 +699,35 @@ mod tests {
             white_time: TimeConfig::default(),
             reconnect_token: None,
             entering_king_rule: None,
+        }
+    }
+
+    #[test]
+    fn meta_marks_any_difference_in_color_clocks() {
+        for difference in ["same", "total", "byoyomi", "increment"] {
+            let mut summary = summary();
+            match difference {
+                "total" => summary.white_time.total_time_ms += 1000,
+                "byoyomi" => summary.white_time.byoyomi_ms += 1000,
+                "increment" => summary.white_time.increment_ms += 1000,
+                _ => {}
+            }
+            let record = GameRecord::new(&summary);
+            let mut output = Vec::new();
+            write_meta(&mut output, &record, &CsaClientConfig::default(), Path::new("test.jsonl"))
+                .unwrap();
+            let meta: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            let settings = &meta["settings"];
+            assert_eq!(settings["btime"], summary.black_time.total_time_ms);
+            assert_eq!(settings["byoyomi"], summary.black_time.byoyomi_ms);
+            assert_eq!(settings["binc"], summary.black_time.increment_ms);
+            if difference == "same" {
+                assert!(settings.get("wtime").is_none());
+                assert!(!record.to_csa().contains("'Time-:"));
+            } else {
+                assert_eq!(settings["wtime"], summary.white_time.total_time_ms);
+                assert!(record.to_csa().contains("'Time-:"));
+            }
         }
     }
 

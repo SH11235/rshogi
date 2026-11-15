@@ -39,7 +39,7 @@ pub trait TimeClock {
     /// 各実装 (`SecondsCountdownClock` / `FischerClock` / `StopWatchClock`) が行う。
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult;
 
-    /// Game_Summary の `BEGIN Time` セクションを CSA 仕様の項目・順序・単位で出力する。
+    /// Game_Summary の `Time` または `Time+` / `Time-` セクションを出力する。
     fn format_summary(&self) -> String;
 
     /// Game_Summary の Time_Unit と着手通知 T に使う単位（正のミリ秒）。
@@ -61,6 +61,7 @@ pub trait TimeClock {
 }
 
 /// フロントエンド設定から選択する時計方式。
+/// `black_total_time_*` / `white_total_time_*` は先後別の上書きで、省略時は `total_time_*` を使う。
 ///
 /// `Countdown` (整数秒切り捨て、Floodgate 互換) と `CountdownMsec` (1ms 粒度、
 /// 短時間対局向け拡張) は **別バリアント** として並列に持つ。
@@ -72,19 +73,39 @@ pub enum ClockSpec {
     /// CSA 2014 改訂互換の秒読み（整数秒切り捨て、`Time_Unit:1sec`）。
     Countdown {
         total_time_sec: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        black_total_time_sec: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        white_total_time_sec: Option<u32>,
         byoyomi_sec: u32,
     },
     /// 1ms 粒度の秒読み（短時間対局向け、`Time_Unit:1msec`）。
     /// 本家 Floodgate には無い拡張で、`byoyomi_ms = 100` のような端数値を許す。
-    CountdownMsec { total_time_ms: u32, byoyomi_ms: u32 },
+    CountdownMsec {
+        total_time_ms: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        black_total_time_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        white_total_time_ms: Option<u32>,
+        byoyomi_ms: u32,
+    },
     /// Fischer 方式（秒単位）。
     Fischer {
         total_time_sec: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        black_total_time_sec: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        white_total_time_sec: Option<u32>,
         increment_sec: u32,
     },
     /// StopWatch 方式（分単位）。
+    #[serde(alias = "stopwatch")]
     StopWatch {
         total_time_min: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        black_total_time_min: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        white_total_time_min: Option<u32>,
         byoyomi_min: u32,
     },
 }
@@ -93,12 +114,37 @@ impl Default for ClockSpec {
     fn default() -> Self {
         Self::Countdown {
             total_time_sec: 600,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
             byoyomi_sec: 10,
         }
     }
 }
 
 impl ClockSpec {
+    /// preset の入力キーから、時計方式に属さない先後別持ち時間の項目を返す。
+    /// 保存済み設定の復元には適用せず、未知の一般項目は許容する。
+    pub fn validate_color_total_fields<'a>(
+        &self,
+        fields: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), &'a str> {
+        let unit = match self {
+            Self::Countdown { .. } | Self::Fischer { .. } => "sec",
+            Self::CountdownMsec { .. } => "ms",
+            Self::StopWatch { .. } => "min",
+        };
+        for field in fields {
+            if let Some(suffix) = field
+                .strip_prefix("black_total_time_")
+                .or_else(|| field.strip_prefix("white_total_time_"))
+                && suffix != unit
+            {
+                return Err(field);
+            }
+        }
+        Ok(())
+    }
+
     /// Game_Summary / 着手通知で共通に使う消費時間の単位（ミリ秒）。
     pub fn time_unit_ms(&self) -> u64 {
         match self {
@@ -110,23 +156,71 @@ impl ClockSpec {
 
     /// 指定設定に対応する時計インスタンスを生成する。
     pub fn build_clock(&self) -> Box<dyn TimeClock> {
+        let (black, white) = self.total_times();
+        if black == white {
+            return self.build_single_clock(black);
+        }
+        Box::new(ColorClock {
+            black: self.build_single_clock(black),
+            white: self.build_single_clock(white),
+        })
+    }
+
+    fn total_times(&self) -> (u32, u32) {
         match self {
             Self::Countdown {
                 total_time_sec,
-                byoyomi_sec,
-            } => Box::new(SecondsCountdownClock::new(*total_time_sec, *byoyomi_sec)),
+                black_total_time_sec,
+                white_total_time_sec,
+                ..
+            } => (
+                black_total_time_sec.unwrap_or(*total_time_sec),
+                white_total_time_sec.unwrap_or(*total_time_sec),
+            ),
             Self::CountdownMsec {
                 total_time_ms,
-                byoyomi_ms,
-            } => Box::new(MillisecondsCountdownClock::new(*total_time_ms, *byoyomi_ms)),
+                black_total_time_ms,
+                white_total_time_ms,
+                ..
+            } => (
+                black_total_time_ms.unwrap_or(*total_time_ms),
+                white_total_time_ms.unwrap_or(*total_time_ms),
+            ),
             Self::Fischer {
                 total_time_sec,
-                increment_sec,
-            } => Box::new(FischerClock::new(*total_time_sec, *increment_sec)),
+                black_total_time_sec,
+                white_total_time_sec,
+                ..
+            } => (
+                black_total_time_sec.unwrap_or(*total_time_sec),
+                white_total_time_sec.unwrap_or(*total_time_sec),
+            ),
             Self::StopWatch {
                 total_time_min,
-                byoyomi_min,
-            } => Box::new(StopWatchClock::new(*total_time_min, *byoyomi_min)),
+                black_total_time_min,
+                white_total_time_min,
+                ..
+            } => (
+                black_total_time_min.unwrap_or(*total_time_min),
+                white_total_time_min.unwrap_or(*total_time_min),
+            ),
+        }
+    }
+
+    fn build_single_clock(&self, total: u32) -> Box<dyn TimeClock> {
+        match self {
+            Self::Countdown { byoyomi_sec, .. } => {
+                Box::new(SecondsCountdownClock::new(total, *byoyomi_sec))
+            }
+            Self::CountdownMsec { byoyomi_ms, .. } => {
+                Box::new(MillisecondsCountdownClock::new(total, *byoyomi_ms))
+            }
+            Self::Fischer { increment_sec, .. } => {
+                Box::new(FischerClock::new(total, *increment_sec))
+            }
+            Self::StopWatch { byoyomi_min, .. } => {
+                Box::new(StopWatchClock::new(total, *byoyomi_min))
+            }
         }
     }
 
@@ -150,11 +244,45 @@ impl ClockSpec {
         }
     }
 
-    /// `total_time_*` が 0 の構成を弾く。`byoyomi_*` / `increment_sec` の 0 は
-    /// sudden death として許容する。`Err` には違反フィールド名 (`"total_time_sec"`
-    /// / `"total_time_ms"` / `"total_time_min"`) を返し、メッセージ組み立ては
+    /// `total_time_*` と指定した先後別の上書きが 0 の構成を弾く。`byoyomi_*` / `increment_sec` の 0 は
+    /// sudden death として許容する。`Err` には先後別の上書きを含む違反フィールド名を返し、メッセージ組み立ては
     /// 呼び出し側に委ねる。
     pub fn validate_total_time_nonzero(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Countdown {
+                black_total_time_sec: Some(0),
+                ..
+            } => return Err("black_total_time_sec"),
+            Self::Countdown {
+                white_total_time_sec: Some(0),
+                ..
+            } => return Err("white_total_time_sec"),
+            Self::CountdownMsec {
+                black_total_time_ms: Some(0),
+                ..
+            } => return Err("black_total_time_ms"),
+            Self::CountdownMsec {
+                white_total_time_ms: Some(0),
+                ..
+            } => return Err("white_total_time_ms"),
+            Self::Fischer {
+                black_total_time_sec: Some(0),
+                ..
+            } => return Err("black_total_time_sec"),
+            Self::Fischer {
+                white_total_time_sec: Some(0),
+                ..
+            } => return Err("white_total_time_sec"),
+            Self::StopWatch {
+                black_total_time_min: Some(0),
+                ..
+            } => return Err("black_total_time_min"),
+            Self::StopWatch {
+                white_total_time_min: Some(0),
+                ..
+            } => return Err("white_total_time_min"),
+            _ => {}
+        }
         match self {
             Self::Countdown { total_time_sec, .. } if *total_time_sec == 0 => Err("total_time_sec"),
             Self::CountdownMsec { total_time_ms, .. } if *total_time_ms == 0 => {
@@ -163,6 +291,56 @@ impl ClockSpec {
             Self::Fischer { total_time_sec, .. } if *total_time_sec == 0 => Err("total_time_sec"),
             Self::StopWatch { total_time_min, .. } if *total_time_min == 0 => Err("total_time_min"),
             _ => Ok(()),
+        }
+    }
+}
+
+struct ColorClock {
+    black: Box<dyn TimeClock>,
+    white: Box<dyn TimeClock>,
+}
+
+fn append_time_section(output: &mut String, summary: &str, section: &str) {
+    for line in summary.split_inclusive('\n') {
+        match line {
+            "BEGIN Time\n" => output.push_str(&format!("BEGIN {section}\n")),
+            "END Time\n" => output.push_str(&format!("END {section}\n")),
+            _ => output.push_str(line),
+        }
+    }
+}
+
+impl TimeClock for ColorClock {
+    fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
+        match color {
+            Color::Black => self.black.consume(color, elapsed_ms),
+            Color::White => self.white.consume(color, elapsed_ms),
+        }
+    }
+
+    fn format_summary(&self) -> String {
+        let mut summary = String::new();
+        for (clock, section) in [(&self.black, "Time+"), (&self.white, "Time-")] {
+            append_time_section(&mut summary, &clock.format_summary(), section);
+        }
+        summary
+    }
+
+    fn time_unit_ms(&self) -> u64 {
+        self.black.time_unit_ms()
+    }
+
+    fn remaining_main_ms(&self, color: Color) -> i64 {
+        match color {
+            Color::Black => self.black.remaining_main_ms(color),
+            Color::White => self.white.remaining_main_ms(color),
+        }
+    }
+
+    fn turn_budget_ms(&self, color: Color) -> i64 {
+        match color {
+            Color::Black => self.black.turn_budget_ms(color),
+            Color::White => self.white.turn_budget_ms(color),
         }
     }
 }
@@ -611,6 +789,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn time_section_renames_only_delimiter_lines() {
+        let input = "BEGIN Time\nTime_Unit:1sec\nLabel:Time\nOther Time\nEND Time\n";
+        let mut output = String::new();
+        append_time_section(&mut output, input, "Time+");
+        assert_eq!(output, "BEGIN Time+\nTime_Unit:1sec\nLabel:Time\nOther Time\nEND Time+\n");
+    }
+
+    #[test]
     fn continues_when_consume_within_main_time() {
         let mut c = SecondsCountdownClock::new(600, 10);
         assert_eq!(c.consume(Color::Black, 1_200), ClockResult::Continue);
@@ -841,6 +1027,8 @@ mod tests {
         let spec = ClockSpec::Countdown {
             total_time_sec: 600,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         assert_eq!(
             spec.format_time_section(),
@@ -853,6 +1041,8 @@ mod tests {
         let spec = ClockSpec::CountdownMsec {
             total_time_ms: 10_000,
             byoyomi_ms: 100,
+            black_total_time_ms: None,
+            white_total_time_ms: None,
         };
         assert_eq!(
             spec.format_time_section(),
@@ -914,6 +1104,8 @@ mod tests {
         let spec = ClockSpec::Fischer {
             total_time_sec: 600,
             increment_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         assert_eq!(spec.format_time_section(), FischerClock::new(600, 10).format_summary());
     }
@@ -923,6 +1115,8 @@ mod tests {
         let spec = ClockSpec::StopWatch {
             total_time_min: 15,
             byoyomi_min: 1,
+            black_total_time_min: None,
+            white_total_time_min: None,
         };
         assert_eq!(spec.format_time_section(), StopWatchClock::new(15, 1).format_summary());
     }
@@ -933,6 +1127,8 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }
             .reconnect_compensation_limit_ms(),
             10_000
@@ -941,6 +1137,8 @@ mod tests {
             ClockSpec::CountdownMsec {
                 total_time_ms: 10_000,
                 byoyomi_ms: 250,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             }
             .reconnect_compensation_limit_ms(),
             250
@@ -949,6 +1147,8 @@ mod tests {
             ClockSpec::StopWatch {
                 total_time_min: 15,
                 byoyomi_min: 2,
+                black_total_time_min: None,
+                white_total_time_min: None,
             }
             .reconnect_compensation_limit_ms(),
             120_000
@@ -957,6 +1157,8 @@ mod tests {
             ClockSpec::Fischer {
                 total_time_sec: 600,
                 increment_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }
             .reconnect_compensation_limit_ms(),
             0
@@ -971,6 +1173,8 @@ mod tests {
                 ClockSpec::Countdown {
                     total_time_sec: 0,
                     byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 "total_time_sec",
             ),
@@ -978,6 +1182,8 @@ mod tests {
                 ClockSpec::CountdownMsec {
                     total_time_ms: 0,
                     byoyomi_ms: 100,
+                    black_total_time_ms: None,
+                    white_total_time_ms: None,
                 },
                 "total_time_ms",
             ),
@@ -985,6 +1191,8 @@ mod tests {
                 ClockSpec::Fischer {
                     total_time_sec: 0,
                     increment_sec: 5,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 "total_time_sec",
             ),
@@ -992,6 +1200,8 @@ mod tests {
                 ClockSpec::StopWatch {
                     total_time_min: 0,
                     byoyomi_min: 1,
+                    black_total_time_min: None,
+                    white_total_time_min: None,
                 },
                 "total_time_min",
             ),
@@ -1012,18 +1222,26 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             ClockSpec::CountdownMsec {
                 total_time_ms: 600_000,
                 byoyomi_ms: 0,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             },
             ClockSpec::Fischer {
                 total_time_sec: 300,
                 increment_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             ClockSpec::StopWatch {
                 total_time_min: 10,
                 byoyomi_min: 0,
+                black_total_time_min: None,
+                white_total_time_min: None,
             },
         ];
         for spec in cases {
@@ -1032,6 +1250,80 @@ mod tests {
                 Ok(()),
                 "sudden-death spec {spec:?} must be accepted",
             );
+        }
+    }
+
+    #[test]
+    fn color_totals_preserve_legacy_bytes_and_accounting() {
+        for (kind, unit, extra, unit_ms) in [
+            ("countdown", "sec", "byoyomi_sec", 1000),
+            ("fischer", "sec", "increment_sec", 1000),
+            ("countdown_msec", "ms", "byoyomi_ms", 1),
+            ("stop_watch", "min", "byoyomi_min", 60_000),
+        ] {
+            let old = serde_json::json!({"kind": kind, format!("total_time_{unit}"): 10, extra: 2});
+            let legacy: ClockSpec = serde_json::from_value(old.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&legacy).unwrap(), old);
+            let wire_unit = if unit == "ms" { "msec" } else { unit };
+            let legacy_bytes = format!(
+                "BEGIN Time\nTime_Unit:1{wire_unit}\nTotal_Time:10\n{}:2\nLeast_Time_Per_Move:0\nEND Time\n",
+                if kind == "fischer" {
+                    "Increment"
+                } else {
+                    "Byoyomi"
+                }
+            );
+            assert_eq!(legacy.format_time_section(), legacy_bytes);
+            for (black, white) in [
+                (None, None),
+                (Some(3), None),
+                (None, Some(8)),
+                (Some(3), Some(8)),
+                (Some(3), Some(3)),
+            ] {
+                let mut input = old.clone();
+                if let Some(n) = black {
+                    input[format!("black_total_time_{unit}")] = n.into();
+                }
+                if let Some(n) = white {
+                    input[format!("white_total_time_{unit}")] = n.into();
+                }
+                let spec: ClockSpec = serde_json::from_value(input.clone()).unwrap();
+                assert_eq!(spec.validate_total_time_nonzero(), Ok(()));
+                assert_eq!(serde_json::to_value(&spec).unwrap(), input);
+                let b = black.unwrap_or(10);
+                let w = white.unwrap_or(10);
+                let mut clock = spec.build_clock();
+                let bsection = legacy_bytes.replace("Total_Time:10", &format!("Total_Time:{b}"));
+                let wsection = legacy_bytes.replace("Total_Time:10", &format!("Total_Time:{w}"));
+                let expected = if b == w {
+                    bsection
+                } else {
+                    bsection.replace("Time\n", "Time+\n") + &wsection.replace("Time\n", "Time-\n")
+                };
+                assert_eq!(clock.format_summary(), expected);
+                for (color, total) in [(Color::Black, b), (Color::White, w)] {
+                    let mut single = spec.build_single_clock(total);
+                    assert_eq!(clock.time_unit_ms(), unit_ms);
+                    for elapsed in [unit_ms + unit_ms / 2, 2 * unit_ms, 20 * unit_ms] {
+                        assert_eq!(clock.turn_budget_ms(color), single.turn_budget_ms(color));
+                        assert_eq!(clock.consume(color, elapsed), single.consume(color, elapsed));
+                        assert_eq!(clock.remaining_main_ms(color), single.remaining_main_ms(color));
+                    }
+                    let mut fresh = spec.build_clock();
+                    let budget = fresh.turn_budget_ms(color) as u64;
+                    assert_eq!(fresh.consume(color, budget), ClockResult::Continue);
+                    let mut fresh = spec.build_clock();
+                    assert_eq!(fresh.consume(color, budget + 1), ClockResult::TimeUp);
+                }
+                for side in ["black", "white"] {
+                    let key = format!("{side}_total_time_{unit}");
+                    let mut invalid = input.clone();
+                    invalid[&key] = 0.into();
+                    let spec: ClockSpec = serde_json::from_value(invalid).unwrap();
+                    assert_eq!(spec.validate_total_time_nonzero().unwrap_err(), key);
+                }
+            }
         }
     }
 }

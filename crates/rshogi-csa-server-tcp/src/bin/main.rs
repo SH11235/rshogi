@@ -88,12 +88,24 @@ struct Cli {
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
+    /// 先手の秒読み・Fischer の総持ち時間（秒）。省略時は共通値。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    black_total_time_sec: Option<u32>,
+    /// 後手の秒読み・Fischer の総持ち時間（秒）。省略時は共通値。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    white_total_time_sec: Option<u32>,
     /// 秒読み方式の秒読み、または Fischer 方式の増分 (秒)。
     #[arg(long, default_value_t = 10)]
     byoyomi_sec: u32,
     /// StopWatch 方式で使う持ち時間 (分)。
     #[arg(long, default_value_t = 10)]
     total_time_min: u32,
+    /// 先手の StopWatch の総持ち時間（分）。省略時は共通値。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    black_total_time_min: Option<u32>,
+    /// 後手の StopWatch の総持ち時間（分）。省略時は共通値。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    white_total_time_min: Option<u32>,
     /// StopWatch 方式の秒読み (分)。
     #[arg(long, default_value_t = 1)]
     byoyomi_min: u32,
@@ -191,26 +203,41 @@ impl EnteringKingRuleArg {
     }
 }
 
+fn validate_color_time_cli(cli: &Cli) -> anyhow::Result<()> {
+    if matches!(cli.clock_kind, ClockKindArg::Stopwatch) {
+        anyhow::ensure!(
+            cli.black_total_time_sec.is_none() && cli.white_total_time_sec.is_none(),
+            "stopwatch does not support --black-total-time-sec / --white-total-time-sec"
+        );
+    } else {
+        anyhow::ensure!(
+            cli.black_total_time_min.is_none() && cli.white_total_time_min.is_none(),
+            "countdown/fischer do not support --black-total-time-min / --white-total-time-min"
+        );
+    }
+    Ok(())
+}
+
 impl ClockKindArg {
-    fn to_clock_spec(
-        self,
-        total_time_sec: u32,
-        byoyomi_sec: u32,
-        total_time_min: u32,
-        byoyomi_min: u32,
-    ) -> ClockSpec {
+    fn to_clock_spec(self, cli: &Cli) -> ClockSpec {
         match self {
             Self::Countdown => ClockSpec::Countdown {
-                total_time_sec,
-                byoyomi_sec,
+                total_time_sec: cli.total_time_sec,
+                byoyomi_sec: cli.byoyomi_sec,
+                black_total_time_sec: cli.black_total_time_sec,
+                white_total_time_sec: cli.white_total_time_sec,
             },
             Self::Fischer => ClockSpec::Fischer {
-                total_time_sec,
-                increment_sec: byoyomi_sec,
+                total_time_sec: cli.total_time_sec,
+                increment_sec: cli.byoyomi_sec,
+                black_total_time_sec: cli.black_total_time_sec,
+                white_total_time_sec: cli.white_total_time_sec,
             },
             Self::Stopwatch => ClockSpec::StopWatch {
-                total_time_min,
-                byoyomi_min,
+                total_time_min: cli.total_time_min,
+                byoyomi_min: cli.byoyomi_min,
+                black_total_time_min: cli.black_total_time_min,
+                white_total_time_min: cli.white_total_time_min,
             },
         }
     }
@@ -284,16 +311,14 @@ fn main() -> anyhow::Result<()> {
             HashMap::new()
         };
 
+    validate_color_time_cli(&cli)?;
+    let global_clock = cli.clock_kind.to_clock_spec(&cli);
+
     // 2. ServerConfig を構築。
     let config = ServerConfig {
         bind_addr,
         kifu_topdir: cli.kifu_dir,
-        clock: cli.clock_kind.to_clock_spec(
-            cli.total_time_sec,
-            cli.byoyomi_sec,
-            cli.total_time_min,
-            cli.byoyomi_min,
-        ),
+        clock: global_clock,
         time_margin_ms: cli.margin_ms,
         max_moves: cli.max_moves,
         login_timeout: std::time::Duration::from_secs(30),
@@ -695,12 +720,22 @@ fn parse_clock_presets_toml_str(
     #[derive(Debug, Deserialize)]
     struct Root {
         #[serde(default)]
-        preset: Vec<Entry>,
+        preset: Vec<toml::Table>,
     }
     let root: Root = toml::from_str(raw)?;
     let mut out: HashMap<rshogi_csa_server::types::GameName, ClockSpec> =
         HashMap::with_capacity(root.preset.len());
-    for entry in root.preset {
+    for table in root.preset {
+        let entry: Entry = toml::Value::Table(table.clone()).try_into()?;
+        entry
+            .spec
+            .validate_color_total_fields(table.keys().map(String::as_str))
+            .map_err(|field| {
+                anyhow::anyhow!(
+                    "clock preset {:?}: {field} is not supported by this clock kind",
+                    entry.game_name
+                )
+            })?;
         entry.spec.validate_total_time_nonzero().map_err(|field| {
             anyhow::anyhow!("clock preset {:?}: {field} must be > 0", entry.game_name)
         })?;
@@ -899,21 +934,27 @@ increment_sec = 10
             map.get(&rshogi_csa_server::types::GameName::new("byoyomi-600-10")),
             Some(ClockSpec::Countdown {
                 total_time_sec: 600,
-                byoyomi_sec: 10
+                byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             })
         ));
         assert!(matches!(
             map.get(&rshogi_csa_server::types::GameName::new("byoyomi-60-5")),
             Some(ClockSpec::Countdown {
                 total_time_sec: 60,
-                byoyomi_sec: 5
+                byoyomi_sec: 5,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             })
         ));
         assert!(matches!(
             map.get(&rshogi_csa_server::types::GameName::new("fischer-300-10F")),
             Some(ClockSpec::Fischer {
                 total_time_sec: 300,
-                increment_sec: 10
+                increment_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             })
         ));
     }
@@ -996,5 +1037,123 @@ byoyomi_sec = 0
 "#;
         let map = parse_clock_presets_toml_str(raw).unwrap();
         assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn color_time_cli_rejects_incompatible_units() {
+        for (kind, forbidden_unit) in [
+            ("countdown", "min"),
+            ("fischer", "min"),
+            ("stopwatch", "sec"),
+        ] {
+            for side in ["black", "white"] {
+                let flag = format!("--{side}-total-time-{forbidden_unit}");
+                let cli = Cli::try_parse_from([
+                    "server",
+                    "--players",
+                    "players.toml",
+                    "--clock-kind",
+                    kind,
+                    &flag,
+                    "3",
+                ])
+                .unwrap();
+                let error = validate_color_time_cli(&cli).unwrap_err().to_string();
+                assert!(error.contains(&flag), "{error}");
+                assert!(error.contains("support"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn presets_reject_incompatible_color_fields_only() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+            ("stop_watch", "min", "byoyomi_min"),
+        ] {
+            let base = format!(
+                "[[preset]]\ngame_name='test'\nkind='{kind}'\ntotal_time_{unit}=10\n{extra}=2\nunknown_option=42\n"
+            );
+            assert!(parse_clock_presets_toml_str(&base).is_ok());
+            for side in ["black", "white"] {
+                for other_unit in ["sec", "ms", "min", "minutes"] {
+                    let field = format!("{side}_total_time_{other_unit}");
+                    let result = parse_clock_presets_toml_str(&format!("{base}{field}=3\n"));
+                    if other_unit == unit {
+                        assert!(result.is_ok());
+                    } else {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains(&field), "{error}");
+                        assert!(error.contains("test"), "{error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn color_totals_cli_and_presets() {
+        for (kind, unit) in [
+            ("countdown", "sec"),
+            ("fischer", "sec"),
+            ("stopwatch", "min"),
+        ] {
+            let black = format!("--black-total-time-{unit}");
+            let white = format!("--white-total-time-{unit}");
+            for sides in [
+                vec![],
+                vec![black.as_str(), "3"],
+                vec![white.as_str(), "8"],
+                vec![black.as_str(), "3", white.as_str(), "8"],
+            ] {
+                let mut args = vec!["server", "--players", "players.toml", "--clock-kind", kind];
+                args.extend(sides);
+                let cli = Cli::try_parse_from(args).unwrap();
+                validate_color_time_cli(&cli).unwrap();
+                let spec = cli.clock_kind.to_clock_spec(&cli);
+                let value = toml::Value::try_from(spec).unwrap();
+                assert_eq!(
+                    value.get(format!("black_total_time_{unit}")),
+                    cli.black_total_time_sec
+                        .or(cli.black_total_time_min)
+                        .map(|n| toml::Value::Integer(i64::from(n)))
+                        .as_ref()
+                );
+                assert_eq!(
+                    value.get(format!("white_total_time_{unit}")),
+                    cli.white_total_time_sec
+                        .or(cli.white_total_time_min)
+                        .map(|n| toml::Value::Integer(i64::from(n)))
+                        .as_ref()
+                );
+            }
+            assert!(
+                Cli::try_parse_from(["server", "--players", "players.toml", &black, "0"]).is_err()
+            );
+        }
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+        ] {
+            let text = format!(
+                "[[preset]]\ngame_name='unequal'\nkind='{kind}'\ntotal_time_{unit}=10\nblack_total_time_{unit}=3\nwhite_total_time_{unit}=8\n{extra}=2\n"
+            );
+            let presets = parse_clock_presets_toml_str(&text).unwrap();
+            let spec = presets.values().next().unwrap();
+            assert!(spec.format_time_section().contains("BEGIN Time+\n"));
+            assert!(spec.format_time_section().contains("Total_Time:8\n"));
+            assert!(
+                parse_clock_presets_toml_str(&text.replace(
+                    &format!("black_total_time_{unit}=3"),
+                    &format!("black_total_time_{unit}=0")
+                ))
+                .is_err()
+            );
+        }
     }
 }

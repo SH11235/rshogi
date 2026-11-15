@@ -2801,4 +2801,26 @@ mod tests {
         assert_eq!(clock.think_limit_ms(100, Color::White), 0);
         assert!(clock.build_go_args(100, Color::White).ends_with("wtime 0 byoyomi 0"));
     }
+
+    #[test]
+    fn color_totals_reach_engine_go_and_consume_separately() {
+        use rshogi_csa::Color;
+        let mut summary = fischer_summary(3_000, 2_000);
+        summary.white_time.total_time_ms = 8_000;
+        let mut clock = Clock::from_summary(&summary);
+        assert_eq!(
+            clock.build_go_args(0, Color::Black),
+            "btime 3000 wtime 8000 binc 2000 winc 2000"
+        );
+        clock.consume(Color::Black, 1);
+        assert_eq!(
+            clock.build_go_args(0, Color::White),
+            "btime 4000 wtime 8000 binc 2000 winc 2000"
+        );
+        clock.consume(Color::White, 3);
+        assert_eq!(
+            clock.build_go_args(0, Color::Black),
+            "btime 4000 wtime 7000 binc 2000 winc 2000"
+        );
+    }
 }

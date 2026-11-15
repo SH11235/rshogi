@@ -803,18 +803,26 @@ mod tests {
             rshogi_csa_server::ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             rshogi_csa_server::ClockSpec::Fischer {
                 total_time_sec: 300,
                 increment_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             rshogi_csa_server::ClockSpec::CountdownMsec {
                 total_time_ms: 60_000,
                 byoyomi_ms: 100,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             },
             rshogi_csa_server::ClockSpec::StopWatch {
                 total_time_min: 15,
                 byoyomi_min: 2,
+                black_total_time_min: None,
+                white_total_time_min: None,
             },
         ];
         let clocks = server_clocks.iter().map(|clock| Some(ClockSpec::from_server(clock)));
@@ -847,6 +855,8 @@ mod tests {
         let fischer = ClockSpec::from_server(&rshogi_csa_server::ClockSpec::Fischer {
             total_time_sec: 300,
             increment_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         });
         assert_eq!(
             canonical_clock_json(&Some(fischer)).unwrap(),

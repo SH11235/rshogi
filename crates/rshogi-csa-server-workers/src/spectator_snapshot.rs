@@ -359,6 +359,8 @@ mod tests {
             clock: ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             max_moves: 256,
             time_margin_ms: 0,
@@ -398,6 +400,8 @@ mod tests {
                 ClockSpec::CountdownMsec {
                     total_time_ms: 10000,
                     byoyomi_ms: 0,
+                    black_total_time_ms: None,
+                    white_total_time_ms: None,
                 },
                 1250,
                 1250,
@@ -407,6 +411,8 @@ mod tests {
                 ClockSpec::StopWatch {
                     total_time_min: 3,
                     byoyomi_min: 0,
+                    black_total_time_min: None,
+                    white_total_time_min: None,
                 },
                 125000,
                 2,
@@ -437,6 +443,8 @@ mod tests {
         cfg.clock = ClockSpec::CountdownMsec {
             total_time_ms: 10000,
             byoyomi_ms: 100,
+            black_total_time_ms: None,
+            white_total_time_ms: None,
         };
         let mut first = move_row_at(1, "black", "+7776FU", 1_000_500);
         first.reconnect_credit_ms = 250;
@@ -627,6 +635,8 @@ mod tests {
         cfg.clock = ClockSpec::CountdownMsec {
             total_time_ms: 10_000,
             byoyomi_ms: 100,
+            black_total_time_ms: None,
+            white_total_time_ms: None,
         };
         cfg.initial_sfen =
             Some("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1".to_owned());

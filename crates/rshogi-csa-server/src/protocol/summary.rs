@@ -20,7 +20,7 @@ pub struct GameSummaryBuilder {
     pub black: PlayerName,
     /// 後手プレイヤ名。
     pub white: PlayerName,
-    /// 持ち時間セクション（`BEGIN Time` から `END Time` まで、末尾改行込み）。
+    /// 持ち時間セクション（`Time` または `Time+` / `Time-`、末尾改行込み）。
     /// 通常は [`crate::game::clock::TimeClock::format_summary`] の戻り値を渡す。
     pub time_section: String,
     /// 初期局面ブロック（`BEGIN Position` … `END Position` 全体、末尾改行込み）。
@@ -541,5 +541,29 @@ mod tests {
         assert!(block.contains("P+00HI00KA"), "block missing P+ hand: {block}");
         // White 手駒は空なので P- 行は出ない。
         assert!(!block.contains("P-"), "block should not have P- line: {block}");
+    }
+
+    #[test]
+    fn color_totals_preserve_full_summary_framing_and_symmetric_bytes() {
+        for (black, white) in [(600, 600), (3, 8)] {
+            let spec = crate::ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 10,
+                black_total_time_sec: Some(black),
+                white_total_time_sec: Some(white),
+            };
+            let section = if black == white {
+                skeleton().time_section
+            } else {
+                "BEGIN Time+\nTime_Unit:1sec\nTotal_Time:3\nByoyomi:10\nLeast_Time_Per_Move:0\nEND Time+\nBEGIN Time-\nTime_Unit:1sec\nTotal_Time:8\nByoyomi:10\nLeast_Time_Per_Move:0\nEND Time-\n".to_owned()
+            };
+            for side in [Color::Black, Color::White] {
+                let expected =
+                    skeleton().build_for(side).replace(&skeleton().time_section, &section);
+                let mut builder = skeleton();
+                builder.time_section = spec.format_time_section();
+                assert_eq!(builder.build_for(side), expected);
+            }
+        }
     }
 }

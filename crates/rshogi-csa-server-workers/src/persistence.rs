@@ -403,6 +403,8 @@ mod tests {
             clock: ClockSpec::Countdown {
                 total_time_sec: 60,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             max_moves: 256,
             time_margin_ms: 0,
@@ -703,6 +705,8 @@ mod tests {
         cfg.clock = ClockSpec::Countdown {
             total_time_sec: 1,
             byoyomi_sec: 1,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         let mut first = move_row(1, "black", "+7776FU,T2", 3_500);
         first.reconnect_credit_ms = 1_000;
@@ -736,14 +740,20 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 60,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             ClockSpec::Fischer {
                 total_time_sec: 60,
                 increment_sec: 5,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             ClockSpec::StopWatch {
                 total_time_min: 1,
                 byoyomi_min: 1,
+                black_total_time_min: None,
+                white_total_time_min: None,
             },
         ];
         let moves = vec![
@@ -950,6 +960,8 @@ mod tests {
         cfg.clock = ClockSpec::Fischer {
             total_time_sec: 60,
             increment_sec: 5,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         };
         cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
         // 黒 40s 長考 → 白 40s 長考。いずれも 60s バンク + 5s increment の予算内。
@@ -1228,5 +1240,58 @@ mod tests {
         assert_eq!(restored.reconnect_grace_ms, original.reconnect_grace_ms);
         assert_eq!(restored.black_reconnect_token, original.black_reconnect_token);
         assert_eq!(restored.white_reconnect_token, original.white_reconnect_token);
+    }
+
+    #[test]
+    fn persisted_config_ignores_incompatible_color_fields() {
+        let original = baseline_config();
+        let mut value = serde_json::to_value(&original).unwrap();
+        value["clock"]["black_total_time_min"] = 3.into();
+        value["clock"]["white_total_time_ms"] = 8.into();
+        let restored: PersistedConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.clock, original.clock);
+    }
+
+    #[test]
+    fn color_totals_survive_persistence_and_replay() {
+        for kind in ["countdown", "fischer", "countdown_msec", "stopwatch"] {
+            let (unit, extra, factor) = match kind {
+                "countdown_msec" => ("ms", "byoyomi_ms", 1),
+                "stopwatch" => ("min", "byoyomi_min", 60_000),
+                "fischer" => ("sec", "increment_sec", 1000),
+                _ => ("sec", "byoyomi_sec", 1000),
+            };
+            let mut value = serde_json::to_value(baseline_config()).unwrap();
+            value["play_started_at_ms"] = PLAY_STARTED_AT_MS.into();
+            value["clock"] =
+                serde_json::json!({"kind": kind, format!("total_time_{unit}"): 10, extra: 2});
+            for asymmetric in [false, true] {
+                if asymmetric {
+                    value["clock"][format!("black_total_time_{unit}")] = 3.into();
+                    value["clock"][format!("white_total_time_{unit}")] = 8.into();
+                }
+                let cfg: PersistedConfig = serde_json::from_value(value.clone()).unwrap();
+                let saved = serde_json::to_string(&cfg).unwrap();
+                let restored: PersistedConfig = serde_json::from_str(&saved).unwrap();
+                assert_eq!(restored.clock, cfg.clock);
+                let moves = [
+                    move_row(1, "black", "+7776FU,T1", factor),
+                    move_row(2, "white", "-3334FU,T2", 3 * factor),
+                ];
+                let ReplaySummary::Restored { core, .. } = replay_core_room(&restored, &moves)
+                else {
+                    panic!("restore failed");
+                };
+                let inc = if kind == "fischer" { 4 } else { 0 };
+                assert_eq!(
+                    core.clock_remaining_main_ms(Color::Black),
+                    ((if asymmetric { 3 } else { 10 }) - 1 + inc) * factor as i64
+                );
+                assert_eq!(
+                    core.clock_remaining_main_ms(Color::White),
+                    ((if asymmetric { 8 } else { 10 }) - 2 + inc) * factor as i64
+                );
+            }
+        }
     }
 }

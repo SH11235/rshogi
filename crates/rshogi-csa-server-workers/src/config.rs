@@ -524,18 +524,26 @@ pub fn parse_clock_spec(
         "countdown" => Ok(ClockSpec::Countdown {
             total_time_sec: parse_u32("TOTAL_TIME_SEC", total_time_sec, 600)?,
             byoyomi_sec: parse_u32("BYOYOMI_SEC", byoyomi_sec, 10)?,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         }),
         "countdown_msec" => Ok(ClockSpec::CountdownMsec {
             total_time_ms: parse_u32("TOTAL_TIME_MS", total_time_ms, 600_000)?,
             byoyomi_ms: parse_u32("BYOYOMI_MS", byoyomi_ms, 10_000)?,
+            black_total_time_ms: None,
+            white_total_time_ms: None,
         }),
         "fischer" => Ok(ClockSpec::Fischer {
             total_time_sec: parse_u32("TOTAL_TIME_SEC", total_time_sec, 600)?,
             increment_sec: parse_u32("BYOYOMI_SEC", byoyomi_sec, 10)?,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         }),
         "stopwatch" => Ok(ClockSpec::StopWatch {
             total_time_min: parse_u32("TOTAL_TIME_MIN", total_time_min, 10)?,
             byoyomi_min: parse_u32("BYOYOMI_MIN", byoyomi_min, 1)?,
+            black_total_time_min: None,
+            white_total_time_min: None,
         }),
         other => Err(format!(
             "CLOCK_KIND: expected countdown|countdown_msec|fischer|stopwatch, got {other:?}"
@@ -581,11 +589,22 @@ pub fn parse_clock_presets(
         #[serde(flatten)]
         spec: ClockSpec,
     }
-    let entries: Vec<Entry> =
+    let entries: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_json::from_str(trimmed).map_err(|e| format!("CLOCK_PRESETS: invalid JSON: {e}"))?;
     let mut out: std::collections::HashMap<String, GamePreset> =
         std::collections::HashMap::with_capacity(entries.len());
-    for entry in entries {
+    for fields in entries {
+        let entry: Entry = serde_json::from_value(serde_json::Value::Object(fields.clone()))
+            .map_err(|e| format!("CLOCK_PRESETS: invalid JSON: {e}"))?;
+        entry
+            .spec
+            .validate_color_total_fields(fields.keys().map(String::as_str))
+            .map_err(|field| {
+                format!(
+                    "CLOCK_PRESETS: clock preset {:?}: {field} is not supported by this clock kind",
+                    entry.game_name
+                )
+            })?;
         entry.spec.validate_total_time_nonzero().map_err(|field| {
             format!("CLOCK_PRESETS: clock preset {:?}: {field} must be > 0", entry.game_name)
         })?;
@@ -732,6 +751,8 @@ mod tests {
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }
         );
     }
@@ -752,6 +773,8 @@ mod tests {
             ClockSpec::CountdownMsec {
                 total_time_ms: 10_000,
                 byoyomi_ms: 100,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             }
         );
     }
@@ -765,6 +788,8 @@ mod tests {
             ClockSpec::CountdownMsec {
                 total_time_ms: 600_000,
                 byoyomi_ms: 10_000,
+                black_total_time_ms: None,
+                white_total_time_ms: None,
             }
         );
     }
@@ -777,6 +802,8 @@ mod tests {
             ClockSpec::Fischer {
                 total_time_sec: 300,
                 increment_sec: 5,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }
         );
     }
@@ -789,6 +816,8 @@ mod tests {
             ClockSpec::StopWatch {
                 total_time_min: 15,
                 byoyomi_min: 2,
+                black_total_time_min: None,
+                white_total_time_min: None,
             }
         );
     }
@@ -865,6 +894,40 @@ mod tests {
     }
 
     #[test]
+    fn presets_reject_incompatible_color_fields_only() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+            ("stop_watch", "min", "byoyomi_min"),
+        ] {
+            let base = serde_json::json!({"game_name": "test", "kind": kind, format!("total_time_{unit}"): 10, extra: 2, "unknown_option": 42});
+            assert!(
+                parse_clock_presets(Some(&serde_json::json!([base.clone()]).to_string())).is_ok()
+            );
+            for side in ["black", "white"] {
+                for other_unit in ["sec", "ms", "min", "minutes"] {
+                    let field = format!("{side}_total_time_{other_unit}");
+                    for value in [serde_json::json!(3), serde_json::Value::Null] {
+                        let mut input = base.clone();
+                        input[&field] = value;
+                        let result =
+                            parse_clock_presets(Some(&serde_json::json!([input]).to_string()));
+                        if other_unit == unit {
+                            assert!(result.is_ok());
+                        } else {
+                            let error = result.unwrap_err();
+                            assert!(error.contains(&field), "{error}");
+                            assert!(error.contains("test"), "{error}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn parse_clock_presets_empty_inputs_return_empty_map() {
         assert!(parse_clock_presets(None).unwrap().is_empty());
         assert!(parse_clock_presets(Some("")).unwrap().is_empty());
@@ -886,7 +949,9 @@ mod tests {
             Some(GamePreset {
                 clock: ClockSpec::Countdown {
                     total_time_sec: 600,
-                    byoyomi_sec: 10
+                    byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 max_moves: None
             })
@@ -896,7 +961,9 @@ mod tests {
             Some(GamePreset {
                 clock: ClockSpec::Fischer {
                     total_time_sec: 300,
-                    increment_sec: 10
+                    increment_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 max_moves: None
             })
@@ -990,6 +1057,8 @@ mod tests {
                 clock: ClockSpec::Countdown {
                     total_time_sec: 600,
                     byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 max_moves: None,
             },
@@ -999,7 +1068,9 @@ mod tests {
             PresetResolution::Hit(GamePreset {
                 clock: ClockSpec::Countdown {
                     total_time_sec: 600,
-                    byoyomi_sec: 10
+                    byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 max_moves: None
             })
@@ -1017,6 +1088,8 @@ mod tests {
                 clock: ClockSpec::Countdown {
                     total_time_sec: 600,
                     byoyomi_sec: 10,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 },
                 max_moves: None,
             },
@@ -1067,5 +1140,21 @@ mod tests {
                 .unwrap_err()
                 .contains("RECONNECT_GRACE_SECONDS")
         );
+    }
+
+    #[test]
+    fn color_totals_presets() {
+        for (kind, unit, extra) in [
+            ("countdown", "sec", "byoyomi_sec"),
+            ("fischer", "sec", "increment_sec"),
+            ("countdown_msec", "ms", "byoyomi_ms"),
+            ("stopwatch", "min", "byoyomi_min"),
+        ] {
+            let input = serde_json::json!([{"game_name": "unequal", "kind": kind, format!("total_time_{unit}"): 10, format!("black_total_time_{unit}"): 3, format!("white_total_time_{unit}"): 8, extra: 2}]);
+            let presets = parse_clock_presets(Some(&input.to_string())).unwrap();
+            let clock = &presets.values().next().unwrap().clock;
+            assert!(clock.format_time_section().contains("BEGIN Time+\n"));
+            assert!(clock.format_time_section().contains("Total_Time:8\n"));
+        }
     }
 }

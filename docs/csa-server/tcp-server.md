@@ -119,10 +119,14 @@ NAT やプロキシ配下では同じ出口 IP の利用者全員が制限を共
 |---|---|---|
 | `--clock-kind` | `countdown` | `countdown` / `fischer` / `stopwatch` |
 | `--total-time-sec` | `600` | 秒読み / Fischer の持ち時間（秒） |
+| `--black-total-time-sec` / `--white-total-time-sec` | 省略 | 秒読み / Fischer の先手・後手の総持ち時間を上書き（正の秒） |
 | `--byoyomi-sec` | `10` | 秒読み秒、または Fischer の増分（秒） |
 | `--total-time-min` | `10` | StopWatch の持ち時間（分） |
+| `--black-total-time-min` / `--white-total-time-min` | 省略 | StopWatch の先手・後手の総持ち時間を上書き（正の分） |
 | `--byoyomi-min` | `1` | StopWatch の秒読み（分） |
 | `--margin-ms` | `1500` | 通信マージン（ミリ秒） |
+
+省略した側は共通の `--total-time-*` を使う。選んだ時計方式と異なる単位の先後指定はエラーになる。
 
 ### 5.2 `--clock-presets-toml`（strict mode）
 
@@ -147,7 +151,17 @@ increment_sec = 10
 
 `kind` は `countdown` / `countdown_msec` / `fischer` / `stopwatch`。各方式のパラメータ名と
 セマンティクスは [`clock_defaults.md`](clock_defaults.md) を参照（Workers 版と同じ
-`ClockSpec` を共有する）。
+`ClockSpec` を共有する）。`black_total_time_*` / `white_total_time_*` で総持ち時間だけを
+先後別に上書きできる（省略した側は `total_time_*`）。加算・秒読みは先後共通。
+
+```toml
+[[preset]]
+game_name = "unequal-fischer"
+kind = "fischer"
+total_time_sec = 30
+black_total_time_sec = 15
+increment_sec = 2
+```
 
 ## 6. Floodgate 運用機能（`--allow-floodgate-features` ゲート）
 

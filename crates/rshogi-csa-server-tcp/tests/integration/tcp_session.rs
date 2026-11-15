@@ -172,6 +172,8 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
         ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
     )
     .await
@@ -187,6 +189,8 @@ async fn spawn_server_with_clock_presets(
         ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         presets,
     )
@@ -441,6 +445,8 @@ fn login_rejected_when_game_name_is_not_in_clock_presets() {
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
         );
         let (addr, topdir) = spawn_server_with_clock_presets("preset_strict", presets).await;
@@ -465,6 +471,8 @@ fn matched_game_summary_uses_preset_clock_not_global() {
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
         );
         let (addr, topdir) = spawn_server_with_clock_presets("preset_summary", presets).await;
@@ -554,6 +562,8 @@ fn fischer_clock_summary_exposes_increment_field() {
             ClockSpec::Fischer {
                 total_time_sec: 60,
                 increment_sec: 5,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
         )
         .await;
@@ -585,6 +595,8 @@ fn stopwatch_clock_summary_uses_minute_unit() {
             ClockSpec::StopWatch {
                 total_time_min: 15,
                 byoyomi_min: 1,
+                black_total_time_min: None,
+                white_total_time_min: None,
             },
         )
         .await;
@@ -723,6 +735,8 @@ async fn spawn_server_with_agree_timeout(
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         login_timeout: Duration::from_secs(10),
         agree_timeout,
@@ -1348,6 +1362,8 @@ async fn spawn_server_with_admin(
         ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         EnteringKingRule::Point24,
         None,
@@ -1722,6 +1738,8 @@ fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
             ClockSpec::Countdown {
                 total_time_sec: 60,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             EnteringKingRule::Point24,
             Some("8k/6G2/8+P/9/9/9/9/9/4K4 b P 1"),
@@ -1763,6 +1781,8 @@ fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
             ClockSpec::Countdown {
                 total_time_sec: 60,
                 byoyomi_sec: 10,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             },
             EnteringKingRule::Point24,
             Some("9/6k2/9/9/9/9/9/6R2/K8 w - 1"),
@@ -2370,6 +2390,8 @@ async fn spawn_server_with_history(
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
@@ -2601,6 +2623,8 @@ async fn spawn_server_with_failing_history(tag: &str) -> (std::net::SocketAddr, 
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
@@ -2667,6 +2691,8 @@ async fn spawn_server_with_rate_query_failing(tag: &str) -> (std::net::SocketAdd
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
@@ -2719,6 +2745,8 @@ fn challenge_test_presets()
         ClockSpec::Countdown {
             total_time_sec: 600,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
     );
     presets
@@ -2890,6 +2918,8 @@ async fn spawn_server_with_short_challenge_ttl(
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
             byoyomi_sec: 10,
+            black_total_time_sec: None,
+            white_total_time_sec: None,
         },
         clock_presets: presets,
         login_timeout: Duration::from_secs(10),
@@ -3312,6 +3342,8 @@ fn off_turn_disconnect_keeps_moves_live_and_resumes_latest_position() {
             Some(ClockSpec::Countdown {
                 total_time_sec: 10,
                 byoyomi_sec: 0,
+                black_total_time_sec: None,
+                white_total_time_sec: None,
             }),
         )
         .await;
@@ -3380,6 +3412,8 @@ fn grace_game_end_rejects_reconnect_without_sending_a_snapshot() {
                 Some(ClockSpec::Countdown {
                     total_time_sec: 1,
                     byoyomi_sec: 0,
+                    black_total_time_sec: None,
+                    white_total_time_sec: None,
                 })
             } else {
                 None
@@ -3613,5 +3647,97 @@ fn white_reconnect_after_first_move_has_consistent_turn_fields() {
         .await
         .unwrap();
         let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn color_totals_follow_moves_and_reconnect() {
+    use rshogi_csa_server::types::Color;
+    run_local(|| async {
+        let clock = ClockSpec::Fischer {
+            total_time_sec: 8,
+            black_total_time_sec: Some(3),
+            white_total_time_sec: None,
+            increment_sec: 2,
+        };
+        let (addr, topdir, _state) = spawn_server_with_reconnect_grace(
+            "color_totals",
+            Duration::from_secs(5),
+            Some(clock.clone()),
+        )
+        .await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let sb = drain_game_summary(&mut rb).await;
+        let sw = drain_game_summary(&mut rw).await;
+        for summary in [&sb, &sw] {
+            assert!(summary.join("\n").contains(clock.format_time_section().trim_end()));
+        }
+        let game_id = extract_summary_field(&sb, "Game_ID").unwrap();
+        let token = extract_summary_field(&sb, "Reconnect_Token").unwrap();
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        read_until(&mut rb, &format!("START:{game_id}")).await;
+        read_until(&mut rw, &format!("START:{game_id}")).await;
+        let mut used = Vec::new();
+        for (color, token) in [(Color::Black, "+7776FU"), (Color::White, "-3334FU")] {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            match color {
+                Color::Black => send_line(&mut wb, token).await,
+                Color::White => send_line(&mut ww, token).await,
+            }
+            let line = read_line_raw(&mut rb).await.unwrap();
+            let (echoed_move, elapsed) = line.split_once(",T").unwrap();
+            assert_eq!(echoed_move, token);
+            let w = read_until(&mut rw, &line).await;
+            assert!(w.contains(&line));
+            used.push(elapsed.parse::<u64>().unwrap());
+        }
+        drop(rb);
+        drop(wb);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let (mut resumed, mut writer) = connect(addr).await;
+        send_line(&mut writer, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut resumed).await.unwrap(), "LOGIN:alice OK");
+        let summary = drain_game_summary(&mut resumed).await;
+        assert!(summary.join("\n").contains(clock.format_time_section().trim_end()));
+        assert_eq!(
+            extract_summary_field(&summary, "Reconnect_Token").as_deref(),
+            Some(token.as_str())
+        );
+        assert_eq!(extract_summary_field(&summary, "To_Move").as_deref(), Some("+"));
+        assert_eq!(read_line_raw(&mut resumed).await.unwrap(), "BEGIN Reconnect_State");
+        let state = read_until(&mut resumed, "END Reconnect_State").await;
+        assert_eq!(extract_summary_field(&state, "Current_Turn").as_deref(), Some("+"));
+        assert_eq!(extract_summary_field(&state, "Last_Move").as_deref(), Some("-3334FU"));
+        assert_eq!(
+            extract_summary_field(&state, "Black_Time_Remaining_Ms")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            (7 - used[0]) * 1000
+        );
+        assert_eq!(
+            extract_summary_field(&state, "White_Time_Remaining_Ms")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            (12 - used[1]) * 1000
+        );
+        let remaining_ms: u64 = extract_summary_field(&state, "Current_Turn_Remaining_Ms")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(remaining_ms > 0 && remaining_ms <= (7 - used[0]) * 1000 - 200, "{remaining_ms}");
+        send_line(&mut writer, "%TORYO").await;
+        read_until(&mut rw, "#WIN").await;
+        let csa = wait_for_csa_text(&topdir, &game_id).await;
+        assert!(csa.contains(&clock.format_time_section()));
+        let _ = tokio::fs::remove_dir_all(topdir).await;
     });
 }

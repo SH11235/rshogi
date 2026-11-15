@@ -18,7 +18,7 @@ use crate::event::Event;
 use crate::transport::{ConnectOpts, CsaTransport, TransportTarget};
 
 /// 先後共通または個別の時間設定
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimeConfig {
     /// サーバーが通知する消費時間 T の単位（ミリ秒）。省略時は1秒。
     pub time_unit_ms: i64,

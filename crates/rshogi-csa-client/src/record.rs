@@ -342,7 +342,23 @@ impl GameRecord {
                 Some(format!("RECONNECT_FRAGMENT: {reason}"))
             }
         };
-        // 先手の時間設定を $TIME_LIMIT に出力（CSA標準）
+        let leading_comment = if self.black_time != self.white_time {
+            let times = format!(
+                "Time+:Total_Time_Ms:{},Byoyomi_Ms:{},Increment_Ms:{}\n'Time-:Total_Time_Ms:{},Byoyomi_Ms:{},Increment_Ms:{}",
+                self.black_time.total_time_ms,
+                self.black_time.byoyomi_ms,
+                self.black_time.increment_ms,
+                self.white_time.total_time_ms,
+                self.white_time.byoyomi_ms,
+                self.white_time.increment_ms,
+            );
+            Some(match leading_comment {
+                Some(comment) => format!("{comment}\n'{times}"),
+                None => times,
+            })
+        } else {
+            leading_comment
+        };
         let header = CsaGameHeader {
             sente_name: &self.sente_name,
             gote_name: &self.gote_name,
