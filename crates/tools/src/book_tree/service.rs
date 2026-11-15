@@ -804,6 +804,38 @@ fn failure_key(tree: &Tree, key: &str) -> (String, Option<String>) {
     (key.to_owned(), tree.def.preferred_fingerprint.clone())
 }
 
+const PENDING_FILE: &str = "pending.jsonl";
+
+/// 木が要求していて読みがまだ無い局面を、その木が読む順 (段、局面キー) に 1 行ずつ足す。
+/// `root` は `tree enqueue` の `root`・`roots` にそのまま渡せる。
+fn pending_lines(
+    target: &Target,
+    tree: &Tree,
+    journal: &impl Readings,
+    failures: &BTreeMap<(String, Option<String>), String>,
+    busy: &impl Fn(&String) -> bool,
+    out: &mut String,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut waiting: Vec<_> = tree
+        .waiting()
+        .iter()
+        .filter(|(key, _)| {
+            !tree_has_reading(tree, journal, key) && !failures.contains_key(&failure_key(tree, key))
+        })
+        .collect();
+    waiting.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    for (key, level) in waiting {
+        let ply = tree.ply.get(key).with_context(|| format!("手数がありません: {key}"))?;
+        writeln!(
+            out,
+            "{}",
+            json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"level":level,"root":format!("sfen {key} {ply}"),"running":busy(key)})
+        )?;
+    }
+    Ok(())
+}
+
 /// 受け付けた対象 1 本の実行時の状態。チェックポイントの `targets` と同じ順に並ぶ。
 struct Live {
     tree: Tree,
@@ -1321,6 +1353,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let mut status_written = None;
     let mut queue_error = None;
     let mut progress_written: Option<(String, Instant)> = None;
+    let mut pending_written: Option<Instant> = None;
     let result = (|| -> Result<()> {
         loop {
             let stopping = args.state.join("stop").exists();
@@ -2104,6 +2137,19 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 );
                 progress_written = Some((status.to_owned(), Instant::now()));
             }
+            if let Some(secs) = args.pending_secs
+                && pending_written.is_none_or(|at| at.elapsed() >= Duration::from_secs(secs))
+            {
+                let mut pending = String::new();
+                for (target, live) in checkpoint.targets.iter().zip(&lives) {
+                    if target.hold || !live.prepared || !active_tree(live) {
+                        continue;
+                    }
+                    pending_lines(target, &live.tree, &journal, &failures, &busy, &mut pending)?;
+                }
+                monitor_changed(&args.state.join(PENDING_FILE), &pending);
+                pending_written = Some(Instant::now());
+            }
             let mut statuses = Vec::new();
             for (target, live) in checkpoint.targets.iter().zip(lives.iter_mut()) {
                 let (read, required) = counts(live);
@@ -2336,6 +2382,64 @@ mod tests {
         lives[0].dirty = false;
         assert!(!poll_imports(&mut imports, &mut journal, &mut alerts, &mut lives).unwrap());
         assert!(lives.iter().all(|live| !live.dirty));
+    }
+
+    #[test]
+    fn pending_lines_list_unread_requests_in_reading_order_as_enqueue_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = super::super::tests::settings();
+        let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+        let other = "4k4/9/9/9/9/9/9/9/5K3 b -";
+        let line = format!(
+            "{}\n",
+            json!({"id":"tree","root":format!("sfen {root} 7"),"roots":[format!("sfen {other} 9")],"own":"b","depth":0,"priority":3})
+        );
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            draw: 0,
+            multipv: 1,
+            nodes: 100,
+        };
+        let (checkpoint, built) = Checkpoint::new(
+            dir.path().join("trees"),
+            settings.fingerprint.clone(),
+        )
+        .apply(line.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty(), "{:?}", checkpoint.rejected.len());
+        let target = &checkpoint.targets[0];
+        let mut tree = built.into_iter().next().unwrap().1;
+        let mut journal =
+            Journal::open(&dir.path().join("journal.jsonl"), &settings.fingerprint).unwrap();
+        tree.advance(&journal).unwrap();
+        let lines = |tree: &Tree, journal: &Journal, failures: &BTreeMap<_, _>| {
+            let mut out = String::new();
+            pending_lines(target, tree, journal, failures, &|key: &String| key == root, &mut out)
+                .unwrap();
+            out.lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let mut expected = vec![
+            json!({"id":"tree","own":"b","generation":target.generation,"priority":3,"level":0,"root":format!("sfen {root} 7"),"running":true}),
+            json!({"id":"tree","own":"b","generation":target.generation,"priority":3,"level":0,"root":format!("sfen {other} 9"),"running":false}),
+        ];
+        expected.sort_by_key(|row| row["root"].as_str().unwrap().to_owned());
+        assert_eq!(lines(&tree, &journal, &BTreeMap::new()), expected);
+        // 行の root は受付の検査を通る。
+        for row in &expected {
+            super::super::targets::parse_root(row["root"].as_str().unwrap()).unwrap();
+        }
+        // 失敗した局面と読みのある局面は出さない。
+        let failed = BTreeMap::from([(failure_key(&tree, other), "x".to_owned())]);
+        assert_eq!(lines(&tree, &journal, &failed).len(), 1);
+        journal
+            .append(super::super::tests::reading(root, &[], &settings), &settings, "engine".into())
+            .unwrap();
+        let rest = lines(&tree, &journal, &BTreeMap::new());
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0]["root"], format!("sfen {other} 9"));
     }
 
     #[test]

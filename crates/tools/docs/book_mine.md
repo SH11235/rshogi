@@ -832,6 +832,27 @@ journal、state dir とその管理ファイル (キュー・lock・チェック
 
 プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / HELD / STOPPED / DONE / NOT_READY / FAIL / SUPERSEDED` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木 (id・手番・世代・priority・hold) の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。キューの読み取りと出力先の用意の失敗は、内容が変わるまで 1 回通知して次の周回でやり直します。STATUS は内容が変わった場合だけ書きます。終了した木（DONE / NOT_READY / FAIL）の出力 dir を削除しても再作成しません。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します（終了した木の出力 dir が残っている場合）。journal と成果物の書き込み失敗はエラーとして扱います。
 
+### 読みがまだ無い局面の書き出し (`--pending-secs`)
+
+`serve --pending-secs <秒>` を付けると、木が要求していて読みがまだ無い局面を、指定した秒数ごとに `<state>/pending.jsonl` へ書き出します (内容が変わったときだけ、原子的に置き換えます)。既定では書きません。1 行が 1 局面の JSON です。
+
+```jsonl
+{"id":"p12_w","own":"w","generation":1,"priority":100,"level":3,"root":"sfen ln1gkgsnl/1r1s3b1/p1pppp1pp/6p2/1p7/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b - 7","running":false}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `id`・`own`・`generation`・`priority` | 局面を要求している木。複数の木が同じ局面を要求していれば、木ごとに 1 行ずつ出す |
+| `level` | その木での段 |
+| `root` | 局面。`tree enqueue` の `root`・`roots` にそのまま渡せる形 (`sfen <盤> <手番> <持駒> <手数>`) |
+| `running` | この serve の worker が今読んでいれば真 |
+
+行は受付順の木ごとに、その木が読む順 (段、局面キー) で並びます。保留の木、終わった木、台帳に読みがある局面、失敗として確定した局面は出しません。先読み (`--prefetch`・`--speculate-at`) の対象は含みません。
+
+大きな木を複数の serve で読むときに使えます。別の serve に、列の後ろ側の局面を `roots` に持つ `depth` 0 の行 (`roots` は `root` と同じ手番に限るので、手番ごとに行を分ける) を積み、読んだ台帳を[受付 dir](#動かしたまま別の台帳を取り込む) から取り込ませると、元の木はその局面をエンジンで読まずに進みます。元の木が `opts.multipv`・`opts.nodes`・`require_condition` を持つなら、手伝う行にも同じ値を書いてください。
+
+ファイルに時刻は入りません。serve が止まると更新されないので、鮮度は `STATUS`・`progress.json` の更新時刻で確かめてください。行数は未読の要求局面の数に比例します (段 0 の大きな木では数十万行)。書き出しの間隔はその大きさに合わせて決めてください。
+
 ### 動かしたまま別の台帳を取り込む
 
 serve が作る `<state>/import/` に、`tree import-journal --from-journal` で読める台帳の複製を置けます。書き込み中のファイルを受け付けないよう、同じ dir の別の拡張子で書き終えてから、一意な名前の `*.jsonl` に rename してください。公開後は変更しません。
