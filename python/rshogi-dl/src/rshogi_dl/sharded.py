@@ -136,7 +136,7 @@ def _shard_dir(root: Path, index: int) -> Path:
     return root / f"shard-{index:08d}"
 
 
-def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array], count: int) -> None:
+def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array], count: int) -> str:
     directory = _shard_dir(root, index)
     directory.mkdir()
     entries = len(columns["legal_indices"])
@@ -161,6 +161,7 @@ def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array],
         {"format": FORMAT, "records": count, "legal_entries": entries, "files": files},
     )
     _sync_directory(directory)
+    return _hash(directory / "metadata.json")
 
 
 def convert_jsonl(
@@ -203,6 +204,7 @@ def convert_jsonl(
         "legal_indices": array("H"),
         "policy_targets": array("f"),
     }
+    content_digest = hashlib.sha256()
     total = 0
     shards = 0
     count = 0
@@ -220,14 +222,14 @@ def convert_jsonl(
         total += 1
         columns["legal_offsets"][count] = len(columns["legal_indices"])
         if count == shard_records:
-            _write_shard(output, shards, columns, count)
+            content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
             shards += 1
             count = 0
             columns["legal_indices"] = array("H")
             columns["policy_targets"] = array("f")
             columns["legal_offsets"][0] = 0
     if count:
-        _write_shard(output, shards, columns, count)
+        content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
         shards += 1
     if not total:
         raise DatasetError("cannot convert an empty dataset")
@@ -235,6 +237,7 @@ def convert_jsonl(
         **_CONTRACT,
         "source_name": source.name,
         "source_size": source_signature[2],
+        "dataset_content_sha256": content_digest.hexdigest(),
         "source_records": total,
         "shard_records": shard_records,
         "shard_count": shards,
@@ -259,13 +262,18 @@ def convert_jsonl(
 def _manifest(root: Path) -> dict:
     manifest = _read_json(root / "manifest.json")
     expected = {
-        *_CONTRACT, "source_name", "source_size", "source_records", "shard_records", "shard_count",
+        *_CONTRACT, "source_name", "source_size", "dataset_content_sha256", "source_records", "shard_records", "shard_count",
         "teacher_kind", "split", "training_status",
     }
     if set(manifest) != expected or any(
         manifest.get(key) != value for key, value in _CONTRACT.items()
     ):
         raise DatasetError("unexpected dataset manifest contract")
+    digest = manifest["dataset_content_sha256"]
+    if type(digest) is not str or len(digest) != 64 or any(
+        char not in "0123456789abcdef" for char in digest
+    ):
+        raise DatasetError("invalid dataset content digest")
     _positive_int(manifest["source_records"], "source_records")
     _positive_int(manifest["source_size"], "source_size")
     _positive_int(manifest["shard_records"], "shard_records", MAX_SHARD_RECORDS)
@@ -433,23 +441,30 @@ def iter_batches(
     *,
     drop_last: bool = False,
     verify_hashes: bool = False,
+    start_record: int = 0,
 ) -> Iterator[Batch]:
     """生成済みで変更されない dataset を順番どおり読み、shard 境界を跨いで batch を作る。
 
     既定は全データの再検証・hash scan をしない。生成後の編集や置換をせず、別 directory に新規生成する。
+    ``start_record`` は先頭からの行数で、対象 shard を直接開く。既読 shard の読捨てはしない。
     """
     _positive_int(batch_size, "batch_size", MAX_BATCH_SIZE)
     root = _dataset_path(path, new=False)
     manifest = _manifest(root)
+    if type(start_record) is not int or not 0 <= start_record <= manifest["source_records"]:
+        raise DatasetError("start_record must be an integer within the dataset")
+    if start_record == manifest["source_records"]:
+        return
     manifest_signature = _signature(root / "manifest.json")
     scratch = _scratch(batch_size)
     pending = 0
     width = 0
-    for index in range(manifest["shard_count"]):
+    first_shard, first_row = divmod(start_record, manifest["shard_records"])
+    for index in range(first_shard, manifest["shard_count"]):
         if _signature(root / "manifest.json") != manifest_signature:
             raise DatasetError("dataset manifest changed while reading")
         shard = _Shard(root, index, manifest, verify_hashes=verify_hashes)
-        start = 0
+        start = first_row if index == first_shard else 0
         while start < shard.rows:
             shard.check_unchanged()
             count = min(batch_size - pending, shard.rows - start)
@@ -468,17 +483,33 @@ def iter_batches(
         yield _batch(scratch, pending, width)
 
 
+def dataset_info(path: str | Path) -> dict:
+    """生成時の内容 root を含む manifest の指紋を返す。shard は走査しない。"""
+    root = _dataset_path(path, new=False)
+    signature = _signature(root / "manifest.json")
+    manifest = _manifest(root)
+    digest = hashlib.sha256()
+    digest.update(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+    if _signature(root / "manifest.json") != signature:
+        raise DatasetError("dataset manifest changed while fingerprinting")
+    return {"path": str(root), "fingerprint": digest.hexdigest(), "manifest": manifest}
+
+
 def verify_dataset(path: str | Path) -> dict:
     """各 shard の header と全ファイルの SHA-256 を明示的に検査する。sample の再検証はしない。"""
     root = _dataset_path(path, new=False)
     manifest = _manifest(root)
     signature = _signature(root / "manifest.json")
+    content_digest = hashlib.sha256()
     for index in range(manifest["shard_count"]):
         shard = _Shard(root, index, manifest, verify_hashes=True)
+        content_digest.update(bytes.fromhex(_hash(_shard_dir(root, index) / "metadata.json")))
         shard.check_unchanged()
         if _signature(root / "manifest.json") != signature:
             raise DatasetError("dataset manifest changed while verifying")
         del shard
+    if content_digest.hexdigest() != manifest["dataset_content_sha256"]:
+        raise DatasetError("dataset content digest mismatch")
     return manifest
 
 

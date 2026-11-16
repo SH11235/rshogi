@@ -1,12 +1,12 @@
 # rshogi-dl (Python)
 
-rshogi の policy / value Transformer のモデル定義と、検証用の smoke・ONNX export・出力照合をまとめた
+rshogi の policy / value Transformer のモデル定義、有限回のshard学習、検証用の smoke・ONNX export・出力照合をまとめた
 package です。import 名は `rshogi_dl`。
 
 - 入力は engine が作る 96 個の token 列 (`stm-tokens-v1`) です。この package は SFEN を token に
   変換しません。token と合法手 label は engine 側の encoder が作ります。
-- ここにある CLI は、学習経路と engine への接続が正しく動くことを確かめるためのものです。
-  本番の学習器ではなく、出力される checkpoint / ONNX は全て `validation-only` と記録されます。
+- `trainer`は有限回の学習・held-out評価と再開を行い、`smoke`は小fixtureで接続を検証します。
+  出力される checkpoint / ONNX は、棋力・探索品質の採用前の候補として全て `validation-only` と記録されます。
   モデル構成 (`initial` / `test`) も接続確認用で、強さや速度を保証するものではありません。
 - NNUE の学習には使いません。
 
@@ -131,6 +131,10 @@ policy target は合法手の元の並びで合計1に正規化します。`poli
 
 配列はconverterが書くNPY 1.0形式です。readerは最大1024 bytesのheaderを先に検査し、期待するshape・dtype・C順序・ファイル長が一致してからmappingを作ります。空の合法手配列でも、headerに書かれた件数から先にメモリを確保しません。
 
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
+
 ```python
 import os
 from pathlib import Path
@@ -176,6 +180,67 @@ SDPA の実際の kernel は device・dtype・PyTorch の設定に依存しま�
 SDPA を使う側でモデルを構築して重みを読み込んでください。SDPA のモデルも ONNX export 中は
 標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
 実行方式は変わりません。
+
+## 有限回の shard 学習と再開
+
+`trainer` は shard を逐次読み、指定回数の更新試行と held-out 評価を行います。学習データと検証データは別 directory に置いてください。実教師では `teacher_kind` と `split` の明示が必要で、未知の出自や検証用 fixture を使うときは `--validation-only` を指定します。変換成功や loss の低下だけで棋力・探索品質が確認されたとは扱わないため、出力モデルは引き続き `validation-only` です。
+
+```bash
+python -m rshogi_dl.trainer \
+  --train "$SHOGI_DATA/teachers/dl/<train>" \
+  --validation "$SHOGI_DATA/teachers/dl/<validation>" \
+  --run-dir "$SHOGI_DATA/runs/rshogi-dl/<run>" \
+  --config initial --max-steps 1000 --batch-size 128 \
+  --learning-rate 0.001 --weight-decay 0 --seed 0 \
+  --device cuda --attention-backend sdpa --precision bf16 \
+  --validation-batches 0 --checkpoint-every 250 --log-every 100
+```
+
+上の精度・実行方式は指定例です。使用するGPUで正当性と性能を確認して選んでください。CPUでは`--device cpu --precision fp32`を使い、CUDAを指定して実行できなければCPUへ切り替えず失敗します。合成fixtureでは`--validation-only`を追加してください。
+
+| option | 内容・既定値 |
+| --- | --- |
+| `--max-steps` | 必須。有限のbatch更新試行数。AMPでskipした試行も数える |
+| `--batch-size` | 1..4096、既定128。epoch末尾の小さいbatchも使用 |
+| `--config` / `--model-config` | `initial` / `test`、または`layers/width/heads/ffn_width`のJSON object |
+| `--attention-backend` | `explicit` / `sdpa`。既定explicit |
+| `--execution` | `eager` / `compile`。既定eager。compile初回費用も学習時間に含む |
+| `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
+| `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
+| `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
+| `--threads` | CPU thread数、既定1 |
+| `--validation-batches` | held-out先頭batchの上限、既定32。0は全件評価 |
+| `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |
+| `--log-every` | `metrics.jsonl`への記録間隔。既定100 |
+| `--deterministic` | 決定的アルゴリズムを要求。CUDAでは起動前に`CUBLAS_WORKSPACE_CONFIG=:4096:8`等を設定 |
+
+順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、一定 learning rate の AdamW で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
+
+`reduce-overhead`と`max-autotune`はCUDA graphを要求するmodeで、CPUでは拒否します。この2つをCUDAで使うときは更新試行の境界をcompilerへ通知します。`default`と`max-autotune-no-cudagraphs`はCPU compileでも使えます。reportの`cudagraphs_requested`は要求した設定を示すだけで、実際にgraphが使用されたことの保証ではありません。modelだけをcompileし、lossやoptimizer更新は通常の実行経路です。
+
+最終`report.json`の学習時間・samples/sはデータ供給、転送、更新と途中の記録・checkpoint保存を含み、setupと最終held-out評価は別時間です。held-outのpolicy CEはpolicyがある行、value BCEとBrierは全行で重み付き集計します。全行policyなしなら`policy_ce=null`です。有限windowを使った値はその先頭windowの評価であり、全datasetの品質を代表するとは限りません。
+
+再開は別の新規runへ保存します。
+
+```bash
+python -m rshogi_dl.trainer \
+  --train "$SHOGI_DATA/teachers/dl/<train>" \
+  --validation "$SHOGI_DATA/teachers/dl/<validation>" \
+  --run-dir "$SHOGI_DATA/runs/rshogi-dl/<resumed-run>" \
+  --resume "$SHOGI_DATA/runs/rshogi-dl/<run>/resume-final.pt" \
+  --config initial --max-steps 2000 --batch-size 128 \
+  --learning-rate 0.001 --weight-decay 0 --seed 0 \
+  --device cuda --attention-backend sdpa --precision bf16 \
+  --validation-batches 0 --checkpoint-every 250 --log-every 100
+```
+
+`max_steps`は再開後の総試行数です。model・学習設定・dataset指紋・実行ライブラリ版を照合し、不一致なら更新前に失敗します。変更できるのは総試行数とcheckpoint/log間隔だけです。再開状態にはmodel、AdamW、GradScaler、定数learning rateのscheduler状態(null)、進捗、Python/NumPy/TorchとCUDA runのGPU RNGを保存します。sample cursorから対象shardへ直接進み、既読行を読み捨てません。checkpointはfsync後にatomic renameし、POSIXではdirectoryもfsyncします。Windowsの保証範囲はfile fsyncとatomic renameまでです。
+
+FP16 の scaler は `growth_factor=2.0`、`backoff_factor=0.5`、`growth_interval=2000` に固定し、再開時も一致を要求します。動的に変わる scale と growth tracker は checkpoint から復元します。
+
+dataset 指紋は生成済み manifest の内容 root を使い、通常の run/resume で全 shard・全 sample を走査しません。dataset は使用中に変更しないでください。train/validation の path・指紋に加えて `dataset_content_sha256` が同じ場合も拒否します。並べ替えや shard の分け方が異なる dataset 間の局面・対局の重複検出は行わないため、game 単位で分割した独立 held-out を dataset 作成側で用意してください。
+
+`resume-final.pt` は再開専用です。別に保存する `checkpoint.pt` は既存の `export` と `parity` CLI で読める v1 形式で、元の reader の契約は変更しません。最終の model・optimizer 検査後、held-out 評価より先に両 checkpoint を保存します。評価に失敗して `report.json` が書かれない場合も、保存済み状態から再開できます。同一環境の CPU で中断前後の model/AdamW/cursor/RNG が一致することをテストしています。CUDA や異なる hardware・実行方式を跨いだ bit 一致を保証するものではありません。
 
 ## smoke
 
