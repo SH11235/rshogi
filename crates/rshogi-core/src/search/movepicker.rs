@@ -38,10 +38,12 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
+use std::mem::MaybeUninit;
+
 use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE, SharedHistories};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
-use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
+use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Square, Value};
 
 // =============================================================================
 // Stage（指し手生成の段階）
@@ -177,6 +179,8 @@ pub struct MovePicker {
     end_generated: usize,
     /// partial_insertion_sort の sorted 領域末尾位置（未使用、書き込みのみ）
     end_good_quiets: usize,
+    drop_scores: [MaybeUninit<[i32; Square::NUM]>; PieceType::HAND_NUM],
+    drop_scores_active: bool,
 }
 
 impl MovePicker {
@@ -240,6 +244,8 @@ impl MovePicker {
             end_captures: 0,
             end_generated: 0,
             end_good_quiets: 0,
+            drop_scores: [MaybeUninit::uninit(); PieceType::HAND_NUM],
+            drop_scores_active: false,
         }
     }
 
@@ -278,6 +284,8 @@ impl MovePicker {
             end_captures: 0,
             end_generated: 0,
             end_good_quiets: 0,
+            drop_scores: [MaybeUninit::uninit(); PieceType::HAND_NUM],
+            drop_scores_active: false,
         }
     }
 
@@ -319,6 +327,8 @@ impl MovePicker {
             end_captures: 0,
             end_generated: 0,
             end_good_quiets: 0,
+            drop_scores: [MaybeUninit::uninit(); PieceType::HAND_NUM],
+            drop_scores_active: false,
         }
     }
 
@@ -432,6 +442,14 @@ impl MovePicker {
                 // ==============================
                 Stage::QuietInit => {
                     if !self.skip_quiets {
+                        if !self.generate_all_legal_moves
+                            && self.ply >= LOW_PLY_HISTORY_SIZE as i32
+                            && !pos.hand(self.side_to_move).is_empty()
+                        {
+                            self.init_drop_quiets(pos, history, shared);
+                            self.stage = Stage::GoodQuiet;
+                            continue;
+                        }
                         // 静かな手を生成
                         let count = if self.generate_all_legal_moves {
                             crate::movegen::generate_with_type(
@@ -480,6 +498,14 @@ impl MovePicker {
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
+                        if self.drop_scores_active {
+                            if self.cur < self.end_generated {
+                                let mv = self.moves.get(self.cur).mv;
+                                self.cur += 1;
+                                return mv;
+                            }
+                            self.restore_drop_quiets(pos);
+                        }
                         self.end_cur = self.end_generated;
                         if let Some(m) = self.select_good_quiet() {
                             return m;
@@ -595,6 +621,98 @@ impl MovePicker {
 
             ext.value = value;
         }
+    }
+
+    fn init_drop_quiets(
+        &mut self,
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+    ) {
+        crate::movegen::generate_board_quiets(pos, &mut self.moves);
+        self.cur = self.end_captures;
+        self.end_cur = self.moves.len();
+        self.score_quiets(pos, history, shared);
+
+        let us = self.side_to_move;
+        let pawn_idx = shared.pawn_history_index(self.pawn_key);
+        let tables = self.continuation_history.map(|key| {
+            history.continuation_history[key.in_check as usize][key.capture as usize]
+                .get_table(key.piece, key.to)
+        });
+        let [ch0, ch1, ch2, ch3, _, ch5] = tables;
+        for pt in PieceType::HAND_PIECES {
+            if !pos.hand(us).has(pt) {
+                continue;
+            }
+            let pc = Piece::make(us, pt);
+            let row = self.drop_scores[pt as usize - 1].write([0; Square::NUM]);
+            for to in Square::all() {
+                row[to.index()] = 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
+            }
+            for to in Square::all() {
+                let mv = Move::new_drop_with_piece(pt, to, pc);
+                row[to.index()] += 2 * history.main_history.get(us, mv) as i32
+                    + ch0.get(pc, to) as i32
+                    + ch1.get(pc, to) as i32
+                    + ch2.get(pc, to) as i32
+                    + ch3.get(pc, to) as i32
+                    + ch5.get(pc, to) as i32;
+            }
+            for to in (pos.check_squares(pt) & !pos.occupied()).iter() {
+                let mv = Move::new_drop_with_piece(pt, to, pc);
+                if pos.see_ge(mv, Value::new(-75)) {
+                    row[to.index()] += 16384;
+                }
+            }
+        }
+
+        let mut prefix = [ExtMove::new(Move::NONE, i32::MIN); 8];
+        let mut len = 0;
+        // 閾値以上の good quiet は生成順に安定ソートされ、残りの手より先に並ぶ。
+        let limit = (-3560 * self.depth).max(-13999);
+        let tt_move = self.tt_move;
+        for ext in &self.moves.as_slice()[self.end_captures..self.end_cur] {
+            insert_quiet_prefix(&mut prefix, &mut len, ext.value, limit, tt_move, || ext.mv);
+        }
+        crate::movegen::visit_quiet_drops(pos, |pt, to, pc| {
+            // SAFETY: 列挙される手駒の行は、この関数で全81升を初期化済み。
+            let value = unsafe { self.drop_scores[pt as usize - 1].assume_init_ref()[to.index()] };
+            insert_quiet_prefix(&mut prefix, &mut len, value, limit, tt_move, || {
+                Move::new_drop_with_piece(pt, to, pc)
+            });
+        });
+        self.cur = self.end_cur;
+        len = len.min(crate::movegen::MAX_MOVES - self.end_cur);
+        for ext in &prefix[..len] {
+            self.moves.push(*ext);
+        }
+        self.end_generated = self.moves.len();
+        self.drop_scores_active = true;
+    }
+
+    fn restore_drop_quiets(&mut self, pos: &Position) {
+        let returned = self.end_generated - self.end_cur;
+        self.moves.set_len(self.end_cur);
+        crate::movegen::visit_quiet_drops(pos, |pt, to, pc| {
+            // SAFETY: 手駒は QuietInit と同じで、各行はその時点で全升を初期化済み。
+            let value = unsafe { self.drop_scores[pt as usize - 1].assume_init_ref()[to.index()] };
+            self.moves.push(ExtMove::new(Move::new_drop_with_piece(pt, to, pc), value));
+        });
+        self.end_generated = self.moves.len();
+        self.end_cur = self.end_generated;
+        self.cur = self.end_captures;
+        // 閾値未満の手の入れ替えも再現するため、元の生成順から部分ソートする。
+        self.end_good_quiets = self.end_captures
+            + partial_insertion_sort(
+                &mut self.moves.as_mut_slice()[self.end_captures..],
+                self.end_cur - self.end_captures,
+                -3560 * self.depth,
+            );
+        for _ in 0..returned {
+            self.select_good_quiet();
+        }
+        self.drop_scores_active = false;
     }
 
     /// 静かな手のスコアを計算
@@ -850,6 +968,31 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
     sorted_end
 }
 
+#[inline]
+fn insert_quiet_prefix(
+    prefix: &mut [ExtMove; 8],
+    len: &mut usize,
+    value: i32,
+    limit: i32,
+    tt_move: Move,
+    make_move: impl FnOnce() -> Move,
+) {
+    if value < limit || value <= prefix[7].value {
+        return;
+    }
+    let mv = make_move();
+    if mv == tt_move {
+        return;
+    }
+    let mut at = (*len).min(7);
+    while at > 0 && prefix[at - 1].value < value {
+        prefix[at] = prefix[at - 1];
+        at -= 1;
+    }
+    prefix[at] = ExtMove::new(mv, value);
+    *len = (*len + 1).min(8);
+}
+
 /// 駒の価値（MVV用）
 #[inline(always)]
 pub(crate) fn piece_value(pc: Piece) -> i32 {
@@ -892,6 +1035,109 @@ mod tests {
             mv.is_some().then_some(mv)
         })
         .collect()
+    }
+
+    fn reference_quiets(
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+        depth: Depth,
+        tt_move: Move,
+    ) -> MovePicker {
+        let mut picker =
+            MovePicker::new(pos, tt_move, depth, 5, [ContHistKey::null_sentinel(); 6], false);
+        pos.generate_quiets(&mut picker.moves, 0);
+        picker.end_cur = picker.moves.len();
+        picker.end_generated = picker.end_cur;
+        picker.score_quiets(pos, history, shared);
+        partial_insertion_sort(picker.moves.as_mut_slice(), picker.end_cur, -3560 * depth);
+        picker.stage = Stage::GoodQuiet;
+        picker
+    }
+
+    #[test]
+    fn drop_rows_preserve_quiet_order_and_fallback_snapshot() {
+        let mut history = HistoryTables::new_boxed();
+        let shared = SharedHistories::new(1);
+        let key = ContHistKey::null_sentinel();
+        for sfen in [
+            "4k4/9/9/9/4P4/9/9/9/4K4 b PLNSGBR 1",
+            "4k4/9/9/9/4p4/9/9/9/4K4 w plnsgbr 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b GS 1",
+            "4k4/3G1G3/4S4/9/9/9/9/9/4K4 b P 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut generated = ExtMoveBuffer::new();
+            pos.generate_quiets(&mut generated, 0);
+            for base in [0, -4000, -6000] {
+                history.main_history.clear_with_init(0);
+                history.continuation_history[key.in_check as usize][key.capture as usize]
+                    .get_table_mut(key.piece, key.to)
+                    .fill(base);
+                for (i, ext) in generated.as_slice().iter().enumerate() {
+                    history.main_history.update(pos.side_to_move(), ext.mv, (i % 7) as i32 * 700);
+                }
+                for depth in [1, 2, 3, 4, 8] {
+                    for tt_move in [Move::NONE, generated.get(generated.len() / 2).mv] {
+                        let mut reference =
+                            reference_quiets(&pos, &history, &shared, depth, tt_move);
+                        let expected: Vec<_> = std::iter::from_fn(|| {
+                            let mv = reference.next_move(&pos, &history, &shared);
+                            mv.is_some().then_some(mv)
+                        })
+                        .collect();
+                        let mut picker = MovePicker::new(&pos, tt_move, depth, 5, [key; 6], false);
+                        picker.stage = Stage::QuietInit;
+                        let mut actual = Vec::new();
+                        loop {
+                            let mv = picker.next_move(&pos, &history, &shared);
+                            if mv.is_none() {
+                                break;
+                            }
+                            actual.push(mv);
+                        }
+                        assert_eq!(actual, expected, "{sfen}, {base}, {depth}, {tt_move:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drop_rows_do_not_rescore_after_returning_prefix() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b PLNSGBR 1").unwrap();
+        let mut history = HistoryTables::new_boxed();
+        let shared = SharedHistories::new(1);
+        let mut reference = reference_quiets(&pos, &history, &shared, 4, Move::NONE);
+        let mut picker =
+            MovePicker::new(&pos, Move::NONE, 4, 5, [ContHistKey::null_sentinel(); 6], false);
+        picker.stage = Stage::QuietInit;
+        assert_eq!(
+            picker.next_move(&pos, &history, &shared),
+            reference.next_move(&pos, &history, &shared)
+        );
+        assert!(picker.drop_scores_active);
+        history.main_history.clear_with_init(-7000);
+        let mut generated = ExtMoveBuffer::new();
+        pos.generate_quiets(&mut generated, 0);
+        for ext in generated.as_slice() {
+            shared.update_pawn_history(
+                shared.pawn_history_index(pos.pawn_key()),
+                ext.mv.moved_piece_after(),
+                ext.mv.to(),
+                9000,
+            );
+        }
+        loop {
+            let mv = picker.next_move(&pos, &history, &shared);
+            assert_eq!(mv, reference.next_move(&pos, &history, &shared));
+            if mv.is_none() {
+                break;
+            }
+        }
+        assert!(!picker.drop_scores_active);
     }
 
     #[test]

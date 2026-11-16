@@ -377,7 +377,11 @@ fn pawn_drop_mask(us: Color, our_pawns: Bitboard) -> Bitboard {
 }
 
 /// 歩の駒打ちを生成
-fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+fn visit_pawn_drops(
+    pos: &Position,
+    target: Bitboard,
+    emit: &mut impl FnMut(PieceType, Square, crate::types::Piece),
+) {
     let us = pos.side_to_move();
 
     // 手駒に歩がなければ終了
@@ -407,7 +411,7 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
 
     let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
     for to in valid_targets.iter() {
-        add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+        emit(PieceType::Pawn, to, dropped_pc);
     }
 }
 
@@ -420,7 +424,11 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
 ///   - 1段目: 香・桂以外
 ///   - 2段目: 桂以外
 ///   - 3〜9段目: 全駒種
-fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+fn visit_non_pawn_drops(
+    pos: &Position,
+    target: Bitboard,
+    emit: &mut impl FnMut(PieceType, Square, crate::types::Piece),
+) {
     let us = pos.side_to_move();
     let hand = pos.hand(us);
 
@@ -467,7 +475,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         // 香・桂を持っていない: 全マスに対して全駒種を生成
         for to in target.iter() {
             for &(pt, pc) in drops {
-                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                emit(pt, to, pc);
             }
         }
     } else {
@@ -481,7 +489,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         if next_to_lance < num {
             for to in target1.iter() {
                 for &(pt, pc) in &drops[next_to_lance..] {
-                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                    emit(pt, to, pc);
                 }
             }
         }
@@ -491,7 +499,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         if next_to_knight < num {
             for to in target2.iter() {
                 for &(pt, pc) in &drops[next_to_knight..] {
-                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                    emit(pt, to, pc);
                 }
             }
         }
@@ -500,10 +508,45 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         let target3 = target & !rank12;
         for to in target3.iter() {
             for &(pt, pc) in drops {
-                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                emit(pt, to, pc);
             }
         }
     }
+}
+
+fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+    visit_pawn_drops(pos, target, &mut |pt, to, pc| {
+        add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+    });
+}
+
+fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+    visit_non_pawn_drops(pos, target, &mut |pt, to, pc| {
+        add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+    });
+}
+
+/// 通常の quiet と同じ順序で、駒打ちの駒種と升を列挙する。
+pub(crate) fn visit_quiet_drops(
+    pos: &Position,
+    mut emit: impl FnMut(PieceType, Square, crate::types::Piece),
+) {
+    let target = !pos.occupied();
+    visit_pawn_drops(pos, target, &mut emit);
+    visit_non_pawn_drops(pos, target, &mut emit);
+}
+
+/// 通常の quiet の盤上の手だけを、生成順を保って追加する。
+pub(crate) fn generate_board_quiets(pos: &Position, buffer: &mut ExtMoveBuffer) {
+    let empties = !pos.occupied();
+    generate_non_evasions_core(
+        pos,
+        buffer,
+        GenerateTargets::new(empties),
+        false,
+        PromotionMode::PromoteOnly,
+        false,
+    );
 }
 
 // ============================================================================

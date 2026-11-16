@@ -21,6 +21,7 @@ pub use generator::{
     generate_legal_all_with_pass, generate_legal_with_pass, generate_non_evasions,
     generate_with_type, is_legal_with_pass,
 };
+pub(crate) use generator::{generate_board_quiets, visit_quiet_drops};
 pub use missing_kings::generate_legal_allowing_missing_kings;
 pub(crate) use missing_kings::{legal_moves_by_rules, to_legal_move_by_rules};
 pub use movelist::MoveList;
