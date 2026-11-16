@@ -139,6 +139,47 @@ CPU・1 thread・seed 固定で、16 step × batch 8 の更新を 1 回だけ行
 
 loss の低下は接続の確認にだけ使います。学習の品質を示すものではありません。
 
+## 学習更新の性能計測
+
+```bash
+python -m rshogi_dl.benchmark \
+  --data fixture.jsonl --config initial --device cuda \
+  --execution eager --precision fp32 --batch-size 32 \
+  --warmup 5 --steps 20 --window-batches 4 --threads 1 --seed 0 \
+  --input-mode resident \
+  --output "$SHOGI_DATA/runs/rshogi-dl/<run>/benchmark.json"
+```
+
+計測専用で、checkpoint は保存しません。JSON を標準出力へ出し、`--output` を指定した場合は新規の
+JSON にも書きます。成果物の保存先・上書き拒否は smoke と同じです。`validation-only` の小さな
+fixture での処理時間であり、学習品質や棋力を示しません。
+
+- `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
+  の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
+  最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
+  `--warmup 0` なら初回実行・optimizer 状態の初期化も計測区間に含みます。
+- `--precision fp32|tf32|fp16|bf16`: `fp32` は TF32 無効、`tf32` は FP32 の行列演算で TF32 を許可、
+  `fp16` / `bf16` は autocast を使います。FP16 は GradScaler を使い、overflow により省略された
+  optimizer 更新数も出します。CUDA が無い場合や対応しない精度は失敗し、CPU へ切り替えません。
+  CPU では `--device cpu --precision fp32` だけを使えます。
+- `--fused-optimizer`: CUDA の fused AdamW を選びます。既定は無効。学習率と weight decay は
+  `--learning-rate` (既定 0.001)、`--weight-decay` (既定 0) で固定できます。
+- `--input-mode resident|stream`: 先頭最大 `--window-batches` 個の完全な batch を繰り返します。
+  `resident` は計測前に device へ転送し、`stream` は同じ局面列を JSONL から再読込・転送します。
+  データ全量は保持せず、resident も最大 32 batch に制限します。batch 未満の末尾は使いません。
+  fixture 全体が 1 batch に満たなければ失敗します。
+
+同期した wall time と `cuda_stream_seconds` を別々に出します。CUDA event の時間にも CPU からの
+演算投入待ちが入り得るため、純粋な kernel 時間ではありません。CUDA の peak allocated / reserved
+メモリは warmup 後に計測し直します。各 step の loss・全 parameter の有限性・初期/最終重みの digest
+は計測区間の外で検査します。現在の loss の `nonzero` は CUDA で同期を伴います。入力 fixture は
+実行中に変更しないでください。FP16 は試行した sample 数と実際に optimizer が更新した sample 数の
+両方で throughput を出します。
+
+比較時は model config、seed、入力 window の digest、batch、warmup、steps、optimizer 条件を揃え、
+一度に 1 つの設定だけを変えてください。各実行は同じ seed の初期重みから始めます。共有 CPU の負荷は
+wall time と CUDA event の両方に影響し得るため、CUDA event だけを根拠に最速と判定しないでください。
+
 ## export
 
 ```bash
