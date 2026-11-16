@@ -167,6 +167,7 @@ python -m rshogi_dl.benchmark \
 JSON にも書きます。成果物の保存先・上書き拒否は smoke と同じです。`validation-only` の小さな
 fixture での処理時間であり、学習品質や棋力を示しません。
 
+- `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
 - `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
   の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
