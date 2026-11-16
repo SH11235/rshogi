@@ -1,0 +1,22 @@
+[package]
+name = "rshogi-dl-usi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "GPL-3.0-or-later"
+description = "USI engine using policy/value MCTS"
+
+[dependencies]
+anyhow.workspace = true
+rshogi-core = { path = "../rshogi-core", default-features = false }
+rshogi-dl = { path = "../rshogi-dl" }
+rshogi-mcts = { path = "../rshogi-mcts" }
+
+[features]
+default = []
+onnx = ["rshogi-dl/onnx"]
+
+[[bin]]
+name = "rshogi-dl-usi"
+path = "src/main.rs"
+required-features = ["onnx"]

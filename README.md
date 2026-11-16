@@ -187,6 +187,10 @@ cargo xtask list-binaries
 詳細は [`docs/build.md`](docs/build.md) を参照してください。
 保守者向けの crates.io publish・engine tag・GitHub Release の手順は [RELEASING.md](RELEASING.md) にあります。
 
+## Policy/value モデルのエンジン
+
+ONNX の policy/value モデルを使う MCTS エンジンは [rshogi-dl-usi](crates/rshogi-dl-usi/README.md) から利用できます。推論部は [rshogi-dl](crates/rshogi-dl/README.md)、探索部は [rshogi-mcts](crates/rshogi-mcts/README.md) に分かれています。NNUE のモデルとは別形式です。
+
 ## クレート構成
 
 ```

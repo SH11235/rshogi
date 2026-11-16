@@ -75,9 +75,9 @@ ft-halfka_hm_split  = ["rshogi-core/ft-halfka_hm_split"]
 ft-halfka_hm_merged = ["rshogi-core/ft-halfka_hm_merged"]
 
 # AobaZero ONNX直接推論（ONNX Runtime + CUDA が必要）
-aobazero-onnx = ["dep:ort"]
+aobazero-onnx = ["dep:ort", "rshogi-dl/onnx"]
 # 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）
-dlshogi-onnx = ["dep:ort"]
+dlshogi-onnx = ["dep:ort", "rshogi-dl/onnx"]
 
 # 棋譜 replay（CSA/PSV/JSONL の parse・盤面再生・勝敗導出。`replay` モジュールの
 # TUI を除く部分）。教師・評価系ツールが TUI 依存 (ratatui/crossterm) なしで
@@ -135,6 +135,7 @@ path = "src/bin/nyugyoku_metrics.rs"
 required-features = ["csa-replay"]
 
 [dependencies]
+rshogi-dl = { path = "../rshogi-dl" }
 # Workspace dependencies
 anyhow.workspace = true
 clap.workspace = true

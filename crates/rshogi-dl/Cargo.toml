@@ -1,0 +1,24 @@
+[package]
+name = "rshogi-dl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "GPL-3.0-or-later"
+description = "Policy/value inference and model features for rshogi"
+
+[dependencies]
+anyhow.workspace = true
+rshogi-core = { path = "../rshogi-core", default-features = false }
+rayon = { version = "1.10", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
+
+[features]
+default = []
+onnx = ["dep:ort", "dep:rayon"]
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[example]]
+name = "evaluate"
+required-features = ["onnx"]

@@ -45,6 +45,8 @@
 
 控え（bench）の復帰は `tree register`（控え自身の source 保護を適用）と `master audit --revive-bench` で行い、`borrow value` では復帰させません。書き出しでは record と同じく DB に -30000 で残し、プリセットから除きます。
 
+特徴量・手ラベルと共有 ONNX 推論 API は [rshogi-dl](../rshogi-dl/README.md) を利用します。既存のツールの cp 出力は変更しません。MCTS の外部エンジン接続は [rshogi-dl-usi](../rshogi-dl-usi/README.md) を参照してください。
+
 ## ビルドと実行
 
 リポジトリのルートで実行します。必要な Rust 環境は [ビルド手順](../../docs/build.md) を参照してください。
