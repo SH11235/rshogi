@@ -9,6 +9,7 @@ from rshogi_dl.contract import CONTEXT_POSITION, POLICY_SIZE, SQUARE_COUNT
 from rshogi_dl.data import collate, validate_record
 from rshogi_dl.loss import policy_value_loss
 from rshogi_dl.model import (
+    ATTENTION_BACKENDS,
     INITIAL_CONFIG,
     TEST_CONFIG,
     ExportModule,
@@ -165,6 +166,61 @@ class AttentionTest(unittest.TestCase):
             single_policy, single_value = model(tokens[2:3])
         self.assertTrue(torch.allclose(policy[2:3], single_policy, rtol=1e-5, atol=1e-6))
         self.assertTrue(torch.allclose(value[2:3], single_value, rtol=1e-5, atol=1e-6))
+
+
+class AttentionBackendTest(unittest.TestCase):
+    def test_default_and_invalid_backend(self) -> None:
+        self.assertEqual(SquareTransformer(TEST_CONFIG).attention_backend, "explicit")
+        self.assertEqual(ATTENTION_BACKENDS, ("explicit", "sdpa"))
+        for backend in ("flash", "", None, True):
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                SquareTransformer(TEST_CONFIG, attention_backend=backend)
+
+    def test_state_layout_outputs_losses_and_gradients_match(self) -> None:
+        for config in (TEST_CONFIG, INITIAL_CONFIG):
+            for rows in (1, 3):
+                with self.subTest(config=config, rows=rows):
+                    explicit = build(config, seed=19)
+                    sdpa = SquareTransformer(config, attention_backend="sdpa")
+                    sdpa.load_state_dict(explicit.state_dict(), strict=True)
+                    self.assertEqual(explicit.state_dict().keys(), sdpa.state_dict().keys())
+                    records = synthetic_records(seed=23, count=rows)
+                    batch = collate([validate_record(record) for record in records])
+                    outputs = [model(batch.tokens) for model in (explicit, sdpa)]
+                    for expected, actual in zip(*outputs, strict=True):
+                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                    losses = [policy_value_loss(*output, batch) for output in outputs]
+                    torch.testing.assert_close(losses[0].total, losses[1].total, rtol=1e-5, atol=1e-6)
+                    for loss in losses:
+                        loss.total.backward()
+                    for (name, expected), (_, actual) in zip(
+                        explicit.named_parameters(), sdpa.named_parameters(), strict=True
+                    ):
+                        self.assertIsNotNone(expected.grad, name)
+                        self.assertIsNotNone(actual.grad, name)
+                        self.assertTrue(torch.isfinite(actual.grad).all(), name)
+                        torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-4, atol=1e-6, msg=name)
+                    for model in (explicit, sdpa):
+                        torch.optim.SGD(model.parameters(), lr=1e-3).step()
+                    for (name, expected), (_, actual) in zip(
+                        explicit.named_parameters(), sdpa.named_parameters(), strict=True
+                    ):
+                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-6, msg=name)
+
+    def test_adamw_update_matches_in_double_precision(self) -> None:
+        explicit = build(seed=29).double()
+        sdpa = SquareTransformer(TEST_CONFIG, attention_backend="sdpa").double()
+        sdpa.load_state_dict(explicit.state_dict(), strict=True)
+        batch = collate([validate_record(record) for record in synthetic_records(seed=31, count=3)])
+        optimizers = [torch.optim.AdamW(model.parameters(), lr=1e-3) for model in (explicit, sdpa)]
+        for model, optimizer in zip((explicit, sdpa), optimizers, strict=True):
+            policy, value = model(batch.tokens)
+            policy_value_loss(policy, value, batch).total.backward()
+            optimizer.step()
+        for (name, expected), (_, actual) in zip(
+            explicit.named_parameters(), sdpa.named_parameters(), strict=True
+        ):
+            torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10, msg=name)
 
 
 class GradientTest(unittest.TestCase):

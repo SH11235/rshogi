@@ -5,6 +5,7 @@ import io
 import json
 import random
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -12,14 +13,14 @@ import onnx
 import torch
 
 from rshogi_dl import export, parity, smoke
-from rshogi_dl.checkpoint import CheckpointError, load_checkpoint
+from rshogi_dl.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
 from rshogi_dl.contract import (
     CPU_PARITY_ATOL,
     CPU_PARITY_RTOL,
     PARITY_BATCH_SIZES,
     POLICY_SIZE,
 )
-from rshogi_dl.model import TEST_CONFIG, SquareTransformer
+from rshogi_dl.model import TEST_CONFIG, ExportModule, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
 
 from .support import artifact_tempdir, random_tokens, synthetic_records, write_jsonl
@@ -142,6 +143,36 @@ class SmokeAndExportTest(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn("first-batch loss", stdout)
         self.assertTrue((run_dir / smoke.CHECKPOINT_NAME).is_file())
+
+    def test_sdpa_checkpoint_and_export_keep_canonical_representation(self) -> None:
+        model = SquareTransformer(TEST_CONFIG, attention_backend="sdpa")
+        model.load_state_dict(load_checkpoint(self.checkpoint_path).model.state_dict(), strict=True)
+        optimizer = torch.optim.AdamW(model.parameters())
+        saved = save_checkpoint(self.runs / "sdpa.pt", model, optimizer, step=0, seed=1)
+        restored = load_checkpoint(saved).model
+        self.assertEqual(restored.attention_backend, "explicit")
+        for key, value in model.state_dict().items():
+            self.assertTrue(torch.equal(value, restored.state_dict()[key]), key)
+        with patch("rshogi_dl.model.functional.scaled_dot_product_attention") as fused:
+            data = export.onnx_bytes(model)
+        fused.assert_not_called()
+        self.assertEqual(model.attention_backend, "sdpa")
+        self.assertTrue(all(block.attention.attention_backend == "sdpa" for block in model.blocks))
+        graph = onnx.load_from_string(data).graph
+        self.assertEqual(sum(node.op_type == "Softmax" for node in graph.node), TEST_CONFIG.layers)
+        options = export.onnxruntime.SessionOptions()
+        options.intra_op_num_threads = 1
+        session = export.onnxruntime.InferenceSession(
+            data, options, providers=["CPUExecutionProvider"],
+        )
+        for rows in (1, 3):
+            with self.subTest(rows=rows):
+                tokens = torch.tensor([random_tokens(random.Random(i + 100)) for i in range(rows)])
+                with torch.no_grad():
+                    expected = ExportModule(model)(tokens)
+                actual = session.run(None, {"tokens": tokens.numpy()})
+                for want, got in zip(expected, actual, strict=True):
+                    np.testing.assert_allclose(got, want.numpy(), rtol=1e-4, atol=1e-5)
 
     def test_export_graph_and_metadata(self) -> None:
         self.assertEqual(self.export_stdout.strip(), str(self.onnx_path))

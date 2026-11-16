@@ -116,6 +116,19 @@ attention は全 96 token 間の双方向で、畳み込みは使いません。
 - loss: policy は合法手の中だけで softmax を取る soft-target cross entropy (`policy` が `null` で
   ない行の平均)、value は BCE。両者を 1:1 で足します。全行が `null` の batch では policy loss は 0 です。
 
+### attention の実行方式
+
+`SquareTransformer(config, attention_backend="sdpa")` は PyTorch の
+`scaled_dot_product_attention` を使います。既定の `"explicit"` は QK の積・softmax・V との積を
+個別に計算します。どちらも全 96 token 間の双方向 attention で、dropout は使いません。
+SDPA の実際の kernel は device・dtype・PyTorch の設定に依存します。
+
+この指定は実行方式だけを変え、model config・parameter 名・checkpoint の形式は共通です。
+同じ重みを両方式へ `load_state_dict` できます。checkpoint の読込時は既定の `"explicit"` に戻るので、
+SDPA を使う側でモデルを構築して重みを読み込んでください。SDPA のモデルも ONNX export 中は
+標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
+実行方式は変わりません。
+
 ## smoke
 
 ```bash
@@ -154,6 +167,7 @@ python -m rshogi_dl.benchmark \
 JSON にも書きます。成果物の保存先・上書き拒否は smoke と同じです。`validation-only` の小さな
 fixture での処理時間であり、学習品質や棋力を示しません。
 
+- `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
 - `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
   の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。

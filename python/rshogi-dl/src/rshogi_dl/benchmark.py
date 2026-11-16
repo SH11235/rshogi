@@ -19,7 +19,7 @@ import torch
 from .contract import TRAINING_STATUS
 from .data import Batch, RecordError, iter_batches
 from .loss import policy_value_loss
-from .model import NAMED_CONFIGS, ModelConfig, SquareTransformer
+from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact
 
 
@@ -38,6 +38,7 @@ class BenchmarkConfig:
     seed: int = 0
     threads: int = 1
     device: str = "cpu"
+    attention_backend: str = "explicit"
     execution: str = "eager"
     precision: str = "fp32"
     input_mode: str = "resident"
@@ -55,6 +56,7 @@ class BenchmarkConfig:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
         for name, choices in {
+            "attention_backend": ATTENTION_BACKENDS,
             "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
             "input_mode": ("resident", "stream"),
         }.items():
@@ -152,7 +154,7 @@ def run_benchmark(
     """
     with _settings(config) as device:
         startup_started = time.perf_counter()
-        model = SquareTransformer(model_config).to(device)
+        model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         model.train()
         initial_digest = _digest(model)
         optimizer = torch.optim.AdamW(
@@ -282,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", required=True, help="encode 済み fixture JSONL")
     parser.add_argument("--config", choices=sorted(NAMED_CONFIGS), default="initial")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
