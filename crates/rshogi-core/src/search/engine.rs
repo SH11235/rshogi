@@ -1811,6 +1811,7 @@ where
     FProgress: FnMut(u64, f64),
 {
     let is_main = main_state.is_some();
+    pos.reserve_repetition_history(MAX_PLY as usize + 1);
     #[cfg(feature = "allocation-stats")]
     let _allocation_scope =
         crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Iteration);

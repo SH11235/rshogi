@@ -115,6 +115,8 @@ pub struct Position {
     // === 状態 ===
     /// 状態スタック
     pub(super) state_stack: Vec<StateInfo>,
+    // undo 後の祖先キーも保持するため、リングではなく経路の prefix を偶奇別に保存する。
+    repetition_keys: [Vec<u64>; 2],
     /// 現在の状態インデックス
     state_idx: usize,
     /// 初期局面からの手数。読み込みで受け付けるのは 0..=[`super::MAX_GAME_PLY`] で、
@@ -176,6 +178,7 @@ impl Position {
     /// 状態スタックに新しい StateInfo を積む（必要なら再利用）
     #[inline]
     fn push_state(&mut self, mut st: StateInfo) {
+        self.save_repetition_key();
         let next_idx = self.state_idx + 1;
         st.previous = self.state_idx;
         if self.state_stack.len() > next_idx {
@@ -193,6 +196,7 @@ impl Position {
     /// ローカルStateInfoを完成させてからstack slotへ丸ごとmoveする二重コピーを避ける。
     #[inline]
     fn push_partial_state_in_place(&mut self) {
+        self.save_repetition_key();
         let previous_idx = self.state_idx;
         let next_idx = previous_idx + 1;
         if self.state_stack.len() <= next_idx {
@@ -268,6 +272,7 @@ impl Position {
             hdk_bb: Bitboard::EMPTY,
             hand: [Hand::EMPTY; Color::NUM],
             state_stack,
+            repetition_keys: [Vec::new(), Vec::new()],
             state_idx: 0,
             game_ply: 0,
             side_to_move: Color::Black,
@@ -540,7 +545,34 @@ impl Position {
     ) -> Result<(), std::collections::TryReserveError> {
         let required = self.state_idx.saturating_add(1).saturating_add(additional_plies);
         self.state_stack
-            .try_reserve_exact(required.saturating_sub(self.state_stack.len()))
+            .try_reserve_exact(required.saturating_sub(self.state_stack.len()))?;
+        for (parity, keys) in self.repetition_keys.iter_mut().enumerate() {
+            let required_keys = required / 2 + usize::from(required % 2 > parity);
+            keys.try_reserve_exact(required_keys.saturating_sub(keys.len()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reserve_repetition_history(&mut self, additional_plies: usize) {
+        let required = self.state_idx + 1 + additional_plies;
+        for (parity, keys) in self.repetition_keys.iter_mut().enumerate() {
+            let required_keys = required / 2 + usize::from(required % 2 > parity);
+            keys.reserve(required_keys.saturating_sub(keys.len()));
+        }
+    }
+
+    #[inline]
+    fn save_repetition_key(&mut self) {
+        // 現局面は state_mut() でも変更できるので、子へ進む直前にキーを確定する。
+        let board_key = self.cur_state().board_key;
+        let key_idx = self.state_idx / 2;
+        let keys = &mut self.repetition_keys[self.state_idx % 2];
+        if key_idx < keys.len() {
+            keys[key_idx] = board_key;
+        } else {
+            debug_assert_eq!(key_idx, keys.len());
+            keys.push(board_key);
+        }
     }
 
     /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
@@ -1814,15 +1846,17 @@ impl Position {
         let mut repetition_type = RepetitionState::None;
 
         if max_back >= 4 {
+            let keys = &self.repetition_keys[current_idx % 2];
+            let start = current_idx / 2 - max_back as usize / 2;
+            let end = current_idx / 2 - 1;
             // 千日手は最短4手で成立するため4手前から比較開始
             let mut dist = 4;
-            while dist <= max_back {
-                let st_idx = current_idx - dist as usize;
-                debug_assert!(st_idx < self.state_stack.len());
-                // SAFETY: dist <= max_back <= current_idx、かつ cur_state の不変条件より
-                //         current_idx < state_stack.len() なので範囲内。
-                let stp = unsafe { self.state_stack.get_unchecked(st_idx) };
-                if stp.board_key == board_key {
+            for &previous_key in keys[start..end].iter().rev() {
+                if previous_key == board_key {
+                    let st_idx = current_idx - dist as usize;
+                    debug_assert!(st_idx < self.state_stack.len());
+                    // SAFETY: dist <= max_back <= current_idx < state_stack.len() を保つ。
+                    let stp = unsafe { self.state_stack.get_unchecked(st_idx) };
                     let prev_hand = stp.hand_snapshot;
                     let cur_hand = hand_snapshot;
 
@@ -2869,6 +2903,108 @@ mod tests {
         assert_eq!(pos.cur_state().repetition_times, 4);
         assert_eq!(pos.cur_state().repetition, -4);
         assert_eq!(pos.cur_state().repetition_type, RepetitionState::Draw);
+    }
+
+    #[test]
+    fn repetition_key_scan_matches_state_history_at_all_distances() {
+        for current_idx in 0..=20 {
+            for match_dist in 0..=20 {
+                let mut pos = Position::new();
+                pos.state_mut().board_key = u64::from(match_dist == current_idx);
+                for idx in 1..=current_idx {
+                    let mut st = StateInfo::new();
+                    st.board_key = u64::from(idx == current_idx || current_idx - idx == match_dist);
+                    pos.push_state(st);
+                }
+                for plies_from_null in 0..=20 {
+                    let expected_dist =
+                        pos.state_stack[..current_idx].iter().enumerate().rev().find_map(
+                            |(idx, st)| {
+                                let dist = (current_idx - idx) as i32;
+                                (dist >= 4
+                                    && dist <= plies_from_null.min(16)
+                                    && dist % 2 == 0
+                                    && st.board_key == pos.state().board_key)
+                                    .then_some(dist)
+                            },
+                        );
+                    pos.state_mut().plies_from_null = plies_from_null;
+                    pos.update_repetition_info();
+                    assert_eq!(pos.state().repetition, expected_dist.unwrap_or(0));
+                    assert_eq!(
+                        pos.state().repetition_type,
+                        if expected_dist.is_some() {
+                            RepetitionState::Draw
+                        } else {
+                            RepetitionState::None
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repetition_keys_preserve_ancestors_across_branches_and_special_moves() {
+        fn assert_ancestors(pos: &Position) {
+            for idx in 0..pos.state_idx {
+                assert_eq!(pos.repetition_keys[idx % 2][idx / 2], pos.state_at(idx).board_key);
+            }
+        }
+
+        let mut pos = Position::new();
+        pos.set_sfen_with_pass_rights("4k4/9/9/9/9/9/9/9/4K4 b - 1", 3, 3).unwrap();
+        pos.try_reserve_move_history(64).unwrap();
+        let storage = pos.repetition_keys.each_ref().map(|keys| keys.as_ptr());
+        let cycle = ["5i5h", "5a5b", "5h5i", "5b5a"].map(|s| Move::from_usi(s).unwrap());
+        for _ in 0..8 {
+            for mv in cycle {
+                pos.do_move(mv, pos.gives_check(mv));
+                assert_ancestors(&pos);
+                assert_eq!(pos.repetition_keys.each_ref().map(|keys| keys.as_ptr()), storage);
+            }
+        }
+        for _ in 0..6 {
+            for mv in cycle.into_iter().rev() {
+                pos.undo_move(mv);
+                assert_ancestors(&pos);
+            }
+        }
+
+        let mut pos = pos.clone();
+        assert_ancestors(&pos);
+        pos.reserve_repetition_history(64);
+        pos.do_null_move();
+        assert_ancestors(&pos);
+        let mv = Move::from_usi("5a6a").unwrap();
+        pos.do_move(mv, pos.gives_check(mv));
+        assert_ancestors(&pos);
+        pos.undo_move(mv);
+        pos.undo_null_move();
+        assert_ancestors(&pos);
+        for _ in 0..2 {
+            pos.do_pass_move();
+            assert_ancestors(&pos);
+        }
+        for _ in 0..2 {
+            pos.undo_pass_move();
+            assert_ancestors(&pos);
+        }
+        for _ in 0..2 {
+            for text in ["5i6i", "5a6a", "6i5i", "6a5a"] {
+                let mv = Move::from_usi(text).unwrap();
+                pos.do_move(mv, pos.gives_check(mv));
+                assert_ancestors(&pos);
+            }
+            assert_eq!(pos.repetition_state(16), RepetitionState::Draw);
+        }
+
+        pos.set_hirate();
+        pos.state_mut().board_key ^= 0x1234;
+        let root_key = pos.state().board_key;
+        pos.do_null_move();
+        assert_eq!(pos.repetition_keys[0][0], root_key);
+        assert_ancestors(&pos);
     }
 
     #[test]
