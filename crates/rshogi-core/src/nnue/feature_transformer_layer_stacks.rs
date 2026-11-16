@@ -2544,6 +2544,19 @@ mod tests {
             *w = ((i * 17 + i / N * 23) % 511) as i16 - 255;
         }
         ft.biases.0.fill(i16::MAX - 100);
+        #[cfg(feature = "nnue-psqt")]
+        {
+            ft.has_psqt = true;
+            ft.psqt_num_buckets = MAX_LAYER_STACK_BUCKETS;
+            ft.psqt_weights =
+                AlignedBox::new_zeroed(TestSpec::DIMENSIONS * MAX_LAYER_STACK_BUCKETS).into();
+            for (i, w) in ft.psqt_weights.make_mut().iter_mut().enumerate() {
+                *w = ((i * 37 + i / MAX_LAYER_STACK_BUCKETS * 13) % 1023) as i32 - 511;
+            }
+            for (bucket, bias) in ft.psqt_biases.iter_mut().enumerate() {
+                *bias = bucket as i32 * 101 - 353;
+            }
+        }
         let sfens = [
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
             "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
@@ -2589,6 +2602,12 @@ mod tests {
                                 expected.threat_accumulation,
                                 "threat {sfen}, ply {ply}, stride {stride}"
                             );
+                            #[cfg(feature = "nnue-psqt")]
+                            assert_eq!(
+                                stack.current().accumulator.psqt_accumulation,
+                                expected.psqt_accumulation,
+                                "psqt {sfen}, ply {ply}, stride {stride}, cached {cached}"
+                            );
                             if !pos.in_check() {
                                 pos.do_null_move();
                                 stack.push();
@@ -2604,6 +2623,11 @@ mod tests {
                                 assert_eq!(
                                     stack.current().accumulator.accumulation,
                                     expected.accumulation
+                                );
+                                #[cfg(feature = "nnue-psqt")]
+                                assert_eq!(
+                                    stack.current().accumulator.psqt_accumulation,
+                                    expected.psqt_accumulation
                                 );
                                 stack.pop();
                                 pos.undo_null_move();
@@ -2625,12 +2649,22 @@ mod tests {
                             expected.threat_accumulation
                         );
                         assert_eq!(stack.current().accumulator.accumulation, expected.accumulation);
+                        #[cfg(feature = "nnue-psqt")]
+                        assert_eq!(
+                            stack.current().accumulator.psqt_accumulation,
+                            expected.psqt_accumulation
+                        );
                     }
                     stack.reset();
                     ft.threat_weights.make_mut()[0] = ft.threat_weights[0].wrapping_add(1);
                     ft.update_with_threat_ancestor(&pos, &mut stack, cached.then_some(&mut cache));
                     let mut expected = AccumulatorLayerStacks::<N>::new();
                     ft.refresh_accumulator(&pos, &mut expected);
+                    #[cfg(feature = "nnue-psqt")]
+                    assert_eq!(
+                        stack.current().accumulator.psqt_accumulation,
+                        expected.psqt_accumulation
+                    );
                     assert_eq!(
                         stack.current().accumulator.threat_accumulation,
                         expected.threat_accumulation
