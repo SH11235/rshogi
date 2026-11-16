@@ -16,9 +16,9 @@
 
 batch 推論への対応は `encoded_batch_capacity()` で確認します。`input_format()` の宣言だけでは batch 対応を意味しません。ORT backend は設定した最大 batch size まで対応し、全出力の shape と有限性を確認してから出力へコピーします。形式・容量・出力長の不一致と推論失敗はエラーになり、呼出し側の出力は変更しません。
 
-cache を使う batch 呼出しは `CachedEvaluator::with_batch_capacity(inner, cache_mib, capacity)` で準備します。全入力を照合し、miss だけを一度の backend 呼出しにまとめます。重複する miss の除去は行いません。全 miss 出力を検証してから要求順に cache 登録し、失敗時は cache と呼出し側の出力を保持します。`new()` は batch 領域を確保せず、従来の scalar API を使用します。
+cache を使う batch 呼出しは `CachedEvaluator::with_batch_capacity(inner, cache_mib, capacity)` で準備します。`cache_mib = 0` でも backend に入力形式と batch 対応の宣言を必要とします。全入力を照合し、miss だけを一度の backend 呼出しにまとめます。重複する miss の除去は行いません。全 miss 出力を検証してから要求順に cache 登録し、失敗時は cache と呼出し側の出力を保持します。`new()` は batch 領域を確保せず、従来の scalar API を使用します。
 
-`allocated_bytes()` は scalar cache の MiB 予算に含む領域です。追加の全出力 staging・miss 入力・key・索引は `batch_allocated_bytes()` で別に確認できます。呼出し側の `InputBatchBuffer` はその `allocated_bytes()` に含まれます。`CacheStats.requests` と `hits` は局面数、`nn_calls` は実際の backend 呼出し回数です。batch では `requests = hits + nn_calls` にはなりません。`nn_positions()` は backend に渡した局面数で、失敗した呼出しも計数します。`reset_stats()` と `clear()` はこれらすべてをリセットします。失敗時の `requests` は検証を通った試行局面数を含み、`hits` は正常に返した局面だけを数えます。
+`CachedEvaluator::allocated_bytes()` は scalar cache の MiB 予算に含む領域です。追加の全出力 staging・miss 入力・key・索引は `CachedEvaluator::batch_allocated_bytes()` で別に確認できます。呼出し側が所有する入力領域は `InputBatchBuffer::allocated_bytes()` で確認でき、これらの wrapper の計数には含まれません。`CacheStats.requests` と `hits` は局面数、`nn_calls` は実際の backend 呼出し回数です。batch では `requests = hits + nn_calls` にはなりません。`nn_positions()` は backend に渡した局面数で、失敗した呼出しも計数します。`reset_stats()` と `clear()` はこれらすべてをリセットします。失敗時の `requests` は検証を通った試行局面数を含み、`hits` は正常に返した局面だけを数えます。
 
 既定 feature は GPU や ONNX Runtime に依存しません。`onnx` feature で ORT backend を利用できます。`ORT_DYLIB_PATH` に ONNX Runtime API 24 対応の共有ライブラリを指定してください。`OnnxConfig` の device が非負なら CUDA、負なら CPU を利用します。TensorRT は明示的に選択し、engine cache は利用するモデルと実行環境に対応する場所へ保存してください。
 
