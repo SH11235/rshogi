@@ -237,7 +237,7 @@ impl PaveReport<'_> {
                     ],
                     opts: args.opts(),
                     group: None,
-                    memo: None,
+                    memo: Some(format!("{} の崩れまでの舗装の根 {} 手目", game.name, m.ply)),
                 };
                 generated.push((root.key.clone(), line));
             }
@@ -323,6 +323,7 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
         let mut pair = false;
         let mut client = false;
         let mut labels = false;
+        let mut numeric_ids = true;
         seeds::visit_json(path, |_, v| {
             if v["type"] == "meta" {
                 client |= !v["game_id"].is_null() || v["source"] == "csa_client";
@@ -331,7 +332,7 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
             if v["type"] == "result" {
                 results += 1;
                 pair |= !v["pair_index"].is_null() || !v["pair_slot"].is_null();
-                ensure!(v["game_id"].is_u64(), "pair の数値 game_id がありません");
+                numeric_ids &= v["game_id"].is_u64();
             }
             Ok(())
         })?;
@@ -340,6 +341,7 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
             !client && (pair || results > 1 || !labels),
             "game-pave は pair JSON Lines 専用です (csa_client は未対応)"
         );
+        ensure!(numeric_ids, "pair の数値 game_id がありません");
         visit_pair(path, &name, None, |mut game, outcome| {
             validate_game(&mut game)?;
             for m in &game.moves {

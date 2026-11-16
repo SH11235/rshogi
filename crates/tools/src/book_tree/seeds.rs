@@ -5,7 +5,7 @@ use super::refutation::format_queue;
 use super::targets::{Line, Opts, Root, parse_root, read_checked_lines};
 use super::walk::{book_probe, check_tag, excluded_positions, open_book, queue_id};
 use crate::common::io::write_atomic;
-use crate::selfplay::types::PrimaryScore;
+use crate::selfplay::types::{PrimaryScore, ScoreBound};
 use crate::tournament_pairs::ResultPairs;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -123,6 +123,7 @@ pub(super) struct Move {
 #[derive(Deserialize)]
 pub(super) struct Eval {
     score: Option<PrimaryScore>,
+    score_bound: Option<ScoreBound>,
     score_cp: Option<i32>,
     score_mate: Option<i32>,
     score_mate_sign: Option<i8>,
@@ -310,7 +311,7 @@ pub(super) fn eval_score(eval: &Eval) -> Option<i64> {
     if let Some(primary) = &eval.last_exact_primary {
         return (!primary.pv.is_empty()).then(|| score_value(&primary.score));
     }
-    if eval.pv.as_ref().is_none_or(Vec::is_empty) {
+    if eval.score_bound.is_some() || eval.pv.as_ref().is_none_or(Vec::is_empty) {
         return None;
     }
     let score = eval.score.clone().or_else(|| {

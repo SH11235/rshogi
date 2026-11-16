@@ -733,6 +733,34 @@ fn pave_collapse_uses_both_sides_recovers_and_ignores_scores_without_pv() {
 }
 
 #[test]
+fn pave_collapse_ignores_bounds_and_prefers_exact_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    for bound in ["lowerbound", "upperbound"] {
+        let mut ms = scored_moves();
+        ms[9]["eval"] = json!({"score_cp":0,"score_bound":bound,"pv":[MOVES[9]]});
+        let mut primary = ms.clone();
+        primary[9]["eval"]["last_exact_primary"] = json!({"score":{"cp":0},"pv":[MOVES[9]]});
+        let mut bounded_loss = moves();
+        bounded_loss[0]["eval"] = json!({"score_cp":-200,"score_bound":bound,"pv":[MOVES[0]]});
+        pave_pair(
+            dir.path(),
+            &[
+                (&ms, "white_win"),
+                (&primary, "white_win"),
+                (&bounded_loss, "white_win"),
+                (&bounded_loss, "white_win"),
+            ],
+        );
+        pave::run(pave_args(dir.path())).unwrap();
+        let table = pave_table(dir.path());
+        assert_eq!(table[0]["collapse"], "1");
+        assert_eq!(table[1]["state"], "no-collapse");
+        assert_eq!(table[2]["state"], "no-collapse");
+    }
+}
+
+#[test]
 fn pave_settled_uses_played_edge_tree_provenance_and_reports_main_match() {
     let dir = tempfile::tempdir().unwrap();
     let mut ms = scored_moves();
@@ -775,6 +803,62 @@ fn pave_settled_uses_played_edge_tree_provenance_and_reports_main_match() {
             assert_eq!(table[0]["settled_ply"], "1");
             assert_eq!(table[0]["settled_main_same"], main_same.to_string());
             assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+        }
+    }
+}
+
+#[test]
+fn pave_settled_uses_loser_turn_value_threshold_and_collapse_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    for (outcome, own, before, after) in [("white_win", "b", 0, 4), ("black_win", "w", 1, 3)] {
+        let mut ms = scored_moves();
+        for (i, m) in ms.iter_mut().enumerate() {
+            let score = if i < 2 {
+                0
+            } else if m["side_to_move"] == own {
+                -200
+            } else {
+                200
+            };
+            m["eval"] = json!({"score_cp":score,"pv":[MOVES[i]]});
+        }
+        for (index, value, expected) in [
+            (before, -150, "settled"),
+            (before, -149, "open"),
+            (before, 150, "open"),
+            (after, -150, "open"),
+        ] {
+            pave_pair(dir.path(), &[(&ms, outcome), (&ms, outcome)]);
+            let root = parse_root(&format!("sfen {}", ms[index]["sfen_before"].as_str().unwrap()))
+                .unwrap();
+            let rows = [Row::from_fields(&[
+                ("key", root.key.clone()),
+                ("ply", root.ply.to_string()),
+                ("move", MOVES[index].into()),
+                ("role", "main".into()),
+                ("value_kind", "tree:1".into()),
+                ("evals", "200".into()),
+                ("cond", "unknown".into()),
+            ])];
+            std::fs::write(dir.path().join("moves.tsv"), format_master(&rows)).unwrap();
+            std::fs::write(
+                dir.path().join("audit.db"),
+                format!("sfen {} 1\n{} none {value} 3 1\n", root.key, MOVES[index]),
+            )
+            .unwrap();
+            pave::run(pave_args(dir.path())).unwrap();
+            let table = pave_table(dir.path());
+            assert_eq!(table[0]["own"], own);
+            assert_eq!(table[0]["collapse"], "3");
+            assert_eq!(table[0]["state"], expected, "{outcome}, index={index}, value={value}");
+            assert_eq!(
+                table[0]["settled_ply"],
+                if expected == "settled" {
+                    (index + 1).to_string()
+                } else {
+                    String::new()
+                }
+            );
         }
     }
 }
@@ -836,6 +920,7 @@ fn pave_spacing_last_extend_merge_and_repeatability() {
     assert_eq!(q[1].opts.extend, Some(12));
     assert_eq!(q[2].opts.extend, Some(12));
     assert_eq!(q[0].game[0].len(), 8);
+    assert_eq!(q[0].memo.as_deref(), Some("games_0 の崩れまでの舗装の根 1 手目"));
     let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
     let output = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
     let mut a = pave_args(dir.path());
@@ -889,7 +974,9 @@ fn pave_rejects_other_formats_and_preserves_outputs_on_error() {
     std::fs::write(dir.path().join("audit.db"), "").unwrap();
     std::fs::write(dir.path().join("table.tsv"), "keep").unwrap();
     client(&dir.path().join("games.jsonl"), &moves());
-    assert!(pave::run(pave_args(dir.path())).is_err());
+    let error = pave::run(pave_args(dir.path())).unwrap_err().to_string();
+    assert!(error.contains("pair JSON Lines"), "{error}");
+    assert!(error.contains("csa_client"), "{error}");
     std::fs::write(dir.path().join("games.jsonl"), "PI\n+\n%TORYO\n").unwrap();
     assert!(
         pave::run(pave_args(dir.path()))
@@ -926,6 +1013,7 @@ fn pave_sorts_games_by_id_and_caps_root_spacing_at_eight() {
     pave::run(a).unwrap();
     assert_eq!(pave_table(dir.path())[0]["game"], "games_0");
     assert_eq!(pave_table(dir.path())[1]["game"], "games_1");
+    assert_eq!(pave_table(dir.path())[0]["target_end"], ms.len().to_string());
     let q = queue(&dir.path().join("queue.jsonl"));
     assert_eq!(q.iter().map(|q| parse_root(&q.root).unwrap().ply).collect::<Vec<_>>(), [1, 9]);
 }

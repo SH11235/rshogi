@@ -2139,7 +2139,7 @@ TSV は `game ply side move kind covered_by key` の列です。抜けのある�
 
 ## `master game-pave`: 負けた局の崩れまでを定跡につなぐ
 
-tournament の pair JSON Lines から、負けた側の崩れを元データと伝播後の値が把握しているかを局ごとに判定します。知らない局には、崩れの先までの抜けをつなぐ木の受付行を出します。版ごとに繰り返すと、既に元データへ入った区間の先へ対象を延ばせます。csa_client の JSON Lines と CSA は受け付けません。
+tournament の pair JSON Lines から、負けた側の崩れを元データと伝播後の値が把握しているかを局ごとに判定します。知らない局には、崩れの先までの抜けをつなぐ木の受付行を出します。版ごとに繰り返すと、既に元データへ入った区間の先へ対象を延ばせます。csa_client の JSON Lines と CSA は、pair JSON Lines 専用であることを示すエラーで拒否します。
 
 ```sh
 book_mine master game-pave --master moves.tsv --audit-db audited.db \
@@ -2164,13 +2164,13 @@ book_mine master game-pave --master moves.tsv --audit-db audited.db \
 | `--opp-n`・`--stop`・`--rounds` | `3`・`300`・`3` | 受付行の読み条件 |
 | `--draw-black`・`--draw-white` | `-70`・`70` | 受付行の千日手の値 |
 
-`own` は局ごとに負けた側です (`black_win` なら `w`、`white_win` なら `b`)。`--player` は使いません。両側の読みを使い、`eval.last_exact_primary.score` を優先し、無ければ `eval` の score / score_cp / score_mate / score_mate_sign を使います。詰みは seeds と同じく勝ち・負けの向きを保ちます。採用する評価値に読み筋が無い手は使いません。手番側から見た値を先手側から見た値にそろえてから、負けた側の値で崩れを調べます。
+`own` は局ごとに負けた側です (`black_win` なら `w`、`white_win` なら `b`)。`--player` は使いません。両側の読みを使い、`eval.last_exact_primary.score` を優先し、無ければ `eval` の score / score_cp / score_mate / score_mate_sign を使います。ただし代替の評価値に `score_bound` が付いている手は使いません。`last_exact_primary` があれば `eval.score_bound` にかかわらずそちらを使います。詰みは seeds と同じく勝ち・負けの向きを保ちます。採用する評価値に読み筋が無い手は使いません。手番側から見た値を先手側から見た値にそろえてから、負けた側の値で崩れを調べます。
 
 判定には各手の `ply` (1 始まり) を使います。
 
 1. `collapse`: 負けた側の値が `-collapse_cp` 以下になり、その後の評価値つきの手がすべてその閾値以下にとどまる最初の手。評価値の無い手は飛ばします。見つからなければ `no-collapse` です。
 2. `book_reach`: 最初の手から連続して、元データに実戦の局面・手の行がある最後の手数。`role` は問いません。盤・手番・持ち駒の直接キーだけで照合し、反転局面は見ません。
-3. `settled`: 負けた側の手番で `ply ≤ collapse` の実戦手について、元データの `value_kind` が `tree:` で始まり、audit DB のその手の値が `-collapse_cp` 以下なら成立します。局面の最善手の値ではありません。main が別の手でも、実戦手の悪さを既に知っていれば成立します。
+3. `settled`: 負けた側の手番で `ply ≤ collapse` の実戦手について、元データの `value_kind` が `tree:` で始まり、audit DB のその手の値が `-collapse_cp` 以下なら成立します。audit の値は局面の手番側から見た値なので、後手が負けた局でも符号を反転しません。既定の閾値では `-150` は成立し、`-149` は成立しません。`ply > collapse` の手は対象外です。局面の最善手の値ではありません。main が別の手でも、実戦手の悪さを既に知っていれば成立します。
 4. `target_end`: `book_reach < collapse + after_collapse` なら `collapse + after_collapse`、それ以外は局の最後の手。いずれも局の手数が上限です。
 5. 状態は `settled` を優先し、未成立で最後まで元データにあれば `disagree` (人による確認が必要)、対象区間の抜けが全部受付で覆われていれば `queued`、残りがあれば `open` です。受付行を出すのは `open` の局だけです。
 
@@ -2178,7 +2178,7 @@ book_mine master game-pave --master moves.tsv --audit-db audited.db \
 
 受付の被覆は game-gaps と同じく、根から対象の手まで `game` の先頭が実戦と一致し、`depth` の範囲内にある場合だけ認めます。根の手数・`own` は問いません。追加の根だけでは覆いません。これは計画上の照合であり、木が停止したり登録できなかったりしていても `queued` になります。`covered_by` で受付 id を確認できます。
 
-open の局では `book_reach + 1` から `target_end` までの抜けのうち、受付でも先に生成した根でも覆わない最初の手を次の根にします。`game` はその根から実戦の手を最大 8 手入れます。id は game-gaps と同じ `<tag>_<局の短い名前>_<手数>_<key の hash>_<own>` です。同じ根・同じ `own` は局をまたいでまとめ、異なる実戦手順を `game` に集約します。`opts.extend` は大きい方を採用し、他の opts が異なればエラーです。
+open の局では `book_reach + 1` から `target_end` までの抜けのうち、受付でも先に生成した根でも覆わない最初の手を次の根にします。`game` はその根から実戦の手を最大 8 手入れます。id は game-gaps と同じ `<tag>_<局の短い名前>_<手数>_<key の hash>_<own>` です。`memo` は `<局名> の崩れまでの舗装の根 <手数> 手目` です。同じ根・同じ `own` は局をまたいでまとめ、異なる実戦手順を `game` に集約します。`memo` は先頭の局のものを残します。`opts.extend` は大きい方を採用し、他の opts が異なればエラーです。
 
 TSV の列は次のとおりです。値の無い欄は空です。
 
