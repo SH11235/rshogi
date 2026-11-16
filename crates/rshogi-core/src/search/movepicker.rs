@@ -574,6 +574,17 @@ impl MovePicker {
         }
     }
 
+    /// 静止探索の生成済み捕獲手から、条件を満たす手を元の順序で返す。
+    pub(super) fn next_qsearch_capture(&mut self, mut keep: impl FnMut(Move) -> bool) -> Move {
+        debug_assert_eq!(self.stage, Stage::QCapture);
+        while let Some(mv) = self.select_simple() {
+            if keep(mv) {
+                return mv;
+            }
+        }
+        Move::NONE
+    }
+
     // =========================================================================
     // スコアリング
     // =========================================================================
@@ -892,6 +903,34 @@ mod tests {
             mv.is_some().then_some(mv)
         })
         .collect()
+    }
+
+    #[test]
+    fn qsearch_capture_tail_preserves_order_and_skips_tt() {
+        let mut pos = Position::new();
+        pos.set_sfen("k8/9/4p4/9/2p1R1p2/9/4p4/9/K8 b - 1").unwrap();
+        let history = HistoryTables::new_boxed();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        let tt = pos.to_move(Move::from_usi("5e5c+").unwrap()).unwrap();
+        for all in [false, true] {
+            let control =
+                all_moves(MovePicker::new(&pos, tt, DEPTH_QS, 0, keys, all), &pos, &history);
+            assert!(control.len() >= 4);
+            let mut picker = MovePicker::new(&pos, tt, DEPTH_QS, 0, keys, all);
+            assert_eq!(picker.next_move(&pos, &history, shared()), control[0]);
+            assert_eq!(picker.next_move(&pos, &history, shared()), control[1]);
+            let target = control[3].to();
+            let expected: Vec<_> =
+                control[2..].iter().copied().filter(|mv| mv.to() == target).collect();
+            let actual: Vec<_> = std::iter::from_fn(|| {
+                let mv = picker.next_qsearch_capture(|mv| mv.to() == target);
+                mv.is_some().then_some(mv)
+            })
+            .collect();
+            assert_eq!(actual, expected);
+            assert!(!actual.contains(&tt));
+            assert_eq!(picker.next_qsearch_capture(|_| true), Move::NONE);
+        }
     }
 
     #[test]

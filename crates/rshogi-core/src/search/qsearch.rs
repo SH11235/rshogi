@@ -378,9 +378,27 @@ pub(super) fn qsearch<const NT: u8>(
     // beta カット時に残りステージの生成・スコアリング・ソートを丸ごと省ける。
     // qsearch の部分木へ history の更新を足す場合は、手順が変わるのでこの前提を見直すこと。
     loop {
-        // SAFETY: history は worker 単位で、単一スレッドからしか触らない。共有参照 h は
-        // next_move の呼び出しを囲むブロックの終わりで破棄され、下の再帰呼び出しの間は生存しない。
-        let mv = {
+        let mv = if move_count >= 2 && !best_value.is_loss() && futility_base != Value::NONE {
+            // 王手にも取り返しにもならない残りの手は、合法性によらず枝刈りされる。
+            // 開き王手は候補を残し、方向の判定を gives_check に委ねる。
+            mp.next_qsearch_capture(|mv| {
+                if (prev_move.is_normal() && mv.to() == prev_move.to())
+                    || pos.check_squares(mv.moved_piece_after().piece_type()).contains(mv.to())
+                    || (!mv.is_drop()
+                        && pos.blockers_for_king(!pos.side_to_move()).contains(mv.from()))
+                {
+                    return true;
+                }
+                inc_stat!(st, qs_moves_picked);
+                #[cfg(feature = "search-stats")]
+                if pos.is_legal(mv) {
+                    inc_stat!(st, qs_futility_pruned);
+                }
+                false
+            })
+        } else {
+            // SAFETY: history は worker 単位で、単一スレッドからしか触らない。共有参照 h は
+            // next_move の呼び出しを囲むブロックの終わりで破棄され、下の再帰呼び出しの間は生存しない。
             let h = unsafe { ctx.history.as_ref_unchecked() };
             mp.next_move(pos, h, ctx.shared)
         };
