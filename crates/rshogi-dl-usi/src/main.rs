@@ -4,7 +4,7 @@ use rshogi_core::types::{EnteringKingRule, Move};
 use rshogi_dl::features::winrate_to_cp;
 use rshogi_dl::onnx::{OnnxConfig, OnnxEvaluator};
 use rshogi_dl_usi::{Go, parse_position};
-use rshogi_mcts::{Config, History, Outcome, Search, SearchResult};
+use rshogi_mcts::{Config, History, Search, SearchResult};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +19,6 @@ struct Engine {
     config: Config,
     model: PathBuf,
     device: i32,
-    tensorrt: bool,
-    cache: Option<PathBuf>,
     overhead: u64,
     runtime: Option<Runtime>,
     worker: Option<JoinHandle<Runtime>>,
@@ -43,8 +41,6 @@ impl Engine {
             config: Config::default(),
             model: "model.onnx".into(),
             device: 0,
-            tensorrt: false,
-            cache: None,
             overhead: 50,
             runtime: None,
             worker: None,
@@ -67,8 +63,8 @@ impl Engine {
             let mut evaluator = OnnxEvaluator::new(&OnnxConfig {
                 model_path: self.model.clone(),
                 gpu_id: self.device,
-                use_tensorrt: self.tensorrt,
-                tensorrt_cache: self.cache.clone(),
+                use_tensorrt: false,
+                tensorrt_cache: None,
                 batch_size: 1,
             })?;
             let mut logits = vec![0.0; rshogi_dl::features::MAX_MOVE_LABEL_NUM];
@@ -122,14 +118,6 @@ impl Engine {
                 self.config.entering_king_rule = EnteringKingRule::from_usi(value)
                     .ok_or_else(|| anyhow::anyhow!("invalid EnteringKingRule"))?
             }
-            "UseTensorRT" => self.tensorrt = value.parse()?,
-            "TensorRTCacheDir" => {
-                self.cache = if value.is_empty() || value == "<empty>" {
-                    None
-                } else {
-                    Some(value.into())
-                }
-            }
             "Threads" => ensure!(value == "1", "only one search worker is supported"),
             _ => bail!("unknown option {name}"),
         }
@@ -160,7 +148,7 @@ impl Engine {
                     match result {
                         Ok(result) => print_result(&result, start.elapsed()),
                         Err(error) => {
-                            output(&format!("info string search failed: {error}"));
+                            output(&format!("info string Error: search failed: {error}"));
                             output("bestmove resign");
                         }
                     }
@@ -184,8 +172,6 @@ impl Engine {
                     "MaxGamePly type spin default 512 min 1 max 100000",
                     "MoveOverhead type spin default 50 min 0 max 10000",
                     "EnteringKingRule type combo default CSARule27 var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule",
-                    "UseTensorRT type check default false",
-                    "TensorRTCacheDir type string default <empty>",
                     "Threads type spin default 1 min 1 max 1",
                 ] {
                     output(&format!("option name {option}"));
@@ -235,11 +221,7 @@ fn print_result(result: &SearchResult, elapsed: Duration) {
         result.evaluations, result.memory_full, result.outcome
     ));
     let best = if result.best_move == Move::NONE {
-        if result.outcome == Some(Outcome::Draw) {
-            "none".into()
-        } else {
-            "resign".into()
-        }
+        "resign".into()
     } else {
         result.best_move.to_usi()
     };
@@ -254,7 +236,7 @@ fn run() -> Result<()> {
             Ok(false) => return Ok(()),
             Ok(true) => {}
             Err(error) => {
-                output(&format!("info string error: {error}"));
+                output(&format!("info string Error: {error}"));
                 if line.split_whitespace().next() == Some("go") {
                     output("bestmove resign");
                 }

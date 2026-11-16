@@ -74,7 +74,7 @@ pub struct Limits {
 /// 一回の探索の結果。depth は PV 長であり αβ の反復深さではない。
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// 最善手。合法手なし・終局済みでは NONE、入玉宣言では WIN。
+    /// 最善手。合法手なしは NONE、宣言勝ちは WIN。内部の引き分けでは合法な fallback を返す。
     pub best_move: Move,
     /// 根の手番側の平均勝率。
     pub value: f32,
@@ -100,7 +100,7 @@ struct Node {
     value_sum: f64,
     static_value: f32,
     outcome: Option<Outcome>,
-    declaration: bool,
+    declaration_move: Move,
 }
 
 impl Node {
@@ -113,7 +113,7 @@ impl Node {
             value_sum: 0.0,
             static_value: 0.5,
             outcome: None,
-            declaration: false,
+            declaration_move: Move::NONE,
         }
     }
 }
@@ -223,9 +223,9 @@ impl Search {
             };
             index = child;
         }
-        let best_move = if root.declaration {
-            Move::WIN
-        } else if root.outcome.is_some() && root.edge_count == 0 {
+        let best_move = if root.declaration_move != Move::NONE {
+            root.declaration_move
+        } else if root.outcome == Some(Outcome::Loss) && root.edge_count == 0 {
             Move::NONE
         } else {
             pv.first().copied().unwrap_or(fallback)
@@ -250,9 +250,9 @@ impl Search {
     }
 
     fn set_terminal(&mut self, index: usize, pos: &Position, history: &History, no_moves: bool) {
-        let declaration = pos.declaration_win(self.config.entering_king_rule) != Move::NONE;
+        let declaration_move = pos.declaration_win(self.config.entering_king_rule);
         let outcome = history.outcome().or_else(|| {
-            if declaration {
+            if declaration_move != Move::NONE {
                 Some(Outcome::Win)
             } else if no_moves {
                 Some(Outcome::Loss)
@@ -263,7 +263,11 @@ impl Search {
             }
         });
         self.nodes[index].outcome = outcome;
-        self.nodes[index].declaration = declaration && outcome == Some(Outcome::Win);
+        self.nodes[index].declaration_move = if outcome == Some(Outcome::Win) {
+            declaration_move
+        } else {
+            Move::NONE
+        };
     }
 
     fn simulate(

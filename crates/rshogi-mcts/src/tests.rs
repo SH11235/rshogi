@@ -256,3 +256,94 @@ fn full_arena_returns_completed_work_and_restores_root() -> Result<()> {
     assert_eq!(pos.to_sfen(), original);
     Ok(())
 }
+
+#[test]
+fn try_rule_returns_the_winning_king_move_even_without_visits() -> Result<()> {
+    let mut pos = Position::new();
+    pos.set_sfen("3K5/9/9/9/9/9/9/9/4k4 b 2r2b4g4s4n4l18p 1")?;
+    let mut history = History::new(&pos);
+    let config = Config {
+        entering_king_rule: EnteringKingRule::TryRule,
+        ..Config::default()
+    };
+    let mut search = Search::new(config)?;
+    for visits in [0, 16] {
+        let result = search.run(
+            &mut pos,
+            &mut history,
+            &mut Constant {
+                value: 0.5,
+                fail: true,
+            },
+            Limits { visits, time: None },
+            &AtomicBool::new(false),
+        )?;
+        assert_eq!(result.best_move.to_usi(), "6a5a");
+        assert_eq!(result.outcome, Some(Outcome::Win));
+        assert_eq!(result.evaluations, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn try_rule_win_is_also_recognized_inside_the_tree() -> Result<()> {
+    let mut pos = Position::new();
+    pos.set_sfen("9/9/9/9/9/9/9/3k5/K8 b - 1")?;
+    let mut history = History::new(&pos);
+    let config = Config {
+        entering_king_rule: EnteringKingRule::TryRule,
+        ..Config::default()
+    };
+    let mut search = Search::new(config)?;
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut Constant {
+            value: 0.5,
+            fail: false,
+        },
+        Limits {
+            visits: 100,
+            time: None,
+        },
+        &AtomicBool::new(false),
+    )?;
+    assert_eq!(result.outcome, Some(Outcome::Loss));
+    assert_eq!(result.evaluations, 1);
+    for edge in &search.edges {
+        let child = &search.nodes[edge.child.unwrap()];
+        assert_eq!(child.outcome, Some(Outcome::Win));
+        assert_eq!(child.declaration_move.to_usi(), "6h5i");
+    }
+    Ok(())
+}
+
+#[test]
+fn root_draw_keeps_a_legal_response_for_external_runners() -> Result<()> {
+    let (mut pos, mut history) = root();
+    play(&mut pos, &mut history, "7g7f");
+    let config = Config {
+        max_game_ply: 1,
+        ..Config::default()
+    };
+    let mut search = Search::new(config)?;
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut Constant {
+            value: 0.5,
+            fail: true,
+        },
+        Limits {
+            visits: 0,
+            time: None,
+        },
+        &AtomicBool::new(false),
+    )?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&pos, &mut legal);
+    assert_eq!(result.outcome, Some(Outcome::Draw));
+    assert!(legal.contains(result.best_move));
+    assert_eq!(result.evaluations, 0);
+    Ok(())
+}

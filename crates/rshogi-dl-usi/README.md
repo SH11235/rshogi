@@ -33,8 +33,6 @@ go nodes 128
 | MaxGamePly | 512 | 開始局面の手数を含む引き分けの上限 |
 | MoveOverhead | 50 | 時計から差し引く余裕 ms |
 | EnteringKingRule | CSARule27 | 既存 core の入玉宣言ルール |
-| UseTensorRT | false | TensorRT FP16 を明示的に選択 |
-| TensorRTCacheDir | 空 | TensorRT engine cache の保存先 |
 | Threads | 1 | 探索 worker 数。1 のみ |
 
 `go nodes`、`go movetime`、`go btime/wtime` と `binc/winc`、`byoyomi`、`go infinite`、`stop` に対応します。nodes は完了した MCTS simulation の数です。depth は読み筋の長さ、hashfull は arena の使用割合で、NNUE の αβ探索とは意味が異なります。推論回数は `info string evaluations` に出力します。
@@ -42,3 +40,5 @@ go nodes 128
 ponder、MultiPV、定跡、`go depth`、`go mate`、`go searchmoves` には対応しません。対応外の go パラメータを黙って無視せずエラーにします。`go infinite` は木が満杯や終局でも stop まで bestmove を待ちます。通常の go はメモリ上限で早期に終わる場合があります。
 
 GUI、既存の tournament、CSA client からは通常の外部 USI エンジンとして使用します。`ModelFile` 等を個別 USI option として指定してください。NNUE の EvalFile や edition の指定は不要です。局面の手順を保つには `position startpos moves ...` または開始 SFEN と moves を渡してください。
+
+`isready` はモデルの読み込みと一回の warmup を完了してから readyok を返します。内部の引き分け評価を USI の終局通知として送りません。合法手がある root では fallback を返すため、対局の総手数上限や千日手の裁定は runner 側と揃えてください。
