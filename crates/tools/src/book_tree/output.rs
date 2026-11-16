@@ -26,7 +26,9 @@ impl Tree {
         let replace = self.negamax(&all)?;
         let rule = self.negamax(&rule_set)?;
         let pending = self.unresolved(&replace);
-        let mut status = json!({"ready": pending.is_empty(), "unresolved": pending});
+        // 延長は補助的な読みなので、延長区間だけの未解決手では登録を止めない。
+        let ready = pending.keys().all(|key| self.level[key] >= self.def.depth);
+        let mut status = json!({"ready": ready, "unresolved": pending});
         if self.reading_conditions.len() == 1
             && let Some(Some(fingerprint)) = self.reading_conditions.first()
             && super::schema::valid_fingerprint(fingerprint)
@@ -76,7 +78,7 @@ impl Tree {
         for (round, added) in &self.round_reports {
             writeln!(report, "伸ばし直しの局面 {added} ({round} 回目)")?;
         }
-        if !pending.is_empty() {
+        if !ready {
             writeln!(
                 report,
                 "未展開手が上回る局面 {}: 登録禁止。伸ばし直し回数を増やして再開する",

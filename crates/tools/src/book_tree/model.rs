@@ -68,6 +68,10 @@ pub(super) struct Definition {
     pub paths_sha256: Option<String>,
     pub out: PathBuf,
     pub depth: usize,
+    #[serde(default)]
+    pub extend: usize,
+    #[serde(default = "super::targets::default_extend_rounds")]
+    pub extend_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -94,6 +98,8 @@ impl Definition {
             require_condition: false,
             preferred_fingerprint: self.fingerprint.clone(),
             depth: self.depth,
+            extend: self.extend,
+            extend_rounds: self.extend_rounds,
             opp_n: self.opp_n,
             stop: self.stop,
             own: self.own.clone(),
@@ -129,6 +135,8 @@ pub(super) struct TreeParams {
     pub preferred_fingerprint: Option<String>,
     pub out: PathBuf,
     pub depth: usize,
+    pub extend: usize,
+    pub extend_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -140,6 +148,11 @@ pub(super) struct TreeParams {
 }
 
 impl TreeParams {
+    /// 延長を含む根からの段数の上限。
+    pub fn max_depth(&self) -> usize {
+        self.depth.saturating_add(self.extend)
+    }
+
     /// `key` の手番の側が循環に入る手に付ける値 (手番の側から見た値)。
     fn draw_for(&self, key: &str) -> i32 {
         let own = if side(key) == "b" {
@@ -250,6 +263,9 @@ impl Tree {
         if !matches!(def.own.as_str(), "b" | "w") || def.opp_n == 0 || def.stop < 0 {
             bail!("own / opp_n / stop の指定が不正です");
         }
+        if def.extend_rounds > 10 {
+            bail!("extend_rounds は 0〜10 が必要です");
+        }
         let mut roots = BTreeMap::new();
         let mut root_order = Vec::new();
         let mut game: Edges = BTreeMap::new();
@@ -350,6 +366,19 @@ impl Tree {
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         let mp = self.nodes[key].lines();
+        let level = self.level[key];
+        if level >= self.def.depth {
+            let pick = mp
+                .first()
+                .filter(|pv| {
+                    level < self.def.max_depth()
+                        && (self.roots.contains_key(key) || pv.cp.abs() < self.def.stop)
+                })
+                .map(|pv| pv.mv.clone())
+                .into_iter()
+                .collect();
+            return (pick, self.force.get(key).cloned().unwrap_or_default());
+        }
         let mut pick = BTreeSet::new();
         let mut extra = BTreeSet::new();
         if !mp.is_empty() {
@@ -418,7 +447,7 @@ impl Tree {
                     continue;
                 }
                 self.expanded.insert(key.clone(), (level, ply));
-                if level >= self.def.depth {
+                if level >= self.def.max_depth() {
                     continue;
                 }
                 let (pick, extra) = self.picks(&key);
@@ -454,12 +483,19 @@ impl Tree {
                 self.waiting.clone_from(&missing);
                 return Ok(missing);
             }
-            if self.round < self.def.rounds {
+            if self.round < self.def.rounds
+                || (self.def.extend > 0 && self.round < self.def.extend_rounds)
+            {
                 let values = self.negamax(&self.reach(&self.edge))?;
                 let pending = self.unresolved(&values);
                 let mut added = 0;
                 for (key, rows) in pending {
-                    if self.level[&key] >= self.def.depth {
+                    let rounds = if self.level[&key] < self.def.depth {
+                        self.def.rounds
+                    } else {
+                        self.def.extend_rounds
+                    };
+                    if self.round >= rounds {
                         continue;
                     }
                     self.force
@@ -610,7 +646,9 @@ impl Tree {
             let Some(edges) = self.edge.get(key).filter(|e| !e.is_empty()) else {
                 continue;
             };
-            if side(key) != self.def.own {
+            if self.level[key] >= self.def.max_depth()
+                || (self.level[key] < self.def.depth && side(key) != self.def.own)
+            {
                 continue;
             }
             let best = edges
@@ -874,6 +912,7 @@ impl Tree {
     ) -> Result<Self> {
         let mut def = self.def.clone();
         def.rounds = 0;
+        def.extend_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
@@ -918,7 +957,7 @@ impl Tree {
 
     /// 読み終えていない局面の途中の上位の手 (`tops`: 手と 1 位の値) から、親の読みを待たずに
     /// 読み始める子を挙げる。挙げた子も、途中の上位の手があればその全部の手で、台帳の読みが
-    /// あれば木と同じ規則 (自分の手番 1 手・相手の手番 opp_n 手と実戦の手) で辿る。木にある局面と
+    /// あれば木と同じ規則で辿る。延長区間ではどちらも 1 位だけを使う。木にある局面と
     /// 読み済みの局面は挙げない。辿る局面が `limit` に達したら浅い段から打ち切る。
     pub fn speculate(
         &self,
@@ -934,7 +973,7 @@ impl Tree {
         for (key, (_, _, multipv)) in tops {
             if self.def.multipv.is_none_or(|own| own == *multipv)
                 && let Some(&level) = self.level.get(key)
-                && level < self.def.depth
+                && level < self.def.max_depth()
                 && !self.nodes.contains_key(key)
                 && self.reading(cache, key).is_none()
             {
@@ -944,7 +983,7 @@ impl Tree {
         let mut found: BTreeMap<String, (usize, u32)> = BTreeMap::new();
         let mut visited = 0;
         while let Some((level, key, ply)) = pending.pop_first() {
-            if level >= self.def.depth || visited >= limit {
+            if level >= self.def.max_depth() || visited >= limit {
                 break;
             }
             visited += 1;
@@ -953,20 +992,29 @@ impl Tree {
             if !in_tree && let Some(reading) = self.reading(cache, &key) {
                 let lines = reading.lines();
                 if lines.first().is_some_and(|pv| pv.cp.abs() < self.def.stop) {
-                    let n = if side(&key) == self.def.own {
+                    let n = if level >= self.def.depth || side(&key) == self.def.own {
                         1
                     } else {
                         self.def.opp_n
                     };
                     moves.extend(lines.iter().take(n).map(|pv| pv.mv.as_str()));
-                    moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
+                    if level < self.def.depth {
+                        moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
+                    }
                 }
             } else if let Some((top, best, multipv)) = tops.get(&key)
                 && self.def.multipv.is_none_or(|own| own == *multipv)
                 && (self.roots.contains_key(&key) || best.abs() < self.def.stop)
             {
-                moves.extend(top.iter().map(String::as_str));
-                moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
+                let n = if level >= self.def.depth {
+                    1
+                } else {
+                    top.len()
+                };
+                moves.extend(top.iter().take(n).map(String::as_str));
+                if level < self.def.depth {
+                    moves.extend(self.game.get(&key).into_iter().flatten().map(String::as_str));
+                }
             }
             for mv in moves {
                 let Ok(next) = child(&key, mv) else {
@@ -1166,12 +1214,189 @@ mod prefetch_tests {
             stop: 300,
             own: "b".into(),
             rounds: 1,
+            extend: 0,
+            extend_rounds: 1,
             extra: vec![],
             draw: 17,
             draw_black: None,
             draw_white: None,
         }
     }
+    fn extended_fixture(stop_value: i32) -> (Tree, BTreeMap<String, Reading>, Vec<String>) {
+        let mut def = params();
+        def.depth = 1;
+        def.extend = 3;
+        def.opp_n = 3;
+        def.extra = vec!["5i6i".into()];
+        let moves = ["5i4i", "5a4a", "4i3i", "4a3a"];
+        let mut keys = vec![ROOT.to_owned()];
+        for mv in moves {
+            keys.push(child(keys.last().unwrap(), mv).unwrap());
+        }
+        let cache = BTreeMap::from([
+            (keys[0].clone(), reading(&keys[0], &[("5i4i", 10)])),
+            (keys[1].clone(), reading(&keys[1], &[("5a4a", 10), ("5a6a", 0), ("5a5b", -10)])),
+            (keys[2].clone(), reading(&keys[2], &[("4i3i", stop_value), ("4i4h", 0)])),
+            (keys[3].clone(), reading(&keys[3], &[("4a3a", 10), ("4a4b", 0)])),
+            (keys[4].clone(), reading(&keys[4], &[("3i2i", 10)])),
+        ]);
+        let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])];
+        (Tree::build(def, &lines).unwrap(), cache, keys)
+    }
+
+    #[test]
+    fn extension_follows_only_first_move_without_rounds() {
+        let (mut tree, cache, keys) = extended_fixture(10);
+        tree.def.rounds = 0;
+        tree.def.extend_rounds = 0;
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.finished);
+        assert_eq!(tree.level.len(), 5);
+        assert_eq!(tree.level[&keys[4]], 4);
+        for key in &keys[..4] {
+            assert_eq!(tree.edge[key].len(), 1);
+        }
+        assert!(!tree.edge.contains_key(&keys[4]));
+        let values = BTreeMap::from([(
+            keys[2].clone(),
+            BTreeMap::from([("4i3i".into(), -500), ("4i4h".into(), 0)]),
+        )]);
+        assert_eq!(tree.unresolved(&values)[&keys[2]], vec![(0, "4i4h".into())]);
+        assert!(tree.force.is_empty());
+        assert_eq!(tree.round, 0);
+    }
+
+    #[test]
+    fn normal_and_extension_force_use_separate_limits_in_the_same_round() {
+        for rounds in [0, 1, 3] {
+            for extend_rounds in [0, 1, 3] {
+                for round in 0..=3 {
+                    let (mut tree, mut cache, keys) = extended_fixture(10);
+                    tree.def.depth = 3;
+                    tree.def.extend = 1;
+                    tree.def.rounds = rounds;
+                    tree.def.extend_rounds = extend_rounds;
+                    tree.round = round;
+                    tree.def.extra.clear();
+                    tree.game.clear();
+                    cache.get_mut(&keys[1]).unwrap().multipv.truncate(1);
+                    cache.get_mut(&keys[2]).unwrap().multipv[1].cp = 5;
+                    tree.advance(&cache).unwrap();
+                    assert_eq!(
+                        tree.force.get(&keys[2]).is_some_and(|m| m.contains("4i4h")),
+                        round < rounds,
+                        "normal: rounds={rounds}, extend_rounds={extend_rounds}, round={round}"
+                    );
+                    assert_eq!(
+                        tree.force.get(&keys[3]).is_some_and(|m| m.contains("4a4b")),
+                        round < extend_rounds,
+                        "extension: rounds={rounds}, extend_rounds={extend_rounds}, round={round}"
+                    );
+                    assert_eq!(tree.round, round + usize::from(round < rounds.max(extend_rounds)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extension_force_propagates_deep_values_for_both_sides() {
+        for own in ["b", "w"] {
+            let (mut tree, mut cache, keys) = extended_fixture(10);
+            tree.def.own = own.into();
+            tree.def.rounds = 0;
+            tree.def.extra.clear();
+            for key in &keys {
+                cache.get_mut(key).unwrap().multipv.truncate(1);
+            }
+            cache.get_mut(&keys[1]).unwrap().multipv =
+                reading(&keys[1], &[("5a4a", 10), ("5a6a", 0)]).multipv;
+            cache.get_mut(&keys[4]).unwrap().multipv[0].cp = 290;
+            let alternative = child(&keys[1], "5a6a").unwrap();
+            cache.insert(alternative.clone(), reading(&alternative, &[("4i3i", 350)]));
+            assert!(tree.advance(&cache).unwrap().is_empty());
+            assert_eq!(tree.force[&keys[1]], BTreeSet::from(["5a6a".into()]));
+            assert_eq!(tree.level[&alternative], 2);
+            assert!(tree.edge[&alternative].is_empty());
+            let values = tree.negamax(&tree.reach(&tree.edge)).unwrap();
+            assert_eq!(values[ROOT]["5i4i"], 290);
+            assert!(tree.unresolved(&values).is_empty());
+        }
+    }
+
+    #[test]
+    fn extension_unresolved_does_not_block_registration() {
+        let (mut tree, cache, keys) = extended_fixture(10);
+        let out = tempfile::tempdir().unwrap();
+        tree.def.out = out.path().into();
+        tree.def.rounds = 0;
+        tree.def.extend_rounds = 0;
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.write_outputs().unwrap());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(out.path().join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["ready"], true);
+        assert!(status["unresolved"].get(&keys[3]).is_some());
+        let text = std::fs::read_to_string(out.path().join("node_moves.tsv")).unwrap();
+        let extended = super::super::register::parse_node_moves(&text, 0, None).unwrap();
+        assert_eq!(extended[ROOT].remaining, 1);
+        assert_eq!(extended[&keys[1]].remaining, 0);
+        assert_eq!(extended[&keys[1]].moves[0].value_kind, "tree:1");
+        let mut broad = extended.clone();
+        broad.get_mut(ROOT).unwrap().remaining = 8;
+        broad.get_mut(ROOT).unwrap().tree = 1;
+        super::super::register::merge(&mut broad, extended);
+        assert_eq!(broad[ROOT].tree, 1);
+    }
+
+    #[test]
+    fn extension_at_depth_zero_ignores_root_extra_game_and_stop() {
+        let (mut tree, cache, keys) = extended_fixture(10);
+        tree.def.depth = 0;
+        tree.def.extend = 1;
+        tree.def.stop = 1;
+        tree.def.extra = vec!["5i6i".into()];
+        tree.game.entry(ROOT.into()).or_default().insert("5i5h".into());
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.level.len(), 2);
+        assert_eq!(tree.edge[ROOT], BTreeSet::from(["5i4i".into()]));
+        assert!(!tree.edge.contains_key(&keys[1]));
+    }
+
+    #[test]
+    fn extension_stops_at_either_sign_of_threshold() {
+        for value in [300, -300] {
+            let (mut tree, cache, keys) = extended_fixture(value);
+            tree.def.rounds = 0;
+            tree.def.extend_rounds = 0;
+            assert!(tree.advance(&cache).unwrap().is_empty());
+            assert_eq!(tree.level.len(), 3);
+            assert!(tree.edge[&keys[2]].is_empty());
+        }
+    }
+
+    #[test]
+    fn extension_speculation_obeys_width_stop_and_depth() {
+        let (mut tree, cache, keys) = extended_fixture(10);
+        let root_cache = BTreeMap::from([(keys[0].clone(), cache[&keys[0]].clone())]);
+        assert_eq!(tree.advance(&root_cache).unwrap(), vec![(keys[1].clone(), 1)]);
+        let tops = keys[1..]
+            .iter()
+            .map(|key| {
+                let rows = cache[key].lines();
+                (key.clone(), (rows.iter().map(|p| p.mv.clone()).collect(), rows[0].cp, 3))
+            })
+            .collect();
+        let speculative = tree.speculate(&tops, &root_cache, SPECULATE_WORK);
+        assert_eq!(
+            speculative.iter().map(|p| p.key.clone()).collect::<BTreeSet<_>>(),
+            keys[2..].iter().cloned().collect()
+        );
+        let stopped = BTreeMap::from([(keys[1].clone(), (vec!["5a4a".into()], 300, 3))]);
+        assert!(tree.speculate(&stopped, &root_cache, SPECULATE_WORK).is_empty());
+    }
+
     fn fixture() -> (Tree, Vec<GameLine>, BTreeMap<String, Reading>) {
         let a = child(ROOT, "5i4i").unwrap();
         let c = child(ROOT, "5i5h").unwrap();
@@ -1350,6 +1575,7 @@ mod prefetch_tests {
         full.insert(second.clone(), reading(&second, &[("4i5i", 500)]));
         let mut tree = Tree::build(original.def, &lines).unwrap();
         tree.def.rounds = 0;
+        tree.def.extend_rounds = 0;
         tree.force.insert(second, BTreeSet::from(["4i5i".into()]));
         let mut cache = BTreeMap::new();
         for _ in 0..5 {

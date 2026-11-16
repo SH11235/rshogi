@@ -77,6 +77,8 @@ fn definition(dir: &Path, rounds: usize) -> Definition {
         stop: 300,
         own: "b".into(),
         rounds,
+        extend: 0,
+        extend_rounds: 1,
         extra: vec!["5i6i".into()],
         fingerprint: None,
         draw: 17,
@@ -217,6 +219,33 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
         }
         tree.round += 1;
     }
+}
+
+#[test]
+fn extension_transposition_rediscovered_in_normal_interval_widens_and_relaxes_children() {
+    let settings = settings();
+    let mut cache = corpus(&settings);
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 3;
+    def.extend = 3;
+    def.own = "w".into();
+    def.opp_n = 3;
+    let mut tree = Tree::load(def, Some(&settings)).unwrap();
+    let short = child(ROOT, "5i4i").unwrap();
+    let merged = child(&short, "5a4a").unwrap();
+    let delayed = cache.remove(&short).unwrap();
+    assert!(!tree.advance(&cache).unwrap().is_empty());
+    assert_eq!(tree.level[&merged], 4);
+    assert_eq!(tree.edge[&merged], BTreeSet::from(["4i5i".into()]));
+    let descendant = child(&merged, "4i5i").unwrap();
+    assert_eq!(tree.level[&descendant], 5);
+    cache.insert(short, delayed);
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert_eq!(tree.level[&merged], 2);
+    assert!(tree.edge[&merged].contains("4i3i"));
+    assert!(tree.edge[&merged].contains("4i4h"));
+    assert_eq!(tree.level[&descendant], 3);
 }
 
 #[test]
@@ -939,6 +968,8 @@ pub(super) fn serve_args(
         opp_n: 2,
         stop: 300,
         rounds: 3,
+        extend: 0,
+        extend_rounds: 1,
         draw: 0,
         trace_dir: None,
         pending_secs: None,
@@ -1130,6 +1161,8 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
         opp_n: 2,
         stop: 300,
         rounds: 3,
+        extend: 0,
+        extend_rounds: 1,
         draw: 0,
         multipv: 3,
         nodes: 100,
@@ -2357,4 +2390,18 @@ fn live_import_preserves_versions_and_adds_missing_prefetch_on_existing_row() {
     assert_eq!(journal.get_exact(&added.key, &src.fingerprint), Some(&added));
     assert!(journal.prefetched.contains(ROOT));
     assert!(journal.skipped_rows.is_empty());
+}
+
+#[test]
+fn toml_extend_rounds_defaults_and_range() {
+    let text =
+        "paths='paths.tsv'\nout='out'\ndepth=1\nextend=20\nopp_n=1\nstop=300\nown='b'\nrounds=3\n";
+    let def: Definition = toml::from_str(text).unwrap();
+    assert_eq!(def.params().extend_rounds, 1);
+    for rounds in [0, 1, 10, 11] {
+        let def: Definition = toml::from_str(&format!("{text}extend_rounds={rounds}\n")).unwrap();
+        assert_eq!(def.params().extend_rounds, rounds);
+        assert_eq!(Tree::build(def.params(), &[(ROOT.into(), 1, vec![])]).is_ok(), rounds <= 10);
+    }
+    assert!(toml::from_str::<Definition>(&format!("{text}extend_rounds=-1\n")).is_err());
 }
