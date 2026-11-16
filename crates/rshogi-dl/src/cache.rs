@@ -8,7 +8,8 @@ use anyhow::{Result, ensure};
 use rshogi_core::position::Position;
 
 use crate::features::{FEATURES1_SIZE, FEATURES2_SIZE, MAX_MOVE_LABEL_NUM, make_input_features};
-use crate::{EncodedInput, Evaluator, InputFormat, tokens};
+use crate::input::zeroed;
+use crate::{EncodedBatch, EncodedInput, Evaluator, InputBatchBuffer, InputFormat, tokens};
 
 const KEY_WORDS: usize = (FEATURES1_SIZE + FEATURES2_SIZE).div_ceil(64);
 type BasicKey = [u64; KEY_WORDS];
@@ -112,16 +113,7 @@ impl Table<BasicKey> {
         self.first.fill(0.0);
         self.second.fill(0.0);
         make_input_features(pos, &mut self.first, &mut self.second);
-        let mut key = [0; KEY_WORDS];
-        for (index, &value) in self.first.iter().chain(&self.second).enumerate() {
-            // 基本形式の全 plane は 0/1。全要素を保持し、手数や履歴を key に混ぜない。
-            match value.to_bits() {
-                0 => {}
-                0x3f800000 => key[index / 64] |= 1 << (index % 64),
-                _ => anyhow::bail!("cache requires binary basic inputs"),
-            }
-        }
-        Ok(key)
+        BasicKey::from_input(EncodedInput::basic_encoded(&self.first, &self.second))
     }
 }
 
@@ -175,12 +167,241 @@ impl Cache {
     }
 }
 
+trait BatchKey: Copy + Eq + Hash {
+    fn empty() -> Self;
+    fn from_input(input: EncodedInput<'_>) -> Result<Self>;
+}
+
+impl BatchKey for BasicKey {
+    fn empty() -> Self {
+        [0; KEY_WORDS]
+    }
+    fn from_input(input: EncodedInput<'_>) -> Result<Self> {
+        let (first, second) =
+            input.basic().ok_or_else(|| anyhow::anyhow!("basic input required"))?;
+        let mut key = [0; KEY_WORDS];
+        for (index, value) in first.iter().chain(second).enumerate() {
+            match value.to_bits() {
+                0 => {}
+                0x3f800000 => key[index / 64] |= 1 << (index % 64),
+                _ => anyhow::bail!("cache requires binary basic inputs"),
+            }
+        }
+        Ok(key)
+    }
+}
+impl BatchKey for TokenKey {
+    fn empty() -> Self {
+        [0; tokens::TOKEN_COUNT]
+    }
+    fn from_input(input: EncodedInput<'_>) -> Result<Self> {
+        input.tokens().copied().ok_or_else(|| anyhow::anyhow!("token input required"))
+    }
+}
+
+struct BatchOutput {
+    format: InputFormat,
+    capacity: usize,
+    values: Vec<f32>,
+    policies: Vec<f32>,
+}
+impl BatchOutput {
+    fn new(format: InputFormat, capacity: usize) -> Result<Self> {
+        Ok(Self {
+            format,
+            capacity,
+            values: zeroed(capacity)?,
+            policies: zeroed(capacity * MAX_MOVE_LABEL_NUM)?,
+        })
+    }
+    fn validate(&self, input: EncodedBatch<'_>, values: &[f32], policies: &[f32]) -> Result<()> {
+        ensure!(input.format() == self.format, "encoded batch format mismatch");
+        ensure!(input.len() <= self.capacity, "batch capacity exceeded");
+        ensure!(
+            values.len() == input.len() && policies.len() == input.len() * MAX_MOVE_LABEL_NUM,
+            "incorrect output buffers"
+        );
+        Ok(())
+    }
+    fn validate_outputs(&self, n: usize) -> Result<()> {
+        ensure!(
+            self.values[..n].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invalid value probability"
+        );
+        ensure!(
+            self.policies[..n * MAX_MOVE_LABEL_NUM].iter().all(|v| v.is_finite()),
+            "non-finite policy logit"
+        );
+        Ok(())
+    }
+    fn heap_bytes(&self) -> usize {
+        (self.values.capacity() + self.policies.capacity()) * size_of::<f32>()
+    }
+}
+struct BatchState<K> {
+    output: BatchOutput,
+    misses: InputBatchBuffer,
+    keys: Vec<K>,
+    slots: Vec<usize>,
+    miss_rows: Vec<usize>,
+}
+impl<K: BatchKey> BatchState<K> {
+    fn new(format: InputFormat, capacity: usize) -> Result<Self> {
+        Ok(Self {
+            output: BatchOutput::new(format, capacity)?,
+            misses: InputBatchBuffer::new(format, capacity)?,
+            keys: {
+                let mut keys = Vec::new();
+                keys.try_reserve_exact(capacity)?;
+                keys.resize(capacity, K::empty());
+                keys
+            },
+            slots: zeroed(capacity)?,
+            miss_rows: zeroed(capacity)?,
+        })
+    }
+    fn heap_bytes(&self) -> usize {
+        self.output.heap_bytes() + self.misses.allocated_bytes() - size_of::<InputBatchBuffer>()
+            + self.keys.capacity() * size_of::<K>()
+            + (self.slots.capacity() + self.miss_rows.capacity()) * size_of::<usize>()
+    }
+    fn evaluate<E: Evaluator>(
+        &mut self,
+        table: &mut Table<K>,
+        inner: &mut E,
+        input: EncodedBatch<'_>,
+        outputs: (&mut [f32], &mut [f32]),
+        counters: (&mut CacheStats, &mut u64),
+    ) -> Result<()> {
+        let (values, policies) = outputs;
+        let (stats, nn_positions) = counters;
+        let n = input.len();
+        let mut count = 0;
+        for row in 0..n {
+            let key = K::from_input(input.row(row).expect("validated batch row"))?;
+            let slot = table.index(&key);
+            self.keys[row] = key;
+            self.slots[row] = slot;
+            let entry = &table.entries[slot];
+            if !entry.occupied || entry.key != key {
+                self.miss_rows[count] = row;
+                count += 1;
+            }
+        }
+        if count != 0 {
+            self.misses.clear();
+            let backend_input = if count == n {
+                input
+            } else {
+                for &row in &self.miss_rows[..count] {
+                    self.misses.push_encoded(input.row(row).expect("validated miss row"))?;
+                }
+                self.misses.view()
+            };
+            stats.nn_calls += 1;
+            *nn_positions += count as u64;
+            inner.evaluate_encoded_batch(
+                backend_input,
+                &mut self.output.values[..count],
+                &mut self.output.policies[..count * MAX_MOVE_LABEL_NUM],
+            )?;
+            self.output.validate_outputs(count)?;
+            // miss 行は昇順かつ row >= compact index。逆順コピーなら未読の結果を壊さない。
+            for compact in (0..count).rev() {
+                let row = self.miss_rows[compact];
+                self.output.values[row] = self.output.values[compact];
+                self.output.policies.copy_within(
+                    compact * MAX_MOVE_LABEL_NUM..(compact + 1) * MAX_MOVE_LABEL_NUM,
+                    row * MAX_MOVE_LABEL_NUM,
+                );
+            }
+        }
+        let mut miss = 0;
+        for row in 0..n {
+            if miss < count && self.miss_rows[miss] == row {
+                miss += 1;
+                continue;
+            }
+            let entry = &table.entries[self.slots[row]];
+            self.output.values[row] = entry.value;
+            self.output.policies[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM]
+                .copy_from_slice(&entry.logits);
+        }
+        // 全 hit を読み終えてから登録する。同一 batch 内の衝突で hit が失われるのを防ぐ。
+        for &row in &self.miss_rows[..count] {
+            let entry = &mut table.entries[self.slots[row]];
+            entry.key = self.keys[row];
+            entry.value = self.output.values[row];
+            entry.logits.copy_from_slice(
+                &self.output.policies[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM],
+            );
+            entry.occupied = true;
+        }
+        stats.hits += (n - count) as u64;
+        values.copy_from_slice(&self.output.values[..n]);
+        policies.copy_from_slice(&self.output.policies[..n * MAX_MOVE_LABEL_NUM]);
+        Ok(())
+    }
+}
+enum BatchWorkspace {
+    Direct(BatchOutput),
+    Basic(BatchState<BasicKey>),
+    Tokens(BatchState<TokenKey>),
+}
+impl BatchWorkspace {
+    fn new(format: InputFormat, capacity: usize, cached: bool) -> Result<Self> {
+        let input_bytes = InputBatchBuffer::required_heap_bytes(format, capacity)?;
+        let key_bytes = match format {
+            InputFormat::Basic => size_of::<BasicKey>(),
+            InputFormat::StmTokensV1 => size_of::<TokenKey>(),
+        };
+        let row_bytes = (MAX_MOVE_LABEL_NUM + 1) * size_of::<f32>()
+            + if cached {
+                key_bytes + 2 * size_of::<usize>()
+            } else {
+                0
+            };
+        let heap = capacity
+            .checked_mul(row_bytes)
+            .and_then(|bytes| bytes.checked_add(if cached { input_bytes } else { 0 }))
+            .ok_or_else(|| anyhow::anyhow!("batch workspace size overflow"))?;
+        ensure!(
+            heap.checked_add(size_of::<Self>())
+                .is_some_and(|bytes| bytes <= isize::MAX as usize),
+            "batch workspace size overflow"
+        );
+        if !cached {
+            return Ok(Self::Direct(BatchOutput::new(format, capacity)?));
+        }
+        match format {
+            InputFormat::Basic => Ok(Self::Basic(BatchState::new(format, capacity)?)),
+            InputFormat::StmTokensV1 => Ok(Self::Tokens(BatchState::new(format, capacity)?)),
+        }
+    }
+    fn output(&self) -> &BatchOutput {
+        match self {
+            Self::Direct(out) => out,
+            Self::Basic(state) => &state.output,
+            Self::Tokens(state) => &state.output,
+        }
+    }
+    fn bytes(&self) -> usize {
+        size_of::<Self>()
+            + match self {
+                Self::Direct(out) => out.heap_bytes(),
+                Self::Basic(state) => state.heap_bytes(),
+                Self::Tokens(state) => state.heap_bytes(),
+            }
+    }
+}
+
 /// 最後の reset 以降の評価要求と、実際の backend 呼び出し。
+/// batch は複数局面を一度に推論するため、requests は hits + nn_calls と一致しない。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
     /// キャッシュを含む評価要求数。
     pub requests: u64,
-    /// backend を呼んだ数。失敗した呼び出しも含む。
+    /// backend を呼んだ数。batch は局面数にかかわらず 1。失敗した呼び出しも含む。
     pub nn_calls: u64,
     /// キャッシュから返した数。
     pub hits: u64,
@@ -192,6 +413,8 @@ pub struct CachedEvaluator<E> {
     inner: E,
     cache: Option<Box<Cache>>,
     stats: CacheStats,
+    nn_positions: u64,
+    batch: Option<Box<BatchWorkspace>>,
 }
 
 impl<E: Evaluator> CachedEvaluator<E> {
@@ -211,7 +434,34 @@ impl<E: Evaluator> CachedEvaluator<E> {
             inner,
             cache,
             stats: CacheStats::default(),
+            nn_positions: 0,
+            batch: None,
         })
+    }
+
+    /// 明示的 batch 用 workspace を追加確保する。cache の MiB 上限とは別に管理する。
+    pub fn with_batch_capacity(inner: E, mib: usize, capacity: usize) -> Result<Self> {
+        ensure!(
+            capacity > 0 && inner.encoded_batch_capacity().is_some_and(|max| capacity <= max),
+            "unsupported batch capacity"
+        );
+        let format = inner
+            .input_format()
+            .ok_or_else(|| anyhow::anyhow!("batch requires an input format"))?;
+        let batch = BatchWorkspace::new(format, capacity, mib != 0)?;
+        let mut evaluator = Self::new(inner, mib)?;
+        evaluator.batch = Some(Box::new(batch));
+        Ok(evaluator)
+    }
+
+    /// backend に渡した局面数。失敗した試行も含み、reset_stats と clear でゼロになる。
+    pub fn nn_positions(&self) -> u64 {
+        self.nn_positions
+    }
+
+    /// 明示的 batch の出力 staging・miss 入力・key・索引を含む別枠の bytes。
+    pub fn batch_allocated_bytes(&self) -> usize {
+        self.batch.as_ref().map_or(0, |batch| batch.bytes())
     }
 
     /// 保存済みの出力と統計を破棄する。モデル自体は保持する。
@@ -225,6 +475,7 @@ impl<E: Evaluator> CachedEvaluator<E> {
     /// 保存済みの出力を保ち、計数だけをリセットする。
     pub fn reset_stats(&mut self) {
         self.stats = CacheStats::default();
+        self.nn_positions = 0;
     }
 
     /// 最後の reset 以降の統計。
@@ -232,7 +483,7 @@ impl<E: Evaluator> CachedEvaluator<E> {
         self.stats
     }
 
-    /// key・出力・metadata・特徴量 buffer の合計 bytes。allocator の管理領域は含まない。
+    /// scalar cache の key・出力・metadata・特徴量 buffer の bytes。batch workspace は含まない。
     pub fn allocated_bytes(&self) -> usize {
         self.cache.as_ref().map_or(0, |cache| cache.bytes())
     }
@@ -243,14 +494,69 @@ impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
         self.inner.input_format()
     }
 
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        self.batch.as_ref().map(|batch| batch.output().capacity)
+    }
+
+    fn evaluate_encoded_batch(
+        &mut self,
+        input: EncodedBatch<'_>,
+        values: &mut [f32],
+        policies: &mut [f32],
+    ) -> Result<()> {
+        let batch = self
+            .batch
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("batch workspace is not prepared"))?;
+        batch.output().validate(input, values, policies)?;
+        self.stats.requests += input.len() as u64;
+        if input.is_empty() {
+            return Ok(());
+        }
+        match (self.cache.as_deref_mut(), batch.as_mut()) {
+            (None, BatchWorkspace::Direct(out)) => {
+                self.stats.nn_calls += 1;
+                self.nn_positions += input.len() as u64;
+                self.inner.evaluate_encoded_batch(
+                    input,
+                    &mut out.values[..input.len()],
+                    &mut out.policies[..policies.len()],
+                )?;
+                out.validate_outputs(input.len())?;
+                values.copy_from_slice(&out.values[..values.len()]);
+                policies.copy_from_slice(&out.policies[..policies.len()]);
+            }
+            (Some(Cache::Basic(table)), BatchWorkspace::Basic(state)) => state.evaluate(
+                table,
+                &mut self.inner,
+                input,
+                (values, policies),
+                (&mut self.stats, &mut self.nn_positions),
+            )?,
+            (Some(Cache::Tokens(table)), BatchWorkspace::Tokens(state)) => state.evaluate(
+                table,
+                &mut self.inner,
+                input,
+                (values, policies),
+                (&mut self.stats, &mut self.nn_positions),
+            )?,
+            _ => anyhow::bail!("batch workspace format mismatch"),
+        }
+        Ok(())
+    }
+
     fn evaluate(&mut self, pos: &Position, logits: &mut [f32]) -> Result<f32> {
         self.stats.requests += 1;
         let Some(cache) = &mut self.cache else {
             self.stats.nn_calls += 1;
+            self.nn_positions += 1;
             return self.inner.evaluate(pos, logits);
         };
         ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
-        cache.evaluate(&mut self.inner, pos, logits, &mut self.stats)
+        let previous = self.stats.nn_calls;
+        let result = cache.evaluate(&mut self.inner, pos, logits, &mut self.stats);
+        self.nn_positions += self.stats.nn_calls - previous;
+        result
     }
 }
 
@@ -272,6 +578,319 @@ mod tests {
             let input = buffer.encode(pos)?;
             let index = self.index(&key);
             evaluate_entry(&mut self.entries[index], key, inner, pos, input, logits, stats)
+        }
+    }
+
+    struct BatchFake {
+        format: InputFormat,
+        calls: usize,
+        rows: Vec<usize>,
+        fail: bool,
+        invalid: bool,
+        invalid_policy: bool,
+    }
+    impl Evaluator for BatchFake {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(self.format)
+        }
+        fn encoded_batch_capacity(&self) -> Option<usize> {
+            Some(8)
+        }
+        fn evaluate(&mut self, _: &Position, _: &mut [f32]) -> Result<f32> {
+            anyhow::bail!("unexpected scalar fallback")
+        }
+        fn evaluate_encoded_batch(
+            &mut self,
+            input: EncodedBatch<'_>,
+            values: &mut [f32],
+            policies: &mut [f32],
+        ) -> Result<()> {
+            self.calls += 1;
+            self.rows.push(input.len());
+            for (row, value) in values.iter_mut().enumerate() {
+                *value = 0.25;
+                policies[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM]
+                    .fill(input_marker(input.row(row).unwrap()));
+            }
+            ensure!(!self.fail, "backend failed");
+            if self.invalid {
+                values[0] = f32::NAN;
+            }
+            if self.invalid_policy {
+                policies[0] = f32::NAN;
+            }
+            Ok(())
+        }
+    }
+    fn batch_fake(format: InputFormat) -> BatchFake {
+        BatchFake {
+            format,
+            calls: 0,
+            rows: Vec::new(),
+            fail: false,
+            invalid: false,
+            invalid_policy: false,
+        }
+    }
+    fn batch_positions() -> Result<Vec<Position>> {
+        [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            "4k4/9/9/9/9/9/9/9/4K4 b R 1",
+        ]
+        .iter()
+        .map(|sfen| {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen)?;
+            Ok(pos)
+        })
+        .collect()
+    }
+    fn batch_buffer(
+        format: InputFormat,
+        positions: &[Position],
+        rows: &[usize],
+    ) -> Result<InputBatchBuffer> {
+        let mut input = InputBatchBuffer::new(format, rows.len().max(1))?;
+        for &row in rows {
+            input.push(&positions[row])?;
+        }
+        Ok(input)
+    }
+
+    #[test]
+    fn batch_mixed_hits_misses_duplicates_and_counters() -> Result<()> {
+        let positions = batch_positions()?;
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            let mut evaluator = CachedEvaluator::with_batch_capacity(batch_fake(format), 1, 8)?;
+            let cache_bytes = evaluator.allocated_bytes();
+            let batch_bytes = evaluator.batch_allocated_bytes();
+            let seed = batch_buffer(format, &positions, &[0])?;
+            evaluator.evaluate_encoded_batch(
+                seed.view(),
+                &mut [0.0],
+                &mut [0.0; MAX_MOVE_LABEL_NUM],
+            )?;
+            let input = batch_buffer(format, &positions, &[0, 1, 0, 2, 1])?;
+            let mut values = [0.0; 5];
+            let mut policy = vec![0.0; 5 * MAX_MOVE_LABEL_NUM];
+            evaluator.evaluate_encoded_batch(input.view(), &mut values, &mut policy)?;
+            assert_eq!(evaluator.inner.rows, [1, 3]);
+            assert_eq!(evaluator.nn_positions(), 4);
+            assert_eq!(
+                evaluator.stats(),
+                CacheStats {
+                    requests: 6,
+                    nn_calls: 2,
+                    hits: 2
+                }
+            );
+            for row in 0..5 {
+                assert_eq!(values[row], 0.25);
+                assert!(
+                    policy[row * MAX_MOVE_LABEL_NUM..(row + 1) * MAX_MOVE_LABEL_NUM]
+                        .iter()
+                        .all(|&v| v == input_marker(input.view().row(row).unwrap()))
+                );
+            }
+            evaluator.evaluate_encoded_batch(input.view(), &mut values, &mut policy)?;
+            assert_eq!(evaluator.inner.calls, 2);
+            assert_eq!(evaluator.stats().hits, 7);
+            assert_eq!(evaluator.allocated_bytes(), cache_bytes);
+            assert_eq!(evaluator.batch_allocated_bytes(), batch_bytes);
+            evaluator.clear();
+            assert_eq!(evaluator.nn_positions(), 0);
+            assert_eq!(evaluator.stats(), CacheStats::default());
+            evaluator.evaluate_encoded_batch(input.view(), &mut values, &mut policy)?;
+            assert_eq!(evaluator.inner.rows, [1, 3, 5]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn batch_one_matches_scalar_and_empty_batches_do_not_call_backend() -> Result<()> {
+        let positions = batch_positions()?;
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            for mib in [0, 1] {
+                let mut scalar =
+                    CachedEvaluator::new(encoded_fake(format, EncodedMode::Supported), mib)?;
+                assert_eq!(scalar.encoded_batch_capacity(), None);
+                assert_eq!(scalar.batch_allocated_bytes(), 0);
+                let mut batch = CachedEvaluator::with_batch_capacity(batch_fake(format), mib, 1)?;
+                assert_eq!(batch.encoded_batch_capacity(), Some(1));
+                let empty = InputBatchBuffer::new(format, 1)?;
+                batch.evaluate_encoded_batch(empty.view(), &mut [], &mut [])?;
+                assert_eq!(batch.inner.calls, 0);
+                for position in &positions {
+                    let mut input = InputBatchBuffer::new(format, 1)?;
+                    input.push(position)?;
+                    let mut scalar_policy = [0.0; MAX_MOVE_LABEL_NUM];
+                    let mut batch_policy = [0.0; MAX_MOVE_LABEL_NUM];
+                    let mut value = [0.0];
+                    batch.evaluate_encoded_batch(input.view(), &mut value, &mut batch_policy)?;
+                    assert_eq!(scalar.evaluate(position, &mut scalar_policy)?, value[0]);
+                    assert_eq!(scalar_policy, batch_policy);
+                }
+                let input = batch_buffer(format, &positions, &[0, 1])?;
+                assert!(
+                    batch
+                        .evaluate_encoded_batch(
+                            input.view(),
+                            &mut [0.0; 2],
+                            &mut vec![0.0; 2 * MAX_MOVE_LABEL_NUM]
+                        )
+                        .is_err()
+                );
+                assert_eq!(batch.inner.calls, 3);
+                assert_eq!(batch.nn_positions(), 3);
+                assert!(scalar.evaluate_encoded_batch(empty.view(), &mut [], &mut []).is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn batch_errors_leave_outputs_and_cache_unchanged() -> Result<()> {
+        let positions = batch_positions()?;
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            for mib in [0, 1] {
+                let mut evaluator =
+                    CachedEvaluator::with_batch_capacity(batch_fake(format), mib, 8)?;
+                let seed = batch_buffer(format, &positions, &[0])?;
+                evaluator.evaluate_encoded_batch(
+                    seed.view(),
+                    &mut [0.0],
+                    &mut [0.0; MAX_MOVE_LABEL_NUM],
+                )?;
+                let input = batch_buffer(format, &positions, &[0, 1])?;
+                let mut values = [77.0; 2];
+                let mut policy = vec![77.0; 2 * MAX_MOVE_LABEL_NUM];
+                for failure in 0..3 {
+                    evaluator.inner.fail = failure == 0;
+                    evaluator.inner.invalid = failure == 1;
+                    evaluator.inner.invalid_policy = failure == 2;
+                    assert!(
+                        evaluator
+                            .evaluate_encoded_batch(input.view(), &mut values, &mut policy)
+                            .is_err()
+                    );
+                    assert_eq!(values, [77.0; 2]);
+                    assert!(policy.iter().all(|&v| v == 77.0));
+                }
+                evaluator.inner.fail = false;
+                evaluator.inner.invalid = false;
+                evaluator.inner.invalid_policy = false;
+                evaluator.evaluate_encoded_batch(
+                    seed.view(),
+                    &mut [0.0],
+                    &mut [0.0; MAX_MOVE_LABEL_NUM],
+                )?;
+                assert_eq!(evaluator.stats().hits, if mib == 0 { 0 } else { 1 });
+                assert_eq!(evaluator.nn_positions(), if mib == 0 { 8 } else { 4 });
+                assert_eq!(evaluator.stats().nn_calls, if mib == 0 { 5 } else { 4 });
+                let calls = evaluator.inner.calls;
+                assert!(
+                    evaluator.evaluate_encoded_batch(input.view(), &mut [], &mut policy).is_err()
+                );
+                assert_eq!(evaluator.inner.calls, calls);
+                assert!(
+                    evaluator
+                        .evaluate_encoded_batch(
+                            batch_buffer(
+                                if format == InputFormat::Basic {
+                                    InputFormat::StmTokensV1
+                                } else {
+                                    InputFormat::Basic
+                                },
+                                &positions,
+                                &[0]
+                            )?
+                            .view(),
+                            &mut [77.0],
+                            &mut [77.0; MAX_MOVE_LABEL_NUM]
+                        )
+                        .is_err()
+                );
+                evaluator.reset_stats();
+                assert_eq!(evaluator.nn_positions(), 0);
+            }
+        }
+        assert!(
+            CachedEvaluator::with_batch_capacity(
+                Fake {
+                    calls: 0,
+                    fail: false
+                },
+                1,
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            CachedEvaluator::with_batch_capacity(batch_fake(InputFormat::Basic), 1, 9).is_err()
+        );
+        assert!(BatchWorkspace::new(InputFormat::Basic, usize::MAX, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn batch_collision_reads_hits_before_request_order_registration() -> Result<()> {
+        let positions = batch_positions()?;
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            let bytes = size_of::<Cache>()
+                + match format {
+                    InputFormat::Basic => {
+                        (FEATURES1_SIZE + FEATURES2_SIZE) * size_of::<f32>()
+                            + size_of::<Entry<BasicKey>>()
+                    }
+                    InputFormat::StmTokensV1 => size_of::<Entry<TokenKey>>(),
+                };
+            let mut evaluator = CachedEvaluator::with_batch_capacity(batch_fake(format), 1, 8)?;
+            evaluator.cache = Some(Box::new(Cache::new(bytes, format)?));
+            let seed = batch_buffer(format, &positions, &[0])?;
+            evaluator.evaluate_encoded_batch(
+                seed.view(),
+                &mut [0.0],
+                &mut [0.0; MAX_MOVE_LABEL_NUM],
+            )?;
+            let input = batch_buffer(format, &positions, &[1, 0, 2, 0])?;
+            let mut values = [0.0; 4];
+            let mut policy = vec![0.0; 4 * MAX_MOVE_LABEL_NUM];
+            evaluator.evaluate_encoded_batch(input.view(), &mut values, &mut policy)?;
+            assert_eq!(evaluator.inner.rows, [1, 2]);
+            for row in 0..4 {
+                assert_eq!(
+                    policy[row * MAX_MOVE_LABEL_NUM],
+                    input_marker(input.view().row(row).unwrap())
+                );
+            }
+            let final_miss = batch_buffer(format, &positions, &[2])?;
+            evaluator.evaluate_encoded_batch(
+                final_miss.view(),
+                &mut [0.0],
+                &mut [0.0; MAX_MOVE_LABEL_NUM],
+            )?;
+            assert_eq!(evaluator.inner.calls, 2);
+            assert_eq!(evaluator.stats().hits, 3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reverse_scatter_preserves_every_monotonic_miss_subset() {
+        for bits in 0u32..(1 << 8) {
+            let rows: Vec<_> = (0..8).filter(|row| bits & (1 << row) != 0).collect();
+            let mut output = [usize::MAX; 8];
+            for (compact, &row) in rows.iter().enumerate() {
+                assert!(row >= compact);
+                output[compact] = row;
+            }
+            for compact in (0..rows.len()).rev() {
+                output[rows[compact]] = output[compact];
+            }
+            for row in rows {
+                assert_eq!(output[row], row);
+            }
         }
     }
 
@@ -470,6 +1089,8 @@ mod tests {
                 inner: encoded_fake(format, EncodedMode::Supported),
                 cache: Some(Box::new(Cache::new(bytes, format)?)),
                 stats: CacheStats::default(),
+                nn_positions: 0,
+                batch: None,
             };
             let first = position();
             let mut other = Position::new();
