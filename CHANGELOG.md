@@ -14,6 +14,29 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+## v1.9.0 — 2026-11-16
+
+v1.8.0 以降の、探索・評価の高速化、USI エンジンの設定、CSA クライアント / サーバー、定跡ツールの
+拡充を中心としたリリース。探索は NUMA に対応し (`NumaPolicy`、既定 none)、LayerStacks (2304 / 3072 /
+1536) と threat 累積の NNUE 計算を高速化した。USI エンジンの `id name` は `RAMU` になり、
+`IgnoreBookPly` の既定値が `true` に変わる。`rshogi-core` は 0.9.1 になり、公開 API は追加のみ。
+
+詳細は各 PR を参照。
+
+### rshogi-core 0.9.1 / ライブラリ利用者の移行
+
+公開 API の追加のみで、移行は不要。`"0.9"` の依存のまま更新できる。
+
+- `NumaPolicy` と、`Search` の `set_numa_policy` / `prepare_numa_networks` を追加した (#1448)。
+- df-pn の最短手順モードに、証明の途中で分かった詰み手順を知らせる `solve_with_lines` (`MateLine` /
+  `MateLineKind`) を追加した (#1392)。
+- LayerStacks の FT 列を並べ替える `permute_ft_columns` を追加した (#1438)。
+- NNUE の LayerStacks 2304 / 3072 / 1536 と threat・PSQT の累積を高速化した
+  (#1423, #1425, #1429, #1430, #1431, #1432, #1434, #1437)。
+- 探索スレッドの best move の変化回数を二重に数えていたのを直した (#1488)。
+  `UseEvalHash=false` では EvalHash の表を確保しない (#1422)。
+- df-pn の最短手順モードを速くした (#1393, #1395, #1415)。
+
 ### USI エンジン
 
 - `BookValueTieBreak` で `BookSelectValue=true` の同値手を `count` / `depth` / `random` から選べるようにした。既定の `count` は従来どおり採択回数降順、USI 昇順で選ぶ。
