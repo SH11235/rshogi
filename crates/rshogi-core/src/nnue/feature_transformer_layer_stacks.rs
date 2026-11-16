@@ -700,20 +700,49 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             // 非整列 load/store を使い、cfg は AVX-512F/BW を保証する。
             unsafe {
                 use std::arch::x86_64::*;
+                let ones = _mm512_set1_epi8(1);
+                // unpack は128bit lane単位なので、64bitブロックを先に並べ替える。
+                // 保存配置を保つことで mmap と単独行更新も同じ重みを使える。
+                let order = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
                 for offset in (0..L1).step_by(256) {
                     let mut tile = [_mm512_setzero_si512(); 8];
                     for (k, v) in tile.iter_mut().enumerate() {
                         *v = _mm512_loadu_si512(accumulation.as_ptr().add(offset + k * 32).cast());
                     }
-                    for index in indices.iter() {
-                        let row = self.threat_weight_row(index);
-                        for (k, v) in tile.iter_mut().enumerate() {
-                            let w = _mm256_loadu_si256(row.as_ptr().add(offset + k * 32).cast());
-                            let w = _mm512_cvtepi8_epi16(w);
-                            *v = if ADD {
-                                _mm512_add_epi16(*v, w)
+                    let mut rows = indices.iter();
+                    while let Some(first) = rows.next() {
+                        let row = self.threat_weight_row(first);
+                        let Some(second) = rows.next() else {
+                            for (k, v) in tile.iter_mut().enumerate() {
+                                let w =
+                                    _mm256_loadu_si256(row.as_ptr().add(offset + k * 32).cast());
+                                let w = _mm512_cvtepi8_epi16(w);
+                                *v = if ADD {
+                                    _mm512_add_epi16(*v, w)
+                                } else {
+                                    _mm512_sub_epi16(*v, w)
+                                };
+                            }
+                            break;
+                        };
+                        let second = self.threat_weight_row(second);
+                        // 2行の和は -256..=254 で、maddubs の i16 飽和は起きない。
+                        for (k, pair) in tile.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                            let a = _mm512_loadu_si512(row.as_ptr().add(offset + k * 64).cast());
+                            let b = _mm512_loadu_si512(second.as_ptr().add(offset + k * 64).cast());
+                            let a = _mm512_permutexvar_epi64(order, a);
+                            let b = _mm512_permutexvar_epi64(order, b);
+                            let lo = _mm512_maddubs_epi16(ones, _mm512_unpacklo_epi8(a, b));
+                            let hi = _mm512_maddubs_epi16(ones, _mm512_unpackhi_epi8(a, b));
+                            pair[0] = if ADD {
+                                _mm512_add_epi16(pair[0], lo)
                             } else {
-                                _mm512_sub_epi16(*v, w)
+                                _mm512_sub_epi16(pair[0], lo)
+                            };
+                            pair[1] = if ADD {
+                                _mm512_add_epi16(pair[1], hi)
+                            } else {
+                                _mm512_sub_epi16(pair[1], hi)
                             };
                         }
                     }
@@ -2402,7 +2431,11 @@ mod tests {
             let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
             let mut weights = AlignedBox::<i8>::new_zeroed(N * 3);
             for (i, w) in weights.iter_mut().enumerate() {
-                *w = ((i as u32).wrapping_mul(0x9e37_79b9) >> 24) as i8;
+                *w = match i % 64 {
+                    0 => i8::MIN,
+                    1 => i8::MAX,
+                    _ => ((i as u32).wrapping_mul(0x9e37_79b9) >> 24) as i8,
+                };
             }
             ft.threat_weights = weights.into();
             for count in 0..=MAX_CHANGED_THREAT_FEATURES {
@@ -2429,6 +2462,11 @@ mod tests {
                 assert_eq!(actual.0, expected);
                 ft.apply_threat_rows::<false>(&mut actual.0, &indices);
                 assert_eq!(actual.0, initial);
+                for (x, &start) in expected.iter_mut().zip(&initial) {
+                    *x = start.wrapping_sub(x.wrapping_sub(start));
+                }
+                ft.apply_threat_rows::<false>(&mut actual.0, &indices);
+                assert_eq!(actual.0, expected);
             }
         }
         check::<48>();
@@ -2436,6 +2474,8 @@ mod tests {
         check::<256>();
         check::<512>();
         check::<768>();
+        check::<1536>();
+        check::<2304>();
     }
 
     #[cfg(feature = "nnue-threat")]
