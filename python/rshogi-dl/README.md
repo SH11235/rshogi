@@ -116,6 +116,19 @@ attention は全 96 token 間の双方向で、畳み込みは使いません。
 - loss: policy は合法手の中だけで softmax を取る soft-target cross entropy (`policy` が `null` で
   ない行の平均)、value は BCE。両者を 1:1 で足します。全行が `null` の batch では policy loss は 0 です。
 
+### attention の実行方式
+
+`SquareTransformer(config, attention_backend="sdpa")` は PyTorch の
+`scaled_dot_product_attention` を使います。既定の `"explicit"` は QK の積・softmax・V との積を
+個別に計算します。どちらも全 96 token 間の双方向 attention で、dropout は使いません。
+SDPA の実際の kernel は device・dtype・PyTorch の設定に依存します。
+
+この指定は実行方式だけを変え、model config・parameter 名・checkpoint の形式は共通です。
+同じ重みを両方式へ `load_state_dict` できます。checkpoint の読込時は既定の `"explicit"` に戻るので、
+SDPA を使う側でモデルを構築して重みを読み込んでください。SDPA のモデルも ONNX export 中は
+標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
+実行方式は変わりません。
+
 ## smoke
 
 ```bash
