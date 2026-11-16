@@ -113,6 +113,8 @@ jobs:
       # 外した構成でも lint し、その分岐の warning を検出する。
       - name: Run Clippy (tools, ONNX 依存無効)
         run: cargo clippy -p tools --no-default-features --features nnue-arch --all-targets -- -D warnings
+      - name: Run Clippy (DL USI)
+        run: cargo clippy -p rshogi-dl-usi --features onnx --all-targets -- -D warnings
 
   test:
     name: Test
@@ -182,6 +184,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run book tree tests
         run: cargo test --release -p tools --lib book_tree
+      - name: Test DL contracts and MCTS
+        run: cargo test -p rshogi-dl -p rshogi-mcts -p rshogi-dl-usi
+      - name: Check DL USI
+        run: cargo check -p rshogi-dl-usi --features onnx
 
   feature-builds:
     # workspace の clippy / test は既定 feature (edition-universal) しかコンパイルしない。

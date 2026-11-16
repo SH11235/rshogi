@@ -1,0 +1,12 @@
+[package]
+name = "rshogi-mcts"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "GPL-3.0-or-later"
+description = "Policy/value Monte Carlo tree search for rshogi"
+
+[dependencies]
+anyhow.workspace = true
+rshogi-core = { path = "../rshogi-core", default-features = false }
+rshogi-dl = { path = "../rshogi-dl" }

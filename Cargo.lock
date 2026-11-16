@@ -2741,6 +2741,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rshogi-dl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ort",
+ "rayon",
+ "rshogi-core",
+ "serde_json",
+]
+
+[[package]]
+name = "rshogi-dl-usi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rshogi-core",
+ "rshogi-dl",
+ "rshogi-mcts",
+]
+
+[[package]]
+name = "rshogi-mcts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rshogi-core",
+ "rshogi-dl",
+]
+
+[[package]]
 name = "rshogi-usi"
 version = "0.1.0"
 dependencies = [
@@ -3590,6 +3620,7 @@ dependencies = [
  "rshogi-core",
  "rshogi-csa",
  "rshogi-csa-client",
+ "rshogi-dl",
  "rustix",
  "rustls",
  "same-file",
