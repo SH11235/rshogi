@@ -99,6 +99,58 @@ pip install --no-deps -e .
 | 10..19 | 上の 10 方向の成り |
 | 20..26 | 打ち: 歩 香 桂 銀 角 飛 金 |
 
+## 生成済み shard の読み込み
+
+JSONL の検証・Python record の作成を毎 epoch 繰り返す代わりに、検証済みの入力を NumPy 配列の shard に変換できます。変換は全行を一度検証し、最大 `--shard-records` 行ずつ保存します。既定4096行、上限65536行で、入力全体をメモリに読みません。
+
+```bash
+python -m rshogi_dl.sharded convert \
+  --source fixture.jsonl \
+  --output "$SHOGI_DATA/teachers/dl/<dataset>" \
+  --shard-records 4096 \
+  --teacher-kind synthetic-validation-targets \
+  --split fixture-only --training-status validation-only
+
+python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<dataset>"
+```
+
+dataset の出力先は `$SHOGI_DATA/teachers/dl/<dataset>/` または `$SHOGI_DATA/runs/rshogi-dl/<run>/` に限ります。絶対 path を指定し、repository・worktree 内や既存 path への出力は拒否します。`manifest.json` は全 shard の保存後に公開します。変換に失敗して manifest がない directory は未完了であり、reader は受け付けません。自動再開・上書きはしないため、別の新規出力先を使ってください。
+
+入力JSONLは通常ファイルに限り、変換中は変更しないでください。開始時とmanifest公開直前のファイル識別子・byte数・更新時刻・metadata変更時刻を照合し、変更された場合は公開しません。manifestには入力の`source_size`と読み取った`source_records`を記録します。
+
+各配列・metadata・一時manifestはflushとfsyncを行い、manifestをatomic renameで公開します。POSIXではshardとdatasetのdirectoryもfsyncし、ファイルシステムがdirectory fsyncを提供しない場合は失敗します。Windowsでは標準Python APIでdirectoryの永続化を確認できないため、file fsyncとatomic renameまでが保証範囲です。Windowsでコピーしたdatasetや電源断後のdatasetは、利用前に`verify`で検査してください。
+
+| shard 内の配列 | 保存形式 |
+| --- | --- |
+| tokens | uint8 `[N, 96]` |
+| values / policy_present | float32 `[N]` / bool `[N]` |
+| legal_offsets | uint64 `[N+1]` |
+| legal_indices / policy_targets | uint16 / float32 の一次元配列。各行の合法手分だけ格納 |
+
+policy target は合法手の元の並びで合計1に正規化します。`policy=null` の行は `policy_present=false`、targetは0で、合法手が空の行も保持します。各行593手分の領域をファイルに確保する形式ではありません。global manifest は件数とshard数を保持し、個々のファイル情報とSHA-256は各shardのmetadataへ保存します。
+
+配列はconverterが書くNPY 1.0形式です。readerは最大1024 bytesのheaderを先に検査し、期待するshape・dtype・C順序・ファイル長が一致してからmappingを作ります。空の合法手配列でも、headerに書かれた件数から先にメモリを確保しません。
+
+```python
+import os
+from pathlib import Path
+from rshogi_dl.sharded import iter_batches
+
+dataset = Path(os.environ["SHOGI_DATA"]) / "teachers" / "dl" / "<dataset>"
+for batch in iter_batches(dataset, batch_size=128, drop_last=False):
+    print(batch.tokens.shape)
+```
+
+reader はread-only mmapを使い、shardを順番に開き、shard境界を跨いでJSONL readerと同じ`Batch`を作ります。batchの上限は16384行です。末尾は`drop_last=True`で捨てられます。保持する作業領域は1shardのmappingと1batch分で、返したbatchは次の読込で書き換わりません。並べ替えやworker・GPU転送は行わず、CPU tensorを返します。
+
+このreaderの対象はconverterが生成した、変更されないdatasetです。既定ではheader・shape・dtype・file sizeと読込中の置換・変更を検査し、全sampleの再検証や全ファイルのhash scanを毎epoch行いません。配布・コピー後に全ファイルを検査するときは`verify`、または`iter_batches(..., verify_hashes=True)`を明示してください。使用中のshardを編集・削除・置換せず、新しいdatasetを別directoryに生成してください。
+
+`teacher_kind`・`split`・datasetの`training_status`は利用者が明示する出自で、未指定は`unknown`です。`training_status`は`unknown`または`validation-only`を指定できます。converterは実教師の品質を推測せず、変換成功は学習データの品質採用を意味しません。上の例は合成fixtureであり、モデル・checkpointの`validation-only`という状態は変更しません。
+
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
+
 ## モデル
 
 token の埋め込み (語彙 121) と位置の埋め込み (96) を足し、pre-LayerNorm の encoder を通します。
