@@ -269,6 +269,19 @@ class ShardedTest(unittest.TestCase):
             convert_jsonl(self.source, output)
             self.assertEqual(next(iter_batches(output, 1)).tokens.shape, (1, 96))
 
+    def test_content_digest_identifies_data_without_a_shard_list(self) -> None:
+        write_jsonl(self.source, special_records())
+        first = self.root / "digest-first"
+        second = self.root / "digest-second"
+        a = convert_jsonl(self.source, first, shard_records=3)
+        b = convert_jsonl(self.source, second, shard_records=3)
+        self.assertEqual(a["dataset_content_sha256"], b["dataset_content_sha256"])
+        self.assertEqual(verify_dataset(first), a)
+        metadata = first / "shard-00000000" / "metadata.json"
+        metadata.write_text(metadata.read_text() + " ", encoding="utf-8")
+        with self.assertRaisesRegex(DatasetError, "content digest"):
+            verify_dataset(first)
+
     def test_source_changes_prevent_manifest_publication(self) -> None:
         records = synthetic_records(seed=3, count=3)
         original_reader = sharded.iter_records

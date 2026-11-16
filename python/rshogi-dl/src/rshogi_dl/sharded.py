@@ -136,7 +136,7 @@ def _shard_dir(root: Path, index: int) -> Path:
     return root / f"shard-{index:08d}"
 
 
-def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array], count: int) -> None:
+def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array], count: int) -> str:
     directory = _shard_dir(root, index)
     directory.mkdir()
     entries = len(columns["legal_indices"])
@@ -161,6 +161,7 @@ def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array],
         {"format": FORMAT, "records": count, "legal_entries": entries, "files": files},
     )
     _sync_directory(directory)
+    return _hash(directory / "metadata.json")
 
 
 def convert_jsonl(
@@ -203,6 +204,7 @@ def convert_jsonl(
         "legal_indices": array("H"),
         "policy_targets": array("f"),
     }
+    content_digest = hashlib.sha256()
     total = 0
     shards = 0
     count = 0
@@ -220,14 +222,14 @@ def convert_jsonl(
         total += 1
         columns["legal_offsets"][count] = len(columns["legal_indices"])
         if count == shard_records:
-            _write_shard(output, shards, columns, count)
+            content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
             shards += 1
             count = 0
             columns["legal_indices"] = array("H")
             columns["policy_targets"] = array("f")
             columns["legal_offsets"][0] = 0
     if count:
-        _write_shard(output, shards, columns, count)
+        content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
         shards += 1
     if not total:
         raise DatasetError("cannot convert an empty dataset")
@@ -235,6 +237,7 @@ def convert_jsonl(
         **_CONTRACT,
         "source_name": source.name,
         "source_size": source_signature[2],
+        "dataset_content_sha256": content_digest.hexdigest(),
         "source_records": total,
         "shard_records": shard_records,
         "shard_count": shards,
@@ -259,13 +262,18 @@ def convert_jsonl(
 def _manifest(root: Path) -> dict:
     manifest = _read_json(root / "manifest.json")
     expected = {
-        *_CONTRACT, "source_name", "source_size", "source_records", "shard_records", "shard_count",
+        *_CONTRACT, "source_name", "source_size", "dataset_content_sha256", "source_records", "shard_records", "shard_count",
         "teacher_kind", "split", "training_status",
     }
     if set(manifest) != expected or any(
         manifest.get(key) != value for key, value in _CONTRACT.items()
     ):
         raise DatasetError("unexpected dataset manifest contract")
+    digest = manifest["dataset_content_sha256"]
+    if type(digest) is not str or len(digest) != 64 or any(
+        char not in "0123456789abcdef" for char in digest
+    ):
+        raise DatasetError("invalid dataset content digest")
     _positive_int(manifest["source_records"], "source_records")
     _positive_int(manifest["source_size"], "source_size")
     _positive_int(manifest["shard_records"], "shard_records", MAX_SHARD_RECORDS)
@@ -476,12 +484,16 @@ def verify_dataset(path: str | Path) -> dict:
     root = _dataset_path(path, new=False)
     manifest = _manifest(root)
     signature = _signature(root / "manifest.json")
+    content_digest = hashlib.sha256()
     for index in range(manifest["shard_count"]):
         shard = _Shard(root, index, manifest, verify_hashes=True)
+        content_digest.update(bytes.fromhex(_hash(_shard_dir(root, index) / "metadata.json")))
         shard.check_unchanged()
         if _signature(root / "manifest.json") != signature:
             raise DatasetError("dataset manifest changed while verifying")
         del shard
+    if content_digest.hexdigest() != manifest["dataset_content_sha256"]:
+        raise DatasetError("dataset content digest mismatch")
     return manifest
 
 

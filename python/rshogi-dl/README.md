@@ -147,6 +147,10 @@ reader はread-only mmapを使い、shardを順番に開き、shard境界を跨�
 
 `teacher_kind`・`split`・datasetの`training_status`は利用者が明示する出自で、未指定は`unknown`です。`training_status`は`unknown`または`validation-only`を指定できます。converterは実教師の品質を推測せず、変換成功は学習データの品質採用を意味しません。上の例は合成fixtureであり、モデル・checkpointの`validation-only`という状態は変更しません。
 
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
+
 ## モデル
 
 token の埋め込み (語彙 121) と位置の埋め込み (96) を足し、pre-LayerNorm の encoder を通します。
