@@ -235,23 +235,17 @@ impl TranspositionTable {
     pub fn probe(&self, key: u64, pos: &Position) -> ProbeResult<'_> {
         let cluster = self.first_entry(key, pos.side_to_move());
         let key16 = key as u16;
-        let gen8 = self.generation();
-        let mut replace = 0;
-        let mut min_value = i32::MAX;
         for index in 0..CLUSTER_SIZE {
-            let entry = cluster.load(index);
-            if entry.key16() == key16 {
+            let entry_key = cluster.keys[index].load(Ordering::Relaxed);
+            if entry_key == key16 {
+                let entry =
+                    TTEntry::from_payload(entry_key, cluster.data[index].load(Ordering::Relaxed));
                 let mut data = entry.read();
                 if data.mv != Move::NONE {
                     if let Some(m) = pos.to_move(data.mv) {
                         data.mv = m;
                     } else {
                         // 不正な手を持つ同一短縮キーはヒットとして採用しない。
-                        let value = entry.depth8() as i32 - entry.relative_age(gen8) as i32;
-                        if value < min_value {
-                            min_value = value;
-                            replace = index;
-                        }
                         continue;
                     }
                 }
@@ -263,6 +257,12 @@ impl TranspositionTable {
                     write_counters: &self.write_counters,
                 };
             }
+        }
+        let gen8 = self.generation();
+        let mut replace = 0;
+        let mut min_value = i32::MAX;
+        for index in 0..CLUSTER_SIZE {
+            let entry = TTEntry::from_payload(0, cluster.data[index].load(Ordering::Relaxed));
             let value = entry.depth8() as i32 - entry.relative_age(gen8) as i32;
             if value < min_value {
                 min_value = value;
@@ -486,6 +486,96 @@ mod tests {
         for cluster in tt.table.iter() {
             assert!(cluster.data.iter().all(|d| d.load(Ordering::Relaxed) == 0));
             assert!(cluster.keys.iter().all(|k| k.load(Ordering::Relaxed) == 0));
+        }
+    }
+
+    #[test]
+    fn probe_preserves_first_match_including_empty_entry() {
+        let tt = TranspositionTable::new(0);
+        let pos = Position::new();
+        let cluster = tt.first_entry(0, pos.side_to_move());
+        let mut entry = TTEntry::new();
+        entry.save(0, Value::new(42), false, Bound::Exact, 20, Move::NONE, Value::ZERO, 0);
+        cluster.store(2, entry);
+
+        let empty = tt.probe(0, &pos);
+        assert!(!empty.found);
+        assert_eq!(empty.writer().index, 0);
+        assert_eq!(empty.data.value, Value::ZERO);
+
+        cluster.store(0, entry);
+        let hit = tt.probe(0, &pos);
+        assert!(hit.found);
+        assert_eq!(hit.writer().index, 0);
+        assert_eq!(hit.data.value, Value::new(42));
+    }
+
+    #[test]
+    fn probe_invalid_move_remains_replaceable_and_allows_later_hit() {
+        let tt = TranspositionTable::new(0);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let cluster = tt.first_entry(1, pos.side_to_move());
+        for (index, key, depth, mv) in [
+            (0, 2, 20, Move::NONE),
+            (1, 1, 1, Move::from_usi("7f7e").unwrap()),
+            (2, 3, 30, Move::NONE),
+        ] {
+            let mut entry = TTEntry::new();
+            entry.save(key, Value::new(42), false, Bound::Exact, depth, mv, Value::ZERO, 0);
+            cluster.store(index, entry);
+        }
+        let miss = tt.probe(1, &pos);
+        assert!(!miss.found);
+        assert_eq!(miss.writer().index, 1);
+
+        let mut entry = TTEntry::new();
+        entry.save(1, Value::new(99), false, Bound::Exact, 30, Move::NONE, Value::ZERO, 0);
+        cluster.store(2, entry);
+        let hit = tt.probe(1, &pos);
+        assert!(hit.found);
+        assert_eq!(hit.writer().index, 2);
+        assert_eq!(hit.data.value, Value::new(99));
+    }
+
+    #[test]
+    fn probe_replacement_preserves_age_and_first_tie() {
+        let tt = TranspositionTable::new(0);
+        let pos = Position::new();
+        let cluster = tt.first_entry(1, pos.side_to_move());
+        for generation in [0, 8, 248] {
+            tt.generation8.store(generation, Ordering::Relaxed);
+            for (index, depth, age) in [(0, 20, 0), (1, 28, 8), (2, 36, 16)] {
+                let mut entry = TTEntry::new();
+                entry.save(
+                    index as u64 + 2,
+                    Value::ZERO,
+                    false,
+                    Bound::Exact,
+                    depth,
+                    Move::NONE,
+                    Value::ZERO,
+                    generation.wrapping_sub(age),
+                );
+                cluster.store(index, entry);
+            }
+            let tied = tt.probe(1, &pos);
+            assert!(!tied.found);
+            assert_eq!(tied.writer().index, 0);
+
+            let mut entry = TTEntry::new();
+            entry.save(
+                4,
+                Value::ZERO,
+                false,
+                Bound::Exact,
+                35,
+                Move::NONE,
+                Value::ZERO,
+                generation.wrapping_sub(16),
+            );
+            cluster.store(2, entry);
+            assert_eq!(tt.probe(1, &pos).writer().index, 2);
         }
     }
 
