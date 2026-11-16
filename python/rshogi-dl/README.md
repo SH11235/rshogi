@@ -260,3 +260,7 @@ export RSHOGI_LEGACY_PROBE_BIN=$PWD/target/release/examples/evaluate
 fixture を自分で作るときも `encode` の出力 (`tokens` と `labels` の label) を使ってください。
 
 package の追加依存 `cpu` / `cuda` はそれぞれ `onnxruntime` / `onnxruntime-gpu` を選びます。同じ環境に両方をインストールしないでください。`requirements.txt` は CPU 用です。
+
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
