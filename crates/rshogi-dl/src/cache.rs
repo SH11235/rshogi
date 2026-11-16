@@ -59,19 +59,20 @@ impl Cache {
         })
     }
 
-    fn key(&mut self, pos: &Position) -> Key {
+    fn key(&mut self, pos: &Position) -> Result<Key> {
         self.first.fill(0.0);
         self.second.fill(0.0);
         make_input_features(pos, &mut self.first, &mut self.second);
         let mut key = [0; KEY_WORDS];
         for (index, &value) in self.first.iter().chain(&self.second).enumerate() {
             // 基本形式の全 plane は 0/1。全要素を保持し、手数や履歴を key に混ぜない。
-            debug_assert!(value == 0.0 || value == 1.0);
-            if value != 0.0 {
-                key[index / 64] |= 1 << (index % 64);
+            match value.to_bits() {
+                0 => {}
+                0x3f800000 => key[index / 64] |= 1 << (index % 64),
+                _ => anyhow::bail!("cache requires binary basic inputs"),
             }
         }
-        key
+        Ok(key)
     }
 
     fn index(&self, key: &Key) -> usize {
@@ -150,7 +151,7 @@ impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
             return self.inner.evaluate(pos, logits);
         };
         ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
-        let key = cache.key(pos);
+        let key = cache.key(pos)?;
         let index = cache.index(&key);
         let entry = &cache.entries[index];
         if entry.occupied && entry.key == key {
@@ -260,7 +261,7 @@ mod tests {
         )?;
         let pos = position();
         let cache = evaluator.cache.as_mut().unwrap();
-        let key = cache.key(&pos);
+        let key = cache.key(&pos)?;
         let index = cache.index(&key);
         cache.entries[index].occupied = true;
         cache.entries[index].key = key;
@@ -293,20 +294,59 @@ mod tests {
     fn input_key_ignores_ply_and_checks_every_plane() -> Result<()> {
         let mut cache = Cache::new(1024 * 1024)?;
         let pos = position();
-        let key = cache.key(&pos);
+        let key = cache.key(&pos)?;
         let mut later = Position::new();
         let sfen = pos.to_sfen();
         let mut parts: Vec<_> = sfen.split_whitespace().collect();
         parts[3] = "200";
         later.set_sfen(&parts.join(" "))?;
-        assert_eq!(cache.key(&later), key);
+        assert_eq!(cache.key(&later)?, key);
         let first = cache.first.clone();
         let second = cache.second.clone();
         for (i, &x) in first.iter().chain(&second).enumerate() {
             assert_eq!((key[i / 64] >> (i % 64)) & 1, u64::from(x == 1.0));
         }
         later.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2")?;
-        assert_ne!(cache.key(&later), key);
+        assert_ne!(cache.key(&later)?, key);
+        Ok(())
+    }
+    #[test]
+    fn distinct_inputs_return_their_own_policy() -> Result<()> {
+        let mut evaluator = CachedEvaluator::new(
+            Fake {
+                calls: 0,
+                fail: false,
+            },
+            1,
+        )?;
+        let mut checked = Position::new();
+        checked.set_sfen("4k4/4R4/9/9/9/9/9/9/K8 w - 1")?;
+        assert!(checked.in_check());
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        for (pos, expected) in [(position(), 0.0), (checked, 1.0), (position(), 0.0)] {
+            evaluator.evaluate(&pos, &mut logits)?;
+            assert!(logits.iter().all(|&x| x == expected));
+        }
+        assert_eq!(evaluator.stats().nn_calls, 2);
+        assert_eq!(evaluator.stats().hits, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn hand_and_attack_planes_are_binary_and_preserved() -> Result<()> {
+        let mut pos = Position::new();
+        let mut cache = Cache::new(1024 * 1024)?;
+        for sfen in [
+            "4k4/9/9/9/9/9/9/9/4K4 b 18P4L4N4S4G2B2R 1",
+            "+B+N4R+Pl/KBG2g2l/P+P2P+N3/6p2/2p3s2/4S2L1/G8/7p+l/7+pk b G2S4Pr2n6p 1",
+        ] {
+            pos.set_sfen(sfen)?;
+            let key = cache.key(&pos)?;
+            for (index, &x) in cache.first.iter().chain(&cache.second).enumerate() {
+                assert!(x == 0.0 || x == 1.0);
+                assert_eq!((key[index / 64] >> (index % 64)) & 1, u64::from(x == 1.0));
+            }
+        }
         Ok(())
     }
 }

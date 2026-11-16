@@ -44,4 +44,4 @@ GUI、既存の tournament、CSA client からは通常の外部 USI エンジ�
 
 `isready` はモデルの読み込みと一回の warmup を完了してから readyok を返します。内部の引き分け評価を USI の終局通知として送りません。合法手がある root では fallback を返すため、対局の総手数上限や千日手の裁定は runner 側と揃えてください。
 
-`NNCacheMiB` は基本形式の全入力を照合し、合法手フィルタや temperature を適用する前の出力を保持します。木は go ごとに作り直しますが cache は同じ対局中に保持します。`usinewgame` / `gameover` と option 変更で破棄します。上限は key・出力・metadata・特徴量 buffer に適用し、allocator の管理領域やモデル・ORT・探索木のメモリは含みません。固定訪問数の結果を保つための機構であり、時間制限では完了訪問数が変わり得ます。
+`NNCacheMiB` は基本形式の全入力を照合し、合法手フィルタや temperature を適用する前の出力を保持します。木は go ごとに作り直しますが cache は同じ対局中に保持します。`usinewgame` / `gameover` と option 変更で破棄します。`isready` で指定容量を確保して初期化するため、その分の常駐メモリが必要です。上限は key・出力・metadata・特徴量 buffer に適用し、allocator の管理領域やモデル・ORT・探索木のメモリは含みません。固定訪問数の結果を保つための機構であり、時間制限では完了訪問数が変わり得ます。
