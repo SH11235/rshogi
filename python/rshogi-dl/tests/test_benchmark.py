@@ -22,7 +22,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             {"steps": 0}, {"steps": 10001}, {"steps": True}, {"warmup": -1},
             {"batch_size": 0}, {"batch_size": 4097}, {"window_batches": 0},
             {"window_batches": 33}, {"threads": 0}, {"threads": 257}, {"seed": -1},
-            {"seed": 2**63}, {"execution": "other"}, {"compile_mode": "other"}, {"precision": "fp16"},
+            {"seed": 2**63}, {"execution": "other"}, {"compile_mode": "other"}, {"compile_scope": "other"}, {"precision": "fp16"},
             {"attention_backend": "other"}, {"input_mode": "other"}, {"policy_rows_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
             {"fused_optimizer": 1}, {"learning_rate": 0.0}, {"learning_rate": float("nan")},
             {"weight_decay": -1.0}, {"weight_decay": float("inf")},
@@ -48,6 +48,15 @@ class BenchmarkConfigTest(unittest.TestCase):
                 benchmark.BenchmarkConfig(device="cuda", execution="compile", compile_mode=mode).compile_mode,
                 mode,
             )
+
+    def test_model_loss_scope_requires_compile_and_prepared_rows(self) -> None:
+        self.assertEqual(benchmark.BenchmarkConfig().compile_scope, "model")
+        with self.assertRaisesRegex(ValueError, "execution=compile"):
+            benchmark.BenchmarkConfig(compile_scope="model-loss")
+        with self.assertRaisesRegex(ValueError, "prepared policy rows"):
+            benchmark.BenchmarkConfig(execution="compile", compile_scope="model-loss", policy_rows_mode="legacy")
+        self.assertEqual(benchmark.BenchmarkConfig(execution="compile", compile_scope="model-loss").compile_scope,
+                         "model-loss")
 
     def test_cuda_does_not_fallback(self) -> None:
         config = benchmark.BenchmarkConfig(device="cuda")
@@ -207,6 +216,40 @@ class BenchmarkTest(unittest.TestCase):
             code = benchmark.main(args)
         self.assertEqual(code, 2)
         self.assertIn("execution=compile", stderr.getvalue())
+
+    def test_model_loss_scope_cli_and_original_model_ownership(self) -> None:
+        args = ["--data", str(self.data), "--config", "test", "--batch-size", "2",
+                "--steps", "5", "--warmup", "1", "--seed", "5", "--execution", "compile",
+                "--compile-scope", "model-loss"]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(torch, "compile", side_effect=lambda model, **options: model) as compiled,
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+        ):
+            code = benchmark.main(args)
+        self.assertEqual(code, 0, stderr.getvalue())
+        report = json.loads(stdout.getvalue())
+        target = compiled.call_args.args[0]
+        self.assertIsInstance(target, benchmark._ModelLoss)
+        self.assertEqual({id(parameter) for parameter in target.parameters()},
+                         {id(parameter) for parameter in target.model.parameters()})
+        self.assertEqual(report["final_weights_sha256"], benchmark._digest(target.model))
+        self.assertEqual(report["compile_scope"], "model-loss")
+        for key in ("initial_weights_sha256", "final_weights_sha256", "input_window_sha256", "losses_sha256",
+                    "optimizer_updates", "initial_loss", "final_loss"):
+            self.assertEqual(report[key], self.report[key], key)
+
+    def test_model_loss_scope_rejects_unprepared_loader_batches(self) -> None:
+        original = benchmark.iter_batches
+
+        def unprepared(*args, **kwargs):
+            for batch in original(*args, **kwargs):
+                yield replace(batch, policy_rows=None)
+
+        with patch.object(benchmark, "iter_batches", side_effect=unprepared):
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "prepared policy rows"):
+                benchmark.run_benchmark(self.data, TEST_CONFIG,
+                                        replace(self.config, execution="compile", compile_scope="model-loss"))
 
     def test_no_policy_rows_still_count_updates(self) -> None:
         data = self.runs / "value-only.jsonl"

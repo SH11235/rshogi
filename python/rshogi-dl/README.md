@@ -226,8 +226,8 @@ JSON にも書きます。成果物の保存先・上書き拒否は smoke と�
 fixture での処理時間であり、学習品質や棋力を示しません。
 
 - `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
-- `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
-  の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
+- `--execution eager|compile`: `compile` は `torch.compile` を使います。対象は `--compile-scope` で指定します。
+  optimizer の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
   `--warmup 0` なら初回実行・optimizer 状態の初期化も計測区間に含みます。
 - `--compile-mode default|reduce-overhead|max-autotune|max-autotune-no-cudagraphs`:
@@ -238,7 +238,15 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   各更新の前に graph の反復境界を示します。JSON の `cudagraphs_requested` は設定上の要求であり、
   実際に graph が使われたことは示しません。適用可否や実 kernel は profile で確認してください。
   探索・コンパイル・graph 記録は初回実行を含む startup / warmup (warmup 0 なら計測区間) に入るため、
-  安定後の throughput と合わせて評価してください。loss と optimizer はこの mode の対象外です。
+  安定後の throughput と合わせて評価してください。optimizer はこの mode の対象外です。
+- `--compile-scope model|model-loss`: 既定の `model` はモデルだけを compile します。
+  `model-loss` は同じモデルと policy/value loss をまとめて compile し、`--execution compile` と
+  `--policy-rows prepared` が必須です。全行の policy が無い場合も policy head の勾配を `None` に保ちます。
+  optimizer・GradScaler・backward の呼出しは計測区間の Python 側に残ります。元モデルの parameter と
+  保存形式は共通です。batch 数・合法手幅・policy 対象行数の変化で再 compile が起きる場合、その費用も
+  発生した区間の時間に含まれます。
+  CUDA Graph モードでは shape ごとに記録と memory pool が増えるため、warmup は window の全 batch が
+  一巡する回数以上にし、再 compile／graph 記録が計測区間に入っていないかを profiler 等で確認してください。
 - `--precision fp32|tf32|fp16|bf16`: `fp32` は TF32 無効、`tf32` は FP32 の行列演算で TF32 を許可、
   `fp16` / `bf16` は autocast を使います。FP16 は GradScaler を使い、overflow により省略された
   optimizer 更新数も出します。CUDA が無い場合や対応しない精度は失敗し、CPU へ切り替えません。
@@ -338,3 +346,4 @@ export RSHOGI_LEGACY_PROBE_BIN=$PWD/target/release/examples/evaluate
 fixture を自分で作るときも `encode` の出力 (`tokens` と `labels` の label) を使ってください。
 
 package の追加依存 `cpu` / `cuda` はそれぞれ `onnxruntime` / `onnxruntime-gpu` を選びます。同じ環境に両方をインストールしないでください。`requirements.txt` は CPU 用です。
+

@@ -45,6 +45,7 @@ class BenchmarkConfig:
     attention_backend: str = "explicit"
     execution: str = "eager"
     compile_mode: str = "default"
+    compile_scope: str = "model"
     precision: str = "fp32"
     input_mode: str = "resident"
     policy_rows_mode: str = "prepared"
@@ -64,6 +65,7 @@ class BenchmarkConfig:
         for name, choices in {
             "attention_backend": ATTENTION_BACKENDS,
             "execution": ("eager", "compile"), "compile_mode": COMPILE_MODES,
+            "compile_scope": ("model", "model-loss"),
             "precision": ("fp32", "tf32", "fp16", "bf16"),
             "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
@@ -73,6 +75,11 @@ class BenchmarkConfig:
             raise ValueError("device must be cpu or cuda")
         if self.execution == "eager" and self.compile_mode != "default":
             raise ValueError("non-default compile_mode requires execution=compile")
+        if self.compile_scope == "model-loss":
+            if self.execution != "compile":
+                raise ValueError("model-loss scope requires execution=compile")
+            if self.policy_rows_mode != "prepared":
+                raise ValueError("model-loss scope requires prepared policy rows")
         if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
             raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
@@ -85,6 +92,18 @@ class BenchmarkConfig:
                 raise ValueError(f"{name} must be finite")
             if value < 0 or (positive and value == 0):
                 raise ValueError(f"{name} must be {'positive' if positive else 'non-negative'}")
+
+
+class _ModelLoss(torch.nn.Module):
+    def __init__(self, model: SquareTransformer) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, batch: Batch) -> torch.Tensor:
+        if batch.policy_rows is None:
+            raise BenchmarkError("model-loss scope requires prepared policy rows")
+        policy, value = self.model(batch.tokens)
+        return policy_value_loss(policy, value, batch).total
 
 
 def _batches(path: str | Path, config: BenchmarkConfig) -> Iterator[Batch]:
@@ -185,6 +204,9 @@ def run_benchmark(
         ))
         if not window:
             raise BenchmarkError(f"data needs at least {config.batch_size} records")
+        model_loss_scope = config.compile_scope == "model-loss"
+        if model_loss_scope and any(batch.policy_rows is None for batch in window):
+            raise BenchmarkError("model-loss scope requires prepared policy rows")
         data_digest = hashlib.sha256()
         for batch in window:
             for field in fields(Batch):
@@ -219,8 +241,9 @@ def run_benchmark(
         # 診断で消費した先頭 batch は、計測する両入力方式でも同じ順序に戻す。
         batches = _batches(data_path, config)
         batch_index = 0
+        target = _ModelLoss(model) if model_loss_scope else model
         forward = (
-            torch.compile(model, mode=config.compile_mode) if config.execution == "compile" else model
+            torch.compile(target, mode=config.compile_mode) if config.execution == "compile" else target
         )
         cudagraphs_requested = (
             config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES
@@ -234,8 +257,11 @@ def run_benchmark(
                 torch.compiler.cudagraph_mark_step_begin()
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
-                policy, value = forward(batch.tokens)
-                loss = policy_value_loss(policy, value, batch).total
+                if model_loss_scope:
+                    loss = forward(batch)
+                else:
+                    policy, value = forward(batch.tokens)
+                    loss = policy_value_loss(policy, value, batch).total
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -290,7 +316,7 @@ def run_benchmark(
             "model_config": model_config.to_dict(), "benchmark_config": asdict(config),
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
-            "compile_scope": "model" if config.execution == "compile" else None,
+            "compile_scope": config.compile_scope if config.execution == "compile" else None,
             "cudagraphs_requested": cudagraphs_requested,
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
@@ -318,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
+    parser.add_argument("--compile-scope", choices=("model", "model-loss"), default="model")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
     parser.add_argument(
