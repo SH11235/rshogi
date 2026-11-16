@@ -5,7 +5,7 @@
 //! - `StatsEntry`: 範囲制限付き履歴エントリ
 //! - `ButterflyHistory`: [Color][from_to] -> score
 //! - `LowPlyHistory`: [ply][from_to] -> score
-//! - `CapturePieceToHistory`: [piece][to][captured_pt] -> score
+//! - `CapturePieceToHistory`: [piece][captured_pt][to] -> score
 //! - `PieceToHistory`: [piece][to] -> score
 //! - `ContinuationHistory`: [prev_pc][prev_to][pc][to] -> score
 //! - `CounterMoveHistory`: [piece][square] -> Move
@@ -255,20 +255,20 @@ impl Default for LowPlyHistory {
 // CapturePieceToHistory
 // =============================================================================
 
-/// CapturePieceToHistory: `[piece][to][captured_piece_type]` -> score
+/// CapturePieceToHistory: `[piece][captured_piece_type][to]` -> score
 ///
 /// 捕獲する手の履歴。
 ///
 /// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CapturePieceToHistory {
-    table: [[[StatsEntry<10692>; PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM],
+    table: [[[StatsEntry<10692>; Square::NUM]; PIECE_TYPE_NUM]; PIECE_NUM],
 }
 
 impl CapturePieceToHistory {
     /// 新しいCapturePieceToHistoryを作成
     pub fn new() -> Self {
         Self {
-            table: [[[StatsEntry::default(); PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM],
+            table: [[[StatsEntry::default(); Square::NUM]; PIECE_TYPE_NUM]; PIECE_NUM],
         }
     }
 
@@ -300,8 +300,8 @@ impl CapturePieceToHistory {
         unsafe {
             self.table
                 .get_unchecked(pc.index())
-                .get_unchecked(to.index())
                 .get_unchecked(captured_idx)
+                .get_unchecked(to.index())
                 .get()
         }
     }
@@ -314,8 +314,8 @@ impl CapturePieceToHistory {
         unsafe {
             self.table
                 .get_unchecked(pc.index())
-                .get_unchecked(to.index())
                 .get_unchecked(captured_pt as usize)
+                .get_unchecked(to.index())
                 .get()
         }
     }
@@ -327,8 +327,8 @@ impl CapturePieceToHistory {
         unsafe {
             self.table
                 .get_unchecked_mut(pc.index())
-                .get_unchecked_mut(to.index())
                 .get_unchecked_mut(captured_pt as usize)
+                .get_unchecked_mut(to.index())
                 .update(bonus);
         }
     }
@@ -1017,6 +1017,68 @@ mod tests {
         // NONEの場合はindex=0を使う
         let captured_none = Piece::NONE;
         assert_eq!(history.get_with_captured_piece(pc, to, captured_none), 0);
+    }
+
+    #[test]
+    fn test_capture_piece_to_history_matches_reference_layout() {
+        let mut history = CapturePieceToHistory::new_boxed();
+        let mut reference =
+            vec![StatsEntry::<10692>::default(); PIECE_NUM * Square::NUM * PIECE_TYPE_NUM];
+        let piece_types: [PieceType; PieceType::NUM] =
+            std::array::from_fn(|i| PieceType::from_u8((i + 1) as u8).unwrap());
+        let pieces: Vec<Piece> =
+            std::iter::once(Piece::NONE)
+                .chain([Color::Black, Color::White].into_iter().flat_map(|color| {
+                    piece_types.into_iter().map(move |pt| Piece::make(color, pt))
+                }))
+                .collect();
+
+        for init in [0, CAPTURE_HISTORY_INIT, 1234] {
+            history.clear_with_init(init);
+            for entry in &mut reference {
+                entry.set(init);
+            }
+            for round in 0..3 {
+                for &pc in &pieces {
+                    for to in Square::all() {
+                        for captured_pt in piece_types {
+                            let idx = (pc.index() * Square::NUM + to.index()) * PIECE_TYPE_NUM
+                                + captured_pt as usize;
+                            let bonus = (idx as i32 * 73 + round * 997) % 40001 - 20000;
+                            history.update(pc, to, captured_pt, bonus);
+                            reference[idx].update(bonus);
+                        }
+                    }
+                }
+                for &pc in &pieces {
+                    for to in Square::all() {
+                        assert_eq!(history.get_with_captured_piece(pc, to, Piece::NONE), init);
+                        for captured_pt in piece_types {
+                            let idx = (pc.index() * Square::NUM + to.index()) * PIECE_TYPE_NUM
+                                + captured_pt as usize;
+                            let expected = reference[idx].get();
+                            assert_eq!(history.get(pc, to, captured_pt), expected);
+                            for captured_color in [Color::Black, Color::White] {
+                                let captured = Piece::make(captured_color, captured_pt);
+                                assert_eq!(
+                                    history.get_with_captured_piece(pc, to, captured),
+                                    expected
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        history.clear();
+        assert!(
+            history
+                .table
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|e| e.get() == CAPTURE_HISTORY_INIT)
+        );
     }
 
     #[test]
