@@ -31,7 +31,7 @@ use super::movepicker::piece_value;
 use super::numa::NumaNetwork;
 use super::types::{
     ContHistKey, NodeType, PvTable, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE,
-    SearchedMoveList, StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
+    SearchedMoveList, Stack, StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
 };
 use super::{LimitsType, MovePicker, SearchTuneParams, SharedHistories, TimeManagement};
 
@@ -371,6 +371,31 @@ pub(super) struct Step14Context<'a> {
     pub(super) pawn_history_index: usize, // pawnHistory用インデックス
     pub(super) follow_pv: bool,           // PV ライン追跡中か
     pub(super) pv_node: bool,             // PV ノードか
+}
+
+// 再帰や同一 ply の検証探索をまたいで参照を保持せず、境界の確認だけを再利用する。
+struct StackSlot {
+    index: usize,
+}
+
+impl StackSlot {
+    #[inline]
+    fn new(index: usize) -> Self {
+        assert!(index < STACK_SIZE);
+        Self { index }
+    }
+
+    #[inline]
+    fn get<'a>(&self, stack: &'a StackArray) -> &'a Stack {
+        // SAFETY: index は new で検証済みで不変。参照の寿命は渡された配列に従う。
+        unsafe { stack.get_unchecked(self.index) }
+    }
+
+    #[inline]
+    fn get_mut<'a>(&self, stack: &'a mut StackArray) -> &'a mut Stack {
+        // SAFETY: index は new で検証済みで不変。可変参照は配列の排他的な借用に従う。
+        unsafe { stack.get_unchecked_mut(self.index) }
+    }
 }
 
 // =============================================================================
@@ -2490,6 +2515,9 @@ impl SearchWorker {
             };
         }
 
+        let ss = StackSlot::new(ply as usize);
+        let child_ss = StackSlot::new((ply + 1) as usize);
+
         // 親の PvTable::update はこの ply の行をそのままコピーする。千日手・中断・
         // Mate Distance Pruning 等の早期 return でも兄弟ノードの行を渡さないよう、
         // それらより前に空にする。
@@ -2500,7 +2528,7 @@ impl SearchWorker {
 
         let liveness_nodes = st.nodes;
         if let Some(liveness) = st.depth_liveness.as_mut() {
-            let excluded_search = st.stack[ply as usize].excluded_move.is_some();
+            let excluded_search = ss.get(&st.stack).excluded_move.is_some();
             depth = liveness.update_depth(
                 liveness_nodes,
                 depth,
@@ -2567,22 +2595,20 @@ impl SearchWorker {
         }
 
         // スタック設定
-        // SAFETY: ply < MAX_PLY (246) は上のガードで保証。STACK_SIZE = MAX_PLY + 10 = 256。
-        //         ply+2 < 248 < STACK_SIZE。
-        let ss = unsafe { st.stack.get_unchecked_mut(ply as usize) };
-        ss.in_check = in_check;
-        ss.move_count = 0;
-        ss.stat_score = 0;
+        let entry = ss.get_mut(&mut st.stack);
+        entry.in_check = in_check;
+        entry.move_count = 0;
+        entry.stat_score = 0;
         // (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
         // 兄弟ノード間で cutoff_cnt が蓄積されるように ply+2 を初期化する
+        // SAFETY: ss の検証で ply >= 0、入口のガードで ply < MAX_PLY。ply+2 < STACK_SIZE。
         unsafe { st.stack.get_unchecked_mut((ply + 2) as usize) }.cutoff_cnt = 0;
 
         let prior_reduction = take_prior_reduction(st, ply);
-        // SAFETY: ply < MAX_PLY < STACK_SIZE。
-        unsafe { st.stack.get_unchecked_mut(ply as usize) }.reduction = 0;
+        ss.get_mut(&mut st.stack).reduction = 0;
 
         // Singular Extension用の除外手を取得
-        let excluded_move = unsafe { st.stack.get_unchecked(ply as usize) }.excluded_move;
+        let excluded_move = ss.get(&st.stack).excluded_move;
         // priorCapture は「1手前が捕獲手か」を局面状態から判定
         let prior_capture = pos.captured_piece().is_some();
 
@@ -2785,7 +2811,7 @@ impl SearchWorker {
                 tt_hit,
                 tt_move_exists: tt_move.is_some(),
                 tt_capture,
-                tt_pv: st.stack[ply as usize].tt_pv,
+                tt_pv: ss.get(&st.stack).tt_pv,
                 in_check,
             },
             ctx.tune_params,
@@ -2823,7 +2849,7 @@ impl SearchWorker {
             && depth >= 6
             && tt_move.is_none()
             && prior_reduction <= 3
-            && !st.stack[ply as usize].follow_pv
+            && !ss.get(&st.stack).follow_pv
         {
             depth -= 1;
         }
@@ -2839,7 +2865,7 @@ impl SearchWorker {
             // NMP verification searchが同一plyでsearch_nodeを呼び
             // stack[ply].static_evalを上書きするため、検証後の値を使う。
             // eval_ctx.static_eval は検証前のスナップショットなので使わない。
-            st.stack[ply as usize].static_eval,
+            ss.get(&st.stack).static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
             cut_node,
@@ -2899,7 +2925,7 @@ impl SearchWorker {
             MovePicker::new(pos, tt_move, depth, ply, cont_tables, ctx.generate_all_legal_moves);
 
         // Singular Extension用の変数
-        let tt_pv = st.stack[ply as usize].tt_pv;
+        let tt_pv = ss.get(&st.stack).tt_pv;
         let root_node = NT == NodeType::Root as u8;
 
         // LMPが発火したかどうか
@@ -2933,7 +2959,7 @@ impl SearchWorker {
             }
 
             move_count += 1;
-            st.stack[ply as usize].move_count = move_count;
+            ss.get_mut(&mut st.stack).move_count = move_count;
             // NonPV で探索した手が同点昇格等で best_move になったときに、前の兄弟の行を
             // 子の続きとしてコピーしないよう、手ごとに子の行を空にしておく。
             if pv_node {
@@ -2965,7 +2991,7 @@ impl SearchWorker {
 
             // ttPv時にreductionを増やす
             // SE前のtt_pvを使う必要がある（SE内のsearch_nodeがtt_pvを上書きする可能性がある）
-            if st.stack[ply as usize].tt_pv {
+            if ss.get(&st.stack).tt_pv {
                 r += ctx.tune_params.lmr_ttpv_add;
             }
 
@@ -3002,12 +3028,12 @@ impl SearchWorker {
                 cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
                 // NMP verification searchが同一plyでsearch_nodeを再帰呼び出しし、
                 // compute_eval_contextがstack[ply].static_evalを上書きする。
-                static_eval: st.stack[ply as usize].static_eval,
+                static_eval: ss.get(&st.stack).static_eval,
                 alpha,
                 best_move,
                 pawn_history_index,
                 // SE 前に取得（SE の再帰 search_node が同一 ply の stack を上書きするため）
-                follow_pv: st.stack[ply as usize].follow_pv,
+                follow_pv: ss.get(&st.stack).follow_pv,
                 pv_node,
             };
 
@@ -3059,7 +3085,7 @@ impl SearchWorker {
                 // - その他: ヒューリスティック用途のため多少の誤差は許容される
 
                 let outer_depth_liveness = st.depth_liveness_snapshot(ply);
-                st.stack[ply as usize].excluded_move = mv;
+                ss.get_mut(&mut st.stack).excluded_move = mv;
                 let singular_value = Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
                     ctx,
@@ -3072,13 +3098,13 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                st.stack[ply as usize].excluded_move = Move::NONE;
+                ss.get_mut(&mut st.stack).excluded_move = Move::NONE;
                 st.depth_liveness_restore(ply, outer_depth_liveness);
 
                 // SE再帰呼び出し内の上方伝播により
                 // st.stack[ply].tt_pvが変更される可能性がある。
                 // rshogiではローカル変数tt_pvの再読み込みが必要。
-                let tt_pv = st.stack[ply as usize].tt_pv;
+                let tt_pv = ss.get(&st.stack).tt_pv;
 
                 if singular_value < singular_beta {
                     inc_stat!(st, singular_extension);
@@ -3132,7 +3158,7 @@ impl SearchWorker {
             }
 
             // 指し手を実行
-            st.stack[ply as usize].current_move = mv;
+            ss.get_mut(&mut st.stack).current_move = mv;
             do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
             // ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
@@ -3164,7 +3190,7 @@ impl SearchWorker {
             let tt_value_higher = tt_value > alpha;
             let tt_depth_ge = tt_depth >= depth;
 
-            if st.stack[ply as usize].tt_pv {
+            if ss.get(&st.stack).tt_pv {
                 r -= ctx.tune_params.lmr_step16_ttpv_sub_base
                     + (pv_node as i32) * ctx.tune_params.lmr_step16_ttpv_sub_pv_node
                     + (tt_value_higher as i32) * ctx.tune_params.lmr_step16_ttpv_sub_tt_value
@@ -3191,7 +3217,7 @@ impl SearchWorker {
             }
 
             // cutoffCnt
-            if st.stack[(ply + 1) as usize].cutoff_cnt > 2 {
+            if child_ss.get(&st.stack).cutoff_cnt > 2 {
                 r += ctx.tune_params.lmr_step16_cutoff_count_add
                     + (all_node as i32) * ctx.tune_params.lmr_step16_cutoff_count_all_node_add;
             }
@@ -3227,7 +3253,7 @@ impl SearchWorker {
                 let cont1 = unsafe { cont_hist_ptr_2.as_ref() }.get(moved_piece, mv.to()) as i32;
                 2 * main_hist + cont0 + cont1
             };
-            st.stack[ply as usize].stat_score = stat_score;
+            ss.get_mut(&mut st.stack).stat_score = stat_score;
             r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
             if all_node {
@@ -3250,7 +3276,7 @@ impl SearchWorker {
                 {
                     new_depth = new_depth.max(1);
                 }
-                st.stack[ply as usize].reduction = 0;
+                ss.get_mut(&mut st.stack).reduction = 0;
                 st.set_child_follow_pv(ply, mv);
                 -Self::search_node::<{ NodeType::PV as u8 }>(
                     st,
@@ -3307,7 +3333,7 @@ impl SearchWorker {
                 }
 
                 let reduction_from_parent = new_depth - d;
-                st.stack[ply as usize].reduction = reduction_from_parent;
+                ss.get_mut(&mut st.stack).reduction = reduction_from_parent;
                 st.set_child_follow_pv(ply, mv);
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
@@ -3321,7 +3347,7 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                st.stack[ply as usize].reduction = 0;
+                ss.get_mut(&mut st.stack).reduction = 0;
 
                 if value > alpha {
                     let deeper_threshold = ctx.tune_params.lmr_research_deeper_base
@@ -3356,7 +3382,7 @@ impl SearchWorker {
                         let moved_piece = mv.moved_piece_after();
                         let to_sq = mv.to();
                         for offset in 1..=6 {
-                            if st.stack[ply as usize].in_check && offset > 2 {
+                            if ss.get(&st.stack).in_check && offset > 2 {
                                 break;
                             }
                             let weight = match offset {
@@ -3416,7 +3442,7 @@ impl SearchWorker {
                     {
                         new_depth = new_depth.max(1);
                     }
-                    st.stack[ply as usize].reduction = 0;
+                    ss.get_mut(&mut st.stack).reduction = 0;
                     st.set_child_follow_pv(ply, mv);
                     -Self::search_node::<{ NodeType::PV as u8 }>(
                         st,
@@ -3443,7 +3469,7 @@ impl SearchWorker {
                 non_lmr_depth -=
                     (r > ctx.tune_params.full_depth_r_threshold2 && new_depth > 2) as i32;
 
-                st.stack[ply as usize].reduction = 0;
+                ss.get_mut(&mut st.stack).reduction = 0;
                 st.set_child_follow_pv(ply, mv);
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
@@ -3457,7 +3483,7 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                st.stack[ply as usize].reduction = 0;
+                ss.get_mut(&mut st.stack).reduction = 0;
 
                 // PvNodeでは zero-window で alpha を超えたら full PV再探索する。
                 if pv_node && value > alpha {
@@ -3468,7 +3494,7 @@ impl SearchWorker {
                     {
                         new_depth = new_depth.max(1);
                     }
-                    st.stack[ply as usize].reduction = 0;
+                    ss.get_mut(&mut st.stack).reduction = 0;
                     st.set_child_follow_pv(ply, mv);
                     value = -Self::search_node::<{ NodeType::PV as u8 }>(
                         st,
@@ -3482,7 +3508,7 @@ impl SearchWorker {
                         limits,
                         time_manager,
                     );
-                    st.stack[ply as usize].reduction = 0;
+                    ss.get_mut(&mut st.stack).reduction = 0;
                 }
 
                 value
@@ -3496,7 +3522,7 @@ impl SearchWorker {
                     new_depth = new_depth.max(1);
                 }
 
-                st.stack[ply as usize].reduction = 0;
+                ss.get_mut(&mut st.stack).reduction = 0;
                 st.set_child_follow_pv(ply, mv);
                 -Self::search_node::<{ NodeType::PV as u8 }>(
                     st,
@@ -3548,7 +3574,7 @@ impl SearchWorker {
 
                     if value >= beta {
                         // extension < 2 または PvNode の場合のみインクリメント
-                        st.stack[ply as usize].cutoff_cnt += (extension < 2 || pv_node) as i32;
+                        ss.get_mut(&mut st.stack).cutoff_cnt += (extension < 2 || pv_node) as i32;
                         // Move Ordering品質統計
                         inc_stat_by_depth!(st, cutoff_by_depth, depth);
                         if move_count == 1 {
@@ -3917,7 +3943,7 @@ impl SearchWorker {
                         let parent_move_count = st.stack[prev_ply].move_count;
                         let parent_in_check = st.stack[prev_ply].in_check;
                         let parent_static_eval = st.stack[prev_ply].static_eval;
-                        let static_eval = st.stack[ply as usize].static_eval;
+                        let static_eval = ss.get(&st.stack).static_eval;
 
                         // bonusScale計算
                         let mut bonus_scale: i32 =
@@ -4062,7 +4088,7 @@ impl SearchWorker {
         // fail low 時、親ノードが PV ライン上だったなら現ノードも PV ライン上として扱う。
         // これにより LMR の reduction 調整や Futility Pruning の抑制が適切に機能する。
         if best_value <= alpha {
-            st.stack[ply as usize].tt_pv = st.stack[ply as usize].tt_pv
+            ss.get_mut(&mut st.stack).tt_pv = ss.get(&st.stack).tt_pv
                 || if ply >= 1 {
                     st.stack[(ply - 1) as usize].tt_pv
                 } else {
@@ -4098,7 +4124,7 @@ impl SearchWorker {
                 && tt_ctx.writer.write(
                     tt_ctx.key,
                     value_to_tt(best_value, ply),
-                    st.stack[ply as usize].tt_pv,
+                    ss.get(&st.stack).tt_pv,
                     bound,
                     stored_depth,
                     best_move,
@@ -4114,7 +4140,7 @@ impl SearchWorker {
                     key: tt_ctx.key,
                     depth: stored_depth,
                     bound,
-                    is_pv: st.stack[ply as usize].tt_pv,
+                    is_pv: ss.get(&st.stack).tt_pv,
                     tt_move: best_move,
                     stored_value: value_to_tt(best_value, ply),
                     eval: eval_ctx.unadjusted_static_eval,
@@ -4134,9 +4160,9 @@ impl SearchWorker {
         // bestMove有無で除数が異なる（有: /10, 無: /8）
         // ttPv伝播・TT保存の後に更新する。
         if !(in_check || best_move.is_some() && pos.is_capture(best_move))
-            && (best_value > st.stack[ply as usize].static_eval) == best_move.is_some()
+            && (best_value > ss.get(&st.stack).static_eval) == best_move.is_some()
         {
-            let static_eval = st.stack[ply as usize].static_eval;
+            let static_eval = ss.get(&st.stack).static_eval;
             let divisor = if best_move.is_some() { 10 } else { 8 };
             let bonus = ((best_value.raw() - static_eval.raw()) * depth / divisor)
                 .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
@@ -4173,3 +4199,45 @@ pub(super) fn apply_pass_move_bonus(value: Value, bonus: i32) -> Value {
 ))]
 #[path = "finny_search_tests.rs"]
 mod finny_search_tests;
+
+#[cfg(test)]
+mod stack_slot_tests {
+    use super::{STACK_SIZE, StackSlot, init_stack_array};
+
+    #[test]
+    fn reads_live_entry_after_same_ply_mutation_and_stack_replacement() {
+        let mut stack = init_stack_array();
+        let ss = StackSlot::new(1);
+        ss.get_mut(&mut stack).move_count = 3;
+        assert_eq!(stack[1].move_count, 3);
+
+        stack[1].move_count = 7;
+        assert_eq!(ss.get(&stack).move_count, 7);
+
+        stack = init_stack_array();
+        assert_eq!(ss.get(&stack).move_count, 0);
+    }
+
+    #[test]
+    fn first_and_last_entries_are_independent() {
+        let mut stack = init_stack_array();
+        let first = StackSlot::new(0);
+        let last = StackSlot::new(STACK_SIZE - 1);
+        first.get_mut(&mut stack).cutoff_cnt = 2;
+        last.get_mut(&mut stack).cutoff_cnt = 5;
+        assert_eq!(first.get(&stack).cutoff_cnt, 2);
+        assert_eq!(last.get(&stack).cutoff_cnt, 5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_out_of_bounds_index() {
+        StackSlot::new(STACK_SIZE);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_negative_ply_cast_to_index() {
+        StackSlot::new((-1_i32) as usize);
+    }
+}
