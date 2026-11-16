@@ -2466,6 +2466,8 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        #[cfg(feature = "search-stats")]
+        let mut diag_exit = crate::search::diagnostics::PreloopExit::new();
         inc_stat!(st, nodes_searched);
         inc_stat_by_depth!(st, nodes_by_depth, depth);
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
@@ -2478,6 +2480,12 @@ impl SearchWorker {
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(
+                crate::search::diagnostics::SEARCH_DEPTH_NONPOSITIVE,
+                1,
+            );
+
             return qsearch::<NT>(st, ctx, pos, alpha, beta, ply, limits, time_manager);
         }
 
@@ -2533,6 +2541,10 @@ impl SearchWorker {
             if rep_state.is_repetition() || rep_state.is_superior_inferior() {
                 let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
                 if v != Value::NONE {
+                    #[cfg(feature = "search-stats")]
+                    {
+                        diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_REPETITION;
+                    }
                     if rep_state == RepetitionState::Draw {
                         let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
                         return jittered;
@@ -2587,6 +2599,8 @@ impl SearchWorker {
         let prior_capture = pos.captured_piece().is_some();
 
         // 置換表プローブ（即時カットオフ含む）
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::probe_reason(crate::search::diagnostics::SEARCH_PRELOOP_TT);
         let tt_ctx = match probe_transposition::<NT>(
             st,
             ctx,
@@ -2605,6 +2619,10 @@ impl SearchWorker {
                 tt_move: cutoff_tt_move,
                 tt_capture: cutoff_tt_capture,
             } => {
+                #[cfg(feature = "search-stats")]
+                {
+                    diag_exit.reason = crate::search::diagnostics::last_probe_reason();
+                }
                 inc_stat!(st, tt_cutoff);
                 inc_stat_by_depth!(st, tt_cutoff_by_depth, depth);
 
@@ -2768,6 +2786,10 @@ impl SearchWorker {
             limits,
             time_manager,
         ) {
+            #[cfg(feature = "search-stats")]
+            {
+                diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_RAZORING;
+            }
             return v;
         }
 
@@ -2792,6 +2814,10 @@ impl SearchWorker {
         ) {
             inc_stat!(st, futility_pruned);
             inc_stat_by_depth!(st, futility_by_depth, depth);
+            #[cfg(feature = "search-stats")]
+            {
+                diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_FUTILITY;
+            }
             return v;
         }
 
@@ -2812,6 +2838,10 @@ impl SearchWorker {
             Self::search_node::<{ NodeType::NonPV as u8 }>,
         );
         if let Some(v) = null_value {
+            #[cfg(feature = "search-stats")]
+            {
+                diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_NMP;
+            }
             return v;
         }
         improving = improving_after_null;
@@ -2848,6 +2878,10 @@ impl SearchWorker {
             time_manager,
             Self::search_node::<{ NodeType::NonPV as u8 }>,
         ) {
+            #[cfg(feature = "search-stats")]
+            {
+                diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_PROBCUT;
+            }
             return v;
         }
 
@@ -2865,6 +2899,10 @@ impl SearchWorker {
                 && !beta.is_mate_score()
                 && !tt_value.is_mate_score()
             {
+                #[cfg(feature = "search-stats")]
+                {
+                    diag_exit.reason = crate::search::diagnostics::SEARCH_PRELOOP_PROBCUT;
+                }
                 return small_probcut_beta;
             }
         }
@@ -2872,6 +2910,10 @@ impl SearchWorker {
         // =================================================================
         // 指し手ループ（lazy generation）
         // =================================================================
+        #[cfg(feature = "search-stats")]
+        {
+            diag_exit.active = false;
+        }
         let mut best_value = Value::new(-32001);
         let mut best_move = Move::NONE;
         let mut move_count = 0;
@@ -2980,6 +3022,8 @@ impl SearchWorker {
             if !root_node && !best_value.is_loss() {
                 let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
                 if move_count >= lmp_limit && !lmp_triggered {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::LMP_TRIGGERED, 1);
                     mp.skip_quiets();
                     lmp_triggered = true;
                 }
@@ -3011,6 +3055,8 @@ impl SearchWorker {
                 pv_node,
             };
 
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::see_caller(7, mp.diag_seen(mv));
             match step14_pruning(ctx, step14_ctx) {
                 Step14Outcome::Skip {
                     best_value: updated,

@@ -233,6 +233,9 @@ impl TranspositionTable {
     /// 置換表を検索（クラスター内は16bitキーでマッチング）。
     /// keyとpayloadの一貫性は保証せず、短縮キーと手の整合性で候補を検査する。
     pub fn probe(&self, key: u64, pos: &Position) -> ProbeResult<'_> {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::TT_PROBE, 1);
+
         let cluster = self.first_entry(key, pos.side_to_move());
         let key16 = key as u16;
         let gen8 = self.generation();
@@ -255,6 +258,15 @@ impl TranspositionTable {
                         continue;
                     }
                 }
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(
+                    if entry.is_occupied() {
+                        crate::search::diagnostics::TT_HIT_SLOT_0 + index
+                    } else {
+                        crate::search::diagnostics::TT_MISS
+                    },
+                    1,
+                );
                 return ProbeResult {
                     found: entry.is_occupied(),
                     data,
@@ -269,6 +281,8 @@ impl TranspositionTable {
                 replace = index;
             }
         }
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::TT_MISS, 1);
         ProbeResult {
             found: false,
             data: TTData::EMPTY,
@@ -449,6 +463,8 @@ impl TTWriter<'_> {
         #[cfg(feature = "tt-write-stats")]
         let accepted = entry.accepts_payload(key, is_pv, bound, depth, generation8);
         entry.save(key, value, is_pv, bound, depth, mv, eval, generation8);
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::TT_STORE, 1);
         cluster.store(index, entry);
         #[cfg(feature = "tt-write-stats")]
         self.write_counters.record(before, entry, key, depth, accepted);

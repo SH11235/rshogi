@@ -516,6 +516,8 @@ impl DynamicLayerStacksNetwork {
         let psqt_start = (current * 2 + p) * self.num_buckets;
 
         if matches!(self.feature, RuntimeLsFeature::EffectBucket(_)) {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL, 1);
             let acc = &mut stack.accumulations[start..start + self.spec.l1];
             acc.copy_from_slice(&self.ft_biases);
             let psqt = &mut stack.psqt[psqt_start..psqt_start + self.num_buckets];
@@ -525,6 +527,8 @@ impl DynamicLayerStacksNetwork {
                 psqt.copy_from_slice(&self.psqt_biases);
             }
             for index in self.feature.active(pos, perspective).iter() {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL_ROWS, 1);
                 add_i16(acc, self.ft_row(index));
                 if !self.psqt_weights.is_empty() {
                     add_i32(
@@ -570,6 +574,9 @@ impl DynamicLayerStacksNetwork {
         let current_psqt = &mut psqt[psqt_start..psqt_start + self.num_buckets];
 
         if cache.valid[entry] {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FINNY, 1);
+
             super::stats::count_cache_hit!();
             acc.copy_from_slice(
                 &cache.accumulations[cache_acc_start..cache_acc_start + self.spec.l1],
@@ -624,8 +631,15 @@ impl DynamicLayerStacksNetwork {
                     diff_count += 1;
                 }
             }
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(
+                crate::search::diagnostics::NNUE_FINNY_ROWS,
+                diff_count as u64,
+            );
             super::stats::count_refresh_diff!(diff_count);
         } else {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL, 1);
             super::stats::count_cache_miss!();
             acc.copy_from_slice(&self.ft_biases);
             if self.psqt_biases.is_empty() {
@@ -641,6 +655,8 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(bp, perspective, king_sq)
                     .expect("non-EffectBucket feature");
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL_ROWS, 1);
                 add_i16(acc, self.ft_row(index));
                 if !self.psqt_weights.is_empty() {
                     add_i32(
@@ -675,29 +691,51 @@ impl DynamicLayerStacksNetwork {
         let threat = &mut stack.threat_accumulations[start..start + self.spec.l1];
         threat.fill(0);
         #[cfg(feature = "nnue-threat")]
-        super::threat_features::for_each_active_threat_index(
-            pos,
-            perspective,
-            pos.king_square(perspective),
-            |idx| {
-                let row = &self.threat_weights[idx * self.spec.l1..(idx + 1) * self.spec.l1];
-                for (a, &w) in threat.iter_mut().zip(row) {
-                    *a = a.wrapping_add(i16::from(w));
-                }
-            },
-        );
+        {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_THREAT_FULL, 1);
+            super::threat_features::for_each_active_threat_index(
+                pos,
+                perspective,
+                pos.king_square(perspective),
+                |idx| {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::NNUE_THREAT_FULL_ROWS,
+                        1,
+                    );
+                    let row = &self.threat_weights[idx * self.spec.l1..(idx + 1) * self.spec.l1];
+                    for (a, &w) in threat.iter_mut().zip(row) {
+                        *a = a.wrapping_add(i16::from(w));
+                    }
+                },
+            );
+        }
     }
 
     pub(crate) fn ensure(&self, pos: &Position, stack: &mut DynamicLayerStacksStack) {
+        #[cfg(feature = "search-stats")]
+        let diag_request = crate::search::diagnostics::NnueRequest::new();
         if stack.computed[stack.current] {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ACC_REUSED, 1);
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ANCESTOR_HIST_0, 1);
+
             return;
         }
         if stack.current == 0 {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ACC_FALLBACK, 1);
+
             self.refresh(pos, stack);
             return;
         }
 
         if stack.computed[stack.current - 1] {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ANCESTOR_HIST_1, 1);
+
             self.update_from_previous(pos, stack);
             return;
         }
@@ -710,7 +748,11 @@ impl DynamicLayerStacksNetwork {
             return;
         }
 
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ACC_FALLBACK, 1);
         self.refresh(pos, stack);
+        #[cfg(feature = "search-stats")]
+        drop(diag_request);
     }
 
     fn update_from_previous(&self, pos: &Position, stack: &mut DynamicLayerStacksStack) {
@@ -721,6 +763,8 @@ impl DynamicLayerStacksNetwork {
                 self.refresh_perspective(pos, perspective, stack);
                 continue;
             }
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
             count_update!();
             let p = perspective.index();
             let l1 = self.spec.l1;
@@ -769,6 +813,12 @@ impl DynamicLayerStacksNetwork {
     ) -> bool {
         let current = stack.current;
         debug_assert!(source < current);
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            crate::search::diagnostics::NNUE_ANCESTOR_HIST_0 + (current - source).min(8),
+            1,
+        );
+
         for perspective in [Color::Black, Color::White] {
             let p = perspective.index();
             let l1 = self.spec.l1;
@@ -788,6 +838,8 @@ impl DynamicLayerStacksNetwork {
 
             for index in source + 1..=current {
                 let dirty = stack.dirty[index];
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
                 count_update!();
                 let fast_applied = self.try_apply_dirty_piece_fast(
                     current_acc,
@@ -825,6 +877,12 @@ impl DynamicLayerStacksNetwork {
         removed: &IndexList<MAX_CHANGED_FEATURES>,
         added: &IndexList<MAX_CHANGED_FEATURES>,
     ) {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+            (removed.len() + added.len()) as u64,
+        );
+
         match (removed.len(), added.len()) {
             (1, 1) => {
                 sub_add_i16(accumulation, self.ft_row(removed.get(0)), self.ft_row(added.get(0)))
@@ -896,6 +954,8 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(new, perspective, king_sq)
                     .expect("non-EffectBucket feature");
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_DIFF_ROWS, 2);
                 sub_add_i16(accumulation, self.ft_row(sub), self.ft_row(add));
                 true
             }
@@ -921,6 +981,8 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(new1, perspective, king_sq)
                     .expect("non-EffectBucket feature");
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_DIFF_ROWS, 4);
                 double_sub_add_i16(
                     accumulation,
                     self.ft_row(sub0),

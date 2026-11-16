@@ -8,6 +8,8 @@
 //! - 静止探索（Quiescence Search）
 //! - 各種枝刈り（NMP, LMR, Futility, SEE, Razoring, Singular Extension）
 
+#[cfg(feature = "search-stats")]
+pub(crate) mod diagnostics;
 mod stats;
 
 mod alpha_beta;

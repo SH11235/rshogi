@@ -320,8 +320,17 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
     // excludedMoveがある場合も実施しない（詰みがあればsingular前にbeta cutするため）
     if NT != NodeType::Root as u8 && !in_check && !tt_hit && excluded_move.is_none() {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::MATE_SEARCH_CALLS, 1);
         let mate_move = pos.mate_1ply();
         if mate_move.is_some() {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::probe_reason(
+                crate::search::diagnostics::SEARCH_PRELOOP_MATE1,
+            );
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::MATE_SEARCH_FOUND, 1);
+
             let value = Value::mate_in(ply + 1);
             let stored_value = value_to_tt(value, ply);
             let mate1_depth_boost = {
@@ -394,6 +403,10 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     if NT != NodeType::Root as u8 && (tt_move.is_none() || pv_node) {
         let decl_move = pos.declaration_win(ctx.entering_king_rule);
         if decl_move.is_some() && decl_move != excluded_move {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::probe_reason(
+                crate::search::diagnostics::SEARCH_PRELOOP_DECLARATION,
+            );
             // 1手詰めと同様、次の node で指し手がなくなって詰むという解釈
             return ProbeOutcome::Cutoff {
                 value: Value::mate_in(ply + 1),

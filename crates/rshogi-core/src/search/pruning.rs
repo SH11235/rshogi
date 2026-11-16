@@ -106,6 +106,9 @@ pub(super) fn step14_pruning(
                     + captured_value
                     + tune.step14_futility_capt_hist_scale * capt_hist / 1024;
                 if futility_value <= step_ctx.alpha.raw() {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::STEP14_FUTILITY, 1);
+
                     return Step14Outcome::Skip { best_value: None };
                 }
             }
@@ -114,7 +117,12 @@ pub(super) fn step14_pruning(
             // alpha >= VALUE_DRAW 条件を追加
             if step_ctx.alpha >= Value::DRAW {
                 let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::set_see_source(0);
                 if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::STEP14_SEE, 1);
+
                     return Step14Outcome::Skip { best_value: None };
                 }
             }
@@ -150,6 +158,9 @@ pub(super) fn step14_pruning(
 
             // Continuation history based pruning
             if cont_history < tune.cont_history_pruning_threshold * step_ctx.depth {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::STEP14_HISTORY, 1);
+
                 return Step14Outcome::Skip { best_value: None };
             }
 
@@ -172,6 +183,9 @@ pub(super) fn step14_pruning(
 
             // static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
             if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::STEP14_FUTILITY, 1);
+
                 // bestValueをfutilityValueで更新する条件
                 // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
                 let futility_val = Value::new(futility_value);
@@ -192,7 +206,12 @@ pub(super) fn step14_pruning(
             let lmr_depth_clamped = lmr_depth.max(0);
             let see_thresh =
                 tune.see_pruning_threshold_mult * lmr_depth_clamped * lmr_depth_clamped;
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::set_see_source(1);
             if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(see_thresh)) {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::STEP14_SEE, 1);
+
                 return Step14Outcome::Skip { best_value: None };
             }
         }

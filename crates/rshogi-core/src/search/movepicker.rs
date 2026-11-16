@@ -156,6 +156,12 @@ pub struct MovePicker {
 
     // 状態
     stage: Stage,
+    #[cfg(feature = "search-stats")]
+    diag_last_stage: Option<Stage>,
+    #[cfg(feature = "search-stats")]
+    diag_seen: [Move; crate::movegen::MAX_MOVES],
+    #[cfg(feature = "search-stats")]
+    diag_seen_len: usize,
     tt_move: Move,
     probcut_threshold: Option<Value>,
     /// 探索の深さ（部分ソートの閾値計算に使用）
@@ -225,6 +231,12 @@ impl MovePicker {
         Self {
             continuation_history,
             stage,
+            #[cfg(feature = "search-stats")]
+            diag_last_stage: None,
+            #[cfg(feature = "search-stats")]
+            diag_seen: [Move::NONE; crate::movegen::MAX_MOVES],
+            #[cfg(feature = "search-stats")]
+            diag_seen_len: 0,
             tt_move,
             probcut_threshold: None,
             depth,
@@ -263,6 +275,12 @@ impl MovePicker {
         Self {
             continuation_history,
             stage,
+            #[cfg(feature = "search-stats")]
+            diag_last_stage: None,
+            #[cfg(feature = "search-stats")]
+            diag_seen: [Move::NONE; crate::movegen::MAX_MOVES],
+            #[cfg(feature = "search-stats")]
+            diag_seen_len: 0,
             tt_move,
             probcut_threshold: None,
             depth: DEPTH_QS,
@@ -304,6 +322,12 @@ impl MovePicker {
         Self {
             continuation_history,
             stage,
+            #[cfg(feature = "search-stats")]
+            diag_last_stage: None,
+            #[cfg(feature = "search-stats")]
+            diag_seen: [Move::NONE; crate::movegen::MAX_MOVES],
+            #[cfg(feature = "search-stats")]
+            diag_seen_len: 0,
             tt_move,
             probcut_threshold: Some(threshold),
             depth: DEPTH_QS,
@@ -326,6 +350,25 @@ impl MovePicker {
     ///
     /// フラグのみ設定する。実際のステージ遷移は next_move() 側で処理される。
     pub fn skip_quiets(&mut self) {
+        #[cfg(feature = "search-stats")]
+        if !self.skip_quiets && self.end_generated > self.end_captures {
+            let remaining = (self.end_captures..self.end_generated)
+                .filter(|&i| {
+                    let ext = self.moves.get(i);
+                    ext.mv != self.tt_move
+                        && match self.stage {
+                            Stage::GoodQuiet => i >= self.cur || ext.value <= -14000,
+                            Stage::BadCapture => ext.value <= -14000,
+                            Stage::BadQuiet => i >= self.cur && ext.value <= -14000,
+                            _ => false,
+                        }
+                })
+                .count();
+            crate::search::diagnostics::add(
+                crate::search::diagnostics::LMP_QUIETS_SUPPRESSED,
+                remaining as u64,
+            );
+        }
         self.skip_quiets = true;
     }
 
@@ -371,6 +414,14 @@ impl MovePicker {
         shared: &SharedHistories,
     ) -> Move {
         loop {
+            #[cfg(feature = "search-stats")]
+            if self.diag_last_stage != Some(self.stage) {
+                crate::search::diagnostics::add(
+                    crate::search::diagnostics::PICKER_STAGE_0 + self.stage as usize,
+                    1,
+                );
+                self.diag_last_stage = Some(self.stage);
+            }
             match self.stage {
                 // ==============================
                 // TT手を返す
@@ -408,6 +459,17 @@ impl MovePicker {
                     };
                     self.end_cur = count;
                     self.end_captures = count;
+                    #[cfg(feature = "search-stats")]
+                    {
+                        use crate::search::diagnostics as d;
+                        let base = match self.stage {
+                            Stage::CaptureInit => d::CAPTURE_INIT,
+                            Stage::QCaptureInit => d::QCAPTURE_INIT,
+                            _ => d::PROBCUT_INIT,
+                        };
+                        d::add(base, 1);
+                        d::add(base + 1, count as u64);
+                    }
 
                     self.score_captures(pos, history);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
@@ -458,6 +520,13 @@ impl MovePicker {
                         let quiet_count = self.end_cur - self.end_captures;
                         debug_assert!(self.end_captures <= self.moves.len());
                         // SAFETY: end_captures <= moves.len() は MovePicker の不変条件。
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::quiet_init(
+                            pos,
+                            self.depth,
+                            &self.moves.as_slice()[self.end_captures..self.end_generated],
+                            limit,
+                        );
                         let sorted_end = partial_insertion_sort(
                             unsafe {
                                 self.moves.as_mut_slice().get_unchecked_mut(self.end_captures..)
@@ -482,6 +551,8 @@ impl MovePicker {
                     if !self.skip_quiets {
                         self.end_cur = self.end_generated;
                         if let Some(m) = self.select_good_quiet() {
+                            #[cfg(feature = "search-stats")]
+                            crate::search::diagnostics::quiet_returned(self.depth);
                             return m;
                         }
                     }
@@ -514,6 +585,8 @@ impl MovePicker {
                         // endCaptures から全quiet手を再走査し、
                         // value <= GOOD_QUIET_THRESHOLD の手のみ返す
                         if let Some(m) = self.select_bad_quiet() {
+                            #[cfg(feature = "search-stats")]
+                            crate::search::diagnostics::quiet_returned(self.depth);
                             return m;
                         }
                     }
@@ -541,6 +614,13 @@ impl MovePicker {
                     self.end_cur = count;
                     self.end_generated = count;
 
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::EVASION_INIT, 1);
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::EVASION_GENERATED,
+                        count as u64,
+                    );
                     self.score_evasions(pos, history);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
@@ -572,6 +652,11 @@ impl MovePicker {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "search-stats")]
+    pub(crate) fn diag_seen(&self, mv: Move) -> bool {
+        self.diag_seen[..self.diag_seen_len].contains(&mv)
     }
 
     // =========================================================================
@@ -629,7 +714,15 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to) && {
+                    #[cfg(feature = "search-stats")]
+                    {
+                        self.diag_seen[self.diag_seen_len] = m;
+                        self.diag_seen_len += 1;
+                        crate::search::diagnostics::see_caller(2, false);
+                    }
+                    pos.see_ge(m, Value::new(-75))
+                } {
                     value += 16384;
                 }
 
@@ -654,7 +747,15 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to) && {
+                    #[cfg(feature = "search-stats")]
+                    {
+                        self.diag_seen[self.diag_seen_len] = m;
+                        self.diag_seen_len += 1;
+                        crate::search::diagnostics::see_caller(2, false);
+                    }
+                    pos.see_ge(m, Value::new(-75))
+                } {
                     value += 16384;
                 }
 
@@ -707,6 +808,12 @@ impl MovePicker {
 
             // SEEで閾値以上の手のみ
             let threshold = Value::new(-ext.value / 18);
+            #[cfg(feature = "search-stats")]
+            {
+                self.diag_seen[self.diag_seen_len] = ext.mv;
+                self.diag_seen_len += 1;
+                crate::search::diagnostics::see_caller(5, false);
+            }
             if pos.see_ge(ext.mv, threshold) {
                 return Some(ext.mv);
             } else {
@@ -781,6 +888,12 @@ impl MovePicker {
                 continue;
             }
 
+            #[cfg(feature = "search-stats")]
+            {
+                self.diag_seen[self.diag_seen_len] = ext.mv;
+                self.diag_seen_len += 1;
+                crate::search::diagnostics::see_caller(6, false);
+            }
             if pos.see_ge(ext.mv, threshold) {
                 return Some(ext.mv);
             }
@@ -841,6 +954,8 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
                 let mut q = sorted_end;
                 while q > 0 && (*base.add(q - 1)).value < tmp.value {
                     *base.add(q) = *base.add(q - 1);
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::SORT_SHIFTS, 1);
                     q -= 1;
                 }
                 *base.add(q) = tmp;
