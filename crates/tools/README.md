@@ -6,6 +6,7 @@
 |---|---|
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
+| 探索結果の一致を検証する（`--strict` で nodes・score・PV・bestmove、未完了・欠損を判定） | [compare_nodes](docs/compare_nodes.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
 | 探索定数を SPSA で調整する (複数の機械の worker に対局を任せる `--remote-worker`、run-dir の写しの照合 `--verify-resume` も) | [spsa](docs/spsa.md) / [運用手順](docs/spsa_runbook.md) |
 | 自己対局 (先後交換ペア、`--unpaired` で単局も可) の定跡出口と、勝たなかった側が途中で有利になった局面 (`--chance-cp`) を件数と少数の ID 見本で集計し、木のキューの行と既存の木への不足手順の更新行を作る | [book_mine tree seeds](docs/book_mine.md#tree-seeds-自己対局から次に読む根を作る) |
