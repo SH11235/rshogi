@@ -131,10 +131,6 @@ policy target は合法手の元の並びで合計1に正規化します。`poli
 
 配列はconverterが書くNPY 1.0形式です。readerは最大1024 bytesのheaderを先に検査し、期待するshape・dtype・C順序・ファイル長が一致してからmappingを作ります。空の合法手配列でも、headerに書かれた件数から先にメモリを確保しません。
 
-manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
-生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
-`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
-
 ```python
 import os
 from pathlib import Path
