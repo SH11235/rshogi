@@ -408,6 +408,7 @@ pub(super) fn qsearch<const NT: u8>(
         move_count += 1;
 
         if !best_value.is_loss() {
+            let mut see_result = super::movepicker::SeeResult::Unknown;
             if !gives_check
                 && (!prev_move.is_normal() || mv.to() != prev_move.to())
                 && futility_base != Value::NONE
@@ -425,7 +426,10 @@ pub(super) fn qsearch<const NT: u8>(
                     continue;
                 }
 
-                if !pos.see_ge(mv, alpha - futility_base) {
+                let threshold = alpha - futility_base;
+                see_result =
+                    super::movepicker::SeeResult::test(pos, mv, threshold.max(Value::new(-78)));
+                if !see_result.see_ge(pos, mv, threshold) {
                     inc_stat!(st, qs_futility_pruned);
                     // SEE で alpha - futility_base を下回った場合、
                     // best_value を futility_base（楽観的上限）で更新する。
@@ -440,7 +444,7 @@ pub(super) fn qsearch<const NT: u8>(
                 continue;
             }
 
-            if !pos.see_ge(mv, Value::new(-78)) {
+            if !see_result.see_ge(pos, mv, Value::new(-78)) {
                 inc_stat!(st, qs_see_margin_pruned);
                 continue;
             }

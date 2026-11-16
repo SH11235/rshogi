@@ -26,7 +26,7 @@ use super::history::{
     LOW_PLY_HISTORY_SIZE, continuation_history_bonus_with_offset, continuation_history_weight,
     low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
 };
-use super::movepicker::piece_value;
+use super::movepicker::{SeeResult, piece_value};
 #[cfg(target_os = "linux")]
 use super::numa::NumaNetwork;
 use super::types::{
@@ -355,6 +355,7 @@ pub(super) struct FutilityParams {
 pub(super) struct Step14Context<'a> {
     pub(super) pos: &'a Position,
     pub(super) mv: Move,
+    pub(super) see_result: SeeResult,
     pub(super) depth: Depth,
     pub(super) ply: i32,
     pub(super) best_value: Value,
@@ -2988,6 +2989,7 @@ impl SearchWorker {
             let step14_ctx = Step14Context {
                 pos,
                 mv,
+                see_result: mp.last_see_result(),
                 depth: original_depth,
                 ply,
                 best_value,

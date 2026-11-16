@@ -43,6 +43,42 @@ use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum SeeResult {
+    #[default]
+    Unknown,
+    Passed(Value),
+    Failed(Value),
+}
+
+impl SeeResult {
+    #[inline]
+    pub(super) fn test(pos: &Position, mv: Move, threshold: Value) -> Self {
+        if pos.see_ge(mv, threshold) {
+            Self::Passed(threshold)
+        } else {
+            Self::Failed(threshold)
+        }
+    }
+
+    #[inline]
+    pub(super) fn see_ge(self, pos: &Position, mv: Move, threshold: Value) -> bool {
+        // 同じ局面・手なら SEE は閾値に対して単調で、逆側の閾値だけ再計算が必要。
+        match self {
+            Self::Passed(bound) if threshold <= bound => true,
+            Self::Failed(bound) if threshold >= bound => false,
+            _ => pos.see_ge(mv, threshold),
+        }
+    }
+}
+
+const QUIET_SEE_CACHE_SIZE: usize = 16;
+
+#[inline]
+fn quiet_see_index(mv: Move) -> usize {
+    ((mv.raw() ^ (mv.raw() >> 7)) as usize) & (QUIET_SEE_CACHE_SIZE - 1)
+}
+
 // =============================================================================
 // Stage（指し手生成の段階）
 // =============================================================================
@@ -158,6 +194,8 @@ pub struct MovePicker {
     stage: Stage,
     tt_move: Move,
     probcut_threshold: Option<Value>,
+    last_see_result: SeeResult,
+    quiet_see_passed: Option<[Move; QUIET_SEE_CACHE_SIZE]>,
     /// 探索の深さ（部分ソートの閾値計算に使用）
     depth: Depth,
     ply: i32,
@@ -227,6 +265,8 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: None,
+            last_see_result: SeeResult::Unknown,
+            quiet_see_passed: None,
             depth,
             ply,
             skip_quiets: false,
@@ -265,6 +305,8 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: None,
+            last_see_result: SeeResult::Unknown,
+            quiet_see_passed: None,
             depth: DEPTH_QS,
             ply,
             skip_quiets: false,
@@ -306,6 +348,8 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: Some(threshold),
+            last_see_result: SeeResult::Unknown,
+            quiet_see_passed: None,
             depth: DEPTH_QS,
             ply,
             skip_quiets: false,
@@ -370,6 +414,7 @@ impl MovePicker {
         history: &HistoryTables,
         shared: &SharedHistories,
     ) -> Move {
+        self.last_see_result = SeeResult::Unknown;
         loop {
             match self.stage {
                 // ==============================
@@ -482,6 +527,7 @@ impl MovePicker {
                     if !self.skip_quiets {
                         self.end_cur = self.end_generated;
                         if let Some(m) = self.select_good_quiet() {
+                            self.last_see_result = self.quiet_see_result(m);
                             return m;
                         }
                     }
@@ -497,6 +543,9 @@ impl MovePicker {
                 // ==============================
                 Stage::BadCapture => {
                     if let Some(m) = self.select_simple() {
+                        // history は兄弟探索で変わるため、選別時のスコアから閾値を復元する。
+                        self.last_see_result =
+                            SeeResult::Failed(Value::new(-self.moves.get(self.cur - 1).value / 18));
                         return m;
                     }
 
@@ -514,6 +563,7 @@ impl MovePicker {
                         // endCaptures から全quiet手を再走査し、
                         // value <= GOOD_QUIET_THRESHOLD の手のみ返す
                         if let Some(m) = self.select_bad_quiet() {
+                            self.last_see_result = self.quiet_see_result(m);
                             return m;
                         }
                     }
@@ -599,6 +649,7 @@ impl MovePicker {
 
     /// 静かな手のスコアを計算
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables, shared: &SharedHistories) {
+        let see_passed = self.quiet_see_passed.insert([Move::NONE; QUIET_SEE_CACHE_SIZE]);
         let us = self.side_to_move;
         let pawn_idx = shared.pawn_history_index(self.pawn_key);
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
@@ -630,6 +681,7 @@ impl MovePicker {
                 value += ch5.get(pc, to) as i32;
 
                 if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                    see_passed[quiet_see_index(m)] = m;
                     value += 16384;
                 }
 
@@ -655,6 +707,7 @@ impl MovePicker {
                 value += ch5.get(pc, to) as i32;
 
                 if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                    see_passed[quiet_see_index(m)] = m;
                     value += 16384;
                 }
 
@@ -694,6 +747,24 @@ impl MovePicker {
     // ヘルパー
     // =========================================================================
 
+    /// 直前に返した手の SEE 結果。同じ局面・手のまま使うこと。
+    pub(super) fn last_see_result(&self) -> SeeResult {
+        self.last_see_result
+    }
+
+    fn quiet_see_result(&self, mv: Move) -> SeeResult {
+        // 衝突は再利用を諦めるだけで、手全体が一致した結果のみを使う。
+        if self
+            .quiet_see_passed
+            .as_ref()
+            .is_some_and(|cache| cache[quiet_see_index(mv)] == mv)
+        {
+            SeeResult::Passed(Value::new(-75))
+        } else {
+            SeeResult::Unknown
+        }
+    }
+
     /// 良い捕獲手を選択（SEE >= threshold）
     fn select_good_capture(&mut self, pos: &Position) -> Option<Move> {
         while self.cur < self.end_cur {
@@ -708,6 +779,7 @@ impl MovePicker {
             // SEEで閾値以上の手のみ
             let threshold = Value::new(-ext.value / 18);
             if pos.see_ge(ext.mv, threshold) {
+                self.last_see_result = SeeResult::Passed(threshold);
                 return Some(ext.mv);
             } else {
                 // 悪い捕獲手は後回し
@@ -895,6 +967,95 @@ mod tests {
     }
 
     #[test]
+    fn see_result_pair_preserves_pruning_reason() {
+        use crate::movegen::{MoveList, generate_legal_all};
+
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/4r4/3p1p3/4S4/9/9/9/4K4 b RBGSNLP 1").unwrap();
+        let mut moves = MoveList::new();
+        generate_legal_all(&pos, &mut moves);
+        let margin = Value::new(-78);
+        for &mv in moves.iter() {
+            for threshold in [-15000, -1000, -79, -78, -77, 0, 90, 1000, 15000] {
+                let threshold = Value::new(threshold);
+                let known = SeeResult::test(&pos, mv, threshold.max(margin));
+                let direct = if !pos.see_ge(mv, threshold) {
+                    0
+                } else if !pos.see_ge(mv, margin) {
+                    1
+                } else {
+                    2
+                };
+                let reused = if !known.see_ge(&pos, mv, threshold) {
+                    0
+                } else if !known.see_ge(&pos, mv, margin) {
+                    1
+                } else {
+                    2
+                };
+                assert_eq!(reused, direct, "{} threshold={threshold:?}", mv.to_usi());
+            }
+        }
+    }
+
+    #[test]
+    fn quiet_see_cache_requires_exact_move() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mut picker =
+            MovePicker::new(&pos, Move::NONE, 1, 0, [ContHistKey::null_sentinel(); 6], false);
+        let first = pos.to_move(Move::from_usi("7g7f").unwrap()).unwrap();
+        let collision = Square::all()
+            .map(|sq| Move::new_drop(PieceType::Gold, sq))
+            .find(|&mv| mv != first && quiet_see_index(mv) == quiet_see_index(first))
+            .unwrap();
+        picker.quiet_see_passed = Some([Move::NONE; QUIET_SEE_CACHE_SIZE]);
+        picker.quiet_see_passed.as_mut().unwrap()[quiet_see_index(first)] = first;
+        assert!(matches!(picker.quiet_see_result(first), SeeResult::Passed(_)));
+        assert!(matches!(picker.quiet_see_result(collision), SeeResult::Unknown));
+        picker.quiet_see_passed.as_mut().unwrap()[quiet_see_index(collision)] = collision;
+        assert!(matches!(picker.quiet_see_result(first), SeeResult::Unknown));
+        assert!(matches!(picker.quiet_see_result(collision), SeeResult::Passed(_)));
+    }
+
+    #[test]
+    fn capture_see_bound_survives_history_changes() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/5r3/3p1p3/4S4/9/9/9/4K4 b - 1").unwrap();
+        let mut history = HistoryTables::new_boxed();
+        let mut picker =
+            MovePicker::new(&pos, Move::NONE, 1, 0, [ContHistKey::null_sentinel(); 6], false);
+        picker.skip_quiets();
+        let mut passed = 0;
+        let mut failed = 0;
+        while picker.next_move(&pos, &history, shared()).is_some() {
+            match picker.last_see_result() {
+                SeeResult::Passed(_) => passed += 1,
+                SeeResult::Failed(_) => failed += 1,
+                SeeResult::Unknown => panic!("捕獲手の SEE 結果がない"),
+            }
+            let mv = picker.moves.get(picker.cur - 1).mv;
+            let bound = match picker.last_see_result() {
+                SeeResult::Passed(bound) | SeeResult::Failed(bound) => bound,
+                SeeResult::Unknown => unreachable!(),
+            };
+            let expected = pos.see_ge(mv, bound);
+            assert_eq!(expected, matches!(picker.last_see_result(), SeeResult::Passed(_)));
+            for ext in picker.moves.as_slice() {
+                let captured = pos.piece_on(ext.mv.to());
+                history.capture_history.update(
+                    ext.mv.moved_piece_after(),
+                    ext.mv.to(),
+                    captured.piece_type(),
+                    10000,
+                );
+            }
+        }
+        assert!(passed > 0);
+        assert!(failed > 0);
+    }
+
+    #[test]
     fn continuation_keys_do_not_retain_owner() {
         let mut pos = Position::new();
         pos.set_hirate();
@@ -1020,6 +1181,11 @@ mod tests {
             let mv = picker.next_move(pos, history, shared());
             if mv.is_none() {
                 break;
+            }
+            match picker.last_see_result() {
+                SeeResult::Passed(bound) => assert!(pos.see_ge(mv, bound)),
+                SeeResult::Failed(bound) => assert!(!pos.see_ge(mv, bound)),
+                SeeResult::Unknown => {}
             }
             assert!(
                 pos.pseudo_legal(mv),

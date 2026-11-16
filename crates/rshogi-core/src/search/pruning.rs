@@ -114,7 +114,7 @@ pub(super) fn step14_pruning(
             // alpha >= VALUE_DRAW 条件を追加
             if step_ctx.alpha >= Value::DRAW {
                 let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
-                if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
+                if !step_ctx.see_result.see_ge(step_ctx.pos, step_ctx.mv, Value::new(-margin)) {
                     return Step14Outcome::Skip { best_value: None };
                 }
             }
@@ -192,7 +192,7 @@ pub(super) fn step14_pruning(
             let lmr_depth_clamped = lmr_depth.max(0);
             let see_thresh =
                 tune.see_pruning_threshold_mult * lmr_depth_clamped * lmr_depth_clamped;
-            if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(see_thresh)) {
+            if !step_ctx.see_result.see_ge(step_ctx.pos, step_ctx.mv, Value::new(see_thresh)) {
                 return Step14Outcome::Skip { best_value: None };
             }
         }

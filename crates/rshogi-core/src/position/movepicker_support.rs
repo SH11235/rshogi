@@ -764,6 +764,57 @@ mod tests {
     }
 
     #[test]
+    fn see_ge_is_monotone_in_threshold() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        for sfen in [
+            None,
+            Some("k8/9/9/9/4r4/9/9/9/4K4 b RBGSNLP 1"),
+            Some("4k4/9/9/4p4/4P4/9/9/9/4K4 w RBGSNLPrbgsnlp 1"),
+        ] {
+            for seed in [0x5EED_u64, 0xCAFE] {
+                let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+                let mut pos = Position::new();
+                if let Some(sfen) = sfen {
+                    pos.set_sfen(sfen).unwrap();
+                } else {
+                    pos.set_hirate();
+                }
+                for _ in 0..64 {
+                    let mut moves = MoveList::new();
+                    generate_legal_all(&pos, &mut moves);
+                    if moves.is_empty() {
+                        break;
+                    }
+                    let mut thresholds = vec![-15001, -15000, -78, -75, -1, 0, 1, 15000, 15001];
+                    for _ in 0..32 {
+                        thresholds.push(rng.random_range(-1600..=1600));
+                    }
+                    thresholds.sort_unstable();
+                    for &mv in moves.iter() {
+                        let mut failed = false;
+                        for &threshold in &thresholds {
+                            let passed = pos.see_ge(mv, Value::new(threshold));
+                            assert!(
+                                !failed || !passed,
+                                "{} {} threshold={threshold}",
+                                pos.to_sfen(),
+                                mv.to_usi()
+                            );
+                            failed |= !passed;
+                        }
+                    }
+                    let mv = moves.at(rng.random_range(0..moves.len()));
+                    let gives_check = pos.gives_check(mv);
+                    pos.do_move(mv, gives_check);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_see_ge_simple_capture() {
         let mut pos = Position::new();
         let sq55 = Square::new(File::File5, Rank::Rank5);
