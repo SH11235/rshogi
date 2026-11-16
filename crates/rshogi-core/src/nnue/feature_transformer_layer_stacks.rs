@@ -35,6 +35,27 @@ use std::marker::PhantomData;
 #[path = "ls_finny_tests.rs"]
 mod ls_finny_tests;
 
+#[cfg(all(
+    feature = "nnue-threat",
+    any(
+        test,
+        all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )
+    )
+))]
+const THREAT_PAIR_INPUT_ORDER: [i64; 8] = {
+    let mut order = [0; 8];
+    let mut block = 0;
+    while block < order.len() {
+        order[block] = (block / 2 + (block % 2) * 4) as i64;
+        block += 1;
+    }
+    order
+};
+
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
 #[inline(never)]
@@ -701,9 +722,10 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             unsafe {
                 use std::arch::x86_64::*;
                 let ones = _mm512_set1_epi8(1);
-                // unpack は128bit lane単位なので、64bitブロックを先に並べ替える。
-                // 保存配置を保つことで mmap と単独行更新も同じ重みを使える。
-                let order = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
+                // unpack は128bit lane単位なので、各 lane に前半・後半の8要素を組に置く。
+                // lo が元の0..32、hi が32..64となり、保存配置と一致する。
+                let [a, b, c, d, e, f, g, h] = THREAT_PAIR_INPUT_ORDER;
+                let order = _mm512_setr_epi64(a, b, c, d, e, f, g, h);
                 for offset in (0..L1).step_by(256) {
                     let mut tile = [_mm512_setzero_si512(); 8];
                     for (k, v) in tile.iter_mut().enumerate() {
@@ -2701,6 +2723,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn avx512_threat_pair_lane_order_matches_scalar() {
+        fn permute(row: [i8; 64]) -> [i8; 64] {
+            std::array::from_fn(|i| row[THREAT_PAIR_INPUT_ORDER[i / 8] as usize * 8 + i % 8])
+        }
+
+        fn unpack(a: [i8; 64], b: [i8; 64], high: bool) -> [i8; 64] {
+            std::array::from_fn(|i| {
+                let lane = i / 16;
+                let source = lane * 16 + usize::from(high) * 8 + (i % 16) / 2;
+                if i % 2 == 0 { a[source] } else { b[source] }
+            })
+        }
+
+        let a = std::array::from_fn::<_, 64, _>(|i| i as i8);
+        let b = std::array::from_fn::<_, 64, _>(|i| (i as i16 - 128) as i8);
+        let expected: [i16; 64] = std::array::from_fn(|i| i16::from(a[i]) + i16::from(b[i]));
+        let a = permute(a);
+        let b = permute(b);
+        let mut actual = [0i16; 64];
+        for (high, half) in actual.as_chunks_mut::<32>().0.iter_mut().enumerate() {
+            let interleaved = unpack(a, b, high != 0);
+            for (sum, pair) in half.iter_mut().zip(interleaved.as_chunks::<2>().0) {
+                *sum = i16::from(pair[0]) + i16::from(pair[1]);
+            }
+        }
+        assert_eq!(actual, expected);
     }
 
     #[cfg(feature = "nnue-threat")]
