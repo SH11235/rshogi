@@ -6,8 +6,8 @@ use super::board_effect::{
     update_by_dropping_piece, update_by_no_capturing_piece,
 };
 use super::state::{
-    CS_IDX_BISHOP, CS_IDX_DRAGON, CS_IDX_GOLD, CS_IDX_HORSE, CS_IDX_KNIGHT, CS_IDX_LANCE,
-    CS_IDX_PAWN, CS_IDX_ROOK, CS_IDX_SILVER, StateInfo, check_sq_index,
+    CHECK_SQUARES_SIZE, CS_IDX_BISHOP, CS_IDX_DRAGON, CS_IDX_GOLD, CS_IDX_HORSE, CS_IDX_KNIGHT,
+    CS_IDX_LANCE, CS_IDX_PAWN, CS_IDX_ROOK, CS_IDX_SILVER, StateInfo, check_sq_index,
 };
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
@@ -830,7 +830,7 @@ impl Position {
         match check_sq_index(pt) {
             Some(idx) => {
                 // SAFETY: check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
-                unsafe { *self.cur_state().check_squares.get_unchecked(idx) }
+                unsafe { *self.ensure_check_squares().get_unchecked(idx) }
             }
             None => Bitboard::EMPTY, // King
         }
@@ -952,13 +952,12 @@ impl Position {
         self.toggle_piece_bitboards(pc, sq);
     }
 
-    /// 占有・玉位置・香のstep利きを共有してpinと王手升を一体更新する。
+    /// pinを更新し、局面ごとの王手升キャッシュを無効化する。
     /// null moveとPASSでは盤面が変わらないため、親のpin情報を引き継ぐ。
     #[inline(always)]
     pub(super) fn set_check_info<const BOARD_UNCHANGED: bool>(&mut self) {
         let occupied = self.occupied();
         let kings = self.king_square;
-        let them = !self.side_to_move;
         let lance_steps = [
             lance_step_effect(Color::Black, kings[Color::Black.index()]),
             lance_step_effect(Color::White, kings[Color::White.index()]),
@@ -1002,19 +1001,30 @@ impl Position {
             }
         }
 
-        let ksq = kings[them.index()];
-        let rook = rook_effect(ksq, occupied);
-        let bishop = bishop_effect(ksq, occupied);
-        let king = king_effect(ksq);
-        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
-        st.check_squares[CS_IDX_LANCE] = rook & lance_steps[them.index()];
-        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
-        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
-        st.check_squares[CS_IDX_BISHOP] = bishop;
-        st.check_squares[CS_IDX_ROOK] = rook;
-        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
-        st.check_squares[CS_IDX_HORSE] = bishop | king;
-        st.check_squares[CS_IDX_DRAGON] = rook | king;
+        st.check_squares.take();
+    }
+
+    #[inline]
+    fn ensure_check_squares(&self) -> &[Bitboard; CHECK_SQUARES_SIZE] {
+        self.cur_state().check_squares.get_or_init(|| {
+            let mut squares = [Bitboard::EMPTY; CHECK_SQUARES_SIZE];
+            let them = !self.side_to_move;
+            let ksq = self.king_square[them.index()];
+            let occupied = self.occupied();
+            let rook = rook_effect(ksq, occupied);
+            let bishop = bishop_effect(ksq, occupied);
+            let king = king_effect(ksq);
+            squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
+            squares[CS_IDX_LANCE] = rook & lance_step_effect(them, ksq);
+            squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
+            squares[CS_IDX_SILVER] = silver_effect(them, ksq);
+            squares[CS_IDX_BISHOP] = bishop;
+            squares[CS_IDX_ROOK] = rook;
+            squares[CS_IDX_GOLD] = gold_effect(them, ksq);
+            squares[CS_IDX_HORSE] = bishop | king;
+            squares[CS_IDX_DRAGON] = rook | king;
+            squares
+        })
     }
 
     // ========== パス権 ==========
@@ -1198,9 +1208,7 @@ impl Position {
                     pt
                 }
             };
-            check_sq_index(moved_pt)
-                .map(|idx| unsafe { *self.cur_state().check_squares.get_unchecked(idx) })
-                .unwrap_or(Bitboard::EMPTY)
+            self.check_squares(moved_pt)
         } else {
             Bitboard::EMPTY
         };
@@ -2121,7 +2129,6 @@ impl Default for Position {
 mod tests {
     use super::*;
     use crate::bitboard::{dragon_effect, horse_effect, lance_effect};
-    use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
 
     #[test]
@@ -2297,15 +2304,17 @@ mod tests {
         let ksq = pos.king_square(them);
         let occupied = pos.occupied();
         let st = pos.cur_state_mut();
-        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
-        st.check_squares[CS_IDX_LANCE] = lance_effect(them, ksq, occupied);
-        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
-        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
-        st.check_squares[CS_IDX_BISHOP] = bishop_effect(ksq, occupied);
-        st.check_squares[CS_IDX_ROOK] = rook_effect(ksq, occupied);
-        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
-        st.check_squares[CS_IDX_HORSE] = horse_effect(ksq, occupied);
-        st.check_squares[CS_IDX_DRAGON] = dragon_effect(ksq, occupied);
+        let mut squares = [Bitboard::EMPTY; CHECK_SQUARES_SIZE];
+        squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
+        squares[CS_IDX_LANCE] = lance_effect(them, ksq, occupied);
+        squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
+        squares[CS_IDX_SILVER] = silver_effect(them, ksq);
+        squares[CS_IDX_BISHOP] = bishop_effect(ksq, occupied);
+        squares[CS_IDX_ROOK] = rook_effect(ksq, occupied);
+        squares[CS_IDX_GOLD] = gold_effect(them, ksq);
+        squares[CS_IDX_HORSE] = horse_effect(ksq, occupied);
+        squares[CS_IDX_DRAGON] = dragon_effect(ksq, occupied);
+        st.check_squares = std::sync::OnceLock::from(squares);
     }
 
     // 実際の駒配置と異なる占有も渡し、仮想的な移動・駒打ちでの利きを確認する。
@@ -3917,7 +3926,7 @@ mod tests {
                 checkers: st.checkers,
                 blockers_for_king: st.blockers_for_king,
                 pinners: st.pinners,
-                check_squares: st.check_squares,
+                check_squares: *pos.ensure_check_squares(),
                 material_value: st.material_value,
             }
         }
@@ -4044,7 +4053,7 @@ mod tests {
         }
         let them = !pos.side_to_move();
         debug_assert_eq!(
-            pos.cur_state().check_squares[CS_IDX_LANCE],
+            pos.check_squares(PieceType::Lance),
             lance_effect(them, pos.king_square(them), pos.occupied()),
             "香の王手升が不一致: {context}"
         );
@@ -4089,6 +4098,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn check_squares_are_lazy_across_moves_and_slot_reuse() {
+        fn assert_cached_matches_reference(pos: &Position) {
+            assert!(pos.cur_state().check_squares.get().is_none());
+            assert_eq!(pos.check_squares(PieceType::King), Bitboard::EMPTY);
+            assert!(pos.cur_state().check_squares.get().is_none());
+            let mut reference = pos.clone();
+            recompute_reference_check_info(&mut reference);
+            for pt in PieceTypeSet::ALL.iter() {
+                assert_eq!(pos.check_squares(pt), reference.check_squares(pt));
+            }
+            assert!(pos.cur_state().check_squares.get().is_some());
+        }
+
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Position>();
+
+        for warm_parent in [false, true] {
+            let mut pos = Position::new();
+            pos.set_hirate();
+            pos.set_pass_rights_enabled(true);
+            pos.set_pass_rights_pair(2, 2);
+            if warm_parent {
+                assert_cached_matches_reference(&pos);
+            }
+            let mv = Move::from_usi("7g7f").unwrap();
+            for _ in 0..2 {
+                pos.do_move(mv, false);
+                assert_cached_matches_reference(&pos);
+                pos.undo_move(mv);
+                assert_eq!(pos.cur_state().check_squares.get().is_some(), warm_parent);
+
+                pos.do_null_move();
+                assert_cached_matches_reference(&pos);
+                pos.undo_null_move();
+                assert_eq!(pos.cur_state().check_squares.get().is_some(), warm_parent);
+
+                pos.do_pass_move();
+                assert_cached_matches_reference(&pos);
+                pos.undo_pass_move();
+                assert_eq!(pos.cur_state().check_squares.get().is_some(), warm_parent);
+            }
+        }
+
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/5R3/9/9/9/9/9/4K4 b - 1").unwrap();
+        let mv = Move::from_usi("4c5c").unwrap();
+        pos.do_move(mv, true);
+        assert!(pos.in_check());
+        assert_cached_matches_reference(&pos);
+        pos.undo_move(mv);
+        assert!(pos.cur_state().check_squares.get().is_some());
     }
 
     #[test]

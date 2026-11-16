@@ -3,6 +3,8 @@
 //! Zobrist ハッシュや王手情報を保持する。
 //! NNUE 差分更新用の Accumulator/DirtyPiece は AccumulatorStack に移動。
 
+use std::sync::OnceLock;
+
 use super::zobrist::zobrist_no_pawns;
 use crate::bitboard::Bitboard;
 use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Value};
@@ -102,8 +104,8 @@ pub struct StateInfo {
     ///
     /// 成小駒（ProPawn, ProLance, ProKnight, ProSilver）は Gold と同一なので
     /// 統合し、King は常に EMPTY なので省略。15 → 9 エントリに削減。
-    /// アクセスは `check_sq_index(pt)` でインデックス変換する。
-    pub check_squares: [Bitboard; CHECK_SQUARES_SIZE],
+    /// 未計算の場合があるため、取得には `Position::check_squares` を使う。
+    pub check_squares: OnceLock<[Bitboard; CHECK_SQUARES_SIZE]>,
     /// 捕獲した駒
     pub captured_piece: Piece,
     /// 千日手判定用カウンタ
@@ -138,7 +140,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
+            check_squares: OnceLock::new(),
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,
@@ -213,7 +215,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
+            check_squares: OnceLock::new(),
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,

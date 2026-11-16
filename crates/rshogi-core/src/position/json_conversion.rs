@@ -343,7 +343,9 @@ mod tests {
         assert_eq!(actual.state().checkers, expected.state().checkers);
         assert_eq!(actual.state().blockers_for_king, expected.state().blockers_for_king);
         assert_eq!(actual.state().pinners, expected.state().pinners);
-        assert_eq!(actual.state().check_squares, expected.state().check_squares);
+        for pt in crate::types::PieceTypeSet::ALL.iter() {
+            assert_eq!(actual.check_squares(pt), expected.check_squares(pt));
+        }
         assert_eq!(actual.state().material_value, expected.state().material_value);
         assert_eq!(actual.piece_list().piece_list_fb(), expected.piece_list().piece_list_fb());
         assert_eq!(actual.piece_list().piece_list_fw(), expected.piece_list().piece_list_fw());
