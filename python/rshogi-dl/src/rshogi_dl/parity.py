@@ -53,7 +53,8 @@ def open_session(onnx_path: str | Path, provider: str) -> onnxruntime.InferenceS
     name = _PROVIDERS[provider][0]
     options = onnxruntime.SessionOptions()
     options.intra_op_num_threads = 1
-    session = onnxruntime.InferenceSession(str(onnx_path), options, providers=[name])
+    providers = [(name, {"use_tf32": "0"})] if provider == "cuda" else [name]
+    session = onnxruntime.InferenceSession(str(onnx_path), options, providers=providers)
     if session.get_providers()[0] != name:
         raise ParityError(f"{name} is not active: {session.get_providers()}")
     return session

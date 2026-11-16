@@ -1,13 +1,13 @@
 use anyhow::{Result, ensure};
 use rshogi_core::position::Position;
-use rshogi_dl::onnx::{ModelEvaluator, OnnxConfig};
+use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
 use std::io::{self, BufRead};
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
-        (4..=5).contains(&args.len()),
-        "usage: model_probe MODEL DEVICE MAX_BATCH [PROFILE_PREFIX]; SFEN lines on stdin"
+        (4..=6).contains(&args.len()),
+        "usage: model_probe MODEL DEVICE MAX_BATCH [PROFILE_PREFIX|-] [CUDA_TF32]; SFEN lines on stdin"
     );
     let config = OnnxConfig {
         model_path: args[1].clone().into(),
@@ -16,11 +16,11 @@ fn main() -> Result<()> {
         tensorrt_cache: None,
         batch_size: args[3].parse()?,
     };
-    let mut evaluator = if let Some(path) = args.get(4) {
-        ModelEvaluator::with_profiling(&config, path.as_ref())?
-    } else {
-        ModelEvaluator::new(&config)?
+    let options = ModelOptions {
+        cuda_tf32: args.get(5).map(|value| value.parse()).transpose()?.unwrap_or(true),
+        profiling: args.get(4).filter(|path| path.as_str() != "-").map(Into::into),
     };
+    let mut evaluator = ModelEvaluator::with_options(&config, &options)?;
     let mut positions = Vec::new();
     for line in io::stdin().lock().lines() {
         let line = line?;
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         io::stdout().lock(),
         &serde_json::json!({"policy":policy,"values":values}),
     )?;
-    if args.len() == 5 {
+    if options.profiling.is_some() {
         eprintln!("profile: {}", evaluator.end_profiling()?);
     }
     Ok(())

@@ -78,7 +78,7 @@ fn ensure_ort_dylib(gpu_id: i32) -> Result<()> {
     }
 }
 
-fn create_session(cfg: &OnnxConfig, profile: Option<&Path>) -> Result<Session> {
+fn create_session(cfg: &OnnxConfig, profile: Option<&Path>, cuda_tf32: bool) -> Result<Session> {
     use ort::ep::ExecutionProvider;
 
     if cfg.batch_size == 0 {
@@ -160,8 +160,12 @@ fn create_session(cfg: &OnnxConfig, profile: Option<&Path>) -> Result<Session> {
         } else {
             eprintln!("Using CUDA GPU {}", cfg.gpu_id);
 
-            let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+            let mut cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
                 .with_device_id(cfg.gpu_id);
+            if !cuda_tf32 {
+                cuda_ep = cuda_ep.with_tf32(false);
+                eprintln!("CUDA TF32: disabled");
+            }
             match cuda_ep.is_available() {
                 Ok(true) => eprintln!("CUDA execution provider: available"),
                 Ok(false) => {
@@ -198,7 +202,7 @@ fn create_session(cfg: &OnnxConfig, profile: Option<&Path>) -> Result<Session> {
 impl OnnxEvaluator {
     /// 基本形式のモデルを読み込む。token形式は受理しない。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
-        let session = create_session(cfg, None)?;
+        let session = create_session(cfg, None, true)?;
         Self::from_session(session, cfg.batch_size)
     }
 
@@ -437,20 +441,33 @@ pub enum ModelEvaluator {
     Tokens(TokenEvaluator),
 }
 
+/// 形式自動選択の推論精度と診断出力。
+pub struct ModelOptions {
+    /// false で CUDA TF32 を無効化する。true は runtime の既定設定を保つ。CPU では使わない。
+    pub cuda_tf32: bool,
+    /// ORT profile の保存先 prefix。
+    pub profiling: Option<PathBuf>,
+}
+
+impl Default for ModelOptions {
+    fn default() -> Self {
+        Self {
+            cuda_tf32: true,
+            profiling: None,
+        }
+    }
+}
+
 impl ModelEvaluator {
     /// モデルの入力形式を検証して読み込む。TensorRT は legacy API で指定する。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
-        Self::load(cfg, None)
+        Self::with_options(cfg, &ModelOptions::default())
     }
 
-    /// 演算の provider 配置を調べる ORT profile を有効にして読み込む。
-    pub fn with_profiling(cfg: &OnnxConfig, path: &Path) -> Result<Self> {
-        Self::load(cfg, Some(path))
-    }
-
-    fn load(cfg: &OnnxConfig, profile: Option<&Path>) -> Result<Self> {
+    /// 精度設定と任意の ORT profile を指定して、一度だけモデルを読み込む。
+    pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
         anyhow::ensure!(!cfg.use_tensorrt, "automatic model dispatch supports CPU/CUDA only");
-        let session = create_session(cfg, profile)?;
+        let session = create_session(cfg, options.profiling.as_deref(), options.cuda_tf32)?;
         match model_format(&session)? {
             crate::InputFormat::Basic => {
                 Ok(Self::Basic(OnnxEvaluator::from_session(session, cfg.batch_size)?))
@@ -589,5 +606,17 @@ impl crate::Evaluator for ModelEvaluator {
                 Ok(values[0])
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelOptions;
+
+    #[test]
+    fn model_options_preserve_runtime_precision_by_default() {
+        let options = ModelOptions::default();
+        assert!(options.cuda_tf32);
+        assert!(options.profiling.is_none());
     }
 }

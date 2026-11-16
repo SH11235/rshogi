@@ -27,6 +27,7 @@ go nodes 128
 |---|---|---|
 | ModelFile | model.onnx | ONNX モデル |
 | Device | 0 | CUDA device id。-1 は CPU |
+| CudaTF32 | true | false で CUDA TF32 を無効化。true は runtime の既定設定を維持。CPU では無効 |
 | NNCacheMiB | 0 | raw policy/value キャッシュの上限 MiB。0 は無効、最大1024 |
 | TreeMemoryMB | 16 | node / edge arena の上限 MiB |
 | CpuctMilli | 1500 | PUCT の係数の千倍 |
@@ -55,3 +56,5 @@ GUI、既存の tournament、CSA client からは通常の外部 USI エンジ�
 | rshogi.value_format | stm-expected-score-sigmoid-v1 |
 
 value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）です。モデルの学習ルールと `EnteringKingRule` 等の設定を揃えて使ってください。token形式のモデル定義・export は [Python package](../../python/rshogi-dl/README.md) を参照してください。USI の形式自動選択は CPU/CUDA に対応します。既存 tools の basic 専用 API では token モデルを受理しません。
+
+`CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。

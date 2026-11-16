@@ -179,7 +179,7 @@ python -m rshogi_dl.parity \
 
 fixture の先頭 4 行を使い、PyTorch (CPU) と ONNX Runtime の出力を batch 1 / 2 / 4、行の並べ替え、
 同一行の反復で比べます。許容差は固定で、CPU は rtol 1e-4 / atol 1e-5、CUDA は rtol 1e-3 / atol 1e-4。
-指定した provider で実行できなかった場合は別の provider に切り替えず失敗します。成功すると、case
+CUDA の照合では `use_tf32=0` を明示し、FP32 演算を使います。engine の `CudaTF32=true` は runtime の既定設定を保ち、この固定許容差の照合対象には含めません。指定した provider で実行できなかった場合は別の provider に切り替えず失敗します。成功すると、case
 ごとの最大絶対差と provider の設定を JSON で出力します。
 
 ## テスト

@@ -3,7 +3,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{EnteringKingRule, Move};
 use rshogi_dl::cache::{CacheStats, CachedEvaluator};
 use rshogi_dl::features::winrate_to_cp;
-use rshogi_dl::onnx::{ModelEvaluator, OnnxConfig};
+use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
 use rshogi_dl_usi::{Go, parse_position};
 use rshogi_mcts::{Config, History, Search, SearchResult};
 use std::io::{self, BufRead, Write};
@@ -20,6 +20,7 @@ struct Engine {
     config: Config,
     model: PathBuf,
     device: i32,
+    cuda_tf32: bool,
     cache_mib: usize,
     overhead: u64,
     runtime: Option<Runtime>,
@@ -43,6 +44,7 @@ impl Engine {
             config: Config::default(),
             model: "model.onnx".into(),
             device: 0,
+            cuda_tf32: true,
             cache_mib: 0,
             overhead: 50,
             runtime: None,
@@ -63,13 +65,19 @@ impl Engine {
     fn initialize(&mut self) -> Result<()> {
         self.join(true)?;
         if self.runtime.is_none() {
-            let mut evaluator = ModelEvaluator::new(&OnnxConfig {
-                model_path: self.model.clone(),
-                gpu_id: self.device,
-                use_tensorrt: false,
-                tensorrt_cache: None,
-                batch_size: 1,
-            })?;
+            let mut evaluator = ModelEvaluator::with_options(
+                &OnnxConfig {
+                    model_path: self.model.clone(),
+                    gpu_id: self.device,
+                    use_tensorrt: false,
+                    tensorrt_cache: None,
+                    batch_size: 1,
+                },
+                &ModelOptions {
+                    cuda_tf32: self.cuda_tf32,
+                    profiling: None,
+                },
+            )?;
             let mut logits = vec![0.0; rshogi_dl::features::MAX_MOVE_LABEL_NUM];
             rshogi_dl::Evaluator::evaluate(&mut evaluator, &self.position, &mut logits)?;
             self.runtime = Some((
@@ -94,6 +102,9 @@ impl Engine {
                 let v: i32 = value.parse()?;
                 ensure!((-1..=15).contains(&v), "invalid Device");
                 self.device = v;
+            }
+            "CudaTF32" => {
+                self.cuda_tf32 = value.parse()?;
             }
             "NNCacheMiB" => {
                 let v = value.parse()?;
@@ -183,6 +194,7 @@ impl Engine {
                 for option in [
                     "ModelFile type string default model.onnx",
                     "Device type spin default 0 min -1 max 15",
+                    "CudaTF32 type check default true",
                     "NNCacheMiB type spin default 0 min 0 max 1024",
                     "TreeMemoryMB type spin default 16 min 1 max 1024",
                     "CpuctMilli type spin default 1500 min 1 max 100000",

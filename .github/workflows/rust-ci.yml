@@ -515,8 +515,9 @@ jobs:
 
   dl-transformer:
     name: DL Transformer CPU
+    needs: changes
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
+    if: needs.changes.outputs.rust_code == 'true'
     timeout-minutes: 25
     env:
       SHOGI_DATA: ${{ runner.temp }}/shogi-data
@@ -544,7 +545,9 @@ jobs:
           python -m pip install -r python/rshogi-dl/requirements.txt -r python/rshogi-dl/requirements-test.txt
           python -m pip install --no-deps -e python/rshogi-dl
       - name: Build Rust encoding and model probes
-        run: cargo build -p rshogi-dl --features onnx --examples
+        run: |
+          cargo build -p rshogi-dl --features onnx --examples
+          cargo test -p rshogi-dl --features onnx
       - name: Check Python model and Rust ONNX connection
         run: |
           export ORT_DYLIB_PATH=$(python -c 'import pathlib,onnxruntime; print(next((pathlib.Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*")))')
