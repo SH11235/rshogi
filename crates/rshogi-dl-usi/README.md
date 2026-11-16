@@ -27,6 +27,7 @@ go nodes 128
 |---|---|---|
 | ModelFile | model.onnx | ONNX モデル |
 | Device | 0 | CUDA device id。-1 は CPU |
+| NNCacheMiB | 0 | raw policy/value キャッシュの上限 MiB。0 は無効、最大1024 |
 | TreeMemoryMB | 16 | node / edge arena の上限 MiB |
 | CpuctMilli | 1500 | PUCT の係数の千倍 |
 | PolicyTemperatureMilli | 1000 | 合法手 softmax temperature の千倍 |
@@ -35,10 +36,12 @@ go nodes 128
 | EnteringKingRule | CSARule27 | 既存 core の入玉宣言ルール |
 | Threads | 1 | 探索 worker 数。1 のみ |
 
-`go nodes`、`go movetime`、`go btime/wtime` と `binc/winc`、`byoyomi`、`go infinite`、`stop` に対応します。nodes は完了した MCTS simulation の数です。depth は読み筋の長さ、hashfull は arena の使用割合で、NNUE の αβ探索とは意味が異なります。推論回数は `info string evaluations` に出力します。
+`go nodes`、`go movetime`、`go btime/wtime` と `binc/winc`、`byoyomi`、`go infinite`、`stop` に対応します。nodes は完了した MCTS simulation の数です。depth は読み筋の長さ、hashfull は arena の使用割合で、NNUE の αβ探索とは意味が異なります。評価要求数は `info string evaluations`、実際の backend 呼び出し数は `nn_calls`、ヒット数は `cache_hits`、cache の確保量は `cache_bytes` に出力します。
 
 ponder、MultiPV、定跡、`go depth`、`go mate`、`go searchmoves` には対応しません。対応外の go パラメータを黙って無視せずエラーにします。`go infinite` は木が満杯や終局でも stop まで bestmove を待ちます。通常の go はメモリ上限で早期に終わる場合があります。
 
 GUI、既存の tournament、CSA client からは通常の外部 USI エンジンとして使用します。`ModelFile` 等を個別 USI option として指定してください。NNUE の EvalFile や edition の指定は不要です。局面の手順を保つには `position startpos moves ...` または開始 SFEN と moves を渡してください。
 
 `isready` はモデルの読み込みと一回の warmup を完了してから readyok を返します。内部の引き分け評価を USI の終局通知として送りません。合法手がある root では fallback を返すため、対局の総手数上限や千日手の裁定は runner 側と揃えてください。
+
+`NNCacheMiB` は基本形式の全入力を照合し、合法手フィルタや temperature を適用する前の出力を保持します。木は go ごとに作り直しますが cache は同じ対局中に保持します。`usinewgame` / `gameover` と option 変更で破棄します。上限は key・出力・metadata・特徴量 buffer に適用し、allocator の管理領域やモデル・ORT・探索木のメモリは含みません。固定訪問数の結果を保つための機構であり、時間制限では完了訪問数が変わり得ます。

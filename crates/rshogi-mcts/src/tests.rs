@@ -347,3 +347,52 @@ fn root_draw_keeps_a_legal_response_for_external_runners() -> Result<()> {
     assert_eq!(result.evaluations, 0);
     Ok(())
 }
+
+#[test]
+fn raw_cache_preserves_fixed_visit_search_and_history_terminals() -> Result<()> {
+    use rshogi_dl::cache::CachedEvaluator;
+    let (mut pos, mut history) = root();
+    let mut search = Search::new(Config::default())?;
+    let limits = Limits {
+        visits: 128,
+        time: None,
+    };
+    let stop = AtomicBool::new(false);
+    let baseline = search.run(
+        &mut pos,
+        &mut history,
+        &mut Constant {
+            value: 0.3,
+            fail: false,
+        },
+        limits,
+        &stop,
+    )?;
+    let mut cached = CachedEvaluator::new(
+        Constant {
+            value: 0.3,
+            fail: false,
+        },
+        4,
+    )?;
+    for _ in 0..2 {
+        let result = search.run(&mut pos, &mut history, &mut cached, limits, &stop)?;
+        assert_eq!(result.best_move, baseline.best_move);
+        assert_eq!(result.pv, baseline.pv);
+        assert_eq!(result.value.to_bits(), baseline.value.to_bits());
+        assert_eq!(result.visits, baseline.visits);
+        assert_eq!(result.evaluations, baseline.evaluations);
+        assert_eq!(result.hashfull, baseline.hashfull);
+    }
+    assert!(cached.stats().hits > 0);
+    let mut terminal = Search::new(Config {
+        max_game_ply: 1,
+        ..Config::default()
+    })?;
+    play(&mut pos, &mut history, "7g7f");
+    cached.reset_stats();
+    let result = terminal.run(&mut pos, &mut history, &mut cached, limits, &stop)?;
+    assert_eq!(result.outcome, Some(Outcome::Draw));
+    assert_eq!(cached.stats().requests, 0);
+    Ok(())
+}

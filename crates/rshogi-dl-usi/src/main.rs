@@ -1,6 +1,7 @@
 use anyhow::{Result, bail, ensure};
 use rshogi_core::position::Position;
 use rshogi_core::types::{EnteringKingRule, Move};
+use rshogi_dl::cache::{CacheStats, CachedEvaluator};
 use rshogi_dl::features::winrate_to_cp;
 use rshogi_dl::onnx::{OnnxConfig, OnnxEvaluator};
 use rshogi_dl_usi::{Go, parse_position};
@@ -12,13 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-type Runtime = (OnnxEvaluator, Search);
+type Runtime = (CachedEvaluator<OnnxEvaluator>, Search);
 struct Engine {
     position: Position,
     history: History,
     config: Config,
     model: PathBuf,
     device: i32,
+    cache_mib: usize,
     overhead: u64,
     runtime: Option<Runtime>,
     worker: Option<JoinHandle<Runtime>>,
@@ -41,6 +43,7 @@ impl Engine {
             config: Config::default(),
             model: "model.onnx".into(),
             device: 0,
+            cache_mib: 0,
             overhead: 50,
             runtime: None,
             worker: None,
@@ -69,7 +72,10 @@ impl Engine {
             })?;
             let mut logits = vec![0.0; rshogi_dl::features::MAX_MOVE_LABEL_NUM];
             rshogi_dl::Evaluator::evaluate(&mut evaluator, &self.position, &mut logits)?;
-            self.runtime = Some((evaluator, Search::new(self.config.clone())?));
+            self.runtime = Some((
+                CachedEvaluator::new(evaluator, self.cache_mib)?,
+                Search::new(self.config.clone())?,
+            ));
         }
         Ok(())
     }
@@ -88,6 +94,11 @@ impl Engine {
                 let v: i32 = value.parse()?;
                 ensure!((-1..=15).contains(&v), "invalid Device");
                 self.device = v;
+            }
+            "NNCacheMiB" => {
+                let v = value.parse()?;
+                ensure!(v <= 1024, "invalid NNCacheMiB");
+                self.cache_mib = v;
             }
             "TreeMemoryMB" => {
                 let v = value.parse()?;
@@ -137,6 +148,7 @@ impl Engine {
         self.worker =
             Some(thread::Builder::new().name("mcts".into()).stack_size(8 * 1024 * 1024).spawn(
                 move || {
+                    evaluator.reset_stats();
                     let start = Instant::now();
                     let result =
                         search.run(&mut position, &mut history, &mut evaluator, limits, &stop);
@@ -146,7 +158,12 @@ impl Engine {
                         }
                     }
                     match result {
-                        Ok(result) => print_result(&result, start.elapsed()),
+                        Ok(result) => print_result(
+                            &result,
+                            start.elapsed(),
+                            evaluator.stats(),
+                            evaluator.allocated_bytes(),
+                        ),
                         Err(error) => {
                             output(&format!("info string Error: search failed: {error}"));
                             output("bestmove resign");
@@ -166,6 +183,7 @@ impl Engine {
                 for option in [
                     "ModelFile type string default model.onnx",
                     "Device type spin default 0 min -1 max 15",
+                    "NNCacheMiB type spin default 0 min 0 max 1024",
                     "TreeMemoryMB type spin default 16 min 1 max 1024",
                     "CpuctMilli type spin default 1500 min 1 max 100000",
                     "PolicyTemperatureMilli type spin default 1000 min 1 max 100000",
@@ -193,7 +211,12 @@ impl Engine {
             }
             "go" => self.go(command)?,
             "stop" => self.join(true)?,
-            "usinewgame" | "gameover" => self.join(true)?,
+            "usinewgame" | "gameover" => {
+                self.join(true)?;
+                if let Some((evaluator, _)) = &mut self.runtime {
+                    evaluator.clear();
+                }
+            }
             "quit" => {
                 self.join(true)?;
                 return Ok(false);
@@ -205,7 +228,7 @@ impl Engine {
     }
 }
 
-fn print_result(result: &SearchResult, elapsed: Duration) {
+fn print_result(result: &SearchResult, elapsed: Duration, stats: CacheStats, cache_bytes: usize) {
     let millis = elapsed.as_millis().max(1);
     let cp = winrate_to_cp(result.value, 600.0);
     let pv = result.pv.iter().map(|m| m.to_usi()).collect::<Vec<_>>().join(" ");
@@ -219,6 +242,10 @@ fn print_result(result: &SearchResult, elapsed: Duration) {
     output(&format!(
         "info string evaluations {} memory_full {} outcome {:?}",
         result.evaluations, result.memory_full, result.outcome
+    ));
+    output(&format!(
+        "info string nn_calls {} cache_hits {} cache_bytes {cache_bytes}",
+        stats.nn_calls, stats.hits
     ));
     let best = if result.best_move == Move::NONE {
         "resign".into()
