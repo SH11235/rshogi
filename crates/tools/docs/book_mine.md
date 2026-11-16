@@ -2166,6 +2166,8 @@ book_mine master game-pave --master moves.tsv --audit-db audited.db \
 
 `own` は局ごとに負けた側です (`black_win` なら `w`、`white_win` なら `b`)。`--player` は使いません。両側の読みを使い、`eval.last_exact_primary.score` を優先し、無ければ `eval` の score / score_cp / score_mate / score_mate_sign を使います。ただし代替の評価値に `score_bound` が付いている手は使いません。`last_exact_primary` があれば `eval.score_bound` にかかわらずそちらを使います。詰みは seeds と同じく勝ち・負けの向きを保ちます。採用する評価値に読み筋が無い手は使いません。手番側から見た値を先手側から見た値にそろえてから、負けた側の値で崩れを調べます。
 
+棋譜のペア・局順と audit DB の局面・手の照合には外部ソートを使います。全局の ID・局面キー・audit の値はメモリに保持せず、棋譜は 1 局分ずつ処理します。audit DB の局面行の手数によってキー順が乱れていても照合できます。一時ファイルには入力件数に応じた空き容量が必要です。
+
 判定には各手の `ply` (1 始まり) を使います。
 
 1. `collapse`: 負けた側の値が `-collapse_cp` 以下になり、その後の評価値つきの手がすべてその閾値以下にとどまる最初の手。評価値の無い手は飛ばします。見つからなければ `no-collapse` です。

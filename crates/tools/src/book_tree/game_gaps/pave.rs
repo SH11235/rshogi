@@ -2,6 +2,10 @@
 
 use super::*;
 
+mod pair_disk;
+
+use super::super::exits::disk::Record;
+
 #[derive(Args, Debug)]
 pub(in crate::book_tree) struct GamePaveArgs {
     #[arg(long)]
@@ -55,10 +59,8 @@ impl GamePaveArgs {
     }
 }
 
-type Audit = BTreeMap<String, BTreeMap<String, i64>>;
-
-fn read_audit(path: &Path, wanted: &BTreeSet<String>) -> Result<Audit> {
-    let mut values: Audit = BTreeMap::new();
+fn read_audit(path: &Path, wanted: Sorter) -> Result<BufReader<File>> {
+    let mut audit = Sorter::new();
     let mut key = None;
     for (n, line) in BufReader::new(File::open(path)?).lines().enumerate() {
         let line = line?;
@@ -67,19 +69,50 @@ fn read_audit(path: &Path, wanted: &BTreeSet<String>) -> Result<Audit> {
             continue;
         }
         if let Some(sfen) = line.strip_prefix("sfen ") {
-            let root = parse_root(&format!("sfen {sfen}"))?;
-            key = wanted.contains(&root.key).then_some(root.key);
+            key = Some(parse_root(&format!("sfen {sfen}"))?.key);
         } else if let Some(key) = &key {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            ensure!(fields.len() == 5, "audit-db の手の行が不正です: {} 行目", n + 1);
-            let value = fields[2].parse::<i64>().context("audit-db の値が不正です")?;
-            let moves = values.entry(key.clone()).or_default();
-            if let Some(old) = moves.insert(fields[0].into(), value) {
-                ensure!(old == value, "audit-db の同じ手の値が不一致です: {key} {}", fields[0]);
-            }
+            // 未使用局面の手の行は検査対象外なので、照合後まで解析を遅らせる。
+            let mv = line.split_whitespace().next().context("audit-db の手がありません")?;
+            audit.push(vec![key.clone(), mv.into()], serde_json::to_string(&(n + 1, line))?)?;
         }
     }
-    Ok(values)
+    let mut audit = audit.finish()?;
+    let mut wanted = wanted.finish()?;
+    let mut request = read_record(&mut wanted)?;
+    let mut requested_position = None;
+    let mut previous: Option<(Vec<String>, i64)> = None;
+    let mut values = Sorter::new();
+    while let Some(row) = read_record(&mut audit)? {
+        while request.as_ref().is_some_and(|r| r.key[..2] < row.key[..]) {
+            requested_position = request.as_ref().map(|r| r.key[0].clone());
+            request = read_record(&mut wanted)?;
+        }
+        if requested_position.as_ref() != Some(&row.key[0])
+            && request.as_ref().is_none_or(|r| r.key[0] != row.key[0])
+        {
+            continue;
+        }
+        let (n, line): (usize, String) = serde_json::from_str(&row.value)?;
+        let fields: Vec<_> = line.split_whitespace().collect();
+        ensure!(fields.len() == 5, "audit-db の手の行が不正です: {n} 行目");
+        let value = fields[2].parse::<i64>().context("audit-db の値が不正です")?;
+        if let Some((key, old)) = &previous {
+            ensure!(
+                *key != row.key || *old == value,
+                "audit-db の同じ手の値が不一致です: {} {}",
+                row.key[0],
+                row.key[1]
+            );
+        }
+        previous = Some((row.key.clone(), value));
+        while request.as_ref().is_some_and(|r| r.key[..2] == row.key[..]) {
+            let r = request.take().context("照合する実戦手がありません")?;
+            requested_position = Some(r.key[0].clone());
+            values.push(r.key[2..].to_vec(), value.to_string())?;
+            request = read_record(&mut wanted)?;
+        }
+    }
+    values.finish()
 }
 
 fn collapse(game: &Game, cp: i32) -> Option<u32> {
@@ -122,14 +155,15 @@ fn repetition_entry(game: &Game) -> Result<Option<u32>> {
 struct PaveReport<'a> {
     args: &'a GamePaveArgs,
     master: MasterIndex,
-    audit: Audit,
+    audit: BufReader<File>,
+    audit_next: Option<Record>,
     excluded: Excluded,
     table: File,
     queue: Sorter,
 }
 
 impl PaveReport<'_> {
-    fn game(&mut self, game: Game, outcome: &str) -> Result<()> {
+    fn game(&mut self, game_key: &[String], game: Game, outcome: &str) -> Result<()> {
         let args = self.args;
         let plies = game.moves.last().map_or(0, |m| m.ply);
         let collapse = (outcome != "draw").then(|| collapse(&game, args.collapse_cp)).flatten();
@@ -153,15 +187,22 @@ impl PaveReport<'_> {
             } else {
                 prefix = false;
             }
+            let mut value_key = game_key.to_vec();
+            value_key.push(format!("{:010}", m.ply));
+            while self.audit_next.as_ref().is_some_and(|r| r.key < value_key) {
+                self.audit_next = read_record(&mut self.audit)?;
+            }
+            let audit_value = self
+                .audit_next
+                .as_ref()
+                .filter(|r| r.key == value_key)
+                .map(|r| r.value.parse::<i64>())
+                .transpose()?;
             if settled.is_none()
                 && m.side_to_move == game.own
                 && collapse.is_some_and(|c| m.ply <= c)
                 && played.is_some_and(|r| r.get("value_kind").starts_with("tree:"))
-                && self
-                    .audit
-                    .get(&root.key)
-                    .and_then(|vs| vs.get(&m.move_usi))
-                    .is_some_and(|v| *v <= -i64::from(args.collapse_cp))
+                && audit_value.is_some_and(|v| v <= -i64::from(args.collapse_cp))
             {
                 settled = Some((
                     m.ply,
@@ -299,7 +340,7 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
     if let Some(path) = &args.enqueue_out {
         reject_same_file(path, &inputs)?;
     }
-    let mut wanted = BTreeSet::new();
+    let mut wanted = Sorter::new();
     let mut games = Sorter::new();
     for (index, path) in args.games.iter().enumerate() {
         let name = path
@@ -342,24 +383,32 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
             "game-pave は pair JSON Lines 専用です (csa_client は未対応)"
         );
         ensure!(numeric_ids, "pair の数値 game_id がありません");
-        visit_pair(path, &name, None, |mut game, outcome| {
+        pair_disk::visit(path, &name, |mut game, outcome| {
             validate_game(&mut game)?;
+            let id: u32 = game.name.rsplit('_').next().context("game_id がありません")?.parse()?;
+            let game_key = vec![format!("{index:020}"), format!("{id:010}")];
             for m in &game.moves {
                 if m.side_to_move == game.own {
-                    wanted.insert(parse_root(&format!("sfen {}", m.sfen_before))?.key);
+                    wanted.push(
+                        vec![
+                            parse_root(&format!("sfen {}", m.sfen_before))?.key,
+                            m.move_usi.clone(),
+                            game_key[0].clone(),
+                            game_key[1].clone(),
+                            format!("{:010}", m.ply),
+                        ],
+                        String::new(),
+                    )?;
                 }
             }
-            let id: u32 = game.name.rsplit('_').next().context("game_id がありません")?.parse()?;
-            games.push(
-                vec![format!("{index:020}"), format!("{id:010}")],
-                serde_json::to_string(&(game, outcome))?,
-            )
+            games.push(game_key, serde_json::to_string(&(game, outcome))?)
         })
         .with_context(|| format!("棋譜: {}", path.display()))?;
     }
     let mut report = PaveReport {
         master: MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?,
-        audit: read_audit(&args.audit_db, &wanted)?,
+        audit: read_audit(&args.audit_db, wanted)?,
+        audit_next: None,
         excluded: read_excluded(&args.exclude_queue)?,
         table: tempfile::tempfile()?,
         queue: Sorter::new(),
@@ -369,10 +418,11 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
         report.table,
         "game\toutcome\town\tplies\tcollapse\tbook_reach\ttarget_end\tsettled_ply\tsettled_main_same\tstate\trows\tcovered_by\trepetition_entry"
     )?;
+    report.audit_next = read_record(&mut report.audit)?;
     let mut games = games.finish()?;
     while let Some(row) = read_record(&mut games)? {
         let (game, outcome): (Game, String) = serde_json::from_str(&row.value)?;
-        report.game(game, &outcome)?;
+        report.game(&row.key, game, &outcome)?;
     }
     let mut queue = merge_queue(report.queue)?;
     copy_output(&mut report.table, &args.table)?;
@@ -380,4 +430,65 @@ pub(in crate::book_tree) fn run(mut args: GamePaveArgs) -> Result<()> {
         copy_output(&mut queue, path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_join_spills_and_restores_game_order_with_repeated_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let a = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -";
+        let b = crate::book_tree::model::child(a, "7g7f").unwrap();
+        let mut audit = File::create(&path).unwrap();
+        let mut wanted = Sorter::new();
+        for i in (0..4100).rev() {
+            let (key, mv, value) = if i % 2 == 0 {
+                (a, "7g7f", -150)
+            } else {
+                (b.as_str(), "3c3d", -200)
+            };
+            writeln!(audit, "sfen {key} {}\n{mv} none {value} 3 1", i + 1).unwrap();
+            wanted
+                .push(
+                    vec![
+                        key.into(),
+                        mv.into(),
+                        format!("{i:020}"),
+                        "0000000001".into(),
+                    ],
+                    String::new(),
+                )
+                .unwrap();
+        }
+        drop(audit);
+        let mut joined = read_audit(&path, wanted).unwrap();
+        for i in 0..4100 {
+            let row = read_record(&mut joined).unwrap().unwrap();
+            assert_eq!(row.key, [format!("{i:020}"), "0000000001".into()]);
+            assert_eq!(row.value, if i % 2 == 0 { "-150" } else { "-200" });
+        }
+        assert!(read_record(&mut joined).unwrap().is_none());
+    }
+
+    #[test]
+    fn audit_join_checks_unplayed_moves_after_last_request_and_skips_unused_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let root = parse_root("startpos").unwrap();
+        for (first, second, expected) in [(10, 10, true), (10, 20, false)] {
+            std::fs::write(&path, format!(
+                "sfen {} 10\n2g2f none -150 3 1\n7g7f none {first} 3 1\nsfen {} 2\n7g7f none {second} 3 1\n",
+                root.key, root.key
+            )).unwrap();
+            let mut wanted = Sorter::new();
+            wanted
+                .push(vec![root.key.clone(), "2g2f".into(), "0".into(), "1".into()], String::new())
+                .unwrap();
+            assert_eq!(read_audit(&path, wanted).is_ok(), expected);
+        }
+        assert!(read_audit(&path, Sorter::new()).is_ok());
+    }
 }

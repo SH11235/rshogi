@@ -353,53 +353,58 @@ fn visit_pair(
         Ok(())
     })?;
     seeds::visit_games(path, &valid, |result, moves| {
-        let engine = |side| -> Result<&str> {
-            let mut names =
-                moves.iter().filter(|m| m.side_to_move == side).map(|m| m.engine.as_str());
-            let name = names.next().context("対局者名がありません")?;
-            ensure!(!name.is_empty() && names.all(|n| n == name), "engine が空か不一致です");
-            Ok(name)
-        };
-        let own = if let Some(player) = player {
-            own_side(engine("b")?, engine("w")?, player)?
-        } else {
-            match result.outcome.as_str() {
-                "black_win" => "w",
-                "white_win" => "b",
-                _ => "",
-            }
-            .into()
-        };
-        let moves = moves
-            .iter()
-            .map(|m| Move {
-                ply: m.ply,
-                side_to_move: m.side_to_move.clone(),
-                sfen_before: m.sfen_before.clone(),
-                move_usi: m.move_usi.clone(),
-                timed_out: m.timed_out,
-                score_black: m
-                    .eval
-                    .as_ref()
-                    .and_then(seeds::eval_score)
-                    .map(|v| if m.side_to_move == "b" { v } else { -v }),
-                searched: m
-                    .eval
-                    .as_ref()
-                    .and_then(|e| {
-                        e.pv.as_ref().or_else(|| e.last_exact_primary.as_ref().map(|p| &p.pv))
-                    })
-                    .is_some_and(|pv| pv.first() == Some(&m.move_usi)),
-            })
-            .collect();
-        visit(
-            Game {
-                name: format!("{name}_{}", result.game_id),
-                own,
-                moves,
-            },
-            &result.outcome,
-        )
+        visit(pair_game(name, player, result, moves)?, &result.outcome)
+    })
+}
+
+fn pair_game(
+    name: &str,
+    player: Option<&str>,
+    result: &seeds::GameResult,
+    moves: &[seeds::Move],
+) -> Result<Game> {
+    let engine = |side| -> Result<&str> {
+        let mut names = moves.iter().filter(|m| m.side_to_move == side).map(|m| m.engine.as_str());
+        let name = names.next().context("対局者名がありません")?;
+        ensure!(!name.is_empty() && names.all(|n| n == name), "engine が空か不一致です");
+        Ok(name)
+    };
+    let own = if let Some(player) = player {
+        own_side(engine("b")?, engine("w")?, player)?
+    } else {
+        match result.outcome.as_str() {
+            "black_win" => "w",
+            "white_win" => "b",
+            _ => "",
+        }
+        .into()
+    };
+    let moves = moves
+        .iter()
+        .map(|m| Move {
+            ply: m.ply,
+            side_to_move: m.side_to_move.clone(),
+            sfen_before: m.sfen_before.clone(),
+            move_usi: m.move_usi.clone(),
+            timed_out: m.timed_out,
+            score_black: m
+                .eval
+                .as_ref()
+                .and_then(seeds::eval_score)
+                .map(|v| if m.side_to_move == "b" { v } else { -v }),
+            searched: m
+                .eval
+                .as_ref()
+                .and_then(|e| {
+                    e.pv.as_ref().or_else(|| e.last_exact_primary.as_ref().map(|p| &p.pv))
+                })
+                .is_some_and(|pv| pv.first() == Some(&m.move_usi)),
+        })
+        .collect();
+    Ok(Game {
+        name: format!("{name}_{}", result.game_id),
+        own,
+        moves,
     })
 }
 
