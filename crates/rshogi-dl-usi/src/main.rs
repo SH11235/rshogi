@@ -3,7 +3,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{EnteringKingRule, Move};
 use rshogi_dl::cache::{CacheStats, CachedEvaluator};
 use rshogi_dl::features::winrate_to_cp;
-use rshogi_dl::onnx::{OnnxConfig, OnnxEvaluator};
+use rshogi_dl::onnx::{ModelEvaluator, OnnxConfig};
 use rshogi_dl_usi::{Go, parse_position};
 use rshogi_mcts::{Config, History, Search, SearchResult};
 use std::io::{self, BufRead, Write};
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-type Runtime = (CachedEvaluator<OnnxEvaluator>, Search);
+type Runtime = (CachedEvaluator<ModelEvaluator>, Search);
 struct Engine {
     position: Position,
     history: History,
@@ -63,7 +63,7 @@ impl Engine {
     fn initialize(&mut self) -> Result<()> {
         self.join(true)?;
         if self.runtime.is_none() {
-            let mut evaluator = OnnxEvaluator::new(&OnnxConfig {
+            let mut evaluator = ModelEvaluator::new(&OnnxConfig {
                 model_path: self.model.clone(),
                 gpu_id: self.device,
                 use_tensorrt: false,

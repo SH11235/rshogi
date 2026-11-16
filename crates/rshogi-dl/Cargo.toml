@@ -22,3 +22,7 @@ serde_json.workspace = true
 [[example]]
 name = "evaluate"
 required-features = ["onnx"]
+
+[[example]]
+name = "model_probe"
+required-features = ["onnx"]

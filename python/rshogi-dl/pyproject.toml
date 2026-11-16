@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rshogi-dl"
+version = "0.1.0"
+description = "rshogi の policy / value Transformer のモデル定義・検証用 smoke・ONNX export"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+dependencies = [
+    "torch==2.14.0",
+    "onnx==1.23.2",
+    "numpy==2.4.6",
+]
+
+[project.optional-dependencies]
+cpu = ["onnxruntime==1.24.1"]
+cuda = ["onnxruntime-gpu==1.24.1"]
+test = ["cshogi==1.0.4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

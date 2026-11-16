@@ -5,6 +5,10 @@ struct Constant {
     fail: bool,
 }
 impl Evaluator for Constant {
+    fn input_format(&self) -> Option<rshogi_dl::InputFormat> {
+        Some(rshogi_dl::InputFormat::Basic)
+    }
+
     fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
         anyhow::ensure!(!self.fail, "evaluation failed");
         logits.fill(0.0);
