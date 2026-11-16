@@ -1791,6 +1791,15 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     return;
                 }
 
+                #[cfg(feature = "nnue-threat")]
+                if $net.feature_transformer.has_threat {
+                    let threat_cache = if let Some(
+                        super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
+                    ) = cache { Some(c) } else { None };
+                    $net.feature_transformer.update_with_threat_ancestor(pos, $stack, threat_cache);
+                    return;
+                }
+
                 let mut updated = false;
 
                 if let Some(prev_idx) = current_entry.previous {

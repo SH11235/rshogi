@@ -1359,6 +1359,141 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         );
     }
 
+    /// 駒側の更新方法とは独立に、Threat の計算済み祖先を再利用する。
+    #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+    pub(super) fn update_with_threat_ancestor(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        mut cache: Option<&mut AccumulatorCacheLayerStacks<L1>>,
+    ) {
+        let dirty = stack.current().dirty_piece;
+        let parent = stack.current().previous.filter(|&i| {
+            i < stack.current_index() && stack.entry_at(i).accumulator.computed_accumulation
+        });
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective.index();
+            let reset = <FT::Set as FeatureSet>::needs_refresh(&dirty, perspective);
+            if let Some(parent) = parent.filter(|_| !reset && !cfg!(feature = "nnue-effect-bucket"))
+            {
+                count_update!();
+                let (prev, current) = stack.get_prev_and_current_accumulators(parent);
+                if !self.try_apply_dirty_piece_fast_from_source(
+                    prev.get(p),
+                    current.get_mut(p),
+                    &dirty,
+                    perspective,
+                    pos.king_square(perspective),
+                ) {
+                    let mut removed = IndexList::new();
+                    let mut added = IndexList::new();
+                    append_changed_indices::<FT>(
+                        &dirty,
+                        perspective,
+                        pos.king_square(perspective),
+                        &mut removed,
+                        &mut added,
+                    );
+                    current.get_mut(p).copy_from_slice(prev.get(p));
+                    for index in removed.iter() {
+                        self.sub_weights(current.get_mut(p), index);
+                    }
+                    for index in added.iter() {
+                        self.add_weights(current.get_mut(p), index);
+                    }
+                }
+                #[cfg(feature = "nnue-psqt")]
+                if self.has_psqt {
+                    let mut removed = IndexList::new();
+                    let mut added = IndexList::new();
+                    append_changed_indices::<FT>(
+                        &dirty,
+                        perspective,
+                        pos.king_square(perspective),
+                        &mut removed,
+                        &mut added,
+                    );
+                    current.psqt_accumulation[p] = prev.psqt_accumulation[p];
+                    for index in removed.iter() {
+                        self.sub_psqt_weights(&mut current.psqt_accumulation[p], index);
+                    }
+                    for index in added.iter() {
+                        self.add_psqt_weights(&mut current.psqt_accumulation[p], index);
+                    }
+                }
+            } else {
+                count_refresh!();
+                let acc = &mut stack.current_mut().accumulator;
+                if let Some(cache) = cache.as_deref_mut() {
+                    self.refresh_perspective_with_cache(
+                        pos,
+                        perspective,
+                        &mut acc.accumulation[p],
+                        #[cfg(feature = "nnue-psqt")]
+                        &mut acc.psqt_accumulation[p],
+                        cache,
+                    );
+                } else {
+                    acc.get_mut(p).copy_from_slice(&self.biases.0);
+                    let mut active = IndexList::new();
+                    append_active_indices::<FT>(pos, perspective, &mut active);
+                    for index in active.iter() {
+                        self.add_weights(acc.get_mut(p), index);
+                    }
+                    #[cfg(feature = "nnue-psqt")]
+                    if self.has_psqt {
+                        self.refresh_psqt(&active, &mut acc.psqt_accumulation[p]);
+                    }
+                }
+            }
+        }
+
+        let mut board = threat_features::ThreatBoard::new(pos);
+        let mut index = stack.current_index();
+        let mut source = None;
+        // 長い鎖の復元費用を制限し、駒側の Finny 選択とは切り離す。
+        for _ in 0..4 {
+            let entry = stack.entry_at(index);
+            let Some(previous) = entry.previous.filter(|&previous| previous < index) else {
+                break;
+            };
+            board.undo(&entry.dirty_piece);
+            index = previous;
+            if stack.entry_at(index).accumulator.computed_accumulation {
+                source = Some(index);
+                break;
+            }
+        }
+        let mut removed = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
+        let mut added = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
+        let diff_ok = source.is_some()
+            && threat_features::append_threat_endpoint_diff(&board, pos, &mut removed, &mut added);
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective.index();
+            if diff_ok && board.same_mirror(pos, perspective) {
+                let (prev, current) = stack.get_prev_and_current_accumulators(source.unwrap());
+                let threat = current.get_threat_mut(p);
+                threat.copy_from_slice(prev.get_threat(p));
+                self.apply_threat_rows::<false>(threat, &removed[p]);
+                self.apply_threat_rows::<true>(threat, &added[p]);
+            } else {
+                let threat = stack.current_mut().accumulator.get_threat_mut(p);
+                threat.fill(0);
+                threat_features::for_each_active_threat_index(
+                    pos,
+                    perspective,
+                    pos.king_square(perspective),
+                    |index| {
+                        self.add_threat_weights(threat, index);
+                    },
+                );
+            }
+        }
+        let acc = &mut stack.current_mut().accumulator;
+        acc.computed_accumulation = true;
+        acc.computed_score = false;
+    }
+
     /// 複数手分の差分を適用してアキュムレータを更新
     pub fn forward_update_incremental(
         &self,
@@ -2392,6 +2527,116 @@ mod tests {
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn threat_ancestor_matches_full_refresh() {
+        use crate::movegen::{MoveList, generate_legal};
+        const N: usize = 64;
+        let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
+        ft.has_threat = true;
+        for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
+            *w = ((i * 73 + i / N * 19) % 255) as i8;
+        }
+        for (i, w) in ft.weights.make_mut().iter_mut().enumerate() {
+            *w = ((i * 17 + i / N * 23) % 511) as i16 - 255;
+        }
+        ft.biases.0.fill(i16::MAX - 100);
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
+            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+            "4k4/9/9/9/9/9/9/4K4/9 b RBGSNLP 1",
+        ];
+        for sfen in sfens {
+            for cached in [false, true] {
+                for stride in [1, 2, 4, 6] {
+                    let mut pos = Position::new();
+                    pos.set_sfen(sfen).unwrap();
+                    let mut stack = AccumulatorStackLayerStacks::<N>::new();
+                    let mut cache = AccumulatorCacheLayerStacks::<N>::new();
+                    ft.refresh_accumulator(&pos, &mut stack.current_mut().accumulator);
+                    let mut moves = Vec::new();
+                    for ply in 0..24 {
+                        let mut list = MoveList::new();
+                        generate_legal(&pos, &mut list);
+                        if list.is_empty() {
+                            break;
+                        }
+                        let mv = list[(ply * 137 + stride * 31) % list.len()];
+                        let dirty = pos.do_move(mv, pos.gives_check(mv));
+                        stack.push();
+                        stack.current_mut().dirty_piece = dirty;
+                        moves.push(mv);
+                        if (ply + 1) % stride == 0 {
+                            ft.update_with_threat_ancestor(
+                                &pos,
+                                &mut stack,
+                                cached.then_some(&mut cache),
+                            );
+                            let mut expected = AccumulatorLayerStacks::<N>::new();
+                            ft.refresh_accumulator(&pos, &mut expected);
+                            assert_eq!(
+                                stack.current().accumulator.accumulation,
+                                expected.accumulation,
+                                "piece {sfen}, ply {ply}, stride {stride}"
+                            );
+                            assert_eq!(
+                                stack.current().accumulator.threat_accumulation,
+                                expected.threat_accumulation,
+                                "threat {sfen}, ply {ply}, stride {stride}"
+                            );
+                            if !pos.in_check() {
+                                pos.do_null_move();
+                                stack.push();
+                                ft.update_with_threat_ancestor(
+                                    &pos,
+                                    &mut stack,
+                                    cached.then_some(&mut cache),
+                                );
+                                assert_eq!(
+                                    stack.current().accumulator.threat_accumulation,
+                                    expected.threat_accumulation
+                                );
+                                assert_eq!(
+                                    stack.current().accumulator.accumulation,
+                                    expected.accumulation
+                                );
+                                stack.pop();
+                                pos.undo_null_move();
+                            }
+                        }
+                    }
+                    while let Some(mv) = moves.pop() {
+                        stack.pop();
+                        pos.undo_move(mv);
+                        ft.update_with_threat_ancestor(
+                            &pos,
+                            &mut stack,
+                            cached.then_some(&mut cache),
+                        );
+                        let mut expected = AccumulatorLayerStacks::<N>::new();
+                        ft.refresh_accumulator(&pos, &mut expected);
+                        assert_eq!(
+                            stack.current().accumulator.threat_accumulation,
+                            expected.threat_accumulation
+                        );
+                        assert_eq!(stack.current().accumulator.accumulation, expected.accumulation);
+                    }
+                    stack.reset();
+                    ft.threat_weights.make_mut()[0] = ft.threat_weights[0].wrapping_add(1);
+                    ft.update_with_threat_ancestor(&pos, &mut stack, cached.then_some(&mut cache));
+                    let mut expected = AccumulatorLayerStacks::<N>::new();
+                    ft.refresh_accumulator(&pos, &mut expected);
+                    assert_eq!(
+                        stack.current().accumulator.threat_accumulation,
+                        expected.threat_accumulation
+                    );
+                }
+            }
         }
     }
 
