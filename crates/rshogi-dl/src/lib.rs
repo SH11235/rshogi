@@ -3,6 +3,7 @@
 use anyhow::Result;
 use rshogi_core::position::Position;
 
+pub mod cache;
 #[cfg(feature = "onnx")]
 pub mod environment;
 pub mod features;

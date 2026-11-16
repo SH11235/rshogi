@@ -80,7 +80,7 @@ pub struct SearchResult {
     pub value: f32,
     /// 完了した simulation 数。
     pub visits: u64,
-    /// NN を実際に呼んだ回数。
+    /// evaluator への要求数。キャッシュによる backend 呼び出し削減は含めない。
     pub evaluations: u64,
     /// 根の確定結果。
     pub outcome: Option<Outcome>,
