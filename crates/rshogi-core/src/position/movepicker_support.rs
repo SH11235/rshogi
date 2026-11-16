@@ -4,7 +4,7 @@
 
 use super::Position;
 use crate::bitboard::{
-    Bitboard, Direct, between_bb, bishop_effect, direct_of, gold_effect, king_effect,
+    Bitboard, Direct, RANK_BB, between_bb, bishop_effect, direct_of, gold_effect, king_effect,
     knight_effect, lance_effect, pawn_effect, ray_effect, rook_effect, silver_effect,
 };
 use crate::movegen::{ExtMoveBuffer, GenType, generate_evasions, generate_with_type};
@@ -348,6 +348,21 @@ impl Position {
     /// 静的駒交換評価を判定する。
     /// 成りボーナスは考慮しない。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
+        self.see_ge_impl(m, threshold, None)
+    }
+
+    /// cache は同じ局面の MovePicker 内でのみ共有する。
+    pub(crate) fn see_ge_with_enemy_attacks(
+        &self,
+        m: Move,
+        threshold: Value,
+        cache: Option<&mut Option<Bitboard>>,
+    ) -> bool {
+        self.see_ge_impl(m, threshold, cache)
+    }
+
+    #[inline]
+    fn see_ge_impl(&self, m: Move, threshold: Value, cache: Option<&mut Option<Bitboard>>) -> bool {
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
             return threshold.raw() <= 0;
@@ -387,6 +402,14 @@ impl Position {
         // 動かす駒を取り返されても閾値以上 → true
         if swap <= 0 {
             return true;
+        }
+
+        if let Some(cache) = cache {
+            let attacks = *cache.get_or_insert_with(|| self.see_enemy_attacks());
+            // from に届く長い利きも除外し、移動で開く to への利きを見落とさない。
+            if !attacks.contains(to) && (is_drop || !attacks.contains(m.from())) {
+                return true;
+            }
         }
 
         // occupied = pieces() ^ from ^ to
@@ -472,6 +495,21 @@ impl Position {
         }
 
         res != 0
+    }
+
+    fn see_enemy_attacks(&self) -> Bitboard {
+        let them = !self.side_to_move();
+        let pawns = self.pieces(them, PieceType::Pawn);
+        let movable_pawns = pawns & !RANK_BB[Rank::Rank1.relative(them).index()];
+        let mut attacks = match them {
+            Color::Black => Bitboard::new(movable_pawns.p0() >> 1, movable_pawns.p1() >> 1),
+            Color::White => Bitboard::new(movable_pawns.p0() << 1, movable_pawns.p1() << 1),
+        };
+        let occupied = self.occupied();
+        for from in (self.pieces_c(them) & !pawns).iter() {
+            attacks |= super::board_effect::attacks_from(self.piece_on(from), from, occupied);
+        }
+        attacks
     }
 
     /// 最も価値の低い攻撃駒を探す（成りは考慮しない）
@@ -761,6 +799,70 @@ mod tests {
         let sq54 = Square::new(File::File5, Rank::Rank4);
         let m3 = Move::new_move(sq55, sq54, false);
         assert!(!pos.pseudo_legal(m3));
+    }
+
+    #[test]
+    fn test_see_enemy_attacks_matches_attackers_to() {
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+
+        for sfen in [super::super::SFEN_HIRATE, PERFT_MATSURI, PERFT_MIDGAME] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            for color in [Color::Black, Color::White] {
+                pos.side_to_move = !color;
+                let attacks = pos.see_enemy_attacks();
+                for sq in Bitboard::ALL.iter() {
+                    assert_eq!(
+                        attacks.contains(sq),
+                        !(pos.attackers_to(sq) & pos.pieces_c(color)).is_empty(),
+                        "{sfen}: {color:?} {sq:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_see_ge_enemy_attacks_equivalence() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME, RandomPlayout};
+
+        fn check(pos: &Position) {
+            let mut moves = MoveList::new();
+            generate_legal_all(pos, &mut moves);
+            let mut cache = None;
+            for &mv in moves.iter() {
+                for threshold in [-1396, -540, -90, -78, -75, -1, 0, 1, 89, 90, 91, 540, 1396] {
+                    let expected = pos.see_ge(mv, Value::new(threshold));
+                    assert_eq!(
+                        pos.see_ge_with_enemy_attacks(mv, Value::new(threshold), Some(&mut cache)),
+                        expected,
+                        "{}: {mv:?} threshold={threshold}",
+                        pos.to_sfen(),
+                    );
+                }
+            }
+        }
+
+        for sfen in [
+            PERFT_MATSURI,
+            PERFT_MIDGAME,
+            "k8/9/9/4r4/4G4/9/9/9/8K b P 1",
+            "k8/9/2b6/3S5/9/9/9/9/8K b P 1",
+            "k8/9/9/4l4/4G4/9/9/9/8K b P 1",
+            "k8/9/9/4g4/4L4/9/9/9/8K w p 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            check(&pos);
+        }
+        let mut playout = RandomPlayout::new(13, 0);
+        for _ in 0..96 {
+            check(&playout.pos);
+            if playout.step().is_none() {
+                break;
+            }
+        }
     }
 
     #[test]

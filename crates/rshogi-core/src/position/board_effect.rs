@@ -421,7 +421,7 @@ fn diagonal_step_effect(sq: Square) -> Bitboard {
     bb
 }
 
-fn attacks_from(pc: Piece, sq: Square, occupied: Bitboard) -> Bitboard {
+pub(super) fn attacks_from(pc: Piece, sq: Square, occupied: Bitboard) -> Bitboard {
     let color = pc.color();
     match pc.piece_type() {
         PieceType::Pawn => pawn_effect(color, sq),

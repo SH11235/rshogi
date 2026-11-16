@@ -39,6 +39,7 @@
 //! 3. QCapture - 捕獲手
 
 use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE, SharedHistories};
+use crate::bitboard::Bitboard;
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
@@ -167,6 +168,7 @@ pub struct MovePicker {
     // 初期化時にキャッシュする情報
     side_to_move: Color,
     pawn_key: u64,
+    enemy_attacks: Option<Bitboard>,
 
     // 指し手バッファ（MaybeUninitにより初期化コストゼロ）
     moves: ExtMoveBuffer,
@@ -233,6 +235,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
+            enemy_attacks: None,
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -271,6 +274,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
+            enemy_attacks: None,
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -312,6 +316,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
+            enemy_attacks: None,
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -336,6 +341,16 @@ impl MovePicker {
     #[inline]
     pub fn is_quiet_stage(&self) -> bool {
         matches!(self.stage, Stage::QuietInit | Stage::GoodQuiet | Stage::BadQuiet)
+    }
+
+    pub(super) fn see_enemy_attacks_cache(&mut self) -> Option<&mut Option<Bitboard>> {
+        if matches!(self.stage, Stage::GoodQuiet | Stage::BadCapture | Stage::BadQuiet)
+            && self.end_generated > self.end_captures
+        {
+            Some(&mut self.enemy_attacks)
+        } else {
+            None
+        }
     }
 
     /// 現在のステージを取得（デバッグ用）
@@ -629,7 +644,13 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to)
+                    && pos.see_ge_with_enemy_attacks(
+                        m,
+                        Value::new(-75),
+                        Some(&mut self.enemy_attacks),
+                    )
+                {
                     value += 16384;
                 }
 
@@ -654,7 +675,13 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to)
+                    && pos.see_ge_with_enemy_attacks(
+                        m,
+                        Value::new(-75),
+                        Some(&mut self.enemy_attacks),
+                    )
+                {
                     value += 16384;
                 }
 

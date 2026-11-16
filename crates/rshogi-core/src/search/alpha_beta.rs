@@ -8,6 +8,8 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use crate::bitboard::Bitboard;
+
 #[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
@@ -353,6 +355,7 @@ pub(super) struct FutilityParams {
 
 /// Step14 の枝刈りに必要な文脈
 pub(super) struct Step14Context<'a> {
+    pub(super) enemy_attacks: Option<&'a mut Option<Bitboard>>,
     pub(super) pos: &'a Position,
     pub(super) mv: Move,
     pub(super) depth: Depth,
@@ -2986,6 +2989,7 @@ impl SearchWorker {
             }
 
             let step14_ctx = Step14Context {
+                enemy_attacks: mp.see_enemy_attacks_cache(),
                 pos,
                 mv,
                 depth: original_depth,
