@@ -14,7 +14,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
-## v1.9.0 — 2026-11-16
+## v1.9.0 — 2026-11-17
 
 v1.8.0 以降の、探索・評価の高速化、USI エンジンの設定、CSA クライアント / サーバー、定跡ツールの
 拡充を中心としたリリース。探索は NUMA に対応し (`NumaPolicy`、既定 none)、LayerStacks (2304 / 3072 /
