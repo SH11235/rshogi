@@ -40,6 +40,8 @@ pub(super) struct Opts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rounds: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw: Option<i32>,
     /// 先手番の局面で循環に入る手の値 (先手から見た値)。省くと `draw`
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +67,9 @@ impl Opts {
         }
         if let Some(v) = o.stop {
             check_range("stop", v, 1, 30000)?;
+        }
+        if let Some(v) = o.extend {
+            check_range("extend", v, 0, 200)?;
         }
         if let Some(v) = o.rounds {
             check_range("rounds", v, 0, 10)?;
@@ -181,6 +186,7 @@ pub(super) struct Defaults {
     pub opp_n: usize,
     pub stop: i32,
     pub rounds: usize,
+    pub extend: usize,
     pub draw: i32,
 }
 impl Defaults {
@@ -190,6 +196,7 @@ impl Defaults {
         check_range("opp_n", self.opp_n, 1, 8)?;
         check_range("stop", self.stop, 1, 30000)?;
         check_range("rounds", self.rounds, 0, 10)?;
+        check_range("extend", self.extend, 0, 200)?;
         check_range("draw", self.draw, -30000, 30000)
     }
 }
@@ -258,6 +265,7 @@ impl Line {
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),
+            extend: self.opts.extend.unwrap_or(defaults.extend),
             draw: self.opts.draw.unwrap_or(defaults.draw),
             draw_black: self.opts.draw_black,
             draw_white: self.opts.draw_white,
@@ -286,6 +294,8 @@ pub(super) struct Resolved {
     pub opp_n: usize,
     pub stop: i32,
     pub rounds: usize,
+    #[serde(default)]
+    pub extend: usize,
     pub draw: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_black: Option<i32>,
@@ -307,6 +317,7 @@ impl Resolved {
             stop: self.stop,
             own: own.to_owned(),
             rounds: self.rounds,
+            extend: self.extend,
             extra: self.extra.clone(),
             draw: self.draw,
             draw_black: self.draw_black,
@@ -656,6 +667,49 @@ mod condition_tests {
     use super::*;
 
     #[test]
+    fn extend_range_defaults_and_roundtrip() {
+        let defaults = Defaults {
+            multipv: 3,
+            nodes: 100,
+            opp_n: 2,
+            stop: 300,
+            rounds: 3,
+            extend: 7,
+            draw: 0,
+        };
+        let mut line: Line =
+            serde_json::from_str(r#"{"id":"extend","root":"startpos","own":"b","depth":1}"#)
+                .unwrap();
+        let root = line.check().unwrap();
+        assert_eq!(line.resolve(&root, &defaults).unwrap().extend, 7);
+        for extend in [0, 200] {
+            line.opts.extend = Some(extend);
+            line.check().unwrap();
+            let restored: Line =
+                serde_json::from_str(&serde_json::to_string(&line).unwrap()).unwrap();
+            assert_eq!(restored.opts.extend, Some(extend));
+            let resolved = restored.resolve(&root, &defaults).unwrap();
+            assert_eq!(resolved.params("b", Path::new("out")).extend, extend);
+            assert_eq!(
+                serde_json::from_value::<Resolved>(serde_json::to_value(&resolved).unwrap())
+                    .unwrap(),
+                resolved
+            );
+        }
+        line.opts.extend = Some(201);
+        assert!(line.check().is_err());
+        assert!(
+            Defaults {
+                extend: 201,
+                ..defaults
+            }
+            .check()
+            .is_err()
+        );
+        assert!(serde_json::from_str::<Opts>(r#"{"extend":-1}"#).is_err());
+    }
+
+    #[test]
     fn per_tree_condition_options_resolve_and_validate() {
         let defaults = Defaults {
             multipv: 3,
@@ -663,6 +717,7 @@ mod condition_tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
         };
         let mut line: Line = serde_json::from_str(
@@ -695,6 +750,7 @@ mod condition_tests {
         let definition: Resolved = serde_json::from_str(
             r#"{"key":"root","ply":1,"depth":0,"opp_n":1,"stop":300,"rounds":0,"draw":0,"extra":[],"game":[]}"#,
         ).unwrap();
+        assert_eq!(definition.extend, 0);
         assert_eq!(definition.multipv, None);
         assert_eq!(definition.nodes, None);
         assert!(!definition.require_condition);

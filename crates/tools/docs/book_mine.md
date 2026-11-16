@@ -233,6 +233,8 @@ cargo run -p tools --release --bin book_mine -- run \
 
 `tree` は `frontier / expand / run` と別の展開規則です。根の読みの候補と実戦の手順から始め、こちらの手番は1位、相手の手番は上位 `opp_n` 手を伸ばします。根以外で1位の絶対値が `stop` 以上なら規則と実戦の枝を止めます。未展開手が伝播後の展開手を上回ると、回の終わりに FORCE に加えて最大 `rounds` 回伸ばし直します。根は STOP を無視し、こちらの根の候補が1手だけなら2位も加えます。
 
+通常の展開は `depth` 段までです。`extend` (既定 0) を指定すると、`depth` 段から `depth + extend` 段の手前までは、手番によらず読みの1位だけを伸ばします。根以外では1位の値の絶対値が `stop` 以上になった局面で止まり、遅くとも `depth + extend` 段で止まります。延長区間では `game`・`extra`・FORCE による枝の追加や `rounds` による伸ばし直しは行いません。`depth = 0` でも延長でき、根では STOP を無視して1位だけを伸ばします。
+
 木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。循環に入らない局面の値は手順に依らないので 1 度だけ計算します。大きな循環が重なる木で、循環の中を手順ごとに数える呼び出しが 1 回の評価で 200 万回を超えたら、以後は循環の中の局面も最初に求めた値を使い回します (別の手順から来たときの千日手の判定を引き継がない近似)。循環に入る手を指す側が先手なら `draw_black`、後手なら `draw_white` を (指定があれば) 使います (どちらもその手を指す側から見た値)。エンジンの `DrawValueBlack` / `DrawValueWhite` は、読む側 (根の手番) から見た千日手の値で、探索の中では相手側にはその符号を返した値になります。木をエンジンに合わせるなら、自分 (`own`) が先手の木は `draw_black = DrawValueBlack`・`draw_white = −DrawValueBlack`、後手の木は `draw_white = DrawValueWhite`・`draw_black = −DrawValueWhite` にします (−70 / 70 の組はどちらの条件も満たす)。`draw` 1 つだけでは、自分の側を正しくすると相手の側が逆向きになります。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
 
 ### 常駐
@@ -248,7 +250,7 @@ book_mine tree serve --state /path/to/state --out-root /path/to/trees \
 
 `EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1` と `USI_Hash=--hash` は起動ごとに指定します。MultiPV と nodes は木ごとの `opts` を使い、省略時は `--multipv` / `--nodes` を使います。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
 
-`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
+`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
 
 木は実行中、各局面で最初に使った読みを保持します。後からその木自身の条件の読みが届いても差し替えず、再構築した木では優先条件を選び直します。同じ局面を異なる条件で読む要求は順に処理します。`require_condition` のない木が先に読みを要求し、後の `require_condition` のある木が自身の条件で読み直すことがあります。
 
@@ -277,7 +279,7 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 | `priority` | 0〜1000000、小さいほど先。目安: 0 = 急ぎ、100 = 既定、1000 = 空きを埋めるだけ |
 | `hold` | 真なら読まない (読みかけは読み終えて台帳に入れる)。解除で再開 |
 | `game` | 根からの実戦の手順 (USI の配列の配列)。各手順の最初の `depth+1` 手を局面別に合わせる |
-| `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`draw`・`draw_black`・`draw_white` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす)・`multipv` / `nodes` (正数)・`require_condition` (真偽値、既定 false) |
+| `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`extend` (0〜200、段の上限の先を一本道で延ばす手数)・`draw`・`draw_black`・`draw_white` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす)・`multipv` / `nodes` (正数)・`require_condition` (真偽値、既定 false) |
 | `memo` | 自由 (道具は読まない) |
 | `group` | 一緒に読み切りたい木のまとまりの名前 (制御文字を含まない 1〜128 バイト)。serve は使わず、`tree queue-review` の再採点と `--group-table` が読む。この欄を知らない古い serve は行を拒否する |
 
@@ -437,7 +439,7 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 - engine 稼働/全: `progress.json` の `key` がある worker 数 / 全 worker 数。
 - 木: 読み中 (RUNNING) / 待ち (QUEUED) / 終わった (DONE + NOT_READY、括弧内はうち読めずに終わった NOT_READY) / 保留 (HELD)。NOT_READY は ready にならず終了した木で、待機・局面・残り・depth・idleまでの時間の計算には含めません。
 - 局面: active な木 (RUNNING、QUEUED) の `read` / `required` の合計。可視の残りは各木の `max(required - read, 0)` の合計。
-- 増加を含む残り: 指定した全stateの DONE の `read` を実績として共有します。同じ `(id, own)` は1件とし (`own=bw` の先後は別の木)、最大の `read` を持つ実績のdepth・世代を使います (同値なら指定順で最初の実績)。対象の木と `(depth, generation >= 2)` が同じで、`read >= 対象の required` の実績が10件以上あれば、その平均と80パーセンタイル (`sorted[int(0.8 * n)]`) を終了時の局面数とします。10件未満なら同じdepthの全世代でやり直し、それも不足なら `required` を使います。各木の `max(予測局面数, required) - read` を0以上として合計します。
+- 増加を含む残り: 指定した全stateの DONE の `read` を実績として共有します。同じ `(id, own)` は1件とし (`own=bw` の先後は別の木)、最大の `read` を持つ実績のdepth・extend・世代を使います (同値なら指定順で最初の実績)。対象の木と `(depth, extend, generation >= 2)` が同じで、`read >= 対象の required` の実績が10件以上あれば、その平均と80パーセンタイル (`sorted[int(0.8 * n)]`) を終了時の局面数とします。10件未満なら同じdepth・extendの全世代でやり直し、それも不足なら `required` を使います。各木の `max(予測局面数, required) - read` を0以上として合計します。
 - 局面/時: 台帳の末尾から `provenance = "engine"` の有効な最新400件 (不足時はある分) の `reading.sec` の平均で、`worker総数 × 3600 / 平均秒` を計算します。prefetch・speculative の読みも含むので、実際に木が進む速さとしてはやや楽観的です。不正なJSON・形式不正・負のsecの行は飛ばします。サンプルなし・平均秒が0なら速さは不明です。
 - 1 engine の NPS: 局面/時と同じ最新400件のうち、`reading.nodes` があり `reading.sec > 0` の行で `nodes / sec` の中央値を取ります (偶数件は中央2件の平均)。該当する行がなければ不明です。nodes の無い行も局面/時には含めます。
 - 合計 NPS: 1 engine の NPS × 全 worker 数です。NPS は読む木ごとのノード上限によらず台の探索速度を表し、局面/時は読む木のノード上限に左右されます。どちらも prefetch・speculative の読みを含みます。NPS は100万単位、小数2桁で `0.75M` のように表示し、不明なら `-` です。
@@ -445,6 +447,8 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 - 深さ×木の数: `accepted.json` の受付済み定義を `(id, own, generation)` で照合し、active な木の深さごとの数を表示します。DONE の実績の深さにも同じ定義を使います。世代が一致しない木は深さ不明です。`accepted.json` が欠損・読めない場合は `targets.jsonl` の同じ id の最初の有効行を近似値として使い、状態欄と JSON の `reason` にその旨を出します。この近似では世代ごとの深さ変更は反映できません。キューの不正行・8 MiB を超える行・改行のない末尾は飛ばし、取得できない木は `不明` に入れます。
 
 表では伸びを見込む残り局面数を整数に丸め、時間は小数第1位まで表示します。JSON の数値の精度は変えません。
+
+DONE の実績は `depth` と `extend` の組ごとに分けます。受付記録が使えない場合の延長は、キューの `opts.extend` (省略時 0) からの近似です。
 
 小さい木が先に完了するため、DONEに基づく増加推定は低めに偏ります。p80も終了時刻を80%の確率で保証する値ではありません。
 読み取りはserveとロックを共有しないため、各ファイルの更新の間には短いずれがあり得ます。
@@ -457,7 +461,7 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 JSONLのキーは全行共通です。`kind` は `state` / `total`、`state` は指定パス (合計は `null`)、`status` は `ok` / `stale` / `unreadable` / `empty` (合計のみ)、`reason` はエラー理由または深さの近似値を使った通知 (通常は `null`) です。
 数値は `workers_busy`, `workers_total`, `trees_running`, `trees_waiting`, `trees_done`, `not_ready`, `trees_held`, `positions_read`, `positions_required`, `remaining_visible`, `remaining_mean`, `remaining_p80`, `positions_per_hour`, `nps_per_engine`, `nps_total`, `hours_until_idle_mean`, `hours_until_idle_p80`。
 `nps_per_engine`・`nps_total` は nodes/秒の数値で、不明なら `null` です。
-`depth_histogram` はdepth文字列 (`不明` を含む) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
+`depth_histogram` はdepth文字列 (延長ありは `depth+extend`、不明は `不明`) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
 
 ### `tree queue-review`: 台ごとの残りと未着手の木を点検する
 
@@ -909,8 +913,8 @@ mv /path/to/state/import/hourly-001.tmp /path/to/state/import/hourly-001.jsonl
 
 `--speculate-at 割合` (`--prefetch` と一緒に指定、0 より大きく 1 未満、例 `0.25`) を付けると、読みの観測 nodes が `nodes 上限 × 割合` を越えた時点で、その時点の MultiPV の上位の手 (multipv 1 から指定数まで揃った最後の組。bound の行は除く) を取り、その局面を待っている木の子を先読みの候補にします。木は段ごとに親の読みを待つので、段数の多い木では直列の待ちが縮みます。
 
-- 候補は、木で読み終えていない段 `depth` 未満の局面の、途中の上位の手と実戦の手の子です。手番によらず MultiPV の全部の手の子を挙げます。根以外で途中の 1 位の値の絶対値が木の `stop` 以上なら挙げません (木もその先を伸ばさないため)。合法手が MultiPV の数より少ない局面などで組が揃わなければ出しません。
-- 挙げた子も辿ります。途中の上位の手があればその全部の手で、台帳の読みがあれば木と同じ規則 (自分の手番は 1 位、相手の手番は上位 `opp_n` 手、どちらも実戦の手を足す。`stop` 以上は辿らない) で、`depth` まで辿ります。合流した局面は浅い段のものを使います。木にすでにある局面・読み済みの局面は挙げません。1 本の木で 1 回に辿る局面は 5,000 までで、浅い段から打ち切ります。
+- 候補は、木で読み終えていない段 `depth + extend` 未満の局面の子です。`depth` 未満では途中の MultiPV の全部の手と実戦の手、延長区間では途中の1位だけを使います。根以外で途中の 1 位の値の絶対値が木の `stop` 以上なら挙げません (木もその先を伸ばさないため)。合法手が MultiPV の数より少ない局面などで組が揃わなければ出しません。
+- 挙げた子も辿ります。途中の上位の手があればその全部の手で、台帳の読みがあれば木と同じ規則 (自分の手番は 1 位、相手の手番は上位 `opp_n` 手、どちらも実戦の手を足す。`stop` 以上は辿らない) で辿ります。`depth` 以降は途中の読みも台帳の読みも1位だけを使い、実戦の手は足さず、最大 `depth + extend` まで辿ります。合流した局面は浅い段のものを使います。木にすでにある局面・読み済みの局面は挙げません。1 本の木で 1 回に辿る局面は 5,000 までで、浅い段から打ち切ります。
 - 途中の上位の手は 1 つの局面で最初の 1 回だけ使います (RESTART などの読み直しでは出し直しません)。読み終えると台帳の読みに替わります。止められて、どの木の局面・候補でもなくなった局面の分は捨てます。途中の手と値は台帳に残しません (`--trace-dir` には残ります)。
 - 途中の上位手のヒントは、木と同じ MultiPV の読みからだけ使います。
 - 候補は伸ばし直しの予測と同じ列に並び、`--prefetch-workers` の上限と横取りの規則も同じです。親を読み終えて外れと分かった子は、読み始めていなければ列から外し、読み始めていれば読み終えて台帳に残します。伸ばし直しの予測で始めた読みが後から候補になった場合も同じです。木の終了・hold・世代替えで需要を失ったときは、既存の先読みと同じく止めます。
@@ -958,6 +962,7 @@ out = "../../example-out"
 depth = 6
 opp_n = 2
 stop = 300
+extend = 0 # depth の先を1位だけで延ばす手数
 own = "w"
 rounds = 3
 extra = ["6b5a"]
@@ -1113,11 +1118,11 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、両方の手番の局面の手ごとの伝播後の値 `node_moves.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は根の候補、伸ばし直し、警告と最後の集計を含みます。
 
-未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
+`depth` 未満で未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv`・`node_moves.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
 
 `registration_status.json` は `ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
 
-`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数 = depth − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
+`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数の上限 = depth + extend − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
 
 ### 定跡の元データへの登録
 

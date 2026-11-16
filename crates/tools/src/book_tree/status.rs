@@ -46,7 +46,7 @@ struct Worker {
 
 struct Snapshot {
     status: StatusFile,
-    depths: BTreeMap<(String, String, u32), usize>,
+    depths: BTreeMap<(String, String, u32), (usize, usize)>,
     notice: Option<String>,
     progress: Progress,
     stale: bool,
@@ -101,7 +101,7 @@ fn snapshot(
             checkpoint
                 .targets
                 .into_iter()
-                .map(|t| ((t.id, t.own, t.generation), t.definition.depth))
+                .map(|t| ((t.id, t.own, t.generation), (t.definition.depth, t.definition.extend)))
                 .collect(),
             None,
         ),
@@ -151,7 +151,7 @@ fn tree_key(tree: &TargetStatus) -> (String, String, u32) {
     (tree.id.clone(), tree.own.clone(), tree.generation)
 }
 
-fn queue_depths(path: &Path) -> Result<BTreeMap<String, usize>> {
+fn queue_depths(path: &Path) -> Result<BTreeMap<String, (usize, usize)>> {
     let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut bytes = Vec::new();
@@ -173,7 +173,7 @@ fn queue_depths(path: &Path) -> Result<BTreeMap<String, usize>> {
         if let Ok(line) = serde_json::from_slice::<Line>(&bytes)
             && line.check().is_ok()
         {
-            depths.entry(line.id).or_insert(line.depth);
+            depths.entry(line.id).or_insert((line.depth, line.opts.extend.unwrap_or(0)));
         }
     }
     Ok(depths)
@@ -289,7 +289,7 @@ impl Samples {
     }
 }
 
-type Pool = BTreeMap<(usize, Option<bool>), Samples>;
+type Pool = BTreeMap<((usize, usize), Option<bool>), Samples>;
 
 fn pool(snapshots: &[Result<Snapshot>]) -> Pool {
     let mut pool = Pool::new();
@@ -317,7 +317,7 @@ fn pool(snapshots: &[Result<Snapshot>]) -> Pool {
     pool
 }
 
-fn estimate(tree: &TargetStatus, depth: Option<usize>, pool: &Pool) -> (f64, f64) {
+fn estimate(tree: &TargetStatus, depth: Option<(usize, usize)>, pool: &Pool) -> (f64, f64) {
     let expected = depth.and_then(|depth| {
         [Some(tree.generation >= 2), None].into_iter().find_map(|generation| {
             pool.get(&(depth, generation))
@@ -368,7 +368,16 @@ fn row(path: &Path, snapshot: &Result<Snapshot>, pool: &Pool) -> Row {
         row.remaining_visible += tree.required.saturating_sub(tree.read);
         let depth = snapshot.depths.get(&tree_key(tree)).copied();
         *row.depth_histogram
-            .entry(depth.map_or_else(|| "不明".into(), |d| d.to_string()))
+            .entry(depth.map_or_else(
+                || "不明".into(),
+                |(depth, extend)| {
+                    if extend == 0 {
+                        depth.to_string()
+                    } else {
+                        format!("{depth}+{extend}")
+                    }
+                },
+            ))
             .or_default() += 1;
         let (mean, p80) = estimate(tree, depth, pool);
         row.remaining_mean += mean;
@@ -565,8 +574,8 @@ mod tests {
     fn sample_pool(buckets: Vec<((usize, bool), Vec<usize>)>) -> Pool {
         let mut pool = Pool::new();
         for ((depth, generation), reads) in buckets {
-            pool.entry((depth, None)).or_default().reads.extend(&reads);
-            pool.entry((depth, Some(generation))).or_default().reads.extend(reads);
+            pool.entry(((depth, 0), None)).or_default().reads.extend(&reads);
+            pool.entry(((depth, 0), Some(generation))).or_default().reads.extend(reads);
         }
         for samples in pool.values_mut() {
             samples.prepare();
@@ -582,13 +591,29 @@ mod tests {
             ((3, false), vec![500; 10]),
             ((4, true), vec![900; 20]),
         ]);
-        assert_eq!(estimate(&tree, Some(3), &pool), (74.5, 78.0));
+        assert_eq!(estimate(&tree, Some((3, 0)), &pool), (74.5, 78.0));
         let pool = sample_pool(vec![((3, true), vec![60; 5]), ((3, false), vec![100; 5])]);
-        assert_eq!(estimate(&tree, Some(3), &pool), (50.0, 70.0));
+        assert_eq!(estimate(&tree, Some((3, 0)), &pool), (50.0, 70.0));
         let pool = sample_pool(vec![((3, true), vec![49; 20]), ((3, false), vec![100; 9])]);
-        assert_eq!(estimate(&tree, Some(3), &pool), (20.0, 20.0));
+        assert_eq!(estimate(&tree, Some((3, 0)), &pool), (20.0, 20.0));
         assert_eq!(estimate(&tree, None, &pool), (20.0, 20.0));
         assert_eq!(estimate(&target("a", "RUNNING", 1, 60, 50), None, &pool), (0.0, 0.0));
+    }
+
+    #[test]
+    fn extended_trees_use_separate_growth_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut targets: Vec<_> =
+            (0..10).map(|i| target(&format!("done{i}"), "DONE", 1, 100, 100)).collect();
+        targets.push(target("extended", "RUNNING", 1, 10, 20));
+        fixture(dir.path(), targets, 3);
+        let mut current = snapshot(dir.path(), None, 2.0, SystemTime::now()).unwrap();
+        current.depths.insert(("extended".into(), "b".into(), 1), (3, 4));
+        let snapshots = vec![Ok(current)];
+        let samples = pool(&snapshots);
+        let row = row(dir.path(), &snapshots[0], &samples);
+        assert_eq!(row.remaining_mean, 10.0);
+        assert_eq!(row.depth_histogram["3+4"], 1);
     }
 
     #[test]
@@ -661,10 +686,10 @@ mod tests {
         write!(file, "{}", json!({"id":"torn", "root":"startpos", "own":"b", "depth":5})).unwrap();
         assert_eq!(
             queue_depths(&dir.path().join(QUEUE)).unwrap(),
-            BTreeMap::from([("active".into(), 3), ("later".into(), 4)])
+            BTreeMap::from([("active".into(), (3, 0)), ("later".into(), (4, 0))])
         );
         let snapshot = snapshot(dir.path(), None, 2.0, SystemTime::now()).unwrap();
-        assert_eq!(snapshot.depths, BTreeMap::from([(("active".into(), "b".into(), 1), 3)]));
+        assert_eq!(snapshot.depths, BTreeMap::from([(("active".into(), "b".into(), 1), (3, 0))]));
         assert!(snapshot.notice.unwrap().contains("近似値"));
     }
 
@@ -690,6 +715,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
         };
         let checkpoint = Checkpoint::new(dir.path().join("output"), "test".into());
@@ -702,8 +728,8 @@ mod tests {
         let now = SystemTime::now();
         let snapshots = vec![snapshot(dir.path(), None, 2.0, now)];
         let samples = pool(&snapshots);
-        assert_eq!(samples[&(8, Some(true))].reads, vec![100; 10]);
-        assert!(!samples.contains_key(&(3, None)));
+        assert_eq!(samples[&((8, 0), Some(true))].reads, vec![100; 10]);
+        assert!(!samples.contains_key(&((3, 0), None)));
         let current = row(dir.path(), &snapshots[0], &samples);
         assert_eq!(current.depth_histogram, BTreeMap::from([("8".into(), 1)]));
         assert_eq!((current.remaining_mean, current.remaining_p80), (70.0, 70.0));
@@ -795,11 +821,11 @@ mod tests {
         let now = SystemTime::now();
         let snapshots = vec![snapshot(&a, None, 2.0, now), snapshot(&b, None, 2.0, now)];
         let samples = pool(&snapshots);
-        assert_eq!(samples[&(3, None)].reads, vec![200; 10]);
-        assert_eq!(samples[&(3, Some(true))].reads, vec![200; 10]);
-        assert!(!samples.contains_key(&(3, Some(false))));
+        assert_eq!(samples[&((3, 0), None)].reads, vec![200; 10]);
+        assert_eq!(samples[&((3, 0), Some(true))].reads, vec![200; 10]);
+        assert!(!samples.contains_key(&((3, 0), Some(false))));
         assert_eq!(
-            estimate(&target("active", "RUNNING", 2, 10, 20), Some(3), &samples),
+            estimate(&target("active", "RUNNING", 2, 10, 20), Some((3, 0)), &samples),
             (190.0, 190.0)
         );
     }

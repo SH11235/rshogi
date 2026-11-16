@@ -833,6 +833,7 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
         opp_n: 2,
         stop: 300,
         rounds: 3,
+        extend: 0,
         draw: 0,
         multipv: 3,
         nodes: 100,

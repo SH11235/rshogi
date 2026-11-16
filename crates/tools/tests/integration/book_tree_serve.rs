@@ -2583,3 +2583,81 @@ fn seeds_single_game_warns_without_unpaired() {
         assert!(std::fs::read_to_string(&queue).unwrap().is_empty());
     }
 }
+
+#[test]
+fn extend_default_and_override_survive_serve_and_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let config = fast_fixture(&state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let mut key = ROOT.to_owned();
+    for (mv, alternate) in [
+        ("5i4i", "5i6i"),
+        ("5a4a", "5a6a"),
+        ("4i3i", "4i4h"),
+        ("4a3a", "4a4b"),
+    ] {
+        data["positions"][&key] =
+            json!([{"move":mv,"cp":10,"depth":8},{"move":alternate,"cp":0,"depth":8}]);
+        key = strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen())
+            .to_owned();
+    }
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    enqueue(
+        &state,
+        json!({"id":"extended","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":3}}),
+    );
+    enqueue(
+        &state,
+        json!({"id":"plain","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0,"extend":0}}),
+    );
+    let mut server = Server(
+        serve_command(&state, &config, 3, 3, dir.path())
+            .args(["--extend", "3"])
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| {
+        status(&out(&state, "extended", "w")) == "DONE\n"
+            && status(&out(&state, "plain", "w")) == "DONE\n"
+    });
+    stop(&state, &mut server);
+    let accepted: Value =
+        serde_json::from_slice(&std::fs::read(state.join("accepted.json")).unwrap()).unwrap();
+    for (id, extend, required) in [("extended", 3, 5), ("plain", 0, 2)] {
+        let entry = accepted["targets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap();
+        assert_eq!(entry["definition"]["extend"], extend);
+        let statuses = targets_status(&state);
+        let status =
+            statuses["targets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap();
+        assert_eq!(status["required"], required);
+    }
+    let output = out(&state, "extended", "w");
+    assert!(output.join("d4.jsonl").is_file());
+    assert!(!output.join("d5.jsonl").exists());
+    let replay = state.join("extended.toml");
+    let paths = state.join("extended.tsv");
+    std::fs::copy(output.join("paths.record.tsv"), &paths).unwrap();
+    std::fs::write(
+        &replay,
+        format!(
+            "paths='{}'\nout='{}'\ndepth=1\nextend=3\nopp_n=1\nstop=300\nown='w'\nrounds=3\n",
+            paths.display(),
+            state.join("replayed").display()
+        ),
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        std::fs::read(output.join("node_moves.tsv")).unwrap(),
+        std::fs::read(state.join("replayed/node_moves.tsv")).unwrap()
+    );
+}

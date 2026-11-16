@@ -156,6 +156,9 @@ struct ServeArgs {
     /// キューの行で opts.rounds を省いたときの既定
     #[arg(long, default_value_t = 3)]
     rounds: usize,
+    /// キューの行で opts.extend を省いたときの既定
+    #[arg(long, default_value_t = 0)]
+    extend: usize,
     /// キューの行で opts.draw を省いたときの既定
     #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     draw: i32,

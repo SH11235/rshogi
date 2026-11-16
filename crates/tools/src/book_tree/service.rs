@@ -1287,6 +1287,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         opp_n: args.opp_n,
         stop: args.stop,
         rounds: args.rounds,
+        extend: args.extend,
         draw: args.draw,
         multipv: args.reading.multipv,
         nodes: args.reading.nodes,
@@ -1792,7 +1793,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 speculate_dirty = false;
                 for (target, live) in checkpoint.targets.iter().zip(&mut lives) {
                     let tree = &live.tree;
-                    let mut next = if target.hold || !live.prepared || tree.def.depth == 0 {
+                    let mut next = if target.hold || !live.prepared || tree.def.max_depth() == 0 {
                         Vec::new()
                     } else {
                         tree.speculate(&tops, &journal, super::model::SPECULATE_WORK)
@@ -2384,6 +2385,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2462,6 +2464,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2569,6 +2572,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2767,6 +2771,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 1,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2881,6 +2886,7 @@ mod tests {
             stop: 300,
             own: "b".into(),
             rounds: 0,
+            extend: 0,
             extra: vec![],
             draw: 0,
             draw_black: None,
@@ -2915,6 +2921,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2944,6 +2951,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 3,
             nodes: 100,
@@ -2984,6 +2992,7 @@ mod tests {
             opp_n: 1,
             stop: 300,
             rounds: 0,
+            extend: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,

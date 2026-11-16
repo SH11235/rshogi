@@ -271,7 +271,7 @@ impl Tree {
                     text,
                     "{key}\t{}\t{level}\t{}\t{}\t{mv}\t{}\t{}\t{}",
                     self.ply[&key],
-                    self.def.depth.saturating_sub(level),
+                    self.def.max_depth().saturating_sub(level),
                     reading.nodes_limit,
                     values[mv],
                     u8::from(edges.is_some_and(|e| e.contains(mv))),
