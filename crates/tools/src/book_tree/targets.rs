@@ -269,6 +269,7 @@ impl Line {
     }
 
     pub fn resolve(&self, root: &Root, defaults: &Defaults) -> Result<Resolved> {
+        let extend = self.opts.extend.unwrap_or(defaults.extend);
         Ok(Resolved {
             key: root.key.clone(),
             ply: root.ply,
@@ -284,8 +285,13 @@ impl Line {
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),
-            extend: self.opts.extend.unwrap_or(defaults.extend),
-            extend_rounds: self.opts.extend_rounds.unwrap_or(defaults.extend_rounds),
+            extend,
+            // 延長しない木では意味が無いので既定にそろえ、serve の既定の変更で世代を替えない。
+            extend_rounds: if extend == 0 {
+                default_extend_rounds()
+            } else {
+                self.opts.extend_rounds.unwrap_or(defaults.extend_rounds)
+            },
             draw: self.opts.draw.unwrap_or(defaults.draw),
             draw_black: self.opts.draw_black,
             draw_white: self.opts.draw_white,
@@ -776,6 +782,12 @@ mod condition_tests {
             assert_eq!(json.get("extend_rounds").is_none(), extend_rounds == 1);
             assert_eq!(serde_json::from_value::<Resolved>(json).unwrap(), resolved);
         }
+        line.opts.extend = Some(0);
+        line.opts.extend_rounds = Some(4);
+        let unextended = line.resolve(&root, &defaults).unwrap();
+        assert_eq!(unextended.extend_rounds, 1);
+        assert!(serde_json::to_value(&unextended).unwrap().get("extend_rounds").is_none());
+        line.opts.extend = None;
         line.opts.extend_rounds = Some(11);
         assert!(line.check().is_err());
         assert!(
