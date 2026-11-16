@@ -19,3 +19,31 @@ target/release/examples/evaluate /path/to/model.onnx 0 < positions.sfen
 ```
 
 モデルの配布は含みません。モデルの取得・利用・再配布条件は各配布元で確認してください。
+
+## 有限回数の性能計測
+
+`benchmark` example は、SFEN の読み込み、evaluator の構築、warmup、反復処理の時間を分けて JSON に出します。標準入力は最大 1024 行・各行 4096 bytes で、空なら初期局面を使います。入力の解析は反復時間に含みません。`--iterations` は corpus 全体を回す回数、`--warmup` は測定前に回す回数です。各区間の要求数は最大 1000 万です。
+
+```bash
+cargo build --release -p rshogi-dl --example benchmark
+target/release/examples/benchmark encode-tokens --iterations 10000 < positions.sfen
+target/release/examples/benchmark cache-tokens --cache-mib 64 --iterations 10000 < positions.sfen
+
+cargo build --release -p rshogi-dl --features onnx --example benchmark
+export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+target/release/examples/benchmark onnx --model /path/to/model.onnx --device 0 --batch-size 8 --warmup 10 --iterations 100 < positions.sfen
+target/release/examples/benchmark onnx-cache --model /path/to/model.onnx --device 0 --cache-mib 64 --iterations 100 < positions.sfen
+```
+
+| mode | 計測対象 |
+|---|---|
+| `encode-basic` / `encode-tokens` | 基本特徴量 / token の作成のみ |
+| `cache-basic` / `cache-tokens` | 安価な決定的合成 evaluator を使った cache 処理。NN 推論速度ではありません |
+| `onnx` | 実モデルの入力作成・ORT 呼出し・CPU 出力取得。`--batch-size` は最大 256 |
+| `onnx-cache` | 実モデルを包んだ cache 処理。batch size は 1 |
+
+cache mode の `cold` は warmup 後に全 entry を消してから corpus を 1 回回した時間、`measured` は続けて corpus を反復した時間です。消去時間は含めません。corpus 内の同じ入力や hash 衝突によって hit/miss が変わるため、区間名だけで判断せず `cold_stats` / `measured_stats` の実要求数・backend 呼出し数・hit 数を確認してください。`--cache-mib 0` は cache を使わない対照です。
+
+共通の既定値は `--iterations 100 --warmup 10 --batch-size 1 --cache-mib 64` です。ONNX mode の既定は `--device -1` (CPU)、`--cuda-tf32 true` で、`false` は CUDA TF32 を無効にします。`onnx` の末尾 batch は corpus の残り件数になるため、指定した batch size で測るときは入力件数をその倍数にしてください。
+
+`setup_seconds` は evaluator / buffer の構築時間、`input_seconds` は標準入力待ちと SFEN 解析時間です。`onnx-cache` のモデル読込時間は `model_setup_seconds` として別に出します。`measured.seconds` は同期した推論結果が CPU に返るまでを含む壁時計時間であり、GPU kernel 単独の時間ではありません。JSON の `checksum` は出力を消費するための値で、モデルの正当性や棋力の判定値ではありません。共有マシンの CPU 競合や GPU クロックの変動を含むため、同じ入力・build profile・実行条件で反復して比較してください。

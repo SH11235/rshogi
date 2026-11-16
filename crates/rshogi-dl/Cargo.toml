@@ -26,3 +26,7 @@ required-features = ["onnx"]
 [[example]]
 name = "model_probe"
 required-features = ["onnx"]
+
+[[example]]
+name = "benchmark"
+test = true
