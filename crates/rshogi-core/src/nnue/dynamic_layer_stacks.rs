@@ -477,9 +477,6 @@ impl DynamicLayerStacksNetwork {
         }
     }
 
-    pub(crate) fn requires_board_effects(&self) -> bool {
-        matches!(self.feature, RuntimeLsFeature::EffectBucket(_))
-    }
     pub(crate) fn new_stack(&self) -> DynamicLayerStacksStack {
         DynamicLayerStacksStack::new(self)
     }

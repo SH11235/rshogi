@@ -125,7 +125,6 @@ pub use net_delta::{
 };
 #[cfg(feature = "layerstack-arch")]
 pub use network::evaluate_layer_stacks;
-pub(crate) use network::nnue_requires_board_effects;
 pub use network::{
     LayerStackBucketMode, LayerStackRoutingError, NNUENetwork, NnueFormatInfo,
     ProgressKpAbsWeights, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
