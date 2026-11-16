@@ -51,6 +51,7 @@ use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Value};
+#[cfg(feature = "nnue-progress-diff")]
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
@@ -227,6 +228,7 @@ fn layer_stack_progress_thresholds(num_buckets: usize) -> &'static [f32] {
 // `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
 // `compute_layer_stack_progresskpabs_bucket_index` 内で消費する。
 // 一度消費されると None にリセットされる（1回限り）。
+#[cfg(feature = "nnue-progress-diff")]
 thread_local! {
     static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -1445,8 +1447,8 @@ pub fn compute_layer_stack_progresskpabs_bucket_index(
     num_buckets: usize,
 ) -> usize {
     // 差分計算済みキャッシュがあれば消費して返す
-    let cached = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None));
-    if let Some(bucket) = cached {
+    #[cfg(feature = "nnue-progress-diff")]
+    if let Some(bucket) = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None)) {
         return bucket;
     }
     // フォールバック: 全駒スキャン
