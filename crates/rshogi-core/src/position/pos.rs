@@ -925,6 +925,67 @@ impl Position {
         Self::xor_bb(&mut self.hdk_bb, mask & masks.hdk);
     }
 
+    // XOR 差分は do/undo で共通。同じ駒種への差分も先に合成し、各盤面を一度だけ更新する。
+    #[inline(always)]
+    fn toggle_move_bitboards(
+        &mut self,
+        from: Square,
+        to: Square,
+        pc: Piece,
+        moved_after: Piece,
+        captured: Piece,
+    ) {
+        let from_mask = SQUARE_BB[from];
+        let to_mask = SQUARE_BB[to];
+        let before_pt = pc.piece_type() as usize;
+        let after_pt = moved_after.piece_type() as usize;
+        let captured_pt = if captured.is_some() {
+            captured.piece_type() as usize
+        } else {
+            0
+        };
+
+        let mut before_delta = from_mask;
+        if before_pt == after_pt {
+            before_delta ^= to_mask;
+        }
+        if captured.is_some() && captured_pt == before_pt {
+            before_delta ^= to_mask;
+        }
+        Self::xor_bb(&mut self.by_type[before_pt], before_delta);
+        if after_pt != before_pt && (captured.is_none() || captured_pt != after_pt) {
+            Self::xor_bb(&mut self.by_type[after_pt], to_mask);
+        }
+        if captured.is_some() && captured_pt != before_pt && captured_pt != after_pt {
+            Self::xor_bb(&mut self.by_type[captured_pt], to_mask);
+        }
+
+        Self::xor_bb(&mut self.by_color[pc.color()], from_mask ^ to_mask);
+        if captured.is_some() {
+            Self::xor_bb(&mut self.by_color[captured.color()], to_mask);
+        }
+
+        let before = &COMPOSITE_MASKS[before_pt];
+        let after = &COMPOSITE_MASKS[after_pt];
+        let cap = &COMPOSITE_MASKS[captured_pt];
+        Self::xor_bb(
+            &mut self.golds_bb,
+            (from_mask & before.golds) ^ (to_mask & (after.golds ^ cap.golds)),
+        );
+        Self::xor_bb(
+            &mut self.bishop_horse_bb,
+            (from_mask & before.bishop_horse) ^ (to_mask & (after.bishop_horse ^ cap.bishop_horse)),
+        );
+        Self::xor_bb(
+            &mut self.rook_dragon_bb,
+            (from_mask & before.rook_dragon) ^ (to_mask & (after.rook_dragon ^ cap.rook_dragon)),
+        );
+        Self::xor_bb(
+            &mut self.hdk_bb,
+            (from_mask & before.hdk) ^ (to_mask & (after.hdk ^ cap.hdk)),
+        );
+    }
+
     #[inline(always)]
     fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(pc.is_some());
@@ -1342,7 +1403,6 @@ impl Position {
                 let piece_no_cap = self.piece_list.piece_no_of_board(to);
                 let old_bp_cap = self.piece_list.bona_piece(piece_no_cap);
 
-                self.remove_piece_internal(captured, to);
                 let st = self.cur_state_mut();
                 st.board_key ^= zobrist_psq(captured, to);
                 Self::xor_partial_keys(st, captured, to);
@@ -1385,12 +1445,13 @@ impl Position {
             self.cur_state_mut().captured_piece = captured;
 
             // 駒を移動
-            self.remove_piece_internal(pc, from);
+            self.board[from] = Piece::NONE;
+            self.board[to] = moved_after_pc;
+            self.toggle_move_bitboards(from, to, pc, moved_after_pc, captured);
             let st = self.cur_state_mut();
             st.board_key ^= zobrist_psq(pc, from);
             Self::xor_partial_keys(st, pc, from);
 
-            self.put_piece_internal(moved_after_pc, to);
             let st = self.cur_state_mut();
             st.board_key ^= zobrist_psq(moved_after_pc, to);
             Self::xor_partial_keys(st, moved_after_pc, to);
@@ -1574,6 +1635,10 @@ impl Position {
             let piece_no_moved = self.piece_list.piece_no_of_board(to);
             let from_bp = ExtBonaPiece::from_board(original_pc, from);
 
+            self.board[from] = original_pc;
+            self.board[to] = captured;
+            self.toggle_move_bitboards(from, to, original_pc, moved_pc, captured);
+
             if captured.is_some() {
                 let cap_pt = captured.piece_type().unpromote();
 
@@ -1584,13 +1649,8 @@ impl Position {
                 let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
                 let cap_board_bp = ExtBonaPiece::from_board(captured, to);
 
-                // 駒を元の位置に戻す
-                self.remove_piece_internal(moved_pc, to);
-                self.put_piece_internal(captured, to);
                 // 手駒から除去
                 self.hand[us] = self.hand[us].sub(cap_pt);
-
-                self.put_piece_internal(original_pc, from);
 
                 // PieceList 更新
                 self.piece_list.put_piece_on_board(piece_no_cap, cap_board_bp, to);
@@ -1615,10 +1675,6 @@ impl Position {
                     );
                 }
             } else {
-                // 駒を元の位置に戻す
-                self.remove_piece_internal(moved_pc, to);
-                self.put_piece_internal(original_pc, from);
-
                 // PieceList 更新
                 self.piece_list.put_piece_on_board(piece_no_moved, from_bp, from);
 
@@ -3204,6 +3260,67 @@ mod tests {
                     pos.put_piece(pc, sq);
                     assert_eq!(pos.pieces_pt(pt), Bitboard::ALL);
                     assert_eq!(pos.pieces_c(color), Bitboard::ALL);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn move_bitboards_match_piece_toggles_for_all_piece_types() {
+        let squares = [
+            (Square::new(File::File1, Rank::Rank1), Square::new(File::File2, Rank::Rank1)),
+            (Square::new(File::File7, Rank::Rank9), Square::new(File::File8, Rank::Rank1)),
+            (Square::new(File::File8, Rank::Rank1), Square::new(File::File7, Rank::Rank9)),
+            (Square::new(File::File8, Rank::Rank1), Square::new(File::File9, Rank::Rank9)),
+        ];
+        for color in [Color::Black, Color::White] {
+            for id in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(id as u8).unwrap();
+                let pc = Piece::new(color, pt);
+                for promote in [false, true] {
+                    let moved_after = if promote {
+                        let Some(promoted) = pc.promote() else {
+                            continue;
+                        };
+                        promoted
+                    } else {
+                        pc
+                    };
+                    for captured_id in 0..=PieceType::NUM {
+                        let captured = if captured_id == 0 {
+                            Piece::NONE
+                        } else {
+                            let cap_pt = PieceType::from_u8(captured_id as u8).unwrap();
+                            if cap_pt == PieceType::King {
+                                continue;
+                            }
+                            Piece::new(!color, cap_pt)
+                        };
+                        for (from, to) in squares {
+                            let mut expected = Position::new();
+                            expected.put_piece(pc, from);
+                            expected.put_piece(pc, Square::new(File::File5, Rank::Rank5));
+                            if captured.is_some() {
+                                expected.put_piece(captured, to);
+                            }
+                            let mut actual = expected.clone();
+                            let initial = DerivedState::of(&actual);
+
+                            expected.toggle_piece_bitboards(pc, from);
+                            expected.toggle_piece_bitboards(moved_after, to);
+                            if captured.is_some() {
+                                expected.toggle_piece_bitboards(captured, to);
+                            }
+                            actual.toggle_move_bitboards(from, to, pc, moved_after, captured);
+                            assert_eq!(
+                                DerivedState::of(&actual),
+                                DerivedState::of(&expected),
+                                "{pc:?} -> {moved_after:?}, captured={captured:?}, {from:?}-{to:?}"
+                            );
+                            actual.toggle_move_bitboards(from, to, pc, moved_after, captured);
+                            assert_eq!(DerivedState::of(&actual), initial);
+                        }
+                    }
                 }
             }
         }
