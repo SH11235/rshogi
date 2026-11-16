@@ -93,7 +93,7 @@ impl SeedsArgs {
 #[derive(Clone, Deserialize)]
 pub(super) struct GameResult {
     pub(super) game_id: u32,
-    outcome: String,
+    pub(super) outcome: String,
     #[serde(default)]
     pair_index: Option<u32>,
     #[serde(default)]
@@ -122,6 +122,10 @@ pub(super) struct Move {
 
 #[derive(Deserialize)]
 pub(super) struct Eval {
+    score: Option<PrimaryScore>,
+    score_cp: Option<i32>,
+    score_mate: Option<i32>,
+    score_mate_sign: Option<i8>,
     #[serde(default)]
     pub(super) pv: Option<Vec<String>>,
     pub(super) last_exact_primary: Option<Primary>,
@@ -300,6 +304,26 @@ fn score_value(score: &PrimaryScore) -> i64 {
         PrimaryScore::MateWin => i64::MAX,
         PrimaryScore::MateLoss => -i64::MAX,
     }
+}
+
+pub(super) fn eval_score(eval: &Eval) -> Option<i64> {
+    if let Some(primary) = &eval.last_exact_primary {
+        return (!primary.pv.is_empty()).then(|| score_value(&primary.score));
+    }
+    if eval.pv.as_ref().is_none_or(Vec::is_empty) {
+        return None;
+    }
+    let score = eval.score.clone().or_else(|| {
+        eval.score_cp
+            .map(PrimaryScore::Cp)
+            .or_else(|| eval.score_mate.map(PrimaryScore::Mate))
+            .or(match eval.score_mate_sign {
+                Some(1) => Some(PrimaryScore::MateWin),
+                Some(-1) => Some(PrimaryScore::MateLoss),
+                _ => None,
+            })
+    });
+    score.as_ref().map(score_value)
 }
 
 fn chance_index(

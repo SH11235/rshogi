@@ -644,3 +644,321 @@ fn csa_inline_comments_use_the_same_exit_detection_as_separate_lines() {
         }
     }
 }
+
+fn pave_args(dir: &Path) -> pave::GamePaveArgs {
+    #[derive(Parser)]
+    struct PaveCli {
+        #[command(flatten)]
+        args: pave::GamePaveArgs,
+    }
+    PaveCli::parse_from([
+        "test",
+        "--master",
+        dir.join("moves.tsv").to_str().unwrap(),
+        "--audit-db",
+        dir.join("audit.db").to_str().unwrap(),
+        "--games",
+        dir.join("games.jsonl").to_str().unwrap(),
+        "--table",
+        dir.join("table.tsv").to_str().unwrap(),
+        "--enqueue-out",
+        dir.join("queue.jsonl").to_str().unwrap(),
+        "--tag",
+        "pave",
+        "--priority",
+        "20",
+    ])
+    .args
+}
+
+fn pave_pair(dir: &Path, games: &[(&[Value], &str)]) {
+    let mut rows =
+        vec![json!({"type":"meta", "engine_cmd":{"label_black":"mine","label_white":"other"}})];
+    for (id, (ms, outcome)) in games.iter().enumerate() {
+        for m in *ms {
+            let mut m = m.clone();
+            m["game_id"] = json!(id);
+            rows.push(m);
+        }
+        rows.push(json!({"type":"result","game_id":id,"pair_index":id/2,"pair_slot":id%2,"outcome":outcome}));
+    }
+    write_json(&dir.join("games.jsonl"), &rows);
+    std::fs::write(dir.join("audit.db"), "#YANEURAOU-DB2016 1.00\n").unwrap();
+}
+
+fn pave_table(dir: &Path) -> Vec<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(dir.join("table.tsv")).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<_> = lines.next().unwrap().split('\t').collect();
+    lines
+        .map(|line| {
+            header
+                .iter()
+                .zip(line.split('\t'))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+fn scored_moves() -> Vec<Value> {
+    let mut ms = moves();
+    for (i, m) in ms.iter_mut().enumerate() {
+        m["eval"] = json!({"last_exact_primary":{"score":{"cp":if i%2==0 {-200} else {200}},"pv":[MOVES[i]]}});
+    }
+    ms
+}
+
+#[test]
+fn pave_collapse_uses_both_sides_recovers_and_ignores_scores_without_pv() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ms = scored_moves();
+    ms[2]["eval"] = json!({"score_cp":0,"pv":[MOVES[2]]});
+    ms[3]["eval"] = json!({"score_cp":200});
+    ms[4]["eval"] = Value::Null;
+    ms[5]["eval"] = json!({"score_cp":200,"pv":[MOVES[5]]});
+    let mut recovered = ms.clone();
+    recovered[9]["eval"] = json!({"last_exact_primary":{"score":{"cp":0},"pv":[MOVES[9]]}});
+    pave_pair(dir.path(), &[(&ms, "white_win"), (&recovered, "white_win")]);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    pave::run(pave_args(dir.path())).unwrap();
+    let table = pave_table(dir.path());
+    assert_eq!(table[0]["collapse"], "6");
+    assert_eq!(table[0]["target_end"], "9");
+    assert_eq!(table[0]["state"], "open");
+    assert_eq!(table[0]["own"], "b");
+    assert_eq!(table[1]["state"], "no-collapse");
+    assert_eq!(table[1]["rows"], "0");
+    assert!(queue(&dir.path().join("queue.jsonl")).iter().all(|q| q.own == "b"));
+}
+
+#[test]
+fn pave_settled_uses_played_edge_tree_provenance_and_reports_main_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ms = scored_moves();
+    ms[0]["eval"] = json!({"score_cp":0,"pv":[MOVES[0]]});
+    for (kind, main_same, expected) in [
+        ("tree:1", true, "settled"),
+        ("single", true, "open"),
+        ("tree:1", false, "settled"),
+    ] {
+        pave_pair(dir.path(), &[(&ms, "white_win"), (&ms, "white_win")]);
+        let root = parse_root(&format!("sfen {}", ms[0]["sfen_before"].as_str().unwrap())).unwrap();
+        let mut rows = vec![Row::from_fields(&[
+            ("key", root.key.clone()),
+            ("ply", "1".into()),
+            ("move", MOVES[0].into()),
+            ("role", if main_same { "main" } else { "record" }.into()),
+            ("value_kind", kind.into()),
+            ("evals", "-200".into()),
+            ("cond", "unknown".into()),
+        ])];
+        if !main_same {
+            rows.push(Row::from_fields(&[
+                ("key", root.key.clone()),
+                ("ply", "1".into()),
+                ("move", "2g2f".into()),
+                ("role", "main".into()),
+            ]));
+        }
+        std::fs::write(dir.path().join("moves.tsv"), format_master(&rows)).unwrap();
+        std::fs::write(
+            dir.path().join("audit.db"),
+            format!("sfen {} 999\n7g7f none -150 3 1\n2g2f none 50 3 1\n", root.key),
+        )
+        .unwrap();
+        let result = pave::run(pave_args(dir.path()));
+        result.unwrap();
+        let table = pave_table(dir.path());
+        assert_eq!(table[0]["state"], expected);
+        if expected == "settled" {
+            assert_eq!(table[0]["settled_ply"], "1");
+            assert_eq!(table[0]["settled_main_same"], main_same.to_string());
+            assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+        }
+    }
+}
+
+#[test]
+fn pave_target_extends_to_end_disagrees_and_queue_requires_actual_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let ms = scored_moves();
+    pave_pair(dir.path(), &[(&ms, "white_win"), (&ms, "white_win")]);
+    for (reach, target, state) in [(0, 4, "open"), (4, 10, "open"), (10, 10, "disagree")] {
+        master(&dir.path().join("moves.tsv"), &ms[..reach], &[], &[]);
+        pave::run(pave_args(dir.path())).unwrap();
+        let table = pave_table(dir.path());
+        assert_eq!(table[0]["book_reach"], reach.to_string());
+        assert_eq!(table[0]["target_end"], target.to_string());
+        assert_eq!(table[0]["state"], state);
+    }
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    let excluded = dir.path().join("excluded.jsonl");
+    let root = format!("sfen {}", ms[0]["sfen_before"].as_str().unwrap());
+    write_json(
+        &excluded,
+        &[json!({"id":"accepted","root":root,"depth":8,"own":"b","game":[MOVES[..8]]})],
+    );
+    let mut a = pave_args(dir.path());
+    a.exclude_queue.push(excluded.clone());
+    pave::run(a).unwrap();
+    assert_eq!(pave_table(dir.path())[0]["state"], "queued");
+    assert_eq!(pave_table(dir.path())[0]["covered_by"], "accepted");
+    assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+    write_json(
+        &excluded,
+        &[json!({"id":"wrong","root":root,"depth":8,"own":"b","game":[["2g2f"]]})],
+    );
+    let mut a = pave_args(dir.path());
+    a.exclude_queue.push(excluded);
+    pave::run(a).unwrap();
+    assert_eq!(pave_table(dir.path())[0]["state"], "open");
+}
+
+#[test]
+fn pave_spacing_last_extend_merge_and_repeatability() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut short = scored_moves();
+    let mut long = short.clone();
+    for i in 0..5 {
+        long[i]["eval"] = json!({"score_cp":0,"pv":[MOVES[i]]});
+    }
+    short[0]["eval"] = json!({"score_cp":0,"pv":[MOVES[0]]});
+    pave_pair(dir.path(), &[(&short, "white_win"), (&long, "white_win")]);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    let mut a = pave_args(dir.path());
+    a.extend = Some(12);
+    pave::run(a).unwrap();
+    let q = queue(&dir.path().join("queue.jsonl"));
+    let plies: Vec<_> = q.iter().map(|q| parse_root(&q.root).unwrap().ply).collect();
+    assert_eq!(plies, [1, 4, 7]);
+    assert_eq!(q[0].opts.extend, None);
+    assert_eq!(q[1].opts.extend, Some(12));
+    assert_eq!(q[2].opts.extend, Some(12));
+    assert_eq!(q[0].game[0].len(), 8);
+    let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
+    let output = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let mut a = pave_args(dir.path());
+    a.extend = Some(12);
+    a.games.push(a.games[0].clone());
+    pave::run(a).unwrap();
+    assert_eq!(std::fs::read(dir.path().join("table.tsv")).unwrap(), table);
+    assert_eq!(std::fs::read(dir.path().join("queue.jsonl")).unwrap(), output);
+}
+
+#[test]
+fn pave_draw_repetition_includes_final_position_and_reports_first_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let ms = moves_for(&["5i5h", "5a5b", "5h5i", "5b5a"]);
+    pave_pair(dir.path(), &[(&ms, "draw"), (&moves(), "draw")]);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    pave::run(pave_args(dir.path())).unwrap();
+    let table = pave_table(dir.path());
+    assert_eq!(table[0]["state"], "repetition");
+    assert_eq!(table[0]["repetition_entry"], "1");
+    assert_eq!(table[0]["own"], "");
+    assert_eq!(table[1]["state"], "draw-other");
+    assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+}
+
+#[test]
+fn pave_white_loser_mates_and_primary_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ms = moves();
+    for (i, m) in ms.iter_mut().enumerate() {
+        m["eval"] = json!({"score_mate_sign": if i%2==0 {1} else {-1},"pv":[MOVES[i]]});
+    }
+    ms[0]["eval"] = json!({"score_cp":200,"pv":[MOVES[0]],"last_exact_primary":{"score":{"cp":0},"pv":[MOVES[0]]}});
+    ms[1]["eval"] = json!({"score_cp":0,"pv":[MOVES[1]]});
+    ms[2]["eval"] = json!({"score":{"mate":3},"pv":[MOVES[2]]});
+    pave_pair(dir.path(), &[(&ms, "black_win"), (&ms, "black_win")]);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    pave::run(pave_args(dir.path())).unwrap();
+    assert_eq!(pave_table(dir.path())[0]["collapse"], "3");
+    assert!(queue(&dir.path().join("queue.jsonl")).iter().all(|q| q.own == "w"));
+    ms[9]["eval"] = json!({"score_cp":0,"pv":[MOVES[9]],"last_exact_primary":{"score":{"cp":0}}});
+    pave_pair(dir.path(), &[(&ms, "black_win"), (&ms, "black_win")]);
+    pave::run(pave_args(dir.path())).unwrap();
+    assert_eq!(pave_table(dir.path())[0]["collapse"], "3");
+}
+
+#[test]
+fn pave_rejects_other_formats_and_preserves_outputs_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    std::fs::write(dir.path().join("audit.db"), "").unwrap();
+    std::fs::write(dir.path().join("table.tsv"), "keep").unwrap();
+    client(&dir.path().join("games.jsonl"), &moves());
+    assert!(pave::run(pave_args(dir.path())).is_err());
+    std::fs::write(dir.path().join("games.jsonl"), "PI\n+\n%TORYO\n").unwrap();
+    assert!(
+        pave::run(pave_args(dir.path()))
+            .unwrap_err()
+            .to_string()
+            .contains("pair JSON Lines")
+    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("table.tsv")).unwrap(), "keep");
+    let ms = scored_moves();
+    pave_pair(dir.path(), &[(&ms, "white_win"), (&ms, "white_win")]);
+    let mut a = pave_args(dir.path());
+    a.table = a.audit_db.clone();
+    assert!(pave::run(a).is_err());
+}
+
+#[test]
+fn pave_sorts_games_by_id_and_caps_root_spacing_at_eight() {
+    let dir = tempfile::tempdir().unwrap();
+    let ms = scored_moves();
+    pave_pair(dir.path(), &[(&ms, "white_win"), (&ms, "white_win")]);
+    let rows: Vec<Value> = std::fs::read_to_string(dir.path().join("games.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let mut reordered = vec![rows[0].clone()];
+    reordered.extend(rows.iter().filter(|v| v["game_id"] == 1).cloned());
+    reordered.extend(rows.iter().filter(|v| v["game_id"] == 0).cloned());
+    write_json(&dir.path().join("games.jsonl"), &reordered);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    let mut a = pave_args(dir.path());
+    a.depth = 9;
+    a.after_collapse = 20;
+    pave::run(a).unwrap();
+    assert_eq!(pave_table(dir.path())[0]["game"], "games_0");
+    assert_eq!(pave_table(dir.path())[1]["game"], "games_1");
+    let q = queue(&dir.path().join("queue.jsonl"));
+    assert_eq!(q.iter().map(|q| parse_root(&q.root).unwrap().ply).collect::<Vec<_>>(), [1, 9]);
+}
+
+#[test]
+fn merged_queue_takes_maximum_extend_and_rejects_other_option_differences() {
+    let make = |extend, stop| -> Line {
+        serde_json::from_value(json!({"id":"test","root":"startpos","own":"b","depth":3,"game":[MOVES[..8]],"opts":{"extend":extend,"stop":stop}})).unwrap()
+    };
+    for (stop, succeeds) in [(300, true), (400, false)] {
+        let mut sorter = Sorter::new();
+        for line in [make(Some(15), 300), make(Some(4), stop), make(None, 300)] {
+            sorter
+                .push(
+                    vec![
+                        HIRATE_KEY.into(),
+                        "b".into(),
+                        serde_json::to_string(&line.game[0]).unwrap(),
+                    ],
+                    serde_json::to_string(&line).unwrap(),
+                )
+                .unwrap();
+        }
+        let result = merge_queue(sorter);
+        assert_eq!(result.is_ok(), succeeds);
+        if let Ok(mut file) = result {
+            use std::io::{Read, Seek};
+            file.rewind().unwrap();
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            let line: Line = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(line.opts.extend, Some(15));
+            assert_eq!(line.game.len(), 1);
+        }
+    }
+}

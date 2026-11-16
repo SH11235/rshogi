@@ -10,7 +10,7 @@ use super::walk::check_tag;
 use crate::book_db::{apply_usi_move, position_from_sfen};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -78,7 +78,7 @@ impl GameGapsArgs {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Move {
     ply: u32,
     side_to_move: String,
@@ -88,8 +88,11 @@ struct Move {
     timed_out: bool,
     #[serde(skip)]
     searched: bool,
+    #[serde(default)]
+    score_black: Option<i64>,
 }
 
+#[derive(Deserialize, Serialize)]
 struct Game {
     name: String,
     own: String,
@@ -236,6 +239,7 @@ fn visit_csa(
             move_usi,
             timed_out: false,
             searched: pv == Some(cm.mv.as_str()),
+            score_black: None,
         });
         pos.apply_csa_move(&cm.mv)?;
     }
@@ -298,54 +302,9 @@ fn visit_input(
     })?;
     ensure!(results > 0, "result がありません");
     if pair || results > 1 || labels.is_none() {
-        let valid = seeds::valid_game_ids(path, false)?;
-        let mut ended = BTreeSet::new();
-        seeds::visit_json(path, |_, v| {
-            if matches!(v["type"].as_str(), Some("move" | "result")) {
-                let id: u32 = serde_json::from_value(v["game_id"].clone())?;
-                if valid.contains_key(&id) {
-                    if v["type"] == "result" {
-                        ended.insert(id);
-                    } else {
-                        ensure!(!ended.contains(&id), "result 後に手があります: game_id={id}");
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        return seeds::visit_games(path, &valid, |result, moves| {
-            let engine = |side| -> Result<&str> {
-                let mut names =
-                    moves.iter().filter(|m| m.side_to_move == side).map(|m| m.engine.as_str());
-                let name = names.next().context("対局者名がありません")?;
-                ensure!(!name.is_empty() && names.all(|n| n == name), "engine が空か不一致です");
-                Ok(name)
-            };
-            let own = own_side(engine("b")?, engine("w")?, &args.player)?;
-            let moves = moves
-                .iter()
-                .map(|m| Move {
-                    ply: m.ply,
-                    side_to_move: m.side_to_move.clone(),
-                    sfen_before: m.sfen_before.clone(),
-                    move_usi: m.move_usi.clone(),
-                    timed_out: m.timed_out,
-                    searched: m
-                        .eval
-                        .as_ref()
-                        .and_then(|e| {
-                            e.pv.as_ref().or_else(|| e.last_exact_primary.as_ref().map(|p| &p.pv))
-                        })
-                        .is_some_and(|pv| pv.first() == Some(&m.move_usi)),
-                })
-                .collect();
-            visit(Game {
-                name: format!("{name}_{}", result.game_id),
-                own,
-                moves,
-            })
-        });
+        return visit_pair(path, &name, Some(&args.player), |game, _| visit(game));
     }
+
     let (black, white) = labels.context("meta がありません")?;
     let own = own_side(&black, &white, &args.player)?;
     let mut moves = Vec::new();
@@ -370,6 +329,78 @@ fn visit_input(
     })?;
     ensure!(ended, "result がありません");
     visit(Game { name, own, moves })
+}
+
+fn visit_pair(
+    path: &Path,
+    name: &str,
+    player: Option<&str>,
+    mut visit: impl FnMut(Game, &str) -> Result<()>,
+) -> Result<()> {
+    let valid = seeds::valid_game_ids(path, false)?;
+    let mut ended = BTreeSet::new();
+    seeds::visit_json(path, |_, v| {
+        if matches!(v["type"].as_str(), Some("move" | "result")) {
+            let id: u32 = serde_json::from_value(v["game_id"].clone())?;
+            if valid.contains_key(&id) {
+                if v["type"] == "result" {
+                    ended.insert(id);
+                } else {
+                    ensure!(!ended.contains(&id), "result 後に手があります: game_id={id}");
+                }
+            }
+        }
+        Ok(())
+    })?;
+    seeds::visit_games(path, &valid, |result, moves| {
+        let engine = |side| -> Result<&str> {
+            let mut names =
+                moves.iter().filter(|m| m.side_to_move == side).map(|m| m.engine.as_str());
+            let name = names.next().context("対局者名がありません")?;
+            ensure!(!name.is_empty() && names.all(|n| n == name), "engine が空か不一致です");
+            Ok(name)
+        };
+        let own = if let Some(player) = player {
+            own_side(engine("b")?, engine("w")?, player)?
+        } else {
+            match result.outcome.as_str() {
+                "black_win" => "w",
+                "white_win" => "b",
+                _ => "",
+            }
+            .into()
+        };
+        let moves = moves
+            .iter()
+            .map(|m| Move {
+                ply: m.ply,
+                side_to_move: m.side_to_move.clone(),
+                sfen_before: m.sfen_before.clone(),
+                move_usi: m.move_usi.clone(),
+                timed_out: m.timed_out,
+                score_black: m
+                    .eval
+                    .as_ref()
+                    .and_then(seeds::eval_score)
+                    .map(|v| if m.side_to_move == "b" { v } else { -v }),
+                searched: m
+                    .eval
+                    .as_ref()
+                    .and_then(|e| {
+                        e.pv.as_ref().or_else(|| e.last_exact_primary.as_ref().map(|p| &p.pv))
+                    })
+                    .is_some_and(|pv| pv.first() == Some(&m.move_usi)),
+            })
+            .collect();
+        visit(
+            Game {
+                name: format!("{name}_{}", result.game_id),
+                own,
+                moves,
+            },
+            &result.outcome,
+        )
+    })
 }
 
 struct Coverage {
@@ -421,6 +452,20 @@ fn read_excluded(paths: &[PathBuf]) -> Result<Excluded> {
         }
     }
     Ok(out)
+}
+
+fn covered_ids(game: &Game, i: usize, active: &[(usize, &Coverage)]) -> BTreeSet<String> {
+    active
+        .iter()
+        .filter(|(start, row)| {
+            let actual = &game.moves[*start..=i];
+            row.game.iter().any(|line| {
+                line.len() >= actual.len()
+                    && line.iter().zip(actual).all(|(mv, actual)| *mv == actual.move_usi)
+            })
+        })
+        .map(|(_, row)| row.id.clone())
+        .collect()
 }
 
 fn short_name(name: &str) -> String {
@@ -490,20 +535,7 @@ impl Report<'_> {
                 "no-move"
             };
             gaps += 1;
-            let covered = active
-                .iter()
-                .filter(|(start, row)| {
-                    let actual = &game.moves[*start..=i];
-                    row.game.iter().any(|line| {
-                        line.len() >= actual.len()
-                            && line.iter().zip(actual).all(|(mv, actual)| *mv == actual.move_usi)
-                    })
-                })
-                .map(|(_, row)| row.id.as_str())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(",");
+            let covered = covered_ids(&game, i, &active).into_iter().collect::<Vec<_>>().join(",");
             writeln!(
                 self.table,
                 "{}\t{}\t{}\t{}\t{kind}\t{covered}\t{}",
@@ -616,38 +648,58 @@ fn copy_output(file: &mut File, path: &Path) -> Result<()> {
 }
 
 fn merge_queue(queue: Sorter) -> Result<File> {
+    use std::io::{Seek, SeekFrom};
+    fn flush(out: &mut File, first: &Line, games: &mut File) -> Result<()> {
+        let mut value = serde_json::to_value(first)?;
+        value.as_object_mut().context("受付行が object ではありません")?.remove("game");
+        let mut prefix = serde_json::to_string(&value)?;
+        ensure!(prefix.pop() == Some('}'), "受付行が object ではありません");
+        out.write_all(prefix.as_bytes())?;
+        out.write_all(b",\"game\":[")?;
+        games.seek(SeekFrom::Start(0))?;
+        std::io::copy(games, out)?;
+        out.write_all(b"]}\n")?;
+        games.set_len(0)?;
+        games.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
     let mut rows = queue.finish()?;
     let mut out = tempfile::tempfile()?;
+    let mut games = tempfile::tempfile()?;
     let mut root = None;
+    let mut first: Option<Line> = None;
     let mut last_game = String::new();
     while let Some(row) = read_record(&mut rows)? {
         let next = (row.key[0].clone(), row.key[1].clone());
+        let mut line: Line = serde_json::from_str(&row.value)?;
         if root.as_ref() != Some(&next) {
-            if root.is_some() {
-                out.write_all(b"]}\n")?;
+            if let Some(first) = &first {
+                flush(&mut out, first, &mut games)?;
             }
-            let mut value: serde_json::Value = serde_json::from_str(&row.value)?;
-            value.as_object_mut().context("受付行が object ではありません")?.remove("game");
-            let mut prefix = serde_json::to_string(&value)?;
-            ensure!(prefix.pop() == Some('}'), "受付行が object ではありません");
-            out.write_all(prefix.as_bytes())?;
-            out.write_all(b",\"game\":[")?;
+            first = Some(line);
             root = Some(next);
             last_game.clear();
+        } else if let Some(first) = &mut first {
+            let extend = line.opts.extend.take();
+            let previous = first.opts.extend.take();
+            ensure!(first.opts == line.opts, "同じ根・own の opts が不一致です");
+            first.opts.extend = previous.max(extend);
         }
         if last_game != row.key[2] {
             if !last_game.is_empty() {
-                out.write_all(b",")?;
+                games.write_all(b",")?;
             }
-            out.write_all(row.key[2].as_bytes())?;
+            games.write_all(row.key[2].as_bytes())?;
             last_game = row.key[2].clone();
         }
     }
-    if root.is_some() {
-        out.write_all(b"]}\n")?;
+    if let Some(first) = &first {
+        flush(&mut out, first, &mut games)?;
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests;
+
+pub(super) mod pave;

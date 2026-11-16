@@ -2137,6 +2137,64 @@ TSV は `game ply side move kind covered_by key` の列です。抜けのある�
 
 元データの照合は一時ディスク索引を使い、受付行は外部ソートで同じ局面・同じ側の手順を集約します。受付行の順序は局面キー・側の順です。棋譜はファイルを順に読み、pair の読み込みでは seeds と同じ有効対局 id の索引と進行中の局の手順を保持します。表と受付の出力は一時ファイルへ逐次書き、全入力の検査が終わってから置き換えます。
 
+## `master game-pave`: 負けた局の崩れまでを定跡につなぐ
+
+tournament の pair JSON Lines から、負けた側の崩れを元データと伝播後の値が把握しているかを局ごとに判定します。知らない局には、崩れの先までの抜けをつなぐ木の受付行を出します。版ごとに繰り返すと、既に元データへ入った区間の先へ対象を延ばせます。csa_client の JSON Lines と CSA は受け付けません。
+
+```sh
+book_mine master game-pave --master moves.tsv --audit-db audited.db \
+  --games pair.jsonl --table games.tsv \
+  --enqueue-out pave.jsonl --tag pave --priority <N>
+```
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `--master <PATH>` | 必須 | 元データ `moves.tsv` |
+| `--schema <DIR>` | なし | 元データの語彙・読み条件の検査 |
+| `--audit-db <PATH>` | 必須 | `master audit --out-db` の伝播後の YaneuraOu 形式 DB |
+| `--games <PATH>` | 必須、繰り返し可 | tournament の pair JSON Lines。有効な完了ペアだけを採用 |
+| `--exclude-queue <PATH>` | なし、繰り返し可 | 既に受付へ積んだ木の JSON Lines |
+| `--table <PATH>` | 必須 | 1 局 1 行の TSV |
+| `--enqueue-out <PATH>` | なし | open の局の抜けをつなぐ、`tree enqueue --from` 用 JSON Lines |
+| `--tag`・`--priority` | 受付出力時に必須 | id の接頭辞と受付の優先度 |
+| `--collapse-cp <N>` | `150` | 崩れと、伝播値が悪いと判定する正の閾値 |
+| `--after-collapse <N>` | `3` | 崩れの後に含める手数 |
+| `--depth <N>` | `3` | 木の段数 (1〜20)。根の間隔は `min(depth, 8)` 手 |
+| `--extend <N>` | なし | 各局で最後に出す根だけに付ける `opts.extend` (0〜200) |
+| `--opp-n`・`--stop`・`--rounds` | `3`・`300`・`3` | 受付行の読み条件 |
+| `--draw-black`・`--draw-white` | `-70`・`70` | 受付行の千日手の値 |
+
+`own` は局ごとに負けた側です (`black_win` なら `w`、`white_win` なら `b`)。`--player` は使いません。両側の読みを使い、`eval.last_exact_primary.score` を優先し、無ければ `eval` の score / score_cp / score_mate / score_mate_sign を使います。詰みは seeds と同じく勝ち・負けの向きを保ちます。採用する評価値に読み筋が無い手は使いません。手番側から見た値を先手側から見た値にそろえてから、負けた側の値で崩れを調べます。
+
+判定には各手の `ply` (1 始まり) を使います。
+
+1. `collapse`: 負けた側の値が `-collapse_cp` 以下になり、その後の評価値つきの手がすべてその閾値以下にとどまる最初の手。評価値の無い手は飛ばします。見つからなければ `no-collapse` です。
+2. `book_reach`: 最初の手から連続して、元データに実戦の局面・手の行がある最後の手数。`role` は問いません。盤・手番・持ち駒の直接キーだけで照合し、反転局面は見ません。
+3. `settled`: 負けた側の手番で `ply ≤ collapse` の実戦手について、元データの `value_kind` が `tree:` で始まり、audit DB のその手の値が `-collapse_cp` 以下なら成立します。局面の最善手の値ではありません。main が別の手でも、実戦手の悪さを既に知っていれば成立します。
+4. `target_end`: `book_reach < collapse + after_collapse` なら `collapse + after_collapse`、それ以外は局の最後の手。いずれも局の手数が上限です。
+5. 状態は `settled` を優先し、未成立で最後まで元データにあれば `disagree` (人による確認が必要)、対象区間の抜けが全部受付で覆われていれば `queued`、残りがあれば `open` です。受付行を出すのは `open` の局だけです。
+
+引き分けは `repetition` (同じ局面が 2 回以上出る) と `draw-other` に分類し、受付行を出しません。繰り返しは最後の着手後の局面も含めて調べ、2 回以上出た局面の最初の出現手数の最小値を `repetition_entry` に入れます。
+
+受付の被覆は game-gaps と同じく、根から対象の手まで `game` の先頭が実戦と一致し、`depth` の範囲内にある場合だけ認めます。根の手数・`own` は問いません。追加の根だけでは覆いません。これは計画上の照合であり、木が停止したり登録できなかったりしていても `queued` になります。`covered_by` で受付 id を確認できます。
+
+open の局では `book_reach + 1` から `target_end` までの抜けのうち、受付でも先に生成した根でも覆わない最初の手を次の根にします。`game` はその根から実戦の手を最大 8 手入れます。id は game-gaps と同じ `<tag>_<局の短い名前>_<手数>_<key の hash>_<own>` です。同じ根・同じ `own` は局をまたいでまとめ、異なる実戦手順を `game` に集約します。`opts.extend` は大きい方を採用し、他の opts が異なればエラーです。
+
+TSV の列は次のとおりです。値の無い欄は空です。
+
+| 列 | 内容 |
+|---|---|
+| `game` | game-gaps と同じ `<ファイル名>_<game_id>` |
+| `outcome`・`own`・`plies` | 勝敗、負けた側、最後の手数。引き分けの own は空 |
+| `collapse`・`book_reach`・`target_end` | 崩れ、元データで連続して届いた手数、対象区間の終わり |
+| `settled_ply`・`settled_main_same` | 最初に settled が成立した手数、その局面の main と実戦手が同じか (`true` / `false`) |
+| `state` | `no-collapse` / `settled` / `disagree` / `queued` / `open` / `repetition` / `draw-other` |
+| `rows` | その局から生成した受付行数 (局をまたぐ統合前) |
+| `covered_by` | 対象区間の抜けを覆う受付 id。複数はカンマ区切り |
+| `repetition_entry` | 繰り返しの入口の手数 |
+
+入力パスをソート・重複排除し、各ファイルの局を game_id 順に出します。同じ入力なら表・受付行はバイト一致します。棋譜は一時ファイルへ退避して外部ソートし、元データは一時ディスク索引で照合します。audit DB は負けた側の手番の局面キーを集めた後に 1 回だけ走査し、その集合にある局面の手の値だけを保持します。DB 全体はメモリに載せず、SFEN の手数は照合に使いません。
+
 ## `master main-line`: main 対 main で定跡が切れる所
 
 初期局面から、手番の側の main (先手の局面では先手の main、後手の局面では後手の main) を交互に指して辿り、
