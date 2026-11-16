@@ -33,6 +33,7 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
     worker.prepare_search(&limits);
     let mut pos = fixture();
     let ctx = SearchContext {
+        move_picker_scratch: &worker.move_picker_scratch,
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,

@@ -115,6 +115,7 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
         capture: true,
     };
     let ctx = SearchContext {
+        move_picker_scratch: &worker.move_picker_scratch,
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,

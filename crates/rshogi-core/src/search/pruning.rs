@@ -495,13 +495,15 @@ where
     inc_stat!(st, probcut_attempted);
 
     let cont_tables = cont_history_keys(st, ply);
-    let mut mp = MovePicker::new_probcut(
+    let mut move_buffer = ctx.move_picker_scratch.acquire();
+    let mut mp = MovePicker::probcut_with_buffer(
         pos,
         tt_ctx.mv,
         threshold,
         ply,
         cont_tables,
         ctx.generate_all_legal_moves,
+        &mut *move_buffer,
     );
 
     // 逐次 next_move 方式（バッファ collect 禁止）。

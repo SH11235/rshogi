@@ -382,6 +382,7 @@ pub(super) struct Step14Context<'a> {
 /// 探索の各ノードで共有される不変の参照群。
 /// TimeManagement と LimitsType は可変アクセスが必要なため、別途引数として渡す。
 pub struct SearchContext<'a> {
+    pub(super) move_picker_scratch: &'a super::movepicker::MovePickerScratch,
     /// 置換表への参照
     pub tt: &'a TranspositionTable,
     /// 評価ハッシュへの参照
@@ -693,6 +694,7 @@ impl SearchState {
 /// - Context用フィールド: tt, eval_hash, history, cont_history_sentinel, generate_all_legal_moves, max_moves_to_draw, thread_id
 /// - State: 探索中に変化するフィールドを SearchState として保持
 pub struct SearchWorker {
+    pub(super) move_picker_scratch: super::movepicker::MovePickerScratch,
     // =========================================================================
     // Context用フィールド（探索中に変化しない）
     // =========================================================================
@@ -820,6 +822,7 @@ impl SearchWorker {
 
         let reductions = build_reductions(search_tune_params.lmr_table_coeff);
         let mut worker = Box::new(Self {
+            move_picker_scratch: super::movepicker::MovePickerScratch::new(),
             tt,
             eval_hash,
             history,
@@ -850,6 +853,7 @@ impl SearchWorker {
     #[inline]
     pub fn create_context(&self) -> SearchContext<'_> {
         SearchContext {
+            move_picker_scratch: &self.move_picker_scratch,
             tt: &self.tt,
             eval_hash: &self.eval_hash,
             history: &self.history,
@@ -1287,6 +1291,7 @@ impl SearchWorker {
         };
         {
             let ctx = SearchContext {
+                move_picker_scratch: &self.move_picker_scratch,
                 tt: &self.tt,
                 eval_hash: &self.eval_hash,
                 history: &self.history,
@@ -1943,6 +1948,7 @@ impl SearchWorker {
                 let bonus = ((best_value.raw() - static_eval.raw()) * depth / divisor)
                     .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
                 let ctx = SearchContext {
+                    move_picker_scratch: &self.move_picker_scratch,
                     tt: &self.tt,
                     eval_hash: &self.eval_hash,
                     history: &self.history,
@@ -2421,6 +2427,7 @@ impl SearchWorker {
         }
         // SearchContext を直接構築して借用の競合を避ける
         let ctx = SearchContext {
+            move_picker_scratch: &self.move_picker_scratch,
             tt: &self.tt,
             eval_hash: &self.eval_hash,
             history: &self.history,
@@ -2895,8 +2902,16 @@ impl SearchWorker {
         // contHist[0], contHist[1] の参照元はノード先頭で固定する。
         let cont_hist_ptr_1 = cont_history_ptr(st, ctx, ply, 1);
         let cont_hist_ptr_2 = cont_history_ptr(st, ctx, ply, 2);
-        let mut mp =
-            MovePicker::new(pos, tt_move, depth, ply, cont_tables, ctx.generate_all_legal_moves);
+        let mut move_buffer = ctx.move_picker_scratch.acquire();
+        let mut mp = MovePicker::with_buffer(
+            pos,
+            tt_move,
+            depth,
+            ply,
+            cont_tables,
+            ctx.generate_all_legal_moves,
+            &mut *move_buffer,
+        );
 
         // Singular Extension用の変数
         let tt_pv = st.stack[ply as usize].tt_pv;

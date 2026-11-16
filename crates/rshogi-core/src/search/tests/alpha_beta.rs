@@ -317,6 +317,7 @@ fn test_nmp_verification_restores_depth_liveness_in_production_path() {
     worker.state.nodes = 200;
 
     let ctx = SearchContext {
+        move_picker_scratch: &worker.move_picker_scratch,
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,
@@ -428,6 +429,7 @@ fn test_nmp_qsearch_verification_leaves_no_stale_mark() {
     worker.state.nodes = 200;
 
     let ctx = SearchContext {
+        move_picker_scratch: &worker.move_picker_scratch,
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,

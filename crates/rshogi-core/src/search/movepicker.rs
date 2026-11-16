@@ -38,6 +38,10 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
+use std::borrow::BorrowMut;
+use std::cell::{Cell, RefCell, RefMut};
+use std::ops::{Deref, DerefMut};
+
 use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE, SharedHistories};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
@@ -116,6 +120,65 @@ impl Stage {
     }
 }
 
+/// 同一 ply の再帰でも手配列を共有しない、worker 専用の一時領域。
+pub(super) struct MovePickerScratch {
+    buffers: Box<[RefCell<ExtMoveBuffer>]>,
+    active: Cell<usize>,
+}
+
+impl MovePickerScratch {
+    pub(super) fn new() -> Self {
+        // SE は除外手ありの探索内では再入せず、各 ply で生存する picker は最大 2 個。
+        let buffers = (0..2 * crate::types::MAX_PLY as usize)
+            .map(|_| RefCell::new(ExtMoveBuffer::new()))
+            .collect();
+        Self {
+            buffers,
+            active: Cell::new(0),
+        }
+    }
+
+    #[inline]
+    pub(super) fn acquire(&self) -> MovePickerBuffer<'_> {
+        let index = self.active.get();
+        let buffer = self.buffers[index].borrow_mut();
+        self.active.set(index + 1);
+        MovePickerBuffer {
+            buffer,
+            active: &self.active,
+            index,
+        }
+    }
+}
+
+pub(super) struct MovePickerBuffer<'a> {
+    buffer: RefMut<'a, ExtMoveBuffer>,
+    active: &'a Cell<usize>,
+    index: usize,
+}
+
+impl Deref for MovePickerBuffer<'_> {
+    type Target = ExtMoveBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffer
+    }
+}
+
+impl DerefMut for MovePickerBuffer<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buffer
+    }
+}
+
+impl Drop for MovePickerBuffer<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        debug_assert_eq!(self.active.get(), self.index + 1);
+        self.active.set(self.index);
+    }
+}
+
 // =============================================================================
 // MovePicker
 // =============================================================================
@@ -148,7 +211,7 @@ impl Stage {
 ///     let value = search_node(...);
 /// }
 /// ```
-pub struct MovePicker {
+pub struct MovePicker<B = ExtMoveBuffer> {
     // History参照は保持しない（next_move時に渡す）
 
     // キーだけを保持し、スコアリング時の生存中 HistoryTables から解決する。
@@ -169,7 +232,7 @@ pub struct MovePicker {
     pawn_key: u64,
 
     // 指し手バッファ（MaybeUninitにより初期化コストゼロ）
-    moves: ExtMoveBuffer,
+    moves: B,
     cur: usize,
     end_cur: usize,
     end_bad_captures: usize,
@@ -180,6 +243,66 @@ pub struct MovePicker {
 }
 
 impl MovePicker {
+    /// 手配列を所有する指し手オーダリング器を作成する。
+    pub fn new(
+        pos: &Position,
+        tt_move: Move,
+        depth: Depth,
+        ply: i32,
+        continuation_history: [ContHistKey; 6],
+        generate_all_legal_moves: bool,
+    ) -> Self {
+        Self::with_buffer(
+            pos,
+            tt_move,
+            depth,
+            ply,
+            continuation_history,
+            generate_all_legal_moves,
+            ExtMoveBuffer::new(),
+        )
+    }
+
+    /// 手配列を所有する指し手オーダリング器を作成する。
+    pub fn new_evasions(
+        pos: &Position,
+        tt_move: Move,
+        ply: i32,
+        continuation_history: [ContHistKey; 6],
+        generate_all_legal_moves: bool,
+    ) -> Self {
+        Self::evasions_with_buffer(
+            pos,
+            tt_move,
+            ply,
+            continuation_history,
+            generate_all_legal_moves,
+            ExtMoveBuffer::new(),
+        )
+    }
+
+    /// 手配列を所有する指し手オーダリング器を作成する。
+    pub fn new_probcut(
+        pos: &Position,
+        tt_move: Move,
+        threshold: Value,
+        ply: i32,
+        continuation_history: [ContHistKey; 6],
+        generate_all_legal_moves: bool,
+    ) -> Self {
+        Self::probcut_with_buffer(
+            pos,
+            tt_move,
+            threshold,
+            ply,
+            continuation_history,
+            generate_all_legal_moves,
+            ExtMoveBuffer::new(),
+        )
+    }
+}
+
+impl<B: BorrowMut<ExtMoveBuffer>> MovePicker<B> {
     /// 通常探索・静止探索用コンストラクタ（History参照を保持しない）
     ///
     /// `pos`は初期化時のみ使用し、フィールドとして保持しない。
@@ -191,14 +314,16 @@ impl MovePicker {
     /// 単独の `PieceToHistory` を渡す代わりに、選択したキーに対応する
     /// `HistoryTables::continuation_history` 内のテーブルへ値を設定する。
     ///
-    pub fn new(
+    pub fn with_buffer(
         pos: &Position,
         tt_move: Move,
         depth: Depth,
         ply: i32,
         continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
+        mut moves: B,
     ) -> Self {
+        moves.borrow_mut().clear();
         let stage = if pos.in_check() {
             // 王手回避
             if tt_move.is_some() && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves) {
@@ -233,7 +358,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
-            moves: ExtMoveBuffer::new(),
+            moves,
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -244,13 +369,15 @@ impl MovePicker {
     }
 
     /// 王手回避専用コンストラクタ（シンプル版）
-    pub fn new_evasions(
+    pub fn evasions_with_buffer(
         pos: &Position,
         tt_move: Move,
         ply: i32,
         continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
+        mut moves: B,
     ) -> Self {
+        moves.borrow_mut().clear();
         debug_assert!(pos.in_check());
 
         let stage =
@@ -271,7 +398,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
-            moves: ExtMoveBuffer::new(),
+            moves,
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -282,14 +409,16 @@ impl MovePicker {
     }
 
     /// ProbCut専用コンストラクタ
-    pub fn new_probcut(
+    pub fn probcut_with_buffer(
         pos: &Position,
         tt_move: Move,
         threshold: Value,
         ply: i32,
         continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
+        mut moves: B,
     ) -> Self {
+        moves.borrow_mut().clear();
         debug_assert!(!pos.in_check());
 
         let stage = if tt_move.is_some()
@@ -312,7 +441,7 @@ impl MovePicker {
             generate_all_legal_moves,
             side_to_move: pos.side_to_move(),
             pawn_key: pos.pawn_key(),
-            moves: ExtMoveBuffer::new(),
+            moves,
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -386,31 +515,35 @@ impl MovePicker {
                 Stage::CaptureInit | Stage::QCaptureInit | Stage::ProbCutInit => {
                     self.cur = 0;
                     self.end_bad_captures = 0;
-                    self.moves.clear();
+                    self.moves.borrow_mut().clear();
 
                     // CaptureInit/QCaptureInit/ProbCutInit は同じ capture 生成を使う
                     let count = if self.generate_all_legal_moves {
                         crate::movegen::generate_with_type(
                             pos,
                             crate::movegen::GenType::CapturesAll,
-                            &mut self.moves,
+                            self.moves.borrow_mut(),
                             None,
                         );
-                        self.moves.len()
+                        self.moves.borrow().len()
                     } else {
                         crate::movegen::generate_with_type(
                             pos,
                             crate::movegen::GenType::Captures,
-                            &mut self.moves,
+                            self.moves.borrow_mut(),
                             None,
                         );
-                        self.moves.len()
+                        self.moves.borrow().len()
                     };
                     self.end_cur = count;
                     self.end_captures = count;
 
                     self.score_captures(pos, history);
-                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
+                    partial_insertion_sort(
+                        self.moves.borrow_mut().as_mut_slice(),
+                        self.end_cur,
+                        i32::MIN,
+                    );
 
                     self.stage = self.stage.next();
                 }
@@ -437,16 +570,16 @@ impl MovePicker {
                             crate::movegen::generate_with_type(
                                 pos,
                                 crate::movegen::GenType::QuietsAll,
-                                &mut self.moves,
+                                self.moves.borrow_mut(),
                                 None,
                             );
-                            self.moves.len() - self.end_captures
+                            self.moves.borrow().len() - self.end_captures
                         } else {
-                            pos.generate_quiets(&mut self.moves, self.end_captures)
+                            pos.generate_quiets(self.moves.borrow_mut(), self.end_captures)
                         };
                         self.end_cur = self.end_captures + count;
                         self.end_generated = self.end_cur;
-                        self.moves.set_len(self.end_cur);
+                        self.moves.borrow_mut().set_len(self.end_cur);
 
                         self.cur = self.end_captures;
 
@@ -456,11 +589,14 @@ impl MovePicker {
                         // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
                         let limit = -3560 * self.depth;
                         let quiet_count = self.end_cur - self.end_captures;
-                        debug_assert!(self.end_captures <= self.moves.len());
+                        debug_assert!(self.end_captures <= self.moves.borrow().len());
                         // SAFETY: end_captures <= moves.len() は MovePicker の不変条件。
                         let sorted_end = partial_insertion_sort(
                             unsafe {
-                                self.moves.as_mut_slice().get_unchecked_mut(self.end_captures..)
+                                self.moves
+                                    .borrow_mut()
+                                    .as_mut_slice()
+                                    .get_unchecked_mut(self.end_captures..)
                             },
                             quiet_count,
                             limit,
@@ -526,23 +662,27 @@ impl MovePicker {
                 Stage::EvasionInit => {
                     // 回避手を生成
                     let count = if self.generate_all_legal_moves {
-                        self.moves.clear();
+                        self.moves.borrow_mut().clear();
                         crate::movegen::generate_with_type(
                             pos,
                             crate::movegen::GenType::EvasionsAll,
-                            &mut self.moves,
+                            self.moves.borrow_mut(),
                             None,
                         );
-                        self.moves.len()
+                        self.moves.borrow().len()
                     } else {
-                        pos.generate_evasions_ext(&mut self.moves)
+                        pos.generate_evasions_ext(self.moves.borrow_mut())
                     };
                     self.cur = 0;
                     self.end_cur = count;
                     self.end_generated = count;
 
                     self.score_evasions(pos, history);
-                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
+                    partial_insertion_sort(
+                        self.moves.borrow_mut().as_mut_slice(),
+                        self.end_cur,
+                        i32::MIN,
+                    );
 
                     self.stage = Stage::Evasion;
                 }
@@ -580,9 +720,11 @@ impl MovePicker {
 
     /// 捕獲手のスコアを計算
     fn score_captures(&mut self, pos: &Position, history: &HistoryTables) {
-        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
+        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.borrow().len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
-        for ext in unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) } {
+        for ext in unsafe {
+            self.moves.borrow_mut().as_mut_slice().get_unchecked_mut(self.cur..self.end_cur)
+        } {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
@@ -601,9 +743,11 @@ impl MovePicker {
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables, shared: &SharedHistories) {
         let us = self.side_to_move;
         let pawn_idx = shared.pawn_history_index(self.pawn_key);
-        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
+        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.borrow().len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
-        let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
+        let moves = unsafe {
+            self.moves.borrow_mut().as_mut_slice().get_unchecked_mut(self.cur..self.end_cur)
+        };
         let tables = self.continuation_history.map(|key| {
             history.continuation_history[key.in_check as usize][key.capture as usize]
                 .get_table(key.piece, key.to)
@@ -670,9 +814,11 @@ impl MovePicker {
         let ch = history.continuation_history[key.in_check as usize][key.capture as usize]
             .get_table(key.piece, key.to);
 
-        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
+        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.borrow().len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
-        for ext in unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) } {
+        for ext in unsafe {
+            self.moves.borrow_mut().as_mut_slice().get_unchecked_mut(self.cur..self.end_cur)
+        } {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
@@ -697,7 +843,7 @@ impl MovePicker {
     /// 良い捕獲手を選択（SEE >= threshold）
     fn select_good_capture(&mut self, pos: &Position) -> Option<Move> {
         while self.cur < self.end_cur {
-            let ext = self.moves.get(self.cur);
+            let ext = self.moves.borrow().get(self.cur);
             self.cur += 1;
 
             // TT手は既に返したのでスキップ
@@ -711,7 +857,7 @@ impl MovePicker {
                 return Some(ext.mv);
             } else {
                 // 悪い捕獲手は後回し
-                self.moves.swap(self.end_bad_captures, self.cur - 1);
+                self.moves.borrow_mut().swap(self.end_bad_captures, self.cur - 1);
                 self.end_bad_captures += 1;
             }
         }
@@ -722,7 +868,7 @@ impl MovePicker {
     fn select_good_quiet(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
-            let ext = self.moves.get(self.cur);
+            let ext = self.moves.borrow().get(self.cur);
             self.cur += 1;
 
             if ext.mv == self.tt_move {
@@ -740,7 +886,7 @@ impl MovePicker {
     fn select_bad_quiet(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
-            let ext = self.moves.get(self.cur);
+            let ext = self.moves.borrow().get(self.cur);
             self.cur += 1;
 
             if ext.mv == self.tt_move {
@@ -757,7 +903,7 @@ impl MovePicker {
     /// シンプルな手の選択（TT手スキップのみ）
     fn select_simple(&mut self) -> Option<Move> {
         while self.cur < self.end_cur {
-            let ext = self.moves.get(self.cur);
+            let ext = self.moves.borrow().get(self.cur);
             self.cur += 1;
 
             // TT手は既に返したのでスキップ
@@ -773,7 +919,7 @@ impl MovePicker {
     /// ProbCut用の手の選択（SEE閾値チェック）
     fn select_probcut(&mut self, pos: &Position, threshold: Value) -> Option<Move> {
         while self.cur < self.end_cur {
-            let ext = self.moves.get(self.cur);
+            let ext = self.moves.borrow().get(self.cur);
             self.cur += 1;
 
             // TT手は既に返したのでスキップ
@@ -886,7 +1032,11 @@ mod tests {
         SHARED.get_or_init(|| SharedHistories::new(1))
     }
 
-    fn all_moves(mut picker: MovePicker, pos: &Position, history: &HistoryTables) -> Vec<Move> {
+    fn all_moves<B: BorrowMut<ExtMoveBuffer>>(
+        mut picker: MovePicker<B>,
+        pos: &Position,
+        history: &HistoryTables,
+    ) -> Vec<Move> {
         std::iter::from_fn(|| {
             let mv = picker.next_move(pos, history, shared());
             mv.is_some().then_some(mv)
@@ -928,7 +1078,8 @@ mod tests {
         let mut keys = [ContHistKey::null_sentinel(); 6];
         keys[0] = key;
         let mut history = HistoryTables::new_boxed();
-        let mut picker = MovePicker::new(&pos, tt, 1, 0, keys, false);
+        let mut buffer = ExtMoveBuffer::new();
+        let mut picker = MovePicker::with_buffer(&pos, tt, 1, 0, keys, false, &mut buffer);
         assert_eq!(picker.next_move(&pos, &history, shared()), tt);
         // TT 手の探索から戻るまで quiet のスコアはまだ確定しない。
         let control = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
@@ -1016,8 +1167,33 @@ mod tests {
         history: &HistoryTables,
     ) {
         let initial_stage = picker.stage;
+        let mut buffer = ExtMoveBuffer::new();
+        buffer.push(ExtMove::new(Move::NONE, i32::MAX));
+        let mut borrowed = if let Some(threshold) = picker.probcut_threshold {
+            MovePicker::probcut_with_buffer(
+                pos,
+                picker.tt_move,
+                threshold,
+                picker.ply,
+                picker.continuation_history,
+                picker.generate_all_legal_moves,
+                &mut buffer,
+            )
+        } else {
+            MovePicker::with_buffer(
+                pos,
+                picker.tt_move,
+                picker.depth,
+                picker.ply,
+                picker.continuation_history,
+                picker.generate_all_legal_moves,
+                &mut buffer,
+            )
+        };
         loop {
             let mv = picker.next_move(pos, history, shared());
+            assert_eq!(mv, borrowed.next_move(pos, history, shared()));
+            assert_eq!(picker.stage(), borrowed.stage());
             if mv.is_none() {
                 break;
             }
@@ -1100,6 +1276,71 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scratch_nested_pickers_preserve_outer_moves_and_reuse_after_return() {
+        let scratch = MovePickerScratch::new();
+        let history = HistoryTables::new_boxed();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let expected =
+            all_moves(MovePicker::new(&pos, Move::NONE, 6, 0, keys, false), &pos, &history);
+        let mut outer_buffer = scratch.acquire();
+        let mut outer =
+            MovePicker::with_buffer(&pos, Move::NONE, 6, 0, keys, false, &mut *outer_buffer);
+        assert_eq!(outer.next_move(&pos, &history, shared()), expected[0]);
+        for all in [false, true] {
+            let mut inner_buffer = scratch.acquire();
+            let mut inner =
+                MovePicker::with_buffer(&pos, Move::NONE, 6, 0, keys, all, &mut *inner_buffer);
+            assert!(inner.next_move(&pos, &history, shared()).is_some());
+        }
+        assert_eq!(all_moves(outer, &pos, &history), expected[1..]);
+        drop(outer_buffer);
+        assert_eq!(scratch.active.get(), 0);
+        {
+            let mut buffer = scratch.acquire();
+            let mut picker =
+                MovePicker::with_buffer(&pos, Move::NONE, 6, 0, keys, false, &mut *buffer);
+            picker.skip_quiets();
+            assert_eq!(picker.next_move(&pos, &history, shared()), Move::NONE);
+        }
+        let mut buffer = scratch.acquire();
+        let picker = MovePicker::with_buffer(&pos, Move::NONE, 6, 0, keys, false, &mut *buffer);
+        assert_eq!(all_moves(picker, &pos, &history), expected);
+    }
+
+    #[test]
+    fn scratch_capacity_and_unwind_release() {
+        let scratch = MovePickerScratch::new();
+        {
+            let buffers: Vec<_> =
+                (0..2 * crate::types::MAX_PLY).map(|_| scratch.acquire()).collect();
+            assert_eq!(scratch.active.get(), buffers.len());
+            for buffer in buffers.into_iter().rev() {
+                drop(buffer);
+            }
+        }
+        assert_eq!(scratch.active.get(), 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let buffer = scratch.acquire();
+            assert!(buffer.is_empty());
+            panic!("unwind");
+        }));
+        assert!(result.is_err());
+        assert_eq!(scratch.active.get(), 0);
+        let mut buffer = scratch.acquire();
+        buffer.clear();
+        buffer.push(ExtMove::new(Move::NONE, 123));
+        assert_eq!(buffer.get(0).value, 123);
+        assert!(std::mem::size_of::<MovePicker<&mut ExtMoveBuffer>>() < 256);
+        assert_eq!(
+            std::mem::size_of::<MovePicker>()
+                - std::mem::size_of::<MovePicker<&mut ExtMoveBuffer>>(),
+            std::mem::size_of::<ExtMoveBuffer>() - std::mem::size_of::<&mut ExtMoveBuffer>(),
+        );
     }
 
     #[test]

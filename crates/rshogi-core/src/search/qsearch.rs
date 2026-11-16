@@ -364,10 +364,26 @@ pub(super) fn qsearch<const NT: u8>(
 
     let cont_tables = cont_history_keys(st, ply);
     // 王手されていない静止探索では quiet checks を生成しない。
+    let mut move_buffer = ctx.move_picker_scratch.acquire();
     let mut mp = if in_check {
-        MovePicker::new_evasions(pos, tt_move, ply, cont_tables, ctx.generate_all_legal_moves)
+        MovePicker::evasions_with_buffer(
+            pos,
+            tt_move,
+            ply,
+            cont_tables,
+            ctx.generate_all_legal_moves,
+            &mut *move_buffer,
+        )
     } else {
-        MovePicker::new(pos, tt_move, DEPTH_QS, ply, cont_tables, ctx.generate_all_legal_moves)
+        MovePicker::with_buffer(
+            pos,
+            tt_move,
+            DEPTH_QS,
+            ply,
+            cont_tables,
+            ctx.generate_all_legal_moves,
+            &mut *move_buffer,
+        )
     };
 
     let mut move_count = 0;

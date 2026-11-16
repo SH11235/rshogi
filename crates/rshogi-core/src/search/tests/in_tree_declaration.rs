@@ -54,6 +54,7 @@ fn probe<const NT: u8>(
     });
     let mut pos = position(sfen);
     let ctx = SearchContext {
+        move_picker_scratch: &worker.move_picker_scratch,
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
         history: &worker.history,
