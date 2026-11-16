@@ -78,6 +78,7 @@ fn definition(dir: &Path, rounds: usize) -> Definition {
         own: "b".into(),
         rounds,
         extend: 0,
+        extend_rounds: 1,
         extra: vec!["5i6i".into()],
         fingerprint: None,
         draw: 17,
@@ -968,6 +969,7 @@ pub(super) fn serve_args(
         stop: 300,
         rounds: 3,
         extend: 0,
+        extend_rounds: 1,
         draw: 0,
         trace_dir: None,
         pending_secs: None,
@@ -1160,6 +1162,7 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
         stop: 300,
         rounds: 3,
         extend: 0,
+        extend_rounds: 1,
         draw: 0,
         multipv: 3,
         nodes: 100,
@@ -2387,4 +2390,18 @@ fn live_import_preserves_versions_and_adds_missing_prefetch_on_existing_row() {
     assert_eq!(journal.get_exact(&added.key, &src.fingerprint), Some(&added));
     assert!(journal.prefetched.contains(ROOT));
     assert!(journal.skipped_rows.is_empty());
+}
+
+#[test]
+fn toml_extend_rounds_defaults_and_range() {
+    let text =
+        "paths='paths.tsv'\nout='out'\ndepth=1\nextend=20\nopp_n=1\nstop=300\nown='b'\nrounds=3\n";
+    let def: Definition = toml::from_str(text).unwrap();
+    assert_eq!(def.params().extend_rounds, 1);
+    for rounds in [0, 1, 10, 11] {
+        let def: Definition = toml::from_str(&format!("{text}extend_rounds={rounds}\n")).unwrap();
+        assert_eq!(def.params().extend_rounds, rounds);
+        assert_eq!(Tree::build(def.params(), &[(ROOT.into(), 1, vec![])]).is_ok(), rounds <= 10);
+    }
+    assert!(toml::from_str::<Definition>(&format!("{text}extend_rounds=-1\n")).is_err());
 }

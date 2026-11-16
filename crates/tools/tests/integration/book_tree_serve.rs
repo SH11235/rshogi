@@ -2610,11 +2610,11 @@ fn extend_default_and_override_survive_serve_and_replay() {
     );
     enqueue(
         &state,
-        json!({"id":"plain","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0,"extend":0}}),
+        json!({"id":"plain","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0,"extend":0,"extend_rounds":1}}),
     );
     let mut server = Server(
         serve_command(&state, &config, 3, 3, dir.path())
-            .args(["--extend", "3"])
+            .args(["--extend", "3", "--extend-rounds", "2"])
             .spawn()
             .unwrap(),
     );
@@ -2632,6 +2632,11 @@ fn extend_default_and_override_survive_serve_and_replay() {
         } else {
             assert_eq!(entry["definition"]["extend"], extend);
         }
+        if id == "plain" {
+            assert!(entry["definition"].get("extend_rounds").is_none());
+        } else {
+            assert_eq!(entry["definition"]["extend_rounds"], 2);
+        }
         let statuses = targets_status(&state);
         let status =
             statuses["targets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap();
@@ -2646,7 +2651,7 @@ fn extend_default_and_override_survive_serve_and_replay() {
     std::fs::write(
         &replay,
         format!(
-            "paths='{}'\nout='{}'\ndepth=1\nextend=3\nopp_n=1\nstop=300\nown='w'\nrounds=3\n",
+            "paths='{}'\nout='{}'\ndepth=1\nextend=3\nextend_rounds=2\nopp_n=1\nstop=300\nown='w'\nrounds=3\n",
             paths.display(),
             state.join("replayed").display()
         ),

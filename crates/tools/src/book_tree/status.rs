@@ -716,6 +716,7 @@ mod tests {
             stop: 300,
             rounds: 0,
             extend: 0,
+            extend_rounds: 1,
             draw: 0,
         };
         let checkpoint = Checkpoint::new(dir.path().join("output"), "test".into());
