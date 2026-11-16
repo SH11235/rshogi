@@ -11,6 +11,7 @@ use crate::position::Position;
 use crate::types::{Bound, MAX_PLY, Move, Piece, RepetitionState, Square, Value};
 
 use super::history::{CorrectionPieceToHistory, PieceToHistory};
+use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 // =============================================================================
@@ -285,7 +286,7 @@ pub fn init_stack_array() -> StackArray {
 /// 例: history テーブルやkillerムーブの更新に使用する手のリスト。
 /// 32手を超える場合は古い統計情報で十分と判断される。
 pub struct SmallMoveList<const N: usize> {
-    buf: [Move; N],
+    buf: [MaybeUninit<Move>; N],
     len: usize,
 }
 
@@ -294,7 +295,7 @@ impl<const N: usize> SmallMoveList<N> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            buf: [Move::NONE; N],
+            buf: [MaybeUninit::uninit(); N],
             len: 0,
         }
     }
@@ -305,7 +306,7 @@ impl<const N: usize> SmallMoveList<N> {
     #[inline]
     pub fn push(&mut self, mv: Move) {
         if self.len < N {
-            self.buf[self.len] = mv;
+            self.buf[self.len].write(mv);
             self.len += 1;
         }
     }
@@ -325,8 +326,8 @@ impl<const N: usize> SmallMoveList<N> {
     /// イテレータを返す
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Move> {
-        // SAFETY: self.len <= N は push() で保証。buf は N 要素で初期化済み。
-        unsafe { self.buf.get_unchecked(..self.len) }.iter()
+        // SAFETY: push() は書き込み後にだけ len を増やすため、len <= N かつ 0..len は初期化済み。
+        unsafe { std::slice::from_raw_parts(self.buf.as_ptr().cast::<Move>(), self.len) }.iter()
     }
 }
 
@@ -1074,6 +1075,7 @@ mod tests {
         let mut list: SmallMoveList<4> = SmallMoveList::new();
         assert!(list.is_empty());
         assert_eq!(list.len(), 0);
+        assert_eq!(list.iter().next(), None);
 
         let mv1 = Move::from_usi("7g7f").unwrap();
         let mv2 = Move::from_usi("2g2f").unwrap();
@@ -1081,12 +1083,22 @@ mod tests {
         list.push(mv1);
         assert_eq!(list.len(), 1);
         assert!(!list.is_empty());
+        assert_eq!(list.iter().copied().collect::<Vec<_>>(), vec![mv1]);
 
         list.push(mv2);
         assert_eq!(list.len(), 2);
 
         let moves: Vec<_> = list.iter().copied().collect();
         assert_eq!(moves, vec![mv1, mv2]);
+    }
+
+    #[test]
+    fn test_small_move_list_zero_capacity() {
+        let mut list = SmallMoveList::<0>::default();
+        list.push(Move::from_usi("7g7f").unwrap());
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+        assert_eq!(list.iter().next(), None);
     }
 
     #[test]
