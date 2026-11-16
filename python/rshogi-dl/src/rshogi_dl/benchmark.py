@@ -23,6 +23,10 @@ from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransfo
 from .paths import ArtifactPathError, resolve_new_artifact
 
 
+COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
+_CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
+
+
 class BenchmarkError(RuntimeError):
     """計測条件または学習更新が不正。"""
 
@@ -40,6 +44,7 @@ class BenchmarkConfig:
     device: str = "cpu"
     attention_backend: str = "explicit"
     execution: str = "eager"
+    compile_mode: str = "default"
     precision: str = "fp32"
     input_mode: str = "resident"
     policy_rows_mode: str = "prepared"
@@ -58,13 +63,18 @@ class BenchmarkConfig:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
         for name, choices in {
             "attention_backend": ATTENTION_BACKENDS,
-            "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
+            "execution": ("eager", "compile"), "compile_mode": COMPILE_MODES,
+            "precision": ("fp32", "tf32", "fp16", "bf16"),
             "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
         if type(self.device) is not str or self.device not in ("cpu", "cuda"):
             raise ValueError("device must be cpu or cuda")
+        if self.execution == "eager" and self.compile_mode != "default":
+            raise ValueError("non-default compile_mode requires execution=compile")
+        if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
+            raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
             raise ValueError("fused_optimizer must be boolean")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
@@ -209,11 +219,19 @@ def run_benchmark(
         # 診断で消費した先頭 batch は、計測する両入力方式でも同じ順序に戻す。
         batches = _batches(data_path, config)
         batch_index = 0
-        forward = torch.compile(model) if config.execution == "compile" else model
+        forward = (
+            torch.compile(model, mode=config.compile_mode) if config.execution == "compile" else model
+        )
+        cudagraphs_requested = (
+            config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES
+        )
         _synchronize(device)
         startup_seconds = time.perf_counter() - startup_started
 
         def step(batch: Batch) -> torch.Tensor:
+            if cudagraphs_requested:
+                # compiled forward/backward の前の反復で使った一時 Tensor の寿命を区切る。
+                torch.compiler.cudagraph_mark_step_begin()
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
                 policy, value = forward(batch.tokens)
@@ -273,6 +291,7 @@ def run_benchmark(
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
             "compile_scope": "model" if config.execution == "compile" else None,
+            "cudagraphs_requested": cudagraphs_requested,
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
             "window_samples": window_count * config.batch_size,
@@ -298,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
+    parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
     parser.add_argument(
