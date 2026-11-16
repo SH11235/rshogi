@@ -5,10 +5,7 @@ use super::board_effect::{
     rewind_by_dropping_piece, rewind_by_no_capturing_piece, update_by_capturing_piece,
     update_by_dropping_piece, update_by_no_capturing_piece,
 };
-use super::state::{
-    CS_IDX_BISHOP, CS_IDX_DRAGON, CS_IDX_GOLD, CS_IDX_HORSE, CS_IDX_KNIGHT, CS_IDX_LANCE,
-    CS_IDX_PAWN, CS_IDX_ROOK, CS_IDX_SILVER, StateInfo, check_sq_index,
-};
+use super::state::{CS_IDX_BISHOP, CS_IDX_ROOK, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, SQUARE_BB, bishop_effect, gold_effect, king_effect,
@@ -827,12 +824,25 @@ impl Position {
     /// 指定駒種で王手となる升
     #[inline]
     pub fn check_squares(&self, pt: PieceType) -> Bitboard {
-        match check_sq_index(pt) {
-            Some(idx) => {
-                // SAFETY: check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
-                unsafe { *self.cur_state().check_squares.get_unchecked(idx) }
+        let them = !self.side_to_move;
+        let ksq = self.king_square[them.index()];
+        match pt {
+            PieceType::Pawn => pawn_effect(them, ksq),
+            PieceType::Lance => {
+                self.cur_state().check_squares[CS_IDX_ROOK] & lance_step_effect(them, ksq)
             }
-            None => Bitboard::EMPTY, // King
+            PieceType::Knight => knight_effect(them, ksq),
+            PieceType::Silver => silver_effect(them, ksq),
+            PieceType::Bishop => self.cur_state().check_squares[CS_IDX_BISHOP],
+            PieceType::Rook => self.cur_state().check_squares[CS_IDX_ROOK],
+            PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver => gold_effect(them, ksq),
+            PieceType::King => Bitboard::EMPTY,
+            PieceType::Horse => self.cur_state().check_squares[CS_IDX_BISHOP] | king_effect(ksq),
+            PieceType::Dragon => self.cur_state().check_squares[CS_IDX_ROOK] | king_effect(ksq),
         }
     }
 
@@ -1003,18 +1013,8 @@ impl Position {
         }
 
         let ksq = kings[them.index()];
-        let rook = rook_effect(ksq, occupied);
-        let bishop = bishop_effect(ksq, occupied);
-        let king = king_effect(ksq);
-        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
-        st.check_squares[CS_IDX_LANCE] = rook & lance_steps[them.index()];
-        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
-        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
-        st.check_squares[CS_IDX_BISHOP] = bishop;
-        st.check_squares[CS_IDX_ROOK] = rook;
-        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
-        st.check_squares[CS_IDX_HORSE] = bishop | king;
-        st.check_squares[CS_IDX_DRAGON] = rook | king;
+        st.check_squares[CS_IDX_BISHOP] = bishop_effect(ksq, occupied);
+        st.check_squares[CS_IDX_ROOK] = rook_effect(ksq, occupied);
     }
 
     // ========== パス権 ==========
@@ -1198,9 +1198,7 @@ impl Position {
                     pt
                 }
             };
-            check_sq_index(moved_pt)
-                .map(|idx| unsafe { *self.cur_state().check_squares.get_unchecked(idx) })
-                .unwrap_or(Bitboard::EMPTY)
+            self.check_squares(moved_pt)
         } else {
             Bitboard::EMPTY
         };
@@ -2297,15 +2295,9 @@ mod tests {
         let ksq = pos.king_square(them);
         let occupied = pos.occupied();
         let st = pos.cur_state_mut();
-        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
-        st.check_squares[CS_IDX_LANCE] = lance_effect(them, ksq, occupied);
-        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
-        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
         st.check_squares[CS_IDX_BISHOP] = bishop_effect(ksq, occupied);
         st.check_squares[CS_IDX_ROOK] = rook_effect(ksq, occupied);
-        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
-        st.check_squares[CS_IDX_HORSE] = horse_effect(ksq, occupied);
-        st.check_squares[CS_IDX_DRAGON] = dragon_effect(ksq, occupied);
+        assert_reference_check_squares(pos, "参照実装での再計算");
     }
 
     // 実際の駒配置と異なる占有も渡し、仮想的な移動・駒打ちでの利きを確認する。
@@ -3792,6 +3784,7 @@ mod tests {
         .enumerate()
         {
             pos.do_move(Move::PASS, false);
+            assert_reference_check_squares(&pos, "PASS 後");
             assert_eq!(pos.side_to_move(), side);
             assert_eq!(pos.pass_rights(Color::Black), black);
             assert_eq!(pos.pass_rights(Color::White), white);
@@ -3801,6 +3794,7 @@ mod tests {
         }
         for _ in 0..3 {
             pos.undo_move(Move::PASS);
+            assert_reference_check_squares(&pos, "PASS undo 後");
         }
         assert_eq!(pos.side_to_move(), Color::Black);
         assert_eq!(pos.pass_rights(Color::Black), 3);
@@ -4042,12 +4036,31 @@ mod tests {
                 "pinners が不一致: color={color:?}: {context}"
             );
         }
+        assert_reference_check_squares(pos, context);
+    }
+
+    fn assert_reference_check_squares(pos: &Position, context: &str) {
         let them = !pos.side_to_move();
-        debug_assert_eq!(
-            pos.cur_state().check_squares[CS_IDX_LANCE],
-            lance_effect(them, pos.king_square(them), pos.occupied()),
-            "香の王手升が不一致: {context}"
-        );
+        let ksq = pos.king_square(them);
+        let occupied = pos.occupied();
+        for (pt, expected) in [
+            (PieceType::Pawn, pawn_effect(them, ksq)),
+            (PieceType::Lance, lance_effect(them, ksq, occupied)),
+            (PieceType::Knight, knight_effect(them, ksq)),
+            (PieceType::Silver, silver_effect(them, ksq)),
+            (PieceType::Bishop, bishop_effect(ksq, occupied)),
+            (PieceType::Rook, rook_effect(ksq, occupied)),
+            (PieceType::Gold, gold_effect(them, ksq)),
+            (PieceType::King, Bitboard::EMPTY),
+            (PieceType::ProPawn, gold_effect(them, ksq)),
+            (PieceType::ProLance, gold_effect(them, ksq)),
+            (PieceType::ProKnight, gold_effect(them, ksq)),
+            (PieceType::ProSilver, gold_effect(them, ksq)),
+            (PieceType::Horse, horse_effect(ksq, occupied)),
+            (PieceType::Dragon, dragon_effect(ksq, occupied)),
+        ] {
+            assert_eq!(pos.check_squares(pt), expected, "王手升が不一致: {pt:?}: {context}");
+        }
     }
 
     #[test]
