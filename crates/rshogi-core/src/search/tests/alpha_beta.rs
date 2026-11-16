@@ -40,6 +40,57 @@ fn test_abort_countdown_and_sticky_stop() {
 }
 
 #[test]
+fn test_qsearch_polls_stop_and_deadline_within_node_interval() {
+    use crate::position::Position;
+    use crate::search::alpha_beta::SearchState;
+    use crate::search::qsearch::qsearch;
+    use crate::search::{NodeType, TimeManagement};
+    use crate::types::{Color, Value};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    for external_stop in [false, true] {
+        let mut worker = SearchWorker::new(
+            Arc::new(TranspositionTable::new(1)),
+            Arc::new(EvalHash::new(1)),
+            0,
+            0,
+            SearchTuneParams::default(),
+        );
+        worker.max_moves_to_draw = 1;
+        let ctx = worker.create_context();
+        let mut state = SearchState::new();
+        let limits = LimitsType {
+            movetime: if external_stop { 0 } else { 1 },
+            start_time: Some(Instant::now() - Duration::from_secs(1)),
+            ..LimitsType::new()
+        };
+        let mut tm = TimeManagement::new(
+            Arc::new(AtomicBool::new(external_stop)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        tm.init(&limits, Color::Black, 0, 256);
+        state.calls_cnt = limits.stop_check_interval();
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 2")
+            .unwrap();
+        for entry in 1..=limits.stop_check_interval() {
+            qsearch::<{ NodeType::NonPV as u8 }>(
+                &mut state,
+                &ctx,
+                &mut pos,
+                -Value::INFINITE,
+                Value::INFINITE,
+                1,
+                &limits,
+                &mut tm,
+            );
+            assert_eq!(state.abort, entry == limits.stop_check_interval());
+        }
+    }
+}
+
+#[test]
 fn test_node_budget_respects_ponder_and_external_stop() {
     use crate::search::{TimeManagement, alpha_beta::SearchState};
     use crate::types::Color;

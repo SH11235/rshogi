@@ -199,7 +199,6 @@ pub(super) fn qsearch<const NT: u8>(
 
     let mut best_move = Move::NONE;
 
-    let corr_value = correction_value(st, ctx, pos, ply);
     let mut unadjusted_static_eval = Value::NONE;
     let mut static_eval = if in_check {
         Value::NONE
@@ -261,6 +260,7 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     if !in_check && unadjusted_static_eval != Value::NONE {
+        let corr_value = correction_value(st, ctx, pos, ply);
         static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
         #[cfg(feature = "search-pass-rules")]

@@ -2928,10 +2928,6 @@ impl SearchWorker {
             if !pos.is_legal(mv) {
                 continue;
             }
-            if check_abort(st, ctx, limits, time_manager) {
-                return Value::ZERO;
-            }
-
             move_count += 1;
             st.stack[ply as usize].move_count = move_count;
             // NonPV で探索した手が同点昇格等で best_move になったときに、前の兄弟の行を
