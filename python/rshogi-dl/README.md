@@ -185,6 +185,12 @@ SDPA を使う側でモデルを構築して重みを読み込んでください
 標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
 実行方式は変わりません。
 
+`collate` と sharded reader の `Batch` は、policy 対象行を CPU で抽出した `policy_rows` を持ちます。
+この昇順 int64 Tensor は他の batch Tensor と同じ device へ転送してください。既存の 6 引数だけで
+`Batch` を構築した場合は `policy_rows=None` となり、loss が従来どおり `policy_present` から抽出します。
+各 step で `optimizer.zero_grad(set_to_none=True)` を呼ぶと、全行に policy が無い batch では policy
+head の勾配が `None` のままとなり、その更新や AdamW の weight decay・状態更新を行いません。
+
 ## 有限回の shard 学習と再開
 
 `trainer` は shard を逐次読み、指定回数の更新試行と held-out 評価を行います。学習データと検証データは別 directory に置いてください。実教師では `teacher_kind` と `split` の明示が必要で、未知の出自や検証用 fixture を使うときは `--validation-only` を指定します。変換成功や loss の低下だけで棋力・探索品質が確認されたとは扱わないため、出力モデルは引き続き `validation-only` です。
@@ -293,6 +299,10 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   `fp16` / `bf16` は autocast を使います。FP16 は GradScaler を使い、overflow により省略された
   optimizer 更新数も出します。CUDA が無い場合や対応しない精度は失敗し、CPU へ切り替えません。
   CPU では `--device cpu --precision fp32` だけを使えます。
+- `--policy-rows prepared|legacy`: 既定の `prepared` は CPU loader が作った policy 対象行の
+  int64 index を使います。`legacy` は同じ batch の `policy_present` から loss 呼出し時に行を抽出し、
+  CUDA 上での動的な行抽出に伴う同期を含む対照にします。入力 window の digest は元の 6 Tensor で
+  計算し、この補助 index の有無では変わりません。
 - `--fused-optimizer`: CUDA の fused AdamW を選びます。既定は無効。学習率と weight decay は
   `--learning-rate` (既定 0.001)、`--weight-decay` (既定 0) で固定できます。
 - `--input-mode resident|stream`: 先頭最大 `--window-batches` 個の完全な batch を繰り返します。

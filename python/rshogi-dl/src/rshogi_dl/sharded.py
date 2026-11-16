@@ -432,6 +432,9 @@ def _batch(scratch: dict, count: int, width: int) -> Batch:
         policy_target=torch.from_numpy(scratch["policy_targets"][:count, :width].copy()),
         policy_present=torch.from_numpy(scratch["policy_present"][:count].copy()),
         value=torch.from_numpy(scratch["values"][:count].copy()),
+        policy_rows=torch.from_numpy(
+            np.flatnonzero(scratch["policy_present"][:count]).astype(np.int64, copy=False)
+        ),
     )
 
 

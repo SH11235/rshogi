@@ -27,7 +27,9 @@ def policy_value_loss(
     policy は ``policy_present`` の行だけで平均する。該当行がなければ policy loss は 0。
     """
     value_loss = functional.binary_cross_entropy_with_logits(value_logits.squeeze(1), batch.value)
-    rows = batch.policy_present.nonzero(as_tuple=True)[0]
+    rows = batch.policy_rows
+    if rows is None:
+        rows = batch.policy_present.nonzero(as_tuple=True)[0]
     if rows.numel() == 0:
         policy_loss = policy_logits.new_zeros(())
     else:
