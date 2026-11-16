@@ -2599,7 +2599,7 @@ fn extend_default_and_override_survive_serve_and_replay() {
         ("4a3a", "4a4b"),
     ] {
         data["positions"][&key] =
-            json!([{"move":mv,"cp":10,"depth":8},{"move":alternate,"cp":0,"depth":8}]);
+            json!([{"move":mv,"cp":10,"depth":8},{"move":alternate,"cp":-10000,"depth":8}]);
         key = strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen())
             .to_owned();
     }
@@ -2627,7 +2627,11 @@ fn extend_default_and_override_survive_serve_and_replay() {
         serde_json::from_slice(&std::fs::read(state.join("accepted.json")).unwrap()).unwrap();
     for (id, extend, required) in [("extended", 3, 5), ("plain", 0, 2)] {
         let entry = accepted["targets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap();
-        assert_eq!(entry["definition"]["extend"], extend);
+        if extend == 0 {
+            assert!(entry["definition"].get("extend").is_none());
+        } else {
+            assert_eq!(entry["definition"]["extend"], extend);
+        }
         let statuses = targets_status(&state);
         let status =
             statuses["targets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap();

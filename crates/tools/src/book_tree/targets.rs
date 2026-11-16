@@ -24,6 +24,10 @@ const MAX_EXTRA: usize = 8;
 pub(super) const MAX_GROUP: usize = 128;
 
 /// 伸ばし方の値。書かない項目は serve の既定で解決する。
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Opts {
@@ -294,7 +298,7 @@ pub(super) struct Resolved {
     pub opp_n: usize,
     pub stop: i32,
     pub rounds: usize,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub extend: usize,
     pub draw: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -690,6 +694,8 @@ mod condition_tests {
             assert_eq!(restored.opts.extend, Some(extend));
             let resolved = restored.resolve(&root, &defaults).unwrap();
             assert_eq!(resolved.params("b", Path::new("out")).extend, extend);
+            let json = serde_json::to_value(&resolved).unwrap();
+            assert_eq!(json.get("extend").is_none(), extend == 0);
             assert_eq!(
                 serde_json::from_value::<Resolved>(serde_json::to_value(&resolved).unwrap())
                     .unwrap(),

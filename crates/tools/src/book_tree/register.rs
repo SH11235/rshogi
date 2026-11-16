@@ -110,7 +110,7 @@ pub(super) struct RegisterArgs {
         requires = "auto_skip_flip"
     )]
     auto_skip_flip_rounds: usize,
-    /// ready の木の出力先。同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う
+    /// ready の木の出力先。同じ局面は、通常区間の残り段数 (remaining) の大きい木を使う
     #[arg(required = true)]
     trees: Vec<PathBuf>,
 }
@@ -890,7 +890,7 @@ pub(super) fn parse_node_moves(
     Ok(nodes)
 }
 
-/// 同じ局面は、その局面から先に伸ばせた段数 (remaining) の大きい木を使う。同じなら先に渡した木。
+/// 同じ局面は、通常区間の残り段数 (remaining) の大きい木を使う。同じなら先に渡した木。
 /// 木どうしで 1 位が違った局面の数を返す。
 pub(super) fn merge(into: &mut BTreeMap<String, Node>, from: BTreeMap<String, Node>) -> usize {
     let mut disagreements = 0;

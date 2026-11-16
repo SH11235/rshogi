@@ -233,7 +233,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 `tree` は `frontier / expand / run` と別の展開規則です。根の読みの候補と実戦の手順から始め、こちらの手番は1位、相手の手番は上位 `opp_n` 手を伸ばします。根以外で1位の絶対値が `stop` 以上なら規則と実戦の枝を止めます。未展開手が伝播後の展開手を上回ると、回の終わりに FORCE に加えて最大 `rounds` 回伸ばし直します。根は STOP を無視し、こちらの根の候補が1手だけなら2位も加えます。
 
-通常の展開は `depth` 段までです。`extend` (既定 0) を指定すると、`depth` 段から `depth + extend` 段の手前までは、手番によらず読みの1位だけを伸ばします。根以外では1位の値の絶対値が `stop` 以上になった局面で止まり、遅くとも `depth + extend` 段で止まります。延長区間では `game`・`extra`・FORCE による枝の追加や `rounds` による伸ばし直しは行いません。`depth = 0` でも延長でき、根では STOP を無視して1位だけを伸ばします。
+通常の展開は `depth` 段までです。`extend` (既定 0) を指定すると、`depth` 段から `depth + extend` 段の手前までは、手番によらず読みの1位だけを伸ばします。根以外では1位の値の絶対値が `stop` 以上になった局面で止まり、遅くとも `depth + extend` 段で止まります。延長区間でも、伸ばしていない手の生の値が伸ばした手の伝播後の値を上回ると、両手番で FORCE による伸ばし直しを行います。回数は通常区間と共有の `rounds` が上限です。追加した手の先も延長区間の1位・STOP・段数上限の規則で辿ります。`game`・`extra` は延長区間では使いません。回数を使い切った未解決手は `registration_status.json` の `unresolved` に残しますが、延長は補助的な読みなので、延長区間だけに残っている場合は NOT_READY にしません。通常区間に未解決手が残れば従来どおり NOT_READY です。`depth = 0` でも延長でき、根では STOP を無視して1位だけを伸ばします。
 
 木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。循環に入らない局面の値は手順に依らないので 1 度だけ計算します。大きな循環が重なる木で、循環の中を手順ごとに数える呼び出しが 1 回の評価で 200 万回を超えたら、以後は循環の中の局面も最初に求めた値を使い回します (別の手順から来たときの千日手の判定を引き継がない近似)。循環に入る手を指す側が先手なら `draw_black`、後手なら `draw_white` を (指定があれば) 使います (どちらもその手を指す側から見た値)。エンジンの `DrawValueBlack` / `DrawValueWhite` は、読む側 (根の手番) から見た千日手の値で、探索の中では相手側にはその符号を返した値になります。木をエンジンに合わせるなら、自分 (`own`) が先手の木は `draw_black = DrawValueBlack`・`draw_white = −DrawValueBlack`、後手の木は `draw_white = DrawValueWhite`・`draw_black = −DrawValueWhite` にします (−70 / 70 の組はどちらの条件も満たす)。`draw` 1 つだけでは、自分の側を正しくすると相手の側が逆向きになります。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
 
@@ -1122,7 +1122,7 @@ book_mine tree import-journal --from-journal /path/to/other-machine-journal.json
 
 `registration_status.json` は `ready`・`unresolved` に加え、木の全ての読みが同じ条件と確認できる場合だけ `fingerprint` (台帳の settings.fingerprint と同じ 64 桁) を持ちます。serve と replay の両方が出力し、異なる条件や由来の不明な読みが混ざる場合は鍵を省きます。
 
-`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (その局面から先に伸ばせた段数の上限 = depth + extend − level)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
+`node_moves.tsv` は木が届く局面すべて (こちらの手番も相手の手番も) の手を、伝播後の値の順に 1 行ずつ並べます。列は `key`・`ply`・`level` (根からの段)・`remaining` (通常区間の残り段数 = max(depth − level, 0)。延長区間では 0)・`nodes` (読みのノード数の上限)・`move`・`value` (手番の側から見た伝播後の値。伸ばしていない手も木の別の局面に合流すればその子の値を使い、合流しなければ 1 回の読みの値)・`expanded` (木の辺として伸ばした手なら 1。合流だけで子の値を使う手は 0 のまま)・`rank` です。勝ち宣言など、指し手を持たない読みの局面は載せません。
 
 ### 定跡の元データへの登録
 
@@ -1185,7 +1185,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 
 `--schema` があれば指紋に対応する conditions.tsv の name を使い、対応がなければ表への追加を促して失敗します。schema がなければ指紋の先頭 8 文字です。1 回の実行中に先頭 8 文字が同じ別の指紋を条件名に使おうとするとエラーになります。`--schema` の conditions.tsv で別の名前を付けてください。手ごとに決めるときは、木の読みが一致した指紋の全部に名前が要ります (足りなければ、木の出力先と指紋を付けたエラーで止まります)。stdout に `読みが 1 つの条件に決まらない木: N (登録に使う局面の手の cond: 条件名 A / mixed B / unknown C)` を出します。A・B・C は、その木のうち登録に使う局面 (`--skip-keys` と、同じ局面が重なって使わない木の局面を除く) の手の数です。`--journal` を渡さなければ A・B は 0 です。
 
-`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の局面の残り段数 + 1 (`remaining + 1`)。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと `read`・`ext` です。
+`value_kind` は、その手の行き先が同じ木の `node_moves.tsv` にある場合、`expanded` によらず `tree:K` です。K は行き先の局面の通常区間の残り段数 + 1 (`remaining + 1`)。延長区間の子も TSV にあれば `tree:1` となり、`single` にはなりません。行き先の key は negamax と同じ規則 (指した後の SFEN から手数を除く、先後反転はしない) で求めます。`expanded=1` でも行き先が TSV にない場合や、`d*.jsonl` にだけある局面 (勝ち宣言の葉や辺で届かない局面など) に合流する場合は、残り段数を確かめられないので `unknown` にします。読みの一覧 (`d*.jsonl`) がない木も、行き先が TSV になければ合流の有無を確かめられないため `unknown` です。それ以外は `single` です。古い木の出力にも同じ判定を使い、TSV の書式と `expanded` の意味は変えません。K は残り段数の目安で、循環や最善手順の長さではありません。新しい行の lineage は空です。更新を許す source は schema の replaceable=1、schema を省くと `read`・`ext` です。
 
 規則 (局面ごと、先手・後手の手番の区別なし):
 
@@ -1199,7 +1199,7 @@ ready の木 (`STATUS` が DONE) の `node_moves.tsv` を読み、定跡の元�
 - `--switch-rule propagated` では `--keep-line`・`--keep-min-depth` を使わず (指定すると止まります)、同じ伝播の値で `master audit --switch-rule propagated` と同じ規則で決めます。元の main と木の 1 位の値がどちらも手の先の局面の値から来ていれば、木の 1 位が 1 でも上回るときだけ替え、同じ値か元の main が上なら残します。どちらかの値が 1 回の読み (元データに手の先の局面が無いか、補った局面で定跡に無い応手が最善) なら替えず、どちらも `--conflicts` の一覧に `reason=keep` で出します (段数 0 の側が 1 回の読み)。`--single-enqueue-out` を渡すと、1 回の読みの手を伸ばす木の行を書きます (形と `--exclude-queue` の除外は `master audit --single-enqueue-out` と同じで、木の 1 位が元の main を上回る差の大きい順に並べます。`--walk-table`・`--single-min-weight`・`--single-priority-band` を渡すと、同じ辿りの重みで並べ、下限で落とし、priority を付けます)。値の分からない手の局面は今までどおり替えます。
 - 一覧の列は `key ply side main main_source main_tier main_tree_value tree_best tree_value tree reason main_value main_depth best_value best_depth gap main_value_black best_value_black` です。`reason` は、元の main の値が上なので残した局面 (`--switch-rule propagated` では同じ値の局面と、片方の値が 1 回の読みなので残した局面も) が `keep`、source・curated で替えなかった局面が `protected` です。`main_value`・`best_value` は上の伝播後の値 (手番の側から)、`main_depth`・`best_depth` はその段数、`gap` は `main_value − best_value`、`*_black` は先手から見た値です。`protected` の局面ではこれらの列は `-` です。`main_tree_value`・`tree_value` は木の値 (手番の側から) で、`main_tree_value` は元の main が木の読みに無ければ `-` です。
 - 更新を許す source の main・alt の行で木に値のある手は、`evals`・`nodes`・`cond`・`value_kind` を木の値に更新します。`evals`・`nodes` がともに同じなら、既知の `cond` や `value_kind` を `unknown` へ下げず、それぞれ元の情報を保持します。別の既知の条件や値の付き方への変更は更新します。値またはノード数が変わるときは、元の情報を引き継ぎません。
-- 同じ局面が複数の木にあるときは、`remaining` の大きい (その局面から深く伸ばした) 木を使い、同じなら先に渡した木を使います。
+- 同じ局面が複数の木にあるときは、`remaining` の大きい (通常区間の残り段数が多い) 木を使い、同じなら先に渡した木を使います。
 - 結果は局面・役割 (main・alt・bench・record の順)・手の順に並べ、局面ごとに main がちょうど 1 つ (`curated` の行だけでも 1 つ) で、同じ手の行が重ならないことを確かめてから書きます。
 
 ### `tree inventory`: 登録していない読み終わった木の一覧

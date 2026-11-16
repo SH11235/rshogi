@@ -370,7 +370,7 @@ impl Tree {
                 .map(|pv| pv.mv.clone())
                 .into_iter()
                 .collect();
-            return (pick, BTreeSet::new());
+            return (pick, self.force.get(key).cloned().unwrap_or_default());
         }
         let mut pick = BTreeSet::new();
         let mut extra = BTreeSet::new();
@@ -481,9 +481,6 @@ impl Tree {
                 let pending = self.unresolved(&values);
                 let mut added = 0;
                 for (key, rows) in pending {
-                    if self.level[&key] >= self.def.depth {
-                        continue;
-                    }
                     self.force
                         .entry(key.clone())
                         .or_default()
@@ -632,7 +629,9 @@ impl Tree {
             let Some(edges) = self.edge.get(key).filter(|e| !e.is_empty()) else {
                 continue;
             };
-            if side(key) != self.def.own || self.level[key] >= self.def.depth {
+            if self.level[key] >= self.def.max_depth()
+                || (self.level[key] < self.def.depth && side(key) != self.def.own)
+            {
                 continue;
             }
             let best = edges
@@ -1227,8 +1226,9 @@ mod prefetch_tests {
     }
 
     #[test]
-    fn extension_follows_only_first_move_and_excludes_force() {
+    fn extension_follows_only_first_move_without_rounds() {
         let (mut tree, cache, keys) = extended_fixture(10);
+        tree.def.rounds = 0;
         assert!(tree.advance(&cache).unwrap().is_empty());
         assert!(tree.finished);
         assert_eq!(tree.level.len(), 5);
@@ -1241,9 +1241,59 @@ mod prefetch_tests {
             keys[2].clone(),
             BTreeMap::from([("4i3i".into(), -500), ("4i4h".into(), 0)]),
         )]);
-        assert!(tree.unresolved(&values).is_empty());
+        assert_eq!(tree.unresolved(&values)[&keys[2]], vec![(0, "4i4h".into())]);
         assert!(tree.force.is_empty());
         assert_eq!(tree.round, 0);
+    }
+
+    #[test]
+    fn extension_force_propagates_deep_values_for_both_sides() {
+        for own in ["b", "w"] {
+            let (mut tree, mut cache, keys) = extended_fixture(10);
+            tree.def.own = own.into();
+            tree.def.extra.clear();
+            for key in &keys {
+                cache.get_mut(key).unwrap().multipv.truncate(1);
+            }
+            cache.get_mut(&keys[1]).unwrap().multipv =
+                reading(&keys[1], &[("5a4a", 10), ("5a6a", 0)]).multipv;
+            cache.get_mut(&keys[4]).unwrap().multipv[0].cp = 290;
+            let alternative = child(&keys[1], "5a6a").unwrap();
+            cache.insert(alternative.clone(), reading(&alternative, &[("4i3i", 350)]));
+            assert!(tree.advance(&cache).unwrap().is_empty());
+            assert_eq!(tree.force[&keys[1]], BTreeSet::from(["5a6a".into()]));
+            assert_eq!(tree.level[&alternative], 2);
+            assert!(tree.edge[&alternative].is_empty());
+            let values = tree.negamax(&tree.reach(&tree.edge)).unwrap();
+            assert_eq!(values[ROOT]["5i4i"], 290);
+            assert!(tree.unresolved(&values).is_empty());
+        }
+    }
+
+    #[test]
+    fn extension_unresolved_does_not_block_registration() {
+        let (mut tree, cache, keys) = extended_fixture(10);
+        let out = tempfile::tempdir().unwrap();
+        tree.def.out = out.path().into();
+        tree.def.rounds = 0;
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.write_outputs().unwrap());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(out.path().join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["ready"], true);
+        assert!(status["unresolved"].get(&keys[3]).is_some());
+        let text = std::fs::read_to_string(out.path().join("node_moves.tsv")).unwrap();
+        let extended = super::super::register::parse_node_moves(&text, 0, None).unwrap();
+        assert_eq!(extended[ROOT].remaining, 1);
+        assert_eq!(extended[&keys[1]].remaining, 0);
+        assert_eq!(extended[&keys[1]].moves[0].value_kind, "tree:1");
+        let mut broad = extended.clone();
+        broad.get_mut(ROOT).unwrap().remaining = 8;
+        broad.get_mut(ROOT).unwrap().tree = 1;
+        super::super::register::merge(&mut broad, extended);
+        assert_eq!(broad[ROOT].tree, 1);
     }
 
     #[test]
@@ -1264,6 +1314,7 @@ mod prefetch_tests {
     fn extension_stops_at_either_sign_of_threshold() {
         for value in [300, -300] {
             let (mut tree, cache, keys) = extended_fixture(value);
+            tree.def.rounds = 0;
             assert!(tree.advance(&cache).unwrap().is_empty());
             assert_eq!(tree.level.len(), 3);
             assert!(tree.edge[&keys[2]].is_empty());

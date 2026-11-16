@@ -221,6 +221,33 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
 }
 
 #[test]
+fn extension_transposition_rediscovered_in_normal_interval_widens_and_relaxes_children() {
+    let settings = settings();
+    let mut cache = corpus(&settings);
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 3;
+    def.extend = 3;
+    def.own = "w".into();
+    def.opp_n = 3;
+    let mut tree = Tree::load(def, Some(&settings)).unwrap();
+    let short = child(ROOT, "5i4i").unwrap();
+    let merged = child(&short, "5a4a").unwrap();
+    let delayed = cache.remove(&short).unwrap();
+    assert!(!tree.advance(&cache).unwrap().is_empty());
+    assert_eq!(tree.level[&merged], 4);
+    assert_eq!(tree.edge[&merged], BTreeSet::from(["4i5i".into()]));
+    let descendant = child(&merged, "4i5i").unwrap();
+    assert_eq!(tree.level[&descendant], 5);
+    cache.insert(short, delayed);
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert_eq!(tree.level[&merged], 2);
+    assert!(tree.edge[&merged].contains("4i3i"));
+    assert!(tree.edge[&merged].contains("4i4h"));
+    assert_eq!(tree.level[&descendant], 3);
+}
+
+#[test]
 fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
     let settings = settings();
     let cache = corpus(&settings);
