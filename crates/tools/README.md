@@ -29,6 +29,7 @@
 | 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す (`--opp-records` で強い対局が止まりの局面とその 10・20 手前に着いた局数・得点・勝敗の列) | [book_mine master walk](docs/book_mine.md#master-walk-自分が読み始める局面と重み) |
 | 自前の main と外部定跡の最善・指定点差以内の手をぶつけ、定跡切れ・値の出所・外部定跡の続き・強い対局の局数と得点を一覧にする | [book_mine master compare](docs/book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) |
 | 対局の手順と元データを照らし、局面・手の抜けと受付の被覆、抜けをつなぐ木を出す | [book_mine master game-gaps](docs/book_mine.md#master-game-gaps-対局の手順と元データの抜け) |
+| 負けた局の崩れと伝播後の実戦手の値を照合し、崩れまでの抜けをつなぐ木を出す | [book_mine master game-pave](docs/book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) |
 | 初期局面から先手と後手の main を交互に直接キーで辿り、定跡が切れる局面 (局面なし・反転キーでだけある・main なし・循環) と理由、そこを根にした own=bw の木の行を出す | [book_mine master main-line](docs/book_mine.md#master-main-line-main-対-main-で定跡が切れる所) |
 | walk の止まりと伝播の切れ目・定跡に戻る手の表を合わせ、出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出す (受付の木の照合つき。局面の番号は全部の節で「何手目」= その局面で次に指す手の番号、先手番は奇数・後手番は偶数。表は局面の手番 `turn` と `move_number` の列を持ち、偶奇が合わなければエラー) | [book_mine master exit-report](docs/book_mine.md#master-exit-report-版ごとの出口の報告) |
 | 戦型の候補ごとに、RAMU の手番の決めた局面で main の代わりに決めた手を指して辿り、出口の値・確度・強い対局の実績・危ない局面を通る重み・分岐の後の相手の手を比べる表と Markdown の報告を出す (報告の局面の番号は「何手目」= その局面で次に指す手の番号) | [book_mine master opening-report](docs/book_mine.md#master-opening-report-戦型の候補を比べる表) |
