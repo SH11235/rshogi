@@ -144,6 +144,10 @@ struct Cli {
     /// 有効時は逐次処理（workers=1 相当）になる。
     #[arg(long, default_value_t = false)]
     reuse_engine: bool,
+
+    /// 探索結果の乖離・未完了・欠損をエラーにする
+    #[arg(long)]
+    strict: bool,
 }
 
 /// コンフィグファイルの構造体。全フィールド Optional で CLI 引数が優先される。
@@ -181,6 +185,7 @@ struct ResolvedConfig {
     seed: u64,
     output_base: PathBuf,
     reuse_engine: bool,
+    strict: bool,
 }
 
 fn load_config(path: &Path) -> Result<Option<Config>> {
@@ -260,6 +265,7 @@ fn resolve_config(cli: Cli) -> Result<ResolvedConfig> {
         seed,
         output_base,
         reuse_engine: cli.reuse_engine,
+        strict: cli.strict,
     })
 }
 
@@ -850,6 +856,96 @@ fn depths_diverged(result: &PositionResult) -> bool {
     first_divergence_depth(result).is_some()
 }
 
+#[derive(Debug)]
+struct StrictFailure {
+    index: usize,
+    sfen: String,
+    reasons: Vec<String>,
+}
+
+fn strict_reasons(result: Option<&PositionResult>, requested_depth: u32) -> Vec<String> {
+    let Some(result) = result else {
+        return vec!["欠損: 比較結果なし（エンジン起動・探索失敗など）".to_string()];
+    };
+    let mut reasons = Vec::new();
+    for (engine, depths) in [("A", &result.a_depths), ("B", &result.b_depths)] {
+        let reached = depths.iter().map(|d| d.depth).max().unwrap_or(0);
+        if depths.is_empty() || reached < requested_depth {
+            reasons.push(format!("未完了: {engine} depth={reached}, 要求={requested_depth}"));
+        }
+    }
+
+    let a_depths: BTreeMap<_, _> = result.a_depths.iter().map(|d| (d.depth, d)).collect();
+    let b_depths: BTreeMap<_, _> = result.b_depths.iter().map(|d| (d.depth, d)).collect();
+    let depths: std::collections::BTreeSet<_> =
+        a_depths.keys().chain(b_depths.keys()).copied().collect();
+    for depth in depths {
+        match (a_depths.get(&depth), b_depths.get(&depth)) {
+            (Some(a), Some(b)) => {
+                if a.nodes != b.nodes {
+                    reasons.push(format!("nodes: depth={depth} A={} B={}", a.nodes, b.nodes));
+                }
+                if (a.score_cp, a.score_mate) != (b.score_cp, b.score_mate) {
+                    reasons.push(format!(
+                        "score: depth={depth} A=(cp={:?}, mate={:?}) B=(cp={:?}, mate={:?})",
+                        a.score_cp, a.score_mate, b.score_cp, b.score_mate
+                    ));
+                }
+                if a.pv != b.pv {
+                    reasons.push(format!("PV: depth={depth} A=[{}] B=[{}]", a.pv, b.pv));
+                }
+            }
+            (a, b) => reasons.push(format!(
+                "欠損: depth={depth} A={} B={}",
+                if a.is_some() { "あり" } else { "なし" },
+                if b.is_some() { "あり" } else { "なし" }
+            )),
+        }
+    }
+    if let (Some(a), Some(b)) = (a_depths.last_key_value(), b_depths.last_key_value())
+        && a.1.pv != b.1.pv
+    {
+        reasons.push(format!("PV: 最終depth A(d{})=[{}] B(d{})=[{}]", a.0, a.1.pv, b.0, b.1.pv));
+    }
+    if result.a_bestmove != result.b_bestmove {
+        reasons.push(format!("bestmove: A={} B={}", result.a_bestmove, result.b_bestmove));
+    }
+    reasons
+}
+
+fn strict_failures(
+    sfens: &[(usize, String)],
+    results: &[PositionResult],
+    requested_depth: u32,
+) -> Vec<StrictFailure> {
+    let by_index: BTreeMap<_, _> = results.iter().map(|r| (r.index, r)).collect();
+    sfens
+        .iter()
+        .filter_map(|(index, sfen)| {
+            let reasons = strict_reasons(by_index.get(index).copied(), requested_depth);
+            (!reasons.is_empty()).then(|| StrictFailure {
+                index: *index,
+                sfen: sfen.clone(),
+                reasons,
+            })
+        })
+        .collect()
+}
+
+fn write_strict_summary(writer: &mut dyn Write, failures: &[StrictFailure]) -> Result<()> {
+    writeln!(writer, "--- strict: {} 局面で不一致・未完了・欠損 ---", failures.len())?;
+    for failure in failures {
+        writeln!(writer, "position {}: {}", failure.index, failure.reasons.join("; "))?;
+        writeln!(writer, "  sfen {}", failure.sfen)?;
+    }
+    Ok(())
+}
+
+fn strict_verdict(failures: &[StrictFailure]) -> Result<()> {
+    anyhow::ensure!(failures.is_empty(), "strict 判定失敗: {} 局面", failures.len());
+    Ok(())
+}
+
 fn write_summary(
     writer: &mut dyn Write,
     results: &[PositionResult],
@@ -1286,13 +1382,26 @@ fn main() -> Result<()> {
     // 最終サマリをファイル + stdout に出力
     let wall_clock_secs = run_start.elapsed().as_secs_f64();
     let pw = progress_writer.lock().unwrap();
+    let failures = if rc.strict {
+        strict_failures(&sfens, &pw.results, rc.depth)
+    } else {
+        Vec::new()
+    };
     {
         let summary_file = File::create(output_dir.join("summary.txt"))?;
         let mut file_writer = BufWriter::new(summary_file);
         write_summary(&mut file_writer, &pw.results, &rc, Some(wall_clock_secs), workers)?;
+        if rc.strict {
+            write_strict_summary(&mut file_writer, &failures)?;
+        }
         file_writer.flush()?;
     }
     write_summary(&mut std::io::stdout().lock(), &pw.results, &rc, Some(wall_clock_secs), workers)?;
+
+    if rc.strict {
+        write_strict_summary(&mut std::io::stdout().lock(), &failures)?;
+        write_strict_summary(&mut std::io::stderr().lock(), &failures)?;
+    }
 
     // 乖離があった局面の SFEN を書き出し（--sfens に再入力可能な形式）
     let divergent: Vec<&PositionResult> =
@@ -1311,6 +1420,9 @@ fn main() -> Result<()> {
     println!();
     println!("結果保存先: {}", output_dir.display());
 
+    if rc.strict {
+        strict_verdict(&failures)?;
+    }
     anyhow::ensure!(
         pw.results.len() == total,
         "局面の比較が未完了です: {}/{} 件成功。保存済み結果は部分結果です",
@@ -1323,6 +1435,143 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_exit_code(result: Option<PositionResult>, depth: u32) -> std::process::ExitCode {
+        use std::process::Termination;
+        let results: Vec<_> = result.into_iter().collect();
+        strict_verdict(&strict_failures(&[(1, "startpos".to_string())], &results, depth)).report()
+    }
+
+    #[test]
+    fn strict_matching_results_exit_successfully() {
+        let mut result = position_result(1, &[10, 20], &[10, 20]);
+        for info in result.a_depths.iter_mut().chain(&mut result.b_depths) {
+            info.score_cp = Some(25);
+            info.pv = "7g7f 3c3d".to_string();
+        }
+        assert_eq!(strict_exit_code(Some(result), 2), std::process::ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn strict_rejects_each_difference_with_distinct_reason_and_failure_exit() {
+        for kind in [
+            "nodes",
+            "score cp",
+            "score mate",
+            "score type",
+            "PV intermediate",
+            "PV final",
+            "bestmove",
+        ] {
+            let mut result = position_result(1, &[10, 20], &[10, 20]);
+            for info in result.a_depths.iter_mut().chain(&mut result.b_depths) {
+                info.score_cp = Some(25);
+                info.pv = "7g7f 3c3d".to_string();
+            }
+            let label = match kind {
+                "nodes" => {
+                    result.b_depths[0].nodes += 1;
+                    "nodes:"
+                }
+                "score cp" => {
+                    result.b_depths[0].score_cp = Some(26);
+                    "score:"
+                }
+                "score mate" => {
+                    result.a_depths[0].score_cp = None;
+                    result.a_depths[0].score_mate = Some(3);
+                    result.b_depths[0].score_cp = None;
+                    result.b_depths[0].score_mate = Some(-3);
+                    "score:"
+                }
+                "score type" => {
+                    result.b_depths[0].score_cp = None;
+                    result.b_depths[0].score_mate = Some(25);
+                    "score:"
+                }
+                "PV intermediate" => {
+                    result.b_depths[0].pv = "2g2f".to_string();
+                    "PV:"
+                }
+                "PV final" => {
+                    result.b_depths[1].pv = "2g2f".to_string();
+                    "PV:"
+                }
+                "bestmove" => {
+                    result.b_bestmove = "2g2f".to_string();
+                    "bestmove:"
+                }
+                _ => unreachable!(),
+            };
+            let reasons = strict_reasons(Some(&result), 2);
+            assert!(reasons.iter().all(|r| r.starts_with(label)), "{kind}: {reasons:?}");
+            assert!(!reasons.is_empty(), "{kind}");
+            assert_eq!(
+                strict_exit_code(Some(result), 2),
+                std::process::ExitCode::FAILURE,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_rejects_incomplete_search_without_node_budget() {
+        for nodes in [&[][..], &[10][..]] {
+            let result = position_result(1, nodes, nodes);
+            assert!(!result.a_truncated);
+            assert!(!result.b_truncated);
+            let reasons = strict_reasons(Some(&result), 2);
+            assert_eq!(reasons.len(), 2);
+            assert!(reasons.iter().all(|r| r.starts_with("未完了:")));
+            assert_eq!(strict_exit_code(Some(result), 2), std::process::ExitCode::FAILURE);
+        }
+    }
+
+    #[test]
+    fn strict_rejects_missing_results_and_depths() {
+        assert!(strict_reasons(None, 2)[0].starts_with("欠損:"));
+        assert_eq!(strict_exit_code(None, 2), std::process::ExitCode::FAILURE);
+        let mut result = position_result(1, &[10, 20, 30], &[10, 20, 30]);
+        result.b_depths.remove(1);
+        assert_eq!(strict_reasons(Some(&result), 3), ["欠損: depth=2 A=あり B=なし"]);
+        assert_eq!(strict_exit_code(Some(result), 3), std::process::ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn strict_compares_final_pv_even_at_different_depths() {
+        let mut result = position_result(1, &[10, 20], &[10]);
+        result.a_depths[1].pv = "7g7f".to_string();
+        assert!(strict_reasons(Some(&result), 2).iter().any(|r| r.starts_with("PV: 最終depth")));
+    }
+
+    #[test]
+    fn strict_summary_identifies_every_missing_input_position() {
+        let sfens = vec![
+            (3, "startpos".to_string()),
+            (7, "another-position".to_string()),
+        ];
+        let failures = strict_failures(&sfens, &[], 2);
+        let mut output = Vec::new();
+        write_strict_summary(&mut output, &failures).unwrap();
+        let summary = String::from_utf8(output).unwrap();
+        assert!(summary.contains("position 3: 欠損:"));
+        assert!(summary.contains("position 7: 欠損:"));
+        assert!(summary.contains("sfen another-position"));
+    }
+
+    #[test]
+    fn strict_is_opt_in_and_jsonl_already_contains_comparison_fields() {
+        assert!(!Cli::try_parse_from(["compare_nodes"]).unwrap().strict);
+        assert!(Cli::try_parse_from(["compare_nodes", "--strict"]).unwrap().strict);
+        let result = position_result(1, &[10], &[10]);
+        let json = serde_json::to_value(result).unwrap();
+        for key in ["score_cp", "score_mate", "pv"] {
+            assert!(json["a_depths"][0].get(key).is_some());
+            assert!(json["b_depths"][0].get(key).is_some());
+        }
+        assert_eq!(json["a_bestmove"], "7g7f");
+        assert_eq!(json["b_bestmove"], "7g7f");
+    }
 
     #[test]
     fn engine_output_eof_after_info_is_an_error() {
@@ -1397,6 +1646,7 @@ mod tests {
             seed: 42,
             output_base: PathBuf::from("results"),
             reuse_engine: false,
+            strict: false,
         }
     }
 

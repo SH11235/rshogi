@@ -48,6 +48,7 @@ cargo run --release -p tools --bin compare_nodes -- \
 | `--workers <N>` | 利用可能コア数の半分 | 並列ワーカー数。最小値は1 |
 | `--seed <N>` | 42 | サンプリング用乱数シード |
 | `--output-base <DIR>` | `results` | 結果ディレクトリの親 |
+| `--strict` | 無効 | 全局面の nodes・score・PV・bestmove の一致と要求 depth の完了を検証し、乖離・未完了・欠損で非ゼロ終了（CLI のみ） |
 | `--reuse-engine` | 無効 | エンジンを局面間で使い回し、TT を蓄積して逐次処理 |
 
 `--engine-a` と `--engine-b` は CLI または設定ファイルでの指定が必須です。
@@ -97,3 +98,37 @@ output_base = "results"
 エンジンが `usiok` / `readyok` / `bestmove` を返す前に標準出力を閉じると、その局面はエラーになります。1 件でも比較に失敗した場合は、成功分の結果とサマリを保存して非ゼロで終了します。保存済み結果は部分結果です。応答を出さず生存するエンジンの受信期限は設けていません。
 
 JSONL・サマリ・乖離局面ファイルの書き込みや flush に失敗した場合も非ゼロで終了します。途中まで書けたファイルは残るため、エラー終了した出力を完全な比較結果として扱わないでください。
+
+## strict モードで探索結果を検証する
+
+リファクタリング前後などの探索結果を機械的に比較するには `--strict` を指定します。
+
+```bash
+cargo run --release -p tools --bin compare_nodes -- \
+  --engine-a /path/to/before-engine \
+  --engine-b /path/to/after-engine \
+  --sfens /path/to/positions.txt --depth 12 --workers 1 --strict
+```
+
+全入力局面で次の条件を満たすと終了コードは 0、1 件でも違反すると 1 になります。
+
+- 両エンジンの比較結果が揃っている。起動・探索失敗などで結果が残らなかった局面は「欠損」。
+- ノード上限の有無にかかわらず、両方の取得済み最大 depth が要求 depth 以上である。
+  depth 情報がない場合も「未完了」。
+- 取得した depth の集合が一致し、同じ depth の nodes、score の種別（cp / mate）と値、PV が一致する。
+  片側だけに存在する depth は「欠損」。score の片側欠落も不一致として扱う。
+- 最終 depth の PV と bestmove が一致する。
+
+判定理由は局面番号・SFEN とともに stderr、stdout、`summary.txt` の末尾へ出力します。
+`nodes` / `score` / `PV` / `bestmove` / 「未完了」/ 「欠損」を区別します。
+`results.jsonl` の既存の `a_depths` / `b_depths`（`score_cp`、`score_mate`、`pv` を含む）と
+`a_bestmove` / `b_bestmove` に比較対象が保存されるため、JSONL の項目は追加しません。
+失敗した局面の JSONL 行は残りませんが、strict サマリには欠損として記載されます。
+
+比較は取得できた `info` に基づきます。各 depth では最後の `multipv=1` 相当の行を使用し、
+両側とも未取得の中間 depth や score・PV は検証できません。
+`a_truncated` / `b_truncated`、既存のノード数統計、`divergent_sfens.txt` の意味は通常モードと同じです。
+strict の未完了判定や score・PV・bestmove だけの乖離は strict サマリで確認してください。
+
+`--strict` を省略すると、従来どおり乖離・未完了自体ではエラー終了しません。
+通信・設定・ファイル入出力のエラーや局面結果の欠損は、通常モードでも非ゼロ終了します。

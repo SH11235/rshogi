@@ -170,15 +170,13 @@ pub use network_layer_stacks::{
 pub use crate::ls_dispatch_ft_size;
 pub use piece_list::{PieceList, PieceNumber};
 
-// const generics 版統一実装（内部型は pub(crate) に隠蔽）
+// 活性化関数とネットワーク構成の公開型。
 pub use activation::{
     CReLU, FtActivation, PairwiseCReLU, SCReLU, default_qa_for_arch, detect_activation_from_arch,
 };
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
-// 型エイリアス（HalfKaSplit*/HalfKP* の全バリアント）は pub(crate) に隠蔽
-// 外部からは NNUEEvaluator を通じてのみ NNUE 評価を行う
-// 内部モジュールは crate::nnue::aliases 経由で直接インポート
+// ネットワークの型エイリアスは aliases モジュールから参照できる。
 
 // Phase 2: 外部 API 統一
 pub use evaluator::NNUEEvaluator;
