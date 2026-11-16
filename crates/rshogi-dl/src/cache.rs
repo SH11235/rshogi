@@ -11,42 +11,39 @@ use crate::features::{FEATURES1_SIZE, FEATURES2_SIZE, MAX_MOVE_LABEL_NUM, make_i
 use crate::{Evaluator, InputFormat, tokens};
 
 const KEY_WORDS: usize = (FEATURES1_SIZE + FEATURES2_SIZE).div_ceil(64);
-type Key = [u64; KEY_WORDS];
-const TOKEN_TAG_WORD: usize = 150;
-const TOKEN_TAG: u64 = 1 << 63;
+type BasicKey = [u64; KEY_WORDS];
+type TokenKey = [u8; tokens::TOKEN_COUNT];
 const _: () = assert!(KEY_WORDS == 151);
-const _: () = assert!(FEATURES1_SIZE + FEATURES2_SIZE <= TOKEN_TAG_WORD * 64 + 63);
-const _: () = assert!(tokens::TOKEN_COUNT == 12 * 8);
 
-struct Entry {
-    key: Key,
+struct Entry<K> {
+    key: K,
     logits: [f32; MAX_MOVE_LABEL_NUM],
     value: f32,
     occupied: bool,
 }
 
-struct Cache {
-    format: InputFormat,
-    entries: Vec<Entry>,
+struct Table<K> {
+    entries: Vec<Entry<K>>,
     first: Vec<f32>,
     second: Vec<f32>,
     bytes: usize,
 }
 
-impl Cache {
-    fn new(bytes: usize, format: InputFormat) -> Result<Self> {
-        let (first_len, second_len) = match format {
-            InputFormat::Basic => (FEATURES1_SIZE, FEATURES2_SIZE),
-            InputFormat::StmTokensV1 => (0, 0),
-        };
-        let overhead = size_of::<Self>() + (first_len + second_len) * size_of::<f32>();
+enum Cache {
+    Basic(Table<BasicKey>),
+    Tokens(Table<TokenKey>),
+}
+
+impl<K: Copy + Eq + Hash> Table<K> {
+    fn new(bytes: usize, empty_key: K, first_len: usize, second_len: usize) -> Result<Self> {
+        let overhead = size_of::<Cache>() + (first_len + second_len) * size_of::<f32>();
         ensure!(bytes > overhead, "cache budget is too small");
-        let count = (bytes - overhead) / size_of::<Entry>();
+        let count = (bytes - overhead) / size_of::<Entry<K>>();
         ensure!(count > 0, "cache has no entries");
         let mut entries = Vec::new();
         entries.try_reserve_exact(count)?;
         entries.resize_with(count, || Entry {
-            key: [0; KEY_WORDS],
+            key: empty_key,
             logits: [0.0; MAX_MOVE_LABEL_NUM],
             value: 0.0,
             occupied: false,
@@ -57,12 +54,11 @@ impl Cache {
         let mut second = Vec::new();
         second.try_reserve_exact(second_len)?;
         second.resize(second_len, 0.0);
-        let allocated = size_of::<Self>()
-            + entries.capacity() * size_of::<Entry>()
+        let allocated = size_of::<Cache>()
+            + entries.capacity() * size_of::<Entry<K>>()
             + (first.capacity() + second.capacity()) * size_of::<f32>();
         ensure!(allocated <= bytes, "cache allocation exceeds budget");
         Ok(Self {
-            format,
             entries,
             first,
             second,
@@ -70,16 +66,48 @@ impl Cache {
         })
     }
 
-    fn key(&mut self, pos: &Position) -> Result<Key> {
-        if self.format == InputFormat::StmTokensV1 {
-            let encoded = tokens::encode(pos)?;
-            let mut key = [0; KEY_WORDS];
-            for (index, token) in encoded.into_iter().enumerate() {
-                key[index / 8] |= u64::from(token) << ((index % 8) * 8);
-            }
-            key[TOKEN_TAG_WORD] = TOKEN_TAG;
-            return Ok(key);
+    fn index(&self, key: &K) -> usize {
+        let mut hash = DefaultHasher::new();
+        key.hash(&mut hash);
+        (hash.finish() % self.entries.len() as u64) as usize
+    }
+
+    fn clear(&mut self) {
+        for entry in &mut self.entries {
+            entry.occupied = false;
         }
+    }
+
+    fn evaluate<E: Evaluator>(
+        &mut self,
+        key: K,
+        inner: &mut E,
+        pos: &Position,
+        logits: &mut [f32],
+        stats: &mut CacheStats,
+    ) -> Result<f32> {
+        let index = self.index(&key);
+        let entry = &self.entries[index];
+        if entry.occupied && entry.key == key {
+            logits.copy_from_slice(&entry.logits);
+            stats.hits += 1;
+            return Ok(entry.value);
+        }
+        stats.nn_calls += 1;
+        let value = inner.evaluate(pos, logits)?;
+        ensure!(value.is_finite() && (0.0..=1.0).contains(&value), "invalid value probability");
+        ensure!(logits.iter().all(|x| x.is_finite()), "non-finite policy logit");
+        let entry = &mut self.entries[index];
+        entry.key = key;
+        entry.logits.copy_from_slice(logits);
+        entry.value = value;
+        entry.occupied = true;
+        Ok(value)
+    }
+}
+
+impl Table<BasicKey> {
+    fn key(&mut self, pos: &Position) -> Result<BasicKey> {
         self.first.fill(0.0);
         self.second.fill(0.0);
         make_input_features(pos, &mut self.first, &mut self.second);
@@ -94,11 +122,48 @@ impl Cache {
         }
         Ok(key)
     }
+}
 
-    fn index(&self, key: &Key) -> usize {
-        let mut hash = DefaultHasher::new();
-        key.hash(&mut hash);
-        (hash.finish() % self.entries.len() as u64) as usize
+impl Cache {
+    fn new(bytes: usize, format: InputFormat) -> Result<Self> {
+        match format {
+            InputFormat::Basic => {
+                Ok(Self::Basic(Table::new(bytes, [0; KEY_WORDS], FEATURES1_SIZE, FEATURES2_SIZE)?))
+            }
+            InputFormat::StmTokensV1 => {
+                Ok(Self::Tokens(Table::new(bytes, [0; tokens::TOKEN_COUNT], 0, 0)?))
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Basic(table) => table.clear(),
+            Self::Tokens(table) => table.clear(),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Basic(table) => table.bytes,
+            Self::Tokens(table) => table.bytes,
+        }
+    }
+
+    fn evaluate<E: Evaluator>(
+        &mut self,
+        inner: &mut E,
+        pos: &Position,
+        logits: &mut [f32],
+        stats: &mut CacheStats,
+    ) -> Result<f32> {
+        match self {
+            Self::Basic(table) => {
+                let key = table.key(pos)?;
+                table.evaluate(key, inner, pos, logits, stats)
+            }
+            Self::Tokens(table) => table.evaluate(tokens::encode(pos)?, inner, pos, logits, stats),
+        }
     }
 }
 
@@ -144,9 +209,7 @@ impl<E: Evaluator> CachedEvaluator<E> {
     /// 保存済みの出力と統計を破棄する。モデル自体は保持する。
     pub fn clear(&mut self) {
         if let Some(cache) = &mut self.cache {
-            for entry in &mut cache.entries {
-                entry.occupied = false;
-            }
+            cache.clear();
         }
         self.reset_stats();
     }
@@ -163,7 +226,7 @@ impl<E: Evaluator> CachedEvaluator<E> {
 
     /// key・出力・metadata・特徴量 buffer の合計 bytes。allocator の管理領域は含まない。
     pub fn allocated_bytes(&self) -> usize {
-        self.cache.as_ref().map_or(0, |cache| cache.bytes)
+        self.cache.as_ref().map_or(0, |cache| cache.bytes())
     }
 }
 
@@ -179,24 +242,7 @@ impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
             return self.inner.evaluate(pos, logits);
         };
         ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
-        let key = cache.key(pos)?;
-        let index = cache.index(&key);
-        let entry = &cache.entries[index];
-        if entry.occupied && entry.key == key {
-            logits.copy_from_slice(&entry.logits);
-            self.stats.hits += 1;
-            return Ok(entry.value);
-        }
-        self.stats.nn_calls += 1;
-        let value = self.inner.evaluate(pos, logits)?;
-        ensure!(value.is_finite() && (0.0..=1.0).contains(&value), "invalid value probability");
-        ensure!(logits.iter().all(|x| x.is_finite()), "non-finite policy logit");
-        let entry = &mut cache.entries[index];
-        entry.key = key;
-        entry.logits.copy_from_slice(logits);
-        entry.value = value;
-        entry.occupied = true;
-        Ok(value)
+        cache.evaluate(&mut self.inner, pos, logits, &mut self.stats)
     }
 }
 
@@ -220,6 +266,20 @@ mod tests {
             Ok(0.25)
         }
     }
+    fn basic_table(bytes: usize) -> Result<Table<BasicKey>> {
+        let Cache::Basic(table) = Cache::new(bytes, InputFormat::Basic)? else {
+            unreachable!()
+        };
+        Ok(table)
+    }
+
+    fn token_table(bytes: usize) -> Result<Table<TokenKey>> {
+        let Cache::Tokens(table) = Cache::new(bytes, InputFormat::StmTokensV1)? else {
+            unreachable!()
+        };
+        Ok(table)
+    }
+
     fn position() -> Position {
         let mut p = Position::new();
         p.set_hirate();
@@ -292,7 +352,9 @@ mod tests {
             1,
         )?;
         let pos = position();
-        let cache = evaluator.cache.as_mut().unwrap();
+        let Cache::Basic(cache) = evaluator.cache.as_mut().unwrap().as_mut() else {
+            unreachable!()
+        };
         let key = cache.key(&pos)?;
         let index = cache.index(&key);
         cache.entries[index].occupied = true;
@@ -324,7 +386,7 @@ mod tests {
     }
     #[test]
     fn input_key_ignores_ply_and_checks_every_plane() -> Result<()> {
-        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        let mut cache = basic_table(1024 * 1024)?;
         let pos = position();
         let key = cache.key(&pos)?;
         let mut later = Position::new();
@@ -367,7 +429,7 @@ mod tests {
     #[test]
     fn hand_and_attack_planes_are_binary_and_preserved() -> Result<()> {
         let mut pos = Position::new();
-        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        let mut cache = basic_table(1024 * 1024)?;
         for sfen in [
             "4k4/9/9/9/9/9/9/9/4K4 b 18P4L4N4S4G2B2R 1",
             "+B+N4R+Pl/KBG2g2l/P+P2P+N3/6p2/2p3s2/4S2L1/G8/7p+l/7+pk b G2S4Pr2n6p 1",
@@ -413,19 +475,53 @@ mod tests {
     }
 
     #[test]
-    fn token_key_contains_every_byte_and_only_the_reserved_tag() -> Result<()> {
-        let mut cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
+    fn token_key_uses_every_byte_without_padding() -> Result<()> {
+        let mut table = token_table(1024 * 1024)?;
         let pos = position();
-        let encoded = tokens::encode(&pos)?;
-        let key = cache.key(&pos)?;
-        for (index, token) in encoded.into_iter().enumerate() {
-            assert_eq!(((key[index / 8] >> ((index % 8) * 8)) & 255) as u8, token);
+        let key = tokens::encode(&pos)?;
+        let index = table.index(&key);
+        let mut inner = TokenFake(Fake {
+            calls: 0,
+            fail: false,
+        });
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        let mut stats = CacheStats::default();
+        assert_eq!(size_of::<TokenKey>(), tokens::TOKEN_COUNT);
+        for byte in 0..tokens::TOKEN_COUNT {
+            let mut different = key;
+            different[byte] ^= 1;
+            table.entries[index].key = different;
+            table.entries[index].occupied = true;
+            table.entries[index].value = 0.75;
+            assert_eq!(table.evaluate(key, &mut inner, &pos, &mut logits, &mut stats)?, 0.25);
+            assert_eq!(stats.hits, 0);
+            assert_eq!(stats.nn_calls, byte as u64 + 1);
         }
-        assert!(key[12..TOKEN_TAG_WORD].iter().all(|&word| word == 0));
-        assert_eq!(key[TOKEN_TAG_WORD], TOKEN_TAG);
-        assert!(cache.first.is_empty() && cache.second.is_empty());
-        let mut basic = Cache::new(1024 * 1024, InputFormat::Basic)?;
-        assert_eq!(basic.key(&pos)?[TOKEN_TAG_WORD] & TOKEN_TAG, 0);
+        assert!(table.first.is_empty() && table.second.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failing_token_collision_keeps_the_previous_entry() -> Result<()> {
+        let minimum = size_of::<Cache>() + size_of::<Entry<TokenKey>>();
+        let mut table = token_table(minimum)?;
+        let pos = position();
+        let key = tokens::encode(&pos)?;
+        let mut other = key;
+        other[95] ^= 1;
+        assert_eq!(table.index(&key), table.index(&other));
+        let mut inner = TokenFake(Fake {
+            calls: 0,
+            fail: false,
+        });
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        let mut stats = CacheStats::default();
+        table.evaluate(key, &mut inner, &pos, &mut logits, &mut stats)?;
+        inner.0.fail = true;
+        assert!(table.evaluate(other, &mut inner, &pos, &mut logits, &mut stats).is_err());
+        assert_eq!(table.evaluate(key, &mut inner, &pos, &mut logits, &mut stats)?, 0.25);
+        assert_eq!(stats.nn_calls, 2);
+        assert_eq!(stats.hits, 1);
         Ok(())
     }
 
@@ -445,7 +541,7 @@ mod tests {
         ] {
             expected[word] = bits;
         }
-        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        let mut cache = basic_table(1024 * 1024)?;
         let key = cache.key(&pos)?;
         assert_eq!(key, expected);
         let mut hash = DefaultHasher::new();
@@ -460,15 +556,14 @@ mod tests {
 
     #[test]
     fn exact_pawn_counts_do_not_alias_saturated_basic_planes() -> Result<()> {
-        let mut basic = Cache::new(1024 * 1024, InputFormat::Basic)?;
-        let mut token_cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
+        let mut basic = basic_table(1024 * 1024)?;
         let mut basic_keys = Vec::new();
         let mut token_keys = Vec::new();
         for count in [8, 9, 18] {
             let mut pos = Position::new();
             pos.set_sfen(&format!("4k4/9/9/9/9/9/9/9/4K4 b {count}P 1"))?;
             basic_keys.push(basic.key(&pos)?);
-            token_keys.push(token_cache.key(&pos)?);
+            token_keys.push(tokens::encode(&pos)?);
         }
         assert_eq!(basic_keys[0], basic_keys[1]);
         assert_eq!(basic_keys[1], basic_keys[2]);
@@ -484,11 +579,9 @@ mod tests {
         black.set_hirate();
         let mut white = Position::new();
         white.set_sfen(&black.to_sfen().replace(" b ", " w "))?;
-        let mut cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
-        let black_key = cache.key(&black)?;
-        let white_key = cache.key(&white)?;
-        assert_eq!(&black_key[..11], &white_key[..11]);
-        assert_eq!(black_key[11] & 0x00ffffffffffffff, white_key[11] & 0x00ffffffffffffff);
+        let black_key = tokens::encode(&black)?;
+        let white_key = tokens::encode(&white)?;
+        assert_eq!(&black_key[..95], &white_key[..95]);
         assert_ne!(black_key, white_key);
         Ok(())
     }
@@ -508,6 +601,10 @@ mod tests {
         evaluator.evaluate(&position(), &mut logits)?;
         assert_eq!(evaluator.stats().nn_calls, 1);
         assert_eq!(evaluator.stats().hits, 1);
+        evaluator.reset_stats();
+        evaluator.evaluate(&position(), &mut logits)?;
+        assert_eq!(evaluator.stats().nn_calls, 0);
+        assert_eq!(evaluator.stats().hits, 1);
         evaluator.clear();
         evaluator.inner.0.fail = true;
         for _ in 0..2 {
@@ -519,6 +616,15 @@ mod tests {
         evaluator.evaluate(&position(), &mut logits)?;
         assert_eq!(evaluator.stats().nn_calls, 3);
         Ok(())
+    }
+
+    fn check_budget<K: Copy + Eq + Hash>(table: &Table<K>, budget: usize) {
+        let actual = size_of::<Cache>()
+            + table.entries.capacity() * size_of::<Entry<K>>()
+            + (table.first.capacity() + table.second.capacity()) * size_of::<f32>();
+        assert_eq!(table.bytes, actual);
+        assert!(actual <= budget);
+        assert!(actual + size_of::<Entry<K>>() > budget);
     }
 
     #[test]
@@ -533,23 +639,36 @@ mod tests {
             )
             .is_err()
         );
-        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+        let basic_overhead =
+            size_of::<Cache>() + (FEATURES1_SIZE + FEATURES2_SIZE) * size_of::<f32>();
+        for (format, minimum) in [
+            (InputFormat::Basic, basic_overhead + size_of::<Entry<BasicKey>>()),
+            (InputFormat::StmTokensV1, size_of::<Cache>() + size_of::<Entry<TokenKey>>()),
+        ] {
             assert!(Cache::new(0, format).is_err());
-            assert!(Cache::new(size_of::<Cache>() + size_of::<Entry>() - 1, format).is_err());
-            let cache = Cache::new(1024 * 1024, format)?;
-            let actual = size_of::<Cache>()
-                + cache.entries.capacity() * size_of::<Entry>()
-                + (cache.first.capacity() + cache.second.capacity()) * size_of::<f32>();
-            assert_eq!(cache.bytes, actual);
-            assert!(actual <= 1024 * 1024);
-            let expected_inputs = if format == InputFormat::Basic {
-                FEATURES1_SIZE + FEATURES2_SIZE
-            } else {
-                0
-            };
-            assert_eq!(cache.first.len() + cache.second.len(), expected_inputs);
-            assert!(actual + size_of::<Entry>() > 1024 * 1024);
+            assert!(Cache::new(minimum - 1, format).is_err());
+            let cache = Cache::new(minimum, format)?;
+            assert_eq!(cache.bytes(), minimum);
+            match cache {
+                Cache::Basic(table) => {
+                    assert_eq!(table.entries.len(), 1);
+                    check_budget(&table, minimum);
+                }
+                Cache::Tokens(table) => {
+                    assert_eq!(table.entries.len(), 1);
+                    check_budget(&table, minimum);
+                }
+            }
         }
+        let budget = 1024 * 1024;
+        let basic = basic_table(budget)?;
+        let token = token_table(budget)?;
+        check_budget(&basic, budget);
+        check_budget(&token, budget);
+        assert_eq!(basic.first.len() + basic.second.len(), FEATURES1_SIZE + FEATURES2_SIZE);
+        assert!(token.first.is_empty() && token.second.is_empty());
+        assert!(size_of::<Entry<TokenKey>>() < size_of::<Entry<BasicKey>>());
+        assert!(token.entries.len() > basic.entries.len());
         Ok(())
     }
 }
