@@ -78,6 +78,23 @@ static COMPOSITE_MASKS: [CompositeMasks; 16] = {
     masks
 };
 
+/// 親局面で解釈した通常手の駒情報と、着手後の主キー。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MoveDiff {
+    board_key: u64,
+    hand_key: u64,
+    piece: Piece,
+    moved_after: Piece,
+    captured: Piece,
+}
+
+impl MoveDiff {
+    #[inline]
+    pub(crate) fn key(&self) -> u64 {
+        self.board_key ^ self.hand_key
+    }
+}
+
 /// 将棋の局面
 #[derive(Clone)]
 pub struct Position {
@@ -568,15 +585,28 @@ impl Position {
     /// PASS 以外の合法手を指した後の (盤面キー, 手駒キー) を、局面を変更せずに計算する。
     #[inline]
     pub(crate) fn keys_after(&self, m: Move) -> (u64, u64) {
+        let diff = self.move_diff(m);
+        (diff.board_key, diff.hand_key)
+    }
+
+    /// PASS 以外の合法手を、実行する親局面で準備する。
+    #[inline]
+    pub(crate) fn move_diff(&self, m: Move) -> MoveDiff {
         debug_assert!(!m.is_pass());
         let us = self.side_to_move;
         let mut board_key = self.cur_state().board_key ^ zobrist_side();
         let mut hand_key = self.cur_state().hand_key;
         let to = m.to();
 
+        let piece;
+        let moved_after;
+        let captured;
         if m.is_drop() {
             let pt = m.drop_piece_type();
-            board_key ^= zobrist_psq(Piece::new(us, pt), to);
+            piece = Piece::new(us, pt);
+            moved_after = piece;
+            captured = Piece::NONE;
+            board_key ^= zobrist_psq(piece, to);
             hand_key = hand_key.wrapping_sub(zobrist_hand(us, pt));
         } else {
             let pc = self.piece_on(m.from());
@@ -587,7 +617,9 @@ impl Position {
             };
             board_key ^= zobrist_psq(pc, m.from()) ^ zobrist_psq(moved_after_pc, to);
 
-            let captured = self.piece_on(to);
+            piece = pc;
+            moved_after = moved_after_pc;
+            captured = self.piece_on(to);
             if captured.is_some() {
                 let pt = captured.piece_type().unpromote();
                 board_key ^= zobrist_psq(captured, to);
@@ -598,7 +630,13 @@ impl Position {
             }
         }
 
-        (board_key, hand_key)
+        MoveDiff {
+            board_key,
+            hand_key,
+            piece,
+            moved_after,
+            captured,
+        }
     }
 
     /// 盤面の利き数を取得
@@ -1119,9 +1157,10 @@ impl Position {
         if m.is_pass() {
             return self.do_pass_move();
         }
-        let next_key = self.key_after(m);
+        let diff = self.move_diff(m);
+        let next_key = diff.key();
         prefetcher.prefetch(next_key, !self.side_to_move);
-        let dirty_piece = self.do_move(m, gives_check);
+        let dirty_piece = self.do_move_prepared(m, gives_check, diff);
         debug_assert_eq!(self.key(), next_key);
         dirty_piece
     }
@@ -1133,7 +1172,7 @@ impl Position {
     ///
     /// PASSの場合は do_pass_move に委譲する。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
-        self.do_move_impl::<false>(m, gives_check)
+        self.do_move_impl::<false>(m, gives_check, None)
     }
 
     /// 手番側の玉が無ければ、`checkers` を消す。
@@ -1155,7 +1194,7 @@ impl Position {
     /// 通常の探索では `do_move` を使う。
     pub fn do_move_with_missing_kings(&mut self, m: Move) -> DirtyPiece {
         self.clear_checkers_without_king();
-        self.do_move_impl::<true>(m, false)
+        self.do_move_impl::<true>(m, false, None)
     }
 
     /// 合法と確かめた指し手を実行する。玉の無い側があれば [`Self::do_move_with_missing_kings`]、
@@ -1171,16 +1210,30 @@ impl Position {
         }
     }
 
+    /// 同じ親局面・同じ手で準備した差分を使って着手する。
+    #[inline]
+    pub(crate) fn do_move_prepared(
+        &mut self,
+        m: Move,
+        gives_check: bool,
+        diff: MoveDiff,
+    ) -> DirtyPiece {
+        debug_assert_eq!(diff, self.move_diff(m));
+        self.do_move_impl::<false>(m, gives_check, Some(diff))
+    }
+
     fn do_move_impl<const ALLOW_MISSING_KINGS: bool>(
         &mut self,
         m: Move,
         gives_check: bool,
+        diff: Option<MoveDiff>,
     ) -> DirtyPiece {
         // PASSの場合は do_pass_move に委譲
         if m.is_pass() {
             return self.do_pass_move_impl::<ALLOW_MISSING_KINGS>();
         }
 
+        let diff = diff.unwrap_or_else(|| self.move_diff(m));
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -1188,16 +1241,7 @@ impl Position {
             !self.board_effects_paused && Self::should_update_board_effects();
 
         let prev_check_square = if gives_check {
-            let moved_pt = if m.is_drop() {
-                m.drop_piece_type()
-            } else {
-                let pt = self.piece_on(m.from()).piece_type();
-                if m.is_promote() {
-                    pt.promote().expect("promote move on unpromotable piece")
-                } else {
-                    pt
-                }
-            };
+            let moved_pt = diff.moved_after.piece_type();
             check_sq_index(moved_pt)
                 .map(|idx| unsafe { *self.cur_state().check_squares.get_unchecked(idx) })
                 .unwrap_or(Bitboard::EMPTY)
@@ -1216,7 +1260,9 @@ impl Position {
         self.cur_state_mut().plies_from_null += 1;
 
         // 3. 手番の変更とハッシュ更新
-        self.cur_state_mut().board_key ^= zobrist_side();
+        let st = self.cur_state_mut();
+        st.board_key = diff.board_key;
+        st.hand_key = diff.hand_key;
 
         // 4. 駒の移動
         let mut moved_from: Option<Square> = None;
@@ -1231,7 +1277,7 @@ impl Position {
         if m.is_drop() {
             let pt = m.drop_piece_type();
             let to = m.to();
-            let pc = Piece::new(us, pt);
+            let pc = diff.piece;
             moved_to = to;
 
             if update_board_effects {
@@ -1252,13 +1298,10 @@ impl Position {
 
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
-            let st = self.cur_state_mut();
-            st.hand_key = st.hand_key.wrapping_sub(zobrist_hand(us, pt));
 
             // 盤上に配置
             self.put_piece_internal(pc, to);
             let st = self.cur_state_mut();
-            st.board_key ^= zobrist_psq(pc, to);
             Self::xor_partial_keys(st, pc, to);
 
             let new_bp = ExtBonaPiece::from_board(pc, to);
@@ -1277,8 +1320,8 @@ impl Position {
             let to = m.to();
             moved_from = Some(from);
             moved_to = to;
-            let pc = self.piece_on(from);
-            let captured = self.piece_on(to);
+            let pc = diff.piece;
+            let captured = diff.captured;
 
             debug_assert!(
                 !m.is_promote() || pc.piece_type().can_promote(),
@@ -1292,11 +1335,7 @@ impl Position {
                 m.is_promote()
             );
 
-            let moved_after_pc = if m.is_promote() {
-                pc.promote().unwrap()
-            } else {
-                pc
-            };
+            let moved_after_pc = diff.moved_after;
             if update_board_effects {
                 let occupied_before = self.occupied();
                 if captured.is_some() {
@@ -1344,7 +1383,6 @@ impl Position {
 
                 self.remove_piece_internal(captured, to);
                 let st = self.cur_state_mut();
-                st.board_key ^= zobrist_psq(captured, to);
                 Self::xor_partial_keys(st, captured, to);
 
                 // material_value: 盤上から駒が消える
@@ -1362,8 +1400,6 @@ impl Position {
                         | PieceType::Rook
                 ) {
                     self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
-                    let st = self.cur_state_mut();
-                    st.hand_key = st.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
                     material_value += hand_piece_value(us, captured_pt);
                 }
 
@@ -1387,12 +1423,10 @@ impl Position {
             // 駒を移動
             self.remove_piece_internal(pc, from);
             let st = self.cur_state_mut();
-            st.board_key ^= zobrist_psq(pc, from);
             Self::xor_partial_keys(st, pc, from);
 
             self.put_piece_internal(moved_after_pc, to);
             let st = self.cur_state_mut();
-            st.board_key ^= zobrist_psq(moved_after_pc, to);
             Self::xor_partial_keys(st, moved_after_pc, to);
 
             // 成りによるmaterial差分
@@ -1513,6 +1547,17 @@ impl Position {
     ///
     /// PASSの場合は undo_pass_move に委譲する。
     pub fn undo_move(&mut self, m: Move) {
+        self.undo_move_impl(m, None);
+    }
+
+    /// 着手時の駒番号と変更前 BonaPiece を使って同じ手を戻す。
+    #[inline]
+    pub(crate) fn undo_move_with_dirty(&mut self, m: Move, dirty: &DirtyPiece) {
+        self.undo_move_impl(m, Some(dirty));
+    }
+
+    #[inline]
+    fn undo_move_impl(&mut self, m: Move, dirty: Option<&DirtyPiece>) {
         if m.is_pass() {
             return self.undo_pass_move();
         }
@@ -1539,15 +1584,18 @@ impl Position {
             let moved_pc = self.piece_on(to);
 
             // PieceList: 盤上 → 手駒に戻す
-            let piece_no = self.piece_list.piece_no_of_board(to);
+            let piece_no =
+                dirty.map_or_else(|| self.piece_list.piece_no_of_board(to), |d| d.piece_no[0]);
 
             // 盤上から除去
             self.remove_piece_internal(moved_pc, to);
             // 手駒に戻す
             self.hand[us] = self.hand[us].add(pt);
 
-            let new_count = self.hand[us].count(pt) as u8;
-            let hand_bp = ExtBonaPiece::from_hand(us, pt, new_count);
+            let hand_bp = dirty.map_or_else(
+                || ExtBonaPiece::from_hand(us, pt, self.hand[us].count(pt) as u8),
+                |d| d.changed_piece[0].old_piece,
+            );
             self.piece_list.put_piece_on_hand(piece_no, hand_bp);
 
             if update_board_effects {
@@ -1571,18 +1619,33 @@ impl Position {
             };
 
             // PieceList: 動いた駒を from に戻す
-            let piece_no_moved = self.piece_list.piece_no_of_board(to);
-            let from_bp = ExtBonaPiece::from_board(original_pc, from);
+            let piece_no_moved =
+                dirty.map_or_else(|| self.piece_list.piece_no_of_board(to), |d| d.piece_no[0]);
+            let from_bp = dirty.map_or_else(
+                || ExtBonaPiece::from_board(original_pc, from),
+                |d| d.changed_piece[0].old_piece,
+            );
 
             if captured.is_some() {
                 let cap_pt = captured.piece_type().unpromote();
 
                 // PieceList: 手駒から取られた駒を盤上に復元
-                let hand_count = self.hand[us].count(cap_pt) as u8;
-                let hand_bp_fb =
-                    crate::nnue::BonaPiece::from_hand_piece(Color::Black, us, cap_pt, hand_count);
-                let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
-                let cap_board_bp = ExtBonaPiece::from_board(captured, to);
+                let (piece_no_cap, cap_board_bp) = dirty.map_or_else(
+                    || {
+                        let hand_count = self.hand[us].count(cap_pt) as u8;
+                        let hand_bp_fb = crate::nnue::BonaPiece::from_hand_piece(
+                            Color::Black,
+                            us,
+                            cap_pt,
+                            hand_count,
+                        );
+                        (
+                            self.piece_list.piece_no_of_hand(hand_bp_fb),
+                            ExtBonaPiece::from_board(captured, to),
+                        )
+                    },
+                    |d| (d.piece_no[1], d.changed_piece[1].old_piece),
+                );
 
                 // 駒を元の位置に戻す
                 self.remove_piece_internal(moved_pc, to);
@@ -2185,6 +2248,95 @@ mod tests {
         pos.do_move_with_prefetch(mv, gives_check, &prefetcher);
         assert_eq!(pos.key(), next_key, "move={mv:?}");
         assert_eq!(prefetcher.0.get(), Some((pos.key(), !us)));
+    }
+
+    #[test]
+    fn shared_move_diff_restores_piece_list_and_state() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+
+        fn assert_same(actual: &Position, reference: &Position) {
+            assert_eq!(RestoredState::of(actual), RestoredState::of(reference));
+            assert_eq!(actual.piece_list.piece_list_fb(), reference.piece_list.piece_list_fb());
+            assert_eq!(actual.piece_list.piece_list_fw(), reference.piece_list.piece_list_fw());
+            for sq in actual.occupied().iter() {
+                assert_eq!(
+                    actual.piece_list.piece_no_of_board(sq),
+                    reference.piece_list.piece_no_of_board(sq),
+                );
+            }
+            for bp in actual.piece_list.piece_list_fb().iter().copied() {
+                if bp != crate::nnue::BonaPiece::ZERO && (bp.0 as usize) < crate::nnue::FE_HAND_END
+                {
+                    assert_eq!(
+                        actual.piece_list.piece_no_of_hand(bp),
+                        reference.piece_list.piece_no_of_hand(bp),
+                    );
+                }
+            }
+        }
+
+        let mut counts = [[0usize; 4]; 2];
+        for sfen in [crate::position::SFEN_HIRATE, PERFT_MATSURI, PERFT_MIDGAME] {
+            let mut actual = Position::new();
+            actual.set_sfen(sfen).unwrap();
+            actual.set_pass_rights_enabled(true);
+            actual.set_pass_rights_pair(2, 2);
+            let mut reference = actual.clone();
+            let mut moves = MoveList::new();
+            generate_legal_all(&actual, &mut moves);
+            for mv in moves.iter().copied().chain(actual.can_pass().then_some(Move::PASS)) {
+                let before = actual.clone();
+                let diff = if mv.is_pass() {
+                    None
+                } else {
+                    Some(actual.move_diff(mv))
+                };
+                let gives_check = actual.gives_check(mv);
+                let count = &mut counts[actual.side_to_move().index()];
+                count[0] += usize::from(mv.is_pass());
+                count[1] += usize::from(mv.is_drop());
+                count[2] += usize::from(mv.is_promote());
+                count[3] += usize::from(!mv.is_pass() && actual.piece_on(mv.to()).is_some());
+
+                // 除外探索は親局面へ戻るが、同じ StateInfo slot を上書きし得る。
+                for sibling in moves.iter().copied().take(3) {
+                    actual.do_move(sibling, actual.gives_check(sibling));
+                    actual.undo_move(sibling);
+                }
+                assert_same(&actual, &before);
+                let dirty = if let Some(diff) = diff {
+                    actual.do_move_prepared(mv, gives_check, diff)
+                } else {
+                    actual.do_move(mv, gives_check)
+                };
+                reference.do_move(mv, gives_check);
+                assert_same(&actual, &reference);
+                let mut replies = MoveList::new();
+                generate_legal_all(&actual, &mut replies);
+                for reply in replies.iter().copied().chain(actual.can_pass().then_some(Move::PASS))
+                {
+                    let count = &mut counts[actual.side_to_move().index()];
+                    count[0] += usize::from(reply.is_pass());
+                    count[1] += usize::from(reply.is_drop());
+                    count[2] += usize::from(reply.is_promote());
+                    count[3] +=
+                        usize::from(!reply.is_pass() && actual.piece_on(reply.to()).is_some());
+                    let child_dirty =
+                        actual.do_move_with_prefetch(reply, actual.gives_check(reply), &NoPrefetch);
+                    reference.do_move(reply, reference.gives_check(reply));
+                    assert_same(&actual, &reference);
+                    actual.undo_move_with_dirty(reply, &child_dirty);
+                    reference.undo_move(reply);
+                    assert_same(&actual, &reference);
+                }
+                actual.undo_move_with_dirty(mv, &dirty);
+                reference.undo_move(mv);
+                assert_same(&actual, &reference);
+                assert_same(&actual, &before);
+            }
+        }
+        assert!(counts.iter().all(|c| c.iter().all(|&n| n > 0)), "網羅不足: {counts:?}");
     }
 
     #[test]

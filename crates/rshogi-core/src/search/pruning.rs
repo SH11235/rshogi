@@ -529,7 +529,7 @@ where
         let cont_hist_to = mv.to();
 
         st.stack[ply as usize].current_move = mv;
-        do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+        let dirty_piece = do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
         set_cont_history_for_move(
             st,
             ctx,
@@ -566,7 +566,7 @@ where
             );
         }
         nnue_pop(st);
-        pos.undo_move(mv);
+        pos.undo_move_with_dirty(mv, &dirty_piece);
 
         // 未完了の子の番兵値を cutoff 判定や TT 保存に使わない。
         if st.abort {

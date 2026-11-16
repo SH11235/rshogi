@@ -452,7 +452,7 @@ pub(super) fn qsearch<const NT: u8>(
         // 実際に探索された手をカウント
         inc_stat!(st, qs_moves_searched);
 
-        do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+        let dirty_piece = do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
 
         // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
         if mv.is_pass() {
@@ -466,7 +466,7 @@ pub(super) fn qsearch<const NT: u8>(
         let value = -qsearch::<NT>(st, ctx, pos, -beta, -alpha, ply + 1, limits, time_manager);
 
         nnue_pop(st);
-        pos.undo_move(mv);
+        pos.undo_move_with_dirty(mv, &dirty_piece);
 
         if st.abort {
             return Value::ZERO;

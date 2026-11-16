@@ -1393,7 +1393,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
+            let dirty_piece = do_move_and_push(
                 &mut self.state,
                 pos,
                 mv,
@@ -1686,7 +1686,7 @@ impl SearchWorker {
             };
 
             self.nnue_pop();
-            pos.undo_move(mv);
+            pos.undo_move_with_dirty(mv, &dirty_piece);
 
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
@@ -2058,7 +2058,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
+            let dirty_piece = do_move_and_push(
                 &mut self.state,
                 pos,
                 mv,
@@ -2337,7 +2337,7 @@ impl SearchWorker {
             };
 
             self.nnue_pop();
-            pos.undo_move(mv);
+            pos.undo_move_with_dirty(mv, &dirty_piece);
 
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
@@ -2941,7 +2941,7 @@ impl SearchWorker {
             }
 
             let is_capture = pos.is_capture(mv);
-            prefetch_child(pos, mv, ctx.tt, ctx.eval_hash);
+            let move_diff = prefetch_child(pos, mv, ctx.tt, ctx.eval_hash);
             let gives_check = pos.gives_check(mv);
 
             let mut new_depth = depth - 1;
@@ -3133,7 +3133,8 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
+            let dirty_piece =
+                do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash, move_diff);
             // ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
@@ -3513,7 +3514,7 @@ impl SearchWorker {
             };
             nnue_pop(st);
 
-            pos.undo_move(mv);
+            pos.undo_move_with_dirty(mv, &dirty_piece);
 
             if st.abort {
                 return Value::ZERO;

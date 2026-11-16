@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 
 use crate::eval::{EvalHash, eval_hash_enabled};
 use crate::nnue::DirtyPiece;
-use crate::position::Position;
+use crate::position::{MoveDiff, Position};
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
 use crate::types::{Color, Move, Piece, Square, Value};
@@ -188,9 +188,13 @@ pub(super) fn prefetch_child<P: TtPrefetch>(
     mv: Move,
     tt: &P,
     eval_hash: &EvalHash,
-) {
-    if !mv.is_pass() {
-        SearchPrefetch { tt, eval_hash }.prefetch(pos.key_after(mv), !pos.side_to_move());
+) -> Option<MoveDiff> {
+    if mv.is_pass() {
+        None
+    } else {
+        let diff = pos.move_diff(mv);
+        SearchPrefetch { tt, eval_hash }.prefetch(diff.key(), !pos.side_to_move());
+        Some(diff)
     }
 }
 
@@ -202,13 +206,20 @@ pub(super) fn do_move_and_push_prefetched(
     mv: Move,
     gives_check: bool,
     eval_hash: &EvalHash,
-) {
-    let dirty_piece = pos.do_move(mv, gives_check);
+    diff: Option<MoveDiff>,
+) -> DirtyPiece {
+    let dirty_piece = if let Some(diff) = diff {
+        pos.do_move_prepared(mv, gives_check, diff)
+    } else {
+        debug_assert!(mv.is_pass());
+        pos.do_move(mv, gives_check)
+    };
     if mv.is_pass() && eval_hash_enabled() {
         eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;
     st.evaluator.push(dirty_piece);
+    dirty_piece
 }
 
 /// do_move + nodes++ + nnue_push をまとめたラッパー
@@ -220,7 +231,7 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     gives_check: bool,
     prefetcher: &P,
     eval_hash: &EvalHash,
-) {
+) -> DirtyPiece {
     let search_prefetch = SearchPrefetch {
         tt: prefetcher,
         eval_hash,
@@ -232,6 +243,7 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     }
     st.nodes += 1;
     st.evaluator.push(dirty_piece);
+    dirty_piece
 }
 
 /// NNUE push

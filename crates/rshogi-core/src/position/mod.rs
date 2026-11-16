@@ -27,6 +27,7 @@ mod zobrist;
 pub use board_effect::BoardEffects;
 #[cfg(feature = "move-features")]
 pub use move_features::MoveFeatures;
+pub(crate) use pos::MoveDiff;
 pub use pos::{EnteringKingPointInfo, Position};
 pub use sfen::{MAX_GAME_PLY, SFEN_HIRATE, SfenError, StaticPosition};
 pub use state::StateInfo;
