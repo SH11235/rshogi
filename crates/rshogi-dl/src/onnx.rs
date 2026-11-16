@@ -1,4 +1,4 @@
-//! dlshogi 互換 ONNX モデルの policy logits と手番側勝率。
+//! ONNX policy/value 推論と入力形式の検証。
 
 use std::path::{Path, PathBuf};
 
@@ -78,128 +78,147 @@ fn ensure_ort_dylib(gpu_id: i32) -> Result<()> {
     }
 }
 
-impl OnnxEvaluator {
-    /// 設定から evaluator を初期化する。
-    ///
-    /// `gpu_id >= 0` のとき CUDA / TensorRT EP の利用可否を明示的にチェックし、
-    /// 暗黙の CPU フォールバックを防ぐ。
-    pub fn new(cfg: &OnnxConfig) -> Result<Self> {
-        use ort::ep::ExecutionProvider;
+fn create_session(cfg: &OnnxConfig, profile: Option<&Path>, cuda_tf32: bool) -> Result<Session> {
+    use ort::ep::ExecutionProvider;
 
-        if cfg.batch_size == 0 {
-            anyhow::bail!("OnnxConfig.batch_size must be > 0");
-        }
+    if cfg.batch_size == 0 {
+        anyhow::bail!("OnnxConfig.batch_size must be > 0");
+    }
 
-        ensure_ort_dylib(cfg.gpu_id)?;
+    ensure_ort_dylib(cfg.gpu_id)?;
 
-        eprintln!("Loading dlshogi ONNX model: {}", cfg.model_path.display());
+    eprintln!("Loading ONNX model: {}", cfg.model_path.display());
 
-        let mut builder = crate::environment::session_builder()?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
-            .with_intra_threads(1)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+    let mut builder = crate::environment::session_builder()?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+        .with_intra_threads(1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
 
-        let session = if cfg.gpu_id >= 0 {
-            if cfg.use_tensorrt {
-                eprintln!("Using TensorRT (FP16) on GPU {}", cfg.gpu_id);
+    if let Some(path) = profile {
+        builder = builder
+            .with_profiling(path)
+            .map_err(|e| anyhow::anyhow!("ORT profiling configuration: {e}"))?;
+    }
+    let session = if cfg.gpu_id >= 0 {
+        if cfg.use_tensorrt {
+            eprintln!("Using TensorRT (FP16) on GPU {}", cfg.gpu_id);
 
-                let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
-                    .with_device_id(cfg.gpu_id)
-                    .with_fp16(true)
-                    .with_engine_cache(cfg.tensorrt_cache.is_some());
-                // 形状の範囲を 1..=batch_size に固定する。未指定だと TensorRT EP は見たことのない
-                // batch 数が来るたびに engine を作り直し、batch 数が毎回変わる呼び出し側で数秒ずつ止まる。
-                let shapes = |n: usize| {
-                    format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
-                };
-                let trt_ep = trt_ep
-                    .with_profile_min_shapes(shapes(1))
-                    .with_profile_opt_shapes(shapes(cfg.batch_size))
-                    .with_profile_max_shapes(shapes(cfg.batch_size));
-                let trt_ep = if let Some(cache_path) = cfg.tensorrt_cache.as_deref() {
-                    let cache_str = cache_path.to_str().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "TensorRT cache path contains non-UTF-8 characters: {}",
-                            cache_path.display()
-                        )
-                    })?;
-                    eprintln!("TensorRT engine cache: {}", cache_path.display());
-                    trt_ep.with_engine_cache_path(cache_str)
-                } else {
-                    eprintln!("TensorRT engine cache: disabled");
-                    trt_ep
-                };
+            let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
+                .with_device_id(cfg.gpu_id)
+                .with_fp16(true)
+                .with_engine_cache(cfg.tensorrt_cache.is_some());
+            // 形状の範囲を 1..=batch_size に固定する。未指定だと TensorRT EP は見たことのない
+            // batch 数が来るたびに engine を作り直し、batch 数が毎回変わる呼び出し側で数秒ずつ止まる。
+            let shapes = |n: usize| {
+                format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
+            };
+            let trt_ep = trt_ep
+                .with_profile_min_shapes(shapes(1))
+                .with_profile_opt_shapes(shapes(cfg.batch_size))
+                .with_profile_max_shapes(shapes(cfg.batch_size));
+            let trt_ep = if let Some(cache_path) = cfg.tensorrt_cache.as_deref() {
+                let cache_str = cache_path.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "TensorRT cache path contains non-UTF-8 characters: {}",
+                        cache_path.display()
+                    )
+                })?;
+                eprintln!("TensorRT engine cache: {}", cache_path.display());
+                trt_ep.with_engine_cache_path(cache_str)
+            } else {
+                eprintln!("TensorRT engine cache: disabled");
+                trt_ep
+            };
 
-                match trt_ep.is_available() {
-                    Ok(true) => eprintln!("TensorRT execution provider: available"),
-                    Ok(false) => {
-                        anyhow::bail!(
-                            "TensorRTExecutionProvider is NOT available.\n\
+            match trt_ep.is_available() {
+                Ok(true) => eprintln!("TensorRT execution provider: available"),
+                Ok(false) => {
+                    anyhow::bail!(
+                        "TensorRTExecutionProvider is NOT available.\n\
                              Ensure TensorRT (libnvinfer.so.10) is in LD_LIBRARY_PATH.\n\
                              To use CUDA EP instead, omit TensorRT."
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("WARNING: Failed to check TensorRT EP availability: {e}");
-                    }
+                    );
                 }
+                Err(e) => {
+                    eprintln!("WARNING: Failed to check TensorRT EP availability: {e}");
+                }
+            }
 
-                // TensorRT EP が局面形状をサポートしない場合に備え CUDA EP を後段に登録する
-                let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(cfg.gpu_id)
-                    .build()
-                    .error_on_failure();
-                let trt_ep = trt_ep.build().error_on_failure();
+            // TensorRT EP が局面形状をサポートしない場合に備え CUDA EP を後段に登録する
+            let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cfg.gpu_id)
+                .build()
+                .error_on_failure();
+            let trt_ep = trt_ep.build().error_on_failure();
 
-                builder
-                    .with_execution_providers([trt_ep, cuda_ep])
-                    .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP registration failed: {e}"))?
-                    .commit_from_file(&cfg.model_path)
-                    .map_err(ort_err)?
-            } else {
-                eprintln!("Using CUDA GPU {}", cfg.gpu_id);
+            builder
+                .with_execution_providers([trt_ep, cuda_ep])
+                .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP registration failed: {e}"))?
+                .commit_from_file(&cfg.model_path)
+                .map_err(ort_err)?
+        } else {
+            eprintln!("Using CUDA GPU {}", cfg.gpu_id);
 
-                let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(cfg.gpu_id);
-                match cuda_ep.is_available() {
-                    Ok(true) => eprintln!("CUDA execution provider: available"),
-                    Ok(false) => {
-                        anyhow::bail!(
-                            "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
+            let mut cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cfg.gpu_id);
+            if !cuda_tf32 {
+                cuda_ep = cuda_ep.with_tf32(false);
+                eprintln!("CUDA TF32: disabled");
+            }
+            match cuda_ep.is_available() {
+                Ok(true) => eprintln!("CUDA execution provider: available"),
+                Ok(false) => {
+                    anyhow::bail!(
+                        "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
                              The library may be a CPU-only build.\n\
                              Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime."
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
-                    }
+                    );
                 }
-
-                let ep = cuda_ep.build().error_on_failure();
-                builder
-                    .with_execution_providers([ep])
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "CUDA EP registration failed (is onnxruntime-gpu installed?): {e}"
-                        )
-                    })?
-                    .commit_from_file(&cfg.model_path)
-                    .map_err(ort_err)?
+                Err(e) => {
+                    eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
+                }
             }
-        } else {
-            eprintln!("Using CPU");
-            builder.commit_from_file(&cfg.model_path).map_err(ort_err)?
-        };
 
-        validate_model(&session, cfg.batch_size)?;
-        eprintln!("dlshogi ONNX model loaded. Batch size: {}", cfg.batch_size);
+            let ep = cuda_ep.build().error_on_failure();
+            builder
+                .with_execution_providers([ep])
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "CUDA EP registration failed (is onnxruntime-gpu installed?): {e}"
+                    )
+                })?
+                .commit_from_file(&cfg.model_path)
+                .map_err(ort_err)?
+        }
+    } else {
+        eprintln!("Using CPU");
+        builder.commit_from_file(&cfg.model_path).map_err(ort_err)?
+    };
+
+    Ok(session)
+}
+
+impl OnnxEvaluator {
+    /// 基本形式のモデルを読み込む。token形式は受理しない。
+    pub fn new(cfg: &OnnxConfig) -> Result<Self> {
+        let session = create_session(cfg, None, true)?;
+        Self::from_session(session, cfg.batch_size)
+    }
+
+    fn from_session(session: Session, batch_size: usize) -> Result<Self> {
+        anyhow::ensure!(
+            model_format(&session)? == crate::InputFormat::Basic,
+            "legacy evaluator requires basic inputs"
+        );
+        validate_model(&session, batch_size, crate::InputFormat::Basic)?;
+        eprintln!("Basic ONNX model loaded. Batch size: {batch_size}");
 
         Ok(Self {
             session,
-            batch_size: cfg.batch_size,
-            f1_buf: vec![0.0f32; cfg.batch_size * FEATURES1_SIZE],
-            f2_buf: vec![0.0f32; cfg.batch_size * FEATURES2_SIZE],
+            batch_size,
+            f1_buf: vec![0.0f32; batch_size * FEATURES1_SIZE],
+            f2_buf: vec![0.0f32; batch_size * FEATURES2_SIZE],
             single_values: Vec::with_capacity(1),
             single_policy: Vec::with_capacity(MAX_MOVE_LABEL_NUM),
         })
@@ -306,13 +325,57 @@ impl OnnxEvaluator {
     }
 }
 
-fn validate_model(session: &Session, max_batch: usize) -> Result<()> {
+const INPUT_FORMAT_KEY: &str = "rshogi.input_format";
+const POLICY_FORMAT: &str = "direction-destination-2187-v1";
+const VALUE_FORMAT: &str = "stm-expected-score-sigmoid-v1";
+
+fn model_format(session: &Session) -> Result<crate::InputFormat> {
+    let metadata = session.metadata().map_err(ort_err)?;
+    // missing key が空文字として返る runtime でも、空文字の宣言と未宣言を区別する。
+    let keys = metadata.custom_keys().map_err(ort_err)?;
+    let custom = |key: &str| -> Result<Option<String>> {
+        if keys.iter().any(|name| name == key) {
+            metadata
+                .custom(key)
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("cannot read metadata {key}"))
+        } else {
+            Ok(None)
+        }
+    };
+    let format = match custom(INPUT_FORMAT_KEY)?.as_deref() {
+        None => crate::InputFormat::Basic,
+        Some("stm-tokens-v1") => crate::InputFormat::StmTokensV1,
+        Some(other) => anyhow::bail!("unsupported input format: {other}"),
+    };
+    for (key, expected) in [
+        ("rshogi.policy_format", POLICY_FORMAT),
+        ("rshogi.value_format", VALUE_FORMAT),
+    ] {
+        let value = custom(key)?;
+        anyhow::ensure!(
+            value.as_deref() == Some(expected)
+                || (value.is_none() && format == crate::InputFormat::Basic),
+            "missing or conflicting metadata {key}"
+        );
+    }
+    Ok(format)
+}
+
+fn validate_model(session: &Session, max_batch: usize, format: crate::InputFormat) -> Result<()> {
     use ort::value::{TensorElementType, ValueType};
-    for (outlets, expected) in [
-        (session.inputs(), vec![("input1", vec![62, 9, 9]), ("input2", vec![57, 9, 9])]),
+    let inputs = match format {
+        crate::InputFormat::Basic => vec![("input1", vec![62, 9, 9]), ("input2", vec![57, 9, 9])],
+        crate::InputFormat::StmTokensV1 => {
+            vec![("tokens", vec![crate::tokens::TOKEN_COUNT as i64])]
+        }
+    };
+    for (outlets, expected, input) in [
+        (session.inputs(), inputs, true),
         (
             session.outputs(),
             vec![("output_policy", vec![2187]), ("output_value", vec![1])],
+            false,
         ),
     ] {
         anyhow::ensure!(outlets.len() == expected.len(), "unexpected model input/output count");
@@ -324,7 +387,12 @@ fn validate_model(session: &Session, max_batch: usize) -> Result<()> {
             let ValueType::Tensor { ty, shape, .. } = outlet.dtype() else {
                 anyhow::bail!("{name} must be a tensor");
             };
-            anyhow::ensure!(*ty == TensorElementType::Float32, "{name} must be float32");
+            let expected_type = if input && format == crate::InputFormat::StmTokensV1 {
+                TensorElementType::Int64
+            } else {
+                TensorElementType::Float32
+            };
+            anyhow::ensure!(*ty == expected_type, "incorrect {name} dtype");
             anyhow::ensure!(
                 shape.len() == tail.len() + 1 && shape[1..] == tail,
                 "unsupported {name} shape: {shape:?}"
@@ -339,6 +407,9 @@ fn validate_model(session: &Session, max_batch: usize) -> Result<()> {
 }
 
 impl crate::Evaluator for OnnxEvaluator {
+    fn input_format(&self) -> Option<crate::InputFormat> {
+        Some(crate::InputFormat::Basic)
+    }
     fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
         anyhow::ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
         let mut values = std::mem::take(&mut self.single_values);
@@ -359,5 +430,193 @@ impl crate::Evaluator for OnnxEvaluator {
         self.single_values = values;
         self.single_policy = policy;
         result.map(|()| value)
+    }
+}
+
+/// metadata と tensor 契約で basic / token 形式を選ぶ CPU/CUDA evaluator。
+pub enum ModelEvaluator {
+    /// dlshogi 互換の基本入力。
+    Basic(OnnxEvaluator),
+    /// 手番正規化した駒・持駒 token 入力。
+    Tokens(TokenEvaluator),
+}
+
+/// 形式自動選択の推論精度と診断出力。
+pub struct ModelOptions {
+    /// false で CUDA TF32 を無効化する。true は runtime の既定設定を保つ。CPU では使わない。
+    pub cuda_tf32: bool,
+    /// ORT profile の保存先 prefix。
+    pub profiling: Option<PathBuf>,
+}
+
+impl Default for ModelOptions {
+    fn default() -> Self {
+        Self {
+            cuda_tf32: true,
+            profiling: None,
+        }
+    }
+}
+
+impl ModelEvaluator {
+    /// モデルの入力形式を検証して読み込む。TensorRT は legacy API で指定する。
+    pub fn new(cfg: &OnnxConfig) -> Result<Self> {
+        Self::with_options(cfg, &ModelOptions::default())
+    }
+
+    /// 精度設定と任意の ORT profile を指定して、一度だけモデルを読み込む。
+    pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
+        anyhow::ensure!(!cfg.use_tensorrt, "automatic model dispatch supports CPU/CUDA only");
+        let session = create_session(cfg, options.profiling.as_deref(), options.cuda_tf32)?;
+        match model_format(&session)? {
+            crate::InputFormat::Basic => {
+                Ok(Self::Basic(OnnxEvaluator::from_session(session, cfg.batch_size)?))
+            }
+            crate::InputFormat::StmTokensV1 => {
+                validate_model(&session, cfg.batch_size, crate::InputFormat::StmTokensV1)?;
+                Ok(Self::Tokens(TokenEvaluator {
+                    session,
+                    batch_size: cfg.batch_size,
+                    tokens: vec![0; cfg.batch_size * crate::tokens::TOKEN_COUNT],
+                }))
+            }
+        }
+    }
+
+    /// 最大 batch 以下の局面を推論し、value と局面順の policy logits を追記する。
+    pub fn evaluate_with_policy(
+        &mut self,
+        positions: &[Position],
+        values: &mut Vec<f32>,
+        policy: &mut Vec<f32>,
+    ) -> Result<()> {
+        match self {
+            Self::Basic(evaluator) => {
+                evaluator.evaluate_with_policy(positions.par_iter(), values, policy)
+            }
+            Self::Tokens(evaluator) => {
+                let n = positions.len();
+                anyhow::ensure!(n <= evaluator.batch_size, "positions exceed batch_size");
+                let value_start = values.len();
+                let policy_start = policy.len();
+                values.resize(value_start + n, 0.0);
+                policy.resize(policy_start + n * MAX_MOVE_LABEL_NUM, 0.0);
+                let result = evaluator.run(
+                    positions,
+                    &mut values[value_start..],
+                    &mut policy[policy_start..],
+                );
+                if result.is_err() {
+                    values.truncate(value_start);
+                    policy.truncate(policy_start);
+                }
+                result
+            }
+        }
+    }
+
+    /// profile を閉じ、ORT が保存したファイル名を返す。
+    pub fn end_profiling(&mut self) -> Result<String> {
+        let session = match self {
+            Self::Basic(e) => &mut e.session,
+            Self::Tokens(e) => &mut e.session,
+        };
+        session.end_profiling().map_err(ort_err)
+    }
+}
+
+/// `stm-tokens-v1` の再利用可能な入力 buffer と ORT session。
+pub struct TokenEvaluator {
+    session: Session,
+    batch_size: usize,
+    tokens: Vec<i64>,
+}
+
+impl TokenEvaluator {
+    fn run(
+        &mut self,
+        positions: &[Position],
+        values_out: &mut [f32],
+        policy_out: &mut [f32],
+    ) -> Result<()> {
+        let n = positions.len();
+        anyhow::ensure!(n <= self.batch_size, "positions exceed batch_size");
+        anyhow::ensure!(
+            values_out.len() == n && policy_out.len() == n * MAX_MOVE_LABEL_NUM,
+            "incorrect output buffers"
+        );
+        if n == 0 {
+            return Ok(());
+        }
+        for (position, output) in positions
+            .iter()
+            .zip(self.tokens.as_chunks_mut::<{ crate::tokens::TOKEN_COUNT }>().0)
+        {
+            for (slot, token) in output.iter_mut().zip(crate::tokens::encode(position)?) {
+                *slot = i64::from(token);
+            }
+        }
+        let tokens = TensorRef::<i64>::from_array_view((
+            [n, crate::tokens::TOKEN_COUNT],
+            &self.tokens[..n * crate::tokens::TOKEN_COUNT],
+        ))
+        .map_err(ort_err)?;
+        let memory =
+            MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+                .map_err(ort_err)?;
+        let mut binding = self.session.create_binding().map_err(ort_err)?;
+        binding.bind_input("tokens", &tokens).map_err(ort_err)?;
+        binding.bind_output_to_device("output_policy", &memory).map_err(ort_err)?;
+        binding.bind_output_to_device("output_value", &memory).map_err(ort_err)?;
+        let outputs = self.session.run_binding(&binding).map_err(ort_err)?;
+        let (shape, policy) =
+            outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
+        anyhow::ensure!(
+            shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
+            "incorrect policy output shape"
+        );
+        anyhow::ensure!(policy.iter().all(|v| v.is_finite()), "non-finite policy logits");
+        let (shape, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
+        anyhow::ensure!(shape.as_ref() == [n as i64, 1], "incorrect value output shape");
+        anyhow::ensure!(
+            values.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invalid expected score"
+        );
+        policy_out.copy_from_slice(policy);
+        values_out.copy_from_slice(values);
+        Ok(())
+    }
+}
+
+impl crate::Evaluator for ModelEvaluator {
+    fn input_format(&self) -> Option<crate::InputFormat> {
+        Some(match self {
+            Self::Basic(_) => crate::InputFormat::Basic,
+            Self::Tokens(_) => crate::InputFormat::StmTokensV1,
+        })
+    }
+
+    fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
+        match self {
+            Self::Basic(evaluator) => crate::Evaluator::evaluate(evaluator, position, logits),
+            Self::Tokens(evaluator) => {
+                let mut values = [0.0];
+                evaluator.run(std::slice::from_ref(position), &mut values, logits)?;
+                Ok(values[0])
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelOptions;
+
+    #[test]
+    fn model_options_preserve_runtime_precision_by_default() {
+        let options = ModelOptions::default();
+        assert!(options.cuda_tf32);
+        assert!(options.profiling.is_none());
     }
 }

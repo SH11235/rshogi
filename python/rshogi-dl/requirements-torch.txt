@@ -1,0 +1,2 @@
+# CPU 版 / CUDA 版で wheel の index が違うため、README の手順どおり --index-url を付けて入れる。
+torch==2.14.0

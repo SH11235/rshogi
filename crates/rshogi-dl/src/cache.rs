@@ -1,4 +1,4 @@
-//! 基本形式の完全入力で照合する、容量固定の raw policy/value キャッシュ。
+//! 宣言された形式の完全入力で照合する、容量固定の raw policy/value キャッシュ。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -7,11 +7,16 @@ use std::mem::size_of;
 use anyhow::{Result, ensure};
 use rshogi_core::position::Position;
 
-use crate::Evaluator;
 use crate::features::{FEATURES1_SIZE, FEATURES2_SIZE, MAX_MOVE_LABEL_NUM, make_input_features};
+use crate::{Evaluator, InputFormat, tokens};
 
 const KEY_WORDS: usize = (FEATURES1_SIZE + FEATURES2_SIZE).div_ceil(64);
 type Key = [u64; KEY_WORDS];
+const TOKEN_TAG_WORD: usize = 150;
+const TOKEN_TAG: u64 = 1 << 63;
+const _: () = assert!(KEY_WORDS == 151);
+const _: () = assert!(FEATURES1_SIZE + FEATURES2_SIZE <= TOKEN_TAG_WORD * 64 + 63);
+const _: () = assert!(tokens::TOKEN_COUNT == 12 * 8);
 
 struct Entry {
     key: Key,
@@ -21,6 +26,7 @@ struct Entry {
 }
 
 struct Cache {
+    format: InputFormat,
     entries: Vec<Entry>,
     first: Vec<f32>,
     second: Vec<f32>,
@@ -28,8 +34,12 @@ struct Cache {
 }
 
 impl Cache {
-    fn new(bytes: usize) -> Result<Self> {
-        let overhead = size_of::<Self>() + (FEATURES1_SIZE + FEATURES2_SIZE) * size_of::<f32>();
+    fn new(bytes: usize, format: InputFormat) -> Result<Self> {
+        let (first_len, second_len) = match format {
+            InputFormat::Basic => (FEATURES1_SIZE, FEATURES2_SIZE),
+            InputFormat::StmTokensV1 => (0, 0),
+        };
+        let overhead = size_of::<Self>() + (first_len + second_len) * size_of::<f32>();
         ensure!(bytes > overhead, "cache budget is too small");
         let count = (bytes - overhead) / size_of::<Entry>();
         ensure!(count > 0, "cache has no entries");
@@ -42,16 +52,17 @@ impl Cache {
             occupied: false,
         });
         let mut first = Vec::new();
-        first.try_reserve_exact(FEATURES1_SIZE)?;
-        first.resize(FEATURES1_SIZE, 0.0);
+        first.try_reserve_exact(first_len)?;
+        first.resize(first_len, 0.0);
         let mut second = Vec::new();
-        second.try_reserve_exact(FEATURES2_SIZE)?;
-        second.resize(FEATURES2_SIZE, 0.0);
+        second.try_reserve_exact(second_len)?;
+        second.resize(second_len, 0.0);
         let allocated = size_of::<Self>()
             + entries.capacity() * size_of::<Entry>()
             + (first.capacity() + second.capacity()) * size_of::<f32>();
         ensure!(allocated <= bytes, "cache allocation exceeds budget");
         Ok(Self {
+            format,
             entries,
             first,
             second,
@@ -60,6 +71,15 @@ impl Cache {
     }
 
     fn key(&mut self, pos: &Position) -> Result<Key> {
+        if self.format == InputFormat::StmTokensV1 {
+            let encoded = tokens::encode(pos)?;
+            let mut key = [0; KEY_WORDS];
+            for (index, token) in encoded.into_iter().enumerate() {
+                key[index / 8] |= u64::from(token) << ((index % 8) * 8);
+            }
+            key[TOKEN_TAG_WORD] = TOKEN_TAG;
+            return Ok(key);
+        }
         self.first.fill(0.0);
         self.second.fill(0.0);
         make_input_features(pos, &mut self.first, &mut self.second);
@@ -93,7 +113,7 @@ pub struct CacheStats {
     pub hits: u64,
 }
 
-/// 基本入力だけに依存する決定的な evaluator を所有し、生の出力を再利用する。
+/// 宣言した入力だけに依存する決定的な evaluator を所有し、生の出力を再利用する。
 /// モデル・provider を変えるときは新しく構築し、対局境界では clear を呼ぶ。
 pub struct CachedEvaluator<E> {
     inner: E,
@@ -103,12 +123,16 @@ pub struct CachedEvaluator<E> {
 
 impl<E: Evaluator> CachedEvaluator<E> {
     /// 上限 MiB を指定する。0 は特徴量作成もせず backend へ委譲する。
+    /// 0 以外では、backend が対応する入力形式を宣言している必要がある。
     pub fn new(inner: E, mib: usize) -> Result<Self> {
         ensure!(mib <= 1024, "NN cache must be 0..=1024 MiB");
         let cache = if mib == 0 {
             None
         } else {
-            Some(Box::new(Cache::new(mib * 1024 * 1024)?))
+            let format = inner
+                .input_format()
+                .ok_or_else(|| anyhow::anyhow!("NN cache requires a supported input format"))?;
+            Some(Box::new(Cache::new(mib * 1024 * 1024, format)?))
         };
         Ok(Self {
             inner,
@@ -144,6 +168,10 @@ impl<E: Evaluator> CachedEvaluator<E> {
 }
 
 impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
+    fn input_format(&self) -> Option<InputFormat> {
+        self.inner.input_format()
+    }
+
     fn evaluate(&mut self, pos: &Position, logits: &mut [f32]) -> Result<f32> {
         self.stats.requests += 1;
         let Some(cache) = &mut self.cache else {
@@ -181,6 +209,10 @@ mod tests {
         fail: bool,
     }
     impl Evaluator for Fake {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(InputFormat::Basic)
+        }
+
         fn evaluate(&mut self, pos: &Position, logits: &mut [f32]) -> Result<f32> {
             self.calls += 1;
             ensure!(!self.fail, "backend failed");
@@ -292,7 +324,7 @@ mod tests {
     }
     #[test]
     fn input_key_ignores_ply_and_checks_every_plane() -> Result<()> {
-        let mut cache = Cache::new(1024 * 1024)?;
+        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
         let pos = position();
         let key = cache.key(&pos)?;
         let mut later = Position::new();
@@ -335,7 +367,7 @@ mod tests {
     #[test]
     fn hand_and_attack_planes_are_binary_and_preserved() -> Result<()> {
         let mut pos = Position::new();
-        let mut cache = Cache::new(1024 * 1024)?;
+        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
         for sfen in [
             "4k4/9/9/9/9/9/9/9/4K4 b 18P4L4N4S4G2B2R 1",
             "+B+N4R+Pl/KBG2g2l/P+P2P+N3/6p2/2p3s2/4S2L1/G8/7p+l/7+pk b G2S4Pr2n6p 1",
@@ -346,6 +378,177 @@ mod tests {
                 assert!(x == 0.0 || x == 1.0);
                 assert_eq!((key[index / 64] >> (index % 64)) & 1, u64::from(x == 1.0));
             }
+        }
+        Ok(())
+    }
+
+    struct TokenFake(Fake);
+    impl Evaluator for TokenFake {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(InputFormat::StmTokensV1)
+        }
+
+        fn evaluate(&mut self, pos: &Position, logits: &mut [f32]) -> Result<f32> {
+            self.0.evaluate(pos, logits)
+        }
+    }
+
+    #[test]
+    fn unknown_format_requires_cache_off_and_is_forwarded() -> Result<()> {
+        struct Unknown;
+        impl Evaluator for Unknown {
+            fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+                logits.fill(0.0);
+                Ok(0.5)
+            }
+        }
+        assert!(CachedEvaluator::new(Unknown, 1).is_err());
+        let mut disabled = CachedEvaluator::new(Unknown, 0)?;
+        assert_eq!(disabled.input_format(), None);
+        let mut logits = [];
+        assert_eq!(disabled.evaluate(&Position::new(), &mut logits)?, 0.5);
+        assert_eq!(disabled.allocated_bytes(), 0);
+        assert_eq!(disabled.stats().nn_calls, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn token_key_contains_every_byte_and_only_the_reserved_tag() -> Result<()> {
+        let mut cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
+        let pos = position();
+        let encoded = tokens::encode(&pos)?;
+        let key = cache.key(&pos)?;
+        for (index, token) in encoded.into_iter().enumerate() {
+            assert_eq!(((key[index / 8] >> ((index % 8) * 8)) & 255) as u8, token);
+        }
+        assert!(key[12..TOKEN_TAG_WORD].iter().all(|&word| word == 0));
+        assert_eq!(key[TOKEN_TAG_WORD], TOKEN_TAG);
+        assert!(cache.first.is_empty() && cache.second.is_empty());
+        let mut basic = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        assert_eq!(basic.key(&pos)?[TOKEN_TAG_WORD] & TOKEN_TAG, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn basic_key_and_hash_match_kings_fixture() -> Result<()> {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1")?;
+        let mut expected = [0; KEY_WORDS];
+        for (word, bits) in [
+            (9, 0x800000000),
+            (27, 0x6010180),
+            (35, 0xc000000000000000),
+            (36, 0x30080),
+            (48, 0x40000000000),
+            (66, 0x602018000),
+            (75, 0x30100c0),
+        ] {
+            expected[word] = bits;
+        }
+        let mut cache = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        let key = cache.key(&pos)?;
+        assert_eq!(key, expected);
+        let mut hash = DefaultHasher::new();
+        key.hash(&mut hash);
+        assert_eq!(hash.finish(), 2_955_507_323_088_843_908);
+        assert_eq!(
+            cache.index(&key),
+            (2_955_507_323_088_843_908u64 % cache.entries.len() as u64) as usize
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_pawn_counts_do_not_alias_saturated_basic_planes() -> Result<()> {
+        let mut basic = Cache::new(1024 * 1024, InputFormat::Basic)?;
+        let mut token_cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
+        let mut basic_keys = Vec::new();
+        let mut token_keys = Vec::new();
+        for count in [8, 9, 18] {
+            let mut pos = Position::new();
+            pos.set_sfen(&format!("4k4/9/9/9/9/9/9/9/4K4 b {count}P 1"))?;
+            basic_keys.push(basic.key(&pos)?);
+            token_keys.push(token_cache.key(&pos)?);
+        }
+        assert_eq!(basic_keys[0], basic_keys[1]);
+        assert_eq!(basic_keys[1], basic_keys[2]);
+        assert_ne!(token_keys[0], token_keys[1]);
+        assert_ne!(token_keys[0], token_keys[2]);
+        assert_ne!(token_keys[1], token_keys[2]);
+        Ok(())
+    }
+
+    #[test]
+    fn original_side_changes_token_key_after_canonicalization() -> Result<()> {
+        let mut black = Position::new();
+        black.set_hirate();
+        let mut white = Position::new();
+        white.set_sfen(&black.to_sfen().replace(" b ", " w "))?;
+        let mut cache = Cache::new(1024 * 1024, InputFormat::StmTokensV1)?;
+        let black_key = cache.key(&black)?;
+        let white_key = cache.key(&white)?;
+        assert_eq!(&black_key[..11], &white_key[..11]);
+        assert_eq!(black_key[11] & 0x00ffffffffffffff, white_key[11] & 0x00ffffffffffffff);
+        assert_ne!(black_key, white_key);
+        Ok(())
+    }
+
+    #[test]
+    fn token_hits_clear_failures_and_format_forwarding() -> Result<()> {
+        let mut evaluator = CachedEvaluator::new(
+            TokenFake(Fake {
+                calls: 0,
+                fail: false,
+            }),
+            1,
+        )?;
+        assert_eq!(evaluator.input_format(), Some(InputFormat::StmTokensV1));
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        evaluator.evaluate(&position(), &mut logits)?;
+        evaluator.evaluate(&position(), &mut logits)?;
+        assert_eq!(evaluator.stats().nn_calls, 1);
+        assert_eq!(evaluator.stats().hits, 1);
+        evaluator.clear();
+        evaluator.inner.0.fail = true;
+        for _ in 0..2 {
+            assert!(evaluator.evaluate(&position(), &mut logits).is_err());
+        }
+        assert_eq!(evaluator.stats().nn_calls, 2);
+        assert_eq!(evaluator.stats().hits, 0);
+        evaluator.inner.0.fail = false;
+        evaluator.evaluate(&position(), &mut logits)?;
+        assert_eq!(evaluator.stats().nn_calls, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn both_formats_account_for_allocated_vectors_and_enforce_budget() -> Result<()> {
+        assert!(
+            CachedEvaluator::new(
+                TokenFake(Fake {
+                    calls: 0,
+                    fail: false
+                }),
+                1025
+            )
+            .is_err()
+        );
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            assert!(Cache::new(0, format).is_err());
+            assert!(Cache::new(size_of::<Cache>() + size_of::<Entry>() - 1, format).is_err());
+            let cache = Cache::new(1024 * 1024, format)?;
+            let actual = size_of::<Cache>()
+                + cache.entries.capacity() * size_of::<Entry>()
+                + (cache.first.capacity() + cache.second.capacity()) * size_of::<f32>();
+            assert_eq!(cache.bytes, actual);
+            assert!(actual <= 1024 * 1024);
+            let expected_inputs = if format == InputFormat::Basic {
+                FEATURES1_SIZE + FEATURES2_SIZE
+            } else {
+                0
+            };
+            assert_eq!(cache.first.len() + cache.second.len(), expected_inputs);
+            assert!(actual + size_of::<Entry>() > 1024 * 1024);
         }
         Ok(())
     }
