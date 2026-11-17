@@ -996,6 +996,168 @@ pub(crate) fn decode_board_threat_info_fb(
     Some((color, class, pt, sq))
 }
 
+/// Threat に必要な盤面だけを保持し、未評価の手を逆順に戻す。
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+pub(crate) struct ThreatBoard {
+    pieces: [crate::types::Piece; 81],
+    occupied: Bitboard,
+    kings: [Square; 2],
+}
+
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+impl ThreatBoard {
+    pub(crate) fn new(pos: &Position) -> Self {
+        Self {
+            pieces: std::array::from_fn(|i| {
+                canonical_piece(pos.piece_on(Square::from_u8(i as u8).unwrap()))
+            }),
+            occupied: pos.occupied(),
+            kings: [pos.king_square(Color::Black), pos.king_square(Color::White)],
+        }
+    }
+
+    pub(crate) fn undo(&mut self, dirty: &DirtyPiece) {
+        use crate::types::Piece;
+        for cp in &dirty.changed_piece[..dirty.dirty_num as usize] {
+            if let Some(sq) = decode_board_square_fb(cp.new_piece.fb) {
+                self.pieces[sq.index()] = Piece::NONE;
+                self.occupied &= !Bitboard::from_square(sq);
+            }
+        }
+        // 捕獲先は old/new で重複するため、消去と復元を分離する。
+        for cp in &dirty.changed_piece[..dirty.dirty_num as usize] {
+            if let Some(sq) = decode_board_square_fb(cp.old_piece.fb) {
+                let pc =
+                    if let Some((color, _, pt, _)) = decode_board_threat_info_fb(cp.old_piece.fb) {
+                        Piece::new(color, pt)
+                    } else {
+                        let color = if cp.old_piece.fb.value() as usize >= E_KING {
+                            Color::White
+                        } else {
+                            Color::Black
+                        };
+                        self.kings[color.index()] = sq;
+                        Piece::new(color, PieceType::King)
+                    };
+                self.pieces[sq.index()] = pc;
+                self.occupied |= Bitboard::from_square(sq);
+            }
+        }
+    }
+
+    pub(crate) fn same_mirror(&self, pos: &Position, perspective: Color) -> bool {
+        is_hm_mirror(self.kings[perspective.index()], perspective)
+            == is_hm_mirror(pos.king_square(perspective), perspective)
+    }
+}
+
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
+    use crate::types::Piece;
+    if pc.is_none() {
+        return pc;
+    }
+    let pt = match pc.piece_type() {
+        PieceType::ProPawn | PieceType::ProLance | PieceType::ProKnight | PieceType::ProSilver => {
+            PieceType::Gold
+        }
+        pt => pt,
+    };
+    Piece::new(pc.color(), pt)
+}
+
+/// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+pub(crate) fn append_threat_endpoint_diff(
+    before: &ThreatBoard,
+    pos: &Position,
+    removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
+    added: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
+) -> bool {
+    let after = ThreatBoard::new(pos);
+    let mut changed = Bitboard::EMPTY;
+    for i in 0..81 {
+        if before.pieces[i] != after.pieces[i] {
+            changed |= Bitboard::from_square(Square::from_u8(i as u8).unwrap());
+        }
+    }
+    if changed.is_empty() {
+        return true;
+    }
+    count_threat_diff!();
+    let mut sources = changed;
+    let mut squares = changed;
+    while !squares.is_empty() {
+        let sq = squares.pop();
+        // 動いた駒は changed に含まれ、動いていない駒の種別は両端で同じ。
+        sources |= pos.attackers_to_occ(sq, before.occupied);
+        sources |= pos.attackers_to_occ(sq, after.occupied);
+    }
+    while !sources.is_empty() {
+        let from = sources.pop();
+        let old_pc = before.pieces[from.index()];
+        let new_pc = after.pieces[from.index()];
+        let targets = |pc: crate::types::Piece, occupied| {
+            if pc.is_none() || pc.piece_type() == PieceType::King {
+                Bitboard::EMPTY
+            } else {
+                attacks_from_piece(pc.piece_type(), pc.color(), from, occupied) & occupied
+            }
+        };
+        let old_targets = targets(old_pc, before.occupied);
+        let new_targets = targets(new_pc, after.occupied);
+        let mut affected = if old_pc == new_pc {
+            (old_targets ^ new_targets) | ((old_targets | new_targets) & changed)
+        } else {
+            old_targets | new_targets
+        };
+        while !affected.is_empty() {
+            let to = affected.pop();
+            for (board, pc, active, output) in [
+                (before, old_pc, old_targets.contains(to), &mut *removed),
+                (&after, new_pc, new_targets.contains(to), &mut *added),
+            ] {
+                if !active {
+                    continue;
+                }
+                let target = board.pieces[to.index()];
+                let Some(dc) = ThreatClass::from_piece_type(target.piece_type()) else {
+                    continue;
+                };
+                let ac = ThreatClass::from_piece_type(pc.piece_type()).unwrap();
+                #[cfg(feature = "threat-profile-full-symdedup")]
+                if is_canonical_dead(ac, from, dc, target.color(), to) {
+                    continue;
+                }
+                for perspective in [Color::Black, Color::White] {
+                    let hm = is_hm_mirror(pos.king_square(perspective), perspective);
+                    let Some(index) = threat_index(
+                        usize::from(pc.color() != perspective),
+                        ac,
+                        if perspective == Color::Black {
+                            pc.color()
+                        } else {
+                            !pc.color()
+                        },
+                        usize::from(target.color() != perspective),
+                        dc,
+                        normalize_sq(from, perspective, hm),
+                        normalize_sq(to, perspective, hm),
+                        &FROM_OFFSET_TABLE,
+                    ) else {
+                        continue;
+                    };
+                    let output = &mut output[perspective.index()];
+                    if output.len() == MAX_CHANGED_THREAT_FEATURES || !output.push(index) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 // =============================================================================
 // append_changed_indices（Threat 差分生成）
 // =============================================================================
@@ -1963,6 +2125,83 @@ mod tests {
             );
 
             pos.undo_move(m);
+        }
+    }
+
+    #[test]
+    fn endpoint_diff_matches_active_features() {
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+            "4k4/9/9/9/9/9/9/4K4/9 b RBGSNLP 1",
+        ];
+        for sfen in sfens {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let before = ThreatBoard::new(&pos);
+            let active: [Vec<usize>; 2] = std::array::from_fn(|p| {
+                let perspective = if p == 0 { Color::Black } else { Color::White };
+                let mut indices = Vec::new();
+                append_active_threat_indices(
+                    &pos,
+                    perspective,
+                    pos.king_square(perspective),
+                    &mut indices,
+                );
+                indices
+            });
+            let mut list = MoveList::new();
+            generate_legal(&pos, &mut list);
+            for &mv in &list {
+                let dirty = pos.do_move(mv, pos.gives_check(mv));
+                let mut restored = ThreatBoard::new(&pos);
+                restored.undo(&dirty);
+                assert_eq!(restored.pieces, before.pieces);
+                assert_eq!(restored.occupied, before.occupied);
+                assert_eq!(restored.kings, before.kings);
+                let mut removed = std::array::from_fn(|_| IndexList::new());
+                let mut added = std::array::from_fn(|_| IndexList::new());
+                assert!(append_threat_endpoint_diff(&restored, &pos, &mut removed, &mut added));
+                for perspective in [Color::Black, Color::White] {
+                    if !before.same_mirror(&pos, perspective) {
+                        continue;
+                    }
+                    let p = perspective.index();
+                    let mut actual = active[p].clone();
+                    for index in removed[p].iter() {
+                        let at = actual.iter().position(|&x| x == index).unwrap();
+                        actual.remove(at);
+                    }
+                    actual.extend(added[p].iter());
+                    actual.sort_unstable();
+                    let mut expected = Vec::new();
+                    append_active_threat_indices(
+                        &pos,
+                        perspective,
+                        pos.king_square(perspective),
+                        &mut expected,
+                    );
+                    expected.sort_unstable();
+                    assert_eq!(actual, expected, "{sfen} {mv:?} {perspective:?}");
+                }
+                if !removed[0].is_empty() || !added[0].is_empty() {
+                    let mut full_removed = std::array::from_fn(|_| IndexList::new());
+                    let mut full_added = std::array::from_fn(|_| IndexList::new());
+                    for output in full_removed.iter_mut().chain(full_added.iter_mut()) {
+                        for _ in 0..MAX_CHANGED_THREAT_FEATURES {
+                            assert!(output.push(0));
+                        }
+                    }
+                    assert!(!append_threat_endpoint_diff(
+                        &restored,
+                        &pos,
+                        &mut full_removed,
+                        &mut full_added
+                    ));
+                }
+                pos.undo_move(mv);
+            }
         }
     }
 

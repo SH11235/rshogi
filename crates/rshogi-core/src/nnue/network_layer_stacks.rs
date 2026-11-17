@@ -1791,6 +1791,15 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     return;
                 }
 
+                #[cfg(feature = "nnue-threat")]
+                if $net.feature_transformer.has_threat {
+                    let threat_cache = if let Some(
+                        super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
+                    ) = cache { Some(c) } else { None };
+                    $net.feature_transformer.update_with_threat_ancestor(pos, $stack, threat_cache);
+                    return;
+                }
+
                 let mut updated = false;
 
                 if let Some(prev_idx) = current_entry.previous {
@@ -1818,23 +1827,16 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 }
 
                 if !updated {
-                    // 遡及上限は runtime のモデル種別と FT 幅で決める。threat モデルは
-                    // path>=2 の forward update が threat accumulator を full 再列挙する(Finny 非対象)
-                    // ため refresh(piece は Finny)に落ちる深さ 1 が速い。non-threat でも FT 幅 1536 以上
-                    // では差分を連ねるより Finny refresh が安く深さ 1 が速い。それより狭い幅は深さ 4。
-                    // threat の有無は読み込んだモデルで決まるので runtime で判定する。
+                    // FT 幅 1536 以上では差分を連ねるより Finny refresh が安いため、
+                    // 祖先探索は深さ 1 までにする。それより狭い幅では深さ 4 まで探索する。
                     #[cfg(not(feature = "nnue-effect-bucket"))]
-                    let chain_depth = if $stack.current().accumulator.accumulation[0].len() >= 1536 {
+                    let max_depth = if $stack.current().accumulator.accumulation[0].len() >= 1536 {
                         1
                     } else {
                         4
                     };
                     #[cfg(feature = "nnue-effect-bucket")]
                     let max_depth = 0;
-                    #[cfg(all(feature = "nnue-threat", not(feature = "nnue-effect-bucket")))]
-                    let max_depth = if $net.feature_transformer.has_threat { 1 } else { chain_depth };
-                    #[cfg(not(any(feature = "nnue-threat", feature = "nnue-effect-bucket")))]
-                    let max_depth = chain_depth;
                     if let Some((source_idx, _depth)) =
                         $stack.find_usable_accumulator(max_depth)
                     {
