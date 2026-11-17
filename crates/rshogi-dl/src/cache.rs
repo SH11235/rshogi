@@ -440,6 +440,7 @@ impl<E: Evaluator> CachedEvaluator<E> {
     }
 
     /// 明示的 batch 用 workspace を追加確保する。cache の MiB 上限とは別に管理する。
+    /// 0 MiB でも backend の入力形式と batch 対応の宣言を必要とする。
     pub fn with_batch_capacity(inner: E, mib: usize, capacity: usize) -> Result<Self> {
         ensure!(
             capacity > 0 && inner.encoded_batch_capacity().is_some_and(|max| capacity <= max),
@@ -448,8 +449,8 @@ impl<E: Evaluator> CachedEvaluator<E> {
         let format = inner
             .input_format()
             .ok_or_else(|| anyhow::anyhow!("batch requires an input format"))?;
-        let batch = BatchWorkspace::new(format, capacity, mib != 0)?;
         let mut evaluator = Self::new(inner, mib)?;
+        let batch = BatchWorkspace::new(format, capacity, mib != 0)?;
         evaluator.batch = Some(Box::new(batch));
         Ok(evaluator)
     }
@@ -646,6 +647,46 @@ mod tests {
         })
         .collect()
     }
+    fn noncolliding_batch_positions(cache: &Cache) -> Result<Vec<Position>> {
+        let format = match cache {
+            Cache::Basic(_) => InputFormat::Basic,
+            Cache::Tokens(_) => InputFormat::StmTokensV1,
+        };
+        let mut buffer = crate::InputBuffer::new(format)?;
+        let mut positions = Vec::new();
+        let mut slots = Vec::new();
+        for rooks in 0..=2 {
+            for pawns in 0..=18 {
+                let mut hand = String::new();
+                if rooks > 0 {
+                    hand.push_str(&format!("{rooks}R"));
+                }
+                if pawns > 0 {
+                    hand.push_str(&format!("{pawns}P"));
+                }
+                if hand.is_empty() {
+                    hand.push('-');
+                }
+                let mut position = Position::new();
+                position.set_sfen(&format!("4k4/9/9/9/9/9/9/9/4K4 b {hand} 1"))?;
+                let input = buffer.encode(&position)?;
+                let slot = match cache {
+                    Cache::Basic(table) => table.index(&BasicKey::from_input(input)?),
+                    Cache::Tokens(table) => table.index(&TokenKey::from_input(input)?),
+                };
+                if slots.contains(&slot) {
+                    continue;
+                }
+                slots.push(slot);
+                positions.push(position);
+                if positions.len() == 3 {
+                    return Ok(positions);
+                }
+            }
+        }
+        anyhow::bail!("not enough distinct cache slots for batch fixture")
+    }
+
     fn batch_buffer(
         format: InputFormat,
         positions: &[Position],
@@ -660,9 +701,9 @@ mod tests {
 
     #[test]
     fn batch_mixed_hits_misses_duplicates_and_counters() -> Result<()> {
-        let positions = batch_positions()?;
         for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
             let mut evaluator = CachedEvaluator::with_batch_capacity(batch_fake(format), 1, 8)?;
+            let positions = noncolliding_batch_positions(evaluator.cache.as_deref().unwrap())?;
             let cache_bytes = evaluator.allocated_bytes();
             let batch_bytes = evaluator.batch_allocated_bytes();
             let seed = batch_buffer(format, &positions, &[0])?;
@@ -751,11 +792,14 @@ mod tests {
 
     #[test]
     fn batch_errors_leave_outputs_and_cache_unchanged() -> Result<()> {
-        let positions = batch_positions()?;
         for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
             for mib in [0, 1] {
                 let mut evaluator =
                     CachedEvaluator::with_batch_capacity(batch_fake(format), mib, 8)?;
+                let positions = match evaluator.cache.as_deref() {
+                    Some(cache) => noncolliding_batch_positions(cache)?,
+                    None => batch_positions()?,
+                };
                 let seed = batch_buffer(format, &positions, &[0])?;
                 evaluator.evaluate_encoded_batch(
                     seed.view(),
