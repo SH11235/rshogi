@@ -46,6 +46,9 @@ class Batch:
 
     ``legal_index`` は行ごとの合法 label を左詰めにしたもので、余りは ``legal_mask`` が False。
     ``policy_target`` は ``legal_index`` と同じ並びの正規化済み重み。
+    ``policy_rows`` は ``policy_present`` が True の行番号を昇順に並べた int64 Tensor。
+    loader は CPU で作り、他の Tensor と同じ device へ転送する。None は未準備の互換入力。
+    外部で構築するときも行番号と mask の一致を保ち、mask を変更したら行番号も作り直す。
     """
 
     tokens: torch.Tensor
@@ -54,6 +57,7 @@ class Batch:
     policy_target: torch.Tensor
     policy_present: torch.Tensor
     value: torch.Tensor
+    policy_rows: torch.Tensor | None = None
 
 
 def _is_int(value: object) -> bool:
@@ -191,6 +195,7 @@ def collate(records: Sequence[Record]) -> Batch:
     legal_mask = torch.zeros((batch_size, width), dtype=torch.bool)
     policy_target = torch.zeros((batch_size, width), dtype=torch.float32)
     policy_present = torch.zeros(batch_size, dtype=torch.bool)
+    policy_rows: list[int] = []
     for row, record in enumerate(records):
         count = len(record.legal_labels)
         if count:
@@ -202,6 +207,7 @@ def collate(records: Sequence[Record]) -> Batch:
             for label, weight in record.policy:
                 policy_target[row, column[label]] = weight / total
             policy_present[row] = True
+            policy_rows.append(row)
     return Batch(
         tokens=torch.tensor([record.tokens for record in records], dtype=torch.int64),
         legal_index=legal_index,
@@ -209,6 +215,7 @@ def collate(records: Sequence[Record]) -> Batch:
         policy_target=policy_target,
         policy_present=policy_present,
         value=torch.tensor([record.value for record in records], dtype=torch.float32),
+        policy_rows=torch.tensor(policy_rows, dtype=torch.int64, device="cpu"),
     )
 
 
