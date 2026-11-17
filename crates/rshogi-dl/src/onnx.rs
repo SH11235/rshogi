@@ -10,6 +10,7 @@ use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::Session;
 use ort::value::TensorRef;
 
+use crate::EncodedInput;
 use crate::features::{
     FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
     make_input_features,
@@ -271,19 +272,33 @@ impl OnnxEvaluator {
             .zip(positions)
             .for_each(|((f1, f2), pos)| make_input_features(pos, f1, f2));
 
+        Self::run_inputs(
+            &mut self.session,
+            n,
+            &self.f1_buf[..n * FEATURES1_SIZE],
+            &self.f2_buf[..n * FEATURES2_SIZE],
+            out,
+            policy_out,
+        )
+    }
+
+    fn run_inputs(
+        session: &mut Session,
+        n: usize,
+        first: &[f32],
+        second: &[f32],
+        out: &mut Vec<f32>,
+        policy_out: Option<&mut Vec<f32>>,
+    ) -> Result<()> {
         let shape1: [usize; 4] = [n, INPUT1_CHANNELS, 9, 9];
-        let input1 =
-            TensorRef::<f32>::from_array_view((shape1, &self.f1_buf[..n * FEATURES1_SIZE]))
-                .map_err(ort_err)?;
+        let input1 = TensorRef::<f32>::from_array_view((shape1, first)).map_err(ort_err)?;
         let shape2: [usize; 4] = [n, INPUT2_CHANNELS, 9, 9];
-        let input2 =
-            TensorRef::<f32>::from_array_view((shape2, &self.f2_buf[..n * FEATURES2_SIZE]))
-                .map_err(ort_err)?;
+        let input2 = TensorRef::<f32>::from_array_view((shape2, second)).map_err(ort_err)?;
 
         let output_mem =
             MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
                 .map_err(ort_err)?;
-        let mut binding = self.session.create_binding().map_err(ort_err)?;
+        let mut binding = session.create_binding().map_err(ort_err)?;
         binding.bind_input("input1", &input1).map_err(ort_err)?;
         binding.bind_input("input2", &input2).map_err(ort_err)?;
         // value のみの推論でも、未バインド出力は ORT 内部処理のオーバーヘッドを増やすため
@@ -291,7 +306,7 @@ impl OnnxEvaluator {
         binding.bind_output_to_device("output_policy", &output_mem).map_err(ort_err)?;
         binding.bind_output_to_device("output_value", &output_mem).map_err(ort_err)?;
 
-        let outputs = self.session.run_binding(&binding).map_err(ort_err)?;
+        let outputs = session.run_binding(&binding).map_err(ort_err)?;
         let (value_shape, values) =
             outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
         anyhow::ensure!(
@@ -322,6 +337,28 @@ impl OnnxEvaluator {
             policy_out.extend_from_slice(logits);
         }
         Ok(())
+    }
+
+    fn run_single(
+        &mut self,
+        logits: &mut [f32],
+        operation: impl FnOnce(&mut Self, &mut Vec<f32>, &mut Vec<f32>) -> Result<()>,
+    ) -> Result<f32> {
+        anyhow::ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
+        let mut values = std::mem::take(&mut self.single_values);
+        let mut policy = std::mem::take(&mut self.single_policy);
+        values.clear();
+        policy.clear();
+        let result = operation(self, &mut values, &mut policy);
+        let value = if result.is_ok() {
+            logits.copy_from_slice(&policy);
+            values[0]
+        } else {
+            0.0
+        };
+        self.single_values = values;
+        self.single_policy = policy;
+        result.map(|()| value)
     }
 }
 
@@ -411,25 +448,27 @@ impl crate::Evaluator for OnnxEvaluator {
         Some(crate::InputFormat::Basic)
     }
     fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
-        anyhow::ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
-        let mut values = std::mem::take(&mut self.single_values);
-        let mut policy = std::mem::take(&mut self.single_policy);
-        values.clear();
-        policy.clear();
-        let result = self.evaluate_with_policy(
-            std::slice::from_ref(position).par_iter(),
-            &mut values,
-            &mut policy,
-        );
-        let value = if result.is_ok() {
-            logits.copy_from_slice(&policy);
-            values[0]
-        } else {
-            0.0
-        };
-        self.single_values = values;
-        self.single_policy = policy;
-        result.map(|()| value)
+        self.run_single(logits, |evaluator, values, policy| {
+            evaluator.evaluate_with_policy(
+                std::slice::from_ref(position).par_iter(),
+                values,
+                policy,
+            )
+        })
+    }
+
+    fn evaluate_encoded(
+        &mut self,
+        input: EncodedInput<'_>,
+        logits: &mut [f32],
+    ) -> Result<Option<f32>> {
+        let (first, second) = input
+            .basic()
+            .ok_or_else(|| anyhow::anyhow!("basic evaluator requires basic encoded inputs"))?;
+        self.run_single(logits, |evaluator, values, policy| {
+            Self::run_inputs(&mut evaluator.session, 1, first, second, values, Some(policy))
+        })
+        .map(Some)
     }
 }
 
@@ -556,19 +595,51 @@ impl TokenEvaluator {
                 *slot = i64::from(token);
             }
         }
-        let tokens = TensorRef::<i64>::from_array_view((
-            [n, crate::tokens::TOKEN_COUNT],
+        Self::run_inputs(
+            &mut self.session,
+            n,
             &self.tokens[..n * crate::tokens::TOKEN_COUNT],
-        ))
-        .map_err(ort_err)?;
+            values_out,
+            policy_out,
+        )
+    }
+
+    fn run_encoded(&mut self, input: EncodedInput<'_>, logits: &mut [f32]) -> Result<f32> {
+        anyhow::ensure!(logits.len() == MAX_MOVE_LABEL_NUM, "incorrect policy buffer length");
+        let tokens = input
+            .tokens()
+            .ok_or_else(|| anyhow::anyhow!("token evaluator requires token encoded inputs"))?;
+        for (slot, &token) in self.tokens.iter_mut().zip(tokens) {
+            *slot = i64::from(token);
+        }
+        let mut values = [0.0];
+        Self::run_inputs(
+            &mut self.session,
+            1,
+            &self.tokens[..crate::tokens::TOKEN_COUNT],
+            &mut values,
+            logits,
+        )?;
+        Ok(values[0])
+    }
+
+    fn run_inputs(
+        session: &mut Session,
+        n: usize,
+        tokens: &[i64],
+        values_out: &mut [f32],
+        policy_out: &mut [f32],
+    ) -> Result<()> {
+        let tokens = TensorRef::<i64>::from_array_view(([n, crate::tokens::TOKEN_COUNT], tokens))
+            .map_err(ort_err)?;
         let memory =
             MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
                 .map_err(ort_err)?;
-        let mut binding = self.session.create_binding().map_err(ort_err)?;
+        let mut binding = session.create_binding().map_err(ort_err)?;
         binding.bind_input("tokens", &tokens).map_err(ort_err)?;
         binding.bind_output_to_device("output_policy", &memory).map_err(ort_err)?;
         binding.bind_output_to_device("output_value", &memory).map_err(ort_err)?;
-        let outputs = self.session.run_binding(&binding).map_err(ort_err)?;
+        let outputs = session.run_binding(&binding).map_err(ort_err)?;
         let (shape, policy) =
             outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
         anyhow::ensure!(
@@ -605,6 +676,17 @@ impl crate::Evaluator for ModelEvaluator {
                 evaluator.run(std::slice::from_ref(position), &mut values, logits)?;
                 Ok(values[0])
             }
+        }
+    }
+
+    fn evaluate_encoded(
+        &mut self,
+        input: EncodedInput<'_>,
+        logits: &mut [f32],
+    ) -> Result<Option<f32>> {
+        match self {
+            Self::Basic(evaluator) => crate::Evaluator::evaluate_encoded(evaluator, input, logits),
+            Self::Tokens(evaluator) => evaluator.run_encoded(input, logits).map(Some),
         }
     }
 }

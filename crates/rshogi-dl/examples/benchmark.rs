@@ -9,13 +9,13 @@ use rshogi_dl::cache::{CacheStats, CachedEvaluator};
 use rshogi_dl::features::{
     FEATURES1_SIZE, FEATURES2_SIZE, MAX_MOVE_LABEL_NUM, make_input_features,
 };
-use rshogi_dl::{Evaluator, InputFormat, tokens};
+use rshogi_dl::{EncodedInput, Evaluator, InputFormat, tokens};
 use serde_json::{Value, json};
 
 const MAX_POSITIONS: usize = 1024;
 const MAX_LINE_BYTES: usize = 4096;
 const MAX_REQUESTS: usize = 10_000_000;
-const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache; SFEN lines on stdin (empty = start position)";
+const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false] [--reuse-encoded true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache; SFEN lines on stdin (empty = start position)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -49,6 +49,7 @@ struct Config {
     model: Option<PathBuf>,
     device: i32,
     cuda_tf32: bool,
+    reuse_encoded: bool,
 }
 
 impl Config {
@@ -72,6 +73,7 @@ impl Config {
             model: None,
             device: -1,
             cuda_tf32: true,
+            reuse_encoded: true,
         };
         let mut seen = Vec::new();
         while let Some(flag) = args.next() {
@@ -85,6 +87,7 @@ impl Config {
                 "--model" => config.model = Some(value.into()),
                 "--device" => config.device = value.parse()?,
                 "--cuda-tf32" => config.cuda_tf32 = value.parse()?,
+                "--reuse-encoded" => config.reuse_encoded = value.parse()?,
                 _ => bail!("unknown option: {flag}; {USAGE}"),
             }
             seen.push(flag);
@@ -105,11 +108,13 @@ impl Config {
             actual_model || (!seen.iter().any(|f| f == "--device" || f == "--cuda-tf32")),
             "device and precision options require an ONNX mode"
         );
-        ensure!(
-            matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
-                || !seen.iter().any(|f| f == "--cache-mib"),
-            "cache capacity requires a cache mode"
-        );
+        for flag in ["--cache-mib", "--reuse-encoded"] {
+            ensure!(
+                matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
+                    || !seen.iter().any(|f| f == flag),
+                "{flag} requires a cache mode"
+            );
+        }
         ensure!(
             mode == Mode::Onnx || config.batch_size == 1,
             "batch sizes above 1 require onnx mode"
@@ -218,12 +223,45 @@ fn stats(stats: CacheStats) -> Value {
     json!({"requests": stats.requests, "nn_calls": stats.nn_calls, "hits": stats.hits})
 }
 
+struct EncodedControl<E> {
+    inner: E,
+    enabled: bool,
+}
+
+impl<E: Evaluator> Evaluator for EncodedControl<E> {
+    fn input_format(&self) -> Option<InputFormat> {
+        self.inner.input_format()
+    }
+
+    fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
+        self.inner.evaluate(position, logits)
+    }
+
+    fn evaluate_encoded(
+        &mut self,
+        input: EncodedInput<'_>,
+        logits: &mut [f32],
+    ) -> Result<Option<f32>> {
+        if self.enabled {
+            self.inner.evaluate_encoded(input, logits)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Result<Value> {
     let setup = Instant::now();
-    let mut evaluator = CachedEvaluator::new(inner, config.cache_mib)?;
+    let mut evaluator = CachedEvaluator::new(
+        EncodedControl {
+            inner,
+            enabled: config.reuse_encoded,
+        },
+        config.cache_mib,
+    )?;
     let setup_seconds = setup.elapsed().as_secs_f64();
     let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
-    let mut pass = |evaluator: &mut CachedEvaluator<E>| {
+    let mut pass = |evaluator: &mut CachedEvaluator<EncodedControl<E>>| {
         let mut checksum = 0.0;
         for position in positions {
             let value = evaluator.evaluate(black_box(position), &mut logits)?;
@@ -328,6 +366,10 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
     report["iterations"] = json!(config.iterations);
     report["warmup_iterations"] = json!(config.warmup);
     report["batch_size"] = json!(config.batch_size);
+    report["reuse_encoded"] = json!(
+        matches!(config.mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
+            .then_some(config.reuse_encoded)
+    );
     report["cache_mib"] = json!(
         matches!(config.mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
             .then_some(config.cache_mib)
@@ -376,6 +418,8 @@ mod tests {
             vec!["encode-tokens", "--model", "model.onnx"],
             vec!["encode-tokens", "--device", "0"],
             vec!["encode-tokens", "--cache-mib", "1"],
+            vec!["onnx", "--model", "model.onnx", "--reuse-encoded", "false"],
+            vec!["cache-tokens", "--reuse-encoded", "invalid"],
             vec!["cache-tokens", "--iterations", "1", "--iterations", "2"],
             vec!["cache-tokens", "--unknown", "1"],
             vec!["cache-tokens", "--warmup"],

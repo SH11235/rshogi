@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use rshogi_core::position::Position;
 
 use crate::features::{FEATURES1_SIZE, FEATURES2_SIZE, MAX_MOVE_LABEL_NUM, make_input_features};
-use crate::{Evaluator, InputFormat, tokens};
+use crate::{EncodedInput, Evaluator, InputFormat, tokens};
 
 const KEY_WORDS: usize = (FEATURES1_SIZE + FEATURES2_SIZE).div_ceil(64);
 type BasicKey = [u64; KEY_WORDS];
@@ -77,33 +77,34 @@ impl<K: Copy + Eq + Hash> Table<K> {
             entry.occupied = false;
         }
     }
+}
 
-    fn evaluate<E: Evaluator>(
-        &mut self,
-        key: K,
-        inner: &mut E,
-        pos: &Position,
-        logits: &mut [f32],
-        stats: &mut CacheStats,
-    ) -> Result<f32> {
-        let index = self.index(&key);
-        let entry = &self.entries[index];
-        if entry.occupied && entry.key == key {
-            logits.copy_from_slice(&entry.logits);
-            stats.hits += 1;
-            return Ok(entry.value);
-        }
-        stats.nn_calls += 1;
-        let value = inner.evaluate(pos, logits)?;
-        ensure!(value.is_finite() && (0.0..=1.0).contains(&value), "invalid value probability");
-        ensure!(logits.iter().all(|x| x.is_finite()), "non-finite policy logit");
-        let entry = &mut self.entries[index];
-        entry.key = key;
-        entry.logits.copy_from_slice(logits);
-        entry.value = value;
-        entry.occupied = true;
-        Ok(value)
+fn evaluate_entry<K: Copy + Eq, E: Evaluator>(
+    entry: &mut Entry<K>,
+    key: K,
+    inner: &mut E,
+    pos: &Position,
+    input: EncodedInput<'_>,
+    logits: &mut [f32],
+    stats: &mut CacheStats,
+) -> Result<f32> {
+    if entry.occupied && entry.key == key {
+        logits.copy_from_slice(&entry.logits);
+        stats.hits += 1;
+        return Ok(entry.value);
     }
+    stats.nn_calls += 1;
+    let value = match inner.evaluate_encoded(input, logits)? {
+        Some(value) => value,
+        None => inner.evaluate(pos, logits)?,
+    };
+    ensure!(value.is_finite() && (0.0..=1.0).contains(&value), "invalid value probability");
+    ensure!(logits.iter().all(|x| x.is_finite()), "non-finite policy logit");
+    entry.key = key;
+    entry.logits.copy_from_slice(logits);
+    entry.value = value;
+    entry.occupied = true;
+    Ok(value)
 }
 
 impl Table<BasicKey> {
@@ -160,9 +161,16 @@ impl Cache {
         match self {
             Self::Basic(table) => {
                 let key = table.key(pos)?;
-                table.evaluate(key, inner, pos, logits, stats)
+                let index = table.index(&key);
+                let input = EncodedInput::basic_encoded(&table.first, &table.second);
+                evaluate_entry(&mut table.entries[index], key, inner, pos, input, logits, stats)
             }
-            Self::Tokens(table) => table.evaluate(tokens::encode(pos)?, inner, pos, logits, stats),
+            Self::Tokens(table) => {
+                let key = tokens::encode(pos)?;
+                let index = table.index(&key);
+                let input = EncodedInput::tokens_encoded(&key);
+                evaluate_entry(&mut table.entries[index], key, inner, pos, input, logits, stats)
+            }
         }
     }
 }
@@ -250,6 +258,23 @@ impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
 mod tests {
     use super::*;
 
+    impl<K: Copy + Eq + Hash> Table<K> {
+        fn evaluate<E: Evaluator>(
+            &mut self,
+            key: K,
+            inner: &mut E,
+            pos: &Position,
+            logits: &mut [f32],
+            stats: &mut CacheStats,
+        ) -> Result<f32> {
+            let format = inner.input_format().ok_or_else(|| anyhow::anyhow!("missing format"))?;
+            let mut buffer = crate::InputBuffer::new(format)?;
+            let input = buffer.encode(pos)?;
+            let index = self.index(&key);
+            evaluate_entry(&mut self.entries[index], key, inner, pos, input, logits, stats)
+        }
+    }
+
     struct Fake {
         calls: usize,
         fail: bool,
@@ -266,6 +291,203 @@ mod tests {
             Ok(0.25)
         }
     }
+
+    #[derive(Clone, Copy)]
+    enum EncodedMode {
+        Supported,
+        Unsupported,
+        Fail,
+        BadValue,
+        BadPolicy,
+    }
+
+    struct EncodedFake {
+        format: InputFormat,
+        scalar_calls: usize,
+        encoded_calls: usize,
+        mode: EncodedMode,
+    }
+
+    fn input_marker(input: EncodedInput<'_>) -> f32 {
+        if let Some((first, second)) = input.basic() {
+            first.iter().chain(second).sum()
+        } else {
+            input.tokens().unwrap().iter().map(|&value| f32::from(value)).sum()
+        }
+    }
+
+    impl Evaluator for EncodedFake {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(self.format)
+        }
+
+        fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
+            self.scalar_calls += 1;
+            let mut input = crate::InputBuffer::new(self.format)?;
+            logits.fill(input_marker(input.encode(position)?));
+            Ok(0.25)
+        }
+
+        fn evaluate_encoded(
+            &mut self,
+            input: EncodedInput<'_>,
+            logits: &mut [f32],
+        ) -> Result<Option<f32>> {
+            self.encoded_calls += 1;
+            ensure!(input.format() == self.format, "incorrect encoded input format");
+            match self.mode {
+                EncodedMode::Unsupported => Ok(None),
+                EncodedMode::Fail => anyhow::bail!("encoded backend failed"),
+                EncodedMode::Supported | EncodedMode::BadValue | EncodedMode::BadPolicy => {
+                    logits.fill(if matches!(self.mode, EncodedMode::BadPolicy) {
+                        f32::NAN
+                    } else {
+                        input_marker(input)
+                    });
+                    Ok(Some(if matches!(self.mode, EncodedMode::BadValue) {
+                        1.25
+                    } else {
+                        0.25
+                    }))
+                }
+            }
+        }
+    }
+
+    fn encoded_fake(format: InputFormat, mode: EncodedMode) -> EncodedFake {
+        EncodedFake {
+            format,
+            scalar_calls: 0,
+            encoded_calls: 0,
+            mode,
+        }
+    }
+
+    #[test]
+    fn encoded_miss_hit_ply_clear_and_off_preserve_scalar_contract() -> Result<()> {
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            let position = position();
+            let mut input = crate::InputBuffer::new(format)?;
+            let expected = input_marker(input.encode(&position)?);
+            let mut evaluator =
+                CachedEvaluator::new(encoded_fake(format, EncodedMode::Supported), 1)?;
+            let bytes = evaluator.allocated_bytes();
+            let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+            for _ in 0..2 {
+                assert_eq!(evaluator.evaluate(&position, &mut logits)?, 0.25);
+                assert!(logits.iter().all(|&value| value == expected));
+            }
+            let mut later = Position::new();
+            later.set_sfen(&position.to_sfen().replace(" 1", " 37"))?;
+            evaluator.evaluate(&later, &mut logits)?;
+            assert_eq!(evaluator.inner.encoded_calls, 1);
+            assert_eq!(evaluator.inner.scalar_calls, 0);
+            assert_eq!(evaluator.stats().hits, 2);
+            evaluator.clear();
+            evaluator.evaluate(&position, &mut logits)?;
+            assert_eq!(evaluator.inner.encoded_calls, 2);
+            assert_eq!(evaluator.allocated_bytes(), bytes);
+
+            let mut off = CachedEvaluator::new(encoded_fake(format, EncodedMode::Supported), 0)?;
+            for _ in 0..2 {
+                off.evaluate(&position, &mut logits)?;
+            }
+            assert_eq!(off.inner.scalar_calls, 2);
+            assert_eq!(off.inner.encoded_calls, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_encoded_input_falls_back_only_on_miss() -> Result<()> {
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            let mut evaluator =
+                CachedEvaluator::new(encoded_fake(format, EncodedMode::Unsupported), 1)?;
+            let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+            for _ in 0..2 {
+                evaluator.evaluate(&position(), &mut logits)?;
+            }
+            assert_eq!(evaluator.inner.encoded_calls, 1);
+            assert_eq!(evaluator.inner.scalar_calls, 1);
+            assert_eq!(evaluator.stats().nn_calls, 1);
+            assert_eq!(evaluator.stats().hits, 1);
+        }
+        let mut legacy = Fake {
+            calls: 0,
+            fail: false,
+        };
+        let mut buffer = crate::InputBuffer::new(InputFormat::Basic)?;
+        let mut logits = [7.0; MAX_MOVE_LABEL_NUM];
+        assert!(legacy.evaluate_encoded(buffer.encode(&position())?, &mut logits)?.is_none());
+        assert!(logits.iter().all(|&value| value == 7.0));
+        assert_eq!(legacy.calls, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn encoded_errors_and_invalid_outputs_never_fall_back_or_cache() -> Result<()> {
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            for mode in [
+                EncodedMode::Fail,
+                EncodedMode::BadValue,
+                EncodedMode::BadPolicy,
+            ] {
+                let mut evaluator = CachedEvaluator::new(encoded_fake(format, mode), 1)?;
+                let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+                for _ in 0..2 {
+                    assert!(evaluator.evaluate(&position(), &mut logits).is_err());
+                }
+                assert_eq!(evaluator.inner.encoded_calls, 2);
+                assert_eq!(evaluator.inner.scalar_calls, 0);
+                assert_eq!(evaluator.stats().hits, 0);
+                evaluator.inner.mode = EncodedMode::Supported;
+                evaluator.evaluate(&position(), &mut logits)?;
+                evaluator.evaluate(&position(), &mut logits)?;
+                assert_eq!(evaluator.inner.encoded_calls, 3);
+                assert_eq!(evaluator.stats().hits, 1);
+            }
+        }
+        let mut evaluator = encoded_fake(InputFormat::Basic, EncodedMode::Supported);
+        let mut buffer = crate::InputBuffer::new(InputFormat::StmTokensV1)?;
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        assert!(evaluator.evaluate_encoded(buffer.encode(&position())?, &mut logits).is_err());
+        assert_eq!(evaluator.scalar_calls, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn encoded_collision_failure_keeps_old_entry() -> Result<()> {
+        for format in [InputFormat::Basic, InputFormat::StmTokensV1] {
+            let bytes = size_of::<Cache>()
+                + match format {
+                    InputFormat::Basic => {
+                        (FEATURES1_SIZE + FEATURES2_SIZE) * size_of::<f32>()
+                            + size_of::<Entry<BasicKey>>()
+                    }
+                    InputFormat::StmTokensV1 => size_of::<Entry<TokenKey>>(),
+                };
+            let mut evaluator = CachedEvaluator {
+                inner: encoded_fake(format, EncodedMode::Supported),
+                cache: Some(Box::new(Cache::new(bytes, format)?)),
+                stats: CacheStats::default(),
+            };
+            let first = position();
+            let mut other = Position::new();
+            other.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2")?;
+            let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+            evaluator.evaluate(&first, &mut logits)?;
+            let expected = logits;
+            evaluator.inner.mode = EncodedMode::Fail;
+            assert!(evaluator.evaluate(&other, &mut logits).is_err());
+            evaluator.evaluate(&first, &mut logits)?;
+            assert_eq!(logits, expected);
+            assert_eq!(evaluator.inner.encoded_calls, 2);
+            assert_eq!(evaluator.inner.scalar_calls, 0);
+            assert_eq!(evaluator.stats().hits, 1);
+        }
+        Ok(())
+    }
+
     fn basic_table(bytes: usize) -> Result<Table<BasicKey>> {
         let Cache::Basic(table) = Cache::new(bytes, InputFormat::Basic)? else {
             unreachable!()
