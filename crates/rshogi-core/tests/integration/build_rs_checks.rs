@@ -12,6 +12,26 @@ fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
 }
 
 #[test]
+fn threat_width_512_requires_supported_static_size() {
+    for size in LAYERSTACK_FEATURES {
+        for mode in ["mode-specific", "mode-family", "mode-universal"] {
+            let features = [
+                mode,
+                "layerstack-arch",
+                "ft-halfka_hm_merged",
+                size,
+                "nnue-threat",
+                "threat-width-512",
+            ];
+            let has = lookup(&features);
+            let supported = mode == "mode-specific"
+                && matches!(*size, "layerstacks-1536x16x32" | "layerstacks-1536x16x64");
+            assert_eq!(validate_feature_combination(&has).is_ok(), supported, "{mode}, {size}");
+        }
+    }
+}
+
+#[test]
 fn empty_features_pass() {
     let has = lookup(&[]);
     assert!(validate_feature_combination(&has).is_ok());

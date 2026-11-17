@@ -22,7 +22,7 @@ cargo run -p tools --no-default-features --bin resize_nnue_threat -- \
 - 加算後に従来と同じ clamp(0,127)、前半×後半、右7bitシフトの pairwise 変換を行います。Threat の量子化尺度は駒 FT と同じ整数単位で、追加の scale はありません。後段の量子化・FV_SCALE・PSQT 加算は変更しません。
 - PSQT は従来の独立した駒由来 i32 accumulator です。Threat 重みの PSQT 項はありません。
 
-対応 engine は `edition-layerstacks-halfka_hm_merged-1536x16x32-threat512` です。PSQT 付き net には追加で `nnue-psqt` を指定します。通常の Threat edition は T=L1 を要求し、threat512 edition は T=512 を要求します。universal edition は部分幅の読み込みを拒否します。
+対応 engine は、後段の寸法に応じて `edition-layerstacks-halfka_hm_merged-1536x16x32-threat512` または `edition-layerstacks-halfka_hm_merged-1536x16x64-threat512` を選びます。PSQT 付き net には追加で `nnue-psqt` を指定します。通常の Threat edition は T=L1 を要求し、threat512 edition は T=512 を要求します。universal edition は部分幅の読み込みを拒否します。
 
 ```bash
 cargo run -q -p xtask -- build \

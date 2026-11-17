@@ -315,6 +315,12 @@ edition-layerstacks-halfka_hm_merged-1536x16x64-none = [
   "nnue-progress-diff",
 ]
 
+edition-layerstacks-halfka_hm_merged-1536x16x64-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x16x64-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-1536x16x64-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x64", "nnue-threat",
+  "nnue-progress-diff",
+]
+
 # LS specific preset (halfka_hm_merged 以外の 4 FT、1536x16x32-none で代表整備)。
 # 残りの (size × ext) 組合せは需要発生時に同パターンで追加する。
 edition-layerstacks-halfka_hm_split-1536x16x32-none = [

@@ -985,6 +985,8 @@ mod tests {
             "layerstacks-halfka_hm_merged-2304x16x64-none",
             "layerstacks-halfka_hm_merged-3072x16x64-none",
             "layerstacks-halfka_hm_merged-1536x16x64-none",
+            "layerstacks-halfka_hm_merged-1536x16x64-threat",
+            "layerstacks-halfka_hm_merged-1536x16x64-threat512",
         ] {
             assert!(manifest.contains(&normalize_edition(edition)));
         }
