@@ -998,6 +998,7 @@ pub(crate) fn decode_board_threat_info_fb(
 
 /// Threat に必要な盤面だけを保持し、未評価の手を逆順に戻す。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+#[derive(Clone)]
 pub(crate) struct ThreatBoard {
     pieces: [crate::types::Piece; 81],
     occupied: Bitboard,
@@ -1016,10 +1017,12 @@ impl ThreatBoard {
         }
     }
 
-    pub(crate) fn undo(&mut self, dirty: &DirtyPiece) {
+    pub(crate) fn undo(&mut self, dirty: &DirtyPiece) -> Bitboard {
         use crate::types::Piece;
+        let mut touched = Bitboard::EMPTY;
         for cp in &dirty.changed_piece[..dirty.dirty_num as usize] {
             if let Some(sq) = decode_board_square_fb(cp.new_piece.fb) {
+                touched |= Bitboard::from_square(sq);
                 self.pieces[sq.index()] = Piece::NONE;
                 self.occupied &= !Bitboard::from_square(sq);
             }
@@ -1039,10 +1042,12 @@ impl ThreatBoard {
                         self.kings[color.index()] = sq;
                         Piece::new(color, PieceType::King)
                     };
+                touched |= Bitboard::from_square(sq);
                 self.pieces[sq.index()] = pc;
                 self.occupied |= Bitboard::from_square(sq);
             }
         }
+        touched
     }
 
     pub(crate) fn same_mirror(&self, pos: &Position, perspective: Color) -> bool {
@@ -1069,6 +1074,107 @@ fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
 /// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 pub(crate) fn append_threat_endpoint_diff(
+    before: &ThreatBoard,
+    after: &ThreatBoard,
+    pos: &Position,
+    mut touched: Bitboard,
+    removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
+    added: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
+) -> bool {
+    let mut changed = Bitboard::EMPTY;
+    while !touched.is_empty() {
+        let sq = touched.pop();
+        if before.pieces[sq.index()] != after.pieces[sq.index()] {
+            changed |= Bitboard::from_square(sq);
+        }
+    }
+    if changed.is_empty() {
+        return true;
+    }
+    count_threat_diff!();
+    let mut sources = changed;
+    let mut squares = changed;
+    while !squares.is_empty() {
+        let sq = squares.pop();
+        // 動いた駒は changed に含まれ、動いていない駒の種別は両端で同じ。
+        sources |= pos.attackers_to_occ(sq, before.occupied);
+        sources |= pos.attackers_to_occ(sq, after.occupied);
+    }
+    while !sources.is_empty() {
+        let from = sources.pop();
+        let old_pc = before.pieces[from.index()];
+        let new_pc = after.pieces[from.index()];
+        let targets = |pc: crate::types::Piece, occupied| {
+            if pc.is_none() || pc.piece_type() == PieceType::King {
+                Bitboard::EMPTY
+            } else {
+                attacks_from_piece(pc.piece_type(), pc.color(), from, occupied) & occupied
+            }
+        };
+        let (old_targets, new_targets) = if old_pc == new_pc
+            && !old_pc.is_none()
+            && is_occupied_independent_threat(old_pc.piece_type())
+        {
+            let attacks =
+                attacks_from_piece(old_pc.piece_type(), old_pc.color(), from, Bitboard::EMPTY);
+            (attacks & before.occupied & changed, attacks & after.occupied & changed)
+        } else {
+            (targets(old_pc, before.occupied), targets(new_pc, after.occupied))
+        };
+        let mut affected = if old_pc == new_pc {
+            (old_targets ^ new_targets) | ((old_targets | new_targets) & changed)
+        } else {
+            old_targets | new_targets
+        };
+        while !affected.is_empty() {
+            let to = affected.pop();
+            for (board, pc, active, output) in [
+                (before, old_pc, old_targets.contains(to), &mut *removed),
+                (after, new_pc, new_targets.contains(to), &mut *added),
+            ] {
+                if !active {
+                    continue;
+                }
+                let target = board.pieces[to.index()];
+                let Some(dc) = ThreatClass::from_piece_type(target.piece_type()) else {
+                    continue;
+                };
+                let ac = ThreatClass::from_piece_type(pc.piece_type()).unwrap();
+                #[cfg(feature = "threat-profile-full-symdedup")]
+                if is_canonical_dead(ac, from, dc, target.color(), to) {
+                    continue;
+                }
+                for perspective in [Color::Black, Color::White] {
+                    let hm = is_hm_mirror(pos.king_square(perspective), perspective);
+                    let Some(index) = threat_index(
+                        usize::from(pc.color() != perspective),
+                        ac,
+                        if perspective == Color::Black {
+                            pc.color()
+                        } else {
+                            !pc.color()
+                        },
+                        usize::from(target.color() != perspective),
+                        dc,
+                        normalize_sq(from, perspective, hm),
+                        normalize_sq(to, perspective, hm),
+                        &FROM_OFFSET_TABLE,
+                    ) else {
+                        continue;
+                    };
+                    let output = &mut output[perspective.index()];
+                    if output.len() == MAX_CHANGED_THREAT_FEATURES || !output.push(index) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+#[cfg(all(test, feature = "nnue-threat"))]
+fn append_threat_endpoint_diff_reference(
     before: &ThreatBoard,
     pos: &Position,
     removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
@@ -2130,17 +2236,146 @@ mod tests {
 
     #[test]
     fn endpoint_diff_matches_active_features() {
-        let sfens = [
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
-            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
-            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
-            "4k4/9/9/9/9/9/9/4K4/9 b RBGSNLP 1",
+        use crate::nnue::accumulator_layer_stacks::AccumulatorLayerStacks;
+        use crate::nnue::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
+        use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
+        const N: usize = 64;
+        let mut ft =
+            FeatureTransformerLayerStacks::<N, HalfKaHmMergedSpec>::for_accumulator_tests();
+        ft.has_threat = true;
+        for (i, weight) in ft.threat_weights.make_mut().iter_mut().enumerate() {
+            *weight = ((i.wrapping_mul(73) + i / N * 19) % 256) as i8;
+        }
+        let verify = |pos: &Position,
+                      before: &ThreatBoard,
+                      dirties: &[DirtyPiece],
+                      active: &[Vec<usize>; 2]| {
+            let after = ThreatBoard::new(pos);
+            let mut restored = after.clone();
+            let mut touched = Bitboard::EMPTY;
+            for dirty in dirties.iter().rev() {
+                touched |= restored.undo(dirty);
+            }
+            assert_eq!(restored.pieces, before.pieces);
+            assert_eq!(restored.occupied, before.occupied);
+            assert_eq!(restored.kings, before.kings);
+            let mut removed = std::array::from_fn(|_| IndexList::new());
+            let mut added = std::array::from_fn(|_| IndexList::new());
+            assert!(append_threat_endpoint_diff(
+                &restored,
+                &after,
+                pos,
+                touched,
+                &mut removed,
+                &mut added
+            ));
+            let mut reference_removed = std::array::from_fn(|_| IndexList::new());
+            let mut reference_added = std::array::from_fn(|_| IndexList::new());
+            assert!(append_threat_endpoint_diff_reference(
+                &restored,
+                pos,
+                &mut reference_removed,
+                &mut reference_added
+            ));
+            let mut expected_acc = AccumulatorLayerStacks::<N>::new();
+            ft.refresh_accumulator(pos, &mut expected_acc);
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective.index();
+                for (actual, reference) in [
+                    (&removed[p], &reference_removed[p]),
+                    (&added[p], &reference_added[p]),
+                ] {
+                    let mut actual: Vec<_> = actual.iter().collect();
+                    let mut reference: Vec<_> = reference.iter().collect();
+                    actual.sort_unstable();
+                    reference.sort_unstable();
+                    assert_eq!(actual, reference);
+                }
+                let mut expected = Vec::new();
+                append_active_threat_indices(
+                    pos,
+                    perspective,
+                    pos.king_square(perspective),
+                    &mut expected,
+                );
+                let mut actual = active[p].clone();
+                if before.same_mirror(pos, perspective) {
+                    for index in removed[p].iter() {
+                        let at = actual.iter().position(|&x| x == index).unwrap();
+                        actual.remove(at);
+                    }
+                    actual.extend(added[p].iter());
+                    actual.sort_unstable();
+                    expected.sort_unstable();
+                    assert_eq!(actual, expected);
+                }
+                let mut raw = [0i16; N];
+                let indices = if before.same_mirror(pos, perspective) {
+                    &active[p]
+                } else {
+                    &expected
+                };
+                for &index in indices {
+                    for (i, value) in raw.iter_mut().enumerate() {
+                        *value = value.wrapping_add(i16::from(ft.threat_weights[index * N + i]));
+                    }
+                }
+                if before.same_mirror(pos, perspective) {
+                    for index in removed[p].iter() {
+                        for (i, value) in raw.iter_mut().enumerate() {
+                            *value =
+                                value.wrapping_sub(i16::from(ft.threat_weights[index * N + i]));
+                        }
+                    }
+                    for index in added[p].iter() {
+                        for (i, value) in raw.iter_mut().enumerate() {
+                            *value =
+                                value.wrapping_add(i16::from(ft.threat_weights[index * N + i]));
+                        }
+                    }
+                }
+                assert_eq!(&raw, expected_acc.get_threat(p));
+            }
+            if !removed[0].is_empty() || !added[0].is_empty() {
+                let mut full_removed = std::array::from_fn(|_| IndexList::new());
+                let mut full_added = std::array::from_fn(|_| IndexList::new());
+                for output in full_removed.iter_mut().chain(full_added.iter_mut()) {
+                    for _ in 0..MAX_CHANGED_THREAT_FEATURES {
+                        assert!(output.push(0));
+                    }
+                }
+                assert!(!append_threat_endpoint_diff(
+                    &restored,
+                    &after,
+                    pos,
+                    touched,
+                    &mut full_removed,
+                    &mut full_added
+                ));
+            }
+        };
+        let cases = [
+            (
+                "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                vec![
+                    "7g7f", "3c3d", "8h2b+", "3a2b", "B*5e", "B*4d", "5e4f", "4d3e",
+                ],
+            ),
+            ("l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1", vec![]),
+            ("l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1", vec![]),
+            (
+                "4k3r/9/9/8p/P8/9/9/4K4/R8 b BGSNLP 1",
+                vec![
+                    "5h4h", "5a4a", "4h5h", "4a5a", "5h6h", "5a6a", "6h5h", "6a5a",
+                ],
+            ),
+            ("4k4/9/9/9/4r4/9/4K4/9/4R4 b - 1", vec![]),
         ];
-        for sfen in sfens {
+        for (sfen, sequence) in cases {
             let mut pos = Position::new();
             pos.set_sfen(sfen).unwrap();
             let before = ThreatBoard::new(&pos);
-            let active: [Vec<usize>; 2] = std::array::from_fn(|p| {
+            let active = std::array::from_fn(|p| {
                 let perspective = if p == 0 { Color::Black } else { Color::White };
                 let mut indices = Vec::new();
                 append_active_threat_indices(
@@ -2151,56 +2386,43 @@ mod tests {
                 );
                 indices
             });
+            verify(&pos, &before, &[], &active);
+            if !pos.in_check() {
+                pos.do_null_move();
+                verify(&pos, &before, &[DirtyPiece::default()], &active);
+                pos.undo_null_move();
+            }
             let mut list = MoveList::new();
             generate_legal(&pos, &mut list);
             for &mv in &list {
                 let dirty = pos.do_move(mv, pos.gives_check(mv));
-                let mut restored = ThreatBoard::new(&pos);
-                restored.undo(&dirty);
-                assert_eq!(restored.pieces, before.pieces);
-                assert_eq!(restored.occupied, before.occupied);
-                assert_eq!(restored.kings, before.kings);
-                let mut removed = std::array::from_fn(|_| IndexList::new());
-                let mut added = std::array::from_fn(|_| IndexList::new());
-                assert!(append_threat_endpoint_diff(&restored, &pos, &mut removed, &mut added));
-                for perspective in [Color::Black, Color::White] {
-                    if !before.same_mirror(&pos, perspective) {
-                        continue;
-                    }
-                    let p = perspective.index();
-                    let mut actual = active[p].clone();
-                    for index in removed[p].iter() {
-                        let at = actual.iter().position(|&x| x == index).unwrap();
-                        actual.remove(at);
-                    }
-                    actual.extend(added[p].iter());
-                    actual.sort_unstable();
-                    let mut expected = Vec::new();
-                    append_active_threat_indices(
-                        &pos,
-                        perspective,
-                        pos.king_square(perspective),
-                        &mut expected,
-                    );
-                    expected.sort_unstable();
-                    assert_eq!(actual, expected, "{sfen} {mv:?} {perspective:?}");
-                }
-                if !removed[0].is_empty() || !added[0].is_empty() {
-                    let mut full_removed = std::array::from_fn(|_| IndexList::new());
-                    let mut full_added = std::array::from_fn(|_| IndexList::new());
-                    for output in full_removed.iter_mut().chain(full_added.iter_mut()) {
-                        for _ in 0..MAX_CHANGED_THREAT_FEATURES {
-                            assert!(output.push(0));
-                        }
-                    }
-                    assert!(!append_threat_endpoint_diff(
-                        &restored,
-                        &pos,
-                        &mut full_removed,
-                        &mut full_added
-                    ));
-                }
+                verify(&pos, &before, &[dirty], &active);
                 pos.undo_move(mv);
+            }
+            let mut dirties = Vec::new();
+            for ply in 0..8 {
+                let mut list = MoveList::new();
+                generate_legal(&pos, &mut list);
+                if list.is_empty() {
+                    break;
+                }
+                let mv = if sequence.is_empty() {
+                    list[(ply * 137 + 31) % list.len()]
+                } else {
+                    *list
+                        .iter()
+                        .find(|mv| mv.to_usi() == sequence[ply])
+                        .unwrap_or_else(|| panic!("{sfen} {}", sequence[ply]))
+                };
+                dirties.push(pos.do_move(mv, pos.gives_check(mv)));
+                verify(&pos, &before, &dirties, &active);
+                if !pos.in_check() {
+                    pos.do_null_move();
+                    dirties.push(DirtyPiece::default());
+                    verify(&pos, &before, &dirties, &active);
+                    dirties.pop();
+                    pos.undo_null_move();
+                }
             }
         }
     }

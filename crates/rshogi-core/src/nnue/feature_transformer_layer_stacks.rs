@@ -1448,7 +1448,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             }
         }
 
-        let mut board = threat_features::ThreatBoard::new(pos);
+        let mut path = [0; 4];
+        let mut path_len = 0;
         let mut index = stack.current_index();
         let mut source = None;
         // 長い鎖の復元費用を制限し、駒側の Finny 選択とは切り離す。
@@ -1457,7 +1458,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             let Some(previous) = entry.previous.filter(|&previous| previous < index) else {
                 break;
             };
-            board.undo(&entry.dirty_piece);
+            path[path_len] = index;
+            path_len += 1;
             index = previous;
             if stack.entry_at(index).accumulator.computed_accumulation {
                 source = Some(index);
@@ -1466,11 +1468,27 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
         let mut removed = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
         let mut added = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
-        let diff_ok = source.is_some()
-            && threat_features::append_threat_endpoint_diff(&board, pos, &mut removed, &mut added);
+        let mut diff_ok = false;
+        let board = source.map(|_| {
+            let after = threat_features::ThreatBoard::new(pos);
+            let mut before = after.clone();
+            let mut touched = crate::bitboard::Bitboard::EMPTY;
+            for &index in &path[..path_len] {
+                touched |= before.undo(&stack.entry_at(index).dirty_piece);
+            }
+            diff_ok = threat_features::append_threat_endpoint_diff(
+                &before,
+                &after,
+                pos,
+                touched,
+                &mut removed,
+                &mut added,
+            );
+            before
+        });
         for perspective in [Color::Black, Color::White] {
             let p = perspective.index();
-            if diff_ok && board.same_mirror(pos, perspective) {
+            if diff_ok && board.as_ref().unwrap().same_mirror(pos, perspective) {
                 let (prev, current) = stack.get_prev_and_current_accumulators(source.unwrap());
                 let threat = current.get_threat_mut(p);
                 threat.copy_from_slice(prev.get_threat(p));
