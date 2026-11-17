@@ -75,3 +75,43 @@ target/release/examples/model_probe /path/to/model.onnx 0 4 - false encoded-batc
 ```
 
 最後に `basic` または `tokens` を追加すると、入力形式を上書きして形式不一致の拒否も確認できます。
+
+## forward の区間診断
+
+`inference-diagnostics` feature は `Evaluator::inference_timings()` に固定長・Copy の累積 snapshot を
+追加します。ORT backend、ModelEvaluator、CachedEvaluator に対応し、未対応 evaluator は None です。
+feature を付けない build では、追加の timer・counter・snapshot API はコンパイルされません。
+
+```bash
+cargo build --release -p rshogi-dl --features onnx,inference-diagnostics --example benchmark
+target/release/examples/benchmark onnx-cache --model /path/to/model.onnx --device 0 --cache-mib 64 --warmup 10 --iterations 100 < positions.sfen
+```
+
+`InferenceTimings` は evaluator 構築以降の `forward_calls`、`forward_failures`、`positions` と、
+`InferenceStage` 順の7区間の `calls`・`errors`・`nanoseconds` を保持します。calls は区間へ入った数で、
+入力 bind の個々の API 呼出し数ではありません。positions は失敗した forward の局面も含みます。
+各値は u64::MAX で飽和します。`checked_since(before)` で同じ evaluator の snapshot 差分を取り、
+counter が逆行した場合は None を返します。cache の clear / reset_stats はこの累積値をリセットしません。
+
+| 区間 | 含む処理 |
+|---|---|
+| tensor_refs | 入力 TensorRef の構築 |
+| binding_setup | 出力 MemoryInfo と binding の構築 |
+| input_bind | 全入力の bind |
+| output_bind | 全出力の bind |
+| run_binding | ORT run_binding と出力取得 wrapper |
+| output_validation_copy | forward 内の shape・有限性検査と出力 copy |
+| cleanup | 出力・binding・MemoryInfo・入力 TensorRef の解放 |
+
+basic / token の Position、encoded scalar、encoded batch は同じ形式ごとの forward を計測します。
+入力 encode・token の i64 への変換・cache 照合・scalar adapter の追加 copy・モデル読込は含みません。
+forward に入る前の引数エラーと空 batch も計数しません。forward 内の Result エラーは失敗区間と
+その時点までに構築した resource の cleanup を記録します。copy 前の shape・有限性検査は維持します。
+
+benchmark の `inference_timings.warmup` / `cold` / `measured` は各既存区間の前後 snapshot の差分です。
+cache hit だけなら forward の増分は0です。未対応 evaluator は null、独立した cold 区間が無い
+`onnx` mode の cold も null で、診断のための追加 forward は実行しません。
+
+全区間は同期や転送を含み得る壁時計時間です。input/output bind を純粋な host 処理時間と扱わず、
+run_binding や ORT の Node profile を GPU kernel 単独の時間とも扱わないでください。timer 自体の費用も
+あるため、診断 build の時間と通常 build の時間を同じものとして比較しないでください。
