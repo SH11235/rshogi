@@ -80,3 +80,5 @@ target/release/examples/model_probe /path/to/model.onnx 0 4 - false encoded-batc
 ```
 
 最後に `basic` または `tokens` を追加すると、入力形式を上書きして形式不一致の拒否も確認できます。
+
+`model_probe` の `parallel` は順序付き並列 iterator API、`values` は value-only API を使います。`values` は最大 1024 局面を `MAX_BATCH` ごとに推論し、JSON の `policy` は空配列になります。これらの mode に入力形式の上書きは指定できません。

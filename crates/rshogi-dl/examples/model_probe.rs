@@ -1,4 +1,5 @@
 use anyhow::{Result, ensure};
+use rayon::prelude::*;
 use rshogi_core::position::Position;
 use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
 use rshogi_dl::{Evaluator, InputBatchBuffer, InputBuffer, InputFormat};
@@ -8,14 +9,17 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
         (4..=8).contains(&args.len()),
-        "usage: model_probe MODEL DEVICE MAX_BATCH [PROFILE_PREFIX|-] [CUDA_TF32] [batch|encoded|encoded-batch] [auto|basic|tokens]; SFEN lines on stdin"
+        "usage: model_probe MODEL DEVICE MAX_BATCH [PROFILE_PREFIX|-] [CUDA_TF32] [batch|parallel|values|encoded|encoded-batch] [auto|basic|tokens]; SFEN lines on stdin"
     );
     let api = args.get(6).map(String::as_str).unwrap_or("batch");
     let input_format = args.get(7).map(String::as_str).unwrap_or("auto");
-    ensure!(matches!(api, "batch" | "encoded" | "encoded-batch"), "invalid API");
+    ensure!(
+        matches!(api, "batch" | "parallel" | "values" | "encoded" | "encoded-batch"),
+        "invalid API"
+    );
     ensure!(matches!(input_format, "auto" | "basic" | "tokens"), "invalid input format");
     ensure!(
-        api != "batch" || input_format == "auto",
+        matches!(api, "encoded" | "encoded-batch") || input_format == "auto",
         "input format override requires encoded API"
     );
     let config = OnnxConfig {
@@ -39,11 +43,21 @@ fn main() -> Result<()> {
         let mut pos = Position::new();
         pos.set_sfen(&line)?;
         positions.push(pos);
-        ensure!(positions.len() <= config.batch_size, "input exceeds MAX_BATCH");
+        let limit = if api == "values" {
+            1024
+        } else {
+            config.batch_size
+        };
+        ensure!(positions.len() <= limit, "input exceeds probe limit");
     }
-    let mut values = Vec::with_capacity(positions.len());
-    let mut policy = Vec::with_capacity(positions.len() * rshogi_dl::features::MAX_MOVE_LABEL_NUM);
-    if api != "batch" {
+    let output_capacity = if api == "values" { 0 } else { positions.len() };
+    let mut values = Vec::with_capacity(output_capacity);
+    let mut policy = Vec::with_capacity(output_capacity * rshogi_dl::features::MAX_MOVE_LABEL_NUM);
+    if api == "values" {
+        values = evaluator.evaluate_values(&positions)?;
+    } else if api == "parallel" {
+        evaluator.evaluate_with_policy_iter(positions.par_iter(), &mut values, &mut policy)?;
+    } else if api != "batch" {
         let format = match input_format {
             "basic" => InputFormat::Basic,
             "tokens" => InputFormat::StmTokensV1,
