@@ -12,6 +12,9 @@ rshogi-core = { path = "../rshogi-core", default-features = false }
 rayon = { version = "1.10", optional = true }
 ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [features]
 default = []
 onnx = ["dep:ort", "dep:rayon"]

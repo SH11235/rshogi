@@ -1,3 +1,5 @@
+mod support;
+
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Result, ensure};
@@ -9,7 +11,11 @@ use rshogi_dl::features::{
 };
 use rshogi_dl::onnx::{OnnxConfig, OnnxEvaluator};
 
-fn main() -> Result<()> {
+fn main() {
+    support::finish(run_command());
+}
+
+fn run_command() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(args.len() == 3, "usage: evaluate MODEL DEVICE; SFEN lines on stdin");
     let mut evaluator = OnnxEvaluator::new(&OnnxConfig {
