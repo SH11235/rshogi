@@ -15,6 +15,7 @@ fn main() -> io::Result<()> {
                 for name in [
                     "EvalFile",
                     "EvalDir",
+                    "ModelFile",
                     "BookFile",
                     "BookDir",
                     "BookExploreFile",
@@ -37,6 +38,9 @@ fn main() -> io::Result<()> {
                         _ => direct.to_owned(),
                     };
                     std::fs::read(path)?;
+                }
+                if let Some(value) = options.get("ModelFile") {
+                    std::fs::read(value)?;
                 }
                 if let Some(value) =
                     options.get("BookFile").filter(|v| v.as_str() != "no_book" && !v.is_empty())
