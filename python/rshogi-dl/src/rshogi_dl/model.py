@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 
 import torch
 from torch import nn
+from torch.nn import functional
 
 from .contract import (
     CONTEXT_POSITION,
@@ -48,6 +49,7 @@ class ModelConfig:
 INITIAL_CONFIG = ModelConfig(layers=4, width=128, heads=4, ffn_width=512)
 TEST_CONFIG = ModelConfig(layers=2, width=32, heads=4, ffn_width=128)
 NAMED_CONFIGS = {"initial": INITIAL_CONFIG, "test": TEST_CONFIG}
+ATTENTION_BACKENDS = ("explicit", "sdpa")
 
 
 def flatten_policy(per_square: torch.Tensor) -> torch.Tensor:
@@ -56,14 +58,13 @@ def flatten_policy(per_square: torch.Tensor) -> torch.Tensor:
 
 
 class SelfAttention(nn.Module):
-    """全 token 間の双方向 multi-head attention。
+    """全 token 間の双方向 multi-head attention。"""
 
-    ONNX に MatMul / Softmax の素の graph として出すため、融合された attention 関数を使わず
-    Q・K・V の積を明示的に書く。
-    """
-
-    def __init__(self, width: int, heads: int) -> None:
+    def __init__(self, width: int, heads: int, attention_backend: str = "explicit") -> None:
         super().__init__()
+        if attention_backend not in ATTENTION_BACKENDS:
+            raise ValueError(f"attention_backend must be one of {ATTENTION_BACKENDS}")
+        self.attention_backend = attention_backend
         self.heads = heads
         self.head_width = width // heads
         self.scale = self.head_width**-0.5
@@ -80,9 +81,16 @@ class SelfAttention(nn.Module):
         query = self._split_heads(self.query(x))
         key = self._split_heads(self.key(x))
         value = self._split_heads(self.value(x))
-        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
-        weights = torch.softmax(scores, dim=-1)
-        mixed = torch.matmul(weights, value).transpose(1, 2)
+        # 配備 graph は実行方式に依存させず、標準 MatMul / Softmax の ONNX 契約を保つ。
+        if self.attention_backend == "sdpa" and not torch.jit.is_tracing():
+            attended = functional.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0, is_causal=False, scale=self.scale
+            )
+        else:
+            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+            weights = torch.softmax(scores, dim=-1)
+            attended = torch.matmul(weights, value)
+        mixed = attended.transpose(1, 2)
         return self.output(mixed.reshape(-1, TOKEN_COUNT, self.heads * self.head_width))
 
 
@@ -102,10 +110,10 @@ class FeedForward(nn.Module):
 class EncoderBlock(nn.Module):
     """pre-LayerNorm の encoder block。"""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, attention_backend: str = "explicit") -> None:
         super().__init__()
         self.attention_norm = nn.LayerNorm(config.width, eps=1e-5)
-        self.attention = SelfAttention(config.width, config.heads)
+        self.attention = SelfAttention(config.width, config.heads, attention_backend)
         self.ffn_norm = nn.LayerNorm(config.width, eps=1e-5)
         self.ffn = FeedForward(config.width, config.ffn_width)
 
@@ -120,12 +128,15 @@ class SquareTransformer(nn.Module):
     policy はマス token 0..80 に共有の線形層を掛け、value は最後の token (元の手番) から読む。
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, *, attention_backend: str = "explicit") -> None:
         super().__init__()
         self.config = config
+        self.attention_backend = attention_backend
         self.token_embedding = nn.Embedding(VOCAB_SIZE, config.width)
         self.position_embedding = nn.Parameter(torch.empty(TOKEN_COUNT, config.width))
-        self.blocks = nn.ModuleList(EncoderBlock(config) for _ in range(config.layers))
+        self.blocks = nn.ModuleList(
+            EncoderBlock(config, attention_backend) for _ in range(config.layers)
+        )
         self.final_norm = nn.LayerNorm(config.width, eps=1e-5)
         self.policy_head = nn.Linear(config.width, POLICY_CHANNELS)
         self.value_head = nn.Sequential(
