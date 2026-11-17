@@ -230,6 +230,12 @@ struct Cli {
     /// ノード数などの簡易メトリクスを各対局ごとに JSONL で出力
     #[arg(long, default_value_t = false)]
     emit_metrics: bool,
+    /// 探索木内の局面を採取する確率。
+    #[arg(long, value_parser = parse_rate_0_1, requires = "tree_sample_out")]
+    tree_sample_p: Option<f64>,
+    /// 探索木内の標本を保存する PSV。
+    #[arg(long, requires = "tree_sample_p")]
+    tree_sample_out: Option<PathBuf>,
 
     /// 学習データ (PackedSfenValue形式) の出力先パス
     /// 指定しない場合はデフォルトで <output>.psv に出力
@@ -421,6 +427,12 @@ struct MetaSettings {
     emit_eval_file: bool,
     #[serde(default)]
     emit_metrics: bool,
+    #[cfg(feature = "search-tree-sample")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree_sample_p: Option<f64>,
+    #[cfg(feature = "search-tree-sample")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree_sample_out: Option<PathBuf>,
     startpos_file: Option<String>,
     sfen: Option<String>,
     #[serde(default)]
@@ -533,6 +545,8 @@ struct ResultLog<'a> {
     eval_bytes: Option<u64>,
     /// この result より先にコミット済みの worker metrics 長。
     metrics_bytes: Option<u64>,
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample_bytes: Option<u64>,
     /// ファイル長だけでは電源断前に永続化済みだった世代を識別できないため記録する。
     fsync_boundary: bool,
 }
@@ -544,6 +558,8 @@ struct CheckpointLengths {
     info: Option<u64>,
     eval: Option<u64>,
     metrics: Option<u64>,
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample: Option<u64>,
 }
 
 fn write_committed_result<W, F>(
@@ -571,6 +587,8 @@ where
         info_bytes: lengths.info,
         eval_bytes: lengths.eval,
         metrics_bytes: lengths.metrics,
+        #[cfg(feature = "search-tree-sample")]
+        tree_sample_bytes: lengths.tree_sample,
         fsync_boundary,
         ..result
     };
@@ -1988,6 +2006,10 @@ struct WorkerGameResult {
 }
 
 struct WorkerOutput {
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample_stats: rshogi_core::search::TreeSampleStats,
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample_records: u64,
     training_stats: TrainingStats,
 }
 
@@ -2029,6 +2051,8 @@ struct WorkerConfig {
     info_path: Option<PathBuf>,
     eval_path: Option<PathBuf>,
     metrics_path: Option<PathBuf>,
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample_path: Option<PathBuf>,
     training_data_path: Option<PathBuf>,
     game_id_sidecar_path: Option<PathBuf>,
     // Output flags
@@ -2036,6 +2060,8 @@ struct WorkerConfig {
     fsync_interval_games: u32,
     append_checkpoints: bool,
     run_seed: u64,
+    #[cfg(feature = "search-tree-sample")]
+    tree_sample_p: Option<f64>,
     // Training
     skip_initial_ply: u32,
     skip_in_check: bool,
@@ -2148,6 +2174,12 @@ fn worker_main(
         } else {
             None
         };
+        #[cfg(feature = "search-tree-sample")]
+        let mut tree_sample_writer = if let Some(ref path) = cfg.tree_sample_path {
+            Some(BufWriter::new(open_checkpoint(path, cfg.append_checkpoints)?))
+        } else {
+            None
+        };
         let mut training_data_collector = if let Some(ref path) = cfg.training_data_path {
             Some(TrainingDataCollector::open(
                 path,
@@ -2172,6 +2204,8 @@ fn worker_main(
             cfg.info_path.as_deref(),
             cfg.eval_path.as_deref(),
             cfg.metrics_path.as_deref(),
+            #[cfg(feature = "search-tree-sample")]
+            cfg.tree_sample_path.as_deref(),
             cfg.training_data_path.as_deref(),
             cfg.game_id_sidecar_path.as_deref(),
         ]
@@ -2182,6 +2216,20 @@ fn worker_main(
         }
 
         let dedup_hash = cfg.dedup_hash.clone();
+        #[cfg(feature = "search-tree-sample")]
+        if let GameEngines::Native(engine) = &mut engines {
+            engine.set_tree_sample(
+                cfg.tree_sample_p.map(|probability| rshogi_core::search::TreeSampleConfig {
+                    probability,
+                    capacity: 65_536,
+                }),
+                cfg.run_seed,
+            );
+        }
+        #[cfg(feature = "search-tree-sample")]
+        let mut tree_sample_records = 0u64;
+        #[cfg(feature = "search-tree-sample")]
+        let mut tree_samples = Vec::new();
         let mut dedup_hits = 0u64;
         let mut dedup_discarded = 0u64;
         let mut multipv_diversions = 0u64;
@@ -2212,6 +2260,10 @@ fn worker_main(
                 cfg.run_seed ^ u64::from(game_idx + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15),
             );
             engines.prepare_game(cfg.keep_tt)?;
+            #[cfg(feature = "search-tree-sample")]
+            if let GameEngines::Native(engine) = &mut engines {
+                engine.reseed_tree_sample(tree_sample_seed(cfg.run_seed, u64::from(game_idx) + 1));
+            }
 
             let parsed = &cfg.start_defs[ticket.startpos_idx];
             let mut pos = build_position(parsed, None, None)?;
@@ -2332,6 +2384,19 @@ fn worker_main(
                     collect_info_lines: info_logger.is_some(),
                 };
                 let search = engines.search(side, &pos, &params)?;
+                // 探索ごとに worker ファイルへ書き、1 局分を溜めない。確定前の分は info log と同じく
+                // result 行の tree_sample_bytes までの復旧で切り詰められる。
+                #[cfg(feature = "search-tree-sample")]
+                if let (GameEngines::Native(engine), Some(writer)) =
+                    (&mut engines, tree_sample_writer.as_mut())
+                {
+                    engine.drain_tree_samples(&mut tree_samples);
+                    for sample in &tree_samples {
+                        writer.write_all(&tree_sample_record(sample).to_bytes())?;
+                    }
+                    tree_sample_records += tree_samples.len() as u64;
+                    tree_samples.clear();
+                }
 
                 // info ログ
                 if let Some(ref mut logger) = info_logger {
@@ -2585,6 +2650,8 @@ fn worker_main(
                 info_bytes: None,
                 eval_bytes: None,
                 metrics_bytes: None,
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_bytes: None,
                 fsync_boundary: false,
             };
             if let Some(w) = eval_writer.as_mut() {
@@ -2660,12 +2727,19 @@ fn worker_main(
                     .as_mut()
                     .map(|writer| committed_writer_len(writer, sync_due))
                     .transpose()?;
+                #[cfg(feature = "search-tree-sample")]
+                let tree_sample = tree_sample_writer
+                    .as_mut()
+                    .map(|writer| committed_writer_len(writer, sync_due))
+                    .transpose()?;
                 Ok(CheckpointLengths {
                     training,
                     sidecar,
                     info,
                     eval,
                     metrics,
+                    #[cfg(feature = "search-tree-sample")]
+                    tree_sample,
                 })
             })?;
             writer.flush()?;
@@ -2729,6 +2803,10 @@ fn worker_main(
         if let Some(w) = metrics_writer.as_mut() {
             w.flush()?;
         }
+        #[cfg(feature = "search-tree-sample")]
+        if let Some(w) = tree_sample_writer.as_mut() {
+            w.flush()?;
+        }
         if cfg.fsync_interval_games > 0 {
             if let Some(collector) = training_data_collector.as_mut() {
                 collector.sync_all()?;
@@ -2758,7 +2836,16 @@ fn worker_main(
             TrainingStats::default()
         };
 
-        Ok(WorkerOutput { training_stats })
+        Ok(WorkerOutput {
+            training_stats,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_stats: match &engines {
+                GameEngines::Native(engine) => engine.tree_sample_stats(),
+                _ => rshogi_core::search::TreeSampleStats::default(),
+            },
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_records,
+        })
     };
 
     let output = run().with_context(|| format!("worker {} failed", cfg.worker_id));
@@ -3304,6 +3391,7 @@ fn recover_worker_checkpoint(
     info_path: Option<&Path>,
     eval_path: Option<&Path>,
     metrics_path: Option<&Path>,
+    #[cfg(feature = "search-tree-sample")] tree_sample_path: Option<&Path>,
     format: TrainingFormat,
     worker_id: usize,
     max_game_id: u32,
@@ -3314,6 +3402,8 @@ fn recover_worker_checkpoint(
     let info_file = checkpoint_file_state(info_path)?;
     let eval_file = checkpoint_file_state(eval_path)?;
     let metrics_file = checkpoint_file_state(metrics_path)?;
+    #[cfg(feature = "search-tree-sample")]
+    let tree_sample_file = checkpoint_file_state(tree_sample_path)?;
     if !jsonl_file.exists {
         if [
             training_file,
@@ -3321,6 +3411,8 @@ fn recover_worker_checkpoint(
             info_file,
             eval_file,
             metrics_file,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_file,
         ]
         .into_iter()
         .any(|file| file.len > 0)
@@ -3341,6 +3433,8 @@ fn recover_worker_checkpoint(
         info: info_path.map(|_| 0),
         eval: eval_path.map(|_| 0),
         metrics: metrics_path.map(|_| 0),
+        #[cfg(feature = "search-tree-sample")]
+        tree_sample: tree_sample_path.map(|_| 0),
     };
     let mut reader = BufReader::new(open_regular_file_nofollow(jsonl_path)?);
     let mut line = Vec::new();
@@ -3420,6 +3514,8 @@ fn recover_worker_checkpoint(
             info: read_optional_offset("info_bytes", info_path.is_some())?,
             eval: read_optional_offset("eval_bytes", eval_path.is_some())?,
             metrics: read_optional_offset("metrics_bytes", metrics_path.is_some())?,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample: read_optional_offset("tree_sample_bytes", tree_sample_path.is_some())?,
         };
         validate_referenced_files_exist(
             next,
@@ -3429,6 +3525,8 @@ fn recover_worker_checkpoint(
                 ("info log", info_path, info_file),
                 ("eval file", eval_path, eval_file),
                 ("metrics", metrics_path, metrics_file),
+                #[cfg(feature = "search-tree-sample")]
+                ("tree_sample", tree_sample_path, tree_sample_file),
             ],
             jsonl_path,
         )?;
@@ -3472,6 +3570,8 @@ fn recover_worker_checkpoint(
             info_file.len,
             eval_file.len,
             metrics_file.len,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_file.len,
         ) {
             durable_prefix_ended = true;
             continue;
@@ -3499,6 +3599,10 @@ fn recover_worker_checkpoint(
     if let (Some(path), Some(len)) = (metrics_path, committed.metrics) {
         truncate_if_needed(path, len, metrics_file.len)?;
     }
+    #[cfg(feature = "search-tree-sample")]
+    if let (Some(path), Some(len)) = (tree_sample_path, committed.tree_sample) {
+        truncate_if_needed(path, len, tree_sample_file.len)?;
+    }
     if results_after_boundary > 0 {
         eprintln!(
             "warning: recovered {} by discarding {results_after_boundary} result row(s) after the last proven fsync boundary",
@@ -3515,7 +3619,12 @@ fn checkpoint_fits_files(
     info_len: u64,
     eval_len: u64,
     metrics_len: u64,
+    #[cfg(feature = "search-tree-sample")] tree_sample_len: u64,
 ) -> bool {
+    #[cfg(feature = "search-tree-sample")]
+    if lengths.tree_sample.is_some_and(|len| len > tree_sample_len) {
+        return false;
+    }
     lengths.training <= training_len
         && lengths.sidecar.is_none_or(|len| len <= sidecar_len)
         && lengths.info.is_none_or(|len| len <= info_len)
@@ -3528,6 +3637,16 @@ fn validate_checkpoint_record_boundaries(
     format: TrainingFormat,
     path: &Path,
 ) -> Result<()> {
+    #[cfg(feature = "search-tree-sample")]
+    if lengths
+        .tree_sample
+        .is_some_and(|len| !len.is_multiple_of(PackedSfenValue::SIZE as u64))
+    {
+        bail!(
+            "committed tree sample length in {} is not on a 40-byte record boundary",
+            path.display()
+        );
+    }
     if format != TrainingFormat::Psv {
         return Ok(());
     }
@@ -3563,6 +3682,8 @@ fn validate_checkpoint_monotonic(
         ("info_bytes", previous.info, next.info),
         ("eval_bytes", previous.eval, next.eval),
         ("metrics_bytes", previous.metrics, next.metrics),
+        #[cfg(feature = "search-tree-sample")]
+        ("tree_sample_bytes", previous.tree_sample, next.tree_sample),
     ];
     for (name, previous, next) in fields {
         if let (Some(previous), Some(next)) = (previous, next)
@@ -3621,9 +3742,9 @@ fn checkpoint_file_state(path: Option<&Path>) -> Result<CheckpointFileState> {
     }
 }
 
-fn validate_referenced_files_exist(
+fn validate_referenced_files_exist<'a>(
     lengths: CheckpointLengths,
-    files: [(&str, Option<&Path>, CheckpointFileState); 5],
+    files: impl IntoIterator<Item = (&'a str, Option<&'a Path>, CheckpointFileState)>,
     jsonl_path: &Path,
 ) -> Result<()> {
     let offsets = [
@@ -3632,6 +3753,8 @@ fn validate_referenced_files_exist(
         lengths.info,
         lengths.eval,
         lengths.metrics,
+        #[cfg(feature = "search-tree-sample")]
+        lengths.tree_sample,
     ];
     for ((label, path, file), offset) in files.into_iter().zip(offsets) {
         if offset.is_some_and(|offset| offset > 0) && !file.exists {
@@ -4073,6 +4196,7 @@ fn validate_finalized_outputs(
     required_paths: &[PathBuf],
     training_path: Option<&Path>,
     sidecar_path: Option<&Path>,
+    #[cfg(feature = "search-tree-sample")] tree_sample_path: Option<&Path>,
     format: TrainingFormat,
     has_results: bool,
 ) -> Result<Option<FinalizedState>> {
@@ -4080,7 +4204,15 @@ fn validate_finalized_outputs(
     let bytes = match read_regular_file_nofollow(&state_path) {
         Ok(bytes) => bytes,
         Err(error) if is_not_found(&error) && !has_results => {
-            for path in [training_path, sidecar_path].into_iter().flatten() {
+            for path in [
+                training_path,
+                sidecar_path,
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_path,
+            ]
+            .into_iter()
+            .flatten()
+            {
                 if std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0) {
                     bail!("final output {} exists without finalized state", path.display());
                 }
@@ -4092,6 +4224,10 @@ fn validate_finalized_outputs(
         }
         Err(error) => return Err(error),
     };
+    #[cfg(feature = "search-tree-sample")]
+    if !file_len_or_zero(tree_sample_path)?.is_multiple_of(PackedSfenValue::SIZE as u64) {
+        bail!("final tree sample PSV is not on a 40-byte record boundary");
+    }
     let state: FinalizedState = serde_json::from_slice(&bytes)?;
     if state.schema != 1 {
         bail!("unsupported finalized state schema {}", state.schema);
@@ -4215,6 +4351,7 @@ fn validate_completed_worker_outputs(
     info_path: Option<&Path>,
     eval_path: Option<&Path>,
     metrics_path: Option<&Path>,
+    #[cfg(feature = "search-tree-sample")] tree_sample_path: Option<&Path>,
     format: TrainingFormat,
     worker_id: usize,
     max_game_id: u32,
@@ -4226,6 +4363,8 @@ fn validate_completed_worker_outputs(
             info_path.map(|path| ("info log", path)),
             eval_path.map(|path| ("eval file", path)),
             metrics_path.map(|path| ("metrics", path)),
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_path.map(|path| ("tree_sample", path)),
         ]
         .into_iter()
         .flatten(),
@@ -4237,6 +4376,8 @@ fn validate_completed_worker_outputs(
         info: info_path.map(|_| 0),
         eval: eval_path.map(|_| 0),
         metrics: metrics_path.map(|_| 0),
+        #[cfg(feature = "search-tree-sample")]
+        tree_sample: tree_sample_path.map(|_| 0),
         ..CheckpointLengths::default()
     };
     let mut reader = BufReader::new(open_regular_file_nofollow(jsonl_path)?);
@@ -4288,6 +4429,8 @@ fn validate_completed_worker_outputs(
             info: read_offset("info_bytes", info_path.is_some())?,
             eval: read_offset("eval_bytes", eval_path.is_some())?,
             metrics: read_offset("metrics_bytes", metrics_path.is_some())?,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample: read_offset("tree_sample_bytes", tree_sample_path.is_some())?,
         };
         validate_checkpoint_monotonic(lengths, next, jsonl_path)?;
         validate_checkpoint_record_boundaries(next, format, jsonl_path)?;
@@ -4308,7 +4451,15 @@ fn validate_completed_worker_outputs(
         metrics: metrics_path
             .map(|path| checkpoint_file_state(Some(path)).map(|file| file.len))
             .transpose()?,
+        #[cfg(feature = "search-tree-sample")]
+        tree_sample: tree_sample_path
+            .map(|path| checkpoint_file_state(Some(path)).map(|file| file.len))
+            .transpose()?,
     };
+    #[cfg(feature = "search-tree-sample")]
+    if lengths.tree_sample != actual.tree_sample {
+        bail!("worker tree sample output length does not match its final result");
+    }
     if lengths.training != actual.training
         || lengths.sidecar != actual.sidecar
         || lengths.info != actual.info
@@ -4363,6 +4514,7 @@ fn main() -> Result<()> {
                 .unwrap_or(0),
         );
     let mut cli = Cli::parse();
+    validate_tree_sample_args(&cli)?;
     validate_cli(&cli)?;
     let _ = fault_spec();
 
@@ -4464,6 +4616,8 @@ fn main() -> Result<()> {
         cli.log_info,
         cli.emit_eval_file,
         cli.emit_metrics,
+        #[cfg(feature = "search-tree-sample")]
+        cli.tree_sample_out.as_deref(),
     )?;
     let mut final_paths = vec![output_path.clone(), training_data_path.clone()];
     if cli.log_info {
@@ -4476,6 +4630,8 @@ fn main() -> Result<()> {
         final_paths.push(default_metrics_path(&output_path));
     }
     final_paths.extend(game_id_sidecar_path.iter().cloned());
+    #[cfg(feature = "search-tree-sample")]
+    final_paths.extend(cli.tree_sample_out.iter().cloned());
     validate_output_entry_types(
         &output_path,
         &final_paths,
@@ -4484,6 +4640,8 @@ fn main() -> Result<()> {
         cli.log_info,
         cli.emit_eval_file,
         cli.emit_metrics,
+        #[cfg(feature = "search-tree-sample")]
+        cli.tree_sample_out.as_deref(),
         game_id_sidecar_path.is_some(),
         cli.resume,
     )?;
@@ -4531,6 +4689,8 @@ fn main() -> Result<()> {
             &final_paths,
             Some(&training_data_path),
             game_id_sidecar_path.as_deref(),
+            #[cfg(feature = "search-tree-sample")]
+            cli.tree_sample_out.as_deref(),
             training_format,
             resume_state.as_ref().is_some_and(|state| state.completed_games.len() > 0),
         )?
@@ -4538,6 +4698,13 @@ fn main() -> Result<()> {
         None
     };
     if let Some(parent) = game_id_sidecar_path.as_deref().and_then(Path::parent)
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    #[cfg(feature = "search-tree-sample")]
+    if let Some(parent) = cli.tree_sample_out.as_deref().and_then(Path::parent)
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
@@ -4841,6 +5008,13 @@ fn main() -> Result<()> {
         // relabel_psv --deblunder の境界判定を silent に壊すため resume で拒否する。
         generation_fingerprint["auxiliary_outputs"]["omit_diversions"] = serde_json::json!(true);
     }
+    #[cfg(feature = "search-tree-sample")]
+    if let Some(probability) = cli.tree_sample_p {
+        generation_fingerprint["auxiliary_outputs"]["tree_sample_p"] =
+            serde_json::json!(probability);
+        generation_fingerprint["auxiliary_outputs"]["tree_sample_out"] =
+            serde_json::json!(cli.tree_sample_out);
+    }
     add_hcpe3_policy_fingerprint(
         &mut generation_fingerprint,
         training_format,
@@ -4900,6 +5074,10 @@ fn main() -> Result<()> {
                 flush_each_move: cli.flush_each_move,
                 emit_eval_file: cli.emit_eval_file,
                 emit_metrics: cli.emit_metrics,
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_p: cli.tree_sample_p,
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_out: cli.tree_sample_out.clone(),
                 startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
                 sfen: cli.sfen.clone(),
                 random_startpos: cli.random_startpos,
@@ -4998,6 +5176,8 @@ fn main() -> Result<()> {
     let mut temp_info_paths = Vec::new();
     let mut temp_eval_paths = Vec::new();
     let mut temp_metrics_paths = Vec::new();
+    #[cfg(feature = "search-tree-sample")]
+    let mut temp_tree_sample_paths = Vec::new();
     let mut temp_pack_paths = Vec::new();
     let mut temp_game_id_paths = Vec::new();
 
@@ -5018,6 +5198,12 @@ fn main() -> Result<()> {
         } else {
             None
         };
+        #[cfg(feature = "search-tree-sample")]
+        let w_tree_sample_path = if cli.tree_sample_out.is_some() {
+            Some(output_parent.join(format!("{output_stem}.w{w}.tree.psv")))
+        } else {
+            None
+        };
         let w_training_path =
             Some(output_parent.join(format!("{output_stem}.w{w}.{training_data_ext}")));
         let w_game_id_path = game_id_sidecar_path
@@ -5034,6 +5220,10 @@ fn main() -> Result<()> {
         if let Some(ref p) = w_metrics_path {
             temp_metrics_paths.push(p.clone());
         }
+        #[cfg(feature = "search-tree-sample")]
+        if let Some(ref p) = w_tree_sample_path {
+            temp_tree_sample_paths.push(p.clone());
+        }
         if let Some(ref p) = w_training_path {
             temp_pack_paths.push(p.clone());
         }
@@ -5049,6 +5239,8 @@ fn main() -> Result<()> {
                 w_info_path.as_deref(),
                 w_eval_path.as_deref(),
                 w_metrics_path.as_deref(),
+                #[cfg(feature = "search-tree-sample")]
+                w_tree_sample_path.as_deref(),
                 training_format,
                 w,
                 cli.games,
@@ -5124,6 +5316,11 @@ fn main() -> Result<()> {
                 info_path: cli.log_info.then(|| temp_info_paths[w].clone()),
                 eval_path: cli.emit_eval_file.then(|| temp_eval_paths[w].clone()),
                 metrics_path: cli.emit_metrics.then(|| temp_metrics_paths[w].clone()),
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_path: cli
+                    .tree_sample_out
+                    .is_some()
+                    .then(|| temp_tree_sample_paths[w].clone()),
                 training_data_path: Some(temp_pack_paths[w].clone()),
                 game_id_sidecar_path: game_id_sidecar_path
                     .as_ref()
@@ -5132,6 +5329,8 @@ fn main() -> Result<()> {
                 fsync_interval_games: cli.fsync_interval_games,
                 append_checkpoints: cli.resume,
                 run_seed: shuffle_seed_resolved.context("run seed missing")?,
+                #[cfg(feature = "search-tree-sample")]
+                tree_sample_p: cli.tree_sample_p,
                 skip_initial_ply: cli.skip_initial_ply,
                 skip_in_check: cli.skip_in_check,
                 training_format,
@@ -5391,10 +5590,21 @@ fn main() -> Result<()> {
 
     // Join workers and collect training stats
     let mut training_stats = TrainingStats::default();
+    #[cfg(feature = "search-tree-sample")]
+    let mut tree_sample_stats = rshogi_core::search::TreeSampleStats::default();
+    #[cfg(feature = "search-tree-sample")]
+    let mut tree_sample_records = 0u64;
     let mut worker_errors = Vec::new();
     for (worker_id, handle) in handles.into_iter().enumerate() {
         match handle.join() {
-            Ok(Ok(output)) => training_stats.merge(output.training_stats),
+            Ok(Ok(output)) => {
+                training_stats.merge(output.training_stats);
+                #[cfg(feature = "search-tree-sample")]
+                {
+                    tree_sample_stats.merge(&output.tree_sample_stats);
+                    tree_sample_records += output.tree_sample_records;
+                }
+            }
             Ok(Err(error)) => worker_errors.push(format!("worker {worker_id}: {error:#}")),
             Err(_) => worker_errors.push(format!("worker {worker_id}: thread panicked")),
         }
@@ -5409,6 +5619,10 @@ fn main() -> Result<()> {
                 cli.log_info.then(|| temp_info_paths[worker_id].as_path()),
                 cli.emit_eval_file.then(|| temp_eval_paths[worker_id].as_path()),
                 cli.emit_metrics.then(|| temp_metrics_paths[worker_id].as_path()),
+                #[cfg(feature = "search-tree-sample")]
+                cli.tree_sample_out
+                    .is_some()
+                    .then(|| temp_tree_sample_paths[worker_id].as_path()),
                 training_format,
                 worker_id,
                 // 実行中に target を引き上げた場合は cli.games を超える game_id が正当に存在する
@@ -5424,6 +5638,10 @@ fn main() -> Result<()> {
                 cli.log_info.then(|| temp_info_paths[worker_id].as_path()),
                 cli.emit_eval_file.then(|| temp_eval_paths[worker_id].as_path()),
                 cli.emit_metrics.then(|| temp_metrics_paths[worker_id].as_path()),
+                #[cfg(feature = "search-tree-sample")]
+                cli.tree_sample_out
+                    .is_some()
+                    .then(|| temp_tree_sample_paths[worker_id].as_path()),
                 training_format,
                 worker_id,
                 cli.games.max(target_games),
@@ -5466,6 +5684,17 @@ fn main() -> Result<()> {
         )?;
         staged_outputs.push(staged);
     }
+    #[cfg(feature = "search-tree-sample")]
+    if let Some(tree_sample_path) = &cli.tree_sample_out {
+        let staged = stage_concatenated_file(
+            tree_sample_path,
+            &temp_tree_sample_paths,
+            append_mode,
+            cli.resume,
+            finalized_output_for(prior_finalized_state.as_ref(), tree_sample_path),
+        )?;
+        staged_outputs.push(staged);
+    }
     if !temp_pack_paths.is_empty() {
         let staged = stage_concatenated_file(
             &training_data_path,
@@ -5494,7 +5723,7 @@ fn main() -> Result<()> {
         finalized_output_for(prior_finalized_state.as_ref(), &output_path),
     )?;
     staged_outputs.push(staged_jsonl);
-    let worker_temps = temp_jsonl_paths
+    let worker_temps: Vec<PathBuf> = temp_jsonl_paths
         .iter()
         .chain(&temp_info_paths)
         .chain(&temp_eval_paths)
@@ -5503,6 +5732,8 @@ fn main() -> Result<()> {
         .chain(&temp_game_id_paths)
         .cloned()
         .collect();
+    #[cfg(feature = "search-tree-sample")]
+    let worker_temps = worker_temps.into_iter().chain(temp_tree_sample_paths).collect();
     let journal = FinalizationJournal {
         schema: 1,
         outputs: staged_outputs,
@@ -5520,6 +5751,21 @@ fn main() -> Result<()> {
             eprintln!("  - {error}");
         }
         bail!("{} worker(s) failed; committed game data was preserved", worker_errors.len());
+    }
+
+    #[cfg(feature = "search-tree-sample")]
+    if cli.tree_sample_out.is_some() {
+        println!(
+            "Tree sample (this invocation): drawn={} rejected_in_check={} rejected_capture={} rejected_promotion={} rejected_no_quiet={} dropped_full={} accepted={} records_written={}",
+            tree_sample_stats.drawn,
+            tree_sample_stats.rejected_in_check,
+            tree_sample_stats.rejected_capture,
+            tree_sample_stats.rejected_promotion,
+            tree_sample_stats.rejected_no_quiet,
+            tree_sample_stats.dropped_full,
+            tree_sample_stats.accepted,
+            tree_sample_records,
+        );
     }
 
     // 最終サマリー
@@ -5666,6 +5912,7 @@ fn validate_output_entry_types(
     log_info: bool,
     emit_eval_file: bool,
     emit_metrics: bool,
+    #[cfg(feature = "search-tree-sample")] tree_sample_out: Option<&Path>,
     emit_sidecar: bool,
     resume: bool,
 ) -> Result<()> {
@@ -5691,6 +5938,8 @@ fn validate_output_entry_types(
         log_info,
         emit_eval_file,
         emit_metrics,
+        #[cfg(feature = "search-tree-sample")]
+        tree_sample_out,
         emit_sidecar,
     ) {
         validate_existing_output_entry(&path, resume, "worker checkpoint")?;
@@ -5722,6 +5971,7 @@ fn worker_checkpoint_paths(
     log_info: bool,
     emit_eval_file: bool,
     emit_metrics: bool,
+    #[cfg(feature = "search-tree-sample")] tree_sample_out: Option<&Path>,
     emit_sidecar: bool,
 ) -> Vec<PathBuf> {
     let parent = output_jsonl.parent().unwrap_or_else(|| Path::new("."));
@@ -5741,6 +5991,10 @@ fn worker_checkpoint_paths(
         }
         if emit_metrics {
             paths.push(parent.join(format!("{stem}.w{worker}.metrics.jsonl")));
+        }
+        #[cfg(feature = "search-tree-sample")]
+        if tree_sample_out.is_some() {
+            paths.push(parent.join(format!("{stem}.w{worker}.tree.psv")));
         }
     }
     paths
@@ -5777,6 +6031,7 @@ fn validate_output_paths_unique(
     log_info: bool,
     emit_eval_file: bool,
     emit_metrics: bool,
+    #[cfg(feature = "search-tree-sample")] tree_sample_out: Option<&Path>,
 ) -> Result<()> {
     let mut paths = vec![("final JSONL".to_string(), output_jsonl.to_path_buf())];
     paths.push(("final training data".to_string(), training_data.to_path_buf()));
@@ -5788,6 +6043,10 @@ fn validate_output_paths_unique(
     }
     if emit_metrics {
         paths.push(("final metrics".to_string(), default_metrics_path(output_jsonl)));
+    }
+    #[cfg(feature = "search-tree-sample")]
+    if let Some(path) = tree_sample_out {
+        paths.push(("final tree sample".to_string(), path.to_path_buf()));
     }
     if let Some(sidecar) = sidecar {
         paths.push(("final game_id sidecar".to_string(), sidecar.to_path_buf()));
@@ -5826,6 +6085,13 @@ fn validate_output_paths_unique(
             paths.push((
                 format!("worker {worker} metrics"),
                 parent.join(format!("{stem}.w{worker}.metrics.jsonl")),
+            ));
+        }
+        #[cfg(feature = "search-tree-sample")]
+        if tree_sample_out.is_some() {
+            paths.push((
+                format!("worker {worker} tree sample"),
+                parent.join(format!("{stem}.w{worker}.tree.psv")),
             ));
         }
     }
@@ -6074,8 +6340,117 @@ fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -
     }
 }
 
+#[cfg(feature = "search-tree-sample")]
+fn tree_sample_record(sample: &rshogi_core::search::TreeSample) -> PackedSfenValue {
+    PackedSfenValue {
+        sfen: tools::packed_sfen::pack_tree_sample(sample),
+        score: 0,
+        move16: 0,
+        game_ply: sample.game_ply.clamp(0, i32::from(u16::MAX)) as u16,
+        game_result: 0,
+        padding: tools::packed_sfen::PSV_PADDING_TREE_SAMPLE,
+    }
+}
+
+#[cfg(feature = "search-tree-sample")]
+fn tree_sample_seed(run_seed: u64, game_id: u64) -> u64 {
+    let mut value = run_seed.wrapping_add(game_id.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn validate_tree_sample_args(cli: &Cli) -> Result<()> {
+    if cli.tree_sample_p.is_none() && cli.tree_sample_out.is_none() {
+        return Ok(());
+    }
+    #[cfg(not(feature = "search-tree-sample"))]
+    bail!("tree sampling requires a build with --features search-tree-sample");
+    #[cfg(feature = "search-tree-sample")]
+    {
+        if cli.native == Some(false) {
+            bail!("tree sampling requires native mode");
+        }
+        if cli.threads_black.unwrap_or(cli.threads) != 1
+            || cli.threads_white.unwrap_or(cli.threads) != 1
+        {
+            bail!("tree sampling requires threads=1 for both sides");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "search-tree-sample")]
+    #[test]
+    fn tree_sample_orphan_final_is_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("gensfen.jsonl");
+        let tree = dir.path().join("samples.psv");
+        std::fs::write(&tree, [9; 40]).unwrap();
+        let error = super::validate_finalized_outputs(
+            &jsonl,
+            &[],
+            None,
+            None,
+            Some(&tree),
+            super::TrainingFormat::Pack,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("without finalized state"));
+        assert_eq!(std::fs::read(tree).unwrap(), [9; 40]);
+    }
+
+    #[cfg(feature = "search-tree-sample")]
+    #[test]
+    fn tree_sample_checkpoint_truncates_tail_and_rejects_partial_records() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("gensfen.w0.jsonl");
+        let tree = dir.path().join("gensfen.w0.tree.psv");
+        let row = |len| {
+            serde_json::json!({
+                "type": "result", "worker_id": 0, "game_id": 1, "outcome": "draw",
+                "training_bytes": 0, "tree_sample_bytes": len, "fsync_boundary": true,
+            })
+        };
+        std::fs::write(&jsonl, format!("{}\n", row(40))).unwrap();
+        std::fs::write(&tree, [0; 83]).unwrap();
+        let state = recover_worker_checkpoint(
+            &jsonl,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&tree),
+            TrainingFormat::Pack,
+            0,
+            1,
+        )
+        .unwrap();
+        assert!(state.completed_games.contains(1));
+        assert_eq!(std::fs::metadata(&tree).unwrap().len(), 40);
+        std::fs::write(&jsonl, format!("{}\n", row(39))).unwrap();
+        let error = recover_worker_checkpoint(
+            &jsonl,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&tree),
+            TrainingFormat::Pack,
+            0,
+            1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("40-byte record boundary"));
+        assert_eq!(std::fs::metadata(tree).unwrap().len(), 40);
+    }
+
     use super::*;
 
     use clap::Parser;
@@ -7086,6 +7461,8 @@ mod tests {
             None,
             None,
             None,
+            #[cfg(feature = "search-tree-sample")]
+            None,
             TrainingFormat::Psv,
             0,
             10,
@@ -7110,6 +7487,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            #[cfg(feature = "search-tree-sample")]
             None,
             TrainingFormat::Psv,
             0,
@@ -7138,6 +7517,8 @@ mod tests {
             Some(&sidecar),
             None,
             None,
+            None,
+            #[cfg(feature = "search-tree-sample")]
             None,
             TrainingFormat::Psv,
             0,
@@ -7170,6 +7551,8 @@ mod tests {
             None,
             None,
             None,
+            #[cfg(feature = "search-tree-sample")]
+            None,
             TrainingFormat::Psv,
             0,
             1,
@@ -7200,6 +7583,8 @@ mod tests {
             None,
             None,
             None,
+            #[cfg(feature = "search-tree-sample")]
+            None,
             TrainingFormat::Psv,
             0,
             10,
@@ -7227,6 +7612,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            #[cfg(feature = "search-tree-sample")]
             None,
             TrainingFormat::Psv,
             0,
@@ -7383,6 +7770,8 @@ mod tests {
             info_bytes: None,
             eval_bytes: None,
             metrics_bytes: None,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_bytes: None,
             fsync_boundary: false,
         };
         let mut jsonl = Vec::new();
@@ -7417,6 +7806,8 @@ mod tests {
             info_bytes: None,
             eval_bytes: None,
             metrics_bytes: None,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_bytes: None,
             fsync_boundary: false,
         };
         let value = serde_json::to_value(result).unwrap();
@@ -7456,6 +7847,8 @@ mod tests {
             info_bytes: None,
             eval_bytes: None,
             metrics_bytes: None,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sample_bytes: None,
             fsync_boundary: false,
         };
         let value = serde_json::to_value(result).unwrap();
@@ -7623,6 +8016,8 @@ mod tests {
                 true,
                 true,
                 true,
+                #[cfg(feature = "search-tree-sample")]
+                None,
             )
             .unwrap_err();
             assert!(error.to_string().contains("collision"), "{error:#}");
@@ -7636,6 +8031,8 @@ mod tests {
             true,
             true,
             true,
+            #[cfg(feature = "search-tree-sample")]
+            None,
         )
         .unwrap();
     }

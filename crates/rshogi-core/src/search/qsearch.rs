@@ -200,6 +200,8 @@ pub(super) fn qsearch<const NT: u8>(
     let mut best_move = Move::NONE;
 
     let corr_value = correction_value(st, ctx, pos, ply);
+    #[cfg(feature = "search-tree-sample")]
+    super::search_helpers::set_tree_sample_ply(st, ply);
     let mut unadjusted_static_eval = Value::NONE;
     let mut static_eval = if in_check {
         Value::NONE

@@ -154,7 +154,10 @@ pub(super) fn nnue_evaluate_cached(
     pos: &Position,
 ) -> Value {
     if !eval_hash_enabled() {
-        return nnue_evaluate(st, pos);
+        let value = nnue_evaluate(st, pos);
+        #[cfg(feature = "search-tree-sample")]
+        sample_tree_position(st, pos);
+        return value;
     }
     let key = pos.key();
     if let Some(raw) = ctx.eval_hash.probe(key) {
@@ -162,7 +165,27 @@ pub(super) fn nnue_evaluate_cached(
     }
     let value = nnue_evaluate(st, pos);
     ctx.eval_hash.store(key, value.raw());
+    #[cfg(feature = "search-tree-sample")]
+    sample_tree_position(st, pos);
     value
+}
+
+/// 次に静的評価する局面の探索 ply を書き出し側へ伝える。
+#[cfg(feature = "search-tree-sample")]
+#[inline]
+pub(super) fn set_tree_sample_ply(st: &mut SearchState, ply: i32) {
+    if let Some(sampler) = st.tree_sampler.as_deref_mut() {
+        sampler.set_ply(ply);
+    }
+}
+
+/// NNUE を実際に計算した局面だけを書き出しの対象にする。EvalHash hit は同じ局面の重複になるので除く。
+#[cfg(feature = "search-tree-sample")]
+#[inline]
+fn sample_tree_position(st: &mut SearchState, pos: &Position) {
+    if let Some(sampler) = st.tree_sampler.as_deref_mut() {
+        sampler.on_static_eval(pos);
+    }
 }
 
 /// 子局面の TT と EvalHash を局面更新前にプリフェッチする。

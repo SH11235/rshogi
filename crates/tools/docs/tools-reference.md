@@ -15,7 +15,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`gensfen`](gensfen.md) | エンジン対局から PSV / pack / hcpe3 教師を生成 |
+| [`gensfen`](gensfen.md) | エンジン対局から PSV / pack / hcpe3 教師を生成。任意で探索木標本 PSV も出力 |
 | [`nyugyoku_gensfen`](nyugyoku_gensfen.md) | CSA から入玉局面を抽出し gensfen 用開始局面を生成 |
 | [`policy_rollout_psv`](policy_rollout_psv.md) | ONNX policy で局面を進め、value 評価付き PSV を生成 |
 | [`shuffle_psv`](shuffle_psv.md) | seed とチャンクサイズを指定して PSV をシャッフル |

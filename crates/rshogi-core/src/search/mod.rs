@@ -28,6 +28,8 @@ mod skill;
 mod thread;
 mod time_manager;
 mod time_options;
+#[cfg(feature = "search-tree-sample")]
+mod tree_sample;
 mod tt_history;
 mod tt_sanity;
 mod tune_params;
@@ -53,6 +55,8 @@ pub use stats::SearchStats;
 pub use thread::*;
 pub use time_manager::*;
 pub use time_options::*;
+#[cfg(feature = "search-tree-sample")]
+pub use tree_sample::{TreeSample, TreeSampleConfig, TreeSampleStats};
 pub use tt_history::*;
 pub use tune_params::*;
 pub use types::*;

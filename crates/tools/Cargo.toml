@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
+search-tree-sample = ["rshogi-core/search-tree-sample"]
 # default は解析対象 NNUE アーキテクチャ集合 (nnue-arch)、DL 教師リスコア用 ONNX
 # (dlshogi-onnx)、棋譜プレイヤー TUI (kifu-player) から成る。ort は load-dynamic なので
 # dlshogi-onnx を default にしても build 時に libonnxruntime は不要 (実行時 dlopen)。

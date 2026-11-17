@@ -464,6 +464,8 @@ pub(super) fn compute_eval_context(
     }
 
     let mut unadjusted_static_eval = Value::NONE;
+    #[cfg(feature = "search-tree-sample")]
+    super::search_helpers::set_tree_sample_ply(st, ply);
 
     // TTからのeval取得 + PvNodeでは必ずevaluate()
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
