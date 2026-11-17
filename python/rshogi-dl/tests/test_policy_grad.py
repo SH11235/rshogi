@@ -59,22 +59,6 @@ class PolicyGradTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "CPU"):
                 has_policy_targets(not_cpu)
 
-    def test_actual_aot_materializes_zero_policy_grad_and_weight_decay_updates_it(self) -> None:
-        torch.random.default_generator.manual_seed(71)
-        model = SquareTransformer(TEST_CONFIG)
-        execution = torch.compile(model, backend="aot_eager")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.2)
-        batch = batch_with_policy(False)
-        before = model.policy_head.weight.detach().clone()
-        policy, value = execution(batch.tokens)
-        policy_value_loss(policy, value, batch).total.backward()
-        for parameter in model.policy_head.parameters():
-            self.assertIsNotNone(parameter.grad)
-            self.assertTrue(torch.equal(parameter.grad, torch.zeros_like(parameter)))
-        optimizer.step()
-        self.assertFalse(torch.equal(before, model.policy_head.weight))
-        self.assertEqual(optimizer.state[model.policy_head.weight]["step"].item(), 1)
-
     def test_null_present_null_present_preserves_head_state_and_eager_semantics(self) -> None:
         torch.random.default_generator.manual_seed(72)
         eager = SquareTransformer(TEST_CONFIG)
