@@ -345,22 +345,36 @@ fn print_result(
     output(&format!("bestmove {best}"));
 }
 
-fn run() -> Result<()> {
-    let mut engine = Engine::new()?;
-    for line in io::stdin().lock().lines() {
-        let line = line?;
-        match engine.command(&line) {
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) => {
-                output(&format!("info string Error: {error}"));
-                if line.split_whitespace().next() == Some("go") {
-                    output("bestmove resign");
+fn run_with_input(engine: &mut Engine, input: impl BufRead) -> Result<()> {
+    let result = (|| -> Result<()> {
+        for line in input.lines() {
+            let line = line?;
+            match engine.command(&line) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    output(&format!("info string Error: {error}"));
+                    if line.split_whitespace().next() == Some("go") {
+                        output("bestmove resign");
+                    }
                 }
             }
         }
+        Ok(())
+    })();
+    let cleanup = engine.join(true);
+    match (result, cleanup) {
+        (Err(primary), Err(secondary)) => {
+            Err(primary.context(format!("worker cleanup also failed: {secondary:#}")))
+        }
+        (Err(primary), _) => Err(primary),
+        (Ok(()), cleanup) => cleanup,
     }
-    engine.join(true)
+}
+
+fn run() -> Result<()> {
+    let mut engine = Engine::new()?;
+    run_with_input(&mut engine, io::stdin().lock())
 }
 #[cfg(unix)]
 fn exit_success_without_ort_teardown() -> Result<()> {
@@ -420,6 +434,95 @@ mod tests {
             policies.fill(0.0);
             Ok(())
         }
+    }
+
+    fn install_waiting_worker(engine: &mut Engine) -> Result<(Arc<AtomicBool>, Arc<AtomicBool>)> {
+        let observed_stop = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let stop = engine.stop.clone();
+        stop.store(false, Ordering::Relaxed);
+        let observed = observed_stop.clone();
+        let completed = finished.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        engine.worker = Some(thread::spawn(move || -> Runtime {
+            started.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !stop.load(Ordering::Relaxed) {
+                assert!(Instant::now() < deadline, "worker did not receive stop");
+                thread::park_timeout(Duration::from_millis(1));
+            }
+            observed.store(true, Ordering::Relaxed);
+            completed.store(true, Ordering::Relaxed);
+            panic!("fake search worker panicked");
+        }));
+        if let Err(error) = ready.recv_timeout(Duration::from_secs(5)) {
+            let _ = engine.join(true);
+            return Err(error.into());
+        }
+        Ok((observed_stop, finished))
+    }
+
+    #[test]
+    fn input_error_stops_and_joins_worker_without_losing_its_source() -> Result<()> {
+        let mut engine = Engine::new()?;
+        let (observed_stop, finished) = install_waiting_worker(&mut engine)?;
+        let result = run_with_input(&mut engine, io::Cursor::new([0xff, b'\n']));
+        let joined = engine.worker.is_none();
+        let observed = observed_stop.load(Ordering::Relaxed);
+        let completed = finished.load(Ordering::Relaxed);
+        if engine.worker.is_some() {
+            let _ = engine.join(true);
+        }
+        let error = result.unwrap_err();
+        assert!(joined && observed && completed);
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{error:#}").contains("search worker panicked"));
+        Ok(())
+    }
+
+    #[test]
+    fn input_error_without_worker_preserves_the_io_error() -> Result<()> {
+        let mut engine = Engine::new()?;
+        engine.stop.store(false, Ordering::Relaxed);
+        let error = run_with_input(&mut engine, io::Cursor::new([0xff, b'\n'])).unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::InvalidData);
+        assert!(engine.stop.load(Ordering::Relaxed));
+        assert!(engine.worker.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn eof_reports_worker_panic_when_input_succeeded() -> Result<()> {
+        let mut engine = Engine::new()?;
+        let (observed_stop, finished) = install_waiting_worker(&mut engine)?;
+        let result = run_with_input(&mut engine, io::Cursor::new([]));
+        let joined = engine.worker.is_none();
+        let observed = observed_stop.load(Ordering::Relaxed);
+        let completed = finished.load(Ordering::Relaxed);
+        if engine.worker.is_some() {
+            let _ = engine.join(true);
+        }
+        let error = result.unwrap_err();
+        assert!(joined && observed && completed);
+        assert_eq!(error.to_string(), "search worker panicked");
+        assert!(error.downcast_ref::<io::Error>().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn recoverable_command_error_keeps_reading_and_eof_stops_cleanly() -> Result<()> {
+        let mut engine = Engine::new()?;
+        engine.stop.store(false, Ordering::Relaxed);
+        run_with_input(
+            &mut engine,
+            io::Cursor::new(
+                b"setoption name NNBatchSize value 0\nsetoption name NNBatchSize value 4\n",
+            ),
+        )?;
+        assert_eq!(engine.config.batch_size, 4);
+        assert!(engine.stop.load(Ordering::Relaxed));
+        assert!(engine.worker.is_none());
+        Ok(())
     }
 
     #[test]
