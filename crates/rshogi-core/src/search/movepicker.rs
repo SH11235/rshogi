@@ -812,14 +812,6 @@ impl MovePicker {
 /// - 挿入ソート相当
 #[inline]
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
-    //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
-    //       if (p->value >= limit) {
-    //           ExtMove tmp = *p, *q;
-    //           *p = *++sortedEnd;
-    //           for (q = sortedEnd; q != begin && *(q - 1) < tmp; --q)
-    //               *q = *(q - 1);
-    //           *q = tmp;
-    //       }
     if end <= 1 {
         return 0;
     }
@@ -831,6 +823,7 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
         // - p は常に 1..end の範囲で、end は呼び出し元が `moves.len()` 以下で渡す。
         // - sorted_end は 0..p の範囲を保つため、add() でアクセスする要素は常に同一 slice 内。
         // - ExtMove は Copy なので、要素の読み書き・シフトで drop 問題は発生しない。
+        // - copy の範囲と移動先は 0..=sorted_end 内に収まり、重なりを許す。
         unsafe {
             let tmp = *base.add(p);
             if tmp.value >= limit {
@@ -838,12 +831,19 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
                 if p != sorted_end {
                     *base.add(p) = *base.add(sorted_end);
                 }
-                let mut q = sorted_end;
-                while q > 0 && (*base.add(q - 1)).value < tmp.value {
-                    *base.add(q) = *base.add(q - 1);
-                    q -= 1;
+                let mut left = 0;
+                let mut right = sorted_end;
+                // 同値の手を追い越さないよう、厳密に小さい値の先頭を探す。
+                while left < right {
+                    let mid = left + (right - left) / 2;
+                    if (*base.add(mid)).value < tmp.value {
+                        right = mid;
+                    } else {
+                        left = mid + 1;
+                    }
                 }
-                *base.add(q) = tmp;
+                std::ptr::copy(base.add(left), base.add(left + 1), sorted_end - left);
+                *base.add(left) = tmp;
             }
         }
     }
@@ -1097,6 +1097,101 @@ mod tests {
                     }
                     let gives_check = pos.gives_check(next);
                     pos.do_move(next, gives_check);
+                }
+            }
+        }
+    }
+
+    fn partial_insertion_sort_reference(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
+        if end <= 1 {
+            return 0;
+        }
+
+        let mut sorted_end = 0;
+        for p in 1..end {
+            let tmp = moves[p];
+            if tmp.value >= limit {
+                sorted_end += 1;
+                if p != sorted_end {
+                    moves[p] = moves[sorted_end];
+                }
+                let mut q = sorted_end;
+                while q > 0 && moves[q - 1].value < tmp.value {
+                    moves[q] = moves[q - 1];
+                    q -= 1;
+                }
+                moves[q] = tmp;
+            }
+        }
+        sorted_end
+    }
+
+    fn assert_partial_sort_matches_reference(values: &[i32], end: usize, limit: i32) {
+        let mut actual: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(i, &value)| ExtMove::new(Move::from_u16(i as u16), value))
+            .collect();
+        let mut expected = actual.clone();
+        let expected_end = partial_insertion_sort_reference(&mut expected, end, limit);
+        let actual_end = partial_insertion_sort(&mut actual, end, limit);
+        assert_eq!(actual_end, expected_end, "end={end} limit={limit} values={values:?}");
+        for (i, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                (actual.mv, actual.value),
+                (expected.mv, expected.value),
+                "index={i} end={end} limit={limit} values={values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_sort_matches_reference_boundary_patterns() {
+        for len in [0, 1, 2, 7, 8, 9, 63, 64, 600] {
+            let ascending: Vec<_> = (0..len).map(|i| i as i32 - len as i32 / 2).collect();
+            let descending: Vec<_> = ascending.iter().copied().rev().collect();
+            let alternating: Vec<_> = (0..len).map(|i| if i % 2 == 0 { -1 } else { 1 }).collect();
+            let duplicates: Vec<_> = (0..len).map(|i| (i % 5) as i32 - 2).collect();
+            let extremes: Vec<_> = (0..len).map(|i| [i32::MIN, i32::MAX, 0][i % 3]).collect();
+            for mut values in [
+                ascending,
+                descending,
+                alternating,
+                duplicates,
+                extremes,
+                vec![0; len],
+            ] {
+                values.extend([i32::MAX, i32::MIN, 42]);
+                for end in [0, len / 2, len] {
+                    for limit in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+                        assert_partial_sort_matches_reference(&values, end, limit);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_sort_matches_reference_random_arrays() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5232);
+        for len in [0, 1, 2, 7, 8, 9, 63, 64, 600] {
+            for _ in 0..128 {
+                let wide: Vec<i32> = (0..len).map(|_| rng.random()).collect();
+                let duplicates: Vec<i32> = (0..len).map(|_| rng.random_range(-3..=3)).collect();
+                for mut values in [wide, duplicates] {
+                    values.extend([i32::MAX, i32::MIN, 42]);
+                    for limit in [
+                        i32::MIN,
+                        i32::MAX,
+                        0,
+                        rng.random(),
+                        rng.random_range(-3..=3),
+                    ] {
+                        assert_partial_sort_matches_reference(&values, len, limit);
+                    }
                 }
             }
         }
