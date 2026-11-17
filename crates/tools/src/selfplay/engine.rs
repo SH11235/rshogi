@@ -57,6 +57,7 @@ pub(crate) fn receive_before_deadline<T>(
 
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
+const ENGINE_CHECKED_QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STDERR_BUFFER_LINES: usize = 2;
 
@@ -136,6 +137,7 @@ fn retain_matching_ponder_eval(
 /// 1本のエンジンに対する入出力をカプセル化する。
 pub struct EngineProcess {
     child: Child,
+    reaped: bool,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
     recent_stderr: Arc<Mutex<VecDeque<String>>>,
@@ -456,6 +458,7 @@ impl EngineProcess {
 
         Ok(Self {
             child,
+            reaped: false,
             stdin: BufWriter::new(stdin),
             rx,
             recent_stderr,
@@ -959,10 +962,93 @@ impl EngineProcess {
         self.stdin.flush()?;
         Ok(())
     }
+
+    /// quit 後の終了を確認し、異常終了・強制終了・I/O 失敗を返す。
+    /// 終了待ちは 3 秒。stdin の書込み時間はこの期限に含まない。
+    pub fn shutdown(mut self) -> Result<()> {
+        let mut failure = None;
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.reaped = true;
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow!("engine {} exited with {status}", self.label))
+                };
+            }
+            Ok(None) => {}
+            Err(error) => retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} status check failed", self.label)),
+            ),
+        }
+        if let Err(error) = self.write_line("quit") {
+            retain_shutdown_error(
+                &mut failure,
+                error.context(format!("engine {} quit write failed", self.label)),
+            );
+        }
+        let deadline = Instant::now() + ENGINE_CHECKED_QUIT_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.reaped = true;
+                    if !status.success() {
+                        retain_shutdown_error(
+                            &mut failure,
+                            anyhow!("engine {} exited with {status}", self.label),
+                        );
+                    }
+                    return failure.map_or(Ok(()), Err);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    retain_shutdown_error(
+                        &mut failure,
+                        anyhow!(error)
+                            .context(format!("engine {} status check failed", self.label)),
+                    );
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                retain_shutdown_error(
+                    &mut failure,
+                    anyhow!("engine {} did not exit after quit; forcing termination", self.label),
+                );
+                break;
+            }
+            std::thread::sleep(ENGINE_QUIT_POLL_INTERVAL);
+        }
+        if let Err(error) = self.child.kill() {
+            retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} kill failed", self.label)),
+            );
+        }
+        match self.child.wait() {
+            Ok(_) => self.reaped = true,
+            Err(error) => retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} wait failed", self.label)),
+            ),
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn retain_shutdown_error(failure: &mut Option<anyhow::Error>, error: anyhow::Error) {
+    *failure = Some(match failure.take() {
+        Some(original) => original.context(format!("shutdown cleanup: {error:#}")),
+        None => error,
+    });
 }
 
 impl Drop for EngineProcess {
     fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
         let _ = self.write_line("quit");
         let deadline = Instant::now() + ENGINE_QUIT_TIMEOUT;
         while Instant::now() < deadline {
@@ -1030,6 +1116,126 @@ pub fn find_engine_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_tests {
+    use super::*;
+
+    fn mock(mode: &str) -> EngineProcess {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("shutdown.py");
+        std::fs::write(
+            &script,
+            r#"
+import os
+import signal
+import sys
+import time
+mode = sys.argv[1]
+if mode == 'closed-stdin': os.close(0)
+print('ready', flush=True)
+if mode == 'preexit': sys.exit(7)
+if mode == 'closed-stdin': time.sleep(60)
+for raw in sys.stdin:
+    if raw.strip() != 'quit': continue
+    if mode == 'exit7': sys.exit(7)
+    if mode == 'signal': os.kill(os.getpid(), signal.SIGTERM)
+    if mode == 'ignore': time.sleep(60)
+    if mode == 'delayed-clean': time.sleep(0.5)
+    print('quit-received', flush=True)
+    break
+"#,
+        )
+        .unwrap();
+        let config = EngineConfig {
+            path: "python3".into(),
+            args: vec![script.display().to_string(), mode.to_owned()],
+            threads: 1,
+            hash_mb: 1,
+            network_delay: None,
+            network_delay2: None,
+            minimum_thinking_time: None,
+            slowmover: None,
+            ponder: false,
+            usi_options: vec![],
+        };
+        let engine =
+            EngineProcess::spawn_uninitialized(&config, "shutdown-mock".to_owned()).unwrap();
+        assert_eq!(engine.recv_line(Duration::from_secs(5)).unwrap(), "ready");
+        engine
+    }
+
+    fn assert_reaped(pid: u32) {
+        #[cfg(target_os = "linux")]
+        assert!(!Path::new("/proc").join(pid.to_string()).exists(), "child {pid} remains");
+        #[cfg(not(target_os = "linux"))]
+        assert!(pid > 0);
+    }
+
+    #[test]
+    fn shutdown_accepts_clean_exit_and_reaps_child() {
+        let engine = mock("clean");
+        let pid = engine.child.id();
+        engine.shutdown().unwrap();
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_accepts_clean_exit_after_drop_grace() {
+        let engine = mock("delayed-clean");
+        let pid = engine.child.id();
+        engine.shutdown().unwrap();
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_rejects_nonzero_and_signal_exit_and_reaps_child() {
+        for mode in ["exit7", "signal"] {
+            let engine = mock(mode);
+            let pid = engine.child.id();
+            let error = engine.shutdown().unwrap_err();
+            assert!(format!("{error:#}").contains("exited with"));
+            assert_reaped(pid);
+        }
+    }
+
+    #[test]
+    fn shutdown_kills_and_reaps_child_after_quit_timeout() {
+        let engine = mock("ignore");
+        let pid = engine.child.id();
+        let error = engine.shutdown().unwrap_err();
+        assert!(format!("{error:#}").contains("forcing termination"));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_checks_already_exited_status() {
+        let mut engine = mock("preexit");
+        let pid = engine.child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while engine.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let error = engine.shutdown().unwrap_err();
+        assert!(format!("{error:#}").contains("exited with"));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_preserves_write_error_while_killing_and_reaping_child() {
+        let engine = mock("closed-stdin");
+        let pid = engine.child.id();
+        let error = engine.shutdown().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert!(format!("{error:#}").contains("quit write failed"));
+        assert!(format!("{error:#}").contains("forcing termination"));
+        assert_reaped(pid);
+    }
 }
 
 #[cfg(all(test, unix))]

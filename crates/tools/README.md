@@ -124,6 +124,7 @@ engine ごとの相手手番思考は `--ponder 0:true 1:false` で指定でき�
 中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
 不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。
 `tournament` は `info string Error:` の通知を通常の投了と区別し、対局エラーの再試行へ渡します。
+通常の対局 worker 終了時にエンジンの異常終了や終了待ち期限後の強制終了を検出した run は無効とします。
 
 ### 探索の動作確認
 
