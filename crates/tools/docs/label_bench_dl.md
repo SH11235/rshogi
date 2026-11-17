@@ -1,6 +1,9 @@
 # label_bench_dl
 
-`label_bench_dl` は、ground truth ラベラー (`label_bench_positions` / `extract_bench_positions`) が出した `label_bench` 形式の jsonl の各局面を **DL水匠 (標準 dlshogi ONNX)** の value head で静的評価し、評価値フィールド (`eval_dl`、既定) を追記するツールです。
+ONNX モードは基本 plane / `stm-tokens-v1` モデルに対応します。モデルの指定方法、metadata と
+CPU/CUDA/TensorRT の対応は [ONNX モデルの入力](onnx-models.md) を参照してください。
+
+`label_bench_dl` は、ground truth ラベラー (`label_bench_positions` / `extract_bench_positions`) が出した `label_bench` 形式の jsonl の各局面を **基本 plane / token 形式の ONNX モデル** の value head で静的評価し、評価値フィールド (`eval_dl`、既定) を追記するツールです。
 
 後段で ground truth の `eval_deep` とクラス別 (`progress_band` / `eval_band` / `nyugyoku` 等) に突き合わせ、DL モデルのラベル品質を測るための入力を作ります。
 

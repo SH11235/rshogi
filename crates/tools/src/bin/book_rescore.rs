@@ -28,6 +28,7 @@ struct Cli {
     engine: Option<PathBuf>,
     #[arg(long = "engine-option", num_args = 1)]
     engine_options: Vec<String>,
+    /// 基本 plane または stm-tokens-v1 ONNX モデル。
     #[arg(long)]
     dlshogi_onnx_model: Option<PathBuf>,
     #[arg(long, default_value_t = 1024)]

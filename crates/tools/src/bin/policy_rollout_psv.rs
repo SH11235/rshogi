@@ -29,7 +29,7 @@ struct Cli {
     #[arg(short, long)]
     output_dir: PathBuf,
 
-    /// 標準 dlshogi ONNX モデル (DL水匠等)
+    /// 基本 plane または stm-tokens-v1 ONNX モデル
     #[arg(long)]
     dlshogi_onnx_model: PathBuf,
 

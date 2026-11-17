@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long, default_value = "eval_dl")]
     out_field: String,
 
-    /// dlshogi ONNX モデルのパス
+    /// 基本 plane または stm-tokens-v1 ONNX モデルのパス
     #[arg(long)]
     dlshogi_onnx_model: std::path::PathBuf,
 

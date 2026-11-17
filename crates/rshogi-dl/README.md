@@ -12,6 +12,11 @@
 形式不一致や推論失敗はエラーを返し、旧 API では再試行しません。buffer を再 encode する前に view の使用を終えてください。
 `CachedEvaluator` 自体の `evaluate_encoded` は未対応の `None` を返します。backend への直接転送は cache 照合と統計を迂回するため、cache を使う呼出し側は `evaluate` に局面を渡してください。
 
+`ModelEvaluator::evaluate_values` は局面を最大 batch ごとに分け、手番側の期待スコアだけを返します。
+`evaluate_with_policy_iter` は `IndexedParallelIterator<Item = &Position>` を受け、最大 batch 以下の
+局面の value と policy を入力順に追記します。既存の slice 形式の `evaluate_with_policy` も利用できます。
+並列 iterator は局面や参照の中間配列を作らず encode します。返す値は確率で、cp への変換は呼出し側で行います。
+
 既定 feature は GPU や ONNX Runtime に依存しません。`onnx` feature で ORT backend を利用できます。`ORT_DYLIB_PATH` に ONNX Runtime API 24 対応の共有ライブラリを指定してください。`OnnxConfig` の device が非負なら CUDA、負なら CPU を利用します。TensorRT は明示的に選択し、engine cache は利用するモデルと実行環境に対応する場所へ保存してください。
 
 入力名・shape・dtype と出力の shape を検証し、value は有限な `[0,1]`、policy は有限な logits を要求します。value に sigmoid が既に適用されたモデルを使用してください。モデルの意味は shape だけでは判別できないため、取得元の仕様も確認してください。
