@@ -6,7 +6,7 @@
 //! - `RootMove`: ルート手の情報
 //! - `RootMoves`: ルート手のリスト
 
-use crate::movegen::{MoveList, generate_legal_with_pass};
+use crate::movegen::{MoveList, generate_legal_all_with_pass, generate_legal_with_pass};
 use crate::position::Position;
 use crate::types::{Bound, MAX_PLY, Move, Piece, RepetitionState, Square, Value};
 
@@ -511,38 +511,50 @@ impl Ord for RootMove {
 /// ルート局面での候補手リスト
 pub struct RootMoves {
     moves: Vec<RootMove>,
+    has_supplemental_moves: bool,
 }
 
 impl Clone for RootMoves {
     fn clone(&self) -> Self {
         Self {
             moves: self.moves.clone(),
+            has_supplemental_moves: self.has_supplemental_moves,
         }
     }
 
     fn clone_from(&mut self, source: &Self) {
         // 反復ごとの退避では既存バッファを再利用する。
         self.moves.clone_from(&source.moves);
+        self.has_supplemental_moves = source.has_supplemental_moves;
     }
 }
 
 impl RootMoves {
     /// 空のRootMovesを作成
     pub fn new() -> Self {
-        Self { moves: Vec::new() }
+        Self {
+            moves: Vec::new(),
+            has_supplemental_moves: false,
+        }
     }
 
     /// テスト用: 指定されたRootMoveで初期化
     #[cfg(test)]
     pub(crate) fn from_vec(moves: Vec<RootMove>) -> Self {
-        Self { moves }
+        Self {
+            moves,
+            has_supplemental_moves: false,
+        }
     }
 
     /// 合法手からRootMovesを初期化
     ///
     /// # Arguments
     /// * `pos` - 現在の局面
-    /// * `search_moves` - 探索対象の手（空なら全合法手）
+    /// * `search_moves` - 探索対象の手（空なら通常探索用の合法手）
+    ///
+    /// 明示された合法な不成も候補に含める。通常の候補順を保ち、
+    /// 通常生成にない要求手は重複を除いて要求順で末尾へ追加する。
     pub fn from_legal_moves(pos: &Position, search_moves: &[Move]) -> Self {
         let mut legal_moves = MoveList::new();
         // パス権利が有効な場合、パス手も含める
@@ -556,7 +568,28 @@ impl RootMoves {
             }
         }
 
-        Self { moves }
+        let mut has_supplemental_moves = false;
+        if search_moves.iter().any(|&mv| !legal_moves.contains(mv)) {
+            // 通常探索で省く不成でも、明示要求なら全合法手に照らして補完する。
+            legal_moves.set_len(0);
+            generate_legal_all_with_pass(pos, &mut legal_moves);
+            for &mv in search_moves {
+                if legal_moves.contains(mv) && !moves.iter().any(|root| root.mv() == mv) {
+                    moves.push(RootMove::new(mv));
+                    has_supplemental_moves = true;
+                }
+            }
+        }
+
+        Self {
+            moves,
+            has_supplemental_moves,
+        }
+    }
+
+    #[inline]
+    pub(super) fn has_supplemental_moves(&self) -> bool {
+        self.has_supplemental_moves
     }
 
     /// 手の数
@@ -575,6 +608,7 @@ impl RootMoves {
     #[inline]
     pub fn clear(&mut self) {
         self.moves.clear();
+        self.has_supplemental_moves = false;
     }
 
     /// イテレータ
@@ -781,6 +815,236 @@ pub fn draw_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNDERPROMOTIONS: [(&str, &str); 8] = [
+        ("k8/9/9/4B4/9/9/9/9/4K4 b - 1", "5d4c"),
+        ("k8/9/9/4R4/9/9/9/9/4K4 b - 1", "5d5c"),
+        ("k8/9/9/4P4/9/9/9/9/4K4 b - 1", "5d5c"),
+        ("k8/9/4L4/9/9/9/9/9/4K4 b - 1", "5c5b"),
+        ("4k4/9/9/9/9/4b4/9/9/8K w - 1", "5f6g"),
+        ("4k4/9/9/9/9/4r4/9/9/8K w - 1", "5f5g"),
+        ("4k4/9/9/9/9/4p4/9/9/8K w - 1", "5f5g"),
+        ("4k4/9/9/9/9/9/4l4/9/8K w - 1", "5g5h"),
+    ];
+
+    #[test]
+    fn root_searchmoves_restores_requested_underpromotions() {
+        for (sfen, usi) in UNDERPROMOTIONS {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+            let mut ordinary = MoveList::new();
+            generate_legal_with_pass(&pos, &mut ordinary);
+            assert!(!ordinary.contains(mv), "{sfen}: {usi}");
+            let roots = RootMoves::from_legal_moves(&pos, &[mv]);
+            assert_eq!(roots.iter().map(RootMove::mv).collect::<Vec<_>>(), [mv]);
+            assert_eq!(pos.to_sfen(), sfen);
+        }
+    }
+
+    #[test]
+    fn root_searchmoves_preserves_default_and_ordinary_order() {
+        for sfen in std::iter::once(crate::position::SFEN_HIRATE)
+            .chain(UNDERPROMOTIONS.iter().map(|&(sfen, _)| sfen))
+        {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut ordinary = MoveList::new();
+            generate_legal_with_pass(&pos, &mut ordinary);
+            let roots = RootMoves::from_legal_moves(&pos, &[]);
+            assert!(!roots.has_supplemental_moves());
+            assert_eq!(roots.iter().map(RootMove::mv).collect::<Vec<_>>(), ordinary.as_slice());
+            let first = ordinary.at(0);
+            let last = ordinary.at(ordinary.len() - 1);
+            let restricted = RootMoves::from_legal_moves(&pos, &[last, first, last]);
+            assert!(!restricted.has_supplemental_moves());
+            assert_eq!(restricted.iter().map(RootMove::mv).collect::<Vec<_>>(), [first, last]);
+        }
+    }
+
+    #[test]
+    fn root_searchmoves_appends_missing_after_ordinary_candidates() {
+        let mut pos = Position::new();
+        pos.set_sfen(UNDERPROMOTIONS[0].0).unwrap();
+        let first_missing = pos.to_move(Move::from_usi("5d6c").unwrap()).unwrap();
+        let second_missing = pos.to_move(Move::from_usi("5d4c").unwrap()).unwrap();
+        let mut ordinary = MoveList::new();
+        generate_legal_with_pass(&pos, &mut ordinary);
+        let first = ordinary.at(0);
+        let last = ordinary.at(ordinary.len() - 1);
+        let roots = RootMoves::from_legal_moves(
+            &pos,
+            &[
+                first_missing,
+                last,
+                first,
+                second_missing,
+                first_missing,
+                Move::NONE,
+            ],
+        );
+        assert_eq!(
+            roots.iter().map(RootMove::mv).collect::<Vec<_>>(),
+            [first, last, first_missing, second_missing]
+        );
+    }
+
+    #[test]
+    fn root_searchmoves_rejects_illegal_requests() {
+        for (sfen, usi) in [
+            ("k8/4P4/9/9/9/9/9/9/4K4 b - 1", "5b5a"),
+            ("k8/4L4/9/9/9/9/9/9/4K4 b - 1", "5b5a"),
+            ("4k4/9/9/9/9/9/9/4p4/8K w - 1", "5h5i"),
+            ("4k4/9/9/9/9/9/9/4l4/8K w - 1", "5h5i"),
+            ("k8/9/9/4B4/9/9/9/9/4K4 b - 1", "5d5c"),
+            ("k3r4/9/9/9/9/9/9/4B4/4K4 b - 1", "5h4g"),
+            ("k8/9/9/9/9/9/9/9/4K4 b - 1", "P*5e"),
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+            assert!(RootMoves::from_legal_moves(&pos, &[mv, mv, Move::NONE, Move::WIN]).is_empty());
+        }
+    }
+
+    #[test]
+    fn root_searchmoves_respects_pass_rights() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        assert!(RootMoves::from_legal_moves(&pos, &[Move::PASS]).is_empty());
+        pos.enable_pass_rights(1, 1);
+        let roots = RootMoves::from_legal_moves(&pos, &[Move::PASS, Move::NONE, Move::PASS]);
+        assert_eq!(roots.iter().map(RootMove::mv).collect::<Vec<_>>(), [Move::PASS]);
+        pos.set_sfen_with_pass_rights("k3r4/9/9/9/9/9/9/9/4K4 b - 1", 1, 1).unwrap();
+        assert!(pos.in_check());
+        assert!(RootMoves::from_legal_moves(&pos, &[Move::PASS]).is_empty());
+    }
+
+    #[test]
+    fn root_searchmoves_supplement_survives_clone_and_resets() {
+        let mut pos = Position::new();
+        pos.set_sfen(UNDERPROMOTIONS[0].0).unwrap();
+        let mv = pos.to_move(Move::from_usi(UNDERPROMOTIONS[0].1).unwrap()).unwrap();
+        let roots = RootMoves::from_legal_moves(&pos, &[mv]);
+        assert!(roots.has_supplemental_moves());
+        let mut copied = roots.clone();
+        assert!(copied.has_supplemental_moves());
+        copied.clear();
+        assert!(!copied.has_supplemental_moves());
+        copied.clone_from(&roots);
+        assert!(copied.has_supplemental_moves());
+        copied.clone_from(&RootMoves::from_legal_moves(&pos, &[]));
+        assert!(!copied.has_supplemental_moves());
+        assert!(!RootMoves::from_legal_moves(&pos, &[Move::NONE]).has_supplemental_moves());
+    }
+
+    #[test]
+    fn root_searchmoves_search_visits_supplemental_nonfirst_moves() {
+        use crate::eval::EvalHash;
+        use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement};
+        use crate::tt::TranspositionTable;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut cases: Vec<_> = UNDERPROMOTIONS
+                    .iter()
+                    .map(|&(sfen, usi)| (sfen, vec![format!("{usi}+"), usi.to_owned()]))
+                    .collect();
+                cases.push((UNDERPROMOTIONS[0].0, vec!["5d6c".to_owned(), "5d4c".to_owned()]));
+                for thread_id in [0, 1] {
+                    for (sfen, moves) in &cases {
+                        let mut pos = Position::new();
+                        pos.set_sfen(sfen).unwrap();
+                        let requested: Vec<_> = moves
+                            .iter()
+                            .map(|usi| pos.to_move(Move::from_usi(usi).unwrap()).unwrap())
+                            .collect();
+                        let limits = LimitsType {
+                            depth: 1,
+                            search_moves: requested,
+                            ..Default::default()
+                        };
+                        let mut worker = SearchWorker::new(
+                            Arc::new(TranspositionTable::new(1)),
+                            Arc::new(EvalHash::new(1)),
+                            0,
+                            thread_id,
+                            SearchTuneParams::default(),
+                        );
+                        worker.prepare_search(&limits);
+                        worker.state.root_depth = 1;
+                        worker.state.root_moves =
+                            RootMoves::from_legal_moves(&pos, &limits.search_moves);
+                        assert_eq!(worker.state.root_moves.len(), 2);
+                        assert!(
+                            worker
+                                .state
+                                .root_moves
+                                .iter()
+                                .all(|rm| rm.mean_squared_score.is_none())
+                        );
+                        let mut tm = TimeManagement::new(
+                            Arc::new(AtomicBool::new(false)),
+                            Arc::new(AtomicBool::new(false)),
+                        );
+                        worker.search_root(
+                            &mut pos,
+                            1,
+                            -Value::INFINITE,
+                            Value::INFINITE,
+                            &limits,
+                            &mut tm,
+                        );
+                        assert!(!worker.state.abort);
+                        for rm in worker.state.root_moves.iter() {
+                            assert!(
+                                rm.mean_squared_score.is_some(),
+                                "{sfen}: {} thread {thread_id}",
+                                rm.mv().to_usi()
+                            );
+                        }
+                        assert_eq!(pos.to_sfen(), *sfen);
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn root_searchmoves_search_reaches_requested_underpromotions() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                for (sfen, usi) in UNDERPROMOTIONS {
+                    let mut pos = Position::new();
+                    pos.set_sfen(sfen).unwrap();
+                    let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+                    let mut search = crate::search::Search::new_with_eval_hash(1, 1);
+                    let limits = crate::search::LimitsType {
+                        depth: 1,
+                        search_moves: vec![mv],
+                        ..Default::default()
+                    };
+                    let result =
+                        search.go(&mut pos, limits, None::<fn(&crate::search::SearchInfo)>);
+                    assert_eq!(result.best_move, mv, "{sfen}: {usi}");
+                    assert_eq!(result.pv.first(), Some(&mv));
+                    assert!(result.nodes > 0);
+                    assert_eq!(pos.to_sfen(), sfen);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn test_node_type_is_pv() {

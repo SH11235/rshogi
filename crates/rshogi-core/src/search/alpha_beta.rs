@@ -1354,7 +1354,7 @@ impl SearchWorker {
             depth,
             0,
             cont_tables,
-            self.generate_all_legal_moves,
+            self.generate_all_legal_moves || self.state.root_moves.has_supplemental_moves(),
         );
 
         let mut best_move = Move::NONE;

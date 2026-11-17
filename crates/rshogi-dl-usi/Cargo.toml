@@ -18,6 +18,7 @@ libc = { version = "0.2", optional = true }
 [features]
 default = []
 onnx = ["rshogi-dl/onnx", "dep:libc"]
+policy-validation-reduction = ["rshogi-dl/policy-validation-reduction"]
 
 [[bin]]
 name = "rshogi-dl-usi"

@@ -431,7 +431,7 @@ impl OnnxEvaluator {
             );
             inference_ensure!(
                 timer,
-                logits.iter().all(|v| v.is_finite()),
+                policy_logits_are_finite(logits),
                 "policy contains non-finite logits"
             );
             Some(logits)
@@ -502,6 +502,18 @@ fn model_format(session: &Session) -> Result<crate::InputFormat> {
         );
     }
     Ok(format)
+}
+
+fn policy_logits_are_finite(logits: &[f32]) -> bool {
+    #[cfg(feature = "policy-validation-reduction")]
+    {
+        // 短絡を避け、連続した logit の有限性検査をコンパイラがベクトル化できるようにする。
+        logits.iter().fold(true, |valid, value| valid & value.is_finite())
+    }
+    #[cfg(not(feature = "policy-validation-reduction"))]
+    {
+        logits.iter().all(|value| value.is_finite())
+    }
 }
 
 fn validate_model(session: &Session, max_batch: usize, format: crate::InputFormat) -> Result<()> {
@@ -996,11 +1008,7 @@ impl TokenEvaluator {
                 shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
                 "incorrect policy output shape"
             );
-            inference_ensure!(
-                timer,
-                policy.iter().all(|v| v.is_finite()),
-                "non-finite policy logits"
-            );
+            inference_ensure!(timer, policy_logits_are_finite(policy), "non-finite policy logits");
             Some(policy)
         } else {
             None
@@ -1091,6 +1099,93 @@ impl crate::Evaluator for ModelEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_finite_scan_accepts_ieee_finite_values_at_vector_boundaries() {
+        assert!(policy_logits_are_finite(&[]));
+        let finite = [
+            0.0,
+            -0.0,
+            f32::MAX,
+            f32::MIN,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            1.0,
+            -1.0,
+        ];
+        for length in [
+            1,
+            7,
+            8,
+            9,
+            31,
+            32,
+            33,
+            MAX_MOVE_LABEL_NUM,
+            MAX_MOVE_LABEL_NUM * 128,
+        ] {
+            for shift in 0..finite.len() {
+                let values: Vec<_> =
+                    (0..length).map(|index| finite[(index + shift) % finite.len()]).collect();
+                assert!(policy_logits_are_finite(&values));
+            }
+        }
+    }
+
+    #[test]
+    fn policy_finite_scan_rejects_infinities_and_nan_payloads_in_every_lane() {
+        for invalid in [
+            0x7f80_0000,
+            0xff80_0000,
+            0x7f80_0001,
+            0xff80_0001,
+            0x7fc0_0000,
+            0xffc0_0000,
+            0x7fff_ffff,
+            0xffff_ffff,
+        ] {
+            for length in [
+                1,
+                7,
+                8,
+                9,
+                31,
+                32,
+                33,
+                MAX_MOVE_LABEL_NUM,
+                MAX_MOVE_LABEL_NUM * 128,
+            ] {
+                let mut values = vec![1.0; length];
+                for index in (0..length.min(64)).chain([length / 2, length - 1]) {
+                    values[index] = f32::from_bits(invalid);
+                    assert!(!policy_logits_are_finite(&values));
+                    values[index] = 1.0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn policy_finite_scan_matches_exponent_bits_on_long_random_inputs() {
+        let mut state = 0x5a17_c9e3u32;
+        for _ in 0..4 {
+            let mut values: Vec<_> = (0..MAX_MOVE_LABEL_NUM * 128)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    f32::from_bits(state)
+                })
+                .collect();
+            let expected = values
+                .iter()
+                .fold(true, |valid, value| valid & (value.to_bits() & 0x7f80_0000 != 0x7f80_0000));
+            assert_eq!(policy_logits_are_finite(&values), expected);
+            for value in &mut values {
+                *value = f32::from_bits(value.to_bits() & 0xfeff_ffff);
+            }
+            assert!(policy_logits_are_finite(&values));
+        }
+    }
 
     #[test]
     fn parallel_token_inputs_preserve_noncontiguous_order_and_unused_capacity() -> Result<()> {
