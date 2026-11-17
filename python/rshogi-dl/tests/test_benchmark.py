@@ -22,14 +22,41 @@ class BenchmarkConfigTest(unittest.TestCase):
             {"steps": 0}, {"steps": 10001}, {"steps": True}, {"warmup": -1},
             {"batch_size": 0}, {"batch_size": 4097}, {"window_batches": 0},
             {"window_batches": 33}, {"threads": 0}, {"threads": 257}, {"seed": -1},
-            {"seed": 2**63}, {"execution": "other"}, {"precision": "fp16"},
-            {"input_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
+            {"seed": 2**63}, {"execution": "other"}, {"compile_mode": "other"}, {"compile_scope": "other"}, {"precision": "fp16"},
+            {"attention_backend": "other"}, {"input_mode": "other"}, {"policy_rows_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
             {"fused_optimizer": 1}, {"learning_rate": 0.0}, {"learning_rate": float("nan")},
             {"weight_decay": -1.0}, {"weight_decay": float("inf")},
         ]
         for options in invalid:
             with self.subTest(options=options), self.assertRaises(ValueError):
                 benchmark.BenchmarkConfig(**options)
+
+    def test_nondefault_compile_mode_requires_compile_and_graph_modes_require_cuda(self) -> None:
+        self.assertEqual(benchmark.BenchmarkConfig().compile_mode, "default")
+        for mode in benchmark.COMPILE_MODES:
+            if mode != "default":
+                with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "execution=compile"):
+                    benchmark.BenchmarkConfig(compile_mode=mode)
+            if mode in ("reduce-overhead", "max-autotune"):
+                with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "device=cuda"):
+                    benchmark.BenchmarkConfig(execution="compile", compile_mode=mode)
+            else:
+                self.assertEqual(
+                    benchmark.BenchmarkConfig(execution="compile", compile_mode=mode).compile_mode, mode
+                )
+            self.assertEqual(
+                benchmark.BenchmarkConfig(device="cuda", execution="compile", compile_mode=mode).compile_mode,
+                mode,
+            )
+
+    def test_model_loss_scope_requires_compile_and_prepared_rows(self) -> None:
+        self.assertEqual(benchmark.BenchmarkConfig().compile_scope, "model")
+        with self.assertRaisesRegex(ValueError, "execution=compile"):
+            benchmark.BenchmarkConfig(compile_scope="model-loss")
+        with self.assertRaisesRegex(ValueError, "prepared policy rows"):
+            benchmark.BenchmarkConfig(execution="compile", compile_scope="model-loss", policy_rows_mode="legacy")
+        self.assertEqual(benchmark.BenchmarkConfig(execution="compile", compile_scope="model-loss").compile_scope,
+                         "model-loss")
 
     def test_cuda_does_not_fallback(self) -> None:
         config = benchmark.BenchmarkConfig(device="cuda")
@@ -90,6 +117,140 @@ class BenchmarkTest(unittest.TestCase):
         other = benchmark.run_benchmark(self.data, TEST_CONFIG, replace(self.config, seed=6))
         self.assertNotEqual(self.report["initial_weights_sha256"], other["initial_weights_sha256"])
 
+    def test_policy_rows_mode_preserves_input_losses_and_updates(self) -> None:
+        for input_mode in ("resident", "stream"):
+            with self.subTest(input_mode=input_mode):
+                prepared = benchmark.run_benchmark(
+                    self.data, TEST_CONFIG, replace(self.config, input_mode=input_mode)
+                )
+                legacy = benchmark.run_benchmark(
+                    self.data, TEST_CONFIG,
+                    replace(self.config, input_mode=input_mode, policy_rows_mode="legacy"),
+                )
+                self.assertEqual(prepared["benchmark_config"]["policy_rows_mode"], "prepared")
+                self.assertEqual(legacy["benchmark_config"]["policy_rows_mode"], "legacy")
+                for key in ("input_window_sha256", "initial_weights_sha256", "final_weights_sha256",
+                            "losses_sha256", "initial_loss", "final_loss", "optimizer_updates"):
+                    self.assertEqual(prepared[key], legacy[key], key)
+
+    def test_to_device_preserves_legacy_batches_without_prepared_rows(self) -> None:
+        batch = next(benchmark.iter_batches(self.data, 2))
+        legacy = benchmark._to_device(batch, torch.device("cpu"), policy_rows_mode="legacy")
+        self.assertIsNone(legacy.policy_rows)
+        copied = benchmark._to_device(legacy, torch.device("cpu"))
+        self.assertIsNone(copied.policy_rows)
+        for name in ("tokens", "legal_index", "legal_mask", "policy_target", "policy_present", "value"):
+            self.assertTrue(torch.equal(getattr(batch, name), getattr(copied, name)), name)
+
+    def test_sdpa_uses_the_same_initial_weights_and_loss(self) -> None:
+        report = benchmark.run_benchmark(
+            self.data, TEST_CONFIG, replace(self.config, attention_backend="sdpa")
+        )
+        self.assertEqual(report["benchmark_config"]["attention_backend"], "sdpa")
+        self.assertEqual(report["initial_weights_sha256"], self.report["initial_weights_sha256"])
+        self.assertAlmostEqual(report["initial_loss"], self.report["initial_loss"], places=5)
+        self.assertAlmostEqual(report["final_loss"], self.report["final_loss"], places=5)
+
+    def test_compile_modes_forward_options_and_mark_only_graph_iterations(self) -> None:
+        settings = benchmark._settings
+        for mode in benchmark.COMPILE_MODES:
+            with self.subTest(mode=mode):
+                graph_mode = mode in ("reduce-overhead", "max-autotune")
+                config = replace(
+                    self.config, device="cuda" if graph_mode else "cpu",
+                    execution="compile", compile_mode=mode,
+                )
+                events = []
+
+                def cpu_settings(config):
+                    return settings(replace(config, device="cpu", compile_mode="default"))
+
+                def compile_model(model, *, mode):
+                    def forward(tokens):
+                        events.append("forward")
+                        return model(tokens)
+                    return forward
+
+                with (
+                    patch.object(benchmark, "_settings", side_effect=cpu_settings),
+                    patch.object(torch, "compile", side_effect=compile_model) as compile_model_call,
+                    patch.object(torch.compiler, "cudagraph_mark_step_begin",
+                                 side_effect=lambda: events.append("mark")) as mark_step,
+                ):
+                    report = benchmark.run_benchmark(self.data, TEST_CONFIG, config)
+                compile_model_call.assert_called_once()
+                self.assertEqual(compile_model_call.call_args.kwargs, {"mode": mode})
+                step_count = config.steps + config.warmup
+                self.assertEqual(events, (["mark", "forward"] if graph_mode else ["forward"]) * step_count)
+                self.assertEqual(mark_step.call_count, step_count if graph_mode else 0)
+                self.assertEqual(report["cudagraphs_requested"], graph_mode)
+                for key in ("initial_weights_sha256", "final_weights_sha256", "input_window_sha256",
+                            "losses_sha256", "initial_loss", "final_loss", "optimizer_updates"):
+                    self.assertEqual(report[key], self.report[key], key)
+
+    def test_eager_does_not_invoke_compile_or_iteration_markers(self) -> None:
+        with (
+            patch.object(torch, "compile", side_effect=AssertionError("no compile")),
+            patch.object(torch.compiler, "cudagraph_mark_step_begin", side_effect=AssertionError("no graph")),
+        ):
+            report = benchmark.run_benchmark(self.data, TEST_CONFIG, self.config)
+        self.assertFalse(report["cudagraphs_requested"])
+        self.assertEqual(report["final_weights_sha256"], self.report["final_weights_sha256"])
+
+    def test_compile_mode_cli_and_invalid_eager_mode(self) -> None:
+        args = ["--data", str(self.data), "--config", "test", "--batch-size", "2",
+                "--steps", "1", "--warmup", "0", "--execution", "compile",
+                "--compile-mode", "max-autotune-no-cudagraphs"]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(torch, "compile", side_effect=lambda model, **options: model) as compiled,
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+        ):
+            code = benchmark.main(args)
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(compiled.call_args.kwargs, {"mode": "max-autotune-no-cudagraphs"})
+        self.assertEqual(json.loads(stdout.getvalue())["benchmark_config"]["compile_mode"],
+                         "max-autotune-no-cudagraphs")
+        args[args.index("--execution") + 1] = "eager"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            code = benchmark.main(args)
+        self.assertEqual(code, 2)
+        self.assertIn("execution=compile", stderr.getvalue())
+
+    def test_model_loss_scope_cli_and_original_model_ownership(self) -> None:
+        args = ["--data", str(self.data), "--config", "test", "--batch-size", "2",
+                "--steps", "5", "--warmup", "1", "--seed", "5", "--execution", "compile",
+                "--compile-scope", "model-loss"]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.object(torch, "compile", side_effect=lambda model, **options: model) as compiled,
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+        ):
+            code = benchmark.main(args)
+        self.assertEqual(code, 0, stderr.getvalue())
+        report = json.loads(stdout.getvalue())
+        target = compiled.call_args.args[0]
+        self.assertIsInstance(target, benchmark._ModelLoss)
+        self.assertEqual({id(parameter) for parameter in target.parameters()},
+                         {id(parameter) for parameter in target.model.parameters()})
+        self.assertEqual(report["final_weights_sha256"], benchmark._digest(target.model))
+        self.assertEqual(report["compile_scope"], "model-loss")
+        for key in ("initial_weights_sha256", "final_weights_sha256", "input_window_sha256", "losses_sha256",
+                    "optimizer_updates", "initial_loss", "final_loss"):
+            self.assertEqual(report[key], self.report[key], key)
+
+    def test_model_loss_scope_rejects_unprepared_loader_batches(self) -> None:
+        original = benchmark.iter_batches
+
+        def unprepared(*args, **kwargs):
+            for batch in original(*args, **kwargs):
+                yield replace(batch, policy_rows=None)
+
+        with patch.object(benchmark, "iter_batches", side_effect=unprepared):
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "prepared policy rows"):
+                benchmark.run_benchmark(self.data, TEST_CONFIG,
+                                        replace(self.config, execution="compile", compile_scope="model-loss"))
+
     def test_no_policy_rows_still_count_updates(self) -> None:
         data = self.runs / "value-only.jsonl"
         rows = synthetic_records(seed=14, count=2)
@@ -98,6 +259,25 @@ class BenchmarkTest(unittest.TestCase):
         write_jsonl(data, rows)
         report = benchmark.run_benchmark(data, TEST_CONFIG, replace(self.config, warmup=0, steps=1))
         self.assertEqual(report["optimizer_updates"], 1)
+
+    def test_policy_presence_metadata_survives_resident_and_stream_transfer(self) -> None:
+        data = self.runs / "alternating-policy.jsonl"
+        rows = synthetic_records(seed=16, count=4)
+        rows[0]["policy"] = rows[1]["policy"] = None
+        rows[3]["policy"] = [[rows[3]["legal_labels"][0], 1]]
+        write_jsonl(data, rows)
+        for input_mode in ("resident", "stream"):
+            for row_mode in ("prepared", "legacy"):
+                with self.subTest(input_mode=input_mode, row_mode=row_mode):
+                    with patch.object(
+                        benchmark, "clear_unused_policy_head_gradients",
+                        wraps=benchmark.clear_unused_policy_head_gradients,
+                    ) as restore:
+                        benchmark.run_benchmark(data, TEST_CONFIG, replace(
+                            self.config, input_mode=input_mode, policy_rows_mode=row_mode,
+                            window_batches=2, warmup=0, steps=4,
+                        ))
+                    self.assertEqual([call.args[1] for call in restore.call_args_list], [False, True, False, True])
 
     def test_short_data_and_failed_training_do_not_return_success(self) -> None:
         short = self.runs / "short.jsonl"
