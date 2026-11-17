@@ -52,6 +52,108 @@ fn count(dir: &Path) -> usize {
     std::fs::read_to_string(dir.join("go.log")).unwrap().lines().count()
 }
 
+fn onnx(weights: [u8; 4]) -> Vec<u8> {
+    let mut model = vec![8, 10, 58, 12, 42, 10, 8, 1, 16, 1, 74, 4];
+    model.extend(weights);
+    model
+}
+
+fn external_onnx() -> Vec<u8> {
+    fn field(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![tag, value.len() as u8];
+        bytes.extend(value);
+        bytes
+    }
+    let mut location = field(10, b"location");
+    location.extend(field(18, b"weights.bin"));
+    let mut tensor = vec![112, 1];
+    tensor.extend(field(106, &location));
+    let graph = field(42, &tensor);
+    let mut model = vec![8, 10];
+    model.extend(field(58, &graph));
+    model
+}
+
+#[test]
+fn model_file_reuses_only_self_contained_onnx_and_invalidates_changed_weights() {
+    for executable in [
+        env!("CARGO_BIN_EXE_book_rescore"),
+        env!("CARGO_BIN_EXE_book_extend"),
+    ] {
+        for external in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("input.db"),
+                format!("#YANEURAOU-DB2016 1.00\nsfen {START}\n7g7f none 0 0 1\n"),
+            )
+            .unwrap();
+            let model = dir.path().join("model.onnx");
+            let bytes = if external {
+                external_onnx()
+            } else {
+                onnx([0; 4])
+            };
+            std::fs::write(&model, &bytes).unwrap();
+            let weights = dir.path().join("weights.bin");
+            std::fs::write(&weights, b"external-a").unwrap();
+            let options = vec![format!("ModelFile={}", model.display())];
+            let first = run(executable, dir.path(), &options, false);
+            assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+            let before = count(dir.path());
+            std::fs::write(&weights, b"external-b").unwrap();
+            let second = run(executable, dir.path(), &options, true);
+            assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
+            if external {
+                assert!(count(dir.path()) > before);
+                assert_eq!(std::fs::read(&model).unwrap(), bytes);
+            } else {
+                assert_eq!(count(dir.path()), before);
+                std::fs::write(&model, onnx([1; 4])).unwrap();
+                let third = run(executable, dir.path(), &options, true);
+                assert!(third.status.success(), "{}", String::from_utf8_lossy(&third.stderr));
+                assert!(count(dir.path()) > before);
+            }
+        }
+    }
+}
+
+#[test]
+fn model_file_is_protected_from_outputs_even_for_unknown_formats_and_hardlinks() {
+    for executable in [
+        env!("CARGO_BIN_EXE_book_rescore"),
+        env!("CARGO_BIN_EXE_book_extend"),
+    ] {
+        for hardlink in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("input.db"), "#YANEURAOU-DB2016 1.00\n").unwrap();
+            let model = dir.path().join("model.onnx");
+            let alias = dir.path().join("output.db");
+            std::fs::write(&model, b"unknown format, preserve").unwrap();
+            let output = if hardlink {
+                std::fs::hard_link(&model, &alias).unwrap();
+                &alias
+            } else {
+                &model
+            };
+            let result = Command::new(executable)
+                .arg("--book")
+                .arg(dir.path().join("input.db"))
+                .arg("--out")
+                .arg(output)
+                .arg("--engine")
+                .arg(engine())
+                .arg("--journal")
+                .arg(dir.path().join("journal.jsonl"))
+                .arg("--engine-option")
+                .arg(format!("ModelFile={}", model.display()))
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert_eq!(std::fs::read(&model).unwrap(), b"unknown format, preserve");
+        }
+    }
+}
+
 #[test]
 fn valid_resource_options_work_for_fresh_and_resume_runs() {
     for executable in [
