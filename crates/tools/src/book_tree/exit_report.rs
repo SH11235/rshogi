@@ -703,6 +703,7 @@ fn queue_lines(
     let mut positions = BTreeMap::new();
     let mut lines: Vec<Line> = Vec::new();
     let mut sizes = Vec::new();
+    let mut root_numbers: Vec<usize> = Vec::new();
     for item in picked {
         let key = enqueue_root(item)?;
         let own = &item.side;
@@ -710,13 +711,13 @@ fn queue_lines(
             counts.excluded += 1;
             continue;
         }
-        let Some(number) = item.move_number else {
-            counts.no_number += 1;
-            continue;
-        };
-        let root_number = number
-            .checked_add(usize::from(item.class == Class::Rejoin))
-            .context("根の手数が大きすぎます")?;
+        let root_number = item
+            .move_number
+            .map(|n| {
+                n.checked_add(usize::from(item.class == Class::Rejoin))
+                    .context("根の手数が大きすぎます")
+            })
+            .transpose()?;
         let game = match item.class {
             Class::Gap => vec![vec![extra(item, "main")?.to_owned()]],
             Class::Rejoin => vec![vec![extra(item, "rejoin_move")?.to_owned()]],
@@ -729,6 +730,7 @@ fn queue_lines(
         } else {
             args.enqueue_priority_other
         };
+        // 手数の分からない行も、同じ根の行が既にあればその game に足せる。
         if let Some(&position) = positions.get(&(key.clone(), own.clone())) {
             let line: &mut Line = &mut lines[position];
             for moves in game {
@@ -737,12 +739,23 @@ fn queue_lines(
                 }
             }
             line.priority = line.priority.min(priority);
+            // 同じ局面に違う手数で着く行は、walk の積み荷と同じく小さい手数を根の手数にする。
+            if let Some(n) = root_number.filter(|&n| n < root_numbers[position]) {
+                root_numbers[position] = n;
+                line.id = queue_id(&args.tag, n, &key, own);
+                line.root = format!("sfen {key} {n}");
+            }
             sizes[position] += 1;
             counts.merged += 1;
             continue;
         }
+        let (Some(number), Some(root_number)) = (item.move_number, root_number) else {
+            counts.no_number += 1;
+            continue;
+        };
         positions.insert((key.clone(), own.clone()), lines.len());
         sizes.push(1usize);
+        root_numbers.push(root_number);
         lines.push(Line {
             group: None,
             id: queue_id(&args.tag, root_number, &key, own),
