@@ -2745,6 +2745,7 @@ name = "rshogi-dl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "ort",
  "rayon",
  "rshogi-core",
