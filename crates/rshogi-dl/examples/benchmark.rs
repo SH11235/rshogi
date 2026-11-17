@@ -1,7 +1,7 @@
 mod support;
 
 use std::hint::black_box;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -531,7 +531,7 @@ fn run_command() -> Result<()> {
     let mut report = run(&config, &positions)?;
     report["input_seconds"] = json!(input_seconds);
     serde_json::to_writer(io::stdout().lock(), &report)?;
-    println!();
+    writeln!(io::stdout())?;
     Ok(())
 }
 
