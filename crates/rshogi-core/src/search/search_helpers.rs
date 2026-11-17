@@ -170,6 +170,15 @@ pub(super) fn nnue_evaluate_cached(
     value
 }
 
+/// 次に静的評価する局面の探索 ply を書き出し側へ伝える。
+#[cfg(feature = "search-tree-sample")]
+#[inline]
+pub(super) fn set_tree_sample_ply(st: &mut SearchState, ply: i32) {
+    if let Some(sampler) = st.tree_sampler.as_deref_mut() {
+        sampler.set_ply(ply);
+    }
+}
+
 /// NNUE を実際に計算した局面だけを書き出しの対象にする。EvalHash hit は同じ局面の重複になるので除く。
 #[cfg(feature = "search-tree-sample")]
 #[inline]

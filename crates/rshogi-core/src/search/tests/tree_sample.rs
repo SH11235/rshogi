@@ -95,7 +95,40 @@ fn samples_are_quiet_positions() {
             has_quiet |= !capture && !mv.is_promotion();
         }
         assert!(has_quiet);
-        assert!(sample.game_ply >= 1);
+    }
+}
+
+/// 標本の手数は root の手数 + 探索 ply。null move は手番だけを入れ替えるので、
+/// root からの手数の偶奇は手番の入れ替わりと必ず一致する。
+#[test]
+fn sample_game_ply_counts_search_ply_including_null_moves() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    let samples = on_large_stack(|| {
+        let mut search = Search::new(16);
+        search.set_tree_sample(config(1.0), 5);
+        let mut pos = Position::new();
+        pos.set_sfen(SFENS[1]).unwrap();
+        search.go(
+            &mut pos,
+            LimitsType {
+                nodes: 50_000,
+                ..Default::default()
+            },
+            None::<fn(&SearchInfo)>,
+        );
+        let mut samples = Vec::new();
+        search.drain_tree_samples(&mut samples);
+        samples
+    });
+    assert!(samples.len() > 100, "samples={}", samples.len());
+    let mut root = Position::new();
+    root.set_sfen(SFENS[1]).unwrap();
+    let root_ply = root.game_ply();
+    for sample in &samples {
+        let depth = sample.game_ply - root_ply;
+        assert!(depth >= 0);
+        assert_eq!(depth % 2 == 1, sample.side_to_move != root.side_to_move(), "depth={depth}");
     }
 }
 

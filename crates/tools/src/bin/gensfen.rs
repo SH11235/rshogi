@@ -2228,6 +2228,8 @@ fn worker_main(
         }
         #[cfg(feature = "search-tree-sample")]
         let mut tree_sample_records = 0u64;
+        #[cfg(feature = "search-tree-sample")]
+        let mut tree_samples = Vec::new();
         let mut dedup_hits = 0u64;
         let mut dedup_discarded = 0u64;
         let mut multipv_diversions = 0u64;
@@ -2262,8 +2264,6 @@ fn worker_main(
             if let GameEngines::Native(engine) = &mut engines {
                 engine.reseed_tree_sample(tree_sample_seed(cfg.run_seed, u64::from(game_idx) + 1));
             }
-            #[cfg(feature = "search-tree-sample")]
-            let mut tree_samples = Vec::new();
 
             let parsed = &cfg.start_defs[ticket.startpos_idx];
             let mut pos = build_position(parsed, None, None)?;
@@ -2384,9 +2384,18 @@ fn worker_main(
                     collect_info_lines: info_logger.is_some(),
                 };
                 let search = engines.search(side, &pos, &params)?;
+                // 探索ごとに worker ファイルへ書き、1 局分を溜めない。確定前の分は info log と同じく
+                // result 行の tree_sample_bytes までの復旧で切り詰められる。
                 #[cfg(feature = "search-tree-sample")]
-                if let GameEngines::Native(engine) = &mut engines {
+                if let (GameEngines::Native(engine), Some(writer)) =
+                    (&mut engines, tree_sample_writer.as_mut())
+                {
                     engine.drain_tree_samples(&mut tree_samples);
+                    for sample in &tree_samples {
+                        writer.write_all(&tree_sample_record(sample).to_bytes())?;
+                    }
+                    tree_sample_records += tree_samples.len() as u64;
+                    tree_samples.clear();
                 }
 
                 // info ログ
@@ -2692,21 +2701,6 @@ fn worker_main(
                 && let Some(dedup_hash) = dedup_hash.as_deref()
             {
                 pending_dedup_keys.publish(dedup_hash);
-            }
-            #[cfg(feature = "search-tree-sample")]
-            if let Some(writer) = tree_sample_writer.as_mut() {
-                for sample in &tree_samples {
-                    let record = PackedSfenValue {
-                        sfen: tools::packed_sfen::pack_tree_sample(sample),
-                        score: 0,
-                        move16: 0,
-                        game_ply: sample.game_ply.clamp(0, i32::from(u16::MAX)) as u16,
-                        game_result: 0,
-                        padding: tools::packed_sfen::PSV_PADDING_TREE_SAMPLE,
-                    };
-                    writer.write_all(&record.to_bytes())?;
-                }
-                tree_sample_records += tree_samples.len() as u64;
             }
             committed_games += 1;
             let sync_due = cfg.fsync_interval_games > 0
@@ -6343,6 +6337,18 @@ fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -
         format!("{engine_name} (default)")
     } else {
         format!("{engine_name} [{}]", usi_options.join(", "))
+    }
+}
+
+#[cfg(feature = "search-tree-sample")]
+fn tree_sample_record(sample: &rshogi_core::search::TreeSample) -> PackedSfenValue {
+    PackedSfenValue {
+        sfen: tools::packed_sfen::pack_tree_sample(sample),
+        score: 0,
+        move16: 0,
+        game_ply: sample.game_ply.clamp(0, i32::from(u16::MAX)) as u16,
+        game_result: 0,
+        padding: tools::packed_sfen::PSV_PADDING_TREE_SAMPLE,
     }
 }
 

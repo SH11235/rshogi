@@ -35,7 +35,7 @@ pub struct TreeSample {
 }
 
 impl TreeSample {
-    fn from_position(pos: &Position) -> Self {
+    fn from_position(pos: &Position, game_ply: i32) -> Self {
         let mut board = [Piece::NONE; 81];
         for (index, slot) in board.iter_mut().enumerate() {
             *slot = pos.piece_on(Square::from_u8(index as u8).expect("index < 81"));
@@ -45,7 +45,7 @@ impl TreeSample {
             hands: [pos.hand(Color::Black), pos.hand(Color::White)],
             side_to_move: pos.side_to_move(),
             king_squares: [pos.king_square(Color::Black), pos.king_square(Color::White)],
-            game_ply: pos.game_ply(),
+            game_ply,
         }
     }
 }
@@ -121,6 +121,8 @@ pub(crate) struct TreeSampler {
     rng: u64,
     samples: Vec<TreeSample>,
     stats: TreeSampleStats,
+    root_game_ply: i32,
+    ply: i32,
 }
 
 impl TreeSampler {
@@ -139,7 +141,22 @@ impl TreeSampler {
             rng: seed,
             samples: Vec::with_capacity(config.capacity),
             stats: TreeSampleStats::default(),
+            root_game_ply: 0,
+            ply: 0,
         }
+    }
+
+    /// 探索の開始時に root の手数を渡す。
+    pub(crate) fn begin_search(&mut self, root_game_ply: i32) {
+        self.root_game_ply = root_game_ply;
+        self.ply = 0;
+    }
+
+    /// これから静的評価する局面の探索 ply。null move は `Position::game_ply` を進めないので、
+    /// 標本の手数は root の手数と探索 ply から出す。
+    #[inline]
+    pub(crate) fn set_ply(&mut self, ply: i32) {
+        self.ply = ply;
     }
 
     pub(crate) fn reseed(&mut self, seed: u64) {
@@ -176,7 +193,8 @@ impl TreeSampler {
             Quietness::NoQuietMove => self.stats.rejected_no_quiet += 1,
             Quietness::Quiet => {
                 if self.samples.len() < self.samples.capacity() {
-                    self.samples.push(TreeSample::from_position(pos));
+                    let game_ply = self.root_game_ply + self.ply;
+                    self.samples.push(TreeSample::from_position(pos, game_ply));
                     self.stats.accepted += 1;
                 } else {
                     self.stats.dropped_full += 1;
@@ -257,6 +275,7 @@ mod tests {
             },
             1,
         );
+        sampler.begin_search(1);
         for _ in 0..5 {
             sampler.on_static_eval(&pos);
         }

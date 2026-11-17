@@ -42,6 +42,9 @@ runs/gensfen/20260317-120000/
   gensfen.metrics.jsonl  # 対局メトリクス（--emit-metrics 指定時のみ）
 ```
 
+`--tree-sample-out` を指定した場合は、探索木内の局面の PSV がそのパスに出る
+（[探索木内の局面の採取](#探索木内の局面の採取)）。
+
 `gensfen.psv` の move16 は実 YaneuraOu 形式 (A: bit14=駒打ち、bit15=成り) で出力されます。
 
 `--out-dir path/to/dir` を指定した場合は、そのディレクトリ内に上記ファイルが生成される。
@@ -212,6 +215,8 @@ position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 | `--emit-metrics` | false | 対局メトリクス JSONL を出力 |
 | `--flush-each-move` | false | 毎手フラッシュ（安全だが低速） |
 | `--fsync-interval-games N` | 1 | worker ごとの fsync 間隔。1 は毎対局、0 は fsync 無効 |
+| `--tree-sample-p F` | なし | 探索木内の局面の採取確率。`--features search-tree-sample` の build 専用（[探索木内の局面の採取](#探索木内の局面の採取)） |
+| `--tree-sample-out PATH` | なし | 採取した局面の PSV の出力先。`--tree-sample-p` と同時に指定 |
 
 ### 中断・再開
 
@@ -769,7 +774,7 @@ cargo build --release -p tools --bin gensfen --features search-tree-sample
 | sfen | 採取した局面の PackedSfen（32 byte） |
 | score | 0 |
 | move16 | 0 |
-| game_ply | 採取した局面の手数（u16 の範囲に制限） |
+| game_ply | 探索の root の手数 + 探索の ply（null move も 1 手と数える。u16 の範囲に制限） |
 | game_result | 0 |
 | padding | 2（bit 1 が探索木標本、bit 0 の dual-label 識別とは別） |
 
@@ -782,9 +787,9 @@ score/result の 0 は評価や引き分けの教師ではありません。padd
 `--keep-tt=true` による対局間の探索状態の保持は、探索する局面自体を変え得ます。
 複数 worker の最終ファイルは worker 順に連結するため、割り当てが変わると全体の並びも変わります。
 
-各対局の標本は通常の教師データの採否にかかわらず、result 行より先に書き込みます。
-JSONL と同じ場所に `{stem}.w{worker}.tree.psv` を作り、result に記録した長さで
-再開時に復旧します。最終化時は指定した出力先へ連結します。
+標本は探索ごとに `{stem}.w{worker}.tree.psv`（JSONL と同じ場所）へ書き、1 局分をメモリに溜めません。
+終局した対局の標本は通常の教師データの採否にかかわらず残ります。result 行に記録した長さが
+確定分で、途中で止まった対局の分は再開時に切り詰めます。最終化時は指定した出力先へ連結します。
 採取確率・出力先が異なる設定での `--resume` は拒否します。
 
 終了時の `Tree sample (this invocation)` 行には、今回の実行での

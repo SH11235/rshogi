@@ -1718,6 +1718,9 @@ impl Search {
         #[cfg(feature = "search-tree-sample")]
         {
             worker.state.tree_sampler = self.tree_sampler.take();
+            if let Some(sampler) = worker.state.tree_sampler.as_deref_mut() {
+                sampler.begin_search(pos.game_ply());
+            }
         }
         let mut noop_progress = |_nodes: u64, _bmc: f64| {};
         let result = iterative_deepening(
@@ -1755,7 +1758,7 @@ impl Search {
 
     /// 探索中の局面の書き出しを設定する。`None` で止める。累計とバッファは捨てる。
     ///
-    /// 書き出すのは main thread の探索だけ。
+    /// 書き出すのは main thread の探索だけ。`config.probability` が 0..=1 の外なら panic する。
     #[cfg(feature = "search-tree-sample")]
     pub fn set_tree_sample(&mut self, config: Option<super::TreeSampleConfig>, seed: u64) {
         self.tree_sampler =
