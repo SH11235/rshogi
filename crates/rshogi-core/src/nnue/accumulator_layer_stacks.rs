@@ -238,6 +238,10 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         #[cfg(feature = "search-stats")]
         if was_valid {
             crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
+            crate::search::diagnostics::finny_rebuild(
+                removed.len() + added.len(),
+                piece_list.iter().filter(|&&bp| bp != BonaPiece::ZERO).count(),
+            );
         }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,
@@ -316,6 +320,10 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         #[cfg(feature = "search-stats")]
         if was_valid {
             crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
+            crate::search::diagnostics::finny_rebuild(
+                removed.len() + added.len(),
+                piece_list.iter().filter(|&&bp| bp != BonaPiece::ZERO).count(),
+            );
         }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,
@@ -1411,6 +1419,46 @@ mod tests {
         // 全エントリが無効になっていることを確認
         assert!(!cache.entries[0][0].valid);
         assert!(!cache.entries[40][1].valid);
+    }
+
+    #[cfg(feature = "search-stats")]
+    #[test]
+    fn finny_rebuild_diagnostics_exclude_cold_entries() {
+        use crate::search::diagnostics as d;
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+        let mut pieces = [BonaPiece::ZERO; PieceNumber::NB];
+        pieces[0] = BonaPiece(5);
+        pieces[1] = BonaPiece(10);
+        let mut acc = [0; TEST_L1];
+        let biases = [0; TEST_L1];
+        let weights = test_weights();
+        d::reset();
+        for i in 0..4 {
+            match i {
+                1 => pieces[0] = BonaPiece(6),
+                2 => pieces[1] = BonaPiece::ZERO,
+                _ => {}
+            }
+            cache.refresh_or_cache(
+                (Square::SQ_55, Color::Black),
+                &pieces,
+                &biases,
+                &mut acc,
+                &weights,
+                |bp| bp.0 as usize,
+            );
+        }
+        let report = d::report();
+        for (key, value) in [
+            ("finny_rebuild_perspectives", 3),
+            ("finny_rebuild_diff_rows", 3),
+            ("finny_rebuild_active_rows", 4),
+            ("finny_rebuild_candidates", 2),
+            ("finny_rebuild_saved_rows", 0),
+        ] {
+            assert!(report.lines().any(|line| line == format!("{key}={value}")));
+        }
+        assert_eq!(acc[0], 6);
     }
 
     /// refresh_or_cache: cold start → full refresh → cache に保存

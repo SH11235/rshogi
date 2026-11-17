@@ -901,6 +901,76 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
     }
 }
 
+/// 物理的な threat pair を一度列挙し、両視点の index を渡す。
+#[cfg(feature = "nnue-threat")]
+#[inline]
+pub fn for_each_active_threat_index_both<F: FnMut(Color, usize)>(pos: &Position, mut f: F) {
+    count_threat_full!();
+    count_threat_full!();
+    let hm = [Color::Black, Color::White].map(|p| is_hm_mirror(pos.king_square(p), p));
+    let occupied = pos.occupied();
+    let from_offset_table = &*FROM_OFFSET_TABLE;
+
+    for attacker_color in [Color::Black, Color::White] {
+        let mut attacker_bb = pos.pieces_c(attacker_color);
+        while !attacker_bb.is_empty() {
+            let from_sq = attacker_bb.pop();
+            let pc = pos.piece_on(from_sq);
+            let pt = pc.piece_type();
+
+            let Some(attacker_class) = ThreatClass::from_piece_type(pt) else {
+                continue;
+            };
+
+            let attack_bb = attacks_from_piece(pt, attacker_color, from_sq, occupied);
+            let mut targets = attack_bb & occupied;
+            while !targets.is_empty() {
+                let to_sq = targets.pop();
+                let target_pc = pos.piece_on(to_sq);
+                let target_pt = target_pc.piece_type();
+
+                let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                    continue;
+                };
+
+                let target_color = target_pc.color();
+
+                #[cfg(feature = "threat-profile-full-symdedup")]
+                if is_canonical_dead(attacker_class, from_sq, attacked_class, target_color, to_sq) {
+                    continue;
+                }
+
+                for perspective in [Color::Black, Color::White] {
+                    let attacker_side = usize::from(attacker_color != perspective);
+                    let attacked_side = usize::from(target_color != perspective);
+                    let from_sq_n = normalize_sq(from_sq, perspective, hm[perspective.index()]);
+                    let to_sq_n = normalize_sq(to_sq, perspective, hm[perspective.index()]);
+                    let oriented_color = if perspective == Color::Black {
+                        attacker_color
+                    } else {
+                        !attacker_color
+                    };
+
+                    let Some(idx) = threat_index(
+                        attacker_side,
+                        attacker_class,
+                        oriented_color,
+                        attacked_side,
+                        attacked_class,
+                        from_sq_n,
+                        to_sq_n,
+                        from_offset_table,
+                    ) else {
+                        continue; // excluded pair
+                    };
+                    debug_assert!(idx < THREAT_DIMENSIONS);
+                    f(perspective, idx);
+                }
+            }
+        }
+    }
+}
+
 // =============================================================================
 // BonaPiece デコード（差分更新用）
 // =============================================================================
@@ -1654,8 +1724,61 @@ fn lookup_piece_before(
 // =============================================================================
 
 #[cfg(all(test, feature = "nnue-threat"))]
+pub(super) fn for_each_full_refresh_test_position(mut f: impl FnMut(&Position)) {
+    use crate::movegen::{MoveList, generate_legal};
+    let mut sfens = vec![
+        "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_owned(),
+        "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24"
+            .to_owned(),
+        "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1".to_owned(),
+        "4k4/9/9/9/9/9/9/4K4/9 b RBGSNLP 1".to_owned(),
+    ];
+    for black in ["K8", "8K"] {
+        for white in ["k8", "8k"] {
+            for turn in ["b", "w"] {
+                sfens.push(format!(
+                    "{white}/9/2+s1+p4/3G1P3/4p4/3+n1+N3/9/9/{black} {turn} RBSNLPg 1"
+                ));
+            }
+        }
+    }
+    for sfen in sfens {
+        let mut pos = Position::new();
+        pos.set_sfen(&sfen).unwrap();
+        f(&pos);
+        let mut moves = MoveList::new();
+        generate_legal(&pos, &mut moves);
+        for &mv in &moves {
+            pos.do_move(mv, pos.gives_check(mv));
+            f(&pos);
+            pos.undo_move(mv);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "nnue-threat"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_full_refresh_indices_match_per_perspective() {
+        for_each_full_refresh_test_position(|pos| {
+            let mut actual: [Vec<usize>; 2] = std::array::from_fn(|_| Vec::new());
+            for_each_active_threat_index_both(pos, |p, index| actual[p.index()].push(index));
+            for perspective in [Color::Black, Color::White] {
+                let mut expected = Vec::new();
+                for_each_active_threat_index(
+                    pos,
+                    perspective,
+                    pos.king_square(perspective),
+                    |index| expected.push(index),
+                );
+                expected.sort_unstable();
+                actual[perspective.index()].sort_unstable();
+                assert_eq!(actual[perspective.index()], expected, "{perspective:?}");
+            }
+        });
+    }
 
     #[test]
     fn test_threat_class_from_piece_type() {

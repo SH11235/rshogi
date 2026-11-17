@@ -115,7 +115,7 @@ HalfKP / HalfKx 専用の別ネットワーク経路は対象外。
 | `nnue_ft_diff_rows` | 通常差分更新で足し引きした駒 FT 行数。融合 fast path も含む | FT の差分ループ / try_apply_dirty_piece_fast_impl、動的版 apply_feature_changes / try_apply_dirty_piece_fast |
 | `nnue_finny_rows` | valid な Finny entry の差分として足し引きした行数 | キャッシュ refresh、動的版 refresh_perspective |
 | `nnue_ft_full_rows` | bias から全再構築するときに足した駒 FT 行数 | FT の refresh、キャッシュ refresh、動的版 refresh_perspective |
-| `nnue_threat_full` / `nnue_threat_full_rows` | threat の全列挙し直し回数 / 列挙して足した行数 | FT 内の全 for_each_active_threat_index 呼び出し、動的版 refresh_threat |
+| `nnue_threat_full` / `nnue_threat_full_rows` | threat の全再構築の視点数 / 列挙して足した行数 | FT の batch 全再構築（両視点共有列挙を含む）、動的版 refresh_threat |
 | `nnue_threat_incremental` / `nnue_threat_diff_rows` | threat の視点ごとの差分更新回数 / 足し引きした行数 | FT の更新処理 / apply_threat_rows |
 | `nnue_eval_ft_incremental` / `nnue_eval_ft_finny` / `nnue_eval_ft_full` | 1回の更新要求内でその駒 FT 経路を使った要求数。複数経路を使えば重複して数える | `diagnostics::NnueRequest::drop` |
 | `nnue_eval_threat_incremental` / `nnue_eval_threat_full` | 1回の更新要求内でその threat 経路を使った要求数 | 同上 |
@@ -203,6 +203,42 @@ valid Finny entry を使った視点だけを実行行数と対応させる。in
 祖先の計算済みフラグだけを読み、変更しない。
 この行数比較には祖先からの accumulator copy、Finny への同期書込み、探索・dirty 整理の命令費用を含めない。
 反実仮想の経路を採用した際の速度改善率を表すものではない。
+
+### Finny から bias 全再構築への切り替えの反実仮想
+
+静的 LayerStacks の valid Finny entry から差分更新した視点が対象。
+`diff = removed + added`、`active = 現在の駒リストの非 ZERO 要素数` とする。
+特徴量に含めない玉スロットは ZERO 済みのリストを数えるので、bias から全再構築する際の加算行数に一致する。
+invalid entry の全再構築は対象外。差分0行の valid entry も含む。
+
+| key | 意味 |
+| --- | --- |
+| `finny_rebuild_perspectives` | valid Finny entry を差分更新した視点数 |
+| `finny_rebuild_diff_rows` | 対象視点の diff の合計 |
+| `finny_rebuild_active_rows` | 対象視点の active の合計 |
+| `finny_rebuild_candidates` | `diff >= active` を満たす視点数。同数も含む |
+| `finny_rebuild_saved_rows` | 候補視点の `diff - active` の合計。同数なら0 |
+
+判定は YaneuraOu の `refresh_accumulator_using_finny_entry` と同じ行数条件。
+実際の更新は差分のままで、bias からの作り直しには切り替えない。
+行数だけの比較であり、速度改善率は表さない。
+
+### partial_insertion_sort の呼び出し元別診断
+
+`c` は `capture`（通常探索・静止探索・ProbCut の捕獲手の全並べ）、
+`evasion`（王手回避手の全並べ）、`quiet`（閾値付き）、`other`（その他）。
+現在の探索中の呼び出し元は前3種。空・1要素の早期 return も呼び出しに含める。
+
+| key | 意味 |
+| --- | --- |
+| `sort_c_calls` | 呼び出し回数 |
+| `sort_c_len` | 入力長 end の合計 |
+| `sort_c_shifts` | 挿入内側 while で要素を右へ1つ動かした回数の合計。従来の `sort_shifts` の内訳 |
+| `sort_c_passed` | 呼び出し時の `[0, end)` で `value >= limit` の要素数の合計。先頭も条件で判定し、無条件で sorted 領域に入ることとは区別する |
+| `sort_c_len_bucket[b]` | 長さ分布の呼び出し回数。b=0: 0〜1、1: 2〜4、2: 5〜8、3: 9〜16、4: 17〜32、5: 33〜64、6: 65以上 |
+
+上表の `c` を呼び出し元名で置換した key を出力する（例: `sort_capture_calls`）。
+シフト数には、閾値外の要素を未整列領域へ退避する代入や挿入要素の最後の書込みを含めない。
 
 ### 評価の取得元と同一入力の再登場
 

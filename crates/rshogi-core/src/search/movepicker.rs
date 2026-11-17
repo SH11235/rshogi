@@ -472,7 +472,13 @@ impl MovePicker {
                     }
 
                     self.score_captures(pos, history);
-                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
+                    partial_insertion_sort(
+                        self.moves.as_mut_slice(),
+                        self.end_cur,
+                        i32::MIN,
+                        #[cfg(feature = "search-stats")]
+                        0,
+                    );
 
                     self.stage = self.stage.next();
                 }
@@ -533,6 +539,8 @@ impl MovePicker {
                             },
                             quiet_count,
                             limit,
+                            #[cfg(feature = "search-stats")]
+                            2,
                         );
                         // sorted 領域末尾位置（現在は実運用で未参照）
                         self.end_good_quiets = self.end_captures + sorted_end;
@@ -622,7 +630,13 @@ impl MovePicker {
                         count as u64,
                     );
                     self.score_evasions(pos, history);
-                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
+                    partial_insertion_sort(
+                        self.moves.as_mut_slice(),
+                        self.end_cur,
+                        i32::MIN,
+                        #[cfg(feature = "search-stats")]
+                        1,
+                    );
 
                     self.stage = Stage::Evasion;
                 }
@@ -924,7 +938,14 @@ impl MovePicker {
 /// ## 計算量
 /// - 挿入ソート相当
 #[inline]
-fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
+fn partial_insertion_sort(
+    moves: &mut [ExtMove],
+    end: usize,
+    limit: i32,
+    #[cfg(feature = "search-stats")] caller: usize,
+) -> usize {
+    #[cfg(feature = "search-stats")]
+    crate::search::diagnostics::sort_call(caller, moves, end, limit);
     //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
     //       if (p->value >= limit) {
     //           ExtMove tmp = *p, *q;
@@ -955,7 +976,11 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
                 while q > 0 && (*base.add(q - 1)).value < tmp.value {
                     *base.add(q) = *base.add(q - 1);
                     #[cfg(feature = "search-stats")]
-                    crate::search::diagnostics::add(crate::search::diagnostics::SORT_SHIFTS, 1);
+                    {
+                        use crate::search::diagnostics as d;
+                        d::add(d::SORT_SHIFTS, 1);
+                        d::add(d::SORT_CALLER + caller * 11 + 2, 1);
+                    }
                     q -= 1;
                 }
                 *base.add(q) = tmp;
@@ -1217,6 +1242,30 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "search-stats")]
+    #[test]
+    fn partial_sort_caller_counts_shifts_and_threshold() {
+        use crate::search::diagnostics as d;
+        for caller in 0..4 {
+            d::reset();
+            let mut moves = [0, 3, -1, 2].map(|v| ExtMove::new(Move::NONE, v));
+            assert_eq!(partial_insertion_sort(&mut moves, 4, 1, caller), 2);
+            assert_eq!(moves.map(|m| m.value), [3, 2, 0, -1]);
+            let name = ["capture", "evasion", "quiet", "other"][caller];
+            let report = d::report();
+            for (suffix, value) in [
+                ("calls", 1),
+                ("len", 4),
+                ("shifts", 2),
+                ("passed", 2),
+                ("len_bucket[1]", 1),
+            ] {
+                assert!(report.lines().any(|line| line == format!("sort_{name}_{suffix}={value}")));
+            }
+            assert!(report.lines().any(|line| line == "sort_shifts=2"));
+        }
+    }
+
     #[test]
     fn partial_sort_partition_and_permutation() {
         let cases: &[(&[i32], i32, &[i32])] = &[
@@ -1230,7 +1279,13 @@ mod tests {
         for &(values, limit, prefix) in cases {
             let mut moves: Vec<_> = values.iter().map(|&v| ExtMove::new(Move::NONE, v)).collect();
             let len = moves.len();
-            let end = partial_insertion_sort(&mut moves, len, limit);
+            let end = partial_insertion_sort(
+                &mut moves,
+                len,
+                limit,
+                #[cfg(feature = "search-stats")]
+                3,
+            );
             assert_eq!(end, prefix.len().saturating_sub(1));
             let mut actual: Vec<_> = moves.iter().map(|m| m.value).collect();
             assert_eq!(&actual[..prefix.len()], prefix);

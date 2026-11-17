@@ -131,7 +131,9 @@ pub(crate) const THREAT_ENDPOINT_SUCCESS: usize = 310;
 pub(crate) const FT_CF_SINGLE: usize = 314;
 pub(crate) const FT_CF_EQUAL: usize = 317;
 pub(crate) const FT_FINNY_EVALS: usize = 320;
-const KEYS: [&str; 321] = [
+pub(crate) const FINNY_REBUILD: usize = 321;
+pub(crate) const SORT_CALLER: usize = 326;
+const KEYS: [&str; 370] = [
     "quiet_n_depth[0]",
     "quiet_n_depth[1]",
     "quiet_n_depth[2]",
@@ -453,6 +455,55 @@ const KEYS: [&str; 321] = [
     "ft_cf_equal[1]",
     "ft_cf_equal[2]",
     "ft_finny_evals",
+    "finny_rebuild_perspectives",
+    "finny_rebuild_diff_rows",
+    "finny_rebuild_active_rows",
+    "finny_rebuild_candidates",
+    "finny_rebuild_saved_rows",
+    "sort_capture_calls",
+    "sort_capture_len",
+    "sort_capture_shifts",
+    "sort_capture_passed",
+    "sort_capture_len_bucket[0]",
+    "sort_capture_len_bucket[1]",
+    "sort_capture_len_bucket[2]",
+    "sort_capture_len_bucket[3]",
+    "sort_capture_len_bucket[4]",
+    "sort_capture_len_bucket[5]",
+    "sort_capture_len_bucket[6]",
+    "sort_evasion_calls",
+    "sort_evasion_len",
+    "sort_evasion_shifts",
+    "sort_evasion_passed",
+    "sort_evasion_len_bucket[0]",
+    "sort_evasion_len_bucket[1]",
+    "sort_evasion_len_bucket[2]",
+    "sort_evasion_len_bucket[3]",
+    "sort_evasion_len_bucket[4]",
+    "sort_evasion_len_bucket[5]",
+    "sort_evasion_len_bucket[6]",
+    "sort_quiet_calls",
+    "sort_quiet_len",
+    "sort_quiet_shifts",
+    "sort_quiet_passed",
+    "sort_quiet_len_bucket[0]",
+    "sort_quiet_len_bucket[1]",
+    "sort_quiet_len_bucket[2]",
+    "sort_quiet_len_bucket[3]",
+    "sort_quiet_len_bucket[4]",
+    "sort_quiet_len_bucket[5]",
+    "sort_quiet_len_bucket[6]",
+    "sort_other_calls",
+    "sort_other_len",
+    "sort_other_shifts",
+    "sort_other_passed",
+    "sort_other_len_bucket[0]",
+    "sort_other_len_bucket[1]",
+    "sort_other_len_bucket[2]",
+    "sort_other_len_bucket[3]",
+    "sort_other_len_bucket[4]",
+    "sort_other_len_bucket[5]",
+    "sort_other_len_bucket[6]",
 ];
 
 thread_local! {
@@ -658,6 +709,34 @@ impl Drop for NnueRequest {
     }
 }
 
+/// valid Finny の実差分と、bias からの全再構築の行数を比較する。
+pub(crate) fn finny_rebuild(diff: usize, active: usize) {
+    add(FINNY_REBUILD, 1);
+    add(FINNY_REBUILD + 1, diff as u64);
+    add(FINNY_REBUILD + 2, active as u64);
+    if diff >= active {
+        add(FINNY_REBUILD + 3, 1);
+        add(FINNY_REBUILD + 4, (diff - active) as u64);
+    }
+}
+
+pub(crate) fn sort_call(caller: usize, moves: &[ExtMove], end: usize, limit: i32) {
+    let base = SORT_CALLER + caller * 11;
+    add(base, 1);
+    add(base + 1, end as u64);
+    add(base + 3, moves[..end].iter().filter(|m| m.value >= limit).count() as u64);
+    let bucket = match end {
+        0..=1 => 0,
+        2..=4 => 1,
+        5..=8 => 2,
+        9..=16 => 3,
+        17..=32 => 4,
+        33..=64 => 5,
+        _ => 6,
+    };
+    add(base + 4 + bucket, 1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +751,35 @@ mod tests {
         assert!(report.ends_with("quiet_init=0\n"));
         let legacy_end = report.find("--- LMR Cut Node Analysis ---").unwrap();
         assert!(report.find("quiet_n_depth[0]=0").unwrap() > legacy_end);
+    }
+
+    #[test]
+    fn finny_rebuild_counts_equal_and_excess_rows() {
+        reset();
+        for (diff, active) in [(0, 3), (2, 3), (3, 3), (7, 3), (0, 0)] {
+            finny_rebuild(diff, active);
+        }
+        COUNTS.with_borrow(|c| {
+            assert_eq!(&c[FINNY_REBUILD..FINNY_REBUILD + 5], &[5, 12, 12, 3, 4]);
+        });
+    }
+
+    #[test]
+    fn sort_length_buckets_include_both_boundaries() {
+        reset();
+        let moves = [ExtMove::new(Move::NONE, 0); 65];
+        for caller in 0..4 {
+            for end in [0, 1, 2, 4, 5, 8, 9, 16, 17, 32, 33, 64, 65] {
+                sort_call(caller, &moves, end, 1);
+            }
+            COUNTS.with_borrow(|c| {
+                let base = SORT_CALLER + caller * 11;
+                assert_eq!(c[base], 13);
+                assert_eq!(c[base + 1], 256);
+                assert_eq!(c[base + 3], 0);
+                assert_eq!(&c[base + 4..base + 11], &[2, 2, 2, 2, 2, 2, 1]);
+            });
+        }
     }
 
     #[test]
