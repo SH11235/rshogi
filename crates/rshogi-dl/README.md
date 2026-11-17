@@ -85,6 +85,10 @@ target/release/examples/model_probe /path/to/model.onnx 0 4 - false encoded-batc
 
 ## forward の区間診断
 
+`policy-validation-reduction` feature は、ONNX policy 出力の有限性検査を短絡しない論理積に切り替えます。
+既定は無効です。NaN・無限大の拒否条件は同じで、異常値がある場合も検査対象全体を走査します。
+利用する場合は build 時に `--features onnx,policy-validation-reduction` を指定してください。
+
 `inference-diagnostics` feature は `Evaluator::inference_timings()` に固定長・Copy の累積 snapshot を
 追加します。ORT backend、ModelEvaluator、CachedEvaluator に対応し、未対応 evaluator は None です。
 feature を付けない build では、追加の timer・counter・snapshot API はコンパイルされません。

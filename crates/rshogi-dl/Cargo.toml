@@ -19,6 +19,7 @@ libc = "0.2"
 default = []
 onnx = ["dep:ort", "dep:rayon"]
 inference-diagnostics = []
+policy-validation-reduction = []
 
 [dev-dependencies]
 serde_json.workspace = true
