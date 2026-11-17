@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 const MAX_POSITIONS: usize = 1024;
 const MAX_LINE_BYTES: usize = 4096;
 const MAX_REQUESTS: usize = 10_000_000;
-const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false] [--reuse-encoded true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache; SFEN lines on stdin (empty = start position)";
+const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false] [--reuse-encoded true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache|onnx-batch-cache; SFEN lines on stdin (empty = start position)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -25,6 +25,7 @@ enum Mode {
     CacheTokens,
     Onnx,
     OnnxCache,
+    OnnxBatchCache,
 }
 
 impl Mode {
@@ -36,6 +37,7 @@ impl Mode {
             Self::CacheTokens => "cache-tokens",
             Self::Onnx => "onnx",
             Self::OnnxCache => "onnx-cache",
+            Self::OnnxBatchCache => "onnx-batch-cache",
         }
     }
 }
@@ -62,6 +64,7 @@ impl Config {
             Some("cache-tokens") => Mode::CacheTokens,
             Some("onnx") => Mode::Onnx,
             Some("onnx-cache") => Mode::OnnxCache,
+            Some("onnx-batch-cache") => Mode::OnnxBatchCache,
             _ => bail!(USAGE),
         };
         let mut config = Self {
@@ -99,7 +102,7 @@ impl Config {
         ensure!(config.warmup <= MAX_REQUESTS, "warmup must be 0..={MAX_REQUESTS}");
         ensure!((1..=256).contains(&config.batch_size), "batch size must be 1..=256");
         ensure!(config.cache_mib <= 1024, "cache must be 0..=1024 MiB");
-        let actual_model = matches!(mode, Mode::Onnx | Mode::OnnxCache);
+        let actual_model = matches!(mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache);
         ensure!(
             actual_model == config.model.is_some(),
             "--model is required only for ONNX modes"
@@ -108,16 +111,21 @@ impl Config {
             actual_model || (!seen.iter().any(|f| f == "--device" || f == "--cuda-tf32")),
             "device and precision options require an ONNX mode"
         );
-        for flag in ["--cache-mib", "--reuse-encoded"] {
-            ensure!(
-                matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
-                    || !seen.iter().any(|f| f == flag),
-                "{flag} requires a cache mode"
-            );
-        }
         ensure!(
-            mode == Mode::Onnx || config.batch_size == 1,
-            "batch sizes above 1 require onnx mode"
+            matches!(
+                mode,
+                Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache | Mode::OnnxBatchCache
+            ) || !seen.iter().any(|f| f == "--cache-mib"),
+            "--cache-mib requires a cache mode"
+        );
+        ensure!(
+            matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
+                || !seen.iter().any(|f| f == "--reuse-encoded"),
+            "--reuse-encoded requires a scalar cache mode"
+        );
+        ensure!(
+            matches!(mode, Mode::Onnx | Mode::OnnxBatchCache) || config.batch_size == 1,
+            "batch sizes above 1 require onnx or onnx-batch-cache mode"
         );
         Ok(config)
     }
@@ -289,6 +297,46 @@ fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Res
 }
 
 #[cfg(feature = "onnx")]
+fn batch_cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Result<Value> {
+    let setup = Instant::now();
+    let format = inner.input_format().context("missing input format")?;
+    let mut evaluator =
+        CachedEvaluator::with_batch_capacity(inner, config.cache_mib, config.batch_size)?;
+    let mut input = rshogi_dl::InputBatchBuffer::new(format, config.batch_size)?;
+    let mut values = vec![0.0; config.batch_size];
+    let mut policy = vec![0.0; config.batch_size * MAX_MOVE_LABEL_NUM];
+    let setup_seconds = setup.elapsed().as_secs_f64();
+    let mut pass = |evaluator: &mut CachedEvaluator<E>| {
+        let mut checksum = 0.0;
+        for positions in positions.chunks(config.batch_size) {
+            input.clear();
+            for position in positions {
+                input.push(black_box(position))?;
+            }
+            let n = positions.len();
+            evaluator.evaluate_encoded_batch(
+                input.view(),
+                &mut values[..n],
+                &mut policy[..n * MAX_MOVE_LABEL_NUM],
+            )?;
+            checksum += f64::from(values[0]) + f64::from(policy[0]);
+            black_box((&values, &policy));
+        }
+        Ok(checksum)
+    };
+    let warmup = measure(|| pass(&mut evaluator), config.warmup)?;
+    evaluator.clear();
+    let cold = measure(|| pass(&mut evaluator), 1)?;
+    let cold_stats = stats(evaluator.stats());
+    let cold_nn_positions = evaluator.nn_positions();
+    evaluator.reset_stats();
+    let measured = measure(|| pass(&mut evaluator), config.iterations)?;
+    Ok(
+        json!({"setup_seconds":setup_seconds,"allocated_bytes":evaluator.allocated_bytes(),"batch_allocated_bytes":evaluator.batch_allocated_bytes(),"input_allocated_bytes":input.allocated_bytes(),"warmup":warmup,"cold":cold,"cold_stats":cold_stats,"cold_nn_positions":cold_nn_positions,"measured":measured,"measured_stats":stats(evaluator.stats()),"measured_nn_positions":evaluator.nn_positions()}),
+    )
+}
+
+#[cfg(feature = "onnx")]
 fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
     use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
 
@@ -314,6 +362,12 @@ fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
     };
     if config.mode == Mode::OnnxCache {
         let mut report = cache(evaluator, config, positions)?;
+        report["model_setup_seconds"] = json!(model_setup_seconds);
+        report["input_format"] = json!(format);
+        return Ok(report);
+    }
+    if config.mode == Mode::OnnxBatchCache {
+        let mut report = batch_cache(evaluator, config, positions)?;
         report["model_setup_seconds"] = json!(model_setup_seconds);
         report["input_format"] = json!(format);
         return Ok(report);
@@ -354,13 +408,13 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
         Mode::CacheTokens => {
             cache(SyntheticEvaluator(InputFormat::StmTokensV1), config, positions)?
         }
-        Mode::Onnx | Mode::OnnxCache => onnx(config, positions)?,
+        Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache => onnx(config, positions)?,
     };
     report["mode"] = json!(config.mode.name());
     report["backend"] = json!(match config.mode {
         Mode::CacheBasic | Mode::CacheTokens => "synthetic-cache-only",
         Mode::EncodeBasic | Mode::EncodeTokens => "encoder-only",
-        Mode::Onnx | Mode::OnnxCache => "onnx-runtime",
+        Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache => "onnx-runtime",
     });
     report["positions"] = json!(positions.len());
     report["iterations"] = json!(config.iterations);
@@ -371,13 +425,16 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
             .then_some(config.reuse_encoded)
     );
     report["cache_mib"] = json!(
-        matches!(config.mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
-            .then_some(config.cache_mib)
+        matches!(
+            config.mode,
+            Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache | Mode::OnnxBatchCache
+        )
+        .then_some(config.cache_mib)
     );
-    let onnx = matches!(config.mode, Mode::Onnx | Mode::OnnxCache);
+    let onnx = matches!(config.mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache);
     report["device"] = json!(onnx.then_some(config.device));
     report["cuda_tf32"] = json!(onnx.then_some(config.cuda_tf32));
-    if !matches!(config.mode, Mode::Onnx | Mode::OnnxCache) {
+    if !matches!(config.mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache) {
         report["input_format"] = json!(match config.mode {
             Mode::EncodeBasic | Mode::CacheBasic => "basic",
             _ => "stm-tokens-v1",
@@ -420,6 +477,13 @@ mod tests {
             vec!["encode-tokens", "--cache-mib", "1"],
             vec!["onnx", "--model", "model.onnx", "--reuse-encoded", "false"],
             vec!["cache-tokens", "--reuse-encoded", "invalid"],
+            vec![
+                "onnx-batch-cache",
+                "--model",
+                "model.onnx",
+                "--reuse-encoded",
+                "false",
+            ],
             vec!["cache-tokens", "--iterations", "1", "--iterations", "2"],
             vec!["cache-tokens", "--unknown", "1"],
             vec!["cache-tokens", "--warmup"],
@@ -429,6 +493,23 @@ mod tests {
         let config = config(&["cache-tokens", "--iterations", "10000000"])
             .expect("valid single-position iteration count");
         assert!(config.check_requests(2).is_err());
+    }
+
+    #[test]
+    fn encoded_batch_cache_accepts_explicit_capacity_and_cache_off() -> Result<()> {
+        let config = config(&[
+            "onnx-batch-cache",
+            "--model",
+            "model.onnx",
+            "--batch-size",
+            "8",
+            "--cache-mib",
+            "0",
+        ])?;
+        assert_eq!(config.mode, Mode::OnnxBatchCache);
+        assert_eq!(config.batch_size, 8);
+        assert_eq!(config.cache_mib, 0);
+        Ok(())
     }
 
     #[test]
