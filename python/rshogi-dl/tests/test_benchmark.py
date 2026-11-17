@@ -23,7 +23,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             {"batch_size": 0}, {"batch_size": 4097}, {"window_batches": 0},
             {"window_batches": 33}, {"threads": 0}, {"threads": 257}, {"seed": -1},
             {"seed": 2**63}, {"execution": "other"}, {"precision": "fp16"},
-            {"attention_backend": "other"}, {"input_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
+            {"attention_backend": "other"}, {"input_mode": "other"}, {"policy_rows_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
             {"fused_optimizer": 1}, {"learning_rate": 0.0}, {"learning_rate": float("nan")},
             {"weight_decay": -1.0}, {"weight_decay": float("inf")},
         ]
@@ -89,6 +89,31 @@ class BenchmarkTest(unittest.TestCase):
             self.assertEqual(self.report[key], streamed[key], key)
         other = benchmark.run_benchmark(self.data, TEST_CONFIG, replace(self.config, seed=6))
         self.assertNotEqual(self.report["initial_weights_sha256"], other["initial_weights_sha256"])
+
+    def test_policy_rows_mode_preserves_input_losses_and_updates(self) -> None:
+        for input_mode in ("resident", "stream"):
+            with self.subTest(input_mode=input_mode):
+                prepared = benchmark.run_benchmark(
+                    self.data, TEST_CONFIG, replace(self.config, input_mode=input_mode)
+                )
+                legacy = benchmark.run_benchmark(
+                    self.data, TEST_CONFIG,
+                    replace(self.config, input_mode=input_mode, policy_rows_mode="legacy"),
+                )
+                self.assertEqual(prepared["benchmark_config"]["policy_rows_mode"], "prepared")
+                self.assertEqual(legacy["benchmark_config"]["policy_rows_mode"], "legacy")
+                for key in ("input_window_sha256", "initial_weights_sha256", "final_weights_sha256",
+                            "losses_sha256", "initial_loss", "final_loss", "optimizer_updates"):
+                    self.assertEqual(prepared[key], legacy[key], key)
+
+    def test_to_device_preserves_legacy_batches_without_prepared_rows(self) -> None:
+        batch = next(benchmark.iter_batches(self.data, 2))
+        legacy = benchmark._to_device(batch, torch.device("cpu"), policy_rows_mode="legacy")
+        self.assertIsNone(legacy.policy_rows)
+        copied = benchmark._to_device(legacy, torch.device("cpu"))
+        self.assertIsNone(copied.policy_rows)
+        for name in ("tokens", "legal_index", "legal_mask", "policy_target", "policy_present", "value"):
+            self.assertTrue(torch.equal(getattr(batch, name), getattr(copied, name)), name)
 
     def test_sdpa_uses_the_same_initial_weights_and_loss(self) -> None:
         report = benchmark.run_benchmark(
