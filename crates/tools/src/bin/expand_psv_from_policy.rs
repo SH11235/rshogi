@@ -3,7 +3,7 @@
 //! PSV ファイルの各局面に対して dlshogi 系 ONNX モデルのポリシー推論を行い、
 //! 合法手の選択確率が閾値を超える手について次局面を生成し、新しい PSV ファイルに書き出す。
 //!
-//! AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`) の両方に対応。
+//! AobaZero (`--onnx-model`) と dlshogi / stm-tokens-v1 (`--dlshogi-onnx-model`) に対応。
 //!
 //! # 使用例
 //!
@@ -54,7 +54,7 @@ struct Cli {
     #[arg(long)]
     onnx_model: Option<PathBuf>,
 
-    /// 標準 dlshogi ONNX モデルファイル（DL水匠等、--onnx-model と排他）
+    /// dlshogi または stm-tokens-v1 ONNX モデルファイル（--onnx-model と排他）
     #[arg(long)]
     dlshogi_onnx_model: Option<PathBuf>,
 
@@ -92,6 +92,108 @@ fn readonly_resources<'a>(
     let mut resources = vec![cli.input.as_path(), selected_model];
     resources.extend(ort_library);
     resources
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn token_input_contract(
+    session: &ort::session::Session,
+    use_aoba: bool,
+    use_tensorrt: bool,
+    max_batch: usize,
+) -> Result<bool> {
+    use ort::value::{TensorElementType, ValueType};
+    let metadata = session.metadata().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let keys = metadata.custom_keys().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let custom = |key: &str| -> Result<Option<String>> {
+        if keys.iter().any(|name| name == key) {
+            metadata
+                .custom(key)
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("cannot read metadata {key}"))
+        } else {
+            Ok(None)
+        }
+    };
+    match custom("rshogi.input_format")?.as_deref() {
+        None => return Ok(false),
+        Some("stm-tokens-v1") => {}
+        Some(other) => anyhow::bail!("unsupported ONNX input format: {other}"),
+    }
+    anyhow::ensure!(!use_aoba, "stm-tokens-v1 requires --dlshogi-onnx-model");
+    anyhow::ensure!(
+        !use_tensorrt,
+        "stm-tokens-v1 with TensorRT is not supported; use CUDA or CPU EP"
+    );
+    for (key, expected) in [
+        ("rshogi.policy_format", "direction-destination-2187-v1"),
+        ("rshogi.value_format", "stm-expected-score-sigmoid-v1"),
+    ] {
+        anyhow::ensure!(
+            custom(key)?.as_deref() == Some(expected),
+            "missing or conflicting metadata {key}"
+        );
+    }
+    for (outlets, expected, dtype) in [
+        (
+            session.inputs(),
+            vec![("tokens", rshogi_dl::tokens::TOKEN_COUNT)],
+            TensorElementType::Int64,
+        ),
+        (
+            session.outputs(),
+            vec![("output_policy", 2187), ("output_value", 1)],
+            TensorElementType::Float32,
+        ),
+    ] {
+        anyhow::ensure!(
+            outlets.len() == expected.len(),
+            "unexpected token model input/output count"
+        );
+        for (name, width) in expected {
+            let outlet = outlets
+                .iter()
+                .find(|outlet| outlet.name() == name)
+                .ok_or_else(|| anyhow::anyhow!("missing tensor {name}"))?;
+            let ValueType::Tensor { ty, shape, .. } = outlet.dtype() else {
+                anyhow::bail!("{name} must be a tensor");
+            };
+            anyhow::ensure!(
+                *ty == dtype && shape.len() == 2 && shape[1] == width as i64,
+                "incorrect token model dtype/shape: {name}"
+            );
+            anyhow::ensure!(
+                shape[0] == -1 || (shape[0] == 1 && max_batch == 1),
+                "{name} must support dynamic batches or batch1"
+            );
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn validate_token_values(shape: &[i64], values: &[f32], rows: usize) -> Result<()> {
+    anyhow::ensure!(
+        shape == [rows as i64, 1] && values.len() == rows,
+        "token output_value must have shape [{rows}, 1]"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+        "token output_value must contain finite probabilities in [0, 1]"
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn validate_token_policy(shape: &[i64], values: &[f32], rows: usize) -> Result<()> {
+    anyhow::ensure!(
+        shape == [rows as i64, 2187] && values.len() == rows * 2187,
+        "token output_policy must have shape [{rows}, 2187]"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "token output_policy must contain finite logits"
+    );
+    Ok(())
 }
 
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
@@ -299,7 +401,8 @@ fn run(cli: &Cli) -> Result<()> {
         builder.commit_from_file(onnx_path).map_err(ort_err)?
     };
 
-    let batch_size = cli.batch_size as usize;
+    let batch_size = usize::try_from(cli.batch_size).context("batch size exceeds this platform")?;
+    let token_inputs = token_input_contract(&session, use_aoba, cli.tensorrt, batch_size)?;
     let threshold = cli.threshold / 100.0; // % → 割合
 
     eprintln!("Model loaded. Batch size: {batch_size}, threshold: {:.1}%", cli.threshold);
@@ -342,9 +445,6 @@ fn run(cli: &Cli) -> Result<()> {
         .with_context(|| format!("Failed to create {}", cli.output.display()))?;
     let mut writer = BufWriter::new(out_file);
 
-    // 特徴量バッファ
-    let mut f1_buf = vec![0.0f32; batch_size * f1_size];
-    let mut f2_buf = vec![0.0f32; batch_size * f2_size];
     let mut buffer = [0u8; PackedSfenValue::SIZE];
 
     let output_mem =
@@ -359,33 +459,56 @@ fn run(cli: &Cli) -> Result<()> {
     let mut logits_buf = Vec::with_capacity(600);
     let mut probs_buf = Vec::with_capacity(600);
 
-    // 特徴量構築クロージャ（モデル別）
     type FeatureBuilder = Box<dyn Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Sync>;
-    let build_features: FeatureBuilder = if use_aoba {
-        #[cfg(feature = "aobazero-onnx")]
-        {
-            let draw_ply = cli.draw_ply;
-            Box::new(move |pos, f1, f2, psv| {
-                tools::aobazero_features::make_input_features(
-                    pos,
-                    f1,
-                    f2,
-                    psv.game_ply as i32,
-                    draw_ply,
-                );
-            })
-        }
-        #[cfg(not(feature = "aobazero-onnx"))]
-        unreachable!()
+    enum Inputs {
+        Basic {
+            f1: Vec<f32>,
+            f2: Vec<f32>,
+            build: FeatureBuilder,
+        },
+        Tokens(Vec<i64>),
+    }
+    let mut inputs = if token_inputs {
+        Inputs::Tokens(vec![
+            0;
+            batch_size
+                .checked_mul(rshogi_dl::tokens::TOKEN_COUNT)
+                .context("token batch size overflow")?
+        ])
     } else {
-        #[cfg(feature = "dlshogi-onnx")]
-        {
-            Box::new(|pos, f1, f2, _psv| {
-                tools::dlshogi_features::make_input_features(pos, f1, f2);
-            })
+        // 特徴量構築クロージャ（モデル別）
+        let build_features: FeatureBuilder = if use_aoba {
+            #[cfg(feature = "aobazero-onnx")]
+            {
+                let draw_ply = cli.draw_ply;
+                Box::new(move |pos, f1, f2, psv| {
+                    tools::aobazero_features::make_input_features(
+                        pos,
+                        f1,
+                        f2,
+                        psv.game_ply as i32,
+                        draw_ply,
+                    );
+                })
+            }
+            #[cfg(not(feature = "aobazero-onnx"))]
+            unreachable!()
+        } else {
+            #[cfg(feature = "dlshogi-onnx")]
+            {
+                Box::new(|pos, f1, f2, _psv| {
+                    tools::dlshogi_features::make_input_features(pos, f1, f2);
+                })
+            }
+            #[cfg(not(feature = "dlshogi-onnx"))]
+            unreachable!()
+        };
+
+        Inputs::Basic {
+            f1: vec![0.0f32; batch_size * f1_size],
+            f2: vec![0.0f32; batch_size * f2_size],
+            build: build_features,
         }
-        #[cfg(not(feature = "dlshogi-onnx"))]
-        unreachable!()
     };
 
     loop {
@@ -401,19 +524,29 @@ fn run(cli: &Cli) -> Result<()> {
             }
             match reader.read_exact(&mut buffer) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if token_inputs
+                        && total_processed + (batch_records.len() as u64) < total_records
+                    {
+                        return Err(e)
+                            .context("token PSV input ended before the declared record count");
+                    }
+                    break;
+                }
                 Err(e) => return Err(e.into()),
             }
             let psv = match PackedSfenValue::from_bytes(&buffer) {
                 Some(p) => p,
                 None => {
+                    anyhow::ensure!(!token_inputs, "invalid PSV record for token model");
                     error_count += 1;
                     continue;
                 }
             };
             let sfen = match unpack_sfen(&psv.sfen) {
                 Ok(s) => s,
-                Err(_) => {
+                Err(error) => {
+                    anyhow::ensure!(!token_inputs, "invalid packed SFEN for token model: {error}");
                     error_count += 1;
                     continue;
                 }
@@ -426,41 +559,75 @@ fn run(cli: &Cli) -> Result<()> {
             break;
         }
 
-        // 特徴量構築（rayon 並列）
-        f1_buf[..actual_batch * f1_size].fill(0.0);
-        f2_buf[..actual_batch * f2_size].fill(0.0);
+        let mut binding = match &mut inputs {
+            Inputs::Basic { f1, f2, build } => {
+                // 特徴量構築（rayon 並列）
+                f1[..actual_batch * f1_size].fill(0.0);
+                f2[..actual_batch * f2_size].fill(0.0);
 
-        let batch_errors = AtomicU64::new(0);
-        let f1_slices: Vec<&mut [f32]> =
-            f1_buf[..actual_batch * f1_size].chunks_mut(f1_size).collect();
-        let f2_slices: Vec<&mut [f32]> =
-            f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
+                let batch_errors = AtomicU64::new(0);
+                let f1_slices: Vec<&mut [f32]> =
+                    f1[..actual_batch * f1_size].chunks_mut(f1_size).collect();
+                let f2_slices: Vec<&mut [f32]> =
+                    f2[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
-        f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
-            |((f1, f2), (psv, sfen))| {
-                let mut pos = Position::new();
-                if pos.set_sfen(sfen).is_err() {
-                    batch_errors.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                build_features(&pos, f1, f2, psv);
-            },
-        );
+                f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
+                    |((f1, f2), (psv, sfen))| {
+                        let mut pos = Position::new();
+                        if pos.set_sfen(sfen).is_err() {
+                            batch_errors.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        build(&pos, f1, f2, psv);
+                    },
+                );
 
-        error_count += batch_errors.load(Ordering::Relaxed);
+                error_count += batch_errors.load(Ordering::Relaxed);
 
-        // ONNX 推論
-        let shape1: [usize; 4] = [actual_batch, input1_ch, 9, 9];
-        let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
-            .map_err(ort_err)?;
+                // ONNX 推論
+                let shape1: [usize; 4] = [actual_batch, input1_ch, 9, 9];
+                let input1 =
+                    TensorRef::<f32>::from_array_view((shape1, &f1[..actual_batch * f1_size]))
+                        .map_err(ort_err)?;
 
-        let shape2: [usize; 4] = [actual_batch, input2_ch, 9, 9];
-        let input2 = TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * f2_size]))
-            .map_err(ort_err)?;
+                let shape2: [usize; 4] = [actual_batch, input2_ch, 9, 9];
+                let input2 =
+                    TensorRef::<f32>::from_array_view((shape2, &f2[..actual_batch * f2_size]))
+                        .map_err(ort_err)?;
 
-        let mut binding = session.create_binding().map_err(ort_err)?;
-        binding.bind_input("input1", &input1).map_err(ort_err)?;
-        binding.bind_input("input2", &input2).map_err(ort_err)?;
+                let mut binding = session.create_binding().map_err(ort_err)?;
+                binding.bind_input("input1", &input1).map_err(ort_err)?;
+                binding.bind_input("input2", &input2).map_err(ort_err)?;
+
+                binding
+            }
+            Inputs::Tokens(tokens) => {
+                let active = &mut tokens[..actual_batch * rshogi_dl::tokens::TOKEN_COUNT];
+                active
+                    .par_chunks_mut(rshogi_dl::tokens::TOKEN_COUNT)
+                    .zip(batch_records.par_iter())
+                    .enumerate()
+                    .try_for_each(|(row, (tokens, (_, sfen)))| -> Result<()> {
+                        let mut position = Position::new();
+                        position.set_sfen(sfen).with_context(|| {
+                            format!("invalid token position at batch row {row}")
+                        })?;
+                        let encoded = rshogi_dl::tokens::encode(&position)?;
+                        for (destination, token) in tokens.iter_mut().zip(encoded) {
+                            *destination = i64::from(token);
+                        }
+                        Ok(())
+                    })?;
+                let tokens = TensorRef::<i64>::from_array_view((
+                    [actual_batch, rshogi_dl::tokens::TOKEN_COUNT],
+                    &*active,
+                ))
+                .map_err(ort_err)?;
+                let mut binding = session.create_binding().map_err(ort_err)?;
+                binding.bind_input("tokens", &tokens).map_err(ort_err)?;
+                binding
+            }
+        };
         binding.bind_output_to_device("output_policy", &output_mem).map_err(ort_err)?;
         binding.bind_output_to_device("output_value", &output_mem).map_err(ort_err)?;
 
@@ -469,6 +636,12 @@ fn run(cli: &Cli) -> Result<()> {
         // ポリシー出力を取得: shape [batch, MAX_MOVE_LABEL_NUM]
         let (policy_shape, policy_data) =
             outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
+        if token_inputs {
+            let (value_shape, values) =
+                outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
+            validate_token_values(&value_shape[..], values, actual_batch)?;
+            validate_token_policy(&policy_shape[..], policy_data, actual_batch)?;
+        }
         let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
         if policy_data.len() != expected_len {
             anyhow::bail!(
@@ -483,7 +656,8 @@ fn run(cli: &Cli) -> Result<()> {
         // 各局面について合法手の確率を計算し、閾値超えの次局面を生成
         for (i, (psv, sfen)) in batch_records.iter().enumerate() {
             let mut pos = Position::new();
-            if pos.set_sfen(sfen).is_err() {
+            if let Err(error) = pos.set_sfen(sfen) {
+                anyhow::ensure!(!token_inputs, "invalid token expansion position: {error}");
                 continue;
             }
             let color = pos.side_to_move();
@@ -590,6 +764,150 @@ mod tests {
         fs::write(cli.dlshogi_onnx_model.as_ref().unwrap(), b"model fixture")?;
         fs::write(&library, b"runtime fixture")?;
         Ok((dir, cli, library))
+    }
+
+    #[cfg(feature = "dlshogi-onnx")]
+    fn constant_token_model(value: f32, policy: f32) -> Vec<u8> {
+        fn varint(mut value: u64) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            while value >= 128 {
+                bytes.push(value as u8 | 128);
+                value >>= 7;
+            }
+            bytes.push(value as u8);
+            bytes
+        }
+        fn number(field: u64, value: u64) -> Vec<u8> {
+            [varint(field << 3), varint(value)].concat()
+        }
+        fn bytes(field: u64, value: &[u8]) -> Vec<u8> {
+            [
+                varint((field << 3) | 2),
+                varint(value.len() as u64),
+                value.to_vec(),
+            ]
+            .concat()
+        }
+        fn value_info(name: &str, dtype: u64, width: u64) -> Vec<u8> {
+            let shape = [bytes(1, &number(1, 1)), bytes(1, &number(1, width))].concat();
+            let tensor = [number(1, dtype), bytes(2, &shape)].concat();
+            [bytes(1, name.as_bytes()), bytes(2, &bytes(1, &tensor))].concat()
+        }
+        fn tensor(name: &str, width: usize, value: f32) -> Vec<u8> {
+            let raw: Vec<u8> = std::iter::repeat_n(value.to_le_bytes(), width).flatten().collect();
+            [
+                number(1, 1),
+                number(1, width as u64),
+                number(2, 1),
+                bytes(8, name.as_bytes()),
+                bytes(9, &raw),
+            ]
+            .concat()
+        }
+        let graph = [
+            bytes(2, b"constant-token-output"),
+            bytes(5, &tensor("output_value", 1, value)),
+            bytes(5, &tensor("output_policy", 2187, policy)),
+            bytes(11, &value_info("tokens", 7, 96)),
+            bytes(12, &value_info("output_value", 1, 1)),
+            bytes(12, &value_info("output_policy", 1, 2187)),
+        ]
+        .concat();
+        let mut model = [number(1, 8), bytes(7, &graph), bytes(8, &number(2, 18))].concat();
+        for (key, value) in [
+            ("rshogi.input_format", "stm-tokens-v1"),
+            ("rshogi.policy_format", "direction-destination-2187-v1"),
+            ("rshogi.value_format", "stm-expected-score-sigmoid-v1"),
+        ] {
+            model.extend(bytes(
+                14,
+                &[bytes(1, key.as_bytes()), bytes(2, value.as_bytes())].concat(),
+            ));
+        }
+        model
+    }
+
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    #[test]
+    fn token_output_contract_rejects_wrong_shape_and_nonfinite_data() {
+        assert!(validate_token_values(&[1, 1], &[0.5], 1).is_ok());
+        for value in [f32::NAN, f32::INFINITY, -0.01, 1.01] {
+            assert!(validate_token_values(&[1, 1], &[value], 1).is_err());
+        }
+        assert!(validate_token_values(&[1], &[0.5], 1).is_err());
+        assert!(validate_token_values(&[2, 1], &[0.5], 2).is_err());
+        let mut policy = vec![0.0; 2187];
+        assert!(validate_token_policy(&[1, 2187], &policy, 1).is_ok());
+        assert!(validate_token_policy(&[2187, 1], &policy, 1).is_err());
+        policy[0] = f32::NAN;
+        assert!(validate_token_policy(&[1, 2187], &policy, 1).is_err());
+    }
+
+    #[cfg(feature = "dlshogi-onnx")]
+    #[test]
+    #[ignore = "requires ORT_DYLIB_PATH pointing to a CPU-capable ONNX Runtime"]
+    fn token_cpu_runtime_validates_before_expansion_and_preserves_psv_fields() -> Result<()> {
+        use rshogi_core::movegen::{MoveList, generate_legal};
+        use rshogi_core::position::Position;
+        use tools::packed_sfen::{PackedSfenValue, pack_position};
+        for (value, policy, invalid_input, succeeds) in [
+            (0.75, 0.0, false, true),
+            (f32::NAN, 0.0, false, false),
+            (f32::INFINITY, 0.0, false, false),
+            (-0.1, 0.0, false, false),
+            (1.1, 0.0, false, false),
+            (0.75, f32::NAN, false, false),
+            (0.75, 0.0, true, false),
+        ] {
+            let (directory, mut cli, _) = fixture()?;
+            fs::write(
+                cli.dlshogi_onnx_model.as_ref().unwrap(),
+                constant_token_model(value, policy),
+            )?;
+            let mut position = Position::new();
+            position.set_hirate();
+            let record = PackedSfenValue {
+                sfen: pack_position(&position),
+                score: 73,
+                move16: 31,
+                game_ply: 7,
+                game_result: 1,
+                padding: 0,
+            };
+            let input = if invalid_input {
+                vec![255; PackedSfenValue::SIZE]
+            } else {
+                record.to_bytes().to_vec()
+            };
+            fs::write(&cli.input, &input)?;
+            cli.gpu_id = -1;
+            cli.batch_size = 1;
+            cli.threshold = 0.0;
+            let result = run(&cli);
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            assert_eq!(fs::read(&cli.input)?, input);
+            let output = fs::read(&cli.output)?;
+            if succeeds {
+                let mut legal = MoveList::new();
+                generate_legal(&position, &mut legal);
+                assert_eq!(output.len(), legal.len() * PackedSfenValue::SIZE);
+                for bytes in output.as_chunks::<{ PackedSfenValue::SIZE }>().0 {
+                    let child = PackedSfenValue::from_bytes(bytes).unwrap();
+                    assert_eq!(
+                        (child.score, child.move16, child.game_result, child.padding),
+                        (0, 0, 0, 0)
+                    );
+                    assert_eq!(child.game_ply, 8);
+                }
+            } else {
+                assert!(
+                    output.is_empty(),
+                    "invalid token model/input wrote child positions in {}",
+                    directory.path().display()
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

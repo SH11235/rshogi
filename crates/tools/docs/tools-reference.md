@@ -30,7 +30,7 @@
 | [`relabel_psv`](relabel_psv.md) | 勝敗による score 置換、宣言勝ち・diversion の検査 |
 | [`rescore_psv`](rescore_psv.md) | NNUE / 探索 / 外部 USI / ONNX で再評価し、再開・score sidecar に対応。探索はスレッド数によらず同じ出力。ONNX は 1 回の実行に渡した全ファイルでセッションを使い回し、`--onnx-gpu-id 0,1` で複数 GPU を使える |
 | [`rescore_hcpe`](rescore_hcpe.md) | hcpe の eval を固定 depth の NNUE 探索で再評価・再開 |
-| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX policy で PSV の候補局面を展開 |
+| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX（dlshogi / stm-tokens-v1 / AobaZero） policy で PSV の候補局面を展開 |
 | [`psv_gate_by_king_zone`](psv_gate_by_king_zone.md) | 入玉条件による score 合成と行対応 mask の生成 |
 | [`psv_dual_label`](psv_dual_label.md) | 通常・dual-label PSV と score / mask sidecar の相互変換 |
 | [`psv_entered`](psv_entered.md) | 入玉の行の抜き出しと、付け直した入玉の行からの dual-label PSV の作成 |
