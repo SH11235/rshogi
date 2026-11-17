@@ -12,6 +12,11 @@
 形式不一致や推論失敗はエラーを返し、旧 API では再試行しません。buffer を再 encode する前に view の使用を終えてください。
 `CachedEvaluator` 自体の `evaluate_encoded` は未対応の `None` を返します。backend への直接転送は cache 照合と統計を迂回するため、cache を使う呼出し側は `evaluate` に局面を渡してください。
 
+`ModelEvaluator::evaluate_values` は局面を最大 batch ごとに分け、手番側の期待スコアだけを返します。
+`evaluate_with_policy_iter` は `IndexedParallelIterator<Item = &Position>` を受け、最大 batch 以下の
+局面の value と policy を入力順に追記します。既存の slice 形式の `evaluate_with_policy` も利用できます。
+並列 iterator は局面や参照の中間配列を作らず encode します。返す値は確率で、cp への変換は呼出し側で行います。
+
 `InputBatchBuffer::new(format, capacity)` は同じ形式の平坦な入力配列を一度確保します。`push` で局面を encode するか、`push_encoded` で既存の完全入力を追加し、`view()` の `EncodedBatch` を `evaluate_encoded_batch` に渡します。value は局面数、policy は局面数 × 2187 要素を用意します。空の batch は空の出力で受理します。buffer を変更する前に view の使用を終えてください。
 
 batch 推論への対応は `encoded_batch_capacity()` で確認します。`input_format()` の宣言だけでは batch 対応を意味しません。ORT backend は設定した最大 batch size まで対応し、全出力の shape と有限性を確認してから出力へコピーします。形式・容量・出力長の不一致と推論失敗はエラーになり、呼出し側の出力は変更しません。
@@ -76,6 +81,8 @@ target/release/examples/model_probe /path/to/model.onnx 0 4 - false encoded-batc
 
 最後に `basic` または `tokens` を追加すると、入力形式を上書きして形式不一致の拒否も確認できます。
 
+`model_probe` の `parallel` は順序付き並列 iterator API、`values` は value-only API を使います。`values` は最大 1024 局面を `MAX_BATCH` ごとに推論し、JSON の `policy` は空配列になります。これらの mode に入力形式の上書きは指定できません。
+
 ## forward の区間診断
 
 `inference-diagnostics` feature は `Evaluator::inference_timings()` に固定長・Copy の累積 snapshot を
@@ -103,7 +110,7 @@ counter が逆行した場合は None を返します。cache の clear / reset_
 | output_validation_copy | forward 内の shape・有限性検査と出力 copy |
 | cleanup | 出力・binding・MemoryInfo・入力 TensorRef の解放 |
 
-basic / token の Position、encoded scalar、encoded batch は同じ形式ごとの forward を計測します。
+basic / token の Position、value-only、順序付き並列 iterator、encoded scalar、encoded batch は同じ形式ごとの forward を計測します。
 入力 encode・token の i64 への変換・cache 照合・scalar adapter の追加 copy・モデル読込は含みません。
 forward に入る前の引数エラーと空 batch も計数しません。forward 内の Result エラーは失敗区間と
 その時点までに構築した resource の cleanup を記録します。copy 前の shape・有限性検査は維持します。

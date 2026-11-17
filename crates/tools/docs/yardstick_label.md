@@ -1,5 +1,8 @@
 # yardstick_label
 
+ONNX モードは基本 plane / `stm-tokens-v1` モデルに対応します。モデルの指定方法、metadata と
+CPU/CUDA/TensorRT の対応は [ONNX モデルの入力](onnx-models.md) を参照してください。
+
 入力は共通の [38 byte HCPE形式](hcpe-format.md) です。gameResultの手番側視点への変換と無効値のスキップは、ラベリング処理で行います。
 
 LayerStacks の bucket mode（`progresskpabsq16` を含む）と進行度係数は [routing 対応表](nnue-routing.md) を参照してください。
