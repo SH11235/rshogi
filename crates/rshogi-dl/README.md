@@ -4,7 +4,7 @@
 
 `Evaluator` は盤面単独の推論だけを行います。合法手への softmax、手順履歴による終局判定、探索統計は呼び出し側の責務です。NNUE の評価ファイルには対応しません。
 
-`cache::CachedEvaluator` は基本入力の全要素と生の出力を保持する容量固定の wrapper です。0 MiB なら入力作成を省いて委譲します。モデル・provider を所有する evaluator と一緒に構築し、差し替え時は wrapper ごと作り直します。履歴依存の終局値や探索統計は保存しません。基本入力だけに依存し、同じ入力に同じ出力を返す backend に使用してください。
+`cache::CachedEvaluator` は宣言された入力形式の全要素と生の出力を保持する容量固定の wrapper です。基本形式は全 plane の bit 列、token 形式は全 96 byte を key にし、hash が衝突しても完全入力を照合します。0 MiB なら入力作成を省いて委譲します。モデル・provider を所有する evaluator と一緒に構築し、差し替え時は wrapper ごと作り直します。履歴依存の終局値や探索統計は保存しません。宣言した入力だけに依存し、同じ入力に同じ出力を返す backend に使用してください。
 
 既定 feature は GPU や ONNX Runtime に依存しません。`onnx` feature で ORT backend を利用できます。`ORT_DYLIB_PATH` に ONNX Runtime API 24 対応の共有ライブラリを指定してください。`OnnxConfig` の device が非負なら CUDA、負なら CPU を利用します。TensorRT は明示的に選択し、engine cache は利用するモデルと実行環境に対応する場所へ保存してください。
 
