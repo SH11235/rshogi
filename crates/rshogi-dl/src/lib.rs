@@ -7,6 +7,8 @@ pub mod cache;
 #[cfg(feature = "onnx")]
 pub mod environment;
 pub mod features;
+pub mod input;
+pub use input::{EncodedInput, InputBuffer};
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod tokens;
@@ -25,6 +27,12 @@ pub trait Evaluator {
     /// 宣言した入力だけに依存する決定的な推論に限り、キャッシュを有効にできる。
     fn input_format(&self) -> Option<InputFormat> {
         None
+    }
+
+    /// encode 済み入力を推論する。未対応なら出力を変更せず None を返す。
+    /// 対応する実装は、形式不一致や推論失敗をエラーにし、Position による再試行を要求しない。
+    fn evaluate_encoded(&mut self, _: EncodedInput<'_>, _: &mut [f32]) -> Result<Option<f32>> {
+        Ok(None)
     }
 
     /// 手番側の期待スコア（勝ち 1・引き分け 0.5・負け 0）と共通の 2187 policy logits を返す。
