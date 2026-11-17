@@ -318,14 +318,22 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   計算し、この補助 index の有無では変わりません。
 - `--fused-optimizer`: CUDA の fused AdamW を選びます。既定は無効。学習率と weight decay は
   `--learning-rate` (既定 0.001)、`--weight-decay` (既定 0) で固定できます。
+- `--foreach-optimizer`: foreach AdamW を明示的に選びます。既定は無効で、従来の方式を保ちます。
+  `--fused-optimizer` との併用はできません。
+  既定は `fused=False` / `foreach=None` を渡し、対応する Torch 2.14 ではパラメータごとの方式になります。
+  `optimizer_foreach_setting` は constructor の param group 設定 (`true` または `null`) を記録します。
 - `--optimizer-execution eager|compile`: 既定は `eager`。`compile` は同じ AdamW の `step` を
   Inductor で compile します。モデル側の execution / compile mode とは独立し、optimizer の
   CUDA Graphs は無効です。単一 graph は要求せず、graph break を含み得ます。compile 失敗や
-  再 compile 上限は error にし、eager の計測結果として返しません。
+  再 compile 上限、parameter 更新を含む graph が無い場合は error にします。
+  fused optimizer は tracing 対象外となるため、`--fused-optimizer` との併用は拒否します。
+  `optimizer_compile_evidence` は optimizer 専用 backend が compile した graph 数と更新 graph 数で、
+  forward の graph を含みません。呼出し回数や全更新の compile を保証する指標ではありません。
   `zero_grad(set_to_none=True)`・policy 教師なしの head の勾配復元・GradScaler は Python 側に残ります。
 - `--optimizer-capturable`: 既定は無効で、CUDA のみ指定できます。CUDA で optimizer を compile
   するときは必須です。初回 trace による AdamW 設定の暗黙変更を避けるため、constructor へ明示します。
-  比較時は eager にも同じ flag を渡し、fused・学習率・weight decay・入力順序も揃えてください。
+  比較時は eager にも同じ flag を渡し、foreach・学習率・weight decay・入力順序も揃えてください。
+  fused eager との比較は実行方式全体の比較として扱い、compile 単独の効果と区別してください。
   JSON の `optimizer_capturable_resolved` は実際の param group 設定を示します。
   optimizer の初回 compile・状態初期化・policy 有無による再 compile の費用も、発生した区間に含みます。
   これらは benchmark 専用の指定で、trainer と再開 checkpoint の設定は変更しません。

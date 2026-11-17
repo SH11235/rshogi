@@ -51,6 +51,7 @@ class BenchmarkConfig:
     input_mode: str = "resident"
     policy_rows_mode: str = "prepared"
     fused_optimizer: bool = False
+    foreach_optimizer: bool = False
     optimizer_execution: str = "eager"
     optimizer_capturable: bool = False
     learning_rate: float = 1e-3
@@ -88,6 +89,12 @@ class BenchmarkConfig:
             raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
             raise ValueError("fused_optimizer must be boolean")
+        if type(self.foreach_optimizer) is not bool:
+            raise ValueError("foreach_optimizer must be boolean")
+        if self.fused_optimizer and self.foreach_optimizer:
+            raise ValueError("fused_optimizer and foreach_optimizer are mutually exclusive")
+        if self.fused_optimizer and self.optimizer_execution == "compile":
+            raise ValueError("fused optimizer compilation is unsupported")
         if type(self.optimizer_capturable) is not bool:
             raise ValueError("optimizer_capturable must be boolean")
         if self.optimizer_capturable and self.device != "cuda":
@@ -197,13 +204,26 @@ def _optimizer_compilation(config: BenchmarkConfig):
     return torch._dynamo.config.patch(suppress_errors=False, fail_on_recompile_limit_hit=True)
 
 
-def _configure_optimizer(optimizer: torch.optim.Optimizer, config: BenchmarkConfig) -> None:
+def _configure_optimizer(optimizer: torch.optim.Optimizer, config: BenchmarkConfig) -> dict[str, int]:
+    evidence = {"compiled_graphs": 0, "update_graphs": 0}
     if config.optimizer_execution == "compile":
-        # 同じ optimizer を GradScaler に渡し、fused AdamW の overflow 処理を保つ。
+        def compile_optimizer(graph, inputs, **options):
+            updates_parameters = any(
+                (node.op == "call_function" and node.target is torch._foreach_addcdiv_)
+                or (node.op == "call_method" and node.target == "addcdiv_")
+                for node in graph.graph.nodes
+            )
+            compiled = torch._inductor.compile(graph, inputs, **options)
+            evidence["compiled_graphs"] += 1
+            evidence["update_graphs"] += updates_parameters
+            return compiled
+
+        # forward の graph を混ぜず、optimizer の compile 時だけ証拠を記録する。
         optimizer.step = torch.compile(
-            optimizer.step, backend="inductor", fullgraph=False,
+            optimizer.step, backend=compile_optimizer, fullgraph=False,
             options={"triton.cudagraphs": False},
         )
+    return evidence
 
 
 def run_benchmark(
@@ -222,9 +242,10 @@ def run_benchmark(
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
             fused=config.fused_optimizer,
+            foreach=True if config.foreach_optimizer else None,
             capturable=config.optimizer_capturable,
         )
-        _configure_optimizer(optimizer, config)
+        optimizer_compile_evidence = _configure_optimizer(optimizer, config)
         scaler = torch.amp.GradScaler("cuda", enabled=config.precision == "fp16")
         batches = _batches(data_path, config)
         window = list(islice(
@@ -321,6 +342,8 @@ def run_benchmark(
         _synchronize(device)
         wall_seconds = time.perf_counter() - measured_started
         cuda_seconds = start_event.elapsed_time(end_event) / 1000 if device.type == "cuda" else None
+        if config.optimizer_execution == "compile" and not optimizer_compile_evidence["update_graphs"]:
+            raise BenchmarkError("optimizer compilation produced no parameter-update graph")
         memory = (
             {"peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
              "peak_reserved_bytes": torch.cuda.max_memory_reserved(device)}
@@ -352,6 +375,8 @@ def run_benchmark(
             "cudagraphs_requested": cudagraphs_requested,
             "optimizer_cudagraphs_requested": False,
             "optimizer_capturable_resolved": [group["capturable"] for group in optimizer.param_groups],
+            "optimizer_foreach_setting": [group["foreach"] for group in optimizer.param_groups],
+            "optimizer_compile_evidence": optimizer_compile_evidence,
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
             "window_samples": window_count * config.batch_size,
@@ -385,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         "--policy-rows", dest="policy_rows_mode", choices=("prepared", "legacy"), default="prepared"
     )
     parser.add_argument("--fused-optimizer", action="store_true")
+    parser.add_argument("--foreach-optimizer", action="store_true")
     parser.add_argument("--optimizer-execution", choices=("eager", "compile"), default="eager")
     parser.add_argument("--optimizer-capturable", action="store_true")
     for name, default in (("batch-size", 32), ("steps", 20), ("warmup", 5),

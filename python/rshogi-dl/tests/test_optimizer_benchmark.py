@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,19 @@ from .support import artifact_tempdir, synthetic_records, write_jsonl
 
 
 class OptimizerBenchmarkTest(unittest.TestCase):
+    def compiled_backend(self, options, result, update=True):
+        backend = options["backend"]
+        self.assertTrue(callable(backend))
+        self.assertEqual({key: value for key, value in options.items() if key != "backend"},
+                         {"fullgraph": False, "options": {"triton.cudagraphs": False}})
+        target = torch._foreach_addcdiv_ if update else torch.add
+        graph = SimpleNamespace(graph=SimpleNamespace(nodes=[SimpleNamespace(op="call_function", target=target)]))
+        with patch.object(torch._inductor, "compile", return_value=result) as compiler:
+            compiled = backend(graph, [], options={"triton.cudagraphs": False})
+        compiler.assert_called_once_with(graph, [], options={"triton.cudagraphs": False})
+        self.assertIs(compiled, result)
+        return compiled
+
     def setUp(self) -> None:
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
@@ -34,10 +48,15 @@ class OptimizerBenchmarkTest(unittest.TestCase):
     def test_configuration_and_trainer_identity_are_separate(self) -> None:
         self.assertEqual(self.config.optimizer_execution, "eager")
         self.assertFalse(self.config.optimizer_capturable)
+        self.assertFalse(self.config.foreach_optimizer)
         for options in (
             {"optimizer_execution": "other"}, {"optimizer_capturable": 1},
             {"optimizer_capturable": True},
             {"device": "cuda", "optimizer_execution": "compile"},
+            {"foreach_optimizer": 1},
+            {"device": "cuda", "fused_optimizer": True, "foreach_optimizer": True},
+            {"device": "cuda", "fused_optimizer": True, "optimizer_execution": "compile",
+             "optimizer_capturable": True},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 replace(self.config, **options)
@@ -48,12 +67,14 @@ class OptimizerBenchmarkTest(unittest.TestCase):
         identity = trainer._identity(trainer.TrainerConfig(max_steps=4))
         self.assertNotIn("optimizer_execution", identity)
         self.assertNotIn("optimizer_capturable", identity)
+        self.assertNotIn("foreach_optimizer", identity)
         self.assertNotIn("optimizer_execution", asdict(trainer.TrainerConfig(max_steps=4)))
 
     def test_same_optimizer_grad_none_state_and_scaler_dispatch(self) -> None:
         original_clear = benchmark.clear_unused_policy_head_gradients
         original_scaler = torch.amp.GradScaler
-        eager = benchmark.run_benchmark(self.data, TEST_CONFIG, self.config)
+        config = replace(self.config, foreach_optimizer=True)
+        eager = benchmark.run_benchmark(self.data, TEST_CONFIG, config)
         for input_mode in ("resident", "stream"):
             events = []
             owners = []
@@ -65,8 +86,6 @@ class OptimizerBenchmarkTest(unittest.TestCase):
                 events.append(("clear", present))
 
             def compile_step(step, **options):
-                self.assertEqual(options, {"backend": "inductor", "fullgraph": False,
-                                           "options": {"triton.cudagraphs": False}})
                 optimizer = step.__self__
                 owners.append(optimizer)
                 self.assertEqual(optimizer.state, {})
@@ -89,7 +108,7 @@ class OptimizerBenchmarkTest(unittest.TestCase):
                     events.append(("step", present))
                     return result
 
-                return compiled
+                return self.compiled_backend(options, compiled)
 
             class Scaler(original_scaler):
                 def step(scaler, optimizer, *args, **kwargs):
@@ -104,13 +123,14 @@ class OptimizerBenchmarkTest(unittest.TestCase):
                 patch.object(torch.compiler, "cudagraph_mark_step_begin", side_effect=AssertionError("no graph")),
             ):
                 result = benchmark.run_benchmark(self.data, TEST_CONFIG, replace(
-                    self.config, optimizer_execution="compile", input_mode=input_mode,
+                    config, optimizer_execution="compile", input_mode=input_mode,
                 ))
             compiled.assert_called_once()
             self.assertEqual(events, [(kind, present) for present in (False, True, False, True)
                                       for kind in ("clear", "step")])
             self.assertFalse(result["optimizer_cudagraphs_requested"])
             self.assertEqual(result["optimizer_capturable_resolved"], [False])
+            self.assertEqual(result["optimizer_compile_evidence"], {"compiled_graphs": 1, "update_graphs": 1})
             for name in ("initial_weights_sha256", "final_weights_sha256", "losses_sha256",
                          "input_window_sha256", "optimizer_updates", "skipped_updates"):
                 self.assertEqual(result[name], eager[name], name)
@@ -142,7 +162,7 @@ class OptimizerBenchmarkTest(unittest.TestCase):
             self.assertIsInstance(step.__self__, torch.optim.AdamW)
             self.assertFalse(torch._dynamo.config.suppress_errors)
             self.assertTrue(torch._dynamo.config.fail_on_recompile_limit_hit)
-            return step
+            return self.compiled_backend(options, step)
 
         with (
             patch.object(torch, "compile", side_effect=compile_step) as compiled,
@@ -151,12 +171,69 @@ class OptimizerBenchmarkTest(unittest.TestCase):
             status = benchmark.main([
                 "--data", str(self.data), "--config", "test", "--batch-size", "2",
                 "--steps", "2", "--warmup", "0", "--optimizer-execution", "compile",
+                "--foreach-optimizer",
             ])
         self.assertEqual(status, 0, errors.getvalue())
         compiled.assert_called_once()
         result = json.loads(output.getvalue())
         self.assertEqual(result["benchmark_config"]["execution"], "eager")
         self.assertEqual(result["benchmark_config"]["optimizer_execution"], "compile")
+        self.assertTrue(result["benchmark_config"]["foreach_optimizer"])
+
+    def test_missing_optimizer_update_graph_fails_even_if_other_graphs_exist(self) -> None:
+        for emit_unrelated in (False, True):
+            def compile_step(step, **options):
+                if emit_unrelated:
+                    return self.compiled_backend(options, step, update=False)
+                return step
+
+            with patch.object(torch, "compile", side_effect=compile_step):
+                with self.assertRaisesRegex(benchmark.BenchmarkError, "no parameter-update graph"):
+                    benchmark.run_benchmark(self.data, TEST_CONFIG, replace(
+                        self.config, optimizer_execution="compile", foreach_optimizer=True,
+                    ))
+
+    def test_update_evidence_survives_compiler_graph_rewrite(self) -> None:
+        parameter = torch.nn.Parameter(torch.ones(2))
+        optimizer = torch.optim.AdamW([parameter], foreach=True)
+        step = optimizer.step
+        graph = SimpleNamespace(graph=SimpleNamespace(nodes=[
+            SimpleNamespace(op="call_function", target=torch._foreach_addcdiv_),
+        ]))
+
+        def lower(current, inputs, **options):
+            current.graph.nodes.clear()
+            return step
+
+        def compile_step(function, **options):
+            return options["backend"](graph, [], options=options["options"])
+
+        with patch.object(torch, "compile", side_effect=compile_step), patch.object(
+            torch._inductor, "compile", side_effect=lower,
+        ):
+            evidence = benchmark._configure_optimizer(optimizer, replace(self.config, optimizer_execution="compile"))
+        self.assertEqual(evidence, {"compiled_graphs": 1, "update_graphs": 1})
+        self.assertEqual(graph.graph.nodes, [])
+        self.assertIs(optimizer.step, step)
+
+    def test_single_tensor_update_evidence_and_eager_defaults(self) -> None:
+        parameter = torch.nn.Parameter(torch.ones(2))
+        optimizer = torch.optim.AdamW([parameter], fused=False, capturable=False)
+        self.assertIsNone(optimizer.param_groups[0]["foreach"])
+        self.assertEqual(benchmark._configure_optimizer(optimizer, self.config),
+                         {"compiled_graphs": 0, "update_graphs": 0})
+        graph = SimpleNamespace(graph=SimpleNamespace(nodes=[SimpleNamespace(op="call_method", target="addcdiv_")]))
+        original_step = optimizer.step
+
+        def compile_step(step, **options):
+            return options["backend"](graph, [], options=options["options"])
+
+        with patch.object(torch, "compile", side_effect=compile_step), patch.object(
+            torch._inductor, "compile", return_value=original_step,
+        ):
+            evidence = benchmark._configure_optimizer(optimizer, replace(self.config, optimizer_execution="compile"))
+        self.assertEqual(evidence, {"compiled_graphs": 1, "update_graphs": 1})
+        self.assertIs(optimizer.step, original_step)
 
 
 if __name__ == "__main__":
