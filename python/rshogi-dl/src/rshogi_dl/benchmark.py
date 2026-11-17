@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 import hashlib
 from itertools import islice
 import json
@@ -42,6 +42,7 @@ class BenchmarkConfig:
     execution: str = "eager"
     precision: str = "fp32"
     input_mode: str = "resident"
+    policy_rows_mode: str = "prepared"
     fused_optimizer: bool = False
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
@@ -58,7 +59,7 @@ class BenchmarkConfig:
         for name, choices in {
             "attention_backend": ATTENTION_BACKENDS,
             "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
-            "input_mode": ("resident", "stream"),
+            "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
@@ -88,8 +89,14 @@ def _batches(path: str | Path, config: BenchmarkConfig) -> Iterator[Batch]:
             raise BenchmarkError(f"data needs at least {config.batch_size} records")
 
 
-def _to_device(batch: Batch, device: torch.device) -> Batch:
-    return Batch(**{field.name: getattr(batch, field.name).to(device) for field in fields(Batch)})
+def _to_device(
+    batch: Batch, device: torch.device, *, policy_rows_mode: str = "prepared"
+) -> Batch:
+    if policy_rows_mode == "legacy":
+        batch = replace(batch, policy_rows=None)
+    values = {field.name: getattr(batch, field.name) for field in fields(Batch)}
+    return Batch(**{name: tensor.to(device) if tensor is not None else None
+                    for name, tensor in values.items()})
 
 
 def _digest(model: SquareTransformer) -> str:
@@ -171,19 +178,24 @@ def run_benchmark(
         data_digest = hashlib.sha256()
         for batch in window:
             for field in fields(Batch):
+                # 補助 index の有無を変えても、比較する元の 6 Tensor の同一性を判定する。
+                if field.name == "policy_rows":
+                    continue
                 tensor = getattr(batch, field.name)
                 data_digest.update(field.name.encode())
                 data_digest.update(str(tuple(tensor.shape)).encode())
                 data_digest.update(tensor.numpy().tobytes())
         window_count = len(window)
-        resident = [_to_device(batch, device) for batch in window] if config.input_mode == "resident" else None
+        resident = [
+            _to_device(batch, device, policy_rows_mode=config.policy_rows_mode) for batch in window
+        ] if config.input_mode == "resident" else None
         del window
         batch_index = 0
 
         def next_batch() -> Batch:
             nonlocal batch_index
             if resident is None:
-                return _to_device(next(batches), device)
+                return _to_device(next(batches), device, policy_rows_mode=config.policy_rows_mode)
             batch = resident[batch_index % len(resident)]
             batch_index += 1
             return batch
@@ -288,6 +300,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
+    parser.add_argument(
+        "--policy-rows", dest="policy_rows_mode", choices=("prepared", "legacy"), default="prepared"
+    )
     parser.add_argument("--fused-optimizer", action="store_true")
     for name, default in (("batch-size", 32), ("steps", 20), ("warmup", 5),
                           ("window-batches", 4), ("seed", 0), ("threads", 1)):
