@@ -11,6 +11,11 @@ target/release/rshogi-dl-usi
 policy 出力の有限性検査を短絡しない走査へ切り替える比較用 feature は
 `--features onnx,policy-validation-reduction` です。既定は無効で、NaN・無限大の拒否条件は変わりません。
 
+batch 探索の予約 metadata を使用量に応じて段階的に確保する、既定無効の feature は
+`--features onnx,lazy-batch-metadata` です。`mcts_batch_workspace_bytes` は確保済みの実容量を示し、
+探索が深まると増えることがあります。エラー後はこの workspace を破棄し、次の batch 探索で
+再作成します。scalar 既定値の `NNBatchSize=1` は変わりません。
+
 Windows では共有ライブラリを `onnxruntime.dll`、実行ファイルを `.exe` に読み替えてください。必要な CUDA / cuDNN 等の依存ライブラリも runtime の仕様に合わせて配置します。
 
 起動後の設定例です。

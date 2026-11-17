@@ -557,10 +557,13 @@ fn batched_visits_are_completed_exactly_and_partial_batches_dispatch() -> Result
         assert_eq!(evaluator.batches.iter().sum::<usize>() as u64, visits);
         assert!(evaluator.batches.iter().all(|&count| (1..=4).contains(&count)));
         assert!(search.batch.as_ref().unwrap().is_idle());
+        #[cfg(not(feature = "lazy-batch-metadata"))]
         assert!(
             search.batch_workspace_bytes()
                 > (search.node_limit + search.edge_limit) * size_of::<u32>()
         );
+        #[cfg(feature = "lazy-batch-metadata")]
+        assert!(search.batch_workspace_bytes() < search.config.tree_memory_mb * 1024 * 1024);
         assert_eq!(pos.to_sfen(), original);
         assert_eq!(history.len(), 1);
         if visits == 6 {
@@ -623,7 +626,13 @@ fn full_batch_validation_and_errors_cancel_all_reservations_before_reuse() -> Re
         assert!(search.run(&mut pos, &mut history, &mut evaluator, limits, &stop).is_err());
         assert_eq!(search.nodes[0].visits, 1);
         assert_eq!(search.nodes.iter().filter(|node| node.expanded).count(), 1);
+        #[cfg(not(feature = "lazy-batch-metadata"))]
         assert!(search.batch.as_ref().unwrap().is_idle());
+        #[cfg(feature = "lazy-batch-metadata")]
+        {
+            assert!(search.batch.is_none());
+            assert_eq!(search.batch_workspace_bytes(), 0);
+        }
         assert_eq!(pos.to_sfen(), original);
         assert_eq!(history.len(), 1);
         let result =

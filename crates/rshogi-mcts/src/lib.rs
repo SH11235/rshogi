@@ -233,7 +233,15 @@ impl Search {
                     history_len: initial_history_len,
                 },
             );
-            self.batch = Some(workspace);
+            #[cfg(not(feature = "lazy-batch-metadata"))]
+            {
+                self.batch = Some(workspace);
+            }
+            // 部分確保で capacity と bytes が未同期になった workspace を公開しない。
+            #[cfg(feature = "lazy-batch-metadata")]
+            if result.is_ok() {
+                self.batch = Some(workspace);
+            }
             memory_full = result?;
         } else {
             while self.nodes[0].visits < limits.visits

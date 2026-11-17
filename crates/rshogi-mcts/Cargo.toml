@@ -10,3 +10,7 @@ description = "Policy/value Monte Carlo tree search for rshogi"
 anyhow.workspace = true
 rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-dl = { path = "../rshogi-dl" }
+
+[features]
+default = []
+lazy-batch-metadata = []
