@@ -8,6 +8,9 @@ export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
 target/release/rshogi-dl-usi
 ```
 
+policy 出力の有限性検査を短絡しない走査へ切り替える比較用 feature は
+`--features onnx,policy-validation-reduction` です。既定は無効で、NaN・無限大の拒否条件は変わりません。
+
 Windows では共有ライブラリを `onnxruntime.dll`、実行ファイルを `.exe` に読み替えてください。必要な CUDA / cuDNN 等の依存ライブラリも runtime の仕様に合わせて配置します。
 
 起動後の設定例です。
