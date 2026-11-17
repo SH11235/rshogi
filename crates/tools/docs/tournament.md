@@ -491,6 +491,12 @@ Ctrl-C では新規発行を停止し、実行中の対局終了を待って回�
 途中のペアを完結するための追加対局や retry は開始しない。エンジン初期化に失敗した場合も
 他 worker から回収できた結果を保存する。どちらも成功完了とは区別し、終了コードは非ゼロとなる。
 
+対局 worker は終了時に各エンジンへ `quit` を送り、終了状態を確認する。通常の worker 終了で
+非ゼロ終了・シグナル終了・通信失敗・終了待ち期限後の強制終了を検出した場合は、保存済みの対局結果を
+残して run を `worker_failed` / `invalid=true` とし、非ゼロで終了する。終了待ちは `quit` 送信後 300ms
+で、stdin の書込み時間は含まない。対局エラーの再試行による退役と ponder timeout による退役は、
+既存の対局結果・再試行の分類を維持する。
+
 meta.json の run_status は起動時 running、終了時 completed / interrupted / worker_failed。
 interrupted と worker_failed は invalid=true とし、最終 SPRT 採否を表示しない。
 incomplete_pairs は発行済み通常ペアのうち有効な 2 局が揃っていない数（失敗ペアを含む）、

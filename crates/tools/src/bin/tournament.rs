@@ -967,6 +967,12 @@ impl Drop for CpuSlotGuard {
     }
 }
 
+enum WorkerExit {
+    Completed,
+    Retired,
+    InitializationFailed,
+}
+
 fn worker_main(
     cfg: WorkerConfig,
     rx: chan::Receiver<Option<MatchTicket>>,
@@ -1004,151 +1010,166 @@ fn worker_main(
     let cpu_affinity = cpu_slot.as_ref().map(CpuSlotGuard::cpus);
     // ワーカー内で全エンジンを起動
     let mut engines: Vec<EngineProcess> = Vec::new();
-    for (i, path) in engine_paths.iter().enumerate() {
-        let label = engine_labels[i].clone();
-        let mut cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
-        cfg.ponder = engine_ponder[i];
-        match spawn_engine(&cfg, label, cpu_affinity).and_then(|mut engine| {
-            engine.enable_tournament_ponder(engine_ponder[i])?;
-            Ok(engine)
-        }) {
-            Ok(ep) => {
-                engines.push(ep);
-            }
-            Err(e) => {
-                eprintln!("worker: failed to spawn engine {i} ({}): {e:#}", path.display());
-                worker_failed.store(true, Ordering::Relaxed);
-                shutdown.store(true, Ordering::Relaxed);
-                return;
-            }
-        }
-    }
-
-    while let Ok(Some(ticket)) = rx.recv() {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-
-        // 2つの異なるインデックスへの同時可変借用のため split_at_mut を使用
-        let (black, white) = if ticket.black_idx < ticket.white_idx {
-            let (left, right) = engines.split_at_mut(ticket.white_idx);
-            (&mut left[ticket.black_idx], &mut right[0])
-        } else {
-            let (left, right) = engines.split_at_mut(ticket.black_idx);
-            (&mut right[0], &mut left[ticket.white_idx])
-        };
-
-        // usinewgame/isready が失敗した EngineProcess は同期状態を保証できない。
-        // error 結果を 1 件返して worker ごと退役し、再試行は新しいプロセスへ渡す。
-        if let Err(e) = black.new_game().and_then(|_| white.new_game()) {
-            eprintln!("worker: new game error: {e:#}; retiring worker");
-            let _ = tx.send(MatchResult {
-                ticket,
-                outcome: GameOutcome::Draw,
-                reason: format!("error: new game: {e:#}"),
-                plies: 0,
-                move_logs: Vec::new(),
-                ponder: None,
-                error: true,
-                worker_retired: true,
-            });
-            return;
-        }
-
-        let start_pos = ticket
-            .cycle_position
-            .as_ref()
-            .map_or_else(|| &start_positions[ticket.startpos_idx], |position| &position.parsed);
-        // 時計はエンジン index に依存せず、各局の先後に割り当てる。
-        let tc = time_control;
-        let config = GameConfig {
-            limit_only_timeout_ms: None,
-            cancel: None,
-            max_moves,
-            resign_rule: adjudicate_resign,
-            win_rule: adjudicate_win,
-            draw_rule: adjudicate_draw,
-            agreement_rule: adjudicate_agreement,
-            game_time_limit_ms: None,
-            timeout_margin_ms,
-            pass_rights: None,
-            go_depth,
-            go_nodes_black: go_nodes[ticket.black_idx],
-            go_nodes_white: go_nodes[ticket.white_idx],
-        };
-        let game_id = (ticket.id as u32) + 1;
-
-        let mut move_logs: Vec<MoveLogEntry> = Vec::new();
-        let mut on_move = |event: &MoveEvent| {
-            move_logs.push(MoveLogEntry {
-                kind: "move",
-                game_id,
-                ply: event.ply,
-                side_to_move: side_label(event.side),
-                sfen_before: event.sfen_before.clone(),
-                move_usi: event.move_usi.clone(),
-                raw_move_usi: event.raw_move_usi.clone(),
-                engine: event.engine_label.clone(),
-                elapsed_ms: event.elapsed_ms,
-                think_limit_ms: event.think_limit_ms,
-                timed_out: event.timed_out,
-                eval: event.eval.clone(),
-            });
-        };
-
-        // run_game の panic を捕捉する。捕捉しないと worker が結果を送らず終了し、
-        // メインの `result_rx.recv()` が in-flight 分を永久に待ってハングする。
-        // panic 時はエラー結果を 1 件送り、状態が不確かなエンジンを使い続けないよう
-        // この worker を退役させる（チケットごとに必ず結果 1 件を保証）。
-        let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_game(black, white, start_pos, tc, &config, game_id, &mut on_move, None)
-        }));
-        match run_result {
-            Ok(Ok(result)) => {
-                let worker_retired = !black.is_reusable() || !white.is_reusable();
-                let _ = tx.send(MatchResult {
-                    ticket,
-                    outcome: result.outcome,
-                    reason: result.reason,
-                    plies: result.plies,
-                    move_logs,
-                    ponder: result.ponder,
-                    error: false,
-                    worker_retired,
-                });
-                if worker_retired {
-                    return;
+    let exit = (|| {
+        for (i, path) in engine_paths.iter().enumerate() {
+            let label = engine_labels[i].clone();
+            let mut cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
+            cfg.ponder = engine_ponder[i];
+            match spawn_engine(&cfg, label, cpu_affinity).and_then(|mut engine| {
+                engine.enable_tournament_ponder(engine_ponder[i])?;
+                Ok(engine)
+            }) {
+                Ok(ep) => {
+                    engines.push(ep);
+                }
+                Err(e) => {
+                    eprintln!("worker: failed to spawn engine {i} ({}): {e:#}", path.display());
+                    worker_failed.store(true, Ordering::Relaxed);
+                    shutdown.store(true, Ordering::Relaxed);
+                    return WorkerExit::InitializationFailed;
                 }
             }
-            Ok(Err(e)) => {
-                eprintln!("worker: game error: {e:#}; retiring worker");
-                let _ = tx.send(MatchResult {
-                    ticket,
-                    outcome: GameOutcome::Draw,
-                    reason: format!("error: {e:#}"),
-                    plies: 0,
-                    move_logs,
-                    ponder: None,
-                    error: true,
-                    worker_retired: true,
-                });
-                return;
+        }
+
+        while let Ok(Some(ticket)) = rx.recv() {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
             }
-            Err(_) => {
-                eprintln!("worker: game {game_id} panicked; retiring worker");
+
+            // 2つの異なるインデックスへの同時可変借用のため split_at_mut を使用
+            let (black, white) = if ticket.black_idx < ticket.white_idx {
+                let (left, right) = engines.split_at_mut(ticket.white_idx);
+                (&mut left[ticket.black_idx], &mut right[0])
+            } else {
+                let (left, right) = engines.split_at_mut(ticket.black_idx);
+                (&mut right[0], &mut left[ticket.white_idx])
+            };
+
+            // usinewgame/isready が失敗した EngineProcess は同期状態を保証できない。
+            // error 結果を 1 件返して worker ごと退役し、再試行は新しいプロセスへ渡す。
+            if let Err(e) = black.new_game().and_then(|_| white.new_game()) {
+                eprintln!("worker: new game error: {e:#}; retiring worker");
                 let _ = tx.send(MatchResult {
                     ticket,
                     outcome: GameOutcome::Draw,
-                    reason: "error: worker panic".to_string(),
+                    reason: format!("error: new game: {e:#}"),
                     plies: 0,
-                    move_logs,
+                    move_logs: Vec::new(),
                     ponder: None,
                     error: true,
                     worker_retired: true,
                 });
-                return;
+                return WorkerExit::Retired;
+            }
+
+            let start_pos = ticket
+                .cycle_position
+                .as_ref()
+                .map_or_else(|| &start_positions[ticket.startpos_idx], |position| &position.parsed);
+            // 時計はエンジン index に依存せず、各局の先後に割り当てる。
+            let tc = time_control;
+            let config = GameConfig {
+                limit_only_timeout_ms: None,
+                cancel: None,
+                max_moves,
+                resign_rule: adjudicate_resign,
+                win_rule: adjudicate_win,
+                draw_rule: adjudicate_draw,
+                agreement_rule: adjudicate_agreement,
+                game_time_limit_ms: None,
+                timeout_margin_ms,
+                pass_rights: None,
+                go_depth,
+                go_nodes_black: go_nodes[ticket.black_idx],
+                go_nodes_white: go_nodes[ticket.white_idx],
+            };
+            let game_id = (ticket.id as u32) + 1;
+
+            let mut move_logs: Vec<MoveLogEntry> = Vec::new();
+            let mut on_move = |event: &MoveEvent| {
+                move_logs.push(MoveLogEntry {
+                    kind: "move",
+                    game_id,
+                    ply: event.ply,
+                    side_to_move: side_label(event.side),
+                    sfen_before: event.sfen_before.clone(),
+                    move_usi: event.move_usi.clone(),
+                    raw_move_usi: event.raw_move_usi.clone(),
+                    engine: event.engine_label.clone(),
+                    elapsed_ms: event.elapsed_ms,
+                    think_limit_ms: event.think_limit_ms,
+                    timed_out: event.timed_out,
+                    eval: event.eval.clone(),
+                });
+            };
+
+            // run_game の panic を捕捉する。捕捉しないと worker が結果を送らず終了し、
+            // メインの `result_rx.recv()` が in-flight 分を永久に待ってハングする。
+            // panic 時はエラー結果を 1 件送り、状態が不確かなエンジンを使い続けないよう
+            // この worker を退役させる（チケットごとに必ず結果 1 件を保証）。
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_game(black, white, start_pos, tc, &config, game_id, &mut on_move, None)
+            }));
+            match run_result {
+                Ok(Ok(result)) => {
+                    let worker_retired = !black.is_reusable() || !white.is_reusable();
+                    let _ = tx.send(MatchResult {
+                        ticket,
+                        outcome: result.outcome,
+                        reason: result.reason,
+                        plies: result.plies,
+                        move_logs,
+                        ponder: result.ponder,
+                        error: false,
+                        worker_retired,
+                    });
+                    if worker_retired {
+                        return WorkerExit::Retired;
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("worker: game error: {e:#}; retiring worker");
+                    let _ = tx.send(MatchResult {
+                        ticket,
+                        outcome: GameOutcome::Draw,
+                        reason: format!("error: {e:#}"),
+                        plies: 0,
+                        move_logs,
+                        ponder: None,
+                        error: true,
+                        worker_retired: true,
+                    });
+                    return WorkerExit::Retired;
+                }
+                Err(_) => {
+                    eprintln!("worker: game {game_id} panicked; retiring worker");
+                    let _ = tx.send(MatchResult {
+                        ticket,
+                        outcome: GameOutcome::Draw,
+                        reason: "error: worker panic".to_string(),
+                        plies: 0,
+                        move_logs,
+                        ponder: None,
+                        error: true,
+                        worker_retired: true,
+                    });
+                    return WorkerExit::Retired;
+                }
             }
         }
+        WorkerExit::Completed
+    })();
+    let mut shutdown_failed = false;
+    for engine in engines {
+        if let Err(error) = engine.shutdown() {
+            eprintln!("worker: engine shutdown error: {error:#}");
+            shutdown_failed = true;
+        }
+    }
+    // 対局エラーの再試行と ponder timeout による退役は、既に送信した結果で扱う。
+    if shutdown_failed && matches!(exit, WorkerExit::Completed) {
+        worker_failed.store(true, Ordering::Relaxed);
+        shutdown.store(true, Ordering::Relaxed);
     }
 }
 
