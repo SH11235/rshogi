@@ -36,3 +36,9 @@ allocator の管理領域は含みません。最初の batch run で確保し�
 変われば作り直します。evaluator 自身の batch/cache buffer は別です。
 
 batch の選択順は scalar と異なり得ます。throughput の改善と探索品質・棋力は別に比較してください。
+
+既定で無効の `lazy-batch-metadata` feature を有効にすると、inflight 配列と node の blocked フラグを
+使用中の node と予約済みの将来 edge に応じて段階的に確保します。確保済みの容量は各 run で
+再利用され、`batch_workspace_bytes()` は容量が増えたときに更新されます。tree arena の上限は
+変わりません。この feature では探索エラー後に batch workspace を破棄するため、次の batch run
+で再作成します。停止・時間上限・arena 上限で正常終了した場合は保持します。

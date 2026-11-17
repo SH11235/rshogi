@@ -553,6 +553,12 @@ jobs:
         run: |
           export ORT_DYLIB_PATH=$(python -c 'import pathlib,onnxruntime; print(next((pathlib.Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*")))')
           python -m unittest discover -s python/rshogi-dl/tests -t python/rshogi-dl -v
+      - name: Check lazy MCTS batch metadata
+        run: |
+          cargo clippy -p rshogi-mcts --features lazy-batch-metadata --all-targets -- -D warnings
+          cargo clippy -p rshogi-dl-usi --features onnx,lazy-batch-metadata --all-targets -- -D warnings
+          cargo test -p rshogi-mcts --features lazy-batch-metadata
+          cargo test -p rshogi-dl-usi --features onnx,lazy-batch-metadata
       - name: Check full-reduction policy validation
         run: |
           cargo clippy -p rshogi-dl --features onnx,policy-validation-reduction --all-targets -- -D warnings

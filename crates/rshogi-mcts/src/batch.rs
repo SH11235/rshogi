@@ -54,6 +54,55 @@ fn filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>> {
     Ok(values)
 }
 
+#[cfg(feature = "lazy-batch-metadata")]
+fn growth_target(required: usize, limit: usize) -> Result<usize> {
+    ensure!(required > 0 && required <= limit, "batch metadata exceeds arena limit");
+    Ok(required.checked_next_power_of_two().unwrap_or(limit).min(limit))
+}
+
+#[cfg(all(test, feature = "lazy-batch-metadata"))]
+mod growth_fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Point {
+        NodeInflight,
+        NodeBlocked,
+        EdgeInflight,
+    }
+
+    thread_local! {
+        static POINT: Cell<Option<Point>> = const { Cell::new(None) };
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn arm(point: Point) -> Self {
+            POINT.with(|slot| {
+                assert!(slot.get().is_none());
+                slot.set(Some(point));
+            });
+            Self
+        }
+
+        pub(super) fn is_armed(&self) -> bool {
+            POINT.with(|slot| slot.get().is_some())
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            POINT.with(|slot| slot.set(None));
+        }
+    }
+
+    pub(super) fn check(point: Point) -> Result<(), anyhow::Error> {
+        anyhow::ensure!(POINT.with(|slot| slot.get()) != Some(point), "metadata allocation failed");
+        Ok(())
+    }
+}
+
 impl Workspace {
     pub(super) fn new(format: InputFormat, capacity: usize, search: &Search) -> Result<Self> {
         ensure!((2..=1024).contains(&capacity), "batch capacity must be 2..=1024");
@@ -62,6 +111,10 @@ impl Workspace {
         pending.try_reserve_exact(capacity)?;
         let mut blocked = Vec::new();
         blocked.try_reserve_exact(elements(capacity, depth + 1)?)?;
+        #[cfg(feature = "lazy-batch-metadata")]
+        let (node_count, edge_count) = (search.nodes.len(), search.edges.len());
+        #[cfg(not(feature = "lazy-batch-metadata"))]
+        let (node_count, edge_count) = (search.node_limit, search.edge_limit);
         let mut workspace = Self {
             format,
             capacity,
@@ -73,15 +126,53 @@ impl Workspace {
             inputs: InputBatchBuffer::new(format, capacity)?,
             logits: filled(elements(capacity, MAX_MOVE_LABEL_NUM)?, 0.0)?,
             values: filled(capacity, 0.0)?,
-            node_inflight: filled(search.node_limit, 0)?,
-            edge_inflight: filled(search.edge_limit, 0)?,
-            node_blocked: filled(search.node_limit, false)?,
+            node_inflight: filled(node_count, 0)?,
+            edge_inflight: filled(edge_count, 0)?,
+            node_blocked: filled(node_count, false)?,
             blocked,
             reserved_edges: 0,
             bytes: 0,
         };
         workspace.bytes = workspace.measure_bytes()?;
         Ok(workspace)
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    fn ensure_nodes(&mut self, required: usize, limit: usize) -> Result<()> {
+        if required <= self.node_inflight.len() {
+            return Ok(());
+        }
+        let target = growth_target(required, limit)?;
+        if self.node_inflight.capacity() < target {
+            #[cfg(test)]
+            growth_fault::check(growth_fault::Point::NodeInflight)?;
+            self.node_inflight.try_reserve_exact(target - self.node_inflight.len())?;
+        }
+        if self.node_blocked.capacity() < target {
+            #[cfg(test)]
+            growth_fault::check(growth_fault::Point::NodeBlocked)?;
+            self.node_blocked.try_reserve_exact(target - self.node_blocked.len())?;
+        }
+        self.node_inflight.resize(target, 0);
+        self.node_blocked.resize(target, false);
+        self.bytes = self.measure_bytes()?;
+        Ok(())
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    fn ensure_edges(&mut self, required: usize, limit: usize) -> Result<()> {
+        if required <= self.edge_inflight.len() {
+            return Ok(());
+        }
+        let target = growth_target(required, limit)?;
+        if self.edge_inflight.capacity() < target {
+            #[cfg(test)]
+            growth_fault::check(growth_fault::Point::EdgeInflight)?;
+            self.edge_inflight.try_reserve_exact(target - self.edge_inflight.len())?;
+        }
+        self.edge_inflight.resize(target, 0);
+        self.bytes = self.measure_bytes()?;
+        Ok(())
     }
 
     pub(super) fn matches(&self, format: InputFormat, capacity: usize) -> bool {
@@ -336,6 +427,8 @@ fn collect(
             if future_edges > search.edge_limit {
                 return Ok(Collected::MemoryFull);
             }
+            #[cfg(feature = "lazy-batch-metadata")]
+            workspace.ensure_edges(future_edges, search.edge_limit)?;
             let row = workspace.pending.len();
             for (column, &mv) in legal.iter().enumerate() {
                 workspace.labels[row * MAX_MOVES + column] =
@@ -372,6 +465,15 @@ fn collect(
             if search.nodes.len() == search.node_limit {
                 return Ok(Collected::MemoryFull);
             }
+            #[cfg(feature = "lazy-batch-metadata")]
+            workspace.ensure_nodes(
+                search
+                    .nodes
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("node reservation overflow"))?,
+                search.node_limit,
+            )?;
             search.edges[edge_index].child = Some(search.nodes.len());
             search.nodes.push(Node::new());
         }
@@ -525,6 +627,14 @@ mod tests {
     }
 
     impl Evaluator for Recorder {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(InputFormat::StmTokensV1)
+        }
+
+        fn encoded_batch_capacity(&self) -> Option<usize> {
+            Some(4)
+        }
+
         fn evaluate(&mut self, _: &Position, _: &mut [f32]) -> Result<f32> {
             self.scalar_calls += 1;
             anyhow::bail!("must not evaluate scalar")
@@ -832,6 +942,210 @@ mod tests {
             assert!(history.matches(&pos));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    #[test]
+    fn metadata_growth_is_bounded_and_preserves_live_reservations() -> Result<()> {
+        let mut search = Search::new(Config {
+            tree_memory_mb: 1,
+            ..Config::default()
+        })?;
+        search.nodes.push(Node::new());
+        let mut workspace = Workspace::new(InputFormat::StmTokensV1, 4, &search)?;
+        assert_eq!(workspace.node_inflight.len(), 1);
+        assert_eq!(workspace.node_blocked.len(), 1);
+        assert!(workspace.edge_inflight.is_empty());
+        workspace.node_inflight[0] = 2;
+        workspace.block(0);
+        for required in [2, 3, 7, 9, 33] {
+            workspace.ensure_nodes(required, search.node_limit)?;
+            assert!(workspace.node_inflight.len() >= required);
+            assert!(workspace.node_inflight.len() <= required * 2);
+            assert_eq!(workspace.node_inflight.len(), workspace.node_blocked.len());
+            assert_eq!(workspace.node_inflight[0], 2);
+            assert!(workspace.node_blocked[0]);
+            assert!(workspace.node_inflight[1..].iter().all(|&count| count == 0));
+            assert!(workspace.node_blocked[1..].iter().all(|&value| !value));
+            assert_eq!(workspace.allocated_bytes(), workspace.measure_bytes()?);
+        }
+        for required in [1, 3, 33, 65, 257] {
+            workspace.ensure_edges(required, search.edge_limit)?;
+            assert!(workspace.edge_inflight.len() >= required);
+            assert!(workspace.edge_inflight.len() <= required * 2);
+            assert_eq!(workspace.allocated_bytes(), workspace.measure_bytes()?);
+            workspace.edge_inflight[0] = 3;
+        }
+        let bytes = workspace.allocated_bytes();
+        workspace.ensure_nodes(1, search.node_limit)?;
+        workspace.ensure_edges(1, search.edge_limit)?;
+        assert_eq!(workspace.node_inflight[0], 2);
+        assert_eq!(workspace.edge_inflight[0], 3);
+        assert_eq!(workspace.allocated_bytes(), bytes);
+        workspace.node_inflight[0] = 0;
+        workspace.edge_inflight[0] = 0;
+        workspace.clear();
+        assert!(workspace.is_idle());
+        assert_eq!(workspace.allocated_bytes(), bytes);
+        assert_eq!(growth_target(33, 63)?, 63);
+        assert!(growth_target(0, 63).is_err());
+        assert!(growth_target(64, 63).is_err());
+        assert!(workspace.ensure_nodes(usize::MAX, usize::MAX).is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    #[test]
+    fn growth_failure_cancels_pending_and_restores_a_nonroot_path() -> Result<()> {
+        use growth_fault::Point;
+        for point in [Point::NodeInflight, Point::NodeBlocked, Point::EdgeInflight] {
+            let mut search = Search::new(Config {
+                batch_size: 4,
+                tree_memory_mb: 1,
+                ..Config::default()
+            })?;
+            let mut pos = Position::new();
+            pos.set_hirate();
+            let original = pos.to_sfen();
+            let first = resolved(&pos, "7g7f");
+            let mut reference = Position::new();
+            reference.set_sfen(&original)?;
+            reference.do_move(first, reference.gives_check(first));
+            let reply = resolved(&reference, "7c7d");
+            search.nodes.resize_with(2, Node::new);
+            search.edges.push(edge(first, 1.0, 1));
+            search.edges.push(Edge {
+                child: None,
+                ..edge(reply, 1.0, 1)
+            });
+            expand(&mut search, 0, 0, 1);
+            expand(&mut search, 1, 1, 1);
+            let mut workspace = Workspace::new(InputFormat::StmTokensV1, 4, &search)?;
+            workspace.reserve(&search, 0, &[], LeafValue::Known(0.5));
+            let mut history = History::new(&pos);
+            let mut evaluator = Recorder::default();
+            let stop = AtomicBool::new(false);
+            let hook = growth_fault::Guard::arm(point);
+            let error = run(
+                &mut search,
+                &mut pos,
+                &mut history,
+                &mut evaluator,
+                &mut workspace,
+                Control {
+                    limits: Limits {
+                        visits: 8,
+                        time: None,
+                    },
+                    stop: &stop,
+                    start: Instant::now(),
+                    history_len: 1,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "metadata allocation failed");
+            assert_eq!(pos.to_sfen(), original);
+            assert_eq!(history.len(), 1);
+            assert!(history.matches(&pos));
+            assert!(search.path.is_empty());
+            assert!(workspace.is_idle());
+            assert!(evaluator.batches.is_empty());
+            assert_eq!(evaluator.scalar_calls, 0);
+            assert_eq!(search.nodes[0].visits, 0);
+            if point == Point::NodeBlocked {
+                assert!(workspace.node_inflight.capacity() > workspace.node_inflight.len());
+                assert_eq!(workspace.node_inflight.len(), 2);
+                assert_eq!(workspace.node_blocked.len(), 2);
+            }
+            if point == Point::EdgeInflight {
+                assert_eq!(search.nodes.len(), 3);
+                assert!(search.edges[1].child.is_some());
+            } else {
+                assert_eq!(search.nodes.len(), 2);
+                assert!(search.edges[1].child.is_none());
+            }
+            drop(hook);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    #[test]
+    fn failed_growth_drops_the_public_workspace_and_allows_a_fresh_run() -> Result<()> {
+        for point in [
+            growth_fault::Point::NodeInflight,
+            growth_fault::Point::NodeBlocked,
+            growth_fault::Point::EdgeInflight,
+        ] {
+            let mut search = Search::new(Config {
+                batch_size: 4,
+                tree_memory_mb: 1,
+                ..Config::default()
+            })?;
+            let mut pos = Position::new();
+            pos.set_hirate();
+            let original = pos.to_sfen();
+            let mut history = History::new(&pos);
+            let mut evaluator = Recorder::default();
+            let stop = AtomicBool::new(false);
+            let limits = Limits {
+                visits: 16,
+                time: None,
+            };
+            let hook = growth_fault::Guard::arm(point);
+            let error =
+                search.run(&mut pos, &mut history, &mut evaluator, limits, &stop).unwrap_err();
+            assert_eq!(error.to_string(), "metadata allocation failed");
+            assert!(search.batch.is_none());
+            assert_eq!(search.batch_workspace_bytes(), 0);
+            assert_eq!(pos.to_sfen(), original);
+            assert_eq!(history.len(), 1);
+            assert!(history.matches(&pos));
+            assert_eq!(evaluator.scalar_calls, 0);
+            assert_eq!(
+                evaluator.batches.len(),
+                usize::from(point != growth_fault::Point::EdgeInflight)
+            );
+            drop(hook);
+            let result = search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+            assert_eq!(result.visits, 16);
+            let bytes = search.batch_workspace_bytes();
+            let retained = search.batch.as_ref().unwrap();
+            assert!(retained.is_idle());
+            assert_eq!(bytes, retained.measure_bytes()?);
+            let result = search.run(
+                &mut pos,
+                &mut history,
+                &mut evaluator,
+                Limits {
+                    visits: 1,
+                    time: None,
+                },
+                &stop,
+            )?;
+            assert_eq!(result.visits, 1);
+            assert_eq!(search.batch_workspace_bytes(), bytes);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lazy-batch-metadata")]
+    #[test]
+    fn allocation_fault_guard_clears_after_drop_and_unwind() {
+        {
+            let guard = growth_fault::Guard::arm(growth_fault::Point::EdgeInflight);
+            assert!(growth_fault::check(growth_fault::Point::EdgeInflight).is_err());
+            drop(guard);
+        }
+        assert!(growth_fault::check(growth_fault::Point::EdgeInflight).is_ok());
+        let result = std::panic::catch_unwind(|| {
+            let guard = growth_fault::Guard::arm(growth_fault::Point::NodeBlocked);
+            assert!(guard.is_armed());
+            assert!(growth_fault::check(growth_fault::Point::NodeBlocked).is_err());
+            panic!("exercise allocation hook cleanup");
+        });
+        assert!(result.is_err());
+        assert!(growth_fault::check(growth_fault::Point::NodeBlocked).is_ok());
     }
 
     #[test]
