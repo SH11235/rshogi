@@ -1,0 +1,13 @@
+# `cargo audit` の設定（CI の Security Audit job が読む）。
+#
+# ignore には「脆弱性ではない通知」だけを、理由と外す条件つきで載せる。
+
+[advisories]
+ignore = [
+    # chrono のメンテ終了通知（informational = unmaintained。既知の脆弱性ではない）。
+    # Cloudflare Workers SDK の `worker` crate（rshogi-csa-server-workers が使う）が
+    # 0.9 系でも chrono に必須で依存しており、自前のコードから chrono を外しても
+    # Cargo.lock から消えない。`worker` が chrono をやめたら、自前の利用も jiff 等へ
+    # 移してこの行を外す。
+    "RUSTSEC-2026-0543",
+]
