@@ -629,10 +629,7 @@ impl Position {
         // Runtime editions can receive an EffectBucket network through a local NNUEEvaluator or
         // after the Position has already advanced, without touching the global NNUE state.
         // Maintaining effects unconditionally makes both paths safe and keeps model reload atomic.
-        if cfg!(feature = "nnue-effect-bucket")
-            || cfg!(feature = "nnue-runtime-dimensions")
-            || crate::nnue::nnue_requires_board_effects()
-        {
+        if cfg!(feature = "nnue-effect-bucket") || cfg!(feature = "nnue-runtime-dimensions") {
             return true;
         }
         // halfkx-arch が無効な build は NNUE 経路のみで評価するため material fallback が

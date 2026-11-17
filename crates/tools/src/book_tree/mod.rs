@@ -222,6 +222,8 @@ enum MasterCommand {
     Exits(exits::ExitsArgs),
     /// 対局の手順と元データの抜けを一覧にする
     GameGaps(Box<game_gaps::GameGapsArgs>),
+    /// 負けた局の崩れまでの抜けをつなぎ、伝播後の値と照合する
+    GamePave(Box<game_gaps::pave::GamePaveArgs>),
     /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
     LineDb(line_db::LineDbArgs),
     /// 初期局面から先手と後手の main を交互に指し、定跡が切れる所と、そこを根にした木の行を出す
@@ -251,6 +253,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
         MasterCommand::Compare(args) => walk::compare::run(args),
         MasterCommand::Exits(args) => exits::run(args),
         MasterCommand::GameGaps(args) => game_gaps::run(*args),
+        MasterCommand::GamePave(args) => game_gaps::pave::run(*args),
         MasterCommand::LineDb(args) => line_db::run(args),
         MasterCommand::MainLine(args) => main_line::run(args),
         MasterCommand::ExitReport(args) => exit_report::run(args),

@@ -51,6 +51,7 @@ use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Value};
+#[cfg(feature = "nnue-progress-diff")]
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
@@ -67,7 +68,6 @@ static NETWORK: LazyLock<RwLock<Option<Arc<NNUENetwork>>>> = LazyLock::new(|| Rw
 /// NNUE ロード時に true、クリア時に false に設定する。
 /// `should_update_board_effects()` 等のホットパスから RwLock::read を回避するため。
 static NNUE_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static NNUE_REQUIRES_BOARD_EFFECTS: AtomicBool = AtomicBool::new(false);
 
 /// FV_SCALE のグローバルオーバーライド設定
 ///
@@ -228,6 +228,7 @@ fn layer_stack_progress_thresholds(num_buckets: usize) -> &'static [f32] {
 // `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
 // `compute_layer_stack_progresskpabs_bucket_index` 内で消費する。
 // 一度消費されると None にリセットされる（1回限り）。
+#[cfg(feature = "nnue-progress-diff")]
 thread_local! {
     static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -502,14 +503,6 @@ impl NNUENetwork {
             #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(net) => Self::LayerStacks(Arc::new((**net).clone())),
         })
-    }
-
-    fn requires_board_effects(&self) -> bool {
-        #[cfg(feature = "nnue-runtime-dimensions")]
-        if let Self::DynamicLayerStacks(net) = self {
-            return net.requires_board_effects();
-        }
-        cfg!(feature = "nnue-effect-bucket")
     }
 
     /// 読み込まれた net から対象テンソルの実行時形状を返す。
@@ -1454,8 +1447,8 @@ pub fn compute_layer_stack_progresskpabs_bucket_index(
     num_buckets: usize,
 ) -> usize {
     // 差分計算済みキャッシュがあれば消費して返す
-    let cached = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None));
-    if let Some(bucket) = cached {
+    #[cfg(feature = "nnue-progress-diff")]
+    if let Some(bucket) = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None)) {
         return bucket;
     }
     // フォールバック: 全駒スキャン
@@ -1611,7 +1604,6 @@ pub fn init_nnue_with_deltas<P: AsRef<Path>>(
     let mut network = NNUENetwork::load(path)?;
     let report = network.apply_net_deltas(deltas).map_err(net_delta_io_error)?;
     let network = Arc::new(network);
-    NNUE_REQUIRES_BOARD_EFFECTS.store(network.requires_board_effects(), Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
     NNUE_INITIALIZED.store(true, Ordering::Release);
     crate::eval::changed();
@@ -1631,7 +1623,6 @@ pub fn init_nnue_from_bytes_with_deltas(
     let mut network = NNUENetwork::from_bytes(bytes)?;
     let report = network.apply_net_deltas(deltas).map_err(net_delta_io_error)?;
     let network = Arc::new(network);
-    NNUE_REQUIRES_BOARD_EFFECTS.store(network.requires_board_effects(), Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
     NNUE_INITIALIZED.store(true, Ordering::Release);
     crate::eval::changed();
@@ -1686,7 +1677,6 @@ pub fn clear_nnue() {
     // 逆順にすると is_nnue_initialized() == true の直後に get_network() が None を返す
     // 短い窓が生じる。false-negative（ロード済みなのに false に見える瞬間）は安全。
     NNUE_INITIALIZED.store(false, Ordering::Release);
-    NNUE_REQUIRES_BOARD_EFFECTS.store(false, Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = None;
 }
 
@@ -1697,11 +1687,6 @@ pub fn clear_nnue() {
 #[inline]
 pub fn is_nnue_initialized() -> bool {
     NNUE_INITIALIZED.load(Ordering::Acquire)
-}
-
-#[inline]
-pub(crate) fn nnue_requires_board_effects() -> bool {
-    NNUE_REQUIRES_BOARD_EFFECTS.load(Ordering::Acquire)
 }
 
 // =============================================================================

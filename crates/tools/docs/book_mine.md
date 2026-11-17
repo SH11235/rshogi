@@ -2137,6 +2137,66 @@ TSV は `game ply side move kind covered_by key` の列です。抜けのある�
 
 元データの照合は一時ディスク索引を使い、受付行は外部ソートで同じ局面・同じ側の手順を集約します。受付行の順序は局面キー・側の順です。棋譜はファイルを順に読み、pair の読み込みでは seeds と同じ有効対局 id の索引と進行中の局の手順を保持します。表と受付の出力は一時ファイルへ逐次書き、全入力の検査が終わってから置き換えます。
 
+## `master game-pave`: 負けた局の崩れまでを定跡につなぐ
+
+tournament の pair JSON Lines から、負けた側の崩れを元データと伝播後の値が把握しているかを局ごとに判定します。知らない局には、崩れの先までの抜けをつなぐ木の受付行を出します。版ごとに繰り返すと、既に元データへ入った区間の先へ対象を延ばせます。csa_client の JSON Lines と CSA は、pair JSON Lines 専用であることを示すエラーで拒否します。
+
+```sh
+book_mine master game-pave --master moves.tsv --audit-db audited.db \
+  --games pair.jsonl --table games.tsv \
+  --enqueue-out pave.jsonl --tag pave --priority <N>
+```
+
+| 引数 | 既定 | 意味 |
+|---|---|---|
+| `--master <PATH>` | 必須 | 元データ `moves.tsv` |
+| `--schema <DIR>` | なし | 元データの語彙・読み条件の検査 |
+| `--audit-db <PATH>` | 必須 | `master audit --out-db` の伝播後の YaneuraOu 形式 DB |
+| `--games <PATH>` | 必須、繰り返し可 | tournament の pair JSON Lines。有効な完了ペアだけを採用 |
+| `--exclude-queue <PATH>` | なし、繰り返し可 | 既に受付へ積んだ木の JSON Lines |
+| `--table <PATH>` | 必須 | 1 局 1 行の TSV |
+| `--enqueue-out <PATH>` | なし | open の局の抜けをつなぐ、`tree enqueue --from` 用 JSON Lines |
+| `--tag`・`--priority` | 受付出力時に必須 | id の接頭辞と受付の優先度 |
+| `--collapse-cp <N>` | `150` | 崩れと、伝播値が悪いと判定する正の閾値 |
+| `--after-collapse <N>` | `3` | 崩れの後に含める手数 |
+| `--depth <N>` | `3` | 木の段数 (1〜20)。根の間隔は `min(depth, 8)` 手 |
+| `--extend <N>` | なし | 各局で最後に出す根だけに付ける `opts.extend` (0〜200) |
+| `--opp-n`・`--stop`・`--rounds` | `3`・`300`・`3` | 受付行の読み条件 |
+| `--draw-black`・`--draw-white` | `-70`・`70` | 受付行の千日手の値 |
+
+`own` は局ごとに負けた側です (`black_win` なら `w`、`white_win` なら `b`)。`--player` は使いません。両側の読みを使い、`eval.last_exact_primary.score` を優先し、無ければ `eval` の score / score_cp / score_mate / score_mate_sign を使います。ただし代替の評価値に `score_bound` が付いている手は使いません。`last_exact_primary` があれば `eval.score_bound` にかかわらずそちらを使います。詰みは seeds と同じく勝ち・負けの向きを保ちます。採用する評価値に読み筋が無い手は使いません。手番側から見た値を先手側から見た値にそろえてから、負けた側の値で崩れを調べます。
+
+棋譜のペア・局順と audit DB の局面・手の照合には外部ソートを使います。全局の ID・局面キー・audit の値はメモリに保持せず、棋譜は 1 局分ずつ処理します。audit DB の局面行の手数によってキー順が乱れていても照合できます。一時ファイルには入力件数に応じた空き容量が必要です。一時ファイルは `TMPDIR` (既定は `/tmp`) に置かれるので、`/tmp` が tmpfs の環境では `TMPDIR` をディスク上の場所に向けてください。audit DB は全ての手の行を並べ直すので、大きな DB では並べ直しの時間と一時領域が支配的になります。
+
+判定には各手の `ply` (1 始まり) を使います。
+
+1. `collapse`: 負けた側の値が `-collapse_cp` 以下になり、その後の評価値つきの手がすべてその閾値以下にとどまる最初の手。評価値の無い手は飛ばします。見つからなければ `no-collapse` です。
+2. `book_reach`: 最初の手から連続して、元データに実戦の局面・手の行がある最後の手数。`role` は問いません。盤・手番・持ち駒の直接キーだけで照合し、反転局面は見ません。
+3. `settled`: 負けた側の手番で `ply ≤ collapse` の実戦手について、元データの `value_kind` が `tree:` で始まり、audit DB のその手の値が `-collapse_cp` 以下なら成立します。audit の値は局面の手番側から見た値なので、後手が負けた局でも符号を反転しません。既定の閾値では `-150` は成立し、`-149` は成立しません。`ply > collapse` の手は対象外です。局面の最善手の値ではありません。main が別の手でも、実戦手の悪さを既に知っていれば成立します。
+4. `target_end`: `book_reach < collapse + after_collapse` なら `collapse + after_collapse`、それ以外は局の最後の手。いずれも局の手数が上限です。
+5. 状態は `settled` を優先し、未成立で最後まで元データにあれば `disagree` (人による確認が必要)、対象区間の抜けが全部受付で覆われていれば `queued`、残りがあれば `open` です。受付行を出すのは `open` の局だけです。
+
+引き分けは `repetition` (同じ局面が 2 回以上出る) と `draw-other` に分類し、受付行を出しません。繰り返しは最後の着手後の局面も含めて調べ、2 回以上出た局面の最初の出現手数の最小値を `repetition_entry` に入れます。
+
+受付の被覆は game-gaps と同じく、根から対象の手まで `game` の先頭が実戦と一致し、`depth` の範囲内にある場合だけ認めます。根の手数・`own` は問いません。追加の根だけでは覆いません。これは計画上の照合であり、木が停止したり登録できなかったりしていても `queued` になります。`covered_by` で受付 id を確認できます。
+
+open の局では `book_reach + 1` から `target_end` までの抜けのうち、受付でも先に生成した根でも覆わない最初の手を次の根にします。`game` はその根から実戦の手を最大 8 手入れます。id は game-gaps と同じ `<tag>_<局の短い名前>_<手数>_<key の hash>_<own>` です。`memo` は `<局名> の崩れまでの舗装の根 <手数> 手目` です。同じ根・同じ `own` は局をまたいでまとめ、異なる実戦手順を `game` に集約します。`memo` は先頭の局のものを残します。`opts.extend` は大きい方を採用し、他の opts が異なればエラーです。
+
+TSV の列は次のとおりです。値の無い欄は空です。
+
+| 列 | 内容 |
+|---|---|
+| `game` | game-gaps と同じ `<ファイル名>_<game_id>` |
+| `outcome`・`own`・`plies` | 勝敗、負けた側、最後の手数。引き分けの own は空 |
+| `collapse`・`book_reach`・`target_end` | 崩れ、元データで連続して届いた手数、対象区間の終わり |
+| `settled_ply`・`settled_main_same` | 最初に settled が成立した手数、その局面の main と実戦手が同じか (`true` / `false`) |
+| `state` | `no-collapse` / `settled` / `disagree` / `queued` / `open` / `repetition` / `draw-other` |
+| `rows` | その局から生成した受付行数 (局をまたぐ統合前) |
+| `covered_by` | 対象区間の抜けを覆う受付 id。複数はカンマ区切り |
+| `repetition_entry` | 繰り返しの入口の手数 |
+
+入力パスをソート・重複排除し、各ファイルの局を game_id 順に出します。同じ入力なら表・受付行はバイト一致します。棋譜は一時ファイルへ退避して外部ソートし、元データは一時ディスク索引で照合します。audit DB は 1 回だけ走査して局面キーの順に並べ直し、負けた側の手番の照合の要求と突き合わせます。DB 全体はメモリに載せず、SFEN の手数は照合に使いません。
+
 ## `master main-line`: main 対 main で定跡が切れる所
 
 初期局面から、手番の側の main (先手の局面では先手の main、後手の局面では後手の main) を交互に指して辿り、
@@ -2198,7 +2258,15 @@ book_mine master exit-report --master moves.tsv --walk walk.tsv \
 | `--gap-min-weight <W>` | 0.001 | 伝播の切れ目と rejoin を載せる重み (来る割合) の下限 |
 | `--gap-line <N>` | 40 | main が 1 位から負ける差がこれ以上なら、補いで main が替わる局面とみなす |
 | `--target-black <cp>` / `--target-white <cp>` | 50 / 80 | 出口の目標。先手は先手から見た値がこれ以上、後手はこれ未満で届く |
-| `--table <TSV>` / `--markdown <MD>` | どちらか必須 | 全部の行の表と報告 |
+| `--table <TSV>` / `--markdown <MD>` | なし | 全部の行の表と報告。`--enqueue-out` と合わせていずれか必須 |
+| `--enqueue-out <PATH>` | なし | good を除く未受付の出口を木の計画 (JSON Lines) に書く |
+| `--exclude-queue <PATH>` | なし、繰り返し可 | 既存キューの根と game の途中の局面を受付ありとして除く |
+| `--tag <NAME>` | exit-report | id の名前。[A-Za-z0-9_-] の 1〜40 文字 |
+| `--depth <N>` | 6 | 木の段数 (0〜20) |
+| `--opp-n <N>` / `--stop <cp>` / `--rounds <N>` | 省略 | 木の相手の手の数 (1〜8)・打ち切り値 (1〜30000)・読み直し回数 (0〜10) |
+| `--draw-black <cp>` / `--draw-white <cp>` | 省略 | 先手番・後手番で循環に入る手の値 (-30000〜30000、各手番から見た値) |
+| `--enqueue-heavy-weight <W>` | 0.05 | 重い出口の重みの下限 (有限の非負数) |
+| `--enqueue-priority-heavy <N>` / `--enqueue-priority-miss <N>` / `--enqueue-priority-other <N>` | 1 / 4 / 7 | 重い出口・目標未達・その他の priority (0〜1000000、小さいほど先) |
 | `--title <NAME>` | 空 | 報告の見出しの版の名前 |
 
 walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以上) は、手順の中で RAMU (表の side) が最後に指した手を元データで引き、
@@ -2224,12 +2292,54 @@ bridge・rejoin の表の ply は空でもよく (元データの ply が空の�
 
 表は `class side turn move_number weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
 side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
-queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。rejoin の行は、局面か戻った先の局面を根にした木です。
+queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
 報告は 1 (good)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
 walk の止まりの節は「出口の局面」の列に手番と何手目と手番の側を (`後手 14 手目 (RAMU)`、`先手 15 手目 (相手)`)、2b・2c は「局面 (RAMU の手番)」の列に手番と何手目を書きます。
 2c は RAMU の手・相手の手・戻った先の main も漢字の棋譜で書き、手順なしの行は手順の欄に「手順なし」と書いて手を USI のまま載せます。
 標準出力には class ごとの行の数を出します。
+
+### 出口から木の計画を出す
+
+```sh
+book_mine master exit-report --master moves.tsv --walk walk.tsv \
+  --rejoin rejoin.tsv --bridge bridge.tsv --bridge-audit bridge_audit.tsv \
+  --box box-a=/path/to/box-a --markdown exits.md \
+  --enqueue-out exits.jsonl --tag edition --depth 6 --opp-n 3 \
+  --exclude-queue already_planned.jsonl
+book_mine tree enqueue --state /path/to/state --from exits.jsonl
+```
+
+出す行は一次の案です。積む前に定跡の判断で直してください。`--exclude-queue`・`--tag`・`--depth`・読み条件・priority 関連引数の明示指定には `--enqueue-out` が必要です。
+
+対象は報告に載った bad・gap・rejoin・shallow・weak の行で、good は出しません。own は常に報告の side (RAMU の側) です。
+
+| 分類 | 根 | 根の手数 | game |
+| --- | --- | --- | --- |
+| bad / shallow / weak | 報告の key | move_number | 空 |
+| gap | 報告の key | move_number | `[[main]]` (best があっても main) |
+| rejoin | key から RAMU の move を指した後の dig の局面 (相手の手番) | move_number + 1 | `[[rejoin_move]]` |
+
+出す根と同じ局面・同じ own の段 1 以上の木が `--box` の受付にあれば除きます。
+`--exclude-queue` は `master walk` と同じ照合で、段 1 以上の木の根に加え、game の途中の局面 (depth + 1 手まで、その木の own の手番の局面) も受付ありと数えます。bw の木は両側に数えます。
+rejoin の積み荷も dig の根と own で照合します。報告の受付欄は元の局面・戻った先も表示の照合に使うので、その木しか無い場合は dig の計画を出します。
+move_number が不明な行は根の手数を作れないので出さず、標準出力で件数を示します。
+
+priority は次の順で決めます。
+
+1. 重みが `--enqueue-heavy-weight` 以上なら `--enqueue-priority-heavy` (目標に届いていても適用)。
+2. それ以外で目標に届かない (`meets == Some(false)`、rejoin は戻った先の値で未達) なら `--enqueue-priority-miss`。
+3. その他 (値なしも含む) は `--enqueue-priority-other`。
+
+同じ (根の局面, own) は 1 行にまとめ、game は初出順で重複なく合併し、priority は最小、根の手数は最小にします。手数の分からない行も、同じ根の行があればそこにまとめます (手数なしに数えるのは、まとめる先も無い行だけです)。
+memo は先の分類 (bad → gap → rejoin → shallow → weak)、同じ分類なら重い行を代表にし、分類・何手目・先手から見た値・出所・重みと、まとめた件数を短く記します。
+根の手数も代表の行を使います。id は `master walk` と同じ `queue_id(tag, 根の手数, 根の key, own)` で、`<tag>_<手数>_<key の SHA-256 先頭16桁>_<own>` です。
+出力は代表の分類順、同じ分類では重みの大きい順 (同じ重みは入力順) です。
+
+全行を `tree enqueue` と同じ検査に通してから一時ファイル経由で書きます。出力先どうし、および master・walk・rejoin・bridge・bridge-audit・schema・box の入力・exclude-queue と出力先が同じファイルなら拒否します。
+標準出力には出した行数・照合で除いた元の行数・手数不明で出せなかった行数・統合で減った行数を 1 行で追加します。
+
+`master audit --bridge-enqueue-out` は伝播の切れ目から計画を作り、gap の計画は重なります。版ごとの出口の報告から good 以外をまとめて積むときは `exit-report --enqueue-out` を使います。
 
 ## `master opening-report`: 戦型の候補を比べる表
 
