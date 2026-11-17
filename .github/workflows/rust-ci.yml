@@ -240,6 +240,12 @@ jobs:
         run: >-
           cargo test -p rshogi-usi --features search-pass-rules --test integration usi_flow::
           -- --test-threads=2
+      - name: Test search tree sampling
+        # gensfen の探索中の局面の書き出しは opt-in なので、既定構成のテストでは一度もコンパイルされない。
+        if: matrix.shard == 2
+        run: |
+          cargo test -p rshogi-core --lib --features search-tree-sample tree_sample -- --test-threads=2
+          cargo test -p tools --features search-tree-sample --lib --bin gensfen --test integration tree_sample -- --test-threads=2
       - name: Test search with lazy evaluate
         # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
         if: matrix.shard == 3

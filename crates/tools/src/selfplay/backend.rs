@@ -105,6 +105,34 @@ pub struct NativeBackend {
 }
 
 impl NativeBackend {
+    /// 探索木の標本採取を設定する。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn set_tree_sample(
+        &mut self,
+        config: Option<rshogi_core::search::TreeSampleConfig>,
+        seed: u64,
+    ) {
+        self.engine.set_tree_sample(config, seed);
+    }
+
+    /// 対局ごとの標本採取 seed を設定する。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn reseed_tree_sample(&mut self, seed: u64) {
+        self.engine.reseed_tree_sample(seed);
+    }
+
+    /// 採取済み標本を取り出す。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn drain_tree_samples(&mut self, out: &mut Vec<rshogi_core::search::TreeSample>) {
+        self.engine.drain_tree_samples(out);
+    }
+
+    /// 標本採取の累計を返す。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn tree_sample_stats(&self) -> rshogi_core::search::TreeSampleStats {
+        self.engine.tree_sample_stats()
+    }
+
     /// 新しい NativeBackend を作成
     pub fn new(tt_size_mb: usize, eval_hash_size_mb: usize) -> Self {
         Self {

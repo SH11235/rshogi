@@ -88,6 +88,7 @@ cargo run --release -p tools --bin shuffle_psv -- \
 ```
 
 `gensfen` は終了時に局面数を表示し、指定先へ PSV と結果 JSONL を保存します。
+`search-tree-sample` feature では、探索木内の局面を別の PSV に採取することもできます。
 LayerStacks の routing・進行度係数が必要なモデルは
 [起動時の設定条件](docs/nnue-routing.md#起動時の設定条件)に従って指定してください。
 `shuffle_psv` のチャンク指定は全件のメモリ保持を避けるためです。メモリ・一時ディスク容量と

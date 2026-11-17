@@ -731,3 +731,63 @@ echo '{"target_games":0}' > <out-dir>/control.json         # 安全な drain（�
   pack / hcpe3 で終局前の記録対象局面がない対局でも `true` になり得る。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
+
+## 探索木内の局面の採取
+
+対局で指された局面とは別に、探索中に NNUE の静的評価を実際に計算した局面を
+確率で採取できます。評価値や勝敗を教師にせず、トレーナーの eval 項だけに使う
+局面を集める用途です。
+
+ビルド時に feature を有効にします（既定では無効）。
+
+```bash
+cargo build --release -p tools --bin gensfen --features search-tree-sample
+```
+
+| オプション | 意味 |
+|---|---|
+| `--tree-sample-p F` | 静的評価時の採取確率（0..=1） |
+| `--tree-sample-out PATH` | 採取した局面の PSV 出力先。指定したパスに保存 |
+
+この 2 引数は同時に指定します。native モード専用で、先後とも探索スレッド数が
+1 である必要があります。採取するのは main thread のみです。
+1 探索あたりの上限は 65,536 局面で、探索ごとにバッファから取り出します。
+上限を超えた標本は捨て、`dropped_full` に数えます。
+
+次の局面・評価経路は採取しません。
+
+- TT の静的評価値を再利用した場合、EvalHash に命中した場合
+- 王手されている局面
+- SEE > 0 の取る手がある局面
+- SEE >= 0 の成る手がある局面
+- 取る手でも成る手でもない合法手がない局面
+
+出力は 40 byte の PSV です。
+
+| フィールド | 値 |
+|---|---|
+| sfen | 採取した局面の PackedSfen（32 byte） |
+| score | 0 |
+| move16 | 0 |
+| game_ply | 採取した局面の手数（u16 の範囲に制限） |
+| game_result | 0 |
+| padding | 2（bit 1 が探索木標本、bit 0 の dual-label 識別とは別） |
+
+score/result の 0 は評価や引き分けの教師ではありません。padding の bit 1 を
+解釈して eval 項のみを使うトレーナーで読み込んでください。
+
+採取用乱数は `--shuffle-seed` で決まる run seed と game_id から対局ごとに設定します。
+同じ入力・モデル・探索条件、固定 seed、固定ノード数または深さ、
+`--keep-tt=false` で対局単位の標本を再現できます。時間制限や
+`--keep-tt=true` による対局間の探索状態の保持は、探索する局面自体を変え得ます。
+複数 worker の最終ファイルは worker 順に連結するため、割り当てが変わると全体の並びも変わります。
+
+各対局の標本は通常の教師データの採否にかかわらず、result 行より先に書き込みます。
+JSONL と同じ場所に `{stem}.w{worker}.tree.psv` を作り、result に記録した長さで
+再開時に復旧します。最終化時は指定した出力先へ連結します。
+採取確率・出力先が異なる設定での `--resume` は拒否します。
+
+終了時の `Tree sample (this invocation)` 行には、今回の実行での
+`drawn`、`rejected_in_check`、`rejected_capture`、`rejected_promotion`、
+`rejected_no_quiet`、`dropped_full`、`accepted`、`records_written` を表示します。
+再開前の累計は含みません。

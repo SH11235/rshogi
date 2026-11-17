@@ -459,7 +459,7 @@ pub fn run_chunk<M: PolicyValueModel, W: Write>(
                             move16: move_to_psv_move16(mv),
                             game_ply: game.game_ply,
                             game_result: 0,
-                            padding: game.moves_from_seed.min(u32::from(u8::MAX)) as u8,
+                            padding: 0,
                         },
                         stm,
                     ));
@@ -732,8 +732,7 @@ mod tests {
             pos.set_sfen(&unpack_sfen(&r.sfen).unwrap()).unwrap();
             let mv = crate::packed_sfen::psv_move16_to_move(r.move16);
             assert!(crate::packed_sfen::is_legal_psv_move(&pos, mv));
-            // padding は種から何手目か。種の game_ply (1 / 3 / 20) まで戻れる。
-            assert!([1, 3, 20].contains(&(r.game_ply - u16::from(r.padding))));
+            assert_eq!(r.padding, 0);
         }
         // 種の局面は rollouts_per_seed 本に対して 1 回だけ出力する
         for seed in seeds() {
@@ -747,7 +746,10 @@ mod tests {
 
     #[test]
     fn rollout_limit_emits_the_nth_position_and_is_reproducible() {
-        let input = seeds();
+        let mut input = seeds();
+        for (i, seed) in input.iter_mut().enumerate() {
+            seed.game_ply = 1 + i as u16 * 20;
+        }
         for n in [1, 3] {
             let cfg = RolloutConfig {
                 max_game_ply: 512,
@@ -760,15 +762,10 @@ mod tests {
             assert_eq!(stats.inferred_positions, 9 * (u64::from(n) + 1));
             assert_eq!(stats.max_ply, 0);
             let recs = records(&bytes);
-            assert!(recs.iter().all(|r| r.game_result == 0 && u16::from(r.padding) <= n));
+            assert!(recs.iter().all(|r| r.game_result == 0 && r.padding == 0));
             for seed in &input {
                 for depth in 0..=n {
-                    let count = recs
-                        .iter()
-                        .filter(|r| {
-                            r.game_ply == seed.game_ply + depth && u16::from(r.padding) == depth
-                        })
-                        .count();
+                    let count = recs.iter().filter(|r| r.game_ply == seed.game_ply + depth).count();
                     let expected = if depth == 0 {
                         1
                     } else {

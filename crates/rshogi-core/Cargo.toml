@@ -55,6 +55,8 @@ debug = []
 prepacked-nnue = ["dep:sha2"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = []
+# 探索が静的評価した静かな局面を確率で書き出す（教師データ生成用）。無効の build には書き出しのコードを含めない。
+search-tree-sample = []
 # NNUE統計収集（refresh/update比率等のカウント）
 nnue-stats = []
 # Bitboard256 の AVX2 経路は target_feature に応じて自動選択する。
