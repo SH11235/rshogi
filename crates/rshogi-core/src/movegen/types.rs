@@ -4,6 +4,8 @@ use std::mem::MaybeUninit;
 
 use crate::types::Move;
 
+mod splat;
+
 /// 1局面での最大合法手数
 /// 理論上の最大は593手だが、余裕を持たせる
 pub const MAX_MOVES: usize = 600;
@@ -75,6 +77,7 @@ impl GenType {
 
 /// 指し手とスコアのペア（オーダリング用）
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct ExtMove {
     /// 指し手
     pub mv: Move,
