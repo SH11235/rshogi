@@ -444,23 +444,30 @@ def iter_batches(
     *,
     drop_last: bool = False,
     verify_hashes: bool = False,
+    start_record: int = 0,
 ) -> Iterator[Batch]:
     """生成済みで変更されない dataset を順番どおり読み、shard 境界を跨いで batch を作る。
 
     既定は全データの再検証・hash scan をしない。生成後の編集や置換をせず、別 directory に新規生成する。
+    ``start_record`` は先頭からの行数で、対象 shard を直接開く。既読 shard の読捨てはしない。
     """
     _positive_int(batch_size, "batch_size", MAX_BATCH_SIZE)
     root = _dataset_path(path, new=False)
     manifest = _manifest(root)
+    if type(start_record) is not int or not 0 <= start_record <= manifest["source_records"]:
+        raise DatasetError("start_record must be an integer within the dataset")
+    if start_record == manifest["source_records"]:
+        return
     manifest_signature = _signature(root / "manifest.json")
     scratch = _scratch(batch_size)
     pending = 0
     width = 0
-    for index in range(manifest["shard_count"]):
+    first_shard, first_row = divmod(start_record, manifest["shard_records"])
+    for index in range(first_shard, manifest["shard_count"]):
         if _signature(root / "manifest.json") != manifest_signature:
             raise DatasetError("dataset manifest changed while reading")
         shard = _Shard(root, index, manifest, verify_hashes=verify_hashes)
-        start = 0
+        start = first_row if index == first_shard else 0
         while start < shard.rows:
             shard.check_unchanged()
             count = min(batch_size - pending, shard.rows - start)
@@ -477,6 +484,18 @@ def iter_batches(
         del shard
     if pending and not drop_last:
         yield _batch(scratch, pending, width)
+
+
+def dataset_info(path: str | Path) -> dict:
+    """生成時の内容 root を含む manifest の指紋を返す。shard は走査しない。"""
+    root = _dataset_path(path, new=False)
+    signature = _signature(root / "manifest.json")
+    manifest = _manifest(root)
+    digest = hashlib.sha256()
+    digest.update(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+    if _signature(root / "manifest.json") != signature:
+        raise DatasetError("dataset manifest changed while fingerprinting")
+    return {"path": str(root), "fingerprint": digest.hexdigest(), "manifest": manifest}
 
 
 def verify_dataset(path: str | Path) -> dict:
