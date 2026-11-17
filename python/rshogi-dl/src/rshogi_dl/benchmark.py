@@ -51,6 +51,8 @@ class BenchmarkConfig:
     input_mode: str = "resident"
     policy_rows_mode: str = "prepared"
     fused_optimizer: bool = False
+    optimizer_execution: str = "eager"
+    optimizer_capturable: bool = False
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
 
@@ -67,6 +69,7 @@ class BenchmarkConfig:
             "attention_backend": ATTENTION_BACKENDS,
             "execution": ("eager", "compile"), "compile_mode": COMPILE_MODES,
             "compile_scope": ("model", "model-loss"),
+            "optimizer_execution": ("eager", "compile"),
             "precision": ("fp32", "tf32", "fp16", "bf16"),
             "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
@@ -85,6 +88,12 @@ class BenchmarkConfig:
             raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
             raise ValueError("fused_optimizer must be boolean")
+        if type(self.optimizer_capturable) is not bool:
+            raise ValueError("optimizer_capturable must be boolean")
+        if self.optimizer_capturable and self.device != "cuda":
+            raise ValueError("optimizer_capturable requires device=cuda")
+        if self.optimizer_execution == "compile" and self.device == "cuda" and not self.optimizer_capturable:
+            raise ValueError("CUDA optimizer compile requires optimizer_capturable")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
             raise ValueError("CPU benchmark requires fp32 and an unfused optimizer")
         for name, positive in (("learning_rate", True), ("weight_decay", False)):
@@ -181,6 +190,22 @@ def _optimizer_steps(optimizer: torch.optim.Optimizer, parameter: torch.nn.Param
     return int(state["step"].item()) if "step" in state else 0
 
 
+def _optimizer_compilation(config: BenchmarkConfig):
+    if config.optimizer_execution == "eager":
+        return nullcontext()
+    # compile 失敗や再 compile 上限を、eager の計測値として成功させない。
+    return torch._dynamo.config.patch(suppress_errors=False, fail_on_recompile_limit_hit=True)
+
+
+def _configure_optimizer(optimizer: torch.optim.Optimizer, config: BenchmarkConfig) -> None:
+    if config.optimizer_execution == "compile":
+        # 同じ optimizer を GradScaler に渡し、fused AdamW の overflow 処理を保つ。
+        optimizer.step = torch.compile(
+            optimizer.step, backend="inductor", fullgraph=False,
+            options={"triton.cudagraphs": False},
+        )
+
+
 def run_benchmark(
     data_path: str | Path, model_config: ModelConfig, config: BenchmarkConfig
 ) -> dict:
@@ -189,7 +214,7 @@ def run_benchmark(
     resident は先頭の有限 window を device に置く。stream は同じ window を再読込・転送する。
     CUDA event の経過時間にも CPU の投入待ちが含まれ、kernel 実行時間だけを表さない。
     """
-    with _settings(config) as device:
+    with _settings(config) as device, _optimizer_compilation(config):
         startup_started = time.perf_counter()
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         model.train()
@@ -197,7 +222,9 @@ def run_benchmark(
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
             fused=config.fused_optimizer,
+            capturable=config.optimizer_capturable,
         )
+        _configure_optimizer(optimizer, config)
         scaler = torch.amp.GradScaler("cuda", enabled=config.precision == "fp16")
         batches = _batches(data_path, config)
         window = list(islice(
@@ -323,6 +350,8 @@ def run_benchmark(
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
             "compile_scope": config.compile_scope if config.execution == "compile" else None,
             "cudagraphs_requested": cudagraphs_requested,
+            "optimizer_cudagraphs_requested": False,
+            "optimizer_capturable_resolved": [group["capturable"] for group in optimizer.param_groups],
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
             "window_samples": window_count * config.batch_size,
@@ -356,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
         "--policy-rows", dest="policy_rows_mode", choices=("prepared", "legacy"), default="prepared"
     )
     parser.add_argument("--fused-optimizer", action="store_true")
+    parser.add_argument("--optimizer-execution", choices=("eager", "compile"), default="eager")
+    parser.add_argument("--optimizer-capturable", action="store_true")
     for name, default in (("batch-size", 32), ("steps", 20), ("warmup", 5),
                           ("window-batches", 4), ("seed", 0), ("threads", 1)):
         parser.add_argument(f"--{name}", type=int, default=default)
