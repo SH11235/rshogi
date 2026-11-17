@@ -260,6 +260,25 @@ class BenchmarkTest(unittest.TestCase):
         report = benchmark.run_benchmark(data, TEST_CONFIG, replace(self.config, warmup=0, steps=1))
         self.assertEqual(report["optimizer_updates"], 1)
 
+    def test_policy_presence_metadata_survives_resident_and_stream_transfer(self) -> None:
+        data = self.runs / "alternating-policy.jsonl"
+        rows = synthetic_records(seed=16, count=4)
+        rows[0]["policy"] = rows[1]["policy"] = None
+        rows[3]["policy"] = [[rows[3]["legal_labels"][0], 1]]
+        write_jsonl(data, rows)
+        for input_mode in ("resident", "stream"):
+            for row_mode in ("prepared", "legacy"):
+                with self.subTest(input_mode=input_mode, row_mode=row_mode):
+                    with patch.object(
+                        benchmark, "clear_unused_policy_head_gradients",
+                        wraps=benchmark.clear_unused_policy_head_gradients,
+                    ) as restore:
+                        benchmark.run_benchmark(data, TEST_CONFIG, replace(
+                            self.config, input_mode=input_mode, policy_rows_mode=row_mode,
+                            window_batches=2, warmup=0, steps=4,
+                        ))
+                    self.assertEqual([call.args[1] for call in restore.call_args_list], [False, True, False, True])
+
     def test_short_data_and_failed_training_do_not_return_success(self) -> None:
         short = self.runs / "short.jsonl"
         write_jsonl(short, synthetic_records(seed=15, count=1))

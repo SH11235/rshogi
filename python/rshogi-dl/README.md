@@ -262,6 +262,10 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   データ全量は保持せず、resident も最大 32 batch に制限します。batch 未満の末尾は使いません。
   fixture 全体が 1 batch に満たなければ失敗します。
 
+全行が `policy=null` の batch では、compile の有無にかかわらず policy head の重み・momentum・
+更新回数を維持します。policy 教師がある場合は loss が 0 でも通常どおり更新し、weight decay も適用します。
+教師の有無は転送前の CPU metadata で判定し、このための GPU 同期は増やしません。
+
 同期した wall time と `cuda_stream_seconds` を別々に出します。CUDA event の時間にも CPU からの
 演算投入待ちが入り得るため、純粋な kernel 時間ではありません。CUDA の peak allocated / reserved
 メモリは warmup 後に計測し直します。各 step の loss・全 parameter の有限性・初期/最終重みの digest
