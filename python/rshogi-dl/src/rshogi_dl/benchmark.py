@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 import hashlib
 from itertools import islice
 import json
@@ -19,8 +19,13 @@ import torch
 from .contract import TRAINING_STATUS
 from .data import Batch, RecordError, iter_batches
 from .loss import policy_value_loss
-from .model import NAMED_CONFIGS, ModelConfig, SquareTransformer
+from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact
+from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
+
+
+COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
+_CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
 
 
 class BenchmarkError(RuntimeError):
@@ -38,9 +43,13 @@ class BenchmarkConfig:
     seed: int = 0
     threads: int = 1
     device: str = "cpu"
+    attention_backend: str = "explicit"
     execution: str = "eager"
+    compile_mode: str = "default"
+    compile_scope: str = "model"
     precision: str = "fp32"
     input_mode: str = "resident"
+    policy_rows_mode: str = "prepared"
     fused_optimizer: bool = False
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
@@ -55,13 +64,25 @@ class BenchmarkConfig:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
         for name, choices in {
-            "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
-            "input_mode": ("resident", "stream"),
+            "attention_backend": ATTENTION_BACKENDS,
+            "execution": ("eager", "compile"), "compile_mode": COMPILE_MODES,
+            "compile_scope": ("model", "model-loss"),
+            "precision": ("fp32", "tf32", "fp16", "bf16"),
+            "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
         if type(self.device) is not str or self.device not in ("cpu", "cuda"):
             raise ValueError("device must be cpu or cuda")
+        if self.execution == "eager" and self.compile_mode != "default":
+            raise ValueError("non-default compile_mode requires execution=compile")
+        if self.compile_scope == "model-loss":
+            if self.execution != "compile":
+                raise ValueError("model-loss scope requires execution=compile")
+            if self.policy_rows_mode != "prepared":
+                raise ValueError("model-loss scope requires prepared policy rows")
+        if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
+            raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
             raise ValueError("fused_optimizer must be boolean")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
@@ -72,6 +93,18 @@ class BenchmarkConfig:
                 raise ValueError(f"{name} must be finite")
             if value < 0 or (positive and value == 0):
                 raise ValueError(f"{name} must be {'positive' if positive else 'non-negative'}")
+
+
+class _ModelLoss(torch.nn.Module):
+    def __init__(self, model: SquareTransformer) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, batch: Batch) -> torch.Tensor:
+        if batch.policy_rows is None:
+            raise BenchmarkError("model-loss scope requires prepared policy rows")
+        policy, value = self.model(batch.tokens)
+        return policy_value_loss(policy, value, batch).total
 
 
 def _batches(path: str | Path, config: BenchmarkConfig) -> Iterator[Batch]:
@@ -86,8 +119,14 @@ def _batches(path: str | Path, config: BenchmarkConfig) -> Iterator[Batch]:
             raise BenchmarkError(f"data needs at least {config.batch_size} records")
 
 
-def _to_device(batch: Batch, device: torch.device) -> Batch:
-    return Batch(**{field.name: getattr(batch, field.name).to(device) for field in fields(Batch)})
+def _to_device(
+    batch: Batch, device: torch.device, *, policy_rows_mode: str = "prepared"
+) -> Batch:
+    if policy_rows_mode == "legacy":
+        batch = replace(batch, policy_rows=None)
+    values = {field.name: getattr(batch, field.name) for field in fields(Batch)}
+    return Batch(**{name: tensor.to(device) if tensor is not None else None
+                    for name, tensor in values.items()})
 
 
 def _digest(model: SquareTransformer) -> str:
@@ -152,7 +191,7 @@ def run_benchmark(
     """
     with _settings(config) as device:
         startup_started = time.perf_counter()
-        model = SquareTransformer(model_config).to(device)
+        model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         model.train()
         initial_digest = _digest(model)
         optimizer = torch.optim.AdamW(
@@ -166,27 +205,37 @@ def run_benchmark(
         ))
         if not window:
             raise BenchmarkError(f"data needs at least {config.batch_size} records")
+        model_loss_scope = config.compile_scope == "model-loss"
+        if model_loss_scope and any(batch.policy_rows is None for batch in window):
+            raise BenchmarkError("model-loss scope requires prepared policy rows")
         data_digest = hashlib.sha256()
         for batch in window:
             for field in fields(Batch):
+                # 補助 index の有無を変えても、比較する元の 6 Tensor の同一性を判定する。
+                if field.name == "policy_rows":
+                    continue
                 tensor = getattr(batch, field.name)
                 data_digest.update(field.name.encode())
                 data_digest.update(str(tuple(tensor.shape)).encode())
                 data_digest.update(tensor.numpy().tobytes())
         window_count = len(window)
-        resident = [_to_device(batch, device) for batch in window] if config.input_mode == "resident" else None
+        def prepare_batch(batch: Batch) -> tuple[Batch, bool]:
+            has_policy = has_policy_targets(batch)
+            return _to_device(batch, device, policy_rows_mode=config.policy_rows_mode), has_policy
+
+        resident = [prepare_batch(batch) for batch in window] if config.input_mode == "resident" else None
         del window
         batch_index = 0
 
-        def next_batch() -> Batch:
+        def next_batch() -> tuple[Batch, bool]:
             nonlocal batch_index
             if resident is None:
-                return _to_device(next(batches), device)
+                return prepare_batch(next(batches))
             batch = resident[batch_index % len(resident)]
             batch_index += 1
             return batch
 
-        diagnostic_batch = next_batch()
+        diagnostic_batch, _ = next_batch()
         with torch.no_grad(), _autocast(config):
             policy, value = model(diagnostic_batch.tokens)
             initial_loss = policy_value_loss(policy, value, diagnostic_batch).total.item()
@@ -195,16 +244,30 @@ def run_benchmark(
         # 診断で消費した先頭 batch は、計測する両入力方式でも同じ順序に戻す。
         batches = _batches(data_path, config)
         batch_index = 0
-        forward = torch.compile(model) if config.execution == "compile" else model
+        target = _ModelLoss(model) if model_loss_scope else model
+        forward = (
+            torch.compile(target, mode=config.compile_mode) if config.execution == "compile" else target
+        )
+        cudagraphs_requested = (
+            config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES
+        )
         _synchronize(device)
         startup_seconds = time.perf_counter() - startup_started
 
-        def step(batch: Batch) -> torch.Tensor:
+        def step(prepared: tuple[Batch, bool]) -> torch.Tensor:
+            batch, has_policy = prepared
+            if cudagraphs_requested:
+                # compiled forward/backward の前の反復で使った一時 Tensor の寿命を区切る。
+                torch.compiler.cudagraph_mark_step_begin()
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
-                policy, value = forward(batch.tokens)
-                loss = policy_value_loss(policy, value, batch).total
+                if model_loss_scope:
+                    loss = forward(batch)
+                else:
+                    policy, value = forward(batch.tokens)
+                    loss = policy_value_loss(policy, value, batch).total
             scaler.scale(loss).backward()
+            clear_unused_policy_head_gradients(model, has_policy)
             scaler.step(optimizer)
             scaler.update()
             return loss.detach()
@@ -258,7 +321,8 @@ def run_benchmark(
             "model_config": model_config.to_dict(), "benchmark_config": asdict(config),
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
-            "compile_scope": "model" if config.execution == "compile" else None,
+            "compile_scope": config.compile_scope if config.execution == "compile" else None,
+            "cudagraphs_requested": cudagraphs_requested,
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
             "window_samples": window_count * config.batch_size,
@@ -282,9 +346,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", required=True, help="encode 済み fixture JSONL")
     parser.add_argument("--config", choices=sorted(NAMED_CONFIGS), default="initial")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
+    parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
+    parser.add_argument("--compile-scope", choices=("model", "model-loss"), default="model")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
+    parser.add_argument(
+        "--policy-rows", dest="policy_rows_mode", choices=("prepared", "legacy"), default="prepared"
+    )
     parser.add_argument("--fused-optimizer", action="store_true")
     for name, default in (("batch-size", 32), ("steps", 20), ("warmup", 5),
                           ("window-batches", 4), ("seed", 0), ("threads", 1)):

@@ -99,6 +99,58 @@ pip install --no-deps -e .
 | 10..19 | 上の 10 方向の成り |
 | 20..26 | 打ち: 歩 香 桂 銀 角 飛 金 |
 
+## 生成済み shard の読み込み
+
+JSONL の検証・Python record の作成を毎 epoch 繰り返す代わりに、検証済みの入力を NumPy 配列の shard に変換できます。変換は全行を一度検証し、最大 `--shard-records` 行ずつ保存します。既定4096行、上限65536行で、入力全体をメモリに読みません。
+
+```bash
+python -m rshogi_dl.sharded convert \
+  --source fixture.jsonl \
+  --output "$SHOGI_DATA/teachers/dl/<dataset>" \
+  --shard-records 4096 \
+  --teacher-kind synthetic-validation-targets \
+  --split fixture-only --training-status validation-only
+
+python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<dataset>"
+```
+
+dataset の出力先は `$SHOGI_DATA/teachers/dl/<dataset>/` または `$SHOGI_DATA/runs/rshogi-dl/<run>/` に限ります。絶対 path を指定し、repository・worktree 内や既存 path への出力は拒否します。`manifest.json` は全 shard の保存後に公開します。変換に失敗して manifest がない directory は未完了であり、reader は受け付けません。自動再開・上書きはしないため、別の新規出力先を使ってください。
+
+入力JSONLは通常ファイルに限り、変換中は変更しないでください。開始時とmanifest公開直前のファイル識別子・byte数・更新時刻・metadata変更時刻を照合し、変更された場合は公開しません。manifestには入力の`source_size`と読み取った`source_records`を記録します。
+
+各配列・metadata・一時manifestはflushとfsyncを行い、manifestをatomic renameで公開します。POSIXではshardとdatasetのdirectoryもfsyncし、ファイルシステムがdirectory fsyncを提供しない場合は失敗します。Windowsでは標準Python APIでdirectoryの永続化を確認できないため、file fsyncとatomic renameまでが保証範囲です。Windowsでコピーしたdatasetや電源断後のdatasetは、利用前に`verify`で検査してください。
+
+| shard 内の配列 | 保存形式 |
+| --- | --- |
+| tokens | uint8 `[N, 96]` |
+| values / policy_present | float32 `[N]` / bool `[N]` |
+| legal_offsets | uint64 `[N+1]` |
+| legal_indices / policy_targets | uint16 / float32 の一次元配列。各行の合法手分だけ格納 |
+
+policy target は合法手の元の並びで合計1に正規化します。`policy=null` の行は `policy_present=false`、targetは0で、合法手が空の行も保持します。各行593手分の領域をファイルに確保する形式ではありません。global manifest は件数とshard数を保持し、個々のファイル情報とSHA-256は各shardのmetadataへ保存します。
+
+配列はconverterが書くNPY 1.0形式です。readerは最大1024 bytesのheaderを先に検査し、期待するshape・dtype・C順序・ファイル長が一致してからmappingを作ります。空の合法手配列でも、headerに書かれた件数から先にメモリを確保しません。
+
+```python
+import os
+from pathlib import Path
+from rshogi_dl.sharded import iter_batches
+
+dataset = Path(os.environ["SHOGI_DATA"]) / "teachers" / "dl" / "<dataset>"
+for batch in iter_batches(dataset, batch_size=128, drop_last=False):
+    print(batch.tokens.shape)
+```
+
+reader はread-only mmapを使い、shardを順番に開き、shard境界を跨いでJSONL readerと同じ`Batch`を作ります。batchの上限は16384行です。末尾は`drop_last=True`で捨てられます。保持する作業領域は1shardのmappingと1batch分で、返したbatchは次の読込で書き換わりません。並べ替えやworker・GPU転送は行わず、CPU tensorを返します。
+
+このreaderの対象はconverterが生成した、変更されないdatasetです。既定ではheader・shape・dtype・file sizeと読込中の置換・変更を検査し、全sampleの再検証や全ファイルのhash scanを毎epoch行いません。配布・コピー後に全ファイルを検査するときは`verify`、または`iter_batches(..., verify_hashes=True)`を明示してください。使用中のshardを編集・削除・置換せず、新しいdatasetを別directoryに生成してください。
+
+`teacher_kind`・`split`・datasetの`training_status`は利用者が明示する出自で、未指定は`unknown`です。`training_status`は`unknown`または`validation-only`を指定できます。converterは実教師の品質を推測せず、変換成功は学習データの品質採用を意味しません。上の例は合成fixtureであり、モデル・checkpointの`validation-only`という状態は変更しません。
+
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
+
 ## モデル
 
 token の埋め込み (語彙 121) と位置の埋め込み (96) を足し、pre-LayerNorm の encoder を通します。
@@ -115,6 +167,25 @@ attention は全 96 token 間の双方向で、畳み込みは使いません。
   sigmoid を付けて `[0, 1]` にします。
 - loss: policy は合法手の中だけで softmax を取る soft-target cross entropy (`policy` が `null` で
   ない行の平均)、value は BCE。両者を 1:1 で足します。全行が `null` の batch では policy loss は 0 です。
+
+### attention の実行方式
+
+`SquareTransformer(config, attention_backend="sdpa")` は PyTorch の
+`scaled_dot_product_attention` を使います。既定の `"explicit"` は QK の積・softmax・V との積を
+個別に計算します。どちらも全 96 token 間の双方向 attention で、dropout は使いません。
+SDPA の実際の kernel は device・dtype・PyTorch の設定に依存します。
+
+この指定は実行方式だけを変え、model config・parameter 名・checkpoint の形式は共通です。
+同じ重みを両方式へ `load_state_dict` できます。checkpoint の読込時は既定の `"explicit"` に戻るので、
+SDPA を使う側でモデルを構築して重みを読み込んでください。SDPA のモデルも ONNX export 中は
+標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
+実行方式は変わりません。
+
+`collate` と sharded reader の `Batch` は、policy 対象行を CPU で抽出した `policy_rows` を持ちます。
+この昇順 int64 Tensor は他の batch Tensor と同じ device へ転送してください。既存の 6 引数だけで
+`Batch` を構築した場合は `policy_rows=None` となり、loss が従来どおり `policy_present` から抽出します。
+各 step で `optimizer.zero_grad(set_to_none=True)` を呼ぶと、全行に policy が無い batch では policy
+head の勾配が `None` のままとなり、その更新や AdamW の weight decay・状態更新を行いません。
 
 ## smoke
 
@@ -154,20 +225,46 @@ python -m rshogi_dl.benchmark \
 JSON にも書きます。成果物の保存先・上書き拒否は smoke と同じです。`validation-only` の小さな
 fixture での処理時間であり、学習品質や棋力を示しません。
 
-- `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
-  の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
+- `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
+- `--execution eager|compile`: `compile` は `torch.compile` を使います。対象は `--compile-scope` で指定します。
+  optimizer の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
   `--warmup 0` なら初回実行・optimizer 状態の初期化も計測区間に含みます。
+- `--compile-mode default|reduce-overhead|max-autotune|max-autotune-no-cudagraphs`:
+  `--execution compile` の実行方式を指定します。既定は `default`。`reduce-overhead` は CUDA Graphs を
+  要求し、`max-autotune-no-cudagraphs` は CUDA Graphs を要求せず演算 kernel を探索します。
+  `max-autotune` は両方を要求します。非既定 mode を eager に渡すと error になります。
+  CUDA Graphs を要求する 2 mode は `--device cuda` が必須です。CPU で CUDA を代替しません。
+  各更新の前に graph の反復境界を示します。JSON の `cudagraphs_requested` は設定上の要求であり、
+  実際に graph が使われたことは示しません。適用可否や実 kernel は profile で確認してください。
+  探索・コンパイル・graph 記録は初回実行を含む startup / warmup (warmup 0 なら計測区間) に入るため、
+  安定後の throughput と合わせて評価してください。optimizer はこの mode の対象外です。
+- `--compile-scope model|model-loss`: 既定の `model` はモデルだけを compile します。
+  `model-loss` は同じモデルと policy/value loss をまとめて compile し、`--execution compile` と
+  `--policy-rows prepared` が必須です。全行の policy が無い場合も policy head の勾配を `None` に保ちます。
+  optimizer・GradScaler・backward の呼出しは計測区間の Python 側に残ります。元モデルの parameter と
+  保存形式は共通です。batch 数・合法手幅・policy 対象行数の変化で再 compile が起きる場合、その費用も
+  発生した区間の時間に含まれます。
+  CUDA Graph モードでは shape ごとに記録と memory pool が増えるため、warmup は window の全 batch が
+  一巡する回数以上にし、再 compile／graph 記録が計測区間に入っていないかを profiler 等で確認してください。
 - `--precision fp32|tf32|fp16|bf16`: `fp32` は TF32 無効、`tf32` は FP32 の行列演算で TF32 を許可、
   `fp16` / `bf16` は autocast を使います。FP16 は GradScaler を使い、overflow により省略された
   optimizer 更新数も出します。CUDA が無い場合や対応しない精度は失敗し、CPU へ切り替えません。
   CPU では `--device cpu --precision fp32` だけを使えます。
+- `--policy-rows prepared|legacy`: 既定の `prepared` は CPU loader が作った policy 対象行の
+  int64 index を使います。`legacy` は同じ batch の `policy_present` から loss 呼出し時に行を抽出し、
+  CUDA 上での動的な行抽出に伴う同期を含む対照にします。入力 window の digest は元の 6 Tensor で
+  計算し、この補助 index の有無では変わりません。
 - `--fused-optimizer`: CUDA の fused AdamW を選びます。既定は無効。学習率と weight decay は
   `--learning-rate` (既定 0.001)、`--weight-decay` (既定 0) で固定できます。
 - `--input-mode resident|stream`: 先頭最大 `--window-batches` 個の完全な batch を繰り返します。
   `resident` は計測前に device へ転送し、`stream` は同じ局面列を JSONL から再読込・転送します。
   データ全量は保持せず、resident も最大 32 batch に制限します。batch 未満の末尾は使いません。
   fixture 全体が 1 batch に満たなければ失敗します。
+
+全行が `policy=null` の batch では、compile の有無にかかわらず policy head の重み・momentum・
+更新回数を維持します。policy 教師がある場合は loss が 0 でも通常どおり更新し、weight decay も適用します。
+教師の有無は転送前の CPU metadata で判定し、このための GPU 同期は増やしません。
 
 同期した wall time と `cuda_stream_seconds` を別々に出します。CUDA event の時間にも CPU からの
 演算投入待ちが入り得るため、純粋な kernel 時間ではありません。CUDA の peak allocated / reserved
@@ -253,3 +350,4 @@ export RSHOGI_LEGACY_PROBE_BIN=$PWD/target/release/examples/evaluate
 fixture を自分で作るときも `encode` の出力 (`tokens` と `labels` の label) を使ってください。
 
 package の追加依存 `cpu` / `cuda` はそれぞれ `onnxruntime` / `onnxruntime-gpu` を選びます。同じ環境に両方をインストールしないでください。`requirements.txt` は CPU 用です。
+
