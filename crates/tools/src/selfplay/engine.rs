@@ -57,6 +57,7 @@ pub(crate) fn receive_before_deadline<T>(
 
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
+const ENGINE_CHECKED_QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STDERR_BUFFER_LINES: usize = 2;
 
@@ -963,7 +964,7 @@ impl EngineProcess {
     }
 
     /// quit 後の終了を確認し、異常終了・強制終了・I/O 失敗を返す。
-    /// 終了待ちは 300ms。stdin の書込み時間はこの期限に含まない。
+    /// 終了待ちは 3 秒。stdin の書込み時間はこの期限に含まない。
     pub fn shutdown(mut self) -> Result<()> {
         let mut failure = None;
         match self.child.try_wait() {
@@ -987,7 +988,7 @@ impl EngineProcess {
                 error.context(format!("engine {} quit write failed", self.label)),
             );
         }
-        let deadline = Instant::now() + ENGINE_QUIT_TIMEOUT;
+        let deadline = Instant::now() + ENGINE_CHECKED_QUIT_TIMEOUT;
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
@@ -1141,6 +1142,7 @@ for raw in sys.stdin:
     if mode == 'exit7': sys.exit(7)
     if mode == 'signal': os.kill(os.getpid(), signal.SIGTERM)
     if mode == 'ignore': time.sleep(60)
+    if mode == 'delayed-clean': time.sleep(0.5)
     print('quit-received', flush=True)
     break
 "#,
@@ -1174,6 +1176,14 @@ for raw in sys.stdin:
     #[test]
     fn shutdown_accepts_clean_exit_and_reaps_child() {
         let engine = mock("clean");
+        let pid = engine.child.id();
+        engine.shutdown().unwrap();
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_accepts_clean_exit_after_drop_grace() {
+        let engine = mock("delayed-clean");
         let pid = engine.child.id();
         engine.shutdown().unwrap();
         assert_reaped(pid);
