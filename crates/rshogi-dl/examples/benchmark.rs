@@ -1,5 +1,7 @@
+mod support;
+
 use std::hint::black_box;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -517,7 +519,11 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
     Ok(report)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    support::finish(run_command());
+}
+
+fn run_command() -> Result<()> {
     let config = Config::parse(std::env::args().skip(1))?;
     let started = Instant::now();
     let positions = read_positions(io::stdin().lock())?;
@@ -525,7 +531,7 @@ fn main() -> Result<()> {
     let mut report = run(&config, &positions)?;
     report["input_seconds"] = json!(input_seconds);
     serde_json::to_writer(io::stdout().lock(), &report)?;
-    println!();
+    writeln!(io::stdout())?;
     Ok(())
 }
 

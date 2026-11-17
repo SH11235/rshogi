@@ -122,3 +122,5 @@ cache hit だけなら forward の増分は0です。未対応 evaluator は nul
 全区間は同期や転送を含み得る壁時計時間です。input/output bind を純粋な host 処理時間と扱わず、
 run_binding や ORT の Node profile を GPU kernel 単独の時間とも扱わないでください。timer 自体の費用も
 あるため、診断 build の時間と通常 build の時間を同じものとして比較しないでください。
+
+Unix で ONNX feature を有効にした example は、推論 session の解放と stdout/stderr の flush 後にプロセスを終了し、ORT の process-global な終了処理を回避します。実行エラーや flush 失敗は非0で終了します。

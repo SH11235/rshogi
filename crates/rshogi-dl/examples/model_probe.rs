@@ -1,3 +1,5 @@
+mod support;
+
 use anyhow::{Result, ensure};
 use rayon::prelude::*;
 use rshogi_core::position::Position;
@@ -5,7 +7,11 @@ use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
 use rshogi_dl::{Evaluator, InputBatchBuffer, InputBuffer, InputFormat};
 use std::io::{self, BufRead};
 
-fn main() -> Result<()> {
+fn main() {
+    support::finish(run_command());
+}
+
+fn run_command() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
         (4..=8).contains(&args.len()),
