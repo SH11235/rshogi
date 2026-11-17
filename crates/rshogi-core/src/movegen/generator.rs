@@ -465,11 +465,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
 
     if next_to_lance == 0 {
         // 香・桂を持っていない: 全マスに対して全駒種を生成
-        for to in target.iter() {
-            for &(pt, pc) in drops {
-                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
-            }
-        }
+        buffer.splat_drops(target, drops);
     } else {
         // 段による場合分け
         let rank1 = rank1_bb(us);
@@ -479,30 +475,18 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         // 1段目: 香・桂以外の駒のみ
         let target1 = target & rank1;
         if next_to_lance < num {
-            for to in target1.iter() {
-                for &(pt, pc) in &drops[next_to_lance..] {
-                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
-                }
-            }
+            buffer.splat_drops(target1, &drops[next_to_lance..]);
         }
 
         // 2段目: 桂以外の駒
         let target2 = target & rank2_only;
         if next_to_knight < num {
-            for to in target2.iter() {
-                for &(pt, pc) in &drops[next_to_knight..] {
-                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
-                }
-            }
+            buffer.splat_drops(target2, &drops[next_to_knight..]);
         }
 
         // 3〜9段目: 全駒種
         let target3 = target & !rank12;
-        for to in target3.iter() {
-            for &(pt, pc) in drops {
-                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
-            }
-        }
+        buffer.splat_drops(target3, drops);
     }
 }
 
