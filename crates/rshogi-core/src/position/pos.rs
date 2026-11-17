@@ -615,6 +615,19 @@ impl Position {
         &self.board_effects
     }
 
+    #[inline]
+    pub(crate) fn current_board_effects(&self) -> Option<&BoardEffects> {
+        if self.board_effects_dirty {
+            None
+        } else {
+            Some(self.board_effects())
+        }
+    }
+
+    pub(crate) fn compute_board_effects(&self) -> BoardEffects {
+        compute_board_effects_and_long_effects(self).0
+    }
+
     /// 利きを読まない探索 (詰みの df-pn など) の間、do_move / undo_move での利きの差分更新を止める。
     /// 再開すると、利きを使う設定なら作り直す
     pub fn pause_board_effects(&mut self, paused: bool) {
@@ -635,9 +648,8 @@ impl Position {
         {
             return true;
         }
-        // halfkx-arch が無効な build は NNUE 経路のみで評価するため material fallback が
-        // 不要 → board_effects も不要。コンパイル時に false が確定し、do_move/undo_move
-        // 内の board_effects 関連コードや is_nnue_initialized の RwLock が全て除去される。
+        // halfkx-arch 無効時は通常探索の利き更新をコンパイル時に除去する。
+        // 駒得評価を直接呼ぶ場合は、評価時に利きを作り直す。
         #[cfg(not(feature = "halfkx-arch"))]
         {
             false
