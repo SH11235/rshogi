@@ -45,6 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `limits.nodes` では全探索スレッドの合計ノード数、`limits.movetime` では固定の思考時間
 （ミリ秒）を指定できます。`search.set_num_threads(4)` で探索スレッド数を変更できます。
 
+`limits.search_moves` に探索対象を指定すると、合法な不成も候補に含まれます。
+指し手は `Position::to_move` で局面に対応する形式へ正規化してください。
+空の指定では通常探索用の手生成を使います。
+
 ## NNUE の利用
 
 モデルはリポジトリ外の共有データ領域 `$SHOGI_DATA/nnue/` に用意します。
