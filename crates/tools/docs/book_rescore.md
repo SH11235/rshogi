@@ -1,5 +1,8 @@
 # book_rescore
 
+ONNX モードは基本 plane / `stm-tokens-v1` モデルに対応します。モデルの指定方法、metadata と
+CPU/CUDA/TensorRT の対応は [ONNX モデルの入力](onnx-models.md) を参照してください。
+
 `book_rescore` は YANEURAOU-DB2016 テキスト定跡 `.db` の各候補手に、USI エンジンの探索評価値または dlshogi ONNX value head の静的評価値を付け直すツールです。
 
 入力定跡の局面・採択回数は保持し、候補手ごとの `value` と `depth` を更新します。出力順は決定的で、局面は SFEN 昇順、指し手は `count` 降順から USI 昇順です。

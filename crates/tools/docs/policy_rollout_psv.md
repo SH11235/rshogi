@@ -1,6 +1,9 @@
 # policy_rollout_psv
 
-`policy_rollout_psv` は、種の局面 (PSV) から dlshogi 系 ONNX モデル (DL水匠等) の policy で
+ONNX モードは基本 plane / `stm-tokens-v1` モデルに対応します。モデルの指定方法、metadata と
+CPU/CUDA/TensorRT の対応は [ONNX モデルの入力](onnx-models.md) を参照してください。
+
+`policy_rollout_psv` は、種の局面 (PSV) から 基本 plane / token 形式の ONNX モデル の policy で
 手を選んで指し進め、途中の局面を PSV に書き出すツールです。探索はせず、1 手ごとに policy を
 1 回推論して合法手の確率から抽選します。各局面の score は同じ推論の value head (静的評価) です。
 
