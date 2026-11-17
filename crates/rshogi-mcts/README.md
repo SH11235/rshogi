@@ -11,3 +11,28 @@
 `History` は開始局面以後の全手順で四回同一局面と連続王手を判定します。開始局面以前の手順は復元しません。優等・劣等局面をルール上の終局とはみなしません。詰み・宣言勝ち・引き分けは近似 value と区別し、木の確定結果として伝播します。
 
 arena が上限へ達した場合は、完了した探索結果を返します。最大深さでは既に得た静的 value を使い、総手数の上限では引き分けとします。実行中の backend の forward は強制中断できないため、停止応答は一回の推論時間にも依存します。
+
+## 同期 leaf batch
+
+`Config { batch_size: 16, ..Config::default() }` で葉をまとめる上限を指定できます (1〜1024)。
+既定の1、または evaluator が入力形式と `encoded_batch_capacity` の両方を宣言していない場合は、
+従来の scalar loop を使います。backend の最大容量が小さければ、その容量までに制限します。
+Rust の `Config` を全 field 指定で構築する場合は `batch_size: 1` を加えてください。
+
+batch では一つの局面と履歴を葉ごとに undo / truncate して再利用します。未完了の葉を予約し、
+完了訪問数と別の整数 inflight を持ちます。PUCT の Q は完了分の平均だけを使い、探索項の
+`sqrt(parent visits + parent inflight)` と `1 + edge visits + edge inflight` で予約を考慮します。
+同じ未展開 node を二度予約せず、予約で全枝が塞がった場合は部分 batch を直ちに処理します。
+根の初回評価と、終局・深さ上限を見つけたときも部分 batch を処理します。
+
+将来追加する合法手 edge の容量も予約し、全出力の検査が済んでから選択順に展開・backupします。
+上限は完了分と予約分の合計で守り、結果の visits には完了分だけを報告します。
+停止・時間上限は葉の収集中と forward の直前に確認します。未開始分は予約を解放して破棄し、
+開始済み forward は完了後に全出力を検査して反映します。forward 自体は強制中断しません。
+
+`batch_workspace_bytes()` は tree arena と別に確保した入力・出力・path・合法手・予約 metadata の
+実 capacity を含む bytes を返します。node / edge の最大容量に応じた inflight 配列も含み、
+allocator の管理領域は含みません。最初の batch run で確保して再利用し、入力形式や最大 batch が
+変われば作り直します。evaluator 自身の batch/cache buffer は別です。
+
+batch の選択順は scalar と異なり得ます。throughput の改善と探索品質・棋力は別に比較してください。
