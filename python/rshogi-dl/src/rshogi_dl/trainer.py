@@ -23,6 +23,7 @@ from .data import Batch
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
+from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from .sharded import DatasetError, dataset_info, iter_batches
 from .trainer_checkpoint import (
     CONTRACT, ResumeError, atomic_save, capture_rng, export_checkpoint, load_resume, restore_rng,
@@ -435,6 +436,7 @@ def run_training(
                     )
                 batch = next(source)
                 samples = batch.tokens.shape[0]
+                has_policy = has_policy_targets(batch)
                 batch = _transfer(batch, device)
                 optimizer.zero_grad(set_to_none=True)
                 if (
@@ -447,6 +449,7 @@ def run_training(
                     loss = policy_value_loss(policy, value, batch)
                 finite.logical_and_(torch.isfinite(loss.total.detach()))
                 scaler.scale(loss.total).backward()
+                clear_unused_policy_head_gradients(model, has_policy)
                 scaler.step(optimizer)
                 scaler.update()
                 rolling += torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach()))

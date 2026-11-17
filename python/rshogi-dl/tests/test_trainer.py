@@ -219,6 +219,55 @@ class TrainerTest(unittest.TestCase):
             run_training(self.train, duplicate, self.root / "duplicate-run", TEST_CONFIG, self.config)
         self.assertFalse((self.root / "duplicate-run").exists())
 
+    def test_actual_aot_trainer_preserves_null_head_state_and_resume_with_weight_decay(self) -> None:
+        records = synthetic_records(seed=23, count=4)
+        records[0]["policy"] = records[2]["policy"] = None
+        records[1]["policy"] = [[records[1]["legal_labels"][0], 1]]
+        records[3]["policy"] = [[records[3]["legal_labels"][0], 1]]
+        self.train = self.make_dataset("aot-alternating-policy", records)
+        config = replace(
+            self.config, max_steps=4, batch_size=1, weight_decay=0.2,
+            execution="compile", checkpoint_every=1,
+        )
+        original_compile = torch.compile
+        def aot_compile(model, **options):
+            self.assertEqual(options, {"backend": "inductor", "mode": "default"})
+            return original_compile(model, backend="aot_eager")
+        with mock.patch("rshogi_dl.trainer.torch.compile", side_effect=aot_compile):
+            full_report = self.run_training("aot-full", config)
+            first_report = self.run_training("aot-first", replace(config, max_steps=3))
+            resumed_report = self.run_training(
+                "aot-resumed", config, resume=self.root / "aot-first" / "resume-final.pt",
+            )
+        self.assertEqual(full_report["progress"]["policy_optimizer_updates"], 2)
+        self.assertEqual(first_report["progress"]["sample_cursor"], 3)
+        self.assertEqual(first_report["progress"]["policy_optimizer_updates"], 1)
+        self.assertEqual(resumed_report["progress"], full_report["progress"])
+        full = load_resume(self.root / "aot-full" / "resume-final.pt")
+        resumed = load_resume(self.root / "aot-resumed" / "resume-final.pt")
+        for field in ("model_state", "optimizer_state", "progress", "rng"):
+            self.assert_nested_equal(full[field], resumed[field])
+        before_null = load_resume(self.root / "aot-full" / "resume-0000000002.pt")
+        after_null = load_resume(self.root / "aot-full" / "resume-0000000003.pt")
+        self.assertEqual(before_null["progress"]["policy_optimizer_updates"], 1)
+        self.assertEqual(after_null["progress"]["policy_optimizer_updates"], 1)
+        self.assertEqual(after_null["progress"]["optimizer_updates"], 3)
+        parameter_names = [name for name, _ in SquareTransformer(TEST_CONFIG).named_parameters()]
+        parameter_ids = dict(zip(
+            parameter_names, before_null["optimizer_state"]["param_groups"][0]["params"], strict=True,
+        ))
+        for name in ("policy_head.weight", "policy_head.bias"):
+            self.assertTrue(torch.equal(before_null["model_state"][name], after_null["model_state"][name]))
+            index = parameter_ids[name]
+            self.assert_nested_equal(
+                before_null["optimizer_state"]["state"][index],
+                after_null["optimizer_state"]["state"][index],
+            )
+        self.run_training("aot-eager-reference", replace(config, execution="eager"))
+        eager = load_resume(self.root / "aot-eager-reference" / "resume-final.pt")
+        for name, expected in eager["model_state"].items():
+            torch.testing.assert_close(full["model_state"][name], expected, rtol=1e-5, atol=1e-6)
+
     def test_final_checkpoint_survives_heldout_evaluation_failure(self) -> None:
         config = replace(self.config, max_steps=2)
         with mock.patch("rshogi_dl.trainer.evaluate", side_effect=TrainingError("validation failed")):
