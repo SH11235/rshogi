@@ -618,31 +618,29 @@ pub fn evaluate_material(pos: &Position) -> Value {
     evaluate_material_at_level(pos, get_material_level())
 }
 
+#[inline]
+fn eval_with_current_effects(
+    pos: &Position,
+    evaluate: impl FnOnce(&Position, &BoardEffects) -> i32,
+) -> i32 {
+    if let Some(effects) = pos.current_board_effects() {
+        evaluate(pos, effects)
+    } else {
+        // 利きの差分更新を省く構成でも、駒得評価は直接呼び出せる。
+        evaluate(pos, &pos.compute_board_effects())
+    }
+}
+
 /// 指定したレベルの駒得評価を返す。
 pub(crate) fn evaluate_material_at_level(pos: &Position, level: MaterialLevel) -> Value {
     let raw = match level {
         MaterialLevel::Lv1 => eval_lv1(pos),
         MaterialLevel::Lv2 => eval_lv2(pos),
-        MaterialLevel::Lv3 => {
-            let effects = pos.board_effects();
-            eval_lv3(pos, effects)
-        }
-        MaterialLevel::Lv4 => {
-            let effects = pos.board_effects();
-            eval_lv4(pos, effects)
-        }
-        MaterialLevel::Lv7 => {
-            let effects = pos.board_effects();
-            eval_lv7(pos, effects)
-        }
-        MaterialLevel::Lv8 => {
-            let effects = pos.board_effects();
-            eval_lv8(pos, effects)
-        }
-        MaterialLevel::Lv9 => {
-            let effects = pos.board_effects();
-            eval_lv9(pos, effects)
-        }
+        MaterialLevel::Lv3 => eval_with_current_effects(pos, eval_lv3),
+        MaterialLevel::Lv4 => eval_with_current_effects(pos, eval_lv4),
+        MaterialLevel::Lv7 => eval_with_current_effects(pos, eval_lv7),
+        MaterialLevel::Lv8 => eval_with_current_effects(pos, eval_lv8),
+        MaterialLevel::Lv9 => eval_with_current_effects(pos, eval_lv9),
     };
 
     // 手番側視点の評価値を返す
@@ -701,6 +699,74 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::position::SFEN_HIRATE;
+    use crate::types::Move;
+
+    #[test]
+    fn material_evaluation_borrows_current_effects() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let cached = pos.current_board_effects().unwrap();
+        assert_eq!(
+            eval_with_current_effects(&pos, |actual, effects| {
+                assert!(std::ptr::eq(actual, &pos));
+                assert!(std::ptr::eq(effects, cached));
+                17
+            }),
+            17
+        );
+    }
+
+    #[test]
+    fn material_evaluation_matches_recomputed_effects_after_moves_and_undo() {
+        let levels = [
+            MaterialLevel::Lv1,
+            MaterialLevel::Lv2,
+            MaterialLevel::Lv3,
+            MaterialLevel::Lv4,
+            MaterialLevel::Lv7,
+            MaterialLevel::Lv8,
+            MaterialLevel::Lv9,
+        ];
+        for (sfen, usi) in [
+            (SFEN_HIRATE, "7g7f"),
+            ("4k4/9/4p4/4R4/9/9/9/9/4K4 b - 1", "5d5c+"),
+            ("4k4/9/9/9/9/9/9/9/4K4 w Rp 1", "P*5e"),
+            ("4k4/9/9/9/4B4/9/9/9/4K4 b - 1", "5e3c+"),
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let original = pos.to_sfen();
+            let original_values = levels.map(|level| evaluate_material_at_level(&pos, level));
+            let mv = pos.to_move(Move::from_usi_strict(usi).unwrap()).unwrap();
+            assert!(pos.pseudo_legal(mv) && pos.is_legal(mv), "{sfen}: {usi}");
+            pos.pause_board_effects(true);
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+            for undo in [false, true] {
+                if undo {
+                    pos.undo_move(mv);
+                }
+                assert!(pos.current_board_effects().is_none());
+                let snapshot = (pos.to_sfen(), pos.key(), pos.state_index());
+                let mut reference = pos.clone();
+                reference.recompute_board_effects();
+                for level in levels {
+                    assert_eq!(
+                        evaluate_material_at_level(&pos, level),
+                        evaluate_material_at_level(&reference, level),
+                        "{sfen}: {usi}, {level:?}, undo={undo}"
+                    );
+                    assert!(pos.current_board_effects().is_none());
+                }
+                assert_eq!((pos.to_sfen(), pos.key(), pos.state_index()), snapshot);
+            }
+            assert_eq!(pos.to_sfen(), original);
+            assert_eq!(
+                levels.map(|level| evaluate_material_at_level(&pos, level)),
+                original_values
+            );
+        }
+    }
 
     #[test]
     fn test_material_eval_hirate() {

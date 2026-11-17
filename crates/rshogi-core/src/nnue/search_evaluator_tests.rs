@@ -513,8 +513,12 @@ fn check_models() {
             assert_eq!(selected.evaluate(&pos), material::evaluate_material(&pos));
         }
         material::disable_material();
-        drop(selected);
-        drop(lazy);
+        {
+            let lazy_owner = lazy;
+            let selected_owner = selected;
+            assert!(!matches!(lazy_owner, SearchEvaluator::Uninitialized));
+            assert!(!matches!(selected_owner, SearchEvaluator::Uninitialized));
+        }
         drop(network);
         // Material の設定・net の解放は、準備済み評価器の所有する重みを変えない。
         nnue::clear_nnue();
@@ -524,7 +528,6 @@ fn check_models() {
         if name == "LayerStacks" {
             use nnue::net_delta::{NetCoefficientId, NetDelta, NetTensorKind};
             let mut standalone = NNUENetwork::from_bytes(&bytes).unwrap();
-            let owner = SearchEvaluator::from_network(&standalone);
             let id = NetCoefficientId {
                 kind: NetTensorKind::FtBias,
                 bucket: None,
@@ -535,12 +538,15 @@ fn check_models() {
                 id: id.clone(),
                 delta: 17,
             }];
-            assert_eq!(
-                standalone.apply_net_deltas(&deltas),
-                Err(nnue::NetDeltaError::SharedNetwork)
-            );
-            assert_eq!(standalone.net_coefficient(&id).unwrap(), before);
-            drop(owner);
+            {
+                let owner = SearchEvaluator::from_network(&standalone);
+                assert!(!matches!(owner, SearchEvaluator::Uninitialized));
+                assert_eq!(
+                    standalone.apply_net_deltas(&deltas),
+                    Err(nnue::NetDeltaError::SharedNetwork)
+                );
+                assert_eq!(standalone.net_coefficient(&id).unwrap(), before);
+            }
             standalone.apply_net_deltas(&deltas).unwrap();
             assert_eq!(standalone.net_coefficient(&id).unwrap(), before + 17);
             nnue::init_nnue_from_bytes_with_deltas(
@@ -583,9 +589,6 @@ fn check_models() {
         MaterialLevel::Lv8,
         MaterialLevel::Lv9,
     ] {
-        if !cfg!(feature = "halfkx-arch") && level.value() > 2 {
-            continue;
-        }
         material::set_material_level(level);
         let mut evaluator = prepared();
         let expected = material::evaluate_material(&pos);

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 const MAX_POSITIONS: usize = 1024;
 const MAX_LINE_BYTES: usize = 4096;
 const MAX_REQUESTS: usize = 10_000_000;
-const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false] [--reuse-encoded true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache; SFEN lines on stdin (empty = start position)";
+const USAGE: &str = "benchmark MODE [--iterations N] [--warmup N] [--batch-size N] [--cache-mib N] [--model FILE] [--device ID] [--cuda-tf32 true|false] [--reuse-encoded true|false]; MODE: encode-basic|encode-tokens|cache-basic|cache-tokens|onnx|onnx-cache|onnx-batch-cache; SFEN lines on stdin (empty = start position)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -25,6 +25,7 @@ enum Mode {
     CacheTokens,
     Onnx,
     OnnxCache,
+    OnnxBatchCache,
 }
 
 impl Mode {
@@ -36,6 +37,7 @@ impl Mode {
             Self::CacheTokens => "cache-tokens",
             Self::Onnx => "onnx",
             Self::OnnxCache => "onnx-cache",
+            Self::OnnxBatchCache => "onnx-batch-cache",
         }
     }
 }
@@ -62,6 +64,7 @@ impl Config {
             Some("cache-tokens") => Mode::CacheTokens,
             Some("onnx") => Mode::Onnx,
             Some("onnx-cache") => Mode::OnnxCache,
+            Some("onnx-batch-cache") => Mode::OnnxBatchCache,
             _ => bail!(USAGE),
         };
         let mut config = Self {
@@ -99,7 +102,7 @@ impl Config {
         ensure!(config.warmup <= MAX_REQUESTS, "warmup must be 0..={MAX_REQUESTS}");
         ensure!((1..=256).contains(&config.batch_size), "batch size must be 1..=256");
         ensure!(config.cache_mib <= 1024, "cache must be 0..=1024 MiB");
-        let actual_model = matches!(mode, Mode::Onnx | Mode::OnnxCache);
+        let actual_model = matches!(mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache);
         ensure!(
             actual_model == config.model.is_some(),
             "--model is required only for ONNX modes"
@@ -108,16 +111,21 @@ impl Config {
             actual_model || (!seen.iter().any(|f| f == "--device" || f == "--cuda-tf32")),
             "device and precision options require an ONNX mode"
         );
-        for flag in ["--cache-mib", "--reuse-encoded"] {
-            ensure!(
-                matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
-                    || !seen.iter().any(|f| f == flag),
-                "{flag} requires a cache mode"
-            );
-        }
         ensure!(
-            mode == Mode::Onnx || config.batch_size == 1,
-            "batch sizes above 1 require onnx mode"
+            matches!(
+                mode,
+                Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache | Mode::OnnxBatchCache
+            ) || !seen.iter().any(|f| f == "--cache-mib"),
+            "--cache-mib requires a cache mode"
+        );
+        ensure!(
+            matches!(mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
+                || !seen.iter().any(|f| f == "--reuse-encoded"),
+            "--reuse-encoded requires a scalar cache mode"
+        );
+        ensure!(
+            matches!(mode, Mode::Onnx | Mode::OnnxBatchCache) || config.batch_size == 1,
+            "batch sizes above 1 require onnx or onnx-batch-cache mode"
         );
         Ok(config)
     }
@@ -223,12 +231,49 @@ fn stats(stats: CacheStats) -> Value {
     json!({"requests": stats.requests, "nn_calls": stats.nn_calls, "hits": stats.hits})
 }
 
+#[cfg(feature = "inference-diagnostics")]
+fn timing_delta(
+    after: Option<rshogi_dl::InferenceTimings>,
+    before: Option<rshogi_dl::InferenceTimings>,
+) -> Result<Value> {
+    match (after, before) {
+        (Some(after), Some(before)) => {
+            let delta =
+                after.checked_since(before).context("inference timing counters regressed")?;
+            let stages: serde_json::Map<String, Value> = rshogi_dl::InferenceStage::ALL
+                .into_iter()
+                .map(|stage| {
+                    let timing = delta.stages[stage as usize];
+                    (stage.name().to_owned(), json!({
+                        "calls": timing.calls, "errors": timing.errors, "nanoseconds": timing.nanoseconds,
+                    }))
+                })
+                .collect();
+            Ok(json!({"forward_calls": delta.forward_calls,
+                "forward_failures": delta.forward_failures, "positions": delta.positions, "stages": stages}))
+        }
+        (None, None) => Ok(Value::Null),
+        _ => bail!("inference timing capability changed"),
+    }
+}
+
+#[cfg(feature = "inference-diagnostics")]
+fn with_inference_timings(mut report: Value, warmup: Value, cold: Value, measured: Value) -> Value {
+    report["inference_timings"] = json!({"warmup": warmup, "cold": cold, "measured": measured});
+    report
+}
+
 struct EncodedControl<E> {
     inner: E,
     enabled: bool,
 }
 
 impl<E: Evaluator> Evaluator for EncodedControl<E> {
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<rshogi_dl::InferenceTimings> {
+        self.inner.inference_timings()
+    }
+
     fn input_format(&self) -> Option<InputFormat> {
         self.inner.input_format()
     }
@@ -270,14 +315,26 @@ fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Res
         }
         Ok(checksum)
     };
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let warmup = measure(|| pass(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
     evaluator.clear();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let cold = measure(|| pass(&mut evaluator), 1)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let cold_timings = timing_delta(evaluator.inference_timings(), before)?;
     let cold_stats = stats(evaluator.stats());
     evaluator.reset_stats();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let measured = measure(|| pass(&mut evaluator), config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
     let warm_stats = stats(evaluator.stats());
-    Ok(json!({
+    let report = json!({
         "setup_seconds": setup_seconds,
         "allocated_bytes": evaluator.allocated_bytes(),
         "warmup": warmup,
@@ -285,7 +342,63 @@ fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Res
         "cold_stats": cold_stats,
         "measured": measured,
         "measured_stats": warm_stats
-    }))
+    });
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, cold_timings, measured_timings);
+    Ok(report)
+}
+
+#[cfg(feature = "onnx")]
+fn batch_cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Result<Value> {
+    let setup = Instant::now();
+    let format = inner.input_format().context("missing input format")?;
+    let mut evaluator =
+        CachedEvaluator::with_batch_capacity(inner, config.cache_mib, config.batch_size)?;
+    let mut input = rshogi_dl::InputBatchBuffer::new(format, config.batch_size)?;
+    let mut values = vec![0.0; config.batch_size];
+    let mut policy = vec![0.0; config.batch_size * MAX_MOVE_LABEL_NUM];
+    let setup_seconds = setup.elapsed().as_secs_f64();
+    let mut pass = |evaluator: &mut CachedEvaluator<E>| {
+        let mut checksum = 0.0;
+        for positions in positions.chunks(config.batch_size) {
+            input.clear();
+            for position in positions {
+                input.push(black_box(position))?;
+            }
+            let n = positions.len();
+            evaluator.evaluate_encoded_batch(
+                input.view(),
+                &mut values[..n],
+                &mut policy[..n * MAX_MOVE_LABEL_NUM],
+            )?;
+            checksum += f64::from(values[0]) + f64::from(policy[0]);
+            black_box((&values, &policy));
+        }
+        Ok(checksum)
+    };
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let warmup = measure(|| pass(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
+    evaluator.clear();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let cold = measure(|| pass(&mut evaluator), 1)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let cold_timings = timing_delta(evaluator.inference_timings(), before)?;
+    let cold_stats = stats(evaluator.stats());
+    let cold_nn_positions = evaluator.nn_positions();
+    evaluator.reset_stats();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let measured = measure(|| pass(&mut evaluator), config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
+    let report = json!({"setup_seconds":setup_seconds,"allocated_bytes":evaluator.allocated_bytes(),"batch_allocated_bytes":evaluator.batch_allocated_bytes(),"input_allocated_bytes":input.allocated_bytes(),"warmup":warmup,"cold":cold,"cold_stats":cold_stats,"cold_nn_positions":cold_nn_positions,"measured":measured,"measured_stats":stats(evaluator.stats()),"measured_nn_positions":evaluator.nn_positions()});
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, cold_timings, measured_timings);
+    Ok(report)
 }
 
 #[cfg(feature = "onnx")]
@@ -318,10 +431,16 @@ fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
         report["input_format"] = json!(format);
         return Ok(report);
     }
+    if config.mode == Mode::OnnxBatchCache {
+        let mut report = batch_cache(evaluator, config, positions)?;
+        report["model_setup_seconds"] = json!(model_setup_seconds);
+        report["input_format"] = json!(format);
+        return Ok(report);
+    }
     let mut values = Vec::with_capacity(config.batch_size);
     let mut policy = Vec::with_capacity(config.batch_size * MAX_MOVE_LABEL_NUM);
     let setup_seconds = setup.elapsed().as_secs_f64();
-    let mut operation = || {
+    let mut operation = |evaluator: &mut ModelEvaluator| {
         let mut checksum = 0.0;
         for batch in positions.chunks(config.batch_size) {
             values.clear();
@@ -332,13 +451,22 @@ fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
         }
         Ok(checksum)
     };
-    let warmup = measure(&mut operation, config.warmup)?;
-    let measured = measure(&mut operation, config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let warmup = measure(|| operation(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let measured = measure(|| operation(&mut evaluator), config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
     let requests = config.iterations * positions.len();
-    Ok(
-        json!({"setup_seconds": setup_seconds, "input_format": format, "warmup": warmup, "measured": measured,
-        "measured_stats": {"requests": requests, "nn_calls": config.iterations * positions.len().div_ceil(config.batch_size), "hits": 0}}),
-    )
+    let report = json!({"setup_seconds": setup_seconds, "input_format": format, "warmup": warmup, "measured": measured,
+        "measured_stats": {"requests": requests, "nn_calls": config.iterations * positions.len().div_ceil(config.batch_size), "hits": 0}});
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, Value::Null, measured_timings);
+    Ok(report)
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -354,13 +482,13 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
         Mode::CacheTokens => {
             cache(SyntheticEvaluator(InputFormat::StmTokensV1), config, positions)?
         }
-        Mode::Onnx | Mode::OnnxCache => onnx(config, positions)?,
+        Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache => onnx(config, positions)?,
     };
     report["mode"] = json!(config.mode.name());
     report["backend"] = json!(match config.mode {
         Mode::CacheBasic | Mode::CacheTokens => "synthetic-cache-only",
         Mode::EncodeBasic | Mode::EncodeTokens => "encoder-only",
-        Mode::Onnx | Mode::OnnxCache => "onnx-runtime",
+        Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache => "onnx-runtime",
     });
     report["positions"] = json!(positions.len());
     report["iterations"] = json!(config.iterations);
@@ -371,13 +499,16 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
             .then_some(config.reuse_encoded)
     );
     report["cache_mib"] = json!(
-        matches!(config.mode, Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache)
-            .then_some(config.cache_mib)
+        matches!(
+            config.mode,
+            Mode::CacheBasic | Mode::CacheTokens | Mode::OnnxCache | Mode::OnnxBatchCache
+        )
+        .then_some(config.cache_mib)
     );
-    let onnx = matches!(config.mode, Mode::Onnx | Mode::OnnxCache);
+    let onnx = matches!(config.mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache);
     report["device"] = json!(onnx.then_some(config.device));
     report["cuda_tf32"] = json!(onnx.then_some(config.cuda_tf32));
-    if !matches!(config.mode, Mode::Onnx | Mode::OnnxCache) {
+    if !matches!(config.mode, Mode::Onnx | Mode::OnnxCache | Mode::OnnxBatchCache) {
         report["input_format"] = json!(match config.mode {
             Mode::EncodeBasic | Mode::CacheBasic => "basic",
             _ => "stm-tokens-v1",
@@ -420,6 +551,13 @@ mod tests {
             vec!["encode-tokens", "--cache-mib", "1"],
             vec!["onnx", "--model", "model.onnx", "--reuse-encoded", "false"],
             vec!["cache-tokens", "--reuse-encoded", "invalid"],
+            vec![
+                "onnx-batch-cache",
+                "--model",
+                "model.onnx",
+                "--reuse-encoded",
+                "false",
+            ],
             vec!["cache-tokens", "--iterations", "1", "--iterations", "2"],
             vec!["cache-tokens", "--unknown", "1"],
             vec!["cache-tokens", "--warmup"],
@@ -429,6 +567,23 @@ mod tests {
         let config = config(&["cache-tokens", "--iterations", "10000000"])
             .expect("valid single-position iteration count");
         assert!(config.check_requests(2).is_err());
+    }
+
+    #[test]
+    fn encoded_batch_cache_accepts_explicit_capacity_and_cache_off() -> Result<()> {
+        let config = config(&[
+            "onnx-batch-cache",
+            "--model",
+            "model.onnx",
+            "--batch-size",
+            "8",
+            "--cache-mib",
+            "0",
+        ])?;
+        assert_eq!(config.mode, Mode::OnnxBatchCache);
+        assert_eq!(config.batch_size, 8);
+        assert_eq!(config.cache_mib, 0);
+        Ok(())
     }
 
     #[test]
@@ -473,6 +628,51 @@ mod tests {
         )?;
         assert_eq!(report["measured_stats"], json!({"requests": 3, "nn_calls": 3, "hits": 0}));
         assert_eq!(report["allocated_bytes"], 0);
+        Ok(())
+    }
+    #[cfg(feature = "inference-diagnostics")]
+    #[test]
+    fn cache_timing_snapshots_are_independent_of_cache_stats_resets() -> Result<()> {
+        struct Instrumented(rshogi_dl::InferenceTimings);
+        impl Evaluator for Instrumented {
+            fn input_format(&self) -> Option<InputFormat> {
+                Some(InputFormat::StmTokensV1)
+            }
+            fn inference_timings(&self) -> Option<rshogi_dl::InferenceTimings> {
+                Some(self.0)
+            }
+            fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+                self.0.forward_calls += 1;
+                self.0.positions += 1;
+                let phase = &mut self.0.stages[rshogi_dl::InferenceStage::TensorRefs as usize];
+                phase.calls += 1;
+                phase.nanoseconds += 2;
+                logits.fill(0.0);
+                Ok(0.5)
+            }
+        }
+        let report = cache(
+            Instrumented(rshogi_dl::InferenceTimings::default()),
+            &config(&[
+                "cache-tokens",
+                "--warmup",
+                "0",
+                "--iterations",
+                "3",
+                "--cache-mib",
+                "1",
+            ])?,
+            &read_positions(io::Cursor::new(""))?,
+        )?;
+        let timings = &report["inference_timings"];
+        assert_eq!(timings["warmup"]["forward_calls"], 0);
+        assert_eq!(timings["cold"]["forward_calls"], 1);
+        assert_eq!(timings["cold"]["stages"]["tensor_refs"]["nanoseconds"], 2);
+        assert_eq!(timings["measured"]["forward_calls"], 0);
+        assert_eq!(timings["measured"]["stages"]["tensor_refs"]["nanoseconds"], 0);
+        assert_eq!(report["measured_stats"]["hits"], 3);
+        assert!(timing_delta(None, None)?.is_null());
+        assert!(timing_delta(None, Some(rshogi_dl::InferenceTimings::default())).is_err());
         Ok(())
     }
 }

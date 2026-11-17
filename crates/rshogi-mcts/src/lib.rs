@@ -11,6 +11,7 @@ use rshogi_core::types::{EnteringKingRule, Move};
 use rshogi_dl::Evaluator;
 use rshogi_dl::features::{MAX_MOVE_LABEL_NUM, make_move_label};
 
+mod batch;
 mod history;
 pub use history::History;
 
@@ -41,6 +42,8 @@ pub struct Config {
     pub temperature: f32,
     /// Node / edge arena に確保する上限 MiB。
     pub tree_memory_mb: usize,
+    /// 同期推論へまとめる葉の上限。1 は従来の scalar 探索。
+    pub batch_size: usize,
     /// 一回の simulation の最大深さ。
     pub max_depth: usize,
     /// 開始局面以前を含む総手数の引き分け上限。
@@ -55,6 +58,7 @@ impl Default for Config {
             cpuct: 1.5,
             temperature: 1.0,
             tree_memory_mb: 16,
+            batch_size: 1,
             max_depth: 128,
             max_game_ply: 512,
             entering_king_rule: EnteringKingRule::Point27,
@@ -80,7 +84,7 @@ pub struct SearchResult {
     pub value: f32,
     /// 完了した simulation 数。
     pub visits: u64,
-    /// evaluator への要求数。キャッシュによる backend 呼び出し削減は含めない。
+    /// evaluator に渡した局面数。batch も局面ごとに数え、backend の呼び出し数とは区別する。
     pub evaluations: u64,
     /// 根の確定結果。
     pub outcome: Option<Outcome>,
@@ -136,6 +140,7 @@ pub struct Search {
     path: Vec<usize>,
     logits: Vec<f32>,
     evaluations: u64,
+    batch: Option<batch::Workspace>,
 }
 
 impl Search {
@@ -148,6 +153,7 @@ impl Search {
         );
         ensure!((1..=1024).contains(&config.tree_memory_mb), "tree memory must be 1..=1024 MiB");
         ensure!((1..=512).contains(&config.max_depth), "depth must be 1..=512");
+        ensure!((1..=1024).contains(&config.batch_size), "batch size must be 1..=1024");
         ensure!(config.max_game_ply > 0, "max game ply must be positive");
         let bytes = config.tree_memory_mb * 1024 * 1024;
         let node_limit = bytes / 4 / size_of::<Node>();
@@ -167,7 +173,13 @@ impl Search {
             path,
             logits: vec![0.0; MAX_MOVE_LABEL_NUM],
             evaluations: 0,
+            batch: None,
         })
+    }
+
+    /// batch 推論用に別途確保した buffer と予約 metadata の bytes。tree arena は含まない。
+    pub fn batch_workspace_bytes(&self) -> usize {
+        self.batch.as_ref().map_or(0, batch::Workspace::allocated_bytes)
     }
 
     /// 履歴を維持して探索し、失敗や中断でも入力局面と履歴を復元する。
@@ -194,20 +206,51 @@ impl Search {
         let initial_history_len = history.len();
         let start = Instant::now();
         let mut memory_full = false;
-        while self.nodes[0].visits < limits.visits
+        let batch = (self.config.batch_size > 1
+            && limits.visits > 0
             && self.nodes[0].outcome.is_none()
             && !stop.load(Ordering::Relaxed)
-            && !limits.time.is_some_and(|t| start.elapsed() >= t)
-        {
-            self.path.clear();
-            let simulation = self.simulate(position, history, evaluator);
-            for &edge in self.path.iter().rev() {
-                position.undo_move(self.edges[edge].mv);
-            }
-            history.truncate(initial_history_len);
-            if !simulation? {
-                memory_full = true;
-                break;
+            && !limits.time.is_some_and(|time| start.elapsed() >= time))
+        .then(|| evaluator.encoded_batch_capacity().zip(evaluator.input_format()))
+        .flatten()
+        .filter(|(capacity, _)| *capacity > 1);
+        if let Some((capacity, format)) = batch {
+            let capacity = capacity.min(self.config.batch_size);
+            let mut workspace = match self.batch.take() {
+                Some(workspace) if workspace.matches(format, capacity) => workspace,
+                _ => batch::Workspace::new(format, capacity, self)?,
+            };
+            let result = batch::run(
+                self,
+                position,
+                history,
+                evaluator,
+                &mut workspace,
+                batch::Control {
+                    limits,
+                    stop,
+                    start,
+                    history_len: initial_history_len,
+                },
+            );
+            self.batch = Some(workspace);
+            memory_full = result?;
+        } else {
+            while self.nodes[0].visits < limits.visits
+                && self.nodes[0].outcome.is_none()
+                && !stop.load(Ordering::Relaxed)
+                && !limits.time.is_some_and(|t| start.elapsed() >= t)
+            {
+                self.path.clear();
+                let simulation = self.simulate(position, history, evaluator);
+                for &edge in self.path.iter().rev() {
+                    position.undo_move(self.edges[edge].mv);
+                }
+                history.truncate(initial_history_len);
+                if !simulation? {
+                    memory_full = true;
+                    break;
+                }
             }
         }
         let root = &self.nodes[0];

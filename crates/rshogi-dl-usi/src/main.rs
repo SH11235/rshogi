@@ -4,6 +4,7 @@ use rshogi_core::types::{EnteringKingRule, Move};
 use rshogi_dl::cache::{CacheStats, CachedEvaluator};
 use rshogi_dl::features::winrate_to_cp;
 use rshogi_dl::onnx::{ModelEvaluator, ModelOptions, OnnxConfig};
+use rshogi_dl::{Evaluator, InputBatchBuffer};
 use rshogi_dl_usi::{Go, parse_position};
 use rshogi_mcts::{Config, History, Search, SearchResult};
 use std::io::{self, BufRead, Write};
@@ -14,6 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 type Runtime = (CachedEvaluator<ModelEvaluator>, Search);
+const NN_BATCH_OPTION: &str = "NNBatchSize type spin default 1 min 1 max 256";
 struct Engine {
     position: Position,
     history: History,
@@ -33,6 +35,53 @@ fn output(line: &str) {
     let mut lock = stdout.lock();
     let _ = writeln!(lock, "{line}");
     let _ = lock.flush();
+}
+
+fn prepare_evaluator<E: Evaluator>(
+    mut evaluator: E,
+    position: &Position,
+    cache_mib: usize,
+    batch_size: usize,
+) -> Result<CachedEvaluator<E>> {
+    let mut logits = vec![0.0; rshogi_dl::features::MAX_MOVE_LABEL_NUM];
+    evaluator.evaluate(position, &mut logits)?;
+    if batch_size == 1 {
+        return CachedEvaluator::new(evaluator, cache_mib);
+    }
+    let format = evaluator
+        .input_format()
+        .ok_or_else(|| anyhow::anyhow!("batch inference requires an input format"))?;
+    let mut inputs = InputBatchBuffer::new(format, batch_size)?;
+    for _ in 0..batch_size {
+        inputs.push(position)?;
+    }
+    let mut values = Vec::new();
+    values.try_reserve_exact(batch_size)?;
+    values.resize(batch_size, 0.0);
+    let policy_len = batch_size
+        .checked_mul(rshogi_dl::features::MAX_MOVE_LABEL_NUM)
+        .ok_or_else(|| anyhow::anyhow!("batch policy size overflow"))?;
+    let mut policies = Vec::new();
+    policies.try_reserve_exact(policy_len)?;
+    policies.resize(policy_len, 0.0);
+    // cache の重複除去を通さず、最大 batch を実際に backend へ渡して検証する。
+    evaluator.evaluate_encoded_batch(inputs.view(), &mut values, &mut policies)?;
+    CachedEvaluator::with_batch_capacity(evaluator, cache_mib, batch_size)
+}
+
+fn batch_info(
+    batch_size: usize,
+    nn_calls: u64,
+    nn_positions: u64,
+    mcts_workspace: usize,
+    cache_workspace: usize,
+) -> Option<String> {
+    (batch_size > 1).then(|| {
+        let mean = if nn_calls == 0 { 0.0 } else { nn_positions as f64 / nn_calls as f64 };
+        format!(
+            "info string nn_positions {nn_positions} nn_batch_limit {batch_size} nn_batch_mean {mean:.3} mcts_batch_workspace_bytes {mcts_workspace} cache_batch_workspace_bytes {cache_workspace}"
+        )
+    })
 }
 
 impl Engine {
@@ -65,27 +114,33 @@ impl Engine {
     fn initialize(&mut self) -> Result<()> {
         self.join(true)?;
         if self.runtime.is_none() {
-            let mut evaluator = ModelEvaluator::with_options(
-                &OnnxConfig {
-                    model_path: self.model.clone(),
-                    gpu_id: self.device,
-                    use_tensorrt: false,
-                    tensorrt_cache: None,
-                    batch_size: 1,
-                },
+            let evaluator = ModelEvaluator::with_options(
+                &self.model_config(),
                 &ModelOptions {
                     cuda_tf32: self.cuda_tf32,
                     profiling: None,
                 },
             )?;
-            let mut logits = vec![0.0; rshogi_dl::features::MAX_MOVE_LABEL_NUM];
-            rshogi_dl::Evaluator::evaluate(&mut evaluator, &self.position, &mut logits)?;
             self.runtime = Some((
-                CachedEvaluator::new(evaluator, self.cache_mib)?,
+                prepare_evaluator(
+                    evaluator,
+                    &self.position,
+                    self.cache_mib,
+                    self.config.batch_size,
+                )?,
                 Search::new(self.config.clone())?,
             ));
         }
         Ok(())
+    }
+    fn model_config(&self) -> OnnxConfig {
+        OnnxConfig {
+            model_path: self.model.clone(),
+            gpu_id: self.device,
+            use_tensorrt: false,
+            tensorrt_cache: None,
+            batch_size: self.config.batch_size,
+        }
     }
     fn option(&mut self, command: &str) -> Result<()> {
         self.join(true)?;
@@ -110,6 +165,11 @@ impl Engine {
                 let v = value.parse()?;
                 ensure!(v <= 1024, "invalid NNCacheMiB");
                 self.cache_mib = v;
+            }
+            "NNBatchSize" => {
+                let v = value.parse()?;
+                ensure!((1..=256).contains(&v), "invalid NNBatchSize");
+                self.config.batch_size = v;
             }
             "TreeMemoryMB" => {
                 let v = value.parse()?;
@@ -156,6 +216,7 @@ impl Engine {
         let (mut evaluator, mut search) = self.runtime.take().expect("runtime was initialized");
         self.stop = Arc::new(AtomicBool::new(false));
         let stop = self.stop.clone();
+        let batch_size = self.config.batch_size;
         self.worker =
             Some(thread::Builder::new().name("mcts".into()).stack_size(8 * 1024 * 1024).spawn(
                 move || {
@@ -174,6 +235,13 @@ impl Engine {
                             start.elapsed(),
                             evaluator.stats(),
                             evaluator.allocated_bytes(),
+                            batch_info(
+                                batch_size,
+                                evaluator.stats().nn_calls,
+                                evaluator.nn_positions(),
+                                search.batch_workspace_bytes(),
+                                evaluator.batch_allocated_bytes(),
+                            ),
                         ),
                         Err(error) => {
                             output(&format!("info string Error: search failed: {error}"));
@@ -196,6 +264,7 @@ impl Engine {
                     "Device type spin default 0 min -1 max 15",
                     "CudaTF32 type check default true",
                     "NNCacheMiB type spin default 0 min 0 max 1024",
+                    NN_BATCH_OPTION,
                     "TreeMemoryMB type spin default 16 min 1 max 1024",
                     "CpuctMilli type spin default 1500 min 1 max 100000",
                     "PolicyTemperatureMilli type spin default 1000 min 1 max 100000",
@@ -240,7 +309,13 @@ impl Engine {
     }
 }
 
-fn print_result(result: &SearchResult, elapsed: Duration, stats: CacheStats, cache_bytes: usize) {
+fn print_result(
+    result: &SearchResult,
+    elapsed: Duration,
+    stats: CacheStats,
+    cache_bytes: usize,
+    batch: Option<String>,
+) {
     let millis = elapsed.as_millis().max(1);
     let cp = winrate_to_cp(result.value, 600.0);
     let pv = result.pv.iter().map(|m| m.to_usi()).collect::<Vec<_>>().join(" ");
@@ -259,6 +334,9 @@ fn print_result(result: &SearchResult, elapsed: Duration, stats: CacheStats, cac
         "info string nn_calls {} cache_hits {} cache_bytes {cache_bytes}",
         stats.nn_calls, stats.hits
     ));
+    if let Some(batch) = batch {
+        output(&batch);
+    }
     let best = if result.best_move == Move::NONE {
         "resign".into()
     } else {
@@ -284,9 +362,179 @@ fn run() -> Result<()> {
     }
     engine.join(true)
 }
+#[cfg(unix)]
+fn exit_success_without_ort_teardown() -> Result<()> {
+    // worker と session は run() で解放済み。ORT の process-global な終了処理だけを避ける。
+    let stdout = io::stdout().flush();
+    let stderr = io::stderr().flush();
+    stdout.and(stderr)?;
+    // SAFETY: worker/session 解放後、全出力を flush 済みで呼ぶ。_exit は残る
+    // デストラクタを実行せずプロセスを終了し、新たなメモリ安全性の前提を要しない。
+    unsafe { libc::_exit(0) }
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error:#}");
         std::process::exit(1);
+    }
+    #[cfg(unix)]
+    if let Err(error) = exit_success_without_ort_teardown() {
+        eprintln!("{error:#}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rshogi_dl::{EncodedBatch, InputFormat};
+    use std::sync::Mutex;
+
+    struct Fake {
+        calls: Arc<Mutex<Vec<usize>>>,
+        fail_batch: bool,
+    }
+
+    impl Evaluator for Fake {
+        fn input_format(&self) -> Option<InputFormat> {
+            Some(InputFormat::StmTokensV1)
+        }
+        fn encoded_batch_capacity(&self) -> Option<usize> {
+            Some(256)
+        }
+        fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+            self.calls.lock().unwrap().push(1);
+            logits.fill(0.0);
+            Ok(0.5)
+        }
+        fn evaluate_encoded_batch(
+            &mut self,
+            input: EncodedBatch<'_>,
+            values: &mut [f32],
+            policies: &mut [f32],
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push(input.len());
+            ensure!(!self.fail_batch, "unsupported runtime batch");
+            values.fill(0.5);
+            policies.fill(0.0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn batch_option_validates_before_changing_search_and_model_capacity() -> Result<()> {
+        let mut engine = Engine::new()?;
+        assert_eq!(NN_BATCH_OPTION, "NNBatchSize type spin default 1 min 1 max 256");
+        assert_eq!(engine.config.batch_size, 1);
+        assert_eq!(engine.model_config().batch_size, 1);
+        for batch in [256, 1, 4] {
+            engine.stop.store(false, Ordering::Relaxed);
+            engine.option(&format!("setoption name NNBatchSize value {batch}"))?;
+            assert!(engine.stop.load(Ordering::Relaxed));
+            assert!(engine.runtime.is_none());
+            assert_eq!(engine.config.batch_size, batch);
+            assert_eq!(engine.model_config().batch_size, batch);
+        }
+        for value in ["0", "257", "-1", "abc", ""] {
+            assert!(engine.option(&format!("setoption name NNBatchSize value {value}")).is_err());
+            assert_eq!(engine.config.batch_size, 4);
+            assert_eq!(engine.model_config().batch_size, 4);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_default_and_batched_warmup_prepare_the_matching_search_path() -> Result<()> {
+        for batch_size in [1, 4] {
+            for cache_mib in [0, 1] {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let fake = Fake {
+                    calls: calls.clone(),
+                    fail_batch: false,
+                };
+                let (mut position, mut history) = parse_position("position startpos")?;
+                let mut evaluator = prepare_evaluator(fake, &position, cache_mib, batch_size)?;
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    if batch_size == 1 { vec![1] } else { vec![1, 4] }
+                );
+                assert_eq!(evaluator.stats(), CacheStats::default());
+                assert_eq!(evaluator.nn_positions(), 0);
+                assert_eq!(evaluator.batch_allocated_bytes() == 0, batch_size == 1);
+                assert_eq!(
+                    evaluator.encoded_batch_capacity(),
+                    (batch_size > 1).then_some(batch_size)
+                );
+                let mut search = Search::new(Config {
+                    batch_size,
+                    tree_memory_mb: 1,
+                    ..Config::default()
+                })?;
+                let result = search.run(
+                    &mut position,
+                    &mut history,
+                    &mut evaluator,
+                    rshogi_mcts::Limits {
+                        visits: 9,
+                        time: None,
+                    },
+                    &AtomicBool::new(false),
+                )?;
+                assert_eq!(result.visits, 9);
+                assert_ne!(result.best_move, Move::NONE);
+                assert_eq!(search.batch_workspace_bytes() == 0, batch_size == 1);
+                assert!(evaluator.stats().nn_calls > 0);
+                evaluator.clear();
+                assert_eq!(evaluator.stats(), CacheStats::default());
+                assert_eq!(evaluator.nn_positions(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_batch_warmup_error_is_returned_without_a_scalar_retry() -> Result<()> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fake = Fake {
+            calls: calls.clone(),
+            fail_batch: true,
+        };
+        let (position, _) = parse_position("position startpos")?;
+        let result = prepare_evaluator(fake, &position, 1, 4);
+        assert!(result.is_err());
+        assert_eq!(*calls.lock().unwrap(), vec![1, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_diagnostics_are_separate_and_absent_for_scalar_default() {
+        assert!(batch_info(1, 3, 3, 0, 0).is_none());
+        assert_eq!(
+            batch_info(4, 3, 7, 100, 200).unwrap(),
+            "info string nn_positions 7 nn_batch_limit 4 nn_batch_mean 2.333 mcts_batch_workspace_bytes 100 cache_batch_workspace_bytes 200"
+        );
+        assert!(batch_info(4, 0, 0, 0, 200).unwrap().contains("nn_batch_mean 0.000"));
+    }
+
+    #[test]
+    fn options_and_non_loading_lifecycle_commands_keep_the_batch_setting() -> Result<()> {
+        let mut engine = Engine::new()?;
+        engine.command("setoption name NNBatchSize value 8")?;
+        for command in [
+            "usi",
+            "position startpos moves 7g7f",
+            "stop",
+            "usinewgame",
+            "gameover",
+        ] {
+            assert!(engine.command(command)?);
+            assert_eq!(engine.config.batch_size, 8);
+            assert!(engine.worker.is_none());
+            assert!(engine.runtime.is_none());
+        }
+        assert!(!engine.command("quit")?);
+        assert_eq!(engine.model_config().batch_size, 8);
+        Ok(())
     }
 }

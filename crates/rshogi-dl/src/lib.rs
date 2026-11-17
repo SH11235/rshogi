@@ -4,11 +4,15 @@ use anyhow::Result;
 use rshogi_core::position::Position;
 
 pub mod cache;
+#[cfg(feature = "inference-diagnostics")]
+pub mod diagnostics;
+#[cfg(feature = "inference-diagnostics")]
+pub use diagnostics::{InferenceStage, InferenceTimings, StageTiming};
 #[cfg(feature = "onnx")]
 pub mod environment;
 pub mod features;
 pub mod input;
-pub use input::{EncodedInput, InputBuffer};
+pub use input::{EncodedBatch, EncodedInput, InputBatchBuffer, InputBuffer};
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod tokens;
@@ -24,6 +28,12 @@ pub enum InputFormat {
 
 /// 合法手の生成や終局判定を含まない、局面単独の推論。
 pub trait Evaluator {
+    /// evaluator 構築以降の累積 forward 診断。未対応なら None。cache の統計 reset とは独立。
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<InferenceTimings> {
+        None
+    }
+
     /// 宣言した入力だけに依存する決定的な推論に限り、キャッシュを有効にできる。
     fn input_format(&self) -> Option<InputFormat> {
         None
@@ -33,6 +43,21 @@ pub trait Evaluator {
     /// 対応する実装は、形式不一致や推論失敗をエラーにし、Position による再試行を要求しない。
     fn evaluate_encoded(&mut self, _: EncodedInput<'_>, _: &mut [f32]) -> Result<Option<f32>> {
         Ok(None)
+    }
+
+    /// 明示的な encode 済み batch 推論の最大局面数。入力形式の宣言だけでは対応を意味しない。
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    /// 局面順の value と平坦な policy を返す。未対応はエラー。失敗時は両出力を変更しない。
+    fn evaluate_encoded_batch(
+        &mut self,
+        _: EncodedBatch<'_>,
+        _: &mut [f32],
+        _: &mut [f32],
+    ) -> Result<()> {
+        anyhow::bail!("encoded batch inference is unsupported")
     }
 
     /// 手番側の期待スコア（勝ち 1・引き分け 0.5・負け 0）と共通の 2187 policy logits を返す。
