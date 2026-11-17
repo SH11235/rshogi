@@ -467,7 +467,7 @@ impl Evaluator for BatchedConstant<'_> {
         self.batches.push(inputs.len());
         ensure!(self.fail_call != Some(self.batches.len()), "batch failure");
         values.fill(0.3);
-        for row in logits.chunks_exact_mut(MAX_MOVE_LABEL_NUM) {
+        for row in logits.as_chunks_mut::<MAX_MOVE_LABEL_NUM>().0 {
             self.policy(row);
         }
         if self.invalid_call == Some(self.batches.len()) {
