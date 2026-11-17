@@ -362,8 +362,24 @@ fn run() -> Result<()> {
     }
     engine.join(true)
 }
+#[cfg(unix)]
+fn exit_success_without_ort_teardown() -> Result<()> {
+    // worker と session は run() で解放済み。ORT の process-global な終了処理だけを避ける。
+    let stdout = io::stdout().flush();
+    let stderr = io::stderr().flush();
+    stdout.and(stderr)?;
+    // SAFETY: worker/session 解放後、全出力を flush 済みで呼ぶ。_exit は残る
+    // デストラクタを実行せずプロセスを終了し、新たなメモリ安全性の前提を要しない。
+    unsafe { libc::_exit(0) }
+}
+
 fn main() {
     if let Err(error) = run() {
+        eprintln!("{error:#}");
+        std::process::exit(1);
+    }
+    #[cfg(unix)]
+    if let Err(error) = exit_success_without_ort_teardown() {
         eprintln!("{error:#}");
         std::process::exit(1);
     }

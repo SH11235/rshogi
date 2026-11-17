@@ -85,3 +85,7 @@ MCTS の workspace は batch 探索を始める際に確保し、arena の容量
 value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）です。モデルの学習ルールと `EnteringKingRule` 等の設定を揃えて使ってください。token形式のモデル定義・export は [Python package](../../python/rshogi-dl/README.md) を参照してください。USI の形式自動選択は CPU/CUDA に対応します。既存 tools の basic 専用 API では token モデルを受理しません。
 
 `CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。
+
+Unix では正常終了時に探索 worker を stop / join し、session を破棄して標準出力・標準エラーを
+flush した後、`_exit` で終了します。ORT の process-global なライブラリ終了処理を回避するためです。
+致命的なエラーは非0の終了コードを返します。Unix 以外では通常のプロセス終了処理を使用します。
