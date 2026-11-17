@@ -125,6 +125,8 @@ fn fixed_positions_preserve_move_order() {
         SFEN_HIRATE,
         PERFT_MATSURI,
         PERFT_MIDGAME,
+        "4k4/9/9/9/9/9/9/9/4K4 b RBGSNLP 1",
+        "4k4/9/9/9/4r4/9/9/9/4K4 b BGSNLP 1",
         // 既存 perft の王手回避・打ち歩詰め・歩打ちによる角筋遮断。
         "lnsgkgsnl/1r5b1/pppp1pppp/9/4R4/9/PPPP1PPPP/1B7/LNSGKGSNL w Pp 1",
         "R6sk/9/7G1/9/9/9/9/9/4K4 b P 1",
@@ -216,15 +218,100 @@ fn random_playouts_preserve_move_order() {
 }
 
 // 盤面参照で駒種を判定する参照実装。
-// 駒種別の移動を組み立て、打ち・王手生成・合法性判定は本体と共有する。
+// 駒種別の移動を組み立て、歩打ち・王手生成・合法性判定は本体と共有する。
 mod reference {
     use super::super::{
         Bitboard, ExtMoveBuffer, GenerateTargets, Move, MoveList, PieceType, Position,
         PromotionMode, Square, add_move, between_bb, bishop_effect, dragon_effect, enemy_field,
-        generate_checks, generate_non_pawn_drops, generate_pawn_drops, gold_effect, horse_effect,
-        king_effect, knight_effect, lance_effect, pawn_effect, rank1_bb, rank12_bb, rook_effect,
-        silver_effect,
+        generate_checks, generate_pawn_drops, gold_effect, horse_effect, king_effect,
+        knight_effect, lance_effect, pawn_effect, rank1_bb, rank12_bb, rook_effect, silver_effect,
     };
+
+    fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+        let us = pos.side_to_move();
+        let hand = pos.hand(us);
+
+        let empties = !pos.occupied();
+        let target = target & empties;
+
+        // 駒種配列を桂→香→銀→金→角→飛の順で構築
+        // ダミー初期値として Pawn を使用（num 未満のインデックスのみ参照される）
+        let dummy = (PieceType::Pawn, crate::types::Piece::make(us, PieceType::Pawn));
+        let mut drops = [dummy; 6];
+        let mut num = 0usize;
+
+        if hand.has(PieceType::Knight) {
+            drops[num] = (PieceType::Knight, crate::types::Piece::make(us, PieceType::Knight));
+            num += 1;
+        }
+        let next_to_knight = num; // 桂を除いたdropsの開始index
+
+        if hand.has(PieceType::Lance) {
+            drops[num] = (PieceType::Lance, crate::types::Piece::make(us, PieceType::Lance));
+            num += 1;
+        }
+        let next_to_lance = num; // 香・桂を除いたdropsの開始index
+
+        for pt in [
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+        ] {
+            if hand.has(pt) {
+                drops[num] = (pt, crate::types::Piece::make(us, pt));
+                num += 1;
+            }
+        }
+
+        if num == 0 {
+            return;
+        }
+
+        let drops = &drops[..num];
+
+        if next_to_lance == 0 {
+            // 香・桂を持っていない: 全マスに対して全駒種を生成
+            for to in target.iter() {
+                for &(pt, pc) in drops {
+                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                }
+            }
+        } else {
+            // 段による場合分け
+            let rank1 = rank1_bb(us);
+            let rank12 = rank12_bb(us);
+            let rank2_only = rank12 & !rank1;
+
+            // 1段目: 香・桂以外の駒のみ
+            let target1 = target & rank1;
+            if next_to_lance < num {
+                for to in target1.iter() {
+                    for &(pt, pc) in &drops[next_to_lance..] {
+                        add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                    }
+                }
+            }
+
+            // 2段目: 桂以外の駒
+            let target2 = target & rank2_only;
+            if next_to_knight < num {
+                for to in target2.iter() {
+                    for &(pt, pc) in &drops[next_to_knight..] {
+                        add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                    }
+                }
+            }
+
+            // 3〜9段目: 全駒種
+            let target3 = target & !rank12;
+            for to in target3.iter() {
+                for &(pt, pc) in drops {
+                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                }
+            }
+        }
+    }
 
     fn generate_pawn_moves(
         pos: &Position,
