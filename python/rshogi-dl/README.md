@@ -99,6 +99,58 @@ pip install --no-deps -e .
 | 10..19 | 上の 10 方向の成り |
 | 20..26 | 打ち: 歩 香 桂 銀 角 飛 金 |
 
+## 生成済み shard の読み込み
+
+JSONL の検証・Python record の作成を毎 epoch 繰り返す代わりに、検証済みの入力を NumPy 配列の shard に変換できます。変換は全行を一度検証し、最大 `--shard-records` 行ずつ保存します。既定4096行、上限65536行で、入力全体をメモリに読みません。
+
+```bash
+python -m rshogi_dl.sharded convert \
+  --source fixture.jsonl \
+  --output "$SHOGI_DATA/teachers/dl/<dataset>" \
+  --shard-records 4096 \
+  --teacher-kind synthetic-validation-targets \
+  --split fixture-only --training-status validation-only
+
+python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<dataset>"
+```
+
+dataset の出力先は `$SHOGI_DATA/teachers/dl/<dataset>/` または `$SHOGI_DATA/runs/rshogi-dl/<run>/` に限ります。絶対 path を指定し、repository・worktree 内や既存 path への出力は拒否します。`manifest.json` は全 shard の保存後に公開します。変換に失敗して manifest がない directory は未完了であり、reader は受け付けません。自動再開・上書きはしないため、別の新規出力先を使ってください。
+
+入力JSONLは通常ファイルに限り、変換中は変更しないでください。開始時とmanifest公開直前のファイル識別子・byte数・更新時刻・metadata変更時刻を照合し、変更された場合は公開しません。manifestには入力の`source_size`と読み取った`source_records`を記録します。
+
+各配列・metadata・一時manifestはflushとfsyncを行い、manifestをatomic renameで公開します。POSIXではshardとdatasetのdirectoryもfsyncし、ファイルシステムがdirectory fsyncを提供しない場合は失敗します。Windowsでは標準Python APIでdirectoryの永続化を確認できないため、file fsyncとatomic renameまでが保証範囲です。Windowsでコピーしたdatasetや電源断後のdatasetは、利用前に`verify`で検査してください。
+
+| shard 内の配列 | 保存形式 |
+| --- | --- |
+| tokens | uint8 `[N, 96]` |
+| values / policy_present | float32 `[N]` / bool `[N]` |
+| legal_offsets | uint64 `[N+1]` |
+| legal_indices / policy_targets | uint16 / float32 の一次元配列。各行の合法手分だけ格納 |
+
+policy target は合法手の元の並びで合計1に正規化します。`policy=null` の行は `policy_present=false`、targetは0で、合法手が空の行も保持します。各行593手分の領域をファイルに確保する形式ではありません。global manifest は件数とshard数を保持し、個々のファイル情報とSHA-256は各shardのmetadataへ保存します。
+
+配列はconverterが書くNPY 1.0形式です。readerは最大1024 bytesのheaderを先に検査し、期待するshape・dtype・C順序・ファイル長が一致してからmappingを作ります。空の合法手配列でも、headerに書かれた件数から先にメモリを確保しません。
+
+```python
+import os
+from pathlib import Path
+from rshogi_dl.sharded import iter_batches
+
+dataset = Path(os.environ["SHOGI_DATA"]) / "teachers" / "dl" / "<dataset>"
+for batch in iter_batches(dataset, batch_size=128, drop_last=False):
+    print(batch.tokens.shape)
+```
+
+reader はread-only mmapを使い、shardを順番に開き、shard境界を跨いでJSONL readerと同じ`Batch`を作ります。batchの上限は16384行です。末尾は`drop_last=True`で捨てられます。保持する作業領域は1shardのmappingと1batch分で、返したbatchは次の読込で書き換わりません。並べ替えやworker・GPU転送は行わず、CPU tensorを返します。
+
+このreaderの対象はconverterが生成した、変更されないdatasetです。既定ではheader・shape・dtype・file sizeと読込中の置換・変更を検査し、全sampleの再検証や全ファイルのhash scanを毎epoch行いません。配布・コピー後に全ファイルを検査するときは`verify`、または`iter_batches(..., verify_hashes=True)`を明示してください。使用中のshardを編集・削除・置換せず、新しいdatasetを別directoryに生成してください。
+
+`teacher_kind`・`split`・datasetの`training_status`は利用者が明示する出自で、未指定は`unknown`です。`training_status`は`unknown`または`validation-only`を指定できます。converterは実教師の品質を推測せず、変換成功は学習データの品質採用を意味しません。上の例は合成fixtureであり、モデル・checkpointの`validation-only`という状態は変更しません。
+
+manifest の `dataset_content_sha256` は、shard 順の metadata digest（各配列の checksum を含む）を
+生成時にまとめた値です。入力の識別のために全 shard 一覧を保持する必要はありません。
+`verify` は配列 checksum とこの digest を照合します。通常読込は生成後に変更しない契約に従い、全件 scan を省きます。
+
 ## モデル
 
 token の埋め込み (語彙 121) と位置の埋め込み (96) を足し、pre-LayerNorm の encoder を通します。
@@ -115,6 +167,19 @@ attention は全 96 token 間の双方向で、畳み込みは使いません。
   sigmoid を付けて `[0, 1]` にします。
 - loss: policy は合法手の中だけで softmax を取る soft-target cross entropy (`policy` が `null` で
   ない行の平均)、value は BCE。両者を 1:1 で足します。全行が `null` の batch では policy loss は 0 です。
+
+### attention の実行方式
+
+`SquareTransformer(config, attention_backend="sdpa")` は PyTorch の
+`scaled_dot_product_attention` を使います。既定の `"explicit"` は QK の積・softmax・V との積を
+個別に計算します。どちらも全 96 token 間の双方向 attention で、dropout は使いません。
+SDPA の実際の kernel は device・dtype・PyTorch の設定に依存します。
+
+この指定は実行方式だけを変え、model config・parameter 名・checkpoint の形式は共通です。
+同じ重みを両方式へ `load_state_dict` できます。checkpoint の読込時は既定の `"explicit"` に戻るので、
+SDPA を使う側でモデルを構築して重みを読み込んでください。SDPA のモデルも ONNX export 中は
+標準の MatMul / Softmax で書き出し、動的 batch・metadata の検査を維持します。export 後のモデルの
+実行方式は変わりません。
 
 ## smoke
 
@@ -154,6 +219,7 @@ python -m rshogi_dl.benchmark \
 JSON にも書きます。成果物の保存先・上書き拒否は smoke と同じです。`validation-only` の小さな
 fixture での処理時間であり、学習品質や棋力を示しません。
 
+- `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
 - `--execution eager|compile`: `compile` は `torch.compile` でモデルを実行します。loss と optimizer
   の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。

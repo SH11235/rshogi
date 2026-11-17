@@ -23,7 +23,7 @@ class BenchmarkConfigTest(unittest.TestCase):
             {"batch_size": 0}, {"batch_size": 4097}, {"window_batches": 0},
             {"window_batches": 33}, {"threads": 0}, {"threads": 257}, {"seed": -1},
             {"seed": 2**63}, {"execution": "other"}, {"precision": "fp16"},
-            {"input_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
+            {"attention_backend": "other"}, {"input_mode": "other"}, {"device": "cuda:999"}, {"fused_optimizer": True},
             {"fused_optimizer": 1}, {"learning_rate": 0.0}, {"learning_rate": float("nan")},
             {"weight_decay": -1.0}, {"weight_decay": float("inf")},
         ]
@@ -89,6 +89,15 @@ class BenchmarkTest(unittest.TestCase):
             self.assertEqual(self.report[key], streamed[key], key)
         other = benchmark.run_benchmark(self.data, TEST_CONFIG, replace(self.config, seed=6))
         self.assertNotEqual(self.report["initial_weights_sha256"], other["initial_weights_sha256"])
+
+    def test_sdpa_uses_the_same_initial_weights_and_loss(self) -> None:
+        report = benchmark.run_benchmark(
+            self.data, TEST_CONFIG, replace(self.config, attention_backend="sdpa")
+        )
+        self.assertEqual(report["benchmark_config"]["attention_backend"], "sdpa")
+        self.assertEqual(report["initial_weights_sha256"], self.report["initial_weights_sha256"])
+        self.assertAlmostEqual(report["initial_loss"], self.report["initial_loss"], places=5)
+        self.assertAlmostEqual(report["final_loss"], self.report["final_loss"], places=5)
 
     def test_no_policy_rows_still_count_updates(self) -> None:
         data = self.runs / "value-only.jsonl"
