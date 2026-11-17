@@ -250,7 +250,7 @@ struct Cli {
     onnx_model: Option<PathBuf>,
 
     // --- 標準 dlshogi ONNX 直接推論モード ---
-    /// 標準dlshogi ONNXモデルパス（DL水匠等、57ch features2）
+    /// dlshogi ONNX（57ch features2）または stm-tokens-v1 ONNX モデルパス
     /// AobaZero モデルには使用不可。
     #[arg(long)]
     dlshogi_onnx_model: Option<PathBuf>,
@@ -4083,20 +4083,82 @@ fn canonicalize_predicted_path(path: &std::path::Path) -> Result<PathBuf> {
     Ok(canonical_parent.join(file_name))
 }
 
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+mod onnx_input_element {
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for i64 {}
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+trait OnnxInputElement: onnx_input_element::Sealed + Copy + Send + Sync + 'static {
+    const ZERO: Self;
+    const TOKENS: bool;
+    fn bind(
+        binding: &mut ort::session::IoBinding,
+        rows: usize,
+        f1: &[Self],
+        f2: &[Self],
+        config: &OnnxPipelineConfig<'_>,
+    ) -> Result<()>;
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl OnnxInputElement for f32 {
+    const ZERO: Self = 0.0;
+    const TOKENS: bool = false;
+    fn bind(
+        binding: &mut ort::session::IoBinding,
+        rows: usize,
+        f1: &[Self],
+        f2: &[Self],
+        config: &OnnxPipelineConfig<'_>,
+    ) -> Result<()> {
+        use ort::value::TensorRef;
+        let input1 = TensorRef::<f32>::from_array_view(([rows, config.input1_channels, 9, 9], f1))
+            .map_err(onnx_ort_err)?;
+        let input2 = TensorRef::<f32>::from_array_view(([rows, config.input2_channels, 9, 9], f2))
+            .map_err(onnx_ort_err)?;
+        binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
+        binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl OnnxInputElement for i64 {
+    const ZERO: Self = 0;
+    const TOKENS: bool = true;
+    fn bind(
+        binding: &mut ort::session::IoBinding,
+        rows: usize,
+        f1: &[Self],
+        _: &[Self],
+        _: &OnnxPipelineConfig<'_>,
+    ) -> Result<()> {
+        let input = ort::value::TensorRef::<i64>::from_array_view((
+            [rows, rshogi_dl::tokens::TOKEN_COUNT],
+            f1,
+        ))
+        .map_err(onnx_ort_err)?;
+        binding.bind_input("tokens", &input).map_err(onnx_ort_err)
+    }
+}
+
 /// 入力特徴の host バッファ。CUDA pinned (page-locked) が使える環境では真の async H2D に
 /// なり、pageable→pinned ステージング (CPU 介在) が消える。pinned 割当に失敗する環境
 /// (CPU 推論など) では通常の `Vec` にフォールバックする。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-enum HostBuf {
-    Paged(Vec<f32>),
+enum HostBuf<T: OnnxInputElement = f32> {
+    Paged(Vec<T>),
     /// CUDA pinned 確保ブロックへの生ポインタ。free は `PinnedPool` が一括で行う。
-    Pinned(PinnedBuf),
+    Pinned(PinnedBuf<T>),
 }
 
 /// CUDA pinned 確保ブロックを指す生ポインタ。確保・解放は [`PinnedPool`] が所有する。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-struct PinnedBuf {
-    ptr: *mut f32,
+struct PinnedBuf<T: OnnxInputElement = f32> {
+    ptr: *mut T,
     len: usize,
 }
 
@@ -4107,12 +4169,12 @@ struct PinnedBuf {
 // スレッド間で送っても data race は発生しない。ort の `Allocator` 自体は Sync でないため、
 // スロットには Allocator ではなく生ポインタを載せて channel 越しに渡す。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-unsafe impl Send for PinnedBuf {}
+unsafe impl<T: OnnxInputElement> Send for PinnedBuf<T> {}
 
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-impl HostBuf {
+impl<T: OnnxInputElement> HostBuf<T> {
     #[inline]
-    fn as_slice(&self) -> &[f32] {
+    fn as_slice(&self) -> &[T] {
         match self {
             HostBuf::Paged(v) => v.as_slice(),
             // SAFETY: ptr/len は生存中の pinned 割当を指し、len 要素分が有効。排他アクセスは
@@ -4122,7 +4184,7 @@ impl HostBuf {
     }
 
     #[inline]
-    fn as_mut_slice(&mut self) -> &mut [f32] {
+    fn as_mut_slice(&mut self) -> &mut [T] {
         match self {
             HostBuf::Paged(v) => v.as_mut_slice(),
             // SAFETY: 上と同じ不変条件。`&mut self` 経由なので Rust の借用規則でも排他。
@@ -4136,34 +4198,41 @@ impl HostBuf {
 /// 解放だけをこの型に集約する。`PinnedPool` は thread::scope より長生きさせること
 /// (スコープ内で全スロットが drop された後に free する)。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-struct PinnedPool {
+struct PinnedPool<T: OnnxInputElement = f32> {
     allocator: ort::memory::Allocator,
-    ptrs: Vec<*mut f32>,
+    ptrs: Vec<*mut T>,
 }
 
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-impl PinnedPool {
-    /// `len` 要素 (f32) 分の pinned バッファを確保しゼロ初期化して返す。
-    fn alloc_zeroed(&mut self, len: usize) -> Result<PinnedBuf> {
-        let mut block = self.allocator.alloc::<f32>(len).map_err(onnx_ort_err)?;
+impl<T: OnnxInputElement> PinnedPool<T> {
+    /// `len` 要素 分の pinned バッファを確保しゼロ初期化して返す。
+    fn alloc_zeroed(&mut self, len: usize) -> Result<PinnedBuf<T>> {
+        anyhow::ensure!(
+            len <= isize::MAX as usize / std::mem::size_of::<T>(),
+            "pinned buffer exceeds addressable size"
+        );
+        let mut block = self.allocator.alloc::<T>(len).map_err(onnx_ort_err)?;
         // ゼロ初期化用に block を借用して書き込む（所有権はまだ block 側）。
         {
-            let zero_ptr = block.as_mut_ptr().cast::<f32>();
-            // SAFETY: alloc が len*size_of::<f32>() バイトを確保済み（pinned は CPU アクセス可）。
-            // write_bytes::<f32>(_, 0, len) は len*size_of::<f32>() = len*4 バイトをゼロ化し、
-            // 確保サイズと一致する。
+            let zero_ptr = block.as_mut_ptr().cast::<T>();
+            anyhow::ensure!(
+                zero_ptr.is_aligned(),
+                "pinned allocator returned a misaligned input buffer"
+            );
+            // SAFETY: alloc::<T> は T の alignment と len 要素分を確保する。CUDA pinned は
+            // CPU から読み書きでき、要素型はゼロ bit が有効な f32 / i64 に限る。
             unsafe { std::ptr::write_bytes(zero_ptr, 0, len) };
         }
         // 所有権を block から取り出す（以後の free は PinnedPool::drop が担う）。zero_ptr と
         // 同一アドレスだが、こちらは「移動した所有ポインタ」を表す。
-        let ptr = block.into_raw().cast::<f32>();
+        let ptr = block.into_raw().cast::<T>();
         self.ptrs.push(ptr);
         Ok(PinnedBuf { ptr, len })
     }
 }
 
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-impl Drop for PinnedPool {
+impl<T: OnnxInputElement> Drop for PinnedPool<T> {
     fn drop(&mut self) {
         for &ptr in &self.ptrs {
             // SAFETY: ptr は self.allocator.alloc → into_raw で得たもの。確保した allocator で
@@ -4391,6 +4460,194 @@ fn drive_pull_worker<B, D>(
     }
 }
 
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+enum OnnxHostInputs {
+    Basic {
+        slot_bufs: Vec<(HostBuf<f32>, HostBuf<f32>)>,
+        pinned_pool: Option<PinnedPool<f32>>,
+    },
+    Tokens {
+        slot_bufs: Vec<(HostBuf<i64>, HostBuf<i64>)>,
+        pinned_pool: Option<PinnedPool<i64>>,
+    },
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct OnnxPipelineState<'a, T: OnnxInputElement> {
+    gpu_sessions: &'a mut Vec<ort::session::Session>,
+    session_gpus: &'a [i32],
+    warmup_leaders: usize,
+    slot_bufs: &'a mut Vec<(HostBuf<T>, HostBuf<T>)>,
+    pinned_pool: &'a mut Option<PinnedPool<T>>,
+    model: &'a OnnxModelIdentity,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+type HostBufferSlots<T> = Vec<(HostBuf<T>, HostBuf<T>)>;
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn allocate_host_buffers<T: OnnxInputElement>(
+    gpu_sessions: &[ort::session::Session],
+    session_gpus: &[i32],
+    use_gpu: bool,
+    batch_size: usize,
+    f1_size: usize,
+    f2_size: usize,
+) -> Result<(HostBufferSlots<T>, Option<PinnedPool<T>>)> {
+    use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+    let pipeline_slots = 2 * session_gpus.len();
+    // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
+    // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
+    // GPU 推論のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
+    // slot はどの GPU のセッションにも渡るため、全 GPU から pinned として使えるメモリが要る。
+    // ORT の CUDA pinned allocator は cudaMallocHost で確保し、64 bit の UVA 環境ではこれが
+    // portable (全デバイスの context で pinned 扱い) になるので、1 本目のセッションの
+    // allocator で一括確保する。
+    let mut pinned_pool: Option<PinnedPool<T>> = if use_gpu {
+        MemoryInfo::new(
+            AllocationDevice::CUDA_PINNED,
+            session_gpus[0],
+            AllocatorType::Device,
+            MemoryType::CPUInput,
+        )
+        .and_then(|info| ort::memory::Allocator::new(&gpu_sessions[0], info))
+        .map(|allocator| PinnedPool {
+            allocator,
+            ptrs: Vec::new(),
+        })
+        .ok()
+    } else {
+        None
+    };
+
+    // 入力特徴バッファ (f1/f2) を pipeline_slots 個ぶん確保。pinned_pool があれば pinned で
+    // 全スロットを一括確保し、1 件でも失敗したら pool を捨てて全スロットを pageable Vec で
+    // 作り直す (all-or-nothing。pinned/pageable 混在を避ける)。確保したバッファは全入力
+    // ファイルで使い回し、pinned_pool は OnnxSessions の drop で free する。
+    let mut slot_bufs: Vec<(HostBuf<T>, HostBuf<T>)> = Vec::with_capacity(pipeline_slots);
+    let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
+        let mut ok = true;
+        for _ in 0..pipeline_slots {
+            // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
+            // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
+            // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
+            let f1 = pool.alloc_zeroed(batch_size * f1_size);
+            let f2 = if f2_size == 0 {
+                Ok(None)
+            } else {
+                pool.alloc_zeroed(batch_size * f2_size).map(Some)
+            };
+            match (f1, f2) {
+                (Ok(f1), Ok(f2)) => slot_bufs.push((
+                    HostBuf::Pinned(f1),
+                    f2.map(HostBuf::Pinned).unwrap_or_else(|| HostBuf::Paged(Vec::new())),
+                )),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        ok
+    } else {
+        false
+    };
+    if !pinned_ok {
+        if use_gpu {
+            eprintln!(
+                "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
+            );
+        }
+        // ここまでに確保した pinned (slot_bufs 内 + pool.ptrs に登録済) を解放する。
+        // PinnedBuf 自体は Drop を持たず、free は pinned_pool の drop に集約しているため、
+        // 先に slot_bufs を空にしてから pinned_pool を drop する (登録 ptr を 1 回ずつ free)。
+        slot_bufs.clear();
+        drop(pinned_pool.take());
+        for _ in 0..pipeline_slots {
+            slot_bufs.push((
+                HostBuf::Paged(vec![T::ZERO; batch_size * f1_size]),
+                HostBuf::Paged(vec![T::ZERO; batch_size * f2_size]),
+            ));
+        }
+    }
+
+    Ok((slot_bufs, pinned_pool))
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn token_input_contract(
+    session: &ort::session::Session,
+    config: &OnnxPipelineConfig<'_>,
+) -> Result<bool> {
+    use ort::value::{TensorElementType, ValueType};
+    let metadata = session.metadata().map_err(onnx_ort_err)?;
+    let keys = metadata.custom_keys().map_err(onnx_ort_err)?;
+    let custom = |key: &str| -> Result<Option<String>> {
+        if keys.iter().any(|name| name == key) {
+            metadata
+                .custom(key)
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("cannot read metadata {key}"))
+        } else {
+            Ok(None)
+        }
+    };
+    match custom("rshogi.input_format")?.as_deref() {
+        None => return Ok(false),
+        Some("stm-tokens-v1") => {}
+        Some(other) => anyhow::bail!("unsupported ONNX input format: {other}"),
+    }
+    anyhow::ensure!(config.model_kind == "dlshogi", "stm-tokens-v1 requires --dlshogi-onnx-model");
+    anyhow::ensure!(
+        !config.use_tensorrt,
+        "stm-tokens-v1 with TensorRT is not supported; use CUDA or CPU EP"
+    );
+    for (key, expected) in [
+        ("rshogi.policy_format", "direction-destination-2187-v1"),
+        ("rshogi.value_format", "stm-expected-score-sigmoid-v1"),
+    ] {
+        anyhow::ensure!(
+            custom(key)?.as_deref() == Some(expected),
+            "missing or conflicting metadata {key}"
+        );
+    }
+    for (outlets, expected, dtype) in [
+        (
+            session.inputs(),
+            vec![("tokens", rshogi_dl::tokens::TOKEN_COUNT)],
+            TensorElementType::Int64,
+        ),
+        (
+            session.outputs(),
+            vec![("output_policy", 2187), ("output_value", 1)],
+            TensorElementType::Float32,
+        ),
+    ] {
+        anyhow::ensure!(
+            outlets.len() == expected.len(),
+            "unexpected token model input/output count"
+        );
+        for (name, width) in expected {
+            let outlet = outlets
+                .iter()
+                .find(|outlet| outlet.name() == name)
+                .ok_or_else(|| anyhow::anyhow!("missing tensor {name}"))?;
+            let ValueType::Tensor { ty, shape, .. } = outlet.dtype() else {
+                anyhow::bail!("{name} must be a tensor");
+            };
+            anyhow::ensure!(
+                *ty == dtype && shape.len() == 2 && shape[1] == width as i64,
+                "incorrect token model dtype/shape: {name}"
+            );
+            anyhow::ensure!(
+                shape[0] == -1 || (shape[0] == 1 && config.batch_size == 1),
+                "{name} must support dynamic batches or batch1"
+            );
+        }
+    }
+    Ok(true)
+}
+
 /// ONNX Runtime のセッションと入力特徴の host バッファ。1 回の実行の全入力ファイルで使い回す。
 ///
 /// ファイルごとに作り直すと、TensorRT EP ではセッションの数だけモデルの解析と
@@ -4402,11 +4659,7 @@ struct OnnxSessions {
     session_gpus: Vec<i32>,
     /// `gpu_sessions` の先頭からこの本数が、最初のバッチを 1 本ずつ順に推論する (`WarmupGate`)。
     warmup_leaders: usize,
-    /// パイプラインの slot ごとの入力特徴バッファ (f1, f2)。数は 2 × セッション数。
-    slot_bufs: Vec<(HostBuf, HostBuf)>,
-    /// `slot_bufs` を pinned で確保できたときの所有者 (drop で free する)。`None` なら
-    /// `slot_bufs` は pageable で、出力バッファも pageable にする。
-    pinned_pool: Option<PinnedPool>,
+    inputs: OnnxHostInputs,
     model: OnnxModelIdentity,
 }
 
@@ -4427,7 +4680,6 @@ impl OnnxSessions {
 
     fn new(config: &OnnxPipelineConfig<'_>) -> Result<Self> {
         use ort::ep::ExecutionProvider;
-        use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
         use ort::session::Session;
 
         let OnnxPipelineConfig {
@@ -4618,8 +4870,13 @@ impl OnnxSessions {
         let warmup_leaders = warmup_leader_count(gpu_ids);
         let num_sessions = session_gpus.len();
         let mut gpu_sessions: Vec<Session> = Vec::with_capacity(num_sessions);
+        let mut token_inputs = false;
         for (i, &gpu_id) in session_gpus.iter().enumerate() {
-            gpu_sessions.push(build_session(gpu_id, i == 0, i < warmup_leaders)?);
+            let session = build_session(gpu_id, i == 0, i < warmup_leaders)?;
+            if i == 0 {
+                token_inputs = token_input_contract(&session, config)?;
+            }
+            gpu_sessions.push(session);
         }
         if num_sessions > 1 {
             eprintln!(
@@ -4629,81 +4886,39 @@ impl OnnxSessions {
 
         eprintln!("{model_name} ONNX model loaded. Batch size: {batch_size}");
 
-        let pipeline_slots = 2 * num_sessions;
-        // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
-        // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
-        // GPU 推論のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
-        // slot はどの GPU のセッションにも渡るため、全 GPU から pinned として使えるメモリが要る。
-        // ORT の CUDA pinned allocator は cudaMallocHost で確保し、64 bit の UVA 環境ではこれが
-        // portable (全デバイスの context で pinned 扱い) になるので、1 本目のセッションの
-        // allocator で一括確保する。
-        let mut pinned_pool = if use_gpu {
-            MemoryInfo::new(
-                AllocationDevice::CUDA_PINNED,
-                session_gpus[0],
-                AllocatorType::Device,
-                MemoryType::CPUInput,
-            )
-            .and_then(|info| ort::memory::Allocator::new(&gpu_sessions[0], info))
-            .map(|allocator| PinnedPool {
-                allocator,
-                ptrs: Vec::new(),
-            })
-            .ok()
+        let inputs = if token_inputs {
+            let (slot_bufs, pinned_pool) = allocate_host_buffers::<i64>(
+                &gpu_sessions,
+                &session_gpus,
+                use_gpu,
+                batch_size,
+                rshogi_dl::tokens::TOKEN_COUNT,
+                0,
+            )?;
+            OnnxHostInputs::Tokens {
+                slot_bufs,
+                pinned_pool,
+            }
         } else {
-            None
+            let (slot_bufs, pinned_pool) = allocate_host_buffers::<f32>(
+                &gpu_sessions,
+                &session_gpus,
+                use_gpu,
+                batch_size,
+                f1_size,
+                f2_size,
+            )?;
+            OnnxHostInputs::Basic {
+                slot_bufs,
+                pinned_pool,
+            }
         };
-
-        // 入力特徴バッファ (f1/f2) を pipeline_slots 個ぶん確保。pinned_pool があれば pinned で
-        // 全スロットを一括確保し、1 件でも失敗したら pool を捨てて全スロットを pageable Vec で
-        // 作り直す (all-or-nothing。pinned/pageable 混在を避ける)。確保したバッファは全入力
-        // ファイルで使い回し、pinned_pool は OnnxSessions の drop で free する。
-        let mut slot_bufs: Vec<(HostBuf, HostBuf)> = Vec::with_capacity(pipeline_slots);
-        let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
-            let mut ok = true;
-            for _ in 0..pipeline_slots {
-                // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
-                // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
-                // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
-                let f1 = pool.alloc_zeroed(batch_size * f1_size);
-                let f2 = pool.alloc_zeroed(batch_size * f2_size);
-                match (f1, f2) {
-                    (Ok(f1), Ok(f2)) => slot_bufs.push((HostBuf::Pinned(f1), HostBuf::Pinned(f2))),
-                    _ => {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            ok
-        } else {
-            false
-        };
-        if !pinned_ok {
-            if use_gpu {
-                eprintln!(
-                    "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
-                );
-            }
-            // ここまでに確保した pinned (slot_bufs 内 + pool.ptrs に登録済) を解放する。
-            // PinnedBuf 自体は Drop を持たず、free は pinned_pool の drop に集約しているため、
-            // 先に slot_bufs を空にしてから pinned_pool を drop する (登録 ptr を 1 回ずつ free)。
-            slot_bufs.clear();
-            drop(pinned_pool.take());
-            for _ in 0..pipeline_slots {
-                slot_bufs.push((
-                    HostBuf::Paged(vec![0.0f32; batch_size * f1_size]),
-                    HostBuf::Paged(vec![0.0f32; batch_size * f2_size]),
-                ));
-            }
-        }
 
         Ok(OnnxSessions {
             gpu_sessions,
             session_gpus,
             warmup_leaders,
-            slot_bufs,
-            pinned_pool,
+            inputs,
             model,
         })
     }
@@ -4719,21 +4934,116 @@ impl OnnxSessions {
     }
 }
 
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn build_token_input(position: &Position, output: &mut [i64]) -> Result<()> {
+    anyhow::ensure!(output.len() == rshogi_dl::tokens::TOKEN_COUNT, "incorrect token row width");
+    let encoded = rshogi_dl::tokens::encode(position)?;
+    for (destination, token) in output.iter_mut().zip(encoded) {
+        *destination = i64::from(token);
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn validate_token_values(shape: &[i64], values: &[f32], rows: usize) -> Result<()> {
+    anyhow::ensure!(
+        shape == [rows as i64, 1] && values.len() == rows,
+        "token output_value must have shape [{rows}, 1]"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+        "token output_value must contain finite probabilities in [0, 1]"
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn validate_token_policy(shape: &[i64], values: &[f32], rows: usize) -> Result<()> {
+    anyhow::ensure!(
+        shape == [rows as i64, 2187] && values.len() == rows * 2187,
+        "token output_policy must have shape [{rows}, 2187]"
+    );
+    anyhow::ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "token output_policy must contain finite logits"
+    );
+    Ok(())
+}
+
 /// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
 ///
 /// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
 /// `build_features` クロージャで特徴量構築の差異を吸収する。
 /// セッションと入力特徴バッファは `onnx_sessions` のものをファイルをまたいで使い回す。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-fn process_file_with_onnx_pipeline<'s, F>(
+fn process_file_with_onnx_pipeline<F>(
     protection: &OutputProtection,
     config: &OnnxPipelineConfig<'_>,
     build_features: F,
     progress: &FileProgress,
-    onnx_sessions: &'s mut OnnxSessions,
+    onnx_sessions: &mut OnnxSessions,
 ) -> Result<()>
 where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
+{
+    let OnnxSessions {
+        gpu_sessions,
+        session_gpus,
+        warmup_leaders,
+        inputs,
+        model,
+    } = onnx_sessions;
+    match inputs {
+        OnnxHostInputs::Basic {
+            slot_bufs,
+            pinned_pool,
+        } => process_file_with_typed_onnx_pipeline(
+            protection,
+            config,
+            |position, f1, f2, psv| {
+                build_features(position, f1, f2, psv);
+                Ok(())
+            },
+            progress,
+            OnnxPipelineState {
+                gpu_sessions,
+                session_gpus,
+                warmup_leaders: *warmup_leaders,
+                slot_bufs,
+                pinned_pool,
+                model,
+            },
+        ),
+        OnnxHostInputs::Tokens {
+            slot_bufs,
+            pinned_pool,
+        } => process_file_with_typed_onnx_pipeline(
+            protection,
+            config,
+            |position, tokens, _, _| build_token_input(position, tokens),
+            progress,
+            OnnxPipelineState {
+                gpu_sessions,
+                session_gpus,
+                warmup_leaders: *warmup_leaders,
+                slot_bufs,
+                pinned_pool,
+                model,
+            },
+        ),
+    }
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn process_file_with_typed_onnx_pipeline<'s, T: OnnxInputElement, F>(
+    protection: &OutputProtection,
+    config: &OnnxPipelineConfig<'_>,
+    build_features: F,
+    progress: &FileProgress,
+    onnx_sessions: OnnxPipelineState<'s, T>,
+) -> Result<()>
+where
+    F: Fn(&Position, &mut [T], &mut [T], &PackedSfenValue) -> Result<()> + Send + Sync,
 {
     let OnnxPipelineConfig {
         // モデルはセッションを作るときに読み、fingerprint は build_run_fingerprint(config) で取る。
@@ -4756,8 +5066,8 @@ where
         onnx_draw_ply: _,
         f1_size,
         f2_size,
-        input1_channels,
-        input2_channels,
+        input1_channels: _,
+        input2_channels: _,
         profile_path: _,
         expand,
         qsearch_leaf_label,
@@ -4783,7 +5093,6 @@ where
     };
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
-    use ort::value::TensorRef;
     use rshogi_core::movegen::{MoveList, generate_legal};
     // ONNX パイプライン専用のため fn 内 use（top-level だと non-ONNX ビルドで unused-import）。
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
@@ -4803,7 +5112,7 @@ where
         }
     }
 
-    let OnnxSessions {
+    let OnnxPipelineState {
         gpu_sessions,
         session_gpus,
         warmup_leaders,
@@ -4811,6 +5120,11 @@ where
         pinned_pool,
         model: loaded_model,
     } = onnx_sessions;
+    let (f1_size, f2_size) = if T::TOKENS {
+        (rshogi_dl::tokens::TOKEN_COUNT, 0)
+    } else {
+        (f1_size, f2_size)
+    };
     let pinned_ok = pinned_pool.is_some();
     let num_sessions = gpu_sessions.len();
     // TensorRT EP は、推論の入力形がそれまでに見た範囲より小さいとエンジンを作り直す
@@ -4901,9 +5215,9 @@ where
     // 推論バッチ 1 個分の CPU 成果物（読み込み済み records + 構築済み特徴量 + フラグ）。
     // producer が埋め、consumer（主スレッド）が GPU 推論・書き出しに使う。f1/f2 等は
     // slot プールで再利用し、ピークメモリは入力件数に非依存（pipeline_slots 個ぶん）。
-    struct PreparedBatch<'b> {
-        f1: &'b mut HostBuf,
-        f2: &'b mut HostBuf,
+    struct PreparedBatch<'b, T: OnnxInputElement> {
+        f1: &'b mut HostBuf<T>,
+        f2: &'b mut HostBuf<T>,
         records: Vec<(PackedSfenValue, UnpackedSfen)>,
         stm_flags: Vec<bool>,
         in_checks: Vec<bool>,
@@ -4932,8 +5246,8 @@ where
     // GPU worker → writer。推論+後処理済みバッチ。書き出しバイト列まで worker 側で
     // 構築し、writer は seq 順に再整列して write するだけにする（後処理を GPU
     // クリティカルパスから外し、別セッションの推論と重ねる）。
-    struct DoneBatch<'b> {
-        slot: PreparedBatch<'b>,
+    struct DoneBatch<'b, T: OnnxInputElement> {
+        slot: PreparedBatch<'b, T>,
         rescore_bytes: Vec<u8>,
         replacement_bytes: Vec<u8>,
         expand_bytes: Vec<u8>,
@@ -4941,22 +5255,22 @@ where
         clipped: u64,
         expanded: u64,
     }
-    let (done_tx, done_rx) = mpsc::channel::<(u64, Result<DoneBatch<'s>>)>();
+    let (done_tx, done_rx) = mpsc::channel::<(u64, Result<DoneBatch<'s, T>>)>();
 
     // ---- GPU worker × num_sessions: 推論 + 後処理 ----
     // 最初のバッチは先導役 (各 `--onnx-gpu-id` 項目の 1 本目) が 1 本ずつ順に推論する
     // (`WarmupGate`)。`--onnx-tensorrt-cache` を指定したときは、cold cache でもエンジンの構築と
     // キャッシュの書き込みが競合せず、後のセッションは書かれたキャッシュを読むので、同じ GPU の
     // セッションは同一エンジンで推論する (指定しないとキャッシュは無効で、各セッションが作る)。
-    let warmup = WarmupGate::new(*warmup_leaders);
+    let warmup = WarmupGate::new(warmup_leaders);
     let want_replacement = replacement_output.is_some();
     // worker 本体。worker 0 は主スレッドで直接実行する（writer 分離後の主スレッドを
     // 遊ばせず、総スレッド数を最小に保つ）。2 本目以降のセッションのみスレッドを spawn する。
     let run_gpu_worker = |worker_idx: usize,
                           gpu_id: i32,
                           session: &mut Session,
-                          done_tx: mpsc::Sender<(u64, Result<DoneBatch<'s>>)>,
-                          ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch<'s>)>>|
+                          done_tx: mpsc::Sender<(u64, Result<DoneBatch<'s, T>>)>,
+                          ready_rx: &Mutex<mpsc::Receiver<(u64, PreparedBatch<'s, T>)>>|
      -> (u128, u128) {
         // 下の早期 return でも drop で番が進むよう、最初に番を待つ。
         let warmup_turn = warmup.wait(worker_idx);
@@ -5014,7 +5328,7 @@ where
             };
             // ort エラーは Result のまま writer へ送って伝播させる（ここで ? を使うと
             // writer が seq 待ちのままデッドロックするため）。
-            let result = (|| -> Result<DoneBatch> {
+            let result = (|| -> Result<DoneBatch<T>> {
                 let mut phase_t = Instant::now();
                 // IoBinding で推論（Python の run_with_iobinding に対応）
                 // session.run() より ORT 内部のメモリ管理が効率的
@@ -5029,23 +5343,14 @@ where
                 //   実質同期 (CPU staging 介在) となり全体の ~96% を占めていた (nsys)。
                 //   入力 host バッファを pinned (page-locked) 化することでこの staging を
                 //   消し、真の async H2D にしている (HostBuf / PinnedPool 参照)。
-                let shape1: [usize; 4] = [infer_rows, input1_channels, 9, 9];
-                let input1 = TensorRef::<f32>::from_array_view((
-                    shape1,
-                    &batch.f1.as_slice()[..infer_rows * f1_size],
-                ))
-                .map_err(onnx_ort_err)?;
-
-                let shape2: [usize; 4] = [infer_rows, input2_channels, 9, 9];
-                let input2 = TensorRef::<f32>::from_array_view((
-                    shape2,
-                    &batch.f2.as_slice()[..infer_rows * f2_size],
-                ))
-                .map_err(onnx_ort_err)?;
-
                 let mut binding = session.create_binding().map_err(onnx_ort_err)?;
-                binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
-                binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
+                T::bind(
+                    &mut binding,
+                    infer_rows,
+                    &batch.f1.as_slice()[..infer_rows * f1_size],
+                    &batch.f2.as_slice()[..infer_rows * f2_size],
+                    config,
+                )?;
                 // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
                 // オーバーヘッドが増加するため全出力をバインドする
                 binding
@@ -5057,8 +5362,11 @@ where
 
                 let outputs = session.run_binding(&binding).map_err(onnx_ort_err)?;
 
-                let (_, values) =
+                let (value_shape, values) =
                     outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
+                if T::TOKENS {
+                    validate_token_values(&value_shape[..], values, infer_rows)?;
+                }
                 if phase_timing {
                     t_run += phase_t.elapsed().as_nanos();
                     phase_t = Instant::now();
@@ -5143,6 +5451,9 @@ where
                     let (policy_shape, policy_data) = outputs["output_policy"]
                         .try_extract_tensor::<f32>()
                         .map_err(onnx_ort_err)?;
+                    if T::TOKENS {
+                        validate_token_policy(&policy_shape[..], policy_data, infer_rows)?;
+                    }
                     let expected_len = infer_rows * MAX_MOVE_LABEL_NUM;
                     if policy_data.len() != expected_len {
                         anyhow::bail!(
@@ -5161,10 +5472,13 @@ where
                         }
 
                         let mut pos = Position::new();
-                        if pos
-                            .set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
-                            .is_err()
+                        if let Err(error) =
+                            pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
                         {
+                            anyhow::ensure!(
+                                !T::TOKENS,
+                                "cannot build token policy expansion position: {error}"
+                            );
                             continue;
                         }
                         let color = pos.side_to_move();
@@ -5230,11 +5544,11 @@ where
         (t_run, t_write)
     };
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
-        let (free_tx, free_rx) = mpsc::channel::<PreparedBatch<'s>>();
+        let (free_tx, free_rx) = mpsc::channel::<PreparedBatch<'s, T>>();
         // producer→GPU worker。バッチ通番 seq を添えて送り、writer が seq で再整列する。
         // Receiver は複数 worker で分け合う（Mutex 越しに recv した worker がそのバッチを
         // 担当する。担当順は任意でよく、出力順は writer の再整列が保証する）。
-        let (ready_tx, ready_rx) = mpsc::channel::<(u64, PreparedBatch<'s>)>();
+        let (ready_tx, ready_rx) = mpsc::channel::<(u64, PreparedBatch<'s, T>)>();
         let ready_rx = Arc::new(Mutex::new(ready_rx));
         for (f1, f2) in slot_bufs {
             free_tx
@@ -5306,6 +5620,15 @@ where
                     match reader.read_exact(&mut buffer) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            if T::TOKENS {
+                                return Err(e).with_context(|| {
+                                    format!(
+                                        "token input truncated at record {} in {}",
+                                        process_count - remaining,
+                                        input_path.display()
+                                    )
+                                });
+                            }
                             remaining = 0;
                             break;
                         }
@@ -5314,13 +5637,26 @@ where
                     let psv = match PackedSfenValue::from_bytes(&buffer) {
                         Some(p) => p,
                         None => {
+                            anyhow::ensure!(
+                                !T::TOKENS,
+                                "invalid token PSV record {} in {}",
+                                process_count - remaining,
+                                input_path.display()
+                            );
                             chunk.errors += 1;
                             continue;
                         }
                     };
                     let parts = match unpack_sfen_to_parts(&psv.sfen) {
                         Ok(p) => p,
-                        Err(_) => {
+                        Err(error) => {
+                            if T::TOKENS {
+                                anyhow::bail!(
+                                    "invalid token packed SFEN at record {} in {}: {error}",
+                                    process_count - remaining,
+                                    input_path.display()
+                                );
+                            }
                             chunk.errors += 1;
                             continue;
                         }
@@ -5339,6 +5675,7 @@ where
         });
 
         // ---- producer: rayon 並列特徴量構築 ----
+        let producer_done_tx = done_tx.clone();
         let producer = scope.spawn(move || -> u128 {
             let mut t_build = 0u128;
             let mut seq = 0u64;
@@ -5373,6 +5710,7 @@ where
                 let phase_t = Instant::now();
                 // rayon 並列で特徴量構築
                 let batch_errors = AtomicU64::new(0);
+                let feature_error = Mutex::new(None);
                 {
                     let PreparedBatch {
                         f1,
@@ -5391,13 +5729,8 @@ where
                     } else {
                         actual_batch
                     };
-                    f1[..zero_rows * f1_size].fill(0.0);
-                    f2[..zero_rows * f2_size].fill(0.0);
-                    let f1_slices: Vec<&mut [f32]> =
-                        f1[..actual_batch * f1_size].chunks_mut(f1_size).collect();
-                    let f2_slices: Vec<&mut [f32]> =
-                        f2[..actual_batch * f2_size].chunks_mut(f2_size).collect();
-
+                    f1[..zero_rows * f1_size].fill(T::ZERO);
+                    f2[..zero_rows * f2_size].fill(T::ZERO);
                     // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
                     let stm_flags = &mut stm_flags[..actual_batch];
                     stm_flags.fill(false);
@@ -5414,18 +5747,27 @@ where
 
                     // 1 局面分の特徴量構築（必要なら葉まで進めて葉 sfen を packed_leaf に書く）。
                     let build_one =
-                        |f1: &mut [f32],
-                         f2: &mut [f32],
+                        |f1: &mut [T],
+                         f2: &mut [T],
                          psv: &PackedSfenValue,
                          parts: &UnpackedSfen,
                          stm_flag: &mut bool,
                          in_check_slot: &mut bool,
                          packed_leaf: Option<&mut [u8; 32]>| {
                             let mut pos = Position::new();
-                            if pos
-                                .set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
-                                .is_err()
+                            if let Err(error) =
+                                pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
                             {
+                                if T::TOKENS {
+                                    let mut first =
+                                        feature_error.lock().expect("feature error mutex poisoned");
+                                    if first.is_none() {
+                                        *first = Some(anyhow::anyhow!(
+                                            "cannot build token input position in {}: {error}",
+                                            input_path.display()
+                                        ));
+                                    }
+                                }
                                 batch_errors.fetch_add(1, Ordering::Relaxed);
                                 return;
                             }
@@ -5458,35 +5800,100 @@ where
                             if let Some(slot) = packed_leaf {
                                 *slot = pack_position(&pos);
                             }
-                            build_features(&pos, f1, f2, psv);
+                            if let Err(error) = build_features(&pos, f1, f2, psv) {
+                                let mut first =
+                                    feature_error.lock().expect("feature error mutex poisoned");
+                                if first.is_none() {
+                                    *first = Some(error);
+                                }
+                            }
                         };
 
-                    if want_leaf_sfens {
-                        f1_slices
-                            .into_par_iter()
-                            .zip(f2_slices)
-                            .zip(records.par_iter())
-                            .zip(stm_flags.par_iter_mut())
-                            .zip(in_checks.par_iter_mut())
-                            .zip(leaf_sfens_slice.par_iter_mut())
-                            .for_each(
-                                |(((((f1, f2), (psv, parts)), stm_flag), in_check), leaf)| {
-                                    build_one(f1, f2, psv, parts, stm_flag, in_check, Some(leaf));
-                                },
-                            );
+                    if T::TOKENS {
+                        if want_leaf_sfens {
+                            f1[..actual_batch * f1_size]
+                                .par_chunks_mut(f1_size)
+                                .zip(records.par_iter())
+                                .zip(stm_flags.par_iter_mut())
+                                .zip(in_checks.par_iter_mut())
+                                .zip(leaf_sfens_slice.par_iter_mut())
+                                .for_each(
+                                    |((((tokens, (psv, parts)), stm_flag), in_check), leaf)| {
+                                        build_one(
+                                            tokens,
+                                            &mut [],
+                                            psv,
+                                            parts,
+                                            stm_flag,
+                                            in_check,
+                                            Some(leaf),
+                                        );
+                                    },
+                                );
+                        } else {
+                            f1[..actual_batch * f1_size]
+                                .par_chunks_mut(f1_size)
+                                .zip(records.par_iter())
+                                .zip(stm_flags.par_iter_mut())
+                                .zip(in_checks.par_iter_mut())
+                                .for_each(|(((tokens, (psv, parts)), stm_flag), in_check)| {
+                                    build_one(
+                                        tokens,
+                                        &mut [],
+                                        psv,
+                                        parts,
+                                        stm_flag,
+                                        in_check,
+                                        None,
+                                    );
+                                });
+                        }
                     } else {
-                        f1_slices
-                            .into_par_iter()
-                            .zip(f2_slices)
-                            .zip(records.par_iter())
-                            .zip(stm_flags.par_iter_mut())
-                            .zip(in_checks.par_iter_mut())
-                            .for_each(|((((f1, f2), (psv, parts)), stm_flag), in_check)| {
-                                build_one(f1, f2, psv, parts, stm_flag, in_check, None);
-                            });
+                        let f1_slices: Vec<&mut [T]> =
+                            f1[..actual_batch * f1_size].chunks_mut(f1_size).collect();
+                        let f2_slices: Vec<&mut [T]> =
+                            f2[..actual_batch * f2_size].chunks_mut(f2_size).collect();
+                        if want_leaf_sfens {
+                            f1_slices
+                                .into_par_iter()
+                                .zip(f2_slices)
+                                .zip(records.par_iter())
+                                .zip(stm_flags.par_iter_mut())
+                                .zip(in_checks.par_iter_mut())
+                                .zip(leaf_sfens_slice.par_iter_mut())
+                                .for_each(
+                                    |(((((f1, f2), (psv, parts)), stm_flag), in_check), leaf)| {
+                                        build_one(
+                                            f1,
+                                            f2,
+                                            psv,
+                                            parts,
+                                            stm_flag,
+                                            in_check,
+                                            Some(leaf),
+                                        );
+                                    },
+                                );
+                        } else {
+                            f1_slices
+                                .into_par_iter()
+                                .zip(f2_slices)
+                                .zip(records.par_iter())
+                                .zip(stm_flags.par_iter_mut())
+                                .zip(in_checks.par_iter_mut())
+                                .for_each(|((((f1, f2), (psv, parts)), stm_flag), in_check)| {
+                                    build_one(f1, f2, psv, parts, stm_flag, in_check, None);
+                                });
+                        }
                     }
                 }
 
+                if let Some(error) =
+                    feature_error.into_inner().expect("feature error mutex poisoned")
+                {
+                    let _ = producer_done_tx.send((seq, Err(error)));
+                    return t_build;
+                }
                 slot.actual_batch = actual_batch;
                 slot.errors = errs + batch_errors.load(Ordering::Relaxed);
                 if phase_timing {
@@ -5534,7 +5941,7 @@ where
                 errors: 0,
                 t_write: 0,
             };
-            let mut pending: SeqReorder<DoneBatch> = SeqReorder::new();
+            let mut pending: SeqReorder<DoneBatch<T>> = SeqReorder::new();
             'writer_loop: loop {
                 // 全 worker が終了して done が閉じたらループを抜ける（正常系は sentinel 処理の
                 // break で抜ける。こちらの経路は reader エラー等で sentinel が届かない場合）。
@@ -7327,6 +7734,242 @@ mod onnx_gpu_ids_tests {
 #[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
 mod onnx_sessions_tests {
     use super::*;
+
+    #[test]
+    fn token_outputs_reject_nonfinite_probabilities_logits_and_wrong_shapes() {
+        assert!(validate_token_values(&[3, 1], &[0.0, 0.5, 1.0], 3).is_ok());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+            assert!(validate_token_values(&[1, 1], &[invalid], 1).is_err());
+        }
+        assert!(validate_token_values(&[1, 2], &[0.5, 0.5], 2).is_err());
+        assert!(validate_token_values(&[2, 1], &[0.5], 2).is_err());
+        let mut policy = vec![0.0; 2187];
+        assert!(validate_token_policy(&[1, 2187], &policy, 1).is_ok());
+        assert!(validate_token_policy(&[2187, 1], &policy, 1).is_err());
+        policy[7] = f32::NAN;
+        assert!(validate_token_policy(&[1, 2187], &policy, 1).is_err());
+        policy[7] = f32::INFINITY;
+        assert!(validate_token_policy(&[1, 2187], &policy, 1).is_err());
+    }
+
+    #[test]
+    fn typed_pageable_buffers_preserve_basic_sizes_and_allocate_only_token_rows() {
+        let (basic, pool) = allocate_host_buffers::<f32>(&[], &[-1], false, 3, 11, 7).unwrap();
+        assert!(pool.is_none());
+        assert_eq!(basic.len(), 2);
+        for (f1, f2) in basic {
+            assert_eq!(f1.as_slice(), &[0.0; 33]);
+            assert_eq!(f2.as_slice(), &[0.0; 21]);
+        }
+        let (mut tokens, pool) =
+            allocate_host_buffers::<i64>(&[], &[-1], false, 3, rshogi_dl::tokens::TOKEN_COUNT, 0)
+                .unwrap();
+        assert!(pool.is_none());
+        assert_eq!(tokens.len(), 2);
+        for (row, unused) in &mut tokens {
+            assert_eq!(row.as_slice().len(), 3 * rshogi_dl::tokens::TOKEN_COUNT);
+            assert!(row.as_slice().iter().all(|&value| value == 0));
+            let HostBuf::Paged(unused) = unused else {
+                panic!("CPU token input must be pageable");
+            };
+            assert_eq!(unused.capacity(), 0);
+            let pointer = row.as_slice().as_ptr();
+            row.as_mut_slice()[0] = 120;
+            assert_eq!(row.as_slice().as_ptr(), pointer);
+        }
+    }
+
+    #[test]
+    fn token_rows_use_leaf_side_and_reject_wrong_width_without_writes() {
+        use rshogi_core::movegen::{MoveList, generate_legal};
+        let mut position = Position::new();
+        position.set_hirate();
+        let mut output = [0i64; rshogi_dl::tokens::TOKEN_COUNT];
+        build_token_input(&position, &mut output).unwrap();
+        assert_eq!(output[95], 119);
+        let mut legal = MoveList::new();
+        generate_legal(&position, &mut legal);
+        let first = *legal.iter().next().unwrap();
+        let stm_changed = apply_pv(&mut position, &[first]);
+        assert!(stm_changed);
+        build_token_input(&position, &mut output).unwrap();
+        assert_eq!(output[95], 120);
+        assert_eq!(output, rshogi_dl::tokens::encode(&position).unwrap().map(i64::from));
+        let mut wrong_width = [77i64; rshogi_dl::tokens::TOKEN_COUNT - 1];
+        assert!(build_token_input(&position, &mut wrong_width).is_err());
+        assert!(wrong_width.iter().all(|&value| value == 77));
+    }
+
+    fn constant_token_model(value: f32, policy: f32) -> Vec<u8> {
+        fn varint(mut value: u64) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            while value >= 128 {
+                bytes.push(value as u8 | 128);
+                value >>= 7;
+            }
+            bytes.push(value as u8);
+            bytes
+        }
+        fn number(field: u64, value: u64) -> Vec<u8> {
+            [varint(field << 3), varint(value)].concat()
+        }
+        fn bytes(field: u64, value: &[u8]) -> Vec<u8> {
+            [
+                varint((field << 3) | 2),
+                varint(value.len() as u64),
+                value.to_vec(),
+            ]
+            .concat()
+        }
+        fn value_info(name: &str, dtype: u64, width: u64) -> Vec<u8> {
+            let shape = [bytes(1, &number(1, 1)), bytes(1, &number(1, width))].concat();
+            let tensor = [number(1, dtype), bytes(2, &shape)].concat();
+            [bytes(1, name.as_bytes()), bytes(2, &bytes(1, &tensor))].concat()
+        }
+        fn tensor(name: &str, width: usize, value: f32) -> Vec<u8> {
+            let raw: Vec<u8> = std::iter::repeat_n(value.to_le_bytes(), width).flatten().collect();
+            [
+                number(1, 1),
+                number(1, width as u64),
+                number(2, 1),
+                bytes(8, name.as_bytes()),
+                bytes(9, &raw),
+            ]
+            .concat()
+        }
+        let graph = [
+            bytes(2, b"constant-token-output"),
+            bytes(5, &tensor("output_value", 1, value)),
+            bytes(5, &tensor("output_policy", 2187, policy)),
+            bytes(11, &value_info("tokens", 7, 96)),
+            bytes(12, &value_info("output_value", 1, 1)),
+            bytes(12, &value_info("output_policy", 1, 2187)),
+        ]
+        .concat();
+        let mut model = [number(1, 8), bytes(7, &graph), bytes(8, &number(2, 18))].concat();
+        for (key, value) in [
+            ("rshogi.input_format", "stm-tokens-v1"),
+            ("rshogi.policy_format", "direction-destination-2187-v1"),
+            ("rshogi.value_format", "stm-expected-score-sigmoid-v1"),
+        ] {
+            model.extend(bytes(
+                14,
+                &[bytes(1, key.as_bytes()), bytes(2, value.as_bytes())].concat(),
+            ));
+        }
+        model
+    }
+
+    #[test]
+    #[ignore = "requires ORT_DYLIB_PATH pointing to a CPU-capable ONNX Runtime"]
+    fn token_cpu_runtime_rejects_bad_outputs_and_input_without_completion_marker() {
+        for (index, (value, policy, expand, invalid_input, succeeds)) in [
+            (f32::NAN, 0.0, false, false, false),
+            (f32::INFINITY, 0.0, false, false, false),
+            (-0.1, 0.0, false, false, false),
+            (1.1, 0.0, false, false, false),
+            (0.75, f32::NAN, true, false, false),
+            (0.75, f32::NAN, false, false, true),
+            (0.75, 0.0, false, true, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempfile::TempDir::new().unwrap();
+            let model_path = directory.path().join("constant.onnx");
+            let input = directory.path().join("input.psv");
+            let output = directory.path().join("output.psv");
+            let expanded = directory.path().join("expanded.psv");
+            fs::write(&model_path, constant_token_model(value, policy)).unwrap();
+            let mut position = Position::new();
+            position.set_hirate();
+            let psv = PackedSfenValue {
+                sfen: pack_position(&position),
+                score: 0,
+                move16: 0,
+                game_ply: 1,
+                game_result: 0,
+                padding: 0,
+            };
+            fs::write(
+                &input,
+                if invalid_input {
+                    vec![255; PackedSfenValue::SIZE]
+                } else {
+                    psv.to_bytes().to_vec()
+                },
+            )
+            .unwrap();
+            let config = OnnxPipelineConfig {
+                model_name: "token fixture",
+                model_kind: "dlshogi",
+                onnx_path: &model_path,
+                input_path: &input,
+                output_path: &output,
+                out_scores: false,
+                process_count: 1,
+                batch_size: 1,
+                gpu_ids: &[-1],
+                sessions: 1,
+                use_tensorrt: false,
+                tensorrt_cache: None,
+                score_clip: 32000,
+                eval_scale: 600.0,
+                skip_in_check: false,
+                onnx_draw_ply: 0,
+                f1_size: 0,
+                f2_size: 0,
+                input1_channels: 0,
+                input2_channels: 0,
+                profile_path: None,
+                expand: expand.then_some(ExpandConfig {
+                    output_path: &expanded,
+                    threshold: 0.1,
+                    skip_parent_in_check: false,
+                    skip_child_in_check: false,
+                }),
+                qsearch_leaf_label: false,
+                qsearch_max_ply: 1,
+                qsearch_nnue_path: None,
+                qsearch_ls_bucket_mode: None,
+                qsearch_ls_progress_buckets: None,
+                qsearch_ls_progress_coeff_path: None,
+                replacement_output: None,
+            };
+            let mut sessions = OnnxSessions::new(&config).unwrap();
+            let progress = MultiFileProgress::new(1, 1, "token-output-fixture");
+            let file = progress.start_file("one record", 0, 1);
+            let protection = OutputProtection {
+                inputs: vec![input.clone(), model_path.clone()],
+                outputs: vec![output.clone(), expanded.clone()],
+            };
+            let result = process_file_with_onnx_pipeline(
+                &protection,
+                &config,
+                |_, _, _, _| panic!("token fixture used Basic features"),
+                &file,
+                &mut sessions,
+            );
+            assert_eq!(result.is_ok(), succeeds, "fixture {index}: {result:?}");
+            if succeeds {
+                assert_eq!(fs::metadata(&output).unwrap().len(), PackedSfenValue::SIZE as u64);
+                assert!(marker_path_for(&output).exists());
+            } else {
+                assert_eq!(
+                    fs::metadata(&output).unwrap().len(),
+                    0,
+                    "fixture {index} wrote a label"
+                );
+                assert!(!marker_path_for(&output).exists(), "fixture {index} completed");
+                if expand {
+                    assert_eq!(
+                        fs::metadata(directory.path().join("expanded.psv")).unwrap().len(),
+                        0
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn sessions_are_listed_round_by_round_with_leaders_first() {

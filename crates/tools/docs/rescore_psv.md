@@ -16,6 +16,37 @@ PSV（PackedSfenValue）ファイルの評価値（score）を付け替えるツ
 主要ユースケースは **dlshogi 系 ONNX モデル + TensorRT FP16** での一括リスコア。
 以下のクイックスタートがその導線になっている。
 
+## stm-tokens-v1 モデル
+
+`--dlshogi-onnx-model` は、標準 dlshogi の float32 特徴量モデルに加え、
+`rshogi.input_format=stm-tokens-v1` を宣言した ONNX モデルを受け付けます。
+`--onnx-gpu-id 0` は CUDA EP、`--onnx-gpu-id -1` は CPU EP を使います。
+この入力形式と `--onnx-tensorrt` の組み合わせには対応していません。
+`--onnx-model` は従来どおり AobaZero 専用です。
+
+モデルには次の入出力と metadata が必要です。batch 軸は動的、または
+`--onnx-batch-size 1` の場合のみ固定 1 を受け付けます。
+
+| 項目 | 契約 |
+|---|---|
+| 入力 | `tokens`: int64 `[batch, 96]` |
+| 出力 | `output_policy`: float32 `[batch, 2187]`、`output_value`: float32 `[batch, 1]` |
+| policy metadata | `rshogi.policy_format=direction-destination-2187-v1` |
+| value metadata | `rshogi.value_format=stm-expected-score-sigmoid-v1` |
+
+`output_value` は手番側の確率値です。追加の sigmoid は掛けず、従来と同じ clamp・
+logit・`--onnx-eval-scale`・`--score-clip` で i16 スコアに変換します。
+`--qsearch-leaf-label` は葉局面を token 化し、葉と元局面の手番が異なる場合は元局面側へ
+スコアを反転します。`--qsearch-leaf-replacement-output` と policy 展開も同じ出力契約を使います。
+
+入力 token バッファ、pinned メモリ、ORT セッションは全入力ファイルで使い回します。
+複数 GPU・複数セッション、入力順の書き出し、端数バッチ、中断・再開、score sidecar の
+保護も同じパイプラインを使います。metadata や token 化が不正なモデル・局面はエラーで止まります。
+
+完了マーカーとセッションのモデル同一性検査が追跡するのは ONNX 本体の path・size・mtime です。
+重みを外部ファイルに分けた ONNX の同一性は追跡しないため、確実な再開判定には重みを内包した
+モデルを使ってください。モデルまたは外部重みを実行中に変更しないでください。
+
 ## クイックスタート（推奨: dlshogi ONNX + TensorRT FP16）
 
 ### 1. 環境変数
