@@ -700,10 +700,9 @@ fn queue_lines(
     let mut picked: Vec<_> = items.iter().filter(|i| i.class != Class::Good).collect();
     picked.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
     let mut counts = EnqueueCounts::default();
+    // 手数の分からない行も同じ根の行の game に足せるよう、先に根ごとにまとめてから手数を決める。
     let mut positions = BTreeMap::new();
-    let mut lines: Vec<Line> = Vec::new();
-    let mut sizes = Vec::new();
-    let mut root_numbers: Vec<usize> = Vec::new();
+    let mut groups: Vec<(String, &Item, Vec<&Item>)> = Vec::new();
     for item in picked {
         let key = enqueue_root(item)?;
         let own = &item.side;
@@ -711,51 +710,63 @@ fn queue_lines(
             counts.excluded += 1;
             continue;
         }
-        let root_number = item
-            .move_number
-            .map(|n| {
-                n.checked_add(usize::from(item.class == Class::Rejoin))
-                    .context("根の手数が大きすぎます")
-            })
-            .transpose()?;
-        let game = match item.class {
-            Class::Gap => vec![vec![extra(item, "main")?.to_owned()]],
-            Class::Rejoin => vec![vec![extra(item, "rejoin_move")?.to_owned()]],
-            _ => Vec::new(),
-        };
-        let priority = if item.weight >= args.enqueue_heavy_weight {
-            args.enqueue_priority_heavy
-        } else if item.class == Class::Rejoin || args.meets(item.value_black, own) == Some(false) {
-            args.enqueue_priority_miss
-        } else {
-            args.enqueue_priority_other
-        };
-        // 手数の分からない行も、同じ根の行が既にあればその game に足せる。
-        if let Some(&position) = positions.get(&(key.clone(), own.clone())) {
-            let line: &mut Line = &mut lines[position];
-            for moves in game {
-                if !line.game.contains(&moves) {
-                    line.game.push(moves);
-                }
+        match positions.get(&(key.clone(), own.clone())) {
+            Some(&position) => {
+                let group: &mut (String, &Item, Vec<&Item>) = &mut groups[position];
+                group.2.push(item);
             }
-            line.priority = line.priority.min(priority);
-            // 同じ局面に違う手数で着く行は、walk の積み荷と同じく小さい手数を根の手数にする。
-            if let Some(n) = root_number.filter(|&n| n < root_numbers[position]) {
-                root_numbers[position] = n;
-                line.id = queue_id(&args.tag, n, &key, own);
-                line.root = format!("sfen {key} {n}");
+            None => {
+                positions.insert((key.clone(), own.clone()), groups.len());
+                groups.push((key, item, vec![item]));
             }
-            sizes[position] += 1;
-            counts.merged += 1;
-            continue;
         }
-        let (Some(number), Some(root_number)) = (item.move_number, root_number) else {
-            counts.no_number += 1;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sizes = Vec::new();
+    for (key, first, members) in groups {
+        let own = &first.side;
+        // 同じ局面に違う手数で着く行は、walk の積み荷と同じく小さい手数を根の手数にする。
+        let Some((number, root_number)) = members
+            .iter()
+            .filter_map(|item| {
+                item.move_number.map(|n| {
+                    n.checked_add(usize::from(item.class == Class::Rejoin))
+                        .context("根の手数が大きすぎます")
+                        .map(|root| (n, root))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .min_by_key(|&(_, root)| root)
+        else {
+            counts.no_number += members.len();
             continue;
         };
-        positions.insert((key.clone(), own.clone()), lines.len());
-        sizes.push(1usize);
-        root_numbers.push(root_number);
+        let mut game: Vec<Vec<String>> = Vec::new();
+        let mut priority = u32::MAX;
+        for item in &members {
+            let moves = match item.class {
+                Class::Gap => Some(vec![extra(item, "main")?.to_owned()]),
+                Class::Rejoin => Some(vec![extra(item, "rejoin_move")?.to_owned()]),
+                _ => None,
+            };
+            if let Some(moves) = moves.filter(|m| !game.contains(m)) {
+                game.push(moves);
+            }
+            let p = if item.weight >= args.enqueue_heavy_weight {
+                args.enqueue_priority_heavy
+            } else if item.class == Class::Rejoin
+                || args.meets(item.value_black, own) == Some(false)
+            {
+                args.enqueue_priority_miss
+            } else {
+                args.enqueue_priority_other
+            };
+            priority = priority.min(p);
+        }
+        counts.merged += members.len() - 1;
+        sizes.push(members.len());
+        let number = first.move_number.unwrap_or(number);
         lines.push(Line {
             group: None,
             id: queue_id(&args.tag, root_number, &key, own),
@@ -769,19 +780,19 @@ fn queue_lines(
             opts: args.queue_opts(),
             memo: Some(format!(
                 "{} {}手目 先手値={} 出所={} 重み={:.5}",
-                item.class.name(),
+                first.class.name(),
                 number,
-                item.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v))),
-                if item.kind.is_empty() {
-                    match item.class {
+                first.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v))),
+                if first.kind.is_empty() {
+                    match first.class {
                         Class::Gap => "補ったmain",
                         Class::Rejoin => "戻った先のmain",
                         _ => "不明",
                     }
                 } else {
-                    &item.kind
+                    &first.kind
                 },
-                item.weight
+                first.weight
             )),
         });
     }

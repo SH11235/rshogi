@@ -894,7 +894,7 @@ fn enqueue_rejoin_uses_dig_and_merges_reply_games_and_counts_missing_numbers() {
 }
 
 #[test]
-fn enqueue_rejoin_without_number_merges_into_the_same_dig_root() {
+fn enqueue_heavier_rejoin_without_number_merges_into_the_same_dig_root() {
     let d = TempDir::new().unwrap();
     let out = d.path().join("plan.jsonl");
     let rejoin = d.path().join("rejoin.tsv");
@@ -904,7 +904,7 @@ fn enqueue_rejoin_without_number_merges_into_the_same_dig_root() {
         format!(
             "{REJOIN_HEADER}\n\
          b\t{start}\t3\t2g2f\tmain\t0\t\t8c8d\t\t2f2e\t\t\t0\t10\t0.1\t10\t2\n\
-         b\t{start}\t\t2g2f\tmain\t0\t\t4c4d\t\t2f2e\t\t\t0\t10\t0.1\t10\t1\n"
+         b\t{start}\t\t2g2f\tmain\t0\t\t4c4d\t\t2f2e\t\t\t0\t10\t0.1\t10\t3\n"
         ),
     )
     .unwrap();
@@ -922,7 +922,8 @@ fn enqueue_rejoin_without_number_merges_into_the_same_dig_root() {
     let lines = read_queue(&out);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].root, format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"])));
-    assert_eq!(lines[0].game, [vec!["8c8d"], vec!["4c4d"]]);
+    assert_eq!(lines[0].game, [vec!["4c4d"], vec!["8c8d"]]);
+    assert_eq!(lines[0].priority, 4);
 }
 
 #[test]
