@@ -376,6 +376,12 @@ JSONL の result 行には初回 0 の `attempt` が記録される。
 通信・`usinewgame`・worker panic の error 後はその worker を退役させ、再対局は新しく
 起動した engine process で行う。
 
+エンジンが `info string Error:` で始まる行を出した場合も game error として扱う。
+その後の `bestmove resign` や通常の指し手を勝敗に採用せず、同じプロセスを再利用しない。
+初期化・準備中の通知は起動または準備の失敗、対局後の ponder 回収中の通知は対局エラーとなる。
+エラー通知のない `bestmove resign` は通常の投了。`info string Warning:` や文中の
+単なる `error` という語は、この通知として扱わない。
+
 最終サマリと `meta.json` の `error_pairs`、`retried_pairs`、`exhausted_pairs` で状況を
 確認できる。2 回の再試行後も error を含むペアがあれば `invalid: true` となる。
 これは統計的敗北ではなくインフラ障害を示すので、SPRT の採否は表示せず、終了コードは非ゼロとなる。

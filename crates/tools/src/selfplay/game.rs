@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rshogi_core::types::{Color, Move};
 
 use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
-use super::engine::{EngineProcess, PonderStats};
+use super::engine::{EngineProcess, PonderStats, ReportedEngineError};
 use super::position::{ParsedPosition, build_position, is_legal_game_move, plies_before_start};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
@@ -105,6 +105,9 @@ pub fn run_game(
             result = match result {
                 Err(original) => {
                     Err(original.context(format!("ponder cleanup failed: {cleanup:#}")))
+                }
+                Ok(_) if cleanup.downcast_ref::<ReportedEngineError>().is_some() => {
+                    Err(cleanup.context(EngineFailure))
                 }
                 Ok(result) => {
                     eprintln!("ponder cleanup failed: {cleanup:#}");
