@@ -779,3 +779,395 @@ fn bridge_from_audit_uses_the_turn_side_graph_with_opponent_records() {
         }
     }
 }
+
+fn read_queue(path: &Path) -> Vec<Line> {
+    let mut lines = Vec::new();
+    super::super::targets::read_checked_lines(path, |line, _, _| {
+        lines.push(line);
+        Ok(())
+    })
+    .unwrap();
+    lines
+}
+
+#[test]
+fn enqueue_walk_classes_use_exit_roots_and_three_priority_levels() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let paths: [&[&str]; 4] = [
+        &["7g7f", "3c3d", "2g2f", "8c8d"],
+        &["7g7f", "8c8d"],
+        &["2g2f", "8c8d", "7g7f"],
+        &["7g7f"],
+    ];
+    let walk = [
+        walk_line("b", "out", 0.02, paths[0]),
+        walk_line("b", "own", 0.05, paths[1]),
+        walk_line("w", "max", 0.01, paths[2]),
+        walk_line("b", "rare", 0.1, paths[3]),
+    ];
+    let (stdout, _, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--enqueue-out",
+            out.to_str().unwrap(),
+            "--tag",
+            "edition",
+            "--depth",
+            "4",
+            "--opp-n",
+            "3",
+            "--stop",
+            "150",
+            "--rounds",
+            "2",
+            "--draw-black",
+            "-70",
+            "--draw-white",
+            "70",
+        ],
+    );
+    assert!(stdout.contains("出力=3 照合除外=0 手数なし=0 まとめた行=0"), "{stdout}");
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 3);
+    for (i, line) in lines.iter().enumerate() {
+        let own = if i == 2 { "w" } else { "b" };
+        let key = key_after(paths[i]);
+        let number = paths[i].len() + 1;
+        assert_eq!(line.root, format!("sfen {key} {number}"));
+        assert_eq!(line.id, queue_id("edition", number, &key, own));
+        assert_eq!(line.own, own);
+        assert!(line.game.is_empty());
+        assert_eq!(line.depth, 4);
+        assert_eq!(line.opts.opp_n, Some(3));
+        assert_eq!(line.opts.stop, Some(150));
+        assert_eq!(line.opts.rounds, Some(2));
+        assert_eq!(line.opts.draw_black, Some(-70));
+        assert_eq!(line.opts.draw_white, Some(70));
+    }
+    assert_eq!(lines.iter().map(|l| l.priority).collect::<Vec<_>>(), [4, 1, 7]);
+    assert!(lines[1].memo.as_ref().unwrap().contains("先手値=+60"));
+}
+
+fn write_rejoins(d: &TempDir) -> PathBuf {
+    let path = d.path().join("rejoin.tsv");
+    let start = key_after(&["7g7f", "3c3d"]);
+    let missing = key_after(&["5g5f"]);
+    std::fs::write(
+        &path,
+        format!(
+            "{REJOIN_HEADER}\n\
+         b\t{start}\t3\t2g2f\tmain\t0\t\t8c8d\t\t2f2e\t\t\t0\t10\t0.1\t10\t2\n\
+         b\t{start}\t3\t2g2f\tmain\t0\t\t4c4d\t\t2f2e\t\t\t0\t10\t0.1\t10\t1\n\
+         w\t{missing}\t\t8c8d\tmain\t0\t\t2g2f\t\t3c3d\t\t\t0\t150\t0.1\t10\t1\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn enqueue_rejoin_uses_dig_and_merges_reply_games_and_counts_missing_numbers() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let rejoin = write_rejoins(&d);
+    let (stdout, _, _) = run_report(
+        &d,
+        &[],
+        &[
+            "--rejoin",
+            rejoin.to_str().unwrap(),
+            "--enqueue-out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("出力=1 照合除外=0 手数なし=1 まとめた行=1"), "{stdout}");
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 1);
+    let line = &lines[0];
+    assert_eq!(line.root, format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"])));
+    assert_eq!(line.own, "b");
+    assert_eq!(line.game, [vec!["8c8d"], vec!["4c4d"]]);
+    assert_eq!(line.priority, 4);
+    assert!(line.memo.as_ref().unwrap().contains("重み=0.02000 (2件)"));
+}
+
+#[test]
+fn enqueue_heavier_rejoin_without_number_merges_into_the_same_dig_root() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let rejoin = d.path().join("rejoin.tsv");
+    let start = key_after(&["7g7f", "3c3d"]);
+    std::fs::write(
+        &rejoin,
+        format!(
+            "{REJOIN_HEADER}\n\
+         b\t{start}\t3\t2g2f\tmain\t0\t\t8c8d\t\t2f2e\t\t\t0\t10\t0.1\t10\t2\n\
+         b\t{start}\t\t2g2f\tmain\t0\t\t4c4d\t\t2f2e\t\t\t0\t10\t0.1\t10\t3\n"
+        ),
+    )
+    .unwrap();
+    let (stdout, _, _) = run_report(
+        &d,
+        &[],
+        &[
+            "--rejoin",
+            rejoin.to_str().unwrap(),
+            "--enqueue-out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("出力=1 照合除外=0 手数なし=0 まとめた行=1"), "{stdout}");
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"])));
+    assert_eq!(lines[0].game, [vec!["4c4d"], vec!["8c8d"]]);
+    assert_eq!(lines[0].priority, 4);
+}
+
+#[test]
+fn enqueue_gap_uses_main_even_when_best_differs_and_merges_with_shallow() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let bridge = d.path().join("bridge.tsv");
+    let audit = d.path().join("audit.tsv");
+    let key = key_after(&["7g7f", "3c3d"]);
+    std::fs::write(
+        &bridge,
+        format!("key\tply\tside\tmain\tplain_black\tbridged_black\n{key}\t3\tb\t2g2f\t60\t60\n"),
+    )
+    .unwrap();
+    std::fs::write(&audit, format!("key\tgap\tbest\tbest_value_black\n{key}\t50\t5g5f\t110\n"))
+        .unwrap();
+    let (stdout, _, _) = run_report(
+        &d,
+        &[walk_line("b", "own", 0.05, &["7g7f", "3c3d"])],
+        &[
+            "--bridge",
+            bridge.to_str().unwrap(),
+            "--bridge-audit",
+            audit.to_str().unwrap(),
+            "--enqueue-out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("出力=1 照合除外=0 手数なし=0 まとめた行=1"), "{stdout}");
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, format!("sfen {key} 3"));
+    assert_eq!(lines[0].own, "b");
+    assert_eq!(lines[0].game, [vec!["2g2f"]]);
+    assert_eq!(lines[0].priority, 1);
+    assert!(lines[0].memo.as_ref().unwrap().starts_with("gap "));
+}
+
+fn enqueue_args(out: &Path) -> ExitReportArgs {
+    Cli::try_parse_from([
+        "test",
+        "--master",
+        "master.tsv",
+        "--walk",
+        "walk.tsv",
+        "--enqueue-out",
+        out.to_str().unwrap(),
+    ])
+    .unwrap()
+    .args
+}
+
+#[test]
+fn enqueue_merge_keeps_earlier_class_heavier_representative_and_minimum_priority() {
+    let d = TempDir::new().unwrap();
+    let args = enqueue_args(&d.path().join("out.jsonl"));
+    let item = |class, weight, value_black, mv: &str| Item {
+        class,
+        side: "b".into(),
+        move_number: Some(1),
+        weight,
+        value_black,
+        kind: "tree:2".into(),
+        key: HIRATE_KEY.into(),
+        moves: Some(Vec::new()),
+        extra: vec![("main", mv.into())],
+    };
+    let items = [
+        item(Class::Shallow, 0.1, Some(60), ""),
+        item(Class::Gap, 0.01, Some(60), "2g2f"),
+        item(Class::Gap, 0.02, Some(10), "7g7f"),
+        item(Class::Gap, 0.01, Some(60), "2g2f"),
+    ];
+    let (lines, counts) = queue_lines(&items, &args, &[], &Excluded::new()).unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(counts.merged, 3);
+    assert_eq!(lines[0].priority, 1);
+    assert_eq!(lines[0].game, [vec!["7g7f"], vec!["2g2f"]]);
+    assert_eq!(
+        lines[0].memo.as_deref(),
+        Some("gap 1手目 先手値=+10 出所=tree:2 重み=0.02000 (4件)")
+    );
+}
+
+#[test]
+fn enqueue_exclude_queue_counts_game_positions_and_dig_roots() {
+    let d = TempDir::new().unwrap();
+    let rejoin = write_rejoins(&d);
+    let out = d.path().join("plan.jsonl");
+    let exclude = d.path().join("existing.jsonl");
+    std::fs::write(&exclude, format!("{}\n{}\n", serde_json::json!({
+        "id": "dig", "root": format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"])), "own": "b", "depth": 2
+    }), serde_json::json!({
+        "id": "game", "root": format!("sfen {HIRATE_KEY} 1"), "own": "bw", "depth": 6,
+        "game": [["2g2f", "8c8d", "7g7f"]]
+    }))).unwrap();
+    let walk = [walk_line("w", "max", 0.01, &["2g2f", "8c8d", "7g7f"])];
+    let (stdout, table, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--rejoin",
+            rejoin.to_str().unwrap(),
+            "--enqueue-out",
+            out.to_str().unwrap(),
+            "--exclude-queue",
+            exclude.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("出力=0 照合除外=3 手数なし=1 まとめた行=0"), "{stdout}");
+    assert!(read_queue(&out).is_empty());
+    assert!(
+        table
+            .lines()
+            .filter(|l| l.starts_with("rejoin\tb"))
+            .all(|l| l.contains("dig (exclude-queue)")),
+        "{table}"
+    );
+}
+
+#[test]
+fn enqueue_box_matches_dig_root_and_own_but_ignores_depth_zero() {
+    let d = TempDir::new().unwrap();
+    let rejoin = write_rejoins(&d);
+    let out = d.path().join("plan.jsonl");
+    let box_dir = d.path().join("box");
+    std::fs::create_dir_all(box_dir.join("enqueue")).unwrap();
+    let root = format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"]));
+    for (own, depth, expected) in [("w", 6, 1), ("b", 0, 1), ("bw", 6, 0)] {
+        let text =
+            format!("{}\n", serde_json::json!({"id":"dig", "root":root, "own":own, "depth":depth}));
+        std::fs::write(box_dir.join("enqueue/a.jsonl"), &text).unwrap();
+        std::fs::write(
+            box_dir.join("enqueue/a.jsonl.receipt"),
+            serde_json::json!({"start":0,"end":text.len(),"lines":1}).to_string(),
+        )
+        .unwrap();
+        let (stdout, table, md) = run_report(
+            &d,
+            &[],
+            &[
+                "--rejoin",
+                rejoin.to_str().unwrap(),
+                "--enqueue-out",
+                out.to_str().unwrap(),
+                "--box",
+                &format!("A={}", box_dir.display()),
+            ],
+        );
+        assert_eq!(read_queue(&out).len(), expected, "{stdout}");
+        if expected == 0 {
+            assert!(stdout.contains("照合除外=2"), "{stdout}");
+            assert!(
+                table
+                    .lines()
+                    .filter(|l| l.starts_with("rejoin\tb"))
+                    .all(|l| l.contains("dig (A,")),
+                "{table}"
+            );
+            assert!(md.contains("dig (A,"), "{md}");
+        }
+    }
+    let input = box_dir.join("enqueue/a.jsonl");
+    let mut args = enqueue_args(&input);
+    args.box_specs = vec![format!("A={}", box_dir.display())];
+    assert!(run_to(args, &mut Vec::new()).is_err());
+}
+
+#[test]
+fn enqueue_rejects_input_output_collisions_and_invalid_options() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("out");
+    for name in [
+        "master",
+        "walk",
+        "rejoin",
+        "bridge",
+        "bridge-audit",
+        "exclude-queue",
+        "table",
+        "markdown",
+    ] {
+        let mut args = enqueue_args(&out);
+        match name {
+            "master" => args.master = out.clone(),
+            "walk" => args.walk = out.clone(),
+            "rejoin" => args.rejoin = Some(out.clone()),
+            "bridge" => args.bridge = Some(out.clone()),
+            "bridge-audit" => args.bridge_audit = Some(out.clone()),
+            "exclude-queue" => args.exclude_queue.push(out.clone()),
+            "table" => args.table = Some(out.clone()),
+            "markdown" => args.markdown = Some(out.clone()),
+            _ => unreachable!(),
+        }
+        assert!(args.check().is_err(), "{name}");
+    }
+    let mut args = enqueue_args(&out);
+    args.table = Some(d.path().join("same"));
+    args.markdown = args.table.clone();
+    assert!(args.check().is_err());
+    for (flag, value) in [
+        ("--tag", "bad.tag"),
+        ("--depth", "21"),
+        ("--opp-n", "9"),
+        ("--enqueue-heavy-weight", "NaN"),
+        ("--enqueue-priority-heavy", "1000001"),
+    ] {
+        let args = Cli::try_parse_from([
+            "test",
+            "--master",
+            "master.tsv",
+            "--walk",
+            "walk.tsv",
+            "--enqueue-out",
+            out.to_str().unwrap(),
+            flag,
+            value,
+        ])
+        .unwrap()
+        .args;
+        assert!(args.check().is_err(), "{flag}");
+    }
+}
+
+#[test]
+fn enqueue_validates_all_lines_before_changing_outputs() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    std::fs::write(&out, "keep").unwrap();
+    let rejoin = write_rejoins(&d);
+    let text = std::fs::read_to_string(&rejoin).unwrap().replace("\t4c4d\t", "\t7g7f\t");
+    std::fs::write(&rejoin, text).unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[])).unwrap();
+    let walk = d.path().join("walk.tsv");
+    std::fs::write(&walk, format!("{WALK_HEADER}\n")).unwrap();
+    let table = d.path().join("report.tsv");
+    std::fs::write(&table, "keep table").unwrap();
+    let mut args = enqueue_args(&out);
+    args.master = master;
+    args.walk = walk;
+    args.rejoin = Some(rejoin);
+    args.table = Some(table.clone());
+    assert!(run_to(args, &mut Vec::new()).is_err());
+    assert_eq!(std::fs::read_to_string(out).unwrap(), "keep");
+    assert_eq!(std::fs::read_to_string(table).unwrap(), "keep table");
+}
