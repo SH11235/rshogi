@@ -400,3 +400,419 @@ fn raw_cache_preserves_fixed_visit_search_and_history_terminals() -> Result<()> 
     assert_eq!(cached.stats().requests, 0);
     Ok(())
 }
+
+struct BatchedConstant<'a> {
+    format: rshogi_dl::InputFormat,
+    capacity: Option<usize>,
+    scalar_calls: usize,
+    batches: Vec<usize>,
+    fail_call: Option<usize>,
+    invalid_call: Option<usize>,
+    stop_after_call: Option<usize>,
+    stop: Option<&'a AtomicBool>,
+    preferred: Option<(usize, usize)>,
+}
+
+fn batched_constant<'a>(capacity: Option<usize>) -> BatchedConstant<'a> {
+    BatchedConstant {
+        format: rshogi_dl::InputFormat::StmTokensV1,
+        capacity,
+        scalar_calls: 0,
+        batches: Vec::new(),
+        fail_call: None,
+        invalid_call: None,
+        stop_after_call: None,
+        stop: None,
+        preferred: None,
+    }
+}
+
+impl BatchedConstant<'_> {
+    fn policy(&self, logits: &mut [f32]) {
+        if let Some((first, second)) = self.preferred {
+            logits.fill(-100.0);
+            logits[first] = 0.1;
+            logits[second] = 0.0;
+        } else {
+            logits.fill(0.0);
+        }
+    }
+}
+
+impl Evaluator for BatchedConstant<'_> {
+    fn input_format(&self) -> Option<rshogi_dl::InputFormat> {
+        Some(self.format)
+    }
+
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        self.capacity
+    }
+
+    fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+        self.scalar_calls += 1;
+        self.policy(logits);
+        Ok(0.3)
+    }
+
+    fn evaluate_encoded_batch(
+        &mut self,
+        inputs: rshogi_dl::EncodedBatch<'_>,
+        values: &mut [f32],
+        logits: &mut [f32],
+    ) -> Result<()> {
+        assert_eq!(inputs.format(), self.format);
+        assert!(inputs.len() <= self.capacity.expect("batch support was declared"));
+        assert_eq!(values.len(), inputs.len());
+        assert_eq!(logits.len(), inputs.len() * MAX_MOVE_LABEL_NUM);
+        self.batches.push(inputs.len());
+        ensure!(self.fail_call != Some(self.batches.len()), "batch failure");
+        values.fill(0.3);
+        for row in logits.chunks_exact_mut(MAX_MOVE_LABEL_NUM) {
+            self.policy(row);
+        }
+        if self.invalid_call == Some(self.batches.len()) {
+            *logits.last_mut().expect("batch is not empty") = f32::NAN;
+        }
+        if self.stop_after_call == Some(self.batches.len()) {
+            self.stop.expect("stop flag was provided").store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+fn same_result(want: &SearchResult, got: &SearchResult) {
+    assert_eq!(want.best_move, got.best_move);
+    assert_eq!(want.value.to_bits(), got.value.to_bits());
+    assert_eq!(want.visits, got.visits);
+    assert_eq!(want.evaluations, got.evaluations);
+    assert_eq!(want.outcome, got.outcome);
+    assert_eq!(want.pv, got.pv);
+    assert_eq!(want.hashfull, got.hashfull);
+    assert_eq!(want.memory_full, got.memory_full);
+}
+
+#[test]
+fn batch_one_and_unsupported_evaluators_keep_the_scalar_search_exact() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let original = pos.to_sfen();
+    let stop = AtomicBool::new(false);
+    let limits = Limits {
+        visits: 128,
+        time: None,
+    };
+    let mut search = Search::new(Config::default())?;
+    let mut evaluator = batched_constant(Some(8));
+    let baseline = search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+    assert!(evaluator.batches.is_empty());
+    assert_eq!(evaluator.scalar_calls, 128);
+    assert_eq!(search.batch_workspace_bytes(), 0);
+    for capacity in [None, Some(1)] {
+        let mut search = Search::new(Config {
+            batch_size: 8,
+            ..Config::default()
+        })?;
+        let mut evaluator = batched_constant(capacity);
+        let result = search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+        same_result(&baseline, &result);
+        assert_eq!(evaluator.scalar_calls, 128);
+        assert!(evaluator.batches.is_empty());
+        assert_eq!(search.batch_workspace_bytes(), 0);
+    }
+    assert_eq!(pos.to_sfen(), original);
+    assert_eq!(history.len(), 1);
+    for batch_size in [0, 1025] {
+        assert!(
+            Search::new(Config {
+                batch_size,
+                ..Config::default()
+            })
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn batched_visits_are_completed_exactly_and_partial_batches_dispatch() -> Result<()> {
+    for visits in [1, 3, 4, 5, 6, 9] {
+        let (mut pos, mut history) = root();
+        let original = pos.to_sfen();
+        let mut search = Search::new(Config {
+            batch_size: 4,
+            tree_memory_mb: 1,
+            ..Config::default()
+        })?;
+        let mut evaluator = batched_constant(Some(4));
+        let result = search.run(
+            &mut pos,
+            &mut history,
+            &mut evaluator,
+            Limits { visits, time: None },
+            &AtomicBool::new(false),
+        )?;
+        assert_eq!(result.visits, visits);
+        assert_eq!(result.evaluations, visits);
+        assert_eq!(evaluator.scalar_calls, 0);
+        assert_eq!(evaluator.batches[0], 1);
+        assert_eq!(evaluator.batches.iter().sum::<usize>() as u64, visits);
+        assert!(evaluator.batches.iter().all(|&count| (1..=4).contains(&count)));
+        assert!(search.batch.as_ref().unwrap().is_idle());
+        assert!(
+            search.batch_workspace_bytes()
+                > (search.node_limit + search.edge_limit) * size_of::<u32>()
+        );
+        assert_eq!(pos.to_sfen(), original);
+        assert_eq!(history.len(), 1);
+        if visits == 6 {
+            assert_eq!(evaluator.batches, vec![1, 4, 1]);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn blocked_children_flush_without_repeating_the_same_pending_expansion() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let mut search = Search::new(Config {
+        batch_size: 64,
+        tree_memory_mb: 1,
+        ..Config::default()
+    })?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&pos, &mut legal);
+    let mut evaluator = batched_constant(Some(64));
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut evaluator,
+        Limits {
+            visits: legal.len() as u64 + 3,
+            time: None,
+        },
+        &AtomicBool::new(false),
+    )?;
+    assert_eq!(evaluator.batches[0], 1);
+    assert_eq!(evaluator.batches[1], legal.len());
+    assert_eq!(evaluator.batches[2], 2);
+    assert_eq!(result.visits, legal.len() as u64 + 3);
+    assert!(search.batch.as_ref().unwrap().is_idle());
+    Ok(())
+}
+
+#[test]
+fn full_batch_validation_and_errors_cancel_all_reservations_before_reuse() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let original = pos.to_sfen();
+    let mut search = Search::new(Config {
+        batch_size: 4,
+        tree_memory_mb: 1,
+        ..Config::default()
+    })?;
+    let stop = AtomicBool::new(false);
+    let limits = Limits {
+        visits: 16,
+        time: None,
+    };
+    for invalid in [false, true] {
+        let mut evaluator = batched_constant(Some(4));
+        if invalid {
+            evaluator.invalid_call = Some(2);
+        } else {
+            evaluator.fail_call = Some(2);
+        }
+        assert!(search.run(&mut pos, &mut history, &mut evaluator, limits, &stop).is_err());
+        assert_eq!(search.nodes[0].visits, 1);
+        assert_eq!(search.nodes.iter().filter(|node| node.expanded).count(), 1);
+        assert!(search.batch.as_ref().unwrap().is_idle());
+        assert_eq!(pos.to_sfen(), original);
+        assert_eq!(history.len(), 1);
+        let result =
+            search.run(&mut pos, &mut history, &mut batched_constant(Some(4)), limits, &stop)?;
+        assert_eq!(result.visits, 16);
+        assert!(search.batch.as_ref().unwrap().is_idle());
+    }
+    Ok(())
+}
+
+#[test]
+fn stop_during_forward_commits_the_valid_completed_batch_and_restores_root() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let original = pos.to_sfen();
+    let stop = AtomicBool::new(false);
+    let mut search = Search::new(Config {
+        batch_size: 4,
+        tree_memory_mb: 1,
+        ..Config::default()
+    })?;
+    let mut evaluator = batched_constant(Some(4));
+    evaluator.stop = Some(&stop);
+    evaluator.stop_after_call = Some(2);
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut evaluator,
+        Limits {
+            visits: 100,
+            time: None,
+        },
+        &stop,
+    )?;
+    assert_eq!(evaluator.batches, vec![1, 4]);
+    assert_eq!(result.visits, 5);
+    assert!(search.batch.as_ref().unwrap().is_idle());
+    assert_eq!(pos.to_sfen(), original);
+    assert_eq!(history.len(), 1);
+    stop.store(false, Ordering::Relaxed);
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut batched_constant(Some(4)),
+        Limits {
+            visits: 3,
+            time: None,
+        },
+        &stop,
+    )?;
+    assert_eq!(result.visits, 3);
+    Ok(())
+}
+
+#[test]
+fn pending_edge_reservations_respect_arena_limit_and_commit_a_partial_batch() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let original = pos.to_sfen();
+    let mut search = Search::new(Config {
+        batch_size: 4,
+        tree_memory_mb: 1,
+        ..Config::default()
+    })?;
+    search.edge_limit = 80;
+    let mut evaluator = batched_constant(Some(4));
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut evaluator,
+        Limits {
+            visits: 100,
+            time: None,
+        },
+        &AtomicBool::new(false),
+    )?;
+    assert!(result.memory_full);
+    assert_eq!(result.visits, 2);
+    assert_eq!(evaluator.batches, vec![1, 1]);
+    assert!(search.edges.len() <= search.edge_limit);
+    assert!(search.batch.as_ref().unwrap().is_idle());
+    assert_eq!(pos.to_sfen(), original);
+    assert_eq!(history.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn terminal_after_pending_neural_leaf_is_backed_up_once_in_selection_order() -> Result<()> {
+    let mut pos = Position::new();
+    pos.set_sfen("7Pk/6R2/9/9/9/9/9/9/4K4 b G 1")?;
+    let mut history = History::new(&pos);
+    let original = pos.to_sfen();
+    let first = pos.to_move(Move::from_usi("5i6i").unwrap()).unwrap();
+    let mate = pos.to_move(Move::from_usi("G*1b").unwrap()).unwrap();
+    let mut evaluator = batched_constant(Some(4));
+    evaluator.preferred = Some((
+        make_move_label(first, pos.side_to_move()),
+        make_move_label(mate, pos.side_to_move()),
+    ));
+    let mut search = Search::new(Config {
+        batch_size: 4,
+        ..Config::default()
+    })?;
+    let result = search.run(
+        &mut pos,
+        &mut history,
+        &mut evaluator,
+        Limits {
+            visits: 100,
+            time: None,
+        },
+        &AtomicBool::new(false),
+    )?;
+    assert_eq!(result.outcome, Some(Outcome::Win));
+    assert_eq!(result.best_move, mate);
+    assert_eq!(result.visits, 3);
+    assert_eq!(result.evaluations, 2);
+    assert_eq!(evaluator.batches, vec![1, 1]);
+    assert_eq!(
+        search
+            .nodes
+            .iter()
+            .filter(|node| node.outcome == Some(Outcome::Loss))
+            .map(|node| node.visits)
+            .sum::<u64>(),
+        1
+    );
+    assert!(search.batch.as_ref().unwrap().is_idle());
+    assert_eq!(pos.to_sfen(), original);
+    assert_eq!(history.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn batch_workspace_is_rebuilt_for_format_and_capacity_changes() -> Result<()> {
+    let (mut pos, mut history) = root();
+    let mut search = Search::new(Config {
+        batch_size: 8,
+        tree_memory_mb: 1,
+        ..Config::default()
+    })?;
+    let mut evaluator = batched_constant(Some(4));
+    let limits = Limits {
+        visits: 3,
+        time: None,
+    };
+    let stop = AtomicBool::new(false);
+    search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+    let first_bytes = search.batch_workspace_bytes();
+    assert!(search.batch.as_ref().unwrap().matches(rshogi_dl::InputFormat::StmTokensV1, 4));
+    evaluator.format = rshogi_dl::InputFormat::Basic;
+    evaluator.capacity = Some(2);
+    search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+    assert!(search.batch.as_ref().unwrap().matches(rshogi_dl::InputFormat::Basic, 2));
+    assert!(search.batch_workspace_bytes() > first_bytes);
+    assert!(search.batch.as_ref().unwrap().is_idle());
+    Ok(())
+}
+
+#[test]
+fn same_neural_input_with_repetition_history_bypasses_batched_inference() -> Result<()> {
+    let mut pos = Position::new();
+    pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1")?;
+    let input = rshogi_dl::tokens::encode(&pos)?;
+    let mut history = History::new(&pos);
+    let mut evaluator = batched_constant(Some(4));
+    let mut search = Search::new(Config {
+        batch_size: 4,
+        ..Config::default()
+    })?;
+    let stop = AtomicBool::new(false);
+    let limits = Limits {
+        visits: 4,
+        time: None,
+    };
+    let first = search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+    assert_eq!(first.visits, 4);
+    for _ in 0..3 {
+        for usi in ["5i6i", "5a6a", "6i5i", "6a5a"] {
+            play(&mut pos, &mut history, usi);
+        }
+    }
+    assert_eq!(input, rshogi_dl::tokens::encode(&pos)?);
+    evaluator.batches.clear();
+    evaluator.scalar_calls = 0;
+    let result = search.run(&mut pos, &mut history, &mut evaluator, limits, &stop)?;
+    assert_eq!(result.outcome, Some(Outcome::Draw));
+    assert_eq!(result.visits, 0);
+    assert_eq!(result.evaluations, 0);
+    assert!(evaluator.batches.is_empty());
+    assert_eq!(evaluator.scalar_calls, 0);
+    assert_eq!(history.len(), 13);
+    Ok(())
+}
