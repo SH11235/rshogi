@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use tools::selfplay::adjudication::parse_agreement_rule;
 use tools::selfplay::cpu_affinity::{CpuAffinityMode, discover_numa_cpu_affinities};
-use tools::selfplay::engine::PonderStats;
+use tools::selfplay::engine::{EngineErrorPolicy, PonderStats};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::nps_bench;
 use tools::selfplay::time_control::TimeControl;
@@ -901,6 +901,7 @@ fn spawn_engine(
     cpus: Option<&[usize]>,
 ) -> Result<EngineProcess> {
     let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(cfg, label, cpus)?;
+    engine.set_error_policy(EngineErrorPolicy::RejectReported);
     engine.initialize(cfg)?;
     Ok(engine)
 }
@@ -1015,7 +1016,7 @@ fn worker_main(
                 engines.push(ep);
             }
             Err(e) => {
-                eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
+                eprintln!("worker: failed to spawn engine {i} ({}): {e:#}", path.display());
                 worker_failed.store(true, Ordering::Relaxed);
                 shutdown.store(true, Ordering::Relaxed);
                 return;
@@ -1040,11 +1041,11 @@ fn worker_main(
         // usinewgame/isready が失敗した EngineProcess は同期状態を保証できない。
         // error 結果を 1 件返して worker ごと退役し、再試行は新しいプロセスへ渡す。
         if let Err(e) = black.new_game().and_then(|_| white.new_game()) {
-            eprintln!("worker: new game error: {e}; retiring worker");
+            eprintln!("worker: new game error: {e:#}; retiring worker");
             let _ = tx.send(MatchResult {
                 ticket,
                 outcome: GameOutcome::Draw,
-                reason: format!("error: new game: {e}"),
+                reason: format!("error: new game: {e:#}"),
                 plies: 0,
                 move_logs: Vec::new(),
                 ponder: None,
@@ -1120,11 +1121,11 @@ fn worker_main(
                 }
             }
             Ok(Err(e)) => {
-                eprintln!("worker: game error: {e}; retiring worker");
+                eprintln!("worker: game error: {e:#}; retiring worker");
                 let _ = tx.send(MatchResult {
                     ticket,
                     outcome: GameOutcome::Draw,
-                    reason: format!("error: {e}"),
+                    reason: format!("error: {e:#}"),
                     plies: 0,
                     move_logs,
                     ponder: None,
