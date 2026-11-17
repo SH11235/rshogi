@@ -231,12 +231,49 @@ fn stats(stats: CacheStats) -> Value {
     json!({"requests": stats.requests, "nn_calls": stats.nn_calls, "hits": stats.hits})
 }
 
+#[cfg(feature = "inference-diagnostics")]
+fn timing_delta(
+    after: Option<rshogi_dl::InferenceTimings>,
+    before: Option<rshogi_dl::InferenceTimings>,
+) -> Result<Value> {
+    match (after, before) {
+        (Some(after), Some(before)) => {
+            let delta =
+                after.checked_since(before).context("inference timing counters regressed")?;
+            let stages: serde_json::Map<String, Value> = rshogi_dl::InferenceStage::ALL
+                .into_iter()
+                .map(|stage| {
+                    let timing = delta.stages[stage as usize];
+                    (stage.name().to_owned(), json!({
+                        "calls": timing.calls, "errors": timing.errors, "nanoseconds": timing.nanoseconds,
+                    }))
+                })
+                .collect();
+            Ok(json!({"forward_calls": delta.forward_calls,
+                "forward_failures": delta.forward_failures, "positions": delta.positions, "stages": stages}))
+        }
+        (None, None) => Ok(Value::Null),
+        _ => bail!("inference timing capability changed"),
+    }
+}
+
+#[cfg(feature = "inference-diagnostics")]
+fn with_inference_timings(mut report: Value, warmup: Value, cold: Value, measured: Value) -> Value {
+    report["inference_timings"] = json!({"warmup": warmup, "cold": cold, "measured": measured});
+    report
+}
+
 struct EncodedControl<E> {
     inner: E,
     enabled: bool,
 }
 
 impl<E: Evaluator> Evaluator for EncodedControl<E> {
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<rshogi_dl::InferenceTimings> {
+        self.inner.inference_timings()
+    }
+
     fn input_format(&self) -> Option<InputFormat> {
         self.inner.input_format()
     }
@@ -278,14 +315,26 @@ fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Res
         }
         Ok(checksum)
     };
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let warmup = measure(|| pass(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
     evaluator.clear();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let cold = measure(|| pass(&mut evaluator), 1)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let cold_timings = timing_delta(evaluator.inference_timings(), before)?;
     let cold_stats = stats(evaluator.stats());
     evaluator.reset_stats();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let measured = measure(|| pass(&mut evaluator), config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
     let warm_stats = stats(evaluator.stats());
-    Ok(json!({
+    let report = json!({
         "setup_seconds": setup_seconds,
         "allocated_bytes": evaluator.allocated_bytes(),
         "warmup": warmup,
@@ -293,7 +342,10 @@ fn cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) -> Res
         "cold_stats": cold_stats,
         "measured": measured,
         "measured_stats": warm_stats
-    }))
+    });
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, cold_timings, measured_timings);
+    Ok(report)
 }
 
 #[cfg(feature = "onnx")]
@@ -324,16 +376,29 @@ fn batch_cache<E: Evaluator>(inner: E, config: &Config, positions: &[Position]) 
         }
         Ok(checksum)
     };
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let warmup = measure(|| pass(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
     evaluator.clear();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let cold = measure(|| pass(&mut evaluator), 1)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let cold_timings = timing_delta(evaluator.inference_timings(), before)?;
     let cold_stats = stats(evaluator.stats());
     let cold_nn_positions = evaluator.nn_positions();
     evaluator.reset_stats();
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
     let measured = measure(|| pass(&mut evaluator), config.iterations)?;
-    Ok(
-        json!({"setup_seconds":setup_seconds,"allocated_bytes":evaluator.allocated_bytes(),"batch_allocated_bytes":evaluator.batch_allocated_bytes(),"input_allocated_bytes":input.allocated_bytes(),"warmup":warmup,"cold":cold,"cold_stats":cold_stats,"cold_nn_positions":cold_nn_positions,"measured":measured,"measured_stats":stats(evaluator.stats()),"measured_nn_positions":evaluator.nn_positions()}),
-    )
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
+    let report = json!({"setup_seconds":setup_seconds,"allocated_bytes":evaluator.allocated_bytes(),"batch_allocated_bytes":evaluator.batch_allocated_bytes(),"input_allocated_bytes":input.allocated_bytes(),"warmup":warmup,"cold":cold,"cold_stats":cold_stats,"cold_nn_positions":cold_nn_positions,"measured":measured,"measured_stats":stats(evaluator.stats()),"measured_nn_positions":evaluator.nn_positions()});
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, cold_timings, measured_timings);
+    Ok(report)
 }
 
 #[cfg(feature = "onnx")]
@@ -375,7 +440,7 @@ fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
     let mut values = Vec::with_capacity(config.batch_size);
     let mut policy = Vec::with_capacity(config.batch_size * MAX_MOVE_LABEL_NUM);
     let setup_seconds = setup.elapsed().as_secs_f64();
-    let mut operation = || {
+    let mut operation = |evaluator: &mut ModelEvaluator| {
         let mut checksum = 0.0;
         for batch in positions.chunks(config.batch_size) {
             values.clear();
@@ -386,13 +451,22 @@ fn onnx(config: &Config, positions: &[Position]) -> Result<Value> {
         }
         Ok(checksum)
     };
-    let warmup = measure(&mut operation, config.warmup)?;
-    let measured = measure(&mut operation, config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let warmup = measure(|| operation(&mut evaluator), config.warmup)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let warmup_timings = timing_delta(evaluator.inference_timings(), before)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let before = evaluator.inference_timings();
+    let measured = measure(|| operation(&mut evaluator), config.iterations)?;
+    #[cfg(feature = "inference-diagnostics")]
+    let measured_timings = timing_delta(evaluator.inference_timings(), before)?;
     let requests = config.iterations * positions.len();
-    Ok(
-        json!({"setup_seconds": setup_seconds, "input_format": format, "warmup": warmup, "measured": measured,
-        "measured_stats": {"requests": requests, "nn_calls": config.iterations * positions.len().div_ceil(config.batch_size), "hits": 0}}),
-    )
+    let report = json!({"setup_seconds": setup_seconds, "input_format": format, "warmup": warmup, "measured": measured,
+        "measured_stats": {"requests": requests, "nn_calls": config.iterations * positions.len().div_ceil(config.batch_size), "hits": 0}});
+    #[cfg(feature = "inference-diagnostics")]
+    let report = with_inference_timings(report, warmup_timings, Value::Null, measured_timings);
+    Ok(report)
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -554,6 +628,51 @@ mod tests {
         )?;
         assert_eq!(report["measured_stats"], json!({"requests": 3, "nn_calls": 3, "hits": 0}));
         assert_eq!(report["allocated_bytes"], 0);
+        Ok(())
+    }
+    #[cfg(feature = "inference-diagnostics")]
+    #[test]
+    fn cache_timing_snapshots_are_independent_of_cache_stats_resets() -> Result<()> {
+        struct Instrumented(rshogi_dl::InferenceTimings);
+        impl Evaluator for Instrumented {
+            fn input_format(&self) -> Option<InputFormat> {
+                Some(InputFormat::StmTokensV1)
+            }
+            fn inference_timings(&self) -> Option<rshogi_dl::InferenceTimings> {
+                Some(self.0)
+            }
+            fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+                self.0.forward_calls += 1;
+                self.0.positions += 1;
+                let phase = &mut self.0.stages[rshogi_dl::InferenceStage::TensorRefs as usize];
+                phase.calls += 1;
+                phase.nanoseconds += 2;
+                logits.fill(0.0);
+                Ok(0.5)
+            }
+        }
+        let report = cache(
+            Instrumented(rshogi_dl::InferenceTimings::default()),
+            &config(&[
+                "cache-tokens",
+                "--warmup",
+                "0",
+                "--iterations",
+                "3",
+                "--cache-mib",
+                "1",
+            ])?,
+            &read_positions(io::Cursor::new(""))?,
+        )?;
+        let timings = &report["inference_timings"];
+        assert_eq!(timings["warmup"]["forward_calls"], 0);
+        assert_eq!(timings["cold"]["forward_calls"], 1);
+        assert_eq!(timings["cold"]["stages"]["tensor_refs"]["nanoseconds"], 2);
+        assert_eq!(timings["measured"]["forward_calls"], 0);
+        assert_eq!(timings["measured"]["stages"]["tensor_refs"]["nanoseconds"], 0);
+        assert_eq!(report["measured_stats"]["hits"], 3);
+        assert!(timing_delta(None, None)?.is_null());
+        assert!(timing_delta(None, Some(rshogi_dl::InferenceTimings::default())).is_err());
         Ok(())
     }
 }
