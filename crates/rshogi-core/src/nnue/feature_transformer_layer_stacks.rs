@@ -891,6 +891,114 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
     }
 
+    #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+    #[inline(always)]
+    fn apply_threat_diff_from_source(
+        &self,
+        source: &[i16; L1],
+        accumulation: &mut [i16; L1],
+        removed: &IndexList<MAX_CHANGED_THREAT_FEATURES>,
+        added: &IndexList<MAX_CHANGED_THREAT_FEATURES>,
+    ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        let start = {
+            // SAFETY: 完全な tile だけを非整列 load/store し、各行と両配列の範囲内に収める。
+            // source と出力は借用で非重複を保証し、cfg が SIMD 命令を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                for offset in (0..L1 / 256 * 256).step_by(256) {
+                    let mut tile = [_mm512_setzero_si512(); 8];
+                    for (k, v) in tile.iter_mut().enumerate() {
+                        *v = _mm512_loadu_si512(source.as_ptr().add(offset + k * 32).cast());
+                    }
+                    for index in removed.iter() {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm256_loadu_si256(row.as_ptr().add(offset + k * 32).cast());
+                            *v = _mm512_sub_epi16(*v, _mm512_cvtepi8_epi16(w));
+                        }
+                    }
+                    for index in added.iter() {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm256_loadu_si256(row.as_ptr().add(offset + k * 32).cast());
+                            *v = _mm512_add_epi16(*v, _mm512_cvtepi8_epi16(w));
+                        }
+                    }
+                    for (k, v) in tile.iter().enumerate() {
+                        _mm512_storeu_si512(
+                            accumulation.as_mut_ptr().add(offset + k * 32).cast(),
+                            *v,
+                        );
+                    }
+                }
+            }
+            L1 / 256 * 256
+        };
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
+        let start = {
+            // SAFETY: 完全な tile だけを非整列 load/store し、各行と両配列の範囲内に収める。
+            // source と出力は借用で非重複を保証し、cfg が SIMD 命令を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                for offset in (0..L1 / 128 * 128).step_by(128) {
+                    let mut tile = [_mm256_setzero_si256(); 8];
+                    for (k, v) in tile.iter_mut().enumerate() {
+                        *v = _mm256_loadu_si256(source.as_ptr().add(offset + k * 16).cast());
+                    }
+                    for index in removed.iter() {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm_loadu_si128(row.as_ptr().add(offset + k * 16).cast());
+                            *v = _mm256_sub_epi16(*v, _mm256_cvtepi8_epi16(w));
+                        }
+                    }
+                    for index in added.iter() {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm_loadu_si128(row.as_ptr().add(offset + k * 16).cast());
+                            *v = _mm256_add_epi16(*v, _mm256_cvtepi8_epi16(w));
+                        }
+                    }
+                    for (k, v) in tile.iter().enumerate() {
+                        _mm256_storeu_si256(
+                            accumulation.as_mut_ptr().add(offset + k * 16).cast(),
+                            *v,
+                        );
+                    }
+                }
+            }
+            L1 / 128 * 128
+        };
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            )
+        )))]
+        let start = 0;
+        for i in start..L1 {
+            let mut value = source[i];
+            for index in removed.iter() {
+                value = value.wrapping_sub(i16::from(self.threat_weight_row(index)[i]));
+            }
+            for index in added.iter() {
+                value = value.wrapping_add(i16::from(self.threat_weight_row(index)[i]));
+            }
+            accumulation[i] = value;
+        }
+    }
+
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn apply_threat_rows<const ADD: bool>(
@@ -1651,10 +1759,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             let p = perspective.index();
             if !refresh[p] {
                 let (prev, current) = stack.get_prev_and_current_accumulators(source.unwrap());
-                let threat = current.get_threat_mut(p);
-                threat.copy_from_slice(prev.get_threat(p));
-                self.apply_threat_rows::<false>(threat, &removed[p]);
-                self.apply_threat_rows::<true>(threat, &added[p]);
+                self.apply_threat_diff_from_source(
+                    prev.get_threat(p),
+                    current.get_threat_mut(p),
+                    &removed[p],
+                    &added[p],
+                );
             }
         }
         self.refresh_threat_perspectives(pos, &mut stack.current_mut().accumulator, refresh);
@@ -2747,7 +2857,7 @@ mod tests {
     #[test]
     fn threat_ancestor_matches_full_refresh() {
         use crate::movegen::{MoveList, generate_legal};
-        const N: usize = 64;
+        const N: usize = 288;
         let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
         ft.has_threat = true;
         for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
@@ -2982,6 +3092,82 @@ mod tests {
             ft.update_with_threat_ancestor(&pos, &mut stack, Some(&mut cache));
             assert_eq!(stack.current().accumulator.threat_accumulation, expected);
         }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn threat_diff_from_source_matches_wrapping_scalar() {
+        fn check<const N: usize>() {
+            #[repr(C)]
+            struct Guarded<const N: usize> {
+                before: [i16; 32],
+                values: [i16; N],
+                after: [i16; 32],
+            }
+            let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
+            let mut weights = AlignedBox::<i8>::new_zeroed(N * 3);
+            for (i, w) in weights.iter_mut().enumerate() {
+                *w = match i % 4 {
+                    0 => i8::MIN,
+                    1 => i8::MAX,
+                    _ => (i as u8).wrapping_mul(73) as i8,
+                };
+            }
+            ft.threat_weights = weights.into();
+            let source = std::array::from_fn(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN });
+            let original = source;
+            for removed_count in [0, 1, 2, 7, MAX_CHANGED_THREAT_FEATURES] {
+                for added_count in [0, 1, 3, 8, MAX_CHANGED_THREAT_FEATURES] {
+                    for repeated in [false, true] {
+                        let mut removed = IndexList::new();
+                        let mut added = IndexList::new();
+                        for i in 0..removed_count {
+                            assert!(removed.push(if repeated { 0 } else { i % 3 }));
+                        }
+                        for i in 0..added_count {
+                            assert!(added.push(if repeated { 0 } else { (i + 1) % 3 }));
+                        }
+                        let mut expected = source;
+                        for index in removed.iter() {
+                            for (a, &w) in expected.iter_mut().zip(ft.threat_weight_row(index)) {
+                                *a = a.wrapping_sub(i16::from(w));
+                            }
+                        }
+                        for index in added.iter() {
+                            for (a, &w) in expected.iter_mut().zip(ft.threat_weight_row(index)) {
+                                *a = a.wrapping_add(i16::from(w));
+                            }
+                        }
+                        let mut actual = Guarded {
+                            before: [0x1234; 32],
+                            values: [0x5a5a; N],
+                            after: [0x5678; 32],
+                        };
+                        ft.apply_threat_diff_from_source(
+                            &source,
+                            &mut actual.values,
+                            &removed,
+                            &added,
+                        );
+                        assert_eq!(
+                            actual.values, expected,
+                            "width {N}, removed {removed_count}, added {added_count}, repeated {repeated}"
+                        );
+                        assert_eq!(source, original);
+                        assert_eq!(actual.before, [0x1234; 32]);
+                        assert_eq!(actual.after, [0x5678; 32]);
+                    }
+                }
+            }
+        }
+        check::<32>();
+        check::<96>();
+        check::<128>();
+        check::<256>();
+        check::<288>();
+        check::<512>();
+        check::<768>();
+        check::<1536>();
     }
 
     #[cfg(feature = "nnue-threat")]
