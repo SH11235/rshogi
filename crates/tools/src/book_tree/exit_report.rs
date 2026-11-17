@@ -7,6 +7,8 @@ use super::model::{child, side};
 use super::queue_review::{TreeState, tree_states};
 use super::reply_graph::HIRATE_KEY;
 use super::schema::Schema;
+use super::targets::{Line, MAX_DEPTH, MAX_PRIORITY, Opts};
+use super::walk::{Excluded, check_tag, excluded_positions, queue_id};
 use crate::kif::usi_moves_to_short_kif;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -57,6 +59,45 @@ pub(super) struct ExitReportArgs {
     /// 報告 (Markdown)
     #[arg(long)]
     markdown: Option<PathBuf>,
+    /// 未受付の出口を木の計画 (JSON Lines) に書く
+    #[arg(long)]
+    enqueue_out: Option<PathBuf>,
+    /// 既に積んだ木のキュー (繰り返し可)
+    #[arg(long, requires = "enqueue_out")]
+    exclude_queue: Vec<PathBuf>,
+    /// 木の段数
+    #[arg(long, default_value_t = 6, requires = "enqueue_out")]
+    depth: usize,
+    /// id に使う名前 ([A-Za-z0-9_-]、1〜40 文字)
+    #[arg(long, default_value = "exit-report", requires = "enqueue_out")]
+    tag: String,
+    /// 相手の手の数 (1〜8)
+    #[arg(long, requires = "enqueue_out")]
+    opp_n: Option<usize>,
+    /// 打ち切り値 (1〜30000)
+    #[arg(long, requires = "enqueue_out")]
+    stop: Option<i32>,
+    /// 読み直し回数 (0〜10)
+    #[arg(long, requires = "enqueue_out")]
+    rounds: Option<usize>,
+    /// 先手番で循環に入る手の値
+    #[arg(long, requires = "enqueue_out", allow_hyphen_values = true)]
+    draw_black: Option<i32>,
+    /// 後手番で循環に入る手の値
+    #[arg(long, requires = "enqueue_out", allow_hyphen_values = true)]
+    draw_white: Option<i32>,
+    /// 重い出口の重みの下限
+    #[arg(long, default_value_t = 0.05, requires = "enqueue_out")]
+    enqueue_heavy_weight: f64,
+    /// 重い出口の priority
+    #[arg(long, default_value_t = 1, requires = "enqueue_out")]
+    enqueue_priority_heavy: u32,
+    /// 目標に届かない出口の priority
+    #[arg(long, default_value_t = 4, requires = "enqueue_out")]
+    enqueue_priority_miss: u32,
+    /// その他の出口の priority
+    #[arg(long, default_value_t = 7, requires = "enqueue_out")]
+    enqueue_priority_other: u32,
     /// 報告の見出しに使う版の名前
     #[arg(long, default_value = "")]
     title: String,
@@ -130,6 +171,17 @@ pub(super) fn column<'a>(row: &BTreeMap<&str, &'a str>, name: &str) -> Result<&'
 }
 
 impl ExitReportArgs {
+    fn queue_opts(&self) -> Opts {
+        Opts {
+            opp_n: self.opp_n,
+            stop: self.stop,
+            rounds: self.rounds,
+            draw_black: self.draw_black,
+            draw_white: self.draw_white,
+            ..Opts::default()
+        }
+    }
+
     fn meets(&self, value: Option<i64>, side: &str) -> Option<bool> {
         value.map(|v| {
             if side == "b" {
@@ -142,11 +194,27 @@ impl ExitReportArgs {
 
     fn check(&self) -> Result<()> {
         ensure!(
-            self.table.is_some() || self.markdown.is_some(),
-            "--table か --markdown の出力先が必要です"
+            self.table.is_some() || self.markdown.is_some() || self.enqueue_out.is_some(),
+            "--table か --markdown か --enqueue-out の出力先が必要です"
         );
         for w in [self.min_weight, self.gap_min_weight] {
             ensure!(w.is_finite() && w >= 0.0, "重みの下限は有限の非負数にしてください: {w}");
+        }
+        if self.enqueue_out.is_some() {
+            check_tag(&self.tag)?;
+            ensure!(self.depth <= MAX_DEPTH, "--depth は {MAX_DEPTH} 以下にしてください");
+            self.queue_opts().check()?;
+            ensure!(
+                self.enqueue_heavy_weight.is_finite() && self.enqueue_heavy_weight >= 0.0,
+                "--enqueue-heavy-weight は有限の非負数にしてください"
+            );
+            for priority in [
+                self.enqueue_priority_heavy,
+                self.enqueue_priority_miss,
+                self.enqueue_priority_other,
+            ] {
+                ensure!(priority <= MAX_PRIORITY, "priority は {MAX_PRIORITY} 以下にしてください");
+            }
         }
         let mut inputs = vec![
             ("--master", self.master.as_path()),
@@ -161,16 +229,24 @@ impl ExitReportArgs {
                 inputs.push((name, path.as_path()));
             }
         }
+        for path in &self.exclude_queue {
+            inputs.push(("--exclude-queue", path.as_path()));
+        }
         let schema_paths: Vec<_> =
             self.schema.iter().flat_map(|dir| super::schema::paths(dir)).collect();
         for path in &schema_paths {
             inputs.push(("--schema", path.as_path()));
         }
-        for output in [&self.table, &self.markdown].into_iter().flatten() {
-            reject_same_file(output, &inputs)?;
-        }
-        if let (Some(table), Some(markdown)) = (&self.table, &self.markdown) {
-            reject_same_file(markdown, &[("--table", table.as_path())])?;
+        let outputs = [
+            ("--table", &self.table),
+            ("--markdown", &self.markdown),
+            ("--enqueue-out", &self.enqueue_out),
+        ];
+        for (name, output) in outputs {
+            if let Some(output) = output {
+                reject_same_file(output, &inputs)?;
+                inputs.push((name, output.as_path()));
+            }
         }
         Ok(())
     }
@@ -317,10 +393,11 @@ pub(super) fn run(args: ExitReportArgs) -> Result<()> {
 fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     args.check()?;
     let (states, box_inputs) = tree_states(&args.box_specs)?;
-    for output in [&args.table, &args.markdown].into_iter().flatten() {
+    for output in [&args.table, &args.markdown, &args.enqueue_out].into_iter().flatten() {
         let inputs: Vec<_> = box_inputs.iter().map(|p| ("--box", p.as_path())).collect();
         reject_same_file(output, &inputs)?;
     }
+    let excluded = excluded_positions(&args.exclude_queue)?;
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
     let mut items = Vec::new();
     // bridge の値は局面の手番側を RAMU としたグラフの値なので、同じ側の walk の重みと手順だけを使う。
@@ -491,14 +568,39 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     // 同じ重みは入力の表の順のまま (安定な並べ替え)。
     items.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
-    let queued = |item: &Item| {
-        // rejoin は戻った先の局面 (RAMU の手番) を根にした木でも塞げるので、両方の根を見る。
+    let queued = |item: &Item| -> Result<String> {
         let rejoin = item.extra.iter().find(|(k, v)| *k == "rejoin" && !v.is_empty());
+        let dig = (item.class == Class::Rejoin).then(|| enqueue_root(item)).transpose()?;
         let roots: Vec<&str> = std::iter::once(item.key.as_str())
             .chain(rejoin.map(|(_, v)| v.as_str()))
+            .chain(dig.as_deref())
             .collect();
-        queued_text(&states, &roots, &item.side)
+        let mut text = queued_text(&states, &roots, &item.side);
+        let ids: BTreeSet<_> = roots
+            .iter()
+            .filter_map(|key| excluded.get(&(key.to_string(), item.side.clone())))
+            .flat_map(|ids| ids.iter())
+            .collect();
+        if !ids.is_empty() {
+            if text == "なし" {
+                text.clear();
+            } else {
+                text.push_str("; ");
+            }
+            text.push_str(
+                &ids.into_iter()
+                    .map(|id| format!("{id} (exclude-queue)"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+        }
+        Ok(text)
     };
+    let enqueue = args
+        .enqueue_out
+        .as_ref()
+        .map(|_| queue_lines(&items, &args, &states, &excluded))
+        .transpose()?;
     let mut counts = BTreeMap::new();
     for item in &items {
         *counts.entry(item.class).or_insert(0usize) += 1;
@@ -535,7 +637,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 fmt_value(item.value_black),
                 item.kind,
                 target_text(args.meets(item.value_black, &item.side)),
-                queued(item),
+                queued(item)?,
                 item.key,
                 item.moves.as_ref().map_or_else(|| UNKNOWN.to_owned(), |m| m.join(" ")),
                 item.extra.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
@@ -547,7 +649,163 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let bytes = markdown(&args, &items, &queued)?;
         write_atomic(path, &bytes)?;
     }
+    if let (Some(path), Some((lines, counts))) = (&args.enqueue_out, enqueue) {
+        crate::common::io::write_atomic(path, &super::refutation::format_queue(&lines)?)?;
+        writeln!(
+            stdout,
+            "積み荷: 出力={} 照合除外={} 手数なし={} まとめた行={}",
+            lines.len(),
+            counts.excluded,
+            counts.no_number,
+            counts.merged
+        )?;
+    }
     Ok(())
+}
+
+fn extra<'a>(item: &'a Item, name: &str) -> Result<&'a str> {
+    item.extra
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
+        .with_context(|| format!("{} の {name} がありません", item.class.name()))
+}
+
+fn enqueue_root(item: &Item) -> Result<String> {
+    if item.class == Class::Rejoin {
+        child(&item.key, extra(item, "move")?)
+    } else {
+        Ok(item.key.clone())
+    }
+}
+
+fn has_tree(states: &[TreeState], key: &str, own: &str) -> bool {
+    states.iter().any(|t| t.depth >= 1 && t.own == own && t.roots.contains(key))
+}
+
+#[derive(Default)]
+struct EnqueueCounts {
+    excluded: usize,
+    no_number: usize,
+    merged: usize,
+}
+
+fn queue_lines(
+    items: &[Item],
+    args: &ExitReportArgs,
+    states: &[TreeState],
+    excluded: &Excluded,
+) -> Result<(Vec<Line>, EnqueueCounts)> {
+    let mut picked: Vec<_> = items.iter().filter(|i| i.class != Class::Good).collect();
+    picked.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
+    let mut counts = EnqueueCounts::default();
+    // 手数の分からない行も同じ根の行の game に足せるよう、先に根ごとにまとめてから手数を決める。
+    let mut positions = BTreeMap::new();
+    let mut groups: Vec<(String, &Item, Vec<&Item>)> = Vec::new();
+    for item in picked {
+        let key = enqueue_root(item)?;
+        let own = &item.side;
+        if has_tree(states, &key, own) || excluded.contains_key(&(key.clone(), own.clone())) {
+            counts.excluded += 1;
+            continue;
+        }
+        match positions.get(&(key.clone(), own.clone())) {
+            Some(&position) => {
+                let group: &mut (String, &Item, Vec<&Item>) = &mut groups[position];
+                group.2.push(item);
+            }
+            None => {
+                positions.insert((key.clone(), own.clone()), groups.len());
+                groups.push((key, item, vec![item]));
+            }
+        }
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sizes = Vec::new();
+    for (key, first, members) in groups {
+        let own = &first.side;
+        // 同じ局面に違う手数で着く行は、walk の積み荷と同じく小さい手数を根の手数にする。
+        let Some((number, root_number)) = members
+            .iter()
+            .filter_map(|item| {
+                item.move_number.map(|n| {
+                    n.checked_add(usize::from(item.class == Class::Rejoin))
+                        .context("根の手数が大きすぎます")
+                        .map(|root| (n, root))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .min_by_key(|&(_, root)| root)
+        else {
+            counts.no_number += members.len();
+            continue;
+        };
+        let mut game: Vec<Vec<String>> = Vec::new();
+        let mut priority = u32::MAX;
+        for item in &members {
+            let moves = match item.class {
+                Class::Gap => Some(vec![extra(item, "main")?.to_owned()]),
+                Class::Rejoin => Some(vec![extra(item, "rejoin_move")?.to_owned()]),
+                _ => None,
+            };
+            if let Some(moves) = moves.filter(|m| !game.contains(m)) {
+                game.push(moves);
+            }
+            let p = if item.weight >= args.enqueue_heavy_weight {
+                args.enqueue_priority_heavy
+            } else if item.class == Class::Rejoin
+                || args.meets(item.value_black, own) == Some(false)
+            {
+                args.enqueue_priority_miss
+            } else {
+                args.enqueue_priority_other
+            };
+            priority = priority.min(p);
+        }
+        counts.merged += members.len() - 1;
+        sizes.push(members.len());
+        let number = first.move_number.unwrap_or(number);
+        lines.push(Line {
+            group: None,
+            id: queue_id(&args.tag, root_number, &key, own),
+            root: format!("sfen {key} {root_number}"),
+            roots: Vec::new(),
+            own: own.clone(),
+            depth: args.depth,
+            priority,
+            hold: false,
+            game,
+            opts: args.queue_opts(),
+            memo: Some(format!(
+                "{} {}手目 先手値={} 出所={} 重み={:.5}",
+                first.class.name(),
+                number,
+                first.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v))),
+                if first.kind.is_empty() {
+                    match first.class {
+                        Class::Gap => "補ったmain",
+                        Class::Rejoin => "戻った先のmain",
+                        _ => "不明",
+                    }
+                } else {
+                    &first.kind
+                },
+                first.weight
+            )),
+        });
+    }
+    for (line, size) in lines.iter_mut().zip(sizes) {
+        if size > 1 {
+            line.memo
+                .as_mut()
+                .context("memo がありません")?
+                .push_str(&format!(" ({size}件)"));
+        }
+        line.check().with_context(|| format!("キューの行の検査: {}", line.id))?;
+    }
+    Ok((lines, counts))
 }
 
 pub(super) fn fmt_value(value: Option<i64>) -> String {
@@ -619,7 +877,7 @@ pub(super) fn side_name(side: &str) -> &'static str {
 fn markdown(
     args: &ExitReportArgs,
     items: &[Item],
-    queued: &dyn Fn(&Item) -> String,
+    queued: &dyn Fn(&Item) -> Result<String>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let title = if args.title.is_empty() {
@@ -663,7 +921,7 @@ fn markdown(
                     fmt_value(r.value_black),
                     r.kind,
                     target_text(args.meets(r.value_black, side)),
-                    queued(r),
+                    queued(r)?,
                     moves_text(r)?
                 )?;
             }
@@ -711,7 +969,7 @@ fn markdown(
                 kif_last(path, get("main").unwrap_or_default())?,
                 fmt_value(get("plain_black").and_then(|v| v.parse().ok())),
                 fmt_value(r.value_black),
-                queued(r),
+                queued(r)?,
                 moves_text(r)?
             )?;
         }
@@ -724,7 +982,7 @@ fn markdown(
         )?;
         writeln!(
             out,
-            "戻った先の main の値が目標を割る所。局面は RAMU の手番で、RAMU の手 (期待の値) の後に相手が定跡に無い手を指し、戻った先で RAMU が main を指す。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。手順は walk の表でその局面を通る行から取り、通る行が無ければ「{NO_MOVES_TEXT}」と書いて手を USI のまま載せる (何手目は rejoin の表の ply、それも空なら「?」)。受付は局面か戻った先を根にした木。\n",
+            "戻った先の main の値が目標を割る所。局面は RAMU の手番で、RAMU の手 (期待の値) の後に相手が定跡に無い手を指し、戻った先で RAMU が main を指す。来る割合 = 局面の重み × その手の局数 / 局面の局数 ({} 以上)。手順は walk の表でその局面を通る行から取り、通る行が無ければ「{NO_MOVES_TEXT}」と書いて手を USI のまま載せる (何手目は rejoin の表の ply、それも空なら「?」)。受付は局面・RAMU の手の後の dig・戻った先を根にした木。\n",
             args.gap_min_weight
         )?;
         writeln!(
@@ -763,7 +1021,7 @@ fn markdown(
                 at(1),
                 at(2),
                 fmt_value(r.value_black),
-                queued(r),
+                queued(r)?,
                 moves_text(r)?
             )?;
         }

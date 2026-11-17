@@ -37,6 +37,53 @@ use std::marker::PhantomData;
 #[path = "ls_finny_tests.rs"]
 mod ls_finny_tests;
 
+#[cfg(feature = "nnue-threat")]
+struct ThreatRefreshBatch {
+    indices: [usize; 192],
+    len: usize,
+    first: bool,
+}
+
+#[cfg(feature = "nnue-threat")]
+impl ThreatRefreshBatch {
+    fn new() -> Self {
+        Self {
+            indices: [0; 192],
+            len: 0,
+            first: true,
+        }
+    }
+
+    #[inline]
+    fn push<const N: usize, FT: LsFeatureSpec>(
+        &mut self,
+        ft: &FeatureTransformerLayerStacks<N, FT>,
+        accumulation: &mut [i16; N],
+        index: usize,
+    ) {
+        self.indices[self.len] = index;
+        self.len += 1;
+        if self.len == self.indices.len() {
+            self.flush(ft, accumulation);
+        }
+    }
+
+    #[inline]
+    fn flush<const N: usize, FT: LsFeatureSpec>(
+        &mut self,
+        ft: &FeatureTransformerLayerStacks<N, FT>,
+        accumulation: &mut [i16; N],
+    ) {
+        if self.first {
+            ft.apply_threat_refresh_batch::<true>(accumulation, &self.indices[..self.len]);
+        } else if self.len != 0 {
+            ft.apply_threat_refresh_batch::<false>(accumulation, &self.indices[..self.len]);
+        }
+        self.first = false;
+        self.len = 0;
+    }
+}
+
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
 #[inline(never)]
@@ -687,6 +734,167 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
     #[cfg(feature = "nnue-threat")]
     #[inline]
+    fn refresh_threat_accumulator(
+        &self,
+        pos: &Position,
+        perspective: Color,
+        king_sq: crate::types::Square,
+        accumulation: &mut [i16; L1],
+    ) {
+        let mut batch = ThreatRefreshBatch::new();
+        threat_features::for_each_active_threat_index(pos, perspective, king_sq, |index| {
+            batch.push(self, accumulation, index);
+        });
+        batch.flush(self, accumulation);
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[inline]
+    fn apply_threat_refresh_batch<const FIRST: bool>(
+        &self,
+        accumulation: &mut [i16; L1],
+        indices: &[usize],
+    ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: 完全な tile だけを SIMD で処理し、各行と accumulator の範囲内を
+            // 非整列 load/store する。cfg が使用する SIMD 命令を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                for offset in (0..L1 / 256 * 256).step_by(256) {
+                    let mut tile = [_mm512_setzero_si512(); 8];
+                    if !FIRST {
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            *v = _mm512_loadu_si512(
+                                accumulation.as_ptr().add(offset + k * 32).cast(),
+                            );
+                        }
+                    }
+                    for &index in indices {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm256_loadu_si256(row.as_ptr().add(offset + k * 32).cast());
+                            *v = _mm512_add_epi16(*v, _mm512_cvtepi8_epi16(w));
+                        }
+                    }
+                    for (k, v) in tile.iter().enumerate() {
+                        _mm512_storeu_si512(
+                            accumulation.as_mut_ptr().add(offset + k * 32).cast(),
+                            *v,
+                        );
+                    }
+                }
+            }
+            self.apply_threat_refresh_tail::<FIRST>(accumulation, indices, L1 / 256 * 256);
+        }
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(all(target_feature = "avx512f", target_feature = "avx512bw"))
+        ))]
+        {
+            // SAFETY: 完全な tile だけを SIMD で処理し、各行と accumulator の範囲内を
+            // 非整列 load/store する。cfg が使用する SIMD 命令を保証する。
+            unsafe {
+                use std::arch::x86_64::*;
+                for offset in (0..L1 / 128 * 128).step_by(128) {
+                    let mut tile = [_mm256_setzero_si256(); 8];
+                    if !FIRST {
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            *v = _mm256_loadu_si256(
+                                accumulation.as_ptr().add(offset + k * 16).cast(),
+                            );
+                        }
+                    }
+                    for &index in indices {
+                        let row = self.threat_weight_row(index);
+                        for (k, v) in tile.iter_mut().enumerate() {
+                            let w = _mm_loadu_si128(row.as_ptr().add(offset + k * 16).cast());
+                            *v = _mm256_add_epi16(*v, _mm256_cvtepi8_epi16(w));
+                        }
+                    }
+                    for (k, v) in tile.iter().enumerate() {
+                        _mm256_storeu_si256(
+                            accumulation.as_mut_ptr().add(offset + k * 16).cast(),
+                            *v,
+                        );
+                    }
+                }
+            }
+            self.apply_threat_refresh_tail::<FIRST>(accumulation, indices, L1 / 128 * 128);
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            )
+        )))]
+        self.apply_threat_refresh_tail::<FIRST>(accumulation, indices, 0);
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[inline]
+    fn apply_threat_refresh_tail<const FIRST: bool>(
+        &self,
+        accumulation: &mut [i16; L1],
+        indices: &[usize],
+        start: usize,
+    ) {
+        if start == L1 {
+            return;
+        }
+        if FIRST {
+            accumulation[start..].fill(0);
+        }
+        for &index in indices {
+            for (a, &w) in
+                accumulation[start..].iter_mut().zip(&self.threat_weight_row(index)[start..])
+            {
+                *a = a.wrapping_add(i16::from(w));
+            }
+        }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[inline]
+    fn refresh_threat_perspectives(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        refresh: [bool; 2],
+    ) {
+        if refresh == [true; 2] {
+            let mut batches = [ThreatRefreshBatch::new(), ThreatRefreshBatch::new()];
+            threat_features::for_each_active_threat_index_both(pos, |perspective, index| {
+                let p = perspective.index();
+                batches[p].push(self, acc.get_threat_mut(p), index);
+            });
+            for (p, batch) in batches.iter_mut().enumerate() {
+                batch.flush(self, acc.get_threat_mut(p));
+            }
+        } else {
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective.index();
+                if refresh[p] {
+                    self.refresh_threat_accumulator(
+                        pos,
+                        perspective,
+                        pos.king_square(perspective),
+                        acc.get_threat_mut(p),
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[inline]
     fn apply_threat_rows<const ADD: bool>(
         &self,
         accumulation: &mut ThreatAccumulation<L1>,
@@ -909,17 +1117,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             if self.has_psqt {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
+        }
 
-            // Threat アキュムレータ（bias なし: piece FT と bias を共有）
-            #[cfg(feature = "nnue-threat")]
-            if self.has_threat {
-                let king_sq = pos.king_square(perspective);
-                let threat_acc = acc.get_threat_mut(p);
-                threat_acc.fill(0);
-                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
-                    self.add_threat_weights(threat_acc, idx);
-                });
-            }
+        #[cfg(feature = "nnue-threat")]
+        if self.has_threat {
+            self.refresh_threat_perspectives(pos, acc, [true; 2]);
         }
 
         acc.computed_accumulation = true;
@@ -938,6 +1140,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             self.refresh_accumulator(pos, acc);
             return;
         }
+
+        #[cfg(feature = "nnue-threat")]
+        let mut threat_refresh = [false; 2];
 
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -1019,16 +1224,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     threat_features::needs_threat_refresh(dirty_piece, king_sq, perspective);
                 if reset_threat {
                     // HM mirror 境界を跨いだ場合のみ全計算
-                    let threat_acc = acc.get_threat_mut(p);
-                    threat_acc.fill(0);
-                    threat_features::for_each_active_threat_index(
-                        pos,
-                        perspective,
-                        king_sq,
-                        |idx| {
-                            self.add_threat_weights(threat_acc, idx);
-                        },
-                    );
+                    threat_refresh[p] = true;
                 } else {
                     // Threat 差分更新
                     let prev_threat = prev_acc.get_threat(p);
@@ -1050,18 +1246,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         self.apply_threat_rows::<true>(curr_threat, &t_added);
                     } else {
                         // overflow → full refresh
-                        curr_threat.fill(0);
-                        threat_features::for_each_active_threat_index(
-                            pos,
-                            perspective,
-                            king_sq,
-                            |idx| {
-                                self.add_threat_weights(curr_threat, idx);
-                            },
-                        );
+                        threat_refresh[p] = true;
                     }
                 }
             }
+        }
+
+        #[cfg(feature = "nnue-threat")]
+        if self.has_threat {
+            self.refresh_threat_perspectives(pos, acc, threat_refresh);
         }
 
         acc.computed_accumulation = true;
@@ -1085,6 +1278,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             self.refresh_accumulator(pos, acc);
             return;
         }
+
+        #[cfg(feature = "nnue-threat")]
+        let mut threat_refresh = [false; 2];
 
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -1173,16 +1369,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 let reset_threat =
                     threat_features::needs_threat_refresh(dirty_piece, king_sq, perspective);
                 if reset_threat {
-                    let threat_acc = acc.get_threat_mut(p);
-                    threat_acc.fill(0);
-                    threat_features::for_each_active_threat_index(
-                        pos,
-                        perspective,
-                        king_sq,
-                        |idx| {
-                            self.add_threat_weights(threat_acc, idx);
-                        },
-                    );
+                    threat_refresh[p] = true;
                 } else {
                     let prev_threat = prev_acc.get_threat(p);
                     let curr_threat = acc.get_threat_mut(p);
@@ -1202,18 +1389,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         self.apply_threat_rows::<false>(curr_threat, &t_removed);
                         self.apply_threat_rows::<true>(curr_threat, &t_added);
                     } else {
-                        curr_threat.fill(0);
-                        threat_features::for_each_active_threat_index(
-                            pos,
-                            perspective,
-                            king_sq,
-                            |idx| {
-                                self.add_threat_weights(curr_threat, idx);
-                            },
-                        );
+                        threat_refresh[p] = true;
                     }
                 }
             }
+        }
+
+        #[cfg(feature = "nnue-threat")]
+        if self.has_threat {
+            self.refresh_threat_perspectives(pos, acc, threat_refresh);
         }
 
         acc.computed_accumulation = true;
@@ -1252,17 +1436,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             {
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
             }
+        }
 
-            // Threat はキャッシュ非対象なのでフル再計算
-            #[cfg(feature = "nnue-threat")]
-            if self.has_threat {
-                let king_sq = pos.king_square(perspective);
-                let threat_acc = acc.get_threat_mut(p);
-                threat_acc.fill(0);
-                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
-                    self.add_threat_weights(threat_acc, idx);
-                });
-            }
+        #[cfg(feature = "nnue-threat")]
+        if self.has_threat {
+            self.refresh_threat_perspectives(pos, acc, [true; 2]);
         }
 
         acc.computed_accumulation = true;
@@ -1470,27 +1648,18 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         let mut added = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
         let diff_ok = source.is_some()
             && threat_features::append_threat_endpoint_diff(&board, pos, &mut removed, &mut added);
+        let refresh = [Color::Black, Color::White].map(|p| !diff_ok || !board.same_mirror(pos, p));
         for perspective in [Color::Black, Color::White] {
             let p = perspective.index();
-            if diff_ok && board.same_mirror(pos, perspective) {
+            if !refresh[p] {
                 let (prev, current) = stack.get_prev_and_current_accumulators(source.unwrap());
                 let threat = current.get_threat_mut(p);
                 threat.copy_from_slice(prev.get_threat(p));
                 self.apply_threat_rows::<false>(threat, &removed[p]);
                 self.apply_threat_rows::<true>(threat, &added[p]);
-            } else {
-                let threat = stack.current_mut().accumulator.get_threat_mut(p);
-                threat.fill(0);
-                threat_features::for_each_active_threat_index(
-                    pos,
-                    perspective,
-                    pos.king_square(perspective),
-                    |index| {
-                        self.add_threat_weights(threat, index);
-                    },
-                );
             }
         }
+        self.refresh_threat_perspectives(pos, &mut stack.current_mut().accumulator, refresh);
         let acc = &mut stack.current_mut().accumulator;
         acc.computed_accumulation = true;
         acc.computed_score = false;
@@ -1590,6 +1759,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 // 1 ply: pos が正しい after-state なので差分更新可能
                 let entry_idx = path.iter().next().unwrap();
                 let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
+                let mut threat_refresh = [false; 2];
                 for perspective in [Color::Black, Color::White] {
                     let p = perspective as usize;
                     let king_sq = pos.king_square(perspective);
@@ -1609,34 +1779,22 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         self.apply_threat_rows::<true>(threat_acc, &t_added);
                     } else {
                         // overflow → full refresh
-                        threat_acc.fill(0);
-                        threat_features::for_each_active_threat_index(
-                            pos,
-                            perspective,
-                            king_sq,
-                            |idx| {
-                                self.add_threat_weights(threat_acc, idx);
-                            },
-                        );
+                        threat_refresh[p] = true;
                     }
                 }
+                self.refresh_threat_perspectives(
+                    pos,
+                    &mut stack.current_mut().accumulator,
+                    threat_refresh,
+                );
             } else {
-                // 2+ plies: full refresh（中間局面が不明）
-                for perspective in [Color::Black, Color::White] {
-                    let p = perspective as usize;
-                    let king_sq = pos.king_square(perspective);
-                    count_threat_multiply!();
-                    let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
-                    threat_acc.fill(0);
-                    threat_features::for_each_active_threat_index(
-                        pos,
-                        perspective,
-                        king_sq,
-                        |idx| {
-                            self.add_threat_weights(threat_acc, idx);
-                        },
-                    );
-                }
+                count_threat_multiply!();
+                count_threat_multiply!();
+                self.refresh_threat_perspectives(
+                    pos,
+                    &mut stack.current_mut().accumulator,
+                    [true; 2],
+                );
             }
         }
 
@@ -2534,6 +2692,61 @@ mod tests {
 
     #[cfg(feature = "nnue-threat")]
     #[test]
+    fn shared_full_refresh_matches_per_perspective_raw_accumulator() {
+        fn check<const N: usize>() {
+            let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
+            ft.has_threat = true;
+            for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
+                *w = (i as u8).wrapping_mul(73).wrapping_add((i / N) as u8) as i8;
+            }
+            threat_features::for_each_full_refresh_test_position(|pos| {
+                let mut expected = [[0i16; N]; 2];
+                for perspective in [Color::Black, Color::White] {
+                    threat_features::for_each_active_threat_index(
+                        pos,
+                        perspective,
+                        pos.king_square(perspective),
+                        |index| {
+                            for (a, &w) in expected[perspective.index()]
+                                .iter_mut()
+                                .zip(ft.threat_weight_row(index))
+                            {
+                                *a = a.wrapping_add(i16::from(w));
+                            }
+                        },
+                    );
+                }
+                let mut actual = AccumulatorLayerStacks::<N>::new();
+                for refresh in [[true, true], [true, false], [false, true], [false, false]] {
+                    actual.threat_accumulation.fill([i16::MAX; N]);
+                    ft.refresh_threat_perspectives(pos, &mut actual, refresh);
+                    for p in 0..2 {
+                        assert_eq!(
+                            actual.get_threat(p),
+                            if refresh[p] {
+                                &expected[p]
+                            } else {
+                                &[i16::MAX; N]
+                            }
+                        );
+                    }
+                }
+                ft.refresh_accumulator(pos, &mut actual);
+                assert_eq!(actual.threat_accumulation, expected);
+                let mut cache = AccumulatorCacheLayerStacks::<N>::new();
+                ft.refresh_accumulator_with_cache(pos, &mut actual, &mut cache);
+                assert_eq!(actual.threat_accumulation, expected);
+                let mut stack = AccumulatorStackLayerStacks::<N>::new();
+                ft.update_with_threat_ancestor(pos, &mut stack, Some(&mut cache));
+                assert_eq!(stack.current().accumulator.threat_accumulation, expected);
+            });
+        }
+        check::<32>();
+        check::<288>();
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
     fn threat_ancestor_matches_full_refresh() {
         use crate::movegen::{MoveList, generate_legal};
         const N: usize = if cfg!(feature = "threat-width-512") {
@@ -2700,6 +2913,103 @@ mod tests {
 
     #[cfg(feature = "nnue-threat")]
     #[test]
+    fn full_threat_batches_match_wrapping_scalar() {
+        fn check<const N: usize>() {
+            let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
+            let mut weights = AlignedBox::<i8>::new_zeroed(N * 3);
+            for (i, w) in weights.iter_mut().enumerate() {
+                *w = match i % 7 {
+                    0 => i8::MIN,
+                    1 => i8::MAX,
+                    _ => (i as u8).wrapping_mul(73) as i8,
+                };
+            }
+            ft.threat_weights = weights.into();
+            for count in [0, 1, 3, 133, 173, 191, 192, 193, 385, 769] {
+                for repeated in [false, true] {
+                    let mut actual = [i16::MAX; N];
+                    let mut expected = [0i16; N];
+                    let mut batch = ThreatRefreshBatch::new();
+                    for i in 0..count {
+                        let index = if repeated { 0 } else { i % 3 };
+                        batch.push(&ft, &mut actual, index);
+                        for (a, &w) in expected.iter_mut().zip(ft.threat_weight_row(index)) {
+                            *a = a.wrapping_add(i16::from(w));
+                        }
+                    }
+                    batch.flush(&ft, &mut actual);
+                    assert_eq!(actual, expected, "width {N}, count {count}, repeated {repeated}");
+                }
+            }
+            for count in [0, 1, 3, 192] {
+                let indices = vec![0; count];
+                let mut actual =
+                    std::array::from_fn(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN });
+                let mut expected = actual;
+                for &index in &indices {
+                    for (a, &w) in expected.iter_mut().zip(ft.threat_weight_row(index)) {
+                        *a = a.wrapping_add(i16::from(w));
+                    }
+                }
+                ft.apply_threat_refresh_batch::<false>(&mut actual, &indices);
+                assert_eq!(actual, expected, "continuation width {N}, count {count}");
+            }
+        }
+        check::<96>();
+        check::<128>();
+        check::<256>();
+        check::<288>();
+        check::<512>();
+        check::<768>();
+        check::<1536>();
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn full_threat_refresh_matches_scalar_raw_accumulator() {
+        const N: usize = 256;
+        let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
+        ft.has_threat = true;
+        for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
+            *w = (i as u8).wrapping_mul(73).wrapping_add((i / N) as u8) as i8;
+        }
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
+            "4k4/9/9/9/9/9/9/4K4/9 b RBGSNLP 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut expected = [[0i16; N]; 2];
+            for perspective in [Color::Black, Color::White] {
+                threat_features::for_each_active_threat_index(
+                    &pos,
+                    perspective,
+                    pos.king_square(perspective),
+                    |index| {
+                        for (a, &w) in expected[perspective.index()]
+                            .iter_mut()
+                            .zip(ft.threat_weight_row(index))
+                        {
+                            *a = a.wrapping_add(i16::from(w));
+                        }
+                    },
+                );
+            }
+            let mut actual = AccumulatorLayerStacks::<N>::new();
+            ft.refresh_accumulator(&pos, &mut actual);
+            assert_eq!(actual.threat_accumulation, expected);
+            let mut cache = AccumulatorCacheLayerStacks::<N>::new();
+            ft.refresh_accumulator_with_cache(&pos, &mut actual, &mut cache);
+            assert_eq!(actual.threat_accumulation, expected);
+            let mut stack = AccumulatorStackLayerStacks::<N>::new();
+            ft.update_with_threat_ancestor(&pos, &mut stack, Some(&mut cache));
+            assert_eq!(stack.current().accumulator.threat_accumulation, expected);
+        }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
     fn batched_threat_rows_match_scalar() {
         fn check<const N: usize>() {
             let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
@@ -2737,7 +3047,7 @@ mod tests {
                 assert_eq!(actual.0, initial);
             }
         }
-        check::<48>();
+        check::<96>();
         check::<64>();
         check::<256>();
         check::<512>();
@@ -2785,7 +3095,7 @@ mod tests {
                 assert_eq!(actual.0, expected);
             }
         }
-        check::<48>();
+        check::<96>();
         check::<64>();
     }
 
