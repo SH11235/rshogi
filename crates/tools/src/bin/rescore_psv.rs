@@ -2724,11 +2724,32 @@ fn process_record_with_search(
 // 外部USIエンジンによるリスコア
 // ============================================================
 
+#[derive(Debug)]
+struct EngineReportedError(String);
+
+impl std::fmt::Display for EngineReportedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "USI engine reported error: {}", self.0)
+    }
+}
+
+impl std::error::Error for EngineReportedError {}
+
 /// 外部USIエンジンの管理構造体
 struct UsiEngine {
     child: Child,
     stdin: BufWriter<std::process::ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
+    reported_error: bool,
+}
+
+impl Drop for UsiEngine {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 impl UsiEngine {
@@ -2755,6 +2776,7 @@ impl UsiEngine {
             child,
             stdin,
             stdout,
+            reported_error: false,
         };
 
         // USIハンドシェイク
@@ -2795,7 +2817,20 @@ impl UsiEngine {
         Ok(engine)
     }
 
+    fn check_response(&mut self, line: &str) -> Result<()> {
+        if let Some(message) = line.strip_prefix("info string Error:") {
+            self.reported_error = true;
+            return Err(EngineReportedError(message.trim().to_owned()).into());
+        }
+        Ok(())
+    }
+
     fn send_command(&mut self, cmd: &str) -> Result<()> {
+        if self.reported_error && cmd != "quit" {
+            return Err(
+                EngineReportedError("engine is unusable after a reported error".into()).into()
+            );
+        }
         writeln!(self.stdin, "{cmd}")?;
         self.stdin.flush()?;
         Ok(())
@@ -2809,7 +2844,9 @@ impl UsiEngine {
             if n == 0 {
                 anyhow::bail!("Engine process closed stdout while waiting for '{expected}'");
             }
-            if line.trim() == expected {
+            let trimmed = line.trim();
+            self.check_response(trimmed)?;
+            if trimmed == expected {
                 break;
             }
         }
@@ -2825,7 +2862,9 @@ impl UsiEngine {
             if n == 0 {
                 anyhow::bail!("Engine process closed stdout while waiting for bestmove");
             }
-            if line.trim().starts_with("bestmove") {
+            let trimmed = line.trim();
+            self.check_response(trimmed)?;
+            if trimmed.starts_with("bestmove") {
                 break;
             }
         }
@@ -2851,6 +2890,7 @@ impl UsiEngine {
                 anyhow::bail!("Engine process closed stdout during evaluation");
             }
             let trimmed = line.trim();
+            self.check_response(trimmed)?;
 
             // score cp / score mate を抽出（最後のinfo行のものを採用）
             if trimmed.starts_with("info") {
@@ -2885,6 +2925,13 @@ impl UsiEngine {
         let _ = self.child.wait();
         Ok(())
     }
+}
+
+struct EngineChunkResult {
+    engine_idx: usize,
+    scores: Vec<Option<i32>>,
+    died: bool,
+    reported_error: Option<anyhow::Error>,
 }
 
 /// 外部USIエンジンでファイルを処理（複数エンジン並列対応）。チャンクストリーミング
@@ -2993,6 +3040,7 @@ fn process_file_with_engine(
         // 生存エンジンに再割り当てして評価し切る（出力順を崩さないため、
         // 次チャンクへは持ち越さない）。
         // None = 未評価、Some(None) = 評価失敗、Some(Some(cp)) = 評価済み
+        let reported_failure = AtomicBool::new(false);
         let mut chunk_scores: Vec<Option<Option<i32>>> = vec![None; chunk.len()];
         let mut pending: Vec<usize> = (0..chunk.len()).collect();
 
@@ -3006,20 +3054,23 @@ fn process_file_with_engine(
             }
             let slice_size = pending.len().div_ceil(alive_engines.len()).max(1);
 
-            // (エンジン番号, 担当 index 列先頭からの評価値列, エンジン死亡フラグ)
             let chunk_ref = &chunk;
-            let results: Vec<(usize, Vec<Option<i32>>, bool)> = thread::scope(|s| {
+            let results: Vec<EngineChunkResult> = thread::scope(|s| {
                 let handles: Vec<_> = alive_engines
                     .iter_mut()
                     .zip(pending.chunks(slice_size))
                     .map(|((engine_idx, engine), idx_slice)| {
                         let engine_idx = *engine_idx;
                         let progress = progress.clone();
+                        let reported_failure = &reported_failure;
                         s.spawn(move || {
                             let mut scores = Vec::with_capacity(idx_slice.len());
                             let mut died = false;
+                            let mut reported_error = None;
                             for &i in idx_slice {
-                                if INTERRUPTED.load(Ordering::SeqCst) {
+                                if INTERRUPTED.load(Ordering::SeqCst)
+                                    || reported_failure.load(Ordering::Relaxed)
+                                {
                                     break;
                                 }
                                 let sfen = &chunk_ref[i].1;
@@ -3034,6 +3085,10 @@ fn process_file_with_engine(
                                         if verbose {
                                             eprintln!("Engine error for {sfen}: {e}");
                                         }
+                                        if e.is::<EngineReportedError>() {
+                                            reported_failure.store(true, Ordering::Relaxed);
+                                            reported_error = Some(e);
+                                        }
                                         scores.push(None);
                                         died = true;
                                         progress.inc(1);
@@ -3042,7 +3097,12 @@ fn process_file_with_engine(
                                 }
                                 progress.inc(1);
                             }
-                            (engine_idx, scores, died)
+                            EngineChunkResult {
+                                engine_idx,
+                                scores,
+                                died,
+                                reported_error,
+                            }
                         })
                     })
                     .collect();
@@ -3055,7 +3115,21 @@ fn process_file_with_engine(
             // 評価結果を chunk 添字へ反映し、死亡ワーカーの未評価分を再キューする
             let mut next_pending: Vec<usize> = Vec::new();
             let mut idx_slices = pending.chunks(slice_size);
-            for (engine_idx, scores, died) in results {
+            for EngineChunkResult {
+                engine_idx,
+                scores,
+                died,
+                reported_error,
+            } in results
+            {
+                if let Some(error) = reported_error {
+                    return Err(match writer.flush() {
+                        Ok(()) => error,
+                        Err(flush_error) => {
+                            error.context(format!("partial output flush failed: {flush_error}"))
+                        }
+                    });
+                }
                 let idx_slice = idx_slices.next().unwrap_or(&[]);
                 for (&i, score) in idx_slice.iter().zip(&scores) {
                     chunk_scores[i] = Some(*score);
@@ -6337,6 +6411,171 @@ fn process_file_with_dlshogi_onnx(
         progress,
         onnx_sessions,
     )
+}
+
+#[cfg(all(test, unix))]
+mod usi_reported_error_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mock_engine(mode: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("engine");
+        let script = format!(
+            r#"#!/bin/sh
+mode={mode}
+queries=0
+newgames=0
+printf '%s\n' "$$" > "$0.pid"
+while IFS= read -r line; do
+  case "$line" in
+    usi)
+      test "$mode" != usi || printf '%s\n' 'info string Error: handshake failure'
+      printf '%s\n' usiok ;;
+    isready)
+      test "$mode" != ready || printf '%s\n' 'info string Error: ready failure'
+      printf '%s\n' readyok ;;
+    usinewgame)
+      newgames=$((newgames+1))
+      if test "$mode" = newgame && test "$newgames" -gt 1; then
+        printf '%s\n' 'info string Error: newgame failure'
+      fi ;;
+    position*)
+      if test "$mode" = position && test "$queries" -ge 2; then
+        printf '%s\n' 'info string Error: position failure'
+      fi ;;
+    go*)
+      queries=$((queries+1))
+      if test "$queries" -le 2; then
+        test "$mode" != warmup || printf '%s\n' 'info string Error: warmup failure'
+        printf '%s\n' 'info depth 1 score cp 123 nodes 1' 'bestmove 7g7f'
+      elif test "$mode" = error || test "$mode" = score_error; then
+        test "$mode" != score_error || printf '%s\n' 'info depth 1 score cp 456 nodes 1'
+        printf '%s\n' 'info string Error: query failure' 'bestmove resign'
+      elif test "$mode" = resign; then
+        printf '%s\n' 'bestmove resign'
+      else
+        printf '%s\n' 'info string diagnostic Error: benign text' 'info depth 1 score cp 37 nodes 1' 'bestmove 7g7f'
+      fi ;;
+    quit) exit 0 ;;
+    setoption*) : ;;
+    *) exit 2 ;;
+  esac
+done
+"#
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (directory, path)
+    }
+
+    fn open_engine(path: &std::path::Path) -> Result<UsiEngine> {
+        UsiEngine::new(path, &[], std::time::Duration::from_secs(1))
+    }
+
+    #[test]
+    fn initialization_reported_errors_stop_and_reap_engine() {
+        for mode in ["usi", "ready", "warmup"] {
+            let (directory, path) = mock_engine(mode);
+            let error = match open_engine(&path) {
+                Ok(_) => panic!("reported {mode} error accepted"),
+                Err(error) => error,
+            };
+            assert!(error.is::<EngineReportedError>(), "{mode}: {error:?}");
+            #[cfg(target_os = "linux")]
+            {
+                let pid = std::fs::read_to_string(directory.path().join("engine.pid")).unwrap();
+                assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+            }
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn reported_error_overrides_scores_and_prevents_queued_resign_reuse() {
+        for mode in ["error", "score_error", "newgame", "position"] {
+            let (directory, path) = mock_engine(mode);
+            let mut engine = open_engine(&path).unwrap();
+            engine.send_command("usinewgame").unwrap();
+            let error = engine.evaluate_position("root", 1).unwrap_err();
+            assert!(error.is::<EngineReportedError>(), "{mode}: {error:?}");
+            assert!(engine.evaluate_position("next", 1).unwrap_err().is::<EngineReportedError>());
+            if mode == "error" || mode == "score_error" {
+                let mut queued = String::new();
+                engine.stdout.read_line(&mut queued).unwrap();
+                assert_eq!(queued.trim(), "bestmove resign");
+            }
+            engine.quit().unwrap();
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn scoreless_resign_and_nonerror_diagnostic_remain_valid() {
+        for (mode, expected) in [("resign", -30000), ("normal", 37)] {
+            let (directory, path) = mock_engine(mode);
+            let mut engine = open_engine(&path).unwrap();
+            assert_eq!(engine.evaluate_position("root", 0).unwrap(), Some(expected));
+            assert_eq!(engine.evaluate_position("next", 1).unwrap(), Some(expected));
+            assert!(!engine.reported_error);
+            engine.quit().unwrap();
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn reported_error_aborts_chunk_even_with_another_live_engine() {
+        let (normal_directory, normal_path) = mock_engine("normal");
+        let (error_directory, error_path) = mock_engine("error");
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.psv");
+        let output = directory.path().join("output.psv");
+        let mut position = Position::new();
+        position
+            .set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        let record = PackedSfenValue {
+            sfen: pack_position(&position),
+            score: 17,
+            move16: 0,
+            game_ply: 1,
+            game_result: 0,
+            padding: 0,
+        }
+        .to_bytes();
+        let original = record.repeat(2);
+        std::fs::write(&input, &original).unwrap();
+        let cli = Cli::try_parse_from([
+            "rescore_psv",
+            "--input",
+            input.to_str().unwrap(),
+            "--output-dir",
+            directory.path().to_str().unwrap(),
+            "--engine",
+            error_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let protection = OutputProtection::new(vec![input.clone()], vec![output.clone()]).unwrap();
+        let mut engines = vec![
+            open_engine(&normal_path).unwrap(),
+            open_engine(&error_path).unwrap(),
+        ];
+        let progress = MultiFileProgress::new(2, 1, "reported-error-test");
+        let file = progress.start_file("one chunk", 0, 2);
+        let error =
+            process_file_with_engine(&protection, &cli, &mut engines, &input, &output, 2, &file)
+                .unwrap_err();
+        assert!(error.is::<EngineReportedError>(), "{error:?}");
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(std::fs::metadata(&output).unwrap().len(), 0);
+        assert!(!marker_path_for(&output).exists());
+        assert!(engines[1].reported_error);
+        drop(engines);
+        drop(normal_directory);
+        drop(error_directory);
+    }
 }
 
 #[cfg(test)]

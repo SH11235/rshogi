@@ -16,6 +16,17 @@ PSV（PackedSfenValue）ファイルの評価値（score）を付け替えるツ
 主要ユースケースは **dlshogi 系 ONNX モデル + TensorRT FP16** での一括リスコア。
 以下のクイックスタートがその導線になっている。
 
+## 外部 USI エンジンの明示エラー
+
+`--engine` の応答に `info string Error:` があれば、初期化・ウォームアップ・局面評価を
+失敗として停止します。そのエンジンの後続応答を別局面の評価に使わず、エラーが起きた
+チャンクのラベルを書き出しません。先行チャンクの出力は残る場合があります。
+`--delete-input` も実行しません。明示エラーのない `bestmove resign` は、評価値がなければ
+従来どおり -30000 として扱います。
+
+`--engine-nodes 0` は `go depth 1` を送ります。深さ指定に対応しないエンジンには
+正の `--engine-nodes`（既定値は1）を使ってください。
+
 ## stm-tokens-v1 モデル
 
 `--dlshogi-onnx-model` は、標準 dlshogi の float32 特徴量モデルに加え、
