@@ -8,7 +8,7 @@ pub mod cache;
 pub mod environment;
 pub mod features;
 pub mod input;
-pub use input::{EncodedInput, InputBuffer};
+pub use input::{EncodedBatch, EncodedInput, InputBatchBuffer, InputBuffer};
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod tokens;
@@ -33,6 +33,21 @@ pub trait Evaluator {
     /// 対応する実装は、形式不一致や推論失敗をエラーにし、Position による再試行を要求しない。
     fn evaluate_encoded(&mut self, _: EncodedInput<'_>, _: &mut [f32]) -> Result<Option<f32>> {
         Ok(None)
+    }
+
+    /// 明示的な encode 済み batch 推論の最大局面数。入力形式の宣言だけでは対応を意味しない。
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    /// 局面順の value と平坦な policy を返す。未対応はエラー。失敗時は両出力を変更しない。
+    fn evaluate_encoded_batch(
+        &mut self,
+        _: EncodedBatch<'_>,
+        _: &mut [f32],
+        _: &mut [f32],
+    ) -> Result<()> {
+        anyhow::bail!("encoded batch inference is unsupported")
     }
 
     /// 手番側の期待スコア（勝ち 1・引き分け 0.5・負け 0）と共通の 2187 policy logits を返す。

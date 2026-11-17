@@ -10,11 +10,11 @@ use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use crate::EncodedInput;
 use crate::features::{
     FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
     make_input_features,
 };
+use crate::{EncodedBatch, EncodedInput};
 
 /// ONNX value evaluator の設定
 pub struct OnnxConfig {
@@ -290,6 +290,22 @@ impl OnnxEvaluator {
         out: &mut Vec<f32>,
         policy_out: Option<&mut Vec<f32>>,
     ) -> Result<()> {
+        Self::forward_inputs(session, n, first, second, policy_out.is_some(), |values, policy| {
+            out.extend_from_slice(values);
+            if let Some(output) = policy_out {
+                output.extend_from_slice(policy.expect("requested policy"));
+            }
+        })
+    }
+
+    fn forward_inputs<R>(
+        session: &mut Session,
+        n: usize,
+        first: &[f32],
+        second: &[f32],
+        need_policy: bool,
+        consume: impl FnOnce(&[f32], Option<&[f32]>) -> R,
+    ) -> Result<R> {
         let shape1: [usize; 4] = [n, INPUT1_CHANNELS, 9, 9];
         let input1 = TensorRef::<f32>::from_array_view((shape1, first)).map_err(ort_err)?;
         let shape2: [usize; 4] = [n, INPUT2_CHANNELS, 9, 9];
@@ -318,25 +334,22 @@ impl OnnxEvaluator {
             "value must be a finite probability"
         );
 
-        for &winrate in values.iter().take(n) {
-            out.push(winrate);
-        }
-
-        if let Some(policy_out) = policy_out {
+        let policy = if need_policy {
             let (shape, logits) =
                 outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
-            if shape.as_ref() != [n as i64, MAX_MOVE_LABEL_NUM as i64] {
-                anyhow::bail!(
-                    "policy output shape mismatch: expected [{n}, {MAX_MOVE_LABEL_NUM}], got {shape:?}"
-                );
-            }
+            anyhow::ensure!(
+                shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
+                "policy output shape mismatch: {shape:?}"
+            );
             anyhow::ensure!(
                 logits.iter().all(|v| v.is_finite()),
                 "policy contains non-finite logits"
             );
-            policy_out.extend_from_slice(logits);
-        }
-        Ok(())
+            Some(logits)
+        } else {
+            None
+        };
+        Ok(consume(values, policy))
     }
 
     fn run_single(
@@ -447,6 +460,36 @@ impl crate::Evaluator for OnnxEvaluator {
     fn input_format(&self) -> Option<crate::InputFormat> {
         Some(crate::InputFormat::Basic)
     }
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        Some(self.batch_size)
+    }
+
+    fn evaluate_encoded_batch(
+        &mut self,
+        input: EncodedBatch<'_>,
+        values: &mut [f32],
+        policies: &mut [f32],
+    ) -> Result<()> {
+        let (first, second) = input
+            .basic()
+            .ok_or_else(|| anyhow::anyhow!("basic evaluator requires basic encoded batch"))?;
+        validate_batch_outputs(input.len(), self.batch_size, values, policies)?;
+        if input.is_empty() {
+            return Ok(());
+        }
+        Self::forward_inputs(
+            &mut self.session,
+            input.len(),
+            first,
+            second,
+            true,
+            |result, policy| {
+                values.copy_from_slice(result);
+                policies.copy_from_slice(policy.expect("requested policy"));
+            },
+        )
+    }
+
     fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
         self.run_single(logits, |evaluator, values, policy| {
             evaluator.evaluate_with_policy(
@@ -564,6 +607,20 @@ impl ModelEvaluator {
     }
 }
 
+fn validate_batch_outputs(
+    n: usize,
+    capacity: usize,
+    values: &[f32],
+    policies: &[f32],
+) -> Result<()> {
+    anyhow::ensure!(n <= capacity, "batch capacity exceeded");
+    anyhow::ensure!(
+        values.len() == n && n.checked_mul(MAX_MOVE_LABEL_NUM) == Some(policies.len()),
+        "incorrect output buffers"
+    );
+    Ok(())
+}
+
 /// `stm-tokens-v1` の再利用可能な入力 buffer と ORT session。
 pub struct TokenEvaluator {
     session: Session,
@@ -601,6 +658,31 @@ impl TokenEvaluator {
             &self.tokens[..n * crate::tokens::TOKEN_COUNT],
             values_out,
             policy_out,
+        )
+    }
+
+    fn run_encoded_batch(
+        &mut self,
+        input: EncodedBatch<'_>,
+        values: &mut [f32],
+        policies: &mut [f32],
+    ) -> Result<()> {
+        let tokens = input
+            .tokens()
+            .ok_or_else(|| anyhow::anyhow!("token evaluator requires token encoded batch"))?;
+        validate_batch_outputs(input.len(), self.batch_size, values, policies)?;
+        if input.is_empty() {
+            return Ok(());
+        }
+        for (slot, &token) in self.tokens.iter_mut().zip(tokens) {
+            *slot = i64::from(token);
+        }
+        Self::run_inputs(
+            &mut self.session,
+            input.len(),
+            &self.tokens[..tokens.len()],
+            values,
+            policies,
         )
     }
 
@@ -666,6 +748,25 @@ impl crate::Evaluator for ModelEvaluator {
             Self::Basic(_) => crate::InputFormat::Basic,
             Self::Tokens(_) => crate::InputFormat::StmTokensV1,
         })
+    }
+
+    fn encoded_batch_capacity(&self) -> Option<usize> {
+        Some(match self {
+            Self::Basic(e) => e.batch_size,
+            Self::Tokens(e) => e.batch_size,
+        })
+    }
+
+    fn evaluate_encoded_batch(
+        &mut self,
+        input: EncodedBatch<'_>,
+        values: &mut [f32],
+        policies: &mut [f32],
+    ) -> Result<()> {
+        match self {
+            Self::Basic(e) => crate::Evaluator::evaluate_encoded_batch(e, input, values, policies),
+            Self::Tokens(e) => e.run_encoded_batch(input, values, policies),
+        }
     }
 
     fn evaluate(&mut self, position: &Position, logits: &mut [f32]) -> Result<f32> {
