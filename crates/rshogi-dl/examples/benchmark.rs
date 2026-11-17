@@ -1,3 +1,5 @@
+mod support;
+
 use std::hint::black_box;
 use std::io::{self, BufRead, Read};
 use std::path::PathBuf;
@@ -517,7 +519,11 @@ fn run(config: &Config, positions: &[Position]) -> Result<Value> {
     Ok(report)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    support::finish(run_command());
+}
+
+fn run_command() -> Result<()> {
     let config = Config::parse(std::env::args().skip(1))?;
     let started = Instant::now();
     let positions = read_positions(io::stdin().lock())?;
