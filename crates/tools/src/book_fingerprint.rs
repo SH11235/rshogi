@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
+mod model_file;
+
 /// 実行ファイルを解決する。絶対化で Windows の別候補が優先される場合は元の起動名を保つ。
 pub fn resolve_engine_path(engine: &Path) -> Result<PathBuf> {
     let selected = selected_engine_path(engine)?;
@@ -195,13 +197,16 @@ fn digest(path: &Path, ancestors: &mut BTreeSet<PathBuf>) -> Result<String> {
 /// 明示したモデル資源があり、既定モデルの推測なしに再利用できるかを返す。
 pub fn has_explicit_model(values: &[String]) -> Result<bool> {
     Ok(options(values)?.iter().any(|(name, value)| {
-        (name.eq_ignore_ascii_case("EvalFile") || name.eq_ignore_ascii_case("EvalDir"))
+        (name.eq_ignore_ascii_case("EvalFile")
+            || name.eq_ignore_ascii_case("EvalDir")
+            || name.eq_ignore_ascii_case("ModelFile"))
             && !matches!(value.as_str(), "" | "none" | "<empty>")
     }))
 }
 
 struct Resources {
     paths: Vec<PathBuf>,
+    model_hashes: BTreeMap<PathBuf, String>,
     reusable: bool,
 }
 
@@ -215,18 +220,23 @@ impl Resources {
     }
 }
 
-fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resources {
+fn resolved_resources(
+    engine: &Path,
+    parsed: &BTreeMap<String, String>,
+    identify_models: bool,
+) -> Resources {
     let selected = selected_engine_path(engine).unwrap_or_else(|_| engine.to_owned());
     let engine = selected.as_path();
     let mut resources = Resources {
         paths: vec![engine.to_owned()],
+        model_hashes: BTreeMap::new(),
         reusable: false,
     };
     let eval_dir = parsed.get("EvalDir").map(PathBuf::from);
     let book_file = parsed.get("BookFile");
     for (name, value) in parsed {
         match name.as_str() {
-            "EvalFile" | "EvalDir" => {
+            "EvalFile" | "EvalDir" | "ModelFile" => {
                 if matches!(value.as_str(), "" | "<empty>" | "<auto>" | "none") {
                     continue;
                 }
@@ -240,6 +250,18 @@ fn resolved_resources(engine: &Path, parsed: &BTreeMap<String, String>) -> Resou
     }
     for (name, value) in parsed {
         match name.as_str() {
+            "ModelFile" => {
+                let path = PathBuf::from(value);
+                let identity = identify_models.then(|| model_file::identify(&path));
+                let stable = match identity {
+                    Some(Ok((hash, complete))) => {
+                        resources.model_hashes.insert(path.clone(), hash);
+                        complete && path.is_absolute()
+                    }
+                    _ => false,
+                };
+                resources.add(path, stable);
+            }
             "EvalFile" => {
                 if matches!(value.as_str(), "" | "<empty>" | "<auto>" | "none") {
                     continue;
@@ -419,17 +441,22 @@ fn is_executable_file(path: &Path) -> bool {
 /// 解決できた読込資源を返す。不確実な option の実在を fresh 起動の条件にしない。
 pub fn readonly_resources(engine: &Path, values: &[String]) -> Result<Vec<PathBuf>> {
     ensure_no_engine_options(engine)?;
-    Ok(resolved_resources(engine, &options(values)?).paths)
+    Ok(resolved_resources(engine, &options(values)?, false).paths)
 }
 
 /// 読込資源の内容を識別する。解決を保証できない設定には実行固有の値を含める。
 pub fn engine_fingerprint(engine: &Path, values: &[String]) -> Result<String> {
     ensure_no_engine_options(engine)?;
     let parsed = options(values)?;
-    let mut resources = resolved_resources(engine, &parsed);
+    let mut resources = resolved_resources(engine, &parsed, true);
     let mut hashes = Vec::new();
     for path in &resources.paths {
-        match content_digest(path) {
+        let hash = resources
+            .model_hashes
+            .get(path)
+            .cloned()
+            .map_or_else(|| content_digest(path), Ok);
+        match hash {
             Ok(hash) => hashes.push((path, hash)),
             Err(_) => resources.reusable = false,
         }
@@ -640,6 +667,88 @@ mod tests {
         assert!(!has_explicit_model(&["EvalFile=none".into()]).unwrap());
         assert!(has_explicit_model(&["EvalFile=model.bin".into()]).unwrap());
         assert!(has_explicit_model(&["EvalFile=a".into(), "evalfile=b".into()]).is_err());
+        assert!(has_explicit_model(&["ModelFile=model.onnx".into()]).unwrap());
+        assert!(!has_explicit_model(&["ModelFile=<empty>".into()]).unwrap());
+    }
+
+    #[test]
+    fn self_contained_model_file_has_content_identity_and_readonly_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.onnx");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&model, model_file::fixture(&[0, 0, 128, 63])).unwrap();
+        let options = vec![format!("ModelFile={}", model.display())];
+        let first = engine_fingerprint(&engine, &options).unwrap();
+        assert_eq!(first, engine_fingerprint(&engine, &options).unwrap());
+        assert!(first.starts_with("content-v2:"));
+        assert!(readonly_resources(&engine, &options).unwrap().contains(&model));
+        std::fs::write(&model, model_file::fixture(&[0, 0, 0, 64])).unwrap();
+        assert_ne!(first, engine_fingerprint(&engine, &options).unwrap());
+    }
+
+    #[test]
+    fn unresolved_unknown_and_external_model_files_disable_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.onnx");
+        std::fs::write(&engine, b"engine").unwrap();
+        for bytes in [
+            b"unknown model format".to_vec(),
+            vec![8, 10, 58, 4, 42, 2, 112, 1],
+            vec![8, 10, 58, 4, 42, 2, 106, 0],
+        ] {
+            std::fs::write(&model, bytes).unwrap();
+            let options = vec![format!("ModelFile={}", model.display())];
+            assert!(readonly_resources(&engine, &options).unwrap().contains(&model));
+            assert_ne!(
+                engine_fingerprint(&engine, &options).unwrap(),
+                engine_fingerprint(&engine, &options).unwrap()
+            );
+        }
+        for value in ["model.onnx", "missing.onnx", "", "<empty>", "none"] {
+            let options = vec![format!("ModelFile={value}")];
+            assert_ne!(
+                engine_fingerprint(&engine, &options).unwrap(),
+                engine_fingerprint(&engine, &options).unwrap()
+            );
+        }
+        let relative_dir = tempfile::tempdir_in(".").unwrap();
+        let relative_model = relative_dir.path().join("relative.onnx");
+        std::fs::write(&relative_model, model_file::fixture(&[0; 4])).unwrap();
+        let current = std::env::current_dir().unwrap();
+        let relative = relative_model.strip_prefix(&current).unwrap_or(&relative_model);
+        assert!(relative.is_relative());
+        let options = vec![format!("ModelFile={}", relative.display())];
+        assert!(readonly_resources(&engine, &options).unwrap().contains(&relative.to_owned()));
+        assert_ne!(
+            engine_fingerprint(&engine, &options).unwrap(),
+            engine_fingerprint(&engine, &options).unwrap()
+        );
+        let unknown = dir.path().join("model.bin");
+        std::fs::write(&unknown, model_file::fixture(&[0; 4])).unwrap();
+        let options = vec![format!("ModelFile={}", unknown.display())];
+        assert_ne!(
+            engine_fingerprint(&engine, &options).unwrap(),
+            engine_fingerprint(&engine, &options).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_model_target_changes_invalidate_the_content_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let original = dir.path().join("weights.onnx");
+        let alias = dir.path().join("model.onnx");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&original, model_file::fixture(&[0; 4])).unwrap();
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        let options = vec![format!("ModelFile={}", alias.display())];
+        let before = engine_fingerprint(&engine, &options).unwrap();
+        assert_eq!(before, engine_fingerprint(&engine, &options).unwrap());
+        std::fs::write(&original, model_file::fixture(&[1; 4])).unwrap();
+        assert_ne!(before, engine_fingerprint(&engine, &options).unwrap());
     }
 
     #[test]
