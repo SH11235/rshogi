@@ -158,6 +158,8 @@ pub(super) fn nnue_evaluate_cached(
     }
     let key = pos.key();
     if let Some(raw) = ctx.eval_hash.probe(key) {
+        #[cfg(feature = "search-stats")]
+        super::diagnostics::add(super::diagnostics::EVAL_HASH, 1);
         return Value::new(raw);
     }
     let value = nnue_evaluate(st, pos);

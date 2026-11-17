@@ -131,3 +131,93 @@ threat の Finny cache 経路はない。universal の既存 threat 更新は全
 
 LMP の未生成手数、QuietInit 時点の LMP 残り予算、SEE の閾値関係による省略可能件数、
 search の1手詰め呼び出し後の razoring / futility 帰還のクロス集計は出力しない。
+
+## 追加の Threat・駒 FT・評価診断
+
+以下の追加経路は静的 LayerStacks が対象。universal の DynamicLayerStacks、HalfKx、
+MaterialLevel は `eval_nnue`、再登場表、駒 FT の反実仮想の対象外。
+`search-stats` 無効時は追加処理・記憶領域・診断用引数を除外する。
+出力は従来どおり `key=value` で、未使用の key も 0 を出す。
+
+### Threat の実更新
+
+`p=0` は黒視点、`p=1` は白視点。両視点を更新する要求ごとに数える。
+対象は `update_with_threat_ancestor`。最初の計算済み祖先を最大4手で探す本来の選択は変えない。
+この経路の既存 `nnue_threat_*`、`nnue_ft_*` と祖先距離も計上する。
+
+| key | 意味 |
+| --- | --- |
+| `threat_full_p[p]` / `threat_full_rows_p[p]` | 全再構築の視点数 / 実際に加算した行数 |
+| `threat_diff_p[p]` / `threat_diff_rows_p[p]` | 祖先差分の視点数 / 実際に減算・加算した行数。0行の差分も回数に含む |
+| `threat_full_reason[4*p+r]` | full の理由。r=0: 4手以内に計算済み祖先なし（鎖の終端・欠落も含む）、1: 選択した祖先と HM 不一致、2: 差分リストの容量超過、3: その他。HM 不一致と溢れが重なる場合は HM を優先 |
+| `threat_full_sides[n]` | n 視点が full だった要求数。0=両側差分、1=片側 full、2=両側 full |
+| `threat_distance[d-1]` | 選択した祖先が d 手前だった要求数（d=1〜4）。HM 不一致・溢れでも含む |
+| `threat_touched[d-1]` | 復元中の dirty の old/new が触った盤上升の集合の要素数の合計。玉を含み、重複升を1度だけ数える |
+| `threat_changed[d-1]` | 両端の正規化した駒が異なる升数の合計。往復・成金の正規化で相殺する升は除く |
+| `threat_sources[d-1]` | 差分列挙の source 候補升数の合計。changed と、その升への両端の利き元の和集合。最終的に辺が出ない候補も含む |
+| `threat_physical_edges[d-1]` | 両視点への index 変換前の removed＋added 物理辺数の合計。採用 profile の除外を適用後。容量超過時は超過までの部分数 |
+| `threat_endpoint_success[d-1]` | 両端差分の列挙が容量内で完了した要求数。HM 不一致でも含む |
+| `threat_endpoint_rows[2*(d-1)+p]` | 上記成功要求の、視点 p の removed＋added index 数の合計。HM 不一致で実適用しない行も含む |
+
+changed/source は差分列挙を試みた要求について数え、溢れでも含む。
+両端が同一なら changed/source/辺/行数は0、成功回数は1。
+`touched` と `changed` は異なる集合であり、行数も SIMD 命令数ではない。
+
+### Threat の最大8／12手の反実仮想
+
+| key | 意味 |
+| --- | --- |
+| `threat_rescued[2*h+p]` | 実処理で full になった視点について、上限8手（h=0）／12手（h=1）なら差分更新できる回数 |
+| `threat_rescued_rows[2*h+p]` | 上記の救済候補の removed＋added 行数の合計 |
+
+現在の盤面の診断専用コピーを undo し、上限内の計算済み祖先を近い順に調べる。
+視点ごとに HM が一致し、**両視点の差分リストが容量内**である最初の祖先を候補とする。
+近い祖先が HM 不一致でも古い祖先を調べるため、4手以内の別祖先による救済も含む。
+8手と12手の値は累積であり、12手だけの増分は両者の差。
+診断中の列挙は既存 NNUE stats と実更新の geometry/行数 counter を増やさない。
+実際の accumulator・Finny・TT へは適用しない。
+
+### 駒 FT と Finny の同時比較
+
+h=0／1／2 は祖先探索の上限2／4／8手。各上限内の**最も近い計算済み祖先**を選ぶ。
+ちょうど2／4／8手に限定する数でも、行数最小の祖先を選ぶ数でもない。
+valid Finny entry を使った視点だけを実行行数と対応させる。invalid entry の bias からの構築は除く。
+
+| key | 意味 |
+| --- | --- |
+| `ft_finny_evals` | valid Finny refresh を1視点以上使った更新要求数。反実仮想の祖先の有無によらない |
+| `ft_cf_paired[h]` | Finny と反実仮想の両方の行数が得られた視点数 |
+| `ft_cf_finny_rows[h]` / `ft_cf_ancestor_rows[h]` | 対応する視点の実 Finny 行数 / 祖先の両端差分行数の合計 |
+| `ft_cf_saved[h]` | 祖先の方が行数が少ない対応視点数。割合の分母は `ft_cf_paired[h]` |
+| `ft_cf_distance[h]` / `ft_cf_dirty[h]` | 対応視点の祖先距離 / そこまでに読んだ dirty 駒エントリ数の合計。両視点対応時は2視点分 |
+| `ft_cf_missing[h]` | valid Finny 視点のうち、上限内に計算済み祖先がない数。鎖の終端・欠落、未対応の effect bucket も含む |
+| `ft_cf_delta[9*h+b]` | 対応視点の「Finny 行数 − 祖先行数」の分布。b=0: −9以下、1: −8〜−5、2: −4〜−2、3: −1、4: 0、5: 1、6: 2〜4、7: 5〜8、8: 9以上 |
+| `ft_cf_eval[2*h]` / `ft_cf_eval[2*h+1]` | 対応視点がある要求数 / その対応視点の合計行数が純減した要求数。割合の分母は前者（祖先なしも含む割合なら `ft_finny_evals`） |
+| `ft_cf_single[h]` | 対応視点が片側だけだった要求数。もう片側が Finny でない場合も含む |
+| `ft_cf_equal[h]` | 対応視点の合計行数が同じだった要求数。copy/store 費用の候補量であり、実際のコピー命令数ではない |
+
+診断用の40駒の BonaPiece 列を dirty の PieceNumber ごとに逆順に戻し、
+各駒の祖先・現在の特徴 index を比較する。途中の往復は相殺するが、異なる駒番号間では相殺しない。
+玉位置による正規化も各端の玉で index 化し、正規化が変わる場合は動かなかった駒の行も差分に含む。
+祖先 accumulator の数値、Finny の値・駒リスト・valid flag は読み書きしない。
+祖先の計算済みフラグだけを読み、変更しない。
+この行数比較には祖先からの accumulator copy、Finny への同期書込み、探索・dirty 整理の命令費用を含めない。
+反実仮想の経路を採用した際の速度改善率を表すものではない。
+
+### 評価の取得元と同一入力の再登場
+
+| key | 意味 |
+| --- | --- |
+| `eval_tt_lazy` | 通常探索の `use-lazy-evaluate` または qsearch で TT の静的評価を再利用した回数。TT 値だけで探索を打ち切り、静的評価の取得まで進まない node は除く |
+| `eval_hash` | `nnue_evaluate_cached` が EvalHash hit で返った回数 |
+| `eval_computed_score` | 計算済み score の再利用数。現行の静的 LayerStacks にはこの帰還経路がないため常に0。計算済み accumulator の再利用 (`nnue_acc_reused`) とは別 |
+| `eval_nnue` | SearchEvaluator の静的 LayerStacks 経路で実際に forward に進んだ回数。計算済み accumulator でも含む |
+| `eval_nnue_repeat` | 上記のうち、直近4096回以内に同じ入力が診断表に残っていた回数 |
+| `eval_nnue_collision` | 有効期限内の slot が異なる key または異なる完全入力で占有されていた回数 |
+
+再登場率は `eval_nnue_repeat / eval_nnue`。4096 entry の thread-local direct-mapped 表を使い、
+局面 hash の下位12 bit で候補を引く。hash 全体に加え、盤上81升の駒・両者の手駒・手番を完全照合する。
+異なる駒番号でも同じ盤・手駒・手番なら一致する。手数・千日手履歴・PASS 権は入力照合に含めない。
+各記録に実 NNUE 回数の連番を保存し、最後の同 slot 記録から4096回超は期限切れとする。
+slot の追い出しによる見逃しがあるため、直近4096回を全件探索した重複率の下限値となる。
+評価値は表に保存せず、hit でも必ず通常の評価を実行する。探索開始時に表と連番をリセットする。

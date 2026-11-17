@@ -495,6 +495,8 @@ pub(super) fn compute_eval_context(
             // TT eval を再利用する。
             // EvalHash hit と同じくアキュムレータは更新しない。後で評価する子孫ノードが
             // 計算済みの祖先から差分適用 / refresh して追いつく。
+            #[cfg(feature = "search-stats")]
+            super::diagnostics::add(super::diagnostics::EVAL_TT, 1);
             unadjusted_static_eval = tt_ctx.eval;
         }
         #[cfg(not(feature = "use-lazy-evaluate"))]

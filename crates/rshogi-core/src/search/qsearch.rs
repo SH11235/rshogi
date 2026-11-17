@@ -206,6 +206,8 @@ pub(super) fn qsearch<const NT: u8>(
     let mut static_eval = if in_check {
         Value::NONE
     } else if tt_hit && tt_data.eval != Value::NONE {
+        #[cfg(feature = "search-stats")]
+        super::diagnostics::add(super::diagnostics::EVAL_TT, 1);
         unadjusted_static_eval = tt_data.eval;
         unadjusted_static_eval
     } else {

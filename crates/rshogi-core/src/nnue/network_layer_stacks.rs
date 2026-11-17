@@ -1798,6 +1798,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     return;
                 }
 
+                #[cfg(feature = "search-stats")]
+                $net.feature_transformer.diagnose_ft_ancestors(pos, $stack);
                 #[cfg(feature = "nnue-threat")]
                 if $net.feature_transformer.has_threat {
                     let threat_cache = if let Some(

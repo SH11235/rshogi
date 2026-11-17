@@ -235,6 +235,10 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             },
             (removed.len() + added.len()) as u64,
         );
+        #[cfg(feature = "search-stats")]
+        if was_valid {
+            crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
+        }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,
             (!was_valid).then_some(biases),
@@ -309,6 +313,10 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             },
             (removed.len() + added.len()) as u64,
         );
+        #[cfg(feature = "search-stats")]
+        if was_valid {
+            crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
+        }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,
             (!was_valid).then_some(biases),

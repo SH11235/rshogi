@@ -90,7 +90,48 @@ pub(crate) const NNUE_EVAL_FT_FULL: usize = 191;
 pub(crate) const NNUE_EVAL_THREAT_INCREMENTAL: usize = 192;
 pub(crate) const NNUE_EVAL_THREAT_FULL: usize = 193;
 pub(crate) const NNUE_ANCESTOR_MISSING: usize = 194;
-const KEYS: [&str; 195] = [
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_FULL_P: usize = 195;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_FULL_ROWS_P: usize = 197;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_DIFF_P: usize = 199;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_DIFF_ROWS_P: usize = 201;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_FULL_REASON: usize = 203;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_FULL_SIDES: usize = 211;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_DISTANCE: usize = 214;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_TOUCHED: usize = 218;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_CHANGED: usize = 222;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_SOURCES: usize = 226;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_ENDPOINT_ROWS: usize = 230;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_RESCUED: usize = 238;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_RESCUED_ROWS: usize = 242;
+pub(crate) const FT_CF: usize = 246;
+pub(crate) const FT_CF_DELTA: usize = 267;
+pub(crate) const FT_CF_EVAL: usize = 294;
+pub(crate) const EVAL_TT: usize = 300;
+pub(crate) const EVAL_HASH: usize = 301;
+pub(crate) const EVAL_NNUE: usize = 303;
+pub(crate) const EVAL_REPEAT: usize = 304;
+pub(crate) const EVAL_COLLISION: usize = 305;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_PHYSICAL_EDGES: usize = 306;
+#[cfg(feature = "nnue-threat")]
+pub(crate) const THREAT_ENDPOINT_SUCCESS: usize = 310;
+pub(crate) const FT_CF_SINGLE: usize = 314;
+pub(crate) const FT_CF_EQUAL: usize = 317;
+pub(crate) const FT_FINNY_EVALS: usize = 320;
+const KEYS: [&str; 321] = [
     "quiet_n_depth[0]",
     "quiet_n_depth[1]",
     "quiet_n_depth[2]",
@@ -286,6 +327,132 @@ const KEYS: [&str; 195] = [
     "nnue_eval_threat_incremental",
     "nnue_eval_threat_full",
     "nnue_ancestor_missing",
+    "threat_full_p[0]",
+    "threat_full_p[1]",
+    "threat_full_rows_p[0]",
+    "threat_full_rows_p[1]",
+    "threat_diff_p[0]",
+    "threat_diff_p[1]",
+    "threat_diff_rows_p[0]",
+    "threat_diff_rows_p[1]",
+    "threat_full_reason[0]",
+    "threat_full_reason[1]",
+    "threat_full_reason[2]",
+    "threat_full_reason[3]",
+    "threat_full_reason[4]",
+    "threat_full_reason[5]",
+    "threat_full_reason[6]",
+    "threat_full_reason[7]",
+    "threat_full_sides[0]",
+    "threat_full_sides[1]",
+    "threat_full_sides[2]",
+    "threat_distance[0]",
+    "threat_distance[1]",
+    "threat_distance[2]",
+    "threat_distance[3]",
+    "threat_touched[0]",
+    "threat_touched[1]",
+    "threat_touched[2]",
+    "threat_touched[3]",
+    "threat_changed[0]",
+    "threat_changed[1]",
+    "threat_changed[2]",
+    "threat_changed[3]",
+    "threat_sources[0]",
+    "threat_sources[1]",
+    "threat_sources[2]",
+    "threat_sources[3]",
+    "threat_endpoint_rows[0]",
+    "threat_endpoint_rows[1]",
+    "threat_endpoint_rows[2]",
+    "threat_endpoint_rows[3]",
+    "threat_endpoint_rows[4]",
+    "threat_endpoint_rows[5]",
+    "threat_endpoint_rows[6]",
+    "threat_endpoint_rows[7]",
+    "threat_rescued[0]",
+    "threat_rescued[1]",
+    "threat_rescued[2]",
+    "threat_rescued[3]",
+    "threat_rescued_rows[0]",
+    "threat_rescued_rows[1]",
+    "threat_rescued_rows[2]",
+    "threat_rescued_rows[3]",
+    "ft_cf_paired[0]",
+    "ft_cf_finny_rows[0]",
+    "ft_cf_ancestor_rows[0]",
+    "ft_cf_saved[0]",
+    "ft_cf_distance[0]",
+    "ft_cf_dirty[0]",
+    "ft_cf_missing[0]",
+    "ft_cf_paired[1]",
+    "ft_cf_finny_rows[1]",
+    "ft_cf_ancestor_rows[1]",
+    "ft_cf_saved[1]",
+    "ft_cf_distance[1]",
+    "ft_cf_dirty[1]",
+    "ft_cf_missing[1]",
+    "ft_cf_paired[2]",
+    "ft_cf_finny_rows[2]",
+    "ft_cf_ancestor_rows[2]",
+    "ft_cf_saved[2]",
+    "ft_cf_distance[2]",
+    "ft_cf_dirty[2]",
+    "ft_cf_missing[2]",
+    "ft_cf_delta[0]",
+    "ft_cf_delta[1]",
+    "ft_cf_delta[2]",
+    "ft_cf_delta[3]",
+    "ft_cf_delta[4]",
+    "ft_cf_delta[5]",
+    "ft_cf_delta[6]",
+    "ft_cf_delta[7]",
+    "ft_cf_delta[8]",
+    "ft_cf_delta[9]",
+    "ft_cf_delta[10]",
+    "ft_cf_delta[11]",
+    "ft_cf_delta[12]",
+    "ft_cf_delta[13]",
+    "ft_cf_delta[14]",
+    "ft_cf_delta[15]",
+    "ft_cf_delta[16]",
+    "ft_cf_delta[17]",
+    "ft_cf_delta[18]",
+    "ft_cf_delta[19]",
+    "ft_cf_delta[20]",
+    "ft_cf_delta[21]",
+    "ft_cf_delta[22]",
+    "ft_cf_delta[23]",
+    "ft_cf_delta[24]",
+    "ft_cf_delta[25]",
+    "ft_cf_delta[26]",
+    "ft_cf_eval[0]",
+    "ft_cf_eval[1]",
+    "ft_cf_eval[2]",
+    "ft_cf_eval[3]",
+    "ft_cf_eval[4]",
+    "ft_cf_eval[5]",
+    "eval_tt_lazy",
+    "eval_hash",
+    "eval_computed_score",
+    "eval_nnue",
+    "eval_nnue_repeat",
+    "eval_nnue_collision",
+    "threat_physical_edges[0]",
+    "threat_physical_edges[1]",
+    "threat_physical_edges[2]",
+    "threat_physical_edges[3]",
+    "threat_endpoint_success[0]",
+    "threat_endpoint_success[1]",
+    "threat_endpoint_success[2]",
+    "threat_endpoint_success[3]",
+    "ft_cf_single[0]",
+    "ft_cf_single[1]",
+    "ft_cf_single[2]",
+    "ft_cf_equal[0]",
+    "ft_cf_equal[1]",
+    "ft_cf_equal[2]",
+    "ft_finny_evals",
 ];
 
 thread_local! {
@@ -300,6 +467,7 @@ pub(crate) fn add(index: usize, value: u64) {
 
 pub(crate) fn reset() {
     COUNTS.with_borrow_mut(|c| c.fill(0));
+    reset_nnue_diagnostics();
     SEE_SOURCE.set(7);
     SEE_PRIOR.set(false);
 }
@@ -448,6 +616,7 @@ pub(crate) struct NnueRequest {
 impl NnueRequest {
     pub(crate) fn new() -> Self {
         add(NNUE_ACC_REQUESTS, 1);
+        begin_ft();
         Self {
             before: Self::snapshot(),
         }
@@ -467,6 +636,7 @@ impl NnueRequest {
 }
 impl Drop for NnueRequest {
     fn drop(&mut self) {
+        end_ft();
         let after = Self::snapshot();
         for (i, &key) in [
             NNUE_EVAL_FT_INCREMENTAL,
@@ -515,3 +685,7 @@ mod tests {
         assert!(!SEE_PRIOR.get());
     }
 }
+
+#[path = "diagnostics_nnue.rs"]
+mod nnue_counters;
+pub(crate) use nnue_counters::*;

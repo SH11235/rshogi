@@ -1069,6 +1069,7 @@ fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
 /// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 pub(crate) fn append_threat_endpoint_diff(
+    #[cfg(feature = "search-stats")] record: bool,
     before: &ThreatBoard,
     pos: &Position,
     removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
@@ -1084,7 +1085,12 @@ pub(crate) fn append_threat_endpoint_diff(
     if changed.is_empty() {
         return true;
     }
+    #[cfg(not(feature = "search-stats"))]
     count_threat_diff!();
+    #[cfg(feature = "search-stats")]
+    if record {
+        count_threat_diff!();
+    }
     let mut sources = changed;
     let mut squares = changed;
     while !squares.is_empty() {
@@ -1092,6 +1098,10 @@ pub(crate) fn append_threat_endpoint_diff(
         // 動いた駒は changed に含まれ、動いていない駒の種別は両端で同じ。
         sources |= pos.attackers_to_occ(sq, before.occupied);
         sources |= pos.attackers_to_occ(sq, after.occupied);
+    }
+    #[cfg(feature = "search-stats")]
+    if record {
+        crate::search::diagnostics::threat_geometry(changed.count(), sources.count());
     }
     while !sources.is_empty() {
         let from = sources.pop();
@@ -1128,6 +1138,10 @@ pub(crate) fn append_threat_endpoint_diff(
                 #[cfg(feature = "threat-profile-full-symdedup")]
                 if is_canonical_dead(ac, from, dc, target.color(), to) {
                     continue;
+                }
+                #[cfg(feature = "search-stats")]
+                if record {
+                    crate::search::diagnostics::threat_physical_edge();
                 }
                 for perspective in [Color::Black, Color::White] {
                     let hm = is_hm_mirror(pos.king_square(perspective), perspective);
@@ -2162,7 +2176,14 @@ mod tests {
                 assert_eq!(restored.kings, before.kings);
                 let mut removed = std::array::from_fn(|_| IndexList::new());
                 let mut added = std::array::from_fn(|_| IndexList::new());
-                assert!(append_threat_endpoint_diff(&restored, &pos, &mut removed, &mut added));
+                assert!(append_threat_endpoint_diff(
+                    #[cfg(feature = "search-stats")]
+                    true,
+                    &restored,
+                    &pos,
+                    &mut removed,
+                    &mut added
+                ));
                 for perspective in [Color::Black, Color::White] {
                     if !before.same_mirror(&pos, perspective) {
                         continue;
@@ -2194,6 +2215,8 @@ mod tests {
                         }
                     }
                     assert!(!append_threat_endpoint_diff(
+                        #[cfg(feature = "search-stats")]
+                        true,
                         &restored,
                         &pos,
                         &mut full_removed,
