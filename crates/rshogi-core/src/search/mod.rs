@@ -12,6 +12,7 @@ mod stats;
 
 mod alpha_beta;
 mod analysis;
+mod drop_score;
 mod engine;
 mod eval_helpers;
 mod history;

@@ -41,7 +41,7 @@
 use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE, SharedHistories};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
-use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
+use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Square, Value};
 
 // =============================================================================
 // Stage（指し手生成の段階）
@@ -640,19 +640,48 @@ impl MovePicker {
                 ext.value = value;
             }
         } else {
+            let mut drop_scores = [const { std::mem::MaybeUninit::<[i32; Square::NUM]>::uninit() };
+                PieceType::HAND_NUM + 1];
+            let hand = pos.hand(us);
+            for pt in PieceType::HAND_PIECES {
+                if hand.has(pt) {
+                    let pc = Piece::new(us, pt);
+                    let mut row = [0; Square::NUM];
+                    super::drop_score::sum(
+                        [
+                            history.main_history.drop_row(us, pt),
+                            ch0.row(pc),
+                            ch1.row(pc),
+                            ch2.row(pc),
+                            ch3.row(pc),
+                            ch5.row(pc),
+                        ],
+                        &mut row,
+                    );
+                    drop_scores[pt as usize].write(row);
+                }
+            }
             for ext in moves {
                 let m = ext.mv;
                 let to = m.to();
                 let pc = m.moved_piece_after();
                 let pt = pc.piece_type();
 
-                let mut value = 2 * history.main_history.get(us, m) as i32;
-                value += 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
-                value += ch0.get(pc, to) as i32;
-                value += ch1.get(pc, to) as i32;
-                value += ch2.get(pc, to) as i32;
-                value += ch3.get(pc, to) as i32;
-                value += ch5.get(pc, to) as i32;
+                let mut value = if m.is_drop() {
+                    // 共有表は他スレッドが更新し得るため、必要な升だけ atomic load する。
+                    // SAFETY: 生成済みの駒打ちの駒種は手駒にあり、その行は上のループで初期化済み。
+                    let row = unsafe { drop_scores[pt as usize].assume_init_ref() };
+                    row[to.index()] + 2 * shared.pawn_history(pawn_idx, pc, to) as i32
+                } else {
+                    let mut value = 2 * history.main_history.get(us, m) as i32;
+                    value += 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
+                    value += ch0.get(pc, to) as i32;
+                    value += ch1.get(pc, to) as i32;
+                    value += ch2.get(pc, to) as i32;
+                    value += ch3.get(pc, to) as i32;
+                    value += ch5.get(pc, to) as i32;
+                    value
+                };
 
                 if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
                     value += 16384;
@@ -892,6 +921,172 @@ mod tests {
             mv.is_some().then_some(mv)
         })
         .collect()
+    }
+
+    fn scored_moves(moves: &[ExtMove]) -> Vec<(Move, i32)> {
+        moves.iter().map(|ext| (ext.mv, ext.value)).collect()
+    }
+
+    fn score_quiets_reference(
+        picker: &mut MovePicker,
+        pos: &Position,
+        history: &HistoryTables,
+        shared: &SharedHistories,
+    ) {
+        let pawn_idx = shared.pawn_history_index(picker.pawn_key);
+        let tables = picker.continuation_history.map(|key| {
+            history.continuation_history[key.in_check as usize][key.capture as usize]
+                .get_table(key.piece, key.to)
+        });
+        let [ch0, ch1, ch2, ch3, _, ch5] = tables;
+        for ext in &mut picker.moves.as_mut_slice()[picker.cur..picker.end_cur] {
+            let m = ext.mv;
+            let to = m.to();
+            let pc = m.moved_piece_after();
+            let mut value = 2 * history.main_history.get(picker.side_to_move, m) as i32;
+            value += 2 * shared.pawn_history(pawn_idx, pc, to) as i32;
+            value += ch0.get(pc, to) as i32;
+            value += ch1.get(pc, to) as i32;
+            value += ch2.get(pc, to) as i32;
+            value += ch3.get(pc, to) as i32;
+            value += ch5.get(pc, to) as i32;
+            if pos.check_squares(pc.piece_type()).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                value += 16384;
+            }
+            if picker.ply < LOW_PLY_HISTORY_SIZE as i32 {
+                value += 8 * history.low_ply_history.get(picker.ply as usize, m) as i32
+                    / (1 + picker.ply).max(1);
+            }
+            ext.value = value;
+        }
+    }
+
+    #[test]
+    fn drop_score_rows_match_reference_on_random_positions_and_histories() {
+        use crate::movegen::{GenType, MoveList, generate_legal_all, generate_with_type};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut history = HistoryTables::new_boxed();
+        let shared = SharedHistories::new(1);
+        let keys = std::array::from_fn(|i| {
+            ContHistKey::new(
+                i % 2 == 0,
+                i % 3 == 0,
+                Piece::B_GOLD,
+                Square::from_u8((i * 13) as u8).unwrap(),
+            )
+        });
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0D05_C081);
+        for key in keys {
+            let table = history.continuation_history[key.in_check as usize][key.capture as usize]
+                .get_table_mut(key.piece, key.to);
+            for color in [Color::Black, Color::White] {
+                for pt in 1..=PieceType::NUM {
+                    let pc = Piece::new(color, PieceType::from_u8(pt as u8).unwrap());
+                    for sq in 0..Square::NUM {
+                        table.update(
+                            pc,
+                            Square::from_u8(sq as u8).unwrap(),
+                            rng.random_range(-30000..=30000),
+                        );
+                    }
+                }
+            }
+        }
+        let mut checked = 0;
+        let mut checking_drops = 0;
+        let mut drops = 0;
+        let mut positions = 0;
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "4k4/9/9/4p4/4P4/9/9/9/4K4 w RBGSNLPrbgsnlp 1",
+            "k8/9/9/9/4r4/9/9/9/4K4 b RBGSNLP 1",
+            "k8/9/9/9/4r4/9/2b6/9/4K4 b GSNLP 1",
+            "k8/5P3/3NL4/9/9/9/9/9/4K4 b RBGSNLP 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            for step in 0..64 {
+                positions += 1;
+                checked += usize::from(pos.in_check());
+                for all in [false, true] {
+                    let mut generated = ExtMoveBuffer::new();
+                    generate_with_type(
+                        &pos,
+                        if all {
+                            GenType::QuietsAll
+                        } else {
+                            GenType::Quiets
+                        },
+                        &mut generated,
+                        None,
+                    );
+                    let pawn_idx = shared.pawn_history_index(pos.pawn_key());
+                    for ext in generated.as_slice() {
+                        let m = ext.mv;
+                        history.main_history.update(
+                            pos.side_to_move(),
+                            m,
+                            rng.random_range(-7183..=7183),
+                        );
+                        for ply in 0..LOW_PLY_HISTORY_SIZE {
+                            history.low_ply_history.update(ply, m, rng.random_range(-7183..=7183));
+                        }
+                        shared.update_pawn_history(
+                            pawn_idx,
+                            m.moved_piece_after(),
+                            m.to(),
+                            rng.random_range(-8192..=8192),
+                        );
+                        drops += usize::from(m.is_drop());
+                        checking_drops += usize::from(m.is_drop() && pos.gives_check(m));
+                    }
+                    for ply in [0, 4, 5, 31] {
+                        let mut actual = MovePicker::new(&pos, Move::NONE, 6, ply, keys, all);
+                        let mut expected = MovePicker::new(&pos, Move::NONE, 6, ply, keys, all);
+                        // 採点対象の前後の番兵で、部分範囲の外側への書き込みも検出する。
+                        for picker in [&mut actual, &mut expected] {
+                            picker.moves.push(ExtMove::new(Move::NONE, i32::MIN));
+                            for ext in generated.as_slice() {
+                                picker.moves.push(*ext);
+                            }
+                            picker.cur = 1;
+                            picker.end_cur = picker.moves.len();
+                            picker.moves.push(ExtMove::new(Move::NONE, i32::MAX));
+                        }
+                        actual.score_quiets(&pos, &history, &shared);
+                        score_quiets_reference(&mut expected, &pos, &history, &shared);
+                        assert_eq!(
+                            scored_moves(actual.moves.as_slice()),
+                            scored_moves(expected.moves.as_slice()),
+                            "step={step} ply={ply} all={all} sfen={}",
+                            pos.to_sfen()
+                        );
+                        for limit in [i32::MIN, -3560, -21360] {
+                            let mut a = actual.moves.as_slice().to_vec();
+                            let mut e = expected.moves.as_slice().to_vec();
+                            let len = generated.len();
+                            assert_eq!(
+                                partial_insertion_sort(&mut a[1..], len, limit),
+                                partial_insertion_sort(&mut e[1..], len, limit)
+                            );
+                            assert_eq!(scored_moves(&a), scored_moves(&e));
+                        }
+                    }
+                }
+                let mut legal = MoveList::new();
+                generate_legal_all(&pos, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let mv = legal.at(rng.random_range(0..legal.len()));
+                let check = pos.gives_check(mv);
+                pos.do_move(mv, check);
+            }
+        }
+        assert!(positions >= 200, "positions={positions}");
+        assert!(checked > 0 && checking_drops > 0 && drops > 1000);
     }
 
     #[test]

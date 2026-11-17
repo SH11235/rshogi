@@ -72,6 +72,7 @@ const PIECE_NUM: usize = Piece::NUM; // NONE含む
 ///
 /// 値の範囲を [-D, D] に制限しながら更新できる。
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub struct StatsEntry<const D: i32> {
     value: i16,
 }
@@ -146,6 +147,14 @@ impl ButterflyHistory {
         // SAFETY: Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
         //         Move::history_index() < FROM_TO_SIZE。
         unsafe { self.table.get_unchecked(color.index()).get_unchecked(mv.history_index()).get() }
+    }
+
+    #[inline]
+    pub(super) fn drop_row(&self, color: Color, pt: PieceType) -> &[i16; Square::NUM] {
+        let start = Move::new_drop(pt, Square::SQ_11).history_index();
+        let row = &self.table[color.index()][start..start + Square::NUM];
+        // SAFETY: StatsEntry は i16 の transparent wrapper。row は連続した 81 要素で、共有参照の間は更新されない。
+        unsafe { &*row.as_ptr().cast::<[i16; Square::NUM]>() }
     }
 
     /// 値を更新
@@ -387,6 +396,12 @@ impl PieceToHistory {
     pub fn get(&self, pc: Piece, to: Square) -> i16 {
         // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
         unsafe { self.table.get_unchecked(pc.index()).get_unchecked(to.index()).get() }
+    }
+
+    #[inline]
+    pub(super) fn row(&self, pc: Piece) -> &[i16; Square::NUM] {
+        // SAFETY: StatsEntry は i16 の transparent wrapper。配列は 81 要素で、共有参照の間は更新されない。
+        unsafe { &*self.table[pc.index()].as_ptr().cast::<[i16; Square::NUM]>() }
     }
 
     /// 値を更新
