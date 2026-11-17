@@ -4,6 +4,10 @@ use anyhow::Result;
 use rshogi_core::position::Position;
 
 pub mod cache;
+#[cfg(feature = "inference-diagnostics")]
+pub mod diagnostics;
+#[cfg(feature = "inference-diagnostics")]
+pub use diagnostics::{InferenceStage, InferenceTimings, StageTiming};
 #[cfg(feature = "onnx")]
 pub mod environment;
 pub mod features;
@@ -24,6 +28,12 @@ pub enum InputFormat {
 
 /// 合法手の生成や終局判定を含まない、局面単独の推論。
 pub trait Evaluator {
+    /// evaluator 構築以降の累積 forward 診断。未対応なら None。cache の統計 reset とは独立。
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<InferenceTimings> {
+        None
+    }
+
     /// 宣言した入力だけに依存する決定的な推論に限り、キャッシュを有効にできる。
     fn input_format(&self) -> Option<InputFormat> {
         None

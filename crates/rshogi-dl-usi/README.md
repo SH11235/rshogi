@@ -29,6 +29,7 @@ go nodes 128
 | Device | 0 | CUDA device id。-1 は CPU |
 | CudaTF32 | true | false で CUDA TF32 を無効化。true は runtime の既定設定を維持。CPU では無効 |
 | NNCacheMiB | 0 | raw policy/value キャッシュの上限 MiB。0 は無効、最大1024 |
+| NNBatchSize | 1 | 同期推論にまとめる葉の上限。1〜256。1 は scalar 探索 |
 | TreeMemoryMB | 16 | node / edge arena の上限 MiB |
 | CpuctMilli | 1500 | PUCT の係数の千倍 |
 | PolicyTemperatureMilli | 1000 | 合法手 softmax temperature の千倍 |
@@ -39,13 +40,39 @@ go nodes 128
 
 `go nodes`、`go movetime`、`go btime/wtime` と `binc/winc`、`byoyomi`、`go infinite`、`stop` に対応します。nodes は完了した MCTS simulation の数です。depth は読み筋の長さ、hashfull は arena の使用割合で、NNUE の αβ探索とは意味が異なります。評価要求数は `info string evaluations`、実際の backend 呼び出し数は `nn_calls`、ヒット数は `cache_hits`、cache の確保量は `cache_bytes` に出力します。
 
+`NNBatchSize > 1` では、単一 worker が複数の未評価の葉を予約し、同期 batch 推論します。
+最初の root 評価は1局面で、訪問数・時間・stop・同時に選べる葉の数によって小さい batch も発生します。
+`NNBatchSize` は最大値で、毎回その局面数を推論する指定ではありません。訪問予約は完了訪問数と
+区別し、`go nodes` と報告する nodes は完了した simulation 数を使います。
+batch 探索は評価前の訪問予約によって葉の選択順が変わるため、同じ nodes の scalar 探索との
+bestmove・PV・value の一致や、速度・棋力の改善を保証しません。既定1は scalar 経路を維持します。
+
+batch 有効時だけ、別の `info string` 行に `nn_positions`（backend へ渡した局面数）、
+`nn_batch_limit`（設定上限）、`nn_batch_mean`（nn_positions / nn_calls。呼出し0回なら0）、
+`mcts_batch_workspace_bytes`（予約・入力・出力 buffer）、`cache_batch_workspace_bytes`
+（cache wrapper の batch 用 buffer）を出力します。cache hit 数は局面数です。
+既存の `info string nn_calls ... cache_hits ... cache_bytes ...` 行の形式は変わりません。
+
 ponder、MultiPV、定跡、`go depth`、`go mate`、`go searchmoves` には対応しません。対応外の go パラメータを黙って無視せずエラーにします。`go infinite` は木が満杯や終局でも stop まで bestmove を待ちます。通常の go はメモリ上限で早期に終わる場合があります。
 
 GUI、既存の tournament、CSA client からは通常の外部 USI エンジンとして使用します。`ModelFile` 等を個別 USI option として指定してください。NNUE の EvalFile や edition の指定は不要です。局面の手順を保つには `position startpos moves ...` または開始 SFEN と moves を渡してください。
 
 `isready` はモデルの読み込みと一回の warmup を完了してから readyok を返します。内部の引き分け評価を USI の終局通知として送りません。合法手がある root では fallback を返すため、対局の総手数上限や千日手の裁定は runner 側と揃えてください。
 
+`NNBatchSize > 1` では scalar warmup に加え、指定した最大 batch を cache の重複除去を通さず
+一度推論してから readyok を返します。全 input/output が動的 batch に対応するモデルが必要です。
+固定 batch のモデル、最大 batch の推論失敗、確保失敗は明示的なエラーになります。
+CPU への切替、精度の切替、batch size の縮小による再試行は行いません。
+option 変更は実行中の探索を stop / join した後にモデル・cache・探索器を破棄し、次の isready / go
+で再構築します。探索中の isready は実行中の session を作り直しません。
+
 `NNCacheMiB` は選択された形式の全入力を照合し、合法手フィルタや temperature を適用する前の出力を保持します。木は go ごとに作り直しますが cache は同じ対局中に保持します。`usinewgame` / `gameover` と option 変更で破棄します。`isready` で指定容量を確保して初期化するため、その分の常駐メモリが必要です。上限は key・出力・metadata・特徴量 buffer に適用し、allocator の管理領域やモデル・ORT・探索木のメモリは含みません。固定訪問数の結果を保つための機構であり、時間制限では完了訪問数が変わり得ます。
+
+`TreeMemoryMB` は node / edge arena だけの予算です。MCTS の batch workspace と cache の
+batch workspace はそれぞれ別枠で、TreeMemoryMB・NNCacheMiB の上限に含みません。
+MCTS の workspace は batch 探索を始める際に確保し、arena の容量に比例する訪問予約 metadata も
+含みます。NNBatchSize と TreeMemoryMB の両方が追加メモリへ影響します。
+`NNCacheMiB = 0` でも batch 用 workspace は必要です。既定 NNBatchSize=1 は両方とも0 byteです。
 
 `stm-tokens-v1` モデルは int64 の `tokens:[B,96]` を受け、同じ policy2187 / value1 を返します。81マスと14持駒を手番視点に正規化し、最後に元の先後を示す token を置きます。履歴は入力に含めず、千日手・連続王手などの裁定は探索側で行います。metadata に以下の3項目が必要です。未知形式・metadata 不整合・shape/dtype の不一致は読み込みエラーになります。
 
@@ -58,3 +85,7 @@ GUI、既存の tournament、CSA client からは通常の外部 USI エンジ�
 value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）です。モデルの学習ルールと `EnteringKingRule` 等の設定を揃えて使ってください。token形式のモデル定義・export は [Python package](../../python/rshogi-dl/README.md) を参照してください。USI の形式自動選択は CPU/CUDA に対応します。既存 tools の basic 専用 API では token モデルを受理しません。
 
 `CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。
+
+Unix では正常終了時に探索 worker を stop / join し、session を破棄して標準出力・標準エラーを
+flush した後、`_exit` で終了します。ORT の process-global なライブラリ終了処理を回避するためです。
+致命的なエラーは非0の終了コードを返します。Unix 以外では通常のプロセス終了処理を使用します。

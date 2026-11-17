@@ -16,6 +16,46 @@ use crate::features::{
 };
 use crate::{EncodedBatch, EncodedInput};
 
+#[cfg(feature = "inference-diagnostics")]
+use crate::diagnostics::{ForwardTimer, InferenceStage};
+
+#[cfg(feature = "inference-diagnostics")]
+macro_rules! inference_try {
+    ($timer:ident, $operation:expr) => {
+        match $operation {
+            Ok(value) => value,
+            Err(error) => {
+                $timer.fail();
+                return Err(error);
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "inference-diagnostics"))]
+macro_rules! inference_try {
+    ($timer:ident, $operation:expr) => {
+        $operation?
+    };
+}
+
+#[cfg(feature = "inference-diagnostics")]
+macro_rules! inference_ensure {
+    ($timer:ident, $condition:expr, $($message:tt)*) => {
+        if !($condition) {
+            $timer.fail();
+            anyhow::bail!($($message)*);
+        }
+    };
+}
+
+#[cfg(not(feature = "inference-diagnostics"))]
+macro_rules! inference_ensure {
+    ($timer:ident, $condition:expr, $($message:tt)*) => {
+        anyhow::ensure!($condition, $($message)*);
+    };
+}
+
 /// ONNX value evaluator の設定
 pub struct OnnxConfig {
     /// dlshogi ONNX モデルのパス
@@ -38,6 +78,8 @@ pub struct OnnxEvaluator {
     f2_buf: Vec<f32>,
     single_values: Vec<f32>,
     single_policy: Vec<f32>,
+    #[cfg(feature = "inference-diagnostics")]
+    timings: crate::InferenceTimings,
 }
 
 fn ort_err(e: ort::Error) -> anyhow::Error {
@@ -222,6 +264,8 @@ impl OnnxEvaluator {
             f2_buf: vec![0.0f32; batch_size * FEATURES2_SIZE],
             single_values: Vec::with_capacity(1),
             single_policy: Vec::with_capacity(MAX_MOVE_LABEL_NUM),
+            #[cfg(feature = "inference-diagnostics")]
+            timings: crate::InferenceTimings::default(),
         })
     }
 
@@ -279,6 +323,8 @@ impl OnnxEvaluator {
             &self.f2_buf[..n * FEATURES2_SIZE],
             out,
             policy_out,
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
         )
     }
 
@@ -289,13 +335,23 @@ impl OnnxEvaluator {
         second: &[f32],
         out: &mut Vec<f32>,
         policy_out: Option<&mut Vec<f32>>,
+        #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
     ) -> Result<()> {
-        Self::forward_inputs(session, n, first, second, policy_out.is_some(), |values, policy| {
-            out.extend_from_slice(values);
-            if let Some(output) = policy_out {
-                output.extend_from_slice(policy.expect("requested policy"));
-            }
-        })
+        Self::forward_inputs(
+            session,
+            n,
+            first,
+            second,
+            policy_out.is_some(),
+            |values, policy| {
+                out.extend_from_slice(values);
+                if let Some(output) = policy_out {
+                    output.extend_from_slice(policy.expect("requested policy"));
+                }
+            },
+            #[cfg(feature = "inference-diagnostics")]
+            timings,
+        )
     }
 
     fn forward_inputs<R>(
@@ -305,43 +361,76 @@ impl OnnxEvaluator {
         second: &[f32],
         need_policy: bool,
         consume: impl FnOnce(&[f32], Option<&[f32]>) -> R,
+        #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
     ) -> Result<R> {
+        // ORT resource より先に宣言し、逆順の Drop で解放時間も記録する。
+        #[cfg(feature = "inference-diagnostics")]
+        let mut timer = ForwardTimer::new(timings, n);
         let shape1: [usize; 4] = [n, INPUT1_CHANNELS, 9, 9];
-        let input1 = TensorRef::<f32>::from_array_view((shape1, first)).map_err(ort_err)?;
+        let input1 = inference_try!(
+            timer,
+            TensorRef::<f32>::from_array_view((shape1, first)).map_err(ort_err)
+        );
         let shape2: [usize; 4] = [n, INPUT2_CHANNELS, 9, 9];
-        let input2 = TensorRef::<f32>::from_array_view((shape2, second)).map_err(ort_err)?;
+        let input2 = inference_try!(
+            timer,
+            TensorRef::<f32>::from_array_view((shape2, second)).map_err(ort_err)
+        );
 
-        let output_mem =
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::BindingSetup);
+        let output_mem = inference_try!(
+            timer,
             MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-                .map_err(ort_err)?;
-        let mut binding = session.create_binding().map_err(ort_err)?;
-        binding.bind_input("input1", &input1).map_err(ort_err)?;
-        binding.bind_input("input2", &input2).map_err(ort_err)?;
-        // value のみの推論でも、未バインド出力は ORT 内部処理のオーバーヘッドを増やすため
-        // 全出力をバインドする。
-        binding.bind_output_to_device("output_policy", &output_mem).map_err(ort_err)?;
-        binding.bind_output_to_device("output_value", &output_mem).map_err(ort_err)?;
-
-        let outputs = session.run_binding(&binding).map_err(ort_err)?;
-        let (value_shape, values) =
-            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
-        anyhow::ensure!(
+                .map_err(ort_err)
+        );
+        let mut binding = inference_try!(timer, session.create_binding().map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::InputBind);
+        inference_try!(timer, binding.bind_input("input1", &input1).map_err(ort_err));
+        inference_try!(timer, binding.bind_input("input2", &input2).map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::OutputBind);
+        // value のみでも全出力をバインドし、未バインド出力の runtime 処理を避ける。
+        inference_try!(
+            timer,
+            binding.bind_output_to_device("output_policy", &output_mem).map_err(ort_err)
+        );
+        inference_try!(
+            timer,
+            binding.bind_output_to_device("output_value", &output_mem).map_err(ort_err)
+        );
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::RunBinding);
+        let outputs = inference_try!(timer, session.run_binding(&binding).map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::OutputValidationCopy);
+        let (value_shape, values) = inference_try!(
+            timer,
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)
+        );
+        inference_ensure!(
+            timer,
             value_shape.as_ref() == [n as i64, 1],
             "value output shape mismatch: {value_shape:?}"
         );
-        anyhow::ensure!(
+        inference_ensure!(
+            timer,
             values.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
             "value must be a finite probability"
         );
-
         let policy = if need_policy {
-            let (shape, logits) =
-                outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
-            anyhow::ensure!(
+            let (shape, logits) = inference_try!(
+                timer,
+                outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)
+            );
+            inference_ensure!(
+                timer,
                 shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
                 "policy output shape mismatch: {shape:?}"
             );
-            anyhow::ensure!(
+            inference_ensure!(
+                timer,
                 logits.iter().all(|v| v.is_finite()),
                 "policy contains non-finite logits"
             );
@@ -349,7 +438,10 @@ impl OnnxEvaluator {
         } else {
             None
         };
-        Ok(consume(values, policy))
+        let result = consume(values, policy);
+        #[cfg(feature = "inference-diagnostics")]
+        timer.finish();
+        Ok(result)
     }
 
     fn run_single(
@@ -457,6 +549,11 @@ fn validate_model(session: &Session, max_batch: usize, format: crate::InputForma
 }
 
 impl crate::Evaluator for OnnxEvaluator {
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<crate::InferenceTimings> {
+        Some(self.timings)
+    }
+
     fn input_format(&self) -> Option<crate::InputFormat> {
         Some(crate::InputFormat::Basic)
     }
@@ -487,6 +584,8 @@ impl crate::Evaluator for OnnxEvaluator {
                 values.copy_from_slice(result);
                 policies.copy_from_slice(policy.expect("requested policy"));
             },
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
         )
     }
 
@@ -509,7 +608,16 @@ impl crate::Evaluator for OnnxEvaluator {
             .basic()
             .ok_or_else(|| anyhow::anyhow!("basic evaluator requires basic encoded inputs"))?;
         self.run_single(logits, |evaluator, values, policy| {
-            Self::run_inputs(&mut evaluator.session, 1, first, second, values, Some(policy))
+            Self::run_inputs(
+                &mut evaluator.session,
+                1,
+                first,
+                second,
+                values,
+                Some(policy),
+                #[cfg(feature = "inference-diagnostics")]
+                &mut evaluator.timings,
+            )
         })
         .map(Some)
     }
@@ -560,6 +668,8 @@ impl ModelEvaluator {
                     session,
                     batch_size: cfg.batch_size,
                     tokens: vec![0; cfg.batch_size * crate::tokens::TOKEN_COUNT],
+                    #[cfg(feature = "inference-diagnostics")]
+                    timings: crate::InferenceTimings::default(),
                 }))
             }
         }
@@ -626,6 +736,8 @@ pub struct TokenEvaluator {
     session: Session,
     batch_size: usize,
     tokens: Vec<i64>,
+    #[cfg(feature = "inference-diagnostics")]
+    timings: crate::InferenceTimings,
 }
 
 impl TokenEvaluator {
@@ -658,6 +770,8 @@ impl TokenEvaluator {
             &self.tokens[..n * crate::tokens::TOKEN_COUNT],
             values_out,
             policy_out,
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
         )
     }
 
@@ -683,6 +797,8 @@ impl TokenEvaluator {
             &self.tokens[..tokens.len()],
             values,
             policies,
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
         )
     }
 
@@ -701,6 +817,8 @@ impl TokenEvaluator {
             &self.tokens[..crate::tokens::TOKEN_COUNT],
             &mut values,
             logits,
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
         )?;
         Ok(values[0])
     }
@@ -711,38 +829,79 @@ impl TokenEvaluator {
         tokens: &[i64],
         values_out: &mut [f32],
         policy_out: &mut [f32],
+        #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
     ) -> Result<()> {
-        let tokens = TensorRef::<i64>::from_array_view(([n, crate::tokens::TOKEN_COUNT], tokens))
-            .map_err(ort_err)?;
-        let memory =
+        // ORT resource より先に宣言し、逆順の Drop で解放時間も記録する。
+        #[cfg(feature = "inference-diagnostics")]
+        let mut timer = ForwardTimer::new(timings, n);
+        let tokens = inference_try!(
+            timer,
+            TensorRef::<i64>::from_array_view(([n, crate::tokens::TOKEN_COUNT], tokens))
+                .map_err(ort_err)
+        );
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::BindingSetup);
+        let memory = inference_try!(
+            timer,
             MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-                .map_err(ort_err)?;
-        let mut binding = session.create_binding().map_err(ort_err)?;
-        binding.bind_input("tokens", &tokens).map_err(ort_err)?;
-        binding.bind_output_to_device("output_policy", &memory).map_err(ort_err)?;
-        binding.bind_output_to_device("output_value", &memory).map_err(ort_err)?;
-        let outputs = session.run_binding(&binding).map_err(ort_err)?;
-        let (shape, policy) =
-            outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
-        anyhow::ensure!(
+                .map_err(ort_err)
+        );
+        let mut binding = inference_try!(timer, session.create_binding().map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::InputBind);
+        inference_try!(timer, binding.bind_input("tokens", &tokens).map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::OutputBind);
+        inference_try!(
+            timer,
+            binding.bind_output_to_device("output_policy", &memory).map_err(ort_err)
+        );
+        inference_try!(
+            timer,
+            binding.bind_output_to_device("output_value", &memory).map_err(ort_err)
+        );
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::RunBinding);
+        let outputs = inference_try!(timer, session.run_binding(&binding).map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::OutputValidationCopy);
+        let (shape, policy) = inference_try!(
+            timer,
+            outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)
+        );
+        inference_ensure!(
+            timer,
             shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
             "incorrect policy output shape"
         );
-        anyhow::ensure!(policy.iter().all(|v| v.is_finite()), "non-finite policy logits");
-        let (shape, values) =
-            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
-        anyhow::ensure!(shape.as_ref() == [n as i64, 1], "incorrect value output shape");
-        anyhow::ensure!(
+        inference_ensure!(timer, policy.iter().all(|v| v.is_finite()), "non-finite policy logits");
+        let (shape, values) = inference_try!(
+            timer,
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)
+        );
+        inference_ensure!(timer, shape.as_ref() == [n as i64, 1], "incorrect value output shape");
+        inference_ensure!(
+            timer,
             values.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
             "invalid expected score"
         );
         policy_out.copy_from_slice(policy);
         values_out.copy_from_slice(values);
+        #[cfg(feature = "inference-diagnostics")]
+        timer.finish();
         Ok(())
     }
 }
 
 impl crate::Evaluator for ModelEvaluator {
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<crate::InferenceTimings> {
+        Some(match self {
+            Self::Basic(evaluator) => evaluator.timings,
+            Self::Tokens(evaluator) => evaluator.timings,
+        })
+    }
+
     fn input_format(&self) -> Option<crate::InputFormat> {
         Some(match self {
             Self::Basic(_) => crate::InputFormat::Basic,
@@ -795,6 +954,47 @@ impl crate::Evaluator for ModelEvaluator {
 #[cfg(test)]
 mod tests {
     use super::ModelOptions;
+
+    #[cfg(feature = "inference-diagnostics")]
+    fn recorded_result(
+        totals: &mut crate::InferenceTimings,
+        ensure_valid: bool,
+        operation_valid: bool,
+    ) -> anyhow::Result<()> {
+        let mut timer = crate::diagnostics::ForwardTimer::new(totals, 2);
+        timer.advance(crate::InferenceStage::BindingSetup);
+        inference_ensure!(timer, ensure_valid, "expected validation error");
+        let operation: anyhow::Result<()> = if operation_valid {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("expected operation error"))
+        };
+        inference_try!(timer, operation);
+        timer.finish();
+        Ok(())
+    }
+
+    #[cfg(feature = "inference-diagnostics")]
+    #[test]
+    fn result_errors_and_ensure_errors_finish_their_phase_and_cleanup() {
+        for (ensure_valid, operation_valid, failures) in
+            [(false, true, 1), (true, false, 1), (true, true, 0)]
+        {
+            let mut totals = crate::InferenceTimings::default();
+            assert_eq!(
+                recorded_result(&mut totals, ensure_valid, operation_valid).is_err(),
+                failures == 1
+            );
+            assert_eq!(totals.forward_calls, 1);
+            assert_eq!(totals.forward_failures, failures);
+            assert_eq!(totals.positions, 2);
+            assert_eq!(
+                totals.stages[crate::InferenceStage::BindingSetup as usize].errors,
+                failures
+            );
+            assert_eq!(totals.stages[crate::InferenceStage::Cleanup as usize].calls, 1);
+        }
+    }
 
     #[test]
     fn model_options_preserve_runtime_precision_by_default() {

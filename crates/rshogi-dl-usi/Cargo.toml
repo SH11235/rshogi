@@ -12,9 +12,12 @@ rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-dl = { path = "../rshogi-dl" }
 rshogi-mcts = { path = "../rshogi-mcts" }
 
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
 [features]
 default = []
-onnx = ["rshogi-dl/onnx"]
+onnx = ["rshogi-dl/onnx", "dep:libc"]
 
 [[bin]]
 name = "rshogi-dl-usi"

@@ -2756,6 +2756,7 @@ name = "rshogi-dl-usi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rshogi-core",
  "rshogi-dl",
  "rshogi-mcts",
