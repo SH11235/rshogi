@@ -230,6 +230,15 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
   `--warmup 0` なら初回実行・optimizer 状態の初期化も計測区間に含みます。
+- `--compile-mode default|reduce-overhead|max-autotune|max-autotune-no-cudagraphs`:
+  `--execution compile` の実行方式を指定します。既定は `default`。`reduce-overhead` は CUDA Graphs を
+  要求し、`max-autotune-no-cudagraphs` は CUDA Graphs を要求せず演算 kernel を探索します。
+  `max-autotune` は両方を要求します。非既定 mode を eager に渡すと error になります。
+  CUDA Graphs を要求する 2 mode は `--device cuda` が必須です。CPU で CUDA を代替しません。
+  各更新の前に graph の反復境界を示します。JSON の `cudagraphs_requested` は設定上の要求であり、
+  実際に graph が使われたことは示しません。適用可否や実 kernel は profile で確認してください。
+  探索・コンパイル・graph 記録は初回実行を含む startup / warmup (warmup 0 なら計測区間) に入るため、
+  安定後の throughput と合わせて評価してください。loss と optimizer はこの mode の対象外です。
 - `--precision fp32|tf32|fp16|bf16`: `fp32` は TF32 無効、`tf32` は FP32 の行列演算で TF32 を許可、
   `fp16` / `bf16` は autocast を使います。FP16 は GradScaler を使い、overflow により省略された
   optimizer 更新数も出します。CUDA が無い場合や対応しない精度は失敗し、CPU へ切り替えません。
@@ -244,6 +253,10 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   `resident` は計測前に device へ転送し、`stream` は同じ局面列を JSONL から再読込・転送します。
   データ全量は保持せず、resident も最大 32 batch に制限します。batch 未満の末尾は使いません。
   fixture 全体が 1 batch に満たなければ失敗します。
+
+全行が `policy=null` の batch では、compile の有無にかかわらず policy head の重み・momentum・
+更新回数を維持します。policy 教師がある場合は loss が 0 でも通常どおり更新し、weight decay も適用します。
+教師の有無は転送前の CPU metadata で判定し、このための GPU 同期は増やしません。
 
 同期した wall time と `cuda_stream_seconds` を別々に出します。CUDA event の時間にも CPU からの
 演算投入待ちが入り得るため、純粋な kernel 時間ではありません。CUDA の peak allocated / reserved

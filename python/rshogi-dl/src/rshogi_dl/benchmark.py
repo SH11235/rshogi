@@ -21,6 +21,11 @@ from .data import Batch, RecordError, iter_batches
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact
+from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
+
+
+COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
+_CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
 
 
 class BenchmarkError(RuntimeError):
@@ -40,6 +45,7 @@ class BenchmarkConfig:
     device: str = "cpu"
     attention_backend: str = "explicit"
     execution: str = "eager"
+    compile_mode: str = "default"
     precision: str = "fp32"
     input_mode: str = "resident"
     policy_rows_mode: str = "prepared"
@@ -58,13 +64,18 @@ class BenchmarkConfig:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
         for name, choices in {
             "attention_backend": ATTENTION_BACKENDS,
-            "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
+            "execution": ("eager", "compile"), "compile_mode": COMPILE_MODES,
+            "precision": ("fp32", "tf32", "fp16", "bf16"),
             "input_mode": ("resident", "stream"), "policy_rows_mode": ("prepared", "legacy"),
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
         if type(self.device) is not str or self.device not in ("cpu", "cuda"):
             raise ValueError("device must be cpu or cuda")
+        if self.execution == "eager" and self.compile_mode != "default":
+            raise ValueError("non-default compile_mode requires execution=compile")
+        if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
+            raise ValueError("this compile_mode requires device=cuda")
         if type(self.fused_optimizer) is not bool:
             raise ValueError("fused_optimizer must be boolean")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
@@ -186,21 +197,23 @@ def run_benchmark(
                 data_digest.update(str(tuple(tensor.shape)).encode())
                 data_digest.update(tensor.numpy().tobytes())
         window_count = len(window)
-        resident = [
-            _to_device(batch, device, policy_rows_mode=config.policy_rows_mode) for batch in window
-        ] if config.input_mode == "resident" else None
+        def prepare_batch(batch: Batch) -> tuple[Batch, bool]:
+            has_policy = has_policy_targets(batch)
+            return _to_device(batch, device, policy_rows_mode=config.policy_rows_mode), has_policy
+
+        resident = [prepare_batch(batch) for batch in window] if config.input_mode == "resident" else None
         del window
         batch_index = 0
 
-        def next_batch() -> Batch:
+        def next_batch() -> tuple[Batch, bool]:
             nonlocal batch_index
             if resident is None:
-                return _to_device(next(batches), device, policy_rows_mode=config.policy_rows_mode)
+                return prepare_batch(next(batches))
             batch = resident[batch_index % len(resident)]
             batch_index += 1
             return batch
 
-        diagnostic_batch = next_batch()
+        diagnostic_batch, _ = next_batch()
         with torch.no_grad(), _autocast(config):
             policy, value = model(diagnostic_batch.tokens)
             initial_loss = policy_value_loss(policy, value, diagnostic_batch).total.item()
@@ -209,16 +222,26 @@ def run_benchmark(
         # 診断で消費した先頭 batch は、計測する両入力方式でも同じ順序に戻す。
         batches = _batches(data_path, config)
         batch_index = 0
-        forward = torch.compile(model) if config.execution == "compile" else model
+        forward = (
+            torch.compile(model, mode=config.compile_mode) if config.execution == "compile" else model
+        )
+        cudagraphs_requested = (
+            config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES
+        )
         _synchronize(device)
         startup_seconds = time.perf_counter() - startup_started
 
-        def step(batch: Batch) -> torch.Tensor:
+        def step(prepared: tuple[Batch, bool]) -> torch.Tensor:
+            batch, has_policy = prepared
+            if cudagraphs_requested:
+                # compiled forward/backward の前の反復で使った一時 Tensor の寿命を区切る。
+                torch.compiler.cudagraph_mark_step_begin()
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
                 policy, value = forward(batch.tokens)
                 loss = policy_value_loss(policy, value, batch).total
             scaler.scale(loss).backward()
+            clear_unused_policy_head_gradients(model, has_policy)
             scaler.step(optimizer)
             scaler.update()
             return loss.detach()
@@ -273,6 +296,7 @@ def run_benchmark(
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
             "compile_scope": "model" if config.execution == "compile" else None,
+            "cudagraphs_requested": cudagraphs_requested,
             "input_window_sha256": data_digest.hexdigest(),
             "window_batches_loaded": window_count,
             "window_samples": window_count * config.batch_size,
@@ -298,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
+    parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--input-mode", choices=("resident", "stream"), default="resident")
     parser.add_argument(
