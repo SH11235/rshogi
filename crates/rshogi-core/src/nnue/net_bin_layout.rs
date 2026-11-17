@@ -114,6 +114,57 @@ pub enum NetBinPatchError {
     Delta(NetDeltaError),
 }
 
+/// Threat 行の両半分の先頭を保持し、指定幅の標準 `.bin` を書き出す。
+/// `seed` 指定時は保持した行を -4..=4 の決定的な乱数に置き換える。
+/// FT・PSQT・FC は元の byte 列を保持し、メモリ使用量は Threat 行数に依存しない。
+pub fn resize_threat<R: Read + Seek, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    width: usize,
+    seed: Option<u64>,
+) -> io::Result<()> {
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+    let layout = LayerStacksBinLayout::read_layout(input, false)?;
+    let source = layout.threat_weights.as_ref().ok_or_else(|| invalid("Threat model required"))?;
+    let old_width =
+        super::spec::parse_threat_width(&layout.architecture, layout.l1).map_err(invalid)?;
+    if width == 0 || width > old_width || !width.is_multiple_of(128) {
+        return Err(invalid("width must be a multiple of 128 and <= source Threat width"));
+    }
+    let mut architecture = layout
+        .architecture
+        .split(',')
+        .filter(|token| !token.starts_with("ThreatWidth="))
+        .collect::<Vec<_>>()
+        .join(",");
+    architecture.push_str(&format!(",ThreatWidth={width}"));
+    if architecture.len() > MAX_ARCH_LEN {
+        return Err(invalid("architecture string too long"));
+    }
+    output.write_all(&layout.version.to_le_bytes())?;
+    output.write_all(&layout.network_hash.to_le_bytes())?;
+    output.write_all(&(architecture.len() as u32).to_le_bytes())?;
+    output.write_all(architecture.as_bytes())?;
+    copy_range(input, output, 12 + layout.architecture.len()..source.start)?;
+    input.seek(SeekFrom::Start(source.start as u64))?;
+    let mut row = vec![0u8; old_width];
+    let mut random = seed.map(Xoshiro256PlusPlus::seed_from_u64);
+    for _ in 0..source.len() / old_width {
+        input.read_exact(&mut row)?;
+        if let Some(rng) = &mut random {
+            for value in &mut row[..width] {
+                *value = rng.random_range(-4i8..=4) as u8;
+            }
+            output.write_all(&row[..width])?;
+        } else {
+            output.write_all(&row[..width / 2])?;
+            output.write_all(&row[old_width / 2..old_width / 2 + width / 2])?;
+        }
+    }
+    copy_range(input, output, source.end..layout.fc_data.source.end)
+}
+
 /// FT の両半分と全 bucket の L1 入力列を同じ順序に並べ替える。
 ///
 /// `permutation[new]` は元の列番号。出力は標準の LayerStacks `.bin` であり、
@@ -391,6 +442,7 @@ impl LayerStacksBinLayout {
         let threat_dimensions = validate_layer_stacks_architecture_header(&architecture)
             .map_err(invalid)?
             .unwrap_or(0);
+        let threat_width = super::spec::parse_threat_width(&architecture, l1).map_err(invalid)?;
         let ft_input_dimensions = parse_ft_input_dimensions(&architecture, threat_dimensions)?;
         let ft_hash = cursor.take(4, "FT hash")?;
         let (feature_transformer, ft_biases) = parse_leb128_ft(&mut cursor, ft_hash, l1)?;
@@ -420,7 +472,7 @@ impl LayerStacksBinLayout {
             Some(
                 cursor.take_count(
                     threat_dimensions
-                        .checked_mul(l1)
+                        .checked_mul(threat_width)
                         .ok_or_else(|| invalid("Threat dimensions overflow"))?,
                     1,
                     "Threat weights",
@@ -1560,6 +1612,71 @@ mod tests {
         let error = LayerStacksBinLayout::from_bytes(&bytes).expect_err("short FT bias payload");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("cannot contain 32 values in 1 bytes"));
+    }
+
+    #[test]
+    fn resize_threat_preserves_other_blocks_and_seed_is_deterministic() {
+        let model = build_synthetic_layer_stacks_with_ft_encoding(
+            "HalfKP",
+            <HalfKPFeatureSet as FeatureSetTrait>::DIMENSIONS,
+            1536,
+            4,
+            3,
+            2,
+            SyntheticFtEncoding::Leb128Split,
+        );
+        let original = LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let architecture = format!("{},PSQT=2,Threat=5,ThreatProfile=0", original.architecture);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&original.version.to_le_bytes());
+        bytes.extend_from_slice(&original.network_hash.to_le_bytes());
+        bytes.extend_from_slice(&(architecture.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(architecture.as_bytes());
+        bytes.extend_from_slice(&(original.num_buckets as u32).to_le_bytes());
+        bytes.extend_from_slice(
+            &model.bytes
+                [original.feature_transformer.hash.start..original.buckets[0].fc_hash.start],
+        );
+        bytes.resize(
+            bytes.len() + (original.ft_input_dimensions + 1) * original.num_buckets * 4,
+            0x23,
+        );
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let start = bytes.len();
+        bytes.extend((0..5 * 1536).map(|i| ((i * 73 + i / 1536) % 255) as u8));
+        let end = bytes.len();
+        bytes.extend_from_slice(&model.bytes[original.buckets[0].fc_hash.start..]);
+        for width in [256, 512, 768, 1536] {
+            let mut output = Vec::new();
+            resize_threat(&mut Cursor::new(&bytes), &mut output, width, None).unwrap();
+            let layout = LayerStacksBinLayout::from_bytes(&output).unwrap();
+            let range = layout.threat_weights.clone().unwrap();
+            assert_eq!(range.len(), 5 * width);
+            assert_eq!(
+                &output[layout.feature_transformer.hash.start..range.start],
+                &bytes[12 + architecture.len() + 4..start]
+            );
+            assert_eq!(&output[range.end..], &bytes[end..]);
+            for row in 0..5 {
+                for half in 0..2 {
+                    assert_eq!(
+                        &output[range.start + row * width + half * width / 2
+                            ..range.start + row * width + (half + 1) * width / 2],
+                        &bytes[start + row * 1536 + half * 768
+                            ..start + row * 1536 + half * 768 + width / 2]
+                    );
+                }
+            }
+            let mut random = Vec::new();
+            let mut repeated = Vec::new();
+            resize_threat(&mut Cursor::new(&bytes), &mut random, width, Some(42)).unwrap();
+            resize_threat(&mut Cursor::new(&bytes), &mut repeated, width, Some(42)).unwrap();
+            assert_eq!(random, repeated);
+            assert!(random[range].iter().all(|&v| (-4..=4).contains(&(v as i8))));
+        }
+        for width in [0, 129, 1664] {
+            assert!(resize_threat(&mut Cursor::new(&bytes), &mut Vec::new(), width, None).is_err());
+        }
     }
 
     #[test]

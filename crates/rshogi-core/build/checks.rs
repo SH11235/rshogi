@@ -62,6 +62,11 @@ fn validate_feature_combination(
 
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
+    if has_feature("threat-width-512")
+        && (!mode_specific || !has_feature("layerstacks-1536x16x32")) {
+        return Err("threat-width-512 requires a static 1536x16x32 edition".to_owned());
+    }
+
     if has_feature("nnue-effect-bucket") {
         if !mode_specific {
             return Err(

@@ -42,7 +42,8 @@ const CORE_FEATURE_REF_PREFIXES: [&str; 2] = ["rshogi-core/", "rshogi-core?/"];
 /// どの preset edition にも束ねられていない member も含め、`--features` では family ごと
 /// 拒否する。edition 名と network 構造が食い違う binary を作らないためと、preset の追加で
 /// 受理される名前が黙って変わらないようにするため。
-const STRUCTURAL_FEATURE_FAMILY_PREFIXES: [&str; 2] = ["threat-profile-", "effect-bucket-"];
+const STRUCTURAL_FEATURE_FAMILY_PREFIXES: [&str; 3] =
+    ["threat-profile-", "threat-width-", "effect-bucket-"];
 const MANIFEST_SUFFIX: &str = ".meta.toml";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 

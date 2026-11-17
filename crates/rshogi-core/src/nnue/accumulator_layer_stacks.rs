@@ -26,7 +26,7 @@ pub struct AccumulatorLayerStacks<const L1: usize> {
     /// Threat アキュムレータ `[perspective][dimension]`
     /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
     #[cfg(feature = "nnue-threat")]
-    pub threat_accumulation: [[i16; L1]; 2],
+    pub threat_accumulation: [super::threat_width::ThreatAccumulation<L1>; 2],
 
     /// PSQT アキュムレータ `[perspective][bucket]`
     /// 各駒の PSQT 重みを視点ごとに累積する。
@@ -46,7 +46,7 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
         Self {
             accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-threat")]
-            threat_accumulation: [[0; L1]; 2],
+            threat_accumulation: [super::threat_width::zero::<L1>(); 2],
             #[cfg(feature = "nnue-psqt")]
             psqt_accumulation: [[0; MAX_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
@@ -78,7 +78,7 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     /// `perspective` が0（先手）・1（後手）以外の場合。
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    pub fn get_threat(&self, perspective: usize) -> &[i16; L1] {
+    pub fn get_threat(&self, perspective: usize) -> &super::threat_width::ThreatAccumulation<L1> {
         &self.threat_accumulation[perspective]
     }
 
@@ -88,7 +88,10 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     /// `perspective` が0（先手）・1（後手）以外の場合。
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
+    pub fn get_threat_mut(
+        &mut self,
+        perspective: usize,
+    ) -> &mut super::threat_width::ThreatAccumulation<L1> {
         &mut self.threat_accumulation[perspective]
     }
 }

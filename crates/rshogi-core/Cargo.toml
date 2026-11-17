@@ -119,9 +119,10 @@ layerstacks-1536x16x64 = []
 
 # LayerStack 拡張 slot (psqt / threat)
 # - nnue-psqt:   AccumulatorLayerStacks に psqt_accumulation を含める。PSQT モデル読み込み可。
-# - nnue-threat: AccumulatorLayerStacks に threat_accumulation を含める (+6KB/entry)。Threat モデル読み込み可。
+# - nnue-threat: AccumulatorLayerStacks に threat_accumulation を含める (4*T bytes/entry)。Threat モデル読み込み可。
 # - nnue-effect-bucket: HalfKaHmMerged の FT 入力を EffectBucket modifier 付きに差し替える。
 nnue-psqt   = []
+threat-width-512 = ["nnue-threat"]
 nnue-threat = []
 nnue-effect-bucket = []
 # universal edition 用の runtime 次元 NNUE 実装。
@@ -224,6 +225,7 @@ edition-layerstacks-halfka_hm_merged-1536x16x32-psqt = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32", "nnue-psqt",
   "nnue-progress-diff",
 ]
+edition-layerstacks-halfka_hm_merged-1536x16x32-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x16x32-threat", "threat-width-512"]
 edition-layerstacks-halfka_hm_merged-1536x16x32-threat = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32", "nnue-threat",
   "nnue-progress-diff",

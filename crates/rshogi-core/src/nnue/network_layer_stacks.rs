@@ -158,7 +158,17 @@ pub fn compute_layer_stack_kingrank9_bucket_index(
 /// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
 #[cfg(feature = "nnue-threat")]
 #[inline]
-fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
+fn add_i16_arrays<const L1: usize>(
+    dst: &mut [i16; L1],
+    a: &[i16; L1],
+    b: &super::threat_width::ThreatAccumulation<L1>,
+) {
+    if b.len() != L1 {
+        for i in 0..L1 {
+            dst[i] = a[i].wrapping_add(super::threat_width::value::<L1>(b, i));
+        }
+        return;
+    }
     // AVX2 ループは `L1 / 16` 回で全要素を処理する前提。L1 が 16 の倍数で
     // ない場合は末端要素が取り残されるため、monomorphization 時に失敗させる。
     const {
@@ -403,6 +413,21 @@ impl<
         let threat_dimensions =
             super::spec::validate_layer_stacks_architecture_header(&arch_str)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+
+        let model_threat_width = super::spec::parse_threat_width(&arch_str, L1)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+        #[cfg(feature = "nnue-threat")]
+        if threat_dimensions.is_some() && model_threat_width != super::threat_width::width(L1) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Threat width mismatch: model={model_threat_width}, engine={}",
+                    super::threat_width::width(L1)
+                ),
+            ));
+        }
+        #[cfg(not(feature = "nnue-threat"))]
+        let _ = model_threat_width;
 
         // Feature transformer hash を読み飛ばす
         reader.read_exact(&mut buf4)?;
@@ -858,8 +883,10 @@ impl<
                 };
                 info!("[NNUE Eval] us_threat first 16: {:?}", &us_t[0..16]);
                 for i in 0..L1 {
-                    us_combined[i] = us_combined[i].wrapping_add(us_t[i]);
-                    them_combined[i] = them_combined[i].wrapping_add(them_t[i]);
+                    us_combined[i] =
+                        us_combined[i].wrapping_add(super::threat_width::value::<L1>(us_t, i));
+                    them_combined[i] =
+                        them_combined[i].wrapping_add(super::threat_width::value::<L1>(them_t, i));
                 }
 
                 info!("[NNUE Eval] us_combined (piece+threat) first 16: {:?}", &us_combined[0..16]);
@@ -3042,6 +3069,109 @@ mod tests {
         assert!(validate("Factorizer").is_err());
     }
 
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
+        const N: usize = 1536;
+        let mut acc = AccumulatorLayerStacks::<N>::new();
+        for side in 0..2 {
+            for (i, x) in acc.accumulation[side].iter_mut().enumerate() {
+                *x = [i16::MIN, i16::MAX, -1, 0, 1, 64, 127, 128][(i + side) % 8];
+            }
+            for (i, x) in acc.threat_accumulation[side].iter_mut().enumerate() {
+                *x = ((i * 73 + side * 31) as i16).wrapping_mul(191);
+            }
+        }
+        let mut combined = [Aligned([0i16; N]); 2];
+        for (side, output) in combined.iter_mut().enumerate() {
+            add_i16_arrays(&mut output.0, acc.get(side), acc.get_threat(side));
+            let mut expected = acc.accumulation[side];
+            let half = acc.get_threat(side).len() / 2;
+            for i in 0..half {
+                expected[i] = expected[i].wrapping_add(acc.get_threat(side)[i]);
+                expected[N / 2 + i] =
+                    expected[N / 2 + i].wrapping_add(acc.get_threat(side)[half + i]);
+            }
+            assert_eq!(output.0, expected);
+        }
+        for (us, them) in [(0, 1), (1, 0)] {
+            let mut actual = Aligned([0u8; N]);
+            sqr_clipped_relu_transform(&combined[us].0, &combined[them].0, &mut actual.0);
+            for (side, base) in [(us, 0), (them, N / 2)] {
+                let threat = acc.get_threat(side);
+                for block in 0..N / 128 {
+                    let mut packed = [0u8; 64];
+                    for (lane, byte) in packed.iter_mut().enumerate() {
+                        let local = (lane / 16) * 8 + lane % 8 + ((lane % 16) / 8) * 32;
+                        let i = block * 64 + local;
+                        let (mut a, mut b) = (acc.get(side)[i], acc.get(side)[N / 2 + i]);
+                        if block * 64 < threat.len() / 2 {
+                            a = a.wrapping_add(threat[i]);
+                            b = b.wrapping_add(threat[threat.len() / 2 + i]);
+                        }
+                        *byte =
+                            ((i32::from(a).clamp(0, 127) * i32::from(b).clamp(0, 127)) >> 7) as u8;
+                        assert_eq!(*byte, actual.0[base + i]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "nnue-threat")]
+    #[test]
+    fn loader_rejects_wrong_threat_width_before_reading_ft() {
+        let wrong = if cfg!(feature = "threat-width-512") {
+            ""
+        } else {
+            ",ThreatWidth=512"
+        };
+        let arch = format!(
+            "Features=HalfKA_hm[138510->1536x2],LayerStacks,l2=16,l3=32,Threat=216720{wrong}"
+        );
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &super::super::constants::NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch.as_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let error = NetworkLayerStacks::<
+            1536,
+            16,
+            30,
+            32,
+            super::super::ls_feature_spec::HalfKaHmMergedSpec,
+        >::read(&mut std::io::Cursor::new(bytes))
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("Threat width mismatch"), "{error}");
+    }
+
+    #[test]
+    fn threat_width_header_validation() {
+        use super::super::spec::parse_threat_width;
+        assert_eq!(parse_threat_width("Threat=216720", 1536).unwrap(), 1536);
+        for width in [256, 512, 768, 1536] {
+            assert_eq!(
+                parse_threat_width(&format!("Threat=216720,ThreatWidth={width}"), 1536).unwrap(),
+                width
+            );
+        }
+        for arch in [
+            "ThreatWidth=512",
+            "Threat=1,ThreatWidth=0",
+            "Threat=1,ThreatWidth=129",
+            "Threat=1,ThreatWidth=1664",
+            "Threat=1,ThreatWidth=abc",
+            "Threat=1,ThreatWidth=512,ThreatWidth=512",
+        ] {
+            assert!(parse_threat_width(arch, 1536).is_err(), "{arch}");
+        }
+    }
+
     #[test]
     fn saturation_uses_forward_accumulators() {
         use super::super::ls_feature_spec::HalfKpSpec;
@@ -3253,7 +3383,7 @@ mod tests {
                 for i in 0..N {
                     acc.accumulation[perspective][i] = rng.random_range(-32..160);
                     #[cfg(feature = "nnue-threat")]
-                    if use_threat {
+                    if use_threat && i < acc.threat_accumulation[perspective].len() {
                         if i % 31 == 0 {
                             acc.accumulation[perspective][i] = i16::MAX;
                             acc.threat_accumulation[perspective][i] = 1;
@@ -3283,8 +3413,12 @@ mod tests {
                         let (a, b) = if use_threat {
                             let threat = acc.get_threat(perspective as usize);
                             (
-                                values[i].wrapping_add(threat[i]),
-                                values[i + N / 2].wrapping_add(threat[i + N / 2]),
+                                values[i].wrapping_add(super::super::threat_width::value::<N>(
+                                    threat, i,
+                                )),
+                                values[i + N / 2].wrapping_add(
+                                    super::super::threat_width::value::<N>(threat, i + N / 2),
+                                ),
                             )
                         } else {
                             (values[i], values[i + N / 2])

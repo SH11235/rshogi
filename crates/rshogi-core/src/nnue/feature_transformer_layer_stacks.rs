@@ -24,6 +24,8 @@ use super::stats::count_threat_multiply;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
+#[cfg(feature = "nnue-threat")]
+use super::threat_width::{ThreatAccumulation, width as threat_width};
 #[cfg(feature = "nnue-effect-bucket")]
 use super::{EFFECT_BUCKET_CONFIG, append_active_effect_bucket};
 use crate::position::Position;
@@ -134,7 +136,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     #[cfg(feature = "nnue-psqt")]
     pub(crate) has_psqt: bool,
 
-    /// Threat 重み [THREAT_DIMENSIONS × L1]
+    /// Threat 重み [THREAT_DIMENSIONS × T]
     #[cfg(feature = "nnue-threat")]
     pub(crate) threat_weights: WeightBox<i8>,
 
@@ -312,7 +314,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(THREAT_DIMENSIONS * L1).into(),
+            threat_weights: AlignedBox::new_zeroed(THREAT_DIMENSIONS * threat_width(L1)).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -537,7 +539,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         reader: &mut R,
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<()> {
-        let weight_count = THREAT_DIMENSIONS * L1;
+        let weight_count = THREAT_DIMENSIONS * threat_width(L1);
         #[cfg(feature = "prepacked-nnue")]
         if let Some(packed) = packed {
             self.threat_weights = packed.threat(weight_count)?;
@@ -555,7 +557,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         // - 作ったスライスは `read_exact` 呼び出しの内側でしか使わず、
         //   関数リターン前にドロップされる。ローカル変数 `threat_weights` への
         //   排他可変参照はこのスコープだけが持ち、重複参照は発生しない。
-        // - `weight_count == THREAT_DIMENSIONS * L1` は `AlignedBox` の長さと
+        // - `weight_count == THREAT_DIMENSIONS * T` は `AlignedBox` の長さと
         //   一致するため、`from_raw_parts_mut` の length 要件を満たす。
         let slice = unsafe {
             std::slice::from_raw_parts_mut(threat_weights.as_mut_ptr() as *mut u8, weight_count)
@@ -566,12 +568,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         Ok(())
     }
 
-    /// Threat 重みの行を取得（i8[L1]）
+    /// Threat 重みの行を取得（i8[T]）
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn threat_weight_row(&self, index: usize) -> &[i8] {
-        let offset = index * L1;
-        let end = offset + L1;
+        let offset = index * threat_width(L1);
+        let end = offset + threat_width(L1);
         debug_assert!(end <= self.threat_weights.len(), "threat index out of range: {index}");
         &self.threat_weights[offset..end]
     }
@@ -582,11 +584,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// AVX-512BW は32要素、AVX2 は16要素ずつ符号拡張して加算する。
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    fn add_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
-        // AVX2 ループは `L1 / 16` 回で全要素を処理する前提のため、
-        // L1 が 16 の倍数でない場合は monomorphization 時に弾く。
+    fn add_threat_weights(&self, accumulation: &mut ThreatAccumulation<L1>, index: usize) {
+        // AVX2 ループは `T / 16` 回で全要素を処理する前提のため、
+        // T が 16 の倍数でない場合は monomorphization 時に弾く。
         const {
-            assert!(L1.is_multiple_of(16), "L1 must be a multiple of 16 for AVX2 SIMD loops");
+            assert!(threat_width(L1).is_multiple_of(16), "Threat width must be a multiple of 16");
         }
         let weights = self.threat_weight_row(index);
 
@@ -596,7 +598,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             target_feature = "avx512bw"
         ))]
         {
-            // SAFETY: 行と accumulator の長さは L1。32要素単位の読み書きと
+            // SAFETY: 行と accumulator の長さは T。32要素単位の読み書きと
             // prefetch はその範囲内で、非整列ロード・ストアを使う。
             // cfg は AVX-512F/BW を保証する。
             unsafe {
@@ -604,11 +606,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 let a = accumulation.as_mut_ptr();
                 let w = weights.as_ptr();
                 for offset in [512, 768, 1024, 1280] {
-                    if L1 > offset {
+                    if threat_width(L1) > offset {
                         _mm_prefetch(w.add(offset), _MM_HINT_T0);
                     }
                 }
-                for i in 0..L1 / 32 {
+                for i in 0..threat_width(L1) / 32 {
                     let offset = i * 32;
                     let x = _mm512_loadu_si512(a.add(offset).cast());
                     let b = _mm256_loadu_si256(w.add(offset).cast());
@@ -616,12 +618,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     _mm512_storeu_si512(a.add(offset).cast(), _mm512_add_epi16(x, y));
                 }
             }
-            for i in L1 / 32 * 32..L1 {
+            for i in threat_width(L1) / 32 * 32..threat_width(L1) {
                 accumulation[i] = accumulation[i].wrapping_add(i16::from(weights[i]));
             }
         }
 
-        // AVX2: 128bit i8 → 256bit i16 sign-extend + add, L1/16 iterations
+        // AVX2: 128bit i8 → 256bit i16 sign-extend + add, T/16 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -630,14 +632,14 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         {
             // SAFETY:
             // - `acc_ptr`: 呼び出し元が `AccumulatorLayerStacks::get_threat_mut()`
-            //   等から取得する `&mut [i16; L1]` (親構造体 `AccumulatorLayerStacks`
+            //   等から取得する `&mut ThreatAccumulation<L1>` (親構造体 `AccumulatorLayerStacks`
             //   が `#[repr(C, align(64))]` で 64 バイトアライン）→
             //   `_mm256_load_si256` / `_mm256_store_si256` の 32 バイトアライン
             //   要件を満たす
             // - `w_ptr`: `AlignedBox<i8>` のポインタ。`_mm_loadu_si128`
             //   （非アラインロード）を使っているためアライメント要件は無い
             // - プリフェッチは hint のみで safety に影響しない
-            // - ループ `L1 / 16` は const generics 由来。`L1 ∈ {512, 768, 1024, 1536, 3072}`
+            // - ループ `T / 16` は const generics 由来。`T ∈ {512, 768, 1024, 1536, 3072}`
             //   は全て 16 の倍数なので末端要素が取り残されない
             unsafe {
                 use std::arch::x86_64::*;
@@ -645,21 +647,21 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 let w_ptr = weights.as_ptr();
 
                 // 行内プリフェッチ: 後半の cache lines を先読み
-                // L1 bytes = L1/64 cache lines (64B), 先頭は触れた時点で fetch される
-                if L1 > 512 {
+                // T bytes = T/64 cache lines (64B), 先頭は触れた時点で fetch される
+                if threat_width(L1) > 512 {
                     _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
                 }
-                if L1 > 768 {
+                if threat_width(L1) > 768 {
                     _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
                 }
-                if L1 > 1024 {
+                if threat_width(L1) > 1024 {
                     _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
                 }
-                if L1 > 1280 {
+                if threat_width(L1) > 1280 {
                     _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
                 }
 
-                for i in 0..(L1 / 16) {
+                for i in 0..(threat_width(L1) / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
                     let w16 = _mm256_cvtepi8_epi16(w8);
@@ -687,7 +689,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     #[inline]
     fn apply_threat_rows<const ADD: bool>(
         &self,
-        accumulation: &mut [i16; L1],
+        accumulation: &mut ThreatAccumulation<L1>,
         indices: &IndexList<MAX_CHANGED_THREAT_FEATURES>,
     ) {
         #[cfg(all(
@@ -695,12 +697,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             target_feature = "avx512f",
             target_feature = "avx512bw"
         ))]
-        if L1.is_multiple_of(256) && !indices.is_empty() {
-            // SAFETY: L1 は tile 幅の倍数で、各行と accumulator の長さは L1。
+        if threat_width(L1).is_multiple_of(256) && !indices.is_empty() {
+            // SAFETY: T は tile 幅の倍数で、各行と accumulator の長さは T。
             // 非整列 load/store を使い、cfg は AVX-512F/BW を保証する。
             unsafe {
                 use std::arch::x86_64::*;
-                for offset in (0..L1).step_by(256) {
+                for offset in (0..threat_width(L1)).step_by(256) {
                     let mut tile = [_mm512_setzero_si512(); 8];
                     for (k, v) in tile.iter_mut().enumerate() {
                         *v = _mm512_loadu_si512(accumulation.as_ptr().add(offset + k * 32).cast());
@@ -739,9 +741,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// Threat 重み (i8) を i16 アキュムレータから減算（SIMD 最適化）
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    fn sub_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+    fn sub_threat_weights(&self, accumulation: &mut ThreatAccumulation<L1>, index: usize) {
         const {
-            assert!(L1.is_multiple_of(16), "L1 must be a multiple of 16 for AVX2 SIMD loops");
+            assert!(threat_width(L1).is_multiple_of(16), "Threat width must be a multiple of 16");
         }
         let weights = self.threat_weight_row(index);
 
@@ -751,7 +753,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             target_feature = "avx512bw"
         ))]
         {
-            // SAFETY: 行と accumulator の長さは L1。32要素単位の読み書きと
+            // SAFETY: 行と accumulator の長さは T。32要素単位の読み書きと
             // prefetch はその範囲内で、非整列ロード・ストアを使う。
             // cfg は AVX-512F/BW を保証する。
             unsafe {
@@ -759,11 +761,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 let a = accumulation.as_mut_ptr();
                 let w = weights.as_ptr();
                 for offset in [512, 768, 1024, 1280] {
-                    if L1 > offset {
+                    if threat_width(L1) > offset {
                         _mm_prefetch(w.add(offset), _MM_HINT_T0);
                     }
                 }
-                for i in 0..L1 / 32 {
+                for i in 0..threat_width(L1) / 32 {
                     let offset = i * 32;
                     let x = _mm512_loadu_si512(a.add(offset).cast());
                     let b = _mm256_loadu_si256(w.add(offset).cast());
@@ -771,7 +773,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     _mm512_storeu_si512(a.add(offset).cast(), _mm512_sub_epi16(x, y));
                 }
             }
-            for i in L1 / 32 * 32..L1 {
+            for i in threat_width(L1) / 32 * 32..threat_width(L1) {
                 accumulation[i] = accumulation[i].wrapping_sub(i16::from(weights[i]));
             }
         }
@@ -784,32 +786,32 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         ))]
         {
             // SAFETY: `add_threat_weights` と同じ契約。
-            // - `acc_ptr`: `accumulation: &mut [i16; L1]` の親は
-            //   `AccumulatorLayerStacks<L1>` (`#[repr(C, align(64))]`) → 32 バイト
+            // - `acc_ptr`: `accumulation: &mut ThreatAccumulation<L1>` の親は
+            //   `AccumulatorLayerStacks<T>` (`#[repr(C, align(64))]`) → 32 バイト
             //   アラインが保証され `_mm256_load/store_si256` の要件を満たす
             // - `w_ptr`: `AlignedBox<i8>` だが `_mm_loadu_si128` 非アラインロード
             //   を使うためアライメント要件は無い
-            // - `L1 ∈ {512, 768, 1024, 1536, 3072}` はすべて 16 の倍数
+            // - `T ∈ {512, 768, 1024, 1536, 3072}` はすべて 16 の倍数
             unsafe {
                 use std::arch::x86_64::*;
 
                 // 行内プリフェッチ
                 let w_ptr = weights.as_ptr();
-                if L1 > 512 {
+                if threat_width(L1) > 512 {
                     _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
                 }
-                if L1 > 768 {
+                if threat_width(L1) > 768 {
                     _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
                 }
-                if L1 > 1024 {
+                if threat_width(L1) > 1024 {
                     _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
                 }
-                if L1 > 1280 {
+                if threat_width(L1) > 1280 {
                     _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
                 }
                 let acc_ptr = accumulation.as_mut_ptr();
                 let w_ptr = weights.as_ptr();
-                for i in 0..(L1 / 16) {
+                for i in 0..(threat_width(L1) / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
                     let w16 = _mm256_cvtepi8_epi16(w8);
@@ -2534,7 +2536,11 @@ mod tests {
     #[test]
     fn threat_ancestor_matches_full_refresh() {
         use crate::movegen::{MoveList, generate_legal};
-        const N: usize = 64;
+        const N: usize = if cfg!(feature = "threat-width-512") {
+            1536
+        } else {
+            64
+        };
         let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
         ft.has_threat = true;
         for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
@@ -2572,6 +2578,7 @@ mod tests {
                     let mut stack = AccumulatorStackLayerStacks::<N>::new();
                     let mut cache = AccumulatorCacheLayerStacks::<N>::new();
                     ft.refresh_accumulator(&pos, &mut stack.current_mut().accumulator);
+                    let mut direct = stack.current().accumulator.clone();
                     let mut moves = Vec::new();
                     for ply in 0..24 {
                         let mut list = MoveList::new();
@@ -2584,6 +2591,19 @@ mod tests {
                         stack.push();
                         stack.current_mut().dirty_piece = dirty;
                         moves.push(mv);
+                        let mut next_direct = AccumulatorLayerStacks::<N>::new();
+                        if cached {
+                            ft.update_accumulator_with_cache(
+                                &pos,
+                                &dirty,
+                                &mut next_direct,
+                                &direct,
+                                &mut cache,
+                            );
+                        } else {
+                            ft.update_accumulator(&pos, &dirty, &mut next_direct, &direct);
+                        }
+                        direct = next_direct;
                         if (ply + 1) % stride == 0 {
                             ft.update_with_threat_ancestor(
                                 &pos,
@@ -2592,6 +2612,10 @@ mod tests {
                             );
                             let mut expected = AccumulatorLayerStacks::<N>::new();
                             ft.refresh_accumulator(&pos, &mut expected);
+                            assert_eq!(direct.accumulation, expected.accumulation);
+                            assert_eq!(direct.threat_accumulation, expected.threat_accumulation);
+                            #[cfg(feature = "nnue-psqt")]
+                            assert_eq!(direct.psqt_accumulation, expected.psqt_accumulation);
                             assert_eq!(
                                 stack.current().accumulator.accumulation,
                                 expected.accumulation,
@@ -2679,7 +2703,8 @@ mod tests {
     fn batched_threat_rows_match_scalar() {
         fn check<const N: usize>() {
             let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
-            let mut weights = AlignedBox::<i8>::new_zeroed(N * 3);
+            let mut weights =
+                AlignedBox::<i8>::new_zeroed(super::super::threat_width::width(N) * 3);
             for (i, w) in weights.iter_mut().enumerate() {
                 *w = ((i as u32).wrapping_mul(0x9e37_79b9) >> 24) as i8;
             }
@@ -2689,7 +2714,7 @@ mod tests {
                 for i in 0..count {
                     assert!(indices.push(i % 3));
                 }
-                let mut actual = Aligned([0i16; N]);
+                let mut actual = Aligned(super::super::threat_width::zero::<N>());
                 for (i, x) in actual.0.iter_mut().enumerate() {
                     *x = if i % 2 == 0 {
                         i16::MAX - (i % 7) as i16
@@ -2701,7 +2726,9 @@ mod tests {
                 let mut expected = initial;
                 for row in indices.iter() {
                     for (i, x) in expected.iter_mut().enumerate() {
-                        *x = x.wrapping_add(i16::from(ft.threat_weights[row * N + i]));
+                        *x = x.wrapping_add(i16::from(
+                            ft.threat_weights[row * super::super::threat_width::width(N) + i],
+                        ));
                     }
                 }
                 ft.apply_threat_rows::<true>(&mut actual.0, &indices);
@@ -2722,12 +2749,13 @@ mod tests {
     fn threat_row_updates_match_wrapping_scalar() {
         fn check<const N: usize>() {
             let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_output_transform_tests();
-            let mut weights = AlignedBox::<i8>::new_zeroed(N * 2);
+            let mut weights =
+                AlignedBox::<i8>::new_zeroed(super::super::threat_width::width(N) * 2);
             for (i, w) in weights.iter_mut().enumerate() {
                 *w = (i as u8).wrapping_mul(73) as i8;
             }
             ft.threat_weights = weights.into();
-            let mut actual = Aligned([0i16; N]);
+            let mut actual = Aligned(super::super::threat_width::zero::<N>());
             for (i, x) in actual.0.iter_mut().enumerate() {
                 *x = if i % 2 == 0 {
                     i16::MAX - (i % 7) as i16
@@ -2739,7 +2767,9 @@ mod tests {
             for row in 0..2 {
                 let mut expected = initial;
                 for (i, x) in expected.iter_mut().enumerate() {
-                    *x = x.wrapping_add(i16::from(ft.threat_weights[row * N + i]));
+                    *x = x.wrapping_add(i16::from(
+                        ft.threat_weights[row * super::super::threat_width::width(N) + i],
+                    ));
                 }
                 actual.0 = initial;
                 ft.add_threat_weights(&mut actual.0, row);
@@ -2747,7 +2777,9 @@ mod tests {
                 ft.sub_threat_weights(&mut actual.0, row);
                 assert_eq!(actual.0, initial);
                 for (i, x) in expected.iter_mut().enumerate() {
-                    *x = initial[i].wrapping_sub(i16::from(ft.threat_weights[row * N + i]));
+                    *x = initial[i].wrapping_sub(i16::from(
+                        ft.threat_weights[row * super::super::threat_width::width(N) + i],
+                    ));
                 }
                 ft.sub_threat_weights(&mut actual.0, row);
                 assert_eq!(actual.0, expected);

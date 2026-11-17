@@ -168,12 +168,14 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
 | size (LS) | [対応する10構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
-| ext (LS) | `psqt` / `threat` / `psqt_threat` | ✓ | ✓ |
+| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
+- `threat512` は 1536x16x32 の駒 FT に512列の Threat を加える静的 edition。形式と変換は
+  [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
   `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
 - slot 区切りは `-`、slot 内の複合語は `_` (tatara の `halfka-hm-merged` と同じ architecture を
@@ -220,7 +222,7 @@ Edition 軸と直交する opt-in feature (`mimalloc` / `prepacked-nnue` / `sear
   (`mode-*` / `layerstack-arch` / `ft-*` / `layerstacks-<dims>` / `nnue-psqt` /
   `nnue-threat` / `nnue-effect-bucket` / `nnue-progress-diff` 等)。
   edition 名と実際の構成が食い違う binary を作らないため、該当 preset を `--edition` で選ぶ
-- NNUE 構造の family: `threat-profile-*` / `effect-bucket-*` で始まる名前は、preset に
+- NNUE 構造の family: `threat-profile-*` / `threat-width-*` / `effect-bucket-*` で始まる名前は、preset に
   束ねられているかによらず family ごと拒否する (Threat 次元や EffectBucket の形を変える
   ため edition 経由でだけ選ぶ。preset の追加で受理される名前が変わることも防ぐ)
 
