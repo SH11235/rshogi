@@ -491,6 +491,11 @@ impl<E: Evaluator> CachedEvaluator<E> {
 }
 
 impl<E: Evaluator> Evaluator for CachedEvaluator<E> {
+    #[cfg(feature = "inference-diagnostics")]
+    fn inference_timings(&self) -> Option<crate::InferenceTimings> {
+        self.inner.inference_timings()
+    }
+
     fn input_format(&self) -> Option<InputFormat> {
         self.inner.input_format()
     }
@@ -1556,6 +1561,49 @@ mod tests {
         assert!(token.first.is_empty() && token.second.is_empty());
         assert!(size_of::<Entry<TokenKey>>() < size_of::<Entry<BasicKey>>());
         assert!(token.entries.len() > basic.entries.len());
+        Ok(())
+    }
+    #[cfg(feature = "inference-diagnostics")]
+    #[test]
+    fn diagnostics_are_forwarded_without_resetting_backend_totals() -> Result<()> {
+        struct Instrumented(crate::InferenceTimings);
+        impl Evaluator for Instrumented {
+            fn input_format(&self) -> Option<InputFormat> {
+                Some(InputFormat::StmTokensV1)
+            }
+            fn inference_timings(&self) -> Option<crate::InferenceTimings> {
+                Some(self.0)
+            }
+            fn evaluate(&mut self, _: &Position, logits: &mut [f32]) -> Result<f32> {
+                self.0.forward_calls += 1;
+                self.0.positions += 1;
+                logits.fill(0.0);
+                Ok(0.5)
+            }
+        }
+        assert!(
+            Fake {
+                calls: 0,
+                fail: false
+            }
+            .inference_timings()
+            .is_none()
+        );
+        let mut evaluator =
+            CachedEvaluator::new(Instrumented(crate::InferenceTimings::default()), 1)?;
+        let mut logits = [0.0; MAX_MOVE_LABEL_NUM];
+        evaluator.evaluate(&position(), &mut logits)?;
+        let snapshot = evaluator.inference_timings().unwrap();
+        evaluator.reset_stats();
+        evaluator.evaluate(&position(), &mut logits)?;
+        assert_eq!(evaluator.inference_timings(), Some(snapshot));
+        evaluator.clear();
+        assert_eq!(evaluator.inference_timings(), Some(snapshot));
+        evaluator.evaluate(&position(), &mut logits)?;
+        assert_eq!(
+            evaluator.inference_timings().unwrap().forward_calls,
+            snapshot.forward_calls + 1
+        );
         Ok(())
     }
 }
