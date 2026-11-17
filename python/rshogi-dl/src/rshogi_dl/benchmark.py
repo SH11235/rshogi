@@ -21,6 +21,7 @@ from .data import Batch, RecordError, iter_batches
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact
+from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
@@ -196,21 +197,23 @@ def run_benchmark(
                 data_digest.update(str(tuple(tensor.shape)).encode())
                 data_digest.update(tensor.numpy().tobytes())
         window_count = len(window)
-        resident = [
-            _to_device(batch, device, policy_rows_mode=config.policy_rows_mode) for batch in window
-        ] if config.input_mode == "resident" else None
+        def prepare_batch(batch: Batch) -> tuple[Batch, bool]:
+            has_policy = has_policy_targets(batch)
+            return _to_device(batch, device, policy_rows_mode=config.policy_rows_mode), has_policy
+
+        resident = [prepare_batch(batch) for batch in window] if config.input_mode == "resident" else None
         del window
         batch_index = 0
 
-        def next_batch() -> Batch:
+        def next_batch() -> tuple[Batch, bool]:
             nonlocal batch_index
             if resident is None:
-                return _to_device(next(batches), device, policy_rows_mode=config.policy_rows_mode)
+                return prepare_batch(next(batches))
             batch = resident[batch_index % len(resident)]
             batch_index += 1
             return batch
 
-        diagnostic_batch = next_batch()
+        diagnostic_batch, _ = next_batch()
         with torch.no_grad(), _autocast(config):
             policy, value = model(diagnostic_batch.tokens)
             initial_loss = policy_value_loss(policy, value, diagnostic_batch).total.item()
@@ -228,7 +231,8 @@ def run_benchmark(
         _synchronize(device)
         startup_seconds = time.perf_counter() - startup_started
 
-        def step(batch: Batch) -> torch.Tensor:
+        def step(prepared: tuple[Batch, bool]) -> torch.Tensor:
+            batch, has_policy = prepared
             if cudagraphs_requested:
                 # compiled forward/backward の前の反復で使った一時 Tensor の寿命を区切る。
                 torch.compiler.cudagraph_mark_step_begin()
@@ -237,6 +241,7 @@ def run_benchmark(
                 policy, value = forward(batch.tokens)
                 loss = policy_value_loss(policy, value, batch).total
             scaler.scale(loss).backward()
+            clear_unused_policy_head_gradients(model, has_policy)
             scaler.step(optimizer)
             scaler.update()
             return loss.detach()
