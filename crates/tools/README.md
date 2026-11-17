@@ -58,7 +58,8 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 ```
 
 通常は必要なバイナリだけを `--bin` で選びます。`kifu_player` と `dlshogi-onnx` は
-既定で有効です。TUI・ONNX 依存を外す場合は
+既定で有効です。基本 plane / token モデルを使う4ツールは
+[ONNX モデルの入力](docs/onnx-models.md) を参照してください。TUI・ONNX 依存を外す場合は
 `--no-default-features --features nnue-arch` をビルド引数に追加します。
 `prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
 1 つの NNUE 構成だけを入れた速い build (`rescore_psv` 等) は

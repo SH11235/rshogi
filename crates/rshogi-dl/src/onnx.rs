@@ -623,7 +623,7 @@ impl crate::Evaluator for OnnxEvaluator {
     }
 }
 
-/// metadata と tensor 契約で basic / token 形式を選ぶ CPU/CUDA evaluator。
+/// 基本 plane / token 形式の policy/value evaluator。
 pub enum ModelEvaluator {
     /// dlshogi 互換の基本入力。
     Basic(OnnxEvaluator),
@@ -675,6 +675,23 @@ impl ModelEvaluator {
         }
     }
 
+    /// 局面を最大 batch ごとに分け、手番側の期待スコアを返す。policy のコピーは行わない。
+    pub fn evaluate_values(&mut self, positions: &[Position]) -> Result<Vec<f32>> {
+        match self {
+            Self::Basic(evaluator) => evaluator.evaluate(positions),
+            Self::Tokens(evaluator) => {
+                let mut values = vec![0.0; positions.len()];
+                for (chunk, output) in positions
+                    .chunks(evaluator.batch_size)
+                    .zip(values.chunks_mut(evaluator.batch_size))
+                {
+                    evaluator.run_iter(chunk.par_iter(), output, None)?;
+                }
+                Ok(values)
+            }
+        }
+    }
+
     /// 最大 batch 以下の局面を推論し、value と局面順の policy logits を追記する。
     pub fn evaluate_with_policy(
         &mut self,
@@ -687,22 +704,33 @@ impl ModelEvaluator {
                 evaluator.evaluate_with_policy(positions.par_iter(), values, policy)
             }
             Self::Tokens(evaluator) => {
+                anyhow::ensure!(
+                    positions.len() <= evaluator.batch_size,
+                    "positions exceed batch_size"
+                );
+                append_token_outputs(positions.len(), values, policy, |values, policy| {
+                    evaluator.run(positions, values, policy)
+                })
+            }
+        }
+    }
+
+    /// 順序付き並列 iterator を直接 encode し、value と policy を入力順に追記する。
+    /// 入力数は最大 batch 以下とし、局面や参照の中間配列は作らない。
+    pub fn evaluate_with_policy_iter<'a>(
+        &mut self,
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
+        values: &mut Vec<f32>,
+        policy: &mut Vec<f32>,
+    ) -> Result<()> {
+        match self {
+            Self::Basic(evaluator) => evaluator.evaluate_with_policy(positions, values, policy),
+            Self::Tokens(evaluator) => {
                 let n = positions.len();
                 anyhow::ensure!(n <= evaluator.batch_size, "positions exceed batch_size");
-                let value_start = values.len();
-                let policy_start = policy.len();
-                values.resize(value_start + n, 0.0);
-                policy.resize(policy_start + n * MAX_MOVE_LABEL_NUM, 0.0);
-                let result = evaluator.run(
-                    positions,
-                    &mut values[value_start..],
-                    &mut policy[policy_start..],
-                );
-                if result.is_err() {
-                    values.truncate(value_start);
-                    policy.truncate(policy_start);
-                }
-                result
+                append_token_outputs(n, values, policy, |values, policy| {
+                    evaluator.run_iter(positions, values, Some(policy))
+                })
             }
         }
     }
@@ -715,6 +743,52 @@ impl ModelEvaluator {
         };
         session.end_profiling().map_err(ort_err)
     }
+}
+
+fn append_token_outputs(
+    n: usize,
+    values: &mut Vec<f32>,
+    policy: &mut Vec<f32>,
+    run: impl FnOnce(&mut [f32], &mut [f32]) -> Result<()>,
+) -> Result<()> {
+    let value_start = values.len();
+    let policy_start = policy.len();
+    let value_end = value_start
+        .checked_add(n)
+        .ok_or_else(|| anyhow::anyhow!("value output size overflow"))?;
+    let policy_end = n
+        .checked_mul(MAX_MOVE_LABEL_NUM)
+        .and_then(|len| policy_start.checked_add(len))
+        .ok_or_else(|| anyhow::anyhow!("policy output size overflow"))?;
+    values.try_reserve(n)?;
+    policy.try_reserve(policy_end - policy_start)?;
+    values.resize(value_end, 0.0);
+    policy.resize(policy_end, 0.0);
+    let result = run(&mut values[value_start..], &mut policy[policy_start..]);
+    if result.is_err() {
+        values.truncate(value_start);
+        policy.truncate(policy_start);
+    }
+    result
+}
+
+fn encode_token_inputs<'a>(
+    positions: impl IndexedParallelIterator<Item = &'a Position>,
+    output: &mut [i64],
+) -> Result<()> {
+    let len = positions
+        .len()
+        .checked_mul(crate::tokens::TOKEN_COUNT)
+        .ok_or_else(|| anyhow::anyhow!("token input size overflow"))?;
+    anyhow::ensure!(len <= output.len(), "incorrect token buffer length");
+    positions
+        .zip(output[..len].par_chunks_mut(crate::tokens::TOKEN_COUNT))
+        .try_for_each(|(position, row)| -> Result<()> {
+            for (slot, token) in row.iter_mut().zip(crate::tokens::encode(position)?) {
+                *slot = i64::from(token);
+            }
+            Ok(())
+        })
 }
 
 fn validate_batch_outputs(
@@ -765,6 +839,34 @@ impl TokenEvaluator {
             }
         }
         Self::run_inputs(
+            &mut self.session,
+            n,
+            &self.tokens[..n * crate::tokens::TOKEN_COUNT],
+            values_out,
+            policy_out,
+            #[cfg(feature = "inference-diagnostics")]
+            &mut self.timings,
+        )
+    }
+
+    fn run_iter<'a>(
+        &mut self,
+        positions: impl IndexedParallelIterator<Item = &'a Position>,
+        values_out: &mut [f32],
+        policy_out: Option<&mut [f32]>,
+    ) -> Result<()> {
+        let n = positions.len();
+        anyhow::ensure!(n <= self.batch_size, "positions exceed batch_size");
+        anyhow::ensure!(
+            values_out.len() == n
+                && policy_out.as_ref().is_none_or(|policy| policy.len() == n * MAX_MOVE_LABEL_NUM),
+            "incorrect output buffers"
+        );
+        if n == 0 {
+            return Ok(());
+        }
+        encode_token_inputs(positions, &mut self.tokens)?;
+        Self::run_inputs_optional_policy(
             &mut self.session,
             n,
             &self.tokens[..n * crate::tokens::TOKEN_COUNT],
@@ -831,6 +933,25 @@ impl TokenEvaluator {
         policy_out: &mut [f32],
         #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
     ) -> Result<()> {
+        Self::run_inputs_optional_policy(
+            session,
+            n,
+            tokens,
+            values_out,
+            Some(policy_out),
+            #[cfg(feature = "inference-diagnostics")]
+            timings,
+        )
+    }
+
+    fn run_inputs_optional_policy(
+        session: &mut Session,
+        n: usize,
+        tokens: &[i64],
+        values_out: &mut [f32],
+        policy_out: Option<&mut [f32]>,
+        #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
+    ) -> Result<()> {
         // ORT resource より先に宣言し、逆順の Drop で解放時間も記録する。
         #[cfg(feature = "inference-diagnostics")]
         let mut timer = ForwardTimer::new(timings, n);
@@ -865,16 +986,25 @@ impl TokenEvaluator {
         let outputs = inference_try!(timer, session.run_binding(&binding).map_err(ort_err));
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::OutputValidationCopy);
-        let (shape, policy) = inference_try!(
-            timer,
-            outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)
-        );
-        inference_ensure!(
-            timer,
-            shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
-            "incorrect policy output shape"
-        );
-        inference_ensure!(timer, policy.iter().all(|v| v.is_finite()), "non-finite policy logits");
+        let policy = if policy_out.is_some() {
+            let (shape, policy) = inference_try!(
+                timer,
+                outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)
+            );
+            inference_ensure!(
+                timer,
+                shape.as_ref() == [n as i64, MAX_MOVE_LABEL_NUM as i64],
+                "incorrect policy output shape"
+            );
+            inference_ensure!(
+                timer,
+                policy.iter().all(|v| v.is_finite()),
+                "non-finite policy logits"
+            );
+            Some(policy)
+        } else {
+            None
+        };
         let (shape, values) = inference_try!(
             timer,
             outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)
@@ -885,7 +1015,14 @@ impl TokenEvaluator {
             values.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
             "invalid expected score"
         );
-        policy_out.copy_from_slice(policy);
+        inference_ensure!(
+            timer,
+            policy_out.is_some() == policy.is_some(),
+            "policy output request mismatch"
+        );
+        if let (Some(output), Some(policy)) = (policy_out, policy) {
+            output.copy_from_slice(policy);
+        }
         values_out.copy_from_slice(values);
         #[cfg(feature = "inference-diagnostics")]
         timer.finish();
@@ -953,7 +1090,87 @@ impl crate::Evaluator for ModelEvaluator {
 
 #[cfg(test)]
 mod tests {
-    use super::ModelOptions;
+    use super::*;
+
+    #[test]
+    fn parallel_token_inputs_preserve_noncontiguous_order_and_unused_capacity() -> Result<()> {
+        let positions: Vec<_> = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 w 2r2b4g4s4n4l18p 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b 8P 37",
+        ]
+        .iter()
+        .map(|sfen| {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen)?;
+            Ok(pos)
+        })
+        .collect::<Result<_>>()?;
+        let order = [2, 0, 1, 2];
+        let mut packed = vec![-1; 5 * crate::tokens::TOKEN_COUNT];
+        let capacity = packed.capacity();
+        encode_token_inputs(order.par_iter().map(|&index| &positions[index]), &mut packed)?;
+        for (row, &index) in order.iter().enumerate() {
+            let expected = crate::tokens::encode(&positions[index])?.map(i64::from);
+            assert_eq!(
+                &packed[row * crate::tokens::TOKEN_COUNT..(row + 1) * crate::tokens::TOKEN_COUNT],
+                &expected
+            );
+        }
+        assert!(packed[4 * crate::tokens::TOKEN_COUNT..].iter().all(|&v| v == -1));
+        let untouched = packed[crate::tokens::TOKEN_COUNT..].to_vec();
+        encode_token_inputs(positions[..1].par_iter(), &mut packed)?;
+        assert_eq!(&packed[crate::tokens::TOKEN_COUNT..], untouched);
+        encode_token_inputs(positions[..0].par_iter(), &mut packed)?;
+        assert_eq!(packed.capacity(), capacity);
+        let mut short = [-1; crate::tokens::TOKEN_COUNT];
+        assert!(encode_token_inputs(positions.par_iter(), &mut short).is_err());
+        assert!(short.iter().all(|&v| v == -1));
+        Ok(())
+    }
+
+    #[test]
+    fn token_policy_append_preserves_prefix_order_capacity_and_rolls_back_failures() -> Result<()> {
+        let mut values = Vec::with_capacity(8);
+        let mut policy = Vec::with_capacity(8 * MAX_MOVE_LABEL_NUM);
+        values.push(17.0);
+        policy.push(19.0);
+        let capacities = (values.capacity(), policy.capacity());
+        append_token_outputs(2, &mut values, &mut policy, |values, policy| {
+            values.copy_from_slice(&[0.25, 0.75]);
+            policy[..MAX_MOVE_LABEL_NUM].fill(2.0);
+            policy[MAX_MOVE_LABEL_NUM..].fill(3.0);
+            Ok(())
+        })?;
+        assert_eq!(values, [17.0, 0.25, 0.75]);
+        assert_eq!(policy[0], 19.0);
+        assert!(policy[1..1 + MAX_MOVE_LABEL_NUM].iter().all(|&value| value == 2.0));
+        assert!(policy[1 + MAX_MOVE_LABEL_NUM..].iter().all(|&value| value == 3.0));
+        let previous_values = values.clone();
+        let previous_policy = policy.clone();
+        assert!(
+            append_token_outputs(2, &mut values, &mut policy, |values, policy| {
+                values.fill(5.0);
+                policy.fill(7.0);
+                anyhow::bail!("inference failed")
+            })
+            .is_err()
+        );
+        assert_eq!(values, previous_values);
+        assert_eq!(policy, previous_policy);
+        assert_eq!((values.capacity(), policy.capacity()), capacities);
+        append_token_outputs(0, &mut values, &mut policy, |values, policy| {
+            assert!(values.is_empty() && policy.is_empty());
+            Ok(())
+        })?;
+        assert!(
+            append_token_outputs(usize::MAX, &mut values, &mut policy, |_, _| unreachable!())
+                .is_err()
+        );
+        assert_eq!(values, previous_values);
+        assert_eq!(policy, previous_policy);
+        Ok(())
+    }
 
     #[cfg(feature = "inference-diagnostics")]
     fn recorded_result(
