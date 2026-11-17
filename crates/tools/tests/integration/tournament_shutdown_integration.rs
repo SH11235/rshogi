@@ -21,10 +21,15 @@ fn run_case(mode: &str, concurrency: u32) -> (tempfile::TempDir, serde_json::Val
     fs::write(
         &engine,
         r#"#!/bin/sh
+printf '%s\n' "$$" >> "$GATE/pids"
 while IFS= read -r line; do
   case "$line" in
     usi)
       if [ "$MODE" = "fail" ]; then exit 1; fi
+      if [ "$MODE" = "partial-init" ]; then
+        if [ -f "$GATE/initialized" ]; then exit 1; fi
+        : > "$GATE/initialized"
+      fi
       printf 'id name shutdown-mock
 usiok
 ' ;;
@@ -49,7 +54,15 @@ usiok
       fi
       printf 'bestmove resign
 ' ;;
-    quit) break ;;
+    quit)
+      printf '%s\n' "$$" >> "$GATE/quit-pids"
+      if [ "$MODE" = "quit-fail" ]; then exit 7; fi
+      if [ "$MODE" = "quit-signal" ]; then kill -TERM "$$"; fi
+      if [ "$MODE" = "quit-ignore" ]; then
+        while IFS= read -r ignored; do :; done
+      fi
+      break ;;
+
   esac
 done
 "#,
@@ -97,6 +110,14 @@ done
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(status.success(), mode == "complete", "{}", fs::read_to_string(&stderr).unwrap());
+    if mode.starts_with("quit-") || mode == "partial-init" {
+        assert_eq!(status.code(), Some(1), "{}", fs::read_to_string(&stderr).unwrap());
+    }
+    #[cfg(target_os = "linux")]
+    for pid in fs::read_to_string(dir.path().join("pids")).unwrap().lines() {
+        assert!(pid.parse::<u32>().is_ok());
+        assert!(!std::path::Path::new("/proc").join(pid).exists(), "mock child {pid} remains");
+    }
     let meta =
         serde_json::from_slice(&fs::read(dir.path().join("out/meta.json")).unwrap()).unwrap();
     let output = fs::read_to_string(stdout).unwrap();
@@ -266,4 +287,44 @@ fn sprt_stop_closes_started_pairs_and_records_stop_decision() {
     assert_eq!(analysis["sprt"]["stopped_at"]["decision"], "accept_h1");
     assert_eq!(analysis["sprt"]["stopped_at"]["pairs"], stopped_pairs);
     assert!(analysis["sprt"]["pairs"].as_u64().unwrap() >= stopped_pairs);
+}
+
+#[test]
+fn abnormal_exit_after_resign_invalidates_run_and_reaps_all_children() {
+    for mode in ["quit-fail", "quit-signal", "quit-ignore"] {
+        let (dir, meta, output) = run_case(mode, 2);
+        assert_eq!(meta["run_status"], "worker_failed");
+        assert_eq!(meta["invalid"], true);
+        assert!(!output.contains("Tournament Complete"));
+        let pids = fs::read_to_string(dir.path().join("pids")).unwrap();
+        let quit_pids = fs::read_to_string(dir.path().join("quit-pids")).unwrap();
+        let mut started = pids.lines().collect::<Vec<_>>();
+        let mut quit = quit_pids.lines().collect::<Vec<_>>();
+        started.sort_unstable();
+        quit.sort_unstable();
+        assert_eq!(started.len(), 4);
+        assert_eq!(quit, started);
+        let rows = fs::read_to_string(dir.path().join("out/pair-0-1__a-vs-b.jsonl")).unwrap();
+        let results = rows
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["type"] == "result")
+            .collect::<Vec<_>>();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|row| row["reason"] == "resign"));
+    }
+}
+
+#[test]
+fn partial_initialization_failure_closes_previously_initialized_child() {
+    let (dir, meta, _) = run_case("partial-init", 1);
+    assert_eq!(meta["run_status"], "worker_failed");
+    assert_eq!(meta["invalid"], true);
+    let pids = fs::read_to_string(dir.path().join("pids")).unwrap();
+    let quit = fs::read_to_string(dir.path().join("quit-pids")).unwrap();
+    assert_eq!(pids.lines().count(), 2);
+    assert_eq!(quit.lines().collect::<Vec<_>>(), vec![pids.lines().next().unwrap()]);
+    let error = fs::read_to_string(dir.path().join("stderr")).unwrap();
+    assert!(error.contains("failed to spawn engine 1"));
+    assert!(!error.contains("worker: engine shutdown error:"));
 }

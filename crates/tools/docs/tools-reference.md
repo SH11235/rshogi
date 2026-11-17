@@ -31,7 +31,7 @@
 | [`relabel_psv`](relabel_psv.md) | 勝敗による score 置換、宣言勝ち・diversion の検査 |
 | [`rescore_psv`](rescore_psv.md) | NNUE / 探索 / 外部 USI / ONNX で再評価し、再開・score sidecar に対応。探索はスレッド数によらず同じ出力。ONNX は dlshogi / stm-tokens-v1 / AobaZero に対応し、1 回の実行に渡した全ファイルでセッションを使い回し、`--onnx-gpu-id 0,1` で複数 GPU を使える。外部 USI の明示エラーは失敗として停止 |
 | [`rescore_hcpe`](rescore_hcpe.md) | hcpe の eval を固定 depth の NNUE 探索で再評価・再開 |
-| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX policy で PSV の候補局面を展開 |
+| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX（dlshogi / stm-tokens-v1 / AobaZero） policy で PSV の候補局面を展開 |
 | [`psv_gate_by_king_zone`](psv_gate_by_king_zone.md) | 入玉条件による score 合成と行対応 mask の生成 |
 | [`psv_dual_label`](psv_dual_label.md) | 通常・dual-label PSV と score / mask sidecar の相互変換 |
 | [`psv_entered`](psv_entered.md) | 入玉の行の抜き出しと、付け直した入玉の行からの dual-label PSV の作成 |
@@ -55,7 +55,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`tournament`](tournament.md) | 複数エンジンの総当たり・先後交換対局、SPRT (境界到達後も開始済みペアを完結し、停止時の判定を meta.json に保存)、動的制御、開始局面ファイルの動的読み直しと均一巡回、NPS 時計補正・Linux NUMA 固定・engine 別 ponder（的中時の PV 検査） |
+| [`tournament`](tournament.md) | 複数エンジンの総当たり・先後交換対局、SPRT (境界到達後も開始済みペアを完結し、停止時の判定を meta.json に保存)、動的制御、開始局面ファイルの動的読み直しと均一巡回、NPS 時計補正・Linux NUMA 固定・engine 別 ponder（的中時の PV 検査）、`info string Error:` を対局エラーとして再試行、対局 worker の正常終了時に engine 終了状態を検証 |
 | [`analyze_selfplay`](analyze_selfplay.md) | 対局 JSONL の勝率・Elo・SPRT・開始局面別成績を集計（result の局面・名前にも対応） |
 | [`floodgate_record`](floodgate_record.md) | csa_client の対局ログから先後別・相手別成績と NPS を集計 |
 | [`floodgate_pipeline`](floodgate_pipeline.md) | Floodgate 棋譜の取得、128 棋譜ずつの局面抽出、live mirror |

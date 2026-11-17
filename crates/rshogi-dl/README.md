@@ -83,6 +83,12 @@ target/release/examples/model_probe /path/to/model.onnx 0 4 - false encoded-batc
 
 `model_probe` の `parallel` は順序付き並列 iterator API、`values` は value-only API を使います。`values` は最大 1024 局面を `MAX_BATCH` ごとに推論し、JSON の `policy` は空配列になります。これらの mode に入力形式の上書きは指定できません。
 
+## policy 出力の検査方式
+
+`policy-validation-reduction` feature は、ONNX policy 出力の有限性検査を短絡しない論理積に切り替えます。
+既定は無効です。NaN・無限大の拒否条件は同じで、異常値がある場合も検査対象全体を走査します。
+利用する場合は build 時に `--features onnx,policy-validation-reduction` を指定してください。
+
 ## forward の区間診断
 
 `inference-diagnostics` feature は `Evaluator::inference_timings()` に固定長・Copy の累積 snapshot を

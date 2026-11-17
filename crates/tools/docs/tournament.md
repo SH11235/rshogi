@@ -376,6 +376,12 @@ JSONL の result 行には初回 0 の `attempt` が記録される。
 通信・`usinewgame`・worker panic の error 後はその worker を退役させ、再対局は新しく
 起動した engine process で行う。
 
+エンジンが `info string Error:` で始まる行を出した場合も game error として扱う。
+その後の `bestmove resign` や通常の指し手を勝敗に採用せず、同じプロセスを再利用しない。
+初期化・準備中の通知は起動または準備の失敗、対局後の ponder 回収中の通知は対局エラーとなる。
+エラー通知のない `bestmove resign` は通常の投了。`info string Warning:` や文中の
+単なる `error` という語は、この通知として扱わない。
+
 最終サマリと `meta.json` の `error_pairs`、`retried_pairs`、`exhausted_pairs` で状況を
 確認できる。2 回の再試行後も error を含むペアがあれば `invalid: true` となる。
 これは統計的敗北ではなくインフラ障害を示すので、SPRT の採否は表示せず、終了コードは非ゼロとなる。
@@ -484,6 +490,12 @@ pair_index が分かれ、完成ペア集計から欠落する場合がありま
 Ctrl-C では新規発行を停止し、実行中の対局終了を待って回収した結果と棋譜を保存する。
 途中のペアを完結するための追加対局や retry は開始しない。エンジン初期化に失敗した場合も
 他 worker から回収できた結果を保存する。どちらも成功完了とは区別し、終了コードは非ゼロとなる。
+
+対局 worker は終了時に各エンジンへ `quit` を送り、終了状態を確認する。通常の worker 終了で
+非ゼロ終了・シグナル終了・通信失敗・終了待ち期限後の強制終了を検出した場合は、保存済みの対局結果を
+残して run を `worker_failed` / `invalid=true` とし、非ゼロで終了する。終了待ちは `quit` 送信後 3 秒
+で、stdin の書込み時間は含まない。対局エラーの再試行による退役と ponder timeout による退役は、
+既存の対局結果・再試行の分類を維持する。
 
 meta.json の run_status は起動時 running、終了時 completed / interrupted / worker_failed。
 interrupted と worker_failed は invalid=true とし、最終 SPRT 採否を表示しない。

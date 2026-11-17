@@ -288,7 +288,7 @@ fixture での処理時間であり、学習品質や棋力を示しません。
 
 - `--attention-backend explicit|sdpa`: 同じ重みで attention の実行方式を比較します。
 - `--execution eager|compile`: `compile` は `torch.compile` を使います。対象は `--compile-scope` で指定します。
-  optimizer の Python 呼出しは対象外です。startup と warmup の時間を別に記録します。初回コンパイルは
+  optimizer は別の `--optimizer-execution` で指定します。startup と warmup の時間を別に記録します。初回コンパイルは
   最初のモデル呼出しで発生し、warmup を行う場合はその時間に含まれます。
   `--warmup 0` なら初回実行・optimizer 状態の初期化も計測区間に含みます。
 - `--compile-mode default|reduce-overhead|max-autotune|max-autotune-no-cudagraphs`:
@@ -303,7 +303,7 @@ fixture での処理時間であり、学習品質や棋力を示しません。
 - `--compile-scope model|model-loss`: 既定の `model` はモデルだけを compile します。
   `model-loss` は同じモデルと policy/value loss をまとめて compile し、`--execution compile` と
   `--policy-rows prepared` が必須です。全行の policy が無い場合も policy head の勾配を `None` に保ちます。
-  optimizer・GradScaler・backward の呼出しは計測区間の Python 側に残ります。元モデルの parameter と
+  GradScaler・backward の呼出しは計測区間の Python 側に残ります。元モデルの parameter と
   保存形式は共通です。batch 数・合法手幅・policy 対象行数の変化で再 compile が起きる場合、その費用も
   発生した区間の時間に含まれます。
   CUDA Graph モードでは shape ごとに記録と memory pool が増えるため、warmup は window の全 batch が
@@ -318,6 +318,25 @@ fixture での処理時間であり、学習品質や棋力を示しません。
   計算し、この補助 index の有無では変わりません。
 - `--fused-optimizer`: CUDA の fused AdamW を選びます。既定は無効。学習率と weight decay は
   `--learning-rate` (既定 0.001)、`--weight-decay` (既定 0) で固定できます。
+- `--foreach-optimizer`: foreach AdamW を明示的に選びます。既定は無効で、従来の方式を保ちます。
+  `--fused-optimizer` との併用はできません。
+  既定は `fused=False` / `foreach=None` を渡し、対応する Torch 2.14 ではパラメータごとの方式になります。
+  `optimizer_foreach_setting` は constructor の param group 設定 (`true` または `null`) を記録します。
+- `--optimizer-execution eager|compile`: 既定は `eager`。`compile` は同じ AdamW の `step` を
+  Inductor で compile します。モデル側の execution / compile mode とは独立し、optimizer の
+  CUDA Graphs は無効です。単一 graph は要求せず、graph break を含み得ます。compile 失敗や
+  再 compile 上限、parameter 更新を含む graph が無い場合は error にします。
+  fused optimizer は tracing 対象外となるため、`--fused-optimizer` との併用は拒否します。
+  `optimizer_compile_evidence` は optimizer 専用 backend が compile した graph 数と更新 graph 数で、
+  forward の graph を含みません。呼出し回数や全更新の compile を保証する指標ではありません。
+  `zero_grad(set_to_none=True)`・policy 教師なしの head の勾配復元・GradScaler は Python 側に残ります。
+- `--optimizer-capturable`: 既定は無効で、CUDA のみ指定できます。CUDA で optimizer を compile
+  するときは必須です。初回 trace による AdamW 設定の暗黙変更を避けるため、constructor へ明示します。
+  比較時は eager にも同じ flag を渡し、foreach・学習率・weight decay・入力順序も揃えてください。
+  fused eager との比較は実行方式全体の比較として扱い、compile 単独の効果と区別してください。
+  JSON の `optimizer_capturable_resolved` は実際の param group 設定を示します。
+  optimizer の初回 compile・状態初期化・policy 有無による再 compile の費用も、発生した区間に含みます。
+  これらは benchmark 専用の指定で、trainer と再開 checkpoint の設定は変更しません。
 - `--input-mode resident|stream`: 先頭最大 `--window-batches` 個の完全な batch を繰り返します。
   `resident` は計測前に device へ転送し、`stream` は同じ局面列を JSONL から再読込・転送します。
   データ全量は保持せず、resident も最大 32 batch に制限します。batch 未満の末尾は使いません。

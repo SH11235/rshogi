@@ -2,7 +2,8 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -13,7 +14,18 @@ fn write_engine(path: &std::path::Path, script: &str) {
     fs::set_permissions(path, permissions).unwrap();
 }
 
-fn run_error_retry_case(isready_action: &str, go_action: &str) {
+struct OwnedChild(Child);
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn run_error_retry_case(isready_action: &str, go_action: &str, exhausted: bool) {
     let dir = tempfile::tempdir().unwrap();
     let flaky = dir.path().join("flaky-engine.sh");
     let steady = dir.path().join("steady-engine.sh");
@@ -25,7 +37,7 @@ fn run_error_retry_case(isready_action: &str, go_action: &str) {
         &flaky,
         &format!(
             "#!/bin/sh\n\
-             printf 'launch\\n' >> '{}'\n\
+             printf '%s\\n' \"$$\" >> '{}'\n\
              isready_count=0\n\
              while IFS= read -r line; do\n\
                case \"$line\" in\n\
@@ -56,50 +68,79 @@ fn run_error_retry_case(isready_action: &str, go_action: &str) {
          done\n",
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
-        .env("FAILED_ONCE", &failed_once)
-        .args([
-            "--engine",
-            flaky.to_str().unwrap(),
-            "--engine-label",
-            "flaky",
-            "--engine",
-            steady.to_str().unwrap(),
-            "--engine-label",
-            "steady",
-            "--games",
-            "1",
-            "--concurrency",
-            "1",
-            "--nodes",
-            "1",
-            "--out-dir",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
+    let stdout_path = dir.path().join("stdout");
+    let stderr_path = dir.path().join("stderr");
+    let mut child = OwnedChild(
+        Command::new(env!("CARGO_BIN_EXE_tournament"))
+            .env("FAILED_ONCE", &failed_once)
+            .args([
+                "--engine",
+                flaky.to_str().unwrap(),
+                "--engine-label",
+                "flaky",
+                "--engine",
+                steady.to_str().unwrap(),
+                "--engine-label",
+                "steady",
+                "--games",
+                "1",
+                "--concurrency",
+                "1",
+                "--nodes",
+                "1",
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+            ])
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()))
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tournament timed out: {}",
+            fs::read_to_string(&stderr_path).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.success(),
+        !exhausted,
         "tournament failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&stdout_path).unwrap(),
+        fs::read_to_string(&stderr_path).unwrap(),
     );
 
-    let launch_count = fs::read_to_string(&launches).unwrap().lines().count();
-    assert_eq!(launch_count, 2, "error 後に flaky engine が新規起動されるべき");
+    let launches = fs::read_to_string(&launches).unwrap();
+    let pids: Vec<_> = launches.lines().collect();
+    assert_eq!(pids.len(), if exhausted { 4 } else { 2 });
+    assert_eq!(pids.iter().collect::<std::collections::HashSet<_>>().len(), pids.len());
+    #[cfg(target_os = "linux")]
+    for pid in &pids {
+        assert!(pid.parse::<u32>().is_ok());
+        assert!(!std::path::Path::new("/proc").join(pid).exists(), "mock child {pid} remains");
+    }
 
     let jsonl = fs::read_to_string(out_dir.join("pair-0-1__flaky-vs-steady.jsonl")).unwrap();
     let results: Vec<Value> = jsonl
         .lines()
-        .map(serde_json::from_str::<Value>)
-        .filter_map(Result::ok)
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .filter(|row| row["type"] == "result")
         .collect();
-    assert_eq!(results.len(), 4, "初回 2 局と再試行 2 局を出力するべき");
-    assert_eq!(results.iter().filter(|row| row["error"] == true).count(), 1);
+    assert_eq!(results.len(), if exhausted { 6 } else { 4 });
+    assert_eq!(
+        results.iter().filter(|row| row["error"] == true).count(),
+        if exhausted { 3 } else { 1 }
+    );
     assert_eq!(results.iter().filter(|row| row["attempt"] == 1).count(), 2);
     assert!(
-        results.iter().filter(|row| row["attempt"] == 1).all(|row| row["error"] != true),
+        exhausted
+            || results.iter().filter(|row| row["attempt"] == 1).all(|row| row["error"] != true),
         "新しい process での再試行は成功するべき"
     );
 
@@ -107,8 +148,32 @@ fn run_error_retry_case(isready_action: &str, go_action: &str) {
         serde_json::from_slice(&fs::read(out_dir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["error_pairs"], 1);
     assert_eq!(meta["retried_pairs"], 1);
-    assert_eq!(meta["exhausted_pairs"], 0);
-    assert_eq!(meta["invalid"], false);
+    assert_eq!(meta["exhausted_pairs"], u64::from(exhausted));
+    assert_eq!(meta["invalid"], exhausted);
+    if go_action.contains("info string Error:") {
+        assert!(results.iter().filter(|row| row["error"] == true).all(|row| {
+            row["reason"].as_str().unwrap().contains("info string Error: inference failed")
+        }));
+    }
+    for attempt in 0..=if exhausted { 2 } else { 1 } {
+        let pair: Vec<_> = results.iter().filter(|row| row["attempt"] == attempt).collect();
+        assert_eq!(pair.len(), 2);
+        assert_eq!(pair[0]["pair_index"], results[0]["pair_index"]);
+        assert_eq!(pair[1]["pair_index"], results[0]["pair_index"]);
+        assert_ne!(pair[0]["pair_slot"], pair[1]["pair_slot"]);
+        for row in pair.iter() {
+            assert!(row["startpos_idx"].is_u64());
+            assert_eq!(row["startpos_idx"], results[0]["startpos_idx"]);
+            assert_eq!(
+                row["pair_slot"],
+                results[row["pair_slot"].as_u64().unwrap() as usize]["pair_slot"]
+            );
+        }
+        assert_eq!(
+            pair[0]["reason"].as_str().unwrap().starts_with("error:"),
+            pair[0]["error"] == true
+        );
+    }
 }
 
 #[test]
@@ -117,6 +182,7 @@ fn communication_error_retires_worker_and_retry_uses_new_processes() {
         "printf 'readyok\\n'",
         "if [ ! -e \"$FAILED_ONCE\" ]; then : > \"$FAILED_ONCE\"; exit 1; fi; \
          printf 'bestmove resign\\n'",
+        false,
     );
 }
 
@@ -126,6 +192,34 @@ fn new_game_error_retires_worker_and_retry_uses_new_processes() {
         "if [ \"$isready_count\" -ge 2 ] && [ ! -e \"$FAILED_ONCE\" ]; then \
          : > \"$FAILED_ONCE\"; exit 1; fi; printf 'readyok\\n'",
         "printf 'bestmove resign\\n'",
+        false,
+    );
+}
+
+#[test]
+fn reported_error_before_resign_retries_in_new_processes() {
+    run_error_retry_case(
+        "printf 'readyok\\n'",
+        "if [ ! -e \"$FAILED_ONCE\" ]; then : > \"$FAILED_ONCE\"; printf 'info string Error: inference failed\\n'; fi; printf 'bestmove resign\\n'",
+        false,
+    );
+}
+
+#[test]
+fn reported_error_before_legal_move_retries_in_new_processes() {
+    run_error_retry_case(
+        "printf 'readyok\\n'",
+        "if [ ! -e \"$FAILED_ONCE\" ]; then : > \"$FAILED_ONCE\"; printf 'info string Error: inference failed\\nbestmove 7g7f\\n'; else printf 'bestmove resign\\n'; fi",
+        false,
+    );
+}
+
+#[test]
+fn permanent_reported_error_exhausts_pairs_without_counting_resign_as_loss() {
+    run_error_retry_case(
+        "printf 'readyok\\n'",
+        "printf 'info string Error: inference failed\\nbestmove resign\\n'",
+        true,
     );
 }
 

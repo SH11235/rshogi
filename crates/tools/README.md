@@ -67,6 +67,8 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 `rescore_psv` の `--dlshogi-onnx-model` は float32 特徴量と `stm-tokens-v1` モデルを受け付けます。
 対応する EP と入出力契約は [rescore_psv](docs/rescore_psv.md#stm-tokens-v1-モデル) を参照してください。
 外部 USI の `info string Error:` では処理を停止し、不正な評価値を保存しません。
+`expand_psv_from_policy` は dlshogi / `stm-tokens-v1` / AobaZero の policy 入力に対応します。
+対応する EP と入出力契約は [expand_psv_from_policy](docs/expand_psv_from_policy.md) を参照してください。
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /
 `verify_nnue_accumulator`) には、tools の `layerstack-arch` feature (`nnue-arch` に含まれる) が必要です。
 
@@ -124,6 +126,8 @@ engine ごとの相手手番思考は `--ponder 0:true 1:false` で指定でき�
 詳しくは [ponder の設定と CPU 割り当て](docs/tournament.md#相手手番の思考ponder)を参照してください。
 中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
 不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。
+`tournament` は `info string Error:` の通知を通常の投了と区別し、対局エラーの再試行へ渡します。
+通常の対局 worker 終了時にエンジンの異常終了や終了待ち期限後の強制終了を検出した run は無効とします。
 
 ### 探索の動作確認
 

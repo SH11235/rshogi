@@ -57,6 +57,7 @@ pub(crate) fn receive_before_deadline<T>(
 
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
+const ENGINE_CHECKED_QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STDERR_BUFFER_LINES: usize = 2;
 
@@ -136,11 +137,14 @@ fn retain_matching_ponder_eval(
 /// 1本のエンジンに対する入出力をカプセル化する。
 pub struct EngineProcess {
     child: Child,
+    reaped: bool,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
     recent_stderr: Arc<Mutex<VecDeque<String>>>,
     opt_names: HashSet<String>,
     read_timeout_hint_printed: Cell<bool>,
+    error_policy: EngineErrorPolicy,
+    reported_error: Cell<bool>,
     pub label: String,
     pub(crate) ponder_enabled: bool,
     pondering: Option<String>,
@@ -151,6 +155,31 @@ pub struct EngineProcess {
     pub(crate) ponder_stats: PonderStats,
     pub(crate) turn_start: Option<Instant>,
 }
+
+/// `info string Error:` で始まるエンジンの通知の扱い。
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum EngineErrorPolicy {
+    /// 通常の info 行として扱う。
+    #[default]
+    Ignore,
+    /// エラーを返し、そのプロセスの再利用を禁止する。
+    RejectReported,
+}
+
+/// エンジンが `info string Error:` で報告した障害。
+#[derive(Debug)]
+pub struct ReportedEngineError {
+    label: String,
+    message: String,
+}
+
+impl std::fmt::Display for ReportedEngineError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.label, self.message)
+    }
+}
+
+impl std::error::Error for ReportedEngineError {}
 
 /// ponder の送信回数と的中回数。
 #[derive(Clone, Copy, Default)]
@@ -175,6 +204,37 @@ impl serde::Serialize for PonderStats {
 }
 
 impl EngineProcess {
+    /// 受信エラー方針を設定する。報告済みの障害は方針を変えても解除しない。
+    pub fn set_error_policy(&mut self, policy: EngineErrorPolicy) {
+        self.error_policy = policy;
+    }
+
+    fn ensure_healthy(&self) -> Result<()> {
+        if self.reported_error.get() {
+            return Err(ReportedEngineError {
+                label: self.label.clone(),
+                message: "engine previously reported an error".to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn validate_received_line(&self, line: &str) -> Result<()> {
+        self.ensure_healthy()?;
+        if self.error_policy == EngineErrorPolicy::RejectReported
+            && line.starts_with("info string Error:")
+        {
+            self.reported_error.set(true);
+            return Err(ReportedEngineError {
+                label: self.label.clone(),
+                message: line.to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn search_commands(req: &SearchRequest<'_>) -> (String, String) {
         // パス権がある場合は passrights を付加
         let mut position_cmd = if let Some((b, w)) = req.pass_rights {
@@ -202,6 +262,7 @@ impl EngineProcess {
         req: &SearchRequest<'_>,
         position: &rshogi_core::position::Position,
     ) -> Result<()> {
+        self.ensure_healthy()?;
         if !self.ponder_enabled {
             return Ok(());
         }
@@ -239,7 +300,7 @@ impl EngineProcess {
 
     /// 未回収の探索がなく、次の対局に利用できるか。
     pub fn is_reusable(&self) -> bool {
-        self.reusable
+        self.reusable && !self.reported_error.get()
     }
 
     /// ponder の bestmove を回収する。回収不能ならプロセスを再利用しない。
@@ -397,11 +458,14 @@ impl EngineProcess {
 
         Ok(Self {
             child,
+            reaped: false,
             stdin: BufWriter::new(stdin),
             rx,
             recent_stderr,
             opt_names: HashSet::new(),
             read_timeout_hint_printed: Cell::new(false),
+            error_policy: EngineErrorPolicy::default(),
+            reported_error: Cell::new(false),
             label,
             ponder_enabled: false,
             pondering: None,
@@ -424,6 +488,7 @@ impl EngineProcess {
         cfg: &EngineConfig,
         total_deadline: Option<Instant>,
     ) -> Result<()> {
+        self.ensure_healthy()?;
         let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
         self.write_line("usi")?;
         loop {
@@ -488,7 +553,8 @@ impl EngineProcess {
     }
 
     pub fn new_game(&mut self) -> Result<()> {
-        if !self.reusable {
+        self.ensure_healthy()?;
+        if !self.is_reusable() {
             bail!("{}: engine has an undrained search", self.label);
         }
         self.stop_ponder()?;
@@ -508,6 +574,7 @@ impl EngineProcess {
         req: &SearchRequest<'_>,
         info_callback: Option<&mut InfoCallback<'_>>,
     ) -> Result<SearchOutcome> {
+        self.ensure_healthy()?;
         if req.limit_only_timeout_ms == Some(0) {
             bail!("limit_only_timeout_ms must be positive");
         }
@@ -589,6 +656,7 @@ impl EngineProcess {
             let remaining = deadline.saturating_sub(elapsed);
             match self.rx.recv_timeout(remaining) {
                 Ok(line) => {
+                    self.validate_received_line(&line)?;
                     if line.starts_with("info") {
                         if hit && let Some(pv) = parse_scored_primary_pv(&line) {
                             scored_primary_pv = pv;
@@ -690,6 +758,7 @@ impl EngineProcess {
         stop_grace: Duration,
         mut info_callback: Option<&mut dyn FnMut(&str)>,
     ) -> Result<SearchOutcome> {
+        self.ensure_healthy()?;
         self.write_line(&format!("position sfen {position_tail}"))?;
         let go_cmd = if go_args.trim().is_empty() {
             "go".to_string()
@@ -705,6 +774,7 @@ impl EngineProcess {
         loop {
             match receive_before_deadline(&self.rx, deadline) {
                 Ok(line) => {
+                    self.validate_received_line(&line)?;
                     if line.starts_with("info") {
                         snapshot.update_from_line(&line);
                         if let Some(cb) = info_callback.as_mut() {
@@ -731,10 +801,12 @@ impl EngineProcess {
                         .ok_or_else(|| anyhow!("stop deadline overflow"))?;
                     loop {
                         match receive_before_deadline(&self.rx, stop_deadline) {
-                            Ok(line) if line.starts_with("info") => {
-                                snapshot.update_from_line(&line);
-                            }
                             Ok(line) => {
+                                self.validate_received_line(&line)?;
+                                if line.starts_with("info") {
+                                    snapshot.update_from_line(&line);
+                                    continue;
+                                }
                                 if let Some(rest) = line.strip_prefix("bestmove ") {
                                     let mut parts = rest.split_whitespace();
                                     let mv = parts.next().unwrap_or_default().to_string();
@@ -770,6 +842,7 @@ impl EngineProcess {
     }
 
     pub fn sync_ready(&mut self) -> Result<()> {
+        self.ensure_healthy()?;
         self.write_line("isready")?;
         let deadline = Instant::now() + ENGINE_READY_TIMEOUT;
         loop {
@@ -783,8 +856,12 @@ impl EngineProcess {
 
     /// 待ち時間内の行を返す。無通信は None、切断はエラーに分ける。
     pub fn poll_line(&self, timeout: Duration) -> Result<Option<String>> {
+        self.ensure_healthy()?;
         match self.rx.recv_timeout(timeout) {
-            Ok(line) => Ok(Some(line)),
+            Ok(line) => {
+                self.validate_received_line(&line)?;
+                Ok(Some(line))
+            }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => bail!("{}", self.engine_exited_message()),
         }
@@ -792,6 +869,7 @@ impl EngineProcess {
 
     /// 継続的な info 出力でも延長されない絶対期限で1行受信する。
     pub fn recv_line_until(&self, deadline: Instant) -> Result<String> {
+        self.ensure_healthy()?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| anyhow!("{}", self.engine_read_timeout_message(Duration::ZERO)))?;
@@ -799,8 +877,12 @@ impl EngineProcess {
     }
 
     pub fn recv_line(&self, timeout: Duration) -> Result<String> {
+        self.ensure_healthy()?;
         match self.rx.recv_timeout(timeout) {
-            Ok(line) => Ok(line),
+            Ok(line) => {
+                self.validate_received_line(&line)?;
+                Ok(line)
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let message = self.engine_read_timeout_message(timeout);
                 if !self.read_timeout_hint_printed.replace(true) {
@@ -880,10 +962,93 @@ impl EngineProcess {
         self.stdin.flush()?;
         Ok(())
     }
+
+    /// quit 後の終了を確認し、異常終了・強制終了・I/O 失敗を返す。
+    /// 終了待ちは 3 秒。stdin の書込み時間はこの期限に含まない。
+    pub fn shutdown(mut self) -> Result<()> {
+        let mut failure = None;
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.reaped = true;
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow!("engine {} exited with {status}", self.label))
+                };
+            }
+            Ok(None) => {}
+            Err(error) => retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} status check failed", self.label)),
+            ),
+        }
+        if let Err(error) = self.write_line("quit") {
+            retain_shutdown_error(
+                &mut failure,
+                error.context(format!("engine {} quit write failed", self.label)),
+            );
+        }
+        let deadline = Instant::now() + ENGINE_CHECKED_QUIT_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.reaped = true;
+                    if !status.success() {
+                        retain_shutdown_error(
+                            &mut failure,
+                            anyhow!("engine {} exited with {status}", self.label),
+                        );
+                    }
+                    return failure.map_or(Ok(()), Err);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    retain_shutdown_error(
+                        &mut failure,
+                        anyhow!(error)
+                            .context(format!("engine {} status check failed", self.label)),
+                    );
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                retain_shutdown_error(
+                    &mut failure,
+                    anyhow!("engine {} did not exit after quit; forcing termination", self.label),
+                );
+                break;
+            }
+            std::thread::sleep(ENGINE_QUIT_POLL_INTERVAL);
+        }
+        if let Err(error) = self.child.kill() {
+            retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} kill failed", self.label)),
+            );
+        }
+        match self.child.wait() {
+            Ok(_) => self.reaped = true,
+            Err(error) => retain_shutdown_error(
+                &mut failure,
+                anyhow!(error).context(format!("engine {} wait failed", self.label)),
+            ),
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn retain_shutdown_error(failure: &mut Option<anyhow::Error>, error: anyhow::Error) {
+    *failure = Some(match failure.take() {
+        Some(original) => original.context(format!("shutdown cleanup: {error:#}")),
+        None => error,
+    });
 }
 
 impl Drop for EngineProcess {
     fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
         let _ = self.write_line("quit");
         let deadline = Instant::now() + ENGINE_QUIT_TIMEOUT;
         while Instant::now() < deadline {
@@ -951,6 +1116,383 @@ pub fn find_engine_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_tests {
+    use super::*;
+
+    fn mock(mode: &str) -> EngineProcess {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("shutdown.py");
+        std::fs::write(
+            &script,
+            r#"
+import os
+import signal
+import sys
+import time
+mode = sys.argv[1]
+if mode == 'closed-stdin': os.close(0)
+print('ready', flush=True)
+if mode == 'preexit': sys.exit(7)
+if mode == 'closed-stdin': time.sleep(60)
+for raw in sys.stdin:
+    if raw.strip() != 'quit': continue
+    if mode == 'exit7': sys.exit(7)
+    if mode == 'signal': os.kill(os.getpid(), signal.SIGTERM)
+    if mode == 'ignore': time.sleep(60)
+    if mode == 'delayed-clean': time.sleep(0.5)
+    print('quit-received', flush=True)
+    break
+"#,
+        )
+        .unwrap();
+        let config = EngineConfig {
+            path: "python3".into(),
+            args: vec![script.display().to_string(), mode.to_owned()],
+            threads: 1,
+            hash_mb: 1,
+            network_delay: None,
+            network_delay2: None,
+            minimum_thinking_time: None,
+            slowmover: None,
+            ponder: false,
+            usi_options: vec![],
+        };
+        let engine =
+            EngineProcess::spawn_uninitialized(&config, "shutdown-mock".to_owned()).unwrap();
+        assert_eq!(engine.recv_line(Duration::from_secs(5)).unwrap(), "ready");
+        engine
+    }
+
+    fn assert_reaped(pid: u32) {
+        #[cfg(target_os = "linux")]
+        assert!(!Path::new("/proc").join(pid.to_string()).exists(), "child {pid} remains");
+        #[cfg(not(target_os = "linux"))]
+        assert!(pid > 0);
+    }
+
+    #[test]
+    fn shutdown_accepts_clean_exit_and_reaps_child() {
+        let engine = mock("clean");
+        let pid = engine.child.id();
+        engine.shutdown().unwrap();
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_accepts_clean_exit_after_drop_grace() {
+        let engine = mock("delayed-clean");
+        let pid = engine.child.id();
+        engine.shutdown().unwrap();
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_rejects_nonzero_and_signal_exit_and_reaps_child() {
+        for mode in ["exit7", "signal"] {
+            let engine = mock(mode);
+            let pid = engine.child.id();
+            let error = engine.shutdown().unwrap_err();
+            assert!(format!("{error:#}").contains("exited with"));
+            assert_reaped(pid);
+        }
+    }
+
+    #[test]
+    fn shutdown_kills_and_reaps_child_after_quit_timeout() {
+        let engine = mock("ignore");
+        let pid = engine.child.id();
+        let error = engine.shutdown().unwrap_err();
+        assert!(format!("{error:#}").contains("forcing termination"));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_checks_already_exited_status() {
+        let mut engine = mock("preexit");
+        let pid = engine.child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while engine.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let error = engine.shutdown().unwrap_err();
+        assert!(format!("{error:#}").contains("exited with"));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn shutdown_preserves_write_error_while_killing_and_reaping_child() {
+        let engine = mock("closed-stdin");
+        let pid = engine.child.id();
+        let error = engine.shutdown().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+        assert!(format!("{error:#}").contains("quit write failed"));
+        assert!(format!("{error:#}").contains("forcing termination"));
+        assert_reaped(pid);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reported_error_tests {
+    use super::*;
+    use crate::selfplay::game::{EngineFailure, GameConfig, run_game};
+    use crate::selfplay::position::ParsedPosition;
+    use crate::selfplay::time_control::TimeControl;
+
+    fn mock(
+        mode: &str,
+        policy: EngineErrorPolicy,
+    ) -> (tempfile::TempDir, EngineProcess, EngineConfig) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("reported_error.py");
+        std::fs::write(
+            &script,
+            r#"
+import sys
+mode = sys.argv[1]
+ready = 0
+for raw in sys.stdin:
+    line = raw.strip()
+    if line == 'quit': break
+    if line == 'usi':
+        if mode == 'init': print('info string Error: initialization', flush=True)
+        print('usiok', flush=True)
+    elif line == 'isready':
+        ready += 1
+        if mode == 'ready' or (mode == 'newgame' and ready > 1):
+            print('info string Error: readiness', flush=True)
+        print('readyok', flush=True)
+    elif line == 'emit': print('info string Error: polled', flush=True)
+    elif line == 'stop':
+        if mode == 'cleanup-eof': break
+        print('info string Error: stopped', flush=True)
+        print('bestmove resign', flush=True)
+    elif line.startswith('go') or line == 'ponderhit':
+        if mode == 'stop': continue
+        if mode == 'ordinary':
+            print('info string Warning: Error: diagnostic', flush=True)
+            print('info string ErrorRate 0', flush=True)
+            print('info string recoverable error description', flush=True)
+        elif mode not in ('cleanup', 'cleanup-eof'):
+            print('info string Error: search', flush=True)
+        print('bestmove ' + ('7g7f' if mode == 'legal' else 'resign'), flush=True)
+"#,
+        )
+        .unwrap();
+        let config = EngineConfig {
+            path: "python3".into(),
+            args: vec![script.display().to_string(), mode.to_owned()],
+            threads: 1,
+            hash_mb: 1,
+            network_delay: None,
+            network_delay2: None,
+            minimum_thinking_time: None,
+            slowmover: None,
+            ponder: false,
+            usi_options: vec![],
+        };
+        let mut engine = EngineProcess::spawn_uninitialized(&config, "mock".to_owned()).unwrap();
+        engine.set_error_policy(policy);
+        (directory, engine, config)
+    }
+
+    fn request(moves: &str) -> SearchRequest<'_> {
+        SearchRequest {
+            sfen: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            moves,
+            time_args: TimeArgs {
+                btime: 0,
+                wtime: 0,
+                binc: 0,
+                winc: 0,
+                byoyomi: 1000,
+            },
+            think_limit_ms: 1000,
+            timeout_margin_ms: 1000,
+            go_depth: None,
+            go_nodes: Some(1),
+            limit_only_timeout_ms: Some(1000),
+            game_id: 1,
+            ply: 1,
+            side: rshogi_core::types::Color::Black,
+            engine_label: "mock".to_owned(),
+            pass_rights: None,
+        }
+    }
+
+    fn assert_reported(error: anyhow::Error, engine: &mut EngineProcess) {
+        assert!(error.downcast_ref::<ReportedEngineError>().is_some(), "{error:#}");
+        assert!(!engine.is_reusable());
+        engine.set_error_policy(EngineErrorPolicy::Ignore);
+        assert!(engine.new_game().unwrap_err().downcast_ref::<ReportedEngineError>().is_some());
+    }
+
+    #[test]
+    fn reported_error_initialization_and_newgame_are_sticky() {
+        for mode in ["init", "ready", "newgame"] {
+            let (directory, mut engine, config) = mock(mode, EngineErrorPolicy::RejectReported);
+            let result =
+                engine.initialize_until(&config, Some(Instant::now() + Duration::from_secs(2)));
+            let error = if mode == "newgame" {
+                result.unwrap();
+                engine.new_game().unwrap_err()
+            } else {
+                result.unwrap_err()
+            };
+            assert_reported(error, &mut engine);
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn reported_error_precedes_resign_legal_move_and_ponderhit() {
+        for mode in ["search", "legal", "ponder"] {
+            let (directory, mut engine, config) = mock(mode, EngineErrorPolicy::RejectReported);
+            engine
+                .initialize_until(&config, Some(Instant::now() + Duration::from_secs(2)))
+                .unwrap();
+            if mode == "ponder" {
+                engine.ponder_enabled = true;
+                engine.pondering = Some("7g7f".to_owned());
+            }
+            let error = engine.search(&request("7g7f"), None).err().unwrap();
+            assert_reported(error, &mut engine);
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn legacy_and_nonfatal_info_preserve_resign() {
+        for (mode, policy) in [
+            ("search", EngineErrorPolicy::default()),
+            ("ordinary", EngineErrorPolicy::RejectReported),
+        ] {
+            let (directory, mut engine, config) = mock(mode, policy);
+            engine
+                .initialize_until(&config, Some(Instant::now() + Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(
+                engine.search(&request(""), None).unwrap().bestmove.as_deref(),
+                Some("resign")
+            );
+            assert!(engine.is_reusable());
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn reported_error_raw_search_stop_drain_and_poll_are_rejected() {
+        for mode in ["search", "stop", "drain", "poll"] {
+            let (directory, mut engine, config) = mock(mode, EngineErrorPolicy::RejectReported);
+            engine
+                .initialize_until(&config, Some(Instant::now() + Duration::from_secs(2)))
+                .unwrap();
+            let error = match mode {
+                "drain" => {
+                    engine.search_pending = true;
+                    engine.stop_ponder().unwrap_err()
+                }
+                "poll" => {
+                    engine.write_line("emit").unwrap();
+                    engine.poll_line(Duration::from_secs(2)).unwrap_err()
+                }
+                _ => engine
+                    .search_raw_go_with_stop_grace(
+                        request("").sfen,
+                        "nodes 1",
+                        Duration::from_millis(30),
+                        Duration::from_secs(2),
+                        None,
+                    )
+                    .err()
+                    .unwrap(),
+            };
+            assert_reported(error, &mut engine);
+            drop(engine);
+            drop(directory);
+        }
+    }
+
+    #[test]
+    fn reported_cleanup_invalidates_game_but_ordinary_cleanup_keeps_resign() {
+        for mode in ["cleanup", "cleanup-eof", "search"] {
+            let (black_dir, mut black, black_config) = mock(
+                if mode == "search" {
+                    "search"
+                } else {
+                    "ordinary"
+                },
+                EngineErrorPolicy::RejectReported,
+            );
+            let (white_dir, mut white, white_config) =
+                mock(mode, EngineErrorPolicy::RejectReported);
+            black
+                .initialize_until(&black_config, Some(Instant::now() + Duration::from_secs(2)))
+                .unwrap();
+            white
+                .initialize_until(&white_config, Some(Instant::now() + Duration::from_secs(2)))
+                .unwrap();
+            white.search_pending = true;
+            if mode == "search" {
+                black.ponder_enabled = true;
+            }
+            let config = GameConfig {
+                resign_rule: None,
+                win_rule: None,
+                draw_rule: None,
+                agreement_rule: None,
+                max_moves: 5,
+                timeout_margin_ms: 1000,
+                limit_only_timeout_ms: Some(1000),
+                game_time_limit_ms: None,
+                cancel: None,
+                pass_rights: None,
+                go_depth: None,
+                go_nodes_black: Some(1),
+                go_nodes_white: Some(1),
+            };
+            let start = ParsedPosition {
+                startpos: true,
+                sfen: None,
+                moves: vec![],
+                source_line: None,
+            };
+            let result = run_game(
+                &mut black,
+                &mut white,
+                &start,
+                TimeControl::new(0, 0, 0, 0, 1000),
+                &config,
+                1,
+                &mut |_| {},
+                None,
+            );
+            if mode == "cleanup-eof" {
+                assert_eq!(result.unwrap().reason, "resign");
+            } else {
+                let error = result.err().unwrap();
+                assert!(error.downcast_ref::<ReportedEngineError>().is_some());
+                assert!(error.downcast_ref::<EngineFailure>().is_some());
+                if mode == "search" {
+                    assert!(error.root_cause().to_string().contains("Error: search"));
+                    assert_eq!(format!("{error:#}").matches("ponder cleanup failed:").count(), 2);
+                }
+            }
+            drop(black);
+            drop(white);
+            drop(black_dir);
+            drop(white_dir);
+        }
+    }
 }
 
 #[cfg(test)]
