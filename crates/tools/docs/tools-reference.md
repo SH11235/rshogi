@@ -3,6 +3,7 @@
 [クイックスタート](../README.md)から始め、用途に合うツールの詳細を開いてください。
 一覧は `src/bin/` の全バイナリを含みます。個別 doc がない補助ツールはソースへリンクしています。
 全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
+静的 value / policy 推論に使うモデルと対応ツールは [ONNX モデルの入力](onnx-models.md) を参照してください。
 `book_mine master rejoin` の応手集約とメモリの扱いは[詳細](book_mine.md#master-rejoin-相手の手で定跡に戻ると値が下がる局面)を参照してください。
 
 対局の手順にある元データの局面・手の抜けと受付の被覆は [`book_mine master game-gaps`](book_mine.md#master-game-gaps-対局の手順と元データの抜け) で一覧にできます。追加の根だけでは被覆にせず、CSA の同じ行の読み筋コメントも出口判定に使います。
@@ -79,7 +80,7 @@
 | [`permute_nnue_ft`](permute_nnue_ft.md) | LayerStacks の FT と L1 列を評価値を保って並べ替え |
 | [`extract_bench_positions`](extract_bench_positions.md) | CSA / 自己対局 JSONL からラベル品質測定用の局面を抽出 |
 | [`label_bench_positions`](label_bench_positions.md) | ベンチ局面へ深い NNUE 探索の評価ラベルを付与 |
-| [`label_bench_dl`](label_bench_dl.md) | ベンチ局面へ dlshogi ONNX の静的評価を付与 |
+| [`label_bench_dl`](label_bench_dl.md) | ベンチ局面へ基本 plane / token ONNX の静的評価を付与 |
 | [`yardstick_label`](yardstick_label.md) | held-out hcpe の保存教師値を保持し、labeler の評価ラベルを付与 |
 | [`yardstick_score`](yardstick_score.md) | ラベルの WDL logloss・相関・基準との一致を採点 |
 | [`ek_testset`](ek_testset.md) | held-out CSA から入玉評価テストセットを構築・採点 |

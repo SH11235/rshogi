@@ -127,7 +127,7 @@ struct Cli {
     #[arg(long)]
     capture_depths: Option<String>,
 
-    /// DL（標準 dlshogi ONNX, DL水匠 等）value head で静的評価する ONNX labeler モード。
+    /// 基本 plane / token ONNX の value head で静的評価する labeler モード。
     /// 指定すると NNUE 探索の代わりに 1 forward pass で `eval_label` を付ける（`--nnue`/`--depth`/
     /// `--capture-depths` は無視/不可、出力は単一ファイル）。`dlshogi-onnx` feature が要る。
     #[arg(long)]
