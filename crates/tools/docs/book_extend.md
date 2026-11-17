@@ -65,6 +65,15 @@ cargo run -p tools --release --bin book_extend -- \
 
 `--resume` は `go` と `engine_fingerprint` が現在の実行設定に一致する `--journal` の行だけを再利用します。`--parent-journal` は別予算の親探索結果を検出シグナルとして使うため、`kind:"parent"` と SFEN 3 フィールドだけを見ます。
 
+`ModelFile` を絶対パスで指定した場合も、対応する自己完結 ONNX と確認できれば内容で journal を識別します。
+ONNX IR 1〜13 の既知の標準 operator の単一 graph、initializer、tensor 属性が対象です。
+external data、入れ子 graph、sparse tensor、関数、training 情報、未知 field・形式、相対パスは実行を許可し、
+過去 journal の再利用だけを無効化します。モデルの検査とハッシュは同じ byte 列に対して行います。
+この確認の対象は ONNX が宣言する資源です。エンジン独自の TensorRT serialized cache 等の識別には、エンジン固有の資源情報が別途必要です。
+engine 本体・engine-option で指定する資源と出力・journal・report の衝突は、hardlink や symlink も含めて書き込み前に拒否します。
+未知形式の `ModelFile` 自体も保護しますが、未解決の外部データファイルは保護対象に含められないため、
+出力先はモデル資源と分けてください。
+
 出力 `.db` は入力探索順や worker 完了順に依存しません。局面は SFEN 昇順、指し手は `count` 降順から USI 昇順で書き出します。同じ journal から生成する `.db` と report は決定的です。
 
 出力 `.db` と report は、同じディレクトリの一時ファイルへ書き切ってから rename する atomic 書き込みです。書き出し途中で中断しても、既存の出力ファイルが中途半端な内容で残ることはありません。

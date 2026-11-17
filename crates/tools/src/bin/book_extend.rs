@@ -179,6 +179,7 @@ fn main() -> Result<()> {
     let mut cli = Cli::parse();
     validate_cli(&cli)?;
     cli.engine = tools::book_fingerprint::resolve_engine_path(&cli.engine)?;
+    validate_resource_outputs(&cli)?;
 
     rshogi_book::Book::from_path(&cli.book, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", cli.book.display()))?;
@@ -186,7 +187,7 @@ fn main() -> Result<()> {
     let engine_fingerprint = engine_fingerprint(&cli.engine, &cli.engine_options)?;
     let reusable = tools::book_fingerprint::has_explicit_model(&cli.engine_options)?;
     if cli.resume && !reusable {
-        eprintln!("警告: EvalFile / EvalDir が未指定のため journal を再利用しません");
+        eprintln!("警告: EvalFile / EvalDir / ModelFile が未指定のため journal を再利用しません");
     }
     let mut journal = if cli.resume && reusable {
         load_journal(&cli.journal, &cli.go, &engine_fingerprint)?
@@ -249,6 +250,29 @@ fn validate_cli(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_resource_outputs(cli: &Cli) -> Result<()> {
+    let resources = tools::book_fingerprint::readonly_resources(&cli.engine, &cli.engine_options)?;
+    let mut inputs = Vec::new();
+    for resource in resources {
+        if resource.is_dir() {
+            for entry in walkdir::WalkDir::new(&resource).follow_links(true) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    inputs.push(entry.into_path());
+                }
+            }
+        } else {
+            inputs.push(resource);
+        }
+    }
+    let mut outputs = vec![cli.out.as_path(), cli.journal.as_path()];
+    if let Some(report) = &cli.report {
+        outputs.push(report);
+    }
+    let inputs: Vec<_> = inputs.iter().map(PathBuf::as_path).collect();
+    tools::output_path::ensure_safe_output_paths(&outputs, &inputs)
 }
 
 fn reject_same_canonical_path(a: &Path, b: &Path, a_name: &str, b_name: &str) -> Result<()> {

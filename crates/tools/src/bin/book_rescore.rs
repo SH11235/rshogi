@@ -193,7 +193,7 @@ fn main() -> Result<()> {
         None => true,
     };
     if cli.resume && !reusable {
-        eprintln!("警告: EvalFile / EvalDir が未指定のため journal を再利用しません");
+        eprintln!("警告: EvalFile / EvalDir / ModelFile が未指定のため journal を再利用しません");
     }
     let mut journal = if cli.resume && reusable {
         load_journal(&cli.journal, go_field, &engine_fingerprint)?
