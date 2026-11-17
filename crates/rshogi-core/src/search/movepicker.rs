@@ -812,42 +812,91 @@ impl MovePicker {
 /// - 挿入ソート相当
 #[inline]
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
-    //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
-    //       if (p->value >= limit) {
-    //           ExtMove tmp = *p, *q;
-    //           *p = *++sortedEnd;
-    //           for (q = sortedEnd; q != begin && *(q - 1) < tmp; --q)
-    //               *q = *(q - 1);
-    //           *q = tmp;
-    //       }
     if end <= 1 {
         return 0;
     }
 
-    let mut sorted_end: usize = 0;
-    let base = moves.as_mut_ptr();
-    for p in 1..end {
-        // SAFETY:
-        // - p は常に 1..end の範囲で、end は呼び出し元が `moves.len()` 以下で渡す。
-        // - sorted_end は 0..p の範囲を保つため、add() でアクセスする要素は常に同一 slice 内。
-        // - ExtMove は Copy なので、要素の読み書き・シフトで drop 問題は発生しない。
-        unsafe {
-            let tmp = *base.add(p);
-            if tmp.value >= limit {
+    let moves = &mut moves[..end];
+    let mut sorted_end = 0;
+    if limit == i32::MIN {
+        for p in 1..end {
+            sorted_end += 1;
+            insert_sorted_move(moves, p, sorted_end);
+        }
+    } else {
+        for start in (1..end).step_by(64) {
+            let block_end = (start + 64).min(end);
+            // 挿入が書き換えるのは現在位置以下だけなので、未走査の値で判定できる。
+            let mut mask = partial_sort_pass_mask(&moves[start..block_end], limit);
+            while mask != 0 {
+                let p = start + mask.trailing_zeros() as usize;
+                mask &= mask - 1;
                 sorted_end += 1;
-                if p != sorted_end {
-                    *base.add(p) = *base.add(sorted_end);
-                }
-                let mut q = sorted_end;
-                while q > 0 && (*base.add(q - 1)).value < tmp.value {
-                    *base.add(q) = *base.add(q - 1);
-                    q -= 1;
-                }
-                *base.add(q) = tmp;
+                insert_sorted_move(moves, p, sorted_end);
             }
         }
     }
     sorted_end
+}
+
+#[inline(always)]
+fn insert_sorted_move(moves: &mut [ExtMove], p: usize, sorted_end: usize) {
+    debug_assert!(sorted_end <= p && p < moves.len());
+    let base = moves.as_mut_ptr();
+    // SAFETY: sorted_end <= p < moves.len() を保ち、シフト先も同一 slice 内に収まる。
+    // ExtMove は Copy であり、読み書きで所有権の重複や drop は生じない。
+    unsafe {
+        let tmp = *base.add(p);
+        if p != sorted_end {
+            *base.add(p) = *base.add(sorted_end);
+        }
+        let mut q = sorted_end;
+        while q > 0 && (*base.add(q - 1)).value < tmp.value {
+            *base.add(q) = *base.add(q - 1);
+            q -= 1;
+        }
+        *base.add(q) = tmp;
+    }
+}
+
+#[inline]
+fn partial_sort_pass_mask(moves: &[ExtMove], limit: i32) -> u64 {
+    debug_assert!(moves.len() <= 64);
+    let mut mask = 0;
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    let offset = 0;
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    let offset = {
+        let mut offset = 0;
+        use std::arch::x86_64::*;
+
+        // SAFETY: AVX2 はコンパイル時に保証され、as_chunks::<8>() 内だけを読む。
+        // value の直接ロードにより、ExtMove のフィールド配置には依存しない。
+        unsafe {
+            let threshold = _mm256_set1_epi32(limit);
+            for chunk in moves.as_chunks::<8>().0 {
+                let values = _mm256_setr_epi32(
+                    chunk[0].value,
+                    chunk[1].value,
+                    chunk[2].value,
+                    chunk[3].value,
+                    chunk[4].value,
+                    chunk[5].value,
+                    chunk[6].value,
+                    chunk[7].value,
+                );
+                let below = _mm256_cmpgt_epi32(threshold, values);
+                let passed = (!_mm256_movemask_ps(_mm256_castsi256_ps(below)) as u32) & 0xff;
+                mask |= u64::from(passed) << offset;
+                offset += 8;
+            }
+        }
+        offset
+    };
+    for (i, ext) in moves[offset..].iter().enumerate() {
+        mask |= u64::from(ext.value >= limit) << (offset + i);
+    }
+    mask
 }
 
 /// 駒の価値（MVV用）
@@ -1097,6 +1146,135 @@ mod tests {
                     }
                     let gives_check = pos.gives_check(next);
                     pos.do_move(next, gives_check);
+                }
+            }
+        }
+    }
+
+    fn reference_partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
+        if end <= 1 {
+            return 0;
+        }
+
+        let mut sorted_end: usize = 0;
+        let base = moves.as_mut_ptr();
+        for p in 1..end {
+            // SAFETY: 呼び出し元が end <= moves.len() を保証し、sorted_end < p < end を保つ。
+            // ExtMove は Copy であり、シフトも同一 slice 内に収まる。
+            unsafe {
+                let tmp = *base.add(p);
+                if tmp.value >= limit {
+                    sorted_end += 1;
+                    if p != sorted_end {
+                        *base.add(p) = *base.add(sorted_end);
+                    }
+                    let mut q = sorted_end;
+                    while q > 0 && (*base.add(q - 1)).value < tmp.value {
+                        *base.add(q) = *base.add(q - 1);
+                        q -= 1;
+                    }
+                    *base.add(q) = tmp;
+                }
+            }
+        }
+        sorted_end
+    }
+
+    fn assert_partial_sort_matches_reference(values: &[i32], end: usize, limit: i32) {
+        let mut actual: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(i, &value)| ExtMove::new(Move::from_u16(i as u16), value))
+            .collect();
+        let mut expected = actual.clone();
+        let expected_end = reference_partial_insertion_sort(&mut expected, end, limit);
+        let actual_end = partial_insertion_sort(&mut actual, end, limit);
+        assert_eq!(actual_end, expected_end, "end={end} limit={limit}");
+        // ExtMove の PartialEq は value だけを比較するため、手の識別子も照合する。
+        for (i, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                (actual.mv, actual.value),
+                (expected.mv, expected.value),
+                "index={i} end={end} limit={limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_sort_matches_reference_boundaries() {
+        for len in [0, 1, 2, 63, 64, 65, 66, 128, 129, 600] {
+            for limit in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+                for pattern in 0..6 {
+                    let mut values: Vec<_> = (0..len)
+                        .map(|i| match pattern {
+                            0 => limit,
+                            1 => limit.saturating_sub(1),
+                            2 if i % 2 == 0 => limit,
+                            2 => limit.saturating_sub(1),
+                            3 => [i32::MIN, i32::MAX, limit, 0][i % 4],
+                            4 => i as i32 - 300,
+                            _ => 300 - i as i32,
+                        })
+                        .collect();
+                    values.extend([i32::MAX, i32::MIN, 123]);
+                    assert_partial_sort_matches_reference(&values, len, limit);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_sort_matches_reference_randomized() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5150_5254);
+        for case in 0..4096 {
+            let len = rng.random_range(0..=600);
+            let limit = match case % 5 {
+                0 => i32::MIN,
+                1 => i32::MAX,
+                2 => 0,
+                _ => rng.random(),
+            };
+            let values: Vec<i32> = (0..len + 3)
+                .map(|_| {
+                    if case % 2 == 0 {
+                        rng.random_range(-4..=4)
+                    } else {
+                        rng.random()
+                    }
+                })
+                .collect();
+            assert_partial_sort_matches_reference(&values, len, limit);
+        }
+    }
+
+    #[test]
+    fn partial_sort_mask_matches_scalar_comparison() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x514d_4153);
+        for len in 0..=64 {
+            for limit in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+                for pattern in 0..4 {
+                    let moves: Vec<_> = (0..len)
+                        .map(|i| {
+                            let value = match pattern {
+                                0 => limit,
+                                1 => limit.saturating_sub(1),
+                                2 => [limit, i32::MIN, i32::MAX][i % 3],
+                                _ => rng.random(),
+                            };
+                            ExtMove::new(Move::NONE, value)
+                        })
+                        .collect();
+                    let expected = moves
+                        .iter()
+                        .enumerate()
+                        .fold(0_u64, |mask, (i, ext)| mask | (u64::from(ext.value >= limit) << i));
+                    assert_eq!(partial_sort_pass_mask(&moves, limit), expected);
                 }
             }
         }
