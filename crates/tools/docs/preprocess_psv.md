@@ -2,6 +2,8 @@
 
 PSV の局面を qsearch の PV 末端へ置換します。`--input` と `--output` は必須です。
 `--nnue` で評価モデルを指定し、省略時は駒得評価を使います。`--rescore` には `--nnue` が必要です。
+葉局面へ変換するレコードは `move16` を 0 にし、padding は bit 1（探索木標本）だけを残します。
+王手局面をそのまま出力する場合は padding 全体を保持します。
 
 LayerStacks は `--ls-bucket-mode progresskpabs|progresskpabsq16|kingrank9` を指定します。
 進行度方式は `--ls-progress-buckets` と（bucket 数 1 以外で）`--ls-progress-coeff` が必要です。

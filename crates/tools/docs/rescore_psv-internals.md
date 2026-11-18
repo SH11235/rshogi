@@ -158,7 +158,7 @@ marker の事前検査は存在する file のみを開く。実際の更新で�
 ## leaf-REPLACEMENT arm のレコード仕様
 
 `--qsearch-leaf-label` + `--qsearch-leaf-replacement-output` の replacement 側出力
-（`--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致）:
+（葉探索を行った局面では `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致）:
 
 | フィールド | 値 |
 |---|---|
@@ -167,7 +167,7 @@ marker の事前検査は存在する file のみを開く。実際の更新で�
 | `move16` | 0 |
 | `game_ply` | root の `game_ply` |
 | `game_result` | 葉で手番反転時のみ `-game_result` |
-| `padding` | 0 |
+| `padding` | 入力の bit 1（探索木標本）のみ |
 
 leaf-LABEL arm（`--output-dir` 側）は root sfen + root 手番視点へ符号反転した
 score + root の `game_result`。両 arm は同一ループで 1:1 lockstep に書き出すため

@@ -86,6 +86,11 @@ impl PackedSfenValue {
     /// サイズ (バイト)
     pub const SIZE: usize = 40;
 
+    /// move16 を書き換えるときは、探索木標本の識別 bit だけを引き継ぐ。
+    pub fn padding_after_move16_rewrite(&self) -> u8 {
+        self.padding & PSV_PADDING_TREE_SAMPLE
+    }
+
     /// バイト列からPackedSfenValueを読み込む
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::SIZE {

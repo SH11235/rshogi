@@ -16,6 +16,11 @@ PSV（PackedSfenValue）ファイルの評価値（score）を付け替えるツ
 主要ユースケースは **dlshogi 系 ONNX モデル + TensorRT FP16** での一括リスコア。
 以下のクイックスタートがその導線になっている。
 
+PSV 出力では探索木標本のマーカー（padding の bit 1）を引き継ぐ。
+`move16` を保持する場合は padding 全体を保持し、最善手の出力・葉局面への置換・
+ポリシー展開で `move16` を書き換える場合は bit 1 だけを残し、dual-label の bit 0 をクリアする。
+マーカーが消えた既存の出力を作り直す場合は、元の PSV と新しい出力先を指定する。
+
 ## クイックスタート（推奨: dlshogi ONNX + TensorRT FP16）
 
 ### 1. 環境変数
@@ -425,7 +430,7 @@ rescore_psv --input "data/*.bin" --output-dir rescored_leaflabel/ \
   原局面のまま評価する。
 - `--qsearch-leaf-replacement-output <dir>` を併用すると、同一 1 パスで
   **葉局面に置換した**レコード（leaf-REPLACEMENT arm）も別ディレクトリに書き出せる。
-  2 工程（`--apply-qsearch-leaf` → DL rescore）と bit 一致し、再計算を半減できる。
+  葉探索を行った局面では 2 工程（`--apply-qsearch-leaf` → DL rescore）と bit 一致し、再計算を半減できる。
   `--output-dir` とは別ディレクトリ必須。レコード仕様の詳細は
   [internals](rescore_psv-internals.md) 参照。
 

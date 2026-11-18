@@ -845,7 +845,7 @@ fn finalize_result(
         move16: new_move16,
         game_ply: new_game_ply,
         game_result: new_game_result,
-        padding: 0,
+        padding: psv.padding_after_move16_rewrite(),
     };
 
     ProcessResult::Ok(new_psv.to_bytes())
@@ -857,6 +857,45 @@ mod tests {
     use std::sync::Mutex;
 
     static PROCESS_FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn material_preprocessing_preserves_tree_sample_padding() {
+        let opts = ProcessOptions {
+            max_ply: 1,
+            fix_stm_sign: true,
+            rescore: false,
+            skip_in_check: false,
+            score_clip: 10000,
+        };
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mut input = PackedSfenValue {
+            sfen: pack_position(&pos),
+            score: 0,
+            move16: 123,
+            game_ply: 1,
+            game_result: 0,
+            padding: 3,
+        };
+        let ProcessResult::Ok(bytes) =
+            process_record_material(&input.to_bytes(), &MaterialEvaluator, opts)
+        else {
+            panic!("expected a preprocessed record");
+        };
+        let output = PackedSfenValue::from_bytes(&bytes).unwrap();
+        assert_eq!(output.move16, 0);
+        assert_eq!(output.padding, 2);
+
+        pos.set_sfen("4k4/9/9/9/4r4/9/9/9/4K4 b - 1").unwrap();
+        assert!(pos.in_check());
+        input.sfen = pack_position(&pos);
+        let ProcessResult::Ok(bytes) =
+            process_record_material(&input.to_bytes(), &MaterialEvaluator, opts)
+        else {
+            panic!("expected the original record");
+        };
+        assert_eq!(bytes, input.to_bytes());
+    }
 
     fn test_cli(input: PathBuf, output: PathBuf, moved_mask: Option<PathBuf>) -> Cli {
         Cli {

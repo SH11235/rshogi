@@ -2292,9 +2292,13 @@ fn process_record(
         sfen: final_sfen,
         score: new_score,
         move16: if position_replaced { 0 } else { psv.move16 },
-        game_ply: psv.game_ply,
         game_result: new_game_result,
-        padding: 0,
+        padding: if position_replaced {
+            psv.padding_after_move16_rewrite()
+        } else {
+            psv.padding
+        },
+        ..psv
     };
 
     ProcessResult::Ok(new_psv.to_bytes(), clipped)
@@ -2705,16 +2709,18 @@ fn process_record_with_search(
 
     // 新しいPackedSfenValueを作成（局面は変更しない）
     let new_psv = PackedSfenValue {
-        sfen: psv.sfen,
         score: new_score,
         move16: if emit_bestmove {
             move_to_psv_move16(search_result.best_move)
         } else {
             psv.move16
         },
-        game_ply: psv.game_ply,
-        game_result: psv.game_result,
-        padding: 0,
+        padding: if emit_bestmove {
+            psv.padding_after_move16_rewrite()
+        } else {
+            psv.padding
+        },
+        ..psv
     };
 
     ProcessResult::Ok(new_psv.to_bytes(), clipped)
@@ -3088,12 +3094,8 @@ fn process_file_with_engine(
                 clipped_count += 1;
             }
             let new_psv = PackedSfenValue {
-                sfen: psv.sfen,
                 score: raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16,
-                move16: psv.move16,
-                game_ply: psv.game_ply,
-                game_result: psv.game_result,
-                padding: 0,
+                ..*psv
             };
             writer.write_all(&new_psv.to_bytes())?;
             total_written += 1;
@@ -5101,17 +5103,13 @@ where
                     // しない）。葉評価はラベルのみに反映（符号反転は signed_score に
                     // 適用済み）。
                     let new_psv = PackedSfenValue {
-                        sfen: psv.sfen,
                         score: new_score,
-                        move16: psv.move16,
-                        game_ply: psv.game_ply,
-                        game_result: psv.game_result,
-                        padding: 0,
+                        ..*psv
                     };
                     append_rescore_bytes(&mut rescore_bytes, &new_psv, out_scores);
 
                     // leaf-REPLACEMENT arm（有効時のみ、leaf-LABEL と 1:1 lockstep）。
-                    // `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致させる:
+                    // 葉探索を行った局面を `--apply-qsearch-leaf` → DL rescore と一致させる:
                     // - sfen は葉局面の packed sfen
                     // - score は葉評価（符号反転なし＝葉手番視点）に clip 適用
                     // - game_result は STM 反転時のみ符号反転
@@ -5130,7 +5128,7 @@ where
                             move16: 0,
                             game_ply: psv.game_ply,
                             game_result: leaf_game_result,
-                            padding: 0,
+                            padding: psv.padding_after_move16_rewrite(),
                         };
                         replacement_bytes.extend_from_slice(&replacement_psv.to_bytes());
                     }
@@ -5200,7 +5198,7 @@ where
                                         move16: 0,
                                         game_ply: psv.game_ply.saturating_add(1),
                                         game_result: 0,
-                                        padding: 0,
+                                        padding: psv.padding_after_move16_rewrite(),
                                     };
                                     expand_bytes.extend_from_slice(&child.to_bytes());
                                     expanded += 1;
@@ -7635,6 +7633,49 @@ mod search_pipeline_tests {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
     use rshogi_core::movegen::{MoveList, generate_legal};
+
+    #[test]
+    fn search_preserves_tree_sample_padding_with_or_without_bestmove() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mut search = Search::new(1);
+        search.set_num_threads(1);
+
+        for (padding, rewritten_padding) in [(2, 2), (3, 2), (0x83, 2), (1, 0)] {
+            let input = PackedSfenValue {
+                sfen: pack_position(&pos),
+                score: 0,
+                move16: u16::MAX,
+                game_ply: 1,
+                game_result: 0,
+                padding,
+            };
+            for emit_bestmove in [false, true] {
+                let ProcessResult::Ok(bytes, _) = process_record_with_search(
+                    &input.to_bytes(),
+                    &mut search,
+                    1,
+                    0,
+                    0,
+                    10000,
+                    false,
+                    1,
+                    1,
+                    emit_bestmove,
+                ) else {
+                    panic!("expected a rescored record");
+                };
+                let output = PackedSfenValue::from_bytes(&bytes).unwrap();
+                if emit_bestmove {
+                    assert_ne!(output.move16, input.move16);
+                    assert_eq!(output.padding, rewritten_padding);
+                } else {
+                    assert_eq!(output.move16, input.move16);
+                    assert_eq!(output.padding, padding);
+                }
+            }
+        }
+    }
 
     fn indexed_record(i: u16) -> [u8; PackedSfenValue::SIZE] {
         PackedSfenValue {
