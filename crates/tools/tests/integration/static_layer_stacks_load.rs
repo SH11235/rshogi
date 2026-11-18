@@ -47,10 +47,14 @@ impl Fixture {
     }
 
     fn with_buckets(buckets: usize) -> Self {
+        Self::with_routing(buckets, None)
+    }
+
+    fn with_routing(buckets: usize, spec: Option<&str>) -> Self {
         let fixture = Self {
             temp: tempdir().expect("tempdir"),
         };
-        let synthetic = build_synthetic_layer_stacks(
+        let mut synthetic = build_synthetic_layer_stacks(
             "HalfKaHmMerged",
             HALFKA_HM_DIMENSIONS,
             1536,
@@ -58,6 +62,16 @@ impl Fixture {
             32,
             buckets,
         );
+        if let Some(spec) = spec {
+            let len = u32::from_le_bytes(synthetic.bytes[8..12].try_into().unwrap()) as usize;
+            let mut arch = String::from_utf8(synthetic.bytes[12..12 + len].to_vec()).unwrap();
+            arch.push_str(",ls_bucket=");
+            arch.push_str(spec);
+            synthetic.bytes.splice(
+                8..12 + len,
+                (arch.len() as u32).to_le_bytes().into_iter().chain(arch.bytes()),
+            );
+        }
         std::fs::write(fixture.net(), &synthetic.bytes).expect("write synthetic net");
         std::fs::write(fixture.sfens(), format!("{SFEN_HIRATE}\n{SFEN_AFTER_7G7F}\n"))
             .expect("write sfens");
@@ -75,6 +89,47 @@ impl Fixture {
 
     fn sfens(&self) -> String {
         self.file("sfens.txt")
+    }
+}
+
+#[test]
+fn diagnostic_cli_uses_net_bucket_spec() {
+    let fixture = Fixture::with_routing(32, Some("handmajor4+ownking:2/3/4/5/6/7/8"));
+    let (net, sfens) = (fixture.net(), fixture.sfens());
+    let entered_king = "4K4/9/9/9/9/9/9/9/4k4 b Rb 1";
+    std::fs::write(&sfens, format!("{SFEN_HIRATE}\n{entered_king}\n")).unwrap();
+    let eval = env!("CARGO_BIN_EXE_eval_sfens");
+    let saturation = env!("CARGO_BIN_EXE_nnue_saturation");
+    let bench = env!("CARGO_BIN_EXE_bench_nnue_eval");
+    let diagnostic_args = ["--nnue", &net, "--sfens", &sfens];
+    let stdout = assert_static_layer_stacks_success(eval, &run(eval, &diagnostic_args));
+    assert!(stdout.contains(&format!("{entered_king}\t31\t")), "{stdout}");
+    let stdout = assert_static_layer_stacks_success(saturation, &run(saturation, &diagnostic_args));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["bucket_mode"], "spec");
+    assert_eq!(report["per_bucket"][0]["bucket"], 0);
+    assert_eq!(report["per_bucket"][1]["bucket"], 31);
+
+    let bench_args = ["--nnue-file", &net, "--warmup", "1", "--iterations", "1"];
+    assert_static_layer_stacks_success(bench, &run(bench, &bench_args));
+    for mode in ["layer-stack-eval", "layer-stack-propagate"] {
+        let args = [bench_args.as_slice(), &["--mode", mode]].concat();
+        let stdout = assert_static_layer_stacks_success(bench, &run(bench, &args));
+        assert!(stdout.contains(r#""bucket_mode":"spec""#), "{stdout}");
+        assert!(stdout.contains(r#""bucket_counts":"0:2, 1:1, 16:1, 17:1""#), "{stdout}");
+    }
+
+    for (binary, args, flag) in [
+        (saturation, diagnostic_args.as_slice(), "--progress-buckets"),
+        (bench, bench_args.as_slice(), "--ls-progress-buckets"),
+    ] {
+        let output = run(binary, &[args, &[flag, "1"]].concat());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("NNUE ls_bucket routing conflicts") && stderr.contains(flag),
+            "{stderr}"
+        );
     }
 }
 

@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rshogi_core::nnue::{
-    LayerStackBucketMode, LayerStackRoutingError, compute_layer_stack_kingrank9_bucket_index,
-    compute_progresskpabs_q16_sum, compute_progresskpabs_sum, configure_layer_stack_routing,
-    get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_q16_weights,
-    get_layer_stack_progress_kpabs_weights, load_progress_coeff_kpabs_from_bytes,
-    load_progress_coeff_kpabs_q16_from_bytes, parse_layer_stack_bucket_mode,
-    progress_q16_sum_to_bucket, progress_sum_to_bucket,
+    BucketSpec, LayerStackBucketMode, LayerStackRoutingError,
+    compute_layer_stack_kingrank9_bucket_index, compute_progresskpabs_q16_sum,
+    compute_progresskpabs_sum, configure_layer_stack_routing, get_layer_stack_bucket_mode,
+    get_layer_stack_progress_kpabs_q16_weights, get_layer_stack_progress_kpabs_weights,
+    load_progress_coeff_kpabs_from_bytes, load_progress_coeff_kpabs_q16_from_bytes,
+    parse_layer_stack_bucket_mode, progress_q16_sum_to_bucket, progress_sum_to_bucket,
     reset_layer_stack_progress_kpabs_q16_weights, set_layer_stack_progress_kpabs_q16_weights,
     set_layer_stack_progress_kpabs_weights, validate_layer_stack_routing_with_coefficients,
 };
@@ -162,6 +162,8 @@ impl NativeRouting {
 ///
 /// 係数は生成時に一度だけ取得し、評価ループ中は global を読まない。
 pub enum LayerStackBucketer {
+    /// ネットに記録された spec に従う。
+    Spec(BucketSpec),
     /// 進行度方式の routing bucket 数 1。係数を参照せず常に bucket 0。
     Single,
     KingRank9 {
@@ -204,6 +206,7 @@ impl LayerStackBucketer {
     /// 局面の bucket index。
     pub fn bucket(&self, pos: &Position) -> usize {
         match self {
+            Self::Spec(spec) => spec.bucket(pos),
             Self::Single => 0,
             Self::KingRank9 { stored } => {
                 compute_layer_stack_kingrank9_bucket_index(pos, pos.side_to_move(), *stored)

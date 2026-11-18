@@ -115,6 +115,9 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `NetworkDelay` | Network delay compensation (ms) | 0 |
 | `NetworkDelay2` | Additional delay for uncertain situations | 0 |
 | `EvalFile` | NNUE model path | `eval/nn.bin` |
+| `LS_BUCKET_MODE` | LayerStacks の外部 routing 設定。`progresskpabs`、`progresskpabsq16`、`kingrank9` | 未設定 |
+| `LS_PROGRESS_BUCKETS` | 進行度 routing の bucket 数。1〜32、0 は未設定 | 0 |
+| `LS_PROGRESS_COEFF` | 進行度係数のファイルパス | 未設定 |
 | `SPSAParamsFile` | 探索・net の SPSA の値のファイル (`.params`)。`<auto>` なら実行ファイルと同じフォルダの `spsa.params` を読む。build に焼き込んだ値 ([ビルドガイド](../../docs/build.md#spsa-の値を焼き込む)) より優先する | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
 | `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
@@ -131,6 +134,12 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
+
+tatara の `--bucket-mode spec --bucket-spec <axes>` で出力した LayerStacks ネットは、
+`EvalFile` に指定するとネットの `ls_bucket=` に従って bucket を選びます。
+`LS_BUCKET_MODE`、`LS_PROGRESS_BUCKETS`、`LS_PROGRESS_COEFF` は未設定にしてください。
+いずれかに値が設定されている場合は `isready` がエラーになります。
+`ls_bucket=` を持たない LayerStacks ネットでは、学習時の routing を USI オプションで指定します。
 
 ### オプションを固定するファイル (`engine_options.txt`)
 

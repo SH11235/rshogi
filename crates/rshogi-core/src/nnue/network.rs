@@ -141,7 +141,7 @@ pub enum LayerStackBucketMode {
     /// tatara モデル用の浮動小数点進行度方式 (KP-absolute)。bucket 数は推論設定で明示する。
     ProgressKPAbs = 4,
     /// YaneuraOu SFNN モデル用の Q16 整数進行度方式。
-    /// 256 段階に量子化する BulletOu 形式とは、バケット数1・2・4・8・16でのみ振り分けが一致する。
+    /// 256 段階に量子化する BulletOu 形式とは、バケット数が 256 の約数の場合に振り分けが一致する。
     ProgressKPAbsQ16 = 5,
 }
 
@@ -1080,6 +1080,17 @@ impl NNUENetwork {
         }
     }
 
+    /// LayerStacks ネットに記録された bucket spec を返す。
+    pub fn layer_stack_bucket_spec(&self) -> Option<super::BucketSpec> {
+        match self {
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicLayerStacks(network) => network.bucket_spec,
+            #[cfg(feature = "layerstack-arch")]
+            Self::LayerStacks(network) => network.bucket_spec(),
+            _ => None,
+        }
+    }
+
     /// HalfKaSplit アーキテクチャかどうか
     pub fn is_halfka(&self) -> bool {
         #[cfg(feature = "nnue-runtime-dimensions")]
@@ -1894,6 +1905,9 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ) -> Value {
     // アキュムレータの更新
     net.update_accumulator(pos, stack, acc_cache);
+    if let Some(spec) = net.bucket_spec() {
+        return net.evaluate_with_bucket(pos, stack, spec.bucket(pos));
+    }
 
     // progresskpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
     #[cfg(feature = "nnue-progress-diff")]

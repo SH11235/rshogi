@@ -129,8 +129,8 @@ struct AccCacheEntry<const L1: usize> {
     /// メモリフットプリント: `nnue-psqt` 有効時、各エントリは
     /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (4 × MAX_LAYER_STACK_BUCKETS bytes)` +
     /// `piece_list (40 × 2 bytes)` + `valid (1 byte)` で構成され、64-byte
-    /// 境界にアライメントされる。L1=1536、16 bucketでは3,264 bytes（パディング込み）。
-    /// `Square::NUM = 81` × 2 perspective = 162 エントリで528,768 bytes。
+    /// 境界にアライメントされる。
+    /// エントリ数は `Square::NUM = 81` × 2 視点。
     #[cfg(feature = "nnue-psqt")]
     psqt_accumulation: [i32; MAX_LAYER_STACK_BUCKETS],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
@@ -1208,7 +1208,7 @@ mod tests {
     #[test]
     fn accumulator_and_cache_rows_are_simd_aligned() {
         #[cfg(feature = "nnue-psqt")]
-        assert_eq!(std::mem::size_of::<AccCacheEntry<1536>>(), 3264);
+        assert_eq!(std::mem::size_of::<AccCacheEntry<1536>>(), 3328);
         #[cfg(not(feature = "nnue-psqt"))]
         assert_eq!(std::mem::size_of::<AccCacheEntry<1536>>(), 3200);
         fn verify<const L1: usize>() {

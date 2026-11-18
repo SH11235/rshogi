@@ -40,8 +40,8 @@ struct Cli {
     count: usize,
 
     /// Output bucket mode (progresskpabs / progresskpabsq16)
-    #[arg(long, value_enum, default_value = "progresskpabs")]
-    bucket_mode: BucketMode,
+    #[arg(long, value_enum)]
+    bucket_mode: Option<BucketMode>,
 
     /// progress.bin (f64 LE の KP-absolute 進行度重み) のパス
     #[arg(long)]
@@ -49,7 +49,7 @@ struct Cli {
 
     /// 進行度方式が推論に使う bucket 数。
     #[arg(long)]
-    progress_buckets: usize,
+    progress_buckets: Option<usize>,
 
     /// Dump detailed intermediates for the first evaluated position (to stderr)
     #[arg(long, default_value_t = false)]
@@ -319,8 +319,17 @@ fn run_eval_for_network<
     network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
 ) -> Result<()> {
     eprintln!("fv_scale: {}", network.fv_scale);
-    eprintln!("bucket_mode: {}", cli.bucket_mode.mode().as_str());
-    let bucketer = LayerStackBucketer::from_configured(network.num_buckets, cli.progress_buckets)?;
+    let spec = network.bucket_spec();
+    let bucketer = if let Some(buckets) = cli.progress_buckets {
+        eprintln!(
+            "bucket_mode: {}",
+            cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode().as_str()
+        );
+        Some(LayerStackBucketer::from_configured(network.num_buckets, buckets)?)
+    } else {
+        eprintln!("bucket_mode: spec");
+        None
+    };
 
     let file = std::fs::File::open(&cli.sfens)
         .with_context(|| format!("Failed to open: {:?}", cli.sfens))?;
@@ -345,7 +354,11 @@ fn run_eval_for_network<
         pos.set_sfen(&sfen).with_context(|| format!("Invalid SFEN: {sfen}"))?;
         network.refresh_accumulator(&pos, &mut acc);
 
-        let value = network.evaluate(&pos, &acc);
+        let bucket_index = match spec {
+            Some(spec) => spec.bucket(&pos),
+            None => bucketer.as_ref().expect("validated routing").bucket(&pos),
+        };
+        let value = network.evaluate_with_bucket(&pos, &acc, bucket_index);
 
         let side_to_move = pos.side_to_move();
         let (us_acc, them_acc) = if side_to_move == Color::Black {
@@ -357,7 +370,6 @@ fn run_eval_for_network<
         let mut transformed = [0u8; L1];
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
 
-        let bucket_index = bucketer.bucket(&pos);
         let raw = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
 
         if cli.dump_debug_first && !dumped_debug {
@@ -380,20 +392,34 @@ pub fn run() -> Result<()> {
     // 静的 net の中間層を dump する本ツールでは使えない。
     let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
-    let plan = NativeRouting::prepare(
-        Some(ls_net.num_buckets()),
-        Some(cli.bucket_mode.mode()),
-        Some(cli.progress_buckets),
-        cli.progress_coeff.as_ref().is_some(),
-    )
-    .context("native routing: --progress-buckets / --progress-coeff")?
-    .expect("LayerStacks routing");
-    plan.apply(|| {
-        cli.progress_coeff
-            .as_ref()
-            .map(|path| ProgressCoefficients::load(path.as_ref()))
-            .transpose()
-    })?;
+    if ls_net.bucket_spec().is_some() {
+        if cli.bucket_mode.is_some()
+            || cli.progress_buckets.is_some()
+            || cli.progress_coeff.is_some()
+        {
+            anyhow::bail!(
+                "NNUE ls_bucket routing conflicts with --bucket-mode, --progress-buckets or --progress-coeff"
+            );
+        }
+    } else {
+        let buckets = cli
+            .progress_buckets
+            .context("--progress-buckets is required for a net without ls_bucket")?;
+        let plan = NativeRouting::prepare(
+            Some(ls_net.num_buckets()),
+            Some(cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode()),
+            Some(buckets),
+            cli.progress_coeff.is_some(),
+        )
+        .context("native routing: --progress-buckets / --progress-coeff")?
+        .expect("LayerStacks routing");
+        plan.apply(|| {
+            cli.progress_coeff
+                .as_ref()
+                .map(|path| ProgressCoefficients::load(path.as_ref()))
+                .transpose()
+        })?;
+    }
 
     ls_dispatch_ft_size!(
         &ls_net,

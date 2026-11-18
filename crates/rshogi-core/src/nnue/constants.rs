@@ -158,13 +158,8 @@ pub const NNUE_PYTORCH_L3: usize = 32;
 /// (= 9) と一致するため、9-bucket 学習済みの配布 net をそのまま読める。
 pub const DEFAULT_NUM_BUCKETS: usize = 9;
 
-/// engine が受理する LayerStack bucket 数の上限。`PSQT accumulator` や PSQT
-/// SIMD path (AVX-512 16-lane mask、AVX2 8-lane × 2 chunk) の固定長レジスタ・
-/// 配列サイズと一致する。`.bin` から読んだ `num_buckets` が本値を超える場合は
-/// `InvalidData` で reject し、本値を上げた engine を再ビルドさせる。
-/// 16 を採るのは AVX-512 1 命令 = 16 lane と一致し、tatara の sweep 範囲
-/// (5/8/9/12/16 等) を吸収できるため。
-pub const MAX_LAYER_STACK_BUCKETS: usize = 16;
+/// tatara の出力形式に合わせた LayerStack bucket 数の上限。
+pub const MAX_LAYER_STACK_BUCKETS: usize = 32;
 
 /// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
 pub const LAYER_STACK_16X32_L1_OUT: usize = LAYER_STACK_16X32_MAIN_DIM + 1; // 16

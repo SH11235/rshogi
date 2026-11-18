@@ -197,24 +197,8 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 /// PSQT アキュムレータ (`[i32; MAX_LAYER_STACK_BUCKETS]`) の先頭 `n` 要素に
 /// `weights[0..n]` を加算 (`ADD = true`) または減算する。
 ///
-/// `n` は net file の `num_buckets` で、`MAX_LAYER_STACK_BUCKETS = 16` 以下。
-/// 配列の `[n..MAX]` 範囲は load 時にゼロのまま残し、本関数はここを触らない
-/// (未使用 bucket の値を保存)。
-///
-/// `wrapping_add` / `wrapping_sub` で明示 wrap する。PSQT 値は ±数千オーダー、
-/// FT 累積でも i32 を溢れないため挙動差は無視できる。
-///
-/// # 実装方針
-///
-/// `MAX_LAYER_STACK_BUCKETS = 16` が AVX-512 1 命令のレーン数と一致するため、
-/// AVX-512F では runtime `n` から `(1 << n) - 1` の 16-bit mask を作り
-/// `_mm512_maskz_loadu_epi32` + `_mm512_mask_storeu_epi32` の 1 セットで完了する。
-/// AVX2 (AVX-512 無し) では `_mm256_maskload_epi32` / `_mm256_maskstore_epi32`
-/// で 8 lane ごとに mask する (n ≤ 16 のため最大 2 chunk)。SSE2 / NEON /
-/// WASM SIMD128 が無い build は scalar fallback。
-///
-/// # Safety
-/// `weights` は少なくとも `n` 個の i32 が連続して読める必要がある（呼び出し元が保証）。
+/// `n` はネットに格納された bucket 数。`[n..MAX]` は更新しない。
+/// 呼び出し元は `weights` が少なくとも `n` 個の連続した i32 を指すことを保証する。
 #[cfg(feature = "nnue-psqt")]
 #[inline(always)]
 fn psqt_add_or_sub<const ADD: bool>(
@@ -224,64 +208,36 @@ fn psqt_add_or_sub<const ADD: bool>(
 ) {
     debug_assert!(n <= MAX_LAYER_STACK_BUCKETS);
 
-    // AVX-512F: 16-lane mask で 1 命令にまとめる
     #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
     {
-        // SAFETY:
-        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続 (AVX-512 1 vector と一致)。
-        //   全 16 レーンが有効領域内。
-        // - `weights` は呼び出し元が **n 個 i32 連続を読める** ことを保証する。
-        //   ポインタ自体は n 個分の領域を指し、`weights.add(k)` for `k < n` は
-        //   in-bounds。
-        // - mask `(1 << n) - 1` は下位 n bit のみ立つ。`_mm512_maskz_loadu_epi32`
-        //   と `_mm512_mask_storeu_epi32` は **mask bit が 0 のレーンに対応する
-        //   メモリアドレスへの load/store を発行しない** (Intel SDM Vol. 2C:
-        //   VMOVDQU32 with `{k1}{z}` — "Masked-out elements are zeroed. No fault
-        //   is signaled for masked-out elements regardless of whether the
-        //   corresponding memory operand would have caused a fault")。よって
-        //   `weights[n..16]` が割り当て外でも安全。
+        // SAFETY: 各 offset は n 未満。mask は両配列の [offset..n] 内のレーンだけを有効にし、
+        // AVX-512 の masked load/store は無効レーンのメモリにアクセスしない。
         unsafe {
             use std::arch::x86_64::*;
-            const _ASSERT: () = assert!(MAX_LAYER_STACK_BUCKETS == 16);
-            let mask: __mmask16 = if n >= 16 {
-                !0u16
-            } else {
-                ((1u32 << n) - 1) as u16
-            };
             let acc_ptr = psqt_acc.as_mut_ptr();
-            let a = _mm512_maskz_loadu_epi32(mask, acc_ptr);
-            let w = _mm512_maskz_loadu_epi32(mask, weights);
-            let result = if ADD {
-                _mm512_add_epi32(a, w)
-            } else {
-                _mm512_sub_epi32(a, w)
-            };
-            _mm512_mask_storeu_epi32(acc_ptr, mask, result);
+            for offset in (0..n).step_by(16) {
+                let remaining = (n - offset).min(16);
+                let mask = ((1u32 << remaining) - 1) as __mmask16;
+                let a = _mm512_maskz_loadu_epi32(mask, acc_ptr.add(offset));
+                let w = _mm512_maskz_loadu_epi32(mask, weights.add(offset));
+                let result = if ADD {
+                    _mm512_add_epi32(a, w)
+                } else {
+                    _mm512_sub_epi32(a, w)
+                };
+                _mm512_mask_storeu_epi32(acc_ptr.add(offset), mask, result);
+            }
         }
     }
 
-    // AVX2 (AVX-512 無し): 8-lane × 最大 2 chunk を runtime mask で処理
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
         not(target_feature = "avx512f")
     ))]
     {
-        // SAFETY:
-        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続、`acc_ptr.add(0)` と
-        //   `acc_ptr.add(8)` の両方が in-bounds (offset 32 / 64 bytes、配列終端は
-        //   64 bytes)。
-        // - `weights` は呼び出し元が **n 個 i32 連続を読める** ことを保証する。
-        //   chunk loop は `covered += 8` で進むため、`weights.add(covered)` は
-        //   `covered < n` の chunk 内では下位レーン (`indices[0]`) が必ず in-bounds。
-        // - `_mm256_maskload_epi32` / `_mm256_maskstore_epi32` (VPMASKMOVD) は
-        //   **mask 最上位 bit が 0 のレーンに対応するメモリアドレスへの load/store
-        //   を発行しない** (Intel SDM Vol. 2B: VPMASKMOVD — "If the mask is 0,
-        //   the corresponding memory location is not accessed and no fault is
-        //   signaled")。よって `weights[k]` (mask = 0 のレーン位置) が割り当て外で
-        //   あっても安全。
-        // - mask は `_mm256_cmpgt_epi32(remaining_broadcast, indices)` で下位
-        //   `remaining` 個のレーンのみ all-ones、それ以上は all-zeros として生成。
+        // SAFETY: covered は n 未満。mask は両配列の [covered..n] 内のレーンだけを有効にし、
+        // AVX2 の masked load/store は無効レーンのメモリにアクセスしない。
         unsafe {
             use std::arch::x86_64::*;
             let acc_ptr = psqt_acc.as_mut_ptr();
@@ -305,8 +261,7 @@ fn psqt_add_or_sub<const ADD: bool>(
     }
 
     // 上記のいずれの SIMD path にも該当しない build (SSE2 のみ / NEON / WASM /
-    // その他) は scalar fallback。`MAX = 16` で n ≤ 16 のループは LLVM が
-    // auto-vectorize する余地がある。
+    // その他) は、有効な PSQT bucket 数だけを更新する scalar fallback。
     #[cfg(not(any(
         all(target_arch = "x86_64", target_feature = "avx512f"),
         all(target_arch = "x86_64", target_feature = "avx2"),
@@ -3644,6 +3599,20 @@ mod tests {
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "nnue-psqt")]
+    #[test]
+    fn psqt_updates_wide_buckets_and_preserves_unused_lanes() {
+        let weights: [i32; MAX_LAYER_STACK_BUCKETS] = std::array::from_fn(|i| i as i32 + 1);
+        for n in [0, 1, 8, 9, 16, 17, 24, 31, 32] {
+            let mut accum = [100; MAX_LAYER_STACK_BUCKETS];
+            let input = weights[..n].to_vec().into_boxed_slice();
+            psqt_add_or_sub::<true>(&mut accum, input.as_ptr(), n);
+            assert_eq!(accum, std::array::from_fn(|i| 100 + if i < n { weights[i] } else { 0 }));
+            psqt_add_or_sub::<false>(&mut accum, input.as_ptr(), n);
+            assert_eq!(accum, [100; MAX_LAYER_STACK_BUCKETS]);
         }
     }
 

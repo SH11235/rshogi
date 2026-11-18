@@ -31,15 +31,19 @@ cargo run -p tools --release --bin bench_nnue_eval -- \
 | `--mode` | `full`（既定）、`layer-stack-propagate`、`layer-stack-eval`、`layer-stack-refresh-cache`、`layer-stack-update-cache` |
 | `--iterations` | 反復数。既定500000。full では正数必須 |
 | `--warmup` | 計測前の反復数。既定10000 |
-| `--ls-bucket-mode` | LayerStacks の bucket 選択モード |
-| `--ls-progress-coeff` | progresskpabs 係数。指定時は bucket 計算のマイクロベンチも実行 |
-| `--ls-progress-buckets` | progresskpabs の推論 bucket 数。このモードでは必須 |
+| `--ls-bucket-mode` | spec のない LayerStacks ネットでは必須 |
+| `--ls-progress-coeff` | 進行度係数。指定時は bucket 計算のマイクロベンチも実行 |
+| `--ls-progress-buckets` | 進行度方式を使う場合の推論 bucket 数。この方式では必須 |
+
+ネットのヘッダに `ls_bucket=` がある場合、全モードで同じ spec を使います。
+上の 3 つの routing オプションを指定すると競合エラーになります。
+LayerStacks 専用モードでは、事前選択した bucket の分布と `bucket_mode: "spec"` を出力します。
 
 LayerStacks 専用モードは各局面に対応する入力・accumulator を事前準備する既存経路です。`layer-stack-propagate` は dense 部、`layer-stack-eval` は準備済み accumulator の評価、`layer-stack-refresh-cache` はキャッシュ付き refresh、`layer-stack-update-cache` は1手差分の更新を計測します。bucket 分布も出力します。full の固定局面 eval-only とは測定範囲が異なります。
 
 これらのモードは静的 LayerStacks 専用の reader でモデルを読み直します。同じビルドの
 他 crate 経由で universal edition の `nnue-runtime-dimensions` が feature 統合されていても、
-静的構造のまま計測できます（`full` モードの読み込み経路と CLI は変わりません）。
+静的構造のまま計測できます。
 `Architecture:` 行と JSON の `arch` は静的 net の spec 名（例 `LayerStacks-1536-16-32-CReLU`）で、
 build 構成によって変わりません。
 

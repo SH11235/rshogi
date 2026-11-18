@@ -25,6 +25,10 @@ PSQT は別の評価加算経路なので、これらの活性計器には含め
 
 ## 使い方
 
+ネットのヘッダに `ls_bucket=` がある場合は、`--nnue` と `--sfens` を指定すると、
+推論と同じ spec で集計します。`--bucket-mode`、`--progress-buckets`、
+`--progress-coeff` は spec と競合します。以下は spec のないネットの例です。
+
 ```bash
 cargo run -p tools --release --bin nnue_saturation -- \
   --nnue "$SHOGI_DATA/nnue/model.bin" \
@@ -40,19 +44,20 @@ feature を選んでビルドしてください。PSQT 併用モデルには `nn
 
 モデルの読み込みには静的 LayerStacks 専用の reader を使います。同じビルドの他 crate
 経由で universal edition の `nnue-runtime-dimensions` が feature 統合されていても、
-LayerStacks net を静的構造のまま読み込めます（CLI は変わりません）。
+LayerStacks net を静的構造のまま読み込めます。
 
 `--bucket-mode` は `progresskpabs`（既定）または `progresskpabsq16` です。
-`--progress-buckets` は学習時の routing bucket 数を指定します。`--progress-buckets 1` は
+`--progress-buckets` には学習時の routing bucket 数を必ず指定します。`--progress-buckets 1` は
 常に bucket 0 を選ぶ no-op routing のため、その場合のみ `--progress-coeff` は省略できます。
 
-出力は JSON（標準出力と `--out`）。全体集計 `total` と、progress bucket 別の
+出力は JSON（標準出力と `--out`）。全体集計 `total` と、bucket 別の
 `per_bucket`（局面が 1 件以上入った bucket のみ）を含みます。各段は
 `*_sat` / `*_total` / `*_rate`（127 到達数 / 総数 / 率）です。
+spec を使うと `bucket_mode` は `"spec"`、`progress_coeff` は `null` になり、
+`progress_buckets` は省略されます。
 
 入玉局面（大評価値側）と一般局面で `--sfens` を替えて比較すると、評価値インフレが
-どの帯で天井に当たっているかを切り分けられます。bucket は progresskpabs なので、
-終盤 bucket ほど入玉局面が集中します。
+どの bucket で天井に当たっているかを切り分けられます。
 
 ## 過去の計測との比較
 
