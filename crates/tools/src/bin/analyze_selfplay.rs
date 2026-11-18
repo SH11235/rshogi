@@ -471,7 +471,7 @@ struct FileExtraStats {
     side_totals_unknown: bool,
     a_sente_total: u32,
     b_sente_total: u32,
-    single_game: bool,
+    single_game_kind: Option<&'static str>,
     by_startpos: Option<StartposStats>,
     incomplete_pairs: usize,
     reasons: BTreeMap<String, u32>,
@@ -884,7 +884,7 @@ fn parse_normal_file_inner(
             } else {
                 None
             };
-            stats.extra.single_game = single_game_kind.is_some();
+            stats.extra.single_game_kind = *single_game_kind;
             if let Some(kind) = *single_game_kind
                 && games != 1
             {
@@ -1695,7 +1695,7 @@ fn main() -> Result<()> {
     let mut extra = AggregatedExtraStats::default();
 
     let mut accepted_files = Vec::new();
-    let mut has_single_game_files = false;
+    let mut single_game_kind = None;
     let mut checked_run_meta = BTreeSet::new();
     for path in &files {
         let meta_path = std::path::Path::new(path)
@@ -1711,9 +1711,7 @@ fn main() -> Result<()> {
         }
         match parse_file(path, cli.by_startpos) {
             Ok(result) => {
-                if result.extra.single_game {
-                    has_single_game_files = true;
-                }
+                single_game_kind = single_game_kind.or(result.extra.single_game_kind);
                 if result.extra.incomplete_pairs > 0 {
                     extra
                         .input_issues
@@ -1767,20 +1765,24 @@ fn main() -> Result<()> {
                     );
                 }
                 valid_files += 1;
-                if !result.extra.single_game {
+                if result.extra.single_game_kind.is_none() {
                     accepted_files.push(*path);
                 }
             }
             Err(e) => {
-                has_single_game_files |= e.is::<InvalidSingleGameLog>();
+                if let Some(error) = e.downcast_ref::<InvalidSingleGameLog>() {
+                    single_game_kind = single_game_kind.or(Some(error.0));
+                }
                 eprintln!("警告: {path}: {e:#}");
                 extra.input_issues.push(format!("{path}: {e:#}"));
             }
         }
     }
 
-    if cli.sprt && has_single_game_files {
-        bail!("単局ログは独立した対局ペアではないためSPRTに使用できません");
+    if cli.sprt
+        && let Some(kind) = single_game_kind
+    {
+        bail!("{kind}は独立した対局ペアではないためSPRTに使用できません");
     }
     if matchups.is_empty() {
         bail!("有効な対局データがありません");

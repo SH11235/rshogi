@@ -552,7 +552,7 @@ fn malformed_csa_mixed_with_tournament_always_rejects_sprt() {
                 assert!(!output.status.success());
                 assert!(
                     String::from_utf8_lossy(&output.stderr)
-                        .contains("単局ログは独立した対局ペアではない")
+                        .contains("CSA単局ログは独立した対局ペアではない")
                 );
             }
             let (success, parsed) = {
