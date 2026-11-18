@@ -215,12 +215,15 @@ python -m rshogi_dl.trainer \
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
+| `--prefetch-batches` | CPUで次の学習バッチを1つ先読み。既定は無効 |
 | `--validation-batches` | held-out先頭batchの上限、既定32。0は全件評価 |
 | `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |
 | `--log-every` | `metrics.jsonl`への記録間隔。既定100 |
 | `--deterministic` | 決定的アルゴリズムを要求。CUDAでは起動前に`CUBLAS_WORKSPACE_CONFIG=:4096:8`等を設定 |
 
 順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、一定 learning rate の AdamW で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
+
+先読みは学習データに適用されます。checkpoint に記録するバッチ順と cursor は学習ループが消費した分で決まり、再開時にも `--prefetch-batches` を切り替えられます。
 
 `reduce-overhead`と`max-autotune`はCUDA graphを要求するmodeで、CPUでは拒否します。この2つをCUDAで使うときは更新試行の境界をcompilerへ通知します。`default`と`max-autotune-no-cudagraphs`はCPU compileでも使えます。reportの`cudagraphs_requested`は要求した設定を示すだけで、実際にgraphが使用されたことの保証ではありません。modelだけをcompileし、lossやoptimizer更新は通常の実行経路です。
 

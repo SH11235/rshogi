@@ -15,7 +15,7 @@ from rshogi_dl.checkpoint import load_checkpoint
 from rshogi_dl.model import TEST_CONFIG, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
 from rshogi_dl.sharded import DatasetError, convert_jsonl, dataset_info, iter_batches
-from rshogi_dl.trainer import TrainerConfig, TrainingError, evaluate, run_training
+from rshogi_dl.trainer import TrainerConfig, TrainingError, _training_batches, evaluate, run_training
 from rshogi_dl.trainer_checkpoint import (
     ResumeError, capture_rng, load_resume, restore_rng, validate_scaler_state,
 )
@@ -102,6 +102,39 @@ class TrainerTest(unittest.TestCase):
         for cursor in (-1, 6, True):
             with self.assertRaises(DatasetError):
                 next(iter_batches(self.train, 1, start_record=cursor))
+
+    def test_prefetch_matches_sequential_training_and_resume(self) -> None:
+        self.run_training("plain")
+        self.run_training("ahead", prefetch_batches=True)
+        first = self.run_training("prefix", replace(self.config, max_steps=3))
+        self.assertEqual(first["progress"]["sample_cursor"], 3)
+        report = self.run_training("resumed-ahead", resume=self.root / "prefix" / "resume-final.pt",
+                                   prefetch_batches=True)
+        self.assertTrue(report["prefetch_batches"])
+        expected = load_resume(self.root / "plain" / "resume-final.pt")
+        for name in ("ahead", "resumed-ahead"):
+            self.assert_nested_equal(expected, load_resume(self.root / name / "resume-final.pt"))
+
+    def test_prefetch_stops_at_step_limit_and_propagates_next_read_error(self) -> None:
+        visited = []
+
+        def source(*args, **kwargs):
+            for step in range(3):
+                visited.append(step)
+                if step == 2:
+                    raise DatasetError("shard read failed")
+                yield step
+
+        with mock.patch("rshogi_dl.trainer.iter_batches", side_effect=source):
+            with _training_batches(self.train, 3, 0, 2, True) as batches:
+                self.assertEqual(list(batches), [0, 1])
+            self.assertEqual(visited, [0, 1])
+            visited.clear()
+            with _training_batches(self.train, 3, 0, 3, True) as batches:
+                self.assertEqual((next(batches), next(batches)), (0, 1))
+                with self.assertRaisesRegex(DatasetError, "shard read failed"):
+                    next(batches)
+            self.assertEqual(visited, [0, 1, 2])
 
     def test_manifest_fingerprint_is_constant_work(self) -> None:
         info = dataset_info(self.train)

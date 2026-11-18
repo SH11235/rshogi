@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from collections.abc import Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, fields
 from itertools import islice
 import json
@@ -113,6 +114,33 @@ def _transfer(batch: Batch, device: torch.device) -> Batch:
         field.name: value.to(device) if isinstance(value := getattr(batch, field.name), torch.Tensor) else value
         for field in fields(Batch)
     })
+
+
+def _repeat_shards(path: str | Path, batch_size: int, cursor: int) -> Generator[Batch, None, None]:
+    yield from iter_batches(path, batch_size, start_record=cursor)
+    while True:
+        yield from iter_batches(path, batch_size)
+
+
+@contextmanager
+def _training_batches(
+    path: str | Path, batch_size: int, cursor: int, steps: int, prefetch: bool,
+) -> Iterator[Iterator[Batch]]:
+    with closing(_repeat_shards(path, batch_size, cursor)) as source:
+        if not prefetch or steps < 2:
+            yield source
+            return
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="shard-prefetch") as worker:
+            def ahead() -> Generator[Batch, None, None]:
+                pending = worker.submit(next, source)
+                for remaining in range(steps, 0, -1):
+                    batch = pending.result()
+                    if remaining > 1:
+                        pending = worker.submit(next, source)
+                    yield batch
+
+            with closing(ahead()) as batches:
+                yield batches
 
 
 def _autocast(config: TrainerConfig):
@@ -353,8 +381,11 @@ def run_training(
     config: TrainerConfig,
     *,
     resume: str | Path | None = None,
+    prefetch_batches: bool = False,
 ) -> dict:
     """有限回だけ更新し、再開状態・v1 export checkpoint・held-out report を新規 run に保存する。"""
+    if type(prefetch_batches) is not bool:
+        raise ValueError("prefetch_batches must be boolean")
     output = resolve_new_artifact(run_dir)
     if not output.is_relative_to(shogi_data_root() / "runs" / "rshogi-dl"):
         raise ArtifactPathError("training runs must be below $SHOGI_DATA/runs/rshogi-dl")
@@ -417,23 +448,22 @@ def run_training(
             "model_config": model_config.to_dict(), "trainer_config": asdict(config),
             "datasets": datasets, "resume": str(Path(resume).resolve()) if resume else None,
             "training_status": TRAINING_STATUS,
+            **({"prefetch_batches": True} if prefetch_batches else {}),
         })
         setup_seconds = time.perf_counter() - setup_started
         model.train()
         count = datasets["train"]["manifest"]["source_records"]
-        source = None
         rolling = torch.zeros(3, device=device)
         rolling_steps = 0
         finite = torch.ones((), dtype=torch.bool, device=device)
         _sync(device)
         started = time.perf_counter()
-        with (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics:
+        with (
+            (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics,
+            _training_batches(datasets["train"]["path"], config.batch_size, progress["sample_cursor"],
+                              config.max_steps - progress["step"], prefetch_batches) as source,
+        ):
             while progress["step"] < config.max_steps:
-                if source is None:
-                    source = iter_batches(
-                        datasets["train"]["path"], config.batch_size,
-                        start_record=progress["sample_cursor"],
-                    )
                 batch = next(source)
                 samples = batch.tokens.shape[0]
                 has_policy = has_policy_targets(batch)
@@ -460,7 +490,6 @@ def run_training(
                 if progress["sample_cursor"] == count:
                     progress["epoch"] += 1
                     progress["sample_cursor"] = 0
-                    source = None
                 log = progress["step"] % config.log_every == 0 or progress["step"] == config.max_steps
                 checkpoint = (
                     config.checkpoint_every
@@ -517,6 +546,7 @@ def run_training(
             "samples_per_second": segment_samples / training_seconds,
             "validation": validation, "resume_checkpoint": "resume-final.pt",
             "export_checkpoint": "checkpoint.pt",
+            **({"prefetch_batches": True} if prefetch_batches else {}),
         }
         _write_json(output / "report.json", report)
         return report
@@ -548,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validation-batches", type=int, default=32, help="0 で全 held-out dataset")
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--prefetch-batches", action="store_true", help="CPU で学習バッチを1つ先読みする")
     args = parser.parse_args(argv)
     try:
         options = {field.name: getattr(args, field.name) for field in fields(TrainerConfig)}
@@ -556,7 +587,10 @@ def main(argv: list[str] | None = None) -> int:
             ModelConfig.from_dict(json.loads(args.model_config))
             if args.model_config else NAMED_CONFIGS[args.config]
         )
-        report = run_training(args.train, args.validation, args.run_dir, model_config, config, resume=args.resume)
+        report = run_training(
+            args.train, args.validation, args.run_dir, model_config, config,
+            resume=args.resume, prefetch_batches=args.prefetch_batches,
+        )
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     except (ArtifactPathError, DatasetError, ResumeError, TrainingError, ValueError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
