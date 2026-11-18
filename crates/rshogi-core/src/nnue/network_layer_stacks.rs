@@ -3069,7 +3069,7 @@ mod tests {
         assert!(validate("Factorizer").is_err());
     }
 
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(all(feature = "nnue-threat", feature = "layerstack-arch"))]
     #[test]
     fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
         const N: usize = 1536;
@@ -3118,7 +3118,11 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(all(
+        feature = "nnue-threat",
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged"
+    ))]
     #[test]
     fn loader_rejects_wrong_threat_width_before_reading_ft() {
         let wrong = if cfg!(feature = "threat-width-512") {
