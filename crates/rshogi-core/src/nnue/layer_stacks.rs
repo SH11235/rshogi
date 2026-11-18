@@ -193,8 +193,8 @@ impl<
         &self,
         us: &[i16; L1],
         them: &[i16; L1],
-        us_threat: &[i16; L1],
-        them_threat: &[i16; L1],
+        us_threat: &super::threat_width::ThreatAccumulation<L1>,
+        them_threat: &super::threat_width::ThreatAccumulation<L1>,
     ) -> Option<i32> {
         let weights = self.fused_weights.as_ref()?;
         let l1_out = super::ls_l1_kernel::avx512::fused_with_threat(
@@ -1900,22 +1900,28 @@ mod kernel_tests {
                         rng.random()
                     }
                 });
-                let ut = std::array::from_fn::<_, N, _>(|i| {
-                    if case < 8 {
+                let mut ut = super::super::threat_width::zero::<N>();
+                for (i, v) in ut.iter_mut().enumerate() {
+                    *v = if case < 8 {
                         values[(i * 5 + case) % 8]
                     } else {
                         rng.random()
-                    }
-                });
-                let tt = std::array::from_fn::<_, N, _>(|i| {
-                    if case < 8 {
+                    };
+                }
+                let mut tt = super::super::threat_width::zero::<N>();
+                for (i, v) in tt.iter_mut().enumerate() {
+                    *v = if case < 8 {
                         values[(i * 7 + case) % 8]
                     } else {
                         rng.random()
-                    }
+                    };
+                }
+                let uc = std::array::from_fn(|i| {
+                    us[i].wrapping_add(super::super::threat_width::value::<N>(&ut, i))
                 });
-                let uc = std::array::from_fn(|i| us[i].wrapping_add(ut[i]));
-                let tc = std::array::from_fn(|i| them[i].wrapping_add(tt[i]));
+                let tc = std::array::from_fn(|i| {
+                    them[i].wrapping_add(super::super::threat_width::value::<N>(&tt, i))
+                });
                 let weights = bucket.fused_weights.as_ref().unwrap();
                 assert_eq!(
                     avx512::fused(&uc, &tc, weights, &bucket.l1.biases),

@@ -405,10 +405,7 @@ fn check_models() {
     check_loader_matrix();
     search_models::for_each_model(true, |name, mut bytes| {
         if name == "LayerStacks" {
-            let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-            let arch = std::str::from_utf8(&bytes[12..12 + arch_len]).unwrap();
-            let (l1, _, _) = nnue::spec::parse_arch_dimensions(arch);
-            bytes = with_auxiliary_weights(bytes, l1, nnue::HALFKA_HM_DIMENSIONS);
+            bytes = with_auxiliary_weights(bytes, nnue::HALFKA_HM_DIMENSIONS);
         }
         nnue::init_nnue_from_bytes(&bytes).unwrap();
         let network = get_network().unwrap();
@@ -783,7 +780,7 @@ fn check_loader_matrix() {
     }
 }
 
-fn with_auxiliary_weights(bytes: Vec<u8>, l1: usize, dimensions: usize) -> Vec<u8> {
+fn with_auxiliary_weights(bytes: Vec<u8>, dimensions: usize) -> Vec<u8> {
     let has_psqt = cfg!(feature = "nnue-psqt");
     let has_threat = cfg!(feature = "nnue-threat");
     if !has_psqt && !has_threat {
@@ -795,11 +792,19 @@ fn with_auxiliary_weights(bytes: Vec<u8>, l1: usize, dimensions: usize) -> Vec<u
         arch.push_str(",PSQT=4");
     }
     #[cfg(feature = "nnue-threat")]
-    arch.push_str(&format!(
-        ",Threat={},ThreatProfile={}",
-        nnue::threat_features::THREAT_DIMENSIONS,
-        nnue::threat_exclusion::THREAT_PROFILE_ID
-    ));
+    let threat_width = {
+        let (l1, _, _) = nnue::spec::parse_arch_dimensions(&arch);
+        let width = nnue::threat_width::width(l1);
+        arch.push_str(&format!(
+            ",Threat={},ThreatProfile={}",
+            nnue::threat_features::THREAT_DIMENSIONS,
+            nnue::threat_exclusion::THREAT_PROFILE_ID
+        ));
+        if width != l1 {
+            arch.push_str(&format!(",ThreatWidth={width}"));
+        }
+        width
+    };
     let block_size_offset = 12 + arch_len + 8 + nnue::leb128::LEB128_MAGIC.len();
     let block_size =
         u32::from_le_bytes(bytes[block_size_offset..block_size_offset + 4].try_into().unwrap())
@@ -815,13 +820,13 @@ fn with_auxiliary_weights(bytes: Vec<u8>, l1: usize, dimensions: usize) -> Vec<u
         }
     }
     #[cfg(feature = "nnue-threat")]
-    let threat_dimensions = nnue::threat_features::THREAT_DIMENSIONS;
-    #[cfg(not(feature = "nnue-threat"))]
-    let threat_dimensions = 0;
-    #[cfg(feature = "nnue-threat")]
-    result.extend_from_slice(&nnue::threat_exclusion::THREAT_PROFILE_ID.to_le_bytes());
-    for i in 0..threat_dimensions * l1 {
-        result.push(((i / l1 * 7 + i % l1) % 5) as u8);
+    {
+        result.extend_from_slice(&nnue::threat_exclusion::THREAT_PROFILE_ID.to_le_bytes());
+        for row in 0..nnue::threat_features::THREAT_DIMENSIONS {
+            for col in 0..threat_width {
+                result.push(((row * 7 + col) % 5) as u8);
+            }
+        }
     }
     result.extend_from_slice(&bytes[ft_end..]);
     result

@@ -168,12 +168,14 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
 | size (LS) | [対応する10構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
-| ext (LS) | `psqt` / `threat` / `psqt_threat` | ✓ | ✓ |
+| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
+- `threat512` は 1536x16x32 / 1536x16x64 の駒 FT に512列の Threat を加える静的 edition。形式と変換は
+  [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
   `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
 - slot 区切りは `-`、slot 内の複合語は `_` (tatara の `halfka-hm-merged` と同じ architecture を
@@ -220,7 +222,7 @@ Edition 軸と直交する opt-in feature (`mimalloc` / `prepacked-nnue` / `sear
   (`mode-*` / `layerstack-arch` / `ft-*` / `layerstacks-<dims>` / `nnue-psqt` /
   `nnue-threat` / `nnue-effect-bucket` / `nnue-progress-diff` 等)。
   edition 名と実際の構成が食い違う binary を作らないため、該当 preset を `--edition` で選ぶ
-- NNUE 構造の family: `threat-profile-*` / `effect-bucket-*` で始まる名前は、preset に
+- NNUE 構造の family: `threat-profile-*` / `threat-width-*` / `effect-bucket-*` で始まる名前は、preset に
   束ねられているかによらず family ごと拒否する (Threat 次元や EffectBucket の形を変える
   ため edition 経由でだけ選ぶ。preset の追加で受理される名前が変わることも防ぐ)
 
@@ -418,6 +420,17 @@ tools (`rescore_psv` 等) も `--no-default-features` と atomic feature で
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x16x64-none --profile production
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
+```
+
+1536x16x64 では、全幅 (1536列) の Threat を使う
+`layerstacks-halfka_hm_merged-1536x16x64-threat` と、512列の Threat を使う
+`layerstacks-halfka_hm_merged-1536x16x64-threat512` も利用できる。
+両方とも `nnue-progress-diff` を含む。`LayerStack-1536-16-64-8bucket` + Threat の net は、
+`ThreatWidth=512` なら後者、省略時または `ThreatWidth=1536` なら前者を選ぶ。
+
+```sh
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat512 --profile production
 ```
 
 AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は

@@ -71,16 +71,17 @@ pub(super) mod avx512 {
     }
 
     /// # Safety
-    /// acc は N 個の i16 を指し、THREAT のとき threat も N 個を指す。
-    /// offset は64の倍数で offset+64 <= N/2。
+    /// acc は N 個の i16 を指し、THREAT のとき threat は 2*threat_half 個を指す。
+    /// offset は64の倍数で offset+64 <= N/2、THREAT 時は offset+64 <= threat_half。
     #[inline]
     #[target_feature(enable = "avx512f,avx512bw")]
-    unsafe fn pack64<const N: usize, const THREAT: bool>(
+    unsafe fn pack64_impl<const N: usize, const THREAT: bool>(
         acc: *const i16,
         threat: *const i16,
         offset: usize,
+        threat_half: usize,
     ) -> __m512i {
-        // SAFETY: 呼び出し側が両入力の offset..offset+64 とその N/2 先を保証する。
+        // SAFETY: 駒 FT は offset..offset+64 と N/2 先、Threat は同範囲と threat_half 先が有効。
         // THREAT=false では threat を読まない。unaligned load を使う。
         // clamp 後の積は最大16129で i16 に収まり、右シフト後は0..=126。
         unsafe {
@@ -89,7 +90,14 @@ pub(super) mod avx512 {
             let load = |index: usize| {
                 let x = _mm512_loadu_si512(acc.add(index).cast());
                 if THREAT {
-                    _mm512_add_epi16(x, _mm512_loadu_si512(threat.add(index).cast()))
+                    _mm512_add_epi16(
+                        x,
+                        _mm512_loadu_si512(
+                            threat
+                                .add(index % (N / 2) + usize::from(index >= N / 2) * threat_half)
+                                .cast(),
+                        ),
+                    )
                 } else {
                     x
                 }
@@ -102,6 +110,27 @@ pub(super) mod avx512 {
             let p1 = _mm512_srli_epi16::<7>(_mm512_mullo_epi16(a1, b1));
             _mm512_packus_epi16(p0, p1)
         }
+    }
+
+    #[inline]
+    unsafe fn pack64<const N: usize, const THREAT: bool>(
+        acc: *const i16,
+        threat: *const i16,
+        offset: usize,
+    ) -> __m512i {
+        // SAFETY: 呼び出し側が N 要素と64要素ブロックの範囲を保証する。
+        unsafe { pack64_impl::<N, THREAT>(acc, threat, offset, N / 2) }
+    }
+
+    #[inline]
+    unsafe fn pack64_partial<const N: usize>(
+        acc: *const i16,
+        threat: *const i16,
+        offset: usize,
+        threat_half: usize,
+    ) -> __m512i {
+        // SAFETY: 呼び出し側が両半分に64要素の読み取り範囲を保証する。
+        unsafe { pack64_impl::<N, true>(acc, threat, offset, threat_half) }
     }
 
     // register を固定し、重みロードの load-op 化と spill を避ける。
@@ -224,11 +253,13 @@ pub(super) mod avx512 {
     pub(crate) fn fused_with_threat<const N: usize, const OUT: usize>(
         us: &[i16; N],
         them: &[i16; N],
-        us_threat: &[i16; N],
-        them_threat: &[i16; N],
+        us_threat: &[i16],
+        them_threat: &[i16],
         weights: &FusedWeights<N>,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
+        assert_eq!(us_threat.len(), them_threat.len());
+        assert!(us_threat.len() <= N && us_threat.len().is_multiple_of(128));
         fused_impl::<N, OUT, true>(us, them, us_threat, them_threat, weights, biases)
     }
 
@@ -236,8 +267,8 @@ pub(super) mod avx512 {
     fn fused_impl<const N: usize, const OUT: usize, const THREAT: bool>(
         us: &[i16; N],
         them: &[i16; N],
-        us_threat: &[i16; N],
-        them_threat: &[i16; N],
+        us_threat: &[i16],
+        them_threat: &[i16],
         weights: &FusedWeights<N>,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
@@ -256,7 +287,16 @@ pub(super) mod avx512 {
             let mut sums = [[_mm512_setzero_si512(); CHAINS]; 4];
             for (acc, threat, base) in [(us, us_threat, 0), (them, them_threat, N / 128)] {
                 for block in 0..N / 128 {
-                    let x = pack64::<N, THREAT>(acc.as_ptr(), threat.as_ptr(), block * 64);
+                    let x = if THREAT && block * 64 < threat.len() / 2 {
+                        pack64_partial::<N>(
+                            acc.as_ptr(),
+                            threat.as_ptr(),
+                            block * 64,
+                            threat.len() / 2,
+                        )
+                    } else {
+                        pack64::<N, false>(acc.as_ptr(), acc.as_ptr(), block * 64)
+                    };
                     let broadcasts = [
                         _mm512_shuffle_epi32::<0x00>(x),
                         _mm512_shuffle_epi32::<0x55>(x),

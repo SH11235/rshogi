@@ -240,3 +240,6 @@ mod registry_tests {
 }
 
 pub(crate) mod search_evaluator;
+
+#[cfg(feature = "nnue-threat")]
+mod threat_width;

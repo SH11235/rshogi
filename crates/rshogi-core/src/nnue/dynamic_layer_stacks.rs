@@ -242,6 +242,9 @@ impl DynamicLayerStacksNetwork {
         validate_layer_stacks_dimensions(l1, l2, l3).map_err(invalid)?;
         let threat_dimensions =
             validate_layer_stacks_architecture_header(arch).map_err(invalid)?.unwrap_or(0);
+        if super::spec::parse_threat_width(arch, l1).map_err(invalid)? != l1 {
+            return Err(invalid("partial Threat width requires a static threat512 edition"));
+        }
         #[cfg(feature = "nnue-threat")]
         if threat_dimensions != 0 && threat_dimensions != super::threat_features::THREAT_DIMENSIONS
         {

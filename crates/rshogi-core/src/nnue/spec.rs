@@ -306,6 +306,26 @@ pub(crate) fn validate_layer_stacks_architecture_header(
     Ok(Some(dimensions))
 }
 
+/// ThreatWidth token を検証し、省略時は FT 全幅を返す。
+pub(crate) fn parse_threat_width(arch: &str, l1: usize) -> Result<usize, String> {
+    let mut tokens = arch.split(',').filter_map(|p| p.strip_prefix("ThreatWidth="));
+    let Some(token) = tokens.next() else {
+        return Ok(l1);
+    };
+    let width = token.parse::<usize>().map_err(|_| "malformed ThreatWidth token".to_owned())?;
+    if tokens.next().is_some()
+        || !arch.split(',').any(|p| p.starts_with("Threat="))
+        || width == 0
+        || width > l1
+        || !width.is_multiple_of(128)
+    {
+        return Err(
+            "ThreatWidth requires Threat and a width <= FT width divisible by 128".to_owned()
+        );
+    }
+    Ok(width)
+}
+
 pub(crate) fn validate_layer_stacks_dimensions(
     l1: usize,
     l2: usize,
