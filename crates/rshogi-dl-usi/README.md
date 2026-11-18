@@ -11,6 +11,8 @@ target/release/rshogi-dl-usi
 policy 出力の有限性検査を短絡しない走査へ切り替える比較用 feature は
 `--features onnx,policy-validation-reduction` です。既定は無効で、NaN・無限大の拒否条件は変わりません。
 
+CUDA 推論結果を pinned host memory で受け取るには `--features onnx,cuda-pinned-output` を指定します。既定は無効です。
+
 batch 探索の予約 metadata を使用量に応じて段階的に確保する、既定無効の feature は
 `--features onnx,lazy-batch-metadata` です。`mcts_batch_workspace_bytes` は確保済みの実容量を示し、
 探索が深まると増えることがあります。エラー後はこの workspace を破棄し、次の batch 探索で

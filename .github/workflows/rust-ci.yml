@@ -564,3 +564,7 @@ jobs:
           cargo clippy -p rshogi-dl --features onnx,policy-validation-reduction --all-targets -- -D warnings
           cargo clippy -p rshogi-dl-usi --features onnx,policy-validation-reduction --all-targets -- -D warnings
           cargo test -p rshogi-dl --features onnx,policy-validation-reduction
+      - name: Check CUDA pinned-output feature on CPU
+        run: |
+          cargo clippy -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-pinned-output --all-targets -- -D warnings
+          cargo test -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-pinned-output
