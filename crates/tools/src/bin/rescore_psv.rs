@@ -3241,6 +3241,12 @@ fn prepare_onnx_psv_resume(
         let mut output_bytes = [0; PackedSfenValue::SIZE];
         for output_index in 1..=output_count {
             let expected = loop {
+                // 除外が続く巨大な shard でも Ctrl-C で切り詰めや .done に進まず止める。
+                anyhow::ensure!(
+                    !INTERRUPTED.load(Ordering::SeqCst),
+                    "Interrupted while aligning {} with its input",
+                    output_path.display()
+                );
                 anyhow::ensure!(
                     consumed < process_count,
                     "Cannot align {} at output record {output_index}: no more kept input records. {NEW_OUTPUT}",
