@@ -11,6 +11,8 @@
 
 定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳の読み込み・検証と応手グラフ構築を並列化できます (台帳の採用順とバッファ上限を維持)。
 
+台帳から片側の一本道の区間や指定手順の上位二手を一覧にするには [`book_mine master one-way`](book_mine.md#master-one-way-台帳から一本道の区間を探す) を使います。追加のエンジン探索は行わず、区間の走査量は `--max-visits` で制限できます。
+
 ## 教師データの生成・変換・加工
 
 | ツール | 用途 |

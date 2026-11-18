@@ -1326,8 +1326,9 @@ pub(super) fn stage_live_source(path: &Path) -> Result<StagedSource> {
     })
 }
 
+/// 正規化した読み条件ごとに指紋の計算結果を共有する。
 #[derive(Default)]
-struct Validity {
+pub(super) struct Validity {
     fingerprints: BTreeMap<Vec<u8>, String>,
 }
 
@@ -1341,7 +1342,8 @@ impl Validity {
         Ok(*computed == settings.fingerprint)
     }
 
-    fn valid(&mut self, rec: &Record) -> Result<bool> {
+    /// 読みの内容と条件の指紋が有効かを検査する。
+    pub(super) fn valid(&mut self, rec: &Record) -> Result<bool> {
         Ok(rec.reading.validate(&rec.settings).is_ok() && self.settings_valid(&rec.settings)?)
     }
 
