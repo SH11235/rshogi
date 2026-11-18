@@ -13,6 +13,8 @@ policy 出力の有限性検査を短絡しない走査へ切り替える比較�
 
 CUDA 推論結果を pinned host memory で受け取るには `--features onnx,cuda-pinned-output` を指定します。既定は無効です。
 
+基本 plane 入力の CUDA 推論で1局面専用セッションを使うには `--features onnx,cuda-basic-single-row-session` を指定します。`NNBatchSize` を2以上に設定すると、初期化時にモデルをもう一度読み込みます。起動時間とメモリ使用量に影響します。
+
 batch 探索の予約 metadata を使用量に応じて段階的に確保する、既定無効の feature は
 `--features onnx,lazy-batch-metadata` です。`mcts_batch_workspace_bytes` は確保済みの実容量を示し、
 探索が深まると増えることがあります。エラー後はこの workspace を破棄し、次の batch 探索で

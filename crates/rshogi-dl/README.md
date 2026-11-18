@@ -29,6 +29,8 @@ cache を使う batch 呼出しは `CachedEvaluator::with_batch_capacity(inner, 
 
 `--features onnx,cuda-pinned-output` を指定すると、CUDA EP の policy と value の出力に pinned host memory を使います。既定は無効です。CPU と TensorRT は通常のホストメモリを使います。
 
+`--features onnx,cuda-basic-single-row-session` を指定すると、基本 plane 入力の CUDA 推論で、1局面の呼び出しを専用セッションに分けます。最大バッチサイズが2以上の構成が対象です。初期化時にモデルをもう一度読み込むため、起動時間とメモリ使用量に影響します。ORT プロファイリングを有効にした構成では単一セッションを使います。
+
 入力名・shape・dtype と出力の shape を検証し、value は有限な `[0,1]`、policy は有限な logits を要求します。value に sigmoid が既に適用されたモデルを使用してください。モデルの意味は shape だけでは判別できないため、取得元の仕様も確認してください。
 
 SFEN ごとの特徴量、全合法手ラベル、推論出力を JSONL で取り出せます。
