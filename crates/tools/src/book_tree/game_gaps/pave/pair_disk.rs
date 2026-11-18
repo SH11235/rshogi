@@ -16,6 +16,15 @@ pub(super) fn visit(
     name: &str,
     mut visit: impl FnMut(Game, &str) -> Result<()>,
 ) -> Result<()> {
+    visit_with_player(path, name, None, &mut visit)
+}
+
+pub(in crate::book_tree::game_gaps) fn visit_with_player(
+    path: &Path,
+    name: &str,
+    player: Option<&str>,
+    mut visit: impl FnMut(Game, &str) -> Result<()>,
+) -> Result<()> {
     let mut pairs = Sorter::new();
     let mut events = Sorter::new();
     let mut seq = 0u32;
@@ -116,7 +125,7 @@ pub(super) fn visit(
             }
             event = read_record(&mut events)?;
         }
-        visit(pair_game(name, None, &result, &moves)?, &result.outcome)?;
+        visit(pair_game(name, player, &result, &moves)?, &result.outcome)?;
     }
     Ok(())
 }

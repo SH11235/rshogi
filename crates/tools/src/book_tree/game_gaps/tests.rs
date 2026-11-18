@@ -12,8 +12,12 @@ fn args(dir: &Path) -> GameGapsArgs {
     GameGapsArgs {
         master: dir.join("moves.tsv"),
         schema: None,
+        line: false,
+        line_sides: LineSides::Both,
+        collapse_cp: 150,
+        after_collapse: 3,
         games: vec![dir.join("games.jsonl")],
-        player: "mine".into(),
+        player: Some("mine".into()),
         until: Until::All,
         max_ply: None,
         skip_plies: 0,
@@ -486,7 +490,10 @@ fn csa_rejects_unreadable_illegal_and_post_terminal_moves() {
         "%JISHOGI",
         "%MAX_MOVES",
     ] {
-        assert_eq!(csa_pvs(&format!("+7776FU\n{terminal}\n'** 10 +7776FU\n")).unwrap(), [None]);
+        assert_eq!(
+            csa_comments(&format!("+7776FU\n{terminal}\n'** 10 +7776FU\n")).unwrap(),
+            [CsaComment::default()]
+        );
     }
 }
 
@@ -1047,6 +1054,484 @@ fn merged_queue_takes_maximum_extend_and_rejects_other_option_differences() {
             let line: Line = serde_json::from_str(text.trim()).unwrap();
             assert_eq!(line.opts.extend, Some(15));
             assert_eq!(line.game.len(), 1);
+        }
+    }
+}
+
+fn line_args(dir: &Path) -> GameGapsArgs {
+    let mut a = args(dir);
+    a.line = true;
+    a.until = Until::Exit;
+    a.depth = 2;
+    a.games = vec![dir.join("line.csa")];
+    a
+}
+
+fn line_csa(path: &Path, scores: &[Option<i32>], ending: &str) {
+    let (mut pos, _, _) = rshogi_csa::parse_csa_full(
+        "PI
++
+",
+    )
+    .unwrap();
+    let mut text = String::from("N+mine\nN-other\nPI\n+\n");
+    for (mv, score) in MOVES.iter().zip(scores) {
+        let csa = rshogi_csa::usi_move_to_csa(mv, &pos).unwrap();
+        text.push_str(&format!("{csa}\n"));
+        if let Some(score) = score {
+            text.push_str(&format!("'** {score}\n"));
+        }
+        pos.apply_csa_move(&csa).unwrap();
+    }
+    text.push_str(ending);
+    std::fs::write(path, text).unwrap();
+}
+
+fn line_fixture(dir: &Path) {
+    line_csa(
+        &dir.join("line.csa"),
+        &[
+            Some(400),
+            Some(0),
+            Some(200),
+            None,
+            Some(300),
+            Some(300),
+            Some(300),
+            Some(300),
+            Some(300),
+            Some(300),
+        ],
+        "%TORYO\n'summary:toryo:mine win:other lose\n",
+    );
+    master(&dir.join("moves.tsv"), &moves(), &[], &[]);
+}
+
+#[test]
+fn line_both_sides_sustained_endpoints_and_actual_game_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    run(line_args(dir.path())).unwrap();
+    let q = queue(&dir.path().join("queue.jsonl"));
+    let table = pave_table(dir.path());
+    assert_eq!(
+        q.iter().map(|q| parse_root(&q.root).unwrap().ply).collect::<Vec<_>>(),
+        [1, 1, 3, 3, 5, 5]
+    );
+    assert_eq!(
+        table.iter().map(|r| r["end_reason"].as_str()).collect::<Vec<_>>(),
+        ["stop", "collapse", "stop", "collapse", "stop", "collapse"]
+    );
+    for row in &q {
+        let ply = parse_root(&row.root).unwrap().ply as usize;
+        assert_eq!(row.game, vec![MOVES[ply - 1..ply + 1].to_vec()]);
+        assert_eq!(
+            table
+                .iter()
+                .find(|r| r["ply"] == ply.to_string() && r["own"] == row.own)
+                .unwrap()["own"],
+            row.own
+        );
+    }
+}
+
+#[test]
+fn line_side_selection_unknown_and_draw_use_loser_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    for (sides, expected) in [
+        (LineSides::Both, vec![1, 1, 3, 3, 5, 5]),
+        (LineSides::Loser, vec![1, 3, 5]),
+        (LineSides::Winner, vec![1, 3, 5]),
+    ] {
+        let mut a = line_args(dir.path());
+        a.line_sides = sides;
+        run(a).unwrap();
+        assert_eq!(
+            queue(&dir.path().join("queue.jsonl"))
+                .iter()
+                .map(|q| parse_root(&q.root).unwrap().ply)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    for ending in [
+        "%SENNICHITE\n",
+        "%CHUDAN\n",
+        "",
+        "%TORYO\n'summary:sennichite:mine draw:other draw\n",
+    ] {
+        line_csa(&dir.path().join("line.csa"), &[Some(200); 10], ending);
+        let mut a = line_args(dir.path());
+        a.line_sides = LineSides::Loser;
+        run(a).unwrap();
+        let table = pave_table(dir.path());
+        assert_eq!(
+            table.iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+            ["1", "1", "3", "3", "5", "7", "9"]
+        );
+        assert!(table.iter().filter(|r| r["own"] == "b").all(|r| r["end_reason"] == "game-end"));
+        assert!(table.iter().filter(|r| r["own"] == "w").all(|r| r["end_reason"] == "collapse"));
+        let mut a = line_args(dir.path());
+        a.line_sides = LineSides::Winner;
+        run(a).unwrap();
+        assert!(queue(&dir.path().join("queue.jsonl")).is_empty());
+    }
+}
+
+#[test]
+fn line_exclusion_requires_every_move_and_matching_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    let excluded = dir.path().join("excluded.jsonl");
+    for (game, depth, expected) in [
+        (vec!["7g7f"], 4, vec![1, 1, 3, 3, 5, 5]),
+        (MOVES[..4].to_vec(), 1, vec![1, 1, 3, 3, 5, 5]),
+        (vec!["2g2f", "3c3d", "7g7f", "8c8d"], 4, vec![1, 1, 3, 3, 5, 5]),
+        (MOVES[..4].to_vec(), 4, vec![1, 3, 5, 5]),
+    ] {
+        write_json(
+            &excluded,
+            &[json!({"id":"accepted","root":"startpos","own":"w","depth":depth,"game":[game]})],
+        );
+        let mut a = line_args(dir.path());
+        a.exclude_queue.push(excluded.clone());
+        run(a).unwrap();
+        assert_eq!(
+            queue(&dir.path().join("queue.jsonl"))
+                .iter()
+                .map(|q| parse_root(&q.root).unwrap().ply)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(pave_table(dir.path())[0]["covered_by"], "");
+    }
+}
+
+#[test]
+fn line_skip_max_depth_spacing_and_terminal_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    line_csa(&dir.path().join("line.csa"), &[None; 10], "%CHUDAN\n");
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    let mut a = line_args(dir.path());
+    a.skip_plies = 2;
+    a.max_ply = Some(8);
+    run(a).unwrap();
+    assert_eq!(
+        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["3", "3", "5", "5", "7", "7"]
+    );
+    assert!(pave_table(dir.path()).iter().all(|r| r["end_reason"] == "max-ply"));
+    let mut a = line_args(dir.path());
+    a.depth = 20;
+    run(a).unwrap();
+    let q = queue(&dir.path().join("queue.jsonl"));
+    assert_eq!(q.len(), 4);
+    assert_eq!(q[0].game[0], MOVES);
+    assert_eq!(q[1].game[0], MOVES);
+    assert_eq!(q[2].game[0], MOVES[8..]);
+    assert_eq!(q[3].game[0], MOVES[8..]);
+    let mut a = line_args(dir.path());
+    a.depth = 3;
+    run(a).unwrap();
+    assert_eq!(
+        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "1", "4", "4", "7", "7", "10", "10"]
+    );
+}
+
+#[test]
+fn line_ids_include_basename_and_game_sequence_and_outputs_repeat() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    let other = dir.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::copy(dir.path().join("line.csa"), other.join("line.csa")).unwrap();
+    run(line_args(dir.path())).unwrap();
+    let first = queue(&dir.path().join("queue.jsonl"))[0].id.clone();
+    let mut a = line_args(dir.path());
+    a.games = vec![other.join("line.csa")];
+    run(a).unwrap();
+    let second = queue(&dir.path().join("queue.jsonl"))[0].id.clone();
+    assert_eq!(first, second);
+    line_csa(&other.join("line.csa"), &[None; 9], "%TORYO\n");
+    let mut a = line_args(dir.path());
+    a.games = vec![other.join("line.csa")];
+    run(a).unwrap();
+    assert_ne!(second, queue(&dir.path().join("queue.jsonl"))[0].id);
+    let mut a = line_args(dir.path());
+    a.games.push(other.join("line.csa"));
+    run(a).unwrap();
+    let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
+    let output = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    let mut a = line_args(dir.path());
+    a.games.insert(0, other.join("line.csa"));
+    a.games.push(a.games[1].clone());
+    run(a).unwrap();
+    assert_eq!(std::fs::read(dir.path().join("table.tsv")).unwrap(), table);
+    assert_eq!(std::fs::read(dir.path().join("queue.jsonl")).unwrap(), output);
+}
+
+#[test]
+fn line_json_client_and_pair_share_exact_score_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    master(&dir.path().join("moves.tsv"), &moves(), &[], &[]);
+    let mut ms = scored_moves();
+    for (i, m) in ms.iter_mut().enumerate() {
+        m["eval"] = json!({"score_cp": if i < 2 { 0 } else if i % 2 == 0 { 300 } else { -300 }, "pv":[MOVES[i]]});
+    }
+    ms[3]["eval"] = json!({"score_cp":0,"score_bound":"lowerbound","pv":[MOVES[3]]});
+    for pair in [false, true] {
+        if pair {
+            pave_pair(dir.path(), &[(&ms, "black_win"), (&ms, "black_win")]);
+        } else {
+            let mut rows = vec![
+                json!({"type":"meta","engine_cmd":{"label_black":"mine","label_white":"other"}}),
+            ];
+            rows.extend(ms.clone());
+            rows.push(json!({"type":"result","outcome":"black_win"}));
+            write_json(&dir.path().join("games.jsonl"), &rows);
+        }
+        let mut a = line_args(dir.path());
+        a.games = vec![dir.path().join("games.jsonl")];
+        a.player = None;
+        run(a).unwrap();
+        let q = queue(&dir.path().join("queue.jsonl"));
+        assert_eq!(
+            q.iter().map(|q| parse_root(&q.root).unwrap().ply).collect::<Vec<_>>(),
+            [1, 1, 3, 3, 5]
+        );
+        assert!(
+            pave_table(dir.path())
+                .iter()
+                .filter(|r| r["own"] == "b")
+                .all(|r| r["end_reason"] == "stop")
+        );
+    }
+}
+
+#[test]
+fn line_csa_terminal_winner_and_inline_scores() {
+    let dir = tempfile::tempdir().unwrap();
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    for (terminal, own) in [
+        ("%TORYO", "w"),
+        ("%TIME_UP", "w"),
+        ("%ILLEGAL_MOVE", "w"),
+        ("%KACHI", "b"),
+    ] {
+        line_csa(&dir.path().join("line.csa"), &[Some(0); 10], terminal);
+        let mut a = line_args(dir.path());
+        a.line_sides = LineSides::Winner;
+        run(a).unwrap();
+        assert!(queue(&dir.path().join("queue.jsonl")).iter().all(|q| q.own == own));
+    }
+    line_fixture(dir.path());
+    let path = dir.path().join("line.csa");
+    let text = std::fs::read_to_string(&path).unwrap().replace("\n'**", ",'**");
+    std::fs::write(path, text).unwrap();
+    run(line_args(dir.path())).unwrap();
+    assert_eq!(
+        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "1", "3", "3", "5", "5"]
+    );
+}
+
+#[test]
+fn line_spacing_caps_at_eight_plies_and_table_only_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path: Vec<_> = ["5i5h", "5a5b", "5h5i", "5b5a"].into_iter().cycle().take(40).collect();
+    client(&dir.path().join("games.jsonl"), &moves_for(&path));
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    let mut a = line_args(dir.path());
+    a.games = vec![dir.path().join("games.jsonl")];
+    a.depth = 20;
+    run(a).unwrap();
+    let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
+    assert_eq!(
+        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "1", "9", "9", "17", "17", "25", "25", "33", "33"]
+    );
+    let mut a = line_args(dir.path());
+    a.games = vec![dir.path().join("games.jsonl")];
+    a.depth = 20;
+    a.enqueue_out = None;
+    a.tag = None;
+    a.priority = None;
+    run(a).unwrap();
+    assert_eq!(std::fs::read(dir.path().join("table.tsv")).unwrap(), table);
+}
+
+#[test]
+fn line_cli_parses_flags_and_rejects_invalid_side() {
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: GameGapsArgs,
+    }
+    let base = [
+        "test",
+        "--master",
+        "moves.tsv",
+        "--games",
+        "game.csa",
+        "--table",
+        "table.tsv",
+        "--line",
+        "--line-sides",
+    ];
+    for (text, side) in [
+        ("both", LineSides::Both),
+        ("loser", LineSides::Loser),
+        ("winner", LineSides::Winner),
+    ] {
+        let parsed = Cli::try_parse_from(base.into_iter().chain([text])).unwrap().args;
+        assert!(parsed.line);
+        assert!(parsed.player.is_none());
+        assert_eq!(parsed.line_sides, side);
+        assert_eq!(parsed.collapse_cp, 150);
+        assert_eq!(parsed.after_collapse, 3);
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["invalid"])).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "test",
+            "--master",
+            "moves.tsv",
+            "--games",
+            "game.csa",
+            "--table",
+            "table.tsv"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn line_white_winner_and_after_collapse_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    let mut a = line_args(dir.path());
+    a.after_collapse = 0;
+    run(a).unwrap();
+    assert_eq!(
+        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "1", "3", "3", "5"]
+    );
+    line_csa(
+        &dir.path().join("line.csa"),
+        &[
+            Some(-400),
+            Some(0),
+            Some(-200),
+            None,
+            Some(-300),
+            Some(-300),
+            Some(-300),
+            Some(-300),
+            Some(-300),
+            Some(-300),
+        ],
+        "%TORYO\n",
+    );
+    run(line_args(dir.path())).unwrap();
+    let table = pave_table(dir.path());
+    assert_eq!(
+        table.iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "1", "3", "3", "5", "5"]
+    );
+    assert_eq!(
+        table.iter().map(|r| r["end_reason"].as_str()).collect::<Vec<_>>(),
+        ["collapse", "stop", "collapse", "stop", "collapse", "stop"]
+    );
+}
+
+#[test]
+fn line_signed_illegal_action_overrides_turn_but_not_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    for (plies, terminal, winner) in [
+        (9, "%+ILLEGAL_ACTION,T0\n", "w"),
+        (10, "%-ILLEGAL_ACTION,T0\n", "b"),
+        (9, "%+ILLEGAL_ACTION\n'summary:illegal:mine win:other lose\n", "b"),
+        (10, "%-ILLEGAL_ACTION\n'summary:illegal:mine lose:other win\n", "w"),
+    ] {
+        line_csa(&dir.path().join("line.csa"), &vec![None; plies], terminal);
+        let mut a = line_args(dir.path());
+        a.line_sides = LineSides::Winner;
+        run(a).unwrap();
+        let q = queue(&dir.path().join("queue.jsonl"));
+        assert!(!q.is_empty());
+        assert!(q.iter().all(|row| row.own == winner));
+    }
+}
+
+#[test]
+fn line_player_is_optional_and_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    run(line_args(dir.path())).unwrap();
+    let expected = std::fs::read(dir.path().join("queue.jsonl")).unwrap();
+    for player in [None, Some("absent".into()), Some(String::new())] {
+        let mut a = line_args(dir.path());
+        a.player = player;
+        run(a).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("queue.jsonl")).unwrap(), expected);
+    }
+}
+
+#[test]
+fn line_tag_limit_is_checked_before_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = line_args(dir.path());
+    a.tag = Some("x".repeat(17));
+    assert!(run(a).unwrap_err().to_string().contains("16 文字"));
+    assert!(!dir.path().join("table.tsv").exists());
+    line_fixture(dir.path());
+    let mut a = line_args(dir.path());
+    a.tag = Some("x".repeat(16));
+    run(a).unwrap();
+    assert!(queue(&dir.path().join("queue.jsonl")).iter().all(|q| q.id.len() <= 64));
+}
+
+#[test]
+fn line_collapse_tail_is_capped_at_game_end() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    let mut a = line_args(dir.path());
+    a.after_collapse = u32::MAX;
+    a.line_sides = LineSides::Loser;
+    a.depth = 3;
+    run(a).unwrap();
+    let table = pave_table(dir.path());
+    assert_eq!(
+        table.iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        ["1", "4", "7", "10"]
+    );
+    assert!(table.iter().all(|r| r["own"] == "w" && r["end_reason"] == "collapse"));
+    let q = queue(&dir.path().join("queue.jsonl"));
+    assert_eq!(q.last().unwrap().game[0], MOVES[9..]);
+}
+
+#[test]
+fn line_exclusion_only_covers_matching_own() {
+    let dir = tempfile::tempdir().unwrap();
+    line_fixture(dir.path());
+    for own in ["b", "w"] {
+        let excluded = dir.path().join("excluded.jsonl");
+        write_json(
+            &excluded,
+            &[json!({"id":"accepted", "root":"startpos", "own":own,
+            "depth":10, "game":[MOVES]})],
+        );
+        let mut a = line_args(dir.path());
+        a.exclude_queue.push(excluded);
+        run(a).unwrap();
+        let q = queue(&dir.path().join("queue.jsonl"));
+        assert_eq!(q.len(), 3);
+        assert!(q.iter().all(|row| row.own != own));
+        for row in pave_table(dir.path()) {
+            assert_eq!(row["covered_by"], if row["own"] == own { "accepted" } else { "" });
         }
     }
 }

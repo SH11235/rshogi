@@ -2,7 +2,7 @@
 
 use super::*;
 
-mod pair_disk;
+pub(super) mod pair_disk;
 
 use super::super::exits::disk::Record;
 
