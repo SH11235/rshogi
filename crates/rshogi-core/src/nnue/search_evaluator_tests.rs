@@ -12,6 +12,112 @@ fn prepared() -> SearchEvaluator {
     evaluator
 }
 
+#[cfg(any(
+    feature = "nnue-runtime-dimensions",
+    all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket")
+    )
+))]
+#[test]
+fn spec_buckets_match_full_refresh_after_each_move_and_undo() {
+    const HEAD_STEP: i32 = 1 << 20;
+    let l1 = if cfg!(feature = "nnue-runtime-dimensions") {
+        32
+    } else {
+        1536
+    };
+    for (spec_text, buckets, max_visited, psqt) in [
+        ("ownking:2/3/7+oppking:2/3/7", 16, 13, false),
+        ("handmajor4+ownking:2/3/4/5/6/7/8", 32, 31, false),
+        #[cfg(feature = "nnue-psqt")]
+        ("handmajor4+ownking:2/3/4/5/6/7/8", 32, 31, true),
+    ] {
+        let mut model = nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            nnue::HALFKA_HM_DIMENSIONS,
+            l1,
+            16,
+            32,
+            buckets,
+        );
+        for (index, bucket) in model.buckets.iter().enumerate() {
+            // 隣の head との間隔を、残りの順伝播と PSQT の寄与の合計より広く取る。
+            model.bytes[bucket.output_bias..bucket.output_weights]
+                .copy_from_slice(&((index as i32 + 1) * HEAD_STEP).to_le_bytes());
+        }
+        let arch_len = u32::from_le_bytes(model.bytes[8..12].try_into().unwrap()) as usize;
+        let mut arch = String::from_utf8(model.bytes[12..12 + arch_len].to_vec()).unwrap();
+        arch.push_str(&format!(",ls_bucket={spec_text},fv_scale=16"));
+        model.bytes.splice(
+            8..12 + arch_len,
+            (arch.len() as u32).to_le_bytes().into_iter().chain(arch.bytes()),
+        );
+        let bytes = if psqt {
+            with_auxiliary_weights(model.bytes, nnue::HALFKA_HM_DIMENSIONS, buckets, false)
+        } else {
+            model.bytes
+        };
+        let net = NNUENetwork::from_bytes(&bytes).unwrap();
+        let spec = spec_text.parse::<nnue::BucketSpec>().unwrap();
+        assert_eq!(net.layer_stack_bucket_spec(), Some(spec));
+        let mut incremental = SearchEvaluator::from_network(&net);
+        #[cfg(feature = "nnue-runtime-dimensions")]
+        assert!(matches!(incremental, SearchEvaluator::DynamicLayerStacks { .. }));
+        #[cfg(not(feature = "nnue-runtime-dimensions"))]
+        assert!(matches!(incremental, SearchEvaluator::LayerStacks { .. }));
+        let mut pos = Position::new();
+        pos.set_sfen("8k/9/8p/9/9/9/P8/9/4K4 b Rb 1").unwrap();
+        let mut visited = std::collections::BTreeSet::new();
+        let mut saw_psqt_difference = false;
+        let mut compare = |pos: &Position, incremental: &mut SearchEvaluator| {
+            let mut fresh = SearchEvaluator::from_network(&net);
+            let expected = fresh.evaluate(pos);
+            let fresh_snapshot = snapshot(&fresh);
+            assert_eq!(incremental.evaluate(pos), expected, "{}", pos.to_sfen());
+            assert_eq!(snapshot(incremental), fresh_snapshot, "{}", pos.to_sfen());
+            let bucket = spec.bucket(pos);
+            let scale = nnue::network::get_fv_scale_override().unwrap_or(16);
+            assert_eq!(
+                (expected.raw() * scale + HEAD_STEP / 2) / HEAD_STEP,
+                bucket as i32 + 1,
+                "{}",
+                pos.to_sfen()
+            );
+            if psqt {
+                let width = fresh_snapshot.psqt.len() / 2;
+                saw_psqt_difference |=
+                    fresh_snapshot.psqt[bucket] != fresh_snapshot.psqt[width + bucket];
+            }
+            if pos.side_to_move() == crate::types::Color::Black {
+                visited.insert(bucket);
+            }
+        };
+        compare(&pos, &mut incremental);
+        let mut played = Vec::new();
+        for usi in [
+            "5i5h", "1c1d", "9g9f", "1a1b", "5h5g", "1b1a", "5g5f", "1a1b", "5f5e", "1b1a", "5e5d",
+            "1a1b", "5d5c", "1b1a", "5c5b", "1a1b", "5b5a", "1b1c",
+        ] {
+            let mv = pos.to_move(crate::types::Move::from_usi(usi).unwrap()).unwrap();
+            assert!(pos.is_legal(mv), "{usi}: {}", pos.to_sfen());
+            incremental.push(pos.do_move(mv, pos.gives_check(mv)));
+            played.push(mv);
+            compare(&pos, &mut incremental);
+        }
+        for mv in played.into_iter().rev() {
+            pos.undo_move(mv);
+            incremental.pop();
+            compare(&pos, &mut incremental);
+        }
+        assert!(visited.len() > 1);
+        assert!(visited.contains(&max_visited));
+        assert_eq!(saw_psqt_difference, psqt);
+    }
+}
+
 #[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
 #[test]
 fn q16_static_evaluation_matches_original_board_routing() {
@@ -405,7 +511,12 @@ fn check_models() {
     check_loader_matrix();
     search_models::for_each_model(true, |name, mut bytes| {
         if name == "LayerStacks" {
-            bytes = with_auxiliary_weights(bytes, nnue::HALFKA_HM_DIMENSIONS);
+            bytes = with_auxiliary_weights(
+                bytes,
+                nnue::HALFKA_HM_DIMENSIONS,
+                4,
+                cfg!(feature = "nnue-threat"),
+            );
         }
         nnue::init_nnue_from_bytes(&bytes).unwrap();
         let network = get_network().unwrap();
@@ -780,28 +891,34 @@ fn check_loader_matrix() {
     }
 }
 
-fn with_auxiliary_weights(bytes: Vec<u8>, dimensions: usize) -> Vec<u8> {
+fn with_auxiliary_weights(
+    bytes: Vec<u8>,
+    dimensions: usize,
+    buckets: usize,
+    has_threat: bool,
+) -> Vec<u8> {
     let has_psqt = cfg!(feature = "nnue-psqt");
-    let has_threat = cfg!(feature = "nnue-threat");
     if !has_psqt && !has_threat {
         return bytes;
     }
     let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let mut arch = String::from_utf8(bytes[12..12 + arch_len].to_vec()).unwrap();
     if has_psqt {
-        arch.push_str(",PSQT=4");
+        arch.push_str(&format!(",PSQT={buckets}"));
     }
     #[cfg(feature = "nnue-threat")]
     let threat_width = {
         let (l1, _, _) = nnue::spec::parse_arch_dimensions(&arch);
         let width = nnue::threat_width::width(l1);
-        arch.push_str(&format!(
-            ",Threat={},ThreatProfile={}",
-            nnue::threat_features::THREAT_DIMENSIONS,
-            nnue::threat_exclusion::THREAT_PROFILE_ID
-        ));
-        if width != l1 {
-            arch.push_str(&format!(",ThreatWidth={width}"));
+        if has_threat {
+            arch.push_str(&format!(
+                ",Threat={},ThreatProfile={}",
+                nnue::threat_features::THREAT_DIMENSIONS,
+                nnue::threat_exclusion::THREAT_PROFILE_ID
+            ));
+            if width != l1 {
+                arch.push_str(&format!(",ThreatWidth={width}"));
+            }
         }
         width
     };
@@ -815,12 +932,12 @@ fn with_auxiliary_weights(bytes: Vec<u8>, dimensions: usize) -> Vec<u8> {
     result.extend_from_slice(arch.as_bytes());
     result.extend_from_slice(&bytes[12 + arch_len..ft_end]);
     if has_psqt {
-        for i in 0..(dimensions + 1) * 4 {
+        for i in 0..(dimensions + 1) * buckets {
             result.extend_from_slice(&((i % 29) as i32 - 14).to_le_bytes());
         }
     }
     #[cfg(feature = "nnue-threat")]
-    {
+    if has_threat {
         result.extend_from_slice(&nnue::threat_exclusion::THREAT_PROFILE_ID.to_le_bytes());
         for row in 0..nnue::threat_features::THREAT_DIMENSIONS {
             for col in 0..threat_width {

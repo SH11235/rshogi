@@ -6,8 +6,14 @@ native 評価経路で選べる mode は `progresskpabs`（tatara の f32）、`
 対象は `preprocess_psv`、`rescore_psv`、`gensfen` の native backend、
 `benchmark` の内部 API、`label_bench_positions`、`rescore_hcpe`、`yardstick_label`、
 `bench_nnue_eval`、`verify_nnue_accumulator`、`ek_testset`、`nyugyoku_metrics` です。
-`eval_sfens` と `nnue_saturation` は進行度方式（`progresskpabs` / `progresskpabsq16`）だけを
-`--bucket-mode` で選ぶ診断ツールです。
+
+`eval_sfens`、`nnue_saturation`、`bench_nnue_eval` は、ネットのヘッダに `ls_bucket=` が
+ある場合、USI と同じ spec で bucket を自動選択します。`--bucket-mode`、
+`--progress-buckets`、`--progress-coeff`（`bench_nnue_eval` では各オプション名に
+`ls-` が付く）を指定すると競合エラーになります。
+
+spec のないネットでは、`eval_sfens` と `nnue_saturation` の `--bucket-mode` に
+`progresskpabs`（既定）または `progresskpabsq16` を指定できます。
 
 progress 係数は USI の `LS_PROGRESS_COEFF` と同じ f64 LE の progress.bin を指定します。
 同じファイルから f32 の係数と、`round(w * 65536)` の Q16 係数の両方を作ります。

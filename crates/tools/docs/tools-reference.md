@@ -68,13 +68,13 @@
 | ツール | 用途 |
 |---|---|
 | [`benchmark`](benchmark.md) | 内部 API または外部 USI の探索量・時間・NPS を計測 |
-| [`bench_nnue_eval`](bench_nnue_eval.md) | 固定・巡回局面の NNUE eval / refresh を分けて計測 |
+| [`bench_nnue_eval`](bench_nnue_eval.md) | 固定・巡回局面の NNUE eval / refresh を分けて計測（`ls_bucket=` 自動適用） |
 | [`search_only_ab`](search_only_ab.md) | 探索だけの A/B 比較と Linux perf / Windows ETW の計測 |
 | [`mate_bench`](mate_bench.md) | df-pn 詰み探索の正解・探索量・時間を集計。最短手順 (詰将棋ルール / 全応手) と作意手数との照合、変長駒余りの候補の検出 (`--check-leftover`) |
 | [`compare_nodes`](compare_nodes.md) | 2 エンジンの深度別ノード数を比較。`--strict` で score・PV・bestmove の乖離、未完了・欠損もエラー判定 |
 | [`compare_eval_nnue`](compare_eval_nnue.md) | PSV をサンプリングして NNUE の静的評価・探索スコアを比較 |
 | [`eval_sfens`](eval_sfens.md) | SFEN 局面集を LayerStacks NNUE で静的評価し、ネット内の `ls_bucket=` にも対応 |
-| [`nnue_saturation`](nnue_saturation.md) | LayerStacks の活性飽和率と bucket 分布を計測 |
+| [`nnue_saturation`](nnue_saturation.md) | LayerStacks の活性飽和率と bucket 分布を計測（`ls_bucket=` 自動適用） |
 | [`verify_nnue_accumulator`](verify_nnue_accumulator.md) | NNUE の差分更新と再計算の一致を検証 |
 | [`dump_effect_bucket_golden`](dump_effect_bucket_golden.md) | effect bucket の active index を設定別に dump |
 | [`prepack_nnue`](prepack_nnue.md) | LayerStacks FT を事前展開して共有読み込み用コンテナを生成 |

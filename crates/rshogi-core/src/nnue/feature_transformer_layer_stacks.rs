@@ -261,8 +261,7 @@ fn psqt_add_or_sub<const ADD: bool>(
     }
 
     // 上記のいずれの SIMD path にも該当しない build (SSE2 のみ / NEON / WASM /
-    // その他) は scalar fallback。`MAX = 16` で n ≤ 16 のループは LLVM が
-    // auto-vectorize する余地がある。
+    // その他) は、有効な PSQT bucket 数だけを更新する scalar fallback。
     #[cfg(not(any(
         all(target_arch = "x86_64", target_feature = "avx512f"),
         all(target_arch = "x86_64", target_feature = "avx2"),

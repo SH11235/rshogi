@@ -38,18 +38,18 @@ struct Cli {
     #[arg(long)]
     sfens: PathBuf,
 
-    /// bucket 選択の進行度方式。
-    #[arg(long, value_enum, default_value = "progresskpabs")]
-    bucket_mode: BucketMode,
+    /// spec のないネットの進行度方式（省略時は progresskpabs）。
+    #[arg(long, value_enum)]
+    bucket_mode: Option<BucketMode>,
 
     /// progress.bin (進行度重み) のパス。
     /// `--progress-buckets 1` (no-op routing) 以外では必須。
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
 
-    /// 進行度方式が推論に使う bucket 数。
+    /// 進行度方式が推論に使う bucket 数。spec のないネットでは必須。
     #[arg(long)]
-    progress_buckets: usize,
+    progress_buckets: Option<usize>,
 
     /// 読む局面数の上限（省略時は全件）。
     #[arg(long)]
@@ -83,7 +83,8 @@ struct SaturationReport {
     sfens: String,
     bucket_mode: String,
     progress_coeff: Option<String>,
-    progress_buckets: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_buckets: Option<usize>,
     positions: u64,
     total: StageRates,
     per_bucket: Vec<BucketReport>,
@@ -161,6 +162,8 @@ fn run_for_network<
 >(
     cli: &Cli,
     network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
+    bucketer: &LayerStackBucketer,
+    bucket_mode: &str,
 ) -> Result<()> {
     let file = std::fs::File::open(&cli.sfens)
         .with_context(|| format!("sfens を開けません: {:?}", cli.sfens))?;
@@ -169,7 +172,6 @@ fn run_for_network<
     let mut pos = Position::new();
     let mut acc = AccumulatorLayerStacks::<L1>::new();
     let mut bucket_counts = vec![BucketCounts::default(); network.num_buckets];
-    let bucketer = LayerStackBucketer::from_configured(network.num_buckets, cli.progress_buckets)?;
     let mut bucket_positions = vec![0u64; network.num_buckets];
     let limit = cli.count.unwrap_or(usize::MAX);
 
@@ -198,7 +200,7 @@ fn run_for_network<
     let report = SaturationReport {
         nnue: cli.nnue.display().to_string(),
         sfens: cli.sfens.display().to_string(),
-        bucket_mode: cli.bucket_mode.mode().as_str().to_string(),
+        bucket_mode: bucket_mode.to_string(),
         progress_coeff: cli.progress_coeff.as_ref().map(|p| p.display().to_string()),
         progress_buckets: cli.progress_buckets,
         positions: bucket_positions.iter().sum(),
@@ -241,24 +243,35 @@ pub fn run() -> Result<()> {
     // 静的 net の内部を解析する本ツールでは使えない。
     let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
-    let plan = NativeRouting::prepare(
-        Some(ls_net.num_buckets()),
-        Some(cli.bucket_mode.mode()),
-        Some(cli.progress_buckets),
-        cli.progress_coeff.as_ref().is_some(),
-    )
-    .context("native routing: --progress-buckets / --progress-coeff")?
-    .expect("LayerStacks routing");
-    plan.apply(|| {
-        cli.progress_coeff
-            .as_ref()
-            .map(|path| ProgressCoefficients::load(path.as_ref()))
-            .transpose()
-    })?;
+    let (bucketer, bucket_mode) = if let Some(spec) = ls_net.bucket_spec() {
+        anyhow::ensure!(
+            cli.bucket_mode.is_none()
+                && cli.progress_buckets.is_none()
+                && cli.progress_coeff.is_none(),
+            "NNUE ls_bucket routing conflicts with --bucket-mode, --progress-buckets or --progress-coeff"
+        );
+        (LayerStackBucketer::Spec(spec), "spec")
+    } else {
+        let buckets = cli
+            .progress_buckets
+            .context("--progress-buckets is required for a net without ls_bucket")?;
+        let mode = cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode();
+        let stored = ls_net.num_buckets();
+        let plan = NativeRouting::prepare(
+            Some(stored),
+            Some(mode),
+            Some(buckets),
+            cli.progress_coeff.is_some(),
+        )
+        .context("native routing: --progress-buckets / --progress-coeff")?
+        .expect("LayerStacks routing");
+        plan.apply(|| cli.progress_coeff.as_deref().map(ProgressCoefficients::load).transpose())?;
+        (LayerStackBucketer::from_configured(stored, buckets)?, mode.as_str())
+    };
 
     ls_dispatch_ft_size!(
         &ls_net,
-        |concrete_net| run_for_network(&cli, concrete_net),
+        |concrete_net| run_for_network(&cli, concrete_net, &bucketer, bucket_mode),
         _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
     )
 }

@@ -26,8 +26,8 @@ use clap::Parser;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
-    LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
-    get_layer_stack_progress_buckets, ls_dispatch_ft_size, sqr_clipped_relu_transform,
+    LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks, ls_dispatch_ft_size,
+    sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType, Value};
@@ -65,7 +65,7 @@ struct Cli {
     #[arg(long)]
     ls_progress_buckets: Option<usize>,
 
-    /// LayerStacks bucket モード
+    /// spec のない LayerStacks ネットの bucket モード
     #[arg(long)]
     ls_bucket_mode: Option<String>,
 }
@@ -140,9 +140,9 @@ struct LayerStackBenchResult {
 }
 
 impl LayerStackBenchResult {
-    fn print(&self, arch_name: &str, bucket_mode: LayerStackBucketMode, bucket_counts: &[usize]) {
+    fn print(&self, arch_name: &str, bucket_mode: &str, bucket_counts: &[usize]) {
         println!("=== {arch_name} / {} ===", self.bench_name);
-        println!("  bucket_mode:         {}", bucket_mode.as_str());
+        println!("  bucket_mode:         {bucket_mode}");
         println!("  dataset buckets:     {}", format_bucket_counts(bucket_counts));
         println!("  ns/op:               {:.1}", self.ns_per_op);
         println!("  throughput:          {:.0} ops/sec", self.ops_per_sec);
@@ -326,11 +326,7 @@ fn format_bucket_counts(bucket_counts: &[usize]) -> String {
     }
 }
 
-fn configure_layer_stack_bucket(
-    cli: &Cli,
-    progress_coefficients: Option<ProgressCoefficients>,
-    stored_buckets: usize,
-) -> Result<LayerStackBucketMode> {
+fn configure_layer_stack_bucket(cli: &Cli, stored_buckets: usize) -> Result<LayerStackBucketMode> {
     let mode_str =
         cli.ls_bucket_mode.as_deref().context("LayerStacks requires --ls-bucket-mode")?;
     let mode = parse_native_layer_stack_bucket_mode(mode_str)?;
@@ -339,11 +335,11 @@ fn configure_layer_stack_bucket(
         Some(stored_buckets),
         Some(mode),
         cli.ls_progress_buckets,
-        cli.ls_progress_coeff.is_some() || progress_coefficients.is_some(),
+        cli.ls_progress_coeff.is_some(),
     )
     .context("native routing: --ls-bucket-mode / --ls-progress-buckets / --ls-progress-coeff")?
     .expect("LayerStacks routing");
-    plan.apply(|| Ok(progress_coefficients))?;
+    plan.apply(|| cli.ls_progress_coeff.as_deref().map(ProgressCoefficients::load).transpose())?;
 
     Ok(mode)
 }
@@ -358,15 +354,9 @@ fn prepare_layer_stack_cases<
 >(
     net: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
     positions: &[Position],
-    bucket_mode: LayerStackBucketMode,
-) -> Result<LayerStackCases<L1>> {
+    bucketer: &LayerStackBucketer,
+) -> LayerStackCases<L1> {
     let num_buckets = net.num_buckets;
-    let routing_buckets = match bucket_mode {
-        LayerStackBucketMode::KingRank9 => num_buckets,
-        _ => get_layer_stack_progress_buckets()
-            .expect("progress routing configured before preparing cases"),
-    };
-    let bucketer = LayerStackBucketer::from_configured(num_buckets, routing_buckets)?;
     let mut propagate_cases = Vec::with_capacity(positions.len());
     let mut eval_cases = Vec::with_capacity(positions.len());
     let mut update_cache_cases = Vec::with_capacity(positions.len());
@@ -413,13 +403,13 @@ fn prepare_layer_stack_cases<
         }
     }
 
-    Ok(LayerStackCases {
+    LayerStackCases {
         propagate_cases,
         eval_cases,
         update_cache_cases,
         bucket_counts,
         update_bucket_counts,
-    })
+    }
 }
 
 fn select_non_king_legal_move(pos: &Position) -> Option<rshogi_core::types::Move> {
@@ -592,7 +582,7 @@ fn bench_layer_stack_update_cache<
 fn print_ls_json(
     mode: BenchMode,
     arch_name: &str,
-    bucket_mode: LayerStackBucketMode,
+    bucket_mode: &str,
     bucket_counts: &[usize],
     result: &LayerStackBenchResult,
 ) {
@@ -601,7 +591,7 @@ fn print_ls_json(
         r#"{{"mode":"{}","arch":"{}","bucket_mode":"{}","bucket_counts":"{}","ns_per_op":{:.1},"ops_per_sec":{:.0}}}"#,
         mode.as_str(),
         arch_name,
-        bucket_mode.as_str(),
+        bucket_mode,
         format_bucket_counts(bucket_counts),
         result.ns_per_op,
         result.ops_per_sec
@@ -620,12 +610,14 @@ fn run_layer_stack_bench<
     net: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
     mode: BenchMode,
     positions: &[Position],
-    bucket_mode: LayerStackBucketMode,
-    warmup: u64,
-    iterations: u64,
+    bucketer: &LayerStackBucketer,
+    bucket_mode: &str,
+    cli: &Cli,
     arch_name: &str,
 ) -> Result<()> {
-    let cases = prepare_layer_stack_cases(net, positions, bucket_mode)?;
+    let cases = prepare_layer_stack_cases(net, positions, bucketer);
+    let warmup = cli.warmup;
+    let iterations = cli.iterations;
 
     let (result, bucket_counts) = match mode {
         BenchMode::LayerStackPropagate => (
@@ -657,9 +649,6 @@ fn run_layer_stack_bench<
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(mode) = cli.ls_bucket_mode.as_deref() {
-        parse_native_layer_stack_bucket_mode(mode)?;
-    }
     let mode = BenchMode::parse(&cli.mode)?;
 
     // テスト局面をパース
@@ -681,48 +670,41 @@ pub fn run() -> Result<()> {
     println!("Test positions: {}", positions.len());
     println!();
 
-    let progress_coefficients = if let Some(ref coeff_path) = cli.ls_progress_coeff {
-        println!("Loading progress coefficients: {}", coeff_path.display());
-        let coefficients = ProgressCoefficients::load(coeff_path)?;
-        println!();
-        Some(coefficients)
-    } else {
-        None
-    };
-    let has_progress_coefficients = progress_coefficients.is_some();
-
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = Arc::new(NNUENetwork::load(&cli.nnue_file)?);
     let arch_name = network.architecture_name();
 
-    let stored_buckets = network.layer_stack_num_buckets();
-    let bucket_mode = match stored_buckets {
-        Some(stored) => Some(configure_layer_stack_bucket(&cli, progress_coefficients, stored)?),
-        None if cli.ls_bucket_mode.is_some()
-            || cli.ls_progress_buckets.is_some()
-            || cli.ls_progress_coeff.is_some() =>
-        {
-            bail!("LayerStacks routing options were provided for a non-LayerStacks network")
-        }
-        None => None,
-    };
-
-    if let (true, Some(bucket_mode), Some(stored)) =
-        (has_progress_coefficients, bucket_mode, stored_buckets)
-    {
-        let num_buckets = cli
-            .ls_progress_buckets
-            .context("progress routing requires --ls-progress-buckets")?;
-        let bucketer = LayerStackBucketer::from_configured(stored, num_buckets)?;
-        bench_progress_bucket(
-            &positions,
-            &bucketer,
-            bucket_mode,
-            num_buckets,
-            cli.warmup,
-            cli.iterations,
+    let has_routing_options = cli.ls_bucket_mode.is_some()
+        || cli.ls_progress_buckets.is_some()
+        || cli.ls_progress_coeff.is_some();
+    let routing = if let Some(spec) = network.layer_stack_bucket_spec() {
+        anyhow::ensure!(
+            !has_routing_options,
+            "NNUE ls_bucket routing conflicts with --ls-bucket-mode, --ls-progress-buckets or --ls-progress-coeff"
         );
-    }
+        Some((LayerStackBucketer::Spec(spec), "spec"))
+    } else if let Some(stored) = network.layer_stack_num_buckets() {
+        let bucket_mode = configure_layer_stack_bucket(&cli, stored)?;
+        let num_buckets = cli.ls_progress_buckets.unwrap_or(stored);
+        let bucketer = LayerStackBucketer::from_configured(stored, num_buckets)?;
+        if cli.ls_progress_coeff.is_some() {
+            bench_progress_bucket(
+                &positions,
+                &bucketer,
+                bucket_mode,
+                num_buckets,
+                cli.warmup,
+                cli.iterations,
+            );
+        }
+        Some((bucketer, bucket_mode.as_str()))
+    } else {
+        anyhow::ensure!(
+            !has_routing_options,
+            "LayerStacks routing options were provided for a non-LayerStacks network"
+        );
+        None
+    };
 
     match mode {
         BenchMode::Full => {
@@ -769,7 +751,7 @@ pub fn run() -> Result<()> {
             let static_arch_name = ls_net.architecture_spec().name();
             println!("Architecture: {static_arch_name}");
             println!();
-            let bucket_mode = bucket_mode.expect("LayerStacks net was configured above");
+            let (bucketer, bucket_mode) = routing.expect("LayerStacks net was configured above");
 
             ls_dispatch_ft_size!(
                 &ls_net,
@@ -778,9 +760,9 @@ pub fn run() -> Result<()> {
                         net,
                         mode,
                         &positions,
+                        &bucketer,
                         bucket_mode,
-                        cli.warmup,
-                        cli.iterations,
+                        &cli,
                         &static_arch_name,
                     )?;
                 },
