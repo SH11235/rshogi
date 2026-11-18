@@ -295,6 +295,9 @@ pub struct Search {
     /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
     #[cfg(test)]
     corrupt_public_pv: Option<Vec<Move>>,
+    /// 探索中の局面の書き出し。`go` の間だけ main worker に預ける。
+    #[cfg(feature = "search-tree-sample")]
+    tree_sampler: Option<Box<super::tree_sample::TreeSampler>>,
 }
 
 /// `NumaPolicy=auto` で有効なときの topology・割り当て・写し。
@@ -794,6 +797,8 @@ impl Search {
             numa_report: None,
             #[cfg(test)]
             corrupt_public_pv: None,
+            #[cfg(feature = "search-tree-sample")]
+            tree_sampler: None,
         }
     }
 
@@ -1710,6 +1715,13 @@ impl Search {
             increase_depth_shared: &self.increase_depth_shared,
         };
 
+        #[cfg(feature = "search-tree-sample")]
+        {
+            worker.state.tree_sampler = self.tree_sampler.take();
+            if let Some(sampler) = worker.state.tree_sampler.as_deref_mut() {
+                sampler.begin_search(pos.game_ply());
+            }
+        }
         let mut noop_progress = |_nodes: u64, _bmc: f64| {};
         let result = iterative_deepening(
             &mut worker,
@@ -1733,10 +1745,46 @@ impl Search {
         self.last_best_move_depth = main_state.last_best_move_depth;
         self.tot_best_move_changes = main_state.tot_best_move_changes;
 
+        #[cfg(feature = "search-tree-sample")]
+        {
+            self.tree_sampler = worker.state.tree_sampler.take();
+        }
+
         // workerを戻す
         self.worker = Some(worker);
 
         result
+    }
+
+    /// 探索中の局面の書き出しを設定する。`None` で止める。累計とバッファは捨てる。
+    ///
+    /// 書き出すのは main thread の探索だけ。`config.probability` が 0..=1 の外なら panic する。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn set_tree_sample(&mut self, config: Option<super::TreeSampleConfig>, seed: u64) {
+        self.tree_sampler =
+            config.map(|config| Box::new(super::tree_sample::TreeSampler::new(config, seed)));
+    }
+
+    /// 書き出しの乱数を `seed` から始め直す。設定が無ければ何もしない。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn reseed_tree_sample(&mut self, seed: u64) {
+        if let Some(sampler) = self.tree_sampler.as_deref_mut() {
+            sampler.reseed(seed);
+        }
+    }
+
+    /// 積んだ標本を `out` の末尾へ移す。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn drain_tree_samples(&mut self, out: &mut Vec<super::TreeSample>) {
+        if let Some(sampler) = self.tree_sampler.as_deref_mut() {
+            sampler.drain_into(out);
+        }
+    }
+
+    /// 設定してからの条件ごとの累計。
+    #[cfg(feature = "search-tree-sample")]
+    pub fn tree_sample_stats(&self) -> super::TreeSampleStats {
+        self.tree_sampler.as_deref().map(|sampler| sampler.stats()).unwrap_or_default()
     }
 }
 

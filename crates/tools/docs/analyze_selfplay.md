@@ -149,6 +149,9 @@ CSA client の JSONL は単局ごとに勝敗集計する。meta の `source: "c
 result がまだない live CSA ログは不完全入力となり、通常は非0で終了する。
 `--allow-partial` では他の有効な入力があればその分だけ集計できる。
 
+tournament の `--single-game` ログも `settings.single_game: true` で識別し、単局として勝敗・先後別集計に含める。
+単局ログを含む入力では `--sprt` を使用できない。
+
 通常のテキスト表示の先後別総局数には引分も含め、決着局勝率の分母からは引分を除く。
 先後情報のない summary を含む対戦カードでは先後別集計を不明と表示する。
 

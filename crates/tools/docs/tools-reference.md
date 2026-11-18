@@ -5,17 +5,19 @@
 全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
 `book_mine master rejoin` の応手集約とメモリの扱いは[詳細](book_mine.md#master-rejoin-相手の手で定跡に戻ると値が下がる局面)を参照してください。
 
-対局の手順にある元データの局面・手の抜けと受付の被覆は [`book_mine master game-gaps`](book_mine.md#master-game-gaps-対局の手順と元データの抜け) で一覧にできます。追加の根だけでは被覆にせず、CSA の同じ行の読み筋コメントも出口判定に使います。負けた局の崩れと伝播後の実戦手の値を照合し、そこまでの抜けをつなぐ木を出すには、pair JSON Lines 専用の [`book_mine master game-pave`](book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) を使います。受付行の memo に局名と根の手数を残します。棋譜と audit DB の照合は外部ソートを使い、全局の ID・局面キー・audit の値をメモリに保持しません。
+対局の手順にある元データの局面・手の抜けと受付の被覆は [`book_mine master game-gaps`](book_mine.md#master-game-gaps-対局の手順と元データの抜け) で一覧にできます。`--line` では抜けの有無によらず、勝った側の stop・負けた側の崩れまで実戦の線に両側の根を置きます。追加の根だけでは被覆にせず、CSA の同じ行の読み筋コメントも出口判定に使います。負けた局の崩れと伝播後の実戦手の値を照合し、そこまでの抜けをつなぐ木を出すには、pair JSON Lines 専用の [`book_mine master game-pave`](book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) を使います。受付行の memo に局名と根の手数を残します。棋譜と audit DB の照合は外部ソートを使い、全局の ID・局面キー・audit の値をメモリに保持しません。
 
 自前の定跡と外部定跡の最善・指定点差以内の手の突き合わせは [`book_mine master compare`](book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) を使います。
 
 定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳の読み込み・検証と応手グラフ構築を並列化できます (台帳の採用順とバッファ上限を維持)。
 
+台帳から片側の一本道の区間や指定手順の上位二手を一覧にするには [`book_mine master one-way`](book_mine.md#master-one-way-台帳から一本道の区間を探す) を使います。追加のエンジン探索は行わず、区間の走査量は `--max-visits` で制限できます。
+
 ## 教師データの生成・変換・加工
 
 | ツール | 用途 |
 |---|---|
-| [`gensfen`](gensfen.md) | エンジン対局から PSV / pack / hcpe3 教師を生成 |
+| [`gensfen`](gensfen.md) | エンジン対局から PSV / pack / hcpe3 教師を生成。任意で探索木標本 PSV も出力 |
 | [`nyugyoku_gensfen`](nyugyoku_gensfen.md) | CSA から入玉局面を抽出し gensfen 用開始局面を生成 |
 | [`policy_rollout_psv`](policy_rollout_psv.md) | ONNX policy で局面を進め、value 評価付き PSV を生成 |
 | [`shuffle_psv`](shuffle_psv.md) | seed とチャンクサイズを指定して PSV をシャッフル |
@@ -54,7 +56,7 @@
 
 | ツール | 用途 |
 |---|---|
-| [`tournament`](tournament.md) | 複数エンジンの総当たり・先後交換対局、SPRT (境界到達後も開始済みペアを完結し、停止時の判定を meta.json に保存)、動的制御、開始局面ファイルの動的読み直しと均一巡回、NPS 時計補正・Linux NUMA 固定・engine 別 ponder（的中時の PV 検査） |
+| [`tournament`](tournament.md) | 先後固定の単局・棋譜履歴を引き継ぐ継ぎ指し、複数エンジンの総当たり・先後交換対局、SPRT (境界到達後も開始済みペアを完結し、停止時の判定を meta.json に保存)、動的制御、開始局面ファイルの動的読み直しと均一巡回、NPS 時計補正・Linux NUMA 固定・engine 別 ponder（的中時の PV 検査） |
 | [`analyze_selfplay`](analyze_selfplay.md) | 対局 JSONL の勝率・Elo・SPRT・開始局面別成績を集計（result の局面・名前にも対応） |
 | [`floodgate_record`](floodgate_record.md) | csa_client の対局ログから先後別・相手別成績と NPS を集計 |
 | [`floodgate_pipeline`](floodgate_pipeline.md) | Floodgate 棋譜の取得、128 棋譜ずつの局面抽出、live mirror |

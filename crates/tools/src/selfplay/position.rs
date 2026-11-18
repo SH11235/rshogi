@@ -159,6 +159,18 @@ pub fn build_position(
     pass_rights_black: Option<u8>,
     pass_rights_white: Option<u8>,
 ) -> Result<Position> {
+    let mut pos = build_base_position(parsed, pass_rights_black, pass_rights_white)?;
+    for mv in &parsed.moves {
+        apply_start_move(&mut pos, mv)?;
+    }
+    Ok(pos)
+}
+
+pub(crate) fn build_base_position(
+    parsed: &ParsedPosition,
+    pass_rights_black: Option<u8>,
+    pass_rights_white: Option<u8>,
+) -> Result<Position> {
     let mut pos = Position::new();
     if parsed.startpos {
         pos.set_sfen(SFEN_HIRATE)?;
@@ -173,20 +185,18 @@ pub fn build_position(
         let white = pass_rights_white.unwrap_or(0);
         pos.enable_pass_rights(black, white);
     }
-    for mv_str in &parsed.moves {
-        let mv = Move::from_usi(mv_str)
-            .ok_or_else(|| anyhow!("invalid move in start position: {mv_str}"))?;
-        if !is_legal_game_move(&pos, mv) {
-            bail!("illegal move '{mv_str}' in start position");
-        }
-        let gives_check = if mv.is_pass() {
-            false
-        } else {
-            pos.gives_check(mv)
-        };
-        pos.do_move(mv, gives_check);
-    }
     Ok(pos)
+}
+
+pub(crate) fn apply_start_move(pos: &mut Position, mv_str: &str) -> Result<(Move, bool)> {
+    let mv = Move::from_usi(mv_str)
+        .ok_or_else(|| anyhow!("invalid move in start position: {mv_str}"))?;
+    if !is_legal_game_move(pos, mv) {
+        bail!("illegal move '{mv_str}' in start position");
+    }
+    let gives_check = !mv.is_pass() && pos.gives_check(mv);
+    pos.do_move(mv, gives_check);
+    Ok((mv, gives_check))
 }
 
 /// 開始局面までに指された手数。SFEN の手数欄は次に指す手の番号なので 1 を引く。

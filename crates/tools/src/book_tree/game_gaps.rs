@@ -23,16 +23,31 @@ enum Until {
     All,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LineSides {
+    Both,
+    Loser,
+    Winner,
+}
+
 #[derive(Args, Debug)]
 pub(super) struct GameGapsArgs {
     #[arg(long)]
     master: PathBuf,
     #[arg(long)]
+    line: bool,
+    #[arg(long, value_enum, default_value_t = LineSides::Both)]
+    line_sides: LineSides,
+    #[arg(long, default_value_t = 150)]
+    collapse_cp: i32,
+    #[arg(long, default_value_t = 3)]
+    after_collapse: u32,
+    #[arg(long)]
     schema: Option<PathBuf>,
     #[arg(long, required = true)]
     games: Vec<PathBuf>,
-    #[arg(long)]
-    player: String,
+    #[arg(long, required_unless_present = "line")]
+    player: Option<String>,
     #[arg(long, value_enum, default_value_t = Until::Exit)]
     until: Until,
     #[arg(long)]
@@ -97,6 +112,7 @@ struct Game {
     name: String,
     own: String,
     moves: Vec<Move>,
+    outcome: String,
 }
 
 fn own_side(black: &str, white: &str, player: &str) -> Result<String> {
@@ -148,15 +164,27 @@ fn validate_game(game: &mut Game) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default, Debug, PartialEq, Eq)]
+struct CsaComment {
+    pv: Option<String>,
+    score: Option<i64>,
+}
+
 // CSA の共通パーサーは未知の行を読み飛ばすため、手と終局の行は先に検査する。
-fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
-    let mut pvs = Vec::new();
+fn csa_comments(text: &str) -> Result<Vec<CsaComment>> {
+    let mut comments = Vec::new();
     let mut ended = false;
     for (n, line) in text.lines().enumerate() {
         let s = line.trim();
         let mut pv_comment = s.strip_prefix("'**");
         if s.starts_with('%') {
-            let (_, parsed, _) = rshogi_csa::parse_csa_full(s)?;
+            let terminal = s.split_once(',').map_or(s, |(terminal, _)| terminal);
+            let terminal = if matches!(terminal, "%+ILLEGAL_ACTION" | "%-ILLEGAL_ACTION") {
+                terminal
+            } else {
+                s
+            };
+            let (_, parsed, _) = rshogi_csa::parse_csa_full(terminal)?;
             ensure!(
                 matches!(parsed.as_slice(), [rshogi_csa::ParsedMove::Special(_)]),
                 "未知の CSA 終局行: {} 行目 {s}",
@@ -177,7 +205,7 @@ fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
                 "読めない CSA の手: {} 行目 {s}",
                 n + 1
             );
-            pvs.push(None);
+            comments.push(CsaComment::default());
             pv_comment = rest.split(',').find_map(|part| part.trim().strip_prefix("'**"));
         } else {
             ensure!(
@@ -191,15 +219,17 @@ fn csa_pvs(text: &str) -> Result<Vec<Option<String>>> {
         }
         if !ended && let Some(rest) = pv_comment {
             let mut fields = rest.split_whitespace();
-            if fields.next().is_some_and(|value| value.parse::<i32>().is_ok())
-                && let Some(first) = fields.next()
-                && let Some(pv) = pvs.last_mut()
+            if let Some(score) = fields.next().and_then(|value| value.parse::<i32>().ok())
+                && let Some(comment) = comments.last_mut()
             {
-                *pv = Some(first.into());
+                comment.score = Some(i64::from(score));
+                if let Some(first) = fields.next() {
+                    comment.pv = Some(first.into());
+                }
             }
         }
     }
-    Ok(pvs)
+    Ok(comments)
 }
 
 fn visit_csa(
@@ -209,19 +239,41 @@ fn visit_csa(
     visit: &mut impl FnMut(Game) -> Result<()>,
 ) -> Result<()> {
     let text = crate::kifu_publish::read_csa_text(path)?;
-    let pvs = csa_pvs(&text)?;
+    let comments = csa_comments(&text)?;
     let (mut pos, parsed, info) = rshogi_csa::parse_csa_full(&text)?;
-    let own = own_side(
-        info.black_name.as_deref().unwrap_or_default(),
-        info.white_name.as_deref().unwrap_or_default(),
-        &args.player,
-    )?;
+    let own = if args.line {
+        String::new()
+    } else {
+        own_side(
+            info.black_name.as_deref().unwrap_or_default(),
+            info.white_name.as_deref().unwrap_or_default(),
+            args.player.as_deref().unwrap_or_default(),
+        )?
+    };
     let mut moves = Vec::new();
     let mut own_pv = false;
     let mut times = Vec::new();
+    let mut outcome = "unknown";
     for (i, m) in parsed.into_iter().enumerate() {
-        let rshogi_csa::ParsedMove::Normal(cm) = m else {
-            break;
+        let cm = match m {
+            rshogi_csa::ParsedMove::Normal(cm) => cm,
+            rshogi_csa::ParsedMove::Special(special) => {
+                use rshogi_csa::{Color, SpecialMove};
+                let black = pos.side_to_move == Color::Black;
+                let winner = match special {
+                    SpecialMove::Resign | SpecialMove::TimeUp | SpecialMove::IllegalMove => {
+                        Some(!black)
+                    }
+                    SpecialMove::Win => Some(black),
+                    _ => None,
+                };
+                outcome = match winner {
+                    Some(true) => "black_win",
+                    Some(false) => "white_win",
+                    None => "unknown",
+                };
+                break;
+            }
         };
         let sfen_before = pos.to_sfen();
         let move_usi = rshogi_csa::csa_move_to_usi(&cm.mv, &pos)?;
@@ -230,7 +282,7 @@ fn visit_csa(
         let mut check = position_from_sfen(&sfen_before)?;
         apply_usi_move(&mut check, &move_usi)?;
         times.push(cm.time_sec);
-        let pv = pvs.get(i).and_then(Option::as_deref);
+        let pv = comments.get(i).and_then(|c| c.pv.as_deref());
         own_pv |= super::model::side(&root.key) == own && pv.is_some();
         moves.push(Move {
             ply: root.ply,
@@ -239,11 +291,11 @@ fn visit_csa(
             move_usi,
             timed_out: false,
             searched: pv == Some(cm.mv.as_str()),
-            score_black: None,
+            score_black: comments.get(i).and_then(|c| c.score),
         });
         pos.apply_csa_move(&cm.mv)?;
     }
-    if !own_pv {
+    if !own_pv && !args.line {
         eprintln!(
             "注意: {name}: 自分の読み筋つき CSA コメントが無いため --exit-secs={} で出口を判定します",
             args.exit_secs
@@ -252,7 +304,26 @@ fn visit_csa(
             m.searched = time.is_some_and(|t| t >= args.exit_secs);
         }
     }
-    visit(Game { name, own, moves })
+    if let Some(winner) = text.lines().find_map(|line| match line.trim().split(',').next() {
+        Some("%+ILLEGAL_ACTION") => Some("white_win"),
+        Some("%-ILLEGAL_ACTION") => Some("black_win"),
+        _ => None,
+    }) {
+        outcome = winner;
+    }
+    if let Some(summary) = info.summary {
+        outcome = match summary.result {
+            rshogi_csa::SummaryResult::BlackWin => "black_win",
+            rshogi_csa::SummaryResult::WhiteWin => "white_win",
+            rshogi_csa::SummaryResult::Draw => "draw",
+        };
+    }
+    visit(Game {
+        name,
+        own,
+        moves,
+        outcome: outcome.into(),
+    })
 }
 
 fn visit_input(
@@ -302,13 +373,21 @@ fn visit_input(
     })?;
     ensure!(results > 0, "result がありません");
     if pair || results > 1 || labels.is_none() {
-        return visit_pair(path, &name, Some(&args.player), |game, _| visit(game));
+        if args.line {
+            return pave::pair_disk::visit_with_player(path, &name, None, |game, _| visit(game));
+        }
+        return visit_pair(path, &name, args.player.as_deref(), |game, _| visit(game));
     }
 
     let (black, white) = labels.context("meta がありません")?;
-    let own = own_side(&black, &white, &args.player)?;
+    let own = if args.line {
+        String::new()
+    } else {
+        own_side(&black, &white, args.player.as_deref().unwrap_or_default())?
+    };
     let mut moves = Vec::new();
     let mut ended = false;
+    let mut outcome = String::from("unknown");
     seeds::visit_json(path, |_, v| {
         match v["type"].as_str() {
             Some("move") => {
@@ -317,18 +396,31 @@ fn visit_input(
                 m.searched =
                     v["eval"]["pv"].as_array().and_then(|p| p.first()).and_then(|p| p.as_str())
                         == Some(&m.move_usi);
+                if args.line {
+                    let eval: Option<seeds::Eval> = serde_json::from_value(v["eval"].clone())?;
+                    m.score_black = eval
+                        .as_ref()
+                        .and_then(seeds::eval_score)
+                        .map(|score| if m.side_to_move == "b" { score } else { -score });
+                }
                 moves.push(m);
             }
             Some("result") => {
                 ensure!(!ended, "result が複数あります");
                 ended = true;
+                outcome = v["outcome"].as_str().unwrap_or("unknown").into();
             }
             _ => {}
         }
         Ok(())
     })?;
     ensure!(ended, "result がありません");
-    visit(Game { name, own, moves })
+    visit(Game {
+        name,
+        own,
+        moves,
+        outcome,
+    })
 }
 
 fn visit_pair(
@@ -403,6 +495,7 @@ fn pair_game(
         .collect();
     Ok(Game {
         name: format!("{name}_{}", result.game_id),
+        outcome: result.outcome.clone(),
         own,
         moves,
     })
@@ -410,6 +503,7 @@ fn pair_game(
 
 struct Coverage {
     id: String,
+    own: String,
     depth: usize,
     game: Vec<Vec<String>>,
 }
@@ -451,6 +545,7 @@ fn read_excluded(paths: &[PathBuf]) -> Result<Excluded> {
         for (root, game) in roots {
             out.entry(root.key).or_default().push(Coverage {
                 id: id.clone(),
+                own: line.own.clone(),
                 depth: line.depth,
                 game,
             });
@@ -497,8 +592,11 @@ struct Report<'a> {
 }
 
 impl Report<'_> {
-    fn game(&mut self, mut game: Game) -> Result<()> {
+    fn game(&mut self, mut game: Game, path: &Path) -> Result<()> {
         validate_game(&mut game)?;
+        if self.args.line {
+            return self.line_game(&game, path);
+        }
         let args = self.args;
         let mut gaps = 0;
         let mut uncovered = 0;
@@ -598,12 +696,22 @@ impl Report<'_> {
 }
 
 pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
-    ensure!(!args.player.is_empty(), "--player は空にできません");
+    ensure!(!args.line || args.collapse_cp > 0, "collapse-cp は正の値が必要です");
+    ensure!(
+        args.line || args.player.as_ref().is_some_and(|player| !player.is_empty()),
+        "--player は空にできません"
+    );
     ensure!(args.depth > 0 && args.depth <= MAX_DEPTH, "depth は 1〜{MAX_DEPTH} が必要です");
     args.opts().check()?;
     ensure!(args.priority.is_none_or(|p| p <= MAX_PRIORITY), "priority が大きすぎます");
     if args.enqueue_out.is_some() {
         check_tag(args.tag.as_deref().context("--enqueue-out には --tag が必要です")?)?;
+        if args.line {
+            ensure!(
+                args.tag.as_ref().is_some_and(|tag| tag.len() <= 16),
+                "--line の --tag は 16 文字以内が必要です (id の上限は 64 文字)"
+            );
+        }
         ensure!(args.priority.is_some(), "--enqueue-out には --priority が必要です");
     }
     args.games = args.games.iter().map(|p| p.canonicalize()).collect::<std::io::Result<_>>()?;
@@ -628,9 +736,17 @@ pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
         table: tempfile::tempfile()?,
         queue: Sorter::new(),
     };
-    writeln!(report.table, "game\tply\tside\tmove\tkind\tcovered_by\tkey")?;
+    writeln!(
+        report.table,
+        "{}",
+        if args.line {
+            "game\tply\tside\town\tend_reason\tgame_moves\tcovered_by\tkey"
+        } else {
+            "game\tply\tside\tmove\tkind\tcovered_by\tkey"
+        }
+    )?;
     for path in &args.games {
-        visit_input(path, &args, |game| report.game(game))
+        visit_input(path, &args, |game| report.game(game, path))
             .with_context(|| format!("棋譜: {}", path.display()))?;
     }
     let mut queue = merge_queue(report.queue)?;
@@ -708,3 +824,5 @@ fn merge_queue(queue: Sorter) -> Result<File> {
 mod tests;
 
 pub(super) mod pave;
+
+mod line;

@@ -60,7 +60,7 @@ cargo run --release -p tools --bin policy_rollout_psv -- \
 | score | value head の勝率を手番視点 cp に変換した値 (`cp = scale * ln(p / (1 - p))`、scale は `--onnx-eval-scale`) |
 | move16 | その局面で抽選した手 |
 | game_ply | 種の game_ply に、種から指した手数を足した値 |
-| padding | 種から何手目か (種の局面は 0、255 で飽和)。通常の PSV では 0 のバイトなので、0 を前提にする後段 (例: `psv_dual_label`) では上書きされます |
+| padding | 0 |
 | game_result | `--game-result zero` (既定) は 0。`rollout` は指し進めの結末を手番視点で入れる (勝ち 1 / 負け -1、千日手・手数上限は 0) |
 
 詰みの局面・宣言できる局面・手数上限の局面など、指し手を選ばずに終わった局面は書きません。

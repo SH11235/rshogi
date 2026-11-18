@@ -13,6 +13,8 @@ mod multi_pv;
 mod node_limit;
 mod skill;
 mod time_management;
+#[cfg(feature = "search-tree-sample")]
+mod tree_sample;
 
 mod mate1_tt;
 mod probcut_abort;

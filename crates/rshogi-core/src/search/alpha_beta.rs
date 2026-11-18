@@ -561,6 +561,9 @@ pub struct SearchState {
     /// 探索統計（search-stats feature有効時のみ）
     #[cfg(feature = "search-stats")]
     pub stats: SearchStats,
+    /// 探索中の局面の書き出し。main thread の探索中だけ `Search` から預かる。
+    #[cfg(feature = "search-tree-sample")]
+    pub(crate) tree_sampler: Option<Box<super::tree_sample::TreeSampler>>,
 }
 
 impl SearchState {
@@ -585,6 +588,8 @@ impl SearchState {
             calls_cnt: 0,
             #[cfg(feature = "search-stats")]
             stats: SearchStats::default(),
+            #[cfg(feature = "search-tree-sample")]
+            tree_sampler: None,
         }
     }
 }

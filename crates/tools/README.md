@@ -4,7 +4,9 @@
 
 | やりたいこと | 入口 |
 |---|---|
+| 台帳の上位二手の差から片側の一本道の区間を探す（走査上限あり） | [book_mine master one-way](docs/book_mine.md#master-one-way-台帳から一本道の区間を探す) |
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
+| 棋譜を引き継いで1局指す | [tournament](docs/tournament.md#棋譜を引き継いで1局指す) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索結果の一致を検証する（`--strict` で nodes・score・PV・bestmove、未完了・欠損を判定） | [compare_nodes](docs/compare_nodes.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |
@@ -28,7 +30,7 @@
 | 伝播の切れ目の局面を重み順に並べ、既存の木との重複を除いたキューにする `--bridge-enqueue-out` と、main の置換と、旧 main・curated を保護した悪い alt の bench（控え）への降格・値が `--bad-eval` より大きく基準との差が `--demote-line` (既定 100) 未満の控えの復帰（`--apply`・`--replace-curated`・`--demote-alts`・`--revive-bench`。降格・復帰は `--demote-line 100`、点検・main 置換は `--line 40`。`--opp-records` で相手の record も、`--opp-bench` で相手の bench も伝播に使い、反転した局面へは辺を張らない。成れる角・飛・歩の不成は main・alt から record にし、控えからも戻さない。`--single-enqueue-out` の行に `--walk-table` の辿りの重み・下限 `--single-min-weight`・重みの帯ごとの priority `--single-priority-band`） | [book_mine master audit](docs/book_mine.md#master-audit-定跡の元データの点検) |
 | 自分は main、相手は強い対局の頻度か大きい定跡の手で指すとして辿り、自分が読み始める局面と重みを出す (`--opp-records` で強い対局が止まりの局面とその 10・20 手前に着いた局数・得点・勝敗の列) | [book_mine master walk](docs/book_mine.md#master-walk-自分が読み始める局面と重み) |
 | 自前の main と外部定跡の最善・指定点差以内の手をぶつけ、定跡切れ・値の出所・外部定跡の続き・強い対局の局数と得点を一覧にする | [book_mine master compare](docs/book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) |
-| 対局の手順と元データを照らし、局面・手の抜けと受付の被覆、抜けをつなぐ木を出す | [book_mine master game-gaps](docs/book_mine.md#master-game-gaps-対局の手順と元データの抜け) |
+| 対局の抜け・受付の被覆を調べ、抜けをつなぐ木や実戦の線を両側で舗装する木を出す | [book_mine master game-gaps](docs/book_mine.md#master-game-gaps-対局の手順と元データの抜け) |
 | 負けた局の崩れと伝播後の実戦手の値を照合し、崩れまでの抜けをつなぐ木を出す | [book_mine master game-pave](docs/book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) |
 | 初期局面から先手と後手の main を交互に直接キーで辿り、定跡が切れる局面 (局面なし・反転キーでだけある・main なし・循環) と理由、そこを根にした own=bw の木の行を出す | [book_mine master main-line](docs/book_mine.md#master-main-line-main-対-main-で定跡が切れる所) |
 | walk の止まりと伝播の切れ目・定跡に戻る手の表を合わせ、出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出し、good 以外の未受付の出口を木の計画にする (`--enqueue-out`、`--exclude-queue` で既存キューも照合。局面の番号は全部の節で「何手目」= その局面で次に指す手の番号、先手番は奇数・後手番は偶数。表は局面の手番 `turn` と `move_number` の列を持ち、偶奇が合わなければエラー) | [book_mine master exit-report](docs/book_mine.md#master-exit-report-版ごとの出口の報告) |
@@ -89,6 +91,7 @@ cargo run --release -p tools --bin shuffle_psv -- \
 ```
 
 `gensfen` は終了時に局面数を表示し、指定先へ PSV と結果 JSONL を保存します。
+`search-tree-sample` feature では、探索木内の局面を別の PSV に採取することもできます。
 LayerStacks の routing・進行度係数が必要なモデルは
 [起動時の設定条件](docs/nnue-routing.md#起動時の設定条件)に従って指定してください。
 `shuffle_psv` のチャンク指定は全件のメモリ保持を避けるためです。メモリ・一時ディスク容量と

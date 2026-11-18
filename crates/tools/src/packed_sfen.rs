@@ -50,6 +50,21 @@
 use rshogi_core::position::{Position, StaticPosition};
 use rshogi_core::types::{Color, Hand, Move, Piece, PieceType, Square};
 
+/// PSV padding の bit 1: 探索木内の標本（score/result なし、学習は eval 項のみ）。
+/// bit 0 は dual-label PSV の識別に使う。
+pub const PSV_PADDING_TREE_SAMPLE: u8 = 1 << 1;
+
+/// 探索木の標本を Position を構築せず PackedSfen に詰める。
+#[cfg(feature = "search-tree-sample")]
+pub fn pack_tree_sample(sample: &rshogi_core::search::TreeSample) -> [u8; 32] {
+    pack_board(
+        sample.side_to_move,
+        sample.king_squares,
+        |sq| sample.board[sq.index()],
+        |c| sample.hands[c.index()],
+    )
+}
+
 /// PackedSfenValue (40バイト)
 #[derive(Debug, Clone, Copy)]
 pub struct PackedSfenValue {
@@ -2393,5 +2408,29 @@ mod tests {
         assert_eq!(hcpe_result_to_stm(1, Color::Black), Some(1));
         assert_eq!(hcpe_result_to_stm(1, Color::White), Some(-1));
         assert_eq!(hcpe_result_to_stm(3, Color::Black), None);
+    }
+}
+
+#[cfg(all(test, feature = "search-tree-sample"))]
+mod tree_sample_tests {
+    use super::*;
+
+    #[test]
+    fn packed_sfen_tree_sample_matches_position() {
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "4k4/9/4+p4/9/9/9/4+P4/9/4K4 w 2R2B2G2S2N2L16P 23",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let sample = rshogi_core::search::TreeSample {
+                board: std::array::from_fn(|i| pos.piece_on(Square::from_u8(i as u8).unwrap())),
+                hands: [pos.hand(Color::Black), pos.hand(Color::White)],
+                side_to_move: pos.side_to_move(),
+                king_squares: [pos.king_square(Color::Black), pos.king_square(Color::White)],
+                game_ply: pos.game_ply(),
+            };
+            assert_eq!(pack_tree_sample(&sample), pack_position(&pos));
+        }
     }
 }

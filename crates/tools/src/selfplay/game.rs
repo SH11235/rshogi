@@ -3,7 +3,10 @@ use rshogi_core::types::{Color, Move};
 
 use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
 use super::engine::{EngineProcess, PonderStats};
-use super::position::{ParsedPosition, build_position, is_legal_game_move, plies_before_start};
+use super::position::{
+    ParsedPosition, apply_start_move, build_base_position, build_position, is_legal_game_move,
+    plies_before_start,
+};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
 
@@ -31,6 +34,8 @@ pub struct GameConfig {
     pub agreement_rule: Option<ResignRule>,
     /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) を含めて数える。
     pub max_moves: u32,
+    /// 開始手順を USI 探索と千日手裁定に引き継ぐ。
+    pub preserve_start_history: bool,
     pub timeout_margin_ms: u64,
     /// 時間制御なしの nodes/depth 探索の期限（1 手、正のミリ秒）。
     pub limit_only_timeout_ms: Option<u64>,
@@ -137,15 +142,33 @@ fn run_game_inner(
     );
     let pass_black = config.pass_rights.map(|(b, _)| b);
     let pass_white = config.pass_rights.map(|(_, w)| w);
-    let mut pos = build_position(start_pos, pass_black, pass_white)?;
-    // 千日手裁定と同じく、開始局面ファイルの手順適用後を対局履歴の基点にする。
-    // 毎手この SFEN と指し手列を送ることで、エンジン側にも反復の履歴を復元させる。
+    let mut pos = if config.preserve_start_history {
+        build_base_position(start_pos, pass_black, pass_white)?
+    } else {
+        build_position(start_pos, pass_black, pass_white)?
+    };
     let initial_sfen = pos.to_sfen();
     let initial_pass_rights = config
         .pass_rights
         .map(|_| (pos.pass_rights(Color::Black), pos.pass_rights(Color::White)));
     let mut moves = String::new();
     let mut rules = RuleAdjudicator::new(&pos);
+    let mut history_plies = 0;
+    if config.preserve_start_history {
+        for mv in &start_pos.moves {
+            let mover = pos.side_to_move();
+            let (mv, gives_check) = apply_start_move(&mut pos, mv)?;
+            if !moves.is_empty() {
+                moves.push(' ');
+            }
+            moves.push_str(&mv.to_usi());
+            history_plies += 1;
+            anyhow::ensure!(
+                rules.after_move(&pos, mover, gives_check, history_plies).is_none(),
+                "start history already ended by repetition at history ply {history_plies}"
+            );
+        }
+    }
     let mut scores = ScoreAdjudicator::new(config.resign_rule, config.win_rule, config.draw_rule)
         .with_agreement(config.agreement_rule);
     let game_start = std::time::Instant::now();
@@ -287,7 +310,7 @@ fn run_game_inner(
                         }
                         moves.push_str(&move_usi);
                         if let Some(verdict) = rules
-                            .after_move(&pos, side, gives_check, plies_played)
+                            .after_move(&pos, side, gives_check, history_plies + plies_played)
                             .or_else(|| scores.after_move(side, eval_log.as_ref(), plies_played))
                         {
                             outcome = verdict.outcome;
