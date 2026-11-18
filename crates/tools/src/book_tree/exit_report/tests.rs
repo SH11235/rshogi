@@ -100,13 +100,13 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
         walk_line("b", "stop", 0.5, &["7g7f"]),
     ];
     let (stdout, table, md) = run_report(&d, &walk, &[]);
-    assert_eq!(stdout.trim(), "good=1 bad=1 gap=0 rejoin=0 shallow=1 weak=1");
+    assert_eq!(stdout.trim(), "good=0 unsettled=1 bad=1 gap=0 rejoin=0 shallow=1 weak=1");
     let rows: Vec<Vec<_>> = table.lines().skip(1).map(|l| l.split('\t').collect()).collect();
     let summary: Vec<_> = rows.iter().map(|r| (r[0], r[1], r[4], r[5], r[6], r[7])).collect();
     assert_eq!(
         summary,
         [
-            ("good", "b", "0.03", "+60", "tree:3", "届く"),
+            ("unsettled", "b", "0.03", "+60", "tree:3", "届く"),
             ("bad", "b", "0.02", "+40", "tree:2", "届かない"),
             ("shallow", "b", "0.05", "+60", "tree:3", "届く"),
             ("weak", "w", "0.01", "-10", "single", "届く"),
@@ -130,6 +130,141 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
     ] {
         assert!(md.contains(line), "{line}\n{md}");
     }
+    assert_eq!(rows[0][11], "stop=rare;settle_plies=0;settle_black=+60;settle_end=missing");
+    assert_eq!(rows[1][11], "stop=out");
+    assert!(md.contains("## 1b. 決着していない出口"));
+    assert!(md.contains("一本道が ±300 まで通っていない"));
+}
+
+#[test]
+fn settle_classifies_missing_end_by_the_last_move_value() {
+    let d = TempDir::new().unwrap();
+    let walk = [walk_line("b", "rare", 0.03, &["7g7f"])];
+    for (terminal, class, value) in [
+        ("300", "good", "-300"),
+        ("-300", "good", "+300"),
+        ("299", "unsettled", "-299"),
+    ] {
+        let rows = [
+            master_row(&[], "7g7f", "350", "tree:3"),
+            master_row(&["7g7f"], "3c3d", "350", "single"),
+            master_row(&["7g7f", "3c3d"], "2g2f", "30", "single"),
+            master_row(&["7g7f", "3c3d", "2g2f"], "8c8d", terminal, "single"),
+        ];
+        let (_, table, _) = run_report_with_rows(&d, &walk, &[], &rows);
+        let row = table.lines().nth(1).unwrap();
+        assert!(row.starts_with(&format!("{class}\t")), "{row}");
+        assert!(row.ends_with(&format!("settle_plies=3;settle_black={value};settle_end=missing")));
+    }
+}
+
+#[test]
+fn settle_uses_last_own_value_when_the_exit_is_missing() {
+    let d = TempDir::new().unwrap();
+    let walk = [walk_line("b", "out", 0.03, &["7g7f"])];
+    let rows = [master_row(&[], "7g7f", "250", "tree:3")];
+    let (_, table, _) = run_report_with_rows(&d, &walk, &["--settle-cp", "250"], &rows);
+    assert!(table.lines().nth(1).unwrap().starts_with("good\t"), "{table}");
+    assert!(table.contains("settle_plies=0;settle_black=+250;settle_end=missing"), "{table}");
+}
+
+#[test]
+fn settle_counts_a_return_to_the_exit_as_repetition() {
+    let d = TempDir::new().unwrap();
+    let exit = ["7g7f", "3c3d"];
+    let walk = [walk_line("b", "max", 0.03, &exit)];
+    let rows = [
+        master_row(&[], "7g7f", "60", "tree:3"),
+        master_row(&exit, "5i5h", "30", "single"),
+        master_row(&["7g7f", "3c3d", "5i5h"], "5a5b", "-25", "single"),
+        master_row(&["7g7f", "3c3d", "5i5h", "5a5b"], "5h5i", "20", "single"),
+        master_row(&["7g7f", "3c3d", "5i5h", "5a5b", "5h5i"], "5b5a", "-10", "single"),
+    ];
+    let (_, table, _) = run_report_with_rows(&d, &walk, &["--settle-max-plies", "4"], &rows);
+    assert!(table.lines().nth(1).unwrap().starts_with("good\t"), "{table}");
+    assert!(
+        table.contains("settle_plies=4;settle_black=+10;settle_end=repetition"),
+        "{table}"
+    );
+}
+
+#[test]
+fn settle_counts_mate_on_the_last_allowed_move() {
+    let d = TempDir::new().unwrap();
+    let key = "3lkl3/3p1p3/5G3/9/9/9/9/9/4K4 b G";
+    let row = test_row(&[
+        ("key", key.to_owned()),
+        ("move", "G*5b".to_owned()),
+        ("role", "main".to_owned()),
+        ("evals", "60".to_owned()),
+        ("value_kind", "single".to_owned()),
+    ]);
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[row])).unwrap();
+    let mut index = MasterIndex::open(&master, &Schema::default()).unwrap();
+    let (plies, value, end) = settle_line(&mut index, key.to_owned(), None, 1).unwrap();
+    assert_eq!((plies, value, end.name()), (1, Some(60), "mate"));
+    assert!(end.settled(value, 300));
+}
+
+#[test]
+fn settle_without_main_uses_best_alt_for_the_side_to_move() {
+    let d = TempDir::new().unwrap();
+    let exit = ["7g7f"];
+    let walk = [walk_line("b", "rare", 0.03, &exit)];
+    let row = |mv, evals, role: &str| {
+        let mut row = master_row(&exit, mv, evals, "single");
+        row.set("role", role.to_owned());
+        row
+    };
+    let rows = [
+        master_row(&[], "7g7f", "60", "tree:3"),
+        row("8c8d", "20", "alt"),
+        row("3c3d", "300", "alt"),
+        row("5c5d", "600", "bench"),
+        row("4c4d", "900", "record"),
+    ];
+    let (_, table, _) = run_report_with_rows(&d, &walk, &[], &rows);
+    assert!(table.lines().nth(1).unwrap().starts_with("good\t"), "{table}");
+    assert!(table.contains("settle_plies=1;settle_black=-300;settle_end=missing"), "{table}");
+}
+
+#[test]
+fn settle_max_plies_queues_unsettled_at_the_exit_with_miss_or_heavy_priority() {
+    let d = TempDir::new().unwrap();
+    let walk = [
+        walk_line("b", "rare", 0.03, &["7g7f"]),
+        walk_line("b", "rare", 0.06, &["2g2f"]),
+    ];
+    let rows = [
+        master_row(&[], "7g7f", "60", "tree:3"),
+        master_row(&[], "2g2f", "60", "tree:3"),
+        master_row(&["7g7f"], "3c3d", "350", "single"),
+        master_row(&["2g2f"], "8c8d", "350", "single"),
+        master_row(&["7g7f", "3c3d"], "2g2f", "400", "single"),
+        master_row(&["2g2f", "8c8d"], "7g7f", "400", "single"),
+    ];
+    let enqueue = d.path().join("enqueue.jsonl");
+    let (stdout, table, _) = run_report_with_rows(
+        &d,
+        &walk,
+        &[
+            "--settle-max-plies",
+            "1",
+            "--enqueue-out",
+            enqueue.to_str().unwrap(),
+        ],
+        &rows,
+    );
+    assert!(stdout.starts_with("good=0 unsettled=2 "), "{stdout}");
+    assert_eq!(table.matches("settle_plies=1;settle_black=-350;settle_end=max").count(), 2);
+    let queued = std::fs::read_to_string(enqueue).unwrap();
+    let lines: Vec<Line> = queued.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].root, format!("sfen {} 2", key_after(&["2g2f"])));
+    assert_eq!(lines[0].priority, 1);
+    assert_eq!(lines[1].root, format!("sfen {} 2", key_after(&["7g7f"])));
+    assert_eq!(lines[1].priority, 4);
 }
 
 #[test]
@@ -818,6 +953,8 @@ fn enqueue_walk_classes_use_exit_roots_and_three_priority_levels() {
             "4",
             "--opp-n",
             "3",
+            "--settle-cp",
+            "60",
             "--stop",
             "150",
             "--rounds",
@@ -828,6 +965,7 @@ fn enqueue_walk_classes_use_exit_roots_and_three_priority_levels() {
             "70",
         ],
     );
+    assert!(stdout.starts_with("good=1 unsettled=0 "), "{stdout}");
     assert!(stdout.contains("出力=3 照合除外=0 手数なし=0 まとめた行=0"), "{stdout}");
     let lines = read_queue(&out);
     assert_eq!(lines.len(), 3);
