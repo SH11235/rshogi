@@ -72,7 +72,7 @@ pub struct OnnxConfig {
 
 /// dlshogi value head を ONNX Runtime で評価する
 pub struct OnnxEvaluator {
-    session: Session,
+    session: EvaluatorSession,
     batch_size: usize,
     f1_buf: Vec<f32>,
     f2_buf: Vec<f32>,
@@ -80,6 +80,29 @@ pub struct OnnxEvaluator {
     single_policy: Vec<f32>,
     #[cfg(feature = "inference-diagnostics")]
     timings: crate::InferenceTimings,
+}
+
+struct EvaluatorSession {
+    inner: Session,
+    #[cfg(feature = "cuda-pinned-output")]
+    pinned_device: Option<i32>,
+}
+
+impl EvaluatorSession {
+    fn output_memory(&self) -> Result<MemoryInfo> {
+        #[cfg(feature = "cuda-pinned-output")]
+        if let Some(device) = self.pinned_device {
+            return MemoryInfo::new(
+                AllocationDevice::CUDA_PINNED,
+                device,
+                AllocatorType::Device,
+                MemoryType::CPUOutput,
+            )
+            .map_err(ort_err);
+        }
+        MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+            .map_err(ort_err)
+    }
 }
 
 fn ort_err(e: ort::Error) -> anyhow::Error {
@@ -121,7 +144,11 @@ fn ensure_ort_dylib(gpu_id: i32) -> Result<()> {
     }
 }
 
-fn create_session(cfg: &OnnxConfig, profile: Option<&Path>, cuda_tf32: bool) -> Result<Session> {
+fn create_session(
+    cfg: &OnnxConfig,
+    profile: Option<&Path>,
+    cuda_tf32: bool,
+) -> Result<EvaluatorSession> {
     use ort::ep::ExecutionProvider;
 
     if cfg.batch_size == 0 {
@@ -239,7 +266,11 @@ fn create_session(cfg: &OnnxConfig, profile: Option<&Path>, cuda_tf32: bool) -> 
         builder.commit_from_file(&cfg.model_path).map_err(ort_err)?
     };
 
-    Ok(session)
+    Ok(EvaluatorSession {
+        inner: session,
+        #[cfg(feature = "cuda-pinned-output")]
+        pinned_device: (cfg.gpu_id >= 0 && !cfg.use_tensorrt).then_some(cfg.gpu_id),
+    })
 }
 
 impl OnnxEvaluator {
@@ -249,12 +280,12 @@ impl OnnxEvaluator {
         Self::from_session(session, cfg.batch_size)
     }
 
-    fn from_session(session: Session, batch_size: usize) -> Result<Self> {
+    fn from_session(session: EvaluatorSession, batch_size: usize) -> Result<Self> {
         anyhow::ensure!(
-            model_format(&session)? == crate::InputFormat::Basic,
+            model_format(&session.inner)? == crate::InputFormat::Basic,
             "legacy evaluator requires basic inputs"
         );
-        validate_model(&session, batch_size, crate::InputFormat::Basic)?;
+        validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
         eprintln!("Basic ONNX model loaded. Batch size: {batch_size}");
 
         Ok(Self {
@@ -329,7 +360,7 @@ impl OnnxEvaluator {
     }
 
     fn run_inputs(
-        session: &mut Session,
+        session: &mut EvaluatorSession,
         n: usize,
         first: &[f32],
         second: &[f32],
@@ -355,7 +386,7 @@ impl OnnxEvaluator {
     }
 
     fn forward_inputs<R>(
-        session: &mut Session,
+        session: &mut EvaluatorSession,
         n: usize,
         first: &[f32],
         second: &[f32],
@@ -379,12 +410,8 @@ impl OnnxEvaluator {
 
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::BindingSetup);
-        let output_mem = inference_try!(
-            timer,
-            MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-                .map_err(ort_err)
-        );
-        let mut binding = inference_try!(timer, session.create_binding().map_err(ort_err));
+        let output_mem = inference_try!(timer, session.output_memory());
+        let mut binding = inference_try!(timer, session.inner.create_binding().map_err(ort_err));
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::InputBind);
         inference_try!(timer, binding.bind_input("input1", &input1).map_err(ort_err));
@@ -402,7 +429,7 @@ impl OnnxEvaluator {
         );
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::RunBinding);
-        let outputs = inference_try!(timer, session.run_binding(&binding).map_err(ort_err));
+        let outputs = inference_try!(timer, session.inner.run_binding(&binding).map_err(ort_err));
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::OutputValidationCopy);
         let (value_shape, values) = inference_try!(
@@ -670,12 +697,12 @@ impl ModelEvaluator {
     pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
         anyhow::ensure!(!cfg.use_tensorrt, "automatic model dispatch supports CPU/CUDA only");
         let session = create_session(cfg, options.profiling.as_deref(), options.cuda_tf32)?;
-        match model_format(&session)? {
+        match model_format(&session.inner)? {
             crate::InputFormat::Basic => {
                 Ok(Self::Basic(OnnxEvaluator::from_session(session, cfg.batch_size)?))
             }
             crate::InputFormat::StmTokensV1 => {
-                validate_model(&session, cfg.batch_size, crate::InputFormat::StmTokensV1)?;
+                validate_model(&session.inner, cfg.batch_size, crate::InputFormat::StmTokensV1)?;
                 Ok(Self::Tokens(TokenEvaluator {
                     session,
                     batch_size: cfg.batch_size,
@@ -753,7 +780,7 @@ impl ModelEvaluator {
             Self::Basic(e) => &mut e.session,
             Self::Tokens(e) => &mut e.session,
         };
-        session.end_profiling().map_err(ort_err)
+        session.inner.end_profiling().map_err(ort_err)
     }
 }
 
@@ -819,7 +846,7 @@ fn validate_batch_outputs(
 
 /// `stm-tokens-v1` の再利用可能な入力 buffer と ORT session。
 pub struct TokenEvaluator {
-    session: Session,
+    session: EvaluatorSession,
     batch_size: usize,
     tokens: Vec<i64>,
     #[cfg(feature = "inference-diagnostics")]
@@ -938,7 +965,7 @@ impl TokenEvaluator {
     }
 
     fn run_inputs(
-        session: &mut Session,
+        session: &mut EvaluatorSession,
         n: usize,
         tokens: &[i64],
         values_out: &mut [f32],
@@ -957,7 +984,7 @@ impl TokenEvaluator {
     }
 
     fn run_inputs_optional_policy(
-        session: &mut Session,
+        session: &mut EvaluatorSession,
         n: usize,
         tokens: &[i64],
         values_out: &mut [f32],
@@ -974,12 +1001,8 @@ impl TokenEvaluator {
         );
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::BindingSetup);
-        let memory = inference_try!(
-            timer,
-            MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-                .map_err(ort_err)
-        );
-        let mut binding = inference_try!(timer, session.create_binding().map_err(ort_err));
+        let memory = inference_try!(timer, session.output_memory());
+        let mut binding = inference_try!(timer, session.inner.create_binding().map_err(ort_err));
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::InputBind);
         inference_try!(timer, binding.bind_input("tokens", &tokens).map_err(ort_err));
@@ -995,7 +1018,7 @@ impl TokenEvaluator {
         );
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::RunBinding);
-        let outputs = inference_try!(timer, session.run_binding(&binding).map_err(ort_err));
+        let outputs = inference_try!(timer, session.inner.run_binding(&binding).map_err(ort_err));
         #[cfg(feature = "inference-diagnostics")]
         timer.advance(InferenceStage::OutputValidationCopy);
         let policy = if policy_out.is_some() {
