@@ -148,12 +148,13 @@ struct UsiEngine {
     eval_file_explicit: Option<bool>,
     /// 最後に指定された EvalFile パス（NNUE_ARCHITECTURE 変更時の再読込用）
     eval_file_path: Option<String>,
-    /// LayerStacks の bucket routing mode。LayerStacks 利用時は明示指定が必須。
+    /// routing を内蔵しない LayerStacks ネット向けの mode。
     ls_bucket_mode: Option<LayerStackBucketMode>,
     /// progresskpabs の推論 bucket 数。0 は未指定として扱う。
     ls_progress_buckets: Option<usize>,
     /// LS_PROGRESS_COEFF の読み込みに成功しているか。
     ls_progress_coeff_loaded: bool,
+    ls_progress_coeff_explicit: bool,
     /// SPSAParamsFile の明示指定パス（setoption で設定）
     spsa_params_file: Option<String>,
     /// SPSA params ファイルの読み込み済みフラグ
@@ -260,6 +261,7 @@ impl UsiEngine {
             ls_bucket_mode: None,
             ls_progress_buckets: None,
             ls_progress_coeff_loaded: false,
+            ls_progress_coeff_explicit: false,
             spsa_params_file: None,
             spsa_params_loaded: false,
             spsa_defaults: BTreeMap::new(),
@@ -536,10 +538,22 @@ impl UsiEngine {
             }
         }
         self.reload_net_deltas_if_dirty()?;
-        // version は binary layout の判別にだけ使う。LayerStacks の routing semantics は
-        // USI オプションと、ロード済み net の格納 bucket 数を突き合わせて検証する。
-        if let Some(stored_bucket_count) =
-            get_network().as_deref().and_then(|net| net.layer_stack_num_buckets())
+        let network = get_network();
+        if let Some(spec) = network.as_deref().and_then(|net| net.layer_stack_bucket_spec()) {
+            if self.ls_bucket_mode.is_some()
+                || self.ls_progress_buckets.is_some()
+                || self.ls_progress_coeff_explicit
+            {
+                bail!(
+                    "NNUE ls_bucket routing conflicts with LS_BUCKET_MODE, LS_PROGRESS_BUCKETS or LS_PROGRESS_COEFF; leave these options unset"
+                );
+            }
+            eprintln!(
+                "info string NNUE LayerStack routing mode=spec buckets={}",
+                spec.num_buckets()
+            );
+        } else if let Some(stored_bucket_count) =
+            network.as_deref().and_then(|net| net.layer_stack_num_buckets())
         {
             if let Err(message) = validate_layer_stack_routing(
                 stored_bucket_count,
@@ -1400,7 +1414,8 @@ impl UsiEngine {
                 }
             },
             "LS_PROGRESS_COEFF" => {
-                if value.is_empty() || value == "<empty>" {
+                self.ls_progress_coeff_explicit = !value.is_empty() && value != "<empty>";
+                if !self.ls_progress_coeff_explicit {
                     reset_layer_stack_progress_kpabs_weights();
                     rshogi_core::nnue::reset_layer_stack_progress_kpabs_q16_weights();
                     self.ls_progress_coeff_loaded = false;

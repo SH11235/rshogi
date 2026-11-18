@@ -19,7 +19,7 @@
 //!
 //! ## バケット選択
 //!
-//! `LS_BUCKET_MODE` で `progresskpabs` または両玉の相対段に基づく `kingrank9` を選ぶ。
+//! ネット内の `ls_bucket=` で bucket を選ぶ。spec がなければ `LS_BUCKET_MODE` を使う。
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
@@ -225,6 +225,7 @@ pub struct NetworkLayerStacks<
     pub fv_scale: i32,
     /// bucket 数 (= net file の `num_buckets` field、legacy `.bin` は 9)
     pub num_buckets: usize,
+    bucket_spec: Option<super::BucketSpec>,
     _ft: PhantomData<FT>,
 }
 
@@ -344,6 +345,7 @@ impl<
         } else {
             DEFAULT_NUM_BUCKETS
         };
+        let bucket_spec = super::BucketSpec::from_arch(&arch_str, num_buckets)?;
 
         #[cfg(feature = "nnue-effect-bucket")]
         {
@@ -581,6 +583,7 @@ impl<
             layer_stacks,
             fv_scale,
             num_buckets,
+            bucket_spec,
             _ft: PhantomData,
         })
     }
@@ -686,13 +689,24 @@ impl<
         }
     }
 
+    /// ネットに記録された bucket spec を返す。
+    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
+        self.bucket_spec
+    }
+
+    fn bucket_index(&self, pos: &Position) -> usize {
+        self.bucket_spec.map_or_else(
+            || compute_layer_stacks_bucket_index(pos, pos.side_to_move(), self.num_buckets),
+            |spec| spec.bucket(pos),
+        )
+    }
+
     /// 評価値を計算。
     ///
     /// stackを持たないため、progress係数は評価ごとにglobal設定から取得する。
     /// f32係数をresetまで保持する場合は `NNUEEvaluator` を使う。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
-        let side_to_move = pos.side_to_move();
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
+        let bucket_index = self.bucket_index(pos);
         self.evaluate_with_bucket(pos, acc, bucket_index)
     }
 
@@ -906,11 +920,13 @@ impl<
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed.0[0..32]);
 
         // バケットインデックスを計算（通常パスと同じ共通関数を使用）
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
-        info!(
-            "[NNUE Eval] bucket_mode={:?}, bucket_index={bucket_index}",
-            get_layer_stack_bucket_mode()
-        );
+        let bucket_index = self.bucket_index(pos);
+        let mode = if self.bucket_spec.is_some() {
+            "spec"
+        } else {
+            get_layer_stack_bucket_mode().as_str()
+        };
+        info!("[NNUE Eval] bucket_mode={mode}, bucket_index={bucket_index}");
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =
@@ -1320,6 +1336,11 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         ls_match_size!(self, net => net.num_buckets)
     }
 
+    /// ネットに記録された bucket spec を返す。
+    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
+        ls_match_size!(self, net => net.bucket_spec())
+    }
+
     #[cfg(feature = "layerstack-arch")]
     pub(crate) fn net_tensor_shape(&self, kind: NetTensorKind) -> NetTensorShape {
         ls_match_size!(self, net => net.net_tensor_shape(kind))
@@ -1523,7 +1544,9 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
-        let bucket = if get_layer_stack_bucket_mode() == LayerStackBucketMode::ProgressKPAbs {
+        let bucket = if let Some(spec) = self.bucket_spec() {
+            Some(spec.bucket(pos))
+        } else if get_layer_stack_bucket_mode() == LayerStackBucketMode::ProgressKPAbs {
             let routing_buckets = get_layer_stack_progress_buckets()
                 .expect("LayerStacks progress routing is not configured");
             assert!(
@@ -2608,6 +2631,11 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.num_buckets())
     }
 
+    /// ネットに記録された bucket spec を返す。
+    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
+        ls_match_ft!(self, by_ft => by_ft.bucket_spec())
+    }
+
     #[cfg(feature = "layerstack-arch")]
     pub(crate) fn net_tensor_shape(&self, kind: NetTensorKind) -> NetTensorShape {
         ls_match_ft!(self, by_ft => by_ft.net_tensor_shape(kind))
@@ -3185,6 +3213,7 @@ mod tests {
             layer_stacks: LayerStacks::with_num_buckets(1),
             fv_scale: 1,
             num_buckets: 1,
+            bucket_spec: None,
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
@@ -3311,6 +3340,7 @@ mod tests {
             layer_stacks: LayerStacks::with_num_buckets(1),
             fv_scale: 16,
             num_buckets: 1,
+            bucket_spec: None,
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
@@ -3371,6 +3401,7 @@ mod tests {
             layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
             num_buckets: DEFAULT_NUM_BUCKETS,
+            bucket_spec: None,
             _ft: PhantomData,
         };
         #[cfg(feature = "nnue-threat")]

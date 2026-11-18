@@ -13,9 +13,11 @@ cargo run --release -p tools --bin eval_sfens -- \
   --count 10
 ```
 
-`--bucket-mode` は `progresskpabs`（既定）または `progresskpabsq16`。`--progress-buckets` は必須で、
-モデルの bucket 数と routing 設定に合わせる。`--count` の既定値は 10 で、
-入力の先頭から読む行数を制限する（空行も数えるが評価はしない）。
+ネットに `ls_bucket=` がある場合は、その spec で自動的に bucket を選ぶ。
+`--bucket-mode`、`--progress-buckets`、`--progress-coeff` を指定すると競合エラーになる。
+ネットに spec がない場合は `--progress-buckets` が必須で、`--bucket-mode` は
+`progresskpabs`（既定）または `progresskpabsq16` を選ぶ。
+`--count` の既定値は 10 で、入力の先頭から読む行数を制限する（空行も数えるが評価はしない）。
 出力列は `sfen`、`bucket`、`raw`、`score`（歩=90 の内部スケール）、
 `score_cp`（歩=100 の cp）。
 
@@ -29,3 +31,68 @@ L1 の診断は読み取り専用の重みを使い、従来の密 SIMD 計算�
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
+
+### tatara との手動照合
+
+以下は HalfKA_hm merged 1536x16x64、Threat・PSQT なしの spec 付きネットを照合する例。
+rshogi のルートで実行する。`NETS` に比較する `.bin` のパスを並べ、`EXTRA_SFENS` に
+平手初期局面と玉を進めた局面から合法手をランダムに指して採取した SFEN ファイルを指定する。
+4 件の sentinel だけで試す場合は `EXTRA_SFENS=/dev/null` を指定する。
+
+```bash
+set -e
+export CARGO_BUILD_JOBS=8
+cargo build --release -p tools --bin eval_sfens --no-default-features \
+  --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x64-none,layerstack-arch,layerstacks-1536x16x64,ft-halfka_hm_merged
+(cd /path/to/tatara && cargo build --release -p eval-sfen --target-dir /tmp/tatara-evalsfen-target)
+export TATARA_EVAL=/tmp/tatara-evalsfen-target/release/eval_sfen
+export RSHOGI_EVAL=target/release/eval_sfens
+export EXTRA_SFENS=/path/to/generated.sfens
+export FV_SCALE=14
+NETS=("$SHOGI_DATA/nnue/<first-model>.bin" "$SHOGI_DATA/nnue/<second-model>.bin")
+
+python3 - "${NETS[@]}" <<'PY'
+import csv
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sentinel = Path("crates/tools/docs/fixtures/search_only_sentinel_4pos.txt")
+positions = [line.split(" | ", 1)[1] for line in sentinel.read_text().splitlines()
+             if " | " in line and not line.startswith("#")]
+positions += [line.strip() for line in Path(os.environ["EXTRA_SFENS"]).read_text().splitlines()
+              if line.strip()]
+scale = os.environ["FV_SCALE"]
+
+with tempfile.TemporaryDirectory() as temp:
+    sfens = Path(temp) / "positions.sfens"
+    sfens.write_text("\n".join(positions) + "\n")
+    for net in sys.argv[1:]:
+        output = subprocess.check_output(
+            [os.environ["RSHOGI_EVAL"], "--nnue", net, "--sfens", sfens,
+             "--count", str(len(positions))], text=True)
+        rows = list(csv.DictReader(io.StringIO(output), delimiter="\t"))
+        reference = subprocess.run(
+            [os.environ["TATARA_EVAL"], "--nnue-file", net, "--fv-scale", scale, "--debug"]
+            + [arg for sfen in positions for arg in ("--sfen", sfen)],
+            check=True, text=True, capture_output=True)
+        traced = [line.split("\t") for line in reference.stderr.splitlines()
+                  if "\tbucket=" in line]
+        scores = reference.stdout.splitlines()
+        if len(rows) != len(traced) or len(rows) != len(scores) or len(rows) != len(positions):
+            raise SystemExit(f"{net}: unexpected number of evaluation rows")
+        for sfen, row, trace, score in zip(positions, rows, traced, scores):
+            expected = (sfen, trace[1].split("=")[1], trace[2].split("=")[1], score)
+            actual = (row["sfen"], row["bucket"], row["raw"], row["score"])
+            if trace[0] != sfen or actual != expected:
+                raise SystemExit(f"{net}: {sfen}: expected {expected}, got {actual}")
+        buckets = sorted({int(row["bucket"]) for row in rows})
+        print(f"{net}: {len(rows)}/{len(positions)} match, buckets={buckets}")
+PY
+```
+
+tatara の標準出力は `raw / FV_SCALE` の整数値なので rshogi の `score` 列と照合する。
+`--debug` が出す bucket と raw も各局面で一致することを検査する。

@@ -192,6 +192,7 @@ pub struct DynamicLayerStacksNetwork {
     feature: RuntimeLsFeature,
     input_dimensions: usize,
     num_buckets: usize,
+    pub(crate) bucket_spec: Option<super::BucketSpec>,
     ft_biases: AlignedBox<i16>,
     ft_weights: WeightBox<i16>,
     psqt_biases: AlignedBox<i32>,
@@ -238,6 +239,7 @@ impl DynamicLayerStacksNetwork {
             )));
         }
 
+        let bucket_spec = super::BucketSpec::from_arch(arch, num_buckets)?;
         let (l1, l2, l3) = parse_arch_dimensions(arch);
         validate_layer_stacks_dimensions(l1, l2, l3).map_err(invalid)?;
         let threat_dimensions =
@@ -407,6 +409,7 @@ impl DynamicLayerStacksNetwork {
             feature,
             input_dimensions,
             num_buckets,
+            bucket_spec,
             ft_biases,
             ft_weights,
             psqt_biases,
@@ -980,31 +983,35 @@ impl DynamicLayerStacksNetwork {
                 &mut stack.transformed[..l1],
             );
         }
-        let bucket_index = match get_layer_stack_bucket_mode() {
-            LayerStackBucketMode::KingRank9 => compute_layer_stack_kingrank9_bucket_index(
-                pos,
-                pos.side_to_move(),
-                self.num_buckets,
-            ),
-            LayerStackBucketMode::ProgressKPAbsQ16 => super::progress_q16::bucket_with_weights(
-                pos,
-                self.num_buckets,
-                stack.progress_q16_weights.as_deref(),
-            ),
-            LayerStackBucketMode::ProgressKPAbs => {
-                let routing_buckets = get_layer_stack_progress_buckets()
-                    .expect("LayerStacks progress routing is not configured");
-                assert!(
-                    routing_buckets <= self.num_buckets,
-                    "LayerStacks progress routing uses {routing_buckets} buckets, but the network stores only {}",
-                    self.num_buckets
-                );
-                compute_layer_stack_progresskpabs_bucket_index(
+        let bucket_index = if let Some(spec) = self.bucket_spec {
+            spec.bucket(pos)
+        } else {
+            match get_layer_stack_bucket_mode() {
+                LayerStackBucketMode::KingRank9 => compute_layer_stack_kingrank9_bucket_index(
                     pos,
                     pos.side_to_move(),
-                    &stack.progress_kpabs_weights,
-                    routing_buckets,
-                )
+                    self.num_buckets,
+                ),
+                LayerStackBucketMode::ProgressKPAbsQ16 => super::progress_q16::bucket_with_weights(
+                    pos,
+                    self.num_buckets,
+                    stack.progress_q16_weights.as_deref(),
+                ),
+                LayerStackBucketMode::ProgressKPAbs => {
+                    let routing_buckets = get_layer_stack_progress_buckets()
+                        .expect("LayerStacks progress routing is not configured");
+                    assert!(
+                        routing_buckets <= self.num_buckets,
+                        "LayerStacks progress routing uses {routing_buckets} buckets, but the network stores only {}",
+                        self.num_buckets
+                    );
+                    compute_layer_stack_progresskpabs_bucket_index(
+                        pos,
+                        pos.side_to_move(),
+                        &stack.progress_kpabs_weights,
+                        routing_buckets,
+                    )
+                }
             }
         };
         let bucket = &self.buckets[bucket_index];
@@ -1462,6 +1469,60 @@ mod tests {
     use crate::nnue::network_layer_stacks::LayerStacksNetwork;
     use crate::position::SFEN_HIRATE;
     use crate::types::Move;
+
+    #[test]
+    fn loads_and_evaluates_a_net_with_32_spec_buckets() {
+        let mut model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            73_305,
+            2,
+            3,
+            5,
+            32,
+        );
+        let layout =
+            super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        for (index, bucket) in layout.buckets.iter().enumerate() {
+            model.bytes[bucket.output.biases.clone()]
+                .copy_from_slice(&(14 * index as i32).to_le_bytes());
+            model.bytes[bucket.output.weights.clone()].fill(0);
+            model.bytes[bucket.l1.biases.clone()].fill(0);
+            model.bytes[bucket.l1.weights.clone()].fill(0);
+        }
+
+        let arch_len = u32::from_le_bytes(model.bytes[8..12].try_into().unwrap()) as usize;
+        let with_token = |token: &str| {
+            let mut bytes = model.bytes.clone();
+            bytes[8..12].copy_from_slice(&((arch_len + token.len()) as u32).to_le_bytes());
+            bytes.splice(12 + arch_len..12 + arch_len, token.bytes());
+            bytes
+        };
+        let load = |token| {
+            DynamicLayerStacksNetwork::read_with_source(
+                &mut Cursor::new(with_token(token)),
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+        };
+        let network = load(",fv_scale=14,ls_bucket=handmajor4+ownking:2/3/4/5/6/7/8").unwrap();
+        assert_eq!(network.bucket_spec.unwrap().num_buckets(), 32);
+        let mut pos = Position::new();
+        pos.set_sfen("4K4/9/9/9/9/9/9/9/4k4 b Rb 1").unwrap();
+        let mut stack = network.new_stack();
+        network.refresh(&pos, &mut stack);
+        assert_eq!(network.evaluate(&pos, &mut stack).raw(), 31);
+
+        for (token, message) in [
+            (",ls_bucket=ownking:2", "the network stores 32"),
+            (",ls_bucket=ownking:0", "invalid ls_bucket"),
+            (",ls_bucket=ownking:2,ls_bucket=oppking:2", "duplicate ls_bucket"),
+        ] {
+            let error = load(token).err().expect("invalid bucket spec");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
 
     #[test]
     fn layer_stacks_raw_extensions_reject_truncation_before_reading_tensor() {
@@ -1936,6 +1997,7 @@ mod tests {
             feature,
             input_dimensions: feature.dimensions(),
             num_buckets,
+            bucket_spec: None,
             ft_biases: AlignedBox::new_zeroed(l1),
             ft_weights: AlignedBox::new_zeroed(0).into(),
             psqt_biases: AlignedBox::new_zeroed(usize::from(has_psqt)),

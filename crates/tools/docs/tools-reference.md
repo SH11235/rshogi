@@ -73,7 +73,7 @@
 | [`mate_bench`](mate_bench.md) | df-pn 詰み探索の正解・探索量・時間を集計。最短手順 (詰将棋ルール / 全応手) と作意手数との照合、変長駒余りの候補の検出 (`--check-leftover`) |
 | [`compare_nodes`](compare_nodes.md) | 2 エンジンの深度別ノード数を比較。`--strict` で score・PV・bestmove の乖離、未完了・欠損もエラー判定 |
 | [`compare_eval_nnue`](compare_eval_nnue.md) | PSV をサンプリングして NNUE の静的評価・探索スコアを比較 |
-| [`eval_sfens`](eval_sfens.md) | SFEN 局面集を NNUE で静的評価 |
+| [`eval_sfens`](eval_sfens.md) | SFEN 局面集を LayerStacks NNUE で静的評価し、ネット内の `ls_bucket=` にも対応 |
 | [`nnue_saturation`](nnue_saturation.md) | LayerStacks の活性飽和率と bucket 分布を計測 |
 | [`verify_nnue_accumulator`](verify_nnue_accumulator.md) | NNUE の差分更新と再計算の一致を検証 |
 | [`dump_effect_bucket_golden`](dump_effect_bucket_golden.md) | effect bucket の active index を設定別に dump |

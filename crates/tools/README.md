@@ -69,6 +69,8 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /
 `verify_nnue_accumulator`) には、tools の `layerstack-arch` feature (`nnue-arch` に含まれる) が必要です。
 
+[`eval_sfens`](docs/eval_sfens.md) は、ネットに `ls_bucket=` がある場合にその routing を自動選択します。
+
 ## クイックスタート
 
 教師データ・NNUE モデル・進行度係数は repo 外の共有 root に置き、

@@ -437,6 +437,7 @@ impl LayerStacksBinLayout {
             )));
         }
 
+        super::BucketSpec::from_arch(&architecture, num_buckets)?;
         let (l1, l2, l3) = parse_arch_dimensions(&architecture);
         validate_layer_stacks_dimensions(l1, l2, l3).map_err(invalid)?;
         let threat_dimensions = validate_layer_stacks_architecture_header(&architecture)
