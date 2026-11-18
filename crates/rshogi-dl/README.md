@@ -27,6 +27,8 @@ cache を使う batch 呼出しは `CachedEvaluator::with_batch_capacity(inner, 
 
 既定 feature は GPU や ONNX Runtime に依存しません。`onnx` feature で ORT backend を利用できます。`ORT_DYLIB_PATH` に ONNX Runtime API 24 対応の共有ライブラリを指定してください。`OnnxConfig` の device が非負なら CUDA、負なら CPU を利用します。TensorRT は明示的に選択し、engine cache は利用するモデルと実行環境に対応する場所へ保存してください。
 
+`--features onnx,cuda-pinned-output` を指定すると、CUDA EP の policy と value の出力に pinned host memory を使います。既定は無効です。CPU と TensorRT は通常のホストメモリを使います。
+
 入力名・shape・dtype と出力の shape を検証し、value は有限な `[0,1]`、policy は有限な logits を要求します。value に sigmoid が既に適用されたモデルを使用してください。モデルの意味は shape だけでは判別できないため、取得元の仕様も確認してください。
 
 SFEN ごとの特徴量、全合法手ラベル、推論出力を JSONL で取り出せます。
