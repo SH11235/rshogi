@@ -72,7 +72,7 @@ pub struct OnnxConfig {
 
 /// dlshogi value head を ONNX Runtime で評価する
 pub struct OnnxEvaluator {
-    session: EvaluatorSession,
+    sessions: BasicSessions,
     batch_size: usize,
     f1_buf: Vec<f32>,
     f2_buf: Vec<f32>,
@@ -80,6 +80,30 @@ pub struct OnnxEvaluator {
     single_policy: Vec<f32>,
     #[cfg(feature = "inference-diagnostics")]
     timings: crate::InferenceTimings,
+}
+
+struct BasicSessions {
+    main: EvaluatorSession,
+    #[cfg(feature = "cuda-basic-root-session")]
+    single_row: Option<Box<EvaluatorSession>>,
+}
+
+impl BasicSessions {
+    #[cfg(feature = "cuda-basic-root-session")]
+    fn for_rows(&mut self, rows: usize) -> &mut EvaluatorSession {
+        if rows == 1
+            && let Some(single_row) = &mut self.single_row
+        {
+            single_row
+        } else {
+            &mut self.main
+        }
+    }
+
+    #[cfg(not(feature = "cuda-basic-root-session"))]
+    fn for_rows(&mut self, _: usize) -> &mut EvaluatorSession {
+        &mut self.main
+    }
 }
 
 struct EvaluatorSession {
@@ -277,19 +301,46 @@ impl OnnxEvaluator {
     /// 基本形式のモデルを読み込む。token形式は受理しない。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
         let session = create_session(cfg, None, true)?;
-        Self::from_session(session, cfg.batch_size)
+        Self::from_session(
+            session,
+            cfg,
+            #[cfg(feature = "cuda-basic-root-session")]
+            &ModelOptions::default(),
+        )
     }
 
-    fn from_session(session: EvaluatorSession, batch_size: usize) -> Result<Self> {
+    fn from_session(
+        session: EvaluatorSession,
+        cfg: &OnnxConfig,
+        #[cfg(feature = "cuda-basic-root-session")] options: &ModelOptions,
+    ) -> Result<Self> {
+        let batch_size = cfg.batch_size;
         anyhow::ensure!(
             model_format(&session.inner)? == crate::InputFormat::Basic,
             "legacy evaluator requires basic inputs"
         );
         validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
+        #[cfg(feature = "cuda-basic-root-session")]
+        // CUDA の畳み込み実行計画は入力形状が変わると再作成される。
+        let single_row = if cfg.gpu_id >= 0
+            && !cfg.use_tensorrt
+            && batch_size > 1
+            && options.profiling.is_none()
+        {
+            let session = create_session(cfg, None, options.cuda_tf32)?;
+            validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
+            Some(Box::new(session))
+        } else {
+            None
+        };
         eprintln!("Basic ONNX model loaded. Batch size: {batch_size}");
 
         Ok(Self {
-            session,
+            sessions: BasicSessions {
+                main: session,
+                #[cfg(feature = "cuda-basic-root-session")]
+                single_row,
+            },
             batch_size,
             f1_buf: vec![0.0f32; batch_size * FEATURES1_SIZE],
             f2_buf: vec![0.0f32; batch_size * FEATURES2_SIZE],
@@ -348,7 +399,7 @@ impl OnnxEvaluator {
             .for_each(|((f1, f2), pos)| make_input_features(pos, f1, f2));
 
         Self::run_inputs(
-            &mut self.session,
+            self.sessions.for_rows(n),
             n,
             &self.f1_buf[..n * FEATURES1_SIZE],
             &self.f2_buf[..n * FEATURES2_SIZE],
@@ -614,7 +665,7 @@ impl crate::Evaluator for OnnxEvaluator {
             return Ok(());
         }
         Self::forward_inputs(
-            &mut self.session,
+            self.sessions.for_rows(input.len()),
             input.len(),
             first,
             second,
@@ -648,7 +699,7 @@ impl crate::Evaluator for OnnxEvaluator {
             .ok_or_else(|| anyhow::anyhow!("basic evaluator requires basic encoded inputs"))?;
         self.run_single(logits, |evaluator, values, policy| {
             Self::run_inputs(
-                &mut evaluator.session,
+                evaluator.sessions.for_rows(1),
                 1,
                 first,
                 second,
@@ -693,14 +744,17 @@ impl ModelEvaluator {
         Self::with_options(cfg, &ModelOptions::default())
     }
 
-    /// 精度設定と任意の ORT profile を指定して、一度だけモデルを読み込む。
+    /// 精度設定と任意の ORT profile を指定して、モデルを読み込む。
     pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
         anyhow::ensure!(!cfg.use_tensorrt, "automatic model dispatch supports CPU/CUDA only");
         let session = create_session(cfg, options.profiling.as_deref(), options.cuda_tf32)?;
         match model_format(&session.inner)? {
-            crate::InputFormat::Basic => {
-                Ok(Self::Basic(OnnxEvaluator::from_session(session, cfg.batch_size)?))
-            }
+            crate::InputFormat::Basic => Ok(Self::Basic(OnnxEvaluator::from_session(
+                session,
+                cfg,
+                #[cfg(feature = "cuda-basic-root-session")]
+                options,
+            )?)),
             crate::InputFormat::StmTokensV1 => {
                 validate_model(&session.inner, cfg.batch_size, crate::InputFormat::StmTokensV1)?;
                 Ok(Self::Tokens(TokenEvaluator {
@@ -777,7 +831,7 @@ impl ModelEvaluator {
     /// profile を閉じ、ORT が保存したファイル名を返す。
     pub fn end_profiling(&mut self) -> Result<String> {
         let session = match self {
-            Self::Basic(e) => &mut e.session,
+            Self::Basic(e) => &mut e.sessions.main,
             Self::Tokens(e) => &mut e.session,
         };
         session.inner.end_profiling().map_err(ort_err)
