@@ -1296,6 +1296,7 @@ for raw in sys.stdin:
             draw_rule: None,
             agreement_rule: None,
             max_moves: 5,
+            preserve_start_history: false,
             timeout_margin_ms: 1000,
             limit_only_timeout_ms: Some(0),
             game_time_limit_ms: None,

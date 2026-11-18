@@ -98,6 +98,7 @@ done
         agreement_rule: None,
         game_time_limit_ms: None,
         max_moves: plies_before_start(&initial) + game_moves,
+        preserve_start_history: false,
         timeout_margin_ms: 1000,
         limit_only_timeout_ms: None,
         cancel: None,

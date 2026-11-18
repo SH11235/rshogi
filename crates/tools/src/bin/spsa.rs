@@ -3245,6 +3245,7 @@ fn build_game_setup(cli: &Cli) -> (GameConfig, TimeControl) {
         // Fischer の async では pair ごとの時計から決めて上書きする。
         game_time_limit_ms: None,
         max_moves: cli.max_moves,
+        preserve_start_history: false,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
         go_depth: None,

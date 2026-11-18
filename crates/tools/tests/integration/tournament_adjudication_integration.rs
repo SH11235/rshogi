@@ -166,3 +166,109 @@ done
         assert_eq!(rows.iter().filter(|row| row["type"] == "move").count(), plies as usize * 2);
     }
 }
+
+#[test]
+fn single_game_keeps_engine_order_and_can_preserve_start_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine.sh");
+    fs::write(
+        &engine,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    usi) printf 'id name repetition\nusiok\n' ;;
+    isready) printf 'readyok\n' ;;
+    position*)
+      set -- $line
+      ply=$6
+      if [ "$ply" -ne "$BASE_PLY" ]; then exit 1; fi
+      if [ "$BASE_PLY" = 1 ] && [ "$8" != 3i4h ]; then exit 1; fi
+      if [ "$#" -gt 6 ]; then ply=$((ply + $# - 7)); fi
+      ;;
+    'go nodes 1')
+      case $((ply % 4)) in
+        1) move=3i4h ;; 2) move=7a6b ;; 3) move=4h3i ;; 0) move=6b7a ;;
+      esac
+      printf 'bestmove %s\n' "$move"
+      ;;
+    quit) break ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let start = dir.path().join("start.txt");
+    fs::write(&start, "startpos moves 3i4hignored 7a6b 4h3i 6b7a 3i4h 7a6b 4h3i\n").unwrap();
+
+    for (name, preserve, max_moves, reason, plies) in [
+        ("history", true, "12", "sennichite", 5),
+        ("default", false, "12", "max_moves", 5),
+        ("cap", true, "11", "max_moves", 4),
+    ] {
+        let out = dir.path().join(name);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tournament"));
+        cmd.env("BASE_PLY", if preserve { "1" } else { "8" }).args([
+            "--engine",
+            engine.to_str().unwrap(),
+            "--engine-label",
+            "black",
+            "--engine",
+            engine.to_str().unwrap(),
+            "--engine-label",
+            "white",
+            "--single-game",
+            "--nodes",
+            "1",
+            "--max-moves",
+            max_moves,
+            "--startpos-file",
+            start.to_str().unwrap(),
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]);
+        if preserve {
+            cmd.arg("--preserve-start-history");
+        }
+        let output = cmd.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let path = out.join("pair-0-1__black-vs-white.jsonl");
+        let jsonl = fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = jsonl.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(rows.len(), plies + 2);
+        assert_eq!(rows[0]["settings"]["games"], 1);
+        assert_eq!(rows[0]["settings"]["single_game"], true);
+        assert_eq!(
+            rows[0]["settings"]["preserve_start_history"].as_bool(),
+            preserve.then_some(true)
+        );
+        assert_eq!(rows[1]["move_usi"], "6b7a");
+        assert_eq!(rows[1]["engine"], "white");
+        assert_eq!(rows[2]["engine"], "black");
+
+        let result = rows.last().unwrap();
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["reason"], reason);
+        assert_eq!(result["outcome"], "draw");
+        assert_eq!(result["plies"], plies);
+        assert!(result.get("pair_slot").is_none() && result.get("pair_index").is_none());
+        let meta: Value =
+            serde_json::from_slice(&fs::read(out.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["run_status"], "completed");
+        assert_eq!(meta["invalid"], false);
+        assert_eq!(meta["incomplete_pairs"], 0);
+
+        let analysis = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(analysis.status.success(), "{}", String::from_utf8_lossy(&analysis.stderr));
+        let sprt = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+            .arg("--sprt")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(!sprt.status.success());
+        assert!(String::from_utf8_lossy(&sprt.stderr).contains("単局ログ"));
+    }
+}
