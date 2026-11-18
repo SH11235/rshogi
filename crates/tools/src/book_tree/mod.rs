@@ -22,6 +22,7 @@ mod main_line;
 mod master_index;
 mod master_table;
 mod model;
+mod one_way;
 mod opening_report;
 mod output;
 mod paths;
@@ -198,6 +199,8 @@ enum MasterCommand {
     Add(add::AddArgs),
     /// 読みのログから追加候補を作る
     AddReads(add_reads::AddReadsArgs),
+    /// 台帳の上位二手の差から一本道の区間を一覧にする
+    OneWay(one_way::OneWayArgs),
     /// 序盤の main の替わりを保留に戻す
     HoldEarly(hold_early::HoldEarlyArgs),
     /// 元データから定跡・プリセット・注釈を書き出す
@@ -241,6 +244,7 @@ pub fn run_master(args: MasterArgs) -> Result<()> {
     match args.command {
         MasterCommand::Add(args) => add::run(args),
         MasterCommand::AddReads(args) => add_reads::run(args),
+        MasterCommand::OneWay(args) => one_way::run(args),
         MasterCommand::HoldEarly(args) => hold_early::run(args),
         MasterCommand::Export(args) => export::run(args),
         MasterCommand::Diff(args) => book_diff::run(args),

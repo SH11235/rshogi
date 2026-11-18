@@ -4,6 +4,7 @@
 
 | やりたいこと | 入口 |
 |---|---|
+| 台帳の上位二手の差から片側の一本道の区間を探す（走査上限あり） | [book_mine master one-way](docs/book_mine.md#master-one-way-台帳から一本道の区間を探す) |
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索結果の一致を検証する（`--strict` で nodes・score・PV・bestmove、未完了・欠損を判定） | [compare_nodes](docs/compare_nodes.md) |
