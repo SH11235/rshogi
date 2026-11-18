@@ -19,6 +19,7 @@ ONNX external tensor、実行時に追加ロードされる依存ライブラリ
 
 ## 出力内容
 
-出力は入力順に各局面の展開先を列挙します。`score`、`move16`、`game_result`、`padding` は0、
-`game_ply` は元の値に1を加算（上限で飽和）します。必要なら後段の `rescore_psv` でスコアを付与してください。
+出力は入力順に各局面の展開先を列挙します。`score`、`move16`、`game_result` は 0、
+`game_ply` は元の値に 1 を加算（上限で飽和）します。`padding` は親局面の探索木標本マーカー
+（bit 1）だけを引き継ぎます。必要なら後段の `rescore_psv` でスコアを付与してください。
 入力件数全体を読み込まず、`--batch-size` の単位で処理します。

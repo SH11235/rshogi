@@ -24,15 +24,15 @@
 | [`split_psv`](split_psv.md) | PSV を件数・容量で分割し、入力を出力 alias から保護 |
 | [`merge_psv`](merge_psv.md) | 複数 PSV を指定順にストリーミング結合 |
 | [`prep_hcpe`](prep_hcpe.md) | hcpe の汚染・重複除去、予算内のメモリ内 shuffle / ディスク切替、メモリ見積もり、件数制限・分割 |
-| [`preprocess_psv`](preprocess_psv.md) | qsearch leaf への置換と、変更行の bitmap mask 出力 |
+| [`preprocess_psv`](preprocess_psv.md) | 探索木標本マーカーを保持した qsearch leaf への置換と、変更行の bitmap mask 出力 |
 | [`filter_teacher_data`](filter_teacher_data.md) | 王手・評価値による抽出、クリップ、統計出力 |
 | [`psv_profile`](psv_profile.md) | 手数・入玉・宣言・勝敗の分布と、棋譜順 PSV の対局ごとの終局を集計 |
 | [`validate_psv`](validate_psv.md) | PSV の不正局面を検出・除去し、入力 alias を拒否 |
 | [`validate_sfens`](../src/bin/validate_sfens.rs) | SFEN テキストの不正局面を検出・除去 |
 | [`relabel_psv`](relabel_psv.md) | 勝敗による score 置換、宣言勝ち・diversion の検査 |
-| [`rescore_psv`](rescore_psv.md) | NNUE / 探索 / 外部 USI / ONNX で再評価し、再開・score sidecar に対応。探索はスレッド数によらず同じ出力。ONNX は 1 回の実行に渡した全ファイルでセッションを使い回し、`--onnx-gpu-id 0,1` で複数 GPU を使える |
+| [`rescore_psv`](rescore_psv.md) | NNUE / 探索 / 外部 USI / ONNX で再評価し、探索木標本マーカーを保持。ONNX の全 PSV への追記再開では既存出力を入力と照合。score sidecar に対応。探索はスレッド数によらず同じ出力。ONNX は 1 回の実行に渡した全ファイルでセッションを使い回し、`--onnx-gpu-id 0,1` で複数 GPU を使える |
 | [`rescore_hcpe`](rescore_hcpe.md) | hcpe の eval を固定 depth の NNUE 探索で再評価・再開 |
-| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX policy で PSV の候補局面を展開 |
+| [`expand_psv_from_policy`](expand_psv_from_policy.md) | ONNX policy で PSV の候補局面を展開し、親の探索木標本マーカーを引き継ぐ |
 | [`psv_gate_by_king_zone`](psv_gate_by_king_zone.md) | 入玉条件による score 合成と行対応 mask の生成 |
 | [`psv_dual_label`](psv_dual_label.md) | 通常・dual-label PSV と score / mask sidecar の相互変換 |
 | [`psv_entered`](psv_entered.md) | 入玉の行の抜き出しと、付け直した入玉の行からの dual-label PSV の作成 |

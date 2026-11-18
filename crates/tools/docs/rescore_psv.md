@@ -16,6 +16,11 @@ PSV（PackedSfenValue）ファイルの評価値（score）を付け替えるツ
 主要ユースケースは **dlshogi 系 ONNX モデル + TensorRT FP16** での一括リスコア。
 以下のクイックスタートがその導線になっている。
 
+PSV 出力では探索木標本のマーカー（padding の bit 1）を引き継ぐ。
+`move16` を保持する場合は padding 全体を保持し、最善手の出力・葉局面への置換・
+ポリシー展開で `move16` を書き換える場合は bit 1 だけを残し、dual-label の bit 0 をクリアする。
+マーカーが消えた既存の出力を作り直す場合は、元の PSV と新しい出力先を指定する。
+
 ## クイックスタート（推奨: dlshogi ONNX + TensorRT FP16）
 
 ### 1. 環境変数
@@ -79,7 +84,7 @@ target/release/rescore_psv \
 - モデルや `--onnx-eval-scale` 等の設定を変えて再実行すると、マーカー不一致を
   検知して該当 shard を自動で最初から再生成する。
 - `Ctrl-C` での中断は安全（処理途中のファイルを完了扱いにしない。部分出力は
-  入力の連続 prefix になる）。
+  出力対象のレコードを入力順に先頭から並べたものになる）。
 
 詳細は「再開（resume）の仕組み」参照。
 
@@ -425,7 +430,7 @@ rescore_psv --input "data/*.bin" --output-dir rescored_leaflabel/ \
   原局面のまま評価する。
 - `--qsearch-leaf-replacement-output <dir>` を併用すると、同一 1 パスで
   **葉局面に置換した**レコード（leaf-REPLACEMENT arm）も別ディレクトリに書き出せる。
-  2 工程（`--apply-qsearch-leaf` → DL rescore）と bit 一致し、再計算を半減できる。
+  葉探索を行った局面では 2 工程（`--apply-qsearch-leaf` → DL rescore）と bit 一致し、再計算を半減できる。
   `--output-dir` とは別ディレクトリ必須。レコード仕様の詳細は
   [internals](rescore_psv-internals.md) 参照。
 
@@ -476,6 +481,12 @@ LayerStacks NNUE では `--ls-bucket-mode` が必須です。`progresskpabs` は
   再実行時、マーカーの設定 fingerprint（モデル・入力・主要フラグ）が現在の CLI と
   一致し出力サイズも一致すれば skip、不一致なら該当ファイルの全出力を truncate
   して自動再生成する。`Ctrl-C` 中断時は `.done` を書かない。
+- **ONNX の全 PSV 出力の中断再開**: 完了マーカーがない場合は、同じ入力と設定で再実行する。
+  入力を先頭から読み、デコードできないレコードや `--skip-in-check` で除外する局面を飛ばしながら、
+  既存出力を対応する入力レコードと照合する。局面や padding が一致しない場合は追記せずに
+  エラーで停止するので、新しい `--output-dir` を指定する。
+  展開出力・葉置換出力・`--qsearch-leaf-label` を有効にした場合はファイルの先頭から再生成する。
+  同じ出力パスへの複数プロセスからの同時書き込みは非対応。
 - **`--out-scores` の中断再開**: `<出力名>.in-progress` に `.done` と同じ形式の
   fingerprint を保持する。入力 path/size/mtime、モデル path/size/mtime、全入力件数、
   `--onnx-eval-scale`、`--score-clip`、`--onnx-tensorrt` など fingerprint が追跡する

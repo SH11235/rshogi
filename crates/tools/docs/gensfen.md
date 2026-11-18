@@ -740,8 +740,8 @@ echo '{"target_games":0}' > <out-dir>/control.json         # 安全な drain（�
 ## 探索木内の局面の採取
 
 対局で指された局面とは別に、探索中に NNUE の静的評価を実際に計算した局面を
-確率で採取できます。評価値や勝敗を教師にせず、トレーナーの eval 項だけに使う
-局面を集める用途です。
+確率で採取できます。採取時の評価値や勝敗は記録せず、後から評価値を付けて
+トレーナーの eval 項に使う局面を集める用途です。
 
 ビルド時に feature を有効にします（既定では無効）。
 
@@ -778,8 +778,10 @@ cargo build --release -p tools --bin gensfen --features search-tree-sample
 | game_result | 0 |
 | padding | 2（bit 1 が探索木標本、bit 0 の dual-label 識別とは別） |
 
-score/result の 0 は評価や引き分けの教師ではありません。padding の bit 1 を
-解釈して eval 項のみを使うトレーナーで読み込んでください。
+score/result の 0 は評価や引き分けの教師ではありません。
+学習前に [rescore_psv](rescore_psv.md) で評価値を付け、padding の bit 1 を解釈して
+eval 項のみを使うトレーナーで読み込んでください。`rescore_psv` は bit 1 を常に保持し、
+dual-label の bit 0 は `move16` をそのまま出力する場合にだけ引き継ぎます。
 
 採取用乱数は `--shuffle-seed` で決まる run seed と game_id から対局ごとに設定します。
 同じ入力・モデル・探索条件、固定 seed、固定ノード数または深さ、
