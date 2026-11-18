@@ -1,4 +1,4 @@
-//! 版ごとの出口の報告: walk の止まりと伝播の切れ目を、有望・塞ぎたい・浅い・値の出所が弱いに分ける。
+//! 版ごとの出口の報告。walk の止まりと伝播の切れ目を分類し、有望な出口は一本道の決着を確かめる。
 
 use super::audit::reject_same_file;
 use super::master_index::MasterIndex;
@@ -9,9 +9,11 @@ use super::reply_graph::HIRATE_KEY;
 use super::schema::Schema;
 use super::targets::{Line, MAX_DEPTH, MAX_PRIORITY, Opts};
 use super::walk::{Excluded, check_tag, excluded_positions, queue_id};
+use crate::book_db::{child_position_after_move, strip_ply};
 use crate::kif::usi_moves_to_short_kif;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub(super) struct ExitReportArgs {
-    /// 定跡の元データの表 (TSV)。RAMU の最後の手の値と出所を引く
+    /// 定跡の元データの表 (TSV)。RAMU の最後の手の値と出所を引き、出口の先を辿る
     #[arg(long)]
     master: PathBuf,
     /// 語彙と読み条件の表を置いたディレクトリ
@@ -53,6 +55,12 @@ pub(super) struct ExitReportArgs {
     target_black: i32,
     #[arg(long, default_value_t = 80, allow_hyphen_values = true)]
     target_white: i32,
+    /// 一本道の末端を決着とみなす値の絶対値 (1〜30000)
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..=30000))]
+    settle_cp: u32,
+    /// 出口の局面から一本道を辿る手数の上限
+    #[arg(long, default_value_t = 400)]
+    settle_max_plies: usize,
     /// 全部の行の表 (TSV)
     #[arg(long)]
     table: Option<PathBuf>,
@@ -92,7 +100,7 @@ pub(super) struct ExitReportArgs {
     /// 重い出口の priority
     #[arg(long, default_value_t = 1, requires = "enqueue_out")]
     enqueue_priority_heavy: u32,
-    /// 目標に届かない出口の priority
+    /// 目標に届かない出口と決着していない出口の priority
     #[arg(long, default_value_t = 4, requires = "enqueue_out")]
     enqueue_priority_miss: u32,
     /// その他の出口の priority
@@ -106,6 +114,7 @@ pub(super) struct ExitReportArgs {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
     Good,
+    Unsettled,
     Bad,
     Gap,
     Rejoin,
@@ -116,6 +125,7 @@ impl Class {
     fn name(self) -> &'static str {
         match self {
             Self::Good => "good",
+            Self::Unsettled => "unsettled",
             Self::Bad => "bad",
             Self::Gap => "gap",
             Self::Rejoin => "rejoin",
@@ -252,15 +262,15 @@ impl ExitReportArgs {
     }
 }
 
-/// 手順を辿り、各局面のキー (指す前) を返す。最後の局面は含めない。
-fn keys_before(moves: &[String]) -> Result<Vec<String>> {
+/// 手順を辿り、指す前の各局面のキーと最後の局面のキーを返す。
+fn walk_keys(moves: &[String]) -> Result<(Vec<String>, String)> {
     let mut key = HIRATE_KEY.to_owned();
     let mut keys = Vec::with_capacity(moves.len());
     for mv in moves {
         let next = child(&key, mv).with_context(|| format!("手順の手が不正です: {mv}"))?;
         keys.push(std::mem::replace(&mut key, next));
     }
-    Ok(keys)
+    Ok((keys, key))
 }
 
 /// 手順の中で、`own` の側が最後に指した定跡の手の値 (先手から見た値) と出所。
@@ -284,6 +294,82 @@ fn last_own_value(
         }
     }
     Ok(last)
+}
+
+enum SettleEnd {
+    Missing,
+    Repetition,
+    Mate,
+    Max,
+}
+
+impl SettleEnd {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Repetition => "repetition",
+            Self::Mate => "mate",
+            Self::Max => "max",
+        }
+    }
+
+    fn settled(&self, value: Option<i64>, cp: u32) -> bool {
+        match self {
+            Self::Missing => value.is_some_and(|v| v.unsigned_abs() >= u64::from(cp)),
+            Self::Repetition | Self::Mate => true,
+            Self::Max => false,
+        }
+    }
+}
+
+fn settle_line(
+    index: &mut MasterIndex,
+    mut key: String,
+    fallback: Option<i64>,
+    max_plies: usize,
+) -> Result<(usize, Option<i64>, SettleEnd)> {
+    let mut seen = BTreeSet::new();
+    let mut value_black = None;
+    for plies in 0..max_plies {
+        let rows = index.rows(&key)?;
+        if rows.is_empty() {
+            return Ok((
+                plies,
+                if plies == 0 { fallback } else { value_black },
+                SettleEnd::Missing,
+            ));
+        }
+        let next = if let Some(main) = rows.iter().find(|r| r.get("role") == "main") {
+            Some((main, mean_eval(main.get("evals"))?))
+        } else {
+            let mut best = None;
+            for row in rows.iter().filter(|r| r.get("role") == "alt") {
+                let value = mean_eval(row.get("evals"))?;
+                if best.is_none_or(|(_, best_value)| value > best_value) {
+                    best = Some((row, value));
+                }
+            }
+            best
+        };
+        let Some((row, value)) = next else {
+            return Ok((plies, value_black, SettleEnd::Missing));
+        };
+        let sign = if side(&key) == "b" { 1 } else { -1 };
+        value_black = value.map(|v| i64::from(v) * sign);
+        let child = child_position_after_move(&format!("{key} 1"), row.get("move"))?;
+        let next_key = strip_ply(&child.to_sfen()).to_owned();
+        seen.insert(key);
+        if seen.contains(&next_key) {
+            return Ok((plies + 1, value_black, SettleEnd::Repetition));
+        }
+        let mut legal = MoveList::new();
+        generate_legal_all(&child, &mut legal);
+        if legal.is_empty() {
+            return Ok((plies + 1, value_black, SettleEnd::Mate));
+        }
+        key = next_key;
+    }
+    Ok((max_plies, value_black, SettleEnd::Max))
 }
 
 /// 何手目が 1 以上で、局面の手番と偶奇が合う (先手番は奇数、後手番は偶数) ことを確かめる。
@@ -428,7 +514,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             column(row, "moves")?.split_whitespace().map(str::to_owned).collect();
         let ply: usize = column(row, "ply")?.parse().context("ply が不正です")?;
         ensure!(ply == moves.len(), "ply {ply} が手順の手数 {} と合いません", moves.len());
-        let keys = keys_before(&moves)?;
+        let (keys, end_key) = walk_keys(&moves)?;
         let last = column(row, "key")?.to_owned();
         for (i, key) in keys.iter().chain(std::iter::once(&last)).enumerate() {
             let Some(found) = rejoin_paths.get_mut(key) else {
@@ -451,24 +537,30 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         }
         let stop = column(row, "stop")?;
         if weight >= args.min_weight && matches!(stop, "own" | "out" | "rare" | "max") {
-            walk_rows.push((
-                side.to_owned(),
-                stop.to_owned(),
-                weight,
-                column(row, "key")?.to_owned(),
-                moves,
-                keys,
-            ));
+            walk_rows.push((side.to_owned(), stop.to_owned(), weight, last, moves, keys, end_key));
         }
         Ok(())
     })?;
-    for (side, stop, weight, key, moves, keys) in walk_rows {
+    for (side, stop, weight, key, moves, keys, end_key) in walk_rows {
         let (value, kind) = last_own_value(&mut index, &moves, &keys, &side)?;
+        let mut extra = vec![("stop", stop.clone())];
         let class = if stop == "own" {
             Class::Shallow
         } else if kind.starts_with("tree") {
             if args.meets(value, &side) == Some(true) {
-                Class::Good
+                ensure!(key == end_key, "walk の key が手順の末尾の局面と合いません: {key}");
+                let (plies, terminal, end) =
+                    settle_line(&mut index, end_key, value, args.settle_max_plies)?;
+                extra.extend([
+                    ("settle_plies", plies.to_string()),
+                    ("settle_black", fmt_value(terminal)),
+                    ("settle_end", end.name().to_owned()),
+                ]);
+                if end.settled(terminal, args.settle_cp) {
+                    Class::Good
+                } else {
+                    Class::Unsettled
+                }
             } else {
                 Class::Bad
             }
@@ -484,7 +576,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             kind,
             key,
             moves: Some(moves),
-            extra: vec![("stop", stop)],
+            extra,
         });
     }
     if let (Some(bridge), Some(audit)) = (&args.bridge, &args.bridge_audit) {
@@ -610,6 +702,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         "{}",
         [
             Class::Good,
+            Class::Unsettled,
             Class::Bad,
             Class::Gap,
             Class::Rejoin,
@@ -755,7 +848,7 @@ fn queue_lines(
             }
             let p = if item.weight >= args.enqueue_heavy_weight {
                 args.enqueue_priority_heavy
-            } else if item.class == Class::Rejoin
+            } else if matches!(item.class, Class::Unsettled | Class::Rejoin)
                 || args.meets(item.value_black, own) == Some(false)
             {
                 args.enqueue_priority_miss
@@ -932,11 +1025,18 @@ fn markdown(
     let min = args.min_weight;
     exits(
         &mut out,
-        "1. 有望な出口 (出口より先まで木で読んであり目標に届く)",
+        "1. 有望な出口 (目標に届き、一本道が決着している)",
         &format!(
-            "止まりが out・rare・max で、RAMU の最後の手の値が木の伝播のもの。重み {min} 以上。"
+            "止まりが out・rare・max で、RAMU の最後の手の値が木の伝播のもの。重み {min} 以上。一本道の末端の値が ±{} に達するか、千日手の筋・詰みに着く出口。",
+            args.settle_cp
         ),
         Class::Good,
+    )?;
+    exits(
+        &mut out,
+        "1b. 決着していない出口",
+        &format!("目標に届くが、一本道が ±{} まで通っていない。有望に数えない。", args.settle_cp),
+        Class::Unsettled,
     )?;
     exits(&mut out, "2a. 塞ぎたい出口: 計算済みで目標に届かない", "", Class::Bad)?;
     if args.bridge.is_some() {
