@@ -26,6 +26,8 @@ use clap::Parser;
 #[cfg(any(test, feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(any(test, feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+use tools::packed_sfen::PackedSfenValue;
 
 /// ポリシーネットワークで PSV を展開
 ///
@@ -94,6 +96,18 @@ fn readonly_resources<'a>(
     resources
 }
 
+#[cfg(any(test, feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn expanded_child(parent: &PackedSfenValue, sfen: [u8; 32]) -> PackedSfenValue {
+    PackedSfenValue {
+        sfen,
+        score: 0,
+        move16: 0,
+        game_ply: parent.game_ply.saturating_add(1),
+        game_result: 0,
+        padding: parent.padding_after_move16_rewrite(),
+    }
+}
+
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn run(cli: &Cli) -> Result<()> {
     use anyhow::Context;
@@ -110,7 +124,7 @@ fn run(cli: &Cli) -> Result<()> {
     use rshogi_core::position::Position;
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
     use tools::output_path::{create_safe_output_file, ensure_safe_output_paths};
-    use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
+    use tools::packed_sfen::{pack_position, unpack_sfen};
 
     fn ort_err(e: ort::Error) -> anyhow::Error {
         anyhow::anyhow!("{e}")
@@ -514,15 +528,7 @@ fn run(cli: &Cli) -> Result<()> {
                     let gives_check = pos.gives_check(*mv);
                     pos.do_move(*mv, gives_check);
 
-                    let packed = pack_position(&pos);
-                    let new_psv = PackedSfenValue {
-                        sfen: packed,
-                        score: 0,
-                        move16: 0,
-                        game_ply: psv.game_ply.saturating_add(1),
-                        game_result: 0,
-                        padding: 0,
-                    };
+                    let new_psv = expanded_child(psv, pack_position(&pos));
                     writer.write_all(&new_psv.to_bytes())?;
                     total_expanded += 1;
 
@@ -573,6 +579,24 @@ mod tests {
     use std::io::Write;
     use tempfile::{TempDir, tempdir};
     use tools::output_path::create_safe_output_file;
+
+    #[test]
+    fn expanded_child_preserves_only_tree_sample_padding() {
+        let mut parent = PackedSfenValue {
+            sfen: [0; 32],
+            score: 123,
+            move16: 42,
+            game_ply: 1,
+            game_result: 1,
+            padding: 0,
+        };
+        for (padding, expected) in [(0, 0), (1, 0), (2, 2), (3, 2), (0x83, 2)] {
+            parent.padding = padding;
+            let child = expanded_child(&parent, [1; 32]);
+            assert_eq!(child.padding, expected);
+            assert_eq!(child.move16, 0);
+        }
+    }
 
     fn fixture() -> Result<(TempDir, Cli, PathBuf)> {
         let dir = tempdir()?;

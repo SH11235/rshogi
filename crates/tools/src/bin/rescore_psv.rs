@@ -84,6 +84,7 @@ use tools::qsearch_pv::{NnueStacks, apply_pv, qsearch_with_pv_nnue};
 
 /// 探索用スタックサイズ（64MB）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
+const SCORE_RECORD_SIZE: u64 = std::mem::size_of::<i16>() as u64;
 
 /// PSVファイルの評価値を再評価
 #[derive(Parser)]
@@ -338,8 +339,7 @@ enum OnnxMarkerDecision {
     TruncateAndProcess,
     /// score sidecar の in-progress marker が一致。件数ベースで追記再開
     ResumeSidecar,
-    /// marker 不存在 + expand 無効 → 既存の record-count resume にフォールバック
-    LegacyResume,
+    ResumeFullPsv,
 }
 
 use tools::output_path::{
@@ -859,10 +859,8 @@ fn onnx_marker_decide(
             SidecarStartDecision::Truncate => Ok(OnnxMarkerDecision::TruncateAndProcess),
         };
     }
-    // leaf-label は marker 必須にする。record 数ベースの legacy resume では、旧通常 rescore の
-    // marker 無し出力（レコード数だけ一致）を完了扱いし、葉ラベルを生成せず stale 出力を温存する。
+    // 補助出力や葉ラベルの由来は、主出力の PSV レコードだけでは確認できない。
     if expand_output_path.is_some() || replacement_output.is_some() || cli.qsearch_leaf_label {
-        // expand / replacement / leaf-label 有効時は marker 必須。truncate して最初から
         if rescore_output_path.exists() {
             protection.truncate(rescore_output_path, 0)?;
         }
@@ -878,7 +876,7 @@ fn onnx_marker_decide(
         }
         Ok(OnnxMarkerDecision::TruncateAndProcess)
     } else {
-        Ok(OnnxMarkerDecision::LegacyResume)
+        Ok(OnnxMarkerDecision::ResumeFullPsv)
     }
 }
 
@@ -1360,10 +1358,6 @@ fn main() -> Result<()> {
 
         // ONNX モードでは marker ベースで skip / truncate 判定
         #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-        let mut use_legacy_resume_check = !(use_onnx || use_dlshogi_onnx || nnue_static_scores);
-        #[cfg(not(any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
-        let use_legacy_resume_check = !(use_onnx || use_dlshogi_onnx || nnue_static_scores);
-        #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
         if use_onnx || use_dlshogi_onnx {
             let (model_kind, onnx_path): (&str, &std::path::Path) = if use_onnx {
                 ("aobazero", cli.onnx_model.as_ref().unwrap().as_path())
@@ -1413,9 +1407,7 @@ fn main() -> Result<()> {
                         input_path.display()
                     );
                 }
-                OnnxMarkerDecision::LegacyResume => {
-                    use_legacy_resume_check = true;
-                }
+                OnnxMarkerDecision::ResumeFullPsv => {}
             }
         }
 
@@ -1444,8 +1436,7 @@ fn main() -> Result<()> {
             }
         }
 
-        // legacy resume / skip 判定（NNUE/USI 全モード、または ONNX 無 marker + expand 無効）
-        if use_legacy_resume_check {
+        if !(use_onnx || use_dlshogi_onnx || nnue_static_scores) {
             // 入力と出力が同じパスの場合はエラー（--delete-input でデータ消失を防ぐ）
             if input_path.canonicalize().ok() == output_path.canonicalize().ok() {
                 anyhow::bail!(
@@ -1472,7 +1463,7 @@ fn main() -> Result<()> {
                 }
                 if out_records > 0 {
                     eprintln!(
-                        "=== [{}/{}] Resuming ({}/{} records): {} ===",
+                        "=== [{}/{}] Regenerating partial output ({}/{} records): {} ===",
                         file_idx + 1,
                         total_files,
                         out_records,
@@ -1900,7 +1891,6 @@ fn run_nnue_scores_pipeline(
     chunk_size: usize,
     eval_record: &(dyn Fn(&[u8; PackedSfenValue::SIZE]) -> ProcessResult + Sync),
 ) -> Result<()> {
-    const SCORE_RECORD_SIZE: u64 = 2;
     assert!(chunk_size >= 1, "chunk_size must be >= 1");
 
     // ロード済みモデルと disk 上の実体が処理開始時点で一致していることを確認する。
@@ -1909,7 +1899,7 @@ fn run_nnue_scores_pipeline(
         build_nnue_scores_fingerprint(cli, identity, input_path, process_count)?;
     prepare_in_progress_marker(protection, output_path, &start_fingerprint, false)?
         .context("out_scores=true did not create an in-progress marker")?;
-    let resume_count = prepare_resume_count(protection, output_path, SCORE_RECORD_SIZE, true)?;
+    let resume_count = score_sidecar_resume_count(output_path)?;
     if resume_count > process_count {
         anyhow::bail!(
             "Existing sidecar has {resume_count} records but the input has only {process_count}. \
@@ -3186,38 +3176,120 @@ fn write_rescore_batch<W: Write>(
     Ok(())
 }
 
-/// 既存出力のレコード数を返す。通常 PSV の末尾 partial record は従来どおり
-/// 切り捨てて自己修復するが、事後検出不能な score sidecar は fail-closed にする。
-fn prepare_resume_count(
-    protection: &OutputProtection,
-    output_path: &std::path::Path,
-    output_record_size: u64,
-    out_scores: bool,
-) -> Result<u64> {
+fn score_sidecar_resume_count(output_path: &std::path::Path) -> Result<u64> {
     if !output_path.exists() {
         return Ok(0);
     }
     let out_size = fs::metadata(output_path)?.len();
-    let remainder = out_size % output_record_size;
-    if remainder == 0 {
-        return Ok(out_size / output_record_size);
-    }
-    if out_scores {
+    if out_size % SCORE_RECORD_SIZE != 0 {
         anyhow::bail!(
-            "Output size is not a multiple of {output_record_size}: {} ({out_size} bytes). \
+            "Output size is not a multiple of {SCORE_RECORD_SIZE}: {} ({out_size} bytes). \
              Delete the .in-progress marker {} so the next run truncates and regenerates the sidecar.",
             output_path.display(),
             in_progress_marker_path_for(output_path).display()
         );
     }
+    Ok(out_size / SCORE_RECORD_SIZE)
+}
 
-    let aligned_size = out_size - remainder;
-    protection.truncate(output_path, aligned_size)?;
-    eprintln!(
-        "Truncated partial output record: {} ({out_size} -> {aligned_size} bytes)",
-        output_path.display()
-    );
-    Ok(aligned_size / output_record_size)
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn decode_onnx_record(
+    buffer: &[u8; PackedSfenValue::SIZE],
+) -> Option<(PackedSfenValue, UnpackedSfen)> {
+    let psv = PackedSfenValue::from_bytes(buffer)?;
+    let parts = unpack_sfen_to_parts(&psv.sfen).ok()?;
+    Some((psv, parts))
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn set_onnx_root_position(
+    pos: &mut Position,
+    parts: &UnpackedSfen,
+) -> Result<bool, rshogi_core::position::SfenError> {
+    pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move)?;
+    Ok(pos.in_check())
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn prepare_onnx_psv_resume(
+    protection: &OutputProtection,
+    output_path: &std::path::Path,
+    input: &mut impl Read,
+    process_count: u64,
+    skip_in_check: bool,
+) -> Result<(File, u64)> {
+    const NEW_OUTPUT: &str = "Use a new output path (--output-dir).";
+    protection.check_path(output_path)?;
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(output_path)
+        .with_context(|| format!("Failed to open {}", output_path.display()))?;
+    protection.check_file(output_path, &file)?;
+    let out_size = file.metadata()?.len();
+    let record_size = PackedSfenValue::SIZE as u64;
+    let output_count = out_size / record_size;
+    let aligned_size = output_count * record_size;
+    let mut consumed = 0;
+
+    if output_count > 0 {
+        let mut output = BufReader::new(&file);
+        let mut pos = skip_in_check.then(Position::new);
+        let mut input_bytes = [0; PackedSfenValue::SIZE];
+        let mut output_bytes = [0; PackedSfenValue::SIZE];
+        for output_index in 1..=output_count {
+            let expected = loop {
+                anyhow::ensure!(
+                    consumed < process_count,
+                    "Cannot align {} at output record {output_index}: no more kept input records. {NEW_OUTPUT}",
+                    output_path.display()
+                );
+                input.read_exact(&mut input_bytes)?;
+                consumed += 1;
+                let Some((psv, parts)) = decode_onnx_record(&input_bytes) else {
+                    continue;
+                };
+                // 局面構築失敗時も full PSV の writer はこのレコードを残す。
+                if let Some(pos) = pos.as_mut()
+                    && set_onnx_root_position(pos, &parts).unwrap_or(false)
+                {
+                    continue;
+                }
+                break psv;
+            };
+            output.read_exact(&mut output_bytes)?;
+            let existing =
+                PackedSfenValue::from_bytes(&output_bytes).context("Invalid PSV record")?;
+            anyhow::ensure!(
+                existing.sfen == expected.sfen
+                    && existing.move16 == expected.move16
+                    && existing.game_ply == expected.game_ply
+                    && existing.game_result == expected.game_result,
+                "Cannot align {} at output record {output_index} with input record {consumed}. {NEW_OUTPUT}",
+                output_path.display()
+            );
+            anyhow::ensure!(
+                existing.padding == expected.padding,
+                "PSV padding mismatch in {} at output record {output_index} (input record {consumed}): \
+                 found {:#04x}, expected {:#04x}. {NEW_OUTPUT}",
+                output_path.display(),
+                existing.padding,
+                expected.padding
+            );
+        }
+    }
+
+    if aligned_size != out_size {
+        file.set_len(aligned_size)?;
+        eprintln!(
+            "Truncated partial output record: {} ({out_size} -> {aligned_size} bytes)",
+            output_path.display()
+        );
+    }
+    file.seek(SeekFrom::Start(aligned_size))?;
+    Ok((file, consumed))
 }
 
 /// 入力を既処理レコードの直後へ移動する。巨大 sidecar の resume で入力 prefix を
@@ -3817,7 +3889,7 @@ fn write_in_progress_marker(
 
 /// score sidecar の安全な resume 条件を確認し、run 開始状態を用意する。
 ///
-/// full PSV では何もせず、従来の marker / record-count 判定へ委ねる。sidecar では
+/// full PSV では何もせず、marker / PSV 照合へ委ねる。sidecar では
 /// 出力と in-progress marker の両方が存在し fingerprint が一致するときだけ追記を許可する。
 /// それ以外は出力を truncate して現在 fingerprint の marker を書き直す。
 fn prepare_in_progress_marker(
@@ -4827,29 +4899,29 @@ where
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::new(in_file);
 
-    // レジューム対応: 出力ファイルに既存レコードがあればスキップして追記
     let output_record_size = if out_scores {
-        std::mem::size_of::<i16>() as u64
+        SCORE_RECORD_SIZE
     } else {
         PackedSfenValue::SIZE as u64
     };
-    let resume_count =
-        prepare_resume_count(protection, output_path, output_record_size, out_scores)?;
-    anyhow::ensure!(
-        resume_count <= process_count,
-        "{} has {resume_count} records, exceeding expected {process_count}: {}",
-        if out_scores {
-            "score sidecar"
-        } else {
-            "output"
-        },
-        output_path.display()
-    );
-
-    let out_file = protection
-        .open(output_path, true)
-        .with_context(|| format!("Failed to open {}", output_path.display()))?;
+    let (out_file, consumed) = if out_scores {
+        let count = score_sidecar_resume_count(output_path)?;
+        anyhow::ensure!(
+            count <= process_count,
+            "score sidecar has {count} records, exceeding expected {process_count}: {}",
+            output_path.display()
+        );
+        seek_to_record(&mut reader, count)?;
+        (protection.open(output_path, true)?, count)
+    } else {
+        prepare_onnx_psv_resume(protection, output_path, &mut reader, process_count, skip_in_check)?
+    };
     let writer = BufWriter::new(out_file);
+    let remaining = process_count - consumed;
+    if consumed > 0 {
+        progress.advance_start(consumed);
+        eprintln!("Resuming after {consumed} input records");
+    }
 
     // expand 出力 writer（expand 有効時のみ）。main 側で truncate(0) 済みなので
     // append open で常に先頭から書く。
@@ -4873,18 +4945,6 @@ where
     } else {
         None
     };
-
-    // 既存レコード分の入力をスキップ（score sidecar の marker 一致 resume、または
-    // full PSV の legacy resume。main 側で truncate(0) 済みなら no-op）
-    let mut remaining = process_count;
-    if resume_count > 0 {
-        let skip = resume_count.min(remaining);
-        seek_to_record(&mut reader, skip)?;
-        remaining -= skip;
-        // 既処理分を進捗の起点として反映（per-file/overall とも前進）。
-        progress.advance_start(skip);
-        eprintln!("Resuming: skipped {skip} already-processed records");
-    }
 
     let mut skipped_count: u64 = 0;
     let mut error_count: u64 = 0;
@@ -5309,21 +5369,11 @@ where
                         }
                         Err(e) => return Err(e.into()),
                     }
-                    let psv = match PackedSfenValue::from_bytes(&buffer) {
-                        Some(p) => p,
-                        None => {
-                            chunk.errors += 1;
-                            continue;
-                        }
+                    let Some(record) = decode_onnx_record(&buffer) else {
+                        chunk.errors += 1;
+                        continue;
                     };
-                    let parts = match unpack_sfen_to_parts(&psv.sfen) {
-                        Ok(p) => p,
-                        Err(_) => {
-                            chunk.errors += 1;
-                            continue;
-                        }
-                    };
-                    chunk.records.push((psv, parts));
+                    chunk.records.push(record);
                 }
                 if phase_timing {
                     t_read += phase_t.elapsed().as_nanos();
@@ -5420,16 +5470,10 @@ where
                          in_check_slot: &mut bool,
                          packed_leaf: Option<&mut [u8; 32]>| {
                             let mut pos = Position::new();
-                            if pos
-                                .set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
-                                .is_err()
-                            {
+                            let Ok(root_in_check) = set_onnx_root_position(&mut pos, parts) else {
                                 batch_errors.fetch_add(1, Ordering::Relaxed);
                                 return;
-                            }
-                            // 王手フラグは直列 read の probe ではなくここで求める（同じ局面構築後の
-                            // root 局面から 1 回だけ）。書き出し時の skip_in_check / expand 判定に使う。
-                            let root_in_check = pos.in_check();
+                            };
                             *in_check_slot = root_in_check;
                             // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
                             // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
@@ -7021,27 +7065,101 @@ mod marker_tests {
     }
 
     #[test]
-    fn normal_resume_truncates_partial_record_but_sidecar_rejects_it() {
+    fn sidecar_resume_rejects_partial_record() {
         let dir = tempfile::tempdir().unwrap();
-        let normal = dir.path().join("normal.psv");
-        std::fs::write(&normal, vec![0u8; PackedSfenValue::SIZE + 1]).unwrap();
-        assert_eq!(
-            prepare_resume_count(
-                &no_protected_paths(),
-                &normal,
-                PackedSfenValue::SIZE as u64,
-                false
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(std::fs::metadata(normal).unwrap().len(), PackedSfenValue::SIZE as u64);
-
         let sidecar = dir.path().join("scores.i16");
         std::fs::write(&sidecar, [0u8; 3]).unwrap();
-        let error = prepare_resume_count(&no_protected_paths(), &sidecar, 2, true).unwrap_err();
+        let error = score_sidecar_resume_count(&sidecar).unwrap_err();
         assert!(error.to_string().contains("Delete the .in-progress marker"));
         assert_eq!(std::fs::metadata(sidecar).unwrap().len(), 3);
+    }
+
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    #[test]
+    fn onnx_psv_resume_consumes_skipped_input_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("normal.psv");
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/4r4/9/9/9/4K4 b - 1").unwrap();
+        let a = PackedSfenValue {
+            sfen: pack_position(&pos),
+            ..test_psv(1)
+        }
+        .to_bytes();
+        let (_, parts) = decode_onnx_record(&a).unwrap();
+        assert!(set_onnx_root_position(&mut pos, &parts).unwrap());
+        pos.set_hirate();
+        let b = PackedSfenValue {
+            sfen: pack_position(&pos),
+            ..test_psv(2)
+        };
+        let c = PackedSfenValue {
+            game_ply: b.game_ply + 1,
+            ..b
+        }
+        .to_bytes();
+        let rescored_b = PackedSfenValue { score: 42, ..b }.to_bytes();
+        let invalid = [u8::MAX; PackedSfenValue::SIZE];
+        assert!(decode_onnx_record(&invalid).is_none());
+
+        for skipped in [vec![a], vec![a, invalid]] {
+            let process_count = skipped.len() as u64 + 2;
+            let input = skipped.into_iter().chain([b.to_bytes(), c]).flatten().collect::<Vec<_>>();
+            std::fs::write(&output, [rescored_b.as_slice(), &c[..1]].concat()).unwrap();
+            let mut reader = input.as_slice();
+            let (mut file, consumed) = prepare_onnx_psv_resume(
+                &no_protected_paths(),
+                &output,
+                &mut reader,
+                process_count,
+                true,
+            )
+            .unwrap();
+            assert_eq!(consumed, process_count - 1);
+            assert_eq!(reader, c);
+            file.write_all(reader).unwrap();
+            assert_eq!(std::fs::read(&output).unwrap(), [rescored_b, c].concat());
+        }
+    }
+
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    #[test]
+    fn onnx_psv_resume_rejects_legacy_padding_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("normal.psv");
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let first = PackedSfenValue {
+            sfen: pack_position(&pos),
+            padding: 1,
+            ..test_psv(1)
+        };
+        let marked = PackedSfenValue {
+            game_ply: first.game_ply + 1,
+            padding: 2,
+            ..first
+        };
+        let legacy = PackedSfenValue {
+            score: 42,
+            padding: 0,
+            ..marked
+        };
+        let partial = [first.to_bytes().as_slice(), &legacy.to_bytes(), &[0]].concat();
+        std::fs::write(&output, &partial).unwrap();
+        let input = [first.to_bytes(), marked.to_bytes(), marked.to_bytes()].concat();
+        let error = prepare_onnx_psv_resume(
+            &no_protected_paths(),
+            &output,
+            &mut input.as_slice(),
+            3,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("PSV padding mismatch"), "{error}");
+        assert!(error.contains("output record 2 (input record 2)"), "{error}");
+        assert!(error.contains("Use a new output path (--output-dir)"), "{error}");
+        assert_eq!(std::fs::read(&output).unwrap(), partial);
     }
 
     #[test]
@@ -7636,6 +7754,9 @@ mod search_pipeline_tests {
 
     #[test]
     fn search_preserves_tree_sample_padding_with_or_without_bestmove() {
+        rshogi_core::eval::material::set_material_level(
+            rshogi_core::eval::material::MaterialLevel::Lv1,
+        );
         let mut pos = Position::new();
         pos.set_hirate();
         let mut search = Search::new(1);
