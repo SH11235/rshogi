@@ -387,6 +387,7 @@ mod tests {
                 &["a".into(), "b".into()],
                 &mut writers,
                 &mut HashMap::new(),
+                false,
             )
             .unwrap();
             let value: serde_json::Value =

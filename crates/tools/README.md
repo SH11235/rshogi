@@ -5,6 +5,7 @@
 | やりたいこと | 入口 |
 |---|---|
 | 教師データを作る・加工する | [gensfen](docs/gensfen.md) / [データ処理の選び方](docs/pack_tools.md) |
+| 棋譜を引き継いで1局指す | [tournament](docs/tournament.md#棋譜を引き継いで1局指す) |
 | エンジンを対局で比較する | [tournament](docs/tournament.md) → [analyze_selfplay](docs/analyze_selfplay.md) |
 | 探索結果の一致を検証する（`--strict` で nodes・score・PV・bestmove、未完了・欠損を判定） | [compare_nodes](docs/compare_nodes.md) |
 | 探索速度を測る | [benchmark](docs/benchmark.md) / [search_only_ab](docs/search_only_ab.md) |

@@ -1,6 +1,6 @@
 # tournament — 並列トーナメント・SPRT 検定
 
-複数エンジン間の総当たり (round-robin) 対局、base-vs-N 対局、または SPRT（逐次確率比検定）を並列実行するツール。
+複数エンジン間の総当たり (round-robin) 対局、base-vs-N 対局、または SPRT（逐次確率比検定）を並列実行するツール。先後を固定した単局にも対応する。
 対局ログは analyze_selfplay 互換の JSONL 形式で出力される。
 
 ## USI評価の進捗値と同一行の主PV記録
@@ -43,11 +43,33 @@ cargo build -p tools --bin tournament --release
 
 | モード | 概要 | 主なオプション |
 |--------|------|---------------|
+| **単局** | 指定順に先手・後手を固定して1局実行 | `--single-game` |
 | **総当たり** | N エンジン間の全 C(N,2) ペアを対局 | `--engine` × N |
 | **base-vs-N** | 基準 1 体 vs 他 N 体のみ対局 | `--base-label` |
 | **SPRT** | A/B 2 エンジンで有意差を逐次判定、境界到達で自動停止 | `--sprt` |
 
 ## クイックスタート
+
+### 棋譜を引き継いで1局指す
+
+```bash
+./target/release/tournament \
+  --engine /path/to/black-engine --engine-label black \
+  --engine /path/to/white-engine --engine-label white \
+  --single-game --preserve-start-history \
+  --startpos-file continuation.txt --nodes 1000000 --max-moves 512 \
+  --out-dir runs/selfplay/continuation
+```
+
+`continuation.txt` は `startpos moves 7g7f 3c3d` のような1局面を指定する。上の例では3手目から対局し、
+`--max-moves` は初手から数える。後手番の局面でも、1番目のエンジンが先手、2番目が後手を担当する。
+単局では先後交換、エラー時の再対局、`control.json` による対局数・並列数の変更は行わない。
+`--games`、`--sprt`、`--base-label`、`--startpos-order cycle` とは併用できず、並列数は1。
+開始局面ファイルを省略した場合は平手初期局面を使う。
+
+JSONL と `meta.json` の `settings` に `games: 1` と `single_game: true` を記録する。
+結果行に `pair_index` と `pair_slot` は付与しない。`analyze_selfplay` はこの結果を単局として集計する。
+複数の分岐を比較する場合は、分岐ごとに開始局面ファイルと出力先を指定して起動する。
 
 ### 総当たり（2 エンジン、各方向 100 局 = 合計 200 局）
 
@@ -95,6 +117,7 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 |-----------|-----------|------|
 | `--engine PATH` | (必須、2 つ以上) | エンジンバイナリパス。`--engine` の数だけエンジン登録される |
 | `--engine-label LABEL` | パスから自動生成 | エンジンラベル（`--engine` と同数・同順で指定）。同一パスを複数回指定する場合は区別のため必須 |
+| `--single-game` | off | エンジン2つ、開始局面1つで、指定順に先後を固定して1局だけ指す |
 | `--games N` | 100 | 各方向の対局数（双方向で 2×N 局/ペア） |
 | `--max-moves N` | 512 | 引分とする総手数。開始局面までの手数（SFEN の手数欄と `moves` の手順）を含めて数えるため、平手から始まる本番対局 (floodgate 等) の手数制限と同じ値を指定する。開始局面が既にこの手数以上ならエラー |
 | `--adjudicate-resign "movecount=3,score=600"` | off | 同一側の劣勢評価の連続による投了裁定 |
@@ -111,9 +134,12 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 初手は `moves` を省略する。毎手の現在局面だけを SFEN で送っていた旧 driver と異なり、
 エンジンは現在局面に加えて過去の反復・連続王手を復元し、探索で利用できる。
 
-履歴の基点は、千日手裁定と同じく開始局面ファイルの `moves` を適用した後の局面。
+既定の履歴の基点は、千日手裁定と同じく開始局面ファイルの `moves` を適用した後の局面。
 開始局面ファイルの手順は基点 SFEN に反映済みなので、送信する手順に重ねて追加しない。
-生の SFEN しかない場合も、それ以前の履歴は復元しない。
+`--preserve-start-history` を指定すると、開始局面ファイルの基点から `moves` を探索と千日手裁定の両方に引き継ぐ。
+開始手順中に千日手が成立している場合は対局エラーになる。棋譜の途中から継ぎ指しする場合は、
+記録の初期局面とそこからの指し手を渡す。生の SFEN より前の履歴は復元できない。
+この設定は `settings.preserve_start_history: true` として出力され、`--single-game` とは独立に指定できる。
 pass 使用時は基点の `passrights` を `moves` より前に送り、手順再生で権利を消費する。
 
 履歴は各局・再試行ごとに作り直し、両エンジンに同じ手順を渡す。これは TT・EvalHash・

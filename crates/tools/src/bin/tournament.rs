@@ -102,6 +102,14 @@ struct Cli {
     #[arg(long, default_value_t = 100)]
     games: u32,
 
+    /// Play exactly one game with engines in Black, White order.
+    #[arg(long, conflicts_with_all = ["games", "sprt", "base_label"])]
+    single_game: bool,
+
+    /// Pass the start position's move sequence to the engines and repetition adjudicator.
+    #[arg(long)]
+    preserve_start_history: bool,
+
     /// Number of concurrent workers
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
@@ -423,6 +431,10 @@ enum StartposOrder {
 struct MetaSettings {
     startpos_order: StartposOrder,
     games: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    single_game: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    preserve_start_history: bool,
     seed: u64,
     max_moves: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -453,7 +465,9 @@ impl MetaSettings {
     fn new(cli: &Cli, time_control: TimeControl, seed: u64) -> Self {
         Self {
             startpos_order: cli.startpos_order,
-            games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
+            games: if cli.single_game { 1 } else { cli.games * 2 },
+            single_game: cli.single_game,
+            preserve_start_history: cli.preserve_start_history,
             seed,
             max_moves: cli.max_moves,
             adjudicate_resign: cli.adjudicate_resign,
@@ -850,6 +864,7 @@ struct WorkerConfig {
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
+    preserve_start_history: bool,
     adjudicate_resign: Option<ResignRule>,
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
@@ -981,6 +996,7 @@ fn worker_main(
         threads,
         hash_mb,
         max_moves,
+        preserve_start_history,
         adjudicate_resign,
         adjudicate_win,
         adjudicate_draw,
@@ -1064,6 +1080,7 @@ fn worker_main(
             limit_only_timeout_ms: None,
             cancel: None,
             max_moves,
+            preserve_start_history,
             resign_rule: adjudicate_resign,
             win_rule: adjudicate_win,
             draw_rule: adjudicate_draw,
@@ -1163,6 +1180,7 @@ struct SpawnCtx<'a> {
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
+    preserve_start_history: bool,
     adjudicate_resign: Option<ResignRule>,
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
@@ -1193,6 +1211,7 @@ fn spawn_worker(
         threads: ctx.threads,
         hash_mb: ctx.hash_mb,
         max_moves: ctx.max_moves,
+        preserve_start_history: ctx.preserve_start_history,
         adjudicate_resign: ctx.adjudicate_resign,
         adjudicate_win: ctx.adjudicate_win,
         adjudicate_draw: ctx.adjudicate_draw,
@@ -1281,6 +1300,15 @@ fn main() -> Result<()> {
         bail!("--concurrency must be at least 1");
     }
 
+    if cli.single_game {
+        anyhow::ensure!(cli.engines.len() == 2, "--single-game requires exactly 2 engines");
+        anyhow::ensure!(cli.concurrency == 1, "--single-game requires --concurrency 1");
+        anyhow::ensure!(
+            cli.startpos_order != StartposOrder::Cycle,
+            "--single-game cannot be used with --startpos-order cycle"
+        );
+    }
+
     // バイナリ存在確認
     for path in &cli.engines {
         if !path.is_file() {
@@ -1358,6 +1386,10 @@ fn main() -> Result<()> {
     } else {
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?
     };
+    anyhow::ensure!(
+        !cli.single_game || start_defs.len() == 1,
+        "--single-game requires exactly one start position"
+    );
     ensure_start_positions_within_max_moves(&start_defs, cli.max_moves)?;
 
     let engine_ponder = parse_ponder(&cli.ponder, cli.engines.len())?;
@@ -1629,22 +1661,30 @@ fn main() -> Result<()> {
     );
 
     source.cycle = cycle.map(RefCell::new);
+    source.single_game = cli.single_game;
 
     let mode_label = if base_idx.is_some() {
         "base-vs-N"
     } else {
         "round-robin"
     };
-    println!(
-        "tournament: {} engines, {} pairs ({}), {} games/direction, {} games/pair, {} total games, concurrency={}",
-        n,
-        pair_indices.len(),
-        mode_label,
-        cli.games,
-        cli.games * 2,
-        source.current_target_total(),
-        cli.concurrency
-    );
+    if cli.single_game {
+        println!(
+            "tournament: single game (Black: {}, White: {})",
+            engine_labels[0], engine_labels[1]
+        );
+    } else {
+        println!(
+            "tournament: {} engines, {} pairs ({}), {} games/direction, {} games/pair, {} total games, concurrency={}",
+            n,
+            pair_indices.len(),
+            mode_label,
+            cli.games,
+            cli.games * 2,
+            source.current_target_total(),
+            cli.concurrency
+        );
+    }
 
     // ペア別のファイルライターを準備し、meta行を書き出す
     let mut pair_writers: HashMap<(usize, usize), PairWriter> = HashMap::new();
@@ -1712,6 +1752,7 @@ fn main() -> Result<()> {
         threads: cli.threads,
         hash_mb: cli.hash_mb,
         max_moves: cli.max_moves,
+        preserve_start_history: cli.preserve_start_history,
         adjudicate_resign: cli.adjudicate_resign,
         adjudicate_win: cli.adjudicate_win,
         adjudicate_draw: cli.adjudicate_draw,
@@ -1737,6 +1778,7 @@ fn main() -> Result<()> {
     }
     let start_time = Instant::now();
     let mut agg = Aggregator {
+        single_game: cli.single_game,
         ponder: tournament_meta.ponder.clone(),
         engine_labels: &engine_labels,
         pair_writers,
@@ -1760,12 +1802,14 @@ fn main() -> Result<()> {
         target_games: cli.games,
         concurrency: cli.concurrency,
     };
-    println!(
-        "[control] 実行中の動的制御: {} を {}ms 間隔でポーリング (例: echo '{{\"target_games\":N,\"concurrency\":M}}' > {})",
-        control_path.display(),
-        CONTROL_POLL_INTERVAL.as_millis(),
-        control_path.display(),
-    );
+    if !cli.single_game {
+        println!(
+            "[control] 実行中の動的制御: {} を {}ms 間隔でポーリング (例: echo '{{\"target_games\":N,\"concurrency\":M}}' > {})",
+            control_path.display(),
+            CONTROL_POLL_INTERVAL.as_millis(),
+            control_path.display(),
+        );
+    }
 
     // CPU 群は起動時の --concurrency 分だけ確保するので、それを越える増員は受け付けない。
     let max_workers = cpu_slots.as_ref().map(|slots| slots.sets.len());
@@ -1782,9 +1826,9 @@ fn main() -> Result<()> {
     // - 退役: live_workers > desired_workers なら poison(None) を 1 つ送る
     // - 増員: live_workers < desired_workers なら worker を spawn
     // - 終了: 供給するものが無く、in-flight も 0 になったら抜ける
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) && (!cli.single_game || agg.completed == 0) {
         // control.json を throttle ポーリング。
-        if last_poll.is_none_or(|t| t.elapsed() >= CONTROL_POLL_INTERVAL) {
+        if !cli.single_game && last_poll.is_none_or(|t| t.elapsed() >= CONTROL_POLL_INTERVAL) {
             last_poll = Some(Instant::now());
             apply_control(
                 &control_path,
@@ -1851,6 +1895,9 @@ fn main() -> Result<()> {
             None => {
                 let inflight = tickets_sent.saturating_sub(agg.completed);
                 if inflight == 0 {
+                    if cli.single_game {
+                        break;
+                    }
                     // 終了直前に最後の制御変更（target 増加）を取りこぼさないよう強制ポーリング。
                     last_poll = Some(Instant::now());
                     apply_control(
@@ -1927,7 +1974,10 @@ fn main() -> Result<()> {
 
     // 完了直前の進捗を 1 行出す（report_interval で割り切れない端数対策）。
     // 直近のループで既に同じ行を出している場合（completed が interval の倍数）は重複を避ける。
-    if valid_completed > 0 && !valid_completed.is_multiple_of(cli.report_interval.max(1)) {
+    if !cli.single_game
+        && valid_completed > 0
+        && !valid_completed.is_multiple_of(cli.report_interval.max(1))
+    {
         print_progress(
             valid_completed,
             source.current_target_total().max(valid_completed),
@@ -1937,17 +1987,23 @@ fn main() -> Result<()> {
         );
     }
 
-    let incomplete_pairs = source
-        .emitted
-        .iter()
-        .sum::<u32>()
-        .div_ceil(2)
-        .saturating_sub(valid_completed / 2);
+    let incomplete_pairs = if cli.single_game {
+        0
+    } else {
+        source
+            .emitted
+            .iter()
+            .sum::<u32>()
+            .div_ceil(2)
+            .saturating_sub(valid_completed / 2)
+    };
     let unreturned_games = tickets_sent.saturating_sub(completed);
     let mut retry_summary = source.retry_summary();
     // analyze_selfplay の `run_meta_issue` と同じ条件で invalid にする。
-    retry_summary.invalid |=
-        run_status != RunStatus::Completed || incomplete_pairs > 0 || unreturned_games > 0;
+    retry_summary.invalid |= run_status != RunStatus::Completed
+        || incomplete_pairs > 0
+        || unreturned_games > 0
+        || (cli.single_game && valid_completed != 1);
     tournament_meta.ponder = ponder;
     tournament_meta.retry = retry_summary;
     tournament_meta.run_status = run_status;
@@ -1968,7 +2024,9 @@ fn main() -> Result<()> {
         }
     );
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
-    print_final_table(&pair_stats, &engine_labels);
+    if !cli.single_game {
+        print_final_table(&pair_stats, &engine_labels);
+    }
     if let Some(stats) = &tournament_meta.ponder {
         for ((label, stats), enabled) in engine_labels.iter().zip(stats).zip(&engine_ponder) {
             if !enabled {
@@ -2006,6 +2064,9 @@ fn main() -> Result<()> {
     if retry_summary.invalid {
         if sprt_state.is_some() {
             println!("SPRT decision withheld: invalid run (exhausted or incomplete pairs).");
+        }
+        if cli.single_game {
+            bail!("single game did not produce a valid result; run status was saved");
         }
         bail!("tournament run is invalid; recovered results and run status were saved");
     }
@@ -2176,6 +2237,7 @@ fn append_control_history(path: &Path, entry: &ControlHistoryEntry) -> Result<()
 /// 再試行チケットは新しい `id` を得る一方、元の `pair_index` / `pair_slot` を引き継ぐ。
 /// 各ペアの通常発行数は常に偶数境界で次ペアへ移るため、2 局ペアが境界をまたがない。
 struct TicketSource {
+    single_game: bool,
     cycle: Option<RefCell<CycleState>>,
     startpos_order: StartposOrder,
     pair_indices: Vec<(usize, usize)>,
@@ -2209,6 +2271,7 @@ impl TicketSource {
     ) -> Self {
         let pair_count = pair_indices.len();
         TicketSource {
+            single_game: false,
             cycle: None,
             startpos_order,
             pair_indices,
@@ -2227,7 +2290,11 @@ impl TicketSource {
 
     /// 各ペアあたりの目標ゲーム数（双方向なので `target_games * 2`）。
     fn target_per_pair(&self) -> u32 {
-        self.target_per_dir.load(Ordering::Relaxed).saturating_mul(2)
+        if self.single_game {
+            1
+        } else {
+            self.target_per_dir.load(Ordering::Relaxed).saturating_mul(2)
+        }
     }
 
     /// 現在の目標値での全ペア合計ゲーム数。進捗表示の分母に使う。
@@ -2285,6 +2352,9 @@ impl TicketSource {
             return Some(ticket);
         }
         let target = self.target_per_pair();
+        if self.single_game && self.emitted[0] == target {
+            return None;
+        }
         // 目標増加で前のカードが未達に戻っても、発行中の先後交換ペアを先に閉じる。
         // 通常発行数由来の pair_index とカード内 slot を同じ 2 局へ対応させるため。
         let pair_pos = self
@@ -2384,6 +2454,9 @@ impl TicketSource {
     }
 
     fn observe_result(&mut self, result: &MatchResult) {
+        if self.single_game {
+            return;
+        }
         let key = (result.ticket.pair_index, result.ticket.attempt);
         let slot = result.ticket.pair_slot.min(1) as usize;
         let entry = self.retry_observations.entry(key).or_default();
@@ -2464,6 +2537,7 @@ fn splitmix64(mut value: u64) -> u64 {
 
 /// 対局結果の集計とファイル出力をまとめる。メインループの各 recv 地点から共通で呼ぶ。
 struct Aggregator<'a> {
+    single_game: bool,
     ponder: Option<Vec<PonderStats>>,
     engine_labels: &'a [String],
     pair_writers: HashMap<(usize, usize), PairWriter>,
@@ -2501,8 +2575,14 @@ impl Aggregator<'_> {
             self.engine_labels,
             &mut self.pair_writers,
             &mut self.pair_game_count,
+            self.single_game,
         )?;
-        if self.observe_direct_result(result) {
+        if self.single_game {
+            if !result.error && result.outcome != GameOutcome::InProgress {
+                self.valid_completed += 1;
+                println!("Single game result: {} ({})", result.outcome.label(), result.reason);
+            }
+        } else if self.observe_direct_result(result) {
             self.valid_completed += 2;
         }
         if let (Some(total), Some(stats)) = (&mut self.ponder, result.ponder) {
@@ -2521,7 +2601,7 @@ impl Aggregator<'_> {
             self.completed,
             tickets_sent,
         );
-        if self.completed.is_multiple_of(self.report_interval) {
+        if !self.single_game && self.completed.is_multiple_of(self.report_interval) {
             print_progress(
                 self.valid_completed,
                 target_total.max(self.valid_completed),
@@ -2597,6 +2677,7 @@ fn process_result(
     engine_labels: &[String],
     pair_writers: &mut HashMap<(usize, usize), PairWriter>,
     pair_game_count: &mut HashMap<(usize, usize), u32>,
+    single_game: bool,
 ) -> Result<()> {
     let bi = result.ticket.black_idx;
     let wi = result.ticket.white_idx;
@@ -2641,8 +2722,8 @@ fn process_result(
             plies: result.plies,
             winner,
             ticket_id: Some(result.ticket.id),
-            pair_index: Some(result.ticket.pair_index),
-            pair_slot: Some(result.ticket.pair_slot),
+            pair_index: (!single_game).then_some(result.ticket.pair_index),
+            pair_slot: (!single_game).then_some(result.ticket.pair_slot),
             attempt: result.ticket.attempt,
             startpos_idx: Some(result.ticket.startpos_idx as u32),
             startpos: result.ticket.cycle_position.as_ref().map(|p| p.command.as_str()),
@@ -3239,6 +3320,8 @@ mod tests {
         let mut settings = super::MetaSettings {
             startpos_order: super::StartposOrder::Random,
             games: 2,
+            single_game: false,
+            preserve_start_history: false,
             seed: 0,
             max_moves: 512,
             adjudicate_resign: None,
@@ -3393,6 +3476,7 @@ mod tests {
             threads: 1,
             hash_mb: 1,
             max_moves: 1,
+            preserve_start_history: false,
             adjudicate_resign: None,
             adjudicate_win: None,
             adjudicate_draw: None,
@@ -3493,6 +3577,7 @@ mod tests {
 
         let labels = strings(&["base", "other", "test"]);
         let mut aggregate = super::Aggregator {
+            single_game: false,
             ponder: None,
             engine_labels: &labels,
             pair_writers: Default::default(),
