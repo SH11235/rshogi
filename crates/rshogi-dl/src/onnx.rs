@@ -321,7 +321,7 @@ impl OnnxEvaluator {
         );
         validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
         #[cfg(feature = "cuda-basic-root-session")]
-        // CUDA の畳み込み実行計画は入力形状が変わると再作成される。
+        // 1行と複数行が交互に来ると、CUDA の畳み込み実行計画を再利用できない場合がある。
         let single_row = if cfg.gpu_id >= 0
             && !cfg.use_tensorrt
             && batch_size > 1
