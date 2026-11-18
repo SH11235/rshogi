@@ -18,7 +18,7 @@ libc = "0.2"
 [features]
 default = []
 cuda-pinned-output = []
-cuda-basic-root-session = []
+cuda-basic-single-row-session = []
 onnx = ["dep:ort", "dep:rayon"]
 inference-diagnostics = []
 policy-validation-reduction = []

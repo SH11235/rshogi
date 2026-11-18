@@ -84,12 +84,12 @@ pub struct OnnxEvaluator {
 
 struct BasicSessions {
     main: EvaluatorSession,
-    #[cfg(feature = "cuda-basic-root-session")]
+    #[cfg(feature = "cuda-basic-single-row-session")]
     single_row: Option<Box<EvaluatorSession>>,
 }
 
 impl BasicSessions {
-    #[cfg(feature = "cuda-basic-root-session")]
+    #[cfg(feature = "cuda-basic-single-row-session")]
     fn for_rows(&mut self, rows: usize) -> &mut EvaluatorSession {
         if rows == 1
             && let Some(single_row) = &mut self.single_row
@@ -100,7 +100,7 @@ impl BasicSessions {
         }
     }
 
-    #[cfg(not(feature = "cuda-basic-root-session"))]
+    #[cfg(not(feature = "cuda-basic-single-row-session"))]
     fn for_rows(&mut self, _: usize) -> &mut EvaluatorSession {
         &mut self.main
     }
@@ -304,7 +304,7 @@ impl OnnxEvaluator {
         Self::from_session(
             session,
             cfg,
-            #[cfg(feature = "cuda-basic-root-session")]
+            #[cfg(feature = "cuda-basic-single-row-session")]
             &ModelOptions::default(),
         )
     }
@@ -312,7 +312,7 @@ impl OnnxEvaluator {
     fn from_session(
         session: EvaluatorSession,
         cfg: &OnnxConfig,
-        #[cfg(feature = "cuda-basic-root-session")] options: &ModelOptions,
+        #[cfg(feature = "cuda-basic-single-row-session")] options: &ModelOptions,
     ) -> Result<Self> {
         let batch_size = cfg.batch_size;
         anyhow::ensure!(
@@ -320,7 +320,7 @@ impl OnnxEvaluator {
             "legacy evaluator requires basic inputs"
         );
         validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
-        #[cfg(feature = "cuda-basic-root-session")]
+        #[cfg(feature = "cuda-basic-single-row-session")]
         // 1行と複数行が交互に来ると、CUDA の畳み込み実行計画を再利用できない場合がある。
         let single_row = if cfg.gpu_id >= 0
             && !cfg.use_tensorrt
@@ -329,6 +329,7 @@ impl OnnxEvaluator {
         {
             let session = create_session(cfg, None, options.cuda_tf32)?;
             validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
+            eprintln!("CUDA single-row session enabled");
             Some(Box::new(session))
         } else {
             None
@@ -338,7 +339,7 @@ impl OnnxEvaluator {
         Ok(Self {
             sessions: BasicSessions {
                 main: session,
-                #[cfg(feature = "cuda-basic-root-session")]
+                #[cfg(feature = "cuda-basic-single-row-session")]
                 single_row,
             },
             batch_size,
@@ -752,7 +753,7 @@ impl ModelEvaluator {
             crate::InputFormat::Basic => Ok(Self::Basic(OnnxEvaluator::from_session(
                 session,
                 cfg,
-                #[cfg(feature = "cuda-basic-root-session")]
+                #[cfg(feature = "cuda-basic-single-row-session")]
                 options,
             )?)),
             crate::InputFormat::StmTokensV1 => {

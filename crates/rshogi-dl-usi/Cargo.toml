@@ -18,7 +18,7 @@ libc = { version = "0.2", optional = true }
 [features]
 default = []
 cuda-pinned-output = ["rshogi-dl/cuda-pinned-output"]
-cuda-basic-root-session = ["rshogi-dl/cuda-basic-root-session"]
+cuda-basic-single-row-session = ["rshogi-dl/cuda-basic-single-row-session"]
 lazy-batch-metadata = ["rshogi-mcts/lazy-batch-metadata"]
 onnx = ["rshogi-dl/onnx", "dep:libc"]
 policy-validation-reduction = ["rshogi-dl/policy-validation-reduction"]

@@ -568,5 +568,5 @@ jobs:
         run: |
           cargo clippy -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-pinned-output --all-targets -- -D warnings
           cargo test -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-pinned-output
-          cargo clippy -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-basic-root-session --all-targets -- -D warnings
-          cargo test -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-basic-root-session,cuda-pinned-output
+          cargo clippy -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-basic-single-row-session --all-targets -- -D warnings
+          cargo test -p rshogi-dl -p rshogi-dl-usi --features onnx,cuda-basic-single-row-session,cuda-pinned-output
