@@ -2111,10 +2111,11 @@ mod tests {
         const R: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let a = child(R, "5i4i").unwrap();
         // 元の main の読みは 100、行き先は控えだけの局面で、控えの読みは先手から 50。
-        let before = master(&[
+        let mut before = master(&[
             row(R, "5i4i", "main", "read", "wide", "100"),
             row(&a, "5a4a", "bench", "read", "wide", "-50"),
         ]);
+        before[0].set("value_kind", "single".into());
         let nodes = BTreeMap::from([(R.to_owned(), node(&[("5i6i", 30)], 1, 0))]);
         let (after, _, _) = register(before.clone(), &nodes, &options()).unwrap();
         let rule = keep::KeepRule {

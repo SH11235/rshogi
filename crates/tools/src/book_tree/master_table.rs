@@ -139,7 +139,7 @@ pub(super) struct BookMove {
     pub mv: String,
     /// 保存値の平均を丸めた値 (手番の側から)。値が無ければ `None`。
     pub eval: Option<i32>,
-    /// 相手の未登録の応手に残す上限は、部分木の伝播値からは作れない。
+    /// single・mean の直接の読み。部分木の伝播値は未登録の応手の上限を保証しない。
     pub direct_read: bool,
 }
 
@@ -221,7 +221,8 @@ pub(super) fn positions_from_rows(
         let book_move = BookMove {
             mv: row.get("move").to_owned(),
             eval,
-            direct_read: row.get("value_kind") == "single",
+            direct_read: row.get("value_kind") == "single"
+                || row.get("value_kind").starts_with("mean:"),
         };
         if role == "main" {
             ensure!(
