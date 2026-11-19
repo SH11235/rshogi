@@ -190,7 +190,7 @@ fn recompute_ft_scalar<
     for index in active.iter() {
         let offset = index * L1;
         for (i, dst) in acc.iter_mut().enumerate() {
-            *dst += i32::from(network.feature_transformer.weights[offset + i]);
+            *dst += i32::from(network.feature_transformer.piece_weight(offset + i));
         }
     }
     acc

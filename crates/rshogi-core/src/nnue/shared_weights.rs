@@ -12,7 +12,7 @@
 //! - 共有粒度は `AlignedBox` 単位（フラット重み配列）。重み構造体まるごとではないため
 //!   POD 化不要で、全 NNUE アーキテクチャに同一機構が効く。
 //! - 1 重み blob = 1 shm セグメント。命名は blob 全バイトの FNV-1a 128bit content hash。
-//! - create-or-attach は `flock` 規律で直列化。creator は `flock` を `ftruncate` の前に取り
+//! - create-or-attach は `flock` 規律で直列化。creator は `flock` を `fallocate` の前に取り
 //!   `ready=1` 到達後まで保持する。これにより「生存 creator ⇔ flock 保持中」が成立し、
 //!   attacher が `shm_unlink` するのは「flock 保持下で size==total かつ ready!=1」＝
 //!   creator 死亡確定の 1 ケースのみ（生存セグメントを誤 unlink する経路が存在しない）。
@@ -274,7 +274,7 @@ mod linux {
                 libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600)
             };
             if create_fd >= 0 {
-                return create_segment(create_fd, cname, spec);
+                return create_segment(create_fd, cname, spec, reserve_segment);
             }
             if last_errno() != Some(libc::EEXIST) {
                 // 権限不足・ENOSPC など → local fallback。
@@ -295,8 +295,22 @@ mod linux {
         None
     }
 
+    fn reserve_segment(fd: libc::c_int, total: libc::off_t) -> std::io::Result<()> {
+        // SAFETY: fd は creator が開いた書込可能な shm、total は検証済みの正の長さ。
+        if unsafe { libc::fallocate(fd, 0, 0, total) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
     /// creator 経路: セグメントを作成し重みを書き込む。
-    fn create_segment(fd: libc::c_int, cname: &CString, spec: &BlobSpec) -> Option<ObtainOk> {
+    fn create_segment(
+        fd: libc::c_int,
+        cname: &CString,
+        spec: &BlobSpec,
+        reserve: impl FnOnce(libc::c_int, libc::off_t) -> std::io::Result<()>,
+    ) -> Option<ObtainOk> {
         // 失敗時クリーンアップ: unlink → flock 解放 → close。ready=1 到達前の失敗で
         // 未完成セグメントを残さない。mmap 後は失敗経路が無いため munmap は不要。
         // `flock(LOCK_UN)` は未取得時も無害。
@@ -309,18 +323,23 @@ mod linux {
             }
         };
 
-        // flock を ftruncate の前に取得し、ready=1 後まで保持する（flock 規律）。
+        // flock を fallocate の前に取得し、ready=1 後まで保持する。
         // SAFETY: fd は有効。
         if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
             cleanup();
             return None;
         }
-        // SAFETY: fd 有効、total は i64 範囲内（呼び出し元で検証済み）。
-        if unsafe { libc::ftruncate(fd, spec.total as libc::off_t) } != 0 {
+        let Ok(total) = libc::off_t::try_from(spec.total) else {
+            cleanup();
+            return None;
+        };
+        // 長さを設定するだけでは、tmpfs の空き不足が mmap への書込時に SIGBUS になる。
+        if let Err(error) = reserve(fd, total) {
+            log::debug!("nnue shared weights: fallocate failed: {error}");
             cleanup();
             return None;
         }
-        // SAFETY: fd 有効、total バイトが ftruncate 済み。
+        // SAFETY: fd は有効で、fallocate が total バイト分を確保済み。
         let base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -336,8 +355,7 @@ mod linux {
             return None;
         }
 
-        // 初回書込 (fault) より前にヒントを置き、THP 割当を促す。ヒントのみで内容も
-        // アドレスも変わらないため失敗は無視する。
+        // 共有マッピングに対する THP のヒント。
         // SAFETY: base / total は上の mmap で得た領域そのもの。
         unsafe {
             libc::madvise(base, spec.total, libc::MADV_HUGEPAGE);
@@ -359,7 +377,7 @@ mod linux {
             (*hdr).creator_pid = libc::getpid();
             let dst = (base as *mut u8).add(HEADER_SIZE);
             std::ptr::copy_nonoverlapping(spec.blob.as_ptr(), dst, spec.blob.len());
-            // 全書込の後に ready を Release ストア（attacher の Acquire と対）。
+            // 全書込を完了してから ready を公開する。
             (*hdr).ready.store(1, Ordering::Release);
         }
 
@@ -369,9 +387,7 @@ mod linux {
             libc::mprotect(base, spec.total, libc::PROT_READ);
         }
 
-        // 書き込んだ shm blob が local blob とバイト一致することを確認する。
-        // `copy_nonoverlapping` 直後のため通常一致するが、rev4 設計の「共有採用は
-        // バイト一致確認後」という不変条件を creator 経路でも満たすための検証。
+        // creator 経路でも、共有領域を採用する前に元データとバイト単位で照合する。
         // SAFETY: [base+HEADER_SIZE, base+total) は blob.len() バイトの有効領域。
         let shm_blob = unsafe {
             std::slice::from_raw_parts((base as *const u8).add(HEADER_SIZE), spec.blob.len())
@@ -430,14 +446,19 @@ mod linux {
                 return AttachResult::Fallback;
             }
 
+            if st.st_nlink == 0 {
+                // 待機中に unlink された fd で、同名の新しいセグメントを消さない。
+                // SAFETY: fd は有効。
+                unsafe {
+                    libc::flock(fd, libc::LOCK_UN);
+                    libc::close(fd);
+                }
+                return AttachResult::RetryOuter;
+            }
+
             if st.st_size as usize != spec.total {
-                // size != total。内訳:
-                // - `st_size == 0`: creator が `shm_open` 後・`ftruncate` 前に死亡した
-                //   未完成セグメント（残骸）の可能性。
-                // - `0 < st_size < total`: `ftruncate` は size を 0→total へ atomic に
-                //   変えるため flock 規律下では通常発生しない。別フォーマット／別実装が
-                //   同名で作ったセグメント等、将来の互換性のための保険として同経路で扱う。
-                // lock を持ったまま待たず解放し、内側ループで shm_open からやり直す。
+                // creator が shm_open 直後で flock をまだ取得していない可能性がある。
+                // creator が確保を進められるよう、flock を解放してから再試行する。
                 // SAFETY: fd 有効。
                 unsafe {
                     libc::flock(fd, libc::LOCK_UN);
@@ -447,24 +468,42 @@ mod linux {
                     std::thread::sleep(SIZE_WAIT_SLEEP);
                     continue;
                 }
-                // 内側ループ上限まで size 不一致が続いた → unlink せず local fallback。
-                //
-                // 採用方針 A（rev4 設計で採用）: `st_size != total` は
-                // 「生存 creator が `shm_open`→`ftruncate` の数命令窓に居る」可能性を
-                // 排除できない唯一の曖昧ケースのため unlink しない。これにより
-                // 「生存 creator・健全セグメントを誤 unlink する経路が一つも無い」が
-                // 例外なく成立する。
-                //
-                // 代償: creator が上記 μs 窓で SIGKILL されると size-0 残骸が残り、
-                // 同一 eval の共有が手動 cleanup（`rm /dev/shm/rshogi-nnue-*`）まで
-                // 無効化される。ただし現実的に最も起きやすい「memcpy 中の OOM kill」は
-                // size==total・ready!=1 になり下の `ready` 経路で自動 unlink+retry 回復
-                // するため、本経路で残骸化するのは μs 窓 kill のみ＝極めて稀。
+                // 再試行後も creator の終了を確定できないため、名前を残して local へ戻る。
                 return AttachResult::Fallback;
             }
 
-            // size == total → mmap（read-only）。
-            // SAFETY: fd 有効、total バイトが確保済み（fstat 確認済）。
+            // 未完成セグメントには hole があり、mmap での読み込みも
+            // 空き容量不足で SIGBUS になり得る。flock 保持下で ready を pread する。
+            let mut ready = [0; size_of::<u32>()];
+            // SAFETY: fd は有効で、ready は指定長の書込可能なバッファ。
+            let read = unsafe {
+                libc::pread(
+                    fd,
+                    ready.as_mut_ptr().cast(),
+                    ready.len(),
+                    std::mem::offset_of!(ShmHeader, ready) as libc::off_t,
+                )
+            };
+            if read != ready.len() as libc::ssize_t {
+                // SAFETY: fd は有効。
+                unsafe {
+                    libc::flock(fd, libc::LOCK_UN);
+                    libc::close(fd);
+                }
+                return AttachResult::Fallback;
+            }
+            if u32::from_ne_bytes(ready) != 1 {
+                log::info!("nnue shared weights: stale segment unlinked");
+                // SAFETY: fd は有効。flock 保持下では creator は終了済み。
+                unsafe {
+                    libc::shm_unlink(cname.as_ptr());
+                    libc::flock(fd, libc::LOCK_UN);
+                    libc::close(fd);
+                }
+                return AttachResult::RetryOuter;
+            }
+
+            // SAFETY: fd は有効で、ready の公開前に全ページへの書込が済んでいる。
             let base = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -484,44 +523,16 @@ mod linux {
                 return AttachResult::Fallback;
             }
 
-            return finish_attach(fd, cname, base, spec);
+            return finish_attach(fd, base, spec);
         }
         AttachResult::Fallback
     }
 
     /// attach: mmap 後のヘッダ検証 + memcmp。
-    fn finish_attach(
-        fd: libc::c_int,
-        cname: &CString,
-        base: *mut libc::c_void,
-        spec: &BlobSpec,
-    ) -> AttachResult {
-        // まず ready を Acquire ロードする（creator の Release ストアと対）。
-        // SAFETY: base は total バイト（>= HEADER_SIZE）の有効な読取可能マッピング先頭で、
-        // ページアラインのため `*const ShmHeader` として整列している。
+    fn finish_attach(fd: libc::c_int, base: *mut libc::c_void, spec: &BlobSpec) -> AttachResult {
         let hdr = base as *const ShmHeader;
-        let ready = unsafe { (*hdr).ready.load(Ordering::Acquire) };
-
-        if ready != 1 {
-            // flock 保持下で size==total かつ ready!=1 ＝ creator が ftruncate 後・
-            // ready=1 前に死亡したことが確定（生存 creator は flock 保持中のはず）。
-            // 唯一の正当な unlink ケース。
-            // SAFETY: base は有効な ShmHeader。
-            let creator_pid = unsafe { (*hdr).creator_pid };
-            log::info!("nnue shared weights: stale segment (creator_pid={creator_pid}) unlinked");
-            // SAFETY: base/total は上の mmap 領域。fd は有効。
-            unsafe {
-                libc::munmap(base, spec.total);
-                libc::shm_unlink(cname.as_ptr());
-                libc::flock(fd, libc::LOCK_UN);
-                libc::close(fd);
-            }
-            return AttachResult::RetryOuter;
-        }
-
-        // ready==1 を確認したので非 atomic ヘッダフィールドを読んで検証する。
-        // SAFETY: base は有効な ShmHeader。creator は ready=1 の前に全フィールドを
-        // 書き込んでおり、Release/Acquire と flock 同期で happens-before が成立。
+        // SAFETY: base はページ境界に整列したヘッダ。ready の確認と flock により
+        // creator が全フィールドを書き終えたことが保証される。
         let (magic, fmt, esz, blen, hlo, hhi) = unsafe {
             (
                 (*hdr).magic,
@@ -601,6 +612,40 @@ mod linux {
         #[test]
         fn header_fits_in_header_size() {
             assert!(std::mem::size_of::<ShmHeader>() <= HEADER_SIZE);
+        }
+
+        #[test]
+        fn reservation_failure_discards_unready_segment() {
+            let name =
+                CString::new(format!("/rshogi-nnue-test-reserve-{}", std::process::id())).unwrap();
+            let spec = BlobSpec {
+                total: HEADER_SIZE + 1,
+                elem_size: 1,
+                len: 1,
+                id: 0,
+                blob: &[42],
+            };
+            // SAFETY: name は有効な C 文字列。
+            let fd = unsafe {
+                libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600)
+            };
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            assert!(
+                create_segment(fd, &name, &spec, |_, size| {
+                    assert_eq!(size as usize, spec.total);
+                    Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+                })
+                .is_none()
+            );
+            // SAFETY: name は有効な C 文字列。open が成功した場合は fd を閉じる。
+            let reopened = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+            let error = last_errno();
+            if reopened >= 0 {
+                // SAFETY: reopened は上で開いた有効な fd。
+                unsafe { libc::close(reopened) };
+            }
+            assert_eq!(reopened, -1);
+            assert_eq!(error, Some(libc::ENOENT));
         }
 
         /// creator → attacher の往復で重み内容がバイト単位で保存されることを確認する。

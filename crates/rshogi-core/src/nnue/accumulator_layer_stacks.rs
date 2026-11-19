@@ -11,9 +11,10 @@ use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
+use super::finny::collect_piece_list_diff;
 #[cfg(test)]
 use super::finny::piece_list_diff_mask;
-use super::finny::{apply_weight_changes_to_two, collect_piece_list_diff};
+use super::piece_weights::{PieceWeight, refresh_with_diff};
 
 /// LayerStacks用アキュムレータ（L1次元）
 #[repr(C, align(64))]
@@ -189,13 +190,13 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     }
 
     /// bias/cache の tile を差分更新し、cache と探索 stack へ同時に書く。
-    pub(crate) fn refresh_or_cache<FI: Fn(BonaPiece) -> usize>(
+    pub(super) fn refresh_or_cache<FI: Fn(BonaPiece) -> usize, W: PieceWeight>(
         &mut self,
         key: (Square, Color),
         piece_list: &[BonaPiece; PieceNumber::NB],
         biases: &[i16; L1],
         accumulation: &mut [i16; L1],
-        weights: &[i16],
+        weights: &[W],
         idx_fn: FI,
     ) {
         let entry = &mut self.entries[key.0.raw() as usize][key.1 as usize];
@@ -220,7 +221,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
                 piece_list.iter().filter(|bp| **bp != BonaPiece::ZERO).map(|&bp| idx_fn(bp)),
             );
         }
-        apply_weight_changes_to_two::<L1>(
+        refresh_with_diff(
             &mut entry.accumulation,
             (!was_valid).then_some(biases),
             accumulation,
@@ -235,7 +236,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     /// PSQT を含む cache と accumulator を同じ駒の差分で更新する。
     #[cfg(feature = "nnue-psqt")]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn refresh_or_cache_with_psqt<FI, FAP, FSP>(
+    pub(super) fn refresh_or_cache_with_psqt<FI, FAP, FSP, W: PieceWeight>(
         &mut self,
         key: (Square, Color),
         piece_list: &[BonaPiece; PieceNumber::NB],
@@ -243,7 +244,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         psqt_biases: &[i32; MAX_LAYER_STACK_BUCKETS],
         accumulation: &mut [i16; L1],
         psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
-        weights: &[i16],
+        weights: &[W],
         idx_fn: FI,
         add_psqt_fn: FAP,
         sub_psqt_fn: FSP,
@@ -276,7 +277,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             );
             *psqt_acc = *psqt_biases;
         }
-        apply_weight_changes_to_two::<L1>(
+        refresh_with_diff(
             &mut entry.accumulation,
             (!was_valid).then_some(biases),
             accumulation,

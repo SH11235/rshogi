@@ -31,6 +31,7 @@ use super::network::{
 };
 use super::network_layer_stacks::compute_layer_stack_kingrank9_bucket_index;
 use super::piece_list::PieceNumber;
+use super::piece_weights::{self, PieceWeight, PieceWeights, with_piece_weights};
 use super::spec::{
     Activation, ArchitectureSpec, FeatureSet, detect_layer_stacks_feature, parse_arch_dimensions,
     parse_effect_bucket_config, parse_feature_input_dimensions,
@@ -190,11 +191,10 @@ struct DynamicLayerStacksSignature {
 pub struct DynamicLayerStacksNetwork {
     spec: ArchitectureSpec,
     feature: RuntimeLsFeature,
-    input_dimensions: usize,
     num_buckets: usize,
     pub(crate) bucket_spec: Option<super::BucketSpec>,
     ft_biases: AlignedBox<i16>,
-    ft_weights: WeightBox<i16>,
+    ft_weights: PieceWeights,
     psqt_biases: AlignedBox<i32>,
     psqt_weights: WeightBox<i32>,
     threat_dimensions: usize,
@@ -402,12 +402,24 @@ impl DynamicLayerStacksNetwork {
                 "unexpected trailing LayerStacks data: consumed={consumed}, file_size={file_size}"
             )));
         }
+        let ft_weights = piece_weights::select(ft_weights, l1)?;
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        let ft_weights = {
+            let mut weights = ft_weights;
+            if let PieceWeights::I8x2(packed) = &mut weights {
+                packed.share("FT weights (int8 x 2)");
+            }
+            weights
+        };
         Ok(Self {
             // Keep public introspection compatible with the const-generic LayerStacks path;
             // the concrete FT remains in `feature` for runtime dispatch.
             spec: ArchitectureSpec::new(FeatureSet::LayerStacks, l1, l2, l3, Activation::CReLU),
             feature,
-            input_dimensions,
             num_buckets,
             bucket_spec,
             ft_biases,
@@ -419,6 +431,10 @@ impl DynamicLayerStacksNetwork {
             buckets,
             fv_scale: parse_fv_scale_from_arch(arch).unwrap_or(FV_SCALE_HALFKA),
         })
+    }
+
+    pub(super) fn piece_ft_storage(&self) -> &'static str {
+        piece_weights::storage(&self.ft_weights)
     }
 
     pub(crate) fn spec(&self) -> ArchitectureSpec {
@@ -499,18 +515,28 @@ impl DynamicLayerStacksNetwork {
     }
 
     pub(crate) fn refresh(&self, pos: &Position, stack: &mut DynamicLayerStacksStack) {
+        with_piece_weights!(self.ft_weights, |rows| self.refresh_with_rows(pos, stack, rows));
+    }
+
+    fn refresh_with_rows<W: PieceWeight>(
+        &self,
+        pos: &Position,
+        stack: &mut DynamicLayerStacksStack,
+        rows: &[W],
+    ) {
         let current = stack.current;
         for perspective in [Color::Black, Color::White] {
-            self.refresh_perspective(pos, perspective, stack);
+            self.refresh_perspective(pos, perspective, stack, rows);
         }
         stack.computed[current] = true;
     }
 
-    fn refresh_perspective(
+    fn refresh_perspective<W: PieceWeight>(
         &self,
         pos: &Position,
         perspective: Color,
         stack: &mut DynamicLayerStacksStack,
+        rows: &[W],
     ) {
         count_refresh!();
         let current = stack.current;
@@ -528,7 +554,7 @@ impl DynamicLayerStacksNetwork {
                 psqt.copy_from_slice(&self.psqt_biases);
             }
             for index in self.feature.active(pos, perspective).iter() {
-                add_i16(acc, self.ft_row(index));
+                self.apply_piece_rows(rows, acc, [], [index]);
                 if !self.psqt_weights.is_empty() {
                     add_i32(
                         psqt,
@@ -599,9 +625,9 @@ impl DynamicLayerStacksNetwork {
                         .expect("non-EffectBucket feature")
                 });
                 match (cached_index, current_index) {
-                    (Some(sub), Some(add)) => sub_add_i16(acc, self.ft_row(sub), self.ft_row(add)),
-                    (Some(sub), None) => sub_i16(acc, self.ft_row(sub)),
-                    (None, Some(add)) => add_i16(acc, self.ft_row(add)),
+                    (Some(sub), Some(add)) => self.apply_piece_rows(rows, acc, [sub], [add]),
+                    (Some(sub), None) => self.apply_piece_rows(rows, acc, [sub], []),
+                    (None, Some(add)) => self.apply_piece_rows(rows, acc, [], [add]),
                     (None, None) => {}
                 }
                 if !self.psqt_weights.is_empty() {
@@ -644,7 +670,7 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(bp, perspective, king_sq)
                     .expect("non-EffectBucket feature");
-                add_i16(acc, self.ft_row(index));
+                self.apply_piece_rows(rows, acc, [], [index]);
                 if !self.psqt_weights.is_empty() {
                     add_i32(
                         current_psqt,
@@ -695,33 +721,47 @@ impl DynamicLayerStacksNetwork {
         if stack.computed[stack.current] {
             return;
         }
+        with_piece_weights!(self.ft_weights, |rows| self.ensure_with_rows(pos, stack, rows));
+    }
+
+    fn ensure_with_rows<W: PieceWeight>(
+        &self,
+        pos: &Position,
+        stack: &mut DynamicLayerStacksStack,
+        rows: &[W],
+    ) {
         if stack.current == 0 {
-            self.refresh(pos, stack);
+            self.refresh_with_rows(pos, stack, rows);
             return;
         }
 
         if stack.computed[stack.current - 1] {
-            self.update_from_previous(pos, stack);
+            self.update_from_previous(pos, stack, rows);
             return;
         }
 
         if self.threat_dimensions == 0
             && !matches!(self.feature, RuntimeLsFeature::EffectBucket(_))
             && let Some(source) = stack.find_usable_accumulator(4)
-            && self.forward_update(pos, stack, source)
+            && self.forward_update(pos, stack, source, rows)
         {
             return;
         }
 
-        self.refresh(pos, stack);
+        self.refresh_with_rows(pos, stack, rows);
     }
 
-    fn update_from_previous(&self, pos: &Position, stack: &mut DynamicLayerStacksStack) {
+    fn update_from_previous<W: PieceWeight>(
+        &self,
+        pos: &Position,
+        stack: &mut DynamicLayerStacksStack,
+        rows: &[W],
+    ) {
         let current = stack.current;
         let dirty = stack.dirty[current];
         for perspective in [Color::Black, Color::White] {
             if self.feature.needs_refresh(&dirty, perspective) {
-                self.refresh_perspective(pos, perspective, stack);
+                self.refresh_perspective(pos, perspective, stack, rows);
                 continue;
             }
             count_update!();
@@ -738,6 +778,7 @@ impl DynamicLayerStacksNetwork {
                 &dirty,
                 perspective,
                 pos.king_square(perspective),
+                rows,
             );
             let changes = if !fast_applied || !self.psqt_weights.is_empty() {
                 self.feature.changed(&dirty, perspective, pos)
@@ -746,7 +787,7 @@ impl DynamicLayerStacksNetwork {
             };
             if !fast_applied {
                 let (removed, added) = changes.as_ref().expect("non-EffectBucket feature");
-                self.apply_feature_changes(curr, removed, added);
+                self.apply_feature_changes(curr, removed, added, rows);
             }
 
             let prev_psqt_start = ((current - 1) * 2 + p) * self.num_buckets;
@@ -764,11 +805,12 @@ impl DynamicLayerStacksNetwork {
         stack.computed[current] = true;
     }
 
-    fn forward_update(
+    fn forward_update<W: PieceWeight>(
         &self,
         pos: &Position,
         stack: &mut DynamicLayerStacksStack,
         source: usize,
+        rows: &[W],
     ) -> bool {
         let current = stack.current;
         debug_assert!(source < current);
@@ -797,6 +839,7 @@ impl DynamicLayerStacksNetwork {
                     &dirty,
                     perspective,
                     pos.king_square(perspective),
+                    rows,
                 );
                 let changes = if !fast_applied || !self.psqt_weights.is_empty() {
                     self.feature.changed(&dirty, perspective, pos)
@@ -807,7 +850,7 @@ impl DynamicLayerStacksNetwork {
                     let Some((removed, added)) = changes.as_ref() else {
                         return false;
                     };
-                    self.apply_feature_changes(current_acc, removed, added);
+                    self.apply_feature_changes(current_acc, removed, added, rows);
                 }
                 if !self.psqt_weights.is_empty() {
                     let Some((removed, added)) = changes.as_ref() else {
@@ -822,41 +865,40 @@ impl DynamicLayerStacksNetwork {
     }
 
     #[inline]
-    fn apply_feature_changes(
+    fn apply_feature_changes<W: PieceWeight>(
         &self,
         accumulation: &mut [i16],
         removed: &IndexList<MAX_CHANGED_FEATURES>,
         added: &IndexList<MAX_CHANGED_FEATURES>,
+        rows: &[W],
     ) {
         match (removed.len(), added.len()) {
-            (1, 1) => {
-                sub_add_i16(accumulation, self.ft_row(removed.get(0)), self.ft_row(added.get(0)))
-            }
-            (2, 2) => double_sub_add_i16(
+            (1, 1) => self.apply_piece_rows(rows, accumulation, [removed.get(0)], [added.get(0)]),
+            (2, 2) => self.apply_piece_rows(
+                rows,
                 accumulation,
-                self.ft_row(removed.get(0)),
-                self.ft_row(added.get(0)),
-                self.ft_row(removed.get(1)),
-                self.ft_row(added.get(1)),
+                [removed.get(0), removed.get(1)],
+                [added.get(0), added.get(1)],
             ),
             _ => {
                 for index in removed.iter() {
-                    sub_i16(accumulation, self.ft_row(index));
+                    self.apply_piece_rows(rows, accumulation, [index], []);
                 }
                 for index in added.iter() {
-                    add_i16(accumulation, self.ft_row(index));
+                    self.apply_piece_rows(rows, accumulation, [], [index]);
                 }
             }
         }
     }
 
     #[inline]
-    fn try_apply_dirty_piece_fast(
+    fn try_apply_dirty_piece_fast<W: PieceWeight>(
         &self,
         accumulation: &mut [i16],
         dirty: &DirtyPiece,
         perspective: Color,
         king_sq: Square,
+        rows: &[W],
     ) -> bool {
         if matches!(self.feature, RuntimeLsFeature::EffectBucket(_)) {
             return false;
@@ -899,7 +941,7 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(new, perspective, king_sq)
                     .expect("non-EffectBucket feature");
-                sub_add_i16(accumulation, self.ft_row(sub), self.ft_row(add));
+                self.apply_piece_rows(rows, accumulation, [sub], [add]);
                 true
             }
             2 => {
@@ -924,13 +966,7 @@ impl DynamicLayerStacksNetwork {
                     .feature
                     .feature_index(new1, perspective, king_sq)
                     .expect("non-EffectBucket feature");
-                double_sub_add_i16(
-                    accumulation,
-                    self.ft_row(sub0),
-                    self.ft_row(add0),
-                    self.ft_row(sub1),
-                    self.ft_row(add1),
-                );
+                self.apply_piece_rows(rows, accumulation, [sub0, sub1], [add0, add1]);
                 true
             }
             _ => false,
@@ -1046,9 +1082,34 @@ impl DynamicLayerStacksNetwork {
         )
     }
 
-    fn ft_row(&self, index: usize) -> &[i16] {
-        debug_assert!(index < self.input_dimensions);
-        &self.ft_weights[index * self.spec.l1..(index + 1) * self.spec.l1]
+    #[inline]
+    fn apply_piece_rows<W: PieceWeight, const R: usize, const A: usize>(
+        &self,
+        rows: &[W],
+        accumulation: &mut [i16],
+        removed: [usize; R],
+        added: [usize; A],
+    ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(rows) = W::packed(rows) {
+            super::ft_packed8::update(rows, None, accumulation, removed, added);
+            return;
+        }
+        let rows = W::unpacked(rows);
+        let row = |index| &rows[index * self.spec.l1..(index + 1) * self.spec.l1];
+        match (removed.as_slice(), added.as_slice()) {
+            ([], &[add]) => add_i16(accumulation, row(add)),
+            (&[sub], []) => sub_i16(accumulation, row(sub)),
+            (&[sub], &[add]) => sub_add_i16(accumulation, row(sub), row(add)),
+            (&[sub0, sub1], &[add0, add1]) => {
+                double_sub_add_i16(accumulation, row(sub0), row(add0), row(sub1), row(add1));
+            }
+            _ => unreachable!("unsupported FT row count"),
+        }
     }
 }
 
@@ -1604,7 +1665,10 @@ mod tests {
             )
             .unwrap();
             packed.finish().unwrap();
-            assert_eq!(&*network.ft_weights, &*loaded.ft_weights);
+            assert!(
+                piece_weights::coefficients(&network.ft_weights)
+                    .eq(piece_weights::coefficients(&loaded.ft_weights))
+            );
             assert_eq!(&*network.psqt_weights, &*loaded.psqt_weights);
             assert_eq!(&*network.threat_weights, &*loaded.threat_weights);
             drop(loaded);
@@ -1723,6 +1787,8 @@ mod tests {
                     None,
                 )
                 .unwrap();
+            assert_eq!(dynamic.piece_ft_storage(), "i16");
+            assert_eq!(fixed.feature_transformer.piece_ft_storage(), "i16");
             assert_eq!(dynamic.spec.l3, WIDTH);
             assert_eq!(dynamic.num_buckets, 8);
             let mut pos = Position::new();
@@ -1737,6 +1803,7 @@ mod tests {
                 stack.push(dirty);
                 dynamic.ensure(&pos, &mut stack);
                 fixed.refresh_accumulator(&pos, &mut acc);
+                assert_eq!(stack.test_accumulation(), acc.accumulation.as_flattened());
                 let expected = fixed.evaluate(&pos, &acc);
                 assert_eq!(
                     dynamic.evaluate(&pos, &mut stack),
@@ -1755,6 +1822,103 @@ mod tests {
         compare::<32>();
         compare::<64>();
         crate::nnue::reset_layer_stack_progress_buckets();
+    }
+
+    #[cfg_attr(
+        not(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )),
+        ignore = "requires an AVX-512F/BW build"
+    )]
+    #[test]
+    fn packed8_dynamic_search_updates_match_i16_at_two_widths() {
+        use crate::nnue::net_delta::test_utils::{
+            SyntheticFtConfig, SyntheticFtEncoding, SyntheticFtValues,
+            build_synthetic_layer_stacks_with_ft_values,
+        };
+
+        for width in [64, 256] {
+            let model = build_synthetic_layer_stacks_with_ft_values(
+                "HalfKaHmMerged",
+                HalfKaHmMergedFeatureSet::DIMENSIONS,
+                width,
+                16,
+                32,
+                3,
+                SyntheticFtConfig {
+                    encoding: SyntheticFtEncoding::Leb128Combined,
+                    values: SyntheticFtValues::SingleByteEven,
+                },
+            );
+            let mut packed = DynamicLayerStacksNetwork::read_with_source(
+                &mut Cursor::new(&model.bytes),
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+            .unwrap();
+            packed.bucket_spec = Some("handmajor3".parse().unwrap());
+            assert_eq!(packed.piece_ft_storage(), "int8 x 2");
+            let mut reference = packed.clone();
+            let layout =
+                super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&model.bytes)
+                    .unwrap();
+            let mut ft_bytes = &model.bytes[layout.feature_transformer.hash.end..];
+            reference.ft_weights = read_layer_stacks_ft_i16(
+                &mut ft_bytes,
+                &mut reference.ft_biases,
+                HalfKaHmMergedFeatureSet::DIMENSIONS * width,
+                AlignedBox::try_new_zeroed,
+            )
+            .unwrap()
+            .into();
+            assert_eq!(reference.piece_ft_storage(), "i16");
+
+            let mut pos = Position::new();
+            pos.set_sfen(SFEN_HIRATE).unwrap();
+            let mut actual = packed.new_stack();
+            let mut expected = reference.new_stack();
+            packed.ensure(&pos, &mut actual);
+            reference.ensure(&pos, &mut expected);
+            let moves = [
+                "7g7f", "3c3d", "8h2b+", "3a2b", "B*7g", "B*3c", "5i6h", "5a6b", "6h5i",
+            ];
+            for (index, move_text) in moves.into_iter().enumerate() {
+                let mv = pos.to_move(Move::from_usi(move_text).unwrap()).unwrap();
+                assert!(pos.is_legal(mv));
+                let dirty = pos.do_move(mv, pos.gives_check(mv));
+                actual.push(dirty);
+                expected.push(dirty);
+                let ply = index + 1;
+                if !matches!(ply, 3 | 4 | 7..=9) {
+                    continue;
+                }
+                if ply == 3 {
+                    assert!(!actual.computed[index]);
+                    assert_eq!(actual.find_usable_accumulator(4), Some(0));
+                }
+                if ply == 7 {
+                    assert!(!actual.computed[index]);
+                    assert_eq!(actual.find_usable_accumulator(4), None);
+                    let white = DynamicLayerStacksCache::entry_index(
+                        pos.king_square(Color::White),
+                        Color::White,
+                    );
+                    assert!(actual.cache.valid[white]);
+                }
+                packed.ensure(&pos, &mut actual);
+                reference.ensure(&pos, &mut expected);
+                let mut fresh = reference.new_stack();
+                reference.refresh(&pos, &mut fresh);
+                let score = packed.evaluate(&pos, &mut actual);
+                for reference_stack in [&mut expected, &mut fresh] {
+                    assert_current_accumulators_equal(&actual, reference_stack, width);
+                    assert_eq!(reference.evaluate(&pos, reference_stack), score);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1995,7 +2159,6 @@ mod tests {
         DynamicLayerStacksNetwork {
             spec: ArchitectureSpec::new(FeatureSet::LayerStacks, l1, l2, l3, Activation::CReLU),
             feature,
-            input_dimensions: feature.dimensions(),
             num_buckets,
             bucket_spec: None,
             ft_biases: AlignedBox::new_zeroed(l1),
@@ -2015,7 +2178,7 @@ mod tests {
         for (i, bias) in net.ft_biases.iter_mut().enumerate() {
             *bias = i as i16 - 4;
         }
-        net.ft_weights = AlignedBox::new_zeroed(net.input_dimensions * net.spec.l1).into();
+        net.ft_weights = AlignedBox::new_zeroed(net.feature.dimensions() * net.spec.l1).into();
         for (i, weight) in net.ft_weights.make_mut().iter_mut().enumerate() {
             *weight = (i % 251) as i16 - 125;
         }
