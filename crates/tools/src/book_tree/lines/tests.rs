@@ -396,3 +396,31 @@ fn game_tables_respect_ancestors_across_missing_evaluation_edges() {
     assert!(row.starts_with("1\t3\t4i4h\t-70\t"), "{row}");
     assert!(row.contains("\trepetition\t"), "{row}");
 }
+
+#[test]
+fn large_cycle_trace_bounds_ancestor_dependent_evaluation() {
+    let (_dir, args, _) = completed(10);
+    let mut report = Report::load(&args).unwrap();
+    let readings = crate::book_tree::model::prefetch_tests::branching_cycle_fixture();
+    let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
+    let start = child(root, "5i4i").unwrap();
+    let nodes = readings.len();
+    assert!(nodes >= 64);
+    report.levels = Cow::Owned(readings.keys().map(|key| (key.clone(), 0)).collect());
+    report.readings = Cow::Owned(readings);
+    let graph = report.propagation().unwrap();
+    let exact_calls = 100;
+    let mut evaluator = graph.evaluator(exact_calls);
+    let trace = report
+        .trace(&mut evaluator, start, BTreeSet::from([root.to_owned()]), Follow::Propagated, 0)
+        .unwrap();
+    assert_eq!(trace.reason, Reason::Repetition);
+    assert!(evaluator.calls() > exact_calls);
+    assert!(
+        evaluator.calls() <= exact_calls + 2 * nodes * (trace.moves.len() + 1),
+        "{} calls for {} nodes and {} moves",
+        evaluator.calls(),
+        nodes,
+        trace.moves.len()
+    );
+}
