@@ -599,6 +599,7 @@ fn read_game_priorities(path: &Path) -> Result<BTreeMap<String, (u32, bool)>> {
             .with_context(|| format!("{row} 行目: 局名と優先度の 2 列が必要です"))?;
         ensure!(!name.is_empty(), "{row} 行目: 局名が空です");
         let priority = priority
+            .trim()
             .parse::<u32>()
             .with_context(|| format!("{row} 行目: 優先度は 0〜{MAX_PRIORITY} の整数が必要です"))?;
         ensure!(
@@ -607,7 +608,7 @@ fn read_game_priorities(path: &Path) -> Result<BTreeMap<String, (u32, bool)>> {
         );
         ensure!(
             priorities.insert(name.to_owned(), (priority, false)).is_none(),
-            "{row} 行目: 局名が重複しています: {name}"
+            "{row} 行目: 局名が重複しています: {name:?}"
         );
     }
     Ok(priorities)
@@ -812,8 +813,8 @@ pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
         .collect();
     ensure!(
         unknown.is_empty(),
-        "--game-priority に未知の局名があります: {}",
-        unknown.join(", ")
+        "--game-priority に未知の局名があります (見出しの行は置かない): {}",
+        unknown.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ")
     );
     let mut queue = merge_queue(report.queue)?;
     copy_output(&mut report.table, &args.table)?;

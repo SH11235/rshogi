@@ -395,7 +395,7 @@ fn game_priority_rejects_unknown_names_without_replacing_outputs() {
     std::fs::write(&queue, "keep queue").unwrap();
     let error = run(a).unwrap_err().to_string();
     assert!(error.contains("未知の局名"));
-    assert!(error.contains("unknown-a, unknown-b"));
+    assert!(error.contains("\"unknown-a\", \"unknown-b\""));
     assert_eq!(std::fs::read_to_string(table).unwrap(), "keep table");
     assert_eq!(std::fs::read_to_string(queue).unwrap(), "keep queue");
 }
@@ -409,7 +409,7 @@ fn game_priority_rejects_duplicates_and_out_of_range_values() {
         read_game_priorities(&path)
             .unwrap_err()
             .to_string()
-            .contains("重複しています: games")
+            .contains("重複しています: \"games\"")
     );
     std::fs::write(&path, format!("games\t{}\n", MAX_PRIORITY + 1)).unwrap();
     assert!(
