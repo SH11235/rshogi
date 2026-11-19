@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// `Tree::negamax` が循環の中の局面を手順ごとに厳密に数える呼び出しの上限 (超えると近似に切り替える)。
-const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
+pub(super) const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
 
 pub(super) type Edges = BTreeMap<String, BTreeSet<String>>;
 pub(super) type Values = BTreeMap<String, BTreeMap<String, i32>>;
@@ -298,10 +298,12 @@ impl Tree {
                 root_order.push(key.clone());
             }
             roots.entry(key.clone()).or_insert(ply);
-            for mv in moves.iter().take(def.depth.saturating_add(1)) {
+            for (index, mv) in moves.iter().enumerate() {
                 work.tick()?;
                 let next = child(&key, mv)?;
-                game.entry(key).or_default().insert(mv.to_owned());
+                if index <= def.depth {
+                    game.entry(key).or_default().insert(mv.to_owned());
+                }
                 key = next;
             }
         }
@@ -538,6 +540,7 @@ impl Tree {
                         self.normal_unresolved = Some(
                             self.unresolved(&values)
                                 .into_iter()
+                                .filter(|(key, _)| self.level[key] < self.def.depth)
                                 .map(|(key, rows)| {
                                     (key, rows.into_iter().map(|(_, mv)| mv).collect())
                                 })
@@ -730,19 +733,7 @@ impl<'a> Propagation<'a> {
         })
     }
 
-    /// 祖先を含む手順上で、伝播後の値と次に辿る最善手を求める。
-    pub fn position(
-        &self,
-        key: &str,
-        ancestors: &mut BTreeSet<String>,
-    ) -> Option<PropagatedPosition> {
-        let reading = self.readings.get(key)?;
-        let (value, rows) = self.evaluator(NEGAMAX_EXACT_CALLS).evaluate(key, ancestors);
-        let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
-        Some(PropagatedPosition { value, best, rows })
-    }
-
-    fn evaluator(&self, exact_calls: usize) -> Evaluator<'_> {
+    pub(super) fn evaluator(&self, exact_calls: usize) -> Evaluator<'_> {
         Evaluator {
             propagation: self,
             memo: BTreeMap::new(),
@@ -752,7 +743,7 @@ impl<'a> Propagation<'a> {
     }
 }
 
-struct Evaluator<'a> {
+pub(super) struct Evaluator<'a> {
     propagation: &'a Propagation<'a>,
     memo: BTreeMap<String, i32>,
     calls: usize,
@@ -760,6 +751,23 @@ struct Evaluator<'a> {
 }
 
 impl Evaluator<'_> {
+    #[cfg(test)]
+    pub(super) fn calls(&self) -> usize {
+        self.calls
+    }
+
+    /// 祖先を含む手順上で、伝播後の値と次に辿る最善手を求める。
+    pub fn position(
+        &mut self,
+        key: &str,
+        ancestors: &mut BTreeSet<String>,
+    ) -> Option<PropagatedPosition> {
+        let reading = self.propagation.readings.get(key)?;
+        let (value, rows) = self.evaluate(key, ancestors);
+        let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
+        Some(PropagatedPosition { value, best, rows })
+    }
+
     fn evaluate(&mut self, key: &str, path: &mut BTreeSet<String>) -> (i32, BTreeMap<String, i32>) {
         self.calls += 1;
         let reading = &self.propagation.readings[key];
@@ -1062,7 +1070,7 @@ impl Tree {
         cache: &impl Readings,
         limit: usize,
     ) -> Vec<PrefetchCandidate> {
-        if self.finished || self.failed {
+        if self.finished || self.failed || self.settle_rounds_used > 0 {
             return Vec::new();
         }
         // 合流した局面を浅い段で辿り直せるよう、段の小さい順に処理する。
@@ -1146,7 +1154,8 @@ impl Tree {
         limit: usize,
     ) -> Result<PredictionReport> {
         let mut report = PredictionReport::default();
-        if hold
+        if self.settle_rounds_used > 0
+            || hold
             || self.finished
             || self.failed
             || self.def.depth == 0
@@ -1389,6 +1398,47 @@ pub(super) mod prefetch_tests {
             assert_eq!(resumed.settle_rounds_used, tree.settle_rounds_used);
             assert_eq!(resumed.round_reports, tree.round_reports);
         }
+    }
+
+    #[test]
+    fn settle_shallower_rediscovery_preserves_extension_classification() {
+        let (mut tree, mut cache, keys) = extended_fixture(10);
+        cache.get_mut(&keys[2]).unwrap().multipv[1].cp = 25;
+        tree.def.rounds = 0;
+        tree.def.extend_rounds = 0;
+        tree.def.settle_rounds = 1;
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert!(!tree.normal_unresolved.as_ref().unwrap().contains_key(&keys[2]));
+        tree.level.insert(keys[2].clone(), 0);
+        let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+        assert!(tree.unresolved(&values).contains_key(&keys[2]));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+    }
+
+    #[test]
+    fn settle_disables_prefetch_and_speculation() {
+        let (mut tree, cache, keys) = settle_fixture(3);
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.settle_rounds_used, 1);
+        tree.def.rounds = 10;
+        assert!(
+            tree.prefetch(&tree.game_lines, &cache, false, PREFETCH_WORK)
+                .unwrap()
+                .is_empty()
+        );
+        let next = child(&keys[1], "5a6a").unwrap();
+        let tops = BTreeMap::from([(next, (vec!["4i3i".into()], 0, 3))]);
+        assert!(tree.speculate(&tops, &cache, PREFETCH_WORK).is_empty());
+    }
+
+    #[test]
+    fn build_rejects_invalid_game_tail_past_depth() {
+        let (tree, _, _) = settle_fixture(0);
+        let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into(), "invalid".into()])];
+        assert!(Tree::build(tree.def, &lines).is_err());
     }
 
     #[test]

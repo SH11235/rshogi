@@ -1,5 +1,5 @@
 use super::journal::Reading;
-use super::model::{Edges, Propagation, child, side};
+use super::model::{Edges, Evaluator, NEGAMAX_EXACT_CALLS, Propagation, child, side};
 use super::output::NODE_MOVES;
 use super::register::{is_done, reading_files};
 use crate::book_db::position_from_sfen;
@@ -8,6 +8,7 @@ use clap::Args;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs::{self, File};
@@ -67,7 +68,11 @@ impl Limits {
     }
 }
 
+type TraceKey = (String, String, BTreeSet<String>);
+type GameTrace = (Option<i32>, Trace);
+
 struct Report<'a> {
+    traces: RefCell<BTreeMap<TraceKey, GameTrace>>,
     limits: Limits,
     levels: Cow<'a, BTreeMap<String, usize>>,
     readings: Cow<'a, BTreeMap<String, Reading>>,
@@ -117,7 +122,9 @@ impl Reason {
     }
 }
 
+#[derive(Clone)]
 struct Trace {
+    start_value: Option<i32>,
     key: String,
     level: Option<usize>,
     moves: Vec<String>,
@@ -258,6 +265,7 @@ impl Report<'_> {
             "木に depth + extend より深い読みがあります"
         );
         Ok(Self {
+            traces: RefCell::default(),
             limits: Limits {
                 depth,
                 cap,
@@ -291,13 +299,14 @@ impl Report<'_> {
 
     fn trace(
         &self,
-        propagation: &Propagation<'_>,
+        propagation: &mut Evaluator<'_>,
         mut key: String,
         mut path: BTreeSet<String>,
         follow: Follow,
         mut merges: usize,
     ) -> Result<Trace> {
         let mut moves = Vec::new();
+        let mut start_value = None;
         let mut deviates = false;
         let mut pending = None;
         let (reason, value) = loop {
@@ -305,14 +314,15 @@ impl Report<'_> {
                 break (Reason::MissingRead, None);
             };
             let level = self.levels[&key];
+            let position =
+                propagation.position(&key, &mut path).context("伝播の読みがありません")?;
+            start_value.get_or_insert(black(&key, position.value));
             if reading.bestmove == "win" {
                 break (
                     Reason::Declaration,
                     Some(black(&key, reading.multipv.first().map_or(0, |pv| pv.cp))),
                 );
             }
-            let position =
-                propagation.position(&key, &mut path).context("伝播の読みがありません")?;
             let first = reading.lines().first();
             let chosen = match follow {
                 Follow::FirstRead => first.map(|pv| pv.mv.as_str()),
@@ -373,6 +383,7 @@ impl Report<'_> {
         };
         let level = self.levels.get(&key).copied();
         Ok(Trace {
+            start_value,
             key,
             level,
             moves,
@@ -386,12 +397,29 @@ impl Report<'_> {
 
     fn trace_game_move(
         &self,
-        propagation: &Propagation<'_>,
+        propagation: &mut Evaluator<'_>,
         key: &str,
         mv: &str,
         next: &str,
         path: &BTreeSet<String>,
     ) -> Result<(Option<i32>, Trace)> {
+        let cache_key = (key.to_owned(), mv.to_owned(), path.clone());
+        if let Some(result) = self.traces.borrow().get(&cache_key) {
+            return Ok(result.clone());
+        }
+        let result = self.trace_game_move_uncached(propagation, key, mv, next, path)?;
+        self.traces.borrow_mut().insert(cache_key, result.clone());
+        Ok(result)
+    }
+
+    fn trace_game_move_uncached(
+        &self,
+        propagation: &mut Evaluator<'_>,
+        key: &str,
+        mv: &str,
+        next: &str,
+        path: &BTreeSet<String>,
+    ) -> Result<GameTrace> {
         let reading = self.readings.get(key);
         let source_level = self.levels[key];
         let raw = reading.and_then(|r| r.lines().iter().find(|pv| pv.mv == mv));
@@ -402,12 +430,11 @@ impl Report<'_> {
             let draw = self.limits.draw(key);
             (draw, Reason::Repetition, next, next_level, draw)
         } else if (raw.is_some() && self.readings.contains_key(next)) || expanded {
-            let mut ancestors = path.clone();
-            let value = propagation.position(next, &mut ancestors).map(|p| black(next, p.value));
+            let ancestors = path.clone();
             let merges = usize::from(next_level.is_some_and(|level| level <= source_level));
             let trace =
                 self.trace(propagation, next.to_owned(), ancestors, Follow::Propagated, merges)?;
-            return Ok((value.or(raw_value), trace));
+            return Ok((trace.start_value.or(raw_value), trace));
         } else if let Some(cp) = (source_level > 0)
             .then(|| {
                 // 1 位が STOP 以上でも実戦手の値は決まらないので、決着と言えるのは実戦手自身が
@@ -443,6 +470,7 @@ impl Report<'_> {
         Ok((
             value,
             Trace {
+                start_value: value,
                 key: end_key.to_owned(),
                 level: end_level,
                 moves: Vec::new(),
@@ -456,7 +484,8 @@ impl Report<'_> {
     }
 
     fn tables(&self, paths: &Path) -> Result<(String, String, Counts)> {
-        let propagation = self.propagation()?;
+        let graph = self.propagation()?;
+        let mut propagation = graph.evaluator(NEGAMAX_EXACT_CALLS);
         let mut counts = Counts::default();
         let mut extension = String::from(
             "start_key\tstart_level\tend_level\tplies\tend_key\tend_value_black\treason\tmoves\tmerges\tstart_propagated_black\tdeviates\n",
@@ -469,8 +498,13 @@ impl Report<'_> {
                 let start_value = self.start_values.get(key).copied().or_else(|| {
                     propagation.position(key, &mut BTreeSet::new()).map(|p| black(key, p.value))
                 });
-                let trace =
-                    self.trace(&propagation, key.clone(), BTreeSet::new(), Follow::FirstRead, 0)?;
+                let trace = self.trace(
+                    &mut propagation,
+                    key.clone(),
+                    BTreeSet::new(),
+                    Follow::FirstRead,
+                    0,
+                )?;
                 counts.add(&trace, false);
                 writeln!(
                     extension,
@@ -515,7 +549,8 @@ impl Report<'_> {
                     key = next;
                     continue;
                 }
-                let (value, trace) = self.trace_game_move(&propagation, &key, mv, &next, &path)?;
+                let (value, trace) =
+                    self.trace_game_move(&mut propagation, &key, mv, &next, &path)?;
                 counts.add(&trace, true);
                 writeln!(
                     game,
@@ -536,7 +571,7 @@ impl Report<'_> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Unsettled {
     pub start_key: String,
     pub start_move: String,
@@ -548,6 +583,7 @@ pub(super) struct Unsettled {
 /// 実戦と根の比較手から、祖先を含む伝播線の不足辺を集める。
 pub(super) fn unsettled(tree: &super::model::Tree) -> Result<Vec<Unsettled>> {
     let report = Report {
+        traces: RefCell::default(),
         limits: Limits {
             depth: tree.def.depth,
             cap: tree.def.max_depth(),
@@ -561,16 +597,32 @@ pub(super) fn unsettled(tree: &super::model::Tree) -> Result<Vec<Unsettled>> {
         start_values: BTreeMap::new(),
         extend_unsaved: false,
     };
-    let propagation = report.propagation()?;
-    let mut pending = Vec::new();
+    let graph = report.propagation()?;
+    let mut propagation = graph.evaluator(NEGAMAX_EXACT_CALLS);
+    let mut starts = Vec::new();
+    for key in tree.roots.keys() {
+        let mut moves: BTreeSet<_> =
+            tree.candidates.get(key).into_iter().flatten().cloned().collect();
+        if let Some(position) = propagation.position(key, &mut BTreeSet::new()) {
+            moves.extend(position.best);
+        }
+        for mv in moves {
+            starts.push((key.clone(), mv));
+        }
+    }
+    let mut pending = BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut trace_move = |key: &str, mv: &str, path: &BTreeSet<String>| -> Result<()> {
+        if !seen.insert((key.to_owned(), mv.to_owned(), path.clone())) {
+            return Ok(());
+        }
         let next = child(key, mv)?;
-        let (_, trace) = report.trace_game_move(&propagation, key, mv, &next, path)?;
+        let (_, trace) = report.trace_game_move(&mut propagation, key, mv, &next, path)?;
         if trace.reason == Reason::Unexpanded
             && let Some((end_key, end_move)) = trace.pending
             && tree.level[&end_key] < tree.def.max_depth()
         {
-            pending.push(Unsettled {
+            pending.insert(Unsettled {
                 start_key: key.to_owned(),
                 start_move: mv.to_owned(),
                 end_key,
@@ -580,15 +632,8 @@ pub(super) fn unsettled(tree: &super::model::Tree) -> Result<Vec<Unsettled>> {
         }
         Ok(())
     };
-    for key in tree.roots.keys() {
-        let mut moves: BTreeSet<_> =
-            tree.candidates.get(key).into_iter().flatten().cloned().collect();
-        if let Some(position) = propagation.position(key, &mut BTreeSet::new()) {
-            moves.extend(position.best);
-        }
-        for mv in moves {
-            trace_move(key, &mv, &BTreeSet::from([key.clone()]))?;
-        }
+    for (key, mv) in starts {
+        trace_move(&key, &mv, &BTreeSet::from([key.clone()]))?;
     }
     for (root, _, moves) in &tree.game_lines {
         let mut key = root.clone();
@@ -601,7 +646,7 @@ pub(super) fn unsettled(tree: &super::model::Tree) -> Result<Vec<Unsettled>> {
             key = child(&key, mv)?;
         }
     }
-    Ok(pending)
+    Ok(pending.into_iter().collect())
 }
 
 #[derive(Default)]

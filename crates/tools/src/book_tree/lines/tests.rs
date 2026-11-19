@@ -39,7 +39,7 @@ fn saved_output_traces_stop_of_either_sign_and_cap() {
         let report = Report::load(&args).unwrap();
         let trace = report
             .trace(
-                &report.propagation().unwrap(),
+                &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
                 keys[1].clone(),
                 BTreeSet::new(),
                 Follow::FirstRead,
@@ -74,7 +74,7 @@ fn stops_at_shallower_merge_with_its_propagated_value() {
     report.levels.to_mut().insert(keys[2].clone(), 1);
     let trace = report
         .trace(
-            &report.propagation().unwrap(),
+            &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
             keys[1].clone(),
             BTreeSet::new(),
             Follow::FirstRead,
@@ -102,7 +102,7 @@ fn direct_game_move_settles_only_when_every_move_is_lost() {
         let next = child(&keys[2], "4i4h").unwrap();
         let (value, trace) = report
             .trace_game_move(
-                &report.propagation().unwrap(),
+                &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
                 &keys[2],
                 "4i4h",
                 &next,
@@ -121,7 +121,7 @@ fn unexpanded_game_move_without_a_read_leaves_value_blank() {
     let next = child(&keys[2], "4i5i").unwrap();
     let (value, trace) = report
         .trace_game_move(
-            &report.propagation().unwrap(),
+            &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
             &keys[2],
             "4i5i",
             &next,
@@ -138,7 +138,7 @@ fn expanded_edge_with_missing_read_is_distinct_from_unexpanded() {
     let report = Report::load(&args).unwrap();
     let trace = report
         .trace(
-            &report.propagation().unwrap(),
+            &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
             keys[1].clone(),
             BTreeSet::new(),
             Follow::FirstRead,
@@ -194,10 +194,11 @@ fn game_pv_and_direct_repetition_use_the_ancestor_path() {
     );
 
     let report = Report::load(&args).unwrap();
-    let propagation = report.propagation().unwrap();
+    let graph = report.propagation().unwrap();
+    let mut propagation = graph.evaluator(NEGAMAX_EXACT_CALLS);
     let (value, trace) = report
         .trace_game_move(
-            &propagation,
+            &mut propagation,
             &keys[0],
             "5i4i",
             &keys[1],
@@ -212,7 +213,7 @@ fn game_pv_and_direct_repetition_use_the_ancestor_path() {
 
     let (value, trace) = report
         .trace_game_move(
-            &propagation,
+            &mut propagation,
             &keys[3],
             "4a5a",
             &keys[0],
@@ -262,7 +263,7 @@ fn terminal_readings_distinguish_mate_no_legal_declaration_and_empty_read() {
         report.expanded.to_mut().remove(key);
         let trace = report
             .trace(
-                &report.propagation().unwrap(),
+                &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
                 key.to_owned(),
                 BTreeSet::new(),
                 Follow::FirstRead,
@@ -281,7 +282,7 @@ fn direct_game_move_at_the_level_cap_reports_cap() {
     let next = child(&keys[4], &mv).unwrap();
     let (_, trace) = report
         .trace_game_move(
-            &report.propagation().unwrap(),
+            &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
             &keys[4],
             &mv,
             &next,
@@ -307,4 +308,36 @@ fn settled_output_has_no_unexpanded_lines() {
     let (_, game, counts) = report.tables(&dir.path().join("paths.record.tsv")).unwrap();
     assert_eq!(counts.reasons.get("unexpanded"), None);
     assert!(game.lines().skip(1).all(|row| row.contains("\tstop\t")));
+}
+
+#[test]
+fn shared_game_prefix_reuses_trace_and_evaluation() {
+    let (_dir, args, keys) = completed(10);
+    let report = Report::load(&args).unwrap();
+    let graph = report.propagation().unwrap();
+    let mut evaluator = graph.evaluator(NEGAMAX_EXACT_CALLS);
+    let path = BTreeSet::from([keys[0].clone(), keys[1].clone()]);
+    report
+        .trace_game_move(&mut evaluator, &keys[1], "5a4a", &keys[2], &path)
+        .unwrap();
+    let calls = evaluator.calls();
+    assert!(calls > 0);
+    for _ in 0..100 {
+        report
+            .trace_game_move(&mut evaluator, &keys[1], "5a4a", &keys[2], &path)
+            .unwrap();
+    }
+    assert_eq!(evaluator.calls(), calls);
+}
+
+#[test]
+fn shared_game_prefix_has_unique_unsettled_rows() {
+    let (mut tree, cache, _) = crate::book_tree::model::prefetch_tests::settle_fixture(1);
+    tree.def.settle_rounds = 0;
+    assert!(!tree.game_lines.is_empty());
+    tree.advance(&cache).unwrap();
+    let expected = unsettled(&tree).unwrap();
+    assert!(!expected.is_empty());
+    tree.game_lines = (0..100).flat_map(|_| tree.game_lines.iter().cloned()).collect();
+    assert_eq!(unsettled(&tree).unwrap(), expected);
 }
