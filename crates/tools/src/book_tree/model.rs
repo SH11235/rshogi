@@ -299,6 +299,10 @@ impl Tree {
             }
             roots.entry(key.clone()).or_insert(ply);
             for (index, mv) in moves.iter().enumerate() {
+                // depth+1 手より先は settle だけが辿るので、既定 0 では従来どおり検査しない。
+                if index > def.depth && def.settle_rounds == 0 {
+                    break;
+                }
                 work.tick()?;
                 let next = child(&key, mv)?;
                 if index <= def.depth {
@@ -1435,10 +1439,12 @@ pub(super) mod prefetch_tests {
     }
 
     #[test]
-    fn build_rejects_invalid_game_tail_past_depth() {
-        let (tree, _, _) = settle_fixture(0);
+    fn build_checks_game_tail_past_depth_only_when_settling() {
         let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into(), "invalid".into()])];
+        let (tree, _, _) = settle_fixture(1);
         assert!(Tree::build(tree.def, &lines).is_err());
+        let (tree, _, _) = settle_fixture(0);
+        assert!(Tree::build(tree.def, &lines).is_ok());
     }
 
     #[test]
