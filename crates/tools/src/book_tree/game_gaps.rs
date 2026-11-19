@@ -64,6 +64,9 @@ pub(super) struct GameGapsArgs {
     enqueue_out: Option<PathBuf>,
     #[arg(long)]
     priority: Option<u32>,
+    /// 局ごとの受付優先度を指定する TSV (局名、優先度)
+    #[arg(long, value_name = "TSV", requires = "enqueue_out")]
+    game_priority: Option<PathBuf>,
     #[arg(long, requires = "enqueue_out")]
     tag: Option<String>,
     #[arg(long, default_value_t = 3)]
@@ -583,21 +586,58 @@ fn short_name(name: &str) -> String {
     if s.is_empty() { "game".into() } else { s }
 }
 
+fn read_game_priorities(path: &Path) -> Result<BTreeMap<String, (u32, bool)>> {
+    let mut priorities = BTreeMap::new();
+    for (index, line) in BufReader::new(File::open(path)?).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row = index + 1;
+        let (name, priority) = line
+            .split_once('\t')
+            .with_context(|| format!("{row} 行目: 局名と優先度の 2 列が必要です"))?;
+        ensure!(!name.is_empty(), "{row} 行目: 局名が空です");
+        let priority = priority
+            .parse::<u32>()
+            .with_context(|| format!("{row} 行目: 優先度は 0〜{MAX_PRIORITY} の整数が必要です"))?;
+        ensure!(
+            priority <= MAX_PRIORITY,
+            "{row} 行目: 優先度は 0〜{MAX_PRIORITY} の整数が必要です"
+        );
+        ensure!(
+            priorities.insert(name.to_owned(), (priority, false)).is_none(),
+            "{row} 行目: 局名が重複しています: {name}"
+        );
+    }
+    Ok(priorities)
+}
+
 struct Report<'a> {
     args: &'a GameGapsArgs,
     master: MasterIndex,
     excluded: Excluded,
     table: File,
     queue: Sorter,
+    game_priorities: BTreeMap<String, (u32, bool)>,
 }
 
 impl Report<'_> {
     fn game(&mut self, mut game: Game, path: &Path) -> Result<()> {
         validate_game(&mut game)?;
+        let priority = self
+            .game_priorities
+            .get_mut(&game.name)
+            .map(|(priority, seen)| {
+                *seen = true;
+                *priority
+            })
+            .or(self.args.priority);
         if self.args.line {
-            return self.line_game(&game, path);
+            return self.line_game(&game, path, priority);
         }
         let args = self.args;
+        let table_priority = priority.map_or_else(String::new, |p| p.to_string());
         let mut gaps = 0;
         let mut uncovered = 0;
         let mut active = Vec::<(usize, &Coverage)>::new();
@@ -641,7 +681,7 @@ impl Report<'_> {
             let covered = covered_ids(&game, i, &active).into_iter().collect::<Vec<_>>().join(",");
             writeln!(
                 self.table,
-                "{}\t{}\t{}\t{}\t{kind}\t{covered}\t{}",
+                "{}\t{}\t{}\t{}\t{kind}\t{covered}\t{}\t{table_priority}",
                 game.name, m.ply, m.side_to_move, m.move_usi, root.key
             )?;
             if !covered.is_empty() {
@@ -666,7 +706,7 @@ impl Report<'_> {
                 roots: vec![],
                 own: game.own.clone(),
                 depth: args.depth,
-                priority: args.priority.context("--priority が必要です")?,
+                priority: priority.context("--priority が必要です")?,
                 hold: false,
                 game: vec![game.moves[i..].iter().take(8).map(|m| m.move_usi.clone()).collect()],
                 opts: args.opts(),
@@ -704,6 +744,10 @@ pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
     ensure!(args.depth > 0 && args.depth <= MAX_DEPTH, "depth は 1〜{MAX_DEPTH} が必要です");
     args.opts().check()?;
     ensure!(args.priority.is_none_or(|p| p <= MAX_PRIORITY), "priority が大きすぎます");
+    ensure!(
+        args.game_priority.is_none() || args.enqueue_out.is_some(),
+        "--game-priority には --enqueue-out が必要です"
+    );
     if args.enqueue_out.is_some() {
         check_tag(args.tag.as_deref().context("--enqueue-out には --tag が必要です")?)?;
         if args.line {
@@ -721,6 +765,9 @@ pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
     let mut inputs = vec![("--master", args.master.as_path())];
     inputs.extend(args.games.iter().map(|p| ("--games", p.as_path())));
     inputs.extend(args.exclude_queue.iter().map(|p| ("--exclude-queue", p.as_path())));
+    if let Some(path) = &args.game_priority {
+        inputs.push(("--game-priority", path));
+    }
     if args.schema.is_some() {
         inputs.extend(schema_paths.iter().map(|p| ("--schema", p.as_path())));
     }
@@ -735,20 +782,39 @@ pub(super) fn run(mut args: GameGapsArgs) -> Result<()> {
         excluded: read_excluded(&args.exclude_queue)?,
         table: tempfile::tempfile()?,
         queue: Sorter::new(),
+        game_priorities: args
+            .game_priority
+            .as_deref()
+            .map(|path| {
+                read_game_priorities(path)
+                    .with_context(|| format!("--game-priority: {}", path.display()))
+            })
+            .transpose()?
+            .unwrap_or_default(),
     };
     writeln!(
         report.table,
         "{}",
         if args.line {
-            "game\tply\tside\town\tend_reason\tgame_moves\tcovered_by\tkey"
+            "game\tply\tside\town\tend_reason\tgame_moves\tcovered_by\tkey\tpriority"
         } else {
-            "game\tply\tside\tmove\tkind\tcovered_by\tkey"
+            "game\tply\tside\tmove\tkind\tcovered_by\tkey\tpriority"
         }
     )?;
     for path in &args.games {
         visit_input(path, &args, |game| report.game(game, path))
             .with_context(|| format!("棋譜: {}", path.display()))?;
     }
+    let unknown: Vec<_> = report
+        .game_priorities
+        .into_iter()
+        .filter_map(|(name, (_, seen))| (!seen).then_some(name))
+        .collect();
+    ensure!(
+        unknown.is_empty(),
+        "--game-priority に未知の局名があります: {}",
+        unknown.join(", ")
+    );
     let mut queue = merge_queue(report.queue)?;
     copy_output(&mut report.table, &args.table)?;
     if let Some(p) = &args.enqueue_out {
@@ -805,6 +871,7 @@ fn merge_queue(queue: Sorter) -> Result<File> {
             let previous = first.opts.extend.take();
             ensure!(first.opts == line.opts, "同じ根・own の opts が不一致です");
             first.opts.extend = previous.max(extend);
+            first.priority = first.priority.min(line.priority);
         }
         if last_game != row.key[2] {
             if !last_game.is_empty() {
