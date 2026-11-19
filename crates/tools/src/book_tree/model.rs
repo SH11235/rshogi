@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 /// `Tree::negamax` が循環の中の局面を手順ごとに厳密に数える呼び出しの上限 (超えると近似に切り替える)。
 const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
 
-type Edges = BTreeMap<String, BTreeSet<String>>;
+pub(super) type Edges = BTreeMap<String, BTreeSet<String>>;
 pub(super) type Values = BTreeMap<String, BTreeMap<String, i32>>;
 pub(super) type Pending = BTreeMap<String, Vec<(i32, String)>>;
 
@@ -153,9 +153,9 @@ impl TreeParams {
         self.depth.saturating_add(self.extend)
     }
 
-    /// `key` の手番の側が循環に入る手に付ける値 (手番の側から見た値)。
-    fn draw_for(&self, key: &str) -> i32 {
-        let own = if side(key) == "b" {
+    /// 手番の側が循環に入る手に付ける値 (手番の側から見た値)。
+    fn draw_for(&self, turn: &str) -> i32 {
+        let own = if turn == "b" {
             self.draw_black
         } else {
             self.draw_white
@@ -548,7 +548,7 @@ impl Tree {
     }
 
     pub fn raw_rows(&self, key: &str) -> BTreeMap<String, i32> {
-        self.nodes[key].lines().iter().map(|p| (p.mv.clone(), p.cp)).collect()
+        raw_rows(&self.nodes[key])
     }
 
     pub fn negamax(&self, nodes: &BTreeSet<String>) -> Result<Values> {
@@ -561,80 +561,17 @@ impl Tree {
         nodes: &BTreeSet<String>,
         exact_calls: usize,
     ) -> Result<Values> {
-        let mut children: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        for key in nodes {
-            let moves: BTreeSet<_> = self.nodes[key]
-                .lines()
-                .iter()
-                .map(|p| p.mv.clone())
-                .chain(self.edge.get(key).into_iter().flatten().cloned())
-                .collect();
-            for mv in moves {
-                let c = child(key, &mv)?;
-                if nodes.contains(&c) {
-                    children.entry(key.clone()).or_default().push((mv, c));
-                }
-            }
-        }
-        let cyclic = cyclic_nodes(&children);
-        // 循環 (強連結成分) に入らない局面からは手順の上の祖先に戻れない (戻れれば同じ成分になる)。
-        // その値は手順に依らないので一度だけ計算する。合流の多い木で手順ごとに数え直すと指数的に遅くなる。
-        // 循環の中の局面は手順ごとに数え直すが、大きな循環が重なる木ではそれも爆発するので、呼び出しが
-        // `exact_calls` を超えたら循環の中の局面も最初に求めた値を使い回す (別の手順から来たときの
-        // 千日手の判定を引き継がない近似)。
-        fn val(
-            tree: &Tree,
-            key: &str,
-            children: &BTreeMap<String, Vec<(String, String)>>,
-            cyclic: &BTreeSet<String>,
-            memo: &mut BTreeMap<String, i32>,
-            calls: &mut usize,
-            exact_calls: usize,
-            path: &mut BTreeSet<String>,
-        ) -> (i32, BTreeMap<String, i32>) {
-            *calls += 1;
-            let mut rows = tree.raw_rows(key);
-            path.insert(key.to_owned());
-            for (mv, c) in children.get(key).into_iter().flatten() {
-                let value = if path.contains(c) {
-                    tree.def.draw_for(key)
-                } else if let Some(&v) = memo.get(c) {
-                    -v
-                } else {
-                    -val(tree, c, children, cyclic, memo, calls, exact_calls, path).0
-                };
-                rows.insert(mv.clone(), value);
-            }
-            path.remove(key);
-            // 宣言勝ちの葉は指し手の行を持たないので、`pv win` の行の値を局面の値にする
-            // (d*.jsonl を読む後段の登録はこの値を使う)。行が無ければ他の葉と同じ 0。
-            let reading = &tree.nodes[key];
-            let win = (rows.is_empty() && reading.bestmove == "win")
-                .then(|| reading.multipv.first().map(|p| p.cp))
-                .flatten();
-            let value = rows.values().copied().max().or(win).unwrap_or(0);
-            if !cyclic.contains(key) || *calls > exact_calls {
-                memo.insert(key.to_owned(), value);
-            }
-            (value, rows)
-        }
-        let mut memo = BTreeMap::new();
-        let mut calls = 0;
+        let propagation = Propagation::new(
+            &self.nodes,
+            &self.edge,
+            nodes,
+            [self.def.draw_for("b"), self.def.draw_for("w")],
+        )?;
+        let mut evaluator = propagation.evaluator(exact_calls);
         Ok(nodes
             .iter()
             .map(|key| {
-                let mut path = BTreeSet::new();
-                let rows = val(
-                    self,
-                    key,
-                    &children,
-                    &cyclic,
-                    &mut memo,
-                    &mut calls,
-                    exact_calls,
-                    &mut path,
-                )
-                .1;
+                let (_, rows) = evaluator.evaluate(key, &mut BTreeSet::new());
                 (key.clone(), rows)
             })
             .collect())
@@ -675,21 +612,137 @@ impl Tree {
         rows: &BTreeMap<String, i32>,
         moves: impl IntoIterator<Item = String>,
     ) -> Vec<String> {
-        let mp = self.nodes[key].lines();
-        let mut moves: Vec<_> = moves.into_iter().collect();
-        moves.sort_by(|a, b| {
-            rows.get(b)
-                .unwrap_or(&-99999)
-                .cmp(rows.get(a).unwrap_or(&-99999))
-                .then_with(|| {
-                    mp.iter()
-                        .position(|p| &p.mv == a)
-                        .unwrap_or(usize::MAX)
-                        .cmp(&mp.iter().position(|p| &p.mv == b).unwrap_or(usize::MAX))
-                })
-                .then_with(|| a.cmp(b))
-        });
-        moves
+        rank_moves(&self.nodes[key], rows, moves)
+    }
+}
+
+fn raw_rows(reading: &Reading) -> BTreeMap<String, i32> {
+    reading.lines().iter().map(|p| (p.mv.clone(), p.cp)).collect()
+}
+
+fn rank_moves(
+    reading: &Reading,
+    rows: &BTreeMap<String, i32>,
+    moves: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mp = reading.lines();
+    let mut moves: Vec<_> = moves.into_iter().collect();
+    moves.sort_by(|a, b| {
+        rows.get(b)
+            .unwrap_or(&-99999)
+            .cmp(rows.get(a).unwrap_or(&-99999))
+            .then_with(|| {
+                mp.iter()
+                    .position(|p| &p.mv == a)
+                    .unwrap_or(usize::MAX)
+                    .cmp(&mp.iter().position(|p| &p.mv == b).unwrap_or(usize::MAX))
+            })
+            .then_with(|| a.cmp(b))
+    });
+    moves
+}
+
+pub(super) struct Propagation<'a> {
+    readings: &'a BTreeMap<String, Reading>,
+    children: BTreeMap<String, Vec<(String, String)>>,
+    cyclic: BTreeSet<String>,
+    draw: [i32; 2],
+}
+
+pub(super) struct PropagatedPosition {
+    pub value: i32,
+    pub best: Option<String>,
+    pub rows: BTreeMap<String, i32>,
+}
+
+impl<'a> Propagation<'a> {
+    /// 展開した辺と、読みの候補手から同じ木に合流する依存を集める。
+    pub fn new(
+        readings: &'a BTreeMap<String, Reading>,
+        edges: &Edges,
+        nodes: &BTreeSet<String>,
+        draw: [i32; 2],
+    ) -> Result<Self> {
+        let mut children: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for key in nodes {
+            let moves: BTreeSet<_> = readings[key]
+                .lines()
+                .iter()
+                .map(|p| &p.mv)
+                .chain(edges.get(key).into_iter().flatten())
+                .collect();
+            for mv in moves {
+                let c = child(key, mv)?;
+                if nodes.contains(&c) {
+                    children.entry(key.clone()).or_default().push((mv.clone(), c));
+                }
+            }
+        }
+        let cyclic = cyclic_nodes(&children);
+        Ok(Self {
+            readings,
+            children,
+            cyclic,
+            draw,
+        })
+    }
+
+    /// 祖先を含む手順上で、伝播後の値と次に辿る最善手を求める。
+    pub fn position(
+        &self,
+        key: &str,
+        ancestors: &mut BTreeSet<String>,
+    ) -> Option<PropagatedPosition> {
+        let reading = self.readings.get(key)?;
+        let (value, rows) = self.evaluator(NEGAMAX_EXACT_CALLS).evaluate(key, ancestors);
+        let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
+        Some(PropagatedPosition { value, best, rows })
+    }
+
+    fn evaluator(&self, exact_calls: usize) -> Evaluator<'_> {
+        Evaluator {
+            propagation: self,
+            memo: BTreeMap::new(),
+            calls: 0,
+            exact_calls,
+        }
+    }
+}
+
+struct Evaluator<'a> {
+    propagation: &'a Propagation<'a>,
+    memo: BTreeMap<String, i32>,
+    calls: usize,
+    exact_calls: usize,
+}
+
+impl Evaluator<'_> {
+    fn evaluate(&mut self, key: &str, path: &mut BTreeSet<String>) -> (i32, BTreeMap<String, i32>) {
+        self.calls += 1;
+        let reading = &self.propagation.readings[key];
+        let mut rows = raw_rows(reading);
+        path.insert(key.to_owned());
+        for (mv, child) in self.propagation.children.get(key).into_iter().flatten() {
+            let value = if path.contains(child) {
+                self.propagation.draw[usize::from(side(key) == "w")]
+            } else if let Some(&value) = self.memo.get(child) {
+                -value
+            } else {
+                -self.evaluate(child, path).0
+            };
+            rows.insert(mv.clone(), value);
+        }
+        path.remove(key);
+        let declaration = (rows.is_empty() && reading.bestmove == "win")
+            .then(|| reading.multipv.first().map(|p| p.cp))
+            .flatten();
+        let value = rows.values().copied().max().or(declaration).unwrap_or(0);
+        // 循環外の局面は探索中に加えた祖先へ戻れない。循環内は手順ごとに評価するが、
+        // 呼び出し上限を超えたら探索量を抑えるために値を使い回す。
+        if !self.propagation.cyclic.contains(key) || self.calls > self.exact_calls {
+            self.memo.insert(key.to_owned(), value);
+        }
+        (value, rows)
     }
 }
 

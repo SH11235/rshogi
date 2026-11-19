@@ -1,9 +1,8 @@
 use super::journal::Reading;
-use super::model::{child, side};
+use super::model::{Edges, Propagation, child, side};
 use super::output::NODE_MOVES;
 use super::register::{is_done, reading_files};
-use crate::book_db::{position_from_sfen, strip_ply};
-use crate::common::dedup::canonicalize_maybe_new;
+use crate::book_db::position_from_sfen;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -57,19 +56,6 @@ struct Limits {
     draw_white: Option<i32>,
 }
 
-#[derive(Default)]
-struct Node {
-    level: Option<usize>,
-    reading: Option<Reading>,
-    moves: BTreeMap<String, RankedMove>,
-}
-
-struct RankedMove {
-    rank: usize,
-    value: i32,
-    expanded: bool,
-}
-
 impl Limits {
     fn draw(&self, key: &str) -> Option<i32> {
         if side(key) == "b" {
@@ -82,7 +68,11 @@ impl Limits {
 
 struct Report {
     limits: Limits,
-    nodes: BTreeMap<String, Node>,
+    levels: BTreeMap<String, usize>,
+    readings: BTreeMap<String, Reading>,
+    expanded: Edges,
+    start_values: BTreeMap<String, i32>,
+    extend_unsaved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,10 +85,11 @@ enum Reason {
     Repetition,
     Unexpanded,
     MissingRead,
+    Merged,
 }
 
 impl Reason {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Stop,
         Self::Cap,
         Self::Mate,
@@ -107,6 +98,7 @@ impl Reason {
         Self::Repetition,
         Self::Unexpanded,
         Self::MissingRead,
+        Self::Merged,
     ];
 
     fn name(self) -> &'static str {
@@ -119,6 +111,7 @@ impl Reason {
             Self::Repetition => "repetition",
             Self::Unexpanded => "unexpanded",
             Self::MissingRead => "missing-read",
+            Self::Merged => "merged",
         }
     }
 }
@@ -130,9 +123,10 @@ struct Trace {
     reason: Reason,
     value: Option<i32>,
     merges: usize,
+    deviates: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Follow {
     FirstRead,
     Propagated,
@@ -165,10 +159,25 @@ fn read_lines(path: &Path) -> Result<std::io::Lines<BufReader<File>>> {
     .lines())
 }
 
-fn set_level(node: &mut Node, key: &str, level: usize) -> Result<()> {
-    ensure!(node.level.is_none_or(|known| known == level), "局面の段が一致しません: {key}");
-    node.level = Some(level);
+fn set_level(levels: &mut BTreeMap<String, usize>, key: &str, level: usize) -> Result<()> {
+    ensure!(
+        levels.insert(key.to_owned(), level).is_none_or(|known| known == level),
+        "局面の段が一致しません: {key}"
+    );
     Ok(())
+}
+
+fn read_end(value: i32, stop: bool, cap: bool) -> Reason {
+    // USI mate と同じ値域の cp は、保存した値から区別できない。
+    if (30000 - rshogi_core::types::MAX_PLY as u32..=30000).contains(&value.unsigned_abs()) {
+        Reason::Mate
+    } else if stop {
+        Reason::Stop
+    } else if cap {
+        Reason::Cap
+    } else {
+        Reason::Unexpanded
+    }
 }
 
 impl Report {
@@ -186,7 +195,8 @@ impl Report {
         let extend = check_saved("extend", args.extend, status.extend)?
             .context("延長段数の記録がありません。--extend を指定してください")?;
         let stop = check_saved("stop", args.stop, status.stop)?.unwrap_or(300);
-        let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
+        let mut levels = BTreeMap::new();
+        let mut readings = BTreeMap::new();
         for path in reading_files(dir)? {
             let name = path.file_stem().and_then(|s| s.to_str()).context("読みのファイル名")?;
             let level = name[1..].parse()?;
@@ -194,10 +204,9 @@ impl Report {
                 let reading: Reading = serde_json::from_str(&line?)
                     .with_context(|| format!("{} の読みの形式が不正です", path.display()))?;
                 let key = &reading.key;
-                let node = nodes.entry(key.clone()).or_default();
-                set_level(node, key, level)?;
-                ensure!(node.reading.is_none(), "読みが重複しています: {key}");
-                node.reading = Some(reading);
+                set_level(&mut levels, key, level)?;
+                ensure!(!readings.contains_key(key), "読みが重複しています: {key}");
+                readings.insert(key.clone(), reading);
             }
         }
 
@@ -206,10 +215,13 @@ impl Report {
             rows.next().transpose()?.as_deref() == Some(super::output::NODE_MOVES_HEADER),
             "{NODE_MOVES} の見出しが違います"
         );
+        let mut expanded = Edges::new();
+        let mut start_values = BTreeMap::new();
         for row in rows {
             let row = row?;
             let cells: Vec<_> = row.split('\t').collect();
-            let &[key, _, level, remaining, _, mv, value, expanded, rank] = cells.as_slice() else {
+            let &[key, _, level, remaining, _, mv, value, expanded_flag, rank] = cells.as_slice()
+            else {
                 anyhow::bail!("{NODE_MOVES} の列数が違います: {row}");
             };
             let level: usize = level.parse()?;
@@ -218,31 +230,31 @@ impl Report {
                 let inferred = level.checked_add(remaining).context("通常深さの上限")?;
                 depth = check_saved("depth", depth, Some(inferred))?;
             }
-            let node = nodes.entry(key.to_owned()).or_default();
-            set_level(node, key, level)?;
-            ensure!(matches!(expanded, "0" | "1"), "{NODE_MOVES} の expanded が不正です: {row}");
-            let ranked = RankedMove {
-                rank: rank.parse()?,
-                value: value.parse()?,
-                expanded: expanded == "1",
-            };
-            ensure!(
-                node.moves.insert(mv.to_owned(), ranked).is_none(),
-                "手が重複しています: {row}"
-            );
+            set_level(&mut levels, key, level)?;
+            let value = value.parse()?;
+            if rank.parse::<usize>()? == 1 {
+                ensure!(
+                    start_values.insert(key.to_owned(), black(key, value)).is_none(),
+                    "1 位の手が重複しています: {row}"
+                );
+            }
+            match expanded_flag {
+                "0" => {}
+                "1" => {
+                    ensure!(
+                        expanded.entry(key.to_owned()).or_default().insert(mv.to_owned()),
+                        "手が重複しています: {row}"
+                    );
+                }
+                _ => anyhow::bail!("{NODE_MOVES} の expanded が不正です: {row}"),
+            }
         }
         let depth = depth.context("通常深さの記録がありません。--depth を指定してください")?;
         let cap = depth.checked_add(extend).context("延長段数の上限")?;
         ensure!(
-            nodes.values().all(|node| node.level.is_some_and(|level| level <= cap)),
+            levels.values().all(|&level| level <= cap),
             "木に depth + extend より深い読みがあります"
         );
-        // 宣言勝ちや合法手のない局面には node_moves.tsv の行が無い。
-        for line in read_lines(&dir.join("tree.db"))? {
-            if let Some(sfen) = line?.strip_prefix("sfen ") {
-                nodes.entry(strip_ply(sfen).to_owned()).or_default();
-            }
-        }
         Ok(Self {
             limits: Limits {
                 depth,
@@ -251,38 +263,59 @@ impl Report {
                 draw_black: status.draw_black,
                 draw_white: status.draw_white,
             },
-            nodes,
+            levels,
+            readings,
+            expanded,
+            start_values,
+            extend_unsaved: status.extend.is_none(),
         })
+    }
+
+    fn propagation(&self) -> Result<Propagation<'_>> {
+        Propagation::new(
+            &self.readings,
+            &self.expanded,
+            &self.readings.keys().cloned().collect(),
+            [
+                self.limits.draw_black.unwrap_or(0),
+                self.limits.draw_white.unwrap_or(0),
+            ],
+        )
+    }
+
+    fn deepest_read(&self) -> Option<usize> {
+        self.readings.keys().map(|key| self.levels[key]).max()
     }
 
     fn trace(
         &self,
-        start: String,
+        propagation: &Propagation<'_>,
+        mut key: String,
         mut path: BTreeSet<String>,
         follow: Follow,
-        mut repeat_value: Option<i32>,
         mut merges: usize,
     ) -> Result<Trace> {
-        let mut key = start;
         let mut moves = Vec::new();
+        let mut deviates = false;
         let (reason, value) = loop {
-            if !path.insert(key.clone()) {
-                break (Reason::Repetition, repeat_value);
-            }
-            let Some(node) = self.nodes.get(&key) else {
+            let Some(reading) = self.readings.get(&key) else {
                 break (Reason::MissingRead, None);
             };
-            let Some(reading) = &node.reading else {
-                break (Reason::MissingRead, None);
-            };
-            let level = node.level.context("読みの段がありません")?;
+            let level = self.levels[&key];
             if reading.bestmove == "win" {
                 break (
                     Reason::Declaration,
                     Some(black(&key, reading.multipv.first().map_or(0, |pv| pv.cp))),
                 );
             }
-            let Some(first) = reading.lines().first() else {
+            let position =
+                propagation.position(&key, &mut path).context("伝播の読みがありません")?;
+            let first = reading.lines().first();
+            let chosen = match follow {
+                Follow::FirstRead => first.map(|pv| pv.mv.as_str()),
+                Follow::Propagated => position.best.as_deref(),
+            };
+            let Some(mv) = chosen else {
                 let pos = position_from_sfen(&format!("{key} 1"))?;
                 let mut legal = MoveList::new();
                 generate_legal_all(&pos, &mut legal);
@@ -299,60 +332,42 @@ impl Report {
                     (Reason::MissingRead, None)
                 };
             };
-
-            let (mv, value, expanded) = match follow {
-                Follow::FirstRead => (
-                    first.mv.as_str(),
-                    first.cp,
-                    node.moves.get(&first.mv).is_some_and(|row| row.expanded),
-                ),
-                Follow::Propagated => {
-                    // node_moves.tsv は Tree::negamax と Tree::rank の結果を保存している。
-                    let Some((mv, row)) = node.moves.iter().find(|(_, row)| row.rank == 1) else {
-                        break (Reason::MissingRead, None);
-                    };
-                    (mv.as_str(), row.value, row.expanded)
-                }
-            };
-            let next = child(&key, mv)?;
-            let next_node = self.nodes.get(&next);
-            let has_dependency = expanded || next_node.is_some();
-            let stop = level > 0
-                && first.cp.unsigned_abs() >= self.limits.stop
-                && value.unsigned_abs() >= self.limits.stop;
+            let value = position.rows[mv];
+            let stop =
+                level > 0 && first.is_some_and(|pv| pv.cp.unsigned_abs() >= self.limits.stop);
             let cap = level >= self.limits.cap;
-            let at_leaf = match follow {
-                Follow::FirstRead => stop || cap,
-                Follow::Propagated => !has_dependency,
-            };
-            if at_leaf {
-                let end_value = Some(black(&key, value));
-                // 保存形式では USI mate も cp に畳むため、詰みの符号化範囲で判定する。
-                if (30000 - rshogi_core::types::MAX_PLY as u32..=30000)
-                    .contains(&value.unsigned_abs())
-                {
-                    break (Reason::Mate, end_value);
-                }
-                if stop {
-                    break (Reason::Stop, end_value);
-                }
-                if cap {
-                    break (Reason::Cap, end_value);
+            if follow == Follow::FirstRead {
+                deviates |= position.best.as_deref() != Some(mv);
+                if let Some(first) = first.filter(|_| stop || cap) {
+                    break (read_end(first.cp, stop, cap), Some(black(&key, first.cp)));
                 }
             }
-            if !has_dependency {
-                break (Reason::Unexpanded, Some(black(&key, value)));
+
+            let next = child(&key, mv)?;
+            path.insert(key.clone());
+            if path.contains(&next) {
+                let draw = self.limits.draw(&key);
+                moves.push(mv.to_owned());
+                key = next;
+                break (Reason::Repetition, draw);
             }
-            if !path.contains(&next)
-                && next_node.and_then(|n| n.level).is_some_and(|next_level| next_level <= level)
-            {
-                merges += 1;
+            let expanded = self.expanded.get(&key).is_some_and(|edges| edges.contains(mv));
+            if !expanded && !self.readings.contains_key(&next) {
+                break (
+                    read_end(value, stop && value.unsigned_abs() >= self.limits.stop, cap),
+                    Some(black(&key, value)),
+                );
             }
-            repeat_value = self.limits.draw(&key);
+            let merged = self.readings.contains_key(&next) && self.levels[&next] <= level;
+            merges += usize::from(merged);
             moves.push(mv.to_owned());
+            let value = black(&key, value);
             key = next;
+            if merged && follow == Follow::FirstRead {
+                break (Reason::Merged, Some(value));
+            }
         };
-        let level = self.nodes.get(&key).and_then(|node| node.level);
+        let level = self.levels.get(&key).copied();
         Ok(Trace {
             key,
             level,
@@ -360,68 +375,87 @@ impl Report {
             reason,
             value,
             merges,
+            deviates,
         })
     }
 
     fn trace_game_move(
         &self,
+        propagation: &Propagation<'_>,
         key: &str,
         mv: &str,
         next: &str,
         path: &BTreeSet<String>,
     ) -> Result<(Option<i32>, Trace)> {
-        let node = self.nodes.get(key);
-        let next_node = self.nodes.get(next);
-        let row = node.and_then(|node| node.moves.get(mv));
-        let level = next_node.and_then(|node| node.level);
-        let value = row.map(|row| black(key, row.value));
-        if row.is_some_and(|row| row.expanded || next_node.is_some()) {
-            let merge = node
-                .and_then(|n| n.level)
-                .zip(level)
-                .is_some_and(|(from, to)| to <= from && !path.contains(next));
-            let trace = self.trace(
-                next.to_owned(),
-                path.clone(),
-                Follow::Propagated,
-                self.limits.draw(key),
-                usize::from(merge),
-            )?;
-            return Ok((value, trace));
-        }
-        let reason = if node.is_some_and(|node| node.reading.is_none()) {
-            Reason::MissingRead
+        let reading = self.readings.get(key);
+        let source_level = self.levels[key];
+        let raw = reading.and_then(|r| r.lines().iter().find(|pv| pv.mv == mv));
+        let expanded = self.expanded.get(key).is_some_and(|edges| edges.contains(mv));
+        let next_level = self.levels.get(next).copied();
+        let raw_value = raw.map(|pv| black(key, pv.cp));
+        let (value, reason, end_key, end_level, end_value) = if path.contains(next) {
+            let draw = self.limits.draw(key);
+            (draw, Reason::Repetition, next, next_level, draw)
+        } else if (raw.is_some() && self.readings.contains_key(next)) || expanded {
+            let mut ancestors = path.clone();
+            let value = propagation.position(next, &mut ancestors).map(|p| black(next, p.value));
+            let merges = usize::from(next_level.is_some_and(|level| level <= source_level));
+            let trace =
+                self.trace(propagation, next.to_owned(), ancestors, Follow::Propagated, merges)?;
+            return Ok((value.or(raw_value), trace));
+        } else if let Some(first) = reading
+            .and_then(|r| r.lines().first())
+            .filter(|pv| source_level > 0 && pv.cp.unsigned_abs() >= self.limits.stop)
+        {
+            (
+                raw_value,
+                read_end(first.cp, true, false),
+                key,
+                Some(source_level),
+                Some(black(key, first.cp)),
+            )
         } else {
-            Reason::Unexpanded
+            let reason = if reading.is_some() {
+                Reason::Unexpanded
+            } else {
+                Reason::MissingRead
+            };
+            (raw_value, reason, next, next_level, raw_value)
         };
         Ok((
             value,
             Trace {
-                key: next.to_owned(),
-                level,
+                key: end_key.to_owned(),
+                level: end_level,
                 moves: Vec::new(),
                 reason,
-                value: None,
+                value: end_value,
                 merges: 0,
+                deviates: false,
             },
         ))
     }
 
     fn tables(&self, paths: &Path) -> Result<(String, String, Counts)> {
+        let propagation = self.propagation()?;
         let mut counts = Counts::default();
         let mut extension = String::from(
-            "start_key\tstart_level\tend_level\tplies\tend_key\tend_value_black\treason\tmoves\tmerges\n",
+            "start_key\tstart_level\tend_level\tplies\tend_key\tend_value_black\treason\tmoves\tmerges\tstart_propagated_black\tdeviates\n",
         );
         if self.limits.depth < self.limits.cap {
-            for (key, node) in &self.nodes {
-                if node.level != Some(self.limits.depth) {
+            for (key, &level) in &self.levels {
+                if level != self.limits.depth {
                     continue;
                 }
-                let trace = self.trace(key.clone(), BTreeSet::new(), Follow::FirstRead, None, 0)?;
+                let start_value = self.start_values.get(key).copied().or_else(|| {
+                    propagation.position(key, &mut BTreeSet::new()).map(|p| black(key, p.value))
+                });
+                let trace =
+                    self.trace(&propagation, key.clone(), BTreeSet::new(), Follow::FirstRead, 0)?;
                 counts.add(&trace, false);
                 writeln!(
                     extension,
-                    "{key}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{key}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     self.limits.depth,
                     field(trace.level),
                     trace.moves.len(),
@@ -429,7 +463,9 @@ impl Report {
                     field(trace.value),
                     trace.reason.name(),
                     trace.moves.join(" "),
-                    trace.merges
+                    trace.merges,
+                    field(start_value),
+                    u8::from(trace.deviates)
                 )?;
             }
         }
@@ -453,10 +489,14 @@ impl Report {
             game_index += 1;
             let mut key = root.to_owned();
             let mut path = BTreeSet::new();
-            for (ply, mv) in actual.take(self.limits.depth.max(1)).enumerate() {
+            for (ply, mv) in actual.enumerate() {
                 path.insert(key.clone());
                 let next = child(&key, mv)?;
-                let (value, trace) = self.trace_game_move(&key, mv, &next, &path)?;
+                if !self.levels.contains_key(&key) {
+                    key = next;
+                    continue;
+                }
+                let (value, trace) = self.trace_game_move(&propagation, &key, mv, &next, &path)?;
                 counts.add(&trace, true);
                 writeln!(
                     game,
@@ -486,13 +526,13 @@ impl Counts {
     fn add(&mut self, trace: &Trace, game: bool) {
         let index = usize::from(game);
         self.reasons.entry(trace.reason.name()).or_default()[index] += 1;
-        if trace.merges > 0 {
-            self.reasons.entry("merged").or_default()[index] += 1;
+        if game && trace.merges > 0 {
+            self.reasons.entry(Reason::Merged.name()).or_default()[index] += 1;
         }
     }
 
     fn write(&self, stdout: &mut impl std::io::Write) -> Result<()> {
-        for reason in Reason::ALL.map(Reason::name).into_iter().chain(["merged"]) {
+        for reason in Reason::ALL.map(Reason::name) {
             let [extension, game] = self.reasons.get(reason).copied().unwrap_or_default();
             writeln!(stdout, "{reason}\textension={extension}\tgame={game}")?;
         }
@@ -500,14 +540,36 @@ impl Counts {
     }
 }
 
-pub(super) fn run(args: LinesArgs) -> Result<()> {
+pub(super) fn run(mut args: LinesArgs) -> Result<()> {
+    args.dir = args.dir.canonicalize()?;
     let mut destinations = BTreeSet::new();
-    for output in [&args.out, &args.game_out].into_iter().flatten() {
-        let normalized = canonicalize_maybe_new(output)?;
-        ensure!(!normalized.try_exists()?, "既存のファイルには書きません: {}", output.display());
-        ensure!(destinations.insert(normalized), "TSV の出力先が重複しています");
+    for output in [&mut args.out, &mut args.game_out].into_iter().flatten() {
+        let parent = super::paths::parent_dir(output).canonicalize()?;
+        ensure!(
+            !parent.starts_with(&args.dir),
+            "木のディレクトリ内には出力できません: {}",
+            output.display()
+        );
+        let name = output.file_name().context("TSV の出力ファイル名がありません")?;
+        let normalized = parent.join(name);
+        ensure!(
+            !normalized.try_exists()? && !normalized.is_symlink(),
+            "既存のファイルには書きません: {}",
+            output.display()
+        );
+        ensure!(destinations.insert(normalized.clone()), "TSV の出力先が重複しています");
+        *output = normalized;
     }
     let report = Report::load(&args)?;
+    if report.extend_unsaved
+        && let Some(deepest) = report.deepest_read()
+        && deepest < report.limits.cap
+    {
+        eprintln!(
+            "警告: 最深の読みは {deepest} 段で、指定した上限 {} 段に達していません。--extend が実際より大きい可能性があります",
+            report.limits.cap
+        );
+    }
     let paths = args.paths.unwrap_or_else(|| args.dir.join("paths.record.tsv"));
     let (extension, game, counts) = report.tables(&paths)?;
     let mut stdout = std::io::stdout().lock();
