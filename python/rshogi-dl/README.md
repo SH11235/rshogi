@@ -115,7 +115,11 @@ pip install --no-deps -e .
 
 ストリームは末尾まで読み、encoder の終了コードを確認してから利用してください。オプションなしの `encode` は SFEN のみを受け付け、従来の JSON Lines を返します。
 
-## 生成済み shard の読み込み
+## shard の作成と読み込み
+
+変換プログラムからは `rshogi_dl.sharded.convert_records` に行の iterable を渡せます。
+行は JSONL と共通の形式で、同じ検証と重みの正規化を経て shard に保存されます。
+`source_name` と `source_size` には入力の名前とバイト数を指定します。入力の安定性は呼び出し元で保証してください。
 
 JSONL の検証・Python record の作成を毎 epoch 繰り返す代わりに、検証済みの入力を NumPy 配列の shard に変換できます。変換は全行を一度検証し、最大 `--shard-records` 行ずつ保存します。既定4096行、上限65536行で、入力全体をメモリに読みません。
 
